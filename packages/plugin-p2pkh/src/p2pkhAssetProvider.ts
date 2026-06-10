@@ -1,0 +1,168 @@
+// packages/plugin-p2pkh/src/p2pkhAssetProvider.ts
+// P2PKH 资产 provider（硬切换 007 / 008 收尾）。
+// 设计缘由：
+//   - single 模式：每个 asset 行只代表当前 active key 的余额。
+//   - all 模式：聚合多个 key，但只读；detailRoute 指向只读总览。
+//   - AssetProvider 必须是通用资产协议，不允许把 UTXO / keyId 塞进 AssetSummary。
+//   - 资产网络由 assetId 决定。
+//   - onChange 内部订阅 P2PKH 同步事件、active key 变化、keyspace 初始化。
+//
+// 硬切换 008 收尾：keyspace 未就绪时直接返回 `[]`（listAssets / listActivity）。
+// 设计缘由：旧实现返回 `emptySummary` 时虽然 display 文本是 `— BSV`，
+// 但 `balance.amount: 0` 会被上游做数值聚合——把"未就绪"误当成"链上 0 余额"。
+// 数值层是上游资产协议约定的语义，扩展协议表达 unknown balance 需要
+// 改 contract；本次施工单内改用推荐方案"未就绪返回空列表"，让
+// keyspace ready 后通过 onChange 通知重拉。
+
+import type { AssetActivity, AssetProvider, AssetSummary, AssetStatus, KeyspaceService, MessageBus } from "@keymaster/contracts";
+import type {
+  P2pkhAssetId,
+  P2pkhService,
+  P2pkhSyncStatus
+} from "./p2pkhContracts.js";
+import { P2PKH_ASSETS, assetIdToNetwork } from "./p2pkhContracts.js";
+import { P2PKH_MSG } from "./p2pkhMessages.js";
+
+export interface P2pkhAssetProviderDeps {
+  service: P2pkhService;
+  messageBus: MessageBus;
+  keyspace: KeyspaceService;
+}
+
+const ASSET_IDS: P2pkhAssetId[] = ["bsv", "bsvtest"];
+
+export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): AssetProvider {
+  const listeners = new Set<() => void>();
+
+  deps.service.onSyncStatusChange(() => notify());
+  deps.messageBus.subscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
+  deps.messageBus.subscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
+  deps.keyspace.onActiveChange(() => notify());
+  // 硬切换 008 收尾：额外订阅初始化变化——keyspace 初始化结束后资产平台
+  // 必须重拉，否则"未就绪"期间返回的空列表会一直显示。
+  deps.keyspace.onInitializationChange(() => notify());
+
+  function notify() {
+    for (const l of [...listeners]) l();
+  }
+
+  function mapStatus(s: P2pkhSyncStatus): AssetStatus {
+    if (s === "syncing") return "syncing";
+    if (s === "failed" || s === "rate-limited") return "stale";
+    return "ready";
+  }
+
+  /**
+   * 平台未就绪时（isInitializing === true 或非 single 模式）直接返回 true。
+   * 这是 listAssets / getAsset / listActivity / sync 的统一闸门。
+   */
+  function isNotReady(): boolean {
+    if (deps.keyspace.isInitializing()) return true;
+    const s = deps.keyspace.active();
+    return s.mode !== "single" || !s.activePublicKeyHash;
+  }
+
+  async function toSummary(assetId: P2pkhAssetId): Promise<AssetSummary> {
+    const def = P2PKH_ASSETS[assetId];
+    const balance = await deps.service.getAssetBalance(assetId);
+    const state = deps.keyspace.active();
+    const suffix = state.mode === "all" ? "（全部 key）" : "";
+    return {
+      assetId,
+      providerId: "p2pkh",
+      kind: "coin",
+      // label 走 I18nText 形态：基名用 i18n key 翻译，"（全部 key）" 是 UI 后缀（可选）。
+      label: { key: `p2pkh.asset.${assetId}`, fallback: `${def.label}${suffix}` },
+      network: def.network,
+      balance: {
+        amount: balance.confirmed,
+        unit: def.unit,
+        display: `${balance.confirmed} ${def.unit}`
+      },
+      status: mapStatus(deps.service.syncStatus()),
+      detailRoute: { id: "p2pkh.overview", path: `/p2pkh?assetId=${encodeURIComponent(assetId)}` },
+      tags: def.tags
+    };
+  }
+
+  async function listNetworkHistory(assetId: P2pkhAssetId) {
+    if (isNotReady()) return [];
+    const all = await deps.service.listHistory({ assetId });
+    const network = assetIdToNetwork(assetId);
+    return all.filter((h) => h.network === network);
+  }
+
+  return {
+    id: "p2pkh",
+    name: { key: "p2pkh.provider.name", fallback: "P2PKH" },
+    kind: "coin",
+    order: 10,
+    async listAssets() {
+      // 硬切换 008 收尾：未就绪返回空列表；onChange 在 ready 后通知重拉。
+      if (isNotReady()) {
+        return [];
+      }
+      return Promise.all(ASSET_IDS.map(toSummary));
+    },
+    async getAsset(assetId) {
+      if (!isP2pkhAssetId(assetId)) return undefined;
+      // 未就绪时 getAsset 返回 undefined：调用方应展示空态而不是 0 余额。
+      if (isNotReady()) return undefined;
+      const summary = await toSummary(assetId);
+      const network = assetIdToNetwork(assetId);
+      const history = await listNetworkHistory(assetId);
+      const activities: AssetActivity[] = history.map((h) => ({
+        id: h.id,
+        assetId,
+        txid: h.txid,
+        title: statusTitle(h.status, h.source),
+        direction: "info",
+        status: h.status === "pending" ? "pending" : h.status === "confirmed" ? "confirmed" : "unconfirmed",
+        occurredAt: h.syncedAt
+      }));
+      return {
+        summary,
+        activities,
+        extras: { network }
+      };
+    },
+    async listActivity(assetId) {
+      if (!isP2pkhAssetId(assetId)) return [];
+      if (isNotReady()) return [];
+      return listNetworkHistory(assetId).then((history) =>
+        history.map<AssetActivity>((h) => ({
+          id: h.id,
+          assetId,
+          txid: h.txid,
+          title: statusTitle(h.status, h.source),
+          direction: "info",
+          status: h.status === "pending" ? "pending" : h.status === "confirmed" ? "confirmed" : "unconfirmed",
+          occurredAt: h.syncedAt
+        }))
+      );
+    },
+    async sync(assetId) {
+      // sync 是写操作：未就绪时不能触发 recent sync（避免触发后端错误）。
+      if (isNotReady()) return;
+      await deps.service.triggerRecentSync();
+    },
+    onChange(handler) {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    }
+  };
+}
+
+function isP2pkhAssetId(id: string): id is P2pkhAssetId {
+  return id === "bsv" || id === "bsvtest";
+}
+
+function statusTitle(status: string, source: string): { key: string; fallback: string } {
+  if (status === "confirmed") return { key: "p2pkh.activity.confirmed", fallback: "链上交易" };
+  if (status === "unconfirmed") return { key: "p2pkh.activity.unconfirmed", fallback: "未确认交易" };
+  if (status === "pending") return source === "pending-local"
+    ? { key: "p2pkh.activity.pendingLocal", fallback: "本地待广播" }
+    : { key: "p2pkh.activity.unconfirmed", fallback: "未确认交易" };
+  if (status === "dropped") return { key: "p2pkh.activity.dropped", fallback: "已丢弃" };
+  return { key: "p2pkh.activity.info", fallback: "链上事件" };
+}

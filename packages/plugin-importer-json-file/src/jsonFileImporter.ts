@@ -1,0 +1,108 @@
+// packages/plugin-importer-json-file/src/jsonFileImporter.ts
+// 解析 BSV 通用钱包导出的 JSON 格式（handcash/moneybutton/relayx 等），
+// 同时支持 bsv8 加密 JSON envelope（keK-v1 / argon2id / xchacha20poly1305）。
+// 设计缘由：
+//   - 每种 wallet 的 JSON 字段都不同，但都包含私钥或 WIF，我们只挑出 hex/wif 字段。
+//   - bsv8 envelope 是加密 JSON，必须走 bsv8 解密逻辑，不能和普通 JSON 一起递归扫描，
+//     否则 ciphertext_hex / salt_hex / nonce_hex 会被误判为私钥候选。
+//   - importer 插件不写 Vault、不调用 vault.withPrivateKey —— bsv8 envelope 解密
+//     成功后返回标准 PrivateKeyMaterial，交给调用方保存。
+// 解析失败时只返回格式错误，不写任何 DB（DB 写入由 vault 完成）。
+
+import type { KeyImporter, KeyImportInput, KeyImportResult } from "@keymaster/contracts";
+import { decryptBsv8KeyEnvelope, isBsv8KeyEnvelope, type Bsv8EnvelopeShape } from "./bsv8KeyEnvelope.js";
+
+interface JsonCandidate {
+  /** 字段路径数组，便于错误提示。 */
+  path: string[];
+  /** 32 字节 hex。 */
+  hex: string;
+  /** 原始 WIF（如果原文件提供）。 */
+  wif?: string;
+}
+
+const HEX_RE = /^[0-9a-fA-F]{64}$/;
+
+// bsv8 envelope 不应被误判为私钥候选的字段名。
+// 这些字段内容是 hex 字符串，但语义是 KDF salt / AEAD nonce / ciphertext。
+// 普通 JSON importer 递归扫描时直接跳过它们。
+const ENVELOPE_FIELD_NAMES = new Set([
+  "salt_hex",
+  "nonce_hex",
+  "ciphertext_hex",
+  "memory_kib",
+  "time_cost",
+  "parallelism"
+]);
+
+function dig(obj: unknown, path: string[] = []): JsonCandidate[] {
+  if (!obj || typeof obj !== "object") return [];
+  const out: JsonCandidate[] = [];
+  const record = obj as Record<string, unknown>;
+  for (const [k, v] of Object.entries(record)) {
+    const here = [...path, k];
+    if (ENVELOPE_FIELD_NAMES.has(k)) continue;
+    if (typeof v === "string") {
+      const trimmed = v.trim();
+      if (HEX_RE.test(trimmed)) {
+        out.push({ path: here, hex: trimmed.toLowerCase() });
+      } else if (/^5[HJK][1-9A-HJ-NP-Za-km-z]{49}$/.test(trimmed) || trimmed.startsWith("L") || trimmed.startsWith("K")) {
+        // 启发式 WIF：以 5/K/L 开头且长度 51-52。
+        out.push({ path: here, hex: "", wif: trimmed });
+      }
+    } else if (v && typeof v === "object") {
+      out.push(...dig(v, here));
+    }
+  }
+  return out;
+}
+
+export const jsonFileImporter: KeyImporter = {
+  id: "json-file",
+  name: { key: "importerJsonFile.name", fallback: "JSON File" },
+  description: { key: "importerJsonFile.description", fallback: "Extract private keys from a wallet JSON export; supports bsv8 encrypted envelopes." },
+  supports: ["file"],
+  async parse(input: KeyImportInput): Promise<KeyImportResult[]> {
+    if (input.kind !== "file") throw new Error("JSON file importer only supports file input");
+    let parsed: unknown;
+    try {
+      const text = new TextDecoder().decode(input.content);
+      parsed = JSON.parse(text);
+    } catch (err) {
+      throw new Error(`Invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // bsv8 envelope 必须走专用解密逻辑；不能用普通递归扫描去找 hex。
+    if (isBsv8KeyEnvelope(parsed)) {
+      const envelope = parsed as Bsv8EnvelopeShape;
+      const password = input.password;
+      if (!password) {
+        throw new Error("Password is required for encrypted key file");
+      }
+      const hex = decryptBsv8KeyEnvelope({ envelope, password });
+      return [
+        {
+          material: { hex },
+          address: "",
+          network: "main",
+          detectedFormat: "bsv8-key-envelope",
+          summary: { key: "importerJsonFile.summary.envelope", fallback: "bsv8 encrypted key envelope" }
+        }
+      ];
+    }
+    const candidates = dig(parsed);
+    if (candidates.length === 0) {
+      throw new Error("No private key candidates found in JSON");
+    }
+    return candidates.map((c) => ({
+      material: { hex: c.hex, wif: c.wif },
+      address: "",
+      network: "main",
+      detectedFormat: "json-file",
+      summary: {
+        key: "importerJsonFile.summary.field",
+        fallback: "Field: ",
+        values: { path: c.path.join(".") }
+      }
+    }));
+  }
+};

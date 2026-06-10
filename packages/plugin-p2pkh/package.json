@@ -1,0 +1,17 @@
+{
+  "name": "@keymaster/plugin-p2pkh",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@noble/hashes": "^1.4.0",
+    "@noble/secp256k1": "^2.1.0",
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*"
+  }
+}

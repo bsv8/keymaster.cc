@@ -1,0 +1,15 @@
+{
+  "name": "@keymaster/plugin-woc",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*"
+  }
+}

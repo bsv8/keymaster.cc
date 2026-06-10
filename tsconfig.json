@@ -1,0 +1,22 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/web" },
+    { "path": "./packages/contracts" },
+    { "path": "./packages/runtime" },
+    { "path": "./packages/ui" },
+    { "path": "./packages/plugin-vault" },
+    { "path": "./packages/plugin-key-import" },
+    { "path": "./packages/plugin-importer-wif" },
+    { "path": "./packages/plugin-importer-hex" },
+    { "path": "./packages/plugin-importer-json-file" },
+    { "path": "./packages/plugin-p2pkh" },
+    { "path": "./packages/plugin-contacts" },
+    { "path": "./packages/plugin-transfer" },
+    { "path": "./packages/plugin-home" },
+    { "path": "./packages/plugin-settings" },
+    { "path": "./packages/plugin-assets" },
+    { "path": "./packages/plugin-woc" },
+    { "path": "./packages/plugin-background" }
+  ]
+}

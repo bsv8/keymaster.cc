@@ -1,0 +1,29 @@
+{
+  "name": "@keymaster/web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "@keymaster/plugin-vault": "*",
+    "@keymaster/plugin-key-import": "*",
+    "@keymaster/plugin-importer-wif": "*",
+    "@keymaster/plugin-importer-hex": "*",
+    "@keymaster/plugin-importer-json-file": "*",
+    "@keymaster/plugin-p2pkh": "*",
+    "@keymaster/plugin-contacts": "*",
+    "@keymaster/plugin-transfer": "*",
+    "@keymaster/plugin-home": "*",
+    "@keymaster/plugin-settings": "*",
+    "@keymaster/plugin-assets": "*",
+    "@keymaster/plugin-woc": "*",
+    "@keymaster/plugin-background": "*"
+  }
+}

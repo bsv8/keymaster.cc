@@ -1,0 +1,149 @@
+// packages/plugin-contacts/src/contactsService.ts
+// 联系人服务实现（硬切换 008 收尾）。
+//
+// 关键设计：
+//   - 数据按 key namespace 隔离：contacts 存储在 key-scoped DB 内。
+//   - 所有读写（addContact / updateContact / removeContact / listContacts /
+//     findByAddress）都要求 single 模式 + 有 active publicKeyHash；all 模式
+//     或无 key 时抛 ContactsNoActiveKeyError。
+//   - UI 必须做 keyspace guard：调用前检查 active() == single，且订阅
+//     onActiveChange 清空本地缓存并重新拉取。
+//   - 切 active key 时发 onChange 通知 UI 重新拉。
+//   - key.deleting / key.deleted 事件不做事：namespace DB 由 keyspace 整体删。
+
+import type { Contact, ContactInput, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import { createContactsDb, openContactsDb, type ContactsDbHandle } from "./contactsDb.js";
+
+export class ContactsDuplicateError extends Error {
+  constructor(public readonly address: string) {
+    super(`Contact for address ${address} already exists`);
+  }
+}
+
+export class ContactsNoActiveKeyError extends Error {
+  constructor() {
+    super("Contacts require a single active key; switch to a key first");
+  }
+}
+
+export interface ContactsServiceDeps {
+  keyspace: KeyspaceService;
+}
+
+export function createContactsService(deps: ContactsServiceDeps): ContactsService {
+  const listeners = new Set<() => void>();
+  // 缓存当前 namespace 的 db handle；切 active key 时由 handle 内部 close。
+  let handle: ContactsDbHandle | undefined;
+  let handleFor: string | undefined;
+
+  function notify() {
+    for (const l of listeners) l();
+  }
+
+  /**
+   * 取得当前 namespace 的 db handle：single 模式下打开 active key 的 DB；
+   * all 模式或无 active key 抛 ContactsNoActiveKeyError。
+   */
+  async function getDbForActiveKey(): Promise<ContactsDbHandle> {
+    const state = deps.keyspace.active();
+    if (state.mode !== "single" || !state.activePublicKeyHash) {
+      throw new ContactsNoActiveKeyError();
+    }
+    if (handle && handleFor === state.activePublicKeyHash) {
+      return handle;
+    }
+    if (handle) {
+      try {
+        handle.close();
+      } catch {
+        // 静默
+      }
+      handle = undefined;
+      handleFor = undefined;
+    }
+    const bundle = await openContactsDb({
+      keyspace: deps.keyspace,
+      publicKeyHash: state.activePublicKeyHash
+    });
+    handle = createContactsDb(bundle);
+    handleFor = state.activePublicKeyHash;
+    return handle;
+  }
+
+  // 监听 active key 变化：清空 handle + 通知监听者。
+  deps.keyspace.onActiveChange((state) => {
+    if (handle && state.mode === "single" && state.activePublicKeyHash === handleFor) {
+      // 未切换
+      return;
+    }
+    if (handle) {
+      try {
+        handle.close();
+      } catch {
+        // 静默
+      }
+      handle = undefined;
+      handleFor = undefined;
+    }
+    notify();
+  });
+
+  return {
+    async addContact(input) {
+      if (!input.address) throw new Error("Address is required");
+      const db = await getDbForActiveKey();
+      const existing = await db.findByAddress(input.address);
+      if (existing) throw new ContactsDuplicateError(input.address);
+      const now = new Date().toISOString();
+      const publicKeyHash = deps.keyspace.active().activePublicKeyHash;
+      const contact: Contact = {
+        id: crypto.randomUUID(),
+        name: input.name,
+        address: input.address,
+        note: input.note,
+        tags: input.tags ?? [],
+        publicKeyHash,
+        createdAt: now,
+        updatedAt: now
+      };
+      await db.put(contact);
+      notify();
+      return contact;
+    },
+    async updateContact(id, input) {
+      const db = await getDbForActiveKey();
+      const existing = await db.get(id);
+      if (!existing) throw new Error(`Contact ${id} not found`);
+      const publicKeyHash = deps.keyspace.active().activePublicKeyHash;
+      const updated: Contact = {
+        ...existing,
+        name: input.name,
+        address: input.address,
+        note: input.note,
+        tags: input.tags ?? existing.tags,
+        publicKeyHash,
+        updatedAt: new Date().toISOString()
+      };
+      await db.put(updated);
+      notify();
+      return updated;
+    },
+    async removeContact(id) {
+      const db = await getDbForActiveKey();
+      await db.remove(id);
+      notify();
+    },
+    async listContacts() {
+      const db = await getDbForActiveKey();
+      return db.list();
+    },
+    async findByAddress(address) {
+      const db = await getDbForActiveKey();
+      return db.findByAddress(address);
+    },
+    onChange(handler) {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    }
+  };
+}

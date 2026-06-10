@@ -1,0 +1,189 @@
+// packages/plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx
+// P2PKH 余额 widget：双资产展示。
+//
+// 硬切换 008 收尾：UI 层防御，不作为主修复。
+// 关键不变量：
+//   - keyspace 初始化中（isInitializing === true）不调 service.getAssetBalance，
+//     避免触发 "Key storage is not ready" 未处理 Promise。
+//   - non-single 模式（mode === "all" 或无 active）金额显示 "—"，刷新按钮 disabled。
+//   - 组件卸载后不 setState；active key 在请求期间切换时旧请求结果必须丢弃。
+//   - 不把 readiness 错误转换为 0 余额：未就绪是本地状态，0 余额是链上结果。
+//   - refreshAll 与 effect loader 共用同一段"load + activeAtRequest + alive 守卫"逻辑，
+//     避免重复实现导致竞态不一致。
+//
+// 硬切换 003：所有展示文案走 i18n。金额 sats 通过 host.i18n.t 解析；i18n
+// 资源中 p2pkh.balanceWidget.status.* 覆盖状态短语。
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Button, formatSats } from "@keymaster/ui";
+import { useCapability, useI18n } from "@keymaster/runtime";
+import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
+import type { P2pkhAssetId, P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";
+
+interface BalancesState {
+  bsv: P2pkhBalance | null;
+  bsvtest: P2pkhBalance | null;
+}
+
+type ReadinessState = "initializing" | "no-active-key" | "ready" | "failed";
+
+interface RequestToken {
+  active: ActiveKeyState;
+  cancelled: boolean;
+}
+
+export function P2pkhBalanceWidget() {
+  const service = useCapability<P2pkhService>("p2pkh.service");
+  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const { t } = useI18n();
+  useI18n().language();
+  const [balances, setBalances] = useState<BalancesState>({ bsv: null, bsvtest: null });
+  const [status, setStatus] = useState(service.syncStatus());
+  const [readiness, setReadiness] = useState<ReadinessState>(() => computeReadiness(keyspace));
+  const [active, setActive] = useState<ActiveKeyState>(() => keyspace.active());
+  const [lastError, setLastError] = useState<string | null>(null);
+  const tokenRef = useRef<RequestToken | null>(null);
+
+  const loadBalances = useCallback(async (): Promise<RequestToken> => {
+    const token: RequestToken = { active: keyspace.active(), cancelled: false };
+    if (tokenRef.current) tokenRef.current.cancelled = true;
+    tokenRef.current = token;
+    if (token.cancelled) return token;
+    try {
+      const [bsv, bsvtest] = await Promise.all([
+        service.getAssetBalance("bsv"),
+        service.getAssetBalance("bsvtest")
+      ]);
+      if (token.cancelled) return token;
+      if (!isSameActive(keyspace.active(), token.active)) return token;
+      setBalances({ bsv, bsvtest });
+      setLastError(null);
+    } catch (err) {
+      if (token.cancelled) return token;
+      if (!isSameActive(keyspace.active(), token.active)) return token;
+      setLastError(err instanceof Error ? err.message : String(err));
+      setBalances({ bsv: null, bsvtest: null });
+    }
+    return token;
+  }, [service, keyspace]);
+
+  useEffect(() => {
+    const offInit = keyspace.onInitializationChange((v) => {
+      setReadiness(computeReadiness(keyspace, v));
+    });
+    const offActive = keyspace.onActiveChange((s) => {
+      setActive(s);
+      setReadiness(computeReadiness(keyspace));
+      setBalances({ bsv: null, bsvtest: null });
+      if (tokenRef.current) tokenRef.current.cancelled = true;
+      tokenRef.current = null;
+    });
+    return () => {
+      offInit();
+      offActive();
+    };
+  }, [keyspace]);
+
+  useEffect(() => service.onSyncStatusChange(setStatus), [service]);
+
+  useEffect(() => {
+    if (readiness !== "ready") {
+      setBalances({ bsv: null, bsvtest: null });
+      if (tokenRef.current) tokenRef.current.cancelled = true;
+      tokenRef.current = null;
+      return;
+    }
+    void loadBalances();
+  }, [loadBalances, readiness, active]);
+
+  useEffect(() => {
+    return () => {
+      if (tokenRef.current) tokenRef.current.cancelled = true;
+      tokenRef.current = null;
+    };
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    if (readiness !== "ready") {
+      return;
+    }
+    try {
+      await service.triggerRecentSync();
+    } catch {
+      // 静默
+    }
+    await loadBalances();
+  }, [readiness, service, loadBalances]);
+
+  const stale = status === "failed" || status === "rate-limited" || lastError !== null;
+  const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.confirmed) : "—");
+  const statusText = computeStatusText(readiness, status, lastError, t);
+
+  return (
+    <div className={`home-widget home-widget--p2pkh-balance ${stale ? "is-stale" : ""}`}>
+      <header className="home-widget__head">
+        <h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={refreshAll}
+          disabled={readiness !== "ready"}
+        >
+          {t("p2pkh.balanceWidget.refreshAll", { defaultValue: "刷新全部" })}
+        </Button>
+      </header>
+      <section className="home-widget__row">
+        <div>
+          <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvMain", { defaultValue: "BSV (main)" })}</p>
+          <p className="home-widget__amount">{showAmount(balances.bsv)}</p>
+        </div>
+      </section>
+      <section className="home-widget__row">
+        <div>
+          <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
+          <p className="home-widget__amount">{showAmount(balances.bsvtest)}</p>
+        </div>
+      </section>
+      <p className="home-widget__status">
+        {t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}{statusText}
+        {stale ? (
+          <span className="home-widget__stale">{t("p2pkh.balanceWidget.staleHint", { defaultValue: " (数据可能陈旧)" })}</span>
+        ) : null}
+      </p>
+    </div>
+  );
+}
+
+function computeReadiness(
+  keyspace: KeyspaceService,
+  initializingOverride?: boolean
+): ReadinessState {
+  const initializing = initializingOverride ?? keyspace.isInitializing();
+  if (initializing) return "initializing";
+  const active = keyspace.active();
+  if (active.mode !== "single" || !active.activePublicKeyHash) return "no-active-key";
+  return "ready";
+}
+
+function isSameActive(a: ActiveKeyState, b: ActiveKeyState): boolean {
+  if (a.mode !== b.mode) return false;
+  if (a.mode === "single" && b.mode === "single") {
+    return a.activePublicKeyHash === b.activePublicKeyHash;
+  }
+  return true;
+}
+
+function computeStatusText(
+  readiness: ReadinessState,
+  sync: string,
+  lastError: string | null,
+  t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string
+): string {
+  if (readiness === "initializing") return t("p2pkh.balanceWidget.status.initializing", { defaultValue: "Key 正在初始化" });
+  if (readiness === "no-active-key") return t("p2pkh.balanceWidget.status.noActiveKey", { defaultValue: "请选择一个 active key" });
+  if (readiness === "failed") return t("p2pkh.balanceWidget.status.loadFailed", { defaultValue: "读取失败" });
+  if (lastError) {
+    return t("p2pkh.balanceWidget.status.withError", { defaultValue: "{{sync}}（{{error}}）", sync: String(sync), error: lastError });
+  }
+  return sync;
+}
