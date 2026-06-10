@@ -17,13 +17,16 @@
 // setStatus("unlocked") + emit。失败时回退到 locked 并清空内存会话。
 
 import type { MessageBus } from "@keymaster/runtime";
-import type {
-  KeyExportEnvelope,
-  KeyIdentity,
-  KeyRef,
-  PrivateKeyMaterial,
-  VaultService,
-  VaultStatus
+import {
+  EVENT_ACTIVE_KEY_CHANGED,
+  KeyPersistedButActivationFailedError,
+  type ActiveKeyState,
+  type KeyExportEnvelope,
+  type KeyIdentity,
+  type KeyRef,
+  type PrivateKeyMaterial,
+  type VaultService,
+  type VaultStatus
 } from "@keymaster/contracts";
 import {
   assertWebCryptoAvailable,
@@ -40,46 +43,31 @@ import { deriveKeyIdentity, generatePrivateKeyHex } from "./keyIdentity.js";
 import { vaultDb, type VaultKeyRecord, type VaultMetaRecord } from "./vaultDb.js";
 import type { KeyspaceHandle } from "./keyspaceService.js";
 
-/**
- * 写库成功但通知 keyspace 切 active 失败的专用错误。
- *
- * 设计缘由（硬切换 002 收尾）：`persistPrivateKey` 的契约是
- *   1) vaultDb.putKey(...)  // 已落库
- *   2) keyspace.notifyKeyCreated(...)  // 切 active
- *   3) messageBus.publish("key.created", ...)  // 通知订阅者
- *
- * 如果 2) 抛错：DB 里已经有这把新 key，但 active 没切。旧实现把 2) 的
- * 错误原样抛出，UI 看到"创建失败"提示，会让用户重复点击（实际 DB
- * 已经有 key 了）。同时 3) 是否应该发也成了问题——发出"key.created"
- * 但 keyspace.active() 不是这把，订阅者会读到不一致状态。
- *
- * 修复后：
- *   - 2) 抛错时进入"已落库但未激活"分支，抛 `KeyPersistedButActivationFailedError`，
- *     携带完整公开 `KeyRef`（`key` 字段），让 UI 进入"已保存但未 active"
- *     的成功/警告态（不要回到可重复提交的失败态），且能直接用 `err.key.id`
- *     等真值继续导出 / 删除 / 设 active，不再需要去兜底列表里反查。
- *   - 3) 在 active 切换成功之后才发；active 失败时不发"key.created"，
- *     避免订阅者从 event handler 中读 keyspace.active() 时看到与
- *     payload publicKeyHash 不一致的状态。
- *   - DB 写入发生在 1) 之后才允许 2) / 3)，确保不会发"key.created"
- *     但 DB 里没有的虚假事件。
- */
-export class KeyPersistedButActivationFailedError extends Error {
-  /** 已落库的完整公开 KeyRef，UI 可直接基于此做导出 / 设 active / 删除。 */
-  readonly key: KeyRef;
-  /** 原始错误（keyspace 抛的），用于日志。 */
-  readonly cause: unknown;
+// 透传 contracts 中的 KeyPersistedButActivationFailedError：
+// plugin-vault 内部旧实现 / 测试仍可直接 import 本文件的符号，
+// 行为与直接 import contracts 完全一致。设计缘由见 contracts/src/vault.ts。
+export { KeyPersistedButActivationFailedError };
 
-  constructor(input: { key: KeyRef; cause: unknown }) {
-    super(
-      `Key "${input.key.label}" was persisted but activation failed before key.created: ${
-        input.cause instanceof Error ? input.cause.message : String(input.cause)
-      }`
-    );
-    this.name = "KeyPersistedButActivationFailedError";
-    this.key = input.key;
-    this.cause = input.cause;
-  }
+/**
+ * "首 Key 已落库但未自动 active"待展示 notice。
+ *
+ * 设计缘由（硬切换 009 收尾）：之前这条 notice 走 messageBus
+ * `vault.created.persisted` 事件 + 页面级订阅，但消息总线事件是瞬时的，
+ * 用户从 LockedShell 跳到首页时，VaultSettingsPage 通常尚未挂载，
+ * 订阅方收不到事件，notice 消失。
+ *
+ * 修复后改用可查询的 vault state：
+ *   - `createVaultWithInitialKey` 命中 `KeyPersistedButActivationFailedError`
+ *     时写入本 notice；
+ *   - AppShell / 顶栏在挂载时通过 `getInitialActivationNotice()` 读取并展示
+ *     提示横幅；
+ *   - 用户手动切 active 后（active 变成这把 key）、用户 lock 后、或
+ *     显式调 `clearInitialActivationNotice()` 后，notice 自动清空。
+ */
+export interface InitialActivationNotice {
+  keyId: string;
+  publicKeyHash?: string;
+  label: string;
 }
 
 /** Vault 标签最大长度。超出时拒绝写入。 */
@@ -89,6 +77,18 @@ const DEFAULT_CAPABILITIES: string[] = ["p2pkh"];
 /** generateKey 记录元数据：审计 / 回归测试使用。 */
 const GENERATED_FORMAT = "generated";
 const GENERATED_SOURCE = "vault-generated";
+
+/**
+ * 首启"新建钱包"默认标签：`Key YYYY-MM-DD HH:mm`。
+ * 收敛在 Vault 内部：shell / VaultSettingsPage 复用同一格式。
+ */
+function defaultInitialKeyLabel(): string {
+  const d = new Date();
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `Key ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
+    d.getHours()
+  )}:${pad(d.getMinutes())}`;
+}
 
 export interface VaultServiceDeps {
   messageBus: MessageBus;
@@ -104,6 +104,26 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   let masterSalt: Uint8Array | null = null;
   /** 当前 key 列表的内存缓存（identity 字段已就绪），避免每次都 await IndexedDB。 */
   let keyCache: KeyRef[] | null = null;
+  /**
+   * "首 Key 已落库但未自动 active"待展示 notice。
+   * 见 {@link InitialActivationNotice}。
+   */
+  let pendingActivationNotice: InitialActivationNotice | null = null;
+  /** notice 变化订阅器。 */
+  const noticeListeners = new Set<(n: InitialActivationNotice | null) => void>();
+  /** messageBus 事件订阅的清理句柄。bootstrap 后挂载，setStatus(unlocked) 时启用。 */
+  let activeChangeUnsub: (() => void) | null = null;
+
+  function setPendingActivationNotice(next: InitialActivationNotice | null) {
+    if (
+      next === pendingActivationNotice ||
+      (next && pendingActivationNotice && next.keyId === pendingActivationNotice.keyId)
+    ) {
+      return;
+    }
+    pendingActivationNotice = next;
+    for (const l of noticeListeners) l(next);
+  }
 
   function setStatus(next: VaultStatus) {
     status = next;
@@ -113,6 +133,29 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       masterKey = null;
       masterSalt = null;
       keyCache = null;
+      // 锁定时清除"首 Key 未激活"notice：会话结束，下一次 unlock
+      // 不应再展示上一次会话的 notice。
+      setPendingActivationNotice(null);
+      if (activeChangeUnsub) {
+        activeChangeUnsub();
+        activeChangeUnsub = null;
+      }
+    } else if (next === "unlocked") {
+      // 解锁后挂载 active 变化监听：如果用户随后手动把 notice 那把 key
+      // 设为 active，自动清除 notice。
+      if (!activeChangeUnsub) {
+        const handler = (state: ActiveKeyState) => {
+          if (
+            pendingActivationNotice &&
+            pendingActivationNotice.publicKeyHash &&
+            state.mode === "single" &&
+            state.activePublicKeyHash === pendingActivationNotice.publicKeyHash
+          ) {
+            setPendingActivationNotice(null);
+          }
+        };
+        activeChangeUnsub = deps.messageBus.subscribe(EVENT_ACTIVE_KEY_CHANGED, handler);
+      }
     }
   }
 
@@ -345,6 +388,30 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return () => statusListeners.delete(handler);
     },
 
+    /**
+     * 读取"首 Key 已落库但未自动 active"notice。
+     *
+     * 返回的是当前快照；不会因读取而清除。清除必须显式调
+     * `clearInitialActivationNotice()`，或在 `setActive` 把该 key 切为
+     * active / `lock()` 时由 vault 内部清掉。
+     */
+    getInitialActivationNotice() {
+      return pendingActivationNotice;
+    },
+
+    /** 显式清除 notice。 */
+    clearInitialActivationNotice() {
+      setPendingActivationNotice(null);
+    },
+
+    /** 订阅 notice 变化（设置 / 清除），用于 UI 实时刷新。 */
+    onInitialActivationNoticeChange(handler) {
+      noticeListeners.add(handler);
+      // 立即把当前值喂给订阅方，避免新挂载时漏掉已存在的 notice。
+      handler(pendingActivationNotice);
+      return () => noticeListeners.delete(handler);
+    },
+
     async hasVault() {
       return Boolean(await vaultDb.getMeta());
     },
@@ -403,6 +470,130 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
       setStatus("unlocked");
       deps.messageBus.publish("vault.unlocked", { at: meta.createdAt });
+    },
+
+    /**
+     * 硬切换 009：首启"新建钱包"高层能力。
+     *
+     * 内部顺序（**严格按此执行，不能调 this.createVault()**）：
+     *   1) 校验 status === "uninitialized"（其余状态 fail closed）。
+     *   2) 写 meta + 把派生 key/salt 放入内存（不调 setStatus）。
+     *   3) 调 `deps.keyspace.onVaultUnlocked()` 让 keyspace 进入 ready 状态
+     *      （与 unlock 的 ready 边界保持一致）。
+     *   4) 调 `generateKey({ label, capabilities })`：复用私钥生成 /
+     *      身份派生 / 加密落库 / active 切换 / `key.created` 事件。
+     *   5) **只有 generateKey 成功后才** `setStatus("unlocked")` + emit
+     *      `vault.unlocked`。这一步是修复硬切换 009 收尾的核心——
+     *      App.tsx 会在看到 `unlocked` 时立刻切到 UnlockedShell，P2PKH
+     *      service 也会在 `vault.unlocked` 事件后启动自己的解锁链路。
+     *      提前宣布 unlocked 会让主界面在"首 Key 尚未落库"的中间态
+     *      渲染，违反施工单"主界面应已带首 Key"的硬切换语义。
+     *   6) 失败回滚：
+     *        a) 步骤 2/3 失败（meta 写入 / keyspace ready）—— 与
+     *           createVault 一致：删 meta、清空内存会话、抛原错，**不**
+     *           宣布 unlocked，状态保持 uninitialized。
+     *        b) generateKey 抛 `KeyPersistedButActivationFailedError` —
+     *           首 Key 已落库但 active 没切上。**先**保存
+     *           `InitialActivationNotice` 给 UI 在主界面展示，**再**
+     *           `setStatus("unlocked")` 让用户能进入已解锁主界面手动
+     *           切 active；抛 `KeyPersistedButActivationFailedError` 给
+     *           调用方（shell 端不必再处理：unlocked 状态已发出，App
+     *           会自动切到 UnlockedShell）。
+     *        c) generateKey 抛其它错（首 Key 未落库）—— 删 meta、清空
+     *           内存会话、状态回到 "uninitialized"、抛原错，**不**宣布
+     *           unlocked。
+     *
+     * 设计缘由：
+     *   - "新建钱包"必须与"创建空 Vault"语义解耦；本方法是面向 shell
+     *     的唯一首启入口，导入私钥仍走 `createVault`。
+     *   - 把事务边界收敛在 Vault 内部，shell 端不需要知道"失败时 meta
+     *     要不要回滚"或"内存会话要不要清理"。
+     *   - 不复用 `this.createVault()`，因为它的 setStatus("unlocked") +
+     *     publish("vault.unlocked") 副作用会导致主界面在首 Key 落库前
+     *     就被渲染。
+     */
+    async createVaultWithInitialKey(input) {
+      if (status !== "uninitialized") {
+        throw new Error("Vault already exists");
+      }
+      // 1) 准备 meta + 内存会话。**不**调 setStatus("unlocked")。
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const key = await deriveKey(input.password, salt);
+      const verifier = await encryptVerifier(key);
+      const meta: VaultMetaRecord = {
+        id: "singleton",
+        saltB64: bytesToHex(salt),
+        verifierSaltB64: bytesToHex(verifier.salt),
+        verifierIvB64: bytesToHex(verifier.iv),
+        verifierCipherB64: bytesToHex(verifier.ciphertext),
+        createdAt: new Date().toISOString()
+      };
+      await vaultDb.putMeta(meta);
+      masterSalt = salt;
+      masterKey = key;
+      // 2) keyspace ready 边界（与 createVault / unlock 一致）。
+      try {
+        if (deps.keyspace) {
+          await deps.keyspace.onVaultUnlocked();
+        }
+      } catch (err) {
+        // keyspace ready 失败：与 createVault 同样的回滚——删 meta、
+        // 清空内存会话、抛原错。状态保持 uninitialized（从未切到 unlocked）。
+        try {
+          await vaultDb.deleteMeta();
+        } catch (deleteErr) {
+          console.error(
+            "vaultDb.deleteMeta failed during createVaultWithInitialKey rollback",
+            deleteErr
+          );
+        }
+        masterSalt = null;
+        masterKey = null;
+        throw err;
+      }
+      // 3) 生成首 Key。复用 generateKey 走 persistPrivateKey 统一路径。
+      const label = (input.label ?? defaultInitialKeyLabel()).trim();
+      let firstKeyRef: KeyRef;
+      try {
+        firstKeyRef = await this.generateKey({
+          label,
+          capabilities: input.capabilities
+        });
+      } catch (err) {
+        if (err instanceof KeyPersistedButActivationFailedError) {
+          // 已落库但未自动 active：保存 notice，让 UI 在已解锁主界面
+          // 展示"首 Key 已保存，请手动切 active"。**仍**宣布 unlocked，
+          // 让用户能进入主界面手动修复——首 Key 已经安全落库，回滚
+          // 反而会隐藏真实状态。
+          setPendingActivationNotice({
+            keyId: err.key.id,
+            publicKeyHash: err.key.publicKeyHash,
+            label: err.key.label
+          });
+          setStatus("unlocked");
+          deps.messageBus.publish("vault.unlocked", { at: new Date().toISOString() });
+          throw err;
+        }
+        // 首 Key 未落库：DB 里只有刚建好的空 Vault，必须把它清掉，
+        // 回到 uninitialized 状态，避免"已创建空 Vault 但没有 Key"
+        // 的脏状态泄漏到下次 bootstrap。
+        try {
+          await vaultDb.deleteMeta();
+        } catch (deleteErr) {
+          console.error(
+            "vaultDb.deleteMeta failed during createVaultWithInitialKey rollback",
+            deleteErr
+          );
+        }
+        masterSalt = null;
+        masterKey = null;
+        setStatus("uninitialized");
+        throw err;
+      }
+      // 4) 完整成功：宣布 unlocked + emit。这是"新建钱包"的真正完成点。
+      setStatus("unlocked");
+      deps.messageBus.publish("vault.unlocked", { at: meta.createdAt });
+      return firstKeyRef;
     },
 
     /**

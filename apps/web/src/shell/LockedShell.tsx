@@ -1,19 +1,27 @@
 // apps/web/src/shell/LockedShell.tsx
 // 空白/锁定状态界面：
 //  - uninitialized（首次启动）：显示两个入口卡片："新建钱包" / "导入私钥"。
-//    无论选哪个都先要设置 vault 密码（因为保存私钥必须依赖 vault），
-//    "导入私钥" 完成后自动跳到 /import 继续流程。
+//    "新建钱包" 走 vault.createVaultWithInitialKey()：一次创建 Vault + 落首 Key；
+//    "导入私钥" 走 vault.createVault()：先建空 Vault 再跳转 /import。
 //  - locked（已有 vault）：只显示解锁入口 —— 不再提供"已有私钥？导入"按钮。
 //    原因：locked 状态下 /import 无法保存私钥，给用户一条不可完成的路径毫无意义。
 // 设计缘由：让空白状态首页就承担"选择流程"的责任，而不是一个纯密码表单。
 //
 // 硬切换 003：所有展示文案走 i18n。表单校验错误信息也走 t()，缺 key 时回退到 fallback。
 // password 相关错误信息从原本的"密码至少 8 位"等走 shell.locked.* 资源。
+//
+// 硬切换 009：首启"新建钱包"必须改走 createVaultWithInitialKey；该高层能力
+// 在 Vault 内部事务化（meta + 首 Key + active 切换），失败时统一回滚到
+// uninitialized。本页面只负责把"已落库但未自动激活"的可恢复状态以 notice
+// 形式带到下一屏，不要展示成"完全失败"。
 
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
 import { router, useCapability, useI18n } from "@keymaster/runtime";
-import type { VaultService } from "@keymaster/contracts";
+import {
+  KeyPersistedButActivationFailedError,
+  type VaultService
+} from "@keymaster/contracts";
 
 type Mode = "welcome" | "create-form" | "unlock-form";
 type PendingIntent = "new" | "import" | null;
@@ -82,8 +90,36 @@ export function LockedShell() {
     }
     setBusy(true);
     try {
-      await vault.createVault(password);
-      // createVault 内部会切到 unlocked，订阅器会处理跳转。
+      if (pending === "import") {
+        // "导入私钥"：先建空 Vault（不自动生成首 Key），让 /import 自己
+        // 走 importPrivateKey 路径保存外部私钥。
+        await vault.createVault(password);
+        // createVault 内部会切到 unlocked，订阅器会处理跳转。
+      } else {
+        // "新建钱包"：硬切换 009——必须走 createVaultWithInitialKey 一次性
+        // 完成 Vault + 首 Key + active 切换。失败由 Vault 内部事务化回滚。
+        try {
+          await vault.createVaultWithInitialKey({ password });
+          // 成功：vault 内部会在 generateKey 成功后才宣布 unlocked，
+          // 订阅器会看到 status === "unlocked" 走正常跳转。
+        } catch (initErr) {
+          if (initErr instanceof KeyPersistedButActivationFailedError) {
+            // 可恢复场景：首 Key 已落库，active 没切上。Vault 仍然宣布
+            // 了 unlocked（让用户能进入主界面手动切），并把 notice 存到
+            // 可查询的 state；AppShell / VaultSettingsPage 会自动展示
+            // 横幅。本页面无需再做任何事——status 切换后 LockedShell
+            // 会被卸载。
+            return;
+          }
+          // 真失败：Vault 已内部回滚到 uninitialized，给明确错误。
+          setError(
+            initErr instanceof Error
+              ? initErr.message
+              : t("shell.locked.createInitialKeyFailed", { defaultValue: "创建钱包失败" })
+          );
+          return;
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("shell.locked.createFailed", { defaultValue: "创建失败" }));
     } finally {

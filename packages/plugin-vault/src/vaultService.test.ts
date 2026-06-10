@@ -15,6 +15,8 @@ import { disposeVaultDb, vaultDb } from "./vaultDb.js";
 
 const TEST_PRIV = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
+/** 与 vaultService 内部常量保持一致，避免跨包 import 测试私有常量。 */
+const LABEL_MAX_LENGTH = 64;
 
 interface EventRecord {
   type: string;
@@ -806,6 +808,470 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     expect(envelope.cipher).toBe("xchacha20poly1305");
     expect(envelope.kdf).toBe("argon2id");
   }, 30_000);
+});
+
+describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
+  // 设计缘由：首启"新建钱包"硬切换要求
+  //   1) 一次调用同时建 Vault + 落首 Key + 设为 active；
+  //   2) createVault() 老语义保持不变（仍允许创建空 Vault 供导入私钥使用）；
+  //   3) generateKey 失败时回滚到 uninitialized；
+  //   4) KeyPersistedButActivationFailedError 不被误回滚。
+
+  it("creates vault, persists the first key, and sets it as active in one call", async () => {
+    const { messageBus: events } = makeMessageBus();
+    // 走"真实 keyspace"路径：先建一个临时 vault 用于构造 keyspace（keyspace
+    // 构造时需要 vault 引用），再创建目标 vault，让它持有真实 keyspace。
+    // meta 已经在 IndexedDB 中被建好，新 vault bootstrap 后是 "locked"
+    // 状态——但 createVaultWithInitialKey 必须从 uninitialized 开始，所以
+    // 先用临时 vault 跑一次 createVault（uninitialized -> unlocked），
+    // 然后清空 DB，再让目标 vault 在 uninitialized 状态下调
+    // createVaultWithInitialKey。
+    const vault0 = createVaultService({ messageBus: events });
+    await waitForStatus(vault0, "uninitialized");
+    await vault0.createVault("test-pw");
+    await vault0.lock();
+    // 清掉临时 vault 的内存状态；新 vault bootstrap 后会是 "locked"。
+    // 为了让目标 vault 走 uninitialized 入口，需要清空整个 vault DB。
+    disposeVaultDb();
+    await new Promise<void>((resolve) => {
+      const req = indexedDB.deleteDatabase("vault");
+      req.onsuccess = () => resolve();
+      req.onerror = () => resolve();
+      req.onblocked = () => resolve();
+    });
+
+    const vault1 = createVaultService({ messageBus: events });
+    await waitForStatus(vault1, "uninitialized");
+    const keyspace = createKeyspaceService({ messageBus: events, vault: vault1 });
+    const vault = createVaultService({ messageBus: events, keyspace });
+    await waitForStatus(vault, "uninitialized");
+
+    const ref = await vault.createVaultWithInitialKey({ password: "test-pw" });
+    expect(ref.format).toBe("generated");
+    expect(ref.source).toBe("vault-generated");
+    expect(ref.capabilities).toEqual(["p2pkh"]);
+    expect(ref.publicKeyHex).toBeDefined();
+    expect(ref.publicKeyHash).toBeDefined();
+    expect(ref.fingerprint).toBeDefined();
+    // Vault 状态：unlocked。
+    expect(vault.status()).toBe("unlocked");
+    // listKeys 看到 1 把。
+    const list = await vault.listKeys();
+    expect(list).toHaveLength(1);
+    expect(list[0]?.id).toBe(ref.id);
+    // keyspace 已切到这把 key。
+    expect(keyspace.active()).toEqual({
+      mode: "single",
+      activePublicKeyHash: ref.publicKeyHash
+    });
+  });
+
+  it("rejects when vault is not in uninitialized state", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    await waitForStatus(vault, "unlocked");
+    // 已经在 unlocked，再次调用必须 fail closed。
+    await expect(
+      vault.createVaultWithInitialKey({ password: "test-pw" })
+    ).rejects.toThrow(/Vault already exists/i);
+  });
+
+  it("uses custom label / capabilities when provided", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    const ref = await vault.createVaultWithInitialKey({
+      password: "test-pw",
+      label: "my-first-key",
+      capabilities: ["p2pkh", "custom"]
+    });
+    expect(ref.label).toBe("my-first-key");
+    expect(ref.capabilities).toEqual(["p2pkh", "custom"]);
+  });
+
+  it("rolls back to uninitialized when initial key generation fails before persistence", async () => {
+    // 设计缘由：generateKey 在 persistPrivateKey 抛错时（DB 写入失败 /
+    // 重复 hash 等场景）会让首 Key 仍处于"未落库"状态。createVaultWithInitialKey
+    // 必须把刚建好的空 Vault 一起清掉，回到 uninitialized，**不**留下
+    // "已创建 Vault 但 0 key"的脏状态。
+    //
+    // 实现策略：mock keyspaceFake 让它主动 inject 一个能抛错的 keyspace
+    // 即可复现——但更直接的复现是：用一个会强制失败的 label（如超长
+    // 标签）让 generateKey 抛 "Label must be at most 64 characters"。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    // 64 字符的标签 + 后缀会超出 LABEL_MAX_LENGTH=64，generateKey 抛错。
+    const longLabel = "x".repeat(LABEL_MAX_LENGTH + 1);
+    await expect(
+      vault.createVaultWithInitialKey({ password: "test-pw", label: longLabel })
+    ).rejects.toThrow(/at most 64 characters/);
+    // 关键：status 必须回到 uninitialized。
+    expect(vault.status()).toBe("uninitialized");
+    // meta 必须被删：bootstrap 重新走也应读到 uninitialized。
+    const fresh = createVaultService({ messageBus: events });
+    await waitForStatus(fresh, "uninitialized");
+  });
+
+  it("rolls back to uninitialized when keyspace.onVaultUnlocked fails", async () => {
+    // 设计缘由：createVault 内部的 keyspace.onVaultUnlocked 抛错时，meta
+    // 也已经被 createVault 自身回滚掉（硬切换 008 收尾）。createVaultWithInitialKey
+    // 必须透传这个失败、不要再尝试生成首 Key。
+    const { messageBus: events } = makeMessageBus();
+    const keyspaceFake = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => {
+        throw new Error("simulated keyspace failure during createVault");
+      },
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => undefined
+    };
+    const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
+    await waitForStatus(vault, "uninitialized");
+    await expect(
+      vault.createVaultWithInitialKey({ password: "test-pw" })
+    ).rejects.toThrow(/simulated keyspace failure/);
+    expect(vault.status()).toBe("uninitialized");
+    // meta 必须被删除——重新走 bootstrap 不应读到孤儿 Vault。
+    const fresh = createVaultService({ messageBus: events });
+    await waitForStatus(fresh, "uninitialized");
+  });
+
+  it("does NOT roll back when KeyPersistedButActivationFailedError is thrown", async () => {
+    // 设计缘由：与 generateKey 现有语义保持一致——首 Key 已落库但 active
+    // 切换失败时，DB 里的 Key 必须保留，让 UI 走"已创建但未自动 active"
+    // 的成功/警告态。
+    const { messageBus: events, records } = makeMessageBus();
+    const explodingKeyspace = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        throw new Error("simulated notify failure");
+      }
+    };
+    const vault = createVaultService({
+      messageBus: events,
+      keyspace: explodingKeyspace as never
+    });
+    await waitForStatus(vault, "uninitialized");
+    let thrown: unknown;
+    try {
+      await vault.createVaultWithInitialKey({ password: "test-pw" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
+    const wrapped = thrown as KeyPersistedButActivationFailedError;
+    expect(wrapped.key.id).toBeTruthy();
+    expect(wrapped.key.publicKeyHash).toBeDefined();
+    // 首 Key 仍在 DB 中——通过 vaultDb 直接查证。
+    const stored = await vaultDb.getKey(wrapped.key.id);
+    expect(stored).toBeDefined();
+    expect(stored?.publicKeyHash).toBe(wrapped.key.publicKeyHash);
+    // meta 仍在（不要误回滚）。
+    const meta = await vaultDb.getMeta();
+    expect(meta).toBeDefined();
+    // key.created 事件**不**被发布（与 generateKey 现有语义一致）。
+    expect(records.some((r) => r.type === "key.created")).toBe(false);
+  });
+
+  it("createVault (old semantics) does not auto-generate any key", async () => {
+    // 设计缘由：createVault 必须保持"创建空 Vault"的旧语义，不被偷偷
+    // 改成"自动生成首 Key"——"导入私钥"分支依赖空 Vault。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    const list = await vault.listKeys();
+    expect(list).toHaveLength(0);
+    expect(vault.status()).toBe("unlocked");
+  });
+
+  // ---------------------------------------------------------------------
+  // 硬切换 009 收尾：时序回归测试
+  // ---------------------------------------------------------------------
+
+  it("does NOT announce unlocked before the first key is persisted (硬切换 009 收尾)", async () => {
+    // 设计缘由：旧实现直接调 this.createVault(...)，createVault 内部
+    // 会立刻 setStatus("unlocked") + publish("vault.unlocked")。App.tsx
+    // 在看到 unlocked 后会立刻渲染 UnlockedShell；P2PKH 也会在
+    // vault.unlocked 事件后启动自己的解锁链路。这种时序会让"新建钱包"
+    // 暂时落在"已解锁但首 Key 尚未落库"的中间态，违反施工单里
+    // "新建钱包完成后主界面应已带首 Key"的硬切换语义。
+    //
+    // 修复后：createVaultWithInitialKey 不复用 this.createVault()，而
+    // 是内联 meta + keyspace ready 步骤，**先**调 generateKey 落首
+    // Key，**再**宣布 unlocked。本测试用 keyspace fake 观察 status
+    // 变化的顺序：在 generateKey 成功前，status 必须仍处于非 unlocked。
+    const { messageBus: events } = makeMessageBus();
+    const statusTimeline: VaultStatus[] = [];
+    const keyspaceFake = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        // 在 notifyKeyCreated 触发时记录 vault 状态——它必须在 setStatus("unlocked")
+        // 之前发生。
+        statusTimeline.push(vault.status());
+      }
+    };
+    const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
+    await waitForStatus(vault, "uninitialized");
+
+    // 订阅 status 变化记录整条时间线。
+    vault.onStatusChange((s) => {
+      // 注意：onStatusChange 也会在 notifyKeyCreated 之前因为 keyspace
+      // 还没切就触发？不需要——这里只关心事件顺序的最终形态。
+      if (statusTimeline[statusTimeline.length - 1] !== s) {
+        statusTimeline.push(s);
+      }
+    });
+
+    await vault.createVaultWithInitialKey({ password: "test-pw" });
+
+    // 关键断言：vault 状态在 notifyKeyCreated 被调用时**仍**是
+    // "uninitialized"——因为 setStatus("unlocked") 必须等 generateKey
+    // 落库后才发生。
+    expect(statusTimeline[0]).toBe("uninitialized");
+    // 终态必须是 unlocked。
+    expect(vault.status()).toBe("unlocked");
+  });
+
+  it("does NOT emit vault.unlocked before the first key is created (硬切换 009 收尾)", async () => {
+    // 设计缘由：与上面类似，但用 messageBus 事件验证。订阅者（典型是
+    // P2PKH service）会在 vault.unlocked 后启动自己的解锁链路；如果
+    // 该事件在首 Key 落库前就发出，会让 P2PKH 在 0 key 状态启动。
+    const { messageBus: events, records } = makeMessageBus();
+    // 收集 key.created 与 vault.unlocked 的发布顺序。
+    const order: string[] = [];
+    const originalPublish = events.publish.bind(events);
+    events.publish = (event: string, payload: unknown, _opts?: unknown) => {
+      order.push(event);
+      return originalPublish(event, payload, _opts as never);
+    };
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVaultWithInitialKey({ password: "test-pw" });
+    // vault.unlocked 必须在 key.created 之后（或至少在它之后被看到）。
+    const unlockedIdx = order.indexOf("vault.unlocked");
+    const createdIdx = order.indexOf("key.created");
+    // 关键断言：vault.unlocked 必须在 key.created 之后。
+    expect(unlockedIdx).toBeGreaterThanOrEqual(0);
+    expect(createdIdx).toBeGreaterThanOrEqual(0);
+    expect(unlockedIdx).toBeGreaterThan(createdIdx);
+    // 完整性：两个事件都发了。
+    expect(records.some((r) => r.type === "vault.unlocked")).toBe(true);
+    expect(records.some((r) => r.type === "key.created")).toBe(true);
+  });
+
+  it("does NOT emit vault.unlocked when initial key generation fails", async () => {
+    // 设计缘由：generateKey 失败时（首 Key 未落库），整个"新建钱包"
+    // 流程应回到 uninitialized，**不**宣布 unlocked。否则会让
+    // App.tsx 切到 UnlockedShell 看到 0 key 的状态。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    const longLabel = "x".repeat(LABEL_MAX_LENGTH + 1);
+    await expect(
+      vault.createVaultWithInitialKey({ password: "test-pw", label: longLabel })
+    ).rejects.toThrow(/at most 64 characters/);
+    // 关键：vault.unlocked 必须**不**被发布。
+    expect(records.some((r) => r.type === "vault.unlocked")).toBe(false);
+    expect(vault.status()).toBe("uninitialized");
+  });
+
+  // ---------------------------------------------------------------------
+  // 硬切换 009 收尾：notice 状态机
+  // ---------------------------------------------------------------------
+
+  it("getInitialActivationNotice() returns null on success path", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    expect(vault.getInitialActivationNotice()).toBeNull();
+    await vault.createVaultWithInitialKey({ password: "test-pw" });
+    // 成功路径不应留 notice。
+    expect(vault.getInitialActivationNotice()).toBeNull();
+  });
+
+  it("getInitialActivationNotice() returns the notice on KeyPersistedButActivationFailedError", async () => {
+    // 设计缘由：硬切换 009 收尾——之前的 messageBus 事件会被新挂载的
+    // UI 错过。修复后 notice 走可查询的 vault state：首 Key 落库但
+    // active 切换失败时，vault 内部存下 notice；AppShell /
+    // VaultSettingsPage 在挂载时通过 getInitialActivationNotice() 取
+    // 得，**不**依赖瞬时事件。
+    const { messageBus: events } = makeMessageBus();
+    const explodingKeyspace = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        throw new Error("simulated notify failure");
+      }
+    };
+    const vault = createVaultService({
+      messageBus: events,
+      keyspace: explodingKeyspace as never
+    });
+    await waitForStatus(vault, "uninitialized");
+    let thrown: unknown;
+    try {
+      await vault.createVaultWithInitialKey({ password: "test-pw" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
+    // 关键：notice 已被 vault 内部存下来。
+    const notice = vault.getInitialActivationNotice();
+    expect(notice).not.toBeNull();
+    expect(notice?.keyId).toBeTruthy();
+    expect(notice?.publicKeyHash).toBeDefined();
+    expect(notice?.label).toBeTruthy();
+    // 状态已切到 unlocked（用户能进主界面手动切 active）。
+    expect(vault.status()).toBe("unlocked");
+  });
+
+  it("clearInitialActivationNotice() wipes the notice", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const explodingKeyspace = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        throw new Error("simulated notify failure");
+      }
+    };
+    const vault = createVaultService({
+      messageBus: events,
+      keyspace: explodingKeyspace as never
+    });
+    await waitForStatus(vault, "uninitialized");
+    try {
+      await vault.createVaultWithInitialKey({ password: "test-pw" });
+    } catch {
+      // 忽略
+    }
+    expect(vault.getInitialActivationNotice()).not.toBeNull();
+    vault.clearInitialActivationNotice();
+    expect(vault.getInitialActivationNotice()).toBeNull();
+  });
+
+  it("onInitialActivationNoticeChange fires on set / clear with current value on subscribe", async () => {
+    // 设计缘由：UI 组件挂载时调用 subscribe()，必须立即收到当前 notice
+    // 值——避免新挂载的 AppShell 漏掉"已经存在的" notice。
+    const { messageBus: events } = makeMessageBus();
+    const explodingKeyspace = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        throw new Error("simulated notify failure");
+      }
+    };
+    const vault = createVaultService({
+      messageBus: events,
+      keyspace: explodingKeyspace as never
+    });
+    await waitForStatus(vault, "uninitialized");
+    const seen: Array<{ keyId: string } | null> = [];
+    vault.onInitialActivationNoticeChange((n) => {
+      seen.push(n ? { keyId: n.keyId } : null);
+    });
+    // 订阅时立即喂入当前值（null）。
+    expect(seen[0]).toBeNull();
+    try {
+      await vault.createVaultWithInitialKey({ password: "test-pw" });
+    } catch {
+      // 忽略
+    }
+    // 通知事件后 handler 被调一次（拿到 notice）。
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen[seen.length - 1]).not.toBeNull();
+    // 清掉后再次喂入 null。
+    vault.clearInitialActivationNotice();
+    expect(seen[seen.length - 1]).toBeNull();
+  });
+
+  it("notice is auto-cleared when user locks the wallet", async () => {
+    // 设计缘由：会话结束（lock）后，notice 不应再展示——下次 unlock
+    // 不应让用户看到上一次会话的"未切 active"提示。
+    const { messageBus: events } = makeMessageBus();
+    const explodingKeyspace = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        throw new Error("simulated notify failure");
+      }
+    };
+    const vault = createVaultService({
+      messageBus: events,
+      keyspace: explodingKeyspace as never
+    });
+    await waitForStatus(vault, "uninitialized");
+    try {
+      await vault.createVaultWithInitialKey({ password: "test-pw" });
+    } catch {
+      // 忽略
+    }
+    expect(vault.getInitialActivationNotice()).not.toBeNull();
+    await vault.lock();
+    expect(vault.getInitialActivationNotice()).toBeNull();
+  });
+
+  it("notice is auto-cleared when active key changes to the notice key", async () => {
+    // 设计缘由：用户手动 setActive(publicKeyHash) 把 notice 那把 key
+    // 切为 active 时，vault 内部监听 EVENT_ACTIVE_KEY_CHANGED 并自动
+    // 清掉 notice——用户不需要再手动 dismiss。
+    //
+    // 实现策略：直接通过 messageBus 发布 "activeKey.changed" 事件，
+    // 模拟 keyspace 在 setActive 成功后发出的事件。这是与 setStatus
+    // 注册的 EVENT_ACTIVE_KEY_CHANGED 订阅器对接的最直接方式——避免
+    // 真实 keyspaceService 的 listActiveCandidates 路径与"首 Key
+    // 已被 notifyKeyCreated 跳过"的特殊状态产生额外耦合。
+    const { messageBus: events } = makeMessageBus();
+    const explodingKeyspace = {
+      active: () => ({ mode: "all" as const }),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: () => undefined,
+      notifyKeyCreated: () => {
+        throw new Error("simulated notify failure");
+      }
+    };
+    const vault = createVaultService({
+      messageBus: events,
+      keyspace: explodingKeyspace as never
+    });
+    await waitForStatus(vault, "uninitialized");
+    let thrown: unknown;
+    try {
+      await vault.createVaultWithInitialKey({ password: "test-pw" });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
+    const notice = vault.getInitialActivationNotice();
+    expect(notice).not.toBeNull();
+    expect(notice?.publicKeyHash).toBeDefined();
+    // 模拟 keyspace 切 active 后发出 activeKey.changed 事件。
+    events.publish("activeKey.changed", {
+      mode: "single",
+      activePublicKeyHash: notice!.publicKeyHash
+    });
+    // 关键：notice 必须被清掉。
+    expect(vault.getInitialActivationNotice()).toBeNull();
+  });
 });
 
 type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";

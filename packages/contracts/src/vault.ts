@@ -106,6 +106,54 @@ export interface KeyExportEnvelope {
   created_at_unix: number;
 }
 
+/**
+ * "Key 已落库但未能自动设为 active"专用错误。
+ *
+ * 设计缘由（硬切换 002 收尾 + 硬切换 009）：
+ *   - 出现在 `importPrivateKey` / `generateKey` / `createVaultWithInitialKey`
+ *     路径上：DB 已经写入了新 Key（这一步成功），但 keyspace
+ *     `notifyKeyCreated` / `activateCreatedKey` 抛错，active 没切。
+ *   - UI 必须**不**把这种错误当作"完全失败"——私钥材料已经安全落库，
+ *     用户仍可继续导出 / 删除 / 手动切 active。错误携带完整公开
+ *     `KeyRef`（`err.key`），调用方拿到 `err.key.id` 就能直接走
+ *     后续管理动作，不再需要去列表里反查。
+ *   - 错误信息使用英文。
+ *
+ * 该类在 `packages/contracts` 暴露，让 shell（apps/web）等**不**依赖
+ * plugin-vault 内部模块的代码也能用 `instanceof` 判断。
+ */
+export class KeyPersistedButActivationFailedError extends Error {
+  /** 已落库的完整公开 KeyRef，UI 可直接基于此做导出 / 设 active / 删除。 */
+  readonly key: KeyRef;
+  /** 原始错误（keyspace 抛的），用于日志。 */
+  readonly cause: unknown;
+
+  constructor(input: { key: KeyRef; cause: unknown }) {
+    super(
+      `Key "${input.key.label}" was persisted but activation failed before key.created: ${
+        input.cause instanceof Error ? input.cause.message : String(input.cause)
+      }`
+    );
+    this.name = "KeyPersistedButActivationFailedError";
+    this.key = input.key;
+    this.cause = input.cause;
+  }
+}
+
+/**
+ * "首 Key 已落库但未自动 active"待展示 notice（硬切换 009 收尾）。
+ *
+ * 由 `vault.createVaultWithInitialKey` 命中
+ * `KeyPersistedButActivationFailedError` 时设置；UI 通过
+ * `vault.getInitialActivationNotice()` 读取并展示。字段足够让
+ * Key 管理页定位具体那一把 key，无需再去兜底列表里反查。
+ */
+export interface InitialActivationNotice {
+  keyId: string;
+  publicKeyHash?: string;
+  label: string;
+}
+
 /** Vault 服务：被 plugin-vault 实现并以 "vault.service" capability 暴露。 */
 export interface VaultService {
   /** 当前状态。 */
@@ -113,10 +161,75 @@ export interface VaultService {
   /** 订阅状态变化，返回取消订阅函数。 */
   onStatusChange(handler: (status: VaultStatus) => void): () => void;
 
+  /**
+   * "首 Key 已落库但未自动 active"待展示 notice。
+   *
+   * 设计缘由（硬切换 009 收尾）：消息总线事件是瞬时的，UI 在 LockedShell
+   * 切到 UnlockedShell 时容易错过这条事件。改用可查询的 vault state：
+   *
+   *   - `createVaultWithInitialKey` 命中 `KeyPersistedButActivationFailedError`
+   *     时写入本 notice；
+   *   - UI（AppShell / 顶栏）在挂载时通过 `getInitialActivationNotice()` 读取
+   *     并展示提示横幅；
+   *   - notice 在以下情况下自动清除：
+   *       * 用户手动 `setActive` 把该 key 切为 active；
+   *       * 用户 `lock()` 钱包（会话结束）；
+   *   - 显式清除走 `clearInitialActivationNotice()`。
+   *
+   * 错误信息使用英文。
+   */
+  getInitialActivationNotice(): InitialActivationNotice | null;
+  clearInitialActivationNotice(): void;
+  /**
+   * 订阅 notice 变化（设置 / 清除）。返回取消订阅函数。
+   * 订阅时会立即把当前 notice 值喂给 handler，避免新挂载的 UI 漏掉
+   * 已存在的 notice。
+   */
+  onInitialActivationNoticeChange(
+    handler: (notice: InitialActivationNotice | null) => void
+  ): () => void;
+
   /** 是否存在 vault_meta（首次启动为 false）。 */
   hasVault(): Promise<boolean>;
-  /** 创建 vault，密码用于派生加密 key。 */
+  /**
+   * 创建 vault，密码用于派生加密 key。
+   *
+   * 本方法**仅**表示"创建一个空 Vault"：它不会自动生成或导入任何 Key。
+   * 仅供"导入私钥"流程使用——该流程需要先有 Vault 才能保存外部私钥。
+   * 首次进入应用选择"新建钱包"必须改走 `createVaultWithInitialKey`，
+   * 这样新建钱包会同时创建 Vault 并落第一把 Key；继续把本方法当作
+   * "新建钱包"会让用户进入"已解锁但 0 key"的状态。
+   */
   createVault(password: string): Promise<void>;
+  /**
+   * 首启"新建钱包"高层能力：创建空 Vault + 立即在 Vault 内部生成首把 Key +
+   * 设为 active key。
+   *
+   * 设计缘由（硬切换 009）：
+   *   - "新建钱包"是一个**业务动作**，不是"创建空 Vault"与"生成 Key"两个
+   *     独立底层调用的拼装。把事务边界放在 Vault 内部，页面层不需要关心
+   *     失败时 meta 是否需要回滚、内存会话是否需要清理。
+   *   - 复用现有 `generateKey` 路径：身份派生、查重、加密落库、active 切换、
+   *     `key.created` 事件全部一致；不允许在本方法里复制私钥生成与持久化
+   *     逻辑。
+   *   - 失败处理：
+   *       * `createVault` 自身失败（已存在 / meta 写入失败）—— 抛原错；
+   *       * 首 Key **未落库**时的 `generateKey` 失败 —— 内部回滚 meta、
+   *         清理内存会话、状态回到 `uninitialized`，再把原错抛给上层；
+   *       * 首 Key **已落库**但 active 切换失败 —— 抛
+   *         `KeyPersistedButActivationFailedError`，**不**回滚已落库 Key
+   *         （与 generateKey 现有语义保持一致），UI 进入"已创建但未自动
+   *         active"的成功/警告态。
+   *   - 仅当 `status === "uninitialized"` 允许调用；locked / unlocked /
+   *     booting 状态必须 fail closed。后续 unlock 不会重复调用本方法。
+   *
+   * 错误信息使用英文。
+   */
+  createVaultWithInitialKey(input: {
+    password: string;
+    label?: string;
+    capabilities?: string[];
+  }): Promise<KeyRef>;
   /** 用密码解锁，会解密所有 key 索引（不解密私钥本身）。 */
   unlock(password: string): Promise<void>;
   /** 锁定，丢弃内存中的明文。 */

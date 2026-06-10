@@ -85,6 +85,26 @@ export function VaultSettingsPage() {
     };
   }, [messageBus, refresh]);
 
+  // 硬切换 009 收尾：订阅 vault 的
+  // `onInitialActivationNoticeChange`，把"首 Key 已落库但未自动
+  // active"的 notice 同步到页面顶部，让用户能明确看到提示。
+  useEffect(() => {
+    if (typeof vault.onInitialActivationNoticeChange !== "function") return;
+    return vault.onInitialActivationNoticeChange((notice) => {
+      if (notice) {
+        setNotice(
+          t("vault.settings.notice.persisted", {
+            defaultValue: "Key 已保存，但未能自动设为 active。请在列表中手动切换。"
+          }) + ` (${notice.label})`
+        );
+      } else {
+        // vault 内部已自动清掉 notice（用户切 active / lock /
+        // 显式 clear），这里同步清掉页面本地 notice，避免双份展示。
+        setNotice(null);
+      }
+    });
+  }, [vault, t]);
+
   async function lock() {
     await vault.lock();
   }
@@ -117,6 +137,18 @@ export function VaultSettingsPage() {
     if (k.identityStatus && k.identityStatus !== "ready") return;
     try {
       await keyspace.setActive(k.publicKeyHash);
+      // 硬切换 009 收尾：如果 vault 还有"首 Key 未自动 active"
+      // notice，且这把 key 正好就是 notice 里的 key，清掉它。
+      // vault 内部也会在 EVENT_ACTIVE_KEY_CHANGED 上做同样检查
+      // （防止其他入口也产生新 notice 后路径不一致），这里再调一
+      // 次是冗余但保险的快速路径。
+      const notice =
+        typeof vault.getInitialActivationNotice === "function"
+          ? vault.getInitialActivationNotice()
+          : null;
+      if (notice && notice.keyId === k.keyId) {
+        vault.clearInitialActivationNotice();
+      }
     } catch (err) {
       setError(
         err instanceof Error
