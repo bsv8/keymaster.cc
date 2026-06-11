@@ -5,6 +5,11 @@ const tailscaleHost = "usops01.degu-danio.ts.net";
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // 设计缘由：当前首包稳定略高于 Vite 默认 500 kB，项目初期先以降低构建噪音为主，
+    // 暂不引入额外分包策略；保留一个略高于现状的阈值，避免无效告警。
+    chunkSizeWarningLimit: 1024
+  },
   server: {
     // 只监听本机地址，外部访问统一通过 Tailscale HTTPS 转发到 localhost。
     host: "127.0.0.1",
