@@ -12,6 +12,7 @@
 
 import { ShieldCheck } from "lucide-react";
 import { useI18n } from "@keymaster/runtime";
+import { BrandIcon } from "./BrandIcon.js";
 import { ThemeToggle } from "../theme/ThemeToggle.js";
 import { LanguageSwitch } from "../i18n/LanguageSwitch.js";
 
@@ -32,10 +33,13 @@ export function OnboardingHeader({ hideSecurityNote = false }: OnboardingHeaderP
     <header className="onboarding-header" role="banner">
       <div className="onboarding-header__row">
         <div className="onboarding-header__brand">
-          <span className="onboarding-header__brand-mark">Keymaster</span>
-          <span className="onboarding-header__brand-subtitle">
-            {t("shell.onboarding.brandSubtitle", { defaultValue: "Local key vault" })}
-          </span>
+          <BrandIcon className="onboarding-header__brand-icon" />
+          <div className="onboarding-header__brand-copy">
+            <span className="onboarding-header__brand-mark">Keymaster</span>
+            <span className="onboarding-header__brand-subtitle">
+              {t("shell.onboarding.brandSubtitle", { defaultValue: "Local key vault" })}
+            </span>
+          </div>
         </div>
         <div className="onboarding-header__actions">
           <ThemeToggle variant="onboarding" />

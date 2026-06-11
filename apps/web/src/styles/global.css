@@ -118,7 +118,37 @@ button { font-family: inherit; }
 .app-shell { display: flex; flex-direction: column; min-height: 100vh; }
 .app-topbar { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; background: var(--surface); border-bottom: 1px solid var(--border); gap: 12px; }
 .app-topbar__left { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.app-topbar__brand { margin: 0; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.brand-icon {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: 9px;
+  border: 1px solid rgba(17, 24, 39, 0.08);
+  box-shadow: 0 4px 12px rgba(17, 24, 39, 0.12);
+  background-color: #ffffff;
+  background-image: url("/keymaster-shield.png");
+  background-position: center;
+  background-repeat: no-repeat;
+  /* 原图留白较多，页头内适度放大裁切能提升小尺寸识别度。 */
+  background-size: 136%;
+  overflow: hidden;
+}
+[data-theme="dark"] .brand-icon {
+  border-color: rgba(255, 255, 255, 0.10);
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.30);
+}
+.app-topbar__brand {
+  margin: 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  white-space: nowrap;
+}
+.app-topbar__brand-icon { width: 28px; height: 28px; border-radius: 8px; }
+.app-topbar__brand-text { overflow: hidden; text-overflow: ellipsis; }
 .app-topbar__nav-toggle {
   display: none; /* 默认隐藏在桌面端 */
   background: transparent; color: var(--text);
@@ -259,6 +289,13 @@ button { font-family: inherit; }
 }
 .onboarding-header__brand {
   display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.onboarding-header__brand-icon { width: 36px; height: 36px; border-radius: 10px; }
+.onboarding-header__brand-copy {
+  display: flex;
   flex-direction: column;
   gap: 2px;
   min-width: 0;
@@ -292,6 +329,8 @@ button { font-family: inherit; }
 .onboarding-header__note svg { color: var(--primary); flex-shrink: 0; }
 @media (max-width: 640px) {
   .onboarding-header { padding: 12px 14px 8px; }
+  .onboarding-header__brand { gap: 10px; }
+  .onboarding-header__brand-icon { width: 32px; height: 32px; border-radius: 9px; }
   .onboarding-header__brand-subtitle { display: none; }
   .onboarding-header__note { font-size: 11px; }
 }
