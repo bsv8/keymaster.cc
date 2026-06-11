@@ -51,7 +51,23 @@ export interface KeyImporter {
   description?: I18nText;
   /** 支持的输入类型。 */
   supports: Array<KeyImportInput["kind"]>;
-  /** 解析输入；失败时抛错。 */
+  /**
+   * 解析输入；失败时抛错。
+   *
+   * 关于"是否需要导入源密码"：这个属性是**输入**的属性，不是 importer
+   * 的属性。importer 可能同时支持加密与不加密两种输入（例如 json-file
+   * 既能解析 handcash / moneybutton 这类明文 JSON，又能解析 bsv8
+   * envelope 加密 JSON）。在静态层把"是否需要密码"声明为 importer
+   * 的布尔字段会强制 UI 在解析前就锁死流程，把 importer 的能力窄化为
+   * 单一形态，破坏 fail-open 的解析体验。
+   *
+   * 正确做法：
+   *   - UI 端：先调用 parse()；如果 importer 抛 `Password is required
+   *     for encrypted key file`（业务约定的密码缺失错误），再追问用户。
+   *     已加密文件可借助 `peekBsv8Envelope` 提前嗅探以优化体验。
+   *   - 平台端：本契约**不**包含"是否需要密码"这种 importer 级声明。
+   *     任何试图把它加回来的改动都会被拒，参见硬切换 010 收尾笔记。
+   */
   parse(input: KeyImportInput): Promise<KeyImportResult[]>;
 }
 

@@ -597,6 +597,140 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     /**
+     * 硬切换 010：首启"导入私钥"高层能力。
+     *
+     * 内部顺序（**严格按此执行，不能调 this.createVault()**）：
+     *   1) 校验 status === "uninitialized"（其余状态 fail closed）。
+     *   2) 写 meta + 把派生 key/salt 放入内存（不调 setStatus）。
+     *   3) 调 `deps.keyspace.onVaultUnlocked()` 让 keyspace 进入 ready
+     *      状态（与 unlock 的 ready 边界保持一致）。
+     *   4) 调 `importPrivateKey({ label, material, format, capabilities,
+     *      source })`：复用 `persistPrivateKey` 内部函数——身份派生 /
+     *      查重 / 加密落库 / active 切换 / `key.created` 事件。
+     *   5) **只有 importPrivateKey 成功后才** `setStatus("unlocked")` +
+     *      emit `vault.unlocked`。这样 App.tsx 看到 unlocked 时这把导入
+     *      key 已经落库，避免主界面在"首 Key 尚未落库"的中间态渲染。
+     *   6) 失败回滚：
+     *        a) 步骤 2/3 失败（meta 写入 / keyspace ready）—— 与
+     *           createVault 一致：删 meta、清空内存会话、抛原错，**不**
+     *           宣布 unlocked，状态保持 uninitialized。
+     *        b) importPrivateKey 抛 `KeyPersistedButActivationFailedError`
+     *           — 首 Key 已落库但 active 没切上。**先**保存
+     *           `InitialActivationNotice` 给 UI 在主界面展示，**再**
+     *           `setStatus("unlocked")` 让用户能进入已解锁主界面手动切
+     *           active；抛 `KeyPersistedButActivationFailedError` 给调用
+     *           方（shell 端不必再处理：unlocked 状态已发出，App 会自动
+     *           切到 UnlockedShell）。
+     *        c) importPrivateKey 抛其它错（首 Key 未落库；常见：label
+     *           为空 / 长度超限 / 重复 publicKeyHash / DB 写入失败）——
+     *           删 meta、清空内存会话、状态回到 "uninitialized"、抛原
+     *           错，**不**宣布 unlocked。
+     *
+     * 设计缘由：
+     *   - 首启"导入私钥"必须与"创建空 Vault"语义解耦；本方法是面向
+     *     shell 的唯一首启入口，**不**再让"导入私钥"走 createVault()
+     *     + 跳 `/import` 的旧路径——那会制造"有锁屏密码但 0 key"的空
+     *     Vault 状态。
+     *   - 把事务边界收敛在 Vault 内部，shell 端不需要知道"失败时 meta
+     *     要不要回滚"或"内存会话要不要清理"。
+     *   - 不复用 `this.createVault()`，因为它的 setStatus("unlocked") +
+     *     publish("vault.unlocked") 副作用会导致主界面在首 Key 落库前
+     *     就被渲染。
+     *   - 本方法与 `createVaultWithInitialKey` 对称：两者都是
+     *     "首启一次性建 Vault + 落首 Key + 切 active"；区别仅在
+     *     "首 Key 是 Vault 内部生成"还是"由调用方解析外部材料后传入"。
+     *   - 调用方语义：调用本方法前，**私钥材料必须已经解析成功**——
+     *     解析失败不允许进入本方法。解析失败必须停在首启导入向导里，
+     *     不写 vault_meta，状态保持 uninitialized。
+     */
+    async createVaultWithImportedKey(input) {
+      if (status !== "uninitialized") {
+        throw new Error("Vault already exists");
+      }
+      // 1) 准备 meta + 内存会话。**不**调 setStatus("unlocked")。
+      const salt = crypto.getRandomValues(new Uint8Array(16));
+      const key = await deriveKey(input.vaultPassword, salt);
+      const verifier = await encryptVerifier(key);
+      const meta: VaultMetaRecord = {
+        id: "singleton",
+        saltB64: bytesToHex(salt),
+        verifierSaltB64: bytesToHex(verifier.salt),
+        verifierIvB64: bytesToHex(verifier.iv),
+        verifierCipherB64: bytesToHex(verifier.ciphertext),
+        createdAt: new Date().toISOString()
+      };
+      await vaultDb.putMeta(meta);
+      masterSalt = salt;
+      masterKey = key;
+      // 2) keyspace ready 边界（与 createVault / unlock 一致）。
+      try {
+        if (deps.keyspace) {
+          await deps.keyspace.onVaultUnlocked();
+        }
+      } catch (err) {
+        // keyspace ready 失败：与 createVault 同样的回滚——删 meta、
+        // 清空内存会话、抛原错。状态保持 uninitialized（从未切到 unlocked）。
+        try {
+          await vaultDb.deleteMeta();
+        } catch (deleteErr) {
+          console.error(
+            "vaultDb.deleteMeta failed during createVaultWithImportedKey rollback",
+            deleteErr
+          );
+        }
+        masterSalt = null;
+        masterKey = null;
+        throw err;
+      }
+      // 3) 持久化首把导入 Key。复用 importPrivateKey -> persistPrivateKey
+      //    统一路径：身份派生 / 查重 / 加密落库 / active 切换 / 事件。
+      let firstKeyRef: KeyRef;
+      try {
+        firstKeyRef = await this.importPrivateKey({
+          label: input.key.label,
+          material: input.key.material,
+          format: input.key.format,
+          capabilities: input.key.capabilities,
+          source: input.key.source
+        });
+      } catch (err) {
+        if (err instanceof KeyPersistedButActivationFailedError) {
+          // 已落库但未自动 active：保存 notice，让 UI 在已解锁主界面
+          // 展示"首 Key 已保存，请手动切 active"。**仍**宣布 unlocked，
+          // 让用户能进入主界面手动修复——首 Key 已经安全落库，回滚
+          // 反而会隐藏真实状态。
+          setPendingActivationNotice({
+            keyId: err.key.id,
+            publicKeyHash: err.key.publicKeyHash,
+            label: err.key.label
+          });
+          setStatus("unlocked");
+          deps.messageBus.publish("vault.unlocked", { at: new Date().toISOString() });
+          throw err;
+        }
+        // 首 Key 未落库：DB 里只有刚建好的空 Vault，必须把它清掉，
+        // 回到 uninitialized 状态，避免"已创建空 Vault 但没有 Key"
+        // 的脏状态泄漏到下次 bootstrap。
+        try {
+          await vaultDb.deleteMeta();
+        } catch (deleteErr) {
+          console.error(
+            "vaultDb.deleteMeta failed during createVaultWithImportedKey rollback",
+            deleteErr
+          );
+        }
+        masterSalt = null;
+        masterKey = null;
+        setStatus("uninitialized");
+        throw err;
+      }
+      // 4) 完整成功：宣布 unlocked + emit。这是"首启导入"的真正完成点。
+      setStatus("unlocked");
+      deps.messageBus.publish("vault.unlocked", { at: meta.createdAt });
+      return firstKeyRef;
+    },
+
+    /**
      * 硬切换 008：unlock 的完成边界。
      * 目标顺序（必须严格按此执行）：
      *   1) 校验 meta / password
@@ -649,6 +783,135 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         deps.keyspace.onVaultLocked();
       }
       deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
+    },
+
+    /**
+     * 硬切换 002：仅校验锁屏密码，不改变 Vault 状态。
+     *
+     * 实现要点：
+     *   1) 从 `vault_meta` 读 verifier。无 meta（uninitialized / booting）
+     *      时直接抛 `Vault not initialized`——没有 verifier 可校验，
+     *      fail closed。
+     *   2) 用传入密码 + meta.salt 派生临时 key，仅用于比对 verifier；
+     *      派生出的 key **不**写入 `masterKey` 内存槽，调用结束就丢。
+     *   3) `verifyVerifier` 失败抛 `Invalid password`，与 `unlock` 错误
+     *      文案一致以便 UI 统一处理。
+     *   4) **不**调用 setStatus、**不**修改 `masterKey / masterSalt /
+     *      keyCache`、**不**触发 backfill、**不**发任何 messageBus 事件。
+     *      keyspace.deleteKey 调用本方法后再走 prepareDeleteKey / 删
+     *      namespace DB / 删私钥材料的主流程。
+     */
+    async verifyPassword(password) {
+      const meta = await vaultDb.getMeta();
+      if (!meta) throw new Error("Vault not initialized");
+      const salt = hexToBytes(meta.saltB64);
+      const probe = await deriveKey(password, salt);
+      const ok = await verifyVerifier(probe, {
+        salt: hexToBytes(meta.verifierSaltB64),
+        iv: hexToBytes(meta.verifierIvB64),
+        ciphertext: hexToBytes(meta.verifierCipherB64)
+      });
+      if (!ok) throw new Error("Invalid password");
+      // 不动 masterKey / masterSalt / keyCache / status / cache
+      // / 不 emit 任何事件。
+    },
+
+    /**
+     * 硬切换 002：删完最后一把 Key 后的"空 Vault 收尾"。
+     *
+     * 实现要点：
+     *   1) **再次**确认 `vault_keys` 已空。这是 fail-closed 防御：
+     *      keyspace 判断剩余 0 是基于自己的 listKeys，本方法直接查
+     *      底层 vaultDb，避免任何中间层判断错误导致误删 meta。
+     *      若仍有 key 抛 `Vault still has keys`，不动任何状态。
+     *   2) 清理内存会话：`masterKey / masterSalt / keyCache` 必须先
+     *      置空，避免后续异步路径还能解密私钥。
+     *   3) 触发会话结束清理：现有插件（如 p2pkh）依赖 `vault.locked`
+     *      事件释放 namespace 资源；删空最后一把 key 时这条链路必须
+     *      被走一次。这里先 emit `vault.locked` 再 setStatus，确保
+     *      订阅者还能看到"会话结束"语义。`keyspace.onVaultLocked()`
+     *      也被调用一次，释放打开的 namespace DB。
+     *   4) 删除 `vault_meta`——下次 bootstrap 必须读到
+     *      `uninitialized`，回到首启欢迎页。
+     *   5) `setStatus("uninitialized")`，订阅者会重新挂载 LockedShell
+     *      欢迎页。
+     *
+     * 失败处理：
+     *   - 步骤 1 fail closed：抛 `Vault still has keys`，状态不变；
+     *     这一步在清理内存之前抛错，所以 in-memory 会话和 status 都
+     *     不会被动到，调用方拿到原始错误即可。
+     *   - 步骤 2-4 任一失败：必须把 status 收敛到 `uninitialized`——
+     *     原因：步骤 2 已经把 `masterKey / masterSalt / keyCache` 清空，
+     *     步骤 3 已经发了 `vault.locked`；如果状态仍停在 `unlocked`，
+     *     App 不会切回欢迎页，但后续任何 withPrivateKey / sign 都会撞上
+     *     `"Vault is locked"` 这种状态机错位错误。所以最终 setStatus
+     *     必须在 `finally` 块中钉死，无论前面是否抛错。
+     *     失败时 meta 可能仍在 DB 里（= 下次 bootstrap 读到 locked，
+     *     与本次期望 uninitialized 不一致），错误文案必须明确说明
+     *     `deleteMeta` 失败 + 状态已收敛 + 下次启动需诊断介入。
+     */
+    async finalizeEmptyVaultAfterLastKeyDeletion() {
+      // 1) fail-closed：直接查底层 vaultDb 列表。listKeys 自身抛错时
+      //    状态/内存都不动，原错沿错误栈冒泡。
+      const remaining = await vaultDb.listKeys();
+      if (remaining.length > 0) {
+        throw new Error("Vault still has keys");
+      }
+      // 进入收尾流程后，无论后续步骤成功还是抛错，setStatus("uninitialized")
+      // 都必须执行——避免 in-memory 已清空、status 仍 unlocked 的错位态。
+      let finalizeError: unknown = null;
+      try {
+        // 2) 清理内存会话——必须在删 meta 之前，避免任何异步路径
+        //    在 meta 已删但会话还在的情况下尝试 decryptMaterial。
+        masterKey = null;
+        masterSalt = null;
+        keyCache = null;
+        setPendingActivationNotice(null);
+        if (activeChangeUnsub) {
+          activeChangeUnsub();
+          activeChangeUnsub = null;
+        }
+        // 3) 触发会话结束清理：让依赖 vault.locked 的业务插件释放
+        //    namespace 资源；keyspace 自己也走一次 onVaultLocked 把
+        //    打开的 namespace DB 关掉、active 清回 all。
+        if (deps.keyspace) {
+          try {
+            deps.keyspace.onVaultLocked();
+          } catch (err) {
+            // 业务插件清理失败不应阻止 vault 状态收尾，记录即可。
+            console.error("keyspace.onVaultLocked failed during finalize", err);
+          }
+        }
+        try {
+          deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
+        } catch (err) {
+          console.error("publish vault.locked failed during finalize", err);
+        }
+        // 4) 删除 vault_meta。如果失败，错误将被外层 catch 捕获，
+        //    finally 仍会把 status 收敛到 uninitialized。
+        await vaultDb.deleteMeta();
+      } catch (err) {
+        // 收尾失败——记下原错，让 finally 块先做状态收敛，
+        // 然后在 finally 之后把错包装成更明确的错误再抛给调用方。
+        finalizeError = err;
+      } finally {
+        // 5) 状态收敛：必须放在 finally 中。如果不收这一步，App 会
+        //    仍按 unlocked 处理，但 in-memory 已经清空，UI 后续会撞上
+        //    "Vault is locked"——这种状态机错位比"meta 残留"更难诊断。
+        //    收掉后 UI 至少能切回欢迎页、让用户重试创建 / 导入流程。
+        setStatus("uninitialized");
+      }
+      if (finalizeError !== null) {
+        // 重新包装：调用方需要明确知道 deleteMeta 失败、状态已收敛、
+        // 但下次 bootstrap 可能会读到 locked——不能让"已经回到
+        // uninitialized"的表象掩盖 meta 残留事实。
+        const reason =
+          finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
+        throw new Error(
+          `Empty-vault finalize failed to wipe vault_meta ` +
+            `(state already collapsed to uninitialized; next bootstrap may re-read locked): ${reason}`
+        );
+      }
     },
 
     async listKeys() {

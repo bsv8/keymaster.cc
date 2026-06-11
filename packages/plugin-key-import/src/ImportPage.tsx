@@ -9,6 +9,13 @@
 //
 // 硬切换 003：所有展示文案走 i18n；KeyImportResult.summary 是 I18nText，
 // 渲染时通过 host.i18n.text() 解析。
+//
+// 硬切换 010：本页面**只**服务"已解锁态导入更多 key"——首启导入第一把
+// key 的入口是 LockedShell 里的首启导入向导（走
+// `vault.createVaultWithImportedKey`），不再让本页面承担首启导入的职责。
+// 已存在 Vault 且处于 uninitialized 状态不可达：首启导入通过 wizard 完成
+// 之后 vault 状态就是 unlocked；但出于防御，页面挂载时仍 fail-closed 拒绝
+// uninitialized / locked 状态，避免用户在"半路"看到 0-key 保存错误。
 
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
@@ -39,6 +46,16 @@ export function ImportPage() {
   const { t } = useI18n();
   useI18n().language();
 
+  // 硬切换 010：本页面只服务已解锁态导入更多 key。
+  // - uninitialized：本应走 LockedShell 里的首启导入向导；如果意外
+  //   跳转到这里（路由级 redirect 漏了），展示引导文案，不让用户
+  //   在这里拼出一个空 Vault。
+  // - locked：必须先解锁；不调 importer，避免让用户解析出私钥却无处
+  //   保存。
+  // - booting：尚在 bootstrap，按 locked 处理。
+  const vaultStatus = vault.status();
+
+  // Hooks 必须在条件返回前全部注册，避免违反 Rules of Hooks。
   const [importer, setImporter] = useState<KeyImporter | undefined>(undefined);
   const [text, setText] = useState("");
   const [fileName, setFileName] = useState<string | null>(null);
@@ -54,6 +71,20 @@ export function ImportPage() {
     if (result) return;
     setPassword("");
   }, [result]);
+
+  if (vaultStatus !== "unlocked") {
+    return (
+      <div className="import-page">
+        <PageHeader
+          title={t("keyImport.page.title", { defaultValue: "导入私钥" })}
+          description={t("keyImport.page.lockedHint", {
+            defaultValue:
+              "此页面仅用于在已解锁的钱包中导入更多 key。请先解锁 Vault，或返回欢迎页通过首启导入向导新建钱包并导入第一把 key。"
+          })}
+        />
+      </div>
+    );
+  }
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.currentTarget.files?.[0];

@@ -1,15 +1,22 @@
 // packages/plugin-vault/src/VaultKeyDeleteModal.tsx
-// 私钥删除 modal：硬切换 007 后流程升级为 key namespace 删除。
+// 私钥删除 modal：硬切换 002 改为"重新输入锁屏密码"作为删除授权。
 // 设计缘由：
-//   - 删除是不可逆操作；modal 必须先让用户清楚：未备份 = 资产可能永久无法使用。
+//   - 删除是不可逆且涉及资产丢失的危险操作。仅"输入指纹 / 标签"只能
+//     防误触，不能证明操作者仍掌握锁屏密码——其他入口也能绕开。
+//   - 收口到平台：modal 只负责收集密码与风险提示，**不**自己校验
+//     密码真伪；真正的校验由 `keyspace.deleteKey* -> vault.verifyPassword`
+//     在 service 层完成。这样未来命令面板 / 快捷操作等入口也会被同
+//     一套删除授权约束。
 //   - 提供"导出备份"按钮，但**不强制**导出后才能继续删除。
-//   - 删除流程由调用方（VaultSettingsPage）执行 `keyspace.deleteKeyById(keyId)`，
-//     平台负责调度：prepare -> cancel background -> close handles -> delete
-//     namespace DBs -> delete Vault private key。
-//   - keyId 路径能同时覆盖 ready / failed / 无 hash 三类情况；不再按
-//     publicKeyHash 路由（deleteKey 仍只允许 ready，failed+hash 走 hash
-//     路径会卡住）。
-//   - 错误信息透传平台错误（namespace DB blocked 等），用英文展示给用户。
+//   - 错误信息透传平台错误（密码错误、namespace DB blocked、空 vault
+//     finalize 失败等），用英文展示给用户。
+//
+// 不能这样改（施工单 §不能怎么做 / §3 部分）：
+//   - 不能再要求"输入指纹 / 标签 / publicKeyHash"——这些都是公开信息。
+//   - 不能把密码缓存到 modal 外的长期 state；提交后 setState 清空。
+//   - 不能要求"输入指纹 + 输入密码"叠加复杂度。
+//   - 不能在 modal 内部根据本地 keys.length 预测是否要跳欢迎页；状态
+//     源是 vault.status()，由 App 自然切壳。
 //
 // 硬切换 003：所有展示文案走 i18n。
 
@@ -20,11 +27,15 @@ import { useI18n } from "@keymaster/runtime";
 export interface VaultKeyDeleteModalProps {
   open: boolean;
   keyLabel: string;
+  /** 可选展示用指纹；仅用于让用户在 warning step 复核目标 key。 */
   keyFingerprint?: string;
-  /** 期望用户输入的确认字符串，建议传 keyFingerprint。 */
-  confirmText?: string;
   onExportBackup?(): void;
-  onConfirmDelete(): Promise<void> | void;
+  /**
+   * 用户在最终 step 输入的锁屏密码会原样回传；调用方再把它喂给
+   * `keyspace.deleteKeyById({ keyId, password })`。modal **不**校验密码
+   * 真伪——校验在 `vault.verifyPassword` 中完成。
+   */
+  onConfirmDelete(password: string): Promise<void> | void;
   onClose(): void;
 }
 
@@ -34,7 +45,6 @@ export function VaultKeyDeleteModal({
   open,
   keyLabel,
   keyFingerprint,
-  confirmText,
   onExportBackup,
   onConfirmDelete,
   onClose
@@ -45,13 +55,13 @@ export function VaultKeyDeleteModal({
   const [step, setStep] = useState<Step>("warning");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [typed, setTyped] = useState("");
+  const [password, setPassword] = useState("");
 
   function close() {
     if (busy) return;
     setStep("warning");
     setError(null);
-    setTyped("");
+    setPassword("");
     onClose();
   }
 
@@ -64,20 +74,25 @@ export function VaultKeyDeleteModal({
     setError(null);
     setBusy(true);
     try {
-      await onConfirmDelete();
+      await onConfirmDelete(password);
+      // 删除成功后清空 modal 状态——尤其密码字段，避免下次打开仍残留。
       setStep("warning");
       setError(null);
-      setTyped("");
+      setPassword("");
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("vault.keyDelete.err.failed", { defaultValue: "删除失败" }));
+      setError(
+        err instanceof Error
+          ? err.message
+          : t("vault.keyDelete.err.failed", { defaultValue: "删除失败" })
+      );
     } finally {
       setBusy(false);
     }
   }
 
-  const required = confirmText ?? keyFingerprint ?? keyLabel;
-  const canConfirm = typed.trim() === required;
+  // 必须输入非空密码才能点击确认；真伪由平台校验。
+  const canConfirm = password.length > 0;
 
   return (
     <Modal
@@ -138,15 +153,16 @@ export function VaultKeyDeleteModal({
             {t("vault.keyDelete.confirmPrompt2", { defaultValue: " 吗？此操作不可撤销。" })}
           </p>
           <p className="vault-delete-warning__meta">
-            {t("vault.keyDelete.typedPrompt1", { defaultValue: "请输入 " })}
-            <code>{required}</code>
-            {t("vault.keyDelete.typedPrompt2", { defaultValue: " 以确认：" })}
+            {t("vault.keyDelete.passwordPrompt", {
+              defaultValue: "请输入锁屏密码以确认删除："
+            })}
           </p>
           <input
             className="vault-delete-warning__input"
-            type="text"
-            value={typed}
-            onChange={(e) => setTyped(e.currentTarget.value)}
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.currentTarget.value)}
             autoFocus
           />
           {error ? <p className="vault-delete-warning__error">{error}</p> : null}

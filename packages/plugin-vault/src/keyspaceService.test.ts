@@ -1,8 +1,12 @@
 // packages/plugin-vault/src/keyspaceService.test.ts
-// KeyspaceService 删除流程集成测试（硬切换 008 收尾）。
+// KeyspaceService 删除流程集成测试（硬切换 008 + 硬切换 002）。
 // 关键不变量：
-//   - keyspace.deleteKey 走"prepareDeleteKey（cancelByKey + close handles）-> 删除
-//     namespace DB -> vault.deleteKeyMaterial -> emit key.deleted"全流程。
+//   - keyspace.deleteKey / deleteKeyById 入口**第一步**必须是
+//     vault.verifyPassword(password)；密码错误 fail closed：不发
+//     `key.deleting / key.deleted`、不取消 background、不删 namespace DB
+//     与私钥（硬切换 002）。
+//   - 走"prepareDeleteKey（cancelByKey + close handles）-> 删除 namespace
+//     DB -> vault.deleteKeyMaterial -> emit key.deleted"全流程。
 //   - key.deleted 事件在整个流程中**仅发一次**。
 //   - background.cancelByKey 在 prepareDeleteKey 阶段被调用；失败必须冒泡以
 //     阻止 namespace DB / Vault 私钥被删（fail-closed）。
@@ -11,6 +15,9 @@
 //   - deleteKeyById 是管理入口：有 hash 走完整 namespace 清理
 //     （cancelByKey + 删 namespace DB + 删私钥材料 + emit key.deleted），
 //     无 hash 仅删私钥材料 + emit key.deleted。
+//   - 删空最后一把 key 后必须调 vault.finalizeEmptyVaultAfterLastKeyDeletion
+//     把 Vault 收回 uninitialized（硬切换 002）；保留 failed key 时仍是
+//     unlocked。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MessageBus } from "@keymaster/runtime";
@@ -18,6 +25,9 @@ import type { BackgroundService, KeyIdentity } from "@keymaster/contracts";
 import { createKeyspaceService } from "./keyspaceService.js";
 import { createVaultService } from "./vaultService.js";
 import { disposeVaultDb, vaultDb, type VaultKeyRecord } from "./vaultDb.js";
+
+/** 测试用统一锁屏密码——seedVaultMeta / deleteKey 都用这个。 */
+const TEST_PASSWORD = "test-pw";
 
 interface EventRecord {
   type: string;
@@ -102,6 +112,32 @@ afterEach(async () => {
   await resetDb();
 });
 
+/** 等待 vaultService.bootstrap() 完成。 */
+async function waitForStatus(
+  vault: ReturnType<typeof createVaultService>,
+  expected: "uninitialized" | "locked" | "unlocked"
+): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    if (vault.status() === expected) return;
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  throw new Error(`vault did not reach status ${expected}; current=${vault.status()}`);
+}
+
+/**
+ * 硬切换 002 测试基础：建一把真正的空 Vault 并 unlock，让
+ * `vault.verifyPassword(TEST_PASSWORD)` 能通过。所有 keyspace.delete*
+ * 测试都需要在此之后再 seed key——直接 putKey 不动 meta，verifier
+ * 仍由 createVault 写入的真实密码维持。
+ */
+async function seedVault(
+  vault: ReturnType<typeof createVaultService>
+): Promise<void> {
+  await waitForStatus(vault, "uninitialized");
+  await vault.createVault(TEST_PASSWORD);
+  await waitForStatus(vault, "unlocked");
+}
+
 /** 直接在 vaultDb 预填一把"已 backfill"的 ready key（绕开 unlock）。 */
 async function seedReadyKey(input: {
   id: string;
@@ -144,11 +180,15 @@ async function seedFailedKey(input: { id: string; label: string }): Promise<void
   });
 }
 
-describe("keyspaceService.deleteKey (硬切换 008)", () => {
+describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
   it("emits key.deleted exactly once and calls background.cancelByKey", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    // 多 seed 一把 key，避免删完后触发"空 Vault 收尾"路径，让本测试
+    // 只覆盖 active fallback / 单 key 删除的事件语义。
     await seedReadyKey({ id: "k1", label: "test", publicKeyHash: "a".repeat(64) });
+    await seedReadyKey({ id: "k-keep", label: "keep", publicKeyHash: "b".repeat(64) });
     const fakeBackground = makeFakeBackground();
     const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
 
@@ -156,30 +196,62 @@ describe("keyspaceService.deleteKey (硬切换 008)", () => {
     const deletedBefore = records.filter((r) => r.type === "key.deleted").length;
     expect(deletedBefore).toBe(0);
 
-    await keyspace.deleteKey("a".repeat(64));
+    await keyspace.deleteKey({ publicKeyHash: "a".repeat(64), password: TEST_PASSWORD });
 
     // 1) cancelByKey 被调。
     expect(fakeBackground.cancelByKeyCalls).toEqual(["a".repeat(64)]);
     // 2) key.deleted 事件恰好发一次。
     const deletedAfter = records.filter((r) => r.type === "key.deleted").length;
     expect(deletedAfter).toBe(1);
-    // 3) vaultDb 中 key 已删。
+    // 3) vaultDb 中 key 已删，但 keep key 仍在。
     const remaining = await vaultDb.listKeys();
     expect(remaining.find((r) => r.id === "k1")).toBeUndefined();
+    expect(remaining.find((r) => r.id === "k-keep")).toBeDefined();
+    // 4) Vault 仍保持 unlocked（还有 key）。
+    expect(vault.status()).toBe("unlocked");
   });
 
   it("does not throw if background is not attached", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     await seedReadyKey({ id: "k1", label: "test", publicKeyHash: "a".repeat(64) });
+    await seedReadyKey({ id: "k-keep", label: "keep", publicKeyHash: "b".repeat(64) });
     // 不传 background，模拟未 attach 的场景。
     const keyspace = createKeyspaceService({ messageBus: events, vault });
 
     await keyspace.setActive("a".repeat(64));
-    await keyspace.deleteKey("a".repeat(64));
+    await keyspace.deleteKey({ publicKeyHash: "a".repeat(64), password: TEST_PASSWORD });
 
     const deleted = records.filter((r) => r.type === "key.deleted");
     expect(deleted).toHaveLength(1);
+  });
+
+  it("rejects with Invalid password and does NOT start the delete pipeline", async () => {
+    // 硬切换 002：密码错时**完全不开始**——不发 key.deleting / key.deleted、
+    // 不取消 background、不删 namespace DB、不删私钥。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ id: "k1", label: "test", publicKeyHash: "a".repeat(64) });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive("a".repeat(64));
+
+    await expect(
+      keyspace.deleteKey({ publicKeyHash: "a".repeat(64), password: "wrong-pw" })
+    ).rejects.toThrow(/Invalid password/);
+
+    // 1) cancelByKey 未被调。
+    expect(fakeBackground.cancelByKeyCalls).toEqual([]);
+    // 2) 不发 key.deleting / key.deleted。
+    expect(records.some((r) => r.type === "key.deleting")).toBe(false);
+    expect(records.some((r) => r.type === "key.deleted")).toBe(false);
+    // 3) key 仍在。
+    const remaining = await vaultDb.listKeys();
+    expect(remaining.find((r) => r.id === "k1")).toBeDefined();
+    // 4) Vault 状态不变。
+    expect(vault.status()).toBe("unlocked");
   });
 });
 
@@ -187,13 +259,16 @@ describe("keyspaceService.prepareDeleteKey fail-closed (硬切换 008 收尾)", 
   it("aborts delete when background.cancelByKey throws", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     await seedReadyKey({ id: "k1", label: "test", publicKeyHash: "a".repeat(64) });
     const fakeBackground = makeFakeBackground({ failCancel: true });
     const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
     await keyspace.setActive("a".repeat(64));
 
     // cancelByKey 抛错 → deleteKey 必须 reject，namespace DB 与 Vault 私钥都保留。
-    await expect(keyspace.deleteKey("a".repeat(64))).rejects.toThrow(/simulated cancelByKey failure/);
+    await expect(
+      keyspace.deleteKey({ publicKeyHash: "a".repeat(64), password: TEST_PASSWORD })
+    ).rejects.toThrow(/simulated cancelByKey failure/);
 
     // 1) cancelByKey 被调过。
     expect(fakeBackground.cancelByKeyCalls).toEqual(["a".repeat(64)]);
@@ -213,6 +288,7 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
   it("includes failed-identity keys with identityStatus=failed", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     await seedReadyKey({ id: "k-ok", label: "ok", publicKeyHash: "b".repeat(64) });
     // 失败的 key 也可以有 publicKeyHash：backfill 出了 hash 但 mark failed。
     // 这种情况必须出现在 listKeys，让 UI 显示"身份失败，可删除"；
@@ -252,7 +328,11 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
     // deleteKeyById(keyId) 清理，不会被 setActive / deleteKey(hash) 误选。
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     await seedFailedKey({ id: "k-fail-no-hash", label: "no-hash" });
+    // 留一把 ready key 防止删空触发 finalize（本测试只覆盖 listKeys / 单
+    // 把 failed key 的删除路径）。
+    await seedReadyKey({ id: "k-keep", label: "keep", publicKeyHash: "d".repeat(64) });
     const keyspace = createKeyspaceService({ messageBus: events, vault });
     const all = await keyspace.listKeys();
     const failed = all.find((k) => k.keyId === "k-fail-no-hash");
@@ -262,7 +342,7 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
     // 无 hash 的 failed key 天然不能 setActive（listActiveCandidates 已过滤）。
     await expect(keyspace.setActive("" as string)).rejects.toBeTruthy();
     // 但 deleteKeyById 可以删它。
-    await keyspace.deleteKeyById("k-fail-no-hash");
+    await keyspace.deleteKeyById({ keyId: "k-fail-no-hash", password: TEST_PASSWORD });
     const remaining = await keyspace.listKeys();
     expect(remaining.find((k) => k.keyId === "k-fail-no-hash")).toBeUndefined();
   });
@@ -270,6 +350,7 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
   it("setActive rejects failed key (filters via listActiveCandidates)", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     // 制造一把"有 hash 但 identityStatus=failed"的 key——listActiveCandidates 必须过滤。
     await vaultDb.putKey({
       id: "k-fail-hash",
@@ -296,20 +377,25 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
   it("setActive rejects unknown publicKeyHash", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     const keyspace = createKeyspaceService({ messageBus: events, vault });
     await expect(keyspace.setActive("d".repeat(64))).rejects.toThrow(/not found/i);
   });
 });
 
-describe("keyspaceService.deleteKeyById (硬切换 008 收尾)", () => {
+describe("keyspaceService.deleteKeyById (硬切换 008 收尾 + 002 密码鉴权)", () => {
   it("deletes a failed-identity key by keyId without cancelByKey", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     await seedFailedKey({ id: "k-fail", label: "fail" });
+    // 留一把 ready key 防止触发 finalize；这条测试只覆盖"无 hash failed
+    // 走简化路径"的事件语义。
+    await seedReadyKey({ id: "k-keep", label: "keep", publicKeyHash: "b".repeat(64) });
     const fakeBackground = makeFakeBackground();
     const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
 
-    await keyspace.deleteKeyById("k-fail");
+    await keyspace.deleteKeyById({ keyId: "k-fail", password: TEST_PASSWORD });
 
     // 1) cancelByKey 未被调（无 hash 不走 background cancel）。
     expect(fakeBackground.cancelByKeyCalls).toEqual([]);
@@ -327,19 +413,42 @@ describe("keyspaceService.deleteKeyById (硬切换 008 收尾)", () => {
   it("throws when keyId not found", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     const keyspace = createKeyspaceService({ messageBus: events, vault });
-    await expect(keyspace.deleteKeyById("missing")).rejects.toThrow(/not found/i);
+    await expect(
+      keyspace.deleteKeyById({ keyId: "missing", password: TEST_PASSWORD })
+    ).rejects.toThrow(/not found/i);
+  });
+
+  it("rejects with Invalid password without touching the key", async () => {
+    // 硬切换 002：密码错时立刻 fail，**不**调到 vault.getKey / 删材料 /
+    // 发 key.deleted。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedFailedKey({ id: "k-fail", label: "fail" });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    await expect(
+      keyspace.deleteKeyById({ keyId: "k-fail", password: "wrong-pw" })
+    ).rejects.toThrow(/Invalid password/);
+    // key 仍在。
+    const remaining = await vaultDb.listKeys();
+    expect(remaining.find((r) => r.id === "k-fail")).toBeDefined();
+    expect(records.some((r) => r.type === "key.deleted")).toBe(false);
+    expect(records.some((r) => r.type === "key.deleting")).toBe(false);
   });
 
   it("delegates to deleteKey when publicKeyHash is present", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     await seedReadyKey({ id: "k1", label: "test", publicKeyHash: "a".repeat(64) });
+    await seedReadyKey({ id: "k-keep", label: "keep", publicKeyHash: "b".repeat(64) });
     const fakeBackground = makeFakeBackground();
     const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
     await keyspace.setActive("a".repeat(64));
 
-    await keyspace.deleteKeyById("k1");
+    await keyspace.deleteKeyById({ keyId: "k1", password: TEST_PASSWORD });
 
     // 1) 走完整路径：cancelByKey 被调。
     expect(fakeBackground.cancelByKeyCalls).toEqual(["a".repeat(64)]);
@@ -362,6 +471,7 @@ describe("keyspaceService.deleteKeyById (硬切换 008 收尾)", () => {
     // 因此 failed+hash 也能走完整 namespace 清理。
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
     // 预填一把 failed 但有 hash 的 key（模拟 backfill 后又失败的情况）。
     await vaultDb.putKey({
       id: "k-fail-hash",
@@ -380,14 +490,18 @@ describe("keyspaceService.deleteKeyById (硬切换 008 收尾)", () => {
       identityStatus: "failed",
       identityError: "simulated"
     });
+    // 留一把 ready 防止删空触发 finalize。
+    await seedReadyKey({ id: "k-keep", label: "keep", publicKeyHash: "b".repeat(64) });
     const fakeBackground = makeFakeBackground();
     const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
 
     // deleteKey(publicKeyHash) 仍然拒绝（保持 ready-only 语义）。
-    await expect(keyspace.deleteKey("c".repeat(64))).rejects.toThrow(/not found/i);
+    await expect(
+      keyspace.deleteKey({ publicKeyHash: "c".repeat(64), password: TEST_PASSWORD })
+    ).rejects.toThrow(/not found/i);
 
     // deleteKeyById(keyId) 必须能删。
-    await keyspace.deleteKeyById("k-fail-hash");
+    await keyspace.deleteKeyById({ keyId: "k-fail-hash", password: TEST_PASSWORD });
 
     // 1) cancelByKey 被调（有 hash 走 background cancel）。
     expect(fakeBackground.cancelByKeyCalls).toEqual(["c".repeat(64)]);
@@ -400,6 +514,247 @@ describe("keyspaceService.deleteKeyById (硬切换 008 收尾)", () => {
     const payload = deleted[0]?.payload as { keyId?: string; publicKeyHash?: string } | undefined;
     expect(payload?.keyId).toBe("k-fail-hash");
     expect(payload?.publicKeyHash).toBe("c".repeat(64));
+  });
+});
+
+// =====================================================================
+// 硬切换 002：删空最后一把 Key 后回到 uninitialized
+// =====================================================================
+
+describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () => {
+  it("deleting non-last ready key keeps Vault unlocked and falls back active to next ready", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: "a".repeat(64) });
+    await seedReadyKey({ id: "k-b", label: "b", publicKeyHash: "b".repeat(64) });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    await keyspace.setActive("a".repeat(64));
+
+    await keyspace.deleteKeyById({ keyId: "k-a", password: TEST_PASSWORD });
+
+    // Vault 仍 unlocked。
+    expect(vault.status()).toBe("unlocked");
+    // active 切到 k-b。
+    const next = keyspace.active();
+    expect(next.mode).toBe("single");
+    expect(next.activePublicKeyHash).toBe("b".repeat(64));
+    // vault_meta 仍在。
+    expect(await vaultDb.getMeta()).toBeDefined();
+  });
+
+  it("deleting the LAST key collapses Vault to uninitialized and wipes vault_meta", async () => {
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ id: "k-only", label: "only", publicKeyHash: "a".repeat(64) });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    await keyspace.setActive("a".repeat(64));
+
+    await keyspace.deleteKeyById({ keyId: "k-only", password: TEST_PASSWORD });
+
+    // 1) key.deleted 仍恰好发一次（先删 key 材料 + emit，再 finalize）。
+    const deleted = records.filter((r) => r.type === "key.deleted");
+    expect(deleted).toHaveLength(1);
+    // 2) Vault 状态最终是 uninitialized，不是 locked 也不是仅 active=all。
+    expect(vault.status()).toBe("uninitialized");
+    // 3) vault_meta 已删——新实例 bootstrap 也读到 uninitialized。
+    expect(await vaultDb.getMeta()).toBeUndefined();
+    const fresh = createVaultService({ messageBus: events });
+    await waitForStatus(fresh, "uninitialized");
+    // 4) finalize 期间 emit 过 vault.locked，方便订阅者清理会话内存。
+    expect(records.some((r) => r.type === "vault.locked")).toBe(true);
+  });
+
+  it("does NOT finalize when only ready key is deleted but failed keys remain (still has user data)", async () => {
+    // 施工单 §情况 3：判定是否删空必须以 Vault 实际剩余 key 数量为准，
+    // 不是 ready key 数量为准。failed key 仍然是用户数据，用户还需要
+    // 导出或继续删除——Vault 不能被销毁。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    // 一把 ready，一把 failed (有 hash)，一把 failed (无 hash)。
+    await seedReadyKey({ id: "k-ready", label: "r", publicKeyHash: "a".repeat(64) });
+    await vaultDb.putKey({
+      id: "k-fail-hash",
+      label: "fh",
+      address: "",
+      network: "main",
+      format: "hex",
+      capabilities: ["p2pkh"],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      cipherSaltB64: "00",
+      cipherIvB64: "00",
+      cipherB64: "00",
+      publicKeyHex: "00",
+      publicKeyHash: "c".repeat(64),
+      fingerprint: "cccc..cccc",
+      identityStatus: "failed",
+      identityError: "simulated"
+    });
+    await seedFailedKey({ id: "k-fail-nohash", label: "fnh" });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    await keyspace.setActive("a".repeat(64));
+
+    await keyspace.deleteKeyById({ keyId: "k-ready", password: TEST_PASSWORD });
+
+    // 1) Vault 仍 unlocked，meta 仍在。
+    expect(vault.status()).toBe("unlocked");
+    expect(await vaultDb.getMeta()).toBeDefined();
+    // 2) 没有 ready key 时 active fallback 到 all（failed key 不能成为 active）。
+    const next = keyspace.active();
+    expect(next.mode).toBe("all");
+    // 3) failed key 还在。
+    const remaining = await vaultDb.listKeys();
+    expect(remaining.find((r) => r.id === "k-fail-hash")).toBeDefined();
+    expect(remaining.find((r) => r.id === "k-fail-nohash")).toBeDefined();
+  });
+
+  it("deleting the last failed (no-hash) key also triggers finalize", async () => {
+    // 收尾路径 2：无 hash failed key 走简化删除路径，也必须在剩余 0 把
+    // key 时调 finalize；否则会留下"meta 存在但 0 key"的空壳。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedFailedKey({ id: "k-only-fail", label: "only-fail" });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+
+    await keyspace.deleteKeyById({ keyId: "k-only-fail", password: TEST_PASSWORD });
+
+    expect(vault.status()).toBe("uninitialized");
+    expect(await vaultDb.getMeta()).toBeUndefined();
+  });
+
+  it("namespace DB blocked: keeps private key AND does NOT finalize Vault", async () => {
+    // 施工单 §情况 2：namespace DB 删除 blocked / timeout 时，密码正确
+    // 也不能继续删私钥；同样必须不 finalize Vault。
+    //
+    // 实现：registerPluginStorage 注册一个名字，再手动打开一个同名
+    // IndexedDB 让 deleteDatabase 进入 onblocked。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ id: "k-only", label: "only", publicKeyHash: "a".repeat(64) });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    keyspace.registerPluginStorage({ pluginId: "test-plugin", storageId: "store" });
+    await keyspace.setActive("a".repeat(64));
+
+    // 在外部打开同名 DB 让 deleteDatabase 进入 blocked（不关闭句柄）。
+    const dbName = `keymaster.key.${"a".repeat(64)}.plugin.test-plugin.store`;
+    const holder = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(dbName, 1);
+      req.onupgradeneeded = () => {
+        if (!req.result.objectStoreNames.contains("kv")) {
+          req.result.createObjectStore("kv");
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+
+    try {
+      await expect(
+        keyspace.deleteKeyById({ keyId: "k-only", password: TEST_PASSWORD })
+      ).rejects.toThrow(/blocked|timed out|Failed to delete namespace/i);
+      // 1) 私钥仍在。
+      const remaining = await vaultDb.listKeys();
+      expect(remaining.find((r) => r.id === "k-only")).toBeDefined();
+      // 2) vault_meta 仍在；Vault 不被 finalize。
+      expect(await vaultDb.getMeta()).toBeDefined();
+      expect(vault.status()).toBe("unlocked");
+      // 3) 没发 key.deleted。
+      expect(records.some((r) => r.type === "key.deleted")).toBe(false);
+    } finally {
+      holder.close();
+    }
+  });
+});
+
+// =====================================================================
+// 硬切换 010：删空最后一把 key 后必须 uninitialized——空 Vault 终态回归
+// =====================================================================
+
+describe("keyspaceService delete-last-key -> uninitialized (硬切换 010)", () => {
+  // 设计缘由：施工单 §"特殊情况提前约定 情况 6" 明确：删除最后一把 key
+  // 后系统锁屏密码必须一起消失，状态回到 uninitialized，下一次导入或
+  // 新建必须重新决定系统锁屏密码。这与已存在的 keyspaceService 测试
+  // "deleting the LAST key collapses Vault to uninitialized and wipes
+  // vault_meta" 共同覆盖——下面这条新增测试断言新增的"下一轮必须重新
+  // 决定密码"语义：删空后用新实例 bootstrap 仍然读到 uninitialized，
+  // 此时再 createVault 不会被旧的 verifier 影响。
+
+  it("deleting the last key resets to uninitialized and a new createVaultWithImportedKey is required for next setup", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ id: "k-only", label: "only", publicKeyHash: "a".repeat(64) });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    await keyspace.setActive("a".repeat(64));
+
+    // 删除唯一一把 key。
+    await keyspace.deleteKeyById({ keyId: "k-only", password: TEST_PASSWORD });
+    expect(vault.status()).toBe("uninitialized");
+    expect(await vaultDb.getMeta()).toBeUndefined();
+
+    // 关键：下一次"新建"或"导入"必须重新决定系统锁屏密码——也就是
+    // 必须能再走一次 createVaultWithImportedKey 拿到一把 key。这里用
+    // 真实公钥对测试私钥。
+    const IMPORT_PRIV =
+      "0000000000000000000000000000000000000000000000000000000000000003";
+    const ref = await vault.createVaultWithImportedKey({
+      vaultPassword: "fresh-pw",
+      key: {
+        label: "fresh-imported",
+        material: { hex: IMPORT_PRIV },
+        format: "hex",
+        capabilities: ["p2pkh"]
+      }
+    });
+    expect(ref.id).toBeTruthy();
+    expect(vault.status()).toBe("unlocked");
+    // 旧密码已不再可用——用 seedVault 留下的 TEST_PASSWORD 调用
+    // verifyPassword 必须抛错，证明旧锁屏密码已彻底消失。
+    await expect(vault.verifyPassword(TEST_PASSWORD)).rejects.toThrow(/Invalid password/);
+    // 新密码可用。
+    await vault.verifyPassword("fresh-pw");
+  });
+
+  it("deleting the last ready key but keeping a failed key preserves Vault (硬切换 010 情况 7)", async () => {
+    // 设计缘由：是否"删空"以 Vault 实际剩余 key 数量为准，不是 ready
+    // key 数量。failed / uninitialized / no-hash key 仍是用户数据。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ id: "k-ready", label: "r", publicKeyHash: "a".repeat(64) });
+    await vaultDb.putKey({
+      id: "k-fail-hash",
+      label: "fh",
+      address: "",
+      network: "main",
+      format: "hex",
+      capabilities: ["p2pkh"],
+      createdAt: "2024-01-01T00:00:00.000Z",
+      cipherSaltB64: "00",
+      cipherIvB64: "00",
+      cipherB64: "00",
+      publicKeyHex: "00",
+      publicKeyHash: "c".repeat(64),
+      fingerprint: "cccc..cccc",
+      identityStatus: "failed",
+      identityError: "simulated"
+    });
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    await keyspace.setActive("a".repeat(64));
+
+    await keyspace.deleteKeyById({ keyId: "k-ready", password: TEST_PASSWORD });
+
+    // 1) Vault 仍 unlocked，meta 仍在——还有 failed key，不能销毁。
+    expect(vault.status()).toBe("unlocked");
+    expect(await vaultDb.getMeta()).toBeDefined();
+    // 2) failed key 还在。
+    const remaining = await vaultDb.listKeys();
+    expect(remaining.find((r) => r.id === "k-fail-hash")).toBeDefined();
   });
 });
 

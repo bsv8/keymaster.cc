@@ -121,19 +121,39 @@ export interface KeyspaceService {
   prepareDeleteKey(publicKeyHash: string): Promise<void>;
   /**
    * 删除 ready key（按 publicKeyHash）。
-   * 流程：prepareDeleteKey（cancelByKey + 关闭 handle + emit key.deleting）->
-   * 按 plugin 注册的 storage 列表逐个 deleteDatabase 全部成功 ->
-   * vault.deleteKeyMaterial（仅删私钥材料，不发事件）-> emit key.deleted。
-   * 设计缘由：namespace DB 删除失败或 blocked 时拒绝继续删除 Vault 私钥，
-   * 否则会留下归属丢失的业务数据。
+   *
+   * 硬切换 002：删除第一步必须是 `vault.verifyPassword(password)`，
+   * 通过后再执行清理主流程：
+   *   verifyPassword -> prepareDeleteKey（cancelByKey + 关闭 handle +
+   *   emit key.deleting）-> 按 plugin 注册的 storage 列表逐个
+   *   deleteDatabase 全部成功 -> vault.deleteKeyMaterial（仅删私钥
+   *   材料，不发事件）-> emit key.deleted -> 剩余 0 把 key 时调用
+   *   `vault.finalizeEmptyVaultAfterLastKeyDeletion()` 把 Vault 收敛
+   *   回 `uninitialized`，否则按 active fallback 选下一把。
+   *
+   * 设计缘由：
+   *   - 密码作为平台删除 API 的一部分，而不是某个页面的私有约定；
+   *     这样命令面板 / 快捷操作 / 批处理等未来入口都会被同一套
+   *     删除授权语义约束住。
+   *   - 密码错误时必须**完全不开始**——不调 prepareDeleteKey、不
+   *     emit `key.deleting`、不取消 background 任务、不动 namespace
+   *     DB / 私钥材料。错误信息使用英文（`Invalid password`）。
+   *   - namespace DB 删除失败或 blocked 时拒绝继续删除 Vault 私钥，
+   *     否则会留下归属丢失的业务数据；密码正确也不破例。
+   *
    * 约束：仅允许 `identityStatus === "ready"` 的 key 通过；传 failed key
    * 的 hash 会抛 "Key not found"。要清理 failed key 必须改走
    * deleteKeyById(keyId)。
    */
-  deleteKey(publicKeyHash: string): Promise<void>;
+  deleteKey(input: { publicKeyHash: string; password: string }): Promise<void>;
 
   /**
    * 按 keyId 删除一个 key（管理入口）。
+   *
+   * 硬切换 002：与 `deleteKey` 一样，第一步必须是 `vault.verifyPassword
+   * (password)`；通过后再走 namespace 清理 + 私钥删除 + active fallback /
+   * empty-vault finalize 主流程。
+   *
    * 设计缘由：硬切换 008 收尾——failed key 仍可能有 publicKeyHash（vault
    * 不在 putKeyIdentityFailed 时清空 identity 字段），deleteKey(hash) 又
    * 拒绝 failed，因此 UI 管理页必须走 keyId 路径。本方法覆盖四种情况：
@@ -143,9 +163,11 @@ export interface KeyspaceService {
    *   - ready / failed + 无 hash：仅删私钥材料 + emit key.deleted（payload
    *     不带 publicKeyHash，因为没有 namespace DB 可删）。
    *   - 不存在的 keyId：抛 "Key not found"。
-   * active fallback：删的是 active key 时切到下一把 ready key。
+   * active fallback：删的是 active key 时切到下一把 ready key；删空最后
+   * 一把 key 时调 `vault.finalizeEmptyVaultAfterLastKeyDeletion()` 让
+   * Vault 最终状态收敛到 `uninitialized`（不再仅 fallback 到 `all`）。
    */
-  deleteKeyById(keyId: string): Promise<void>;
+  deleteKeyById(input: { keyId: string; password: string }): Promise<void>;
 
   /**
    * 由 background 插件在装载时调用：把 background service 注入 keyspace，

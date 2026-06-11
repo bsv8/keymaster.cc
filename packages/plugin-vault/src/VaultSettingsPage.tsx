@@ -118,10 +118,15 @@ export function VaultSettingsPage() {
     return vault.exportPrivateKey({ keyId: exporting.keyId, password });
   }
 
-  async function handleDelete() {
+  async function handleDelete(password: string) {
     if (!deleting) return;
     try {
-      await keyspace.deleteKeyById(deleting.keyId);
+      // 硬切换 002：删除入口必须带锁屏密码；service 层负责校验真伪、
+      // 决定是否触发"空 Vault 收尾"。页面只透传 modal 收集的密码，
+      // **不**在这里多调一次 vault.verifyPassword（会让授权语义出现
+      // 两个真值来源），也**不**在这里判断"删完是否要跳欢迎页"——
+      // 真正的状态源是 vault.status()，由 App 自然切回 LockedShell。
+      await keyspace.deleteKeyById({ keyId: deleting.keyId, password });
       await refresh();
     } catch (err) {
       setError(
@@ -129,6 +134,9 @@ export function VaultSettingsPage() {
           ? err.message
           : t("vault.settings.err.delete", { defaultValue: "删除失败" })
       );
+      // 重新抛出让 modal 的 try/catch 捕获——modal 看到抛错才会保持
+      // final step 打开、把错误展示给用户继续重试。
+      throw err;
     }
   }
 
@@ -504,7 +512,6 @@ export function VaultSettingsPage() {
           open={Boolean(deleting)}
           keyLabel={deleting.label}
           keyFingerprint={deleting.fingerprint}
-          confirmText={deleting.fingerprint || deleting.label || deleting.keyId}
           onExportBackup={
             () => {
               setExporting(deleting);

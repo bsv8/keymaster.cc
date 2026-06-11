@@ -237,6 +237,10 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    * 掉 failed key，但 deleteKeyById 允许 failed+hash 也走这里——本函数
    * 不再做 status 检查，只负责按 (keyId, publicKeyHash) 把数据清干净。
    *
+   * 硬切换 002：本函数假设密码校验**已经**在 deleteKey / deleteKeyById
+   * 入口完成，自己不再重复校验；这样 verify 失败时连 prepareDeleteKey
+   * 都不会被调到，符合"密码错误时完全不开始删除"的硬切换语义。
+   *
    * 这是 createKeyspaceService 内部的闭包函数，**不**挂在 service 对象上，
    * 因此不会随 `keyspace.service` capability 暴露给插件作者；插件只能走
    * deleteKey / deleteKeyById 这两个 public 入口。
@@ -270,7 +274,26 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     }
     // 4) 通知业务插件 key 已删除（仅此处发一次，vault.deleteKeyMaterial 不再发）。
     deps.messageBus.publish("key.deleted", { publicKeyHash, keyId });
-    // 5) active fallback：删的是 active key 时切到下一把；非 active 不动。
+    // 5) 收尾：剩余 0 把 key 时走 vault.finalizeEmptyVaultAfterLastKeyDeletion
+    //    把 Vault 收回 uninitialized；否则按 active fallback 处理。
+    //
+    // 硬切换 002 设计要点：
+    //   - "是否删空"以 Vault 实际剩余 key 数量为准（包含 failed /
+    //     uninitialized / no-hash key），不能用 listActiveCandidates
+    //     的 ready key 数量，否则会在"还有 failed key"时错误地把
+    //     Vault 销毁，丢失用户数据。
+    //   - 仍有 key 时：删的是 active key 走 autoPickActive 选下一把
+    //     ready；没有 ready 但有其它残留 key 时落到 all，Vault 保持
+    //     unlocked。
+    //   - finalizeEmptyVaultAfterLastKeyDeletion 失败必须冒泡：UI
+    //     不能在"meta 还在"的异常残留态显示成功（施工单情况 4）。
+    //     `key.deleted` 已经发出，那是真的——但 Vault 收尾失败要让
+    //     调用方知道。
+    const remainingAll = await deps.vault.listKeys();
+    if (remainingAll.length === 0) {
+      await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
+      return;
+    }
     if (active.mode === "single" && active.activePublicKeyHash === publicKeyHash) {
       const next = await autoPickActive();
       closeActiveNamespace(publicKeyHash);
@@ -399,37 +422,51 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       }
       deps.messageBus.publish("key.deleting", { publicKeyHash });
     },
-    async deleteKey(publicKeyHash) {
+    async deleteKey(input) {
+      // 硬切换 002：删除主流程**第一步**必须是 vault.verifyPassword。
+      // 密码错误时直接抛 Invalid password，**完全不开始**删除——不调
+      // prepareDeleteKey、不取消 background、不动 namespace DB / 私钥。
+      await deps.vault.verifyPassword(input.password);
       // 严格只允许 ready key 走 publicKeyHash 主路径。设计缘由：
       // deleteKey(publicKeyHash) 是平台身份查找的"已就绪"入口；如果
       // 调用方传一个 identityStatus="failed" 但仍有 hash 的 key，应改走
       // deleteKeyById(keyId) 走管理入口。
       const ready = await listActiveCandidates();
-      const target = ready.find((k) => k.publicKeyHash === publicKeyHash);
+      const target = ready.find((k) => k.publicKeyHash === input.publicKeyHash);
       if (!target) {
         throw new Error("Key not found");
       }
       // 委托给 deleteKeyRecord：单一删除路径，避免重复实现。
-      return deleteKeyRecord({ keyId: target.keyId, publicKeyHash });
+      return deleteKeyRecord({ keyId: target.keyId, publicKeyHash: input.publicKeyHash });
     },
-    async deleteKeyById(keyId) {
+    async deleteKeyById(input) {
+      // 硬切换 002：管理入口的密码校验同样收口在 service 层；UI 不能
+      // 在外面"先校验、再删"——那会让密码授权语义散落在每个页面。
+      await deps.vault.verifyPassword(input.password);
       // 管理入口：允许 ready / failed / 无 hash 的 key 走同一条路径。
       // 设计缘由：硬切换 008 收尾——failed key 也可能有 publicKeyHash
       // （vaultDb.putKeyIdentityFailed 只改 status、不动 identity 字段），
       // 因此 deleteKeyById 必须能处理 failed+hash 的情况，走完整 namespace
       // 清理（cancelByKey + 删 namespace DB + 删私钥材料）。
-      const ref = await deps.vault.getKey(keyId);
+      const ref = await deps.vault.getKey(input.keyId);
       if (!ref) {
         throw new Error("Key not found");
       }
       if (ref.publicKeyHash) {
         // 有 hash：走完整 namespace 清理路径——不依赖 listActiveCandidates。
-        return deleteKeyRecord({ keyId, publicKeyHash: ref.publicKeyHash });
+        return deleteKeyRecord({ keyId: input.keyId, publicKeyHash: ref.publicKeyHash });
       }
       // 无 hash：没有 namespace DB 可删，只删私钥材料。
-      await deps.vault.deleteKeyMaterial(keyId);
+      await deps.vault.deleteKeyMaterial(input.keyId);
       // keyspace 统一发一次 key.deleted（payload 不带 publicKeyHash）。
-      deps.messageBus.publish("key.deleted", { keyId });
+      deps.messageBus.publish("key.deleted", { keyId: input.keyId });
+      // 硬切换 002：剩余 0 把 key 时同样走 finalize empty vault 收尾；
+      // 否则继续保留 active fallback（无 hash key 天然不可能是 active）。
+      const remaining = await deps.vault.listKeys();
+      if (remaining.length === 0) {
+        await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
+        return;
+      }
       // active fallback：失败 key 不可能成为 active（没有 hash）；保险清理。
       if (active.mode === "single" && !active.activePublicKeyHash) {
         setActiveInternal({ mode: "all" });

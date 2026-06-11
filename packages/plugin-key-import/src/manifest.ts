@@ -3,6 +3,12 @@
 // 具体格式由 importer-* 插件通过 importer.registry 接入。
 //
 // 硬切换 003：route / menu / breadcrumb 走 I18nText。
+//
+// 硬切换 010：/import 页面**只**服务"已解锁态导入更多 key"，不再承担
+// 首启导入第一把 key 的入口职责。首启导入走 LockedShell 里的首启导入
+// 向导，调 `vault.createVaultWithImportedKey` 一次性建 Vault + 落首 Key
+// + 切 active。因此 menu 的 visibleWhen 必须是 `({ unlocked }) => unlocked`
+// （已具备）；不允许任何路径在 uninitialized 状态下 push 到 /import。
 
 import type {
   BreadcrumbProvider,
@@ -51,7 +57,11 @@ const keyImportResources: I18nPluginResources = {
       "keyImport.page.err.save": "Save failed",
       "keyImport.page.filePicked": "Selected: ",
       "keyImport.picker.empty": "No import formats available.",
-      "keyImport.page.label.supports": "Supports: "
+      "keyImport.page.label.supports": "Supports: ",
+      // 硬切换 010：/import 页面在 vault 未解锁时展示的引导文案，提示
+      // 用户先去 LockedShell 走首启导入向导或先解锁 Vault。
+      "keyImport.page.lockedHint":
+        "This page is for importing more keys into an unlocked wallet. Unlock the Vault first, or return to the welcome page to use the first-time import wizard for the first key."
     },
     "zh-CN": {
       "keyImport.route.title": "导入私钥",
@@ -84,7 +94,9 @@ const keyImportResources: I18nPluginResources = {
       "keyImport.page.err.save": "保存失败",
       "keyImport.page.filePicked": "已选择：",
       "keyImport.picker.empty": "没有可用的导入器。",
-      "keyImport.page.label.supports": "支持："
+      "keyImport.page.label.supports": "支持：",
+      "keyImport.page.lockedHint":
+        "此页面仅用于在已解锁的钱包中导入更多 key。请先解锁 Vault，或返回欢迎页通过首启导入向导新建钱包并导入第一把 key。"
     }
   }
 };

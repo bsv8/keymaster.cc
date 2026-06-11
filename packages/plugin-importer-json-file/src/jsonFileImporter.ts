@@ -62,6 +62,10 @@ export const jsonFileImporter: KeyImporter = {
   name: { key: "importerJsonFile.name", fallback: "JSON File" },
   description: { key: "importerJsonFile.description", fallback: "Extract private keys from a wallet JSON export; supports bsv8 encrypted envelopes." },
   supports: ["file"],
+  // 是否需要"导入源密码"取决于输入本身——明文 JSON 走 dig(parsed) 不需要，
+  // bsv8 envelope 才需要。**不**在 importer 级静态声明"需要密码"，
+  // 让调用方通过 parse() 的实际行为判断（失败时抛
+  // "Password is required for encrypted key file"）。
   async parse(input: KeyImportInput): Promise<KeyImportResult[]> {
     if (input.kind !== "file") throw new Error("JSON file importer only supports file input");
     let parsed: unknown;

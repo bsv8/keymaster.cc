@@ -230,10 +230,103 @@ export interface VaultService {
     label?: string;
     capabilities?: string[];
   }): Promise<KeyRef>;
+  /**
+   * 首启"导入私钥"高层能力：先校验当前 `status === "uninitialized"`，再
+   * **一次性**写 `vault_meta` + 把导入私钥加密落库 + 设为 active + 切到
+   * `unlocked`。
+   *
+   * 设计缘由（硬切换 010）：
+   *   - 首启导入是一个完整业务动作，不是"创建空 Vault" + "保存首把导入
+   *     Key"两个可分离产品步骤的拼装。把事务边界收敛在 Vault 内部，
+   *     页面层不需要关心：
+   *       * meta 是否已经写入；
+   *       * 首把导入 key 是否已经落库；
+   *       * active 是否已经切换；
+   *       * 失败时是否要回滚到 `uninitialized`。
+   *   - 这条路径是首启导入**唯一**的高层入口；不允许再让首启导入先调
+   *     `createVault()` 再走 `/import` —— 那会制造"有锁屏密码但 0 key"
+   *     的空 Vault 状态。
+   *   - 复用现有 `importPrivateKey` 路径（`persistPrivateKey` 内部函数）：
+   *     身份派生、查重、加密落库、active 切换、`key.created` 事件全部一致；
+   *     不允许在本方法里复制私钥持久化逻辑。
+   *   - 失败处理：
+   *       * `createVault` / meta 写入失败 —— 抛原错，状态保持
+   *         `uninitialized`；
+   *       * 首把导入 key **未落库**（解析失败、重复 publicKeyHash、
+   *         加密失败、DB 写入失败等） —— 内部回滚 meta、清空内存会话、
+   *         状态回到 `uninitialized`，再把原错抛给上层；
+   *       * 首把导入 key **已落库**但 active 切换失败 —— 抛
+   *         `KeyPersistedButActivationFailedError`，**不**回滚已落库 key
+   *         （与 `importPrivateKey` 现有语义保持一致），UI 进入"已保存
+   *         但未自动 active"的成功/警告态。
+   *   - 仅当 `status === "uninitialized"` 允许调用；locked / unlocked /
+   *     booting 状态必须 fail closed（已有 Vault 时导入更多 key 走的是
+   *     已解锁态的 `importPrivateKey`，不是本方法）。
+   *   - 不允许本方法被首启导入以外的流程使用；首启"新建钱包"仍走
+   *     `createVaultWithInitialKey`。
+   *
+   * 错误信息使用英文。
+   */
+  createVaultWithImportedKey(input: {
+    /** 本机 Vault 锁屏密码——与导入源密码是两个独立字段。 */
+    vaultPassword: string;
+    /** 导入解析成功后交给 Vault 落库的私钥材料。 */
+    key: {
+      label: string;
+      material: PrivateKeyMaterial;
+      /** importer 推断出的格式，例如 "wif-mainnet"、"bsv8-key-envelope"。 */
+      format: string;
+      capabilities: string[];
+      source?: string;
+    };
+  }): Promise<KeyRef>;
   /** 用密码解锁，会解密所有 key 索引（不解密私钥本身）。 */
   unlock(password: string): Promise<void>;
   /** 锁定，丢弃内存中的明文。 */
   lock(): Promise<void>;
+
+  /**
+   * 仅校验锁屏密码是否正确，不改变 Vault 状态（硬切换 002 删除授权）。
+   *
+   * 设计缘由：
+   *   - 删除 Key 这类危险操作必须要求用户**重新**输入锁屏密码，不能把
+   *     "之前已经 unlock"视为永久授权；本方法是收敛密码真值校验的
+   *     平台入口，由 Vault 自己拿 verifier 比对，不能让业务插件复制
+   *     一套密码校验逻辑。
+   *   - 与 `unlock(password)` 严格区分：
+   *       * `unlock` 会派生 masterKey、跑 identity backfill、通知
+   *         keyspace、emit `vault.unlocked`，创建一段新会话；
+   *       * `verifyPassword` **只**比对 verifier，不会改变 `masterKey
+   *         / masterSalt / keyCache / status`，不会重跑 backfill，
+   *         不会发任何事件。
+   *   - 调用前 Vault 不要求处于特定状态：locked / unlocked 都允许，
+   *     uninitialized / booting 必须 fail closed（没有 verifier 可校验）。
+   *   - 校验失败抛英文错误，例如 `Invalid password`；与 `unlock` 错误
+   *     文案一致以便统一 i18n 处理。
+   */
+  verifyPassword(password: string): Promise<void>;
+
+  /**
+   * 删空最后一把 Key 后的"空 Vault 收尾"——把 Vault 状态机最终收敛到
+   * `uninitialized`（硬切换 002）。
+   *
+   * 设计缘由：
+   *   - "删完最后一把 Key 后应该回到首启欢迎页"是平台级生命周期，
+   *     不能由 keyspace 越层动 `vaultDb.deleteMeta()`，也不能让 UI 凭
+   *     "本地列表 length === 0"自己跳转；状态源必须是 Vault。
+   *   - 仅允许在"Vault 仍存在但 key 列表已空"的收尾场景调用；否则
+   *     fail closed。具体来说：
+   *       * 进入时必须**再次**确认 `vault_keys` 为空（哪怕 keyspace
+   *         判断剩余 0；fail-closed 防御）；
+   *       * 不空则抛错，例如 `Vault still has keys`，绝不能继续删
+   *         meta 把用户其它 key 弄成"无 meta、有 key"的脏状态。
+   *   - 内部必须：清理内存会话（masterKey / masterSalt / keyCache）
+   *     -> 删除 `vault_meta` -> 通知现有依赖 `vault.locked` 的清理
+   *     链路（业务插件需要结束 unlocked 会话内存）-> 最终
+   *     `setStatus("uninitialized")`。
+   *   - 错误信息使用英文。
+   */
+  finalizeEmptyVaultAfterLastKeyDeletion(): Promise<void>;
 
   /** 列出所有 key 元数据。 */
   listKeys(): Promise<KeyRef[]>;

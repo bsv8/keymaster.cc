@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./ImporterPicker": "./src/ImporterPicker.tsx",
+    "./importFileSniff": "./src/importFileSniff.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
