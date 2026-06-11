@@ -20,6 +20,7 @@ import type {
 import { Breadcrumbs } from "./Breadcrumbs.js";
 import { RouteRenderer } from "./RouteRenderer.js";
 import { Sidebar } from "./Sidebar.js";
+import { SiteFooter } from "./SiteFooter.js";
 import { Topbar } from "./Topbar.js";
 
 export function AppShell() {
@@ -82,6 +83,7 @@ export function AppShell() {
           <RouteRenderer />
         </main>
       </div>
+      <SiteFooter variant="app" />
     </div>
   );
 }

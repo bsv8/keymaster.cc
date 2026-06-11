@@ -14,6 +14,7 @@
 
 import type { ReactNode } from "react";
 import { OnboardingHeader } from "./OnboardingHeader.js";
+import { SiteFooter } from "./SiteFooter.js";
 
 export interface OnboardingShellProps {
   children: ReactNode;
@@ -44,6 +45,7 @@ export function OnboardingShell({
           {children}
         </div>
       </main>
+      <SiteFooter variant="onboarding" />
     </div>
   );
 }
