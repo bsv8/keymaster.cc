@@ -13,6 +13,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.topbar.openMenu": "Open menu",
       "shell.topbar.statusLabel": "Status: ",
       "shell.topbar.language.label": "Switch language",
+      "shell.locked.welcome.title": "Welcome to Keymaster",
       "shell.locked.welcome.subtitle": "Welcome. Pick a flow to start:",
       "shell.locked.card.newTitle": "New wallet",
       "shell.locked.card.newBody":
@@ -73,6 +74,40 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.import.wizard.vaultPasswordOnly": "Local Vault password",
       "shell.import.wizard.placeholder.vaultPassword": "At least 8 characters",
       "shell.import.wizard.confirm": "Create Vault and import",
+      // 硬切换 011：第 4 步复用导入源密码时显示的说明文案；UI 隐藏
+      // 密码输入框并把密码以"已应用"形式提示用户。
+      "shell.import.wizard.reuseNotice":
+        "Reusing the import-source password you entered in step 2. The Vault will be created and unlocked with this password.",
+      "shell.import.wizard.reuseLabel": "Password to use",
+      "shell.import.wizard.reuseOrigin":
+        "From step 2 (import-source password, kept in this wizard's memory only).",
+      "shell.import.wizard.newPasswordTitle": "Set a new local Vault password",
+      "shell.import.wizard.newPasswordDesc":
+        "This password replaces the import-source password. It is stored only on this device.",
+      // 硬切换 011：onboarding 共享 header 文案。welcome / 新建钱包 /
+      // 解锁 / 首启导入各 step 都使用同一套文案。
+      "shell.onboarding.brandSubtitle": "Local key vault",
+      "shell.onboarding.securityNote":
+        "Your keys never leave the browser. The password is never uploaded.",
+      "shell.onboarding.theme.toggle": "Switch theme",
+      "shell.onboarding.theme.auto": "Auto",
+      "shell.onboarding.theme.autoHint": "Follow the system",
+      "shell.onboarding.theme.light": "Light",
+      "shell.onboarding.theme.lightHint": "Light theme",
+      "shell.onboarding.theme.dark": "Dark",
+      "shell.onboarding.theme.darkHint": "Dark theme",
+      "shell.onboarding.theme.autoActive": "Auto (currently {theme})",
+      // 硬切换 011：step progress 文案（四步向导）。
+      "shell.onboarding.step.pickImporter": "Pick a format",
+      "shell.onboarding.step.input": "Provide material",
+      "shell.onboarding.step.confirmKey": "Confirm result",
+      "shell.onboarding.step.setPassword": "Set lock password",
+      "shell.onboarding.step.state.current": "Current",
+      "shell.onboarding.step.state.done": "Done",
+      "shell.onboarding.step.state.upcoming": "Upcoming",
+      // 硬切换 011 修复：步骤进度 `<nav>` 的 aria-label 也必须 i18n，
+      // 辅助技术读到的导航名才能跟随语言切换。
+      "shell.onboarding.step.navLabel": "Import wizard steps",
       "common.action.back": "Back",
       "common.action.next": "Next"
     },
@@ -80,6 +115,7 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.topbar.openMenu": "打开菜单",
       "shell.topbar.statusLabel": "状态：",
       "shell.topbar.language.label": "切换语言",
+      "shell.locked.welcome.title": "欢迎使用 Keymaster",
       "shell.locked.welcome.subtitle": "欢迎。选择你要开始的流程：",
       "shell.locked.card.newTitle": "新建钱包",
       "shell.locked.card.newBody": "设置一个本地密码，并立即生成你的第一把 Key。之后可以继续导入其他私钥。",
@@ -121,6 +157,31 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.import.wizard.vaultPasswordOnly": "本机系统锁屏密码",
       "shell.import.wizard.placeholder.vaultPassword": "至少 8 位",
       "shell.import.wizard.confirm": "创建 Vault 并导入",
+      "shell.import.wizard.reuseNotice":
+        "将复用第 2 步已输入的导入源密码，Vault 将使用该密码创建并解锁。",
+      "shell.import.wizard.reuseLabel": "将使用的密码",
+      "shell.import.wizard.reuseOrigin": "来源：第 2 步（导入源密码，仅保存在本次向导内存中）。",
+      "shell.import.wizard.newPasswordTitle": "设置新的本机系统锁屏密码",
+      "shell.import.wizard.newPasswordDesc":
+        "此密码将取代导入源密码，仅保存在本机设备。",
+      "shell.onboarding.brandSubtitle": "本地私钥保险箱",
+      "shell.onboarding.securityNote": "私钥不会离开浏览器，密码不会上传到任何服务器。",
+      "shell.onboarding.theme.toggle": "切换主题",
+      "shell.onboarding.theme.auto": "跟随系统",
+      "shell.onboarding.theme.autoHint": "跟随系统当前设置",
+      "shell.onboarding.theme.light": "浅色",
+      "shell.onboarding.theme.lightHint": "浅色主题",
+      "shell.onboarding.theme.dark": "深色",
+      "shell.onboarding.theme.darkHint": "深色主题",
+      "shell.onboarding.theme.autoActive": "跟随系统 (当前 {theme})",
+      "shell.onboarding.step.pickImporter": "选择方式",
+      "shell.onboarding.step.input": "输入材料",
+      "shell.onboarding.step.confirmKey": "确认结果",
+      "shell.onboarding.step.setPassword": "设置锁屏密码",
+      "shell.onboarding.step.state.current": "当前",
+      "shell.onboarding.step.state.done": "已完成",
+      "shell.onboarding.step.state.upcoming": "未开始",
+      "shell.onboarding.step.navLabel": "首启导入向导步骤",
       "common.action.back": "返回",
       "common.action.next": "下一步"
     }

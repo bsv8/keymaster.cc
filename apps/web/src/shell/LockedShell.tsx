@@ -1,26 +1,40 @@
 // apps/web/src/shell/LockedShell.tsx
-// 空白/锁定状态界面：
-//  - uninitialized（首次启动）：显示两个入口卡片："新建钱包" / "导入私钥"。
-//    "新建钱包" 走 vault.createVaultWithInitialKey()：一次创建 Vault + 落首 Key；
-//    "导入私钥" 进入首启导入向导（FirstTimeImportWizard），走
-//    vault.createVaultWithImportedKey()：先解析导入材料，再一次性建 Vault +
-//    落首把导入 Key + 切 active。
-//  - locked（已有 vault）：只显示解锁入口 —— 不再提供"已有私钥？导入"按钮。
-//    原因：locked 状态下 /import 无法保存私钥，给用户一条不可完成的路径毫无意义。
-// 设计缘由：让空白状态首页就承担"选择流程"的责任，而不是一个纯密码表单。
+// 空白/锁定状态界面（硬切换 011：onboarding 共享壳层）：
+//   - 全部 4 种模式（welcome / new-wallet-form / first-time-import /
+//     unlock-form）必须使用 OnboardingShell 作为统一壳层，共享
+//     OnboardingHeader（品牌 / 安全说明 / 主题切换 / 语言切换）。
+//   - uninitialized（首次启动）：显示两个入口卡片："新建钱包" /
+//     "导入私钥"。
+//     * "新建钱包" 走 vault.createVaultWithInitialKey()：一次创建
+//       Vault + 落首 Key；
+//     * "导入私钥" 进入首启导入向导（FirstTimeImportWizard），走
+//       vault.createVaultWithImportedKey()。
+//   - locked（已有 vault）：只显示解锁入口 —— 不再提供"已有私钥？
+//     导入"按钮。原因：locked 状态下 /import 无法保存私钥，给用户
+//     一条不可完成的路径毫无意义。
 //
-// 硬切换 003：所有展示文案走 i18n。表单校验错误信息也走 t()，缺 key 时回退到 fallback。
-// password 相关错误信息从原本的"密码至少 8 位"等走 shell.locked.* 资源。
+// 设计缘由：让空白状态首页就承担"选择流程"的责任，而不是一个纯
+// 密码表单；同时让首启阶段的视觉与"已解锁态"完全分离——这是
+// 两种不同的 IA。
 //
-// 硬切换 009：首启"新建钱包"必须改走 createVaultWithInitialKey；该高层能力
-// 在 Vault 内部事务化（meta + 首 Key + active 切换），失败时统一回滚到
-// uninitialized。本页面只负责把"已落库但未自动激活"的可恢复状态以 notice
-// 形式带到下一屏，不要展示成"完全失败"。
+// 硬切换 003：所有展示文案走 i18n。表单校验错误信息也走 t()，缺
+// key 时回退到 fallback。
 //
-// 硬切换 010：首启"导入私钥"必须改走首启导入向导（FirstTimeImportWizard），
-// 该向导走 vault.createVaultWithImportedKey()。**不再**让本页面要求用户先
-// 设密码、createVault、再跳 /import——那是会产生"有锁屏密码但 0 key"空 Vault
-// 的旧路径，已被本施工单硬切废弃。
+// 硬切换 009：首启"新建钱包"必须改走 createVaultWithInitialKey；该
+// 高层能力在 Vault 内部事务化（meta + 首 Key + active 切换），失败
+// 时统一回滚到 uninitialized。本页面只负责把"已落库但未自动激活"
+// 的可恢复状态以 notice 形式带到下一屏，不要展示成"完全失败"。
+//
+// 硬切换 010：首启"导入私钥"必须改走首启导入向导
+// （FirstTimeImportWizard），该向导走 vault.createVaultWithImportedKey()。
+// **不再**让本页面要求用户先设密码、createVault、再跳 /import——
+// 那是会产生"有锁屏密码但 0 key"空 Vault 的旧路径，已被本施工单
+// 硬切废弃。
+//
+// 硬切换 011：把锁屏态 shell 收敛成 OnboardingShell；welcome / new-
+// wallet-form / first-time-import / unlock-form 都使用同一套 header
+// 容器；OnboardingHeader 是锁屏态系统级能力，与 unlocked topbar /
+// sidebar 严格分离。
 
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
@@ -30,6 +44,7 @@ import {
   type VaultService
 } from "@keymaster/contracts";
 import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
+import { OnboardingShell } from "./OnboardingShell.js";
 
 type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
 
@@ -75,6 +90,13 @@ export function LockedShell() {
   function chooseFirstTimeImport() {
     setError(null);
     setMode("first-time-import");
+  }
+
+  function backToWelcome() {
+    setPassword("");
+    setConfirm("");
+    setError(null);
+    setMode("welcome");
   }
 
   async function createNewWallet() {
@@ -137,110 +159,134 @@ export function LockedShell() {
   // ---------- 空白系统：欢迎页 ----------
   if (mode === "welcome") {
     return (
-      <div className="locked-shell locked-shell--welcome">
-        <header className="locked-shell__hero">
-          <h1>Keymaster</h1>
-          <p>{t("shell.locked.welcome.subtitle", { defaultValue: "欢迎。选择你要开始的流程：" })}</p>
-        </header>
-        <div className="locked-shell__cards">
-          <button
-            type="button"
-            className="locked-shell__card"
-            onClick={chooseNewWallet}
-            data-intent="new"
-          >
-            <h2>{t("shell.locked.card.newTitle", { defaultValue: "新建钱包" })}</h2>
-            <p>{t("shell.locked.card.newBody", { defaultValue: "设置一个本地密码，并立即生成你的第一把 Key。之后可以继续导入其他私钥。" })}</p>
-            <span className="locked-shell__card-cta">{t("shell.locked.card.newCta", { defaultValue: "设置密码 →" })}</span>
-          </button>
-          <button
-            type="button"
-            className="locked-shell__card"
-            onClick={chooseFirstTimeImport}
-            data-intent="import"
-          >
-            <h2>{t("shell.locked.card.importTitle", { defaultValue: "导入私钥" })}</h2>
-            <p>{t("shell.locked.card.importBody", { defaultValue: "已经有 WIF / Hex / JSON 文件私钥？先解析导入材料，再设置本机系统锁屏密码一次性创建 Vault。" })}</p>
-            <span className="locked-shell__card-cta">{t("shell.locked.card.importCta", { defaultValue: "开始导入 →" })}</span>
-          </button>
+      <OnboardingShell width="wide">
+        <div className="locked-shell locked-shell--welcome">
+          <header className="locked-shell__hero">
+            <h1>{t("shell.locked.welcome.title", { defaultValue: "欢迎使用 Keymaster" })}</h1>
+            <p>
+              {t("shell.locked.welcome.subtitle", { defaultValue: "欢迎。选择你要开始的流程：" })}
+            </p>
+          </header>
+          <div className="locked-shell__cards">
+            <button
+              type="button"
+              className="locked-shell__card"
+              onClick={chooseNewWallet}
+              data-intent="new"
+            >
+              <h2>{t("shell.locked.card.newTitle", { defaultValue: "新建钱包" })}</h2>
+              <p>
+                {t("shell.locked.card.newBody", {
+                  defaultValue:
+                    "设置一个本地密码，并立即生成你的第一把 Key。之后可以继续导入其他私钥。"
+                })}
+              </p>
+              <span className="locked-shell__card-cta">
+                {t("shell.locked.card.newCta", { defaultValue: "设置密码 →" })}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="locked-shell__card"
+              onClick={chooseFirstTimeImport}
+              data-intent="import"
+            >
+              <h2>{t("shell.locked.card.importTitle", { defaultValue: "导入私钥" })}</h2>
+              <p>
+                {t("shell.locked.card.importBody", {
+                  defaultValue:
+                    "已经有 WIF / Hex / JSON 文件私钥？先解析导入材料，再设置本机系统锁屏密码一次性创建 Vault。"
+                })}
+              </p>
+              <span className="locked-shell__card-cta">
+                {t("shell.locked.card.importCta", { defaultValue: "开始导入 →" })}
+              </span>
+            </button>
+          </div>
+          <EmptyState
+            title={t("shell.locked.notice.title", { defaultValue: "私钥不会离开你的浏览器" })}
+            description={t("shell.locked.notice.body", { defaultValue: "所有私钥在本地用 WebCrypto AES-GCM 加密，密码不会上传到任何服务器。" })}
+          />
         </div>
-        <EmptyState
-          title={t("shell.locked.notice.title", { defaultValue: "私钥不会离开你的浏览器" })}
-          description={t("shell.locked.notice.body", { defaultValue: "所有私钥在本地用 WebCrypto AES-GCM 加密，密码不会上传到任何服务器。" })}
-        />
-      </div>
+      </OnboardingShell>
     );
   }
 
   // ---------- 新建钱包：设置密码 ----------
   if (mode === "new-wallet-form") {
     return (
-      <div className="locked-shell">
-        <PageHeader
-          title={t("shell.locked.newWallet", { defaultValue: "新建钱包" })}
-          description={t("shell.locked.newWalletDesc", {
-            defaultValue: "设置一个本地密码。Vault 接下来会生成你的第一把 Key 并自动设为 active。该密码仅保存在本机，用于加密你的私钥。"
-          })}
-        />
-        <TextInput
-          label={t("shell.locked.passwordNew", { defaultValue: "新密码" })}
-          type="password"
-          autoComplete="new-password"
-          value={password}
-          onChange={(e) => setPassword(e.currentTarget.value)}
-        />
-        <TextInput
-          label={t("shell.locked.passwordConfirm", { defaultValue: "确认密码" })}
-          type="password"
-          autoComplete="new-password"
-          value={confirm}
-          onChange={(e) => setConfirm(e.currentTarget.value)}
-          error={error ?? undefined}
-        />
-        <div className="locked-shell__actions">
-          <Button onClick={createNewWallet} loading={busy} disabled={!password || !confirm}>
-            {t("shell.locked.create", { defaultValue: "创建" })}
-          </Button>
-          <Button variant="ghost" onClick={() => setMode("welcome")} disabled={busy}>
-            {t("common.action.back", { defaultValue: "返回" })}
-          </Button>
+      <OnboardingShell width="narrow">
+        <div className="locked-shell locked-shell--form">
+          <PageHeader
+            title={t("shell.locked.newWallet", { defaultValue: "新建钱包" })}
+            description={t("shell.locked.newWalletDesc", {
+              defaultValue:
+                "设置一个本地密码。Vault 接下来会生成你的第一把 Key 并自动设为 active。该密码仅保存在本机，用于加密你的私钥。"
+            })}
+          />
+          <TextInput
+            label={t("shell.locked.passwordNew", { defaultValue: "新密码" })}
+            type="password"
+            autoComplete="new-password"
+            value={password}
+            onChange={(e) => setPassword(e.currentTarget.value)}
+          />
+          <TextInput
+            label={t("shell.locked.passwordConfirm", { defaultValue: "确认密码" })}
+            type="password"
+            autoComplete="new-password"
+            value={confirm}
+            onChange={(e) => setConfirm(e.currentTarget.value)}
+            error={error ?? undefined}
+          />
+          <div className="locked-shell__actions">
+            <Button onClick={createNewWallet} loading={busy} disabled={!password || !confirm}>
+              {t("shell.locked.create", { defaultValue: "创建" })}
+            </Button>
+            <Button variant="ghost" onClick={backToWelcome} disabled={busy}>
+              {t("common.action.back", { defaultValue: "返回" })}
+            </Button>
+          </div>
         </div>
-      </div>
+      </OnboardingShell>
     );
   }
 
   // ---------- 首启导入：向导 ----------
   if (mode === "first-time-import") {
     return (
-      <FirstTimeImportWizard
-        onCancel={() => {
-          setError(null);
-          setMode("welcome");
-        }}
-      />
+      <OnboardingShell width="wizard">
+        <div className="locked-shell locked-shell--wizard">
+          <FirstTimeImportWizard
+            onCancel={backToWelcome}
+          />
+        </div>
+      </OnboardingShell>
     );
   }
 
   // ---------- 已有 vault：解锁 ----------
   return (
-    <div className="locked-shell">
-      <PageHeader
-        title={t("shell.locked.lockedTitle", { defaultValue: "钱包已锁定" })}
-        description={t("shell.locked.lockedDesc", { defaultValue: "需要先解锁本地 Vault，解锁后可以导入或管理私钥。" })}
-      />
-      <TextInput
-        label={t("shell.locked.password", { defaultValue: "密码" })}
-        type="password"
-        autoComplete="current-password"
-        value={password}
-        onChange={(e) => setPassword(e.currentTarget.value)}
-        error={error ?? undefined}
-      />
-      <div className="locked-shell__actions">
-        <Button onClick={unlock} loading={busy} disabled={!password}>
-          {t("common.action.unlock", { defaultValue: "解锁" })}
-        </Button>
+    <OnboardingShell width="narrow">
+      <div className="locked-shell locked-shell--form">
+        <PageHeader
+          title={t("shell.locked.lockedTitle", { defaultValue: "钱包已锁定" })}
+          description={t("shell.locked.lockedDesc", { defaultValue: "需要先解锁本地 Vault，解锁后可以导入或管理私钥。" })}
+        />
+        <TextInput
+          label={t("shell.locked.password", { defaultValue: "密码" })}
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.currentTarget.value)}
+          error={error ?? undefined}
+        />
+        <div className="locked-shell__actions">
+          <Button onClick={unlock} loading={busy} disabled={!password}>
+            {t("common.action.unlock", { defaultValue: "解锁" })}
+          </Button>
+        </div>
       </div>
-    </div>
+    </OnboardingShell>
   );
 }

@@ -144,38 +144,291 @@ button { font-family: inherit; }
 .app-breadcrumbs__link { background: none; border: 0; color: inherit; cursor: pointer; padding: 0; }
 .app-breadcrumbs__current { color: var(--text); }
 
-.app-booting, .locked-shell { padding: 32px; max-width: 480px; margin: 0 auto; }
+.app-booting, .locked-shell { padding: 0; max-width: none; margin: 0; }
 .locked-shell__actions { display: flex; gap: 8px; margin-top: 12px; }
 .route-not-found { padding: 48px; text-align: center; color: var(--text-dim); }
 
-.locked-shell--welcome { max-width: 720px; }
-.locked-shell__hero { text-align: center; margin-bottom: 24px; }
-.locked-shell__hero h1 { margin: 0 0 8px 0; font-size: 24px; }
-.locked-shell__hero p { color: var(--text-dim); margin: 0; }
+/* 硬切换 011：welcome / 新建钱包 / 解锁 / 首启导入 共享 onboarding 壳层
+ * 视觉主张：
+ *   - 暖色强调（primary = #f7b955）
+ *   - 浅底深字
+ *   - 圆角容器（更大圆角，与 unlocked 区分）
+ *   - 渐变背景（不是纯白空页）
+ *   - 有限阴影
+ *   - 明确色阶：标题 / 正文 / 次要说明 / 风险文案
+ */
+.onboarding-shell {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(circle at 0% 0%, rgba(247, 185, 85, 0.10), transparent 55%),
+    radial-gradient(circle at 100% 100%, rgba(247, 185, 85, 0.08), transparent 60%),
+    var(--bg);
+  color: var(--text);
+}
+.onboarding-shell__main {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding: 32px 20px 48px;
+}
+.onboarding-shell__panel {
+  width: 100%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 28px 28px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.onboarding-shell__panel--narrow { max-width: 480px; }
+.onboarding-shell__panel--wide { max-width: 720px; }
+.onboarding-shell__panel--wizard { max-width: 640px; }
+@media (max-width: 640px) {
+  .onboarding-shell__main { padding: 16px 12px 32px; }
+  .onboarding-shell__panel { padding: 20px 16px 18px; border-radius: 12px; }
+}
+
+/* Onboarding header：品牌 + 安全说明 + 主题/语言切换。
+ * 视觉独立于 unlocked 顶栏：浅底 + 暖色重点 + 大圆角。
+ */
+.onboarding-header {
+  width: 100%;
+  padding: 18px 24px 12px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.6);
+  backdrop-filter: blur(8px);
+}
+[data-theme="dark"] .onboarding-header { background: rgba(15, 17, 21, 0.6); }
+.onboarding-header__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  max-width: 1100px;
+  margin: 0 auto;
+}
+.onboarding-header__brand {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.onboarding-header__brand-mark {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: 0.5px;
+}
+.onboarding-header__brand-subtitle {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.onboarding-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+.onboarding-header__note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px auto 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  max-width: 1100px;
+  width: 100%;
+}
+.onboarding-header__note svg { color: var(--primary); flex-shrink: 0; }
+@media (max-width: 640px) {
+  .onboarding-header { padding: 12px 14px 8px; }
+  .onboarding-header__brand-subtitle { display: none; }
+  .onboarding-header__note { font-size: 11px; }
+}
+
+/* Theme toggle 的 onboarding 变体：触发按钮在 header 中更紧凑。 */
+.theme-toggle--onboarding .theme-toggle__button {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: transparent;
+  border: 1px solid var(--border);
+}
+.theme-toggle--onboarding .theme-toggle__label { max-width: 100px; }
+
+/* Language switch 在 onboarding header 中也是同样的紧凑壳层。 */
+.onboarding-header__actions .language-switch__button {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+/* locked-shell 在 onboarding 壳层内部只负责内容区，不再拥有自己的 padding。 */
+.locked-shell { padding: 0; }
+.locked-shell--welcome { width: 100%; }
+.locked-shell--form { width: 100%; display: flex; flex-direction: column; gap: 12px; }
+.locked-shell--wizard { width: 100%; }
+.locked-shell__hero { text-align: center; margin-bottom: 8px; }
+.locked-shell__hero h1 { margin: 0 0 6px 0; font-size: 22px; }
+.locked-shell__hero p { color: var(--text-dim); margin: 0; font-size: 13px; }
 .locked-shell__cards {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  margin-bottom: 24px;
+  margin-bottom: 8px;
 }
 .locked-shell__card {
   text-align: left;
-  background: var(--surface);
+  background: var(--surface-2);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: 12px;
   padding: 16px;
   cursor: pointer;
   color: var(--text);
   font: inherit;
-  transition: border-color 0.15s, background 0.15s;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
-.locked-shell__card:hover { border-color: var(--primary); background: var(--surface-2); }
-.locked-shell__card h2 { margin: 0 0 8px 0; font-size: 16px; color: var(--primary); }
-.locked-shell__card p { color: var(--text-dim); margin: 0 0 12px 0; font-size: 13px; }
+.locked-shell__card:hover { border-color: var(--primary); background: var(--surface); }
+.locked-shell__card h2 { margin: 0; font-size: 15px; color: var(--primary); }
+.locked-shell__card p { color: var(--text-dim); margin: 0; font-size: 12px; line-height: 1.55; }
 .locked-shell__card-cta { color: var(--primary); font-weight: 600; font-size: 13px; }
 @media (max-width: 560px) {
   .locked-shell__cards { grid-template-columns: 1fr; }
 }
+
+/* ---------- Step progress (硬切换 011) ----------
+ * 视觉上：圆点 + 连线 + 标签；当前步骤高亮、已完成显示勾、未来禁点。
+ */
+.step-progress { width: 100%; margin: 0 0 8px 0; }
+.step-progress__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  position: relative;
+}
+.step-progress__item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  min-width: 0;
+}
+.step-progress__connector {
+  position: absolute;
+  top: 12px;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--border);
+  z-index: 0;
+}
+.step-progress__item--done .step-progress__connector,
+.step-progress__item--current .step-progress__connector { background: var(--primary); }
+.step-progress__node {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--text-dim);
+  cursor: default;
+  width: 100%;
+}
+.step-progress__node:disabled { cursor: not-allowed; }
+button.step-progress__node:not(:disabled) { cursor: pointer; }
+.step-progress__index {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-dim);
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.step-progress__item--current .step-progress__index {
+  background: var(--primary);
+  color: var(--primary-text);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 4px rgba(247, 185, 85, 0.18);
+}
+.step-progress__item--done .step-progress__index {
+  background: var(--primary);
+  color: var(--primary-text);
+  border-color: var(--primary);
+}
+.step-progress__label {
+  font-size: 12px;
+  line-height: 1.3;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.step-progress__item--current .step-progress__label { color: var(--text); font-weight: 600; }
+.step-progress__item--done .step-progress__label { color: var(--text-dim); }
+button.step-progress__node:not(:disabled):hover .step-progress__label { color: var(--primary); }
+@media (max-width: 560px) {
+  .step-progress__list { grid-template-columns: repeat(4, 1fr); gap: 0; }
+  .step-progress__label { font-size: 10px; }
+  .step-progress__index { width: 20px; height: 20px; font-size: 10px; }
+  .step-progress__connector { top: 10px; }
+}
+
+/* ---------- First-time import wizard (硬切换 011) ---------- */
+.first-time-import { display: flex; flex-direction: column; gap: 12px; }
+.first-time-import__picker,
+.first-time-import__input,
+.first-time-import__confirm,
+.first-time-import__password { display: flex; flex-direction: column; gap: 10px; }
+.first-time-import__actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.first-time-import__error { color: var(--danger); font-size: 13px; margin: 0; }
+.first-time-import__reuse-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface-2);
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  margin-bottom: 0;
+}
+.first-time-import__reuse-toggle-label { font-size: 13px; color: var(--text); }
+.first-time-import__reuse-notice {
+  background: rgba(247, 185, 85, 0.10);
+  border: 1px solid var(--primary);
+  border-radius: 10px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.first-time-import__reuse-headline { margin: 0; font-size: 13px; color: var(--text); line-height: 1.5; }
+.first-time-import__reuse-meta { margin: 0; font-size: 12px; color: var(--text-dim); }
+.first-time-import__reuse-label { color: var(--text-dim); }
+.first-time-import__reuse-meta code { font-size: 14px; letter-spacing: 2px; color: var(--primary); }
+.first-time-import__reuse-origin { margin: 0; font-size: 11px; color: var(--text-dim); }
+.first-time-import__new-password-intro { margin: 0; font-size: 13px; color: var(--text-dim); }
 
 /* ---------- Home grid ---------- */
 .home-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
