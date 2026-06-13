@@ -3,7 +3,7 @@
 // 设计缘由：
 //   - 顶栏在 order 90 注册，位于 background.tray (order 100) 左侧。
 //   - 内部通过 keyspace.service 维护 active key；不直接持有 active key 状态。
-//   - 单 key 模式显示 label + fingerprint；all 模式显示"全部 key"。
+//   - 单 key 模式显示 label + 短公钥（publicKeyHex 截断）；all 模式显示"全部 key"。
 //   - 切换 key 时调用 keyspace.setActive；菜单顶部有"全部 key"切换项。
 //   - 与 BackgroundTray 同高度，使用 lucide 图标。
 //   - 切换时清空未提交 provider draft：本期由 keyspace 通过事件 activeKey.changed
@@ -14,10 +14,16 @@
 // 一次性 load。
 //
 // 硬切换 003：所有展示文案走 i18n。
+//
+// 硬切换 003 收尾：
+//   - 短公钥通过 `formatShortPublicKey(publicKeyHex)` 运行时现算。
+//   - 不再读取 `KeyIdentity.fingerprint` 字段。
+//   - class 命名从 `key-switch__fingerprint` 改为 `key-switch__pubkey`。
 
 import { useEffect, useState } from "react";
 import { ChevronDown, KeyRound, Check, AlertTriangle } from "lucide-react";
 import { router, useCapability, useI18n } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type { ActiveKeyState, KeyIdentity, KeyspaceService, MessageBus } from "@keymaster/contracts";
 
 export function KeySwitchWidget() {
@@ -38,7 +44,7 @@ export function KeySwitchWidget() {
       try {
         const all = await keyspace.listKeys();
         const switchable = all.filter(
-          (k) => k.identityStatus === "ready" && k.publicKeyHash
+          (k) => k.identityStatus === "ready" && k.publicKeyHash && k.publicKeyHex
         );
         if (!cancelled) setKeys(switchable);
       } catch {
@@ -73,7 +79,7 @@ export function KeySwitchWidget() {
         try {
           const all = await keyspace.listKeys();
           const switchable = all.filter(
-            (k) => k.identityStatus === "ready" && k.publicKeyHash
+            (k) => k.identityStatus === "ready" && k.publicKeyHash && k.publicKeyHex
           );
           setKeys(switchable);
         } catch {
@@ -139,10 +145,10 @@ export function KeySwitchWidget() {
           <span className="key-switch__label">{t("vault.keySwitch.noKey", { defaultValue: "无 key" })}</span>
         ) : active.mode === "all" ? (
           <span className="key-switch__label">{t("vault.keySwitch.allKey", { defaultValue: "全部 key" })}</span>
-        ) : current ? (
+        ) : current && current.publicKeyHex ? (
           <>
             <span className="key-switch__label">{current.label || unnamed}</span>
-            <span className="key-switch__fingerprint">{current.fingerprint}</span>
+            <span className="key-switch__pubkey">{formatShortPublicKey(current.publicKeyHex)}</span>
           </>
         ) : (
           <span className="key-switch__label">{t("vault.keySwitch.unselected", { defaultValue: "未选择" })}</span>
@@ -167,12 +173,14 @@ export function KeySwitchWidget() {
               key={k.publicKeyHash}
               className={`key-switch__item ${active.activePublicKeyHash === k.publicKeyHash ? "key-switch__active" : ""}`}
               onClick={() => k.publicKeyHash && pick(k.publicKeyHash)}
-              disabled={busy || k.identityStatus !== "ready"}
+              disabled={busy || k.identityStatus !== "ready" || !k.publicKeyHex}
               title={k.identityStatus !== "ready" ? t("vault.keySwitch.notReady", { defaultValue: "身份尚未就绪" }) : undefined}
             >
               <span className="key-switch__item-label">
                 <span>{k.label || unnamed}</span>
-                <span className="key-switch__fingerprint">{k.fingerprint}</span>
+                {k.publicKeyHex ? (
+                  <span className="key-switch__pubkey">{formatShortPublicKey(k.publicKeyHex)}</span>
+                ) : null}
                 <span className="key-switch__caps">{k.capabilities.join(", ")}</span>
               </span>
               {active.activePublicKeyHash === k.publicKeyHash ? <Check size={14} /> : null}

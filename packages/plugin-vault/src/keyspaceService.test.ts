@@ -157,7 +157,6 @@ async function seedReadyKey(input: {
     cipherB64: "00",
     publicKeyHex: "00",
     publicKeyHash: input.publicKeyHash,
-    fingerprint: input.publicKeyHash.slice(0, 4) + ".." + input.publicKeyHash.slice(-4),
     identityStatus: "ready"
   });
 }
@@ -307,7 +306,6 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
       cipherB64: "00",
       publicKeyHex: "00",
       publicKeyHash: "c".repeat(64),
-      fingerprint: "cccc..cccc",
       identityStatus: "failed",
       identityError: "simulated"
     });
@@ -365,7 +363,6 @@ describe("keyspaceService.listKeys (硬切换 008 收尾)", () => {
       cipherB64: "00",
       publicKeyHex: "00",
       publicKeyHash: "c".repeat(64),
-      fingerprint: "cccc..cccc",
       identityStatus: "failed",
       identityError: "simulated"
     });
@@ -486,7 +483,6 @@ describe("keyspaceService.deleteKeyById (硬切换 008 收尾 + 002 密码鉴权
       cipherB64: "00",
       publicKeyHex: "00",
       publicKeyHash: "c".repeat(64),
-      fingerprint: "cccc..cccc",
       identityStatus: "failed",
       identityError: "simulated"
     });
@@ -588,7 +584,6 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
       cipherB64: "00",
       publicKeyHex: "00",
       publicKeyHash: "c".repeat(64),
-      fingerprint: "cccc..cccc",
       identityStatus: "failed",
       identityError: "simulated"
     });
@@ -740,7 +735,6 @@ describe("keyspaceService delete-last-key -> uninitialized (硬切换 010)", () 
       cipherB64: "00",
       publicKeyHex: "00",
       publicKeyHash: "c".repeat(64),
-      fingerprint: "cccc..cccc",
       identityStatus: "failed",
       identityError: "simulated"
     });

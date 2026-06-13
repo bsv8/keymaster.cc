@@ -1,12 +1,14 @@
 // packages/plugin-vault/src/keyIdentity.ts
-// 公钥身份工具：派生 compressed public key、计算 publicKeyHash、生成短 fingerprint。
+// 公钥身份工具：派生 compressed public key、计算 publicKeyHash。
 // 设计缘由：
-//   - 平台公开的 key 身份只能来自公钥（publicKeyHex / publicKeyHash / fingerprint），
+//   - 平台公开的 key 身份只能来自公钥（publicKeyHex / publicKeyHash），
 //     不使用私钥、地址或网络作为根 id。
 //   - 本模块不保存私钥、不打开 P2PKH DB、不派生网络地址。
 //   - publicKeyHash 取 sha256(compressed public key) 的 hex；这样可以稳定跨插件
 //     表达"同一把 key"。
 //   - 重复导入同一 publicKeyHash 时，vault 必须拒绝并给出英文错误信息。
+//   - 短公钥属于 UI 显示格式，**不**在这里派生。展示时由 UI 调
+//     `formatShortPublicKey(publicKeyHex)` 现算。
 //
 // 硬切换 002：本模块同时承担"在 Vault 内部安全生成 secp256k1 私钥"的
 // 局部职责。私钥字节由 noble secp256k1 的 randomPrivateKey 生成，调用方
@@ -21,7 +23,6 @@ import { getPublicKey, utils as secp256k1Utils } from "@noble/secp256k1";
 export interface KeyIdentityFields {
   publicKeyHex: string;
   publicKeyHash: string;
-  fingerprint: string;
 }
 
 /** 从 32 字节私钥派生公钥身份。 */
@@ -31,8 +32,7 @@ export function deriveKeyIdentity(privateKeyHex: string): KeyIdentityFields {
   const pub = getPublicKey(priv, true);
   const publicKeyHex = bytesToHex(pub);
   const publicKeyHash = bytesToHex(sha256(pub));
-  const fingerprint = makeFingerprint(publicKeyHash);
-  return { publicKeyHex, publicKeyHash, fingerprint };
+  return { publicKeyHex, publicKeyHash };
 }
 
 /** 从公钥 hex 计算 identity。用于 import 时没有私钥（如备份导入解析中）的兜底。 */
@@ -40,8 +40,7 @@ export function identityFromPublicKeyHex(publicKeyHex: string): KeyIdentityField
   const pub = hexToBytes(publicKeyHex);
   if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
   const publicKeyHash = bytesToHex(sha256(pub));
-  const fingerprint = makeFingerprint(publicKeyHash);
-  return { publicKeyHex, publicKeyHash, fingerprint };
+  return { publicKeyHex, publicKeyHash };
 }
 
 /**
@@ -59,15 +58,6 @@ export function identityFromPublicKeyHex(publicKeyHex: string): KeyIdentityField
 export function generatePrivateKeyHex(): string {
   const priv = secp256k1Utils.randomPrivateKey();
   return bytesToHex(priv);
-}
-
-/**
- * 短展示指纹：取 publicKeyHash 前后 4 字节拼成 8 字符 base16。
- * 设计缘由：key switch widget 顶栏只显示短指纹，hash 全长太占地方。
- */
-export function makeFingerprint(publicKeyHash: string): string {
-  if (publicKeyHash.length < 8) throw new Error("publicKeyHash too short");
-  return `${publicKeyHash.slice(0, 4)}…${publicKeyHash.slice(-4)}`;
 }
 
 function hexToBytes(hex: string): Uint8Array {

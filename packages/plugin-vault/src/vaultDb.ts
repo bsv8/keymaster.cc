@@ -4,7 +4,7 @@
 // 这里只创建 vault_meta / vault_keys 两张表，不与其他插件共用 schema 文件。
 //
 // 硬切换 007 后的 schema v2：
-//   - vault_keys 新增 publicKeyHex / publicKeyHash / fingerprint 三个字段。
+//   - vault_keys 新增 publicKeyHex / publicKeyHash 两个字段。
 //   - vault_keys 新增 unique index "publicKeyHash"，重复导入同一公钥会被 DB 拒绝。
 //   - 老记录（v1）没有公钥字段：升级时不能凭空从密文推导，平台在 unlock
 //     后逐把 key 走 withPrivateKey backfill 派生并写回。
@@ -15,6 +15,11 @@
 //   - 老记录（v1/v2）没有这两个字段：读取时按 "ready" 处理；写时由
 //     putKeyIdentityReady / putKeyIdentityFailed 显式维护。
 //   - 不需要新 store：字段都存在 vault_keys store 中即可。
+//
+// 硬切换 003 收尾：
+//   - 旧 `fingerprint` 字段从类型上删除；新代码不再读写。
+//   - 旧库记录里可能残留 `fingerprint`，读取时被忽略、写入时不再写。
+//   - 显式构造允许保留的字段，**不**用 `...current` 续命旧字段。
 
 const DB_NAME = "vault";
 const DB_VERSION = 3;
@@ -50,8 +55,6 @@ export interface VaultKeyRecord {
   publicKeyHex?: string;
   /** 公钥 hash。 */
   publicKeyHash?: string;
-  /** 短展示指纹。 */
-  fingerprint?: string;
   /**
    * 硬切换 008：identity 状态。
    *   - "ready" 或缺省：可作为 active key 候选。
@@ -177,22 +180,39 @@ export const vaultDb = {
   },
   /**
    * 仅回写 identity 字段。设计缘由：backfill 阶段需要补 publicKeyHex /
-   * publicKeyHash / fingerprint，但不应替换整个 record（避免与并发 import 冲突）。
+   * publicKeyHash，但不应替换整个 record（避免与并发 import 冲突）。
    * 同时写 identityStatus = "ready"、清 identityError。
+   *
+   * 硬切换 003 收尾：本方法**不**接收 fingerprint；旧字段即使在
+   * `current` 记录上残留也**不**会被续命（只白名单写出 publicKeyHex
+   * / publicKeyHash / identityStatus / identityError）。
    * 硬切换 008：vaultService 调本方法，并在成功后发 key.identity.ready 事件。
    */
   async putKeyIdentity(id: string, identity: {
     publicKeyHex: string;
     publicKeyHash: string;
-    fingerprint: string;
   }): Promise<void> {
     await tx("vault_keys", "readwrite", async (t) => {
       const store = t.objectStore("vault_keys");
       const current = await reqAsPromise<VaultKeyRecord | undefined>(store.get(id));
       if (!current) throw new Error(`Unknown key ${id}`);
+      // 硬切换 003 收尾：白名单构造允许保留的字段，避免 `...current` 把
+      // 旧库残留的 `fingerprint` 续命回 DB。其它业务字段（label / cipher*
+      // / format / capabilities / source / createdAt 等）必须原样保留。
       const next: VaultKeyRecord = {
-        ...current,
-        ...identity,
+        id: current.id,
+        label: current.label,
+        address: current.address,
+        network: current.network,
+        format: current.format,
+        capabilities: current.capabilities,
+        createdAt: current.createdAt,
+        source: current.source,
+        cipherSaltB64: current.cipherSaltB64,
+        cipherIvB64: current.cipherIvB64,
+        cipherB64: current.cipherB64,
+        publicKeyHex: identity.publicKeyHex,
+        publicKeyHash: identity.publicKeyHash,
         identityStatus: "ready",
         identityError: undefined
       };
@@ -202,11 +222,13 @@ export const vaultDb = {
   /**
    * 硬切换 008：标记某把 key 的 identity backfill 失败。
    * 写 identityStatus = "failed" + identityError；**不动**已有 identity
-   * 字段（publicKeyHex / publicKeyHash / fingerprint）。设计缘由：公钥
+   * 字段（publicKeyHex / publicKeyHash）。设计缘由：公钥
    * 身份与 backfill 状态是两件事——失败 status 表示"暂时无法重新派
    * 生"，不应丢弃已知公钥；keyspace 也不会把 failed key 选为 active。
    * 重试时由 putKeyIdentity 重新走派生并写回。
    * 失败 key 不会被 keyspace 选为 active key 候选。
+   *
+   * 硬切换 003 收尾：显式构造字段，避免把旧 `fingerprint` 写回。
    */
   async putKeyIdentityFailed(id: string, error: string): Promise<void> {
     await tx("vault_keys", "readwrite", async (t) => {
@@ -214,7 +236,19 @@ export const vaultDb = {
       const current = await reqAsPromise<VaultKeyRecord | undefined>(store.get(id));
       if (!current) throw new Error(`Unknown key ${id}`);
       const next: VaultKeyRecord = {
-        ...current,
+        id: current.id,
+        label: current.label,
+        address: current.address,
+        network: current.network,
+        format: current.format,
+        capabilities: current.capabilities,
+        createdAt: current.createdAt,
+        source: current.source,
+        cipherSaltB64: current.cipherSaltB64,
+        cipherIvB64: current.cipherIvB64,
+        cipherB64: current.cipherB64,
+        publicKeyHex: current.publicKeyHex,
+        publicKeyHash: current.publicKeyHash,
         identityStatus: "failed",
         identityError: error
       };
@@ -224,6 +258,8 @@ export const vaultDb = {
   /**
    * 硬切换 008：把失败 key 重置为 ready（用于重试 backfill 时清状态）。
    * 实际身份字段由 putKeyIdentity 写回；本方法只清状态。
+   *
+   * 硬切换 003 收尾：显式构造字段，避免把旧 `fingerprint` 写回。
    */
   async putKeyIdentityReady(id: string): Promise<void> {
     await tx("vault_keys", "readwrite", async (t) => {
@@ -231,7 +267,19 @@ export const vaultDb = {
       const current = await reqAsPromise<VaultKeyRecord | undefined>(store.get(id));
       if (!current) throw new Error(`Unknown key ${id}`);
       const next: VaultKeyRecord = {
-        ...current,
+        id: current.id,
+        label: current.label,
+        address: current.address,
+        network: current.network,
+        format: current.format,
+        capabilities: current.capabilities,
+        createdAt: current.createdAt,
+        source: current.source,
+        cipherSaltB64: current.cipherSaltB64,
+        cipherIvB64: current.cipherIvB64,
+        cipherB64: current.cipherB64,
+        publicKeyHex: current.publicKeyHex,
+        publicKeyHash: current.publicKeyHash,
         identityStatus: "ready",
         identityError: undefined
       };

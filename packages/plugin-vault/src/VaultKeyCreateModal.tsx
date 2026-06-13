@@ -10,10 +10,17 @@
 //   - 失败状态：保留 modal，可重试。
 //
 // 硬切换 003：所有展示文案走 i18n。
+//
+// 硬切换 003 收尾：
+//   - 成功提示展示"公钥"而不是"指纹"，默认显示**短公钥**。
+//   - "按指纹区分"文案改为"按公钥区分"或"按短公钥区分"。
+//   - 复制按钮复制**完整公钥**，不是截断串。
+//   - 不再读取 KeyRef.fingerprint 字段。
 
 import { useEffect, useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type { KeyRef } from "@keymaster/contracts";
 
 /** 标签最大长度，与 vaultService.LABEL_MAX_LENGTH 保持一致。 */
@@ -94,6 +101,18 @@ export function VaultKeyCreateModal({
     }
   }
 
+  // 复制完整公钥。硬切换 003 收尾：复制永远是完整 publicKeyHex。
+  async function copyPubkey() {
+    if (!created?.publicKeyHex) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(created.publicKeyHex);
+      }
+    } catch {
+      // 静默：用户仍可手动选中复制
+    }
+  }
+
   const canSubmit = !busy && label.trim().length > 0 && label.trim().length <= LABEL_MAX_LENGTH;
 
   return (
@@ -151,7 +170,7 @@ export function VaultKeyCreateModal({
             autoFocus
           />
           <p className="vault-create-modal__note">
-            {t("vault.keyCreate.note", { defaultValue: "标签不要求唯一；后续管理列表按指纹区分。" })}
+            {t("vault.keyCreate.note", { defaultValue: "标签不要求唯一；后续管理列表按公钥区分。" })}
           </p>
         </>
       ) : (
@@ -165,10 +184,21 @@ export function VaultKeyCreateModal({
             </p>
             <p className="vault-create-modal__success-line">
               <span className="vault-create-modal__success-label">
-                {t("vault.keyCreate.success.fingerprint", { defaultValue: "指纹" })}
+                {t("vault.keyCreate.success.publicKey", { defaultValue: "公钥" })}
               </span>
-              <code>{created.fingerprint}</code>
+              {created.publicKeyHex ? (
+                <code>{formatShortPublicKey(created.publicKeyHex)}</code>
+              ) : (
+                <code>—</code>
+              )}
             </p>
+            {created.publicKeyHex ? (
+              <p className="vault-create-modal__success-line vault-create-modal__success-actions">
+                <Button size="sm" variant="secondary" onClick={copyPubkey}>
+                  {t("vault.keyCreate.copyPubkey", { defaultValue: "复制完整公钥" })}
+                </Button>
+              </p>
+            ) : null}
             <p className="vault-create-modal__warning">
               {t("vault.keyCreate.warning", {
                 defaultValue:

@@ -19,16 +19,27 @@
 //     源是 vault.status()，由 App 自然切壳。
 //
 // 硬切换 003：所有展示文案走 i18n。
+//
+// 硬切换 003 收尾：
+//   - 目标 key 复核信息从"标签 + 指纹"切到"标签 + 短公钥（如果可用）"。
+//   - 若该 key 没有 `publicKeyHex`，显示"身份不可用"，不强行拼展示串。
+//   - 不再接收 `keyFingerprint` 字段；改为接收 `publicKeyHex`，由 modal
+//     内部现算短公钥。
+//   - 删除授权仍然是密码，不受本次影响。
 
 import { useState } from "react";
 import { Button, Modal } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 
 export interface VaultKeyDeleteModalProps {
   open: boolean;
   keyLabel: string;
-  /** 可选展示用指纹；仅用于让用户在 warning step 复核目标 key。 */
-  keyFingerprint?: string;
+  /**
+   * 完整公钥 hex；存在时 modal 内部现算短公钥用于目标复核。
+   * 缺省或为空时显示"身份不可用"，不强行拼展示串。
+   */
+  publicKeyHex?: string;
   onExportBackup?(): void;
   /**
    * 用户在最终 step 输入的锁屏密码会原样回传；调用方再把它喂给
@@ -44,7 +55,7 @@ type Step = "warning" | "final";
 export function VaultKeyDeleteModal({
   open,
   keyLabel,
-  keyFingerprint,
+  publicKeyHex,
   onExportBackup,
   onConfirmDelete,
   onClose
@@ -93,6 +104,7 @@ export function VaultKeyDeleteModal({
 
   // 必须输入非空密码才能点击确认；真伪由平台校验。
   const canConfirm = password.length > 0;
+  const identityMissingText = t("vault.settings.empty.fingerprint", { defaultValue: "身份不可用" });
 
   return (
     <Modal
@@ -141,7 +153,19 @@ export function VaultKeyDeleteModal({
           <p className="vault-delete-warning__meta">
             {t("vault.keyDelete.target", { defaultValue: "目标：" })}
             <strong>{keyLabel}</strong>
-            {keyFingerprint ? <>（<code>{keyFingerprint}</code>）</> : null}
+            {publicKeyHex ? (
+              <>
+                {"（"}
+                <code>{formatShortPublicKey(publicKeyHex)}</code>
+                {"）"}
+              </>
+            ) : (
+              <>
+                {"（"}
+                <span style={{ color: "var(--text-dim)" }}>{identityMissingText}</span>
+                {"）"}
+              </>
+            )}
           </p>
           {error ? <p className="vault-delete-warning__error">{error}</p> : null}
         </div>

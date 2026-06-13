@@ -1,14 +1,21 @@
 // packages/plugin-assets/src/AssetsPage.tsx
 // 资产列表页：聚合所有 provider 的资产摘要。
 // 设计缘由：单 provider 失败不影响其他 provider；通用资产页不展示 UTXO 等具体字段。
-// 硬切换 008：description 显示当前 key 上下文（label / fingerprint / 全部 key / 无 key）；
+// 硬切换 008：description 显示当前 key 上下文（label / 短公钥 / 全部 key / 无 key）；
 // 切 key 时重新拉取资产。
 //
 // 硬切换 003：所有展示文案走 i18n。
+//
+// 硬切换 003 收尾：
+//   - 当前 key 上下文统一显示 `label + 短公钥`。
+//   - 短公钥由 `formatShortPublicKey(publicKeyHex)` 现算，不再读取
+//     `KeyIdentity.fingerprint` 字段。
+//   - 没有 `publicKeyHex` 时显示"身份不可用"，**不**伪造短公钥兜底。
 
 import { useEffect, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type { AssetRegistry, AssetSummary, KeyIdentity, KeyspaceService } from "@keymaster/contracts";
 import { loadAllAssets, type ProviderLoadResult } from "./assetsFlow.js";
 
@@ -169,5 +176,11 @@ async function buildDescriptionAsync(
   const identity: KeyIdentity | undefined = await keyspace.getKey(state.activePublicKeyHash);
   if (!identity) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
   const label = identity.label || host.i18n.t("assets.context.unnamed", { defaultValue: "未命名" });
-  return `${label}（${identity.fingerprint}）`;
+  // 硬切换 003 收尾：短公钥由 publicKeyHex 现算；缺 publicKeyHex 时显示
+  // "身份不可用"，不再读 identity.fingerprint，也不从 publicKeyHash 反向
+  // 伪造短串。
+  const shortPubkey = identity.publicKeyHex
+    ? formatShortPublicKey(identity.publicKeyHex)
+    : host.i18n.t("assets.context.identityMissing", { defaultValue: "身份不可用" });
+  return `${label}（${shortPubkey}）`;
 }

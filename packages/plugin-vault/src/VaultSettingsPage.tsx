@@ -6,15 +6,24 @@
 //     本页面不接触私钥材料、不调用 crypto / noble。
 //   - 删除仍走 keyspace.deleteKeyById(keyId)；不在页面直接调 vault.deleteKeyMaterial。
 //   - 桌面端用 DataTable 紧凑展示；移动端改成纵向 Key 条目，状态 / 标签 /
-//     指纹 / 能力 / 时间 / 操作折叠成单条记录，避免横向滚动。
+//     短公钥 / 能力 / 时间 / 操作折叠成单条记录，避免横向滚动。
 //   - 失败 / uninitialized / 无 publicKeyHash 等边界沿用硬切换 008 防御。
 //   - active 通知失败时不删除已安全落库的 Key；提示用户手动切 active。
 //
 // 硬切换 003：所有展示文案走 i18n。日期通过 Intl.DateTimeFormat(locale) 格式化。
+//
+// 硬切换 003 收尾：
+//   - 删除了"指纹"列；只保留"公钥"列。
+//   - 公钥列默认显示**短公钥**（由 `formatShortPublicKey(publicKeyHex)` 现算），
+//     用户点"展开公钥"才看完整 hex。
+//   - 提供"复制完整公钥"动作，复制永远是完整 `publicKeyHex`，不是截断串。
+//   - 删除确认的目标复核改成 `label + 短公钥`（或"身份不可用"）。
+//   - 不再读取、构造、回填 `KeyIdentity.fingerprint` 字段。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
 import { router, useCapability, useI18n, useLocale } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
   KeyExportEnvelope,
@@ -40,6 +49,7 @@ export function VaultSettingsPage() {
   const [active, setActive] = useState<ActiveKeyState>(keyspace.active());
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [copyNotice, setCopyNotice] = useState<string | null>(null);
 
   const [exporting, setExporting] = useState<KeyIdentity | null>(null);
   const [deleting, setDeleting] = useState<KeyIdentity | null>(null);
@@ -166,6 +176,38 @@ export function VaultSettingsPage() {
     }
   }
 
+  // 复制完整公钥到剪贴板。硬切换 003 收尾：复制永远是完整 publicKeyHex，
+  // 绝不能复制短公钥截断串。
+  async function copyPublicKey(k: KeyIdentity) {
+    if (!k.publicKeyHex) return;
+    try {
+      if (typeof navigator !== "undefined" && navigator.clipboard) {
+        await navigator.clipboard.writeText(k.publicKeyHex);
+      } else {
+        // 退化路径：使用临时 textarea + execCommand。
+        const ta = document.createElement("textarea");
+        ta.value = k.publicKeyHex;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+      }
+      setCopyNotice(
+        t("vault.settings.notice.copied", { defaultValue: "已复制完整公钥" })
+      );
+      setTimeout(() => setCopyNotice(null), 2000);
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : t("vault.settings.err.copy", { defaultValue: "复制失败" })
+      );
+    }
+  }
+
   async function handleCreate(label: string): Promise<KeyRef> {
     try {
       const ref = await vault.generateKey({ label });
@@ -236,8 +278,7 @@ export function VaultSettingsPage() {
       createdAt: identity.createdAt,
       source: "vault-generated",
       publicKeyHex: identity.publicKeyHex,
-      publicKeyHash: identity.publicKeyHash,
-      fingerprint: identity.fingerprint
+      publicKeyHash: identity.publicKeyHash
     };
   }
 
@@ -246,7 +287,6 @@ export function VaultSettingsPage() {
       keyId: key.id,
       publicKeyHex: key.publicKeyHex ?? "",
       publicKeyHash: key.publicKeyHash ?? "",
-      fingerprint: key.fingerprint ?? "",
       label: key.label,
       capabilities: key.capabilities,
       createdAt: key.createdAt,
@@ -266,12 +306,6 @@ export function VaultSettingsPage() {
       key: "label",
       header: t("vault.settings.col.label", { defaultValue: "标签" }),
       render: (r) => (r.label ? r.label : <span style={{ color: "var(--text-dim)" }}>{unnamedText}</span>)
-    },
-    {
-      key: "fingerprint",
-      header: t("vault.settings.col.fingerprint", { defaultValue: "指纹" }),
-      render: (r) =>
-        r.fingerprint ? <code>{r.fingerprint}</code> : <span style={{ color: "var(--text-dim)" }}>{identityMissingText}</span>
     },
     {
       key: "status",
@@ -294,21 +328,43 @@ export function VaultSettingsPage() {
     {
       key: "pub",
       header: t("vault.settings.col.pubkey", { defaultValue: "公钥" }),
+      // 硬切换 003 收尾：默认显示短公钥；展开后显示完整 publicKeyHex；
+      // 复制按钮复制完整公钥（不是截断串）。
       render: (r) => {
         if (!r.publicKeyHash || !r.publicKeyHex) {
           return <span style={{ color: "var(--text-dim)" }}>{identityMissingText}</span>;
         }
         const publicKeyHash = r.publicKeyHash;
+        const publicKeyHex = r.publicKeyHex;
         return expanded[publicKeyHash] ? (
-          <code style={{ wordBreak: "break-all" }}>{r.publicKeyHex}</code>
+          <div className="vault-key-pubkey-expanded">
+            <code className="vault-key-pubkey-full">{publicKeyHex}</code>
+            <button
+              type="button"
+              className="vault-key-public-toggle"
+              onClick={() => copyPublicKey(r)}
+            >
+              {t("vault.settings.action.copyPubkey", { defaultValue: "复制完整公钥" })}
+            </button>
+            <button
+              type="button"
+              className="vault-key-public-toggle"
+              onClick={() => setExpanded((m) => ({ ...m, [publicKeyHash]: false }))}
+            >
+              {t("vault.settings.action.collapsePubkey", { defaultValue: "收起" })}
+            </button>
+          </div>
         ) : (
-          <button
-            type="button"
-            className="vault-key-public-toggle"
-            onClick={() => setExpanded((m) => ({ ...m, [publicKeyHash]: true }))}
-          >
-            {t("vault.settings.action.expand", { defaultValue: "展开" })}
-          </button>
+          <div className="vault-key-pubkey-collapsed">
+            <code className="vault-key-pubkey-short">{formatShortPublicKey(publicKeyHex)}</code>
+            <button
+              type="button"
+              className="vault-key-public-toggle"
+              onClick={() => setExpanded((m) => ({ ...m, [publicKeyHash]: true }))}
+            >
+              {t("vault.settings.action.expandPubkey", { defaultValue: "展开公钥" })}
+            </button>
+          </div>
         );
       }
     },
@@ -390,14 +446,34 @@ export function VaultSettingsPage() {
               <span className={`vault-key-status ${statusClass}`}>{statusLabel}</span>
             </div>
             <div className="vault-key-list__meta">
-              <code>{r.fingerprint || identityMissingText}</code>
+              {r.publicKeyHex ? (
+                <code className="vault-key-list__pubkey">{formatShortPublicKey(r.publicKeyHex)}</code>
+              ) : (
+                <code>{identityMissingText}</code>
+              )}
             </div>
             <div className="vault-key-list__caps">
               {r.capabilities.join(", ")} · {dateFmt.format(new Date(r.createdAt))}
             </div>
             {r.publicKeyHash && r.publicKeyHex ? (
               expanded[r.publicKeyHash] ? (
-                <code className="vault-key-list__pub">{r.publicKeyHex}</code>
+                <div className="vault-key-list__pubkey-detail">
+                  <code className="vault-key-list__pub">{r.publicKeyHex}</code>
+                  <button
+                    type="button"
+                    className="vault-key-public-toggle"
+                    onClick={() => copyPublicKey(r)}
+                  >
+                    {t("vault.settings.action.copyPubkey", { defaultValue: "复制完整公钥" })}
+                  </button>
+                  <button
+                    type="button"
+                    className="vault-key-public-toggle"
+                    onClick={() => setExpanded((m) => ({ ...m, [r.publicKeyHash!]: false }))}
+                  >
+                    {t("vault.settings.action.collapsePubkey", { defaultValue: "收起" })}
+                  </button>
+                </div>
               ) : (
                 <button
                   type="button"
@@ -471,6 +547,7 @@ export function VaultSettingsPage() {
       />
       {error ? <p className="vault-page__error">{error}</p> : null}
       {notice ? <p className="vault-page__notice">{notice}</p> : null}
+      {copyNotice ? <p className="vault-page__notice">{copyNotice}</p> : null}
       {keys.length === 0 ? (
         <EmptyState
           title={t("vault.settings.empty.title", { defaultValue: "还没有 Key" })}
@@ -511,7 +588,8 @@ export function VaultSettingsPage() {
         <VaultKeyDeleteModal
           open={Boolean(deleting)}
           keyLabel={deleting.label}
-          keyFingerprint={deleting.fingerprint}
+          // 硬切换 003 收尾：传完整公钥，modal 内部按需现算短公钥。
+          publicKeyHex={deleting.publicKeyHex}
           onExportBackup={
             () => {
               setExporting(deleting);

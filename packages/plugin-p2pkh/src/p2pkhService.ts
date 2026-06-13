@@ -70,9 +70,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   let p2pkhDbHandle: P2pkhDbHandle | null = null;
   let currentPublicKeyHash: string | undefined;
   let activeKeyId: string | undefined;
-  // 硬切换 008 收尾：activeIdentity 是 ReadyKeyIdentity，publicKeyHash
-  // / publicKeyHex / fingerprint 都是必填。rebind 时通过 requireReadyKey
-  // 断言；写入 P2pkhKeyResource 时不需要再 `!`。
+  // 硬切换 008 收尾 + 硬切换 003 收尾：activeIdentity 是 ReadyKeyIdentity，
+  // publicKeyHash / publicKeyHex 必填。rebind 时通过 requireReadyKey 断言；
+  // 写入 P2pkhKeyResource 时不需要再 `!`。短公钥不再作为字段持有，UI
+  // 需要展示时由 `formatShortPublicKey(publicKeyHex)` 现算。
   let activeIdentity: ReadyKeyIdentity | undefined;
 
   const recent = createP2pkhRecentSync({
@@ -168,9 +169,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   }
 
   /** 切换 active key 后的 hook：重建 identity 缓存与 db handle。
-   * 设计缘由：硬切换 008 收尾——通过 requireReadyKey 把 KeyIdentity
-   * 收窄成 ReadyKeyIdentity，publicKeyHash / publicKeyHex / fingerprint
-   * 必填；写入 P2pkhKeyResource 等位置时不再需要 `!`。
+   * 设计缘由：硬切换 008 收尾 + 硬切换 003 收尾——通过 requireReadyKey
+   * 把 KeyIdentity 收窄成 ReadyKeyIdentity，publicKeyHash / publicKeyHex
+   * 必填；写入 P2pkhKeyResource 等位置时不再需要 `!`。短公钥不再是
+   * contract 字段，UI 需要时由 `formatShortPublicKey(publicKeyHex)` 现算。
    */
   async function rebindActiveKey() {
     const state = getActiveKeyState();
@@ -272,6 +274,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    * 设计缘由：008 把 keyScope 改为函数形式以支持延迟求值——注册时只存函数
    * 引用，backgroundService.snapshot() / cancelByKey() 在调用时通过
    * resolveKeyScope 求值。这样 active key 切换不会让 task 仍指向旧 key hash。
+   *
+   * 硬切换 003 收尾：scope 不再携带 `fingerprint`；若有展示需要，按
+   * `BackgroundTaskKeyScope.publicKeyHex` 透传完整公钥，UI 侧再调
+   * `formatShortPublicKey()` 现算短公钥。
    */
   function p2pkhTaskKeyScope() {
     const state = getActiveKeyState();
@@ -285,7 +291,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     return {
       publicKeyHash: state.activePublicKeyHash,
       label: id.label,
-      fingerprint: id.fingerprint
+      publicKeyHex: id.publicKeyHex
     };
   }
 

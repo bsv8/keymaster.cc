@@ -3,7 +3,10 @@
 // 关键安全约束：明文私钥只允许在 withPrivateKey 回调内短暂存在。
 //
 // 硬切换（007）后的根身份：
-//   - KeyIdentity 使用公钥身份（publicKeyHex / publicKeyHash / fingerprint）。
+//   - KeyIdentity 使用公钥身份（publicKeyHex / publicKeyHash）。
+//   - 短公钥属于 UI 显示格式，**不**作为 KeyRef 字段持有；展示时由
+//     UI 调 `formatShortPublicKey(publicKeyHex)` 现算。
+//   - 旧 `fingerprint` 概念已废弃，不再是 contract / storage / 业务对象的字段。
 //   - `address` 与 `network` 不再是 KeyRef 的根身份字段；仅作为兼容展示
 //     字段保留，业务方不应再通过 address 反查 key。
 //   - 找 key 的主路径是 publicKeyHash，地址查找应交给 P2PKH 自己的 namespace。
@@ -28,12 +31,13 @@ export interface KeyRef {
   publicKeyHex?: string;
   /** 公钥 hash（hex）。 */
   publicKeyHash?: string;
-  /** 短展示指纹。 */
-  fingerprint?: string;
   /**
    * 硬切换 008：identity backfill 状态。缺省或 "ready" 表示可作为
    * active key 候选；"failed" 表示 backfill 失败，keyspace 不会选为
    * active key。vault.listKeys 在 refreshKeyCache 时把 status 映射到 KeyRef。
+   *
+   * 硬切换 003 收尾：短公钥不属于 contract 字段，UI 展示时由
+   * `formatShortPublicKey(publicKeyHex)` 现算。
    */
   identityStatus?: "ready" | "failed";
   /** backfill 失败原因；仅在 identityStatus === "failed" 时有值。 */

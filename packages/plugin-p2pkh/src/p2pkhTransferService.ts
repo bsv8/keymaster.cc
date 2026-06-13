@@ -5,9 +5,10 @@
 //   - 写 pending / reservation 时把 publicKeyHash 一并写入，便于跨 key 排错。
 // 设计缘由：所有 P2PKH 转移业务逻辑放在这里；Widget 只调用服务。
 // 签名仍走 vault.withPrivateKey；广播走 woc.service（强制 broadcast 优先级）。
-// 硬切换 008 收尾：getActiveKey 返回 ReadyKeyIdentity（publicKeyHash /
-// publicKeyHex / fingerprint 必填）。p2pkhService.rebindActiveKey 内部
-// 用 requireReadyKey 收窄；本文件不直接调用 requireReadyKey。
+// 硬切换 008 收尾 + 硬切换 003 收尾：getActiveKey 返回 ReadyKeyIdentity
+// （publicKeyHash / publicKeyHex 必填）。p2pkhService.rebindActiveKey 内部
+// 用 requireReadyKey 收窄；本文件不直接调用 requireReadyKey。短公钥不再
+// 作为字段持有，UI 需要时由 `formatShortPublicKey(publicKeyHex)` 现算。
 
 import type { MessageBus, VaultService, WocService } from "@keymaster/contracts";
 import type {

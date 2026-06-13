@@ -152,8 +152,12 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    * 返回所有可管理的 KeyIdentity（ready + failed + 无 hash）。
    * 设计缘由：硬切换 008 收尾——failed key 也必须能列出，用户需要看到
    * "这把 key 解密失败，只能删除"；listKeys 返回包含 failed 与无 hash。
-   * `KeyIdentity` 的 publicKeyHex / publicKeyHash / fingerprint 在
-   * identity 字段缺失时为 undefined，调用方需自行处理展示。
+   * `KeyIdentity` 的 publicKeyHex / publicKeyHash 在 identity 字段缺失
+   * 时为 undefined，调用方需自行处理展示；短公钥由 UI 现算。
+   *
+   * 硬切换 003 收尾：本方法不再回填 `fingerprint` 字段——`KeyIdentity`
+   * 也不再持有该字段。需要短公钥展示的调用方应拿 `publicKeyHex` 调
+   * `formatShortPublicKey()` 现算。
    */
   async function listManageableKeys(): Promise<KeyIdentity[]> {
     const refs = await deps.vault.listKeys();
@@ -161,7 +165,6 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       keyId: r.id,
       publicKeyHex: r.publicKeyHex,
       publicKeyHash: r.publicKeyHash,
-      fingerprint: r.fingerprint,
       label: r.label,
       capabilities: r.capabilities,
       createdAt: r.createdAt,
@@ -337,11 +340,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       }
       // 同步取：active 状态是 in-memory，但 publicKeyHash 必须对应到 KeyIdentity；
       // 业务插件同步调用时，我们用缓存的 active 状态构造最小可用对象。
+      // 硬切换 003 收尾：不再回填 fingerprint 字段；短公钥由调用方现算。
       return {
         keyId: "",
         publicKeyHex: "",
         publicKeyHash: active.activePublicKeyHash,
-        fingerprint: "",
         label: "",
         capabilities: [],
         createdAt: "",

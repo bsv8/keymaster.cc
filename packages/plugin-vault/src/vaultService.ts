@@ -7,7 +7,7 @@
 //   - 导出必须由 Vault 完成，因为只有 Vault 能通过 withPrivateKey 受控借用明文私钥。
 //   - importPrivateKey 必须拒绝重复 publicKeyHash；错误信息使用英文。
 //   - unlock 后必须执行一次 identity backfill：逐个 withPrivateKey 派生
-//     publicKeyHex / publicKeyHash / fingerprint 并回写。backfill 失败的 key
+//     publicKeyHex / publicKeyHash 并回写。backfill 失败的 key
 //     标 identity-failed，只允许导出 / 删除。
 //   - emit key.created / key.deleted 时 payload 携带 publicKeyHash，让
 //     keyspace.deleteKey 能直接定位。
@@ -15,6 +15,13 @@
 // "keyspace ready 边界已完成，业务可以安全读取 key-scoped storage"。具体
 // 顺序：password 校验 -> backfillIdentities -> keyspace.onVaultUnlocked ->
 // setStatus("unlocked") + emit。失败时回退到 locked 并清空内存会话。
+//
+// 硬切换 003 收尾：
+//   - 系统不再生成、缓存、回写、透传 `fingerprint` 字段。
+//   - 短公钥属于 UI 显示格式，**不**在 vault 层派生。展示时由 UI
+//     调 `formatShortPublicKey(publicKeyHex)` 现算。
+//   - 旧库残留 `fingerprint` 仍可能存在于 `vault_keys` 记录上，读取时
+//     忽略，回写时也不再续命。
 
 import type { MessageBus } from "@keymaster/runtime";
 import {
@@ -201,7 +208,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       source: record.source,
       publicKeyHex: record.publicKeyHex,
       publicKeyHash: record.publicKeyHash,
-      fingerprint: record.fingerprint,
       // 硬切换 008：把 vaultDb 中的 identityStatus 透传给 KeyRef 消费者
       // （keyspaceService 依赖此字段过滤 failed key）。
       identityStatus: record.identityStatus ?? "ready",
@@ -218,7 +224,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       keyId: record.id,
       publicKeyHex: record.publicKeyHex,
       publicKeyHash: record.publicKeyHash,
-      fingerprint: record.fingerprint ?? "",
       label: record.label,
       capabilities: record.capabilities,
       createdAt: record.createdAt,
@@ -240,15 +245,23 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    *   - 失败时写 vaultDb.putKeyIdentityFailed 把状态持久化，keyspace 不会
    *     把这把 key 选为 active 候选。
    *   - 成功时发 key.identity.ready 事件；失败时发 key.identity.failed 事件。
+   *
+   * 硬切换 003 收尾：
+   *   - 只回写 publicKeyHex / publicKeyHash，不再回写 fingerprint。
+   *   - 老记录已有 fingerprint 字段时，putKeyIdentity 内部已白名单构造
+   *     字段，不会把 fingerprint 续命。
+   *   - key.identity.ready payload 也不再带 fingerprint（订阅方需要短公钥
+   *     时由 UI 侧现算）。
    */
   async function backfillIdentities() {
     deps.keyspace?.setInitializing(true);
     try {
       const records = await vaultDb.listKeys();
       for (const record of records) {
-        if (record.publicKeyHash && record.publicKeyHex && record.fingerprint) {
+        if (record.publicKeyHash && record.publicKeyHex) {
           // 已有完整 identity：确保 status 字段也是 ready（老 v2 记录可能
-          // 没有该字段，按 ready 处理）。
+          // 没有该字段，按 ready 处理）。即便老记录还残留 fingerprint，
+          // putKeyIdentityReady 内部也是白名单构造，不会写回。
           if (record.identityStatus !== "ready") {
             await vaultDb.putKeyIdentityReady(record.id);
           }
@@ -259,12 +272,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           const identity = deriveKeyIdentity(material.hex);
           // 写入 DB（同时把 identityStatus 置为 "ready"、清 identityError）。
           await vaultDb.putKeyIdentity(record.id, identity);
-          // 通过事件通知 keyspace 重建候选。
+          // 通过事件通知 keyspace 重建候选。payload 不再带 fingerprint。
           deps.messageBus.publish("key.identity.ready", {
             keyId: record.id,
             publicKeyHash: identity.publicKeyHash,
             publicKeyHex: identity.publicKeyHex,
-            fingerprint: identity.fingerprint,
             label: record.label,
             capabilities: record.capabilities,
             createdAt: record.createdAt
@@ -343,8 +355,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       cipherIvB64: bytesToHex(blob.iv),
       cipherB64: bytesToHex(blob.ciphertext),
       publicKeyHex: identity.publicKeyHex,
-      publicKeyHash: identity.publicKeyHash,
-      fingerprint: identity.fingerprint
+      publicKeyHash: identity.publicKeyHash
     };
     // 5) DB 写入必须发生在 notify / emit 之前——失败时 keyspace
     //    不会误把不存在的 key 选为 active，订阅者也不会收到

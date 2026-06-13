@@ -577,11 +577,12 @@ describe("identity backfill failure passthrough (硬切换 008 收尾)", () => {
     const entry = fromKeyspace.find((k) => k.keyId === ref.id);
     expect(entry?.identityStatus).toBe("failed");
     expect(entry?.identityError).toBe("simulated decrypt failure");
-    // 设计允许 failed key 保留 publicKeyHash：vaultDb.putKeyIdentityFailed
-    // 不动 identity 字段，只标 status。listActiveCandidates 会过滤掉
-    // failed key，但 listKeys 仍能读到 hash 供 UI 展示。
+    // 设计允许 failed key 保留 publicKeyHash / publicKeyHex：
+    // vaultDb.putKeyIdentityFailed 不动 identity 字段，只标 status。
+    // listActiveCandidates 会过滤掉 failed key，但 listKeys 仍能读到 hash
+    // / hex 供 UI 展示。硬切换 003 收尾：fingerprint 已废弃，不再断言。
     expect(entry?.publicKeyHash).toBe(ref.publicKeyHash);
-    expect(entry?.fingerprint).toBe(ref.fingerprint);
+    expect(entry?.publicKeyHex).toBe(ref.publicKeyHex);
   });
 });
 
@@ -777,7 +778,6 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     expect(ref.label).toBe("first-generated");
     expect(ref.publicKeyHex).toBeDefined();
     expect(ref.publicKeyHash).toBeDefined();
-    expect(ref.fingerprint).toBeDefined();
     // 关键：返回对象中不能有 material / hex / wif。
     const refRecord = ref as unknown as Record<string, unknown>;
     expect(refRecord.material).toBeUndefined();
@@ -1028,7 +1028,6 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     expect(wrapped.key.id).toBeTruthy();
     expect(wrapped.key.publicKeyHash).toBeDefined();
     expect(wrapped.key.label).toBe("explode");
-    expect(wrapped.key.fingerprint).toBeDefined();
     expect(wrapped.key.publicKeyHex).toBeDefined();
     // 3) DB 里 key 已存在。
     const stored = await vaultDb.getKey(wrapped.key.id);
@@ -1090,7 +1089,6 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(ref.capabilities).toEqual(["p2pkh"]);
     expect(ref.publicKeyHex).toBeDefined();
     expect(ref.publicKeyHash).toBeDefined();
-    expect(ref.fingerprint).toBeDefined();
     // Vault 状态：unlocked。
     expect(vault.status()).toBe("unlocked");
     // listKeys 看到 1 把。

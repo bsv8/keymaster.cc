@@ -40,7 +40,6 @@ function makeKeyspace(publicKeyHash: string): KeyspaceService {
       keyId: "k1",
       publicKeyHex: "00",
       publicKeyHash,
-      fingerprint: "ab..cd",
       label: "l",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z",

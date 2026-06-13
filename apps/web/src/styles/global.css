@@ -614,6 +614,11 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 /* ---------- P2PKH transfer widget ---------- */
 .p2pkh-transfer-widget { display: flex; flex-direction: column; gap: 8px; }
 .p2pkh-transfer-widget__address { color: var(--text-dim); font-size: 12px; }
+.p2pkh-transfer-widget__pubkey {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: var(--text-dim);
+  margin-left: 6px;
+}
 .p2pkh-transfer-widget__error { color: var(--danger); }
 .p2pkh-transfer-widget__actions { display: flex; gap: 8px; }
 .p2pkh-transfer-widget__preview { background: var(--surface-2); border-radius: var(--radius); padding: 8px 12px; }
@@ -813,7 +818,7 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   font-size: 13px; font-weight: 600; color: var(--text);
   max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.key-switch__fingerprint {
+.key-switch__pubkey {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px; color: var(--text-dim);
 }

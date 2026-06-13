@@ -17,11 +17,16 @@ export type BackgroundTaskState =
  * 任务归属的 key namespace（硬切换 007 / 008）。
  * 设计缘由：删除 key 时由 keyspace 取消该 key 下所有 task；active key
  * 切换不影响其他 key 的后台收尾。background 平台不应理解业务字段。
+ *
+ * 硬切换 003 收尾：若任务需要展示 key 上下文，UI 应在拿到本 scope 后
+ * 调 `formatShortPublicKey(publicKeyHex)` 现算短公钥；本接口**不**持
+ * 有 `fingerprint` 字段，也**不**通过 MessageBus 透传短公钥。
  */
 export interface BackgroundTaskKeyScope {
   publicKeyHash: string;
   label?: string;
-  fingerprint?: string;
+  /** 完整公钥 hex（可选）。如设置，UI 侧可现算短公钥展示。 */
+  publicKeyHex?: string;
 }
 
 /** 任务进度（可空）。 */

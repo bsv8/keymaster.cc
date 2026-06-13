@@ -1,8 +1,11 @@
 // packages/contracts/src/keyspace.ts
 // Keyspace 平台契约：Active Key + Key Namespace 存储 + Key 删除。
 // 设计缘由：
-//   - KeyIdentity 使用公钥身份（publicKeyHex / publicKeyHash / fingerprint），
+//   - KeyIdentity 使用公钥身份（publicKeyHex / publicKeyHash），
 //     不使用私钥、地址或网络作为根 id。私钥材料只留在 Vault 的 withPrivateKey 闭包内。
+//   - 短公钥属于 UI 显示格式，**不**作为 KeyIdentity 字段持有：
+//     需要短串展示时由 UI 侧 `formatShortPublicKey(publicKeyHex)` 现算。
+//   - 旧 `fingerprint` 概念已废弃，不再是 contract / storage / 业务对象的字段。
 //   - active key 是平台级状态，由 keyspace 维护；业务插件通过该服务获取当前身份。
 //   - 业务相关持久化必须通过 keyspace.openKeyStorage 进入 key namespace。
 //     IndexedDB 没有真正嵌套 namespace，因此用 DB name 表达归属：
@@ -15,13 +18,15 @@
 /**
  * 平台公开的 key 身份；不包含任何私钥材料。
  *
- * 字段可选性约束（硬切换 008 收尾）：
- *   - `ready` key 必须有 `publicKeyHex` / `publicKeyHash` / `fingerprint`。
- *   - `failed` key 可以没有这三个字段：例如 backfill 阶段解密失败，或老
+ * 字段可选性约束（硬切换 008 收尾 + 硬切换 003 收尾）：
+ *   - `ready` key 必须有 `publicKeyHex` / `publicKeyHash`。
+ *   - `failed` key 可以没有这两个字段：例如 backfill 阶段解密失败，或老
  *     旧记录尚未 backfill 的情况。
  *   - `failed` key 只能导出 / 删除；不允许作为 active key。
  *   - `uninitialized` key 通常是 import 后 backfill 暂未跑完；UI 显示
  *     "初始化中"。
+ *   - 短公钥属于 UI 显示格式，**不**作为 KeyIdentity 字段持有。展示时
+ *     调 `formatShortPublicKey(publicKeyHex)` 现算。
  */
 export interface KeyIdentity {
   /** Vault 内部 key id，签名时传给 vault.withPrivateKey 借用私钥。 */
@@ -30,8 +35,6 @@ export interface KeyIdentity {
   publicKeyHex?: string;
   /** 平台 namespace id，建议 sha256(compressed public key) 的 hex；ready 必有，failed 可能缺省。 */
   publicKeyHash?: string;
-  /** 短展示指纹，例如 publicKeyHash 前后截断；ready 必有，failed 可能缺省。 */
-  fingerprint?: string;
   /** 用户标签。 */
   label: string;
   /** 私钥支持能力，例如 ["p2pkh"]。 */

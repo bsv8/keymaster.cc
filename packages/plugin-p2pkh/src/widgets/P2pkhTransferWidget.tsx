@@ -8,10 +8,18 @@
 //   - 成功后保留 widget 实例展示结果；用户关闭后才 onCompleted。
 //
 // 硬切换 003：所有展示文案走 i18n。
+//
+// 硬切换 003 收尾：
+//   - 当前 key 上下文统一显示 `label + 短公钥`。
+//   - 短公钥由 `formatShortPublicKey(activeIdentity.publicKeyHex)` 现算；
+//     不再读取 `KeyIdentity.fingerprint` 字段。
+//   - class 命名从 `p2pkh-transfer-widget__fingerprint` 改为
+//     `p2pkh-transfer-widget__pubkey`，避免名称漂移。
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, PageHeader, Select, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type { Contact, ContactsService, KeyIdentity, KeyspaceService, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { assetIdToNetwork } from "../p2pkhContracts.js";
@@ -68,8 +76,10 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
 
   const isAllMode = activeKey.mode === "all";
 
-  // 硬切换 008：通过 keyspace.getKey 拿当前 key 的展示信息（label + fingerprint），
-  // 不再在 UI 里渲染完整 publicKeyHash。
+  // 硬切换 008 + 硬切换 003 收尾：通过 keyspace.getKey 拿当前 key 的展示
+  // 信息（label + 短公钥），不再在 UI 里渲染完整 publicKeyHash 或读取
+  // 已废弃的 fingerprint 字段。短公钥由 formatShortPublicKey(publicKeyHex)
+  // 现算。
   const [activeIdentity, setActiveIdentity] = useState<KeyIdentity | undefined>(undefined);
 
   useEffect(() => {
@@ -239,6 +249,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   }, [activeKey, preview, previewKey, t]);
 
   const unnamed = t("p2pkh.transfer.unnamed", { defaultValue: "未命名" });
+  const identityMissing = t("p2pkh.transfer.identityMissing", { defaultValue: "身份不可用" });
 
   return (
     <div className="p2pkh-transfer-widget">
@@ -254,9 +265,13 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
           ) : activeIdentity ? (
             <>
               <strong>{activeIdentity.label || unnamed}</strong>
-              <code className="p2pkh-transfer-widget__fingerprint">
-                {activeIdentity.fingerprint}
-              </code>
+              {activeIdentity.publicKeyHex ? (
+                <code className="p2pkh-transfer-widget__pubkey">
+                  {formatShortPublicKey(activeIdentity.publicKeyHex)}
+                </code>
+              ) : (
+                <code className="p2pkh-transfer-widget__pubkey">{identityMissing}</code>
+              )}
             </>
           ) : activeKey.activePublicKeyHash ? (
             <code>{t("p2pkh.transfer.loading", { defaultValue: "加载中…" })}</code>

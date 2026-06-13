@@ -341,18 +341,22 @@ export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {
 }
 
 /**
- * 硬切换 008 收尾：KeyIdentity 收窄类型。
- * 设计缘由：contract 的 KeyIdentity 字段 publicKeyHash / publicKeyHex /
- * fingerprint 是 optional（兼容 failed / uninitialized 状态），但 P2PKH
- * 业务只在 ready 状态下运行。`requireReadyKey` 内部做断言后返回
- * `ReadyKeyIdentity`，调用方拿到的就是 publicKeyHash 必填的窄类型，
- * 写入 P2pkhKeyResource.publicKeyHash 等必填字段时不再需要 `!`。
+ * 硬切换 008 收尾 + 硬切换 003 收尾：KeyIdentity 收窄类型。
+ * 设计缘由：contract 的 KeyIdentity 字段 publicKeyHash / publicKeyHex
+ * 是 optional（兼容 failed / uninitialized 状态），但 P2PKH 业务只在
+ * ready 状态下运行。`requireReadyKey` 内部做断言后返回
+ * `ReadyKeyIdentity`，调用方拿到的就是 publicKeyHash / publicKeyHex
+ * 必填的窄类型，写入 P2pkhKeyResource.publicKeyHash 等必填字段时不再
+ * 需要 `!`。
+ *
+ * 硬切换 003 收尾：`fingerprint` 字段已从 contract 中删除；
+ * 短公钥属于 UI 展示格式，需要时由 UI 拿 `publicKeyHex` 调
+ * `formatShortPublicKey()` 现算。本窄类型也不再持有 `fingerprint`。
  */
 export interface ReadyKeyIdentity {
   keyId: string;
   publicKeyHex: string;
   publicKeyHash: string;
-  fingerprint: string;
   label: string;
   capabilities: string[];
   createdAt: string;
@@ -371,7 +375,10 @@ export interface ReadyKeyIdentity {
  * 这里仍然显式拒绝 "failed" 与 "uninitialized"——前者是 backfill
  * 解密失败（不能让 P2PKH 拿去做签名），后者是 backfill 未完成
  * 的中间态（不能让 P2PKH 在命名空间还没就绪时打开 DB）。同时
- * 三个 identity 字段必须存在，老 v1/v2 记录缺字段时也会被拒。
+ * publicKeyHash / publicKeyHex 必须存在，老 v1/v2 记录缺字段时也会被拒。
+ *
+ * 硬切换 003 收尾：本函数不再检查或回填 `fingerprint`——该字段已
+ * 从 KeyIdentity / ReadyKeyIdentity 中删除。短公钥由 UI 现算。
  */
 export function requireReadyKey(key: KeyIdentity | undefined | null): ReadyKeyIdentity {
   if (!key) throw new Error("Active key is not ready");
@@ -379,12 +386,10 @@ export function requireReadyKey(key: KeyIdentity | undefined | null): ReadyKeyId
   if (key.identityStatus === "uninitialized") throw new Error("Active key is not ready");
   if (!key.publicKeyHash) throw new Error("Active key is not ready");
   if (!key.publicKeyHex) throw new Error("Active key is not ready");
-  if (!key.fingerprint) throw new Error("Active key is not ready");
   return {
     keyId: key.keyId,
     publicKeyHex: key.publicKeyHex,
     publicKeyHash: key.publicKeyHash,
-    fingerprint: key.fingerprint,
     label: key.label,
     capabilities: key.capabilities,
     createdAt: key.createdAt,
