@@ -2,6 +2,10 @@
 // 插件/包边界检查：禁止跨越本应单向的依赖。
 // 设计缘由：plugin-host 通过 capability/registry 协作；直接 import 互相依赖的包
 // 会让边界立刻失效（也是这次硬切换的核心动机）。
+//
+// 重要：本脚本必须是"可失败"的硬规则，不只是备注说明。所有 plugin-poker
+// 硬切换文档（001）里要求的边界都在这里写成 process.exit(1) 路径，避免
+// 实施时被"先放着，后面再补"绕过。
 
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
@@ -134,6 +138,81 @@ for (const file of walk(shellDir)) {
   const text = readFileSync(file, "utf8");
   if (/@keymaster\/plugin-background\b/.test(text)) {
     recordViolation(file, "Shell must not import @keymaster/plugin-background");
+  }
+}
+
+/**
+ * plugin-poker 硬边界（硬切换 001 修订版的"可失败"规则）。
+ *
+ * 设计缘由：修订版施工单 666 行明确要求脚本层把约束落成"可失败"的检查，
+ * 不再接受纯文档约束。以下规则全部走 process.exit(1)：
+ *
+ *   1. 不 import 任何其它 plugin-*（vault / p2pkh / transfer / assets /
+ *      woc / background / home / settings / contacts / contracts 例外）。
+ *   2. 不 import apps/web shell 路径。
+ *   3. 不直接出现 fetch("ws://...") / new WebSocket("ws://...") 字面
+ *      量——proxy endpoint 必须来自 service settings。
+ *   4. engine / tsstack 目录不允许 import @keymaster/runtime / @keymaster/ui
+ *      （UI/runtime 只能通过 contracts capability 间接进入；engine 是
+ *      纯协议真值层）。
+ *   5. tsstack 目录只允许 import @bsv/sdk + 标准库；不允许 import 任何
+ *      @keymaster/plugin-*（保证它是"真值底座包装"，不是业务散件）。
+ */
+const pokerSrc = join(packagesDir, "plugin-poker", "src");
+const POKER_FORBIDDEN_PLUGINS = [
+  "plugin-vault", "plugin-p2pkh", "plugin-transfer", "plugin-assets",
+  "plugin-woc", "plugin-background", "plugin-home", "plugin-settings",
+  "plugin-contacts", "plugin-key-import", "plugin-importer-hex",
+  "plugin-importer-wif", "plugin-importer-json-file"
+];
+for (const file of walk(pokerSrc)) {
+  const text = readFileSync(file, "utf8");
+  const rel = relative(root, file);
+
+  // 1) 不 import 其它业务插件
+  for (const forbidden of POKER_FORBIDDEN_PLUGINS) {
+    const pkg = `@keymaster/${forbidden}`;
+    if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
+      recordViolation(file, `plugin-poker must not import ${pkg}`);
+    }
+  }
+
+  // 2) 不 import apps/web shell
+  if (/from\s+['"][^'"]*apps\/web/.test(text) || /from\s+['"]@keymaster\/web/.test(text)) {
+    recordViolation(file, "plugin-poker must not import apps/web shell");
+  }
+
+  // 3) 不允许在源码里硬编码 WebSocket / wss endpoint
+  //    (合法路径：从 service.settings.proxyEndpoint 读取后再 new WebSocket(url))
+  //    例外：当前文件就是 pokerService.ts 本身，它 new WebSocket(this.settings.proxyEndpoint)。
+  if (!/pokerService\.ts$/.test(rel)) {
+    if (/new\s+WebSocket\s*\(\s*["'`]wss?:\/\//.test(text)) {
+      recordViolation(file, "plugin-poker must not hardcode WebSocket URLs (use service settings)");
+    }
+    if (/fetch\s*\(\s*["'`]wss?:\/\//.test(text)) {
+      recordViolation(file, "plugin-poker must not hardcode fetch() to wss endpoints");
+    }
+  }
+
+  // 4) engine/ 与 tsstack/ 是协议真值层，不允许接 runtime / ui
+  if (/\/(engine|tsstack|conformance)\//.test(rel)) {
+    for (const forbidden of ["@keymaster/runtime", "@keymaster/ui"]) {
+      const re = new RegExp(`(from\\s+['"]${forbidden}|require\\(['"]${forbidden})`);
+      if (re.test(text)) {
+        recordViolation(file, `plugin-poker ${rel.includes("/engine/") ? "engine" : rel.includes("/tsstack/") ? "tsstack" : "conformance"} must not import ${forbidden}`);
+      }
+    }
+  }
+
+  // 5) tsstack/ 只接 @bsv/sdk + 标准库 + 自家 contracts；不接其它插件
+  if (/\/tsstack\//.test(rel)) {
+    for (const p of pluginNames) {
+      if (p === "plugin-poker") continue;
+      const pkg = `@keymaster/${p}`;
+      if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
+        recordViolation(file, `plugin-poker tsstack/ must not import ${pkg}`);
+      }
+    }
   }
 }
 

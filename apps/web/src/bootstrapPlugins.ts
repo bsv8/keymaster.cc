@@ -19,6 +19,7 @@ import { jsonFileImporterPlugin } from "@keymaster/plugin-importer-json-file";
 import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
 import { keyImportPlugin } from "@keymaster/plugin-key-import";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
+import { pokerPlugin } from "@keymaster/plugin-poker";
 import { settingsPlugin } from "@keymaster/plugin-settings";
 import { transferPlugin } from "@keymaster/plugin-transfer";
 import { vaultPlugin } from "@keymaster/plugin-vault";
@@ -48,6 +49,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     wocPlugin,
     backgroundPlugin,
     p2pkhPlugin,
+    pokerPlugin,
     wifImporterPlugin,
     hexImporterPlugin,
     jsonFileImporterPlugin

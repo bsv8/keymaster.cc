@@ -23,3 +23,4 @@ export * from "./background.js";
 export * from "./woc.js";
 export * from "./i18n.js";
 export * from "./keyDisplay.js";
+export * from "./poker.js";
