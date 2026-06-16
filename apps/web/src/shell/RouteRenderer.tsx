@@ -1,6 +1,9 @@
 // apps/web/src/shell/RouteRenderer.tsx
 // 根据 path 渲染路由。
-// 设计缘由：路由只来自 route.registry；找不到时显示 NotFound。
+// 设计缘由：
+//   - 业务路由来自 route.registry；
+//   - 设置详情页来自 settings.registry（硬切换 003：不再有"通用 /settings 聚合页"）；
+//   - 路由匹配优先精确匹配，缺失时回退到前缀匹配（例如 /contacts/:id -> /contacts/:id）。
 //
 // router 从 `@keymaster/runtime` re-export，保持与 `Sidebar` /
 // `Breadcrumbs` 旧 import 路径兼容（`import { router } from
@@ -9,25 +12,45 @@
 // 避免 `<a href>` 绕过 SPA 的问题。
 
 import { router, useCurrentPath, useI18n, usePluginHost } from "@keymaster/runtime";
-import type { AppRoute } from "@keymaster/contracts";
+import type { AppRoute, SettingsRoute } from "@keymaster/contracts";
 
 export { router };
 
-export function useRoute(): AppRoute | undefined {
+interface ResolvedRoute {
+  component: AppRoute["component"] | SettingsRoute["component"];
+  source: "route" | "settings";
+  path: string;
+}
+
+export function useRoute(): ResolvedRoute | undefined {
   const host = usePluginHost();
   const path = useCurrentPath();
 
-  // 走精确匹配优先，缺失精确匹配时回退到前缀匹配（例如 /contacts/:id -> /contacts/:id）。
-  // 注意：匹配逻辑不依赖翻译后的 label；只比 path。route.label 走 i18n 是展示层。
   const routes = host.routes.list();
-  return (
-    routes.find((r) => r.path === path) ??
-    routes.find((r) => {
-      if (!r.path.includes(":")) return false;
-      const re = new RegExp("^" + r.path.replace(/:[^/]+/g, "[^/]+") + "$");
-      return re.test(path);
-    })
-  );
+  const exact = routes.find((r) => r.path === path);
+  if (exact) {
+    return { component: exact.component, source: "route", path: exact.path };
+  }
+  const pref = routes.find((r) => {
+    if (!r.path.includes(":")) return false;
+    const re = new RegExp("^" + r.path.replace(/:[^/]+/g, "[^/]+") + "$");
+    return re.test(path);
+  });
+  if (pref) {
+    return { component: pref.component, source: "route", path: pref.path };
+  }
+
+  // 设置详情页（硬切换 003）：settings.registry 的 path 直接参与路由匹配。
+  const settingsRoutes = host.settings.list();
+  const settingsExact = settingsRoutes.find((r) => r.path === path);
+  if (settingsExact) {
+    return {
+      component: settingsExact.component,
+      source: "settings",
+      path: settingsExact.path
+    };
+  }
+  return undefined;
 }
 
 export function RouteRenderer() {

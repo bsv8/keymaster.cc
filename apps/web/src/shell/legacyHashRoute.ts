@@ -9,6 +9,13 @@
 //   - 仅迁移**站内**单斜杠开头的 hash 路径；普通 anchor (#section)、
 //     协议 URL、跨站路径一律不动。
 //   - 使用 history.replaceState 不新增浏览器历史记录、不触发重载。
+//
+// 硬切换 003：旧 hash "#/settings"（无后续段）映射到 "/settings/language"。
+// 这是因为 /settings 聚合页已经删除，但应用启动时可能仍有旧入口残留在
+// URL 或书签中；迁移目标必须是真实存在、稳定、不可被业务插件卸载的
+// 系统级设置页。语言设置页正是这种真值。
+
+const LEGACY_SETTINGS_REDIRECT = "/settings/language";
 
 /**
  * 纯解析：把 pathname + hash 解析为可用的 pathname。
@@ -27,6 +34,8 @@ export function parseLegacyHashPath(pathname: string, hash: string): string | un
   // 5) 拒绝看起来像协议 URL 的形式（"//xxx" 已经在上一步挡掉；
   //    这里再挡掉 "/https://..." 这种 "/" 后紧跟协议头的情况）。
   if (/^\/[a-z][a-z0-9+.-]*:\/\//i.test(inner)) return undefined;
+  // 6) 硬切换 003：旧 "#/settings"（聚合页）已不存在；迁移到语言设置页。
+  if (inner === "/settings") return LEGACY_SETTINGS_REDIRECT;
   return inner;
 }
 

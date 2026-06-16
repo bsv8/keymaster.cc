@@ -3,7 +3,7 @@
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
 
-import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, MenuItem, SettingsField, SettingsPage, TransferRegistry as ITransferRegistry } from "./index.js";
+import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, MenuItem, SettingsRoute, TransferRegistry as ITransferRegistry } from "./index.js";
 import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
 import type { I18nText } from "./i18n.js";
@@ -26,11 +26,25 @@ export interface BreadcrumbRegistry {
   match(path: string): BreadcrumbProvider | undefined;
 }
 
+/**
+ * 设置详情页注册表（硬切换 003）。
+ *
+ * - 插件只能注册"独立设置详情页"（SettingsRoute）；
+ * - 不再支持 registerField / listFields / 聚合 page.component 拼装；
+ * - 同一路由只能由 settings.registry 一处真值，不能再同时进
+ *   route.registry / menu.registry。
+ */
 export interface SettingsRegistry {
-  registerPage(page: SettingsPage): void;
-  registerField(field: SettingsField): void;
-  listPages(): SettingsPage[];
-  listFields(): SettingsField[];
+  /** 注册一个设置详情页。id 重复时抛错。 */
+  register(route: SettingsRoute): void;
+  /** 注销设置详情页。id 不存在时抛错。 */
+  unregister(id: string): void;
+  /** 列出全部设置详情页，按 order 升序。 */
+  list(): SettingsRoute[];
+  /** 按 id 取详情页。 */
+  byId(id: string): SettingsRoute | undefined;
+  /** 按 path 取详情页（path 必须以 "/" 开头）。 */
+  byPath(path: string): SettingsRoute | undefined;
 }
 
 export interface HomeRegistry {

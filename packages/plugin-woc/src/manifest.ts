@@ -1,22 +1,20 @@
 // packages/plugin-woc/src/manifest.ts
-// WOC 插件清单：注册 woc.service、设置页、路由、菜单、面包屑。
+// WOC 插件清单：注册 woc.service / 设置页 / 面包屑。
 //
 // 设计缘由（硬切换 008 收尾）：
 //   - actor 必须挂到 runtime messageBus 才能与其它插件在同一总线上。
 //   - 因此本插件显式声明对 RUNTIME_MESSAGE_BUS capability 的依赖。
 //   - 业务插件仍只依赖 wocService，不再接触 messageBus。
 //
-// 硬切换 003：所有展示文案走 i18n。
+// 硬切换 003：所有展示文案走 i18n；/settings/woc 改为通过
+// settings.registry 注册，不再向 route.registry / menu.registry 重复注册。
 
 import type {
   BreadcrumbProvider,
   BreadcrumbRegistry,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
   MessageBus,
   PluginManifest,
-  RouteRegistry,
   SettingsRegistry,
   WocService
 } from "@keymaster/contracts";
@@ -28,10 +26,6 @@ const wocResources: I18nPluginResources = {
   namespace: "woc",
   resources: {
     en: {
-      "woc.route.settings": "WOC settings",
-      "woc.menu.settings": "WOC",
-      "woc.settings.label": "WOC",
-      "woc.settings.description": "WhatsOnChain API endpoint, rate limit, and queue status.",
       "woc.crumb.settings": "Settings",
       "woc.crumb.woc": "WOC",
       "woc.page.title": "WOC settings",
@@ -53,10 +47,6 @@ const wocResources: I18nPluginResources = {
       "woc.status.coordinated.warn": "Multi-tab coordination: disabled. The current browser does not support Web Locks, so cross-tab rate limiting cannot be guaranteed. Open only one wallet tab at a time, or switch to a Web-Locks-capable browser, to avoid triggering WOC rate limits."
     },
     "zh-CN": {
-      "woc.route.settings": "WOC 设置",
-      "woc.menu.settings": "WOC",
-      "woc.settings.label": "WOC",
-      "woc.settings.description": "WhatsOnChain API 入口、限流与队列状态。",
       "woc.crumb.settings": "设置",
       "woc.crumb.woc": "WOC",
       "woc.page.title": "WOC 设置",
@@ -94,9 +84,7 @@ export const wocPlugin: PluginManifest = {
   i18n: wocResources,
   dependencies: [
     { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
-    { capability: "route.registry", reason: "注册 WOC 设置页" },
-    { capability: "menu.registry", reason: "注册 WOC 菜单入口" },
-    { capability: "settings.registry", reason: "注册 WOC 设置页" },
+    { capability: "settings.registry", reason: "注册 WOC 设置详情页" },
     { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" }
   ],
   setup(ctx) {
@@ -104,38 +92,17 @@ export const wocPlugin: PluginManifest = {
     const service = createWocService({ messageBus });
     ctx.provide<WocService>(WOC_CAPABILITY, service);
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    routes.register({
+    // 硬切换 003：settings.registry 单一真值；同时承担"菜单入口 + 路由匹配"。
+    const settings = ctx.get<SettingsRegistry>("settings.registry");
+    settings.register({
       id: "woc.settings",
       path: "/settings/woc",
-      label: { key: "woc.route.settings", fallback: "WOC settings" },
+      label: { key: "woc.crumb.woc", fallback: "WOC" },
+      description: { key: "woc.page.desc", fallback: "WhatsOnChain API endpoint, rate limit, and queue status." },
       component: WocSettingsPage,
-      inMenu: false,
-      menuGroup: "settings",
-      order: 120,
-      icon: "Cloud"
-    });
-
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.woc",
-      label: { key: "woc.menu.settings", fallback: "WOC" },
-      routeId: "woc.settings",
-      group: "settings",
       order: 120,
       icon: "Cloud",
       visibleWhen: ({ unlocked }) => unlocked
-    };
-    menus.register(item);
-
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.registerPage({
-      id: "woc.config",
-      label: { key: "woc.settings.label", fallback: "WOC" },
-      description: { key: "woc.settings.description", fallback: "WhatsOnChain API endpoint, rate limit, and queue status." },
-      fields: [],
-      order: 20,
-      component: WocSettingsPage
     });
 
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
@@ -144,7 +111,7 @@ export const wocPlugin: PluginManifest = {
       order: 250,
       match: (path) => path === "/settings/woc",
       resolve: () => [
-        { label: { key: "woc.crumb.settings", fallback: "Settings" }, path: "/settings" },
+        { label: { key: "woc.crumb.settings", fallback: "Settings" } },
         { label: { key: "woc.crumb.woc", fallback: "WOC" } }
       ]
     };

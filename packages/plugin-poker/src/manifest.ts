@@ -8,6 +8,12 @@
 //     严禁 deep-import 其它 plugin-*。
 //   - 暴露 POKER_SERVICE_CAPABILITY 与 POKER_CAPABILITY（同值）两个常量名，
 //     兼容旧调用方；plugin-poker 的能力 key 与 contracts/poker.ts 集中维护。
+//
+// 硬切换 003：
+//   - /settings/poker 改为通过 settings.registry 注册单一真值；
+//   - 不再向 route.registry / menu.registry 重复注册同一设置页；
+//   - 删除 PokerSettingsEntry，不再向 /settings 聚合页注册入口 section；
+//   - breadcrumb 第一段改为不可点击"设置"分类节点。
 
 import type {
   BreadcrumbProvider,
@@ -25,11 +31,9 @@ import type {
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY, POKER_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { createPokerService } from "./pokerService.js";
-import { PokerPage } from "./PokerPage.js";
 import { PokerLobby } from "./PokerLobby.js";
 import { PokerTable as PokerTablePage } from "./PokerTable.js";
 import { PokerSettingsPage } from "./PokerSettingsPage.js";
-import { PokerSettingsEntry } from "./PokerSettingsEntry.js";
 import { PokerHomeWidget } from "./widgets/PokerHomeWidget.js";
 
 export { POKER_SERVICE_CAPABILITY };
@@ -43,14 +47,9 @@ const pokerResources: I18nPluginResources = {
       "poker.provider.description": "Multi-tenant peer poker over bsv-poker protocol.",
       "poker.route.lobby": "Poker lobby",
       "poker.route.table": "Poker table",
-      "poker.route.settings": "Poker settings",
-      "poker.menu.lobby": "Poker",
-      "poker.menu.settings": "Poker settings",
       "poker.crumb.poker": "Poker",
       "poker.crumb.settings": "Settings",
       "poker.crumb.table": "Table",
-      "poker.settings.label": "Poker",
-      "poker.settings.description": "Proxy endpoint and broadcast policy.",
       "poker.settings.endpoint": "Proxy WSS endpoint",
       "poker.settings.endpointHint": "e.g. wss://poker-proxy.example.com",
       "poker.settings.announceP2PNode": "Announced P2PNode endpoint",
@@ -83,12 +82,6 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.identity.section": "Identity binding",
       "poker.settings.actions.section": "Actions",
       "poker.settings.diag": "Diagnostics",
-      // 硬切换 002：/settings 入口 section 专用文案
-      "poker.entry.summary": "Poker entry section — opens the full configuration page.",
-      "poker.entry.statusLabel": "Status",
-      "poker.entry.identityLabel": "Identity",
-      "poker.entry.openSettings": "Open Poker settings",
-      "poker.entry.noService": "Poker service not available",
       "poker.home.title": "Poker",
       "poker.home.empty": "Not connected",
       "poker.home.connectHint": "Open Poker settings to configure the proxy endpoint.",
@@ -130,14 +123,9 @@ const pokerResources: I18nPluginResources = {
       "poker.provider.description": "基于 bsv-poker 协议的多租户浏览器扑克。",
       "poker.route.lobby": "扑克大厅",
       "poker.route.table": "扑克桌",
-      "poker.route.settings": "扑克设置",
-      "poker.menu.lobby": "扑克",
-      "poker.menu.settings": "扑克设置",
       "poker.crumb.poker": "扑克",
       "poker.crumb.settings": "设置",
       "poker.crumb.table": "桌",
-      "poker.settings.label": "扑克",
-      "poker.settings.description": "代理入口与广播策略。",
       "poker.settings.endpoint": "代理 WSS endpoint",
       "poker.settings.endpointHint": "例如 wss://poker-proxy.example.com",
       "poker.settings.announceP2PNode": "公告的 P2PNode 入口",
@@ -158,7 +146,7 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.status.ready": "就绪",
       "poker.settings.status.reconnecting": "重连中",
       "poker.settings.status.failed": "失败",
-      "poker.settings.status.closed": "已关闭",
+      "poker.settings.status.closed": "已断开",
       "poker.settings.identity": "扑克身份",
       "poker.settings.identity.bound": "已绑定",
       "poker.settings.identity.unbound": "未绑定（fail-closed）",
@@ -170,12 +158,6 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.identity.section": "身份绑定",
       "poker.settings.actions.section": "操作",
       "poker.settings.diag": "诊断",
-      // 硬切换 002：/settings 入口 section 专用文案
-      "poker.entry.summary": "Poker 入口 section — 进入完整配置页。",
-      "poker.entry.statusLabel": "连接状态",
-      "poker.entry.identityLabel": "身份",
-      "poker.entry.openSettings": "打开 Poker 设置",
-      "poker.entry.noService": "Poker 服务不可用",
       "poker.home.title": "扑克",
       "poker.home.empty": "未连接",
       "poker.home.connectHint": "前往扑克设置配置代理 endpoint。",
@@ -187,7 +169,7 @@ const pokerResources: I18nPluginResources = {
       "poker.status.ready": "就绪",
       "poker.status.reconnecting": "重连中",
       "poker.status.failed": "失败",
-      "poker.status.closed": "已关闭",
+      "poker.status.closed": "已断开",
       "poker.lobby.title": "扑克大厅",
       "poker.lobby.description": "本地 poker-proxy 连接观察到的桌局与在线玩家。",
       "poker.lobby.tables": "桌局",
@@ -233,7 +215,7 @@ export const pokerPlugin: PluginManifest = {
     { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
     { capability: "route.registry", reason: "register poker pages" },
     { capability: "menu.registry", reason: "register poker menu" },
-    { capability: "settings.registry", reason: "register poker entry section in /settings" },
+    { capability: "settings.registry", reason: "register poker settings detail page" },
     { capability: "home.registry", reason: "register poker home widget" },
     { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" }
   ],
@@ -263,22 +245,12 @@ export const pokerPlugin: PluginManifest = {
       component: PokerTablePage,
       inMenu: false
     });
-    routes.register({
-      id: "poker.settings",
-      path: "/settings/poker",
-      label: { key: "poker.route.settings", fallback: "Poker settings" },
-      component: PokerSettingsPage,
-      inMenu: false,
-      menuGroup: "settings",
-      order: 120,
-      icon: "Cog"
-    });
 
     const menus = ctx.get<MenuRegistry>("menu.registry");
     const items: MenuItem[] = [
       {
         id: "menu.poker.lobby",
-        label: { key: "poker.menu.lobby", fallback: "Poker" },
+        label: { key: "poker.route.lobby", fallback: "Poker lobby" },
         routeId: "poker.lobby",
         group: "apps",
         order: 30,
@@ -288,20 +260,18 @@ export const pokerPlugin: PluginManifest = {
     ];
     for (const item of items) menus.register(item);
 
-    // 硬切换 002 唯一结论：
-    //   - Poker 配置项不再注册为通用 SettingsField；
-    //   - 但 settings.registry.registerPage(...) 必须保留，
-    //     挂的是 PokerSettingsEntry（轻量入口 section），不是 PokerSettingsPage；
-    //   - /settings/poker 才是 Poker 唯一正式完整设置页；
-    //   - 该入口随 plugin enable/disable 热出现 / 热消失。
+    // 硬切换 003：/settings/poker 由 settings.registry 单一真值提供。
+    // 不再保留 PokerSettingsEntry，不再向 /settings 聚合页注册入口 section。
     const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.registerPage({
-      id: "poker.config",
-      label: { key: "poker.settings.label", fallback: "Poker" },
-      description: { key: "poker.settings.description", fallback: "Poker settings." },
-      fields: [],
-      order: 30,
-      component: PokerSettingsEntry
+    settings.register({
+      id: "poker.settings",
+      path: "/settings/poker",
+      label: { key: "poker.crumb.poker", fallback: "Poker" },
+      description: { key: "poker.provider.description", fallback: "Multi-tenant peer poker." },
+      component: PokerSettingsPage,
+      order: 130,
+      icon: "Cog",
+      visibleWhen: ({ unlocked }) => unlocked
     });
 
     const home = ctx.get<HomeRegistry>("home.registry");
@@ -322,7 +292,7 @@ export const pokerPlugin: PluginManifest = {
       resolve: (path) => {
         if (path.startsWith("/settings/poker")) {
           return [
-            { label: { key: "poker.crumb.settings", fallback: "Settings" }, path: "/settings" },
+            { label: { key: "poker.crumb.settings", fallback: "Settings" } },
             { label: { key: "poker.crumb.poker", fallback: "Poker" } }
           ];
         }
@@ -336,9 +306,6 @@ export const pokerPlugin: PluginManifest = {
       }
     };
     breadcrumbs.register(provider);
-
-    // 单页 alias（保留旧入口）。
-    void PokerPage;
 
     // 硬切换 001：teardown 桥接到 service.dispose() —— 内部处理 ws / reconnect
     // timer / identity binding / listeners 全部清理。

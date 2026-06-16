@@ -20,6 +20,11 @@ describe("parseLegacyHashPath", () => {
     expect(parseLegacyHashPath("/", "#/settings/vault")).toBe("/settings/vault");
   });
 
+  it("migrates legacy #/settings to /settings/language", () => {
+    // 旧 hash /settings 已不再有聚合页面；统一迁移到语言设置页（最稳定的系统级）。
+    expect(parseLegacyHashPath("/", "#/settings")).toBe("/settings/language");
+  });
+
   it("preserves hash query string", () => {
     expect(parseLegacyHashPath("/", "#/import?source=vault")).toBe(
       "/import?source=vault"
@@ -100,6 +105,14 @@ describe("normalizeLegacyHashRoute (side effect)", () => {
     expect(migrated).toBe(true);
     expect(calls).toHaveLength(1);
     expect(calls[0]?.url).toBe("/settings/vault");
+  });
+
+  it("migrates legacy #/settings to /settings/language", () => {
+    installWindow("/", "#/settings");
+    const migrated = normalizeLegacyHashRoute();
+    expect(migrated).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.url).toBe("/settings/language");
   });
 
   it("preserves query string when migrating", () => {

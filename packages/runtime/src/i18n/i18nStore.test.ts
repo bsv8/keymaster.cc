@@ -18,7 +18,19 @@ const STORAGE_KEY = "keymaster.languageMode";
 
 describe("i18nStore", () => {
   beforeEach(() => {
-    if (typeof window !== "undefined") {
+    // 注意：vitest.setup.ts 把 MemoryStorage 装到 globalThis.localStorage 上，
+    // 而非 window.localStorage。这里必须清掉 globalThis 这一份；否则
+    // 前面用例写入的 STORAGE_KEY 会污染后续用例（applyInitialLanguage
+    // 会读到残留值，导致 mode/language 进入 "manual/zh-CN" 状态）。
+    const ls = (globalThis as { localStorage?: Storage }).localStorage;
+    if (ls) {
+      try {
+        ls.removeItem(STORAGE_KEY);
+      } catch {
+        // 忽略
+      }
+    }
+    if (typeof window !== "undefined" && window.localStorage && window.localStorage !== ls) {
       try {
         window.localStorage.removeItem(STORAGE_KEY);
       } catch {

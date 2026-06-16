@@ -6,29 +6,27 @@
 //   - vault 同时提供 vault.service 与 keyspace.service；KeySwitchWidget 由
 //     vault 直接注册到 topbar.registry（order 90），位置在 background.tray
 //     (order 100) 左侧。
-//   - manifest 声明两个 keyScopedStorages（meta / keys），让 runtime 在装载时
-//     自动调用 keyspace.registerPluginStorage。
+//   - manifest 声明 keyScopedStorages（meta），让 runtime 在装载时自动调用
+//     keyspace.registerPluginStorage。
 //   - keyspace service 通过 capability "keyspace.service" 暴露；key 状态
 //     切换由 keyspace 维护，shell 与业务插件只读不写。
 //
+// 硬切换 003：
+//   - /settings/vault 不再向 route.registry + menu.registry 双注册；
+//     改为通过 settings.registry.register() 注册单一真值。
+//   - breadcrumb 第一段改为不可点击"设置"分类节点（不带 path）。
+//
 // 硬切换 002：
 //   - /settings/vault 路由 label 改为"Key 管理"，与 VaultSettingsPage 标题一致。
-//   - 注册菜单入口"Key 管理"（menu.vault.keys）到 menu.registry，group=settings、
-//     order=0，icon=KeyRound，visibleWhen=unlocked——放在通用"设置"前。
-//   - 注册面包屑 provider：/settings/vault 显示"设置 / Key 管理"。
-//   - 移除 settings.registry 中"vault.security"无字段占位页（重复且空白）。
-//
-// 硬切换 003：route / menu / breadcrumb / topbar / command 全部走 I18nText；
-// 资源在 plugin.i18n 中由 runtime 在 setup 之前注入。
 
 import type {
   BreadcrumbRegistry,
   CommandRegistry,
   I18nPluginResources,
-  MenuRegistry,
   MessageBus,
   PluginManifest,
   RouteRegistry,
+  SettingsRegistry,
   TopbarRegistry
 } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -41,8 +39,8 @@ import { KeySwitchWidget } from "./KeySwitchWidget.js";
 
 export const VAULT_CAPABILITY = "vault.service";
 
-/** vault i18n 资源。覆盖 route / menu / breadcrumb / topbar / command
- * 的 label 与 SettingsPage 内的展示文案。 */
+/** vault i18n 资源。覆盖 route / breadcrumb / topbar / command
+ * 的 label 与 VaultSettingsPage 内的展示文案。 */
 const vaultResources: I18nPluginResources = {
   namespace: "vault",
   resources: {
@@ -50,7 +48,6 @@ const vaultResources: I18nPluginResources = {
       "vault.route.unlock": "Unlock wallet",
       "vault.route.create": "New wallet",
       "vault.route.settings": "Key management",
-      "vault.menu.keys": "Key management",
       "vault.crumb.settings": "Settings",
       "vault.crumb.keys": "Key management",
       "vault.command.lock": "Lock wallet",
@@ -157,7 +154,6 @@ const vaultResources: I18nPluginResources = {
       "vault.route.unlock": "解锁钱包",
       "vault.route.create": "创建钱包",
       "vault.route.settings": "Key 管理",
-      "vault.menu.keys": "Key 管理",
       "vault.crumb.settings": "设置",
       "vault.crumb.keys": "Key 管理",
       "vault.command.lock": "锁定钱包",
@@ -289,11 +285,6 @@ export const vaultPlugin: PluginManifest = {
     keyspaceHandle = createKeyspaceService({ messageBus, vault: service });
     ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
 
-    // 把 key scoped storage 注册声明交由 runtime 在 manifest 上识别。
-    // keyspace 不需要注册"vault"自身（vault 私钥材料由 keyspace 删除流程
-    // 调用 vault.deleteKeyMaterial 处理，调用方从业务插件视角只能走到
-    // keyspace.deleteKey / deleteKeyById，不再有 vault.removeKey 入口），
-    // 业务插件通过 manifest.keyScopedStorages 自动注册。
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({
       id: "vault.unlock",
@@ -309,48 +300,35 @@ export const vaultPlugin: PluginManifest = {
       component: VaultCreatePage,
       inMenu: false
     });
-    routes.register({
+
+    // 硬切换 003：/settings/vault 不再注册到 route.registry / menu.registry。
+    // 改为 settings.registry.register() 一处真值；shell 走 settings 分组渲染。
+    const settings = ctx.get<SettingsRegistry>("settings.registry");
+    settings.register({
       id: "vault.settings",
       path: "/settings/vault",
-      // 硬切换 002：label 与页面标题统一为"Key 管理"；该字段同时是
-      // route 文档和菜单展示文本，breadcrumb 仍由下方 breadcrumb registry
-      // 提供的"设置 / Key 管理"覆盖。
       label: { key: "vault.route.settings", fallback: "Key management" },
+      description: {
+        key: "vault.settings.description",
+        fallback: "Manage local Vault keys, the active identity, and encrypted backups."
+      },
       component: VaultSettingsPage,
-      inMenu: false,
-      menuGroup: "settings",
-      order: 0,
-      icon: "KeyRound"
-    });
-
-    // 硬切换 002：菜单"Key 管理"挂在 settings 分组，order=0 让它排在
-    // 通用"设置"前面。visibleWhen: unlocked 避免锁定 / 引导页时出现。
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    menus.register({
-      id: "menu.vault.keys",
-      label: { key: "vault.menu.keys", fallback: "Key management" },
-      routeId: "vault.settings",
-      group: "settings",
       order: 0,
       icon: "KeyRound",
       visibleWhen: ({ unlocked }) => unlocked
     });
 
-    // 硬切换 002：面包屑 provider。/settings/vault 显示"设置 / Key 管理"。
-    // 第一个节点指向通用 /settings 占位，第二个节点是当前页面（不可点）。
+    // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
     breadcrumbs.register({
       id: "breadcrumb.vault.keys",
       order: 0,
       match: (path) => path === "/settings/vault",
-      resolve: (path) => [
-        { label: { key: "vault.crumb.settings", fallback: "Settings" }, path: "/settings" },
+      resolve: () => [
+        { label: { key: "vault.crumb.settings", fallback: "Settings" } },
         { label: { key: "vault.crumb.keys", fallback: "Key management" } }
       ]
     });
-
-    // 硬切换 002：移除 /settings 中无字段的"vault.security"占位页。
-    // 真实管理能力在独立 /settings/vault 路由。
 
     const commands = ctx.get<CommandRegistry>("command.registry");
     commands.register({

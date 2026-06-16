@@ -153,7 +153,7 @@ function buildOwnershipSnapshot(
     routes: { _ids: () => string[] };
     menus: { _ids: () => string[] };
     breadcrumbs: { _ids: () => string[] };
-    settings: { _pageIds: () => string[]; _fieldIds: () => string[] };
+    settings: { _ids: () => string[] };
     home: { _ids: () => string[] };
     commands: { _ids: () => string[] };
     importers: { _ids: () => string[] };
@@ -167,8 +167,7 @@ function buildOwnershipSnapshot(
     routes: registries.routes._ids(),
     menus: registries.menus._ids(),
     breadcrumbs: registries.breadcrumbs._ids(),
-    settingsPages: registries.settings._pageIds(),
-    settingsFields: registries.settings._fieldIds(),
+    settingsRoutes: registries.settings._ids(),
     homeWidgets: registries.home._ids(),
     commands: registries.commands._ids(),
     importers: registries.importers._ids(),
@@ -184,14 +183,13 @@ function ownershipDiff(
   after: ReturnType<typeof buildOwnershipSnapshot>
 ): Pick<
   PluginOwnership,
-  "routes" | "menus" | "breadcrumbs" | "settingsPages" | "settingsFields" | "homeWidgets" | "commands" | "importers" | "transferProviders" | "assetProviders" | "topbarItems" | "capabilities"
+  "routes" | "menus" | "breadcrumbs" | "settingsRoutes" | "homeWidgets" | "commands" | "importers" | "transferProviders" | "assetProviders" | "topbarItems" | "capabilities"
 > {
   return {
     routes: diffIds(before.routes, after.routes),
     menus: diffIds(before.menus, after.menus),
     breadcrumbs: diffIds(before.breadcrumbs, after.breadcrumbs),
-    settingsPages: diffIds(before.settingsPages, after.settingsPages),
-    settingsFields: diffIds(before.settingsFields, after.settingsFields),
+    settingsRoutes: diffIds(before.settingsRoutes, after.settingsRoutes),
     homeWidgets: diffIds(before.homeWidgets, after.homeWidgets),
     commands: diffIds(before.commands, after.commands),
     importers: diffIds(before.importers, after.importers),
@@ -238,6 +236,13 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY, topbar);
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
+
+  // 硬切换 003：注入 route.registry 的 path 探测函数。
+  // settings.registry 在 register 时会调用这个 probe，避免同一 path 同时
+  // 由 settings.registry 与 route.registry 各注册一份导致双渲染真值。
+  // 用 byPath 而非 list + 精确比对，保证与 RouteRenderer 的"先 route 后
+  // settings"匹配顺序一致：若已经在 route.registry，settings.register 必须抛错。
+  settings.setRoutePathProbe((path) => routes.byPath(path) !== undefined);
 
   const configStore = createPluginConfigStore({ readOnly: options.disableConfigPersistence });
 
@@ -339,11 +344,22 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const pluginId of enabledSet) {
       const r = records.get(pluginId);
       if (!r) continue;
+      // 业务路由：owner 拥有的 route ids 中的 path 必须能命中当前路径。
       const routeIds = r.ownership.routes;
       for (const rid of routeIds) {
         const route = routes.byId(rid);
         if (!route) continue;
         if (route.path === path || matchPath(route.path, path)) {
+          return pluginId;
+        }
+      }
+      // 设置详情页（硬切换 003）：settings.registry 的 path 是设置详情页的真值；
+      // 用户停留在 /settings/<plugin> 时，宿主必须能识别"当前页面属于该插件"，
+      // 才能在 disable 时先跳离到安全页，避免渲染崩溃。
+      for (const sid of r.ownership.settingsRoutes) {
+        const settingsRoute = settings.byId(sid);
+        if (!settingsRoute) continue;
+        if (settingsRoute.path === path || matchPath(settingsRoute.path, path)) {
           return pluginId;
         }
       }
@@ -390,8 +406,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const id of ownership.routes) safe(() => routes.unregister(id), `route:${id}`);
     for (const id of ownership.menus) safe(() => menus.unregister(id), `menu:${id}`);
     for (const id of ownership.homeWidgets) safe(() => home.unregister(id), `home:${id}`);
-    for (const id of ownership.settingsPages) safe(() => settings.unregisterPage(id), `settingsPage:${id}`);
-    for (const id of ownership.settingsFields) safe(() => settings.unregisterField(id), `settingsField:${id}`);
+    for (const id of ownership.settingsRoutes) safe(() => settings.unregister(id), `settingsRoute:${id}`);
     for (const id of ownership.breadcrumbs) safe(() => breadcrumbs.unregister(id), `breadcrumb:${id}`);
     for (const id of ownership.commands) safe(() => commands.unregister(id), `command:${id}`);
     for (const id of ownership.importers) safe(() => importers.unregister(id), `importer:${id}`);

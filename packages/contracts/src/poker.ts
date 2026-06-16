@@ -208,7 +208,7 @@ export type PokerConnectionStatus =
 
 /** Poker 服务设置。 */
 export interface PokerSettings {
-  /** proxy WSS endpoint，缺省值由 plugin-poker 在 SettingsPage 写入。 */
+  /** proxy WSS endpoint，缺省值由 plugin-poker 在 /settings/poker 详情页写入。 */
   proxyEndpoint: string;
   /**
    * 公告里对外暴露的 `P2PNode` 入口地址（host:port），可空。

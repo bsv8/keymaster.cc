@@ -5,6 +5,8 @@
 //   - host 在 setup 前后对全部 registry 做快照 diff，把新增资源归属到当前 plugin。
 //   - disable 时按 ownership record 反向注销。
 //   - 这条设计保证对旧插件零侵入。
+//
+// 硬切换 003：settingsPages / settingsFields 收敛成单一 settingsRoutes。
 
 import type {
   AssetProvider,
@@ -13,8 +15,7 @@ import type {
   HomeWidget,
   KeyImporter,
   MenuItem,
-  SettingsField,
-  SettingsPage,
+  SettingsRoute,
   TopbarItem,
   TransferProvider
 } from "@keymaster/contracts";
@@ -28,10 +29,8 @@ export interface PluginOwnership {
   menus: string[];
   /** breadcrumb provider ids。 */
   breadcrumbs: string[];
-  /** settings page ids。 */
-  settingsPages: string[];
-  /** settings field ids。 */
-  settingsFields: string[];
+  /** settings detail page ids（硬切换 003：单一 settings 资源）。 */
+  settingsRoutes: string[];
   /** home widget ids。 */
   homeWidgets: string[];
   /** command ids。 */
@@ -54,8 +53,7 @@ export function emptyOwnership(): PluginOwnership {
     routes: [],
     menus: [],
     breadcrumbs: [],
-    settingsPages: [],
-    settingsFields: [],
+    settingsRoutes: [],
     homeWidgets: [],
     commands: [],
     importers: [],
@@ -74,8 +72,7 @@ export type {
   HomeWidget,
   KeyImporter,
   MenuItem,
-  SettingsField,
-  SettingsPage,
+  SettingsRoute,
   TopbarItem,
   TransferProvider
 };

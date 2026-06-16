@@ -426,16 +426,6 @@ export const p2pkhPlugin: PluginManifest = {
       component: P2pkhUtxosPage,
       inMenu: false
     });
-    routes.register({
-      id: "p2pkh.settings",
-      path: "/settings/p2pkh",
-      label: { key: "p2pkh.route.settings", fallback: "P2PKH settings" },
-      component: P2pkhSettingsPage,
-      inMenu: false,
-      menuGroup: "settings",
-      order: 110,
-      icon: "Cog"
-    });
 
     const menus = ctx.get<MenuRegistry>("menu.registry");
     const items: MenuItem[] = [
@@ -445,14 +435,17 @@ export const p2pkhPlugin: PluginManifest = {
     ];
     for (const item of items) menus.register(item);
 
+    // 硬切换 003：/settings/p2pkh 由 settings.registry 单一真值提供。
     const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.registerPage({
-      id: "p2pkh.config",
+    settings.register({
+      id: "p2pkh.settings",
+      path: "/settings/p2pkh",
       label: { key: "p2pkh.settings.label", fallback: "P2PKH" },
       description: { key: "p2pkh.settings.description", fallback: "P2PKH asset policies." },
-      fields: [],
-      order: 10,
-      component: P2pkhSettingsPage
+      component: P2pkhSettingsPage,
+      order: 110,
+      icon: "Cog",
+      visibleWhen: ({ unlocked }) => unlocked
     });
 
     const home = ctx.get<HomeRegistry>("home.registry");
@@ -477,7 +470,7 @@ export const p2pkhPlugin: PluginManifest = {
       resolve: (path) => {
         if (path.startsWith("/settings/p2pkh")) {
           return [
-            { label: { key: "p2pkh.crumb.settings", fallback: "Settings" }, path: "/settings" },
+            { label: { key: "p2pkh.crumb.settings", fallback: "Settings" } },
             { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" } }
           ];
         }

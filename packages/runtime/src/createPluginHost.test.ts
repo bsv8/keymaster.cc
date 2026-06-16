@@ -18,8 +18,7 @@ import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 interface RegistryViews {
   routes: { ids: string[] };
   menus: { ids: string[] };
-  settingsPages: { ids: string[] };
-  settingsFields: { ids: string[] };
+  settingsRoutes: { ids: string[] };
   capabilities: { keys: string[] };
 }
 
@@ -27,8 +26,7 @@ function view(host: PluginHost): RegistryViews {
   return {
     routes: { ids: host.routes._ids() },
     menus: { ids: host.menus._ids() },
-    settingsPages: { ids: host.settings._pageIds() },
-    settingsFields: { ids: host.settings._fieldIds() },
+    settingsRoutes: { ids: host.settings._ids() },
     capabilities: { keys: host.capabilities.keys() }
   };
 }
@@ -82,13 +80,12 @@ function makeB(dependsOn: string[] = [CAP_A]): PluginManifest {
         component: () => null
       });
       const s = ctx.get<SettingsRegistry>("settings.registry");
-      s.registerPage({ id: "b.page", label: "B", fields: [], order: 1 });
-      s.registerField({
-        id: "b.field",
-        label: "BF",
-        kind: "text",
-        getValue: async () => "",
-        setValue: async () => undefined
+      s.register({
+        id: "b.settings",
+        path: "/settings/b",
+        label: "B",
+        order: 1,
+        component: () => null
       });
       ctx.provide(CAP_B, { value: "b" });
     }

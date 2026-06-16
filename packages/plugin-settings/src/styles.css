@@ -220,3 +220,21 @@
   .plugin-card__meta { grid-template-columns: 1fr; }
   .plugin-card__meta dt { margin-top: 4px; }
 }
+
+/* ---------- Language settings page ----------
+ * 硬切换 003：/settings/language 的独立详情页布局。
+ * 复用 .settings-language 内部块的样式，本文件只补充页面壳层。
+ */
+.settings-language-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.settings-language-page__section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
