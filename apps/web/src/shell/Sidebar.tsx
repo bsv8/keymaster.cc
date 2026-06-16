@@ -18,8 +18,14 @@
 // inert 只在窄屏（<= 1024px，匹配 CSS 抽屉断点）应用——桌面端侧栏永远
 // 可见，不该被 inert。
 
-import { useEffect, useMemo, useState } from "react";
-import { useCurrentPath, useI18n, usePluginHost, useRuntimeStatus } from "@keymaster/runtime";
+import { useEffect, useState } from "react";
+import {
+  useCurrentPath,
+  useI18n,
+  usePluginHost,
+  useRegistry,
+  useRuntimeStatus
+} from "@keymaster/runtime";
 import type { MenuItem, SettingsRoute } from "@keymaster/contracts";
 import { router } from "./RouteRenderer.js";
 
@@ -82,19 +88,19 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const currentPath = useCurrentPath();
   const unlocked = vault === "unlocked";
 
-  const menuItems = host.menus
-    .list()
+  // 设计缘由：settings / menu 都必须跟随 host.version 热更新。
+  // 这里统一走 useRegistry，避免像旧实现那样把 host 引用当成稳定依赖，
+  // 导致 enable / disable 后 settings 分组菜单不重算。
+  const menuItems = useRegistry((h) => h.menus.list())
     .filter((m: MenuItem) => (m.visibleWhen ? m.visibleWhen({ unlocked }) : true));
+  const settingsRoutes = useRegistry((h) => h.settings.list());
 
   // 普通菜单 + settings 详情页合并：
   //   - 普通菜单来源：menu.registry，但需要剔除任何带 group="settings" 的菜单
   //     项——settings 分组由 settings.registry 单独渲染，避免双注册。
   //   - settings 分组：直接由 host.settings.list() 渲染。
   const regularItems = menuItems.filter((m) => m.group !== SETTINGS_GROUP);
-  const settingsEntries = useMemo(
-    () => buildSettingsEntries(host.settings.list(), unlocked),
-    [host, unlocked]
-  );
+  const settingsEntries = buildSettingsEntries(settingsRoutes, unlocked);
 
   // 按 group 分组：普通菜单按各自 group；settings 分组固定 group。
   const groups = new Map<string, Array<{ key: string; label: MenuItem["label"]; path?: string; icon?: string; order: number }>>();
