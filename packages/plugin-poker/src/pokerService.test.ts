@@ -358,23 +358,41 @@ describe("pokerService (active-key-driven)", () => {
     expect((svc as any).currentSessionKeyHash).toBeNull();
   });
 
-  it("key.deleted on non-active key does not disturb current session", async () => {
+  it("key.deleted on non-active key does not disturb current session (preserves presences/tables)", async () => {
     await svc.updateSettings({ proxyEndpoint: "wss://example" });
     (svc as any).currentStatus = "ready";
-    (svc as any).presences.set("03" + "cd".repeat(32), {
+    // 当前 active key 是 pkhA；在内存里挂一条 pkhB 的 presence（模拟
+    // 之前观察到的另一玩家；不应该因为 pkhB 被删就被清）。
+    const ghostPresence = {
       publicKeyHex: "03" + "cd".repeat(32),
       seenAt: 1
-    });
-    // 删除非 active key（pkhB 当前不是 active，但我们在内存里放了一条它的 presence）。
+    };
+    (svc as any).presences.set(ghostPresence.publicKeyHex, ghostPresence);
+    const ghostTable = {
+      tableId: "t-ghost",
+      variant: "TexasHoldem",
+      seats: 4,
+      stakes: 0,
+      ownerPub: "03" + "cd".repeat(32)
+    };
+    (svc as any).tables.set(ghostTable.tableId, ghostTable);
+    expect(svc.listPresences().length).toBe(1);
+    expect(svc.listTables().length).toBe(1);
+    // 删除非 active key（pkhB）。
     keyspace.emitKeyDeleted("pkhB");
     await new Promise((r) => setTimeout(r, 0));
-    // 当前 active key 仍是 pkhA；服务应主动 prune 非当前 key 的残余引用。
-    // 实现选择：pruneReferencesToKey 对所有非自身 hash 都清；这是预期语义。
-    // 这里仅验证：当前 active key 没变，且连接状态未被破坏。
+    // 关键不变量（硬切换 004 情况 4）：当前 active key 没变，且当前
+    // session 的 presences / tables 必须原样保留——删除非当前 key
+    // 不能清空当前会话的内存态。
     expect(svc.getActivePokerKey().kind).toBe("ready");
     if (svc.getActivePokerKey().kind === "ready") {
       expect(svc.getActivePokerKey().key.publicKeyHash).toBe("pkhA");
     }
+    expect(svc.listPresences().length).toBe(1);
+    expect(svc.listPresences()[0]?.publicKeyHex).toBe(ghostPresence.publicKeyHex);
+    expect(svc.listTables().length).toBe(1);
+    expect(svc.listTables()[0]?.tableId).toBe(ghostTable.tableId);
+    expect(svc.status()).toBe("ready");
   });
 
   it("global settings persist across service instances", async () => {
@@ -494,5 +512,304 @@ describe("pokerService (active-key-driven)", () => {
       announceTxLinkEndpoint: "b",
       allowFallbackBroadcast: false
     });
+  });
+
+  // ------------------------------------------------------------------------
+  // 硬切换 004 反馈修复：active key 切换 / 删除后必须按新 key 重建会话
+  // ------------------------------------------------------------------------
+
+  it("active key switch with userWantsConnection triggers auto-rebuild under new key", async () => {
+    // 准备：先把 endpoint 配好，然后模拟用户连接过（userWantsConnection = true,
+    // status = ready）—— 这条路径等效于"用户已经点过 Connect 并连上"。
+    await svc.updateSettings({ proxyEndpoint: "wss://example" });
+    (svc as any).userWantsConnection = true;
+    (svc as any).currentStatus = "ready";
+
+    // stub openSocket：不真正打开 WebSocket，避免测试环境需要 ws 实现。
+    let openSocketCalls = 0;
+    (svc as any).openSocket = async () => {
+      openSocketCalls += 1;
+      // 模拟立刻 ready。
+      (svc as any).currentStatus = "ready";
+    };
+
+    await keyspace.setActive("pkhB");
+    // rebindToActiveKey 是 microtask 异步；多等几轮让它走完
+    // hydrateFromKeyScopedDb → connect() → openSocket() 整条链。
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // 关键不变量（硬切换 004）：切 key 后必须按新 key 重建连接。
+    expect(openSocketCalls).toBeGreaterThanOrEqual(1);
+    expect((svc as any).currentSessionKeyHash).toBe("pkhB");
+    const state = svc.getActivePokerKey();
+    expect(state.kind).toBe("ready");
+    if (state.kind === "ready") {
+      expect(state.key.publicKeyHash).toBe("pkhB");
+    }
+    expect(svc.status()).toBe("ready");
+    // userWantsConnection 在自动重建后必须仍然为 true（保留用户意图）。
+    expect((svc as any).userWantsConnection).toBe(true);
+  });
+
+  it("active key switch without userWantsConnection does NOT auto-connect", async () => {
+    // 没设置 userWantsConnection → 切 key 时不主动 reconnect。
+    await svc.updateSettings({ proxyEndpoint: "wss://example" });
+    expect((svc as any).userWantsConnection).toBe(false);
+    let openSocketCalls = 0;
+    (svc as any).openSocket = async () => {
+      openSocketCalls += 1;
+      (svc as any).currentStatus = "ready";
+    };
+    await keyspace.setActive("pkhB");
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(openSocketCalls).toBe(0);
+    expect((svc as any).currentSessionKeyHash).toBe("pkhB");
+    expect(svc.status()).not.toBe("ready");
+  });
+
+  it("user-initiated disconnect clears userWantsConnection; next key switch does NOT auto-reconnect", async () => {
+    await svc.updateSettings({ proxyEndpoint: "wss://example" });
+    (svc as any).userWantsConnection = true;
+    (svc as any).currentStatus = "ready";
+
+    let openSocketCalls = 0;
+    (svc as any).openSocket = async () => {
+      openSocketCalls += 1;
+    };
+    svc.disconnect();
+    expect((svc as any).userWantsConnection).toBe(false);
+    await keyspace.setActive("pkhB");
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    // 用户已经主动断开 → 切 key 不能再连回去。
+    expect(openSocketCalls).toBe(0);
+  });
+
+  it("vault.lock clears userWantsConnection (vault lock is significant user action)", async () => {
+    await svc.updateSettings({ proxyEndpoint: "wss://example" });
+    (svc as any).userWantsConnection = true;
+    (svc as any).currentStatus = "ready";
+    vault.setStatus("locked");
+    await new Promise((r) => setTimeout(r, 0));
+    expect((svc as any).userWantsConnection).toBe(false);
+  });
+
+  it("vault.unlock after lock does NOT auto-reconnect (user must click Connect)", async () => {
+    await svc.updateSettings({ proxyEndpoint: "wss://example" });
+    (svc as any).userWantsConnection = true;
+    (svc as any).currentStatus = "ready";
+    vault.setStatus("locked");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 解锁 → 模拟 keyspace 重新评估 active。
+    let openSocketCalls = 0;
+    (svc as any).openSocket = async () => {
+      openSocketCalls += 1;
+    };
+    vault.setStatus("unlocked");
+    await new Promise((r) => setTimeout(r, 0));
+    await keyspace.setActive("pkhA"); // 触发 onActiveChange → rebind
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    // vault.unlock 不应触发自动 reconnect；用户必须显式点 Connect。
+    expect(openSocketCalls).toBe(0);
+  });
+
+  it("delete current active key + keyspace fallback auto-rebuilds under new key", async () => {
+    // 模拟"用户已连接"的初始状态。
+    await svc.updateSettings({ proxyEndpoint: "wss://example" });
+    (svc as any).userWantsConnection = true;
+    (svc as any).currentStatus = "ready";
+
+    let openSocketCalls = 0;
+    (svc as any).openSocket = async () => {
+      openSocketCalls += 1;
+      (svc as any).currentStatus = "ready";
+    };
+
+    // 1) key.deleting 命中当前 session key：teardown，userWantsConnection 保留。
+    keyspace.emitKeyDeleting("pkhA");
+    await new Promise((r) => setTimeout(r, 0));
+    expect(svc.status()).toBe("closed");
+    expect((svc as any).currentSessionKeyHash).toBeNull();
+    expect((svc as any).userWantsConnection).toBe(true);
+    expect(openSocketCalls).toBe(0); // 这一步还没连。
+
+    // 2) key.deleted → pruneReferencesToKey 不动当前内存态（已空）。
+    keyspace.emitKeyDeleted("pkhA");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // 3) keyspace 决定新 active key = pkhB → 触发 onActiveChange →
+    //    rebindToActiveKey 看到 state=ready 且 userWantsConnection=true，
+    //    必须自动 connect。
+    await keyspace.setActive("pkhB");
+    for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
+
+    expect(openSocketCalls).toBeGreaterThanOrEqual(1);
+    expect((svc as any).currentSessionKeyHash).toBe("pkhB");
+    const state = svc.getActivePokerKey();
+    expect(state.kind).toBe("ready");
+    if (state.kind === "ready") {
+      expect(state.key.publicKeyHash).toBe("pkhB");
+    }
+  });
+
+  it("hydrates presences / tables / txIngest from current active key's IDB on init", async () => {
+    // 准备：在 pkhA 的 DB 里写入若干 cached 行。
+    const handle = await keyspace.openKeyStorage({
+      publicKeyHash: "pkhA",
+      pluginId: "plugin-poker",
+      storageId: "poker",
+      version: 3,
+      upgrade: (db, oldV, newV) => {
+        // 直接复用 service 的 upgrade，避免 import 循环。
+        const u = (svc as any).deps.keyspace;
+        void u;
+        if (!db.objectStoreNames.contains("tables")) {
+          const s = db.createObjectStore("tables", { keyPath: "tableId" });
+          s.createIndex("observedAt", "observedAt");
+        }
+        if (!db.objectStoreNames.contains("presences")) {
+          const s = db.createObjectStore("presences", { keyPath: "publicKeyHex" });
+          s.createIndex("seenAt", "seenAt");
+        }
+        if (!db.objectStoreNames.contains("txIngest")) {
+          const s = db.createObjectStore("txIngest", { keyPath: "txid" });
+          s.createIndex("receivedAt", "receivedAt");
+        }
+        void oldV; void newV;
+      }
+    });
+    try {
+      // 直接通过 service 写入一条 txIngest，避免引入更多 helper 导入。
+      await (svc as any).deps.messageBus; // 触发 messageBus 加载
+      // 用 service 内部 writeTxIngest 入口：直接调用我们暴露的持久化方法
+      // 不行（私有）。改用裸 IDB 操作写入 tables / presences，绕开
+      // service 的写接口以模拟"上次会话留下的数据"。
+      await new Promise<void>((resolve, reject) => {
+        const tx = handle.db.transaction("tables", "readwrite");
+        tx.objectStore("tables").put({
+          tableId: "t-cached",
+          variant: "TexasHoldem",
+          seats: 4,
+          stakes: 0,
+          ownerPub: "03xxx",
+          observedAt: 1
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+      await new Promise<void>((resolve, reject) => {
+        const tx = handle.db.transaction("presences", "readwrite");
+        tx.objectStore("presences").put({
+          publicKeyHex: "02cached",
+          endpoint: "node:cached",
+          nick: "cached-nick",
+          seenAt: 1
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    } finally {
+      handle.close();
+    }
+
+    // 构造一个新 service：构造函数会触发 rebindToActiveKey("init") →
+    // hydrateFromKeyScopedDb("pkhA")，应能恢复上面写入的 tables / presences。
+    const svc2 = createPokerService({
+      vault: vault as any,
+      keyspace: keyspace as any,
+      messageBus: bus as any
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const tables = svc2.listTables();
+    const presences = svc2.listPresences();
+    expect(tables.find((t) => t.tableId === "t-cached")).toBeTruthy();
+    expect(presences.find((p) => p.publicKeyHex === "02cached")).toBeTruthy();
+    // init 阶段不应该自动连接（userWantsConnection 起始为 false）。
+    expect(svc2.status()).not.toBe("ready");
+    expect((svc2 as any).userWantsConnection).toBe(false);
+  });
+
+  it("active key switch A → B hydrates B's DB (not A's)", async () => {
+    // 1) 在 pkhA 的 DB 写 table-A。复用 service 的 upgrade（保证 3 个
+    // store 都创建），避免 hydrate 因缺 store 失败。
+    const upgradeFull = (db: IDBDatabase) => {
+      if (!db.objectStoreNames.contains("tables")) {
+        const s = db.createObjectStore("tables", { keyPath: "tableId" });
+        s.createIndex("observedAt", "observedAt");
+      }
+      if (!db.objectStoreNames.contains("presences")) {
+        const s = db.createObjectStore("presences", { keyPath: "publicKeyHex" });
+        s.createIndex("seenAt", "seenAt");
+      }
+      if (!db.objectStoreNames.contains("txIngest")) {
+        const s = db.createObjectStore("txIngest", { keyPath: "txid" });
+        s.createIndex("receivedAt", "receivedAt");
+      }
+    };
+    const handleA = await keyspace.openKeyStorage({
+      publicKeyHash: "pkhA",
+      pluginId: "plugin-poker",
+      storageId: "poker",
+      version: 3,
+      upgrade: upgradeFull
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = handleA.db.transaction("tables", "readwrite");
+      tx.objectStore("tables").put({
+        tableId: "t-A",
+        variant: "TexasHoldem",
+        seats: 4,
+        stakes: 0,
+        ownerPub: "03A",
+        observedAt: 1
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    handleA.close();
+
+    // 2) 在 pkhB 的 DB 写 table-B。
+    const handleB = await keyspace.openKeyStorage({
+      publicKeyHash: "pkhB",
+      pluginId: "plugin-poker",
+      storageId: "poker",
+      version: 3,
+      upgrade: upgradeFull
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = handleB.db.transaction("tables", "readwrite");
+      tx.objectStore("tables").put({
+        tableId: "t-B",
+        variant: "Omaha",
+        seats: 6,
+        stakes: 0,
+        ownerPub: "03B",
+        observedAt: 2
+      });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    handleB.close();
+
+    // 3) 构造新 service → init hydrate from pkhA。
+    const svc2 = createPokerService({
+      vault: vault as any,
+      keyspace: keyspace as any,
+      messageBus: bus as any
+    });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(svc2.listTables().find((t) => t.tableId === "t-A")).toBeTruthy();
+    expect(svc2.listTables().find((t) => t.tableId === "t-B")).toBeFalsy();
+
+    // 4) 切到 pkhB → 必须 hydrate pkhB 的 DB；不应保留 t-A。
+    await keyspace.setActive("pkhB");
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    const tables = svc2.listTables();
+    expect(tables.find((t) => t.tableId === "t-B")).toBeTruthy();
+    expect(tables.find((t) => t.tableId === "t-A")).toBeFalsy();
   });
 });

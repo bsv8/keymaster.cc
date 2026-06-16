@@ -53,6 +53,9 @@ import { BsvEncoding } from "./tsstack/adapter.js";
 import {
   POKER_KEY_STORAGE_ID,
   POKER_KEY_STORAGE_VERSION,
+  readAllPresences,
+  readAllTables,
+  readAllTxIngest,
   readLegacyKeyScopedSettings,
   upgradePokerDb,
   writeTxIngest
@@ -180,6 +183,18 @@ class PokerServiceImpl implements PokerService {
   /** 抑制 hydrate 期间多余的 handler 触发（单次 rehydrate 收敛为一次通知）。 */
   private rebindScheduled = false;
 
+  /**
+   * 用户连接意图：connect() 调用置 true，disconnect() 调用置 false；
+   * vault.lock / 当前 key.deleting 也会清掉（系统终止会话）。
+   *
+   * rebindToActiveKey 用它决定"切换 key 后是否自动 reconnect"。
+   * 设计缘由（硬切换 004）：施工单要求"切 active key 时旧会话必须
+   * 收拢，新会话必须按新 key 重建"。但 init 阶段（构造 / 刷新）不应
+   * 自动建连——用户必须显式点 Connect。让 userWantsConnection 标记
+   * 用户意图可以同时满足"切换时自动重建"和"刷新时不自动建连"。
+   */
+  private userWantsConnection = false;
+
   constructor(deps: PokerServiceDeps) {
     this.deps = deps;
     this.engine = new PokerProtocolEngine({
@@ -280,8 +295,12 @@ class PokerServiceImpl implements PokerService {
     });
 
     // vault 锁定时立即 fail-closed（硬切换 001 收尾 + 硬切换 004 复用）。
+    // 设计缘由：vault 锁定是系统终止当前会话，不算用户主动取消；
+    // 但解锁后通常需要重新走一遍"显式 connect"，所以这里清掉
+    // userWantsConnection。如果用户解锁后还想连，应该重新点 Connect。
     this.vaultUnsub = deps.vault.onStatusChange((s) => {
       if (s !== "unlocked") {
+        this.userWantsConnection = false;
         this.disconnect();
         this.clearSessionInMemory();
         // 重新评估 active key state（应是 vaultLocked）
@@ -369,13 +388,18 @@ class PokerServiceImpl implements PokerService {
       this.currentStatus === "connecting" ||
       this.currentStatus === "authenticating"
     ) {
+      // 已经处于活动状态：保留 userWantsConnection 状态，无副作用。
       return;
     }
+    // 用户显式发起连接：标记意图。后续切 key / 刷新后由 rebind 读取。
+    this.userWantsConnection = true;
     this.setStatus("connecting");
     await this.openSocket();
   }
 
   disconnect(): void {
+    // 用户显式断开：清掉意图。后续切 key 不会再自动重连。
+    this.userWantsConnection = false;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -539,7 +563,8 @@ class PokerServiceImpl implements PokerService {
    *   2. 若不是 ready（vaultLocked / allMode / missing / notReady / noActiveHash）
    *      → teardown + fail-closed；
    *   3. 若与当前 session key 相同 → 不重复重连，仅刷新内部缓存；
-   *   4. 若不同 → teardown old → hydrate new → 视配置 reconnect。
+   *   4. 若不同 → teardown old → hydrate new key-scoped DB → 视用户
+   *      意图（userWantsConnection）与 endpoint 配置决定是否自动重连。
    *
    * "reason" 仅用于日志 / 调试，不参与语义判断。
    */
@@ -552,7 +577,11 @@ class PokerServiceImpl implements PokerService {
 
     if (state.kind !== "ready") {
       // Fail-closed：断开、停止重连、清掉内存态（但保留全局 settings）。
-      this.disconnect();
+      // 注意这里不复用 disconnect()，因为要保留 userWantsConnection 状态：
+      // 如果用户在 vault 锁定前确实点过 Connect，重新解锁后应该按
+      // userWantsConnection 自动重连。disconnect() 会清掉这个标记，
+      // 而我们这里只是 fail-closed 暂时不连、不是用户主动取消意图。
+      this.disconnectForFailClosed();
       this.clearSessionInMemory();
       return;
     }
@@ -566,11 +595,16 @@ class PokerServiceImpl implements PokerService {
       this.engine.setContext(
         state.key.publicKeyHex ? { myPub33: BsvEncoding.fromHex(state.key.publicKeyHex) } : null
       );
+      // 同 key 也要 hydrate（首次启动 / 刷新场景）。
+      await this.hydrateFromKeyScopedDb(nextHash);
       return;
     }
 
     // 不同 key：先断开旧会话，再按新 key hydrate。
-    this.disconnect();
+    // 注意：这里用 disconnectForFailClosed 而不是 disconnect()，因为
+    // disconnect() 会清掉 userWantsConnection；而切 key 的目标是"按
+    // 新 key 自动重建连接"——必须保留用户原始意图。
+    this.disconnectForFailClosed();
     this.clearSessionInMemory();
     this.currentSessionKey = state.key;
     this.currentSessionKeyHash = nextHash;
@@ -582,9 +616,23 @@ class PokerServiceImpl implements PokerService {
     // 全局配置仍是默认值，且旧 DB 还有 settings 行）。
     await this.migrateLegacySettingsIfNeeded(state.key.publicKeyHash);
 
-    // 自动连接？契约并未要求自动连接；保持显式 `service.connect()`。
-    // 但如果之前已 ready（重连场景），则保持用户的连接意图。
-    // 这里保持"调用 connect 才连接"的语义，避免静默建立网络。
+    // 从当前 active key 的 key-scoped DB 重建 presences / tables /
+    // txIngest 缓存。设计缘由（硬切换 004）：刷新后 / 切 key 后必须
+    // 只恢复"明确属于该 key 的会话上下文"，不混淆。
+    await this.hydrateFromKeyScopedDb(nextHash);
+
+    // 自动重建连接（施工单硬切换 004 不变量 4 / 不变量 7）：
+    //   - 切 active key 时旧会话收拢，新会话必须按新 key 重建；
+    //   - 删除当前 active key 后在新的 active key 下恢复；
+    // 但 init 阶段（构造 / 刷新）不允许静默建连——必须靠 userWantsConnection
+    // 这个用户意图标记区分"用户确实想连"和"应用启动"。
+    if (this.userWantsConnection && this.settings.proxyEndpoint) {
+      try {
+        await this.connect();
+      } catch {
+        // status 已经反映失败；不向上冒泡。
+      }
+    }
   }
 
   /**
@@ -659,12 +707,52 @@ class PokerServiceImpl implements PokerService {
   }
 
   /**
+   * 类似 disconnect()，但不重置 userWantsConnection。
+   *
+   * 设计缘由：vault 锁定 / all 模式 / failed / uninitialized 等
+   * fail-closed 场景下，会话是被系统暂时终止；用户原本的连接意图
+   * （userWantsConnection === true）应该被保留，以便重新解锁 / 切回
+   * 单一 key 后自动恢复。teardownForDeletingCurrentKey 同样使用本函数，
+   * 让 keyspace 决定下一把 active key 时能自动按新 key 重建。
+   *
+   * 真正的"清掉意图"发生在两处：
+   *   - 用户主动点击 Disconnect（disconnect() 会清）；
+   *   - vault.lock（vault 锁定是显著用户动作，需要重新点 Connect）。
+   */
+  private disconnectForFailClosed(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.ws) {
+      try {
+        this.ws.close();
+      } catch {
+        /* swallow */
+      }
+      this.ws = null;
+    }
+    if (this.currentStatus !== "idle" && this.currentStatus !== "closed") {
+      this.setStatus("closed");
+    }
+  }
+
+  /**
    * key.deleting 命中"当前 session key"时立即 teardown。
    * 比 clearSessionInMemory 更激进：还要取消 reconnect timer + 关闭 ws +
    * 停止后续向该 key namespace 写入。
+   *
+   * 设计缘由（硬切换 004 情况 3）：删除当前 active key 时 service 应该
+   * "先清旧会话，再等 keyspace 决定新 active，然后按新 key 自动恢复连接"。
+   * 因此这里**保留** userWantsConnection——让后续 activeKey.changed 到
+   * 新 key 时，rebindToActiveKey 按用户原有意图自动重连。
+   *
+   * 真正的"清掉意图"发生在 vault.lock（vault 锁定是显著用户动作）
+   * 以及用户主动点击 Disconnect（disconnect() 会清）。
    */
   private teardownForDeletingCurrentKey(): void {
-    this.disconnect();
+    // 用 disconnectForFailClosed 而不是 disconnect()：保留 userWantsConnection。
+    this.disconnectForFailClosed();
     this.clearSessionInMemory();
     // 让 UI 立即看到"key 已删，等下一把 active"的失败状态。
     this.activeKeyState = { kind: "missing" };
@@ -672,22 +760,162 @@ class PokerServiceImpl implements PokerService {
   }
 
   /**
-   * 清理任何仍指向指定 hash 的残余引用（presence / table / tx 缓存里
-   * 误带的旧 key 影子）。即使不是当前 session key 也要做，避免脏回放。
+   * key.deleting / key.deleted 命中"非当前 session key"时的处理。
+   *
+   * 设计缘由（硬切换 004）：删除非当前 key 不能打断当前会话。当前
+   * service 的 in-memory 缓存（presences / tables / txEvents /
+   * intendedSubscriptions / lastPresence / ownedTablePublishes）全部
+   * 都只属于"当前 session key 的视图"——它们不是被删 key 的影子。
+   * 当前 session 的会话状态不应该被影响。唯一需要清理的"残余引用"
+   * 是 txIngest / presences / tables 在 DB 里的持久化数据，但那些
+   * 属于被删 key 的 namespace DB，keyspace.deleteKey 自己负责
+   * deleteDatabase，不需要 plugin-poker 再做事。
+   *
+   * 结论：本函数在非当前 key 路径上是 no-op；保留作为防御性入口，
+   * 并显式注释这条不变量，避免后续误改回"清空所有内存态"。
    */
   private pruneReferencesToKey(publicKeyHash: string): void {
-    // presence / table 都按 publicKeyHex 持有 key 影子；不能光按 hash
-    // 精确清除（cache 内不存 hash），但旧的 presences / tables 在切
-    // active key 时已经被 clearSessionInMemory 清空。这里真正能清的是
-    // 内存里 txEvents / txHandlers 引用——txEvents 持有 rawTx bytes
-    // 不带 key 身份，因此可以保留。但 presence / tables 必须清空以免
-    // 旧 key 的影子在 UI 闪现。这里通过 clearSessionInMemory 的等价
-    // 行为避免脏状态：清空内存 presences / tables（如果当前 session key
-    // 已经是新 key，重新连接后会被新一轮 announce 覆盖）。
-    if (publicKeyHash !== this.currentSessionKeyHash) {
-      // 非当前 session key：只清残余 cache；不断开当前会话。
-      this.presences.clear();
-      this.tables.clear();
+    void publicKeyHash;
+    // 不变量：删除非当前 session key 不能打扰当前会话。当前内存态全部
+    // 是当前 session key 的视图；namespace DB 由 keyspace.deleteKey
+    // 删；本函数保留为空实现。
+  }
+
+  /**
+   * 从当前 active key 的 key-scoped IDB 恢复 presences / tables /
+   * txIngest 缓存。
+   *
+   * 设计缘由（硬切换 004 验收清单"浏览器刷新恢复"）：
+   *   - 启动时：service 构造后立即 rebindToActiveKey("init")；
+   *     命中 same-key 分支后调本方法，从 IDB 把上次会话留下的
+   *     presences / tables / txIngest 拉回内存。
+   *   - 切 active key 后：rebindToActiveKey 命中 different-key 分支；
+   *     清空旧 key 内存态 → 写入新 session key 引用 → 调本方法
+   *     从新 key 的 IDB 恢复。
+   *   - 任何失败（旧 DB 不存在 / vault 锁定 / namespace 已删）都
+   *     swallow；service 始终能用空 cache 起步，不会被 DB 阻塞。
+   */
+  private async hydrateFromKeyScopedDb(publicKeyHash: string | null): Promise<void> {
+    if (!publicKeyHash) return;
+    try {
+      const handle = await this.deps.keyspace.openKeyStorage({
+        publicKeyHash,
+        pluginId: "plugin-poker",
+        storageId: POKER_KEY_STORAGE_ID,
+        version: POKER_KEY_STORAGE_VERSION,
+        upgrade: upgradePokerDb
+      });
+      try {
+        // 容错：缺 store 的旧 namespace（比如从未升级到 v3）→ 当作
+        // 空 cache 处理，不阻塞 hydrate。生产路径下 upgradePokerDb 会
+        // 保证三个 store 都存在；这条防御针对"DB 被外部写入半成品 schema"
+        // 的边缘场景。
+        const db = handle.db;
+        const reads: Promise<unknown>[] = [
+          Promise.resolve([] as unknown),
+          Promise.resolve([] as unknown),
+          Promise.resolve([] as unknown)
+        ];
+        if (db.objectStoreNames.contains("tables")) {
+          reads[0] = readAllTables(db);
+        }
+        if (db.objectStoreNames.contains("presences")) {
+          reads[1] = readAllPresences(db);
+        }
+        if (db.objectStoreNames.contains("txIngest")) {
+          reads[2] = readAllTxIngest(db, this.txEventCap);
+        }
+        const [cachedTables, cachedPresences, cachedTxIngest] = await Promise.all(reads) as [
+          ReturnType<typeof readAllTables> extends Promise<infer T> ? T : never,
+          ReturnType<typeof readAllPresences> extends Promise<infer T> ? T : never,
+          ReturnType<typeof readAllTxIngest> extends Promise<infer T> ? T : never
+        ];
+
+        // ----- presences -----
+        for (const p of cachedPresences) {
+          if (!p.publicKeyHex) continue;
+          const presence: PokerPresence = {
+            publicKeyHex: p.publicKeyHex,
+            endpoint: p.endpoint,
+            nick: p.nick,
+            seenAt: p.seenAt
+          };
+          this.presences.set(presence.publicKeyHex, presence);
+        }
+
+        // ----- tables -----
+        for (const t of cachedTables) {
+          if (!t.tableId) continue;
+          const tbl: PokerTable = {
+            tableId: t.tableId,
+            variant: t.variant,
+            seats: t.seats,
+            stakes: t.stakes,
+            ownerPub: t.ownerPub,
+            joined: false
+          };
+          this.tables.set(tbl.tableId, tbl);
+        }
+
+        // ----- txIngest -----
+        // 去重（按 txid），按 receivedAt 排序，截断到 txEventCap。
+        const seenTxids = new Set<string>();
+        for (const t of cachedTxIngest) {
+          if (!t.txid || seenTxids.has(t.txid)) continue;
+          seenTxids.add(t.txid);
+          this.txEvents.push({
+            txid: t.txid,
+            route: t.route,
+            kind: t.kind,
+            reason: t.reason,
+            rawTx: t.rawTx,
+            receivedAt: t.receivedAt
+          });
+        }
+        this.txEvents.sort((a, b) => a.receivedAt - b.receivedAt);
+        if (this.txEvents.length > this.txEventCap) {
+          this.txEvents.splice(0, this.txEvents.length - this.txEventCap);
+        }
+
+        // ----- 通知订阅者 -----
+        // presences：与现有 onPresenceFrame 行为一致——逐条 fire，handler
+        //   一般只调 service.listPresences() 取快照，所以多次 fire 只是
+        //   触发 React 一次 re-render，不会有副作用。
+        if (cachedPresences.length > 0) {
+          for (const h of this.presenceHandlers) {
+            for (const p of this.presences.values()) {
+              try {
+                h(p);
+              } catch {
+                /* swallow */
+              }
+            }
+          }
+        }
+        // tables：与现有 onTableFrame 行为一致——fire 一次完整快照。
+        if (cachedTables.length > 0) {
+          const snap = Array.from(this.tables.values());
+          this.deps.messageBus.publish(POKER_EVENT.Tables, snap);
+          for (const h of this.tableHandlers) {
+            try {
+              h(snap);
+            } catch {
+              /* swallow */
+            }
+          }
+        }
+        // txIngest：是历史数据，不主动 fire onTxEvent；调用方通过
+        // service.recentTxEvents() 取快照（用于 inbox / 诊断）。
+      } finally {
+        try {
+          handle.close();
+        } catch {
+          /* noop */
+        }
+      }
+    } catch {
+      // namespace 打不开（vault locked / 已删 / 旧版本无表）→ 静默
+      // 兜底为空 cache。绝不允许 DB 故障阻塞 service 启动或切 key。
     }
   }
 
