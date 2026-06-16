@@ -6,6 +6,13 @@ const tailscaleHost = "usops01.degu-danio.ts.net";
 export default defineConfig({
   plugins: [react()],
   build: {
+    // 设计缘由：
+    //   - 应用本身已经占用了业务路由 `/assets`（plugin-assets）。
+    //   - Vite 默认把构建产物发到 `/assets/*`，部署到 Cloudflare Pages 时，
+    //     这会让"业务路由前缀"与"静态资源前缀"同名，排障与规则配置都别扭。
+    //   - 改成独立静态前缀后，Pages 上的资源路径会是 `/_static/*`，
+    //     与应用路由彻底解耦。
+    assetsDir: "_static",
     // 设计缘由：当前首包稳定略高于 Vite 默认 500 kB，项目初期先以降低构建噪音为主，
     // 暂不引入额外分包策略；保留一个略高于现状的阈值，避免无效告警。
     chunkSizeWarningLimit: 1024
