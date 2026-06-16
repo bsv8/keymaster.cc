@@ -184,10 +184,15 @@ class PokerServiceImpl implements PokerService {
   private rebindScheduled = false;
 
   /**
-   * 用户连接意图：connect() 调用置 true，disconnect() 调用置 false；
-   * vault.lock / 当前 key.deleting 也会清掉（系统终止会话）。
+   * 用户连接意图。写入 / 清空时机：
+   *   - connect() 显式发起连接 → 置 true
+   *   - disconnect()（用户主动断开） → 置 false
+   *   - vault.lock → 置 false（vault 锁定是显著用户动作，重新点 Connect）
+   *   - key.deleting 命中当前 session key → **保留**（让 keyspace
+   *     决定的下一把 active key 走自动恢复连接，符合施工单 004 情况 3）
    *
    * rebindToActiveKey 用它决定"切换 key 后是否自动 reconnect"。
+   *
    * 设计缘由（硬切换 004）：施工单要求"切 active key 时旧会话必须
    * 收拢，新会话必须按新 key 重建"。但 init 阶段（构造 / 刷新）不应
    * 自动建连——用户必须显式点 Connect。让 userWantsConnection 标记
@@ -265,19 +270,36 @@ class PokerServiceImpl implements PokerService {
     });
 
     // key.deleting：删除前主清理钩子。
+    //
     // 设计缘由：service 必须消费这条事件，主动停止旧会话、停重连、清内存态。
     // 不能只依赖"平台删 IndexedDB 名字后自然失败"——那时 namespace DB 已
     // 进入删除流程，迟到写入与重连会制造竞态。
+    //
+    // 关键不变量（硬切换 004 反馈修复）："当前 session key"的判定**不能**
+    // 依赖 this.currentSessionKeyHash——该字段是异步 rebindToActiveKey("init")
+    // 之后才填上的；如果 key.deleting 在 init 完成前到达（事件竞争），按
+    // currentSessionKeyHash 判定会漏掉 teardown，session 仍然挂在被删 key
+    // 上直到下次自然失败。必须改用 this.deps.keyspace.active() 同步读，
+    // 这样无论 init 是否完成都能给出正确答案（keyspace 是同步数据源）。
     this.keyDeletingUnsub = deps.messageBus.subscribe("key.deleting", (p) => {
       const ev = p as { publicKeyHash?: string; keyId?: string } | undefined;
       const hash = ev?.publicKeyHash;
       if (!hash) return;
-      if (hash === this.currentSessionKeyHash) {
+      // 用 keyspace.active() 同步判定：active.mode === "all" 表示没有
+      // 单一 session key；single + activePublicKeyHash === hash 才是
+      // 当前 session key 被删。
+      const active = this.deps.keyspace.active();
+      const isCurrentSessionKey =
+        active.mode === "single" && active.activePublicKeyHash === hash;
+      if (isCurrentSessionKey) {
         // 当前 session key 即将被删：立刻 teardown + 清内存态。
+        // teardownForDeletingCurrentKey 内部用 disconnectForFailClosed
+        // 保留 userWantsConnection，让 keyspace 决定的下一把 active key
+        // 能自动按新 key 重建（施工单 004 情况 3）。
         this.teardownForDeletingCurrentKey();
       }
-      // 即使不是当前 session key 也要清空残余引用（presence / table /
-      // txIngest 缓存都可能误带被删 key 的影子）。
+      // 即使不是当前 session key 也要走 pruneReferencesToKey（当前实现
+      // 是 no-op，但保留入口以防未来需要）。
       this.pruneReferencesToKey(hash);
     });
 
@@ -732,7 +754,11 @@ class PokerServiceImpl implements PokerService {
       }
       this.ws = null;
     }
-    if (this.currentStatus !== "idle" && this.currentStatus !== "closed") {
+    // 总是把状态切到 closed——teardown 是显式动作，无论之前是 idle
+    // （从未连接）/ ready / connecting / authenticating，都应该统一收敛
+    // 到 closed。idle 只在 service 还没初始化过的初始态短暂出现，teardown
+    // 一旦发生就不再是"从未连接"，而是"已收拢"。
+    if (this.currentStatus !== "closed") {
       this.setStatus("closed");
     }
   }

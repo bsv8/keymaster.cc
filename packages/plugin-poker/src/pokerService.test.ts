@@ -518,6 +518,46 @@ describe("pokerService (active-key-driven)", () => {
   // 硬切换 004 反馈修复：active key 切换 / 删除后必须按新 key 重建会话
   // ------------------------------------------------------------------------
 
+  it("key.deleting fired BEFORE init rebind still teardowns current session", async () => {
+    // 不走 beforeEach 的 init 流程：直接 new service，立即在 init
+    // rebind 完成前发 key.deleting。这条路径专门覆盖"事件竞争"——
+    // 不能依赖 this.currentSessionKeyHash（异步 init 才填），必须用
+    // keyspace.active() 同步判定。
+    if (typeof localStorage !== "undefined") localStorage.clear();
+    const fdb = require("fake-indexeddb/lib/FDBFactory");
+    (globalThis as any).indexedDB = new fdb();
+    const localVault = new FakeVault();
+    const localKeyspace = new FakeKeyspace();
+    const localBus = new FakeMessageBus();
+    localKeyspace.attachBus(localBus);
+
+    // 直接 new，不等任何 tick；构造里 rebindToActiveKey("init") 还
+    // 没走完（pending microtask，停在 await keyspace.getKey(...)）。
+    const fresh = createPokerService({
+      vault: localVault as any,
+      keyspace: localKeyspace as any,
+      messageBus: localBus as any
+    });
+    // 这时：(fresh as any).currentSessionKeyHash 还是 null（init 没填），
+    // 但 keyspace.active().activePublicKeyHash === "pkhA"——后者是同步
+    // 数据源，handler 改用它就不会漏掉 teardown。
+    expect((fresh as any).currentSessionKeyHash).toBeNull();
+    expect(localKeyspace.active().activePublicKeyHash).toBe("pkhA");
+
+    // 在 init rebind 完成前发 key.deleting：必须命中"当前 session key"
+    // 分支并 teardown。
+    localKeyspace.emitKeyDeleting("pkhA");
+
+    // 给 rebind + teardown 多个 tick 走完。
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // 关键不变量（硬切换 004 反馈修复）：teardown 必须执行，不能因为
+    // currentSessionKeyHash 还是 null 就漏掉。teardown 会把 status 切到
+    // closed；后续 init rebind 即使再次 ready（因为 pkhA 还在 keyspace
+    // 列表里），也走 fail-closed / 不主动重连路径，status 保持 closed。
+    expect(fresh.status()).toBe("closed");
+  });
+
   it("active key switch with userWantsConnection triggers auto-rebuild under new key", async () => {
     // 准备：先把 endpoint 配好，然后模拟用户连接过（userWantsConnection = true,
     // status = ready）—— 这条路径等效于"用户已经点过 Connect 并连上"。
