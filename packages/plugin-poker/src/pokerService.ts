@@ -331,7 +331,17 @@ class PokerServiceImpl implements PokerService {
     });
 
     // 构造时立刻评估一次 active key，让 UI 拿到正确初始状态。
-    void this.rebindToActiveKey("init");
+    //
+    // 设计缘由（硬切换 004 反馈修复）：真实 keyspaceService.onActiveChange
+    // 在订阅时立刻推一次 handler（见 packages/plugin-vault/src/keyspaceService.ts
+    // 的 onActiveChange 实现）。如果这里直接调 rebindToActiveKey，构造
+    // 阶段会对同一把 key 跑两次 rebind + hydrate——第二次会重复 push
+    // txEvents（详见 hydrateFromKeyScopedDb 内部去重逻辑）。改成走
+    // scheduleRebindToActiveKey 让两次请求被 rebindScheduled flag 合并：
+    //   - 如果 onActiveChange 已经 schedule 过，本调用被 swallow；
+    //   - 如果 onActiveChange 是 lazy（测试桩），本调用 schedule 一次。
+    //   - 任何一种情况只会有一次 rebind 真正运行。
+    this.scheduleRebindToActiveKey("init");
   }
 
   // ------------------------------------------------------------------------
@@ -812,7 +822,7 @@ class PokerServiceImpl implements PokerService {
    * txIngest 缓存。
    *
    * 设计缘由（硬切换 004 验收清单"浏览器刷新恢复"）：
-   *   - 启动时：service 构造后立即 rebindToActiveKey("init")；
+   *   - 启动时：service 构造后立即 scheduleRebindToActiveKey("init")；
    *     命中 same-key 分支后调本方法，从 IDB 把上次会话留下的
    *     presences / tables / txIngest 拉回内存。
    *   - 切 active key 后：rebindToActiveKey 命中 different-key 分支；
@@ -820,6 +830,16 @@ class PokerServiceImpl implements PokerService {
    *     从新 key 的 IDB 恢复。
    *   - 任何失败（旧 DB 不存在 / vault 锁定 / namespace 已删）都
    *     swallow；service 始终能用空 cache 起步，不会被 DB 阻塞。
+   *
+   * **幂等性（硬切换 004 反馈修复）**：本函数可以被同一 service 实例
+   * 多次调用而不应产生重复数据。具体：
+   *   - presences / tables 用 Map 按 publicKeyHex / tableId 覆盖，
+   *     天然幂等。
+   *   - txEvents 是数组，必须显式按 txid 去重；详见下面实现。
+   * 真实 keyspaceService.onActiveChange 在订阅时立刻推一次 handler，
+   * 加上 service 构造里主动 scheduleRebindToActiveKey("init")，构造
+   * 阶段可能对同一把 key 跑两次 hydrate。test 桩 FakeKeyspace 也应该
+   * 模拟这个 eager 行为，否则测试覆盖不到。
    */
   private async hydrateFromKeyScopedDb(publicKeyHash: string | null): Promise<void> {
     if (!publicKeyHash) return;
@@ -884,8 +904,19 @@ class PokerServiceImpl implements PokerService {
         }
 
         // ----- txIngest -----
-        // 去重（按 txid），按 receivedAt 排序，截断到 txEventCap。
+        // 去重（按 txid）必须**跨多次 hydrate 调用**生效：
+        // keyspace.onActiveChange 订阅时会立刻推一次 handler（真实实现
+        // 见 packages/plugin-vault/src/keyspaceService.ts），加上
+        // 构造里我们主动 scheduleRebindToActiveKey("init")，构造阶段
+        // 可能对同一把 key 做两次 hydrate。第二次如果只对本次新读到的
+        // rows 去重，仍会把 DB 里的全部条目重复 push 进 this.txEvents
+        // （因为本次 seenTxids 是空的）。所以必须先把当前内存里的
+        // txid 也并入 seenTxids，才能保证"同一 service 实例的 hydrate
+        // 是幂等的"。
         const seenTxids = new Set<string>();
+        for (const e of this.txEvents) {
+          if (e.txid) seenTxids.add(e.txid);
+        }
         for (const t of cachedTxIngest) {
           if (!t.txid || seenTxids.has(t.txid)) continue;
           seenTxids.add(t.txid);

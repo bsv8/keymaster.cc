@@ -166,6 +166,10 @@ class FakeKeyspace {
   }
   onActiveChange(h: (s: any) => void) {
     this.activeHandlers.add(h);
+    // 真实 keyspaceService.onActiveChange 订阅时立刻推一次（见
+    // packages/plugin-vault/src/keyspaceService.ts）。模拟该行为，否则
+    // 构造阶段的双重 hydrate / 双重 rebind 路径测试覆盖不到。
+    h(this.state);
     return () => {
       this.activeHandlers.delete(h);
     };
@@ -771,6 +775,74 @@ describe("pokerService (active-key-driven)", () => {
     // init 阶段不应该自动连接（userWantsConnection 起始为 false）。
     expect(svc2.status()).not.toBe("ready");
     expect((svc2 as any).userWantsConnection).toBe(false);
+  });
+
+  it("hydrate is idempotent: real keyspace.onActiveChange subscribes-eagerly + explicit init schedule don't double-push txEvents", async () => {
+    // 复现 004 反馈路径：真实 keyspaceService.onActiveChange 在订阅时
+    // 立刻推一次（FakeKeyspace 已对齐），加上 service 构造里主动
+    // scheduleRebindToActiveKey("init")——两次请求只该走一次 hydrate。
+    // 即便 rebind 跑两次（其它原因导致的并发），hydrate 仍要幂等：
+    // txEvents 不能重复 push。
+    const upgradeFull = (db: IDBDatabase) => {
+      if (!db.objectStoreNames.contains("tables")) {
+        const s = db.createObjectStore("tables", { keyPath: "tableId" });
+        s.createIndex("observedAt", "observedAt");
+      }
+      if (!db.objectStoreNames.contains("presences")) {
+        const s = db.createObjectStore("presences", { keyPath: "publicKeyHex" });
+        s.createIndex("seenAt", "seenAt");
+      }
+      if (!db.objectStoreNames.contains("txIngest")) {
+        const s = db.createObjectStore("txIngest", { keyPath: "txid" });
+        s.createIndex("receivedAt", "receivedAt");
+      }
+    };
+    const handleA = await keyspace.openKeyStorage({
+      publicKeyHash: "pkhA",
+      pluginId: "plugin-poker",
+      storageId: "poker",
+      version: 3,
+      upgrade: upgradeFull
+    });
+    // 写入 5 条 txIngest。
+    for (let i = 0; i < 5; i++) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = handleA.db.transaction("txIngest", "readwrite");
+        tx.objectStore("txIngest").put({
+          txid: `tx-${i}`,
+          route: "direct",
+          kind: "test",
+          reason: undefined,
+          rawTx: new Uint8Array([i]),
+          receivedAt: 100 + i,
+          consumed: false
+        });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    handleA.close();
+
+    // 构造 service → onActiveChange (eager) + scheduleRebindToActiveKey("init")
+    // 应当被合并成一次 rebind 跑一次 hydrate。即便 service 内部的
+    // scheduleRebindToActiveKey 没有合并，hydrate 自身也应幂等。
+    const local = createPokerService({
+      vault: vault as any,
+      keyspace: keyspace as any,
+      messageBus: bus as any
+    });
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // 关键不变量：txEvents 应该有 5 条（与 DB 写入条数一致），不是 10 条
+    // 或更多。
+    const events = local.recentTxEvents(100);
+    expect(events.length).toBe(5);
+    const ids = events.map((e) => e.txid).sort();
+    expect(ids).toEqual(["tx-0", "tx-1", "tx-2", "tx-3", "tx-4"]);
+
+    // 防御性：再次调 hydrate，验证 idempotent。
+    await (local as any).hydrateFromKeyScopedDb("pkhA");
+    expect(local.recentTxEvents(100).length).toBe(5);
   });
 
   it("active key switch A → B hydrates B's DB (not A's)", async () => {
