@@ -797,6 +797,20 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     /**
+     * 硬切换 001：vault service 自我清理。
+     * 幂等：host teardown 多次调用安全。当前动作是清空内存中的 status listener
+     * 与 active-change 订阅。
+     */
+    dispose() {
+      if (activeChangeUnsub) {
+        activeChangeUnsub();
+        activeChangeUnsub = null;
+      }
+      statusListeners.clear();
+      noticeListeners.clear();
+    },
+
+    /**
      * 硬切换 002：仅校验锁屏密码，不改变 Vault 状态。
      *
      * 实现要点：

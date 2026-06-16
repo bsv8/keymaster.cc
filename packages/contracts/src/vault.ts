@@ -288,6 +288,8 @@ export interface VaultService {
   unlock(password: string): Promise<void>;
   /** 锁定，丢弃内存中的明文。 */
   lock(): Promise<void>;
+  /** 硬切换 001：宿主 teardown 时调用。幂等：可重复调用；可容忍部分资源已清。 */
+  dispose?(): void;
 
   /**
    * 仅校验锁屏密码是否正确，不改变 Vault 状态（硬切换 002 删除授权）。

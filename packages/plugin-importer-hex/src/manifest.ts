@@ -25,9 +25,18 @@ export const hexImporterPlugin: PluginManifest = {
   id: "importer-hex",
   name: "Hex Importer",
   description: "支持 32 字节 hex 私钥导入。",
+  meta: {
+    kind: "business",
+    defaultEnabled: true,
+    canDisable: true,
+    displayGroup: "import"
+  },
   i18n: hexResources,
   dependencies: [{ capability: "importer.registry", reason: "需要注册 HEX 实现" }],
   setup(ctx) {
     ctx.get<ImporterRegistry>("importer.registry").register(hexImporter);
+    return () => {
+      // no-op
+    };
   }
 };

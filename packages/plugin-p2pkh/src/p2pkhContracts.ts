@@ -328,6 +328,8 @@ export interface P2pkhService {
    * main/test P2PKH 资源。Vault 仍处于 locked 时静默返回。
    */
   rehydrate(): Promise<void>;
+  /** 硬切换 001：宿主 teardown 时调用。幂等。 */
+  dispose?(): void;
 }
 
 /** P2PKH 插件对外暴露的 capability key。 */

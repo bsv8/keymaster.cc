@@ -267,6 +267,13 @@ export const vaultPlugin: PluginManifest = {
   id: "vault",
   name: "Vault",
   description: "本地密码 Vault，管理私钥加解密、内存会话与 active key 状态。",
+  meta: {
+    kind: "core",
+    defaultEnabled: true,
+    canDisable: false,
+    providesCapabilities: [VAULT_CAPABILITY, "keyspace.service"],
+    displayGroup: "core"
+  },
   i18n: vaultResources,
   keyScopedStorages: [
     { storageId: "meta", description: "Vault 自身元数据（不参与 key namespace）" }
@@ -362,5 +369,14 @@ export const vaultPlugin: PluginManifest = {
       component: KeySwitchWidget,
       order: 90
     });
+
+    // 硬切换 001：vault 是 core 插件，理论上不会被 disable。
+    // 但 host 仍会要求 setup 返回 teardown。vault 自身不持有后台资源，
+    // 返回幂等空函数即可。service.lock() 等动作由 vault 命令触发，
+    // 不属于 ownership 回收范围。
+    return () => {
+      // 幂等：清空内存 vault 句柄引用。
+      service.dispose?.();
+    };
   }
 };

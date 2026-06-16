@@ -31,16 +31,29 @@ export interface P2pkhAssetProviderDeps {
 
 const ASSET_IDS: P2pkhAssetId[] = ["bsv", "bsvtest"];
 
-export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): AssetProvider {
-  const listeners = new Set<() => void>();
+export interface P2pkhAssetProviderHandle extends AssetProvider {
+  /** 硬切换 001：宿主 teardown 时调用。幂等。 */
+  dispose(): void;
+}
 
-  deps.service.onSyncStatusChange(() => notify());
-  deps.messageBus.subscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
-  deps.messageBus.subscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
-  deps.keyspace.onActiveChange(() => notify());
+export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAssetProviderHandle {
+  const listeners = new Set<() => void>();
+  // 硬切换 001：所有挂载的"外部订阅"必须保存取消句柄，dispose 时统一释放。
+  // 否则 plugin disable 后旧 provider 仍会被 service / messageBus / keyspace 持续回调，
+  // 与"真正热卸载"语义冲突。
+  const unsubs: Array<() => void> = [];
+  function trackSubscribe<T>(type: string, handler: (p: T) => void) {
+    const off = deps.messageBus.subscribe<T>(type, handler);
+    unsubs.push(off);
+    return off;
+  }
+  unsubs.push(deps.service.onSyncStatusChange(() => notify()));
+  trackSubscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
+  trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
+  unsubs.push(deps.keyspace.onActiveChange(() => notify()));
   // 硬切换 008 收尾：额外订阅初始化变化——keyspace 初始化结束后资产平台
   // 必须重拉，否则"未就绪"期间返回的空列表会一直显示。
-  deps.keyspace.onInitializationChange(() => notify());
+  unsubs.push(deps.keyspace.onInitializationChange(() => notify()));
 
   function notify() {
     for (const l of [...listeners]) l();
@@ -92,7 +105,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): AssetPro
     return all.filter((h) => h.network === network);
   }
 
-  return {
+  const handle: P2pkhAssetProviderHandle = {
     id: "p2pkh",
     name: { key: "p2pkh.provider.name", fallback: "P2PKH" },
     kind: "coin",
@@ -149,8 +162,20 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): AssetPro
     onChange(handler) {
       listeners.add(handler);
       return () => listeners.delete(handler);
+    },
+    dispose() {
+      for (const off of unsubs) {
+        try {
+          off();
+        } catch {
+          // swallow
+        }
+      }
+      unsubs.length = 0;
+      listeners.clear();
     }
   };
+  return handle;
 }
 
 function isP2pkhAssetId(id: string): id is P2pkhAssetId {

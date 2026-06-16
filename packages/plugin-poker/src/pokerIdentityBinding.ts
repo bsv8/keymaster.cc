@@ -57,11 +57,13 @@ export class PokerIdentityBindingManager {
   private hydratePromise: Promise<void> | null = null;
   /** 标识"已尝试过 hydrate"，用于 unlock → 自动 load。 */
   private hydrated = false;
+  /** 硬切换 001：vault status 订阅的取消句柄；dispose 时调用。 */
+  private vaultUnsub: (() => void) | null = null;
 
   constructor(deps: PokerIdentityBindingDeps) {
     this.deps = deps;
     // vault 锁定时立即清空绑定缓存（fail-closed）。
-    deps.vault.onStatusChange((s) => {
+    this.vaultUnsub = deps.vault.onStatusChange((s) => {
       if (s !== "unlocked") {
         this.current = null;
         this.hydrated = false;
@@ -71,6 +73,34 @@ export class PokerIdentityBindingManager {
         void this.loadFromVault().catch(() => undefined);
       }
     });
+    // 硬切换 001 补：刷新恢复路径。
+    // 旧实现只在"vault 状态从其它切到 unlocked"时触发 loadFromVault()，
+    // 但 service 通常在 vault 已经是 unlocked 时才被构造（应用启动 / 刷新后
+    // bootstrap 阶段），这条 onStatusChange 不会触发，导致 binding 与
+    // key-scoped settings 永远不会被 hydrate。
+    // 修复：构造时主动检查 vault.status()；若已经 unlocked，立即触发 hydrate。
+    if (deps.vault.status() === "unlocked" && !this.hydrated) {
+      void this.loadFromVault().catch(() => undefined);
+    }
+  }
+
+  /**
+   * 硬切换 001：宿主 teardown 时调用。幂等。
+   * 取消 vault 状态订阅、清空业务 handler 集合、丢弃 in-memory binding。
+   */
+  dispose(): void {
+    if (this.vaultUnsub) {
+      try {
+        this.vaultUnsub();
+      } catch {
+        // swallow
+      }
+      this.vaultUnsub = null;
+    }
+    this.handlers.clear();
+    this.current = null;
+    this.hydratePromise = null;
+    this.hydrated = false;
   }
 
   /** 当前绑定（fail-closed：vault 未解锁返回 null）。 */

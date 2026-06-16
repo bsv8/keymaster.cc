@@ -38,6 +38,12 @@ export const homePlugin: PluginManifest = {
   id: "home",
   name: "Home",
   description: "首页容器。",
+  meta: {
+    kind: "core",
+    defaultEnabled: true,
+    canDisable: false,
+    displayGroup: "core"
+  },
   i18n: homeResources,
   dependencies: [
     { capability: "home.registry", reason: "需要从注册表读取 widget" },
@@ -67,5 +73,10 @@ export const homePlugin: PluginManifest = {
       icon: "Home"
     };
     menus.register(item);
+
+    // 硬切换 001：home 是 core 插件；teardown 走空实现（route/menu 由 host owner 回收）。
+    return () => {
+      // no-op
+    };
   }
 };

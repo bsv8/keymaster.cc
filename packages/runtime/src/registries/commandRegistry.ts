@@ -1,6 +1,7 @@
 // packages/runtime/src/registries/commandRegistry.ts
 // 命令注册表：菜单、Topbar、快捷键都通过 command 调用。
 // 设计缘由：把"动作"从"展示"中抽离，命令可以在多个入口复用。
+// 硬切换 001：unregister 走 owner 回收。
 
 import type { I18nText } from "@keymaster/contracts";
 
@@ -19,10 +20,14 @@ export interface Command {
 
 export interface CommandRegistry {
   register(command: Command): void;
+  /** 硬切换 001：注销命令。id 不存在时抛错。 */
+  unregister(id: string): void;
   list(): Command[];
   get(id: string): Command | undefined;
   /** 执行命令；未注册抛错。 */
   run(id: string): Promise<void>;
+  /** 仅用于 host owner diff 捕获。 */
+  _ids(): string[];
 }
 
 export function createCommandRegistry(): CommandRegistry {
@@ -35,6 +40,12 @@ export function createCommandRegistry(): CommandRegistry {
       }
       map.set(command.id, command);
     },
+    unregister(id) {
+      if (!map.has(id)) {
+        throw new Error(`Command id "${id}" is not registered`);
+      }
+      map.delete(id);
+    },
     list() {
       return [...map.values()];
     },
@@ -45,6 +56,9 @@ export function createCommandRegistry(): CommandRegistry {
       const cmd = map.get(id);
       if (!cmd) throw new Error(`Command "${id}" is not registered`);
       await cmd.run();
+    },
+    _ids() {
+      return [...map.keys()];
     }
   };
 }

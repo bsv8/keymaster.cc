@@ -162,6 +162,10 @@ export function createI18nService(options: CreateI18nServiceOptions = {}): I18nS
 
   const i18n = createI18nInstance(initial, [...loadedNamespaces], debug);
 
+  // 硬切换 001：跟踪每个 pluginId 注册过的 namespace，便于 unregisterResources
+  // 精确清理。同一 namespace 被多个 plugin 共享时，记录 pluginId -> ns 集合。
+  const namespacesByPlugin = new Map<string, Set<string>>();
+
   // 订阅 store 变化：手动切换或 setAuto 时把 i18next 切到对应语言。
   // changeLanguage 是异步的；这里用 i18n.changeLanguage 的 Promise resolve
   // 作为 onChange 触发点，确保 setLanguage() await 完成时 handler 已收到
@@ -225,6 +229,61 @@ export function createI18nService(options: CreateI18nServiceOptions = {}): I18nS
           opts.ns.push(resources.namespace);
         } else {
           opts.ns = [COMMON_NS, resources.namespace];
+        }
+      }
+      // 跟踪 pluginId -> namespace，便于 unregisterResources 精确回收。
+      let set = namespacesByPlugin.get(pluginId);
+      if (!set) {
+        set = new Set();
+        namespacesByPlugin.set(pluginId, set);
+      }
+      set.add(resources.namespace);
+    },
+    unregisterResources(pluginId) {
+      // 硬切换 001：插件 disable / unregister 时回收资源。
+      // 重复调用安全；pluginId 没有注册过资源时 no-op。
+      // 注意：i18next 没有原生的 namespace 清理；我们直接对 store 做 splice。
+      // 如果同一 namespace 被多个 plugin 共享，仅在最后一个 plugin 释放时才
+      // 真从 store 移除。
+      const set = namespacesByPlugin.get(pluginId);
+      if (!set) return;
+      namespacesByPlugin.delete(pluginId);
+      // 找出仍然有 plugin 占用的 namespace 集合
+      const stillUsed = new Set<string>();
+      for (const s of namespacesByPlugin.values()) {
+        for (const ns of s) stillUsed.add(ns);
+      }
+      const i18nInternal = i18n as unknown as {
+        store: {
+          data: Record<string, Record<string, Record<string, string>>>;
+        };
+        removeResourceBundle(lang: string, ns: string): void;
+      };
+      for (const ns of set) {
+        if (stillUsed.has(ns)) continue;
+        loadedNamespaces.delete(ns);
+        const opts = i18n.options as { ns?: string[] };
+        if (Array.isArray(opts.ns)) {
+          opts.ns = opts.ns.filter((n) => n !== ns);
+        }
+        // 从 store 删除（i18next 1.x 用 removeResourceBundle）
+        if (typeof i18nInternal.removeResourceBundle === "function") {
+          for (const lang of SUPPORTED_LANGUAGES) {
+            try {
+              i18nInternal.removeResourceBundle(lang, ns);
+            } catch {
+              // 静默失败
+            }
+          }
+        }
+        // 兜底：直接清 store.data
+        if (i18nInternal.store?.data) {
+          for (const lang of Object.keys(i18nInternal.store.data)) {
+            const langMap = i18nInternal.store.data[lang];
+            if (langMap && ns in langMap) {
+              delete langMap[ns];
+            }
+          }
         }
       }
     },

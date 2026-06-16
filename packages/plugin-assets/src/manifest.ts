@@ -119,6 +119,12 @@ export const assetsPlugin: PluginManifest = {
   id: "assets",
   name: "Assets",
   description: "资产平台：聚合所有 AssetProvider 并提供资产列表与首页 widget。",
+  meta: {
+    kind: "platform",
+    defaultEnabled: true,
+    canDisable: true,
+    displayGroup: "platform"
+  },
   i18n: assetsResources,
   dependencies: [
     { capability: "asset.registry", reason: "需要资产注册表来聚合 provider" },
@@ -173,5 +179,8 @@ export const assetsPlugin: PluginManifest = {
     home.register(widget);
 
     void assets;
+    return () => {
+      // no-op：assets 平台不持有后台资源；route / menu / home widget 由 host 回收。
+    };
   }
 };

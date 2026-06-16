@@ -72,6 +72,12 @@ export const transferPlugin: PluginManifest = {
   id: "transfer",
   name: "Transfer",
   description: "转账平台：聚合 Transfer Offer 并挂载 provider Widget。",
+  meta: {
+    kind: "platform",
+    defaultEnabled: true,
+    canDisable: true,
+    displayGroup: "platform"
+  },
   i18n: transferResources,
   dependencies: [
     { capability: "transfer.registry", reason: "需要 transfer 注册表" },
@@ -115,5 +121,8 @@ export const transferPlugin: PluginManifest = {
       ]
     };
     breadcrumbs.register(crumbProvider);
+    return () => {
+      // no-op
+    };
   }
 };

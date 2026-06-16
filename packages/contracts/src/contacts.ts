@@ -43,4 +43,6 @@ export interface ContactsService {
   findByAddress(address: string): Promise<Contact | undefined>;
   /** 订阅变化。 */
   onChange(handler: () => void): () => void;
+  /** 硬切换 001：宿主 teardown 时调用。幂等。 */
+  dispose?(): void;
 }

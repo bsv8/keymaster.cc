@@ -366,6 +366,8 @@ export interface PokerService {
 
   /** 订阅 messageBus 事件（业务方用）：poker.status / poker.tx / poker.tables。 */
   readonly messageBus: MessageBus;
+  /** 硬切换 001：宿主 teardown 时调用。幂等。 */
+  dispose?(): void;
 }
 
 /** Poker 插件 manifest 形状。 */

@@ -30,10 +30,19 @@ export const wifImporterPlugin: PluginManifest = {
   id: "importer-wif",
   name: "WIF Importer",
   description: "支持 WIF 文本私钥导入。",
+  meta: {
+    kind: "business",
+    defaultEnabled: true,
+    canDisable: true,
+    displayGroup: "import"
+  },
   i18n: wifResources,
   dependencies: [{ capability: "importer.registry", reason: "需要注册 WIF 实现" }],
   setup(ctx) {
     const registry = ctx.get<ImporterRegistry>("importer.registry");
     registry.register(wifImporter);
+    return () => {
+      // host owner 回收时会 unregister importer；这里 no-op。
+    };
   }
 };

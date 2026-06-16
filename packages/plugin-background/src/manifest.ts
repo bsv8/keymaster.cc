@@ -63,6 +63,13 @@ export const backgroundPlugin: PluginManifest = {
   id: "background",
   name: "Background",
   description: "通用后台任务平台：注册、调度、去重、暂停、重试、Topbar 托盘。",
+  meta: {
+    kind: "platform",
+    defaultEnabled: true,
+    canDisable: true,
+    providesCapabilities: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY],
+    displayGroup: "platform"
+  },
   i18n: backgroundResources,
   dependencies: [
     { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" }
@@ -86,5 +93,9 @@ export const backgroundPlugin: PluginManifest = {
       component: BackgroundTray,
       order: 100
     });
+    return () => {
+      // 硬切换 001：service.dispose 停止 interval / visibility / leader lock。
+      service.dispose();
+    };
   }
 };

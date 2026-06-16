@@ -8,6 +8,13 @@
 //
 // 硬切换 003：把 shell 自身 i18n 资源（apps/web 装配层）通过 initialI18nResources
 // 注入；plugin 注册前可被 t() 命中。
+//
+// 硬切换 001：bootstrap 不再等价于"ordered = 全部一定装载"。
+//   - registerAll 把每个 manifest 加入 host 已知集合；
+//   - host 内部根据"全局启停配置（localStorage）+ manifest.meta.defaultEnabled"
+//     决定每个 plugin 初始是否 enable。
+//   - 因此旧的"按顺序 registerAll"在新模型下也保持兼容：core / settings / home 等
+//     标记 defaultEnabled=true 的会自动装载，business 插件可通过配置 store 控制。
 
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { assetsPlugin } from "@keymaster/plugin-assets";
@@ -38,6 +45,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     i18nDebug: !isProd
   });
 
+  // 硬切换 001：按"依赖先后保证 capability 顺序"的顺序加入已知集合。
+  // host.register 内部会按 config store 决定是否自动 enable。
   const ordered = [
     vaultPlugin,
     homePlugin,

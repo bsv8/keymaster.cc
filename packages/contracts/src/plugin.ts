@@ -1,6 +1,7 @@
 // packages/contracts/src/plugin.ts
 // 插件契约：描述 PluginManifest、PluginContext、PluginDependency。
-// 这是 plugin host 装载插件的唯一入口；plugin 通过 setup(ctx) 暴露能力。
+// 这是 plugin host 装载插件的唯一入口；plugin 通过 setup(ctx) 暴露能力，
+// 并在 disable / unregister 时由 host 调用 teardown 释放资源。
 
 import type { MessageBus } from "./messageBus.js";
 import type { I18nPluginResources } from "./i18n.js";
@@ -31,6 +32,38 @@ export interface PluginDependency {
   reason?: string;
 }
 
+/**
+ * 插件分类：
+ *   - core：宿主必备，禁止 disable（如 vault / settings / home）。
+ *   - platform：平台层能力，可 disable 但 UI 默认提示风险。
+ *   - business：业务插件，可随时 disable（如 poker / p2pkh）。
+ */
+export type PluginKind = "core" | "platform" | "business";
+
+/** 插件展示分组（仅 UI 用）。 */
+export type PluginDisplayGroup = "core" | "platform" | "business" | "import" | "experimental";
+
+/**
+ * 插件元数据（硬切换 001）：
+ *   - 插件分类、默认启用、是否允许禁用、提供 capability、UI 分组。
+ *   - 这些字段是插件依赖图与系统级启停的真值；运行时不再另建中心化目录。
+ */
+export interface PluginMeta {
+  /** 插件分类。 */
+  kind: PluginKind;
+  /** 首屏默认是否启用。runtime 启动时与全局启停配置合并得到初始集合。 */
+  defaultEnabled: boolean;
+  /** 是否允许用户在系统级 UI 禁用。core 必为 false。 */
+  canDisable: boolean;
+  /** 该插件提供哪些 capability（供反向依赖查询使用）。 */
+  providesCapabilities?: string[];
+  /** UI 分组（仅展示），不传则按 kind 兜底。 */
+  displayGroup?: PluginDisplayGroup;
+}
+
+/** 插件 setup 钩子可返回的清理函数。 */
+export type PluginTeardown = () => void | Promise<void>;
+
 /** 插件清单：插件作者导出的唯一对象。 */
 export interface PluginManifest {
   /** 全局唯一 id，使用命名空间，例如 "vault"、"p2pkh"。 */
@@ -41,6 +74,11 @@ export interface PluginManifest {
   description?: string;
   /** 显式声明依赖的 capability（PluginHost 会做依赖检查）。 */
   dependencies?: PluginDependency[];
+  /**
+   * 硬切换 001：插件元数据（分类、默认启用、是否可禁用、提供 capability）。
+   * 旧插件没有 meta 字段时，runtime bootstrap 视为"业务插件、可禁用"。
+   */
+  meta?: PluginMeta;
   /**
    * 声明插件拥有的 key-scoped storage。
    * 装载时由 runtime 自动调用 keyspace.registerPluginStorage，让 keyspace
@@ -59,8 +97,12 @@ export interface PluginManifest {
    * 需要运行时翻译的插件可以显式 get 它（不再要求每个 plugin 手写 registerResources）。
    */
   i18n?: I18nPluginResources;
-  /** 插件的 setup 钩子，所有注册动作都发生在这里。 */
-  setup(ctx: PluginContext): void | Promise<void>;
+  /**
+   * 插件的 setup 钩子，所有注册动作都发生在这里。
+   * 硬切换 001：可以返回 teardown 清理函数；host 在 disable / unregister 时
+   * 调用它。teardown 必须是幂等、可重复调用、可容忍部分资源已被清理。
+   */
+  setup(ctx: PluginContext): void | Promise<void> | PluginTeardown | Promise<PluginTeardown>;
 }
 
 /** 插件声明的一个 key-scoped storage。 */
@@ -70,3 +112,51 @@ export interface PluginKeyStorageDeclaration {
   /** 描述，便于诊断。 */
   description?: string;
 }
+
+/**
+ * 插件启停运行时状态。
+ *   - `registered` 仅表示已知；不代表 enabled。
+ *   - `enabled` 当前正在运行，可被 UI 访问。
+ *   - `disabled` 已被显式禁用；host 内已卸载。
+ *   - `blocked` 当前无法 enable（依赖未满足）。
+ *   - `error-disabled` teardown 出错但已被卸载。
+ */
+export type PluginStateKind =
+  | "registered"
+  | "enabled"
+  | "disabled"
+  | "blocked"
+  | "error-disabled";
+
+/** host.state(pluginId) 返回的状态对象。 */
+export interface PluginState {
+  id: string;
+  kind: PluginStateKind;
+  /** teardown 抛错时填入的最近错误信息。 */
+  error?: string;
+}
+
+/** 插件依赖图中"被谁依赖"查询的条目。 */
+export interface PluginReverseDep {
+  /** 反向依赖者 id。 */
+  pluginId: string;
+  /** 反向依赖者当前是否 enabled。 */
+  enabled: boolean;
+  /** 触发依赖的 capability 列表（被本插件 provides 的子集）。 */
+  capabilities: string[];
+}
+
+/** 插件依赖图快照。 */
+export interface PluginGraph {
+  /** 已知 manifest id 列表。 */
+  plugins: string[];
+  /** 插件 -> 它依赖的 capability 列表。 */
+  dependencies: Record<string, string[]>;
+  /** 插件 -> 它声明提供的 capability 列表（取自 manifest.meta）。 */
+  provides: Record<string, string[]>;
+  /** 插件 -> 反向依赖它的启用中插件。 */
+  reverse: Record<string, PluginReverseDep[]>;
+}
+
+/** 通用订阅回调（host version / state 变化时调用）。 */
+export type HostListener = (snapshot: { version: number }) => void;

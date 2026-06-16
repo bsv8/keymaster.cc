@@ -120,6 +120,8 @@ class PokerServiceImpl implements PokerService {
   private settingsHandlers = new Set<(s: PokerSettings) => void>();
   private readonly identity: PokerIdentityBindingManager;
   private readonly engine: PokerProtocolEngine;
+  /** 硬切换 001：vault.onStatusChange 句柄；dispose 时调用。 */
+  private vaultUnsub: (() => void) | null = null;
 
   /**
    * 本次会话内已成功提交给 proxy 的 topic 订阅集合。
@@ -217,7 +219,9 @@ class PokerServiceImpl implements PokerService {
       }
     });
 
-    deps.vault.onStatusChange((s) => {
+    // 硬切换 001：vault.onStatusChange 句柄保存到字段，dispose 时调用，
+    // 否则 plugin disable 后旧 service 实例仍被 vault 持续引用，破坏热卸载语义。
+    this.vaultUnsub = deps.vault.onStatusChange((s) => {
       if (s !== "unlocked") {
         this.disconnect();
         this.presences.clear();
@@ -713,6 +717,37 @@ class PokerServiceImpl implements PokerService {
       throw new Error("WebSocket not open");
     }
     this.ws.send(JSON.stringify(env));
+  }
+
+  /**
+   * 硬切换 001：宿主 teardown 时调用。幂等：可重复调用、可容忍部分资源已清。
+   * 停止：reconnect timer / ws / vault / keyspace / status / settings 监听器。
+   */
+  dispose(): void {
+    // 0) 取消 vault.onStatusChange 句柄（硬切换 001 补）。
+    if (this.vaultUnsub) {
+      try {
+        this.vaultUnsub();
+      } catch {
+        // swallow
+      }
+      this.vaultUnsub = null;
+    }
+    // 1) 断 ws + 取消 reconnect
+    this.disconnect();
+    // 2) 取消 identity binding 监听（vault / keyspace / status 变化）
+    try {
+      this.identity.dispose();
+    } catch {
+      // swallow
+    }
+    // 3) 清空各类 listener
+    this.statusHandlers.clear();
+    this.presenceHandlers.clear();
+    this.tableHandlers.clear();
+    this.txHandlers.clear();
+    this.bindingHandlers.clear();
+    this.settingsHandlers.clear();
   }
 }
 

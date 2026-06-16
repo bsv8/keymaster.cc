@@ -1,19 +1,22 @@
 // packages/runtime/src/react/useRegistry.ts
-// 通用 registry 读取 hook：接收一个 selector，从已稳定的 PluginHost 上同步读取数据。
+// 通用 registry 读取 hook：基于 host.version 重新计算 selector 输出。
 //
-// 当前插件注册发生在 React 挂载前，host 引用稳定。
-// 这里不使用 useSyncExternalStore，避免 selector 返回新数组/新对象时
-// 被 React 误判为 snapshot 变化而触发无限更新。
+// 硬切换 001：runtime 进入热卸载模型后，host 可能在 React 挂载后变化。
+// 我们用 useHostVersion() 触发重新计算；selector 仍然纯同步（host 是稳定
+// 引用），不会出现 useSyncExternalStore 那种 snapshot 误判。
 //
-// 不再声明运行期动态订阅能力：调用方应假定 host 在挂载后不再变更。
-// 未来若真的需要运行期安装/卸载插件，请另开施工单在 runtime 层
-// 引入 `host.version` + `host.subscribe()`，并在 useRegistry 内部基于
-// 稳定的 version 做 useMemo，而不是把 selector(host) 当成 external store snapshot。
+// 用法：
+//   const routes = useRegistry(h => h.routes.list());
+//   const route = useRegistry(h => h.routes.byPath('/poker'));
+// 不再假定"host 挂载后不变"。
 
+import { useMemo } from "react";
 import type { PluginHost } from "../createPluginHost.js";
-import { usePluginHost } from "./PluginHostProvider.js";
+import { usePluginHost, useHostVersion } from "./PluginHostProvider.js";
 
 export function useRegistry<T>(selector: (host: PluginHost) => T): T {
   const host = usePluginHost();
-  return selector(host);
+  const version = useHostVersion();
+  // version 变化时强制重算 selector；selector host 是稳定引用。
+  return useMemo(() => selector(host), [version, host, selector]);
 }

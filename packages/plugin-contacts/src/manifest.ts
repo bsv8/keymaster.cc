@@ -124,6 +124,13 @@ export const contactsPlugin: PluginManifest = {
   id: "contacts",
   name: "Contacts",
   description: "联系人管理（按 key namespace 隔离，地址在 namespace 内唯一）。",
+  meta: {
+    kind: "business",
+    defaultEnabled: true,
+    canDisable: true,
+    providesCapabilities: [CONTACTS_CAPABILITY, CONTACTS_PICKER],
+    displayGroup: "business"
+  },
   i18n: contactsResources,
   keyScopedStorages: [
     { storageId: "book", description: "当前 key 的联系人" }
@@ -204,5 +211,10 @@ export const contactsPlugin: PluginManifest = {
       }
     };
     breadcrumbs.register(crumbProvider);
+    return () => {
+      // 硬切换 001：contacts 业务 service 暂未显式 dispose。路由/菜单/面包屑
+      // 由 host 回收；service 内部监听由 contacts 自身在 unbind 时清。
+      service.dispose?.();
+    };
   }
 };

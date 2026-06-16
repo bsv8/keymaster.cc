@@ -105,6 +105,13 @@ export const keyImportPlugin: PluginManifest = {
   id: "key-import",
   name: "Key Import",
   description: "统一导入平台：选择 importer、解析、调用 vault。",
+  meta: {
+    kind: "business",
+    defaultEnabled: true,
+    canDisable: true,
+    providesCapabilities: [KEY_IMPORT_CAPABILITY],
+    displayGroup: "business"
+  },
   i18n: keyImportResources,
   dependencies: [
     { capability: "vault.service", reason: "导入私钥需要 vault 提供加解密" },
@@ -148,5 +155,8 @@ export const keyImportPlugin: PluginManifest = {
       ]
     };
     breadcrumbs.register(provider);
+    return () => {
+      // no-op
+    };
   }
 };

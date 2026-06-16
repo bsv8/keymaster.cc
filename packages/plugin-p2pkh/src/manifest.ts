@@ -347,6 +347,13 @@ export const p2pkhPlugin: PluginManifest = {
   id: "p2pkh",
   name: "P2PKH",
   description: "BSV P2PKH 资产实现：通过 woc.service 读取链上真值；通过 background 调度 recent-sync 与 history-backfill。",
+  meta: {
+    kind: "business",
+    defaultEnabled: true,
+    canDisable: true,
+    providesCapabilities: [P2PKH_CAPABILITY],
+    displayGroup: "business"
+  },
   i18n: p2pkhResources,
   keyScopedStorages: [
     { storageId: "state", description: "P2PKH 资源 / 余额 / UTXO / 历史 / 回填 / pending / reservation" }
@@ -385,13 +392,14 @@ export const p2pkhPlugin: PluginManifest = {
 
     void service.rehydrate();
 
-    messageBus.subscribe<{ keyId: string; publicKeyHash: string; label: string }>("key.created", async (payload) => {
+    const keyCreatedUnsub = messageBus.subscribe<{ keyId: string; publicKeyHash: string; label: string }>("key.created", async (payload) => {
       if (!payload.keyId) return;
       await service.onKeyImported(payload.keyId);
     });
 
     const assets = ctx.get<AssetRegistry>("asset.registry");
-    assets.register(createP2pkhAssetProvider({ service, messageBus, keyspace }));
+    const assetProvider = createP2pkhAssetProvider({ service, messageBus, keyspace });
+    assets.register(assetProvider);
 
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({
@@ -458,7 +466,8 @@ export const p2pkhPlugin: PluginManifest = {
     });
 
     const transferReg = ctx.get<import("@keymaster/contracts").TransferRegistry>("transfer.registry");
-    transferReg.register(createP2pkhTransferProvider({ service, messageBus, keyspace }));
+    const transferProvider = createP2pkhTransferProvider({ service, messageBus, keyspace });
+    transferReg.register(transferProvider);
 
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
     const crumbProvider: BreadcrumbProvider = {
@@ -493,5 +502,27 @@ export const p2pkhPlugin: PluginManifest = {
       }
     };
     breadcrumbs.register(crumbProvider);
+
+    // 硬切换 001：teardown 桥接到 service.dispose() 并取消 manifest 内挂载的
+    // messageBus 订阅（key.created）；service 内部订阅由 service.dispose 收尾。
+    // providers 也必须 dispose，否则它们仍会被 messageBus / keyspace 持续回调。
+    return () => {
+      try {
+        keyCreatedUnsub();
+      } catch {
+        // swallow
+      }
+      try {
+        assetProvider.dispose();
+      } catch {
+        // swallow
+      }
+      try {
+        transferProvider.dispose();
+      } catch {
+        // swallow
+      }
+      service.dispose?.();
+    };
   }
 };

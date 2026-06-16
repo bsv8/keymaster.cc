@@ -159,6 +159,13 @@ export const pokerPlugin: PluginManifest = {
   id: "poker",
   name: "Poker",
   description: "Browser-native peer poker over bsv-poker protocol, served by an external poker-proxy.",
+  meta: {
+    kind: "business",
+    defaultEnabled: false,
+    canDisable: true,
+    providesCapabilities: [POKER_SERVICE_CAPABILITY],
+    displayGroup: "business"
+  },
   i18n: pokerResources,
   keyScopedStorages: [
     { storageId: "poker", description: "Poker settings / tables / presences / tx ingest" }
@@ -309,5 +316,15 @@ export const pokerPlugin: PluginManifest = {
 
     // 单页 alias（保留旧入口）。
     void PokerPage;
+
+    // 硬切换 001：teardown 桥接到 service.dispose() —— 内部处理 ws / reconnect
+    // timer / identity binding / listeners 全部清理。
+    return () => {
+      try {
+        service.dispose?.();
+      } catch {
+        // swallow
+      }
+    };
   }
 };

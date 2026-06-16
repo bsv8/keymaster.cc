@@ -5,6 +5,7 @@
 // 关键不变量：
 //  - provider id 重复必须抛错（不允许后注册的 provider 覆盖先注册的）。
 //  - registry 不缓存 provider 返回的资产数据，数据刷新由 provider 自己处理。
+// 硬切换 001：unregister 走 owner 回收。
 
 import type { AssetProvider, AssetRegistry as IAssetRegistry, I18nText } from "@keymaster/contracts";
 
@@ -16,7 +17,12 @@ function i18nKey(text: I18nText): string {
   return text.key;
 }
 
-export function createAssetRegistry(): IAssetRegistry {
+export function createAssetRegistry(): IAssetRegistry & {
+  /** 硬切换 001：注销 provider。id 不存在时抛错。 */
+  unregister(id: string): void;
+  /** 仅用于 host owner diff 捕获。 */
+  _ids(): string[];
+} {
   const providers = new Map<string, AssetProvider>();
 
   return {
@@ -25,6 +31,12 @@ export function createAssetRegistry(): IAssetRegistry {
         throw new Error(`Asset provider id "${provider.id}" is already registered`);
       }
       providers.set(provider.id, provider);
+    },
+    unregister(id) {
+      if (!providers.has(id)) {
+        throw new Error(`Asset provider id "${id}" is not registered`);
+      }
+      providers.delete(id);
     },
     list() {
       // 排序优先按 provider order，再按 name 的 I18nText key（业务稳定 code）。
@@ -37,6 +49,9 @@ export function createAssetRegistry(): IAssetRegistry {
     },
     get(id) {
       return providers.get(id);
+    },
+    _ids() {
+      return [...providers.keys()];
     }
   };
 }

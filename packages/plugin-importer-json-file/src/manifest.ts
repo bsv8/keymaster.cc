@@ -27,9 +27,18 @@ export const jsonFileImporterPlugin: PluginManifest = {
   id: "importer-json-file",
   name: "JSON File Importer",
   description: "从钱包 JSON 导出文件中提取私钥。",
+  meta: {
+    kind: "business",
+    defaultEnabled: true,
+    canDisable: true,
+    displayGroup: "import"
+  },
   i18n: jsonFileResources,
   dependencies: [{ capability: "importer.registry", reason: "需要注册 JSON 实现" }],
   setup(ctx) {
     ctx.get<ImporterRegistry>("importer.registry").register(jsonFileImporter);
+    return () => {
+      // no-op
+    };
   }
 };

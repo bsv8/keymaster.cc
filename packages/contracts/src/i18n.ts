@@ -116,6 +116,14 @@ export interface I18nService {
    */
   registerResources(pluginId: string, resources: I18nPluginResources): void;
 
+  /**
+   * 硬切换 001：注销指定插件注册过的 i18n 资源。
+   * 重复调用安全；pluginId 没有注册过资源时 no-op。
+   * 设计缘由：host 在 disable / unregister 流程回收插件 i18n 资源，
+   * 避免同一 namespace 在多次 enable / disable 后出现 key 残留。
+   */
+  unregisterResources(pluginId: string): void;
+
   /** 订阅语言变更；返回取消订阅函数。 */
   onChange(handler: LanguageChangeHandler): () => void;
 }

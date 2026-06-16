@@ -84,6 +84,13 @@ export const wocPlugin: PluginManifest = {
   id: "woc",
   name: "WOC",
   description: "WhatsOnChain API 代理：唯一 WOC 入口、全局限流、优先级队列、429 backoff、多标签页协调。",
+  meta: {
+    kind: "platform",
+    defaultEnabled: true,
+    canDisable: true,
+    providesCapabilities: [WOC_CAPABILITY],
+    displayGroup: "platform"
+  },
   i18n: wocResources,
   dependencies: [
     { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
@@ -142,5 +149,10 @@ export const wocPlugin: PluginManifest = {
       ]
     };
     breadcrumbs.register(crumbProvider);
+    return () => {
+      // 硬切换 001：bridge 到 service.dispose()。
+      // actor detach + 取消 messageBus handle 都在 dispose 内。
+      service.dispose();
+    };
   }
 };

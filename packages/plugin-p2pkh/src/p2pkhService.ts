@@ -111,6 +111,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   });
 
   const statusListeners = new Set<(s: P2pkhSyncStatus) => void>();
+  // 硬切换 001：messageBus 订阅的取消句柄收集器；dispose 时统一释放。
+  const messageBusUnsubs: Array<() => void> = [];
+  function trackSubscribe<TPayload>(type: string, handler: (p: TPayload) => void) {
+    const off = deps.messageBus.subscribe<TPayload>(type, handler);
+    messageBusUnsubs.push(off);
+    return off;
+  }
   let status: P2pkhSyncStatus = "idle";
   let backfillPaused = false;
 
@@ -200,7 +207,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   // 硬切换 008 收尾：切 active key 走与 onVaultUnlocked 同构的完整序列——
   // rebind + rehydrate + trigger recent/backfill——确保任何路径切到新 active
   // 都不会漏建 P2PKH 资源。
-  deps.keyspace.onActiveChange(() => {
+  // 硬切换 001：必须保存取消句柄，dispose 时调用，否则 disable 后旧 service
+  // 实例仍会响应 active-key 事件，破坏热卸载语义。
+  const keyspaceUnsubs: Array<() => void> = [];
+  function trackKeyspaceSubscribe(handler: () => void) {
+    const off = deps.keyspace.onActiveChange(handler);
+    keyspaceUnsubs.push(off);
+    return off;
+  }
+  trackKeyspaceSubscribe(() => {
     void (async () => {
       try {
         await rebindActiveKey();
@@ -215,14 +230,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   // 硬切换 008：实际取消由 keyspace.deleteKey -> background.cancelByKey
   // 统一驱动；本 handler 只做日志/保险，不再调用 cancel。
-  deps.messageBus.subscribe<{ publicKeyHash: string }>("key.deleting", (payload) => {
+  trackSubscribe<{ publicKeyHash: string }>("key.deleting", (payload) => {
     // 设计缘由：active key 切换不影响本 key 任务的收尾；只有当被删的 key
     // 是 active 时我们才需要清理本地的协调器 lane 与 db handle 缓存。
     // background 已经收到 cancelByKey 并在 await 旧实例退出；本服务接下来
     // 收到的 key.deleted 事件再彻底清掉本地资源。
     void payload;
   });
-  deps.messageBus.subscribe<{ publicKeyHash: string }>("key.deleted", async (payload) => {
+  trackSubscribe<{ publicKeyHash: string }>("key.deleted", async (payload) => {
     try {
       const resources = await listAllResources().catch(() => []);
       for (const r of resources) coordinator.removeResource(r.resourceId);
@@ -352,10 +367,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   });
 
   // 监听 vault 锁定/解锁。
-  deps.messageBus.subscribe("vault.locked", () => {
+  trackSubscribe("vault.locked", () => {
     onVaultLocked();
   });
-  deps.messageBus.subscribe("vault.unlocked", () => {
+  trackSubscribe("vault.unlocked", () => {
     void onVaultUnlocked();
   });
 
@@ -403,7 +418,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     }
   }
 
-  deps.messageBus.subscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => {
+  trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => {
     deps.backgroundService.trigger(P2PKH_TASK_RECENT, "transfer.broadcast");
   });
 
@@ -550,6 +565,43 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     async rehydrate() {
       await rebindActiveKey();
       await rehydrateResources();
+    },
+    /**
+     * 硬切换 001：宿主 teardown 时调用。幂等。
+     * 回收：取消 vault / key 事件订阅、keyspace active 订阅、释放同步协调器、丢弃 db handle。
+     */
+    dispose() {
+      for (const off of messageBusUnsubs) {
+        try {
+          off();
+        } catch {
+          // swallow
+        }
+      }
+      messageBusUnsubs.length = 0;
+      // 硬切换 001 补：keyspace.onActiveChange 句柄。
+      for (const off of keyspaceUnsubs) {
+        try {
+          off();
+        } catch {
+          // swallow
+        }
+      }
+      keyspaceUnsubs.length = 0;
+      // 取消后台任务
+      try {
+        deps.backgroundService.cancel(P2PKH_TASK_RECENT);
+        deps.backgroundService.cancel(P2PKH_TASK_BACKFILL);
+      } catch {
+        // swallow
+      }
+      // 释放 db handle
+      try {
+        disposeP2pkhDb();
+      } catch {
+        // swallow
+      }
+      p2pkhDbHandle = null;
     }
   };
 }

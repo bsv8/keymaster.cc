@@ -25,16 +25,28 @@ export interface P2pkhTransferProviderDeps {
 
 const ASSET_IDS: P2pkhAssetId[] = ["bsv", "bsvtest"];
 
-export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): TransferProvider {
-  const listeners = new Set<() => void>();
+export interface P2pkhTransferProviderHandle extends TransferProvider {
+  /** 硬切换 001：宿主 teardown 时调用。幂等。 */
+  dispose(): void;
+}
 
-  deps.service.onSyncStatusChange(() => notify());
-  deps.messageBus.subscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
-  deps.messageBus.subscribe(P2PKH_MSG.SYNC, () => notify());
-  deps.messageBus.subscribe(P2PKH_MSG.BACKFILL_ERROR, () => notify());
-  deps.keyspace.onActiveChange(() => notify());
+export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2pkhTransferProviderHandle {
+  const listeners = new Set<() => void>();
+  // 硬切换 001：保存所有"外部订阅"取消句柄，dispose 时统一释放。
+  const unsubs: Array<() => void> = [];
+  function trackSubscribe<T>(type: string, handler: (p: T) => void) {
+    const off = deps.messageBus.subscribe<T>(type, handler);
+    unsubs.push(off);
+    return off;
+  }
+
+  unsubs.push(deps.service.onSyncStatusChange(() => notify()));
+  trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
+  trackSubscribe(P2PKH_MSG.SYNC, () => notify());
+  trackSubscribe(P2PKH_MSG.BACKFILL_ERROR, () => notify());
+  unsubs.push(deps.keyspace.onActiveChange(() => notify()));
   // 硬切换 008 收尾：初始化结束也触发重拉。
-  deps.keyspace.onInitializationChange(() => notify());
+  unsubs.push(deps.keyspace.onInitializationChange(() => notify()));
 
   function notify() {
     for (const l of [...listeners]) l();
@@ -78,7 +90,7 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): Tr
     };
   }
 
-  return {
+  const handle: P2pkhTransferProviderHandle = {
     id: "p2pkh",
     name: { key: "p2pkh.provider.name", fallback: "P2PKH" },
     description: { key: "p2pkh.provider.description", fallback: "BSV P2PKH 转移：bsv / bsvtest 两个网络。" },
@@ -93,6 +105,18 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): Tr
     onChange(handler) {
       listeners.add(handler);
       return () => listeners.delete(handler);
+    },
+    dispose() {
+      for (const off of unsubs) {
+        try {
+          off();
+        } catch {
+          // swallow
+        }
+      }
+      unsubs.length = 0;
+      listeners.clear();
     }
   };
+  return handle;
 }
