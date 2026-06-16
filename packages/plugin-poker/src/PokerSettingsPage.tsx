@@ -1,14 +1,14 @@
 // packages/plugin-poker/src/PokerSettingsPage.tsx
 // 设置页：proxy endpoint / 双平面 endpoint 公告 / 允许 fallback broadcast /
-// 当前 active key 展示 / 连接控制。
+// 当前扑克身份展示 / 连接控制。
 //
 // 设计缘由（硬切换 004）：
 //   - Poker 不再维护独立的"稳定 poker identity 绑定"；身份真值永远跟随
 //     keyspace.active()。本页**不再**提供 key 选择器 / 绑定按钮 / 解绑按钮。
-//   - 页面明确展示"当前 active key 即扑克身份"；active key 切换会断开
-//     当前 Poker 会话并以新 key 重建。
-//   - all 模式 / vault 锁定 / active key 尚未 ready → Connect 按钮禁用，
-//     提示对应原因（fail-closed）。
+//   - 页面只展示业务语义"当前扑克身份"，不向用户暴露 active key /
+//     vault locked / all mode 这类系统内部概念。
+//   - 会话不可用时仅显示"扑克当前不可用"之类的业务结果，不提示用户在
+//     Poker 页里执行 key / wallet 操作；这些动作属于系统层。
 //   - 网络配置（proxy endpoint / 双平面 announce / fallback 开关）属于
 //     全局配置，切 key 不丢。表单直接编辑 service.getSettings()。
 //   - 硬切换 002：本页是 Poker 唯一正式设置页；/settings 不再展示字段
@@ -34,31 +34,17 @@ function statusClass(s: StatusKind): string {
 }
 
 function describeSession(state: PokerSessionKeyState): {
-  kind: string;
-  tone: "ok" | "warn" | "fail";
+  tone: "ok" | "fail";
   text: string;
 } {
   switch (state.kind) {
     case "ready":
       return {
-        kind: "ready",
         tone: "ok",
         text: `${state.key.label} · ${shortHex(state.key.publicKeyHex ?? "")}`
       };
-    case "allMode":
-      return { kind: "allMode", tone: "warn", text: "all-keys mode" };
-    case "vaultLocked":
-      return { kind: "vaultLocked", tone: "fail", text: "vault locked" };
-    case "missing":
-      return { kind: "missing", tone: "fail", text: "no ready key" };
-    case "notReady":
-      return {
-        kind: "notReady",
-        tone: "fail",
-        text: `active key ${state.reason}`
-      };
-    case "noActiveHash":
-      return { kind: "noActiveHash", tone: "fail", text: "no active hash" };
+    default:
+      return { tone: "fail", text: "unavailable" };
   }
 }
 
@@ -160,49 +146,34 @@ export function PokerSettingsPage(): React.ReactElement {
           {t("poker.settings.status.label", { defaultValue: "Status" })}
         </span>
         <span className={statusClass(status)}>{t(statusKey, { defaultValue: status })}</span>
-        <span
-          className={`poker-settings__active-key poker-settings__active-key--${sessionDesc.tone}`}
-        >
-          {t("poker.settings.activeKey.label", { defaultValue: "Active key" })}:{" "}
-          {sessionReady ? (
-            <>
-              <code>{sessionDesc.text}</code>
-            </>
-          ) : (
-            <span className="poker-settings__active-key--fail">
-              {t(`poker.settings.activeKey.${sessionDesc.kind}`, {
-                defaultValue: sessionDesc.text
-              })}
-            </span>
-          )}
-        </span>
+        {sessionReady ? (
+          <span
+            className={`poker-settings__active-key poker-settings__active-key--${sessionDesc.tone}`}
+          >
+            {t("poker.settings.identity.label", { defaultValue: "Current poker identity" })}:{" "}
+            <code>{sessionDesc.text}</code>
+          </span>
+        ) : null}
       </div>
 
       <section className="poker-settings__section poker-settings-active-key">
         <h2>
-          {t("poker.settings.activeKey.section", { defaultValue: "Poker identity" })}
+          {t("poker.settings.identity.section", { defaultValue: "Poker identity" })}
         </h2>
-        <p className="poker-settings-active-key__hint">
-          {t("poker.settings.activeKey.hint", {
-            defaultValue:
-              "The current active key is your poker identity. Switching active key will close the current session and rebuild it under the new key."
-          })}
-        </p>
-        {session.kind === "allMode" ? (
-          <p className="poker-settings-active-key__warn">
-            {t("poker.settings.activeKey.allModeWarn", {
+        {sessionReady ? (
+          <p className="poker-settings-active-key__hint">
+            {t("poker.settings.identity.hint", {
               defaultValue:
-                "All-keys mode is active. Poker requires a single active key — switch back to a single key to enable connection."
+                "Poker uses the current identity for this session. If the identity changes, the current session will be rebuilt automatically."
             })}
           </p>
-        ) : null}
-        {session.kind === "vaultLocked" ? (
+        ) : (
           <p className="poker-settings-active-key__warn">
-            {t("poker.settings.activeKey.lockedWarn", {
-              defaultValue: "Vault is locked. Unlock to enable Poker."
+            {t("poker.settings.identity.unavailable", {
+              defaultValue: "Poker is currently unavailable."
             })}
           </p>
-        ) : null}
+        )}
       </section>
 
       <section className="poker-settings__section poker-settings-endpoint">

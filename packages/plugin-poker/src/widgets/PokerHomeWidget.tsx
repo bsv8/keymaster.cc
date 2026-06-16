@@ -1,11 +1,11 @@
 // packages/plugin-poker/src/widgets/PokerHomeWidget.tsx
-// Home widget：展示连接状态 + 在线 player 数 + active key 提示。
+// Home widget：展示连接状态 + 在线 player 数 + 当前扑克身份。
 //
 // 设计缘由（硬切换 004）：
 //   - 旧 widget 在 binding 解绑时显示"未绑定"。现在 binding 概念已删
-//     除，改为显示当前 active key 状态：all 模式 / vault locked / 未就绪
-//     时分别给出对应提示，而不是显示笼统的"未连接"。
-//   - active key 切换时 widget 状态必须跟随新 session；不允许展示旧
+//     除；当会话不可用时只显示业务结果"扑克当前不可用"，不暴露 active key /
+//     vault locked 这类系统内部概念。
+//   - 会话切换时 widget 状态必须跟随新 session；不允许展示旧
 //     key 的"在线玩家"计数。
 //   - 硬切换 002：使用 home-widget / home-widget__head / home-widget__status
 //     这套共享 class，业务专属细节走 poker-home-widget* 修饰类。
@@ -46,11 +46,6 @@ export function PokerHomeWidget(): React.ReactElement {
     };
   }, [service]);
 
-  const sessionHintKey = `poker.home.sessionUnavailable.${session.kind}`;
-  const sessionHint = t(sessionHintKey, {
-    defaultValue: t("poker.home.empty", { defaultValue: "Not connected" })
-  });
-
   return (
     <div className="home-widget poker-home-widget">
       <header className="home-widget__head">
@@ -70,11 +65,12 @@ export function PokerHomeWidget(): React.ReactElement {
         </p>
       ) : session.kind !== "ready" ? (
         <p className="home-widget__status poker-home-widget__hint">
-          {sessionHint}
+          {t("poker.home.unavailable", {
+            defaultValue: "Poker is currently unavailable."
+          })}
           <span className="poker-home-widget__hint-sub">
-            {t("poker.home.sessionUnavailable.subHint", {
-              defaultValue:
-                "Poker needs a single active key. Switch back from all-keys mode or unlock the vault."
+            {t("poker.home.unavailableHint", {
+              defaultValue: "The current session is unavailable."
             })}
           </span>
         </p>
@@ -85,7 +81,7 @@ export function PokerHomeWidget(): React.ReactElement {
             <span className="addr">{count}</span>
           </li>
           <li>
-            <span>{t("poker.home.activeKey", { defaultValue: "Active key" })}</span>
+            <span>{t("poker.home.identity", { defaultValue: "Current poker identity" })}</span>
             <span className="addr">
               <code>
                 {session.key.label} · {(session.key.publicKeyHex ?? "").slice(0, 12)}…

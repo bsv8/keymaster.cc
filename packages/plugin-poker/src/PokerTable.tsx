@@ -4,10 +4,10 @@
 // 设计缘由：
 //   - 硬切换文档验收清单要求 "host / join table 后能进入局内视图"；本
 //     期仅完成 topic 订阅与 frame 接收骨架，详细牌局逻辑留到后续硬切换。
-//   - 硬切换 004：若用户正在桌里时切 `active key`，页面不能假装继续
-//     停留在同一玩家身份——合理行为是：
+//   - 硬切换 004：若用户正在桌里时会话身份切换，页面不能假装继续停留
+//     在同一玩家身份——合理行为是：
 //       * 旧订阅断开；
-//       * 页内显示"active key 已变更，旧会话已关闭"；
+//       * 页内显示"当前会话已关闭"；
 //       * 由用户按新身份重新进入。
 //   - 硬切换 002：使用 @keymaster/ui 的 PageHeader / EmptyState；本视图
 //     是当前阶段的协议页，不强装成完整牌桌。layout 走 poker-table* 专
@@ -37,7 +37,7 @@ export function PokerTable(): React.ReactElement {
   /** 当前订阅时锁定的 session key hash；若 activeKey 改变则视为失效。 */
   const [joinedKeyHash, setJoinedKeyHash] = useState<string | null>(null);
 
-  // 切 active key 时强制收拢：清掉旧订阅，提示用户用新身份重新加入。
+  // 会话身份切换时强制收拢：清掉旧订阅，提示用户重新进入。
   useEffect(() => {
     if (!service) return;
     const off = service.onActivePokerKeyChange((next) => {
@@ -49,9 +49,9 @@ export function PokerTable(): React.ReactElement {
           setJoinedKeyHash(null);
           setJoined(false);
           setError(
-            t("poker.table.activeKeyChanged", {
+            t("poker.table.sessionClosed", {
               defaultValue:
-                "Active key has changed. The previous session was closed; please re-enter under the new identity."
+                "The current session was closed. Please re-enter."
             })
           );
         }
@@ -72,7 +72,7 @@ export function PokerTable(): React.ReactElement {
       setError(
         t(`poker.table.sessionUnavailable.${session.kind}`, {
           defaultValue: t("poker.table.sessionUnavailable.default", {
-            defaultValue: "Poker session unavailable. Open Poker settings."
+            defaultValue: "Poker is currently unavailable."
           })
         })
       );

@@ -74,37 +74,19 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.network": "Network",
       "poker.settings.actions.section": "Actions",
       "poker.settings.diag": "Diagnostics",
-      "poker.settings.activeKey.label": "Active key",
-      "poker.settings.activeKey.section": "Poker identity",
-      "poker.settings.activeKey.hint":
-        "The current active key is your poker identity. Switching active key will close the current session and rebuild it under the new key.",
-      "poker.settings.activeKey.allModeWarn":
-        "All-keys mode is active. Poker requires a single active key — switch back to a single key to enable connection.",
-      "poker.settings.activeKey.lockedWarn": "Vault is locked. Unlock to enable Poker.",
-      "poker.settings.activeKey.ready": "ready",
-      "poker.settings.activeKey.allMode": "all-keys mode (fail-closed)",
-      "poker.settings.activeKey.vaultLocked": "vault locked (fail-closed)",
-      "poker.settings.activeKey.missing": "no ready key (fail-closed)",
-      "poker.settings.activeKey.notReady": "active key not ready (fail-closed)",
-      "poker.settings.activeKey.noActiveHash": "no active hash (fail-closed)",
+      "poker.settings.identity.label": "Current poker identity",
+      "poker.settings.identity.section": "Poker identity",
+      "poker.settings.identity.hint":
+        "Poker uses the current identity for this session. If the identity changes, the current session will be rebuilt automatically.",
+      "poker.settings.identity.unavailable": "Poker is currently unavailable.",
       "poker.home.title": "Poker",
       "poker.home.empty": "Not connected",
       "poker.home.connectHint": "Open Poker settings to configure the proxy endpoint.",
       "poker.home.tables": "Tables",
       "poker.home.presences": "Online players",
-      "poker.home.activeKey": "Active key",
-      "poker.home.sessionUnavailable.allMode":
-        "All-keys mode is active. Poker needs a single active key.",
-      "poker.home.sessionUnavailable.vaultLocked":
-        "Vault is locked. Unlock the vault to use Poker.",
-      "poker.home.sessionUnavailable.missing":
-        "No ready key. Import or generate a key to use Poker.",
-      "poker.home.sessionUnavailable.notReady":
-        "Active key is not ready yet. Wait for backfill to finish.",
-      "poker.home.sessionUnavailable.noActiveHash":
-        "No active hash. Select a single active key.",
-      "poker.home.sessionUnavailable.subHint":
-        "Poker needs a single active key. Switch back from all-keys mode or unlock the vault.",
+      "poker.home.identity": "Current poker identity",
+      "poker.home.unavailable": "Poker is currently unavailable.",
+      "poker.home.unavailableHint": "The current session is unavailable.",
       "poker.status.idle": "Idle",
       "poker.status.connecting": "Connecting",
       "poker.status.authenticating": "Authenticating",
@@ -123,24 +105,24 @@ const pokerResources: I18nPluginResources = {
       "poker.lobby.noPresences": "Nobody online",
       "poker.lobby.noPresencesHint":
         "Online players will show up once the proxy connection is established.",
-      "poker.lobby.sessionUnavailable.default.title": "Poker session unavailable",
+      "poker.lobby.sessionUnavailable.default.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.default.hint":
-        "Switch to a single active key to see tables and online players.",
-      "poker.lobby.sessionUnavailable.allMode.title": "All-keys mode active",
+        "The current session is unavailable.",
+      "poker.lobby.sessionUnavailable.allMode.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.allMode.hint":
-        "Poker requires a single active key. Switch back from all-keys mode.",
-      "poker.lobby.sessionUnavailable.vaultLocked.title": "Vault is locked",
+        "The current session is unavailable.",
+      "poker.lobby.sessionUnavailable.vaultLocked.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.vaultLocked.hint":
-        "Unlock the vault to see tables and online players.",
-      "poker.lobby.sessionUnavailable.missing.title": "No ready key",
+        "The current session is unavailable.",
+      "poker.lobby.sessionUnavailable.missing.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.missing.hint":
-        "Import or generate a key to use Poker.",
-      "poker.lobby.sessionUnavailable.notReady.title": "Active key is not ready",
+        "The current session is unavailable.",
+      "poker.lobby.sessionUnavailable.notReady.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.notReady.hint":
-        "Wait for backfill to finish, then reload.",
-      "poker.lobby.sessionUnavailable.noActiveHash.title": "No active key selected",
+        "The current session is unavailable.",
+      "poker.lobby.sessionUnavailable.noActiveHash.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.noActiveHash.hint":
-        "Select a single active key to enable Poker.",
+        "The current session is unavailable.",
       "poker.table.title": "Poker table",
       "poker.table.back": "Back to lobby",
       "poker.table.notJoined": "You have not joined this table",
@@ -151,22 +133,21 @@ const pokerResources: I18nPluginResources = {
       "poker.table.frames": "Frames",
       "poker.table.protocolOnly":
         "Protocol-only view. Game-state rendering will land in a later hard switch.",
-      "poker.table.activeKeyChanged":
-        "Active key has changed. The previous session was closed; please re-enter under the new identity.",
+      "poker.table.sessionClosed":
+        "The current session was closed. Please re-enter.",
       "poker.table.sessionUnavailable.default":
-        "Poker session unavailable. Open Poker settings.",
+        "Poker is currently unavailable.",
       "poker.table.sessionUnavailable.allMode":
-        "All-keys mode is active. Switch to a single active key.",
+        "Poker is currently unavailable.",
       "poker.table.sessionUnavailable.vaultLocked":
-        "Vault is locked. Unlock to use Poker.",
+        "Poker is currently unavailable.",
       "poker.table.sessionUnavailable.missing":
-        "No ready key. Import or generate a key to use Poker.",
+        "Poker is currently unavailable.",
       "poker.table.sessionUnavailable.notReady":
-        "Active key is not ready. Wait for backfill to finish.",
+        "Poker is currently unavailable.",
       "poker.table.sessionUnavailable.noActiveHash":
-        "No active hash. Select a single active key.",
-      "poker.err.notReady": "Proxy not ready",
-      "poker.err.locked": "Vault is locked"
+        "Poker is currently unavailable.",
+      "poker.err.notReady": "Proxy not ready"
     },
     "zh-CN": {
       "poker.provider.name": "扑克",
@@ -200,32 +181,19 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.network": "网络",
       "poker.settings.actions.section": "操作",
       "poker.settings.diag": "诊断",
-      "poker.settings.activeKey.label": "当前 active key",
-      "poker.settings.activeKey.section": "扑克身份",
-      "poker.settings.activeKey.hint":
-        "当前 active key 即扑克身份；切换 active key 会断开当前会话并以新 key 重建。",
-      "poker.settings.activeKey.allModeWarn":
-        "当前处于全部 key 模式，Poker 需要单一 active key —— 切换回单一 key 后才能连接。",
-      "poker.settings.activeKey.lockedWarn": "钱包未解锁，无法启用 Poker。",
-      "poker.settings.activeKey.ready": "就绪",
-      "poker.settings.activeKey.allMode": "全部 key 模式（fail-closed）",
-      "poker.settings.activeKey.vaultLocked": "钱包未解锁（fail-closed）",
-      "poker.settings.activeKey.missing": "没有 ready key（fail-closed）",
-      "poker.settings.activeKey.notReady": "active key 尚未就绪（fail-closed）",
-      "poker.settings.activeKey.noActiveHash": "没有 active hash（fail-closed）",
+      "poker.settings.identity.label": "当前扑克身份",
+      "poker.settings.identity.section": "扑克身份",
+      "poker.settings.identity.hint":
+        "Poker 会使用当前身份建立会话；身份变化时，当前会话会自动重建。",
+      "poker.settings.identity.unavailable": "扑克当前不可用。",
       "poker.home.title": "扑克",
       "poker.home.empty": "未连接",
       "poker.home.connectHint": "前往扑克设置配置代理 endpoint。",
       "poker.home.tables": "桌局",
       "poker.home.presences": "在线玩家",
-      "poker.home.activeKey": "当前 active key",
-      "poker.home.sessionUnavailable.allMode": "当前处于全部 key 模式，Poker 需要单一 active key。",
-      "poker.home.sessionUnavailable.vaultLocked": "钱包未解锁，解锁后即可使用 Poker。",
-      "poker.home.sessionUnavailable.missing": "没有 ready key。请导入或生成一把 key。",
-      "poker.home.sessionUnavailable.notReady": "active key 尚未就绪，请等待 backfill 完成。",
-      "poker.home.sessionUnavailable.noActiveHash": "没有 active hash。请选择单一 active key。",
-      "poker.home.sessionUnavailable.subHint":
-        "Poker 需要单一 active key，请切换回单一 key 模式或解锁钱包。",
+      "poker.home.identity": "当前扑克身份",
+      "poker.home.unavailable": "扑克当前不可用。",
+      "poker.home.unavailableHint": "当前会话暂不可用。",
       "poker.status.idle": "空闲",
       "poker.status.connecting": "连接中",
       "poker.status.authenticating": "认证中",
@@ -241,18 +209,18 @@ const pokerResources: I18nPluginResources = {
       "poker.lobby.noTablesHint": "代理上 host 公告桌局后，会出现在这里。",
       "poker.lobby.noPresences": "暂无在线玩家",
       "poker.lobby.noPresencesHint": "代理连接建立后，在线玩家会出现在这里。",
-      "poker.lobby.sessionUnavailable.default.title": "扑克会话不可用",
-      "poker.lobby.sessionUnavailable.default.hint": "切换到单一 active key 后即可查看桌局与在线玩家。",
-      "poker.lobby.sessionUnavailable.allMode.title": "全部 key 模式已开启",
-      "poker.lobby.sessionUnavailable.allMode.hint": "Poker 需要单一 active key，请切换回单一 key 模式。",
-      "poker.lobby.sessionUnavailable.vaultLocked.title": "钱包未解锁",
-      "poker.lobby.sessionUnavailable.vaultLocked.hint": "解锁钱包后即可查看桌局与在线玩家。",
-      "poker.lobby.sessionUnavailable.missing.title": "没有 ready key",
-      "poker.lobby.sessionUnavailable.missing.hint": "请导入或生成一把 key。",
-      "poker.lobby.sessionUnavailable.notReady.title": "active key 尚未就绪",
-      "poker.lobby.sessionUnavailable.notReady.hint": "等待 backfill 完成后重新加载。",
-      "poker.lobby.sessionUnavailable.noActiveHash.title": "未选择 active key",
-      "poker.lobby.sessionUnavailable.noActiveHash.hint": "选择单一 active key 后即可启用 Poker。",
+      "poker.lobby.sessionUnavailable.default.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.default.hint": "当前会话暂不可用。",
+      "poker.lobby.sessionUnavailable.allMode.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.allMode.hint": "当前会话暂不可用。",
+      "poker.lobby.sessionUnavailable.vaultLocked.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.vaultLocked.hint": "当前会话暂不可用。",
+      "poker.lobby.sessionUnavailable.missing.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.missing.hint": "当前会话暂不可用。",
+      "poker.lobby.sessionUnavailable.notReady.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.notReady.hint": "当前会话暂不可用。",
+      "poker.lobby.sessionUnavailable.noActiveHash.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.noActiveHash.hint": "当前会话暂不可用。",
       "poker.table.title": "扑克桌",
       "poker.table.back": "返回大厅",
       "poker.table.notJoined": "尚未加入该桌",
@@ -262,15 +230,14 @@ const pokerResources: I18nPluginResources = {
       "poker.table.txEvents": "Tx 事件",
       "poker.table.frames": "帧",
       "poker.table.protocolOnly": "纯协议页。牌局状态渲染留到后续硬切换。",
-      "poker.table.activeKeyChanged": "active key 已变更，旧会话已关闭，请用新身份重新进入。",
-      "poker.table.sessionUnavailable.default": "扑克会话不可用，请打开扑克设置。",
-      "poker.table.sessionUnavailable.allMode": "全部 key 模式已开启，请切换到单一 active key。",
-      "poker.table.sessionUnavailable.vaultLocked": "钱包未解锁，请解锁后使用 Poker。",
-      "poker.table.sessionUnavailable.missing": "没有 ready key，请导入或生成一把 key。",
-      "poker.table.sessionUnavailable.notReady": "active key 尚未就绪，请等待 backfill 完成。",
-      "poker.table.sessionUnavailable.noActiveHash": "没有 active hash，请选择单一 active key。",
-      "poker.err.notReady": "代理尚未就绪",
-      "poker.err.locked": "钱包未解锁"
+      "poker.table.sessionClosed": "当前会话已关闭，请重新进入。",
+      "poker.table.sessionUnavailable.default": "扑克当前不可用。",
+      "poker.table.sessionUnavailable.allMode": "扑克当前不可用。",
+      "poker.table.sessionUnavailable.vaultLocked": "扑克当前不可用。",
+      "poker.table.sessionUnavailable.missing": "扑克当前不可用。",
+      "poker.table.sessionUnavailable.notReady": "扑克当前不可用。",
+      "poker.table.sessionUnavailable.noActiveHash": "扑克当前不可用。",
+      "poker.err.notReady": "代理尚未就绪"
     }
   }
 };

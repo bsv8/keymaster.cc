@@ -8,7 +8,7 @@
 //   - service 切 key 时已主动清空 in-memory presences / tables；本组件
 //     只需订阅 service 的 onPresenceChange / onTablesChange，列表会自动
 //     跟随切换。
-//   - all 模式 / vault locked / 未就绪 → 显示只读提示而不是"未连接"。
+//   - 会话不可用时显示业务结果，不在 Poker 页面暴露系统内部状态名称。
 //   - 硬切换 002：使用 @keymaster/ui 的 PageHeader / EmptyState 原子
 //     组件，layout 走 poker-lobby* 专属 CSS（不再依赖 apps/web 全局
 //     样式）。
@@ -88,13 +88,12 @@ export function PokerLobby(): React.ReactElement {
         <EmptyState
           title={t(`poker.lobby.sessionUnavailable.${session.kind}.title`, {
             defaultValue: t("poker.lobby.sessionUnavailable.default.title", {
-              defaultValue: "Poker session unavailable"
+              defaultValue: "Poker is currently unavailable"
             })
           })}
           description={t(`poker.lobby.sessionUnavailable.${session.kind}.hint`, {
             defaultValue: t("poker.lobby.sessionUnavailable.default.hint", {
-              defaultValue:
-                "Switch to a single active key to see tables and online players."
+              defaultValue: "The current session is unavailable."
             })
           })}
         />
