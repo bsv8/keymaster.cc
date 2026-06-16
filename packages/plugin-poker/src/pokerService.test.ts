@@ -154,11 +154,12 @@ class FakeKeyspace {
     return { ...this.state };
   }
   async setActive(pkh: string) {
-    this.state = { mode: "single", activePublicKeyHash: pkh };
+    this.state = { activePublicKeyHash: pkh };
     for (const h of this.activeHandlers) h(this.state);
   }
-  async setAll() {
-    this.state = { mode: "all" };
+  /** 硬切换 005 收尾：模拟 activePublicKeyHash 缺省（替代旧的 setAll）。 */
+  clearActive() {
+    this.state = {};
     for (const h of this.activeHandlers) h(this.state);
   }
   requireActiveKey() {
@@ -286,11 +287,14 @@ describe("pokerService (active-key-driven)", () => {
     await expect(svc.connect()).rejects.toThrow(/not ready/);
   });
 
-  it("all-mode fails-closed: connect throws and no ws opens", async () => {
+  it("no-active-key fails-closed: connect throws and no ws opens", async () => {
+    // 硬切换 005 收尾：active key 不再有 `mode: "all"`；"无 active key"
+    // 唯一对应 `activePublicKeyHash` 缺省，service 一律按 noActiveHash
+    // 处理。
     await svc.updateSettings({ proxyEndpoint: "wss://example" });
-    await keyspace.setAll();
+    keyspace.clearActive();
     await new Promise((r) => setTimeout(r, 0));
-    await expect(svc.connect()).rejects.toThrow(/all-keys mode/);
+    await expect(svc.connect()).rejects.toThrow(/not ready/);
     expect(svc.status()).not.toBe("ready");
   });
 
@@ -342,12 +346,14 @@ describe("pokerService (active-key-driven)", () => {
     expect((svc as any).currentSessionKeyHash).toBe("pkhB");
   });
 
-  it("all-mode change pkhA → all clears session and surfaces allMode state", async () => {
+  it("active key cleared (noActiveHash) clears session and surfaces noActiveHash state", async () => {
+    // 硬切换 005 收尾：activePublicKeyHash 缺省时 service 落到
+    // noActiveHash 状态，断开连接、清空内存态。
     await svc.updateSettings({ proxyEndpoint: "wss://example" });
     (svc as any).currentStatus = "ready";
-    await keyspace.setAll();
+    keyspace.clearActive();
     await new Promise((r) => setTimeout(r, 0));
-    expect(svc.getActivePokerKey().kind).toBe("allMode");
+    expect(svc.getActivePokerKey().kind).toBe("noActiveHash");
     expect(svc.status()).toBe("closed");
   });
 

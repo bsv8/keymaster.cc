@@ -155,7 +155,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           if (
             pendingActivationNotice &&
             pendingActivationNotice.publicKeyHash &&
-            state.mode === "single" &&
             state.activePublicKeyHash === pendingActivationNotice.publicKeyHash
           ) {
             setPendingActivationNotice(null);
@@ -170,7 +169,24 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     try {
       assertWebCryptoAvailable();
       const meta = await vaultDb.getMeta();
-      setStatus(meta ? "locked" : "uninitialized");
+      if (!meta) {
+        setStatus("uninitialized");
+        return;
+      }
+      // 硬切换 005 收尾：meta 存在但 vault_keys 已空是异常态——
+      // 不允许进入"locked / unlocked 但 0 key"的假状态。直接清理 meta
+      // 并收敛到 uninitialized，让用户进入首启 welcome。
+      const keys = await vaultDb.listKeys();
+      if (keys.length === 0) {
+        try {
+          await vaultDb.deleteMeta();
+        } catch (delErr) {
+          console.error("vaultDb.deleteMeta during empty-bootstrap failed", delErr);
+        }
+        setStatus("uninitialized");
+        return;
+      }
+      setStatus("locked");
     } catch (err) {
       console.error("Vault bootstrap failed", err);
       setStatus("uninitialized");
@@ -753,6 +769,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      * 渲染，keyspace 也已 ready，避免 widget 抢跑触发 "Key storage is not ready"。
      * 失败时必须清理 masterKey / masterSalt 并回退到 locked，避免 UI 仍停
      * 在 locked 但内存里有解锁态材料。
+     *
+     * 硬切换 005 收尾：unlock 收尾前再次校验 vault_keys 不为 0；空列表
+     * 是异常态（meta 还在但 0 key），按"meta 残留"路径收敛到
+     * uninitialized 而不是 unlocked——这是与 bootstrap 路径一致的护栏。
      */
     async unlock(password) {
       const meta = await vaultDb.getMeta();
@@ -770,6 +790,29 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       try {
         // 1) identity backfill：失败 key 单独标 failed，不影响整体 unlocked。
         await backfillIdentities();
+        // 硬切换 005 收尾：unlock 收尾前若 vault_keys 已空，按"meta 残留"
+        // 路径收敛到 uninitialized——直接清空内存会话、删 meta，不再走
+        // keyspace.onVaultUnlocked / setStatus("unlocked")。
+        const remaining = await vaultDb.listKeys();
+        if (remaining.length === 0) {
+          if (deps.keyspace) {
+            try {
+              deps.keyspace.onVaultLocked();
+            } catch (err) {
+              console.error("keyspace.onVaultLocked during empty-unlock failed", err);
+            }
+          }
+          try {
+            await vaultDb.deleteMeta();
+          } catch (delErr) {
+            console.error("vaultDb.deleteMeta during empty-unlock failed", delErr);
+          }
+          masterKey = null;
+          masterSalt = null;
+          keyCache = null;
+          setStatus("uninitialized");
+          return;
+        }
         // 2) keyspace 选择 active key：必须发生在 setStatus/emit 之前，
         //    否则业务插件看到 unlocked 时 active 仍是初始化期状态。
         if (deps.keyspace) {
@@ -794,6 +837,62 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         deps.keyspace.onVaultLocked();
       }
       deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
+    },
+
+    /**
+     * 硬切换 005 收尾：已解锁壳层守卫调用——"0 key 异常态"恢复入口。
+     *
+     * 触发场景：AppShell 检测到 vault.status === "unlocked" 且
+     * keyspace.active().activePublicKeyHash 缺失且 listKeys 为空。
+     * 此时必须把状态收敛到 uninitialized（不是 locked），让用户进
+     * 入首启 welcome 而不是撞上"已经看到主界面但永远没有 key"。
+     *
+     * 实现：复用 finalizeEmptyVaultAfterLastKeyDeletion 的同构清理
+     * 流程——清空内存会话、触发 keyspace.onVaultLocked、删 meta、
+     * 状态收敛到 uninitialized。但与"删完最后一把 key"不同的是
+     * 本方法**不**在 finally 块里抛错——壳层守卫的目标是
+     * "即使有残留也能从 uninitialized 入口继续"，与
+     * finalizeEmptyVaultAfterLastKeyDeletion 严格"meta 必须删干净"
+     * 的语义有差异。
+     *
+     * 设计缘由：bootstrap 路径里已经做了"meta 存在但 0 key 就清 meta"
+     * 的护栏；本方法在 unlocked 状态补做一次同源护栏。两条路径都
+     * 收敛到 uninitialized。
+     */
+    async recoverEmptyVaultToUninitialized() {
+      // 1) 校验：仅在 unlocked + 0 key 时允许触发。其它状态抛错拒绝。
+      if (status !== "unlocked") {
+        throw new Error("recoverEmptyVaultToUninitialized requires unlocked state");
+      }
+      const remaining = await vaultDb.listKeys();
+      if (remaining.length > 0) {
+        throw new Error("recoverEmptyVaultToUninitialized requires zero keys");
+      }
+      // 2) 通知 keyspace 收尾。
+      if (deps.keyspace) {
+        try {
+          deps.keyspace.onVaultLocked();
+        } catch (err) {
+          console.error("keyspace.onVaultLocked during recover failed", err);
+        }
+      }
+      // 3) 清空内存会话。
+      masterKey = null;
+      masterSalt = null;
+      keyCache = null;
+      setPendingActivationNotice(null);
+      if (activeChangeUnsub) {
+        activeChangeUnsub();
+        activeChangeUnsub = null;
+      }
+      // 4) 删 meta，状态收敛到 uninitialized。
+      try {
+        await vaultDb.deleteMeta();
+      } catch (delErr) {
+        // meta 删除失败仍要把状态收敛：UI 至少能切回 welcome 让用户重试。
+        console.error("vaultDb.deleteMeta during recover failed", delErr);
+      }
+      setStatus("uninitialized");
     },
 
     /**

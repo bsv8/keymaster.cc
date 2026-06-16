@@ -2,8 +2,11 @@
 // 单个联系人详情：根据 path 参数显示。
 // 设计缘由：动态资源名（联系人名）由 breadcrumb provider resolve，页面只展示。
 //
-// 硬切换 008 收尾：catch listContacts 错误；all / 无 key 模式显示"请选择一个 key"，
+// 硬切换 008 收尾：catch listContacts 错误；无 key 时显示"请选择一个 key"，
 // 避免把"无 key"误显为"联系人已被删除"。
+//
+// 硬切换 005 收尾：删掉 "all 模式" 分支，仅以 activePublicKeyHash 缺失
+// 作为阻断条件。
 //
 // 硬切换 003：所有展示文案走 i18n。
 
@@ -27,7 +30,7 @@ export function ContactDetailPage() {
 
   useEffect(() => {
     let mounted = true;
-    if (keyspace.active().mode !== "single") {
+    if (!keyspace.active().activePublicKeyHash) {
       setContact(undefined);
       setNoActiveKey(true);
       return;

@@ -2,10 +2,13 @@
 // Poker session key 解析辅助：把 `keyspace.active()` + vault 状态机
 // 收敛成 PokerSessionKeyState 一份解析结果。
 //
-// 设计缘由（硬切换 004）：
+// 设计缘由（硬切换 004 + 硬切换 005 收尾）：
 //   - 旧 `pokerIdentityBinding.ts` 把"poker identity"做成独立绑定；现
 //     在 Poker 身份永远来自 `keyspace.active()`，因此只需要"判断当前
 //     active 能不能用作 Poker 身份"这一件事。
+//   - 硬切换 005：`allMode` 已被删除——`mode: "all"` 不再是真值。
+//     `activePublicKeyHash` 缺失 = 异常态（壳层会拦截到 uninitialized
+//     或修复/管理态）；Poker 一律按 `noActiveHash` 处理。
 //   - 解析逻辑必须独立可单测（不能直接耦合 vault / keyspace / service
 //     内部状态），于是抽到独立模块。
 //   - 该函数返回的 state 直接驱动 service 的 fail-closed 行为：
@@ -22,10 +25,9 @@ import type {
 /**
  * 从 `keyspace.active()` 取一把"可作为 Poker 身份的 KeyIdentity"。
  *
- * 行为约定（硬切换 004）：
+ * 行为约定（硬切换 004 + 硬切换 005 收尾）：
  *   - vault 未解锁 → `{ kind: "vaultLocked" }`。
- *   - active.mode === "all" → `{ kind: "allMode" }`。
- *   - active.mode === "single" 但 activePublicKeyHash 缺省 → `{ kind: "noActiveHash" }`。
+ *   - activePublicKeyHash 缺省 → `{ kind: "noActiveHash" }`。
  *   - single + 有 hash：尝试 `keyspace.getKey(hash)`；
  *       * 未找到 → `{ kind: "missing" }`。
  *       * identityStatus === "ready" → `{ kind: "ready", key }`。
@@ -39,7 +41,6 @@ export async function resolvePokerSessionKey(
 ): Promise<PokerSessionKeyState> {
   if (vault.status() !== "unlocked") return { kind: "vaultLocked" };
   const active: ActiveKeyState = keyspace.active();
-  if (active.mode === "all") return { kind: "allMode" };
   if (!active.activePublicKeyHash) return { kind: "noActiveHash" };
   const key: KeyIdentity | undefined = await keyspace.getKey(active.activePublicKeyHash);
   if (!key) return { kind: "missing" };
@@ -61,7 +62,6 @@ export function quickResolvePokerSessionKey(
 ): PokerSessionKeyState {
   if (vault.status() !== "unlocked") return { kind: "vaultLocked" };
   const active = keyspace.active();
-  if (active.mode === "all") return { kind: "allMode" };
   if (!active.activePublicKeyHash) return { kind: "noActiveHash" };
   // 同步版本不查 key 元数据：返回 noActiveHash 视作"未知"，由 service
   // 异步解析升级为 missing / notReady / ready。

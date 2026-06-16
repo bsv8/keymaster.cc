@@ -3,8 +3,8 @@
 // 设计缘由：
 //   - 顶栏在 order 90 注册，位于 background.tray (order 100) 左侧。
 //   - 内部通过 keyspace.service 维护 active key；不直接持有 active key 状态。
-//   - 单 key 模式显示 label + 短公钥（publicKeyHex 截断）；all 模式显示"全部 key"。
-//   - 切换 key 时调用 keyspace.setActive；菜单顶部有"全部 key"切换项。
+//   - 显示 label + 短公钥（publicKeyHex 截断）；不再有"全部 key"入口。
+//   - 切换 key 时调用 keyspace.setActive；菜单只列出 ready keys。
 //   - 与 BackgroundTray 同高度，使用 lucide 图标。
 //   - 切换时清空未提交 provider draft：本期由 keyspace 通过事件 activeKey.changed
 //     通知，业务插件各自订阅处理。
@@ -19,6 +19,11 @@
 //   - 短公钥通过 `formatShortPublicKey(publicKeyHex)` 运行时现算。
 //   - 不再读取 `KeyIdentity.fingerprint` 字段。
 //   - class 命名从 `key-switch__fingerprint` 改为 `key-switch__pubkey`。
+//
+// 硬切换 005 收尾：删除"全部 key"入口。`active` state 不再有 `mode` 字段；
+// widget 只在 ready key 列表内显示具体 key。无 activePublicKeyHash 时不暴露
+// "未选择"作为正常态文案（壳层会把这种情况识别为"修复/管理态"，这里是
+// 内部瞬时或异常兜底）。
 
 import { useEffect, useState } from "react";
 import { ChevronDown, KeyRound, Check, AlertTriangle } from "lucide-react";
@@ -96,7 +101,7 @@ export function KeySwitchWidget() {
     };
   }, [messageBus, keyspace]);
 
-  const current = active.mode === "single" && active.activePublicKeyHash
+  const current = active.activePublicKeyHash
     ? keys.find((k) => k.publicKeyHash === active.activePublicKeyHash)
     : undefined;
 
@@ -108,19 +113,6 @@ export function KeySwitchWidget() {
       setOpen(false);
     } catch (err) {
       console.error("Failed to switch key", err);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function pickAll() {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await keyspace.setAll();
-      setOpen(false);
-    } catch (err) {
-      console.error("Failed to enter all mode", err);
     } finally {
       setBusy(false);
     }
@@ -141,32 +133,18 @@ export function KeySwitchWidget() {
         <KeyRound size={16} />
         {initializing ? (
           <span className="key-switch__label">{t("vault.keySwitch.initializing", { defaultValue: "初始化中" })}</span>
-        ) : keys.length === 0 ? (
-          <span className="key-switch__label">{t("vault.keySwitch.noKey", { defaultValue: "无 key" })}</span>
-        ) : active.mode === "all" ? (
-          <span className="key-switch__label">{t("vault.keySwitch.allKey", { defaultValue: "全部 key" })}</span>
         ) : current && current.publicKeyHex ? (
           <>
             <span className="key-switch__label">{current.label || unnamed}</span>
             <span className="key-switch__pubkey">{formatShortPublicKey(current.publicKeyHex)}</span>
           </>
         ) : (
-          <span className="key-switch__label">{t("vault.keySwitch.unselected", { defaultValue: "未选择" })}</span>
+          <span className="key-switch__label">{t("vault.keySwitch.noReadyKey", { defaultValue: "无可切换 key" })}</span>
         )}
         <ChevronDown size={14} />
       </button>
       {open ? (
         <div className="key-switch__panel" role="menu">
-          <button
-            type="button"
-            className={`key-switch__item ${active.mode === "all" ? "key-switch__active" : ""}`}
-            onClick={pickAll}
-            disabled={busy}
-          >
-            <span className="key-switch__item-label">{t("vault.keySwitch.allKeyDesc", { defaultValue: "全部 key（只读总览）" })}</span>
-            {active.mode === "all" ? <Check size={14} /> : null}
-          </button>
-          <hr className="key-switch__divider" />
           {keys.map((k) => (
             <button
               type="button"

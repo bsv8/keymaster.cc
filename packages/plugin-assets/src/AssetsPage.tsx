@@ -1,16 +1,13 @@
 // packages/plugin-assets/src/AssetsPage.tsx
 // 资产列表页：聚合所有 provider 的资产摘要。
 // 设计缘由：单 provider 失败不影响其他 provider；通用资产页不展示 UTXO 等具体字段。
-// 硬切换 008：description 显示当前 key 上下文（label / 短公钥 / 全部 key / 无 key）；
+// 硬切换 008：description 显示当前 key 上下文（label / 短公钥 / 无 key）；
 // 切 key 时重新拉取资产。
 //
-// 硬切换 003：所有展示文案走 i18n。
-//
-// 硬切换 003 收尾：
-//   - 当前 key 上下文统一显示 `label + 短公钥`。
-//   - 短公钥由 `formatShortPublicKey(publicKeyHex)` 现算，不再读取
-//     `KeyIdentity.fingerprint` 字段。
-//   - 没有 `publicKeyHex` 时显示"身份不可用"，**不**伪造短公钥兜底。
+// 硬切换 005 收尾：删掉 "all 模式" 文案。无 active key 时本页面在壳层守卫
+// 拦截下不会渲染——"无 key"只会以"加载中"过渡态短暂出现，壳层 AppShell
+// 已经把"无 active key"收敛到 uninitialized 或修复/管理态，业务页不再
+// 自己处理该空态。
 
 import { useEffect, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
@@ -161,7 +158,6 @@ export function AssetsPage() {
 
 function buildDescription(host: ReturnType<typeof usePluginHost>, keyspace: KeyspaceService): string {
   const state = keyspace.active();
-  if (state.mode === "all") return host.i18n.t("assets.context.allKey", { defaultValue: "全部 key（只读总览）" });
   if (!state.activePublicKeyHash) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
   return host.i18n.t("assets.context.loading", { defaultValue: "加载中…" });
 }
@@ -171,7 +167,6 @@ async function buildDescriptionAsync(
   keyspace: KeyspaceService
 ): Promise<string> {
   const state = keyspace.active();
-  if (state.mode === "all") return host.i18n.t("assets.context.allKey", { defaultValue: "全部 key（只读总览）" });
   if (!state.activePublicKeyHash) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
   const identity: KeyIdentity | undefined = await keyspace.getKey(state.activePublicKeyHash);
   if (!identity) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });

@@ -1,13 +1,15 @@
 // packages/plugin-p2pkh/src/p2pkhService.ts
-// P2PKH 服务实现（硬切换 007）。
+// P2PKH 服务实现（硬切换 007 + 硬切换 005 收尾）。
 // 关键设计：
-//   - 默认方法只读当前 active key namespace；all 模式聚合多 key 读，写抛错。
+//   - 默认方法只读当前 active key namespace；不再支持 all-mode 聚合。
 //   - 切换 active key 时由本服务重建 p2pkh db handle 并通知同步协调器。
 //   - 同步入口：依赖 WocService + BackgroundService；不直接 fetch WOC。
 //   - 单一 SyncCoordinator 协调 recent-sync 与 history-backfill 写库。
 //   - recent-sync 由 BackgroundService 调度；history-backfill 单独注册。
 //   - key 导入后创建资源并触发 recent + backfill。
 //   - key.deleting 时取消资源通道；删除由 keyspace.deleteKey 统一调度。
+//   - 硬切换 005：active key 不再有 `mode: "all"` 状态。本 service 所有
+//     守护检查只看 `activePublicKeyHash` 是否存在。
 
 import type {
   BackgroundRegistry,
@@ -97,7 +99,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     getDb: () => ensureDb(),
     getActiveKey: () => {
       const state = getActiveKeyState();
-      if (state.mode !== "single" || !state.activePublicKeyHash) {
+      if (!state.activePublicKeyHash) {
         throw new Error("Active key is required");
       }
       if (!activeIdentity) {
@@ -138,7 +140,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   function requireActiveKeyIdentity(): ReadyKeyIdentity {
     const state = getActiveKeyState();
-    if (state.mode !== "single" || !state.activePublicKeyHash) {
+    if (!state.activePublicKeyHash) {
       throw new Error("Active key is required");
     }
     if (!activeIdentity || activeIdentity.publicKeyHash !== state.activePublicKeyHash) {
@@ -156,7 +158,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    */
   async function ensureDb(): Promise<P2pkhDbHandle> {
     const state = getActiveKeyState();
-    if (state.mode !== "single" || !state.activePublicKeyHash) {
+    if (!state.activePublicKeyHash) {
       throw new Error("Key storage is not ready");
     }
     if (p2pkhDbHandle && currentPublicKeyHash === state.activePublicKeyHash) {
@@ -183,7 +185,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    */
   async function rebindActiveKey() {
     const state = getActiveKeyState();
-    if (state.mode !== "single" || !state.activePublicKeyHash) {
+    if (!state.activePublicKeyHash) {
       activeKeyId = undefined;
       activeIdentity = undefined;
       p2pkhDbHandle = null;
@@ -296,7 +298,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    */
   function p2pkhTaskKeyScope() {
     const state = getActiveKeyState();
-    if (state.mode !== "single" || !state.activePublicKeyHash) {
+    if (!state.activePublicKeyHash) {
       return undefined;
     }
     const id = activeIdentity;
@@ -327,7 +329,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     canRun: () =>
       deps.vault.status() === "unlocked" &&
       !deps.keyspace.isInitializing() &&
-      getActiveKeyState().mode === "single",
+      Boolean(getActiveKeyState().activePublicKeyHash),
     async run(ctx) {
       setStatus("syncing");
       try {
@@ -353,7 +355,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       deps.vault.status() === "unlocked" &&
       !backfillPaused &&
       !deps.keyspace.isInitializing() &&
-      getActiveKeyState().mode === "single",
+      Boolean(getActiveKeyState().activePublicKeyHash),
     async run(ctx) {
       setStatus("syncing");
       try {
@@ -405,7 +407,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   async function rehydrateResources(): Promise<void> {
     if (deps.vault.status() !== "unlocked") return;
     const state = getActiveKeyState();
-    if (state.mode !== "single" || !state.activePublicKeyHash) return;
+    if (!state.activePublicKeyHash) return;
     if (!activeIdentity) return;
     try {
       await getOrCreateAddress("main");
@@ -455,7 +457,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       let confirmed = 0, unconfirmed = 0, spendable = 0;
       for (const r of all) {
         if (r.network !== network) continue;
-        if (state.mode === "single" && r.publicKeyHash !== state.activePublicKeyHash) continue;
+        // 硬切换 005 收尾：active key 唯一，只服务当前 active key namespace。
+        // ensureDb 已在 state.activePublicKeyHash 缺失时抛错；此处继续按
+        // activePublicKeyHash 过滤以防 db 里残留旧 key 的余额被计入。
+        if (r.publicKeyHash !== state.activePublicKeyHash) continue;
         confirmed += r.confirmed;
         unconfirmed += r.unconfirmed;
         spendable += r.spendable;
@@ -525,17 +530,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     },
 
     prepareTransfer: (input) => {
-      // 强制 single active key；输入不再要求 keyId。
-      const state = getActiveKeyState();
-      if (state.mode !== "single") {
-        return Promise.reject(new Error("Cannot sign in all-keys mode"));
+      // 强制要求 active key 存在；输入不再要求 keyId。
+      // 硬切换 005 收尾：active key 模型收窄为单一 active，"single 模式"
+      // 与 "有 active key" 等价；`requireActiveKeyIdentity` 已经会校验。
+      if (!getActiveKeyState().activePublicKeyHash) {
+        return Promise.reject(new Error("Cannot sign without an active key"));
       }
       return transfer.prepare({ ...input, keyId: requireActiveKeyIdentity().keyId });
     },
     submitTransfer: (preview, input) => {
-      const state = getActiveKeyState();
-      if (state.mode !== "single") {
-        return Promise.reject(new Error("Cannot sign in all-keys mode"));
+      if (!getActiveKeyState().activePublicKeyHash) {
+        return Promise.reject(new Error("Cannot sign without an active key"));
       }
       return transfer.submit(preview, { ...input, keyId: requireActiveKeyIdentity().keyId });
     },

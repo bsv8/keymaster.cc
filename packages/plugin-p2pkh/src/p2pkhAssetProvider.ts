@@ -66,26 +66,26 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   }
 
   /**
-   * 平台未就绪时（isInitializing === true 或非 single 模式）直接返回 true。
+   * 平台未就绪时（isInitializing === true 或无 active key）直接返回 true。
    * 这是 listAssets / getAsset / listActivity / sync 的统一闸门。
+   *
+   * 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"，
+   * 不再有 `mode === "all"` 分支；"未就绪"只看 activePublicKeyHash 缺省。
    */
   function isNotReady(): boolean {
     if (deps.keyspace.isInitializing()) return true;
-    const s = deps.keyspace.active();
-    return s.mode !== "single" || !s.activePublicKeyHash;
+    return !deps.keyspace.active().activePublicKeyHash;
   }
 
   async function toSummary(assetId: P2pkhAssetId): Promise<AssetSummary> {
     const def = P2PKH_ASSETS[assetId];
     const balance = await deps.service.getAssetBalance(assetId);
-    const state = deps.keyspace.active();
-    const suffix = state.mode === "all" ? "（全部 key）" : "";
     return {
       assetId,
       providerId: "p2pkh",
       kind: "coin",
-      // label 走 I18nText 形态：基名用 i18n key 翻译，"（全部 key）" 是 UI 后缀（可选）。
-      label: { key: `p2pkh.asset.${assetId}`, fallback: `${def.label}${suffix}` },
+      // label 走 I18nText 形态：基名用 i18n key 翻译，不再追加"（全部 key）"后缀。
+      label: { key: `p2pkh.asset.${assetId}`, fallback: def.label },
       network: def.network,
       balance: {
         amount: balance.confirmed,

@@ -533,7 +533,8 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     expect(vault.status()).toBe("unlocked");
     // active 切到 k-b。
     const next = keyspace.active();
-    expect(next.mode).toBe("single");
+    // 硬切换 005：active state 不再有 `mode` 字段；这里只断言
+    // activePublicKeyHash 指向 k-b。
     expect(next.activePublicKeyHash).toBe("b".repeat(64));
     // vault_meta 仍在。
     expect(await vaultDb.getMeta()).toBeDefined();
@@ -596,9 +597,10 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     // 1) Vault 仍 unlocked，meta 仍在。
     expect(vault.status()).toBe("unlocked");
     expect(await vaultDb.getMeta()).toBeDefined();
-    // 2) 没有 ready key 时 active fallback 到 all（failed key 不能成为 active）。
+    // 2) 没有 ready key 时 active 为空（硬切换 005：active state 不再有
+    // `mode: "all"` 真值；`activePublicKeyHash` 缺省 = "无 active key"）。
     const next = keyspace.active();
-    expect(next.mode).toBe("all");
+    expect(next.activePublicKeyHash).toBeUndefined();
     // 3) failed key 还在。
     const remaining = await vaultDb.listKeys();
     expect(remaining.find((r) => r.id === "k-fail-hash")).toBeDefined();

@@ -115,7 +115,7 @@ export function ContactsPage() {
     }
   ];
 
-  if (active.mode !== "single" || !active.activePublicKeyHash) {
+  if (!active.activePublicKeyHash) {
     return (
       <div className="contacts-page">
         <PageHeader

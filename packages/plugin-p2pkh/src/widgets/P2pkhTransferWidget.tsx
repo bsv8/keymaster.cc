@@ -74,7 +74,10 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   const [result, setResult] = useState<P2pkhTransferResult | undefined>(undefined);
   const [completion, setCompletion] = useState<TransferCompletion | undefined>(undefined);
 
-  const isAllMode = activeKey.mode === "all";
+  // 硬切换 005 收尾：active key 不再有 `mode` 字段。"all 模式"被壳层守卫
+  // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
+  // ——但正常业务流下不会进入 hasNoActiveKey 分支。
+  const hasNoActiveKey = !activeKey.activePublicKeyHash;
 
   // 硬切换 008 + 硬切换 003 收尾：通过 keyspace.getKey 拿当前 key 的展示
   // 信息（label + 短公钥），不再在 UI 里渲染完整 publicKeyHash 或读取
@@ -92,7 +95,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
       setCompletion(undefined);
       setError(null);
       // 重新拉 identity。
-      if (s.mode === "single" && s.activePublicKeyHash) {
+      if (s.activePublicKeyHash) {
         keyspace
           .getKey(s.activePublicKeyHash)
           .then((id) => setActiveIdentity(id))
@@ -105,13 +108,13 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
 
   // 初始化时拉一次当前 active identity。
   useEffect(() => {
-    if (isAllMode || !activeKey.activePublicKeyHash) {
+    if (hasNoActiveKey) {
       setActiveIdentity(undefined);
       return;
     }
     let cancelled = false;
     keyspace
-      .getKey(activeKey.activePublicKeyHash)
+      .getKey(activeKey.activePublicKeyHash!)
       .then((id) => {
         if (!cancelled) setActiveIdentity(id);
       })
@@ -121,10 +124,10 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     return () => {
       cancelled = true;
     };
-  }, [keyspace, activeKey.mode, activeKey.activePublicKeyHash, isAllMode]);
+  }, [keyspace, activeKey.activePublicKeyHash, hasNoActiveKey]);
 
   useEffect(() => {
-    if (isAllMode) {
+    if (hasNoActiveKey) {
       setResource(undefined);
       return;
     }
@@ -136,7 +139,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     return () => {
       cancelled = true;
     };
-  }, [service, assetId, isAllMode]);
+  }, [service, assetId, hasNoActiveKey]);
 
   useEffect(() => {
     if (!contacts) return;
@@ -190,7 +193,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     try {
       const p = await service.prepareTransfer(input);
       setPreview(p);
-      setPreviewKey(activeKey.mode === "single" ? activeKey.activePublicKeyHash ?? "" : "all");
+      setPreviewKey(activeKey.activePublicKeyHash ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("p2pkh.transfer.err.prepare", { defaultValue: "准备失败" }));
     } finally {
@@ -240,7 +243,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
 
   useEffect(() => {
     if (!preview) return;
-    const current = activeKey.mode === "single" ? activeKey.activePublicKeyHash ?? "" : "all";
+    const current = activeKey.activePublicKeyHash ?? "";
     if (previewKey !== current) {
       setPreview(undefined);
       setPreviewKey(undefined);
@@ -260,8 +263,8 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
       <section className="p2pkh-transfer-widget__key-context">
         <p>
           {t("p2pkh.transfer.currentKey", { defaultValue: "当前 key：" })}
-          {isAllMode ? (
-            <strong>{t("p2pkh.transfer.allKey", { defaultValue: " 全部 key（只读总览，无法签名）" })}</strong>
+          {hasNoActiveKey ? (
+            <strong>{t("p2pkh.transfer.noActiveKey", { defaultValue: " 无 active key：壳层守卫已阻断，请到 Key 管理处理" })}</strong>
           ) : activeIdentity ? (
             <>
               <strong>{activeIdentity.label || unnamed}</strong>
@@ -275,9 +278,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
             </>
           ) : activeKey.activePublicKeyHash ? (
             <code>{t("p2pkh.transfer.loading", { defaultValue: "加载中…" })}</code>
-          ) : (
-            <strong>{t("p2pkh.transfer.unselected", { defaultValue: "未选择" })}</strong>
-          )}
+          ) : null}
         </p>
         {networkAddress ? (
           <p>
@@ -318,9 +319,9 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
             </Button>
           </div>
         </section>
-      ) : isAllMode ? (
+      ) : hasNoActiveKey ? (
         <section className="p2pkh-transfer-widget__guard">
-          <p>{t("p2pkh.transfer.allModeWarning", { defaultValue: "当前是\"全部 key\"只读模式。请到顶栏选择一个具体的 key 后再转账。" })}</p>
+          <p>{t("p2pkh.transfer.noActiveKeyWarning", { defaultValue: "当前没有可用的 active key。请到 Key 管理处理失败 / 未初始化的 key 后再转账。" })}</p>
         </section>
       ) : (
         <>

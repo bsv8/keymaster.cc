@@ -2,8 +2,12 @@
 // 转账页面：聚合 provider 的 Transfer Offer -> 选中 -> 挂载 provider 自己的 Widget。
 // 设计缘由：transfer 平台不解释 P2PKH/UTXO/地址/金额/矿工费。
 // 提供错误边界，避免单个 provider Widget 崩溃影响其他 Offer。
-// 硬切换 008：页面级 keyspace guard——all 模式或无 key 时显示 empty state，
+// 硬切换 008：页面级 keyspace guard——无 key 时显示 empty state，
 // 不让用户进入"假可操作"状态；active key 切换时清空 selected/completion。
+//
+// 硬切换 005 收尾：删掉 "all 模式" 提示。平台 active key 唯一——无
+// active key 时由壳层 AppShell 阻断，本页面不再显示"all mode 请选择 key"，
+// 只保留"无 provider"空态与正常业务流。
 //
 // 硬切换 003：所有展示文案走 i18n；TransferOffer.label 走 host.i18n.text() 解析。
 
@@ -80,20 +84,6 @@ export function TransferPage() {
     setSelected(undefined);
   }
 
-  if (activeState.mode === "all") {
-    return (
-      <div className="transfer-page">
-        <PageHeader
-          title={t("transfer.route.title", { defaultValue: "转账" })}
-          description={t("transfer.page.desc.pickKey", { defaultValue: "转账要求 single 模式。" })}
-        />
-        <EmptyState
-          title={t("transfer.page.empty.allMode.title", { defaultValue: "请选择一个 key" })}
-          description={t("transfer.page.empty.allMode.desc", { defaultValue: "到顶栏选择一把具体的 key 后再开始转账。" })}
-        />
-      </div>
-    );
-  }
   if (!activeState.activePublicKeyHash) {
     return (
       <div className="transfer-page">

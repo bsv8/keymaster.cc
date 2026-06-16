@@ -1,11 +1,10 @@
 // packages/plugin-poker/src/pokerSessionKey.test.ts
-// 验证硬切换 004 后 session key 解析：
+// 验证硬切换 004 + 硬切换 005 收尾后 session key 解析：
 //   - vault 未解锁 → vaultLocked；
-//   - active.mode = "all" → allMode；
-//   - single + 有 hash + identityStatus ready → ready；
-//   - single + hash 在 keyspace 找不到 → missing；
-//   - single + identityStatus = uninitialized / failed → notReady；
-//   - single + activePublicKeyHash 缺省 → noActiveHash。
+//   - activePublicKeyHash 缺省 → noActiveHash；
+//   - 有 hash + identityStatus ready → ready；
+//   - hash 在 keyspace 找不到 → missing；
+//   - identityStatus = uninitialized / failed → notReady。
 
 import { beforeEach, describe, expect, it } from "vitest";
 import { resolvePokerSessionKey } from "./pokerSessionKey.js";
@@ -31,19 +30,16 @@ class FakeVault {
 }
 
 class FakeKeyspace {
-  private state = { mode: "single" as "single" | "all", activePublicKeyHash: "pkhA" as string | undefined };
+  private state: { activePublicKeyHash?: string } = { activePublicKeyHash: "pkhA" };
   private meta = new Map<string, any>([["pkhA", KEY_A]]);
   active() {
     return { ...this.state };
   }
   setActive(pkh: string) {
-    this.state = { mode: "single", activePublicKeyHash: pkh };
+    this.state = { activePublicKeyHash: pkh };
   }
-  setAll() {
-    this.state = { mode: "all" };
-  }
-  setNoActive() {
-    this.state = { mode: "single" };
+  clearActive() {
+    this.state = {};
   }
   async getKey(pkh: string) {
     return this.meta.get(pkh);
@@ -72,13 +68,14 @@ describe("resolvePokerSessionKey", () => {
     expect(state.kind).toBe("vaultLocked");
   });
 
-  it("returns allMode when active.mode is all", async () => {
-    keyspace.setAll();
+  it("returns noActiveHash when activePublicKeyHash missing", async () => {
+    // 硬切换 005 收尾：原 "allMode" 已被 `noActiveHash` 替代。
+    keyspace.clearActive();
     const state = await resolvePokerSessionKey(vault as any, keyspace as any);
-    expect(state.kind).toBe("allMode");
+    expect(state.kind).toBe("noActiveHash");
   });
 
-  it("returns ready when active single + identityStatus ready", async () => {
+  it("returns ready when activePublicKeyHash present and identityStatus ready", async () => {
     const state = await resolvePokerSessionKey(vault as any, keyspace as any);
     expect(state.kind).toBe("ready");
     if (state.kind === "ready") {
@@ -115,11 +112,5 @@ describe("resolvePokerSessionKey", () => {
     delete (keyspace as any).meta.get("pkhA").identityStatus;
     const state = await resolvePokerSessionKey(vault as any, keyspace as any);
     expect(state.kind).toBe("ready");
-  });
-
-  it("returns noActiveHash when single but activePublicKeyHash missing", async () => {
-    keyspace.setNoActive();
-    const state = await resolvePokerSessionKey(vault as any, keyspace as any);
-    expect(state.kind).toBe("noActiveHash");
   });
 });

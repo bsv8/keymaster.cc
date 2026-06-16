@@ -334,6 +334,26 @@ export interface VaultService {
    */
   finalizeEmptyVaultAfterLastKeyDeletion(): Promise<void>;
 
+  /**
+   * 硬切换 005 收尾：已解锁壳层守卫调用的"0 key 异常态恢复入口"。
+   *
+   * 触发场景：AppShell 检测到 `vault.status() === "unlocked"` 但
+   * `keyspace.listKeys()` 为空。这通常是异常残留——bootstrap / unlock
+   * 路径上的 0 key 护栏如果漏掉，已经进了 unlocked 又没有任何 key，
+   * 必须从这里收敛回 `uninitialized`。
+   *
+   * 与 `finalizeEmptyVaultAfterLastKeyDeletion` 的区别：
+   *   - `finalizeEmptyVaultAfterLastKeyDeletion` 是"删完最后一把 key"
+   *     的收尾入口，**严格**要求删完，必须把 meta 删干净才允许
+   *     状态收敛；本方法是异常守卫的容错入口，meta 删除失败时
+   *     仍要把状态收敛到 uninitialized，让用户进首启 welcome 重试。
+   *   - 两条路径最终都收敛到 uninitialized；区别是严格的强度。
+   *
+   * 仅允许在 `status === "unlocked"` + `listKeys().length === 0` 调用；
+   * 其它状态 / 还有 key 时抛错拒绝。错误信息使用英文。
+   */
+  recoverEmptyVaultToUninitialized(): Promise<void>;
+
   /** 列出所有 key 元数据。 */
   listKeys(): Promise<KeyRef[]>;
   /** 按 id 取单个 key 元数据。 */

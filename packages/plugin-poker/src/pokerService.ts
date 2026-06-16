@@ -285,12 +285,11 @@ class PokerServiceImpl implements PokerService {
       const ev = p as { publicKeyHash?: string; keyId?: string } | undefined;
       const hash = ev?.publicKeyHash;
       if (!hash) return;
-      // 用 keyspace.active() 同步判定：active.mode === "all" 表示没有
-      // 单一 session key；single + activePublicKeyHash === hash 才是
-      // 当前 session key 被删。
+      // 用 keyspace.active() 同步判定：activePublicKeyHash === hash 才是
+      // 当前 session key 被删。硬切换 005：active key 模型收窄为唯一一把，
+      // 不再有 "all mode"。
       const active = this.deps.keyspace.active();
-      const isCurrentSessionKey =
-        active.mode === "single" && active.activePublicKeyHash === hash;
+      const isCurrentSessionKey = active.activePublicKeyHash === hash;
       if (isCurrentSessionKey) {
         // 当前 session key 即将被删：立刻 teardown + 清内存态。
         // teardownForDeletingCurrentKey 内部用 disconnectForFailClosed
@@ -592,7 +591,7 @@ class PokerServiceImpl implements PokerService {
   /**
    * rebindToActiveKey: 单一原子流程入口。
    *   1. 解析 keyspace.active() → PokerSessionKeyState；
-   *   2. 若不是 ready（vaultLocked / allMode / missing / notReady / noActiveHash）
+   *   2. 若不是 ready（vaultLocked / missing / notReady / noActiveHash）
    *      → teardown + fail-closed；
    *   3. 若与当前 session key 相同 → 不重复重连，仅刷新内部缓存；
    *   4. 若不同 → teardown old → hydrate new key-scoped DB → 视用户
@@ -981,12 +980,12 @@ class PokerServiceImpl implements PokerService {
       throw new Error("Poker proxy not ready");
     }
     if (!this.currentSessionKey || !this.currentSessionKey.publicKeyHex) {
-      throw new Error("Poker session key not resolved (vault locked or all-mode)");
+      throw new Error("Poker session key not resolved (vault locked or no active key)");
     }
     // 强校验：当前 session key 必须仍与 keyspace.active() 一致。
+    // 硬切换 005：active key 模型收窄为唯一一把，不再有 `mode` 字段。
     const active = this.deps.keyspace.active();
     if (
-      active.mode !== "single" ||
       !active.activePublicKeyHash ||
       active.activePublicKeyHash !== this.currentSessionKey.publicKeyHash
     ) {
@@ -1145,7 +1144,6 @@ class PokerServiceImpl implements PokerService {
     }
     const active = this.deps.keyspace.active();
     if (
-      active.mode !== "single" ||
       !active.activePublicKeyHash ||
       active.activePublicKeyHash !== sessionKey.publicKeyHash
     ) {
@@ -1423,8 +1421,6 @@ function describeSessionState(state: PokerSessionKeyState): string {
   switch (state.kind) {
     case "ready":
       return "ready";
-    case "allMode":
-      return "all-keys mode requires single active key";
     case "vaultLocked":
       return "vault locked";
     case "missing":

@@ -115,17 +115,24 @@ describe("VaultService.importPrivateKey", () => {
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
+    // 硬切换 005：bootstrap 路径新增 0-key 护栏。先 import 一把 key 让
+    // 新 vault bootstrap 走正常 "locked" 路径。
+    await vault.importPrivateKey({
+      label: "seed",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
 
     // 构造一个最小 keyspace fake：active() 读 activeRef，
     // notifyKeyCreated 写入 activeRef。真实切换逻辑由集成测试覆盖，
     // 这里只验证 vaultService 的事件调用顺序。
     // unlock 流程会调用 setInitializing / onVaultUnlocked；提供 no-op 实现。
-    const activeRef: { mode: "all" | "single"; activePublicKeyHash?: string } = { mode: "all" };
+    const activeRef: { activePublicKeyHash?: string } = {};
     const keyspaceFake = {
       active: () => activeRef,
       notifyKeyCreated: (id: { publicKeyHash: string }) => {
         // 模拟真实 keyspace：切到新 key。
-        activeRef.mode = "single";
         activeRef.activePublicKeyHash = id.publicKeyHash;
       },
       setInitializing: () => undefined,
@@ -143,12 +150,11 @@ describe("VaultService.importPrivateKey", () => {
 
     // Patch messageBus.publish：每个 publish 时记录当时的 active 状态。
     // 由于 makeMessageBus 内部 subscribe() 不签名正确，避免用 messageBus.subscribe；直接劫持 publish。
-    const emittedActive: { type: string; activeMode: string; activeHash?: string }[] = [];
+    const emittedActive: { type: string; activeHash?: string }[] = [];
     const originalPublish = events.publish.bind(events);
     events.publish = (event: string, payload: unknown, _opts?: unknown) => {
       emittedActive.push({
         type: event,
-        activeMode: activeRef.mode,
         activeHash: activeRef.activePublicKeyHash
       });
       return originalPublish(event, payload, _opts as never);
@@ -164,10 +170,18 @@ describe("VaultService.importPrivateKey", () => {
     const createdSnapshot = emittedActive.find((e) => e.type === "key.created");
     expect(createdSnapshot).toBeDefined();
     // 关键断言：emit key.created 时 active 已经切到新 key。
-    expect(createdSnapshot?.activeMode).toBe("single");
-    const createdPayload = records.find((r) => r.type === "key.created")?.payload as
-      | { publicKeyHash: string }
-      | undefined;
+    expect(createdSnapshot?.activeHash).toBeTruthy();
+    // 硬切换 005：本测试现在在 vault0 阶段先 import 了一把 "seed" key
+    // （让新 vault bootstrap 走 "locked"），所以 records 里会有多个
+    // key.created；按 emittedActive 记录的 activeHash 找到对应的
+    // 那一帧 payload 来对比。
+    const createdPayload = records.find(
+      (r) =>
+        r.type === "key.created" &&
+        (r.payload as { publicKeyHash: string } | undefined)?.publicKeyHash ===
+          createdSnapshot?.activeHash
+    )?.payload as { publicKeyHash: string } | undefined;
+    expect(createdPayload).toBeDefined();
     expect(createdSnapshot?.activeHash).toBe(createdPayload?.publicKeyHash);
   });
 });
@@ -334,7 +348,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     const { messageBus: events } = makeMessageBus();
     let onVaultLockedCount = 0;
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => {
@@ -600,6 +614,15 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     const vault0 = createVaultService({ messageBus: events });
     await waitForStatus(vault0, "uninitialized");
     await vault0.createVault("test-pw");
+    // 硬切换 005：bootstrap / unlock 路径新增 0-key 护栏——meta 存在但
+    // 0 key 时直接收敛到 uninitialized。这里先 import 一把 key，让
+    // 后续新 vault 的 bootstrap 能正常进 "locked"。
+    await vault0.importPrivateKey({
+      label: "k",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
     await vault0.lock();
     await waitForStatus(vault0, "locked");
 
@@ -611,7 +634,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     // 事件顺序的证明直接指向 unlock 目标。
     const callOrder: string[] = [];
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: (v: boolean) => {
         callOrder.push(`keyspace.setInitializing(${v})`);
       },
@@ -676,7 +699,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     await waitForStatus(vault0, "locked");
 
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure");
@@ -711,7 +734,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     let onVaultUnlockedCalledAt: VaultStatus = "booting";
     let onVaultUnlockedCalled = false;
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => {
         onVaultUnlockedCalled = true;
@@ -746,7 +769,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     });
     const { messageBus: events } = makeMessageBus();
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure during createVault");
@@ -832,10 +855,18 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const vault0 = createVaultService({ messageBus: events });
     await waitForStatus(vault0, "uninitialized");
     await vault0.createVault("test-pw");
+    // 硬切换 005：bootstrap 路径新增 0-key 护栏。先 import 一把 key 让
+    // 新 vault bootstrap 走正常 "locked" 路径。
+    await vault0.importPrivateKey({
+      label: "k",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
 
     const callOrder: string[] = [];
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       notifyKeyCreated: () => {
         callOrder.push("notifyKeyCreated");
       },
@@ -924,6 +955,15 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     const vault0 = createVaultService({ messageBus: events });
     await waitForStatus(vault0, "uninitialized");
     await vault0.createVault("test-pw");
+    // 硬切换 005：先 import 一把 key 让后续新 vault bootstrap 走正常
+    // "locked" 路径。0-key 护栏现在会让 meta 存在但 0 key 的 vault
+    // 收敛到 uninitialized。
+    await vault0.importPrivateKey({
+      label: "k",
+      material: { hex: "0000000000000000000000000000000000000000000000000000000000000099" },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
 
     // 用真实 keyspace：重建 vault 让它持有真实 keyspace。
     // meta 已经在 IndexedDB 里，所以新 vault bootstrap 后是 "locked"，
@@ -941,7 +981,6 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
       capabilities: ["p2pkh"]
     });
     expect(keyspace.active()).toEqual({
-      mode: "single",
       activePublicKeyHash: first.publicKeyHash
     });
 
@@ -953,13 +992,21 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
       capabilities: ["p2pkh"]
     });
     expect(keyspace.active()).toEqual({
-      mode: "single",
       activePublicKeyHash: second.publicKeyHash
     });
 
     // key.created 事件按时间顺序：第一把发布时 active 应是第一把，
-    // 第二把发布时 active 应已是第二把。
-    const createdEvents = records.filter((r) => r.type === "key.created");
+    // 第二把发布时 active 应已是第二把。硬切换 005：本测试现在在
+    // 之前先 import 了一把 "seed" key（让新 vault bootstrap 走
+    // "locked"），所以 records 里会有 3 个 key.created；筛选与
+    // first / second 匹配的 2 个。
+    const createdEvents = records
+      .filter(
+        (r) =>
+          r.type === "key.created" &&
+          ((r.payload as { publicKeyHash: string } | undefined)?.publicKeyHash === first.publicKeyHash ||
+            (r.payload as { publicKeyHash: string } | undefined)?.publicKeyHash === second.publicKeyHash)
+      );
     expect(createdEvents).toHaveLength(2);
     const firstEvent = createdEvents[0]?.payload as { publicKeyHash: string };
     const secondEvent = createdEvents[1]?.payload as { publicKeyHash: string };
@@ -974,6 +1021,13 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     const vault0 = createVaultService({ messageBus: events });
     await waitForStatus(vault0, "uninitialized");
     await vault0.createVault("test-pw");
+    // 硬切换 005：先 import 一把 key 让新 vault bootstrap 走 "locked"。
+    await vault0.importPrivateKey({
+      label: "k",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
     const keyspace = createKeyspaceService({ messageBus: events, vault: vault0 });
     const vault = createVaultService({ messageBus: events, keyspace });
     await waitForStatus(vault, "locked");
@@ -996,7 +1050,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     //      出现"错误携带空 id"导致 UI 无法导出私钥的回归）。
     const { messageBus: events, records } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1097,7 +1151,6 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(list[0]?.id).toBe(ref.id);
     // keyspace 已切到这把 key。
     expect(keyspace.active()).toEqual({
-      mode: "single",
       activePublicKeyHash: ref.publicKeyHash
     });
   });
@@ -1157,7 +1210,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     // 必须透传这个失败、不要再尝试生成首 Key。
     const { messageBus: events } = makeMessageBus();
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure during createVault");
@@ -1182,7 +1235,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     // 的成功/警告态。
     const { messageBus: events, records } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1247,7 +1300,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     const { messageBus: events } = makeMessageBus();
     const statusTimeline: VaultStatus[] = [];
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1344,7 +1397,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     // 得，**不**依赖瞬时事件。
     const { messageBus: events } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1377,7 +1430,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
   it("clearInitialActivationNotice() wipes the notice", async () => {
     const { messageBus: events } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1405,7 +1458,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     // 值——避免新挂载的 AppShell 漏掉"已经存在的" notice。
     const { messageBus: events } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1442,7 +1495,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     // 不应让用户看到上一次会话的"未切 active"提示。
     const { messageBus: events } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1477,7 +1530,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     // 已被 notifyKeyCreated 跳过"的特殊状态产生额外耦合。
     const { messageBus: events } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,
@@ -1502,7 +1555,6 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(notice?.publicKeyHash).toBeDefined();
     // 模拟 keyspace 切 active 后发出 activeKey.changed 事件。
     events.publish("activeKey.changed", {
-      mode: "single",
       activePublicKeyHash: notice!.publicKeyHash
     });
     // 关键：notice 必须被清掉。
@@ -1572,7 +1624,6 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     expect(list[0]?.id).toBe(ref.id);
     // 3) keyspace 已切到这把 key。
     expect(keyspace.active()).toEqual({
-      mode: "single",
       activePublicKeyHash: ref.publicKeyHash
     });
     // 4) 标签和 source 都按调用方传入落地。
@@ -1636,7 +1687,7 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     // 必须把 meta 也删掉，回到 uninitialized。
     const { messageBus: events } = makeMessageBus();
     const keyspaceFake = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure during import");
@@ -1668,7 +1719,7 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     // 保留，让 UI 走"已创建但未自动 active"的成功/警告态。
     const { messageBus: events, records } = makeMessageBus();
     const explodingKeyspace = {
-      active: () => ({ mode: "all" as const }),
+      active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: () => undefined,

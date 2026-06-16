@@ -97,9 +97,10 @@ export interface BackgroundTaskSnapshot {
   /** 是否启用（与 paused 区分）。 */
   enabled: boolean;
   /**
-   * key 上下文（硬切换 007 / 008）：任务归属哪个 key namespace。
-   * BackgroundTray 在 single 模式默认优先显示当前 active key 的任务；
-   * all 模式按 key 分组。background 平台不应理解业务字段（UTXO / 地址 / 私钥）。
+   * key 上下文（硬切换 007 / 008 / 005）：任务归属哪个 key namespace。
+   * 硬切换 005 收尾：BackgroundTray 只按当前 active key 展示任务；不再有
+   * "all 模式按 key 分组"的语义——平台 active key 模型收窄为唯一一把
+   * ready key。background 平台不应理解业务字段（UTXO / 地址 / 私钥）。
    *
    * 008：始终是解析后的对象。动态 keyScope 会在 snapshot 时通过
    * resolveKeyScope 求值后再写到这里。

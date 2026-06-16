@@ -8,8 +8,13 @@
 //   - 删除顺序：prepare -> cancel background -> close handles -> delete namespace
 //     DBs -> delete Vault key。namespace DB 删除失败时拒绝继续，避免留下归属
 //     丢失的业务数据。
-//   - active key 自动选择规则：unlock 后若上次 active key 仍存在则恢复；否则
-//     取最近创建或列表第一把；没有 key 时进入无 key 状态。
+//   - 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"；
+//     `activePublicKeyHash` 缺省即"无 active key"。不再有 `mode: "all"`、
+//     `setAll()`、所有模式持久化。`autoPickActive` 只在有 ready key 时返回具体
+//     publicKeyHash；没有时返回 `{}`。
+//   - 删除 active key 时由 `autoPickActive` 选下一把 ready key；没有 ready 时
+//     active 清空，调用方（keyspace）发布新 state。仍有可能由壳层判断
+//     `listKeys().length > 0 && !activePublicKeyHash` 进入"修复/管理态"阻断。
 
 import type { MessageBus } from "@keymaster/runtime";
 import type {
@@ -29,7 +34,6 @@ import type { VaultService } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 const ACTIVE_KEY_STORAGE_KEY = "keyspace.activePublicKeyHash";
-const ACTIVE_KEY_MODE_KEY = "keyspace.activeMode";
 const ALL_KEYS_DB_PREFIX = "keymaster.key.";
 
 export interface KeyspaceServiceDeps {
@@ -89,32 +93,31 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   // attachBackgroundService 在 background 插件装载后注入。
   let attachedBackground: BackgroundService | undefined = deps.background;
 
-  let active: ActiveKeyState = { mode: "all" };
+  // 硬切换 005 收尾：active state 只表达 `activePublicKeyHash`；不再有 mode。
+  // 初值 `{}` = "无 active key"。构造期并不区分 vault 状态——vault bootstrap
+  // 后由 `onVaultUnlocked` 收敛。
+  let active: ActiveKeyState = {};
   let initializing = false;
 
   function persistActive(state: ActiveKeyState) {
     try {
       if (typeof localStorage === "undefined") return;
-      if (state.mode === "single" && state.activePublicKeyHash) {
+      if (state.activePublicKeyHash) {
         localStorage.setItem(ACTIVE_KEY_STORAGE_KEY, state.activePublicKeyHash);
-        localStorage.setItem(ACTIVE_KEY_MODE_KEY, "single");
       } else {
         localStorage.removeItem(ACTIVE_KEY_STORAGE_KEY);
-        localStorage.setItem(ACTIVE_KEY_MODE_KEY, "all");
       }
     } catch {
       // localStorage 不可用时静默退化。
     }
   }
 
-  function readPersistedActive(): { hash?: string; mode: ActiveKeyState["mode"] } {
+  function readPersistedActiveHash(): string | undefined {
     try {
-      if (typeof localStorage === "undefined") return { mode: "all" };
-      const mode = localStorage.getItem(ACTIVE_KEY_MODE_KEY);
-      const hash = localStorage.getItem(ACTIVE_KEY_STORAGE_KEY) ?? undefined;
-      return { hash, mode: mode === "single" ? "single" : "all" };
+      if (typeof localStorage === "undefined") return undefined;
+      return localStorage.getItem(ACTIVE_KEY_STORAGE_KEY) ?? undefined;
     } catch {
-      return { mode: "all" };
+      return undefined;
     }
   }
 
@@ -195,22 +198,24 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   /**
    * 自动选 active key：
    *   - 已持久化的 hash 仍存在 -> 用持久化 hash。
-   *   - 否则取 createdAt 最近或第一把。
-   *   - 没有 key -> active = { mode: "all" }（实际为"无 key"状态，UI 通过 listKeys 渲染空）。
+   *   - 否则取 createdAt 最近或列表第一把。
+   *   - 没有 ready key -> `{}`（无 active key）。这对应"vault 内有 failed
+   *     key 但没有 ready key"或"vault 内无 key 已被 finalize 到 uninitialized"
+   *     两种情况，由调用方（壳层）区分。
    */
   async function autoPickActive(): Promise<ActiveKeyState> {
     const ready = await listActiveCandidates();
     if (ready.length === 0) {
-      return { mode: "all" };
+      return {};
     }
-    const persisted = readPersistedActive();
-    if (persisted.mode === "single" && persisted.hash) {
-      const found = ready.find((k) => k.publicKeyHash === persisted.hash);
-      if (found) return { mode: "single", activePublicKeyHash: found.publicKeyHash };
+    const persistedHash = readPersistedActiveHash();
+    if (persistedHash) {
+      const found = ready.find((k) => k.publicKeyHash === persistedHash);
+      if (found) return { activePublicKeyHash: found.publicKeyHash };
     }
     // 取最近创建；并列时取列表第一把。
     const sorted = [...ready].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return { mode: "single", activePublicKeyHash: sorted[0]!.publicKeyHash };
+    return { activePublicKeyHash: sorted[0]!.publicKeyHash };
   }
 
   /**
@@ -244,6 +249,10 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    * 入口完成，自己不再重复校验；这样 verify 失败时连 prepareDeleteKey
    * 都不会被调到，符合"密码错误时完全不开始删除"的硬切换语义。
    *
+   * 硬切换 005 收尾：active fallback 改为单 active 模型——删的是 active
+   * key 时切到下一把 ready key；没有 ready key 时 active 清空（`{}`），
+   * 由壳层判断 `listKeys().length > 0` 决定是否进入"修复/管理态"。
+   *
    * 这是 createKeyspaceService 内部的闭包函数，**不**挂在 service 对象上，
    * 因此不会随 `keyspace.service` capability 暴露给插件作者；插件只能走
    * deleteKey / deleteKeyById 这两个 public 入口。
@@ -264,7 +273,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       }
     }
     // 3) 删 Vault 私钥材料。deleteKeyMaterial 不发事件；失败时 namespace
-    // 已经被删，必须通知调用方并保留 tombstone。
+    //    已经被删，必须通知调用方并保留 tombstone。
     try {
       await deps.vault.deleteKeyMaterial(keyId);
     } catch (err) {
@@ -286,8 +295,9 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     //     的 ready key 数量，否则会在"还有 failed key"时错误地把
     //     Vault 销毁，丢失用户数据。
     //   - 仍有 key 时：删的是 active key 走 autoPickActive 选下一把
-    //     ready；没有 ready 但有其它残留 key 时落到 all，Vault 保持
-    //     unlocked。
+    //     ready；没有 ready 但有其它残留 key 时 active 清空（`{}`），
+    //     Vault 保持 unlocked，由壳层识别"无 active key 但有 key"进入
+    //     修复/管理态。
     //   - finalizeEmptyVaultAfterLastKeyDeletion 失败必须冒泡：UI
     //     不能在"meta 还在"的异常残留态显示成功（施工单情况 4）。
     //     `key.deleted` 已经发出，那是真的——但 Vault 收尾失败要让
@@ -297,7 +307,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
       return;
     }
-    if (active.mode === "single" && active.activePublicKeyHash === publicKeyHash) {
+    if (active.activePublicKeyHash === publicKeyHash) {
       const next = await autoPickActive();
       closeActiveNamespace(publicKeyHash);
       setActiveInternal(next);
@@ -326,16 +336,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         throw new Error("Key not found");
       }
       const prev = active;
-      closeActiveNamespace(prev.mode === "single" ? prev.activePublicKeyHash : undefined);
-      setActiveInternal({ mode: "single", activePublicKeyHash: publicKeyHash });
-    },
-    async setAll() {
-      const prev = active;
-      closeActiveNamespace(prev.mode === "single" ? prev.activePublicKeyHash : undefined);
-      setActiveInternal({ mode: "all" });
+      closeActiveNamespace(prev.activePublicKeyHash);
+      setActiveInternal({ activePublicKeyHash: publicKeyHash });
     },
     requireActiveKey() {
-      if (active.mode !== "single" || !active.activePublicKeyHash) {
+      if (!active.activePublicKeyHash) {
         throw new Error("Active key is required");
       }
       // 同步取：active 状态是 in-memory，但 publicKeyHash 必须对应到 KeyIdentity；
@@ -389,7 +394,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       openDbs.set(cacheKey, { handle, refCount: 1 });
       // namespace DB 打开成功后检查它是否仍然属于当前 active publicKeyHash。
       // 若 active 已切换走，关闭并要求调用方重新 open。
-      if (active.mode === "single" && active.activePublicKeyHash !== input.publicKeyHash) {
+      if (active.activePublicKeyHash && active.activePublicKeyHash !== input.publicKeyHash) {
         handle.close();
         throw new Error("Key storage is not ready");
       }
@@ -470,9 +475,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
         return;
       }
-      // active fallback：失败 key 不可能成为 active（没有 hash）；保险清理。
-      if (active.mode === "single" && !active.activePublicKeyHash) {
-        setActiveInternal({ mode: "all" });
+      // 硬切换 005：active 仍指向这把被删 key 的 hash 时（极少出现：active
+      // 缓存与 deleteById 之前已经不一致），把 active 清空让壳层按
+      // listKeys() > 0 决定走修复/管理态。
+      if (active.activePublicKeyHash && !active.activePublicKeyHash) {
+        setActiveInternal({});
       }
     },
     isInitializing() {
@@ -485,10 +492,10 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     },
     async onVaultUnlocked() {
       // 解锁后 backfill 阶段由 vaultService 触发；keyspace 只需等。
-      // 若 keyspace 没有 ready key（首次解锁或 backfill 全部失败），进入无 key 状态。
+      // 若 keyspace 没有 ready key（首次解锁或 backfill 全部失败），active 清空。
       const ready = await listActiveCandidates();
       if (ready.length === 0) {
-        setActiveInternal({ mode: "all" });
+        setActiveInternal({});
         return;
       }
       const next = await autoPickActive();
@@ -504,7 +511,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         }
       }
       openDbs.clear();
-      setActiveInternal({ mode: "all" });
+      setActiveInternal({});
     },
     notifyKeyCreated(identity) {
       // 硬切换 002 收尾：新建 / 导入后**始终**把新 key 切为 active。
@@ -524,8 +531,8 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       }
       const prev = active;
       // 关闭旧 active 的 namespace db（如果存在），与 setActive 行为一致。
-      closeActiveNamespace(prev.mode === "single" ? prev.activePublicKeyHash : undefined);
-      setActiveInternal({ mode: "single", activePublicKeyHash: identity.publicKeyHash });
+      closeActiveNamespace(prev.activePublicKeyHash);
+      setActiveInternal({ activePublicKeyHash: identity.publicKeyHash });
     },
     setInitializing(next) {
       setInitializingInternal(next);

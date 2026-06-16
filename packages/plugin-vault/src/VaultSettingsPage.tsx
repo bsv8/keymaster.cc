@@ -382,8 +382,7 @@ export function VaultSettingsPage() {
       key: "actions",
       header: t("vault.settings.col.actions", { defaultValue: "操作" }),
       render: (r) => {
-        const isActive =
-          active.mode === "single" && active.activePublicKeyHash === r.publicKeyHash;
+        const isActive = active.activePublicKeyHash === r.publicKeyHash;
         const canSetActive = Boolean(r.publicKeyHash) && (!r.identityStatus || r.identityStatus === "ready");
         return (
           <div className="vault-key-actions">
@@ -426,8 +425,7 @@ export function VaultSettingsPage() {
   const mobileList = (
     <ul className="vault-key-list">
       {keys.map((r) => {
-        const isActive =
-          active.mode === "single" && active.activePublicKeyHash === r.publicKeyHash;
+        const isActive = active.activePublicKeyHash === r.publicKeyHash;
         const canSetActive =
           Boolean(r.publicKeyHash) && (!r.identityStatus || r.identityStatus === "ready");
         const status = r.identityStatus ?? (r.publicKeyHash ? "ready" : "uninitialized");

@@ -33,9 +33,8 @@ function makeKeyspace(publicKeyHash: string): KeyspaceService {
   return {
     listKeys: async () => [],
     getKey: async () => undefined,
-    active: () => ({ mode: "single", activePublicKeyHash: publicKeyHash }),
+    active: () => ({ activePublicKeyHash: publicKeyHash }),
     setActive: async () => undefined,
-    setAll: async () => undefined,
     requireActiveKey: () => ({
       keyId: "k1",
       publicKeyHex: "00",

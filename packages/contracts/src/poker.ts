@@ -5,9 +5,13 @@
 // 设计缘由：
 //   - 硬切换 004（plugin-poker 跟随 active key + 多 Key 生命周期收敛）：
 //     Poker 不再维护独立的"稳定扑克身份绑定"，Poker 身份永远跟随平台
-//     `keyspace.active()` 的 single-mode 唯一一把 ready key。
-//   - "all" 模式 / vault locked / active key failed / uninitialized 时，
-//     Poker 一律 fail-closed（不连接、不重连、不允许 publish）。
+//     `keyspace.active()` 的唯一一把 ready key。
+//   - 硬切换 005 收尾：删掉 `allMode` 真值。Poker 只处理：
+//       `vaultLocked` / `missing` / `notReady` / `ready`。
+//     "没有 active key" 不再有 all 模式分支——只可能是 vault locked 或
+//     "vault 内有 key 但都不可用"的修复态。
+//   - vault locked / active key failed / uninitialized 时，Poker 一律
+//     fail-closed（不连接、不重连、不允许 publish）。
 //   - 业务插件不能自己再发明第二身份；唯一身份真值来自 keyspace。
 //   - 切 active key 时必须先断开旧会话再按新 key 重建，不允许在同一个
 //     websocket 会话里"换公钥"继续跑。
@@ -233,22 +237,22 @@ export interface PokerSettings {
 /**
  * 当前 Poker 会话 key 的解析结果。
  *
- * 设计缘由（硬切换 004）：Poker 唯一身份真值 = `keyspace.active()` 的
- * single-mode ready key。这里把"解析当前 active key 是否可用作 Poker
- * 身份"集中表达：
+ * 设计缘由（硬切换 004 + 硬切换 005 收尾）：Poker 唯一身份真值 =
+ * `keyspace.active().activePublicKeyHash` 对应的那把 ready key。这里把
+ * "解析当前 active key 是否可用作 Poker 身份"集中表达：
  *   - `ready`：active key 可用，session 字段给出具体 KeyIdentity。
- *   - `allMode`：当前 active 处于 all 模式，Poker 必须 fail-closed。
  *   - `vaultLocked`：vault 未解锁，没有 active key 候选。
  *   - `missing`：vault 已解锁但 keyspace 内没有任何 ready key。
  *   - `notReady`：active key 存在但 identityStatus !== "ready"。
- *   - `noActiveHash`：single 模式但 activePublicKeyHash 缺省（异常态）。
+ *   - `noActiveHash`：activePublicKeyHash 缺省（异常态 / 过渡期）。
  *
- * 业务 UI 通过这一枚举直接决定"Poker 设置页的 Connect 按钮是否启用 /
- * 大厅/单桌是否允许 publish / home widget 显示哪种提示"。
+ * 硬切换 005：`allMode` 已被删除——"无具体 active key" 不再有"全部 key
+ * 只读总览"语义；Poker 一律按 `noActiveHash` / `missing` 处理，业务 UI
+ * 通过这一枚举直接决定"Poker 设置页的 Connect 按钮是否启用 / 大厅/单桌
+ * 是否允许 publish / home widget 显示哪种提示"。
  */
 export type PokerSessionKeyState =
   | { kind: "ready"; key: KeyIdentity }
-  | { kind: "allMode" }
   | { kind: "vaultLocked" }
   | { kind: "missing" }
   | { kind: "notReady"; key: KeyIdentity; reason: string }
@@ -273,17 +277,17 @@ export interface PokerService {
 
   /**
    * 当前 Poker 会话 key 状态解析结果（见 PokerSessionKeyState）。
-   * 设计缘由：硬切换 004 要求"active key = all / vault locked / failed /
-   * uninitialized"时一律 fail-closed；用单一解析结果把"能否建立
-   * Poker 会话"的判断收敛在一处，避免业务 UI 各自重复判断。
+   * 设计缘由：硬切换 004 + 硬切换 005 收尾要求"active key 缺失 / vault
+   * locked / failed / uninitialized"时一律 fail-closed；用单一解析结果
+   * 把"能否建立 Poker 会话"的判断收敛在一处，避免业务 UI 各自重复判断。
    */
   getActivePokerKey(): PokerSessionKeyState;
   /**
    * 订阅 active poker key 变化。
    * - active key 从 A 切到 B：handler 立刻收到新 state；
-   * - vault 锁定 / active 切到 all：handler 收到 fail-closed 状态；
+   * - vault 锁定：handler 收到 fail-closed 状态；
    * - key.deleted 后 keyspace 决定下一把 active key：handler 收到新
-   *   single 状态时由 service 内部负责按新 key 重建会话。
+   *   ready 状态时由 service 内部负责按新 key 重建会话。
    *
    * 订阅时**不会**立即推一次当前值——UI 应在 mount 时调用
    * `getActivePokerKey()` 取初值；onChange 只负责后续增量更新。

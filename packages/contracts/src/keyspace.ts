@@ -12,8 +12,9 @@
 //     `keymaster.key.<publicKeyHash>.plugin.<pluginId>.<storageId>`。
 //   - 删除 key 由 keyspace.deleteKey 统一调度：先 prepare -> 取消后台任务 ->
 //     删 namespace DB -> 删 Vault 私钥；不允许插件自行 delete where key = ?。
-//   - ActiveKeyMode = "all" 只用于只读总览；签名 / 广播 / 导出 / 删除 / 显示
-//     收款地址等动作必须要求 single 模式。
+//   - 硬切换 005：active key 模型收窄为"single 模式唯一一把 ready key"：
+//     activePublicKeyHash 缺省即"无 active key"（异常修复态 / 过渡期），
+//     不再有"all mode 只读总览"语义。
 
 /**
  * 平台公开的 key 身份；不包含任何私钥材料。
@@ -51,15 +52,19 @@ export interface KeyIdentity {
   identityError?: string;
 }
 
-/** 当前 active key 模式。 */
-export type ActiveKeyMode = "single" | "all";
-
-/** 平台级 active key 状态。 */
+/**
+ * 平台级 active key 状态（硬切换 005）。
+ *
+ * 设计缘由：当前 active key 不再表达"all keys"模式。`activePublicKeyHash`
+ * 缺省 = 当前没有具体 active key（异常修复态 / 过渡期 / vault locked）。
+ * 业务插件处理：
+ *   1) activePublicKeyHash 存在：正常业务态。
+ *   2) activePublicKeyHash 缺失：仅作为内部瞬时过渡或壳层识别的异常修复态。
+ */
 export interface ActiveKeyState {
-  mode: ActiveKeyMode;
   /**
-   * mode = "single" 时必填；mode = "all" 时禁止。
-   * 业务插件可以按 state 决定默认上下文。
+   * 当前选中的具体 key publicKeyHash。
+   * 缺省 = "无 active key"。没有 all mode 这一真值。
    */
   activePublicKeyHash?: string;
 }
@@ -90,10 +95,8 @@ export interface KeyspaceService {
   active(): ActiveKeyState;
   /** 把 active key 切到指定 publicKeyHash。 */
   setActive(publicKeyHash: string): Promise<void>;
-  /** 进入 all-keys 只读模式。 */
-  setAll(): Promise<void>;
   /**
-   * 强制要求 single 模式：all 模式或无 key 时抛错。
+   * 强制要求当前有 active key：activePublicKeyHash 缺失时抛错。
    * 业务插件在签名 / 转账 / 显示当前收款地址前调用。
    */
   requireActiveKey(): KeyIdentity;
@@ -168,7 +171,7 @@ export interface KeyspaceService {
    *   - 不存在的 keyId：抛 "Key not found"。
    * active fallback：删的是 active key 时切到下一把 ready key；删空最后
    * 一把 key 时调 `vault.finalizeEmptyVaultAfterLastKeyDeletion()` 让
-   * Vault 最终状态收敛到 `uninitialized`（不再仅 fallback 到 `all`）。
+   * Vault 最终状态收敛到 `uninitialized`。
    */
   deleteKeyById(input: { keyId: string; password: string }): Promise<void>;
 
