@@ -1,0 +1,222 @@
+/* packages/plugin-settings/src/styles.css
+ * 硬切换 002：plugin-settings 专属样式。
+ *
+ * 职责边界：
+ *   - Plugin Manager（/settings/plugins）的整页布局、扫描行、可展开明细区
+ *   - pm-state badge 配色
+ *   - plugin-card 行布局、capability chip、反向依赖 chip、blocker 提示
+ *
+ * 不再写进 apps/web/src/styles/global.css：插件样式必须跟随插件目录走，
+ * 卸载插件时一并删除对应 CSS 入口。
+ */
+
+.plugin-manager {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.plugin-manager__error {
+  background: rgba(227, 90, 90, 0.08);
+  border-left: 3px solid var(--danger);
+  border-radius: 4px;
+  padding: 8px 12px;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.plugin-manager__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.plugin-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.plugin-card.is-err { border-color: var(--danger); }
+
+.plugin-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.plugin-card__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.plugin-card__title h3 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.plugin-card__id code {
+  background: var(--surface-2);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.plugin-card__group {
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--surface-2);
+  border-radius: 8px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+}
+
+.plugin-card__desc {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.plugin-card__error {
+  margin: 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.plugin-card__blockers-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.plugin-card__blockers-list {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.plugin-card__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.plugin-card__cannot {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.plugin-card__meta {
+  margin: 0;
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 12px;
+  row-gap: 6px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.plugin-card__meta > div {
+  display: contents;
+}
+
+.plugin-card__meta dt {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  align-self: center;
+}
+
+.plugin-card__meta dd {
+  margin: 0;
+  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.plugin-card__cap {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.plugin-card__cap.is-missing {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.plugin-card__dep {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  border-radius: 4px;
+  padding: 2px 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.plugin-card__dep.is-on { border-color: var(--primary); color: var(--primary); }
+.plugin-card__dep.is-off { color: var(--text-dim); }
+
+.plugin-card__blockers ul {
+  margin: 4px 0 0 0;
+  padding-left: 16px;
+}
+
+.muted { color: var(--text-dim); }
+
+/* ---------- pm-state badges ---------- */
+.pm-state {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-2);
+  white-space: nowrap;
+}
+.pm-state--on { border-color: var(--primary); color: var(--primary); }
+.pm-state--off { color: var(--text-dim); }
+.pm-state--warn { border-color: #d6a417; color: #d6a417; background: rgba(214, 164, 23, 0.10); }
+.pm-state--err { border-color: var(--danger); color: var(--danger); background: rgba(227, 90, 90, 0.10); }
+[data-theme="dark"] .pm-state--warn { color: #f3c969; border-color: #f3c969; background: rgba(243, 201, 105, 0.10); }
+[data-theme="dark"] .pm-state--err { color: #ff8c8c; border-color: #ff8c8c; background: rgba(255, 140, 140, 0.10); }
+
+@media (max-width: 640px) {
+  .plugin-card__head { flex-direction: column; align-items: flex-start; }
+  .plugin-card__meta { grid-template-columns: 1fr; }
+  .plugin-card__meta dt { margin-top: 4px; }
+}

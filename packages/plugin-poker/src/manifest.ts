@@ -20,7 +20,6 @@ import type {
   MessageBus,
   PluginManifest,
   RouteRegistry,
-  SettingsField,
   SettingsRegistry,
   VaultService
 } from "@keymaster/contracts";
@@ -30,6 +29,7 @@ import { PokerPage } from "./PokerPage.js";
 import { PokerLobby } from "./PokerLobby.js";
 import { PokerTable as PokerTablePage } from "./PokerTable.js";
 import { PokerSettingsPage } from "./PokerSettingsPage.js";
+import { PokerSettingsEntry } from "./PokerSettingsEntry.js";
 import { PokerHomeWidget } from "./widgets/PokerHomeWidget.js";
 
 export { POKER_SERVICE_CAPABILITY };
@@ -64,13 +64,31 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.disconnect": "Disconnect",
       "poker.settings.save": "Save",
       "poker.settings.saved": "Saved",
+      "poker.settings.status.label": "Status",
+      "poker.settings.status.idle": "Idle",
+      "poker.settings.status.connecting": "Connecting",
+      "poker.settings.status.authenticating": "Authenticating",
+      "poker.settings.status.ready": "Ready",
+      "poker.settings.status.reconnecting": "Reconnecting",
+      "poker.settings.status.failed": "Failed",
+      "poker.settings.status.closed": "Closed",
       "poker.settings.identity": "Poker identity",
       "poker.settings.identity.bound": "Bound to",
       "poker.settings.identity.unbound": "No poker identity bound (fail-closed)",
       "poker.settings.identity.select": "Select vault key",
+      "poker.settings.identity.selectPlaceholder": "—",
       "poker.settings.identity.bind": "Bind",
       "poker.settings.identity.unbind": "Unbind",
+      "poker.settings.network": "Network",
+      "poker.settings.identity.section": "Identity binding",
+      "poker.settings.actions.section": "Actions",
       "poker.settings.diag": "Diagnostics",
+      // 硬切换 002：/settings 入口 section 专用文案
+      "poker.entry.summary": "Poker entry section — opens the full configuration page.",
+      "poker.entry.statusLabel": "Status",
+      "poker.entry.identityLabel": "Identity",
+      "poker.entry.openSettings": "Open Poker settings",
+      "poker.entry.noService": "Poker service not available",
       "poker.home.title": "Poker",
       "poker.home.empty": "Not connected",
       "poker.home.connectHint": "Open Poker settings to configure the proxy endpoint.",
@@ -84,14 +102,26 @@ const pokerResources: I18nPluginResources = {
       "poker.status.failed": "Failed",
       "poker.status.closed": "Closed",
       "poker.lobby.title": "Poker lobby",
+      "poker.lobby.description":
+        "Tables and online players observed by the local poker-proxy connection.",
       "poker.lobby.tables": "Tables",
       "poker.lobby.presences": "Online players",
       "poker.lobby.noTables": "No tables yet",
+      "poker.lobby.noTablesHint":
+        "Tables appear here once a host announces them on the proxy.",
       "poker.lobby.noPresences": "Nobody online",
+      "poker.lobby.noPresencesHint":
+        "Online players will show up once the proxy connection is established.",
       "poker.table.title": "Poker table",
       "poker.table.back": "Back to lobby",
       "poker.table.notJoined": "You have not joined this table",
       "poker.table.topic": "Topic",
+      "poker.table.subscribe": "Subscribe",
+      "poker.table.joined": "Joined",
+      "poker.table.txEvents": "Tx events",
+      "poker.table.frames": "Frames",
+      "poker.table.protocolOnly":
+        "Protocol-only view. Game-state rendering will land in a later hard switch.",
       "poker.err.notReady": "Proxy not ready",
       "poker.err.locked": "Vault is locked"
     },
@@ -121,13 +151,31 @@ const pokerResources: I18nPluginResources = {
       "poker.settings.disconnect": "断开",
       "poker.settings.save": "保存",
       "poker.settings.saved": "已保存",
+      "poker.settings.status.label": "连接状态",
+      "poker.settings.status.idle": "空闲",
+      "poker.settings.status.connecting": "连接中",
+      "poker.settings.status.authenticating": "认证中",
+      "poker.settings.status.ready": "就绪",
+      "poker.settings.status.reconnecting": "重连中",
+      "poker.settings.status.failed": "失败",
+      "poker.settings.status.closed": "已关闭",
       "poker.settings.identity": "扑克身份",
       "poker.settings.identity.bound": "已绑定",
       "poker.settings.identity.unbound": "未绑定（fail-closed）",
       "poker.settings.identity.select": "选择 vault key",
+      "poker.settings.identity.selectPlaceholder": "—",
       "poker.settings.identity.bind": "绑定",
       "poker.settings.identity.unbind": "解绑",
+      "poker.settings.network": "网络",
+      "poker.settings.identity.section": "身份绑定",
+      "poker.settings.actions.section": "操作",
       "poker.settings.diag": "诊断",
+      // 硬切换 002：/settings 入口 section 专用文案
+      "poker.entry.summary": "Poker 入口 section — 进入完整配置页。",
+      "poker.entry.statusLabel": "连接状态",
+      "poker.entry.identityLabel": "身份",
+      "poker.entry.openSettings": "打开 Poker 设置",
+      "poker.entry.noService": "Poker 服务不可用",
       "poker.home.title": "扑克",
       "poker.home.empty": "未连接",
       "poker.home.connectHint": "前往扑克设置配置代理 endpoint。",
@@ -141,14 +189,22 @@ const pokerResources: I18nPluginResources = {
       "poker.status.failed": "失败",
       "poker.status.closed": "已关闭",
       "poker.lobby.title": "扑克大厅",
+      "poker.lobby.description": "本地 poker-proxy 连接观察到的桌局与在线玩家。",
       "poker.lobby.tables": "桌局",
       "poker.lobby.presences": "在线玩家",
       "poker.lobby.noTables": "暂无桌局",
+      "poker.lobby.noTablesHint": "代理上 host 公告桌局后，会出现在这里。",
       "poker.lobby.noPresences": "暂无在线玩家",
+      "poker.lobby.noPresencesHint": "代理连接建立后，在线玩家会出现在这里。",
       "poker.table.title": "扑克桌",
       "poker.table.back": "返回大厅",
       "poker.table.notJoined": "尚未加入该桌",
       "poker.table.topic": "Topic",
+      "poker.table.subscribe": "订阅",
+      "poker.table.joined": "已加入",
+      "poker.table.txEvents": "Tx 事件",
+      "poker.table.frames": "帧",
+      "poker.table.protocolOnly": "纯协议页。牌局状态渲染留到后续硬切换。",
       "poker.err.notReady": "代理尚未就绪",
       "poker.err.locked": "钱包未解锁"
     }
@@ -177,7 +233,7 @@ export const pokerPlugin: PluginManifest = {
     { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
     { capability: "route.registry", reason: "register poker pages" },
     { capability: "menu.registry", reason: "register poker menu" },
-    { capability: "settings.registry", reason: "register poker settings" },
+    { capability: "settings.registry", reason: "register poker entry section in /settings" },
     { capability: "home.registry", reason: "register poker home widget" },
     { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" }
   ],
@@ -232,53 +288,20 @@ export const pokerPlugin: PluginManifest = {
     ];
     for (const item of items) menus.register(item);
 
+    // 硬切换 002 唯一结论：
+    //   - Poker 配置项不再注册为通用 SettingsField；
+    //   - 但 settings.registry.registerPage(...) 必须保留，
+    //     挂的是 PokerSettingsEntry（轻量入口 section），不是 PokerSettingsPage；
+    //   - /settings/poker 才是 Poker 唯一正式完整设置页；
+    //   - 该入口随 plugin enable/disable 热出现 / 热消失。
     const settings = ctx.get<SettingsRegistry>("settings.registry");
-    const fields: SettingsField[] = [
-      {
-        id: "poker.endpoint",
-        label: { key: "poker.settings.endpoint", fallback: "Proxy WSS endpoint" },
-        kind: "text",
-        getValue: async () => service.getSettings().proxyEndpoint,
-        setValue: async (v) => {
-          await service.updateSettings({ proxyEndpoint: String(v ?? "") });
-        }
-      },
-      {
-        id: "poker.announceP2PNode",
-        label: { key: "poker.settings.announceP2PNode", fallback: "Announced P2PNode endpoint" },
-        kind: "text",
-        getValue: async () => service.getSettings().announceP2PNodeEndpoint ?? "",
-        setValue: async (v) => {
-          await service.updateSettings({ announceP2PNodeEndpoint: String(v ?? "") || undefined });
-        }
-      },
-      {
-        id: "poker.announceTxLink",
-        label: { key: "poker.settings.announceTxLink", fallback: "Announced TxLink endpoint" },
-        kind: "text",
-        getValue: async () => service.getSettings().announceTxLinkEndpoint ?? "",
-        setValue: async (v) => {
-          await service.updateSettings({ announceTxLinkEndpoint: String(v ?? "") || undefined });
-        }
-      },
-      {
-        id: "poker.allowFallback",
-        label: { key: "poker.settings.allowFallback", fallback: "Allow fallback broadcast" },
-        kind: "boolean",
-        getValue: async () => service.getSettings().allowFallbackBroadcast,
-        setValue: async (v) => {
-          await service.updateSettings({ allowFallbackBroadcast: Boolean(v) });
-        }
-      }
-    ];
-    for (const f of fields) settings.registerField(f);
     settings.registerPage({
       id: "poker.config",
       label: { key: "poker.settings.label", fallback: "Poker" },
       description: { key: "poker.settings.description", fallback: "Poker settings." },
-      fields,
+      fields: [],
       order: 30,
-      component: PokerSettingsPage
+      component: PokerSettingsEntry
     });
 
     const home = ctx.get<HomeRegistry>("home.registry");

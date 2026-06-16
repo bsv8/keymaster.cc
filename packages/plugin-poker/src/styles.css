@@ -1,0 +1,482 @@
+/* packages/plugin-poker/src/styles.css
+ * 硬切换 002：plugin-poker 专属样式。
+ *
+ * 职责边界：
+ *   - PokerSettingsPage：状态条 / 身份绑定区 / 网络参数区 / 操作区 / 诊断区
+ *   - PokerLobby：双栏大厅（桌局 + 在线玩家）
+ *   - PokerTable：单桌视图（topic + subscribe 状态 + tx 计数）
+ *   - PokerHomeWidget：补充 home-widget 壳层的 poker 专属修饰
+ *
+ * 不再写进 apps/web/src/styles/global.css：业务样式必须跟随业务插件目录
+ * 走，移除插件时一并删除对应 CSS 入口。
+ */
+
+/* ---------- Settings page ---------- */
+.poker-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 720px;
+}
+
+.poker-settings--empty { max-width: none; }
+
+.poker-settings__empty {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.poker-settings__status-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+}
+
+.poker-settings__status-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.poker-settings__status-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+
+.poker-settings__status-badge--ready { border-color: var(--primary); color: var(--primary); }
+.poker-settings__status-badge--idle { color: var(--text-dim); }
+.poker-settings__status-badge--connecting,
+.poker-settings__status-badge--authenticating,
+.poker-settings__status-badge--reconnecting {
+  border-color: #d6a417;
+  color: #d6a417;
+  background: rgba(214, 164, 23, 0.08);
+}
+[data-theme="dark"] .poker-settings__status-badge--connecting,
+[data-theme="dark"] .poker-settings__status-badge--authenticating,
+[data-theme="dark"] .poker-settings__status-badge--reconnecting {
+  color: #f3c969;
+  border-color: #f3c969;
+}
+.poker-settings__status-badge--failed,
+.poker-settings__status-badge--closed {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(227, 90, 90, 0.08);
+}
+
+.poker-settings__status-binding {
+  font-size: 12px;
+  color: var(--text);
+}
+.poker-settings__status-binding code { font-size: 11px; }
+.poker-settings__status-binding--unbound { color: var(--text-dim); }
+
+.poker-settings__section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.poker-settings__section h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.poker-settings-identity__row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.poker-settings-identity__row .ui-field { flex: 1 1 220px; margin-bottom: 0; }
+.poker-settings-identity__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.poker-settings__fallback {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  user-select: none;
+  cursor: pointer;
+}
+
+.poker-settings-actions__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.poker-settings-actions__saved {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.poker-settings-diag__line {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+.poker-settings-diag__line code { font-size: 11px; }
+
+/* ---------- Lobby ---------- */
+.poker-lobby {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.poker-lobby--empty { gap: 16px; }
+
+.poker-lobby__panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.poker-lobby__pane {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.poker-lobby__pane h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.poker-lobby__list,
+.poker-lobby__presence-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.poker-lobby__item {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.poker-lobby__item:hover { border-color: var(--primary); }
+
+.poker-lobby__item-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  background: transparent;
+  border: 0;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.poker-lobby__item-id code {
+  font-size: 12px;
+  color: var(--primary);
+}
+
+.poker-lobby__item-meta {
+  display: inline-flex;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.poker-lobby__presence {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.poker-lobby__presence-nick {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.poker-lobby__presence-pubkey code {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* ---------- Table ---------- */
+.poker-table {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.poker-table--empty { gap: 16px; }
+
+.poker-table__panes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.poker-table__pane {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.poker-table__pane h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.poker-table__topic {
+  display: inline-block;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+  color: var(--primary);
+  word-break: break-all;
+  max-width: 100%;
+}
+
+.poker-table__line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.poker-table__line-label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-width: 88px;
+}
+
+.poker-table__state {
+  font-size: 12px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 10px;
+  border: 1px solid var(--border);
+}
+.poker-table__state--on { border-color: var(--primary); color: var(--primary); }
+.poker-table__state--off { color: var(--text-dim); }
+
+.poker-table__counter {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.poker-table__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.poker-table__error {
+  color: var(--danger);
+  font-size: 12px;
+  background: rgba(227, 90, 90, 0.08);
+  border-left: 3px solid var(--danger);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+/* ---------- Home widget (extends shared home-widget shell) ---------- */
+.poker-home-widget__status-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+.poker-home-widget__status-badge--ready { border-color: var(--primary); color: var(--primary); }
+.poker-home-widget__status-badge--failed,
+.poker-home-widget__status-badge--closed { border-color: var(--danger); color: var(--danger); }
+.poker-home-widget__status-badge--connecting,
+.poker-home-widget__status-badge--authenticating,
+.poker-home-widget__status-badge--reconnecting {
+  border-color: #d6a417;
+  color: #d6a417;
+}
+[data-theme="dark"] .poker-home-widget__status-badge--connecting,
+[data-theme="dark"] .poker-home-widget__status-badge--authenticating,
+[data-theme="dark"] .poker-home-widget__status-badge--reconnecting {
+  color: #f3c969;
+  border-color: #f3c969;
+}
+
+.poker-home-widget__hint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+}
+.poker-home-widget__hint-sub {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.poker-home-widget__list {
+  margin: 0;
+}
+
+/* ---------- Responsive: 单列 ---------- */
+@media (max-width: 768px) {
+  .poker-lobby__panes,
+  .poker-table__panes {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---------- Settings entry section (/settings 聚合页) ----------
+ * 硬切换 002：这是 PokerSettingsEntry 在 SettingsPage 中的样式。
+ * 必须轻量：只展示状态摘要 + 跳转按钮，禁止承载业务字段编辑器。
+ */
+.poker-settings-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.poker-settings-entry--empty {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.poker-settings-entry__line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.poker-settings-entry__label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  min-width: 72px;
+}
+
+.poker-settings-entry__status-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  background: var(--surface-2);
+}
+
+.poker-settings-entry__status-badge--ready { border-color: var(--primary); color: var(--primary); }
+.poker-settings-entry__status-badge--idle { color: var(--text-dim); }
+.poker-settings-entry__status-badge--connecting,
+.poker-settings-entry__status-badge--authenticating,
+.poker-settings-entry__status-badge--reconnecting {
+  border-color: #d6a417;
+  color: #d6a417;
+  background: rgba(214, 164, 23, 0.08);
+}
+[data-theme="dark"] .poker-settings-entry__status-badge--connecting,
+[data-theme="dark"] .poker-settings-entry__status-badge--authenticating,
+[data-theme="dark"] .poker-settings-entry__status-badge--reconnecting {
+  color: #f3c969;
+  border-color: #f3c969;
+}
+.poker-settings-entry__status-badge--failed,
+.poker-settings-entry__status-badge--closed {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: rgba(227, 90, 90, 0.08);
+}
+
+.poker-settings-entry__identity--bound {
+  color: var(--text);
+}
+.poker-settings-entry__identity--unbound {
+  color: var(--text-dim);
+}
+
+.poker-settings-entry__summary {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.poker-settings-entry__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 4px;
+}

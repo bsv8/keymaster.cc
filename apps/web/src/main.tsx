@@ -12,6 +12,7 @@ import { renderFatalError } from "./bootstrapError.js";
 import { normalizeLegacyHashRoute } from "./shell/legacyHashRoute.js";
 import { applyInitialTheme } from "./theme/themeStore.js";
 import "./styles/global.css";
+import "./styles/plugins.css";
 
 // 启动顺序（硬切换 002 + 003）：
 //   1) applyInitialTheme：首帧前把 <html data-theme="…"> 写好，避免 FOUC。

@@ -1,5 +1,13 @@
 // packages/plugin-settings/src/manifest.ts
 // 设置页：注册 /settings 页面、菜单 + 系统级插件管理页 /settings/plugins。
+//
+// 设计缘由（硬切换 002）：
+//   - /settings 是通用设置聚合页；只展示 settings.registry 注册的业务设置。
+//   - /settings/plugins 是系统级独立工作台，由 route / menu / breadcrumb 直
+//     接挂载，**不再**通过 settings.registry.registerPage() 在 /settings 内重
+//     复渲染一份。
+//   - 这样 PluginManagerPage 与 SettingsPage 之间不会有"两个独立真值"，也
+//     不会因为 registry 重渲染导致整页布局撕扯。
 
 import type {
   BreadcrumbRegistry,
@@ -7,8 +15,7 @@ import type {
   MenuItem,
   MenuRegistry,
   PluginManifest,
-  RouteRegistry,
-  SettingsRegistry
+  RouteRegistry
 } from "@keymaster/contracts";
 import { PluginManagerPage } from "./PluginManagerPage.js";
 import { SettingsPage } from "./SettingsPage.js";
@@ -59,7 +66,14 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.dep.title": "Dependencies",
       "pluginManager.dep.dependsOn": "Depends on",
       "pluginManager.dep.usedBy": "Used by",
-      "pluginManager.dep.missing": "Missing dependencies: {{list}}"
+      "pluginManager.dep.missing": "Missing dependencies: {{list}}",
+      "pluginManager.details": "Details",
+      "pluginManager.details.hide": "Hide details",
+      "pluginManager.state.enabled": "Enabled",
+      "pluginManager.state.disabled": "Disabled",
+      "pluginManager.state.blocked": "Blocked (missing dependency)",
+      "pluginManager.state.errorDisabled": "Error-disabled",
+      "pluginManager.state.registered": "Registered"
     },
     "zh-CN": {
       "settings.route.label": "设置",
@@ -99,7 +113,14 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.dep.title": "依赖",
       "pluginManager.dep.dependsOn": "依赖",
       "pluginManager.dep.usedBy": "被谁依赖",
-      "pluginManager.dep.missing": "缺少依赖：{{list}}"
+      "pluginManager.dep.missing": "缺少依赖：{{list}}",
+      "pluginManager.details": "详情",
+      "pluginManager.details.hide": "收起详情",
+      "pluginManager.state.enabled": "已启用",
+      "pluginManager.state.disabled": "已禁用",
+      "pluginManager.state.blocked": "被阻塞（依赖缺失）",
+      "pluginManager.state.errorDisabled": "错误已禁用",
+      "pluginManager.state.registered": "已注册"
     }
   }
 };
@@ -146,7 +167,9 @@ export const settingsPlugin: PluginManifest = {
     };
     menus.register(item);
 
-    // 硬切换 001：注册系统级插件管理页 /settings/plugins。
+    // 硬切换 002：/settings/plugins 是系统级独立工作台。
+    // 只通过 route + menu + breadcrumb 挂载，不再注册到 settings.registry，
+    // 避免在 /settings 聚合页中重复渲染一整份 PluginManagerPage。
     routes.register({
       id: "settings.plugins",
       path: "/settings/plugins",
@@ -176,20 +199,8 @@ export const settingsPlugin: PluginManifest = {
         { label: { key: "settings.crumb.plugins", fallback: "Plugins" } }
       ]
     });
-    // settings registry 多注册一个"插件管理"页（label i18n），保持 settings 页
-    // 出现一条入口（与 /settings/plugins 路由互为补充：菜单 / 路由 / 设置页
-    // 三处都有入口）。
-    const settingsReg = ctx.get<SettingsRegistry>("settings.registry");
-    settingsReg.registerPage({
-      id: "settings.plugins",
-      label: { key: "settings.route.plugins", fallback: "Plugins" },
-      description: { key: "pluginManager.description", fallback: "System-level plugin management." },
-      fields: [],
-      order: 5,
-      component: PluginManagerPage
-    });
 
-    // 硬切换 001：core 插件；teardown 走空实现。
+    // 硬切换 002：core 插件；teardown 走空实现。
     return () => {
       // no-op
     };

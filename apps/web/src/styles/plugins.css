@@ -1,0 +1,17 @@
+/* apps/web/src/styles/plugins.css
+ * 硬切换 002：装配层样式入口。
+ *
+ * 设计缘由：
+ *   - 每个业务插件自带一份 src/styles.css；apps/web 作为装配层在
+ *     plugins.css 里显式列出当前启用的插件样式来源。
+ *   - 卸载某个插件时，开发者只需：
+ *       1) 删 bootstrapPlugins.ts 里的插件 import；
+ *       2) 删本文件里的对应 @import 行；
+ *       3) 删整个插件目录。
+ *     不需要再去 global.css 里搜残留选择器。
+ *   - 全局样式（global.css）只承担 token / shell / UI primitive；插件业务
+ *     样式不得反向写回 global.css。
+ */
+
+@import "@keymaster/plugin-settings/styles.css";
+@import "@keymaster/plugin-poker/styles.css";
