@@ -101,10 +101,62 @@ button { font-family: inherit; }
 .ui-modal__body { display: flex; flex-direction: column; gap: 8px; }
 .ui-modal__footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
-.ui-page-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+/* 硬切换 013：业务页头窄屏收敛为「左上文案 + 右下操作」的斜对角结构。
+ * 边界：仅作用于 .app-shell__paged 下的 .ui-page-header。
+ * .app-shell__paged 只在 renderNormalShell 的「面包屑 + 路由内容」
+ * wrapper 上挂——明确的「面包屑下方业务页」容器。repair 分支虽然也
+ * 在 .app-shell__main 里，但 renderRepair 走 RepairGuard、不挂
+ * .app-shell__paged，因此不被纳入。OnboardingShell（表单 / 向导 step）
+ * 更不在 unlocked 壳层里，天然隔离。规则跟着 AppShell 走，不让
+ * PageHeader 自己承担业务/表单二分。
+ * - 宽屏：flex 横排，左 title+desc、右 actions。
+ * - ≤ 768px：切到 grid；title+desc 占第 1 行（左对齐），actions 占第 2 行
+ *   （右对齐，允许换行）。多按钮时可换行但不挤压标题。
+ * - ≤ 480px：actions 整体下沉到独立行，仍保持右对齐 + 允许换行；
+ *   不出现横向溢出，按钮仍可点。
+ */
+.ui-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+.ui-page-header__content { min-width: 0; flex: 1 1 auto; }
 .ui-page-header__title { margin: 0; font-size: 20px; }
 .ui-page-header__description { color: var(--text-dim); margin: 4px 0 0 0; }
-.ui-page-header__actions { display: flex; gap: 8px; }
+.ui-page-header__actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+@media (max-width: 768px) {
+  .app-shell__paged .ui-page-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+    row-gap: 10px;
+  }
+  .app-shell__paged .ui-page-header__content { min-width: 0; }
+  .app-shell__paged .ui-page-header__actions {
+    justify-self: end;
+    align-self: stretch;
+    flex-wrap: wrap;
+    max-width: 100%;
+  }
+}
+/* 硬切换 013：极窄屏兜底——actions 整体下沉并保持右对齐，
+ * 不再尝试挤进 title 同一行；按钮仍可点，不出现横向溢出。 */
+@media (max-width: 480px) {
+  .app-shell__paged .ui-page-header { row-gap: 8px; }
+  .app-shell__paged .ui-page-header__actions {
+    justify-self: stretch;
+    flex-direction: row;
+  }
+  .app-shell__paged .ui-page-header__actions > * { min-width: 0; }
+}
 
 .ui-data-table table { width: 100%; border-collapse: collapse; }
 .ui-data-table th, .ui-data-table td { text-align: left; padding: 8px; border-bottom: 1px solid var(--border); }
@@ -802,7 +854,6 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 @media (max-width: 768px) {
   .vault-page__table { display: none; }
   .vault-page__mobile { display: block; }
-  .ui-page-header__actions { flex-wrap: wrap; }
 }
 
 /* ---------- Key switch widget (硬切换 007) ---------- */
@@ -854,7 +905,7 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .key-switch__empty {
   margin: 0; padding: 12px; color: var(--text-dim); font-size: 12px; text-align: center;
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   /* 硬切换 012:最窄断点统一 icon-only;只压缩 trigger,不动 dropdown 面板。
    * 用 > 子选择器把作用域圈在 trigger 里,避免误伤 .key-switch__panel
    * 里复用同名 .key-switch__pubkey / .key-switch__label 的列表项。 */
@@ -907,7 +958,7 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .theme-toggle__item-mark {
   color: var(--primary); font-size: 10px; line-height: 1;
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   /* 硬切换 012:最窄断点统一 icon-only,基准已对齐 key-switch / language / lock。 */
   .theme-toggle__button { padding: 8px 10px; }
   .theme-toggle__label { display: none; }
@@ -942,7 +993,7 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .language-switch__item-mark {
   color: var(--primary); flex-shrink: 0;
 }
-@media (max-width: 640px) {
+@media (max-width: 768px) {
   /* 硬切换 012:最窄断点统一 icon-only。Button 把 children 包成 span,
    * 图标 span 带 .ui-button__icon,这里只把文字 span 收掉。 */
   .language-switch__button { padding: 8px 10px; }

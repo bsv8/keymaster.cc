@@ -369,8 +369,16 @@ function renderNormalShell({
           />
         ) : null}
         <main className="app-shell__main">
-          <Breadcrumbs />
-          <RouteRenderer />
+          {/*
+            硬切换 013：把「面包屑下方业务页」包进 .app-shell__paged，
+            让窄屏 grid 收敛规则有明确的边界——repair 分支虽然也在
+            .app-shell__main 里但不进这个 wrapper，因此不会被纳入，
+            也就不依赖「repair 恰好没 actions」这个隐性不变量。
+          */}
+          <div className="app-shell__paged">
+            <Breadcrumbs />
+            <RouteRenderer />
+          </div>
         </main>
       </div>
       <SiteFooter variant="app" />
