@@ -13,21 +13,30 @@
 // 硬切换 005 收尾：已解锁壳层守卫。
 //   - vault.status === "unlocked" + activePublicKeyHash 存在 → 正常渲染。
 //   - vault.status === "unlocked" + activePublicKeyHash 缺失 +
-//     listKeys().length === 0 → "0 key 异常态"，主动触发回
+//     listKeys() 读成功且 length === 0 → "0 key 异常态"，主动触发回
 //     uninitialized 的恢复路径（让用户进入首启 welcome）。
 //   - vault.status === "unlocked" + activePublicKeyHash 缺失 +
-//     listKeys().length > 0 → "修复/管理态"：阻断普通业务页，
-//     只允许去 Vault Key 管理页处理 failed / uninitialized key。
-//   - 这两类都是壳层守卫，**不**引入新的全局 mode 概念。
+//     listKeys() 读成功且 length > 0 → "修复/管理态"：阻断普通业务页，
+//     但 `/settings/vault`（VaultSettingsPage）**始终**允许渲染——
+//     用户必须能在该页面导出 / 删除失败 / uninitialized key 才能脱离
+//     修复态。
+//   - listKeys() 抛错：进 "diagnostic" 态——渲染报错 + 重试按钮，**不**
+//     触发空 Vault 收敛（把"读失败"误判为"0 key"会误删 meta）。
+//   - 这几类都是壳层守卫，**不**引入新的全局 mode 概念。
+//
+// 守卫判定已抽出到 `evaluateShellGuard` 纯函数，可单测。
+// `AppShell` 组件本身只负责订阅 + 渲染 + 路由允许。
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useI18n, router } from "@keymaster/runtime";
+import { useCapability, useCurrentPath, useI18n, router } from "@keymaster/runtime";
 import type {
+  ActiveKeyState,
   InitialActivationNotice,
   KeyIdentity,
   KeyspaceService,
-  VaultService
+  VaultService,
+  VaultStatus
 } from "@keymaster/contracts";
 import { Breadcrumbs } from "./Breadcrumbs.js";
 import { RouteRenderer } from "./RouteRenderer.js";
@@ -36,10 +45,70 @@ import { SiteFooter } from "./SiteFooter.js";
 import { Topbar } from "./Topbar.js";
 
 /** 已解锁壳层守卫的判定结果。 */
-type ShellGuardState =
+export type ShellGuardState =
   | { kind: "normal" }
   | { kind: "empty-vault-recovery" }
-  | { kind: "needs-repair"; keys: KeyIdentity[] };
+  | { kind: "needs-repair"; keys: KeyIdentity[] }
+  | { kind: "diagnostic"; error: string };
+
+const KEY_MANAGEMENT_PATH = "/settings/vault";
+
+/**
+ * 纯函数：评估当前已解锁状态下的壳层守卫。
+ *
+ * 设计缘由（硬切换 005 反馈修复）：
+ *   - "读失败" 必须 fail-closed 成 "diagnostic"，**不**误判为 0 key
+ *     触发空 Vault 收敛。
+ *   - "0 key" 才允许走 "empty-vault-recovery"，并通过 `onEmpty` 触发
+ *     vault.recoverEmptyVaultToUninitialized() 等收敛动作。
+ *   - "仍有 key 但都不可用" 走 "needs-repair"，由组件层决定如何渲染
+ *     （修复态下 `/settings/vault` 仍允许渲染以避免锁死用户）。
+ *
+ * 抽出此函数是为了让守卫决策本身可单测，避免每次新增分支都要靠
+ * mock 整个 React runtime 才能验证。
+ */
+export async function evaluateShellGuard(args: {
+  vaultStatus: VaultStatus;
+  active: ActiveKeyState;
+  listKeys: () => Promise<KeyIdentity[]>;
+  /**
+   * 进入 empty-vault-recovery 时触发的副作用。组件层通常在这里
+   * 调 vault.recoverEmptyVaultToUninitialized()；本函数本身不感知。
+   * 副作用抛错会被吞掉（recorderError 字段返回 true），但不影响
+   * 守卫结果。
+   */
+  onEmpty?: () => Promise<void> | void;
+}): Promise<{ state: ShellGuardState; recorderError: boolean }> {
+  if (args.vaultStatus !== "unlocked") {
+    return { state: { kind: "normal" }, recorderError: false };
+  }
+  if (args.active.activePublicKeyHash) {
+    return { state: { kind: "normal" }, recorderError: false };
+  }
+  // activePublicKeyHash 缺失：按 listKeys 决定走"恢复"/"修复"/"诊断"。
+  let list: KeyIdentity[];
+  try {
+    list = await args.listKeys();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return {
+      state: { kind: "diagnostic", error: msg },
+      recorderError: false
+    };
+  }
+  if (list.length === 0) {
+    let recorderError = false;
+    if (args.onEmpty) {
+      try {
+        await args.onEmpty();
+      } catch {
+        recorderError = true;
+      }
+    }
+    return { state: { kind: "empty-vault-recovery" }, recorderError };
+  }
+  return { state: { kind: "needs-repair", keys: list }, recorderError: false };
+}
 
 export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
@@ -48,6 +117,7 @@ export function AppShell() {
   const [guard, setGuard] = useState<ShellGuardState>({ kind: "normal" });
   const vault = useCapability<VaultService>("vault.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const path = useCurrentPath();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
   useI18n().language();
@@ -65,10 +135,11 @@ export function AppShell() {
   // 不变量：
   //   - vault.status === "unlocked" + activePublicKeyHash 存在 → normal。
   //   - vault.status === "unlocked" + activePublicKeyHash 缺失：
-  //       * listKeys().length === 0 → "0 key 异常态"。
-  //         此时必须主动触发回 uninitialized——继续在 unlocked
-  //         状态会卡在"已经看到顶栏但永远没有 key"的死循环。
-  //       * listKeys().length > 0 → "修复/管理态"，阻断普通业务页。
+  //       * listKeys() 读失败 → "diagnostic"（**不**触发空 Vault 收敛，
+  //         避免把"读失败"误判为"0 key"而误删 meta）。
+  //       * listKeys() length === 0 → "0 key 异常态"，调
+  //         `vault.recoverEmptyVaultToUninitialized()` 收敛到 uninitialized。
+  //       * listKeys() length > 0 → "修复/管理态"。
   // 任何时候 status 切到非 unlocked 都让壳层降级到 normal，由 App 决定
   // 切回 LockedShell。
   useEffect(() => {
@@ -78,39 +149,23 @@ export function AppShell() {
     }
     let cancelled = false;
     async function evaluate() {
-      if (vault.status() !== "unlocked") {
-        if (!cancelled) setGuard({ kind: "normal" });
-        return;
-      }
-      const active = keyspace.active();
-      if (active.activePublicKeyHash) {
-        if (!cancelled) setGuard({ kind: "normal" });
-        return;
-      }
-      // activePublicKeyHash 缺失：按 listKeys 决定走"恢复"还是"修复"。
-      let list: KeyIdentity[] = [];
-      try {
-        list = await keyspace.listKeys();
-      } catch {
-        list = [];
-      }
-      if (cancelled) return;
-      if (list.length === 0) {
-        // 0 key：主动触发"0 key 异常态恢复"路径——调
-        // vault.recoverEmptyVaultToUninitialized() 把状态收敛到
-        // uninitialized，让用户进入首启 welcome。app.tsx 看到 status
-        // 变化后切到 LockedShell。
-        setGuard({ kind: "empty-vault-recovery" });
-        if (typeof vault.recoverEmptyVaultToUninitialized === "function") {
-          try {
-            await vault.recoverEmptyVaultToUninitialized();
-          } catch (err) {
-            console.error(
-              "AppShell guard: recoverEmptyVaultToUninitialized failed",
-              err
-            );
+      const result = await evaluateShellGuard({
+        vaultStatus: vault.status(),
+        active: keyspace.active(),
+        listKeys: () => keyspace.listKeys(),
+        onEmpty: async () => {
+          if (typeof vault.recoverEmptyVaultToUninitialized === "function") {
+            try {
+              await vault.recoverEmptyVaultToUninitialized();
+            } catch (err) {
+              console.error(
+                "AppShell guard: recoverEmptyVaultToUninitialized failed",
+                err
+              );
+              throw err;
+            }
+            return;
           }
-        } else {
           // 旧版 vault service 没有此方法时的兜底：仍走 lock 路径。
           try {
             await vault.lock();
@@ -119,12 +174,12 @@ export function AppShell() {
               "AppShell guard: vault.lock during empty-vault-recovery fallback failed",
               err
             );
+            throw err;
           }
         }
-        return;
-      }
-      // 仍有 key 但都不可用：进入修复/管理态。
-      setGuard({ kind: "needs-repair", keys: list });
+      });
+      if (cancelled) return;
+      setGuard(result.state);
     }
     void evaluate();
     const offActive = keyspace.onActiveChange(() => {
@@ -147,6 +202,51 @@ export function AppShell() {
     setActivationNotice(null);
   }
 
+  function retryGuardEvaluation() {
+    // 诊断态下让用户能重试一次 listKeys——只重新触发守卫评估，
+    // 不直接调用 listKeys（让守卫函数自己处理错误归类）。
+    if (!vault || !keyspace) return;
+    void (async () => {
+      const result = await evaluateShellGuard({
+        vaultStatus: vault.status(),
+        active: keyspace.active(),
+        listKeys: () => keyspace.listKeys(),
+        onEmpty: async () => {
+          if (typeof vault.recoverEmptyVaultToUninitialized === "function") {
+            await vault.recoverEmptyVaultToUninitialized();
+            return;
+          }
+          await vault.lock();
+        }
+      });
+      setGuard(result.state);
+    })();
+  }
+
+  // "诊断态"：listKeys 读失败。**不**触发空 Vault 收敛，暴露错误
+  // 并允许重试。
+  if (guard.kind === "diagnostic") {
+    return (
+      <div className="app-shell app-shell--diagnostic">
+        <PageHeader
+          title={t("shell.appShell.diagnostic.title", { defaultValue: "无法读取 key 列表" })}
+          description={t("shell.appShell.diagnostic.desc", {
+            defaultValue: "读取 key 列表时出错；为避免误删数据，壳层守卫已暂停自动恢复路径。"
+          })}
+        />
+        <EmptyState
+          title={t("shell.appShell.diagnostic.errorTitle", { defaultValue: "读取失败" })}
+          description={guard.error}
+          action={
+            <Button onClick={retryGuardEvaluation}>
+              {t("shell.appShell.diagnostic.retry", { defaultValue: "重试" })}
+            </Button>
+          }
+        />
+      </div>
+    );
+  }
+
   // "0 key 异常态"恢复期：渲染极简"正在恢复"占位，避免业务页
   // 抢跑触发空指针。
   if (guard.kind === "empty-vault-recovery") {
@@ -162,8 +262,29 @@ export function AppShell() {
     );
   }
 
-  // "修复/管理态"：阻断普通业务页，直接引导到 Vault Key 管理页。
+  // "修复/管理态"：阻断普通业务页。但当用户已经在 Vault Key 管理页
+  // 上时，**必须**允许 RouteRenderer 渲染 VaultSettingsPage——否则
+  // 用户会被锁死：点击"前往 Key 管理"按钮 router.push 改了 URL，
+  // 但当前分支根本不渲染 RouteRenderer，URL 变了 UI 也不动。
+  //
+  // 设计缘由：硬切换 005 反馈修复——修复态的"阻断"目标是把普通业务页
+  // （assets / transfer / contacts / p2pkh / poker）挡在外面，而不是
+  // 把唯一能修复的 Key 管理页也挡掉。
   if (guard.kind === "needs-repair") {
+    const isOnKeyManagement = path === KEY_MANAGEMENT_PATH;
+    if (isOnKeyManagement) {
+      // 在 Key 管理页：渲染正常壳层，让 VaultSettingsPage 显示并允许
+      // 用户导出 / 删除失败 / uninitialized key。failure 列表仍通过
+      // activationNotice 之外的方式显示——本分支直接渲染 RouteRenderer
+      // 即可，VaultSettingsPage 自己会列出所有 keys。
+      return renderNormalShell({
+        mobileOpen,
+        setMobileOpen,
+        activationNotice,
+        dismissNotice,
+        t
+      });
+    }
     return (
       <div className={`app-shell app-shell--repair ${mobileOpen ? "is-mobile-nav-open" : ""}`}>
         <Topbar
@@ -181,7 +302,11 @@ export function AppShell() {
             />
           ) : null}
           <main className="app-shell__main">
-            <RepairGuard keys={guard.keys} onGoToKeyManagement={() => router.push("/settings/vault")} t={t} />
+            <RepairGuard
+              keys={guard.keys}
+              onGoToKeyManagement={() => router.push(KEY_MANAGEMENT_PATH)}
+              t={t}
+            />
           </main>
         </div>
         <SiteFooter variant="app" />
@@ -189,6 +314,30 @@ export function AppShell() {
     );
   }
 
+  return renderNormalShell({
+    mobileOpen,
+    setMobileOpen,
+    activationNotice,
+    dismissNotice,
+    t
+  });
+}
+
+interface NormalShellArgs {
+  mobileOpen: boolean;
+  setMobileOpen: (next: boolean | ((prev: boolean) => boolean)) => void;
+  activationNotice: InitialActivationNotice | null;
+  dismissNotice: () => void;
+  t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
+}
+
+function renderNormalShell({
+  mobileOpen,
+  setMobileOpen,
+  activationNotice,
+  dismissNotice,
+  t
+}: NormalShellArgs) {
   return (
     <div className={`app-shell ${mobileOpen ? "is-mobile-nav-open" : ""}`}>
       <Topbar
