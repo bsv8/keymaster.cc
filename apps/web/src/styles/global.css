@@ -855,8 +855,13 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   margin: 0; padding: 12px; color: var(--text-dim); font-size: 12px; text-align: center;
 }
 @media (max-width: 640px) {
-  .key-switch__button { max-width: 160px; }
-  .key-switch__label { max-width: 80px; }
+  /* 硬切换 012:最窄断点统一 icon-only;只压缩 trigger,不动 dropdown 面板。
+   * 用 > 子选择器把作用域圈在 trigger 里,避免误伤 .key-switch__panel
+   * 里复用同名 .key-switch__pubkey / .key-switch__label 的列表项。 */
+  .key-switch__button { max-width: 160px; padding: 8px 10px; }
+  .key-switch__button > .key-switch__label,
+  .key-switch__button > .key-switch__pubkey,
+  .key-switch__button > svg:last-of-type { display: none; }
   .key-switch__panel { right: -8px; min-width: 240px; max-width: 280px; }
 }
 
@@ -903,6 +908,8 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   color: var(--primary); font-size: 10px; line-height: 1;
 }
 @media (max-width: 640px) {
+  /* 硬切换 012:最窄断点统一 icon-only,基准已对齐 key-switch / language / lock。 */
+  .theme-toggle__button { padding: 8px 10px; }
   .theme-toggle__label { display: none; }
   .theme-toggle__panel { right: -8px; min-width: 180px; }
 }
@@ -936,7 +943,14 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   color: var(--primary); flex-shrink: 0;
 }
 @media (max-width: 640px) {
+  /* 硬切换 012:最窄断点统一 icon-only。Button 把 children 包成 span,
+   * 图标 span 带 .ui-button__icon,这里只把文字 span 收掉。 */
+  .language-switch__button { padding: 8px 10px; }
+  .language-switch__button > span:not(.ui-button__icon) { display: none; }
   .language-switch__panel { right: -8px; min-width: 140px; }
+  /* 顶栏 Lock 按钮:同规则收敛为 icon-only。 */
+  .app-topbar__lock { padding: 8px 10px; }
+  .app-topbar__lock > span:not(.ui-button__icon) { display: none; }
 }
 
 /* ---------- 响应式断点 ----------

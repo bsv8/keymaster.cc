@@ -7,7 +7,7 @@
 // 硬切换 003：所有展示文案走 i18n；TopbarItem.label / 状态文本 / 锁定按钮
 // 都通过 host.i18n.text / t() 解析；语言切换自动重渲染。
 
-import { Menu, X } from "lucide-react";
+import { Menu, X, Lock } from "lucide-react";
 import { Button } from "@keymaster/ui";
 import { useI18n, usePluginHost, useRegistry, useRuntimeStatus } from "@keymaster/runtime";
 import { BRAND_WORDMARK } from "../brand.js";
@@ -62,7 +62,14 @@ export function Topbar({ mobileOpen, onToggleMobileNav }: TopbarProps) {
         <ThemeToggle />
         <LanguageSwitch />
         {vault === "unlocked" ? (
-          <Button variant="ghost" onClick={lock}>
+          <Button
+            variant="ghost"
+            className="app-topbar__lock"
+            iconLeft={<Lock size={16} />}
+            onClick={lock}
+            title={t("common.action.lock", { defaultValue: "锁定" })}
+            aria-label={t("common.action.lock", { defaultValue: "锁定" })}
+          >
             {t("common.action.lock", { defaultValue: "锁定" })}
           </Button>
         ) : (

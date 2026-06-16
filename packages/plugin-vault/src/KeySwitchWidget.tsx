@@ -128,6 +128,8 @@ export function KeySwitchWidget() {
         onClick={() => setOpen((v) => !v)}
         aria-label={t("vault.keySwitch.label", { defaultValue: "切换 key" })}
         title={t("vault.keySwitch.label", { defaultValue: "切换 key" })}
+        aria-haspopup="menu"
+        aria-expanded={open}
         disabled={busy}
       >
         <KeyRound size={16} />

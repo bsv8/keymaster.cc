@@ -65,6 +65,7 @@ export function LanguageSwitch() {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={t("shell.topbar.language.label", { defaultValue: "切换语言" })}
         title={t("shell.topbar.language.label", { defaultValue: "切换语言" })}
       >
         {current}
