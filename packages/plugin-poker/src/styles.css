@@ -1,14 +1,18 @@
 /* packages/plugin-poker/src/styles.css
- * 硬切换 002：plugin-poker 专属样式。
+ * 硬切换 002 + 硬切换 004：plugin-poker 专属样式。
  *
  * 职责边界：
- *   - PokerSettingsPage：状态条 / 身份绑定区 / 网络参数区 / 操作区 / 诊断区
+ *   - PokerSettingsPage：状态条 / 当前 active key 提示 / 网络参数区 / 操作区 / 诊断区
  *   - PokerLobby：双栏大厅（桌局 + 在线玩家）
  *   - PokerTable：单桌视图（topic + subscribe 状态 + tx 计数）
  *   - PokerHomeWidget：补充 home-widget 壳层的 poker 专属修饰
  *
  * 不再写进 apps/web/src/styles/global.css：业务样式必须跟随业务插件目录
  * 走，移除插件时一并删除对应 CSS 入口。
+ *
+ * 硬切换 004：删除原 `poker-settings__status-binding` / `poker-settings-identity*`
+ * 区块；新增 `poker-settings__active-key*` / `poker-settings-active-key*` 区块，
+ * 体现"active key 即扑克身份"语义。
  */
 
 /* ---------- Settings page ---------- */
@@ -106,15 +110,35 @@
   color: var(--text);
 }
 
-.poker-settings-identity__row {
-  display: flex;
-  gap: 12px;
-  align-items: flex-end;
-  flex-wrap: wrap;
+/* 硬切换 004：active key 即扑克身份。状态条上的紧凑提示。 */
+.poker-settings__active-key {
+  font-size: 12px;
+  color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
+.poker-settings__active-key code { font-size: 11px; }
+.poker-settings__active-key--ok { color: var(--primary); }
+.poker-settings__active-key--warn { color: #d6a417; }
+.poker-settings__active-key--fail { color: var(--danger); }
 
-.poker-settings-identity__row .ui-field { flex: 1 1 220px; margin-bottom: 0; }
-.poker-settings-identity__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.poker-settings-active-key__hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+.poker-settings-active-key__warn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--danger);
+  background: rgba(227, 90, 90, 0.08);
+  border-left: 3px solid var(--danger);
+  border-radius: 4px;
+  padding: 8px 10px;
+}
 
 .poker-settings__fallback {
   display: inline-flex;

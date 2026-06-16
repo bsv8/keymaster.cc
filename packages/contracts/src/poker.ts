@@ -3,14 +3,20 @@
 // 之间的所有协议对象与 capability 入口。
 //
 // 设计缘由：
-//   - 硬切换 001 要求 "plugin-poker 持有 poker 能力契约与 UI，与 proxy
-//     建立 WSS 会话；本地完成签名、验签、状态推进、钱包调用"。
+//   - 硬切换 004（plugin-poker 跟随 active key + 多 Key 生命周期收敛）：
+//     Poker 不再维护独立的"稳定扑克身份绑定"，Poker 身份永远跟随平台
+//     `keyspace.active()` 的 single-mode 唯一一把 ready key。
+//   - "all" 模式 / vault locked / active key failed / uninitialized 时，
+//     Poker 一律 fail-closed（不连接、不重连、不允许 publish）。
+//   - 业务插件不能自己再发明第二身份；唯一身份真值来自 keyspace。
+//   - 切 active key 时必须先断开旧会话再按新 key 重建，不允许在同一个
+//     websocket 会话里"换公钥"继续跑。
+//   - 网络配置（proxy endpoint / 双平面 announce / fallback 开关）属于
+//     全局配置，跨切 key 不丢；key-scoped storage 只保存"明确属于该
+//     key 的扑克状态"（presences / tables / txIngest 等）。
 //   - 该契约只承载类型，不放实现；实现位于 packages/plugin-poker。
-//   - browser <-> proxy 的帧类型与 proxy 端 BrowserEnvelope 1:1 对齐，
-//     JSON 字段名采用 camelCase（proxy 的 encoding/json 默认）。
-//   - 必须把 capability key 集中导出（"poker.service"），runtime 通过
-//     ctx.get("poker.service") 获取服务实例。
 
+import type { KeyIdentity } from "./keyspace.js";
 import type { MessageBus } from "./messageBus.js";
 import type { I18nPluginResources } from "./i18n.js";
 
@@ -206,7 +212,7 @@ export type PokerConnectionStatus =
   | "failed"
   | "closed";
 
-/** Poker 服务设置。 */
+/** Poker 服务全局网络设置（与具体 key 无关）。 */
 export interface PokerSettings {
   /** proxy WSS endpoint，缺省值由 plugin-poker 在 /settings/poker 详情页写入。 */
   proxyEndpoint: string;
@@ -225,56 +231,64 @@ export interface PokerSettings {
 }
 
 /**
- * 稳定 poker identity 绑定记录。
+ * 当前 Poker 会话 key 的解析结果。
  *
- * 设计缘由：硬切换 001 修订版 100 / 567 / 764 行明确"稳定扑克身份必须
- * 独立于当前 active key 切换"。本结构是 plugin-poker 在 key-scoped
- * IndexedDB 里持久化的"poker identity 选择"：用户在 settings 里显式
- * 挑一把 vault key 作为 poker 身份，切换 active key 不会隐式改变它。
+ * 设计缘由（硬切换 004）：Poker 唯一身份真值 = `keyspace.active()` 的
+ * single-mode ready key。这里把"解析当前 active key 是否可用作 Poker
+ * 身份"集中表达：
+ *   - `ready`：active key 可用，session 字段给出具体 KeyIdentity。
+ *   - `allMode`：当前 active 处于 all 模式，Poker 必须 fail-closed。
+ *   - `vaultLocked`：vault 未解锁，没有 active key 候选。
+ *   - `missing`：vault 已解锁但 keyspace 内没有任何 ready key。
+ *   - `notReady`：active key 存在但 identityStatus !== "ready"。
+ *   - `noActiveHash`：single 模式但 activePublicKeyHash 缺省（异常态）。
  *
- * 字段：
- *   - bound: 用户已经显式绑定一把 key；解锁后这把 key 即 poker identity。
- *   - publicKeyHash: 被绑定 key 的稳定 namespace id。
- *   - publicKeyHex: 缓存的压缩公钥 hex（presence / chat / announce 都用它）。
- *   - keyId: vault.withPrivateKey 的 key id（签名通道）。
- *   - label: 创建绑定时记录的人类标签（仅展示，可与 vault label 不同步）。
- *   - boundAt: 绑定建立时间。
+ * 业务 UI 通过这一枚举直接决定"Poker 设置页的 Connect 按钮是否启用 /
+ * 大厅/单桌是否允许 publish / home widget 显示哪种提示"。
  */
-export interface PokerIdentityBinding {
-  bound: true;
-  publicKeyHash: string;
-  publicKeyHex: string;
-  keyId: string;
-  label: string;
-  boundAt: number;
-}
-
-/** 当前没有显式绑定时的占位记录，service.getIdentityBinding 可能返回 null。 */
-export type PokerIdentityBindingState = PokerIdentityBinding | null;
-
-/** Settings 页 / lobby 列出"可选 poker identity"用的轻量公开身份。 */
-export interface PokerIdentityCandidate {
-  keyId: string;
-  publicKeyHash: string;
-  publicKeyHex: string;
-  label: string;
-  /** 是否当前 active key（仅 UI 提示）。 */
-  isActive: boolean;
-}
+export type PokerSessionKeyState =
+  | { kind: "ready"; key: KeyIdentity }
+  | { kind: "allMode" }
+  | { kind: "vaultLocked" }
+  | { kind: "missing" }
+  | { kind: "notReady"; key: KeyIdentity; reason: string }
+  | { kind: "noActiveHash" };
 
 /**
  * PokerService 是 plugin-poker 暴露给宿主的 service 接口。
  *
  * 设计缘由：
- *   - 宿主（topbar / home widget）通过 ctx.get<PokerService>(POKER_SERVICE_CAPABILITY)
- *     拿到 service，订阅 status / tables / presences / txEvents。
+ *   - 宿主（topbar / home widget / lobby / table）通过
+ *     `ctx.get<PokerService>(POKER_SERVICE_CAPABILITY)` 拿到 service，
+ *     订阅 status / tables / presences / txEvents / activePokerKey。
  *   - service 内不暴露私钥、不留明文材料；签名走 vault.withPrivateKey 闭包。
+ *   - Poker 身份永远来自 `keyspace.active()`；本服务不再提供任何
+ *     "把某把 key 绑定为 poker identity" 的 API（硬切换 004）。
  */
 export interface PokerService {
   /** 当前连接状态。 */
   status(): PokerConnectionStatus;
   /** 订阅连接状态变化。 */
   onStatusChange(handler: (status: PokerConnectionStatus) => void): () => void;
+
+  /**
+   * 当前 Poker 会话 key 状态解析结果（见 PokerSessionKeyState）。
+   * 设计缘由：硬切换 004 要求"active key = all / vault locked / failed /
+   * uninitialized"时一律 fail-closed；用单一解析结果把"能否建立
+   * Poker 会话"的判断收敛在一处，避免业务 UI 各自重复判断。
+   */
+  getActivePokerKey(): PokerSessionKeyState;
+  /**
+   * 订阅 active poker key 变化。
+   * - active key 从 A 切到 B：handler 立刻收到新 state；
+   * - vault 锁定 / active 切到 all：handler 收到 fail-closed 状态；
+   * - key.deleted 后 keyspace 决定下一把 active key：handler 收到新
+   *   single 状态时由 service 内部负责按新 key 重建会话。
+   *
+   * 订阅时**不会**立即推一次当前值——UI 应在 mount 时调用
+   * `getActivePokerKey()` 取初值；onChange 只负责后续增量更新。
+   */
+  onActivePokerKeyChange(handler: (state: PokerSessionKeyState) => void): () => void;
 
   /** 列出当前已观察到的 presence。 */
   listPresences(): PokerPresence[];
@@ -291,7 +305,14 @@ export interface PokerService {
   /** 订阅新 tx 事件。 */
   onTxEvent(handler: (e: PokerTxEvent) => void): () => void;
 
-  /** 主动连接 proxy（解锁后才能调用，vault 锁定 fail-closed）。 */
+  /**
+   * 主动连接 proxy。
+   *
+   * 前置条件（不满足直接抛错 fail-closed）：
+   *   - vault.status() === "unlocked"
+   *   - active key 是 single 且 identityStatus === "ready"
+   *   - settings.proxyEndpoint 已配置
+   */
   connect(): Promise<void>;
   /** 主动断开。 */
   disconnect(): void;
@@ -307,62 +328,31 @@ export interface PokerService {
   subscribeTopics(topics: string[]): Promise<void>;
   unsubscribeTopics(topics: string[]): Promise<void>;
 
-  /** 读取 / 写入 settings。 */
+  /**
+   * 读取全局网络配置。
+   *
+   * 设计缘由（硬切换 004）：Poker 的 proxy endpoint / 双平面 announce /
+   * fallback 开关都属于全局配置，跨切 key 不丢。plugin-poker 在
+   * pokerGlobalConfig 单独存储；本方法把全局配置以 PokerSettings 形式
+   * 暴露给宿主。
+   */
   getSettings(): PokerSettings;
+  /**
+   * 更新全局网络配置。
+   *
+   * 设计缘由：硬切换 004 后 settings 不再写到 key-scoped DB；plugin-poker
+   * 启动时一次性 hydrate 来自 pokerGlobalConfig。更新时同时触发
+   * onSettingsChange；若当前已 ready 且 patch.proxyEndpoint 变化，service
+   * 会主动 disconnect → reconnect，让新 endpoint 立即生效。
+   */
   updateSettings(patch: Partial<PokerSettings>): Promise<void>;
   /**
    * 订阅 settings 变化。
    *
-   * 设计缘由：bindIdentity 后 service 会异步从 key-scoped IDB 拉回该 identity
-   * 的 settings；如果 UI 只在 mount 时调 `getSettings()` 一次，刷新后会
-   * 看到空表单 / 错误禁用 Connect 按钮。该回调在两条路径上都会触发：
-   *   - `updateSettings(patch)` 完成后；
-   *   - 内部 `hydrateSettingsForCurrentIdentity()` 完成后（binding 切换）。
-   * 订阅时**不会**立即推一次当前值——UI 仍应在 mount 时调 `getSettings()`
-   * 取初值；onChange 只负责后续增量更新。
+   * 设计缘由：硬切换 004 后 settings 来自 pokerGlobalConfig（localStorage /
+   * 全局 IDB），不会随 binding 切换而变化；订阅时**不会**立即推一次当前值。
    */
   onSettingsChange(handler: (settings: PokerSettings) => void): () => void;
-
-  // --------------------------------------------------------------------------
-  // 稳定 poker identity 绑定（硬切换 001 修订版 100 / 567 / 764 行）
-  // --------------------------------------------------------------------------
-
-  /**
-   * 当前绑定的 poker identity。
-   *
-   * 设计缘由：plugin-poker 的 presence / table owner / chat 身份必须独立于
-   * keyspace.active() 切换。`null` 表示用户尚未在 settings 里显式绑定，
-   * 此时所有 publish 路径 fail-closed。
-   */
-  getIdentityBinding(): PokerIdentityBindingState;
-
-  /** 订阅绑定变化（解绑 → null；重新绑定 → 新对象）。 */
-  onIdentityBindingChange(handler: (b: PokerIdentityBindingState) => void): () => void;
-
-  /**
-   * 列出当前可作为 poker identity 的候选 vault key（`identityStatus = "ready"`
-   * 且有 publicKeyHex 的 key）。仅展示用，不暴露任何 capability 反射。
-   */
-  listIdentityCandidates(): Promise<PokerIdentityCandidate[]>;
-
-  /**
-   * 显式绑定一把 vault key 作为 poker identity。
-   *
-   * 设计缘由：硬切换文档要求"允许用户显式选择一把 vault key 作为 poker
-   * 身份；绑定结果独立于当前 active key 切换"。
-   *
-   * 副作用：写 key-scoped storage（落地）+ 触发 onIdentityBindingChange +
-   * 若已连接 proxy，会主动 disconnect 以避免用旧身份维持 session。
-   */
-  bindIdentity(input: { publicKeyHash: string; label?: string }): Promise<PokerIdentityBinding>;
-
-  /**
-   * 清除当前绑定。
-   *
-   * 设计缘由：用户主动放弃 poker 玩法 / 即将删除该 key 时调用。绑定清除
-   * 后 connect/publish 均 fail-closed，直到下一次 bindIdentity。
-   */
-  unbindIdentity(): Promise<void>;
 
   /** 订阅 messageBus 事件（业务方用）：poker.status / poker.tx / poker.tables。 */
   readonly messageBus: MessageBus;

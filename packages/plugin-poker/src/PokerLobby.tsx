@@ -2,15 +2,15 @@
 // 扑克大厅：展示当前 online presence 与已 observe 到的桌列表。
 //
 // 设计缘由：
-//   - 硬切换文档要求 "不变量 6：plugin-poker 不能把 poker 的网络会话
-//     状态放进 apps/web 的全局 React state 里乱传"。本页面只读
-//     PokerService 暴露的 listPresences / listTables，不维护本地副
-//     本；订阅由 PokerService 内部 handler 维护。
-//   - 状态为空时不渲染报错：硬切换文档要求 "fallback broadcast 到来的
-//     raw tx 不会导致 UI 崩溃；识别不了的 tx 被安全忽略"。本页面也
-//     同样：proxy 未连接时只显示"未连接"占位。
-//   - 硬切换 002：使用 @keymaster/ui 的 PageHeader / EmptyState 原
-//     子组件，layout 走 poker-lobby* 专属 CSS（不再依赖 apps/web 全局
+//   - 硬切换 004：presences / tables 必须只反映当前 active key 对应会话
+//     观察到的数据。切 active key 后旧列表应立即清空或切到新 key hydrate
+//     后的列表；不允许短暂显示旧 key 的桌局。
+//   - service 切 key 时已主动清空 in-memory presences / tables；本组件
+//     只需订阅 service 的 onPresenceChange / onTablesChange，列表会自动
+//     跟随切换。
+//   - all 模式 / vault locked / 未就绪 → 显示只读提示而不是"未连接"。
+//   - 硬切换 002：使用 @keymaster/ui 的 PageHeader / EmptyState 原子
+//     组件，layout 走 poker-lobby* 专属 CSS（不再依赖 apps/web 全局
 //     样式）。
 
 import React, { useEffect, useState } from "react";
@@ -21,22 +21,36 @@ import {
   POKER_SERVICE_CAPABILITY,
   type PokerService,
   type PokerPresence,
+  type PokerSessionKeyState,
   type PokerTable
 } from "@keymaster/contracts";
 
 export function PokerLobby(): React.ReactElement {
   const { t } = useTranslation("poker");
   const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
-  const [presences, setPresences] = useState<PokerPresence[]>(() => (service ? service.listPresences() : []));
+  const [presences, setPresences] = useState<PokerPresence[]>(() =>
+    service ? service.listPresences() : []
+  );
   const [tables, setTables] = useState<PokerTable[]>(() => (service ? service.listTables() : []));
+  const [session, setSession] = useState<PokerSessionKeyState>(() =>
+    service ? service.getActivePokerKey() : { kind: "vaultLocked" }
+  );
 
   useEffect(() => {
     if (!service) return;
     const offP = service.onPresenceChange(() => setPresences(service.listPresences()));
     const offT = service.onTablesChange((next) => setTables(next));
+    const offS = service.onActivePokerKeyChange((next) => {
+      setSession(next);
+      // 切 key 时 service 已清空内存 cache；这里再读一次以保证 UI 与
+      // service 完全一致（哪怕 service 未来在某些路径只通知不清理）。
+      setPresences(service.listPresences());
+      setTables(service.listTables());
+    });
     return () => {
       offP();
       offT();
+      offS();
     };
   }, [service]);
 
@@ -45,11 +59,44 @@ export function PokerLobby(): React.ReactElement {
       <div className="poker-lobby poker-lobby--empty">
         <PageHeader
           title={t("poker.lobby.title", { defaultValue: "Poker lobby" })}
-          description={t("poker.lobby.description", { defaultValue: "Tables and online players observed by the local poker-proxy connection." })}
+          description={t("poker.lobby.description", {
+            defaultValue:
+              "Tables and online players observed by the local poker-proxy connection."
+          })}
         />
         <EmptyState
           title={t("poker.home.empty", { defaultValue: "Not connected" })}
-          description={t("poker.home.connectHint", { defaultValue: "Open Poker settings to configure the proxy endpoint." })}
+          description={t("poker.home.connectHint", {
+            defaultValue: "Open Poker settings to configure the proxy endpoint."
+          })}
+        />
+      </div>
+    );
+  }
+
+  // session 不可用 → 显示降级提示（不展示旧桌局数据）。
+  if (session.kind !== "ready") {
+    return (
+      <div className="poker-lobby poker-lobby--empty">
+        <PageHeader
+          title={t("poker.lobby.title", { defaultValue: "Poker lobby" })}
+          description={t("poker.lobby.description", {
+            defaultValue:
+              "Tables and online players observed by the local poker-proxy connection."
+          })}
+        />
+        <EmptyState
+          title={t(`poker.lobby.sessionUnavailable.${session.kind}.title`, {
+            defaultValue: t("poker.lobby.sessionUnavailable.default.title", {
+              defaultValue: "Poker session unavailable"
+            })
+          })}
+          description={t(`poker.lobby.sessionUnavailable.${session.kind}.hint`, {
+            defaultValue: t("poker.lobby.sessionUnavailable.default.hint", {
+              defaultValue:
+                "Switch to a single active key to see tables and online players."
+            })
+          })}
         />
       </div>
     );
@@ -59,7 +106,10 @@ export function PokerLobby(): React.ReactElement {
     <div className="poker-lobby">
       <PageHeader
         title={t("poker.lobby.title", { defaultValue: "Poker lobby" })}
-        description={t("poker.lobby.description", { defaultValue: "Tables and online players observed by the local poker-proxy connection." })}
+        description={t("poker.lobby.description", {
+          defaultValue:
+            "Tables and online players observed by the local poker-proxy connection."
+        })}
       />
       <div className="poker-lobby__panes">
         <section className="poker-lobby__pane poker-lobby__pane--tables">
@@ -67,7 +117,10 @@ export function PokerLobby(): React.ReactElement {
           {tables.length === 0 ? (
             <EmptyState
               title={t("poker.lobby.noTables", { defaultValue: "No tables yet" })}
-              description={t("poker.lobby.noTablesHint", { defaultValue: "Tables appear here once a host announces them on the proxy." })}
+              description={t("poker.lobby.noTablesHint", {
+                defaultValue:
+                  "Tables appear here once a host announces them on the proxy."
+              })}
             />
           ) : (
             <ul className="poker-lobby__list">
@@ -97,13 +150,18 @@ export function PokerLobby(): React.ReactElement {
           {presences.length === 0 ? (
             <EmptyState
               title={t("poker.lobby.noPresences", { defaultValue: "Nobody online" })}
-              description={t("poker.lobby.noPresencesHint", { defaultValue: "Online players will show up once the proxy connection is established." })}
+              description={t("poker.lobby.noPresencesHint", {
+                defaultValue:
+                  "Online players will show up once the proxy connection is established."
+              })}
             />
           ) : (
             <ul className="poker-lobby__presence-list">
               {presences.map((p) => (
                 <li key={p.publicKeyHex} className="poker-lobby__presence">
-                  <span className="poker-lobby__presence-nick">{p.nick ?? p.publicKeyHex.slice(0, 8)}</span>
+                  <span className="poker-lobby__presence-nick">
+                    {p.nick ?? p.publicKeyHex.slice(0, 8)}
+                  </span>
                   <span className="poker-lobby__presence-pubkey">
                     <code>{p.publicKeyHex.slice(0, 16)}…</code>
                   </span>
