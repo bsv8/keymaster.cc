@@ -10,6 +10,7 @@
 import { Menu, X } from "lucide-react";
 import { Button } from "@keymaster/ui";
 import { useI18n, usePluginHost, useRegistry, useRuntimeStatus } from "@keymaster/runtime";
+import { BRAND_WORDMARK } from "../brand.js";
 import { BrandIcon } from "./BrandIcon.js";
 import { ThemeToggle } from "../theme/ThemeToggle.js";
 import { LanguageSwitch } from "../i18n/LanguageSwitch.js";
@@ -51,7 +52,7 @@ export function Topbar({ mobileOpen, onToggleMobileNav }: TopbarProps) {
         </button>
         <h1 className="app-topbar__brand">
           <BrandIcon className="app-topbar__brand-icon" />
-          <span className="app-topbar__brand-text">Keymaster</span>
+          <span className="app-topbar__brand-text">{BRAND_WORDMARK}</span>
         </h1>
       </div>
       <div className="app-topbar__actions">

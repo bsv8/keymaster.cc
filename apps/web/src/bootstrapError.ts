@@ -2,6 +2,8 @@
 // 启动期致命错误展示。
 // 设计缘由：bootstrap 失败时 React 还没挂载，错误必须用纯 DOM 渲染。
 
+import { BRAND_WORDMARK } from "./brand.js";
+
 /** 把多行错误写到 #root 容器里，使用等宽字体并保留换行。 */
 export function renderFatalError(message: string): void {
   const container = document.getElementById("root");
@@ -29,7 +31,7 @@ export function renderFatalError(message: string): void {
   ].join(";");
   const title = document.createElement("h2");
   title.style.cssText = "color:#e35a5a;margin:0 0 12px 0;font-size:16px;font-family:system-ui,sans-serif";
-  title.textContent = "Keymaster 启动失败";
+  title.textContent = `${BRAND_WORDMARK} 启动失败`;
   const body = document.createElement("pre");
   body.style.cssText = "margin:0;white-space:pre-wrap;font:13px ui-monospace,monospace";
   body.textContent = message;
