@@ -1,7 +1,9 @@
 // packages/runtime/src/registries/homeRegistry.ts
-// 首页注册表：按 order 排序，size 决定栅格。
+// 首页注册表：按 order 升序返回 widget，栏目归属由 widget.slot 决定。
 // 设计缘由：首页只来自 home.registry，禁止直接 import 业务 widget。
 // 硬切换 001：unregister 走 owner 回收。
+// 硬切换 006：删除 size 维度；栏目分组是渲染层职责，registry 不再提供
+//   listMain / listAside 等附加 API。
 
 import type { HomeWidget } from "@keymaster/contracts";
 

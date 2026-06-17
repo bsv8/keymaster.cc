@@ -253,8 +253,31 @@ beforeEach(async () => {
   keyspace.attachBus(bus);
   svc = createPokerService({ vault: vault as any, keyspace: keyspace as any, messageBus: bus as any });
   // 让 service 的 init rebind 完成。
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => setTimeout(r, 0));
+  // 关键（修复 pokerService.test.ts:683 偶发 flake）：
+  // rebindToActiveKey("init") 内部在写完 currentSessionKeyHash 之后还要
+  // 跑 migrateLegacySettingsIfNeeded + hydrateFromKeyScopedDb，最后才到
+  // `if (userWantsConnection && proxyEndpoint) await this.connect()` 这一行。
+  // 如果测试在"currentSessionKeyHash 已写"但"connect 检查还没到"之间就
+  // patch userWantsConnection = true / proxyEndpoint = "wss://example"，
+  // in-flight rebind 会拿着测试 patch 后的值调 connect()，把
+  // currentStatus 从 "closed" 翻回 "ready"，导致 :683 的断言失败。
+  // 解决：用 init rebind 的最终稳定态作为同步信号——
+  //   rebind 走完"不同 key"分支时，会按 (userWantsConnection=false &&
+  //   proxyEndpoint="") 不调 connect，currentStatus 保持 "idle"，且
+  //   currentSessionKeyHash === "pkhA"、activeKeyState.kind === "ready"。
+  // 三个条件同时成立才能确保 rebind 已"过了"connect 检查那一行（因为
+  // connect 会把 currentStatus 改成 "connecting"）。所以这里轮询到三态稳定
+  // 才放行测试开始 patch。
+  for (let i = 0; i < 50; i++) {
+    if (
+      (svc as any).currentSessionKeyHash === "pkhA" &&
+      (svc as any).currentStatus === "idle" &&
+      (svc as any).activeKeyState?.kind === "ready"
+    ) {
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 0));
+  }
 });
 
 afterEach(() => {

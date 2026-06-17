@@ -329,7 +329,7 @@ export const pokerPlugin: PluginManifest = {
       title: { key: "poker.home.title", fallback: "Poker" },
       component: PokerHomeWidget,
       order: 30,
-      size: "sm",
+      slot: "aside",
       refreshHint: "manual"
     });
 

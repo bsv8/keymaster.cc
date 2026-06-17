@@ -184,7 +184,7 @@ export const contactsPlugin: PluginManifest = {
       title: { key: "contacts.home.recent", fallback: "Recent contacts" },
       component: RecentContactsWidget,
       order: 30,
-      size: "sm",
+      slot: "aside",
       refreshHint: "realtime"
     });
 

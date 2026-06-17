@@ -565,11 +565,22 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .first-time-import__reuse-origin { margin: 0; font-size: 11px; color: var(--text-dim); }
 .first-time-import__new-password-intro { margin: 0; font-size: 13px; color: var(--text-dim); }
 
-/* ---------- Home grid ---------- */
-.home-grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 12px; }
-.home-grid__cell--sm { grid-column: span 4; }
-.home-grid__cell--md { grid-column: span 6; }
-.home-grid__cell--lg { grid-column: span 12; }
+/* ---------- Home layout (硬切换 006) ---------- */
+/* 双栏布局：左 main 撑满，右 aside 固定窄宽 320px。 */
+.home-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 12px;
+  align-items: start;
+}
+.home-layout__main,
+.home-layout__aside {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.home-layout__cell { min-width: 0; }
 .home-widget { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
 .home-widget__head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 .home-widget__head h3 { margin: 0; font-size: 14px; }
@@ -1034,18 +1045,12 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   .app-shell.is-mobile-nav-open { overflow: hidden; }
 }
 
-/* pad 专属:内容网格 2 列。 */
+/* pad 专属:双栏布局改为单列，避免窄屏下 320px 固定窄栏撑爆。 */
 @media (min-width: 769px) and (max-width: 1024px) {
-  .home-grid { grid-template-columns: repeat(2, 1fr); }
-  .home-grid__cell--sm,
-  .home-grid__cell--md { grid-column: span 1; }
-  .home-grid__cell--lg { grid-column: span 2; }
+  .home-layout { grid-template-columns: 1fr; }
 }
 
-/* mobile 专属:内容网格 1 列。 */
+/* mobile 专属:双栏布局改为单列，DOM 顺序保持 main 在前 aside 在后。 */
 @media (max-width: 768px) {
-  .home-grid { grid-template-columns: 1fr; }
-  .home-grid__cell--sm,
-  .home-grid__cell--md,
-  .home-grid__cell--lg { grid-column: span 1; }
+  .home-layout { grid-template-columns: 1fr; }
 }

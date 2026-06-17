@@ -171,7 +171,7 @@ export const assetsPlugin: PluginManifest = {
       title: { key: "assets.home.overview", fallback: "Assets" },
       component: AssetsHomeWidget,
       order: 5,
-      size: "md",
+      slot: "main",
       refreshHint: "manual"
     };
     home.register(widget);

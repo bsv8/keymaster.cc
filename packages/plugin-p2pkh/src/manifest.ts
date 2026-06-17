@@ -452,7 +452,7 @@ export const p2pkhPlugin: PluginManifest = {
       title: { key: "p2pkh.home.balance", fallback: "P2PKH balance" },
       component: P2pkhBalanceWidget,
       order: 20,
-      size: "md",
+      slot: "main",
       refreshHint: "manual"
     });
 

@@ -47,6 +47,13 @@ export interface SettingsRegistry {
   byPath(path: string): SettingsRoute | undefined;
 }
 
+/**
+ * 首页 widget 注册表（硬切换 006）。
+ *
+ * - 插件只能通过 `slot: "main" | "aside"` 显式声明首页栏目归属；
+ * - registry 不再承载 `size` 维度，也不再提供栏目分组 API；
+ * - 栏目分组属于页面渲染职责（plugin-home / HomePage），不属于注册表职责。
+ */
 export interface HomeRegistry {
   register(widget: HomeWidget): void;
   list(): HomeWidget[];

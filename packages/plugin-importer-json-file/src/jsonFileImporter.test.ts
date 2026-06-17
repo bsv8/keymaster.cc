@@ -23,14 +23,24 @@ function encode(s: string): Uint8Array {
 const SAMPLE_HEX =
   "0000000000000000000000000000000000000000000000000000000000000003";
 
-/** 一个看起来像 bsv8 envelope 的最小 JSON。 */
+/**
+ * 一个看起来像 bsv8 envelope 的最小 JSON。
+ *
+ * 注意 KDF 参数（memory_kib / time_cost）刻意选最小可行值（1 MiB /
+ * t=1）——本测试只验证"密码错时被拒收"与"未提供密码时抛约定错误"两条
+ * 契约，不验证 argon2id 抗暴力破解强度（那是生产路径的事，与单元测试
+ * 无关）。生产实现 bsv8KeyEnvelope.ts 仍按真实强度跑，不受这里影响。
+ * 选小参数的另一个原因：全量 vitest run 中 argon2id(m=65536, t=3) 在
+ * 其它测试并发抢占 CPU 时偶尔会 > 5s，触发 testTimeout；缩到 (m=1024,
+ * t=1) 后单次解密耗时稳定 < 100ms。
+ */
 const ENVELOPE = {
   version: "kek-v1",
   key_id: "default",
   kdf: "argon2id",
   kdf_params: {
-    memory_kib: 65536,
-    time_cost: 3,
+    memory_kib: 1024,
+    time_cost: 1,
     parallelism: 4,
     salt_hex: "00".repeat(16)
   },
