@@ -224,11 +224,13 @@ for (const file of walk(pokerSrc)) {
  * in-memory 解锁态丢失。规范需要落到"可失败"的检查上，不只是文档约束。
  *
  * 规则：
- *   1. `packages/**` 与 `apps/web/src/**` 禁止出现 `<a ... href="/...">` 内部
- *      路径（无论 `<a href="...">` 还是 `<a href={...}>` 形式）。内部文本链接
- *      必须走 runtime AppLink。
- *   2. 禁止 `window.location.href = "/..."` / `window.location.assign("/...")`
- *      / `location.assign("/...")` / `location.replace("/...")` 内部路径。
+ *   1. `packages/**` 与 `apps/web/src/**` 禁止出现任何内部 `<a>` 跳转，包括
+ *      字面量 `<a href="/...">` / `<a href={`/...`}>` 与表达式形式
+ *      `<a href={...}>`。内部文本链接必须走 runtime AppLink；如果未来需要
+ *      动态外链 URL，请用字面量 `<a href="https://...">` 而不是表达式。
+ *   2. 禁止 `window.location.href = X` / `location.assign(X)` /
+ *      `location.replace(X)`，其中 X 不是字面量外链（"https://..." / 'https://...'）。
+ *      字面量内部路径（"/foo"）单独命中规则 1 / 2 的内部字面量分支。
  *   3. 允许外链（`http://` / `https://` / `mailto:` 等）——只对应用内同源 pathname
  *      做强约束。
  *   4. 例外：注释里的描述性引用不应触发；脚本在检查前会先剥离行注释。
@@ -244,6 +246,7 @@ const navIgnoreFiles = new Set([
   join(packagesDir, "runtime", "src", "react", "AppLink.tsx"),
   join(packagesDir, "runtime", "src", "navigate.ts")
 ]);
+const EXTERNAL_LITERAL = /^\s*["'`]https?:\/\//;
 for (const rootDir of navScanRoots) {
   let files;
   try {
@@ -257,24 +260,57 @@ for (const rootDir of navScanRoots) {
     // 剥离行注释，避免文档示例 / 反例描述触发误报。
     const stripped = text.replace(/\/\/[^\n]*/g, "");
 
-    // 1) <a ... href="/..."> / <a ... href={`/...`}>
+    // 1a) <a ... href="/..."> / <a ... href={`/...`}> —— 字面量内部 href
     if (/<a\b[^>]*\bhref\s*=\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
       recordViolation(file, "internal <a href=\"/...\"> is forbidden; use runtime AppLink");
     }
 
-    // 2) window.location.href = "/..." / window.location.assign("/...")
+    // 1b) <a ... href={...}> —— 表达式形式 href 一律视为可疑。
+    // 原因：从语法上无法区分 "detailRoute.path" 内部路径和 "externalUrl"
+    // 外部 URL；为防止 plugin-assets 这次同类问题复发，统一要求走 AppLink
+    // （内部）或字面量 <a href="https://...">（外部）。
+    if (/<a\b[^>]*\bhref\s*=\s*\{/.test(stripped)) {
+      recordViolation(file, "<a href={...}> with a dynamic value is forbidden; use runtime AppLink (internal) or a literal <a href=\"https://...\"> (external)");
+    }
+
+    // 2a) window.location.href = "/..." / "{...}" —— 字面量内部路径
     if (/window\.location\.href\s*=\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
       recordViolation(file, "internal window.location.href assignment is forbidden; use router.push");
     }
-    if (/window\.location\.assign\s*\(\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
-      recordViolation(file, "internal window.location.assign is forbidden; use router.push");
+
+    // 2b) window.location.href = X —— X 不是字面量外链则全部禁止（变量、
+    // 函数返回、模板字符串、内部字面量），全部应改 router.push。
+    // 负向先行 (?![`'"]https?:\/\/)：白名单仅放行字面量外链赋值。
+    {
+      const re = /window\.location\.href\s*=\s*(?![`'"]https?:\/\/)/g;
+      if (re.test(stripped)) {
+        recordViolation(file, "window.location.href = <non-external-literal> is forbidden; use router.push");
+      }
     }
-    if (/\blocation\.assign\s*\(\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
-      recordViolation(file, "internal location.assign is forbidden; use router.push");
+
+    // 2c) window.location.assign / location.assign / location.replace：
+    // 同理，禁止除字面量外链以外的所有调用。
+    {
+      const re = /window\.location\.assign\s*\(\s*(?![`'"]https?:\/\/)/g;
+      if (re.test(stripped)) {
+        recordViolation(file, "window.location.assign(<non-external-literal>) is forbidden; use router.push");
+      }
     }
-    if (/\blocation\.replace\s*\(\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
-      recordViolation(file, "internal location.replace is forbidden; use router.push");
+    {
+      const re = /\blocation\.assign\s*\(\s*(?![`'"]https?:\/\/)/g;
+      if (re.test(stripped)) {
+        recordViolation(file, "location.assign(<non-external-literal>) is forbidden; use router.push");
+      }
     }
+    {
+      const re = /\blocation\.replace\s*\(\s*(?![`'"]https?:\/\/)/g;
+      if (re.test(stripped)) {
+        recordViolation(file, "location.replace(<non-external-literal>) is forbidden; use router.push");
+      }
+    }
+
+    // 抑制未使用变量告警（EXTERNAL_LITERAL 保留以备未来扩展）
+    void EXTERNAL_LITERAL;
   }
 }
 

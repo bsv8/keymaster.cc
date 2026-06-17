@@ -1,5 +1,5 @@
 // packages/runtime/src/react/AppLink.tsx
-// 内部文本链接：渲染真实 <a>，但只对"同源 + 应用内 pathname + 左键无 modifier +
+// 内部文本链接：渲染真实 <a>，但只对"同源 + 应用内 path + 左键无 modifier +
 // 无 target / download"的普通点击做 SPA 跳转；其它场景全部放行浏览器默认行为。
 //
 // 设计缘由：硬切换 007 要求"内部页面跳转必须走 runtime router"——但文本链接
@@ -7,9 +7,16 @@
 // 识别为 link）。简单换成 <button> 会破坏这些能力，而 <a href="/..."> 会触发
 // 整页刷新、丢 in-memory Vault 会话。AppLink 的存在就是同时满足两边。
 //
-// 阻止跳转的判定：href 与 window.location 同源（host + protocol 一致），且目标
-// 是应用内 pathname（开头是 "/" 且不带 "//" / scheme:）。外链、target=_blank
-// 、download、modifier 点击、中键点击全部放行。
+// 阻止跳转的判定（isInternalHref）：
+//   - mailto: / tel: / javascript: / data: 等非 http(s) scheme → 外链
+//   - "https?://..."：parse 后 origin === 当前 origin → 内部
+//   - "//host/path" 协议相对：parse 后 origin === 当前 origin → 内部
+//   - 其它（"/foo"、"?x=1"、"#x"、"foo.html"）：按当前 location 解析，浏览器
+//     必然同源 → 内部
+//
+// `to` 支持完整 path：pathname + 可选 search + 可选 hash。navigateTo /
+// useCurrentPath 在 007 同期升级为"完整 location"语义，所以同一路径下换
+// ?query 也能正常更新 URL 并通知订阅者。
 //
 // 这个组件放在 runtime 而不是 UI 包：导航拦截是运行时能力；UI 包目前明确不
 // 依赖 runtime。
@@ -25,12 +32,11 @@ export interface AppLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
 /** 判断 href 是否为"应用内同源链接"。 */
 function isInternalHref(href: string, currentLocation: Location): boolean {
   if (!href) return false;
-  // 协议相对 / 绝对 / 模板片段 / mailto 等都直接判外链
-  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false;
-  if (href.startsWith("//")) return false;
-  if (!href.startsWith("/")) return false;
-  // 同源判定：相对路径（"/..."）必然同源；http(s) 同源才放行。
-  if (/^https?:\/\//i.test(href)) {
+
+  // 任何带 scheme 的 href 先单独判外链（mailto: / tel: / javascript: / data: /
+  // blob: / ftp: 等）。http(s) 走同源判定。
+  if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+    if (!/^https?:\/\//i.test(href)) return false;
     try {
       const target = new URL(href);
       return target.origin === currentLocation.origin;
@@ -38,6 +44,19 @@ function isInternalHref(href: string, currentLocation: Location): boolean {
       return false;
     }
   }
+
+  // 协议相对 "//host/path"：按当前 location 解析后判同源。
+  if (href.startsWith("//")) {
+    try {
+      const target = new URL(href, currentLocation.href);
+      return target.origin === currentLocation.origin;
+    } catch {
+      return false;
+    }
+  }
+
+  // 其它（"/foo"、"?x=1"、"#x"、相对路径 "foo.html"）：浏览器按当前 location
+  // 解析，必然同源。
   return true;
 }
 
