@@ -1,13 +1,23 @@
 // packages/runtime/src/navigate.test.ts
 // 硬切换 007：navigateTo 必须按完整 path (pathname + search + hash) 比较与推送，
 // 否则同一 pathname 下换 ?query 会静默 no-op。
+// 硬切换 007 收尾：navigateTo 必须把入参规范化（pathname + search + hash），
+// 这样同源绝对 URL `https://当前域名/foo` 和相对路径 `/foo` 走同一条 no-op
+// 判定路径，与 AppLink 的"同源绝对 URL 也走 SPA"语义对齐。
 //
 // useCurrentPath 已在文件里内联说明：nav version 计数器强制重渲染。这一行为
 // 在 node 测试环境里需要 jsdom 才能挂载 React，仓库目前没装；本测试只覆盖
 // navigateTo / subscribePath 行为。useCurrentPath 行为由 review + 手测兜底。
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
-import { currentLocationPath, currentPath, navigateTo, router, subscribePath } from "./navigate.js";
+import {
+  currentLocationPath,
+  currentPath,
+  navigateTo,
+  normalizeLocationPath,
+  router,
+  subscribePath
+} from "./navigate.js";
 
 interface FakeLocation {
   pathname: string;
@@ -123,5 +133,33 @@ describe("navigateTo", () => {
   it("currentPath still returns only pathname for backward compat", () => {
     makeWindow({ pathname: "/p2pkh", search: "?assetId=abc", hash: "#x" });
     expect(currentPath()).toBe("/p2pkh");
+  });
+
+  it("no-ops when target is the same location as a same-origin absolute URL", () => {
+    // /settings/woc 上点击一个 <AppLink to="https://app.example.com/settings/woc">
+    // 必须 no-op，不再多打一条 history。
+    makeWindow({ pathname: "/settings/woc" });
+    const spy = vi.fn();
+    const off = subscribePath(spy);
+    navigateTo("https://app.example.com/settings/woc");
+    expect(spy).not.toHaveBeenCalled();
+    off();
+  });
+
+  it("normalizes a same-origin absolute URL to relative before pushState", () => {
+    makeWindow({ pathname: "/assets" });
+    const { historyCalls } = makeWindow({ pathname: "/assets" });
+    navigateTo("https://app.example.com/p2pkh?assetId=abc");
+    // push 出去的应是相对形式，与 currentLocationPath 保持一致。
+    expect(historyCalls).toEqual(["/p2pkh?assetId=abc"]);
+    expect(currentLocationPath()).toBe("/p2pkh?assetId=abc");
+  });
+
+  it("normalizeLocationPath is exported and idempotent for relative paths", () => {
+    makeWindow({ pathname: "/", origin: "https://app.example.com" });
+    expect(normalizeLocationPath("/foo?x=1")).toBe("/foo?x=1");
+    expect(normalizeLocationPath("https://app.example.com/foo?x=1")).toBe("/foo?x=1");
+    // 再次 normalize 同一字符串应不变
+    expect(normalizeLocationPath("/foo?x=1")).toBe("/foo?x=1");
   });
 });

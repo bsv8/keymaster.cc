@@ -247,6 +247,135 @@ const navIgnoreFiles = new Set([
   join(packagesDir, "runtime", "src", "navigate.ts")
 ]);
 const EXTERNAL_LITERAL = /^\s*["'`]https?:\/\//;
+/**
+ * 把代码里的注释（行注释 + 块注释）替换成空格，保留换行与字符长度。字符串
+ * / 模板字面量原样保留：规则需要看见字符串里的内容（`<a href="/...">` 的
+ * 内部路径、`window.location.href = "https://..."` 的字面量外链），不能
+ * 遮蔽成空格。
+ *
+ * 设计缘由：硬切换 007 收尾里发现，旧的"剥离行注释"实现（行注释正则
+ * 全局替换）会把字符串里的 `https://example.com` 截断成 `https:`，导致
+ * `2b` 的外链白名单负向先行误报——文档说支持字面量外链，实际实现并不可
+ * 靠。这里用最小状态机区分"代码 / 行注释 / 块注释 / 单引号字符串 / 双引号
+ * 字符串 / 模板字面量"：行注释 / 块注释被替换成空格；字符串 / 模板原样
+ * 保留；只在 code 区识别行注释、块注释、单引号、双引号、反引号。
+ *
+ * 模板字面量里 `${...}` 的表达式体走 code 分支（处理字符串 / 注释），关闭
+ * `}` 后回到 template；这样 `${a + "https://x"}` 里的 `https://` 仍然完整。
+ */
+function maskCommentsAndStrings(text) {
+  const n = text.length;
+  let out = "";
+  let i = 0;
+  // 状态：code | lineComment | blockComment | sqString | dqString | template
+  let state = "code";
+  // 模板字面量里 `${...}` 嵌套层数：>0 时说明在表达式体里，回归 code 模式
+  // 以正确处理表达式内的注释 / 字符串。`}` 关闭一层，0 时回到 template。
+  let tplDepth = 0;
+  while (i < n) {
+    const c = text[i];
+    const next = i + 1 < n ? text[i + 1] : "";
+    if (state === "code") {
+      if (c === "/" && next === "/") {
+        state = "lineComment";
+        out += "  ";
+        i += 2;
+      } else if (c === "/" && next === "*") {
+        state = "blockComment";
+        out += "  ";
+        i += 2;
+      } else if (c === "'") {
+        state = "sqString";
+        out += c;
+        i++;
+      } else if (c === '"') {
+        state = "dqString";
+        out += c;
+        i++;
+      } else if (c === "`") {
+        state = "template";
+        tplDepth = 0;
+        out += c;
+        i++;
+      } else if (tplDepth > 0 && c === "{") {
+        // 嵌套 `${ ${...} }`：表达式里又有 `${`，继续走 code 处理。
+        tplDepth++;
+        out += c;
+        i++;
+      } else if (tplDepth > 0 && c === "}") {
+        // 关键修复：原来 `}` 处理器只在 template 分支，导致 `${host}` 的
+        // `}` 在 code 状态下落穿，tplDepth 永远不递减，模板永远关不上，
+        // 后续所有内容被当成模板正文保留——`// 真实违规` 这种行注释就
+        // 不再被遮蔽。这里在 code 状态也补上 `}` 处理。
+        tplDepth--;
+        out += c;
+        if (tplDepth === 0) state = "template";
+        i++;
+      } else {
+        out += c;
+        i++;
+      }
+    } else if (state === "lineComment") {
+      if (c === "\n") {
+        state = "code";
+        out += "\n";
+        i++;
+      } else {
+        out += " ";
+        i++;
+      }
+    } else if (state === "blockComment") {
+      if (c === "*" && next === "/") {
+        state = "code";
+        out += "  ";
+        i += 2;
+      } else {
+        out += c === "\n" ? "\n" : " ";
+        i++;
+      }
+    } else if (state === "sqString" || state === "dqString") {
+      // 字符串原文保留（不能 mask 成空格，否则规则看不到里面的字面量
+      // 内部路径 / 字面量外链）。`\` 后跟任意字符视为转义，整体保留。
+      if (c === "\\" && i + 1 < n) {
+        out += c + next;
+        i += 2;
+      } else if (c === (state === "sqString" ? "'" : '"')) {
+        state = "code";
+        out += c;
+        i++;
+      } else {
+        out += c;
+        i++;
+      }
+    } else if (state === "template") {
+      if (c === "\\" && i + 1 < n) {
+        out += c + next;
+        i += 2;
+      } else if (tplDepth === 0 && c === "`") {
+        state = "code";
+        out += c;
+        i++;
+      } else if (tplDepth === 0 && c === "$" && next === "{") {
+        tplDepth = 1;
+        out += "${";
+        i += 2;
+        // 进入表达式体：跟普通 code 一样处理，遇字符串再切回。
+        state = "code";
+      } else {
+        // 模板字面量正文：原样保留（`https://...` 这种字面量外链必须在
+        // 规则负向先行里能被看到）。`${` 与 `}` 的处理走 code 分支。
+        out += c;
+        i++;
+      }
+    } else {
+      // 不可达
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
 for (const rootDir of navScanRoots) {
   let files;
   try {
@@ -257,8 +386,9 @@ for (const rootDir of navScanRoots) {
   for (const file of files) {
     if (navIgnoreFiles.has(file)) continue;
     const text = readFileSync(file, "utf8");
-    // 剥离行注释，避免文档示例 / 反例描述触发误报。
-    const stripped = text.replace(/\/\/[^\n]*/g, "");
+    // 用 maskCommentsAndStrings 同时遮蔽注释和字符串内容；这样反例描述
+    // 不会触发匹配，而 `"https://..."` 里的 `//` 也不会被截断。
+    const stripped = maskCommentsAndStrings(text);
 
     // 1a) <a ... href="/..."> / <a ... href={`/...`}> —— 字面量内部 href
     if (/<a\b[^>]*\bhref\s*=\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {

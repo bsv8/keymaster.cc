@@ -41,6 +41,26 @@ export function currentLocationPath(): string {
   );
 }
 
+/**
+ * 把传入的 path 规范化为 pathname + search + hash 形式。这样 AppLink 接受
+ * 的同源绝对 URL（`https://当前域名/foo`）和相对路径（`/foo`）会被视为
+ * 同一目标，避免出现"已经是当前页却多打一条 history"的现象。
+ *
+ * 注意：跨源 URL 在这里也接受 normalize，但 navigateTo 是 trusted runtime
+ * 入口，正常调用方不会传外链；跨源会让 pathname 取到外链的 pathname（看
+ * 起来像内部跳转），所以调用方仍需先用 AppLink 的 isInternalHref / 业务
+ * 规则守好边界。
+ */
+export function normalizeLocationPath(input: string): string {
+  if (typeof window === "undefined") return input;
+  try {
+    const url = new URL(input, window.location.origin);
+    return url.pathname + url.search + url.hash;
+  } catch {
+    return input;
+  }
+}
+
 /** 订阅 path 变化；返回 unsubscribe。每次 notify 都会触发，调用方自己
  *  比对 pathname 决定是否重渲染（见 useCurrentPath 的 nav version）。 */
 export function subscribePath(listener: PathListener): () => void {
@@ -76,8 +96,12 @@ function notifyPathChange(): void {
 export function navigateTo(path: string): void {
   if (typeof window === "undefined") return;
   if (typeof window.history === "undefined") return;
-  if (currentLocationPath() === path) return;
-  window.history.pushState({}, "", path);
+  // 先把入参规范化为 pathname + search + hash，再和当前 location 比对。
+  // 这与 AppLink 的"同源绝对 URL 也走 SPA"语义一致：用户在 `/foo` 时
+  // 传 `https://当前域名/foo` 应当 no-op，而不是再 push 一条 history。
+  const target = normalizeLocationPath(path);
+  if (target === currentLocationPath()) return;
+  window.history.pushState({}, "", target);
   notifyPathChange();
 }
 
