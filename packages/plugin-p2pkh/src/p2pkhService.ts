@@ -692,9 +692,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     },
 
     prepareTransfer: (input) => {
-      // 强制要求 active key 存在；输入不再要求 keyId。
-      // 硬切换 005 收尾：active key 模型收窄为单一 active，"single 模式"
-      // 与 "有 active key" 等价；`requireActiveKeyIdentity` 已经会校验。
       if (!getActiveKeyState().activePublicKeyHash) {
         return Promise.reject(new Error("Cannot sign without an active key"));
       }
@@ -703,17 +700,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       if (!settings.includeTestnet && input.assetId === "bsvtest") {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
-      return transfer.prepare({ ...input, keyId: requireActiveKeyIdentity().keyId });
+      return transfer.prepare(input);
     },
-    submitTransfer: (preview, input) => {
+    submitTransfer: (preview) => {
       if (!getActiveKeyState().activePublicKeyHash) {
         return Promise.reject(new Error("Cannot sign without an active key"));
       }
       const settings = getCurrentSettings();
-      if (!settings.includeTestnet && input.assetId === "bsvtest") {
+      if (!settings.includeTestnet && preview.assetId === "bsvtest") {
         return Promise.reject(new Error("Testnet is not enabled in P2PKH settings"));
       }
-      return transfer.submit(preview, { ...input, keyId: requireActiveKeyIdentity().keyId });
+      return transfer.submit(preview);
     },
 
     /**

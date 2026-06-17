@@ -79,6 +79,27 @@ export function buildP2pkhTx(params: {
   return { version: 1, inputs, outputs, lockTime: 0 };
 }
 
+/** 序列化交易为原始字节。 */
+export function serializeTx(tx: UnsignedTx): Uint8Array {
+  const parts: Uint8Array[] = [u32LE(tx.version)];
+  parts.push(encodeVarInt(tx.inputs.length));
+  for (const i of tx.inputs) {
+    parts.push(hexToBytes(swapEndian(i.prevTxid)));
+    parts.push(u32LE(i.prevVout));
+    parts.push(encodeVarInt(i.scriptSig.length));
+    parts.push(i.scriptSig);
+    parts.push(u32LE(i.sequence));
+  }
+  parts.push(encodeVarInt(tx.outputs.length));
+  for (const o of tx.outputs) {
+    parts.push(u64LE(o.value));
+    parts.push(encodeVarInt(o.script.length));
+    parts.push(o.script);
+  }
+  parts.push(u32LE(tx.lockTime));
+  return concatBytes(...parts);
+}
+
 /** 签名并返回 raw tx hex。 */
 export async function signP2pkhTx(
   unsigned: UnsignedTx,
@@ -111,6 +132,22 @@ export async function signP2pkhTx(
   }
 
   return bytesToHex(serializeTx({ ...unsigned, inputs: signedInputs }));
+}
+
+/** 原始交易 hex 的字节长度。 */
+export function rawTxHexByteLength(rawTxHex: string): number {
+  const clean = rawTxHex.replace(/^0x/, "");
+  if (clean.length % 2 !== 0) {
+    throw new Error("Invalid raw transaction hex length");
+  }
+  return clean.length / 2;
+}
+
+/** 计算 rawTxHex 对应的 txid。 */
+export function calcTxidFromRawTxHex(rawTxHex: string): string {
+  const bytes = hexToBytes(rawTxHex);
+  const hash = dsha256(bytes);
+  return bytesToHex(new Uint8Array([...hash].reverse()));
 }
 
 /**
@@ -187,26 +224,6 @@ function encodeDERSignature(r: bigint, s: bigint): Uint8Array {
     rEnc,
     sEnc
   );
-}
-
-function serializeTx(tx: UnsignedTx): Uint8Array {
-  const parts: Uint8Array[] = [u32LE(tx.version)];
-  parts.push(encodeVarInt(tx.inputs.length));
-  for (const i of tx.inputs) {
-    parts.push(hexToBytes(swapEndian(i.prevTxid)));
-    parts.push(u32LE(i.prevVout));
-    parts.push(encodeVarInt(i.scriptSig.length));
-    parts.push(i.scriptSig);
-    parts.push(u32LE(i.sequence));
-  }
-  parts.push(encodeVarInt(tx.outputs.length));
-  for (const o of tx.outputs) {
-    parts.push(u64LE(o.value));
-    parts.push(encodeVarInt(o.script.length));
-    parts.push(o.script);
-  }
-  parts.push(u32LE(tx.lockTime));
-  return concatBytes(...parts);
 }
 
 function addressToP2pkhScript(address: string): Uint8Array {

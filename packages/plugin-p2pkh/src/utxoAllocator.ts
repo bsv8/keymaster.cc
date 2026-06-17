@@ -19,8 +19,6 @@ export type AllocateOk = { ok: true; allocation: UtxoAllocation };
 export type AllocateErr = { ok: false; error: UtxoAllocationError };
 export type AllocateResult = AllocateOk | AllocateErr;
 
-const DEFAULT_FEE_RESERVE = 1000;
-
 /** P2PKH 分配错误。抛错给 UI 显示。 */
 export class P2pkhAllocationError extends Error {
   readonly info: UtxoAllocationError;
@@ -37,7 +35,7 @@ export function allocateUtxos(
   if (request.amountSatoshis <= 0) {
     return { ok: false, error: { required: request.amountSatoshis, available: 0, feeReserve: 0, reason: "policy-denied" } };
   }
-  const feeReserve = request.feeReserveSatoshis ?? DEFAULT_FEE_RESERVE;
+  const feeReserve = request.feeReserveSatoshis ?? 0;
   // 硬切换 001：service 已按 reservation.state === "reserved" 过滤过；
   // 候选集合就是所有可花费的未花费 UTXO。allocator 不再关心 confirmed/unconfirmed。
   const candidates = utxos;

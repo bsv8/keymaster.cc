@@ -1,14 +1,10 @@
 // packages/plugin-p2pkh/src/p2pkhTransferService.ts
-// P2PKH 转移业务服务（硬切换 007 / 008 收尾）：
-//   - 不再接收 keyId；签名所需的 keyId 由 service 通过 getActiveKey 内部获取。
-//   - DB 操作通过传入的 db 句柄完成（p2pkhService 在 ensureDb 后传入）。
-//   - 写 pending / reservation 时把 publicKeyHash 一并写入，便于跨 key 排错。
-// 设计缘由：所有 P2PKH 转移业务逻辑放在这里；Widget 只调用服务。
-// 签名仍走 vault.withPrivateKey；广播走 woc.service（强制 broadcast 优先级）。
-// 硬切换 008 收尾 + 硬切换 003 收尾：getActiveKey 返回 ReadyKeyIdentity
-// （publicKeyHash / publicKeyHex 必填）。p2pkhService.rebindActiveKey 内部
-// 用 requireReadyKey 收窄；本文件不直接调用 requireReadyKey。短公钥不再
-// 作为字段持有，UI 需要时由 `formatShortPublicKey(publicKeyHex)` 现算。
+// P2PKH 转移业务服务：
+//   - prepareTransfer 生成最终已签名交易快照。
+//   - submitTransfer 只广播 preview.rawTxHex，不再重签、不再重算 fee。
+//   - 预览阶段不写 pending / reservation；只有进入应用内广播流程后才写。
+// 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
+// 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
 
 import type { MessageBus, VaultService, WocService } from "@keymaster/contracts";
 import type {
@@ -17,13 +13,20 @@ import type {
   P2pkhTransferInput,
   P2pkhTransferPreview,
   P2pkhTransferResult,
+  P2pkhUtxo,
   P2pkhUtxoReservation,
   ReadyKeyIdentity
 } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
 import { reservationIdFor, type P2pkhDbHandle } from "./p2pkhDb.js";
-import { allocateUtxos, P2pkhAllocationError } from "./utxoAllocator.js";
-import { buildP2pkhTx, deriveP2pkhAddress, signP2pkhTx } from "./p2pkhSigner.js";
+import {
+  buildP2pkhTx,
+  calcTxidFromRawTxHex,
+  deriveP2pkhAddress,
+  rawTxHexByteLength,
+  signP2pkhTx,
+  type UnsignedTx
+} from "./p2pkhSigner.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 
 export interface P2pkhTransferServiceDeps {
@@ -41,13 +44,14 @@ export interface P2pkhTransferServiceDeps {
 
 export interface P2pkhTransferService {
   prepare(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
-  submit(preview: P2pkhTransferPreview, input: P2pkhTransferInput): Promise<P2pkhTransferResult>;
+  submit(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
 }
 
 export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pkhTransferService {
   return {
     async prepare(input) {
-      const network = assetIdToNetwork(input.assetId);
+      const validated = validateTransferInput(input);
+      const network = assetIdToNetwork(validated.assetId);
       const db = await deps.getDb();
       const active = deps.getActiveKey();
       const resourceId = makeResourceId(active.keyId, network);
@@ -55,189 +59,180 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       if (!resource) {
         throw new Error(`P2PKH resource not found for active key (${network})`);
       }
-      validateAddressForNetwork(input.recipientAddress, network);
+      validateAddressForNetwork(validated.recipientAddress, network);
+
       const reservations = await db.listReservationsByResource(resource.resourceId);
-      const reservationOutpoints = new Set(
+      const reserved = new Set(
         reservations.filter((r) => r.state === "reserved").map((r) => `${r.txid}:${r.vout}`)
       );
       const allUtxos = await db.listUtxos();
       const candidates = allUtxos.filter(
-        (u) => u.resourceId === resource.resourceId && !reservationOutpoints.has(`${u.txid}:${u.vout}`)
+        (u) => u.resourceId === resource.resourceId && !reserved.has(`${u.txid}:${u.vout}`)
       );
-      const result = allocateUtxos(candidates, {
-        amountSatoshis: input.amountSatoshis,
-        feeReserveSatoshis: input.feeRateSatoshisPerKb != null ? Math.max(500, Math.ceil((input.feeRateSatoshisPerKb / 1000) * 250)) : 500,
-        assetId: input.assetId,
-        keyId: active.keyId
-      });
-      if (!result.ok) {
-        throw new P2pkhAllocationError(result.error);
+      if (candidates.length === 0) {
+        throw buildAllocationError({
+          available: 0,
+          amountSatoshis: validated.amountSatoshis,
+          feeSatoshis: 0,
+          required: validated.amountSatoshis,
+          reason: "no-utxos"
+        });
       }
-      const { address: changeAddress } = await deps.vault.withPrivateKey(active.keyId, async (m) => deriveP2pkhAddress(m.hex, network));
-      const outputs: Array<{ address: string; value: number }> = [
-        { address: input.recipientAddress, value: result.allocation.requestedSatoshis }
-      ];
-      if (result.allocation.changeSatoshis > 0) {
-        outputs.push({ address: changeAddress, value: result.allocation.changeSatoshis });
+
+      const sorted = [...candidates].sort((a, b) => a.value - b.value);
+      const { address: changeAddress, publicKeyHex } = await deps.vault.withPrivateKey(
+        active.keyId,
+        async (material) => deriveP2pkhAddress(material.hex, network)
+      );
+      const signRawTx = async (unsigned: UnsignedTx, selected: P2pkhUtxo[]): Promise<string> =>
+        deps.vault.withPrivateKey(active.keyId, async (material) => signP2pkhTx(unsigned, selected, material, publicKeyHex));
+
+      let bestError: AllocationFailureInfo | undefined;
+      for (let count = 1; count <= sorted.length; count++) {
+        const selected = sorted.slice(0, count);
+        const solution = await solveForSelectedInputs({
+          assetId: validated.assetId,
+          selected,
+          amountSatoshis: validated.amountSatoshis,
+          feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
+          recipientAddress: validated.recipientAddress,
+          changeAddress,
+          signRawTx
+        });
+        if (solution.ok) {
+          return solution.preview;
+        }
+        bestError = solution.error;
       }
-      return {
-        allocation: result.allocation,
-        changeAddress,
-        outputs,
-        estimatedFeeSatoshis: result.allocation.feeReserveSatoshis
-      };
+
+      throw buildAllocationError(
+        bestError ?? {
+          available: candidates.reduce((sum, u) => sum + u.value, 0),
+          amountSatoshis: validated.amountSatoshis,
+          feeSatoshis: 0,
+          required: validated.amountSatoshis,
+          reason: "insufficient"
+        }
+      );
     },
 
-    async submit(preview, input) {
-      const network = assetIdToNetwork(input.assetId);
+    async submit(preview) {
       const db = await deps.getDb();
       const active = deps.getActiveKey();
+      const network = preview.network;
       const resourceId = makeResourceId(active.keyId, network);
       const resource = await db.getResource(resourceId);
       if (!resource) {
         throw new Error(`P2PKH resource not found for active key (${network})`);
       }
-      const pendingId = crypto.randomUUID();
-      const now = new Date().toISOString();
-
-      // 1. 签名（vault.withPrivateKey 内执行）。
-      let rawTxHex: string;
-      try {
-        const { publicKeyHex, address: changeAddress } = await deps.vault.withPrivateKey(active.keyId, async (m) => deriveP2pkhAddress(m.hex, network));
-        const unsigned = buildP2pkhTx({
-          allocation: preview.allocation,
-          recipientAddress: input.recipientAddress,
-          changeAddress
-        });
-        rawTxHex = await deps.vault.withPrivateKey(active.keyId, async (m) => signP2pkhTx(unsigned, preview.allocation.selected, m, publicKeyHex));
-      } catch (err) {
-        await writeFailedPending(db, {
-          id: pendingId,
-          resourceId: resource.resourceId,
-          keyId: active.keyId,
-          publicKeyHash: active.publicKeyHash,
-          network,
-          assetId: input.assetId,
-          recipientAddress: input.recipientAddress,
-          amountSatoshis: input.amountSatoshis,
-          inputOutpoints: preview.allocation.selected.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
-          createdAt: now,
-          error: err instanceof Error ? err.message : String(err)
-        });
-        throw err;
+      if (resource.publicKeyHash !== active.publicKeyHash) {
+        throw new Error("Active key changed before broadcast");
+      }
+      if (assetIdToNetwork(preview.assetId) !== network) {
+        throw new Error("Preview asset does not match active network");
+      }
+      if (preview.amountSatoshis <= 0) {
+        throw new Error("Preview amount is invalid");
       }
 
-      // 2. 写 pending transfer。
-      const pending: P2pkhPendingTransfer = {
+      const pendingId = crypto.randomUUID();
+      const now = new Date().toISOString();
+      const pendingBase: P2pkhPendingTransfer = {
         id: pendingId,
         resourceId: resource.resourceId,
         keyId: active.keyId,
         publicKeyHash: active.publicKeyHash,
         network,
-        assetId: input.assetId,
-        recipientAddress: input.recipientAddress,
-        amountSatoshis: input.amountSatoshis,
+        assetId: preview.assetId,
+        txid: preview.txid,
+        recipientAddress: preview.recipientAddress,
+        amountSatoshis: preview.amountSatoshis,
         status: "pending",
         inputOutpoints: preview.allocation.selected.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
         createdAt: now,
         updatedAt: now
       };
-      await db.putPendingTransfer(pending);
+      await db.putPendingTransfer(pendingBase);
 
-      // 3. 广播（broadcast 优先级由 service 内部强制）。
-      let broadcastRes;
+      let broadcastRes: { txid: string };
       try {
-        broadcastRes = await deps.woc.broadcast(network, rawTxHex, { timeoutMs: 30_000 });
+        broadcastRes = await deps.woc.broadcast(network, preview.rawTxHex, { timeoutMs: 30_000 });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const isDefinitiveRejection = isDefinitivelyRejectedError(msg);
         if (isDefinitiveRejection) {
           await db.putPendingTransfer({
-            ...pending,
+            ...pendingBase,
             status: "failed",
             error: msg,
             updatedAt: new Date().toISOString()
           });
           return {
             status: "rejected",
-            rawTxHex,
+            txid: preview.txid,
+            rawTxHex: preview.rawTxHex,
             error: msg,
             pendingTransferId: pendingId,
             reservationIds: []
           };
         }
-        await db.putPendingTransfer({
-          ...pending,
-          status: "unknown",
-          error: msg,
-          updatedAt: new Date().toISOString()
-        });
-        const unknownReservationIds: string[] = [];
-        for (const u of preview.allocation.selected) {
-          const id = reservationIdFor(resource.resourceId, u.txid, u.vout);
-          const reservation: P2pkhUtxoReservation = {
-            id,
-            resourceId: resource.resourceId,
-            keyId: active.keyId,
-            publicKeyHash: active.publicKeyHash,
-            network,
-            txid: u.txid,
-            vout: u.vout,
-            spendingTxid: pendingId,
-            state: "reserved",
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-          await db.putReservation(reservation);
-          unknownReservationIds.push(id);
-        }
-        return {
-          status: "unknown",
-          rawTxHex,
-          error: msg,
-          pendingTransferId: pendingId,
-          reservationIds: unknownReservationIds
-        };
-      }
 
-      const txid = broadcastRes.txid;
-
-      // 4. 写 reservation。
-      const reservationIds: string[] = [];
-      for (const u of preview.allocation.selected) {
-        const id = reservationIdFor(resource.resourceId, u.txid, u.vout);
-        const reservation: P2pkhUtxoReservation = {
-          id,
+        const reservationIds = await reserveInputs(db, {
           resourceId: resource.resourceId,
           keyId: active.keyId,
           publicKeyHash: active.publicKeyHash,
           network,
-          txid: u.txid,
-          vout: u.vout,
-          spendingTxid: txid,
-          state: "reserved",
-          createdAt: new Date().toISOString(),
+          spendingTxid: preview.txid,
+          inputs: preview.allocation.selected
+        });
+        await db.putPendingTransfer({
+          ...pendingBase,
+          status: "unknown",
+          error: msg,
           updatedAt: new Date().toISOString()
+        });
+        return {
+          status: "unknown",
+          txid: preview.txid,
+          rawTxHex: preview.rawTxHex,
+          error: msg,
+          pendingTransferId: pendingId,
+          reservationIds
         };
-        await db.putReservation(reservation);
-        reservationIds.push(id);
       }
 
-      // 5. 更新 pending 状态为 broadcast。
+      if (broadcastRes.txid !== preview.txid) {
+        const msg = "Broadcast txid does not match preview txid";
+        await db.putPendingTransfer({
+          ...pendingBase,
+          status: "failed",
+          error: msg,
+          updatedAt: new Date().toISOString()
+        });
+        throw new Error(msg);
+      }
+
+      const reservationIds = await reserveInputs(db, {
+        resourceId: resource.resourceId,
+        keyId: active.keyId,
+        publicKeyHash: active.publicKeyHash,
+        network,
+        spendingTxid: preview.txid,
+        inputs: preview.allocation.selected
+      });
       await db.putPendingTransfer({
-        ...pending,
+        ...pendingBase,
         status: "broadcast",
-        txid,
+        txid: preview.txid,
         updatedAt: new Date().toISOString()
       });
 
-      // 6. 触发一次高优先级 recent-sync。
-      deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid });
+      deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
 
       return {
         status: "broadcast",
-        txid,
-        rawTxHex,
+        txid: preview.txid,
+        rawTxHex: preview.rawTxHex,
         pendingTransferId: pendingId,
         reservationIds
       };
@@ -245,44 +240,218 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
   };
 }
 
-async function writeFailedPending(
+type AllocationFailureInfo = {
+  available: number;
+  amountSatoshis: number;
+  feeSatoshis: number;
+  required: number;
+  reason: "no-utxos" | "insufficient";
+};
+
+type SolveResult = { ok: true; preview: P2pkhTransferPreview } | { ok: false; error: AllocationFailureInfo };
+
+async function solveForSelectedInputs(params: {
+  assetId: P2pkhAssetId;
+  selected: P2pkhUtxo[];
+  amountSatoshis: number;
+  feeRateSatoshisPerKb: number;
+  recipientAddress: string;
+  changeAddress: string;
+  signRawTx: (unsigned: UnsignedTx, selected: P2pkhUtxo[]) => Promise<string>;
+}): Promise<SolveResult> {
+  const totalInputSatoshis = params.selected.reduce((sum, u) => sum + u.value, 0);
+  let feeSatoshis = 1;
+
+  for (let round = 0; round < 12; round++) {
+    const changeSatoshis = totalInputSatoshis - params.amountSatoshis - feeSatoshis;
+    if (changeSatoshis < 0) {
+      return {
+        ok: false,
+        error: {
+          available: totalInputSatoshis,
+          amountSatoshis: params.amountSatoshis,
+          feeSatoshis,
+          required: params.amountSatoshis + feeSatoshis,
+          reason: "insufficient"
+        }
+      };
+    }
+    const allocation = {
+      requestedSatoshis: params.amountSatoshis,
+      feeReserveSatoshis: feeSatoshis,
+      selected: params.selected,
+      totalInputSatoshis,
+      changeSatoshis
+    };
+    const unsigned = buildP2pkhTx({
+      allocation,
+      recipientAddress: params.recipientAddress,
+      changeAddress: params.changeAddress
+    });
+    const rawTxHex = await params.signRawTx(unsigned, params.selected);
+    const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
+    const nextFeeSatoshis = Math.max(1, Math.ceil((serializedSizeBytes * params.feeRateSatoshisPerKb) / 1000));
+    if (nextFeeSatoshis === feeSatoshis) {
+      const outputs = [
+        { address: params.recipientAddress, value: params.amountSatoshis },
+        ...(changeSatoshis > 0 ? [{ address: params.changeAddress, value: changeSatoshis }] : [])
+      ];
+      return {
+        ok: true,
+        preview: {
+          assetId: params.assetId,
+          network: assetIdToNetworkMap[params.assetId],
+          recipientAddress: params.recipientAddress,
+          amountSatoshis: params.amountSatoshis,
+          feeRateSatoshisPerKb: params.feeRateSatoshisPerKb,
+          allocation,
+          changeAddress: params.changeAddress,
+          outputs,
+          estimatedFeeSatoshis: feeSatoshis,
+          serializedSizeBytes,
+          txid: calcTxidFromRawTxHex(rawTxHex),
+          rawTxHex
+        }
+      };
+    }
+    feeSatoshis = nextFeeSatoshis;
+  }
+
+  const stableChangeSatoshis = totalInputSatoshis - params.amountSatoshis - feeSatoshis;
+  if (stableChangeSatoshis < 0) {
+    return {
+      ok: false,
+      error: {
+        available: totalInputSatoshis,
+        amountSatoshis: params.amountSatoshis,
+        feeSatoshis,
+        required: params.amountSatoshis + feeSatoshis,
+        reason: "insufficient"
+      }
+    };
+  }
+  const stableAllocation = {
+    requestedSatoshis: params.amountSatoshis,
+    feeReserveSatoshis: feeSatoshis,
+    selected: params.selected,
+    totalInputSatoshis,
+    changeSatoshis: stableChangeSatoshis
+  };
+  const stableUnsigned = buildP2pkhTx({
+    allocation: stableAllocation,
+    recipientAddress: params.recipientAddress,
+    changeAddress: params.changeAddress
+  });
+  const stableRawTxHex = await params.signRawTx(stableUnsigned, params.selected);
+  const serializedSizeBytes = rawTxHexByteLength(stableRawTxHex);
+  const estimatedFeeSatoshis = Math.max(1, Math.ceil((serializedSizeBytes * params.feeRateSatoshisPerKb) / 1000));
+  if (estimatedFeeSatoshis !== feeSatoshis) {
+    return {
+      ok: false,
+      error: {
+        available: totalInputSatoshis,
+        amountSatoshis: params.amountSatoshis,
+        feeSatoshis: estimatedFeeSatoshis,
+        required: params.amountSatoshis + estimatedFeeSatoshis,
+        reason: "insufficient"
+      }
+    };
+  }
+  const outputs = [
+    { address: params.recipientAddress, value: params.amountSatoshis },
+    ...(stableChangeSatoshis > 0 ? [{ address: params.changeAddress, value: stableChangeSatoshis }] : [])
+  ];
+  return {
+    ok: true,
+    preview: {
+      assetId: params.assetId,
+      network: assetIdToNetworkMap[params.assetId],
+      recipientAddress: params.recipientAddress,
+      amountSatoshis: params.amountSatoshis,
+      feeRateSatoshisPerKb: params.feeRateSatoshisPerKb,
+      allocation: stableAllocation,
+      changeAddress: params.changeAddress,
+      outputs,
+      estimatedFeeSatoshis,
+      serializedSizeBytes,
+      txid: calcTxidFromRawTxHex(stableRawTxHex),
+      rawTxHex: stableRawTxHex
+    }
+  };
+}
+
+async function reserveInputs(
   db: P2pkhDbHandle,
-  input: {
-    id: string;
+  params: {
     resourceId: string;
     keyId: string;
     publicKeyHash: string;
     network: "main" | "test";
-    assetId: P2pkhAssetId;
-    recipientAddress: string;
-    amountSatoshis: number;
-    inputOutpoints: Array<{ txid: string; vout: number; value: number }>;
-    createdAt: string;
-    error: string;
+    spendingTxid: string;
+    inputs: P2pkhUtxo[];
   }
-): Promise<void> {
+): Promise<string[]> {
+  const reservationIds: string[] = [];
   const now = new Date().toISOString();
-  await db.putPendingTransfer({
-    id: input.id,
-    resourceId: input.resourceId,
-    keyId: input.keyId,
-    publicKeyHash: input.publicKeyHash,
-    network: input.network,
-    assetId: input.assetId,
-    recipientAddress: input.recipientAddress,
-    amountSatoshis: input.amountSatoshis,
-    status: "failed",
-    inputOutpoints: input.inputOutpoints,
-    createdAt: input.createdAt,
-    updatedAt: now,
-    error: input.error
-  });
+  for (const u of params.inputs) {
+    const id = reservationIdFor(params.resourceId, u.txid, u.vout);
+    const reservation: P2pkhUtxoReservation = {
+      id,
+      resourceId: params.resourceId,
+      keyId: params.keyId,
+      publicKeyHash: params.publicKeyHash,
+      network: params.network,
+      txid: u.txid,
+      vout: u.vout,
+      spendingTxid: params.spendingTxid,
+      state: "reserved",
+      createdAt: now,
+      updatedAt: now
+    };
+    await db.putReservation(reservation);
+    reservationIds.push(id);
+  }
+  return reservationIds;
 }
 
-/**
- * 判断广播错误是否是 WOC 明确拒绝（非网络/超时/5xx）。
- * 只有 WOC 端确认不会接受该交易时返回 true；其他错误一律视为未知结果。
- */
+function validateTransferInput(input: P2pkhTransferInput): {
+  assetId: P2pkhAssetId;
+  recipientAddress: string;
+  amountSatoshis: number;
+  feeRateSatoshisPerKb: number;
+} {
+  if (!input.assetId || !(input.assetId in assetIdToNetworkMap)) {
+    throw new Error("P2PKH provider requires an assetId");
+  }
+  const amountSatoshis = normalizePositiveInteger(input.amountSatoshis, "Amount");
+  const feeRateSatoshisPerKb = normalizePositiveInteger(input.feeRateSatoshisPerKb ?? 0, "Fee rate");
+  if (feeRateSatoshisPerKb < 1) {
+    throw new Error("Fee rate must be at least 1 sats/kB");
+  }
+  if (!input.recipientAddress) {
+    throw new Error("Recipient address is required");
+  }
+  return {
+    assetId: input.assetId,
+    recipientAddress: input.recipientAddress,
+    amountSatoshis,
+    feeRateSatoshisPerKb
+  };
+}
+
+function normalizePositiveInteger(value: number, label: string): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
+}
+
+function buildAllocationError(input: AllocationFailureInfo): Error {
+  return new Error(
+    `P2PKH transfer failed: ${input.reason}. Available inputs ${input.available} sats, amount ${input.amountSatoshis} sats, final fee ${input.feeSatoshis} sats, total required ${input.required} sats.`
+  );
+}
+
 function isDefinitivelyRejectedError(msg: string): boolean {
   if (!msg) return false;
   const lower = msg.toLowerCase();
@@ -317,7 +486,13 @@ function validateAddressForNetwork(address: string, network: "main" | "test"): v
   }
 }
 
+const assetIdToNetworkMap: Record<P2pkhAssetId, "main" | "test"> = {
+  bsv: "main",
+  bsvtest: "test"
+};
+
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
 function base58Decode(input: string): Uint8Array {
   if (input.length === 0) return new Uint8Array(0);
   const bytes = [0];

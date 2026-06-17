@@ -89,18 +89,21 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   async function toOffer(assetId: P2pkhAssetId): Promise<TransferOffer> {
     const def = P2PKH_ASSETS[assetId];
     const balance = await deps.service.getAssetBalance(assetId);
-    return {
-      id: `p2pkh:${assetId}`,
-      providerId: "p2pkh",
-      assetProviderId: "p2pkh",
-      assetId,
-      // label 不再追加"（全部 key）"后缀。
-      label: { key: `p2pkh.asset.${assetId}`, fallback: def.label },
-      description: { key: "p2pkh.transfer.description", fallback: `BSV P2PKH (${def.network})` },
-      balance: {
-        amount: balance.total,
-        unit: def.unit,
-        display: `${balance.total} ${def.unit}`
+      return {
+        id: `p2pkh:${assetId}`,
+        providerId: "p2pkh",
+        assetProviderId: "p2pkh",
+        assetId,
+        // label 不再追加"（全部 key）"后缀。
+        label: { key: `p2pkh.asset.${assetId}`, fallback: def.label },
+        description: {
+          key: `p2pkh.transfer.description.${assetId}`,
+          fallback: `BSV P2PKH (${def.network})`
+        },
+        balance: {
+          amount: balance.total,
+          unit: def.unit,
+          display: `${balance.total} ${def.unit}`
       },
       status: mapStatus(deps.service.syncStatus()),
       order: assetId === "bsv" ? 10 : 11

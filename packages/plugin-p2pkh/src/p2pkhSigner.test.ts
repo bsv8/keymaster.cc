@@ -4,10 +4,18 @@
 //   - 构造 + 签名 + 序列化产生非空 hex。
 //   - dsha256 不等于 sha256（preimage 双哈希）。
 //   - serializeTx 把带 scriptSig 的 input 正确编入。
+//   - rawTxHex 字节长度与 txid 可以本地计算。
 
 import { describe, expect, it } from "vitest";
 import { sha256 } from "@noble/hashes/sha256";
-import { buildP2pkhTx, deriveP2pkhAddress, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
+import {
+  buildP2pkhTx,
+  calcTxidFromRawTxHex,
+  deriveP2pkhAddress,
+  rawTxHexByteLength,
+  signP2pkhTx,
+  type UnsignedTx
+} from "./p2pkhSigner.js";
 import type { P2pkhUtxo, UtxoAllocation } from "./p2pkhContracts.js";
 
 const TEST_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -95,6 +103,95 @@ describe("signP2pkhTx", () => {
     const hex = await signP2pkhTx(tx, allocation.selected, { hex: TEST_PRIV_HEX }, TEST_PUB_HEX);
     expect(hex).toMatch(/^[0-9a-f]+$/);
     expect(hex.length).toBeGreaterThan(100);
+  });
+
+  it("produces different serialized sizes for one-output and two-output tx", async () => {
+    const oneOutputAllocation: UtxoAllocation = {
+      requestedSatoshis: 1400,
+      feeReserveSatoshis: 100,
+      selected: [
+        {
+          id: "r1:t1:0",
+          resourceId: "r1",
+          keyId: "k1",
+          network: "main",
+          address: TEST_ADDR,
+          txid: "0000000000000000000000000000000000000000000000000000000000000001",
+          vout: 0,
+          value: 1500,
+          height: 10,
+          status: "confirmed",
+          isSpentInMempoolTx: false,
+          syncedAt: ""
+        } as P2pkhUtxo
+      ],
+      totalInputSatoshis: 1500,
+      changeSatoshis: 0
+    };
+    const twoOutputAllocation: UtxoAllocation = {
+      ...oneOutputAllocation,
+      requestedSatoshis: 1000,
+      changeSatoshis: 400
+    };
+    const oneOutputHex = await signP2pkhTx(
+      buildP2pkhTx({
+        allocation: oneOutputAllocation,
+        recipientAddress: TEST_ADDR,
+        changeAddress: TEST_ADDR
+      }),
+      oneOutputAllocation.selected,
+      { hex: TEST_PRIV_HEX },
+      TEST_PUB_HEX
+    );
+    const twoOutputHex = await signP2pkhTx(
+      buildP2pkhTx({
+        allocation: twoOutputAllocation,
+        recipientAddress: TEST_ADDR,
+        changeAddress: TEST_ADDR
+      }),
+      twoOutputAllocation.selected,
+      { hex: TEST_PRIV_HEX },
+      TEST_PUB_HEX
+    );
+    expect(rawTxHexByteLength(twoOutputHex)).toBeGreaterThan(rawTxHexByteLength(oneOutputHex));
+  });
+
+  it("derives txid from raw tx hex locally", async () => {
+    const allocation: UtxoAllocation = {
+      requestedSatoshis: 1000,
+      feeReserveSatoshis: 200,
+      selected: [
+        {
+          id: "r1:t1:0",
+          resourceId: "r1",
+          keyId: "k1",
+          network: "main",
+          address: TEST_ADDR,
+          txid: "0000000000000000000000000000000000000000000000000000000000000001",
+          vout: 0,
+          value: 1500,
+          height: 10,
+          status: "confirmed",
+          isSpentInMempoolTx: false,
+          syncedAt: ""
+        } as P2pkhUtxo
+      ],
+      totalInputSatoshis: 1500,
+      changeSatoshis: 300
+    };
+    const hex = await signP2pkhTx(
+      buildP2pkhTx({
+        allocation,
+        recipientAddress: TEST_ADDR,
+        changeAddress: TEST_ADDR
+      }),
+      allocation.selected,
+      { hex: TEST_PRIV_HEX },
+      TEST_PUB_HEX
+    );
+    const txid = calcTxidFromRawTxHex(hex);
+    expect(txid).toMatch(/^[0-9a-f]{64}$/);
+    expect(txid).toBe(calcTxidFromRawTxHex(hex));
   });
 
   it("uses double sha256 in preimage (not single)", async () => {

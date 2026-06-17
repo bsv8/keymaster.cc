@@ -286,10 +286,18 @@ export interface P2pkhTransferInput {
 
 /** 转移预览结果。 */
 export interface P2pkhTransferPreview {
+  assetId: P2pkhAssetId;
+  network: BsvNetwork;
+  recipientAddress: string;
+  amountSatoshis: number;
+  feeRateSatoshisPerKb: number;
   allocation: UtxoAllocation;
   changeAddress: string;
   outputs: Array<{ address: string; value: number }>;
   estimatedFeeSatoshis: number;
+  serializedSizeBytes: number;
+  txid: string;
+  rawTxHex: string;
 }
 
 /** 转移结果。 */
@@ -298,7 +306,7 @@ export type P2pkhTransferResultStatus = "broadcast" | "confirmed" | "rejected" |
 export interface P2pkhTransferResult {
   status: P2pkhTransferResultStatus;
   txid?: string;
-  rawTxHex?: string;
+  rawTxHex: string;
   error?: string;
   pendingTransferId: string;
   reservationIds: string[];
@@ -364,8 +372,8 @@ export interface P2pkhService {
 
   /** 转移：prepare / preview。 */
   prepareTransfer(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
-  /** 转移：sign 并 broadcast。 */
-  submitTransfer(preview: P2pkhTransferPreview, input: P2pkhTransferInput): Promise<P2pkhTransferResult>;
+  /** 转移：广播 preview 中已经生成好的最终交易。 */
+  submitTransfer(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
 
   onKeyImported(keyId: string): Promise<void>;
   onKeyRemoved(keyId: string): Promise<void>;
