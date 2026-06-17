@@ -13,7 +13,7 @@
 
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";
-import { getPublicKey, sign } from "@noble/secp256k1";
+import { getPublicKey, signAsync } from "@noble/secp256k1";
 import type { PrivateKeyMaterial } from "@keymaster/contracts";
 import type { P2pkhUtxo, UtxoAllocation } from "./p2pkhContracts.js";
 
@@ -117,7 +117,9 @@ export async function signP2pkhTx(
     const utxo = utxos[i]!;
     const scriptCode = addressToP2pkhScript(utxo.address);
     const sighash = calcBip143Sighash(unsigned, i, scriptCode, utxo.value);
-    const sig = sign(sighash, priv, { lowS: true });
+    // noble-secp256k1 v2 默认只启用 async HMAC；这里走 signAsync，
+    // 直接复用浏览器 / Node WebCrypto，避免额外注入 hmacSha256Sync。
+    const sig = await signAsync(sighash, priv, { lowS: true });
     const der = encodeDERSignature(sig.r, sig.s);
     const sigWithType = concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
     signedInputs[i] = {
