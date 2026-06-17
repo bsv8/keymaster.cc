@@ -30,6 +30,7 @@ export * from "./react/useRuntimeStatus.js";
 export * from "./react/useI18n.js";
 export * from "./react/useCurrentPath.js";
 export * from "./react/usePluginRuntime.js";
+export * from "./react/AppLink.js";
 export * from "./i18n/i18nStore.js";
 export * from "./i18n/languageMap.js";
 export * from "./i18n/createI18nService.js";

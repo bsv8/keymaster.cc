@@ -5,7 +5,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { router, useCapability, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
 import type { AssetActivity, AssetDetail, AssetProvider, AssetRegistry } from "@keymaster/contracts";
 
 export interface AssetDetailPageProps {
@@ -95,7 +95,7 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
         description={`${host.i18n.text(provider.name)} · ${detail.summary.kind} · ${detail.summary.status}`}
         actions={
           detail.summary.detailRoute?.path ? (
-            <Button onClick={() => (window.location.href = detail.summary.detailRoute!.path!)}>
+            <Button onClick={() => router.push(detail.summary.detailRoute!.path!)}>
               {t("assets.detail.openSpecific", { defaultValue: "打开专属详情" })}
             </Button>
           ) : null

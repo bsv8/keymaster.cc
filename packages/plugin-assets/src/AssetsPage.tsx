@@ -11,7 +11,7 @@
 
 import { useEffect, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { AppLink, useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type { AssetRegistry, AssetSummary, KeyIdentity, KeyspaceService } from "@keymaster/contracts";
 import { loadAllAssets, type ProviderLoadResult } from "./assetsFlow.js";
@@ -116,7 +116,7 @@ export function AssetsPage() {
     {
       key: "detail",
       header: t("assets.table.col.detail", { defaultValue: "详情" }),
-      render: (r) => (r.detailRoute?.path ? <a href={r.detailRoute.path}>{t("assets.table.open", { defaultValue: "进入" })}</a> : "-")
+      render: (r) => (r.detailRoute?.path ? <AppLink to={r.detailRoute.path}>{t("assets.table.open", { defaultValue: "进入" })}</AppLink> : "-")
     }
   ];
 

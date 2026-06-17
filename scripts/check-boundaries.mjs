@@ -216,6 +216,68 @@ for (const file of walk(pokerSrc)) {
   }
 }
 
+/**
+ * 硬切换 007：内部导航禁止走浏览器原生硬跳转。
+ *
+ * 设计缘由：之前 plugin-p2pkh / plugin-assets 各自写 `<a href="/settings/woc">`
+ * 和 `window.location.href = ...`，结果整页刷新、React host 重建、Vault
+ * in-memory 解锁态丢失。规范需要落到"可失败"的检查上，不只是文档约束。
+ *
+ * 规则：
+ *   1. `packages/**` 与 `apps/web/src/**` 禁止出现 `<a ... href="/...">` 内部
+ *      路径（无论 `<a href="...">` 还是 `<a href={...}>` 形式）。内部文本链接
+ *      必须走 runtime AppLink。
+ *   2. 禁止 `window.location.href = "/..."` / `window.location.assign("/...")`
+ *      / `location.assign("/...")` / `location.replace("/...")` 内部路径。
+ *   3. 允许外链（`http://` / `https://` / `mailto:` 等）——只对应用内同源 pathname
+ *      做强约束。
+ *   4. 例外：注释里的描述性引用不应触发；脚本在检查前会先剥离行注释。
+ *   5. 例外：apps/web/index.html 里的 favicon / 静态资源链接不在本检查范围内
+ *      （它本来就在白名单外，文件类型也不属于 ts/tsx 扫描路径）。
+ */
+const navScanRoots = [
+  packagesDir,
+  join(root, "apps", "web", "src")
+];
+const navIgnoreFiles = new Set([
+  // AppLink / navigate 自身是规则的实现方，注释里会引用 `href="/..."` 作为反例。
+  join(packagesDir, "runtime", "src", "react", "AppLink.tsx"),
+  join(packagesDir, "runtime", "src", "navigate.ts")
+]);
+for (const rootDir of navScanRoots) {
+  let files;
+  try {
+    files = walk(rootDir);
+  } catch {
+    continue;
+  }
+  for (const file of files) {
+    if (navIgnoreFiles.has(file)) continue;
+    const text = readFileSync(file, "utf8");
+    // 剥离行注释，避免文档示例 / 反例描述触发误报。
+    const stripped = text.replace(/\/\/[^\n]*/g, "");
+
+    // 1) <a ... href="/..."> / <a ... href={`/...`}>
+    if (/<a\b[^>]*\bhref\s*=\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
+      recordViolation(file, "internal <a href=\"/...\"> is forbidden; use runtime AppLink");
+    }
+
+    // 2) window.location.href = "/..." / window.location.assign("/...")
+    if (/window\.location\.href\s*=\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
+      recordViolation(file, "internal window.location.href assignment is forbidden; use router.push");
+    }
+    if (/window\.location\.assign\s*\(\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
+      recordViolation(file, "internal window.location.assign is forbidden; use router.push");
+    }
+    if (/\blocation\.assign\s*\(\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
+      recordViolation(file, "internal location.assign is forbidden; use router.push");
+    }
+    if (/\blocation\.replace\s*\(\s*["'`](\/[^"'`\s]*)["'`]/.test(stripped)) {
+      recordViolation(file, "internal location.replace is forbidden; use router.push");
+    }
+  }
+}
+
 if (violations.length > 0) {
   console.error("Boundary violations:");
   for (const v of violations) console.error(`- ${v}`);

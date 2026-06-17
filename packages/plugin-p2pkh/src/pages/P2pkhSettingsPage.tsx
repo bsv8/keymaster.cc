@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from "react";
 import { Button, PageHeader, Select } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { AppLink, useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
 import type { PluginManifest } from "@keymaster/contracts";
 
 const STORAGE_KEY = "p2pkh.settings";
@@ -66,7 +66,7 @@ export function P2pkhSettingsPage() {
       />
       <p className="p2pkh-settings__hint">
         {t("p2pkh.settings.wocHint", { defaultValue: "WOC endpoint、限流与队列状态请到 " })}
-        <a href="/settings/woc">{t("p2pkh.settings.wocLink", { defaultValue: "WOC 设置" })}</a>
+        <AppLink to="/settings/woc">{t("p2pkh.settings.wocLink", { defaultValue: "WOC 设置" })}</AppLink>
         。
       </p>
       <Button
