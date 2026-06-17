@@ -18,11 +18,15 @@
 // useCurrentPath 在 007 同期升级为"完整 location"语义，所以同一路径下换
 // ?query 也能正常更新 URL 并通知订阅者。
 //
+// 硬切换 007 收尾 3：AppLink 自己先把 `to` 规范化成相对 pathname + search +
+// hash 再 router.push。这样组件语义自洽——传入 `to="https://当前域名/foo"`
+// 在当前页时不会多打一条 history，也不需要调用方记得提前 normalize。
+//
 // 这个组件放在 runtime 而不是 UI 包：导航拦截是运行时能力；UI 包目前明确不
 // 依赖 runtime。
 
 import type { AnchorHTMLAttributes, MouseEvent, ReactNode } from "react";
-import { router } from "../navigate.js";
+import { normalizeLocationPath, router } from "../navigate.js";
 
 export interface AppLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
   to: string;
@@ -80,7 +84,12 @@ export function AppLink({ to, onClick, children, ...rest }: AppLinkProps) {
     if (shouldBypassNavigation(event)) return;
     if (!isInternalHref(to, window.location)) return;
     event.preventDefault();
-    router.push(to);
+    // AppLink 自身把 `to` 规范化为相对 pathname + search + hash，再交给
+    // router.push。navigateTo 内部也会 normalize（兜底），但组件层先做一
+    // 次能让"to 是当前页"时即使 navigateTo 被未来其它实现替换也不会多打
+    // history。`<a>` 的 href 仍保留原始 `to`，可复制 / 可中键新开等行为
+    // 保持不变。
+    router.push(normalizeLocationPath(to));
   }
 
   return (
