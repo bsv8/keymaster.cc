@@ -28,20 +28,6 @@ interface FormState {
   recipient: string;
   amount: string;
   feeRate: string;
-  allowUnconfirmed: boolean;
-}
-
-const SETTINGS_KEY = "p2pkh.settings";
-
-function loadAllowUnconfirmed(): boolean {
-  try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
-    if (!raw) return false;
-    const obj = JSON.parse(raw) as { allowUnconfirmed?: boolean };
-    return obj.allowUnconfirmed === true;
-  } catch {
-    return false;
-  }
 }
 
 export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps) {
@@ -63,8 +49,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   const [form, setForm] = useState<FormState>({
     recipient: "",
     amount: "0",
-    feeRate: "1000",
-    allowUnconfirmed: loadAllowUnconfirmed()
+    feeRate: "1000"
   });
   const [contactList, setContactList] = useState<Contact[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -179,7 +164,6 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
       recipientAddress: form.recipient,
       amountSatoshis: Math.floor(amount),
       feeRateSatoshisPerKb: Math.floor(feeRate),
-      allowUnconfirmed: form.allowUnconfirmed,
       keyId: ""
     };
   }
@@ -355,15 +339,6 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
             type="number"
             value={form.feeRate}
             onChange={(e) => update("feeRate", e.currentTarget.value)}
-          />
-          <Select
-            label={t("p2pkh.transfer.form.allowUnconfirmed", { defaultValue: "允许未确认 UTXO" })}
-            value={form.allowUnconfirmed ? "yes" : "no"}
-            onChange={(e) => update("allowUnconfirmed", e.currentTarget.value === "yes")}
-            options={[
-              { label: t("p2pkh.transfer.form.allowUnconfirmed.no", { defaultValue: "否（推荐）" }), value: "no" },
-              { label: t("p2pkh.transfer.form.allowUnconfirmed.yes", { defaultValue: "是" }), value: "yes" }
-            ]}
           />
           {error ? <p className="p2pkh-transfer-widget__error">{error}</p> : null}
           <div className="p2pkh-transfer-widget__actions">

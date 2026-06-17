@@ -1,11 +1,10 @@
 // packages/plugin-p2pkh/src/p2pkhAssetProvider.ts
-// P2PKH 资产 provider（硬切换 007 / 008 收尾）。
+// P2PKH 资产 provider（硬切换 007 / 008 收尾 + 硬切换 001）。
 // 设计缘由：
 //   - single 模式：每个 asset 行只代表当前 active key 的余额。
-//   - all 模式：聚合多个 key，但只读；detailRoute 指向只读总览。
 //   - AssetProvider 必须是通用资产协议，不允许把 UTXO / keyId 塞进 AssetSummary。
 //   - 资产网络由 assetId 决定。
-//   - onChange 内部订阅 P2PKH 同步事件、active key 变化、keyspace 初始化。
+//   - onChange 内部订阅 P2PKH 同步事件、active key 变化、keyspace 初始化、global settings。
 //
 // 硬切换 008 收尾：keyspace 未就绪时直接返回 `[]`（listAssets / listActivity）。
 // 设计缘由：旧实现返回 `emptySummary` 时虽然 display 文本是 `— BSV`，
@@ -13,6 +12,13 @@
 // 数值层是上游资产协议约定的语义，扩展协议表达 unknown balance 需要
 // 改 contract；本次施工单内改用推荐方案"未就绪返回空列表"，让
 // keyspace ready 后通过 onChange 通知重拉。
+//
+// 硬切换 001：
+//   - balance 展示改为 `{ total }`（不再用 confirmed）。
+//   - assets 列表受 `includeTestnet` 控制：false 时只暴露 bsv。
+//   - includeTestnet 通过 service.onGlobalSettingsChange 订阅——同 tab 写入
+//     由 settings 页调用 service.applyGlobalSettings 主动通知；跨 tab 由
+//     service 内部 storage 监听回灌。
 
 import type { AssetActivity, AssetProvider, AssetSummary, AssetStatus, KeyspaceService, MessageBus } from "@keymaster/contracts";
 import type {
@@ -54,6 +60,8 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   // 硬切换 008 收尾：额外订阅初始化变化——keyspace 初始化结束后资产平台
   // 必须重拉，否则"未就绪"期间返回的空列表会一直显示。
   unsubs.push(deps.keyspace.onInitializationChange(() => notify()));
+  // 硬切换 001：global settings 变化也要触发重拉（testnet asset 显隐切换）。
+  unsubs.push(deps.service.onGlobalSettingsChange(() => notify()));
 
   function notify() {
     for (const l of [...listeners]) l();
@@ -77,6 +85,15 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
     return !deps.keyspace.active().activePublicKeyHash;
   }
 
+  /**
+   * 硬切换 001：根据 includeTestnet 决定哪些 asset 进入 assets 列表。
+   */
+  function visibleAssetIds(): P2pkhAssetId[] {
+    const settings = deps.service.getGlobalSettings();
+    if (settings.includeTestnet) return ASSET_IDS;
+    return ASSET_IDS.filter((id) => id !== "bsvtest");
+  }
+
   async function toSummary(assetId: P2pkhAssetId): Promise<AssetSummary> {
     const def = P2PKH_ASSETS[assetId];
     const balance = await deps.service.getAssetBalance(assetId);
@@ -88,9 +105,9 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
       label: { key: `p2pkh.asset.${assetId}`, fallback: def.label },
       network: def.network,
       balance: {
-        amount: balance.confirmed,
+        amount: balance.total,
         unit: def.unit,
-        display: `${balance.confirmed} ${def.unit}`
+        display: `${balance.total} ${def.unit}`
       },
       status: mapStatus(deps.service.syncStatus()),
       detailRoute: { id: "p2pkh.overview", path: `/p2pkh?assetId=${encodeURIComponent(assetId)}` },
@@ -115,10 +132,12 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
       if (isNotReady()) {
         return [];
       }
-      return Promise.all(ASSET_IDS.map(toSummary));
+      return Promise.all(visibleAssetIds().map(toSummary));
     },
     async getAsset(assetId) {
       if (!isP2pkhAssetId(assetId)) return undefined;
+      // includeTestnet=false 时不暴露 testnet。
+      if (!visibleAssetIds().includes(assetId)) return undefined;
       // 未就绪时 getAsset 返回 undefined：调用方应展示空态而不是 0 余额。
       if (isNotReady()) return undefined;
       const summary = await toSummary(assetId);
@@ -141,6 +160,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
     },
     async listActivity(assetId) {
       if (!isP2pkhAssetId(assetId)) return [];
+      if (!visibleAssetIds().includes(assetId)) return [];
       if (isNotReady()) return [];
       return listNetworkHistory(assetId).then((history) =>
         history.map<AssetActivity>((h) => ({

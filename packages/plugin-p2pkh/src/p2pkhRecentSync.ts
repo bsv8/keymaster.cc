@@ -1,12 +1,13 @@
 // packages/plugin-p2pkh/src/p2pkhRecentSync.ts
-// P2PKH 近期同步实现。
+// P2PKH 近期同步实现（硬切换 001）。
 // 设计缘由：
 //   - 按 network 分组，per-resource 走 WOC 限流（批量接口歧义大，逐个最稳）。
-//   - 写余额、UTXO 快照、近期 history、watermark、reservation 对账。
+//   - 硬切换 001：不再请求 WOC balance endpoint，余额改为 service 现算。
+//   - 写 UTXO 快照、近期 history、watermark、reservation 对账、pending 对账。
 //   - 不写 backfill cursor；不从头扫描完整历史。
+//   - 不写余额。
 //   - 单 resource 失败不影响其他 resource，错误被收集后由任务最终抛出。
 //   - 失败时保留旧缓存。
-//   - 未确认余额是 unconfirmed - 0（不重复减 confirmed）。
 //   - pending 标 confirmed 必须看到对应 txid 出现在 confirmed history，否则不标。
 
 import type { BsvNetwork, MessageBus, WocService } from "@keymaster/contracts";
@@ -73,9 +74,8 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
   const db = await deps.getDb();
 
   // 关键：使用同一份请求 + 严格优先级；不在批量阶段做无意义预取。
-  const [balance, unconfirmedBalance, utxos, unconfirmedUtxos, recentHistoryPage, unconfirmedHistory] = await Promise.all([
-    deps.woc.getAddressConfirmedBalance(network, resource.address, { priority: "foreground", signal }),
-    deps.woc.getAddressUnconfirmedBalance(network, resource.address, { priority: "background", signal }),
+  // 硬切换 001：不再请求 WOC balance endpoint——余额由 service 现算。
+  const [utxos, unconfirmedUtxos, recentHistoryPage, unconfirmedHistory] = await Promise.all([
     deps.woc.getAddressConfirmedUtxos(network, resource.address, { priority: "foreground", signal }),
     deps.woc.getAddressUnconfirmedUtxos(network, resource.address, { priority: "background", signal }),
     deps.woc.listAddressConfirmedHistory(network, resource.address, { limit: HISTORY_PAGE_LIMIT }, { priority: "foreground", signal }),
@@ -207,15 +207,10 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
     return p;
   });
 
-  // 未确认余额：直接采用 unconfirmed 字段（WOC 已返回确认+未确认总和减确认得到 unconfirmed）。
+  // 硬切换 001：commit 不再携带 balance——余额由 service 现算。
   const commit: P2pkhRecentCommit = {
     resourceId: resource.resourceId,
     resource,
-    balance: {
-      confirmed: balance.confirmed,
-      unconfirmed: unconfirmedBalance.unconfirmed,
-      spendable: balance.confirmed
-    },
     utxos: utxoRows,
     recentHistory: historyRows,
     unconfirmedHistory: unconfirmedRows,

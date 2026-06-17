@@ -1,8 +1,8 @@
 // packages/plugin-p2pkh/src/utxoAllocator.test.ts
-// UTXO 分配逻辑单测：
+// UTXO 分配逻辑单测（硬切换 001）：
 //   - 不允许金额为 0/负数。
-//   - 默认只选 confirmed；allowUnconfirmed=true 时可包含 unconfirmed。
-//   - reservation 排除（由 service 层过滤）。
+//   - allocator 不再区分 confirmed / unconfirmed；所有未 reserved 候选都可参与。
+//   - reservation 排除由 service 层在传入前完成；allocator 只看候选集合。
 
 import { describe, expect, it } from "vitest";
 import { allocateUtxos } from "./utxoAllocator.js";
@@ -30,6 +30,7 @@ describe("allocateUtxos", () => {
   it("rejects zero/negative amount", () => {
     const r = allocateUtxos([utxo(1000)], { amountSatoshis: 0, assetId: "bsv" });
     expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.reason).toBe("policy-denied");
   });
 
   it("returns no-utxos when no candidates", () => {
@@ -48,8 +49,8 @@ describe("allocateUtxos", () => {
     if (!r.ok) expect(r.error.reason).toBe("insufficient");
   });
 
-  it("selects only confirmed by default", () => {
-    // 给足 confirmed 才能满足 required；否则会被 insufficient 拦截。
+  it("treats confirmed and unconfirmed as equivalent candidates", () => {
+    // 候选集合中混合 confirmed / unconfirmed：allocator 不再按 status 过滤。
     const r = allocateUtxos([utxo(1000, "confirmed"), utxo(5000, "unconfirmed")], {
       amountSatoshis: 200,
       feeReserveSatoshis: 100,
@@ -57,25 +58,17 @@ describe("allocateUtxos", () => {
     });
     expect(r.ok).toBe(true);
     if (r.ok) {
-      expect(r.allocation.selected.every((u) => u.status === "confirmed")).toBe(true);
+      // 仍然挑选 smallest-first；1000 比 5000 小，所以选 confirmed 那条。
+      expect(r.allocation.selected).toHaveLength(1);
+      expect(r.allocation.selected[0]!.status).toBe("confirmed");
     }
   });
 
-  it("returns no-utxos when only unconfirmed available and allowUnconfirmed=false", () => {
+  it("includes unconfirmed candidates in the same set as confirmed", () => {
+    // 候选只有一个 unconfirmed：仍能成功选币。
     const r = allocateUtxos([utxo(5000, "unconfirmed")], {
       amountSatoshis: 200,
       feeReserveSatoshis: 100,
-      assetId: "bsv"
-    });
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.error.reason).toBe("no-utxos");
-  });
-
-  it("selects unconfirmed when allowUnconfirmed=true", () => {
-    const r = allocateUtxos([utxo(5000, "unconfirmed")], {
-      amountSatoshis: 100,
-      feeReserveSatoshis: 100,
-      allowUnconfirmed: true,
       assetId: "bsv"
     });
     expect(r.ok).toBe(true);

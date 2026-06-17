@@ -1,24 +1,27 @@
 // packages/plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx
-// P2PKH 余额 widget：双资产展示。
+// P2PKH 余额 widget（硬切换 001）：
+//   - 金额来源改为 `{ total }`；不再分 confirmed / unconfirmed。
+//   - testnet 行受 `includeTestnet` 控制：false 时不展示。
+//   - includeTestnet 通过 service.onGlobalSettingsChange 订阅；同 tab 写入
+//     由 settings 页调用 service.applyGlobalSettings 主动通知。
 //
 // 硬切换 008 收尾：UI 层防御，不作为主修复。
 // 关键不变量：
 //   - keyspace 初始化中（isInitializing === true）不调 service.getAssetBalance，
 //     避免触发 "Key storage is not ready" 未处理 Promise。
-//   - non-single 模式（mode === "all" 或无 active）金额显示 "—"，刷新按钮 disabled。
+//   - non-single 模式（无 active）金额显示 "—"，刷新按钮 disabled。
 //   - 组件卸载后不 setState；active key 在请求期间切换时旧请求结果必须丢弃。
 //   - 不把 readiness 错误转换为 0 余额：未就绪是本地状态，0 余额是链上结果。
 //   - refreshAll 与 effect loader 共用同一段"load + activeAtRequest + alive 守卫"逻辑，
 //     避免重复实现导致竞态不一致。
 //
-// 硬切换 003：所有展示文案走 i18n。金额 sats 通过 host.i18n.t 解析；i18n
-// 资源中 p2pkh.balanceWidget.status.* 覆盖状态短语。
+// 硬切换 003：所有展示文案走 i18n。
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button, formatSats } from "@keymaster/ui";
 import { useCapability, useI18n } from "@keymaster/runtime";
 import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
-import type { P2pkhAssetId, P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";
+import type { P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";
 
 interface BalancesState {
   bsv: P2pkhBalance | null;
@@ -42,6 +45,7 @@ export function P2pkhBalanceWidget() {
   const [readiness, setReadiness] = useState<ReadinessState>(() => computeReadiness(keyspace));
   const [active, setActive] = useState<ActiveKeyState>(() => keyspace.active());
   const [lastError, setLastError] = useState<string | null>(null);
+  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
   const tokenRef = useRef<RequestToken | null>(null);
 
   const loadBalances = useCallback(async (): Promise<RequestToken> => {
@@ -50,13 +54,15 @@ export function P2pkhBalanceWidget() {
     tokenRef.current = token;
     if (token.cancelled) return token;
     try {
-      const [bsv, bsvtest] = await Promise.all([
-        service.getAssetBalance("bsv"),
-        service.getAssetBalance("bsvtest")
-      ]);
+      const include = service.getGlobalSettings().includeTestnet;
+      const calls: Promise<P2pkhBalance>[] = [service.getAssetBalance("bsv")];
+      if (include) calls.push(service.getAssetBalance("bsvtest"));
+      const results = await Promise.all(calls);
+      const bsv = results[0]!;
+      const bsvtest = include ? results[1] ?? null : null;
       if (token.cancelled) return token;
       if (!isSameActive(keyspace.active(), token.active)) return token;
-      setBalances({ bsv, bsvtest });
+      setBalances({ bsv, bsvtest: include ? bsvtest : null });
       setLastError(null);
     } catch (err) {
       if (token.cancelled) return token;
@@ -86,6 +92,15 @@ export function P2pkhBalanceWidget() {
 
   useEffect(() => service.onSyncStatusChange(setStatus), [service]);
 
+  // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
+  // 同 tab 与跨 tab 通知。
+  useEffect(() => {
+    const off = service.onGlobalSettingsChange((s) => {
+      setIncludeTestnet(s.includeTestnet);
+    });
+    return off;
+  }, [service]);
+
   useEffect(() => {
     if (readiness !== "ready") {
       setBalances({ bsv: null, bsvtest: null });
@@ -94,7 +109,7 @@ export function P2pkhBalanceWidget() {
       return;
     }
     void loadBalances();
-  }, [loadBalances, readiness, active]);
+  }, [loadBalances, readiness, active, includeTestnet]);
 
   useEffect(() => {
     return () => {
@@ -116,7 +131,7 @@ export function P2pkhBalanceWidget() {
   }, [readiness, service, loadBalances]);
 
   const stale = status === "failed" || status === "rate-limited" || lastError !== null;
-  const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.confirmed) : "—");
+  const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.total) : "—");
   const statusText = computeStatusText(readiness, status, lastError, t);
 
   return (
@@ -138,12 +153,14 @@ export function P2pkhBalanceWidget() {
           <p className="home-widget__amount">{showAmount(balances.bsv)}</p>
         </div>
       </section>
-      <section className="home-widget__row">
-        <div>
-          <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
-          <p className="home-widget__amount">{showAmount(balances.bsvtest)}</p>
-        </div>
-      </section>
+      {includeTestnet ? (
+        <section className="home-widget__row">
+          <div>
+            <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
+            <p className="home-widget__amount">{showAmount(balances.bsvtest)}</p>
+          </div>
+        </section>
+      ) : null}
       <p className="home-widget__status">
         {t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}{statusText}
         {stale ? (

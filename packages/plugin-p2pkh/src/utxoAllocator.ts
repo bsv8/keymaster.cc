@@ -1,5 +1,9 @@
 // packages/plugin-p2pkh/src/utxoAllocator.ts
-// UTXO 选择：默认只使用 confirmed UTXO；allowUnconfirmed 必须由调用方显式开启。
+// UTXO 选择（硬切换 001）：
+//   - 输入集合 = 当前 WOC 未花费 UTXO - 本地 reservation；service 已
+//     在传入前完成 reservation 过滤。
+//   - 不再区分 confirmed / unconfirmed：所有未 reserved 的候选都可参与。
+//   - 失败原因收敛为 no-utxos / insufficient / policy-denied。
 // 设计缘由：让 transfer 页面只看到错误，不自己重新计算。
 
 import type {
@@ -34,9 +38,9 @@ export function allocateUtxos(
     return { ok: false, error: { required: request.amountSatoshis, available: 0, feeReserve: 0, reason: "policy-denied" } };
   }
   const feeReserve = request.feeReserveSatoshis ?? DEFAULT_FEE_RESERVE;
-  const candidates = utxos.filter((u) =>
-    request.allowUnconfirmed ? true : u.status === "confirmed"
-  );
+  // 硬切换 001：service 已按 reservation.state === "reserved" 过滤过；
+  // 候选集合就是所有可花费的未花费 UTXO。allocator 不再关心 confirmed/unconfirmed。
+  const candidates = utxos;
   const available = candidates.reduce((s, u) => s + u.value, 0);
   const required = request.amountSatoshis + feeReserve;
   if (candidates.length === 0) {

@@ -67,7 +67,6 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const result = allocateUtxos(candidates, {
         amountSatoshis: input.amountSatoshis,
         feeReserveSatoshis: input.feeRateSatoshisPerKb != null ? Math.max(500, Math.ceil((input.feeRateSatoshisPerKb / 1000) * 250)) : 500,
-        allowUnconfirmed: input.allowUnconfirmed ?? false,
         assetId: input.assetId,
         keyId: active.keyId
       });

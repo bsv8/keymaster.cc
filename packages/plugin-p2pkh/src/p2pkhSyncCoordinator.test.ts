@@ -1,9 +1,11 @@
 // packages/plugin-p2pkh/src/p2pkhSyncCoordinator.test.ts
-// 协调器单测（硬切换 007）：
+// 协调器单测（硬切换 007 + 硬切换 001）：
 //   - 同一 resource 串行执行。
 //   - revision 不匹配被丢弃。
 //   - generation 不匹配被丢弃。
 //   - hasRecentPending 在 recent 排队时为 true。
+// 硬切换 001：本文件无 balance commit 相关断言（commitRecentSnapshot
+// 的 balance 写入语义已整体删除）。
 //
 // 通过 fake keyspace 打开 key-scoped namespace db，注入 coordinator。
 

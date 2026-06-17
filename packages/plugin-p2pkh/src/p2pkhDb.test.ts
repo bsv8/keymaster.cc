@@ -104,8 +104,8 @@ afterEach(async () => {
   await resetDb();
 });
 
-describe("p2pkhDb v4 stores", () => {
-  it("creates all required stores on first open", async () => {
+describe("p2pkhDb v5 stores", () => {
+  it("creates all required stores on first open and does not have p2pkh_balances", async () => {
     const db = await openDb();
     await db.listAddresses();
     const raw = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -115,7 +115,6 @@ describe("p2pkhDb v4 stores", () => {
     });
     const required = [
       "p2pkh_addresses",
-      "p2pkh_balances",
       "p2pkh_utxos",
       "p2pkh_history",
       "p2pkh_history_backfill",
@@ -126,6 +125,8 @@ describe("p2pkhDb v4 stores", () => {
     for (const name of required) {
       expect(raw.objectStoreNames.contains(name), `missing store: ${name}`).toBe(true);
     }
+    // 硬切换 001：余额不再落库。
+    expect(raw.objectStoreNames.contains("p2pkh_balances")).toBe(false);
     raw.close();
   });
 });
@@ -209,14 +210,13 @@ describe("p2pkhDb commitBackfillPage", () => {
 });
 
 describe("p2pkhDb commitRecentSnapshot", () => {
-  it("replaces UTXOs per resource and uses correct network", async () => {
+  it("replaces UTXOs per resource and uses correct network (no balance write)", async () => {
     const db = await openDb();
     const r = makeResource();
     await db.putAddress(r);
     await db.commitRecentSnapshot({
       resourceId: r.resourceId,
       resource: r,
-      balance: { confirmed: 1000, unconfirmed: 200, spendable: 1000 },
       utxos: [
         {
           id: `${r.resourceId}:t1:0`,
@@ -238,9 +238,9 @@ describe("p2pkhDb commitRecentSnapshot", () => {
     const utxos = await db.listUtxos();
     expect(utxos).toHaveLength(1);
     expect(utxos[0]!.network).toBe("main");
-    const balance = await db.listBalances();
-    expect(balance[0]!.network).toBe("main");
-    expect(balance[0]!.confirmed).toBe(1000);
+    // 硬切换 001：commitRecentSnapshot 不再写 p2pkh_balances，listBalances 应抛错（方法已被删除）。
+    expect((db as unknown as { listBalances?: unknown }).listBalances).toBeUndefined();
+    expect((db as unknown as { putBalance?: unknown }).putBalance).toBeUndefined();
   });
 
   it("does not overwrite confirmed history with unconfirmed", async () => {
@@ -290,9 +290,76 @@ describe("p2pkhDb commitRecentSnapshot", () => {
       db.commitRecentSnapshot({
         resourceId: r.resourceId,
         resource: r,
-        expectedGeneration: 0, // 旧 generation
-        balance: { confirmed: 1, unconfirmed: 0, spendable: 1 }
+        expectedGeneration: 0 // 旧 generation
       })
     ).rejects.toThrow();
+  });
+
+  it("removes UTXOs that WOC no longer reports (replace-semantics)", async () => {
+    const db = await openDb();
+    const r = makeResource();
+    await db.putAddress(r);
+    // 第一次同步：写入两个 UTXO。
+    await db.commitRecentSnapshot({
+      resourceId: r.resourceId,
+      resource: r,
+      utxos: [
+        {
+          id: `${r.resourceId}:t1:0`,
+          resourceId: r.resourceId,
+          keyId: r.keyId,
+          publicKeyHash: r.publicKeyHash,
+          network: "main",
+          address: r.address,
+          txid: "t1",
+          vout: 0,
+          value: 1000,
+          height: 100,
+          status: "confirmed",
+          isSpentInMempoolTx: false,
+          syncedAt: "2024-01-01T00:00:00.000Z"
+        },
+        {
+          id: `${r.resourceId}:t2:0`,
+          resourceId: r.resourceId,
+          keyId: r.keyId,
+          publicKeyHash: r.publicKeyHash,
+          network: "main",
+          address: r.address,
+          txid: "t2",
+          vout: 0,
+          value: 2000,
+          height: 101,
+          status: "confirmed",
+          isSpentInMempoolTx: false,
+          syncedAt: "2024-01-01T00:00:00.000Z"
+        }
+      ]
+    });
+    // 第二次同步：WOC 只返回 t1；t2 必须从本地被删除。
+    await db.commitRecentSnapshot({
+      resourceId: r.resourceId,
+      resource: r,
+      utxos: [
+        {
+          id: `${r.resourceId}:t1:0`,
+          resourceId: r.resourceId,
+          keyId: r.keyId,
+          publicKeyHash: r.publicKeyHash,
+          network: "main",
+          address: r.address,
+          txid: "t1",
+          vout: 0,
+          value: 1000,
+          height: 100,
+          status: "confirmed",
+          isSpentInMempoolTx: false,
+          syncedAt: "2024-01-02T00:00:00.000Z"
+        }
+      ]
+    });
+    const utxos = await db.listUtxos();
+    expect(utxos).toHaveLength(1);
+    expect(utxos[0]!.txid).toBe("t1");
   });
 });

@@ -1,5 +1,7 @@
 // packages/plugin-p2pkh/src/pages/P2pkhHistoryPage.tsx
-// P2PKH 历史页面：展示 source/status、backfill 状态、pending/unconfirmed/confirmed。
+// P2PKH 历史页面（硬切换 001）：展示 source/status、backfill 状态、
+// pending/unconfirmed/confirmed；testnet 切换按钮受 `includeTestnet` 控制。
+// 直链 URL 上的 `assetId=bsvtest` 在 includeTestnet=false 时被夹回 undefined。
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
@@ -15,6 +17,14 @@ function readAssetIdFromLocation(): P2pkhAssetId | undefined {
   return undefined;
 }
 
+function clampAssetIdBySettings(
+  id: P2pkhAssetId | undefined,
+  includeTestnet: boolean
+): P2pkhAssetId | undefined {
+  if (!includeTestnet && id === "bsvtest") return undefined;
+  return id;
+}
+
 export function P2pkhHistoryPage() {
   const service = useCapability<P2pkhService>("p2pkh.service");
   const { t } = useI18n();
@@ -24,7 +34,10 @@ export function P2pkhHistoryPage() {
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
     [locale]
   );
-  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(() => readAssetIdFromLocation());
+  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
+  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(
+    () => clampAssetIdBySettings(readAssetIdFromLocation(), service.getGlobalSettings().includeTestnet)
+  );
   const [rows, setRows] = useState<P2pkhHistoryItem[]>([]);
   const [backfills, setBackfills] = useState<P2pkhBackfillState[]>([]);
   const [version, setVersion] = useState(0);
@@ -33,6 +46,17 @@ export function P2pkhHistoryPage() {
     service.listHistory(assetId ? { assetId } : undefined).then(setRows);
     service.listBackfillStates().then(setBackfills);
   }, [service, assetId, version]);
+
+  // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
+  // 同 tab 与跨 tab 通知。
+  useEffect(() => {
+    const off = service.onGlobalSettingsChange((s) => {
+      setIncludeTestnet(s.includeTestnet);
+      setAssetId((prev) => clampAssetIdBySettings(prev, s.includeTestnet));
+      setVersion((v) => v + 1);
+    });
+    return off;
+  }, [service]);
 
   const columns: DataTableColumn<P2pkhHistoryItem>[] = [
     { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (r) => <code>{r.txid}</code> },
@@ -55,9 +79,11 @@ export function P2pkhHistoryPage() {
             <Button variant={assetId === "bsv" ? "primary" : "ghost"} onClick={() => setAssetId("bsv")}>
               {t("p2pkh.asset.bsvMain", { defaultValue: "BSV / main" })}
             </Button>
-            <Button variant={assetId === "bsvtest" ? "primary" : "ghost"} onClick={() => setAssetId("bsvtest")}>
-              {t("p2pkh.asset.bsvTest", { defaultValue: "BSV / test" })}
-            </Button>
+            {includeTestnet ? (
+              <Button variant={assetId === "bsvtest" ? "primary" : "ghost"} onClick={() => setAssetId("bsvtest")}>
+                {t("p2pkh.asset.bsvTest", { defaultValue: "BSV / test" })}
+              </Button>
+            ) : null}
             <Button variant="ghost" onClick={() => setAssetId(undefined)}>
               {t("p2pkh.asset.all", { defaultValue: "全部" })}
             </Button>

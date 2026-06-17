@@ -1,15 +1,16 @@
 // packages/plugin-p2pkh/src/p2pkhDb.ts
-// P2PKH 资源库（硬切换 007）。
+// P2PKH 资源库（硬切换 007 + 硬切换 001）。
 // 设计缘由：
 //   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 active key 一个 namespace DB，
 //     通过 keyspace.openKeyStorage 打开。
 //   - DB name 形如 `keymaster.key.<publicKeyHash>.plugin.p2pkh.state`。
 //   - store 中 keyId 字段保留为诊断字段，但删除 / 清理不再以 keyId index 为主路径。
-//   - resourceId 改为不包含 Vault keyId：`p2pkh:<network>:<scriptType>` 或
-//     `p2pkh:<assetId>`；同 key 多资源用不同 resourceId 区分。
+//   - resourceId 改为不包含 Vault keyId：`p2pkh:<network>`。
 //   - 原子提交：commitBackfillPage / commitRecentSnapshot 行为不变，但写入的 DB
 //     是当前 key 的 namespace DB，不再有跨 key 数据混合风险。
 //   - 切换 active key 时调用方需要重新拿 p2pkhDb(publicKeyHash) 才能继续访问。
+//   - 硬切换 001：DB schema 升级到 v5，删除 `p2pkh_balances` store；
+//     余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
 //
 // 迁移策略：
 //   - 旧全局 "p2pkh" DB 不再作为主路径；v3 schema 不再创建。
@@ -17,6 +18,7 @@
 //     仍存在且 active key 已就绪，按旧记录 keyId 找 publicKeyHash，写入
 //     对应 namespace DB；迁移成功后删除旧 DB。
 //   - 迁移失败时只丢弃旧缓存，重新从 WOC 同步；不阻断钱包解锁。
+//   - 硬切换 001：legacy migration 不再迁移 balance 行。
 
 import type { BsvNetwork, KeyspaceService } from "@keymaster/contracts";
 import type {
@@ -32,7 +34,11 @@ import type { P2pkhBackfillCommit, P2pkhRecentCommit } from "./p2pkhContracts.js
 import { makeResourceId } from "./p2pkhContracts.js";
 
 const P2PKH_STORAGE_ID = "state";
-const P2PKH_DB_VERSION = 4;
+/**
+ * 硬切换 001：DB 版本升到 5。删除 `p2pkh_balances` store；
+ * 余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
+ */
+const P2PKH_DB_VERSION = 5;
 
 /**
  * 旧全局 DB（v3）。best-effort 迁移期会读这个 DB；迁移完成后删除。
@@ -87,7 +93,7 @@ export async function openP2pkhDb(input: {
     storageId: P2PKH_STORAGE_ID,
     version: P2PKH_DB_VERSION,
     upgrade: (db, _oldVersion, _newVersion) => {
-      createV4Stores(db);
+      createV5Stores(db);
     }
   });
   const next: OpenHandle = {
@@ -118,8 +124,15 @@ export function disposeP2pkhDb(): void {
   }
 }
 
-function createV4Stores(db: IDBDatabase) {
-  // v4：删除 v1-v3 旧 store（keyId index 不再是删除主路径），重建 namespace stores。
+/**
+ * v5 schema（硬切换 001）：
+ *   - 删除 `p2pkh_balances` store；余额不再是持久化实体。
+ *   - 保留 v4 已建立的 addresses / utxos / history / history_backfill /
+ *     recent_sync / pending_transfers / utxo_reservations 七个 store。
+ *   - 把 `p2pkh_balances` 加入 legacy 删除列表，保证从 v4 升级时旧 store 也会被清掉。
+ */
+function createV5Stores(db: IDBDatabase) {
+  // v5：删除 v1-v4 旧 store（包含 p2pkh_balances），重建 namespace stores。
   const legacy = [
     "p2pkh_v1_addresses",
     "p2pkh_v1_balances",
@@ -141,11 +154,6 @@ function createV4Stores(db: IDBDatabase) {
     store.createIndex("publicKeyHash", "publicKeyHash", { unique: false });
     store.createIndex("network", "network", { unique: false });
     store.createIndex("address", "address", { unique: true });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_balances")) {
-    const store = db.createObjectStore("p2pkh_balances", { keyPath: "resourceId" });
-    store.createIndex("publicKeyHash", "publicKeyHash", { unique: false });
-    store.createIndex("network", "network", { unique: false });
   }
   if (!db.objectStoreNames.contains("p2pkh_utxos")) {
     const store = db.createObjectStore("p2pkh_utxos", { keyPath: "id" });
@@ -231,17 +239,12 @@ function tx<T>(
   });
 }
 
-export interface P2pkhBalanceRow {
-  resourceId: string;
-  /** 诊断字段：删除主路径不再依赖。 */
-  keyId: string;
-  publicKeyHash: string;
-  network: BsvNetwork;
-  confirmed: number;
-  unconfirmed: number;
-  spendable: number;
-  updatedAt?: string;
-}
+/**
+ * 硬切换 001：`P2pkhBalanceRow` 已删除。余额不再落库，由 service 每次
+ * 基于当前 UTXO 快照现算。如果以后出现外部代码仍 import 此类型，
+ * 会立即在编译期暴露（unknown 字段不能赋值）。
+ */
+void (0 as unknown as BsvNetwork);
 
 function newHistoryId(resourceId: string, txid: string): string {
   return `${resourceId}:${txid}`;
@@ -286,28 +289,6 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
       // key scoped DB 里 keyId 不可靠；列出当前 namespace 全部 resource。
       return tx(handle, "p2pkh_addresses", "readonly", (t) =>
         reqAsPromise(t.objectStore("p2pkh_addresses").getAll())
-      );
-    },
-
-    // ---------- balance ----------
-    async putBalance(row: P2pkhBalanceRow): Promise<void> {
-      await tx(handle, "p2pkh_balances", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_balances").put(row))
-      );
-    },
-    async listBalances(): Promise<P2pkhBalanceRow[]> {
-      return tx(handle, "p2pkh_balances", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_balances").getAll())
-      );
-    },
-    async getBalanceRow(resourceId: string): Promise<P2pkhBalanceRow | undefined> {
-      return tx(handle, "p2pkh_balances", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_balances").get(resourceId))
-      );
-    },
-    async clearBalance(resourceId: string): Promise<void> {
-      await tx(handle, "p2pkh_balances", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_balances").delete(resourceId))
       );
     },
 
@@ -522,11 +503,11 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
     },
 
     async commitRecentSnapshot(commit: P2pkhRecentCommit): Promise<void> {
+      // 硬切换 001：事务范围不再包含 p2pkh_balances——余额不再落库。
       await tx(
         handle,
         [
           "p2pkh_addresses",
-          "p2pkh_balances",
           "p2pkh_utxos",
           "p2pkh_history",
           "p2pkh_recent_sync",
@@ -545,21 +526,6 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
             throw new Error("generation mismatch");
           }
           const effectiveResource = currentAddress;
-          if (commit.balance) {
-            const balanceStore = t.objectStore("p2pkh_balances");
-            const existing = await reqAsPromise<P2pkhBalanceRow | undefined>(balanceStore.get(commit.resourceId));
-            const row: P2pkhBalanceRow = {
-              resourceId: commit.resourceId,
-              keyId: existing?.keyId ?? effectiveResource.keyId,
-              publicKeyHash: existing?.publicKeyHash ?? effectiveResource.publicKeyHash,
-              network: existing?.network ?? effectiveResource.network,
-              confirmed: commit.balance.confirmed,
-              unconfirmed: commit.balance.unconfirmed,
-              spendable: commit.balance.spendable ?? commit.balance.confirmed,
-              updatedAt: now
-            };
-            await reqAsPromise(balanceStore.put(row));
-          }
           if (commit.utxos) {
             const utxoStore = t.objectStore("p2pkh_utxos");
             const idx = utxoStore.index("resourceId");
@@ -658,12 +624,12 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
 
     // ---------- 清理 ----------
     /** 清理当前 namespace 内所有数据。设计缘由：删除 key 时 namespace DB 整体删除，
-     *  本方法用于手动重置或迁移失败回滚。 */
+     *  本方法用于手动重置或迁移失败回滚。硬切换 001：余额不再落库，
+     *  clearAll 不再调用 clearBalance。 */
     async clearAll(): Promise<void> {
       const resources = await this.listResourcesByKey("");
       for (const r of resources) {
         await this.removeResource(r.resourceId);
-        await this.clearBalance(r.resourceId);
         await this.clearUtxosForResource(r.resourceId);
         await this.clearHistoryForResource(r.resourceId);
         await this.clearBackfillState(r.resourceId);
@@ -726,14 +692,15 @@ export async function migrateLegacyP2pkhDb(input: {
     const oldResources = await readAllFromLegacy<P2pkhKeyResource>(oldDb, "p2pkh_addresses");
     const oldUtxos = await readAllFromLegacy<P2pkhUtxo>(oldDb, "p2pkh_utxos");
     const oldHistory = await readAllFromLegacy<P2pkhHistoryItem>(oldDb, "p2pkh_history");
-    const oldBalances = await readAllFromLegacy<P2pkhBalanceRow>(oldDb, "p2pkh_balances");
+    // 硬切换 001：不再迁移旧 balance 行——余额改为 service 现算，
+    // 即使旧 DB 仍有 p2pkh_balances 行也只能让它们随旧 DB 删除一起丢弃。
     const summary: LegacyMigrationSummary = { migrated: 0, failed: 0, abandoned: false };
     // 按 keyId 分组写到对应 namespace。
-    const byKey = new Map<string, { resources: P2pkhKeyResource[]; utxos: P2pkhUtxo[]; history: P2pkhHistoryItem[]; balances: P2pkhBalanceRow[] }>();
+    const byKey = new Map<string, { resources: P2pkhKeyResource[]; utxos: P2pkhUtxo[]; history: P2pkhHistoryItem[] }>();
     function bucket(keyId: string) {
       let b = byKey.get(keyId);
       if (!b) {
-        b = { resources: [], utxos: [], history: [], balances: [] };
+        b = { resources: [], utxos: [], history: [] };
         byKey.set(keyId, b);
       }
       return b;
@@ -741,7 +708,6 @@ export async function migrateLegacyP2pkhDb(input: {
     for (const r of oldResources) bucket(r.keyId).resources.push(r);
     for (const u of oldUtxos) bucket(u.keyId).utxos.push(u);
     for (const h of oldHistory) bucket(h.keyId).history.push(h);
-    for (const b of oldBalances) bucket(b.keyId).balances.push(b);
     for (const [oldKeyId, group] of byKey) {
       const publicKeyHash = await input.resolvePublicKeyHash(oldKeyId);
       if (!publicKeyHash) {
@@ -754,7 +720,7 @@ export async function migrateLegacyP2pkhDb(input: {
           pluginId: "p2pkh",
           storageId: P2PKH_STORAGE_ID,
           version: P2PKH_DB_VERSION,
-          upgrade: (db) => createV4Stores(db)
+          upgrade: (db) => createV5Stores(db)
         });
         const target = createP2pkhDb({
           publicKeyHash,
@@ -769,9 +735,6 @@ export async function migrateLegacyP2pkhDb(input: {
         }
         for (const h of group.history) {
           await target.putHistory([{ ...h, publicKeyHash }]);
-        }
-        for (const b of group.balances) {
-          await target.putBalance({ ...b, publicKeyHash });
         }
         handle.close();
         summary.migrated += group.resources.length;

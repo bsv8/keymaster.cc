@@ -28,7 +28,15 @@ export const P2PKH_MSG = {
   /** rehydrate 失败。 */
   REHYDRATE_ERROR: "p2pkh.rehydrate.error",
   /** 转账广播完成。 */
-  TRANSFER_BROADCAST: "p2pkh.transfer.broadcast"
+  TRANSFER_BROADCAST: "p2pkh.transfer.broadcast",
+  /**
+   * 全局产品设置变更（硬切换 001）。
+   * 设计缘由：跨标签页或非 settings 页面需要知道 includeTestnet 切换，
+   * 跨 tab 链路交给 messageBus；settings 页同 tab 链路交给
+   * `service.onGlobalSettingsChange` 订阅句柄。
+   * payload: P2pkhGlobalSettings。
+   */
+  SETTINGS_CHANGED: "p2pkh.settings.changed"
 } as const;
 
 export type P2pkhMessageType = (typeof P2PKH_MSG)[keyof typeof P2PKH_MSG];

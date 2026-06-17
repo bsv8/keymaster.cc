@@ -1,5 +1,9 @@
 // packages/plugin-p2pkh/src/pages/P2pkhOverviewPage.tsx
-// P2PKH 总览：按 assetId 展示双网络资源与 backfill 状态。
+// P2PKH 总览（硬切换 001）：
+//   - summary 只显示 `{ total }`，不再分 confirmed / unconfirmed。
+//   - testnet 切换按钮受 `includeTestnet` 控制；false 时隐藏。
+//   - 直链 URL 上的 `assetId=bsvtest` 在 includeTestnet=false 时被强制
+//     夹回 `bsv`（避免 dormant cache 暴露）。
 //
 // 硬切换 008 收尾：UI 层防御。
 // 关键不变量：
@@ -18,6 +22,7 @@ import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhBackfillState,
+  P2pkhGlobalSettings,
   P2pkhKeyResource,
   P2pkhRecentSyncState,
   P2pkhService
@@ -31,6 +36,14 @@ function readAssetIdFromLocation(): P2pkhAssetId | undefined {
   const id = params.get("assetId");
   if (id === "bsv" || id === "bsvtest") return id;
   return undefined;
+}
+
+function clampAssetIdBySettings(
+  id: P2pkhAssetId | undefined,
+  includeTestnet: boolean
+): P2pkhAssetId | undefined {
+  if (!includeTestnet && id === "bsvtest") return undefined;
+  return id;
 }
 
 type PageReadiness = "initializing" | "no-active-key" | "ready" | "failed";
@@ -57,14 +70,19 @@ export function P2pkhOverviewPage() {
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
     [locale]
   );
-  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(() => readAssetIdFromLocation());
+  // 硬切换 001：URL 上的 bsvtest 在 includeTestnet=false 时被夹回 undefined。
+  // 设置的真值通过 service 提供——service 会跨 tab 同步并向本页面发出变更。
+  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
+  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(
+    () => clampAssetIdBySettings(readAssetIdFromLocation(), service.getGlobalSettings().includeTestnet)
+  );
   const [rows, setRows] = useState<P2pkhKeyResource[]>([]);
   const [backfills, setBackfills] = useState<P2pkhBackfillState[]>([]);
   const [recentStates, setRecentStates] = useState<P2pkhRecentSyncState[]>([]);
   const [version, setVersion] = useState(0);
   const [readiness, setReadiness] = useState<PageReadiness>(() => computeReadiness(keyspace));
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [balanceDisplay, setBalanceDisplay] = useState<{ confirmed: number; unconfirmed: number } | null>(null);
+  const [balanceDisplay, setBalanceDisplay] = useState<{ total: number } | null>(null);
   // 余额加载 token 引用：cancel-and-replace 模式，新请求自动取消旧请求。
   const balanceTokenRef = useRef<RequestToken | null>(null);
   // 资源列表加载 token 引用。
@@ -167,6 +185,11 @@ export function P2pkhOverviewPage() {
       setBalanceDisplay(null);
       return;
     }
+    // 硬切换 001：includeTestnet=false 时不展示 testnet 余额。
+    if (!includeTestnet && assetId === "bsvtest") {
+      setBalanceDisplay(null);
+      return;
+    }
     const token: RequestToken = { active: keyspace.active(), cancelled: false };
     if (balanceTokenRef.current) balanceTokenRef.current.cancelled = true;
     balanceTokenRef.current = token;
@@ -176,7 +199,7 @@ export function P2pkhOverviewPage() {
       .then((b) => {
         if (cancelled || token.cancelled) return;
         if (!isSameActive(keyspace.active(), token.active)) return;
-        setBalanceDisplay({ confirmed: b.confirmed, unconfirmed: b.unconfirmed });
+        setBalanceDisplay({ total: b.total });
       })
       .catch((err) => {
         if (cancelled || token.cancelled) return;
@@ -187,7 +210,21 @@ export function P2pkhOverviewPage() {
     return () => {
       cancelled = true;
     };
-  }, [service, keyspace, readiness, assetId, version]);
+  }, [service, keyspace, readiness, assetId, version, includeTestnet]);
+
+  // 硬切换 001：订阅 service 的 settings 变化。同 tab 由 applyGlobalSettings
+  // 主动通知，跨 tab 由 service 内部的 storage 监听回灌——本页面只通过
+  // service.onGlobalSettingsChange 一条链路统一处理。
+  useEffect(() => {
+    const off = service.onGlobalSettingsChange((s) => {
+      setIncludeTestnet(s.includeTestnet);
+      // includeTestnet 由 true → false 时，把当前 bsvtest 视图夹回 undefined
+      // 避免显示空白 / 资源空态混乱。
+      setAssetId((prev) => clampAssetIdBySettings(prev, s.includeTestnet));
+      setVersion((v) => v + 1);
+    });
+    return off;
+  }, [service]);
 
   const columns: DataTableColumn<P2pkhKeyResource>[] = useMemo(
     () => [
@@ -252,9 +289,11 @@ export function P2pkhOverviewPage() {
             <Button variant={assetId === "bsv" ? "primary" : "ghost"} onClick={() => setAssetId("bsv")}>
               {t("p2pkh.asset.bsvMain", { defaultValue: "BSV / main" })}
             </Button>
-            <Button variant={assetId === "bsvtest" ? "primary" : "ghost"} onClick={() => setAssetId("bsvtest")}>
-              {t("p2pkh.asset.bsvTest", { defaultValue: "BSV / test" })}
-            </Button>
+            {includeTestnet ? (
+              <Button variant={assetId === "bsvtest" ? "primary" : "ghost"} onClick={() => setAssetId("bsvtest")}>
+                {t("p2pkh.asset.bsvTest", { defaultValue: "BSV / test" })}
+              </Button>
+            ) : null}
             <Button variant="ghost" onClick={() => setAssetId(undefined)}>
               {t("p2pkh.asset.all", { defaultValue: "全部" })}
             </Button>
@@ -285,9 +324,8 @@ export function P2pkhOverviewPage() {
       {balanceDisplay ? (
         <p className="p2pkh-overview__balance">
           {t("p2pkh.balance.line", {
-            defaultValue: "余额：确认 {{confirmed}} · 未确认 {{unconfirmed}}",
-            confirmed: formatSats(balanceDisplay.confirmed),
-            unconfirmed: formatSats(balanceDisplay.unconfirmed)
+            defaultValue: "余额：{{total}}",
+            total: formatSats(balanceDisplay.total)
           })}
         </p>
       ) : null}

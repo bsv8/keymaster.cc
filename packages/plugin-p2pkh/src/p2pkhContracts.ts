@@ -58,12 +58,24 @@ export interface P2pkhKeyResource {
   generation: number;
 }
 
-/** P2PKH 余额。 */
+/**
+ * P2PKH 余额（硬切换 009 / 001）。
+ * 设计缘由：余额不再是表、不是持久化实体，只是 service 基于当前 UTXO 快照
+ * 的实时计算结果。WOC 当前返回的未花费 UTXO 集合是余额与可选输入的唯一链上
+ * 真值；`confirmed / unconfirmed / spendable` 不再作为余额字段。
+ */
 export interface P2pkhBalance {
-  confirmed: number;
-  unconfirmed: number;
-  spendable: number;
-  updatedAt?: string;
+  total: number;
+}
+
+/**
+ * P2PKH 全局产品设置（硬切换 001）。
+ * 设计缘由：这是产品级显示与同步范围配置，不是某一把 key 的链上状态，
+ * 放在全局 localStorage 而不是 key-scoped DB。当前唯一字段是
+ * `includeTestnet`：缺省 false。
+ */
+export interface P2pkhGlobalSettings {
+  includeTestnet: boolean;
 }
 
 /** P2PKH UTXO。 */
@@ -115,11 +127,14 @@ export interface P2pkhUtxoFilter {
   resourceId?: string;
 }
 
-/** UTXO 分配请求。 */
+/**
+ * UTXO 分配请求（硬切换 001）。
+ * 设计缘由：移除 `allowUnconfirmed`。一旦"未在 WOC 未花费集合里"
+ * 才会让该输入不参与分配——本地 reservation 由 service 层过滤后传入。
+ */
 export interface UtxoAllocationRequest {
   amountSatoshis: number;
   feeReserveSatoshis?: number;
-  allowUnconfirmed?: boolean;
   strategy?: "smallest-first" | "largest-first";
   assetId: P2pkhAssetId;
   keyId?: string;
@@ -229,13 +244,18 @@ export interface P2pkhBackfillCommit {
   nextPageToken?: string;
 }
 
+/**
+ * P2pkhRecentCommit（硬切换 001）。
+ * 设计缘由：移除 `balance` 字段。recent-sync 不再请求 WOC balance
+ * endpoint，也不再把余额写回 DB；余额真值由 service 每次基于当前
+ * UTXO 快照现算。
+ */
 export interface P2pkhRecentCommit {
   resourceId: string;
   /** 资源代际；提交时与 store 当前 generation 不一致则拒绝写入。 */
   expectedGeneration?: number;
-  /** 资源元数据，用于在 balance / history 中填入正确的 keyId/network/address。 */
+  /** 资源元数据，用于在 history 中填入正确的 keyId/network/address。 */
   resource?: P2pkhKeyResource;
-  balance?: { confirmed: number; unconfirmed: number; spendable?: number };
   /** resource 替换式 UTXO 快照。 */
   utxos?: P2pkhUtxo[];
   /** 近期确认与未确认 history。 */
@@ -251,14 +271,17 @@ export interface P2pkhRecentCommit {
   lastSyncedAt?: string;
 }
 
-/** 转移输入参数。 */
+/**
+ * 转移输入参数（硬切换 001）。
+ * 设计缘由：移除 `allowUnconfirmed`。所有未在本地 reservation 中
+ * 占用的未花费 UTXO 都会参与选币；WOC 已看不到的输入也不会进入。
+ */
 export interface P2pkhTransferInput {
   assetId: P2pkhAssetId;
   keyId: string;
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb?: number;
-  allowUnconfirmed?: boolean;
 }
 
 /** 转移预览结果。 */
@@ -293,6 +316,33 @@ export interface P2pkhService {
   /** 暂停 history-backfill；返回的 Promise resolve 时表示旧实例已退出。 */
   pauseHistoryBackfill(resourceId?: string): Promise<void>;
   resumeHistoryBackfill(resourceId?: string): void;
+
+  /**
+   * 读取当前全局产品设置。始终返回最新同步值：
+   * - 进程内缓存由 `applyGlobalSettings` 维护；
+   * - 跨标签页变更通过 storage 事件被 service 接收并刷新缓存。
+   * 设计缘由：所有 read 路径（listResources / listUtxos / listHistory /
+   * getAssetBalance / getResourceBalance / allocateUtxos / transfer）
+   * 在做 testnet 过滤时都必须拿到与上一次写一致的 `includeTestnet`，
+   * 否则会出现"切换设置后同一次渲染仍按旧值过滤"的不一致。
+   */
+  getGlobalSettings(): P2pkhGlobalSettings;
+  /**
+   * 订阅全局设置变更。包括：
+   * - 本标签页通过 `applyGlobalSettings` 写入的变更；
+   * - 跨标签页由 storage 事件带回来的变更。
+   * 返回取消订阅句柄。
+   */
+  onGlobalSettingsChange(handler: (settings: P2pkhGlobalSettings) => void): () => void;
+  /**
+   * 应用新的全局设置：写 localStorage、更新进程内缓存、通知订阅者、
+   * 并在 includeTestnet 由 false → true 时立即触发 rehydrate +
+   * recent-sync + history-backfill，让 testnet 重新进入运行范围。
+   * 设计缘由：硬切换 001 要求"再次开启 testnet 时立即把 testnet
+   * 纳入运行范围"，但 storage 事件不会在本标签页触发，必须由写入
+   * 路径主动通知 service。
+   */
+  applyGlobalSettings(settings: P2pkhGlobalSettings): Promise<void>;
 
   getAssetBalance(assetId: P2pkhAssetId): Promise<P2pkhBalance>;
   getResourceBalance(resourceId: string): Promise<P2pkhBalance>;
