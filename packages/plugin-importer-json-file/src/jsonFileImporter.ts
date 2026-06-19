@@ -8,6 +8,9 @@
 //   - importer 插件不写 Vault、不调用 vault.withPrivateKey —— bsv8 envelope 解密
 //     成功后返回标准 PrivateKeyMaterial，交给调用方保存。
 // 解析失败时只返回格式错误，不写任何 DB（DB 写入由 vault 完成）。
+//
+// 硬切换 012（施工单 001）：本 importer 同时支持 text 与 file 两种输入，
+// 共享同一套解析路径；`password` 是输入的属性，文本与文件都可能携带。
 
 import type { KeyImporter, KeyImportInput, KeyImportResult } from "@keymaster/contracts";
 import { decryptBsv8KeyEnvelope, isBsv8KeyEnvelope, type Bsv8EnvelopeShape } from "./bsv8KeyEnvelope.js";
@@ -57,21 +60,37 @@ function dig(obj: unknown, path: string[] = []): JsonCandidate[] {
   return out;
 }
 
+/**
+ * 把任意 `KeyImportInput` 归一化为 JSON 字符串。
+ * 设计缘由：JSON 文件与 JSON 文本本质上是同一种导入材料，只是来源不同；
+ * 解析时不应该走两条分支。下游所有逻辑（JSON.parse / envelope 判断 / dig）
+ * 都基于这串文本，不关心来源。
+ */
+function readInputText(input: KeyImportInput): string {
+  if (input.kind === "text") return input.text;
+  return new TextDecoder().decode(input.content);
+}
+
 export const jsonFileImporter: KeyImporter = {
   id: "json-file",
-  name: { key: "importerJsonFile.name", fallback: "JSON File" },
-  description: { key: "importerJsonFile.description", fallback: "Extract private keys from a wallet JSON export; supports bsv8 encrypted envelopes." },
-  supports: ["file"],
+  // 硬切换 012：名称回归为更准确的 "JSON"，因为 importer 已经支持
+  // text + file 两种来源；继续叫 "JSON File" 会和"支持 JSON 文本"直接冲突。
+  name: { key: "importerJsonFile.name", fallback: "JSON" },
+  description: {
+    key: "importerJsonFile.description",
+    fallback: "Extract private keys from a wallet JSON export; supports JSON files, JSON text, and bsv8 encrypted envelopes."
+  },
+  // 硬切换 012：同时支持 text 与 file。两条入口都共用同一套输入模式切换
+  // 与解析逻辑，不再区分 "json-file" 与 "json-text"。
+  supports: ["text", "file"],
   // 是否需要"导入源密码"取决于输入本身——明文 JSON 走 dig(parsed) 不需要，
   // bsv8 envelope 才需要。**不**在 importer 级静态声明"需要密码"，
   // 让调用方通过 parse() 的实际行为判断（失败时抛
   // "Password is required for encrypted key file"）。
   async parse(input: KeyImportInput): Promise<KeyImportResult[]> {
-    if (input.kind !== "file") throw new Error("JSON file importer only supports file input");
     let parsed: unknown;
     try {
-      const text = new TextDecoder().decode(input.content);
-      parsed = JSON.parse(text);
+      parsed = JSON.parse(readInputText(input));
     } catch (err) {
       throw new Error(`Invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -80,6 +99,8 @@ export const jsonFileImporter: KeyImporter = {
       const envelope = parsed as Bsv8EnvelopeShape;
       const password = input.password;
       if (!password) {
+        // 文案虽然包含 "file"，本次先保持不变以不破坏既有 UI 与测试常量；
+        // 未来若改成更中性的 "encrypted key JSON"，必须同步两个入口和测试。
         throw new Error("Password is required for encrypted key file");
       }
       const hex = decryptBsv8KeyEnvelope({ envelope, password });

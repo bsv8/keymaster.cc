@@ -3,8 +3,8 @@
 // 设计缘由：平台只编排流程，不解析具体格式。
 //
 // bsv8 envelope 支持：
-//   - 文件读取后能快速识别为 envelope 时，显示"备份文件密码"输入框；
-//   - parse 时把 password 放入 file input，parse 成功后立即清空密码输入。
+//   - 文件读取后能快速识别为 envelope 时，显示"导入源密码"输入框；
+//   - parse 时把 password 放入 file/text input，parse 成功后立即清空密码输入。
 //   - 密码只活在这一次 parse 闭包里，不进入 KeyImportResult / localStorage / IDB。
 //
 // 硬切换 003：所有展示文案走 i18n；KeyImportResult.summary 是 I18nText，
@@ -16,9 +16,17 @@
 // 已存在 Vault 且处于 uninitialized 状态不可达：首启导入通过 wizard 完成
 // 之后 vault 状态就是 unlocked；但出于防御，页面挂载时仍 fail-closed 拒绝
 // uninitialized / locked 状态，避免用户在"半路"看到 0-key 保存错误。
+//
+// 硬切换 012（施工单 001）：JSON importer 同时支持 file 与 text 两种来源，
+// 输入区先让用户在"JSON 文件 / JSON 文本"之间二选一，再渲染对应控件；
+// 切换方式时必须清理旧模式残留的状态。
+//
+// 硬切换 012 验收修复（施工单 001 复审）：
+//   - 密码 label 不再固定"备份文件密码"：JSON 文本模式下显示"导入源密码"。
+//   - isJsonImporter 走显式 id 判断（不再靠 supports 启发式）。
 
-import { useEffect, useState } from "react";
-import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
+import { useEffect, useReducer } from "react";
+import { Button, EmptyState, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
 import type {
   ImporterRegistry,
@@ -29,14 +37,18 @@ import type {
 } from "@keymaster/contracts";
 import { ImporterPicker } from "./ImporterPicker.js";
 import { persistImport } from "./importFlow.js";
-import { peekBsv8Envelope } from "./importFileSniff.js";
-
-/**
- * Importer parse 抛出的 "Password is required" 错误：
- * 文件被识别为 bsv8 envelope 但用户没填密码。
- * 检测到时打开密码输入框，避免用户重选文件。
- */
-const PASSWORD_REQUIRED_MSG = "Password is required for encrypted key file";
+import {
+  peekBsv8EnvelopeBytes,
+  peekBsv8EnvelopeText
+} from "./importFileSniff.js";
+import {
+  buildImportInput,
+  initialJsonImportState,
+  isJsonImporter,
+  reduceJsonImport,
+  type JsonInputMode,
+  type JsonImportState
+} from "./jsonImportStateMachine.js";
 
 export function ImportPage() {
   const registry = useCapability<ImporterRegistry>("importer.registry");
@@ -55,22 +67,23 @@ export function ImportPage() {
   // - booting：尚在 bootstrap，按 locked 处理。
   const vaultStatus = vault.status();
 
-  // Hooks 必须在条件返回前全部注册，避免违反 Rules of Hooks。
-  const [importer, setImporter] = useState<KeyImporter | undefined>(undefined);
-  const [text, setText] = useState("");
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [fileBytes, setFileBytes] = useState<Uint8Array | null>(null);
-  const [fileNeedsPassword, setFileNeedsPassword] = useState(false);
-  const [password, setPassword] = useState("");
-  const [label, setLabel] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<KeyImportResult | null>(null);
+  // 硬切换 012 验收修复：JSON importer 的输入与解析状态机收敛到 reducer。
+  // 设计缘由：所有"切换 importer / 切换输入方式 / 切换文件 / 解析失败
+  // 升密码"等关键不变量都集中在 jsonImportStateMachine 的 reducer 里，
+  // 用纯函数测试覆盖，组件本身只负责渲染与发起 async parse。
+  const [state, dispatch] = useReducer(reduceJsonImport, initialJsonImportState);
+  const importer = state.importer;
+  const jsonInputMode = state.jsonInputMode;
 
   useEffect(() => {
-    if (result) return;
-    setPassword("");
-  }, [result]);
+    if (state.result) return;
+    // result 清空时（即导入完成 / reset 后），确保 password 也清空。
+    if (state.password) {
+      dispatch({ type: "set-password", password: "" });
+    }
+    // 仅依赖 result：其他字段变化不触发本 effect。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.result]);
 
   if (vaultStatus !== "unlocked") {
     return (
@@ -90,75 +103,108 @@ export function ImportPage() {
     const f = e.currentTarget.files?.[0];
     if (!f) return;
     const bytes = new Uint8Array(await f.arrayBuffer());
-    setFileName(f.name);
-    setFileBytes(bytes);
-    setFileNeedsPassword(peekBsv8Envelope(bytes));
-    setPassword("");
-    setError(null);
+    dispatch({
+      type: "set-file",
+      name: f.name,
+      bytes,
+      needsPassword: peekBsv8EnvelopeBytes(bytes)
+    });
   }
 
   function clearFile() {
-    setFileName(null);
-    setFileBytes(null);
-    setFileNeedsPassword(false);
-    setPassword("");
+    dispatch({ type: "clear-file" });
+  }
+
+  /**
+   * 文本输入时也用文本 sniff 决定是否升起密码框。
+   * 设计缘由：JSON 文本模式与文件模式必须共用同一套"是否像 envelope"的
+   * 嗅探逻辑。
+   */
+  function onTextChange(value: string) {
+    const sniff = isJsonImporter(importer) ? peekBsv8EnvelopeText(value) : false;
+    dispatch({ type: "set-text", text: value, needsPassword: sniff });
   }
 
   async function parse() {
-    if (!importer) {
-      setError(t("keyImport.page.err.noImporter", { defaultValue: "请先选择导入方式" }));
-      return;
-    }
-    setError(null);
-    setBusy(true);
+    dispatch({ type: "parse-start" });
     try {
-      const input = fileBytes
-        ? {
-            kind: "file" as const,
-            name: fileName ?? "blob",
-            content: fileBytes,
-            password: fileNeedsPassword ? password : undefined
-          }
-        : { kind: "text" as const, text };
-      const r = await importer.parse(input);
-      if (r.length === 0) {
-        setError(t("keyImport.page.err.noKey", { defaultValue: "未解析出私钥" }));
+      const input = buildImportInput(state);
+      if (!input || !importer) {
+        dispatch({
+          type: "parse-failure",
+          error: t("keyImport.page.err.noFile", { defaultValue: "请先选择文件" })
+        });
         return;
       }
-      setResult(r[0] ?? null);
-      setPassword("");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : t("keyImport.page.err.parse", { defaultValue: "解析失败" });
-      if (fileBytes && msg === PASSWORD_REQUIRED_MSG) {
-        setFileNeedsPassword(true);
+      const r = await importer.parse(input);
+      if (r.length === 0) {
+        dispatch({
+          type: "parse-failure",
+          error: t("keyImport.page.err.noKey", { defaultValue: "未解析出私钥" })
+        });
+        return;
       }
-      setError(msg);
-    } finally {
-      setBusy(false);
+      dispatch({ type: "parse-success", result: r[0] ?? null });
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : t("keyImport.page.err.parse", { defaultValue: "解析失败" });
+      dispatch({ type: "parse-failure", error: msg });
     }
   }
 
   async function save() {
-    if (!result) return;
-    setError(null);
-    setBusy(true);
+    if (!state.result || !importer) return;
+    dispatch({ type: "parse-start" });
     try {
-      await persistImport(vault, result, {
-        label: label || `key-${Date.now()}`,
+      await persistImport(vault, state.result, {
+        label: state.label || `key-${Date.now()}`,
         capabilities: ["p2pkh"],
-        source: importer?.id
+        source: importer.id
       });
       messageBus.publish("key.imported", { keyId: null });
-      setResult(null);
-      setText("");
-      clearFile();
-      setLabel("");
+      dispatch({ type: "reset" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("keyImport.page.err.save", { defaultValue: "保存失败" }));
-    } finally {
-      setBusy(false);
+      dispatch({
+        type: "parse-failure",
+        error:
+          err instanceof Error
+            ? err.message
+            : t("keyImport.page.err.save", { defaultValue: "保存失败" })
+      });
     }
   }
+
+  // 当 reducer 处于 busy 状态时（parse / save 中）渲染 loading 标记。
+  const busy = state.busy;
+
+  // 文件 / 文本输入区的可见性派生：JSON importer 走 mode 切换；其它走 supports。
+  const showJsonModeToggle = isJsonImporter(importer);
+  const showTextInput =
+    Boolean(importer) && !showJsonModeToggle && importer!.supports.includes("text");
+  const showFileInput =
+    Boolean(importer) && !showJsonModeToggle && importer!.supports.includes("file");
+
+  // 是否升起密码框：JSON importer 看 needsPassword；其它 importer 仅在 file 模式下。
+  const showPassword =
+    (showJsonModeToggle && state.needsPassword) ||
+    (Boolean(importer) && !showJsonModeToggle && state.needsPassword && Boolean(state.fileBytes));
+
+  // 解析按钮是否可点：importer 已选；JSON 模式下要求有输入（文件已选 / 文本非空）；
+  // 密码需求时必须已填密码。
+  const canParse = (() => {
+    if (!importer) return false;
+    if (showJsonModeToggle) {
+      if (jsonInputMode === "text") {
+        if (state.text.trim().length === 0) return false;
+      } else {
+        if (!state.fileBytes) return false;
+      }
+    }
+    if (state.needsPassword && !state.password) return false;
+    return true;
+  })();
 
   return (
     <div className="import-page">
@@ -170,83 +216,82 @@ export function ImportPage() {
       />
       <section className="import-page__pickers">
         <h3>{t("keyImport.page.step.picker", { defaultValue: "1. 选择导入方式" })}</h3>
-        <ImporterPicker selected={importer?.id} onSelect={setImporter} />
+        <ImporterPicker
+          selected={importer?.id}
+          onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
+        />
       </section>
       <section className="import-page__input">
         <h3>{t("keyImport.page.step.input", { defaultValue: "2. 输入" })}</h3>
-        {importer?.supports.includes("text") ? (
+        {showJsonModeToggle ? (
+          <JsonModeInputs
+            state={state}
+            dispatch={dispatch}
+            onFile={onFile}
+            onTextChange={onTextChange}
+            t={t}
+          />
+        ) : null}
+        {showTextInput ? (
           <TextInput
             label={t("keyImport.page.label.text", { defaultValue: "文本" })}
-            value={text}
-            onChange={(e) => setText(e.currentTarget.value)}
+            value={state.text}
+            onChange={(e) => onTextChange(e.currentTarget.value)}
             placeholder={t("keyImport.page.placeholder.text", { defaultValue: "粘贴 WIF 或 hex 私钥" })}
           />
         ) : null}
-        {importer?.supports.includes("file") ? (
-          <>
-            <label className="ui-field">
-              <span className="ui-field__label">{t("keyImport.page.label.file", { defaultValue: "文件" })}</span>
-              <input className="ui-input" type="file" onChange={onFile} />
-              {fileName ? (
-                <span className="ui-field__hint">
-                  {t("keyImport.page.filePicked", { defaultValue: "已选择：" })}
-                  {fileName}
-                  {" "}
-                  <button
-                    type="button"
-                    className="import-page__clear"
-                    onClick={clearFile}
-                  >
-                    {t("keyImport.page.action.clear", { defaultValue: "清除" })}
-                  </button>
-                </span>
-              ) : null}
-            </label>
-            {fileNeedsPassword && fileBytes ? (
-              <TextInput
-                label={t("keyImport.page.label.password", { defaultValue: "备份文件密码" })}
-                type="password"
-                autoComplete="off"
-                value={password}
-                onChange={(e) => setPassword(e.currentTarget.value)}
-                placeholder={t("keyImport.page.placeholder.password", { defaultValue: "加密 JSON 文件的密码" })}
-              />
-            ) : null}
-          </>
+        {showFileInput ? (
+          <FilePicker
+            fileName={state.fileName}
+            onFile={onFile}
+            onClear={clearFile}
+            t={t}
+          />
         ) : null}
-        <Button
-          onClick={parse}
-          loading={busy}
-          disabled={!importer || (fileNeedsPassword && !password)}
-        >
+        {showPassword ? (
+          <TextInput
+            label={t("keyImport.page.label.importPassword", { defaultValue: "导入源密码" })}
+            type="password"
+            autoComplete="off"
+            value={state.password}
+            onChange={(e) =>
+              dispatch({ type: "set-password", password: e.currentTarget.value })
+            }
+            placeholder={t("keyImport.page.placeholder.importPassword", {
+              defaultValue: "加密 JSON 的密码"
+            })}
+          />
+        ) : null}
+        <Button onClick={parse} loading={busy} disabled={!canParse}>
           {t("keyImport.page.action.parse", { defaultValue: "解析" })}
         </Button>
-        {error ? <p className="import-page__error">{error}</p> : null}
+        {state.error ? <p className="import-page__error">{state.error}</p> : null}
       </section>
-      {result ? (
+      {state.result ? (
         <section className="import-page__confirm">
           <h3>{t("keyImport.page.step.confirm", { defaultValue: "3. 确认导入" })}</h3>
           <p>
             {t("keyImport.page.detected", { defaultValue: "检测到：" })}
-            {result.detectedFormat}
-            {result.summary ? ` · ${host.i18n.text(result.summary)}` : ""}
+            {state.result.detectedFormat}
+            {state.result.summary ? ` · ${host.i18n.text(state.result.summary)}` : ""}
           </p>
           <p>
             {t("keyImport.page.derived", { defaultValue: "派生地址：" })}
-            {result.address || t("keyImport.page.derivedPending", { defaultValue: "等待业务插件回填" })}
+            {state.result.address ||
+              t("keyImport.page.derivedPending", { defaultValue: "等待业务插件回填" })}
           </p>
           <TextInput
             label={t("keyImport.page.label.label", { defaultValue: "标签" })}
-            value={label}
-            onChange={(e) => setLabel(e.currentTarget.value)}
+            value={state.label}
+            onChange={(e) => dispatch({ type: "set-label", label: e.currentTarget.value })}
             placeholder={t("keyImport.page.placeholder.label", { defaultValue: "例如 主钱包 / 冷钱包" })}
           />
-          <Button onClick={save} loading={busy} disabled={!result}>
+          <Button onClick={save} loading={busy} disabled={!state.result}>
             {t("keyImport.page.action.save", { defaultValue: "保存到 Vault" })}
           </Button>
         </section>
       ) : (
-        !result && (
+        !state.result && (
           <EmptyState
             title={t("keyImport.page.empty.title", { defaultValue: "等待解析" })}
             description={t("keyImport.page.empty.desc", { defaultValue: "解析成功后这里会显示派生地址和确认按钮。" })}
@@ -254,5 +299,86 @@ export function ImportPage() {
         )
       )}
     </div>
+  );
+}
+
+/** JSON importer 专属输入区：mode 切换 + file / text 分支。 */
+function JsonModeInputs(props: {
+  state: JsonImportState;
+  dispatch: React.Dispatch<Parameters<typeof reduceJsonImport>[1]>;
+  onFile: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
+  onTextChange: (value: string) => void;
+  t: (key: string, opts?: { defaultValue?: string }) => string;
+}) {
+  const { state, dispatch, onFile, onTextChange, t } = props;
+  return (
+    <>
+      <Select
+        label={t("keyImport.page.label.inputMode", { defaultValue: "输入方式" })}
+        value={state.jsonInputMode}
+        onChange={(e) =>
+          dispatch({
+            type: "switch-input-mode",
+            next: (e.currentTarget.value as JsonInputMode) ?? "file"
+          })
+        }
+        options={[
+          {
+            value: "file",
+            label: t("keyImport.page.option.jsonFile", { defaultValue: "JSON 文件" })
+          },
+          {
+            value: "text",
+            label: t("keyImport.page.option.jsonText", { defaultValue: "JSON 文本" })
+          }
+        ]}
+      />
+      {state.jsonInputMode === "text" ? (
+        <TextArea
+          label={t("keyImport.page.label.jsonText", { defaultValue: "JSON 文本" })}
+          value={state.text}
+          onChange={(e) => onTextChange(e.currentTarget.value)}
+          placeholder={t("keyImport.page.placeholder.jsonText", {
+            defaultValue: "粘贴从钱包导出的 JSON 内容"
+          })}
+          hint={t("keyImport.page.hint.jsonText", {
+            defaultValue:
+              "切换输入方式会清空当前文件 / 文本内容、密码草稿与解析结果。"
+          })}
+        />
+      ) : (
+        <FilePicker
+          fileName={state.fileName}
+          onFile={onFile}
+          onClear={() => dispatch({ type: "clear-file" })}
+          t={t}
+        />
+      )}
+    </>
+  );
+}
+
+/** 通用文件选择控件。 */
+function FilePicker(props: {
+  fileName: string | null;
+  onFile: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
+  onClear: () => void;
+  t: (key: string, opts?: { defaultValue?: string }) => string;
+}) {
+  const { fileName, onFile, onClear, t } = props;
+  return (
+    <label className="ui-field">
+      <span className="ui-field__label">{t("keyImport.page.label.file", { defaultValue: "文件" })}</span>
+      <input className="ui-input" type="file" onChange={onFile} />
+      {fileName ? (
+        <span className="ui-field__hint">
+          {t("keyImport.page.filePicked", { defaultValue: "已选择：" })}
+          {fileName}{" "}
+          <button type="button" className="import-page__clear" onClick={onClear}>
+            {t("keyImport.page.action.clear", { defaultValue: "清除" })}
+          </button>
+        </span>
+      ) : null}
+    </label>
   );
 }

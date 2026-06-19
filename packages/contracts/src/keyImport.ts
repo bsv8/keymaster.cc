@@ -7,12 +7,14 @@ import type { I18nText } from "./i18n.js";
 
 /**
  * Importer 输入类型。
- * 设计缘由：加密文件（如 bsv8 envelope）的备份密码属于本次 parse 的瞬时输入，
- * 不能放到 importer 实例或 React 全局状态里；它只在 file input 上随本次解析
- * 一次性传递，parse 结束后由调用方负责清空。
+ * 设计缘由：加密 JSON（bsv8 envelope 等）的备份密码属于**本次 parse 的瞬时输入**，
+ * 不能放到 importer 实例或 React 全局状态里。`password` 是输入的属性，而不是
+ * importer 的属性：文本与文件两种输入都可能携带它（例如 JSON 文本如果是一段
+ * bsv8 envelope，仍然需要在 parse 时随输入一起提供密码）。parse 结束后由
+ * 调用方负责清空。
  */
 export type KeyImportInput =
-  | { kind: "text"; text: string }
+  | { kind: "text"; text: string; password?: string }
   | { kind: "file"; name: string; content: Uint8Array; password?: string };
 
 /** 单条解析结果。 */

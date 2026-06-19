@@ -82,6 +82,19 @@ button { font-family: inherit; }
   width: 100%;
   font-family: inherit;
 }
+.ui-textarea {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 10px;
+  width: 100%;
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 120px;
+}
 .ui-field { display: block; margin-bottom: var(--space); }
 .ui-field__label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 4px; }
 .ui-field__hint { font-size: 12px; color: var(--text-dim); margin-top: 4px; display: block; }

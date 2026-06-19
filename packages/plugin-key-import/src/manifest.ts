@@ -23,7 +23,7 @@ import { ImportPage } from "./ImportPage.js";
 
 export const KEY_IMPORT_CAPABILITY = "key-import.platform";
 
-const keyImportResources: I18nPluginResources = {
+export const keyImportResources: I18nPluginResources = {
   namespace: "keyImport",
   resources: {
     en: {
@@ -41,6 +41,10 @@ const keyImportResources: I18nPluginResources = {
       "keyImport.page.label.file": "File",
       "keyImport.page.label.password": "Backup file password",
       "keyImport.page.placeholder.password": "Password for the encrypted JSON file",
+      // 硬切换 012 验收修复（施工单 001 复审）：密码 label 在文件 / 文本
+      // 两种输入方式下都用中性"Import-source password"；不再写死"file"。
+      "keyImport.page.label.importPassword": "Import-source password",
+      "keyImport.page.placeholder.importPassword": "Password for the encrypted JSON",
       "keyImport.page.action.clear": "Clear",
       "keyImport.page.action.parse": "Parse",
       "keyImport.page.action.save": "Save to Vault",
@@ -55,6 +59,16 @@ const keyImportResources: I18nPluginResources = {
       "keyImport.page.err.noKey": "No private key parsed",
       "keyImport.page.err.parse": "Parse failed",
       "keyImport.page.err.save": "Save failed",
+      "keyImport.page.err.noFile": "Please pick a file first",
+      // 硬切换 012（施工单 001）：JSON importer 的输入方式切换。
+      "keyImport.page.label.inputMode": "Input mode",
+      "keyImport.page.option.jsonFile": "JSON file",
+      "keyImport.page.option.jsonText": "JSON text",
+      "keyImport.page.label.jsonText": "JSON text",
+      "keyImport.page.placeholder.jsonText":
+        "Paste the JSON content exported from your wallet",
+      "keyImport.page.hint.jsonText":
+        "Switching input mode clears the current file/text content, password draft, and parsed result.",
       "keyImport.page.filePicked": "Selected: ",
       "keyImport.picker.empty": "No import formats available.",
       "keyImport.page.label.supports": "Supports: ",
@@ -78,6 +92,10 @@ const keyImportResources: I18nPluginResources = {
       "keyImport.page.label.file": "文件",
       "keyImport.page.label.password": "备份文件密码",
       "keyImport.page.placeholder.password": "加密 JSON 文件的密码",
+      // 硬切换 012 验收修复（施工单 001 复审）：密码 label 在文件 / 文本
+      // 两种输入方式下都用中性"导入源密码"；不再写死"文件"。
+      "keyImport.page.label.importPassword": "导入源密码",
+      "keyImport.page.placeholder.importPassword": "加密 JSON 的密码",
       "keyImport.page.action.clear": "清除",
       "keyImport.page.action.parse": "解析",
       "keyImport.page.action.save": "保存到 Vault",
@@ -92,6 +110,15 @@ const keyImportResources: I18nPluginResources = {
       "keyImport.page.err.noKey": "未解析出私钥",
       "keyImport.page.err.parse": "解析失败",
       "keyImport.page.err.save": "保存失败",
+      "keyImport.page.err.noFile": "请先选择文件",
+      // 硬切换 012（施工单 001）：JSON importer 的输入方式切换。
+      "keyImport.page.label.inputMode": "输入方式",
+      "keyImport.page.option.jsonFile": "JSON 文件",
+      "keyImport.page.option.jsonText": "JSON 文本",
+      "keyImport.page.label.jsonText": "JSON 文本",
+      "keyImport.page.placeholder.jsonText": "粘贴从钱包导出的 JSON 内容",
+      "keyImport.page.hint.jsonText":
+        "切换输入方式会清空当前文件 / 文本内容、密码草稿与解析结果。",
       "keyImport.page.filePicked": "已选择：",
       "keyImport.picker.empty": "没有可用的导入器。",
       "keyImport.page.label.supports": "支持：",

@@ -5,8 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./manifest": "./src/manifest.ts",
     "./ImporterPicker": "./src/ImporterPicker.tsx",
-    "./importFileSniff": "./src/importFileSniff.ts"
+    "./importFileSniff": "./src/importFileSniff.ts",
+    "./jsonImportStateMachine": "./src/jsonImportStateMachine.ts",
+    "./wizardImportStateMachine": "./src/wizardImportStateMachine.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

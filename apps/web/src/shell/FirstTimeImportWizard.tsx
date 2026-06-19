@@ -1,5 +1,5 @@
 // apps/web/src/shell/FirstTimeImportWizard.tsx
-// 首启"导入私钥"向导（硬切换 011）：
+// 首启"导入私钥"向导（硬切换 011 + 012）：
 //   业务流程固定为：
 //     1) 选择导入类型（importer）
 //     2) 输入 / 解析导入材料
@@ -25,6 +25,18 @@
 //   - importRequiredPassword === false（明文路径）：
 //       强制"新密码 + 确认密码"；不显示"使用同一密码"勾选。
 //
+// 硬切换 012（施工单 001）：JSON importer 同时支持 file 与 text 两种来源；
+// 第 2 步先让用户选"输入方式"，再渲染对应控件；切换方式 / 切换 importer /
+// 重新解析时必须清掉旧模式残留的所有状态。`resolvedImportPassword` 的复用
+// 语义对文本 / 文件完全一致。
+//
+// 硬切换 012 验收修复（施工单 001 复审）：
+//   - 状态机拆分为两层 reducer：importState（plugin-key-import 提供的
+//     纯函数 reducer）+ wizard 顶层 reducer（包裹 step / 密码决策 /
+//     vaultPassword*）。所有验收关键不变量都用纯函数测试覆盖。
+//   - 密码 label 不再固定"备份文件密码"：JSON 文本模式下显示"导入源密码"。
+//   - isJsonImporter 走显式 id 判断（不再靠 supports 启发式）。
+//
 // 设计缘由：
 //   - 解析失败时 importPasswordDraft 必须保留以便用户重试；
 //     解析成功时才把草稿"转存"为 resolvedImportPassword。
@@ -45,8 +57,8 @@
 //   - 不能在第 4 步复用时仍渲染密码输入框。
 //   - 不能在"明文导入"路径下保留"单输入框无 confirm"的新密码流程。
 
-import { useEffect, useState } from "react";
-import { Button, PageHeader, TextInput } from "@keymaster/ui";
+import { useEffect, useReducer } from "react";
+import { Button, PageHeader, Select, TextArea, TextInput } from "@keymaster/ui";
 import {
   useCapability,
   useI18n,
@@ -60,7 +72,22 @@ import {
   type VaultService
 } from "@keymaster/contracts";
 import { ImporterPicker } from "@keymaster/plugin-key-import/ImporterPicker";
-import { peekBsv8Envelope } from "@keymaster/plugin-key-import/importFileSniff";
+import {
+  peekBsv8EnvelopeBytes,
+  peekBsv8EnvelopeText
+} from "@keymaster/plugin-key-import/importFileSniff";
+import {
+  buildImportInput,
+  isJsonImporter,
+  type JsonInputMode
+} from "@keymaster/plugin-key-import/jsonImportStateMachine";
+import {
+  initialWizardState,
+  prevStepFor,
+  reduceWizard,
+  STEP_ORDER,
+  type WizardState
+} from "@keymaster/plugin-key-import/wizardImportStateMachine";
 import {
   StepProgress,
   type StepDefinition
@@ -69,15 +96,7 @@ import {
 /** Importer parse 抛出的密码缺失错误——和 ImportPage 保持一致。 */
 const PASSWORD_REQUIRED_MSG = "Password is required for encrypted key file";
 
-type Step = "pick-importer" | "input" | "confirm-key" | "set-password";
-
-const STEP_ORDER: ReadonlyArray<Step> = [
-  "pick-importer",
-  "input",
-  "confirm-key",
-  "set-password"
-];
-
+/** 与 wizard 状态机的 step 顺序一一对应的 label 定义。 */
 const STEP_DEFINITIONS: ReadonlyArray<StepDefinition> = [
   {
     id: "pick-importer",
@@ -101,20 +120,6 @@ const STEP_DEFINITIONS: ReadonlyArray<StepDefinition> = [
   }
 ];
 
-/** 哪个步骤触发"返回"。每一步的返回目标不同。 */
-function prevStepFor(step: Step): Step | null {
-  switch (step) {
-    case "pick-importer":
-      return null;
-    case "input":
-      return "pick-importer";
-    case "confirm-key":
-      return "input";
-    case "set-password":
-      return "confirm-key";
-  }
-}
-
 export interface FirstTimeImportWizardProps {
   /** 用户点"返回"回到欢迎页时触发。 */
   onCancel(): void;
@@ -127,167 +132,207 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
   // 触发 languageChanged 重渲染。
   useI18n().language();
 
-  const [step, setStep] = useState<Step>("pick-importer");
+  // 硬切换 012 验收修复：所有 wizard 状态机收敛到 reducer；
+  // 组件本身只负责发起 async parse + 调用 vault.createVaultWithImportedKey。
+  const [state, dispatch] = useReducer(reduceWizard, initialWizardState);
+  const step = state.step;
+  const importer = state.importState.importer;
+  const jsonInputMode = state.importState.jsonInputMode;
+  const importPasswordDraft = state.importState.password;
 
-  // Step 1: 选择 importer
-  const [importer, setImporter] = useState<KeyImporter | undefined>(undefined);
+  // 解析成功后由 useEffect 把 importPasswordDraft 转存为
+  // resolvedImportPassword 的逻辑已并入 reducer 的 `parse-resolved`
+  // action；这里只剩一个无害的 language() 订阅用于触发重渲染。
 
-  // Step 2: 输入
-  const [text, setText] = useState("");
-  const [fileName, setFileName] = useState<string | null>(null);
-  const [fileBytes, setFileBytes] = useState<Uint8Array | null>(null);
-  /**
-   * 嗅探 / fail-open 综合判断的"当前文件是否需要导入源密码"。
-   * 初始 false（默认不显示密码框）；peekBsv8Envelope 命中时或
-   * parse() 抛 PASSWORD_REQUIRED_MSG 时升 true。**不**在 importer
-   * 级静态声明。
-   */
-  const [fileNeedsPassword, setFileNeedsPassword] = useState(false);
-  /**
-   * 硬切换 011：第 2 步密码输入框的草稿。**解析失败时必须保留**，
-   * 方便用户重试；**解析成功后**才转存为 resolvedImportPassword。
-   */
-  const [importPasswordDraft, setImportPasswordDraft] = useState("");
-
-  // Step 3: 解析结果 / 确认
-  const [parsed, setParsed] = useState<KeyImportResult | null>(null);
-  const [label, setLabel] = useState("");
-
-  /**
-   * 本次首启导入的输入**实际**是否需要导入源密码。仅在 step 4 用于
-   * 决定是否展示"使用同一密码"勾选——如果本次没用过导入源密码，
-   * 那个勾选就毫无意义。
-   * 派生规则：
-   *   - 文本输入（WIF / Hex）：parse 成功 ⇒ false。
-   *   - 文件输入（json-file）：parse 成功 ⇒ fileNeedsPassword（如果
-   *     这次解析是 bsv8 envelope 走的，就是 true；明文 JSON 走的就是
-   *     false）。
-   * 失败回退：如果 parse 抛了非密码错误，本字段保持原值；向导回到
-   * step 1 / 2 时由 resetWizard 清零。
-   */
-  const [importRequiredPassword, setImportRequiredPassword] = useState(false);
-
-  /**
-   * 硬切换 011：parse 成功后保存"已实际用于导入解析的密码"。
-   *   - 只活在 wizard 生命周期内。
-   *   - 重新选 importer / 重新选文件 / 重新解析时**必须**清空，
-   *     否则第 4 步会基于已失效的旧密码复用。
-   *   - 关闭向导或刷新页面后随组件卸载丢弃。
-   */
-  const [resolvedImportPassword, setResolvedImportPassword] = useState<
-    string | null
-  >(null);
-
-  // Step 4: 系统锁屏密码
-  /**
-   * "使用同一密码"勾选：
-   *   - 当 importRequiredPassword === true 时才有意义（明文路径不显示）。
-   *   - 默认 true：硬切换 011 强调"复用"是产品意图，**不能**让用户每
-   *     次都要重新输入。
-   *   - 取消勾选时清空新设密码草稿；勾回时清空 vaultPasswordDraft /
-   *     vaultPasswordConfirmDraft。
-   */
-  const [useSamePassword, setUseSamePassword] = useState(true);
-  const [vaultPasswordDraft, setVaultPasswordDraft] = useState("");
-  const [vaultPasswordConfirmDraft, setVaultPasswordConfirmDraft] = useState("");
-
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  // 解析成功 → 把 importPasswordDraft 提升为 resolvedImportPassword。
-  // 这里**不**再无条件清空可复用的成功密码；只清 importPasswordDraft
-  // 字段本身以免 UI 上"残留"明文（resolvedImportPassword 是另一份
-  // 受控状态）。
   useEffect(() => {
-    if (parsed) {
-      setImportRequiredPassword(fileNeedsPassword);
-      // 解析成功 + 确实需要密码 ⇒ 把已用于解析的密码转存为
-      // resolvedImportPassword。**不**写入长期 state、不写
-      // localStorage / IndexedDB / URL。
-      if (fileNeedsPassword) {
-        setResolvedImportPassword(importPasswordDraft);
-      } else {
-        // 重新解析后输入不再需要密码——清掉旧 resolvedImportPassword。
-        setResolvedImportPassword(null);
-      }
-      setImportPasswordDraft("");
-    }
-    // 故意只依赖 parsed：fileNeedsPassword / importPasswordDraft 在
-    // parse 成功后已经被"读取"过一次，再变就无关 wizard 的当前决定。
+    // 仅用于在语言切换时强制 wizard 重渲染。
+    void host.i18n.language();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [parsed]);
+  }, [host.i18n.language()]);
 
   async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.currentTarget.files?.[0];
     if (!f) return;
     const bytes = new Uint8Array(await f.arrayBuffer());
-    setFileName(f.name);
-    setFileBytes(bytes);
-    // 重新选文件 ⇒ 旧的密码决策已失效：清掉 resolvedImportPassword、
-    // importRequiredPassword、importPasswordDraft。
-    setResolvedImportPassword(null);
-    setImportRequiredPassword(false);
-    // fail-open 嗅探：选完文件后立即用 peekBsv8Envelope 判断是否像
-    // bsv8 envelope。如果命中，预先打开密码框；如果不命中，保持隐藏。
-    setFileNeedsPassword(peekBsv8Envelope(bytes));
-    setImportPasswordDraft("");
-    setError(null);
+    dispatch({
+      type: "import",
+      action: {
+        type: "set-file",
+        name: f.name,
+        bytes,
+        needsPassword: peekBsv8EnvelopeBytes(bytes)
+      }
+    });
   }
 
   function clearFile() {
-    setFileName(null);
-    setFileBytes(null);
-    setFileNeedsPassword(false);
-    setImportPasswordDraft("");
-    setResolvedImportPassword(null);
-    setImportRequiredPassword(false);
-  }
-
-  function resetWizard() {
-    setStep("pick-importer");
-    setImporter(undefined);
-    setText("");
-    setFileName(null);
-    setFileBytes(null);
-    setFileNeedsPassword(false);
-    setImportPasswordDraft("");
-    setParsed(null);
-    setLabel("");
-    setImportRequiredPassword(false);
-    setResolvedImportPassword(null);
-    setUseSamePassword(true);
-    setVaultPasswordDraft("");
-    setVaultPasswordConfirmDraft("");
-    setError(null);
-  }
-
-  /** 切换 importer：必须清掉旧密码决策。 */
-  function pickImporter(imp: KeyImporter) {
-    setImporter(imp);
-    setError(null);
-    setFileBytes(null);
-    setFileName(null);
-    setFileNeedsPassword(false);
-    setImportPasswordDraft("");
-    setImportRequiredPassword(false);
-    setResolvedImportPassword(null);
-    setUseSamePassword(true);
-    setVaultPasswordDraft("");
-    setVaultPasswordConfirmDraft("");
+    dispatch({ type: "import", action: { type: "clear-file" } });
   }
 
   /**
-   * 用户点击 step progress 上的某一步。仅允许跳到**已完成**或
-   * **当前**步骤。返回未来步骤被 UI 禁点保护；这里再做一次保险。
+   * 硬切换 012：文本输入实时嗅探 envelope，命中即升起密码框。
+   * 与文件模式共用同一套"是否像 envelope"的嗅探逻辑。
    */
+  function onTextChange(value: string) {
+    const sniff = isJsonImporter(importer) ? peekBsv8EnvelopeText(value) : false;
+    dispatch({ type: "import", action: { type: "set-text", text: value, needsPassword: sniff } });
+  }
+
+  async function parse() {
+    dispatch({ type: "import", action: { type: "parse-start" } });
+    try {
+      const input = buildImportInput(state.importState);
+      if (!input || !importer) {
+        dispatch({
+          type: "import",
+          action: {
+            type: "parse-failure",
+            error: t("keyImport.page.err.noFile", { defaultValue: "请先选择 JSON 文件" })
+          }
+        });
+        return;
+      }
+      const r = await importer.parse(input);
+      if (r.length === 0) {
+        dispatch({
+          type: "import",
+          action: {
+            type: "parse-failure",
+            error: t("keyImport.page.err.noKey", { defaultValue: "未解析出私钥" })
+          }
+        });
+        return;
+      }
+      const result = r[0]!;
+      // reducer 内一并处理：转存 resolvedImportPassword + 跳到 confirm-key。
+      dispatch({
+        type: "parse-resolved",
+        result,
+        needsPassword: state.importState.needsPassword,
+        importPasswordDraft
+      });
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : t("keyImport.page.err.parse", { defaultValue: "解析失败" });
+      // fail-open：parse-failure reducer 已会处理 PASSWORD_REQUIRED_MSG。
+      dispatch({ type: "import", action: { type: "parse-failure", error: msg } });
+    }
+  }
+
+  function gotoPassword() {
+    if (!state.importState.result) return;
+    setLabelDefault();
+    dispatch({ type: "goto-step", step: "set-password" });
+  }
+
+  function setLabelDefault() {
+    if (!state.label.trim()) {
+      dispatch({ type: "set-label", value: `key-${Date.now()}` });
+    }
+  }
+
+  async function finish() {
+    if (!state.importState.result) return;
+
+    // 硬切换 011：根据 useSamePassword 显式选择最终的 vaultPassword：
+    //   - useSamePassword === true ⇒ 复用 resolvedImportPassword。
+    //   - useSamePassword === false ⇒ 用户新设密码。
+    let finalVaultPassword: string;
+    if (state.importRequiredPassword && state.useSamePassword) {
+      if (!state.resolvedImportPassword) {
+        // 理论不可能到这里：useSamePassword === true 但解析时没有
+        // 保存密码——保留一条防御性提示。
+        dispatch({
+          type: "import",
+          action: {
+            type: "parse-failure",
+            error: t("keyImport.page.err.parse", { defaultValue: "解析失败" })
+          }
+        });
+        return;
+      }
+      finalVaultPassword = state.resolvedImportPassword;
+    } else {
+      if (state.vaultPasswordDraft.length < 8) {
+        dispatch({
+          type: "import",
+          action: {
+            type: "parse-failure",
+            error: t("shell.locked.passwordTooShort", { defaultValue: "密码至少 8 位" })
+          }
+        });
+        return;
+      }
+      if (state.vaultPasswordDraft !== state.vaultPasswordConfirmDraft) {
+        dispatch({
+          type: "import",
+          action: {
+            type: "parse-failure",
+            error: t("shell.locked.passwordMismatch", { defaultValue: "两次密码不一致" })
+          }
+        });
+        return;
+      }
+      finalVaultPassword = state.vaultPasswordDraft;
+    }
+
+    dispatch({ type: "import", action: { type: "parse-start" } });
+    try {
+      const parsed = state.importState.result;
+      // 把 KeyImportResult 收敛为 PrivateKeyMaterial——只把 hex / wif 喂给 Vault。
+      const material: PrivateKeyMaterial = {
+        hex: parsed.material.hex,
+        wif: parsed.material.wif
+      };
+      await vault.createVaultWithImportedKey({
+        vaultPassword: finalVaultPassword,
+        key: {
+          label: state.label.trim() || `key-${Date.now()}`,
+          material,
+          format: parsed.detectedFormat,
+          capabilities: ["p2pkh"],
+          source: importer?.id
+        }
+      });
+      // 成功：vault 内部会切到 unlocked，App 卸载 LockedShell。
+      dispatch({ type: "reset" });
+    } catch (err) {
+      if (err instanceof KeyPersistedButActivationFailedError) {
+        dispatch({ type: "reset" });
+        return;
+      }
+      dispatch({
+        type: "import",
+        action: {
+          type: "parse-failure",
+          error:
+            err instanceof Error
+              ? err.message
+              : t("shell.locked.createInitialKeyFailed", { defaultValue: "创建钱包失败" })
+        }
+      });
+    } finally {
+      // 清掉新设密码草稿，避免本 wizard 重用旧值。
+      dispatch({
+        type: "set-use-same-password",
+        value: state.useSamePassword
+      });
+    }
+  }
+
+  // ---- step progress 派生 ----
+  const currentIndex = STEP_ORDER.indexOf(step);
+  const doneUpToIndex = Math.max(currentIndex, 0);
+
   function gotoStepIndex(i: number) {
     const cur = STEP_ORDER.indexOf(step);
     if (i < 0) return;
     if (i > cur) return; // 禁止向前跳
     const target = STEP_ORDER[i];
     if (!target) return;
-    setError(null);
-    setStep(target);
+    dispatch({ type: "goto-step", step: target });
   }
 
   function gotoPrev() {
@@ -298,143 +343,29 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
       onCancel();
       return;
     }
-    setError(null);
-    setStep(prev);
+    dispatch({ type: "goto-prev" });
   }
 
-  async function parse() {
-    if (!importer) {
-      setError(t("keyImport.page.err.noImporter", { defaultValue: "请先选择导入方式" }));
-      return;
+  // 当前 JSON 模式下解析按钮是否可点：文本模式需要非空文本，文件模式需要已选文件。
+  const canParse = (() => {
+    if (!importer) return false;
+    if (isJsonImporter(importer)) {
+      if (jsonInputMode === "text") return state.importState.text.trim().length > 0;
+      return Boolean(state.importState.fileBytes);
     }
-    setError(null);
-    setBusy(true);
-    try {
-      const input = fileBytes
-        ? {
-            kind: "file" as const,
-            name: fileName ?? "blob",
-            content: fileBytes,
-            password: fileNeedsPassword ? importPasswordDraft : undefined
-          }
-        : { kind: "text" as const, text };
-      const r = await importer.parse(input);
-      if (r.length === 0) {
-        setError(t("keyImport.page.err.noKey", { defaultValue: "未解析出私钥" }));
-        return;
-      }
-      setParsed(r[0] ?? null);
-      // resolvedImportPassword / importRequiredPassword 由 useEffect 在
-      // parsed 变化时根据 fileNeedsPassword 派生；这里不需要手动设。
-      setStep("confirm-key");
-    } catch (err) {
-      const msg =
-        err instanceof Error
-          ? err.message
-          : t("keyImport.page.err.parse", { defaultValue: "解析失败" });
-      // fail-open：解析失败如果是"密码缺失"——通常是 bsv8 envelope 未
-      // 嗅探到但实际是加密——立即把密码框升上来，让用户输入后再点
-      // 解析。ImportPage 也是这个语义。
-      if (fileBytes && msg === PASSWORD_REQUIRED_MSG) {
-        setFileNeedsPassword(true);
-      }
-      // 解析失败时**不**写 resolvedImportPassword（即便 draft 已填）；
-      // 由 resetWizard / 重新选文件 / 重新解析时再清。
-      setError(msg);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  function gotoPassword() {
-    if (!parsed) return;
-    setError(null);
-    setLabel((prev) => (prev.trim() ? prev : `key-${Date.now()}`));
-    setStep("set-password");
-  }
-
-  async function finish() {
-    if (!parsed) return;
-    setError(null);
-
-    // 硬切换 011：根据 useSamePassword 显式选择最终的 vaultPassword：
-    //   - useSamePassword === true ⇒ 复用 resolvedImportPassword。
-    //   - useSamePassword === false ⇒ 用户新设密码。
-    let finalVaultPassword: string;
-    if (importRequiredPassword && useSamePassword) {
-      if (!resolvedImportPassword) {
-        // 理论不可能到这里：useSamePassword === true 但解析时没有
-        // 保存密码——保留一条防御性提示。
-        setError(
-          t("keyImport.page.err.parse", { defaultValue: "解析失败" })
-        );
-        return;
-      }
-      finalVaultPassword = resolvedImportPassword;
-    } else {
-      // 新设密码场景：必须是双输入框模式（明文 / 取消复用）。
-      if (vaultPasswordDraft.length < 8) {
-        setError(t("shell.locked.passwordTooShort", { defaultValue: "密码至少 8 位" }));
-        return;
-      }
-      if (vaultPasswordDraft !== vaultPasswordConfirmDraft) {
-        setError(t("shell.locked.passwordMismatch", { defaultValue: "两次密码不一致" }));
-        return;
-      }
-      finalVaultPassword = vaultPasswordDraft;
-    }
-
-    setBusy(true);
-    try {
-      // 把 KeyImportResult 收敛为 PrivateKeyMaterial——只把 hex / wif 喂给 Vault。
-      // address / network / detectedFormat / summary 不进 Vault；Vault 不感知
-      // 这些业务字段。
-      const material: PrivateKeyMaterial = {
-        hex: parsed.material.hex,
-        wif: parsed.material.wif
-      };
-      await vault.createVaultWithImportedKey({
-        vaultPassword: finalVaultPassword,
-        key: {
-          label: label.trim() || `key-${Date.now()}`,
-          material,
-          format: parsed.detectedFormat,
-          capabilities: ["p2pkh"],
-          source: importer?.id
-        }
-      });
-      // 成功：vault 内部会切到 unlocked，App 卸载 LockedShell，导入 wizard 自然消失。
-      // 不需要主动 push 路由——UnlockedShell 自己渲染默认首页。
-      // 关闭前清掉本 wizard 的所有内存状态（包括
-      // resolvedImportPassword / importPasswordDraft）。
-      resetWizard();
-    } catch (err) {
-      if (err instanceof KeyPersistedButActivationFailedError) {
-        // 可恢复：首 Key 已落库，active 没切上。Vault 已宣布 unlocked，
-        // App 切到 UnlockedShell，AppShell / VaultSettingsPage 会展示
-        // notice。本 wizard 不必再做任何事。
-        resetWizard();
-        return;
-      }
-      setError(
-        err instanceof Error
-          ? err.message
-          : t("shell.locked.createInitialKeyFailed", { defaultValue: "创建钱包失败" })
-      );
-    } finally {
-      setBusy(false);
-      setVaultPasswordDraft("");
-      setVaultPasswordConfirmDraft("");
-    }
-  }
-
-  // ---- step progress 派生 ----
-  const currentIndex = STEP_ORDER.indexOf(step);
-  // 已完成步骤的最高 exclusive index：当前步骤之前的所有步骤视为完成。
-  // 关键约束：UI 不能让用户跳到尚未满足前置条件的步骤。
-  const doneUpToIndex = Math.max(currentIndex, 0);
+    return true;
+  })();
 
   // ----------------- 渲染 -----------------
+  // 派生 boolean：方便 JSX 内 if-else 风格写法。
+  const showJsonModeToggle = isJsonImporter(importer);
+  const showTextInput =
+    Boolean(importer) && !showJsonModeToggle && importer!.supports.includes("text");
+  const showFileInput =
+    Boolean(importer) && !showJsonModeToggle && importer!.supports.includes("file");
+  const showPassword =
+    (showJsonModeToggle && state.importState.needsPassword) ||
+    (Boolean(importer) && !showJsonModeToggle && state.importState.needsPassword && Boolean(state.importState.fileBytes));
 
   if (step === "pick-importer") {
     return (
@@ -457,18 +388,18 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
         <section className="first-time-import__picker">
           <ImporterPicker
             selected={importer?.id}
-            onSelect={pickImporter}
+            onSelect={(imp) => dispatch({ type: "pick-importer", importer: imp })}
           />
         </section>
-        {error ? <p className="first-time-import__error">{error}</p> : null}
+        {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
           <Button
-            onClick={() => setStep("input")}
+            onClick={() => dispatch({ type: "goto-step", step: "input" })}
             disabled={!importer}
           >
             {t("common.action.next", { defaultValue: "下一步" })}
           </Button>
-          <Button variant="ghost" onClick={gotoPrev} disabled={busy}>
+          <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
             {t("common.action.back", { defaultValue: "返回" })}
           </Button>
         </div>
@@ -494,27 +425,107 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
           })}
         />
         <section className="first-time-import__input">
-          {importer?.supports.includes("text") ? (
+          {showJsonModeToggle ? (
+            <>
+              <Select
+                label={t("keyImport.page.label.inputMode", { defaultValue: "输入方式" })}
+                value={jsonInputMode}
+                onChange={(e) =>
+                  dispatch({
+                    type: "import",
+                    action: {
+                      type: "switch-input-mode",
+                      next: (e.currentTarget.value as JsonInputMode) ?? "file"
+                    }
+                  })
+                }
+                options={[
+                  {
+                    value: "file",
+                    label: t("keyImport.page.option.jsonFile", { defaultValue: "JSON 文件" })
+                  },
+                  {
+                    value: "text",
+                    label: t("keyImport.page.option.jsonText", { defaultValue: "JSON 文本" })
+                  }
+                ]}
+              />
+              {jsonInputMode === "text" ? (
+                <TextArea
+                  label={t("keyImport.page.label.jsonText", { defaultValue: "JSON 文本" })}
+                  value={state.importState.text}
+                  onChange={(e) => onTextChange(e.currentTarget.value)}
+                  placeholder={t("keyImport.page.placeholder.jsonText", {
+                    defaultValue: "粘贴从钱包导出的 JSON 内容"
+                  })}
+                  hint={t("keyImport.page.hint.jsonText", {
+                    defaultValue:
+                      "切换输入方式会清空当前文件 / 文本内容、密码草稿与解析结果。"
+                  })}
+                />
+              ) : (
+                <label className="ui-field">
+                  <span className="ui-field__label">
+                    {t("keyImport.page.label.file", { defaultValue: "文件" })}
+                  </span>
+                  <input className="ui-input" type="file" onChange={onFile} />
+                  {state.importState.fileName ? (
+                    <span className="ui-field__hint">
+                      {t("keyImport.page.filePicked", { defaultValue: "已选择：" })}
+                      {state.importState.fileName}{" "}
+                      <button
+                        type="button"
+                        className="import-page__clear"
+                        onClick={clearFile}
+                      >
+                        {t("keyImport.page.action.clear", { defaultValue: "清除" })}
+                      </button>
+                    </span>
+                  ) : null}
+                </label>
+              )}
+              {state.importState.needsPassword ? (
+                <TextInput
+                  label={t("keyImport.page.label.importPassword", {
+                    defaultValue: "导入源密码"
+                  })}
+                  type="password"
+                  autoComplete="off"
+                  value={importPasswordDraft}
+                  onChange={(e) =>
+                    dispatch({
+                      type: "import",
+                      action: { type: "set-password", password: e.currentTarget.value }
+                    })
+                  }
+                  placeholder={t("keyImport.page.placeholder.importPassword", {
+                    defaultValue: "加密 JSON 的密码"
+                  })}
+                />
+              ) : null}
+            </>
+          ) : null}
+          {showTextInput ? (
             <TextInput
               label={t("keyImport.page.label.text", { defaultValue: "文本" })}
-              value={text}
-              onChange={(e) => setText(e.currentTarget.value)}
+              value={state.importState.text}
+              onChange={(e) => onTextChange(e.currentTarget.value)}
               placeholder={t("keyImport.page.placeholder.text", {
                 defaultValue: "粘贴 WIF 或 hex 私钥"
               })}
             />
           ) : null}
-          {importer?.supports.includes("file") ? (
+          {showFileInput ? (
             <>
               <label className="ui-field">
                 <span className="ui-field__label">
                   {t("keyImport.page.label.file", { defaultValue: "文件" })}
                 </span>
                 <input className="ui-input" type="file" onChange={onFile} />
-                {fileName ? (
+                {state.importState.fileName ? (
                   <span className="ui-field__hint">
                     {t("keyImport.page.filePicked", { defaultValue: "已选择：" })}
-                    {fileName}{" "}
+                    {state.importState.fileName}{" "}
                     <button
                       type="button"
                       className="import-page__clear"
@@ -525,16 +536,21 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
                   </span>
                 ) : null}
               </label>
-              {fileNeedsPassword && fileBytes ? (
+              {state.importState.needsPassword && state.importState.fileBytes ? (
                 <TextInput
-                  label={t("keyImport.page.label.password", {
-                    defaultValue: "备份文件密码"
+                  label={t("keyImport.page.label.importPassword", {
+                    defaultValue: "导入源密码"
                   })}
                   type="password"
                   autoComplete="off"
                   value={importPasswordDraft}
-                  onChange={(e) => setImportPasswordDraft(e.currentTarget.value)}
-                  placeholder={t("keyImport.page.placeholder.password", {
+                  onChange={(e) =>
+                    dispatch({
+                      type: "import",
+                      action: { type: "set-password", password: e.currentTarget.value }
+                    })
+                  }
+                  placeholder={t("keyImport.page.placeholder.importPassword", {
                     defaultValue: "加密 JSON 文件的密码"
                   })}
                 />
@@ -542,16 +558,16 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
             </>
           ) : null}
         </section>
-        {error ? <p className="first-time-import__error">{error}</p> : null}
+        {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
           <Button
             onClick={parse}
-            loading={busy}
-            disabled={!importer || (fileNeedsPassword && !importPasswordDraft)}
+            loading={state.importState.busy}
+            disabled={!canParse}
           >
             {t("keyImport.page.action.parse", { defaultValue: "解析" })}
           </Button>
-          <Button variant="ghost" onClick={gotoPrev} disabled={busy}>
+          <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
             {t("common.action.back", { defaultValue: "返回" })}
           </Button>
         </div>
@@ -559,7 +575,8 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     );
   }
 
-  if (step === "confirm-key" && parsed) {
+  if (step === "confirm-key" && state.importState.result) {
+    const parsed = state.importState.result;
     return (
       <div className="first-time-import">
         <StepProgress
@@ -589,19 +606,19 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
           </p>
           <TextInput
             label={t("keyImport.page.label.label", { defaultValue: "标签" })}
-            value={label}
-            onChange={(e) => setLabel(e.currentTarget.value)}
+            value={state.label}
+            onChange={(e) => dispatch({ type: "set-label", value: e.currentTarget.value })}
             placeholder={t("keyImport.page.placeholder.label", {
               defaultValue: "例如 主钱包 / 冷钱包"
             })}
           />
         </section>
-        {error ? <p className="first-time-import__error">{error}</p> : null}
+        {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
         <div className="first-time-import__actions">
           <Button onClick={gotoPassword} disabled={!parsed}>
             {t("common.action.next", { defaultValue: "下一步" })}
           </Button>
-          <Button variant="ghost" onClick={gotoPrev} disabled={busy}>
+          <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
             {t("common.action.back", { defaultValue: "返回" })}
           </Button>
         </div>
@@ -610,15 +627,10 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
   }
 
   // step === "set-password"
-  // 硬切换 011 第 4 步三种渲染模式：
-  //   模式 A：importRequiredPassword === true 且 useSamePassword === true
-  //     ⇒ 复用 resolvedImportPassword。**不**渲染密码输入框。
-  //   模式 B：importRequiredPassword === true 且 useSamePassword === false
-  //     ⇒ "新密码 + 确认密码"。
-  //   模式 C：importRequiredPassword === false
-  //     ⇒ "新密码 + 确认密码"，不显示"使用同一密码"勾选。
   const isReuseMode =
-    importRequiredPassword && useSamePassword && Boolean(resolvedImportPassword);
+    state.importRequiredPassword &&
+    state.useSamePassword &&
+    Boolean(state.resolvedImportPassword);
 
   return (
     <div className="first-time-import">
@@ -638,26 +650,17 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
         })}
       />
       <section className="first-time-import__password">
-        {importRequiredPassword ? (
+        {state.importRequiredPassword ? (
           <label className="ui-field first-time-import__reuse-toggle">
             <input
               type="checkbox"
-              checked={useSamePassword}
-              onChange={(e) => {
-                const next = e.currentTarget.checked;
-                setUseSamePassword(next);
-                if (next) {
-                  // 切到模式 A：清掉所有"新设密码"草稿，最终以
-                  // resolvedImportPassword 为准。
-                  setVaultPasswordDraft("");
-                  setVaultPasswordConfirmDraft("");
-                } else {
-                  // 切到模式 B：清掉 vaultPassword* 草稿，让用户重新
-                  // 输入新密码 + 确认。
-                  setVaultPasswordDraft("");
-                  setVaultPasswordConfirmDraft("");
-                }
-              }}
+              checked={state.useSamePassword}
+              onChange={(e) =>
+                dispatch({
+                  type: "set-use-same-password",
+                  value: e.currentTarget.checked
+                })
+              }
             />
             <span className="first-time-import__reuse-toggle-label">
               {t("shell.import.wizard.useSamePassword", {
@@ -680,7 +683,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
                 {t("shell.import.wizard.reuseLabel", { defaultValue: "将使用的密码" })}
                 {": "}
               </span>
-              <code aria-hidden="true">{"•".repeat(resolvedImportPassword?.length ?? 0)}</code>
+              <code aria-hidden="true">{"•".repeat(state.resolvedImportPassword?.length ?? 0)}</code>
             </p>
             <p className="first-time-import__reuse-origin">
               {t("shell.import.wizard.reuseOrigin", {
@@ -691,28 +694,29 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
         ) : (
           <>
             <p className="first-time-import__new-password-intro">
-              {importRequiredPassword
-                ? t("shell.import.wizard.newPasswordTitle", {
-                    defaultValue: "设置新的本机系统锁屏密码"
-                  })
-                : t("shell.import.wizard.newPasswordTitle", {
-                    defaultValue: "设置新的本机系统锁屏密码"
-                  })}
+              {t("shell.import.wizard.newPasswordTitle", {
+                defaultValue: "设置新的本机系统锁屏密码"
+              })}
             </p>
             <TextInput
               label={t("shell.locked.passwordNew", { defaultValue: "新密码" })}
               type="password"
               autoComplete="new-password"
-              value={vaultPasswordDraft}
-              onChange={(e) => setVaultPasswordDraft(e.currentTarget.value)}
+              value={state.vaultPasswordDraft}
+              onChange={(e) =>
+                dispatch({ type: "set-vault-password-draft", value: e.currentTarget.value })
+              }
             />
             <TextInput
               label={t("shell.locked.passwordConfirm", { defaultValue: "确认密码" })}
               type="password"
               autoComplete="new-password"
-              value={vaultPasswordConfirmDraft}
+              value={state.vaultPasswordConfirmDraft}
               onChange={(e) =>
-                setVaultPasswordConfirmDraft(e.currentTarget.value)
+                dispatch({
+                  type: "set-vault-password-confirm-draft",
+                  value: e.currentTarget.value
+                })
               }
             />
           </>
@@ -720,31 +724,36 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
 
         <TextInput
           label={t("keyImport.page.label.label", { defaultValue: "标签" })}
-          value={label}
-          onChange={(e) => setLabel(e.currentTarget.value)}
+          value={state.label}
+          onChange={(e) => dispatch({ type: "set-label", value: e.currentTarget.value })}
           placeholder={t("keyImport.page.placeholder.label", {
             defaultValue: "例如 主钱包 / 冷钱包"
           })}
         />
       </section>
-      {error ? <p className="first-time-import__error">{error}</p> : null}
+      {state.importState.error ? <p className="first-time-import__error">{state.importState.error}</p> : null}
       <div className="first-time-import__actions">
         <Button
           onClick={finish}
-          loading={busy}
+          loading={state.importState.busy}
           disabled={
             isReuseMode
-              ? !resolvedImportPassword
-              : !vaultPasswordDraft ||
-                vaultPasswordDraft !== vaultPasswordConfirmDraft
+              ? !state.resolvedImportPassword
+              : !state.vaultPasswordDraft ||
+                state.vaultPasswordDraft !== state.vaultPasswordConfirmDraft
           }
         >
           {t("shell.import.wizard.confirm", { defaultValue: "创建 Vault 并导入" })}
         </Button>
-        <Button variant="ghost" onClick={gotoPrev} disabled={busy}>
+        <Button variant="ghost" onClick={gotoPrev} disabled={state.importState.busy}>
           {t("common.action.back", { defaultValue: "返回" })}
         </Button>
       </div>
     </div>
   );
 }
+
+// 抑制未用变量警告 — `WizardState` 类型在签名中已使用，TS 编译期不报错；
+// 但保留类型导出供调用方 / 测试使用。
+export type { WizardState };
+void PASSWORD_REQUIRED_MSG;

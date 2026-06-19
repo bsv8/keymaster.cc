@@ -12,6 +12,12 @@ export default defineConfig({
       "apps/**/*.test.tsx",
       "apps/**/*.spec.ts"
     ],
-    exclude: ["**/node_modules/**", "**/dist/**"]
+    exclude: ["**/node_modules/**", "**/dist/**"],
+    // 兼容依赖 jsdom 的 React 组件测试：默认 node，
+    // 组件测试用 `// @vitest-environment jsdom` 注释按文件覆盖。
+    environmentMatchGlobs: [
+      ["packages/**/*.test.tsx", "jsdom"],
+      ["apps/**/*.test.tsx", "jsdom"]
+    ]
   }
 });

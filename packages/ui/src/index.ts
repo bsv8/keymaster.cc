@@ -7,6 +7,7 @@
 
 export * from "./Button.js";
 export * from "./TextInput.js";
+export * from "./TextArea.js";
 export * from "./Select.js";
 export * from "./Modal.js";
 export * from "./PageHeader.js";
