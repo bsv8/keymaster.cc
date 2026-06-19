@@ -13,8 +13,14 @@
 
 /** P2PKH 业务事件类型（messageBus.publish 的 type 字段）。 */
 export const P2PKH_MSG = {
-  /** recent-sync 状态变更。 */
+  /** recent-sync 状态变更（聚合：recent + backfill 的合并值）。 */
   SYNC: "p2pkh.sync",
+  /** 硬切换 003：recent-sync 单任务状态变更。订阅侧用它判定"本次
+   * recent 任务完成"，避免与 backfill 并发时聚合状态提前翻 ok 导致
+   * 第二次完成被吞掉。payload: { status: P2pkhSyncStatus }。 */
+  RECENT_TASK_STATE: "p2pkh.recent.task.state",
+  /** 硬切换 003：history-backfill 单任务状态变更。语义与上同。 */
+  BACKFILL_TASK_STATE: "p2pkh.backfill.task.state",
   /** 资源层同步错误（不影响 task 整体状态）。 */
   RECENT_RESOURCE_ERROR: "p2pkh.recent.resource.error",
   /** history 翻页错误。 */

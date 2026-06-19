@@ -1,5 +1,5 @@
 // packages/plugin-p2pkh/src/p2pkhDb.ts
-// P2PKH 资源库（硬切换 007 + 硬切换 001）。
+// P2PKH 资源库（硬切换 007 + 硬切换 001 + 硬切换 003）。
 // 设计缘由：
 //   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 active key 一个 namespace DB，
 //     通过 keyspace.openKeyStorage 打开。
@@ -12,15 +12,20 @@
 //   - 硬切换 001：DB schema 升级到 v6，删除 `p2pkh_balances` store；
 //     余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
 //
-// 迁移策略：
-//   - 旧全局 "p2pkh" DB 不再作为主路径；v3 schema 不再创建。
-//   - best-effort 迁移：unlock 后 plugin-p2pkh 启动时如果检测到旧 DB
-//     仍存在且 active key 已就绪，按旧记录 keyId 找 publicKeyHash，写入
-//     对应 namespace DB；迁移成功后删除旧 DB。
-//   - 迁移失败时只丢弃旧缓存，重新从 WOC 同步；不阻断钱包解锁。
-//   - 硬切换 001：legacy migration 不再迁移 balance 行。
+// 硬切换 003（2026-06-19）：
+//   - 旧全局 "p2pkh" DB 不再作为恢复路径，也不再接入任何启动路径。
+//   - `migrateLegacyP2pkhDb()` 保留代码用于历史诊断，但不在 unlock、rehydrate、
+//     手工同步、key.deleted 等路径里调用。
+//   - 老 key 即使残留旧全局 DB 也允许被放弃；恢复路径是
+//     `rehydrate + recent-sync + history-backfill`，从 WOC 链上真值重建。
+//   - `openP2pkhDb` 内部统一走 `keyspace.openKeyStorage({ version, upgrade })`，
+//     缺 DB / 缺表 / 版本旧都会在 upgrade 里被自动修复到 v6 schema；
+//     这是 P2PKH 存储自愈的唯一入口，不允许再出现"修表脚本"或"单次迁移器"。
+//   - 旧的"best-effort 一次性迁移"注释已经被本硬切换覆盖；新代码若需要把
+//     历史 v3 数据搬过来，也必须通过 active key 自己的 namespace DB
+//     升级路径，而不是再造一条与 active key 模型平行的迁移链。
 
-import type { BsvNetwork, KeyspaceService } from "@keymaster/contracts";
+import type { BsvNetwork, KeyspaceService, PluginLogger } from "@keymaster/contracts";
 import type {
   P2pkhBackfillState,
   P2pkhHistoryItem,
@@ -41,8 +46,12 @@ const P2PKH_STORAGE_ID = "state";
 const P2PKH_DB_VERSION = 6;
 
 /**
- * 旧全局 DB（v3）。best-effort 迁移期会读这个 DB；迁移完成后删除。
- * 设计缘由：硬切换不允许保留主路径；只允许"一次性读取 + 删除"作为迁移。
+ * 旧全局 DB（v3）。保留常量以便调试 / 单元测试 / 一次性诊断脚本；
+ * 硬切换 003 起不再有调用方接入这条路径。
+ *
+ * 设计缘由：当前系统对老 key 不再做一次性迁移，链上真值（rehydrate +
+ * recent-sync + history-backfill）就是唯一恢复路径。即使本地残留
+ * `p2pkh` v3 DB，也允许它留在原地被忽略，不影响当前 namespace 升级。
  */
 const LEGACY_DB_NAME = "p2pkh";
 const LEGACY_DB_VERSION = 3;
@@ -67,13 +76,52 @@ interface OpenHandle {
 let openHandle: OpenHandle | undefined;
 
 /**
+ * 硬切换 003：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
+ * 自动修复当前 key 的 namespace DB。upgrade 回调能拿到 oldVersion：
+ *   - oldVersion === 0：DB 第一次被创建；
+ *   - 0 < oldVersion < newVersion：旧版本被升级；
+ *   - oldVersion === newVersion：普通打开，不动 schema。
+ * 配合传入的 logger 即可在日志上区分这三种情况。
+ */
+type OpenKind = "created" | "upgraded" | "opened";
+
+interface UpgradeAudit {
+  kind: OpenKind;
+  oldVersion: number;
+  newVersion: number;
+  /** 已存在的 stores；只记录关键 store 是否齐全。 */
+  storeSnapshot: Record<string, boolean>;
+}
+
+function auditV6Stores(db: IDBDatabase): Record<string, boolean> {
+  const required = [
+    "p2pkh_addresses",
+    "p2pkh_utxos",
+    "p2pkh_history",
+    "p2pkh_history_backfill",
+    "p2pkh_recent_sync",
+    "p2pkh_local_submissions",
+    "p2pkh_local_input_claims"
+  ];
+  const result: Record<string, boolean> = {};
+  for (const name of required) {
+    result[name] = db.objectStoreNames.contains(name);
+  }
+  return result;
+}
+
+/**
  * 打开当前 active key 的 P2PKH namespace db。
  * 设计缘由：plugin 内部通过 keyspace 获取当前 active key，再打开对应 namespace。
  * 切换 active key 后必须重新调用此函数。
+ *
+ * 硬切换 003：调用方可通过 `logger` 让本函数在 upgrade 阶段补全"新建 /
+ * 升级 / 普通打开"日志；不传时不记日志。
  */
 export async function openP2pkhDb(input: {
   keyspace: KeyspaceService;
   publicKeyHash: string;
+  logger?: PluginLogger;
 }): Promise<P2pkhDbBundle> {
   if (openHandle && openHandle.publicKeyHash === input.publicKeyHash) {
     return openHandle as P2pkhDbBundle;
@@ -87,15 +135,65 @@ export async function openP2pkhDb(input: {
     }
     openHandle = undefined;
   }
+  let audit: UpgradeAudit | undefined;
   const handle = await input.keyspace.openKeyStorage({
     publicKeyHash: input.publicKeyHash,
     pluginId: "p2pkh",
     storageId: P2PKH_STORAGE_ID,
     version: P2PKH_DB_VERSION,
-    upgrade: (db, _oldVersion, _newVersion) => {
+    upgrade: (db, oldVersion, newVersion) => {
+      // oldVersion 是 indexedDB 在 upgradeneeded 回调里给出的"当前版本"——
+      // 0 表示 DB 首次创建；> 0 表示旧版本被升级；=== newVersion 在一般
+      // openKeyStorage 路径下不会出现（upgradeneeded 只在版本不同或新 DB
+      // 时触发），但仍然归一化处理。
+      // newVersion 在 contract 里允许 null（DB 被删除的特殊场景）；本路径
+      // 下若为 null 也按 created 处理——这只是日志分类，不需要阻断。
+      const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
+      const kind: OpenKind = oldVersion === 0 ? "created" : oldVersion < resolvedNewVersion ? "upgraded" : "opened";
       createV6Stores(db);
+      audit = {
+        kind,
+        oldVersion,
+        newVersion: resolvedNewVersion,
+        storeSnapshot: auditV6Stores(db)
+      };
+      input.logger?.info({
+        scope: "p2pkh.db",
+        event: "schema.upgradeApplied",
+        message: `P2PKH schema ${kind}`,
+        data: {
+          kind,
+          oldVersion,
+          newVersion: resolvedNewVersion,
+          targetVersion: resolvedNewVersion,
+          storeSnapshot: audit.storeSnapshot
+        }
+      });
     }
   });
+  // 浏览器层面 indexedDB.open 可能在 upgrade 之外直接成功（无版本变化
+  // 复用旧 db），audit 不会被赋值。这种情况下我们记一条 opened 日志，
+  // 覆盖"复用现有 schema / 未触发 upgrade"的语义。
+  if (!audit) {
+    audit = {
+      kind: "opened",
+      oldVersion: P2PKH_DB_VERSION,
+      newVersion: P2PKH_DB_VERSION,
+      storeSnapshot: auditV6Stores(handle.db)
+    };
+    input.logger?.info({
+      scope: "p2pkh.db",
+      event: "schema.opened",
+      message: "P2PKH namespace db opened without schema upgrade",
+      data: {
+        kind: "opened",
+        oldVersion: P2PKH_DB_VERSION,
+        newVersion: P2PKH_DB_VERSION,
+        targetVersion: P2PKH_DB_VERSION,
+        storeSnapshot: audit.storeSnapshot
+      }
+    });
+  }
   const next: OpenHandle = {
     publicKeyHash: input.publicKeyHash,
     close: () => {
@@ -661,9 +759,19 @@ export function localInputClaimIdFor(resourceId: string, txid: string, vout: num
 }
 
 /**
- * best-effort 旧 DB 迁移：把全局 "p2pkh" DB 的资源按 keyId 找对应 publicKeyHash，
- * 写入对应 namespace DB；迁移成功后删除旧 DB。
- * 失败时只丢弃旧缓存；不阻断解锁。
+ * 硬切换 003：legacy migration 仅作为诊断工具保留，**不再被任何运行时
+ * 路径调用**——不在 unlock、rehydrate、手工同步、key.deleted、indexedDB
+ * 升级钩子里触发。
+ *
+ * 历史设计：将全局 `p2pkh` v3 DB 的记录按 keyId 找对应 publicKeyHash，
+ * 写入对应 namespace DB；迁移成功后删除旧 DB；失败时只丢弃旧缓存。
+ *
+ * 现在 P2PKH 的恢复路径是 `rehydrate + recent-sync + history-backfill`：
+ * 旧 DB 即使还在 indexedDB 里也只是死缓存；不需要为了它再造一条与
+ * active key 模型平行的迁移链，否则只会增加系统复杂度。
+ *
+ * 调用方必须明确知道自己在做什么；任何"启动时自动迁移"或"unlock 时
+ * 顺带迁移"的接法都是硬切换 003 禁止的。
  */
 export interface LegacyMigrationSummary {
   migrated: number;

@@ -1,5 +1,5 @@
 // packages/plugin-p2pkh/src/pages/P2pkhOverviewPage.tsx
-// P2PKH 总览（硬切换 001）：
+// P2PKH 总览（硬切换 001 + 硬切换 003）：
 //   - summary 只显示 `{ total }`，不再分 confirmed / unconfirmed。
 //   - testnet 切换按钮受 `includeTestnet` 控制；false 时隐藏。
 //   - 直链 URL 上的 `assetId=bsvtest` 在 includeTestnet=false 时被强制
@@ -14,6 +14,15 @@
 //   - 组件卸载后不 setState；active key 在请求期间切换时旧请求结果必须丢弃。
 //
 // 硬切换 003：所有展示文案走 i18n。
+//
+// 硬切换 003（2026-06-19）：页面真刷新订阅。
+//   - 旧实现：点击"触发同步"按钮后立刻 setVersion(v + 1) 触发一次 load，
+//     但这只在按钮点击瞬间读一次状态；后台任务跑完以后页面不会再次读取，
+//     recent_sync 真值变了页面却没刷新，用户长期看到"最近同步：未同步"。
+//   - 新实现：保留按钮点击后立即反馈（旧行为不能拆掉，否则用户完全没
+//     视觉确认），但同时订阅 service.onSyncStatusChange；
+//     在 `syncing -> ok / failed / idle` 任意完成态触发一次 reload，
+//     让最近一次同步时间能正确显示在表格上。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
@@ -224,6 +233,38 @@ export function P2pkhOverviewPage() {
       setVersion((v) => v + 1);
     });
     return off;
+  }, [service]);
+
+  // 硬切换 003：订阅同步状态。在后台任务结束（syncing -> ok / failed / idle
+  // 任意完成态）时重新读取 recent_sync / resources / backfill state，
+  // 让"最近同步"列能跟随 recent_sync 真值刷新，不再依赖按钮点击瞬间的
+  // 假刷新。旧的行为（按钮点击后立即 setVersion）保留为立即反馈。
+  //
+  // 硬切换 003 收尾：recent-sync 与 history-backfill 并发时，聚合
+  // `syncStatus` 会在第一个任务完成时就翻成 ok/failed，第二个任务结束
+  // 时订阅侧如果只看聚合 status 会错过刷新事件。因此本页面同时订阅
+  // per-task `onRecentSyncStatusChange` / `onBackfillStatusChange`——
+  // 任一任务进入完成态（ok / failed / idle）都重新拉取 recent_sync /
+  // backfill state 真值。
+  useEffect(() => {
+    let prevRecent: string = service.recentSyncStatus();
+    let prevBackfill: string = service.backfillStatus();
+    const offRecent = service.onRecentSyncStatusChange((next) => {
+      if (prevRecent === "syncing" && next !== "syncing") {
+        setVersion((v) => v + 1);
+      }
+      prevRecent = next;
+    });
+    const offBackfill = service.onBackfillStatusChange((next) => {
+      if (prevBackfill === "syncing" && next !== "syncing") {
+        setVersion((v) => v + 1);
+      }
+      prevBackfill = next;
+    });
+    return () => {
+      offRecent();
+      offBackfill();
+    };
   }, [service]);
 
   const columns: DataTableColumn<P2pkhKeyResource>[] = useMemo(

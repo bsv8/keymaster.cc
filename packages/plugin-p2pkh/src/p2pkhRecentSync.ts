@@ -47,22 +47,55 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
      * - 按 network 分组逐 resource 同步。
      * - 单 resource 失败：收集错误，不打断其他 resource。
      * - 全部失败：抛错；部分失败：发出资源错误事件，但整体成功。
+     *
+     * 硬切换 003：0 resource 不是异常崩溃，但必须是可观测的同步结果——
+     * 直接 return 的旧路径只让 background 任务"看起来成功"，但页面、
+     * 日志、托盘都没有任何证据；现在每次同步都写至少一条 info 日志。
      */
     async runOnce(signal: AbortSignal): Promise<void> {
       const resources = await deps.getResources();
-      if (resources.length === 0) return;
       deps.logger?.info({
         scope: "p2pkh.recentSync",
         event: "recent.sync.started",
         message: "P2PKH recent sync started",
         data: { resourceCount: resources.length }
       });
+      if (resources.length === 0) {
+        // 硬切换 003：本次同步没有 resource 可处理——必须能在日志上
+        // 看到原因（通常是 service.rehydrate 没补到 / includeTestnet=false /
+        // 当前 active key 没有 P2PKH 资源），而不是 silent no-op。
+        deps.logger?.info({
+          scope: "p2pkh.recentSync",
+          event: "recent.sync.noResources",
+          message: "P2PKH recent sync skipped: no resources for active key",
+          data: { resourceCount: 0 }
+        });
+        return;
+      }
 
       const errors: ResourceError[] = [];
       for (const r of resources) {
         if (signal.aborted) return;
+        deps.logger?.info({
+          scope: "p2pkh.recentSync",
+          event: "recent.resource.started",
+          message: `P2PKH recent-sync resource started: ${r.resourceId}`,
+          data: { resourceId: r.resourceId, network: r.network, address: r.address }
+        });
         try {
-          await syncOne(r, signal, deps);
+          const summary = await syncOne(r, signal, deps);
+          deps.logger?.info({
+            scope: "p2pkh.recentSync",
+            event: "recent.resource.completed",
+            message: `P2PKH recent-sync resource completed: ${r.resourceId}`,
+            data: {
+              resourceId: r.resourceId,
+              network: r.network,
+              address: r.address,
+              utxoCount: summary.utxoCount,
+              recentConfirmedCount: summary.recentConfirmedCount
+            }
+          });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ resourceId: r.resourceId, error: msg });
@@ -96,7 +129,11 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
   };
 }
 
-async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2pkhRecentSyncDeps): Promise<void> {
+async function syncOne(
+  resource: P2pkhKeyResource,
+  signal: AbortSignal,
+  deps: P2pkhRecentSyncDeps
+): Promise<{ utxoCount: number; recentConfirmedCount: number }> {
   const network = resource.network;
   const db = await deps.getDb();
 
@@ -134,7 +171,7 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
   }
   if (!stopped && recentItems.length === recentHistoryPage.items.length && pageToken && pageCount < RECENT_HISTORY_PAGES) {
     while (pageToken && pageCount < RECENT_HISTORY_PAGES) {
-      if (signal.aborted) return;
+      if (signal.aborted) return { utxoCount: 0, recentConfirmedCount: 0 };
       pageCount += 1;
       try {
         const next = await deps.woc.listAddressConfirmedHistory(
@@ -261,6 +298,7 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
     lastSuccessAt: now
   };
   await db.putRecentSyncState(nextRecent);
+  return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length };
 }
 
 function utxoFromWoc(

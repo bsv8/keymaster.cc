@@ -315,6 +315,19 @@ export interface P2pkhService {
   syncStatus(): P2pkhSyncStatus;
   onSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
 
+  /**
+   * 硬切换 003：单个任务级别的状态。`syncStatus` 是 recent + backfill 的
+   * 聚合（任一 syncing -> syncing，任一 failed -> failed，全 ok -> ok），
+   * 两个任务并发运行时聚合状态会在第一个任务完成时就退出 syncing；
+   * 第二个任务结束时如果聚合状态已经不是 syncing，订阅侧就会错过
+   * "第二次完成"的刷新。订阅侧（总览页）应改用 per-task 订阅，
+   * 在任一任务进入完成态（ok / failed / idle）时都重新拉取真值。
+   */
+  recentSyncStatus(): P2pkhSyncStatus;
+  backfillStatus(): P2pkhSyncStatus;
+  onRecentSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
+  onBackfillStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
+
   /** 触发一次 recent-sync。 */
   triggerRecentSync(): Promise<void>;
   /** 触发 history-backfill（用户手动重试 / 继续）。 */

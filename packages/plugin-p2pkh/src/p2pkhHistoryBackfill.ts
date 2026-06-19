@@ -51,12 +51,43 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
         message: "P2PKH history backfill started",
         data: { resourceCount: resources.length }
       });
+      // 硬切换 003：本次 backfill 没有 resource 时必须能在日志上看到，
+      // 而不是 silently no-op。这与 recent-sync 的 noResources 分支
+      // 语义一致——手工 backfill 触发成功但 0 resource 也是重要诊断信息。
+      if (resources.length === 0) {
+        deps.logger?.info({
+          scope: "p2pkh.backfill",
+          event: "backfill.noResources",
+          message: "P2PKH history backfill skipped: no resources for active key",
+          data: { resourceCount: 0 }
+        });
+        return;
+      }
       const failures: Array<{ resourceId: string; error: string }> = [];
       for (const r of resources) {
         if (signal.aborted) return;
         if (pausedRef.paused) return;
+        deps.logger?.info({
+          scope: "p2pkh.backfill",
+          event: "backfill.resource.started",
+          message: `P2PKH backfill resource started: ${r.resourceId}`,
+          data: { resourceId: r.resourceId, network: r.network, address: r.address }
+        });
         try {
-          await backfillOne(r, signal, pausedRef, deps);
+          const summary = await backfillOne(r, signal, pausedRef, deps);
+          deps.logger?.info({
+            scope: "p2pkh.backfill",
+            event: "backfill.resource.completed",
+            message: `P2PKH backfill resource finished: ${r.resourceId}`,
+            data: {
+              resourceId: r.resourceId,
+              network: r.network,
+              address: r.address,
+              finalStatus: summary.status,
+              pagesSynced: summary.pagesSynced,
+              recordsSynced: summary.recordsSynced
+            }
+          });
         } catch (err) {
           failures.push({ resourceId: r.resourceId, error: errMsg(err) });
           deps.logger?.warn({
@@ -110,13 +141,21 @@ async function backfillOne(
   signal: AbortSignal,
   pausedRef: { paused: boolean },
   deps: P2pkhHistoryBackfillDeps
-): Promise<void> {
-  if (signal.aborted) return;
-  if (pausedRef.paused) return;
+): Promise<{ status: string; pagesSynced: number; recordsSynced: number }> {
+  // 硬切换 003：所有"提前结束"路径都要带回当前 backfill state 摘要，
+  // 让 runOnce 能写出"本 resource 已 complete / paused"日志，而不是
+  // silent return。
+  const summarize = (s: P2pkhBackfillState | undefined): { status: string; pagesSynced: number; recordsSynced: number } => ({
+    status: s?.status ?? "unknown",
+    pagesSynced: s?.pagesSynced ?? 0,
+    recordsSynced: s?.recordsSynced ?? 0
+  });
 
   const db = await deps.getDb();
   let state = await db.getBackfillState(resource.resourceId);
-  if (state?.status === "complete") return;
+  if (signal.aborted) return summarize(state);
+  if (pausedRef.paused) return summarize(state);
+  if (state?.status === "complete") return summarize(state);
 
   // 关键修复：failed 状态需要重置为 running 才能继续；
   // 但如果 saved state 的 nextPageToken 缺失（首次请求失败从未翻页），
@@ -138,7 +177,7 @@ async function backfillOne(
   //          （循环跳过）并标记 complete，bug。
   // 新实现：当 mustRefetchFirstPage 或没有 state 时强制请求首页。
   if (mustRefetchFirstPage || !state) {
-    if (signal.aborted) return;
+    if (signal.aborted) return summarize(state);
     let firstPage;
     try {
       firstPage = await deps.woc.listAddressConfirmedHistory(
@@ -164,7 +203,7 @@ async function backfillOne(
       deps.messageBus.publish(P2PKH_MSG.BACKFILL_ERROR, { resourceId: resource.resourceId, error: msg });
       throw new Error(`backfill first page failed: ${msg}`);
     }
-    if (signal.aborted) return;
+    if (signal.aborted) return summarize(state);
     try {
       await deps.coordinator.runBackfillPage(resource.resourceId, 0, resource.generation, async () => ({
         page: firstPage.items.map(toCommitItem),
@@ -191,25 +230,26 @@ async function backfillOne(
     if (!state || state.status === "complete" || !state.nextPageToken) {
       if (state && state.status === "running" && !state.nextPageToken) {
         await saveState(db, state, "complete");
+        state = { ...state, status: "complete" };
       }
-      return;
+      return summarize(state);
     }
   }
 
   // 续传：循环到尽头。
   let current: P2pkhBackfillState | undefined = state;
   while (current && current.status === "running" && current.nextPageToken) {
-    if (signal.aborted) return;
+    if (signal.aborted) return summarize(current);
     if (pausedRef.paused) {
       await saveState(db, current, "paused");
-      return;
+      return summarize({ ...current, status: "paused" });
     }
     while (deps.coordinator.hasRecentPending(resource.resourceId)) {
       await new Promise((r) => setTimeout(r, 50));
-      if (signal.aborted) return;
+      if (signal.aborted) return summarize(current);
       if (pausedRef.paused) {
         await saveState(db, current, "paused");
-        return;
+        return summarize({ ...current, status: "paused" });
       }
     }
     deps.coordinator.requestBackfillYield(resource.resourceId);
@@ -228,7 +268,7 @@ async function backfillOne(
       deps.messageBus.publish(P2PKH_MSG.BACKFILL_ERROR, { resourceId: resource.resourceId, error: msg });
       throw new Error(`backfill page fetch failed: ${msg}`);
     }
-    if (signal.aborted) return;
+    if (signal.aborted) return summarize(current);
     try {
       await deps.coordinator.runBackfillPage(resource.resourceId, expected, resource.generation, async () => ({
         page: nextPage.items.map(toCommitItem),
@@ -238,9 +278,9 @@ async function backfillOne(
     } catch (err) {
       // revision / generation mismatch：resource 被删除或 cursor 已被其他流程重置。
       const latest = await db.getBackfillState(resource.resourceId);
-      if (!latest) return;
+      if (!latest) return summarize(undefined);
       current = latest;
-      if (current!.status !== "running") return;
+      if (current.status !== "running") return summarize(current);
       continue;
     }
     current = await db.getBackfillState(resource.resourceId);
@@ -248,7 +288,9 @@ async function backfillOne(
 
   if (current && current.status === "running" && !current.nextPageToken) {
     await saveState(db, current, "complete");
+    current = { ...current, status: "complete" };
   }
+  return summarize(current);
 }
 
 function toCommitItem(h: { txid: string; height: number }) {
