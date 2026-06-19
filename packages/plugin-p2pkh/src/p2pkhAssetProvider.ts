@@ -205,8 +205,8 @@ function isP2pkhAssetId(id: string): id is P2pkhAssetId {
 function statusTitle(status: string, source: string): { key: string; fallback: string } {
   if (status === "confirmed") return { key: "p2pkh.activity.confirmed", fallback: "链上交易" };
   if (status === "unconfirmed") return { key: "p2pkh.activity.unconfirmed", fallback: "未确认交易" };
-  if (status === "pending") return source === "pending-local"
-    ? { key: "p2pkh.activity.pendingLocal", fallback: "本地待广播" }
+  if (status === "pending") return source === "local-submission"
+    ? { key: "p2pkh.activity.localSubmission", fallback: "本地提交" }
     : { key: "p2pkh.activity.unconfirmed", fallback: "未确认交易" };
   if (status === "dropped") return { key: "p2pkh.activity.dropped", fallback: "已丢弃" };
   return { key: "p2pkh.activity.info", fallback: "链上事件" };

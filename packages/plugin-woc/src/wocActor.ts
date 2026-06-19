@@ -68,6 +68,95 @@ interface Locker {
   request<T>(name: string, cb: () => Promise<T>): Promise<T | undefined>;
 }
 
+/** 把 hex 字符串转成字节数组。 */
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+  if (clean.length % 2 !== 0) {
+    throw new Error("Invalid hex length");
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    const byte = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+    if (!Number.isFinite(byte)) {
+      throw new Error("Invalid hex string");
+    }
+    out[i] = byte;
+  }
+  return out;
+}
+
+/** 把字节数组转成 hex 字符串。 */
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** 规范化 txid：去掉 0x 前缀并转小写。 */
+function normalizeTxidHex(txid: string): string {
+  return txid.startsWith("0x") ? txid.slice(2).toLowerCase() : txid.toLowerCase();
+}
+
+/** 反转 hex 字节序；输入非法时返回 undefined。 */
+function reverseHexBytes(txid: string): string | undefined {
+  const clean = normalizeTxidHex(txid);
+  if (clean.length === 0) return "";
+  if (clean.length % 2 !== 0 || !/^[0-9a-f]+$/.test(clean)) {
+    return undefined;
+  }
+  const parts = clean.match(/../g);
+  return parts ? parts.reverse().join("") : undefined;
+}
+
+/** 计算 rawTxHex 的 canonical txid（double-SHA256 后字节序反转）。 */
+async function calcCanonicalTxidFromRawTxHex(rawTxHex: string): Promise<string> {
+  const input = hexToBytes(rawTxHex);
+  const firstInput = input.buffer.slice(input.byteOffset, input.byteOffset + input.byteLength) as ArrayBuffer;
+  const first = await crypto.subtle.digest("SHA-256", firstInput);
+  const second = await crypto.subtle.digest("SHA-256", first);
+  const digest = new Uint8Array(second);
+  digest.reverse();
+  return bytesToHex(digest);
+}
+
+/**
+ * Provider txid 回执解释器（纯函数）。
+ *
+ * 职责：
+ *   - 把 provider 返回的原始 txid 与本地 canonical txid 一起解释成
+ *     "exact / reversed / mismatch / missing" 四种 integrity 结论；
+ *   - 不做任何 fetch / 不做归一化之外的副作用；
+ *   - 业务层（包括 plugin-p2pkh）只消费 canonicalTxid；
+ *     providerReturnedTxid* 仅用于诊断。
+ *
+ * 设计缘由：
+ *   把回执解释从 broadcast() 主流程中抽离出来，避免在主流程里继续堆
+ *   条件分支引入新的优先级副作用（例如不小心在 fetch 之前 await）。
+ */
+function interpretProviderTxidReceipt(input: {
+  providerTxid: string;
+  canonicalTxid: string;
+}): {
+  providerReturnedTxidRaw: string;
+  providerReturnedTxidNormalized: string;
+  txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
+} {
+  const providerReturnedTxidRaw = input.providerTxid;
+  const providerReturnedTxidNormalized = normalizeTxidHex(providerReturnedTxidRaw);
+  const reversedProviderTxid = reverseHexBytes(providerReturnedTxidRaw);
+  const txidIntegrity: "exact" | "reversed" | "mismatch" | "missing" =
+    providerReturnedTxidNormalized === input.canonicalTxid
+      ? "exact"
+      : reversedProviderTxid === input.canonicalTxid
+        ? "reversed"
+        : providerReturnedTxidNormalized.length > 0
+          ? "mismatch"
+          : "missing";
+  return {
+    providerReturnedTxidRaw,
+    providerReturnedTxidNormalized,
+    txidIntegrity
+  };
+}
+
 function getLocker(): Locker | undefined {
   if (typeof navigator === "undefined") return undefined;
   const nav = navigator as Navigator & { locks?: Locker };
@@ -577,13 +666,29 @@ export function createWocActor(): WocActorHandle {
       signal: opts.signal,
       label: WOC_MSG.TX_BROADCAST,
       fn: async (signal) => {
+        // 关键修复（硬切换 003 收尾）：必须先发 /tx/raw，再做本地 canonical
+        // 计算。旧实现先 await calcCanonicalTxidFromRawTxHex 会让 broadcast
+        // 任务在 fetchJson 之前先让出执行权；pump 继续 while 循环时趁机拉起
+        // background 任务的 fetch，破坏 broadcast 优先级（order[1] 变成
+        // background 而不是 /tx/raw）。
         const res = await fetchJson<{ txid: string }>(network, "/tx/raw", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ txhex: rawTxHex })
         }, signal, opts.timeoutMs);
         resetBackoff();
-        return { txid: res.txid };
+        const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
+        const interpreted = interpretProviderTxidReceipt({
+          providerTxid: res.txid,
+          canonicalTxid
+        });
+        return {
+          accepted: true,
+          canonicalTxid,
+          providerReturnedTxidRaw: interpreted.providerReturnedTxidRaw,
+          providerReturnedTxidNormalized: interpreted.providerReturnedTxidNormalized,
+          txidIntegrity: interpreted.txidIntegrity
+        };
       }
     });
   }

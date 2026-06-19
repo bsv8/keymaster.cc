@@ -205,7 +205,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
           assetId: offer.assetId,
           reference: r.txid,
           completedAt: new Date().toISOString(),
-          details: { reservationIds: r.reservationIds, pendingTransferId: r.pendingTransferId }
+          details: { localInputClaimIds: r.localInputClaimIds, submissionId: r.submissionId }
         };
         setCompletion(c);
       }
@@ -300,13 +300,16 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
           ) : null}
           {result.error ? <p className="p2pkh-transfer-widget__error">{result.error}</p> : null}
           {result.status === "rejected" ? (
-            <p>{t("p2pkh.transfer.result.rejected", { defaultValue: "广播被网络拒绝，未写入 reservation。" })}</p>
+            <p>{t("p2pkh.transfer.result.rejected", { defaultValue: "广播被网络拒绝，未写入本地输入占用。" })}</p>
           ) : null}
           {result.status === "unknown" ? (
-            <p>{t("p2pkh.transfer.result.unknown", { defaultValue: "广播结果未知，已为本次输入写入 reservation。" })}</p>
+            <p>{t("p2pkh.transfer.result.unknown", { defaultValue: "广播结果未知，已为本次输入写入本地输入占用。" })}</p>
+          ) : null}
+          {result.status === "provider-inconsistent" ? (
+            <p>{t("p2pkh.transfer.result.providerInconsistent", { defaultValue: "广播回执与本地 canonical txid 不一致，已标记为 provider-inconsistent。" })}</p>
           ) : null}
           {result.status === "broadcast" || result.status === "confirmed" ? (
-            <p>{t("p2pkh.transfer.result.broadcast", { defaultValue: "已广播最终预览交易，并写入 reservation。" })}</p>
+            <p>{t("p2pkh.transfer.result.broadcast", { defaultValue: "已广播最终预览交易，并写入本地输入占用。" })}</p>
           ) : null}
           <div className="p2pkh-transfer-widget__actions">
             <Button onClick={dismissResult} variant="primary">

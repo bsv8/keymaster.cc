@@ -1,7 +1,7 @@
 // packages/plugin-p2pkh/src/p2pkhContracts.ts
 // P2PKH 专属类型与 P2pkhService 契约。
 // 设计缘由：硬切换后这些类型默认只在 plugin-p2pkh 内部使用，不进入全局 contracts。
-// 包含 WOC 硬切换后的扩展：recent sync、history backfill、UTXO reservation、pending transfer。
+// 包含 WOC 硬切换后的扩展：recent sync、history backfill、本地提交、本地输入占用。
 
 import type { BsvNetwork, KeyIdentity } from "@keymaster/contracts";
 
@@ -109,8 +109,8 @@ export interface P2pkhHistoryItem {
   txid: string;
   height?: number;
   status: "confirmed" | "unconfirmed" | "pending" | "dropped";
-  /** 历史来源：本地 pending、WOC 未确认、WOC 确认。 */
-  source: "pending-local" | "woc-unconfirmed" | "woc-confirmed";
+  /** 历史来源：本地提交、WOC 未确认、WOC 确认。 */
+  source: "local-submission" | "woc-unconfirmed" | "woc-confirmed";
   syncedAt: string;
   /**
    * 未观察到的 recent-sync 轮次；用于确认被 dropped 前必须连续多次 missing。
@@ -130,7 +130,7 @@ export interface P2pkhUtxoFilter {
 /**
  * UTXO 分配请求（硬切换 001）。
  * 设计缘由：移除 `allowUnconfirmed`。一旦"未在 WOC 未花费集合里"
- * 才会让该输入不参与分配——本地 reservation 由 service 层过滤后传入。
+ * 才会让该输入不参与分配——本地输入占用由 service 层过滤后传入。
  */
 export interface UtxoAllocationRequest {
   amountSatoshis: number;
@@ -186,47 +186,45 @@ export interface P2pkhRecentSyncState {
 }
 
 /** Pending transfer。 */
-export type P2pkhPendingStatus = "pending" | "broadcast" | "confirmed" | "failed" | "unknown";
+export type P2pkhLocalSubmissionStatus = "submitting" | "broadcast" | "confirmed" | "failed" | "unknown" | "provider-inconsistent";
 
-export interface P2pkhPendingTransfer {
+export interface P2pkhLocalSubmission {
   id: string;
   resourceId: string;
   keyId: string;
   publicKeyHash: string;
   network: BsvNetwork;
   assetId: P2pkhAssetId;
-  txid?: string;
+  canonicalTxid: string;
+  rawTxHex: string;
+  providerReturnedTxidRaw?: string;
+  providerReturnedTxidNormalized?: string;
+  txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
   recipientAddress: string;
   amountSatoshis: number;
-  status: P2pkhPendingStatus;
-  /** 占用输入。 */
+  status: P2pkhLocalSubmissionStatus;
   inputOutpoints: Array<{ txid: string; vout: number; value: number }>;
   createdAt: string;
   updatedAt: string;
   error?: string;
 }
 
-/** UTXO reservation。 */
-export type P2pkhReservationState = "reserved" | "observed-spent" | "released";
+/** 本地输入占用。 */
+export type P2pkhLocalInputClaimState = "claimed" | "observed-consumed" | "released";
 
-export interface P2pkhUtxoReservation {
+export interface P2pkhLocalInputClaim {
   id: string;
+  submissionId: string;
   resourceId: string;
   keyId: string;
   publicKeyHash: string;
   network: BsvNetwork;
   txid: string;
   vout: number;
-  spendingTxid: string;
-  state: P2pkhReservationState;
+  canonicalTxid?: string;
+  state: P2pkhLocalInputClaimState;
   createdAt: string;
   updatedAt: string;
-  /**
-   * 未观察到的 recent-sync 轮次。
-   * 关键修复：单次 missing 不能直接把 reservation 标 observed-spent，
-   * 必须累计多次 missing 才允许 transition；否则 WOC 短暂不一致时
-   * 该输入会被重新可花费，造成双花。
-   */
   missingObservationCount?: number;
 }
 
@@ -263,17 +261,17 @@ export interface P2pkhRecentCommit {
   unconfirmedHistory?: P2pkhHistoryItem[];
   /** 写入 recent watermark。 */
   recentConfirmedTxids?: string[];
-  /** reservation 对账结果。 */
-  reservations?: P2pkhUtxoReservation[];
-  /** pending transfer 状态更新。 */
-  pendingTransfers?: P2pkhPendingTransfer[];
+  /** 本地输入占用对账结果。 */
+  localInputClaims?: P2pkhLocalInputClaim[];
+  /** 本地提交观察对账结果。 */
+  localSubmissions?: P2pkhLocalSubmission[];
   /** lastSyncedAt 时间戳。 */
   lastSyncedAt?: string;
 }
 
 /**
  * 转移输入参数（硬切换 001）。
- * 设计缘由：移除 `allowUnconfirmed`。所有未在本地 reservation 中
+ * 设计缘由：移除 `allowUnconfirmed`。所有未在本地输入占用中
  * 占用的未花费 UTXO 都会参与选币；WOC 已看不到的输入也不会进入。
  */
 export interface P2pkhTransferInput {
@@ -301,15 +299,15 @@ export interface P2pkhTransferPreview {
 }
 
 /** 转移结果。 */
-export type P2pkhTransferResultStatus = "broadcast" | "confirmed" | "rejected" | "unknown";
+export type P2pkhTransferResultStatus = "broadcast" | "confirmed" | "rejected" | "unknown" | "provider-inconsistent";
 
 export interface P2pkhTransferResult {
   status: P2pkhTransferResultStatus;
   txid?: string;
   rawTxHex: string;
   error?: string;
-  pendingTransferId: string;
-  reservationIds: string[];
+  submissionId: string;
+  localInputClaimIds: string[];
 }
 
 /** P2PKH 服务契约：plugin-p2pkh 内部使用，对应 capability "p2pkh.service"。 */
@@ -365,8 +363,8 @@ export interface P2pkhService {
    * lastSyncedAt）。UI 应使用此接口展示"最近同步"。
    */
   listRecentSyncStates(): Promise<P2pkhRecentSyncState[]>;
-  listPendingTransfers(): Promise<P2pkhPendingTransfer[]>;
-  listReservations(): Promise<P2pkhUtxoReservation[]>;
+  listLocalSubmissions(): Promise<P2pkhLocalSubmission[]>;
+  listLocalInputClaims(): Promise<P2pkhLocalInputClaim[]>;
 
   allocateUtxos(request: UtxoAllocationRequest): Promise<UtxoAllocation>;
 

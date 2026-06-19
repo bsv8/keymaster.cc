@@ -2,23 +2,23 @@
 // P2PKH 转移业务服务：
 //   - prepareTransfer 生成最终已签名交易快照。
 //   - submitTransfer 只广播 preview.rawTxHex，不再重签、不再重算 fee。
-//   - 预览阶段不写 pending / reservation；只有进入应用内广播流程后才写。
+//   - 预览阶段不写本地提交 / 本地输入占用；只有进入应用内广播流程后才写。
 // 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
 // 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
 
 import type { MessageBus, VaultService, WocService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
-  P2pkhPendingTransfer,
+  P2pkhLocalInputClaim,
+  P2pkhLocalSubmission,
   P2pkhTransferInput,
   P2pkhTransferPreview,
   P2pkhTransferResult,
   P2pkhUtxo,
-  P2pkhUtxoReservation,
   ReadyKeyIdentity
 } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
-import { reservationIdFor, type P2pkhDbHandle } from "./p2pkhDb.js";
+import { localInputClaimIdFor, type P2pkhDbHandle } from "./p2pkhDb.js";
 import {
   buildP2pkhTx,
   calcTxidFromRawTxHex,
@@ -61,9 +61,9 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       }
       validateAddressForNetwork(validated.recipientAddress, network);
 
-      const reservations = await db.listReservationsByResource(resource.resourceId);
+      const reservations = await db.listLocalInputClaimsByResource(resource.resourceId);
       const reserved = new Set(
-        reservations.filter((r) => r.state === "reserved").map((r) => `${r.txid}:${r.vout}`)
+        reservations.filter((r) => r.state === "claimed").map((r) => `${r.txid}:${r.vout}`)
       );
       const allUtxos = await db.listUtxos();
       const candidates = allUtxos.filter(
@@ -135,34 +135,44 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         throw new Error("Preview amount is invalid");
       }
 
-      const pendingId = crypto.randomUUID();
+      const submissionId = crypto.randomUUID();
       const now = new Date().toISOString();
-      const pendingBase: P2pkhPendingTransfer = {
-        id: pendingId,
+      const submissionBase: P2pkhLocalSubmission = {
+        id: submissionId,
         resourceId: resource.resourceId,
         keyId: active.keyId,
         publicKeyHash: active.publicKeyHash,
         network,
         assetId: preview.assetId,
-        txid: preview.txid,
+        canonicalTxid: preview.txid,
+        rawTxHex: preview.rawTxHex,
         recipientAddress: preview.recipientAddress,
         amountSatoshis: preview.amountSatoshis,
-        status: "pending",
+        status: "submitting",
+        txidIntegrity: "missing",
         inputOutpoints: preview.allocation.selected.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
         createdAt: now,
         updatedAt: now
       };
-      await db.putPendingTransfer(pendingBase);
+      await db.putLocalSubmission(submissionBase);
 
-      let broadcastRes: { txid: string };
+      let broadcastRes:
+        | {
+            accepted: true;
+            canonicalTxid: string;
+            providerReturnedTxidRaw?: string;
+            providerReturnedTxidNormalized?: string;
+            txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
+          }
+        | undefined;
       try {
         broadcastRes = await deps.woc.broadcast(network, preview.rawTxHex, { timeoutMs: 30_000 });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         const isDefinitiveRejection = isDefinitivelyRejectedError(msg);
         if (isDefinitiveRejection) {
-          await db.putPendingTransfer({
-            ...pendingBase,
+          await db.putLocalSubmission({
+            ...submissionBase,
             status: "failed",
             error: msg,
             updatedAt: new Date().toISOString()
@@ -172,69 +182,75 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             txid: preview.txid,
             rawTxHex: preview.rawTxHex,
             error: msg,
-            pendingTransferId: pendingId,
-            reservationIds: []
+            submissionId,
+            localInputClaimIds: []
           };
         }
 
-        const reservationIds = await reserveInputs(db, {
+        const localInputClaimIds = await claimInputs(db, {
+          submissionId,
           resourceId: resource.resourceId,
           keyId: active.keyId,
           publicKeyHash: active.publicKeyHash,
           network,
-          spendingTxid: preview.txid,
           inputs: preview.allocation.selected
         });
-        await db.putPendingTransfer({
-          ...pendingBase,
+        await db.putLocalSubmission({
+          ...submissionBase,
           status: "unknown",
           error: msg,
           updatedAt: new Date().toISOString()
         });
+        deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
         return {
           status: "unknown",
           txid: preview.txid,
           rawTxHex: preview.rawTxHex,
           error: msg,
-          pendingTransferId: pendingId,
-          reservationIds
+          submissionId,
+          localInputClaimIds
         };
       }
 
-      if (broadcastRes.txid !== preview.txid) {
-        const msg = "Broadcast txid does not match preview txid";
-        await db.putPendingTransfer({
-          ...pendingBase,
-          status: "failed",
-          error: msg,
-          updatedAt: new Date().toISOString()
-        });
-        throw new Error(msg);
+      if (!broadcastRes) {
+        throw new Error("Broadcast result is missing");
       }
 
-      const reservationIds = await reserveInputs(db, {
+      const localInputClaimIds = await claimInputs(db, {
+        submissionId,
         resourceId: resource.resourceId,
         keyId: active.keyId,
         publicKeyHash: active.publicKeyHash,
         network,
-        spendingTxid: preview.txid,
         inputs: preview.allocation.selected
       });
-      await db.putPendingTransfer({
-        ...pendingBase,
-        status: "broadcast",
-        txid: preview.txid,
+      // 关键不变量（硬切换 003 收尾）：本判断依赖的是 plugin-woc 已归一化
+      // 后的 WocBroadcastResult.txidIntegrity（exact / reversed / mismatch /
+      // missing）。plugin-p2pkh 不再自行 reverse / normalize provider 原始
+      // txid，也不再做"provider 原值与 preview.txid 不一致"这类二次猜测；
+      // provider 字节序归一化是 plugin-woc 包的跨包契约职责。
+      const nextStatus: P2pkhTransferResult["status"] =
+        broadcastRes.txidIntegrity === "mismatch"
+          ? "provider-inconsistent"
+          : "broadcast";
+      await db.putLocalSubmission({
+        ...submissionBase,
+        status: nextStatus,
+        canonicalTxid: broadcastRes.canonicalTxid,
+        providerReturnedTxidRaw: broadcastRes.providerReturnedTxidRaw,
+        providerReturnedTxidNormalized: broadcastRes.providerReturnedTxidNormalized,
+        txidIntegrity: broadcastRes.txidIntegrity,
         updatedAt: new Date().toISOString()
       });
 
       deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
 
       return {
-        status: "broadcast",
+        status: nextStatus,
         txid: preview.txid,
         rawTxHex: preview.rawTxHex,
-        pendingTransferId: pendingId,
-        reservationIds
+        submissionId,
+        localInputClaimIds
       };
     }
   };
@@ -380,38 +396,38 @@ async function solveForSelectedInputs(params: {
   };
 }
 
-async function reserveInputs(
+async function claimInputs(
   db: P2pkhDbHandle,
   params: {
+    submissionId: string;
     resourceId: string;
     keyId: string;
     publicKeyHash: string;
     network: "main" | "test";
-    spendingTxid: string;
     inputs: P2pkhUtxo[];
   }
 ): Promise<string[]> {
-  const reservationIds: string[] = [];
+  const localInputClaimIds: string[] = [];
   const now = new Date().toISOString();
   for (const u of params.inputs) {
-    const id = reservationIdFor(params.resourceId, u.txid, u.vout);
-    const reservation: P2pkhUtxoReservation = {
+    const id = localInputClaimIdFor(params.resourceId, u.txid, u.vout);
+    const claim: P2pkhLocalInputClaim = {
       id,
+      submissionId: params.submissionId,
       resourceId: params.resourceId,
       keyId: params.keyId,
       publicKeyHash: params.publicKeyHash,
       network: params.network,
       txid: u.txid,
       vout: u.vout,
-      spendingTxid: params.spendingTxid,
-      state: "reserved",
+      state: "claimed",
       createdAt: now,
       updatedAt: now
     };
-    await db.putReservation(reservation);
-    reservationIds.push(id);
+    await db.putLocalInputClaim(claim);
+    localInputClaimIds.push(id);
   }
-  return reservationIds;
+  return localInputClaimIds;
 }
 
 function validateTransferInput(input: P2pkhTransferInput): {

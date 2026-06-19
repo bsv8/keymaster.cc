@@ -87,9 +87,33 @@ export interface WocUnconfirmedHistory {
   items: Array<{ txid: string; fee?: number }>;
 }
 
-/** 广播结果。 */
+/**
+ * 广播结果。
+ *
+ * 关键不变量（消费方必须遵守）：
+ *   - `accepted: true` 仅表示 provider（Whatsonchain）接受了 broadcast
+ *     请求并返回 2xx，并不等于链上最终确认。是否进入 mempool、是否被打包、
+ *     是否被重组，仍以 WOC recent-sync / history-backfill 观察到的链上
+ *     真值为准。
+ *   - `canonicalTxid` 是上层业务唯一应消费的 txid；上层不应再自行 reverse
+ *     或 normalize provider 原始回执，所有字节序归一化已由 `plugin-woc`
+ *     在此层完成。
+ *   - `providerReturnedTxidRaw` / `providerReturnedTxidNormalized` 仅用于
+ *     诊断（例如日志、provider-inconsistent 状态展示），禁止作为业务真值。
+ *   - `txidIntegrity` 描述 provider 回执与本地 canonical txid 的关系：
+ *       - "exact"     ：provider 原值与 canonical 完全一致
+ *       - "reversed"  ：provider 原值与 canonical 字节序相反，但规范化后一致
+ *       - "mismatch"  ：provider 原值规范化后仍与 canonical 不一致；
+ *                       业务层应进入 provider-inconsistent / unknown，
+ *                       仍写本地 input claim，等待链上真值收敛
+ *       - "missing"   ：provider 未返回 txid 字段
+ */
 export interface WocBroadcastResult {
-  txid: string;
+  accepted: true;
+  canonicalTxid: string;
+  providerReturnedTxidRaw?: string;
+  providerReturnedTxidNormalized?: string;
+  txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
 }
 
 /**

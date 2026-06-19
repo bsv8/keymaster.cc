@@ -1,6 +1,6 @@
 // packages/plugin-p2pkh/src/p2pkhDb.test.ts
 // 硬切换 007 后单测：通过 fake keyspace 打开 key-scoped namespace db。
-// 验证：v4 stores 全部建立、commitBackfillPage revision/rejection 校验、
+// 验证：v6 stores 全部建立、commitBackfillPage revision/rejection 校验、
 // commitRecentSnapshot generation 校验。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -104,7 +104,7 @@ afterEach(async () => {
   await resetDb();
 });
 
-describe("p2pkhDb v5 stores", () => {
+describe("p2pkhDb v6 stores", () => {
   it("creates all required stores on first open and does not have p2pkh_balances", async () => {
     const db = await openDb();
     await db.listAddresses();
@@ -119,12 +119,14 @@ describe("p2pkhDb v5 stores", () => {
       "p2pkh_history",
       "p2pkh_history_backfill",
       "p2pkh_recent_sync",
-      "p2pkh_pending_transfers",
-      "p2pkh_utxo_reservations"
+      "p2pkh_local_submissions",
+      "p2pkh_local_input_claims"
     ];
     for (const name of required) {
       expect(raw.objectStoreNames.contains(name), `missing store: ${name}`).toBe(true);
     }
+    expect(raw.objectStoreNames.contains("p2pkh_pending_transfers")).toBe(false);
+    expect(raw.objectStoreNames.contains("p2pkh_utxo_reservations")).toBe(false);
     // 硬切换 001：余额不再落库。
     expect(raw.objectStoreNames.contains("p2pkh_balances")).toBe(false);
     raw.close();

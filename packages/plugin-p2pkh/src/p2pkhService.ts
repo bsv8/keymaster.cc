@@ -28,14 +28,14 @@ import type {
   P2pkhGlobalSettings,
   P2pkhHistoryItem,
   P2pkhKeyResource,
-  P2pkhPendingTransfer,
+  P2pkhLocalInputClaim,
+  P2pkhLocalSubmission,
   P2pkhService as IP2pkhService,
   P2pkhSyncStatus,
   P2pkhTransferInput,
   P2pkhTransferPreview,
   P2pkhTransferResult,
   P2pkhUtxo,
-  P2pkhUtxoReservation,
   UtxoAllocation,
   UtxoAllocationRequest,
   P2pkhUtxoFilter
@@ -407,7 +407,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     id: P2PKH_TASK_RECENT,
     pluginId: "p2pkh",
     label: { key: "p2pkh.task.recent.label", fallback: "P2PKH 近期同步" },
-    description: { key: "p2pkh.task.recent.description", fallback: "检查余额、UTXO、近期 history 与 reservation 对账（按 active key namespace）。" },
+    description: { key: "p2pkh.task.recent.description", fallback: "检查余额、UTXO、近期 history 与本地输入占用对账（按 active key namespace）。" },
     intervalMs: 60_000,
     defaultEnabled: true,
     // 硬切换 008：传函数本身，由 backgroundService 延迟求值。
@@ -641,17 +641,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         ? all
         : all.filter((s) => /:main$/.test(s.resourceId));
     },
-    async listPendingTransfers() {
+    async listLocalSubmissions() {
       const db = await ensureDb();
-      const all = await db.listPendingTransfers();
+      const all = await db.listLocalSubmissions();
       const settings = getCurrentSettings();
       return settings.includeTestnet
         ? all
         : all.filter((p) => p.network === "main");
     },
-    async listReservations() {
+    async listLocalInputClaims() {
       const db = await ensureDb();
-      const all = await db.listReservations();
+      const all = await db.listLocalInputClaims();
       const settings = getCurrentSettings();
       return settings.includeTestnet
         ? all
@@ -681,9 +681,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         assetId: request.assetId,
         keyId: request.keyId
       });
-      const reservations = await db.listReservations();
+      const reservations = await db.listLocalInputClaims();
       const reserved = new Set(
-        reservations.filter((r) => r.state === "reserved").map((r) => `${r.txid}:${r.vout}`)
+        reservations.filter((r) => r.state === "claimed").map((r) => `${r.txid}:${r.vout}`)
       );
       const candidates = filtered.filter((u) => !reserved.has(`${u.txid}:${u.vout}`));
       const result = allocateUtxos(candidates, request);
@@ -856,8 +856,8 @@ void (null as unknown as P2pkhUtxo);
 void (null as unknown as UtxoAllocation);
 void (null as unknown as UtxoAllocationRequest);
 void (null as unknown as P2pkhBackfillState);
-void (null as unknown as P2pkhPendingTransfer);
-void (null as unknown as P2pkhUtxoReservation);
+void (null as unknown as P2pkhLocalSubmission);
+void (null as unknown as P2pkhLocalInputClaim);
 void (null as unknown as P2pkhTransferInput);
 void (null as unknown as P2pkhTransferPreview);
 void (null as unknown as P2pkhTransferResult);

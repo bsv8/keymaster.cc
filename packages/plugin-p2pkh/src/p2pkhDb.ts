@@ -9,7 +9,7 @@
 //   - 原子提交：commitBackfillPage / commitRecentSnapshot 行为不变，但写入的 DB
 //     是当前 key 的 namespace DB，不再有跨 key 数据混合风险。
 //   - 切换 active key 时调用方需要重新拿 p2pkhDb(publicKeyHash) 才能继续访问。
-//   - 硬切换 001：DB schema 升级到 v5，删除 `p2pkh_balances` store；
+//   - 硬切换 001：DB schema 升级到 v6，删除 `p2pkh_balances` store；
 //     余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
 //
 // 迁移策略：
@@ -25,20 +25,20 @@ import type {
   P2pkhBackfillState,
   P2pkhHistoryItem,
   P2pkhKeyResource,
-  P2pkhPendingTransfer,
+  P2pkhLocalInputClaim,
+  P2pkhLocalSubmission,
   P2pkhRecentSyncState,
   P2pkhUtxo,
-  P2pkhUtxoReservation
 } from "./p2pkhContracts.js";
 import type { P2pkhBackfillCommit, P2pkhRecentCommit } from "./p2pkhContracts.js";
 import { makeResourceId } from "./p2pkhContracts.js";
 
 const P2PKH_STORAGE_ID = "state";
 /**
- * 硬切换 001：DB 版本升到 5。删除 `p2pkh_balances` store；
+ * 硬切换 001：DB 版本升到 6。删除 `p2pkh_balances` store；
  * 余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
  */
-const P2PKH_DB_VERSION = 5;
+const P2PKH_DB_VERSION = 6;
 
 /**
  * 旧全局 DB（v3）。best-effort 迁移期会读这个 DB；迁移完成后删除。
@@ -93,7 +93,7 @@ export async function openP2pkhDb(input: {
     storageId: P2PKH_STORAGE_ID,
     version: P2PKH_DB_VERSION,
     upgrade: (db, _oldVersion, _newVersion) => {
-      createV5Stores(db);
+      createV6Stores(db);
     }
   });
   const next: OpenHandle = {
@@ -125,14 +125,13 @@ export function disposeP2pkhDb(): void {
 }
 
 /**
- * v5 schema（硬切换 001）：
+ * v6 schema（硬切换 003 / 001）：
  *   - 删除 `p2pkh_balances` store；余额不再是持久化实体。
- *   - 保留 v4 已建立的 addresses / utxos / history / history_backfill /
- *     recent_sync / pending_transfers / utxo_reservations 七个 store。
- *   - 把 `p2pkh_balances` 加入 legacy 删除列表，保证从 v4 升级时旧 store 也会被清掉。
+ *   - 删除 `p2pkh_pending_transfers / p2pkh_utxo_reservations` 旧 store。
+ *   - 新建 `p2pkh_local_submissions / p2pkh_local_input_claims`。
  */
-function createV5Stores(db: IDBDatabase) {
-  // v5：删除 v1-v4 旧 store（包含 p2pkh_balances），重建 namespace stores。
+function createV6Stores(db: IDBDatabase) {
+  // v6：删除 v1-v5 旧 store（包含 p2pkh_balances / 旧本地观察层），重建 namespace stores。
   const legacy = [
     "p2pkh_v1_addresses",
     "p2pkh_v1_balances",
@@ -141,7 +140,9 @@ function createV5Stores(db: IDBDatabase) {
     "p2pkh_addresses",
     "p2pkh_balances",
     "p2pkh_utxos",
-    "p2pkh_history"
+    "p2pkh_history",
+    "p2pkh_pending_transfers",
+    "p2pkh_utxo_reservations"
   ];
   for (const name of legacy) {
     if (db.objectStoreNames.contains(name)) {
@@ -173,14 +174,19 @@ function createV5Stores(db: IDBDatabase) {
   if (!db.objectStoreNames.contains("p2pkh_recent_sync")) {
     db.createObjectStore("p2pkh_recent_sync", { keyPath: "resourceId" });
   }
-  if (!db.objectStoreNames.contains("p2pkh_pending_transfers")) {
-    const s = db.createObjectStore("p2pkh_pending_transfers", { keyPath: "id" });
+  if (!db.objectStoreNames.contains("p2pkh_local_submissions")) {
+    const s = db.createObjectStore("p2pkh_local_submissions", { keyPath: "id" });
     s.createIndex("resourceId", "resourceId", { unique: false });
     s.createIndex("status", "status", { unique: false });
+    s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
+    s.createIndex("txidIntegrity", "txidIntegrity", { unique: false });
   }
-  if (!db.objectStoreNames.contains("p2pkh_utxo_reservations")) {
-    const s = db.createObjectStore("p2pkh_utxo_reservations", { keyPath: "id" });
+  if (!db.objectStoreNames.contains("p2pkh_local_input_claims")) {
+    const s = db.createObjectStore("p2pkh_local_input_claims", { keyPath: "id" });
     s.createIndex("resourceId", "resourceId", { unique: false });
+    s.createIndex("submissionId", "submissionId", { unique: false });
+    s.createIndex("state", "state", { unique: false });
+    s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
   }
 }
 
@@ -249,7 +255,7 @@ void (0 as unknown as BsvNetwork);
 function newHistoryId(resourceId: string, txid: string): string {
   return `${resourceId}:${txid}`;
 }
-function newReservationId(resourceId: string, txid: string, vout: number): string {
+function newLocalInputClaimId(resourceId: string, txid: string, vout: number): string {
   return `${resourceId}:${txid}:${vout}`;
 }
 
@@ -389,47 +395,47 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
       );
     },
 
-    // ---------- pending transfers ----------
-    async putPendingTransfer(t: P2pkhPendingTransfer): Promise<void> {
-      await tx(handle, "p2pkh_pending_transfers", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_pending_transfers").put(t))
+    // ---------- local submissions ----------
+    async putLocalSubmission(t: P2pkhLocalSubmission): Promise<void> {
+      await tx(handle, "p2pkh_local_submissions", "readwrite", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_submissions").put(t))
       );
     },
-    async listPendingTransfers(): Promise<P2pkhPendingTransfer[]> {
-      return tx(handle, "p2pkh_pending_transfers", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_pending_transfers").getAll())
+    async listLocalSubmissions(): Promise<P2pkhLocalSubmission[]> {
+      return tx(handle, "p2pkh_local_submissions", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_submissions").getAll())
       );
     },
-    async listPendingTransfersByResource(resourceId: string): Promise<P2pkhPendingTransfer[]> {
-      return tx(handle, "p2pkh_pending_transfers", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_pending_transfers").index("resourceId").getAll(resourceId))
+    async listLocalSubmissionsByResource(resourceId: string): Promise<P2pkhLocalSubmission[]> {
+      return tx(handle, "p2pkh_local_submissions", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_submissions").index("resourceId").getAll(resourceId))
       );
     },
-    async removePendingTransfer(id: string): Promise<void> {
-      await tx(handle, "p2pkh_pending_transfers", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_pending_transfers").delete(id))
+    async removeLocalSubmission(id: string): Promise<void> {
+      await tx(handle, "p2pkh_local_submissions", "readwrite", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_submissions").delete(id))
       );
     },
 
-    // ---------- reservations ----------
-    async putReservation(r: P2pkhUtxoReservation): Promise<void> {
-      await tx(handle, "p2pkh_utxo_reservations", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_utxo_reservations").put(r))
+    // ---------- local input claims ----------
+    async putLocalInputClaim(r: P2pkhLocalInputClaim): Promise<void> {
+      await tx(handle, "p2pkh_local_input_claims", "readwrite", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_input_claims").put(r))
       );
     },
-    async listReservations(): Promise<P2pkhUtxoReservation[]> {
-      return tx(handle, "p2pkh_utxo_reservations", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_utxo_reservations").getAll())
+    async listLocalInputClaims(): Promise<P2pkhLocalInputClaim[]> {
+      return tx(handle, "p2pkh_local_input_claims", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_input_claims").getAll())
       );
     },
-    async listReservationsByResource(resourceId: string): Promise<P2pkhUtxoReservation[]> {
-      return tx(handle, "p2pkh_utxo_reservations", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_utxo_reservations").index("resourceId").getAll(resourceId))
+    async listLocalInputClaimsByResource(resourceId: string): Promise<P2pkhLocalInputClaim[]> {
+      return tx(handle, "p2pkh_local_input_claims", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_input_claims").index("resourceId").getAll(resourceId))
       );
     },
-    async removeReservation(id: string): Promise<void> {
-      await tx(handle, "p2pkh_utxo_reservations", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_utxo_reservations").delete(id))
+    async removeLocalInputClaim(id: string): Promise<void> {
+      await tx(handle, "p2pkh_local_input_claims", "readwrite", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_local_input_claims").delete(id))
       );
     },
 
@@ -511,8 +517,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
           "p2pkh_utxos",
           "p2pkh_history",
           "p2pkh_recent_sync",
-          "p2pkh_utxo_reservations",
-          "p2pkh_pending_transfers"
+          "p2pkh_local_input_claims",
+          "p2pkh_local_submissions"
         ],
         "readwrite",
         async (t) => {
@@ -610,13 +616,13 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
             };
             await reqAsPromise(recentStore.put(next));
           }
-          if (commit.reservations) {
-            const store = t.objectStore("p2pkh_utxo_reservations");
-            for (const r of commit.reservations) await reqAsPromise(store.put(r));
+          if (commit.localInputClaims) {
+            const store = t.objectStore("p2pkh_local_input_claims");
+            for (const r of commit.localInputClaims) await reqAsPromise(store.put(r));
           }
-          if (commit.pendingTransfers) {
-            const store = t.objectStore("p2pkh_pending_transfers");
-            for (const p of commit.pendingTransfers) await reqAsPromise(store.put(p));
+          if (commit.localSubmissions) {
+            const store = t.objectStore("p2pkh_local_submissions");
+            for (const p of commit.localSubmissions) await reqAsPromise(store.put(p));
           }
         }
       );
@@ -633,10 +639,10 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
         await this.clearUtxosForResource(r.resourceId);
         await this.clearHistoryForResource(r.resourceId);
         await this.clearBackfillState(r.resourceId);
-        const pendings = await this.listPendingTransfersByResource(r.resourceId);
-        for (const p of pendings) await this.removePendingTransfer(p.id);
-        const reservations = await this.listReservationsByResource(r.resourceId);
-        for (const rs of reservations) await this.removeReservation(rs.id);
+        const submissions = await this.listLocalSubmissionsByResource(r.resourceId);
+        for (const p of submissions) await this.removeLocalSubmission(p.id);
+        const claims = await this.listLocalInputClaimsByResource(r.resourceId);
+        for (const rs of claims) await this.removeLocalInputClaim(rs.id);
       }
     }
   };
@@ -649,9 +655,9 @@ export function resourceIdFor(keyId: string, network: BsvNetwork): string {
   return makeResourceId(keyId, network);
 }
 
-/** 工具：reservation id。 */
-export function reservationIdFor(resourceId: string, txid: string, vout: number): string {
-  return newReservationId(resourceId, txid, vout);
+/** 工具：本地输入占用 id。 */
+export function localInputClaimIdFor(resourceId: string, txid: string, vout: number): string {
+  return newLocalInputClaimId(resourceId, txid, vout);
 }
 
 /**
@@ -720,7 +726,7 @@ export async function migrateLegacyP2pkhDb(input: {
           pluginId: "p2pkh",
           storageId: P2PKH_STORAGE_ID,
           version: P2PKH_DB_VERSION,
-          upgrade: (db) => createV5Stores(db)
+          upgrade: (db) => createV6Stores(db)
         });
         const target = createP2pkhDb({
           publicKeyHash,

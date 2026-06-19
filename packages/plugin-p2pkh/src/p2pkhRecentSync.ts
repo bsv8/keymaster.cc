@@ -3,12 +3,12 @@
 // 设计缘由：
 //   - 按 network 分组，per-resource 走 WOC 限流（批量接口歧义大，逐个最稳）。
 //   - 硬切换 001：不再请求 WOC balance endpoint，余额改为 service 现算。
-//   - 写 UTXO 快照、近期 history、watermark、reservation 对账、pending 对账。
+//   - 写 UTXO 快照、近期 history、watermark、本地输入占用对账、本地提交对账。
 //   - 不写 backfill cursor；不从头扫描完整历史。
 //   - 不写余额。
 //   - 单 resource 失败不影响其他 resource，错误被收集后由任务最终抛出。
 //   - 失败时保留旧缓存。
-//   - pending 标 confirmed 必须看到对应 txid 出现在 confirmed history，否则不标。
+//   - 本地提交标 confirmed 必须看到对应 txid 出现在 confirmed history，否则不标。
 
 import type { BsvNetwork, MessageBus, WocService } from "@keymaster/contracts";
 import type {
@@ -166,19 +166,19 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
   const newTxids = recentItems.map((h) => h.txid);
   const recentConfirmedTxids = Array.from(new Set([...newTxids, ...(recentState?.recentConfirmedTxids ?? [])])).slice(0, HISTORY_PAGE_LIMIT * RECENT_HISTORY_PAGES);
 
-  // reservation 对账：必须连续多次 missing 才允许把 reservation 标 observed-spent。
-  // 关键修复：单次 missing 不能直接标 observed-spent；WOC 短暂不一致
-  // 时下一次 recent-sync 仍可能看到该输入。分配逻辑只排除 "reserved"，
+  // 本地输入占用对账：必须连续多次 missing 才允许把 claim 标 observed-consumed。
+  // 关键修复：单次 missing 不能直接标 observed-consumed；WOC 短暂不一致
+  // 时下一次 recent-sync 仍可能看到该输入。分配逻辑只排除 "claimed"，
   // 提前 release 会让该输入重新可花费，造成双花。
-  const existingReservations = await db.listReservationsByResource(resource.resourceId);
+  const existingReservations = await db.listLocalInputClaimsByResource(resource.resourceId);
   const wocOutpoints = new Set(utxoRows.map((u) => `${u.txid}:${u.vout}`));
   const MISSING_THRESHOLD = 3;
-  const reservations = existingReservations.map((r) => {
-    if (r.state !== "reserved") return r;
+  const localInputClaims = existingReservations.map((r) => {
+    if (r.state !== "claimed") return r;
     if (!wocOutpoints.has(`${r.txid}:${r.vout}`)) {
       const count = (r.missingObservationCount ?? 0) + 1;
       if (count >= MISSING_THRESHOLD) {
-        return { ...r, state: "observed-spent" as const, missingObservationCount: count, updatedAt: now };
+        return { ...r, state: "observed-consumed" as const, missingObservationCount: count, updatedAt: now };
       }
       return { ...r, missingObservationCount: count, updatedAt: now };
     }
@@ -189,21 +189,21 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
     return r;
   });
 
-  // pending transfer 对账：必须看到 pending.txid 出现在 confirmed history 才标 confirmed。
+  // 本地提交对账：必须看到 submission.txid 出现在 confirmed history 才标 confirmed。
   // 仅"输入已不在 UTXO"不足以确认，可能只是被替换/重组/RBF。
-  const pending = await db.listPendingTransfersByResource(resource.resourceId);
+  const localSubmissions = await db.listLocalSubmissionsByResource(resource.resourceId);
   const confirmedTxidSet = new Set(recentItems.map((h) => h.txid));
-  // 也合并未确认历史里已知的 pending txid（pending 转 unconfirmed）
+  // 也合并未确认历史里已知的本地提交 canonicalTxid（broadcast 转 unconfirmed）。
   const unconfirmedTxidSet = new Set(unconfirmedHistory.items.map((h) => h.txid));
-  const pendingUpdated = pending.map((p) => {
+  const submissionUpdated = localSubmissions.map((p) => {
     if (p.status === "confirmed" || p.status === "failed") return p;
-    if (p.txid && confirmedTxidSet.has(p.txid)) {
+    if (p.canonicalTxid && confirmedTxidSet.has(p.canonicalTxid)) {
       return { ...p, status: "confirmed" as const, updatedAt: now };
     }
-    if (p.txid && unconfirmedTxidSet.has(p.txid)) {
-      return { ...p, status: "pending" as const, updatedAt: now };
+    if (p.canonicalTxid && unconfirmedTxidSet.has(p.canonicalTxid)) {
+      return { ...p, status: "broadcast" as const, updatedAt: now };
     }
-    // 输入已花费但 txid 还没出现：保持 pending/unknown，等待下次观察。
+    // 输入已花费但 txid 还没出现：保持 unknown，等待下次观察。
     return p;
   });
 
@@ -215,8 +215,8 @@ async function syncOne(resource: P2pkhKeyResource, signal: AbortSignal, deps: P2
     recentHistory: historyRows,
     unconfirmedHistory: unconfirmedRows,
     recentConfirmedTxids,
-    reservations,
-    pendingTransfers: pendingUpdated,
+    localInputClaims,
+    localSubmissions: submissionUpdated,
     lastSyncedAt: now
   };
 

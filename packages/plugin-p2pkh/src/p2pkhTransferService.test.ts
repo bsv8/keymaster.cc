@@ -29,25 +29,25 @@ function makeUtxo(value: number): P2pkhUtxo {
 }
 
 function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
-  const pending: unknown[] = [];
-  const reservations: unknown[] = [];
+  const submissions: unknown[] = [];
+  const inputClaims: unknown[] = [];
   return {
-    pending,
-    reservations,
+    submissions,
+    inputClaims,
     async getResource(resourceId: string) {
       return resource.resourceId === resourceId ? resource : undefined;
     },
-    async listReservationsByResource(resourceId: string) {
-      return resource.resourceId === resourceId ? reservations : [];
+    async listLocalInputClaimsByResource(resourceId: string) {
+      return resource.resourceId === resourceId ? inputClaims : [];
     },
     async listUtxos() {
       return utxos;
     },
-    async putPendingTransfer(value: unknown) {
-      pending.push(value);
+    async putLocalSubmission(value: unknown) {
+      submissions.push(value);
     },
-    async putReservation(value: unknown) {
-      reservations.push(value);
+    async putLocalInputClaim(value: unknown) {
+      inputClaims.push(value);
     }
   };
 }
@@ -66,9 +66,16 @@ describe("createP2pkhTransferService", () => {
     };
     const db = makeDb([makeUtxo(3000)], resource);
     let vaultCalls = 0;
-    const broadcast = vi.fn(async (_network: "main" | "test", rawTxHex: string) => ({
-      txid: calcTxidFromRawTxHex(rawTxHex)
-    }));
+    const broadcast = vi.fn(async (_network: "main" | "test", rawTxHex: string) => {
+      const txid = calcTxidFromRawTxHex(rawTxHex);
+      return {
+        accepted: true,
+        canonicalTxid: txid,
+        providerReturnedTxidRaw: txid,
+        providerReturnedTxidNormalized: txid,
+        txidIntegrity: "exact" as const
+      };
+    });
     const service = createP2pkhTransferService({
       vault: {
         status: () => "unlocked",
@@ -102,7 +109,7 @@ describe("createP2pkhTransferService", () => {
     expect(preview.txid).toBe(calcTxidFromRawTxHex(preview.rawTxHex));
     expect(preview.serializedSizeBytes).toBe(preview.rawTxHex.length / 2);
     expect(preview.outputs).toHaveLength(preview.allocation.changeSatoshis > 0 ? 2 : 1);
-    expect(db.reservations).toHaveLength(0);
+    expect(db.inputClaims).toHaveLength(0);
 
     const vaultCallsAfterPrepare = vaultCalls;
     const result = await service.submit(preview);
@@ -113,13 +120,135 @@ describe("createP2pkhTransferService", () => {
     expect(result.status).toBe("broadcast");
     expect(result.rawTxHex).toBe(preview.rawTxHex);
     expect(result.txid).toBe(preview.txid);
-    expect(db.reservations).toHaveLength(preview.allocation.selected.length);
-    expect(db.pending).toHaveLength(2);
-    expect((db.pending.at(-1) as { status?: string } | undefined)?.status).toBe("broadcast");
-    expect((db.pending.at(-1) as { txid?: string } | undefined)?.txid).toBe(preview.txid);
+    expect(result.submissionId).toBeTypeOf("string");
+    expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
+    expect(db.inputClaims).toHaveLength(preview.allocation.selected.length);
+    expect(db.submissions).toHaveLength(2);
+    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("broadcast");
+    expect((db.submissions.at(-1) as { canonicalTxid?: string } | undefined)?.canonicalTxid).toBe(preview.txid);
   });
 
-  it("does not re-sign when broadcast is rejected", async () => {
+  it("accepts reversed provider txid as broadcast", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId("ignored", "main"),
+      keyId: "k1",
+      publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+      label: "active",
+      address: ACTIVE.address,
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const db = makeDb([makeUtxo(3000)], resource);
+    const broadcast = vi.fn(async (_network: "main" | "test", rawTxHex: string) => {
+      const txid = calcTxidFromRawTxHex(rawTxHex);
+      const reversed = txid.match(/../g)?.reverse().join("") ?? txid;
+      return {
+        accepted: true,
+        canonicalTxid: txid,
+        providerReturnedTxidRaw: reversed,
+        providerReturnedTxidNormalized: reversed,
+        txidIntegrity: "reversed" as const
+      };
+    });
+    const service = createP2pkhTransferService({
+      vault: {
+        status: () => "unlocked",
+        withPrivateKey: async (_keyId: string, fn: (m: { hex: string }) => Promise<string> | string) =>
+          fn({ hex: ACTIVE_PRIV_HEX })
+      } as never,
+      woc: { broadcast } as never,
+      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
+      getDb: async () => db as never,
+      getActiveKey: () => ({
+        keyId: "k1",
+        publicKeyHex: ACTIVE.publicKeyHex,
+        publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+        label: "active",
+        capabilities: [],
+        createdAt: "2024-01-01T00:00:00.000Z"
+      })
+    });
+
+    const preview = await service.prepare({
+      assetId: "bsv",
+      keyId: "k1",
+      recipientAddress: RECEIVER.address,
+      amountSatoshis: 1000,
+      feeRateSatoshisPerKb: 1
+    });
+    const result = await service.submit(preview);
+
+    expect(result.status).toBe("broadcast");
+    expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
+  });
+
+  it("marks provider-inconsistent when broadcast txid does not match canonical txid", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId("ignored", "main"),
+      keyId: "k1",
+      publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+      label: "active",
+      address: ACTIVE.address,
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const db = makeDb([makeUtxo(3000)], resource);
+    let vaultCalls = 0;
+    const previewTxid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const providerTxid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const reversedProviderTxid = providerTxid.match(/../g)?.reverse().join("") ?? providerTxid;
+    const broadcast = vi.fn(async () => ({
+      accepted: true,
+      canonicalTxid: previewTxid,
+      providerReturnedTxidRaw: reversedProviderTxid,
+      providerReturnedTxidNormalized: reversedProviderTxid,
+      txidIntegrity: "mismatch" as const
+    }));
+    const service = createP2pkhTransferService({
+      vault: {
+        status: () => "unlocked",
+        withPrivateKey: async (_keyId: string, fn: (m: { hex: string }) => Promise<string> | string) => {
+          vaultCalls += 1;
+          return fn({ hex: ACTIVE_PRIV_HEX });
+        }
+      } as never,
+      woc: { broadcast } as never,
+      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
+      getDb: async () => db as never,
+      getActiveKey: () => ({
+        keyId: "k1",
+        publicKeyHex: ACTIVE.publicKeyHex,
+        publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+        label: "active",
+        capabilities: [],
+        createdAt: "2024-01-01T00:00:00.000Z"
+      })
+    });
+
+    const preview = await service.prepare({
+      assetId: "bsv",
+      keyId: "k1",
+      recipientAddress: RECEIVER.address,
+      amountSatoshis: 1000,
+      feeRateSatoshisPerKb: 1
+    });
+    const vaultCallsAfterPrepare = vaultCalls;
+    const result = await service.submit(preview);
+
+    expect(vaultCalls).toBe(vaultCallsAfterPrepare);
+    expect(broadcast).toHaveBeenCalledTimes(1);
+    expect(result.status).toBe("provider-inconsistent");
+    expect(result.rawTxHex).toBe(preview.rawTxHex);
+    expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
+    expect(db.inputClaims).toHaveLength(preview.allocation.selected.length);
+    expect(db.submissions).toHaveLength(2);
+    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("provider-inconsistent");
+    expect((db.submissions.at(-1) as { txidIntegrity?: string } | undefined)?.txidIntegrity).toBe("mismatch");
+  });
+
+  it("does not create local input claims when broadcast is rejected", async () => {
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId("ignored", "main"),
       keyId: "k1",
@@ -170,10 +299,9 @@ describe("createP2pkhTransferService", () => {
     expect(broadcast).toHaveBeenCalledTimes(1);
     expect(result.status).toBe("rejected");
     expect(result.rawTxHex).toBe(preview.rawTxHex);
-    expect(db.reservations).toHaveLength(0);
-    expect(db.pending).toHaveLength(2);
-    expect((db.pending.at(-1) as { status?: string } | undefined)?.status).toBe("failed");
-    expect((db.pending.at(-1) as { txid?: string } | undefined)?.txid).toBe(preview.txid);
+    expect(db.inputClaims).toHaveLength(0);
+    expect(db.submissions).toHaveLength(2);
+    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("failed");
   });
 });
 

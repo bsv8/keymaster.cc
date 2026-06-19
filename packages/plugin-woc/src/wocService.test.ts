@@ -26,6 +26,23 @@ interface FetchCall {
   ts: number;
 }
 
+function reverseHexBytes(hex: string): string {
+  const clean = hex.replace(/^0x/, "");
+  const parts = clean.match(/../g) ?? [];
+  return parts.reverse().join("");
+}
+
+async function calcCanonicalTxidFromRawTxHex(rawTxHex: string): Promise<string> {
+  const clean = rawTxHex.replace(/^0x/, "");
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) {
+    bytes[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  const first = await crypto.subtle.digest("SHA-256", bytes);
+  const second = await crypto.subtle.digest("SHA-256", first);
+  return Array.from(new Uint8Array(second), (b) => b.toString(16).padStart(2, "0")).reverse().join("");
+}
+
 const fetchLog: FetchCall[] = [];
 
 function installFetchMock(opts?: { delayMs?: number; on?: (url: string) => Response | undefined }) {
@@ -266,11 +283,43 @@ describe("WocService basics", () => {
     s.dispose();
   }, 5_000);
 
-  it("broadcast() forces broadcast priority and resolves with txid", async () => {
+  it("broadcast() normalizes exact, reversed, and mismatch txids", async () => {
     const s = createWocService({ messageBus: createMessageBus() });
     s.updateConfig({ baseUrl: "https://mock.test" });
-    const res = await s.broadcast("main", "deadbeef", { signal: undefined });
-    expect(res.txid).toBe("broadcast-txid");
+
+    const cases = [
+      { rawTxHex: "deadbeef", mode: "exact" as const },
+      { rawTxHex: "cafebabe", mode: "reversed" as const },
+      { rawTxHex: "0f0e0d0c", mode: "mismatch" as const }
+    ];
+
+    for (const c of cases) {
+      (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+        const body = typeof init?.body === "string" ? JSON.parse(init.body) as { txhex: string } : { txhex: c.rawTxHex };
+        const canonicalTxid = await calcCanonicalTxidFromRawTxHex(body.txhex);
+        if (c.mode === "exact") {
+          return new Response(JSON.stringify({ txid: canonicalTxid }), { status: 200 });
+        }
+        if (c.mode === "reversed") {
+          return new Response(JSON.stringify({ txid: reverseHexBytes(canonicalTxid) }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ txid: "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff" }), {
+          status: 200
+        });
+      }) as unknown as typeof fetch;
+      const res = await s.broadcast("main", c.rawTxHex, { signal: undefined });
+      expect(res.accepted).toBe(true);
+      expect(res.canonicalTxid).toBe(await calcCanonicalTxidFromRawTxHex(c.rawTxHex));
+      if (c.mode === "exact") {
+        expect(res.txidIntegrity).toBe("exact");
+        expect(res.providerReturnedTxidNormalized).toBe(res.canonicalTxid);
+      } else if (c.mode === "reversed") {
+        expect(res.txidIntegrity).toBe("reversed");
+        expect(res.providerReturnedTxidRaw).toBeDefined();
+      } else {
+        expect(res.txidIntegrity).toBe("mismatch");
+      }
+    }
     s.dispose();
   });
 });
@@ -407,9 +456,43 @@ describe("WocService priority", () => {
       return new Response(JSON.stringify({ txid: "x" }), { status: 200 });
     }) as unknown as typeof fetch;
     const pBg = s.getAddressConfirmedBalance("main", "bg-addr", { priority: "background" });
-    const pBc = s.broadcast("main", "raw", { signal: undefined });
+    const pBc = s.broadcast("main", "cafebabe", { signal: undefined });
     await Promise.all([pBg, pBc]);
-    // pump 第一轮选优先级最高的:broadcast 比 background 高,应在第一位。
+    // 回归守卫：pump 第一轮必须选 broadcast（最高 priority）；不能先
+    // 把 background 抬进 in-flight，也不能让 broadcast 在 await 本地
+    // canonical 计算时让出执行权被 background 抢走。修复（硬切换 003
+    // 收尾）前，broadcast 任务先 await calc，pump 趁机拉起 background
+    // 的 fetch，order[0] 变成 /confirmed/balance，本断言失败。
+    expect(order[0]).toContain("/tx/raw");
+    s.dispose();
+  });
+
+  it("broadcast run's first action is /tx/raw fetch, not local async calc (硬切换 003 收尾)", async () => {
+    // 关键回归守卫：broadcast 任务出队后，第一步必须进入 /tx/raw 请求；
+    // 不能先 await 本地 canonical 计算（calcCanonicalTxidFromRawTxHex），
+    // 否则 broadcast 任务会先让出执行权，pump 趁机拉起 background 任务的
+    // fetch，破坏 broadcast 优先级。
+    //
+    // 旧实现顺序：await calc → fetchJson
+    //   pump 选 broadcast → run await calc → yield → pump 选 background →
+    //   run 同步 fetch → order[0] = background。
+    // 修复后顺序：fetchJson → await calc
+    //   pump 选 broadcast → run 同步 fetch → order[0] = /tx/raw。
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test", requestsPerSecond: 1000 });
+    const order: string[] = [];
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async (url: string) => {
+      order.push(url);
+      return new Response(JSON.stringify({ txid: "tx" }), { status: 200 });
+    }) as unknown as typeof fetch;
+    // 先入队 4 个 background，让 broadcast 排在它们之后入队。
+    const pBgs = Array.from({ length: 4 }).map((_, i) =>
+      s.getAddressConfirmedBalance("main", `bg-${i}`, { priority: "background" })
+    );
+    const pBc = s.broadcast("main", "deadbeef", { signal: undefined });
+    await Promise.all([...pBgs, pBc]);
+    // 关键断言：broadcast 任务的 fetch 必须是第一个（pump 先选 broadcast，
+    // 且 broadcast 第一步就是 fetch，没有先做本地计算让出执行权）。
     expect(order[0]).toContain("/tx/raw");
     s.dispose();
   });
@@ -650,7 +733,7 @@ describe("WocService messageBus integration (硬切换 008 收尾)", () => {
       s.getAddressConfirmedBalance("main", `bg-${i}`, { priority: "background" })
     );
     // broadcast 排在所有 background 之后入队。
-    const pBc = s.broadcast("main", "raw", { signal: undefined });
+    const pBc = s.broadcast("main", "cafebabe", { signal: undefined });
     await Promise.all([p0, ...pBgs, pBc]);
     // pump 第一轮选 p0（已在 inFlight），第二轮选 broadcast（最高 priority），
     // 然后才轮到 background 队列。

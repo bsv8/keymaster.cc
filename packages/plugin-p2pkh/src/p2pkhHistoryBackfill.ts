@@ -5,7 +5,7 @@
 //   - 每一页通过 SyncCoordinator 原子提交（page + cursor + generation）。
 //   - 每完成一页让出执行权给 recent-sync。
 //   - 尽头判断：WOC 响应中没有 nextPageToken。
-//   - 不写余额、UTXO、reservation、pending。
+//   - 不写余额、UTXO、本地输入占用、本地提交。
 //   - 不写 recent watermark。
 //   - 不覆盖 recent-sync 已写入的 confirmed 状态。
 //   - 关键修复：循环跑到 complete / failed / paused / 取消。

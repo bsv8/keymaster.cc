@@ -1,12 +1,12 @@
 // packages/plugin-p2pkh/src/pages/P2pkhUtxosPage.tsx
-// P2PKH UTXO 页面（硬切换 001）：展示 WOC UTXO 真值与本地 reservation 覆盖层。
+// P2PKH UTXO 页面（硬切换 001）：展示 WOC UTXO 真值与本地输入占用覆盖层。
 // testnet 切换按钮受 `includeTestnet` 控制；WOC 状态列只作为观察信息。
 // 直链 URL 上的 `assetId=bsvtest` 在 includeTestnet=false 时被夹回 undefined。
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
 import { useCapability, useI18n } from "@keymaster/runtime";
-import type { P2pkhAssetId, P2pkhService, P2pkhUtxo, P2pkhUtxoReservation } from "../p2pkhContracts.js";
+import type { P2pkhAssetId, P2pkhLocalInputClaim, P2pkhService, P2pkhUtxo } from "../p2pkhContracts.js";
 
 function readAssetIdFromLocation(): P2pkhAssetId | undefined {
   const search = window.location.search;
@@ -26,7 +26,7 @@ function clampAssetIdBySettings(
 }
 
 interface UtxoRow extends P2pkhUtxo {
-  reservation?: P2pkhUtxoReservation;
+  inputClaim?: P2pkhLocalInputClaim;
   spendable: boolean;
 }
 
@@ -39,11 +39,11 @@ export function P2pkhUtxosPage() {
     () => clampAssetIdBySettings(readAssetIdFromLocation(), service.getGlobalSettings().includeTestnet)
   );
   const [utxos, setUtxos] = useState<P2pkhUtxo[]>([]);
-  const [reservations, setReservations] = useState<P2pkhUtxoReservation[]>([]);
+  const [inputClaims, setInputClaims] = useState<P2pkhLocalInputClaim[]>([]);
 
   useEffect(() => {
     service.listUtxos(assetId ? { assetId } : undefined).then(setUtxos);
-    service.listReservations().then(setReservations);
+    service.listLocalInputClaims().then(setInputClaims);
   }, [service, assetId, includeTestnet]);
 
   // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
@@ -57,19 +57,19 @@ export function P2pkhUtxosPage() {
   }, [service]);
 
   const rows: UtxoRow[] = useMemo(() => {
-    const byOutpoint = new Map<string, P2pkhUtxoReservation>();
-    for (const r of reservations) {
+    const byOutpoint = new Map<string, P2pkhLocalInputClaim>();
+    for (const r of inputClaims) {
       byOutpoint.set(`${r.txid}:${r.vout}`, r);
     }
     return utxos.map((u) => {
       const r = byOutpoint.get(`${u.txid}:${u.vout}`);
       return {
         ...u,
-        reservation: r,
-        spendable: !r || r.state !== "reserved"
+        inputClaim: r,
+        spendable: !r || r.state !== "claimed"
       };
     });
-  }, [utxos, reservations]);
+  }, [utxos, inputClaims]);
 
   const columns: DataTableColumn<UtxoRow>[] = [
     { key: "txid", header: t("p2pkh.col.txidVout", { defaultValue: "txid:vout" }), render: (r) => <code>{r.txid}:{r.vout}</code> },
@@ -78,12 +78,12 @@ export function P2pkhUtxosPage() {
     { key: "address", header: t("p2pkh.col.address", { defaultValue: "地址" }), render: (r) => <code>{r.address}</code> },
     { key: "status", header: t("p2pkh.col.wocStatus", { defaultValue: "WOC 状态" }), render: (r) => r.status },
     {
-      key: "reservation",
-      header: t("p2pkh.col.reservation", { defaultValue: "本地 reservation" }),
+      key: "inputClaim",
+      header: t("p2pkh.col.inputClaim", { defaultValue: "本地输入占用" }),
       render: (r) =>
-        r.reservation
-          ? `${r.reservation.state}${t("p2pkh.col.reservation.spending", { defaultValue: " (spending " })}${r.reservation.spendingTxid.slice(0, 8)}${t("p2pkh.col.reservation.ellipsis", { defaultValue: "…)" })}`
-          : t("p2pkh.col.reservation.empty", { defaultValue: "无" })
+        r.inputClaim
+          ? `${r.inputClaim.state}${t("p2pkh.col.inputClaim.submission", { defaultValue: " (submission " })}${r.inputClaim.submissionId.slice(0, 8)}${t("p2pkh.col.inputClaim.ellipsis", { defaultValue: "…)" })}`
+          : t("p2pkh.col.inputClaim.empty", { defaultValue: "无" })
     },
     {
       key: "spendable",
@@ -97,7 +97,7 @@ export function P2pkhUtxosPage() {
       <PageHeader
         title={t("p2pkh.utxos.title", { defaultValue: "P2PKH UTXO" })}
         description={t("p2pkh.utxos.desc", {
-          defaultValue: "WOC UTXO 真值快照 + 本地 reservation 覆盖层。已 reservation 的 UTXO 不会参与分配。"
+          defaultValue: "WOC UTXO 真值快照 + 本地输入占用覆盖层。已占用的 UTXO 不会参与分配。"
         })}
         actions={
           <>
