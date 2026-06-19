@@ -34,3 +34,7 @@ export * from "./react/AppLink.js";
 export * from "./i18n/i18nStore.js";
 export * from "./i18n/languageMap.js";
 export * from "./i18n/createI18nService.js";
+// 硬切换 002：统一日志 service 由 runtime 内建。
+// 业务插件只通过 ctx.logger 写入；本入口只暴露 createLogService 供 host
+// 装配和测试夹具使用，DB 层不外暴露。
+export * from "./log/logService.js";

@@ -5,6 +5,7 @@
 
 import type { MessageBus } from "./messageBus.js";
 import type { I18nPluginResources } from "./i18n.js";
+import type { PluginLogger } from "./log.js";
 
 /** 插件运行时上下文，由 plugin host 创建并传入 setup。 */
 export interface PluginContext {
@@ -22,6 +23,14 @@ export interface PluginContext {
    * 旧 emit / on 已被移除，避免与 messageBus.publish / subscribe 双入口并存。
    */
   messageBus: MessageBus;
+  /**
+   * 平台注入的统一 logger。
+   *   - pluginId 已经天然绑定，插件作者**禁止**自己再传 pluginId。
+   *   - 不允许插件自己 new / 拼装第二套 logger。
+   *   - debug 关闭时 logger.debug() 不写库。
+   *   - child(scope) 仅用于在同一插件内细分模块。
+   */
+  logger: PluginLogger;
 }
 
 /** 插件依赖描述。 */

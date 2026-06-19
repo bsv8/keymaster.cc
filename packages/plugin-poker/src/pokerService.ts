@@ -30,6 +30,7 @@ import type {
   KeyIdentity,
   KeyspaceService,
   MessageBus,
+  PluginLogger,
   PokerService,
   PokerSessionKeyState,
   VaultService
@@ -77,6 +78,12 @@ export interface PokerServiceDeps {
   vault: VaultService;
   keyspace: KeyspaceService;
   messageBus: MessageBus;
+  /**
+   * 硬切换 002：业务插件注入的 logger。
+   * poker 关键轨迹（status changed / connect / disconnect / tx ingest 摘要）
+   * 走统一日志。不传时不记日志。
+   */
+  logger?: PluginLogger;
 }
 
 /**
@@ -994,9 +1001,20 @@ class PokerServiceImpl implements PokerService {
   }
 
   private setStatus(s: PokerConnectionStatus): void {
+    const prev = this.currentStatus;
     this.currentStatus = s;
     for (const h of this.statusHandlers) h(s);
     this.deps.messageBus.publish(POKER_EVENT.StatusChange, { status: s });
+    // 硬切换 002：poker 状态变化走统一日志。status 切换跨度更大时才记，
+    // 避免 init 与 first 状态机的瞬时跳变噪音。
+    if (prev !== s) {
+      this.deps.logger?.info({
+        scope: "poker.status",
+        event: "status.changed",
+        message: `Poker status: ${prev} -> ${s}`,
+        data: { from: prev, to: s }
+      });
+    }
   }
 
   private notifySettings(): void {

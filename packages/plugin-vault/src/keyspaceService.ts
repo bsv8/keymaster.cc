@@ -23,7 +23,8 @@ import type {
   KeyIdentity,
   KeyScopedStorageHandle,
   KeyScopedStorageOpenInput,
-  KeyspaceService
+  KeyspaceService,
+  PluginLogger
 } from "@keymaster/contracts";
 import {
   EVENT_ACTIVE_KEY_CHANGED,
@@ -46,6 +47,12 @@ export interface KeyspaceServiceDeps {
    * 跳过 background.cancelByKey（仍会关闭 handle + emit）。
    */
   background?: BackgroundService;
+  /**
+   * 硬切换 002：业务插件注入的 logger。
+   * key.deleted / active.changed / identity.failed 走统一日志。
+   * 不传时不记日志。
+   */
+  logger?: PluginLogger;
 }
 
 export interface KeyspaceHandle extends KeyspaceService {
@@ -122,8 +129,21 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   function setActiveInternal(next: ActiveKeyState) {
+    const prev = active;
     active = next;
     persistActive(next);
+    // 硬切换 002：active 切换走统一日志；记录前后 publicKeyHash 摘要（不记私钥 / 不记 label 原文之外的内容）。
+    if (prev.activePublicKeyHash !== next.activePublicKeyHash) {
+      deps.logger?.info({
+        scope: "vault.key",
+        event: "active.changed",
+        message: "Active key changed",
+        data: {
+          previousPublicKeyHash: prev.activePublicKeyHash,
+          nextPublicKeyHash: next.activePublicKeyHash
+        }
+      });
+    }
     // active 状态和 localStorage 写入已完成；逐个通知 listener。
     // 隔离每个 listener 的异常：active listener 是通知，任意一个
     // 抛错都不应回灌给调用方（特别是 `notifyKeyCreated` / `activateCreatedKey`），
@@ -286,6 +306,12 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     }
     // 4) 通知业务插件 key 已删除（仅此处发一次，vault.deleteKeyMaterial 不再发）。
     deps.messageBus.publish("key.deleted", { publicKeyHash, keyId });
+    deps.logger?.info({
+      scope: "vault.key",
+      event: "key.deleted",
+      message: "Vault key deleted",
+      data: { keyId, publicKeyHash }
+    });
     // 5) 收尾：剩余 0 把 key 时走 vault.finalizeEmptyVaultAfterLastKeyDeletion
     //    把 Vault 收回 uninitialized；否则按 active fallback 处理。
     //

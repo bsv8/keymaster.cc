@@ -4,3 +4,4 @@ export { PluginManagerPage } from "./PluginManagerPage.js";
 export { PluginDependencyPanel } from "./PluginDependencyPanel.js";
 export { LanguageSettingsPage } from "./LanguageSettingsPage.js";
 export { LanguageSection } from "./LanguageSection.js";
+export { LogSettingsPage } from "./LogSettingsPage.js";

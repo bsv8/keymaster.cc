@@ -89,7 +89,7 @@ export const wocPlugin: PluginManifest = {
   ],
   setup(ctx) {
     const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
-    const service = createWocService({ messageBus });
+    const service = createWocService({ messageBus, logger: ctx.logger });
     ctx.provide<WocService>(WOC_CAPABILITY, service);
 
     // 硬切换 003：settings.registry 单一真值；同时承担"菜单入口 + 路由匹配"。

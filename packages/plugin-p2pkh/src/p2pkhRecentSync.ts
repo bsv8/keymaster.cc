@@ -10,7 +10,7 @@
 //   - 失败时保留旧缓存。
 //   - 本地提交标 confirmed 必须看到对应 txid 出现在 confirmed history，否则不标。
 
-import type { BsvNetwork, MessageBus, WocService } from "@keymaster/contracts";
+import type { BsvNetwork, MessageBus, PluginLogger, WocService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhHistoryItem,
@@ -28,6 +28,8 @@ export interface P2pkhRecentSyncDeps {
   coordinator: SyncCoordinator;
   getResources(): Promise<P2pkhKeyResource[]>;
   getDb(): Promise<P2pkhDbHandle>;
+  /** 硬切换 002：业务插件注入的 logger。 */
+  logger?: PluginLogger;
 }
 
 const HISTORY_PAGE_LIMIT = 50;
@@ -49,6 +51,12 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
     async runOnce(signal: AbortSignal): Promise<void> {
       const resources = await deps.getResources();
       if (resources.length === 0) return;
+      deps.logger?.info({
+        scope: "p2pkh.recentSync",
+        event: "recent.sync.started",
+        message: "P2PKH recent sync started",
+        data: { resourceCount: resources.length }
+      });
 
       const errors: ResourceError[] = [];
       for (const r of resources) {
@@ -58,13 +66,32 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ resourceId: r.resourceId, error: msg });
+          deps.logger?.warn({
+            scope: "p2pkh.recentSync",
+            event: "recent.resource.failed",
+            message: `P2PKH recent-sync resource failed: ${r.resourceId}`,
+            data: { resourceId: r.resourceId, network: r.network },
+            error: { name: err instanceof Error ? err.name : "Error", message: msg }
+          });
           deps.messageBus.publish(P2PKH_MSG.RECENT_RESOURCE_ERROR, { resourceId: r.resourceId, error: msg });
         }
       }
       if (errors.length === resources.length && resources.length > 0) {
         // 全部失败：抛错让 background task 标 failed。
+        deps.logger?.error({
+          scope: "p2pkh.recentSync",
+          event: "recent.sync.failed",
+          message: `P2PKH recent sync failed for all ${resources.length} resources`,
+          data: { resourceCount: resources.length }
+        });
         throw new Error(`P2PKH recent-sync failed for all ${resources.length} resources`);
       }
+      deps.logger?.info({
+        scope: "p2pkh.recentSync",
+        event: "recent.sync.completed",
+        message: "P2PKH recent sync completed",
+        data: { resourceCount: resources.length, failedCount: errors.length }
+      });
     }
   };
 }

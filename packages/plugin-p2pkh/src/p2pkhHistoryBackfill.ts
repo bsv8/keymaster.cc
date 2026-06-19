@@ -11,7 +11,7 @@
 //   - 关键修复：循环跑到 complete / failed / paused / 取消。
 //   - 关键修复：failed / paused 状态在 resume() 后必须能被继续，重置为 running。
 
-import type { MessageBus, WocService } from "@keymaster/contracts";
+import type { MessageBus, PluginLogger, WocService } from "@keymaster/contracts";
 import type {
   P2pkhBackfillState,
   P2pkhKeyResource
@@ -26,6 +26,8 @@ export interface P2pkhHistoryBackfillDeps {
   coordinator: SyncCoordinator;
   getResources(): Promise<P2pkhKeyResource[]>;
   getDb(): Promise<P2pkhDbHandle>;
+  /** 硬切换 002：业务插件注入的 logger。 */
+  logger?: PluginLogger;
 }
 
 const PAGE_LIMIT = 100;
@@ -43,6 +45,12 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
      */
     async runOnce(signal: AbortSignal, pausedRef: { paused: boolean }): Promise<void> {
       const resources = await deps.getResources();
+      deps.logger?.info({
+        scope: "p2pkh.backfill",
+        event: "backfill.started",
+        message: "P2PKH history backfill started",
+        data: { resourceCount: resources.length }
+      });
       const failures: Array<{ resourceId: string; error: string }> = [];
       for (const r of resources) {
         if (signal.aborted) return;
@@ -51,9 +59,22 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
           await backfillOne(r, signal, pausedRef, deps);
         } catch (err) {
           failures.push({ resourceId: r.resourceId, error: errMsg(err) });
+          deps.logger?.warn({
+            scope: "p2pkh.backfill",
+            event: "backfill.page.failed",
+            message: `P2PKH backfill page failed: ${r.resourceId}`,
+            data: { resourceId: r.resourceId, network: r.network },
+            error: { name: err instanceof Error ? err.name : "Error", message: errMsg(err) }
+          });
         }
       }
       if (failures.length === resources.length && resources.length > 0) {
+        deps.logger?.error({
+          scope: "p2pkh.backfill",
+          event: "backfill.failed",
+          message: `P2PKH history backfill failed for all ${resources.length} resources`,
+          data: { failedCount: failures.length, totalCount: resources.length }
+        });
         throw new Error(
           `P2PKH history-backfill failed for all ${resources.length} resources: ${failures
             .map((f) => `${f.resourceId}: ${f.error}`)
@@ -62,12 +83,24 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
       }
       if (failures.length > 0) {
         // 关键修复：部分失败也要让 background 任务感知，状态进入 failed。
+        deps.logger?.warn({
+          scope: "p2pkh.backfill",
+          event: "backfill.partialFailed",
+          message: `P2PKH history backfill failed for ${failures.length} resources`,
+          data: { failedCount: failures.length, totalCount: resources.length }
+        });
         throw new Error(
           `P2PKH history-backfill failed for ${failures.length} resources: ${failures
             .map((f) => `${f.resourceId}: ${f.error}`)
             .join("; ")}`
         );
       }
+      deps.logger?.info({
+        scope: "p2pkh.backfill",
+        event: "backfill.completed",
+        message: "P2PKH history backfill completed",
+        data: { resourceCount: resources.length }
+      });
     }
   };
 }

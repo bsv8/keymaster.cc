@@ -29,7 +29,8 @@ import type {
   BackgroundTaskKeyScope,
   BackgroundTaskProgress,
   BackgroundTaskSnapshot,
-  BackgroundTaskState
+  BackgroundTaskState,
+  PluginLogger
 } from "@keymaster/contracts";
 import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
@@ -77,7 +78,16 @@ export interface BackgroundServiceHandle extends BackgroundService {
   dispose(): void;
 }
 
-export function createBackgroundService(): BackgroundServiceHandle {
+export interface CreateBackgroundServiceOptions {
+  /**
+   * 硬切换 002：业务插件注入的 logger。
+   * 设计缘由：后台任务的状态变化是系统诊断面，应有统一埋点。
+   * 不传时不记日志（保持旧行为）。
+   */
+  logger?: PluginLogger;
+}
+
+export function createBackgroundService(options: CreateBackgroundServiceOptions = {}): BackgroundServiceHandle {
   const tasks = new Map<string, TaskRuntime>();
   const enabledOverrides = loadEnabledOverrides();
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
@@ -85,6 +95,7 @@ export function createBackgroundService(): BackgroundServiceHandle {
   let visibilityHandler: (() => void) | undefined;
   let disposed = false;
   const leaderCtx = createLeaderContext(LEADER_LOCK_NAME, LEADER_HEARTBEAT_MS);
+  const logger = options.logger;
 
   function snapshot(task: TaskRuntime): BackgroundTaskSnapshot {
     return {
@@ -222,6 +233,7 @@ export function createBackgroundService(): BackgroundServiceHandle {
     }
     t.state = "queued";
     t.rerunRequested = false;
+    logger?.info({ scope: "background.task", event: "triggered", message: `Task triggered: ${t.def.id}`, data: { taskId: t.def.id, reason } });
     emitAll();
     const promise = (async () => {
       // canRun 检查：false 时只保持 idle/queued，不标记为 failed。
@@ -243,6 +255,7 @@ export function createBackgroundService(): BackgroundServiceHandle {
       t.error = undefined;
       t.lastStartedAt = new Date().toISOString();
       t.ctl = new AbortController();
+      logger?.info({ scope: "background.task", event: "started", message: `Task started: ${t.def.id}`, data: { taskId: t.def.id, reason } });
       emitAll();
       const ctx: BackgroundTaskContext = {
         signal: t.ctl.signal,
@@ -257,12 +270,25 @@ export function createBackgroundService(): BackgroundServiceHandle {
         t.state = t.enabled ? "idle" : "paused";
         t.lastCompletedAt = new Date().toISOString();
         t.progress = undefined;
+        logger?.info({ scope: "background.task", event: "completed", message: `Task completed: ${t.def.id}`, data: { taskId: t.def.id } });
       } catch (err) {
         if (t.ctl.signal.aborted) {
           t.state = t.enabled ? "idle" : "paused";
+          logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {
-          t.error = err instanceof Error ? err.message : String(err);
+          const msg = err instanceof Error ? err.message : String(err);
+          t.error = msg;
           t.state = "failed";
+          logger?.error({
+            scope: "background.task",
+            event: "failed",
+            message: `Task failed: ${t.def.id}`,
+            data: { taskId: t.def.id },
+            error: {
+              name: err instanceof Error ? err.name : "Error",
+              message: msg
+            }
+          });
         }
       } finally {
         t.ctl = undefined;
@@ -333,6 +359,7 @@ export function createBackgroundService(): BackgroundServiceHandle {
     // 旧实例退出后才能安全切到 paused；否则 pause 期间被 trigger 会启动新实例。
     t.state = "paused";
     t.nextRunAt = undefined;
+    logger?.info({ scope: "background.task", event: "paused", message: `Task paused: ${t.def.id}`, data: { taskId: t.def.id } });
     emitAll();
   }
   function resume(id: string): void {
@@ -349,6 +376,7 @@ export function createBackgroundService(): BackgroundServiceHandle {
       t.state = "idle";
     }
     scheduleNext(t);
+    logger?.info({ scope: "background.task", event: "resumed", message: `Task resumed: ${t.def.id}`, data: { taskId: t.def.id } });
     emitAll();
   }
   async function cancel(id: string): Promise<void> {
@@ -525,8 +553,8 @@ export interface BackgroundBundle {
   service: BackgroundServiceHandle;
 }
 
-export function createBackgroundBundle(): BackgroundBundle {
-  const service = createBackgroundService();
+export function createBackgroundBundle(options: CreateBackgroundServiceOptions = {}): BackgroundBundle {
+  const service = createBackgroundService(options);
   const registry = (service as unknown as { __registry: BackgroundRegistry }).__registry;
   return { registry, service };
 }

@@ -6,7 +6,7 @@
 // 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
 // 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
 
-import type { MessageBus, VaultService, WocService } from "@keymaster/contracts";
+import type { MessageBus, PluginLogger, VaultService, WocService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhLocalInputClaim,
@@ -40,6 +40,8 @@ export interface P2pkhTransferServiceDeps {
    * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHash 必填）。
    */
   getActiveKey: () => ReadyKeyIdentity;
+  /** 硬切换 002：业务插件注入的 logger。 */
+  logger?: PluginLogger;
 }
 
 export interface P2pkhTransferService {
@@ -177,6 +179,14 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             error: msg,
             updatedAt: new Date().toISOString()
           });
+          deps.logger?.warn({
+            scope: "p2pkh.transfer",
+            event: "transfer.broadcast.rejected",
+            message: `P2PKH transfer broadcast rejected: ${preview.txid}`,
+            data: { resourceId: resource.resourceId, network, txid: preview.txid },
+            keyScope: { publicKeyHash: active.publicKeyHash },
+            error: { name: err instanceof Error ? err.name : "Error", message: msg }
+          });
           return {
             status: "rejected",
             txid: preview.txid,
@@ -200,6 +210,14 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           status: "unknown",
           error: msg,
           updatedAt: new Date().toISOString()
+        });
+        deps.logger?.error({
+          scope: "p2pkh.transfer",
+          event: "transfer.broadcast.unknown",
+          message: `P2PKH transfer broadcast unknown: ${preview.txid}`,
+          data: { resourceId: resource.resourceId, network, txid: preview.txid },
+          keyScope: { publicKeyHash: active.publicKeyHash },
+          error: { name: err instanceof Error ? err.name : "Error", message: msg }
         });
         deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
         return {
@@ -242,6 +260,22 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         txidIntegrity: broadcastRes.txidIntegrity,
         updatedAt: new Date().toISOString()
       });
+      deps.logger?.info({
+        scope: "p2pkh.transfer",
+        event: "transfer.broadcast.accepted",
+        message: `P2PKH transfer broadcast accepted: ${broadcastRes.canonicalTxid}`,
+        data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid, txidIntegrity: broadcastRes.txidIntegrity },
+        keyScope: { publicKeyHash: active.publicKeyHash }
+      });
+      if (broadcastRes.txidIntegrity === "mismatch") {
+        deps.logger?.warn({
+          scope: "p2pkh.transfer",
+          event: "transfer.broadcast.providerInconsistent",
+          message: `P2PKH transfer broadcast provider-inconsistent: ${broadcastRes.canonicalTxid}`,
+          data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid },
+          keyScope: { publicKeyHash: active.publicKeyHash }
+        });
+      }
 
       deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
 

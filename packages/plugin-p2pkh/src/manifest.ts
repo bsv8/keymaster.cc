@@ -400,7 +400,8 @@ export const p2pkhPlugin: PluginManifest = {
       messageBus,
       backgroundRegistry,
       backgroundService,
-      keyspace
+      keyspace,
+      logger: ctx.logger
     });
     ctx.provide(P2PKH_CAPABILITY, service);
 

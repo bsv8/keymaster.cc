@@ -274,11 +274,11 @@ export const vaultPlugin: PluginManifest = {
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
     // 先建一个未绑定 keyspace 的 vault 实例占位；keyspace 创建后再回填。
     let keyspaceHandle: KeyspaceHandle | undefined = undefined;
-    const service = createVaultService({ messageBus, get keyspace() { return keyspaceHandle; } });
+    const service = createVaultService({ messageBus, get keyspace() { return keyspaceHandle; }, logger: ctx.logger });
     ctx.provide(VAULT_CAPABILITY, service);
 
     // 创建 keyspace：依赖 vault.service。
-    keyspaceHandle = createKeyspaceService({ messageBus, vault: service });
+    keyspaceHandle = createKeyspaceService({ messageBus, vault: service, logger: ctx.logger });
     ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
 
     const routes = ctx.get<RouteRegistry>("route.registry");

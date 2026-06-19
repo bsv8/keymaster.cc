@@ -75,7 +75,7 @@ export const backgroundPlugin: PluginManifest = {
     { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" }
   ],
   setup(ctx) {
-    const { registry, service } = createBackgroundBundle();
+    const { registry, service } = createBackgroundBundle({ logger: ctx.logger });
     ctx.provide<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY, registry);
     ctx.provide<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY, service);
 

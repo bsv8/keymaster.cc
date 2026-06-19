@@ -17,6 +17,7 @@ import type {
   KeyIdentity,
   KeyspaceService,
   MessageBus,
+  PluginLogger,
   VaultService,
   WocService
 } from "@keymaster/contracts";
@@ -97,6 +98,12 @@ export interface P2pkhServiceDeps {
   backgroundRegistry: BackgroundRegistry;
   backgroundService: BackgroundService;
   keyspace: KeyspaceService;
+  /**
+   * 硬切换 002：业务插件注入的 logger。
+   * P2PKH 关键轨迹（recent sync、backfill、broadcast）走统一日志。
+   * 不传时不记日志。
+   */
+  logger?: PluginLogger;
 }
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
@@ -130,20 +137,23 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     messageBus: deps.messageBus,
     coordinator,
     getResources: () => listAllResources(),
-    getDb: () => ensureDb()
+    getDb: () => ensureDb(),
+    logger: deps.logger
   });
   const backfill = createP2pkhHistoryBackfill({
     woc: deps.woc,
     messageBus: deps.messageBus,
     coordinator,
     getResources: () => listAllResources(),
-    getDb: () => ensureDb()
+    getDb: () => ensureDb(),
+    logger: deps.logger
   });
   const transfer = createP2pkhTransferService({
     vault: deps.vault,
     woc: deps.woc,
     messageBus: deps.messageBus,
     getDb: () => ensureDb(),
+    logger: deps.logger,
     getActiveKey: () => {
       const state = getActiveKeyState();
       if (!state.activePublicKeyHash) {

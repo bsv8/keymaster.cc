@@ -17,6 +17,7 @@ import type {
   I18nPluginResources,
   I18nService,
   KeyspaceService,
+  LogService,
   MessageBus,
   PluginContext,
   PluginGraph,
@@ -30,6 +31,7 @@ import type {
 import {
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
+  LOG_SERVICE_CAPABILITY,
   RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT
 } from "@keymaster/contracts";
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
@@ -45,6 +47,7 @@ import { createSettingsRegistry, type SettingsRegistry } from "./registries/sett
 import { createTopbarRegistry } from "./registries/topbarRegistry.js";
 import { createTransferRegistry, type TransferRegistry } from "./registries/transferRegistry.js";
 import { createI18nService } from "./i18n/createI18nService.js";
+import { createLogService, type LogServiceHandle } from "./log/logService.js";
 import { createPluginConfigStore } from "./pluginConfigStore.js";
 import type { PluginConfigStore } from "./pluginConfigStoreContract.js";
 import { buildPluginGraph, reverseDependentsOf } from "./pluginGraph.js";
@@ -52,6 +55,11 @@ import { emptyOwnership, type PluginOwnership } from "./pluginOwnership.js";
 
 const RUNTIME_MESSAGE_BUS = RUNTIME_MESSAGE_BUS_CONTRACT;
 const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
+
+/** 硬切换 002：runtime 系统日志统一使用的 pluginId。
+ * 设计缘由：plugin-host 自身记日志时不伪装成业务插件；统一用 "runtime"
+ * 让用户能一眼分辨"系统轨迹"和"业务插件轨迹"。 */
+const RUNTIME_SYSTEM_PLUGIN_ID = "runtime";
 
 /** runtime messageBus capability key；重新导出以便 manifest 集中引用。 */
 export { RUNTIME_MESSAGE_BUS };
@@ -70,6 +78,8 @@ export interface PluginHost {
   assets: AssetRegistry;
   topbar: TopbarRegistry;
   i18n: I18nService;
+  /** 硬切换 002：runtime 内建 log service（统一日志平台）。 */
+  log: LogService;
   /** 启停全局配置（localStorage 持久化 + storage 事件广播）。 */
   configStore: PluginConfigStore;
 
@@ -223,7 +233,13 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     debug: options.i18nDebug
   });
 
-  // 把内置 registry + messageBus + i18n 暴露成 capability。
+  // 硬切换 002：log.service 也是 runtime 内建 capability。
+  //   - 必须在 plugin 注册前 provide，保证 ctx.logger 在 setup 内可用；
+  //   - 即便 plugin 自己的 setup 是异步的，ctx.logger 也是同步可拿的；
+  //   - service 内部写库失败不能反向阻断 plugin lifecycle。
+  const logService: LogServiceHandle = createLogService();
+
+  // 把内置 registry + messageBus + i18n + log 暴露成 capability。
   capabilities.provide<RouteRegistry>("route.registry", routes);
   capabilities.provide<MenuRegistry>("menu.registry", menus);
   capabilities.provide<BreadcrumbRegistry>("breadcrumb.registry", breadcrumbs);
@@ -236,6 +252,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY, topbar);
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
+  capabilities.provide<LogService>(LOG_SERVICE_CAPABILITY, logService);
 
   // 硬切换 003：注入 route.registry 的 path 探测函数。
   // settings.registry 在 register 时会调用这个 probe，避免同一 path 同时
@@ -277,7 +294,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       get: (k) => capabilities.get(k),
       has: (k) => capabilities.has(k),
       require: (k) => capabilities.require(k),
-      messageBus
+      messageBus,
+      // 硬切换 002：logger 已天然绑定当前 pluginId；插件作者禁止再传。
+      logger: logService.forPlugin(record.manifest.id)
     };
   }
 
@@ -327,6 +346,20 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         ...diff,
         teardown: undefined
       };
+      // 硬切换 002：记系统日志（pluginId 固定 "runtime"，不伪装成业务插件）。
+      // 写库失败被 service 内部吞掉，不会反向影响 enable 主流程。
+      logService.append({
+        level: "error",
+        pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
+        scope: "plugin-host",
+        event: "setup.failed",
+        message: `Plugin setup failed: ${record.manifest.id}`,
+        data: { pluginId: record.manifest.id },
+        error: {
+          name: err instanceof Error ? err.name : "Error",
+          message: err instanceof Error ? err.message : String(err)
+        }
+      });
       throw err;
     }
     const after = snapshotOwnership();
@@ -442,6 +475,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     assets,
     topbar,
     i18n,
+    log: logService,
     configStore,
 
     installed() {
@@ -561,6 +595,15 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         record.state = "enabled";
         record.error = undefined;
         configStore.setEnabled(pluginId, true);
+        // 硬切换 002：plugin enabled 系统轨迹。失败不阻断主流程。
+        logService.append({
+          level: "info",
+          pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
+          scope: "plugin-host",
+          event: "plugin.enabled",
+          message: `Plugin enabled: ${pluginId}`,
+          data: { pluginId }
+        });
         bumpVersion();
       } catch (err) {
         // 回滚：把 setup 中已经产生的 owner 资源全部回收。
@@ -572,6 +615,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         record.state = "error-disabled";
         record.error = err instanceof Error ? err.message : String(err);
         configStore.setEnabled(pluginId, false);
+        // setup 失败日志在 runSetup 内部已记录；这里不再重复。
         bumpVersion();
         throw err;
       }
@@ -609,9 +653,31 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       if (teardownErr) {
         record.state = "error-disabled";
         record.error = teardownErr instanceof Error ? teardownErr.message : String(teardownErr);
+        // 硬切换 002：teardown 失败系统轨迹。
+        logService.append({
+          level: "error",
+          pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
+          scope: "plugin-host",
+          event: "teardown.failed",
+          message: `Plugin teardown failed: ${pluginId}`,
+          data: { pluginId },
+          error: {
+            name: teardownErr instanceof Error ? teardownErr.name : "Error",
+            message: teardownErr instanceof Error ? teardownErr.message : String(teardownErr)
+          }
+        });
       } else {
         record.state = "disabled";
         record.error = undefined;
+        // 硬切换 002：plugin disabled 系统轨迹。
+        logService.append({
+          level: "info",
+          pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
+          scope: "plugin-host",
+          event: "plugin.disabled",
+          message: `Plugin disabled: ${pluginId}`,
+          data: { pluginId }
+        });
       }
       record.ownership = emptyOwnership();
       configStore.setEnabled(pluginId, false);

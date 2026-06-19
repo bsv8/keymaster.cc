@@ -31,6 +31,7 @@ import {
   type KeyExportEnvelope,
   type KeyIdentity,
   type KeyRef,
+  type PluginLogger,
   type PrivateKeyMaterial,
   type VaultService,
   type VaultStatus
@@ -100,6 +101,12 @@ function defaultInitialKeyLabel(): string {
 export interface VaultServiceDeps {
   messageBus: MessageBus;
   keyspace?: KeyspaceHandle;
+  /**
+   * 硬切换 002：业务插件注入的 logger。
+   * vault 关键轨迹（unlock / lock / key created / deleted / active changed /
+   * identity failed）走统一日志。不传时不记日志。
+   */
+  logger?: PluginLogger;
 }
 
 export function createVaultService(deps: VaultServiceDeps): VaultService {
@@ -143,11 +150,21 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       // 锁定时清除"首 Key 未激活"notice：会话结束，下一次 unlock
       // 不应再展示上一次会话的 notice。
       setPendingActivationNotice(null);
+      deps.logger?.info({
+        scope: "vault.lifecycle",
+        event: "vault.locked",
+        message: "Vault locked"
+      });
       if (activeChangeUnsub) {
         activeChangeUnsub();
         activeChangeUnsub = null;
       }
     } else if (next === "unlocked") {
+      deps.logger?.info({
+        scope: "vault.lifecycle",
+        event: "vault.unlocked",
+        message: "Vault unlocked"
+      });
       // 解锁后挂载 active 变化监听：如果用户随后手动把 notice 那把 key
       // 设为 active，自动清除 notice。
       if (!activeChangeUnsub) {
@@ -402,6 +419,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       keyId: ref.id,
       publicKeyHash: identity.publicKeyHash,
       label
+    });
+    deps.logger?.info({
+      scope: "vault.key",
+      event: "key.created",
+      message: "Vault key created",
+      data: { keyId: ref.id, publicKeyHash: identity.publicKeyHash, label },
+      keyScope: { publicKeyHash: identity.publicKeyHash }
     });
     return ref;
   }

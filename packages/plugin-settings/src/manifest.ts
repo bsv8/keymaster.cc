@@ -20,8 +20,10 @@ import type {
   PluginManifest,
   SettingsRegistry
 } from "@keymaster/contracts";
+import { LOG_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { PluginManagerPage } from "./PluginManagerPage.js";
 import { LanguageSettingsPage } from "./LanguageSettingsPage.js";
+import { LogSettingsPage } from "./LogSettingsPage.js";
 
 /** 设置 i18n 资源。设计缘由：route / menu / 设置项 label 全部走 I18nText。 */
 const settingsResources: I18nPluginResources = {
@@ -30,11 +32,14 @@ const settingsResources: I18nPluginResources = {
     en: {
       "settings.route.language": "Language",
       "settings.route.plugins": "Plugins",
+      "settings.route.logs": "System logs",
       "settings.menu.language": "Language",
       "settings.menu.plugins": "Plugins",
+      "settings.menu.logs": "System logs",
       "settings.crumb.settings": "Settings",
       "settings.crumb.language": "Language",
       "settings.crumb.plugins": "Plugins",
+      "settings.crumb.logs": "System logs",
       "settings.language.title": "Language",
       "settings.language.description": "Choose display language. Affects all UI text; switch is instant.",
       "settings.language.option.en": "English",
@@ -71,16 +76,51 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.state.disabled": "Disabled",
       "pluginManager.state.blocked": "Blocked (missing dependency)",
       "pluginManager.state.errorDisabled": "Error-disabled",
-      "pluginManager.state.registered": "Registered"
+      "pluginManager.state.registered": "Registered",
+      // 硬切换 002：统一日志页文案
+      "logSettings.title": "System logs",
+      "logSettings.description":
+        "Inspect and configure the unified system log. Plugins record their activity via ctx.logger; entries are stored in a single global IndexedDB.",
+      "logSettings.config.title": "Configuration",
+      "logSettings.config.retentionHint":
+        "Retention applies to all entries. Decreasing the value prunes the oldest entries immediately (best-effort).",
+      "logSettings.config.debug": "Enable debug logs",
+      "logSettings.config.debugHint":
+        "Debug is off by default. When off, logger.debug() does not write to storage. Turning it on affects future entries only — past debug entries are not back-filled.",
+      "logSettings.config.retention": "Retention (days)",
+      "logSettings.config.save": "Save",
+      "logSettings.config.pruneNow": "Prune now",
+      "logSettings.filter.title": "Filters",
+      "logSettings.filter.pluginId": "Plugin id",
+      "logSettings.filter.pluginIdPh": "e.g. woc, p2pkh, runtime",
+      "logSettings.filter.level": "Level",
+      "logSettings.filter.levelAll": "All",
+      "logSettings.filter.keyword": "Keyword",
+      "logSettings.filter.keywordPh": "Match message / event / scope",
+      "logSettings.filter.needOne": "Set a plugin id or level first",
+      "logSettings.actions.clearFiltered": "Clear filtered",
+      "logSettings.actions.clearAll": "Clear all",
+      "logSettings.actions.clearAllConfirm": "Clear ALL log entries? This cannot be undone.",
+      "logSettings.list.title": "Entries",
+      "logSettings.list.empty": "No entries match the current filters.",
+      "logSettings.entry.details": "Details",
+      "logSettings.entry.hide": "Hide",
+      "logSettings.entry.data": "data",
+      "logSettings.entry.error": "error",
+      "logSettings.cleared": "Cleared ${removed} entries",
+      "logSettings.pruned": "Pruned ${removed} expired entries"
     },
     "zh-CN": {
       "settings.route.language": "语言",
       "settings.route.plugins": "插件",
+      "settings.route.logs": "系统日志",
       "settings.menu.language": "语言",
       "settings.menu.plugins": "插件",
+      "settings.menu.logs": "系统日志",
       "settings.crumb.language": "语言",
       "settings.crumb.settings": "设置",
       "settings.crumb.plugins": "插件",
+      "settings.crumb.logs": "系统日志",
       "settings.language.title": "语言",
       "settings.language.description": "选择界面显示语言，影响所有 UI 文案；切换立即生效。",
       "settings.language.option.en": "English",
@@ -115,7 +155,39 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.state.disabled": "已禁用",
       "pluginManager.state.blocked": "被阻塞（依赖缺失）",
       "pluginManager.state.errorDisabled": "错误已禁用",
-      "pluginManager.state.registered": "已注册"
+      "pluginManager.state.registered": "已注册",
+      // 硬切换 002：统一日志页文案
+      "logSettings.title": "系统日志",
+      "logSettings.description":
+        "查看并配置统一系统日志。插件通过 ctx.logger 记录行为，entry 存储在唯一的全局 IndexedDB 中。",
+      "logSettings.config.title": "配置",
+      "logSettings.config.retentionHint":
+        "保留策略对所有 entry 生效。调小后立即触发 best-effort 清理。",
+      "logSettings.config.debug": "开启 debug 日志",
+      "logSettings.config.debugHint":
+        "debug 默认关闭。关闭时 logger.debug() 不写入存储；开启后只对未来产生的 entry 生效，**不**补历史。",
+      "logSettings.config.retention": "保留天数",
+      "logSettings.config.save": "保存",
+      "logSettings.config.pruneNow": "立即清理过期",
+      "logSettings.filter.title": "过滤",
+      "logSettings.filter.pluginId": "插件 id",
+      "logSettings.filter.pluginIdPh": "例如 woc, p2pkh, runtime",
+      "logSettings.filter.level": "级别",
+      "logSettings.filter.levelAll": "全部",
+      "logSettings.filter.keyword": "关键字",
+      "logSettings.filter.keywordPh": "匹配 message / event / scope",
+      "logSettings.filter.needOne": "请先设置 plugin id 或 level",
+      "logSettings.actions.clearFiltered": "按过滤清理",
+      "logSettings.actions.clearAll": "清空全部",
+      "logSettings.actions.clearAllConfirm": "确定清空所有日志 entry？此操作不可撤销。",
+      "logSettings.list.title": "Entry 列表",
+      "logSettings.list.empty": "没有匹配当前过滤的 entry。",
+      "logSettings.entry.details": "详情",
+      "logSettings.entry.hide": "收起",
+      "logSettings.entry.data": "data",
+      "logSettings.entry.error": "error",
+      "logSettings.cleared": "已清理 ${removed} 条 entry",
+      "logSettings.pruned": "已清理 ${removed} 条过期 entry"
     }
   }
 };
@@ -133,7 +205,8 @@ export const settingsPlugin: PluginManifest = {
   i18n: settingsResources,
   dependencies: [
     { capability: "settings.registry", reason: "注册 settings 详情页" },
-    { capability: "breadcrumb.registry", reason: "为设置详情页提供面包屑" }
+    { capability: "breadcrumb.registry", reason: "为设置详情页提供面包屑" },
+    { capability: LOG_SERVICE_CAPABILITY, reason: "统一日志页依赖 log.service" }
   ],
   setup(ctx) {
     // 硬切换 003：settings 分组菜单 + 详情页路由的真值全部由
@@ -162,6 +235,20 @@ export const settingsPlugin: PluginManifest = {
       visibleWhen: ({ unlocked }) => unlocked,
       component: PluginManagerPage
     });
+    // 硬切换 002：/settings/logs 系统级统一日志页。
+    settings.register({
+      id: "settings.logs",
+      path: "/settings/logs",
+      label: { key: "settings.route.logs", fallback: "System logs" },
+      description: {
+        key: "logSettings.description",
+        fallback: "Inspect and configure the unified system log."
+      },
+      order: 3,
+      icon: "ScrollText",
+      visibleWhen: () => true,
+      component: LogSettingsPage
+    });
 
     // 面包屑：当前路径匹配时第一段固定为不可点击的"设置"分类节点。
     // 这样 plugin 的 settings breadcrumb 不再回指不存在的 /settings，
@@ -185,6 +272,15 @@ export const settingsPlugin: PluginManifest = {
         // 第一段：不可点击"设置"分类节点（无 path）。
         { label: { key: "settings.crumb.settings", fallback: "Settings" } },
         { label: { key: "settings.crumb.plugins", fallback: "Plugins" } }
+      ]
+    });
+    breadcrumbs.register({
+      id: "settings.logs.crumbs",
+      order: 5,
+      match: (path) => path === "/settings/logs",
+      resolve: () => [
+        { label: { key: "settings.crumb.settings", fallback: "Settings" } },
+        { label: { key: "settings.crumb.logs", fallback: "System logs" } }
       ]
     });
 

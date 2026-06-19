@@ -17,6 +17,7 @@
 import type {
   BsvNetwork,
   MessageBus,
+  PluginLogger,
   WocBalanceResponse,
   WocBroadcastResult,
   WocConfig,
@@ -49,6 +50,11 @@ export interface CreateWocServiceOptions {
    * 不传时 createWocService 立即抛错，避免误用。
    */
   messageBus: MessageBus;
+  /**
+   * 硬切换 002：业务插件注入的 logger。
+   * 不传时不记日志。
+   */
+  logger?: PluginLogger;
 }
 
 export function createWocService(options: CreateWocServiceOptions): WocServiceHandle {
@@ -56,7 +62,9 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
     throw new Error("createWocService: messageBus is required");
   }
   const messageBus: MessageBus = options.messageBus;
-  const actor: WocActorHandle = createWocActor();
+  // logger 在 attach 之前已经准备好；actor 内部用它做 config / backoff /
+  // request 关键轨迹埋点。
+  const actor: WocActorHandle = createWocActor({ logger: options.logger });
   actor.attach(messageBus);
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {
