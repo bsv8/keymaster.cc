@@ -396,17 +396,24 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     await vaultDb.putKey(record);
     const ref = recordToRef(record);
     keyCache = null;
-    // 6) 先通知 keyspace（内部把新 key 注册为 active），
-    //    再 emit key.created；订阅者看到的 active 已切好。
+    // 6) 先通知 keyspace（内部把新 key 注册为 active），再 emit key.created；
+    //    订阅者看到的 active 已切好。
     //
-    // 硬切换 002 收尾：如果 keyspace 通知失败，DB 已经有这把 key，
-    // 但 active 没切。抛 `KeyPersistedButActivationFailedError` 让 UI
-    // 进入"已保存但未 active"的成功/警告态，**不**发 "key.created"——
-    // 否则订阅者从事件 handler 读 keyspace.active() 会看到与 payload
-    // publicKeyHash 不一致的状态（payload 是新 key，active 是旧 key）。
+    // 硬切换 002 收尾：如果 keyspace 通知失败，DB 已经有这把 key，但 active
+    // 没切。抛 `KeyPersistedButActivationFailedError` 让 UI 进入"已保存但
+    // 未 active"的成功/警告态，**不**发 "key.created"——否则订阅者从
+    // 事件 handler 读 keyspace.active() 会看到与 payload publicKeyHash
+    // 不一致的状态（payload 是新 key，active 是旧 key）。
+    //
+    // 硬切换 004 收尾：必须 await notifyKeyCreated。keyspace 内部会
+    // 先 await quiesceNamespace(prev.active) 把旧 key 的后台任务停稳，
+    // 然后才切 active；同步不 await 等于把旧 key 的 history-backfill
+    // 留在内存里继续跑，新 active 的 namespace DB 一旦被业务插件打开，
+    // 旧 task 仍可能撞 `database connection is closing`——和手动
+    // setActive 的同类竞态。
     if (deps.keyspace) {
       try {
-        deps.keyspace.notifyKeyCreated(await recordToIdentity(record));
+        await deps.keyspace.notifyKeyCreated(await recordToIdentity(record));
       } catch (notifyErr) {
         throw new KeyPersistedButActivationFailedError({
           key: ref,
@@ -821,7 +828,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         if (remaining.length === 0) {
           if (deps.keyspace) {
             try {
-              deps.keyspace.onVaultLocked();
+              await deps.keyspace.onVaultLocked();
             } catch (err) {
               console.error("keyspace.onVaultLocked during empty-unlock failed", err);
             }
@@ -856,9 +863,19 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     },
 
     async lock() {
+      // 硬切换 004：lock 的顺序收紧——setStatus("locked") 之后，先
+      // await keyspace.onVaultLocked()（平台级锁屏清理屏障：cancelByKey
+      // + await 旧 task 退出 + 关闭 namespace DB handle），再 publish
+      // `vault.locked`。
+      //
+      // 设计缘由：`vault.locked` 的语义被收紧为"平台级资源已停稳"——
+      // 业务插件订阅者不再承担"我必须先 cancel 才安全"的职责。如果
+      // keyspace.onVaultLocked 抛错，必须冒泡——禁止在这里 catch 后
+      // 伪装成成功锁屏；调用方（AppShell）会把未发布的 vault.locked
+      // 视作"锁屏尚未完成"。
       setStatus("locked");
       if (deps.keyspace) {
-        deps.keyspace.onVaultLocked();
+        await deps.keyspace.onVaultLocked();
       }
       deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
     },
@@ -892,10 +909,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (remaining.length > 0) {
         throw new Error("recoverEmptyVaultToUninitialized requires zero keys");
       }
-      // 2) 通知 keyspace 收尾。
+      // 2) 通知 keyspace 收尾。硬切换 004：await keyspace.onVaultLocked()
+      // —— await 旧 task 退出 + 关闭 namespace DB。
       if (deps.keyspace) {
         try {
-          deps.keyspace.onVaultLocked();
+          await deps.keyspace.onVaultLocked();
         } catch (err) {
           console.error("keyspace.onVaultLocked during recover failed", err);
         }
@@ -1022,13 +1040,21 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         // 3) 触发会话结束清理：让依赖 vault.locked 的业务插件释放
         //    namespace 资源；keyspace 自己也走一次 onVaultLocked 把
         //    打开的 namespace DB 关掉、active 清回 all。
+        //
+        // 硬切换 004：await keyspace.onVaultLocked()——平台级清理屏障，
+        // resolve 时表示后台任务已退出、namespace DB 已关；之后再
+        // publish `vault.locked`，让"会话结束"语义保持
+        // "平台资源已停稳"的收紧含义。
+        //
+        // 硬切换 004 收尾：禁止在 finalize 里 catch keyspace.onVaultLocked()
+        // 的错误后继续往下走。cancelByKey / namespace 关失败意味着
+        // "平台资源没停稳"——继续 publish vault.locked + 删 meta 会
+        // 把"清理失败"伪装成"会话成功结束"，留下旧 task 仍可能继续
+        // 跑的风险，与施工单"锁屏清理屏障失败必须可见"的语义冲突。
+        // 让错误冒泡到外层 catch：status 仍收敛到 uninitialized（finally），
+        // 但调用方通过抛错看到 finalize 失败。
         if (deps.keyspace) {
-          try {
-            deps.keyspace.onVaultLocked();
-          } catch (err) {
-            // 业务插件清理失败不应阻止 vault 状态收尾，记录即可。
-            console.error("keyspace.onVaultLocked failed during finalize", err);
-          }
+          await deps.keyspace.onVaultLocked();
         }
         try {
           deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
@@ -1050,14 +1076,20 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         setStatus("uninitialized");
       }
       if (finalizeError !== null) {
-        // 重新包装：调用方需要明确知道 deleteMeta 失败、状态已收敛、
-        // 但下次 bootstrap 可能会读到 locked——不能让"已经回到
-        // uninitialized"的表象掩盖 meta 残留事实。
+        // 重新包装：调用方需要明确知道 finalize 哪个阶段失败、状态已
+        // 收敛到 uninitialized。错误可能来源：
+        //   - keyspace.onVaultLocked() 抛错（cancelByKey / namespace 关失败）
+        //   - publish vault.locked 抛错（业务订阅者异常，理论上不致命）
+        //   - vaultDb.deleteMeta 抛错（meta 残留，下次 bootstrap 可能
+        //     读到 locked）
+        // 不区分阶段统一报"platform-level cleanup failed"——具体根因
+        // 在 console.error / 调用方日志里能看到，UI 至少能切回欢迎页
+        // 重新走流程。
         const reason =
           finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
         throw new Error(
-          `Empty-vault finalize failed to wipe vault_meta ` +
-            `(state already collapsed to uninitialized; next bootstrap may re-read locked): ${reason}`
+          `Empty-vault finalize failed (platform-level cleanup incomplete; ` +
+            `state collapsed to uninitialized; next bootstrap may re-read locked): ${reason}`
         );
       }
     },

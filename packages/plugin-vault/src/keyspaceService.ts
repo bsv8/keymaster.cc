@@ -15,6 +15,13 @@
 //   - 删除 active key 时由 `autoPickActive` 选下一把 ready key；没有 ready 时
 //     active 清空，调用方（keyspace）发布新 state。仍有可能由壳层判断
 //     `listKeys().length > 0 && !activePublicKeyHash` 进入"修复/管理态"阻断。
+//   - 硬切换 004：active 切换、Vault 锁定、删除 key 三条路径统一收口到同
+//     一条 namespace quiesce 语义——cancelByKey（await 旧实例退出）再
+//     关闭 openDbs。"后台任务已收到 abort"不等于"已退出"；必须 await 到
+//     旧实例真正结束，否则会出现 history-backfill 还在跑却已经撞上
+//     `database connection is closing` 的竞态。该语义由内部 helper
+//     `quiesceNamespace(publicKeyHash)` 提供；setActive / prepareDeleteKey
+//     / onVaultLocked 都必须复用这一条路径，不能在调用方各自手写。
 
 import type { MessageBus } from "@keymaster/runtime";
 import type {
@@ -58,10 +65,32 @@ export interface KeyspaceServiceDeps {
 export interface KeyspaceHandle extends KeyspaceService {
   /** 在 Vault unlock 后调用，触发 identity backfill。 */
   onVaultUnlocked(): Promise<void>;
-  /** Vault 锁定时调用：清空 active key 状态。 */
-  onVaultLocked(): void;
-  /** 通知 keyspace 一个 key 被创建（vault 在 importPrivateKey 成功后调用）。 */
-  notifyKeyCreated(identity: KeyIdentity): void;
+  /**
+   * Vault 锁定时的平台级清理屏障（硬切换 004）。
+   *
+   * 语义：
+   *   1) 若有 active key，先 await quiesceNamespace(active) 把它
+   *      的后台任务停稳、DB handle 关掉；
+   *   2) 再关闭可能残留的其它 openDbs；
+   *   3) 再 setActiveInternal({}) 清空 active。
+   *
+   * resolve 时表示"当前 namespace 的后台任务已退出，相关 DB handle
+   * 已关闭"。这是 `vault.locked` 事件发布之前必须先 await 的屏障：
+   * 业务插件订阅 vault.locked 不再承担"正确性依赖于我先 cancel"
+   * 的职责，顺序由 keyspace 统一掌控。错误必须冒泡；调用方不允许
+   * catch 后伪装成成功锁屏。
+   */
+  onVaultLocked(): Promise<void>;
+  /**
+   * 通知 keyspace 一个 key 被创建（vault 在 importPrivateKey 成功后调用）。
+   *
+   * 硬切换 004 收尾：返回 Promise<void>，调用方必须 await——内部会先
+   * await quiesceNamespace(prev.active) 把旧 key 的后台任务停稳、再
+   * 切到新 key active；只有 await 走完才表示"新 key 已真正成为
+   * active"。如果同步调用且不 await，等同于把旧 key 的 history-backfill
+   * 留在内存里继续跑、和新 active 的 namespace DB 切换撞在一起。
+   */
+  notifyKeyCreated(identity: KeyIdentity): Promise<void>;
   /**
    * 显式"把某把 key 切为 active"。vault 在 importPrivateKey / generateKey
    * 成功后必须调用，确保新 key 进入 single 模式。
@@ -69,8 +98,14 @@ export interface KeyspaceHandle extends KeyspaceService {
    * 与 `setActive(publicKeyHash)` 的区别：本方法不依赖 identityStatus 过滤
    * ——keyspace 自己刚被通知了一把新 key（同一调用链），应无条件接受。
    * `setActive` 走 listActiveCandidates 过滤，是用户手动切 key 的入口。
+   *
+   * 硬切换 004 收尾：返回 Promise<void>，内部必须先 await quiesceNamespace
+   * 旧 active 的 namespace（cancelByKey + await 旧 task 退出 + 关闭
+   * openDbs），再 setActiveInternal。漏 await 等同于让 history-backfill
+   * 在旧 key 仍在跑的情况下被新 active 顶走，复现 `database connection is
+   * closing` 的同类竞态。
    */
-  activateCreatedKey(identity: KeyIdentity): void;
+  activateCreatedKey(identity: KeyIdentity): Promise<void>;
   /**
    * 设置 identity backfill 阶段状态。vault 在 backfillIdentities 前后
    * 调用，触发 EVENT_KEYSPACE_INITIALIZATION 事件。
@@ -239,15 +274,15 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   /**
-   * 切换 active key 时清空打开的 namespace db：业务插件可能缓存了旧 namespace 的
+   * 关闭指定 key 的 namespace db：业务插件可能缓存了旧 namespace 的
    * IDBDatabase，必须关闭后由它们重新 openKeyStorage 拿到新 namespace。
    * 设计缘由：active key 切换不应该把别的 key 的打开的 db 也关闭；只关闭当前
    * 即将离开的 active key 的 db。但因为 openKeyStorage 是按需打开的，未必已开，
    * 所以这里只关闭"旧 active"的 db。
    */
-  function closeActiveNamespace(oldPublicKeyHash: string | undefined) {
-    if (!oldPublicKeyHash) return;
-    const prefix = `${oldPublicKeyHash}::`;
+  function closeNamespaceHandles(publicKeyHash: string | undefined) {
+    if (!publicKeyHash) return;
+    const prefix = `${publicKeyHash}::`;
     for (const [key, entry] of openDbs.entries()) {
       if (!key.startsWith(prefix)) continue;
       try {
@@ -257,6 +292,35 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       }
       openDbs.delete(key);
     }
+  }
+
+  /**
+   * 硬切换 004：namespace quiesce——"停任务并等待退出再关 handle"的
+   * 单一实现来源。setActive / prepareDeleteKey / onVaultLocked 必须
+   * 共用这条路径，不能在调用方各自手写；只要一条路径忘记 await，
+   * 就会重新长回 history-backfill 撞上 `database connection is closing`
+   * 的同类 bug。
+   *
+   * 顺序（不可重排）：
+   *   1) 若 attachedBackground 存在，await cancelByKey(publicKeyHash)——
+   *      background 内部 cancelByKey 已经会 t.ctl?.abort() 再
+   *      `await awaitIdle(t)` 等旧实例真正结束；这一句 resolve 时
+   *      表示该 key 的 task 旧实例已退出。
+   *   2) 关闭该 key 的 openDbs。
+   *
+   * 没有 attachedBackground 时按"最小语义退化"——直接关 handle。这
+   * 表示"当前没有可等待的后台平台接入"，不新建第二套本地任务状态机。
+   *
+   * 错误必须冒泡：cancelByKey 失败或 close 异常不允许在这里 catch 成
+   * 成功——调用方（setActive / prepareDeleteKey / vaultService.lock）
+   * 需要正确性边界。
+   */
+  async function quiesceNamespace(publicKeyHash: string | undefined): Promise<void> {
+    if (!publicKeyHash) return;
+    if (attachedBackground) {
+      await attachedBackground.cancelByKey(publicKeyHash);
+    }
+    closeNamespaceHandles(publicKeyHash);
   }
 
   /**
@@ -335,7 +399,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     }
     if (active.activePublicKeyHash === publicKeyHash) {
       const next = await autoPickActive();
-      closeActiveNamespace(publicKeyHash);
+      closeNamespaceHandles(publicKeyHash);
       setActiveInternal(next);
     }
   }
@@ -361,8 +425,19 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       if (!target) {
         throw new Error("Key not found");
       }
+      // 硬切换 004：重复切到当前 active key 时不做任何事——不 cancel、
+      // 不 close、不重发 active.changed，避免打断正在跑的同步任务。
+      if (active.activePublicKeyHash === publicKeyHash) {
+        return;
+      }
+      // 顺序收紧：先 quiesce 旧 active 的 namespace（await 旧 task
+      // 退出 + 关闭其 openDbs），再切 active。
+      //
+      // 设计缘由：active 一旦先变，background task 的 keyScope 延迟
+      // 求值会指向新 key，此时再 cancelByKey(oldKey) 已无法正确匹配
+      // 旧 task。必须"先停旧 key 任务，再切 active"。
       const prev = active;
-      closeActiveNamespace(prev.activePublicKeyHash);
+      await quiesceNamespace(prev.activePublicKeyHash);
       setActiveInternal({ activePublicKeyHash: publicKeyHash });
     },
     requireActiveKey() {
@@ -436,24 +511,16 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       return [...registeredStorages];
     },
     async prepareDeleteKey(publicKeyHash) {
-      // 硬切换 008 收尾：严格顺序 + fail-closed。
-      //   1) background.cancelByKey —— 等所有该 key 的 task 旧实例退出；
-      //      失败必须冒泡以阻止后续 namespace DB / Vault 私钥删除。
-      //   2) 关闭该 key 的 openDbs
-      //   3) emit key.deleting（emit 不可 await，作为日志/保险通知）
-      if (attachedBackground) {
-        await attachedBackground.cancelByKey(publicKeyHash);
-      }
-      const prefix = `${publicKeyHash}::`;
-      for (const [key, entry] of [...openDbs.entries()]) {
-        if (!key.startsWith(prefix)) continue;
-        try {
-          entry.handle.close();
-        } catch {
-          // 静默
-        }
-        openDbs.delete(key);
-      }
+      // 硬切换 008 收尾 + 硬切换 004：严格顺序 + fail-closed。
+      //   1) quiesceNamespace —— cancelByKey（await 旧 task 退出）+ 关闭
+      //      该 key 的 openDbs。失败必须冒泡以阻止后续 namespace DB /
+      //      Vault 私钥删除。
+      //   2) emit key.deleting（emit 不可 await，作为日志/保险通知）
+      //
+      // 设计缘由：quiesceNamespace 是 active 切换 / 删除 key / Vault 锁定
+      // 三条路径的唯一实现来源。prepareDeleteKey 必须复用，不能再手写
+      // 一份"先 cancel 再关 handle"。
+      await quiesceNamespace(publicKeyHash);
       deps.messageBus.publish("key.deleting", { publicKeyHash });
     },
     async deleteKey(input) {
@@ -527,9 +594,21 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       const next = await autoPickActive();
       setActiveInternal(next);
     },
-    onVaultLocked() {
-      // 锁定时关闭所有 namespace db：业务插件不应该再持有明文 DB。
-      for (const [, entry] of openDbs) {
+    async onVaultLocked() {
+      // 硬切换 004：锁屏清理屏障。顺序：
+      //   1) 若当前有 active key，先 await quiesceNamespace(active)
+      //      —— cancelByKey（await 旧 task 退出）+ 关闭该 namespace 的
+      //      openDbs；
+      //   2) 关闭可能残留的其它 openDbs（其它 hash 的）；
+      //   3) setActiveInternal({})。
+      //
+      // resolve 时表示"当前 active key 的后台任务已退出、相关 DB handle
+      // 已关闭"。vaultService.lock() 必须先 await 本方法再 publish
+      // `vault.locked`——业务插件订阅 vault.locked 不再承担"我必须先
+      // cancel 才安全"的职责。
+      await quiesceNamespace(active.activePublicKeyHash);
+      // 步骤 2：清理其它残留 namespace db。
+      for (const [, entry] of [...openDbs.entries()]) {
         try {
           entry.handle.close();
         } catch {
@@ -539,25 +618,35 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       openDbs.clear();
       setActiveInternal({});
     },
-    notifyKeyCreated(identity) {
-      // 硬切换 002 收尾：新建 / 导入后**始终**把新 key 切为 active。
+    async notifyKeyCreated(identity) {
+      // 硬切换 002 收尾 + 硬切换 004 收尾：新建 / 导入后**始终**把新 key
+      // 切为 active。
       // 设计缘由：用户导入或新建一把 key 的预期就是用这把新 key；
       // 之前"已有 active 时不切换"会让用户点完按钮看不到效果，反而
       // 需要再去顶栏手动切一次，违反最小惊讶原则。
       //
-      // 实现委托给 activateCreatedKey 统一收口；如果调用方需要更精细
-      // 的语义（例如批量导入时只激活最后一把），由调用方直接调
-      // activateCreatedKey 而不是 notifyKeyCreated。
-      this.activateCreatedKey(identity);
+      // 实现委托给 activateCreatedKey 统一收口；调用方必须 await 本方法，
+      // 直到旧 key 的后台任务退出 + 旧 namespace DB 关掉之后，新 key
+      // 才成为 active——否则旧 key 的 history-backfill 仍在跑却撞上
+      // 旧 namespace DB 被关闭，与手动 setActive 的竞态同源。
+      //
+      // 如果调用方需要更精细的语义（例如批量导入时只激活最后一把），
+      // 由调用方直接调 activateCreatedKey 而不是 notifyKeyCreated。
+      await this.activateCreatedKey(identity);
     },
-    activateCreatedKey(identity) {
+    async activateCreatedKey(identity) {
       if (!identity.publicKeyHash) {
         // 兜底：identity 缺 hash 时无法切到 single 模式，保持现状。
         return;
       }
       const prev = active;
-      // 关闭旧 active 的 namespace db（如果存在），与 setActive 行为一致。
-      closeActiveNamespace(prev.activePublicKeyHash);
+      // 硬切换 004 收尾：与 setActive(B) 共用同一条 namespace quiesce
+      // 语义——先 await cancelByKey + await 旧 task 退出 + 关闭
+      // openDbs，再 setActiveInternal。新 key 此时尚不存在，没有 task
+      // 跑在它身上；旧的 recent-sync / history-backfill 必须真正退出
+      // 后才能被"踢出"旧 namespace，否则会撞上 `database connection
+      // is closing`。
+      await quiesceNamespace(prev.activePublicKeyHash);
       setActiveInternal({ activePublicKeyHash: identity.publicKeyHash });
     },
     setInitializing(next) {

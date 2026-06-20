@@ -93,7 +93,14 @@ export interface KeyspaceService {
   getKey(publicKeyHash: string): Promise<KeyIdentity | undefined>;
   /** 取当前 active key 状态。 */
   active(): ActiveKeyState;
-  /** 把 active key 切到指定 publicKeyHash。 */
+  /**
+   * 把 active key 切到指定 publicKeyHash。
+   *
+   * 硬切换 004：切换前会先 quiesce 旧 active key 的 namespace
+   * （cancelByKey + await 旧实例退出 + 关闭 openDbs），再切换 active。
+   * 这样保证 "task 还在跑却看到 DB connection closing" 的竞态从顺序
+   * 上消失，而不是被 catch 吞掉。
+   */
   setActive(publicKeyHash: string): Promise<void>;
   /**
    * 强制要求当前有 active key：activePublicKeyHash 缺失时抛错。

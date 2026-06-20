@@ -131,13 +131,13 @@ describe("VaultService.importPrivateKey", () => {
     const activeRef: { activePublicKeyHash?: string } = {};
     const keyspaceFake = {
       active: () => activeRef,
-      notifyKeyCreated: (id: { publicKeyHash: string }) => {
+      notifyKeyCreated: async (id: { publicKeyHash: string }) => {
         // 模拟真实 keyspace：切到新 key。
         activeRef.activePublicKeyHash = id.publicKeyHash;
       },
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined
+      onVaultLocked: async () => undefined
     };
     const vaultWithKeyspace = createVaultService({
       messageBus: events,
@@ -351,10 +351,10 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => {
+      onVaultLocked: async () => {
         onVaultLockedCount += 1;
       },
-      notifyKeyCreated: () => undefined
+      notifyKeyCreated: async () => undefined
     };
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
     await waitForStatus(vault, "uninitialized");
@@ -430,7 +430,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
 
     try {
       await expect(vault.finalizeEmptyVaultAfterLastKeyDeletion()).rejects.toThrow(
-        /Empty-vault finalize failed to wipe vault_meta/
+        /Empty-vault finalize failed/
       );
       // 关键：status 仍必须收敛到 uninitialized。
       expect(vault.status()).toBe("uninitialized");
@@ -472,6 +472,44 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
       deleteMetaSpy.mockRestore();
     }
     // 清掉残留 meta，避免污染后续测试。
+    await vaultDb.deleteMeta();
+  });
+
+  it("surfaces keyspace.onVaultLocked() failure instead of masking it (硬切换 004 收尾)", async () => {
+    // 设计缘由：旧实现 try/catch 包住 keyspace.onVaultLocked()，
+    // cancelByKey / namespace 失败时被 console.error 吞掉，然后
+    // 继续 publish vault.locked + 删 vault_meta——把"平台资源没
+    // 停稳"伪装成"会话成功结束"。修复后：onVaultLocked 抛错必须
+    // 冒泡；调用方看到 finalize 失败；status 仍收敛到 uninitialized
+    // （finally 兜底）。
+    const { messageBus: events, records } = makeMessageBus();
+    const keyspaceFake = {
+      active: () => ({}),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: async () => {
+        throw new Error("simulated platform cleanup failure");
+      },
+      notifyKeyCreated: async () => undefined
+    };
+    const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    await waitForStatus(vault, "unlocked");
+    expect(await vault.listKeys()).toHaveLength(0);
+
+    await expect(vault.finalizeEmptyVaultAfterLastKeyDeletion()).rejects.toThrow(
+      /Empty-vault finalize failed/
+    );
+    // 关键：vault.locked 没被发布——会话结束语义对调用方保持可见，
+    // 不会把"清理失败"伪装成"清理完成"。
+    expect(records.some((r) => r.type === "vault.locked")).toBe(false);
+    // status 仍必须收敛到 uninitialized（finally 兜底）。
+    expect(vault.status()).toBe("uninitialized");
+    // meta 可能仍在 DB 里；下一次 bootstrap 走 0-key 护栏会清理——
+    // 不能在 finalize 内部先 catch 后强行删 meta，否则又把"清理
+    // 失败"掩盖掉。
+    // 清掉残留 meta 避免污染后续测试。
     await vaultDb.deleteMeta();
   });
 });
@@ -645,8 +683,8 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
         callOrder.push(`keyspace.onVaultUnlocked:vaultStatus=${vault.status()}`);
         callOrder.push("keyspace.onVaultUnlocked:exit");
       },
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => undefined
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => undefined
     };
 
     // 重建 vault，让它持有 keyspace fake。meta 已写好，bootstrap 后
@@ -704,8 +742,8 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure");
       },
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => undefined
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => undefined
     };
 
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
@@ -742,8 +780,8 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
         // （createVault 内部尚未 setStatus("unlocked")）。
         onVaultUnlockedCalledAt = "uninitialized";
       },
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => undefined
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => undefined
     };
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
     await waitForStatus(vault, "uninitialized");
@@ -774,8 +812,8 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure during createVault");
       },
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => undefined
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => undefined
     };
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
     await waitForStatus(vault, "uninitialized");
@@ -867,12 +905,12 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const callOrder: string[] = [];
     const keyspaceFake = {
       active: () => ({}),
-      notifyKeyCreated: () => {
+      notifyKeyCreated: async () => {
         callOrder.push("notifyKeyCreated");
       },
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined
+      onVaultLocked: async () => undefined
     };
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
     await waitForStatus(vault, "locked");
@@ -1053,8 +1091,8 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1215,8 +1253,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure during createVault");
       },
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => undefined
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => undefined
     };
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
     await waitForStatus(vault, "uninitialized");
@@ -1238,8 +1276,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1303,8 +1341,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         // 在 notifyKeyCreated 触发时记录 vault 状态——它必须在 setStatus("unlocked")
         // 之前发生。
         statusTimeline.push(vault.status());
@@ -1400,8 +1438,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1433,8 +1471,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1461,8 +1499,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1498,8 +1536,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1533,8 +1571,8 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1692,8 +1730,8 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure during import");
       },
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => undefined
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => undefined
     };
     const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
     await waitForStatus(vault, "uninitialized");
@@ -1722,8 +1760,8 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
       active: () => ({}),
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
-      onVaultLocked: () => undefined,
-      notifyKeyCreated: () => {
+      onVaultLocked: async () => undefined,
+      notifyKeyCreated: async () => {
         throw new Error("simulated notify failure");
       }
     };
@@ -1817,6 +1855,108 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     expect(unlockedIdx).toBeGreaterThan(createdIdx);
     expect(records.some((r) => r.type === "vault.unlocked")).toBe(true);
     expect(records.some((r) => r.type === "key.created")).toBe(true);
+  });
+});
+
+// =====================================================================
+// 硬切换 004：vault.locked 必须在 keyspace.onVaultLocked() 之后发布
+// =====================================================================
+
+describe("VaultService.lock() order (硬切换 004)", () => {
+  // 设计缘由：vault.locked 的语义被收紧为"平台级资源已停稳"。本组
+  // 测试覆盖三条调用路径：
+  //   1) lock()：必须先 await keyspace.onVaultLocked() 再 publish；
+  //   2) finalizeEmptyVaultAfterLastKeyDeletion()：保持同样的顺序；
+  //   3) 任一调用路径 keyspace.onVaultLocked() 抛错时错误必须冒泡，
+  //      不被包装成成功锁屏。
+
+  it("publishes vault.locked only after keyspace.onVaultLocked() resolves", async () => {
+    const { messageBus: events, records } = makeMessageBus();
+    let onVaultLockedResolvedAt = -1;
+    let vaultLockedPublishedAt = -1;
+    let counter = 0;
+    const keyspaceFake = {
+      active: () => ({}),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: async () => {
+        // 让 await 真正等到下个 microtask，确保 vaultService.lock 内部的
+        // await 顺序能被观察到。
+        await new Promise<void>((r) => setTimeout(r, 5));
+        onVaultLockedResolvedAt = counter++;
+      },
+      notifyKeyCreated: async () => undefined
+    };
+    events.subscribe("vault.locked", () => {
+      vaultLockedPublishedAt = counter++;
+    });
+    const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    await waitForStatus(vault, "unlocked");
+    await vault.lock();
+
+    expect(onVaultLockedResolvedAt).toBeGreaterThanOrEqual(0);
+    expect(vaultLockedPublishedAt).toBeGreaterThanOrEqual(0);
+    expect(onVaultLockedResolvedAt).toBeLessThan(vaultLockedPublishedAt);
+    expect(vault.status()).toBe("locked");
+    expect(records.some((r) => r.type === "vault.locked")).toBe(true);
+  });
+
+  it("finalizeEmptyVaultAfterLastKeyDeletion() also publishes vault.locked only after onVaultLocked", async () => {
+    const { messageBus: events, records } = makeMessageBus();
+    let onVaultLockedResolvedAt = -1;
+    let vaultLockedPublishedAt = -1;
+    let counter = 0;
+    const keyspaceFake = {
+      active: () => ({}),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: async () => {
+        await new Promise<void>((r) => setTimeout(r, 5));
+        onVaultLockedResolvedAt = counter++;
+      },
+      notifyKeyCreated: async () => undefined
+    };
+    events.subscribe("vault.locked", () => {
+      vaultLockedPublishedAt = counter++;
+    });
+    const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    await waitForStatus(vault, "unlocked");
+    await vault.finalizeEmptyVaultAfterLastKeyDeletion();
+
+    expect(onVaultLockedResolvedAt).toBeGreaterThanOrEqual(0);
+    expect(vaultLockedPublishedAt).toBeGreaterThanOrEqual(0);
+    expect(onVaultLockedResolvedAt).toBeLessThan(vaultLockedPublishedAt);
+    expect(records.some((r) => r.type === "vault.locked")).toBe(true);
+  });
+
+  it("lock() surfaces keyspace.onVaultLocked() error rather than masking it as success", async () => {
+    // 设计缘由：旧实现可能 catch keyspace.onVaultLocked() 抛错并
+    // 继续 publish vault.locked，把"清理失败"伪装成"成功锁屏"。
+    // 本测试确保 lock() 在 keyspace.onVaultLocked() 抛错时：
+    //   - 仍然把 status 收到 locked（已经先 setStatus 了）；
+    //   - 错误冒泡给调用方；
+    //   - vault.locked 不被发布。
+    const { messageBus: events, records } = makeMessageBus();
+    const keyspaceFake = {
+      active: () => ({}),
+      setInitializing: () => undefined,
+      onVaultUnlocked: async () => undefined,
+      onVaultLocked: async () => {
+        throw new Error("simulated keyspace lock failure");
+      },
+      notifyKeyCreated: async () => undefined
+    };
+    const vault = createVaultService({ messageBus: events, keyspace: keyspaceFake as never });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    await waitForStatus(vault, "unlocked");
+    await expect(vault.lock()).rejects.toThrow(/simulated keyspace lock failure/);
+    // vault.locked 没被发布——错误状态对调用方可见。
+    expect(records.some((r) => r.type === "vault.locked")).toBe(false);
   });
 });
 

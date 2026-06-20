@@ -104,7 +104,7 @@ function makeFakeService(): FakeService {
     submitTransfer: vi.fn(async () => { throw new Error("not used in this test"); }),
     onKeyImported: vi.fn(async () => undefined),
     onKeyRemoved: vi.fn(async () => undefined),
-    onVaultLocked: () => undefined,
+    onVaultLocked: async () => undefined,
     onVaultUnlocked: vi.fn(async () => undefined),
     rehydrate: vi.fn(async () => undefined),
     dispose: () => undefined

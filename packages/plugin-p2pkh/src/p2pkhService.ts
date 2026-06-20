@@ -629,9 +629,23 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     void onVaultUnlocked();
   });
 
+  /**
+   * 硬切换 004：onVaultLocked 不再承担"正确性依赖于我先 cancel"的
+   * 职责——锁屏前的任务退出屏障由 keyspace（quiesceNamespace ->
+   * background.cancelByKey + await 旧 task 退出）统一掌控，vault.locked
+   * 是"平台资源已停稳"的事件。
+   *
+   * 本方法只做本地缓存 / 句柄释放：
+   *   - status 收回 idle；
+   *   - 释放 p2pkh DB handle；
+   *   - 清空 currentPublicKeyHash / activeIdentity / activeKeyId。
+   *
+   * 故意不调 backgroundService.cancel —— 该调用在旧实现里是 fire-and-forget
+   * 保险，但它的正确性依赖于"keyspace 没在切换 active 前先 cancel"，
+   * 而新链路已把 cancel 提前到 keyspace.onVaultLocked()，这里再 cancel
+   * 一次既冗余又可能掩盖"边界外的 cancel 被依赖"的回归。
+   */
   function onVaultLocked() {
-    deps.backgroundService.cancel(P2PKH_TASK_RECENT);
-    deps.backgroundService.cancel(P2PKH_TASK_BACKFILL);
     setStatus("idle");
     disposeP2pkhDb();
     p2pkhDbHandle = null;

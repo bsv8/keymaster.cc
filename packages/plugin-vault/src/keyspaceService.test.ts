@@ -754,5 +754,330 @@ describe("keyspaceService delete-last-key -> uninitialized (硬切换 010)", () 
   });
 });
 
+// =====================================================================
+// 硬切换 004：active 切换 / Vault 锁定共用 namespace quiesce 语义
+// =====================================================================
+
+describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004)", () => {
+  // 设计缘由：硬切换 004 把 active 切换、Vault 锁定、删除 key 三条
+  // 路径统一收口到 namespace quiesce 语义——先 cancelByKey + await
+  // 旧 task 退出，再关 DB，最后才推进 active / 发布事件。本组测试
+  // 用同步 record 的 fake background 来观察顺序：
+  //   1) setActive(B) 必须先 cancelByKey(A)，再 setActiveInternal(B)；
+  //   2) onVaultLocked() 必须先 cancelByKey(active)，再清 active；
+  //   3) setActive 重复切到当前 active 必须 no-op；
+  //   4) cancelByKey 抛错必须冒泡——禁止在 setActive / onVaultLocked
+  //      内部 catch 成"已切换 active"。
+  // 不变量要直接覆盖 history-backfill 撞 `database connection is
+  // closing` 这条根本链路——只要"先 cancel 再关 DB"的顺序破了，这条
+  // 路径就还会出错。
+
+  it("setActive(B) cancels A's tasks before closing A's openDbs and switching active", async () => {
+    // 1) 起一个 slow cancelByKey（挂 50ms 才 resolve），观察 setActive
+    //    在 cancelByKey resolve 前是否已经 setActiveInternal。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    await seedReadyKey({ id: "k-b", label: "b", publicKeyHash: hashB });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+
+    // 2) 直接 open A 的 namespace DB 模拟业务插件缓存。
+    const storageKeyA = keyspace.openKeyStorage({
+      publicKeyHash: hashA,
+      pluginId: "p2pkh",
+      storageId: "main",
+      version: 1,
+      upgrade: () => undefined
+    });
+    await storageKeyA;
+
+    // 3) 标记 setActiveInternal 的发生点：通过 activeKey.changed 事件
+    //    反向观察 setActive 何时跨过 active 切换边界。
+    let activeChangedAt = -1;
+    let cancelResolvedAt = -1;
+    let counter = 0;
+    const originalCancel = fakeBackground.cancelByKey;
+    fakeBackground.cancelByKey = async (h: string) => {
+      await originalCancel(h);
+      cancelResolvedAt = counter++;
+      // 模拟 background 内部等待旧 task 退出（这里就是 cancelByKey resolve）。
+    };
+    events.subscribe("activeKey.changed", () => {
+      activeChangedAt = counter++;
+    });
+
+    await keyspace.setActive(hashB);
+
+    // 4) cancelByKey 必须先于 activeKey.changed。
+    expect(cancelResolvedAt).toBeGreaterThanOrEqual(0);
+    expect(activeChangedAt).toBeGreaterThanOrEqual(0);
+    expect(cancelResolvedAt).toBeLessThan(activeChangedAt);
+    // 5) setActive(B) 之后 active 必须是 B。
+    expect(keyspace.active().activePublicKeyHash).toBe(hashB);
+    // 6) cancelByKey 被调过一次，且参数是 A（旧 active）。
+    expect(fakeBackground.cancelByKeyCalls).toContain(hashA);
+    // 7) A 的 openDb 应该已被 quiesceNamespace 关掉（cache 中没有 A）。
+    //    这里仅断言 B 能正常 open——间接证明 keyspace state 没坏。
+    const reopened = await keyspace.openKeyStorage({
+      publicKeyHash: hashB,
+      pluginId: "p2pkh",
+      storageId: "main",
+      version: 1,
+      upgrade: () => undefined
+    });
+    expect(reopened).toBeDefined();
+    expect(records.some((r) => r.type === "activeKey.changed")).toBe(true);
+  });
+
+  it("setActive(currentActive) is a no-op (no cancel, no close, no second active event)", async () => {
+    // 硬切换 004 情况 4：重复切到当前 active key 不应触发 cancel /
+    // close，也不应重发 activeKey.changed，避免打断正在跑的同步任务。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+    const before = fakeBackground.cancelByKeyCalls.length;
+    const activeChangedBefore = records.filter((r) => r.type === "activeKey.changed").length;
+    await keyspace.setActive(hashA);
+    expect(fakeBackground.cancelByKeyCalls.length).toBe(before);
+    const activeChangedAfter = records.filter((r) => r.type === "activeKey.changed").length;
+    expect(activeChangedAfter).toBe(activeChangedBefore);
+  });
+
+  it("onVaultLocked() awaits cancelByKey(active) before clearing active", async () => {
+    // 硬切换 004：onVaultLocked 必须先 await cancelByKey(active) resolve
+    // 再清 active；否则下游 vaultService.lock 在 publish vault.locked
+    // 之前，namespace DB 还在被未退出的 task 持有。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+
+    let cancelResolvedAt = -1;
+    let activeClearedAt = -1;
+    let counter = 0;
+    const originalCancel = fakeBackground.cancelByKey;
+    fakeBackground.cancelByKey = async (h: string) => {
+      await originalCancel(h);
+      cancelResolvedAt = counter++;
+    };
+    // active 状态清空通过 activeKey.changed 事件观察。
+    events.subscribe("activeKey.changed", (payload) => {
+      if (!(payload as { activePublicKeyHash?: string }).activePublicKeyHash) {
+        activeClearedAt = counter++;
+      }
+    });
+
+    await keyspace.onVaultLocked();
+
+    // 1) cancelByKey 必须先于 active 清空。
+    expect(cancelResolvedAt).toBeGreaterThanOrEqual(0);
+    expect(activeClearedAt).toBeGreaterThanOrEqual(0);
+    expect(cancelResolvedAt).toBeLessThan(activeClearedAt);
+    // 2) active 已清空。
+    expect(keyspace.active().activePublicKeyHash).toBeUndefined();
+    // 3) cancelByKey 参数是 A。
+    expect(fakeBackground.cancelByKeyCalls).toContain(hashA);
+  });
+
+  it("onVaultLocked() with no active key still resolves (no cancel called)", async () => {
+    // 硬切换 004 情况 3：没有 active key 时 onVaultLocked 必须直接
+    // 关 openDbs + 清 active；调 background.cancelByKey 应被跳过。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await expect(keyspace.onVaultLocked()).resolves.toBeUndefined();
+    expect(fakeBackground.cancelByKeyCalls).toEqual([]);
+    expect(keyspace.active().activePublicKeyHash).toBeUndefined();
+  });
+
+  it("prepareDeleteKey() and setActive() reuse the same quiesce helper", async () => {
+    // 硬切换 004：删除 key 路径不能继续手写"先 cancel 再 close"。本
+    // 测试用同一个 fake background 走两条路径，断言它们都触发了
+    // cancelByKey(hash) 并完成了后续顺序——证明两条路径共用同一条
+    // namespace quiesce 语义。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    await seedReadyKey({ id: "k-b", label: "b", publicKeyHash: hashB });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+
+    // 1) setActive(B) 触发 cancelByKey(A)。
+    await keyspace.setActive(hashB);
+    expect(fakeBackground.cancelByKeyCalls).toContain(hashA);
+
+    // 2) prepareDeleteKey(A) 也走同一条路径：cancelByKey(A)。
+    const callsBefore = fakeBackground.cancelByKeyCalls.length;
+    await keyspace.prepareDeleteKey(hashA);
+    expect(fakeBackground.cancelByKeyCalls.length).toBeGreaterThan(callsBefore);
+    expect(fakeBackground.cancelByKeyCalls[fakeBackground.cancelByKeyCalls.length - 1]).toBe(hashA);
+  });
+
+  it("setActive() fails closed when cancelByKey throws (does not switch active)", async () => {
+    // 硬切换 004：cancelByKey 抛错时，setActive 必须冒泡——禁止 catch
+    // 后继续 setActiveInternal；那样会让 active 切到目标 key，但旧 key
+    // 的 task 仍在跑，竞态原封不动留下来。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    await seedReadyKey({ id: "k-b", label: "b", publicKeyHash: hashB });
+    const fakeBackground = makeFakeBackground({ failCancel: true });
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+
+    await expect(keyspace.setActive(hashB)).rejects.toThrow(/simulated cancelByKey failure/);
+    // active 必须仍是 A——setActiveInternal 不能在 cancelByKey 失败后
+    // 仍然执行。
+    expect(keyspace.active().activePublicKeyHash).toBe(hashA);
+  });
+
+  it("activateCreatedKey(NewKey) cancels old active's tasks before switching active (硬切换 004 收尾)", async () => {
+    // 设计缘由：vaultService 在 importPrivateKey / generateKey 后会
+    // 调 notifyKeyCreated -> activateCreatedKey 把新 key 切为 active。
+    // 这条"自动激活"路径必须与手动 setActive 共用同一条 namespace
+    // quiesce 语义——否则旧 key 的 history-backfill 仍在跑就被踢出
+    // namespace，复现 `database connection is closing` 竞态。
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    const hashB = "b".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    await seedReadyKey({ id: "k-b", label: "b", publicKeyHash: hashB });
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+
+    let cancelResolvedAt = -1;
+    let activeChangedAt = -1;
+    let counter = 0;
+    const originalCancel = fakeBackground.cancelByKey;
+    fakeBackground.cancelByKey = async (h: string) => {
+      await originalCancel(h);
+      cancelResolvedAt = counter++;
+    };
+    events.subscribe("activeKey.changed", () => {
+      activeChangedAt = counter++;
+    });
+
+    await keyspace.activateCreatedKey({
+      keyId: "k-b",
+      publicKeyHash: hashB,
+      publicKeyHex: "ff",
+      label: "b",
+      capabilities: ["p2pkh"],
+      createdAt: new Date().toISOString(),
+      identityStatus: "ready"
+    });
+
+    // 1) cancelByKey(A) 必须先于 activeKey.changed。
+    expect(cancelResolvedAt).toBeGreaterThanOrEqual(0);
+    expect(activeChangedAt).toBeGreaterThanOrEqual(0);
+    expect(cancelResolvedAt).toBeLessThan(activeChangedAt);
+    // 2) activateCreatedKey 调用过 cancelByKey(A)。
+    expect(fakeBackground.cancelByKeyCalls).toContain(hashA);
+    // 3) active 切到了新 key。
+    expect(keyspace.active().activePublicKeyHash).toBe(hashB);
+    // 4) activeKey.changed 事件至少发了一次。
+    expect(records.some((r) => r.type === "activeKey.changed")).toBe(true);
+  });
+
+  it("activateCreatedKey() returns a Promise (硬切换 004 收尾)", async () => {
+    // 设计缘由：vaultService.persistPrivateKey 现在 await
+    // notifyKeyCreated；如果 activateCreatedKey 不返回 Promise，
+    // 那个 await 就只是同步拿个 void、cancelByKey 没真正等。
+    // 本测试断言 KeyspaceHandle.activateCreatedKey 的运行时类型是
+    // async function，避免被悄悄改成 sync。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const keyspace = createKeyspaceService({ messageBus: events, vault });
+    const ret = keyspace.activateCreatedKey({
+      keyId: "k-x",
+      publicKeyHash: "x".repeat(64),
+      publicKeyHex: "ff",
+      label: "x",
+      capabilities: ["p2pkh"],
+      createdAt: new Date().toISOString(),
+      identityStatus: "ready"
+    });
+    expect(ret).toBeInstanceOf(Promise);
+    await ret;
+  });
+
+  it("activateCreatedKey() with no previous active skips cancelByKey", async () => {
+    // 首启 / 0 残留时 activateCreatedKey 没有任何 prev.active 等着
+    // 停任务——直接 setActiveInternal 即可；cancelByKey 不应被调。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const fakeBackground = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.activateCreatedKey({
+      keyId: "k-new",
+      publicKeyHash: "n".repeat(64),
+      publicKeyHex: "ff",
+      label: "n",
+      capabilities: ["p2pkh"],
+      createdAt: new Date().toISOString(),
+      identityStatus: "ready"
+    });
+    expect(fakeBackground.cancelByKeyCalls).toEqual([]);
+    expect(keyspace.active().activePublicKeyHash).toBe("n".repeat(64));
+  });
+
+  it("activateCreatedKey() fails closed when cancelByKey throws (does not switch active)", async () => {
+    // 与 setActive 一致：cancelByKey 抛错时，activateCreatedKey 必须
+    // 冒泡——禁止 catch 后继续 setActiveInternal；那样会让 active 切
+    // 到目标 key，但旧 key 的 task 仍在跑，竞态原封不动留下来。
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    const hashA = "a".repeat(64);
+    await seedReadyKey({ id: "k-a", label: "a", publicKeyHash: hashA });
+    const fakeBackground = makeFakeBackground({ failCancel: true });
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    await keyspace.setActive(hashA);
+
+    await expect(
+      keyspace.activateCreatedKey({
+        keyId: "k-b",
+        publicKeyHash: "b".repeat(64),
+        publicKeyHex: "ff",
+        label: "b",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString(),
+        identityStatus: "ready"
+      })
+    ).rejects.toThrow(/simulated cancelByKey failure/);
+    // active 仍指向 A——setActiveInternal 不能在 cancelByKey 失败后
+    // 仍然执行。
+    expect(keyspace.active().activePublicKeyHash).toBe(hashA);
+  });
+});
+
 // 占位：seedKeyWithIdentity 旧 helper 不再使用；保留引用以便审计。
 void (null as unknown as VaultKeyRecord);
