@@ -48,7 +48,7 @@ import {
   requireReadyKey,
   type ReadyKeyIdentity
 } from "./p2pkhContracts.js";
-import { createP2pkhDb, disposeP2pkhDb, openP2pkhDb, type P2pkhDbBundle, type P2pkhDbHandle } from "./p2pkhDb.js";
+import { createP2pkhDb, disposeP2pkhDb, openP2pkhDb, P2PKH_DB_VERSION, type P2pkhDbBundle, type P2pkhDbHandle } from "./p2pkhDb.js";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhSyncCoordinator } from "./p2pkhSyncCoordinator.js";
 import { createP2pkhRecentSync } from "./p2pkhRecentSync.js";
@@ -334,7 +334,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         message: "P2PKH reusing cached namespace db handle",
         data: {
           publicKeyHash: state.activePublicKeyHash,
-          targetVersion: 6
+          targetVersion: P2PKH_DB_VERSION
         }
       });
       return p2pkhDbHandle;
@@ -352,7 +352,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       message: "P2PKH opening namespace db for active key",
       data: {
         publicKeyHash: state.activePublicKeyHash,
-        targetVersion: 6
+        targetVersion: P2PKH_DB_VERSION
       }
     });
     try {
@@ -369,7 +369,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         message: "P2PKH namespace db ready",
         data: {
           publicKeyHash: state.activePublicKeyHash,
-          targetVersion: 6
+          targetVersion: P2PKH_DB_VERSION
         }
       });
       return p2pkhDbHandle;

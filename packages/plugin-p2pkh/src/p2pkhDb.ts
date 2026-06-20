@@ -1,5 +1,5 @@
 // packages/plugin-p2pkh/src/p2pkhDb.ts
-// P2PKH 资源库（硬切换 007 + 硬切换 001 + 硬切换 003）。
+// P2PKH 资源库（硬切换 005 + 硬切换 007 + 硬切换 001 + 硬切换 003）。
 // 设计缘由：
 //   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 active key 一个 namespace DB，
 //     通过 keyspace.openKeyStorage 打开。
@@ -9,18 +9,28 @@
 //   - 原子提交：commitBackfillPage / commitRecentSnapshot 行为不变，但写入的 DB
 //     是当前 key 的 namespace DB，不再有跨 key 数据混合风险。
 //   - 切换 active key 时调用方需要重新拿 p2pkhDb(publicKeyHash) 才能继续访问。
-//   - 硬切换 001：DB schema 升级到 v6，删除 `p2pkh_balances` store；
+//   - 硬切换 001：DB schema 升级，删除 `p2pkh_balances` store；
 //     余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
 //
-// 硬切换 003（2026-06-19）：
+// 硬切换 005（2026-06-19）：P2PKH DB 版本硬切换 6 -> 7。
+//   - 目标版本 = 7；不兼容旧 schema，**不做老数据迁移**。
+//   - 打开语义收口为单一规则：版本不匹配即整库 rebuild。
+//     - `oldVersion < 7`：进入 onupgradeneeded 事务，删光当前 DB 内所有
+//       p2pkh_* stores，按 v7 完整重建。
+//     - `oldVersion === 7`：直接使用，不做额外 schema 扫描。
+//     - `oldVersion > 7`：keyspace.openKeyStorage 会抛 VersionError，
+//       p2pkh 在 openP2pkhDb 捕获后执行
+//       `close cached handle -> deleteDatabase -> reopen(name, 7)`。
+//   - `deleteDatabase` blocked / 失败必须冒泡，**不允许**"假装已经 rebuild"。
+//   - 重建边界是整份 `keymaster.key.<publicKeyHash>.plugin.p2pkh.state`，
+//     不与其它 plugin 共库；整库删除不会误伤别的业务。
+//
+// 硬切换 003：
 //   - 旧全局 "p2pkh" DB 不再作为恢复路径，也不再接入任何启动路径。
 //   - `migrateLegacyP2pkhDb()` 保留代码用于历史诊断，但不在 unlock、rehydrate、
 //     手工同步、key.deleted 等路径里调用。
 //   - 老 key 即使残留旧全局 DB 也允许被放弃；恢复路径是
 //     `rehydrate + recent-sync + history-backfill`，从 WOC 链上真值重建。
-//   - `openP2pkhDb` 内部统一走 `keyspace.openKeyStorage({ version, upgrade })`，
-//     缺 DB / 缺表 / 版本旧都会在 upgrade 里被自动修复到 v6 schema；
-//     这是 P2PKH 存储自愈的唯一入口，不允许再出现"修表脚本"或"单次迁移器"。
 //   - 旧的"best-effort 一次性迁移"注释已经被本硬切换覆盖；新代码若需要把
 //     历史 v3 数据搬过来，也必须通过 active key 自己的 namespace DB
 //     升级路径，而不是再造一条与 active key 模型平行的迁移链。
@@ -40,10 +50,18 @@ import { makeResourceId } from "./p2pkhContracts.js";
 
 const P2PKH_STORAGE_ID = "state";
 /**
- * 硬切换 001：DB 版本升到 6。删除 `p2pkh_balances` store；
- * 余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
+ * 硬切换 005：P2PKH namespace DB schema 版本升级到 7。
+ * 本次是硬切换——不兼容 v6 schema，**不做老数据迁移**。
+ * 重建边界是整份 `keymaster.key.<publicKeyHash>.plugin.p2pkh.state`：
+ *   - `oldVersion < 7`：onupgradeneeded 事务内删光旧 p2pkh_* stores，
+ *     按 v7 完整重建。
+ *   - `oldVersion > 7`：VersionError -> close cached handle ->
+ *     deleteDatabase -> reopen(name, 7)。
+ *
+ * 导出以供 service 层日志 / 验收脚本使用——所有需要报告
+ * "P2PKH 当前目标版本"的位置都应从这里取真值，不要再硬编码数字。
  */
-const P2PKH_DB_VERSION = 6;
+export const P2PKH_DB_VERSION = 7;
 
 /**
  * 旧全局 DB（v3）。保留常量以便调试 / 单元测试 / 一次性诊断脚本；
@@ -76,12 +94,14 @@ interface OpenHandle {
 let openHandle: OpenHandle | undefined;
 
 /**
- * 硬切换 003：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
+ * 硬切换 003 + 硬切换 005：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
  * 自动修复当前 key 的 namespace DB。upgrade 回调能拿到 oldVersion：
  *   - oldVersion === 0：DB 第一次被创建；
- *   - 0 < oldVersion < newVersion：旧版本被升级；
+ *   - 0 < oldVersion < newVersion：旧版本被升级（**不迁移旧数据，删光 p2pkh stores 重建**）；
  *   - oldVersion === newVersion：普通打开，不动 schema。
- * 配合传入的 logger 即可在日志上区分这三种情况。
+ *   - oldVersion > newVersion：不会进入 upgrade；浏览器层抛 VersionError，
+ *     本函数在下方 try/catch 命中后走 `close -> deleteDatabase -> reopen`。
+ * 配合传入的 logger 即可在日志上区分这几种情况。
  */
 type OpenKind = "created" | "upgraded" | "opened";
 
@@ -93,7 +113,7 @@ interface UpgradeAudit {
   storeSnapshot: Record<string, boolean>;
 }
 
-function auditV6Stores(db: IDBDatabase): Record<string, boolean> {
+function auditV7Stores(db: IDBDatabase): Record<string, boolean> {
   const required = [
     "p2pkh_addresses",
     "p2pkh_utxos",
@@ -115,6 +135,13 @@ function auditV6Stores(db: IDBDatabase): Record<string, boolean> {
  * 设计缘由：plugin 内部通过 keyspace 获取当前 active key，再打开对应 namespace。
  * 切换 active key 后必须重新调用此函数。
  *
+ * 硬切换 005：版本不匹配即整库 rebuild——收口在 `openP2pkhDb()` 一处。
+ *   - `oldVersion < 7`：onupgradeneeded 事务内删光旧 p2pkh_* stores，重建 v7。
+ *   - `oldVersion > 7`：keyspace 内部 `indexedDB.open(name, 7)` 抛 VersionError，
+ *     本函数捕获后执行 `close cached handle -> deleteDatabase -> reopen`。
+ *   - `oldVersion === 7`：普通打开。
+ *   - `deleteDatabase` 被 blocked / 失败必须冒泡，**不允许**假装 rebuild 成功。
+ *
  * 硬切换 003：调用方可通过 `logger` 让本函数在 upgrade 阶段补全"新建 /
  * 升级 / 普通打开"日志；不传时不记日志。
  */
@@ -127,50 +154,90 @@ export async function openP2pkhDb(input: {
     return openHandle as P2pkhDbBundle;
   }
   // 切换 namespace：关闭旧的。
-  if (openHandle) {
-    try {
-      openHandle.close();
-    } catch {
-      // 静默
-    }
-    openHandle = undefined;
-  }
+  closeCachedHandle();
   let audit: UpgradeAudit | undefined;
-  const handle = await input.keyspace.openKeyStorage({
-    publicKeyHash: input.publicKeyHash,
-    pluginId: "p2pkh",
-    storageId: P2PKH_STORAGE_ID,
-    version: P2PKH_DB_VERSION,
-    upgrade: (db, oldVersion, newVersion) => {
-      // oldVersion 是 indexedDB 在 upgradeneeded 回调里给出的"当前版本"——
-      // 0 表示 DB 首次创建；> 0 表示旧版本被升级；=== newVersion 在一般
-      // openKeyStorage 路径下不会出现（upgradeneeded 只在版本不同或新 DB
-      // 时触发），但仍然归一化处理。
-      // newVersion 在 contract 里允许 null（DB 被删除的特殊场景）；本路径
-      // 下若为 null 也按 created 处理——这只是日志分类，不需要阻断。
-      const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
-      const kind: OpenKind = oldVersion === 0 ? "created" : oldVersion < resolvedNewVersion ? "upgraded" : "opened";
-      createV6Stores(db);
-      audit = {
-        kind,
-        oldVersion,
-        newVersion: resolvedNewVersion,
-        storeSnapshot: auditV6Stores(db)
-      };
-      input.logger?.info({
-        scope: "p2pkh.db",
-        event: "schema.upgradeApplied",
-        message: `P2PKH schema ${kind}`,
-        data: {
+  let handle: import("@keymaster/contracts").KeyScopedStorageHandle;
+  try {
+    handle = await input.keyspace.openKeyStorage({
+      publicKeyHash: input.publicKeyHash,
+      pluginId: "p2pkh",
+      storageId: P2PKH_STORAGE_ID,
+      version: P2PKH_DB_VERSION,
+      upgrade: (db, oldVersion, newVersion) => {
+        // 硬切换 005：oldVersion < 7 进入 upgrade 是"删光旧 stores 重建 v7"，
+        // **不是**数据迁移。oldVersion === 0（首次创建）和
+        // 0 < oldVersion < 7（旧版本）都统一落到 createV7Stores——
+        // 区别仅在日志分类 kind 上。
+        // newVersion 在 contract 里允许 null（DB 被删除的特殊场景）；本路径
+        // 下若为 null 也按 created 处理——这只是日志分类，不需要阻断。
+        const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
+        const kind: OpenKind = oldVersion === 0 ? "created" : "upgraded";
+        createV7Stores(db);
+        audit = {
           kind,
           oldVersion,
           newVersion: resolvedNewVersion,
-          targetVersion: resolvedNewVersion,
-          storeSnapshot: audit.storeSnapshot
-        }
-      });
-    }
-  });
+          storeSnapshot: auditV7Stores(db)
+        };
+        input.logger?.info({
+          scope: "p2pkh.db",
+          event: "schema.upgradeApplied",
+          message: `P2PKH schema ${kind}`,
+          data: {
+            kind,
+            oldVersion,
+            newVersion: resolvedNewVersion,
+            targetVersion: resolvedNewVersion,
+            storeSnapshot: audit.storeSnapshot
+          }
+        });
+      }
+    });
+  } catch (err) {
+    // 硬切换 005：oldVersion > 7 走"close -> deleteDatabase -> reopen"重建。
+    // 非 VersionError 直接冒泡，**不**在 p2pkh 层吞错。
+    if (!isVersionError(err)) throw err;
+    // 防御性：捕获当前模块缓存的 openHandle 句柄（若本函数上方某次
+    // 早返回路径已让 openHandle 残留，这里也要先关掉，避免
+    // deleteDatabase 被自己的连接阻塞）。
+    closeCachedHandle();
+    const name = namespaceDbName(input.publicKeyHash);
+    input.logger?.warn({
+      scope: "p2pkh.db",
+      event: "schema.versionMismatch",
+      message: "P2PKH namespace db version higher than target; rebuilding",
+      data: { publicKeyHash: input.publicKeyHash, targetVersion: P2PKH_DB_VERSION, name }
+    });
+    await deleteDatabaseOrThrow(name);
+    handle = await input.keyspace.openKeyStorage({
+      publicKeyHash: input.publicKeyHash,
+      pluginId: "p2pkh",
+      storageId: P2PKH_STORAGE_ID,
+      version: P2PKH_DB_VERSION,
+      upgrade: (db, oldVersion, newVersion) => {
+        // 重建路径：上一轮 DB 已被 deleteDatabase，oldVersion === 0。
+        const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
+        createV7Stores(db);
+        audit = {
+          kind: "created",
+          oldVersion,
+          newVersion: resolvedNewVersion,
+          storeSnapshot: auditV7Stores(db)
+        };
+        input.logger?.info({
+          scope: "p2pkh.db",
+          event: "schema.rebuilt",
+          message: "P2PKH namespace db rebuilt after deleteDatabase",
+          data: {
+            oldVersion,
+            newVersion: resolvedNewVersion,
+            targetVersion: resolvedNewVersion,
+            storeSnapshot: audit.storeSnapshot
+          }
+        });
+      }
+    });
+  }
   // 浏览器层面 indexedDB.open 可能在 upgrade 之外直接成功（无版本变化
   // 复用旧 db），audit 不会被赋值。这种情况下我们记一条 opened 日志，
   // 覆盖"复用现有 schema / 未触发 upgrade"的语义。
@@ -179,7 +246,7 @@ export async function openP2pkhDb(input: {
       kind: "opened",
       oldVersion: P2PKH_DB_VERSION,
       newVersion: P2PKH_DB_VERSION,
-      storeSnapshot: auditV6Stores(handle.db)
+      storeSnapshot: auditV7Stores(handle.db)
     };
     input.logger?.info({
       scope: "p2pkh.db",
@@ -212,40 +279,90 @@ export async function openP2pkhDb(input: {
 
 /** 关闭并清空缓存的 db handle（仅用于测试与 dispose）。 */
 export function disposeP2pkhDb(): void {
-  if (openHandle) {
-    try {
-      openHandle.close();
-    } catch {
-      // 静默
-    }
-    openHandle = undefined;
-  }
+  closeCachedHandle();
 }
 
 /**
- * v6 schema（硬切换 003 / 001）：
- *   - 删除 `p2pkh_balances` store；余额不再是持久化实体。
+ * 内部：关掉模块级 openHandle（如果存在）。把这段逻辑抽到独立函数，
+ * 避免在 openP2pkhDb 内被 TypeScript 跨 try-catch 的窄化分析吃成 `never`。
+ */
+function closeCachedHandle(): void {
+  const current = openHandle;
+  if (!current) return;
+  try {
+    current.close();
+  } catch {
+    // 静默
+  }
+  openHandle = undefined;
+}
+
+/**
+ * 硬切换 005：把 `oldVersion > 7` 时的浏览器抛错识别为 VersionError。
+ * 浏览器原生是 `DOMException` 且 `name === "VersionError"`；
+ * fake-indexeddb 同样以 DOMException 模拟。
+ */
+function isVersionError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const name = (err as { name?: unknown }).name;
+  return name === "VersionError";
+}
+
+/**
+ * 硬切换 005：当前 key 的 p2pkh namespace DB 名字。`plugin-p2pkh` 整库边界
+ * 在这里——这把 key 的 p2pkh 数据物理上独立，不会和别的 plugin 共享。
+ *
+ * 导出是让单测可以直接断言这条命名约定：万一 keyspace 以后改了
+ * `keymaster.key.<publicKeyHash>.plugin.<pluginId>.<storageId>` 这条
+ * 规则，这里要跟着改并通过这条断言暴露。
+ */
+export function namespaceDbName(publicKeyHash: string): string {
+  return `keymaster.key.${publicKeyHash}.plugin.p2pkh.state`;
+}
+
+/**
+ * 硬切换 005：删整份 namespace DB。
+ * - onsuccess：删除完成，库文件已被浏览器清掉。
+ * - onerror：删除失败（例如权限 / 引擎异常），直接 fail-closed。
+ * - onblocked：还有连接没关干净（同名 DB 仍被别处 open）。**绝不能**继续
+ *   假装重建——本路径必须抛错让上层显式处理。
+ */
+function deleteDatabaseOrThrow(name: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const req = indexedDB.deleteDatabase(name);
+    req.onsuccess = () => resolve();
+    req.onerror = () => reject(req.error ?? new Error(`P2PKH deleteDatabase failed: ${name}`));
+    req.onblocked = () => reject(new Error(`P2PKH deleteDatabase blocked: ${name}`));
+  });
+}
+
+/**
+ * v7 schema（硬切换 005 + 硬切换 003 / 001）：
+ *   - 硬切换 005：进入 upgrade 事务即删光当前 DB 内**所有** `p2pkh_` 前缀
+ *     的 store（包括任何历史遗留 / 未来被废弃但忘了在硬编码列表里登记
+ *     的 store），然后按 v7 完整重建；**不迁移**任何旧数据。
+ *   - 硬切换 001：删除 `p2pkh_balances` store；余额不再是持久化实体。
  *   - 删除 `p2pkh_pending_transfers / p2pkh_utxo_reservations` 旧 store。
  *   - 新建 `p2pkh_local_submissions / p2pkh_local_input_claims`。
  */
-function createV6Stores(db: IDBDatabase) {
-  // v6：删除 v1-v5 旧 store（包含 p2pkh_balances / 旧本地观察层），重建 namespace stores。
-  const legacy = [
-    "p2pkh_v1_addresses",
-    "p2pkh_v1_balances",
-    "p2pkh_v1_utxos",
-    "p2pkh_v1_history",
-    "p2pkh_addresses",
-    "p2pkh_balances",
-    "p2pkh_utxos",
-    "p2pkh_history",
-    "p2pkh_pending_transfers",
-    "p2pkh_utxo_reservations"
-  ];
-  for (const name of legacy) {
-    if (db.objectStoreNames.contains(name)) {
-      db.deleteObjectStore(name);
-    }
+const P2PKH_STORE_PREFIX = "p2pkh_";
+
+function createV7Stores(db: IDBDatabase) {
+  // v7：进入 onupgradeneeded 时**先**遍历 `db.objectStoreNames`，把所有
+  // `p2pkh_` 前缀的 store 全部删掉，再**无条件**按 v7 schema 重建——这是
+  // 硬切换 005 的硬规则。
+  //
+  // 为什么不用硬编码的 store 名列表：硬编码列表是脆弱的——只要未来哪个
+  // 开发者加了一个新 `p2pkh_xxx` store 又被回退/弃用，硬编码列表里
+  // 没有这个 name 的话，upgrade 路径就会把它留在库里，硬切换语义就不完整。
+  // 用前缀扫描把"p2pkh 自己创建的 store"作为删表范围，规则只有一条。
+  // 唯一会漏掉的"非 p2pkh_ 命名的 store"——本插件永远不会创建这种 store，
+  // 万一有就是别人越界写进来的，那不在本次硬切换语义内，不动它。
+  // 索引 onupgradeneeded 期间对 `objectStoreNames` 的修改必须立刻可见；
+  // 复制一份再删，避免边遍历边修改。
+  const toDelete = [...db.objectStoreNames].filter((name) => name.startsWith(P2PKH_STORE_PREFIX));
+  for (const name of toDelete) {
+    db.deleteObjectStore(name);
   }
   if (!db.objectStoreNames.contains("p2pkh_addresses")) {
     const store = db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
@@ -834,7 +951,7 @@ export async function migrateLegacyP2pkhDb(input: {
           pluginId: "p2pkh",
           storageId: P2PKH_STORAGE_ID,
           version: P2PKH_DB_VERSION,
-          upgrade: (db) => createV6Stores(db)
+          upgrade: (db) => createV7Stores(db)
         });
         const target = createP2pkhDb({
           publicKeyHash,
