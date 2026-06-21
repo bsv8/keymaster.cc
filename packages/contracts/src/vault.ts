@@ -2,14 +2,16 @@
 // Vault 契约：私钥存储 + 内存解密的统一入口。
 // 关键安全约束：明文私钥只允许在 withPrivateKey 回调内短暂存在。
 //
-// 硬切换（007）后的根身份：
-//   - KeyIdentity 使用公钥身份（publicKeyHex / publicKeyHash）。
+// 硬切换（007 + 001 收口）后的根身份：
+//   - KeyRef / KeyIdentity 使用公钥身份（publicKeyHex）。平台根身份
+//     字段唯一，不再保留 `publicKeyHash`。
 //   - 短公钥属于 UI 显示格式，**不**作为 KeyRef 字段持有；展示时由
 //     UI 调 `formatShortPublicKey(publicKeyHex)` 现算。
 //   - 旧 `fingerprint` 概念已废弃，不再是 contract / storage / 业务对象的字段。
 //   - `address` 与 `network` 不再是 KeyRef 的根身份字段；仅作为兼容展示
 //     字段保留，业务方不应再通过 address 反查 key。
-//   - 找 key 的主路径是 publicKeyHash，地址查找应交给 P2PKH 自己的 namespace。
+//   - 找 key 的主路径是 publicKeyHex，地址查找应交给 P2PKH 自己的 namespace。
+//   - `keyId` 是 Vault 内部借用句柄，不是 namespace 根 id。
 
 export type BsvNetwork = "main" | "test";
 
@@ -27,10 +29,8 @@ export interface KeyRef {
   createdAt: string;
   /** 导入来源，可选。 */
   source?: string;
-  /** 压缩公钥 hex。 */
+  /** 压缩公钥 hex；平台公开身份根字段。ready 必有，failed 可能缺省。 */
   publicKeyHex?: string;
-  /** 公钥 hash（hex）。 */
-  publicKeyHash?: string;
   /**
    * 硬切换 008：identity backfill 状态。缺省或 "ready" 表示可作为
    * active key 候选；"failed" 表示 backfill 失败，keyspace 不会选为
@@ -38,6 +38,8 @@ export interface KeyRef {
    *
    * 硬切换 003 收尾：短公钥不属于 contract 字段，UI 展示时由
    * `formatShortPublicKey(publicKeyHex)` 现算。
+   *
+   * 硬切换 001 收口：旧 `publicKeyHash` 平台身份字段已从 KeyRef 删除。
    */
   identityStatus?: "ready" | "failed";
   /** backfill 失败原因；仅在 identityStatus === "failed" 时有值。 */
@@ -154,7 +156,7 @@ export class KeyPersistedButActivationFailedError extends Error {
  */
 export interface InitialActivationNotice {
   keyId: string;
-  publicKeyHash?: string;
+  publicKeyHex?: string;
   label: string;
 }
 
@@ -256,7 +258,7 @@ export interface VaultService {
    *   - 失败处理：
    *       * `createVault` / meta 写入失败 —— 抛原错，状态保持
    *         `uninitialized`；
-   *       * 首把导入 key **未落库**（解析失败、重复 publicKeyHash、
+   *       * 首把导入 key **未落库**（解析失败、重复 publicKeyHex、
    *         加密失败、DB 写入失败等） —— 内部回滚 meta、清空内存会话、
    *         状态回到 `uninitialized`，再把原错抛给上层；
    *       * 首把导入 key **已落库**但 active 切换失败 —— 抛
@@ -359,13 +361,13 @@ export interface VaultService {
   /** 按 id 取单个 key 元数据。 */
   getKey(id: string): Promise<KeyRef | undefined>;
   /**
-   * 按 publicKeyHash 查找 key 元数据。已成为平台身份查找的主路径。
+   * 按 publicKeyHex 查找 key 元数据。平台身份查找的主路径。
    * 设计缘由：硬切换后地址不再是根 id，平台找 key 必须走公钥身份。
    */
-  getKeyByPublicKeyHash(publicKeyHash: string): Promise<KeyRef | undefined>;
+  getKeyByPublicKeyHex(publicKeyHex: string): Promise<KeyRef | undefined>;
   /**
    * 兼容接口：按 address 查找 key 元数据。
-   * 设计缘由：保留只是给历史路径兜底；新代码应使用 getKeyByPublicKeyHash。
+   * 设计缘由：保留只是给历史路径兜底；新代码应使用 getKeyByPublicKeyHex。
    */
   findByAddress?(address: string): Promise<KeyRef | undefined>;
 

@@ -158,8 +158,8 @@ class PokerServiceImpl implements PokerService {
   private keyDeletedUnsub: (() => void) | null = null;
 
   /**
-   * 当前 active key 的 publicKeyHash，用于"事件归属判断"。
-   *   - key.deleting 收到的 publicKeyHash 等于它 → 是当前 session key，
+   * 当前 active key 的 publicKeyHex，用于"事件归属判断"。
+   *   - key.deleting 收到的 publicKeyHex 等于它 → 是当前 session key，
    *     必须 teardown 一切并清内存态；
    *   - 不等于它 → 是非当前 session key，只清残余引用。
    */
@@ -289,14 +289,14 @@ class PokerServiceImpl implements PokerService {
     // 上直到下次自然失败。必须改用 this.deps.keyspace.active() 同步读，
     // 这样无论 init 是否完成都能给出正确答案（keyspace 是同步数据源）。
     this.keyDeletingUnsub = deps.messageBus.subscribe("key.deleting", (p) => {
-      const ev = p as { publicKeyHash?: string; keyId?: string } | undefined;
-      const hash = ev?.publicKeyHash;
+      const ev = p as { publicKeyHex?: string; keyId?: string } | undefined;
+      const hash = ev?.publicKeyHex;
       if (!hash) return;
-      // 用 keyspace.active() 同步判定：activePublicKeyHash === hash 才是
+      // 用 keyspace.active() 同步判定：activePublicKeyHex === hash 才是
       // 当前 session key 被删。硬切换 005：active key 模型收窄为唯一一把，
       // 不再有 "all mode"。
       const active = this.deps.keyspace.active();
-      const isCurrentSessionKey = active.activePublicKeyHash === hash;
+      const isCurrentSessionKey = active.activePublicKeyHex === hash;
       if (isCurrentSessionKey) {
         // 当前 session key 即将被删：立刻 teardown + 清内存态。
         // teardownForDeletingCurrentKey 内部用 disconnectForFailClosed
@@ -315,8 +315,8 @@ class PokerServiceImpl implements PokerService {
     //     （active key state 由 keyspace 决定下一把）；
     //   - 真正触发重建的是后续 `activeKey.changed`。
     this.keyDeletedUnsub = deps.messageBus.subscribe("key.deleted", (p) => {
-      const ev = p as { publicKeyHash?: string; keyId?: string } | undefined;
-      const hash = ev?.publicKeyHash;
+      const ev = p as { publicKeyHex?: string; keyId?: string } | undefined;
+      const hash = ev?.publicKeyHex;
       if (!hash) return;
       this.pruneReferencesToKey(hash);
       // 不主动 connect：等 keyspace 决定下一把 active key 后由 onActiveChange 触发。
@@ -598,7 +598,7 @@ class PokerServiceImpl implements PokerService {
   /**
    * rebindToActiveKey: 单一原子流程入口。
    *   1. 解析 keyspace.active() → PokerSessionKeyState；
-   *   2. 若不是 ready（vaultLocked / missing / notReady / noActiveHash）
+   *   2. 若不是 ready（vaultLocked / missing / notReady / noActiveKey）
    *      → teardown + fail-closed；
    *   3. 若与当前 session key 相同 → 不重复重连，仅刷新内部缓存；
    *   4. 若不同 → teardown old → hydrate new key-scoped DB → 视用户
@@ -624,8 +624,8 @@ class PokerServiceImpl implements PokerService {
       return;
     }
 
-    const nextHash = state.key.publicKeyHash ?? null;
-    if (previous.kind === "ready" && previous.key.publicKeyHash === nextHash) {
+    const nextHash = state.key.publicKeyHex ?? null;
+    if (previous.kind === "ready" && previous.key.publicKeyHex === nextHash) {
       // 同一把 key 的事件（activeKey.changed 可能因其它键切换又切回来）：
       // 不重连，仅 hydrate 内部引用。
       this.currentSessionKey = state.key;
@@ -652,7 +652,7 @@ class PokerServiceImpl implements PokerService {
 
     // 尝试把旧 v1/v2 key-scoped settings 一次性迁到全局（仅当当前
     // 全局配置仍是默认值，且旧 DB 还有 settings 行）。
-    await this.migrateLegacySettingsIfNeeded(state.key.publicKeyHash);
+    await this.migrateLegacySettingsIfNeeded(state.key.publicKeyHex);
 
     // 从当前 active key 的 key-scoped DB 重建 presences / tables /
     // txIngest 缓存。设计缘由（硬切换 004）：刷新后 / 切 key 后必须
@@ -681,14 +681,14 @@ class PokerServiceImpl implements PokerService {
    * 不覆盖（用户偏好优先）。如果当前 active key 没有旧 DB 或 settings
    * 已被清，跳过。
    */
-  private async migrateLegacySettingsIfNeeded(publicKeyHash: string | undefined): Promise<void> {
-    if (!publicKeyHash) return;
+  private async migrateLegacySettingsIfNeeded(publicKeyHex: string | undefined): Promise<void> {
+    if (!publicKeyHex) return;
     const global = readPokerGlobalConfig();
     // 已经有非空 endpoint：用户已在新位置显式保存过，不再迁移覆盖。
     if (global.proxyEndpoint) return;
     try {
       const handle = await this.deps.keyspace.openKeyStorage({
-        publicKeyHash,
+        publicKeyHex,
         pluginId: "plugin-poker",
         storageId: POKER_KEY_STORAGE_ID,
         version: POKER_KEY_STORAGE_VERSION,
@@ -816,8 +816,8 @@ class PokerServiceImpl implements PokerService {
    * 结论：本函数在非当前 key 路径上是 no-op；保留作为防御性入口，
    * 并显式注释这条不变量，避免后续误改回"清空所有内存态"。
    */
-  private pruneReferencesToKey(publicKeyHash: string): void {
-    void publicKeyHash;
+  private pruneReferencesToKey(publicKeyHex: string): void {
+    void publicKeyHex;
     // 不变量：删除非当前 session key 不能打扰当前会话。当前内存态全部
     // 是当前 session key 的视图；namespace DB 由 keyspace.deleteKey
     // 删；本函数保留为空实现。
@@ -847,11 +847,11 @@ class PokerServiceImpl implements PokerService {
    * 阶段可能对同一把 key 跑两次 hydrate。test 桩 FakeKeyspace 也应该
    * 模拟这个 eager 行为，否则测试覆盖不到。
    */
-  private async hydrateFromKeyScopedDb(publicKeyHash: string | null): Promise<void> {
-    if (!publicKeyHash) return;
+  private async hydrateFromKeyScopedDb(publicKeyHex: string | null): Promise<void> {
+    if (!publicKeyHex) return;
     try {
       const handle = await this.deps.keyspace.openKeyStorage({
-        publicKeyHash,
+        publicKeyHex,
         pluginId: "plugin-poker",
         storageId: POKER_KEY_STORAGE_ID,
         version: POKER_KEY_STORAGE_VERSION,
@@ -993,8 +993,8 @@ class PokerServiceImpl implements PokerService {
     // 硬切换 005：active key 模型收窄为唯一一把，不再有 `mode` 字段。
     const active = this.deps.keyspace.active();
     if (
-      !active.activePublicKeyHash ||
-      active.activePublicKeyHash !== this.currentSessionKey.publicKeyHash
+      !active.activePublicKeyHex ||
+      active.activePublicKeyHex !== this.currentSessionKey.publicKeyHex
     ) {
       throw new Error("Poker session key drifted from active key");
     }
@@ -1162,8 +1162,8 @@ class PokerServiceImpl implements PokerService {
     }
     const active = this.deps.keyspace.active();
     if (
-      !active.activePublicKeyHash ||
-      active.activePublicKeyHash !== sessionKey.publicKeyHash
+      !active.activePublicKeyHex ||
+      active.activePublicKeyHex !== sessionKey.publicKeyHex
     ) {
       this.disconnect();
       return;
@@ -1320,7 +1320,7 @@ class PokerServiceImpl implements PokerService {
     if (!hash) return;
     try {
       const handle = await this.deps.keyspace.openKeyStorage({
-        publicKeyHash: hash,
+        publicKeyHex: hash,
         pluginId: "plugin-poker",
         storageId: POKER_KEY_STORAGE_ID,
         version: POKER_KEY_STORAGE_VERSION,
@@ -1445,7 +1445,7 @@ function describeSessionState(state: PokerSessionKeyState): string {
       return "no ready key";
     case "notReady":
       return `active key ${state.reason}`;
-    case "noActiveHash":
+    case "noActiveKey":
       return "no active hash";
   }
 }

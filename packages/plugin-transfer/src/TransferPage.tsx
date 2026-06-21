@@ -84,7 +84,7 @@ export function TransferPage() {
     setSelected(undefined);
   }
 
-  if (!activeState.activePublicKeyHash) {
+  if (!activeState.activePublicKeyHex) {
     return (
       <div className="transfer-page">
         <PageHeader

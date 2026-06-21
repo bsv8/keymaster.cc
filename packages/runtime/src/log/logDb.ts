@@ -30,7 +30,7 @@ export interface LogEntryRow {
   event: string;
   message: string;
   data?: Record<string, unknown>;
-  keyScope?: { publicKeyHash: string };
+  keyScope?: { publicKeyHex: string };
   error?: { name?: string; message: string; stack?: string };
 }
 

@@ -21,7 +21,7 @@
 //   - class 命名从 `key-switch__fingerprint` 改为 `key-switch__pubkey`。
 //
 // 硬切换 005 收尾：删除"全部 key"入口。`active` state 不再有 `mode` 字段；
-// widget 只在 ready key 列表内显示具体 key。无 activePublicKeyHash 时不暴露
+// widget 只在 ready key 列表内显示具体 key。无 activePublicKeyHex 时不暴露
 // "未选择"作为正常态文案（壳层会把这种情况识别为"修复/管理态"，这里是
 // 内部瞬时或异常兜底）。
 
@@ -49,7 +49,7 @@ export function KeySwitchWidget() {
       try {
         const all = await keyspace.listKeys();
         const switchable = all.filter(
-          (k) => k.identityStatus === "ready" && k.publicKeyHash && k.publicKeyHex
+          (k) => k.identityStatus === "ready" && k.publicKeyHex
         );
         if (!cancelled) setKeys(switchable);
       } catch {
@@ -84,7 +84,7 @@ export function KeySwitchWidget() {
         try {
           const all = await keyspace.listKeys();
           const switchable = all.filter(
-            (k) => k.identityStatus === "ready" && k.publicKeyHash && k.publicKeyHex
+            (k) => k.identityStatus === "ready" && k.publicKeyHex
           );
           setKeys(switchable);
         } catch {
@@ -92,24 +92,24 @@ export function KeySwitchWidget() {
         }
       })();
     };
-    offs.push(messageBus.subscribe<{ keyId: string; publicKeyHash: string; label: string }>("key.created", trigger));
-    offs.push(messageBus.subscribe<{ publicKeyHash: string; keyId?: string }>("key.deleted", trigger));
-    offs.push(messageBus.subscribe<{ keyId: string; publicKeyHash: string }>("key.identity.ready", trigger));
+    offs.push(messageBus.subscribe<{ keyId: string; publicKeyHex: string; label: string }>("key.created", trigger));
+    offs.push(messageBus.subscribe<{ publicKeyHex: string; keyId?: string }>("key.deleted", trigger));
+    offs.push(messageBus.subscribe<{ keyId: string; publicKeyHex: string }>("key.identity.ready", trigger));
     offs.push(messageBus.subscribe<{ keyId: string; label?: string; error: string }>("key.identity.failed", trigger));
     return () => {
       for (const off of offs) off();
     };
   }, [messageBus, keyspace]);
 
-  const current = active.activePublicKeyHash
-    ? keys.find((k) => k.publicKeyHash === active.activePublicKeyHash)
+  const current = active.activePublicKeyHex
+    ? keys.find((k) => k.publicKeyHex === active.activePublicKeyHex)
     : undefined;
 
-  async function pick(hash: string) {
+  async function pick(hex: string) {
     if (busy) return;
     setBusy(true);
     try {
-      await keyspace.setActive(hash);
+      await keyspace.setActive(hex);
       setOpen(false);
     } catch (err) {
       console.error("Failed to switch key", err);
@@ -150,9 +150,9 @@ export function KeySwitchWidget() {
           {keys.map((k) => (
             <button
               type="button"
-              key={k.publicKeyHash}
-              className={`key-switch__item ${active.activePublicKeyHash === k.publicKeyHash ? "key-switch__active" : ""}`}
-              onClick={() => k.publicKeyHash && pick(k.publicKeyHash)}
+              key={k.publicKeyHex}
+              className={`key-switch__item ${active.activePublicKeyHex === k.publicKeyHex ? "key-switch__active" : ""}`}
+              onClick={() => k.publicKeyHex && pick(k.publicKeyHex)}
               disabled={busy || k.identityStatus !== "ready" || !k.publicKeyHex}
               title={k.identityStatus !== "ready" ? t("vault.keySwitch.notReady", { defaultValue: "身份尚未就绪" }) : undefined}
             >
@@ -163,7 +163,7 @@ export function KeySwitchWidget() {
                 ) : null}
                 <span className="key-switch__caps">{k.capabilities.join(", ")}</span>
               </span>
-              {active.activePublicKeyHash === k.publicKeyHash ? <Check size={14} /> : null}
+              {active.activePublicKeyHex === k.publicKeyHex ? <Check size={14} /> : null}
               {k.identityStatus !== "ready" ? <AlertTriangle size={14} /> : null}
             </button>
           ))}

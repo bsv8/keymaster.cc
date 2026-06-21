@@ -150,7 +150,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
         retry(action.id);
         break;
       case "cancel-by-key":
-        void cancelByKey(action.publicKeyHash);
+        void cancelByKey(action.publicKeyHex);
         break;
       case "sync-state":
         // follower 主动询问最新快照：响应一份给请求方。
@@ -410,16 +410,16 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
    * 硬切换 007：取消指定 key namespace 下所有 task。
    * follower 必须把操作转发给 leader；leader 在本 tab 内执行 cancel。
    */
-  async function cancelByKey(publicKeyHash: string): Promise<void> {
+  async function cancelByKey(publicKeyHex: string): Promise<void> {
     if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "cancel-by-key", publicKeyHash });
+      leaderCtx.forwardAction({ type: "cancel-by-key", publicKeyHex });
       return;
     }
     const targets: TaskRuntime[] = [];
     for (const t of tasks.values()) {
       // 008：用 resolveKeyScope 取最新求值结果——active key 切换后再调
       // cancelByKey 也能匹配到正确 namespace。
-      if (resolveKeyScope(t.def)?.publicKeyHash === publicKeyHash) {
+      if (resolveKeyScope(t.def)?.publicKeyHex === publicKeyHex) {
         targets.push(t);
       }
     }
@@ -580,7 +580,7 @@ type FollowerAction =
   | { type: "resume"; id: string; fromTabId?: string }
   | { type: "cancel"; id: string; fromTabId?: string }
   | { type: "retry"; id: string; fromTabId?: string }
-  | { type: "cancel-by-key"; publicKeyHash: string; fromTabId?: string }
+  | { type: "cancel-by-key"; publicKeyHex: string; fromTabId?: string }
   | { type: "sync-state"; fromTabId: string };
 
 type LeaderToFollower =

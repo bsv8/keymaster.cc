@@ -44,7 +44,7 @@ export function PokerTable(): React.ReactElement {
       setSession(next);
       if (joinedKeyHash) {
         const nextHash =
-          next.kind === "ready" ? next.key.publicKeyHash ?? null : null;
+          next.kind === "ready" ? next.key.publicKeyHex ?? null : null;
         if (nextHash !== joinedKeyHash) {
           setJoinedKeyHash(null);
           setJoined(false);
@@ -78,7 +78,7 @@ export function PokerTable(): React.ReactElement {
       );
       return;
     }
-    const expectedHash = session.key.publicKeyHash ?? null;
+    const expectedHash = session.key.publicKeyHex ?? null;
     void service
       .subscribeTopics([tableId])
       .then(() => {

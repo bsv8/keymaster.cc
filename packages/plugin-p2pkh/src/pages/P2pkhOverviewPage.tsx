@@ -390,11 +390,11 @@ export function P2pkhOverviewPage() {
 function computeReadiness(keyspace: KeyspaceService): PageReadiness {
   if (keyspace.isInitializing()) return "initializing";
   // 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"；
-  // `mode` 字段已删除，readiness 仅以 activePublicKeyHash 是否存在判断。
-  if (!keyspace.active().activePublicKeyHash) return "no-active-key";
+  // `mode` 字段已删除，readiness 仅以 activePublicKeyHex 是否存在判断。
+  if (!keyspace.active().activePublicKeyHex) return "no-active-key";
   return "ready";
 }
 
 function isSameActive(a: ActiveKeyState, b: ActiveKeyState): boolean {
-  return a.activePublicKeyHash === b.activePublicKeyHash;
+  return a.activePublicKeyHex === b.activePublicKeyHex;
 }

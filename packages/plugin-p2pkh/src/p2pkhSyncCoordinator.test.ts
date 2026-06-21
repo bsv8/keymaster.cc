@@ -15,14 +15,14 @@ import { createP2pkhSyncCoordinator } from "./p2pkhSyncCoordinator.js";
 import type { P2pkhKeyResource } from "./p2pkhContracts.js";
 import type { KeyScopedStorageHandle, KeyspaceService } from "@keymaster/contracts";
 
-const PUBLIC_KEY_HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const DB_NAME = `keymaster.key.${PUBLIC_KEY_HASH}.plugin.p2pkh.state`;
+const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 
 function makeResource(generation = 0): P2pkhKeyResource {
   return {
     resourceId: "k1:main",
     keyId: "k1",
-    publicKeyHash: PUBLIC_KEY_HASH,
+    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     label: "l",
     address: "a",
     network: "main",
@@ -31,16 +31,15 @@ function makeResource(generation = 0): P2pkhKeyResource {
   };
 }
 
-function makeKeyspace(publicKeyHash: string): KeyspaceService {
+function makeKeyspace(publicKeyHex: string): KeyspaceService {
   return {
     listKeys: async () => [],
     getKey: async () => undefined,
-    active: () => ({ activePublicKeyHash: publicKeyHash }),
+    active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
       keyId: "k1",
-      publicKeyHex: "00",
-      publicKeyHash,
+
       label: "l",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -48,10 +47,10 @@ function makeKeyspace(publicKeyHash: string): KeyspaceService {
     }),
     onActiveChange: () => () => undefined,
     openKeyStorage: async (input) => {
-      if (input.publicKeyHash !== publicKeyHash) {
+      if (input.publicKeyHex !== publicKeyHex) {
         throw new Error("Key storage is not ready");
       }
-      const name = `keymaster.key.${input.publicKeyHash}.plugin.${input.pluginId}.${input.storageId}`;
+      const name = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const r = indexedDB.open(name, input.version);
         r.onupgradeneeded = () => {
@@ -84,8 +83,8 @@ let bundle: P2pkhDbHandle | undefined;
 
 async function getDb(): Promise<P2pkhDbHandle> {
   if (bundle) return bundle;
-  const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
-  const nsHandle = await openP2pkhDb({ keyspace, publicKeyHash: PUBLIC_KEY_HASH });
+  const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
+  const nsHandle = await openP2pkhDb({ keyspace, publicKeyHex: ACTIVE_PUBLIC_KEY_HEX });
   bundle = createP2pkhDb(nsHandle);
   return bundle;
 }

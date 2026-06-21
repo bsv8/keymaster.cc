@@ -3,26 +3,36 @@
 // 设计缘由：每个插件管理自己的 DB schema，升级失败不能破坏旧数据。
 // 这里只创建 vault_meta / vault_keys 两张表，不与其他插件共用 schema 文件。
 //
-// 硬切换 007 后的 schema v2：
-//   - vault_keys 新增 publicKeyHex / publicKeyHash 两个字段。
-//   - vault_keys 新增 unique index "publicKeyHash"，重复导入同一公钥会被 DB 拒绝。
-//   - 老记录（v1）没有公钥字段：升级时不能凭空从密文推导，平台在 unlock
-//     后逐把 key 走 withPrivateKey backfill 派生并写回。
+// 硬切换 007 / 硬切换 001 收口后:平台身份唯一字段是 publicKeyHex。
+//   - 旧 schema v2 的 `publicKeyHash` index 已经在 v3->v4 升级路径中
+//     显式删除；新代码不再创建或读取该 index。
+//   - 旧 v1 老记录（没有 publicKeyHex）会在 unlock 后由 vaultService
+//     backfillIdentities 走 withPrivateKey 重新派生并写回。
 //   - 旧字段 address / network 仍保留为兼容展示，不再是 key 根身份。
 //
 // 硬切换 008 后的 schema v3：
 //   - vault_keys 新增 identityStatus / identityError 两个可选字段。
 //   - 老记录（v1/v2）没有这两个字段：读取时按 "ready" 处理；写时由
 //     putKeyIdentityReady / putKeyIdentityFailed 显式维护。
-//   - 不需要新 store：字段都存在 vault_keys store 中即可。
 //
 // 硬切换 003 收尾：
 //   - 旧 `fingerprint` 字段从类型上删除；新代码不再读写。
 //   - 旧库记录里可能残留 `fingerprint`，读取时被忽略、写入时不再写。
 //   - 显式构造允许保留的字段，**不**用 `...current` 续命旧字段。
+//
+// 硬切换 001 收口后的 schema v4：
+//   - 删除 `publicKeyHash` index。
+//   - 删除 `publicKeyHash` 字段：所有记录物理去掉该字段。
+//   - 新增 publicKeyHex unique index `publicKeyHex`：查重主路径。
+//   - upgrade 阶段（v3 -> v4）会逐条把旧记录 rewrite 成最终字段形状：
+//     老 v1/v2 残留的 publicKeyHash 字段被物理删除；publicKeyHex 保留。
+//   - 旧记录若没有 publicKeyHex（v1 老记录），仍保留为 ready,等待
+//     backfill 阶段用 withPrivateKey 重新派生并写回。
+//   - failed key 仍可能有 publicKeyHex（vaultDb.putKeyIdentityFailed
+//     不动 identity 字段）；只是不参与 active 候选。
 
 const DB_NAME = "vault";
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 export interface VaultMetaRecord {
   id: "singleton";
@@ -51,10 +61,8 @@ export interface VaultKeyRecord {
   cipherSaltB64: string;
   cipherIvB64: string;
   cipherB64: string;
-  /** 压缩公钥 hex。 */
+  /** 压缩公钥 hex；平台公开身份根字段。ready 必有，failed 可能缺省。 */
   publicKeyHex?: string;
-  /** 公钥 hash。 */
-  publicKeyHash?: string;
   /**
    * 硬切换 008：identity 状态。
    *   - "ready" 或缺省：可作为 active key 候选。
@@ -96,17 +104,61 @@ function openDb(): Promise<IDBDatabase> {
         }
       }
       if (oldVersion < 2) {
-        // v1 -> v2：补 publicKeyHash 索引与字段占位（升级时只创建 index，
-        // 不重写已有记录；backfill 阶段再写回 identity 字段）。
-        const store = req.transaction?.objectStore("vault_keys");
-        if (store && !store.indexNames.contains("publicKeyHash")) {
-          store.createIndex("publicKeyHash", "publicKeyHash", { unique: true });
-        }
+        // v1 -> v4:硬切换 001 收口后,任何从 v1 直接升级到 v4 的路径都不
+        // 再创建旧 `publicKeyHash` 索引;v3->v4 升级时显式删除。
+        // 旧 v1 老记录没有 publicKeyHex,backfill 阶段由 vaultService
+        // 走 withPrivateKey 重新派生并写回。
       }
       if (oldVersion < 3) {
         // v2 -> v3：硬切换 008。identityStatus / identityError 是 vault_keys
         // store 的可选字段，不需新增 store；老记录缺省按 "ready" 处理。
         // 这里什么都不做——读时 map，写时显式 put。
+      }
+      if (oldVersion < 4) {
+        // v3 -> v4：硬切换 001 收口。
+        //   - 删除 publicKeyHash 唯一索引；
+        //   - 新增 publicKeyHex 唯一索引；
+        //   - 逐条 rewrite vault_keys 记录：显式构造字段白名单,物理删
+        //     旧 publicKeyHash 字段（即使老记录里有也丢掉），保留
+        //     publicKeyHex。失败的 key 仍可能没有 publicKeyHex,backfill
+        //     阶段由 vaultService 重新派生并写回。
+        const tx = req.transaction;
+        if (tx) {
+          const store = tx.objectStore("vault_keys");
+          if (store.indexNames.contains("publicKeyHash")) {
+            store.deleteIndex("publicKeyHash");
+          }
+          if (!store.indexNames.contains("publicKeyHex")) {
+            store.createIndex("publicKeyHex", "publicKeyHex", { unique: true });
+          }
+          // 物理清理旧字段：cursor 遍历所有记录,显式构造最终形状。
+          const cursorReq = store.openCursor();
+          cursorReq.onsuccess = () => {
+            const cursor = cursorReq.result;
+            if (!cursor) return;
+            const r = cursor.value as VaultKeyRecord & {
+              publicKeyHash?: string;
+            };
+            const next: VaultKeyRecord = {
+              id: r.id,
+              label: r.label,
+              address: r.address,
+              network: r.network,
+              format: r.format,
+              capabilities: r.capabilities,
+              createdAt: r.createdAt,
+              source: r.source,
+              cipherSaltB64: r.cipherSaltB64,
+              cipherIvB64: r.cipherIvB64,
+              cipherB64: r.cipherB64,
+              publicKeyHex: r.publicKeyHex,
+              identityStatus: r.identityStatus,
+              identityError: r.identityError
+            };
+            cursor.update(next);
+            cursor.continue();
+          };
+        }
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -168,29 +220,29 @@ export const vaultDb = {
       return reqAsPromise(idx.get(address));
     });
   },
-  async getKeyByPublicKeyHash(publicKeyHash: string): Promise<VaultKeyRecord | undefined> {
+  async getKeyByPublicKeyHex(publicKeyHex: string): Promise<VaultKeyRecord | undefined> {
     return tx("vault_keys", "readonly", async (t) => {
       const store = t.objectStore("vault_keys");
-      if (!store.indexNames.contains("publicKeyHash")) return undefined;
-      return reqAsPromise(store.index("publicKeyHash").get(publicKeyHash));
+      if (!store.indexNames.contains("publicKeyHex")) return undefined;
+      return reqAsPromise(store.index("publicKeyHex").get(publicKeyHex));
     });
   },
   async putKey(record: VaultKeyRecord): Promise<void> {
     await tx("vault_keys", "readwrite", (t) => reqAsPromise(t.objectStore("vault_keys").put(record)));
   },
   /**
-   * 仅回写 identity 字段。设计缘由：backfill 阶段需要补 publicKeyHex /
-   * publicKeyHash，但不应替换整个 record（避免与并发 import 冲突）。
+   * 仅回写 identity 字段。设计缘由：backfill 阶段需要补 publicKeyHex,
+   * 但不应替换整个 record（避免与并发 import 冲突）。
    * 同时写 identityStatus = "ready"、清 identityError。
    *
    * 硬切换 003 收尾：本方法**不**接收 fingerprint；旧字段即使在
    * `current` 记录上残留也**不**会被续命（只白名单写出 publicKeyHex
-   * / publicKeyHash / identityStatus / identityError）。
+   * / identityStatus / identityError）。
    * 硬切换 008：vaultService 调本方法，并在成功后发 key.identity.ready 事件。
+   * 硬切换 001 收口：本方法不再写 publicKeyHash 字段。
    */
   async putKeyIdentity(id: string, identity: {
     publicKeyHex: string;
-    publicKeyHash: string;
   }): Promise<void> {
     await tx("vault_keys", "readwrite", async (t) => {
       const store = t.objectStore("vault_keys");
@@ -212,7 +264,6 @@ export const vaultDb = {
         cipherIvB64: current.cipherIvB64,
         cipherB64: current.cipherB64,
         publicKeyHex: identity.publicKeyHex,
-        publicKeyHash: identity.publicKeyHash,
         identityStatus: "ready",
         identityError: undefined
       };
@@ -222,13 +273,14 @@ export const vaultDb = {
   /**
    * 硬切换 008：标记某把 key 的 identity backfill 失败。
    * 写 identityStatus = "failed" + identityError；**不动**已有 identity
-   * 字段（publicKeyHex / publicKeyHash）。设计缘由：公钥
+   * 字段（publicKeyHex）。设计缘由：公钥
    * 身份与 backfill 状态是两件事——失败 status 表示"暂时无法重新派
-   * 生"，不应丢弃已知公钥；keyspace 也不会把 failed key 选为 active。
+   * 生",不应丢弃已知公钥；keyspace 也不会把 failed key 选为 active。
    * 重试时由 putKeyIdentity 重新走派生并写回。
    * 失败 key 不会被 keyspace 选为 active key 候选。
    *
-   * 硬切换 003 收尾：显式构造字段，避免把旧 `fingerprint` 写回。
+   * 硬切换 003 收尾：显式构造字段,避免把旧 `fingerprint` 写回。
+   * 硬切换 001 收口：不再写 publicKeyHash 字段。
    */
   async putKeyIdentityFailed(id: string, error: string): Promise<void> {
     await tx("vault_keys", "readwrite", async (t) => {
@@ -248,7 +300,6 @@ export const vaultDb = {
         cipherIvB64: current.cipherIvB64,
         cipherB64: current.cipherB64,
         publicKeyHex: current.publicKeyHex,
-        publicKeyHash: current.publicKeyHash,
         identityStatus: "failed",
         identityError: error
       };
@@ -259,7 +310,8 @@ export const vaultDb = {
    * 硬切换 008：把失败 key 重置为 ready（用于重试 backfill 时清状态）。
    * 实际身份字段由 putKeyIdentity 写回；本方法只清状态。
    *
-   * 硬切换 003 收尾：显式构造字段，避免把旧 `fingerprint` 写回。
+   * 硬切换 003 收尾：显式构造字段,避免把旧 `fingerprint` 写回。
+   * 硬切换 001 收口：不再写 publicKeyHash 字段。
    */
   async putKeyIdentityReady(id: string): Promise<void> {
     await tx("vault_keys", "readwrite", async (t) => {
@@ -279,7 +331,6 @@ export const vaultDb = {
         cipherIvB64: current.cipherIvB64,
         cipherB64: current.cipherB64,
         publicKeyHex: current.publicKeyHex,
-        publicKeyHash: current.publicKeyHash,
         identityStatus: "ready",
         identityError: undefined
       };

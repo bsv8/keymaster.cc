@@ -158,7 +158,7 @@ export function AssetsPage() {
 
 function buildDescription(host: ReturnType<typeof usePluginHost>, keyspace: KeyspaceService): string {
   const state = keyspace.active();
-  if (!state.activePublicKeyHash) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
+  if (!state.activePublicKeyHex) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
   return host.i18n.t("assets.context.loading", { defaultValue: "加载中…" });
 }
 
@@ -167,12 +167,12 @@ async function buildDescriptionAsync(
   keyspace: KeyspaceService
 ): Promise<string> {
   const state = keyspace.active();
-  if (!state.activePublicKeyHash) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
-  const identity: KeyIdentity | undefined = await keyspace.getKey(state.activePublicKeyHash);
+  if (!state.activePublicKeyHex) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
+  const identity: KeyIdentity | undefined = await keyspace.getKey(state.activePublicKeyHex);
   if (!identity) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
   const label = identity.label || host.i18n.t("assets.context.unnamed", { defaultValue: "未命名" });
   // 硬切换 003 收尾：短公钥由 publicKeyHex 现算；缺 publicKeyHex 时显示
-  // "身份不可用"，不再读 identity.fingerprint，也不从 publicKeyHash 反向
+  // "身份不可用"，不再读 identity.fingerprint，也不从 publicKeyHex 反向
   // 伪造短串。
   const shortPubkey = identity.publicKeyHex
     ? formatShortPublicKey(identity.publicKeyHex)

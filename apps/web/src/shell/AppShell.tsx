@@ -11,11 +11,11 @@
 // vault state，新挂载的组件也能立即拿到当前值。
 //
 // 硬切换 005 收尾：已解锁壳层守卫。
-//   - vault.status === "unlocked" + activePublicKeyHash 存在 → 正常渲染。
-//   - vault.status === "unlocked" + activePublicKeyHash 缺失 +
+//   - vault.status === "unlocked" + activePublicKeyHex 存在 → 正常渲染。
+//   - vault.status === "unlocked" + activePublicKeyHex 缺失 +
 //     listKeys() 读成功且 length === 0 → "0 key 异常态"，主动触发回
 //     uninitialized 的恢复路径（让用户进入首启 welcome）。
-//   - vault.status === "unlocked" + activePublicKeyHash 缺失 +
+//   - vault.status === "unlocked" + activePublicKeyHex 缺失 +
 //     listKeys() 读成功且 length > 0 → "修复/管理态"：阻断普通业务页，
 //     但 `/settings/vault`（VaultSettingsPage）**始终**允许渲染——
 //     用户必须能在该页面导出 / 删除失败 / uninitialized key 才能脱离
@@ -82,10 +82,10 @@ export async function evaluateShellGuard(args: {
   if (args.vaultStatus !== "unlocked") {
     return { state: { kind: "normal" }, recorderError: false };
   }
-  if (args.active.activePublicKeyHash) {
+  if (args.active.activePublicKeyHex) {
     return { state: { kind: "normal" }, recorderError: false };
   }
-  // activePublicKeyHash 缺失：按 listKeys 决定走"恢复"/"修复"/"诊断"。
+  // activePublicKeyHex 缺失：按 listKeys 决定走"恢复"/"修复"/"诊断"。
   let list: KeyIdentity[];
   try {
     list = await args.listKeys();
@@ -133,8 +133,8 @@ export function AppShell() {
 
   // 硬切换 005 收尾：已解锁壳层守卫。
   // 不变量：
-  //   - vault.status === "unlocked" + activePublicKeyHash 存在 → normal。
-  //   - vault.status === "unlocked" + activePublicKeyHash 缺失：
+  //   - vault.status === "unlocked" + activePublicKeyHex 存在 → normal。
+  //   - vault.status === "unlocked" + activePublicKeyHex 缺失：
   //       * listKeys() 读失败 → "diagnostic"（**不**触发空 Vault 收敛，
   //         避免把"读失败"误判为"0 key"而误删 meta）。
   //       * listKeys() length === 0 → "0 key 异常态"，调

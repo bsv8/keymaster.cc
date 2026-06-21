@@ -63,10 +63,10 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   // 硬切换 005 收尾：active key 不再有 `mode` 字段。"all 模式"被壳层守卫
   // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
   // ——但正常业务流下不会进入 hasNoActiveKey 分支。
-  const hasNoActiveKey = !activeKey.activePublicKeyHash;
+  const hasNoActiveKey = !activeKey.activePublicKeyHex;
 
   // 硬切换 008 + 硬切换 003 收尾：通过 keyspace.getKey 拿当前 key 的展示
-  // 信息（label + 短公钥），不再在 UI 里渲染完整 publicKeyHash 或读取
+  // 信息（label + 短公钥），不再在 UI 里渲染完整 publicKeyHex 或读取
   // 已废弃的 fingerprint 字段。短公钥由 formatShortPublicKey(publicKeyHex)
   // 现算。
   const [activeIdentity, setActiveIdentity] = useState<KeyIdentity | undefined>(undefined);
@@ -81,9 +81,9 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
       setCompletion(undefined);
       setError(null);
       // 重新拉 identity。
-      if (s.activePublicKeyHash) {
+      if (s.activePublicKeyHex) {
         keyspace
-          .getKey(s.activePublicKeyHash)
+          .getKey(s.activePublicKeyHex)
           .then((id) => setActiveIdentity(id))
           .catch(() => setActiveIdentity(undefined));
       } else {
@@ -100,7 +100,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     }
     let cancelled = false;
     keyspace
-      .getKey(activeKey.activePublicKeyHash!)
+      .getKey(activeKey.activePublicKeyHex!)
       .then((id) => {
         if (!cancelled) setActiveIdentity(id);
       })
@@ -110,7 +110,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     return () => {
       cancelled = true;
     };
-  }, [keyspace, activeKey.activePublicKeyHash, hasNoActiveKey]);
+  }, [keyspace, activeKey.activePublicKeyHex, hasNoActiveKey]);
 
   useEffect(() => {
     if (hasNoActiveKey) {
@@ -182,7 +182,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     try {
       const p = await service.prepareTransfer(input);
       setPreview(p);
-      setPreviewKey(activeKey.activePublicKeyHash ?? "");
+      setPreviewKey(activeKey.activePublicKeyHex ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : t("p2pkh.transfer.err.prepare", { defaultValue: "准备失败" }));
     } finally {
@@ -231,7 +231,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
 
   useEffect(() => {
     if (!preview) return;
-    const current = activeKey.activePublicKeyHash ?? "";
+    const current = activeKey.activePublicKeyHex ?? "";
     if (previewKey !== current) {
       setPreview(undefined);
       setPreviewKey(undefined);
@@ -274,7 +274,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
                 <code className="p2pkh-transfer-widget__pubkey">{identityMissing}</code>
               )}
             </>
-          ) : activeKey.activePublicKeyHash ? (
+          ) : activeKey.activePublicKeyHex ? (
             <code>{t("p2pkh.transfer.loading", { defaultValue: "加载中…" })}</code>
           ) : null}
         </p>

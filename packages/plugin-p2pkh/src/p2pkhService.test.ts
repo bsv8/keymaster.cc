@@ -222,7 +222,7 @@ describe("createP2pkhRecentSync.runOnce", () => {
     const resource: P2pkhKeyResource = {
       resourceId: "p2pkh:main",
       keyId: "k1",
-      publicKeyHash: "h1",
+      publicKeyHex: "h1",
       label: "k",
       address: "addr-main",
       network: "main",
@@ -286,7 +286,7 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
     const resource: P2pkhKeyResource = {
       resourceId: "p2pkh:main",
       keyId: "k1",
-      publicKeyHash: "h1",
+      publicKeyHex: "h1",
       label: "k",
       address: "addr-main",
       network: "main",

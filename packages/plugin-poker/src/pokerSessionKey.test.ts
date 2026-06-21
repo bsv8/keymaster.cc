@@ -1,7 +1,7 @@
 // packages/plugin-poker/src/pokerSessionKey.test.ts
 // 验证硬切换 004 + 硬切换 005 收尾后 session key 解析：
 //   - vault 未解锁 → vaultLocked；
-//   - activePublicKeyHash 缺省 → noActiveHash；
+//   - activePublicKeyHex 缺省 → noActiveKey；
 //   - 有 hash + identityStatus ready → ready；
 //   - hash 在 keyspace 找不到 → missing；
 //   - identityStatus = uninitialized / failed → notReady。
@@ -11,7 +11,6 @@ import { resolvePokerSessionKey } from "./pokerSessionKey.js";
 
 const KEY_A = {
   keyId: "kA",
-  publicKeyHash: "pkhA",
   publicKeyHex: "02" + "ab".repeat(32),
   label: "A",
   capabilities: ["poker"],
@@ -30,13 +29,13 @@ class FakeVault {
 }
 
 class FakeKeyspace {
-  private state: { activePublicKeyHash?: string } = { activePublicKeyHash: "pkhA" };
+  private state: { activePublicKeyHex?: string } = { activePublicKeyHex: "pkhA" };
   private meta = new Map<string, any>([["pkhA", KEY_A]]);
   active() {
     return { ...this.state };
   }
   setActive(pkh: string) {
-    this.state = { activePublicKeyHash: pkh };
+    this.state = { activePublicKeyHex: pkh };
   }
   clearActive() {
     this.state = {};
@@ -68,18 +67,18 @@ describe("resolvePokerSessionKey", () => {
     expect(state.kind).toBe("vaultLocked");
   });
 
-  it("returns noActiveHash when activePublicKeyHash missing", async () => {
-    // 硬切换 005 收尾：原 "allMode" 已被 `noActiveHash` 替代。
+  it("returns noActiveKey when activePublicKeyHex missing", async () => {
+    // 硬切换 005 收尾：原 "allMode" 已被 `noActiveKey` 替代。
     keyspace.clearActive();
     const state = await resolvePokerSessionKey(vault as any, keyspace as any);
-    expect(state.kind).toBe("noActiveHash");
+    expect(state.kind).toBe("noActiveKey");
   });
 
-  it("returns ready when activePublicKeyHash present and identityStatus ready", async () => {
+  it("returns ready when activePublicKeyHex present and identityStatus ready", async () => {
     const state = await resolvePokerSessionKey(vault as any, keyspace as any);
     expect(state.kind).toBe("ready");
     if (state.kind === "ready") {
-      expect(state.key.publicKeyHash).toBe("pkhA");
+      expect(state.key.publicKeyHex).toBe("02" + "ab".repeat(32));
     }
   });
 

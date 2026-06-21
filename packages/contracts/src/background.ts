@@ -14,19 +14,21 @@ export type BackgroundTaskState =
   | "failed";
 
 /**
- * 任务归属的 key namespace（硬切换 007 / 008）。
+ * 任务归属的 key namespace（硬切换 007 / 008 / 001 收口）。
  * 设计缘由：删除 key 时由 keyspace 取消该 key 下所有 task；active key
  * 切换不影响其他 key 的后台收尾。background 平台不应理解业务字段。
+ *
+ * 硬切换 001 收口：平台身份根字段统一为 publicKeyHex；`publicKeyHash`
+ * 不再作为任务 scope 字段。cancelByKey 等 API 入参也对应改为
+ * `publicKeyHex`。
  *
  * 硬切换 003 收尾：若任务需要展示 key 上下文，UI 应在拿到本 scope 后
  * 调 `formatShortPublicKey(publicKeyHex)` 现算短公钥；本接口**不**持
  * 有 `fingerprint` 字段，也**不**通过 MessageBus 透传短公钥。
  */
 export interface BackgroundTaskKeyScope {
-  publicKeyHash: string;
+  publicKeyHex: string;
   label?: string;
-  /** 完整公钥 hex（可选）。如设置，UI 侧可现算短公钥展示。 */
-  publicKeyHex?: string;
 }
 
 /** 任务进度（可空）。 */
@@ -139,12 +141,14 @@ export interface BackgroundService {
   /** 重试：仅重试失败任务。 */
   retry(taskId: string): void;
   /**
-   * 取消指定 key namespace 下所有 task（硬切换 007）。
-   * 设计缘由：keyspace.deleteKey 通知 background 停止该 key 的所有收尾，
+   * 取消指定 key namespace 下所有 task（硬切换 007 / 001 收口）。
+   * 设计缘由：keyspace.deleteKey 通知 background 停止该 key 的所有收尾,
    * 防止迟到写入重建被删 namespace。返回的 Promise resolve 时表示
    * 所有目标 task 旧实例均已退出。
+   *
+   * 硬切换 001 收口：入参是 publicKeyHex。
    */
-  cancelByKey(publicKeyHash: string): Promise<void>;
+  cancelByKey(publicKeyHex: string): Promise<void>;
 }
 
 /** capability keys。 */

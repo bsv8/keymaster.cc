@@ -16,7 +16,7 @@ export type LogLevel = "debug" | "info" | "warn" | "error";
 
 /** 单条 entry 的可选 key-scope 摘要。 */
 export interface LogKeyScope {
-  publicKeyHash: string;
+  publicKeyHex: string;
 }
 
 /** 单条 entry 中的错误摘要（截断后的 name / message / stack）。 */

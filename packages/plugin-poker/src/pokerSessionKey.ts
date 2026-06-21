@@ -7,8 +7,8 @@
 //     在 Poker 身份永远来自 `keyspace.active()`，因此只需要"判断当前
 //     active 能不能用作 Poker 身份"这一件事。
 //   - 硬切换 005：`allMode` 已被删除——`mode: "all"` 不再是真值。
-//     `activePublicKeyHash` 缺失 = 异常态（壳层会拦截到 uninitialized
-//     或修复/管理态）；Poker 一律按 `noActiveHash` 处理。
+//     `activePublicKeyHex` 缺失 = 异常态（壳层会拦截到 uninitialized
+//     或修复/管理态）；Poker 一律按 `noActiveKey` 处理。
 //   - 解析逻辑必须独立可单测（不能直接耦合 vault / keyspace / service
 //     内部状态），于是抽到独立模块。
 //   - 该函数返回的 state 直接驱动 service 的 fail-closed 行为：
@@ -27,7 +27,7 @@ import type {
  *
  * 行为约定（硬切换 004 + 硬切换 005 收尾）：
  *   - vault 未解锁 → `{ kind: "vaultLocked" }`。
- *   - activePublicKeyHash 缺省 → `{ kind: "noActiveHash" }`。
+ *   - activePublicKeyHex 缺省 → `{ kind: "noActiveKey" }`。
  *   - single + 有 hash：尝试 `keyspace.getKey(hash)`；
  *       * 未找到 → `{ kind: "missing" }`。
  *       * identityStatus === "ready" → `{ kind: "ready", key }`。
@@ -41,8 +41,8 @@ export async function resolvePokerSessionKey(
 ): Promise<PokerSessionKeyState> {
   if (vault.status() !== "unlocked") return { kind: "vaultLocked" };
   const active: ActiveKeyState = keyspace.active();
-  if (!active.activePublicKeyHash) return { kind: "noActiveHash" };
-  const key: KeyIdentity | undefined = await keyspace.getKey(active.activePublicKeyHash);
+  if (!active.activePublicKeyHex) return { kind: "noActiveKey" };
+  const key: KeyIdentity | undefined = await keyspace.getKey(active.activePublicKeyHex);
   if (!key) return { kind: "missing" };
   const status = key.identityStatus ?? "ready";
   if (status === "ready") return { kind: "ready", key };
@@ -62,8 +62,8 @@ export function quickResolvePokerSessionKey(
 ): PokerSessionKeyState {
   if (vault.status() !== "unlocked") return { kind: "vaultLocked" };
   const active = keyspace.active();
-  if (!active.activePublicKeyHash) return { kind: "noActiveHash" };
-  // 同步版本不查 key 元数据：返回 noActiveHash 视作"未知"，由 service
+  if (!active.activePublicKeyHex) return { kind: "noActiveKey" };
+  // 同步版本不查 key 元数据：返回 noActiveKey 视作"未知"，由 service
   // 异步解析升级为 missing / notReady / ready。
-  return { kind: "noActiveHash" };
+  return { kind: "noActiveKey" };
 }

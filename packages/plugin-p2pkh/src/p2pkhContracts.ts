@@ -36,7 +36,7 @@ export const P2PKH_ASSETS: Record<P2pkhAssetId, P2pkhAssetDef> = {
 };
 
 /** P2PKH 资源：当前 active key namespace 下的一个网络资源。
- *  设计缘由：硬切换 007 后 P2PKH 资源归属 publicKeyHash；keyId 仍保留为诊断字段，
+ *  设计缘由：硬切换 007 后 P2PKH 资源归属 publicKeyHex；keyId 仍保留为诊断字段，
  *  不再作为删除/隔离主路径。resourceId 不再拼接 keyId，改为
  *  `p2pkh:<network>:<scriptType>`，区分同 key 下的不同网络。 */
 export interface P2pkhKeyResource {
@@ -44,7 +44,7 @@ export interface P2pkhKeyResource {
   /** Vault 内部 key id，诊断字段。 */
   keyId: string;
   /** active key 公钥 hash；硬切换后用于诊断与迁移回查。 */
-  publicKeyHash: string;
+  publicKeyHex: string;
   label: string;
   address: string;
   network: BsvNetwork;
@@ -84,7 +84,7 @@ export interface P2pkhUtxo {
   resourceId: string;
   /** 诊断字段，删除主路径不再依赖。 */
   keyId: string;
-  publicKeyHash: string;
+  publicKeyHex: string;
   network: BsvNetwork;
   address: string;
   txid: string;
@@ -103,7 +103,7 @@ export interface P2pkhHistoryItem {
   resourceId: string;
   /** 诊断字段，删除主路径不再依赖。 */
   keyId: string;
-  publicKeyHash: string;
+  publicKeyHex: string;
   network: BsvNetwork;
   address: string;
   txid: string;
@@ -192,7 +192,7 @@ export interface P2pkhLocalSubmission {
   id: string;
   resourceId: string;
   keyId: string;
-  publicKeyHash: string;
+  publicKeyHex: string;
   network: BsvNetwork;
   assetId: P2pkhAssetId;
   canonicalTxid: string;
@@ -217,7 +217,7 @@ export interface P2pkhLocalInputClaim {
   submissionId: string;
   resourceId: string;
   keyId: string;
-  publicKeyHash: string;
+  publicKeyHex: string;
   network: BsvNetwork;
   txid: string;
   vout: number;
@@ -413,11 +413,11 @@ export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {
 
 /**
  * 硬切换 008 收尾 + 硬切换 003 收尾：KeyIdentity 收窄类型。
- * 设计缘由：contract 的 KeyIdentity 字段 publicKeyHash / publicKeyHex
+ * 设计缘由：contract 的 KeyIdentity 字段 publicKeyHex / publicKeyHex
  * 是 optional（兼容 failed / uninitialized 状态），但 P2PKH 业务只在
  * ready 状态下运行。`requireReadyKey` 内部做断言后返回
- * `ReadyKeyIdentity`，调用方拿到的就是 publicKeyHash / publicKeyHex
- * 必填的窄类型，写入 P2pkhKeyResource.publicKeyHash 等必填字段时不再
+ * `ReadyKeyIdentity`，调用方拿到的就是 publicKeyHex / publicKeyHex
+ * 必填的窄类型，写入 P2pkhKeyResource.publicKeyHex 等必填字段时不再
  * 需要 `!`。
  *
  * 硬切换 003 收尾：`fingerprint` 字段已从 contract 中删除；
@@ -427,7 +427,6 @@ export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {
 export interface ReadyKeyIdentity {
   keyId: string;
   publicKeyHex: string;
-  publicKeyHash: string;
   label: string;
   capabilities: string[];
   createdAt: string;
@@ -446,7 +445,7 @@ export interface ReadyKeyIdentity {
  * 这里仍然显式拒绝 "failed" 与 "uninitialized"——前者是 backfill
  * 解密失败（不能让 P2PKH 拿去做签名），后者是 backfill 未完成
  * 的中间态（不能让 P2PKH 在命名空间还没就绪时打开 DB）。同时
- * publicKeyHash / publicKeyHex 必须存在，老 v1/v2 记录缺字段时也会被拒。
+ * publicKeyHex / publicKeyHex 必须存在，老 v1/v2 记录缺字段时也会被拒。
  *
  * 硬切换 003 收尾：本函数不再检查或回填 `fingerprint`——该字段已
  * 从 KeyIdentity / ReadyKeyIdentity 中删除。短公钥由 UI 现算。
@@ -455,12 +454,10 @@ export function requireReadyKey(key: KeyIdentity | undefined | null): ReadyKeyId
   if (!key) throw new Error("Active key is not ready");
   if (key.identityStatus === "failed") throw new Error("Active key is not ready");
   if (key.identityStatus === "uninitialized") throw new Error("Active key is not ready");
-  if (!key.publicKeyHash) throw new Error("Active key is not ready");
   if (!key.publicKeyHex) throw new Error("Active key is not ready");
   return {
     keyId: key.keyId,
     publicKeyHex: key.publicKeyHex,
-    publicKeyHash: key.publicKeyHash,
     label: key.label,
     capabilities: key.capabilities,
     createdAt: key.createdAt,

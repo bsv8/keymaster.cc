@@ -8,14 +8,15 @@ import { makeResourceId, type P2pkhKeyResource, type P2pkhUtxo } from "./p2pkhCo
 const ACTIVE_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
 const ACTIVE = deriveP2pkhAddress(ACTIVE_PRIV_HEX, "main");
 const RECEIVER = deriveP2pkhAddress("0000000000000000000000000000000000000000000000000000000000000002", "main");
-const ACTIVE_PUBLIC_KEY_HASH = hash160(ACTIVE.publicKeyHex);
+/** 链上 HASH160(compressed public key),用于 P2PKH 锁脚本。 */
+const ACTIVE_PUBKEY_HASH160_HEX = hash160(ACTIVE.publicKeyHex);
 
 function makeUtxo(value: number): P2pkhUtxo {
   return {
     id: `u-${value}`,
     resourceId: makeResourceId("ignored", "main"),
     keyId: "k1",
-    publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+    publicKeyHex: ACTIVE.publicKeyHex,
     network: "main",
     address: ACTIVE.address,
     txid: "0000000000000000000000000000000000000000000000000000000000000009",
@@ -57,7 +58,7 @@ describe("createP2pkhTransferService", () => {
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId("ignored", "main"),
       keyId: "k1",
-      publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+      publicKeyHex: ACTIVE.publicKeyHex,
       label: "active",
       address: ACTIVE.address,
       network: "main",
@@ -90,7 +91,6 @@ describe("createP2pkhTransferService", () => {
       getActiveKey: () => ({
         keyId: "k1",
         publicKeyHex: ACTIVE.publicKeyHex,
-        publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
@@ -132,7 +132,7 @@ describe("createP2pkhTransferService", () => {
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId("ignored", "main"),
       keyId: "k1",
-      publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+      publicKeyHex: ACTIVE.publicKeyHex,
       label: "active",
       address: ACTIVE.address,
       network: "main",
@@ -163,7 +163,6 @@ describe("createP2pkhTransferService", () => {
       getActiveKey: () => ({
         keyId: "k1",
         publicKeyHex: ACTIVE.publicKeyHex,
-        publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
@@ -187,7 +186,7 @@ describe("createP2pkhTransferService", () => {
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId("ignored", "main"),
       keyId: "k1",
-      publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+      publicKeyHex: ACTIVE.publicKeyHex,
       label: "active",
       address: ACTIVE.address,
       network: "main",
@@ -220,7 +219,6 @@ describe("createP2pkhTransferService", () => {
       getActiveKey: () => ({
         keyId: "k1",
         publicKeyHex: ACTIVE.publicKeyHex,
-        publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
@@ -252,7 +250,7 @@ describe("createP2pkhTransferService", () => {
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId("ignored", "main"),
       keyId: "k1",
-      publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
+      publicKeyHex: ACTIVE.publicKeyHex,
       label: "active",
       address: ACTIVE.address,
       network: "main",
@@ -278,7 +276,6 @@ describe("createP2pkhTransferService", () => {
       getActiveKey: () => ({
         keyId: "k1",
         publicKeyHex: ACTIVE.publicKeyHex,
-        publicKeyHash: ACTIVE_PUBLIC_KEY_HASH,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"

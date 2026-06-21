@@ -1,11 +1,11 @@
 // apps/web/src/shell/AppShell.guard.test.ts
 // 验证硬切换 005 收尾 + 反馈修复后的 AppShell 壳层守卫：
-//   - normal：vault 未解锁 或 activePublicKeyHash 存在。
-//   - empty-vault-recovery：activePublicKeyHash 缺失 + listKeys() 长度 0
+//   - normal：vault 未解锁 或 activePublicKeyHex 存在。
+//   - empty-vault-recovery：activePublicKeyHex 缺失 + listKeys() 长度 0
 //     + 触发 onEmpty 回调。
-//   - needs-repair：activePublicKeyHash 缺失 + listKeys() 返回 failed /
+//   - needs-repair：activePublicKeyHex 缺失 + listKeys() 返回 failed /
 //     uninitialized key 列表（**不**触发 onEmpty）。
-//   - diagnostic：activePublicKeyHash 缺失 + listKeys() 抛错（**不**触发
+//   - diagnostic：activePublicKeyHex 缺失 + listKeys() 抛错（**不**触发
 //     onEmpty，避免把"读失败"误判为 0 key 触发空 Vault 收敛）。
 //
 // 抽出 evaluateShellGuard 纯函数后可独立单测，不依赖 React runtime。
@@ -26,7 +26,6 @@ const KEY_MANAGEMENT_PATH = "/settings/vault";
 
 const READY_KEY: KeyIdentity = {
   keyId: "k1",
-  publicKeyHash: "h".repeat(64),
   publicKeyHex: "02" + "ab".repeat(32),
   label: "ready",
   capabilities: ["p2pkh"],
@@ -64,16 +63,16 @@ describe("evaluateShellGuard: normal 状态", () => {
   it("vault.status 不是 unlocked 时直接 normal", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "locked",
-      active: { activePublicKeyHash: "x" },
+      active: { activePublicKeyHex: "x" },
       listKeys: async () => [READY_KEY]
     });
     expect(result.state).toEqual({ kind: "normal" });
   });
 
-  it("activePublicKeyHash 存在时直接 normal", async () => {
+  it("activePublicKeyHex 存在时直接 normal", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: "h".repeat(64) },
+      active: { activePublicKeyHex: "h".repeat(64) },
       listKeys: async () => []
     });
     expect(result.state).toEqual({ kind: "normal" });
@@ -82,7 +81,7 @@ describe("evaluateShellGuard: normal 状态", () => {
   it("vault.status = booting 时也直接 normal", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "booting",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => [READY_KEY]
     });
     expect(result.state).toEqual({ kind: "normal" });
@@ -90,11 +89,11 @@ describe("evaluateShellGuard: normal 状态", () => {
 });
 
 describe("evaluateShellGuard: needs-repair 状态", () => {
-  it("activePublicKeyHash 缺失 + listKeys 返回 failed key 列表", async () => {
+  it("activePublicKeyHex 缺失 + listKeys 返回 failed key 列表", async () => {
     const onEmpty = vi.fn();
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => [FAILED_KEY],
       onEmpty
     });
@@ -106,10 +105,10 @@ describe("evaluateShellGuard: needs-repair 状态", () => {
     expect(onEmpty).not.toHaveBeenCalled();
   });
 
-  it("activePublicKeyHash 缺失 + listKeys 返回 uninitialized key 列表", async () => {
+  it("activePublicKeyHex 缺失 + listKeys 返回 uninitialized key 列表", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => [UNINITIALIZED_KEY]
     });
     expect(result.state.kind).toBe("needs-repair");
@@ -118,10 +117,10 @@ describe("evaluateShellGuard: needs-repair 状态", () => {
     }
   });
 
-  it("activePublicKeyHash 缺失 + listKeys 返回 mixed 列表", async () => {
+  it("activePublicKeyHex 缺失 + listKeys 返回 mixed 列表", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => [FAILED_KEY, UNINITIALIZED_KEY, READY_KEY]
     });
     expect(result.state.kind).toBe("needs-repair");
@@ -129,11 +128,11 @@ describe("evaluateShellGuard: needs-repair 状态", () => {
 });
 
 describe("evaluateShellGuard: empty-vault-recovery 状态", () => {
-  it("activePublicKeyHash 缺失 + listKeys 返回 0 把", async () => {
+  it("activePublicKeyHex 缺失 + listKeys 返回 0 把", async () => {
     const onEmpty = vi.fn();
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => [],
       onEmpty
     });
@@ -148,7 +147,7 @@ describe("evaluateShellGuard: empty-vault-recovery 状态", () => {
     // 关键：副作用抛错不能让状态被错误归类。
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => [],
       onEmpty: async () => {
         throw new Error("recover failed");
@@ -162,7 +161,7 @@ describe("evaluateShellGuard: empty-vault-recovery 状态", () => {
     // 关键：onEmpty 是可选回调，缺省不能导致状态变成别的。
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => []
     });
     expect(result.state).toEqual({ kind: "empty-vault-recovery" });
@@ -178,7 +177,7 @@ describe("evaluateShellGuard: diagnostic 状态（硬切换 005 反馈修复）"
     const onEmpty = vi.fn();
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => {
         throw new Error("indexedDB read failed");
       },
@@ -195,7 +194,7 @@ describe("evaluateShellGuard: diagnostic 状态（硬切换 005 反馈修复）"
   it("listKeys 抛非 Error 异常时也能正确归类为 diagnostic", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "unlocked",
-      active: { activePublicKeyHash: undefined },
+      active: { activePublicKeyHex: undefined },
       listKeys: async () => {
         // 故意抛出非 Error 类型的异常。
         throw "string error";

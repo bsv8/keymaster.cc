@@ -3,12 +3,12 @@
 // 设计缘由：
 //   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 active key 一个 namespace DB，
 //     通过 keyspace.openKeyStorage 打开。
-//   - DB name 形如 `keymaster.key.<publicKeyHash>.plugin.p2pkh.state`。
+//   - DB name 形如 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`。
 //   - store 中 keyId 字段保留为诊断字段，但删除 / 清理不再以 keyId index 为主路径。
 //   - resourceId 改为不包含 Vault keyId：`p2pkh:<network>`。
 //   - 原子提交：commitBackfillPage / commitRecentSnapshot 行为不变，但写入的 DB
 //     是当前 key 的 namespace DB，不再有跨 key 数据混合风险。
-//   - 切换 active key 时调用方需要重新拿 p2pkhDb(publicKeyHash) 才能继续访问。
+//   - 切换 active key 时调用方需要重新拿 p2pkhDb(publicKeyHex) 才能继续访问。
 //   - 硬切换 001：DB schema 升级，删除 `p2pkh_balances` store；
 //     余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
 //
@@ -22,7 +22,7 @@
 //       p2pkh 在 openP2pkhDb 捕获后执行
 //       `close cached handle -> deleteDatabase -> reopen(name, 7)`。
 //   - `deleteDatabase` blocked / 失败必须冒泡，**不允许**"假装已经 rebuild"。
-//   - 重建边界是整份 `keymaster.key.<publicKeyHash>.plugin.p2pkh.state`，
+//   - 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`，
 //     不与其它 plugin 共库；整库删除不会误伤别的业务。
 //
 // 硬切换 003：
@@ -52,7 +52,7 @@ const P2PKH_STORAGE_ID = "state";
 /**
  * 硬切换 005：P2PKH namespace DB schema 版本升级到 7。
  * 本次是硬切换——不兼容 v6 schema，**不做老数据迁移**。
- * 重建边界是整份 `keymaster.key.<publicKeyHash>.plugin.p2pkh.state`：
+ * 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`：
  *   - `oldVersion < 7`：onupgradeneeded 事务内删光旧 p2pkh_* stores，
  *     按 v7 完整重建。
  *   - `oldVersion > 7`：VersionError -> close cached handle ->
@@ -79,14 +79,14 @@ interface P2pkhDbBundle {
   close(): void;
   /** 用于 store 操作的 IDBDatabase。 */
   getDb(): IDBDatabase;
-  /** 关联的 publicKeyHash。 */
-  publicKeyHash: string;
+  /** 关联的 publicKeyHex。 */
+  publicKeyHex: string;
 }
 
 export type { P2pkhDbBundle };
 
 interface OpenHandle {
-  publicKeyHash: string;
+  publicKeyHex: string;
   close(): void;
   getDb(): IDBDatabase;
 }
@@ -147,10 +147,10 @@ function auditV7Stores(db: IDBDatabase): Record<string, boolean> {
  */
 export async function openP2pkhDb(input: {
   keyspace: KeyspaceService;
-  publicKeyHash: string;
+  publicKeyHex: string;
   logger?: PluginLogger;
 }): Promise<P2pkhDbBundle> {
-  if (openHandle && openHandle.publicKeyHash === input.publicKeyHash) {
+  if (openHandle && openHandle.publicKeyHex === input.publicKeyHex) {
     return openHandle as P2pkhDbBundle;
   }
   // 切换 namespace：关闭旧的。
@@ -159,7 +159,7 @@ export async function openP2pkhDb(input: {
   let handle: import("@keymaster/contracts").KeyScopedStorageHandle;
   try {
     handle = await input.keyspace.openKeyStorage({
-      publicKeyHash: input.publicKeyHash,
+      publicKeyHex: input.publicKeyHex,
       pluginId: "p2pkh",
       storageId: P2PKH_STORAGE_ID,
       version: P2PKH_DB_VERSION,
@@ -201,16 +201,16 @@ export async function openP2pkhDb(input: {
     // 早返回路径已让 openHandle 残留，这里也要先关掉，避免
     // deleteDatabase 被自己的连接阻塞）。
     closeCachedHandle();
-    const name = namespaceDbName(input.publicKeyHash);
+    const name = namespaceDbName(input.publicKeyHex);
     input.logger?.warn({
       scope: "p2pkh.db",
       event: "schema.versionMismatch",
       message: "P2PKH namespace db version higher than target; rebuilding",
-      data: { publicKeyHash: input.publicKeyHash, targetVersion: P2PKH_DB_VERSION, name }
+      data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION, name }
     });
     await deleteDatabaseOrThrow(name);
     handle = await input.keyspace.openKeyStorage({
-      publicKeyHash: input.publicKeyHash,
+      publicKeyHex: input.publicKeyHex,
       pluginId: "p2pkh",
       storageId: P2PKH_STORAGE_ID,
       version: P2PKH_DB_VERSION,
@@ -262,7 +262,7 @@ export async function openP2pkhDb(input: {
     });
   }
   const next: OpenHandle = {
-    publicKeyHash: input.publicKeyHash,
+    publicKeyHex: input.publicKeyHex,
     close: () => {
       try {
         handle.close();
@@ -313,11 +313,11 @@ function isVersionError(err: unknown): boolean {
  * 在这里——这把 key 的 p2pkh 数据物理上独立，不会和别的 plugin 共享。
  *
  * 导出是让单测可以直接断言这条命名约定：万一 keyspace 以后改了
- * `keymaster.key.<publicKeyHash>.plugin.<pluginId>.<storageId>` 这条
+ * `keymaster.key.<publicKeyHex>.plugin.<pluginId>.<storageId>` 这条
  * 规则，这里要跟着改并通过这条断言暴露。
  */
-export function namespaceDbName(publicKeyHash: string): string {
-  return `keymaster.key.${publicKeyHash}.plugin.p2pkh.state`;
+export function namespaceDbName(publicKeyHex: string): string {
+  return `keymaster.key.${publicKeyHex}.plugin.p2pkh.state`;
 }
 
 /**
@@ -366,21 +366,21 @@ function createV7Stores(db: IDBDatabase) {
   }
   if (!db.objectStoreNames.contains("p2pkh_addresses")) {
     const store = db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
-    // publicKeyHash 是诊断字段（key switch 时排错用），不再做唯一约束。
-    store.createIndex("publicKeyHash", "publicKeyHash", { unique: false });
+    // publicKeyHex 是诊断字段（key switch 时排错用），不再做唯一约束。
+    store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
     store.createIndex("network", "network", { unique: false });
     store.createIndex("address", "address", { unique: true });
   }
   if (!db.objectStoreNames.contains("p2pkh_utxos")) {
     const store = db.createObjectStore("p2pkh_utxos", { keyPath: "id" });
     store.createIndex("resourceId", "resourceId", { unique: false });
-    store.createIndex("publicKeyHash", "publicKeyHash", { unique: false });
+    store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
     store.createIndex("network", "network", { unique: false });
   }
   if (!db.objectStoreNames.contains("p2pkh_history")) {
     const store = db.createObjectStore("p2pkh_history", { keyPath: "id" });
     store.createIndex("resourceId", "resourceId", { unique: false });
-    store.createIndex("publicKeyHash", "publicKeyHash", { unique: false });
+    store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
     store.createIndex("network", "network", { unique: false });
   }
   if (!db.objectStoreNames.contains("p2pkh_history_backfill")) {
@@ -686,7 +686,7 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
               id,
               resourceId: commit.resourceId,
               keyId: currentAddress.keyId,
-              publicKeyHash: currentAddress.publicKeyHash,
+              publicKeyHex: currentAddress.publicKeyHex,
               network: currentAddress.network,
               address: currentAddress.address,
               txid: item.txid,
@@ -701,7 +701,7 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
               }
               if (prev.syncedAt) merged.syncedAt = prev.syncedAt;
               if (prev.source && prev.source !== "woc-confirmed") merged.source = prev.source;
-              if (prev.publicKeyHash) merged.publicKeyHash = prev.publicKeyHash;
+              if (prev.publicKeyHex) merged.publicKeyHex = prev.publicKeyHex;
               if (prev.network) merged.network = prev.network;
               if (prev.address) merged.address = prev.address;
             }
@@ -764,7 +764,7 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
                 id,
                 resourceId: commit.resourceId,
                 keyId: effectiveResource.keyId,
-                publicKeyHash: effectiveResource.publicKeyHash,
+                publicKeyHex: effectiveResource.publicKeyHex,
                 network: effectiveResource.network,
                 address: effectiveResource.address,
                 txid: h.txid,
@@ -813,7 +813,7 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
                 ...h,
                 id,
                 resourceId: commit.resourceId,
-                publicKeyHash: effectiveResource.publicKeyHash,
+                publicKeyHex: effectiveResource.publicKeyHex,
                 network: effectiveResource.network,
                 address: effectiveResource.address
               }));
@@ -880,7 +880,7 @@ export function localInputClaimIdFor(resourceId: string, txid: string, vout: num
  * 路径调用**——不在 unlock、rehydrate、手工同步、key.deleted、indexedDB
  * 升级钩子里触发。
  *
- * 历史设计：将全局 `p2pkh` v3 DB 的记录按 keyId 找对应 publicKeyHash，
+ * 历史设计：将全局 `p2pkh` v3 DB 的记录按 keyId 找对应 publicKeyHex，
  * 写入对应 namespace DB；迁移成功后删除旧 DB；失败时只丢弃旧缓存。
  *
  * 现在 P2PKH 的恢复路径是 `rehydrate + recent-sync + history-backfill`：
@@ -898,7 +898,7 @@ export interface LegacyMigrationSummary {
 
 export async function migrateLegacyP2pkhDb(input: {
   keyspace: KeyspaceService;
-  /** 把旧记录 keyId 映射到当前 active 的 publicKeyHash；找不到时跳过。 */
+  /** 把旧记录 keyId 映射到当前 active 的 publicKeyHex；找不到时跳过。 */
   resolvePublicKeyHash: (oldKeyId: string) => Promise<string | undefined>;
   onProgress?: (summary: LegacyMigrationSummary) => void;
 }): Promise<LegacyMigrationSummary> {
@@ -940,32 +940,32 @@ export async function migrateLegacyP2pkhDb(input: {
     for (const u of oldUtxos) bucket(u.keyId).utxos.push(u);
     for (const h of oldHistory) bucket(h.keyId).history.push(h);
     for (const [oldKeyId, group] of byKey) {
-      const publicKeyHash = await input.resolvePublicKeyHash(oldKeyId);
-      if (!publicKeyHash) {
+      const publicKeyHex = await input.resolvePublicKeyHash(oldKeyId);
+      if (!publicKeyHex) {
         summary.failed += group.resources.length;
         continue;
       }
       try {
         const handle = await input.keyspace.openKeyStorage({
-          publicKeyHash,
+          publicKeyHex,
           pluginId: "p2pkh",
           storageId: P2PKH_STORAGE_ID,
           version: P2PKH_DB_VERSION,
           upgrade: (db) => createV7Stores(db)
         });
         const target = createP2pkhDb({
-          publicKeyHash,
+          publicKeyHex,
           close: () => handle.close(),
           getDb: () => handle.db
         });
         for (const r of group.resources) {
-          await target.putAddress({ ...r, publicKeyHash });
+          await target.putAddress({ ...r, publicKeyHex });
         }
         for (const u of group.utxos) {
-          await target.putUtxos([{ ...u, publicKeyHash }]);
+          await target.putUtxos([{ ...u, publicKeyHex }]);
         }
         for (const h of group.history) {
-          await target.putHistory([{ ...h, publicKeyHash }]);
+          await target.putHistory([{ ...h, publicKeyHex }]);
         }
         handle.close();
         summary.migrated += group.resources.length;

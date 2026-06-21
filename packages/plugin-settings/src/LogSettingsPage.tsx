@@ -377,10 +377,10 @@ export function LogSettingsPage() {
                   </div>
                   <div className="log-entry__msg">{describeEntry(e)}</div>
                   {summary ? <div className="log-entry__summary">{summary}</div> : null}
-                  {e.keyScope?.publicKeyHash ? (
+                  {e.keyScope?.publicKeyHex ? (
                     <div className="log-entry__key">
                       <span className="muted">key</span>{" "}
-                      <code>{e.keyScope.publicKeyHash.slice(0, 16)}…</code>
+                      <code>{e.keyScope.publicKeyHex.slice(0, 16)}…</code>
                     </div>
                   ) : null}
                   <div className="log-entry__actions">

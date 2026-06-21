@@ -26,13 +26,13 @@ import type {
 } from "./p2pkhContracts.js";
 import { P2pkhOverviewPage } from "./pages/P2pkhOverviewPage.js";
 
-const PUBLIC_KEY_HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 function makeResource(): P2pkhKeyResource {
   return {
     resourceId: "p2pkh:main",
     keyId: "k1",
-    publicKeyHash: PUBLIC_KEY_HASH,
+    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     label: "test-key",
     address: "addr-main",
     network: "main",
@@ -139,7 +139,7 @@ function makeFakeService(): FakeService {
 }
 
 function makeFakeKeyspace(): KeyspaceService {
-  const active: ActiveKeyState = { activePublicKeyHash: PUBLIC_KEY_HASH };
+  const active: ActiveKeyState = { activePublicKeyHex: ACTIVE_PUBLIC_KEY_HEX };
   const listeners = new Set<(s: ActiveKeyState) => void>();
   return {
     listKeys: async () => [],
@@ -148,8 +148,7 @@ function makeFakeKeyspace(): KeyspaceService {
     setActive: async () => undefined,
     requireActiveKey: () => ({
       keyId: "k1",
-      publicKeyHex: "00",
-      publicKeyHash: PUBLIC_KEY_HASH,
+      publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       label: "test",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z",

@@ -5,7 +5,7 @@
 // 硬切换 008 收尾：catch listContacts 错误；无 key 时显示"请选择一个 key"，
 // 避免把"无 key"误显为"联系人已被删除"。
 //
-// 硬切换 005 收尾：删掉 "all 模式" 分支，仅以 activePublicKeyHash 缺失
+// 硬切换 005 收尾：删掉 "all 模式" 分支，仅以 activePublicKeyHex 缺失
 // 作为阻断条件。
 //
 // 硬切换 003：所有展示文案走 i18n。
@@ -30,7 +30,7 @@ export function ContactDetailPage() {
 
   useEffect(() => {
     let mounted = true;
-    if (!keyspace.active().activePublicKeyHash) {
+    if (!keyspace.active().activePublicKeyHex) {
       setContact(undefined);
       setNoActiveKey(true);
       return;

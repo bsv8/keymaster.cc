@@ -4,13 +4,13 @@
 // 关键设计：
 //   - 数据按 key namespace 隔离：contacts 存储在 key-scoped DB 内。
 //   - 所有读写（addContact / updateContact / removeContact / listContacts /
-//     findByAddress）都要求有 active publicKeyHash；缺失时抛
+//     findByAddress）都要求有 active publicKeyHex；缺失时抛
 //     ContactsNoActiveKeyError（保留错误类型以兼容旧 i18n / 调用方）。
-//   - 硬切换 005 收尾：删掉 all-mode 分支。activePublicKeyHash 缺失是
+//   - 硬切换 005 收尾：删掉 all-mode 分支。activePublicKeyHex 缺失是
 //     异常态，由壳层 AppShell 守卫（uninitialized / 修复/管理态），本
 //     service 只在收到具体的 active key 后才正常服务；旧的 `mode === "all"`
 //     分支不再存在。
-//   - UI 仍然做 keyspace guard：调用前检查 activePublicKeyHash 存在，
+//   - UI 仍然做 keyspace guard：调用前检查 activePublicKeyHex 存在，
 //     订阅 onActiveChange 清空本地缓存并重新拉取。
 //   - 切 active key 时发 onChange 通知 UI 重新拉。
 //   - key.deleting / key.deleted 事件不做事：namespace DB 由 keyspace 整体删。
@@ -49,15 +49,15 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
    * ContactsNoActiveKeyError。
    *
    * 硬切换 005 收尾：不再区分 single / all 模式——无 active key 唯一指
-   * "activePublicKeyHash 缺失"；壳层 AppShell 会拦截该情况，service 内部
+   * "activePublicKeyHex 缺失"；壳层 AppShell 会拦截该情况，service 内部
    * 仍 fail-closed 抛 ContactsNoActiveKeyError。
    */
   async function getDbForActiveKey(): Promise<ContactsDbHandle> {
     const state = deps.keyspace.active();
-    if (!state.activePublicKeyHash) {
+    if (!state.activePublicKeyHex) {
       throw new ContactsNoActiveKeyError();
     }
-    if (handle && handleFor === state.activePublicKeyHash) {
+    if (handle && handleFor === state.activePublicKeyHex) {
       return handle;
     }
     if (handle) {
@@ -71,16 +71,16 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     }
     const bundle = await openContactsDb({
       keyspace: deps.keyspace,
-      publicKeyHash: state.activePublicKeyHash
+      publicKeyHex: state.activePublicKeyHex
     });
     handle = createContactsDb(bundle);
-    handleFor = state.activePublicKeyHash;
+    handleFor = state.activePublicKeyHex;
     return handle;
   }
 
   // 监听 active key 变化：清空 handle + 通知监听者。
   deps.keyspace.onActiveChange((state) => {
-    if (handle && state.activePublicKeyHash === handleFor) {
+    if (handle && state.activePublicKeyHex === handleFor) {
       // 未切换
       return;
     }
@@ -103,14 +103,14 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       const existing = await db.findByAddress(input.address);
       if (existing) throw new ContactsDuplicateError(input.address);
       const now = new Date().toISOString();
-      const publicKeyHash = deps.keyspace.active().activePublicKeyHash;
+      const publicKeyHex = deps.keyspace.active().activePublicKeyHex;
       const contact: Contact = {
         id: crypto.randomUUID(),
         name: input.name,
         address: input.address,
         note: input.note,
         tags: input.tags ?? [],
-        publicKeyHash,
+        publicKeyHex,
         createdAt: now,
         updatedAt: now
       };
@@ -122,14 +122,14 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       const db = await getDbForActiveKey();
       const existing = await db.get(id);
       if (!existing) throw new Error(`Contact ${id} not found`);
-      const publicKeyHash = deps.keyspace.active().activePublicKeyHash;
+      const publicKeyHex = deps.keyspace.active().activePublicKeyHex;
       const updated: Contact = {
         ...existing,
         name: input.name,
         address: input.address,
         note: input.note,
         tags: input.tags ?? existing.tags,
-        publicKeyHash,
+        publicKeyHex,
         updatedAt: new Date().toISOString()
       };
       await db.put(updated);

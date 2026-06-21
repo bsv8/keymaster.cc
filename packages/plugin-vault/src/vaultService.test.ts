@@ -128,12 +128,12 @@ describe("VaultService.importPrivateKey", () => {
     // notifyKeyCreated 写入 activeRef。真实切换逻辑由集成测试覆盖，
     // 这里只验证 vaultService 的事件调用顺序。
     // unlock 流程会调用 setInitializing / onVaultUnlocked；提供 no-op 实现。
-    const activeRef: { activePublicKeyHash?: string } = {};
+    const activeRef: { activePublicKeyHex?: string } = {};
     const keyspaceFake = {
       active: () => activeRef,
-      notifyKeyCreated: async (id: { publicKeyHash: string }) => {
+      notifyKeyCreated: async (id: { publicKeyHex: string }) => {
         // 模拟真实 keyspace：切到新 key。
-        activeRef.activePublicKeyHash = id.publicKeyHash;
+        activeRef.activePublicKeyHex = id.publicKeyHex;
       },
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
@@ -155,7 +155,7 @@ describe("VaultService.importPrivateKey", () => {
     events.publish = (event: string, payload: unknown, _opts?: unknown) => {
       emittedActive.push({
         type: event,
-        activeHash: activeRef.activePublicKeyHash
+        activeHash: activeRef.activePublicKeyHex
       });
       return originalPublish(event, payload, _opts as never);
     };
@@ -178,11 +178,11 @@ describe("VaultService.importPrivateKey", () => {
     const createdPayload = records.find(
       (r) =>
         r.type === "key.created" &&
-        (r.payload as { publicKeyHash: string } | undefined)?.publicKeyHash ===
+        (r.payload as { publicKeyHex: string } | undefined)?.publicKeyHex ===
           createdSnapshot?.activeHash
-    )?.payload as { publicKeyHash: string } | undefined;
+    )?.payload as { publicKeyHex: string } | undefined;
     expect(createdPayload).toBeDefined();
-    expect(createdSnapshot?.activeHash).toBe(createdPayload?.publicKeyHash);
+    expect(createdSnapshot?.activeHash).toBe(createdPayload?.publicKeyHex);
   });
 });
 
@@ -629,11 +629,11 @@ describe("identity backfill failure passthrough (硬切换 008 收尾)", () => {
     const entry = fromKeyspace.find((k) => k.keyId === ref.id);
     expect(entry?.identityStatus).toBe("failed");
     expect(entry?.identityError).toBe("simulated decrypt failure");
-    // 设计允许 failed key 保留 publicKeyHash / publicKeyHex：
+    // 设计允许 failed key 保留 publicKeyHex / publicKeyHex：
     // vaultDb.putKeyIdentityFailed 不动 identity 字段，只标 status。
     // listActiveCandidates 会过滤掉 failed key，但 listKeys 仍能读到 hash
     // / hex 供 UI 展示。硬切换 003 收尾：fingerprint 已废弃，不再断言。
-    expect(entry?.publicKeyHash).toBe(ref.publicKeyHash);
+    expect(entry?.publicKeyHex).toBe(ref.publicKeyHex);
     expect(entry?.publicKeyHex).toBe(ref.publicKeyHex);
   });
 });
@@ -838,7 +838,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     expect(ref.capabilities).toEqual(["p2pkh"]);
     expect(ref.label).toBe("first-generated");
     expect(ref.publicKeyHex).toBeDefined();
-    expect(ref.publicKeyHash).toBeDefined();
+    expect(ref.publicKeyHex).toBeDefined();
     // 关键：返回对象中不能有 material / hex / wif。
     const refRecord = ref as unknown as Record<string, unknown>;
     expect(refRecord.material).toBeUndefined();
@@ -846,23 +846,23 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     expect(refRecord.wif).toBeUndefined();
     // key.created payload 也只暴露公开身份。
     const createdPayload = records.find((r) => r.type === "key.created")?.payload as
-      | { publicKeyHash: string; keyId: string; label: string }
+      | { publicKeyHex: string; keyId: string; label: string }
       | undefined;
     expect(createdPayload?.keyId).toBe(ref.id);
-    expect(createdPayload?.publicKeyHash).toBe(ref.publicKeyHash);
+    expect(createdPayload?.publicKeyHex).toBe(ref.publicKeyHex);
     const payloadRecord = createdPayload as unknown as Record<string, unknown>;
     expect(payloadRecord.material).toBeUndefined();
     expect(payloadRecord.hex).toBeUndefined();
   });
 
-  it("two consecutive generateKey calls produce different publicKeyHash", async () => {
+  it("two consecutive generateKey calls produce different publicKeyHex", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const a = await vault.generateKey({ label: "k1" });
     const b = await vault.generateKey({ label: "k2" });
-    expect(a.publicKeyHash).not.toBe(b.publicKeyHash);
+    expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
     expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
   });
 
@@ -1019,7 +1019,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
       capabilities: ["p2pkh"]
     });
     expect(keyspace.active()).toEqual({
-      activePublicKeyHash: first.publicKeyHash
+      activePublicKeyHex: first.publicKeyHex
     });
 
     // 第二把 key：必须切到 second。
@@ -1030,7 +1030,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
       capabilities: ["p2pkh"]
     });
     expect(keyspace.active()).toEqual({
-      activePublicKeyHash: second.publicKeyHash
+      activePublicKeyHex: second.publicKeyHex
     });
 
     // key.created 事件按时间顺序：第一把发布时 active 应是第一把，
@@ -1042,16 +1042,16 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
       .filter(
         (r) =>
           r.type === "key.created" &&
-          ((r.payload as { publicKeyHash: string } | undefined)?.publicKeyHash === first.publicKeyHash ||
-            (r.payload as { publicKeyHash: string } | undefined)?.publicKeyHash === second.publicKeyHash)
+          ((r.payload as { publicKeyHex: string } | undefined)?.publicKeyHex === first.publicKeyHex ||
+            (r.payload as { publicKeyHex: string } | undefined)?.publicKeyHex === second.publicKeyHex)
       );
     expect(createdEvents).toHaveLength(2);
-    const firstEvent = createdEvents[0]?.payload as { publicKeyHash: string };
-    const secondEvent = createdEvents[1]?.payload as { publicKeyHash: string };
-    expect(firstEvent.publicKeyHash).toBe(first.publicKeyHash);
-    expect(secondEvent.publicKeyHash).toBe(second.publicKeyHash);
+    const firstEvent = createdEvents[0]?.payload as { publicKeyHex: string };
+    const secondEvent = createdEvents[1]?.payload as { publicKeyHex: string };
+    expect(firstEvent.publicKeyHex).toBe(first.publicKeyHex);
+    expect(secondEvent.publicKeyHex).toBe(second.publicKeyHex);
     // emit 顺序与 vault 调用顺序一致。
-    expect(secondEvent.publicKeyHash).not.toBe(firstEvent.publicKeyHash);
+    expect(secondEvent.publicKeyHex).not.toBe(firstEvent.publicKeyHex);
   });
 
   it("switches active for generateKey too (real keyspace)", async () => {
@@ -1072,16 +1072,16 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     await vault.unlock("test-pw");
 
     const first = await vault.generateKey({ label: "g1" });
-    expect(keyspace.active().activePublicKeyHash).toBe(first.publicKeyHash);
+    expect(keyspace.active().activePublicKeyHex).toBe(first.publicKeyHex);
     const second = await vault.generateKey({ label: "g2" });
-    expect(keyspace.active().activePublicKeyHash).toBe(second.publicKeyHash);
+    expect(keyspace.active().activePublicKeyHex).toBe(second.publicKeyHex);
   });
 
   it("throws KeyPersistedButActivationFailedError when keyspace.notifyKeyCreated throws", async () => {
     // 设计缘由：当 keyspace 通知失败时，vault 不应让 UI 误以为"完全失败"。
     // DB 里已经落库，active 没切。验证：
     //   1) 抛出的是 KeyPersistedButActivationFailedError；
-    //   2) error 携带完整公开 KeyRef（`err.key`），含真实 id / publicKeyHash / label；
+    //   2) error 携带完整公开 KeyRef（`err.key`），含真实 id / publicKeyHex / label；
     //   3) DB 里 key 存在（已持久化）；
     //   4) key.created 事件**不**被发布（避免与 active 状态不一致）；
     //   5) 真实 key.id 可以走 exportPrivateKey 拿到 envelope（防止再次
@@ -1115,16 +1115,16 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     // 1) 抛出的错误是专用类型。
     expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
     const wrapped = thrown as KeyPersistedButActivationFailedError;
-    // 2) 错误携带完整公开 KeyRef——必须有真实 id / publicKeyHash / label。
+    // 2) 错误携带完整公开 KeyRef——必须有真实 id / publicKeyHex / label。
     expect(wrapped.key).toBeDefined();
     expect(wrapped.key.id).toBeTruthy();
-    expect(wrapped.key.publicKeyHash).toBeDefined();
+    expect(wrapped.key.publicKeyHex).toBeDefined();
     expect(wrapped.key.label).toBe("explode");
     expect(wrapped.key.publicKeyHex).toBeDefined();
     // 3) DB 里 key 已存在。
     const stored = await vaultDb.getKey(wrapped.key.id);
     expect(stored).toBeDefined();
-    expect(stored?.publicKeyHash).toBe(wrapped.key.publicKeyHash);
+    expect(stored?.publicKeyHex).toBe(wrapped.key.publicKeyHex);
     // 4) key.created 事件**不**被发布（active 切换失败）。
     expect(records.some((r) => r.type === "key.created")).toBe(false);
     // 5) 真实 key.id 可以走 exportPrivateKey：防止再次出现"错误携带空
@@ -1180,7 +1180,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(ref.source).toBe("vault-generated");
     expect(ref.capabilities).toEqual(["p2pkh"]);
     expect(ref.publicKeyHex).toBeDefined();
-    expect(ref.publicKeyHash).toBeDefined();
+    expect(ref.publicKeyHex).toBeDefined();
     // Vault 状态：unlocked。
     expect(vault.status()).toBe("unlocked");
     // listKeys 看到 1 把。
@@ -1189,7 +1189,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(list[0]?.id).toBe(ref.id);
     // keyspace 已切到这把 key。
     expect(keyspace.active()).toEqual({
-      activePublicKeyHash: ref.publicKeyHash
+      activePublicKeyHex: ref.publicKeyHex
     });
   });
 
@@ -1295,11 +1295,11 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
     const wrapped = thrown as KeyPersistedButActivationFailedError;
     expect(wrapped.key.id).toBeTruthy();
-    expect(wrapped.key.publicKeyHash).toBeDefined();
+    expect(wrapped.key.publicKeyHex).toBeDefined();
     // 首 Key 仍在 DB 中——通过 vaultDb 直接查证。
     const stored = await vaultDb.getKey(wrapped.key.id);
     expect(stored).toBeDefined();
-    expect(stored?.publicKeyHash).toBe(wrapped.key.publicKeyHash);
+    expect(stored?.publicKeyHex).toBe(wrapped.key.publicKeyHex);
     // meta 仍在（不要误回滚）。
     const meta = await vaultDb.getMeta();
     expect(meta).toBeDefined();
@@ -1459,7 +1459,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     const notice = vault.getInitialActivationNotice();
     expect(notice).not.toBeNull();
     expect(notice?.keyId).toBeTruthy();
-    expect(notice?.publicKeyHash).toBeDefined();
+    expect(notice?.publicKeyHex).toBeDefined();
     expect(notice?.label).toBeTruthy();
     // 状态已切到 unlocked（用户能进主界面手动切 active）。
     expect(vault.status()).toBe("unlocked");
@@ -1557,7 +1557,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
   });
 
   it("notice is auto-cleared when active key changes to the notice key", async () => {
-    // 设计缘由：用户手动 setActive(publicKeyHash) 把 notice 那把 key
+    // 设计缘由：用户手动 setActive(publicKeyHex) 把 notice 那把 key
     // 切为 active 时，vault 内部监听 EVENT_ACTIVE_KEY_CHANGED 并自动
     // 清掉 notice——用户不需要再手动 dismiss。
     //
@@ -1590,10 +1590,10 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
     const notice = vault.getInitialActivationNotice();
     expect(notice).not.toBeNull();
-    expect(notice?.publicKeyHash).toBeDefined();
+    expect(notice?.publicKeyHex).toBeDefined();
     // 模拟 keyspace 切 active 后发出 activeKey.changed 事件。
     events.publish("activeKey.changed", {
-      activePublicKeyHash: notice!.publicKeyHash
+      activePublicKeyHex: notice!.publicKeyHex
     });
     // 关键：notice 必须被清掉。
     expect(vault.getInitialActivationNotice()).toBeNull();
@@ -1662,7 +1662,7 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     expect(list[0]?.id).toBe(ref.id);
     // 3) keyspace 已切到这把 key。
     expect(keyspace.active()).toEqual({
-      activePublicKeyHash: ref.publicKeyHash
+      activePublicKeyHex: ref.publicKeyHex
     });
     // 4) 标签和 source 都按调用方传入落地。
     expect(ref.label).toBe("imported-first");
@@ -1787,7 +1787,7 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     expect(thrown).toBeInstanceOf(KeyPersistedButActivationFailedError);
     const wrapped = thrown as KeyPersistedButActivationFailedError;
     expect(wrapped.key.id).toBeTruthy();
-    expect(wrapped.key.publicKeyHash).toBeDefined();
+    expect(wrapped.key.publicKeyHex).toBeDefined();
     // 首 Key 仍在 DB 中。
     const stored = await vaultDb.getKey(wrapped.key.id);
     expect(stored).toBeDefined();

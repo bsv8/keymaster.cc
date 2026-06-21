@@ -12,14 +12,14 @@ import { createP2pkhDb, disposeP2pkhDb, namespaceDbName, openP2pkhDb, type P2pkh
 import type { P2pkhKeyResource } from "./p2pkhContracts.js";
 import type { KeyScopedStorageHandle, KeyspaceService } from "@keymaster/contracts";
 
-const PUBLIC_KEY_HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const DB_NAME = `keymaster.key.${PUBLIC_KEY_HASH}.plugin.p2pkh.state`;
+const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 
 function makeResource(generation = 0): P2pkhKeyResource {
   return {
     resourceId: "key1:main",
     keyId: "key1",
-    publicKeyHash: PUBLIC_KEY_HASH,
+    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     label: "test",
     address: "addr-main",
     network: "main",
@@ -28,16 +28,15 @@ function makeResource(generation = 0): P2pkhKeyResource {
   };
 }
 
-function makeKeyspace(publicKeyHash: string): KeyspaceService {
+function makeKeyspace(publicKeyHex: string): KeyspaceService {
   return {
     listKeys: async () => [],
     getKey: async () => undefined,
-    active: () => ({ activePublicKeyHash: publicKeyHash }),
+    active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
       keyId: "key1",
-      publicKeyHex: "00",
-      publicKeyHash,
+
       label: "test",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -45,10 +44,10 @@ function makeKeyspace(publicKeyHash: string): KeyspaceService {
     }),
     onActiveChange: () => () => undefined,
     openKeyStorage: async (input) => {
-      if (input.publicKeyHash !== publicKeyHash) {
+      if (input.publicKeyHex !== publicKeyHex) {
         throw new Error("Key storage is not ready");
       }
-      const name = `keymaster.key.${input.publicKeyHash}.plugin.${input.pluginId}.${input.storageId}`;
+      const name = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const r = indexedDB.open(name, input.version);
         r.onupgradeneeded = () => {
@@ -82,15 +81,15 @@ function makeKeyspace(publicKeyHash: string): KeyspaceService {
  * 默认 fake 总是把 oldVersion 传成 0，无法覆盖 v6 -> v7 / v8 -> v7 路径；
  * 本 fake 透传浏览器自身的 oldVersion / VersionError，验证 rebuild 分支。
  */
-function makeRealKeyspace(publicKeyHash: string): KeyspaceService {
-  const base = makeKeyspace(publicKeyHash);
+function makeRealKeyspace(publicKeyHex: string): KeyspaceService {
+  const base = makeKeyspace(publicKeyHex);
   return {
     ...base,
     openKeyStorage: async (input) => {
-      if (input.publicKeyHash !== publicKeyHash) {
+      if (input.publicKeyHex !== publicKeyHex) {
         throw new Error("Key storage is not ready");
       }
-      const name = `keymaster.key.${input.publicKeyHash}.plugin.${input.pluginId}.${input.storageId}`;
+      const name = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const r = indexedDB.open(name, input.version);
         r.onupgradeneeded = (event) => {
@@ -157,8 +156,8 @@ let bundle: P2pkhDbHandle | undefined;
 
 async function openDb(): Promise<P2pkhDbHandle> {
   if (bundle) return bundle;
-  const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
-  const nsHandle = await openP2pkhDb({ keyspace, publicKeyHash: PUBLIC_KEY_HASH });
+  const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
+  const nsHandle = await openP2pkhDb({ keyspace, publicKeyHex: ACTIVE_PUBLIC_KEY_HEX });
   bundle = createP2pkhDb(nsHandle);
   return bundle;
 }
@@ -218,10 +217,10 @@ describe("p2pkhDb v7 stores", () => {
 describe("p2pkhDb namespaceDbName (硬切换 005 name source)", () => {
   it("uses the keyspace contract naming convention: keymaster.key.<hash>.plugin.p2pkh.state", () => {
     // 硬切换 005：VersionError 分支由 plugin-p2pkh 自己按这条命名约定
-    // 拼出 name。如果 keyspace 改了 `keymaster.key.<publicKeyHash>.plugin.
+    // 拼出 name。如果 keyspace 改了 `keymaster.key.<publicKeyHex>.plugin.
     // <pluginId>.<storageId>` 这条规则，这里要直接红，避免 VersionError
     // 路径里悄悄删错库。
-    expect(namespaceDbName(PUBLIC_KEY_HASH)).toBe(DB_NAME);
+    expect(namespaceDbName(ACTIVE_PUBLIC_KEY_HEX)).toBe(DB_NAME);
     expect(namespaceDbName("a".repeat(64))).toBe(
       `keymaster.key.${"a".repeat(64)}.plugin.p2pkh.state`
     );
@@ -246,7 +245,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       t.objectStore("p2pkh_addresses").put({
         resourceId: "stale:row",
         keyId: "stale",
-        publicKeyHash: PUBLIC_KEY_HASH,
+        publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
         label: "stale",
         address: "stale-addr",
         network: "main",
@@ -259,8 +258,8 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     closeDbQuietly(seeded);
 
     // 走真 IDBVersionChangeEvent 语义的 keyspace 调用 openP2pkhDb。
-    const keyspace = makeRealKeyspace(PUBLIC_KEY_HASH);
-    const nsHandle = await openP2pkhDb({ keyspace, publicKeyHash: PUBLIC_KEY_HASH });
+    const keyspace = makeRealKeyspace(ACTIVE_PUBLIC_KEY_HEX);
+    const nsHandle = await openP2pkhDb({ keyspace, publicKeyHex: ACTIVE_PUBLIC_KEY_HEX });
 
     // 验证：DB 已经是 v7；旧 stores / 旧记录不能残留。
     const raw = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -300,8 +299,8 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     ]);
     closeDbQuietly(seeded);
 
-    const keyspace = makeRealKeyspace(PUBLIC_KEY_HASH);
-    const nsHandle = await openP2pkhDb({ keyspace, publicKeyHash: PUBLIC_KEY_HASH });
+    const keyspace = makeRealKeyspace(ACTIVE_PUBLIC_KEY_HEX);
+    const nsHandle = await openP2pkhDb({ keyspace, publicKeyHex: ACTIVE_PUBLIC_KEY_HEX });
 
     const raw = await new Promise<IDBDatabase>((resolve, reject) => {
       const r = indexedDB.open(DB_NAME);
@@ -331,8 +330,8 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     ]);
     closeDbQuietly(seeded);
 
-    const keyspace = makeRealKeyspace(PUBLIC_KEY_HASH);
-    const nsHandle = await openP2pkhDb({ keyspace, publicKeyHash: PUBLIC_KEY_HASH });
+    const keyspace = makeRealKeyspace(ACTIVE_PUBLIC_KEY_HEX);
+    const nsHandle = await openP2pkhDb({ keyspace, publicKeyHex: ACTIVE_PUBLIC_KEY_HEX });
 
     const raw = await new Promise<IDBDatabase>((resolve, reject) => {
       const r = indexedDB.open(DB_NAME);
@@ -365,13 +364,13 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     // 硬切换 005：openP2pkhDb 只在 VersionError 上触发 deleteDatabase ->
     // reopen；其它错误必须原样冒泡，不假装 rebuild。
     const failingKeyspace: KeyspaceService = {
-      ...makeRealKeyspace(PUBLIC_KEY_HASH),
+      ...makeRealKeyspace(ACTIVE_PUBLIC_KEY_HEX),
       openKeyStorage: async () => {
         throw new Error("synthetic open failure");
       }
     };
     await expect(
-      openP2pkhDb({ keyspace: failingKeyspace, publicKeyHash: PUBLIC_KEY_HASH })
+      openP2pkhDb({ keyspace: failingKeyspace, publicKeyHex: ACTIVE_PUBLIC_KEY_HEX })
     ).rejects.toThrow("synthetic open failure");
   });
 });
@@ -467,7 +466,7 @@ describe("p2pkhDb commitRecentSnapshot", () => {
           id: `${r.resourceId}:t1:0`,
           resourceId: r.resourceId,
           keyId: r.keyId,
-          publicKeyHash: r.publicKeyHash,
+          publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
           txid: "t1",
@@ -509,7 +508,7 @@ describe("p2pkhDb commitRecentSnapshot", () => {
           id: `${r.resourceId}:t-conf`,
           resourceId: r.resourceId,
           keyId: r.keyId,
-          publicKeyHash: r.publicKeyHash,
+          publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
           txid: "t-conf",
@@ -553,7 +552,7 @@ describe("p2pkhDb commitRecentSnapshot", () => {
           id: `${r.resourceId}:t1:0`,
           resourceId: r.resourceId,
           keyId: r.keyId,
-          publicKeyHash: r.publicKeyHash,
+          publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
           txid: "t1",
@@ -568,7 +567,7 @@ describe("p2pkhDb commitRecentSnapshot", () => {
           id: `${r.resourceId}:t2:0`,
           resourceId: r.resourceId,
           keyId: r.keyId,
-          publicKeyHash: r.publicKeyHash,
+          publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
           txid: "t2",
@@ -590,7 +589,7 @@ describe("p2pkhDb commitRecentSnapshot", () => {
           id: `${r.resourceId}:t1:0`,
           resourceId: r.resourceId,
           keyId: r.keyId,
-          publicKeyHash: r.publicKeyHash,
+          publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
           txid: "t1",

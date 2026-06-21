@@ -57,6 +57,20 @@ export function deriveP2pkhAddress(privateKeyHex: string, network: "main" | "tes
   };
 }
 
+/**
+ * 计算链上 P2PKH 锁脚本所需的 HASH160(compressed public key),即
+ * `ripemd160(sha256(pub))`,20 字节 hex。
+ *
+ * 硬切换 001 收口：这是 P2PKH 链上脚本材料,不是平台 namespace id。
+ * 命名带 `160` 显式与平台 `publicKeyHex` 区分；不允许再叫
+ * `publicKeyHash`。
+ */
+export function pubKeyHash160Hex(publicKeyHex: string): string {
+  const pub = hexToBytes(publicKeyHex);
+  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
+  return bytesToHex(ripemd160(sha256(pub)));
+}
+
 /** 构造未签名 P2PKH 交易。 */
 export function buildP2pkhTx(params: {
   allocation: UtxoAllocation;

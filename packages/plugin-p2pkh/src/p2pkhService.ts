@@ -9,7 +9,7 @@
 //   - key 导入后创建资源并触发 recent + backfill。
 //   - key.deleting 时取消资源通道；删除由 keyspace.deleteKey 统一调度。
 //   - 硬切换 005：active key 不再有 `mode: "all"` 状态。本 service 所有
-//     守护检查只看 `activePublicKeyHash` 是否存在。
+//     守护检查只看 `activePublicKeyHex` 是否存在。
 
 import type {
   BackgroundRegistry,
@@ -112,7 +112,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   let currentPublicKeyHash: string | undefined;
   let activeKeyId: string | undefined;
   // 硬切换 008 收尾 + 硬切换 003 收尾：activeIdentity 是 ReadyKeyIdentity，
-  // publicKeyHash / publicKeyHex 必填。rebind 时通过 requireReadyKey 断言；
+  // publicKeyHex / publicKeyHex 必填。rebind 时通过 requireReadyKey 断言；
   // 写入 P2pkhKeyResource 时不需要再 `!`。短公钥不再作为字段持有，UI
   // 需要展示时由 `formatShortPublicKey(publicKeyHex)` 现算。
   let activeIdentity: ReadyKeyIdentity | undefined;
@@ -156,13 +156,13 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     logger: deps.logger,
     getActiveKey: () => {
       const state = getActiveKeyState();
-      if (!state.activePublicKeyHash) {
+      if (!state.activePublicKeyHex) {
         throw new Error("Active key is required");
       }
       if (!activeIdentity) {
         throw new Error("Active key is not ready");
       }
-      if (activeIdentity.publicKeyHash !== state.activePublicKeyHash) {
+      if (activeIdentity.publicKeyHex !== state.activePublicKeyHex) {
         throw new Error("Active key is not ready");
       }
       return activeIdentity;
@@ -207,7 +207,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "settings.testnet.enabled.crossTab",
           message: "P2PKH includeTestnet enabled in another tab; rehydrating testnet resources",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
         });
         void rehydrateResources()
           .catch((err) => {
@@ -224,7 +224,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "settings.testnet.disabled.crossTab",
           message: "P2PKH includeTestnet disabled in another tab; triggering recent-sync refresh",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
         });
         deps.backgroundService.trigger(P2PKH_TASK_RECENT, "settings.testnet.disabled");
       }
@@ -299,10 +299,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   function requireActiveKeyIdentity(): ReadyKeyIdentity {
     const state = getActiveKeyState();
-    if (!state.activePublicKeyHash) {
+    if (!state.activePublicKeyHex) {
       throw new Error("Active key is required");
     }
-    if (!activeIdentity || activeIdentity.publicKeyHash !== state.activePublicKeyHash) {
+    if (!activeIdentity || activeIdentity.publicKeyHex !== state.activePublicKeyHex) {
       // 占位 identity：转账流程会在 vault.withPrivateKey 时拿到真实 keyId。
       // 这里不抛错；调用方在签名时必须通过 vault 拿到真实 key。
       throw new Error("Active key is not ready");
@@ -322,10 +322,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    */
   async function ensureDb(): Promise<P2pkhDbHandle> {
     const state = getActiveKeyState();
-    if (!state.activePublicKeyHash) {
+    if (!state.activePublicKeyHex) {
       throw new Error("Key storage is not ready");
     }
-    if (p2pkhDbHandle && currentPublicKeyHash === state.activePublicKeyHash) {
+    if (p2pkhDbHandle && currentPublicKeyHash === state.activePublicKeyHex) {
       // 硬切换 003 收尾：缓存命中也必须留痕，否则日志上看不出"为什么
       // 这次没有任何 db.opening/db.opened"。
       deps.logger?.info({
@@ -333,7 +333,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         event: "db.reused",
         message: "P2PKH reusing cached namespace db handle",
         data: {
-          publicKeyHash: state.activePublicKeyHash,
+          publicKeyHex: state.activePublicKeyHex,
           targetVersion: P2PKH_DB_VERSION
         }
       });
@@ -351,24 +351,24 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       event: "db.opening",
       message: "P2PKH opening namespace db for active key",
       data: {
-        publicKeyHash: state.activePublicKeyHash,
+        publicKeyHex: state.activePublicKeyHex,
         targetVersion: P2PKH_DB_VERSION
       }
     });
     try {
       const bundle: P2pkhDbBundle = await openP2pkhDb({
         keyspace: deps.keyspace,
-        publicKeyHash: state.activePublicKeyHash,
+        publicKeyHex: state.activePublicKeyHex,
         logger: deps.logger
       });
       p2pkhDbHandle = createP2pkhDb(bundle);
-      currentPublicKeyHash = state.activePublicKeyHash;
+      currentPublicKeyHash = state.activePublicKeyHex;
       deps.logger?.info({
         scope: "p2pkh.service",
         event: "db.opened",
         message: "P2PKH namespace db ready",
         data: {
-          publicKeyHash: state.activePublicKeyHash,
+          publicKeyHex: state.activePublicKeyHex,
           targetVersion: P2PKH_DB_VERSION
         }
       });
@@ -379,7 +379,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         scope: "p2pkh.service",
         event: "db.openFailed",
         message: "P2PKH failed to open namespace db",
-        data: { publicKeyHash: state.activePublicKeyHash },
+        data: { publicKeyHex: state.activePublicKeyHex },
         error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
       });
       throw err;
@@ -388,20 +388,20 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   /** 切换 active key 后的 hook：重建 identity 缓存与 db handle。
    * 设计缘由：硬切换 008 收尾 + 硬切换 003 收尾——通过 requireReadyKey
-   * 把 KeyIdentity 收窄成 ReadyKeyIdentity，publicKeyHash / publicKeyHex
+   * 把 KeyIdentity 收窄成 ReadyKeyIdentity，publicKeyHex / publicKeyHex
    * 必填；写入 P2pkhKeyResource 等位置时不再需要 `!`。短公钥不再是
    * contract 字段，UI 需要时由 `formatShortPublicKey(publicKeyHex)` 现算。
    */
   async function rebindActiveKey() {
     const state = getActiveKeyState();
-    if (!state.activePublicKeyHash) {
+    if (!state.activePublicKeyHex) {
       activeKeyId = undefined;
       activeIdentity = undefined;
       p2pkhDbHandle = null;
       currentPublicKeyHash = undefined;
       return;
     }
-    const identity = await deps.keyspace.getKey(state.activePublicKeyHash);
+    const identity = await deps.keyspace.getKey(state.activePublicKeyHex);
     if (!identity) {
       throw new Error("Active key identity not found");
     }
@@ -435,7 +435,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           event: "activeKey.changed",
           message: "P2PKH active key changed; rebinding and rehydrating",
           data: {
-            publicKeyHash: state.activePublicKeyHash ?? null,
+            publicKeyHex: state.activePublicKeyHex ?? null,
             label: activeIdentity?.label ?? null
           }
         });
@@ -448,7 +448,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "activeKey.changeFailed",
           message: "P2PKH onActiveChange handler failed",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null },
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
           error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
         });
       }
@@ -457,21 +457,21 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   // 硬切换 008：实际取消由 keyspace.deleteKey -> background.cancelByKey
   // 统一驱动；本 handler 只做日志/保险，不再调用 cancel。
-  trackSubscribe<{ publicKeyHash: string }>("key.deleting", (payload) => {
+  trackSubscribe<{ publicKeyHex: string }>("key.deleting", (payload) => {
     // 设计缘由：active key 切换不影响本 key 任务的收尾；只有当被删的 key
     // 是 active 时我们才需要清理本地的协调器 lane 与 db handle 缓存。
     // background 已经收到 cancelByKey 并在 await 旧实例退出；本服务接下来
     // 收到的 key.deleted 事件再彻底清掉本地资源。
     void payload;
   });
-  trackSubscribe<{ publicKeyHash: string }>("key.deleted", async (payload) => {
+  trackSubscribe<{ publicKeyHex: string }>("key.deleted", async (payload) => {
     try {
       const resources = await listAllResources().catch(() => []);
       for (const r of resources) coordinator.removeResource(r.resourceId);
     } catch (err) {
       console.error("P2PKH key.deleted handler failed", err);
     }
-    if (currentPublicKeyHash === payload.publicKeyHash) {
+    if (currentPublicKeyHash === payload.publicKeyHex) {
       disposeP2pkhDb();
       p2pkhDbHandle = null;
       currentPublicKeyHash = undefined;
@@ -491,7 +491,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           resourceId,
           network,
           keyId: existing.keyId,
-          publicKeyHash: existing.publicKeyHash,
+          publicKeyHex: existing.publicKeyHex,
           address: existing.address,
           created: false
         }
@@ -504,7 +504,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const resource: P2pkhKeyResource = {
         resourceId,
         keyId: key.keyId,
-        publicKeyHash: key.publicKeyHash,
+        publicKeyHex: key.publicKeyHex,
         label: key.label,
         address,
         network,
@@ -515,10 +515,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       await db.putAddress(resource);
       deps.messageBus.publish(P2PKH_MSG.ADDRESS_DERIVED, {
         keyId: key.keyId,
-        publicKeyHash: key.publicKeyHash,
+        publicKeyHex: key.publicKeyHex,
         network,
         address,
-        publicKeyHex,
         generation: 0
       });
       deps.logger?.info({
@@ -529,7 +528,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           resourceId,
           network,
           keyId: key.keyId,
-          publicKeyHash: key.publicKeyHash,
+          publicKeyHex: key.publicKeyHex,
           address,
           created: true
         }
@@ -551,17 +550,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    */
   function p2pkhTaskKeyScope() {
     const state = getActiveKeyState();
-    if (!state.activePublicKeyHash) {
+    if (!state.activePublicKeyHex) {
       return undefined;
     }
     const id = activeIdentity;
-    if (!id || id.publicKeyHash !== state.activePublicKeyHash) {
-      return { publicKeyHash: state.activePublicKeyHash };
+    if (!id || id.publicKeyHex !== state.activePublicKeyHex) {
+      return { publicKeyHex: state.activePublicKeyHex };
     }
     return {
-      publicKeyHash: state.activePublicKeyHash,
-      label: id.label,
-      publicKeyHex: id.publicKeyHex
+      publicKeyHex: state.activePublicKeyHex,
+      label: id.label
     };
   }
 
@@ -582,7 +580,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     canRun: () =>
       deps.vault.status() === "unlocked" &&
       !deps.keyspace.isInitializing() &&
-      Boolean(getActiveKeyState().activePublicKeyHash),
+      Boolean(getActiveKeyState().activePublicKeyHex),
     async run(ctx) {
       setRecentStatus("syncing");
       try {
@@ -608,7 +606,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       deps.vault.status() === "unlocked" &&
       !backfillPaused &&
       !deps.keyspace.isInitializing() &&
-      Boolean(getActiveKeyState().activePublicKeyHash),
+      Boolean(getActiveKeyState().activePublicKeyHex),
     async run(ctx) {
       setBackfillStatus("syncing");
       try {
@@ -659,7 +657,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       scope: "p2pkh.service",
       event: "vault.unlocked",
       message: "P2PKH reacting to vault unlocked; rebinding and rehydrating",
-      data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+      data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
     });
     try {
       await rebindActiveKey();
@@ -675,7 +673,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         scope: "p2pkh.service",
         event: "vault.unlocked.rehydrateFailed",
         message: "P2PKH vault unlocked rehydrate failed",
-        data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null },
+        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
         error: { name: err instanceof Error ? err.name : "Error", message: msg }
       });
     }
@@ -702,7 +700,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   async function rehydrateResources(): Promise<void> {
     if (deps.vault.status() !== "unlocked") return;
     const state = getActiveKeyState();
-    if (!state.activePublicKeyHash) return;
+    if (!state.activePublicKeyHex) return;
     if (!activeIdentity) return;
     const includeTestnet = getCurrentSettings().includeTestnet;
     const targetNetworks: Array<"main" | "test"> = includeTestnet ? ["main", "test"] : ["main"];
@@ -711,7 +709,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       event: "rehydrate.started",
       message: "P2PKH rehydrate started for active key",
       data: {
-        publicKeyHash: state.activePublicKeyHash,
+        publicKeyHex: state.activePublicKeyHex,
         keyId: activeIdentity.keyId,
         includeTestnet,
         targetNetworks
@@ -751,7 +749,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         event: "rehydrate.failed",
         message: "P2PKH rehydrate failed",
         data: {
-          publicKeyHash: state.activePublicKeyHash,
+          publicKeyHex: state.activePublicKeyHex,
           keyId: activeIdentity.keyId,
           includeTestnet
         },
@@ -764,7 +762,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       event: "rehydrate.completed",
       message: "P2PKH rehydrate completed",
       data: {
-        publicKeyHash: state.activePublicKeyHash,
+        publicKeyHex: state.activePublicKeyHex,
         keyId: activeIdentity.keyId,
         includeTestnet,
         existingResources,
@@ -814,7 +812,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         scope: "p2pkh.service",
         event: "manual.recentSync.requested",
         message: "Manual recent-sync requested",
-        data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
       });
       try {
         await rebindActiveKey();
@@ -826,7 +824,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "manual.recentSync.rehydrateFailed",
           message: "Manual recent-sync rehydrate failed; will still trigger background task",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null },
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
           error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
         });
       }
@@ -840,7 +838,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         event: "manual.backfill.requested",
         message: "Manual history-backfill requested",
         data: {
-          publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null,
+          publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null,
           resourceId: resourceId ?? null
         }
       });
@@ -852,7 +850,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "manual.backfill.rehydrateFailed",
           message: "Manual history-backfill rehydrate failed; will still trigger background task",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null, resourceId: resourceId ?? null },
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null, resourceId: resourceId ?? null },
           error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
         });
       }
@@ -885,9 +883,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       let total = 0;
       for (const u of all) {
         if (u.network !== network) continue;
-        // ensureDb 已在 state.activePublicKeyHash 缺失时抛错；此处继续按
-        // activePublicKeyHash 过滤以防 db 里残留旧 key 的 UTXO 被计入。
-        if (u.publicKeyHash !== state.activePublicKeyHash) continue;
+        // ensureDb 已在 state.activePublicKeyHex 缺失时抛错；此处继续按
+        // activePublicKeyHex 过滤以防 db 里残留旧 key 的 UTXO 被计入。
+        if (u.publicKeyHex !== state.activePublicKeyHex) continue;
         total += u.value;
       }
       return { total };
@@ -1014,7 +1012,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     },
 
     prepareTransfer: (input) => {
-      if (!getActiveKeyState().activePublicKeyHash) {
+      if (!getActiveKeyState().activePublicKeyHex) {
         return Promise.reject(new Error("Cannot sign without an active key"));
       }
       // 硬切换 001：includeTestnet=false 时禁止 testnet 转账。
@@ -1025,7 +1023,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return transfer.prepare(input);
     },
     submitTransfer: (preview) => {
-      if (!getActiveKeyState().activePublicKeyHash) {
+      if (!getActiveKeyState().activePublicKeyHex) {
         return Promise.reject(new Error("Cannot sign without an active key"));
       }
       const settings = getCurrentSettings();
@@ -1076,7 +1074,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "settings.testnet.enabled",
           message: "P2PKH includeTestnet enabled; rehydrating testnet and triggering sync",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
         });
         try {
           await rehydrateResources();
@@ -1095,7 +1093,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "settings.testnet.disabled",
           message: "P2PKH includeTestnet disabled; triggering recent-sync refresh",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
         });
         deps.backgroundService.trigger(P2PKH_TASK_RECENT, "settings.testnet.disabled");
       }
@@ -1108,7 +1106,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         scope: "p2pkh.service",
         event: "key.imported",
         message: "P2PKH reacting to key import; rehydrating active key",
-        data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null }
+        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
       });
       try {
         await rehydrateResources();
@@ -1119,7 +1117,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
           scope: "p2pkh.service",
           event: "key.imported.failed",
           message: "P2PKH onKeyImported failed",
-          data: { publicKeyHash: getActiveKeyState().activePublicKeyHash ?? null },
+          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
           error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
         });
       }
@@ -1179,7 +1177,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   };
 }
 
-function filterUtxos<T extends { network: "main" | "test"; keyId: string; publicKeyHash: string; resourceId: string }>(
+function filterUtxos<T extends { network: "main" | "test"; keyId: string; publicKeyHex: string; resourceId: string }>(
   rows: T[],
   filter: P2pkhUtxoFilter | undefined
 ): T[] {

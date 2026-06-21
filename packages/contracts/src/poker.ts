@@ -237,26 +237,29 @@ export interface PokerSettings {
 /**
  * 当前 Poker 会话 key 的解析结果。
  *
- * 设计缘由（硬切换 004 + 硬切换 005 收尾）：Poker 唯一身份真值 =
- * `keyspace.active().activePublicKeyHash` 对应的那把 ready key。这里把
- * "解析当前 active key 是否可用作 Poker 身份"集中表达：
+ * 设计缘由（硬切换 004 + 硬切换 005 收尾 + 硬切换 001 收口）：Poker
+ * 唯一身份真值 = `keyspace.active().activePublicKeyHex` 对应的那把
+ * ready key。这里把"解析当前 active key 是否可用作 Poker 身份"集中表达：
  *   - `ready`：active key 可用，session 字段给出具体 KeyIdentity。
  *   - `vaultLocked`：vault 未解锁，没有 active key 候选。
  *   - `missing`：vault 已解锁但 keyspace 内没有任何 ready key。
  *   - `notReady`：active key 存在但 identityStatus !== "ready"。
- *   - `noActiveHash`：activePublicKeyHash 缺省（异常态 / 过渡期）。
+ *   - `noActiveKey`：activePublicKeyHex 缺省（异常态 / 过渡期）。
  *
  * 硬切换 005：`allMode` 已被删除——"无具体 active key" 不再有"全部 key
- * 只读总览"语义；Poker 一律按 `noActiveHash` / `missing` 处理，业务 UI
+ * 只读总览"语义；Poker 一律按 `noActiveKey` / `missing` 处理，业务 UI
  * 通过这一枚举直接决定"Poker 设置页的 Connect 按钮是否启用 / 大厅/单桌
  * 是否允许 publish / home widget 显示哪种提示"。
+ *
+ * 硬切换 001 收口：原 `noActiveHash` 重命名为 `noActiveKey`，与平台
+ * `activePublicKeyHex` 命名一致。
  */
 export type PokerSessionKeyState =
   | { kind: "ready"; key: KeyIdentity }
   | { kind: "vaultLocked" }
   | { kind: "missing" }
   | { kind: "notReady"; key: KeyIdentity; reason: string }
-  | { kind: "noActiveHash" };
+  | { kind: "noActiveKey" };
 
 /**
  * PokerService 是 plugin-poker 暴露给宿主的 service 接口。

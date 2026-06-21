@@ -27,28 +27,26 @@ import type {
 } from "@keymaster/contracts";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 
-const PUBLIC_KEY_HASH = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const DB_NAME = `keymaster.key.${PUBLIC_KEY_HASH}.plugin.p2pkh.state`;
+const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 const ACTIVE_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
 
-function makeKeyspace(publicKeyHash: string): KeyspaceService {
+function makeKeyspace(publicKeyHex: string): KeyspaceService {
   return {
     listKeys: async () => [],
     getKey: async (keyId: string): Promise<KeyIdentity | undefined> => ({
       keyId,
-      publicKeyHex: ACTIVE_PRIV_HEX,
-      publicKeyHash,
+      publicKeyHex,
       label: "active",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z",
       identityStatus: "ready"
     }),
-    active: () => ({ activePublicKeyHash: publicKeyHash }),
+    active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
       keyId: "k1",
-      publicKeyHex: ACTIVE_PRIV_HEX,
-      publicKeyHash,
+      publicKeyHex,
       label: "active",
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -56,10 +54,10 @@ function makeKeyspace(publicKeyHash: string): KeyspaceService {
     }),
     onActiveChange: () => () => undefined,
     openKeyStorage: async (input) => {
-      if (input.publicKeyHash !== publicKeyHash) {
+      if (input.publicKeyHex !== publicKeyHex) {
         throw new Error("Key storage is not ready");
       }
-      const name = `keymaster.key.${input.publicKeyHash}.plugin.${input.pluginId}.${input.storageId}`;
+      const name = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const r = indexedDB.open(name, input.version);
         r.onupgradeneeded = () => {
@@ -193,7 +191,7 @@ it("per-task status: backfill completion fires even when recent is still syncing
     // 硬切换 003 收尾：两个任务并发时，第一个任务结束会让聚合状态
     // 翻成 ok/failed；订阅 per-task 应该能在第二个任务完成时再次
     // 触发刷新事件。
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();
@@ -239,7 +237,7 @@ it("per-task status: backfill completion fires even when recent is still syncing
 
   it("cached ensureDb emits db.reused without re-opening the namespace db", async () => {
     // 硬切换 003 收尾：缓存命中也必须留痕，不能直接静默 return。
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();
@@ -275,7 +273,7 @@ it("per-task status: backfill completion fires even when recent is still syncing
 
 describe("createP2pkhService manual triggers", () => {
   it("triggerRecentSync first rehydrates active key then triggers background task", async () => {
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();
@@ -308,7 +306,7 @@ describe("createP2pkhService manual triggers", () => {
   });
 
   it("triggerHistoryBackfill first rehydrates active key then triggers background task", async () => {
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();
@@ -337,7 +335,7 @@ describe("createP2pkhService manual triggers", () => {
   });
 
   it("logs manual.recentSync.requested and manual.backfill.requested info events", async () => {
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();
@@ -366,7 +364,7 @@ describe("createP2pkhService manual triggers", () => {
   });
 
   it("self-heals missing P2PKH DB and creates main resource for active key", async () => {
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();
@@ -391,7 +389,7 @@ describe("createP2pkhService manual triggers", () => {
     expect(resources.length).toBeGreaterThan(0);
     const mainResource = resources.find((r) => r.network === "main");
     expect(mainResource?.address).toBe(expectedAddress);
-    expect(mainResource?.publicKeyHash).toBe(PUBLIC_KEY_HASH);
+    expect(mainResource?.publicKeyHex).toBe(ACTIVE_PUBLIC_KEY_HEX);
 
     // db.opened 至少出现一次：active key 第一次打开 namespace DB。
     const opened = logger.calls.filter((c) => c.event === "db.opened");
@@ -408,7 +406,7 @@ describe("createP2pkhService manual triggers", () => {
     // 当前 contract 里 migrateLegacyP2pkhDb 仍存在但没有被任何 service 路径
     // 引用；本测试断言：触发同步流程后日志里没有"legacy"或"migration"
     // 相关字样，避免后续开发者误把旧迁移接回主路径。
-    const keyspace = makeKeyspace(PUBLIC_KEY_HASH);
+    const keyspace = makeKeyspace(ACTIVE_PUBLIC_KEY_HEX);
     const vault = makeVault();
     const woc = makeWoc();
     const messageBus = makeMessageBus();

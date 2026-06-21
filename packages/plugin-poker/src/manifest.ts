@@ -120,8 +120,8 @@ const pokerResources: I18nPluginResources = {
       "poker.lobby.sessionUnavailable.notReady.title": "Poker is currently unavailable",
       "poker.lobby.sessionUnavailable.notReady.hint":
         "The current session is unavailable.",
-      "poker.lobby.sessionUnavailable.noActiveHash.title": "Poker is currently unavailable",
-      "poker.lobby.sessionUnavailable.noActiveHash.hint":
+      "poker.lobby.sessionUnavailable.noActiveKey.title": "Poker is currently unavailable",
+      "poker.lobby.sessionUnavailable.noActiveKey.hint":
         "The current session is unavailable.",
       "poker.table.title": "Poker table",
       "poker.table.back": "Back to lobby",
@@ -145,7 +145,7 @@ const pokerResources: I18nPluginResources = {
         "Poker is currently unavailable.",
       "poker.table.sessionUnavailable.notReady":
         "Poker is currently unavailable.",
-      "poker.table.sessionUnavailable.noActiveHash":
+      "poker.table.sessionUnavailable.noActiveKey":
         "Poker is currently unavailable.",
       "poker.err.notReady": "Proxy not ready"
     },
@@ -219,8 +219,8 @@ const pokerResources: I18nPluginResources = {
       "poker.lobby.sessionUnavailable.missing.hint": "当前会话暂不可用。",
       "poker.lobby.sessionUnavailable.notReady.title": "扑克当前不可用",
       "poker.lobby.sessionUnavailable.notReady.hint": "当前会话暂不可用。",
-      "poker.lobby.sessionUnavailable.noActiveHash.title": "扑克当前不可用",
-      "poker.lobby.sessionUnavailable.noActiveHash.hint": "当前会话暂不可用。",
+      "poker.lobby.sessionUnavailable.noActiveKey.title": "扑克当前不可用",
+      "poker.lobby.sessionUnavailable.noActiveKey.hint": "当前会话暂不可用。",
       "poker.table.title": "扑克桌",
       "poker.table.back": "返回大厅",
       "poker.table.notJoined": "尚未加入该桌",
@@ -236,7 +236,7 @@ const pokerResources: I18nPluginResources = {
       "poker.table.sessionUnavailable.vaultLocked": "扑克当前不可用。",
       "poker.table.sessionUnavailable.missing": "扑克当前不可用。",
       "poker.table.sessionUnavailable.notReady": "扑克当前不可用。",
-      "poker.table.sessionUnavailable.noActiveHash": "扑克当前不可用。",
+      "poker.table.sessionUnavailable.noActiveKey": "扑克当前不可用。",
       "poker.err.notReady": "代理尚未就绪"
     }
   }

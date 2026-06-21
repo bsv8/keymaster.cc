@@ -9,7 +9,7 @@
 //   - "稳定 poker identity binding"概念被删除；plugin-poker 永远跟随
 //     active key，不再有独立绑定持久化记录。
 //   - DB 名称遵循 keyspace 规范：
-//     `keymaster.key.<publicKeyHash>.plugin.plugin-poker.poker`。
+//     `keymaster.key.<publicKeyHex>.plugin.plugin-poker.poker`。
 //   - vault 锁定时 key-scoped storage 不可用，service 必须按 fail-closed
 //     处理。
 //   - DB schema 升级走 `upgradePokerDb`；新增 store 必须递增

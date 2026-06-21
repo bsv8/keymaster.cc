@@ -6,7 +6,7 @@
 //     直接清空 rows，避免 ContactsNoActiveKeyError 冒到 React 渲染。
 //   - 订阅 onActiveChange：active 切换时重新拉；active 缺失时清空。
 //
-// 硬切换 005 收尾：删掉 "all 模式" 分支。activePublicKeyHash 缺失由
+// 硬切换 005 收尾：删掉 "all 模式" 分支。activePublicKeyHex 缺失由
 // 壳层守卫收敛，本 widget 只在 active key 缺失时清空 rows，不展示
 // 任何"全部 key"提示。
 //
@@ -27,7 +27,7 @@ export function RecentContactsWidget() {
   useEffect(() => {
     let mounted = true;
     const refresh = async () => {
-      if (!keyspace.active().activePublicKeyHash) {
+      if (!keyspace.active().activePublicKeyHex) {
         if (mounted) setRows([]);
         return;
       }

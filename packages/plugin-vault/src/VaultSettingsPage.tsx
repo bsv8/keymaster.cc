@@ -7,7 +7,7 @@
 //   - 删除仍走 keyspace.deleteKeyById(keyId)；不在页面直接调 vault.deleteKeyMaterial。
 //   - 桌面端用 DataTable 紧凑展示；移动端改成纵向 Key 条目，状态 / 标签 /
 //     短公钥 / 能力 / 时间 / 操作折叠成单条记录，避免横向滚动。
-//   - 失败 / uninitialized / 无 publicKeyHash 等边界沿用硬切换 008 防御。
+//   - 失败 / uninitialized / 无 publicKeyHex 等边界沿用硬切换 008 防御。
 //   - active 通知失败时不删除已安全落库的 Key；提示用户手动切 active。
 //
 // 硬切换 003：所有展示文案走 i18n。日期通过 Intl.DateTimeFormat(locale) 格式化。
@@ -151,10 +151,10 @@ export function VaultSettingsPage() {
   }
 
   async function setAsActive(k: KeyIdentity) {
-    if (!k.publicKeyHash) return;
+    if (!k.publicKeyHex) return;
     if (k.identityStatus && k.identityStatus !== "ready") return;
     try {
-      await keyspace.setActive(k.publicKeyHash);
+      await keyspace.setActive(k.publicKeyHex);
       // 硬切换 009 收尾：如果 vault 还有"首 Key 未自动 active"
       // notice，且这把 key 正好就是 notice 里的 key，清掉它。
       // vault 内部也会在 EVENT_ACTIVE_KEY_CHANGED 上做同样检查
@@ -258,14 +258,14 @@ export function VaultSettingsPage() {
     list: KeyIdentity[]
   ): KeyIdentity | undefined {
     if (err instanceof Error) {
-      const maybeHash = (err as { publicKeyHash?: unknown }).publicKeyHash;
-      if (typeof maybeHash === "string" && maybeHash) {
-        const found = list.find((k) => k.publicKeyHash === maybeHash);
+      const maybeHex = (err as { publicKeyHex?: unknown }).publicKeyHex;
+      if (typeof maybeHex === "string" && maybeHex) {
+        const found = list.find((k) => k.publicKeyHex === maybeHex);
         if (found) return found;
       }
     }
     return list.find(
-      (k) => k.label === label && (k.publicKeyHash || k.identityStatus === "failed")
+      (k) => k.label === label && (k.publicKeyHex || k.identityStatus === "failed")
     );
   }
 
@@ -277,8 +277,7 @@ export function VaultSettingsPage() {
       capabilities: identity.capabilities,
       createdAt: identity.createdAt,
       source: "vault-generated",
-      publicKeyHex: identity.publicKeyHex,
-      publicKeyHash: identity.publicKeyHash
+      publicKeyHex: identity.publicKeyHex
     };
   }
 
@@ -286,7 +285,6 @@ export function VaultSettingsPage() {
     const identity: KeyIdentity = {
       keyId: key.id,
       publicKeyHex: key.publicKeyHex ?? "",
-      publicKeyHash: key.publicKeyHash ?? "",
       label: key.label,
       capabilities: key.capabilities,
       createdAt: key.createdAt,
@@ -311,7 +309,7 @@ export function VaultSettingsPage() {
       key: "status",
       header: t("vault.settings.col.status", { defaultValue: "状态" }),
       render: (r) => {
-        const status = r.identityStatus ?? (r.publicKeyHash ? "ready" : "uninitialized");
+        const status = r.identityStatus ?? (r.publicKeyHex ? "ready" : "uninitialized");
         if (status === "failed") {
           return (
             <span className="vault-key-status vault-key-status--failed" title={r.identityError}>
@@ -331,12 +329,11 @@ export function VaultSettingsPage() {
       // 硬切换 003 收尾：默认显示短公钥；展开后显示完整 publicKeyHex；
       // 复制按钮复制完整公钥（不是截断串）。
       render: (r) => {
-        if (!r.publicKeyHash || !r.publicKeyHex) {
+        if (!r.publicKeyHex) {
           return <span style={{ color: "var(--text-dim)" }}>{identityMissingText}</span>;
         }
-        const publicKeyHash = r.publicKeyHash;
         const publicKeyHex = r.publicKeyHex;
-        return expanded[publicKeyHash] ? (
+        return expanded[publicKeyHex] ? (
           <div className="vault-key-pubkey-expanded">
             <code className="vault-key-pubkey-full">{publicKeyHex}</code>
             <button
@@ -349,7 +346,7 @@ export function VaultSettingsPage() {
             <button
               type="button"
               className="vault-key-public-toggle"
-              onClick={() => setExpanded((m) => ({ ...m, [publicKeyHash]: false }))}
+              onClick={() => setExpanded((m) => ({ ...m, [publicKeyHex]: false }))}
             >
               {t("vault.settings.action.collapsePubkey", { defaultValue: "收起" })}
             </button>
@@ -360,7 +357,7 @@ export function VaultSettingsPage() {
             <button
               type="button"
               className="vault-key-public-toggle"
-              onClick={() => setExpanded((m) => ({ ...m, [publicKeyHash]: true }))}
+              onClick={() => setExpanded((m) => ({ ...m, [publicKeyHex]: true }))}
             >
               {t("vault.settings.action.expandPubkey", { defaultValue: "展开公钥" })}
             </button>
@@ -382,8 +379,8 @@ export function VaultSettingsPage() {
       key: "actions",
       header: t("vault.settings.col.actions", { defaultValue: "操作" }),
       render: (r) => {
-        const isActive = active.activePublicKeyHash === r.publicKeyHash;
-        const canSetActive = Boolean(r.publicKeyHash) && (!r.identityStatus || r.identityStatus === "ready");
+        const isActive = active.activePublicKeyHex === r.publicKeyHex;
+        const canSetActive = Boolean(r.publicKeyHex) && (!r.identityStatus || r.identityStatus === "ready");
         return (
           <div className="vault-key-actions">
             <Button
@@ -425,10 +422,10 @@ export function VaultSettingsPage() {
   const mobileList = (
     <ul className="vault-key-list">
       {keys.map((r) => {
-        const isActive = active.activePublicKeyHash === r.publicKeyHash;
+        const isActive = active.activePublicKeyHex === r.publicKeyHex;
         const canSetActive =
-          Boolean(r.publicKeyHash) && (!r.identityStatus || r.identityStatus === "ready");
-        const status = r.identityStatus ?? (r.publicKeyHash ? "ready" : "uninitialized");
+          Boolean(r.publicKeyHex) && (!r.identityStatus || r.identityStatus === "ready");
+        const status = r.identityStatus ?? (r.publicKeyHex ? "ready" : "uninitialized");
         const statusLabel =
           status === "failed" ? statusFailedText : status === "uninitialized" ? statusInitText : statusReadyText;
         const statusClass =
@@ -453,8 +450,8 @@ export function VaultSettingsPage() {
             <div className="vault-key-list__caps">
               {r.capabilities.join(", ")} · {dateFmt.format(new Date(r.createdAt))}
             </div>
-            {r.publicKeyHash && r.publicKeyHex ? (
-              expanded[r.publicKeyHash] ? (
+            {r.publicKeyHex ? (
+              expanded[r.publicKeyHex] ? (
                 <div className="vault-key-list__pubkey-detail">
                   <code className="vault-key-list__pub">{r.publicKeyHex}</code>
                   <button
@@ -467,7 +464,7 @@ export function VaultSettingsPage() {
                   <button
                     type="button"
                     className="vault-key-public-toggle"
-                    onClick={() => setExpanded((m) => ({ ...m, [r.publicKeyHash!]: false }))}
+                    onClick={() => setExpanded((m) => ({ ...m, [r.publicKeyHex!]: false }))}
                   >
                     {t("vault.settings.action.collapsePubkey", { defaultValue: "收起" })}
                   </button>
@@ -476,7 +473,7 @@ export function VaultSettingsPage() {
                 <button
                   type="button"
                   className="vault-key-public-toggle"
-                  onClick={() => setExpanded((m) => ({ ...m, [r.publicKeyHash!]: true }))}
+                  onClick={() => setExpanded((m) => ({ ...m, [r.publicKeyHex!]: true }))}
                 >
                   {t("vault.settings.action.expandPubkey", { defaultValue: "展开公钥" })}
                 </button>

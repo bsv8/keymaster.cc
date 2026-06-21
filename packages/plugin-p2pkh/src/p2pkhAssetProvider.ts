@@ -78,11 +78,11 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
    * 这是 listAssets / getAsset / listActivity / sync 的统一闸门。
    *
    * 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"，
-   * 不再有 `mode === "all"` 分支；"未就绪"只看 activePublicKeyHash 缺省。
+   * 不再有 `mode === "all"` 分支；"未就绪"只看 activePublicKeyHex 缺省。
    */
   function isNotReady(): boolean {
     if (deps.keyspace.isInitializing()) return true;
-    return !deps.keyspace.active().activePublicKeyHash;
+    return !deps.keyspace.active().activePublicKeyHex;
   }
 
   /**

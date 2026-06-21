@@ -407,7 +407,7 @@ export const p2pkhPlugin: PluginManifest = {
 
     void service.rehydrate();
 
-    const keyCreatedUnsub = messageBus.subscribe<{ keyId: string; publicKeyHash: string; label: string }>("key.created", async (payload) => {
+    const keyCreatedUnsub = messageBus.subscribe<{ keyId: string; publicKeyHex: string; label: string }>("key.created", async (payload) => {
       if (!payload.keyId) return;
       await service.onKeyImported(payload.keyId);
     });

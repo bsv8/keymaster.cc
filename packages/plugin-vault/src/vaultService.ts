@@ -5,11 +5,11 @@
 //   - 不持有全局明文缓存；多签名者顺序调用即依次解密。
 //   - 状态机：booting -> uninitialized -> locked -> unlocked。
 //   - 导出必须由 Vault 完成，因为只有 Vault 能通过 withPrivateKey 受控借用明文私钥。
-//   - importPrivateKey 必须拒绝重复 publicKeyHash；错误信息使用英文。
+//   - importPrivateKey 必须拒绝重复 publicKeyHex；错误信息使用英文。
 //   - unlock 后必须执行一次 identity backfill：逐个 withPrivateKey 派生
-//     publicKeyHex / publicKeyHash 并回写。backfill 失败的 key
+//     publicKeyHex 并回写。backfill 失败的 key
 //     标 identity-failed，只允许导出 / 删除。
-//   - emit key.created / key.deleted 时 payload 携带 publicKeyHash，让
+//   - emit key.created / key.deleted 时 payload 携带 publicKeyHex，让
 //     keyspace.deleteKey 能直接定位。
 // 硬切换 008：unlock 完成边界收紧——"unlocked" 对 UI / 业务插件的语义是
 // "keyspace ready 边界已完成，业务可以安全读取 key-scoped storage"。具体
@@ -74,7 +74,7 @@ export { KeyPersistedButActivationFailedError };
  */
 export interface InitialActivationNotice {
   keyId: string;
-  publicKeyHash?: string;
+  publicKeyHex?: string;
   label: string;
 }
 
@@ -171,8 +171,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         const handler = (state: ActiveKeyState) => {
           if (
             pendingActivationNotice &&
-            pendingActivationNotice.publicKeyHash &&
-            state.activePublicKeyHash === pendingActivationNotice.publicKeyHash
+            pendingActivationNotice.publicKeyHex &&
+            state.activePublicKeyHex === pendingActivationNotice.publicKeyHex
           ) {
             setPendingActivationNotice(null);
           }
@@ -240,7 +240,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       createdAt: record.createdAt,
       source: record.source,
       publicKeyHex: record.publicKeyHex,
-      publicKeyHash: record.publicKeyHash,
       // 硬切换 008：把 vaultDb 中的 identityStatus 透传给 KeyRef 消费者
       // （keyspaceService 依赖此字段过滤 failed key）。
       identityStatus: record.identityStatus ?? "ready",
@@ -250,13 +249,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   }
 
   async function recordToIdentity(record: VaultKeyRecord): Promise<KeyIdentity> {
-    if (!record.publicKeyHash || !record.publicKeyHex) {
+    if (!record.publicKeyHex) {
       throw new Error("Identity not initialized");
     }
     return {
       keyId: record.id,
       publicKeyHex: record.publicKeyHex,
-      publicKeyHash: record.publicKeyHash,
       label: record.label,
       capabilities: record.capabilities,
       createdAt: record.createdAt,
@@ -280,18 +278,21 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    *   - 成功时发 key.identity.ready 事件；失败时发 key.identity.failed 事件。
    *
    * 硬切换 003 收尾：
-   *   - 只回写 publicKeyHex / publicKeyHash，不再回写 fingerprint。
+   *   - 只回写 publicKeyHex，不再回写 fingerprint。
    *   - 老记录已有 fingerprint 字段时，putKeyIdentity 内部已白名单构造
    *     字段，不会把 fingerprint 续命。
    *   - key.identity.ready payload 也不再带 fingerprint（订阅方需要短公钥
    *     时由 UI 侧现算）。
+   *
+   * 硬切换 001 收口：identity 字段统一为 publicKeyHex；vault 内部已不
+   * 再保留旧的平台 namespace 派生字段。
    */
   async function backfillIdentities() {
     deps.keyspace?.setInitializing(true);
     try {
       const records = await vaultDb.listKeys();
       for (const record of records) {
-        if (record.publicKeyHash && record.publicKeyHex) {
+        if (record.publicKeyHex) {
           // 已有完整 identity：确保 status 字段也是 ready（老 v2 记录可能
           // 没有该字段，按 ready 处理）。即便老记录还残留 fingerprint，
           // putKeyIdentityReady 内部也是白名单构造，不会写回。
@@ -308,7 +309,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           // 通过事件通知 keyspace 重建候选。payload 不再带 fingerprint。
           deps.messageBus.publish("key.identity.ready", {
             keyId: record.id,
-            publicKeyHash: identity.publicKeyHash,
             publicKeyHex: identity.publicKeyHex,
             label: record.label,
             capabilities: record.capabilities,
@@ -363,9 +363,9 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (label.length > LABEL_MAX_LENGTH) {
       throw new Error(`Label must be at most ${LABEL_MAX_LENGTH} characters`);
     }
-    // 3) 派生公钥身份并按 publicKeyHash 重复检查。
+    // 3) 派生公钥身份并按 publicKeyHex 重复检查。
     const identity = deriveKeyIdentity(input.material.hex);
-    const existing = await vaultDb.getKeyByPublicKeyHash(identity.publicKeyHash);
+    const existing = await vaultDb.getKeyByPublicKeyHex(identity.publicKeyHex);
     if (existing) {
       throw new Error("Key already exists");
     }
@@ -387,8 +387,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       cipherSaltB64: bytesToHex(blob.salt),
       cipherIvB64: bytesToHex(blob.iv),
       cipherB64: bytesToHex(blob.ciphertext),
-      publicKeyHex: identity.publicKeyHex,
-      publicKeyHash: identity.publicKeyHash
+      publicKeyHex: identity.publicKeyHex
     };
     // 5) DB 写入必须发生在 notify / emit 之前——失败时 keyspace
     //    不会误把不存在的 key 选为 active，订阅者也不会收到
@@ -402,7 +401,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     // 硬切换 002 收尾：如果 keyspace 通知失败，DB 已经有这把 key，但 active
     // 没切。抛 `KeyPersistedButActivationFailedError` 让 UI 进入"已保存但
     // 未 active"的成功/警告态，**不**发 "key.created"——否则订阅者从
-    // 事件 handler 读 keyspace.active() 会看到与 payload publicKeyHash
+    // 事件 handler 读 keyspace.active() 会看到与 payload publicKeyHex
     // 不一致的状态（payload 是新 key，active 是旧 key）。
     //
     // 硬切换 004 收尾：必须 await notifyKeyCreated。keyspace 内部会
@@ -424,15 +423,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     // 7) 仅在 active 切换成功后才发 key.created。
     deps.messageBus.publish("key.created", {
       keyId: ref.id,
-      publicKeyHash: identity.publicKeyHash,
+      publicKeyHex: identity.publicKeyHex,
       label
     });
     deps.logger?.info({
       scope: "vault.key",
       event: "key.created",
       message: "Vault key created",
-      data: { keyId: ref.id, publicKeyHash: identity.publicKeyHash, label },
-      keyScope: { publicKeyHash: identity.publicKeyHash }
+      data: { keyId: ref.id, publicKeyHex: identity.publicKeyHex, label },
+      keyScope: { publicKeyHex: identity.publicKeyHex }
     });
     return ref;
   }
@@ -625,7 +624,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           // 反而会隐藏真实状态。
           setPendingActivationNotice({
             keyId: err.key.id,
-            publicKeyHash: err.key.publicKeyHash,
+            publicKeyHex: err.key.publicKeyHex,
             label: err.key.label
           });
           setStatus("unlocked");
@@ -680,7 +679,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      *           方（shell 端不必再处理：unlocked 状态已发出，App 会自动
      *           切到 UnlockedShell）。
      *        c) importPrivateKey 抛其它错（首 Key 未落库；常见：label
-     *           为空 / 长度超限 / 重复 publicKeyHash / DB 写入失败）——
+     *           为空 / 长度超限 / 重复 publicKeyHex / DB 写入失败）——
      *           删 meta、清空内存会话、状态回到 "uninitialized"、抛原
      *           错，**不**宣布 unlocked。
      *
@@ -759,7 +758,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           // 反而会隐藏真实状态。
           setPendingActivationNotice({
             keyId: err.key.id,
-            publicKeyHash: err.key.publicKeyHash,
+            publicKeyHex: err.key.publicKeyHex,
             label: err.key.label
           });
           setStatus("unlocked");
@@ -884,7 +883,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      * 硬切换 005 收尾：已解锁壳层守卫调用——"0 key 异常态"恢复入口。
      *
      * 触发场景：AppShell 检测到 vault.status === "unlocked" 且
-     * keyspace.active().activePublicKeyHash 缺失且 listKeys 为空。
+     * keyspace.active().activePublicKeyHex 缺失且 listKeys 为空。
      * 此时必须把状态收敛到 uninitialized（不是 locked），让用户进
      * 入首启 welcome 而不是撞上"已经看到主界面但永远没有 key"。
      *
@@ -1105,8 +1104,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return r ? recordToRef(r) : undefined;
     },
 
-    async getKeyByPublicKeyHash(publicKeyHash) {
-      const r = await vaultDb.getKeyByPublicKeyHash(publicKeyHash);
+    async getKeyByPublicKeyHex(publicKeyHex) {
+      const r = await vaultDb.getKeyByPublicKeyHex(publicKeyHex);
       return r ? recordToRef(r) : undefined;
     },
 

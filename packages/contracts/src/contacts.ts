@@ -1,5 +1,9 @@
 // packages/contracts/src/contacts.ts
 // 联系人契约：plugin-contacts 实现并通过 "contacts.service" 暴露。
+//
+// 硬切换 001 收口：联系人归属字段统一改为 publicKeyHex（平台 owning
+// key 公钥），不再使用 `publicKeyHash`。联系人是本地真值，因此
+// plugin-contacts 必须做一次性迁移（见 plugin-contacts/contactsDb）。
 
 /** 联系人。 */
 export interface Contact {
@@ -9,11 +13,13 @@ export interface Contact {
   note?: string;
   tags: string[];
   /**
-   * 硬切换 008：联系人归属的 key namespace（公钥 hash hex）。
-   * 实际存储按 key namespace 拆分到不同 DB；publicKeyHash 作为展示字段
+   * 联系人归属的 owning key 公钥 hex（平台公开身份）。这是联系人"属于
+   * 哪把 key"的归属字段,不是链上 hash。
+   *
+   * 实际存储按 key namespace 拆分到不同 DB；publicKeyHex 作为展示字段
    * 供 UI 提示"这是哪把 key 的联系人"。
    */
-  publicKeyHash?: string;
+  publicKeyHex?: string;
   createdAt: string;
   updatedAt: string;
 }

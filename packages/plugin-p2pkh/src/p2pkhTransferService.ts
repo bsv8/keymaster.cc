@@ -37,7 +37,7 @@ export interface P2pkhTransferServiceDeps {
   getDb: () => Promise<P2pkhDbHandle>;
   /**
    * 当前 active key。p2pkhService.rebindActiveKey 内部用 requireReadyKey
-   * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHash 必填）。
+   * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHex 必填）。
    */
   getActiveKey: () => ReadyKeyIdentity;
   /** 硬切换 002：业务插件注入的 logger。 */
@@ -127,7 +127,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       if (!resource) {
         throw new Error(`P2PKH resource not found for active key (${network})`);
       }
-      if (resource.publicKeyHash !== active.publicKeyHash) {
+      if (resource.publicKeyHex !== active.publicKeyHex) {
         throw new Error("Active key changed before broadcast");
       }
       if (assetIdToNetwork(preview.assetId) !== network) {
@@ -143,7 +143,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         id: submissionId,
         resourceId: resource.resourceId,
         keyId: active.keyId,
-        publicKeyHash: active.publicKeyHash,
+        publicKeyHex: active.publicKeyHex,
         network,
         assetId: preview.assetId,
         canonicalTxid: preview.txid,
@@ -184,7 +184,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             event: "transfer.broadcast.rejected",
             message: `P2PKH transfer broadcast rejected: ${preview.txid}`,
             data: { resourceId: resource.resourceId, network, txid: preview.txid },
-            keyScope: { publicKeyHash: active.publicKeyHash },
+            keyScope: { publicKeyHex: active.publicKeyHex },
             error: { name: err instanceof Error ? err.name : "Error", message: msg }
           });
           return {
@@ -201,7 +201,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           submissionId,
           resourceId: resource.resourceId,
           keyId: active.keyId,
-          publicKeyHash: active.publicKeyHash,
+          publicKeyHex: active.publicKeyHex,
           network,
           inputs: preview.allocation.selected
         });
@@ -216,7 +216,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           event: "transfer.broadcast.unknown",
           message: `P2PKH transfer broadcast unknown: ${preview.txid}`,
           data: { resourceId: resource.resourceId, network, txid: preview.txid },
-          keyScope: { publicKeyHash: active.publicKeyHash },
+          keyScope: { publicKeyHex: active.publicKeyHex },
           error: { name: err instanceof Error ? err.name : "Error", message: msg }
         });
         deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
@@ -238,7 +238,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         submissionId,
         resourceId: resource.resourceId,
         keyId: active.keyId,
-        publicKeyHash: active.publicKeyHash,
+        publicKeyHex: active.publicKeyHex,
         network,
         inputs: preview.allocation.selected
       });
@@ -265,7 +265,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         event: "transfer.broadcast.accepted",
         message: `P2PKH transfer broadcast accepted: ${broadcastRes.canonicalTxid}`,
         data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid, txidIntegrity: broadcastRes.txidIntegrity },
-        keyScope: { publicKeyHash: active.publicKeyHash }
+        keyScope: { publicKeyHex: active.publicKeyHex }
       });
       if (broadcastRes.txidIntegrity === "mismatch") {
         deps.logger?.warn({
@@ -273,7 +273,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           event: "transfer.broadcast.providerInconsistent",
           message: `P2PKH transfer broadcast provider-inconsistent: ${broadcastRes.canonicalTxid}`,
           data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid },
-          keyScope: { publicKeyHash: active.publicKeyHash }
+          keyScope: { publicKeyHex: active.publicKeyHex }
         });
       }
 
@@ -436,7 +436,7 @@ async function claimInputs(
     submissionId: string;
     resourceId: string;
     keyId: string;
-    publicKeyHash: string;
+    publicKeyHex: string;
     network: "main" | "test";
     inputs: P2pkhUtxo[];
   }
@@ -450,7 +450,7 @@ async function claimInputs(
       submissionId: params.submissionId,
       resourceId: params.resourceId,
       keyId: params.keyId,
-      publicKeyHash: params.publicKeyHash,
+      publicKeyHex: params.publicKeyHex,
       network: params.network,
       txid: u.txid,
       vout: u.vout,

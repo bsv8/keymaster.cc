@@ -68,13 +68,13 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
 
   /**
    * 是否可以提供转账 offer：必须有 active key 且 keyspace 已就绪。
-   * 硬切换 005 收尾：不再有 "all 模式" 兜底——`activePublicKeyHash` 缺失
+   * 硬切换 005 收尾：不再有 "all 模式" 兜底——`activePublicKeyHex` 缺失
    * 唯一指"无 active key"，由壳层守卫收敛到修复/管理态；本函数仍作为
    * listOffers 的 fail-closed 防御。
    */
   function isTransferable(): boolean {
     if (deps.keyspace.isInitializing()) return false;
-    return Boolean(deps.keyspace.active().activePublicKeyHash);
+    return Boolean(deps.keyspace.active().activePublicKeyHex);
   }
 
   /**
