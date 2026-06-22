@@ -27,6 +27,7 @@ import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
 import { keyImportPlugin } from "@keymaster/plugin-key-import";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
 import { pokerPlugin } from "@keymaster/plugin-poker";
+import { protocolPlugin } from "@keymaster/plugin-protocol";
 import { settingsPlugin } from "@keymaster/plugin-settings";
 import { transferPlugin } from "@keymaster/plugin-transfer";
 import { vaultPlugin } from "@keymaster/plugin-vault";
@@ -47,8 +48,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
 
   // 硬切换 001：按"依赖先后保证 capability 顺序"的顺序加入已知集合。
   // host.register 内部会按 config store 决定是否自动 enable。
+  //
+  // 001 收口（施工单 001 协议 V1）：protocolPlugin 必须在 vaultPlugin 之后、
+  // 业务插件之前装载；它依赖 vault.service / keyspace.service。
   const ordered = [
     vaultPlugin,
+    protocolPlugin,
     homePlugin,
     settingsPlugin,
     assetsPlugin,

@@ -24,6 +24,7 @@
     "@keymaster/plugin-settings": "*",
     "@keymaster/plugin-assets": "*",
     "@keymaster/plugin-woc": "*",
-    "@keymaster/plugin-background": "*"
+    "@keymaster/plugin-background": "*",
+    "@keymaster/plugin-protocol": "*"
   }
 }

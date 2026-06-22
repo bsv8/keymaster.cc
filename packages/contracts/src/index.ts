@@ -25,3 +25,4 @@ export * from "./i18n.js";
 export * from "./keyDisplay.js";
 export * from "./poker.js";
 export * from "./log.js";
+export * from "./protocol.js";

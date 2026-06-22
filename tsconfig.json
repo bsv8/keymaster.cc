@@ -17,6 +17,7 @@
     { "path": "./packages/plugin-settings" },
     { "path": "./packages/plugin-assets" },
     { "path": "./packages/plugin-woc" },
-    { "path": "./packages/plugin-background" }
+    { "path": "./packages/plugin-background" },
+    { "path": "./packages/plugin-protocol" }
   ]
 }
