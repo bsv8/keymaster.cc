@@ -37,6 +37,27 @@
   `/protocol/v1/popup`。
 - 经过用户确认；不存在"轻量免确认"或"静默获取"模式。
 
+## Popup 连接状态与业务请求结果
+
+Popup 连接状态是协议公共约定的一部分，与具体方法（`identity.get` /
+`intent.sign` / `cipher.encrypt` / `cipher.decrypt`）无关。连接状态
+与业务请求结果是两层语义：
+
+- 连接状态：`opening` / `connected` / `disconnected`。
+  - `ready`：连接建立信号。
+  - `closing`：连接结束信号。
+  - `popup.closed === true`：浏览器兜底真值。
+- 业务结果：`result`（`ok=true` / `ok=false`），由 `id` 关联到具体 `request`。
+
+不允许把 `result` 当成"连接已经断开"的唯一真值，也不允许把
+`closing` 当成 `result` 的别名。具体定义收敛在
+[公共约定](./keymaster-protocol-common-v1-draft.md) 里的"Popup
+生命周期连接状态"与"顶层报文 / closing"段。本总览页不重复定义
+连接状态机，只做语义分层提示。
+
+本协议 V1 **不**引入心跳、**不**引入 `MessageChannel`：连接状态
+完全建立在现有 `window.open + postMessage` 模型上。
+
 各方法的"返回真值字节"语义**不**通用，按方法区分：
 
 - `identity.get` 返回 `identityEnvelope`（含 `subjectPublicKey` 与

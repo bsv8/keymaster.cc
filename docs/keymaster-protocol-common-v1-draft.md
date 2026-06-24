@@ -25,12 +25,58 @@
 2. Keymaster popup 初始化完成后，通过 `postMessage` 回发一条 `ready`。
 3. 第三方站点收到 `ready` 后，再发送正式 `request`。
 4. Keymaster 完成后回发 `result`。
+5. Keymaster popup 在进入结束流程时，主动发出一条 `closing`；第三方站点把 `closing` 与 `popup.closed === true` 共同视作断开信号。
 
 设计缘由：
 
 - popup 页面加载和消息监听注册存在时序问题；
 - `ready` 用来明确“我已经能收消息了”，避免首条请求丢失；
-- 传输层只解决消息收发，不承载业务语义。
+- 传输层只解决消息收发，不承载业务语义；
+- `closing` 是 popup 生命周期的主动通知；`popup.closed === true` 是浏览器给的兜底真值。两者并联收敛到断开态，本协议**不**引入心跳、**不**引入 MessageChannel。
+
+## Popup 生命周期连接状态
+
+Popup 连接状态只在 popup 窗口级别定义，**不**在 request 级别定义。
+
+外部发起方只感知：
+
+```txt
+popup 是否已经 ready    -> opening / connected
+popup 是否已经结束      -> disconnected
+```
+
+而不是：
+
+```txt
+request 是否正在执行
+request 是否成功
+result 是否已经返回
+```
+
+### 状态定义
+
+| 状态        | 含义                                                                 |
+| ----------- | -------------------------------------------------------------------- |
+| `opening`   | `window.open` 已成功返回 popup 句柄，尚未收到 `ready`。              |
+| `connected` | 已收到 `ready`。                                                     |
+| `disconnected` | 已收到 `closing`，或轮询到 `popup.closed === true`。终态。         |
+
+### 转移规则
+
+- `window.open(...)` 成功 → `opening`。
+- 收到 `ready` → `connected`。
+- 收到 `closing` → `disconnected`。
+- 任意时刻轮询到 `popup.closed === true` → `disconnected`。
+- 重复收到 `closing` 或重复轮询到 `popup.closed === true` 直接忽略。
+
+### 不变量
+
+1. `ready` 是连接建立信号，**不**表示用户已授权、**不**表示业务成功。
+2. `closing` 是连接结束信号，**不**携带业务结果，**不**替代 `result`。
+3. `result` 与 `closing` 必须保持两种不同语义的顶层报文，**不允许**在 `result` 里夹带“连接已断开”。
+4. `disconnected` 是终态；client 端状态转移必须幂等。
+5. 本协议**不**做心跳：不引入 `ping/pong`、不基于“若干秒没消息”判定断开。
+6. 本协议**不**引入 `MessageChannel`：连接状态完全建立在现有 `window.open + postMessage` 模型上。
 
 ## 报文对象模型
 
@@ -141,6 +187,36 @@ type BinaryField = {
 - `id` 必须原样回显请求的 `id`。
 - `ok=true` 时返回 `result`。
 - `ok=false` 时返回 `error`。
+
+### `closing`
+
+```ts
+{
+  v: 1,
+  type: "closing"
+}
+```
+
+`closing` 是 popup 生命周期结束信号。它**只**说明：
+
+```txt
+这个 popup 会话要结束了
+```
+
+它**不**说明：
+
+- 请求成功还是失败；
+- 用户是否授权；
+- 有没有 `result`；
+- 为什么关闭。
+
+字段说明：
+
+- 报文为最小对象，**不**附带 `id` / `ok` / `error` / `reason` / `method` 等业务字段。
+- `closing` 与 `result` 是两种不同语义的顶层报文，不允许合并。
+- popup 应在 `result` 之后、关闭窗口之前发出 `closing`；用户手工关闭 / 页面卸载时由页面层 best-effort 再补一次。
+- popup 最多发一次 `closing`；发送失败不重试，由 `popup.closed === true` 兜底。
+- client 收到 `closing` 后立即收敛到 `disconnected`；重复 `closing` 幂等忽略。
 
 ## 安全边界
 

@@ -89,6 +89,23 @@ export interface ProtocolReadyMessage {
   type: "ready";
 }
 
+/**
+ * 顶层 closing 报文。Popup 在进入结束流程时主动向 opener 发出，
+ * 用以通告 popup 生命周期结束。报文**只**承载生命周期语义：
+ *
+ * - `closing` 是 popup 会话要结束的主动通知；
+ * - `closing` **不**携带业务结果、不替代 `result`、不携带 `error`；
+ * - client 收到 `closing` 后应立即收敛到 `disconnected`；
+ * - `popup.closed === true` 是浏览器给的兜底真值，两者并联收敛。
+ *
+ * popup 最多发一次 `closing`；发送失败不重试，由 client 端
+ * `popup.closed === true` 兜底。
+ */
+export interface ProtocolClosingMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "closing";
+}
+
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
   v: typeof PROTOCOL_VERSION;
@@ -116,11 +133,27 @@ export type ProtocolResultMessage =
       error: ProtocolError;
     };
 
-/** 顶层报文 union。 */
+/**
+ * 顶层报文 union。
+ *
+ * 报文按语义分两类：
+ * - 连接状态报文：`ready`（连接建立）、`closing`（连接结束）。
+ * - 业务报文：`request` / `result`。
+ *
+ * 连接状态与业务请求结果是两层语义：
+ * - `ready` 是 transport-ready 信号，**不**表示用户已授权；
+ * - `closing` 是 popup 生命周期结束信号，**不**替代 `result`；
+ * - `result` 是 request 的业务结果，**不**代表连接已断开。
+ *
+ * 不允许在 `result` 中夹带"连接已断开"语义；不允许把 `closing`
+ * 设计成"顺便夹带 result"。本协议 V1 **不**引入心跳、不引入
+ * `MessageChannel`。
+ */
 export type ProtocolMessage =
   | ProtocolReadyMessage
   | ProtocolRequestMessage
-  | ProtocolResultMessage;
+  | ProtocolResultMessage
+  | ProtocolClosingMessage;
 
 /* ============== identity.get ============== */
 
@@ -335,6 +368,13 @@ export interface ProtocolService {
    * confirming 阶段。仅当 phase === "unlocking" 时生效。
    */
   resumeAfterUnlock(): void;
+  /**
+   * 页面卸载 / 手工关闭路径上的 best-effort `closing` 触发入口。
+   * ProtocolPopupPage 在 `pagehide` / `beforeunload` 调它。idempotent：
+   * service 内部已经发过 `closing` 时直接忽略。**不**抛、**不**重试，
+   * 失败由 client 端 `popup.closed === true` 兜底。
+   */
+  pageUnloading?(): void;
   /**
    * 当前已绑定 request 的拷贝（不绑定时返回 null）。UI 在 confirm 页
    * 用来展示 aud / text / claims / contentType。

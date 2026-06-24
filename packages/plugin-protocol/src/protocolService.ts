@@ -31,6 +31,7 @@ import {
   type KeyspaceService,
   type MethodParams,
   type MethodResult,
+  type ProtocolClosingMessage,
   type ProtocolError,
   type ProtocolErrorCode,
   type ProtocolMethod,
@@ -63,6 +64,11 @@ export interface ProtocolServiceDeps {
   postReady?: (target: Window, msg: ProtocolReadyMessage) => void;
   /** 自定义 result 发送（默认 `target.postMessage(msg, origin)`）。 */
   postResult?: (target: Window, origin: string, msg: ProtocolResultMessage) => void;
+  /**
+   * 自定义 closing 发送（默认 `target.postMessage(msg, "*")`）。依赖中暴露
+   * 这条通道是为了让 ProtocolPopupPage 在页面卸载路径上复用同一幂等门禁。
+   */
+  postClosing?: (target: Window, msg: ProtocolClosingMessage) => void;
   /** 用户确认页 / 解锁页推动 session 状态使用。 */
   notifyUnlockChanged?: () => void;
 }
@@ -76,6 +82,7 @@ interface RequestBinding {
 }
 
 const READY_MESSAGE: ProtocolReadyMessage = { v: PROTOCOL_VERSION, type: "ready" };
+const CLOSING_MESSAGE: ProtocolClosingMessage = { v: PROTOCOL_VERSION, type: "closing" };
 
 export class ProtocolServiceImpl implements ProtocolService {
   private phase: ProtocolSessionSnapshot["phase"] = "waiting";
@@ -84,6 +91,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   private pendingRequestSnapshot:
     | { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
     | null = null;
+  /**
+   * 本会话是否已经向 opener 发过 `closing`。`closing` 与 `popup.closed` 是
+   * 并联收敛的断开信号，因此本标志只用来防止重复发出 `closing` 本身；
+   * 它**不**影响 `result` 的发送，也不影响 endSession 流程。
+   */
+  private closingSent = false;
 
   constructor(private readonly deps: ProtocolServiceDeps) {}
 
@@ -92,12 +105,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.phase = "waiting";
     this.binding = null;
     this.pendingRequestSnapshot = null;
+    this.closingSent = false;
     this.emit();
     this.postReadyIfPossible();
   }
 
   /** 关闭当前会话并清空内部状态。 */
   endSession(): void {
+    // endSession 自身不是"会话结束通知"路径；通知由 replyResult /
+    // replyError / pageUnloading 在窗口关闭前发出 `closing` 触发。
     this.phase = "waiting";
     this.binding = null;
     this.pendingRequestSnapshot = null;
@@ -165,6 +181,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.binding) return;
     if (this.phase !== "unlocking") return;
     this.setPhase("confirming");
+  }
+
+  /**
+   * 页面层 best-effort 触发：用户手工关闭窗口 / 刷新 / 卸载时由
+   * ProtocolPopupPage 调用。本方法**只**负责"如果还没发过 closing
+   * 就尝试发一次"，发送失败不重试、不阻塞。idempotent。
+   */
+  pageUnloading(): void {
+    this.sendClosingBestEffort();
   }
 
   /** vault locked / uninitialized 时让 UI 进入解锁页。 */
@@ -554,8 +579,13 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async replyResult(binding: RequestBinding, result: MethodResult): Promise<void> {
     if (!this.canPostToOpener(binding)) {
       // 情况 H：opener 已关，结束本地流程。
+      // 先发 closing（即便没有目标也走一遍幂等门禁清旗），再切到 closing
+      // 让 UI 渲染 DoneView 触发自动关闭。最后**不**在这里调 endSession：
+      // endSession 会把 phase 重置回 "waiting"，React 会把 closing 这次
+      // 推送覆盖掉，导致 DoneView 永远不挂载、自动关窗失败。endSession
+      // 由 page-level unmount handler 在组件销毁时调用。
+      this.sendClosingBestEffort();
       this.setPhase("closing");
-      this.endSession();
       return;
     }
     const message: ProtocolResultMessage = {
@@ -566,8 +596,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       result
     };
     this.postMessage(binding, message);
+    // 正常成功结束路径：result 已发出，进入关窗前再发一次 closing。
+    this.sendClosingBestEffort();
+    // 仅切 phase 为 closing，让 ProtocolPopupPage 渲染 DoneView。DoneView 内
+    // 的 useEffect 会在 200ms 后调用 window.close()。endSession 留给
+    // page-level unmount handler 在组件真正销毁时调用，避免 React 状态被
+    // "waiting" 推送覆盖掉 "closing" 推送。
     this.setPhase("closing");
-    this.endSession();
   }
 
   private async replyError(
@@ -592,9 +627,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       };
       this.postMessage(binding, message);
     }
-    // 状态机切到 error 让 UI 展示错误；会话进入 closing 后续由 UI 决定关 popup。
-    this.phase = "error";
-    this.emit();
+    // 发 closing 通知 opener，再切到 closing 让 UI 渲染 DoneView 触发自动关闭。
+    // 这里**不**调 endSession，原因与 replyResult 一致：endSession 会把 phase
+    // 重置回 "waiting"，导致 React 覆盖掉 "closing" 推送，DoneView 永远不渲染。
+    this.sendClosingBestEffort();
+    this.setPhase("closing");
   }
 
   private canPostToOpener(binding: RequestBinding): boolean {
@@ -617,6 +654,52 @@ export class ProtocolServiceImpl implements ProtocolService {
     } catch (err) {
       this.deps.logger?.error?.({ scope: "protocol.transport", event: "postMessage.failed", data: { err: String(err) } });
     }
+  }
+
+  /**
+   * best-effort 发送 `closing`。idempotent：最多发一次。失败不重试、
+   * 不抛、不阻塞，由 client 端 `popup.closed === true` 兜底。
+   *
+   * 优先级：绑定的 request source > window.opener。前者覆盖 service 启动后
+   * opener 已被回收的情况；后者覆盖 popup 页面在 waiting 阶段就触发卸载
+   * （还没绑定 request）的边缘情况。
+   */
+  private sendClosingBestEffort(): void {
+    if (this.closingSent) return;
+    const target = this.binding?.source ?? this.getOpener();
+    if (!target) {
+      // 没目标可以发，但仍然置位以避免后续重复进入这条路径。
+      this.closingSent = true;
+      return;
+    }
+    if (!this.canPostToTarget(target)) {
+      this.closingSent = true;
+      return;
+    }
+    this.closingSent = true;
+    if (this.deps.postClosing) {
+      try {
+        this.deps.postClosing(target, CLOSING_MESSAGE);
+      } catch (err) {
+        this.deps.logger?.error?.({ scope: "protocol.transport", event: "closing.failed", data: { err: String(err) } });
+      }
+      return;
+    }
+    try {
+      target.postMessage(CLOSING_MESSAGE, "*");
+    } catch (err) {
+      this.deps.logger?.error?.({ scope: "protocol.transport", event: "closing.failed", data: { err: String(err) } });
+    }
+  }
+
+  private canPostToTarget(target: Window): boolean {
+    try {
+      const s = target as Window & { closed?: boolean };
+      if (s.closed === true) return false;
+    } catch {
+      return false;
+    }
+    return true;
   }
 
   private getOpener(): Window | null {

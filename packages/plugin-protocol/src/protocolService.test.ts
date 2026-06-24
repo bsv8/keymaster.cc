@@ -9,7 +9,13 @@
 //   - cipher 同 origin 可解、异 origin 不可解。
 
 import { beforeEach, describe, expect, it } from "vitest";
-import { PROTOCOL_VERSION, type KeyspaceService, type VaultService, type ProtocolResultMessage } from "@keymaster/contracts";
+import {
+  PROTOCOL_VERSION,
+  type KeyspaceService,
+  type VaultService,
+  type ProtocolClosingMessage,
+  type ProtocolResultMessage
+} from "@keymaster/contracts";
 import { ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
 import { cborDecode, cborEncode } from "./protocolCbor.js";
 import { aesGcmDecrypt, deriveSiteKey, verifyCompactSecp256k1, signCompactSecp256k1 } from "./protocolCrypto.js";
@@ -113,7 +119,11 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
 function makeService(publicKeyHex = TEST_PUB_HEX) {
   const opener = makeFakeOpener();
   let resultMessage: ProtocolResultMessage | null = null;
-  const posted: { ready: number; result: ProtocolResultMessage[] } = { ready: 0, result: [] };
+  const posted: {
+    ready: number;
+    result: ProtocolResultMessage[];
+    closing: ProtocolClosingMessage[];
+  } = { ready: 0, result: [], closing: [] };
   const deps: ProtocolServiceDeps = {
     vault: makeVaultStub(publicKeyHex),
     keyspace: makeKeyspaceStub(publicKeyHex),
@@ -124,6 +134,9 @@ function makeService(publicKeyHex = TEST_PUB_HEX) {
     postResult: (_t, _o, msg) => {
       resultMessage = msg;
       posted.result.push(msg);
+    },
+    postClosing: (_t, msg) => {
+      posted.closing.push(msg);
     }
   };
   const service = new ProtocolServiceImpl(deps);
@@ -391,6 +404,170 @@ describe("ProtocolServiceImpl", () => {
     const r = getResult();
     // keyspace.requireActiveKey 抛错 -> internal_error
     expect(r?.ok).toBe(false);
+  });
+
+  it("posts exactly one closing after a successful result", async () => {
+    const { service, opener, posted } = makeService();
+    service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-closing-ok",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    // 正常成功路径：result + 一次 closing
+    expect(posted.result).toHaveLength(1);
+    expect(posted.closing).toHaveLength(1);
+    expect(posted.closing[0]).toEqual({ v: PROTOCOL_VERSION, type: "closing" });
+  });
+
+  it("posts exactly one closing after a user rejection", async () => {
+    const { service, opener, posted } = makeService();
+    service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-closing-rej",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.rejectByUser();
+    expect(posted.result).toHaveLength(1);
+    expect(posted.closing).toHaveLength(1);
+    expect(posted.closing[0]).toEqual({ v: PROTOCOL_VERSION, type: "closing" });
+  });
+
+  it("pageUnloading triggers closing idempotently", () => {
+    const { service, posted } = makeService();
+    service.startSession();
+    service.pageUnloading?.();
+    service.pageUnloading?.();
+    service.pageUnloading?.();
+    // 幂等：连续多次 pageUnloading 只发一次 closing。
+    expect(posted.closing).toHaveLength(1);
+  });
+
+  it("pageUnloading before any binding does not throw and posts once", () => {
+    const { service, posted } = makeService();
+    service.startSession();
+    // waiting 阶段，尚未绑定 request。
+    expect(() => service.pageUnloading?.()).not.toThrow();
+    expect(posted.closing).toHaveLength(1);
+  });
+
+  it("does not post closing when opener is already closed", async () => {
+    const { service, opener, posted } = makeService();
+    service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-closing-closed",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 在 confirmByUser 之前把 opener 标记为已关闭。
+    opener.closed = true;
+    await service.confirmByUser();
+    // opener 已关：result 与 closing 都不投递（canPostToTarget 兜底）。
+    expect(posted.result).toHaveLength(0);
+    expect(posted.closing).toHaveLength(0);
+  });
+
+  it("closing send failure does not block session end", async () => {
+    const { service, opener, deps, posted } = makeService();
+    const failing: ProtocolServiceDeps = {
+      ...deps,
+      postClosing: () => {
+        throw new Error("postMessage failed");
+      }
+    };
+    const s2 = new ProtocolServiceImpl(failing);
+    s2.startSession();
+    s2.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-closing-fail",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 不应抛；closing 失败被吞掉。
+    await expect(s2.confirmByUser()).resolves.toBeUndefined();
+    // replyResult 路径：phase 应停留在 "closing"，让 page-level DoneView
+    // 渲染并触发自动关窗。endSession 由 page-level unmount handler 调用，
+    // 不在这里重置 phase。
+    expect(s2.snapshot().phase).toBe("closing");
+    void posted;
+  });
+
+  it("replyResult leaves phase=closing so DoneView can auto-close popup", async () => {
+    // 验证施工单隐含约束：成功后 popup 必须稳定进入 closing 阶段以触发
+    // window.close()。replyResult 不能在内部调 endSession() 把 phase 重置
+    // 回 "waiting"，否则 React 会用 waiting 覆盖 closing 推送，DoneView
+    // 永远不渲染，popup 不会自动关闭。
+    const { service, opener } = makeService();
+    service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-doneview",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    expect(service.snapshot().phase).toBe("closing");
+  });
+
+  it("replyError leaves phase=closing so DoneView can auto-close popup", async () => {
+    // 验证拒绝 / 错误路径同样停在 closing，不会因 endSession() 提前回到 waiting。
+    const { service, opener } = makeService();
+    service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-doneview-rej",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.rejectByUser();
+    expect(service.snapshot().phase).toBe("closing");
   });
 });
 

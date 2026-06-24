@@ -42,9 +42,14 @@ export function ProtocolPopupPage() {
     });
   }, []);
 
-  // 挂载时启动会话并订阅；卸载时 endSession。
+  // 挂载时先装 message 监听，再启动会话；卸载时反向拆。
+  //
+  // 时序约束（施工单 001 公共语义）：
+  //   `ready` 必须只在 popup 监听安装完成后发出。否则 opener 收到 `ready`
+  //   立刻回 `request` 时，popup 还没开始监听，首条请求会丢。
+  //   因此这里坚持 "addEventListener → service.startSession()" 的顺序，
+  //   绝不能在监听未挂好前先 startSession（startSession 内部会立刻发 ready）。
   useEffect(() => {
-    service.startSession();
     const off = service.subscribe((next) => {
       console.debug("[protocol-popup] snapshot", {
         phase: next.phase,
@@ -63,10 +68,29 @@ export function ProtocolPopupPage() {
       });
       service.handleMessage(event);
     }
+    // 卸载 / 手工关闭 / 刷新路径上 best-effort 触发 `closing`，与
+    // service 层共用同一幂等门禁。pagehide 是更现代、更可靠的关闭信号；
+    // beforeunload 兜底。
+    function onPageHide() {
+      console.info("[protocol-popup] pagehide -> best-effort closing");
+      service.pageUnloading?.();
+    }
+    function onBeforeUnload() {
+      console.info("[protocol-popup] beforeunload -> best-effort closing");
+      service.pageUnloading?.();
+    }
+    // 1. 先装 message 监听，再装 pagehide / beforeunload。
     window.addEventListener("message", onMessage);
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    // 2. 监听装好后再启动会话：startSession 内部会立刻 post `ready`，
+    //    现在 opener 收到的任何 `request` 都能被本监听捕获。
+    service.startSession();
     return () => {
       console.info("[protocol-popup] unmount");
       window.removeEventListener("message", onMessage);
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("beforeunload", onBeforeUnload);
       off();
       service.endSession();
     };
