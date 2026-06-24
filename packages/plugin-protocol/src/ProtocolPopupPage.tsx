@@ -102,9 +102,9 @@ function WaitingView({ t }: { t: (k: string, v?: { defaultValue?: string }) => s
   return (
     <div className="protocol-popup protocol-popup--waiting">
       <PageHeader
-        title={t("protocol.waiting.title", { defaultValue: "等待请求" })}
+        title={t("protocol.waiting.title", { defaultValue: "等待外部站点请求" })}
         description={t("protocol.waiting.desc", {
-          defaultValue: "第三方站点应当通过 postMessage 发送请求。如果是误打开的，可以直接关闭。"
+          defaultValue: "请从外部 demo 站点发起请求。若你是直接打开此页面，它不会自己产生结果。"
         })}
       />
     </div>
@@ -296,8 +296,8 @@ function DoneView({ t }: { t: (k: string, v?: { defaultValue?: string }) => stri
   return (
     <div className="protocol-popup protocol-popup--done">
       <PageHeader
-        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
-        description={t("protocol.done", { defaultValue: "已完成。可以关闭此窗口。" })}
+        title={t("protocol.done.title", { defaultValue: "结果已回传" })}
+        description={t("protocol.done", { defaultValue: "请求已完成并回传给外部站点，这个窗口会自动关闭。" })}
       />
     </div>
   );
@@ -308,7 +308,7 @@ function ErrorView({ t, message }: { t: (k: string, v?: { defaultValue?: string 
     <div className="protocol-popup protocol-popup--error">
       <PageHeader
         title={t("protocol.error", { defaultValue: "请求失败" })}
-        description={message}
+        description={`${message}。请回到外部 demo 查看控制台日志，定位失败步骤。`}
       />
     </div>
   );
