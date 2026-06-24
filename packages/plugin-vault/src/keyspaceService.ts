@@ -149,6 +149,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   // 初值 `{}` = "无 active key"。构造期并不区分 vault 状态——vault bootstrap
   // 后由 `onVaultUnlocked` 收敛。
   let active: ActiveKeyState = {};
+  let activeIdentity: KeyIdentity | undefined;
   let initializing = false;
 
   function persistActive(state: ActiveKeyState) {
@@ -186,12 +187,18 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     }
   }
 
-  function setActiveInternal(next: ActiveKeyState) {
+  function setActiveInternal(next: ActiveKeyState, identity?: KeyIdentity) {
     const prev = active;
     active = next;
+    activeIdentity = next.activePublicKeyHex ? identity : undefined;
     persistActive(next);
     // 硬切换 002：active 切换走统一日志；记录前后 publicKeyHex 摘要（不记私钥 / 不记 label 原文之外的内容）。
     if (prev.activePublicKeyHex !== next.activePublicKeyHex) {
+      console.info("[keyspace] active.changed", {
+        previousPublicKeyHex: prev.activePublicKeyHex,
+        nextPublicKeyHex: next.activePublicKeyHex,
+        nextKeyId: activeIdentity?.keyId
+      });
       deps.logger?.info({
         scope: "vault.key",
         event: "active.changed",
@@ -282,19 +289,19 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    *     key 但没有 ready key"或"vault 内无 key 已被 finalize 到 uninitialized"
    *     两种情况，由调用方（壳层）区分。
    */
-  async function autoPickActive(): Promise<ActiveKeyState> {
+  async function autoPickActive(): Promise<KeyIdentity | undefined> {
     const ready = await listActiveCandidates();
     if (ready.length === 0) {
-      return {};
+      return undefined;
     }
     const persistedHex = readPersistedActiveHex();
     if (persistedHex) {
       const found = ready.find((k) => k.publicKeyHex === persistedHex);
-      if (found) return { activePublicKeyHex: found.publicKeyHex };
+      if (found) return found;
     }
     // 取最近创建；并列时取列表第一把。
     const sorted = [...ready].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    return { activePublicKeyHex: sorted[0]!.publicKeyHex };
+    return sorted[0];
   }
 
   /**
@@ -424,7 +431,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     if (active.activePublicKeyHex === publicKeyHex) {
       const next = await autoPickActive();
       closeNamespaceHandles(publicKeyHex);
-      setActiveInternal(next);
+      if (next) {
+        setActiveInternal({ activePublicKeyHex: next.publicKeyHex }, next);
+      } else {
+        setActiveInternal({});
+      }
     }
   }
 
@@ -462,17 +473,25 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       // 旧 task。必须"先停旧 key 任务，再切 active"。
       const prev = active;
       await quiesceNamespace(prev.activePublicKeyHex);
-      setActiveInternal({ activePublicKeyHex: publicKeyHex });
+      setActiveInternal({ activePublicKeyHex: publicKeyHex }, target);
     },
     requireActiveKey() {
       if (!active.activePublicKeyHex) {
         throw new Error("Active key is required");
       }
-      // 同步取：active 状态是 in-memory，但 publicKeyHex 必须对应到 KeyIdentity；
-      // 业务插件同步调用时，我们用缓存的 active 状态构造最小可用对象。
-      // 硬切换 003 收尾：不再回填 fingerprint 字段；短公钥由调用方现算。
+      if (activeIdentity && activeIdentity.publicKeyHex === active.activePublicKeyHex) {
+        console.info("[keyspace] requireActiveKey", {
+          keyId: activeIdentity.keyId,
+          publicKeyHex: activeIdentity.publicKeyHex,
+          label: activeIdentity.label
+        });
+        return activeIdentity;
+      }
+      console.warn("[keyspace] requireActiveKey fallback without cached identity", {
+        activePublicKeyHex: active.activePublicKeyHex
+      });
       return {
-        keyId: "",
+        keyId: active.activePublicKeyHex,
         publicKeyHex: active.activePublicKeyHex,
         label: "",
         capabilities: [],
@@ -618,7 +637,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         return;
       }
       const next = await autoPickActive();
-      setActiveInternal(next);
+      if (next) {
+        setActiveInternal({ activePublicKeyHex: next.publicKeyHex }, next);
+      } else {
+        setActiveInternal({});
+      }
     },
     async onVaultLocked() {
       // 硬切换 004：锁屏清理屏障。顺序：
@@ -673,7 +696,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       // 后才能被"踢出"旧 namespace，否则会撞上 `database connection
       // is closing`。
       await quiesceNamespace(prev.activePublicKeyHex);
-      setActiveInternal({ activePublicKeyHex: identity.publicKeyHex });
+      setActiveInternal({ activePublicKeyHex: identity.publicKeyHex }, identity);
     },
     setInitializing(next) {
       setInitializingInternal(next);

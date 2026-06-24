@@ -35,18 +35,37 @@ export function ProtocolPopupPage() {
   const [snap, setSnap] = useState<ProtocolSessionSnapshot>(() => service.snapshot());
   const [request, setRequest] = useState<ReturnType<NonNullable<ProtocolService["currentRequest"]>>>(() => service.currentRequest());
 
+  useEffect(() => {
+    console.info("[protocol-popup] mounted", {
+      pathname: window.location.pathname,
+      hasOpener: Boolean(window.opener)
+    });
+  }, []);
+
   // 挂载时启动会话并订阅；卸载时 endSession。
   useEffect(() => {
     service.startSession();
     const off = service.subscribe((next) => {
+      console.debug("[protocol-popup] snapshot", {
+        phase: next.phase,
+        method: next.method,
+        requestId: next.requestId,
+        boundOrigin: next.boundOrigin
+      });
       setSnap(next);
       setRequest(service.currentRequest());
     });
     function onMessage(event: MessageEvent) {
+      console.debug("[protocol-popup] message", {
+        origin: event.origin,
+        hasSource: Boolean(event.source),
+        dataType: event.data && typeof event.data === "object" ? (event.data as { type?: unknown }).type : typeof event.data
+      });
       service.handleMessage(event);
     }
     window.addEventListener("message", onMessage);
     return () => {
+      console.info("[protocol-popup] unmount");
       window.removeEventListener("message", onMessage);
       off();
       service.endSession();

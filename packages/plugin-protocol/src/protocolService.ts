@@ -264,6 +264,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private async dispatch(binding: RequestBinding): Promise<MethodResult> {
+    console.info("[protocol] dispatch", {
+      requestId: binding.id,
+      method: binding.method,
+      origin: binding.origin,
+      paramsKeys: Object.keys(binding.params as object)
+    });
     switch (binding.method) {
       case "identity.get":
         return this.executeIdentityGet(binding.params as IdentityGetParams, binding.origin);
@@ -280,10 +286,22 @@ export class ProtocolServiceImpl implements ProtocolService {
     params: IdentityGetParams,
     eventOrigin: string
   ): Promise<IdentityGetResult> {
+    console.info("[protocol] identity.get begin", {
+      requestId: this.binding?.id,
+      origin: eventOrigin,
+      aud: params.aud,
+      claimCount: params.claims?.length ?? 0
+    });
     if (params.aud !== eventOrigin) {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
     const active = this.requireActiveKey();
+    console.info("[protocol] identity.get active key", {
+      requestId: this.binding?.id,
+      keyId: active.keyId,
+      publicKeyHex: active.publicKeyHex,
+      label: active.label
+    });
     const { publicKeyHex, label, keyId } = active;
     const publicKeyBytes = await this.fetchPublicKeyBytes(publicKeyHex, keyId);
 
@@ -305,6 +323,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     ];
     const envelopeCbor = cborEncode(envelopeInput);
     const signature = await this.signWithActive(keyId, envelopeCbor);
+    console.info("[protocol] identity.get done", {
+      requestId: this.binding?.id,
+      keyId,
+      publicKeyHex,
+      envelopeBytes: envelopeCbor.byteLength,
+      signatureBytes: signature.byteLength
+    });
 
     return {
       identityEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
@@ -318,10 +343,23 @@ export class ProtocolServiceImpl implements ProtocolService {
     params: IntentSignParams,
     eventOrigin: string
   ): Promise<IntentSignResult> {
+    console.info("[protocol] intent.sign begin", {
+      requestId: this.binding?.id,
+      origin: eventOrigin,
+      aud: params.aud,
+      contentType: params.contentType,
+      contentBytes: params.content.bytes.byteLength
+    });
     if (params.aud !== eventOrigin) {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
     const active = this.requireActiveKey();
+    console.info("[protocol] intent.sign active key", {
+      requestId: this.binding?.id,
+      keyId: active.keyId,
+      publicKeyHex: active.publicKeyHex,
+      label: active.label
+    });
     const { publicKeyHex, keyId } = active;
     const publicKeyBytes = await this.fetchPublicKeyBytes(publicKeyHex, keyId);
     const contentSha256 = sha256Bytes(new Uint8Array(params.content.bytes));
@@ -338,6 +376,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       publicKeyBytes
     ]);
     const signature = await this.signWithActive(keyId, envelopeCbor);
+    console.info("[protocol] intent.sign done", {
+      requestId: this.binding?.id,
+      keyId,
+      publicKeyHex,
+      envelopeBytes: envelopeCbor.byteLength,
+      signatureBytes: signature.byteLength
+    });
     return {
       signedEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
       signature: toBinaryField(signature)
@@ -348,7 +393,19 @@ export class ProtocolServiceImpl implements ProtocolService {
     params: CipherEncryptParams,
     eventOrigin: string
   ): Promise<CipherEncryptResult> {
+    console.info("[protocol] cipher.encrypt begin", {
+      requestId: this.binding?.id,
+      origin: eventOrigin,
+      contentType: params.contentType,
+      contentBytes: params.content.bytes.byteLength
+    });
     const active = this.requireActiveKey();
+    console.info("[protocol] cipher.encrypt active key", {
+      requestId: this.binding?.id,
+      keyId: active.keyId,
+      publicKeyHex: active.publicKeyHex,
+      label: active.label
+    });
     const { publicKeyHex, keyId } = active;
     const siteKey = await this.deriveSiteKeyWithActive(keyId, eventOrigin);
     // inner plaintext = [v, contentType, contentBytes]
@@ -358,6 +415,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       new Uint8Array(params.content.bytes)
     ]);
     const { nonce, cipherbytes } = aesGcmEncrypt(siteKey, inner);
+    console.info("[protocol] cipher.encrypt done", {
+      requestId: this.binding?.id,
+      keyId,
+      publicKeyHex,
+      nonceBytes: nonce.byteLength,
+      cipherbytesBytes: cipherbytes.byteLength
+    });
     return {
       nonce: toBinaryField(nonce),
       cipherbytes: toBinaryField(cipherbytes)
@@ -368,7 +432,19 @@ export class ProtocolServiceImpl implements ProtocolService {
     params: CipherDecryptParams,
     eventOrigin: string
   ): Promise<CipherDecryptResult> {
+    console.info("[protocol] cipher.decrypt begin", {
+      requestId: this.binding?.id,
+      origin: eventOrigin,
+      nonceBytes: params.nonce.bytes.byteLength,
+      cipherbytesBytes: params.cipherbytes.bytes.byteLength
+    });
     const active = this.requireActiveKey();
+    console.info("[protocol] cipher.decrypt active key", {
+      requestId: this.binding?.id,
+      keyId: active.keyId,
+      publicKeyHex: active.publicKeyHex,
+      label: active.label
+    });
     const { publicKeyHex, keyId } = active;
     let siteKey: Uint8Array;
     try {
@@ -408,12 +484,27 @@ export class ProtocolServiceImpl implements ProtocolService {
   private requireActiveKey() {
     const active = this.deps.keyspace.active();
     if (!active.activePublicKeyHex) {
+      console.error("[protocol] requireActiveKey failed: no active key", {
+        requestId: this.binding?.id,
+        bindingMethod: this.binding?.method
+      });
       throw protocolError("active_key_unavailable", "No active key available");
     }
     const id = this.deps.keyspace.requireActiveKey();
     if (!id.publicKeyHex) {
+      console.error("[protocol] requireActiveKey failed: key identity missing publicKeyHex", {
+        requestId: this.binding?.id,
+        activePublicKeyHex: active.activePublicKeyHex,
+        keyId: id.keyId
+      });
       throw protocolError("active_key_unavailable", "No active key available");
     }
+    console.info("[protocol] requireActiveKey resolved", {
+      requestId: this.binding?.id,
+      keyId: id.keyId,
+      publicKeyHex: id.publicKeyHex,
+      label: id.label
+    });
     return {
       publicKeyHex: id.publicKeyHex,
       label: id.label,
@@ -423,6 +514,11 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** sign helper：从 vault.withPrivateKey 借私钥。 */
   private async signWithActive(keyId: string, bytes: Uint8Array): Promise<Uint8Array> {
+    console.info("[protocol] signWithActive", {
+      requestId: this.binding?.id,
+      keyId,
+      bytes: bytes.byteLength
+    });
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       return signCompactSecp256k1(material.hex, bytes);
     });
@@ -430,6 +526,11 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** cipher siteKey 派生：借私钥后 HMAC。 */
   private async deriveSiteKeyWithActive(keyId: string, exactOrigin: string): Promise<Uint8Array> {
+    console.info("[protocol] deriveSiteKeyWithActive", {
+      requestId: this.binding?.id,
+      keyId,
+      exactOrigin
+    });
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       return deriveSiteKey(material.hex, exactOrigin);
     });
@@ -437,6 +538,11 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** publicKey 字节：用 vault.withPrivateKey 派生 33-byte compressed pubkey。 */
   private async fetchPublicKeyBytes(publicKeyHex: string, keyId: string): Promise<Uint8Array> {
+    console.info("[protocol] fetchPublicKeyBytes", {
+      requestId: this.binding?.id,
+      keyId,
+      publicKeyHex
+    });
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       const pub = secp256k1.getPublicKey(hexToBytes(material.hex), true);
       return pub;
@@ -469,6 +575,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     code: ProtocolErrorCode,
     errorMessage: string
   ): Promise<void> {
+    console.error("[protocol] replyError", {
+      requestId: binding.id,
+      method: binding.method,
+      origin: binding.origin,
+      code,
+      errorMessage
+    });
     if (this.canPostToOpener(binding)) {
       const message: ProtocolResultMessage = {
         v: PROTOCOL_VERSION,

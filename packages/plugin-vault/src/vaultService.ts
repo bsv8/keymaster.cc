@@ -1173,17 +1173,27 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!password) throw new Error("Backup password is required");
       const record = await vaultDb.getKey(keyId);
       if (!record) throw new Error("Unknown key");
+      console.info("[vault] exportPrivateKey", {
+        keyId,
+        publicKeyHex: record.publicKeyHex
+      });
       return this.withPrivateKey(keyId, (material) =>
         encryptBsv8KeyEnvelope(material.hex, password)
       );
     },
 
     async withPrivateKey(id, fn) {
+      console.info("[vault] withPrivateKey begin", { keyId: id });
       const record = await vaultDb.getKey(id);
       if (!record) throw new Error(`Unknown key ${id}`);
       const material = await decryptMaterial(record);
       try {
-        return await fn(material);
+        const out = await fn(material);
+        console.info("[vault] withPrivateKey success", {
+          keyId: id,
+          publicKeyHex: record.publicKeyHex
+        });
+        return out;
       } finally {
         // material 在闭包结束后不再可达，由 GC 回收。
         // 这里不显式 zero，避免额外开销且不真正安全。
