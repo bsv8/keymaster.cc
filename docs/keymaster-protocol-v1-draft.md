@@ -45,15 +45,32 @@ Popup 连接状态是协议公共约定的一部分，与具体方法（`identit
 
 - 连接状态：`opening` / `connected` / `disconnected`。
   - `ready`：连接建立信号。
-  - `closing`：连接结束信号。
+  - `closing`：**窗口**生命周期结束信号。
   - `popup.closed === true`：浏览器兜底真值。
 - 业务结果：`result`（`ok=true` / `ok=false`），由 `id` 关联到具体 `request`。
 
 不允许把 `result` 当成"连接已经断开"的唯一真值，也不允许把
 `closing` 当成 `result` 的别名。具体定义收敛在
 [公共约定](./keymaster-protocol-common-v1-draft.md) 里的"Popup
-生命周期连接状态"与"顶层报文 / closing"段。本总览页不重复定义
-连接状态机，只做语义分层提示。
+生命周期与业务请求生命周期"与"顶层报文 / closing"段。本总览页不重复
+定义连接状态机，只做语义分层提示。
+
+## Popup 复用与命令流
+
+V1 协议 popup 是一次 window.open 之后**常驻**的会话窗口：
+
+- 同一个 popup 会话内允许**串行**处理多条 request；同一时刻仍只允许
+  **一条在途** request。
+- 单条 request 完成后 popup **不**自动关闭；它回到"等待下一条请求"
+  的可继续复用状态。
+- 一次只面向一个当前 origin；切换 origin 时按新 origin 重新载入命令
+  流历史。
+- 历史按 `event.origin` 归档到 Keymaster 自有的 IndexedDB
+  `keymaster.protocol`；不持久化私钥 / 完整密文 / 完整签名 / 解密明文。
+- 命令流历史**不**是协议层审计冷库，仅作为 popup 内的命令上下文展示。
+
+具体定义收敛在[公共约定](./keymaster-protocol-common-v1-draft.md) 里
+的"命令流历史"段。
 
 本协议 V1 **不**引入心跳、**不**引入 `MessageChannel`：连接状态
 完全建立在现有 `window.open + postMessage` 模型上。

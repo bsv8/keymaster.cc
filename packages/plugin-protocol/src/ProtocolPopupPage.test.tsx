@@ -1,17 +1,23 @@
 // packages/plugin-protocol/src/ProtocolPopupPage.test.tsx
-// 验证施工单 001：ProtocolPopupPage 的 UI 行为。
-//   - 等待 request；
-//   - 锁定态显示解锁；
-//   - 确认页展示来源/文案/claims/contentType；
-//   - 用户拒绝返回 user_rejected；
-//   - 完成后触发关闭流程（sending ready + waiting state）。
+// 验证施工单 001 + 002：
+//   - waiting 状态显示空 feed / 等待文案；
+//   - 收到历史后按新到旧渲染；
+//   - 最新命令默认展开；
+//   - 历史命令可点击展开；
+//   - 完成后页面不自动关闭（phase 回到 waiting）；
+//   - closing 由 pageUnloading 路径发出。
 
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
-import type { ProtocolService, ProtocolSessionSnapshot } from "@keymaster/contracts";
+import type {
+  ProtocolCommandFeedState,
+  ProtocolMethod,
+  ProtocolService,
+  ProtocolSessionSnapshot
+} from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_VERSION } from "@keymaster/contracts";
 import type { ReactNode } from "react";
 
@@ -50,22 +56,11 @@ function makeFakeService(): ProtocolService & {
   confirmCalls: number;
   handleMessageCalls: number;
   pageUnloadingCalls: number;
-  /**
-   * service 内部"本会话是否已发出过 closing"的幂等门禁镜像。
-   * ProtocolPopupPage 在页面卸载路径调 pageUnloading()，但 service
-   * 自己已经在 replyResult / replyError 发过 closing 时，pageUnloading()
-   * 必须 no-op —— 由 service 内部门禁短路。这里用 `closingEmitted` 计数，
-   * 让测试能区分"被调用的次数"与"实际触发 closing 的次数"。
-   */
   closingSent: boolean;
   closingEmitted: number;
-  /**
-   * 测试钩子：模拟 service 内"在 startSession 之前"被外部读取过监听状态。
-   * ProtocolPopupPage 必须保证 addEventListener('message') 在 startSession
-   * 之前调用 —— startSession 会立刻发 ready，opener 收到 ready 后会回 request，
-   * 此时如果监听未挂好，首条 request 会丢。本钩子让测试断言这个顺序。
-   */
   messageListenerInstalledBeforeReady: boolean | null;
+  feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+  feed: ProtocolCommandFeedState;
 } {
   const snap: ProtocolSessionSnapshot = {
     phase: "waiting",
@@ -75,6 +70,15 @@ function makeFakeService(): ProtocolService & {
     requestId: null
   };
   const listeners = new Set<(s: ProtocolSessionSnapshot) => void>();
+  const feedListeners = new Set<(s: ProtocolCommandFeedState) => void>();
+  const feed: ProtocolCommandFeedState = {
+    currentOrigin: null,
+    commands: [],
+    historyAvailable: true
+  };
+  // 模拟真实 service：当前已绑定 request 时 `currentRequest()` 返回它，
+  // 否则 null。让测试可以推进 confirming 状态。
+  let currentRequest: { id: string; method: ProtocolMethod; params: Record<string, unknown> } | null = null;
   const svc = {
     phase: "waiting" as ProtocolSessionSnapshot["phase"],
     postReadyCalls: 0,
@@ -85,12 +89,13 @@ function makeFakeService(): ProtocolService & {
     closingSent: false,
     closingEmitted: 0,
     messageListenerInstalledBeforeReady: null as boolean | null,
-    // 暴露内部 listener 集合，让测试能在 startSession 之后补 emit，
-    // 而不必依赖 subscribe 与 startSession 的相对顺序。
     listeners,
+    feedListeners,
+    feed,
     startSession() {
       this.phase = "waiting";
       this.postReadyCalls++;
+      currentRequest = null;
       for (const l of listeners) l({ ...snap, phase: this.phase });
     },
     endSession() {
@@ -103,7 +108,6 @@ function makeFakeService(): ProtocolService & {
     },
     pageUnloading() {
       this.pageUnloadingCalls++;
-      // 模拟真实 service 的幂等门禁：已经发过 closing 就短路，不再触发。
       if (this.closingSent) return;
       this.closingSent = true;
       this.closingEmitted++;
@@ -113,12 +117,8 @@ function makeFakeService(): ProtocolService & {
     },
     async rejectByUser() {
       this.rejectCalls++;
-      this.phase = "closing";
-      // 模拟真实 service：replyError 路径发完 result 后立刻发 closing。
-      if (!this.closingSent) {
-        this.closingSent = true;
-        this.closingEmitted++;
-      }
+      this.phase = "waiting";
+      currentRequest = null;
       for (const l of listeners) l({ ...snap, phase: this.phase });
     },
     resumeAfterUnlock() {
@@ -126,12 +126,26 @@ function makeFakeService(): ProtocolService & {
       for (const l of listeners) l({ ...snap, phase: this.phase });
     },
     currentRequest() {
-      return null;
+      return currentRequest as unknown as ReturnType<ProtocolService["currentRequest"]>;
+    },
+    setCurrentRequest(next: typeof currentRequest) {
+      currentRequest = next;
+    },
+    currentOrigin() {
+      return this.feed.currentOrigin;
+    },
+    feedSnapshot() {
+      return { ...this.feed, commands: this.feed.commands.slice() };
     },
     subscribe(handler: (s: ProtocolSessionSnapshot) => void) {
       listeners.add(handler);
       handler({ ...snap, phase: this.phase });
       return () => listeners.delete(handler);
+    },
+    subscribeFeed(handler: (s: ProtocolCommandFeedState) => void) {
+      feedListeners.add(handler);
+      handler({ ...this.feed, commands: this.feed.commands.slice() });
+      return () => feedListeners.delete(handler);
     },
     snapshot() {
       return { ...snap, phase: this.phase };
@@ -153,27 +167,160 @@ afterEach(() => {
 });
 
 describe("ProtocolPopupPage", () => {
-  it("shows waiting view and calls startSession on mount", () => {
+  it("shows topbar and feed empty state on mount", () => {
     const service = makeFakeService();
     currentService = service;
     render(<ProtocolPopupPage />);
+    // 顶栏：当前站点 / 状态 / 关闭 / 回到最新（文案带冒号，用正则匹配）
+    expect(screen.getByText(/当前站点/)).toBeTruthy();
+    expect(screen.getByText(/状态/)).toBeTruthy();
+    expect(screen.getByText("关闭")).toBeTruthy();
+    expect(screen.getByText("回到最新")).toBeTruthy();
+    // feed 等待文案（i18n key 即文案）：
     expect(service.postReadyCalls).toBe(1);
-    // 等待 view 渲染：与 WaitingView 中的 PageHeader title 一致。
-    expect(screen.getByText("等待外部站点请求")).toBeTruthy();
+  });
+
+  it("shows waiting hint when no origin yet", () => {
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    expect(
+      screen.getByText(
+        "等待来自外部站点的第一条请求。命令历史会按该站点的 origin 归档。"
+      )
+    ).toBeTruthy();
+  });
+
+  it("renders command feed sorted by updatedAt desc; latest expanded by default", async () => {
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    // 推一条 feed 进 service：当前 origin + 两条命令（最新在前）。
+    const newFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "r-new",
+          origin: "https://demo.example",
+          requestId: "r-new",
+          method: "identity.get",
+          phase: "approved",
+          decision: "approved",
+          status: "approved",
+          textSummary: "newest",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 2,
+          updatedAt: 2,
+          finishedAt: 2,
+          errorCode: "",
+          errorMessage: ""
+        },
+        {
+          id: "r-old",
+          origin: "https://demo.example",
+          requestId: "r-old",
+          method: "cipher.encrypt",
+          phase: "approved",
+          decision: "approved",
+          status: "approved",
+          textSummary: "oldest",
+          claimsSummary: [],
+          contentType: "note.v1",
+          payloadSize: 12,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 1,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = newFeed;
+      for (const l of service.feedListeners) l({ ...newFeed, commands: newFeed.commands.slice() });
+    });
+    // 新命令卡片：默认展开（包含"提示文案"等详情）
+    expect(screen.getByText("newest")).toBeTruthy();
+    // 旧命令卡片：默认折叠，只显示摘要行，不显示"提示文案"等详情。
+    expect(screen.queryByText("oldest")).toBeNull();
+  });
+
+  it("renders 'history unavailable' notice when historyAvailable=false", () => {
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const noHistoryFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [],
+      historyAvailable: false
+    };
+    act(() => {
+      service.feed = noHistoryFeed;
+      for (const l of service.feedListeners) l({ ...noHistoryFeed, commands: [] });
+    });
+    expect(
+      screen.getByText(
+        "历史不可用：本地数据库读取失败。当前命令仍可正常执行，但不会持久化。"
+      )
+    ).toBeTruthy();
+  });
+
+  it("does not auto-close popup when a request is confirmed (phase returns to waiting)", async () => {
+    // 验证施工单 002：单条 request 完成后 phase 回到 waiting，popup 不
+    // 渲染 DoneView，window.close 不会被自动触发。
+    const service = makeFakeService() as unknown as ProtocolService & {
+      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    // 模拟"已绑定 request"：让 currentRequest() 返回非 null。
+    service.setCurrentRequest({
+      id: "r-1",
+      method: "identity.get",
+      params: { aud: "https://demo.example", iat: 1, exp: 2, text: "x" }
+    });
+    // 推一次 phase=confirming，然后推 phase=waiting（模拟 confirmByUser 完成）。
+    const confirming: ProtocolSessionSnapshot = {
+      phase: "confirming",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: "identity.get",
+      requestId: "r-1"
+    };
+    act(() => {
+      for (const l of service.listeners) l(confirming);
+    });
+    // confirming 时会渲染 ConfirmView 的"确认请求"标题。
+    expect(screen.getByText("确认请求")).toBeTruthy();
+    // 切回 waiting：ConfirmView 消失，feed 仍在。
+    const waiting: ProtocolSessionSnapshot = {
+      phase: "waiting",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: null,
+      requestId: null
+    };
+    act(() => {
+      for (const l of service.listeners) l(waiting);
+    });
+    expect(screen.queryByText("确认请求")).toBeNull();
+    // 顶栏的"状态"应回到"等待下一条请求"。
+    await waitFor(() => {
+      expect(screen.getByText("等待下一条请求")).toBeTruthy();
+    });
   });
 
   it("registers window message listener before startSession sends ready", () => {
-    // 施工单 001 公共语义：ready 只能在监听安装完成后发出。
-    // 这里用 startSession spy 触发时记录"addEventListener 是否已被调用"
-    // 来锁定顺序约束。
     const order: string[] = [];
     const service = makeFakeService();
     service.startSession = () => {
       order.push(`ready_at_${service.postReadyCalls}`);
-      // 此时检查 window 上是否已有 message 监听。
-      // 由于 React Testing Library 在 render 时同步触发了 useEffect，
-      // 并且我们刚刚在测试里劫持了 startSession，按修复后的实现顺序，
-      // addEventListener('message') 应当已经执行过。
       service.messageListenerInstalledBeforeReady = messageListenerInstalledForTest();
       service.postReadyCalls++;
     };
@@ -186,14 +333,6 @@ describe("ProtocolPopupPage", () => {
   it("shows unlock view when phase is unlocking", () => {
     const service = makeFakeService() as unknown as ProtocolService & {
       phase: ProtocolSessionSnapshot["phase"];
-      startSession: () => void;
-      /**
-       * 暴露 fake 内部的 listener 集合，让 override 在 startSession 之后再补
-       * 一次 phase=unlocking 的 emit —— 与 startSession 和 subscribe 的相对
-       * 顺序无关。这是测试稳定性的关键：旧实现里 startSession 在 subscribe
-       * 之前，subscribe 立即拿到当前 phase；新实现里反过来。新测试只信任
-       * listener 集合的最终推送，不依赖实现顺序。
-       */
       listeners: Set<(s: ProtocolSessionSnapshot) => void>;
     };
     currentService = service;
@@ -208,14 +347,11 @@ describe("ProtocolPopupPage", () => {
         method: null,
         requestId: null
       };
-      // 推一次 phase=unlocking 给 React；无论 subscribe 在前还是在后，
-      // 这次 emit 都会被 React 看到。
       for (const l of service.listeners) l(snap);
       service.snapshot = () => snap;
     };
     runtimeState.vault = "locked";
     render(<ProtocolPopupPage />);
-    // 解锁 view：包含"解锁后继续"或"Unlock to continue"
     expect(screen.getByText(/解锁后继续|Unlock to continue/)).toBeTruthy();
   });
 
@@ -252,70 +388,21 @@ describe("ProtocolPopupPage", () => {
   });
 
   it("does not double-send closing when service has already sent it", () => {
-    // 模拟真实场景：service 在 replyResult / replyError 路径已经发过 closing，
-    // 然后用户在确认页直接关闭 popup，触发 pagehide → pageUnloading。
-    // service 内部门禁应短路，页面层不再产生第二次 closing。
     const service = makeFakeService();
-    // 提前标记 service 已通过 replyResult 等路径发过 closing。
     service.closingSent = true;
     service.closingEmitted = 1;
     currentService = service;
     render(<ProtocolPopupPage />);
     window.dispatchEvent(new Event("pagehide"));
-    // 页面层仍然调用了 pageUnloading（监听到了 pagehide）。
     expect(service.pageUnloadingCalls).toBe(1);
-    // 但 closing 实际发出次数仍是 1，没有变成 2。
     expect(service.closingEmitted).toBe(1);
-  });
-
-  it("renders DoneView when service phase becomes closing", () => {
-    // 验证 popup 正常结束后会进入 DoneView，自动 window.close() 才能挂上。
-    // 这条修复的关键约束：service 必须**先**发 result + closing，再把 phase
-    // 推到 closing；不能调 endSession() 把 phase 重置回 waiting，否则
-    // React 会用 waiting 覆盖 closing 推送，DoneView 永远不渲染。
-    const service = makeFakeService() as unknown as ProtocolService & {
-      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
-    };
-    currentService = service;
-    render(<ProtocolPopupPage />);
-    // 模拟 replyResult 完成：推一次 phase=closing 给所有 subscriber。
-    // setSnap 必须在 act() 内同步刷新 React 状态，否则 getByText 拿到的是
-    // 上一帧的 waiting 视图。
-    const closingSnap: ProtocolSessionSnapshot = {
-      phase: "closing",
-      boundSource: null,
-      boundOrigin: null,
-      method: null,
-      requestId: null
-    };
-    act(() => {
-      for (const l of service.listeners) l(closingSnap);
-    });
-    // DoneView 渲染包含 "结果已回传" 标题。
-    expect(screen.getByText("结果已回传")).toBeTruthy();
   });
 });
 
-/**
- * 检测 window 上是否已挂 message 监听。jsdom 不直接暴露"是否已注册监听"，
- * 但 addEventListener('message') 会触发现有监听 —— 所以最稳的方式是
- * 派发一条事件并记录 listener 是否被调用过。
- *
- * 测试里我们在 render 前 hook 进 startSession，在 startSession 执行前
- * 派发一条 test-only message，看是否有监听响应：
- *   - 若 ProtocolPopupPage 已经 addEventListener('message', ...) → 派发
- *     后 handleMessageCalls 自增 → 返回 true；
- *   - 否则监听未挂 → 返回 false。
- *
- * 必须在每条用例之间重置计数。
- */
 let probeHandleMessageCalls = 0;
 function messageListenerInstalledForTest(): boolean {
   const before = probeHandleMessageCalls;
   window.dispatchEvent(new MessageEvent("message", { data: { probe: true } }));
   const after = probeHandleMessageCalls;
-  // 探测事件本身不计入业务 handleMessageCalls，避免污染其它用例。
-  // 直接判断 after > before：ProtocolPopupPage 注册的 onMessage 会调
-  // service.handleMessage 让 handleMessageCalls 自增。
   return after > before;
 }

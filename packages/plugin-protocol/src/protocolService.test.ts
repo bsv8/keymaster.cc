@@ -7,13 +7,19 @@
 //   - claim 省略规则；
 //   - identity/sign envelope 字节稳定；
 //   - cipher 同 origin 可解、异 origin 不可解。
+//   - 单条 request 完成后 service 不发 closing、phase 回 waiting；
+//   - 同 popup 连续处理两条 request 时复用同一个 service；
+//   - pageUnloading 才发 closing；
+//   - DB 写失败不阻塞主协议结果。
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PROTOCOL_VERSION,
   type KeyspaceService,
   type VaultService,
   type ProtocolClosingMessage,
+  type ProtocolCommandDb,
+  type ProtocolCommandRecord,
   type ProtocolResultMessage
 } from "@keymaster/contracts";
 import { ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
@@ -47,7 +53,6 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     status: () => "unlocked",
     onStatusChange: () => () => undefined,
     withPrivateKey: async <T,>(_keyId: string, fn: (m: { hex: string }) => Promise<T> | T) => {
-      // 测试里：直接给 fn 私钥材料。
       return fn({ hex: TEST_PRIV_HEX });
     },
     listKeys: async () => [
@@ -116,14 +121,64 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
   } as unknown as KeyspaceService;
 }
 
-function makeService(publicKeyHex = TEST_PUB_HEX) {
-  const opener = makeFakeOpener();
-  let resultMessage: ProtocolResultMessage | null = null;
-  const posted: {
+/**
+ * 内存 fake commandDb：保留持久语义（同 id 覆盖、按 origin 隔离、
+ * updatedAt desc 排序），不引入 fake-indexeddb。
+ */
+function makeFakeCommandDb(): ProtocolCommandDb & { writes: number; readFailures: number; writeFailures: number } {
+  const map = new Map<string, ProtocolCommandRecord>();
+  let writes = 0;
+  let writeFailures = 0;
+  return {
+    get writes() {
+      return writes;
+    },
+    get readFailures() {
+      return 0;
+    },
+    get writeFailures() {
+      return writeFailures;
+    },
+    async putCommand(record) {
+      writes++;
+      if (record.id === "__force_write_fail__") {
+        writeFailures++;
+        throw new Error("forced write failure");
+      }
+      map.set(record.id, { ...record });
+    },
+    async getCommand(id) {
+      const v = map.get(id);
+      return v ? { ...v } : null;
+    },
+    async listCommandsByOrigin(origin) {
+      const out: ProtocolCommandRecord[] = [];
+      for (const v of map.values()) {
+        if (v.origin === origin) out.push({ ...v });
+      }
+      out.sort((a, b) => b.updatedAt - a.updatedAt);
+      return out;
+    }
+  };
+}
+
+interface ServiceHarness {
+  service: ProtocolServiceImpl;
+  opener: FakeWindow;
+  deps: ProtocolServiceDeps;
+  posted: {
     ready: number;
     result: ProtocolResultMessage[];
     closing: ProtocolClosingMessage[];
-  } = { ready: 0, result: [], closing: [] };
+  };
+  getResult: () => ProtocolResultMessage | null;
+  commandDb: ReturnType<typeof makeFakeCommandDb>;
+}
+
+function makeService(publicKeyHex = TEST_PUB_HEX, commandDb: ProtocolCommandDb | undefined = makeFakeCommandDb()): ServiceHarness {
+  const opener = makeFakeOpener();
+  let resultMessage: ProtocolResultMessage | null = null;
+  const posted: ServiceHarness["posted"] = { ready: 0, result: [], closing: [] };
   const deps: ProtocolServiceDeps = {
     vault: makeVaultStub(publicKeyHex),
     keyspace: makeKeyspaceStub(publicKeyHex),
@@ -139,8 +194,18 @@ function makeService(publicKeyHex = TEST_PUB_HEX) {
       posted.closing.push(msg);
     }
   };
+  if (commandDb) {
+    deps.commandDb = commandDb;
+  }
   const service = new ProtocolServiceImpl(deps);
-  return { service, opener, deps, posted, getResult: () => resultMessage };
+  return {
+    service,
+    opener,
+    deps,
+    posted,
+    getResult: () => resultMessage,
+    commandDb: commandDb as ReturnType<typeof makeFakeCommandDb>
+  };
 }
 
 function makeEvent<T>(data: T, origin = ORIGIN, source: object | null = null): MessageEvent {
@@ -206,8 +271,8 @@ describe("ProtocolServiceImpl", () => {
     }
   });
 
-  it("user rejection replies with user_rejected", async () => {
-    const { service, opener, getResult } = makeService();
+  it("user rejection replies with user_rejected and does not close popup", async () => {
+    const { service, opener, getResult, posted } = makeService();
     service.startSession();
     service.handleMessage(
       makeEvent(
@@ -226,6 +291,9 @@ describe("ProtocolServiceImpl", () => {
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && r.ok === false) expect(r.error.code).toBe("user_rejected");
+    // 施工单 002：拒绝不结束 popup 会话；phase 回到 waiting、不发 closing。
+    expect(service.snapshot().phase).toBe("waiting");
+    expect(posted.closing).toHaveLength(0);
   });
 
   it("identity.get envelope is deterministic cbor with signed envelope bytes", async () => {
@@ -254,9 +322,7 @@ describe("ProtocolServiceImpl", () => {
       subject: { publicKey: { bytes: ArrayBuffer } };
       resolvedClaims: Record<string, unknown>;
     };
-    // envelope 是 application/cbor。
     expect(result.identityEnvelope.mime).toBe("application/cbor");
-    // 解码 envelope 检查结构。
     const decoded = cborDecode(new Uint8Array(result.identityEnvelope.bytes)) as unknown[];
     expect(Array.isArray(decoded)).toBe(true);
     const arr = decoded as unknown[];
@@ -266,15 +332,11 @@ describe("ProtocolServiceImpl", () => {
     expect(arr[3]).toBe(1000);
     expect(arr[4]).toBe(2000);
     expect(arr[5]).toBe("hi");
-    // claims：按字典序排序的 [[name, val], ...]
     const claims = arr[7] as unknown[];
     expect(Array.isArray(claims)).toBe(true);
     expect((claims[0] as unknown[])[0]).toBe("key.label");
-    // resolvedClaims 包含 key.label
     expect(result.resolvedClaims["key.label"]).toBe("Key A");
-    // signature 64 bytes compact
     expect(result.signature.bytes.byteLength).toBe(64);
-    // 验签：subject.publicKey 是 33 字节
     const pub = new Uint8Array(result.subject.publicKey.bytes);
     expect(pub.length).toBe(33);
     const sigOk = verifyCompactSecp256k1(
@@ -308,7 +370,6 @@ describe("ProtocolServiceImpl", () => {
     if (!r1 || r1.ok !== true) return;
     const enc = r1.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
 
-    // 拿同样的私钥与 origin 派生 siteKey，手动解密。
     const siteKey = deriveSiteKey(TEST_PRIV_HEX, ORIGIN);
     const plain = aesGcmDecrypt(siteKey, new Uint8Array(enc.nonce.bytes), new Uint8Array(enc.cipherbytes.bytes));
     const decoded = cborDecode(plain) as unknown[];
@@ -319,7 +380,6 @@ describe("ProtocolServiceImpl", () => {
 
   it("cipher.decrypt across different origin fails with decrypt_failed", async () => {
     const { service, opener, getResult } = makeService();
-    // 先 encrypt
     service.startSession();
     const content = new TextEncoder().encode("body");
     service.handleMessage(
@@ -340,9 +400,7 @@ describe("ProtocolServiceImpl", () => {
     if (!r1 || r1.ok !== true) throw new Error("expected ok");
     const enc = r1.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
 
-    // decrypt 时换 origin
     const EVIL = "https://evil.com";
-    // 新 service 构造，origin 不同
     const evil = makeService();
     evil.service.startSession();
     const opener2 = evil.opener;
@@ -379,7 +437,6 @@ describe("ProtocolServiceImpl", () => {
 
   it("rejects request when active key is not available", async () => {
     const { service, opener, deps, getResult } = makeService();
-    // 替换 keyspace，让 active 没有 publicKeyHex
     const ks = makeKeyspaceStub("00".repeat(33));
     ks.active = () => ({});
     ks.requireActiveKey = () => {
@@ -402,11 +459,12 @@ describe("ProtocolServiceImpl", () => {
     );
     await s2.confirmByUser();
     const r = getResult();
-    // keyspace.requireActiveKey 抛错 -> internal_error
     expect(r?.ok).toBe(false);
   });
 
-  it("posts exactly one closing after a successful result", async () => {
+  /* ============== 施工单 002 硬切换：popup 复用 ============== */
+
+  it("does not post closing after a successful result; phase returns to waiting", async () => {
     const { service, opener, posted } = makeService();
     service.startSession();
     service.handleMessage(
@@ -414,7 +472,7 @@ describe("ProtocolServiceImpl", () => {
         {
           v: PROTOCOL_VERSION,
           type: "request",
-          id: "req-closing-ok",
+          id: "req-ok-1",
           method: "identity.get",
           params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
         },
@@ -423,13 +481,58 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.confirmByUser();
-    // 正常成功路径：result + 一次 closing
+    // result 发了，但 closing 还没发（closing 由 pageUnloading 路径负责）。
     expect(posted.result).toHaveLength(1);
-    expect(posted.closing).toHaveLength(1);
-    expect(posted.closing[0]).toEqual({ v: PROTOCOL_VERSION, type: "closing" });
+    expect(posted.closing).toHaveLength(0);
+    // 单条 request 收尾：phase 回到 waiting；service 还在。
+    expect(service.snapshot().phase).toBe("waiting");
+    expect(service.currentOrigin()).toBe(ORIGIN);
   });
 
-  it("posts exactly one closing after a user rejection", async () => {
+  it("reuses the same service to process a second request after first completes", async () => {
+    const { service, opener, posted } = makeService();
+    service.startSession();
+
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-A",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    expect(posted.closing).toHaveLength(0);
+    expect(service.snapshot().phase).toBe("waiting");
+
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-B",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 收到第二条后立即进入 confirming，可被确认。
+    expect(service.snapshot().phase).toBe("confirming");
+    expect(service.snapshot().requestId).toBe("req-B");
+    await service.confirmByUser();
+    // 两条 result 都已发，closing 仍未发。
+    expect(posted.result).toHaveLength(2);
+    expect(posted.closing).toHaveLength(0);
+  });
+
+  it("rejects while another request is in flight (second message ignored)", () => {
     const { service, opener, posted } = makeService();
     service.startSession();
     service.handleMessage(
@@ -437,7 +540,7 @@ describe("ProtocolServiceImpl", () => {
         {
           v: PROTOCOL_VERSION,
           type: "request",
-          id: "req-closing-rej",
+          id: "req-first",
           method: "identity.get",
           params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
         },
@@ -445,56 +548,121 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    await service.rejectByUser();
-    expect(posted.result).toHaveLength(1);
-    expect(posted.closing).toHaveLength(1);
-    expect(posted.closing[0]).toEqual({ v: PROTOCOL_VERSION, type: "closing" });
+    expect(service.snapshot().phase).toBe("confirming");
+    // 第二个 request 来自同 source/origin 应被忽略。
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-second",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "y" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.snapshot().requestId).toBe("req-first");
+    expect(posted.result).toHaveLength(0);
   });
 
-  it("pageUnloading triggers closing idempotently", () => {
-    const { service, posted } = makeService();
+  it("switching origin reloads feed history from commandDb", async () => {
+    const { service, opener, commandDb } = makeService();
+    // 先在 ORIGIN 处理一条 request。
     service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-origin-A",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    // 假装这条已经写库（service 自己写过，但为了"切换 origin 拉历史"
+    // 这条断言显式放一条"另一条不在内存里但应该被 DB 列出"的记录）。
+    await commandDb.putCommand({
+      id: "old-on-origin-A",
+      origin: ORIGIN,
+      requestId: "old-on-origin-A",
+      method: "identity.get",
+      phase: "approved",
+      decision: "approved",
+      status: "approved",
+      textSummary: "old",
+      claimsSummary: [],
+      contentType: "",
+      payloadSize: 0,
+      activePublicKeyHex: TEST_PUB_HEX,
+      createdAt: 1,
+      updatedAt: 1,
+      finishedAt: 1,
+      errorCode: "",
+      errorMessage: ""
+    });
+
+    const OTHER = "https://other.example";
+    // 切换 origin：再来一条来自 OTHER 的 request。
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-origin-B",
+          method: "identity.get",
+          params: { aud: OTHER, iat: 1, exp: 2, text: "y" }
+        },
+        OTHER,
+        opener
+      )
+    );
+    // 等异步 loadHistoryForOrigin 落定。
+    await new Promise((r) => setTimeout(r, 5));
+    expect(service.currentOrigin()).toBe(OTHER);
+    const feed = service.feedSnapshot();
+    // 切换后 feed 只显示 OTHER 自己的历史；ORIGIN 那条不串。
+    expect(feed.commands.every((c) => c.origin === OTHER)).toBe(true);
+    expect(feed.commands.find((c) => c.id === "old-on-origin-A")).toBeUndefined();
+  });
+
+  it("pageUnloading is the only path that posts closing", async () => {
+    const { service, opener, posted } = makeService();
+    service.startSession();
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-close-1",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    expect(posted.closing).toHaveLength(0);
+    // 触发 pageUnloading 才发 closing。
     service.pageUnloading?.();
-    service.pageUnloading?.();
-    service.pageUnloading?.();
-    // 幂等：连续多次 pageUnloading 只发一次 closing。
     expect(posted.closing).toHaveLength(1);
   });
 
   it("pageUnloading before any binding does not throw and posts once", () => {
     const { service, posted } = makeService();
     service.startSession();
-    // waiting 阶段，尚未绑定 request。
     expect(() => service.pageUnloading?.()).not.toThrow();
     expect(posted.closing).toHaveLength(1);
   });
 
-  it("does not post closing when opener is already closed", async () => {
-    const { service, opener, posted } = makeService();
-    service.startSession();
-    service.handleMessage(
-      makeEvent(
-        {
-          v: PROTOCOL_VERSION,
-          type: "request",
-          id: "req-closing-closed",
-          method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
-        },
-        ORIGIN,
-        opener
-      )
-    );
-    // 在 confirmByUser 之前把 opener 标记为已关闭。
-    opener.closed = true;
-    await service.confirmByUser();
-    // opener 已关：result 与 closing 都不投递（canPostToTarget 兜底）。
-    expect(posted.result).toHaveLength(0);
-    expect(posted.closing).toHaveLength(0);
-  });
-
-  it("closing send failure does not block session end", async () => {
-    const { service, opener, deps, posted } = makeService();
+  it("closing send failure does not block main flow", async () => {
+    const { service, opener, deps } = makeService();
     const failing: ProtocolServiceDeps = {
       ...deps,
       postClosing: () => {
@@ -516,20 +684,59 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    // 不应抛；closing 失败被吞掉。
     await expect(s2.confirmByUser()).resolves.toBeUndefined();
-    // replyResult 路径：phase 应停留在 "closing"，让 page-level DoneView
-    // 渲染并触发自动关窗。endSession 由 page-level unmount handler 调用，
-    // 不在这里重置 phase。
-    expect(s2.snapshot().phase).toBe("closing");
-    void posted;
+    // 收尾：phase 仍稳定在 waiting；不抛。
+    expect(s2.snapshot().phase).toBe("waiting");
   });
 
-  it("replyResult leaves phase=closing so DoneView can auto-close popup", async () => {
-    // 验证施工单隐含约束：成功后 popup 必须稳定进入 closing 阶段以触发
-    // window.close()。replyResult 不能在内部调 endSession() 把 phase 重置
-    // 回 "waiting"，否则 React 会用 waiting 覆盖 closing 推送，DoneView
-    // 永远不渲染，popup 不会自动关闭。
+  it("DB write failure does not block main protocol result", async () => {
+    // 构造一个读 / 写都失败的 fake db；service 主流程不应被它打断。
+    const failingDb: ProtocolCommandDb = {
+      async putCommand() {
+        throw new Error("db down");
+      },
+      async getCommand() {
+        throw new Error("db down");
+      },
+      async listCommandsByOrigin() {
+        throw new Error("db down");
+      }
+    };
+    const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingDb);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      service.startSession();
+      service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "req-db-fail",
+            method: "identity.get",
+            params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          },
+          ORIGIN,
+          opener
+        )
+      );
+      // 等异步 loadHistoryForOrigin 落定。
+      await new Promise((r) => setTimeout(r, 5));
+      // 此时写已经失败过一次：historyAvailable 必须为 false。
+      expect(service.feedSnapshot().historyAvailable).toBe(false);
+      await service.confirmByUser();
+      // result 正常发出。
+      const r = getResult();
+      expect(r?.ok).toBe(true);
+      // 写失败已被吞；historyAvailable 保持 false。
+      expect(service.feedSnapshot().historyAvailable).toBe(false);
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("internal record id is decoupled from transport requestId", async () => {
+    // DB 主键必须由 service 内部生成；调用方即便重复 requestId，也应该
+    // 落两条不同命令卡（不会互相覆盖）。
     const { service, opener } = makeService();
     service.startSession();
     service.handleMessage(
@@ -537,7 +744,7 @@ describe("ProtocolServiceImpl", () => {
         {
           v: PROTOCOL_VERSION,
           type: "request",
-          id: "req-doneview",
+          id: "duplicated-request-id",
           method: "identity.get",
           params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
         },
@@ -546,19 +753,17 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await service.confirmByUser();
-    expect(service.snapshot().phase).toBe("closing");
-  });
-
-  it("replyError leaves phase=closing so DoneView can auto-close popup", async () => {
-    // 验证拒绝 / 错误路径同样停在 closing，不会因 endSession() 提前回到 waiting。
-    const { service, opener } = makeService();
-    service.startSession();
+    const feed1 = service.feedSnapshot();
+    const recordId1 = feed1.commands[0]?.id;
+    expect(recordId1).toBeDefined();
+    expect(recordId1).not.toBe("duplicated-request-id");
+    // 复用同一 requestId：DB 应有两条不同记录。
     service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
           type: "request",
-          id: "req-doneview-rej",
+          id: "duplicated-request-id",
           method: "identity.get",
           params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
         },
@@ -566,8 +771,105 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    await service.rejectByUser();
-    expect(service.snapshot().phase).toBe("closing");
+    await service.confirmByUser();
+    const feed2 = service.feedSnapshot();
+    const recordId2 = feed2.commands[0]?.id;
+    expect(recordId2).toBeDefined();
+    expect(recordId2).not.toBe(recordId1);
+    expect(feed2.commands.length).toBe(2);
+  });
+
+  it("loadHistoryForOrigin preserves in-flight command card on origin switch", async () => {
+    // 关键不变量：切换 origin 时，DB 读结果不能覆盖当前 in-flight 命令卡。
+    // 即便 DB 读比当前命令卡 upsert 更早完成，in-flight 卡的最新状态
+    // 也必须保留。
+    const { service, opener, commandDb } = makeService();
+    service.startSession();
+    // 准备：在 ORIGIN 历史上先放一条已完成的命令卡，DB 里有完整记录。
+    await commandDb.putCommand({
+      id: "old-on-origin-A",
+      origin: ORIGIN,
+      requestId: "req-old",
+      method: "identity.get",
+      phase: "approved",
+      decision: "approved",
+      status: "approved",
+      textSummary: "old",
+      claimsSummary: [],
+      contentType: "",
+      payloadSize: 0,
+      activePublicKeyHex: TEST_PUB_HEX,
+      createdAt: 1,
+      updatedAt: 1,
+      finishedAt: 1,
+      errorCode: "",
+      errorMessage: ""
+    });
+    // 切换到 OTHER：先用 OTHER 发一条 request。
+    const OTHER = "https://other.example";
+    service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-OTHER",
+          method: "identity.get",
+          params: { aud: OTHER, iat: 1, exp: 2, text: "x" }
+        },
+        OTHER,
+        opener
+      )
+    );
+    // 等异步 loadHistoryForOrigin 落定。
+    await new Promise((r) => setTimeout(r, 5));
+    // 关键断言：OTHER 上有 in-flight 命令卡，且 ORIGIN 旧记录不串入。
+    const feed = service.feedSnapshot();
+    expect(feed.currentOrigin).toBe(OTHER);
+    expect(feed.commands.every((c) => c.origin === OTHER)).toBe(true);
+    const inflight = feed.commands.find((c) => c.requestId === "req-OTHER");
+    expect(inflight).toBeDefined();
+    expect(inflight?.origin).toBe(OTHER);
+  });
+
+  it("loadHistoryForOrigin failure keeps the in-flight card alive", async () => {
+    // DB 读抛错时，UI 进入"历史不可用"；但当前命令卡不能因此消失。
+    const failingDb: ProtocolCommandDb = {
+      async putCommand() {
+        return undefined;
+      },
+      async getCommand() {
+        return null;
+      },
+      async listCommandsByOrigin() {
+        throw new Error("read failed");
+      }
+    };
+    const { service, opener } = makeService(TEST_PUB_HEX, failingDb);
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      service.startSession();
+      // 切换到不同 origin 触发 loadHistoryForOrigin。
+      const NEW_ORIGIN = "https://new.example";
+      service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "req-keep",
+            method: "identity.get",
+            params: { aud: NEW_ORIGIN, iat: 1, exp: 2, text: "x" }
+          },
+          NEW_ORIGIN,
+          opener
+        )
+      );
+      await new Promise((r) => setTimeout(r, 5));
+      const feed = service.feedSnapshot();
+      expect(feed.historyAvailable).toBe(false);
+      expect(feed.commands.find((c) => c.requestId === "req-keep")).toBeDefined();
+    } finally {
+      errSpy.mockRestore();
+    }
   });
 });
 
@@ -582,9 +884,7 @@ describe("protocolCbor", () => {
   });
 
   it("deterministic map ordering by key", () => {
-    const a = cborEncode({ b: 1, a: 2 });
-    const b = cborEncode({ a: 2, b: 1 });
-    expect(a).toEqual(b);
+    expect(cborEncode({ b: 1, a: 2 })).toEqual(cborEncode({ a: 2, b: 1 }));
   });
 });
 

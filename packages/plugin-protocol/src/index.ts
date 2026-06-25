@@ -4,7 +4,9 @@
 
 export { protocolPlugin, PROTOCOL_PLUGIN_ID } from "./manifest.js";
 export { ProtocolPopupPage } from "./ProtocolPopupPage.js";
-export { createProtocolService, ProtocolServiceImpl } from "./protocolService.js";
+export { ProtocolCommandFeed, type ProtocolCommandFeedProps } from "./ProtocolCommandFeed.js";
+export { createProtocolService, ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
+export { openProtocolCommandDb } from "./protocolCommandDb.js";
 export { ProtocolValidationError, parseRequestMessage } from "./protocolValidation.js";
 export {
   cborEncode,

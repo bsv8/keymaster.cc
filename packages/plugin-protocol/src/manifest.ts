@@ -1,17 +1,16 @@
 // packages/plugin-protocol/src/manifest.ts
-// 对外协议插件：popup 路由 + service capability + 协议页 i18n。
+// 对外协议插件：popup 路由 + service capability + 协议页 i18n +
+// 命令流 IndexedDB。
 //
-// 设计缘由（施工单 001）：
-//   - 本插件是 V1 对外协议的唯一 owner。其它插件不参与协议层。
-//   - 入口路由只有一条 `/protocol/v1/popup`；不要为每个方法拆路由。
-//   - popup 走独立的 React 组件 `ProtocolPopupPage`，它通过
-//     `protocol.service` capability 拿到 service 实例。
-//   - 依赖 `vault.service` / `keyspace.service`：协议需要 active key +
-//     withPrivateKey；这两个能力由 vault 插件提供。
-//   - popup 不出现在 menu.registry；它通过 window.open 由第三方站点触发。
-//   - 不注册到 route.registry 普通路由表（RouteRenderer 走普通路由）：
-//     apps/web 的 App.tsx 走"path 命中 /protocol/v1/popup → 渲染协议入口"
-//     的硬切换特例，跳过 LockedShell / UnlockedShell。
+// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+//   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
+//     `closing` 由 pageUnloading 路径发出。
+//   - 命令流历史走 `keymaster.protocol` IndexedDB：store=commands，
+//     索引 origin / updatedAt / [origin, updatedAt]。
+//   - service 收到第一条合法 request 时按 `event.origin` 拉历史；
+//     切换 origin 时重新载入；DB 失败时 `historyAvailable=false` 降级。
+//   - popup 入口路径只有一条 `/protocol/v1/popup`，**不**注册到
+//     `route.registry`（与施工单 001 公共语义保持一致）。
 
 import type {
   I18nPluginResources,
@@ -20,11 +19,10 @@ import type {
   PluginManifest,
   VaultService
 } from "@keymaster/contracts";
-import {
-  PROTOCOL_SERVICE_CAPABILITY
-} from "@keymaster/contracts";
+import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import { createProtocolService } from "./protocolService.js";
+import { openProtocolCommandDb } from "./protocolCommandDb.js";
 
 export const PROTOCOL_PLUGIN_ID = "protocol";
 
@@ -34,11 +32,25 @@ const protocolResources: I18nPluginResources = {
   resources: {
     en: {
       "protocol.route.popup": "Protocol",
-      "protocol.opener.missing": "This page must be opened by a third-party site via window.open. The opener window is no longer available.",
+      "protocol.opener.missing":
+        "This page must be opened by a third-party site via window.open. The opener window is no longer available.",
+      "protocol.topbar.origin": "Current site",
+      "protocol.topbar.origin.none": "Not bound",
+      "protocol.topbar.status": "Status",
+      "protocol.topbar.backToTop": "Back to latest",
+      "protocol.topbar.close": "Close",
+      "protocol.phase.waiting": "Waiting for next request",
+      "protocol.phase.unlocking": "Waiting for unlock",
+      "protocol.phase.confirming": "Waiting for confirmation",
+      "protocol.phase.executing": "Processing",
+      "protocol.phase.closing": "Closing",
+      "protocol.phase.error": "Error",
       "protocol.waiting.title": "Waiting for request",
-      "protocol.waiting.desc": "A third-party site should send a request through postMessage. You can close this window if it opened by accident.",
+      "protocol.waiting.desc":
+        "A third-party site should send a request through postMessage. You can close this window if it opened by accident.",
       "protocol.unlock.title": "Unlock to continue",
-      "protocol.unlock.desc": "This protocol request requires you to unlock the local Vault. Once unlocked, the request will continue automatically.",
+      "protocol.unlock.desc":
+        "This protocol request requires you to unlock the local Vault. Once unlocked, the request will continue automatically.",
       "protocol.unlock.password": "Password",
       "protocol.unlock.submit": "Unlock",
       "protocol.unlock.cancel": "Cancel",
@@ -56,6 +68,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.confirm.cancel": "Cancel",
       "protocol.confirm.confirm": "Confirm",
       "protocol.executing": "Processing…",
+      "protocol.done.title": "Result delivered",
       "protocol.done": "Done. You can close this window.",
       "protocol.error": "Request failed",
       "protocol.error.user_rejected": "You rejected the request.",
@@ -63,11 +76,41 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_request": "Invalid request.",
       "protocol.error.invalid_origin": "The request origin does not match the declared aud.",
       "protocol.error.decrypt_failed": "Decryption failed.",
-      "protocol.error.internal_error": "Internal error."
+      "protocol.error.internal_error": "Internal error.",
+      "protocol.feed.empty":
+        "No command history for this site yet. The first request will appear here after it completes.",
+      "protocol.feed.empty.waitingOrigin":
+        "Waiting for the first request from an external site. Command history will be archived by that site's exact origin.",
+      "protocol.feed.historyUnavailable":
+        "History unavailable: local database read failed. The current command still works, but it won't be persisted.",
+      "protocol.feed.list.aria": "Command flow history",
+      "protocol.feed.decision.pending": "Pending",
+      "protocol.feed.decision.approved": "Approved",
+      "protocol.feed.decision.rejected": "Rejected",
+      "protocol.feed.decision.failed": "Failed",
+      "protocol.feed.origin": "Origin",
+      "protocol.feed.requestId": "Request id",
+      "protocol.feed.text": "Message",
+      "protocol.feed.claims": "Requested claims",
+      "protocol.feed.contentType": "Content type",
+      "protocol.feed.activeKey": "Signer public key",
+      "protocol.feed.error": "Error",
+      "protocol.feed.timeline": "Timeline"
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
       "protocol.opener.missing": "该页面必须由第三方站点通过 window.open 打开。opener 窗口已不可用。",
+      "protocol.topbar.origin": "当前站点",
+      "protocol.topbar.origin.none": "未绑定",
+      "protocol.topbar.status": "状态",
+      "protocol.topbar.backToTop": "回到最新",
+      "protocol.topbar.close": "关闭",
+      "protocol.phase.waiting": "等待下一条请求",
+      "protocol.phase.unlocking": "等待解锁",
+      "protocol.phase.confirming": "等待确认",
+      "protocol.phase.executing": "处理中",
+      "protocol.phase.closing": "收尾",
+      "protocol.phase.error": "错误",
       "protocol.waiting.title": "等待请求",
       "protocol.waiting.desc": "第三方站点应当通过 postMessage 发送请求。如果是误打开的，可以直接关闭。",
       "protocol.unlock.title": "解锁后继续",
@@ -89,6 +132,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.confirm.cancel": "取消",
       "protocol.confirm.confirm": "确认",
       "protocol.executing": "处理中…",
+      "protocol.done.title": "结果已回传",
       "protocol.done": "已完成。可以关闭此窗口。",
       "protocol.error": "请求失败",
       "protocol.error.user_rejected": "你已取消请求。",
@@ -96,7 +140,23 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_request": "请求格式不合法。",
       "protocol.error.invalid_origin": "请求来源与声明的 aud 不一致。",
       "protocol.error.decrypt_failed": "解密失败。",
-      "protocol.error.internal_error": "内部错误。"
+      "protocol.error.internal_error": "内部错误。",
+      "protocol.feed.empty": "当前站点尚无命令历史。第一条请求完成后会出现在这里。",
+      "protocol.feed.empty.waitingOrigin": "等待来自外部站点的第一条请求。命令历史会按该站点的 origin 归档。",
+      "protocol.feed.historyUnavailable": "历史不可用：本地数据库读取失败。当前命令仍可正常执行，但不会持久化。",
+      "protocol.feed.list.aria": "命令流历史",
+      "protocol.feed.decision.pending": "等待",
+      "protocol.feed.decision.approved": "已批准",
+      "protocol.feed.decision.rejected": "已拒绝",
+      "protocol.feed.decision.failed": "执行失败",
+      "protocol.feed.origin": "来源站点",
+      "protocol.feed.requestId": "请求 id",
+      "protocol.feed.text": "提示文案",
+      "protocol.feed.claims": "请求的 claims",
+      "protocol.feed.contentType": "内容类型",
+      "protocol.feed.activeKey": "签名公钥",
+      "protocol.feed.error": "错误",
+      "protocol.feed.timeline": "时间"
     }
   }
 };
@@ -122,50 +182,68 @@ export const protocolPlugin: PluginManifest = {
     const vaultService = ctx.get<VaultService>("vault.service");
     const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
 
-    const service = createProtocolService({
-      vault: vaultService,
-      keyspace: keyspaceService,
-      logger: {
-        info: (input) =>
-          ctx.logger.info({
-            scope: "protocol.lifecycle",
-            event: "info",
-            message: "",
-            data: input as Record<string, unknown>
-          }),
-        warn: (input) =>
-          ctx.logger.warn({
-            scope: "protocol.lifecycle",
-            event: "warn",
-            message: "",
-            data: input as Record<string, unknown>
-          }),
-        error: (input) =>
-          ctx.logger.error({
-            scope: "protocol.lifecycle",
-            event: "error",
-            message: "",
-            data: input as Record<string, unknown>
-          })
-      }
-    });
-    ctx.provide(PROTOCOL_SERVICE_CAPABILITY, service);
-
-    // 注意：协议页**不**注册到 `route.registry`。
-    // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径
-    // 也只有一条。`apps/web/src/App.tsx` 已经把
-    // `/protocol/v1/popup` 作为顶层特例在 LockedShell / UnlockedShell
-    // **之前**直接渲染 `ProtocolPopupPage`；若再在 route.registry 里
-    // 注册，会让 RouteRenderer 多一条可匹配路径，破坏"路径 → 组件"
-    // 的单映射。其它路径仍走 `RouteRenderer`，与协议路径互不干扰。
-
-    return () => {
-      // 幂等 teardown：service 内部状态在 endSession 后清空。
+    // 命令流 IndexedDB：best-effort 打开；失败时 service 走"historyAvailable=false"
+    // 降级，主协议流程不受影响。`setup` 允许返回 Promise；这里 await
+    // 让 service 在拿到 DB 引用后才被构造，避免 late-binding 复杂度。
+    return (async () => {
+      let commandDb: Awaited<ReturnType<typeof openProtocolCommandDb>> | undefined;
       try {
-        service.endSession();
-      } catch {
-        // ignore
+        commandDb = await openProtocolCommandDb();
+      } catch (err) {
+        ctx.logger.error({
+          scope: "protocol.lifecycle",
+          event: "commandDb.open.failed",
+          message: "commandDb failed to open",
+          data: { err: err instanceof Error ? err.message : String(err) }
+        });
       }
-    };
+
+      const service = createProtocolService({
+        vault: vaultService,
+        keyspace: keyspaceService,
+        commandDb,
+        logger: {
+          info: (input) =>
+            ctx.logger.info({
+              scope: "protocol.lifecycle",
+              event: "info",
+              message: "",
+              data: input as Record<string, unknown>
+            }),
+          warn: (input) =>
+            ctx.logger.warn({
+              scope: "protocol.lifecycle",
+              event: "warn",
+              message: "",
+              data: input as Record<string, unknown>
+            }),
+          error: (input) =>
+            ctx.logger.error({
+              scope: "protocol.lifecycle",
+              event: "error",
+              message: "",
+              data: input as Record<string, unknown>
+            })
+        }
+      });
+      ctx.provide(PROTOCOL_SERVICE_CAPABILITY, service);
+
+      // 注意：协议页**不**注册到 `route.registry`。
+      // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径
+      // 也只有一条。`apps/web/src/App.tsx` 已经把
+      // `/protocol/v1/popup` 作为顶层特例在 LockedShell / UnlockedShell
+      // **之前**直接渲染 `ProtocolPopupPage`；若再在 route.registry 里
+      // 注册，会让 RouteRenderer 多一条可匹配路径，破坏"路径 → 组件"
+      // 的单映射。其它路径仍走 `RouteRenderer`，与协议路径互不干扰。
+
+      return () => {
+        // 幂等 teardown：service 内部状态在 endSession 后清空。
+        try {
+          service.endSession();
+        } catch {
+          // ignore
+        }
+      };
+    })();
   }
 };

@@ -1,21 +1,28 @@
 // packages/plugin-protocol/src/protocolService.ts
 // 协议 service：transport + 校验 + source/origin 绑定 + 解锁/确认调度 +
-// 调用 vault / keyspace + 构造 envelope + 签名/加解密。
+// 调用 vault / keyspace + 构造 envelope + 签名/加解密 + 命令流历史。
 //
-// 设计缘由（施工单 001）：
-//   - 一次只处理一个 request；状态机由 service 自己维护，UI 不参与。
-//   - UI 只通过 subscribe 拿到 snapshot，通过 confirmByUser / rejectByUser
-//     推动状态。
-//   - popup 刷新 / 关闭 / opener 丢失 都视为会话结束，不在本地存任何
-//     持久化。
+// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+//   - **service 生命周期 = popup 生命周期**：popup 在，service 在；
+//     单条 request 完成后 service 不结束，不发 `closing`。
+//   - **request 生命周期 = 单条命令卡**：一条 request 收到后落到
+//     `ProtocolCommandRecord`；状态推进时同步更新该记录。
+//   - **closing 只在 `pageUnloading` 路径发出**：用户手工关窗 /
+//     页面卸载 / demo 主动要求关闭。
+//   - **一次只处理一条 request**：第二个 request 进入时被当前 binding
+//     占用则忽略（非当前 binding source/origin 的请求也忽略）。
+//   - **历史按 exact origin 归档**：首条合法 request 进来时按
+//     `event.origin` 拉 DB；同会话切换 origin 时重新载入。
+//   - **DB 主键与 transport requestId 解耦**：`ProtocolCommandRecord.id`
+//     是 service 内部生成的稳定 UUID，与 `requestId`（transport 关联用）
+//     分离。调用方即便重复 `requestId`，命令卡也不会互相覆盖。
+//   - **历史加载用 merge 而不是 replace**：DB 读结果只覆盖非 in-flight 的
+//     内存命令卡；当前进行中的命令卡永远保留在 feed 顶部。
+//   - **DB 不可用不阻塞协议主流程**：DB 异常时 `historyAvailable=false`，
+//     当前 request 仍正常完成，UI 顶部显示"历史不可用"。
 //   - 不依赖 React；可单测。
-//   - 错误分两类：
-//       * 校验类（invalid_request / invalid_origin / wallet_locked 等）→
-//         直接组 result 回 opener；
-//       * 业务类（user_rejected / decrypt_failed / internal_error）→
-//         同上。
-//   - 用户在确认后、service 真正回传前发现 opener 不存在：直接结束
-//     本地流程，不重试，不缓存。
+//   - 错误分两类：校验类（invalid_request / invalid_origin 等）直接
+//     走 result 回 opener；业务类同样。失败状态仍写命令卡。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
@@ -32,12 +39,16 @@ import {
   type MethodParams,
   type MethodResult,
   type ProtocolClosingMessage,
+  type ProtocolCommandDb,
+  type ProtocolCommandFeedState,
+  type ProtocolCommandRecord,
   type ProtocolError,
   type ProtocolErrorCode,
   type ProtocolMethod,
   type ProtocolReadyMessage,
   type ProtocolResultMessage,
   type ProtocolService,
+  type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type VaultService
 } from "@keymaster/contracts";
@@ -56,6 +67,11 @@ import { buildClaimProjectionFromParams } from "./protocolClaims.js";
 export interface ProtocolServiceDeps {
   vault: VaultService;
   keyspace: KeyspaceService;
+  /**
+   * 可选命令流 DB。manifest 在 setup 阶段打开并通过这个钩子注入；
+   * 测试里可以传一个内存 fake。`undefined` 时按"历史不可用"降级。
+   */
+  commandDb?: ProtocolCommandDb;
   /** 用于调试 / 日志的 logger（任意形状）。 */
   logger?: { info?: (input: unknown) => void; warn?: (input: unknown) => void; error?: (input: unknown) => void };
   /** 自定义 source window（默认取 `window.opener`）。 */
@@ -71,6 +87,12 @@ export interface ProtocolServiceDeps {
   postClosing?: (target: Window, msg: ProtocolClosingMessage) => void;
   /** 用户确认页 / 解锁页推动 session 状态使用。 */
   notifyUnlockChanged?: () => void;
+  /**
+   * 自定义 ID 生成器。默认用 `crypto.randomUUID()`；测试可注入稳定 id。
+   * 这一层**只**用作命令流 DB 主键（`ProtocolCommandRecord.id`），不参与
+   * transport `requestId`。
+   */
+  generateId?: () => string;
 }
 
 interface RequestBinding {
@@ -79,26 +101,56 @@ interface RequestBinding {
   params: MethodParams<ProtocolMethod>;
   source: Window;
   origin: string;
+  /** 当前命令卡 id（service 内部生成，与 transport requestId 解耦）。 */
+  recordId: string;
 }
 
 const READY_MESSAGE: ProtocolReadyMessage = { v: PROTOCOL_VERSION, type: "ready" };
 const CLOSING_MESSAGE: ProtocolClosingMessage = { v: PROTOCOL_VERSION, type: "closing" };
 
 export class ProtocolServiceImpl implements ProtocolService {
-  private phase: ProtocolSessionSnapshot["phase"] = "waiting";
+  private phase: ProtocolSessionPhase = "waiting";
   private binding: RequestBinding | null = null;
   private listeners = new Set<(snap: ProtocolSessionSnapshot) => void>();
+  private feedListeners = new Set<(state: ProtocolCommandFeedState) => void>();
   private pendingRequestSnapshot:
     | { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
     | null = null;
   /**
    * 本会话是否已经向 opener 发过 `closing`。`closing` 与 `popup.closed` 是
-   * 并联收敛的断开信号，因此本标志只用来防止重复发出 `closing` 本身；
-   * 它**不**影响 `result` 的发送，也不影响 endSession 流程。
+   * 并联收敛的断开信号，因此本标志只用来防止重复发出 `closing` 本身。
    */
   private closingSent = false;
 
-  constructor(private readonly deps: ProtocolServiceDeps) {}
+  /** 当前 origin（exact event.origin，**不**归一化）。 */
+  private currentOriginValue: string | null = null;
+  /** 当前 origin 下的命令流（最新在前；按 updatedAt desc）。 */
+  private feedCommands: ProtocolCommandRecord[] = [];
+  /** 命令流 DB 是否可用。false 时 UI 顶部显示"历史不可用"。 */
+  private historyAvailableFlag: boolean;
+  /** DB 加载 promise：避免重复打开 + 重复载入。 */
+  private historyLoadInFlight: Promise<void> | null = null;
+  /** 当前绑定的命令卡 id；用于状态推进时定位。 */
+  private currentRecordId: string | null = null;
+
+  constructor(private readonly deps: ProtocolServiceDeps) {
+    this.historyAvailableFlag = Boolean(deps.commandDb);
+  }
+
+  /**
+   * 内部稳定 id 生成器。**不**允许与 transport `requestId` 共用——同一
+   * requestId 重复发来时，必须落两条不同命令卡，而不是互相覆盖。
+   */
+  private nextRecordId(): string {
+    if (this.deps.generateId) {
+      return this.deps.generateId();
+    }
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID();
+    }
+    // 兜底：测试环境或非常规运行时。用时间戳 + 随机数即可。
+    return `rec-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
 
   /** 启动会话。挂在 window.message 监听**之后**再调用，确保 ready 不丢。 */
   startSession(): void {
@@ -106,17 +158,24 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.binding = null;
     this.pendingRequestSnapshot = null;
     this.closingSent = false;
+    // 注意：startSession **不**清空 currentOrigin / feedCommands / history。
+    // 设计缘由：popup 刷新场景下我们仍要按"上次服务的 origin"载入历史；
+    // 但施工单 002 收口显式不恢复未完成 request，未完成 request 由 binding
+    // 状态自然丢失。
     this.emit();
     this.postReadyIfPossible();
   }
 
-  /** 关闭当前会话并清空内部状态。 */
+  /**
+   * 关闭当前会话并清空内部状态。**不**主动发 `closing`——`closing` 由
+   * `pageUnloading` 路径发出，避免 `endSession` 误把单条 request 收尾
+   * 当成"会话结束"。
+   */
   endSession(): void {
-    // endSession 自身不是"会话结束通知"路径；通知由 replyResult /
-    // replyError / pageUnloading 在窗口关闭前发出 `closing` 触发。
     this.phase = "waiting";
     this.binding = null;
     this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
     this.emit();
   }
 
@@ -132,23 +191,43 @@ export class ProtocolServiceImpl implements ProtocolService {
     return () => this.listeners.delete(handler);
   }
 
+  /** 当前 origin（exact event.origin）。未收到第一条 request 时为 null。 */
+  currentOrigin(): string | null {
+    return this.currentOriginValue;
+  }
+
+  /** 同步取当前命令流 feed 状态。 */
+  feedSnapshot(): ProtocolCommandFeedState {
+    return {
+      currentOrigin: this.currentOriginValue,
+      commands: this.feedCommands.slice(),
+      historyAvailable: this.historyAvailableFlag
+    };
+  }
+
+  /** 订阅命令流变化。立即把当前 feed 状态喂给 handler。 */
+  subscribeFeed(handler: (state: ProtocolCommandFeedState) => void): () => void {
+    this.feedListeners.add(handler);
+    handler(this.feedSnapshot());
+    return () => this.feedListeners.delete(handler);
+  }
+
   /** 处理来自 `window` 的 message 事件。 */
   handleMessage(event: MessageEvent): void {
     if (!this.binding) {
       this.tryAcceptFirstRequest(event);
       return;
     }
-    // 已绑定：只接受同 source + 同 origin 的消息。其它一律忽略。
+    // 已绑定：只接受同 source + 同 origin 的消息；其它一律忽略。
     if (event.source !== this.binding.source || event.origin !== this.binding.origin) {
       return;
     }
-    // 当前 V1 不支持同会话多 request；忽略后续。
+    // 当前 V1 不支持同会话并发多 request；忽略后续。
   }
 
   /** 用户在确认页点击"确认"。开始执行方法。 */
   async confirmByUser(): Promise<void> {
     if (!this.binding) {
-      // 没绑定 request；忽略。
       return;
     }
     if (this.phase !== "confirming") {
@@ -156,16 +235,34 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const binding = this.binding;
     this.setPhase("executing");
+    this.updateRecordPhase(binding.recordId, "executing");
+    let result: MethodResult | null = null;
+    let errCode: ProtocolErrorCode | null = null;
+    let errMessage: string | null = null;
     try {
-      const result = await this.dispatch(binding);
-      await this.replyResult(binding, result);
+      result = await this.dispatch(binding);
     } catch (err) {
       const protoErr = toProtocolError(err);
-      await this.replyError(binding, protoErr.code, protoErr.message);
+      errCode = protoErr.code;
+      errMessage = protoErr.message;
     }
+    // 写命令卡终态：成功 / 失败 都落 DB。
+    if (result) {
+      this.updateRecordFinal(binding.recordId, "approved", "approved");
+      await this.replyResult(binding, result);
+    } else if (errCode && errMessage) {
+      this.updateRecordFinal(binding.recordId, "failed", "failed", errCode, errMessage);
+      await this.replyError(binding, errCode, errMessage);
+    }
+    // 单条 request 收尾：清 binding、phase 回到 waiting。
+    // 不发 closing（closing 由 pageUnloading 路径发），不调 endSession。
+    this.binding = null;
+    this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
+    this.setPhase("waiting");
   }
 
-  /** 用户点击"取消"。回 user_rejected 并结束会话。 */
+  /** 用户点击"取消"。回 user_rejected，把命令卡标 rejected，phase 回到 waiting。 */
   async rejectByUser(): Promise<void> {
     if (!this.binding) {
       this.setPhase("waiting");
@@ -173,7 +270,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     const binding = this.binding;
+    this.updateRecordFinal(binding.recordId, "rejected", "rejected");
     await this.replyError(binding, "user_rejected", "User rejected");
+    this.binding = null;
+    this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
+    this.setPhase("waiting");
   }
 
   /** 解锁状态机推进：vault unlock 完成后由 UI 调本方法继续已绑定的 request。 */
@@ -181,6 +283,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.binding) return;
     if (this.phase !== "unlocking") return;
     this.setPhase("confirming");
+    this.updateRecordPhase(this.binding.recordId, "waiting_confirm");
   }
 
   /**
@@ -219,7 +322,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
   }
 
-  private setPhase(phase: ProtocolSessionSnapshot["phase"]): void {
+  private setPhase(phase: ProtocolSessionPhase): void {
     this.phase = phase;
     this.emit();
   }
@@ -229,10 +332,14 @@ export class ProtocolServiceImpl implements ProtocolService {
     for (const l of this.listeners) l(snap);
   }
 
+  private emitFeed(): void {
+    const state = this.feedSnapshot();
+    for (const l of this.feedListeners) l(state);
+  }
+
   private postReadyIfPossible(): void {
     const opener = this.getOpener();
     if (!opener) {
-      // 情况 A：opener 缺失。直接进 error 态。
       this.setPhase("error");
       return;
     }
@@ -240,8 +347,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.deps.postReady(opener, READY_MESSAGE);
       return;
     }
-    // 真实 postMessage：用 "*" 即可——opener 已经在调用方站点上。
-    // 第一条 request 进入时会再校验 origin。
     try {
       opener.postMessage(READY_MESSAGE, "*");
     } catch (err) {
@@ -254,35 +359,71 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!opener) return;
     if (event.source !== opener) return;
     const data = event.data;
-    // 必须是结构化合法的 request（v / type / id / method）。
     if (!looksLikeRequest(data)) return;
     let parsed;
     try {
       parsed = parseRequestMessage(data);
     } catch (err) {
       if (err instanceof ProtocolValidationError) {
-        // 情况 B：非法 request；按规则忽略，不在 ready 之前 reject。
+        // 非法 request：按规则忽略。
         return;
       }
       this.deps.logger?.error?.({ scope: "protocol.validation", event: "unexpected", data: { err: String(err) } });
       return;
     }
+    // origin 切换：如果与上次服务的 origin 不同，重新载入该 origin 的历史。
+    // 注意：载入完成前先把当前命令卡 upsert 到 feed；loadHistoryForOrigin
+    // 用 merge 模式不会覆盖当前卡。
+    if (this.currentOriginValue !== event.origin) {
+      this.currentOriginValue = event.origin;
+      // 触发历史载入（fire & forget；UI 走 historyAvailable 兜底）。
+      void this.loadHistoryForOrigin(event.origin);
+    }
+    // 创命令卡：内部稳定 id 与 transport requestId 解耦，避免调用方
+    // 重复 requestId 时旧命令卡被覆盖。
+    const recordId = this.nextRecordId();
+    const now = Date.now();
+    const activePub = this.deps.keyspace.active().activePublicKeyHex ?? "";
+    const newRecord: ProtocolCommandRecord = {
+      id: recordId,
+      origin: event.origin,
+      requestId: parsed.id,
+      method: parsed.method,
+      phase: "waiting_unlock",
+      decision: "pending",
+      status: "pending",
+      textSummary: this.summarizeText(parsed.params),
+      claimsSummary: this.summarizeClaims(parsed.params),
+      contentType: this.summarizeContentType(parsed.params),
+      payloadSize: this.summarizePayloadSize(parsed.params),
+      activePublicKeyHex: activePub,
+      createdAt: now,
+      updatedAt: now,
+      finishedAt: 0,
+      errorCode: "",
+      errorMessage: ""
+    };
+    this.upsertFeedCommand(newRecord);
+    this.persistRecord(newRecord);
+
     this.binding = {
       id: parsed.id,
       method: parsed.method,
       params: parsed.params,
       source: event.source as Window,
-      origin: event.origin
+      origin: event.origin,
+      recordId
     };
     this.pendingRequestSnapshot = {
       id: parsed.id,
       method: parsed.method,
       params: parsed.params
     };
-    // 决定下一步：vault unlocked → confirming；其它 → unlocking。
+    this.currentRecordId = recordId;
     const status = this.deps.vault.status();
     if (status === "unlocked") {
       this.setPhase("confirming");
+      this.updateRecordPhase(recordId, "waiting_confirm");
     } else {
       this.setPhase("unlocking");
     }
@@ -321,12 +462,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
     const active = this.requireActiveKey();
-    console.info("[protocol] identity.get active key", {
-      requestId: this.binding?.id,
-      keyId: active.keyId,
-      publicKeyHex: active.publicKeyHex,
-      label: active.label
-    });
     const { publicKeyHex, label, keyId } = active;
     const publicKeyBytes = await this.fetchPublicKeyBytes(publicKeyHex, keyId);
 
@@ -334,8 +469,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       activeKeyLabel: label
     });
 
-    // envelope 真值 = [v, id, aud, iat, exp, text, subjectPublicKey, claims]
-    // projection 已经是 [name, val] 二元组列表；CBOR 编码时直接转 CborValue。
     const envelopeInput: CborValue[] = [
       PROTOCOL_VERSION,
       this.binding!.id,
@@ -348,13 +481,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     ];
     const envelopeCbor = cborEncode(envelopeInput);
     const signature = await this.signWithActive(keyId, envelopeCbor);
-    console.info("[protocol] identity.get done", {
-      requestId: this.binding?.id,
-      keyId,
-      publicKeyHex,
-      envelopeBytes: envelopeCbor.byteLength,
-      signatureBytes: signature.byteLength
-    });
 
     return {
       identityEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
@@ -379,16 +505,9 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
     const active = this.requireActiveKey();
-    console.info("[protocol] intent.sign active key", {
-      requestId: this.binding?.id,
-      keyId: active.keyId,
-      publicKeyHex: active.publicKeyHex,
-      label: active.label
-    });
     const { publicKeyHex, keyId } = active;
     const publicKeyBytes = await this.fetchPublicKeyBytes(publicKeyHex, keyId);
     const contentSha256 = sha256Bytes(new Uint8Array(params.content.bytes));
-    // envelope 真值 = [v, id, aud, iat, exp, text, contentType, contentSha256, subjectPublicKey]
     const envelopeCbor = cborEncode([
       PROTOCOL_VERSION,
       this.binding!.id,
@@ -401,13 +520,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       publicKeyBytes
     ]);
     const signature = await this.signWithActive(keyId, envelopeCbor);
-    console.info("[protocol] intent.sign done", {
-      requestId: this.binding?.id,
-      keyId,
-      publicKeyHex,
-      envelopeBytes: envelopeCbor.byteLength,
-      signatureBytes: signature.byteLength
-    });
     return {
       signedEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
       signature: toBinaryField(signature)
@@ -425,28 +537,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       contentBytes: params.content.bytes.byteLength
     });
     const active = this.requireActiveKey();
-    console.info("[protocol] cipher.encrypt active key", {
-      requestId: this.binding?.id,
-      keyId: active.keyId,
-      publicKeyHex: active.publicKeyHex,
-      label: active.label
-    });
     const { publicKeyHex, keyId } = active;
     const siteKey = await this.deriveSiteKeyWithActive(keyId, eventOrigin);
-    // inner plaintext = [v, contentType, contentBytes]
     const inner = cborEncode([
       PROTOCOL_VERSION,
       params.contentType,
       new Uint8Array(params.content.bytes)
     ]);
     const { nonce, cipherbytes } = aesGcmEncrypt(siteKey, inner);
-    console.info("[protocol] cipher.encrypt done", {
-      requestId: this.binding?.id,
-      keyId,
-      publicKeyHex,
-      nonceBytes: nonce.byteLength,
-      cipherbytesBytes: cipherbytes.byteLength
-    });
     return {
       nonce: toBinaryField(nonce),
       cipherbytes: toBinaryField(cipherbytes)
@@ -464,12 +562,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       cipherbytesBytes: params.cipherbytes.bytes.byteLength
     });
     const active = this.requireActiveKey();
-    console.info("[protocol] cipher.decrypt active key", {
-      requestId: this.binding?.id,
-      keyId: active.keyId,
-      publicKeyHex: active.publicKeyHex,
-      label: active.label
-    });
     const { publicKeyHex, keyId } = active;
     let siteKey: Uint8Array;
     try {
@@ -509,27 +601,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   private requireActiveKey() {
     const active = this.deps.keyspace.active();
     if (!active.activePublicKeyHex) {
-      console.error("[protocol] requireActiveKey failed: no active key", {
-        requestId: this.binding?.id,
-        bindingMethod: this.binding?.method
-      });
       throw protocolError("active_key_unavailable", "No active key available");
     }
     const id = this.deps.keyspace.requireActiveKey();
     if (!id.publicKeyHex) {
-      console.error("[protocol] requireActiveKey failed: key identity missing publicKeyHex", {
-        requestId: this.binding?.id,
-        activePublicKeyHex: active.activePublicKeyHex,
-        keyId: id.keyId
-      });
       throw protocolError("active_key_unavailable", "No active key available");
     }
-    console.info("[protocol] requireActiveKey resolved", {
-      requestId: this.binding?.id,
-      keyId: id.keyId,
-      publicKeyHex: id.publicKeyHex,
-      label: id.label
-    });
     return {
       publicKeyHex: id.publicKeyHex,
       label: id.label,
@@ -539,11 +616,6 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** sign helper：从 vault.withPrivateKey 借私钥。 */
   private async signWithActive(keyId: string, bytes: Uint8Array): Promise<Uint8Array> {
-    console.info("[protocol] signWithActive", {
-      requestId: this.binding?.id,
-      keyId,
-      bytes: bytes.byteLength
-    });
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       return signCompactSecp256k1(material.hex, bytes);
     });
@@ -551,11 +623,6 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** cipher siteKey 派生：借私钥后 HMAC。 */
   private async deriveSiteKeyWithActive(keyId: string, exactOrigin: string): Promise<Uint8Array> {
-    console.info("[protocol] deriveSiteKeyWithActive", {
-      requestId: this.binding?.id,
-      keyId,
-      exactOrigin
-    });
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       return deriveSiteKey(material.hex, exactOrigin);
     });
@@ -563,11 +630,6 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** publicKey 字节：用 vault.withPrivateKey 派生 33-byte compressed pubkey。 */
   private async fetchPublicKeyBytes(publicKeyHex: string, keyId: string): Promise<Uint8Array> {
-    console.info("[protocol] fetchPublicKeyBytes", {
-      requestId: this.binding?.id,
-      keyId,
-      publicKeyHex
-    });
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       const pub = secp256k1.getPublicKey(hexToBytes(material.hex), true);
       return pub;
@@ -578,14 +640,6 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async replyResult(binding: RequestBinding, result: MethodResult): Promise<void> {
     if (!this.canPostToOpener(binding)) {
-      // 情况 H：opener 已关，结束本地流程。
-      // 先发 closing（即便没有目标也走一遍幂等门禁清旗），再切到 closing
-      // 让 UI 渲染 DoneView 触发自动关闭。最后**不**在这里调 endSession：
-      // endSession 会把 phase 重置回 "waiting"，React 会把 closing 这次
-      // 推送覆盖掉，导致 DoneView 永远不挂载、自动关窗失败。endSession
-      // 由 page-level unmount handler 在组件销毁时调用。
-      this.sendClosingBestEffort();
-      this.setPhase("closing");
       return;
     }
     const message: ProtocolResultMessage = {
@@ -596,13 +650,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       result
     };
     this.postMessage(binding, message);
-    // 正常成功结束路径：result 已发出，进入关窗前再发一次 closing。
-    this.sendClosingBestEffort();
-    // 仅切 phase 为 closing，让 ProtocolPopupPage 渲染 DoneView。DoneView 内
-    // 的 useEffect 会在 200ms 后调用 window.close()。endSession 留给
-    // page-level unmount handler 在组件真正销毁时调用，避免 React 状态被
-    // "waiting" 推送覆盖掉 "closing" 推送。
-    this.setPhase("closing");
+    // 注意：单条 request 收尾**不**发 `closing`。closing 由
+    // pageUnloading 路径在 popup 真正销毁时发。
   }
 
   private async replyError(
@@ -627,11 +676,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       };
       this.postMessage(binding, message);
     }
-    // 发 closing 通知 opener，再切到 closing 让 UI 渲染 DoneView 触发自动关闭。
-    // 这里**不**调 endSession，原因与 replyResult 一致：endSession 会把 phase
-    // 重置回 "waiting"，导致 React 覆盖掉 "closing" 推送，DoneView 永远不渲染。
-    this.sendClosingBestEffort();
-    this.setPhase("closing");
   }
 
   private canPostToOpener(binding: RequestBinding): boolean {
@@ -668,7 +712,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.closingSent) return;
     const target = this.binding?.source ?? this.getOpener();
     if (!target) {
-      // 没目标可以发，但仍然置位以避免后续重复进入这条路径。
       this.closingSent = true;
       return;
     }
@@ -708,6 +751,157 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (typeof window === "undefined") return null;
     return window.opener;
+  }
+
+  /* ============== 命令流（feed）+ DB ============== */
+
+  /**
+   * 推一条命令到当前 feed。`commands` 数组按 `updatedAt desc` 排序；
+   * 同 `id` 已存在时覆盖并前移。
+   */
+  private upsertFeedCommand(record: ProtocolCommandRecord): void {
+    const idx = this.feedCommands.findIndex((c) => c.id === record.id);
+    if (idx >= 0) {
+      this.feedCommands[idx] = record;
+    } else {
+      this.feedCommands.unshift(record);
+    }
+    this.feedCommands.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.emitFeed();
+  }
+
+  private updateRecordPhase(id: string, phase: ProtocolCommandRecord["phase"]): void {
+    const rec = this.feedCommands.find((c) => c.id === id);
+    if (!rec) return;
+    rec.phase = phase;
+    rec.status = phase;
+    rec.updatedAt = Date.now();
+    this.feedCommands.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.emitFeed();
+    this.persistRecord(rec);
+  }
+
+  private updateRecordFinal(
+    id: string,
+    phase: ProtocolCommandRecord["phase"],
+    decision: ProtocolCommandRecord["decision"],
+    errorCode: string = "",
+    errorMessage: string = ""
+  ): void {
+    const rec = this.feedCommands.find((c) => c.id === id);
+    if (!rec) return;
+    rec.phase = phase;
+    rec.decision = decision;
+    rec.status = phase;
+    rec.errorCode = errorCode;
+    rec.errorMessage = errorMessage;
+    rec.finishedAt = Date.now();
+    rec.updatedAt = rec.finishedAt;
+    this.feedCommands.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.emitFeed();
+    this.persistRecord(rec);
+  }
+
+  private persistRecord(record: ProtocolCommandRecord): void {
+    const db = this.deps.commandDb;
+    if (!db) return;
+    void db.putCommand(record).catch((err) => {
+      console.error("[protocol.commandDb] persistRecord failed", {
+        id: record.id,
+        origin: record.origin,
+        error: err instanceof Error ? err.message : String(err)
+      });
+      // 写失败 → 历史不可用；UI 顶部显示"历史不可用"提示。
+      // 仍然在内存里保留命令卡，主协议流程不中断。
+      // 注意：写成功**不**主动把 historyAvailable 翻回 true —— 历史可用
+      // 是由"DB 能读 + DB 能写"共同决定的，单次写成功不足以证明 DB
+      // 已经恢复。翻回 true 只能由 loadHistoryForOrigin 成功完成时做。
+      if (this.historyAvailableFlag) {
+        this.historyAvailableFlag = false;
+        this.emitFeed();
+      }
+    });
+  }
+
+  private async loadHistoryForOrigin(origin: string): Promise<void> {
+    if (this.historyLoadInFlight) {
+      return this.historyLoadInFlight;
+    }
+    const db = this.deps.commandDb;
+    if (!db) {
+      this.historyAvailableFlag = false;
+      // 即使没 DB，也保留当前 in-flight 命令卡（如果有）。
+      this.feedCommands = this.feedCommands.filter(
+        (c) => c.origin === origin && c.id === this.currentRecordId
+      );
+      this.emitFeed();
+      return;
+    }
+    const task = (async () => {
+      try {
+        const list = await db.listCommandsByOrigin(origin);
+        // merge：DB 列表是基线，但**当前 in-flight 命令卡**必须保留。
+        // 因为 in-flight 卡的最新状态只在内存里，DB 里可能还没有它的
+        // 中间态记录（持久化是 fire & forget）。
+        const inflight = this.currentRecordId
+          ? this.feedCommands.find((c) => c.id === this.currentRecordId)
+          : undefined;
+        const merged: ProtocolCommandRecord[] = list.slice();
+        if (inflight && !merged.some((c) => c.id === inflight.id)) {
+          merged.unshift(inflight);
+        }
+        merged.sort((a, b) => b.updatedAt - a.updatedAt);
+        this.feedCommands = merged;
+        this.historyAvailableFlag = true;
+        this.emitFeed();
+      } catch (err) {
+        console.error("[protocol.commandDb] loadHistoryForOrigin failed", {
+          origin,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        this.historyAvailableFlag = false;
+        // 读失败时也保留当前 in-flight 命令卡。
+        this.feedCommands = this.feedCommands.filter(
+          (c) => c.id === this.currentRecordId
+        );
+        this.emitFeed();
+      } finally {
+        this.historyLoadInFlight = null;
+      }
+    })();
+    this.historyLoadInFlight = task;
+    return task;
+  }
+
+  /* ============== 摘要工具 ============== */
+
+  private summarizeText(params: MethodParams<ProtocolMethod>): string {
+    const p = params as { text?: unknown };
+    return typeof p.text === "string" ? p.text : "";
+  }
+
+  private summarizeClaims(params: MethodParams<ProtocolMethod>): string[] {
+    const p = params as { claims?: unknown };
+    if (Array.isArray(p.claims)) {
+      return p.claims.filter((c): c is string => typeof c === "string");
+    }
+    return [];
+  }
+
+  private summarizeContentType(params: MethodParams<ProtocolMethod>): string {
+    const p = params as { contentType?: unknown };
+    return typeof p.contentType === "string" ? p.contentType : "";
+  }
+
+  private summarizePayloadSize(params: MethodParams<ProtocolMethod>): number {
+    const p = params as { content?: { bytes?: { byteLength?: number } }; cipherbytes?: { bytes?: { byteLength?: number } } };
+    if (p.content?.bytes && typeof p.content.bytes.byteLength === "number") {
+      return p.content.bytes.byteLength;
+    }
+    if (p.cipherbytes?.bytes && typeof p.cipherbytes.bytes.byteLength === "number") {
+      return p.cipherbytes.bytes.byteLength;
+    }
+    return 0;
   }
 }
 
@@ -753,7 +947,6 @@ function valToCbor(v: unknown): CborValue {
   if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;
   if (v instanceof Uint8Array) return v;
   if (Array.isArray(v)) return v.map(valToCbor);
-  // 已经构造好的 ["binary", mime, sha256bytes] 投影：原样透传。
   if (Array.isArray(v) && v.length === 3 && v[0] === "binary" && typeof v[1] === "string" && v[2] instanceof Uint8Array) {
     return ["binary", v[1] as string, v[2] as Uint8Array];
   }

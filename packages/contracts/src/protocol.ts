@@ -291,6 +291,119 @@ export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends 
   ? MethodResultMap[M]
   : never;
 
+/* ============== popup 命令流（施工单 002：popup 复用与命令流） ============== */
+
+/**
+ * popup 命令卡状态。**不**与"会话生命周期"耦合——一条命令从收到
+ * 合法 request 走到最终决定（approved / rejected / failed），状态
+ * 由 service 在状态推进时同步更新。
+ *
+ * 历史 DB 持久化的是 `ProtocolCommandRecord.phase` / `status` /
+ * `decision` 三个收敛点；中间态只在内存里走，不一定都落库。
+ */
+export type ProtocolCommandPhase =
+  | "waiting_unlock"
+  | "waiting_confirm"
+  | "executing"
+  | "approved"
+  | "rejected"
+  | "failed";
+
+/** 命令终态判定。中间态：waiting_unlock / waiting_confirm / executing。 */
+export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "failed";
+
+/**
+ * popup 内"按 origin 归档"的一条命令记录。
+ *
+ * 设计缘由（施工单 002 硬切换）：
+ *   - 一条 request = 一条 `ProtocolCommandRecord`；
+ *   - 不做 event-sourcing：状态推进直接更新同一条记录；
+ *   - 历史只按 `origin`（exact origin，**不**做 host 归一化）归档；
+ *   - DB 真值 = Keymaster IndexedDB；UI 文案可显示"站点 / 域名"，
+ *     但 DB 落盘必须是 `event.origin` 原样字符串。
+ *   - 不持久化私钥 / 大体积密文 / 完整签名结果 / 解密明文。
+ */
+export interface ProtocolCommandRecord {
+  /** 内部稳定主键；与 transport `requestId` 同源但不一定相等。 */
+  id: string;
+  /** exact origin（popup 接收到的 `event.origin` 原样）。 */
+  origin: string;
+  /** 当前绑定的 transport request id（如果还在 request 上下文里）。 */
+  requestId: string;
+  /** 协议方法名。 */
+  method: ProtocolMethod;
+  /** 当前命令阶段。中间态不持久化；只在终态落库。 */
+  phase: ProtocolCommandPhase;
+  /** 终态决策；中间态为 `pending`。 */
+  decision: ProtocolCommandDecision;
+  /** 与 `decision` 类似的稳定字符串，给 UI 直接展示用。 */
+  status: string;
+  /** 人类可读确认文案。 */
+  textSummary: string;
+  /** identity.get 的请求 claims 列表（其它方法为空数组）。 */
+  claimsSummary: string[];
+  /** intent.sign / cipher.encrypt / cipher.decrypt 的内容类型。 */
+  contentType: string;
+  /** 请求正文字节数（cipher.decrypt 时是 `cipherbytes.bytes.byteLength`）。 */
+  payloadSize: number;
+  /** 执行该命令时 active public key hex；写记录时取一次。 */
+  activePublicKeyHex: string;
+  /** 创建时间，unix milliseconds。 */
+  createdAt: number;
+  /** 最近一次状态更新时间，unix milliseconds。 */
+  updatedAt: number;
+  /** 终态时间，unix milliseconds；中间态为 0。 */
+  finishedAt: number;
+  /** 错误码（failed 时填写）。 */
+  errorCode: string;
+  /** 错误 message（failed 时填写，英文）。 */
+  errorMessage: string;
+}
+
+/**
+ * popup 内"按当前 origin 归档"的命令流 feed 状态。
+ *
+ * service 维护的内部状态：每条合法 request 进入时按 `event.origin`
+ * 重新载入历史；feed 列表按 `updatedAt desc` 排序。
+ */
+export interface ProtocolCommandFeedState {
+  /** 当前 popup 服务的 exact origin；未收到第一条 request 时为 null。 */
+  currentOrigin: string | null;
+  /** 当前 feed 列表（最新在前）。 */
+  commands: ProtocolCommandRecord[];
+  /** DB 读 / 写是否可用；false 时 UI 顶部显示"历史不可用"。 */
+  historyAvailable: boolean;
+}
+
+/**
+ * 命令流 DB capability key。manifest 在 setup 阶段 provide；
+ * ProtocolService 通过 ctx 注入，**不**直接 import DB 模块。
+ */
+export const PROTOCOL_COMMAND_DB_CAPABILITY = "protocol.commandDb";
+
+/**
+ * 命令流 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
+ *
+ * 关键不变量：
+ *   - 索引按 `origin + updatedAt desc`；
+ *   - `putCommand` 写同 `id` 覆盖旧记录（不追加 event row）；
+ *   - DB 异常不抛出：调用方需要自己捕获并降级到"historyAvailable=false"。
+ */
+export interface ProtocolCommandDb {
+  /**
+   * 写入或更新一条命令。`record.id` 已存在时整条覆盖；`updatedAt` 必
+   * 须由调用方填好。
+   */
+  putCommand(record: ProtocolCommandRecord): Promise<void>;
+  /** 按 `id` 读一条；不存在返回 null。 */
+  getCommand(id: string): Promise<ProtocolCommandRecord | null>;
+  /**
+   * 按 exact origin 拉历史；按 `updatedAt desc` 排序。
+   * 返回数组可能为空；DB 异常时调用方决定怎么降级。
+   */
+  listCommandsByOrigin(origin: string): Promise<ProtocolCommandRecord[]>;
+}
+
 /* ============== popup 会话状态 ============== */
 
 /**
@@ -392,4 +505,19 @@ export interface ProtocolService {
   subscribe(handler: (snapshot: ProtocolSessionSnapshot) => void): () => void;
   /** 同步取当前会话快照。 */
   snapshot(): ProtocolSessionSnapshot;
+  /**
+   * 当前 popup 服务的 exact origin。未收到第一条 request 时返回 null。
+   * UI 顶部"当前站点"展示用。**不**做 host 归一化。
+   */
+  currentOrigin(): string | null;
+  /**
+   * 同步取当前命令流 feed 状态。`commands` 已是按 `updatedAt desc`
+   * 排序后的最新在前列表；UI 拿来直接渲染。
+   */
+  feedSnapshot(): ProtocolCommandFeedState;
+  /**
+   * 订阅命令流变化。`feed.phase !== 'waiting' && feed.commands` 推
+   * 变；UI 用来驱动 feed 面板的更新。
+   */
+  subscribeFeed(handler: (state: ProtocolCommandFeedState) => void): () => void;
 }

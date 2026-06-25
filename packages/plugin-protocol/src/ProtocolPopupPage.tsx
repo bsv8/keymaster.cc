@@ -1,31 +1,36 @@
 // packages/plugin-protocol/src/ProtocolPopupPage.tsx
 // 对外协议 popup 页面。
 //
-// 设计缘由（施工单 001）：
+// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
 //   - 页面只负责渲染态 + 转交用户操作给 service；密码学 / message 收发
 //     / 校验 / 签名 / 加解密一律不进组件。
 //   - 页面挂载时 startSession() 一次；之后通过 subscribe 拿到 snapshot
 //     驱动渲染。
-//   - 解锁页、确认页、执行中、成功、失败态分别对应 service 的 phase。
-//   - 不写 localStorage / sessionStorage / IndexedDB / URL hash；用户
-//     刷新或关闭 popup 视为会话结束。
+//   - popup 是**会话级**长存：单条 request 完成后 phase 回到 waiting，
+//     不会自动关窗；`closing` 由 pagehide / beforeunload 路径发出。
+//   - 顶部 sticky 顶栏：当前 origin / 当前 phase / 关闭按钮 / 回到最新。
+//   - 中间是命令流 feed：最新命令展开，历史命令默认折叠。
+//   - 在 `confirming` / `unlocking` 时，当前请求会以浮层 / 占位条
+//     形式出现在 feed 顶部，避免被历史盖住。
+//   - 收到第一条 request 时按 exact origin 载入历史。
 //   - 文案中文；错误 message 原样显示英文。
-//   - 完成后 `window.close()`。
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n } from "@keymaster/runtime";
 import type {
+  CipherDecryptParams,
+  CipherEncryptParams,
   IdentityGetParams,
   IntentSignParams,
-  CipherEncryptParams,
-  CipherDecryptParams,
   MethodParams,
+  ProtocolCommandFeedState,
   ProtocolMethod,
   ProtocolService,
   ProtocolSessionSnapshot
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
 
 export function ProtocolPopupPage() {
   const service = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
@@ -33,7 +38,11 @@ export function ProtocolPopupPage() {
   // 触发 languageChanged 重渲染。
   useI18n().language();
   const [snap, setSnap] = useState<ProtocolSessionSnapshot>(() => service.snapshot());
-  const [request, setRequest] = useState<ReturnType<NonNullable<ProtocolService["currentRequest"]>>>(() => service.currentRequest());
+  const [feed, setFeed] = useState<ProtocolCommandFeedState>(() => service.feedSnapshot());
+  const [request, setRequest] = useState<ReturnType<NonNullable<ProtocolService["currentRequest"]>>>(() =>
+    service.currentRequest()
+  );
+  const feedTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     console.info("[protocol-popup] mounted", {
@@ -50,7 +59,7 @@ export function ProtocolPopupPage() {
   //   因此这里坚持 "addEventListener → service.startSession()" 的顺序，
   //   绝不能在监听未挂好前先 startSession（startSession 内部会立刻发 ready）。
   useEffect(() => {
-    const off = service.subscribe((next) => {
+    const offSnap = service.subscribe((next) => {
       console.debug("[protocol-popup] snapshot", {
         phase: next.phase,
         method: next.method,
@@ -60,6 +69,14 @@ export function ProtocolPopupPage() {
       setSnap(next);
       setRequest(service.currentRequest());
     });
+    const offFeed = service.subscribeFeed((next) => {
+      console.debug("[protocol-popup] feed", {
+        currentOrigin: next.currentOrigin,
+        commandCount: next.commands.length,
+        historyAvailable: next.historyAvailable
+      });
+      setFeed(next);
+    });
     function onMessage(event: MessageEvent) {
       console.debug("[protocol-popup] message", {
         origin: event.origin,
@@ -68,9 +85,8 @@ export function ProtocolPopupPage() {
       });
       service.handleMessage(event);
     }
-    // 卸载 / 手工关闭 / 刷新路径上 best-effort 触发 `closing`，与
-    // service 层共用同一幂等门禁。pagehide 是更现代、更可靠的关闭信号；
-    // beforeunload 兜底。
+    // 卸载 / 手工关闭 / 刷新路径上 best-effort 触发 `closing`，
+    // service 内部走幂等门禁。
     function onPageHide() {
       console.info("[protocol-popup] pagehide -> best-effort closing");
       service.pageUnloading?.();
@@ -91,18 +107,103 @@ export function ProtocolPopupPage() {
       window.removeEventListener("message", onMessage);
       window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("beforeunload", onBeforeUnload);
-      off();
+      offSnap();
+      offFeed();
       service.endSession();
     };
   }, [service]);
 
-  // 状态机分流
-  if (snap.phase === "error") {
-    return <ErrorView t={t} message={t("protocol.error")} />;
+  // 新命令出现时自动滚回顶部。jsdom 不支持 scrollIntoView；显式检测
+  // 后再调，避免单测报 `scrollIntoView is not a function`。
+  useEffect(() => {
+    const el = feedTopRef.current;
+    if (!el) return;
+    const maybeScroll = (el as HTMLElement & { scrollIntoView?: (opts?: ScrollIntoViewOptions) => void })
+      .scrollIntoView;
+    if (typeof maybeScroll === "function") {
+      maybeScroll.call(el, { behavior: "smooth", block: "start" });
+    }
+  }, [feed.commands.length, feed.currentOrigin]);
+
+  const showConfirmingOverlay = snap.phase === "confirming" || snap.phase === "unlocking" || snap.phase === "executing";
+
+  return (
+    <div className="protocol-popup">
+      <div className="protocol-popup__topbar" ref={feedTopRef}>
+        <span className="protocol-popup__topbar-item protocol-popup__topbar-item--origin">
+          <strong>{t("protocol.topbar.origin", { defaultValue: "当前站点" })}:</strong>{" "}
+          <code>{feed.currentOrigin ?? t("protocol.topbar.origin.none", { defaultValue: "未绑定" })}</code>
+        </span>
+        <span className="protocol-popup__topbar-item">
+          <strong>{t("protocol.topbar.status", { defaultValue: "状态" })}:</strong>{" "}
+          {phaseLabel(t, snap.phase)}
+        </span>
+        <span className="protocol-popup__topbar-spacer" />
+        <button
+          type="button"
+          className="protocol-popup__back-top"
+          onClick={() => {
+            const el = feedTopRef.current;
+            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+          }}
+        >
+          {t("protocol.topbar.backToTop", { defaultValue: "回到最新" })}
+        </button>
+        <button
+          type="button"
+          className="protocol-popup__back-top"
+          onClick={() => {
+            service.pageUnloading?.();
+            window.close();
+          }}
+        >
+          {t("protocol.topbar.close", { defaultValue: "关闭" })}
+        </button>
+      </div>
+      <div className="protocol-popup__content">
+        {snap.phase === "error" ? <ErrorView t={t} message={t("protocol.error")} /> : null}
+        {showConfirmingOverlay ? (
+          <CurrentRequestPanel t={t} service={service} snap={snap} request={request} />
+        ) : null}
+        <ProtocolCommandFeed t={t} feed={feed} />
+      </div>
+    </div>
+  );
+}
+
+function phaseLabel(
+  t: (k: string, v?: { defaultValue?: string }) => string,
+  phase: ProtocolSessionSnapshot["phase"]
+): string {
+  switch (phase) {
+    case "waiting":
+      return t("protocol.phase.waiting", { defaultValue: "等待下一条请求" });
+    case "unlocking":
+      return t("protocol.phase.unlocking", { defaultValue: "等待解锁" });
+    case "confirming":
+      return t("protocol.phase.confirming", { defaultValue: "等待确认" });
+    case "executing":
+      return t("protocol.phase.executing", { defaultValue: "处理中" });
+    case "closing":
+      return t("protocol.phase.closing", { defaultValue: "收尾" });
+    case "error":
+      return t("protocol.phase.error", { defaultValue: "错误" });
   }
-  if (snap.phase === "waiting") {
-    return <WaitingView t={t} />;
-  }
+}
+
+/* ============== 当前进行中的命令 ============== */
+
+function CurrentRequestPanel({
+  t,
+  service,
+  snap,
+  request
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
+  snap: ProtocolSessionSnapshot;
+  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } | null;
+}) {
   if (snap.phase === "unlocking") {
     return <UnlockView t={t} service={service} />;
   }
@@ -114,25 +215,9 @@ export function ProtocolPopupPage() {
   }
   // confirming
   if (!request) {
-    // 不应到达；显示等待。
-    return <WaitingView t={t} />;
+    return null;
   }
   return <ConfirmView t={t} service={service} request={request} />;
-}
-
-/* ============== 视图 ============== */
-
-function WaitingView({ t }: { t: (k: string, v?: { defaultValue?: string }) => string }) {
-  return (
-    <div className="protocol-popup protocol-popup--waiting">
-      <PageHeader
-        title={t("protocol.waiting.title", { defaultValue: "等待外部站点请求" })}
-        description={t("protocol.waiting.desc", {
-          defaultValue: "请从外部 demo 站点发起请求。若你是直接打开此页面，它不会自己产生结果。"
-        })}
-      />
-    </div>
-  );
 }
 
 function UnlockView({
@@ -153,7 +238,6 @@ function UnlockView({
   useEffect(() => {
     return vault.onStatusChange((s) => {
       if (s === "unlocked") {
-        // 通知 service 继续已绑定 request。
         (service as unknown as { resumeAfterUnlock?: () => void }).resumeAfterUnlock?.();
       }
     });
@@ -173,7 +257,6 @@ function UnlockView({
   }
   async function cancel() {
     await service.rejectByUser();
-    window.close();
   }
   return (
     <div className="protocol-popup protocol-popup--unlock">
@@ -255,7 +338,9 @@ function ConfirmView({
             <dd>
               <ul>
                 {claims.map((c) => (
-                  <li key={c}><code>{c}</code></li>
+                  <li key={c}>
+                    <code>{c}</code>
+                  </li>
                 ))}
               </ul>
             </dd>
@@ -288,7 +373,6 @@ function ConfirmView({
           variant="ghost"
           onClick={async () => {
             await service.rejectByUser();
-            window.close();
           }}
         >
           {t("protocol.confirm.cancel", { defaultValue: "取消" })}
@@ -310,18 +394,13 @@ function ExecutingView({ t }: { t: (k: string, v?: { defaultValue?: string }) =>
 }
 
 function DoneView({ t }: { t: (k: string, v?: { defaultValue?: string }) => string }) {
-  useEffect(() => {
-    // 给调用方一点时间收到 result，再关 popup。
-    const timer = window.setTimeout(() => {
-      window.close();
-    }, 200);
-    return () => window.clearTimeout(timer);
-  }, []);
+  // 兼容旧 phase 名字的极端情形：当前 V1 不再进入 closing，
+  // 但若以后 phase 名字又扩，这里仍允许渲染一个静态收尾提示。
   return (
     <div className="protocol-popup protocol-popup--done">
       <PageHeader
         title={t("protocol.done.title", { defaultValue: "结果已回传" })}
-        description={t("protocol.done", { defaultValue: "请求已完成并回传给外部站点，这个窗口会自动关闭。" })}
+        description={t("protocol.done", { defaultValue: "请求已完成并回传给外部站点。" })}
       />
     </div>
   );

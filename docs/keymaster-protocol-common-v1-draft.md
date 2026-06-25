@@ -25,16 +25,53 @@
 2. Keymaster popup 初始化完成后，通过 `postMessage` 回发一条 `ready`。
 3. 第三方站点收到 `ready` 后，再发送正式 `request`。
 4. Keymaster 完成后回发 `result`。
-5. Keymaster popup 在进入结束流程时，主动发出一条 `closing`；第三方站点把 `closing` 与 `popup.closed === true` 共同视作断开信号。
+5. Keymaster popup 在**窗口生命周期结束**时（用户手工关闭 / 页面卸载 / 第三方站点主动要求关闭），主动发出一条 `closing`；第三方站点把 `closing` 与 `popup.closed === true` 共同视作断开信号。
 
 设计缘由：
 
 - popup 页面加载和消息监听注册存在时序问题；
 - `ready` 用来明确“我已经能收消息了”，避免首条请求丢失；
 - 传输层只解决消息收发，不承载业务语义；
-- `closing` 是 popup 生命周期的主动通知；`popup.closed === true` 是浏览器给的兜底真值。两者并联收敛到断开态，本协议**不**引入心跳、**不**引入 MessageChannel。
+- `closing` 是 popup **窗口**生命周期的主动通知，**不**是“单条 request 收尾”的通知；popup 可以连续处理多条 request，期间不发 `closing`。
+- `popup.closed === true` 是浏览器给的兜底真值。两者并联收敛到断开态，本协议**不**引入心跳、**不**引入 MessageChannel。
 
-## Popup 生命周期连接状态
+## Popup 生命周期与业务请求生命周期
+
+V1 把"窗口生命周期"与"业务请求生命周期"分到两条独立的时间线上。
+
+### 窗口生命周期
+
+```txt
+window.open(...)   -> 收到 ready                -> 收到 closing / popup.closed
+       opening              connected                  disconnected
+```
+
+- `opening` → `connected`：收到 `ready`。
+- `connected` → `disconnected`：收到 `closing` 或 `popup.closed === true`。
+- `disconnected` 是终态；下次 `window.open` 才能重新进入 `opening`。
+
+### 业务请求生命周期（在同一窗口内可重复）
+
+```txt
+waiting -> (waiting_unlock -> waiting_confirm) -> executing -> (approved / rejected / failed) -> waiting
+```
+
+- 收到合法 request 后服务进入 `waiting_unlock`（vault 锁）或 `waiting_confirm`（vault 已解）；
+- 用户确认后进入 `executing`；
+- 终态：`approved` / `rejected` / `failed`；
+- 终态后服务**回到** `waiting`，允许在同一个 popup 会话里处理下一条 request。
+- `result` 报回业务结果；`closing` **不**在此路径上发出。
+
+### 关键不变量
+
+1. `ready` 是连接建立信号，**不**表示用户已授权、**不**表示业务成功。
+2. `closing` 是**窗口**生命周期结束信号，**不**携带业务结果，**不**替代 `result`。
+3. `result` 是单条 request 的业务结果，**不**代表连接已断开。
+4. `result` 与 `closing` 必须保持两种不同语义的顶层报文，**不允许**在 `result` 里夹带“连接已断开”。
+5. 同一 popup 窗口里允许串行处理多条 request；同时只允许**一条在途** request。
+6. `disconnected` 是窗口级终态；`approved / rejected / failed` 是 request 级终态，两者**不**互相替代。
+
+## Popup 连接状态
 
 Popup 连接状态只在 popup 窗口级别定义，**不**在 request 级别定义。
 
@@ -72,7 +109,7 @@ result 是否已经返回
 ### 不变量
 
 1. `ready` 是连接建立信号，**不**表示用户已授权、**不**表示业务成功。
-2. `closing` 是连接结束信号，**不**携带业务结果，**不**替代 `result`。
+2. `closing` 是**窗口**生命周期结束信号，**不**携带业务结果，**不**替代 `result`。
 3. `result` 与 `closing` 必须保持两种不同语义的顶层报文，**不允许**在 `result` 里夹带“连接已断开”。
 4. `disconnected` 是终态；client 端状态转移必须幂等。
 5. 本协议**不**做心跳：不引入 `ping/pong`、不基于“若干秒没消息”判定断开。
@@ -197,15 +234,15 @@ type BinaryField = {
 }
 ```
 
-`closing` 是 popup 生命周期结束信号。它**只**说明：
+`closing` 是 popup **窗口**生命周期结束信号。它**只**说明：
 
 ```txt
-这个 popup 会话要结束了
+这个 popup 窗口会话要结束了
 ```
 
 它**不**说明：
 
-- 请求成功还是失败；
+- 当前 request 成功还是失败；
 - 用户是否授权；
 - 有没有 `result`；
 - 为什么关闭。
@@ -214,9 +251,67 @@ type BinaryField = {
 
 - 报文为最小对象，**不**附带 `id` / `ok` / `error` / `reason` / `method` 等业务字段。
 - `closing` 与 `result` 是两种不同语义的顶层报文，不允许合并。
-- popup 应在 `result` 之后、关闭窗口之前发出 `closing`；用户手工关闭 / 页面卸载时由页面层 best-effort 再补一次。
+- popup 在以下路径发出 `closing`：
+  - 用户手工关闭窗口 / 页面卸载 / 刷新（`pagehide` / `beforeunload`）；
+  - 第三方站点主动要求关闭 popup（例如 `targetOrigin` 改变）。
+- popup **不**在"单条 request 完成"路径上发 `closing`：单条 request 完成
+  只回 `result`；popup 仍可继续处理下一条 request。
 - popup 最多发一次 `closing`；发送失败不重试，由 `popup.closed === true` 兜底。
 - client 收到 `closing` 后立即收敛到 `disconnected`；重复 `closing` 幂等忽略。
+
+## 命令流历史（popup 内）
+
+popup 内部维护一份"按 exact origin 归档"的命令流历史，目的是让用户
+在同一个站点反复调用时能看到命令流上下文，但**不**承担审计冷库职责。
+
+### 数据模型
+
+- 一条 request = 一条 `ProtocolCommandRecord`；状态推进时直接更新同一
+  条记录（**不**做 event-sourcing / 不追加 event row）。
+- 状态收口为：`waiting_unlock` / `waiting_confirm` / `executing` /
+  `approved` / `rejected` / `failed`。
+- 终态稳定后立刻落 IndexedDB；中间态不一定落库（取决于实现）。
+
+### 归档维度
+
+- **exact origin**（`event.origin` 原样字符串），不归一化到 host。
+- `https://example.com` 与 `https://example.com:8443` 必须视为不同 origin。
+- UI 文案可以显示"站点 / 域名"，但 DB 真值必须存 exact origin。
+
+### 持久化范围
+
+| 方法 | 持久化字段 |
+| --- | --- |
+| `identity.get` | `aud`（= origin）、`text`、请求的 `claims` |
+| `intent.sign` | `text`、`contentType`、content 字节长度 |
+| `cipher.encrypt` | `text`、`contentType`、content 字节长度 |
+| `cipher.decrypt` | `text`、nonce 字节长度、cipherbytes 字节长度 |
+| 终态 | 状态、错误码、错误英文消息 |
+
+**不**持久化：
+
+- 私钥材料；
+- 解密后的明文完整内容；
+- 完整密文字节；
+- 完整签名结果字节；
+- 大体积二进制正文。
+
+### DB 位置
+
+- DB 名：`keymaster.protocol`；
+- store：`commands`；
+- 索引：`origin` / `updatedAt` / compound `[origin, updatedAt]`。
+
+DB 不可用时 popup 继续工作：当前 request 仍可正常执行，UI 顶部显示
+"历史不可用"。
+
+### 历史加载时机
+
+- popup 第一次启动**不**预先载入任何历史。
+- 收到第一条合法 request 时，按 `event.origin` 载入该 origin 的历史。
+- 同 popup 会话内遇到不同 origin 的 request 时，按新 origin 重新载入。
+- 不支持从 URL 参数 / demo 本地缓存猜测历史归属；历史只信浏览器
+  `event.origin`。
 
 ## 安全边界
 
