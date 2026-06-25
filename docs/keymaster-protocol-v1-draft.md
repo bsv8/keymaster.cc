@@ -1,17 +1,20 @@
 # Keymaster Protocol V1（草案）
 
-本文档是 Keymaster 对外协议的总览入口。**当前**协议按能力拆成四份
+本文档是 Keymaster 对外协议的总览入口。**当前**协议按能力拆成多份
 草案：
 
 - [公共约定](./keymaster-protocol-common-v1-draft.md)
 - [Identity.Get](./keymaster-identity-get-v1-draft.md)
 - [Intent.Sign](./keymaster-intent-sign-v1-draft.md)
 - [Cipher](./keymaster-cipher-v1-draft.md)
+- [P2PKH.Transfer](./keymaster-p2pkh-transfer-v1-draft.md)
+- [FeePool](./keymaster-feepool-v1-draft.md)
 
 拆分缘由：
 
 - 公共约定承载 `BinaryField` / 顶层 `ready` / `request` / `result` 报文
-  形态 / 安全边界 / claim 命名规则等所有方法共享的部分。
+  形态 / 安全边界 / claim 命名规则 / 站点配置 / 命令历史 / 费用池状态
+  等所有方法共享的部分。
 - `identity.get` 与 `intent.sign` 都需要 Keymaster 签名，但签名对象不同：
   - `identity.get` 签的是"身份断言"；
   - `intent.sign` 签的是"调用方提供的业务内容信封"。
@@ -20,7 +23,12 @@
 - `cipher.encrypt` / `cipher.decrypt` 处理的是站点绑定的二进制加解密，
   业务模型、加解密算法、错误语义与签名类方法差异较大，单独成文避免
   把"明文/密文"与"待签名字节/签名"混在一起。
-- 四份草案都复用公共约定中的 transport / `BinaryField` / popup + `postMessage`
+- `p2pkh.transfer` 是受控转账能力（**不**复用站内 `plugin-transfer` UI）；
+  site 只提交地址 + 金额，确认文案由 Keymaster 自己生成；余额不足时不
+  自动对外暴露真实原因。
+- `feepool.prepare` / `feepool.commit` 是双端费用池两步方法族；不允许
+  单步 `feepool.transfer`，也不允许中间子会话 / 心跳 / MessageChannel。
+- 各草案都复用公共约定中的 transport / `BinaryField` / popup + `postMessage`
   通信模型；不要在子文档里再次定义这些。
 
 当前协议能力包括：
@@ -29,13 +37,23 @@
 - `intent.sign`
 - `cipher.encrypt`
 - `cipher.decrypt`
+- `p2pkh.transfer`
+- `feepool.prepare`
+- `feepool.commit`
 
-四个方法都：
+七个方法都：
 
 - 走同一套 transport（popup + `postMessage` + JS 对象 + `BinaryField`）。
 - 必须由 Keymaster popup 处理；Keymaster popup 协议入口固定为
   `/protocol/v1/popup`。
-- 经过用户确认；不存在"轻量免确认"或"静默获取"模式。
+- `identity.get` / `intent.sign` / `cipher.encrypt` / `cipher.decrypt` 经过用户确认；
+  `p2pkh.transfer` 默认走人工确认，但 origin 配置了 `p2pkhAutoApproveEnabled`
+  + `amountSatoshis <= p2pkhAutoApproveMaxSatoshis` 时走 auto-approve
+  （不弹确认页，结果写进命令历史）。
+  `feepool.prepare` / `feepool.commit` 默认走人工确认；但 origin 配置了
+  `feePoolAutoSignMaxSatoshis` + `amountSatoshis <= feePoolAutoSignMaxSatoshis`
+  时走 auto-sign（同 p2pkh.autoApprove，跳过 ConfirmView）。
+  不存在"静默获取"模式。
 
 ## Popup 连接状态与业务请求结果
 

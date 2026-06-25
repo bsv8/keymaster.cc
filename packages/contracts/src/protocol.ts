@@ -1,18 +1,27 @@
 // packages/contracts/src/protocol.ts
 // Keymaster 对外协议 V1 公共契约。
 //
-// 设计缘由（施工单 001）：
-//   - 协议四方法（identity.get / intent.sign / cipher.encrypt / cipher.decrypt）
-//     全部走同一套 transport + 同一套 BinaryField + 同一套 ready/request/result
-//     状态机；任何一份契约都要与 "硬切换 001" 中列出的核心不变量保持一致。
+// 设计缘由（施工单 001 + 002 硬切换）：
+//   - 协议方法集：identity.get / intent.sign / cipher.encrypt / cipher.decrypt
+//     （签名 + 加解密），p2pkh.transfer（受控转账），feepool.prepare /
+//     feepool.commit（双端费用池两步方法族）。所有方法走同一套 transport +
+//     同一套 BinaryField + 同一套 ready/request/result 状态机；任何一份契约都
+//     要与"硬切换 001 / 002"中列出的核心不变量保持一致。
 //   - 本文件**只**放类型与错误码字面量；具体 CBOR 编码、签名、加解密、claim
 //     解析都收敛在 `packages/plugin-protocol` 内部，不在 contracts 暴露实现。
+//     p2pkh / feepool 的链上交互通过 capability 注入到 plugin-protocol 的
+//     service 中；plugin-protocol 不直接 import plugin-p2pkh。
 //   - 二进制统一用 `BinaryField`，不允许 base64 / stringified ArrayBuffer 偷渡。
 //   - `identityEnvelope` / `signedEnvelope` 是最终真值字节（Deterministic CBOR），
 //     不是"待调用方重编码的对象"；调用方验签时**直接**对这些字节验签。
 //   - `signature.bytes` 固定为 compact 64-byte secp256k1（r || s），不允许双格式。
-//   - `event.origin` 在 cipher 路径上**原样**参与站点密钥派生，不做归一化。
+//   - `event.origin` 在 cipher 路径上**原样**参与站点密钥派生，不做归一化；
+//     origin settings / fee pool 持久化也按 exact origin 归档。
 //   - 所有错误信息走英文；UI 展示由调用方自己翻译。
+//   - `p2pkh.transfer` / `feepool.*` 涉及本地敏感信息（余额 / 池状态 / 失败原因）；
+//     真实原因只写本地历史；对外统一 `user_rejected`，**不**暴露真实原因。
+//   - `feepool.commit` 的 `operationId` 只在 popup 会话内存中有效，
+//     不持久化；popup 刷新 / 关闭后 operation 失效。
 
 /**
  * 二进制字段。V1 协议里所有二进制内容（密文、签名、信封真值、文件本体、
@@ -39,7 +48,10 @@ export const PROTOCOL_METHODS = [
   "identity.get",
   "intent.sign",
   "cipher.encrypt",
-  "cipher.decrypt"
+  "cipher.decrypt",
+  "p2pkh.transfer",
+  "feepool.prepare",
+  "feepool.commit"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -263,6 +275,309 @@ export interface CipherDecryptResult {
   content: BinaryField;
 }
 
+/* ============== p2pkh.transfer ============== */
+
+/**
+ * `p2pkh.transfer` 请求参数。
+ *
+ * 设计缘由（施工单 002 硬切换）：
+ *   - 本次只支持 `bsv` 主网 P2PKH 转账。不引入 assetId / network / 多币种
+ *     / 多网络协商。
+ *   - site 不允许传 `text` / `confirmMessage`：确认文案由 Keymaster 自己
+ *     按方法语义生成；不允许 site 伪装转账为登录确认。
+ *   - `aud` 不接受：connect popup 已天然拿到 `event.origin` 真值，origin
+ *     等价检查由 service 自动执行。
+ *   - `feeRateSatoshisPerKb` 可选；缺省时由 service 走一个保守默认值。
+ *   - amountSatoshis 是整数 satoshis，不接受小数；feeSatoshis 在 result 里
+ *     回。
+ */
+export interface P2pkhTransferParams {
+  /** 主网 P2PKH 地址（base58check，version 0x00）；testnet 直接 invalid_request。 */
+  recipientAddress: string;
+  /** 正整数 satoshis。 */
+  amountSatoshis: number;
+  /** 可选 fee rate（sat/kB）。>= 1。 */
+  feeRateSatoshisPerKb?: number;
+}
+
+/** `p2pkh.transfer` 成功结果。 */
+export interface P2pkhTransferResult {
+  /** 已广播交易的 canonical txid。 */
+  txid: string;
+  /** 已签名交易 raw hex。 */
+  rawTxHex: string;
+  /** 实际花费的 fee satoshis。 */
+  feeSatoshis: number;
+}
+
+/* ============== feepool.prepare / feepool.commit ============== */
+
+/**
+ * fee pool 三种 action。
+ *
+ * 含义（V4 真实模型："两笔 tx + 持续协商的 B-Tx 草稿"）：
+ *   - `create`：当前没有该 (origin, counterpartyPublicKeyHex) 对应的池，
+ *     建池 A-Tx（client P2PKH → 2-of-2 multisig）+ 生成初始 B-Tx 草稿，
+ *     草稿 `serverAmount = amountSatoshis`。**不**广播 B-Tx。
+ *   - `spend`：池已存在且 `prior.serverAmount + amountSatoshis <= prior.totalAmount`；
+ *     在旧 B-Tx 草稿上 `serverAmount += amountSatoshis` 并 client 重签，
+ *     **不**构造新独立 draftTx，**不**走 dust close 路径，**不**广播。
+ *   - `close_and_recreate`：池存在但累计 transfer 会超 `totalAmount`；先把
+ *     旧 B-Tx 草稿切到 `FINAL_LOCKTIME` 得到 close 草稿（双方后续广播；
+ *     V1 简化下暂不广播），再建新池 A-Tx + 生成新池初始 B-Tx 草稿。
+ */
+export type ProtocolFeePoolAction = "create" | "spend" | "close_and_recreate";
+
+/**
+ * `feepool.prepare` 请求参数。
+ *
+ * 设计缘由（施工单 002 硬切换 + 收尾反馈）：
+ *   - site **不**传 `action` / `lockHeight` 等策略字段；action（create /
+ *     spend / close_and_recreate）和 lockHeight 由 Keymaster 单边决定。
+ *   - site 只提交：
+ *       - `counterpartyPublicKeyHex`：对端公钥。
+ *       - `amountSatoshis`：**本次想转给对端的金额**（satoshis）。
+ *   - `amountSatoshis` 在所有 action 下语义一致：本次 transfer 的金额。
+ *     池大小由 `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`
+ *     决定（per-origin 配置）。
+ *   - 三种 action 都围绕"持续协商的 B-Tx 草稿"展开（**不**在 prepare 阶段
+ *     广播任何 draftTx）：
+ *       - `create`：建池 A-Tx + 生成初始 B-Tx 草稿，
+ *         草稿 `serverAmount = amountSatoshis`。
+ *       - `spend`：在旧 B-Tx 草稿上把 `serverAmount += amountSatoshis` 并
+ *         client 重签，得到更新后的 B-Tx 草稿。
+ *       - `close_and_recreate`：把旧 B-Tx 草稿切到 `FINAL_LOCKTIME` 得到
+ *         close 草稿（待双方后续广播；V1 简化下暂不广播），再建新池 A-Tx +
+ *         生成新池初始 B-Tx 草稿。
+ */
+export interface FeepoolPrepareParams {
+  /** 33-byte compressed secp256k1 公钥 hex（66 个 hex 字符）。 */
+  counterpartyPublicKeyHex: string;
+  /** 正整数 satoshis；本次想转给对端的金额（三种 action 语义一致）。 */
+  amountSatoshis: number;
+}
+
+/**
+ * `feepool.prepare` 成功结果。
+ *
+ * 设计缘由（V4 收口）：feepool 真实模型是"两笔 tx + 持续协商的 B-Tx 草稿"。
+ *   - `baseTxHex`：建池那笔 A-Tx（client P2PKH → 2-of-2 multisig），
+ *     仅 client 签（funding 来自 client 自己的 UTXO），**不需要** server sig。
+ *   - `draftSpendTxHex` / `draftClientSignBytes`：当前 B-Tx 草稿（multisig output
+ *     → server + client change）。三种 action 都有。**不是**真广播的 tx，
+ *     是 site / server 持续协商的草稿。
+ *
+ * 三种 action 返回的字段：
+ *   - `create`：baseTxHex + baseTxOutputIndex + draftSpendTxHex + draftClientSignBytes
+ *     （建池 + 初始 B-Tx 草稿；草稿 serverAmount = amountSatoshis）。
+ *   - `spend`：draftSpendTxHex + draftClientSignBytes（更新后的 B-Tx 草稿；
+ *     在旧草稿上累计 serverAmount 并 client 重签，**不**再单独发一笔
+ *     draftTx，**不**走 dust close 路径，**不**广播）。
+ *   - `close_and_recreate`：closeDraftTxHex + closeClientSignBytes（close 草稿：
+ *     旧草稿切到 `FINAL_LOCKTIME` 最终版本） + baseTxHex + baseTxOutputIndex
+ *     （新池 A-Tx） + draftSpendTxHex + draftClientSignBytes（新池初始 B-Tx 草稿）。
+ *
+ * 字段命名说明：`draftSpendTxHex` / `closeDraftTxHex` 中的 `draft` 强调
+ * "是当前草稿、不是真广播的 tx"；`closeDraftTxHex` 同理（是 close 版本的
+ * 草稿）。`operationId` 同步在 prepare 阶段产出，commit 阶段回带。
+ */
+export interface FeepoolPrepareResult {
+  /** operationId 仅在当前 popup 会话内有效；popup 关闭后失效。 */
+  operationId: string;
+  action: ProtocolFeePoolAction;
+  counterpartyPublicKeyHex: string;
+  /** 本次 transfer 的 delta（site 请求的 amountSatoshis）。 */
+  amountSatoshis: number;
+  /**
+   * 建池 A-Tx（action === "create" 或 "close_and_recreate"）。
+   * create：唯一的一笔；close_and_recreate：新建池那笔。
+   * 仅 client 签；**不需要** server sig。
+   */
+  baseTxHex?: string;
+  /** multisig output 在 base tx 里的 vout index。 */
+  baseTxOutputIndex?: number;
+  /**
+   * 主 B-Tx 草稿（三种 action 都有）。
+   * create / close_and_recreate 的新池分支：这是初始 B-Tx 草稿。
+   * spend / close_and_recreate 的 close 之前的 spend 分支：这是更新后的草稿。
+   *
+   * 当前草稿，不是真广播的 tx；是 site 与 server 持续协商的对象。
+   */
+  draftSpendTxHex: string;
+  /** 当前 draftSpendTxHex 上的 client 部分签名。 */
+  draftClientSignBytes: BinaryField;
+  /**
+   * close_and_recreate 的 close 版本 B-Tx 草稿（仅 close_and_recreate）。
+   * 由 SDK `loadTx` 把旧 draft 切到 FINAL_LOCKTIME 最终版本得到；
+   * commit 落地后这个 close 草稿会被双方广播（V1 简化：暂时不广播）。
+   */
+  closeDraftTxHex?: string;
+  /** closeDraftTxHex 上的 client 部分签名。 */
+  closeClientSignBytes?: BinaryField;
+  /** 决策时参考的旧池快照。 */
+  priorPoolRecord?: {
+    baseTxid: string;
+    totalAmount: number;
+    serverAmount: number;
+    draftSpendTxHex?: string;
+  } | null;
+}
+
+/** `feepool.commit` 请求参数。
+ *
+ * V4 收口：**移除 `baseCounterpartySignatures`**。base tx 仅由 client 用
+ * 自己 P2PKH UTXO funding 并签名；server 不参与 base tx 的签名（multisig
+ * output 是被创建的，不是被花费的）。所有 server sig 都在 B-Tx 上。
+ */
+export interface FeepoolCommitParams {
+  /** 由 `feepool.prepare` 返回的 operationId；只在本 popup 会话内有效。 */
+  operationId: string;
+  /** 33-byte compressed secp256k1 公钥 hex。 */
+  counterpartyPublicKeyHex: string;
+  /**
+   * 主 B-Tx 草稿的 server sig。
+   * - create：initial spend sig（由 SDK `clientVerifyServerSpendSig` 验）。
+   * - spend：update sig（由 SDK `clientVerifyServerUpdateSig` 验）。
+   * - close_and_recreate 的新池部分：initial spend sig（同 create）。
+   */
+  counterpartySignatures: BinaryField[];
+  /**
+   * close_and_recreate 的 close 部分 B-Tx 草稿的 server sig（update sig）。
+   * 仅 close_and_recreate 路径下传入；其它 action 不传。
+   */
+  closeCounterpartySignatures?: BinaryField[];
+}
+
+/** `feepool.commit` 成功结果。
+ *
+ * V4 收口：返回的 `draftTxid` / `draftTxHex` 是**当前 B-Tx 草稿**的
+ * txid / hex，**不是**真广播的 tx。commit 阶段只把草稿持久化到 store，
+ * 由 server 决定何时广播。V1 简化下不真广播。
+ */
+export interface FeepoolCommitResult {
+  operationId: string;
+  action: ProtocolFeePoolAction;
+  /** 当前主 B-Tx 草稿的 txid。 */
+  draftTxid: string;
+  /** 当前主 B-Tx 草稿的 raw tx hex。 */
+  draftTxHex: string;
+  /** 落地后费用池记录（spend / close_and_recreate 的新池部分非空）。 */
+  poolRecord: ProtocolFeePoolRecord | null;
+  /** 仅 close_and_recreate：旧池被 close 时的最终 close 草稿 txid。 */
+  closeDraftTxid?: string;
+}
+
+/* ============== 站点配置与费用池状态（施工单 002 硬切换） ============== */
+
+/**
+ * 站点级配置。
+ *
+ * 字段固定；默认值在 service 层给出：
+ *   - p2pkhAutoApproveEnabled 默认 false；
+ *   - p2pkhAutoApproveMaxSatoshis 默认 0；
+ *   - feePoolDefaultFundSatoshis 默认 0（首次配置必须由用户填）；
+ *   - feePoolAutoSignMaxSatoshis 默认 0（即"默认关闭 auto-sign"）。
+ *
+ * 设计缘由（施工单 002 收尾反馈）：
+ *   - 关键：**fee pool 缺省 fund 是 per-origin 设置**，不是系统级设置；
+ *     同一站点不同 origin 之间彼此独立。
+ *   - 首次 `feepool.prepare` 命中 create action 且该 origin 没配置时，
+ *     popup 必须要求用户先填 `feePoolDefaultFundSatoshis`（走 settings modal
+ *     或站点配置入口；详见协议文档）。
+ */
+export interface ProtocolOriginSettingsRecord {
+  /** exact event.origin（不做 host 归一化）。 */
+  origin: string;
+  /** 是否对该 origin 自动通过 p2pkh.transfer。 */
+  p2pkhAutoApproveEnabled: boolean;
+  /** 自动通过上限（amount <= max 才放行）。0 = 关闭。 */
+  p2pkhAutoApproveMaxSatoshis: number;
+  /** 自动签名上限（amount <= max 才放行 feepool.commit）。0 = 关闭。 */
+  feePoolAutoSignMaxSatoshis: number;
+  /**
+   * 该 origin 首次 `feepool.prepare` 命中 create 时使用的池大小。
+   * 默认 0；0 = "未配置"，首次会要求用户在 popup 内补。
+   */
+  feePoolDefaultFundSatoshis: number;
+  updatedAt: number;
+}
+
+/**
+ * 费用池持久化记录。
+ *
+ * 设计缘由（V4 收口）：feepool 真实模型是两笔 tx：
+ *   - **A-Tx（base tx，建池时定）**：client P2PKH UTXO → 2-of-2 multisig output，
+ *     池大小 = multisig output 总额 = `feePoolDefaultFundSatoshis`。
+ *   - **B-Tx（draft 草稿，持续协商）**：multisig output → server + client change。
+ *     每次 transfer 不再独立发一笔新 draftTx，而是在同一个 B-Tx 草稿上
+ *     更新 `serverAmount` 字段；只有 close 时把草稿切到 FINAL_LOCKTIME
+ *     最终版本，broadcast 后真正生效。
+ *
+ * `totalAmount` vs `serverAmount` 语义（V4 明确）：
+ *   - `totalAmount` = 池大小 = base tx multisig output 总额。
+ *   - `serverAmount` = 当前已累计分配给 server 的金额
+ *     （`prior.serverAmount + amountSatoshis` 的累加结果）；永远 `<= totalAmount`。
+ *   - 决策：若 `prior.serverAmount + amountSatoshis <= prior.totalAmount`
+ *     → spend（在旧 B-Tx 草稿上 update）；否则 close_and_recreate。
+ *   - key 必须包含 counterpartyPublicKeyHex：同一 origin 可能切换对端公钥，
+ *     旧池不应串到新池。
+ *   - key 格式：`${origin}::${counterpartyPublicKeyHex}`；`::` 不可能出现在
+ *     origin 字符串里（origin 是 URL），实际碰撞风险极低。
+ */
+export interface ProtocolFeePoolRecord {
+  /** `${origin}::${counterpartyPublicKeyHex}` 复合 key。 */
+  poolKey: string;
+  origin: string;
+  counterpartyPublicKeyHex: string;
+  /** base tx txid（2-of-2 multisig output 在这里）。 */
+  baseTxid: string;
+  /** base tx raw hex。 */
+  baseTxHex: string;
+  /** 池大小（satoshis）= base tx multisig output 总额 = `feePoolDefaultFundSatoshis`。 */
+  totalAmount: number;
+  /**
+   * 累计已分配给 server 的金额（satoshis）。
+   * - create：第一次 transfer 后 = `amountSatoshis`。
+   * - spend：每次在 prior 基础上累加（`prior.serverAmount + amountSatoshis`）。
+   * - close_and_recreate：旧池被关时 = `prior.serverAmount + amountSatoshis`；
+   *   新池被建时 = `amountSatoshis`（新池重新从 0 开始累计）。
+   */
+  serverAmount: number;
+  /** 当前 B-Tx 草稿 hex（site 与 server 持续协商的对象；当前草稿，不是真广播）。 */
+  draftSpendTxHex: string;
+  /** 当前 B-Tx 草稿上的 client 部分签名。 */
+  draftClientSignBytes: BinaryField;
+  /** 产生这条记录的最后一次 operation id。 */
+  lastOperationId: string;
+  updatedAt: number;
+}
+
+/**
+ * 真实失败原因（仅写本地历史；对外统一 `user_rejected`）。
+ *
+ * 设计缘由：余额不足 / 池缺失 / DB 不可用等都属于本地敏感状态；
+ * 站点**不**应通过 `error.message` 反推。V1 把这些原因收口在一个
+ * 固定的 union 里；service 层映射到 `ProtocolErrorCode = "user_rejected"`。
+ */
+export type ProtocolFailureReason =
+  | "insufficient_balance"
+  | "invalid_address"
+  | "invalid_amount"
+  | "fee_pool_not_found"
+  | "fee_pool_db_unavailable"
+  | "unknown_operation"
+  | "cross_origin_operation"
+  | "internal_error";
+
+/**
+ * 站点配置与费用池状态（施工单 002 硬切换）
+ *
+ * fee pool 缺省 fund **已收回到 per-origin 配置**
+ * （`ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`）。
+ * 不再有系统级常量 / 不再有 `/settings/protocol` 入口；同一站点不同 origin
+ * 之间彼此独立。
+ */
+
 /* ============== Method dispatch ============== */
 
 /**
@@ -274,6 +589,9 @@ export interface MethodParamsMap {
   "intent.sign": IntentSignParams;
   "cipher.encrypt": CipherEncryptParams;
   "cipher.decrypt": CipherDecryptParams;
+  "p2pkh.transfer": P2pkhTransferParams;
+  "feepool.prepare": FeepoolPrepareParams;
+  "feepool.commit": FeepoolCommitParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -285,6 +603,9 @@ export interface MethodResultMap {
   "intent.sign": IntentSignResult;
   "cipher.encrypt": CipherEncryptResult;
   "cipher.decrypt": CipherDecryptResult;
+  "p2pkh.transfer": P2pkhTransferResult;
+  "feepool.prepare": FeepoolPrepareResult;
+  "feepool.commit": FeepoolCommitResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
@@ -321,7 +642,15 @@ export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "fai
  *   - 历史只按 `origin`（exact origin，**不**做 host 归一化）归档；
  *   - DB 真值 = Keymaster IndexedDB；UI 文案可显示"站点 / 域名"，
  *     但 DB 落盘必须是 `event.origin` 原样字符串。
- *   - 不持久化私钥 / 大体积密文 / 完整签名结果 / 解密明文。
+ *   - 不持久化私钥 / 大体积密文 / 完整签名结果 / 解密明文 / 完整 rawTx。
+ *
+ * 字段语义扩展（p2pkh + feepool）：
+ *   - `recipientAddress` / `amountSatoshis` 摘要显示用；不要把整笔交易存进来。
+ *   - `action` 只在 feepool.prepare/commit 上填写。
+ *   - `operationId` 只在 feepool.commit 上填写（指向 prepare 阶段产的 op）。
+ *   - `counterpartyPublicKeyHex` 只在 feepool.prepare/commit 上填写。
+ *   - `failureReason` 是真实原因（写本地）；对外 `errorCode` 永远是 `user_rejected`。
+ *   - `autoApproved` 在 p2pkh.transfer auto 命中时为 true；UI 据此隐藏 confirm 页。
  */
 export interface ProtocolCommandRecord {
   /** 内部稳定主键；与 transport `requestId` 同源但不一定相等。 */
@@ -354,10 +683,24 @@ export interface ProtocolCommandRecord {
   updatedAt: number;
   /** 终态时间，unix milliseconds；中间态为 0。 */
   finishedAt: number;
-  /** 错误码（failed 时填写）。 */
+  /** 错误码（failed 时填写；隐私敏感场景统一填 `user_rejected`）。 */
   errorCode: string;
-  /** 错误 message（failed 时填写，英文）。 */
+  /** 错误 message（failed 时填写，英文；隐私敏感场景统一填 `User rejected`）。 */
   errorMessage: string;
+  /** p2pkh.transfer 收款地址（p2pkh.transfer 填写）。 */
+  recipientAddress?: string;
+  /** p2pkh.transfer / feepool.* 转账或池金额（satoshis）。 */
+  amountSatoshis?: number;
+  /** feepool.prepare / feepool.commit 的 action。 */
+  action?: ProtocolFeePoolAction;
+  /** feepool.commit 的 operationId（指向 prepare 阶段产的 op）。 */
+  operationId?: string;
+  /** feepool.prepare / feepool.commit 的对端公钥 hex。 */
+  counterpartyPublicKeyHex?: string;
+  /** 本地真实失败原因；隐私敏感场景下与对外 `errorCode` 解耦。 */
+  failureReason?: ProtocolFailureReason;
+  /** p2pkh.transfer auto-approve 命中时为 true；UI 据此跳过 confirm 页。 */
+  autoApproved?: boolean;
 }
 
 /**
@@ -382,27 +725,59 @@ export interface ProtocolCommandFeedState {
 export const PROTOCOL_COMMAND_DB_CAPABILITY = "protocol.commandDb";
 
 /**
- * 命令流 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
+ * 协议存储 DB capability key。
+ *
+ * 设计缘由（施工单 002 硬切换）：原 `PROTOCOL_COMMAND_DB_CAPABILITY` 只承载
+ * commands store；本次把 DB 升级到 3 store（commands / origins / feePools），
+ * capability 同步改名。manifest 在 setup 阶段 provide，service 通过 deps
+ * 注入，**不**直接 import DB 模块。
+ */
+export const PROTOCOL_STORAGE_DB_CAPABILITY = "protocol.storageDb";
+
+/**
+ * 协议存储 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
  *
  * 关键不变量：
- *   - 索引按 `origin + updatedAt desc`；
- *   - `putCommand` 写同 `id` 覆盖旧记录（不追加 event row）；
- *   - DB 异常不抛出：调用方需要自己捕获并降级到"historyAvailable=false"。
+ *   - DB 名固定 `keymaster.protocol`，version 2；
+ *   - 三 store 各司其职：
+ *       - `commands`：命令流历史（一条 request = 一条 record）；
+ *       - `origins`：按 exact origin 存站点级配置；
+ *       - `feePools`：按 `${origin}::${counterpartyPublicKeyHex}` 复合 key
+ *         存费用池状态；
+ *   - commands store 索引按 `origin + updatedAt desc`；
+ *   - feePools store 索引 `origin`，便于按 origin 列出该站点的所有池；
+ *   - `putCommand` / `putOrigin` / `putFeePool` 写同 key 覆盖；
+ *   - DB 异常一律 `console.error + rethrow`；调用方决定怎么降级（p2pkh
+ *     走 manual confirm、feepool fail-closed）。
  */
-export interface ProtocolCommandDb {
-  /**
-   * 写入或更新一条命令。`record.id` 已存在时整条覆盖；`updatedAt` 必
-   * 须由调用方填好。
-   */
+export interface ProtocolStorageDb {
+  /* ----- commands ----- */
   putCommand(record: ProtocolCommandRecord): Promise<void>;
-  /** 按 `id` 读一条；不存在返回 null。 */
   getCommand(id: string): Promise<ProtocolCommandRecord | null>;
-  /**
-   * 按 exact origin 拉历史；按 `updatedAt desc` 排序。
-   * 返回数组可能为空；DB 异常时调用方决定怎么降级。
-   */
+  /** 按 exact origin 拉历史；按 `updatedAt desc` 排序。 */
   listCommandsByOrigin(origin: string): Promise<ProtocolCommandRecord[]>;
+
+  /* ----- origins ----- */
+  getOrigin(origin: string): Promise<ProtocolOriginSettingsRecord | null>;
+  putOrigin(record: ProtocolOriginSettingsRecord): Promise<void>;
+  /** 列出所有 origin 配置。 */
+  listOrigins(): Promise<ProtocolOriginSettingsRecord[]>;
+
+  /* ----- feePools ----- */
+  getFeePool(poolKey: string): Promise<ProtocolFeePoolRecord | null>;
+  putFeePool(record: ProtocolFeePoolRecord): Promise<void>;
+  deleteFeePool(poolKey: string): Promise<void>;
+  /** 按 origin 列出该站点下所有费用池。 */
+  listFeePoolsByOrigin(origin: string): Promise<ProtocolFeePoolRecord[]>;
 }
+
+/**
+ * （施工单 002 收尾反馈：已废弃并删除）
+ *
+ * 原本想用 system-level bridge 暴露 `feePoolDefaultFundSatoshis`，
+ * 实际收口为 per-origin 字段 `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`。
+ * 本接口不再导出；service / manifest / settings 页一并删除。
+ */
 
 /* ============== popup 会话状态 ============== */
 
@@ -451,6 +826,61 @@ export const PROTOCOL_SERVICE_CAPABILITY = "protocol.service";
  * vault / keyspace + 构造 envelope + 签名 / 加解密；UI 只负责渲染态。
  * service 完全不依赖 React，单元测试可直接调它。
  */
+/**
+ * plugin-protocol 通过 capability 注入 p2pkh 业务能力的"瘦身"接口。
+ *
+ * 设计缘由：plugin-protocol 不直接 import plugin-p2pkh（边界检查禁止
+ * 插件间互相 import）。这里在 contracts 层定义一个最小子集；plugin-p2pkh
+ * 的现有 `P2pkhService` 已经覆盖该子集，manifest setup 时做一次
+ * 适配即可。
+ */
+export interface P2pkhProtocolAdapter {
+  /** 列当前 active key 在指定 assetId 下的 UTXO（mainnet P2PKH）。 */
+  listUtxos(filter?: { assetId?: string }): Promise<
+    Array<{ txid: string; vout: number; value: number }>
+  >;
+  prepareTransfer(input: {
+    assetId: "bsv";
+    recipientAddress: string;
+    amountSatoshis: number;
+    feeRateSatoshisPerKb: number;
+  }): Promise<{
+    assetId: "bsv";
+    network: "main";
+    recipientAddress: string;
+    amountSatoshis: number;
+    feeRateSatoshisPerKb: number;
+    allocation: unknown;
+    changeAddress: string;
+    outputs: Array<{ address: string; value: number }>;
+    estimatedFeeSatoshis: number;
+    serializedSizeBytes: number;
+    txid: string;
+    rawTxHex: string;
+  }>;
+  submitTransfer(preview: {
+    assetId: "bsv";
+    network: "main";
+    recipientAddress: string;
+    amountSatoshis: number;
+    feeRateSatoshisPerKb: number;
+    allocation: unknown;
+    changeAddress: string;
+    outputs: Array<{ address: string; value: number }>;
+    estimatedFeeSatoshis: number;
+    serializedSizeBytes: number;
+    txid: string;
+    rawTxHex: string;
+  }): Promise<{
+    status: string;
+    txid?: string;
+    rawTxHex: string;
+    error?: string;
+    submissionId: string;
+    localInputClaimIds: string[];
+  }>;
+}
+
 export interface ProtocolService {
   /**
    * 启动一个 popup 会话。同一 service 实例允许多次启动会话（每次都重置
@@ -460,6 +890,7 @@ export interface ProtocolService {
   startSession(): void;
   /**
    * 关闭当前会话并清理内部状态。UI 在用户关闭 popup / 主动取消时调用。
+   * 同时清空 feepool pendingOps（operationId 立即失效）。
    */
   endSession(): void;
   /**
@@ -500,6 +931,11 @@ export interface ProtocolService {
       }
     | null;
   /**
+   * 当前已绑定 request 是否走了 auto-approve（p2pkh.transfer）。
+   * UI 据此跳过 ConfirmView（auto-approve 命中时 popup **不**弹确认页）。
+   */
+  currentRequestAutoApproved(): boolean;
+  /**
    * 订阅会话状态变化，UI 用来驱动页面。
    */
   subscribe(handler: (snapshot: ProtocolSessionSnapshot) => void): () => void;
@@ -520,4 +956,13 @@ export interface ProtocolService {
    * 变；UI 用来驱动 feed 面板的更新。
    */
   subscribeFeed(handler: (state: ProtocolCommandFeedState) => void): () => void;
+  /**
+   * 读 origin 配置；DB 不可用或该 origin 尚未配置时返回 null。
+   * UI 用此填默认 + 弹 modal 编辑当前 origin。
+   */
+  getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null>;
+  /**
+   * 写 origin 配置；DB 不可用时 throw（由调用方决定怎么降级）。
+   */
+  setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void>;
 }

@@ -149,6 +149,59 @@ function CommandCard({
                 </dd>
               </>
             ) : null}
+            {/* ============== 施工单 002 硬切换：p2pkh/feepool 摘要 ============== */}
+            {command.recipientAddress ? (
+              <>
+                <dt>{t("protocol.feed.recipient", { defaultValue: "收款地址" })}</dt>
+                <dd>
+                  <code>{command.recipientAddress}</code>
+                </dd>
+              </>
+            ) : null}
+            {command.amountSatoshis !== undefined ? (
+              <>
+                <dt>{t("protocol.feed.amount", { defaultValue: "金额" })}</dt>
+                <dd>
+                  <code>{command.amountSatoshis}</code> sats
+                </dd>
+              </>
+            ) : null}
+            {command.action ? (
+              <>
+                <dt>{t("protocol.feed.action", { defaultValue: "动作" })}</dt>
+                <dd>
+                  <code>{command.action}</code>
+                </dd>
+              </>
+            ) : null}
+            {command.counterpartyPublicKeyHex ? (
+              <>
+                <dt>{t("protocol.feed.counterparty", { defaultValue: "对端公钥" })}</dt>
+                <dd>
+                  <code>
+                    {command.counterpartyPublicKeyHex.length > 30
+                      ? `${command.counterpartyPublicKeyHex.slice(0, 14)}…${command.counterpartyPublicKeyHex.slice(-12)}`
+                      : command.counterpartyPublicKeyHex}
+                  </code>
+                </dd>
+              </>
+            ) : null}
+            {command.operationId ? (
+              <>
+                <dt>{t("protocol.feed.operationId", { defaultValue: "操作 id" })}</dt>
+                <dd>
+                  <code>{command.operationId}</code>
+                </dd>
+              </>
+            ) : null}
+            {command.autoApproved ? (
+              <>
+                <dt>{t("protocol.feed.autoApproved", { defaultValue: "自动通过" })}</dt>
+                <dd>
+                  <code>yes</code>
+                </dd>
+              </>
+            ) : null}
             <dt>{t("protocol.feed.activeKey", { defaultValue: "签名公钥" })}</dt>
             <dd>
               <code>{command.activePublicKeyHex || "n/a"}</code>
@@ -158,6 +211,14 @@ function CommandCard({
                 <dt>{t("protocol.feed.error", { defaultValue: "错误" })}</dt>
                 <dd>
                   <code>{command.errorCode}</code>: {command.errorMessage}
+                </dd>
+              </>
+            ) : null}
+            {command.failureReason ? (
+              <>
+                <dt>{t("protocol.feed.failureReason", { defaultValue: "本地失败原因" })}</dt>
+                <dd>
+                  <code>{command.failureReason}</code>
                 </dd>
               </>
             ) : null}

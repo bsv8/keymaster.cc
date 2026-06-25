@@ -1,17 +1,18 @@
 // packages/plugin-protocol/src/ProtocolPopupPage.tsx
 // 对外协议 popup 页面。
 //
-// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+// 设计缘由（施工单 002 硬切换：popup 复用与命令流 + p2pkh/feepool）：
 //   - 页面只负责渲染态 + 转交用户操作给 service；密码学 / message 收发
 //     / 校验 / 签名 / 加解密一律不进组件。
 //   - 页面挂载时 startSession() 一次；之后通过 subscribe 拿到 snapshot
 //     驱动渲染。
 //   - popup 是**会话级**长存：单条 request 完成后 phase 回到 waiting，
 //     不会自动关窗；`closing` 由 pagehide / beforeunload 路径发出。
-//   - 顶部 sticky 顶栏：当前 origin / 当前 phase / 关闭按钮 / 回到最新。
+//   - 顶部 sticky 顶栏：当前 origin / 当前 phase / 站点配置按钮 / 关闭 / 回到最新。
 //   - 中间是命令流 feed：最新命令展开，历史命令默认折叠。
-//   - 在 `confirming` / `unlocking` 时，当前请求会以浮层 / 占位条
-//     形式出现在 feed 顶部，避免被历史盖住。
+//   - `confirming` / `unlocking` / `executing` 时当前请求以浮层形式出现
+//     （feed 顶部占位）。`p2pkh.transfer` auto-approve 命中时不显示
+//     ConfirmView（`currentRequestAutoApproved()` 为 true 时跳过 overlay）。
 //   - 收到第一条 request 时按 exact origin 载入历史。
 //   - 文案中文；错误 message 原样显示英文。
 
@@ -21,9 +22,12 @@ import { useCapability, useI18n } from "@keymaster/runtime";
 import type {
   CipherDecryptParams,
   CipherEncryptParams,
+  FeepoolCommitParams,
+  FeepoolPrepareParams,
   IdentityGetParams,
   IntentSignParams,
   MethodParams,
+  P2pkhTransferParams,
   ProtocolCommandFeedState,
   ProtocolMethod,
   ProtocolService,
@@ -31,6 +35,7 @@ import type {
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
+import { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
 
 export function ProtocolPopupPage() {
   const service = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
@@ -42,6 +47,7 @@ export function ProtocolPopupPage() {
   const [request, setRequest] = useState<ReturnType<NonNullable<ProtocolService["currentRequest"]>>>(() =>
     service.currentRequest()
   );
+  const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
   const feedTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -125,7 +131,12 @@ export function ProtocolPopupPage() {
     }
   }, [feed.commands.length, feed.currentOrigin]);
 
-  const showConfirmingOverlay = snap.phase === "confirming" || snap.phase === "unlocking" || snap.phase === "executing";
+  // p2pkh.transfer auto-approve 命中时 popup **不**显示 ConfirmView；
+  // service 在 `tryAcceptFirstRequest` 里已经把 phase 推到 executing
+  // 并启动内联执行；这里直接跳过 overlay，只让 feed 显示最新卡片。
+  const showConfirmingOverlay =
+    !service.currentRequestAutoApproved?.() &&
+    (snap.phase === "confirming" || snap.phase === "unlocking" || snap.phase === "executing");
 
   return (
     <div className="protocol-popup">
@@ -139,6 +150,15 @@ export function ProtocolPopupPage() {
           {phaseLabel(t, snap.phase)}
         </span>
         <span className="protocol-popup__topbar-spacer" />
+        <button
+          type="button"
+          className="protocol-popup__back-top"
+          disabled={!feed.currentOrigin}
+          onClick={() => setOriginSettingsOpen((v) => !v)}
+          aria-expanded={originSettingsOpen}
+        >
+          {t("protocol.topbar.originSettings", { defaultValue: "站点配置" })}
+        </button>
         <button
           type="button"
           className="protocol-popup__back-top"
@@ -160,6 +180,12 @@ export function ProtocolPopupPage() {
           {t("protocol.topbar.close", { defaultValue: "关闭" })}
         </button>
       </div>
+      {originSettingsOpen && feed.currentOrigin ? (
+        <OriginSettingsTrayInline
+          origin={feed.currentOrigin}
+          onClose={() => setOriginSettingsOpen(false)}
+        />
+      ) : null}
       <div className="protocol-popup__content">
         {snap.phase === "error" ? <ErrorView t={t} message={t("protocol.error")} /> : null}
         {showConfirmingOverlay ? (
@@ -303,6 +329,11 @@ function ConfirmView({
   const sign = request.method === "intent.sign" ? (request.params as IntentSignParams) : null;
   const enc = request.method === "cipher.encrypt" ? (request.params as CipherEncryptParams) : null;
   const dec = request.method === "cipher.decrypt" ? (request.params as CipherDecryptParams) : null;
+  const p2pkh = request.method === "p2pkh.transfer" ? (request.params as P2pkhTransferParams) : null;
+  const feepoolPrepare =
+    request.method === "feepool.prepare" ? (request.params as FeepoolPrepareParams) : null;
+  const feepoolCommit =
+    request.method === "feepool.commit" ? (request.params as FeepoolCommitParams) : null;
   const aud = identity?.aud ?? sign?.aud ?? null;
   const text = identity?.text ?? sign?.text ?? enc?.text ?? dec?.text ?? "";
   const claims = identity?.claims ?? [];
@@ -364,6 +395,53 @@ function ConfirmView({
             </dd>
           </>
         ) : null}
+        {/* ============== 施工单 002 硬切换：p2pkh.transfer ============== */}
+        {p2pkh ? (
+          <>
+            <dt>{t("protocol.confirm.p2pkh.recipient", { defaultValue: "收款地址" })}</dt>
+            <dd>
+              <code>{p2pkh.recipientAddress}</code>
+            </dd>
+            <dt>{t("protocol.confirm.p2pkh.amount", { defaultValue: "金额" })}</dt>
+            <dd>
+              <code>{p2pkh.amountSatoshis}</code> sats
+            </dd>
+            {p2pkh.feeRateSatoshisPerKb ? (
+              <>
+                <dt>{t("protocol.confirm.p2pkh.feeRate", { defaultValue: "费率 (sat/kB)" })}</dt>
+                <dd>
+                  <code>{p2pkh.feeRateSatoshisPerKb}</code>
+                </dd>
+              </>
+            ) : null}
+          </>
+        ) : null}
+        {/* ============== 施工单 002 硬切换：feepool.prepare ============== */}
+        {feepoolPrepare ? (
+          <>
+            <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
+            <dd>
+              <code>{shortHex(feepoolPrepare.counterpartyPublicKeyHex, 12)}</code>
+            </dd>
+            <dt>{t("protocol.confirm.feepool.amount", { defaultValue: "金额" })}</dt>
+            <dd>
+              <code>{feepoolPrepare.amountSatoshis}</code> sats
+            </dd>
+          </>
+        ) : null}
+        {/* ============== 施工单 002 硬切换：feepool.commit ============== */}
+        {feepoolCommit ? (
+          <>
+            <dt>{t("protocol.confirm.feepool.operationId", { defaultValue: "操作 id" })}</dt>
+            <dd>
+              <code>{feepoolCommit.operationId}</code>
+            </dd>
+            <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
+            <dd>
+              <code>{shortHex(feepoolCommit.counterpartyPublicKeyHex, 12)}</code>
+            </dd>
+          </>
+        ) : null}
       </dl>
       <div className="protocol-popup__actions">
         <Button onClick={() => service.confirmByUser()}>
@@ -380,6 +458,12 @@ function ConfirmView({
       </div>
     </div>
   );
+}
+
+/** 截短 hex 显示（feepool 公钥 66 字符太长）。 */
+function shortHex(hex: string, head: number): string {
+  if (hex.length <= head * 2 + 3) return hex;
+  return `${hex.slice(0, head)}…${hex.slice(-head)}`;
 }
 
 function ExecutingView({ t }: { t: (k: string, v?: { defaultValue?: string }) => string }) {

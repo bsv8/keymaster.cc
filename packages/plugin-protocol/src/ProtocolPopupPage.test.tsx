@@ -149,7 +149,13 @@ function makeFakeService(): ProtocolService & {
     },
     snapshot() {
       return { ...snap, phase: this.phase };
-    }
+    },
+    currentRequestAutoApproved() {
+      return false;
+    },
+    getOriginSettings: async () => null,
+    setOriginSettings: async () => undefined,
+    setSystemSettings: async () => undefined
   };
   return svc;
 }
@@ -406,3 +412,61 @@ function messageListenerInstalledForTest(): boolean {
   const after = probeHandleMessageCalls;
   return after > before;
 }
+
+/* ============== 施工单 002 硬切换：topbar 站点配置按钮 ============== */
+
+describe("ProtocolPopupPage topbar origin settings", () => {
+  it("renders the site-settings button when an origin is bound", () => {
+    const service = makeFakeService();
+    currentService = service;
+    act(() => {
+      service.feed = {
+        currentOrigin: "https://demo.example",
+        commands: [],
+        historyAvailable: true
+      };
+      for (const l of service.feedListeners) l({ ...service.feed });
+    });
+    render(<ProtocolPopupPage />);
+    expect(screen.getByText("站点配置")).toBeTruthy();
+  });
+
+  it("site-settings button is disabled when no origin is bound", () => {
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const btn = screen.getByText("站点配置").closest("button");
+    expect(btn).not.toBeNull();
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("ProtocolPopupPage auto-approve skip", () => {
+  it("does not render ConfirmView when currentRequestAutoApproved is true", () => {
+    const service = makeFakeService() as unknown as ProtocolService & {
+      currentRequestAutoApproved?: () => boolean;
+      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
+    };
+    currentService = service;
+    service.currentRequestAutoApproved = () => true;
+    render(<ProtocolPopupPage />);
+    service.setCurrentRequest({
+      id: "r-auto",
+      method: "p2pkh.transfer",
+      params: { recipientAddress: "1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa", amountSatoshis: 1000 }
+    });
+    const executing: ProtocolSessionSnapshot = {
+      phase: "executing",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: "p2pkh.transfer",
+      requestId: "r-auto"
+    };
+    act(() => {
+      for (const l of service.listeners) l(executing);
+    });
+    // auto-approve 命中：ConfirmView 不应出现。
+    expect(screen.queryByText("确认请求")).toBeNull();
+  });
+});

@@ -1,6 +1,6 @@
 # Keymaster Protocol Common V1（草案）
 
-本文档定义 Keymaster 对外协议的公共约定，供 `identity.get`、`intent.sign`、`cipher.encrypt` 与 `cipher.decrypt` 复用。
+本文档定义 Keymaster 对外协议的公共约定，供 `identity.get`、`intent.sign`、`cipher.encrypt`、`cipher.decrypt`、`p2pkh.transfer`、`feepool.prepare` 与 `feepool.commit` 复用。
 
 ## 目标
 
@@ -10,6 +10,8 @@
   - 内容签名：`intent.sign`
   - 内容加密：`cipher.encrypt`
   - 内容解密：`cipher.decrypt`
+  - 受控转账：`p2pkh.transfer`
+  - 费用池两步方法族：`feepool.prepare` / `feepool.commit`
 
 ## 非目标
 
@@ -472,3 +474,166 @@ V1 约定：顶层 `request.id` 既是传输层请求 id，也是业务层操作
 - `profile.avatar.image` 的摘要投影规则，不等于自动生成一个 `profile.avatar.sha256` claim。
   - `profile.avatar.sha256` 仍然是独立、显式、可单独请求的业务 claim；
   - `profile.avatar.image` 的摘要投影只是签名实现规则，不改变对外业务语义。
+
+## 站点配置（per-origin settings）
+
+`p2pkh.transfer` / `feepool.*` 的 auto-approve / auto-sign 配置按
+exact origin 持久化，与命令历史分 store 管理。
+
+### 数据模型
+
+```ts
+type ProtocolOriginSettingsRecord = {
+  origin: string;                       // exact event.origin
+  p2pkhAutoApproveEnabled: boolean;    // 默认 false
+  p2pkhAutoApproveMaxSatoshis: number;  // 默认 0（= 关闭）
+  feePoolAutoSignMaxSatoshis: number;   // 默认 0（= 关闭）
+  feePoolDefaultFundSatoshis: number;   // 默认 0（= 未配置）
+  updatedAt: number;
+};
+```
+
+### 默认值与开启流程
+
+- `p2pkhAutoApproveEnabled` 默认 false；未配置 origin 的第一次
+  `p2pkh.transfer` 视为"自动确认关闭 + 上限 0"，走人工确认。
+- 用户主动开启 + 设置上限后，配置写到 `origins` store；后续同 origin
+  的 `p2pkh.transfer` 命中 `amountSatoshis <= max` 即走 auto-approve。
+- `feePoolDefaultFundSatoshis` 默认 0；首次 `feepool.prepare` 命中
+  `create` action 且 `feePoolDefaultFundSatoshis === 0` 时，service 拒绝
+  并要求用户先在 popup 顶栏"站点配置"按钮处填该字段。详见
+  `feepool-v1` 文档。
+- 配置入口在 popup 顶栏"站点配置"按钮 → inline 面板，编辑当前
+  origin 的**四个**字段；写操作走 `service.setOriginSettings`。
+- origin key 必须是 `event.origin` 原样字符串，不做 host / port 归一化。
+
+### 与命令历史的关系
+
+站点配置是"以后遇到这个 origin 该按什么策略执行"——属于**未来策略真值**。
+命令历史是"过去发生过什么"——属于**历史真值**。两者职责分离，分别
+落在 `origins` / `commands` 两个 store。任何把配置塞进 command 记录的
+混合态都禁止。
+
+## 费用池状态（fee pools）
+
+费用池状态按 exact origin + counterpartyPublicKeyHex 复合 key 持久化。
+Site 不管理池状态；Keymaster 内部负责重建策略 + 落地事务。
+
+### 数据模型
+
+```ts
+type ProtocolFeePoolRecord = {
+  poolKey: string;                          // `${origin}::${counterpartyPublicKeyHex}`
+  origin: string;
+  counterpartyPublicKeyHex: string;
+  baseTxid: string;
+  baseTxHex: string;
+  totalAmount: number;                      // 池大小 = multisig output satoshis
+  /**
+   * 累计已分配给 server 的金额（V4 语义）。create 第一次 transfer 后
+   * = `amountSatoshis`；spend 累加 = `prior.serverAmount + amountSatoshis`；
+   * close_and_recreate 的新池 = `amountSatoshis`（新池从 0 重新累计）。
+   * 永远 `<= totalAmount`。
+   */
+  serverAmount: number;
+  /** 当前 B-Tx 草稿 hex（site 与 server 持续协商的对象；当前草稿，不是真广播）。*/
+  draftSpendTxHex: string;
+  /** 当前 B-Tx 草稿上的 client 部分签名。*/
+  draftClientSignBytes: BinaryField;
+  lastOperationId: string;
+  updatedAt: number;
+};
+```
+
+### 关键不变量
+
+1. poolKey 必须包含 counterpartyPublicKeyHex；只按 origin 归档会让同站点
+   不同对端公钥之间相互串池。
+2. pending fee pool operation **不持久化**；operationId 只在当前 popup
+   会话内存中有效。popup 关闭 / 刷新后旧 operationId 必然无效，commit
+   失败为 `user_rejected`（对外口径）。
+3. `feepool.commit` 成功后：
+   - `create` → 新增 `feePools` 记录（首次 transfer 已包含）；
+   - `spend` → **不删池**；`putFeePool` 覆盖同一条 pool record（累计 `serverAmount` + 草稿 hex）；
+   - `close_and_recreate` → `putFeePool` 覆盖同一条 pool record（同 key 用新池替换旧池；close 草稿单独维护）。
+4. **V4 关键：池大小（`totalAmount`）与累计 transfer 金额（`serverAmount`）必须分开**：
+   - `totalAmount` = 池大小 = `feePoolDefaultFundSatoshis`（per-origin 设置）。
+   - `serverAmount` = 累计已分配给 server 的金额 = `prior.serverAmount + amountSatoshis`（create 时从 0 起；close_and_recreate 新池从 `amountSatoshis` 起）。
+   - 两者在不同 commit 后**不应该相等**（除非 site 想 transfer 整个池）。
+   - **不允许 `serverAmount` 写成 0**；create 的第一次 transfer 同样非 0。
+   - spend **不**构造新独立 draftTx；是在同一个 B-Tx 草稿上 `serverAmount += amountSatoshis` 并 client 重签。
+
+### 系统级设置（fee pool 缺省 fund）
+
+> **施工单 002 收尾反馈（已撤回原"系统级 + /settings/protocol"方案）**
+
+`feePoolDefaultFundSatoshis` 是 **per-origin** 设置，放在
+`ProtocolOriginSettingsRecord` 里，**不**再是系统级常量 + `/settings/protocol`
+详情页。
+
+理由：
+
+- 同一站点不同 origin 之间彼此独立；统一一个全局默认值会让某些 origin
+  拿到超过自己预期的池大小。
+- per-origin 的设置入口已经存在：popup 顶栏"站点配置"按钮 →
+  `<OriginSettingsTray>`；同一套 UI 同时承载
+  `p2pkhAutoApproveEnabled` / `p2pkhAutoApproveMaxSatoshis` /
+  `feePoolAutoSignMaxSatoshis` / `feePoolDefaultFundSatoshis` 四个字段。
+- V1 不引入"系统级默认值可被全局修改"这种能力；保持 V1 简洁。
+
+`feePoolDefaultFundSatoshis` 在 `feepool.prepare` 决策中的用法（V4
+收口：**`amountSatoshis` 一律 = 本次 transfer 金额，**`feePoolDefaultFundSatoshis`
+一律 = 池大小；两个量必须分开**）：
+
+| action | 池大小（= multisig output）| 草稿 B-Tx 行为 |
+| --- | --- | --- |
+| `create` | `feePoolDefaultFundSatoshis`（建新池时）| 生成初始 B-Tx 草稿；草稿 `serverAmount = params.amountSatoshis` |
+| `spend` | 不变（仍 = 旧池大小）| 在旧 B-Tx 草稿上 `serverAmount += params.amountSatoshis` 并 client 重签；不构造新独立 draftTx，不广播 |
+| `close_and_recreate` | `feePoolDefaultFundSatoshis`（建新池时）| 旧草稿切到 `FINAL_LOCKTIME` 得到 close 草稿（待双方后续广播，V1 简化下暂不广播）；再建新池 A-Tx + 生成新池初始 B-Tx 草稿 |
+
+约束：
+
+- `create` / `close_and_recreate`：建新池时 `amountSatoshis <= feePoolDefaultFundSatoshis`；
+  site 想 transfer 比池子还大的钱 → 拒掉，site 重新提交。
+- `spend`：`prior.serverAmount + amountSatoshis <= prior.totalAmount`；用
+  累计值校验，**不**是 `amountSatoshis <= prior.totalAmount`。
+
+首次 create 命中但 `feePoolDefaultFundSatoshis === 0` 时：
+
+- popup 必须先让用户填该值；
+- 未填前 service 拒绝：对外 `user_rejected`，本地 `failureReason = "internal_error"`（专门给"未配置"的语义留口子）；
+- popup 弹"补 default fund"面板即可（不是协议强制的）。
+
+## 命令历史与新方法摘要（p2pkh + feepool）
+
+命令历史 `ProtocolCommandRecord` 在 V1 新方法下扩展以下可选字段：
+
+| 字段 | 何时填写 | 含义 |
+| --- | --- | --- |
+| `recipientAddress` | `p2pkh.transfer` | 收款地址 |
+| `amountSatoshis` | `p2pkh.transfer` / `feepool.*` | 转账或池金额 |
+| `action` | `feepool.prepare` / `feepool.commit` | `create` / `spend` / `close_and_recreate` |
+| `operationId` | `feepool.commit` | commit 时指向 prepare 产出的 op |
+| `counterpartyPublicKeyHex` | `feepool.*` | 对端公钥 |
+| `failureReason` | 失败时 | 本地真实失败原因（`insufficient_balance` 等） |
+| `autoApproved` | `p2pkh.transfer` auto-approve 命中 | true |
+
+**不**持久化：完整签名任务集、回签结果、完整 rawTx、完整密文 / 签名 / 明文。
+
+## 隐私边界（敏感状态对外不暴露）
+
+以下情况发生时，**对外**（`result.error`）一律返回 `user_rejected` +
+`User rejected` 英文 message；**本地**（`ProtocolCommandRecord.failureReason`）
+记录真实原因：
+
+- `p2pkh.transfer` 余额不足（`insufficient_balance`）；
+- `p2pkh.transfer` 地址非法（`invalid_address`）；
+- `p2pkh.transfer` 金额非法（`invalid_amount`）；
+- `feepool.prepare` / `feepool.commit` 找不到对应池（`fee_pool_not_found`）；
+- `feepool.prepare` / `feepool.commit` DB 不可用（`fee_pool_db_unavailable`）；
+- `feepool.commit` 未知 operationId（`unknown_operation`）；
+- `feepool.commit` 跨 origin operationId（`cross_origin_operation`）；
+- 其它本地内部错误（`internal_error`）。
+
+site **不**应通过 `error.message` 反推本地敏感状态（余额 / 池状态 / 失败原因）。
+新错误码不引入；现有 `ProtocolErrorCode` 集合保持稳定。

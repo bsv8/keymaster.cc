@@ -21,8 +21,10 @@ import type {
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
-import { createProtocolService } from "./protocolService.js";
-import { openProtocolCommandDb } from "./protocolCommandDb.js";
+import {
+  createProtocolService
+} from "./protocolService.js";
+import { openProtocolStorageDb } from "./protocolStorageDb.js";
 
 export const PROTOCOL_PLUGIN_ID = "protocol";
 
@@ -95,7 +97,37 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.contentType": "Content type",
       "protocol.feed.activeKey": "Signer public key",
       "protocol.feed.error": "Error",
-      "protocol.feed.timeline": "Timeline"
+      "protocol.feed.timeline": "Timeline",
+      /* ============== 施工单 002 硬切换：新增 i18n key ============== */
+      "protocol.topbar.originSettings": "Site settings",
+      "protocol.confirm.method.p2pkh.transfer": "Transfer satoshis",
+      "protocol.confirm.method.feepool.prepare": "Prepare a fee-pool transaction",
+      "protocol.confirm.method.feepool.commit": "Commit a fee-pool transaction",
+      "protocol.confirm.p2pkh.recipient": "Recipient address",
+      "protocol.confirm.p2pkh.amount": "Amount",
+      "protocol.confirm.p2pkh.feeRate": "Fee rate (sat/kB)",
+      "protocol.confirm.feepool.action": "Action",
+      "protocol.confirm.feepool.counterparty": "Counterparty public key",
+      "protocol.confirm.feepool.operationId": "Operation id",
+      "protocol.confirm.feepool.amount": "Amount",
+      "protocol.confirm.originSettingsBadge.off": "Auto-approve is off for this site",
+      "protocol.confirm.originSettingsBadge.on": "Auto-approve is on up to {{max}} sats",
+      "protocol.originSettings.title": "Per-origin settings",
+      "protocol.originSettings.p2pkhAutoApprove.label": "Auto-approve p2pkh.transfer when amount ≤ max",
+      "protocol.originSettings.p2pkhAutoApproveMax.label": "Max satoshis for auto-approve (0 = off)",
+      "protocol.originSettings.feepoolAutoSignMax.label": "Max satoshis for fee-pool auto-sign (0 = off)",
+      "protocol.originSettings.save": "Save",
+      "protocol.originSettings.saved": "Saved",
+      "protocol.originSettings.err.saveFailed": "Failed to save settings",
+      "protocol.feed.recipient": "Recipient address",
+      "protocol.feed.amount": "Amount",
+      "protocol.feed.action": "Action",
+      "protocol.feed.operationId": "Operation id",
+      "protocol.feed.counterparty": "Counterparty public key",
+      "protocol.feed.failureReason": "Local failure reason",
+      "protocol.feed.autoApproved": "Auto-approved",
+      "protocol.originSettings.feePoolDefaultFundSatoshis.label":
+        "Fee-pool default initial fund (satoshis). 0 = unconfigured."
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -156,7 +188,37 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.contentType": "内容类型",
       "protocol.feed.activeKey": "签名公钥",
       "protocol.feed.error": "错误",
-      "protocol.feed.timeline": "时间"
+      "protocol.feed.timeline": "时间",
+      /* ============== 施工单 002 硬切换：新增 i18n key ============== */
+      "protocol.topbar.originSettings": "站点配置",
+      "protocol.confirm.method.p2pkh.transfer": "转账 satoshis",
+      "protocol.confirm.method.feepool.prepare": "准备一笔费用池交易",
+      "protocol.confirm.method.feepool.commit": "提交一笔费用池交易",
+      "protocol.confirm.p2pkh.recipient": "收款地址",
+      "protocol.confirm.p2pkh.amount": "金额",
+      "protocol.confirm.p2pkh.feeRate": "费率 (sat/kB)",
+      "protocol.confirm.feepool.action": "动作",
+      "protocol.confirm.feepool.counterparty": "对端公钥",
+      "protocol.confirm.feepool.operationId": "操作 id",
+      "protocol.confirm.feepool.amount": "金额",
+      "protocol.confirm.originSettingsBadge.off": "该站点自动确认未开启",
+      "protocol.confirm.originSettingsBadge.on": "自动确认已开启，上限 {{max}} sat",
+      "protocol.originSettings.title": "站点级配置",
+      "protocol.originSettings.p2pkhAutoApprove.label": "p2pkh.transfer 自动确认（金额 ≤ 上限）",
+      "protocol.originSettings.p2pkhAutoApproveMax.label": "自动确认上限（0 = 关闭）",
+      "protocol.originSettings.feepoolAutoSignMax.label": "费用池自动签名上限（0 = 关闭）",
+      "protocol.originSettings.save": "保存",
+      "protocol.originSettings.saved": "已保存",
+      "protocol.originSettings.err.saveFailed": "保存失败",
+      "protocol.feed.recipient": "收款地址",
+      "protocol.feed.amount": "金额",
+      "protocol.feed.action": "动作",
+      "protocol.feed.operationId": "操作 id",
+      "protocol.feed.counterparty": "对端公钥",
+      "protocol.feed.failureReason": "本地失败原因",
+      "protocol.feed.autoApproved": "已自动通过",
+      "protocol.originSettings.feePoolDefaultFundSatoshis.label":
+        "费用池缺省初始金额（satoshis）。0 = 未配置。"
     }
   }
 };
@@ -164,7 +226,7 @@ const protocolResources: I18nPluginResources = {
 export const protocolPlugin: PluginManifest = {
   id: PROTOCOL_PLUGIN_ID,
   name: "Protocol",
-  description: "对外协议 V1：identity.get / intent.sign / cipher.encrypt / cipher.decrypt。",
+  description: "对外协议 V1：identity.get / intent.sign / cipher.encrypt / cipher.decrypt + p2pkh.transfer + feepool.prepare / feepool.commit。",
   meta: {
     kind: "platform",
     defaultEnabled: true,
@@ -175,7 +237,8 @@ export const protocolPlugin: PluginManifest = {
   i18n: protocolResources,
   dependencies: [
     { capability: "vault.service", reason: "协议需要 active key 与 withPrivateKey" },
-    { capability: "keyspace.service", reason: "协议需要 active key 状态" }
+    { capability: "keyspace.service", reason: "协议需要 active key 状态" },
+    { capability: "p2pkh.service", reason: "执行 p2pkh.transfer 与 feepool.create / close_and_recreate 的 UTXO 列表；缺时走 internal_error" }
   ],
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
@@ -183,25 +246,54 @@ export const protocolPlugin: PluginManifest = {
     const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
 
     // 命令流 IndexedDB：best-effort 打开；失败时 service 走"historyAvailable=false"
-    // 降级，主协议流程不受影响。`setup` 允许返回 Promise；这里 await
-    // 让 service 在拿到 DB 引用后才被构造，避免 late-binding 复杂度。
+    // 降级，主协议流程不受影响（p2pkh 仍可用 manual confirm；feepool fail-closed）。
+    // `setup` 允许返回 Promise；这里 await 让 service 在拿到 DB 引用后才被构造，
+    // 避免 late-binding 复杂度。
     return (async () => {
-      let commandDb: Awaited<ReturnType<typeof openProtocolCommandDb>> | undefined;
+      let storageDb: Awaited<ReturnType<typeof openProtocolStorageDb>> | undefined;
       try {
-        commandDb = await openProtocolCommandDb();
+        storageDb = await openProtocolStorageDb();
       } catch (err) {
         ctx.logger.error({
           scope: "protocol.lifecycle",
-          event: "commandDb.open.failed",
-          message: "commandDb failed to open",
+          event: "storageDb.open.failed",
+          message: "storageDb failed to open",
           data: { err: err instanceof Error ? err.message : String(err) }
         });
+      }
+
+      // p2pkh service 是 optional 依赖：缺时 `p2pkh.transfer` 走 internal_error。
+      // 边界检查禁止 plugin-protocol 直接 import plugin-p2pkh；这里通过
+      // capability key 拿值，类型断言为最小适配接口。
+      let p2pkhService:
+        | {
+            listUtxos(filter?: { assetId?: string }): Promise<
+              Array<{ txid: string; vout: number; value: number }>
+            >;
+            prepareTransfer(input: {
+              assetId: "bsv";
+              recipientAddress: string;
+              amountSatoshis: number;
+              feeRateSatoshisPerKb: number;
+            }): Promise<unknown>;
+            submitTransfer(preview: unknown): Promise<unknown>;
+          }
+        | undefined;
+      try {
+        p2pkhService = ctx.get<typeof p2pkhService extends infer T ? T : never>(
+          "p2pkh.service"
+        );
+      } catch {
+        // 缺 p2pkh.service capability 时不阻塞 setup；service 内部
+        // 在 p2pkh.transfer 路径上走 internal_error 降级。
+        p2pkhService = undefined;
       }
 
       const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
-        commandDb,
+        storageDb,
+        p2pkhService: p2pkhService as never,
         logger: {
           info: (input) =>
             ctx.logger.info({
@@ -235,6 +327,11 @@ export const protocolPlugin: PluginManifest = {
       // **之前**直接渲染 `ProtocolPopupPage`；若再在 route.registry 里
       // 注册，会让 RouteRenderer 多一条可匹配路径，破坏"路径 → 组件"
       // 的单映射。其它路径仍走 `RouteRenderer`，与协议路径互不干扰。
+      //
+      // 施工单 002 收尾反馈：`/settings/protocol` 这一**系统级**设置页
+      // 已被删除；fee pool 默认 fund 收回到 per-origin
+      // `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`，
+      // 通过 popup 顶栏"站点配置"按钮内联配置。
 
       return () => {
         // 幂等 teardown：service 内部状态在 endSession 后清空。

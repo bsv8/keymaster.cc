@@ -5,9 +5,13 @@
 export { protocolPlugin, PROTOCOL_PLUGIN_ID } from "./manifest.js";
 export { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 export { ProtocolCommandFeed, type ProtocolCommandFeedProps } from "./ProtocolCommandFeed.js";
-export { createProtocolService, ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
-export { openProtocolCommandDb } from "./protocolCommandDb.js";
-export { ProtocolValidationError, parseRequestMessage } from "./protocolValidation.js";
+export {
+  createProtocolService,
+  ProtocolServiceImpl,
+  type ProtocolServiceDeps
+} from "./protocolService.js";
+export { openProtocolStorageDb } from "./protocolStorageDb.js";
+export { ProtocolValidationError, parseRequestMessage, assertMainnetP2pkhAddress, assertCompressedPubkeyHex } from "./protocolValidation.js";
 export {
   cborEncode,
   cborDecode,
@@ -32,3 +36,5 @@ export {
   type ClaimResolver,
   type CborProjectionEntry
 } from "./protocolClaims.js";
+export { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
+export type { FeepoolPendingOp } from "./feepoolOperations.js";

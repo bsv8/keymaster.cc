@@ -1,36 +1,43 @@
 // packages/plugin-protocol/src/protocolService.ts
 // 协议 service：transport + 校验 + source/origin 绑定 + 解锁/确认调度 +
-// 调用 vault / keyspace + 构造 envelope + 签名/加解密 + 命令流历史。
+// 调用 vault / keyspace + 构造 envelope + 签名/加解密 + 命令流历史 +
+// p2pkh.transfer / feepool.prepare / feepool.commit 执行。
 //
-// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
-//   - **service 生命周期 = popup 生命周期**：popup 在，service 在；
-//     单条 request 完成后 service 不结束，不发 `closing`。
-//   - **request 生命周期 = 单条命令卡**：一条 request 收到后落到
-//     `ProtocolCommandRecord`；状态推进时同步更新该记录。
-//   - **closing 只在 `pageUnloading` 路径发出**：用户手工关窗 /
-//     页面卸载 / demo 主动要求关闭。
-//   - **一次只处理一条 request**：第二个 request 进入时被当前 binding
-//     占用则忽略（非当前 binding source/origin 的请求也忽略）。
-//   - **历史按 exact origin 归档**：首条合法 request 进来时按
-//     `event.origin` 拉 DB；同会话切换 origin 时重新载入。
-//   - **DB 主键与 transport requestId 解耦**：`ProtocolCommandRecord.id`
-//     是 service 内部生成的稳定 UUID，与 `requestId`（transport 关联用）
-//     分离。调用方即便重复 `requestId`，命令卡也不会互相覆盖。
-//   - **历史加载用 merge 而不是 replace**：DB 读结果只覆盖非 in-flight 的
-//     内存命令卡；当前进行中的命令卡永远保留在 feed 顶部。
-//   - **DB 不可用不阻塞协议主流程**：DB 异常时 `historyAvailable=false`，
-//     当前 request 仍正常完成，UI 顶部显示"历史不可用"。
+// 设计缘由（施工单 002 硬切换：connect 增加 p2pkh + feepool）：
+//   - service 生命周期、命令卡、closing 语义、`pageUnloading` 收口、
+//     DB 主键与 transport requestId 解耦等基础约定与 002 之前一致。
+//   - 新增 `pendingOps: Map`：`feepool.commit` 消费由 `feepool.prepare`
+//     产出的内存 op；`endSession()` 一次性清空。
+//   - 新增 `p2pkh.transfer` 的 auto-approve 路径：在 `tryAcceptFirstRequest`
+//     里**直接决定** auto-approve 是否命中；命中时内联 `executeP2pkhTransfer`
+//     + 写历史 + reply result，**不**进 confirming phase。这样 popup 自然
+//     不显示 ConfirmView（snapshot.phase === "executing" 时 popup 顶层
+//     CurrentRequestPanel 渲染 ExecutingView，briefly 后回到 waiting）。
+//     外部依赖 `currentRequestAutoApproved()` 来更精确地跳过 ConfirmView。
+//   - 新增 feepool.prepare / feepool.commit 的完整执行路径：buildDualFee
+//     池 + 内存 op + 服务端验签 + 写 feePools store。
+//   - 新增站点配置 getter/setter：getOriginSettings / setOriginSettings。
+//   - 新增系统级设置 setSystemSettings：把 feePoolDefaultFundSatoshis
+//     写入 localStorage 并同步到 systemSettings bridge。
+//   - 隐私边界：余额不足 / 费用池缺失 / DB 不可用 / 未知 op / 跨 origin
+//     operationId，**全部**对外回 `user_rejected`；真实原因只写
+//     `ProtocolCommandRecord.failureReason`。
+//   - DB 不可用差异化降级：p2pkh 仍可用（auto-approve 被禁用、manual
+//     confirm 仍可走通）；feepool 直接 fail-closed。
 //   - 不依赖 React；可单测。
-//   - 错误分两类：校验类（invalid_request / invalid_origin 等）直接
-//     走 result 回 opener；业务类同样。失败状态仍写命令卡。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   PROTOCOL_VERSION,
+  type BinaryField,
   type CipherDecryptParams,
   type CipherDecryptResult,
   type CipherEncryptParams,
   type CipherEncryptResult,
+  type FeepoolCommitParams,
+  type FeepoolCommitResult,
+  type FeepoolPrepareParams,
+  type FeepoolPrepareResult,
   type IdentityGetParams,
   type IdentityGetResult,
   type IntentSignParams,
@@ -38,18 +45,25 @@ import {
   type KeyspaceService,
   type MethodParams,
   type MethodResult,
+  type P2pkhProtocolAdapter,
+  type P2pkhTransferParams,
+  type P2pkhTransferResult,
   type ProtocolClosingMessage,
-  type ProtocolCommandDb,
   type ProtocolCommandFeedState,
   type ProtocolCommandRecord,
   type ProtocolError,
   type ProtocolErrorCode,
+  type ProtocolFailureReason,
+  type ProtocolFeePoolAction,
+  type ProtocolFeePoolRecord,
   type ProtocolMethod,
+  type ProtocolOriginSettingsRecord,
   type ProtocolReadyMessage,
   type ProtocolResultMessage,
   type ProtocolService,
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
+  type ProtocolStorageDb,
   type VaultService
 } from "@keymaster/contracts";
 import { ProtocolValidationError, parseRequestMessage } from "./protocolValidation.js";
@@ -62,16 +76,36 @@ import {
 } from "./protocolCrypto.js";
 import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams } from "./protocolClaims.js";
+import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
+import {
+  sdkBuildBaseTx,
+  sdkBuildInitialDraftSpendTx,
+  sdkClientSignInitialSpendTx,
+  sdkClientSignUpdatedSpendTx,
+  sdkLoadDraftSpendTx,
+  sdkVerifyServerInitialSpendSig,
+  sdkVerifyServerUpdateSig,
+  FINAL_LOCKTIME
+} from "./feepoolSdk.js";
+
+/** p2pkh auto-approve 缺省 fee rate。 */
+const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
 
 /** ProtocolService 构造依赖。 */
 export interface ProtocolServiceDeps {
   vault: VaultService;
   keyspace: KeyspaceService;
   /**
-   * 可选命令流 DB。manifest 在 setup 阶段打开并通过这个钩子注入；
-   * 测试里可以传一个内存 fake。`undefined` 时按"历史不可用"降级。
+   * 可选协议存储 DB（commands / origins / feePools）。manifest 在 setup 阶段
+   * 打开并通过这个钩子注入；测试里可以传一个内存 fake。`undefined` 时按
+   * "历史不可用"降级（p2pkh auto-approve 关闭；feepool fail-closed）。
    */
-  commandDb?: ProtocolCommandDb;
+  storageDb?: ProtocolStorageDb;
+  /**
+   * 可选 P2PKH 业务适配。manifest 从 plugin-p2pkh 暴露的 `p2pkh.service`
+   * capability 取值注入；缺时 `p2pkh.transfer` 走 internal_error。
+   */
+  p2pkhService?: P2pkhProtocolAdapter;
   /** 用于调试 / 日志的 logger（任意形状）。 */
   logger?: { info?: (input: unknown) => void; warn?: (input: unknown) => void; error?: (input: unknown) => void };
   /** 自定义 source window（默认取 `window.opener`）。 */
@@ -103,6 +137,8 @@ interface RequestBinding {
   origin: string;
   /** 当前命令卡 id（service 内部生成，与 transport requestId 解耦）。 */
   recordId: string;
+  /** p2pkh.auto-approve 命中时为 true；UI 据此跳过 ConfirmView。 */
+  autoApproved?: boolean;
 }
 
 const READY_MESSAGE: ProtocolReadyMessage = { v: PROTOCOL_VERSION, type: "ready" };
@@ -132,9 +168,20 @@ export class ProtocolServiceImpl implements ProtocolService {
   private historyLoadInFlight: Promise<void> | null = null;
   /** 当前绑定的命令卡 id；用于状态推进时定位。 */
   private currentRecordId: string | null = null;
+  /** feepool pending operations：仅本 popup 会话内存有效，endSession 清空。 */
+  private pendingOps: FeepoolPendingOpsMap = new Map();
+  /**
+   * origin 配置内存 cache（同步 auto-approve 判断用）。
+   *
+   * 设计缘由：`isP2pkhAutoApprovedSync` 在 `tryAcceptFirstRequest` 里要走
+   * 同步路径，而 IndexedDB 读写是 async。所以把 `setOriginSettings` 写入
+   * 时同步刷 cache；新会话无 cache 时保守走 manual confirm。
+   * `getOriginSettings` 公开接口仍走 storageDb（async + 拿到最新真值）。
+   */
+  private originCache: Map<string, ProtocolOriginSettingsRecord> = new Map();
 
   constructor(private readonly deps: ProtocolServiceDeps) {
-    this.historyAvailableFlag = Boolean(deps.commandDb);
+    this.historyAvailableFlag = Boolean(deps.storageDb);
   }
 
   /**
@@ -176,6 +223,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.binding = null;
     this.pendingRequestSnapshot = null;
     this.currentRecordId = null;
+    // popup 卸载 / 刷新 → 所有 pending feepool operation 立即失效。
+    // 设计缘由：operationId 不持久化；popup 关闭后 commit 必然 invalid_request。
+    this.pendingOps.clear();
     this.emit();
   }
 
@@ -212,6 +262,40 @@ export class ProtocolServiceImpl implements ProtocolService {
     return () => this.feedListeners.delete(handler);
   }
 
+  /**
+   * 读 origin 配置。DB 不可用或该 origin 尚未配置时返回 null。
+   * 设置 modal 初始化时调它拿当前值；null 时 UI 给默认值。
+   */
+  async getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
+    if (!this.deps.storageDb) return null;
+    try {
+      const rec = await this.deps.storageDb.getOrigin(origin);
+      if (rec) this.originCache.set(origin, rec);
+      return rec;
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.storageDb",
+        event: "getOrigin.failed",
+        origin,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+  }
+
+  /**
+   * 写 origin 配置。DB 不可用时 throw（settings modal 应提示"无法保存"）。
+   * 写入时同步刷内存 cache，确保下一次 p2pkh auto-approve 判断能立即生效。
+   */
+  async setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void> {
+    if (!this.deps.storageDb) {
+      throw new Error("Protocol storage DB is not available");
+    }
+    const next: ProtocolOriginSettingsRecord = { ...record, updatedAt: Date.now() };
+    await this.deps.storageDb.putOrigin(next);
+    this.originCache.set(record.origin, next);
+  }
+
   /** 处理来自 `window` 的 message 事件。 */
   handleMessage(event: MessageEvent): void {
     if (!this.binding) {
@@ -239,23 +323,44 @@ export class ProtocolServiceImpl implements ProtocolService {
     let result: MethodResult | null = null;
     let errCode: ProtocolErrorCode | null = null;
     let errMessage: string | null = null;
+    let localReason: ProtocolFailureReason | undefined;
     try {
       result = await this.dispatch(binding);
     } catch (err) {
-      const protoErr = toProtocolError(err);
-      errCode = protoErr.code;
-      errMessage = protoErr.message;
+      // 本地失败原因（p2pkh 余额不足 / feepool 未知 op / feepool 跨 origin /
+      // DB 不可用 等）→ 外层统一 user_rejected，本地写 failureReason。
+      if (err && typeof err === "object" && "localReason" in err) {
+        localReason = (err as { localReason?: unknown }).localReason as
+          | ProtocolFailureReason
+          | undefined;
+        errCode = "user_rejected";
+        errMessage = "User rejected";
+      } else {
+        const protoErr = toProtocolError(err);
+        errCode = protoErr.code;
+        errMessage = protoErr.message;
+      }
     }
-    // 写命令卡终态：成功 / 失败 都落 DB。
-    if (result) {
+    // p2pkh / feepool 的 execute 内部已经 reply + 清 binding 并回 waiting；
+    // 这里跳过外层 reply。
+    const internalHandled =
+      binding.method === "p2pkh.transfer" ||
+      binding.method === "feepool.prepare" ||
+      binding.method === "feepool.commit";
+    if (result && !internalHandled) {
       this.updateRecordFinal(binding.recordId, "approved", "approved");
       await this.replyResult(binding, result);
-    } else if (errCode && errMessage) {
+    } else if (errCode && errMessage && !internalHandled) {
       this.updateRecordFinal(binding.recordId, "failed", "failed", errCode, errMessage);
       await this.replyError(binding, errCode, errMessage);
+    } else if (result === null && localReason && !internalHandled) {
+      // 防御：localReason 但 internalHandled=false 的情况不应发生。
+      this.updateRecordFinal(binding.recordId, "failed", "failed", "user_rejected", "User rejected");
+      await this.replyError(binding, "user_rejected", "User rejected");
     }
     // 单条 request 收尾：清 binding、phase 回到 waiting。
     // 不发 closing（closing 由 pageUnloading 路径发），不调 endSession。
+    // p2pkh / feepool 在 execute 里已经清过；幂等再做无副作用。
     this.binding = null;
     this.pendingRequestSnapshot = null;
     this.currentRecordId = null;
@@ -420,12 +525,186 @@ export class ProtocolServiceImpl implements ProtocolService {
       params: parsed.params
     };
     this.currentRecordId = recordId;
+
+    /* ============== auto-approve 分流（p2pkh.transfer） ============== */
+    // 命中 auto-approve 时**不**进 confirming：内联执行 + reply result + 回 waiting。
+    // popup 因此不会显示 ConfirmView（详见 ProtocolPopupPage 6.2）。
+    if (
+      parsed.method === "p2pkh.transfer" &&
+      this.deps.vault.status() === "unlocked" &&
+      this.isP2pkhAutoApprovedSync(parsed.params as P2pkhTransferParams, event.origin)
+    ) {
+      this.binding.autoApproved = true;
+      newRecord.autoApproved = true;
+      this.updateRecordPhase(recordId, "executing");
+      this.setPhase("executing");
+      // 异步执行；不阻塞 tryAcceptFirstRequest 返回。
+      void this.runP2pkhTransferAndFinalize(parsed, event.origin, recordId, /*autoApproved*/ true).catch(
+        (err: unknown) => {
+          this.deps.logger?.error?.({
+            scope: "protocol.exec",
+            event: "autoTransfer.err",
+            err: err instanceof Error ? err.message : String(err)
+          });
+        }
+      );
+      return;
+    }
+
+    /* ============== auto-sign 分流（feepool.prepare / feepool.commit） ============== */
+    // 命中 auto-sign 时**不**进 confirming：内联执行 feepool 方法 + 回 waiting。
+    // 关键修复（施工单 002 收尾反馈 V2）：`feepool.commit` 没有
+    // `amountSatoshis` 字段；它的金额必须从 `pendingOps` 里 prepare 阶段
+    // 已经决策好的 op.amountSatoshis 读取，**不能**从 request params 读。
+    // 否则 commit 路径永远拿到 0、被 `isFeepoolAutoSignedSync` 的
+    // `amountSatoshis <= 0` 检查拒掉、auto-sign 永远只在 prepare 命中。
+    if (
+      (parsed.method === "feepool.prepare" || parsed.method === "feepool.commit") &&
+      this.deps.vault.status() === "unlocked"
+    ) {
+      let amountSatoshisForCheck: number | null = null;
+      if (parsed.method === "feepool.prepare") {
+        amountSatoshisForCheck = (parsed.params as FeepoolPrepareParams).amountSatoshis;
+      } else {
+        // feepool.commit：从 pending op 里读。
+        const opId = (parsed.params as FeepoolCommitParams).operationId;
+        const op = this.pendingOps.get(opId);
+        amountSatoshisForCheck = op ? op.amountSatoshis : null;
+      }
+      if (
+        amountSatoshisForCheck !== null &&
+        amountSatoshisForCheck > 0 &&
+        this.isFeepoolAutoSignedSync(amountSatoshisForCheck, event.origin)
+      ) {
+        this.binding.autoApproved = true;
+        newRecord.autoApproved = true;
+        this.updateRecordPhase(recordId, "executing");
+        this.setPhase("executing");
+        void this.runFeepoolAutoApproved(parsed, event.origin, recordId).catch(
+          (err: unknown) => {
+            this.deps.logger?.error?.({
+              scope: "protocol.exec",
+              event: "autoFeepool.err",
+              err: err instanceof Error ? err.message : String(err)
+            });
+          }
+        );
+        return;
+      }
+    }
+
     const status = this.deps.vault.status();
     if (status === "unlocked") {
       this.setPhase("confirming");
       this.updateRecordPhase(recordId, "waiting_confirm");
     } else {
       this.setPhase("unlocking");
+    }
+  }
+
+  /**
+   * p2pkh auto-approve 同步判断（fire & forget 路径用）。
+   *
+   * 命中条件（必须全部满足）：
+   *   - `storageDb` 可用（无 DB → 强制 manual，避免"无配置时偷偷自动"）；
+   *   - 当前 origin 有配置；
+   *   - `p2pkhAutoApproveEnabled === true`；
+   *   - `amountSatoshis <= p2pkhAutoApproveMaxSatoshis`。
+   *
+   * 不在这里做余额 / 地址校验——余额不够会在 `runP2pkhTransferAndFinalize`
+   * 内部 throw `insufficient_balance` 并对外统一回 user_rejected。
+   */
+  private isP2pkhAutoApprovedSync(params: P2pkhTransferParams, origin: string): boolean {
+    if (!this.deps.storageDb) return false;
+    const rec = this.originCache.get(origin) ?? null;
+    if (!rec) return false;
+    if (!rec.p2pkhAutoApproveEnabled) return false;
+    if (params.amountSatoshis <= 0) return false;
+    return params.amountSatoshis <= rec.p2pkhAutoApproveMaxSatoshis;
+  }
+
+  /**
+   * feepool auto-sign 同步判断（fire & forget 路径用）。
+   *
+   * 命中条件：
+   *   - `storageDb` 可用；
+   *   - 当前 origin 有配置；
+   *   - `feePoolAutoSignMaxSatoshis > 0`；
+   *   - `amountSatoshis <= feePoolAutoSignMaxSatoshis`。
+   *
+   * 适用于 `feepool.prepare` 与 `feepool.commit` 两种 method。`commit` 命中
+   * auto-sign 时，service 假定 pending op 在 prepare 阶段已经生成；不命中
+   * 时走 manual confirm。
+   */
+  private isFeepoolAutoSignedSync(amountSatoshis: number, origin: string): boolean {
+    if (!this.deps.storageDb) return false;
+    const rec = this.originCache.get(origin) ?? null;
+    if (!rec) return false;
+    if (rec.feePoolAutoSignMaxSatoshis <= 0) return false;
+    if (amountSatoshis <= 0) return false;
+    return amountSatoshis <= rec.feePoolAutoSignMaxSatoshis;
+  }
+
+  /** 当前已绑定 request 是否走了 auto-approve / auto-sign。 */
+  currentRequestAutoApproved(): boolean {
+    return Boolean(this.binding?.autoApproved);
+  }
+
+  /**
+   * feepool auto-sign 内联执行入口。
+   *
+   * V1 简化：
+   *   - prepare：调 executeFeepoolPrepare；内部已 reply + 清 binding。
+   *   - commit：调 executeFeepoolCommit；同样内部 reply + 清 binding。
+   *   - 失败（localFailure / 业务错误）时 catch → 对外 user_rejected（executeFeepoolPrepare
+   *     / executeFeepoolCommit 自己走 `runFeepoolAndFinalize` 已经处理）。
+   */
+  private async runFeepoolAutoApproved(
+    parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> },
+    eventOrigin: string,
+    recordId: string
+  ): Promise<void> {
+    try {
+      if (parsed.method === "feepool.prepare") {
+        await this.executeFeepoolPrepare(
+          parsed.params as FeepoolPrepareParams,
+          eventOrigin,
+          recordId
+        );
+      } else if (parsed.method === "feepool.commit") {
+        await this.executeFeepoolCommit(
+          parsed.params as FeepoolCommitParams,
+          eventOrigin,
+          recordId
+        );
+      }
+    } catch (err) {
+      // executeFeepoolPrepare / executeFeepoolCommit 自己 runFeepoolAndFinalize
+      // 已经 catch 了；但 runFeepoolAndFinalize 是在 dispatch 里调用的，
+      // 这里直接调 executeFeepool* 不走 dispatch；所以 catch 兜底。
+      this.deps.logger?.error?.({
+        scope: "protocol.exec",
+        event: "feepoolAutoSign.err",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      // 用 localFailure 语义映射 record 终态。
+      let localReason: ProtocolFailureReason = "internal_error";
+      if (err && typeof err === "object" && "localReason" in err) {
+        localReason = (err as { localReason?: ProtocolFailureReason }).localReason ?? "internal_error";
+      }
+      const rec = this.feedCommands.find((c) => c.id === recordId);
+      if (rec) {
+        rec.failureReason = localReason;
+      }
+      this.updateRecordFinal(recordId, "failed", "failed", "user_rejected", "User rejected");
+      const binding = this.binding;
+      if (binding) {
+        await this.replyError(binding, "user_rejected", "User rejected");
+      }
+      this.binding = null;
+      this.pendingRequestSnapshot = null;
+      this.currentRecordId = null;
+      this.setPhase("waiting");
     }
   }
 
@@ -445,6 +724,74 @@ export class ProtocolServiceImpl implements ProtocolService {
         return this.executeCipherEncrypt(binding.params as CipherEncryptParams, binding.origin);
       case "cipher.decrypt":
         return this.executeCipherDecrypt(binding.params as CipherDecryptParams, binding.origin);
+      case "p2pkh.transfer":
+        return this.executeP2pkhTransfer(
+          binding.params as P2pkhTransferParams,
+          binding.origin
+        );
+      case "feepool.prepare":
+        return this.runFeepoolAndFinalize(
+          () =>
+            this.executeFeepoolPrepare(
+              binding.params as FeepoolPrepareParams,
+              binding.origin,
+              binding.recordId
+            ),
+          binding.recordId
+        );
+      case "feepool.commit":
+        return this.runFeepoolAndFinalize(
+          () =>
+            this.executeFeepoolCommit(
+              binding.params as FeepoolCommitParams,
+              binding.origin,
+              binding.recordId
+            ),
+          binding.recordId
+        );
+    }
+  }
+
+  /**
+   * feepool 执行包装：catch localFailure / 业务错误 → 对外统一 user_rejected，
+   * 命令卡本地写 failureReason + errorCode/errorMessage。
+   */
+  private async runFeepoolAndFinalize<T extends FeepoolPrepareResult | FeepoolCommitResult>(
+    run: () => Promise<T>,
+    recordId: string
+  ): Promise<T> {
+    const binding = this.binding;
+    try {
+      return await run();
+    } catch (err) {
+      let localReason: ProtocolFailureReason = "internal_error";
+      if (err && typeof err === "object" && "localReason" in err) {
+        localReason = (err as { localReason?: ProtocolFailureReason }).localReason ??
+          "internal_error";
+      }
+      this.deps.logger?.error?.({
+        scope: "protocol.exec",
+        event: "feepool.failed",
+        recordId,
+        localReason,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      const rec = this.feedCommands.find((c) => c.id === recordId);
+      if (rec) {
+        rec.failureReason = localReason;
+      }
+      this.updateRecordFinal(recordId, "failed", "failed", "user_rejected", "User rejected");
+      if (binding) {
+        await this.replyError(binding, "user_rejected", "User rejected");
+      }
+      this.binding = null;
+      this.pendingRequestSnapshot = null;
+      this.currentRecordId = null;
+      this.setPhase("waiting");
+      // dispatch 上层仍要拿到 result（confirmByUser 检查 internalHandled 时
+      // 直接跳过外层 reply / 写命令卡）。这里返回 null 占位；调用方 dispatch
+      // 内部已经把 result reply 出去 / 把命令卡写好；这里只是为了让 TS 收口。
+      return null as unknown as T;
     }
   }
 
@@ -596,6 +943,647 @@ export class ProtocolServiceImpl implements ProtocolService {
       contentType,
       content: toBinaryField(contentBytes)
     };
+  }
+
+  /* ============== p2pkh.transfer ============== */
+
+  /**
+   * 手动 confirm 路径上执行 p2pkh.transfer（`confirmByUser` 流程调用）。
+   * auto-approve 路径走 `runP2pkhTransferAndFinalize`。
+   */
+  private async executeP2pkhTransfer(
+    params: P2pkhTransferParams,
+    eventOrigin: string
+  ): Promise<P2pkhTransferResult> {
+    if (!this.binding) throw protocolError("internal_error", "No binding");
+    await this.runP2pkhTransferAndFinalize(
+      { id: this.binding.id, method: this.binding.method, params },
+      eventOrigin,
+      this.binding.recordId,
+      /*autoApproved*/ false
+    );
+    // 上面的 finalize 已经 reply result；这里返回 dummy 让 dispatch 类型收敛。
+    return {
+      txid: "",
+      rawTxHex: "",
+      feeSatoshis: 0
+    };
+  }
+
+  /**
+   * p2pkh 真实执行 + reply result + 写命令卡终态；被 auto-approve 路径与
+   * manual 路径共用。
+   *
+   * 关键不变量：
+   *   - 余额不足 / 任何 prepare 失败 / 任何 submit 失败，**对外**统一回
+   *     `user_rejected` + `User rejected` message；真实原因写到 record 的
+   *     `failureReason`（本地）。
+   *   - 错误 message 绝不含真实余额数字（p2pkhTransferService.prepare
+   *     默认会带 "Available inputs N sats"；这里把它转换成 `user_rejected`
+   *     后 message 固定为 "User rejected"）。
+   *   - 成功时 record 写 recipientAddress / amountSatoshis / autoApproved；
+   *     reply result 含 txid / rawTxHex / feeSatoshis。
+   */
+  private async runP2pkhTransferAndFinalize(
+    parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> },
+    eventOrigin: string,
+    recordId: string,
+    autoApproved: boolean
+  ): Promise<void> {
+    const params = parsed.params as P2pkhTransferParams;
+    try {
+      const active = this.requireActiveKey();
+      const result = await this.runP2pkhTransferOnce(params, active, recordId, autoApproved);
+      // 成功：写 record 终态 + reply result + 回 waiting。
+      this.updateRecordFinal(recordId, "approved", "approved");
+      const binding = this.binding;
+      if (binding) {
+        await this.replyResult(binding, result);
+      }
+    } catch (err) {
+      const reason = classifyP2pkhFailure(err);
+      this.deps.logger?.error?.({
+        scope: "protocol.exec",
+        event: "p2pkhTransfer.failed",
+        recordId,
+        origin: eventOrigin,
+        reason,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      const binding = this.binding;
+      // record 写：errorCode = user_rejected（对外口径），failureReason = 真实原因（本地）。
+      this.updateRecordFinal(recordId, "failed", "failed", "user_rejected", "User rejected");
+      const rec = this.feedCommands.find((c) => c.id === recordId);
+      if (rec) {
+        rec.failureReason = reason;
+        rec.updatedAt = Date.now();
+        this.emitFeed();
+        this.persistRecord(rec);
+      }
+      if (binding) {
+        await this.replyError(binding, "user_rejected", "User rejected");
+      }
+    } finally {
+      // 收尾：清 binding、phase 回到 waiting；与 manual confirm 路径一致。
+      this.binding = null;
+      this.pendingRequestSnapshot = null;
+      this.currentRecordId = null;
+      this.setPhase("waiting");
+    }
+  }
+
+  private async runP2pkhTransferOnce(
+    params: P2pkhTransferParams,
+    active: { publicKeyHex: string; keyId: string; label: string },
+    recordId: string,
+    autoApproved: boolean
+  ): Promise<P2pkhTransferResult> {
+    if (!this.deps.p2pkhService) {
+      throw protocolError("internal_error", "p2pkh service not available");
+    }
+    this.updateRecordPhase(recordId, "executing");
+    // 写入方法相关摘要字段，供历史显示。
+    const rec = this.feedCommands.find((c) => c.id === recordId);
+    if (rec) {
+      rec.recipientAddress = params.recipientAddress;
+      rec.amountSatoshis = params.amountSatoshis;
+      rec.autoApproved = autoApproved;
+      rec.updatedAt = Date.now();
+      this.emitFeed();
+      this.persistRecord(rec);
+    }
+
+    const preview = await this.deps.p2pkhService.prepareTransfer({
+      assetId: "bsv",
+      recipientAddress: params.recipientAddress,
+      amountSatoshis: params.amountSatoshis,
+      feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB
+    });
+    const submitted = await this.deps.p2pkhService.submitTransfer(preview);
+    const txid = submitted.txid ?? preview.txid;
+    return {
+      txid,
+      rawTxHex: submitted.rawTxHex,
+      feeSatoshis: preview.estimatedFeeSatoshis
+    };
+  }
+
+  /* ============== feepool.prepare ============== */
+
+  private async executeFeepoolPrepare(
+    params: FeepoolPrepareParams,
+    eventOrigin: string,
+    recordId: string
+  ): Promise<FeepoolPrepareResult> {
+    if (!this.deps.storageDb) {
+      throw localFailure("fee_pool_db_unavailable", "Protocol storage DB unavailable");
+    }
+    const poolKey = `${eventOrigin}::${params.counterpartyPublicKeyHex}`;
+    const prior = await this.deps.storageDb.getFeePool(poolKey);
+    const originSettings = await this.getOriginSettingsCached(eventOrigin);
+
+    /**
+     * action 决策（V4 收口，Keymaster 单边）：
+     *   - 无 prior 池 → create
+     *   - 有 prior，且 `prior.serverAmount + amountSatoshis <= prior.totalAmount` → spend
+     *   - 其它 → close_and_recreate
+     *
+     * 关键：spend 决策**不**是 `prior.totalAmount >= amountSatoshis`——
+     * 那样会忽略累计已分配金额；正确是看剩余额度（`prior.totalAmount -
+     * prior.serverAmount`）是否够。
+     */
+    let action: ProtocolFeePoolAction;
+    let nextServerAmount: number;
+    if (!prior) {
+      action = "create";
+      nextServerAmount = params.amountSatoshis;
+    } else if (prior.serverAmount + params.amountSatoshis <= prior.totalAmount) {
+      action = "spend";
+      nextServerAmount = prior.serverAmount + params.amountSatoshis;
+    } else {
+      action = "close_and_recreate";
+      nextServerAmount = params.amountSatoshis; // 新池从 0 重新累计
+    }
+
+    const active = this.requireActiveKey();
+    const clientPrivateKeyHex = await this.getActiveKeyHex(active.keyId);
+    const operationId = this.nextRecordId();
+    const preparedAt = Date.now();
+
+    const priorPoolSnapshot = prior
+      ? {
+          baseTxid: prior.baseTxid,
+          totalAmount: prior.totalAmount,
+          serverAmount: prior.serverAmount,
+          draftSpendTxHex: prior.draftSpendTxHex
+        }
+      : null;
+
+    // 主 B-Tx 草稿字段（三种 action 都有）。
+    let draftSpendTxHex = "";
+    let draftClientSignBytes: Uint8Array = new Uint8Array(0);
+    let draftTotalAmount = 0;
+    // 仅 close_and_recreate 的 close 部分。
+    let closeDraftTxHex: string | undefined;
+    let closeClientSignBytes: Uint8Array | undefined;
+    // 仅 create / close_and_recreate 的新池部分。
+    let baseTxHex: string | undefined;
+    let baseTxOutputIndex: number | undefined;
+
+    if (action === "create") {
+      // 池大小 = 该 origin 配置的 feePoolDefaultFundSatoshis。
+      const poolAmount = originSettings?.feePoolDefaultFundSatoshis ?? 0;
+      if (poolAmount <= 0) {
+        throw localFailure("internal_error", "origin feePoolDefaultFundSatoshis not configured");
+      }
+      if (params.amountSatoshis > poolAmount) {
+        throw localFailure(
+          "internal_error",
+          `amountSatoshis (${params.amountSatoshis}) exceeds pool size (${poolAmount})`
+        );
+      }
+      // 1) 建 A-Tx（client P2PKH → 2-of-2 multisig output，size = poolAmount）。
+      const baseResp = await this.buildAndMaybeBuildBaseTx(
+        prior,
+        clientPrivateKeyHex,
+        params.counterpartyPublicKeyHex,
+        poolAmount
+      );
+      baseTxHex = baseResp.baseTxHex;
+      baseTxOutputIndex = baseResp.baseTxOutputIndex;
+      draftTotalAmount = baseResp.amount;
+      // 2) 构造**初始** B-Tx 草稿（multisig output → server + change）；
+      //    `serverAmount = amountSatoshis`。
+      const initialDraft = await sdkBuildInitialDraftSpendTx({
+        prevTxId: baseResp.baseTxid,
+        totalAmount: draftTotalAmount,
+        serverAmount: params.amountSatoshis,
+        endHeight: 0,
+        clientPrivateKeyHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        feeRate: 1
+      });
+      // 3) client 在初始草稿上签名。
+      const clientSig = await sdkClientSignInitialSpendTx({
+        txHex: initialDraft.txHex,
+        totalAmount: draftTotalAmount,
+        clientPrivateKeyHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex
+      });
+      draftSpendTxHex = initialDraft.txHex;
+      draftClientSignBytes = clientSig;
+    } else if (action === "spend") {
+      if (!prior) throw localFailure("internal_error", "prior missing for spend");
+      // 用 SDK `loadTx` 在**旧草稿**上把 `serverAmount` 改成
+      // `prior.serverAmount + amountSatoshis`；locktime 保持未来生效。
+      // **关键**（施工单 002 收尾反馈 V5）：sequenceNumber **不能**传 0
+      // ——SDK 在 update 签名 / 验签时用 `input.sequence || 1`，所以
+      // sequence=0 会让 sighash preimage 用 1 算，但实际 sequence 是 0，
+      // 导致"实际 sequence 0 / 签名 preimage 按 1 算"的不一致。V1 用一个
+      // 固定的非零未来生效值（0xfffffffe，类似"近未来"）。
+      const loaded = await sdkLoadDraftSpendTx({
+        prevDraftHex: prior.draftSpendTxHex,
+        locktime: undefined,
+        sequenceNumber: 0xfffffffe,
+        serverAmount: nextServerAmount,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        clientPublicKeyHex: active.publicKeyHex,
+        targetAmount: prior.totalAmount
+      });
+      const clientSig = await sdkClientSignUpdatedSpendTx({
+        txHex: loaded.txHex,
+        clientPrivateKeyHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex
+      });
+      draftSpendTxHex = loaded.txHex;
+      draftClientSignBytes = clientSig;
+      draftTotalAmount = prior.totalAmount;
+    } else {
+      // close_and_recreate：先把旧草稿切到 FINAL_LOCKTIME 最终版本；
+      // 然后建新 A-Tx + 新初始 B-Tx 草稿。
+      if (!prior) throw localFailure("internal_error", "prior missing for close_and_recreate");
+      const newPoolAmount = originSettings?.feePoolDefaultFundSatoshis ?? 0;
+      if (newPoolAmount <= 0) {
+        throw localFailure("internal_error", "origin feePoolDefaultFundSatoshis not configured");
+      }
+      if (params.amountSatoshis > newPoolAmount) {
+        throw localFailure(
+          "internal_error",
+          `amountSatoshis (${params.amountSatoshis}) exceeds new pool size (${newPoolAmount})`
+        );
+      }
+      // 1) close 部分：把旧草稿切到 FINAL_LOCKTIME（`sequence = 0xFFFFFFFF`）。
+      //    **关键**（施工单 002 收尾反馈 V5）：close 的 serverAmount 必须
+      //    只是 `prior.serverAmount`（旧池已累计的金额）—— close 只能兑现
+      //    旧池内的累计，**不能**把 site 的新请求 amountSatoshis 加进来。
+      //    新请求的 amountSatoshis 由新池的初始 B-Tx 草稿承接（`buildInitialDraftSpendTx`）。
+      //    SDK 的 `loadTx` 只更新 `outputs[0] = serverAmount`、`outputs[1] = total - serverAmount`，
+      //    **没有**上限检查——如果 close.serverAmount 超出 prior.totalAmount，
+      //    outputs[1] 会变成负数，签名会失败。
+      const closeLoaded = await sdkLoadDraftSpendTx({
+        prevDraftHex: prior.draftSpendTxHex,
+        locktime: FINAL_LOCKTIME,
+        sequenceNumber: 0xffffffff,
+        serverAmount: prior.serverAmount,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        clientPublicKeyHex: active.publicKeyHex,
+        targetAmount: prior.totalAmount
+      });
+      const closeClientSig = await sdkClientSignUpdatedSpendTx({
+        txHex: closeLoaded.txHex,
+        clientPrivateKeyHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex
+      });
+      closeDraftTxHex = closeLoaded.txHex;
+      closeClientSignBytes = closeClientSig;
+      // 2) 建新 A-Tx。
+      const baseResp = await this.buildAndMaybeBuildBaseTx(
+        prior,
+        clientPrivateKeyHex,
+        params.counterpartyPublicKeyHex,
+        newPoolAmount
+      );
+      baseTxHex = baseResp.baseTxHex;
+      baseTxOutputIndex = baseResp.baseTxOutputIndex;
+      draftTotalAmount = baseResp.amount;
+      // 3) 新池的初始 B-Tx 草稿。
+      const newInitialDraft = await sdkBuildInitialDraftSpendTx({
+        prevTxId: baseResp.baseTxid,
+        totalAmount: draftTotalAmount,
+        serverAmount: params.amountSatoshis,
+        endHeight: 0,
+        clientPrivateKeyHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        feeRate: 1
+      });
+      const newClientSig = await sdkClientSignInitialSpendTx({
+        txHex: newInitialDraft.txHex,
+        totalAmount: draftTotalAmount,
+        clientPrivateKeyHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex
+      });
+      draftSpendTxHex = newInitialDraft.txHex;
+      draftClientSignBytes = newClientSig;
+    }
+
+    // 写 pending op 内存。
+    this.pendingOps.set(operationId, {
+      operationId,
+      origin: eventOrigin,
+      counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+      action,
+      preparedAt,
+      baseTxHex,
+      baseTxOutputIndex,
+      draftSpendTxHex,
+      draftClientSignBytes,
+      draftTotalAmount,
+      amountSatoshis: params.amountSatoshis,
+      nextServerAmount,
+      closeDraftTxHex,
+      closeClientSignBytes,
+      priorPool: prior
+    });
+
+    this.updateRecordSummary(recordId, {
+      action,
+      operationId,
+      counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+      amountSatoshis: params.amountSatoshis
+    });
+
+    // 构造 prepare result。
+    const result: FeepoolPrepareResult = {
+      operationId,
+      action,
+      counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+      amountSatoshis: params.amountSatoshis,
+      draftSpendTxHex,
+      draftClientSignBytes: bytesToBinaryField(draftClientSignBytes),
+      priorPoolRecord: priorPoolSnapshot
+    };
+    if (action === "create" || action === "close_and_recreate") {
+      result.baseTxHex = baseTxHex;
+      result.baseTxOutputIndex = baseTxOutputIndex;
+    }
+    if (action === "close_and_recreate" && closeDraftTxHex) {
+      result.closeDraftTxHex = closeDraftTxHex;
+      if (closeClientSignBytes) {
+        result.closeClientSignBytes = bytesToBinaryField(closeClientSignBytes);
+      }
+    }
+
+    this.updateRecordFinal(recordId, "approved", "approved");
+    const binding = this.binding;
+    if (binding) {
+      await this.replyResult(binding, result);
+    }
+    this.binding = null;
+    this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
+    this.setPhase("waiting");
+    return result;
+  }
+
+  /**
+   * 建 A-Tx（client P2PKH UTXO → 2-of-2 multisig output）；create / close_and_recreate 复用。
+   * 返回 `baseTxHex` / `baseTxOutputIndex` / `baseTxid` / `amount`（multisig output 大小）。
+   */
+  private async buildAndMaybeBuildBaseTx(
+    prior: ProtocolFeePoolRecord | null,
+    clientPrivateKeyHex: string,
+    serverPublicKeyHex: string,
+    poolAmount: number
+  ): Promise<{
+    baseTxHex: string;
+    baseTxOutputIndex: number;
+    baseTxid: string;
+    amount: number;
+  }> {
+    if (!this.deps.p2pkhService) {
+      throw localFailure("internal_error", "p2pkh service required for fee pool base tx");
+    }
+    const utxos = await this.deps.p2pkhService.listUtxos({ assetId: "bsv" });
+    if (utxos.length === 0) {
+      throw localFailure("internal_error", "No P2PKH UTXOs to fund fee pool");
+    }
+    const resp = await sdkBuildBaseTx({
+      clientUtxos: utxos.map((u) => ({ txid: u.txid, vout: u.vout, satoshis: u.value })),
+      clientPrivateKeyHex,
+      serverPublicKeyHex,
+      feepoolAmount: poolAmount,
+      feeRate: 1
+    });
+    return {
+      baseTxHex: resp.txHex,
+      baseTxOutputIndex: resp.outputIndex,
+      baseTxid: resp.txid,
+      amount: resp.amount
+    };
+  }
+
+  /**
+   * 同步取 origin 配置（用于 `executeFeepoolPrepare` 内部读取 default fund）。
+   * 内部缓存已通过 `loadHistoryForOrigin` / `setOriginSettings` 维护。
+   * cache miss 时保守返回 undefined（service 仍可继续，只是 default fund = 0）。
+   */
+  private async getOriginSettingsCached(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
+    const cached = this.originCache.get(origin);
+    if (cached) return cached;
+    if (!this.deps.storageDb) return null;
+    try {
+      const rec = await this.deps.storageDb.getOrigin(origin);
+      if (rec) this.originCache.set(origin, rec);
+      return rec;
+    } catch {
+      return null;
+    }
+  }
+
+  /* ============== feepool.commit ============== */
+
+  private async executeFeepoolCommit(
+    params: FeepoolCommitParams,
+    eventOrigin: string,
+    recordId: string
+  ): Promise<FeepoolCommitResult> {
+    if (!this.deps.storageDb) {
+      throw localFailure("fee_pool_db_unavailable", "Protocol storage DB unavailable");
+    }
+    const op = this.pendingOps.get(params.operationId);
+    if (!op) {
+      throw localFailure("unknown_operation", "operationId not found in current session");
+    }
+    if (op.origin !== eventOrigin) {
+      throw localFailure("cross_origin_operation", "operationId from a different origin");
+    }
+    if (op.counterpartyPublicKeyHex !== params.counterpartyPublicKeyHex) {
+      throw localFailure("internal_error", "counterpartyPublicKeyHex mismatch");
+    }
+    if (params.counterpartySignatures.length === 0) {
+      throw localFailure("internal_error", "counterpartySignatures must not be empty");
+    }
+    const active = this.requireActiveKey();
+    const clientPublicKeyHex = active.publicKeyHex;
+    const mainServerSignBytes = binaryFieldsToBytes(params.counterpartySignatures);
+    const closeServerSignBytes =
+      params.closeCounterpartySignatures && params.closeCounterpartySignatures.length > 0
+        ? binaryFieldsToBytes(params.closeCounterpartySignatures)
+        : null;
+
+    /**
+     * V4 验签矩阵（**B-Tx 是草稿**，不是最终已广播的 tx）：
+     *
+     * | action | 验什么 | sig 类型 |
+     * | --- | --- | --- |
+     * | create | 主 B-Tx 草稿 | initial spend sig |
+     * | spend | 主 B-Tx 草稿（更新版）| update sig |
+     * | close_and_recreate | close 草稿（旧池 final）+ 主 B-Tx 草稿（新池）| update sig + initial spend sig |
+     *
+     * V4 移除 `baseCounterpartySignatures`：base tx 仅由 client 用 P2PKH
+     * UTXO funding 签；server 不参与 base tx 的签名（multisig output
+     * 是被创建的，不是被花费的）。
+     */
+    if (op.action === "create") {
+      if (!op.draftSpendTxHex || !op.draftClientSignBytes.length) {
+        throw localFailure("internal_error", "create pending op missing draft / client sign");
+      }
+      // create：验**初始** spend sig（草稿是初始版）。
+      const draftValid = await sdkVerifyServerInitialSpendSig({
+        txHex: op.draftSpendTxHex,
+        totalAmount: op.draftTotalAmount,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        clientPublicKeyHex,
+        serverSignBytes: mainServerSignBytes
+      });
+      if (!draftValid) {
+        throw localFailure("internal_error", "draft signature verification failed");
+      }
+    } else if (op.action === "spend") {
+      if (!op.draftSpendTxHex || !op.draftClientSignBytes.length || !op.priorPool) {
+        throw localFailure("internal_error", "spend pending op missing draft / client sign / priorPool");
+      }
+      // spend：验**更新** sig（草稿是更新版）。
+      // SDK 的 `clientVerifyServerUpdateSig` 与 `clientVerifyServerSpendSig`
+      // sighash 计算方式不同，不能混用。
+      const draftValid = await sdkVerifyServerUpdateSig({
+        txHex: op.draftSpendTxHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        clientPublicKeyHex,
+        serverSignBytes: mainServerSignBytes
+      });
+      if (!draftValid) {
+        throw localFailure("internal_error", "draft update signature verification failed");
+      }
+    } else {
+      // close_and_recreate：验 close 草稿（update sig）+ 主 B-Tx 草稿（initial spend sig）。
+      // eslint-disable-next-line no-console
+      if (!op.closeDraftTxHex ||
+        !op.closeClientSignBytes?.length ||
+        !op.draftSpendTxHex ||
+        !op.draftClientSignBytes.length
+      ) {
+        throw localFailure(
+          "internal_error",
+          "close_and_recreate pending op missing close draft / new draft / client signs"
+        );
+      }
+      if (!closeServerSignBytes) {
+        throw localFailure("internal_error", "close_and_recreate requires closeCounterpartySignatures");
+      }
+      // 1) close 草稿：update sig。
+      const closeValid = await sdkVerifyServerUpdateSig({
+        txHex: op.closeDraftTxHex,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        clientPublicKeyHex,
+        serverSignBytes: closeServerSignBytes
+      });
+      // eslint-disable-next-line no-console
+      if (!closeValid) {
+        throw localFailure("internal_error", "close draft signature verification failed");
+      }
+      // 2) 新池主 B-Tx 草稿：initial spend sig。
+      const draftValid = await sdkVerifyServerInitialSpendSig({
+        txHex: op.draftSpendTxHex,
+        totalAmount: op.draftTotalAmount,
+        serverPublicKeyHex: params.counterpartyPublicKeyHex,
+        clientPublicKeyHex,
+        serverSignBytes: mainServerSignBytes
+      });
+      // eslint-disable-next-line no-console
+      if (!draftValid) {
+        throw localFailure("internal_error", "draft signature verification failed");
+      }
+    }
+
+    // V4：commit 不真广播；只把 B-Tx 草稿落地到 store。
+    // eslint-disable-next-line no-console
+    const poolKey = `${eventOrigin}::${params.counterpartyPublicKeyHex}`;
+    let newRecord: ProtocolFeePoolRecord | null = null;
+    let draftTxid = "";
+    let draftTxHex = "";
+    draftTxid = await computeTxidFromHex(op.draftSpendTxHex);
+    draftTxHex = op.draftSpendTxHex;
+    // eslint-disable-next-line no-console
+    let closeDraftTxid: string | undefined;
+
+    if (op.action === "create" || op.action === "close_and_recreate") {
+      // 新池 baseTxid = 新 base tx 的 txid（**不是** B-Tx draft 的 txid）。
+      const baseTxid = await computeTxidFromHex(op.baseTxHex ?? "");
+      // 关键不变量（V4）：totalAmount = 池大小 = draftTotalAmount；
+      // serverAmount = 累计已分配额 = op.nextServerAmount。
+      newRecord = {
+        poolKey,
+        origin: eventOrigin,
+        counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+        baseTxid,
+        baseTxHex: op.baseTxHex ?? "",
+        totalAmount: op.draftTotalAmount,
+        serverAmount: op.nextServerAmount,
+        draftSpendTxHex: op.draftSpendTxHex,
+        draftClientSignBytes: bytesToBinaryField(op.draftClientSignBytes),
+        lastOperationId: op.operationId,
+        updatedAt: Date.now()
+      };
+      await this.deps.storageDb.putFeePool(newRecord);
+    } else if (op.action === "spend") {
+      // spend：**不**删池；只更新同一条 pool record（累计 serverAmount + 草稿）。
+      if (op.priorPool) {
+        const baseTxid = op.priorPool.baseTxid;
+        const baseTxHex = op.priorPool.baseTxHex;
+        newRecord = {
+          poolKey: op.priorPool.poolKey,
+          origin: eventOrigin,
+          counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+          baseTxid,
+          baseTxHex,
+          totalAmount: op.draftTotalAmount,
+          serverAmount: op.nextServerAmount,
+          draftSpendTxHex: op.draftSpendTxHex,
+          draftClientSignBytes: bytesToBinaryField(op.draftClientSignBytes),
+          lastOperationId: op.operationId,
+          updatedAt: Date.now()
+        };
+        await this.deps.storageDb.putFeePool(newRecord);
+      }
+    }
+    if (op.action === "close_and_recreate" && op.closeDraftTxHex) {
+      // close_and_recreate：**不**需要 deleteFeePool；上面 putFeePool(newRecord)
+      // 已经用同 key（同一 origin + counterparty）覆盖了 prior。
+      // 再 delete 反而会把新池也删掉。
+      closeDraftTxid = await computeTxidFromHex(op.closeDraftTxHex);
+    }
+    this.pendingOps.delete(op.operationId);
+
+    this.updateRecordSummary(recordId, {
+      action: op.action,
+      operationId: op.operationId
+    });
+
+    const result: FeepoolCommitResult = {
+      operationId: op.operationId,
+      action: op.action,
+      draftTxid,
+      draftTxHex,
+      poolRecord: newRecord,
+      closeDraftTxid
+    };
+
+    this.updateRecordFinal(recordId, "approved", "approved");
+    const binding = this.binding;
+    if (binding) {
+      await this.replyResult(binding, result);
+    }
+    this.binding = null;
+    this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
+    this.setPhase("waiting");
+    return result;
+  }
+
+  /** 通过 vault.withPrivateKey 拿到私钥 hex（feepoolSdk 需要）。 */
+  private async getActiveKeyHex(keyId: string): Promise<string> {
+    return this.deps.vault.withPrivateKey(keyId, async (material) => material.hex);
   }
 
   private requireActiveKey() {
@@ -803,10 +1791,10 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private persistRecord(record: ProtocolCommandRecord): void {
-    const db = this.deps.commandDb;
+    const db = this.deps.storageDb;
     if (!db) return;
     void db.putCommand(record).catch((err) => {
-      console.error("[protocol.commandDb] persistRecord failed", {
+      console.error("[protocol.storageDb] persistRecord failed", {
         id: record.id,
         origin: record.origin,
         error: err instanceof Error ? err.message : String(err)
@@ -823,11 +1811,41 @@ export class ProtocolServiceImpl implements ProtocolService {
     });
   }
 
+  /**
+   * 把方法特定的摘要字段（recipientAddress / amountSatoshis / action /
+   * operationId / counterpartyPublicKeyHex）写进 record；不影响 phase /
+   * decision / status。
+   */
+  private updateRecordSummary(
+    recordId: string,
+    summary: {
+      recipientAddress?: string;
+      amountSatoshis?: number;
+      action?: ProtocolFeePoolAction;
+      operationId?: string;
+      counterpartyPublicKeyHex?: string;
+    }
+  ): void {
+    const rec = this.feedCommands.find((c) => c.id === recordId);
+    if (!rec) return;
+    if (summary.recipientAddress !== undefined) rec.recipientAddress = summary.recipientAddress;
+    if (summary.amountSatoshis !== undefined) rec.amountSatoshis = summary.amountSatoshis;
+    if (summary.action !== undefined) rec.action = summary.action;
+    if (summary.operationId !== undefined) rec.operationId = summary.operationId;
+    if (summary.counterpartyPublicKeyHex !== undefined) {
+      rec.counterpartyPublicKeyHex = summary.counterpartyPublicKeyHex;
+    }
+    rec.updatedAt = Date.now();
+    this.feedCommands.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.emitFeed();
+    this.persistRecord(rec);
+  }
+
   private async loadHistoryForOrigin(origin: string): Promise<void> {
     if (this.historyLoadInFlight) {
       return this.historyLoadInFlight;
     }
-    const db = this.deps.commandDb;
+    const db = this.deps.storageDb;
     if (!db) {
       this.historyAvailableFlag = false;
       // 即使没 DB，也保留当前 in-flight 命令卡（如果有）。
@@ -839,10 +1857,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const task = (async () => {
       try {
-        const list = await db.listCommandsByOrigin(origin);
+        // 三 store 并行拉：commands / origins / feePools。
+        const [list, originRec, pools] = await Promise.all([
+          db.listCommandsByOrigin(origin),
+          db.getOrigin(origin),
+          db.listFeePoolsByOrigin(origin)
+        ]);
+        // 把 origins 写进内存 cache（auto-approve 同步判断用）。
+        if (originRec) this.originCache.set(origin, originRec);
         // merge：DB 列表是基线，但**当前 in-flight 命令卡**必须保留。
-        // 因为 in-flight 卡的最新状态只在内存里，DB 里可能还没有它的
-        // 中间态记录（持久化是 fire & forget）。
         const inflight = this.currentRecordId
           ? this.feedCommands.find((c) => c.id === this.currentRecordId)
           : undefined;
@@ -853,9 +1876,13 @@ export class ProtocolServiceImpl implements ProtocolService {
         merged.sort((a, b) => b.updatedAt - a.updatedAt);
         this.feedCommands = merged;
         this.historyAvailableFlag = true;
+        // 注意：feePools 不进 commands 内存（不持久化到命令流），但写入
+        // pendingOps 之外的 store 时仍走 storageDb。这里只确认"读得到"，
+        // 不缓存（cache 不需要；feepool 路径按需重读）。
+        void pools;
         this.emitFeed();
       } catch (err) {
-        console.error("[protocol.commandDb] loadHistoryForOrigin failed", {
+        console.error("[protocol.storageDb] loadHistoryForOrigin failed", {
           origin,
           error: err instanceof Error ? err.message : String(err)
         });
@@ -920,6 +1947,110 @@ function toProtocolError(err: unknown): ProtocolError {
 
 function protocolError(code: ProtocolErrorCode, message: string): ProtocolError {
   return { code, message };
+}
+
+/* ============== 施工单 002 硬切换：本地失败原因辅助 ============== */
+
+/**
+ * 把"内部真实失败原因"打包成 Error；error.code = ProtocolErrorCode（用于
+ * reply 给 opener 时 fallback 选 user_rejected），error.localReason =
+ * ProtocolFailureReason（写到命令卡）。`runP2pkhTransferAndFinalize` /
+ * `executeFeepool*` 用这个 throw 错误。
+ */
+function localFailure(reason: ProtocolFailureReason, message: string): Error & {
+  code: ProtocolErrorCode;
+  localReason: ProtocolFailureReason;
+} {
+  const err = new Error(message) as Error & {
+    code: ProtocolErrorCode;
+    localReason: ProtocolFailureReason;
+  };
+  err.code = "user_rejected";
+  err.localReason = reason;
+  return err;
+}
+
+/**
+ * 把 p2pkh 业务异常分类成本地 `ProtocolFailureReason`。
+ *
+ * 触发源：plugin-p2pkh `prepareTransfer` 抛的 Error message 含特定关键字；
+ * 我们不依赖 message 数字本身（避免泄漏），只做关键字分类。
+ */
+function classifyP2pkhFailure(err: unknown): ProtocolFailureReason {
+  if (err && typeof err === "object" && "localReason" in err) {
+    const r = (err as { localReason?: unknown }).localReason;
+    if (typeof r === "string") return r as ProtocolFailureReason;
+  }
+  const msg = err instanceof Error ? err.message.toLowerCase() : String(err).toLowerCase();
+  if (msg.includes("insufficient") || msg.includes("no-utxos") || msg.includes("no utxo")) {
+    return "insufficient_balance";
+  }
+  if (
+    msg.includes("recipient address") ||
+    msg.includes("invalid base58") ||
+    msg.includes("invalid p2pkh")
+  ) {
+    return "invalid_address";
+  }
+  if (msg.includes("amount") || msg.includes("fee rate")) {
+    return "invalid_amount";
+  }
+  return "internal_error";
+}
+
+/** BinaryField[] → Uint8Array[]（feepool.commit 验签前转换）。 */
+function binaryFieldsToBytes(fields: BinaryField[]): Uint8Array {
+  if (fields.length !== 1) {
+    // 当前 V1 一个 server pubkey 对应一个签名；多条签名合并语义留作 V2。
+    return fields[0] ? new Uint8Array(fields[0].bytes) : new Uint8Array(0);
+  }
+  return new Uint8Array(fields[0]!.bytes);
+}
+
+/** Uint8Array → BinaryField。 */
+function bytesToBinaryField(bytes: Uint8Array): BinaryField {
+  const ab = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(ab).set(bytes);
+  return { $type: "binary" as const, bytes: ab };
+}
+
+/**
+ * V1 简化：用 @bsv/sdk Transaction.id("hex") 计算 txid。
+ * 失败时退化为 sha256d(txBytes)（双 sha256 后按字节序小端）。
+ */
+async function computeTxidFromHex(txHex: string): Promise<string> {
+  // 关键修复（施工单 002 收尾反馈）：fallback 路径必须是对**交易字节**
+  // 做双 sha256，而不是对十六进制字符串文本做。原实现的 fallback 会
+  // 产出完全错误的 txid。
+  let txBytes: Uint8Array | null = null;
+  try {
+    txBytes = hexToBytes(txHex);
+  } catch {
+    txBytes = null;
+  }
+  if (!txBytes) {
+    throw new Error("Invalid tx hex");
+  }
+  try {
+    const { Transaction } = await import("@bsv/sdk");
+    const tx = Transaction.fromHex(txHex);
+    const id = tx.id("hex");
+    if (typeof id === "string" && id.length === 64) return id;
+  } catch {
+    // SDK 不可用时走 sha256d(txBytes) 退化路径。
+  }
+  const first = sha256Bytes(txBytes);
+  const second = sha256Bytes(first);
+  return bytesToTxid(second);
+}
+
+function bytesToTxid(b: Uint8Array): string {
+  // BSV txid 是双 sha256 结果反序。
+  const out: string[] = [];
+  for (let i = b.length - 1; i >= 0; i--) {
+    out.push(b[i]!.toString(16).padStart(2, "0"));
+  }
+  return out.join("");
 }
 
 function looksLikeRequest(v: unknown): boolean {
