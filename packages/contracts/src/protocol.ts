@@ -492,6 +492,30 @@ export interface ProtocolOriginSettingsRecord {
   p2pkhAutoApproveEnabled: boolean;
   /** 自动通过上限（amount <= max 才放行）。0 = 关闭。 */
   p2pkhAutoApproveMaxSatoshis: number;
+  /**
+   * 是否对该 origin 自动批准 `identity.get`。
+   *
+   * 设计缘由（施工单 001 收口：per-origin 自动批准 + 钱包入口）：
+   *   - exact origin 语义与 `origin` 字段保持一致，不做 host 归一化。
+   *   - 自动批准 = "跳过 manual confirm 页" + "vault 锁定态下解锁后直接
+   *     executing 内联执行，不再进入 confirming"。
+   *   - DB 不可用时按 false 处理（走 manual confirm）。
+   *   - 旧记录缺字段时由 service 层 `normalizeOriginSettings` 补 false，
+   *     **不**扫库迁移，**不**升 DB version。
+   */
+  identityAutoApproveEnabled: boolean;
+  /**
+   * 是否对该 origin 自动批准 `cipher.encrypt` 与 `cipher.decrypt`。
+   * 同一字段同时控制 encrypt 与 decrypt，语义对称。
+   *
+   * 设计缘由（施工单 001）：
+   *   - **不**扩展到 `intent.sign` / `p2pkh.transfer` / `feepool.*`；
+   *     这些 method 的 auto-approve 仍走各自独立字段（p2pkh.transfer
+   *     走 p2pkhAutoApproveEnabled，feepool 走 feePoolAutoSignMaxSatoshis）。
+   *   - aud / origin 校验仍由对应 execute 方法内部 throw，自动批准
+   *     路径不绕过校验。
+   */
+  cipherAutoApproveEnabled: boolean;
   /** 自动签名上限（amount <= max 才放行 feepool.commit）。0 = 关闭。 */
   feePoolAutoSignMaxSatoshis: number;
   /**
@@ -896,8 +920,14 @@ export interface ProtocolService {
   /**
    * 接收来自 `window.message` 的事件。UI 监听 message 事件后转发给
    * service。
+   *
+   * 返回类型 `void | Promise<void>`：identity / cipher cache miss 路径
+   * 需要先 `await getOriginSettingsCached` 决定 setPhase,内部 `async`
+   * 实现。调用者可以 sync 调用(不 await)也可以 await。listener 端常
+   * 用 sync 调;test 路径必须 await 以确保 setPhase 已落定（cache
+   * miss 时 phase 不会先经 confirming 再被翻案）。
    */
-  handleMessage(event: MessageEvent): void;
+  handleMessage(event: MessageEvent): void | Promise<void>;
   /**
    * 用户在确认页点击"确认"。service 收到后开始执行方法。
    */
@@ -908,10 +938,25 @@ export interface ProtocolService {
    */
   rejectByUser(): Promise<void>;
   /**
-   * 通知 service 钱包已解锁，service 把已绑定 request 推进到
-   * confirming 阶段。仅当 phase === "unlocking" 时生效。
+   * 通知 service 钱包已解锁，service 把已绑定 request 推进。仅当
+   * phase === "unlocking" 时生效。
+   *
+   * 推进终态：
+   *   - **命中** per-origin auto-approve 配置（identity.get /
+   *     cipher.encrypt / cipher.decrypt）：直接转 `executing` 并内联
+   *     执行,不再进入 manual confirming 页。这与 "popup 新开会话 +
+   *     锁定态下首条请求命中持久化配置" 一致：cache miss 时内部先
+   *     `await getOriginSettingsCached` 兜底一次,命中后翻案转
+   *     `executing`。
+   *   - **未命中** auto-approve：转 `confirming`,UI 渲染 ConfirmView
+   *     等用户手动确认。
+   *
+   * 返回类型 `void | Promise<void>`：cache miss 路径需要一次异步
+   * DB 查询 + 归一化写 cache,内部 `async` 实现。调用者既可 sync
+   * 调用也可 await —— 两种形态都合法（lock 状态的 UI 路径用 sync
+   * 调用,test 路径用 await 保证推进已落定）。
    */
-  resumeAfterUnlock(): void;
+  resumeAfterUnlock(): void | Promise<void>;
   /**
    * 页面卸载 / 手工关闭路径上的 best-effort `closing` 触发入口。
    * ProtocolPopupPage 在 `pagehide` / `beforeunload` 调它。idempotent：

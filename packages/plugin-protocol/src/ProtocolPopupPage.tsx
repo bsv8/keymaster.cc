@@ -37,6 +37,25 @@ import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
 import { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
 
+/** 钱包首页 URL：硬编码，"进入钱包"按钮的固定目标。 */
+const WALLET_HOMEPAGE_URL = "https://keymaster.cc";
+
+/**
+ * 顶栏"进入钱包"按钮的 onClick handler。
+ *
+ * best-effort：window.open 失败不报错、不弹提示。
+ * 设计缘由（施工单 001）：钱包是外部站点，service 不持有它的会话；
+ * 扩展失败恢复协议会让 popup 自己也跳走，违反"popup 是会话级长存"。
+ * 失败就让用户点不到，不影响 popup 主流程。
+ */
+function openWalletHomepage(): void {
+  try {
+    window.open(WALLET_HOMEPAGE_URL, "_blank", "noopener,noreferrer");
+  } catch (err) {
+    console.warn("[protocol-popup] openWalletHomepage failed", err);
+  }
+}
+
 export function ProtocolPopupPage() {
   const service = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
   const { t } = useI18n();
@@ -145,11 +164,15 @@ export function ProtocolPopupPage() {
           <strong>{t("protocol.topbar.origin", { defaultValue: "当前站点" })}:</strong>{" "}
           <code>{feed.currentOrigin ?? t("protocol.topbar.origin.none", { defaultValue: "未绑定" })}</code>
         </span>
-        <span className="protocol-popup__topbar-item">
-          <strong>{t("protocol.topbar.status", { defaultValue: "状态" })}:</strong>{" "}
-          {phaseLabel(t, snap.phase)}
-        </span>
         <span className="protocol-popup__topbar-spacer" />
+        {/* ============== 施工单 001：钱包入口（独立新窗口跳转，不破坏 popup 会话） ============== */}
+        <button
+          type="button"
+          className="protocol-popup__back-top"
+          onClick={openWalletHomepage}
+        >
+          {t("protocol.topbar.wallet", { defaultValue: "进入钱包" })}
+        </button>
         <button
           type="button"
           className="protocol-popup__back-top"
@@ -195,26 +218,6 @@ export function ProtocolPopupPage() {
       </div>
     </div>
   );
-}
-
-function phaseLabel(
-  t: (k: string, v?: { defaultValue?: string }) => string,
-  phase: ProtocolSessionSnapshot["phase"]
-): string {
-  switch (phase) {
-    case "waiting":
-      return t("protocol.phase.waiting", { defaultValue: "等待下一条请求" });
-    case "unlocking":
-      return t("protocol.phase.unlocking", { defaultValue: "等待解锁" });
-    case "confirming":
-      return t("protocol.phase.confirming", { defaultValue: "等待确认" });
-    case "executing":
-      return t("protocol.phase.executing", { defaultValue: "处理中" });
-    case "closing":
-      return t("protocol.phase.closing", { defaultValue: "收尾" });
-    case "error":
-      return t("protocol.phase.error", { defaultValue: "错误" });
-  }
 }
 
 /* ============== 当前进行中的命令 ============== */

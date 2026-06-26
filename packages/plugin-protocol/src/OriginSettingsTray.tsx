@@ -30,6 +30,8 @@ function defaultOriginSettings(origin: string): ProtocolOriginSettingsRecord {
     origin,
     p2pkhAutoApproveEnabled: false,
     p2pkhAutoApproveMaxSatoshis: 0,
+    identityAutoApproveEnabled: false,
+    cipherAutoApproveEnabled: false,
     feePoolAutoSignMaxSatoshis: 0,
     feePoolDefaultFundSatoshis: 0,
     updatedAt: Date.now()
@@ -118,6 +120,35 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
           <span>
             {t("protocol.originSettings.p2pkhAutoApprove.label", {
               defaultValue: "Auto-approve p2pkh.transfer when amount ≤ max"
+            })}
+          </span>
+        </label>
+        {/* ============== 施工单 001：identity / cipher auto-approve ============== */}
+        <label className="origin-settings-panel__field">
+          <input
+            type="checkbox"
+            checked={form.identityAutoApproveEnabled}
+            onChange={(e) =>
+              setForm({ ...form, identityAutoApproveEnabled: e.currentTarget.checked })
+            }
+          />
+          <span>
+            {t("protocol.originSettings.identityAutoApprove.label", {
+              defaultValue: "始终同意 账户信息获取"
+            })}
+          </span>
+        </label>
+        <label className="origin-settings-panel__field">
+          <input
+            type="checkbox"
+            checked={form.cipherAutoApproveEnabled}
+            onChange={(e) =>
+              setForm({ ...form, cipherAutoApproveEnabled: e.currentTarget.checked })
+            }
+          />
+          <span>
+            {t("protocol.originSettings.cipherAutoApprove.label", {
+              defaultValue: "始终同意 加密解密"
             })}
           </span>
         </label>

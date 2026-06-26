@@ -10,7 +10,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import type {
   ProtocolCommandFeedState,
@@ -177,11 +177,14 @@ describe("ProtocolPopupPage", () => {
     const service = makeFakeService();
     currentService = service;
     render(<ProtocolPopupPage />);
-    // 顶栏：当前站点 / 状态 / 关闭 / 回到最新（文案带冒号，用正则匹配）
+    // 顶栏：当前站点 / 进入钱包 / 关闭 / 回到最新（文案带冒号，用正则匹配）
     expect(screen.getByText(/当前站点/)).toBeTruthy();
-    expect(screen.getByText(/状态/)).toBeTruthy();
+    // 施工单 001：顶栏不再显示 phaseLabel / "状态"。
+    expect(screen.queryByText(/状态/)).toBeNull();
+    expect(screen.queryByText(/等待下一条请求/)).toBeNull();
     expect(screen.getByText("关闭")).toBeTruthy();
     expect(screen.getByText("回到最新")).toBeTruthy();
+    expect(screen.getByText("进入钱包")).toBeTruthy();
     // feed 等待文案（i18n key 即文案）：
     expect(service.postReadyCalls).toBe(1);
   });
@@ -316,10 +319,9 @@ describe("ProtocolPopupPage", () => {
       for (const l of service.listeners) l(waiting);
     });
     expect(screen.queryByText("确认请求")).toBeNull();
-    // 顶栏的"状态"应回到"等待下一条请求"。
-    await waitFor(() => {
-      expect(screen.getByText("等待下一条请求")).toBeTruthy();
-    });
+    // 施工单 001：顶栏不再显示 phase / "等待下一条请求" 文案。
+    expect(screen.queryByText(/等待下一条请求/)).toBeNull();
+    expect(screen.queryByText(/状态/)).toBeNull();
   });
 
   it("registers window message listener before startSession sends ready", () => {
@@ -468,5 +470,52 @@ describe("ProtocolPopupPage auto-approve skip", () => {
     });
     // auto-approve 命中：ConfirmView 不应出现。
     expect(screen.queryByText("确认请求")).toBeNull();
+  });
+});
+
+/* ============== 施工单 001：顶栏"进入钱包"按钮 ============== */
+
+describe("ProtocolPopupPage topbar wallet entry", () => {
+  it("renders the 'enter wallet' button and opens keymaster.cc in a new tab on click", () => {
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    try {
+      const service = makeFakeService();
+      currentService = service;
+      render(<ProtocolPopupPage />);
+      // 顶栏出现"进入钱包"按钮。
+      expect(screen.getByText("进入钱包")).toBeTruthy();
+      const btn = screen.getByText("进入钱包").closest("button");
+      expect(btn).not.toBeNull();
+      act(() => {
+        (btn as HTMLButtonElement).click();
+      });
+      expect(openSpy).toHaveBeenCalledWith(
+        "https://keymaster.cc",
+        "_blank",
+        "noopener,noreferrer"
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it("wallet entry does not navigate the current popup window", () => {
+    // 验证"进入钱包"不破坏 popup 会话:open 失败 / 返回 null 时,popup 仍存在。
+    const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    try {
+      const service = makeFakeService();
+      currentService = service;
+      render(<ProtocolPopupPage />);
+      const btn = screen.getByText("进入钱包").closest("button");
+      expect(btn).not.toBeNull();
+      // 点击不应抛错。
+      act(() => {
+        (btn as HTMLButtonElement).click();
+      });
+      // popup 仍然在(没被 close)。
+      expect(service.postReadyCalls).toBe(1);
+    } finally {
+      openSpy.mockRestore();
+    }
   });
 });

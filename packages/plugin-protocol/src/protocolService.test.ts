@@ -281,14 +281,14 @@ beforeEach(() => {
 });
 
 describe("ProtocolServiceImpl", () => {
-  it("posts ready on startSession", () => {
+  it("posts ready on startSession", async () => {
     const { service, posted } = makeService();
     service.startSession();
     expect(posted.ready).toBe(1);
     expect(service.snapshot().phase).toBe("waiting");
   });
 
-  it("binds first request and moves to confirming when vault unlocked", () => {
+  it("binds first request and moves to confirming when vault unlocked", async () => {
     const { service, opener } = makeService();
     service.startSession();
     const event = makeEvent(
@@ -302,7 +302,7 @@ describe("ProtocolServiceImpl", () => {
       ORIGIN,
       opener
     );
-    service.handleMessage(event);
+    await service.handleMessage(event);
     expect(service.snapshot().phase).toBe("confirming");
     expect(service.snapshot().requestId).toBe("req-1");
   });
@@ -321,7 +321,7 @@ describe("ProtocolServiceImpl", () => {
       ORIGIN,
       opener
     );
-    service.handleMessage(event);
+    await service.handleMessage(event);
     await service.confirmByUser();
     const r = getResult();
     expect(r).not.toBeNull();
@@ -334,7 +334,7 @@ describe("ProtocolServiceImpl", () => {
   it("user rejection replies with user_rejected and does not close popup", async () => {
     const { service, opener, getResult, posted } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -359,7 +359,7 @@ describe("ProtocolServiceImpl", () => {
   it("identity.get envelope is deterministic cbor with signed envelope bytes", async () => {
     const { service, opener, getResult } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -411,7 +411,7 @@ describe("ProtocolServiceImpl", () => {
     const { service, opener, getResult } = makeService();
     service.startSession();
     const content = new TextEncoder().encode("note body");
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -442,7 +442,7 @@ describe("ProtocolServiceImpl", () => {
     const { service, opener, getResult } = makeService();
     service.startSession();
     const content = new TextEncoder().encode("body");
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -464,7 +464,7 @@ describe("ProtocolServiceImpl", () => {
     const evil = makeService();
     evil.service.startSession();
     const opener2 = evil.opener;
-    evil.service.handleMessage(
+    await evil.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -487,10 +487,10 @@ describe("ProtocolServiceImpl", () => {
     if (r2 && r2.ok === false) expect(r2.error.code).toBe("decrypt_failed");
   });
 
-  it("ignores non-request messages before binding", () => {
+  it("ignores non-request messages before binding", async () => {
     const { service, opener } = makeService();
     service.startSession();
-    service.handleMessage(makeEvent({ foo: "bar" }, ORIGIN, opener));
+    await service.handleMessage(makeEvent({ foo: "bar" }, ORIGIN, opener));
     expect(service.snapshot().phase).toBe("waiting");
     expect(service.snapshot().requestId).toBeNull();
   });
@@ -504,7 +504,7 @@ describe("ProtocolServiceImpl", () => {
     };
     const s2 = new ProtocolServiceImpl({ ...deps, keyspace: ks });
     s2.startSession();
-    s2.handleMessage(
+    await s2.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -527,7 +527,7 @@ describe("ProtocolServiceImpl", () => {
   it("does not post closing after a successful result; phase returns to waiting", async () => {
     const { service, opener, posted } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -553,7 +553,7 @@ describe("ProtocolServiceImpl", () => {
     const { service, opener, posted } = makeService();
     service.startSession();
 
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -570,7 +570,7 @@ describe("ProtocolServiceImpl", () => {
     expect(posted.closing).toHaveLength(0);
     expect(service.snapshot().phase).toBe("waiting");
 
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -592,10 +592,10 @@ describe("ProtocolServiceImpl", () => {
     expect(posted.closing).toHaveLength(0);
   });
 
-  it("rejects while another request is in flight (second message ignored)", () => {
+  it("rejects while another request is in flight (second message ignored)", async () => {
     const { service, opener, posted } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -610,7 +610,7 @@ describe("ProtocolServiceImpl", () => {
     );
     expect(service.snapshot().phase).toBe("confirming");
     // 第二个 request 来自同 source/origin 应被忽略。
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -631,7 +631,7 @@ describe("ProtocolServiceImpl", () => {
     const { service, opener, storageDb } = makeService();
     // 先在 ORIGIN 处理一条 request。
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -669,7 +669,7 @@ describe("ProtocolServiceImpl", () => {
 
     const OTHER = "https://other.example";
     // 切换 origin：再来一条来自 OTHER 的 request。
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -694,7 +694,7 @@ describe("ProtocolServiceImpl", () => {
   it("pageUnloading is the only path that posts closing", async () => {
     const { service, opener, posted } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -714,7 +714,7 @@ describe("ProtocolServiceImpl", () => {
     expect(posted.closing).toHaveLength(1);
   });
 
-  it("pageUnloading before any binding does not throw and posts once", () => {
+  it("pageUnloading before any binding does not throw and posts once", async () => {
     const { service, posted } = makeService();
     service.startSession();
     expect(() => service.pageUnloading?.()).not.toThrow();
@@ -731,7 +731,7 @@ describe("ProtocolServiceImpl", () => {
     };
     const s2 = new ProtocolServiceImpl(failing);
     s2.startSession();
-    s2.handleMessage(
+    await s2.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -787,7 +787,7 @@ describe("ProtocolServiceImpl", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       service.startSession();
-      service.handleMessage(
+      await service.handleMessage(
         makeEvent(
           {
             v: PROTOCOL_VERSION,
@@ -820,7 +820,7 @@ describe("ProtocolServiceImpl", () => {
     // 落两条不同命令卡（不会互相覆盖）。
     const { service, opener } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -839,7 +839,7 @@ describe("ProtocolServiceImpl", () => {
     expect(recordId1).toBeDefined();
     expect(recordId1).not.toBe("duplicated-request-id");
     // 复用同一 requestId：DB 应有两条不同记录。
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -888,7 +888,7 @@ describe("ProtocolServiceImpl", () => {
     });
     // 切换到 OTHER：先用 OTHER 发一条 request。
     const OTHER = "https://other.example";
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -952,7 +952,7 @@ describe("ProtocolServiceImpl", () => {
       service.startSession();
       // 切换到不同 origin 触发 loadHistoryForOrigin。
       const NEW_ORIGIN = "https://new.example";
-      service.handleMessage(
+      await service.handleMessage(
         makeEvent(
           {
             v: PROTOCOL_VERSION,
@@ -1026,7 +1026,7 @@ describe("ProtocolServiceImpl", () => {
       p2pkhService: p2pkh as never
     });
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1069,12 +1069,14 @@ describe("ProtocolServiceImpl", () => {
       origin: ORIGIN,
       p2pkhAutoApproveEnabled: true,
       p2pkhAutoApproveMaxSatoshis: 10000,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 50000,
       updatedAt: 1
     });
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1125,7 +1127,7 @@ describe("ProtocolServiceImpl", () => {
       p2pkhService: p2pkhStub as never
     });
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1164,7 +1166,7 @@ describe("ProtocolServiceImpl", () => {
     const testnetAddr = "mzBc4XEFSdjm9XEV3R3c7x6Q7ZqQ2d1b8e";
     const { service, opener } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1185,7 +1187,7 @@ describe("ProtocolServiceImpl", () => {
   it("p2pkh invalid amount: validation rejects as invalid_request", async () => {
     const { service, opener } = makeService();
     service.startSession();
-    service.handleMessage(
+    await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1293,6 +1295,8 @@ describe("ProtocolServiceImpl", () => {
       origin: ORIGIN,
       p2pkhAutoApproveEnabled: false,
       p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
       updatedAt: 1,
@@ -1308,7 +1312,7 @@ describe("ProtocolServiceImpl", () => {
     const h = await setupFeepoolMock({});
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 25000 });
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1354,7 +1358,7 @@ describe("ProtocolServiceImpl", () => {
     const h = await setupFeepoolMock({});
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1383,7 +1387,7 @@ describe("ProtocolServiceImpl", () => {
     const h = await setupFeepoolMock({});
     // 不调 setOriginSettings → cache + DB 都是默认（feePoolDefaultFundSatoshis=0）。
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1430,7 +1434,7 @@ describe("ProtocolServiceImpl", () => {
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     await h.storageDb.putFeePool(prior);
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1484,7 +1488,7 @@ describe("ProtocolServiceImpl", () => {
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     await h.storageDb.putFeePool(prior);
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1529,7 +1533,7 @@ describe("ProtocolServiceImpl", () => {
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1549,7 +1553,7 @@ describe("ProtocolServiceImpl", () => {
       throw new Error("prepare failed");
     }
     const opId = (preparedResult.result as { operationId: string }).operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1594,7 +1598,7 @@ describe("ProtocolServiceImpl", () => {
     const h = await setupFeepoolMock({});
     await setOriginViaService(h.service, {});
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1627,7 +1631,7 @@ describe("ProtocolServiceImpl", () => {
     const h = await setupFeepoolMock({});
     await setOriginViaService(h.service, {});
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1646,7 +1650,7 @@ describe("ProtocolServiceImpl", () => {
     if (!r || r.ok !== true) throw new Error("prepare failed");
     const opId = (r.result as { operationId: string }).operationId;
     const EVIL = "https://evil.example";
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1685,7 +1689,7 @@ describe("ProtocolServiceImpl", () => {
       feePoolAutoSignMaxSatoshis: 5000
     });
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1724,7 +1728,7 @@ describe("ProtocolServiceImpl", () => {
     // 先跑 prepare（auto-sign 内联），pending op 会被清掉（commit 后才清；
     // 这里我们手动把 op 留下给下一步 commit 用）。
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1745,7 +1749,7 @@ describe("ProtocolServiceImpl", () => {
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
     const opId = (prep.result as { operationId: string }).operationId;
     // 在 op 还在 pendingOps 里的时候发出 commit（auto-sign 内联）：
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1774,7 +1778,7 @@ describe("ProtocolServiceImpl", () => {
     teardownFeepoolMock();
   });
 
-  it("encodes integers with shortest form", () => {
+  it("encodes integers with shortest form", async () => {
     expect(cborEncode(0)).toEqual(new Uint8Array([0]));
     expect(cborEncode(1)).toEqual(new Uint8Array([1]));
     expect(cborEncode(23)).toEqual(new Uint8Array([23]));
@@ -1783,7 +1787,7 @@ describe("ProtocolServiceImpl", () => {
     expect(cborEncode(256)).toEqual(new Uint8Array([25, 1, 0]));
   });
 
-  it("deterministic map ordering by key", () => {
+  it("deterministic map ordering by key", async () => {
     expect(cborEncode({ b: 1, a: 2 })).toEqual(cborEncode({ a: 2, b: 1 }));
   });
 
@@ -1795,7 +1799,7 @@ describe("ProtocolServiceImpl", () => {
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1813,7 +1817,7 @@ describe("ProtocolServiceImpl", () => {
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
     const opId = (prep.result as { operationId: string }).operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1847,7 +1851,7 @@ describe("ProtocolServiceImpl", () => {
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     h.service.startSession();
 
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1862,7 +1866,7 @@ describe("ProtocolServiceImpl", () => {
     );
     await h.service.confirmByUser();
     let opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1883,7 +1887,7 @@ describe("ProtocolServiceImpl", () => {
     let stored = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
     expect(stored?.serverAmount).toBe(1000);
 
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1898,7 +1902,7 @@ describe("ProtocolServiceImpl", () => {
     );
     await h.service.confirmByUser();
     opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1945,7 +1949,7 @@ describe("ProtocolServiceImpl", () => {
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     await h.storageDb.putFeePool(prior);
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -1963,7 +1967,7 @@ describe("ProtocolServiceImpl", () => {
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
     const opId = (prep.result as { operationId: string }).operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -2016,7 +2020,7 @@ describe("ProtocolServiceImpl", () => {
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     await h.storageDb.putFeePool(prior);
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -2034,7 +2038,7 @@ describe("ProtocolServiceImpl", () => {
     expect(prep?.ok).toBe(true);
     if (!prep || prep.ok !== true) throw new Error("prepare failed");
     const opId = (prep.result as { operationId: string }).operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -2070,7 +2074,7 @@ describe("ProtocolServiceImpl", () => {
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
     h.service.startSession();
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -2085,7 +2089,7 @@ describe("ProtocolServiceImpl", () => {
     );
     await h.service.confirmByUser();
     const opId = (h.lastResult() as unknown as { ok: true; result: { operationId: string } }).result.operationId;
-    h.service.handleMessage(
+    await h.service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
@@ -2114,8 +2118,504 @@ describe("ProtocolServiceImpl", () => {
   });
 });
 
+/* ============== 施工单 001：identity / cipher per-origin auto-approve ============== */
+
+describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
+  const ORIGIN_FRESH = "https://fresh.example";
+
+  /** 直接构造一个会抛 throw 的 storageDb,用于"DB 不可用"测试。 */
+  function makeFailingDb(): ProtocolStorageDb {
+    return {
+      async putCommand() {
+        throw new Error("db down");
+      },
+      async getCommand() {
+        return null;
+      },
+      async listCommandsByOrigin() {
+        return [];
+      },
+      async getOrigin() {
+        throw new Error("db down");
+      },
+      async putOrigin() {
+        throw new Error("db down");
+      },
+      async listOrigins() {
+        return [];
+      },
+      async getFeePool() {
+        return null;
+      },
+      async putFeePool() {
+        throw new Error("db down");
+      },
+      async deleteFeePool() {
+        return undefined;
+      },
+      async listFeePoolsByOrigin() {
+        return [];
+      }
+    };
+  }
+
+  function identityParams() {
+    return {
+      aud: ORIGIN_FRESH,
+      iat: 1,
+      exp: 2,
+      text: "hello",
+      claims: ["key.label"]
+    };
+  }
+
+  it("origin settings round-trip includes identityAutoApproveEnabled / cipherAutoApproveEnabled", async () => {
+    const { service, storageDb } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: true,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    const got = await service.getOriginSettings(ORIGIN_FRESH);
+    expect(got?.identityAutoApproveEnabled).toBe(true);
+    expect(got?.cipherAutoApproveEnabled).toBe(true);
+    const raw = await storageDb.getOrigin(ORIGIN_FRESH);
+    expect(raw?.identityAutoApproveEnabled).toBe(true);
+    expect(raw?.cipherAutoApproveEnabled).toBe(true);
+  });
+
+  it("normalizes old origin record (missing new fields) to identityAutoApproveEnabled=false / cipherAutoApproveEnabled=false", async () => {
+    const { service, storageDb } = makeService();
+    // 模拟旧 schema:直接往 DB 写一条缺新字段的 record。
+    await storageDb.putOrigin({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: true,
+      p2pkhAutoApproveMaxSatoshis: 5000,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 10000,
+      updatedAt: 1
+    } as ProtocolOriginSettingsRecord);
+    const got = await service.getOriginSettings(ORIGIN_FRESH);
+    expect(got).not.toBeNull();
+    expect(got?.identityAutoApproveEnabled).toBe(false);
+    expect(got?.cipherAutoApproveEnabled).toBe(false);
+    // 用共享 storageDb 的第二个 service:cache miss → 异步读 DB → 归一化写 cache。
+    const { service: s2 } = makeService(TEST_PUB_HEX, storageDb);
+    s2.startSession();
+    const loaded = await s2.getOriginSettings(ORIGIN_FRESH);
+    expect(loaded?.identityAutoApproveEnabled).toBe(false);
+  });
+
+  it("identity.get auto-approve (sync cache hit): skips confirming, replies result inline", async () => {
+    const { service, opener, getResult } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "id-auto-sync",
+          method: "identity.get",
+          params: identityParams()
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    // cache 命中 → 直接 executing + autoApproved=true。
+    expect(service.currentRequestAutoApproved()).toBe(true);
+    // 等内联执行完成。
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    expect(service.snapshot().phase).toBe("waiting");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "id-auto-sync");
+    expect(card?.autoApproved).toBe(true);
+  });
+
+  it("cipher.encrypt auto-approve (sync cache hit)", async () => {
+    const { service, opener, getResult } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: true,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "enc-auto-sync",
+          method: "cipher.encrypt",
+          params: {
+            aud: ORIGIN_FRESH,
+            text: "hello",
+            contentType: "note.v1",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+          }
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    expect(service.currentRequestAutoApproved()).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getResult()?.ok).toBe(true);
+    expect(service.snapshot().phase).toBe("waiting");
+  });
+
+  it("cipher.decrypt auto-approve (sync cache hit)", async () => {
+    // 先用同 origin 发一次 encrypt,再用 decrypt 请求(同 origin cache 命中)。
+    const { service, opener } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: true,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    // 先发 encrypt 拿到 nonce / cipherbytes。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "enc-pre",
+          method: "cipher.encrypt",
+          params: {
+            aud: ORIGIN_FRESH,
+            text: "hi",
+            contentType: "note.v1",
+            content: { $type: "binary", bytes: new Uint8Array([7, 8]).buffer }
+          }
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    expect(service.snapshot().phase).toBe("waiting");
+    // 重新发起 decrypt(同 origin cache 命中)。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "dec-auto-sync",
+          method: "cipher.decrypt",
+          params: { aud: ORIGIN_FRESH, text: "ignored", cipherbytes: { $type: "binary", bytes: new Uint8Array([0]).buffer }, nonce: { $type: "binary", bytes: new Uint8Array([0]).buffer } }
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    expect(service.currentRequestAutoApproved()).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(service.snapshot().phase).toBe("waiting");
+  });
+
+  it("identity.get auto-approve (popup fresh session, cache miss): await getOriginSettingsCached decides auto-approve before setPhase (no ConfirmView flash)", async () => {
+    // 第一次 service:setOriginSettings 写 DB。
+    const first = makeService();
+    await first.service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    // 第二次 service:共享 storageDb,但 cache 是空的——模拟 popup 新开会话。
+    const second = makeService(TEST_PUB_HEX, first.storageDb);
+    second.service.startSession();
+    // cache miss 路径:handleMessage 内部 await getOriginSettingsCached →
+    // 命中 → setPhase("executing") + fire-and-forget runIdentityCipherAutoApproved。
+    // await handleMessage 返回时 phase === "executing",但 fire-and-forget
+    // 链可能已经在 microtask 中推进到 waiting(不阻塞测试断言:关键
+    // 是 "phase 永远不在 confirming 出现过",UI 不会闪 confirm 浮层)。
+    await second.service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "id-fresh",
+          method: "identity.get",
+          params: identityParams()
+        },
+        ORIGIN_FRESH,
+        second.opener
+      )
+    );
+    // 关键:await handleMessage 之后 phase 一定是 "executing" 或 "waiting"
+    // ——**绝不**是 "confirming"。"不显示 confirm 浮层" 这条是绝对的。
+    expect(second.service.snapshot().phase).not.toBe("confirming");
+    // 等 fire-and-forget 内联执行收尾。
+    await new Promise((r) => setTimeout(r, 50));
+    expect(second.getResult()?.ok).toBe(true);
+    expect(second.service.snapshot().phase).toBe("waiting");
+    const card = second.service.feedSnapshot().commands.find((c) => c.requestId === "id-fresh");
+    expect(card?.autoApproved).toBe(true);
+  });
+
+  it("identity.get cache miss + DB no record: falls back to manual confirm (no silent auto-approve)", async () => {
+    const { service, opener } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "id-empty-db",
+          method: "identity.get",
+          params: identityParams()
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    // 同步:phase === "confirming"。
+    expect(service.snapshot().phase).toBe("confirming");
+    // 等 fire-and-forget 异步查询(DB 没记录)落定:不翻案,phase 仍 confirming。
+    await new Promise((r) => setTimeout(r, 30));
+    expect(service.snapshot().phase).toBe("confirming");
+    expect(service.currentRequestAutoApproved()).toBe(false);
+  });
+
+  it("identity.get auto-approve when vault locked: unlock flips directly to executing, skipping confirming", async () => {
+    // 构造 vault 初始 locked 的 service。
+    const vaultLocked = makeVaultStub(TEST_PUB_HEX);
+    type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
+    let currentStatus: VaultStatus = "locked";
+    vaultLocked.status = () => currentStatus;
+    const unlockListeners: Array<(s: VaultStatus) => void> = [];
+    vaultLocked.onStatusChange = (h: (s: VaultStatus) => void) => {
+      unlockListeners.push(h);
+      return () => undefined;
+    };
+    vaultLocked.unlock = async (_password: string) => {
+      currentStatus = "unlocked";
+      for (const l of unlockListeners) l("unlocked");
+    };
+    const { service, opener, storageDb } = makeService(TEST_PUB_HEX, undefined, {
+      vault: vaultLocked
+    });
+    await storageDb.putOrigin({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "id-locked",
+          method: "identity.get",
+          params: identityParams()
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    // locked → phase 应是 unlocking。
+    expect(service.snapshot().phase).toBe("unlocking");
+    // 模拟解锁:status 变 unlocked + 触发 resumeAfterUnlock。
+    await vaultLocked.unlock("test-password");
+    await service.resumeAfterUnlock();
+    await new Promise((r) => setTimeout(r, 30));
+    expect(service.snapshot().phase).toBe("waiting");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "id-locked");
+    expect(card?.autoApproved).toBe(true);
+  });
+
+  it("DB unavailable: identity.get auto-approve is off; falls through to manual confirm (after await getOriginSettingsCached catches)", async () => {
+    const { service, opener } = makeService(TEST_PUB_HEX, makeFailingDb());
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "id-no-db",
+          method: "identity.get",
+          params: identityParams()
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    // getOriginSettingsCached 内部 try/catch 抛 → 返回 null → 走 manual
+    // confirm。await handleMessage 返回时 phase 已经是 confirming。
+    expect(service.snapshot().phase).toBe("confirming");
+    expect(service.currentRequestAutoApproved()).toBe(false);
+  });
+
+  it("intent.sign is unaffected by identity/cipher auto-approve fields", async () => {
+    const { service, opener } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: true,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "sign-1",
+          method: "intent.sign",
+          params: {
+            aud: ORIGIN_FRESH,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            contentType: "text/plain",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+          }
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("confirming");
+    expect(service.currentRequestAutoApproved()).toBe(false);
+  });
+
+  /* ============== 施工单 001 收口反馈 v2：业务错误必须对外回真实 errCode ============== */
+
+  it("identity.get auto-approve path: invalid_origin replies invalid_origin (not user_rejected)", async () => {
+    const { service, opener, getResult } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    // aud 故意写错 → executeIdentityGet 内部 throw protocolError("invalid_origin", ...)。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "id-aud-bad",
+          method: "identity.get",
+          params: { aud: "https://wrong.example", iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    // 同步 cache 命中 auto-approve:跳过 confirming 直接 executing。fire-and-forget
+    // 内联执行 executeIdentityGet 立即 throw → 立即 reject → catch + finally
+    // 链入 microtask,可能先于 test 后面的断言执行并清 binding。**不**在这里
+    // 断言 currentRequestAutoApproved() —— 等 fire-and-forget 收尾后,记录
+    // 终态才是真值。
+    await new Promise((r) => setTimeout(r, 30));
+    // 对外回 invalid_origin(不是 user_rejected)。
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) {
+      expect(r.error?.code).toBe("invalid_origin");
+    }
+    expect(service.snapshot().phase).toBe("waiting");
+    // 记录写 failed + 真实 errorCode。
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "id-aud-bad");
+    expect(card?.errorCode).toBe("invalid_origin");
+    // 关键:autoApproved 在 inline 失败时也应为 true(command 走的是 auto-approve
+    // 路径,只是执行失败)—— record 已写最终态,record.autoApproved 反映"是否走
+    // auto-approve 路径",不反映成功失败。
+    expect(card?.autoApproved).toBe(true);
+  });
+
+  it("cipher.decrypt auto-approve path: decrypt_failed replies decrypt_failed (not user_rejected)", async () => {
+    const { service, opener, getResult } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN_FRESH,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: true,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 1
+    });
+    service.startSession();
+    // 故意用非法 nonce / cipherbytes → executeCipherDecrypt 内部 throw protocolError("decrypt_failed", ...)。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "dec-bad",
+          method: "cipher.decrypt",
+          params: {
+            aud: ORIGIN_FRESH,
+            text: "ignored",
+            nonce: { $type: "binary", bytes: new Uint8Array([1]).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array([2]).buffer }
+          }
+        },
+        ORIGIN_FRESH,
+        opener
+      )
+    );
+    expect(service.currentRequestAutoApproved()).toBe(true);
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) {
+      expect(r.error?.code).toBe("decrypt_failed");
+    }
+    expect(service.snapshot().phase).toBe("waiting");
+  });
+});
+
 describe("signCompactSecp256k1", () => {
-  it("produces 64-byte compact and verifies against pubkey", () => {
+  it("produces 64-byte compact and verifies against pubkey", async () => {
     const msg = new TextEncoder().encode("hello");
     const sig = signCompactSecp256k1(TEST_PRIV_HEX, msg);
     expect(sig.length).toBe(64);

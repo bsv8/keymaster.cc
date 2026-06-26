@@ -127,7 +127,11 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.failureReason": "Local failure reason",
       "protocol.feed.autoApproved": "Auto-approved",
       "protocol.originSettings.feePoolDefaultFundSatoshis.label":
-        "Fee-pool default initial fund (satoshis). 0 = unconfigured."
+        "Fee-pool default initial fund (satoshis). 0 = unconfigured.",
+      /* ============== 施工单 001：钱包入口 + identity / cipher auto-approve ============== */
+      "protocol.topbar.wallet": "Open wallet",
+      "protocol.originSettings.identityAutoApprove.label": "Always allow identity.get",
+      "protocol.originSettings.cipherAutoApprove.label": "Always allow cipher.encrypt / cipher.decrypt"
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -218,7 +222,11 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.failureReason": "本地失败原因",
       "protocol.feed.autoApproved": "已自动通过",
       "protocol.originSettings.feePoolDefaultFundSatoshis.label":
-        "费用池缺省初始金额（satoshis）。0 = 未配置。"
+        "费用池缺省初始金额（satoshis）。0 = 未配置。",
+      /* ============== 施工单 001：钱包入口 + identity / cipher auto-approve ============== */
+      "protocol.topbar.wallet": "进入钱包",
+      "protocol.originSettings.identityAutoApprove.label": "始终同意 账户信息获取",
+      "protocol.originSettings.cipherAutoApprove.label": "始终同意 加密解密"
     }
   }
 };

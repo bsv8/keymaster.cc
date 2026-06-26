@@ -51,6 +51,8 @@ function makeOrigin(origin: string, max: number): ProtocolOriginSettingsRecord {
     origin,
     p2pkhAutoApproveEnabled: max > 0,
     p2pkhAutoApproveMaxSatoshis: max,
+    identityAutoApproveEnabled: false,
+    cipherAutoApproveEnabled: false,
     feePoolAutoSignMaxSatoshis: 0,
     feePoolDefaultFundSatoshis: 10000,
     updatedAt: 1
@@ -250,5 +252,27 @@ describe("openProtocolStorageDb", () => {
     expect(h).toHaveLength(1);
     expect(g[0]?.totalAmount).toBe(100);
     expect(h[0]?.totalAmount).toBe(200);
+  });
+
+  /* ============== 施工单 001：identity / cipher auto-approve fields ============== */
+
+  it("stores and retrieves origin settings with identityAutoApproveEnabled / cipherAutoApproveEnabled", async () => {
+    const db = await openProtocolStorageDb();
+    const origin = `https://roundtrip-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.example`;
+    const rec: ProtocolOriginSettingsRecord = {
+      origin,
+      p2pkhAutoApproveEnabled: true,
+      p2pkhAutoApproveMaxSatoshis: 5000,
+      identityAutoApproveEnabled: true,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 10000,
+      updatedAt: 1
+    };
+    await db.putOrigin(rec);
+    const got = await db.getOrigin(origin);
+    expect(got?.identityAutoApproveEnabled).toBe(true);
+    expect(got?.cipherAutoApproveEnabled).toBe(false);
+    expect(got?.p2pkhAutoApproveMaxSatoshis).toBe(5000);
   });
 });

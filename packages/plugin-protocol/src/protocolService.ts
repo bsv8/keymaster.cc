@@ -91,6 +91,33 @@ import {
 /** p2pkh auto-approve 缺省 fee rate。 */
 const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
 
+/**
+ * 把 DB 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 DB。
+ *
+ * 设计缘由（施工单 001 收口：per-origin 自动批准）：
+ *   - 旧记录（写入时 schema 还没有 `identityAutoApproveEnabled` /
+ *     `cipherAutoApproveEnabled`）走归一化后两字段都为 false，不抛错。
+ *   - 不做 host 归一化、不做数字字段 clamp；这里只补 boolean 默认与
+ *     origin 字段来源校正。
+ *   - `origin` 由 caller 显式传入（不读 `rec.origin`）——这样归一化后
+ *     的 record 永远与 DB primary key 对齐；调用方传错也能保持一致。
+ */
+function normalizeOriginSettings(
+  rec: ProtocolOriginSettingsRecord | null | undefined,
+  origin: string
+): ProtocolOriginSettingsRecord {
+  return {
+    origin,
+    p2pkhAutoApproveEnabled: rec?.p2pkhAutoApproveEnabled ?? false,
+    p2pkhAutoApproveMaxSatoshis: rec?.p2pkhAutoApproveMaxSatoshis ?? 0,
+    identityAutoApproveEnabled: rec?.identityAutoApproveEnabled ?? false,
+    cipherAutoApproveEnabled: rec?.cipherAutoApproveEnabled ?? false,
+    feePoolAutoSignMaxSatoshis: rec?.feePoolAutoSignMaxSatoshis ?? 0,
+    feePoolDefaultFundSatoshis: rec?.feePoolDefaultFundSatoshis ?? 0,
+    updatedAt: rec?.updatedAt ?? 0
+  };
+}
+
 /** ProtocolService 构造依赖。 */
 export interface ProtocolServiceDeps {
   vault: VaultService;
@@ -269,9 +296,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   async getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
     if (!this.deps.storageDb) return null;
     try {
-      const rec = await this.deps.storageDb.getOrigin(origin);
-      if (rec) this.originCache.set(origin, rec);
-      return rec;
+      const raw = await this.deps.storageDb.getOrigin(origin);
+      // 旧记录缺字段：归一化补默认值，再刷 cache；保证下一次同步判断能命中。
+      // null 时不刷 cache（避免污染；后续同步判断读不到旧值更安全）。
+      if (raw) {
+        const normalized = normalizeOriginSettings(raw, origin);
+        this.originCache.set(origin, normalized);
+        return normalized;
+      }
+      return null;
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.storageDb",
@@ -285,21 +318,37 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 写 origin 配置。DB 不可用时 throw（settings modal 应提示"无法保存"）。
-   * 写入时同步刷内存 cache，确保下一次 p2pkh auto-approve 判断能立即生效。
+   * 写入时同步刷内存 cache，确保下一次 auto-approve 判断能立即生效。
+   *
+   * 设计缘由（施工单 001）：写入前走归一化——若 UI 漏字段（甚至来自旧
+   * 版本调用方），DB 落盘也是带默认 false 的完整 record，避免下次读
+   * 出来又触发归一化 + 误导 UI。
    */
   async setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void> {
     if (!this.deps.storageDb) {
       throw new Error("Protocol storage DB is not available");
     }
-    const next: ProtocolOriginSettingsRecord = { ...record, updatedAt: Date.now() };
+    const next = normalizeOriginSettings(record, record.origin);
+    next.updatedAt = Date.now();
     await this.deps.storageDb.putOrigin(next);
     this.originCache.set(record.origin, next);
   }
 
-  /** 处理来自 `window` 的 message 事件。 */
-  handleMessage(event: MessageEvent): void {
+  /**
+   * 处理来自 `window` 的 message 事件。
+   *
+   * 返回 `Promise<void>`:identity / cipher cache miss 路径需要先
+   * `await getOriginSettingsCached` 决定 setPhase;这样 phase 永远只在
+   * 终态（executing 或 confirming）出现一次,不会先 setPhase("confirming")
+   * 再被 fire-and-forget 翻案成 executing —— 后者会引入 race condition
+   * （React batching 行为变化 / 用户在翻案前点 confirm 抢先消费）。
+   *
+   * 调用方可以 sync 调(不 await)也可以 await。listener 端常用 sync 调;
+   * unit test 必须 await 以确保 setPhase 已落定。
+   */
+  async handleMessage(event: MessageEvent): Promise<void> {
     if (!this.binding) {
-      this.tryAcceptFirstRequest(event);
+      await this.tryAcceptFirstRequest(event);
       return;
     }
     // 已绑定：只接受同 source + 同 origin 的消息；其它一律忽略。
@@ -383,12 +432,80 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.setPhase("waiting");
   }
 
-  /** 解锁状态机推进：vault unlock 完成后由 UI 调本方法继续已绑定的 request。 */
-  resumeAfterUnlock(): void {
+  /**
+   * 解锁状态机推进：vault unlock 完成后由 UI 调本方法继续已绑定的 request。
+   *
+   * 设计缘由（施工单 001 收口）：
+   *   - 锁定态下命中 auto-approve 时：解锁后**不**进 confirming，直接转
+   *     `executing` 并内联执行。这样 popup 不会闪一下 ConfirmView。
+   *   - **不**重新判断 `amountSatoshis` 这类业务量：tryAcceptFirstRequest
+   *     已经判断过；这里只是补"vault 锁定下延后执行"。executeFeepoolPrepare
+   *     / executeFeepoolCommit / executeIdentityGet 等内部仍会校验。
+   *   - 锁定态 cache miss（popup 新开会话 + 首次请求即命中）也要兜底：
+   *     同步 `isIdentityAutoApprovedSync` / `isCipherAutoApprovedSync`
+   *     只读 cache；这里再加一次 async `getOriginSettingsCached` 让 DB
+   *     真值能命中。否则用户体感"上次保存的 auto-approve 在 lock 后失效"。
+   */
+  async resumeAfterUnlock(): Promise<void> {
     if (!this.binding) return;
     if (this.phase !== "unlocking") return;
-    this.setPhase("confirming");
-    this.updateRecordPhase(this.binding.recordId, "waiting_confirm");
+    const binding = this.binding;
+    const method = binding.method;
+    const origin = binding.origin;
+
+    let isAutoApproved =
+      (method === "identity.get" && this.isIdentityAutoApprovedSync(origin)) ||
+      ((method === "cipher.encrypt" || method === "cipher.decrypt") &&
+        this.isCipherAutoApprovedSync(origin));
+
+    // 锁定态 cache miss 兜底：异步读 DB 一次，写 cache，再判断一次。
+    // 不影响既有 sync 路径；只对 cache 没填的"popup 新开 + vault 锁定"场景生效。
+    if (
+      !isAutoApproved &&
+      (method === "identity.get" || method === "cipher.encrypt" || method === "cipher.decrypt") &&
+      this.binding?.recordId === binding.recordId
+    ) {
+      const cached = await this.getOriginSettingsCached(origin);
+      if (cached) {
+        isAutoApproved =
+          (method === "identity.get" && cached.identityAutoApproveEnabled) ||
+          ((method === "cipher.encrypt" || method === "cipher.decrypt") &&
+            cached.cipherAutoApproveEnabled);
+      }
+    }
+
+    if (!isAutoApproved) {
+      this.setPhase("confirming");
+      this.updateRecordPhase(binding.recordId, "waiting_confirm");
+      return;
+    }
+
+    // 翻案：锁定态下命中 auto-approve → 解锁后直接 executing。
+    binding.autoApproved = true;
+    const recordId = binding.recordId;
+    const card = this.feedCommands.find((c) => c.id === recordId);
+    if (card) {
+      card.autoApproved = true;
+      card.updatedAt = Date.now();
+      this.emitFeed();
+      this.persistRecord(card);
+    }
+    this.updateRecordPhase(recordId, "executing");
+    this.setPhase("executing");
+    const parsedFrozen = {
+      id: binding.id,
+      method: binding.method,
+      params: binding.params
+    };
+    void this.runIdentityCipherAutoApproved(parsedFrozen, origin, recordId).catch(
+      (err: unknown) => {
+        this.deps.logger?.error?.({
+          scope: "protocol.exec",
+          event: "resumeAutoApprove.identityCipher.err",
+          err: err instanceof Error ? err.message : String(err)
+        });
+      }
+    );
   }
 
   /**
@@ -459,7 +576,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
-  private tryAcceptFirstRequest(event: MessageEvent): void {
+  private async tryAcceptFirstRequest(event: MessageEvent): Promise<void> {
     const opener = this.getOpener();
     if (!opener) return;
     if (event.source !== opener) return;
@@ -595,6 +712,83 @@ export class ProtocolServiceImpl implements ProtocolService {
 
     const status = this.deps.vault.status();
     if (status === "unlocked") {
+      /* ============== auto-approve 分流（identity.get / cipher.*） ==============
+       *
+       * 设计缘由（施工单 001 收口）：
+       *   - 同步路径：originCache 命中 → 直接 executing + 内联执行。
+       *     与 p2pkh / feepool 的现有同步分流对称。
+       *   - 异步路径：cache miss（新会话 / 新 origin / DB 未命中） →
+       *     fire-and-forget 异步查 DB；如果 DB 命中 → "翻案"转 executing。
+       *     这是为了让"popup 新开会话第一条请求也能命中持久化配置"。
+       *   - vault 锁定/未初始化：上一行已经把已存在的 p2pkh / feepool 同步
+       *     分流拦在 unlocked 分支内；这里 identity / cipher 也只在 unlocked
+       *     时走 auto-approve 路径，否则交由 `resumeAfterUnlock` 决策。
+       */
+      const isIdentityOrCipher =
+        parsed.method === "identity.get" ||
+        parsed.method === "cipher.encrypt" ||
+        parsed.method === "cipher.decrypt";
+
+      if (isIdentityOrCipher) {
+        // 同步 cache 检查：命中就立即 executing 内联，**不**进 confirming。
+        const cacheHit =
+          parsed.method === "identity.get"
+            ? this.isIdentityAutoApprovedSync(event.origin)
+            : this.isCipherAutoApprovedSync(event.origin);
+
+        if (cacheHit) {
+          this.binding!.autoApproved = true;
+          newRecord.autoApproved = true;
+          this.updateRecordPhase(recordId, "executing");
+          this.setPhase("executing");
+          const parsedFrozen = parsed;
+          const recordIdFrozen = recordId;
+          const originFrozen = event.origin;
+          void this.runIdentityCipherAutoApproved(parsedFrozen, originFrozen, recordIdFrozen).catch(
+            (err: unknown) => {
+              this.deps.logger?.error?.({
+                scope: "protocol.exec",
+                event: "autoIdentityCipher.err",
+                err: err instanceof Error ? err.message : String(err)
+              });
+            }
+          );
+          return;
+        }
+
+        // cache miss（popup 新开会话 / 新 origin）：**先 await 一次 DB 查询**
+        // 再决定 setPhase。这样 phase 永远只在终态（executing 或 confirming）
+        // 出现一次，UI 不会先看到 confirming 浮层再被翻案。
+        const settings = await this.getOriginSettingsCached(event.origin);
+        // 二次确认：binding 仍指本 record（避免 await 期间被 reject / 新 request 替换）。
+        if (this.binding?.recordId !== recordId) return;
+        if (settings) {
+          const hit =
+            (parsed.method === "identity.get" && settings.identityAutoApproveEnabled) ||
+            ((parsed.method === "cipher.encrypt" || parsed.method === "cipher.decrypt") &&
+              settings.cipherAutoApproveEnabled);
+          if (hit) {
+            this.binding.autoApproved = true;
+            newRecord.autoApproved = true;
+            this.updateRecordPhase(recordId, "executing");
+            this.setPhase("executing");
+            const parsedFrozen = parsed;
+            const originFrozen = event.origin;
+            void this.runIdentityCipherAutoApproved(parsedFrozen, originFrozen, recordId).catch(
+              (err: unknown) => {
+                this.deps.logger?.error?.({
+                  scope: "protocol.exec",
+                  event: "autoIdentityCipher.dbHit.err",
+                  err: err instanceof Error ? err.message : String(err)
+                });
+              }
+            );
+            return;
+          }
+        }
+      }
+
+      // manual confirm 路径：identity/cipher 都没命中，或非 identity/cipher method。
       this.setPhase("confirming");
       this.updateRecordPhase(recordId, "waiting_confirm");
     } else {
@@ -621,6 +815,37 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec.p2pkhAutoApproveEnabled) return false;
     if (params.amountSatoshis <= 0) return false;
     return params.amountSatoshis <= rec.p2pkhAutoApproveMaxSatoshis;
+  }
+
+  /**
+   * identity.get 自动批准同步判断。
+   *
+   * 命中条件：
+   *   - `storageDb` 可用（无 DB → false）；
+   *   - 当前 origin 在 `originCache` 有配置；
+   *   - `identityAutoApproveEnabled === true`。
+   *
+   * 不做 aud 校验：`executeIdentityGet` 内部仍会 throw `invalid_origin`，
+   * auto-approve 路径不绕过业务校验。
+   */
+  private isIdentityAutoApprovedSync(origin: string): boolean {
+    if (!this.deps.storageDb) return false;
+    const rec = this.originCache.get(origin) ?? null;
+    if (!rec) return false;
+    return rec.identityAutoApproveEnabled === true;
+  }
+
+  /**
+   * cipher.encrypt / cipher.decrypt 自动批准同步判断。
+   *
+   * 同一字段同时控制 encrypt 与 decrypt。命中条件同 identity。
+   * 不做内容 / nonce 长度校验：`executeCipher*` 内部仍会做全部业务校验。
+   */
+  private isCipherAutoApprovedSync(origin: string): boolean {
+    if (!this.deps.storageDb) return false;
+    const rec = this.originCache.get(origin) ?? null;
+    if (!rec) return false;
+    return rec.cipherAutoApproveEnabled === true;
   }
 
   /**
@@ -707,6 +932,124 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.setPhase("waiting");
     }
   }
+
+  /**
+   * identity / cipher auto-approve 内联执行入口。
+   *
+   * 设计缘由（施工单 001 收口）：
+   *   - **不**走 `dispatch`：dispatch 给 confirmByUser 用，内部还有 result
+   *     包装 / internalHandled 判断。auto-approve 路径需要自己管 record
+   *     终态 + reply result + 清 binding，这里直接调底层 execute* 更干净。
+   *   - 错误语义（与 `confirmByUser` 路径对齐）：
+   *       * 业务错误（`invalid_origin` / `decrypt_failed` /
+   *         `active_key_unavailable` / `invalid_request` /
+   *         `internal_error`）：对外回**真实** `errCode` + `errMessage`，
+   *         不吞掉协议语义。这是施工单 001 收口反馈 v1 修复的行为。
+   *       * 本地失败原因（含 `localReason` 字段，例如未来扩展的
+   *         "余额不足"等敏感本地状态）：对外回 `user_rejected` +
+   *         `User rejected`（隐私边界，与 p2pkh 一致），本地 record
+   *         写 `failureReason`。
+   *   - 走 `this.binding` 而非局部快照：runIdentityCipherAutoApproved 由
+   *     `tryAcceptFirstRequest` / `resumeAfterUnlock` 串行调起，调用前
+   *     已经 setPhase("executing")，binding 仍指向本 record。
+   */
+  private async runIdentityCipherAutoApproved(
+    parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> },
+    eventOrigin: string,
+    recordId: string
+  ): Promise<void> {
+    const binding = this.binding;
+    try {
+      let result: MethodResult;
+      switch (parsed.method) {
+        case "identity.get":
+          result = await this.executeIdentityGet(
+            parsed.params as IdentityGetParams,
+            eventOrigin
+          );
+          break;
+        case "cipher.encrypt":
+          result = await this.executeCipherEncrypt(
+            parsed.params as CipherEncryptParams,
+            eventOrigin
+          );
+          break;
+        case "cipher.decrypt":
+          result = await this.executeCipherDecrypt(
+            parsed.params as CipherDecryptParams,
+            eventOrigin
+          );
+          break;
+        default:
+          // 不会到这里：call site 已经只对 identity / cipher 调起。
+          return;
+      }
+      this.updateRecordFinal(recordId, "approved", "approved");
+      if (binding) {
+        await this.replyResult(binding, result);
+      }
+    } catch (err) {
+      // 错误语义：与 `confirmByUser` 路径对齐
+      //   - 业务错误（invalid_origin / decrypt_failed / active_key_unavailable /
+      //     invalid_request / internal_error）：对外回**真实** errCode
+      //     + message，**不**吞掉协议语义。
+      //   - 本地失败原因（p2pkh 余额不足 / DB 不可用 / 等"含 localReason"）：
+      //     对外统一 `user_rejected`（隐私边界），本地 record 写 `failureReason`。
+      let localReason: ProtocolFailureReason | undefined;
+      let errCode: ProtocolErrorCode;
+      let errMessage: string;
+      if (err && typeof err === "object" && "localReason" in err) {
+        localReason = (err as { localReason?: ProtocolFailureReason }).localReason as
+          | ProtocolFailureReason
+          | undefined;
+        errCode = "user_rejected";
+        errMessage = "User rejected";
+      } else {
+        const protoErr = toProtocolError(err);
+        errCode = protoErr.code;
+        errMessage = protoErr.message;
+      }
+      this.deps.logger?.error?.({
+        scope: "protocol.exec",
+        event: "identityCipherAutoApprove.failed",
+        recordId,
+        origin: eventOrigin,
+        method: parsed.method,
+        errCode,
+        reason: localReason,
+        err: errMessage
+      });
+      this.updateRecordFinal(recordId, "failed", "failed", errCode, errMessage);
+      if (localReason) {
+        const rec = this.feedCommands.find((c) => c.id === recordId);
+        if (rec) {
+          rec.failureReason = localReason;
+          rec.updatedAt = Date.now();
+          this.emitFeed();
+          this.persistRecord(rec);
+        }
+      }
+      if (binding) {
+        await this.replyError(binding, errCode, errMessage);
+      }
+    } finally {
+      // 收尾：清 binding、phase 回到 waiting；与 manual confirm 路径一致。
+      this.binding = null;
+      this.pendingRequestSnapshot = null;
+      this.currentRecordId = null;
+      this.setPhase("waiting");
+    }
+  }
+
+  /**
+   * 历史保留注释（施工单 001 收口反馈 v3 → v4 演进）：
+   * 旧版 `evaluateIdentityCipherAutoApproveAfterLookup` 用 fire-and-forget
+   * 异步查 DB 翻案会引入 race condition（先 setPhase("confirming") 再
+   * 翻案 → React batching 行为变化 / 用户在翻案前点 confirm 抢先消费）。
+   * v4 改为 `tryAcceptFirstRequest` 内**同步 await** `getOriginSettingsCached`
+   * 再决定 setPhase,phase 永远只在终态（executing 或 confirming）出现一次,
+   * 不再有 fire-and-forget 翻案路径。**因此本方法已删除,不再有 caller。**
+   */
 
   private async dispatch(binding: RequestBinding): Promise<MethodResult> {
     console.info("[protocol] dispatch", {
@@ -1372,9 +1715,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (cached) return cached;
     if (!this.deps.storageDb) return null;
     try {
-      const rec = await this.deps.storageDb.getOrigin(origin);
-      if (rec) this.originCache.set(origin, rec);
-      return rec;
+      const raw = await this.deps.storageDb.getOrigin(origin);
+      // 与 getOriginSettings 行为一致：DB 命中才归一化写 cache；null
+      // 不污染 cache。
+      if (raw) {
+        const normalized = normalizeOriginSettings(raw, origin);
+        this.originCache.set(origin, normalized);
+        return normalized;
+      }
+      return raw;
     } catch {
       return null;
     }
@@ -1864,7 +2213,11 @@ export class ProtocolServiceImpl implements ProtocolService {
           db.listFeePoolsByOrigin(origin)
         ]);
         // 把 origins 写进内存 cache（auto-approve 同步判断用）。
-        if (originRec) this.originCache.set(origin, originRec);
+        // 旧记录经 normalizeOriginSettings 补默认值；null 时不刷 cache，
+        // 避免把"该 origin 未配置"覆盖成"曾有旧配置"。
+        if (originRec) {
+          this.originCache.set(origin, normalizeOriginSettings(originRec, origin));
+        }
         // merge：DB 列表是基线，但**当前 in-flight 命令卡**必须保留。
         const inflight = this.currentRecordId
           ? this.feedCommands.find((c) => c.id === this.currentRecordId)
