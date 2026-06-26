@@ -245,8 +245,7 @@ export const protocolPlugin: PluginManifest = {
   i18n: protocolResources,
   dependencies: [
     { capability: "vault.service", reason: "协议需要 active key 与 withPrivateKey" },
-    { capability: "keyspace.service", reason: "协议需要 active key 状态" },
-    { capability: "p2pkh.service", reason: "执行 p2pkh.transfer 与 feepool.create / close_and_recreate 的 UTXO 列表；缺时走 internal_error" }
+    { capability: "keyspace.service", reason: "协议需要 active key 状态" }
   ],
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
@@ -270,7 +269,12 @@ export const protocolPlugin: PluginManifest = {
         });
       }
 
-      // p2pkh service 是 optional 依赖：缺时 `p2pkh.transfer` 走 internal_error。
+      // p2pkh service 是 optional 能力：**不**放进 manifest.dependencies，
+      // 否则 host.enable() 会在 protocolPlugin 早于 plugin-p2pkh 装载时直接
+      // 把本插件打成 blocked，导致 `protocol.service` capability 根本
+      // 不会 provide。这里保留运行时 best-effort 获取；缺时对应方法走
+      // internal_error / fail-closed。
+      //
       // 边界检查禁止 plugin-protocol 直接 import plugin-p2pkh；这里通过
       // capability key 拿值，类型断言为最小适配接口。
       let p2pkhService:
