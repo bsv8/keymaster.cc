@@ -441,6 +441,45 @@ describe("ProtocolPopupPage topbar origin settings", () => {
     expect(btn).not.toBeNull();
     expect((btn as HTMLButtonElement).disabled).toBe(true);
   });
+
+  /* ============== 施工单 002：弹出面板 + 即时生效 ============== */
+
+  it("clicking the site-settings button opens the inline panel with full style classes", async () => {
+    const service = makeFakeService();
+    service.getOriginSettings = vi.fn(async (origin: string) => ({
+      origin,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      updatedAt: 0
+    }));
+    service.setOriginSettings = vi.fn(async () => undefined);
+    currentService = service;
+    act(() => {
+      service.feed = {
+        currentOrigin: "https://demo.example",
+        commands: [],
+        historyAvailable: true
+      };
+      for (const l of service.feedListeners) l({ ...service.feed });
+    });
+    render(<ProtocolPopupPage />);
+    const btn = screen.getByText("站点配置").closest("button") as HTMLButtonElement;
+    await act(async () => {
+      btn.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // 面板带完整样式类。
+    const panel = document.querySelector(".origin-settings-panel");
+    expect(panel).not.toBeNull();
+    expect(panel!.querySelector(".origin-settings-panel__form")).not.toBeNull();
+    // 不再出现"保存"按钮。
+    expect(screen.queryByText("Save")).toBeNull();
+    expect(screen.queryByText("保存")).toBeNull();
+  });
 });
 
 describe("ProtocolPopupPage auto-approve skip", () => {

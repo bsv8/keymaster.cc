@@ -262,3 +262,171 @@
     padding: 0.75rem;
   }
 }
+
+/* ============== 站点配置面板（施工单 002 硬切换：补全样式） ==============
+ *
+ * 设计缘由：
+ *   - 面板挂在 protocol popup 顶栏下方，宽度受 popup 限制；
+ *   - 不是 modal、不是 drawer；与 feed 同级但视觉上独立；
+ *   - 字段间距紧凑，移动端可读；
+ *   - 不与 .protocol-feed__card 视觉混淆——它有更明确的边界与 padding，
+ *     让用户一眼能区分"我在改站点配置"与"我在看历史"。
+ */
+.origin-settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem 1rem;
+  background: var(--bg-card, #ffffff);
+  border-bottom: 1px solid var(--border-card, #e4e4e7);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  font-size: 13px;
+  color: var(--text-base, #1a1a1a);
+}
+
+.origin-settings-panel__header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.origin-settings-panel__header-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.origin-settings-panel__header-text code {
+  display: block;
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", "Consolas", monospace);
+  font-size: 11.5px;
+  color: var(--text-muted, #6b7280);
+  word-break: break-all;
+  margin-top: 0.15rem;
+}
+
+.origin-settings-panel__loading {
+  color: var(--text-muted, #6b7280);
+  font-size: 12.5px;
+}
+
+.origin-settings-panel__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.origin-settings-panel__field {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.25rem;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border-card, #e4e4e7);
+  border-radius: 6px;
+  background: var(--bg-card-body, #fafafa);
+  cursor: pointer;
+}
+
+.origin-settings-panel__field--inline {
+  /* 复选框字段：checkbox 与文案同行 */
+  grid-template-columns: max-content 1fr;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.origin-settings-panel__field--inline input[type="checkbox"] {
+  margin: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+
+.origin-settings-panel__field--inline span {
+  line-height: 1.4;
+}
+
+.origin-settings-panel__field-label {
+  font-size: 12.5px;
+  color: var(--text-muted, #6b7280);
+  font-weight: 500;
+}
+
+.origin-settings-panel__field input[type="number"] {
+  width: 100%;
+  max-width: 220px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border-card, #e4e4e7);
+  border-radius: 4px;
+  background: var(--bg-input, #ffffff);
+  font: inherit;
+  color: inherit;
+}
+
+.origin-settings-panel__field input[type="number"]:focus {
+  outline: none;
+  border-color: var(--accent, #2563eb);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+.origin-settings-panel__field input[type="number"]:disabled {
+  background: var(--bg-card-hover, #f8f8fa);
+  color: var(--text-muted, #6b7280);
+  cursor: not-allowed;
+}
+
+.origin-settings-panel__error {
+  padding: 0.45rem 0.6rem;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  border-radius: 6px;
+  color: #991b1b;
+  font-size: 12.5px;
+}
+
+.origin-settings-panel__error code {
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", "Consolas", monospace);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.origin-settings-panel__saving {
+  display: inline-block;
+  font-size: 11.5px;
+  color: var(--text-muted, #6b7280);
+  padding: 0.15rem 0.4rem;
+  border: 1px solid var(--border-card, #e4e4e7);
+  border-radius: 999px;
+  background: var(--bg-card-hover, #f8f8fa);
+}
+
+.origin-settings-panel__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  font-size: 18px;
+  line-height: 1;
+  background: transparent;
+  border: 1px solid var(--border-button, #d4d4d8);
+  border-radius: 6px;
+  cursor: pointer;
+  color: var(--text-base, #1a1a1a);
+  padding: 0;
+}
+
+.origin-settings-panel__close:hover,
+.origin-settings-panel__close:focus-visible {
+  background: var(--bg-card-hover, #f8f8fa);
+  outline: none;
+}
+
+@media (max-width: 480px) {
+  .origin-settings-panel {
+    padding: 0.7rem 0.75rem 0.85rem;
+    font-size: 12.5px;
+  }
+  .origin-settings-panel__field {
+    padding: 0.4rem 0.5rem;
+  }
+}
