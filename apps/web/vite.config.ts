@@ -1,5 +1,6 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
+import { fileURLToPath, URL } from "node:url";
 
 const tailscaleHost = "usops01.degu-danio.ts.net";
 
@@ -30,6 +31,11 @@ export default defineConfig({
     }
   },
   resolve: {
+    alias: {
+      // `keymaster-multisig-pool` 当前发布包直接 import Node `crypto`。
+      // 浏览器构建只补它实际用到的 `createHmac` 最小能力，不引入整套 polyfill。
+      crypto: fileURLToPath(new URL("./src/shims/crypto.ts", import.meta.url))
+    },
     // 让 Vite 直接消费 packages/* 源码（与 tsc 行为一致）。
     preserveSymlinks: false
   },

@@ -10,21 +10,22 @@
   },
   "dependencies": {
     "@keymaster/contracts": "*",
-    "@keymaster/runtime": "*",
-    "@keymaster/ui": "*",
-    "@keymaster/plugin-vault": "*",
-    "@keymaster/plugin-key-import": "*",
-    "@keymaster/plugin-importer-wif": "*",
+    "@keymaster/plugin-assets": "*",
+    "@keymaster/plugin-background": "*",
+    "@keymaster/plugin-contacts": "*",
+    "@keymaster/plugin-home": "*",
     "@keymaster/plugin-importer-hex": "*",
     "@keymaster/plugin-importer-json-file": "*",
+    "@keymaster/plugin-importer-wif": "*",
+    "@keymaster/plugin-key-import": "*",
     "@keymaster/plugin-p2pkh": "*",
-    "@keymaster/plugin-contacts": "*",
-    "@keymaster/plugin-transfer": "*",
-    "@keymaster/plugin-home": "*",
+    "@keymaster/plugin-protocol": "*",
     "@keymaster/plugin-settings": "*",
-    "@keymaster/plugin-assets": "*",
+    "@keymaster/plugin-transfer": "*",
+    "@keymaster/plugin-vault": "*",
     "@keymaster/plugin-woc": "*",
-    "@keymaster/plugin-background": "*",
-    "@keymaster/plugin-protocol": "*"
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "buffer": "^6.0.3"
   }
 }

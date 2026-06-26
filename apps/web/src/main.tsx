@@ -11,6 +11,7 @@ import { bootstrapPlugins } from "./bootstrapPlugins.js";
 import { renderFatalError } from "./bootstrapError.js";
 import { normalizeLegacyHashRoute } from "./shell/legacyHashRoute.js";
 import { applyInitialTheme } from "./theme/themeStore.js";
+import "./shims/buffer.js";
 import "./styles/global.css";
 import "./styles/plugins.css";
 
