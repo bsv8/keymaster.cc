@@ -1,15 +1,20 @@
 // packages/plugin-protocol/src/ProtocolCommandFeed.tsx
-// popup 命令流 feed 组件（单列流 + sticky 顶栏）。
+// popup 命令流 feed 组件（单列流 + 多活动卡片）。
 //
-// 设计缘由（施工单 003 硬切换：confirm 收口到历史卡 + 外部 cancel + 超时）：
-//   - 当前请求的交互**只**在最新卡片里呈现：解锁表单 / 确认按钮 / 取消
-//     按钮 / 倒计时都内联在卡片 body。
-//   - 历史卡片保持只读 summary；不允许出现第二套"当前请求" UI。
-//   - 同一时刻最多一张"活"卡片可交互（事实上就是最新一张）。
-//   - 终态：`approved` / `rejected` / `failed` / `timed_out` 走同一个
-//     decision 渲染分支；`status = "timed_out"` 单独显示"超时"文案。
-//   - auto-approve 命中时 currentRequestAutoApproved() === true，卡片仍
-//     渲染但 body 显示"自动通过 / 处理中"，没有确认按钮。
+// 设计缘由（施工单 2026-06-27 001 硬切换：锁屏 + 多 request 并存 +
+// 全局串行执行）：
+//   - 不再有"全局当前 request"概念；多张 `confirming` / `queued` /
+//     `executing` 卡片可同时存在。
+//   - 每张卡片按自己的 `recordId` 调 service 交互 API
+//     （`confirmByUser(recordId)` / `rejectByUser(recordId)`）。
+//   - 每张 `confirming` 卡独立显示倒计时（deadline 由 service 按
+//     recordId 暴露）。
+//   - 历史卡片保持只读 summary；不允许出现"对历史 request 再点确认"。
+//   - `queued` 显示"已确认，等待执行"。
+//   - `executing` 显示"处理中"。
+//   - `timed_out` 单独显示"超时"（与 `failed` 平级）。
+//   - auto-approve 命中时 card.autoApproved=true，body 显示
+//     "自动通过 / 处理中"，没有确认按钮。
 //   - 视图层**不**参与 service 业务：所有状态都通过 props 传入。
 
 import { useEffect, useState } from "react";
@@ -27,21 +32,18 @@ import type {
   ProtocolCommandRecord,
   ProtocolMethod,
   ProtocolService,
-  ProtocolSessionPhase,
   ProtocolSessionSnapshot
 } from "@keymaster/contracts";
-import { useCapability } from "@keymaster/runtime";
 
 /* ============== 公开 props ============== */
 
 export interface ProtocolCommandFeedProps {
-  t: (key: string, values?: { defaultValue?: string }) => string;
+  t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
   feed: ProtocolCommandFeedState;
   service: ProtocolService;
   snap: ProtocolSessionSnapshot;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } | null;
-  /** 剩余秒数（service 倒计时推算）；null = 没在计时。 */
-  remainingSeconds: number | null;
+  /** 当前 wall-clock（epoch ms）；由父组件 1s 滴答推进；用于倒计时渲染。 */
+  now: number;
 }
 
 const DECISION_LABEL_KEY: Record<ProtocolCommandRecord["decision"], string> = {
@@ -64,10 +66,6 @@ export function ProtocolCommandFeed(props: ProtocolCommandFeedProps) {
       </div>
     );
   }
-  // 历史不可用时**始终**显示顶部横幅——即便内存里已经有当前命令卡，
-  // 也必须告诉用户"本次操作不会持久化"。原先把 `!feed.commands.length`
-  // 叠加在判断里会让"内存有卡 + DB 不可用"这种最需要提示的场景被
-  // 静默吞掉。
   const historyWarning = !feed.historyAvailable ? (
     <div className="protocol-feed__notice protocol-feed__notice--warn">
       {t("protocol.feed.historyUnavailable", {
@@ -95,13 +93,6 @@ export function ProtocolCommandFeed(props: ProtocolCommandFeedProps) {
 
 function FeedList(props: ProtocolCommandFeedProps) {
   const { t, feed } = props;
-  // 最新命令 = feed.commands[0]（service 已按 updatedAt desc 排序）。
-  const head = feed.commands[0];
-  const isHeadLive =
-    !!head &&
-    !!props.snap.requestId &&
-    !!props.snap.boundOrigin &&
-    head.requestId === props.snap.requestId;
   return (
     <ul className="protocol-feed__list" aria-label={t("protocol.feed.list.aria", { defaultValue: "命令流历史" })}>
       {feed.commands.map((c, i) => (
@@ -110,36 +101,29 @@ function FeedList(props: ProtocolCommandFeedProps) {
           t={t}
           command={c}
           initiallyExpanded={i === 0}
-          // 仅当本卡片就是当前正在处理的 request 时才走交互视图。
-          isLive={isHeadLive && i === 0}
           service={props.service}
-          snap={props.snap}
-          request={props.request}
-          remainingSeconds={props.remainingSeconds}
+          now={props.now}
         />
       ))}
     </ul>
   );
 }
 
+/**
+ * 单张命令卡：按 record.id 独立交互；不再假设"最新一张才是活卡"。
+ */
 function CommandCard({
   t,
   command,
   initiallyExpanded,
-  isLive,
   service,
-  snap,
-  request,
-  remainingSeconds
+  now
 }: {
-  t: (key: string, values?: { defaultValue?: string }) => string;
+  t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
   command: ProtocolCommandRecord;
   initiallyExpanded: boolean;
-  isLive: boolean;
   service: ProtocolService;
-  snap: ProtocolSessionSnapshot;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } | null;
-  remainingSeconds: number | null;
+  now: number;
 }) {
   const [expanded, setExpanded] = useState<boolean>(initiallyExpanded);
   const decisionKey = DECISION_LABEL_KEY[command.decision];
@@ -152,13 +136,14 @@ function CommandCard({
   const cardClass = [
     "protocol-feed__card",
     `protocol-feed__card--${command.decision}`,
-    isLive ? "protocol-feed__card--live" : ""
+    `protocol-feed__card--phase-${command.phase}`
   ].join(" ");
   return (
     <li
       className={cardClass}
       data-record-id={command.id}
       data-status={command.status}
+      data-phase={command.phase}
     >
       <button
         type="button"
@@ -177,6 +162,26 @@ function CommandCard({
             {statusLabel}
           </span>
         ) : null}
+        {command.phase === "queued" ? (
+          <span className="protocol-feed__card-status protocol-feed__card-status--queued">
+            {t("protocol.feed.status.queued", { defaultValue: "已确认，等待执行" })}
+          </span>
+        ) : null}
+        {command.phase === "executing" ? (
+          <span className="protocol-feed__card-status protocol-feed__card-status--executing">
+            {t("protocol.feed.status.executing", { defaultValue: "处理中" })}
+          </span>
+        ) : null}
+        {command.phase === "waiting_unlock_manual" ? (
+          <span className="protocol-feed__card-status protocol-feed__card-status--waiting_unlock">
+            {t("protocol.feed.status.waiting_unlock_manual", { defaultValue: "等待解锁（人工）" })}
+          </span>
+        ) : null}
+        {command.phase === "waiting_unlock_auto" ? (
+          <span className="protocol-feed__card-status protocol-feed__card-status--waiting_unlock">
+            {t("protocol.feed.status.waiting_unlock_auto", { defaultValue: "等待解锁（自动）" })}
+          </span>
+        ) : null}
         <span className="protocol-feed__card-time">
           {new Date(command.updatedAt).toLocaleString()}
         </span>
@@ -186,11 +191,8 @@ function CommandCard({
           <CardBody
             t={t}
             command={command}
-            isLive={isLive}
             service={service}
-            snap={snap}
-            request={request}
-            remainingSeconds={remainingSeconds}
+            now={now}
           />
         </div>
       ) : null}
@@ -198,58 +200,185 @@ function CommandCard({
   );
 }
 
-/* ============== 卡片 body：交互视图（isLive=true）或只读 summary ============== */
+/* ============== 卡片 body：按 phase 渲染交互体 ============== */
 
 function CardBody({
   t,
   command,
-  isLive,
   service,
-  snap,
-  request,
-  remainingSeconds
+  now
 }: {
-  t: (key: string, values?: { defaultValue?: string }) => string;
+  t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
   command: ProtocolCommandRecord;
-  isLive: boolean;
   service: ProtocolService;
-  snap: ProtocolSessionSnapshot;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } | null;
-  remainingSeconds: number | null;
+  now: number;
 }) {
   // 历史卡片：只读 summary。
-  if (!isLive) {
+  const isTerminal =
+    command.decision === "approved" ||
+    command.decision === "rejected" ||
+    command.decision === "failed";
+  if (isTerminal) {
     return <ReadOnlyBody t={t} command={command} />;
   }
-  // 当前正在处理的 request：按 phase 渲染交互体。
-  const phase: ProtocolSessionPhase = snap.phase;
-  if (phase === "unlocking") {
+
+  if (command.phase === "waiting_unlock_manual") {
     return (
-      <UnlockCardBody
+      <WaitingUnlockCardBody
         t={t}
-        service={service}
         command={command}
-        remainingSeconds={remainingSeconds}
       />
     );
   }
-  if (phase === "executing") {
-    return <ExecutingCardBody t={t} command={command} />;
+  if (command.phase === "waiting_unlock_auto") {
+    return (
+      <WaitingUnlockAutoCardBody t={t} command={command} />
+    );
   }
-  if (phase === "confirming") {
+  if (command.phase === "confirming") {
     return (
       <ConfirmCardBody
         t={t}
-        service={service}
         command={command}
-        request={request}
-        remainingSeconds={remainingSeconds}
+        service={service}
+        now={now}
       />
     );
   }
-  // phase = waiting / closing / error 等：当前 request 实际已不在交互态，
-  // 但 command 还在 feed 顶。等 service 推完终态后，这里会切到只读 summary。
+  if (command.phase === "queued") {
+    return <QueuedCardBody t={t} command={command} service={service} />;
+  }
+  if (command.phase === "executing") {
+    return <ExecutingCardBody t={t} command={command} />;
+  }
   return <ReadOnlyBody t={t} command={command} />;
+}
+
+/* ============== 等待解锁（人工确认） ============== */
+
+function WaitingUnlockCardBody({
+  t,
+  command
+}: {
+  t: (key: string, values?: { defaultValue?: string }) => string;
+  command: ProtocolCommandRecord;
+}) {
+  return (
+    <>
+      <PageHeader
+        title={t("protocol.feed.waitingUnlock.title", { defaultValue: "等待解锁" })}
+        description={t("protocol.feed.waitingUnlock.manualDesc", {
+          defaultValue: "此请求需要解锁 Keymaster。解锁后会进入确认页。"
+        })}
+      />
+      <RequestSummary t={t} command={command} />
+    </>
+  );
+}
+
+function WaitingUnlockAutoCardBody({
+  t,
+  command
+}: {
+  t: (key: string, values?: { defaultValue?: string }) => string;
+  command: ProtocolCommandRecord;
+}) {
+  return (
+    <>
+      <PageHeader
+        title={t("protocol.feed.waitingUnlock.title", { defaultValue: "等待解锁" })}
+        description={t("protocol.feed.waitingUnlock.autoDesc", {
+          defaultValue: "此请求会在解锁后自动执行。"
+        })}
+      />
+      <RequestSummary t={t} command={command} />
+    </>
+  );
+}
+
+/* ============== 确认卡（解锁后人工确认阶段） ============== */
+
+function ConfirmCardBody({
+  t,
+  service,
+  command,
+  now
+}: {
+  t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
+  service: ProtocolService;
+  command: ProtocolCommandRecord;
+  now: number;
+}) {
+  const deadline = service.confirmDeadlineMs(command.id);
+  const remainingSeconds = deadline === null ? null : Math.max(0, Math.ceil((deadline - now) / 1000));
+  return (
+    <>
+      <PageHeader
+        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
+        description={t(`protocol.confirm.method.${command.method}`, { defaultValue: command.method })}
+      />
+      <ConfirmDetails t={t} command={command} />
+      <div className="protocol-popup__actions">
+        <Button onClick={() => service.confirmByUser(command.id)}>
+          {t("protocol.confirm.confirm", { defaultValue: "确认" })}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => service.rejectByUser(command.id)}
+        >
+          {t("protocol.confirm.cancel", { defaultValue: "取消" })}
+        </Button>
+        <CountdownBadge t={t} remainingSeconds={remainingSeconds} />
+      </div>
+    </>
+  );
+}
+
+/* ============== queued 卡（已确认，等待执行） ============== */
+
+function QueuedCardBody({
+  t,
+  command,
+  service
+}: {
+  t: (key: string, values?: { defaultValue?: string }) => string;
+  command: ProtocolCommandRecord;
+  service: ProtocolService;
+}) {
+  return (
+    <>
+      <PageHeader
+        title={t("protocol.feed.queued.title", { defaultValue: "已确认，等待执行" })}
+        description={t(`protocol.confirm.method.${command.method}`, { defaultValue: command.method })}
+      />
+      <RequestSummary t={t} command={command} />
+      <div className="protocol-popup__actions">
+        <Button variant="ghost" onClick={() => service.rejectByUser(command.id)}>
+          {t("protocol.feed.queued.cancel", { defaultValue: "取消排队" })}
+        </Button>
+      </div>
+    </>
+  );
+}
+
+/* ============== 执行中卡 ============== */
+
+function ExecutingCardBody({
+  t,
+  command
+}: {
+  t: (key: string, values?: { defaultValue?: string }) => string;
+  command: ProtocolCommandRecord;
+}) {
+  return (
+    <>
+      <PageHeader
+        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
+        description={t("protocol.executing", { defaultValue: "处理中…" })}
+      />
+      <RequestSummary t={t} command={command} />
+    </>
+  );
 }
 
 /* ============== 只读 summary（历史卡片 + 终态卡片） ============== */
@@ -387,145 +516,6 @@ function ReadOnlyBody({
   );
 }
 
-/* ============== 解锁卡 ============== */
-
-function UnlockCardBody({
-  t,
-  service,
-  command,
-  remainingSeconds
-}: {
-  t: (key: string, values?: { defaultValue?: string }) => string;
-  service: ProtocolService;
-  command: ProtocolCommandRecord;
-  remainingSeconds: number | null;
-}) {
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const vault = useCapability<{
-    status(): "booting" | "uninitialized" | "locked" | "unlocked";
-    onStatusChange(handler: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void): () => void;
-    unlock(password: string): Promise<void>;
-  }>("vault.service");
-  useEffect(() => {
-    return vault.onStatusChange((s) => {
-      if (s === "unlocked") {
-        (service as unknown as { resumeAfterUnlock?: () => void }).resumeAfterUnlock?.();
-      }
-    });
-  }, [vault, service]);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      await vault.unlock(password);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("protocol.unlock.err.failed", { defaultValue: "解锁失败" }));
-    } finally {
-      setBusy(false);
-      setPassword("");
-    }
-  }
-  async function cancel() {
-    await service.rejectByUser();
-  }
-  return (
-    <>
-      <PageHeader
-        title={t("protocol.unlock.title", { defaultValue: "解锁后继续" })}
-        description={t("protocol.unlock.desc", {
-          defaultValue: "此协议请求需要先解锁本地 Vault。解锁成功后请求会自动继续。"
-        })}
-      />
-      <RequestSummary t={t} command={command} />
-      <form onSubmit={submit} className="protocol-popup__form">
-        <TextInput
-          label={t("protocol.unlock.password", { defaultValue: "密码" })}
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.currentTarget.value)}
-          error={error ?? undefined}
-        />
-        <div className="protocol-popup__actions">
-          <Button type="submit" loading={busy} disabled={!password}>
-            {t("protocol.unlock.submit", { defaultValue: "解锁" })}
-          </Button>
-          <Button variant="ghost" onClick={cancel} disabled={busy}>
-            {t("protocol.unlock.cancel", { defaultValue: "取消" })}
-          </Button>
-          <CountdownBadge t={t} remainingSeconds={remainingSeconds} />
-        </div>
-      </form>
-    </>
-  );
-}
-
-/* ============== 确认卡 ============== */
-
-function ConfirmCardBody({
-  t,
-  service,
-  command,
-  request,
-  remainingSeconds
-}: {
-  t: (key: string, values?: { defaultValue?: string }) => string;
-  service: ProtocolService;
-  command: ProtocolCommandRecord;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } | null;
-  remainingSeconds: number | null;
-}) {
-  if (!request) {
-    return null;
-  }
-  return (
-    <>
-      <PageHeader
-        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
-        description={t(`protocol.confirm.method.${request.method}`, { defaultValue: request.method })}
-      />
-      <ConfirmDetails t={t} command={command} request={request} />
-      <div className="protocol-popup__actions">
-        <Button onClick={() => service.confirmByUser()}>
-          {t("protocol.confirm.confirm", { defaultValue: "确认" })}
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={async () => {
-            await service.rejectByUser();
-          }}
-        >
-          {t("protocol.confirm.cancel", { defaultValue: "取消" })}
-        </Button>
-        <CountdownBadge t={t} remainingSeconds={remainingSeconds} />
-      </div>
-    </>
-  );
-}
-
-/* ============== 执行中卡 ============== */
-
-function ExecutingCardBody({
-  t,
-  command
-}: {
-  t: (key: string, values?: { defaultValue?: string }) => string;
-  command: ProtocolCommandRecord;
-}) {
-  return (
-    <>
-      <PageHeader
-        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
-        description={t("protocol.executing", { defaultValue: "处理中…" })}
-      />
-      <RequestSummary t={t} command={command} />
-    </>
-  );
-}
-
 /* ============== 倒计时 badge ============== */
 
 function CountdownBadge({
@@ -536,10 +526,6 @@ function CountdownBadge({
   remainingSeconds: number | null;
 }) {
   if (remainingSeconds === null) return null;
-  // i18n key 在 en / zh-CN 资源里都通过 `{{seconds}}` 插值；
-  // 关键：把 `seconds` 也传给 i18n service，让有 key 命中的语言
-  // 走真正的占位符替换（不是 `defaultValue` 兜底）。否则英文界面
-  // 会直接渲染 `"{{seconds}}s remaining"`。
   return (
     <span className="protocol-popup__countdown" aria-live="polite">
       {t("protocol.countdown.remaining", {
@@ -550,7 +536,7 @@ function CountdownBadge({
   );
 }
 
-/* ============== 命令摘要（解锁 / 执行中 共享） ============== */
+/* ============== 命令摘要 ============== */
 
 function RequestSummary({
   t,
@@ -583,30 +569,32 @@ function RequestSummary({
 
 function ConfirmDetails({
   t,
-  command,
-  request
+  command
 }: {
   t: (key: string, values?: { defaultValue?: string }) => string;
   command: ProtocolCommandRecord;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> };
 }) {
-  const identity = request.method === "identity.get" ? (request.params as IdentityGetParams) : null;
-  const sign = request.method === "intent.sign" ? (request.params as IntentSignParams) : null;
-  const enc = request.method === "cipher.encrypt" ? (request.params as CipherEncryptParams) : null;
-  const dec = request.method === "cipher.decrypt" ? (request.params as CipherDecryptParams) : null;
-  const p2pkh = request.method === "p2pkh.transfer" ? (request.params as P2pkhTransferParams) : null;
-  const feepoolPrepare =
-    request.method === "feepool.prepare" ? (request.params as FeepoolPrepareParams) : null;
-  const feepoolCommit =
-    request.method === "feepool.commit" ? (request.params as FeepoolCommitParams) : null;
-  const aud = identity?.aud ?? sign?.aud ?? null;
-  const text = identity?.text ?? sign?.text ?? enc?.text ?? dec?.text ?? "";
-  const claims = identity?.claims ?? [];
-  const iat = identity?.iat ?? sign?.iat;
-  const exp = identity?.exp ?? sign?.exp;
-  const contentType = sign?.contentType ?? enc?.contentType;
+  // 历史持久化的 command 不带 params（安全），所以读 params 的 detail 路径
+  // 仅适用于活跃卡。这里直接复用 summary 文本与摘要字段。
+  const params = command as unknown as { params?: Record<string, unknown> };
+  const p = (params.params ?? {}) as Record<string, unknown>;
+  const method = command.method;
+  const aud = (p.aud as string | undefined) ?? null;
+  const text = (p.text as string | undefined) ?? "";
+  const claims = Array.isArray(p.claims)
+    ? (p.claims as unknown[]).filter((c): c is string => typeof c === "string")
+    : [];
+  const iat = (p.iat as number | undefined) ?? undefined;
+  const exp = (p.exp as number | undefined) ?? undefined;
+  const contentType = (p.contentType as string | undefined) ?? undefined;
+  const contentField = p.content as { bytes?: { byteLength?: number } } | undefined;
+  const cipherField = p.cipherbytes as { bytes?: { byteLength?: number } } | undefined;
   const contentBytes =
-    sign?.content?.bytes.byteLength ?? enc?.content?.bytes.byteLength ?? dec?.cipherbytes?.bytes.byteLength ?? 0;
+    typeof contentField?.bytes?.byteLength === "number"
+      ? contentField.bytes.byteLength
+      : typeof cipherField?.bytes?.byteLength === "number"
+      ? cipherField.bytes.byteLength
+      : 0;
   return (
     <>
       <RequestSummary t={t} command={command} />
@@ -657,47 +645,27 @@ function ConfirmDetails({
             </dd>
           </>
         ) : null}
-        {p2pkh ? (
+        {command.recipientAddress ? (
           <>
             <dt>{t("protocol.confirm.p2pkh.recipient", { defaultValue: "收款地址" })}</dt>
             <dd>
-              <code>{p2pkh.recipientAddress}</code>
+              <code>{command.recipientAddress}</code>
             </dd>
+          </>
+        ) : null}
+        {command.amountSatoshis !== undefined ? (
+          <>
             <dt>{t("protocol.confirm.p2pkh.amount", { defaultValue: "金额" })}</dt>
             <dd>
-              <code>{p2pkh.amountSatoshis}</code> sats
-            </dd>
-            {p2pkh.feeRateSatoshisPerKb ? (
-              <>
-                <dt>{t("protocol.confirm.p2pkh.feeRate", { defaultValue: "费率 (sat/kB)" })}</dt>
-                <dd>
-                  <code>{p2pkh.feeRateSatoshisPerKb}</code>
-                </dd>
-              </>
-            ) : null}
-          </>
-        ) : null}
-        {feepoolPrepare ? (
-          <>
-            <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
-            <dd>
-              <code>{shortHex(feepoolPrepare.counterpartyPublicKeyHex, 12)}</code>
-            </dd>
-            <dt>{t("protocol.confirm.feepool.amount", { defaultValue: "金额" })}</dt>
-            <dd>
-              <code>{feepoolPrepare.amountSatoshis}</code> sats
+              <code>{command.amountSatoshis}</code> sats
             </dd>
           </>
         ) : null}
-        {feepoolCommit ? (
+        {method.startsWith("feepool.") && command.counterpartyPublicKeyHex ? (
           <>
-            <dt>{t("protocol.confirm.feepool.operationId", { defaultValue: "操作 id" })}</dt>
-            <dd>
-              <code>{feepoolCommit.operationId}</code>
-            </dd>
             <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
             <dd>
-              <code>{shortHex(feepoolCommit.counterpartyPublicKeyHex, 12)}</code>
+              <code>{shortHex(command.counterpartyPublicKeyHex, 12)}</code>
             </dd>
           </>
         ) : null}

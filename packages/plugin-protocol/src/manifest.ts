@@ -134,11 +134,36 @@ const protocolResources: I18nPluginResources = {
       /* ============== 施工单 003：confirm 收口到历史卡 + 外部 cancel + 超时 ============== */
       "protocol.originSettings.confirmTimeoutSeconds.label":
         "Confirmation timeout (seconds, default 30)",
+      "protocol.originSettings.confirmTimeoutSeconds.help":
+        "This timeout only applies to the manual confirmation phase after the wallet is unlocked. Lock-screen waiting does not count down; queued / executing requests are not affected by this timeout.",
       "protocol.feed.status.timed_out": "Timed out",
+      "protocol.feed.status.queued": "Confirmed, waiting to execute",
+      "protocol.feed.status.executing": "Processing",
+      "protocol.feed.status.waiting_unlock_manual": "Waiting for unlock (manual)",
+      "protocol.feed.status.waiting_unlock_auto": "Waiting for unlock (auto)",
+      "protocol.feed.waitingUnlock.title": "Waiting for unlock",
+      "protocol.feed.waitingUnlock.manualDesc":
+        "This request needs the wallet to be unlocked. After unlock it will enter the confirmation page.",
+      "protocol.feed.waitingUnlock.autoDesc":
+        "This request will execute automatically after the wallet is unlocked.",
+      "protocol.feed.queued.title": "Confirmed, waiting to execute",
+      "protocol.feed.queued.cancel": "Cancel queue",
       "protocol.feed.method": "Method",
       "protocol.sessionError.banner":
         "Cannot reach the external site. Please check the site console for details.",
-      "protocol.countdown.remaining": "{{seconds}}s remaining"
+      "protocol.countdown.remaining": "{{seconds}}s remaining",
+      /* ============== 施工单 2026-06-27 001：锁屏页文案 ============== */
+      "protocol.lockscreen.title": "Unlock to continue",
+      "protocol.lockscreen.desc":
+        "Keymaster is locked. The current site has pending requests; they will continue automatically after unlock.",
+      "protocol.lockscreen.pendingTotal": "pending",
+      "protocol.lockscreen.manual": "Waiting for unlock (manual confirmation)",
+      "protocol.lockscreen.auto": "Auto-execute after unlock",
+      "protocol.lockscreen.queued": "Confirmed, waiting to execute",
+      "protocol.lockscreen.executing": "Executing",
+      "protocol.lockscreen.byMethod": "By method",
+      "protocol.lockscreen.unlockHint":
+        "After unlock, {{total}} pending request(s) will automatically enter the confirmation / execution flow."
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -236,11 +261,36 @@ const protocolResources: I18nPluginResources = {
       /* ============== 施工单 003：confirm 收口到历史卡 + 外部 cancel + 超时 ============== */
       "protocol.originSettings.confirmTimeoutSeconds.label":
         "确认超时（秒，默认 30）",
+      "protocol.originSettings.confirmTimeoutSeconds.help":
+        "该超时只作用于解锁后的人工确认阶段。锁屏等待阶段不计时；queued / executing 也不会被这个超时命中。",
       "protocol.feed.status.timed_out": "超时",
+      "protocol.feed.status.queued": "已确认，等待执行",
+      "protocol.feed.status.executing": "处理中",
+      "protocol.feed.status.waiting_unlock_manual": "等待解锁（人工）",
+      "protocol.feed.status.waiting_unlock_auto": "等待解锁（自动）",
+      "protocol.feed.waitingUnlock.title": "等待解锁",
+      "protocol.feed.waitingUnlock.manualDesc":
+        "此请求需要解锁钱包。解锁后会进入确认页。",
+      "protocol.feed.waitingUnlock.autoDesc":
+        "此请求会在解锁后自动执行。",
+      "protocol.feed.queued.title": "已确认，等待执行",
+      "protocol.feed.queued.cancel": "取消排队",
       "protocol.feed.method": "方法",
       "protocol.sessionError.banner":
         "无法连接到外部站点。请回到来源站点查看控制台日志。",
-      "protocol.countdown.remaining": "剩余 {{seconds}} 秒"
+      "protocol.countdown.remaining": "剩余 {{seconds}} 秒",
+      /* ============== 施工单 2026-06-27 001：锁屏页文案 ============== */
+      "protocol.lockscreen.title": "解锁后继续",
+      "protocol.lockscreen.desc":
+        "Keymaster 当前处于锁定状态。当前站点已有请求；解锁后会自动继续处理。",
+      "protocol.lockscreen.pendingTotal": "条待处理",
+      "protocol.lockscreen.manual": "待解锁后人工确认",
+      "protocol.lockscreen.auto": "解锁后自动执行",
+      "protocol.lockscreen.queued": "已确认待执行",
+      "protocol.lockscreen.executing": "执行中",
+      "protocol.lockscreen.byMethod": "按 method 聚合",
+      "protocol.lockscreen.unlockHint":
+        "解锁后，{{total}} 条待处理请求会自动进入确认 / 执行流程。"
     }
   }
 };

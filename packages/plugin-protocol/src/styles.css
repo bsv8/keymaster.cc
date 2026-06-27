@@ -176,6 +176,43 @@
   border: 1px solid #fed7aa;
 }
 
+/* ============== 施工单 2026-06-27 001：卡片状态扩展 ============== */
+
+.protocol-feed__card-status--queued {
+  background: #eef2ff;
+  color: #3730a3;
+  border: 1px solid #c7d2fe;
+}
+
+.protocol-feed__card-status--executing {
+  background: #ecfeff;
+  color: #155e75;
+  border: 1px solid #a5f3fc;
+}
+
+.protocol-feed__card-status--waiting_unlock {
+  background: #f5f3ff;
+  color: #5b21b6;
+  border: 1px solid #ddd6fe;
+}
+
+.protocol-feed__card--phase-queued {
+  border-left: 3px solid #6366f1;
+}
+
+.protocol-feed__card--phase-executing {
+  border-left: 3px solid #06b6d4;
+}
+
+.protocol-feed__card--phase-waiting_unlock_manual,
+.protocol-feed__card--phase-waiting_unlock_auto {
+  border-left: 3px solid #8b5cf6;
+}
+
+.protocol-feed__card--phase-timed_out {
+  border-left: 3px solid #f97316;
+}
+
 /* ============== 施工单 003：卡片内倒计时 badge ============== */
 .protocol-popup__countdown {
   display: inline-flex;
@@ -473,4 +510,139 @@
   .origin-settings-panel__field {
     padding: 0.4rem 0.5rem;
   }
+}
+
+/* ============== 施工单 2026-06-27 001：全页面锁屏 ==============
+ *
+ * 设计缘由：
+ *   - 锁屏页独立于主 popup：vault locked 时**只**渲染这一块。
+ *   - 不显示顶栏 / 站点配置 / 命令流；命令流真值保留在 service 内存里。
+ *   - 解锁表单 + 待处理概要聚合放在同一张中心卡片里；视觉上与主页面
+ *     区分明显（无顶栏 + 大标题 + 居中布局）。
+ */
+
+.protocol-popup--locked {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background: var(--bg-base, #ffffff);
+}
+
+.protocol-lockscreen {
+  width: 100%;
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.5rem 1.5rem 1.75rem;
+  background: var(--bg-card, #ffffff);
+  border: 1px solid var(--border-card, #e4e4e7);
+  border-radius: 12px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.06);
+}
+
+.protocol-lockscreen__header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.protocol-lockscreen__title {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.protocol-lockscreen__desc {
+  margin: 0;
+  color: var(--text-muted, #6b7280);
+  font-size: 12.5px;
+}
+
+.protocol-lockscreen__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.protocol-lockscreen__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.protocol-lockscreen__summary {
+  padding: 0.85rem 1rem;
+  background: var(--bg-card-body, #fafafa);
+  border: 1px solid var(--border-card, #e4e4e7);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.protocol-lockscreen__summary-total {
+  display: flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  font-size: 13.5px;
+}
+
+.protocol-lockscreen__summary-total strong {
+  font-size: 1.4rem;
+  color: var(--accent, #2563eb);
+}
+
+.protocol-lockscreen__summary-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 12.5px;
+}
+
+.protocol-lockscreen__summary-methods-title {
+  margin: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text-muted, #6b7280);
+}
+
+.protocol-lockscreen__summary-methods-list {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  font-size: 12.5px;
+}
+
+.protocol-lockscreen__summary-methods-list li {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.protocol-lockscreen__summary-methods-list code {
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", "Consolas", monospace);
+  font-size: 12px;
+  background: var(--bg-code, #f1f1f3);
+  padding: 0 0.25rem;
+  border-radius: 3px;
+}
+
+/* ============== 施工单 2026-06-27 001：站点配置面板 hint 文案 ============== */
+
+.origin-settings-panel__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  padding: 0.2rem 0.55rem;
+  background: var(--bg-card-body, #fafafa);
+  border: 1px dashed var(--border-card, #e4e4e7);
+  border-radius: 6px;
 }

@@ -1,18 +1,20 @@
 // packages/plugin-protocol/src/ProtocolPopupPage.tsx
 // 对外协议 popup 页面。
 //
-// 设计缘由（施工单 003 硬切换：confirm 收口到历史卡 + 外部 cancel + 超时）：
-//   - 页面**只**渲染顶栏 / 站点配置面板 / 命令流；不再保留独立全页
-//     确认 overlay。
-//   - 当前请求的交互（解锁表单 / 确认按钮 / 取消按钮 / 倒计时）全部
-//     收口到命令流最新卡片里（`ProtocolCommandFeed.CommandCard`
-//     内部按 phase 渲染交互体）。
-//   - 历史卡片保持只读 summary；不允许出现第二套"当前请求" UI。
+// 设计缘由（施工单 2026-06-27 001 硬切换：锁屏 + 多 request 并存 + 全局
+// 串行执行）：
+//   - 锁屏仍是全页面：vault 处于 locked 时**只**渲染锁屏页（解锁表单 +
+//     待处理概要），不渲染主 popup 页面 / 命令流 / 顶栏。
+//   - unlocked 后才进入主 popup 页面（顶栏 + 站点配置 + 命令流）。
+//   - 多 request 并存：每条 request 独立卡片；每张卡片内部按自己 recordId
+//     渲染 confirm / cancel / 倒计时。
+//   - 命令流不再是"全局当前 request"——任意多张 `confirming` / `queued` /
+//     `executing` 卡片可同时存在；UI 不依赖 `snap.phase`。
 //   - 页面只负责渲染态 + 转交用户操作给 service；密码学 / message 收发
 //     / 校验 / 签名 / 加解密一律不进组件。
-//   - 顶栏 sticky：当前 origin / 站点配置按钮 / 关闭 / 回到最新 / 进入钱包。
-//   - popup 是**会话级**长存：单条 request 完成后 phase 回到 waiting，
-//     不会自动关窗；`closing` 由 pagehide / beforeunload 路径发出。
+//   - 顶栏 sticky：当前 origin / 站点配置 / 关闭 / 回到最新 / 进入钱包。
+//   - popup 是**会话级**长存：phase 回到 waiting 时不会自动关窗；
+//     `closing` 由 pagehide / beforeunload 路径发出。
 //   - 文案中文；错误 message 原样显示英文。
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -20,9 +22,12 @@ import { useI18n } from "@keymaster/runtime";
 import type {
   MethodParams,
   ProtocolCommandFeedState,
+  ProtocolCommandRecord,
+  ProtocolLockSummary,
   ProtocolMethod,
   ProtocolService,
-  ProtocolSessionSnapshot
+  ProtocolSessionSnapshot,
+  VaultService
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { useCapability } from "@keymaster/runtime";
@@ -36,8 +41,6 @@ const WALLET_HOMEPAGE_URL = "https://keymaster.cc";
  * 顶栏"进入钱包"按钮的 onClick handler。
  *
  * best-effort：window.open 失败不报错、不弹提示。
- * 设计缘由（施工单 001）：钱包是外部站点，service 不持有它的会话；
- * 扩展失败恢复协议会让 popup 自己也跳走，违反"popup 是会话级长存"。
  * 失败就让用户点不到，不影响 popup 主流程。
  */
 function openWalletHomepage(): void {
@@ -55,13 +58,8 @@ export function ProtocolPopupPage() {
   useI18n().language();
   const [snap, setSnap] = useState<ProtocolSessionSnapshot>(() => service.snapshot());
   const [feed, setFeed] = useState<ProtocolCommandFeedState>(() => service.feedSnapshot());
-  const [request, setRequest] = useState<ReturnType<NonNullable<ProtocolService["currentRequest"]>>>(() =>
-    service.currentRequest()
-  );
   const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
-  const [confirmDeadlineMs, setConfirmDeadlineMs] = useState<number | null>(() =>
-    service.confirmDeadlineMs()
-  );
+  const [now, setNow] = useState<number>(() => Date.now());
   const feedTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -72,29 +70,23 @@ export function ProtocolPopupPage() {
   }, []);
 
   // 挂载时先装 message 监听，再启动会话；卸载时反向拆。
-  //
-  // 时序约束（施工单 001 公共语义）：
-  //   `ready` 必须只在 popup 监听安装完成后发出。否则 opener 收到 `ready`
-  //   立刻回 `request` 时，popup 还没开始监听，首条请求会丢。
-  //   因此这里坚持 "addEventListener → service.startSession()" 的顺序，
-  //   绝不能在监听未挂好前先 startSession（startSession 内部会立刻发 ready）。
   useEffect(() => {
     const offSnap = service.subscribe((next) => {
       console.debug("[protocol-popup] snapshot", {
         phase: next.phase,
         method: next.method,
         requestId: next.requestId,
-        boundOrigin: next.boundOrigin
+        boundOrigin: next.boundOrigin,
+        lockState: next.lockState
       });
       setSnap(next);
-      setRequest(service.currentRequest());
-      setConfirmDeadlineMs(service.confirmDeadlineMs());
     });
     const offFeed = service.subscribeFeed((next) => {
       console.debug("[protocol-popup] feed", {
         currentOrigin: next.currentOrigin,
         commandCount: next.commands.length,
-        historyAvailable: next.historyAvailable
+        historyAvailable: next.historyAvailable,
+        lockSummary: next.lockSummary
       });
       setFeed(next);
     });
@@ -106,8 +98,6 @@ export function ProtocolPopupPage() {
       });
       service.handleMessage(event);
     }
-    // 卸载 / 手工关闭 / 刷新路径上 best-effort 触发 `closing`，
-    // service 内部走幂等门禁。
     function onPageHide() {
       console.info("[protocol-popup] pagehide -> best-effort closing");
       service.pageUnloading?.();
@@ -116,12 +106,9 @@ export function ProtocolPopupPage() {
       console.info("[protocol-popup] beforeunload -> best-effort closing");
       service.pageUnloading?.();
     }
-    // 1. 先装 message 监听，再装 pagehide / beforeunload。
     window.addEventListener("message", onMessage);
     window.addEventListener("pagehide", onPageHide);
     window.addEventListener("beforeunload", onBeforeUnload);
-    // 2. 监听装好后再启动会话：startSession 内部会立刻 post `ready`，
-    //    现在 opener 收到的任何 `request` 都能被本监听捕获。
     service.startSession();
     return () => {
       console.info("[protocol-popup] unmount");
@@ -134,16 +121,38 @@ export function ProtocolPopupPage() {
     };
   }, [service]);
 
-  // 倒计时：只要 confirmDeadlineMs 非 null，就每秒触发一次 re-render 让
-  // UI 重新算"剩余秒数"。setInterval 仅用于 re-render 触发，**不**用作
-  // 超时触发器——超时真值在 service 内部用 wall-clock 比较 deadline。
+  /**
+   * vault 锁状态监听挂在父组件（施工单 2026-06-27 001 反馈修复）：
+   *
+   * 旧实现把监听放在 `LockScreenPage` 子组件里；解锁后切到主 popup 时
+   * `LockScreenPage` 卸载 → 监听消失 → 主页面状态下重新锁定时
+   * `setVaultLockState(true)` 不会再被调用 → `confirming -> waiting_unlock_manual`
+   * 的硬收口不会发生，也不会切回全页面锁屏。
+   *
+   * 现在监听挂在 `ProtocolPopupPage`，跨越 locked / unlocked 视图切换仍生效。
+   * LockScreenPage 里旧的 `useEffect(() => vault.onStatusChange(...))` 已
+   * 删除（避免重复监听）。
+   */
   useEffect(() => {
-    if (confirmDeadlineMs === null) return;
-    const id = setInterval(() => {
-      setConfirmDeadlineMs(service.confirmDeadlineMs());
-    }, 1000);
+    const vault = (service as unknown as { getVaultService?: () => VaultService }).getVaultService?.();
+    if (!vault) return;
+    return vault.onStatusChange((s) => {
+      if (s === "unlocked") {
+        (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(false);
+        void service.resumeAfterUnlock?.();
+      } else if (s === "locked") {
+        (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(true);
+      }
+    });
+  }, [service]);
+
+  // 倒计时：每秒触发一次 re-render，让确认卡内的"剩余秒数"自然滚动。
+  // setInterval 仅用于 re-render 触发，**不**用作超时触发器——超时真值
+  // 在 service 内部用 wall-clock 比较 deadline。
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [confirmDeadlineMs, service]);
+  }, []);
 
   // 新命令出现时自动滚回顶部。jsdom 不支持 scrollIntoView；显式检测
   // 后再调，避免单测报 `scrollIntoView is not a function`。
@@ -157,12 +166,17 @@ export function ProtocolPopupPage() {
     }
   }, [feed.commands.length, feed.currentOrigin]);
 
-  // 计算剩余秒数。clamp 到 >= 0；deadline 已过但 service 还在做 timeout
-  // 收尾的窗口期内 UI 仍能稳定显示 0。
-  const remainingSeconds = useMemo(() => {
-    if (confirmDeadlineMs === null) return null;
-    return Math.max(0, Math.ceil((confirmDeadlineMs - Date.now()) / 1000));
-  }, [confirmDeadlineMs]);
+  // 锁屏态分支：locked 时直接渲染锁屏页（不渲染顶栏 / 站点配置 / 命令流）。
+  if (snap.lockState === "locked") {
+    return (
+      <LockScreenPage
+        t={t}
+        service={service}
+        summary={feed.lockSummary}
+        now={now}
+      />
+    );
+  }
 
   return (
     <div className="protocol-popup">
@@ -172,7 +186,6 @@ export function ProtocolPopupPage() {
           <code>{feed.currentOrigin ?? t("protocol.topbar.origin.none", { defaultValue: "未绑定" })}</code>
         </span>
         <span className="protocol-popup__topbar-spacer" />
-        {/* ============== 施工单 001：钱包入口（独立新窗口跳转，不破坏 popup 会话） ============== */}
         <button
           type="button"
           className="protocol-popup__back-top"
@@ -223,10 +236,175 @@ export function ProtocolPopupPage() {
           feed={feed}
           service={service}
           snap={snap}
-          request={request}
-          remainingSeconds={remainingSeconds}
+          now={now}
         />
       </div>
+    </div>
+  );
+}
+
+/* ============== 锁屏页（施工单 2026-06-27 001 硬切换：全页面锁屏） ============== */
+
+/**
+ * 全页面锁屏：解锁表单 + 待处理概要。
+ *
+ * 设计缘由：
+ *   - 锁屏页**只**展示聚合信息（总数 / method 聚合 / 分类计数）。
+ *   - 不允许直接对具体 request 点确认 / 取消。
+ *   - 解锁成功后 service 自动批量推进所有 `waiting_unlock_*` request。
+ *   - 不显示命令流；命令流真值保留在 service 内存里，解锁后主页面直接渲染。
+ */
+function LockScreenPage({
+  t,
+  service,
+  summary,
+  now
+}: {
+  t: (k: string, v?: { defaultValue?: string; seconds?: number }) => string;
+  service: ProtocolService;
+  summary: ProtocolLockSummary | null;
+  now: number;
+}) {
+  const vault = useCapability<{
+    status(): "booting" | "uninitialized" | "locked" | "unlocked";
+    onStatusChange(handler: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void): () => void;
+    unlock(password: string): Promise<void>;
+  }>("vault.service");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // 关键：vault.onStatusChange 监听统一挂在父组件 `ProtocolPopupPage`，
+  // 这里**不**再重复挂监听——否则会双调用 setVaultLockState / resumeAfterUnlock，
+  // 旧实现下还会导致主页面状态下 relock 监听丢失。
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await vault.unlock(password);
+      // resumeAfterUnlock 由父组件的 vault.onStatusChange 触发；这里不显式调。
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("protocol.unlock.err.failed", { defaultValue: "解锁失败" }));
+    } finally {
+      setBusy(false);
+      setPassword("");
+    }
+  }
+
+  const total = summary?.pendingTotal ?? 0;
+  return (
+    <div className="protocol-popup protocol-popup--locked">
+      <div className="protocol-lockscreen">
+        <header className="protocol-lockscreen__header">
+          <h1 className="protocol-lockscreen__title">
+            {t("protocol.lockscreen.title", { defaultValue: "解锁后继续" })}
+          </h1>
+          <p className="protocol-lockscreen__desc">
+            {t("protocol.lockscreen.desc", {
+              defaultValue:
+                "Keymaster 正在锁定状态。当前站点已发出请求；解锁后会自动继续处理。"
+            })}
+          </p>
+        </header>
+        {summary ? (
+          <LockSummaryView t={t} summary={summary} now={now} />
+        ) : null}
+        <form onSubmit={submit} className="protocol-popup__form protocol-lockscreen__form">
+          <label className="origin-settings-panel__field">
+            <span className="origin-settings-panel__field-label">
+              {t("protocol.unlock.password", { defaultValue: "密码" })}
+            </span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.currentTarget.value)}
+              style={{ padding: "0.4rem 0.55rem", border: "1px solid var(--border-card, #e4e4e7)", borderRadius: 4 }}
+            />
+          </label>
+          {error ? (
+            <div className="origin-settings-panel__error">
+              <code>{error}</code>
+            </div>
+          ) : null}
+          <div className="protocol-popup__actions">
+            <button
+              type="submit"
+              className="protocol-popup__back-top"
+              disabled={busy || !password}
+            >
+              {t("protocol.unlock.submit", { defaultValue: "解锁" })}
+            </button>
+          </div>
+        </form>
+        <p className="protocol-lockscreen__hint">
+          {(() => {
+            const fallback = `解锁后，${total} 条待处理请求会自动进入确认 / 执行流程。`;
+            // i18n mock 不识别 `total` 字段；模板里有 {{total}} 占位符时
+            // 通过 defaultValue 注入数字（mock 的 t 会用 defaultValue）。
+            return t("protocol.lockscreen.unlockHint", {
+              defaultValue: fallback
+            });
+          })()}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 锁屏页的待处理概要视图。从 `ProtocolLockSummary` 派生展示。
+ */
+function LockSummaryView({
+  t,
+  summary,
+  now
+}: {
+  t: (k: string, v?: { defaultValue?: string; seconds?: number }) => string;
+  summary: ProtocolLockSummary;
+  now: number;
+}) {
+  void now;
+  return (
+    <div className="protocol-lockscreen__summary" role="region" aria-label="待处理概要">
+      <div className="protocol-lockscreen__summary-total">
+        <strong>{summary.pendingTotal}</strong>{" "}
+        <span>{t("protocol.lockscreen.pendingTotal", { defaultValue: "条待处理" })}</span>
+      </div>
+      <ul className="protocol-lockscreen__summary-list">
+        <li>
+          {t("protocol.lockscreen.manual", { defaultValue: "待解锁后人工确认" })}：{" "}
+          <code>{summary.waitingUnlockManual}</code>
+        </li>
+        <li>
+          {t("protocol.lockscreen.auto", { defaultValue: "解锁后自动执行" })}：{" "}
+          <code>{summary.waitingUnlockAuto}</code>
+        </li>
+        <li>
+          {t("protocol.lockscreen.queued", { defaultValue: "已确认待执行" })}：{" "}
+          <code>{summary.queued}</code>
+        </li>
+        <li>
+          {t("protocol.lockscreen.executing", { defaultValue: "执行中" })}：{" "}
+          <code>{summary.executing}</code>
+        </li>
+      </ul>
+      {summary.byMethod.length > 0 ? (
+        <div className="protocol-lockscreen__summary-methods">
+          <h2 className="protocol-lockscreen__summary-methods-title">
+            {t("protocol.lockscreen.byMethod", { defaultValue: "按 method 聚合" })}
+          </h2>
+          <ul className="protocol-lockscreen__summary-methods-list">
+            {summary.byMethod.map((m) => (
+              <li key={m.method}>
+                <code>{m.method}</code> × <code>{m.count}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -237,9 +415,7 @@ export function ProtocolPopupPage() {
  * popup 启动时如果 opener 缺失 / 不可用，service 会把 phase 推到 `error`。
  * 这不是某条 request 的错误，而是 session 级错误。
  *
- * 施工单 003 收口：popup 主体**不再保留**独立的"当前请求全页 overlay"，
- * 但 session-level 错误与 request-level 错误是两件事。本组件只是 feed
- * 上方一个紧凑的 banner，**不**是全页遮罩。
+ * 本组件只是 feed 上方一个紧凑的 banner，**不**是全页遮罩。
  */
 function SessionErrorBanner({
   t

@@ -2,7 +2,8 @@
 // popup 顶栏 inline 配置面板：编辑当前 origin 的 p2pkh auto-approve +
 // feepool auto-sign + identity / cipher auto-approve + 确认超时。
 //
-// 设计缘由（施工单 002 硬切换：即时生效 + 样式补全；施工单 003：confirmTimeoutSeconds）：
+// 设计缘由（施工单 002 硬切换：即时生效 + 样式补全；施工单 003：confirmTimeoutSeconds；
+// 施工单 2026-06-27 001：文案明确 timeout 仅作用于解锁后人工确认阶段）：
 //   - popup 是会话级长存；origin 切换时 settings 跟着重读。
 //   - 站点级配置**不**走 settings.registry（settings 路由是 per-user 全局
 //     设置；站点级是 per-origin per-popup-session）。
@@ -21,6 +22,9 @@
 //   - 简单 busy 门禁：提交过程中禁用所有可写字段，避免快速连击的边缘竞争；
 //     **不**引入事务模型、撤销栈、乐观队列、离线缓存。
 //   - 样式由 `styles.css` 的 `.origin-settings-panel*` 提供；本文件只管结构。
+//   - 文案（施工单 2026-06-27 001 硬切换）：明确 `confirmTimeoutSeconds`
+//     仅作用于"解锁后的人工确认阶段"。锁屏等待阶段不会计时；queued /
+//     executing 状态也不会被这个 timeout 命中。
 
 import { useEffect, useRef, useState } from "react";
 import { PageHeader } from "@keymaster/ui";
@@ -398,6 +402,12 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
             defaultValue: "确认超时（秒，默认 30）"
           })
         )}
+        <p className="origin-settings-panel__hint">
+          {t("protocol.originSettings.confirmTimeoutSeconds.help", {
+            defaultValue:
+              "该超时只作用于解锁后的人工确认阶段。锁屏等待阶段不计时；queued / executing 也不会被这个超时命中。"
+          })}
+        </p>
         {error ? (
           <div className="origin-settings-panel__error">
             <code>{error}</code>
