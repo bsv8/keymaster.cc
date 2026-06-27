@@ -83,14 +83,16 @@ function makeFakeService(): ProtocolService & {
     boundSource: null,
     boundOrigin: null,
     method: null,
-    requestId: null
+    requestId: null,
+    lockState: "unlocked"
   };
   const listeners = new Set<(s: ProtocolSessionSnapshot) => void>();
   const feedListeners = new Set<(s: ProtocolCommandFeedState) => void>();
   const feed: ProtocolCommandFeedState = {
     currentOrigin: null,
     commands: [],
-    historyAvailable: true
+    historyAvailable: true,
+    lockSummary: null
   };
   // 模拟真实 service：当前已绑定 request 时 `currentRequest()` 返回它，
   // 否则 null。让测试可以推进 confirming 状态。
@@ -151,7 +153,7 @@ function makeFakeService(): ProtocolService & {
       return this.feed.currentOrigin;
     },
     feedSnapshot() {
-      return { ...this.feed, commands: this.feed.commands.slice() };
+      return { ...this.feed, commands: this.feed.commands.slice(), lockSummary: this.feed.lockSummary };
     },
     subscribe(handler: (s: ProtocolSessionSnapshot) => void) {
       listeners.add(handler);
@@ -160,7 +162,7 @@ function makeFakeService(): ProtocolService & {
     },
     subscribeFeed(handler: (s: ProtocolCommandFeedState) => void) {
       feedListeners.add(handler);
-      handler({ ...this.feed, commands: this.feed.commands.slice() });
+      handler({ ...this.feed, commands: this.feed.commands.slice(), lockSummary: this.feed.lockSummary });
       return () => feedListeners.delete(handler);
     },
     snapshot() {
@@ -172,7 +174,16 @@ function makeFakeService(): ProtocolService & {
     getOriginSettings: async () => null,
     setOriginSettings: async () => undefined,
     confirmDeadlineMs: () => null,
-    setSystemSettings: async () => undefined
+    setSystemSettings: async () => undefined,
+    lockState: () => "unlocked" as const,
+    lockSummarySnapshot: () => null,
+    // Mock vault service —— 测试仅要求接口存在，不实际触发状态变化。
+    getVaultService: (() => ({
+      status: () => "unlocked" as const,
+      onStatusChange: (_h: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void) => () => undefined,
+      unlock: async () => undefined
+    })) as unknown as ProtocolService["getVaultService"],
+    setVaultLockState: () => undefined
   };
   return svc;
 }
@@ -264,7 +275,8 @@ describe("ProtocolPopupPage", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = newFeed;
@@ -283,7 +295,8 @@ describe("ProtocolPopupPage", () => {
     const noHistoryFeed: ProtocolCommandFeedState = {
       currentOrigin: "https://demo.example",
       commands: [],
-      historyAvailable: false
+      historyAvailable: false,
+        lockSummary: null
     };
     act(() => {
       service.feed = noHistoryFeed;
@@ -322,9 +335,9 @@ describe("ProtocolPopupPage", () => {
           origin: "https://demo.example",
           requestId: "r-1",
           method: "identity.get",
-          phase: "waiting_confirm",
+          phase: "confirming",
           decision: "pending",
-          status: "waiting_confirm",
+          status: "confirming",
           textSummary: "live",
           claimsSummary: [],
           contentType: "",
@@ -337,7 +350,8 @@ describe("ProtocolPopupPage", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = liveFeed;
@@ -350,7 +364,7 @@ describe("ProtocolPopupPage", () => {
       boundOrigin: "https://demo.example",
       method: "identity.get",
       requestId: "r-1"
-    };
+    , lockState: "unlocked" };
     act(() => {
       for (const l of service.listeners) l(confirming);
     });
@@ -363,7 +377,7 @@ describe("ProtocolPopupPage", () => {
       boundOrigin: "https://demo.example",
       method: null,
       requestId: null
-    };
+    , lockState: "unlocked" };
     act(() => {
       for (const l of service.listeners) l(waiting);
     });
@@ -413,7 +427,7 @@ describe("ProtocolPopupPage", () => {
           origin: "https://demo.example",
           requestId: "r-unlock",
           method: "identity.get",
-          phase: "waiting_unlock",
+          phase: "waiting_unlock_manual",
           decision: "pending",
           status: "waiting_unlock",
           textSummary: "unlock",
@@ -428,7 +442,8 @@ describe("ProtocolPopupPage", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = unlockFeed;
@@ -440,7 +455,7 @@ describe("ProtocolPopupPage", () => {
       boundOrigin: "https://demo.example",
       method: "identity.get",
       requestId: "r-unlock"
-    };
+    , lockState: "unlocked" };
     act(() => {
       for (const l of service.listeners) l(unlocking);
     });
@@ -512,7 +527,8 @@ describe("ProtocolPopupPage topbar origin settings", () => {
       service.feed = {
         currentOrigin: "https://demo.example",
         commands: [],
-        historyAvailable: true
+        historyAvailable: true,
+        lockSummary: null
       };
       for (const l of service.feedListeners) l({ ...service.feed });
     });
@@ -550,7 +566,8 @@ describe("ProtocolPopupPage topbar origin settings", () => {
       service.feed = {
         currentOrigin: "https://demo.example",
         commands: [],
-        historyAvailable: true
+        historyAvailable: true,
+        lockSummary: null
       };
       for (const l of service.feedListeners) l({ ...service.feed });
     });
@@ -591,7 +608,7 @@ describe("ProtocolPopupPage auto-approve skip", () => {
       boundOrigin: "https://demo.example",
       method: "p2pkh.transfer",
       requestId: "r-auto"
-    };
+    , lockState: "unlocked" };
     act(() => {
       for (const l of service.listeners) l(executing);
     });
@@ -626,9 +643,9 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           origin: "https://demo.example",
           requestId: "r-live",
           method: "identity.get",
-          phase: "waiting_confirm",
+          phase: "confirming",
           decision: "pending",
-          status: "waiting_confirm",
+          status: "confirming",
           textSummary: "live",
           claimsSummary: [],
           contentType: "",
@@ -641,7 +658,8 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = liveFeed;
@@ -653,7 +671,7 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
       boundOrigin: "https://demo.example",
       method: "identity.get",
       requestId: "r-live"
-    };
+    , lockState: "unlocked" };
     act(() => {
       for (const l of service.listeners) l(confirming);
     });
@@ -688,7 +706,7 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           origin: "https://demo.example",
           requestId: "r-unlock",
           method: "identity.get",
-          phase: "waiting_unlock",
+          phase: "waiting_unlock_manual",
           decision: "pending",
           status: "waiting_unlock",
           textSummary: "unlock",
@@ -703,7 +721,8 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = unlockFeed;
@@ -715,7 +734,7 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
       boundOrigin: "https://demo.example",
       method: "identity.get",
       requestId: "r-unlock"
-    };
+    , lockState: "unlocked" };
     act(() => {
       for (const l of service.listeners) l(unlocking);
     });
@@ -755,7 +774,8 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           failureReason: "request_timeout"
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = feed;
@@ -787,7 +807,7 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
       boundOrigin: "https://demo.example",
       method: "identity.get",
       requestId: "r-cd"
-    };
+    , lockState: "unlocked" };
     service.setCurrentRequest({
       id: "r-cd",
       method: "identity.get",
@@ -801,9 +821,9 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           origin: "https://demo.example",
           requestId: "r-cd",
           method: "identity.get",
-          phase: "waiting_confirm",
+          phase: "confirming",
           decision: "pending",
-          status: "waiting_confirm",
+          status: "confirming",
           textSummary: "cd",
           claimsSummary: [],
           contentType: "",
@@ -816,7 +836,8 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: true
+      historyAvailable: true,
+        lockSummary: null
     };
     act(() => {
       service.feed = liveFeed;
@@ -853,9 +874,9 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           origin: "https://demo.example",
           requestId: "r-live",
           method: "identity.get",
-          phase: "waiting_confirm",
+          phase: "confirming",
           decision: "pending",
-          status: "waiting_confirm",
+          status: "confirming",
           textSummary: "live",
           claimsSummary: [],
           contentType: "",
@@ -868,7 +889,8 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
           errorMessage: ""
         }
       ],
-      historyAvailable: false
+      historyAvailable: false,
+        lockSummary: null
     };
     act(() => {
       service.feed = feed;

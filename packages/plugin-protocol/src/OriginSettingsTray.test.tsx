@@ -55,7 +55,45 @@ function makeMockService(): MockService {
     async setOriginSettings(record) {
       calls.push(record);
       return this.setOriginSettingsImpl(record);
-    }
+    },
+    // 兼容完整 ProtocolService 接口（施工单 2026-06-27 001 后增字段）。
+    startSession: () => undefined,
+    endSession: () => undefined,
+    handleMessage: () => undefined,
+    confirmByUser: async () => undefined,
+    rejectByUser: async () => undefined,
+    resumeAfterUnlock: () => undefined,
+    pageUnloading: () => undefined,
+    currentRequest: () => null,
+    currentRequestAutoApproved: () => false,
+    subscribe: () => () => undefined,
+    snapshot: () => ({
+      phase: "waiting" as const,
+      boundSource: null,
+      boundOrigin: null,
+      method: null,
+      requestId: null,
+      lockState: "unlocked" as const
+    }),
+    currentOrigin: () => null,
+    feedSnapshot: () => ({
+      currentOrigin: null,
+      commands: [],
+      historyAvailable: true,
+      lockSummary: null
+    }),
+    subscribeFeed: () => () => undefined,
+    confirmDeadlineMs: () => null,
+    lockState: () => "unlocked" as const,
+    lockSummarySnapshot: () => null,
+    // 测试不直接用 vault；MockService 只需要 getVaultService 接口存在。
+    // 用最小骨架 + 类型断言避免触发 VaultService 全字段检查。
+    getVaultService: (() => ({
+      status: () => "unlocked" as const,
+      onStatusChange: (_h: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void) => () => undefined,
+      unlock: async () => undefined
+    })) as unknown as MockService["getVaultService"],
+    setVaultLockState: () => undefined
   };
   return svc;
 }
@@ -181,7 +219,7 @@ describe("OriginSettingsTray — 复选框即时提交（施工单 002）", () =
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0].p2pkhAutoApproveEnabled).toBe(true);
+    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveEnabled).toBe(true);
   });
 
   it("rolls back checkbox state when setOriginSettings rejects", async () => {
@@ -250,7 +288,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0].p2pkhAutoApproveMaxSatoshis).toBe(123);
+    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveMaxSatoshis).toBe(123);
   });
 
   it("submits on Enter key in number input", async () => {
@@ -282,7 +320,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0].p2pkhAutoApproveMaxSatoshis).toBe(456);
+    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveMaxSatoshis).toBe(456);
   });
 
   it("rolls back number input value when submission rejects", async () => {
@@ -348,7 +386,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0].p2pkhAutoApproveMaxSatoshis).toBe(1);
+    expect(service.setOriginSettingsCalls[0]!.p2pkhAutoApproveMaxSatoshis).toBe(1);
     // 再输入负数 → 规范化为 0 → 提交 0。
     await act(async () => {
       fireEvent.change(input, { target: { value: "-5" } });
@@ -357,7 +395,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(2);
-    expect(service.setOriginSettingsCalls[1].p2pkhAutoApproveMaxSatoshis).toBe(0);
+    expect(service.setOriginSettingsCalls[1]!.p2pkhAutoApproveMaxSatoshis).toBe(0);
     expect(input.value).toBe("0");
   });
 
@@ -718,7 +756,7 @@ describe("OriginSettingsTray — confirmTimeoutSeconds (003)", () => {
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0].confirmTimeoutSeconds).toBe(15);
+    expect(service.setOriginSettingsCalls[0]!.confirmTimeoutSeconds).toBe(15);
   });
 
   it("空串 / 0 / 负数 / 非整数 → 规范化 30 并落库", async () => {
@@ -749,7 +787,7 @@ describe("OriginSettingsTray — confirmTimeoutSeconds (003)", () => {
       await flushMicrotasks();
     });
     expect(service.setOriginSettingsCalls.length).toBe(1);
-    expect(service.setOriginSettingsCalls[0].confirmTimeoutSeconds).toBe(30);
+    expect(service.setOriginSettingsCalls[0]!.confirmTimeoutSeconds).toBe(30);
     expect(input.value).toBe("30");
   });
 });
