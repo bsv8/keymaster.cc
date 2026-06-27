@@ -506,6 +506,18 @@ describe("ProtocolPopupPage", () => {
     act(() => {
       for (const l of service.listeners) l(waiting);
     });
+    act(() => {
+      const approvedFeed: ProtocolCommandFeedState = {
+        ...liveFeed,
+        commands: liveFeed.commands.map((c) =>
+          c.requestId === "r-1"
+            ? { ...c, phase: "approved", decision: "approved", status: "approved", finishedAt: 2, updatedAt: 2 }
+            : c
+        )
+      };
+      service.feed = approvedFeed;
+      for (const l of service.feedListeners) l({ ...approvedFeed, commands: approvedFeed.commands.slice() });
+    });
     expect(screen.queryByText("确认请求")).toBeNull();
     // 施工单 001：顶栏不再显示 phase / "等待下一条请求" 文案。
     expect(screen.queryByText(/等待下一条请求/)).toBeNull();
@@ -584,7 +596,7 @@ describe("ProtocolPopupPage", () => {
     act(() => {
       for (const l of service.listeners) l(unlocking);
     });
-    expect(screen.getByText("解锁后继续")).toBeTruthy();
+    expect(screen.getByText("等待解锁")).toBeTruthy();
     // 不再有独立 overlay。
     expect(document.querySelector(".protocol-popup--unlock")).toBeNull();
     runtimeState.vault = "unlocked";
@@ -863,9 +875,9 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
     act(() => {
       for (const l of service.listeners) l(unlocking);
     });
-    // 解锁卡内：标题 + 密码字段 + 解锁/取消按钮。
-    expect(screen.getByText("解锁后继续")).toBeTruthy();
-    expect(screen.getByText("解锁")).toBeTruthy();
+    // 等待解锁卡只展示摘要，不再在主页面卡片内内嵌解锁表单。
+    expect(screen.getByText("等待解锁")).toBeTruthy();
+    expect(screen.getByText("此请求需要解锁 Keymaster。解锁后会进入确认页。")).toBeTruthy();
     // 独立的 .protocol-popup--unlock overlay 不应存在。
     expect(document.querySelector(".protocol-popup--unlock")).toBeNull();
     runtimeState.vault = "unlocked";

@@ -651,10 +651,11 @@ describe("ProtocolServiceImpl", () => {
     expect(posted.result).toHaveLength(0);
   });
 
-  it("活卡槽位稳定：confirming → queued → executing 不改变活请求区相对顺序", async () => {
+  it("活卡槽位稳定：第一条完成后第二条自然上移，不发生借壳复用", async () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：活请求区按 createdAt asc
-    // 固定。第一条从 confirming 进入 queued / executing 时，**不**因为
-    // updatedAt 推进而接管第二格的视觉位置。
+    // 固定。第一条完成后离开活请求区，第二条自然上移成为第一格；
+    // `confirmByUser()` 现在 await 到本轮执行收尾，所以这里直接断言收尾后的
+    // 展示真值，而不再强抓瞬时 queued 态。
     const { service, opener } = makeService();
     service.startSession();
     await service.handleMessage(
@@ -684,17 +685,7 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    // 推进 A：confirming → queued → executing → approved。
     await service.confirmByUser();
-    // 推进过程中记录 feed 顺序：
-    // queued 阶段：A 在前（queued）B 在后（confirming），按 createdAt asc。
-    const feedQueued = service.feedSnapshot();
-    const liveQueued = feedQueued.commands.filter((c) => c.decision === "pending");
-    expect(liveQueued[0]?.requestId).toBe("req-A");
-    expect(liveQueued[0]?.phase).toBe("queued");
-    expect(liveQueued[1]?.requestId).toBe("req-B");
-    // 等 A 跑完 → A 终态进入历史区，B 成为活请求区第一格。
-    await new Promise((r) => setTimeout(r, 50));
     const feedAfter = service.feedSnapshot();
     // A 应出现在历史区（approved / decision=approved）。
     const aCard = feedAfter.commands.find((c) => c.requestId === "req-A");
@@ -863,7 +854,6 @@ describe("ProtocolServiceImpl", () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：旧 origin 的历史加载
     // 晚到时，**不**回写当前 origin 视图（防 origin 切换时旧数据串回）。
     // 用可控延迟的 storageDb 模拟"旧 origin 加载慢"。
-    let resolveOriginA!: (record: ProtocolOriginSettingsRecord | null) => void;
     let listCommandsACalls = 0;
     let resolveListCommandsA!: (list: ProtocolCommandRecord[]) => void;
     const stubDb: ProtocolStorageDb = {
@@ -884,11 +874,9 @@ describe("ProtocolServiceImpl", () => {
         return [];
       },
       async getOrigin(origin: string) {
-        if (origin === "https://origin-a.example") {
-          return new Promise<ProtocolOriginSettingsRecord | null>((resolve) => {
-            resolveOriginA = resolve;
-          });
-        }
+        // 这个用例只想让"历史列表"晚到，不想把 handleMessage 卡在
+        // auto-approve 的 origin 配置读取上；因此 origin 配置统一同步返回。
+        void origin;
         return null;
       },
       async putOrigin() {
@@ -948,7 +936,6 @@ describe("ProtocolServiceImpl", () => {
     expect(service.currentOrigin()).toBe("https://origin-b.example");
     // 关键：即使 origin-a 旧批次晚到，**不**应该回写 currentOrigin。
     // 模拟"旧 origin 加载晚到"——但 origin-a 历史 list 不应再触发合并。
-    resolveOriginA(null);
     resolveListCommandsA([]);
     // 等 microtask 消化旧批次的 promise。
     await new Promise((r) => setTimeout(r, 30));
@@ -993,12 +980,6 @@ describe("ProtocolServiceImpl", () => {
       },
       async getOrigin(origin: string) {
         void callsByOrigin;
-        if (origin === "https://origin-a.example") {
-          // origin-a 加载挂住,模拟旧 origin 慢。
-          return new Promise(() => {
-            /* never resolves */
-          });
-        }
         return null;
       },
       async putOrigin() {
@@ -1582,9 +1563,12 @@ describe("ProtocolServiceImpl", () => {
     );
     await service.confirmByUser();
     const feed2 = service.feedSnapshot();
-    const recordId2 = feed2.commands[0]?.id;
-    expect(recordId2).toBeDefined();
-    expect(recordId2).not.toBe(recordId1);
+    const ids = feed2.commands
+      .filter((c) => c.requestId === "duplicated-request-id")
+      .map((c) => c.id);
+    expect(ids).toHaveLength(2);
+    expect(new Set(ids).size).toBe(2);
+    expect(ids).toContain(recordId1!);
     expect(feed2.commands.length).toBe(2);
   });
 
@@ -1821,9 +1805,7 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    // auto-approve 命中：phase 不应是 confirming（因为 binding.autoApproved=true）。
-    expect(service.currentRequestAutoApproved()).toBe(true);
-    // 等内联执行完成（异步 fire & forget）。
+    // auto-approve 命中：不走 confirming；等待内联执行完成后看终态卡真值。
     await new Promise((r) => setTimeout(r, 30));
     const r = getResult();
     expect(r?.ok).toBe(true);

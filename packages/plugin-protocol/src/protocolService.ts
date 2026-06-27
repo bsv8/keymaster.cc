@@ -634,7 +634,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.executionQueue.push(rec.recordId);
     this.emit();
     this.emitFeed();
-    void this.drainExecutionQueue();
+    await this.drainExecutionQueue();
   }
 
   /**
@@ -791,7 +791,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   private snapshotInternal(): ProtocolSessionSnapshot {
     const rec = this.firstAliveRequest();
     return {
-      phase: this.phase,
+      phase: this.snapshotPhaseFromRequests(),
       boundSource: rec?.source ?? null,
       boundOrigin: rec?.origin ?? null,
       method: rec?.method ?? null,
@@ -2225,6 +2225,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private makeCommandRecord(rec: RequestRecord, activePublicKeyHex: string): ProtocolCommandRecord {
     const isTerminal = this.isTerminalPhase(rec.phase);
+    const prev = this.feedCommands.find((c) => c.id === rec.recordId);
     const status =
       rec.phase === "timed_out"
         ? "timed_out"
@@ -2258,8 +2259,20 @@ export class ProtocolServiceImpl implements ProtocolService {
       finishedAt: rec.finishedAt,
       errorCode: rec.errorCode,
       errorMessage: rec.errorMessage,
+      ...(this.summarizeRecipientAddress(rec.params)
+        ? { recipientAddress: this.summarizeRecipientAddress(rec.params) }
+        : {}),
+      ...(this.summarizeAmountSatoshis(rec.params) !== null
+        ? { amountSatoshis: this.summarizeAmountSatoshis(rec.params)! }
+        : {}),
+      ...(this.summarizeCounterpartyPublicKeyHex(rec.params)
+        ? { counterpartyPublicKeyHex: this.summarizeCounterpartyPublicKeyHex(rec.params) }
+        : {}),
+      ...(prev?.action ? { action: prev.action } : {}),
+      ...(prev?.operationId ? { operationId: prev.operationId } : {}),
       ...(rec.failureReason !== undefined ? { failureReason: rec.failureReason } : {}),
-      ...(rec.autoApproved ? { autoApproved: true } : {})
+      // 显式写布尔，避免手动确认路径在重建卡片时把 false 折叠成 undefined。
+      autoApproved: rec.autoApproved
     };
   }
 
@@ -2435,6 +2448,21 @@ export class ProtocolServiceImpl implements ProtocolService {
       return p.cipherbytes.bytes.byteLength;
     }
     return 0;
+  }
+
+  private summarizeRecipientAddress(params: MethodParams<ProtocolMethod>): string {
+    const p = params as { recipientAddress?: unknown };
+    return typeof p.recipientAddress === "string" ? p.recipientAddress : "";
+  }
+
+  private summarizeAmountSatoshis(params: MethodParams<ProtocolMethod>): number | null {
+    const p = params as { amountSatoshis?: unknown };
+    return typeof p.amountSatoshis === "number" ? p.amountSatoshis : null;
+  }
+
+  private summarizeCounterpartyPublicKeyHex(params: MethodParams<ProtocolMethod>): string {
+    const p = params as { counterpartyPublicKeyHex?: unknown };
+    return typeof p.counterpartyPublicKeyHex === "string" ? p.counterpartyPublicKeyHex : "";
   }
 
   /* ============== 工具：查找 / 状态 ============== */
