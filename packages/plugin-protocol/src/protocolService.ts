@@ -2274,6 +2274,11 @@ export class ProtocolServiceImpl implements ProtocolService {
   private persistRecord(record: ProtocolCommandRecord): void {
     const db = this.deps.storageDb;
     if (!db) return;
+    // 施工单 2026-06-27 001/002 明确：活请求只存在于当前 popup 会话内存，
+    // popup 刷新 / 关闭后不做会话级活卡恢复。因此 IndexedDB 只持久化终态；
+    // 中间态（waiting_unlock_* / confirming / queued / executing）即便误写，
+    // 也只会制造"UI 看起来有活卡，但内存里已经没有 request"的脏状态。
+    if (!this.isTerminalPhase(record.phase)) return;
     void db.putCommand(record).catch((err) => {
       console.error("[protocol.storageDb] persistRecord failed", {
         id: record.id,
@@ -2297,6 +2302,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     全局 `currentOriginValue` 判断复用（否则切到 B 时复用 A 的 in-flight）。
    *   - 加载完成后，按 recordId 合并 DB 历史 + 内存活记录，**同 id 以
    *     内存活记录为准**；DB 旧字段不允许覆盖当前内存里的活卡。
+   *   - DB 里若残留旧版本误写进去的中间态 record（confirming /
+   *     waiting_unlock_* / queued / executing），本轮直接忽略：活请求
+   *     只能来自当前 popup 会话内存，不能跨会话从 DB "复活"。
    *   - 合并完成后用 `buildFeedDisplay` 重建展示投影（活请求区
    *     createdAt asc + 历史区 updatedAt desc）。
    *   - 加载完成 / 失败时检查 `currentOriginValue === origin`：如果当前
@@ -2341,7 +2349,10 @@ export class ProtocolServiceImpl implements ProtocolService {
         }
         // 按 recordId 合并：内存活记录优先覆盖 DB 旧记录。
         const mergedById = new Map<string, ProtocolCommandRecord>();
-        for (const c of list) mergedById.set(c.id, c);
+        for (const c of list) {
+          if (!this.isTerminalPhase(c.phase)) continue;
+          mergedById.set(c.id, c);
+        }
         for (const rec of this.requestsByRecordId.values()) {
           if (rec.origin !== origin) continue;
           const card = this.makeCommandRecord(rec, rec.activePublicKeyHex);

@@ -784,6 +784,81 @@ describe("ProtocolServiceImpl", () => {
     expect(cardA?.textSummary).not.toBe("stale-approved");
   });
 
+  it("中间态 request 不落库；终态后才进入历史持久化", async () => {
+    const { service, opener, storageDb } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "persist-after-terminal",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "persist-me" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // request 进入 confirming，但 DB 历史仍应为空：活请求只存在于当前会话内存。
+    const beforeConfirm = await storageDb.listCommandsByOrigin(ORIGIN);
+    expect(beforeConfirm.find((c) => c.requestId === "persist-after-terminal")).toBeUndefined();
+
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    const afterConfirm = await storageDb.listCommandsByOrigin(ORIGIN);
+    const persisted = afterConfirm.find((c) => c.requestId === "persist-after-terminal");
+    expect(persisted).toBeDefined();
+    expect(persisted?.phase).toBe("approved");
+    expect(persisted?.decision).toBe("approved");
+  });
+
+  it("loadHistoryForOrigin 忽略 DB 残留的中间态脏卡", async () => {
+    // 回归这次线上问题：旧版本把 confirming 写进 DB；新 popup 会话收到
+    // 同 origin 新请求后，历史加载不能把这条旧活卡重新展示成可交互 live card。
+    const { service, opener, storageDb } = makeService();
+    await storageDb.putCommand({
+      id: "stale-confirming-from-db",
+      origin: ORIGIN,
+      requestId: "stale-confirming-from-db",
+      method: "cipher.decrypt",
+      phase: "confirming",
+      decision: "pending",
+      status: "confirming",
+      textSummary: "stale live card",
+      claimsSummary: [],
+      contentType: "",
+      payloadSize: 66,
+      activePublicKeyHex: TEST_PUB_HEX,
+      createdAt: 10,
+      updatedAt: 20,
+      finishedAt: 0,
+      errorCode: "",
+      errorMessage: ""
+    });
+
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "fresh-live",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "fresh live request" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 50));
+
+    const feed = service.feedSnapshot();
+    expect(feed.commands.find((c) => c.id === "stale-confirming-from-db")).toBeUndefined();
+    expect(feed.commands.some((c) => c.requestId === "fresh-live" && c.phase === "confirming")).toBe(true);
+    expect(feed.commands.filter((c) => c.decision === "pending")).toHaveLength(1);
+  });
+
   it("切换 origin 时旧批次历史加载结果不会覆盖新 origin 视图", async () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：旧 origin 的历史加载
     // 晚到时，**不**回写当前 origin 视图（防 origin 切换时旧数据串回）。
