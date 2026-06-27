@@ -31,6 +31,8 @@
  * 只是为了让"这是二进制内容"在对象层有显式标记，避免调用方误把
  * base64 / hex 字符串塞进协议层。
  */
+import type { VaultService } from "./vault.js";
+
 export interface BinaryField {
   /** 固定 "binary"。缺省 / 其它值一律拒绝。 */
   $type: "binary";
@@ -687,14 +689,34 @@ export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends 
  *
  * 历史 DB 持久化的是 `ProtocolCommandRecord.phase` / `status` /
  * `decision` 三个收敛点；中间态只在内存里走，不一定都落库。
+ *
+ * 设计缘由（施工单 2026-06-27 001 硬切换：锁屏 + 多 request 并存 +
+ * 串行执行）：
+ *   - request 状态独立于"会话锁状态"（`ProtocolPopupLockState`），不再
+ *     共享一个中心 phase；这样 manual / auto 在锁屏时分别落到不同的
+ *     `waiting_unlock_*` 状态，互不干扰。
+ *   - 引入 `waiting_unlock_manual` / `waiting_unlock_auto` 两种"等待
+ *     解锁"状态：manual 等解锁后继续走 manual confirm 路径；
+ *     `waiting_unlock_auto` 等解锁后跳过 confirming 直接进入 queued。
+ *   - 引入 `queued`：用户已确认、待执行；`executing` 是当前唯一正在
+ *     执行的一条。queued 是 FIFO 等待。
+ *   - `timed_out` 是"超时"专用终态，与 `failed` 平级但 `status` 字段
+ *     单独区分。
+ *   - 兼容旧 `waiting_unlock` / `waiting_confirm`：保留作为 alias，
+ *     让 DB 旧记录仍能被新逻辑识别。
  */
 export type ProtocolCommandPhase =
   | "waiting_unlock"
+  | "waiting_unlock_manual"
+  | "waiting_unlock_auto"
   | "waiting_confirm"
+  | "confirming"
+  | "queued"
   | "executing"
   | "approved"
   | "rejected"
-  | "failed";
+  | "failed"
+  | "timed_out";
 
 /** 命令终态判定。中间态：waiting_unlock / waiting_confirm / executing。 */
 export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "failed";
@@ -784,6 +806,12 @@ export interface ProtocolCommandRecord {
  *
  * service 维护的内部状态：每条合法 request 进入时按 `event.origin`
  * 重新载入历史；feed 列表按 `updatedAt desc` 排序。
+ *
+ * 设计缘由（施工单 2026-06-27 001 硬切换）：
+ *   - 加 `lockSummary` 字段给锁屏页提供聚合视图；该字段是从
+ *     `commands` 派生出来的，**不**是另一份可变状态。
+ *   - `lockSummary` 字段在 unlocked 时是 null；锁屏页不读 commands 走
+ *     自己摘要，命令流仍以 commands 为真相源。
  */
 export interface ProtocolCommandFeedState {
   /** 当前 popup 服务的 exact origin；未收到第一条 request 时为 null。 */
@@ -792,7 +820,46 @@ export interface ProtocolCommandFeedState {
   commands: ProtocolCommandRecord[];
   /** DB 读 / 写是否可用；false 时 UI 顶部显示"历史不可用"。 */
   historyAvailable: boolean;
+  /** 锁屏页用的待处理摘要；从 commands 派生；unlocked 时为 null。 */
+  lockSummary: ProtocolLockSummary | null;
 }
+
+/**
+ * 锁屏页用的待处理摘要（施工单 2026-06-27 001 硬切换）。
+ *
+ * 设计缘由：
+ *   - 不维护第二份可变状态；它由 service 从 `ProtocolCommandFeedState.commands`
+ *     在 `feedSnapshot()` / `lockSummarySnapshot()` 调用时刻聚合。
+ *   - `byMethod` 用 method 名做 key，value 是该方法在当前未终态记录里
+ *     出现的次数；与历史终态记录无关。
+ *   - `counts` 给出按"分类"聚合的数字（manual / auto / queued / executing），
+ *     锁屏页可按需展示。
+ */
+export interface ProtocolLockSummary {
+  /** 当前未终态（`waiting_unlock_*` / `confirming` / `queued` / `executing`）总数。 */
+  pendingTotal: number;
+  /** 待解锁后人工确认的 request 数。 */
+  waitingUnlockManual: number;
+  /** 解锁后自动执行的 request 数。 */
+  waitingUnlockAuto: number;
+  /** 已确认待执行的 request 数。 */
+  queued: number;
+  /** 当前正在执行的 request 数（同一时刻最多 1）。 */
+  executing: number;
+  /** 按 method 聚合的待处理数。 */
+  byMethod: Array<{ method: ProtocolMethod; count: number }>;
+}
+
+/**
+ * 锁屏摘要对外只读查询接口（施工单 2026-06-27 001 硬切换）。
+ *
+ * 与 `feedSnapshot()` 的关系：
+ *   - `feedSnapshot().lockSummary` 在 locked 时是该摘要，unlocked 时为 null；
+ *     这是 UI 锁屏页首选入口。
+ *   - `lockSummarySnapshot()` 是 service 暴露的独立只读 getter，行为与
+ *     `feedSnapshot().lockSummary` 一致；调用方择一即可。
+ */
+export type ProtocolPopupLockState = "locked" | "unlocked";
 
 /**
  * 命令流 DB capability key。manifest 在 setup 阶段 provide；
@@ -867,6 +934,15 @@ export interface ProtocolStorageDb {
  * - `error`     : 终态：协议层面发生不可恢复错误（opener 缺失、解析失败等）。
  *
  * UI 不允许自己再发明"中间态"。任何 UI 上的等待展示都映射回这六态之一。
+ *
+ * 设计缘由（施工单 2026-06-27 001 硬切换）：
+ *   - `phase` 与 `lockState` **不**再一一对应：`phase === "unlocking"`
+ *     现在表示"已绑定 request 且 vault 处于 locked"，但在多 request
+ *     模型下，没有"当前绑定 request"概念（多条 request 各自状态），
+ *     所以 `phase` 主要是为了**兼容旧 UI 路径**，新代码应优先用
+ *     `lockState` + 每条 command 的 `phase` 字段。
+ *   - `unlocking` 之后多个 request 各自处于 `waiting_unlock_*`；
+ *     解锁后才批量推进到 `confirming` / `queued`。
  */
 export type ProtocolSessionPhase =
   | "waiting"
@@ -887,6 +963,15 @@ export interface ProtocolSessionSnapshot {
   method: ProtocolMethod | null;
   /** 已绑定 request 的 id（绑定前为 null）。 */
   requestId: string | null;
+  /**
+   * 当前会话级锁状态（施工单 2026-06-27 001 硬切换）。
+   * - `unlocked` → 进入主 popup 页面（顶栏 + 命令流 + 站点配置）；
+   * - `locked`   → 全页锁屏页（解锁表单 + 待处理摘要）。
+   *
+   * 注意：`phase` 与 `lockState` 是两层语义；不允许把 phase 改写
+   * 成 lockState，也不允许把 lockState 合并进 phase。
+   */
+  lockState: ProtocolPopupLockState;
 }
 
 /* ============== capability ============== */
@@ -960,55 +1045,56 @@ export interface P2pkhProtocolAdapter {
 export interface ProtocolService {
   /**
    * 启动一个 popup 会话。同一 service 实例允许多次启动会话（每次都重置
-   * 内部状态），但**一次只处理一个 request**。调用方在 popup 加载时
-   * 调用一次；之后由 service 自己维护 ready / bind / state。
+   * 内部状态）。调用方在 popup 加载时调用一次；之后由 service 自己维护
+   * ready / bind / state。
+   *
+   * 设计缘由（施工单 2026-06-27 001 硬切换）：现在 service 内部用
+   * "request store + execution queue" 模型，**不**再有"全局单 active
+   * request"概念。`startSession()` 不再绑定任何 request，只重置 lockState
+   * 与内存数据结构。
    */
   startSession(): void;
   /**
    * 关闭当前会话并清理内部状态。UI 在用户关闭 popup / 主动取消时调用。
-   * 同时清空 feepool pendingOps（operationId 立即失效）。
+   * 同时清空 feepool pendingOps（operationId 立即失效），并把所有未终态
+   * request 强制收尾为 rejected（best-effort，不回 result 给 opener）。
    */
   endSession(): void;
   /**
    * 接收来自 `window.message` 的事件。UI 监听 message 事件后转发给
    * service。
    *
-   * 返回类型 `void | Promise<void>`：identity / cipher cache miss 路径
-   * 需要先 `await getOriginSettingsCached` 决定 setPhase,内部 `async`
-   * 实现。调用者可以 sync 调用(不 await)也可以 await。listener 端常
-   * 用 sync 调;test 路径必须 await 以确保 setPhase 已落定（cache
-   * miss 时 phase 不会先经 confirming 再被翻案）。
+   * 行为（施工单 2026-06-27 001 硬切换）：
+   *   - 收到 `cancel` 时按 `source + origin + cancel.id` 命中具体 request；
+   *     命中后该 request 立即收尾（对外仍回原 request 的 user_rejected）。
+   *   - 收到 `request` 时按 `source + origin + requestId` 去重：同 key 已
+   *     有未终态记录则直接拒绝（不覆盖、不入队、不回 result）。否则建
+   *     立新 request 记录，并按 lockState + auto-approve 决定初始 phase。
    */
   handleMessage(event: MessageEvent): void | Promise<void>;
   /**
-   * 用户在确认页点击"确认"。service 收到后开始执行方法。
+   * 用户在确认页点击"确认"。service 收到后把对应 request 从 `confirming`
+   * 推进到 `queued`，再触发全局串行执行。
+   *
+   * 兼容旧 UI：未传 recordId 时取"当前最新一张 confirming 卡片"。新 UI
+   * 应**始终**传 recordId。
    */
-  confirmByUser(): Promise<void>;
+  confirmByUser(recordId?: string): Promise<void>;
   /**
    * 用户在确认页或解锁页点击"取消"。service 立即向 opener 回
-   * `user_rejected`。
+   * `user_rejected`；request 进入 `rejected` 终态。
+   *
+   * 兼容旧 UI：未传 recordId 时取"当前最新一张可取消的卡片"。
    */
-  rejectByUser(): Promise<void>;
+  rejectByUser(recordId?: string): Promise<void>;
   /**
-   * 通知 service 钱包已解锁，service 把已绑定 request 推进。仅当
-   * phase === "unlocking" 时生效。
+   * 通知 service 钱包已解锁，service 把所有 `waiting_unlock_*` request
+   * 批量推进到 `confirming` 或 `queued`，并尝试启动全局串行执行。
    *
-   * 推进终态：
-   *   - **命中** per-origin auto-approve 配置（identity.get /
-   *     cipher.encrypt / cipher.decrypt）：直接转 `executing` 并内联
-   *     执行,不再进入 manual confirming 页。这与 "popup 新开会话 +
-   *     锁定态下首条请求命中持久化配置" 一致：cache miss 时内部先
-   *     `await getOriginSettingsCached` 兜底一次,命中后翻案转
-   *     `executing`。
-   *   - **未命中** auto-approve：转 `confirming`,UI 渲染 ConfirmView
-   *     等用户手动确认。
-   *
-   * 返回类型 `void | Promise<void>`：cache miss 路径需要一次异步
-   * DB 查询 + 归一化写 cache,内部 `async` 实现。调用者既可 sync
-   * 调用也可 await —— 两种形态都合法（lock 状态的 UI 路径用 sync
-   * 调用,test 路径用 await 保证推进已落定）。
+   * 兼容旧 UI：未传 recordId 时使用 service 内部判断（所有等待中的
+   * request）。
    */
-  resumeAfterUnlock(): void | Promise<void>;
+  resumeAfterUnlock(recordId?: string): void | Promise<void>;
   /**
    * 页面卸载 / 手工关闭路径上的 best-effort `closing` 触发入口。
    * ProtocolPopupPage 在 `pagehide` / `beforeunload` 调它。idempotent：
@@ -1017,8 +1103,11 @@ export interface ProtocolService {
    */
   pageUnloading?(): void;
   /**
-   * 当前已绑定 request 的拷贝（不绑定时返回 null）。UI 在 confirm 页
-   * 用来展示 aud / text / claims / contentType。
+   * 当前已绑定 request 的拷贝（不绑定时返回 null）。
+   *
+   * 兼容旧 UI：保留接口；新逻辑下**不**再有"全局当前绑定 request"。
+   * 新 UI 应直接读 `feedSnapshot().commands` + 每条 command 的 `phase`。
+   * 本接口在多 request 模型下返回首张非终态记录（用于 debug / 兼容）。
    */
   currentRequest():
     | {
@@ -1029,7 +1118,7 @@ export interface ProtocolService {
     | null;
   /**
    * 当前已绑定 request 是否走了 auto-approve（p2pkh.transfer）。
-   * UI 据此跳过 ConfirmView（auto-approve 命中时 popup **不**弹确认页）。
+   * 兼容旧 UI；新逻辑下读 command.autoApproved。
    */
   currentRequestAutoApproved(): boolean;
   /**
@@ -1046,6 +1135,9 @@ export interface ProtocolService {
   /**
    * 同步取当前命令流 feed 状态。`commands` 已是按 `updatedAt desc`
    * 排序后的最新在前列表；UI 拿来直接渲染。
+   *
+   * 设计缘由（施工单 2026-06-27 001 硬切换）：
+   *   - 增加 `lockSummary` 字段，锁屏页用其渲染待处理概览。
    */
   feedSnapshot(): ProtocolCommandFeedState;
   /**
@@ -1065,13 +1157,45 @@ export interface ProtocolService {
   /**
    * 当前确认超时截止时间（epoch ms）。
    *
-   * 设计缘由（施工单 003 硬切换）：
-   *   - 当前已绑定 request 且处于 `unlocking` / `confirming` 时返回一个
-   *     epoch ms 截止时间；其它情况返回 null。
-   *   - UI 倒计时直接 `Math.max(0, ceil((deadline - Date.now()) / 1000))`。
-   *   - 修改站点 timeout **不**热更新当前正在倒计时的 request；这里返回
-   *     的 deadline 保留它开始计时时快照的值。
-   *   - popup 卸载 / endSession 时 timer 自然销毁，不做恢复。
+   * 设计缘由（施工单 2026-06-27 001 硬切换）：
+   *   - 改为按 `recordId` 查询；任何 `confirming` request 都可以独立查询。
+   *   - 旧 UI 不传 recordId 时，返回"任意一张 confirming request"的 deadline
+   *     用于兼容；新 UI 应**始终**传 recordId。
+   *   - waiting_unlock_* / queued / executing 都返回 null（这些状态没有 timeout）。
+   *   - 修改站点 timeout **不**热更新当前正在倒计时的 request。
    */
-  confirmDeadlineMs(): number | null;
+  confirmDeadlineMs(recordId?: string): number | null;
+  /**
+   * 当前会话级锁状态（施工单 2026-06-27 001 硬切换）。
+   *
+   * 同步读：UI 用此决定渲染锁屏页还是主 popup 页面。
+   */
+  lockState(): ProtocolPopupLockState;
+  /**
+   * 锁屏页用的待处理摘要（施工单 2026-06-27 001 硬切换）。
+   *
+   * 数据由 service 从 request store 派生；调用方也可以读
+   * `feedSnapshot().lockSummary`，两者行为一致。
+   */
+  lockSummarySnapshot(): ProtocolLockSummary | null;
+  /**
+   * 暴露底层 vault service 引用（施工单 2026-06-27 001 反馈修复）。
+   *
+   * 设计缘由：vault 状态变化（unlock / relock）需要在 popup 顶层监听，
+   * 跨 locked / unlocked 视图切换仍生效。UI 不应再 useCapability 拿
+   * 一个独立的 vault 实例——会双订阅。
+   */
+  getVaultService(): VaultService;
+  /**
+   * 由 popup 顶层 vault.onStatusChange 调用的切换入口。
+   *
+   * 语义：
+   *   - locked → unlocked：批量推进 `waiting_unlock_*`；manual 进
+   *     `confirming`（启动 timer + 异步 clamp 到 DB 真值），auto 进
+   *     `queued`；尝试启动执行器。
+   *   - unlocked → locked：所有 `confirming` 立即回到
+   *     `waiting_unlock_manual` + 清 timer；queued 保持；executing 当前
+   *     这条允许跑完；执行器暂停取新任务。
+   */
+  setVaultLockState(locked: boolean): void;
 }
