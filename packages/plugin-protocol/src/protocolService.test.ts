@@ -351,6 +351,8 @@ describe("ProtocolServiceImpl", () => {
     const r = getResult();
     expect(r?.ok).toBe(false);
     if (r && r.ok === false) expect(r.error.code).toBe("user_rejected");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "req-3");
+    expect(card?.failureReason).toBe("user_canceled");
     // 施工单 002：拒绝不结束 popup 会话；phase 回到 waiting、不发 closing。
     expect(service.snapshot().phase).toBe("waiting");
     expect(posted.closing).toHaveLength(0);
@@ -3335,6 +3337,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "req-cancel-1");
     expect(card?.decision).toBe("rejected");
     expect(card?.status).toBe("rejected");
+    expect(card?.failureReason).toBe("client_canceled");
     // timeout 已在收尾时清掉。
     expect(service.confirmDeadlineMs()).toBeNull();
   });

@@ -141,6 +141,8 @@ V1 popup 的"当前 origin 视图"由两个语义独立的区块组成：
   的 request；被取消的是原 request，由原 request 回
   `result(ok=false, error.user_rejected)`。详见[公共约定]里的
   "cancel" 与"当前请求交互在命令流卡片内"段。
+  popup 本地历史可用 `failureReason = "client_canceled"` 如实记录，
+  但该信息**不**对 site 暴露。
 - 当前请求有 per-origin `confirmTimeoutSeconds` 超时（默认 30 秒）；
   超时走本地 `status = "timed_out"` + `failureReason = "request_timeout"`，
   对外仍回 `user_rejected`，**不**暴露 `request_timeout`。

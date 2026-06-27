@@ -910,6 +910,66 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
     expect(screen.getByText("超时")).toBeTruthy();
   });
 
+  it("rejected 历史卡按本地 failureReason 区分用户取消与 client 主动取消", () => {
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const feed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-client-cancel",
+          origin: "https://demo.example",
+          requestId: "r-client-cancel",
+          method: "identity.get",
+          phase: "rejected",
+          decision: "rejected",
+          status: "rejected",
+          textSummary: "client cancel",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 2,
+          finishedAt: 2,
+          errorCode: "user_rejected",
+          errorMessage: "User rejected",
+          failureReason: "client_canceled"
+        },
+        {
+          id: "rec-user-cancel",
+          origin: "https://demo.example",
+          requestId: "r-user-cancel",
+          method: "identity.get",
+          phase: "rejected",
+          decision: "rejected",
+          status: "rejected",
+          textSummary: "user cancel",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 3,
+          updatedAt: 4,
+          finishedAt: 4,
+          errorCode: "user_rejected",
+          errorMessage: "User rejected",
+          failureReason: "user_canceled"
+        }
+      ],
+      historyAvailable: true,
+      lockSummary: null
+    };
+    act(() => {
+      service.feed = feed;
+      for (const l of service.feedListeners) l({ ...feed, commands: feed.commands.slice() });
+    });
+    expect(screen.getByText("对方主动取消")).toBeTruthy();
+    expect(screen.getByText("你已取消")).toBeTruthy();
+    expect(screen.queryByText("已拒绝")).toBeNull();
+  });
+
   /* ============== 修复 2：CountdownBadge i18n 插值 ============== */
 
   it("修复 2：CountdownBadge 渲染时 i18n 模板的 {{seconds}} 占位符被替换为具体数字", () => {

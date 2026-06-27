@@ -380,7 +380,8 @@ V1 popup 的"当前 origin 视图"由**两个语义独立的区块**组成。
 - 顺序按 `updatedAt desc` 排序；
 - 每张卡按 phase 渲染：
   - `approved`：卡片内显示"成功" + 终态摘要 + 时间线；
-  - `rejected`：卡片内显示"用户取消" + 摘要 + 时间线；
+  - `rejected`：卡片头按本地 `failureReason` 区分展示
+    "你已取消" / "对方主动取消"；旧记录或未知值回退到"已拒绝"；
   - `failed`：卡片内显示"失败" + 错误码 + 时间线；
   - `timed_out`：`phase = "failed"`、`decision = "failed"`、
     `status = "timed_out"`、`failureReason = "request_timeout"`；
@@ -837,7 +838,7 @@ type ProtocolFeePoolRecord = {
 | `action` | `feepool.prepare` / `feepool.commit` | `create` / `spend` / `close_and_recreate` |
 | `operationId` | `feepool.commit` | commit 时指向 prepare 产出的 op |
 | `counterpartyPublicKeyHex` | `feepool.*` | 对端公钥 |
-| `failureReason` | 失败时 | 本地真实失败原因（`insufficient_balance` 等） |
+| `failureReason` | 有本地终态原因时 | 本地终态原因（如 `user_canceled` / `client_canceled` / `insufficient_balance`） |
 | `autoApproved` | `p2pkh.transfer` auto-approve 命中 | true |
 
 **不**持久化：完整签名任务集、回签结果、完整 rawTx、完整密文 / 签名 / 明文。

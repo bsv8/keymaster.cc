@@ -36,12 +36,44 @@ export interface ProtocolCommandFeedProps {
   now: number;
 }
 
-const DECISION_LABEL_KEY: Record<ProtocolCommandRecord["decision"], string> = {
+const DECISION_LABEL_KEY: Record<Exclude<ProtocolCommandRecord["decision"], "rejected">, string> = {
   pending: "protocol.feed.decision.pending",
   approved: "protocol.feed.decision.approved",
-  rejected: "protocol.feed.decision.rejected",
   failed: "protocol.feed.decision.failed"
 };
+
+/**
+ * rejected 终态在 popup 内部要尽量反映本地真相：
+ *   - user_canceled：用户本地点取消；
+ *   - client_canceled：client web 发 cancel 命中；
+ *   - 旧记录 / 其它未知值：回退到通用"已拒绝"。
+ */
+function decisionLabelForCommand(
+  command: ProtocolCommandRecord,
+  t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string
+): string {
+  if (command.decision === "rejected") {
+    if (command.failureReason === "user_canceled") {
+      return t("protocol.feed.decision.rejected.user_canceled", {
+        defaultValue: "你已取消"
+      });
+    }
+    if (command.failureReason === "client_canceled") {
+      return t("protocol.feed.decision.rejected.client_canceled", {
+        defaultValue: "对方主动取消"
+      });
+    }
+    return t("protocol.feed.decision.rejected", { defaultValue: "已拒绝" });
+  }
+  const decisionKey = DECISION_LABEL_KEY[command.decision];
+  const defaultValue =
+    command.decision === "pending"
+      ? "等待"
+      : command.decision === "approved"
+      ? "已批准"
+      : "执行失败";
+  return t(decisionKey, { defaultValue });
+}
 
 /**
  * 顶层：根据 service 投影的 `commands` 把活请求区 / 历史区分别渲染。
@@ -216,8 +248,7 @@ function CommandCard({
   // 展开态**必须**按 recordId 稳定绑定：组件 key={c.id} 由 React 保证，
   // 这里只在自己状态机内维护 expanded 布尔值。
   const [expanded, setExpanded] = useState<boolean>(initiallyExpanded);
-  const decisionKey = DECISION_LABEL_KEY[command.decision];
-  const decisionLabel = t(decisionKey, { defaultValue: command.decision });
+  const decisionLabel = decisionLabelForCommand(command, t);
   // 终态：status = "timed_out" 单独显示"超时"文案。
   const statusLabel =
     command.status === "timed_out"
@@ -594,7 +625,7 @@ function ReadOnlyBody({
       ) : null}
       {command.failureReason ? (
         <>
-          <dt>{t("protocol.feed.failureReason", { defaultValue: "本地失败原因" })}</dt>
+          <dt>{t("protocol.feed.failureReason", { defaultValue: "本地原因" })}</dt>
           <dd>
             <code>{command.failureReason}</code>
           </dd>

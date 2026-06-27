@@ -629,13 +629,16 @@ export interface ProtocolFeePoolRecord {
 }
 
 /**
- * 真实失败原因（仅写本地历史；对外统一 `user_rejected`）。
+ * 本地终态原因（仅写本地历史；对外统一 `user_rejected`）。
  *
- * 设计缘由：余额不足 / 池缺失 / DB 不可用等都属于本地敏感状态；
- * 站点**不**应通过 `error.message` 反推。V1 把这些原因收口在一个
- * 固定的 union 里；service 层映射到 `ProtocolErrorCode = "user_rejected"`。
+ * 设计缘由：余额不足 / 池缺失 / DB 不可用等敏感失败，以及用户本地取消 /
+ * client 主动 cancel 等内部终态，都不应暴露给站点；站点**不**应通过
+ * `error.message` 反推。V1 把这些本地原因收口在一个固定 union 里；
+ * service 层映射到 `ProtocolErrorCode = "user_rejected"`。
  */
 export type ProtocolFailureReason =
+  | "user_canceled"
+  | "client_canceled"
   | "insufficient_balance"
   | "invalid_address"
   | "invalid_amount"
@@ -746,7 +749,7 @@ export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "fai
  *   - `action` 只在 feepool.prepare/commit 上填写。
  *   - `operationId` 只在 feepool.commit 上填写（指向 prepare 阶段产的 op）。
  *   - `counterpartyPublicKeyHex` 只在 feepool.prepare/commit 上填写。
- *   - `failureReason` 是真实原因（写本地）；对外 `errorCode` 永远是 `user_rejected`。
+ *   - `failureReason` 是本地终态原因（写本地）；对外 `errorCode` 永远是 `user_rejected`。
  *   - `autoApproved` 在 p2pkh.transfer auto 命中时为 true；UI 据此隐藏 confirm 页。
  */
 export interface ProtocolCommandRecord {
@@ -804,7 +807,7 @@ export interface ProtocolCommandRecord {
   operationId?: string;
   /** feepool.prepare / feepool.commit 的对端公钥 hex。 */
   counterpartyPublicKeyHex?: string;
-  /** 本地真实失败原因；隐私敏感场景下与对外 `errorCode` 解耦。 */
+  /** 本地终态原因；隐私敏感场景下与对外 `errorCode` 解耦。 */
   failureReason?: ProtocolFailureReason;
   /** p2pkh.transfer auto-approve 命中时为 true；UI 据此跳过 confirm 页。 */
   autoApproved?: boolean;

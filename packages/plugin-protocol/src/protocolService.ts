@@ -23,7 +23,8 @@
 //       * unlocked + manual → `confirming`（启动 timeout）
 //       * unlocked + auto → `queued`
 //   - `cancel(id)` 按 `source + origin + transportRequestId` 命中具体
-//     request；命中后转 rejected，对外回原 request 的 user_rejected。
+//     request；命中后转 rejected，并写本地 `failureReason=client_canceled`；
+//     对外仍回原 request 的 user_rejected。
 //   - 重复 `requestId` 拒绝：同 source + origin + transportRequestId
 //     只要存在未终态记录，后续相同 id 直接忽略。
 //   - 解锁后批量推进：所有 `waiting_unlock_*` 一次性扫描，manual →
@@ -38,7 +39,7 @@
 //     endSession 把所有未终态 request 强制收尾为 rejected。
 //
 // 隐私边界：余额不足 / 费用池缺失 / DB 不可用 / 未知 op / 跨 origin
-// operationId，**全部**对外回 `user_rejected`；真实原因只写
+// operationId，**全部**对外回 `user_rejected`；本地原因只写
 // `ProtocolCommandRecord.failureReason`。
 //
 // DB 不可用差异化降级：p2pkh 仍可用（auto-approve 被禁用、manual
@@ -231,7 +232,7 @@ interface RequestRecord {
   errorCode: string;
   /** 错误 message；英文。 */
   errorMessage: string;
-  /** 本地真实失败原因（写本地）；隐私敏感场景与对外解耦。 */
+  /** 本地终态原因（写本地）；隐私敏感场景与对外解耦。 */
   failureReason?: ProtocolFailureReason;
 }
 
@@ -575,7 +576,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const rec = this.findRequestByTransportId(event.source as Window | null, event.origin, parsed.id);
       if (!rec) return;
       if (!this.isRequestCancellable(rec)) return;
-      await this.finalizeRequestByCancel(rec.recordId);
+      await this.finalizeRequestByCancel(rec.recordId, "client_canceled");
       return;
     }
 
@@ -645,7 +646,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const rec = this.resolveRecordForCancel(recordId);
     if (!rec) return;
     if (!this.isRequestCancellable(rec)) return;
-    await this.finalizeRequestByCancel(rec.recordId);
+    await this.finalizeRequestByCancel(rec.recordId, "user_canceled");
   }
 
   /**
@@ -1205,7 +1206,14 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /* ============== Cancel ============== */
 
-  private async finalizeRequestByCancel(recordId: string): Promise<void> {
+  /**
+   * cancel 收尾：对外统一 `user_rejected`，本地用 `failureReason`
+   * 区分"用户本地取消"与"client 主动 cancel"。
+   */
+  private async finalizeRequestByCancel(
+    recordId: string,
+    failureReason: "user_canceled" | "client_canceled"
+  ): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.phase === "executing") return;
@@ -1217,6 +1225,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.phase = "rejected";
     rec.errorCode = "user_rejected";
     rec.errorMessage = "User rejected";
+    rec.failureReason = failureReason;
     rec.finishedAt = Date.now();
     rec.updatedAt = rec.finishedAt;
     this.writeFeedCommandFor(rec);
