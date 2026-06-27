@@ -77,8 +77,9 @@ Popup 连接状态是协议公共约定的一部分，与具体方法（`identit
 
 V1 协议 popup 是一次 window.open 之后**常驻**的会话窗口：
 
-- 同一个 popup 会话内允许**串行**处理多条 request；同一时刻仍只允许
-  **一条在途** request。
+- 同一个 popup 会话内允许多条 request 并存；每条 request 独立状态机。
+  同一时刻允许多条 `waiting_unlock_*` / `confirming` / `queued`
+  共存；执行层全局串行 FIFO，同一时刻只允许一条 `executing`。
 - 单条 request 完成后 popup **不**自动关闭；它回到"等待下一条请求"
   的可继续复用状态。
 - 一次只面向一个当前 origin；切换 origin 时按新 origin 重新载入命令
@@ -97,8 +98,51 @@ V1 协议 popup 是一次 window.open 之后**常驻**的会话窗口：
   超时走本地 `status = "timed_out"` + `failureReason = "request_timeout"`，
   对外仍回 `user_rejected`，**不**暴露 `request_timeout`。
 
+### Popup 锁屏 + 多 request 并存（施工单 2026-06-27 001 硬切换）
+
+本协议 V1 在 popup 与命令流层面引入两层语义：
+
+```txt
+会话锁状态 (ProtocolPopupLockState)
+  locked
+  unlocked
+
+请求状态 (ProtocolCommandPhase)
+  waiting_unlock_manual
+  waiting_unlock_auto
+  confirming
+  queued
+  executing
+  approved
+  rejected
+  failed
+  timed_out
+```
+
+约束：
+
+1. `locked / unlocked` 是**会话级**状态，与具体 request 解耦。
+2. request 自己维护自己的状态；不再依赖 service 内部的单一
+   `binding + phase`。
+3. UI / cancel / timeout / 执行调度都必须基于"请求状态 + 会话锁状态"
+   联合判定。
+4. vault 处于 `locked` 时 popup 渲染**全页面锁屏**（解锁表单 +
+   待处理概要），不渲染主 popup 页面 / 顶栏 / 命令流。
+5. vault 处于 `unlocked` 时才进入主 popup 页面（顶栏 + 站点配置 +
+   命令流）。
+
+不允许：
+
+1. 继续把 `locked / unlocked` 与 `confirming / executing` 混在一个
+   枚举里。
+2. 继续用"全局当前绑定 request"代表系统内唯一活请求。
+3. 用单一 `confirmDeadlineMs()` 代表所有 request 的倒计时——必须按
+   `recordId` 查询。
+4. 在 `waiting_unlock_*` 阶段启动 confirm timeout。
+5. 让 auto-confirm 在锁屏期间直接执行——必须等解锁后再走全局串行。
+
 具体定义收敛在[公共约定](./keymaster-protocol-common-v1-draft.md) 里
-的"命令流历史"段。
+的"命令流历史"与"popup 锁屏 + 多 request 并存 + 串行执行"段。
 
 本协议 V1 **不**引入心跳、**不**引入 `MessageChannel`：连接状态
 完全建立在现有 `window.open + postMessage` 模型上。

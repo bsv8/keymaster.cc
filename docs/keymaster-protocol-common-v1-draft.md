@@ -55,14 +55,42 @@ window.open(...)   -> 收到 ready                -> 收到 closing / popup.clos
 ### 业务请求生命周期（在同一窗口内可重复）
 
 ```txt
-waiting -> (waiting_unlock -> waiting_confirm) -> executing -> (approved / rejected / failed) -> waiting
+(locked + manual)   waiting_unlock_manual
+(locked + auto)     waiting_unlock_auto
+(unlocked + manual) confirming
+(unlocked + auto)   queued
+                    -> executing -> (approved / rejected / failed / timed_out)
 ```
 
-- 收到合法 request 后服务进入 `waiting_unlock`（vault 锁）或 `waiting_confirm`（vault 已解）；
-- 用户确认后进入 `executing`；
-- 终态：`approved` / `rejected` / `failed`；
-- 终态后服务**回到** `waiting`，允许在同一个 popup 会话里处理下一条 request。
-- `result` 报回业务结果；`closing` **不**在此路径上发出。
+关键约束（施工单 2026-06-27 001）：
+
+1. 收到合法 request 后立刻建立独立 record；按 `lockState + auto-approve`
+   落到对应初始 phase。
+2. 同 `source + origin + requestId` 已有未终态 record 时，后续同 id
+   直接忽略（重复 requestId 拒绝）。
+3. 同一时刻允许多条 `waiting_unlock_*` / `confirming` / `queued` 共存；
+   执行层全局串行 FIFO，同一时刻只允许一条 `executing`。
+4. 用户点"确认" → `confirming → queued`，再触发全局 drain。
+5. `queued` 也可被 `cancel(id)` 命中 → `rejected`，并从执行队列中移除。
+6. `executing` 不响应 `cancel(id)`——V1 不支持补偿 / 中断。
+7. 终态后服务**回到** `waiting`，允许在同一个 popup 会话里处理下一条 request。
+8. `result` 报回业务结果；`closing` **不**在此路径上发出。
+
+### 会话锁状态（施工单 2026-06-27 001 硬切换）
+
+会话级锁状态独立于 request 状态：
+
+```txt
+locked   -> 渲染全页面锁屏（解锁表单 + 待处理概要）
+unlocked -> 渲染主 popup 页面（顶栏 + 站点配置 + 命令流）
+```
+
+- popup 加载时若 vault 处于 locked，**只**渲染锁屏页。
+- 解锁成功后 vault.onStatusChange 触发 service.setVaultLockState(false)
+  + resumeAfterUnlock()；service 批量把 `waiting_unlock_*` 推进。
+- 重新锁定时（vault.onStatusChange("locked")）service 立即把
+  `confirming` 收口到 `waiting_unlock_manual` 并清 timeout；queued
+  保持；executing 当前这条允许跑完。
 
 ### 关键不变量
 
@@ -281,20 +309,26 @@ type BinaryField = {
 
 生效条件（必须全部满足）：
 
-1. popup 当前已绑定一条 request；
-2. `event.source === 当前绑定 source`；
-3. `event.origin === 当前绑定 origin`；
-4. `cancel.id === 当前绑定 request.id`；
-5. 当前 request 没进入不可逆 `executing` 终态。
+1. popup 存在一条与 cancel.id 匹配的活 request；
+2. `event.source === 该 request 绑定的 source`；
+3. `event.origin === 该 request 绑定的 origin`；
+4. `cancel.id === 该 request 的 transportRequestId`；
+5. 该 request 处于 `waiting_unlock_*` / `confirming` / `queued` 之一
+   （施工单 2026-06-27 001：`queued` 也可被 cancel 命中）。
 
 否则 popup **静默忽略**该 `cancel`：不抛、不回包、不回错误。
 
+可生效的情况：
+
+- `phase = "waiting_unlock_manual"` / `"waiting_unlock_auto"`：cancel 生效，
+  走原 request 的 reject 路径，对外回 `user_rejected`。
+- `phase = "confirming"`：cancel 生效，清 timeout，对外回 `user_rejected`。
+- `phase = "queued"`：cancel 生效，从执行队列移除，对外回 `user_rejected`。
+
 可忽略的情况：
 
-- `phase = "unlocking" / "confirming"`：cancel 生效，走原 request 的 reject
-  路径，对外回 `user_rejected`。
 - `phase = "executing"`：cancel 忽略（V1 不支持补偿事务）。
-- `phase = "waiting" / "error"` 或没绑定：cancel 忽略。
+- `phase = "approved" / "rejected" / "failed" / "timed_out"` 或没绑定：cancel 忽略。
 - id 不匹配：cancel 忽略（不允许"最接近匹配"或"取消最新一条"）。
 - source / origin 不匹配：cancel 忽略。
 
