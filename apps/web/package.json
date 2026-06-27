@@ -27,6 +27,7 @@
     "@keymaster/plugin-woc": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
+    "@noble/hashes": "^1.8.0",
     "buffer": "^6.0.3"
   }
 }

@@ -129,6 +129,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../../packages/ui
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
