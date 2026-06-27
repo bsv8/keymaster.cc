@@ -73,6 +73,301 @@ importers:
         specifier: ^4.1.8
         version: 4.1.9(@vitest/coverage-v8@4.1.9)(jsdom@25.0.1)(vite@5.4.21)
 
+  apps/web:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../../packages/contracts
+      '@keymaster/plugin-assets':
+        specifier: '*'
+        version: link:../../packages/plugin-assets
+      '@keymaster/plugin-background':
+        specifier: '*'
+        version: link:../../packages/plugin-background
+      '@keymaster/plugin-contacts':
+        specifier: '*'
+        version: link:../../packages/plugin-contacts
+      '@keymaster/plugin-home':
+        specifier: '*'
+        version: link:../../packages/plugin-home
+      '@keymaster/plugin-importer-hex':
+        specifier: '*'
+        version: link:../../packages/plugin-importer-hex
+      '@keymaster/plugin-importer-json-file':
+        specifier: '*'
+        version: link:../../packages/plugin-importer-json-file
+      '@keymaster/plugin-importer-wif':
+        specifier: '*'
+        version: link:../../packages/plugin-importer-wif
+      '@keymaster/plugin-key-import':
+        specifier: '*'
+        version: link:../../packages/plugin-key-import
+      '@keymaster/plugin-p2pkh':
+        specifier: '*'
+        version: link:../../packages/plugin-p2pkh
+      '@keymaster/plugin-poker':
+        specifier: '*'
+        version: link:../../packages/plugin-poker
+      '@keymaster/plugin-protocol':
+        specifier: '*'
+        version: link:../../packages/plugin-protocol
+      '@keymaster/plugin-settings':
+        specifier: '*'
+        version: link:../../packages/plugin-settings
+      '@keymaster/plugin-transfer':
+        specifier: '*'
+        version: link:../../packages/plugin-transfer
+      '@keymaster/plugin-vault':
+        specifier: '*'
+        version: link:../../packages/plugin-vault
+      '@keymaster/plugin-woc':
+        specifier: '*'
+        version: link:../../packages/plugin-woc
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../../packages/runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../../packages/ui
+      buffer:
+        specifier: ^6.0.3
+        version: 6.0.3
+
+  packages/contracts: {}
+
+  packages/plugin-assets:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-background:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      lucide-react:
+        specifier: ^0.468.0
+        version: 0.468.0(react@18.3.1)
+
+  packages/plugin-contacts:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-home:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-importer-hex:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+
+  packages/plugin-importer-json-file:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      '@noble/secp256k1':
+        specifier: ^2.2.0
+        version: 2.3.0
+
+  packages/plugin-importer-wif:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+
+  packages/plugin-key-import:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-p2pkh:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/hashes':
+        specifier: ^1.4.0
+        version: 1.8.0
+      '@noble/secp256k1':
+        specifier: ^2.1.0
+        version: 2.3.0
+
+  packages/plugin-poker:
+    dependencies:
+      '@bsv/sdk':
+        specifier: ^2.1.4
+        version: 2.1.6
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/curves':
+        specifier: ^1.7.0
+        version: 1.9.7
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      '@noble/secp256k1':
+        specifier: ^2.2.0
+        version: 2.3.0
+
+  packages/plugin-protocol:
+    dependencies:
+      '@bsv/sdk':
+        specifier: ^1.6.12
+        version: 1.10.4
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.2.0
+      keymaster-multisig-pool:
+        specifier: 1.5.0
+        version: 1.5.0
+
+  packages/plugin-settings:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-transfer:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-vault:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/ciphers':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
+      '@noble/secp256k1':
+        specifier: ^2.2.0
+        version: 2.3.0
+
+  packages/plugin-woc:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/runtime:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+
+  packages/ui: {}
+
 packages:
 
   '@asamuzakjp/css-color@3.2.0':
@@ -171,6 +466,9 @@ packages:
 
   '@bsv/sdk@1.10.4':
     resolution: {integrity: sha512-NuEXWwtuZ3WbER9wLtm33QCfhVwLyTyAzGholOeHo1imNDLLe7d2HADmf8hlSqAkNud3Y03S2poRc6aJMRWDrA==}
+
+  '@bsv/sdk@2.1.6':
+    resolution: {integrity: sha512-Szm1KM9BbA0Yc091gCW5NkFu9lhcykaDK9yXab/B/6f18h05uys3HWKaxHO05pKl0fYIpvwFrSScOefy0RT3GQ==}
 
   '@csstools/color-helpers@5.1.0':
     resolution: {integrity: sha512-S11EXWJyy0Mz5SYvRmY8nJYTFFd1LCNV+7cXyAgQtOOuzb4EsgfqDufL+9esx72/eLhsRdGZwaldu/h+E4t4BA==}
@@ -354,13 +652,28 @@ packages:
   '@jridgewell/trace-mapping@0.3.31':
     resolution: {integrity: sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==}
 
+  '@noble/ciphers@2.2.0':
+    resolution: {integrity: sha512-Z6pjIZ/8IJcCGzb2S/0Px5J81yij85xASuk1teLNeg75bfT07MV3a/O2Mtn1I2se43k3lkVEcFaR10N4cgQcZA==}
+    engines: {node: '>= 20.19.0'}
+
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
   '@noble/curves@2.2.0':
     resolution: {integrity: sha512-T/BoHgFXirb0ENSPBquzX0rcjXeM6Lo892a2jlYJkqk83LqZx0l1Of7DzlKJ6jkpvMrkHSnAcgb5JegL8SeIkQ==}
     engines: {node: '>= 20.19.0'}
 
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
+
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
     engines: {node: '>= 20.19.0'}
+
+  '@noble/secp256k1@2.3.0':
+    resolution: {integrity: sha512-0TQed2gcBbIrh7Ccyw+y/uZQvbJwm7Ao4scBUxqpBCcsOlZG0O4KGfjtNAy/li4W8n1xt3dxrwJ0beZ2h2G6Kw==}
 
   '@rolldown/pluginutils@1.0.0-beta.27':
     resolution: {integrity: sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==}
@@ -635,6 +948,9 @@ packages:
   asynckit@0.4.0:
     resolution: {integrity: sha512-Oei9OH4tRh0YqU3GxhX79dM/mwVgvbZJaSNaRk+bshkj0S5cfHcgYakreBjrHwatXKbz+IoIdYLxrKim2MjW0Q==}
 
+  base64-js@1.5.1:
+    resolution: {integrity: sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA==}
+
   baseline-browser-mapping@2.10.40:
     resolution: {integrity: sha512-BSSLZ9/Cjjv7Gtj5B68ZzXcXUg8iOf3fme+FCuh8rC/Go+Kmh8cox7M3A8dolou16s64QjLPOSdngh7GxXvkSw==}
     engines: {node: '>=6.0.0'}
@@ -644,6 +960,9 @@ packages:
     resolution: {integrity: sha512-MTc8i/x9jBQd1iMw2CFGS+rwMa07eYjLR0CCTLDACl9xhxy+nIs3KeML/biicXtk9JrZ6dnnTatmc7ErPXIxqw==}
     engines: {node: ^6 || ^7 || ^8 || ^9 || ^10 || ^11 || ^12 || >=13.7}
     hasBin: true
+
+  buffer@6.0.3:
+    resolution: {integrity: sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA==}
 
   call-bind-apply-helpers@1.0.2:
     resolution: {integrity: sha512-Sp1ablJ0ivDkSzjcaJdxEunN5/XvksFJ2sMBFfq6x0ryhQV/2b/KwFe21cMpmHtPOSij8K99/wSfoEuTObmuMQ==}
@@ -828,6 +1147,9 @@ packages:
   iconv-lite@0.6.3:
     resolution: {integrity: sha512-4fCk79wshMdzMp2rH06qWrJE4iolqLhCUH+OiuIgU++RB0+94NlDL81atO7GX55uUKueo0txHNtvEyI6D7WdMw==}
     engines: {node: '>=0.10.0'}
+
+  ieee754@1.2.1:
+    resolution: {integrity: sha512-dcyqhDvX1C46lXZcVqCpK+FtMRQVdIMN6/Df5js2zouUsqG7I6sFxitIC+7KYK29KdXOLHdu9zL4sFnoVQnqaA==}
 
   is-potential-custom-element-name@1.0.1:
     resolution: {integrity: sha512-bCYeRA2rVibKZd+s2625gGnGF/t7DSqDs4dP7CrLA1m7jKWz6pps0LpYLJN8Q64HtmPKJ1hrN3nzPNKFEKOUiQ==}
@@ -1346,6 +1668,8 @@ snapshots:
 
   '@bsv/sdk@1.10.4': {}
 
+  '@bsv/sdk@2.1.6': {}
+
   '@csstools/color-helpers@5.1.0': {}
 
   '@csstools/css-calc@2.1.4(@csstools/css-parser-algorithms@3.0.5(@csstools/css-tokenizer@3.0.4))(@csstools/css-tokenizer@3.0.4)':
@@ -1454,11 +1778,21 @@ snapshots:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.5
 
+  '@noble/ciphers@2.2.0': {}
+
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
   '@noble/curves@2.2.0':
     dependencies:
       '@noble/hashes': 2.2.0
 
+  '@noble/hashes@1.8.0': {}
+
   '@noble/hashes@2.2.0': {}
+
+  '@noble/secp256k1@2.3.0': {}
 
   '@rolldown/pluginutils@1.0.0-beta.27': {}
 
@@ -1694,6 +2028,8 @@ snapshots:
 
   asynckit@0.4.0: {}
 
+  base64-js@1.5.1: {}
+
   baseline-browser-mapping@2.10.40: {}
 
   browserslist@4.28.4:
@@ -1703,6 +2039,11 @@ snapshots:
       electron-to-chromium: 1.5.379
       node-releases: 2.0.50
       update-browserslist-db: 1.2.3(browserslist@4.28.4)
+
+  buffer@6.0.3:
+    dependencies:
+      base64-js: 1.5.1
+      ieee754: 1.2.1
 
   call-bind-apply-helpers@1.0.2:
     dependencies:
@@ -1890,6 +2231,8 @@ snapshots:
   iconv-lite@0.6.3:
     dependencies:
       safer-buffer: 2.1.2
+
+  ieee754@1.2.1: {}
 
   is-potential-custom-element-name@1.0.1: {}
 

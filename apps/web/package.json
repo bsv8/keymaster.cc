@@ -19,6 +19,7 @@
     "@keymaster/plugin-importer-wif": "*",
     "@keymaster/plugin-key-import": "*",
     "@keymaster/plugin-p2pkh": "*",
+    "@keymaster/plugin-poker": "*",
     "@keymaster/plugin-protocol": "*",
     "@keymaster/plugin-settings": "*",
     "@keymaster/plugin-transfer": "*",
