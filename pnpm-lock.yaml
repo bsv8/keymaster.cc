@@ -173,6 +173,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
 
   packages/plugin-home:
     dependencies:
