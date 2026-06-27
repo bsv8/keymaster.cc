@@ -55,6 +55,7 @@ function makeOrigin(origin: string, max: number): ProtocolOriginSettingsRecord {
     cipherAutoApproveEnabled: false,
     feePoolAutoSignMaxSatoshis: 0,
     feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
     updatedAt: 1
   };
 }
@@ -267,6 +268,7 @@ describe("openProtocolStorageDb", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     };
     await db.putOrigin(rec);
@@ -274,5 +276,26 @@ describe("openProtocolStorageDb", () => {
     expect(got?.identityAutoApproveEnabled).toBe(true);
     expect(got?.cipherAutoApproveEnabled).toBe(false);
     expect(got?.p2pkhAutoApproveMaxSatoshis).toBe(5000);
+  });
+
+  /* ============== 施工单 003：confirmTimeoutSeconds 字段 ============== */
+
+  it("stores and retrieves origin settings with confirmTimeoutSeconds", async () => {
+    const db = await openProtocolStorageDb();
+    const origin = `https://ct-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.example`;
+    const rec: ProtocolOriginSettingsRecord = {
+      origin,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 12,
+      updatedAt: 1
+    };
+    await db.putOrigin(rec);
+    const got = await db.getOrigin(origin);
+    expect(got?.confirmTimeoutSeconds).toBe(12);
   });
 });

@@ -130,7 +130,15 @@ const protocolResources: I18nPluginResources = {
       /* ============== 施工单 001：钱包入口 + identity / cipher auto-approve ============== */
       "protocol.topbar.wallet": "Open wallet",
       "protocol.originSettings.identityAutoApprove.label": "Always allow identity.get",
-      "protocol.originSettings.cipherAutoApprove.label": "Always allow cipher.encrypt / cipher.decrypt"
+      "protocol.originSettings.cipherAutoApprove.label": "Always allow cipher.encrypt / cipher.decrypt",
+      /* ============== 施工单 003：confirm 收口到历史卡 + 外部 cancel + 超时 ============== */
+      "protocol.originSettings.confirmTimeoutSeconds.label":
+        "Confirmation timeout (seconds, default 30)",
+      "protocol.feed.status.timed_out": "Timed out",
+      "protocol.feed.method": "Method",
+      "protocol.sessionError.banner":
+        "Cannot reach the external site. Please check the site console for details.",
+      "protocol.countdown.remaining": "{{seconds}}s remaining"
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -224,7 +232,15 @@ const protocolResources: I18nPluginResources = {
       /* ============== 施工单 001：钱包入口 + identity / cipher auto-approve ============== */
       "protocol.topbar.wallet": "进入钱包",
       "protocol.originSettings.identityAutoApprove.label": "始终同意 账户信息获取",
-      "protocol.originSettings.cipherAutoApprove.label": "始终同意 加密解密"
+      "protocol.originSettings.cipherAutoApprove.label": "始终同意 加密解密",
+      /* ============== 施工单 003：confirm 收口到历史卡 + 外部 cancel + 超时 ============== */
+      "protocol.originSettings.confirmTimeoutSeconds.label":
+        "确认超时（秒，默认 30）",
+      "protocol.feed.status.timed_out": "超时",
+      "protocol.feed.method": "方法",
+      "protocol.sessionError.banner":
+        "无法连接到外部站点。请回到来源站点查看控制台日志。",
+      "protocol.countdown.remaining": "剩余 {{seconds}} 秒"
     }
   }
 };

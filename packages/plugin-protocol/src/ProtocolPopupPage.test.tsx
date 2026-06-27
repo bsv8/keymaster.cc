@@ -25,6 +25,17 @@ const runtimeState = vi.hoisted(() => ({
   vault: "unlocked" as "booting" | "uninitialized" | "locked" | "unlocked"
 }));
 
+// 简单的 i18n 模板替换：mock 渲染时把 `{{seconds}}` 这种占位符替换成
+// values 里的字段。覆盖修复 2 测试场景（`protocol.countdown.remaining`
+// 模板 + `seconds` 插值）。
+function renderTemplate(template: string, values?: Record<string, unknown>): string {
+  if (!template) return template;
+  return template.replace(/\{\{(\w+)\}\}/g, (_m, name) => {
+    const v = values?.[name];
+    return v === undefined ? `{{${name}}}` : String(v);
+  });
+}
+
 vi.mock("@keymaster/runtime", () => ({
   useCapability: (key: string) => {
     if (key === PROTOCOL_SERVICE_CAPABILITY) {
@@ -43,7 +54,12 @@ vi.mock("@keymaster/runtime", () => ({
     return undefined;
   },
   useI18n: () => ({
-    t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
+    t: (key: string, values?: { defaultValue?: string; seconds?: number }) => {
+      const tmpl = values?.defaultValue ?? key;
+      // 用模板占位符替换模拟 i18n 资源行为：让"已挂资源但缺占位符"
+      // 这条路径能够被覆盖到。
+      return renderTemplate(tmpl, values);
+    },
     language: () => "en"
   })
 }));
@@ -155,6 +171,7 @@ function makeFakeService(): ProtocolService & {
     },
     getOriginSettings: async () => null,
     setOriginSettings: async () => undefined,
+    confirmDeadlineMs: () => null,
     setSystemSettings: async () => undefined
   };
   return svc;
@@ -284,6 +301,8 @@ describe("ProtocolPopupPage", () => {
     // 渲染 DoneView，window.close 不会被自动触发。
     const service = makeFakeService() as unknown as ProtocolService & {
       listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+      feed: ProtocolCommandFeedState;
       setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
     };
     currentService = service;
@@ -293,6 +312,36 @@ describe("ProtocolPopupPage", () => {
       id: "r-1",
       method: "identity.get",
       params: { aud: "https://demo.example", iat: 1, exp: 2, text: "x" }
+    });
+    // 同步 push live card 到 feed：确认视图**只**在最新卡片里出现。
+    const liveFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-1",
+          origin: "https://demo.example",
+          requestId: "r-1",
+          method: "identity.get",
+          phase: "waiting_confirm",
+          decision: "pending",
+          status: "waiting_confirm",
+          textSummary: "live",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = liveFeed;
+      for (const l of service.feedListeners) l({ ...liveFeed, commands: liveFeed.commands.slice() });
     });
     // 推一次 phase=confirming，然后推 phase=waiting（模拟 confirmByUser 完成）。
     const confirming: ProtocolSessionSnapshot = {
@@ -305,7 +354,7 @@ describe("ProtocolPopupPage", () => {
     act(() => {
       for (const l of service.listeners) l(confirming);
     });
-    // confirming 时会渲染 ConfirmView 的"确认请求"标题。
+    // confirming 时 feed live card 渲染"确认请求"标题。
     expect(screen.getByText("确认请求")).toBeTruthy();
     // 切回 waiting：ConfirmView 消失，feed 仍在。
     const waiting: ProtocolSessionSnapshot = {
@@ -338,29 +387,67 @@ describe("ProtocolPopupPage", () => {
     expect(service.messageListenerInstalledBeforeReady).toBe(true);
   });
 
-  it("shows unlock view when phase is unlocking", () => {
+  it("shows unlock view inside feed live card when phase is unlocking", () => {
+    // 施工单 003 收口：解锁表单**只**在命令流最新卡片里出现；
+    // 没有"独立全页 overlay"。
     const service = makeFakeService() as unknown as ProtocolService & {
-      phase: ProtocolSessionSnapshot["phase"];
       listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+      feed: ProtocolCommandFeedState;
+      setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
     };
     currentService = service;
-    const origStart = service.startSession.bind(service);
-    service.startSession = () => {
-      origStart();
-      service.phase = "unlocking";
-      const snap: ProtocolSessionSnapshot = {
-        phase: "unlocking",
-        boundSource: null,
-        boundOrigin: null,
-        method: null,
-        requestId: null
-      };
-      for (const l of service.listeners) l(snap);
-      service.snapshot = () => snap;
-    };
     runtimeState.vault = "locked";
     render(<ProtocolPopupPage />);
-    expect(screen.getByText(/解锁后继续|Unlock to continue/)).toBeTruthy();
+    // 先把当前 request 推进 feed（live 卡片前置）。
+    service.setCurrentRequest({
+      id: "r-unlock",
+      method: "identity.get",
+      params: { aud: "https://demo.example", iat: 1, exp: 2, text: "x" }
+    });
+    const unlockFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-unlock",
+          origin: "https://demo.example",
+          requestId: "r-unlock",
+          method: "identity.get",
+          phase: "waiting_unlock",
+          decision: "pending",
+          status: "waiting_unlock",
+          textSummary: "unlock",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = unlockFeed;
+      for (const l of service.feedListeners) l({ ...unlockFeed, commands: unlockFeed.commands.slice() });
+    });
+    const unlocking: ProtocolSessionSnapshot = {
+      phase: "unlocking",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: "identity.get",
+      requestId: "r-unlock"
+    };
+    act(() => {
+      for (const l of service.listeners) l(unlocking);
+    });
+    expect(screen.getByText("解锁后继续")).toBeTruthy();
+    // 不再有独立 overlay。
+    expect(document.querySelector(".protocol-popup--unlock")).toBeNull();
+    runtimeState.vault = "unlocked";
   });
 
   it("calls endSession on unmount", () => {
@@ -454,6 +541,7 @@ describe("ProtocolPopupPage topbar origin settings", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     }));
     service.setOriginSettings = vi.fn(async () => undefined);
@@ -509,6 +597,287 @@ describe("ProtocolPopupPage auto-approve skip", () => {
     });
     // auto-approve 命中：ConfirmView 不应出现。
     expect(screen.queryByText("确认请求")).toBeNull();
+  });
+});
+
+/* ============== 施工单 003：confirm 收口到历史卡 ============== */
+
+describe("ProtocolPopupPage confirm-in-feed (003)", () => {
+  it("confirming 时当前交互出现在 feed 最新卡片（无独立全页 overlay）", () => {
+    const service = makeFakeService() as unknown as ProtocolService & {
+      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+      feed: ProtocolCommandFeedState;
+      setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    // 让 service 当前已绑定 request 并 push 到 feed。
+    service.setCurrentRequest({
+      id: "r-live",
+      method: "identity.get",
+      params: { aud: "https://demo.example", iat: 1, exp: 2, text: "x" }
+    });
+    const liveFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-live",
+          origin: "https://demo.example",
+          requestId: "r-live",
+          method: "identity.get",
+          phase: "waiting_confirm",
+          decision: "pending",
+          status: "waiting_confirm",
+          textSummary: "live",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 2,
+          updatedAt: 2,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = liveFeed;
+      for (const l of service.feedListeners) l({ ...liveFeed, commands: liveFeed.commands.slice() });
+    });
+    const confirming: ProtocolSessionSnapshot = {
+      phase: "confirming",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: "identity.get",
+      requestId: "r-live"
+    };
+    act(() => {
+      for (const l of service.listeners) l(confirming);
+    });
+    // 关键断言：feed 最新卡片内仍渲染"确认请求"标题 + 确认按钮；**不再**有
+    // 独立的 .protocol-popup--confirm 全页 overlay。
+    expect(screen.getByText("确认请求")).toBeTruthy();
+    expect(screen.getByText("确认")).toBeTruthy();
+    expect(screen.getByText("取消")).toBeTruthy();
+    expect(document.querySelector(".protocol-popup--confirm")).toBeNull();
+  });
+
+  it("unlocking 时卡片内出现解锁表单（含密码输入 + 解锁 + 取消）", () => {
+    const service = makeFakeService() as unknown as ProtocolService & {
+      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+      feed: ProtocolCommandFeedState;
+      setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
+    };
+    currentService = service;
+    runtimeState.vault = "locked";
+    render(<ProtocolPopupPage />);
+    service.setCurrentRequest({
+      id: "r-unlock",
+      method: "identity.get",
+      params: { aud: "https://demo.example", iat: 1, exp: 2, text: "x" }
+    });
+    const unlockFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-unlock",
+          origin: "https://demo.example",
+          requestId: "r-unlock",
+          method: "identity.get",
+          phase: "waiting_unlock",
+          decision: "pending",
+          status: "waiting_unlock",
+          textSummary: "unlock",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = unlockFeed;
+      for (const l of service.feedListeners) l({ ...unlockFeed, commands: unlockFeed.commands.slice() });
+    });
+    const unlocking: ProtocolSessionSnapshot = {
+      phase: "unlocking",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: "identity.get",
+      requestId: "r-unlock"
+    };
+    act(() => {
+      for (const l of service.listeners) l(unlocking);
+    });
+    // 解锁卡内：标题 + 密码字段 + 解锁/取消按钮。
+    expect(screen.getByText("解锁后继续")).toBeTruthy();
+    expect(screen.getByText("解锁")).toBeTruthy();
+    // 独立的 .protocol-popup--unlock overlay 不应存在。
+    expect(document.querySelector(".protocol-popup--unlock")).toBeNull();
+    runtimeState.vault = "unlocked";
+  });
+
+  it("status=timed_out 的卡片单独显示超时标签", () => {
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const feed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-timeout",
+          origin: "https://demo.example",
+          requestId: "r-timeout",
+          method: "identity.get",
+          phase: "failed",
+          decision: "failed",
+          status: "timed_out",
+          textSummary: "timeout",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 1,
+          errorCode: "user_rejected",
+          errorMessage: "User rejected",
+          failureReason: "request_timeout"
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = feed;
+      for (const l of service.feedListeners) l({ ...feed, commands: feed.commands.slice() });
+    });
+    // 卡片 head 显示"超时"标签（i18n default = "超时"）。
+    expect(screen.getByText("超时")).toBeTruthy();
+  });
+
+  /* ============== 修复 2：CountdownBadge i18n 插值 ============== */
+
+  it("修复 2：CountdownBadge 渲染时 i18n 模板的 {{seconds}} 占位符被替换为具体数字", () => {
+    const service = makeFakeService() as unknown as ProtocolService & {
+      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+      feed: ProtocolCommandFeedState;
+      setCurrentRequest: (next: { id: string; method: ProtocolSessionSnapshot["method"]; params: Record<string, unknown> } | null) => void;
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    // 让 service 暴露 confirmDeadlineMs = now + 12s。
+    const now = Date.now();
+    service.confirmDeadlineMs = () => now + 12_000;
+    // 触发 subscribe 路径的 setConfirmDeadlineMs(state → service.confirmDeadlineMs())
+    // 通过推一次 snapshot 让 popup 重新订阅 deadline。
+    const snap: ProtocolSessionSnapshot = {
+      phase: "confirming",
+      boundSource: null,
+      boundOrigin: "https://demo.example",
+      method: "identity.get",
+      requestId: "r-cd"
+    };
+    service.setCurrentRequest({
+      id: "r-cd",
+      method: "identity.get",
+      params: { aud: "https://demo.example", iat: 1, exp: 2, text: "x" }
+    });
+    const liveFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-cd",
+          origin: "https://demo.example",
+          requestId: "r-cd",
+          method: "identity.get",
+          phase: "waiting_confirm",
+          decision: "pending",
+          status: "waiting_confirm",
+          textSummary: "cd",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true
+    };
+    act(() => {
+      service.feed = liveFeed;
+      for (const l of service.feedListeners) l({ ...liveFeed, commands: liveFeed.commands.slice() });
+      for (const l of service.listeners) l(snap);
+    });
+    // i18n defaultValue 是中文"剩余 N 秒"，mock 已挂 renderTemplate 替换。
+    // 关键断言：渲染后**不**应该出现原始 `{{seconds}}` 占位符。
+    const html = document.querySelector(".protocol-popup__countdown")?.textContent ?? "";
+    expect(html).not.toMatch(/\{\{seconds\}\}/);
+    // 真实插值结果：mock i18n 没挂"protocol.countdown.remaining"资源,
+    // 走 defaultValue 替换 → "剩余 12 秒"。这里只校验占位符已替换即
+    // 可（mock 默认值是中文，但运行时 i18n 真正会走英文 "12s remaining"）。
+    expect(html).toMatch(/\d/);
+  });
+
+  /* ============== 修复 3：historyAvailable=false 时横幅始终显示 ============== */
+
+  it("修复 3：historyAvailable=false + 命令卡非空 → 横幅**仍**显示，不会被命令列表吞掉", () => {
+    // 关键场景：DB 写失败时内存里已经有当前命令卡。这种场景最需要
+    // 提示用户"本次不会持久化"，但旧实现把判断写成 `commands.length === 0`
+    // 会让横幅静默消失。
+    const service = makeFakeService() as unknown as ProtocolService & {
+      feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
+      feed: ProtocolCommandFeedState;
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const feed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "rec-live",
+          origin: "https://demo.example",
+          requestId: "r-live",
+          method: "identity.get",
+          phase: "waiting_confirm",
+          decision: "pending",
+          status: "waiting_confirm",
+          textSummary: "live",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: false
+    };
+    act(() => {
+      service.feed = feed;
+      for (const l of service.feedListeners) l({ ...feed, commands: feed.commands.slice() });
+    });
+    // 关键断言：横幅**仍**存在。
+    expect(screen.getByText(/历史不可用/)).toBeTruthy();
+    // 命令卡也仍渲染。
+    expect(screen.getByText("live")).toBeTruthy();
   });
 });
 

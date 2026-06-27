@@ -1,8 +1,8 @@
 // packages/plugin-protocol/src/OriginSettingsTray.tsx
 // popup 顶栏 inline 配置面板：编辑当前 origin 的 p2pkh auto-approve +
-// feepool auto-sign + identity / cipher auto-approve 配置。
+// feepool auto-sign + identity / cipher auto-approve + 确认超时。
 //
-// 设计缘由（施工单 002 硬切换：即时生效 + 样式补全）：
+// 设计缘由（施工单 002 硬切换：即时生效 + 样式补全；施工单 003：confirmTimeoutSeconds）：
 //   - popup 是会话级长存；origin 切换时 settings 跟着重读。
 //   - 站点级配置**不**走 settings.registry（settings 路由是 per-user 全局
 //     设置；站点级是 per-origin per-popup-session）。
@@ -13,7 +13,10 @@
 //       * 数字输入：编辑态本地维护字符串；blur / Enter 才提交；
 //       * 提交失败：回滚到上一个已持久化真值，并显示错误；
 //       * 不再有"保存"按钮 / "已保存"提示。
-//   - 数字字段提交时规范化：空串 / 非整数 / 负数 → 0；合法非负整数保留。
+//   - 数字字段提交时规范化：
+//       * 其它数字字段：空串 / 非整数 / 负数 → 0；合法非负整数保留；
+//       * `confirmTimeoutSeconds`（施工单 003）：空串 / 非整数 / <= 0
+//         → 30；正整数保留。不引入"关闭 timeout"语义。
 //   - 切换 origin：直接丢弃未提交编辑态，重新读取新 origin 真值。
 //   - 简单 busy 门禁：提交过程中禁用所有可写字段，避免快速连击的边缘竞争；
 //     **不**引入事务模型、撤销栈、乐观队列、离线缓存。
@@ -42,6 +45,7 @@ function defaultOriginSettings(origin: string): ProtocolOriginSettingsRecord {
     cipherAutoApproveEnabled: false,
     feePoolAutoSignMaxSatoshis: 0,
     feePoolDefaultFundSatoshis: 0,
+    confirmTimeoutSeconds: 30,
     updatedAt: Date.now()
   };
 }
@@ -50,7 +54,8 @@ function defaultOriginSettings(origin: string): ProtocolOriginSettingsRecord {
 type NumberFieldKey =
   | "p2pkhAutoApproveMaxSatoshis"
   | "feePoolAutoSignMaxSatoshis"
-  | "feePoolDefaultFundSatoshis";
+  | "feePoolDefaultFundSatoshis"
+  | "confirmTimeoutSeconds";
 
 type NumberEdits = Partial<Record<NumberFieldKey, string>>;
 
@@ -66,6 +71,23 @@ function normalizeNumber(raw: string): { display: string; value: number } {
   const n = Number(trimmed);
   if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
     return { display: "0", value: 0 };
+  }
+  return { display: String(n), value: n };
+}
+
+/**
+ * `confirmTimeoutSeconds` 规范化（施工单 003 硬切换）：
+ *   - 空串 / 非整数 / `<= 0` → 30（缺省）；
+ *   - 正整数 → 原值；
+ *   - **不**支持"关闭 timeout"语义；不引入小数秒 / 毫秒 / 上限 clamp。
+ * 返回 `{ display, value }`：display 是回填 input 的字符串，value 是落库数字。
+ */
+function normalizeConfirmTimeoutSeconds(raw: string): { display: string; value: number } {
+  const trimmed = raw.trim();
+  if (trimmed === "") return { display: "30", value: 30 };
+  const n = Number(trimmed);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
+    return { display: "30", value: 30 };
   }
   return { display: String(n), value: n };
 }
@@ -204,11 +226,18 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
    * 数字字段提交：规范化 → 幂等检查 → 提交。
    * 幂等：规范化值等于当前 record 真值时不写库（覆盖 blur 与 Enter 连续
    * 触发的边缘情况）。
+   *
+   * `confirmTimeoutSeconds` 走单独的 `normalizeConfirmTimeoutSeconds`：
+   * 非法 → 30，**不**走"非法 → 0"的常规路径。
    */
   function submitNumber(key: NumberFieldKey, display: string): void {
     if (!record) return;
-    const { display: normDisplay, value } = normalizeNumber(display);
-    // 把规范化后的字符串回写到 edits，让 input 显示 "0" 而不是空串 / NaN。
+    const normalized =
+      key === "confirmTimeoutSeconds"
+        ? normalizeConfirmTimeoutSeconds(display)
+        : normalizeNumber(display);
+    const { display: normDisplay, value } = normalized;
+    // 把规范化后的字符串回写到 edits，让 input 显示 "0"/"30" 而不是空串 / NaN。
     setEdits((cur) => ({ ...cur, [key]: normDisplay }));
     if (value === record[key]) return;
     const next: ProtocolOriginSettingsRecord = { ...record, [key]: value };
@@ -360,6 +389,13 @@ export function OriginSettingsTrayInline({ origin, onClose }: OriginSettingsTray
           "feePoolDefaultFundSatoshis",
           t("protocol.originSettings.feePoolDefaultFundSatoshis.label", {
             defaultValue: "Fee-pool default initial fund (satoshis). 0 = unconfigured."
+          })
+        )}
+        {/* ============== 施工单 003：per-origin 确认超时 ============== */}
+        {renderNumberField(
+          "confirmTimeoutSeconds",
+          t("protocol.originSettings.confirmTimeoutSeconds.label", {
+            defaultValue: "确认超时（秒，默认 30）"
           })
         )}
         {error ? (

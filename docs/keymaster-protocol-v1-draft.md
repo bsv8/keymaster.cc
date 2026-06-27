@@ -86,6 +86,16 @@ V1 协议 popup 是一次 window.open 之后**常驻**的会话窗口：
 - 历史按 `event.origin` 归档到 Keymaster 自有的 IndexedDB
   `keymaster.protocol`；不持久化私钥 / 完整密文 / 完整签名 / 解密明文。
 - 命令流历史**不**是协议层审计冷库，仅作为 popup 内的命令上下文展示。
+- **当前请求的交互只发生在命令流最新卡片里**（施工单 003 硬切换）：
+  不存在独立的全页确认 overlay。解锁表单 / 确认按钮 / 取消按钮 /
+  倒计时全部内联在最新卡片 body；历史卡片保持只读 summary。
+- 外部 client 可以通过顶层 `cancel` 报文取消当前正在等待用户处理
+  的 request；被取消的是原 request，由原 request 回
+  `result(ok=false, error.user_rejected)`。详见[公共约定]里的
+  "cancel" 与"当前请求交互在命令流卡片内"段。
+- 当前请求有 per-origin `confirmTimeoutSeconds` 超时（默认 30 秒）；
+  超时走本地 `status = "timed_out"` + `failureReason = "request_timeout"`，
+  对外仍回 `user_rejected`，**不**暴露 `request_timeout`。
 
 具体定义收敛在[公共约定](./keymaster-protocol-common-v1-draft.md) 里
 的"命令流历史"段。

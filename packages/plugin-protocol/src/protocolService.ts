@@ -66,7 +66,7 @@ import {
   type ProtocolStorageDb,
   type VaultService
 } from "@keymaster/contracts";
-import { ProtocolValidationError, parseRequestMessage } from "./protocolValidation.js";
+import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -92,13 +92,26 @@ import {
 const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
 
 /**
+ * 确认超时缺省秒数（施工单 003 硬切换：per-origin 确认超时）。
+ *
+ * 设计缘由：
+ *   - 缺省 30 秒是 per-origin 策略的保守默认值；DB / 缓存 / UI 都按
+ *     "空 / 非整数 / <= 0 → 30" 规范化。
+ *   - 不引入"关闭 timeout"语义：用户明确要 timeout，0 / 负数 / 空 都
+ *     不视为"关闭"，而是回退到缺省 30。这是与现有 p2pkh 上限 / 费用
+ *     池上限"非法 → 0 关闭"语义的对称收口。
+ */
+const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
+
+/**
  * 把 DB 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 DB。
  *
- * 设计缘由（施工单 001 收口：per-origin 自动批准）：
+ * 设计缘由（施工单 001 收口：per-origin 自动批准 + 施工单 003：per-origin 超时）：
  *   - 旧记录（写入时 schema 还没有 `identityAutoApproveEnabled` /
- *     `cipherAutoApproveEnabled`）走归一化后两字段都为 false，不抛错。
- *   - 不做 host 归一化、不做数字字段 clamp；这里只补 boolean 默认与
- *     origin 字段来源校正。
+ *     `cipherAutoApproveEnabled` / `confirmTimeoutSeconds`）走归一化后
+ *     字段都补默认值，不抛错。
+ *   - 不做 host 归一化、不做数字字段 clamp；这里只补 boolean / 数字
+ *     默认与 origin 字段来源校正。
  *   - `origin` 由 caller 显式传入（不读 `rec.origin`）——这样归一化后
  *     的 record 永远与 DB primary key 对齐；调用方传错也能保持一致。
  */
@@ -114,6 +127,10 @@ function normalizeOriginSettings(
     cipherAutoApproveEnabled: rec?.cipherAutoApproveEnabled ?? false,
     feePoolAutoSignMaxSatoshis: rec?.feePoolAutoSignMaxSatoshis ?? 0,
     feePoolDefaultFundSatoshis: rec?.feePoolDefaultFundSatoshis ?? 0,
+    confirmTimeoutSeconds:
+      rec?.confirmTimeoutSeconds && rec.confirmTimeoutSeconds > 0
+        ? rec.confirmTimeoutSeconds
+        : DEFAULT_CONFIRM_TIMEOUT_SECONDS,
     updatedAt: rec?.updatedAt ?? 0
   };
 }
@@ -206,6 +223,43 @@ export class ProtocolServiceImpl implements ProtocolService {
    * `getOriginSettings` 公开接口仍走 storageDb（async + 拿到最新真值）。
    */
   private originCache: Map<string, ProtocolOriginSettingsRecord> = new Map();
+  /**
+   * 确认超时截止时间（epoch ms；null = 没在计时）。
+   *
+   * 设计缘由（施工单 003 硬切换）：
+   *   - 一条 request 只维护一个定时器；进入 `unlocking` 或 `confirming`
+   *     时启动；任何终态都清掉。
+   *   - auto-approve / auto-sign 命中时**不**创建 timer。
+   *   - UI 倒计时直接读 wall-clock 计算 remaining = deadline - now()；
+   *     setInterval 只用来每 1s emitFeed 一次让 UI 重渲染。
+   *   - 修改站点 timeout **不**热更新当前正在倒计时的 request；当前
+   *     request 保留它开始计时时快照下来的 deadline。
+   */
+  private timeoutDeadlineMs: number | null = null;
+  /**
+   * 倒计时 setInterval handle；null 表示没有计时。
+   *
+   * setInterval **不**用作"超时触发器"——超时与否用 wall-clock 比较
+   * deadline 判定。setInterval 仅用来 1s emitFeed() 一次让 UI 倒计时
+   * 重渲染。这样即便 setInterval 抖动也不会把"实际超时时刻"拖后。
+   */
+  private timeoutTickHandle: ReturnType<typeof setInterval> | null = null;
+  /**
+   * 倒计时的原始起点（epoch ms；null = 没在计时）。
+   *
+   * 用于在 cache miss 异步 clamp 时**不**重算起点：deadline 收紧到
+   * `timerStartedAtMs + actualMs`，保证"从进入 unlocking / confirming
+   * 算起"的总等待时长稳定 = DB 真值，不会因为 DB 慢返回而拉长。
+   *
+   * `timerStartedAtMs + timeoutDeadlineMs` 不变（即 deadline 缩短 = 总
+   * 等待时长不变 = 不影响用户对"我已经等了多久"的判断）。
+   */
+  private timerStartedAtMs: number | null = null;
+  /**
+   * 当前正在计时的 request id（用于跨 await 安全判定"这条 timeout 仍属于
+   * 当前 binding"）。一旦 binding 切换 / 收尾 / endSession 都清掉。
+   */
+  private timeoutRecordId: string | null = null;
 
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageDb);
@@ -253,6 +307,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     // popup 卸载 / 刷新 → 所有 pending feepool operation 立即失效。
     // 设计缘由：operationId 不持久化；popup 关闭后 commit 必然 invalid_request。
     this.pendingOps.clear();
+    // 确认超时 timer 也一起清（不持久化、不恢复）。
+    this.clearConfirmTimeout();
     this.emit();
   }
 
@@ -345,8 +401,38 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 调用方可以 sync 调(不 await)也可以 await。listener 端常用 sync 调;
    * unit test 必须 await 以确保 setPhase 已落定。
+   *
+   * 顶层 cancel 报文（施工单 003 硬切换）：
+   *   - cancel 是 transport 控制消息，不是业务 method。
+   *   - 生效条件：当前已绑定 + event.source/origin 与绑定匹配 +
+   *     cancel.id === binding.id + 当前 phase 不是 executing。
+   *   - 任意一条不满足 → 静默忽略（不抛、不回 cancel result）。
+   *   - 生效时复用现有 reject 路径收尾：对外回原 request 的
+   *     `result(ok=false, user_rejected)`，cancel 自己**不**回一条
+   *     新 result。
    */
   async handleMessage(event: MessageEvent): Promise<void> {
+    // cancel 在 binding 之前也可能到来（比如 client 在 popup 还没收到
+    // 第一条 request 时发 cancel）。validation 失败 → 静默忽略。
+    if (looksLikeCancel(event.data)) {
+      let parsed: { id: string };
+      try {
+        parsed = parseCancelMessage(event.data);
+      } catch {
+        return;
+      }
+      // 没绑定 / id 不匹配 → 忽略；这条边界是 cancel 与普通 request
+      // 不一样的关键：cancel **不**是新业务请求，不允许"最接近匹配"。
+      if (!this.binding) return;
+      if (event.source !== this.binding.source) return;
+      if (event.origin !== this.binding.origin) return;
+      if (parsed.id !== this.binding.id) return;
+      // 进入 executing 后 cancel 忽略（不可逆执行，V1 不支持补偿）。
+      if (this.phase === "executing") return;
+      // 命中：复用 reject 路径清 timer + 回 user_rejected + 收尾。
+      await this.finalizeByExternalCancel();
+      return;
+    }
     if (!this.binding) {
       await this.tryAcceptFirstRequest(event);
       return;
@@ -367,6 +453,9 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     const binding = this.binding;
+    // 用户点了"确认"→ 进入 executing → 不再计时；timeout 路径已经在
+    // setInterval 里 wall-clock 比较，这里只需清 handle 即可。
+    this.clearConfirmTimeout();
     this.setPhase("executing");
     this.updateRecordPhase(binding.recordId, "executing");
     let result: MethodResult | null = null;
@@ -424,12 +513,195 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     const binding = this.binding;
+    // 任何终态都统一清 timer：cancel / reject / confirmByUser / timeout
+    // 全部走同一条 cleanup，避免泄漏与误触。
+    this.clearConfirmTimeout();
+    // **关键**：先快照 binding 再立即清 this.binding，使后续并发 cancel /
+    // reject 看到 binding === null 直接早退，保证原 request 最多只回一条
+    // result。
+    this.binding = null;
+    this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
+    this.setPhase("waiting");
     this.updateRecordFinal(binding.recordId, "rejected", "rejected");
+    await this.replyError(binding, "user_rejected", "User rejected");
+  }
+
+  /**
+   * 当前正在计时的截止时间（epoch ms；null = 没在计时）。
+   * UI 倒计时直接 `Math.max(0, ceil((deadline - Date.now()) / 1000))`。
+   *
+   * 注意：
+   *   - popup 卸载 / endSession 时 timer 自然销毁；不做恢复。
+   *   - 修改 `confirmTimeoutSeconds` **不**热更新当前正在倒计时的
+   *     request，deadline 保留它开始计时时快照的值。
+   */
+  confirmDeadlineMs(): number | null {
+    return this.timeoutDeadlineMs;
+  }
+
+  /**
+   * 启动当前 request 的确认超时计时器。
+   *
+   * 时机：进入 `unlocking` 或 `confirming` 时。auto-approve / auto-sign
+   * 命中时**不**调用本方法（不创建 timer）。
+   *
+   * 实现要点：
+   *   - setInterval 只用来 1s emitFeed() 让 UI 倒计时刷新，**不**用作
+   *     "触发器"。真正的 timeout 判定走 wall-clock 比较 deadline。
+   *   - 修改站点 timeout 不影响当前正在倒计时的 request。
+   */
+  private startConfirmTimeout(recordId: string, origin: string): void {
+    this.clearConfirmTimeout();
+    const cached = this.originCache.get(origin);
+    const seconds =
+      cached && cached.confirmTimeoutSeconds > 0
+        ? cached.confirmTimeoutSeconds
+        : DEFAULT_CONFIRM_TIMEOUT_SECONDS;
+    const now = Date.now();
+    // 关键：记录**原始**起点，让后续 cache-miss clamp 用
+    // `timerStartedAtMs + actualMs` 而不是 `Date.now() + actualMs`，
+    // 避免 DB 慢返回时把总等待时长拉长超过 DB 真值。
+    this.timerStartedAtMs = now;
+    this.timeoutDeadlineMs = now + seconds * 1000;
+    this.timeoutRecordId = recordId;
+    this.timeoutTickHandle = setInterval(() => {
+      // 已被其它路径清掉（confirm / reject / cancel / endSession）→ 退出。
+      if (!this.timeoutDeadlineMs || !this.timeoutTickHandle) {
+        this.clearConfirmTimeout();
+        return;
+      }
+      // binding 已经切走（被 fire-and-forget 路径提前收尾）→ 不再干预。
+      if (!this.binding || this.binding.recordId !== this.timeoutRecordId) {
+        this.clearConfirmTimeout();
+        return;
+      }
+      if (Date.now() >= this.timeoutDeadlineMs) {
+        this.clearConfirmTimeout();
+        void this.finalizeByTimeout();
+        return;
+      }
+      // 还在倒计时：emitFeed 让 UI 刷新倒计时数字（用 wall-clock 计算）。
+      this.emitFeed();
+    }, 1000);
+    // 关键：让 popup 立即看到 deadline 变化（之前 setPhase 已经 emit 过一次，
+    // 但 confirmDeadlineMs 仍是 null；这里补 emit() 让 subscribe 重新读）。
+    this.emit();
+  }
+
+  /**
+   * 异步刷 origin cache：如果 cache miss 时 timer 用缺省 30 秒兜底启动，
+   * DB 返回后这里把 deadline clamp 到 DB 真值（如果 DB 值比剩余时间更短）。
+   *
+   * 设计缘由：
+   *   - 硬切换要求 timer 与 setPhase 同步开始，**不**能在 await getOriginSettingsCached
+   *     后再 startConfirmTimeout（DB 慢会让用户无倒计时地等）。
+   *   - cache miss 时 timer 用缺省 30 兜底，**立即**开始倒计时；DB 回来后
+   *     如果真值比剩余时间更短就 clamp down，让"首条新 request 立即吃到
+   *     站点配置"尽量成立。
+   *   - **不** extend：如果 DB 真值比剩余时间更长，保持原 deadline 不变。
+   *     这是施工单 003 收口的"不热更新"原则——timer 一旦开始就稳定。
+   *   - 如果 binding 已切走（reject / confirm / 新 request）→ 静默退出。
+   */
+  private async refreshTimeoutFromOriginConfig(recordId: string, origin: string): Promise<void> {
+    // 触发 cache 加载（cache hit 同步返回；cache miss 走 DB 一次）。
+    const cached = await this.getOriginSettingsCached(origin);
+    // 如果 timer 已被 confirm / reject / cancel / 其它路径清掉 → 退出。
+    if (this.timeoutRecordId !== recordId) return;
+    if (!this.timeoutDeadlineMs || this.timerStartedAtMs === null) return;
+    if (!cached) return;
+    const actualSeconds = cached.confirmTimeoutSeconds;
+    if (!actualSeconds || actualSeconds <= 0) return;
+    const actualMs = actualSeconds * 1000;
+    const currentDeadline = this.timeoutDeadlineMs;
+    // 关键：deadline 算式用 `timerStartedAtMs + actualMs`，**不**用
+    // `Date.now() + actualMs`——后者会让"phase 切换到 DB 返回"的等待
+    // 时长被叠加到 total 上，使总等待时长 > 配置值。
+    const newDeadline = this.timerStartedAtMs + actualMs;
+    // 比较的是"两个 deadline 哪个更早"，不是"actualMs 与 remainingMs"。
+    // 例：默认先起了 30 秒，DB 在第 29 秒才返回 20 秒：
+    //   newDeadline = start + 20s（已过去 9s）vs currentDeadline = start + 30s（剩 1s）
+    //   newDeadline < currentDeadline → 应当 clamp 到 20s（按配置已超时 9s）。
+    // 旧条件 `actualMs < remainingMs`（20000 < 1000 假）→ 不 clamp，
+    // 会让请求继续活到默认 30s 才超时，违反"按配置计时"语义。
+    if (newDeadline < currentDeadline) {
+      this.timeoutDeadlineMs = newDeadline;
+      this.emitFeed();
+      this.emit();
+      // 如果按真实配置早已超时（newDeadline <= now），立即收尾，不等
+      // 下一个 1s tick——这样最大误差是 setInterval tick 间隔（≤1s），
+      // 而不是"1s tick + clamp 延迟"。施工单 003 字面语义"从进入该状态
+      // 开始按配置计时"要求这里立即 finalize。
+      if (newDeadline <= Date.now()) {
+        await this.finalizeByTimeout();
+      }
+    }
+  }
+
+  /** 清 timer / deadline / recordId / 起点；任何终态都走它，幂等。 */
+  private clearConfirmTimeout(): void {
+    if (this.timeoutTickHandle !== null) {
+      clearInterval(this.timeoutTickHandle);
+      this.timeoutTickHandle = null;
+    }
+    this.timeoutDeadlineMs = null;
+    this.timeoutRecordId = null;
+    this.timerStartedAtMs = null;
+  }
+
+  /**
+   * 内部超时收尾：本地标 `status = "timed_out"` + `failureReason =
+   * "request_timeout"`；对外**仍然**回 `user_rejected`（不暴露
+   * `request_timeout`）。
+   *
+   * 走和 `rejectByUser` 同样的收尾路径，但**不**复用 `rejectByUser`
+   * ——`rejectByUser` 把 record 写成 `decision = "rejected"`；
+   * 这里要写成 `decision = "failed"` + `status = "timed_out"` + 真实
+   * 本地 `failureReason = "request_timeout"`。
+   */
+  private async finalizeByTimeout(): Promise<void> {
+    if (!this.binding) return;
+    const binding = this.binding;
+    this.clearConfirmTimeout();
+    // record 终态：phase/decision 走 failed，status 单独标记 timed_out。
+    const rec = this.feedCommands.find((c) => c.id === binding.recordId);
+    if (rec) {
+      rec.phase = "failed";
+      rec.decision = "failed";
+      rec.status = "timed_out";
+      rec.errorCode = "user_rejected";
+      rec.errorMessage = "User rejected";
+      rec.failureReason = "request_timeout";
+      rec.finishedAt = Date.now();
+      rec.updatedAt = rec.finishedAt;
+      this.feedCommands.sort((a, b) => b.updatedAt - a.updatedAt);
+      this.emitFeed();
+      this.persistRecord(rec);
+    }
+    // 对外依然回 user_rejected（不暴露 request_timeout）。
     await this.replyError(binding, "user_rejected", "User rejected");
     this.binding = null;
     this.pendingRequestSnapshot = null;
     this.currentRecordId = null;
     this.setPhase("waiting");
+  }
+
+  /**
+   * 外部 cancel 命中的收尾：与 `rejectByUser` 语义一致，但触发来源是
+   * client 发来的 cancel 报文。本地 record 也标 `rejected`（与本地
+   * 点取消语义一致）；对外回原 request 的 `user_rejected`。
+   */
+  private async finalizeByExternalCancel(): Promise<void> {
+    if (!this.binding) return;
+    const binding = this.binding;
+    this.clearConfirmTimeout();
+    // 先快照 + 立即清 binding，确保后续并发 reject 看到 null → 早退 → 单 result。
+    this.binding = null;
+    this.pendingRequestSnapshot = null;
+    this.currentRecordId = null;
+    this.setPhase("waiting");
+    this.updateRecordFinal(binding.recordId, "rejected", "rejected");
+    await this.replyError(binding, "user_rejected", "User rejected");
   }
 
   /**
@@ -791,8 +1063,22 @@ export class ProtocolServiceImpl implements ProtocolService {
       // manual confirm 路径：identity/cipher 都没命中，或非 identity/cipher method。
       this.setPhase("confirming");
       this.updateRecordPhase(recordId, "waiting_confirm");
+      // 关键：**timer 与 setPhase 同步启动**，不允许先 await DB 再启动。
+      // 之前先 await getOriginSettingsCached 再 startConfirmTimeout 的写法
+      // 会让 DB 慢时用户已经进入确认/解锁态、但 timer 还没开始，实际等待
+      // 时长被无上限拉长。改成：cache 命中直接用 cache；cache miss 用缺省
+      // 30 兜底，立即启动 timer；之后再异步刷一次 cache，如果发现 DB 里
+      // 的值**比当前剩余时间更短**就 clamp deadline（不 extend，符合
+      // 施工单"不热更新"原则）。
+      this.startConfirmTimeout(recordId, event.origin);
+      void this.refreshTimeoutFromOriginConfig(recordId, event.origin);
     } else {
       this.setPhase("unlocking");
+      // 进入 unlocking：同样 timer 同步启动（vault 锁定期间用户迟迟
+      // 不解锁也要按 origin 配置 timeout；与 confirming 共享一个 timer，
+      // 符合"同一条 request 只维护一个定时器"）。
+      this.startConfirmTimeout(recordId, event.origin);
+      void this.refreshTimeoutFromOriginConfig(recordId, event.origin);
     }
   }
 
@@ -2414,6 +2700,17 @@ function looksLikeRequest(v: unknown): boolean {
     o.type === "request" &&
     typeof o.id === "string" &&
     typeof o.method === "string"
+  );
+}
+
+/** 顶层 cancel 报文的轻量形状嗅探（施工单 003 硬切换）。 */
+function looksLikeCancel(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    o.v === PROTOCOL_VERSION &&
+    o.type === "cancel" &&
+    typeof o.id === "string"
   );
 }
 

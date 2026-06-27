@@ -1073,6 +1073,7 @@ describe("ProtocolServiceImpl", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 50000,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -1299,6 +1300,7 @@ describe("ProtocolServiceImpl", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1,
       ...overrides
     });
@@ -1686,6 +1688,7 @@ describe("ProtocolServiceImpl", () => {
     });
     await setOriginViaService(h.service, {
       feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
       feePoolAutoSignMaxSatoshis: 5000
     });
     h.service.startSession();
@@ -1723,6 +1726,7 @@ describe("ProtocolServiceImpl", () => {
     });
     await setOriginViaService(h.service, {
       feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
       feePoolAutoSignMaxSatoshis: 5000
     });
     // 先跑 prepare（auto-sign 内联），pending op 会被清掉（commit 后才清；
@@ -1947,7 +1951,6 @@ describe("ProtocolServiceImpl", () => {
       sdkBase: { txHex: "cc".repeat(120), outputIndex: 0, amount: 10000 }
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
-    await h.storageDb.putFeePool(prior);
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
@@ -2018,7 +2021,6 @@ describe("ProtocolServiceImpl", () => {
       sdkBase: { txHex: "cc".repeat(120), outputIndex: 0, amount: 10000 }
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
-    await h.storageDb.putFeePool(prior);
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
@@ -2179,6 +2181,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: true,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     const got = await service.getOriginSettings(ORIGIN_FRESH);
@@ -2189,9 +2192,11 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     expect(raw?.cipherAutoApproveEnabled).toBe(true);
   });
 
-  it("normalizes old origin record (missing new fields) to identityAutoApproveEnabled=false / cipherAutoApproveEnabled=false", async () => {
+  it("normalizes old origin record (missing new fields) to identityAutoApproveEnabled=false / cipherAutoApproveEnabled=false / confirmTimeoutSeconds=30", async () => {
     const { service, storageDb } = makeService();
     // 模拟旧 schema:直接往 DB 写一条缺新字段的 record。
+    // 注意：这里**故意**不写 `confirmTimeoutSeconds` —— 走的是施工单 003
+    // 归一化路径（缺字段 → 30）。
     await storageDb.putOrigin({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: true,
@@ -2204,11 +2209,13 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     expect(got).not.toBeNull();
     expect(got?.identityAutoApproveEnabled).toBe(false);
     expect(got?.cipherAutoApproveEnabled).toBe(false);
+    expect(got?.confirmTimeoutSeconds).toBe(30);
     // 用共享 storageDb 的第二个 service:cache miss → 异步读 DB → 归一化写 cache。
     const { service: s2 } = makeService(TEST_PUB_HEX, storageDb);
     s2.startSession();
     const loaded = await s2.getOriginSettings(ORIGIN_FRESH);
     expect(loaded?.identityAutoApproveEnabled).toBe(false);
+    expect(loaded?.confirmTimeoutSeconds).toBe(30);
   });
 
   it("identity.get auto-approve (sync cache hit): skips confirming, replies result inline", async () => {
@@ -2221,6 +2228,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2258,6 +2266,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: true,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2296,6 +2305,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: true,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2350,6 +2360,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     // 第二次 service:共享 storageDb,但 cache 是空的——模拟 popup 新开会话。
@@ -2434,6 +2445,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2493,6 +2505,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: true,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2532,6 +2545,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2581,6 +2595,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       cipherAutoApproveEnabled: true,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
     service.startSession();
@@ -2621,6 +2636,702 @@ describe("signCompactSecp256k1", () => {
     expect(sig.length).toBe(64);
     const pub = secp256k1.getPublicKey(hexToBytes(TEST_PRIV_HEX), true);
     expect(verifyCompactSecp256k1(sig, msg, pub)).toBe(true);
+  });
+});
+
+/* ============== 003 硬切换：cancel / timeout ============== */
+
+describe("ProtocolServiceImpl cancel / timeout (003)", () => {
+  it("cancel 命中当前 request：对外回 user_rejected，不另发 cancel result", async () => {
+    const { service, opener, getResult, posted } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-cancel-1",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("confirming");
+    // 外部 cancel 命中
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "cancel",
+          id: "req-cancel-1"
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && r.ok === false) {
+      expect(r.error.code).toBe("user_rejected");
+      expect(r.error.message).toBe("User rejected");
+    }
+    // 关键：cancel 自己**不**发新 result；只回原 request 的 result。
+    expect(posted.result).toHaveLength(1);
+    expect(posted.closing).toHaveLength(0);
+    expect(service.snapshot().phase).toBe("waiting");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "req-cancel-1");
+    expect(card?.decision).toBe("rejected");
+    expect(card?.status).toBe("rejected");
+    // timeout 已在收尾时清掉。
+    expect(service.confirmDeadlineMs()).toBeNull();
+  });
+
+  it("cancel 用错 id：被忽略，当前 request 继续", async () => {
+    const { service, opener, getResult, posted } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-cancel-2",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 错的 id → 忽略。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "cancel",
+          id: "req-wrong-id"
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("confirming");
+    expect(posted.result).toHaveLength(0);
+    // confirmByUser 仍能正常走完。
+    await service.confirmByUser();
+    expect(getResult()?.ok).toBe(true);
+  });
+
+  it("cancel 跨 origin：被忽略", async () => {
+    const { service, opener, getResult, posted } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-cancel-3",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "cancel",
+          id: "req-cancel-3"
+        },
+        "https://evil.example",
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("confirming");
+    expect(posted.result).toHaveLength(0);
+  });
+
+  it("cancel 在没绑定时：被忽略", async () => {
+    const { service, opener, posted } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "cancel",
+          id: "any-id"
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(posted.result).toHaveLength(0);
+    expect(service.snapshot().phase).toBe("waiting");
+  });
+
+  it("confirmDeadlineMs：confirming 时暴露 deadline；confirm 后立刻清掉", async () => {
+    const { service, opener } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
+      updatedAt: 1
+    });
+    service.startSession();
+    expect(service.confirmDeadlineMs()).toBeNull();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-deadline",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    const d = service.confirmDeadlineMs();
+    expect(d).not.toBeNull();
+    expect(d!).toBeGreaterThan(Date.now());
+    await service.confirmByUser();
+    expect(service.confirmDeadlineMs()).toBeNull();
+  });
+
+  it("修复 1（更新语义）：timer 与 setPhase 同步开始；cache miss 兜底 30 秒后 DB 回来会 clamp down", async () => {
+    // 用一个 service 写 origin 配置（confirmTimeoutSeconds=5）到 DB；
+    // 再用第二个 service 模拟"popup 新开会话"——cache 空、storageDb 复用。
+    // 关键不变量：
+    //   1. timer 与 setPhase 同步启动（不被 DB 阻塞）。
+    //   2. DB 异步刷 cache 后，如果 DB 值（5s）< 剩余时间，clamp down 到 5s。
+    //   3. **不** extend：DB 值（60s）> 剩余时间（30s）时保持 30s。
+    //
+    // 用 intent.sign 走纯 manual 路径——identity.get 会在 cache-miss
+    // auto-approve 检查里先 await getOriginSettingsCached 预热 cache，
+    // 让 startConfirmTimeout 启动时直接拿到正确值，无法验证"cache miss
+    // 兜底 → 异步 clamp"的两段语义。
+    const first = makeService();
+    await first.service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 5,
+      updatedAt: 1
+    });
+    const second = makeService(TEST_PUB_HEX, first.storageDb);
+    second.service.startSession();
+    await second.service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-fresh-timeout",
+          method: "intent.sign",
+          params: {
+            aud: ORIGIN,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            contentType: "text/plain",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+          }
+        },
+        ORIGIN,
+        second.opener
+      )
+    );
+    // 不变量 1：timer 已启动（deadline 非 null）。具体值在测试里不
+    // 严格断言——`loadHistoryForOrigin` 也 fire-and-forget 读 origin，
+    // 可能在 startConfirmTimeout 之前/之后写入 cache；DB 一回来就会
+    // clamp。最终 deadline 一定命中 DB 真值（不变量 2）。
+    expect(second.service.confirmDeadlineMs()).not.toBeNull();
+    // 不变量 2：等 DB 异步刷 cache + clamp down；deadline 必须 ≤ 6s。
+    await new Promise((r) => setTimeout(r, 30));
+    const clampedRemaining = second.service.confirmDeadlineMs()! - Date.now();
+    expect(clampedRemaining).toBeLessThan(6_000);
+    expect(clampedRemaining).toBeGreaterThan(4_000);
+  });
+
+  it("修复 1（不 extend）：cache miss 兜底 30s，DB 返回 60s 时 timer 仍保持 ~30s", async () => {
+    // 与"不变量 4"对齐：施工单 003 收口明确"修改站点 timeout 不热更新
+    // 当前正在倒计时的 request"。cache miss 兜底 30s 后 DB 即使返回更
+    // 大值，timer 也**不** extend。同样用 intent.sign 走纯 manual 路径。
+    const first = makeService();
+    await first.service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 60,
+      updatedAt: 1
+    });
+    const second = makeService(TEST_PUB_HEX, first.storageDb);
+    second.service.startSession();
+    await second.service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-no-extend",
+          method: "intent.sign",
+          params: {
+            aud: ORIGIN,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            contentType: "text/plain",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+          }
+        },
+        ORIGIN,
+        second.opener
+      )
+    );
+    // 等 DB 异步刷一次。
+    await new Promise((r) => setTimeout(r, 30));
+    const remaining = second.service.confirmDeadlineMs()! - Date.now();
+    // 仍保持 ~30s，没有 extend 到 60s。
+    expect(remaining).toBeGreaterThan(29_000);
+    expect(remaining).toBeLessThan(31_000);
+  });
+
+  it("修复 1（同步保证）：cache miss + 慢 DB 也不延迟 timer 启动", async () => {
+    // 用一个永远不 resolve 的 storageDb getOrigin，模拟"DB 慢到永远没
+    // 响应"。timer 必须仍能启动——popup 用户不会无倒计时地等。
+    // intent.sign 走纯 manual 路径，不走 cache-miss auto-approve。
+    const slowDb: ProtocolStorageDb = {
+      async putCommand() { /* noop */ },
+      async getCommand() { return null; },
+      async listCommandsByOrigin() { return []; },
+      async getOrigin() {
+        // 永远 hang——模拟极端慢的 DB。
+        return new Promise(() => { /* never resolves */ });
+      },
+      async putOrigin() { /* noop */ },
+      async listOrigins() { return []; },
+      async getFeePool() { return null; },
+      async putFeePool() { /* noop */ },
+      async deleteFeePool() { /* noop */ },
+      async listFeePoolsByOrigin() { return []; }
+    };
+    const { service, opener } = makeService(TEST_PUB_HEX, slowDb);
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-slow",
+          method: "intent.sign",
+          params: {
+            aud: ORIGIN,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            contentType: "text/plain",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 即便 DB getOrigin 永远 hang，timer 必须已经启动（兜底 30s）。
+    expect(service.confirmDeadlineMs()).not.toBeNull();
+    const remaining = service.confirmDeadlineMs()! - Date.now();
+    expect(remaining).toBeGreaterThan(29_000);
+    expect(remaining).toBeLessThan(31_000);
+  });
+
+  it("修复 1（总时长稳定）：DB 延迟 2s 返回 + 真值 5s，clamp 后总等待 ≈ 5s（不是 ~7s）", async () => {
+    // 关键场景：DB 慢返回 + DB 真值比兜底小。
+    // 旧实现 `deadline = Date.now() + actualMs` 会让总等待 ≈ 2s + 5s = 7s。
+    // 正确实现：deadline = 原始起点 + actualMs = 5s（与 DB 延迟无关）。
+    let resolveGetOrigin!: (record: ProtocolOriginSettingsRecord | null) => void;
+    const stubDb: ProtocolStorageDb = {
+      async putCommand() { /* noop */ },
+      async getCommand() { return null; },
+      async listCommandsByOrigin() { return []; },
+      async getOrigin() {
+        // 可控延迟——先挂住 2 秒后再返回。
+        return new Promise<ProtocolOriginSettingsRecord | null>((resolve) => {
+          resolveGetOrigin = resolve;
+        });
+      },
+      async putOrigin() { /* noop */ },
+      async listOrigins() { return []; },
+      async getFeePool() { return null; },
+      async putFeePool() { /* noop */ },
+      async deleteFeePool() { /* noop */ },
+      async listFeePoolsByOrigin() { return []; }
+    };
+    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    service.startSession();
+    const phaseStartMs = Date.now();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-slow-clamp",
+          method: "intent.sign",
+          params: {
+            aud: ORIGIN,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            contentType: "text/plain",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 兜底：deadline = phaseStart + 30s。
+    expect(service.confirmDeadlineMs()).not.toBeNull();
+    const deadlineBefore = service.confirmDeadlineMs()!;
+    expect(deadlineBefore - phaseStartMs).toBeGreaterThan(29_000);
+    expect(deadlineBefore - phaseStartMs).toBeLessThan(31_000);
+    // 模拟 DB 延迟 2 秒后返回 5s 真值。
+    await new Promise((r) => setTimeout(r, 2000));
+    resolveGetOrigin({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 5,
+      updatedAt: 1
+    });
+    // 等 microtask 队列消化 refreshTimeoutFromOriginConfig 的 await 续延。
+    await new Promise((r) => setTimeout(r, 50));
+    const deadlineAfter = service.confirmDeadlineMs()!;
+    // 关键：deadline 必须 = 原始 phase 起点 + 5s，**不**能 = phase 起点 + 30s
+    // 也不**能** = phase 起点 + 2s（DB 延迟） + 5s（配置）。
+    expect(deadlineAfter - phaseStartMs).toBeGreaterThan(4_000);
+    expect(deadlineAfter - phaseStartMs).toBeLessThan(5_500);
+  });
+
+  it("修复 clamp 条件：DB 在第 29s 返回 20s 真值（newDeadline < currentDeadline），应立即 clamp + finalize", async () => {
+    // 用户给的例子：默认 30s 兜底启动，DB 在第 29s 返回 confirmTimeoutSeconds=20。
+    // 此时 newDeadline = start + 20s（已过去 9s），currentDeadline = start + 30s（剩 1s）。
+    // 旧条件 `actualMs < remainingMs`（20000 < 1000 假）→ 不 clamp，请求继续活到 30s。
+    // 新条件 `newDeadline < currentDeadline`（T+20 < T+30 真）→ clamp 到 20s，
+    // 且 newDeadline 已落入过去 → 立即 finalizeByTimeout（不等下个 1s tick）。
+    // 用 vi.useFakeTimers 加速验证（不真等 29s）。
+    vi.useFakeTimers();
+    let resolveGetOrigin!: (record: ProtocolOriginSettingsRecord | null) => void;
+    const stubDb: ProtocolStorageDb = {
+      async putCommand() { /* noop */ },
+      async getCommand() { return null; },
+      async listCommandsByOrigin() { return []; },
+      async getOrigin() {
+        return new Promise<ProtocolOriginSettingsRecord | null>((resolve) => {
+          resolveGetOrigin = resolve;
+        });
+      },
+      async putOrigin() { /* noop */ },
+      async listOrigins() { return []; },
+      async getFeePool() { return null; },
+      async putFeePool() { /* noop */ },
+      async deleteFeePool() { /* noop */ },
+      async listFeePoolsByOrigin() { return []; }
+    };
+    try {
+      const { service, opener, getResult, posted } = makeService(TEST_PUB_HEX, stubDb);
+      service.startSession();
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "req-late-clamp",
+            method: "intent.sign",
+            params: {
+              aud: ORIGIN,
+              iat: 1,
+              exp: 2,
+              text: "x",
+              contentType: "text/plain",
+              content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            }
+          },
+          ORIGIN,
+          opener
+        )
+      );
+      // 默认 30s 兜底启动。
+      expect(service.confirmDeadlineMs()).not.toBeNull();
+      expect(service.confirmDeadlineMs()! - Date.now()).toBeGreaterThan(29_000);
+      // 推进 29s 时间。
+      await vi.advanceTimersByTimeAsync(29_000);
+      // 此时 currentDeadline 距 now ≈ 1s；DB 返回 20s 真值。
+      // 用 setSystemDate/系统时间?  不——fake timers 默认 mock Date.now。
+      // 先确认 deadline 仍剩约 1s（fake timer 下 Date.now 已前进 29s）。
+      const remainingBefore = service.confirmDeadlineMs()! - Date.now();
+      expect(remainingBefore).toBeGreaterThan(0);
+      expect(remainingBefore).toBeLessThan(2_000);
+      // DB 返回 20s 真值。
+      resolveGetOrigin({
+        origin: ORIGIN,
+        p2pkhAutoApproveEnabled: false,
+        p2pkhAutoApproveMaxSatoshis: 0,
+        identityAutoApproveEnabled: false,
+        cipherAutoApproveEnabled: false,
+        feePoolAutoSignMaxSatoshis: 0,
+        feePoolDefaultFundSatoshis: 0,
+        confirmTimeoutSeconds: 20,
+        updatedAt: 1
+      });
+      // 让 microtask + 任何新创建的 setInterval 都跑起来。
+      await vi.advanceTimersByTimeAsync(0);
+      // 关键断言：finalizeByTimeout 必须**已经**被触发：
+      //   1) 对外回了 user_rejected result；
+      //   2) phase 回到 waiting；
+      //   3) binding 已清，deadline 已清。
+      // 旧条件（actualMs < remainingMs）下，clamp 不会发生，最终只有
+      // 下次 setInterval tick（再过约 1s）才会触发 finalize——但这里
+      // 我们已把时间推进到 start+29s + 0，**没**再推进 1s，tick 不会
+      // 触发。所以这个测试会卡住旧 bug。
+      const r = getResult();
+      expect(r?.ok).toBe(false);
+      if (r && r.ok === false) {
+        expect(r.error.code).toBe("user_rejected");
+      }
+      expect(service.snapshot().phase).toBe("waiting");
+      expect(service.confirmDeadlineMs()).toBeNull();
+      // record 终态：status=timed_out / failureReason=request_timeout。
+      const card = service.feedSnapshot().commands.find(
+        (c) => c.requestId === "req-late-clamp"
+      );
+      expect(card?.status).toBe("timed_out");
+      expect(card?.failureReason).toBe("request_timeout");
+      expect(posted.result).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("timeout 默认 30 秒：confirmTimeoutSeconds 未配置时用缺省", async () => {
+    const { service, opener } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-default-timeout",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    const d = service.confirmDeadlineMs();
+    expect(d).not.toBeNull();
+    const remaining = d! - Date.now();
+    // 默认 30 秒 → remaining ∈ (29s, 31s)
+    expect(remaining).toBeGreaterThan(29_000);
+    expect(remaining).toBeLessThan(31_000);
+  });
+
+  it("timeout 使用 origin 配置值：confirmTimeoutSeconds=5 时 remaining < 6s", async () => {
+    const { service, opener } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 5,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-cfg-timeout",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    const remaining = service.confirmDeadlineMs()! - Date.now();
+    expect(remaining).toBeLessThan(6_000);
+    expect(remaining).toBeGreaterThan(4_000);
+  });
+
+  it("timeout 后本地 status=timed_out / failureReason=request_timeout，对外 user_rejected", async () => {
+    const { service, opener, getResult } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 1,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-timeout",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 等 1.5s 让 timer 到点。
+    await new Promise((r) => setTimeout(r, 1500));
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && r.ok === false) {
+      expect(r.error.code).toBe("user_rejected");
+      expect(r.error.message).toBe("User rejected");
+    }
+    expect(service.snapshot().phase).toBe("waiting");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "req-timeout");
+    expect(card?.decision).toBe("failed");
+    expect(card?.status).toBe("timed_out");
+    expect(card?.failureReason).toBe("request_timeout");
+    expect(card?.errorCode).toBe("user_rejected");
+    // 关键：**不**对外暴露 request_timeout。
+    if (r && r.ok === false) {
+      expect(r.error.code).not.toBe("request_timeout");
+    }
+  });
+
+  it("本地取消与外部 cancel 并发时：first-wins，原 request 最多回一条 result", async () => {
+    const { service, opener, getResult, posted } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-race",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 同时发：本地 reject + 外部 cancel。两条都期望幂等收尾。
+    await Promise.all([
+      service.rejectByUser(),
+      service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "cancel",
+            id: "req-race"
+          },
+          ORIGIN,
+          opener
+        )
+      )
+    ]);
+    // 最多只回 1 条 result（cancel 不单独回包）。
+    expect(posted.result).toHaveLength(1);
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && r.ok === false) {
+      expect(r.error.code).toBe("user_rejected");
+    }
+  });
+
+  it("confirmByUser 清 timer 并发执行；timeout 回调在 executing 后到达应放弃", async () => {
+    // 模拟"用户点了确认，但 timer 在执行中也到点"——timer 回调发现
+    // phase === "executing" / binding 不存在 → 放弃，不双回包。
+    const { service, opener, getResult, posted } = makeService();
+    await service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 1,
+      updatedAt: 1
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-confirm-race",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 立即点确认。clearConfirmTimeout 同步生效。
+    await service.confirmByUser();
+    expect(service.confirmDeadlineMs()).toBeNull();
+    expect(getResult()?.ok).toBe(true);
+    // 等"假装 timer 回调到点"——但 timer 已被清；service 不会发第二条 result。
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(posted.result).toHaveLength(1);
+    expect(service.snapshot().phase).toBe("waiting");
+  });
+
+  it("endSession 清 timer", async () => {
+    const { service, opener } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-end",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.confirmDeadlineMs()).not.toBeNull();
+    service.endSession();
+    expect(service.confirmDeadlineMs()).toBeNull();
   });
 });
 

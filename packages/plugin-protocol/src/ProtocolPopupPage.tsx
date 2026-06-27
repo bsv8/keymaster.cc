@@ -1,39 +1,31 @@
 // packages/plugin-protocol/src/ProtocolPopupPage.tsx
 // 对外协议 popup 页面。
 //
-// 设计缘由（施工单 002 硬切换：popup 复用与命令流 + p2pkh/feepool）：
+// 设计缘由（施工单 003 硬切换：confirm 收口到历史卡 + 外部 cancel + 超时）：
+//   - 页面**只**渲染顶栏 / 站点配置面板 / 命令流；不再保留独立全页
+//     确认 overlay。
+//   - 当前请求的交互（解锁表单 / 确认按钮 / 取消按钮 / 倒计时）全部
+//     收口到命令流最新卡片里（`ProtocolCommandFeed.CommandCard`
+//     内部按 phase 渲染交互体）。
+//   - 历史卡片保持只读 summary；不允许出现第二套"当前请求" UI。
 //   - 页面只负责渲染态 + 转交用户操作给 service；密码学 / message 收发
 //     / 校验 / 签名 / 加解密一律不进组件。
-//   - 页面挂载时 startSession() 一次；之后通过 subscribe 拿到 snapshot
-//     驱动渲染。
+//   - 顶栏 sticky：当前 origin / 站点配置按钮 / 关闭 / 回到最新 / 进入钱包。
 //   - popup 是**会话级**长存：单条 request 完成后 phase 回到 waiting，
 //     不会自动关窗；`closing` 由 pagehide / beforeunload 路径发出。
-//   - 顶部 sticky 顶栏：当前 origin / 当前 phase / 站点配置按钮 / 关闭 / 回到最新。
-//   - 中间是命令流 feed：最新命令展开，历史命令默认折叠。
-//   - `confirming` / `unlocking` / `executing` 时当前请求以浮层形式出现
-//     （feed 顶部占位）。`p2pkh.transfer` auto-approve 命中时不显示
-//     ConfirmView（`currentRequestAutoApproved()` 为 true 时跳过 overlay）。
-//   - 收到第一条 request 时按 exact origin 载入历史。
 //   - 文案中文；错误 message 原样显示英文。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useI18n } from "@keymaster/runtime";
 import type {
-  CipherDecryptParams,
-  CipherEncryptParams,
-  FeepoolCommitParams,
-  FeepoolPrepareParams,
-  IdentityGetParams,
-  IntentSignParams,
   MethodParams,
-  P2pkhTransferParams,
   ProtocolCommandFeedState,
   ProtocolMethod,
   ProtocolService,
   ProtocolSessionSnapshot
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { useCapability } from "@keymaster/runtime";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
 import { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
 
@@ -67,6 +59,9 @@ export function ProtocolPopupPage() {
     service.currentRequest()
   );
   const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
+  const [confirmDeadlineMs, setConfirmDeadlineMs] = useState<number | null>(() =>
+    service.confirmDeadlineMs()
+  );
   const feedTopRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -93,6 +88,7 @@ export function ProtocolPopupPage() {
       });
       setSnap(next);
       setRequest(service.currentRequest());
+      setConfirmDeadlineMs(service.confirmDeadlineMs());
     });
     const offFeed = service.subscribeFeed((next) => {
       console.debug("[protocol-popup] feed", {
@@ -138,6 +134,17 @@ export function ProtocolPopupPage() {
     };
   }, [service]);
 
+  // 倒计时：只要 confirmDeadlineMs 非 null，就每秒触发一次 re-render 让
+  // UI 重新算"剩余秒数"。setInterval 仅用于 re-render 触发，**不**用作
+  // 超时触发器——超时真值在 service 内部用 wall-clock 比较 deadline。
+  useEffect(() => {
+    if (confirmDeadlineMs === null) return;
+    const id = setInterval(() => {
+      setConfirmDeadlineMs(service.confirmDeadlineMs());
+    }, 1000);
+    return () => clearInterval(id);
+  }, [confirmDeadlineMs, service]);
+
   // 新命令出现时自动滚回顶部。jsdom 不支持 scrollIntoView；显式检测
   // 后再调，避免单测报 `scrollIntoView is not a function`。
   useEffect(() => {
@@ -150,12 +157,12 @@ export function ProtocolPopupPage() {
     }
   }, [feed.commands.length, feed.currentOrigin]);
 
-  // p2pkh.transfer auto-approve 命中时 popup **不**显示 ConfirmView；
-  // service 在 `tryAcceptFirstRequest` 里已经把 phase 推到 executing
-  // 并启动内联执行；这里直接跳过 overlay，只让 feed 显示最新卡片。
-  const showConfirmingOverlay =
-    !service.currentRequestAutoApproved?.() &&
-    (snap.phase === "confirming" || snap.phase === "unlocking" || snap.phase === "executing");
+  // 计算剩余秒数。clamp 到 >= 0；deadline 已过但 service 还在做 timeout
+  // 收尾的窗口期内 UI 仍能稳定显示 0。
+  const remainingSeconds = useMemo(() => {
+    if (confirmDeadlineMs === null) return null;
+    return Math.max(0, Math.ceil((confirmDeadlineMs - Date.now()) / 1000));
+  }, [confirmDeadlineMs]);
 
   return (
     <div className="protocol-popup">
@@ -210,296 +217,40 @@ export function ProtocolPopupPage() {
         />
       ) : null}
       <div className="protocol-popup__content">
-        {snap.phase === "error" ? <ErrorView t={t} message={t("protocol.error")} /> : null}
-        {showConfirmingOverlay ? (
-          <CurrentRequestPanel t={t} service={service} snap={snap} request={request} />
-        ) : null}
-        <ProtocolCommandFeed t={t} feed={feed} />
-      </div>
-    </div>
-  );
-}
-
-/* ============== 当前进行中的命令 ============== */
-
-function CurrentRequestPanel({
-  t,
-  service,
-  snap,
-  request
-}: {
-  t: (k: string, v?: { defaultValue?: string }) => string;
-  service: ProtocolService;
-  snap: ProtocolSessionSnapshot;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> } | null;
-}) {
-  if (snap.phase === "unlocking") {
-    return <UnlockView t={t} service={service} />;
-  }
-  if (snap.phase === "executing") {
-    return <ExecutingView t={t} />;
-  }
-  if (snap.phase === "closing") {
-    return <DoneView t={t} />;
-  }
-  // confirming
-  if (!request) {
-    return null;
-  }
-  return <ConfirmView t={t} service={service} request={request} />;
-}
-
-function UnlockView({
-  t,
-  service
-}: {
-  t: (k: string, v?: { defaultValue?: string }) => string;
-  service: ProtocolService;
-}) {
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const vault = useCapability<{
-    status(): "booting" | "uninitialized" | "locked" | "unlocked";
-    onStatusChange(handler: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void): () => void;
-    unlock(password: string): Promise<void>;
-  }>("vault.service");
-  useEffect(() => {
-    return vault.onStatusChange((s) => {
-      if (s === "unlocked") {
-        (service as unknown as { resumeAfterUnlock?: () => void }).resumeAfterUnlock?.();
-      }
-    });
-  }, [vault, service]);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      await vault.unlock(password);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t("protocol.unlock.err.failed", { defaultValue: "解锁失败" }));
-    } finally {
-      setBusy(false);
-      setPassword("");
-    }
-  }
-  async function cancel() {
-    await service.rejectByUser();
-  }
-  return (
-    <div className="protocol-popup protocol-popup--unlock">
-      <PageHeader
-        title={t("protocol.unlock.title", { defaultValue: "解锁后继续" })}
-        description={t("protocol.unlock.desc", {
-          defaultValue: "此协议请求需要先解锁本地 Vault。解锁成功后请求会自动继续。"
-        })}
-      />
-      <form onSubmit={submit} className="protocol-popup__form">
-        <TextInput
-          label={t("protocol.unlock.password", { defaultValue: "密码" })}
-          type="password"
-          autoComplete="current-password"
-          value={password}
-          onChange={(e) => setPassword(e.currentTarget.value)}
-          error={error ?? undefined}
+        {snap.phase === "error" ? <SessionErrorBanner t={t} /> : null}
+        <ProtocolCommandFeed
+          t={t}
+          feed={feed}
+          service={service}
+          snap={snap}
+          request={request}
+          remainingSeconds={remainingSeconds}
         />
-        <div className="protocol-popup__actions">
-          <Button type="submit" loading={busy} disabled={!password}>
-            {t("protocol.unlock.submit", { defaultValue: "解锁" })}
-          </Button>
-          <Button variant="ghost" onClick={cancel} disabled={busy}>
-            {t("protocol.unlock.cancel", { defaultValue: "取消" })}
-          </Button>
-        </div>
-      </form>
-    </div>
-  );
-}
-
-function ConfirmView({
-  t,
-  service,
-  request
-}: {
-  t: (k: string, v?: { defaultValue?: string }) => string;
-  service: ProtocolService;
-  request: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> };
-}) {
-  const methodKey = `protocol.confirm.method.${request.method}`;
-  const methodLabel = t(methodKey, { defaultValue: request.method });
-  const identity = request.method === "identity.get" ? (request.params as IdentityGetParams) : null;
-  const sign = request.method === "intent.sign" ? (request.params as IntentSignParams) : null;
-  const enc = request.method === "cipher.encrypt" ? (request.params as CipherEncryptParams) : null;
-  const dec = request.method === "cipher.decrypt" ? (request.params as CipherDecryptParams) : null;
-  const p2pkh = request.method === "p2pkh.transfer" ? (request.params as P2pkhTransferParams) : null;
-  const feepoolPrepare =
-    request.method === "feepool.prepare" ? (request.params as FeepoolPrepareParams) : null;
-  const feepoolCommit =
-    request.method === "feepool.commit" ? (request.params as FeepoolCommitParams) : null;
-  const aud = identity?.aud ?? sign?.aud ?? null;
-  const text = identity?.text ?? sign?.text ?? enc?.text ?? dec?.text ?? "";
-  const claims = identity?.claims ?? [];
-  const iat = identity?.iat ?? sign?.iat;
-  const exp = identity?.exp ?? sign?.exp;
-  const contentType = sign?.contentType ?? enc?.contentType;
-  const contentBytes =
-    sign?.content?.bytes.byteLength ?? enc?.content?.bytes.byteLength ?? dec?.cipherbytes?.bytes.byteLength ?? 0;
-  return (
-    <div className="protocol-popup protocol-popup--confirm">
-      <PageHeader
-        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
-        description={methodLabel}
-      />
-      <dl className="protocol-popup__list">
-        {aud ? (
-          <>
-            <dt>{t("protocol.confirm.origin", { defaultValue: "来源站点" })}</dt>
-            <dd>
-              <code>{aud}</code>
-            </dd>
-          </>
-        ) : null}
-        {text ? (
-          <>
-            <dt>{t("protocol.confirm.text", { defaultValue: "提示文案" })}</dt>
-            <dd>{text}</dd>
-          </>
-        ) : null}
-        {claims.length > 0 ? (
-          <>
-            <dt>{t("protocol.confirm.claims", { defaultValue: "请求的 claims" })}</dt>
-            <dd>
-              <ul>
-                {claims.map((c) => (
-                  <li key={c}>
-                    <code>{c}</code>
-                  </li>
-                ))}
-              </ul>
-            </dd>
-          </>
-        ) : null}
-        {contentType ? (
-          <>
-            <dt>{t("protocol.confirm.contentType", { defaultValue: "内容类型" })}</dt>
-            <dd>
-              <code>{contentType}</code>（{contentBytes} bytes）
-            </dd>
-          </>
-        ) : null}
-        {iat !== undefined && exp !== undefined ? (
-          <>
-            <dt>{t("protocol.confirm.window", { defaultValue: "有效期" })}</dt>
-            <dd>
-              <code>
-                {iat} → {exp}
-              </code>
-            </dd>
-          </>
-        ) : null}
-        {/* ============== 施工单 002 硬切换：p2pkh.transfer ============== */}
-        {p2pkh ? (
-          <>
-            <dt>{t("protocol.confirm.p2pkh.recipient", { defaultValue: "收款地址" })}</dt>
-            <dd>
-              <code>{p2pkh.recipientAddress}</code>
-            </dd>
-            <dt>{t("protocol.confirm.p2pkh.amount", { defaultValue: "金额" })}</dt>
-            <dd>
-              <code>{p2pkh.amountSatoshis}</code> sats
-            </dd>
-            {p2pkh.feeRateSatoshisPerKb ? (
-              <>
-                <dt>{t("protocol.confirm.p2pkh.feeRate", { defaultValue: "费率 (sat/kB)" })}</dt>
-                <dd>
-                  <code>{p2pkh.feeRateSatoshisPerKb}</code>
-                </dd>
-              </>
-            ) : null}
-          </>
-        ) : null}
-        {/* ============== 施工单 002 硬切换：feepool.prepare ============== */}
-        {feepoolPrepare ? (
-          <>
-            <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
-            <dd>
-              <code>{shortHex(feepoolPrepare.counterpartyPublicKeyHex, 12)}</code>
-            </dd>
-            <dt>{t("protocol.confirm.feepool.amount", { defaultValue: "金额" })}</dt>
-            <dd>
-              <code>{feepoolPrepare.amountSatoshis}</code> sats
-            </dd>
-          </>
-        ) : null}
-        {/* ============== 施工单 002 硬切换：feepool.commit ============== */}
-        {feepoolCommit ? (
-          <>
-            <dt>{t("protocol.confirm.feepool.operationId", { defaultValue: "操作 id" })}</dt>
-            <dd>
-              <code>{feepoolCommit.operationId}</code>
-            </dd>
-            <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
-            <dd>
-              <code>{shortHex(feepoolCommit.counterpartyPublicKeyHex, 12)}</code>
-            </dd>
-          </>
-        ) : null}
-      </dl>
-      <div className="protocol-popup__actions">
-        <Button onClick={() => service.confirmByUser()}>
-          {t("protocol.confirm.confirm", { defaultValue: "确认" })}
-        </Button>
-        <Button
-          variant="ghost"
-          onClick={async () => {
-            await service.rejectByUser();
-          }}
-        >
-          {t("protocol.confirm.cancel", { defaultValue: "取消" })}
-        </Button>
       </div>
     </div>
   );
 }
 
-/** 截短 hex 显示（feepool 公钥 66 字符太长）。 */
-function shortHex(hex: string, head: number): string {
-  if (hex.length <= head * 2 + 3) return hex;
-  return `${hex.slice(0, head)}…${hex.slice(-head)}`;
-}
+/* ============== 会话级错误（不属于"当前请求" overlay） ============== */
 
-function ExecutingView({ t }: { t: (k: string, v?: { defaultValue?: string }) => string }) {
+/**
+ * popup 启动时如果 opener 缺失 / 不可用，service 会把 phase 推到 `error`。
+ * 这不是某条 request 的错误，而是 session 级错误。
+ *
+ * 施工单 003 收口：popup 主体**不再保留**独立的"当前请求全页 overlay"，
+ * 但 session-level 错误与 request-level 错误是两件事。本组件只是 feed
+ * 上方一个紧凑的 banner，**不**是全页遮罩。
+ */
+function SessionErrorBanner({
+  t
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+}) {
   return (
-    <div className="protocol-popup protocol-popup--executing">
-      <PageHeader
-        title={t("protocol.confirm.title", { defaultValue: "确认请求" })}
-        description={t("protocol.executing", { defaultValue: "处理中…" })}
-      />
-    </div>
-  );
-}
-
-function DoneView({ t }: { t: (k: string, v?: { defaultValue?: string }) => string }) {
-  // 兼容旧 phase 名字的极端情形：当前 V1 不再进入 closing，
-  // 但若以后 phase 名字又扩，这里仍允许渲染一个静态收尾提示。
-  return (
-    <div className="protocol-popup protocol-popup--done">
-      <PageHeader
-        title={t("protocol.done.title", { defaultValue: "结果已回传" })}
-        description={t("protocol.done", { defaultValue: "请求已完成并回传给外部站点。" })}
-      />
-    </div>
-  );
-}
-
-function ErrorView({ t, message }: { t: (k: string, v?: { defaultValue?: string }) => string; message: string }) {
-  return (
-    <div className="protocol-popup protocol-popup--error">
-      <PageHeader
-        title={t("protocol.error", { defaultValue: "请求失败" })}
-        description={`${message}。请回到外部 demo 查看控制台日志，定位失败步骤。`}
-      />
+    <div className="protocol-popup__session-error" role="alert">
+      {t("protocol.sessionError.banner", {
+        defaultValue: "无法连接到外部站点。请回到来源站点查看控制台日志。"
+      })}
     </div>
   );
 }

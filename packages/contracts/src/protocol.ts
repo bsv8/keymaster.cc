@@ -118,6 +118,30 @@ export interface ProtocolClosingMessage {
   type: "closing";
 }
 
+/* ============== 顶层 cancel 报文（施工单 003 硬切换） ============== */
+
+/**
+ * 顶层 `cancel` 报文。
+ *
+ * 设计缘由（施工单 003）：
+ *   - cancel 是 transport 控制消息，**不是**业务 method；不允许把它做成
+ *     `method: "cancel"` 的伪 request，也不允许给 cancel 单独配 result。
+ *   - `cancel.id` 指向**已经发出**的 `request.id`；popup 只尝试取消
+ *     当前会话中绑定的那条 request。被取消的是原 request，所以最终
+ *     仍由原 request 回 `result(ok=false)`。
+ *   - cancel 自己**不**回一条新 result；这条不变量是 cancel 与普通
+ *     request 的关键边界。
+ *   - 生效条件由 service 在 `handleMessage` 路径里做集中判定：
+ *     当前已绑定 + source/origin 匹配 + id 匹配 + 当前 request 还没
+ *     进入不可逆 executing 终态。
+ */
+export interface ProtocolCancelMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "cancel";
+  /** 要取消的原 `request.id`。 */
+  id: string;
+}
+
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
   v: typeof PROTOCOL_VERSION;
@@ -165,7 +189,8 @@ export type ProtocolMessage =
   | ProtocolReadyMessage
   | ProtocolRequestMessage
   | ProtocolResultMessage
-  | ProtocolClosingMessage;
+  | ProtocolClosingMessage
+  | ProtocolCancelMessage;
 
 /* ============== identity.get ============== */
 
@@ -523,6 +548,22 @@ export interface ProtocolOriginSettingsRecord {
    * 默认 0；0 = "未配置"，首次会要求用户在 popup 内补。
    */
   feePoolDefaultFundSatoshis: number;
+  /**
+   * 确认超时秒数（施工单 003 硬切换：per-origin 确认超时）。
+   *
+   * 设计缘由：
+   *   - exact origin 级别的策略字段；不放在全局 localStorage / 不放在
+   *     系统级 /settings/protocol。
+   *   - 缺省值 `30`（正整数秒）；空串 / 非整数 / `<= 0` 在 UI 提交路径
+   *     上规范化为 `30`。
+   *   - 起点：请求进入 `unlocking` 或 `confirming`。终点：用户确认 /
+   *     取消 / client 发来 cancel / 进入 executing / 倒计时到点。
+   *   - 改动只影响下一条新 request；当前正在倒计时的请求保留它开始
+   *     计时时快照下来的 timeout 值，**不**做热更新。
+   *   - 旧 origin 记录缺这个字段时，由 service 层 `normalizeOriginSettings`
+   *     补 `30`，不扫库迁移，不升 DB version。
+   */
+  confirmTimeoutSeconds: number;
   updatedAt: number;
 }
 
@@ -591,6 +632,7 @@ export type ProtocolFailureReason =
   | "fee_pool_db_unavailable"
   | "unknown_operation"
   | "cross_origin_operation"
+  | "request_timeout"
   | "internal_error";
 
 /**
@@ -689,7 +731,17 @@ export interface ProtocolCommandRecord {
   phase: ProtocolCommandPhase;
   /** 终态决策；中间态为 `pending`。 */
   decision: ProtocolCommandDecision;
-  /** 与 `decision` 类似的稳定字符串，给 UI 直接展示用。 */
+  /** 与 `decision` 类似的稳定字符串，给 UI 直接展示用。
+   *
+   * 合法值（施工单 003 收口：timeout 在终态里单独区分）：
+   *   - 中间态：`"waiting_unlock"` / `"waiting_confirm"` / `"executing"`
+   *   - 终态：`"approved"` / `"rejected"` / `"failed"`
+   *   - 终态超时（施工单 003）：`"timed_out"`
+   *     ——`phase = "failed"` + `decision = "failed"` + `status = "timed_out"`
+   *     + `failureReason = "request_timeout"`。`status` 走 `"timed_out"`
+   *     单独区分而不是套用 `"failed"`，让 UI 能直接把它翻成"超时"
+   *     文案而不必再开新 phase 枚举。
+   */
   status: string;
   /** 人类可读确认文案。 */
   textSummary: string;
@@ -1010,4 +1062,16 @@ export interface ProtocolService {
    * 写 origin 配置；DB 不可用时 throw（由调用方决定怎么降级）。
    */
   setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void>;
+  /**
+   * 当前确认超时截止时间（epoch ms）。
+   *
+   * 设计缘由（施工单 003 硬切换）：
+   *   - 当前已绑定 request 且处于 `unlocking` / `confirming` 时返回一个
+   *     epoch ms 截止时间；其它情况返回 null。
+   *   - UI 倒计时直接 `Math.max(0, ceil((deadline - Date.now()) / 1000))`。
+   *   - 修改站点 timeout **不**热更新当前正在倒计时的 request；这里返回
+   *     的 deadline 保留它开始计时时快照的值。
+   *   - popup 卸载 / endSession 时 timer 自然销毁，不做恢复。
+   */
+  confirmDeadlineMs(): number | null;
 }

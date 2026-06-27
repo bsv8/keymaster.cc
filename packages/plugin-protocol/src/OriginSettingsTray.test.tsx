@@ -114,6 +114,7 @@ describe("OriginSettingsTray — 面板样式（施工单 002）", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -139,6 +140,7 @@ describe("OriginSettingsTray — 面板样式（施工单 002）", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -164,6 +166,7 @@ describe("OriginSettingsTray — 复选框即时提交（施工单 002）", () =
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -191,6 +194,7 @@ describe("OriginSettingsTray — 复选框即时提交（施工单 002）", () =
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     service.setOriginSettingsImpl = async () => {
@@ -225,6 +229,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -258,6 +263,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -289,6 +295,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     service.setOriginSettingsImpl = async () => {
@@ -324,6 +331,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -363,6 +371,7 @@ describe("OriginSettingsTray — 数字输入编辑态 + blur/Enter 提交（施
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -401,6 +410,7 @@ describe("OriginSettingsTray — origin 切换（施工单 002）", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     currentService = service;
@@ -427,6 +437,7 @@ describe("OriginSettingsTray — origin 切换（施工单 002）", () => {
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     await act(async () => {
@@ -489,6 +500,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     // 让 setOriginSettings 阻塞在测试手动 resolve/reject。
@@ -520,6 +532,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     await act(async () => {
@@ -554,6 +567,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     let resolveSet!: () => void;
@@ -582,6 +596,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     await act(async () => {
@@ -616,6 +631,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     let rejectSet!: (err: Error) => void;
@@ -649,6 +665,7 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
       cipherAutoApproveEnabled: false,
       feePoolAutoSignMaxSatoshis: 0,
       feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
       updatedAt: 0
     });
     await act(async () => {
@@ -668,5 +685,71 @@ describe("OriginSettingsTray — in-flight commit 跨 origin 切换（施工单 
     });
     expect(newInput.value).toBe("888");
     expect(screen.queryByText("DB unavailable")).toBeNull();
+  });
+});
+
+/* ============== 施工单 003：confirmTimeoutSeconds 字段 ============== */
+
+describe("OriginSettingsTray — confirmTimeoutSeconds (003)", () => {
+  it("提交合法正整数会落库", async () => {
+    const service = makeMockService();
+    service.getOriginSettingsImpl = async (origin) => ({
+      origin,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 30,
+      updatedAt: 0
+    });
+    currentService = service;
+    render(<OriginSettingsTrayInline origin="https://demo.example" onClose={() => undefined} />);
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    const input = findNumberInputByLabel(/确认超时|Confirmation timeout/);
+    await act(async () => {
+      fireEvent.focus(input);
+      fireEvent.change(input, { target: { value: "15" } });
+      fireEvent.blur(input);
+      await flushMicrotasks();
+      await flushMicrotasks();
+    });
+    expect(service.setOriginSettingsCalls.length).toBe(1);
+    expect(service.setOriginSettingsCalls[0].confirmTimeoutSeconds).toBe(15);
+  });
+
+  it("空串 / 0 / 负数 / 非整数 → 规范化 30 并落库", async () => {
+    const service = makeMockService();
+    service.getOriginSettingsImpl = async (origin) => ({
+      origin,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 100,
+      updatedAt: 0
+    });
+    currentService = service;
+    render(<OriginSettingsTrayInline origin="https://demo.example" onClose={() => undefined} />);
+    await act(async () => {
+      await flushMicrotasks();
+    });
+    const input = findNumberInputByLabel(/确认超时|Confirmation timeout/);
+    // 空串 → 30。
+    await act(async () => {
+      fireEvent.focus(input);
+      fireEvent.change(input, { target: { value: "" } });
+      fireEvent.blur(input);
+      await flushMicrotasks();
+      await flushMicrotasks();
+    });
+    expect(service.setOriginSettingsCalls.length).toBe(1);
+    expect(service.setOriginSettingsCalls[0].confirmTimeoutSeconds).toBe(30);
+    expect(input.value).toBe("30");
   });
 });
