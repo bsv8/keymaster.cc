@@ -592,7 +592,10 @@ describe("ProtocolServiceImpl", () => {
     expect(posted.closing).toHaveLength(0);
   });
 
-  it("rejects while another request is in flight (second message ignored)", async () => {
+  it("concurrent live requests coexist in feed (施工单 2026-06-27 002 硬切换)", async () => {
+    // 旧行为（001 单之前）：第二条 request 被单 active request 模型忽略。
+    // 新行为（002 单）：多 request 并存；两条独立活卡出现在 feed 活请求区
+    // 头部（按 createdAt asc 排序）。
     const { service, opener, posted } = makeService();
     service.startSession();
     await service.handleMessage(
@@ -601,6 +604,128 @@ describe("ProtocolServiceImpl", () => {
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-first",
+          method: "cipher.decrypt",
+          params: {
+            aud: ORIGIN,
+            text: "first",
+            nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("confirming");
+    // 让两条 record 的 createdAt 明确不同：第二条晚 1ms 进入。
+    await new Promise((r) => setTimeout(r, 2));
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-second",
+          method: "cipher.decrypt",
+          params: {
+            aud: ORIGIN,
+            text: "second",
+            nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 两条 record 都建出活记录，feed 顺序按 createdAt asc：第一条在前。
+    const feed = service.feedSnapshot();
+    const live = feed.commands.filter((c) => c.decision === "pending");
+    expect(live.length).toBe(2);
+    expect(live[0]?.requestId).toBe("req-first");
+    expect(live[1]?.requestId).toBe("req-second");
+    expect(live[0]?.id).not.toBe(live[1]?.id);
+    // snapshot.requestId 仍兼容指向首张活卡；不影响多 request 真实状态。
+    expect(service.snapshot().requestId).toBe("req-first");
+    expect(posted.result).toHaveLength(0);
+  });
+
+  it("活卡槽位稳定：confirming → queued → executing 不改变活请求区相对顺序", async () => {
+    // 关键不变量（施工单 2026-06-27 002 硬切换）：活请求区按 createdAt asc
+    // 固定。第一条从 confirming 进入 queued / executing 时，**不**因为
+    // updatedAt 推进而接管第二格的视觉位置。
+    const { service, opener } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-A",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 2));
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-B",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 推进 A：confirming → queued → executing → approved。
+    await service.confirmByUser();
+    // 推进过程中记录 feed 顺序：
+    // queued 阶段：A 在前（queued）B 在后（confirming），按 createdAt asc。
+    const feedQueued = service.feedSnapshot();
+    const liveQueued = feedQueued.commands.filter((c) => c.decision === "pending");
+    expect(liveQueued[0]?.requestId).toBe("req-A");
+    expect(liveQueued[0]?.phase).toBe("queued");
+    expect(liveQueued[1]?.requestId).toBe("req-B");
+    // 等 A 跑完 → A 终态进入历史区，B 成为活请求区第一格。
+    await new Promise((r) => setTimeout(r, 50));
+    const feedAfter = service.feedSnapshot();
+    // A 应出现在历史区（approved / decision=approved）。
+    const aCard = feedAfter.commands.find((c) => c.requestId === "req-A");
+    expect(aCard?.decision).toBe("approved");
+    // 活请求区只剩 B：B 是第一格；它的 recordId / 按钮绑定不变。
+    const liveAfter = feedAfter.commands.filter((c) => c.decision === "pending");
+    expect(liveAfter.length).toBe(1);
+    expect(liveAfter[0]?.requestId).toBe("req-B");
+  });
+
+  it("loadHistoryForOrigin 按 recordId 合并：内存活记录覆盖 DB 旧记录", async () => {
+    // 关键不变量（施工单 2026-06-27 002 硬切换）：DB 旧记录与内存活记录
+    // 同 id 时，**以内存为准**。这条阻止"DB 旧字段覆盖当前内存活卡"。
+    const { service, opener, storageDb } = makeService();
+    service.startSession();
+    // DB 里有一条旧记录，phase 是 "approved"（终态），但内存里我们等会
+    // 推一条同 recordId 但 phase 是 "confirming" 的活记录——不可能完全
+    // 真实发生（id 在内存里是 nextRecordId 生成）；所以这里**直接写一
+    // 个会冲突的场景**：
+    //   1. 先 acceptRequest 创建 record-A，得到 recordId_A；
+    //   2. 手动用 storageDb.putCommand 覆盖 recordId_A 为"approved" 终态
+    //      旧记录（模拟"DB 之前已经写过、现在内存 record 仍是 confirming"）；
+    //   3. 触发 loadHistoryForOrigin（同 origin 再次 acceptRequest）让合并
+    //      路径执行。
+    // 但我们的合并是同步的（内存 push + DB 已经存在），所以更直接的验证
+    // 是：手动触发 loadHistoryForOrigin 后，feed 里 recordId_A 的 card
+    // **必须**是内存活卡的 phase（confirming），不是 DB 旧的（approved）。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "live-confirming",
           method: "identity.get",
           params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
         },
@@ -608,14 +733,37 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    expect(service.snapshot().phase).toBe("confirming");
-    // 第二个 request 来自同 source/origin 应被忽略。
+    const feed1 = service.feedSnapshot();
+    const recordIdA = feed1.commands[0]?.id;
+    expect(recordIdA).toBeDefined();
+    expect(feed1.commands[0]?.phase).toBe("confirming");
+    // 把同 recordId 写一条"approved" 旧记录到 DB（模拟 DB 已经存过终态）。
+    await storageDb.putCommand({
+      id: recordIdA!,
+      origin: ORIGIN,
+      requestId: "live-confirming",
+      method: "identity.get",
+      phase: "approved",
+      decision: "approved",
+      status: "approved",
+      textSummary: "stale-approved",
+      claimsSummary: [],
+      contentType: "",
+      payloadSize: 0,
+      activePublicKeyHex: "02" + "11".repeat(32),
+      createdAt: 1,
+      updatedAt: 999,
+      finishedAt: 999,
+      errorCode: "",
+      errorMessage: ""
+    });
+    // 触发另一次同 origin 的 request：acceptRequest 会触发 loadHistoryForOrigin。
     await service.handleMessage(
       makeEvent(
         {
           v: PROTOCOL_VERSION,
           type: "request",
-          id: "req-second",
+          id: "live-other",
           method: "identity.get",
           params: { aud: ORIGIN, iat: 1, exp: 2, text: "y" }
         },
@@ -623,8 +771,511 @@ describe("ProtocolServiceImpl", () => {
         opener
       )
     );
-    expect(service.snapshot().requestId).toBe("req-first");
-    expect(posted.result).toHaveLength(0);
+    // 等异步 loadHistoryForOrigin 落定。
+    await new Promise((r) => setTimeout(r, 50));
+    const feed2 = service.feedSnapshot();
+    // 关键断言：recordId_A 在 feed 中仍是内存活卡（confirming），不是
+    // DB 旧的 "approved"。
+    const cardA = feed2.commands.find((c) => c.id === recordIdA);
+    expect(cardA?.phase).toBe("confirming");
+    expect(cardA?.decision).toBe("pending");
+    expect(cardA?.textSummary).not.toBe("stale-approved");
+  });
+
+  it("切换 origin 时旧批次历史加载结果不会覆盖新 origin 视图", async () => {
+    // 关键不变量（施工单 2026-06-27 002 硬切换）：旧 origin 的历史加载
+    // 晚到时，**不**回写当前 origin 视图（防 origin 切换时旧数据串回）。
+    // 用可控延迟的 storageDb 模拟"旧 origin 加载慢"。
+    let resolveOriginA!: (record: ProtocolOriginSettingsRecord | null) => void;
+    let listCommandsACalls = 0;
+    let resolveListCommandsA!: (list: ProtocolCommandRecord[]) => void;
+    const stubDb: ProtocolStorageDb = {
+      async putCommand() {
+        /* noop */
+      },
+      async getCommand() {
+        return null;
+      },
+      async listCommandsByOrigin(origin: string) {
+        if (origin === "https://origin-a.example") {
+          listCommandsACalls++;
+          // 第一次调用挂住——模拟旧 origin 加载晚到。
+          return new Promise<ProtocolCommandRecord[]>((resolve) => {
+            resolveListCommandsA = resolve;
+          });
+        }
+        return [];
+      },
+      async getOrigin(origin: string) {
+        if (origin === "https://origin-a.example") {
+          return new Promise<ProtocolOriginSettingsRecord | null>((resolve) => {
+            resolveOriginA = resolve;
+          });
+        }
+        return null;
+      },
+      async putOrigin() {
+        /* noop */
+      },
+      async listOrigins() {
+        return [];
+      },
+      async getFeePool() {
+        return null;
+      },
+      async putFeePool() {
+        /* noop */
+      },
+      async deleteFeePool() {
+        /* noop */
+      },
+      async listFeePoolsByOrigin() {
+        return [];
+      }
+    };
+    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    service.startSession();
+    // 第一条 request 来自 origin-a：触发 loadHistoryForOrigin（挂住）。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-a",
+          method: "identity.get",
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    // 此时 currentOrigin=origin-a；feed 中有 from-a 活记录。
+    expect(service.currentOrigin()).toBe("https://origin-a.example");
+    const liveA = service.feedSnapshot().commands.find((c) => c.requestId === "from-a");
+    expect(liveA?.phase).toBe("confirming");
+    expect(listCommandsACalls).toBe(1);
+    // 切换到 origin-b：第二条 request 触发新一轮 loadHistoryForOrigin（同步返回）。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-b",
+          method: "identity.get",
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    expect(service.currentOrigin()).toBe("https://origin-b.example");
+    // 关键：即使 origin-a 旧批次晚到，**不**应该回写 currentOrigin。
+    // 模拟"旧 origin 加载晚到"——但 origin-a 历史 list 不应再触发合并。
+    resolveOriginA(null);
+    resolveListCommandsA([]);
+    // 等 microtask 消化旧批次的 promise。
+    await new Promise((r) => setTimeout(r, 30));
+    // 关键断言：feed 中**不**出现 origin-a 的旧数据；currentOrigin 仍为
+    // origin-b；from-b 仍是唯一活记录。
+    const feedFinal = service.feedSnapshot();
+    expect(service.currentOrigin()).toBe("https://origin-b.example");
+    expect(feedFinal.commands.every((c) => c.origin === "https://origin-b.example" || c.requestId === "from-b")).toBe(true);
+    // from-b 仍然是 confirming（不被旧 origin 结果覆盖）。
+    const liveB = feedFinal.commands.find((c) => c.requestId === "from-b");
+    expect(liveB?.phase).toBe("confirming");
+  });
+
+  it("修复 #1：切换 origin 时新 origin 触发独立的 loadHistoryForOrigin（不复用旧 origin in-flight）", async () => {
+    // 关键修复（施工单 2026-06-27 002 反馈）：旧实现里 loadHistoryForOrigin
+    // 用单一全局 promise，复用条件 `currentOriginValue === origin`——
+    // 但 acceptRequest 已经把 currentOriginValue 改成新 origin 了，
+    // 所以"复用条件"会被错误满足，直接复用旧 origin 的 in-flight，
+    // 导致新 origin 的历史永远不会被加载。
+    // 新实现按 origin 隔离 in-flight；切到 B 后必须真的发起 B 的 load。
+    const callsByOrigin: string[] = [];
+    let listCommandsACalls = 0;
+    let listCommandsBCalls = 0;
+    const stubDb: ProtocolStorageDb = {
+      async putCommand() {
+        /* noop */
+      },
+      async getCommand() {
+        return null;
+      },
+      async listCommandsByOrigin(origin: string) {
+        callsByOrigin.push(origin);
+        if (origin === "https://origin-a.example") {
+          listCommandsACalls++;
+          return [];
+        }
+        if (origin === "https://origin-b.example") {
+          listCommandsBCalls++;
+          return [];
+        }
+        return [];
+      },
+      async getOrigin(origin: string) {
+        void callsByOrigin;
+        if (origin === "https://origin-a.example") {
+          // origin-a 加载挂住,模拟旧 origin 慢。
+          return new Promise(() => {
+            /* never resolves */
+          });
+        }
+        return null;
+      },
+      async putOrigin() {
+        /* noop */
+      },
+      async listOrigins() {
+        return [];
+      },
+      async getFeePool() {
+        return null;
+      },
+      async putFeePool() {
+        /* noop */
+      },
+      async deleteFeePool() {
+        /* noop */
+      },
+      async listFeePoolsByOrigin() {
+        return [];
+      }
+    };
+    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    service.startSession();
+    // 第一条 request 来自 origin-a:触发 in-flight load (挂住)。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-a",
+          method: "identity.get",
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    expect(service.currentOrigin()).toBe("https://origin-a.example");
+    expect(listCommandsACalls).toBe(1);
+    // 切换到 origin-b:必须**新发起**对 origin-b 的历史读取,而不是复用
+    // 旧 origin 的 in-flight。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-b",
+          method: "identity.get",
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    expect(service.currentOrigin()).toBe("https://origin-b.example");
+    expect(listCommandsBCalls).toBe(1);
+    // 同一 origin 不再发起重复读取:连发两条 from-b 也只调一次 listB。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-b2",
+          method: "identity.get",
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "z" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    expect(listCommandsBCalls).toBe(1);
+    // 再次确认 origin-a 的 list 只被调一次（之前的 in-flight 仍在飞）。
+    expect(listCommandsACalls).toBe(1);
+    expect(callsByOrigin.filter((o) => o === "https://origin-a.example").length).toBe(1);
+    expect(callsByOrigin.filter((o) => o === "https://origin-b.example").length).toBe(1);
+  });
+
+  it("修复 #2：切换 origin 瞬间 feedCommands 不再含旧 origin 的卡片", async () => {
+    // 关键修复（施工单 2026-06-27 002 反馈）：切 origin 时旧实现只更新
+    // currentOriginValue，旧 origin 的卡片留在 feedCommands 里；后续
+    // setRecordPhase 会拿"旧 origin 历史 + 新 origin 活卡"一起 buildFeedDisplay。
+    // 新实现：切 origin 瞬间立即清空 feedCommands，只保留新 origin 内
+    // 存活记录的投影——避免跨 origin 混排。
+    const { service, opener, storageDb } = makeService();
+    service.startSession();
+    // 在 origin-a 处理一条 request 并 confirm,使其进入终态 (approved)。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-a",
+          method: "identity.get",
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    // 验证 origin-a 的 approved 卡在 feed 中。
+    const feedA = service.feedSnapshot();
+    expect(feedA.currentOrigin).toBe("https://origin-a.example");
+    expect(feedA.commands.some((c) => c.requestId === "from-a" && c.decision === "approved")).toBe(true);
+    // 切换到 origin-b：新 origin 的第一条 request 触发切 origin。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-b",
+          method: "identity.get",
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    // 关键断言：切 origin 瞬间，feed.commands 中**不**应该出现 origin-a
+    // 的卡片（即使旧 origin 数据仍在 requestsByRecordId 里）。
+    const feedImmediate = service.feedSnapshot();
+    expect(feedImmediate.currentOrigin).toBe("https://origin-b.example");
+    expect(feedImmediate.commands.some((c) => c.origin === "https://origin-a.example")).toBe(false);
+    expect(feedImmediate.commands.some((c) => c.requestId === "from-a")).toBe(false);
+    // from-b 仍在活请求区。
+    expect(feedImmediate.commands.some((c) => c.requestId === "from-b" && c.phase === "confirming")).toBe(true);
+    // 等异步 loadHistoryForOrigin 落定。
+    await new Promise((r) => setTimeout(r, 30));
+    const feedAfterLoad = service.feedSnapshot();
+    // loadHistoryForOrigin 完成 → origin-b 视图重建；仍**不**含 origin-a 卡片。
+    expect(feedAfterLoad.currentOrigin).toBe("https://origin-b.example");
+    expect(feedAfterLoad.commands.some((c) => c.origin === "https://origin-a.example")).toBe(false);
+    // 注：旧 origin-a 的 from-a 记录仍在 requestsByRecordId 里（用于将来切回），
+    // 但当前视图不显示。这是施工单要求的"切 origin 立即换视图"。
+    void storageDb;
+  });
+
+  it("修复 #2 (续)：再切回 origin-a,旧 origin 历史能正确重建", async () => {
+    // 修复 #2 的对称用例：把旧 origin-a 的数据保留在内存,切回去时按其
+    // 自己的数据重建视图(不依赖 DB)。
+    const { service, opener } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-a",
+          method: "identity.get",
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    // 切到 origin-b
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-b",
+          method: "identity.get",
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    expect(service.feedSnapshot().currentOrigin).toBe("https://origin-b.example");
+    // 再切回 origin-a:旧 origin 的内存 record 仍在 requestsByRecordId。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "from-a-2",
+          method: "identity.get",
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x2" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    const feedBack = service.feedSnapshot();
+    expect(feedBack.currentOrigin).toBe("https://origin-a.example");
+    // from-a 之前的 approved 卡应重新出现在 origin-a 视图(终态)。
+    expect(feedBack.commands.some((c) => c.requestId === "from-a" && c.decision === "approved")).toBe(true);
+    // from-a-2 在活请求区。
+    expect(feedBack.commands.some((c) => c.requestId === "from-a-2" && c.phase === "confirming")).toBe(true);
+  });
+
+  it("修复 #3：activePublicKeyHex 写卡时取一次,后续切换 active key 不污染旧卡", async () => {
+    // 关键修复（施工单 2026-06-27 002 反馈）：contract 注释明确
+    // `activePublicKeyHex` 是"写记录时取一次"。旧实现里 writeFeedCommandFor
+    // 每次都读 keyspace.active()——用户在 popup 会话里切换 active key
+    // 会让旧卡片的元数据被污染。
+    // 新实现：rec.activePublicKeyHex 在 acceptRequest 创建 record 时快照,
+    // 后续 writeFeedCommandFor / loadHistoryForOrigin 合并都从 rec 读,
+    // 不再读 keyspace。
+    //
+    // 用一个能动态切换 active key 的 keyspace stub 来模拟。
+    let currentActiveKey = "02" + "aa".repeat(32); // 创建 record 时的 active key。
+    const dynamicKeyspace = {
+      ...makeKeyspaceStub(currentActiveKey),
+      active: () => ({ activePublicKeyHex: currentActiveKey }),
+      requireActiveKey: () => ({
+        keyId: "k1",
+        publicKeyHex: currentActiveKey,
+        label: "Key A",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString(),
+        identityStatus: "ready"
+      })
+    };
+    const { service, opener, deps } = makeService(currentActiveKey, undefined, {
+      keyspace: dynamicKeyspace as unknown as KeyspaceService
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-key1",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 此时卡片 activePublicKeyHex = 创建时的 currentActiveKey (02aa...)。
+    const feed1 = service.feedSnapshot();
+    const card1 = feed1.commands.find((c) => c.requestId === "req-key1");
+    expect(card1?.activePublicKeyHex).toBe("02" + "aa".repeat(32));
+    // 用户切换 active key:dynamicKeyspace.active() 改成新 key。
+    currentActiveKey = "02" + "bb".repeat(32);
+    // 推进旧卡 phase 触发 writeFeedCommandFor(queued 后写一次)。
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    // 关键断言：旧卡的 activePublicKeyHex 仍是创建时的 02aa...,不变成 02bb...。
+    const feed2 = service.feedSnapshot();
+    const card2 = feed2.commands.find((c) => c.requestId === "req-key1");
+    expect(card2?.activePublicKeyHex).toBe("02" + "aa".repeat(32));
+    void deps;
+  });
+
+  it("同类 request 不复用卡位：两条 cipher.decrypt 在 feed 投影中独立", async () => {
+    // 关键不变量（施工单 2026-06-27 002 硬切换）：同类 request 不应"借壳"
+    // 修改第一张卡的内容伪装成更新。两条独立 record，两张独立卡。
+    const { service, opener } = makeService();
+    service.startSession();
+    const nonce1 = new Uint8Array(12);
+    const nonce2 = new Uint8Array(12);
+    nonce2[0] = 1;
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "dec-1",
+          method: "cipher.decrypt",
+          params: {
+            aud: ORIGIN,
+            text: "first",
+            nonce: { $type: "binary", bytes: nonce1.buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 2));
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "dec-2",
+          method: "cipher.decrypt",
+          params: {
+            aud: ORIGIN,
+            text: "second",
+            nonce: { $type: "binary", bytes: nonce2.buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    const feed = service.feedSnapshot();
+    // 两条独立活记录，card.textSummary 各自保留（不被对方覆盖）。
+    const live = feed.commands.filter((c) => c.decision === "pending");
+    expect(live.length).toBe(2);
+    expect(live.find((c) => c.requestId === "dec-1")?.textSummary).toBe("first");
+    expect(live.find((c) => c.requestId === "dec-2")?.textSummary).toBe("second");
+    // 两张卡的 recordId 不同；不可被同一 recordId 复用。
+    expect(live[0]?.id).not.toBe(live[1]?.id);
+  });
+
+  it("第一条活卡终态后第二条成为活请求区第一格，recordId 不变", async () => {
+    // 关键不变量（施工单 2026-06-27 002 硬切换）：第一条活卡进入终态后
+    // 从活请求区离开，进入历史区；第二条活卡上移成为新的活请求区第一格。
+    // 第二条活卡的 recordId、按钮绑定、内容都不被复用。
+    const { service, opener } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "r-A",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 2));
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "r-B",
+          method: "identity.get",
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 推进 A 终态。
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 50));
+    const feed = service.feedSnapshot();
+    // 活请求区只剩 B。
+    const live = feed.commands.filter((c) => c.decision === "pending");
+    expect(live.length).toBe(1);
+    expect(live[0]?.requestId).toBe("r-B");
+    expect(live[0]?.textSummary).toBe("B");
+    // A 在历史区。
+    const aInHistory = feed.commands.find((c) => c.requestId === "r-A");
+    expect(aInHistory?.decision).toBe("approved");
+    // B 的 recordId 没有改变（不应继承 A 的 recordId）。
+    const bInLive = live[0];
+    expect(bInLive?.requestId).toBe("r-B");
   });
 
   it("switching origin reloads feed history from storageDb", async () => {

@@ -1,7 +1,7 @@
 // packages/contracts/src/protocol.ts
 // Keymaster 对外协议 V1 公共契约。
 //
-// 设计缘由（施工单 001 + 002 硬切换）：
+// 设计缘由（施工单 001 + 002 + 2026-06-27 002 硬切换）：
 //   - 协议方法集：identity.get / intent.sign / cipher.encrypt / cipher.decrypt
 //     （签名 + 加解密），p2pkh.transfer（受控转账），feepool.prepare /
 //     feepool.commit（双端费用池两步方法族）。所有方法走同一套 transport +
@@ -22,6 +22,15 @@
 //     真实原因只写本地历史；对外统一 `user_rejected`，**不**暴露真实原因。
 //   - `feepool.commit` 的 `operationId` 只在 popup 会话内存中有效，
 //     不持久化；popup 刷新 / 关闭后 operation 失效。
+//   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
+//       `ProtocolCommandFeedState.commands` **不**再承诺
+//       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
+//       历史区"拼接投影：
+//         - 活请求区：未终态 record，按 createdAt asc（recordId 次级稳定）；
+//         - 历史区：  终态 record，按 updatedAt desc。
+//       同类 request 在活请求区不复用卡位；UI 不应再按索引展开。
+//       历史加载必须按 recordId 合并（内存活记录覆盖 DB 旧记录），
+//       批次隔离（origin + token）避免旧 origin 异步回写新 origin 视图。
 
 /**
  * 二进制字段。V1 协议里所有二进制内容（密文、签名、信封真值、文件本体、
@@ -805,18 +814,36 @@ export interface ProtocolCommandRecord {
  * popup 内"按当前 origin 归档"的命令流 feed 状态。
  *
  * service 维护的内部状态：每条合法 request 进入时按 `event.origin`
- * 重新载入历史；feed 列表按 `updatedAt desc` 排序。
+ * 重新载入历史；feed 列表是 service 派生的**展示投影**，**不**承诺
+ * "全局按 `updatedAt desc`"。
  *
- * 设计缘由（施工单 2026-06-27 001 硬切换）：
+ * 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-27 002 硬切换）：
  *   - 加 `lockSummary` 字段给锁屏页提供聚合视图；该字段是从
  *     `commands` 派生出来的，**不**是另一份可变状态。
  *   - `lockSummary` 字段在 unlocked 时是 null；锁屏页不读 commands 走
  *     自己摘要，命令流仍以 commands 为真相源。
+ *   - **002 硬切换**：`commands` 的展示顺序固定为
+ *       `活请求区（按 createdAt asc，recordId 次级稳定）
+ *        + 历史区（按 updatedAt desc）`
+ *     拼接后的投影。
+ *   - **002 硬切换**：UI 不应再发明第二套排序规则；UI 仍可按
+ *     `isTerminal` 在两端内部分组渲染，但顺序真值在 service 里。
+ *   - **002 硬切换**：同类 request 在活请求区不复用卡位；
+ *     第一条活卡进入终态后从活请求区离开，第二条活卡成为新的
+ *     活请求区第一格——这是"前一条事务结束"的正常释放。
  */
 export interface ProtocolCommandFeedState {
   /** 当前 popup 服务的 exact origin；未收到第一条 request 时为 null。 */
   currentOrigin: string | null;
-  /** 当前 feed 列表（最新在前）。 */
+  /**
+   * 当前 feed 列表的**展示投影**（施工单 2026-06-27 002 硬切换）：
+   *   - 未终态 record 在前：按 `createdAt asc` 稳定排序，
+   *     `createdAt` 相同时按内部稳定 `recordId` 作次级稳定排序；
+   *   - 终态 record 在后：按 `updatedAt desc` 排序。
+   *
+   * 不再承诺"全局最新在前"；UI 拿 `commands` 直接渲染，但 UI
+   * **不**应再按索引决定唯一展开卡。
+   */
   commands: ProtocolCommandRecord[];
   /** DB 读 / 写是否可用；false 时 UI 顶部显示"历史不可用"。 */
   historyAvailable: boolean;
@@ -1133,8 +1160,15 @@ export interface ProtocolService {
    */
   currentOrigin(): string | null;
   /**
-   * 同步取当前命令流 feed 状态。`commands` 已是按 `updatedAt desc`
-   * 排序后的最新在前列表；UI 拿来直接渲染。
+   * 同步取当前命令流 feed 状态。`commands` 是 service 派生的**展示
+   * 投影**（施工单 2026-06-27 002 硬切换）：
+   *   - 未终态 record 在前：按 `createdAt asc` 稳定排序（同类 request
+   *     不复用卡位；第一条活卡进入终态离开后第二条上移）；
+   *   - 终态 record 在后：按 `updatedAt desc` 排序。
+   *
+   * UI 不应再发明第二套排序规则；UI 可按 `isTerminal` 在两端内部分组
+   * 渲染，但顺序真值在 service 里。活卡默认按 `recordId` 全部展开，
+   * 不允许用 `i === 0` 决定唯一展开卡。
    *
    * 设计缘由（施工单 2026-06-27 001 硬切换）：
    *   - 增加 `lockSummary` 字段，锁屏页用其渲染待处理概览。

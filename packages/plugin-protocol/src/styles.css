@@ -104,6 +104,78 @@
   gap: 0.75rem;
 }
 
+/* ============== 施工单 2026-06-27 002 硬切换：活请求区 + 历史区 ==============
+ *
+ * 设计缘由：
+ *   - 活请求区：视觉重点突出——更明显的边框 + 略亮的背景 + 标题前置
+ *     数量徽章；让用户一眼看到"我还需要处理的事"。
+ *   - 历史区：视觉弱化——淡灰背景 + 较弱的边框 + 较小间距；让用户
+ *     能扫一眼过去发生了什么，但不与当前待处理项混淆。
+ *   - 两个区块之间用一条明显的分隔带 + 节标题强化视觉层级。
+ *   - 顺序真值在 service 里（createdAt asc / updatedAt desc），本样式
+ *     只负责视觉分组，不承担"借壳"卡位的语义修复。
+ */
+.protocol-feed__section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  padding: 0.85rem 0.85rem 0.95rem;
+  border-radius: 10px;
+  border: 1px solid var(--border-card, #e4e4e7);
+  background: var(--bg-card, #ffffff);
+}
+
+.protocol-feed__section--live {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: linear-gradient(
+    180deg,
+    rgba(37, 99, 235, 0.04) 0%,
+    rgba(37, 99, 235, 0.02) 100%
+  );
+  box-shadow: 0 1px 3px rgba(37, 99, 235, 0.08);
+}
+
+.protocol-feed__section--history {
+  border-style: dashed;
+  border-color: var(--border-card, #e4e4e7);
+  background: var(--bg-card-body, #fafafa);
+  opacity: 0.94;
+}
+
+.protocol-feed__section-title {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-base, #1a1a1a);
+  letter-spacing: 0.02em;
+}
+
+.protocol-feed__section--live .protocol-feed__section-title {
+  color: var(--accent, #2563eb);
+}
+
+.protocol-feed__section--history .protocol-feed__section-title {
+  color: var(--text-muted, #6b7280);
+}
+
+.protocol-feed__section-count code {
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", "Consolas", monospace);
+  font-size: 11.5px;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: var(--bg-code, #f1f1f3);
+  color: inherit;
+}
+
+.protocol-feed__section--live .protocol-feed__section-count code {
+  background: rgba(37, 99, 235, 0.12);
+  color: var(--accent, #2563eb);
+}
+
 .protocol-feed--empty,
 .protocol-feed--no-history {
   padding: 1.5rem 0.5rem;
@@ -141,6 +213,26 @@
   border-radius: 8px;
   overflow: hidden;
   transition: box-shadow 120ms ease;
+}
+
+/* ============== 施工单 2026-06-27 002 硬切换：活卡 vs 历史卡 ============== */
+
+/* 活请求卡：明确视觉重点 + 默认展开 + 与历史卡强对比 */
+.protocol-feed__card--live {
+  border-color: rgba(37, 99, 235, 0.32);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.16);
+}
+
+/* 历史卡：视觉弱化——淡化背景 + 移除阴影 + 缩紧间距 */
+.protocol-feed__card--history {
+  background: var(--bg-card-body, #fafafa);
+  border-color: var(--border-card, #e4e4e7);
+  box-shadow: none;
+}
+
+.protocol-feed__card--history .protocol-feed__card-body {
+  background: var(--bg-card-body, #fafafa);
+  color: var(--text-muted, #4b5563);
 }
 
 .protocol-feed__card--approved {

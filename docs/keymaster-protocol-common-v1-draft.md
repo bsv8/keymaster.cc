@@ -339,32 +339,92 @@ type BinaryField = {
 - 不允许双回包；service 在收尾入口先快照 binding 并立即清 binding，确保
   并发第二次进入时看到 `binding === null` 早退。
 
-## 当前请求交互在命令流卡片内（施工单 003 硬切换）
+## 当前请求交互：活请求区 + 历史区（施工单 2026-06-27 002 硬切换）
 
-V1 popup 的"当前正在处理的请求"**不**再使用全页确认 overlay。
-收口到命令流最新卡片里：
+V1 popup 的"当前 origin 视图"由**两个语义独立的区块**组成。
+不再使用全页确认 overlay；收口到命令流**活请求区**的对应卡片里：
 
 ```txt
 顶栏（sticky）
   当前站点 / 进入钱包 / 站点配置 / 回到最新 / 关闭
 站点配置 inline 面板（可选）
-命令流
-  最新卡片：当前请求的交互体
-  历史卡片：只读 summary
+活请求区
+  放置未终态 request（waiting_unlock_manual / waiting_unlock_auto /
+  confirming / queued / executing）
+  按 createdAt asc 稳定排序
+  每条 request 一个固定格子；同类 request 不复用卡位
+  每张卡默认展开；直接展示详情 / 按钮 / 倒计时 / 状态文案
+历史区
+  放置终态 request（approved / rejected / failed / timed_out）
+  按 updatedAt desc 排序
+  默认只读 / 折叠；用户可手动展开看详情
+  不出现确认 / 取消按钮
 ```
 
-最新卡片按 phase 渲染：
+### 活请求区
 
-- `unlocking`：卡片内显示解锁表单（密码 / 解锁 / 取消 / 倒计时）。
-- `confirming`：卡片内显示请求详情 + 确认按钮 + 取消按钮 + 倒计时。
-- `executing`：卡片内显示"处理中"；不再显示取消按钮。
-- 终态（`approved / rejected / failed`）：卡片内显示终态摘要 + 时间线。
-- 终态超时：`phase = "failed"`、`decision = "failed"`、`status = "timed_out"`、
-  `failureReason = "request_timeout"`；UI 单独把 `status === "timed_out"`
-  翻译成"超时"。
+- 显示当前 origin 下所有**未终态** request；
+- 顺序按 `createdAt asc` 固定（同类 request 不会"借壳"接管旧卡位）；
+- 每张卡按 phase 渲染：
+  - `waiting_unlock_manual`：卡片内显示"等待解锁" + 请求摘要；
+  - `waiting_unlock_auto`：卡片内显示"等待解锁（自动）" + 摘要；
+  - `confirming`：卡片内显示请求详情 + 确认按钮 + 取消按钮 + 倒计时；
+  - `queued`：卡片内显示"已确认，等待执行" + 取消排队按钮；
+  - `executing`：卡片内显示"处理中"，无取消按钮。
+- 每张活卡**默认展开**，并以 `recordId` 稳定绑定展开态——不允许
+  通过 `i === 0` 之类的索引决定唯一展开卡。
 
-历史卡片**不**允许再出现第二套"确认 / 取消"按钮；popup 主体**不**保留
-独立的 `CurrentRequestPanel` overlay。同一时刻最多一张"活"卡片可交互。
+### 历史区
+
+- 显示当前 origin 下所有**终态** request；
+- 顺序按 `updatedAt desc` 排序；
+- 每张卡按 phase 渲染：
+  - `approved`：卡片内显示"成功" + 终态摘要 + 时间线；
+  - `rejected`：卡片内显示"用户取消" + 摘要 + 时间线；
+  - `failed`：卡片内显示"失败" + 错误码 + 时间线；
+  - `timed_out`：`phase = "failed"`、`decision = "failed"`、
+    `status = "timed_out"`、`failureReason = "request_timeout"`；
+    UI 单独把 `status === "timed_out"` 翻译成"超时"。
+- 历史卡默认折叠；用户可手动展开看详情；**不**出现确认 / 取消按钮。
+
+### 排序真值
+
+- `ProtocolCommandFeedState.commands` 是**展示投影**，**不**再承诺
+  "全局按 `updatedAt desc`"。
+- 实际顺序 = `活请求区按 createdAt asc` 拼接 `历史区按 updatedAt desc`。
+- `createdAt` 相同时按内部稳定 `recordId` 作次级稳定排序。
+- 该语义由 service 在 `feedSnapshot()` 内统一派生；UI 不再发明
+  第二套排序规则。
+
+### 历史加载合并
+
+`loadHistoryForOrigin(origin)` 的合并规则：
+
+- DB 读出来的旧记录与内存 request store 里的活记录**按 recordId 合并**；
+- 同 id 时一律以**内存活记录**为准；DB 旧字段不允许覆盖内存里正在
+  等待用户处理的请求；
+- 不同 id 时共存；
+- 合并完成后按"活请求区 + 历史区"投影规则重建 `commands` 顺序。
+
+### 批次隔离
+
+- `loadHistoryForOrigin` 内部用 `origin + token` 隔离批次；
+- 旧 origin 的历史加载晚到时，**不**回写当前 origin 视图；
+- 切换 origin 时新批次开始，旧批次的最终结果被丢弃。
+
+### 关键不变量
+
+1. 同一时刻**允许多张**未终态活卡并存；不存在"全局当前唯一 request"心智。
+2. `confirming -> queued -> executing` 状态推进**不**改变活卡相对顺序。
+3. 第一条活卡进入终态后从活请求区离开，进入历史区；第二条活卡
+   上移成为新的活请求区第一格——这是"前一条事务结束"的正常释放，
+   不是"第二条借壳复用第一条卡"。
+4. `cancel(id)` 按 `recordId` 精确命中，只影响目标卡。
+5. popup 刷新 / 关闭后，内存里的活请求**不**做"占位卡复原"——与
+   施工单 001 的 popup 会话级生命周期一致。
+6. DB 不可用时：活请求区照常渲染（来自内存），历史区只显示本会话
+   内可从内存派生的终态，UI 顶部继续显示"历史不可用"——但**不**
+   因此退回"单一当前请求卡"的旧模型。
 
 ## 确认超时（施工单 003 硬切换）
 

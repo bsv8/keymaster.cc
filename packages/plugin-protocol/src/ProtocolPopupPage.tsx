@@ -2,7 +2,8 @@
 // 对外协议 popup 页面。
 //
 // 设计缘由（施工单 2026-06-27 001 硬切换：锁屏 + 多 request 并存 + 全局
-// 串行执行）：
+// 串行执行 + 施工单 2026-06-27 002 硬切换：活请求区固定槽位 +
+// 历史区分离 + 同类请求不复用卡位）：
 //   - 锁屏仍是全页面：vault 处于 locked 时**只**渲染锁屏页（解锁表单 +
 //     待处理概要），不渲染主 popup 页面 / 命令流 / 顶栏。
 //   - unlocked 后才进入主 popup 页面（顶栏 + 站点配置 + 命令流）。
@@ -10,6 +11,11 @@
 //     渲染 confirm / cancel / 倒计时。
 //   - 命令流不再是"全局当前 request"——任意多张 `confirming` / `queued` /
 //     `executing` 卡片可同时存在；UI 不依赖 `snap.phase`。
+//   - **002 硬切换**：命令流由 service 投影为"活请求区 + 历史区"两段
+//     （活请求按 createdAt asc，历史按 updatedAt desc）；UI 渲染交给
+//     `ProtocolCommandFeed`，本页面**不**再做排序 / 不做 i===0 默认展开。
+//   - **002 硬切换**：顶栏"回到最新"按钮滚到活请求区标题锚点
+//     `#protocol-feed-live-top`，不再盲目按总条数滚。
 //   - 页面只负责渲染态 + 转交用户操作给 service；密码学 / message 收发
 //     / 校验 / 签名 / 加解密一律不进组件。
 //   - 顶栏 sticky：当前 origin / 站点配置 / 关闭 / 回到最新 / 进入钱包。
@@ -154,15 +160,16 @@ export function ProtocolPopupPage() {
     return () => clearInterval(id);
   }, []);
 
-  // 新命令出现时自动滚回顶部。jsdom 不支持 scrollIntoView；显式检测
-  // 后再调，避免单测报 `scrollIntoView is not a function`。
+  // 新命令出现时自动滚回活请求区顶部（施工单 2026-06-27 002 硬切换）。
+  // jsdom 不支持 scrollIntoView；显式检测后再调，避免单测报
+  // `scrollIntoView is not a function`。
   useEffect(() => {
-    const el = feedTopRef.current;
-    if (!el) return;
-    const maybeScroll = (el as HTMLElement & { scrollIntoView?: (opts?: ScrollIntoViewOptions) => void })
+    const anchor = document.getElementById("protocol-feed-live-top");
+    if (!anchor) return;
+    const maybeScroll = (anchor as HTMLElement & { scrollIntoView?: (opts?: ScrollIntoViewOptions) => void })
       .scrollIntoView;
     if (typeof maybeScroll === "function") {
-      maybeScroll.call(el, { behavior: "smooth", block: "start" });
+      maybeScroll.call(anchor, { behavior: "smooth", block: "start" });
     }
   }, [feed.commands.length, feed.currentOrigin]);
 
@@ -206,8 +213,17 @@ export function ProtocolPopupPage() {
           type="button"
           className="protocol-popup__back-top"
           onClick={() => {
-            const el = feedTopRef.current;
-            if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+            // 施工单 2026-06-27 002 硬切换：滚到活请求区顶部锚点；
+            // 若活请求区为空（只有历史），则退回到顶部。
+            const liveAnchor = document.getElementById("protocol-feed-live-top");
+            const target: HTMLElement | null = liveAnchor ?? feedTopRef.current;
+            if (target) {
+              const maybeScroll = (target as HTMLElement & { scrollIntoView?: (opts?: ScrollIntoViewOptions) => void })
+                .scrollIntoView;
+              if (typeof maybeScroll === "function") {
+                maybeScroll.call(target, { behavior: "smooth", block: "start" });
+              }
+            }
           }}
         >
           {t("protocol.topbar.backToTop", { defaultValue: "回到最新" })}

@@ -87,9 +87,56 @@ V1 协议 popup 是一次 window.open 之后**常驻**的会话窗口：
 - 历史按 `event.origin` 归档到 Keymaster 自有的 IndexedDB
   `keymaster.protocol`；不持久化私钥 / 完整密文 / 完整签名 / 解密明文。
 - 命令流历史**不**是协议层审计冷库，仅作为 popup 内的命令上下文展示。
-- **当前请求的交互只发生在命令流最新卡片里**（施工单 003 硬切换）：
-  不存在独立的全页确认 overlay。解锁表单 / 确认按钮 / 取消按钮 /
-  倒计时全部内联在最新卡片 body；历史卡片保持只读 summary。
+
+### 当前 origin 视图：活请求区 + 历史区（施工单 2026-06-27 002 硬切换）
+
+V1 popup 的"当前 origin 视图"由两个语义独立的区块组成：
+
+```txt
+顶栏（sticky）
+  当前站点 / 进入钱包 / 站点配置 / 回到最新 / 关闭
+站点配置 inline 面板（可选）
+活请求区
+  放置未终态 request（waiting_unlock_manual / waiting_unlock_auto /
+  confirming / queued / executing）
+  按 createdAt asc 稳定排序
+  每条 request 一个固定格子；同类 request 不复用卡位
+  每张卡默认展开；直接展示详情 / 按钮 / 倒计时 / 状态文案
+历史区
+  放置终态 request（approved / rejected / failed / timed_out）
+  按 updatedAt desc 排序
+  默认只读 / 折叠；用户可手动展开看详情
+  不出现确认 / 取消按钮
+```
+
+约束：
+
+1. **请求**是 request 状态机的唯一真相源；活请求区与历史区**只是**它的
+   投影。`recordId` 是每条请求的稳定主键。
+2. **排序**语义固定：活请求区按 `createdAt asc`，历史区按 `updatedAt desc`。
+   `updatedAt` 表示"最近一次状态变化"，仅适合作历史排序，不适合作活
+   事务的卡位排序——`confirming -> queued -> executing` 过程中状态
+   变化不应让卡位跳变。
+3. **同类不复用**：连续两条 `cipher.decrypt` 会进入活请求区两个独立
+   格子；用户在第一格确认后，**第二格不会被"借壳"接管第一格的视觉
+   位置**。这是 V1 显示模型的核心不变量。
+4. **历史加载合并**：DB 里的旧记录与内存里的活记录合并时，**同 id
+   一律以内存活记录为准**——保证内存里正在等待用户处理的请求永远
+   不会被 DB 旧字段回退覆盖。
+5. **批次隔离**：切换 origin 时，旧 origin 的历史加载结果如果晚到，
+   **不**覆盖当前 origin 视图。
+
+不允许：
+
+1. 继续保留"整个 feed 全部按 `updatedAt desc` 排序"再靠颜色暗示活卡。
+2. 继续把"当前请求"理解成"第一张可见卡"或"最新一张卡"。
+3. 让同 method 的第二条 request 通过修改第一张卡的内容伪装成"更新"。
+4. 在 UI 上只默认展开索引 0 的卡片。
+5. `loadHistoryForOrigin` 完成后直接把 `commands = listFromDb`，覆盖
+   当前内存活记录。
+
+### 当前请求交互：cancel 与 timeout
+
 - 外部 client 可以通过顶层 `cancel` 报文取消当前正在等待用户处理
   的 request；被取消的是原 request，由原 request 回
   `result(ok=false, error.user_rejected)`。详见[公共约定]里的

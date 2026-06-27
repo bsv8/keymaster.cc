@@ -1,9 +1,8 @@
 // packages/plugin-protocol/src/ProtocolPopupPage.test.tsx
-// 验证施工单 001 + 002：
+// 验证施工单 001 + 2026-06-27 002：
 //   - waiting 状态显示空 feed / 等待文案；
-//   - 收到历史后按新到旧渲染；
-//   - 最新命令默认展开；
-//   - 历史命令可点击展开；
+//   - 命令流按 service 投影渲染：活请求区 + 历史区两个区块；
+//   - 活请求区按 createdAt asc 默认展开；历史区默认折叠只读；
 //   - 完成后页面不自动关闭（phase 回到 waiting）；
 //   - closing 由 pageUnloading 路径发出。
 
@@ -228,45 +227,45 @@ describe("ProtocolPopupPage", () => {
     ).toBeTruthy();
   });
 
-  it("renders command feed sorted by updatedAt desc; latest expanded by default", async () => {
+  it("renders command feed: live section + history section (施工单 2026-06-27 002 硬切换)", async () => {
     const service = makeFakeService();
     currentService = service;
     render(<ProtocolPopupPage />);
-    // 推一条 feed 进 service：当前 origin + 两条命令（最新在前）。
+    // 推一条 feed 进 service：当前 origin + 一条活记录 + 一条历史记录。
     const newFeed: ProtocolCommandFeedState = {
       currentOrigin: "https://demo.example",
       commands: [
         {
-          id: "r-new",
+          id: "live-1",
           origin: "https://demo.example",
-          requestId: "r-new",
-          method: "identity.get",
-          phase: "approved",
-          decision: "approved",
-          status: "approved",
-          textSummary: "newest",
+          requestId: "live-1",
+          method: "cipher.decrypt",
+          phase: "confirming",
+          decision: "pending",
+          status: "confirming",
+          textSummary: "live-prompt",
           claimsSummary: [],
           contentType: "",
           payloadSize: 0,
           activePublicKeyHex: "02" + "11".repeat(32),
           createdAt: 2,
           updatedAt: 2,
-          finishedAt: 2,
+          finishedAt: 0,
           errorCode: "",
           errorMessage: ""
         },
         {
-          id: "r-old",
+          id: "hist-1",
           origin: "https://demo.example",
-          requestId: "r-old",
-          method: "cipher.encrypt",
+          requestId: "hist-1",
+          method: "identity.get",
           phase: "approved",
           decision: "approved",
           status: "approved",
-          textSummary: "oldest",
+          textSummary: "history-prompt",
           claimsSummary: [],
-          contentType: "note.v1",
-          payloadSize: 12,
+          contentType: "",
+          payloadSize: 0,
           activePublicKeyHex: "02" + "11".repeat(32),
           createdAt: 1,
           updatedAt: 1,
@@ -276,16 +275,142 @@ describe("ProtocolPopupPage", () => {
         }
       ],
       historyAvailable: true,
-        lockSummary: null
+      lockSummary: null
     };
     act(() => {
       service.feed = newFeed;
       for (const l of service.feedListeners) l({ ...newFeed, commands: newFeed.commands.slice() });
     });
-    // 新命令卡片：默认展开（包含"提示文案"等详情）
-    expect(screen.getByText("newest")).toBeTruthy();
-    // 旧命令卡片：默认折叠，只显示摘要行，不显示"提示文案"等详情。
-    expect(screen.queryByText("oldest")).toBeNull();
+    // 关键断言：两个区块标题都在。
+    expect(screen.getByText("待处理请求")).toBeTruthy();
+    expect(screen.getByText("历史")).toBeTruthy();
+    // 活请求区默认展开：textSummary 直接展示。
+    expect(screen.getByText("live-prompt")).toBeTruthy();
+    // 历史区默认折叠：textSummary 不直接展示。
+    expect(screen.queryByText("history-prompt")).toBeNull();
+  });
+
+  it("活请求区多条同类 request：每条独立展开，按 recordId 稳定 key", async () => {
+    // 关键不变量（施工单 002）：同类 request 不复用卡位；每条独立展开。
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const newFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "dec-A",
+          origin: "https://demo.example",
+          requestId: "dec-A",
+          method: "cipher.decrypt",
+          phase: "confirming",
+          decision: "pending",
+          status: "confirming",
+          textSummary: "dec-A",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 1,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        },
+        {
+          id: "dec-B",
+          origin: "https://demo.example",
+          requestId: "dec-B",
+          method: "cipher.decrypt",
+          phase: "confirming",
+          decision: "pending",
+          status: "confirming",
+          textSummary: "dec-B",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 2,
+          updatedAt: 2,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true,
+      lockSummary: null
+    };
+    act(() => {
+      service.feed = newFeed;
+      for (const l of service.feedListeners) l({ ...newFeed, commands: newFeed.commands.slice() });
+    });
+    // 两张独立活卡都默认展开。
+    expect(screen.getByText("dec-A")).toBeTruthy();
+    expect(screen.getByText("dec-B")).toBeTruthy();
+  });
+
+  it("第一条活卡终态后从活请求区进入历史区：第二条仍默认展开", async () => {
+    // 关键不变量（施工单 002）：第一条活卡 → approved 后从活请求区离开
+    // 进入历史区；第二条仍位于活请求区第一格并默认展开。
+    const service = makeFakeService();
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const newFeed: ProtocolCommandFeedState = {
+      currentOrigin: "https://demo.example",
+      commands: [
+        {
+          id: "live-B",
+          origin: "https://demo.example",
+          requestId: "live-B",
+          method: "identity.get",
+          phase: "confirming",
+          decision: "pending",
+          status: "confirming",
+          textSummary: "B-prompt",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 2,
+          updatedAt: 2,
+          finishedAt: 0,
+          errorCode: "",
+          errorMessage: ""
+        },
+        {
+          id: "hist-A",
+          origin: "https://demo.example",
+          requestId: "hist-A",
+          method: "identity.get",
+          phase: "approved",
+          decision: "approved",
+          status: "approved",
+          textSummary: "A-history",
+          claimsSummary: [],
+          contentType: "",
+          payloadSize: 0,
+          activePublicKeyHex: "02" + "11".repeat(32),
+          createdAt: 1,
+          updatedAt: 5,
+          finishedAt: 5,
+          errorCode: "",
+          errorMessage: ""
+        }
+      ],
+      historyAvailable: true,
+      lockSummary: null
+    };
+    act(() => {
+      service.feed = newFeed;
+      for (const l of service.feedListeners) l({ ...newFeed, commands: newFeed.commands.slice() });
+    });
+    // 活请求区只剩 B：默认展开，textSummary 直接可见。
+    expect(screen.getByText("B-prompt")).toBeTruthy();
+    // 历史区有 A：默认折叠，textSummary 不直接可见。
+    expect(screen.queryByText("A-history")).toBeNull();
+    // 两个区块标题都在。
+    expect(screen.getByText("待处理请求")).toBeTruthy();
+    expect(screen.getByText("历史")).toBeTruthy();
   });
 
   it("renders 'history unavailable' notice when historyAvailable=false", () => {

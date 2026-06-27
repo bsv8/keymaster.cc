@@ -1,33 +1,23 @@
 // packages/plugin-protocol/src/ProtocolCommandFeed.tsx
-// popup 命令流 feed 组件（单列流 + 多活动卡片）。
+// popup 命令流 feed 组件（活请求区 + 历史区 两段渲染）。
 //
-// 设计缘由（施工单 2026-06-27 001 硬切换：锁屏 + 多 request 并存 +
-// 全局串行执行）：
-//   - 不再有"全局当前 request"概念；多张 `confirming` / `queued` /
-//     `executing` 卡片可同时存在。
-//   - 每张卡片按自己的 `recordId` 调 service 交互 API
-//     （`confirmByUser(recordId)` / `rejectByUser(recordId)`）。
-//   - 每张 `confirming` 卡独立显示倒计时（deadline 由 service 按
-//     recordId 暴露）。
-//   - 历史卡片保持只读 summary；不允许出现"对历史 request 再点确认"。
-//   - `queued` 显示"已确认，等待执行"。
-//   - `executing` 显示"处理中"。
-//   - `timed_out` 单独显示"超时"（与 `failed` 平级）。
-//   - auto-approve 命中时 card.autoApproved=true，body 显示
-//     "自动通过 / 处理中"，没有确认按钮。
-//   - 视图层**不**参与 service 业务：所有状态都通过 props 传入。
+// 设计缘由（施工单 2026-06-27 002 硬切换：活请求区固定槽位 +
+// 历史区分离 + 同类请求不复用卡位）：
+//   - 活请求区：未终态 request（waiting_unlock_manual / waiting_unlock_auto /
+//     confirming / queued / executing），按 service 投影的 `commands`
+//     前段（createdAt asc，recordId 次级稳定）渲染。
+//   - 历史区：终态 request（approved / rejected / failed / timed_out），
+//     按 service 投影的 `commands` 后段（updatedAt desc）渲染。
+//   - 两个区块有明确视觉分组（活请求区视觉重点突出；历史区视觉弱化）。
+//   - 活请求卡**全部默认展开**，并按 `recordId` 稳定绑定展开态。
+//   - 历史卡默认折叠，用户手动展开看详情；不允许出现确认 / 取消按钮。
+//   - 不再用 `i === 0` 决定唯一展开卡——活请求卡按 recordId 独立状态。
+//   - 视图层**不**参与 service 业务：所有状态都通过 props 传入；不做
+//     任何排序、不做 id 去重、不改写任何 record。
 
-import { useEffect, useState } from "react";
-import { Button, PageHeader, TextInput } from "@keymaster/ui";
+import { useState } from "react";
+import { Button, PageHeader } from "@keymaster/ui";
 import type {
-  CipherDecryptParams,
-  CipherEncryptParams,
-  FeepoolCommitParams,
-  FeepoolPrepareParams,
-  IdentityGetParams,
-  IntentSignParams,
-  MethodParams,
-  P2pkhTransferParams,
   ProtocolCommandFeedState,
   ProtocolCommandRecord,
   ProtocolMethod,
@@ -53,6 +43,12 @@ const DECISION_LABEL_KEY: Record<ProtocolCommandRecord["decision"], string> = {
   failed: "protocol.feed.decision.failed"
 };
 
+/**
+ * 顶层：根据 service 投影的 `commands` 把活请求区 / 历史区分别渲染。
+ *
+ * service 已按"活请求区 createdAt asc + 历史区 updatedAt desc"投影；
+ * 本组件只负责分两段渲染，**不**再做排序。
+ */
 export function ProtocolCommandFeed(props: ProtocolCommandFeedProps) {
   const { t, feed } = props;
   if (!feed.currentOrigin) {
@@ -80,51 +76,145 @@ export function ProtocolCommandFeed(props: ProtocolCommandFeedProps) {
       </div>
     );
   }
-  if (historyWarning) {
-    return (
-      <div className="protocol-feed protocol-feed--no-history">
-        {historyWarning}
-        <FeedList {...props} />
-      </div>
-    );
-  }
-  return <FeedList {...props} />;
-}
-
-function FeedList(props: ProtocolCommandFeedProps) {
-  const { t, feed } = props;
+  const split = splitFeedByTerminal(feed.commands);
   return (
-    <ul className="protocol-feed__list" aria-label={t("protocol.feed.list.aria", { defaultValue: "命令流历史" })}>
-      {feed.commands.map((c, i) => (
-        <CommandCard
-          key={c.id}
+    <div className="protocol-feed">
+      {historyWarning}
+      {split.live.length > 0 ? (
+        <FeedSection
+          kind="live"
           t={t}
-          command={c}
-          initiallyExpanded={i === 0}
+          commands={split.live}
           service={props.service}
           now={props.now}
+          defaultExpanded
         />
-      ))}
-    </ul>
+      ) : null}
+      {split.history.length > 0 ? (
+        <FeedSection
+          kind="history"
+          t={t}
+          commands={split.history}
+          service={props.service}
+          now={props.now}
+          defaultExpanded={false}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 把 service 投影后的 commands 拆为活请求区 + 历史区。
+ *
+ * 注意：这里不**重排**——service 已经按"活请求区 + 历史区"投影好；
+ * 只按 phase 是否终态切片分组。终态判定与 service 的 `isTerminalPhase`
+ * 保持一致。
+ */
+function splitFeedByTerminal(commands: ProtocolCommandRecord[]): {
+  live: ProtocolCommandRecord[];
+  history: ProtocolCommandRecord[];
+} {
+  const live: ProtocolCommandRecord[] = [];
+  const history: ProtocolCommandRecord[] = [];
+  for (const c of commands) {
+    if (isTerminalPhase(c.phase)) history.push(c);
+    else live.push(c);
+  }
+  return { live, history };
+}
+
+function isTerminalPhase(phase: ProtocolCommandRecord["phase"]): boolean {
+  return (
+    phase === "approved" ||
+    phase === "rejected" ||
+    phase === "failed" ||
+    phase === "timed_out"
+  );
+}
+
+/* ============== 区块（活请求区 / 历史区） ============== */
+
+/**
+ * 单个区块（活请求区或历史区）。
+ *
+ * 设计要点：
+ *   - 区块标题清楚区分"待处理请求"vs"历史"。
+ *   - 区块内的卡片都用 `CommandCard`，但用 `kind` 控制默认展开态 +
+ *     区块样式（活请求卡视觉重点突出，历史卡视觉弱化）。
+ *   - 区块标题挂 `id` 给顶栏"回到最新"锚点用。
+ */
+function FeedSection({
+  kind,
+  t,
+  commands,
+  service,
+  now,
+  defaultExpanded
+}: {
+  kind: "live" | "history";
+  t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
+  commands: ProtocolCommandRecord[];
+  service: ProtocolService;
+  now: number;
+  defaultExpanded: boolean;
+}) {
+  const sectionClass = `protocol-feed__section protocol-feed__section--${kind}`;
+  const title =
+    kind === "live"
+      ? t("protocol.feed.section.live", { defaultValue: "待处理请求" })
+      : t("protocol.feed.section.history", { defaultValue: "历史" });
+  const anchorId = kind === "live" ? "protocol-feed-live-top" : "protocol-feed-history-top";
+  return (
+    <section className={sectionClass} aria-label={title}>
+      <h2 className="protocol-feed__section-title" id={anchorId}>
+        {title}
+        <span className="protocol-feed__section-count">
+          <code>{commands.length}</code>
+        </span>
+      </h2>
+      <ul className="protocol-feed__list">
+        {commands.map((c) => (
+          <CommandCard
+            key={c.id}
+            t={t}
+            command={c}
+            initiallyExpanded={defaultExpanded}
+            service={service}
+            now={now}
+            kind={kind}
+          />
+        ))}
+      </ul>
+    </section>
   );
 }
 
 /**
  * 单张命令卡：按 record.id 独立交互；不再假设"最新一张才是活卡"。
+ *
+ * 活请求区 / 历史区共用同一个组件，区别：
+ *   - 活请求区：默认展开，按 recordId 稳定 key；卡片内可呈现
+ *     `confirming` / `waiting_unlock_*` / `queued` / `executing` 的交互体。
+ *   - 历史区：默认折叠；卡片内只显示 summary，不显示交互按钮。
  */
 function CommandCard({
   t,
   command,
   initiallyExpanded,
   service,
-  now
+  now,
+  kind
 }: {
   t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
   command: ProtocolCommandRecord;
   initiallyExpanded: boolean;
   service: ProtocolService;
   now: number;
+  kind: "live" | "history";
 }) {
+  // 展开态**必须**按 recordId 稳定绑定：组件 key={c.id} 由 React 保证，
+  // 这里只在自己状态机内维护 expanded 布尔值。
   const [expanded, setExpanded] = useState<boolean>(initiallyExpanded);
   const decisionKey = DECISION_LABEL_KEY[command.decision];
   const decisionLabel = t(decisionKey, { defaultValue: command.decision });
@@ -136,7 +226,8 @@ function CommandCard({
   const cardClass = [
     "protocol-feed__card",
     `protocol-feed__card--${command.decision}`,
-    `protocol-feed__card--phase-${command.phase}`
+    `protocol-feed__card--phase-${command.phase}`,
+    kind === "history" ? "protocol-feed__card--history" : "protocol-feed__card--live"
   ].join(" ");
   return (
     <li
@@ -193,6 +284,7 @@ function CommandCard({
             command={command}
             service={service}
             now={now}
+            kind={kind}
           />
         </div>
       ) : null}
@@ -206,19 +298,27 @@ function CardBody({
   t,
   command,
   service,
-  now
+  now,
+  kind
 }: {
   t: (key: string, values?: { defaultValue?: string; seconds?: number }) => string;
   command: ProtocolCommandRecord;
   service: ProtocolService;
   now: number;
+  kind: "live" | "history";
 }) {
-  // 历史卡片：只读 summary。
-  const isTerminal =
+  // 历史区块的卡片：直接走只读 summary，不显示任何交互按钮。
+  if (kind === "history") {
+    return <ReadOnlyBody t={t} command={command} />;
+  }
+  // 活请求区块内，终态卡片虽然被划到 history 段，但 service 内部终态
+  // 路径里仍可能短暂进入活请求区（state 推进的中间瞬间）。这种卡也
+  // 走只读 summary——交互已不可用。
+  if (
     command.decision === "approved" ||
     command.decision === "rejected" ||
-    command.decision === "failed";
-  if (isTerminal) {
+    command.decision === "failed"
+  ) {
     return <ReadOnlyBody t={t} command={command} />;
   }
 

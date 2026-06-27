@@ -211,6 +211,16 @@ interface RequestRecord {
   enteredPhaseAt: number;
   /** 是否被 auto-approve 路径命中（p2pkh / feepool / identity / cipher）。 */
   autoApproved: boolean;
+  /**
+   * 写记录时快照的 active public key hex（施工单 2026-06-27 002 反馈修复）。
+   *
+   * 严格遵守 contract `ProtocolCommandRecord.activePublicKeyHex` 的语义：
+   * "执行该命令时 active public key hex；写记录时取一次"。后续写卡
+   * **不**再读当前 active key——即使 popup 会话里用户切换 active key，
+   * 旧卡片的 `activePublicKeyHex` 字段也保持 record 创建时的快照值，
+   * 不被污染。
+   */
+  activePublicKeyHex: string;
   /** 创建时间，unix milliseconds。 */
   createdAt: number;
   /** 最近一次状态更新时间，unix milliseconds。 */
@@ -270,8 +280,22 @@ export class ProtocolServiceImpl implements ProtocolService {
   private feedCommands: ProtocolCommandRecord[] = [];
   /** 命令流 DB 是否可用。false 时 UI 顶部显示"历史不可用"。 */
   private historyAvailableFlag: boolean;
-  /** DB 加载 promise：避免重复打开 + 重复载入。 */
-  private historyLoadInFlight: Promise<void> | null = null;
+  /**
+   * DB 加载按 origin 隔离的 in-flight promise map（施工单 2026-06-27 002
+   * 反馈修复）。
+   *
+   * 旧实现用单一全局 `historyLoadInFlight: Promise<void> | null`，复
+   * 用条件是"currentOriginValue === origin"——这个条件在 acceptRequest
+   * 里已被改成新 origin，结果旧 origin 的 in-flight 会被新 origin 错
+   * 误复用。新实现按 origin key 隔离：同 origin 复用 in-flight；不同
+   * origin 各自独立，配合 `historyLoadToken` 防旧批次晚到回写。
+   */
+  private historyLoadInFlightByOrigin: Map<string, Promise<void>> = new Map();
+  /**
+   * 历史加载当前批次的递增 token；切换 origin / 重新触发时递增。旧 token
+   * 晚到的批次结果直接丢弃，**不**回写当前视图。
+   */
+  private historyLoadToken: number = 0;
 
   /**
    * request store（施工单 2026-06-27 001 硬切换）。
@@ -352,7 +376,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    不应泄漏到新会话。
     this.currentOriginValue = null;
     this.feedCommands = [];
-    this.historyLoadInFlight = null;
+    this.historyLoadInFlightByOrigin.clear();
+    this.historyLoadToken++;
     // 5. 重置会话级 phase / lockState / closing 标志。
     this.phase = "waiting";
     this.lockStateValue = this.readVaultLockState();
@@ -398,7 +423,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 残留到下一轮 startSession 之前的快照读取里。
     this.currentOriginValue = null;
     this.feedCommands = [];
-    this.historyLoadInFlight = null;
+    this.historyLoadInFlightByOrigin.clear();
+    this.historyLoadToken++;
     this.phase = "waiting";
     // 同时推 session 快照 + feed 快照：feed 订阅者拿到空 feed；
     // session 订阅者拿到 phase="waiting" + lockState 不变（vault 状态
@@ -831,15 +857,26 @@ export class ProtocolServiceImpl implements ProtocolService {
     event: MessageEvent,
     parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
   ): Promise<void> {
-    // origin 切换：触发历史载入。
+    // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
+    // 002 反馈修复）。
+    //   - 旧实现只更新 `currentOriginValue` 并异步加载历史，旧 origin 的
+    //     卡片仍留在 `feedCommands` 里。后续 setRecordPhase → upsertFeedCommand
+    //     会拿"旧 origin 历史 + 新 origin 活卡"一起 buildFeedDisplay，让用户
+    //     短暂看到跨 origin 混排。
+    //   - 新实现：切 origin 时立即把 `feedCommands` 清成"只含新 origin 内
+    //     存活记录的投影"；旧 origin 数据仍保留在 `requestsByRecordId` 里
+    //     便于切回，但当前视图只显示新 origin。`loadHistoryForOrigin`
+    //     完成后再用 DB 历史重建当前 origin 视图。
     if (this.currentOriginValue !== event.origin) {
       this.currentOriginValue = event.origin;
+      this.feedCommands = this.buildFeedDisplay(
+        this.currentOriginLiveCommands(event.origin)
+      );
       void this.loadHistoryForOrigin(event.origin);
     }
 
     const recordId = this.nextRecordId();
     const now = Date.now();
-    const activePub = this.deps.keyspace.active().activePublicKeyHex ?? "";
     const source = event.source as Window;
     const origin = event.origin;
     const method = parsed.method;
@@ -856,6 +893,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       status: "pending",
       enteredPhaseAt: now,
       autoApproved: false,
+      // 关键（施工单 2026-06-27 002 反馈修复）：activePublicKeyHex 在
+      // record 创建时快照一次。后续写卡（writeFeedCommandFor）从
+      // rec.activePublicKeyHex 读取，**不**再读当前 active key——
+      // 即使 popup 会话里用户切换 active key，这条 record 的元数据
+      // 也不会被污染。
+      activePublicKeyHex: this.deps.keyspace.active().activePublicKeyHex ?? "",
       createdAt: now,
       updatedAt: now,
       finishedAt: 0,
@@ -864,13 +907,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
     this.requestsByRecordId.set(recordId, rec);
 
-    // 写命令流历史卡（waiting_unlock_manual / waiting_unlock_auto / queued /
-    // confirming 都用同一份 record，仅 phase 字段不同）。
-    const card = this.makeCommandRecord(rec, activePub);
-    this.upsertFeedCommand(card);
-    this.persistRecord(card);
-
-    // 决定初始 phase。
+    // 决定初始 phase。`setRecordPhase` 会负责写 feed 卡 + 持久化（施工单
+    // 2026-06-27 002 硬切换：feed 投影走 `buildFeedDisplay`，活卡按
+    // createdAt asc 稳定排序，不再做"先占位后改 phase"的两次写）。
     const autoApproved = await this.tryAutoApprove(parsed, origin, rec);
     if (autoApproved) {
       rec.autoApproved = true;
@@ -2081,35 +2120,102 @@ export class ProtocolServiceImpl implements ProtocolService {
   /* ============== 命令流（feed）+ DB ============== */
 
   /**
-   * 推一条命令到当前 feed。`commands` 数组按 `updatedAt desc` 排序；
-   * 同 `id` 已存在时覆盖并前移。
+   * 当前 record 的 phase 是否已经走到终态（不可再被 `confirmByUser` /
+   * `rejectByUser` 影响，仍可作为历史展示）。
+   *
+   * 终态集合（与 `ProtocolCommandPhase` 同步）：
+   *   approved / rejected / failed / timed_out
+   *
+   * 旧 `waiting_unlock` / `waiting_confirm` 是 DB 历史 schema 上的 alias，
+   * 现在新写入只会落到 `waiting_unlock_manual` / `waiting_unlock_auto`；
+   * 这里把 `waiting_unlock` / `waiting_confirm` 也视为**中间态**——它们
+   * 一定来自旧历史记录，按活请求区展示策略走（它们不可能出现在新写
+   * 路径里）。
+   */
+  private isTerminalPhase(phase: ProtocolCommandPhase | "waiting_unlock" | "waiting_confirm"): boolean {
+    return (
+      phase === "approved" ||
+      phase === "rejected" ||
+      phase === "failed" ||
+      phase === "timed_out"
+    );
+  }
+
+  /**
+   * 派生展示投影（施工单 2026-06-27 002 硬切换）。
+   *
+   * 规则：
+   *   - 活请求区：未终态 record，按 createdAt asc；createdAt 相同时按
+   *     recordId 作次级稳定排序（避免同 createdAt 抖动）。
+   *   - 历史区：  终态 record，按 updatedAt desc。
+   *   - 拼接顺序：活请求区在前，历史区在后。
+   *
+   * 入参 `records` 一般来自 `feedCommands` 或"DB 历史 + 内存活记录"的
+   * 合并结果；本函数只负责按 phase / 时间戳排序，**不**做 id 去重——
+   * 调用方负责先按 id 合并（DB + 内存合并时内存覆盖 DB）。
+   */
+  private buildFeedDisplay(records: ProtocolCommandRecord[]): ProtocolCommandRecord[] {
+    const live: ProtocolCommandRecord[] = [];
+    const history: ProtocolCommandRecord[] = [];
+    for (const r of records) {
+      if (this.isTerminalPhase(r.phase)) history.push(r);
+      else live.push(r);
+    }
+    live.sort((a, b) => {
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
+    history.sort((a, b) => b.updatedAt - a.updatedAt);
+    return [...live, ...history];
+  }
+
+  /**
+   * 推一条命令到当前 feed。
+   *
+   * 设计缘由（施工单 2026-06-27 002 硬切换）：
+   *   - 旧实现：in-place 覆盖 `feedCommands[idx]`，再整体按 updatedAt
+   *     desc 排序。后果：每次状态推进都会让活卡整体跳位（同类 request
+   *     "借壳"接管第一格）。
+   *   - 新实现：用 `buildFeedDisplay` 派生活请求区 + 历史区投影，活请
+   *     求区按 createdAt asc 稳定，活卡相对顺序不被 updatedAt 驱动。
+   *
+   * 同 `id` 已存在时覆盖；新记录按新建字段插入。
+   *
+   * 切 origin 时可能携带旧 origin 的 card（如 acceptRequest 阶段尚未
+   * 切完）：这里**不**主动过滤，origin 切换收口放在 `acceptRequest` +
+   * `loadHistoryForOrigin` 里完成（见 `loadHistoryForOrigin` 中的
+   * `currentOriginValue === origin` 守卫）。
    */
   private upsertFeedCommand(record: ProtocolCommandRecord): void {
     const idx = this.feedCommands.findIndex((c) => c.id === record.id);
     if (idx >= 0) {
       this.feedCommands[idx] = record;
     } else {
-      this.feedCommands.unshift(record);
+      this.feedCommands.push(record);
     }
-    this.feedCommands.sort((a, b) => b.updatedAt - a.updatedAt);
+    this.feedCommands = this.buildFeedDisplay(this.feedCommands);
     this.emitFeed();
   }
 
   /**
    * 把 RequestRecord 投影成 ProtocolCommandRecord，并 upsert。
+   *
+   * 关键（施工单 2026-06-27 002 反馈修复）：
+   *   - `activePublicKeyHex` 从 `rec.activePublicKeyHex` 读取——即 record
+   *     创建时快照下来的值，**不**再读 `keyspace.active()`。这样
+   *     符合 contract `ProtocolCommandRecord.activePublicKeyHex` 注释：
+   *     "执行该命令时 active public key hex；写记录时取一次"。
+   *   - 后续即便用户在 popup 会话里切换 active key，旧卡片的元数据
+   *     不会被污染。
    */
   private writeFeedCommandFor(rec: RequestRecord): void {
-    const card = this.makeCommandRecord(rec, this.feedCommands.find((c) => c.id === rec.recordId)?.activePublicKeyHex ?? "");
+    const card = this.makeCommandRecord(rec, rec.activePublicKeyHex);
     this.upsertFeedCommand(card);
     this.persistRecord(card);
   }
 
   private makeCommandRecord(rec: RequestRecord, activePublicKeyHex: string): ProtocolCommandRecord {
-    const isTerminal =
-      rec.phase === "approved" ||
-      rec.phase === "rejected" ||
-      rec.phase === "failed" ||
-      rec.phase === "timed_out";
+    const isTerminal = this.isTerminalPhase(rec.phase);
     const status =
       rec.phase === "timed_out"
         ? "timed_out"
@@ -2172,16 +2278,44 @@ export class ProtocolServiceImpl implements ProtocolService {
     });
   }
 
+  /**
+   * 历史加载（施工单 2026-06-27 002 硬切换 + 反馈修复）。
+   *
+   * 行为：
+   *   - 同 origin 内已有的 in-flight load 直接复用返回的 promise（避免
+   *     对同 origin 重复 DB 读取）；**不同 origin 各自独立**——
+   *     `historyLoadInFlightByOrigin: Map<origin, Promise>`，不能用
+   *     全局 `currentOriginValue` 判断复用（否则切到 B 时复用 A 的 in-flight）。
+   *   - 加载完成后，按 recordId 合并 DB 历史 + 内存活记录，**同 id 以
+   *     内存活记录为准**；DB 旧字段不允许覆盖当前内存里的活卡。
+   *   - 合并完成后用 `buildFeedDisplay` 重建展示投影（活请求区
+   *     createdAt asc + 历史区 updatedAt desc）。
+   *   - 加载完成 / 失败时检查 `currentOriginValue === origin`：如果当前
+   *     origin 已切换（旧批次晚到），整批结果丢弃，**不**回写
+   *     `feedCommands`；否则把结果写到当前视图。
+   *   - 旧 origin 历史保留在 `requestsByRecordId` 里（便于切回），但
+   *     `feedCommands` 始终只含**当前 origin**的投影。
+   */
   private async loadHistoryForOrigin(origin: string): Promise<void> {
-    if (this.historyLoadInFlight) {
-      return this.historyLoadInFlight;
+    // 同 origin 已有 in-flight load：复用。
+    const existing = this.historyLoadInFlightByOrigin.get(origin);
+    if (existing) {
+      return existing;
     }
     const db = this.deps.storageDb;
     if (!db) {
-      this.historyAvailableFlag = false;
-      this.emitFeed();
+      // DB 不可用：仅当当前 currentOrigin 仍等于本 origin 时把"不可用"
+      // 状态写回 feed；旧 origin 的 in-flight 不会污染新 origin 视图。
+      if (this.currentOriginValue === origin) {
+        this.feedCommands = this.buildFeedDisplay(
+          this.currentOriginLiveCommands(origin)
+        );
+        this.historyAvailableFlag = false;
+        this.emitFeed();
+      }
       return;
     }
+    const token = ++this.historyLoadToken;
     const task = (async () => {
       try {
         const [list, originRec, pools] = await Promise.all([
@@ -2189,43 +2323,64 @@ export class ProtocolServiceImpl implements ProtocolService {
           db.getOrigin(origin),
           db.listFeePoolsByOrigin(origin)
         ]);
+        // 批次隔离：旧 token 晚到 → 丢弃结果。
+        if (token !== this.historyLoadToken) {
+          return;
+        }
         if (originRec) {
           this.originCache.set(origin, normalizeOriginSettings(originRec, origin));
         }
-        const merged: ProtocolCommandRecord[] = list.slice();
-        // 当前 in-flight 记录全部保留。
+        // 按 recordId 合并：内存活记录优先覆盖 DB 旧记录。
+        const mergedById = new Map<string, ProtocolCommandRecord>();
+        for (const c of list) mergedById.set(c.id, c);
         for (const rec of this.requestsByRecordId.values()) {
           if (rec.origin !== origin) continue;
-          const card = this.makeCommandRecord(rec, rec.origin);
-          if (!merged.some((c) => c.id === rec.recordId)) {
-            merged.unshift(card);
-          }
+          const card = this.makeCommandRecord(rec, rec.activePublicKeyHex);
+          mergedById.set(rec.recordId, card);
         }
-        merged.sort((a, b) => b.updatedAt - a.updatedAt);
-        this.feedCommands = merged;
-        this.historyAvailableFlag = true;
-        void pools;
-        this.emitFeed();
+        // 写入前再次确认 currentOrigin 没切换；否则丢弃（旧批次晚到）。
+        if (this.currentOriginValue === origin) {
+          this.feedCommands = this.buildFeedDisplay(
+            Array.from(mergedById.values())
+          );
+          this.historyAvailableFlag = true;
+          void pools;
+          this.emitFeed();
+        }
       } catch (err) {
         console.error("[protocol.storageDb] loadHistoryForOrigin failed", {
           origin,
           error: err instanceof Error ? err.message : String(err)
         });
-        this.historyAvailableFlag = false;
-        // 保留当前活记录。
-        const live: ProtocolCommandRecord[] = [];
-        for (const rec of this.requestsByRecordId.values()) {
-          if (rec.origin === origin) live.push(this.makeCommandRecord(rec, rec.origin));
+        if (token !== this.historyLoadToken) {
+          return;
         }
-        live.sort((a, b) => b.updatedAt - a.updatedAt);
-        this.feedCommands = live;
-        this.emitFeed();
+        if (this.currentOriginValue === origin) {
+          this.historyAvailableFlag = false;
+          this.feedCommands = this.buildFeedDisplay(
+            this.currentOriginLiveCommands(origin)
+          );
+          this.emitFeed();
+        }
       } finally {
-        this.historyLoadInFlight = null;
+        this.historyLoadInFlightByOrigin.delete(origin);
       }
     })();
-    this.historyLoadInFlight = task;
+    this.historyLoadInFlightByOrigin.set(origin, task);
     return task;
+  }
+
+  /**
+   * 取当前 origin 的内存活命令卡（不读 DB）。
+   * 用于切 origin / DB 不可用时快速重建"当前 origin 视图"。
+   */
+  private currentOriginLiveCommands(origin: string): ProtocolCommandRecord[] {
+    const out: ProtocolCommandRecord[] = [];
+    for (const rec of this.requestsByRecordId.values()) {
+      if (rec.origin !== origin) continue;
+      out.push(this.makeCommandRecord(rec, rec.activePublicKeyHex));
+    }
+    return out;
   }
 
   /* ============== 摘要工具 ============== */
