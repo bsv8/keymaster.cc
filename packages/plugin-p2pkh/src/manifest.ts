@@ -45,7 +45,7 @@ import { P2pkhBalanceWidget } from "./widgets/P2pkhBalanceWidget.js";
 export { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 
 /** P2PKH i18n 资源：覆盖 route/menu/home/settings/breadcrumb 展示与 P2PKH 业务文案。 */
-const p2pkhResources: I18nPluginResources = {
+export const p2pkhResources: I18nPluginResources = {
   namespace: "p2pkh",
   resources: {
     en: {

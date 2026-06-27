@@ -24,6 +24,7 @@ import type {
   P2pkhRecentSyncState,
   P2pkhService
 } from "./p2pkhContracts.js";
+import { p2pkhResources } from "./manifest.js";
 import { P2pkhOverviewPage } from "./pages/P2pkhOverviewPage.js";
 
 const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -185,7 +186,10 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
   it("shows 未同步 initially, switches to timestamp after recentSyncStatus completes", async () => {
     const fake = makeFakeService();
     const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({
+      disableConfigPersistence: true,
+      initialI18nResources: [p2pkhResources]
+    });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace);
 
@@ -195,11 +199,11 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
       </PluginHostProvider>
     );
 
-    // 初始：resource 行已渲染，但 recentSync 为空 -> "未同步"。
+    // 初始：resource 行已渲染，但 recentSync 为空 -> "未同步" / "Never synced"。
     await waitFor(() => {
       expect(screen.getByText("test-key")).toBeTruthy();
     });
-    expect(screen.getAllByText("未同步").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/未同步|Never synced/).length).toBeGreaterThan(0);
 
     // 模拟 recent-sync 任务跑完：listRecentSyncStates 即将返回带时间戳。
     const ts = "2024-06-19T10:00:00.000Z";
@@ -215,9 +219,9 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
       fake.emitRecent({ resourceId: "p2pkh:main", recentConfirmedTxids: [], lastSuccessAt: ts, lastCheckedAt: ts });
     });
 
-    // 等待列表重新读取 recent_sync 后，"未同步"应该消失。
+    // 等待列表重新读取 recent_sync 后，"未同步" / "Never synced" 应该消失。
     await waitFor(() => {
-      expect(screen.queryAllByText("未同步").length).toBe(0);
+      expect(screen.queryAllByText(/未同步|Never synced/).length).toBe(0);
     }, { timeout: 1500 });
     // listRecentSyncStates 至少被调用两次（initial load + reload after status change）。
     expect((fake.service.listRecentSyncStates as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2);
@@ -228,7 +232,10 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
     // status 已经离开 syncing，但 per-task 订阅仍应触发 reload。
     const fake = makeFakeService();
     const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({
+      disableConfigPersistence: true,
+      initialI18nResources: [p2pkhResources]
+    });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace);
 

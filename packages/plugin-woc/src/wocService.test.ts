@@ -84,6 +84,7 @@ function installFakeWebLocks(): { uninstall: () => void; isBusy: () => boolean }
   const queues = new Map<string, Array<() => void>>();
   const held = new Set<string>();
   const navAny = globalThis as { navigator?: Navigator };
+  const prevNavigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const prevNav = navAny.navigator;
   const fakeNav = {
     ...(prevNav ?? {}),
@@ -108,11 +109,26 @@ function installFakeWebLocks(): { uninstall: () => void; isBusy: () => boolean }
       }
     }
   } as unknown as Navigator;
-  (navAny as { navigator: Navigator }).navigator = fakeNav;
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    writable: true,
+    value: fakeNav
+  });
   return {
     uninstall() {
-      if (prevNav) (navAny as { navigator: Navigator }).navigator = prevNav;
-      else delete (navAny as { navigator?: Navigator }).navigator;
+      if (prevNavigatorDescriptor) {
+        Object.defineProperty(globalThis, "navigator", prevNavigatorDescriptor);
+        return;
+      }
+      if (prevNav) {
+        Object.defineProperty(globalThis, "navigator", {
+          configurable: true,
+          writable: true,
+          value: prevNav
+        });
+        return;
+      }
+      delete (navAny as { navigator?: Navigator }).navigator;
     },
     isBusy() {
       return held.size > 0;

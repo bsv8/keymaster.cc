@@ -27,7 +27,10 @@ import { LogSettingsPage } from "./LogSettingsPage.js";
 
 /** 设置 i18n 资源。设计缘由：route / menu / 设置项 label 全部走 I18nText。 */
 const settingsResources: I18nPluginResources = {
-  namespace: "settings",
+  // 这批 key 的调用方长期使用 `t("settings.*") / t("pluginManager.*") /
+  // t("logSettings.*")`，并不把 `settings` 当 namespace 前缀来传。
+  // 因此资源必须挂在 common namespace，才能让这些 flat key 直接命中。
+  namespace: "common",
   resources: {
     en: {
       "settings.route.language": "Language",

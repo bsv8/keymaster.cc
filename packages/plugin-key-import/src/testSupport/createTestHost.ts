@@ -47,8 +47,8 @@ export interface TestHostHandle {
 function makeTestJsonImporter(): KeyImporter {
   return {
     id: "json-file",
-    name: { key: "x", fallback: "JSON" },
-    description: { key: "x", fallback: "" },
+    name: "JSON",
+    description: "",
     supports: ["text", "file"],
     async parse(input: KeyImportInput): Promise<KeyImportResult[]> {
       const text =
