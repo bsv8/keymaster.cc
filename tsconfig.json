@@ -16,8 +16,13 @@
     { "path": "./packages/plugin-home" },
     { "path": "./packages/plugin-settings" },
     { "path": "./packages/plugin-assets" },
+    { "path": "./packages/plugin-collectibles" },
+    { "path": "./packages/plugin-collectible-transfer" },
     { "path": "./packages/plugin-woc" },
     { "path": "./packages/plugin-background" },
-    { "path": "./packages/plugin-protocol" }
+    { "path": "./packages/plugin-protocol" },
+    { "path": "./packages/plugin-token-bsv21" },
+    { "path": "./packages/plugin-token-stas" },
+    { "path": "./packages/plugin-collectible-1satordinals" }
   ]
 }

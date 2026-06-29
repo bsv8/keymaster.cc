@@ -38,7 +38,13 @@ export const WOC_MSG = {
   UTXOS_UNCONFIRMED: "woc.utxos.unconfirmed",
   HISTORY_CONFIRMED: "woc.history.confirmed",
   HISTORY_UNCONFIRMED: "woc.history.unconfirmed",
-  TX_BROADCAST: "woc.tx.broadcast"
+  TX_BROADCAST: "woc.tx.broadcast",
+  // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
+  // priority queue / 限流 / 429 backoff / 多标签页协调。
+  BSV21_LIST_TOKENS: "woc.bsv21.listTokens",
+  BSV21_TOKEN_BALANCE: "woc.bsv21.tokenBalance",
+  STAS_LIST_TOKENS: "woc.stas.listTokens",
+  ONE_SAT_OUTPOINT: "woc.1satordinals.outpoint"
 } as const;
 
 export type WocMessageType = (typeof WOC_MSG)[keyof typeof WOC_MSG];
@@ -69,4 +75,25 @@ export interface WocBroadcastPayload {
   /** broadcast 内部强制 broadcast 优先级，调用方不可降级。 */
   signal?: AbortSignal;
   timeoutMs?: number;
+}
+
+/** BSV-21：列地址持有的 token。 */
+export interface WocBsv21ListTokensPayload extends WocActorPayload {
+  address: string;
+}
+
+/** BSV-21：查单个 origin token 在某地址的余额。 */
+export interface WocBsv21TokenBalancePayload extends WocActorPayload {
+  address: string;
+  origin: string;
+}
+
+/** STAS：列地址持有的 token。 */
+export interface WocStasListTokensPayload extends WocActorPayload {
+  address: string;
+}
+
+/** 1Sat Ordinals：按 outpoint 查 inscription。 */
+export interface Woc1SatOutpointPayload extends WocActorPayload {
+  outpoint: string;
 }

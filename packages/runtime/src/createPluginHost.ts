@@ -38,12 +38,15 @@ import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityR
 import { createMessageBus } from "./messageBus.js";
 import { createAssetRegistry, type AssetRegistry } from "./registries/assetRegistry.js";
 import { createBreadcrumbRegistry, type BreadcrumbRegistry } from "./registries/breadcrumbRegistry.js";
+import { createCollectibleRegistry, type CollectibleRegistry } from "./registries/collectibleRegistry.js";
+import { createCollectibleTransferRegistry, type CollectibleTransferRegistry } from "./registries/collectibleTransferRegistry.js";
 import { createCommandRegistry, type CommandRegistry } from "./registries/commandRegistry.js";
 import { createHomeRegistry, type HomeRegistry } from "./registries/homeRegistry.js";
 import { createImporterRegistry, type ImporterRegistry } from "./registries/importerRegistry.js";
 import { createMenuRegistry, type MenuRegistry } from "./registries/menuRegistry.js";
 import { createRouteRegistry, type RouteRegistry } from "./registries/routeRegistry.js";
 import { createSettingsRegistry, type SettingsRegistry } from "./registries/settingsRegistry.js";
+import { createTokenRegistry, type TokenRegistry } from "./registries/tokenRegistry.js";
 import { createTopbarRegistry } from "./registries/topbarRegistry.js";
 import { createTransferRegistry, type TransferRegistry } from "./registries/transferRegistry.js";
 import { createI18nService } from "./i18n/createI18nService.js";
@@ -76,6 +79,9 @@ export interface PluginHost {
   importers: ImporterRegistry;
   transfers: TransferRegistry;
   assets: AssetRegistry;
+  tokens: TokenRegistry;
+  collectibles: CollectibleRegistry;
+  collectibleTransfer: CollectibleTransferRegistry;
   topbar: TopbarRegistry;
   i18n: I18nService;
   /** 硬切换 002：runtime 内建 log service（统一日志平台）。 */
@@ -169,6 +175,9 @@ function buildOwnershipSnapshot(
     importers: { _ids: () => string[] };
     transfers: { _ids: () => string[] };
     assets: { _ids: () => string[] };
+    tokens: { _ids: () => string[] };
+    collectibles: { _ids: () => string[] };
+    collectibleTransfer: { _ids: () => string[] };
     topbar: { _ids: () => string[] };
     capabilities: { keys: () => string[] };
   }
@@ -183,6 +192,9 @@ function buildOwnershipSnapshot(
     importers: registries.importers._ids(),
     transferProviders: registries.transfers._ids(),
     assetProviders: registries.assets._ids(),
+    tokenProviders: registries.tokens._ids(),
+    collectibleProviders: registries.collectibles._ids(),
+    collectibleTransferHandlers: registries.collectibleTransfer._ids(),
     topbarItems: registries.topbar._ids(),
     capabilities: registries.capabilities.keys()
   };
@@ -193,7 +205,20 @@ function ownershipDiff(
   after: ReturnType<typeof buildOwnershipSnapshot>
 ): Pick<
   PluginOwnership,
-  "routes" | "menus" | "breadcrumbs" | "settingsRoutes" | "homeWidgets" | "commands" | "importers" | "transferProviders" | "assetProviders" | "topbarItems" | "capabilities"
+  | "routes"
+  | "menus"
+  | "breadcrumbs"
+  | "settingsRoutes"
+  | "homeWidgets"
+  | "commands"
+  | "importers"
+  | "transferProviders"
+  | "assetProviders"
+  | "tokenProviders"
+  | "collectibleProviders"
+  | "collectibleTransferHandlers"
+  | "topbarItems"
+  | "capabilities"
 > {
   return {
     routes: diffIds(before.routes, after.routes),
@@ -205,6 +230,9 @@ function ownershipDiff(
     importers: diffIds(before.importers, after.importers),
     transferProviders: diffIds(before.transferProviders, after.transferProviders),
     assetProviders: diffIds(before.assetProviders, after.assetProviders),
+    tokenProviders: diffIds(before.tokenProviders, after.tokenProviders),
+    collectibleProviders: diffIds(before.collectibleProviders, after.collectibleProviders),
+    collectibleTransferHandlers: diffIds(before.collectibleTransferHandlers, after.collectibleTransferHandlers),
     topbarItems: diffIds(before.topbarItems, after.topbarItems),
     capabilities: diffIds(before.capabilities, after.capabilities)
   };
@@ -222,6 +250,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const importers = createImporterRegistry();
   const transfers = createTransferRegistry();
   const assets = createAssetRegistry();
+  const tokens = createTokenRegistry();
+  const collectibles = createCollectibleRegistry();
+  const collectibleTransfer = createCollectibleTransferRegistry();
   const topbar = createTopbarRegistry();
   // i18n service 必须在 plugin 注册前完成初始化：
   //   - host 创建时立即 provide "i18n.service" capability；
@@ -249,6 +280,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<ImporterRegistry>("importer.registry", importers);
   capabilities.provide<TransferRegistry>("transfer.registry", transfers);
   capabilities.provide<AssetRegistry>("asset.registry", assets);
+  capabilities.provide<TokenRegistry>("token.registry", tokens);
+  capabilities.provide<CollectibleRegistry>("collectible.registry", collectibles);
+  capabilities.provide<CollectibleTransferRegistry>("collectible-transfer.registry", collectibleTransfer);
   capabilities.provide<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY, topbar);
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
@@ -311,6 +345,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       importers,
       transfers,
       assets,
+      tokens,
+      collectibles,
+      collectibleTransfer,
       topbar,
       capabilities
     });
@@ -445,6 +482,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const id of ownership.importers) safe(() => importers.unregister(id), `importer:${id}`);
     for (const id of ownership.transferProviders) safe(() => transfers.unregister(id), `transfer:${id}`);
     for (const id of ownership.assetProviders) safe(() => assets.unregister(id), `asset:${id}`);
+    for (const id of ownership.tokenProviders) safe(() => tokens.unregister(id), `token:${id}`);
+    for (const id of ownership.collectibleProviders) safe(() => collectibles.unregister(id), `collectible:${id}`);
+    for (const id of ownership.collectibleTransferHandlers) safe(() => collectibleTransfer.unregister(id), `collectibleTransfer:${id}`);
     for (const cap of ownership.capabilities) safe(() => capabilities.revoke(cap), `capability:${cap}`);
     if (errors.length > 0) {
       // eslint-disable-next-line no-console
@@ -473,6 +513,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     importers,
     transfers,
     assets,
+    tokens,
+    collectibles,
+    collectibleTransfer,
     topbar,
     i18n,
     log: logService,

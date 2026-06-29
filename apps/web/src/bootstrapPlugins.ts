@@ -19,6 +19,9 @@
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
+import { collectiblesPlugin } from "@keymaster/plugin-collectibles";
+import { collectibleTransferPlugin } from "@keymaster/plugin-collectible-transfer";
+import { oneSatOrdinalsCollectiblePlugin } from "@keymaster/plugin-collectible-1satordinals";
 import { contactsPlugin } from "@keymaster/plugin-contacts";
 import { homePlugin } from "@keymaster/plugin-home";
 import { hexImporterPlugin } from "@keymaster/plugin-importer-hex";
@@ -29,6 +32,8 @@ import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
 import { pokerPlugin } from "@keymaster/plugin-poker";
 import { protocolPlugin } from "@keymaster/plugin-protocol";
 import { settingsPlugin } from "@keymaster/plugin-settings";
+import { bsv21TokenPlugin } from "@keymaster/plugin-token-bsv21";
+import { stasTokenPlugin } from "@keymaster/plugin-token-stas";
 import { transferPlugin } from "@keymaster/plugin-transfer";
 import { vaultPlugin } from "@keymaster/plugin-vault";
 import { wocPlugin } from "@keymaster/plugin-woc";
@@ -46,23 +51,51 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     i18nDebug: !isProd
   });
 
-  // 硬切换 001：按"依赖先后保证 capability 顺序"的顺序加入已知集合。
-  // host.register 内部会按 config store 决定是否自动 enable。
+  // 硬切换 001 + 施工单 004：按"依赖先后保证 capability 顺序"的顺序
+  // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //
-  // 001 收口（施工单 001 协议 V1）：protocolPlugin 必须在 vaultPlugin 之后、
-  // 业务插件之前装载；它依赖 vault.service / keyspace.service。
+  // 关键顺序（施工单 004）：
+  //   vault
+  //   protocol
+  //   home
+  //   settings
+  //   assets
+  //   collectibles
+  //   collectible-transfer
+  //   key-import
+  //   transfer
+  //   contacts
+  //   woc
+  //   background
+  //   p2pkh
+  //   token / collectible 业务插件（依赖 p2pkh.service + woc.*）
+  //   importers
+  //
+  // 设计缘由：
+  //   - wocPlugin 必须在 p2pkhPlugin 之前装载（plugin-p2pkh 内部会拿
+  //     woc.service；plugin-woc 自身在 manifest provide WOC capabilities）。
+  //   - backgroundPlugin 也必须在 p2pkhPlugin 之前。
+  //   - token / collectible 业务插件必须在 p2pkhPlugin 之后，因为它们
+  //     直接依赖 p2pkh.service / woc.bsv21.service / woc.stas.service /
+  //     woc.1satordinals.service；plugin-p2pkh 与 plugin-woc 是这些
+  //     capability 的唯一提供方。
   const ordered = [
     vaultPlugin,
     protocolPlugin,
     homePlugin,
     settingsPlugin,
     assetsPlugin,
+    collectiblesPlugin,
+    collectibleTransferPlugin,
     keyImportPlugin,
     transferPlugin,
     contactsPlugin,
     wocPlugin,
     backgroundPlugin,
     p2pkhPlugin,
+    bsv21TokenPlugin,
+    stasTokenPlugin,
+    oneSatOrdinalsCollectiblePlugin,
     pokerPlugin,
     wifImporterPlugin,
     hexImporterPlugin,

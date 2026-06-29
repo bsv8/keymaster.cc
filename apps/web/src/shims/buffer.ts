@@ -14,7 +14,10 @@ declare global {
   }
 }
 
-if (typeof globalThis.Buffer === "undefined") {
-  globalThis.Buffer = Buffer;
+// 本项目不引入 @types/node，globalThis 没有 Buffer 的索引签名；用一个带
+// Buffer 字段的局部视图挂载，避免污染全局类型，也不需要 node 类型。
+const globalScope = globalThis as typeof globalThis & { Buffer?: typeof Buffer };
+if (typeof globalScope.Buffer === "undefined") {
+  globalScope.Buffer = Buffer;
 }
 

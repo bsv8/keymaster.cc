@@ -18,6 +18,10 @@ const violations = [];
 /** 递归收集目录下所有 ts/tsx 源文件。 */
 function walk(dir) {
   return readdirSync(dir).flatMap((name) => {
+    // 跳过依赖产物目录：pnpm 把 @keymaster/* 软链进各包的 node_modules，
+    // 顺着软链递归会扫到 runtime 自己的 AppLink.tsx（它本就合法地用动态
+    // href），产生 20+ 条假阳性。边界检查只针对各包 src 源码。
+    if (name === "node_modules" || name === "dist") return [];
     const path = join(dir, name);
     if (statSync(path).isDirectory()) return walk(path);
     return /\.(ts|tsx)$/.test(name) ? [path] : [];

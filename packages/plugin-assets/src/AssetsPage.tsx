@@ -1,34 +1,33 @@
 // packages/plugin-assets/src/AssetsPage.tsx
-// 资产列表页：聚合所有 provider 的资产摘要。
-// 设计缘由：单 provider 失败不影响其他 provider；通用资产页不展示 UTXO 等具体字段。
-// 硬切换 008：description 显示当前 key 上下文（label / 短公钥 / 无 key）；
-// 切 key 时重新拉取资产。
+// 统一持仓页：聚合 asset.registry + token.registry。
 //
-// 硬切换 005 收尾：删掉 "all 模式" 文案。无 active key 时本页面在壳层守卫
-// 拦截下不会渲染——"无 key"只会以"加载中"过渡态短暂出现，壳层 AppShell
-// 已经把"无 active key"收敛到 uninitialized 或修复/管理态，业务页不再
-// 自己处理该空态。
+// 设计缘由：
+//   - 单 provider 失败不影响其他 provider；通用资产页不展示 UTXO 等
+//     具体字段。
+//   - 排序不变量：asset 组整体在 token 组前；组内先按 provider 名称，
+//     再按 label（platform 二次稳定排序）。
+//   - 详情入口仍由各 provider 自行声明 detailRoute；未声明时表格
+//     "详情" 列展示 "-"，引导用户回到 provider 自带详情页或 detail 平台。
 
 import { useEffect, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
 import { AppLink, useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
-import type { AssetRegistry, AssetSummary, KeyIdentity, KeyspaceService } from "@keymaster/contracts";
-import { loadAllAssets, type ProviderLoadResult } from "./assetsFlow.js";
-
-interface Row extends AssetSummary {
-  providerName: string;
-  providerId: string;
-}
+import type { AssetRegistry, KeyIdentity, KeyspaceService, TokenRegistry } from "@keymaster/contracts";
+import { loadAllHoldings, toHoldingRows, type HoldingRow } from "./holdingsFlow.js";
 
 export function AssetsPage() {
-  const registry = useCapability<AssetRegistry>("asset.registry");
+  const assetsRegistry = useCapability<AssetRegistry>("asset.registry");
+  const tokensRegistry = useCapability<TokenRegistry>("token.registry");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
   useI18n().language();
-  const [results, setResults] = useState<ProviderLoadResult[] | null>(null);
+  const [rows, setRows] = useState<HoldingRow[] | null>(null);
+  const [errors, setErrors] = useState<Array<{ provider: string; error: string; kind: "asset" | "token" }>>(
+    []
+  );
   const [busy, setBusy] = useState(false);
   const [activeContext, setActiveContext] = useState<{
     description: string;
@@ -37,8 +36,16 @@ export function AssetsPage() {
   async function refresh() {
     setBusy(true);
     try {
-      const r = await loadAllAssets(registry);
-      setResults(r.results);
+      const result = await loadAllHoldings(assetsRegistry, tokensRegistry);
+      const collected: typeof errors = [];
+      for (const r of result.assets) {
+        if (r.error) collected.push({ provider: r.provider.id, error: r.error, kind: "asset" });
+      }
+      for (const r of result.tokens) {
+        if (r.error) collected.push({ provider: r.provider.id, error: r.error, kind: "token" });
+      }
+      setErrors(collected);
+      setRows(toHoldingRows(host, result));
     } finally {
       setBusy(false);
     }
@@ -46,11 +53,14 @@ export function AssetsPage() {
 
   useEffect(() => {
     refresh();
-    const unsubs = registry.list().map((p) => p.onChange(() => refresh()));
+    const unsubs = [
+      ...assetsRegistry.list().map((p) => p.onChange(() => refresh())),
+      ...tokensRegistry.list().map((p) => p.onChange(() => refresh()))
+    ];
     return () => {
       for (const off of unsubs) off();
     };
-  }, [registry]);
+  }, [assetsRegistry, tokensRegistry]);
 
   useEffect(() => {
     let cancelled = false;
@@ -69,7 +79,7 @@ export function AssetsPage() {
     };
   }, [keyspace, host]);
 
-  if (!results) {
+  if (!rows) {
     return (
       <div className="assets-page">
         <PageHeader
@@ -80,43 +90,48 @@ export function AssetsPage() {
     );
   }
 
-  if (results.length === 0) {
-    return (
-      <div className="assets-page">
-        <PageHeader
-          title={t("assets.page.title", { defaultValue: "资产" })}
-          description={`${t("assets.page.descriptionPrefix", { defaultValue: "跨 provider 聚合展示 · " })}${activeContext.description}`}
-        />
-        <EmptyState
-          title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })}
-          description={t("assets.page.empty.providers.desc", { defaultValue: "安装至少一个资产 provider（例如 plugin-p2pkh）后这里会出现选项。" })}
-        />
-      </div>
-    );
-  }
-
-  const rows: Row[] = [];
-  for (const r of results) {
-    for (const a of r.assets) {
-      rows.push({ ...a, providerName: host.i18n.text(r.provider.name), providerId: r.provider.id });
+  if (rows.length === 0 && errors.length === 0) {
+    const hasProviders = assetsRegistry.list().length > 0 || tokensRegistry.list().length > 0;
+    if (!hasProviders) {
+      return (
+        <div className="assets-page">
+          <PageHeader
+            title={t("assets.page.title", { defaultValue: "资产" })}
+            description={`${t("assets.page.descriptionPrefix", { defaultValue: "跨 provider 聚合展示 · " })}${activeContext.description}`}
+          />
+          <EmptyState
+            title={t("assets.page.empty.providers.title", { defaultValue: "暂无资产 provider" })}
+            description={t("assets.page.empty.providers.desc", {
+              defaultValue: "安装至少一个资产或 token provider 后这里会出现选项。"
+            })}
+          />
+        </div>
+      );
     }
   }
 
-  const columns: DataTableColumn<Row>[] = [
-    { key: "label", header: t("assets.table.col.name", { defaultValue: "名称" }), render: (r) => host.i18n.text(r.label) },
-    { key: "kind", header: t("assets.table.col.kind", { defaultValue: "类别" }), render: (r) => r.kind },
+  const columns: DataTableColumn<HoldingRow>[] = [
+    { key: "label", header: t("assets.table.col.name", { defaultValue: "名称" }), render: (r) => r.label },
+    {
+      key: "kind",
+      header: t("assets.table.col.kind", { defaultValue: "类别" }),
+      // 显示 "coin" / "token"，对用户语义清晰；asset provider 的 kind 由
+      // symbolOrKind 字段承载，token provider 透传 symbol。
+      render: (r) => (r.kind === "asset" ? r.symbolOrKind : "token")
+    },
     { key: "provider", header: t("assets.table.col.provider", { defaultValue: "Provider" }), render: (r) => r.providerName },
     { key: "network", header: t("assets.table.col.network", { defaultValue: "网络" }), render: (r) => r.network ?? "-" },
     {
       key: "balance",
       header: t("assets.table.col.balance", { defaultValue: "余额" }),
-      render: (r) => (r.balance ? r.balance.display ?? `${r.balance.amount} ${r.balance.unit}` : "-")
+      render: (r) => r.balanceDisplay
     },
     { key: "status", header: t("assets.table.col.status", { defaultValue: "状态" }), render: (r) => r.status },
     {
       key: "detail",
       header: t("assets.table.col.detail", { defaultValue: "详情" }),
-      render: (r) => (r.detailRoute?.path ? <AppLink to={r.detailRoute.path}>{t("assets.table.open", { defaultValue: "进入" })}</AppLink> : "-")
+      render: (r) =>
+        r.detailRoute ? <AppLink to={r.detailRoute}>{t("assets.table.open", { defaultValue: "进入" })}</AppLink> : "-"
     }
   ];
 
@@ -131,17 +146,15 @@ export function AssetsPage() {
           </Button>
         }
       />
-      {results.some((r) => r.error) ? (
+      {errors.length > 0 ? (
         <ul className="assets-page__errors">
-          {results
-            .filter((r) => r.error)
-            .map((r) => (
-              <li key={r.provider.id}>
-                {host.i18n.text(r.provider.name)}
-                {t("assets.page.error.load", { defaultValue: " 加载失败：" })}
-                {r.error}
-              </li>
-            ))}
+          {errors.map((e) => (
+            <li key={`${e.kind}:${e.provider}`}>
+              {e.provider}
+              {t("assets.page.error.load", { defaultValue: " 加载失败：" })}
+              {e.error}
+            </li>
+          ))}
         </ul>
       ) : null}
       {rows.length === 0 ? (
@@ -150,7 +163,7 @@ export function AssetsPage() {
           description={t("assets.page.empty.assets.desc", { defaultValue: "导入或解锁钱包后这里会显示资产。" })}
         />
       ) : (
-        <DataTable columns={columns} rows={rows} rowKey={(r) => `${r.providerId}:${r.assetId}`} />
+        <DataTable columns={columns} rows={rows} rowKey={(r) => `${r.kind}:${r.providerId}:${r.itemId}`} />
       )}
     </div>
   );
@@ -171,9 +184,6 @@ async function buildDescriptionAsync(
   const identity: KeyIdentity | undefined = await keyspace.getKey(state.activePublicKeyHex);
   if (!identity) return host.i18n.t("assets.context.noKey", { defaultValue: "无 key" });
   const label = identity.label || host.i18n.t("assets.context.unnamed", { defaultValue: "未命名" });
-  // 硬切换 003 收尾：短公钥由 publicKeyHex 现算；缺 publicKeyHex 时显示
-  // "身份不可用"，不再读 identity.fingerprint，也不从 publicKeyHex 反向
-  // 伪造短串。
   const shortPubkey = identity.publicKeyHex
     ? formatShortPublicKey(identity.publicKeyHex)
     : host.i18n.t("assets.context.identityMissing", { defaultValue: "身份不可用" });

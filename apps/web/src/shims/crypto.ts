@@ -14,6 +14,10 @@ import { Buffer } from "buffer";
 
 type BinaryLike = string | ArrayBuffer | ArrayBufferView;
 
+// `BufferEncoding` 是 @types/node 的全局类型；本项目不引入 node 类型，
+// 这里用 buffer 包自身 toString 的参数类型还原同一约束，保持自洽。
+type BufferEncoding = NonNullable<Parameters<ReturnType<typeof Buffer.from>["toString"]>[0]>;
+
 function toBytes(input: BinaryLike): Uint8Array {
   if (typeof input === "string") {
     return new TextEncoder().encode(input);

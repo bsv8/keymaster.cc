@@ -12,7 +12,8 @@ import type {
   MenuItem,
   MenuRegistry,
   PluginManifest,
-  RouteRegistry
+  RouteRegistry,
+  TokenRegistry
 } from "@keymaster/contracts";
 import { AssetsPage } from "./AssetsPage.js";
 import { AssetDetailRedirect } from "./AssetDetailRedirect.js";
@@ -116,7 +117,7 @@ const assetsResources: I18nPluginResources = {
 export const assetsPlugin: PluginManifest = {
   id: "assets",
   name: "Assets",
-  description: "资产平台：聚合所有 AssetProvider 并提供资产列表与首页 widget。",
+  description: "统一持仓平台：聚合 AssetProvider（coin）与 TokenProvider（fungible token），提供 /assets 持仓列表与首页 widget。collectible 由 plugin-collectibles 单独承接。",
   meta: {
     kind: "platform",
     defaultEnabled: true,
@@ -125,13 +126,15 @@ export const assetsPlugin: PluginManifest = {
   },
   i18n: assetsResources,
   dependencies: [
-    { capability: "asset.registry", reason: "需要资产注册表来聚合 provider" },
+    { capability: "asset.registry", reason: "需要资产注册表来聚合 coin provider" },
+    { capability: "token.registry", reason: "需要 token 注册表来聚合 fungible token provider" },
     { capability: "route.registry", reason: "注册资产列表与详情页" },
     { capability: "menu.registry", reason: "注册资产菜单入口" },
     { capability: "home.registry", reason: "注册资产首页 widget" }
   ],
   setup(ctx) {
     const assets = ctx.get<AssetRegistry>("asset.registry");
+    const tokens = ctx.get<TokenRegistry>("token.registry");
 
     const routes = ctx.get<RouteRegistry>("route.registry");
     const listRoute: AppRoute = {
@@ -177,6 +180,7 @@ export const assetsPlugin: PluginManifest = {
     home.register(widget);
 
     void assets;
+    void tokens;
     return () => {
       // no-op：assets 平台不持有后台资源；route / menu / home widget 由 host 回收。
     };

@@ -11,11 +11,14 @@
 import type {
   AssetProvider,
   BreadcrumbProvider,
+  CollectibleProvider,
+  CollectibleTransferHandler,
   CommandDescriptor,
   HomeWidget,
   KeyImporter,
   MenuItem,
   SettingsRoute,
+  TokenProvider,
   TopbarItem,
   TransferProvider
 } from "@keymaster/contracts";
@@ -41,6 +44,12 @@ export interface PluginOwnership {
   transferProviders: string[];
   /** asset provider ids。 */
   assetProviders: string[];
+  /** token provider ids。 */
+  tokenProviders: string[];
+  /** collectible provider ids。 */
+  collectibleProviders: string[];
+  /** collectible transfer handler ids。 */
+  collectibleTransferHandlers: string[];
   /** topbar item ids。 */
   topbarItems: string[];
   /** 该 plugin 的 teardown。空实现 = 无资源。 */
@@ -59,6 +68,9 @@ export function emptyOwnership(): PluginOwnership {
     importers: [],
     transferProviders: [],
     assetProviders: [],
+    tokenProviders: [],
+    collectibleProviders: [],
+    collectibleTransferHandlers: [],
     topbarItems: [],
     teardown: undefined
   };
@@ -68,11 +80,14 @@ export function emptyOwnership(): PluginOwnership {
 export type {
   AssetProvider,
   BreadcrumbProvider,
+  CollectibleProvider,
+  CollectibleTransferHandler,
   CommandDescriptor,
   HomeWidget,
   KeyImporter,
   MenuItem,
   SettingsRoute,
+  TokenProvider,
   TopbarItem,
   TransferProvider
 };

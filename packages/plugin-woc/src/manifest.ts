@@ -16,10 +16,22 @@ import type {
   MessageBus,
   PluginManifest,
   SettingsRegistry,
-  WocService
+  Woc1SatOrdinalsService,
+  WocBsv21Service,
+  WocService,
+  WocStasService
 } from "@keymaster/contracts";
-import { RUNTIME_MESSAGE_BUS, WOC_CAPABILITY } from "@keymaster/contracts";
+import {
+  RUNTIME_MESSAGE_BUS,
+  WOC_1SAT_ORDINALS_CAPABILITY,
+  WOC_BSV21_CAPABILITY,
+  WOC_CAPABILITY,
+  WOC_STAS_CAPABILITY
+} from "@keymaster/contracts";
+import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
+import { createWocBsv21Service } from "./wocBsv21Service.js";
 import { createWocService } from "./wocService.js";
+import { createWocStasService } from "./wocStasService.js";
 import { WocSettingsPage } from "./pages/WocSettingsPage.js";
 
 const wocResources: I18nPluginResources = {
@@ -78,7 +90,12 @@ export const wocPlugin: PluginManifest = {
     kind: "platform",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [WOC_CAPABILITY],
+    providesCapabilities: [
+      WOC_CAPABILITY,
+      WOC_BSV21_CAPABILITY,
+      WOC_STAS_CAPABILITY,
+      WOC_1SAT_ORDINALS_CAPABILITY
+    ],
     displayGroup: "platform"
   },
   i18n: wocResources,
@@ -91,6 +108,17 @@ export const wocPlugin: PluginManifest = {
     const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
     const service = createWocService({ messageBus, logger: ctx.logger });
     ctx.provide<WocService>(WOC_CAPABILITY, service);
+
+    // BSV-21 / STAS / 1Sat Ordinals 的 WOC capability。
+    // 全部共享同一个 actor（service 内的 createWocService 持有 actor 并
+    // 已 attach 到 messageBus），因此 token / collectible 业务插件继承
+    // 同一套限流 / 优先级 / 429 backoff / 多标签页协调，不复制第二套队列。
+    const bsv21Service = createWocBsv21Service({ messageBus, logger: ctx.logger });
+    ctx.provide<WocBsv21Service>(WOC_BSV21_CAPABILITY, bsv21Service);
+    const stasService = createWocStasService({ messageBus, logger: ctx.logger });
+    ctx.provide<WocStasService>(WOC_STAS_CAPABILITY, stasService);
+    const oneSatService = createWoc1SatOrdinalsService({ messageBus, logger: ctx.logger });
+    ctx.provide<Woc1SatOrdinalsService>(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
 
     // 硬切换 003：settings.registry 单一真值；同时承担"菜单入口 + 路由匹配"。
     const settings = ctx.get<SettingsRegistry>("settings.registry");

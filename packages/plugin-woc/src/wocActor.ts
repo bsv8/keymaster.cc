@@ -38,10 +38,20 @@ import {
   WOC_ACTOR_TARGET,
   WOC_MSG,
   type WocBalancePayload,
+  type WocBsv21ListTokensPayload,
+  type WocBsv21TokenBalancePayload,
   type WocBroadcastPayload,
   type WocHistoryPayload,
-  type WocUtxosPayload
+  type WocStasListTokensPayload,
+  type WocUtxosPayload,
+  type Woc1SatOutpointPayload
 } from "./wocMessages.js";
+import type {
+  Woc1SatOrdinalsInscription,
+  WocBsv21BalanceResponse,
+  WocBsv21TokenMeta,
+  WocStasTokenEntry
+} from "@keymaster/contracts";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const SHARED_TIMESTAMP_KEY = "woc.sharedTimestamps";
@@ -743,6 +753,142 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
+  // ---- token / collectible 协议 endpoint（共享 actor 限流与优先级队列） ----
+  // 设计缘由：BSV-21 / STAS / 1Sat 的 WOC 查询与现有 coin 类 endpoint 走
+  // 同一 actor priority queue，不复制第二套限流。404 / not-found 翻译
+  // 为业务语义（1Sat 返回 null；BSV-21 list 返回空数组）。
+  //
+  // 路径（对齐 WOC 官方公开 endpoint 形态）：
+  //   - BSV-21 列表：GET /token/bsv21/<address>/balance
+  //   - BSV-21 单 token 余额：GET /token/bsv21/<address>/balance/<origin>
+  //   - STAS 列表：GET /token/stas/<address>/balance
+  //   - 1Sat outpoint：GET /token/1satordinals/<txid>_<vout>
+  //     outpoint 字符串格式："txid_vout"（下划线）；不是 "txid:vout"。
+  //     业务插件（plugin-collectible-1satordinals）拿 P2PKH UTXO 的
+  //     { txid, vout } 自行用 toWocOutpoint() 拼成正确字符串再调进来。
+
+  function bsv21ListTokens(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocBsv21TokenMeta[]> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.BSV21_LIST_TOKENS,
+      fn: async (signal) => {
+        let raw: { result?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }> };
+        try {
+          raw = await fetchJson<{
+            result?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }>;
+          }>(
+            network,
+            `/token/bsv21/${encodeURIComponent(address)}/balance`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+        } catch (err) {
+          if (isWocNotFoundError(err)) return [];
+          throw err;
+        }
+        const list = raw.result ?? [];
+        return list.map((t) => ({
+          origin: t.origin,
+          symbol: t.symbol,
+          decimals: t.decimals,
+          issuer: t.issuer
+        }));
+      }
+    });
+  }
+
+  function bsv21TokenBalance(network: BsvNetwork, address: string, origin: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocBsv21BalanceResponse> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.BSV21_TOKEN_BALANCE,
+      fn: (signal) =>
+        fetchJson<WocBsv21BalanceResponse>(
+          network,
+          `/token/bsv21/${encodeURIComponent(address)}/balance/${encodeURIComponent(origin)}`,
+          { method: "GET" },
+          signal,
+          opts.timeoutMs
+        )
+    });
+  }
+
+  function stasListTokens(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocStasTokenEntry[]> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.STAS_LIST_TOKENS,
+      fn: async (signal) => {
+        let raw: { result?: Array<{ symbol: string; issuer?: string; balance: number }> };
+        try {
+          raw = await fetchJson<{
+            result?: Array<{ symbol: string; issuer?: string; balance: number }>;
+          }>(
+            network,
+            `/token/stas/${encodeURIComponent(address)}/balance`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+        } catch (err) {
+          if (isWocNotFoundError(err)) return [];
+          throw err;
+        }
+        return (raw.result ?? []).map((t) => ({
+          symbol: t.symbol,
+          issuer: t.issuer,
+          balance: Number.isFinite(t.balance) ? t.balance : 0
+        }));
+      }
+    });
+  }
+
+  function oneSatOutpoint(network: BsvNetwork, outpoint: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<Woc1SatOrdinalsInscription | null> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.ONE_SAT_OUTPOINT,
+      fn: async (signal) => {
+        if (!outpoint.includes("_")) {
+          // 业务侧把 outpoint 拼错了（必须 "txid_vout"）：直接视为
+          // "不是 1Sat collectible"，返回 null 而非抛错。
+          return null;
+        }
+        try {
+          const raw = await fetchJson<{
+            inscriptionId: string;
+            outpoint?: string;
+            origin?: string;
+            contentType?: string;
+            preview?: string;
+            owner?: string;
+          }>(
+            network,
+            `/token/1satordinals/${encodeURIComponent(outpoint)}`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+          return {
+            inscriptionId: raw.inscriptionId,
+            outpoint: raw.outpoint ?? outpoint,
+            origin: raw.origin,
+            contentType: raw.contentType,
+            preview: raw.preview,
+            owner: raw.owner
+          };
+        } catch (err) {
+          // 404 / not-found：业务侧约定的"这不是 1Sat collectible"语义，
+          // 翻译成 null；其它错误向上抛。
+          if (isWocNotFoundError(err)) return null;
+          throw err;
+        }
+      }
+    });
+  }
+
   /**
    * 业务插件层：把 wocService 投递给 messageBus 的消息翻译为 actor 内部
    * endpoint 调用。这里保持 WocService 公开 API 行为完全等价。
@@ -788,6 +934,22 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocBroadcastPayload;
         return broadcast(p.network, p.rawTxHex, { signal, timeoutMs: opts.timeoutMs });
       }
+      case WOC_MSG.BSV21_LIST_TOKENS: {
+        const p = payload as WocBsv21ListTokensPayload;
+        return bsv21ListTokens(p.network, p.address, opts);
+      }
+      case WOC_MSG.BSV21_TOKEN_BALANCE: {
+        const p = payload as WocBsv21TokenBalancePayload;
+        return bsv21TokenBalance(p.network, p.address, p.origin, opts);
+      }
+      case WOC_MSG.STAS_LIST_TOKENS: {
+        const p = payload as WocStasListTokensPayload;
+        return stasListTokens(p.network, p.address, opts);
+      }
+      case WOC_MSG.ONE_SAT_OUTPOINT: {
+        const p = payload as Woc1SatOutpointPayload;
+        return oneSatOutpoint(p.network, p.outpoint, opts);
+      }
       default:
         throw new Error(`Unknown WOC message type: ${type}`);
     }
@@ -807,7 +969,11 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.UTXOS_UNCONFIRMED,
       WOC_MSG.HISTORY_CONFIRMED,
       WOC_MSG.HISTORY_UNCONFIRMED,
-      WOC_MSG.TX_BROADCAST
+      WOC_MSG.TX_BROADCAST,
+      WOC_MSG.BSV21_LIST_TOKENS,
+      WOC_MSG.BSV21_TOKEN_BALANCE,
+      WOC_MSG.STAS_LIST_TOKENS,
+      WOC_MSG.ONE_SAT_OUTPOINT
     ]) {
       const off = bus.handle(type, (message) => dispatch(type, message), {
         target: WOC_ACTOR_TARGET,

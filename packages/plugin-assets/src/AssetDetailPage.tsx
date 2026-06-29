@@ -1,20 +1,38 @@
 // packages/plugin-assets/src/AssetDetailPage.tsx
-// 通用资产详情页：作为转发页，查找 provider 的 detailRoute 并跳过去。
-// 设计缘由：通用资产详情页不展示 UTXO 等具体字段；具体资产 UI 由该资产插件自己提供。
-// 如果没有声明 detailRoute，则展示平台级摘要与活动。
+// 通用持仓详情页：先在 asset.registry 查找，未命中再在 token.registry
+// 查找。collectible 由 plugin-collectibles 单独承接，本页面不处理。
+//
+// 设计缘由：
+//   - 统一持仓页（/assets）的 detail 入口是 holding 的通用详情：
+//     asset / token provider 各自声明 detailRoute；未声明 detailRoute
+//     时链接到本页面提供通用摘要 + 活动列表。
+//   - collectible 不进入这里：详情页结构（preview / attributes / media）
+//     与 coin / token 完全不同，硬塞会污染通用页面。
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
 import { router, useCapability, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
-import type { AssetActivity, AssetDetail, AssetProvider, AssetRegistry } from "@keymaster/contracts";
+import type {
+  AssetRegistry,
+  I18nText,
+  TokenRegistry
+} from "@keymaster/contracts";
 
 export interface AssetDetailPageProps {
   providerId: string;
   assetId: string;
 }
 
+interface HoldingResolution {
+  kind: "asset" | "token";
+  provider: { id: string; name: I18nText };
+  detail: { summary: unknown; activities?: unknown[] };
+  detailRoute?: { id?: string; path?: string };
+}
+
 export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
-  const registry = useCapability<AssetRegistry>("asset.registry");
+  const assetsRegistry = useCapability<AssetRegistry>("asset.registry");
+  const tokensRegistry = useCapability<TokenRegistry>("token.registry");
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -24,33 +42,61 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
     [locale]
   );
-  const [provider, setProvider] = useState<AssetProvider | undefined>(undefined);
-  const [detail, setDetail] = useState<AssetDetail | null>(null);
-  const [activities, setActivities] = useState<AssetActivity[]>([]);
+  const [resolved, setResolved] = useState<HoldingResolution | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const p = registry.get(providerId);
-    if (!p) {
-      setError(`Unknown asset provider "${providerId}"`);
-      return;
-    }
-    setProvider(p);
-    p.getAsset(assetId)
-      .then((d) => {
-        if (!d) {
-          setError(`Asset "${assetId}" not found in provider "${providerId}"`);
+    let cancelled = false;
+    async function run() {
+      // asset 先查：保持 asset 组在前的语义与详情页 lookup 顺序一致。
+      const assetProvider = assetsRegistry.get(providerId);
+      if (assetProvider) {
+        try {
+          const detail = await assetProvider.getAsset(assetId);
+          if (!detail) {
+            setError(`Asset "${assetId}" not found in provider "${providerId}"`);
+            return;
+          }
+          if (cancelled) return;
+          setResolved({
+            kind: "asset",
+            provider: { id: assetProvider.id, name: assetProvider.name },
+            detail: detail as unknown as HoldingResolution["detail"],
+            detailRoute: detail.summary.detailRoute
+          });
+          return;
+        } catch (err) {
+          if (!cancelled) setError(err instanceof Error ? err.message : String(err));
           return;
         }
-        setDetail(d);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : String(err));
-      });
-    p.listActivity(assetId)
-      .then(setActivities)
-      .catch(() => setActivities([]));
-  }, [registry, providerId, assetId]);
+      }
+      const tokenProvider = tokensRegistry.get(providerId);
+      if (tokenProvider) {
+        try {
+          const detail = await tokenProvider.getToken(assetId);
+          if (!detail) {
+            setError(`Token "${assetId}" not found in provider "${providerId}"`);
+            return;
+          }
+          if (cancelled) return;
+          setResolved({
+            kind: "token",
+            provider: { id: tokenProvider.id, name: tokenProvider.name },
+            detail: detail as unknown as HoldingResolution["detail"],
+            detailRoute: detail.summary.detailRoute
+          });
+        } catch (err) {
+          if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        }
+        return;
+      }
+      setError(`Unknown holding provider "${providerId}"`);
+    }
+    void run();
+    return () => {
+      cancelled = true;
+    };
+  }, [assetsRegistry, tokensRegistry, providerId, assetId]);
 
   if (error) {
     return (
@@ -64,7 +110,7 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
     );
   }
 
-  if (!provider || !detail) {
+  if (!resolved) {
     return (
       <div className="asset-detail">
         <PageHeader
@@ -75,7 +121,19 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
     );
   }
 
-  const columns: DataTableColumn<AssetActivity>[] = [
+  // activities 走同一张表；asset 与 token 字段名一致（id / title / txid /
+  // direction / status / occurredAt；token 的 amount 使用 TokenBalance，
+  // UI 文本直接走 amount.display ?? `${amount} ${unit}`）。
+  const activities = (resolved.detail.activities ?? []) as Array<{
+    id: string;
+    title: I18nText;
+    txid?: string;
+    amount?: { amount: number; unit: string; display?: string };
+    direction?: string;
+    status?: string;
+    occurredAt?: string;
+  }>;
+  const columns: DataTableColumn<(typeof activities)[number]>[] = [
     { key: "title", header: t("assets.detail.table.title", { defaultValue: "标题" }), render: (a) => host.i18n.text(a.title) },
     { key: "txid", header: t("assets.detail.table.txid", { defaultValue: "txid" }), render: (a) => (a.txid ? <code>{a.txid}</code> : "-") },
     {
@@ -88,14 +146,16 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
     { key: "time", header: t("assets.detail.table.time", { defaultValue: "时间" }), render: (a) => (a.occurredAt ? dateFmt.format(new Date(a.occurredAt)) : "-") }
   ];
 
+  const summaryAny = resolved.detail.summary as { label?: I18nText; kind?: string; status?: string };
+
   return (
     <div className="asset-detail">
       <PageHeader
-        title={host.i18n.text(detail.summary.label)}
-        description={`${host.i18n.text(provider.name)} · ${detail.summary.kind} · ${detail.summary.status}`}
+        title={summaryAny?.label ? host.i18n.text(summaryAny.label) : t("assets.detail.title", { defaultValue: "资产详情" })}
+        description={`${host.i18n.text(resolved.provider.name)} · ${resolved.kind} · ${summaryAny?.status ?? ""}`}
         actions={
-          detail.summary.detailRoute?.path ? (
-            <Button onClick={() => router.push(detail.summary.detailRoute!.path!)}>
+          resolved.detailRoute?.path ? (
+            <Button onClick={() => router.push(resolved.detailRoute!.path!)}>
               {t("assets.detail.openSpecific", { defaultValue: "打开专属详情" })}
             </Button>
           ) : null
@@ -103,14 +163,8 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
       />
       <p>
         {t("assets.detail.assetId", { defaultValue: "资产 id：" })}
-        <code>{detail.summary.assetId}</code>
+        <code>{assetId}</code>
       </p>
-      {detail.summary.balance ? (
-        <p>
-          {t("assets.detail.balance", { defaultValue: "余额：" })}
-          {detail.summary.balance.display ?? `${detail.summary.balance.amount} ${detail.summary.balance.unit}`}
-        </p>
-      ) : null}
       {activities.length === 0 ? (
         <EmptyState title={t("assets.detail.empty.activities", { defaultValue: "暂无活动" })} />
       ) : (
