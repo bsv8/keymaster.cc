@@ -15,7 +15,7 @@ import type { ProtocolFeePoolAction, ProtocolFeePoolRecord } from "@keymaster/co
 /**
  * feepool prepare 落地、commit 消费的内存 op。
  *
- * 关键不变量（V4）：
+ * 关键不变量（V4 + 施工单 2026-06-28 002 硬切换）：
  *   - `draftSpendTxHex` / `draftClientSignBytes`：当前 B-Tx 草稿（含
  *     server 的 update sig 等价的 client 初始签）。三种 action 都有。
  *     不是已广播的最终 tx；是 site 与 server 持续协商的对象。
@@ -24,12 +24,20 @@ import type { ProtocolFeePoolAction, ProtocolFeePoolRecord } from "@keymaster/co
  *   - `close_and_recreate` 的 close 部分：把 `prior.draftSpendTxHex` 切到
  *     `FINAL_LOCKTIME` 最终版本，得到 `closeDraftTxHex` / `closeClientSignBytes`。
  *     之后才建新池（A-Tx + 初始 B-Tx 草稿）。
+ *   - **owner 唯一真值 = `ownerPublicKeyHex`**：op 必须绑定
+ *     `connectSessionId` + `ownerPublicKeyHex`。commit 阶段按 origin +
+ *     connectSessionId + ownerPublicKeyHex + counterpartyPublicKeyHex
+ *     四元组校验 op，禁止跨 session / 跨 owner 复用 operationId。
  */
 export interface FeepoolPendingOp {
   /** 内部稳定 op id（与 prepare 返回的 operationId 一致）。 */
   operationId: string;
   /** prepare 时的 exact origin；commit 时按这个做 origin 一致性检查。 */
   origin: string;
+  /** prepare 时的 connect sessionId（施工单 2026-06-28 002 硬切换）。 */
+  connectSessionId: string;
+  /** prepare 时的 owner 压缩公钥 hex；commit 时按这个做 owner 一致性检查。 */
+  ownerPublicKeyHex: string;
   /** prepare 时的对端公钥 hex。 */
   counterpartyPublicKeyHex: string;
   /** 三种 action 之一。 */

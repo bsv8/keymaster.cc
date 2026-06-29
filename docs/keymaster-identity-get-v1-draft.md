@@ -18,12 +18,16 @@
 
 ## 设计原则
 
-- `identity.get` 返回当前 active key 的身份与请求的 claims。
+- `identity.get` **不再**是"推荐登录入口"（施工单 2026-06-28 002 硬切换）。
+  登录走 `connect.login`；`identity.get` 是会话内身份断言能力。
+- `identity.get` 返回 session 绑定 owner 的身份与请求的 claims——**不**
+  读取钱包全局 active key。
 - `identity.get` 必须由 Keymaster 签名，不只是返回信息。
 - `identity.get` 也必须有时效性，因此带 `aud` / `iat` / `exp`。
 - 调用方拿到结果后，可以长期保存 `identityEnvelope + signature` 作为证据。
-- 推荐把 `identity.get` 作为登录入口使用；调用方可在登录时一并请求 profile claims，从而同时完成身份建立与 profile 同步。
 - 是否把 `identity.get` 用作站点登录策略，由调用方自己决定；Keymaster 只提供能力，不强制产品策略。
+- `identity.get` **必须**携带 `connectSessionId`（施工单 2026-06-28 002 硬切换）；
+  `subject.publicKey` 取自 session 绑定的 owner，**不**读全局 active key。
 
 ## 请求
 
@@ -38,7 +42,8 @@
     iat: 1761018000,
     exp: 1761018300,
     text: "向 abc.com 提供身份信息",
-    claims: ["key.label", "profile.nickname", "profile.avatar.image"]
+    claims: ["key.label", "profile.nickname", "profile.avatar.image"],
+    connectSessionId: "sess-xxx"
   }
 }
 ```
@@ -49,6 +54,7 @@
 - `iat` 必填。
 - `exp` 必填。
 - `exp` 必须严格大于 `iat`。
+- `connectSessionId` 必填（002 硬切换）。
 - Keymaster 必须执行本地有效期上限策略；超出上限的请求必须拒绝。
 - 所有 `identity.get` 请求都必须经过用户确认。
 
@@ -184,4 +190,6 @@ V1 明确采用：
 - `identity.get` 必须由 Keymaster 签名。
 - `identityEnvelope` 采用固定顺序数组 + Deterministic CBOR。
 - `identity.get` 请求也必须用户确认，不区分信息轻重。
-- 推荐使用 `identity.get` 作为登录入口，并顺便同步 profile。
+- `identity.get` 必须携带 `connectSessionId`（002 硬切换），`subject.publicKey`
+  取自 session 绑定 owner。
+- 不再把 `identity.get` 推荐作为"登录入口"——登录走 `connect.login`。

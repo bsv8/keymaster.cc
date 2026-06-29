@@ -97,7 +97,9 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.text": "Message",
       "protocol.feed.claims": "Requested claims",
       "protocol.feed.contentType": "Content type",
-      "protocol.feed.activeKey": "Signer public key",
+      "protocol.feed.activeKey": "Signer public key (legacy)",
+      "protocol.feed.ownerKey": "Session owner public key",
+      "protocol.feed.connectSessionId": "Connect session id",
       "protocol.feed.error": "Error",
       "protocol.feed.timeline": "Timeline",
       /* ============== 施工单 002 硬切换：新增 i18n key ============== */
@@ -165,7 +167,26 @@ const protocolResources: I18nPluginResources = {
       "protocol.lockscreen.executing": "Executing",
       "protocol.lockscreen.byMethod": "By method",
       "protocol.lockscreen.unlockHint":
-        "After unlock, {{total}} pending request(s) will automatically enter the confirmation / execution flow."
+        "After unlock, {{total}} pending request(s) will automatically enter the confirmation / execution flow.",
+      /* ============== 施工单 2026-06-28 001：connect 视图文案 ============== */
+      "protocol.connect.login.title": "Choose sign-in identity",
+      "protocol.connect.login.desc":
+        "This site is asking to open a connect session. Pick a key as the session's bound identity; all subsequent business methods (identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit) will use only this key, not the global active key.",
+      "protocol.connect.login.empty":
+        "No ready key is available in this wallet. Please create or import one in Keymaster first.",
+      "protocol.connect.login.confirm": "Sign in with this key",
+      "protocol.connect.resume.title": "Resume authorized session",
+      "protocol.connect.resume.desc":
+        "This site is asking to resume a previously established connect session. The session-bound key is unchanged; you do not need to pick a key again.",
+      "protocol.connect.resume.ownerLabel": "Bound key",
+      "protocol.connect.resume.confirm": "Resume",
+      "protocol.connect.logout.title": "Log out connect session",
+      "protocol.connect.logout.desc":
+        "This site is asking to log out the current connect session. After this, resume / cipher with the same sessionId will fail; you will need to log in again.",
+      "protocol.connect.logout.confirm": "Confirm logout",
+      "protocol.connect.cancel": "Cancel",
+      "protocol.connect.sessionExpired":
+        "This session has expired or its key is no longer available. Please ask the site to log in again."
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -226,7 +247,9 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.text": "提示文案",
       "protocol.feed.claims": "请求的 claims",
       "protocol.feed.contentType": "内容类型",
-      "protocol.feed.activeKey": "签名公钥",
+      "protocol.feed.activeKey": "签名公钥（兼容）",
+      "protocol.feed.ownerKey": "会话 owner 公钥",
+      "protocol.feed.connectSessionId": "connect session id",
       "protocol.feed.error": "错误",
       "protocol.feed.timeline": "时间",
       /* ============== 施工单 002 硬切换：新增 i18n key ============== */
@@ -294,7 +317,26 @@ const protocolResources: I18nPluginResources = {
       "protocol.lockscreen.executing": "执行中",
       "protocol.lockscreen.byMethod": "按 method 聚合",
       "protocol.lockscreen.unlockHint":
-        "解锁后，{{total}} 条待处理请求会自动进入确认 / 执行流程。"
+        "解锁后，{{total}} 条待处理请求会自动进入确认 / 执行流程。",
+      /* ============== 施工单 2026-06-28 001：connect 视图文案 ============== */
+      "protocol.connect.login.title": "选择登录身份",
+      "protocol.connect.login.desc":
+        "该站点请求建立 connect 会话。请选择一把 key 作为本次会话的绑定身份；后续所有外部业务方法（identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）都将只走这把 key，不再读取全局 active key。",
+      "protocol.connect.login.empty":
+        "当前钱包没有 ready 的 key。请先回到 Keymaster 创建或导入一把 key。",
+      "protocol.connect.login.confirm": "用此 key 登录",
+      "protocol.connect.resume.title": "恢复已授权会话",
+      "protocol.connect.resume.desc":
+        "该站点请求恢复已建立的 connect 会话。会话绑定的 key 与原 session 不变；不需要重新选 key。",
+      "protocol.connect.resume.ownerLabel": "绑定 key",
+      "protocol.connect.resume.confirm": "恢复",
+      "protocol.connect.logout.title": "注销 connect 会话",
+      "protocol.connect.logout.desc":
+        "该站点请求注销本次 connect 会话。注销后该 sessionId 的 resume / cipher 将全部失败，需要重新 login。",
+      "protocol.connect.logout.confirm": "确认注销",
+      "protocol.connect.cancel": "取消",
+      "protocol.connect.sessionExpired":
+        "该会话已失效或绑定 key 不可用。请回到站点重新登录。"
     }
   }
 };
@@ -345,18 +387,41 @@ export const protocolPlugin: PluginManifest = {
       //
       // 边界检查禁止 plugin-protocol 直接 import plugin-p2pkh；这里通过
       // capability key 拿值，类型断言为最小适配接口。
+      //
+      // 硬切换 002：listUtxos / prepareTransfer / submitTransfer 全部
+      // 接受 `ownerPublicKeyHex`（session 绑定 owner）。plugin-protocol
+      // 在 `executeP2pkhTransferAndFinalize` / `buildAndMaybeBuildBaseTx`
+      // 内从 session 取 owner 后传入。plugin-p2pkh 内部按 owner 解析
+      // keyId 走选币 + 签名，**不**走全局 active key。
       let p2pkhService:
         | {
-            listUtxos(filter?: { assetId?: string }): Promise<
-              Array<{ txid: string; vout: number; value: number }>
-            >;
+            listUtxos(filter?: {
+              assetId?: string;
+              ownerPublicKeyHex?: string;
+            }): Promise<Array<{ txid: string; vout: number; value: number }>>;
             prepareTransfer(input: {
               assetId: "bsv";
+              ownerPublicKeyHex: string;
               recipientAddress: string;
               amountSatoshis: number;
               feeRateSatoshisPerKb: number;
             }): Promise<unknown>;
-            submitTransfer(preview: unknown): Promise<unknown>;
+            submitTransfer(preview: {
+              assetId: "bsv";
+              network: "main";
+              ownerPublicKeyHex?: string;
+              keyId?: string;
+              recipientAddress: string;
+              amountSatoshis: number;
+              feeRateSatoshisPerKb: number;
+              allocation: unknown;
+              changeAddress: string;
+              outputs: Array<{ address: string; value: number }>;
+              estimatedFeeSatoshis: number;
+              serializedSizeBytes: number;
+              txid: string;
+              rawTxHex: string;
+            }): Promise<unknown>;
           }
         | undefined;
       try {

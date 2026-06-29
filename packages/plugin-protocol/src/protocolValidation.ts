@@ -2,7 +2,7 @@
 // 协议层校验：顶层 message 结构 / BinaryField 形状 / aud / iat / exp /
 // p2pkh 地址 / feepool 公钥 hex / 金额正整数。
 //
-// 设计缘由（施工单 001 + 002 硬切换）：
+// 设计缘由（施工单 001 + 002 + 2026-06-28 002 硬切换）：
 //   - 校验与业务执行分离：service 只调用这里抛错 / 返回值的接口。
 //   - 校验失败全部映射为 ProtocolError，方便 service 直接组装 result。
 //   - 不允许把"已经经过一轮校验的 request"再做一次隐式归一化。
@@ -12,11 +12,20 @@
 //     invalid_request。
 //   - 公钥 hex 必须是 33-byte compressed secp256k1（66 个 hex 字符）。
 //   - amountSatoshis 必须是正整数；feeRateSatoshisPerKb 必须 >= 1。
+//   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
+//     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）
+//     强制要求 `connectSessionId` 入参（施工单 2026-06-28 002 硬切换）。
+//     缺该字段直接 `invalid_request` 拒绝——不允许 fallback 到"当前 session"
+//     / "全局 active key"。`connect.login` 是唯一不要求 `connectSessionId`
+//     的入口方法（它本身负责建 session）。
 
 import type {
   BinaryField,
   CipherDecryptParams,
   CipherEncryptParams,
+  ConnectLoginParams,
+  ConnectLogoutParams,
+  ConnectResumeParams,
   FeepoolCommitParams,
   FeepoolPrepareParams,
   IdentityGetParams,
@@ -88,6 +97,12 @@ function validateParams(
       return validateFeepoolPrepareParams(raw);
     case "feepool.commit":
       return validateFeepoolCommitParams(raw);
+    case "connect.login":
+      return validateConnectLoginParams(raw);
+    case "connect.resume":
+      return validateConnectResumeParams(raw);
+    case "connect.logout":
+      return validateConnectLogoutParams(raw);
   }
 }
 
@@ -110,7 +125,11 @@ function validateIdentityGetParams(raw: unknown): IdentityGetParams {
       }
     }
   }
-  return { aud, iat, exp, text, claims: obj.claims as string[] | undefined };
+  // 施工单 2026-06-28 002 硬切换：所有外部业务方法都必须属于某个
+  // connectSessionId（identity.get 是会话内身份断言能力，**不**再
+  // 是登录入口）。缺 `connectSessionId` 直接 invalid_request 拒绝。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { aud, iat, exp, text, claims: obj.claims as string[] | undefined, connectSessionId };
 }
 
 function validateIntentSignParams(raw: unknown): IntentSignParams {
@@ -124,7 +143,9 @@ function validateIntentSignParams(raw: unknown): IntentSignParams {
     throw new ProtocolValidationError("invalid_request", "exp must be greater than iat");
   }
   const content = parseBinaryField(obj.content, "content");
-  return { aud, iat, exp, text, contentType, content };
+  // 施工单 2026-06-28 002 硬切换：签名主体公钥取自 session 绑定 owner。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { aud, iat, exp, text, contentType, content, connectSessionId };
 }
 
 function validateCipherEncryptParams(raw: unknown): CipherEncryptParams {
@@ -132,7 +153,10 @@ function validateCipherEncryptParams(raw: unknown): CipherEncryptParams {
   const text = expectString(obj.text, "text");
   const contentType = expectString(obj.contentType, "contentType");
   const content = parseBinaryField(obj.content, "content");
-  return { text, contentType, content };
+  // 施工单 2026-06-28 001 硬切换：connectSessionId 是**强制**输入字段；
+  // 不允许缺省 / 不允许 fallback 到 active key。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { text, contentType, content, connectSessionId };
 }
 
 function validateCipherDecryptParams(raw: unknown): CipherDecryptParams {
@@ -140,7 +164,9 @@ function validateCipherDecryptParams(raw: unknown): CipherDecryptParams {
   const text = expectString(obj.text, "text");
   const nonce = parseBinaryField(obj.nonce, "nonce");
   const cipherbytes = parseBinaryField(obj.cipherbytes, "cipherbytes");
-  return { text, nonce, cipherbytes };
+  // 与 cipher.encrypt 对称：connectSessionId 强制字段。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { text, nonce, cipherbytes, connectSessionId };
 }
 
 /** 严格比较 `aud` 与 `event.origin`；不补端口 / 不 lower host。 */
@@ -165,7 +191,10 @@ function validateP2pkhTransferParams(raw: unknown): P2pkhTransferParams {
     }
     feeRateSatoshisPerKb = v;
   }
-  return { recipientAddress, amountSatoshis, feeRateSatoshisPerKb };
+  // 施工单 2026-06-28 002 硬切换：资金 owner 取自 session 绑定 owner，
+  // 不再读取全局 active key。缺 `connectSessionId` 直接 invalid_request。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { recipientAddress, amountSatoshis, feeRateSatoshisPerKb, connectSessionId };
 }
 
 function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
@@ -173,7 +202,9 @@ function validateFeepoolPrepareParams(raw: unknown): FeepoolPrepareParams {
   const counterpartyPublicKeyHex = expectString(obj.counterpartyPublicKeyHex, "counterpartyPublicKeyHex");
   assertCompressedPubkeyHex(counterpartyPublicKeyHex);
   const amountSatoshis = expectPositiveInteger(obj.amountSatoshis, "amountSatoshis");
-  return { counterpartyPublicKeyHex, amountSatoshis };
+  // 施工单 2026-06-28 002 硬切换：feepool 必须绑定 session / owner。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { counterpartyPublicKeyHex, amountSatoshis, connectSessionId };
 }
 
 function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
@@ -203,12 +234,60 @@ function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
   // 并签 inputs，multisig output 是被创建不是被花费）；只保留可选的
   // closeCounterpartySignatures（仅 close_and_recreate 需要）。
   const closeCounterpartySignatures = optionalSignatures("closeCounterpartySignatures");
+  // 施工单 2026-06-28 002 硬切换：commit 必须按 session / owner 校验 op。
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
   return {
     operationId,
     counterpartyPublicKeyHex,
+    connectSessionId,
     counterpartySignatures,
     closeCounterpartySignatures
   };
+}
+
+/* ============== 施工单 2026-06-28 001：connect.* 校验 ============== */
+
+/**
+ * 校验 connect.login params。
+ *
+ * 设计缘由（施工单 2026-06-28 001 硬切换 5.1.1）：
+ *   - **不**校验 ownerPublicKeyHex：owner 是用户在 popup UI 选定的，caller
+ *     不在 params 里携带；service 内部从用户视图选择后写入 record。
+ *   - `text` 与 `claims` 与 identity.get 同语义。
+ *   - `claims` 可选；缺省 = `[]`（不返回任何 claim）。
+ */
+function validateConnectLoginParams(raw: unknown): ConnectLoginParams {
+  const obj = expectObject(raw, "connect.login params");
+  const text = expectString(obj.text, "text");
+  let claims: string[] | undefined;
+  if (obj.claims !== undefined) {
+    if (!Array.isArray(obj.claims)) {
+      throw new ProtocolValidationError("invalid_request", "claims must be an array of strings");
+    }
+    claims = obj.claims.filter((c): c is string => typeof c === "string");
+  }
+  return { text, claims };
+}
+
+/**
+ * 校验 connect.resume params。
+ *
+ * 设计缘由：resume 只接 sessionId；service 在执行路径上按 sessionId 查
+ * session 记录 + 校验 origin 匹配 + 校验 owner 仍 ready。
+ */
+function validateConnectResumeParams(raw: unknown): ConnectResumeParams {
+  const obj = expectObject(raw, "connect.resume params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { connectSessionId };
+}
+
+/**
+ * 校验 connect.logout params。
+ */
+function validateConnectLogoutParams(raw: unknown): ConnectLogoutParams {
+  const obj = expectObject(raw, "connect.logout params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { connectSessionId };
 }
 
 /* ============== helpers ============== */

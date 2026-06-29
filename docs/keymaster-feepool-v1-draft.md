@@ -9,10 +9,14 @@
 - Site 不管理池状态；site 只提交：
   - `counterpartyPublicKeyHex`（33-byte compressed secp256k1 hex）
   - `amountSatoshis`：**本次想转给对端的金额**（satoshis；语义在三种 action 下统一）
+  - `connectSessionId`：本次 transfer 所属 connect session（002 硬切换）
 - Keymaster 决定本次 action（`create` / `spend` / `close_and_recreate`）；
   累计维护 B-Tx 草稿。
 - Site 把签名任务交给对端 / 自己处理，回签通过 `feepool.commit` 提交。
 - Keymaster 完成最终落地 + 更新 `feePools` store。
+- **owner 真值**：feepool 走 session 绑定 owner（`connectSessionId` 对应
+  `ownerPublicKeyHex`），**不**读取钱包全局 active key。建池资金来源
+  与签名 key 都按 session owner 走，**不**错位。
 
 ## 关键不变量（V4 收口）
 
@@ -26,8 +30,12 @@
    崩溃后 operationId 失效。
 3. 不持久化 `operations` store；pending operation 不进 IndexedDB。
 4. 不允许中间子会话协议。
-5. 费用池状态 key 必须包含 `counterpartyPublicKeyHex`。
-6. `feepool.commit` 的 `operationId` 不能跨 origin 复用。
+5. 费用池状态 key 必须包含 `counterpartyPublicKeyHex` 与 owner
+   `ownerPublicKeyHex`（施工单 2026-06-28 002 硬切换）：
+   `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`；
+   同一 origin 不同 owner 不再串池。
+6. `feepool.commit` 的 `operationId` 不能跨 origin / 跨 session /
+   跨 owner 复用。
 7. 不引入协议级心跳、MessageChannel、嵌套 request 子会话。
 8. 不允许新增对外错误码。
 9. **`amountSatoshis` 一律 = 本次 transfer 金额**（三种 action 统一）。
@@ -35,6 +43,9 @@
 11. **spend 不删池**；只更新同一条 pool record（累计 `serverAmount` + 草稿）。
 12. **close_and_recreate 不用 dust spend 路径**；用 SDK `loadTx` 把旧 B-Tx
     草稿切到 `FINAL_LOCKTIME` 最终版本，再建新池。
+13. `feepool.prepare` / `feepool.commit` **必须**携带 `connectSessionId`
+    （002 硬切换）；签名主体公钥与建池 UTXO 选币都按 session 绑定
+    owner 走，**不**读取全局 active key。
 
 ## 三个量的关系（V4 关键）
 
@@ -56,6 +67,7 @@
 type FeepoolPrepareParams = {
   counterpartyPublicKeyHex: string;  // 33-byte compressed secp256k1 hex
   amountSatoshis: number;            // 本次 transfer 金额
+  connectSessionId: string;          // 必填（002 硬切换）
 };
 ```
 
@@ -120,6 +132,7 @@ type FeepoolPrepareResult = {
 type FeepoolCommitParams = {
   operationId: string;
   counterpartyPublicKeyHex: string;
+  connectSessionId: string;          // 必填（002 硬切换）
   /** 主 B-Tx 草稿的 server sig（create 走 initial，spend 走 update） */
   counterpartySignatures: BinaryField[];
   /** 仅 close_and_recreate：旧 B-Tx 草稿切到 FINAL_LOCKTIME 的 server sig（update sig）*/

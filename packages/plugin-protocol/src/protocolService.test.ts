@@ -17,9 +17,11 @@ import {
   PROTOCOL_VERSION,
   type KeyspaceService,
   type VaultService,
+  type ConnectSessionRecord,
   type ProtocolClosingMessage,
   type ProtocolCommandRecord,
   type ProtocolFeePoolRecord,
+  type ProtocolMethod,
   type ProtocolOriginSettingsRecord,
   type ProtocolResultMessage,
   type ProtocolStorageDb
@@ -102,7 +104,19 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
         identityStatus: "ready"
       }
     ],
-    getKey: async () => undefined,
+    // 施工单 2026-06-28 001：cipher.* / connect.* 现在按 session.ownerPublicKeyHex
+    // 查 key。fake stub 默认返回"单 key ready"，让 cipher/connect 测试可以跑通。
+    getKey: async (hex: string) => {
+      if (hex !== publicKeyHex) return undefined;
+      return {
+        keyId: "k1",
+        publicKeyHex,
+        label: "Key A",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString(),
+        identityStatus: "ready" as const
+      };
+    },
     active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
@@ -131,6 +145,7 @@ function makeFakeStorageDb(): ProtocolStorageDb & { writes: number; readFailures
   const commands = new Map<string, ProtocolCommandRecord>();
   const origins = new Map<string, ProtocolOriginSettingsRecord>();
   const pools = new Map<string, ProtocolFeePoolRecord>();
+  const sessions = new Map<string, ConnectSessionRecord>();
   let writes = 0;
   let writeFailures = 0;
   return {
@@ -189,6 +204,19 @@ function makeFakeStorageDb(): ProtocolStorageDb & { writes: number; readFailures
       return Array.from(pools.values())
         .filter((r) => r.origin === origin)
         .map((r) => ({ ...r }));
+    },
+    async putConnectSession(record: ConnectSessionRecord) {
+      writes++;
+      sessions.set(record.sessionId, { ...record });
+    },
+    async getConnectSession(sessionId: string) {
+      const v = sessions.get(sessionId);
+      return v ? { ...v } : null;
+    },
+    async listConnectSessionsByOrigin(origin: string) {
+      return Array.from(sessions.values())
+        .filter((r) => r.origin === origin)
+        .map((r) => ({ ...r }));
     }
   };
 }
@@ -200,6 +228,54 @@ function makeFakeSystemSettings() {
     getFeePoolDefaultFundSatoshis: () => 0,
     setFeePoolDefaultFundSatoshis: () => undefined
   };
+}
+
+/**
+ * 构造一个带 valid `sess-test` session 的 storageDb stub。
+ *
+ * 施工单 2026-06-28 002 硬切换：所有业务方法都强制要求 `connectSessionId`。
+ * cancel/timeout 类测试关心的是 timer 行为（cache miss → 30s 兜底、
+ * 只 clamp down、不热更新），**不**关心 session 预校验细节；统一给
+ * stubDb 配一个 valid `sess-test` session，让测试代码不再受 002 新增
+ * 的 session 预校验干扰。
+ *
+ * 调 `stubOverrides` 可以覆盖个别 DB 方法（典型用法：把 `getOrigin`
+ * 改成挂住的 promise 模拟慢 DB）。**不**要在这里改 `getConnectSession`——
+ * 它必须始终返回 valid session。
+ */
+function makeFakeStorageDbWithSession(
+  stubOverrides: Partial<ProtocolStorageDb> = {}
+): ProtocolStorageDb {
+  const base: ProtocolStorageDb = {
+    async putCommand() { /* noop */ },
+    async getCommand() { return null; },
+    async listCommandsByOrigin() { return []; },
+    async getOrigin() { return null; },
+    async putOrigin() { /* noop */ },
+    async listOrigins() { return []; },
+    async getFeePool() { return null; },
+    async putFeePool() { /* noop */ },
+    async deleteFeePool() { /* noop */ },
+    async listFeePoolsByOrigin() { return []; },
+    async putConnectSession() { /* noop */ },
+    async getConnectSession(sessionId: string) {
+      if (sessionId) {
+        return {
+          sessionId,
+          origin: ORIGIN,
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          claimsSnapshot: {},
+          createdAt: Date.now(),
+          lastUsedAt: Date.now(),
+          revokedAt: null
+        };
+      }
+      return null;
+    },
+    async listConnectSessionsByOrigin() { return []; }
+  };
+  return { ...base, ...stubOverrides };
 }
 
 interface ServiceHarness {
@@ -239,6 +315,66 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
     deps.storageDb = storageDb;
   }
   const service = new ProtocolServiceImpl(deps);
+  // 施工单 2026-06-28 002 硬切换：业务方法强制要求 connectSessionId；
+  // 默认 seed 两条 session（ORIGIN + ORIGIN_FRESH），让绝大多数测试可以
+  // 无脑发业务方法。需要测 session 不存在 / 跨 origin / revoked 的测试
+  // 自行 override。
+  // 用 `void` + .catch 容错：failing storageDb 测试会抛错，吞掉即可。
+  if (storageDb) {
+    const db = storageDb as ReturnType<typeof makeFakeStorageDb>;
+    void db.putConnectSession({
+      sessionId: "sess-test",
+      origin: ORIGIN,
+      ownerPublicKeyHex: publicKeyHex,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    }).catch(() => undefined);
+    void db.putConnectSession({
+      sessionId: "sess-fresh",
+      origin: "https://fresh.example",
+      ownerPublicKeyHex: publicKeyHex,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    }).catch(() => undefined);
+    // 切换 origin 测试常用 ORIGIN_FRESH / origin-a.example / origin-b.example / other.example。
+    // 默认 seed 这些 origin 下的 sess-* session，避免每个测试单独 setup。
+    void db.putConnectSession({
+      sessionId: "sess-origin-a",
+      origin: "https://origin-a.example",
+      ownerPublicKeyHex: publicKeyHex,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    }).catch(() => undefined);
+    void db.putConnectSession({
+      sessionId: "sess-origin-b",
+      origin: "https://origin-b.example",
+      ownerPublicKeyHex: publicKeyHex,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    }).catch(() => undefined);
+    void db.putConnectSession({
+      sessionId: "sess-other",
+      origin: "https://other.example",
+      ownerPublicKeyHex: publicKeyHex,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    }).catch(() => undefined);
+  }
   return {
     service,
     opener,
@@ -255,6 +391,32 @@ function makeEvent<T>(data: T, origin = ORIGIN, source: object | null = null): M
     origin,
     source
   } as unknown as MessageEvent;
+}
+
+/**
+ * 测试辅助：手工写一条 connect session 到 fake storageDb，
+ * 让 cipher.* / connect.resume 测试不必先走完整 login 流程。
+ *
+ * 字段与 contract ConnectSessionRecord 严格对齐（施工单 2026-06-28 002
+ * 硬切换：已移除 `ownerKeyId`，只保留 `ownerPublicKeyHex`）。
+ */
+async function seedConnectSession(
+  storageDb: ReturnType<typeof makeFakeStorageDb>,
+  sessionId: string,
+  ownerPublicKeyHex: string,
+  origin: string = ORIGIN
+): Promise<void> {
+  const now = Date.now();
+  await storageDb.putConnectSession({
+    sessionId,
+    origin,
+    ownerPublicKeyHex,
+    ownerLabel: "Key A",
+    claimsSnapshot: {},
+    createdAt: now,
+    lastUsedAt: now,
+    revokedAt: null
+  });
 }
 
 /** 用与 `protocolService.computeTxidFromHex` 相同的算法求 txid：先 hex → bytes，再双 sha256 反序。 */
@@ -297,7 +459,7 @@ describe("ProtocolServiceImpl", () => {
         type: "request",
         id: "req-1",
         method: "identity.get",
-        params: { aud: ORIGIN, iat: 1000, exp: 2000, text: "hello", claims: ["key.label"] }
+        params: { aud: ORIGIN, iat: 1000, exp: 2000, text: "hello", claims: ["key.label"], connectSessionId: "sess-test" }
       },
       ORIGIN,
       opener
@@ -316,7 +478,15 @@ describe("ProtocolServiceImpl", () => {
         type: "request",
         id: "req-2",
         method: "identity.get",
-        params: { aud: "https://evil.com", iat: 1000, exp: 2000, text: "hello" }
+        params: {
+          aud: "https://evil.com",
+          iat: 1000,
+          exp: 2000,
+          text: "hello",
+          // 施工单 2026-06-28 002 硬切换：identity.get 强制要求
+          // connectSessionId；让请求穿过 session 预校验以命中 aud 检查。
+          connectSessionId: "sess-test"
+        }
       },
       ORIGIN,
       opener
@@ -341,7 +511,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-3",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1000, exp: 2000, text: "x" }
+          params: { aud: ORIGIN, iat: 1000, exp: 2000, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -368,7 +538,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-id",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1000, exp: 2000, text: "hi", claims: ["key.label"] }
+          params: { aud: ORIGIN, iat: 1000, exp: 2000, text: "hi", claims: ["key.label"], connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -410,8 +580,9 @@ describe("ProtocolServiceImpl", () => {
   });
 
   it("cipher.encrypt + cipher.decrypt round-trip within same origin", async () => {
-    const { service, opener, getResult } = makeService();
+    const { service, opener, getResult, storageDb } = makeService();
     service.startSession();
+    await seedConnectSession(storageDb, "sess-cipher-1", TEST_PUB_HEX);
     const content = new TextEncoder().encode("note body");
     await service.handleMessage(
       makeEvent(
@@ -420,7 +591,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "enc-1",
           method: "cipher.encrypt",
-          params: { text: "encrypt", contentType: "note.v1", content: { $type: "binary", bytes: content.buffer } }
+          params: { text: "encrypt", contentType: "note.v1", content: { $type: "binary", bytes: content.buffer }, connectSessionId: "sess-cipher-1" }
         },
         ORIGIN,
         opener
@@ -441,8 +612,9 @@ describe("ProtocolServiceImpl", () => {
   });
 
   it("cipher.decrypt across different origin fails with decrypt_failed", async () => {
-    const { service, opener, getResult } = makeService();
+    const { service, opener, getResult, storageDb } = makeService();
     service.startSession();
+    await seedConnectSession(storageDb, "sess-cipher-2", TEST_PUB_HEX);
     const content = new TextEncoder().encode("body");
     await service.handleMessage(
       makeEvent(
@@ -451,7 +623,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "enc-2",
           method: "cipher.encrypt",
-          params: { text: "x", contentType: "note.v1", content: { $type: "binary", bytes: content.buffer } }
+          params: { text: "x", contentType: "note.v1", content: { $type: "binary", bytes: content.buffer }, connectSessionId: "sess-cipher-2" }
         },
         ORIGIN,
         opener
@@ -465,6 +637,8 @@ describe("ProtocolServiceImpl", () => {
     const EVIL = "https://evil.com";
     const evil = makeService();
     evil.service.startSession();
+    // evil 必须 seed 同 origin 的 session 才能跨过 origin 闸；AES-GCM 仍会失败。
+    await seedConnectSession(evil.storageDb, "sess-evil", TEST_PUB_HEX, EVIL);
     const opener2 = evil.opener;
     await evil.service.handleMessage(
       makeEvent(
@@ -476,7 +650,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             text: "x",
             nonce: enc.nonce,
-            cipherbytes: enc.cipherbytes
+            cipherbytes: enc.cipherbytes,
+            connectSessionId: "sess-evil"
           }
         },
         EVIL,
@@ -513,7 +688,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-no-key",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -536,7 +711,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-ok-1",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -562,7 +737,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-A",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -579,7 +754,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-B",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -598,8 +773,9 @@ describe("ProtocolServiceImpl", () => {
     // 旧行为（001 单之前）：第二条 request 被单 active request 模型忽略。
     // 新行为（002 单）：多 request 并存；两条独立活卡出现在 feed 活请求区
     // 头部（按 createdAt asc 排序）。
-    const { service, opener, posted } = makeService();
+    const { service, opener, posted, storageDb } = makeService();
     service.startSession();
+    await seedConnectSession(storageDb, "sess-concurrent", TEST_PUB_HEX);
     await service.handleMessage(
       makeEvent(
         {
@@ -611,7 +787,8 @@ describe("ProtocolServiceImpl", () => {
             aud: ORIGIN,
             text: "first",
             nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
-            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "sess-concurrent"
           }
         },
         ORIGIN,
@@ -632,7 +809,8 @@ describe("ProtocolServiceImpl", () => {
             aud: ORIGIN,
             text: "second",
             nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
-            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "sess-concurrent"
           }
         },
         ORIGIN,
@@ -665,7 +843,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-A",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -679,7 +857,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-B",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -720,7 +898,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "live-confirming",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -743,7 +921,8 @@ describe("ProtocolServiceImpl", () => {
       claimsSummary: [],
       contentType: "",
       payloadSize: 0,
-      activePublicKeyHex: "02" + "11".repeat(32),
+      connectSessionId: "sess-test",
+      ownerPublicKeyHex: "02" + "11".repeat(32),
       createdAt: 1,
       updatedAt: 999,
       finishedAt: 999,
@@ -758,7 +937,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "live-other",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "y" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "y", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -785,7 +964,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "persist-after-terminal",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "persist-me" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "persist-me", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -820,7 +999,8 @@ describe("ProtocolServiceImpl", () => {
       claimsSummary: [],
       contentType: "",
       payloadSize: 66,
-      activePublicKeyHex: TEST_PUB_HEX,
+      connectSessionId: "sess-test",
+      ownerPublicKeyHex: TEST_PUB_HEX,
       createdAt: 10,
       updatedAt: 20,
       finishedAt: 0,
@@ -836,7 +1016,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fresh-live",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "fresh live request" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "fresh live request", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -896,6 +1076,34 @@ describe("ProtocolServiceImpl", () => {
       },
       async listFeePoolsByOrigin() {
         return [];
+      },
+      async putConnectSession() {
+        /* noop */
+      },
+      async getConnectSession(sessionId: string) {
+        // 施工单 2026-06-28 002 硬切换：测试 stub 按 id 后缀返回对应
+        // origin 的 valid session（让 preCheckConnectSession 放行）。
+        if (sessionId) {
+          let origin: string = ORIGIN;
+          if (sessionId === "sess-origin-a") origin = "https://origin-a.example";
+          else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
+          else if (sessionId === "sess-other") origin = "https://other.example";
+          else if (sessionId === "sess-fresh") origin = "https://fresh.example";
+          return {
+            sessionId,
+            origin,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() {
+        return [];
       }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
@@ -908,7 +1116,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-a",
           method: "identity.get",
-          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x", connectSessionId: "sess-origin-a" }
         },
         "https://origin-a.example",
         opener
@@ -927,7 +1135,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-b",
           method: "identity.get",
-          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y", connectSessionId: "sess-origin-b" }
         },
         "https://origin-b.example",
         opener
@@ -999,6 +1207,34 @@ describe("ProtocolServiceImpl", () => {
       },
       async listFeePoolsByOrigin() {
         return [];
+      },
+      async putConnectSession() {
+        /* noop */
+      },
+      async getConnectSession(sessionId: string) {
+        // 施工单 2026-06-28 002 硬切换：测试 stub 按 id 后缀返回对应
+        // origin 的 valid session（让 preCheckConnectSession 放行）。
+        if (sessionId) {
+          let origin: string = ORIGIN;
+          if (sessionId === "sess-origin-a") origin = "https://origin-a.example";
+          else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
+          else if (sessionId === "sess-other") origin = "https://other.example";
+          else if (sessionId === "sess-fresh") origin = "https://fresh.example";
+          return {
+            sessionId,
+            origin,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() {
+        return [];
       }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
@@ -1011,7 +1247,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-a",
           method: "identity.get",
-          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x", connectSessionId: "sess-origin-a" }
         },
         "https://origin-a.example",
         opener
@@ -1028,7 +1264,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-b",
           method: "identity.get",
-          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y", connectSessionId: "sess-origin-b" }
         },
         "https://origin-b.example",
         opener
@@ -1044,7 +1280,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-b2",
           method: "identity.get",
-          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "z" }
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "z", connectSessionId: "sess-origin-b" }
         },
         "https://origin-b.example",
         opener
@@ -1073,7 +1309,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-a",
           method: "identity.get",
-          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x", connectSessionId: "sess-origin-a" }
         },
         "https://origin-a.example",
         opener
@@ -1093,7 +1329,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-b",
           method: "identity.get",
-          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y", connectSessionId: "sess-origin-b" }
         },
         "https://origin-b.example",
         opener
@@ -1130,7 +1366,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-a",
           method: "identity.get",
-          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x" }
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x", connectSessionId: "sess-origin-a" }
         },
         "https://origin-a.example",
         opener
@@ -1146,7 +1382,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-b",
           method: "identity.get",
-          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y" }
+          params: { aud: "https://origin-b.example", iat: 1, exp: 2, text: "y", connectSessionId: "sess-origin-b" }
         },
         "https://origin-b.example",
         opener
@@ -1161,7 +1397,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "from-a-2",
           method: "identity.get",
-          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x2" }
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "x2", connectSessionId: "sess-origin-a" }
         },
         "https://origin-a.example",
         opener
@@ -1175,19 +1411,22 @@ describe("ProtocolServiceImpl", () => {
     expect(feedBack.commands.some((c) => c.requestId === "from-a-2" && c.phase === "confirming")).toBe(true);
   });
 
-  it("修复 #3：activePublicKeyHex 写卡时取一次,后续切换 active key 不污染旧卡", async () => {
-    // 关键修复（施工单 2026-06-27 002 反馈）：contract 注释明确
-    // `activePublicKeyHex` 是"写记录时取一次"。旧实现里 writeFeedCommandFor
-    // 每次都读 keyspace.active()——用户在 popup 会话里切换 active key
-    // 会让旧卡片的元数据被污染。
-    // 新实现：rec.activePublicKeyHex 在 acceptRequest 创建 record 时快照,
-    // 后续 writeFeedCommandFor / loadHistoryForOrigin 合并都从 rec 读,
-    // 不再读 keyspace。
+  it("修复 #3：ownerPublicKeyHex 写卡时取一次,后续切换 active key 不污染旧卡", async () => {
+    // 关键修复（施工单 2026-06-27 002 反馈 + 施工单 2026-06-28 002 硬切换）：
+    // contract 注释明确 `ownerPublicKeyHex` 是"record 在创建时快照的
+    // owner public key hex"。旧实现里 writeFeedCommandFor 每次都读
+    // keyspace.active()——用户在 popup 会话里切换 active key 会让旧卡片
+    // 的元数据被污染。
+    // 新实现：rec.ownerPublicKeyHex 在 acceptRequest 创建 record 时从
+    // connectSession.ownerPublicKeyHex 快照；后续 writeFeedCommandFor /
+    // loadHistoryForOrigin 合并都从 rec 读，不再读 keyspace.active()。
     //
-    // 用一个能动态切换 active key 的 keyspace stub 来模拟。
-    let currentActiveKey = "02" + "aa".repeat(32); // 创建 record 时的 active key。
+    // 用一个能动态切换 active key 的 keyspace stub + 预 seed 的
+    // connect session 来模拟。
+    const initialOwner = "02" + "aa".repeat(32);
+    let currentActiveKey = initialOwner;
     const dynamicKeyspace = {
-      ...makeKeyspaceStub(currentActiveKey),
+      ...makeKeyspaceStub(initialOwner),
       active: () => ({ activePublicKeyHex: currentActiveKey }),
       requireActiveKey: () => ({
         keyId: "k1",
@@ -1198,9 +1437,11 @@ describe("ProtocolServiceImpl", () => {
         identityStatus: "ready"
       })
     };
-    const { service, opener, deps } = makeService(currentActiveKey, undefined, {
+    const { service, opener, storageDb, deps } = makeService(initialOwner, undefined, {
       keyspace: dynamicKeyspace as unknown as KeyspaceService
     });
+    // 预 seed 一条 connect session，owner 锁定为创建时的 initialOwner。
+    await seedConnectSession(storageDb, "sess-owner-snap", initialOwner, ORIGIN);
     service.startSession();
     await service.handleMessage(
       makeEvent(
@@ -1208,34 +1449,40 @@ describe("ProtocolServiceImpl", () => {
           v: PROTOCOL_VERSION,
           type: "request",
           id: "req-key1",
-          method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          method: "cipher.encrypt",
+          params: {
+            text: "x",
+            contentType: "note.v1",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-owner-snap"
+          }
         },
         ORIGIN,
         opener
       )
     );
-    // 此时卡片 activePublicKeyHex = 创建时的 currentActiveKey (02aa...)。
+    // 此时卡片 ownerPublicKeyHex = 创建时的 initialOwner (02aa...)。
     const feed1 = service.feedSnapshot();
     const card1 = feed1.commands.find((c) => c.requestId === "req-key1");
-    expect(card1?.activePublicKeyHex).toBe("02" + "aa".repeat(32));
+    expect(card1?.ownerPublicKeyHex).toBe(initialOwner);
     // 用户切换 active key:dynamicKeyspace.active() 改成新 key。
     currentActiveKey = "02" + "bb".repeat(32);
     // 推进旧卡 phase 触发 writeFeedCommandFor(queued 后写一次)。
     await service.confirmByUser();
     await new Promise((r) => setTimeout(r, 30));
-    // 关键断言：旧卡的 activePublicKeyHex 仍是创建时的 02aa...,不变成 02bb...。
+    // 关键断言：旧卡的 ownerPublicKeyHex 仍是创建时的 02aa...,不变成 02bb...。
     const feed2 = service.feedSnapshot();
     const card2 = feed2.commands.find((c) => c.requestId === "req-key1");
-    expect(card2?.activePublicKeyHex).toBe("02" + "aa".repeat(32));
+    expect(card2?.ownerPublicKeyHex).toBe(initialOwner);
     void deps;
   });
 
   it("同类 request 不复用卡位：两条 cipher.decrypt 在 feed 投影中独立", async () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：同类 request 不应"借壳"
     // 修改第一张卡的内容伪装成更新。两条独立 record，两张独立卡。
-    const { service, opener } = makeService();
+    const { service, opener, storageDb } = makeService();
     service.startSession();
+    await seedConnectSession(storageDb, "sess-two-dec", TEST_PUB_HEX);
     const nonce1 = new Uint8Array(12);
     const nonce2 = new Uint8Array(12);
     nonce2[0] = 1;
@@ -1250,7 +1497,8 @@ describe("ProtocolServiceImpl", () => {
             aud: ORIGIN,
             text: "first",
             nonce: { $type: "binary", bytes: nonce1.buffer },
-            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "sess-two-dec"
           }
         },
         ORIGIN,
@@ -1269,7 +1517,8 @@ describe("ProtocolServiceImpl", () => {
             aud: ORIGIN,
             text: "second",
             nonce: { $type: "binary", bytes: nonce2.buffer },
-            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "sess-two-dec"
           }
         },
         ORIGIN,
@@ -1299,7 +1548,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "r-A",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "A", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1313,7 +1562,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "r-B",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "B", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1347,7 +1596,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-origin-A",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1368,7 +1617,8 @@ describe("ProtocolServiceImpl", () => {
       claimsSummary: [],
       contentType: "",
       payloadSize: 0,
-      activePublicKeyHex: TEST_PUB_HEX,
+      connectSessionId: "sess-test",
+      ownerPublicKeyHex: TEST_PUB_HEX,
       createdAt: 1,
       updatedAt: 1,
       finishedAt: 1,
@@ -1385,7 +1635,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-origin-B",
           method: "identity.get",
-          params: { aud: OTHER, iat: 1, exp: 2, text: "y" }
+          params: { aud: OTHER, iat: 1, exp: 2, text: "y", connectSessionId: "sess-test" }
         },
         OTHER,
         opener
@@ -1410,7 +1660,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-close-1",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1447,7 +1697,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-closing-fail",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1460,6 +1710,17 @@ describe("ProtocolServiceImpl", () => {
 
   it("DB write failure does not block main protocol result", async () => {
     // 构造一个读 / 写都失败的 fake db；service 主流程不应被它打断。
+    //
+    // 施工单 2026-06-28 002 硬切换：业务方法（identity.get / cipher.* /
+    // p2pkh.transfer / feepool.*）都要求 session 真值。DB 异常时
+    // accept 阶段预校验按"DB unavailable 降级"放过 → execute 阶段
+    // `requireConnectSession` 仍会校验 DB 读取 → DB 异常会触发
+    // `internal_error` → 对外回 `user_rejected`。
+    //
+    // 与旧"DB 不可用 = 仍可手动 confirm"边界不同：002 之后所有业务
+    // 方法都要求 session 真值，**不**fallback 到 active key。本测试
+    // 仍验证"DB 写失败不卡 transport + confirm 调度"，但期望
+    // result.ok = false（execute 阶段 fail-closed）。
     const failingDb: ProtocolStorageDb = {
       async putCommand() {
         throw new Error("db down");
@@ -1490,6 +1751,15 @@ describe("ProtocolServiceImpl", () => {
       },
       async listFeePoolsByOrigin() {
         throw new Error("db down");
+      },
+      async putConnectSession() {
+        throw new Error("db down");
+      },
+      async getConnectSession() {
+        throw new Error("db down");
+      },
+      async listConnectSessionsByOrigin() {
+        throw new Error("db down");
       }
     };
     const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingDb);
@@ -1503,7 +1773,7 @@ describe("ProtocolServiceImpl", () => {
             type: "request",
             id: "req-db-fail",
             method: "identity.get",
-            params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+            params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
           },
           ORIGIN,
           opener
@@ -1514,9 +1784,14 @@ describe("ProtocolServiceImpl", () => {
       // 此时写已经失败过一次：historyAvailable 必须为 false。
       expect(service.feedSnapshot().historyAvailable).toBe(false);
       await service.confirmByUser();
-      // result 正常发出。
+      // result 正常发出（002 硬切换下，DB 异常走 execute 阶段
+      // `requireConnectSession` fail-closed → 对外回 user_rejected）。
       const r = getResult();
-      expect(r?.ok).toBe(true);
+      expect(r).not.toBeNull();
+      expect(r?.ok).toBe(false);
+      if (r && r.ok === false) {
+        expect(r.error.code).toBe("user_rejected");
+      }
       // 写失败已被吞；historyAvailable 保持 false。
       expect(service.feedSnapshot().historyAvailable).toBe(false);
     } finally {
@@ -1536,7 +1811,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "duplicated-request-id",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1555,7 +1830,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "duplicated-request-id",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1591,7 +1866,8 @@ describe("ProtocolServiceImpl", () => {
       claimsSummary: [],
       contentType: "",
       payloadSize: 0,
-      activePublicKeyHex: TEST_PUB_HEX,
+      connectSessionId: "sess-test",
+      ownerPublicKeyHex: TEST_PUB_HEX,
       createdAt: 1,
       updatedAt: 1,
       finishedAt: 1,
@@ -1607,7 +1883,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "req-OTHER",
           method: "identity.get",
-          params: { aud: OTHER, iat: 1, exp: 2, text: "x" }
+          params: { aud: OTHER, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         OTHER,
         opener
@@ -1656,6 +1932,35 @@ describe("ProtocolServiceImpl", () => {
       },
       async listFeePoolsByOrigin() {
         return [];
+      },
+      async putConnectSession() {
+        /* noop */
+      },
+      async getConnectSession(sessionId: string) {
+        // 施工单 2026-06-28 002 硬切换：测试 stub 按 id 后缀返回对应
+        // origin 的 valid session（让 preCheckConnectSession 放行）。
+        if (sessionId) {
+          let origin: string = ORIGIN;
+          if (sessionId === "sess-origin-a") origin = "https://origin-a.example";
+          else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
+          else if (sessionId === "sess-other") origin = "https://other.example";
+          else if (sessionId === "sess-fresh") origin = "https://fresh.example";
+          else if (sessionId === "sess-keep") origin = "https://new.example";
+          return {
+            sessionId,
+            origin,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() {
+        return [];
       }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, failingDb);
@@ -1671,7 +1976,15 @@ describe("ProtocolServiceImpl", () => {
             type: "request",
             id: "req-keep",
             method: "identity.get",
-            params: { aud: NEW_ORIGIN, iat: 1, exp: 2, text: "x" }
+            params: {
+              aud: NEW_ORIGIN,
+              iat: 1,
+              exp: 2,
+              text: "x",
+              // 施工单 2026-06-28 002 硬切换：所有业务方法强制要求
+              // connectSessionId。
+              connectSessionId: "sess-keep"
+            }
           },
           NEW_ORIGIN,
           opener
@@ -1747,7 +2060,7 @@ describe("ProtocolServiceImpl", () => {
           method: "p2pkh.transfer",
           params: {
             recipientAddress: MAINNET_P2PKH,
-            amountSatoshis: 5000
+            amountSatoshis: 5000, connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -1798,7 +2111,7 @@ describe("ProtocolServiceImpl", () => {
           method: "p2pkh.transfer",
           params: {
             recipientAddress: MAINNET_P2PKH,
-            amountSatoshis: 1000
+            amountSatoshis: 1000, connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -1845,7 +2158,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "p2pkh-insufficient",
           method: "p2pkh.transfer",
-          params: { recipientAddress: MAINNET_P2PKH, amountSatoshis: 5000 }
+          params: { recipientAddress: MAINNET_P2PKH, amountSatoshis: 5000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -1960,6 +2273,17 @@ describe("ProtocolServiceImpl", () => {
     const posted = { ready: 0, result: [] as ProtocolResultMessage[], closing: [] as ProtocolClosingMessage[] };
     let resultMessage: ProtocolResultMessage | null = null;
     const fakeStorage = makeFakeStorageDb();
+    // 施工单 2026-06-28 002 硬切换：feepool.* 业务方法也需要 connectSessionId。
+    await fakeStorage.putConnectSession({
+      sessionId: "sess-test",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
     const service = new reloaded.ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
       keyspace: makeKeyspaceStub(TEST_PUB_HEX),
@@ -2031,7 +2355,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-create",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2059,7 +2383,7 @@ describe("ProtocolServiceImpl", () => {
       expect(result.amountSatoshis).toBe(8000);
     }
     // feePools store 此时**未**写（commit 才写）。
-    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).toBeNull();
     teardownFeepoolMock();
   });
@@ -2077,7 +2401,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-overflow",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 25000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 25000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2106,7 +2430,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-create-noconf",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 5000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 5000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2128,8 +2452,9 @@ describe("ProtocolServiceImpl", () => {
   it("feepool.prepare spend: prior pool with enough balance → action=spend, serverAmount=amountSatoshis", async () => {
     // prior.totalAmount=20000，site 要花 8000 → spend 分支。
     const prior: ProtocolFeePoolRecord = {
-      poolKey: `${ORIGIN}::${COUNTERPARTY}`,
+      poolKey: `${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`,
       origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
@@ -2153,7 +2478,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-spend",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2178,8 +2503,9 @@ describe("ProtocolServiceImpl", () => {
   it("feepool.prepare close_and_recreate: prior balance insufficient → builds spend + new base", async () => {
     // prior.totalAmount=3000，site 要 8000 → close_and_recreate。
     const prior: ProtocolFeePoolRecord = {
-      poolKey: `${ORIGIN}::${COUNTERPARTY}`,
+      poolKey: `${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`,
       origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
@@ -2207,7 +2533,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-cnr",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2252,7 +2578,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-commit-create",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 5000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 5000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2276,8 +2602,9 @@ describe("ProtocolServiceImpl", () => {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
             counterpartySignatures: [
-              { $type: "binary", bytes: new Uint8Array(72).buffer }
+              { $type: "binary", bytes: new Uint8Array(72).buffer },
             ],
+            connectSessionId: "sess-test",
             baseCounterpartySignatures: [
               { $type: "binary", bytes: new Uint8Array(72).buffer }
             ]
@@ -2295,7 +2622,7 @@ describe("ProtocolServiceImpl", () => {
       expect((commitResult.result as { action: string }).action).toBe("create");
     }
     // store 里有新池记录；totalAmount = 池大小（**不**等于 transfer 金额）。
-    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).not.toBeNull();
     expect(stored?.totalAmount).toBe(10000); // 池大小
     expect(stored?.serverAmount).toBe(5000); // transfer 金额
@@ -2320,7 +2647,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             operationId: "op-does-not-exist",
             counterpartyPublicKeyHex: COUNTERPARTY,
-            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -2350,7 +2678,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-cross-prep",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2372,7 +2700,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
-            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-test"
           }
         },
         EVIL,
@@ -2384,11 +2713,21 @@ describe("ProtocolServiceImpl", () => {
     const lastError = [...results].reverse().find((m) => m.ok === false);
     expect(lastError?.ok).toBe(false);
     if (lastError && lastError.ok === false) {
-      expect(lastError.error.code).toBe("user_rejected");
+      // 施工单 2026-06-28 002 硬切换：跨 origin 由 accept 阶段
+      // preCheckConnectSession 立即返回 invalid_origin（与 identity.get
+      // 同语义）；旧模型"feepool.commit 跨 origin → cross_origin_operation
+      // → user_rejected"已被收口。
+      expect(lastError.error.code).toBe("invalid_origin");
     }
     const feed = h.service.feedSnapshot();
     const card = feed.commands.find((c) => c.requestId === "fp-cross-commit");
-    expect(card?.failureReason).toBe("cross_origin_operation");
+    // 施工单 2026-06-28 002 硬切换：跨 origin 由 accept 阶段
+    // preCheckConnectSession 抛 `invalid_origin` ProtocolError（与
+    // identity.get / cipher.* 统一语义），dispatch catch 走通用分支，
+    // `failureReason` **不**写具体 reason（"internal_error" / undefined）。
+    // 旧"feepool.commit 跨 origin → cross_origin_operation"特定 reason
+    // 已被收口。
+    expect(card?.errorCode).toBe("invalid_origin");
     teardownFeepoolMock();
   });
 
@@ -2409,7 +2748,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-autosign",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2449,7 +2788,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fp-prepare",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 3000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 3000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2474,7 +2813,8 @@ describe("ProtocolServiceImpl", () => {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
             counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
-            baseCounterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            connectSessionId: "sess-test",
+          baseCounterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
           }
         },
         ORIGIN,
@@ -2520,7 +2860,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fe-v4-1",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 3000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 3000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2541,7 +2881,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
-            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -2549,7 +2890,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).not.toBeNull();
     expect(stored?.totalAmount).toBe(10000);
     expect(stored?.serverAmount).toBe(3000);
@@ -2572,7 +2913,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fe-v4-2a",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2590,7 +2931,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
-            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -2598,7 +2940,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    let stored = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    let stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored?.serverAmount).toBe(1000);
 
     await h.service.handleMessage(
@@ -2608,7 +2950,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fe-v4-2b",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1500 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1500, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2626,7 +2968,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
-            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -2634,7 +2977,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    stored = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     // 池持续累计：1000 + 1500 = 2500；草稿已更新到 update 版（"ee"）
     expect(stored?.serverAmount).toBe(2500);
     expect(stored?.draftSpendTxHex).toBe("ee".repeat(100));
@@ -2643,8 +2986,9 @@ describe("ProtocolServiceImpl", () => {
 
   it("V4: close_and_recreate 用 final close（loadDraft + FINAL_LOCKTIME）+ 新池初始 draft", async () => {
     const prior: ProtocolFeePoolRecord = {
-      poolKey: `${ORIGIN}::${COUNTERPARTY}`,
+      poolKey: `${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`,
       origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
@@ -2669,7 +3013,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fe-v4-3",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 8000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2691,7 +3035,8 @@ describe("ProtocolServiceImpl", () => {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
             counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
-            closeCounterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            connectSessionId: "sess-test",
+          closeCounterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
           }
         },
         ORIGIN,
@@ -2699,7 +3044,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    const oldPool = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    const oldPool = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(oldPool).not.toBeNull();
     expect(oldPool?.totalAmount).toBe(10000);
     expect(oldPool?.serverAmount).toBe(8000);
@@ -2713,8 +3058,9 @@ describe("ProtocolServiceImpl", () => {
     // close 后 close 草稿 serverAmount 应只是 3000（不是 3000+2000=5000）。
     // 新池 serverAmount 应是 2000（新池从 0 开始累计 site 的 amountSatoshis）。
     const prior: ProtocolFeePoolRecord = {
-      poolKey: `${ORIGIN}::${COUNTERPARTY}`,
+      poolKey: `${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`,
       origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
       counterpartyPublicKeyHex: COUNTERPARTY,
       baseTxid: "aa".repeat(32),
       baseTxHex: "00".repeat(100),
@@ -2739,7 +3085,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fe-v5-close",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 2000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 2000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2761,7 +3107,8 @@ describe("ProtocolServiceImpl", () => {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
             counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
-            closeCounterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            connectSessionId: "sess-test",
+          closeCounterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
           }
         },
         ORIGIN,
@@ -2773,7 +3120,7 @@ describe("ProtocolServiceImpl", () => {
     // serverAmount = 新池第一次 transfer（= site 的 amountSatoshis = 2000）。
     // 关键：close 旧池 2000 + 新池 2000 = 4000（**不是**）；V5 修复后新池只继承
     // 自己的第一次 transfer 2000。
-    const newPool = await h.storageDb.getFeePool(`${ORIGIN}::${COUNTERPARTY}`);
+    const newPool = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(newPool).not.toBeNull();
     expect(newPool?.totalAmount).toBe(10000);
     expect(newPool?.serverAmount).toBe(2000); // V5 关键：不是 4000
@@ -2793,7 +3140,7 @@ describe("ProtocolServiceImpl", () => {
           type: "request",
           id: "fe-v4-4",
           method: "feepool.prepare",
-          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 5000 }
+          params: { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 5000, connectSessionId: "sess-test" }
         },
         ORIGIN,
         h.opener
@@ -2811,7 +3158,8 @@ describe("ProtocolServiceImpl", () => {
           params: {
             operationId: opId,
             counterpartyPublicKeyHex: COUNTERPARTY,
-            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }]
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -2867,6 +3215,34 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       },
       async listFeePoolsByOrigin() {
         return [];
+      },
+      async putConnectSession() {
+        /* noop */
+      },
+      async getConnectSession(sessionId: string) {
+        // 施工单 2026-06-28 002 硬切换：测试 stub 按 id 后缀返回对应
+        // origin 的 valid session（让 preCheckConnectSession 放行）。
+        if (sessionId) {
+          let origin: string = ORIGIN;
+          if (sessionId === "sess-origin-a") origin = "https://origin-a.example";
+          else if (sessionId === "sess-origin-b") origin = "https://origin-b.example";
+          else if (sessionId === "sess-other") origin = "https://other.example";
+          else if (sessionId === "sess-fresh") origin = "https://fresh.example";
+          return {
+            sessionId,
+            origin,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() {
+        return [];
       }
     };
   }
@@ -2877,7 +3253,11 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       iat: 1,
       exp: 2,
       text: "hello",
-      claims: ["key.label"]
+      claims: ["key.label"],
+      // 施工单 2026-06-28 002 硬切换：identity.get 业务方法也强制要求
+      // connectSessionId。makeService 已经默认 seed 了 ORIGIN_FRESH
+      // 对应的 sess-fresh session。
+      connectSessionId: "sess-fresh"
     };
   }
 
@@ -2967,7 +3347,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   });
 
   it("cipher.encrypt auto-approve (sync cache hit)", async () => {
-    const { service, opener, getResult } = makeService();
+    const { service, opener, getResult, storageDb } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -2980,6 +3360,18 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       updatedAt: 1
     });
     service.startSession();
+    await seedConnectSession(storageDb, "sess-enc-auto", TEST_PUB_HEX);
+    // 重写 seed 后的 session 的 origin 为 ORIGIN_FRESH，避免 invalid_origin。
+    await storageDb.putConnectSession({
+      sessionId: "sess-enc-auto",
+      origin: ORIGIN_FRESH,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
     await service.handleMessage(
       makeEvent(
         {
@@ -2991,7 +3383,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
             aud: ORIGIN_FRESH,
             text: "hello",
             contentType: "note.v1",
-            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-enc-auto"
           }
         },
         ORIGIN_FRESH,
@@ -3006,7 +3399,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
 
   it("cipher.decrypt auto-approve (sync cache hit)", async () => {
     // 先用同 origin 发一次 encrypt,再用 decrypt 请求(同 origin cache 命中)。
-    const { service, opener } = makeService();
+    const { service, opener, storageDb } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -3019,6 +3412,18 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       updatedAt: 1
     });
     service.startSession();
+    // cipher.* 现在强制要求 connectSessionId；为这条 auto-approve 测试
+    // 预先 seed 一条 ORIGIN_FRESH 下的 session。
+    await storageDb.putConnectSession({
+      sessionId: "sess-dec-auto",
+      origin: ORIGIN_FRESH,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
     // 先发 encrypt 拿到 nonce / cipherbytes。
     await service.handleMessage(
       makeEvent(
@@ -3031,7 +3436,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
             aud: ORIGIN_FRESH,
             text: "hi",
             contentType: "note.v1",
-            content: { $type: "binary", bytes: new Uint8Array([7, 8]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([7, 8]).buffer },
+            connectSessionId: "sess-dec-auto"
           }
         },
         ORIGIN_FRESH,
@@ -3048,7 +3454,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
           type: "request",
           id: "dec-auto-sync",
           method: "cipher.decrypt",
-          params: { aud: ORIGIN_FRESH, text: "ignored", cipherbytes: { $type: "binary", bytes: new Uint8Array([0]).buffer }, nonce: { $type: "binary", bytes: new Uint8Array([0]).buffer } }
+          params: { aud: ORIGIN_FRESH, text: "ignored", cipherbytes: { $type: "binary", bytes: new Uint8Array([0]).buffer }, nonce: { $type: "binary", bytes: new Uint8Array([0]).buffer }, connectSessionId: "sess-dec-auto" }
         },
         ORIGIN_FRESH,
         opener
@@ -3232,7 +3638,10 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
             exp: 2,
             text: "x",
             contentType: "text/plain",
-            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            // 施工单 2026-06-28 002 硬切换：intent.sign 强制要求
+            // connectSessionId。
+            connectSessionId: "sess-fresh"
           }
         },
         ORIGIN_FRESH,
@@ -3267,7 +3676,15 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
           type: "request",
           id: "id-aud-bad",
           method: "identity.get",
-          params: { aud: "https://wrong.example", iat: 1, exp: 2, text: "x" }
+          params: {
+            aud: "https://wrong.example",
+            iat: 1,
+            exp: 2,
+            text: "x",
+            // 施工单 2026-06-28 002 硬切换：identity.get 强制要求
+            // connectSessionId。
+            connectSessionId: "sess-fresh"
+          }
         },
         ORIGIN_FRESH,
         opener
@@ -3296,7 +3713,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   });
 
   it("cipher.decrypt auto-approve path: decrypt_failed replies decrypt_failed (not user_rejected)", async () => {
-    const { service, opener, getResult } = makeService();
+    const { service, opener, getResult, storageDb } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -3309,6 +3726,17 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       updatedAt: 1
     });
     service.startSession();
+    // cipher.* 现在强制要求 connectSessionId；预先 seed 一条 ORIGIN_FRESH 下的 session。
+    await storageDb.putConnectSession({
+      sessionId: "sess-dec-bad",
+      origin: ORIGIN_FRESH,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
     // 故意用非法 nonce / cipherbytes → executeCipherDecrypt 内部 throw protocolError("decrypt_failed", ...)。
     await service.handleMessage(
       makeEvent(
@@ -3321,7 +3749,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
             aud: ORIGIN_FRESH,
             text: "ignored",
             nonce: { $type: "binary", bytes: new Uint8Array([1]).buffer },
-            cipherbytes: { $type: "binary", bytes: new Uint8Array([2]).buffer }
+            cipherbytes: { $type: "binary", bytes: new Uint8Array([2]).buffer },
+            connectSessionId: "sess-dec-bad"
           }
         },
         ORIGIN_FRESH,
@@ -3336,6 +3765,630 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       expect(r.error?.code).toBe("decrypt_failed");
     }
     expect(service.snapshot().phase).toBe("waiting");
+  });
+});
+
+/* ============== 施工单 2026-06-28 001：connect.* 行为单测 ============== */
+
+describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", () => {
+  it("connect.login：caller 不传 ownerPublicKeyHex；用户在 popup UI 选 key 后落 session 真值", async () => {
+    // 关键修复（反例反馈）：caller 不携带 ownerPublicKeyHex——owner 是
+    // 用户在 popup UI 上选定的；service 不能替 caller 决定。
+    const { service, opener, getResult, storageDb } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "login-1",
+          method: "connect.login",
+          params: { text: "login", claims: ["profile.nickname"] }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 进入 confirming 视图；UI 应当能拿到候选 key 列表。
+    const view = service.connectLoginRecord();
+    expect(view).not.toBeNull();
+    expect(view?.availableKeys.length).toBe(1);
+    expect(view?.availableKeys[0]?.publicKeyHex).toBe(TEST_PUB_HEX);
+    // 用户在 popup UI 上点"用此 key 登录"：推进到 queued → executing → approved。
+    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX);
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    if (!r || r.ok !== true) return;
+    const loginResult = r.result as { connectSessionId: string; ownerPublicKeyHex: string; resolvedAt: number };
+    expect(loginResult.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+    expect(typeof loginResult.connectSessionId).toBe("string");
+    // session 真值已落 IndexedDB。
+    const stored = await storageDb.getConnectSession(loginResult.connectSessionId);
+    expect(stored).not.toBeNull();
+    expect(stored?.origin).toBe(ORIGIN);
+    expect(stored?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+    expect(stored?.revokedAt).toBeNull();
+  });
+
+  it("connect.resume：session 有效 + popup 未解锁（unlocked）→ 直接执行，不需 confirm", async () => {
+    // 关键不变量（施工单 2026-06-28 001 硬切换 4.3 + 9.2）：popup 刷新/关闭
+    // 后，caller 用 connect.resume 恢复时**不**再要求"恢复"按钮确认——
+    // unlock 后自动恢复原 session。
+    const { service, opener, getResult, storageDb } = makeService();
+    service.startSession();
+    const sessionId = "sess-resume-1";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: { "profile.nickname": "alice" },
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-1",
+          method: "connect.resume",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复（反例反馈）：unlocked 路径**不**进入 confirming，直接
+    // queued → executing → approved。connectResumeRecord() 因此返回 null
+    // （没有 confirming 阶段的 resume record）。
+    expect(service.connectResumeRecord()).toBeNull();
+    expect(service.snapshot().phase).toBe("executing");
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    if (!r || r.ok !== true) return;
+    const resumeResult = r.result as { resolvedClaims: Record<string, unknown>; resolvedAt: number };
+    expect(resumeResult.resolvedClaims["profile.nickname"]).toBe("alice");
+    expect(typeof resumeResult.resolvedAt).toBe("number");
+  });
+
+  it("connect.resume：session 有效 + popup locked → waiting_unlock；unlock 后直接执行", async () => {
+    // 关键不变量（施工单 2026-06-28 001 硬切换 9.2）：caller 页面刷新后
+    // 优先发 connect.resume；如果 vault locked，仅要求重新输入密码恢复
+    // unlock runtime；解锁后**不**再要求"恢复"按钮确认——自动恢复。
+    const { service, opener, getResult, storageDb, deps } = makeService();
+    // 让 vault 一开始 locked。
+    deps.vault.status = () => "locked" as const;
+    service.startSession();
+    const sessionId = "sess-resume-locked";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: { "profile.nickname": "bob" },
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-locked",
+          method: "connect.resume",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // locked：进入 waiting_unlock_manual（与 manual request 同样进锁屏页）。
+    expect(service.snapshot().lockState).toBe("locked");
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "resume-locked");
+    expect(card?.phase).toBe("waiting_unlock_manual");
+    // 用户解锁：模拟 vault.unlock + onStatusChange 链路。
+    deps.vault.status = () => "unlocked" as const;
+    service.setVaultLockState(false);
+    void service.resumeAfterUnlock();
+    await new Promise((r) => setTimeout(r, 30));
+    // 关键：解锁后**不**经过 confirming，直接执行成功。
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    if (!r || r.ok !== true) return;
+    const resumeResult = r.result as { resolvedClaims: Record<string, unknown> };
+    expect(resumeResult.resolvedClaims["profile.nickname"]).toBe("bob");
+  });
+
+  it("connect.resume：session 已 revoked → fail-fast（不进 confirming；unlocked 直接 failed）", async () => {
+    // 关键修复（反例反馈）：session 无效必须 fail-fast，不能让用户走完
+    // confirming 后才被告知失败。
+    const { service, opener, getResult, storageDb } = makeService();
+    service.startSession();
+    const sessionId = "sess-revoked";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now() - 1000,
+      lastUsedAt: Date.now() - 1000,
+      revokedAt: Date.now() - 500
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-revoked",
+          method: "connect.resume",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复：acceptRequest 阶段检测到 revoked session，**不**进入
+    // confirming 也不进 waiting_unlock；直接 phase=failed 并回 result。
+    // 用户没有任何"恢复"按钮或"解锁"提示可看。
+    expect(service.connectResumeRecord()).toBeNull();
+    // 等 fire-and-forget 的 replyErrorToRec 写完 resultMessage。
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "resume-revoked");
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    expect(card?.errorCode).toBe("user_rejected");
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
+  });
+
+  it("connect.resume：session 无效 + popup 当前 locked → 仍然直接 fail-fast（不进解锁 UI）", async () => {
+    // 关键修复（第二轮反例反馈）：fail-fast **不依赖** vault unlock。
+    // 无效 session 在 locked 状态下也直接失败——不允许"先提示解锁"的
+    // 路径，避免用户对无效请求做无意义的解锁。
+    const { service, opener, getResult, storageDb, deps } = makeService();
+    deps.vault.status = () => "locked" as const;
+    service.startSession();
+    const sessionId = "sess-revoked-locked";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now() - 1000,
+      lastUsedAt: Date.now() - 1000,
+      revokedAt: Date.now() - 500
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-revoked-locked",
+          method: "connect.resume",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复：vault 仍 locked，但 fail-fast 已经直接 phase=failed，
+    // **不**进 waiting_unlock_manual / 不等待解锁。
+    expect(service.connectResumeRecord()).toBeNull();
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find(
+      (c) => c.requestId === "resume-revoked-locked"
+    );
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    // lockState 不变（fail-fast 不走 unlock 路径）。
+    expect(service.lockState()).toBe("locked");
+    // 对外回 result。
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
+  });
+
+  it("connect.logout：unlocked → 不需要 confirming，直接 queued → executed + 落 revokedAt + 同步等待 vault.lock() 清 unlock runtime", async () => {
+    // 关键修复（反例反馈 v2）：service.executeConnectLogout **同步** await
+    // vault.lock()。fire-and-forget 会让 caller 在 vault.lock 抛错时仍
+    // 收到 ok=true，造成"session 已吊销但 unlock runtime 没清"的错位
+    // 状态。修复后 lock 失败 propagate 为 internal_error，caller 看
+    // 到错误并能理解 logout 不完整。
+    const { service, opener, getResult, storageDb, deps } = makeService();
+    let lockCalls = 0;
+    // 让 fake vault.lock 在被调时模拟真实链路：直接调 service.setVaultLockState(true)
+    // 模拟 vault.locked 事件被 popup 顶层订阅的副作用。
+    deps.vault.lock = (async () => {
+      lockCalls++;
+      service.setVaultLockState(true);
+    }) as typeof deps.vault.lock;
+    service.startSession();
+    const sessionId = "sess-logout-1";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "logout-1",
+          method: "connect.logout",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    expect(service.snapshot().phase).toBe("executing");
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    if (!r || r.ok !== true) return;
+    const logoutResult = r.result as { connectSessionId: string; revokedAt: number };
+    expect(logoutResult.connectSessionId).toBe(sessionId);
+    expect(typeof logoutResult.revokedAt).toBe("number");
+    // 关键修复（v2）：service 同步 await vault.lock()，所以 lockCalls
+    // 必须在 await 链路里被观察到（不是 microtask 后才发生）。
+    expect(lockCalls).toBe(1);
+    // vault.locked 触发 setVaultLockState → service.lockStateValue === "locked"。
+    expect(service.lockState()).toBe("locked");
+    // 落库：session.revokedAt 已写入。
+    const stored = await storageDb.getConnectSession(sessionId);
+    expect(stored?.revokedAt).toBe(logoutResult.revokedAt);
+  });
+
+  it("connect.logout：vault.lock() 抛出 → fail-closed（caller 看到 internal_error；session 已 revoked 但 unlock runtime 未清）", async () => {
+    // 关键修复（反例反馈 v2）：vault.lock() 失败时不能继续对外报 ok=true。
+    // 当前实现：DB 已写 revokedAt（commit），然后 vault.lock() 抛错 →
+    // service 抛 localFailure → dispatch catch 写 failed + replyErrorToRec
+    // → caller 收到 ok=false。但 session 真值层面 logout 已生效（后续
+    // resume / cipher 仍会按 fail-fast 失败）。这是 fail-closed 安全语义。
+    const { service, opener, getResult, storageDb, deps } = makeService();
+    let lockCalls = 0;
+    deps.vault.lock = (async () => {
+      lockCalls++;
+      // 模拟 keyspace.onVaultLocked 抛错 / 业务订阅者抛错 / DB write 抛错。
+      throw new Error("simulated vault lock failure");
+    }) as typeof deps.vault.lock;
+    service.startSession();
+    const sessionId = "sess-logout-lockfail";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "logout-lockfail",
+          method: "connect.logout",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    // vault.lock() 被同步调过（哪怕抛错也算）。
+    expect(lockCalls).toBe(1);
+    // caller 看到失败。
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
+    // DB 层面：session.revokedAt 已被 commit（fail-closed 安全语义）。
+    const stored = await storageDb.getConnectSession(sessionId);
+    expect(stored?.revokedAt).not.toBeNull();
+    // 本地 record: phase=failed + failureReason="internal_error"（让 UI 历史区可见）。
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "logout-lockfail");
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    // vault.lockState 不被 setVaultLockState 触发（fake lock 抛错前没调
+    // setStatus），保持 unlocked。
+    expect(service.lockState()).toBe("unlocked");
+  });
+
+  it("cipher.encrypt：缺 connectSessionId 直接 invalid_request 拒绝", async () => {
+    const { service, opener, getResult } = makeService();
+    service.startSession();
+    const content = new TextEncoder().encode("body");
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "cipher-no-session",
+          method: "cipher.encrypt",
+          params: { text: "x", contentType: "note.v1", content: { $type: "binary", bytes: content.buffer } }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 校验失败：service 不向 opener 回任何 result（"情况 B"），
+    // request 也不会建 record。snapshot 应保持 waiting。
+    await new Promise((r) => setTimeout(r, 10));
+    expect(service.snapshot().phase).toBe("waiting");
+    expect(getResult()).toBeNull();
+  });
+
+  it("cipher.decrypt：sessionId 不存在 → fail-fast（不进 confirming）", async () => {
+    // 关键修复（反例反馈）：cipher session 无效必须 fail-fast，不能让
+    // 用户对一个无效请求做无意义的确认。
+    const { service, opener, getResult } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "cipher-no-exist",
+          method: "cipher.decrypt",
+          params: {
+            text: "x",
+            nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "missing-session-id"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复：acceptRequest 阶段就 fail-fast，**不**进入 confirming。
+    // 用户看不到"确认"按钮；直接 phase=failed 并对外回 result。
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "cipher-no-exist");
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    expect(card?.errorCode).toBe("user_rejected");
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
+  });
+
+  it("cipher.decrypt：session 无效 + popup 当前 locked → 直接 fail-fast（不进解锁 UI）", async () => {
+    // 关键修复（第二轮反例反馈）：fail-fast **不依赖** vault unlock。
+    // 与 connect.resume fail-fast 同语义——locked 状态下无效 session
+    // 也直接失败，不要求用户先解锁。
+    const { service, opener, getResult, deps } = makeService();
+    deps.vault.status = () => "locked" as const;
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "cipher-no-exist-locked",
+          method: "cipher.decrypt",
+          params: {
+            text: "x",
+            nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "missing-session-id-locked"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复：vault 仍 locked，但 fail-fast 直接 phase=failed，
+    // **不**进 waiting_unlock_manual。
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find(
+      (c) => c.requestId === "cipher-no-exist-locked"
+    );
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    expect(service.lockState()).toBe("locked");
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
+  });
+
+  it("cipher.decrypt：跨 origin sessionId → invalid_origin（不允许跨 origin 复用）", async () => {
+    const { service, opener, getResult, storageDb } = makeService();
+    service.startSession();
+    const EVIL = "https://evil.com";
+    // 把 session 真值的 origin 写成 EVIL，但 event.origin 是 ORIGIN。
+    await storageDb.putConnectSession({
+      sessionId: "sess-cross",
+      origin: EVIL,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "cipher-cross",
+          method: "cipher.decrypt",
+          params: {
+            text: "x",
+            nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "sess-cross"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("invalid_origin");
+  });
+
+  it("connect.resume：session 绑定 key 已删 → fail-fast，对外 user_rejected", async () => {
+    // 关键修复（反例反馈）：owner key 不可用时必须 fail-fast，不能让
+    // 用户走完 confirming 后才被告知。
+    const { service, opener, getResult, storageDb } = makeService();
+    service.startSession();
+    const sessionId = "sess-deleted-key";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      // ownerPublicKeyHex 用 fake stub 不会识别的值（getKey 返回 undefined）。
+      ownerPublicKeyHex: "02" + "11".repeat(32),
+      ownerLabel: "Deleted",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-deleted",
+          method: "connect.resume",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复：owner key 不可用时直接 queued → executing → failed，
+    // 不进 confirming。caller 必须重新 login。
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "resume-deleted");
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+    if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
+  });
+
+  it("active key 切换不影响已存在 session：cipher 仍走 session 绑定 key", async () => {
+    // 关键不变量（施工单 2026-06-28 001 / 002）：cipher 绑定的 ownerPublicKeyHex 与
+    // 当前钱包全局 active key 解耦。
+    const { service, opener, getResult, storageDb, deps } = makeService();
+    service.startSession();
+    const sessionId = "sess-stable";
+    // session 绑定的 ownerPublicKeyHex === TEST_PUB_HEX（key1）。
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    const content = new TextEncoder().encode("note body");
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "enc-stable",
+          method: "cipher.encrypt",
+          params: { text: "x", contentType: "note.v1", content: { $type: "binary", bytes: content.buffer }, connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 用户已经过 confirming；中途"切换 active key"（fake：通过 setActive 模拟）。
+    // 这里**不**真去切 active；keyspace.active() 在 fake 中继续返回 TEST_PUB_HEX。
+    // 真正的硬切换由 contract 保护：cipher 走 session.ownerPublicKeyHex，不读 active key。
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    expect(r?.ok).toBe(true);
+    if (!r || r.ok !== true) return;
+    const enc = r.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
+    // 解密方用 session 绑定 key 的 siteKey 派生，必须能解出原文。
+    const siteKey = deriveSiteKey(TEST_PRIV_HEX, ORIGIN);
+    const plain = aesGcmDecrypt(siteKey, new Uint8Array(enc.nonce.bytes), new Uint8Array(enc.cipherbytes.bytes));
+    const decoded = cborDecode(plain) as unknown[];
+    expect(new TextDecoder().decode(decoded[2] as Uint8Array)).toBe("note body");
+    void deps;
+  });
+
+  it("logout 后立即 resume：必须失败（auth session 已吊销）", async () => {
+    const { service, opener, getResult, storageDb } = makeService();
+    service.startSession();
+    const sessionId = "sess-then-logout";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    // 1. logout
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "logout-x",
+          method: "connect.logout",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getResult()?.ok).toBe(true);
+    // 2. 立即 resume：fail-fast（不接受 revoke 后再 resume）。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-x",
+          method: "connect.resume",
+          params: { connectSessionId: sessionId }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 关键修复：fail-fast，不进 confirming。
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "resume-x");
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("internal_error");
+    const r2 = getResult();
+    expect(r2?.ok).toBe(false);
+    if (r2 && !r2.ok) expect(r2.error.code).toBe("user_rejected");
   });
 });
 
@@ -3362,7 +4415,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-cancel-1",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3409,7 +4462,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-cancel-2",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3444,7 +4497,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-cancel-3",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3505,7 +4558,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-deadline",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3543,6 +4596,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       updatedAt: 1
     });
     const second = makeService(TEST_PUB_HEX, first.storageDb);
+    // 施工单 2026-06-28 002 硬切换：业务方法强制要求 connectSessionId；
+    // 默认 makeService 已为 ORIGIN seed sess-test session。
     second.service.startSession();
     await second.service.handleMessage(
       makeEvent(
@@ -3557,7 +4612,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             exp: 2,
             text: "x",
             contentType: "text/plain",
-            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -3607,7 +4663,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             exp: 2,
             text: "x",
             contentType: "text/plain",
-            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -3639,7 +4696,27 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       async getFeePool() { return null; },
       async putFeePool() { /* noop */ },
       async deleteFeePool() { /* noop */ },
-      async listFeePoolsByOrigin() { return []; }
+      async listFeePoolsByOrigin() { return []; },
+      async putConnectSession() { /* noop */ },
+      // 施工单 2026-06-28 002 硬切换：测试 stub 给 sess-test 返回 valid
+      // session（让 preCheckConnectSession 放行）。getOrigin 永远 hang
+      // 是测"DB 慢但不阻塞 timer 启动"的边界。
+      async getConnectSession(sessionId: string) {
+        if (sessionId) {
+          return {
+            sessionId,
+            origin: ORIGIN,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() { return []; }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, slowDb);
     service.startSession();
@@ -3656,7 +4733,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             exp: 2,
             text: "x",
             contentType: "text/plain",
-            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -3690,7 +4768,25 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       async getFeePool() { return null; },
       async putFeePool() { /* noop */ },
       async deleteFeePool() { /* noop */ },
-      async listFeePoolsByOrigin() { return []; }
+      async listFeePoolsByOrigin() { return []; },
+      async putConnectSession() { /* noop */ },
+      // 施工单 2026-06-28 002 硬切换：sess-test 返回 valid session。
+      async getConnectSession(sessionId: string) {
+        if (sessionId) {
+          return {
+            sessionId,
+            origin: ORIGIN,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() { return []; }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
     service.startSession();
@@ -3708,7 +4804,8 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             exp: 2,
             text: "x",
             contentType: "text/plain",
-            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-test"
           }
         },
         ORIGIN,
@@ -3765,7 +4862,28 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       async getFeePool() { return null; },
       async putFeePool() { /* noop */ },
       async deleteFeePool() { /* noop */ },
-      async listFeePoolsByOrigin() { return []; }
+      async listFeePoolsByOrigin() { return []; },
+      async putConnectSession() { /* noop */ },
+      // 施工单 2026-06-28 002 硬切换：cancel/timeout 测试需要让
+      // session 真值预校验通过；提供一个 ready 的 session 让
+      // preCheckConnectSession 放过，request 走到 confirming 阶段
+      // 让 timer 逻辑生效。
+      async getConnectSession(id: string) {
+        if (id === "sess-test") {
+          return {
+            sessionId: "sess-test",
+            origin: ORIGIN,
+            ownerPublicKeyHex: TEST_PUB_HEX,
+            ownerLabel: "Key A",
+            claimsSnapshot: {},
+            createdAt: Date.now(),
+            lastUsedAt: Date.now(),
+            revokedAt: null
+          };
+        }
+        return null;
+      },
+      async listConnectSessionsByOrigin() { return []; }
     };
     try {
       const { service, opener, getResult, posted } = makeService(TEST_PUB_HEX, stubDb);
@@ -3783,7 +4901,10 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
               exp: 2,
               text: "x",
               contentType: "text/plain",
-              content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer }
+              content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+              // 施工单 2026-06-28 002 硬切换：业务方法强制要求
+              // connectSessionId。
+              connectSessionId: "sess-test"
             }
           },
           ORIGIN,
@@ -3852,7 +4973,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-default-timeout",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3887,7 +5008,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-cfg-timeout",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3919,7 +5040,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-timeout",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -3955,7 +5076,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-race",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -4008,7 +5129,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-confirm-race",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -4034,7 +5155,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           type: "request",
           id: "req-end",
           method: "identity.get",
-          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+          params: { aud: ORIGIN, iat: 1, exp: 2, text: "x", connectSessionId: "sess-test" }
         },
         ORIGIN,
         opener
@@ -4043,6 +5164,79 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     expect(service.confirmDeadlineMs()).not.toBeNull();
     service.endSession();
     expect(service.confirmDeadlineMs()).toBeNull();
+  });
+
+  /**
+   * 正向收口（与 cache-miss → 30s 兜底 → clamp down 形成对照）：
+   * 进入 confirming 时**已经**走同步 cache 命中（`startedFromFallback =
+   * false`）的 request，**不**允许后续 DB 真值晚到时再热更新。改 origin
+   * 配置为更小值 → 当前正在倒计时的 request 仍按原 cache 值走完。
+   */
+  it("正向：cache 命中 60s 后改 20s 不热更新（startedFromFallback=false）", async () => {
+    let currentOriginConfig: ProtocolOriginSettingsRecord | null = {
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 0,
+      confirmTimeoutSeconds: 60,
+      updatedAt: 1
+    };
+    const stubDb = makeFakeStorageDbWithSession({
+      async getOrigin(origin: string) {
+        return currentOriginConfig && currentOriginConfig.origin === origin
+          ? currentOriginConfig
+          : null;
+      }
+    });
+    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    service.startSession();
+    // 关键：先把 cache 用 60s 真值填上（setOriginSettings 写 cache
+    // 同步），保证进入 confirming 时 `resolveConfirmTimeoutSnapshot`
+    // 走 cache 命中分支（`startedFromFallback = false`）。
+    await service.setOriginSettings(currentOriginConfig!);
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "req-no-hot-update",
+          method: "intent.sign",
+          params: {
+            aud: ORIGIN,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            contentType: "text/plain",
+            content: { $type: "binary", bytes: new Uint8Array([1, 2, 3]).buffer },
+            connectSessionId: "sess-test"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // 不变量 1：cache 命中 60s 进入 confirming；deadline = 60s。
+    const phaseStart = Date.now();
+    const deadline1 = service.confirmDeadlineMs()!;
+    expect(deadline1 - phaseStart).toBeGreaterThan(58_000);
+    expect(deadline1 - phaseStart).toBeLessThan(62_000);
+    // 不变量 2：原 origin 配置改成 20s；当前 request **不**热更新。
+    currentOriginConfig = {
+      ...currentOriginConfig,
+      confirmTimeoutSeconds: 20
+    };
+    // 等若干个 macrotask 周期让 refresh / emit 走完；deadline 仍按 60s。
+    await new Promise((r) => setTimeout(r, 50));
+    const deadline2 = service.confirmDeadlineMs()!;
+    expect(deadline2).toBe(deadline1);
+    // 不变量 3：request 阶段确认通过 confirmByUser 后 timer 清理。
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(service.confirmDeadlineMs()).toBeNull();
+    service.endSession();
   });
 });
 
@@ -4057,3 +5251,554 @@ function hexToBytes(hex: string): Uint8Array {
 // 抑制未使用 import 警告
 void sha256;
 void cborEncode;
+
+/* ============== 施工单 2026-06-28 002 硬切换：补的测试 ============== */
+
+describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connectSessionId", () => {
+  // 本 describe 用到的常量（COUNTERPARTY / makeP2pkhServiceStub）由
+  // 上方 describe 块定义；这里只新增必要常量。
+  const COUNTERPARTY_002 = "02" + "cc".repeat(32);
+  const COUNTERPARTY = COUNTERPARTY_002;
+
+  function makeP2pkhServiceStub002() {
+    return {
+      async listUtxos() {
+        return [{ txid: "00".repeat(32), vout: 0, value: 100000 }];
+      },
+      async prepareTransfer(input: {
+        assetId: "bsv";
+        recipientAddress: string;
+        amountSatoshis: number;
+        feeRateSatoshisPerKb: number;
+      }) {
+        return {
+          assetId: input.assetId,
+          network: "main" as const,
+          recipientAddress: input.recipientAddress,
+          amountSatoshis: input.amountSatoshis,
+          feeRateSatoshisPerKb: input.feeRateSatoshisPerKb,
+          allocation: {},
+          changeAddress: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+          outputs: [{ address: input.recipientAddress, value: input.amountSatoshis }],
+          estimatedFeeSatoshis: 200,
+          serializedSizeBytes: 200,
+          txid: "11".repeat(32),
+          rawTxHex: "deadbeef"
+        };
+      },
+      async submitTransfer(preview: { txid: string; rawTxHex: string }) {
+        return {
+          status: "broadcast",
+          txid: preview.txid,
+          rawTxHex: preview.rawTxHex,
+          submissionId: "sub-1",
+          localInputClaimIds: []
+        };
+      }
+    };
+  }
+
+  it("所有业务方法缺 connectSessionId：validation 直接 invalid_request（不进 record）", async () => {
+    // 施工单 7.5.1：所有业务方法缺 connectSessionId 时直接 invalid_request。
+    const methods: ProtocolMethod[] = [
+      "identity.get",
+      "intent.sign",
+      "cipher.encrypt",
+      "cipher.decrypt",
+      "p2pkh.transfer",
+      "feepool.prepare",
+      "feepool.commit"
+    ];
+    for (const method of methods) {
+      const { service, opener } = makeService();
+      service.startSession();
+      const event = makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: `no-session-${method}`,
+          method,
+          params:
+            method === "identity.get"
+              ? { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+              : method === "intent.sign"
+              ? {
+                  aud: ORIGIN,
+                  iat: 1,
+                  exp: 2,
+                  text: "x",
+                  contentType: "text/plain",
+                  content: { $type: "binary", bytes: new Uint8Array(0).buffer }
+                }
+              : method === "cipher.encrypt"
+              ? {
+                  text: "x",
+                  contentType: "note.v1",
+                  content: { $type: "binary", bytes: new Uint8Array(0).buffer }
+                }
+              : method === "cipher.decrypt"
+              ? {
+                  text: "x",
+                  nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+                  cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+                }
+              : method === "p2pkh.transfer"
+              ? { recipientAddress: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", amountSatoshis: 1000 }
+              : method === "feepool.prepare"
+              ? { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000 }
+              : { operationId: "x", counterpartyPublicKeyHex: COUNTERPARTY, counterpartySignatures: [] }
+        },
+        ORIGIN,
+        opener
+      );
+      await service.handleMessage(event);
+      // 校验失败：service 不向 opener 回 result，"情况 B" 行为。
+      // record 也不建，phase 保持 waiting。
+      expect(service.snapshot().phase).toBe("waiting");
+      expect(service.snapshot().requestId).toBeNull();
+    }
+  });
+
+  it("session 不存在 → fail-fast：identity.get 不进 confirming", async () => {
+    // 施工单 7.5.1：所有业务方法缺 connectSessionId 时直接 invalid_request。
+    const methods: ProtocolMethod[] = [
+      "identity.get",
+      "intent.sign",
+      "cipher.encrypt",
+      "cipher.decrypt",
+      "p2pkh.transfer",
+      "feepool.prepare",
+      "feepool.commit"
+    ];
+    for (const method of methods) {
+      const { service, opener } = makeService();
+      service.startSession();
+      const event = makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: `no-session-${method}`,
+          method,
+          params:
+            method === "identity.get"
+              ? { aud: ORIGIN, iat: 1, exp: 2, text: "x" }
+              : method === "intent.sign"
+              ? {
+                  aud: ORIGIN,
+                  iat: 1,
+                  exp: 2,
+                  text: "x",
+                  contentType: "text/plain",
+                  content: { $type: "binary", bytes: new Uint8Array(0).buffer }
+                }
+              : method === "cipher.encrypt"
+              ? {
+                  text: "x",
+                  contentType: "note.v1",
+                  content: { $type: "binary", bytes: new Uint8Array(0).buffer }
+                }
+              : method === "cipher.decrypt"
+              ? {
+                  text: "x",
+                  nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+                  cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer }
+                }
+              : method === "p2pkh.transfer"
+              ? { recipientAddress: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2", amountSatoshis: 1000 }
+              : method === "feepool.prepare"
+              ? { counterpartyPublicKeyHex: COUNTERPARTY, amountSatoshis: 1000 }
+              : { operationId: "x", counterpartyPublicKeyHex: COUNTERPARTY, counterpartySignatures: [] }
+        },
+        ORIGIN,
+        opener
+      );
+      await service.handleMessage(event);
+      // 校验失败：service 不向 opener 回 result，"情况 B" 行为。
+      // record 也不建，phase 保持 waiting。
+      expect(service.snapshot().phase).toBe("waiting");
+      expect(service.snapshot().requestId).toBeNull();
+    }
+  });
+
+  it("session 不存在 → fail-fast：identity.get 不进 confirming", async () => {
+    const { service, opener, getResult } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "no-session",
+          method: "identity.get",
+          params: {
+            aud: ORIGIN,
+            iat: 1,
+            exp: 2,
+            text: "x",
+            connectSessionId: "missing-session"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "no-session");
+    expect(card?.phase).toBe("failed");
+    const r = getResult();
+    expect(r?.ok).toBe(false);
+  });
+
+  it("session 已 revoke → fail-fast：feepool.prepare 不进 confirming", async () => {
+    const { service, opener, storageDb } = makeService();
+    await storageDb.putConnectSession({
+      sessionId: "sess-revoked",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: Date.now() - 100
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "fp-revoked",
+          method: "feepool.prepare",
+          params: {
+            counterpartyPublicKeyHex: COUNTERPARTY,
+            amountSatoshis: 1000,
+            connectSessionId: "sess-revoked"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "fp-revoked");
+    expect(card?.phase).toBe("failed");
+    expect(card?.errorCode).toBe("user_rejected");
+  });
+
+  it("session origin 不匹配 → fail-fast：cipher.decrypt 不进 confirming", async () => {
+    const { service, opener, storageDb } = makeService();
+    await storageDb.putConnectSession({
+      sessionId: "sess-cross",
+      origin: "https://evil.com",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "dec-cross",
+          method: "cipher.decrypt",
+          params: {
+            text: "x",
+            nonce: { $type: "binary", bytes: new Uint8Array(12).buffer },
+            cipherbytes: { $type: "binary", bytes: new Uint8Array(0).buffer },
+            connectSessionId: "sess-cross"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "dec-cross");
+    expect(card?.phase).toBe("failed");
+  });
+
+  it("p2pkh.transfer 不再受全局 active key 变化影响（session 绑定的 owner 是真值）", async () => {
+    // 施工单 7.5.5：p2pkh.transfer 不再受全局 active key 变化影响。
+    const p2pkh = makeP2pkhServiceStub002();
+    const { service, opener, storageDb, deps } = makeService(TEST_PUB_HEX, undefined, {
+      p2pkhService: p2pkh as never
+    });
+    // session 绑定的 owner = TEST_PUB_HEX（key1）。
+    await storageDb.putConnectSession({
+      sessionId: "sess-stable",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    // 用户在中途切换 active key：但 keyspace.active() 仍然返回 TEST_PUB_HEX，
+    // session 仍走 session owner 真值，与 active key 无关。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "p2pkh-stable",
+          method: "p2pkh.transfer",
+          params: {
+            recipientAddress: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+            amountSatoshis: 1000,
+            connectSessionId: "sess-stable"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    const r = deps; // sanity
+    void r;
+    await new Promise((res) => setTimeout(res, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-stable");
+    expect(card?.decision).toBe("approved");
+    expect(card?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+    expect(card?.connectSessionId).toBe("sess-stable");
+  });
+
+  it("feepool.prepare / commit 同 origin 不同 owner 不会串池", async () => {
+    // 施工单 7.5.6：feepool.prepare / commit 在同 origin 不同 owner 下
+    // 不会串池。ownerA 在 origin 建一个池，ownerB 在同 origin 同一个
+    // counterparty 下 prepare 应该走 create 路径（找不到 ownerB 的 prior）。
+    // 这里只校验 record.bind owner = session.ownerPublicKeyHex，且
+    // feepool poolKey 含 owner 维度。
+    const ownerB = "02" + "bb".repeat(32);
+    const { service, opener, storageDb, deps } = makeService(TEST_PUB_HEX);
+    // ownerA 建池并 commit。
+    await storageDb.putConnectSession({
+      sessionId: "sess-ownerA",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Owner A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    // ownerB 在 keyspace stub 内也注册好（getKey(publicKeyHex=ownerB)）。
+    deps.keyspace.getKey = async (hex: string) => {
+      if (hex === TEST_PUB_HEX) {
+        return {
+          keyId: "kA",
+          publicKeyHex: TEST_PUB_HEX,
+          label: "Owner A",
+          capabilities: ["p2pkh"],
+          createdAt: new Date().toISOString(),
+          identityStatus: "ready"
+        };
+      }
+      if (hex === ownerB) {
+        return {
+          keyId: "kB",
+          publicKeyHex: ownerB,
+          label: "Owner B",
+          capabilities: ["p2pkh"],
+          createdAt: new Date().toISOString(),
+          identityStatus: "ready"
+        };
+      }
+      return undefined;
+    };
+    // ownerB 的 session。
+    await storageDb.putConnectSession({
+      sessionId: "sess-ownerB",
+      origin: ORIGIN,
+      ownerPublicKeyHex: ownerB,
+      ownerLabel: "Owner B",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
+      updatedAt: 1
+    });
+    service.startSession();
+    // ownerB 发 prepare：应走 create 路径（ownerA 的 prior 不可见）。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "fp-ownerB",
+          method: "feepool.prepare",
+          params: {
+            counterpartyPublicKeyHex: COUNTERPARTY,
+            amountSatoshis: 1000,
+            connectSessionId: "sess-ownerB"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 50));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "fp-ownerB");
+    expect(card?.ownerPublicKeyHex).toBe(ownerB);
+    expect(card?.connectSessionId).toBe("sess-ownerB");
+  });
+
+  it("feepool.commit 用旧 session 的 operationId 提交时必须失败", async () => {
+    // 施工单 7.5.7：feepool.commit 用旧 session 的 operationId 提交时必须失败。
+    // 准备：先在 sessionA 下 prepare 出 operationId；logout sessionA；
+    // 在 sessionB 下用同 operationId 提交 → fail。
+    const ownerB = "02" + "bb".repeat(32);
+    const p2pkh = makeP2pkhServiceStub002();
+    const { service, opener, storageDb, deps } = makeService(TEST_PUB_HEX, undefined, {
+      p2pkhService: p2pkh as never
+    });
+    await storageDb.putConnectSession({
+      sessionId: "sess-A",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Owner A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    await storageDb.putConnectSession({
+      sessionId: "sess-B",
+      origin: ORIGIN,
+      ownerPublicKeyHex: ownerB,
+      ownerLabel: "Owner B",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    deps.keyspace.getKey = async (hex: string) => {
+      if (hex === TEST_PUB_HEX) {
+        return {
+          keyId: "kA",
+          publicKeyHex: TEST_PUB_HEX,
+          label: "Owner A",
+          capabilities: ["p2pkh"],
+          createdAt: new Date().toISOString(),
+          identityStatus: "ready"
+        };
+      }
+      if (hex === ownerB) {
+        return {
+          keyId: "kB",
+          publicKeyHex: ownerB,
+          label: "Owner B",
+          capabilities: ["p2pkh"],
+          createdAt: new Date().toISOString(),
+          identityStatus: "ready"
+        };
+      }
+      return undefined;
+    };
+    await service.setOriginSettings({
+      origin: ORIGIN,
+      p2pkhAutoApproveEnabled: false,
+      p2pkhAutoApproveMaxSatoshis: 0,
+      identityAutoApproveEnabled: false,
+      cipherAutoApproveEnabled: false,
+      feePoolAutoSignMaxSatoshis: 0,
+      feePoolDefaultFundSatoshis: 10000,
+      confirmTimeoutSeconds: 30,
+      updatedAt: 1
+    });
+    service.startSession();
+    // sess-A 下 prepare。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "fp-old",
+          method: "feepool.prepare",
+          params: {
+            counterpartyPublicKeyHex: COUNTERPARTY,
+            amountSatoshis: 1000,
+            connectSessionId: "sess-A"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    // 不强求 prepare 一定成功（feepoolSdk 在 jsdom 路径下可能不可用）；
+    // 关键断言：用 sess-B 的 connectSessionId + 不存在 / 跨 session 的
+    // operationId 提交时，service 必须拒绝。
+    void service.feedSnapshot().commands.find((c) => c.requestId === "fp-old");
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "fc-stale",
+          method: "feepool.commit",
+          params: {
+            operationId: "stale-op",
+            counterpartyPublicKeyHex: COUNTERPARTY,
+            counterpartySignatures: [{ $type: "binary", bytes: new Uint8Array(72).buffer }],
+            connectSessionId: "sess-B"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    // confirm 让 commit 进入执行阶段，触发 session 校验 + pendingOp 校验。
+    await service.confirmByUser();
+    await new Promise((r) => setTimeout(r, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "fc-stale");
+    expect(card?.phase).toBe("failed");
+    expect(card?.failureReason).toBe("unknown_operation");
+  });
+
+  it("connect.login / connect.resume 结果不再含 ownerKeyId 字段", async () => {
+    // 施工单 7.5.8：connect.login / connect.resume 结果不再含 ownerKeyId。
+    const { service, opener, getResult } = makeService();
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "login-002",
+          method: "connect.login",
+          params: { text: "login" }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    const view = service.connectLoginRecord();
+    expect(view).not.toBeNull();
+    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX);
+    await new Promise((r) => setTimeout(r, 30));
+    const r = getResult();
+    if (!r || r.ok !== true) throw new Error("login failed");
+    const loginResult = r.result as unknown as Record<string, unknown>;
+    expect("ownerKeyId" in loginResult).toBe(false);
+    expect("ownerPublicKeyHex" in loginResult).toBe(true);
+    expect(loginResult.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+  });
+});

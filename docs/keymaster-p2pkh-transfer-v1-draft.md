@@ -4,11 +4,15 @@
 
 ## 能力
 
-- **主网 BSV P2PKH 受控转账**：从当前 active key 对应的主网 P2PKH
-  余额中，向一个主网 P2PKH 地址转账指定 satoshis。
+- **主网 BSV P2PKH 受控转账**：从 session 绑定 owner 对应的主网
+  P2PKH 余额中，向一个主网 P2PKH 地址转账指定 satoshis。
+  施工单 2026-06-28 002 硬切换：资金 owner 取自 `connectSession.ownerPublicKeyHex`，
+  **不**读取钱包全局 active key。
 - 受控含义：site 不允许自带确认文案 / 不允许传 assetId / network /
   aud / text / feeRate / allowUnconfirmed / rawTx / changeAddress 等
   字段；Keymaster 自己做决策。
+- 必须携带 `connectSessionId`（002 硬切换）；缺该字段直接
+  `invalid_request` 拒绝，**不**fallback 到 active key。
 
 ## 请求
 
@@ -17,6 +21,7 @@ type P2pkhTransferParams = {
   recipientAddress: string;   // 主网 P2PKH base58check（version 0x00）
   amountSatoshis: number;     // 正整数
   feeRateSatoshisPerKb?: number; // 可选；>= 1
+  connectSessionId: string;   // 必填（002 硬切换）
 };
 ```
 

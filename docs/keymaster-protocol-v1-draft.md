@@ -9,6 +9,7 @@
 - [Cipher](./keymaster-cipher-v1-draft.md)
 - [P2PKH.Transfer](./keymaster-p2pkh-transfer-v1-draft.md)
 - [FeePool](./keymaster-feepool-v1-draft.md)
+- [Connect](./keymaster-connect-v1-draft.md)
 
 拆分缘由：
 
@@ -28,6 +29,9 @@
   自动对外暴露真实原因。
 - `feepool.prepare` / `feepool.commit` 是双端费用池两步方法族；不允许
   单步 `feepool.transfer`，也不允许中间子会话 / 心跳 / MessageChannel。
+- `connect.login` / `connect.resume` / `connect.logout` 是施工单
+  2026-06-28 001 硬切换新增的 connect session 方法族；定义在
+  [Connect](./keymaster-connect-v1-draft.md)。
 - 各草案都复用公共约定中的 transport / `BinaryField` / popup + `postMessage`
   通信模型；不要在子文档里再次定义这些。
 
@@ -40,8 +44,11 @@
 - `p2pkh.transfer`
 - `feepool.prepare`
 - `feepool.commit`
+- `connect.login`
+- `connect.resume`
+- `connect.logout`
 
-七个方法都：
+十个方法都：
 
 - 走同一套 transport（popup + `postMessage` + JS 对象 + `BinaryField`）。
 - 必须由 Keymaster popup 处理；Keymaster popup 协议入口固定为
@@ -53,7 +60,20 @@
   `feepool.prepare` / `feepool.commit` 默认走人工确认；但 origin 配置了
   `feePoolAutoSignMaxSatoshis` + `amountSatoshis <= feePoolAutoSignMaxSatoshis`
   时走 auto-sign（同 p2pkh.autoApprove，跳过 ConfirmView）。
-  不存在"静默获取"模式。
+- `connect.login` / `connect.resume` / `connect.logout` 走"会话级"语义
+  （不是单条业务请求的真值），详见 [Connect](./keymaster-connect-v1-draft.md)：
+  - `connect.login`：首次显式登录 + 用户选 key + 落 session 真值；
+  - `connect.resume`：caller 持 sessionId，恢复会话（**不**重新选 key）；
+  - `connect.logout`：吊销 session。
+- **所有外部业务方法的执行身份都必须走 `connectSessionId`**（施工单
+  2026-06-28 002 硬切换）：`identity.get` / `intent.sign` / `cipher.encrypt` /
+  `cipher.decrypt` / `p2pkh.transfer` / `feepool.prepare` / `feepool.commit`
+  全部强制要求 `connectSessionId` 入参；不允许 fallback 到钱包全局 active key。
+  owner 唯一真值 = session 绑定的 `ownerPublicKeyHex`。
+  `connect.login` 是唯一不要求 `connectSessionId` 的入口方法（它本身负责
+  建 session）。
+- `connect.*` 与所有外部业务方法都不存在"静默获取"模式——必须由 caller
+  显式走 `connect.login` 建会话。
 
 ## Popup 连接状态与业务请求结果
 

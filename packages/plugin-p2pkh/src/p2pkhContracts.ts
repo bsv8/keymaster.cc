@@ -120,9 +120,25 @@ export interface P2pkhHistoryItem {
   missingObservationCount?: number;
 }
 
-/** UTXO 过滤条件。 */
+/**
+ * UTXO 过滤条件。
+ *
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：
+ *   - `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值；plugin
+ *     内部解析为 `keyId` 后再用 `keyId` 过滤 UTXO。
+ *   - `keyId` 仍保留为内部维度：plugin 内部某些路径（如后台同步、
+ *     旧调用方）直接拿 vault keyId 走选币，避免每次都查 keyspace。
+ *   - 两者**不**冲突：若两者都给，则 `keyId` 优先（plugin 内部已
+ *     解析过 owner，避免重复解析）。
+ */
 export interface P2pkhUtxoFilter {
   assetId?: P2pkhAssetId;
+  /**
+   * session / caller 视角的 owner public key hex（施工单 002 硬切换）。
+   * 缺省 = "取 active key namespace"是兜底路径，**只**为兼容旧调用。
+   * 002 之后所有调用方都应传 owner 或 keyId。
+   */
+  ownerPublicKeyHex?: string;
   keyId?: string;
   resourceId?: string;
 }
@@ -270,22 +286,48 @@ export interface P2pkhRecentCommit {
 }
 
 /**
- * 转移输入参数（硬切换 001）。
- * 设计缘由：移除 `allowUnconfirmed`。所有未在本地输入占用中
- * 占用的未花费 UTXO 都会参与选币；WOC 已看不到的输入也不会进入。
+ * 转移输入参数（硬切换 001 + 施工单 2026-06-28 002 硬切换）。
+ *
+ * 设计缘由：
+ *   - 移除 `allowUnconfirmed`。所有未在本地输入占用中占用的未花费
+ *     UTXO 都会参与选币；WOC 已看不到的输入也不会进入。
+ *   - `ownerPublicKeyHex` 是**强制**输入字段（002 硬切换）。UTXO
+ *     选币、签名 key、resourceId 全部按该 owner 走；不允许 fallback
+ *     到当前 active key。Plugin-protocol 调用时永远传 session 绑定
+ *     owner；老路径（widget / overview）保留 `keyId` 作为兜底。
+ *   - `keyId` 仍保留：plugin 内部已知 owner 时直接传 keyId 走"已
+ *     解析"路径，避免每次都查 keyspace。
  */
 export interface P2pkhTransferInput {
   assetId: P2pkhAssetId;
-  keyId: string;
+  /**
+   * session / caller 视角的 owner public key hex。
+   * 002 之后所有外部调用方都应填该字段；老路径（widget / overview）
+   * 仍允许只传 `keyId` 走 active-key 兜底。
+   */
+  ownerPublicKeyHex?: string;
+  /**
+   * vault 内部借用句柄。plugin 内部直接给 keyId 走"已解析"路径；
+   * ownerPublicKeyHex 与 keyId 二选一即可（**不**强制都填）。
+   */
+  keyId?: string;
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb?: number;
 }
 
-/** 转移预览结果。 */
+/**
+ * 转移预览结果。
+ *
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：`ownerPublicKeyHex` 透传到
+ * preview 上，让 submit 阶段可以校验 resource / 签名 key 与该 owner
+ * 一致——owner 变了就拒绝广播。
+ */
 export interface P2pkhTransferPreview {
   assetId: P2pkhAssetId;
   network: BsvNetwork;
+  ownerPublicKeyHex?: string;
+  keyId?: string;
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb: number;

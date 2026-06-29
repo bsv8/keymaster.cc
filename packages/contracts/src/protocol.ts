@@ -1,7 +1,7 @@
 // packages/contracts/src/protocol.ts
 // Keymaster 对外协议 V1 公共契约。
 //
-// 设计缘由（施工单 001 + 002 + 2026-06-27 002 硬切换）：
+// 设计缘由（施工单 001 + 002 + 2026-06-27 002 硬切换 + 2026-06-28 002 硬切换）：
 //   - 协议方法集：identity.get / intent.sign / cipher.encrypt / cipher.decrypt
 //     （签名 + 加解密），p2pkh.transfer（受控转账），feepool.prepare /
 //     feepool.commit（双端费用池两步方法族）。所有方法走同一套 transport +
@@ -15,8 +15,8 @@
 //   - `identityEnvelope` / `signedEnvelope` 是最终真值字节（Deterministic CBOR），
 //     不是"待调用方重编码的对象"；调用方验签时**直接**对这些字节验签。
 //   - `signature.bytes` 固定为 compact 64-byte secp256k1（r || s），不允许双格式。
-//   - `event.origin` 在 cipher 路径上**原样**参与站点密钥派生，不做归一化；
-//     origin settings / fee pool 持久化也按 exact origin 归档。
+//   - `event.origin` 在 cipher / 业务方法上**原样**参与站点密钥派生 / 费用池
+//     归档，不做归一化；origin settings / fee pool 持久化也按 exact origin 归档。
 //   - 所有错误信息走英文；UI 展示由调用方自己翻译。
 //   - `p2pkh.transfer` / `feepool.*` 涉及本地敏感信息（余额 / 池状态 / 失败原因）；
 //     真实原因只写本地历史；对外统一 `user_rejected`，**不**暴露真实原因。
@@ -31,6 +31,37 @@
 //       同类 request 在活请求区不复用卡位；UI 不应再按索引展开。
 //       历史加载必须按 recordId 合并（内存活记录覆盖 DB 旧记录），
 //       批次隔离（origin + token）避免旧 origin 异步回写新 origin 视图。
+//   - 施工单 2026-06-28 001 硬切换：connect session 作为持续登录 caller
+//     的正式真值。
+//       - 新增 connect.login / connect.resume / connect.logout 三个 method；
+//       - cipher.encrypt / cipher.decrypt 强制要求 `connectSessionId`
+//         输入字段；不再读取钱包全局 active key。
+//       - connect session 持久化到 `keymaster.protocol` 的
+//         `connectSessions` store（DB version 升 4）。
+//       - popup unlock runtime 仅存在于 popup 当前文档内存；popup
+//         刷新 / 关闭后立即失效，caller 通过 `connect.resume` 补 unlock
+//         即可，不需要重新登录。
+//   - 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于 connectSessionId：
+//       - identity.get / intent.sign / cipher.encrypt / cipher.decrypt /
+//         p2pkh.transfer / feepool.prepare / feepool.commit 全部强制要求
+//         `connectSessionId` 入参；`connect.login` 是唯一不要求 sessionId
+//         的入口方法。
+//       - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**允许
+//         出现在 contract / session record / request record / result payload /
+//         fee pool key / pending operation key / service 分支判断里。
+//       - `ConnectSessionRecord` / `ConnectLoginResult` / `ConnectResumeResult`
+//         都已移除 `ownerKeyId` 字段。
+//       - `ProtocolFeePoolRecord` 的持久化 key 维度补 `ownerPublicKeyHex`：
+//         `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`，
+//         同 origin 不同 owner 不再串池。
+//       - `ProtocolCommandRecord` 上的 owner snapshot 字段统一改为
+//         `ownerPublicKeyHex` + 新增 `connectSessionId`（业务方法必填）。
+//       - 所有业务 request 在 accept 阶段即预校验 session 真值
+//         （fail-fast：session 不存在 / 已 revoke / origin 不匹配 /
+//         owner key 不 ready → 直接 phase=failed，对外回 user_rejected
+//         / invalid_origin；不进 waiting_unlock / confirming UI）。
+//       - 业务执行阶段再次校验 session 仍有效（logout 后同 session 下挂
+//         的旧 request 后续执行必须失败；不允许"老 session 复用新 key"）。
 
 /**
  * 二进制字段。V1 协议里所有二进制内容（密文、签名、信封真值、文件本体、
@@ -62,7 +93,10 @@ export const PROTOCOL_METHODS = [
   "cipher.decrypt",
   "p2pkh.transfer",
   "feepool.prepare",
-  "feepool.commit"
+  "feepool.commit",
+  "connect.login",
+  "connect.resume",
+  "connect.logout"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -205,7 +239,17 @@ export type ProtocolMessage =
 
 /* ============== identity.get ============== */
 
-/** identity.get 请求参数。 */
+/**
+ * identity.get 请求参数。
+ *
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：
+ *   - `connectSessionId` 是**强制**输入字段；所有外部业务方法都属于某个
+ *     `connectSessionId`（仅 `connect.login` 例外）。缺该字段直接
+ *     `invalid_request` 拒绝。
+ *   - `identity.get` 不再是"推荐登录入口"；登录走 `connect.login`。
+ *     `identity.get` 是"会话内身份断言能力"——`subject` 取自 session 绑
+ *     定 owner，不是当前钱包 active key。
+ */
 export interface IdentityGetParams {
   /** 目标站点 origin；必须等于 `event.origin`，否则拒绝。 */
   aud: string;
@@ -221,6 +265,11 @@ export interface IdentityGetParams {
    * - 不存在的 claim 直接省略，不报错。
    */
   claims?: string[];
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
+   */
+  connectSessionId: string;
 }
 
 /** identity.get 解析后的 claim 真值。 */
@@ -247,7 +296,14 @@ export interface IdentityGetResult {
 
 /* ============== intent.sign ============== */
 
-/** intent.sign 请求参数。 */
+/**
+ * intent.sign 请求参数。
+ *
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：
+ *   - `connectSessionId` 是**强制**输入字段；签名主体公钥取自 session
+ *     绑定的 owner，不再读取钱包全局 active key。
+ *   - 旧叙事"登录场景推荐 identity.get"已废弃；登录走 `connect.login`。
+ */
 export interface IntentSignParams {
   /** 目标站点 origin；必须等于 `event.origin`，否则拒绝。 */
   aud: string;
@@ -261,6 +317,11 @@ export interface IntentSignParams {
   contentType: string;
   /** 调用方准备好的最终二进制内容。允许为空字节。 */
   content: BinaryField;
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
+   */
+  connectSessionId: string;
 }
 
 /** intent.sign 成功结果。 */
@@ -273,7 +334,16 @@ export interface IntentSignResult {
 
 /* ============== cipher.encrypt ============== */
 
-/** cipher.encrypt 请求参数。 */
+/**
+ * cipher.encrypt 请求参数。
+ *
+ * 设计缘由（施工单 2026-06-28 001 硬切换）：
+ *   - `connectSessionId` 是**强制**输入字段；cipher 不再读取钱包全局
+ *     active key，必须通过 sessionId 找到绑定 key。
+ *   - 缺 `connectSessionId` 直接 `invalid_request` 拒绝；不允许 fallback
+ *     到当前 active key。
+ *   - cipher 仍**不**对外暴露签名真值 envelope；返回 nonce + cipherbytes。
+ */
 export interface CipherEncryptParams {
   /** 人类可读确认文案。 */
   text: string;
@@ -281,6 +351,11 @@ export interface CipherEncryptParams {
   contentType: string;
   /** 业务字节本体。 */
   content: BinaryField;
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**；service 通过此 id
+   * 找到绑定 key，不允许 fallback 到 active key。
+   */
+  connectSessionId: string;
 }
 
 /** cipher.encrypt 成功结果。 */
@@ -293,7 +368,12 @@ export interface CipherEncryptResult {
 
 /* ============== cipher.decrypt ============== */
 
-/** cipher.decrypt 请求参数。 */
+/**
+ * cipher.decrypt 请求参数。
+ *
+ * 设计缘由：与 `cipher.encrypt` 对称——`connectSessionId` 是强制输入
+ * 字段；不允许 fallback 到 active key。
+ */
 export interface CipherDecryptParams {
   /** 人类可读确认文案。 */
   text: string;
@@ -301,6 +381,11 @@ export interface CipherDecryptParams {
   nonce: BinaryField;
   /** 加密时保存的密文字节。 */
   cipherbytes: BinaryField;
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**；service 通过此 id
+   * 找到绑定 key，不允许 fallback 到 active key。
+   */
+  connectSessionId: string;
 }
 
 /** cipher.decrypt 成功结果。 */
@@ -316,7 +401,7 @@ export interface CipherDecryptResult {
 /**
  * `p2pkh.transfer` 请求参数。
  *
- * 设计缘由（施工单 002 硬切换）：
+ * 设计缘由（施工单 002 硬切换 + 施工单 2026-06-28 002 硬切换）：
  *   - 本次只支持 `bsv` 主网 P2PKH 转账。不引入 assetId / network / 多币种
  *     / 多网络协商。
  *   - site 不允许传 `text` / `confirmMessage`：确认文案由 Keymaster 自己
@@ -326,6 +411,9 @@ export interface CipherDecryptResult {
  *   - `feeRateSatoshisPerKb` 可选；缺省时由 service 走一个保守默认值。
  *   - amountSatoshis 是整数 satoshis，不接受小数；feeSatoshis 在 result 里
  *     回。
+ *   - `connectSessionId` 是**强制**输入字段（施工单 2026-06-28 002 硬切换）：
+ *     资金 owner 取自 session 绑定 owner，**不**读取全局 active key。
+ *     旧 session 失效时直接 fail-fast，不再静默 fallback 到 active key。
  */
 export interface P2pkhTransferParams {
   /** 主网 P2PKH 地址（base58check，version 0x00）；testnet 直接 invalid_request。 */
@@ -334,6 +422,11 @@ export interface P2pkhTransferParams {
   amountSatoshis: number;
   /** 可选 fee rate（sat/kB）。>= 1。 */
   feeRateSatoshisPerKb?: number;
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * service 通过此 id 找到绑定 key，不允许 fallback 到 active key。
+   */
+  connectSessionId: string;
 }
 
 /** `p2pkh.transfer` 成功结果。 */
@@ -367,12 +460,14 @@ export type ProtocolFeePoolAction = "create" | "spend" | "close_and_recreate";
 /**
  * `feepool.prepare` 请求参数。
  *
- * 设计缘由（施工单 002 硬切换 + 收尾反馈）：
+ * 设计缘由（施工单 002 硬切换 + 收尾反馈 + 施工单 2026-06-28 002 硬切换）：
  *   - site **不**传 `action` / `lockHeight` 等策略字段；action（create /
  *     spend / close_and_recreate）和 lockHeight 由 Keymaster 单边决定。
  *   - site 只提交：
  *       - `counterpartyPublicKeyHex`：对端公钥。
  *       - `amountSatoshis`：**本次想转给对端的金额**（satoshis）。
+ *       - `connectSessionId`：本次 transfer 所属 connect sessionId；service
+ *         通过 session 找到绑定 owner。**必填**。
  *   - `amountSatoshis` 在所有 action 下语义一致：本次 transfer 的金额。
  *     池大小由 `ProtocolOriginSettingsRecord.feePoolDefaultFundSatoshis`
  *     决定（per-origin 配置）。
@@ -391,6 +486,12 @@ export interface FeepoolPrepareParams {
   counterpartyPublicKeyHex: string;
   /** 正整数 satoshis；本次想转给对端的金额（三种 action 语义一致）。 */
   amountSatoshis: number;
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * feepool 是按 (origin + ownerPublicKeyHex + counterpartyPublicKeyHex)
+   * 三个维度归档的；不同 owner 不会串池。
+   */
+  connectSessionId: string;
 }
 
 /**
@@ -464,12 +565,22 @@ export interface FeepoolPrepareResult {
  * V4 收口：**移除 `baseCounterpartySignatures`**。base tx 仅由 client 用
  * 自己 P2PKH UTXO funding 并签名；server 不参与 base tx 的签名（multisig
  * output 是被创建的，不是被花费的）。所有 server sig 都在 B-Tx 上。
+ *
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：
+ *   - `connectSessionId` 是**强制**输入字段；`feepool.commit` 必须按
+ *     `connectSessionId + origin + ownerPublicKeyHex` 校验 pending op，
+ *     不允许跨 session / 跨 owner 复用 operationId。
  */
 export interface FeepoolCommitParams {
   /** 由 `feepool.prepare` 返回的 operationId；只在本 popup 会话内有效。 */
   operationId: string;
   /** 33-byte compressed secp256k1 公钥 hex。 */
   counterpartyPublicKeyHex: string;
+  /**
+   * 由 `connect.login` 返回的 sessionId。**必填**。
+   * `feepool.commit` 校验 operation 与当前 session/owner/origin 一致。
+   */
+  connectSessionId: string;
   /**
    * 主 B-Tx 草稿的 server sig。
    * - create：initial spend sig（由 SDK `clientVerifyServerSpendSig` 验）。
@@ -581,7 +692,7 @@ export interface ProtocolOriginSettingsRecord {
 /**
  * 费用池持久化记录。
  *
- * 设计缘由（V4 收口）：feepool 真实模型是两笔 tx：
+ * 设计缘由（V4 收口 + 施工单 2026-06-28 002 硬切换）：feepool 真实模型是两笔 tx：
  *   - **A-Tx（base tx，建池时定）**：client P2PKH UTXO → 2-of-2 multisig output，
  *     池大小 = multisig output 总额 = `feePoolDefaultFundSatoshis`。
  *   - **B-Tx（draft 草稿，持续协商）**：multisig output → server + client change。
@@ -595,15 +706,23 @@ export interface ProtocolOriginSettingsRecord {
  *     （`prior.serverAmount + amountSatoshis` 的累加结果）；永远 `<= totalAmount`。
  *   - 决策：若 `prior.serverAmount + amountSatoshis <= prior.totalAmount`
  *     → spend（在旧 B-Tx 草稿上 update）；否则 close_and_recreate。
- *   - key 必须包含 counterpartyPublicKeyHex：同一 origin 可能切换对端公钥，
- *     旧池不应串到新池。
- *   - key 格式：`${origin}::${counterpartyPublicKeyHex}`；`::` 不可能出现在
- *     origin 字符串里（origin 是 URL），实际碰撞风险极低。
+ *   - key 必须包含 ownerPublicKeyHex + counterpartyPublicKeyHex：
+ *       同一 origin 不同 owner 不能串池（不同 connect session 是不同 owner）；
+ *       同一 origin 同一 owner 但对端公钥切换 → 新池。
+ *   - key 格式：
+ *       `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`；
+ *       `::` 不可能出现在 origin / publicKeyHex 字符串里，碰撞风险极低。
  */
 export interface ProtocolFeePoolRecord {
-  /** `${origin}::${counterpartyPublicKeyHex}` 复合 key。 */
+  /**
+   * 复合 key。施工单 2026-06-28 002 硬切换：补 `ownerPublicKeyHex` 维度，
+   * 不再仅按 `origin + counterpartyPublicKeyHex` 归档。
+   * 格式：`${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`。
+   */
   poolKey: string;
   origin: string;
+  /** 绑定该池的 connect session owner 的公钥 hex。 */
+  ownerPublicKeyHex: string;
   counterpartyPublicKeyHex: string;
   /** base tx txid（2-of-2 multisig output 在这里）。 */
   baseTxid: string;
@@ -658,6 +777,191 @@ export type ProtocolFailureReason =
  * 之间彼此独立。
  */
 
+/* ============== connect.login / connect.resume / connect.logout（施工单 2026-06-28 001 硬切换） ============== */
+
+/**
+ * connect 方法族：把 connect session 提升为持续登录 caller 的正式真值。
+ *
+ * 设计缘由（施工单 2026-06-28 001）：
+ *   - 三层语义必须分开：
+ *       popup transport session
+ *         = popup 窗口级 postMessage 收发会话
+ *       connect auth session
+ *         = caller 对当前 origin 已获得授权的持久会话
+ *       popup unlock runtime
+ *         = 当前 popup 文档内可直接执行私钥操作的短期运行时材料
+ *   - 登录时显式选择 key；后续 connect session 绑定该 key 的 publicKeyHex。
+ *   - cipher.* 不再读取钱包全局 active key；通过 `connectSessionId` 找到
+ *     绑定 key。
+ *   - popup 刷新 / 关闭 → 当前 popup unlock runtime 失效；auth session
+ *     持久化记录仍保留，caller 通过 `connect.resume` 补 unlock 即可。
+ *   - `connect.logout` 是 auth 失效的唯一正常路径。
+ *
+ * 不删除 `identity.get` / `intent.sign` / `cipher.encrypt` / `cipher.decrypt`：
+ *   - `identity.get` 仍保留，但**不**再作为 note 这类持续登录 caller
+ *     的推荐入口；走 `connect.login` 取 sessionId。
+ *   - `cipher.*` 的稳定调用路径改为 session 绑定版本；继续保留旧 method
+ *     名但**强制**要求 `connectSessionId` 字段。
+ */
+
+/**
+ * 持久化的 connect session 记录。
+ *
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：
+ *   - 这是 auth session 真值；**不**是 unlock runtime。
+ *   - 允许持久化（IndexedDB `connectSessions` store）。
+ *   - **不**混入 pending request / 中间密文 / 解锁材料。
+ *   - `revokedAt` 是被 `connect.logout` 主动吊销的时间戳；非空记录
+ *     不允许 `connect.resume` 复活。
+ *   - **owner 唯一真值 = `ownerPublicKeyHex`**。`ownerKeyId` **不允许**
+ *     出现在 session record / request record / result payload / fee pool
+ *     key / service 分支判断里——它会制造第二套 owner 身份。Vault 内部
+ *     借用句柄按需从 keyspace 解析，**不**落 session 持久化。
+ *
+ * 关键不变量：
+ *   - `ownerPublicKeyHex` 在创建后**不**可变（resume 不重新选 key）。
+ *   - origin / sessionId / ownerPublicKeyHex 三元组是 session 的稳定真值。
+ *   - 执行 owner 判定时按 `ownerPublicKeyHex` 查 keyspace.getKey() →
+ *     拿当前 vault 内部 keyId，不存第二份 ownerKeyId。
+ */
+export interface ConnectSessionRecord {
+  /** sessionId：service 在 connect.login 时生成；UUID。 */
+  sessionId: string;
+  /** exact event.origin；connect.resume / 业务方法必须严格匹配。 */
+  origin: string;
+  /** 绑定 key 的压缩公钥 hex；session 创建后不变。owner 唯一真值。 */
+  ownerPublicKeyHex: string;
+  /** 绑定 key 的 label 快照（仅展示用，不参与身份判定）。 */
+  ownerLabel: string;
+  /**
+   * identity.get 解析时返回的 claims 真值快照（本次 connect.login 时
+   * 取一次）。site 后续 `connect.resume` 拿同一份快照，不必再发一次
+   * `identity.get`。
+   */
+  claimsSnapshot: Record<string, ResolvedClaimValue>;
+  /**
+   * 创建时间，unix milliseconds。
+   */
+  createdAt: number;
+  /** 最近一次使用时间（resume / 业务方法命中都会刷新）。 */
+  lastUsedAt: number;
+  /** 吊销时间；null = 未吊销。 */
+  revokedAt: number | null;
+}
+
+/**
+ * `connect.login` 请求参数。
+ *
+ * 设计缘由（施工单 2026-06-28 001 硬切换 5.1.1）：
+ *   - **不**在 params 里携带 ownerPublicKeyHex：owner 是用户**在 popup
+ *     UI 上**选定的，service 不能代替 caller 决定。
+ *   - caller 发起 `connect.login` 时只需要传 `text` + 可选 `claims`；
+ *     popup 解锁后展示 ready key 列表给用户选；用户点"用此 key 登录"
+ *     后由 UI 调 `service.confirmConnectLogin(recordId, ownerPublicKeyHex)`
+ *     写入 service 内部 record。
+ *   - `origin` 仍按 `event.origin` 由 service 在执行时填，params 里
+ *     不允许覆盖。
+ *   - `text` 与 `claims` 与 `identity.get` 语义一致；本次 connect.login
+ *     实际上跑了一次 `identity.get` 取真值快照，存进 session 持久化。
+ */
+export interface ConnectLoginParams {
+  /** 人类可读确认文案。 */
+  text: string;
+  /**
+   * 请求索要的 claim 名列表（与 `identity.get` 同语义）。
+   * 缺省 = `[]`，不返回任何 claim；通常 caller 想获取 profile.* 时必须显式列出。
+   */
+  claims?: string[];
+}
+
+/**
+ * `connect.login` 成功结果。
+ *
+ * 设计缘由：返回 sessionId + owner + claimsSnapshot 三元组，caller 把
+ * sessionId 持久化在本地；后续 connect.resume / 业务方法都用这个 sessionId
+ * 找回绑定关系。
+ *
+ * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
+ * owner 唯一真值 = `ownerPublicKeyHex`；vault 内部 keyId 属于实现细节。
+ */
+export interface ConnectLoginResult {
+  /** 持久化 sessionId；caller 必须存本地。 */
+  connectSessionId: string;
+  /** 绑定 key 的压缩公钥 hex；与 session 记录内字段一致。 */
+  ownerPublicKeyHex: string;
+  /** 本次 login 时一次解析的 claims 真值快照。 */
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  /** 本次解析时间（unix milliseconds）。 */
+  resolvedAt: number;
+}
+
+/**
+ * `connect.resume` 请求参数。
+ *
+ * 设计缘由：resume 必须显式传入 sessionId；service 在执行时按
+ * `event.origin` + sessionId 查 session 记录。sessionId 不在 params
+ * 里时直接 invalid_request。
+ */
+export interface ConnectResumeParams {
+  /**
+   * 由 `connect.login` 返回的 sessionId。
+   * caller 持 sessionId，popup 持有 session 真值与 unlock runtime。
+   */
+  connectSessionId: string;
+}
+
+/**
+ * `connect.resume` 成功结果。
+ *
+ * 设计缘由：与 `connect.login` 对称——返回 sessionId + owner + claimsSnapshot
+ * 三元组。claimsSnapshot 是 connect.login 时已落库的真值快照；resume 不重新
+ * 跑 identity.get，避免 popup unlock 后还要走人工确认。
+ *
+ * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
+ */
+export interface ConnectResumeResult {
+  connectSessionId: string;
+  ownerPublicKeyHex: string;
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  /**
+   * 解析时间——本次 resume 时间戳，**不**是 connect.login 时的快照时间。
+   * 给 caller 用来做"是否要重新登录"的客户端超时策略。
+   */
+  resolvedAt: number;
+}
+
+/**
+ * `connect.logout` 请求参数。
+ *
+ * 设计缘由：logout 只需要 sessionId；service 在执行时按 event.origin + sessionId
+ * 找到对应记录并吊销。
+ */
+export interface ConnectLogoutParams {
+  connectSessionId: string;
+}
+
+/**
+ * `connect.logout` 成功结果。
+ *
+ * 设计缘由：返回 ok=true 即表示 session 已被吊销；不需要返回 claims。
+ */
+export interface ConnectLogoutResult {
+  connectSessionId: string;
+  /** 吊销时间（unix milliseconds）。 */
+  revokedAt: number;
+}
+
+/**
+ * connect method 在 popup 当前文档处于 `waiting_unlock_*` 时进入的"选 key"
+ * UI 行为约束。
+ *
+ * 设计缘由：login / resume 在 popup 当前文档处于 locked 时进入 unlock UI；
+ * 解锁后：
+ *   - login → 进入"选 key + 确认"视图；
+ *   - resume → 直接恢复（不重新选 key、不重新确认）。
+ */
+export type ConnectRequestKind = "login" | "resume" | "logout";
+
 /* ============== Method dispatch ============== */
 
 /**
@@ -672,6 +976,9 @@ export interface MethodParamsMap {
   "p2pkh.transfer": P2pkhTransferParams;
   "feepool.prepare": FeepoolPrepareParams;
   "feepool.commit": FeepoolCommitParams;
+  "connect.login": ConnectLoginParams;
+  "connect.resume": ConnectResumeParams;
+  "connect.logout": ConnectLogoutParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -686,6 +993,9 @@ export interface MethodResultMap {
   "p2pkh.transfer": P2pkhTransferResult;
   "feepool.prepare": FeepoolPrepareResult;
   "feepool.commit": FeepoolCommitResult;
+  "connect.login": ConnectLoginResult;
+  "connect.resume": ConnectResumeResult;
+  "connect.logout": ConnectLogoutResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
@@ -736,21 +1046,27 @@ export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "fai
 /**
  * popup 内"按 origin 归档"的一条命令记录。
  *
- * 设计缘由（施工单 002 硬切换）：
+ * 设计缘由（施工单 002 硬切换 + 施工单 2026-06-28 002 硬切换）：
  *   - 一条 request = 一条 `ProtocolCommandRecord`；
  *   - 不做 event-sourcing：状态推进直接更新同一条记录；
  *   - 历史只按 `origin`（exact origin，**不**做 host 归一化）归档；
  *   - DB 真值 = Keymaster IndexedDB；UI 文案可显示"站点 / 域名"，
  *     但 DB 落盘必须是 `event.origin` 原样字符串。
  *   - 不持久化私钥 / 大体积密文 / 完整签名结果 / 解密明文 / 完整 rawTx。
+ *   - **owner 唯一真值 = `ownerPublicKeyHex`**：所有业务方法在 record
+ *     创建时即快照 `connectSessionId` + `ownerPublicKeyHex`；执行时不再
+ *     改写归属。`ownerKeyId` 不再出现。
  *
- * 字段语义扩展（p2pkh + feepool）：
+ * 字段语义扩展（p2pkh + feepool + connect）：
  *   - `recipientAddress` / `amountSatoshis` 摘要显示用；不要把整笔交易存进来。
  *   - `action` 只在 feepool.prepare/commit 上填写。
  *   - `operationId` 只在 feepool.commit 上填写（指向 prepare 阶段产的 op）。
  *   - `counterpartyPublicKeyHex` 只在 feepool.prepare/commit 上填写。
+ *   - `connectSessionId` 业务方法（除 `connect.login`）必填；记录创建时
+ *     绑定一次，执行时再次校验。`connect.login` record 上该字段为空。
  *   - `failureReason` 是本地终态原因（写本地）；对外 `errorCode` 永远是 `user_rejected`。
- *   - `autoApproved` 在 p2pkh.transfer auto 命中时为 true；UI 据此隐藏 confirm 页。
+ *   - `autoApproved` 在 p2pkh.transfer / feepool.* / identity.get / cipher.*
+ *     auto 命中时为 true；UI 据此隐藏 confirm 页。
  */
 export interface ProtocolCommandRecord {
   /** 内部稳定主键；与 transport `requestId` 同源但不一定相等。 */
@@ -779,14 +1095,31 @@ export interface ProtocolCommandRecord {
   status: string;
   /** 人类可读确认文案。 */
   textSummary: string;
-  /** identity.get 的请求 claims 列表（其它方法为空数组）。 */
+  /** identity.get / connect.login 的请求 claims 列表（其它方法为空数组）。 */
   claimsSummary: string[];
   /** intent.sign / cipher.encrypt / cipher.decrypt 的内容类型。 */
   contentType: string;
   /** 请求正文字节数（cipher.decrypt 时是 `cipherbytes.bytes.byteLength`）。 */
   payloadSize: number;
-  /** 执行该命令时 active public key hex；写记录时取一次。 */
-  activePublicKeyHex: string;
+  /**
+   * 该 record 所属 connect sessionId（业务方法必填；`connect.login` 为空）。
+   *
+   * 关键不变量（施工单 2026-06-28 002 硬切换）：record 创建时立即绑定，
+   * record 生命周期内**不**可漂移——不允许"旧请求漂进新 session"。
+   */
+  connectSessionId: string;
+  /**
+   * 该 record 在创建时快照的 owner public key hex。
+   *
+   * 关键不变量（施工单 2026-06-28 002 硬切换）：
+   *   - 取自 `connectSession.ownerPublicKeyHex`（业务方法）或
+   *     `connectLoginSelected`（connect.login）；
+   *   - record 生命周期内**不**可变；
+   *   - **不**再读取当前 active key；后续写卡**不**再读 keyspace.active()。
+   *   - 这是 `ProtocolCommandRecord` 上的 owner 唯一真值；`ownerKeyId`
+   *     **不**出现在 record / result payload 里。
+   */
+  ownerPublicKeyHex: string;
   /** 创建时间，unix milliseconds。 */
   createdAt: number;
   /** 最近一次状态更新时间，unix milliseconds。 */
@@ -809,7 +1142,7 @@ export interface ProtocolCommandRecord {
   counterpartyPublicKeyHex?: string;
   /** 本地终态原因；隐私敏感场景下与对外 `errorCode` 解耦。 */
   failureReason?: ProtocolFailureReason;
-  /** p2pkh.transfer auto-approve 命中时为 true；UI 据此跳过 confirm 页。 */
+  /** p2pkh.transfer / feepool.* / identity.get / cipher.* auto-approve 命中时为 true。 */
   autoApproved?: boolean;
 }
 
@@ -911,17 +1244,26 @@ export const PROTOCOL_STORAGE_DB_CAPABILITY = "protocol.storageDb";
  * 协议存储 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
  *
  * 关键不变量：
- *   - DB 名固定 `keymaster.protocol`，version 2；
- *   - 三 store 各司其职：
+ *   - DB 名固定 `keymaster.protocol`，version 5（施工单 2026-06-28 002
+ *     硬切换：owner 真值收口成 `ownerPublicKeyHex`，feePool key 维度
+ *     补 `ownerPublicKeyHex`，从 4 升到 5；commands / feePools /
+ *     connectSessions 三 store 全部重建）。
+ *   - 四 store 各司其职：
  *       - `commands`：命令流历史（一条 request = 一条 record）；
  *       - `origins`：按 exact origin 存站点级配置；
- *       - `feePools`：按 `${origin}::${counterpartyPublicKeyHex}` 复合 key
- *         存费用池状态；
+ *       - `feePools`：按
+ *         `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`
+ *         复合 key 存费用池状态（v5 补 ownerPublicKeyHex 维度）；
+ *       - `connectSessions`：auth session 真值（按 sessionId 主键）；
  *   - commands store 索引按 `origin + updatedAt desc`；
  *   - feePools store 索引 `origin`，便于按 origin 列出该站点的所有池；
- *   - `putCommand` / `putOrigin` / `putFeePool` 写同 key 覆盖；
+ *   - connectSessions store 索引 `origin`，便于按 origin 列出该站点的
+ *     所有 session（包括已 revoked）；
+ *   - `putCommand` / `putOrigin` / `putFeePool` / `putConnectSession`
+ *     写同 key 覆盖；
  *   - DB 异常一律 `console.error + rethrow`；调用方决定怎么降级（p2pkh
- *     走 manual confirm、feepool fail-closed）。
+ *     走 manual confirm、feepool fail-closed、connect session 不可用
+ *     时 caller 被要求重新登录）。
  */
 export interface ProtocolStorageDb {
   /* ----- commands ----- */
@@ -942,6 +1284,20 @@ export interface ProtocolStorageDb {
   deleteFeePool(poolKey: string): Promise<void>;
   /** 按 origin 列出该站点下所有费用池。 */
   listFeePoolsByOrigin(origin: string): Promise<ProtocolFeePoolRecord[]>;
+
+  /* ----- connectSessions ----- */
+  /**
+   * 写一条 connect session 记录；同 sessionId 覆盖。
+   *
+   * **不**写密码 / 解锁运行时材料；只写 public 字段
+   * （sessionId / origin / ownerPublicKeyHex / claimsSnapshot / 时间戳 /
+   * revokedAt）。`connectSessions` store 不允许出现私钥材料或密码字段。
+   */
+  putConnectSession(record: ConnectSessionRecord): Promise<void>;
+  /** 按 sessionId 读一条 connect session。 */
+  getConnectSession(sessionId: string): Promise<ConnectSessionRecord | null>;
+  /** 按 origin 列出该站点下所有 connect session（含 revoked）。 */
+  listConnectSessionsByOrigin(origin: string): Promise<ConnectSessionRecord[]>;
 }
 
 /**
@@ -1020,18 +1376,38 @@ export const PROTOCOL_SERVICE_CAPABILITY = "protocol.service";
 /**
  * plugin-protocol 通过 capability 注入 p2pkh 业务能力的"瘦身"接口。
  *
- * 设计缘由：plugin-protocol 不直接 import plugin-p2pkh（边界检查禁止
- * 插件间互相 import）。这里在 contracts 层定义一个最小子集；plugin-p2pkh
- * 的现有 `P2pkhService` 已经覆盖该子集，manifest setup 时做一次
- * 适配即可。
+ * 设计缘由（施工单 2026-06-28 002 硬切换）：
+ *   - plugin-protocol 不直接 import plugin-p2pkh（边界检查禁止插件间
+ *     互相 import）。这里在 contracts 层定义一个最小子集；plugin-p2pkh
+ *     的现有 `P2pkhService` 已经覆盖该子集，manifest setup 时做一次
+ *     适配即可。
+ *   - 所有 p2pkh 业务能力（listUtxos / prepareTransfer / submitTransfer）
+ *     **必须**接受 `ownerPublicKeyHex` 维度。owner 是 connect session 绑定
+ *     的 owner；plugin-protocol 永远**不**传当前钱包 active key 给 p2pkh
+ *     适配层——只有 session 绑定的 owner 才是真值。`ownerPublicKeyHex`
+ *     缺省视作旧路径的"取 active key"语义（**仅**为旧测试 / 兜底保留）；
+ *     002 之后所有业务方法都强制传 owner。
  */
 export interface P2pkhProtocolAdapter {
-  /** 列当前 active key 在指定 assetId 下的 UTXO（mainnet P2PKH）。 */
-  listUtxos(filter?: { assetId?: string }): Promise<
-    Array<{ txid: string; vout: number; value: number }>
-  >;
+  /**
+   * 列指定 owner 在指定 assetId 下的 UTXO（mainnet P2PKH）。
+   *
+   * `ownerPublicKeyHex` 必填；缺省 = "取 active key namespace"是
+   * 兜底路径，**只**为兼容旧调用。002 之后所有调用方都应传 owner。
+   */
+  listUtxos(filter?: {
+    assetId?: string;
+    ownerPublicKeyHex?: string;
+  }): Promise<Array<{ txid: string; vout: number; value: number }>>;
+  /**
+   * 准备 p2pkh 转账预览。
+   *
+   * `ownerPublicKeyHex` 必填；plugin-protocol 永远传 session 绑定 owner。
+   * UTXO 选币 + 签名都按该 owner 走，**不**读全局 active key。
+   */
   prepareTransfer(input: {
     assetId: "bsv";
+    ownerPublicKeyHex: string;
     recipientAddress: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
@@ -1049,9 +1425,16 @@ export interface P2pkhProtocolAdapter {
     txid: string;
     rawTxHex: string;
   }>;
+  /**
+   * 广播已签名 transfer preview。
+   *
+   * `ownerPublicKeyHex` 必填：plugin-p2pkh 在 submit 阶段会校验 resource
+   * / 签名 key 与该 ownerPublicKeyHex 一致——owner 变了就拒绝广播。
+   */
   submitTransfer(preview: {
     assetId: "bsv";
     network: "main";
+    ownerPublicKeyHex: string;
     recipientAddress: string;
     amountSatoshis: number;
     feeRateSatoshisPerKb: number;
@@ -1235,4 +1618,46 @@ export interface ProtocolService {
    *     这条允许跑完；执行器暂停取新任务。
    */
   setVaultLockState(locked: boolean): void;
+
+  /* ============== connect.*（施工单 2026-06-28 001 硬切换） ============== */
+
+  /**
+   * 当前 popup 是否存在"等待用户处理"的 connect login 流程。
+   * UI 用此决定是否在 command stream 上方渲染 connect 选 key 视图。
+   *
+   * `recordId` 缺省时取首张；新 UI 应**始终**传 recordId。
+   */
+  connectLoginRecord(recordId?: string): {
+    recordId: string;
+    method: "connect.login";
+    availableKeys: Array<{ publicKeyHex: string; label: string }>;
+  } | null;
+  /**
+   * 当前 popup 是否存在"等待用户恢复"的 connect resume 流程。
+   * UI 用此决定是否在 command stream 上方渲染 connect 解锁视图。
+   *
+   * `recordId` 缺省时取首张；新 UI 应**始终**传 recordId。
+   */
+  connectResumeRecord(recordId?: string): {
+    recordId: string;
+    method: "connect.resume";
+    ownerPublicKeyHex: string;
+    ownerLabel: string;
+  } | null;
+  /**
+   * 用户在 connect login 视图选定 key 并确认。service 推进 request 从
+   * `waiting_unlock_manual` / `confirming` → `queued` → `executing`，
+   * 完成后回 `result`。
+   */
+  confirmConnectLogin(recordId: string, ownerPublicKeyHex: string): Promise<void>;
+  /**
+   * 用户在 connect resume 视图点击"恢复"。service 推进 request 从
+   * `waiting_unlock_manual` → `queued` → `executing`，完成后回 `result`。
+   */
+  confirmConnectResume(recordId: string): Promise<void>;
+  /**
+   * 用户在 connect login / resume / cipher confirm / 任何视图点击"取消"，
+   * service 把 request 收尾为 `rejected`，对外回 `user_rejected`。
+   */
+  rejectConnectRequest(recordId: string): Promise<void>;
 }

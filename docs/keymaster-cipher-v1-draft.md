@@ -48,7 +48,10 @@ V1 固定使用：
 
 ## 站点密钥派生
 
-Keymaster 必须基于当前 active key 的私钥秘密材料与 `exactOrigin` 推导站点密钥。
+Keymaster 必须基于 **session 绑定 owner** 的私钥秘密材料与 `exactOrigin`
+推导站点密钥（施工单 2026-06-28 002 硬切换）。`privateKeySecret` 取自
+`connectSession.ownerPublicKeyHex` 对应的 vault 内部 keyId，**不**读取
+钱包全局 active key。
 
 逻辑表达：
 
@@ -61,7 +64,8 @@ siteKey = HMAC-SHA256(
 
 其中：
 
-- `privateKeySecret`：当前 active key 的私钥秘密材料
+- `privateKeySecret`：`cipher.encrypt` / `cipher.decrypt` 发起时 session
+  绑定 owner 的私钥秘密材料（**不**取全局 active key）
 - `exactOrigin`：浏览器事件中的 `event.origin` 原样字符串
 - `cipherContext`：协议常量，V1 固定为 `keymaster:cipher:v1`
 
@@ -70,6 +74,8 @@ siteKey = HMAC-SHA256(
 - `cipherContext` 是协议的一部分，不能在同一协议实现里随意改动。
 - 同一私钥、同一 `exactOrigin`、同一协议版本，必须推导出相同的 `siteKey`。
 - 不同 origin 必须推导出不同的 `siteKey`。
+- 同一 owner 切换 active key 后，session 仍指向同一 owner —— 不允许
+  "主站切到 keyB 后老 session 改成走 keyB 派生 siteKey"。
 
 ## 内层明文结构
 
@@ -125,7 +131,8 @@ V1 明确采用：
     content: {
       $type: "binary",
       bytes: noteArrayBuffer
-    }
+    },
+    connectSessionId: "sess-xxx"
   }
 }
 ```
@@ -135,6 +142,7 @@ V1 明确采用：
 - `text` 必填，用于用户确认展示。
 - `contentType` 必填。
 - `content` 必填，且必须是最终业务字节。
+- `connectSessionId` 必填（002 硬切换）。
 - Keymaster 不要求理解 `contentType` 的业务语义。
 - 所有 `cipher.encrypt` 请求都必须经过用户确认。
 
@@ -209,7 +217,8 @@ Keymaster 必须：
     cipherbytes: {
       $type: "binary",
       bytes: cipherbytesArrayBuffer
-    }
+    },
+    connectSessionId: "sess-xxx"
   }
 }
 ```
@@ -219,6 +228,7 @@ Keymaster 必须：
 - `text` 必填，用于用户确认展示。
 - `nonce` 必填。
 - `cipherbytes` 必填。
+- `connectSessionId` 必填（002 硬切换）。
 - 解密请求不需要调用方额外提供 `contentType`。
 - 所有 `cipher.decrypt` 请求都必须经过用户确认。
 

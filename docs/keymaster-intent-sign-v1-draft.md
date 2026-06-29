@@ -18,7 +18,11 @@
 - 调用方自己负责把业务对象转换成最终 `content.bytes`。
 - Keymaster 不理解业务内容本身，只负责展示、校验安全边界并签名。
 - 最终签名对象是一个内容信封：既绑定安全字段，也绑定 `contentType` 和 `contentSha256`。
-- `intent.sign` 不是推荐的登录入口；推荐登录场景使用 `identity.get`。
+- 签名主体公钥（`subjectPublicKey`）取自 session 绑定的 owner（**不**读取
+  钱包全局 active key）——`intent.sign` 强制要求 `connectSessionId` 入参
+  （施工单 2026-06-28 002 硬切换）。
+- 登录场景推荐改走 `connect.login` 建会话 + `identity.get` 取身份，
+  `intent.sign` **不**作为"裸用"的登录入口。
 
 ## 请求
 
@@ -37,7 +41,8 @@
     content: {
       $type: "binary",
       bytes: contractBytesArrayBuffer
-    }
+    },
+    connectSessionId: "sess-xxx"
   }
 }
 ```
@@ -59,7 +64,8 @@
     content: {
       $type: "binary",
       bytes: contractBytesArrayBuffer
-    }
+    },
+    connectSessionId: "sess-xxx"
   }
 }
 ```
@@ -75,7 +81,8 @@
       $type: "binary",
       mime: "application/pdf",
       bytes: fileArrayBuffer
-    }
+    },
+    connectSessionId: "sess-xxx"
   }
 }
 ```
@@ -86,6 +93,7 @@
 - `iat` 必填。
 - `exp` 必填。
 - `exp` 必须严格大于 `iat`。
+- `connectSessionId` 必填（002 硬切换）。
 - Keymaster 必须执行本地有效期上限策略；超出上限的请求必须拒绝。
 - `content` 是调用方已经准备好的最终二进制内容，也是请求里传输文件本体、挑战本体、业务本体的统一字段名。
 - `contentType` 是调用方自己定义的数据结构类型名；Keymaster 不要求理解，但必须一起签进去。
@@ -205,4 +213,7 @@ V1 明确采用：
 - 最终签名真值使用固定顺序数组 + Deterministic CBOR 编码。
 - `result.signedEnvelope` 直接返回编码后的真值字节，不要求调用方重编码。
 - `intent.sign` 也必须用户确认。
-- 登录场景不推荐使用 `intent.sign` 作为主入口；推荐改走 `identity.get`。
+- 登录场景不推荐使用 `intent.sign` 作为主入口；推荐改走 `connect.login` +
+  `identity.get`。
+- `intent.sign` 强制要求 `connectSessionId`（002 硬切换）；签名主体公钥
+  取自 session 绑定 owner，**不**读全局 active key。

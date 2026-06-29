@@ -166,6 +166,30 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         throw new Error("Active key is not ready");
       }
       return activeIdentity;
+    },
+    /**
+     * 硬切换 002：按 owner public key hex 解析 ReadyKeyIdentity。
+     * plugin-protocol 调用 transfer.prepare / transfer.submit 时必传
+     * `ownerPublicKeyHex`；transfer 内部用本函数解析出 keyId / publicKeyHex
+     * 走签名 + 选币 + resourceId 解析。不依赖 active key 状态——owner
+     * 变了 / 切了 active key 都不影响 transfer 行为。
+     */
+    getKeyForOwner: async (ownerPublicKeyHex: string) => {
+      const key = await deps.keyspace.getKey(ownerPublicKeyHex);
+      if (!key) {
+        throw new Error(`P2PKH owner key not found: ${ownerPublicKeyHex}`);
+      }
+      if (!key.keyId || !key.publicKeyHex) {
+        throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
+      }
+      return {
+        keyId: key.keyId,
+        publicKeyHex: key.publicKeyHex,
+        label: key.label,
+        capabilities: key.capabilities,
+        createdAt: key.createdAt,
+        identityStatus: key.identityStatus ?? "ready"
+      } as ReadyKeyIdentity;
     }
   });
 
@@ -933,6 +957,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const withoutTestnet = settings.includeTestnet
         ? all
         : all.filter((u) => u.network === "main");
+      // 硬切换 002：plugin-protocol 调用 listUtxos 时**必须**传
+      // `ownerPublicKeyHex`（或 `keyId`），filter 内自动按 owner 过滤。
+      // 老 widget / overview 不传 owner 时按"全部"兜底（但调用方
+      // 自己按需过滤）。
       return filterUtxos(withoutTestnet, filter);
     },
     async listHistory(filter) {
@@ -1012,8 +1040,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     },
 
     prepareTransfer: (input) => {
-      if (!getActiveKeyState().activePublicKeyHex) {
-        return Promise.reject(new Error("Cannot sign without an active key"));
+      // 硬切换 002：`ownerPublicKeyHex` 是**强制**输入字段（plugin-protocol
+      // 调用时永远传 session 绑定 owner）。老 widget / overview 路径
+      // 仍允许不传 `ownerPublicKeyHex` 但必须传 `keyId` 走 active-key
+      // 兜底。两条路径**都**拒绝无 owner 也无 keyId 的"裸"调用——避免
+      // 静默 fallback 到全局 active key。
+      if (!input.ownerPublicKeyHex && !input.keyId) {
+        return Promise.reject(
+          new Error(
+            "P2PKH prepareTransfer requires ownerPublicKeyHex (preferred) or keyId (legacy)"
+          )
+        );
       }
       // 硬切换 001：includeTestnet=false 时禁止 testnet 转账。
       const settings = getCurrentSettings();
@@ -1023,8 +1060,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return transfer.prepare(input);
     },
     submitTransfer: (preview) => {
-      if (!getActiveKeyState().activePublicKeyHex) {
-        return Promise.reject(new Error("Cannot sign without an active key"));
+      // 硬切换 002：submit 阶段必须能解析出 owner——preview 上若没带
+      // ownerPublicKeyHex / keyId，**必须**从 session 真值 / 老 active
+      // key 解析，**不**做静默 fallback。
+      if (!preview.ownerPublicKeyHex && !preview.keyId) {
+        return Promise.reject(
+          new Error(
+            "P2PKH submitTransfer requires ownerPublicKeyHex (preferred) or keyId (legacy)"
+          )
+        );
       }
       const settings = getCurrentSettings();
       if (!settings.includeTestnet && preview.assetId === "bsvtest") {
@@ -1187,7 +1231,16 @@ function filterUtxos<T extends { network: "main" | "test"; keyId: string; public
       const net = assetIdToNetwork(filter.assetId);
       if (r.network !== net) return false;
     }
-    if (filter.keyId && r.keyId !== filter.keyId) return false;
+    // 硬切换 002：owner 真值（session / caller 视角）按 `publicKeyHex`
+    // 直接过滤；不依赖 vault keyId 这层中间表示。
+    // keyId 是内部细节（vault.withPrivateKey 借用句柄），owner 真值
+    // 仍然是 publicKeyHex。`ownerPublicKeyHex` 与 `keyId` 二选一即可；
+    // 都给时 keyId 优先（内部已解析过）。
+    if (filter.keyId) {
+      if (r.keyId !== filter.keyId) return false;
+    } else if (filter.ownerPublicKeyHex) {
+      if (r.publicKeyHex !== filter.ownerPublicKeyHex) return false;
+    }
     if (filter.resourceId && r.resourceId !== filter.resourceId) return false;
     return true;
   });

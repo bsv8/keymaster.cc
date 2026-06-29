@@ -37,7 +37,10 @@ function makeRecord(
     claimsSummary: [],
     contentType: "",
     payloadSize: 0,
-    activePublicKeyHex: "02" + "11".repeat(32),
+    // 施工单 2026-06-28 002 硬切换：record 的 owner 快照字段统一为
+    // `connectSessionId` + `ownerPublicKeyHex`。
+    connectSessionId: "sess-" + id,
+    ownerPublicKeyHex: "02" + "11".repeat(32),
     createdAt,
     updatedAt,
     finishedAt: updatedAt,
@@ -66,8 +69,10 @@ function makePool(
   total: number
 ): ProtocolFeePoolRecord {
   return {
-    poolKey: `${origin}::${counterparty}`,
+    // 施工单 2026-06-28 002 硬切换：poolKey 补 ownerPublicKeyHex 维度。
+    poolKey: `${origin}::${"02" + "11".repeat(32)}::${counterparty}`,
     origin,
+    ownerPublicKeyHex: "02" + "11".repeat(32),
     counterpartyPublicKeyHex: counterparty,
     baseTxid: "00".repeat(32),
     baseTxHex: "deadbeef",

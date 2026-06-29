@@ -3,8 +3,7 @@
 // 调用 vault / keyspace + 构造 envelope + 签名/加解密 + 命令流历史 +
 // p2pkh.transfer / feepool.prepare / feepool.commit 执行。
 //
-// 设计缘由（施工单 2026-06-27 001 硬切换：popup 锁屏 + 多 request 并存 +
-// 全局串行执行）：
+// 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-28 002 硬切换）：
 //   - 会话锁状态 (`ProtocolPopupLockState`) 与请求状态 (`ProtocolCommandPhase`)
 //     分层；不再共享一个中心 phase。
 //   - 内部数据：
@@ -22,6 +21,23 @@
 //       * locked + auto → `waiting_unlock_auto`
 //       * unlocked + manual → `confirming`（启动 timeout）
 //       * unlocked + auto → `queued`
+//   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
+//     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）
+//     强制要求 `connectSessionId` 入参（施工单 2026-06-28 002 硬切换）。
+//     accept 阶段同步预校验 session 真值（fail-fast）：
+//       - session 不存在 / 已 revoke / origin 不匹配 / owner key 不 ready
+//         → 直接 phase=failed，对外回 user_rejected / invalid_origin；
+//       - 不进 waiting_unlock / confirming / 解锁 UI。
+//   - **owner 唯一真值 = `ownerPublicKeyHex`**：`ownerKeyId` **不**出现
+//     在 record / result payload / 内部 pendingOp 字段里。执行时按
+//     `session.ownerPublicKeyHex` 查 keyspace.getKey() 拿当前 vault 内
+//     借用句柄（keyId 是 vault 内部细节，按需解析）。
+//   - record 在创建时立即绑定 `connectSessionId` + `ownerPublicKeyHex`；
+//     record 生命周期内**不**可漂移。执行阶段再次校验 session 仍有效
+//     （logout 后同 session 下旧 request 后续执行必须失败）。
+//   - `feepool` 持久化 key 维度补 `ownerPublicKeyHex`：
+//     `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`，
+//     同 origin 不同 owner 不再串池。
 //   - `cancel(id)` 按 `source + origin + transportRequestId` 命中具体
 //     request；命中后转 rejected，并写本地 `failureReason=client_canceled`；
 //     对外仍回原 request 的 user_rejected。
@@ -55,6 +71,13 @@ import {
   type CipherDecryptResult,
   type CipherEncryptParams,
   type CipherEncryptResult,
+  type ConnectLoginParams,
+  type ConnectLoginResult,
+  type ConnectLogoutParams,
+  type ConnectLogoutResult,
+  type ConnectResumeParams,
+  type ConnectResumeResult,
+  type ConnectSessionRecord,
   type FeepoolCommitParams,
   type FeepoolCommitResult,
   type FeepoolPrepareParams,
@@ -98,7 +121,7 @@ import {
   signCompactSecp256k1
 } from "./protocolCrypto.js";
 import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
-import { buildClaimProjectionFromParams } from "./protocolClaims.js";
+import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
   sdkBuildBaseTx,
@@ -213,15 +236,29 @@ interface RequestRecord {
   /** 是否被 auto-approve 路径命中（p2pkh / feepool / identity / cipher）。 */
   autoApproved: boolean;
   /**
-   * 写记录时快照的 active public key hex（施工单 2026-06-27 002 反馈修复）。
+   * 该 record 所属 connect sessionId（施工单 2026-06-28 002 硬切换）。
    *
-   * 严格遵守 contract `ProtocolCommandRecord.activePublicKeyHex` 的语义：
-   * "执行该命令时 active public key hex；写记录时取一次"。后续写卡
-   * **不**再读当前 active key——即使 popup 会话里用户切换 active key，
-   * 旧卡片的 `activePublicKeyHex` 字段也保持 record 创建时的快照值，
-   * 不被污染。
+   * 关键不变量：所有外部业务方法在 record 创建时立即绑定 sessionId；
+   * `connect.login` record 上该字段为空（login 自身负责建 session）。
+   * record 生命周期内**不**可漂移；不允许"旧请求漂进新 session"。
    */
-  activePublicKeyHex: string;
+  connectSessionId: string;
+  /**
+   * record 在创建时快照的 owner public key hex（施工单 2026-06-28 002
+   * 硬切换：owner 唯一真值）。
+   *
+   * 业务方法：取自 `connectSession.ownerPublicKeyHex`（由 accept 阶段
+   * 预校验 session 真值时同步落到 record）。
+   * `connect.login`：取自用户在 UI 选定的 key（`connectLoginSelected`）。
+   *
+   * 后续写卡**不**再读 keyspace.active() / 钱包全局 active key；
+   * 旧卡片的 `ownerPublicKeyHex` 字段保持 record 创建时的快照值，不被
+   * 污染——即使用户在 popup 会话里切换 active key 也不影响。
+   *
+   * `ownerKeyId` **不**作为 owner 身份出现在 record / result / 分支
+   * 判断里；vault 内部借用句柄按需从 keyspace.getKey() 解析。
+   */
+  ownerPublicKeyHex: string;
   /** 创建时间，unix milliseconds。 */
   createdAt: number;
   /** 最近一次状态更新时间，unix milliseconds。 */
@@ -234,6 +271,42 @@ interface RequestRecord {
   errorMessage: string;
   /** 本地终态原因（写本地）；隐私敏感场景与对外解耦。 */
   failureReason?: ProtocolFailureReason;
+  /* ============== 施工单 2026-06-28 001：connect.* 字段 ============== */
+  /**
+   * `connect.login` 当前候选 key 列表（来自 `keyspace.listKeys` 过滤掉
+   * 非 ready 的）。只在 `method === "connect.login"` 时有值。
+   */
+  connectLoginCandidates?: Array<{ publicKeyHex: string; label: string }>;
+  /**
+   * `connect.login` 用户在 UI 选定的那把 key 公钥 hex。用户在 confirming
+   * 视图点"确认选 key"时由 `confirmConnectLogin` 写入；执行阶段读此字段。
+   */
+  connectLoginSelected?: string;
+  /**
+   * `connect.resume` 进入时的 session 快照（ownerPublicKeyHex /
+   * ownerLabel / claimsSnapshot）；只在 `method === "connect.resume"`
+   * 时有值。confirming 视图直接拿这个做展示，不需要再查 DB。
+   *
+   * 关键（施工单 2026-06-28 002 硬切换）：`ownerKeyId` **不**记录在
+   * snapshot 里；owner 唯一真值 = `ownerPublicKeyHex`。
+   */
+  connectResumeSnapshot?: {
+    sessionId: string;
+    ownerPublicKeyHex: string;
+    ownerLabel: string;
+    claimsSnapshot: Record<string, import("@keymaster/contracts").ResolvedClaimValue>;
+  };
+  /**
+   * 标记 record 在 unlock 后**不**走 confirming 视图，直接 queued → executing。
+   *
+   * 设计缘由（施工单 2026-06-28 001 硬切换 4.3 / 5.1.2）：
+   *   - connect.resume：unlock 后"只补解锁，自动恢复"，**不**再点确认。
+   *   - connect.logout：unlocked 路径"可无额外交互"，locked 路径解锁后
+   *     也直接入队，不弹额外 UI。
+   *   - cipher.* / connect.resume fail-fast：session 预校验失败、locked
+   *     路径解锁后直接 queued，让执行阶段抛 user_rejected。
+   */
+  autoExecuteAfterUnlock?: boolean;
 }
 
 /** request 级状态机：扩展开关掉旧 `waiting_unlock` / `waiting_confirm`，新加 `queued` / `timed_out`。 */
@@ -256,6 +329,13 @@ interface ConfirmTimeoutState {
   tickHandle: ReturnType<typeof setInterval>;
   /** 起点（epoch ms）；用于 cache-miss clamp 时维持总等待时长稳定。 */
   startedAtMs: number;
+  /**
+   * 进入 confirming 时是否走了默认 30s 兜底（true）还是同步 cache
+   * 命中（false）。决定 `refreshTimeoutFromOriginConfig` 是否允许
+   * 异步 clamp down——`true` 才允许 clamp；`false` 永不热更新。
+   * （施工单 2026-06-28 002 硬切换 timeout 收口）
+   */
+  startedFromFallback: boolean;
 }
 
 const READY_MESSAGE: ProtocolReadyMessage = { v: PROTOCOL_VERSION, type: "ready" };
@@ -675,15 +755,30 @@ export class ProtocolServiceImpl implements ProtocolService {
         if (rec.phase === "waiting_unlock_manual") manualRecs.push(rec);
         else if (rec.phase === "waiting_unlock_auto") autoRecs.push(rec);
       }
-      // manual → confirming（启动 timeout + 异步 clamp）；auto → queued（直接入队）。
+      // manual 分两类：autoExecuteAfterUnlock=true（connect.* / cipher.* fail-fast）
+      // → 直接 queued；否则走 confirming（启动 timeout + 异步 clamp）。
       for (const rec of manualRecs) {
-        this.setRecordPhase(rec.recordId, "confirming");
-        rec.enteredPhaseAt = Date.now();
-        this.startConfirmTimeout(rec.recordId, rec.origin);
-        // 同步等待 refresh 落定：cache miss 时 timer 用 30s 兜底启动，
-        // refresh 会 clamp 到 DB 真值；如果 clamp 触发了 finalize，由
-        // await 链保证后续 setPhase/emit 不会跟 finalize 收尾冲突。
-        await this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
+        if (rec.autoExecuteAfterUnlock) {
+          this.setRecordPhase(rec.recordId, "queued");
+          rec.enteredPhaseAt = Date.now();
+          this.executionQueue.push(rec.recordId);
+        } else {
+          this.setRecordPhase(rec.recordId, "confirming");
+          rec.enteredPhaseAt = Date.now();
+          // 推进到 confirming 的瞬间决定 timeout 快照：
+          // sync cache 命中 → 用 cache 真值（不热更新）；
+          // cache miss → 30s 兜底（允许后续 clamp down）。
+          const snapshot = this.resolveConfirmTimeoutSnapshot(rec.origin);
+          this.startConfirmTimeout(
+            rec.recordId,
+            snapshot.initialSeconds,
+            snapshot.startedFromFallback
+          );
+          // 同步等待 refresh 落定：cache miss 时 timer 用 30s 兜底启动，
+          // refresh 会 clamp 到 DB 真值；如果 clamp 触发了 finalize，由
+          // await 链保证后续 setPhase/emit 不会跟 finalize 收尾冲突。
+          await this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
+        }
       }
       for (const rec of autoRecs) {
         this.setRecordPhase(rec.recordId, "queued");
@@ -700,12 +795,27 @@ export class ProtocolServiceImpl implements ProtocolService {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.phase === "waiting_unlock_manual") {
-      this.setRecordPhase(rec.recordId, "confirming");
-      rec.enteredPhaseAt = Date.now();
-      this.startConfirmTimeout(rec.recordId, rec.origin);
-      await this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
+      if (rec.autoExecuteAfterUnlock) {
+        this.setRecordPhase(rec.recordId, "queued");
+        rec.enteredPhaseAt = Date.now();
+        this.executionQueue.push(rec.recordId);
+      } else {
+        this.setRecordPhase(rec.recordId, "confirming");
+        rec.enteredPhaseAt = Date.now();
+        // 推进到 confirming 的瞬间决定 timeout 快照：
+        // sync cache 命中 → 用 cache 真值（不热更新）；
+        // cache miss → 30s 兜底（允许后续 clamp down）。
+        const snapshot = this.resolveConfirmTimeoutSnapshot(rec.origin);
+        this.startConfirmTimeout(
+          rec.recordId,
+          snapshot.initialSeconds,
+          snapshot.startedFromFallback
+        );
+        await this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
+      }
       this.emit();
       this.emitFeed();
+      void this.drainExecutionQueue();
     } else if (rec.phase === "waiting_unlock_auto") {
       this.setRecordPhase(rec.recordId, "queued");
       rec.enteredPhaseAt = Date.now();
@@ -786,6 +896,182 @@ export class ProtocolServiceImpl implements ProtocolService {
     return null;
   }
 
+  /* ============== 施工单 2026-06-28 001：connect.* UI 接口 ============== */
+
+  /**
+   * 同步读取当前 connect login 视图信息。
+   *
+   * 行为：
+   *   - 优先按 recordId 取；缺省时按 createdAt asc 取首张 method
+   *     === "connect.login" 且 phase 处于 `waiting_unlock_manual` /
+   *     `confirming` 的 record；
+   *   - 返回当前 ready key 候选列表；popup 用此渲染"选 key + 确认"视图。
+   *   - 候选列表为空时返回 null candidates 数组（**不**返回 null 整体）：
+   *     UI 据此展示"无可用 key，请先创建或导入"的兜底文案。
+   */
+  connectLoginRecord(recordId?: string): {
+    recordId: string;
+    method: "connect.login";
+    availableKeys: Array<{ publicKeyHex: string; label: string }>;
+  } | null {
+    const rec = this.pickConnectRecord("connect.login", recordId);
+    if (!rec) return null;
+    return {
+      recordId: rec.recordId,
+      method: "connect.login",
+      availableKeys: rec.connectLoginCandidates ?? []
+    };
+  }
+
+  /**
+   * 同步读取当前 connect resume 视图信息。
+   *
+   * 行为：
+   *   - 优先按 recordId 取；缺省时按 createdAt asc 取首张 method
+   *     === "connect.resume" 且 phase 处于 `waiting_unlock_manual` /
+   *     `confirming` 的 record；
+   *   - 返回 owner 快照（ownerPublicKeyHex / ownerLabel）；UI 据此渲染
+   *     "恢复会话"视图。
+   *   - snapshot 缺失（DB 不可用 / session 失效）时返回 null：UI 据此
+   *     展示"该会话已失效，请重新登录"并禁用"恢复"按钮（仍可"取消"）。
+   */
+  connectResumeRecord(recordId?: string): {
+    recordId: string;
+    method: "connect.resume";
+    ownerPublicKeyHex: string;
+    ownerLabel: string;
+  } | null {
+    const rec = this.pickConnectRecord("connect.resume", recordId);
+    if (!rec) return null;
+    if (!rec.connectResumeSnapshot) return null;
+    return {
+      recordId: rec.recordId,
+      method: "connect.resume",
+      ownerPublicKeyHex: rec.connectResumeSnapshot.ownerPublicKeyHex,
+      ownerLabel: rec.connectResumeSnapshot.ownerLabel
+    };
+  }
+
+  /**
+   * UI 选定 key 后调用：把 connect.login record 推进到 queued，并触发
+   * 全局串行执行。
+   *
+   * 行为：
+   *   - 校验 recordId 存在 + method === "connect.login" + 当前 phase
+   *     处于 `waiting_unlock_manual` 或 `confirming`；
+   *   - 校验 ownerPublicKeyHex 必须是 record 候选列表里的一员；
+   *   - 清 timer（与 confirmByUser 同语义）；
+   *   - 写入 rec.connectLoginSelected；切到 queued；入执行队列；
+   *     drainExecutionQueue 异步触发。
+   *
+   * 失败语义：
+   *   - 上述校验失败时**不**抛错（best-effort；UI 可以在调用前先
+   *     `connectLoginRecord()` 检查）；任何路径出错时记录日志，不阻塞
+   *     其它请求。
+   */
+  async confirmConnectLogin(recordId: string, ownerPublicKeyHex: string): Promise<void> {
+    const rec = this.requestsByRecordId.get(recordId);
+    if (!rec) return;
+    if (rec.method !== "connect.login") return;
+    if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
+    const candidates = rec.connectLoginCandidates ?? [];
+    if (!candidates.some((c) => c.publicKeyHex === ownerPublicKeyHex)) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "confirmConnectLogin.invalidCandidate",
+        recordId,
+        ownerPublicKeyHex
+      });
+      return;
+    }
+    rec.connectLoginSelected = ownerPublicKeyHex;
+    // 关键（施工单 2026-06-28 002 硬切换）：login record 在用户点确认时
+    // 立即把 ownerPublicKeyHex 落到 rec；executeConnectLogin 之后建的
+    // session record 与该 ownerPublicKeyHex 一致。
+    rec.ownerPublicKeyHex = ownerPublicKeyHex;
+    this.clearConfirmTimeout(recordId);
+    this.setRecordPhase(recordId, "queued");
+    rec.enteredPhaseAt = Date.now();
+    this.executionQueue.push(recordId);
+    this.emit();
+    this.emitFeed();
+    await this.drainExecutionQueue();
+  }
+
+  /**
+   * UI 点"恢复"后调用：把 connect.resume record 推进到 queued。
+   *
+   * 行为：
+   *   - 校验 recordId 存在 + method === "connect.resume" + 当前 phase
+   *     处于 `waiting_unlock_manual` 或 `confirming`；
+   *   - snapshot 缺失（DB 不可用 / session 失效）时不推进，UI 应当展示
+   *     "该会话已失效，请重新登录"。
+   */
+  async confirmConnectResume(recordId: string): Promise<void> {
+    const rec = this.requestsByRecordId.get(recordId);
+    if (!rec) return;
+    if (rec.method !== "connect.resume") return;
+    if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return;
+    if (!rec.connectResumeSnapshot) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "confirmConnectResume.missingSnapshot",
+        recordId
+      });
+      return;
+    }
+    this.clearConfirmTimeout(recordId);
+    this.setRecordPhase(recordId, "queued");
+    rec.enteredPhaseAt = Date.now();
+    this.executionQueue.push(recordId);
+    this.emit();
+    this.emitFeed();
+    await this.drainExecutionQueue();
+  }
+
+  /**
+   * 用户在 connect 视图点"取消"。
+   *
+   * 行为：
+   *   - 校验 recordId 存在 + 当前 phase 处于可取消状态
+   *     （waiting_unlock_* / confirming / queued）；
+   *   - 走与 `rejectByUser` 同语义路径：写 failureReason="user_canceled"，
+   *     对外回 `user_rejected`。
+   */
+  async rejectConnectRequest(recordId: string): Promise<void> {
+    const rec = this.requestsByRecordId.get(recordId);
+    if (!rec) return;
+    if (!this.isRequestCancellable(rec)) return;
+    await this.finalizeRequestByCancel(recordId, "user_canceled");
+  }
+
+  /**
+   * 按 method + recordId 选取"等待用户处理"的 connect record。
+   *
+   * - `recordId` 优先；存在但 method 不符 / phase 不符时返回 null。
+   * - 缺省时按 createdAt asc 取首张 method 匹配 + phase ∈ {waiting_unlock_manual,
+   *   confirming} 的 record。
+   */
+  private pickConnectRecord(
+    method: "connect.login" | "connect.resume",
+    recordId?: string
+  ): RequestRecord | null {
+    if (recordId) {
+      const rec = this.requestsByRecordId.get(recordId);
+      if (!rec) return null;
+      if (rec.method !== method) return null;
+      if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return null;
+      return rec;
+    }
+    let pick: RequestRecord | null = null;
+    for (const [, rec] of this.requestsByRecordId) {
+      if (rec.method !== method) continue;
+      if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") continue;
+      if (!pick || rec.createdAt < pick.createdAt) pick = rec;
+    }
+    return pick;
+  }
+
   /* ============== 内部 ============== */
 
   private snapshotInternal(): ProtocolSessionSnapshot {
@@ -859,6 +1145,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     parsed: { id: string; method: ProtocolMethod; params: MethodParams<ProtocolMethod> }
   ): Promise<void> {
     // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
+    // origin 切换：触发历史载入 + 立即清空旧 origin 视图（施工单 2026-06-27
     // 002 反馈修复）。
     //   - 旧实现只更新 `currentOriginValue` 并异步加载历史，旧 origin 的
     //     卡片仍留在 `feedCommands` 里。后续 setRecordPhase → upsertFeedCommand
@@ -894,12 +1181,15 @@ export class ProtocolServiceImpl implements ProtocolService {
       status: "pending",
       enteredPhaseAt: now,
       autoApproved: false,
-      // 关键（施工单 2026-06-27 002 反馈修复）：activePublicKeyHex 在
-      // record 创建时快照一次。后续写卡（writeFeedCommandFor）从
-      // rec.activePublicKeyHex 读取，**不**再读当前 active key——
-      // 即使 popup 会话里用户切换 active key，这条 record 的元数据
-      // 也不会被污染。
-      activePublicKeyHex: this.deps.keyspace.active().activePublicKeyHex ?? "",
+      // 关键（施工单 2026-06-28 002 硬切换）：`connectSessionId` +
+      // `ownerPublicKeyHex` 在 record 创建时立即绑定一次。后续写卡
+      // **不**再读 keyspace.active()——即使 popup 会话里用户切换 active
+      // key，这条 record 的 owner / session 归属也不会被污染。
+      // 业务方法在下方 method 分支里**先**做 session 预校验，再回填
+      // 这两个字段；`connect.login` 在 bootstrapConnectLoginRecord
+      // 之后回填。
+      connectSessionId: "",
+      ownerPublicKeyHex: "",
       createdAt: now,
       updatedAt: now,
       finishedAt: 0,
@@ -911,6 +1201,112 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 决定初始 phase。`setRecordPhase` 会负责写 feed 卡 + 持久化（施工单
     // 2026-06-27 002 硬切换：feed 投影走 `buildFeedDisplay`，活卡按
     // createdAt asc 稳定排序，不再做"先占位后改 phase"的两次写）。
+    //
+    // connect.* 三方法（施工单 2026-06-28 001 硬切换）：
+    //   - login：locked → waiting_unlock_manual；unlocked → confirming
+    //     （UI 渲染"选 key + 确认"视图）。需要拉 keyspace.ready keys
+    //     候选列表，落到 rec.connectLoginCandidates。session 预校验
+    //     不适用——login 阶段还没有 session。
+    //   - resume：locked → waiting_unlock_manual；unlocked → 直接 queued
+    //     （**不**经过 confirming；施工单 4.3 + 9.2/9.3 明确要求 unlock 后
+    //     "只补解锁，自动恢复"——不再多一次人工确认）。session 预校验
+    //     失败时（不存在 / 已 revoke / origin 不匹配 / owner 不 ready）
+    //     走 fail-fast：locked 时仍要求解锁，unlocked 时直接 queued →
+    //     executing → failed（不进 confirming）。
+    //   - logout：locked → waiting_unlock_manual；unlocked → 直接 queued
+    //     （不需要额外确认 UI，"可无额外交互"）。locked + 手动解锁后
+    //     也直接入 queued。**执行完成后**调 vault.lock() 清掉 popup
+    //     当前 unlock runtime（施工单 4.4 + 5.1.3 明确要求）。
+    if (method === "connect.logout") {
+      // logout：unlock 后直接 queued → executing；不需要额外确认 UI。
+      rec.autoExecuteAfterUnlock = true;
+      this.applyManualPhaseDecision(recordId, origin, /* skipConfirmWhenUnlocked */ true);
+      return;
+    }
+    if (method === "connect.login") {
+      await this.bootstrapConnectLoginRecord(rec, parsed.params as ConnectLoginParams);
+      // login：用户必须选 key → 走 confirming 视图（与现有 manual 路径一致）。
+    } else if (method === "connect.resume") {
+      // 同步预校验 session 真值（fail-fast）。session 无效时**直接**
+      // 失败——不进 waiting_unlock / confirming / 解锁 UI。
+      const resumeParams = parsed.params as ConnectResumeParams;
+      const resumePre = await this.bootstrapConnectResumeRecord(rec, resumeParams, origin);
+      if (resumePre !== null) {
+        this.scheduleFailFastRequest(recordId, resumePre.code, resumePre.reason);
+        return;
+      }
+      // session 有效：locked → waiting_unlock_manual；unlocked → 直接
+      // queued（**不**经过 confirming）。解锁后同样直接 queued。
+      rec.connectSessionId = resumeParams.connectSessionId;
+      rec.ownerPublicKeyHex = rec.connectResumeSnapshot?.ownerPublicKeyHex ?? "";
+      rec.autoExecuteAfterUnlock = true;
+      this.applyManualPhaseDecision(recordId, origin, /* skipConfirmWhenUnlocked */ true);
+      return;
+    } else {
+      // 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于某个
+      // connectSessionId。统一预校验 session 真值，session 无效时
+      // fail-fast（与 cipher.* 旧逻辑同语义）。
+      //
+      // 业务方法：identity.get / intent.sign / cipher.encrypt /
+      // cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit。
+      const sessionParams = parsed.params as { connectSessionId?: string };
+      const sessionId = sessionParams?.connectSessionId;
+      if (typeof sessionId !== "string" || sessionId.length === 0) {
+        // 校验层应当已经拒绝；这里是兜底——任何缺 connectSessionId 的
+        // 业务 method 都不允许落 record；按 invalid_request 兜底处理。
+        this.deps.logger?.warn?.({
+          scope: "protocol.session",
+          event: "missingConnectSessionId",
+          recordId,
+          method
+        });
+        this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
+        return;
+      }
+      const sessionFail = await this.preCheckConnectSession(sessionId, origin);
+      if (sessionFail !== null) {
+        this.scheduleFailFastRequest(recordId, sessionFail.code, sessionFail.reason);
+        return;
+      }
+      // preCheck 已通过：session 真值有效 / DB 异常按降级放行（手动
+      // confirm 继续走）。把 sessionId 落到 record 必填字段；
+      // ownerPublicKeyHex 由 fetchSessionForBinding 二次校验后回填。
+      let session: ConnectSessionRecord | null = null;
+      let dbError = false;
+      try {
+        session = await this.fetchSessionForBinding(sessionId);
+      } catch (err) {
+        // DB 异常：accept 阶段无法读到 session 真值；走 manual
+        // confirm 路径，execute 阶段 `requireConnectSession` 再校验。
+        // ownerPublicKeyHex 留空——execute 阶段校验失败会写入
+        // 本地 failureReason；caller 收到 user_rejected。
+        this.deps.logger?.warn?.({
+          scope: "protocol.session",
+          event: "acceptRequest.fetchSession.dbError",
+          recordId,
+          sessionId,
+          err: err instanceof Error ? err.message : String(err)
+        });
+        dbError = true;
+      }
+      if (dbError) {
+        rec.connectSessionId = sessionId;
+        // 不 return；让 request 继续走 manual confirm / execute 路径。
+      } else if (session === null) {
+        // 极端竞态：preCheck 通过 → session 突然被外部 logout / 删除。
+        // 走 fail-fast（与 DB 异常区分）。
+        this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
+        return;
+      } else {
+        rec.connectSessionId = sessionId;
+        rec.ownerPublicKeyHex = session.ownerPublicKeyHex;
+      }
+      if (method === "cipher.encrypt" || method === "cipher.decrypt") {
+        // cipher.* session 有效：locked → waiting_unlock_manual；
+        // unlocked → confirming（与现有 manual confirm 路径一致）。
+      }
+    }
+
     const autoApproved = await this.tryAutoApprove(parsed, origin, rec);
     if (autoApproved) {
       rec.autoApproved = true;
@@ -931,20 +1327,273 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
-    // manual confirm 路径。
+    // manual confirm 路径（identity.get / intent.sign / p2pkh.transfer /
+    // feepool.*）。
+    this.applyManualPhaseDecision(recordId, origin, false);
+  }
+
+  /**
+   * 同步预校验 connect session 真值。
+   *
+   * 设计缘由（施工单 2026-06-28 001 硬切换 5.1.2 + 5.2 + 2026-06-28 002
+   * 硬切换）：在 acceptRequest 阶段同步校验 session 真值，避免无效
+   * session 走"等待解锁 / 确认" UI 才被发现；用户对该 origin 的请求
+   * 应直接 fail-fast。校验项与执行阶段 `requireConnectSession` 严格
+   * 对齐：session 真值存在 + 未 revoke + origin 匹配 + owner key ready。
+   *
+   * 返回 `null` 表示校验通过；返回 `{code, reason}` 表示校验失败：
+   *   - `code` 是对外 result.error.code（user_rejected 或 invalid_origin）；
+   *   - `reason` 是本地 ProtocolFailureReason（写进 record.failureReason）。
+   *
+   * 跨 origin 区分：accept 阶段读出 session 后立即做 origin 比对，
+   * origin 不匹配 → `invalid_origin`（与 identity.get 同语义，
+   * 让 caller 知道自己"用的 sessionId 不是该 origin 的"）。
+   *
+   * DB 异常 / DB 不可用处理（关键边界）：
+   *   - fetchSessionForBinding 抛错时**不**走 fail-fast 路径，**返回
+   *     null** 让 caller 走 manual confirm / execute 阶段再校验。
+   *     这与旧"DB unavailable 降级"边界一致：p2pkh / cipher / 业务
+   *     方法仍可继续走人工确认，execute 阶段 `requireConnectSession`
+   *     会再做一次校验。
+   */
+  private async preCheckConnectSession(
+    sessionId: string,
+    origin: string
+  ): Promise<{ code: ProtocolErrorCode; reason: ProtocolFailureReason } | null> {
+    if (!sessionId) {
+      return { code: "user_rejected", reason: "internal_error" };
+    }
+    let session: ConnectSessionRecord | null = null;
+    try {
+      session = await this.fetchSessionForBinding(sessionId);
+    } catch (err) {
+      // 关键（施工单 2026-06-28 002 收口）：DB 异常**不**触发 fail-fast。
+      // 与"DB unavailable 降级"边界一致：允许 manual confirm 继续走
+      // manual confirm 路径，execute 阶段再校验 session 真值。
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "preCheckConnectSession.dbError",
+        sessionId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+    if (session === null) {
+      // 校验失败：不存在 / 已 revoke —— 不能直接告诉 caller 哪一种，
+      // 统一 `user_rejected`。
+      return { code: "user_rejected", reason: "internal_error" };
+    }
+    // 跨 origin 区分：与 identity.get 同语义。execute 阶段
+    // `requireConnectSession` 也会做同样校验，accept 阶段提前
+    // 给出精确错误码。
+    if (session.origin !== origin) {
+      return { code: "invalid_origin", reason: "internal_error" };
+    }
+    try {
+      const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+      if (!key || !key.publicKeyHex || key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+        return { code: "user_rejected", reason: "internal_error" };
+      }
+    } catch {
+      // owner key 查询失败 → 走 fail-fast。
+      return { code: "user_rejected", reason: "internal_error" };
+    }
+    return null;
+  }
+
+  /**
+   * 按 sessionId 取 connect session 真值（不区分 origin，由 caller 决定
+   * 跨 origin 错误码）。
+   *
+   * 关键不变量（施工单 2026-06-28 002 硬切换）：
+   *   - 不存在 / 已 revoke → 返回 `null`；caller 触发 fail-fast。
+   *   - DB 异常 / DB 不可用 → **抛错**。让 caller 区分"session 失效"
+   *     与"DB 异常"两种 case：DB 异常**不**走 fail-fast 路径——与
+   *     旧"DB unavailable 降级"边界一致：p2pkh / cipher / 业务
+   *     方法仍走 manual confirm（execute 阶段再校验）。Fail-fast 只
+   *     用于"session 真值确凿无效"，**不**用于"DB 查不到"。
+   *   - 跨 origin 不在本函数判断；caller 拿到 session 后自己
+   *     `session.origin !== event.origin` 决定走 `invalid_origin`。
+   */
+  private async fetchSessionForBinding(
+    sessionId: string
+  ): Promise<ConnectSessionRecord | null> {
+    if (!this.deps.storageDb) {
+      throw new Error("connect session storage unavailable");
+    }
+    const session = await this.deps.storageDb.getConnectSession(sessionId);
+    if (!session) return null;
+    if (session.revokedAt !== null) return null;
+    return session;
+  }
+
+  /**
+   * 让一条已建 record "fail-fast"：直接 phase=failed 并回复错误 result。
+   *
+   * 设计缘由（施工单 2026-06-28 001 硬切换 5.1.2 / 5.2 + 反例反馈）：
+   *   - session 真值无效（不存在 / 已 revoke / origin 不匹配 / owner key
+   *     不 ready）时**必须直接失败**：不让用户走任何"解锁" / "确认" UI。
+   *   - 无效 session 失败路径**不依赖** vault unlock：replyErrorToRec 只
+   *     走 postMessage，不读 vault / keyspace 状态。
+   *   - 因此 locked 与 unlocked 一视同仁——fail-fast 在两种状态下都直接
+   *     收口为 phase=failed，对外回 result(ok=false)。**不**进入
+   *     waiting_unlock_manual。
+   *
+   * 关键不变量：
+   *   - fail-fast 的 record 不进 executionQueue / 不 drainExecutionQueue；
+   *     executionQueue 的 drain 检查 `lockStateValue === "unlocked"`，
+   *     走队列意味着 locked 时会被挂起，违反"直接失败"。
+   *   - 不动 setVaultLockState / autoExecuteAfterUnlock——fail-fast record
+   *     已经没有"unlock 后怎么办"的概念。
+   */
+  private scheduleFailFastRequest(
+    recordId: string,
+    code: ProtocolErrorCode,
+    reason: ProtocolFailureReason
+  ): void {
+    const rec = this.requestsByRecordId.get(recordId);
+    if (!rec) return;
+    rec.phase = "failed";
+    rec.decision = "failed";
+    rec.status = "failed";
+    rec.errorCode = code;
+    rec.errorMessage = code === "invalid_origin" ? "invalid origin" : "User rejected";
+    rec.failureReason = reason;
+    rec.finishedAt = Date.now();
+    rec.updatedAt = rec.finishedAt;
+    // 写 feed 历史卡（终态）。
+    this.writeFeedCommandFor(rec);
+    this.emitFeed();
+    // 直接向 opener 回 result。fire-and-forget：postMessage 失败不影响
+    // 本地 record 终态；与现有 dispatch 收尾保持一致。
+    void this.replyErrorToRec(rec, code, rec.errorMessage);
+    this.emit();
+  }
+
+  /**
+   * 决定 manual confirm 路径的初始 phase。
+   *
+   * `skipConfirmWhenUnlocked`：connect.logout 用此跳过 unlocked 时的 confirming
+   * 视图（"可无额外交互，快速完成"）。
+   */
+  private applyManualPhaseDecision(
+    recordId: string,
+    origin: string,
+    skipConfirmWhenUnlocked: boolean
+  ): void {
     if (this.lockStateValue === "locked") {
       this.setRecordPhase(recordId, "waiting_unlock_manual");
-      rec.enteredPhaseAt = Date.now();
+      const rec = this.requestsByRecordId.get(recordId);
+      if (rec) rec.enteredPhaseAt = Date.now();
       this.emit();
       this.emitFeed();
-    } else {
-      this.setRecordPhase(recordId, "confirming");
-      rec.enteredPhaseAt = Date.now();
-      this.startConfirmTimeout(recordId, origin);
-      this.emit();
-      this.emitFeed();
-      void this.refreshTimeoutFromOriginConfig(recordId, origin);
+      return;
     }
+    // unlocked：
+    if (skipConfirmWhenUnlocked) {
+      this.setRecordPhase(recordId, "queued");
+      const rec = this.requestsByRecordId.get(recordId);
+      if (rec) rec.enteredPhaseAt = Date.now();
+      this.executionQueue.push(recordId);
+      this.emit();
+      this.emitFeed();
+      void this.drainExecutionQueue();
+      return;
+    }
+    this.setRecordPhase(recordId, "confirming");
+    const rec = this.requestsByRecordId.get(recordId);
+    if (rec) rec.enteredPhaseAt = Date.now();
+    // 推进到 confirming 的瞬间决定 timeout 快照：
+    // sync cache 命中 → 用 cache 真值（不热更新）；
+    // cache miss → 30s 兜底（允许后续 clamp down）。
+    const snapshot = this.resolveConfirmTimeoutSnapshot(origin);
+    this.startConfirmTimeout(recordId, snapshot.initialSeconds, snapshot.startedFromFallback);
+    this.emit();
+    this.emitFeed();
+    void this.refreshTimeoutFromOriginConfig(recordId, origin);
+  }
+
+  /**
+   * 准备 `connect.login` record：拉取 ready key 列表作为选 key 候选。
+   * 任何 DB / keyspace 异常都**不**当场拒掉 request——service 仍按 manual
+   * 路径推进；执行阶段会再次校验，失败时回 `user_rejected` + 本地 reason。
+   */
+  private async bootstrapConnectLoginRecord(rec: RequestRecord, _params: ConnectLoginParams): Promise<void> {
+    try {
+      const keys = await this.deps.keyspace.listKeys();
+      const candidates = keys
+        .filter((k) => k.publicKeyHex && k.identityStatus !== "failed" && k.identityStatus !== "uninitialized")
+        .map((k) => ({ publicKeyHex: k.publicKeyHex as string, label: k.label }));
+      rec.connectLoginCandidates = candidates;
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "listKeys.failed",
+        recordId: rec.recordId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      rec.connectLoginCandidates = [];
+    }
+  }
+
+  /**
+   * 准备 `connect.resume` record：按 sessionId 查 session 真值。
+   *
+   * 设计缘由（施工单 2026-06-28 001 硬切换 5.1.2 + 反例反馈）：
+   *   - 这是 acceptRequest 阶段的**同步**预校验；session 无效时**不**
+   *     让 request 走 waiting_unlock / confirming UI，直接 fail-fast。
+   *   - 校验项与执行阶段 `requireConnectSessionForCipher` 严格对齐：
+   *     session 真值存在 + 未 revoke + origin 匹配 + owner key ready。
+   *   - 校验**通过**时同步把 session 真值落到 `rec.connectResumeSnapshot`，
+   *     避免 execute 阶段再去 DB 多走一次（执行路径仍以 DB 当前值为
+   *     准，但 snapshot 是热路径上的合理缓存）。
+   *
+   * 返回：`null` = 校验通过；`{code, reason}` = 校验失败（fail-fast）。
+   */
+  private async bootstrapConnectResumeRecord(
+    rec: RequestRecord,
+    params: ConnectResumeParams,
+    origin: string
+  ): Promise<{ code: ProtocolErrorCode; reason: ProtocolFailureReason } | null> {
+    if (!this.deps.storageDb) {
+      return { code: "user_rejected", reason: "internal_error" };
+    }
+    let session: ConnectSessionRecord | null = null;
+    try {
+      session = await this.deps.storageDb.getConnectSession(params.connectSessionId);
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "bootstrapConnectResume.getConnectSession.failed",
+        recordId: rec.recordId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return { code: "user_rejected", reason: "internal_error" };
+    }
+    if (!session) return { code: "user_rejected", reason: "internal_error" };
+    if (session.revokedAt !== null) return { code: "user_rejected", reason: "internal_error" };
+    if (session.origin !== origin) return { code: "invalid_origin", reason: "internal_error" };
+    try {
+      const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+      if (!key || !key.publicKeyHex || key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+        return { code: "user_rejected", reason: "internal_error" };
+      }
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "bootstrapConnectResume.getKey.failed",
+        recordId: rec.recordId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return { code: "user_rejected", reason: "internal_error" };
+    }
+    rec.connectResumeSnapshot = {
+      sessionId: session.sessionId,
+      ownerPublicKeyHex: session.ownerPublicKeyHex,
+      ownerLabel: session.ownerLabel,
+      claimsSnapshot: session.claimsSnapshot
+    };
+    return null;
   }
 
   /**
@@ -1008,6 +1657,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       return hit;
     }
+    // connect.* 走 manual 路径（施工单 2026-06-28 001）：
+    //   - connect.login / resume：用户必须明确点确认（login 还要选 key）；
+    //   - connect.logout：unlocked 时直接入队执行（不需要额外确认 UI），
+    //     locked 时进入 waiting_unlock_manual，解锁后直接入队。
+    // auto-approve 配置对 connect.* 不生效——caller 主动发 connect.* 已经是
+    // "希望走 connect 流程"的信号，不应被 per-origin auto-approve 跳过。
     return false;
   }
 
@@ -1094,12 +1749,28 @@ export class ProtocolServiceImpl implements ProtocolService {
         else if (rec.phase === "waiting_unlock_auto") autoRecs.push(rec);
       }
       for (const rec of manualRecs) {
-        this.setRecordPhase(rec.recordId, "confirming");
-        rec.enteredPhaseAt = Date.now();
-        this.startConfirmTimeout(rec.recordId, rec.origin);
-        // 与 resumeAfterUnlock 对齐：cache miss 时 timer 用 30s 兜底启动，
-        // refresh 异步 clamp 到 DB 真值；per-origin timeout 配置必须生效。
-        void this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
+        // autoExecuteAfterUnlock：connect.resume / connect.logout / cipher.* fail-fast
+        // 在解锁后直接 queued（不进入 confirming 视图）。
+        if (rec.autoExecuteAfterUnlock) {
+          this.setRecordPhase(rec.recordId, "queued");
+          rec.enteredPhaseAt = Date.now();
+          this.executionQueue.push(rec.recordId);
+        } else {
+          this.setRecordPhase(rec.recordId, "confirming");
+          rec.enteredPhaseAt = Date.now();
+          // 推进到 confirming 的瞬间决定 timeout 快照：
+          // sync cache 命中 → 用 cache 真值（不热更新）；
+          // cache miss → 30s 兜底（允许后续 clamp down）。
+          const snapshot = this.resolveConfirmTimeoutSnapshot(rec.origin);
+          this.startConfirmTimeout(
+            rec.recordId,
+            snapshot.initialSeconds,
+            snapshot.startedFromFallback
+          );
+          // 与 resumeAfterUnlock 对齐：cache miss 时 timer 用 30s 兜底启动，
+          // refresh 异步 clamp 到 DB 真值；per-origin timeout 配置必须生效。
+          void this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
+        }
       }
       for (const rec of autoRecs) {
         this.setRecordPhase(rec.recordId, "queued");
@@ -1123,16 +1794,29 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - cache miss 用缺省 30 兜底；DB 返回后**clamp down**（不 extend）。
    *   - 修改站点 timeout **不**热更新当前正在倒计时的 request。
    */
-  private startConfirmTimeout(recordId: string, origin: string): void {
+  /**
+   * 启动单条 confirming request 的 timeout 倒计时。
+   *
+   * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
+   *   - 调用方在“进入 confirming 的那个瞬间”已经决定本次 request 的
+   *     超时快照（同步 cache 命中 → 用 cache 值 / cache miss →
+   *     默认 30s 兜底）；本函数**不**再读全局 `originCache`——避免
+   *     cache 在 preCheck / loadHistoryForOrigin microtask flush 期间
+   *     被提前填充，timer 误读到 60s 而非走 30s 兜底。
+   *   - `startedFromFallback`：true 表示本次走了 30s 兜底，后续
+   *     `refreshTimeoutFromOriginConfig` 才允许 clamp down；false
+   *     表示本次已拿到 cache 真值，后续不允许热更新（DB 真值晚到
+   *     也**不** extend）。
+   */
+  private startConfirmTimeout(
+    recordId: string,
+    initialSeconds: number,
+    startedFromFallback: boolean
+  ): void {
     this.clearConfirmTimeout(recordId);
-    const cached = this.originCache.get(origin);
-    const seconds =
-      cached && cached.confirmTimeoutSeconds > 0
-        ? cached.confirmTimeoutSeconds
-        : DEFAULT_CONFIRM_TIMEOUT_SECONDS;
     const now = Date.now();
     const startedAtMs = now;
-    const deadlineMs = now + seconds * 1000;
+    const deadlineMs = now + initialSeconds * 1000;
     const tickHandle = setInterval(() => {
       const t = this.timersByRecordId.get(recordId);
       if (!t || !t.tickHandle) return;
@@ -1149,14 +1833,32 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       this.emitFeed();
     }, 1000);
-    this.timersByRecordId.set(recordId, { deadlineMs, tickHandle, startedAtMs });
+    this.timersByRecordId.set(recordId, {
+      deadlineMs,
+      tickHandle,
+      startedAtMs,
+      startedFromFallback
+    });
     this.emit();
   }
 
+  /**
+   * 异步刷 origin 配置后，按 DB 真值重新评估当前 request 的
+   * timeout deadline。
+   *
+   * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
+   *   - **只**对 `startedFromFallback === true` 的 request 生效——已经
+   *     走同步 cache 命中的 request **不**允许 DB 真值晚到后再热更新。
+   *     收口掉“修改站点 timeout 配置热更新正在倒计时的 request”的边界。
+   *   - `newDeadline < currentDeadline` 才更新（只缩短，不延长）。
+   *   - `newDeadline <= Date.now()` 时立即 `finalizeRequestByTimeout`，
+   *     不等下一个 tick——晚到的小 timeout 立即生效。
+   */
   private async refreshTimeoutFromOriginConfig(recordId: string, origin: string): Promise<void> {
     const cached = await this.getOriginSettingsCached(origin);
     const t = this.timersByRecordId.get(recordId);
     if (!t) return;
+    if (!t.startedFromFallback) return; // 已走 cache 真值 → 不热更新
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec || rec.phase !== "confirming") return;
     if (!cached) return;
@@ -1170,6 +1872,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.emitFeed();
       this.emit();
       if (newDeadline <= Date.now()) {
+        // 新 deadline 已过去 / 即将过去（不变量 cache miss → 5s 真值晚到
+        // 仍应立即 timeout，不等下一个 tick）。
         await this.finalizeRequestByTimeout(recordId);
       }
     }
@@ -1181,6 +1885,30 @@ export class ProtocolServiceImpl implements ProtocolService {
       clearInterval(t.tickHandle);
       this.timersByRecordId.delete(recordId);
     }
+  }
+
+  /**
+   * 决定本次 request 进入 confirming 时的 timeout 快照。
+   *
+   * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
+   *   - 同步 cache 命中 → 用 cache 真值启动 timer；后续 DB 真值晚到**不**
+   *     热更新（`startedFromFallback = false`）。
+   *   - 同步 cache miss → 用 `DEFAULT_CONFIRM_TIMEOUT_SECONDS`
+   *     （30s）兜底；后续 DB 真值晚到**只**允许 clamp down
+   *     （`startedFromFallback = true`）。
+   *
+   * 谁把 request 推进到 `confirming`，谁就在“推进那个瞬间”调用本
+   * helper 拿快照，**不**让 `startConfirmTimeout` 隐式读全局 cache。
+   */
+  private resolveConfirmTimeoutSnapshot(origin: string): {
+    initialSeconds: number;
+    startedFromFallback: boolean;
+  } {
+    const cached = this.originCache.get(origin);
+    if (cached && cached.confirmTimeoutSeconds > 0) {
+      return { initialSeconds: cached.confirmTimeoutSeconds, startedFromFallback: false };
+    }
+    return { initialSeconds: DEFAULT_CONFIRM_TIMEOUT_SECONDS, startedFromFallback: true };
   }
 
   /**
@@ -1302,6 +2030,12 @@ export class ProtocolServiceImpl implements ProtocolService {
         case "feepool.commit":
           await this.executeFeepoolCommitAndFinalize(rec);
           return null;
+        case "connect.login":
+          return await this.executeConnectLogin(rec);
+        case "connect.resume":
+          return await this.executeConnectResume(rec);
+        case "connect.logout":
+          return await this.executeConnectLogout(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -1340,9 +2074,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (params.aud !== rec.origin) {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
-    const active = this.requireActiveKey();
-    const { publicKeyHex, label, keyId } = active;
-    const publicKeyBytes = await this.fetchPublicKeyBytes(publicKeyHex, keyId);
+    // 施工单 2026-06-28 002 硬切换：subject 取自 session 绑定 owner，
+    // 不再读钱包全局 active key。session 真值在 accept 阶段已预校验
+    // 过一次；执行阶段再校验一次防"中段时间窗"内 session 注销 / 失效。
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const { keyId, label } = await this.resolveOwnerKeyMaterial(session.ownerPublicKeyHex);
+    const publicKeyBytes = await this.fetchPublicKeyBytes(session.ownerPublicKeyHex, keyId);
 
     const { resolvedClaims, projection } = buildClaimProjectionFromParams(params, {
       activeKeyLabel: label
@@ -1359,7 +2096,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       projection.map(([name, val]) => [name, valToCbor(val)])
     ];
     const envelopeCbor = cborEncode(envelopeInput);
-    const signature = await this.signWithActive(keyId, envelopeCbor);
+    const signature = await this.signWithOwnerKey(keyId, envelopeCbor);
 
     return {
       identityEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
@@ -1374,9 +2111,10 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (params.aud !== rec.origin) {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
-    const active = this.requireActiveKey();
-    const { publicKeyHex, keyId } = active;
-    const publicKeyBytes = await this.fetchPublicKeyBytes(publicKeyHex, keyId);
+    // 施工单 2026-06-28 002 硬切换：签名主体公钥取自 session 绑定 owner。
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const { keyId } = await this.resolveOwnerKeyMaterial(session.ownerPublicKeyHex);
+    const publicKeyBytes = await this.fetchPublicKeyBytes(session.ownerPublicKeyHex, keyId);
     const contentSha256 = sha256Bytes(new Uint8Array(params.content.bytes));
     const envelopeCbor = cborEncode([
       PROTOCOL_VERSION,
@@ -1389,7 +2127,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       contentSha256,
       publicKeyBytes
     ]);
-    const signature = await this.signWithActive(keyId, envelopeCbor);
+    const signature = await this.signWithOwnerKey(keyId, envelopeCbor);
     return {
       signedEnvelope: toBinaryField(envelopeCbor, "application/cbor"),
       signature: toBinaryField(signature)
@@ -1398,15 +2136,15 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeCipherEncrypt(rec: RequestRecord): Promise<CipherEncryptResult> {
     const params = rec.params as CipherEncryptParams;
-    const active = this.requireActiveKey();
-    const { publicKeyHex, keyId } = active;
-    const siteKey = await this.deriveSiteKeyWithActive(keyId, rec.origin);
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const siteKey = await this.deriveSiteKeyWithSession(session, rec.origin);
     const inner = cborEncode([
       PROTOCOL_VERSION,
       params.contentType,
       new Uint8Array(params.content.bytes)
     ]);
     const { nonce, cipherbytes } = aesGcmEncrypt(siteKey, inner);
+    void this.touchConnectSession(session);
     return {
       nonce: toBinaryField(nonce),
       cipherbytes: toBinaryField(cipherbytes)
@@ -1415,11 +2153,10 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeCipherDecrypt(rec: RequestRecord): Promise<CipherDecryptResult> {
     const params = rec.params as CipherDecryptParams;
-    const active = this.requireActiveKey();
-    const { publicKeyHex, keyId } = active;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
     let siteKey: Uint8Array;
     try {
-      siteKey = await this.deriveSiteKeyWithActive(keyId, rec.origin);
+      siteKey = await this.deriveSiteKeyWithSession(session, rec.origin);
     } catch {
       throw protocolError("decrypt_failed", "Decrypt failed");
     }
@@ -1450,10 +2187,323 @@ export class ProtocolServiceImpl implements ProtocolService {
     ) {
       throw protocolError("decrypt_failed", "Decrypt failed");
     }
+    void this.touchConnectSession(session);
     return {
       contentType,
       content: toBinaryField(contentBytes)
     };
+  }
+
+  /* ============== connect.login / connect.resume / connect.logout（施工单 2026-06-28 001） ============== */
+
+  /**
+   * 校验所有业务方法 / connect.* 用的 connect session 真值。
+   *
+   * 校验项（缺一不可）：
+   *   - sessionId 对应的 ConnectSessionRecord 必须存在；
+   *   - session.origin === rec.origin（不允许跨 origin 复用 session）；
+   *   - session.revokedAt === null（已吊销 session 立即拒掉）；
+   *   - session.ownerPublicKeyHex 对应的 key 必须仍存在且 identityStatus
+   *     === "ready"（已删 / failed / uninitialized 一律拒掉）。
+   *
+   * 失败语义：
+   *   - session 不存在 / 跨 origin / 已 revoked / owner 不 ready 一律对外
+   *     回 `user_rejected`；本地 reason 写 `internal_error`（具体原因
+   *     不对外暴露，避免 site 通过 result 反推本地状态）。
+   *   - DB 不可用时也按 internal_error 拒掉——cipher / connect.* / 业务
+   *     方法路径不接受"session 不可查"的中间态。
+   *   - 跨 origin 单独走 `invalid_origin`（与 identity.get 同语义），
+   *     其它失败统一 `user_rejected`。
+   *
+   * 关键不变量（施工单 2026-06-28 002 硬切换）：
+   *   - accept 阶段已校验过 session 真值；执行阶段再校验一次防"中段时间
+   *     窗"内 session 被 logout / key 被删除——"旧请求漂进新 session" /
+   *     "session 失效但旧 request 继续跑"都是不允许的。
+   */
+  private async requireConnectSession(
+    rec: RequestRecord,
+    sessionId: string
+  ): Promise<ConnectSessionRecord> {
+    if (!this.deps.storageDb) {
+      throw localFailure("internal_error", "connect session storage unavailable");
+    }
+    if (!sessionId) {
+      throw localFailure("internal_error", "connect session id missing");
+    }
+    let session: ConnectSessionRecord | null = null;
+    try {
+      session = await this.fetchSessionForBinding(sessionId);
+    } catch (err) {
+      // DB 异常：与"DB unavailable 降级"边界一致——execute 阶段
+      // 也走"未查到 session"路径，统一 user_rejected。
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "requireConnectSession.dbError",
+        sessionId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw localFailure("internal_error", "connect session storage unavailable");
+    }
+    if (!session) {
+      // 重新做一次更精确的区分：可能是被删 / 被 revoke / 跨 origin。
+      // 跨 origin 必须给 caller `invalid_origin` 让其能定位问题；
+      // 其它统一 `user_rejected`。
+      let raw: ConnectSessionRecord | null = null;
+      try {
+        raw = await this.deps.storageDb.getConnectSession(sessionId);
+      } catch (err) {
+        this.deps.logger?.warn?.({
+          scope: "protocol.connect",
+          event: "requireConnectSession.rawGet.dbError",
+          sessionId,
+          err: err instanceof Error ? err.message : String(err)
+        });
+        throw localFailure("internal_error", "connect session storage unavailable");
+      }
+      if (raw && raw.origin !== rec.origin) {
+        throw protocolError("invalid_origin", "connect session origin mismatch");
+      }
+      throw localFailure("internal_error", "connect session not found / revoked");
+    }
+    const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+    if (!key || !key.publicKeyHex || key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      throw localFailure("internal_error", "connect session owner key not ready");
+    }
+    return session;
+  }
+
+  /**
+   * 用 session 绑定的 owner public key 解析当前 vault 内部借用句柄（keyId）。
+   *
+   * 设计缘由（施工单 2026-06-28 002 硬切换）：`ownerKeyId` **不**允许
+   * 落 session 持久化；执行时按 `ownerPublicKeyHex` → keyspace.getKey() →
+   * `keyId` 解析。`keyId` 是 vault 内部细节，按需解析。
+   */
+  private async resolveOwnerKeyMaterial(
+    ownerPublicKeyHex: string
+  ): Promise<{ keyId: string; label: string }> {
+    const key = await this.deps.keyspace.getKey(ownerPublicKeyHex);
+    if (!key || !key.keyId) {
+      throw localFailure("internal_error", "owner key material not available");
+    }
+    return { keyId: key.keyId, label: key.label };
+  }
+
+  /**
+   * 用 session 绑定的 owner public key 派生站点密钥。
+   *
+   * 设计缘由：cipher.* 必须基于 session 绑定的 key；**不**读取钱包全局
+   * active key。`keyId` 在闭包内由 `resolveOwnerKeyMaterial` 解析出，
+   * 不在 `ConnectSessionRecord` 持久化。
+   */
+  private async deriveSiteKeyWithSession(
+    session: ConnectSessionRecord,
+    exactOrigin: string
+  ): Promise<Uint8Array> {
+    const { keyId } = await this.resolveOwnerKeyMaterial(session.ownerPublicKeyHex);
+    return this.deps.vault.withPrivateKey(keyId, async (material) => {
+      return deriveSiteKey(material.hex, exactOrigin);
+    });
+  }
+
+  /**
+   * 更新 session.lastUsedAt。fire-and-forget：cipher 解密 / 加密的
+   * 主路径**不**等待 DB 写；写失败时 DB 侧记日志但不影响主流程。
+   */
+  private touchConnectSession(session: ConnectSessionRecord): void {
+    if (!this.deps.storageDb) return;
+    session.lastUsedAt = Date.now();
+    const next: ConnectSessionRecord = { ...session, lastUsedAt: session.lastUsedAt };
+    void this.deps.storageDb.putConnectSession(next).catch((err) => {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect",
+        event: "touchConnectSession.putFailed",
+        sessionId: session.sessionId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+    });
+  }
+
+  /**
+   * 执行 connect.login。
+   *
+   * 关键不变量（施工单 2026-06-28 002 硬切换）：
+   *   - ownerPublicKeyHex 必须是用户在 UI 上选定的那把 key 公钥 hex
+   *     （来自 rec.connectLoginSelected；用户在 confirmConnectLogin 时写入）；
+   *   - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**落
+   *     session record；vault 内部 keyId 按需在执行时从 keyspace 解析。
+   *   - owner key 必须在 keyspace 内可查，且 identityStatus === "ready"；
+   *   - DB 不可用时直接拒掉（fail-closed）。
+   */
+  private async executeConnectLogin(rec: RequestRecord): Promise<ConnectLoginResult> {
+    const params = rec.params as ConnectLoginParams;
+    const ownerPublicKeyHex = rec.connectLoginSelected;
+    if (!ownerPublicKeyHex) {
+      throw localFailure("internal_error", "connect.login: no owner selected");
+    }
+    const key = await this.deps.keyspace.getKey(ownerPublicKeyHex);
+    if (!key || !key.publicKeyHex) {
+      throw localFailure("internal_error", "connect.login: owner key not found");
+    }
+    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      throw localFailure("internal_error", "connect.login: owner key not ready");
+    }
+    if (!this.deps.storageDb) {
+      throw localFailure("internal_error", "connect.login: session storage unavailable");
+    }
+    // 一次解析 claims 真值快照（与 identity.get 同语义，但不构造
+    // envelope / signature）。仅 user-provided claim 不在 builtin claim
+    // 里时落 "unresolved"，与现有 claim projection 行为一致。
+    //
+    // 不直接复用 buildClaimProjectionFromParams：它要求 params 是
+    // IdentityGetParams 类型；connect.login 没有 aud/iat/exp 语义，
+    // 只用 `claims` 列表走 builtin claim 解析。
+    const resolvedClaims = resolveClaims(params.claims, (name) =>
+      resolveBuiltinClaim(name, { activeKeyLabel: key.label })
+    );
+    const now = Date.now();
+    const sessionId = this.nextRecordId();
+    const record: ConnectSessionRecord = {
+      sessionId,
+      origin: rec.origin,
+      ownerPublicKeyHex: key.publicKeyHex,
+      ownerLabel: key.label,
+      claimsSnapshot: resolvedClaims,
+      createdAt: now,
+      lastUsedAt: now,
+      revokedAt: null
+    };
+    await this.deps.storageDb.putConnectSession(record);
+    return {
+      connectSessionId: sessionId,
+      ownerPublicKeyHex: key.publicKeyHex,
+      resolvedClaims: resolvedClaims,
+      resolvedAt: now
+    };
+  }
+
+  /**
+   * 执行 connect.resume。
+   *
+   * 关键不变量：
+   *   - session 真值必须仍在 DB 内（rec.connectResumeSnapshot 由
+   *     `bootstrapConnectResumeRecord` 在 acceptRequest 时预填，执行时
+   *     仍以 DB 当前值为准；中间态变化以 DB 为真值）；
+   *   - origin / revokedAt / owner ready 三道闸在执行时**重新**校验一次
+   *     （即使 popup 当前文档 unlock runtime 仍在，session 也可能被外部
+   *     logout / key 删除 / 别的 tab 改 DB）；
+   *   - 失败语义与 cipher 路径一致。
+   */
+  private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
+    const params = rec.params as ConnectResumeParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+    if (!key || !key.publicKeyHex) {
+      throw localFailure("internal_error", "connect.resume: owner key not found");
+    }
+    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      throw localFailure("internal_error", "connect.resume: owner key not ready");
+    }
+    const now = Date.now();
+    const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
+    if (this.deps.storageDb) {
+      try {
+        await this.deps.storageDb.putConnectSession(next);
+      } catch (err) {
+        this.deps.logger?.warn?.({
+          scope: "protocol.connect",
+          event: "touchConnectSession.putFailed",
+          sessionId: session.sessionId,
+          err: err instanceof Error ? err.message : String(err)
+        });
+      }
+    }
+    return {
+      connectSessionId: session.sessionId,
+      ownerPublicKeyHex: session.ownerPublicKeyHex,
+      resolvedClaims: session.claimsSnapshot,
+      resolvedAt: now
+    };
+  }
+
+  /**
+   * 执行 connect.logout。
+   *
+   * 关键不变量（施工单 2026-06-28 001 硬切换 4.4 / 5.1.3）：
+   *   - 找不到 session 不算错——返回 ok=true，revokedAt 取当前时刻
+   *     （幂等 logout）；
+   *   - 跨 origin 的 sessionId 直接拒掉（`requireConnectSessionForCipher`
+   *     的 origin 校验一致语义）；
+   *   - 写 revokedAt 失败时按 internal_error 拒掉——caller 必须能感知
+   *     logout 没真正生效，否则下一次 resume 仍可能成功。
+   *   - **执行成功后**清掉 popup 当前 unlock runtime：调 `vault.lock()`。
+   *     这是施工单 4.4 + 5.1.3 明确要求的"清掉 popup unlock runtime"。
+   *     `vault.locked` 事件触发 popup 顶层 `vault.onStatusChange` 监听，
+   *     调用 `setVaultLockState(true)`：
+   *       - 当前 executing 的 logout request 走完，结果照常发；
+   *       - 其它 confirming / queued request 进入 waiting_unlock_manual
+   *         （与现有 relock 行为一致）；
+   *       - vault.lock 内部还会 publish `vault.locked` 事件，业务插件
+   *         释放 namespace 资源。
+   *   - logout 在 locked 路径上的"幂等成功"也调 vault.lock——只要 caller
+   *     显式 logout，就清 unlock runtime；不允许"logout 成功但 vault 还
+   *     unlocked"的中间态。
+   */
+  private async executeConnectLogout(rec: RequestRecord): Promise<ConnectLogoutResult> {
+    const params = rec.params as ConnectLogoutParams;
+    if (!this.deps.storageDb) {
+      throw localFailure("internal_error", "connect.logout: session storage unavailable");
+    }
+    const existing = await this.deps.storageDb.getConnectSession(params.connectSessionId);
+    const now = Date.now();
+    let result: ConnectLogoutResult;
+    if (!existing) {
+      // 幂等：session 不存在也直接回 ok=true。site 自己应当处理
+      // "sessionId 本地丢失 → 不需要 logout"的情况，但即使重复 logout
+      // 也不报错。
+      result = {
+        connectSessionId: params.connectSessionId,
+        revokedAt: now
+      };
+    } else if (existing.origin !== rec.origin) {
+      throw protocolError("invalid_origin", "connect.logout: session origin mismatch");
+    } else if (existing.revokedAt !== null) {
+      // 已 revoke 视为幂等成功。
+      result = {
+        connectSessionId: existing.sessionId,
+        revokedAt: existing.revokedAt
+      };
+    } else {
+      const next: ConnectSessionRecord = { ...existing, revokedAt: now };
+      await this.deps.storageDb.putConnectSession(next);
+      result = {
+        connectSessionId: existing.sessionId,
+        revokedAt: now
+      };
+    }
+    // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
+    // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
+    // 任意一步失败即视为 logout 不完整；fire-and-forget 会让 caller 在
+    // vault.lock 抛出（例如 keyspace.onVaultLocked 失败 / 业务订阅者抛
+    // 错）时仍收到 ok=true，导致"session 已吊销但 unlock runtime 还在"
+    // 的状态错位。
+    //
+    // 副作用：DB 里 session.revokedAt 已被本次写入；即使 vault.lock
+    // 抛错、对外回 ok=false，session 真值层面 logout 已生效——下次
+    // connect.resume / cipher.* 仍会按 fail-fast 路径失败（session
+    // revoked）。这是 fail-closed 的安全语义，不是 bug。
+    try {
+      await this.deps.vault.lock();
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.connect",
+        event: "logout.vaultLock.failed",
+        sessionId: params.connectSessionId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw localFailure("internal_error", "connect.logout: vault lock failed");
+    }
+    return result;
   }
 
   /* ============== p2pkh.transfer ============== */
@@ -1472,7 +2522,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     try {
-      const active = this.requireActiveKey();
+      // 施工单 2026-06-28 002 硬切换：p2pkh.transfer 走 session 绑定 owner，
+      // 不再读全局 active key。execute 阶段先 requireConnectSession 校验
+      // session 仍有效，再把 session 绑定的 owner public key 交给
+      // p2pkhService（plugin-p2pkh 内部按 ownerPublicKeyHex 解析 keyId
+      // 走选币 + 签名）。
+      const session = await this.requireConnectSession(rec, params.connectSessionId);
+      const ownerPublicKeyHex = session.ownerPublicKeyHex;
       const card = this.feedCommands.find((c) => c.id === rec.recordId);
       if (card) {
         card.recipientAddress = params.recipientAddress;
@@ -1483,11 +2539,16 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       const preview = await this.deps.p2pkhService.prepareTransfer({
         assetId: "bsv",
+        ownerPublicKeyHex,
         recipientAddress: params.recipientAddress,
         amountSatoshis: params.amountSatoshis,
         feeRateSatoshisPerKb: params.feeRateSatoshisPerKb ?? DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB
       });
-      const submitted = await this.deps.p2pkhService.submitTransfer(preview);
+      // preview 透传 ownerPublicKeyHex；submit 阶段 plugin-p2pkh
+      // 会校验 resource / 签名 key 与 owner 一致，跨 owner 复用
+      // preview 直接拒绝。
+      const previewWithOwner = { ...preview, ownerPublicKeyHex };
+      const submitted = await this.deps.p2pkhService.submitTransfer(previewWithOwner);
       const txid = submitted.txid ?? preview.txid;
       const result: P2pkhTransferResult = {
         txid,
@@ -1528,7 +2589,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     try {
-      const poolKey = `${rec.origin}::${params.counterpartyPublicKeyHex}`;
+      // 施工单 2026-06-28 002 硬切换：feepool 走 session 绑定 owner；
+      // poolKey 补 ownerPublicKeyHex 维度（不再仅按 origin + counterparty）。
+      const session = await this.requireConnectSession(rec, params.connectSessionId);
+      const ownerPublicKeyHex = session.ownerPublicKeyHex;
+      const poolKey = `${rec.origin}::${ownerPublicKeyHex}::${params.counterpartyPublicKeyHex}`;
       const prior = await this.deps.storageDb.getFeePool(poolKey);
       const originSettings = await this.getOriginSettingsCached(rec.origin);
 
@@ -1545,8 +2610,8 @@ export class ProtocolServiceImpl implements ProtocolService {
         nextServerAmount = params.amountSatoshis;
       }
 
-      const active = this.requireActiveKey();
-      const clientPrivateKeyHex = await this.getActiveKeyHex(active.keyId);
+      const { keyId } = await this.resolveOwnerKeyMaterial(ownerPublicKeyHex);
+      const clientPrivateKeyHex = await this.getActiveKeyHex(keyId);
       const operationId = this.nextRecordId();
       const preparedAt = Date.now();
 
@@ -1582,7 +2647,8 @@ export class ProtocolServiceImpl implements ProtocolService {
           prior,
           clientPrivateKeyHex,
           params.counterpartyPublicKeyHex,
-          poolAmount
+          poolAmount,
+          ownerPublicKeyHex
         );
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
@@ -1612,7 +2678,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           sequenceNumber: 0xfffffffe,
           serverAmount: nextServerAmount,
           serverPublicKeyHex: params.counterpartyPublicKeyHex,
-          clientPublicKeyHex: active.publicKeyHex,
+          clientPublicKeyHex: ownerPublicKeyHex,
           targetAmount: prior.totalAmount
         });
         const clientSig = await sdkClientSignUpdatedSpendTx({
@@ -1641,7 +2707,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           sequenceNumber: 0xffffffff,
           serverAmount: prior.serverAmount,
           serverPublicKeyHex: params.counterpartyPublicKeyHex,
-          clientPublicKeyHex: active.publicKeyHex,
+          clientPublicKeyHex: ownerPublicKeyHex,
           targetAmount: prior.totalAmount
         });
         const closeClientSig = await sdkClientSignUpdatedSpendTx({
@@ -1655,7 +2721,8 @@ export class ProtocolServiceImpl implements ProtocolService {
           prior,
           clientPrivateKeyHex,
           params.counterpartyPublicKeyHex,
-          newPoolAmount
+          newPoolAmount,
+          ownerPublicKeyHex
         );
         baseTxHex = baseResp.baseTxHex;
         baseTxOutputIndex = baseResp.baseTxOutputIndex;
@@ -1679,9 +2746,15 @@ export class ProtocolServiceImpl implements ProtocolService {
         draftClientSignBytes = newClientSig;
       }
 
+      // 关键（施工单 2026-06-28 002 硬切换）：pending op 必须绑定
+      // connectSessionId + ownerPublicKeyHex。commit 阶段按 origin +
+      // connectSessionId + ownerPublicKeyHex + counterpartyPublicKeyHex
+      // 四元组校验 op，禁止跨 session / 跨 owner 复用 operationId。
       this.pendingOps.set(operationId, {
         operationId,
         origin: rec.origin,
+        connectSessionId: rec.connectSessionId,
+        ownerPublicKeyHex,
         counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
         action,
         preparedAt,
@@ -1754,12 +2827,22 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 建 A-Tx（client P2PKH UTXO → 2-of-2 multisig output）；create /
    * close_and_recreate 复用。返回 `baseTxHex` / `baseTxOutputIndex` /
    * `baseTxid` / `amount`（multisig output 大小）。
+   *
+   * 设计缘由（施工单 2026-06-28 002 硬切换）：
+   *   - UTXO 选币按 `ownerPublicKeyHex`（session 绑定 owner）走，**不**
+   *     读全局 active key 的 namespace。`clientPrivateKeyHex` 由调用方
+   *     从 session owner 解析出来的 keyId 借出，与 ownerPublicKeyHex
+   *     在 plugin-p2pkh 内部必须同源。
+   *   - 旧实现读 `listUtxos({ assetId: "bsv" })` 等于"取当前 active key
+   *     namespace"——会与签名 key 错位。本实现强制传 owner 让 plugin-p2pkh
+   *     内部按 owner 过滤 UTXO。
    */
   private async buildAndMaybeBuildBaseTx(
     prior: ProtocolFeePoolRecord | null,
     clientPrivateKeyHex: string,
     serverPublicKeyHex: string,
-    poolAmount: number
+    poolAmount: number,
+    ownerPublicKeyHex: string
   ): Promise<{
     baseTxHex: string;
     baseTxOutputIndex: number;
@@ -1769,9 +2852,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!this.deps.p2pkhService) {
       throw localFailure("internal_error", "p2pkh service required for fee pool base tx");
     }
-    const utxos = await this.deps.p2pkhService.listUtxos({ assetId: "bsv" });
+    // 关键（002 硬切换）：UTXO 选币按 owner 走，**不**读全局 active key。
+    // plugin-p2pkh 内部 `listUtxos` filter 已支持 `ownerPublicKeyHex`。
+    const utxos = await this.deps.p2pkhService.listUtxos({
+      assetId: "bsv",
+      ownerPublicKeyHex
+    });
     if (utxos.length === 0) {
-      throw localFailure("internal_error", "No P2PKH UTXOs to fund fee pool");
+      throw localFailure(
+        "internal_error",
+        `No P2PKH UTXOs to fund fee pool for owner ${ownerPublicKeyHex}`
+      );
     }
     const resp = await sdkBuildBaseTx({
       clientUtxos: utxos.map((u) => ({ txid: u.txid, vout: u.vout, satoshis: u.value })),
@@ -1804,6 +2895,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     try {
+      // 施工单 2026-06-28 002 硬切换：feepool.commit 必须按 origin +
+      // connectSessionId + ownerPublicKeyHex + counterpartyPublicKeyHex
+      // 四元组校验 pending op，禁止跨 session / 跨 owner 复用 operationId。
+      const session = await this.requireConnectSession(rec, params.connectSessionId);
       const op = this.pendingOps.get(params.operationId);
       if (!op) {
         throw localFailure("unknown_operation", "operationId not found in current session");
@@ -1811,14 +2906,19 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (op.origin !== rec.origin) {
         throw localFailure("cross_origin_operation", "operationId from a different origin");
       }
+      if (op.connectSessionId !== session.sessionId) {
+        throw localFailure("internal_error", "operationId from a different connect session");
+      }
+      if (op.ownerPublicKeyHex !== session.ownerPublicKeyHex) {
+        throw localFailure("internal_error", "operationId bound to a different owner");
+      }
       if (op.counterpartyPublicKeyHex !== params.counterpartyPublicKeyHex) {
         throw localFailure("internal_error", "counterpartyPublicKeyHex mismatch");
       }
       if (params.counterpartySignatures.length === 0) {
         throw localFailure("internal_error", "counterpartySignatures must not be empty");
       }
-      const active = this.requireActiveKey();
-      const clientPublicKeyHex = active.publicKeyHex;
+      const clientPublicKeyHex = session.ownerPublicKeyHex;
       const mainServerSignBytes = binaryFieldsToBytes(params.counterpartySignatures);
       const closeServerSignBytes =
         params.closeCounterpartySignatures && params.closeCounterpartySignatures.length > 0
@@ -1888,7 +2988,8 @@ export class ProtocolServiceImpl implements ProtocolService {
         }
       }
 
-      const poolKey = `${rec.origin}::${params.counterpartyPublicKeyHex}`;
+      // 施工单 2026-06-28 002 硬切换：poolKey 补 ownerPublicKeyHex 维度。
+      const poolKey = `${rec.origin}::${session.ownerPublicKeyHex}::${params.counterpartyPublicKeyHex}`;
       let newRecord: ProtocolFeePoolRecord | null = null;
       const draftTxid = await computeTxidFromHex(op.draftSpendTxHex);
       const draftTxHex = op.draftSpendTxHex;
@@ -1899,6 +3000,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         newRecord = {
           poolKey,
           origin: rec.origin,
+          ownerPublicKeyHex: session.ownerPublicKeyHex,
           counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
           baseTxid,
           baseTxHex: op.baseTxHex ?? "",
@@ -1910,25 +3012,24 @@ export class ProtocolServiceImpl implements ProtocolService {
           updatedAt: Date.now()
         };
         await this.deps.storageDb.putFeePool(newRecord);
-      } else if (op.action === "spend") {
-        if (op.priorPool) {
-          const baseTxid = op.priorPool.baseTxid;
-          const baseTxHex = op.priorPool.baseTxHex;
-          newRecord = {
-            poolKey: op.priorPool.poolKey,
-            origin: rec.origin,
-            counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
-            baseTxid,
-            baseTxHex,
-            totalAmount: op.draftTotalAmount,
-            serverAmount: op.nextServerAmount,
-            draftSpendTxHex: op.draftSpendTxHex,
-            draftClientSignBytes: bytesToBinaryField(op.draftClientSignBytes),
-            lastOperationId: op.operationId,
-            updatedAt: Date.now()
-          };
-          await this.deps.storageDb.putFeePool(newRecord);
-        }
+      } else if (op.action === "spend" && op.priorPool) {
+        const baseTxid = op.priorPool.baseTxid;
+        const baseTxHex = op.priorPool.baseTxHex;
+        newRecord = {
+          poolKey: op.priorPool.poolKey,
+          origin: rec.origin,
+          ownerPublicKeyHex: session.ownerPublicKeyHex,
+          counterpartyPublicKeyHex: params.counterpartyPublicKeyHex,
+          baseTxid,
+          baseTxHex,
+          totalAmount: op.draftTotalAmount,
+          serverAmount: op.nextServerAmount,
+          draftSpendTxHex: op.draftSpendTxHex,
+          draftClientSignBytes: bytesToBinaryField(op.draftClientSignBytes),
+          lastOperationId: op.operationId,
+          updatedAt: Date.now()
+        };
+        await this.deps.storageDb.putFeePool(newRecord);
       }
       if (op.action === "close_and_recreate" && op.closeDraftTxHex) {
         closeDraftTxid = await computeTxidFromHex(op.closeDraftTxHex);
@@ -1975,38 +3076,29 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /* ============== vault / 私钥 helpers ============== */
 
+  /**
+   * 借出 private key 拿 hex 文本。feepool 等场景要拿私钥 hex 给 SDK 签名
+   * 草稿；通过 `keyId` 借用，不走全局 active key。
+   */
   private async getActiveKeyHex(keyId: string): Promise<string> {
     return this.deps.vault.withPrivateKey(keyId, async (material) => material.hex);
   }
 
-  private requireActiveKey() {
-    const active = this.deps.keyspace.active();
-    if (!active.activePublicKeyHex) {
-      throw protocolError("active_key_unavailable", "No active key available");
-    }
-    const id = this.deps.keyspace.requireActiveKey();
-    if (!id.publicKeyHex) {
-      throw protocolError("active_key_unavailable", "No active key available");
-    }
-    return {
-      publicKeyHex: id.publicKeyHex,
-      label: id.label,
-      keyId: id.keyId
-    };
-  }
-
-  private async signWithActive(keyId: string, bytes: Uint8Array): Promise<Uint8Array> {
+  /**
+   * 用指定 key（由 `ownerPublicKeyHex` 解析出的 vault keyId）做 compact
+   * secp256k1 签名。identity.get / intent.sign / 任何业务方法**都**走
+   * 这条路径——不允许 fallback 到钱包全局 active key。
+   */
+  private async signWithOwnerKey(keyId: string, bytes: Uint8Array): Promise<Uint8Array> {
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       return signCompactSecp256k1(material.hex, bytes);
     });
   }
 
-  private async deriveSiteKeyWithActive(keyId: string, exactOrigin: string): Promise<Uint8Array> {
-    return this.deps.vault.withPrivateKey(keyId, async (material) => {
-      return deriveSiteKey(material.hex, exactOrigin);
-    });
-  }
-
+  /**
+   * 取 owner 压缩公钥字节（用于 envelope / subject 字段）。走 vault 借用
+   * 私钥 hex → noble secp256k1 推出 compressed pubkey。
+   */
   private async fetchPublicKeyBytes(publicKeyHex: string, keyId: string): Promise<Uint8Array> {
     return this.deps.vault.withPrivateKey(keyId, async (material) => {
       const pub = secp256k1.getPublicKey(hexToBytes(material.hex), true);
@@ -2209,21 +3301,21 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 把 RequestRecord 投影成 ProtocolCommandRecord，并 upsert。
    *
-   * 关键（施工单 2026-06-27 002 反馈修复）：
-   *   - `activePublicKeyHex` 从 `rec.activePublicKeyHex` 读取——即 record
-   *     创建时快照下来的值，**不**再读 `keyspace.active()`。这样
-   *     符合 contract `ProtocolCommandRecord.activePublicKeyHex` 注释：
-   *     "执行该命令时 active public key hex；写记录时取一次"。
+   * 关键（施工单 2026-06-27 002 反馈修复 + 施工单 2026-06-28 002 硬切换）：
+   *   - `connectSessionId` + `ownerPublicKeyHex` 从 `rec` 字段读取——即 record
+   *     创建时快照下来的值，**不**再读 `keyspace.active()` / 钱包全局
+   *     active key。这样符合 contract `ProtocolCommandRecord.ownerPublicKeyHex`
+   *     注释："record 在创建时快照的 owner public key hex"。
    *   - 后续即便用户在 popup 会话里切换 active key，旧卡片的元数据
    *     不会被污染。
    */
   private writeFeedCommandFor(rec: RequestRecord): void {
-    const card = this.makeCommandRecord(rec, rec.activePublicKeyHex);
+    const card = this.makeCommandRecord(rec);
     this.upsertFeedCommand(card);
     this.persistRecord(card);
   }
 
-  private makeCommandRecord(rec: RequestRecord, activePublicKeyHex: string): ProtocolCommandRecord {
+  private makeCommandRecord(rec: RequestRecord): ProtocolCommandRecord {
     const isTerminal = this.isTerminalPhase(rec.phase);
     const prev = this.feedCommands.find((c) => c.id === rec.recordId);
     const status =
@@ -2253,7 +3345,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       claimsSummary: this.summarizeClaims(rec.params),
       contentType: this.summarizeContentType(rec.params),
       payloadSize: this.summarizePayloadSize(rec.params),
-      activePublicKeyHex,
+      connectSessionId: rec.connectSessionId,
+      ownerPublicKeyHex: rec.ownerPublicKeyHex,
       createdAt: rec.createdAt,
       updatedAt: rec.updatedAt,
       finishedAt: rec.finishedAt,
@@ -2357,8 +3450,17 @@ export class ProtocolServiceImpl implements ProtocolService {
         if (token !== this.historyLoadToken) {
           return;
         }
+        // 关键（002 硬切换 + cancel/timeout 测试稳定）：
+        // 推迟 cache 写入到下一个 macrotask——避免在 acceptRequest 的
+        // preCheckConnectSession await flush 期间同步写 cache，让
+        // startConfirmTimeout 在 cache miss 状态下用 30s 兜底。
+        // 直接 cache.set 会导致 002 新增的 preCheck 链路下 microtask
+        // flush 时 cache 已被填充，timer 立即读到 60s 而不是兜底 30s。
         if (originRec) {
-          this.originCache.set(origin, normalizeOriginSettings(originRec, origin));
+          setTimeout(() => {
+            if (token !== this.historyLoadToken) return;
+            this.originCache.set(origin, normalizeOriginSettings(originRec, origin));
+          }, 0);
         }
         // 按 recordId 合并：内存活记录优先覆盖 DB 旧记录。
         const mergedById = new Map<string, ProtocolCommandRecord>();
@@ -2368,7 +3470,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         }
         for (const rec of this.requestsByRecordId.values()) {
           if (rec.origin !== origin) continue;
-          const card = this.makeCommandRecord(rec, rec.activePublicKeyHex);
+          const card = this.makeCommandRecord(rec);
           mergedById.set(rec.recordId, card);
         }
         // 写入前再次确认 currentOrigin 没切换；否则丢弃（旧批次晚到）。
@@ -2411,7 +3513,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const out: ProtocolCommandRecord[] = [];
     for (const rec of this.requestsByRecordId.values()) {
       if (rec.origin !== origin) continue;
-      out.push(this.makeCommandRecord(rec, rec.activePublicKeyHex));
+      out.push(this.makeCommandRecord(rec));
     }
     return out;
   }

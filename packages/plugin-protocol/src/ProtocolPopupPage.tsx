@@ -247,6 +247,7 @@ export function ProtocolPopupPage() {
       ) : null}
       <div className="protocol-popup__content">
         {snap.phase === "error" ? <SessionErrorBanner t={t} /> : null}
+        <ConnectSection t={t} service={service} feed={feed} />
         <ProtocolCommandFeed
           t={t}
           feed={feed}
@@ -445,4 +446,250 @@ function SessionErrorBanner({
       })}
     </div>
   );
+}
+
+/* ============== 施工单 2026-06-28 001：connect 视图（login / resume / logout） ============== */
+
+/**
+ * `connect.login` 视图（5.5.1）。
+ *
+ * 用途：用户首次登录时显式选择 key。
+ * 渲染条件：当前 popup 文档 unlocked + 存在 connect.login request 处于
+ * `confirming` 阶段。
+ */
+function ConnectLoginView({
+  t,
+  service,
+  recordId,
+  availableKeys
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
+  recordId: string;
+  availableKeys: Array<{ publicKeyHex: string; label: string }>;
+}) {
+  // 受控：用户当前选中的 key publicKeyHex（不写入 rec，由 confirm 时一次性传）。
+  const [selected, setSelected] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!selected || busy) return;
+    setBusy(true);
+    try {
+      await service.confirmConnectLogin(recordId, selected);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="protocol-connect protocol-connect--login" aria-label="connect login">
+      <header className="protocol-connect__header">
+        <h2 className="protocol-connect__title">
+          {t("protocol.connect.login.title", { defaultValue: "选择登录身份" })}
+        </h2>
+        <p className="protocol-connect__desc">
+          {t("protocol.connect.login.desc", {
+            defaultValue:
+              "该站点请求建立 connect 会话。请选择一把 key 作为本次会话的绑定身份；后续所有外部业务方法（identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）都将只走这把 key，不再读取全局 active key。"
+          })}
+        </p>
+      </header>
+      <form onSubmit={submit} className="protocol-connect__form">
+        {availableKeys.length === 0 ? (
+          <div className="protocol-connect__empty">
+            {t("protocol.connect.login.empty", {
+              defaultValue:
+                "当前钱包没有 ready 的 key。请先回到 Keymaster 创建或导入一把 key。"
+            })}
+          </div>
+        ) : (
+          <ul className="protocol-connect__keylist" role="radiogroup">
+            {availableKeys.map((k) => {
+              const checked = selected === k.publicKeyHex;
+              return (
+                <li key={k.publicKeyHex} className="protocol-connect__keyitem">
+                  <label className="protocol-connect__keylabel">
+                    <input
+                      type="radio"
+                      name="connect-login-key"
+                      value={k.publicKeyHex}
+                      checked={checked}
+                      disabled={busy}
+                      onChange={(e) => setSelected(e.currentTarget.value)}
+                    />
+                    <span className="protocol-connect__keylabel-text">{k.label}</span>
+                    <code className="protocol-connect__keylabel-hex">
+                      {k.publicKeyHex.slice(0, 8)}…{k.publicKeyHex.slice(-6)}
+                    </code>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        <div className="protocol-popup__actions">
+          <button
+            type="button"
+            className="protocol-popup__back-top"
+            disabled={busy}
+            onClick={() => {
+              void service.rejectConnectRequest(recordId);
+            }}
+          >
+            {t("protocol.connect.cancel", { defaultValue: "取消" })}
+          </button>
+          <button
+            type="submit"
+            className="protocol-popup__back-top protocol-popup__back-top--primary"
+            disabled={busy || !selected || availableKeys.length === 0}
+          >
+            {t("protocol.connect.login.confirm", { defaultValue: "用此 key 登录" })}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+/**
+ * `connect.logout` 视图（5.5.3）。
+ *
+ * 用途：caller 主动注销。
+ * 行为：
+ *   - unlocked 路径**不**弹额外 UI（直接执行）；
+ *   - 本组件是兜底：万一 service 把 connect.logout 推到 confirming（locked 路径解锁后），
+ *     仍能正常完成收口。
+ */
+function ConnectLogoutView({
+  t,
+  service,
+  recordId
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
+  recordId: string;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <section className="protocol-connect protocol-connect--logout" aria-label="connect logout">
+      <header className="protocol-connect__header">
+        <h2 className="protocol-connect__title">
+          {t("protocol.connect.logout.title", { defaultValue: "注销 connect 会话" })}
+        </h2>
+        <p className="protocol-connect__desc">
+          {t("protocol.connect.logout.desc", {
+            defaultValue:
+              "该站点请求注销本次 connect 会话。注销后该 sessionId 的 resume / cipher 将全部失败，需要重新 login。"
+          })}
+        </p>
+      </header>
+      <div className="protocol-popup__actions">
+        <button
+          type="button"
+          className="protocol-popup__back-top"
+          disabled={busy}
+          onClick={() => {
+            void service.rejectConnectRequest(recordId);
+          }}
+        >
+          {t("protocol.connect.cancel", { defaultValue: "取消" })}
+        </button>
+        <button
+          type="button"
+          className="protocol-popup__back-top protocol-popup__back-top--primary"
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              // 走 cancel 路径：caller 已经发了 logout，再次点确认应当
+              // 让 service 主动 confirm（解锁后 service 直接走 queued
+              // 不会到这里）。
+              // 这里只兜底 reject；unlocked 时 service 已自行推进 executing。
+              await service.rejectConnectRequest(recordId);
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {t("protocol.connect.logout.confirm", { defaultValue: "确认注销" })}
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/**
+ * connect 视图容器：根据 service 当前状态渲染 login 视图（resume 不再需要
+ * 确认视图，详见下文）。
+ *
+ * 设计缘由（施工单 2026-06-28 001 硬切换 + 反例反馈）：
+ *   - connect.login：locked → waiting_unlock_manual；unlocked → confirming
+ *     渲染"选 key + 确认"视图。
+ *   - connect.resume：locked → waiting_unlock_manual；unlocked → 直接 queued
+ *     → executing → approved（**不**经过 confirming UI）。这是施工单
+ *     4.3 + 9.2/9.3 明确要求的"只补解锁，自动恢复"。resume UI 完全由锁屏
+ *     页 + 锁屏摘要承担，unlocked 后**不**弹任何"恢复"按钮——避免
+ *     误导用户再次确认。
+ *   - connect.logout：unlocked → 直接 queued → executing；不弹 UI。
+ *   - popup 顶部插入"connect 视图"区域（仅 login），**不**与命令流活卡
+ *     合并——connect 视图是"会话级"语义，而命令流卡片是"单条 request"
+ *     语义。两者并存，UI 不复用卡位。
+ */
+function ConnectSection({
+  t,
+  service,
+  feed
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
+  feed: ProtocolCommandFeedState;
+}) {
+  // 仅在 unlocked 状态下显示 connect 视图；锁屏时走 LockScreenPage。
+  if (feed.lockSummary !== null) return null;
+
+  // connect.login：进入 confirming 后渲染"选 key"视图。
+  const login = service.connectLoginRecord();
+  if (login) {
+    return (
+      <ConnectLoginView
+        t={t}
+        service={service}
+        recordId={login.recordId}
+        availableKeys={login.availableKeys}
+      />
+    );
+  }
+  // connect.resume：unlocked 后不渲染任何视图；service 已直接执行。
+  // 该 record 会进入历史区作为终态卡片，UI 自然能看到结果。
+  // connect.logout：兜底视图，仅当 service 把 logout 推到 confirming 时
+  // 才出现（unlocked 路径下不会出现）。
+  const logoutRecordId = pickConfirmingConnectRecordId(service, "connect.logout");
+  if (logoutRecordId) {
+    return (
+      <ConnectLogoutView
+        t={t}
+        service={service}
+        recordId={logoutRecordId}
+      />
+    );
+  }
+  return null;
+}
+
+/**
+ * 兜底 helper：通过 `feedSnapshot().commands` 找当前是否存在某种
+ * connect method 的 confirming record。connect.logout 在 unlocked 时**不**
+ * 经过 confirming，所以通常返回 null；保留是为了 future-proof。
+ */
+function pickConfirmingConnectRecordId(service: ProtocolService, method: "connect.logout"): string | null {
+  const feed = service.feedSnapshot();
+  for (const c of feed.commands) {
+    if (c.method === method && c.phase === "confirming" && c.decision === "pending") {
+      return c.id;
+    }
+  }
+  return null;
 }

@@ -65,10 +65,11 @@ export function verifyCompactSecp256k1(
 export const CIPHER_CONTEXT_V1 = "keymaster:cipher:v1";
 
 /**
- * 从 active key 的私钥 + `exactOrigin` 推导 32 字节 siteKey。
+ * 从 session 绑定的 owner 私钥材料 + `exactOrigin` 推导 32 字节 siteKey。
  *
  * 严格按 `HMAC-SHA256(privateKeySecret, "keymaster:cipher:v1|"+exactOrigin)`。
  * `exactOrigin` 必须原样来自 `event.origin`；本函数不做任何归一化。
+ * 这里不关心上层是怎么拿到私钥的，只负责按当前 session 的 owner 材料做派生。
  */
 export function deriveSiteKey(privateKeyHex: string, exactOrigin: string): Uint8Array {
   const priv = hexToBytes(privateKeyHex);

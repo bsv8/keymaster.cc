@@ -93,7 +93,14 @@ function makeMockService(): MockService {
       onStatusChange: (_h: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void) => () => undefined,
       unlock: async () => undefined
     })) as unknown as MockService["getVaultService"],
-    setVaultLockState: () => undefined
+    setVaultLockState: () => undefined,
+    // 施工单 2026-06-28 001：connect.* UI 接口的 mock。origin settings
+    // 测试不实际触发 connect 流程；只要求接口存在。
+    connectLoginRecord: () => null,
+    connectResumeRecord: () => null,
+    confirmConnectLogin: async () => undefined,
+    confirmConnectResume: async () => undefined,
+    rejectConnectRequest: async () => undefined
   };
   return svc;
 }

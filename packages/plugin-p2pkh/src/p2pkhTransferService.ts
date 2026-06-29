@@ -38,8 +38,17 @@ export interface P2pkhTransferServiceDeps {
   /**
    * 当前 active key。p2pkhService.rebindActiveKey 内部用 requireReadyKey
    * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHex 必填）。
+   *
+   * 002 硬切换：仍保留作为兜底（旧 widget / overview 路径）；新路径
+   * 全部走 `getKeyForOwner` 按 session 绑定 owner 取 key。
    */
   getActiveKey: () => ReadyKeyIdentity;
+  /**
+   * 按 owner public key hex 解析 ReadyKeyIdentity（002 硬切换）。
+   * 解析失败时抛 `Error`，调用方（plugin-protocol）已经校验过 owner
+   * key ready 才进入 transfer 流程。
+   */
+  getKeyForOwner?: (ownerPublicKeyHex: string) => Promise<ReadyKeyIdentity>;
   /** 硬切换 002：业务插件注入的 logger。 */
   logger?: PluginLogger;
 }
@@ -55,11 +64,15 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const validated = validateTransferInput(input);
       const network = assetIdToNetwork(validated.assetId);
       const db = await deps.getDb();
-      const active = deps.getActiveKey();
-      const resourceId = makeResourceId(active.keyId, network);
+      const owner = await resolveOwnerKeyIdentity(deps, input);
+      const resourceId = makeResourceId(owner.keyId, network);
       const resource = await db.getResource(resourceId);
       if (!resource) {
-        throw new Error(`P2PKH resource not found for active key (${network})`);
+        throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
+      }
+      if (resource.publicKeyHex !== owner.publicKeyHex) {
+        // 防御：namespace DB 的 resource 与 owner 不一致 → 拒绝。
+        throw new Error("P2PKH resource publicKeyHex does not match owner");
       }
       validateAddressForNetwork(validated.recipientAddress, network);
 
@@ -69,7 +82,10 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       );
       const allUtxos = await db.listUtxos();
       const candidates = allUtxos.filter(
-        (u) => u.resourceId === resource.resourceId && !reserved.has(`${u.txid}:${u.vout}`)
+        (u) =>
+          u.resourceId === resource.resourceId &&
+          u.publicKeyHex === owner.publicKeyHex &&
+          !reserved.has(`${u.txid}:${u.vout}`)
       );
       if (candidates.length === 0) {
         throw buildAllocationError({
@@ -83,11 +99,11 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 
       const sorted = [...candidates].sort((a, b) => a.value - b.value);
       const { address: changeAddress, publicKeyHex } = await deps.vault.withPrivateKey(
-        active.keyId,
+        owner.keyId,
         async (material) => deriveP2pkhAddress(material.hex, network)
       );
       const signRawTx = async (unsigned: UnsignedTx, selected: P2pkhUtxo[]): Promise<string> =>
-        deps.vault.withPrivateKey(active.keyId, async (material) => signP2pkhTx(unsigned, selected, material, publicKeyHex));
+        deps.vault.withPrivateKey(owner.keyId, async (material) => signP2pkhTx(unsigned, selected, material, publicKeyHex));
 
       let bestError: AllocationFailureInfo | undefined;
       for (let count = 1; count <= sorted.length; count++) {
@@ -102,7 +118,15 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           signRawTx
         });
         if (solution.ok) {
-          return solution.preview;
+          // 关键（002 硬切换）：preview 必须携带 owner 信息，让
+          // submit 阶段可校验"同一 owner 才能广播"——避免 caller / widget
+          // 在 prepare 与 submit 之间切换 owner 导致"用 keyA 准备、
+          // 用 keyB 广播"的错位。
+          return {
+            ...solution.preview,
+            ownerPublicKeyHex: owner.publicKeyHex,
+            keyId: owner.keyId
+          };
         }
         bestError = solution.error;
       }
@@ -120,15 +144,15 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 
     async submit(preview) {
       const db = await deps.getDb();
-      const active = deps.getActiveKey();
+      const owner = await resolveOwnerKeyIdentity(deps, preview);
       const network = preview.network;
-      const resourceId = makeResourceId(active.keyId, network);
+      const resourceId = makeResourceId(owner.keyId, network);
       const resource = await db.getResource(resourceId);
       if (!resource) {
-        throw new Error(`P2PKH resource not found for active key (${network})`);
+        throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
       }
-      if (resource.publicKeyHex !== active.publicKeyHex) {
-        throw new Error("Active key changed before broadcast");
+      if (resource.publicKeyHex !== owner.publicKeyHex) {
+        throw new Error("P2PKH resource publicKeyHex does not match owner");
       }
       if (assetIdToNetwork(preview.assetId) !== network) {
         throw new Error("Preview asset does not match active network");
@@ -142,8 +166,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const submissionBase: P2pkhLocalSubmission = {
         id: submissionId,
         resourceId: resource.resourceId,
-        keyId: active.keyId,
-        publicKeyHex: active.publicKeyHex,
+        keyId: owner.keyId,
+        publicKeyHex: owner.publicKeyHex,
         network,
         assetId: preview.assetId,
         canonicalTxid: preview.txid,
@@ -184,7 +208,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             event: "transfer.broadcast.rejected",
             message: `P2PKH transfer broadcast rejected: ${preview.txid}`,
             data: { resourceId: resource.resourceId, network, txid: preview.txid },
-            keyScope: { publicKeyHex: active.publicKeyHex },
+            keyScope: { publicKeyHex: owner.publicKeyHex },
             error: { name: err instanceof Error ? err.name : "Error", message: msg }
           });
           return {
@@ -200,8 +224,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const localInputClaimIds = await claimInputs(db, {
           submissionId,
           resourceId: resource.resourceId,
-          keyId: active.keyId,
-          publicKeyHex: active.publicKeyHex,
+          keyId: owner.keyId,
+          publicKeyHex: owner.publicKeyHex,
           network,
           inputs: preview.allocation.selected
         });
@@ -216,7 +240,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           event: "transfer.broadcast.unknown",
           message: `P2PKH transfer broadcast unknown: ${preview.txid}`,
           data: { resourceId: resource.resourceId, network, txid: preview.txid },
-          keyScope: { publicKeyHex: active.publicKeyHex },
+          keyScope: { publicKeyHex: owner.publicKeyHex },
           error: { name: err instanceof Error ? err.name : "Error", message: msg }
         });
         deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
@@ -237,8 +261,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const localInputClaimIds = await claimInputs(db, {
         submissionId,
         resourceId: resource.resourceId,
-        keyId: active.keyId,
-        publicKeyHex: active.publicKeyHex,
+        keyId: owner.keyId,
+        publicKeyHex: owner.publicKeyHex,
         network,
         inputs: preview.allocation.selected
       });
@@ -265,7 +289,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         event: "transfer.broadcast.accepted",
         message: `P2PKH transfer broadcast accepted: ${broadcastRes.canonicalTxid}`,
         data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid, txidIntegrity: broadcastRes.txidIntegrity },
-        keyScope: { publicKeyHex: active.publicKeyHex }
+        keyScope: { publicKeyHex: owner.publicKeyHex }
       });
       if (broadcastRes.txidIntegrity === "mismatch") {
         deps.logger?.warn({
@@ -273,7 +297,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           event: "transfer.broadcast.providerInconsistent",
           message: `P2PKH transfer broadcast provider-inconsistent: ${broadcastRes.canonicalTxid}`,
           data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid },
-          keyScope: { publicKeyHex: active.publicKeyHex }
+          keyScope: { publicKeyHex: owner.publicKeyHex }
         });
       }
 
@@ -288,6 +312,63 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       };
     }
   };
+}
+
+/**
+ * 按 owner public key hex 解析 ReadyKeyIdentity（施工单 002 硬切换）。
+ *
+ * 解析优先级（与 P2pkhUtxoFilter / P2pkhTransferInput 维度一致）：
+ *   1. `input.ownerPublicKeyHex` 走 `deps.getKeyForOwner`（002 新路径）。
+ *      若 `getKeyForOwner` 未注入（兼容老 widget / overview 路径），
+ *      退到 active key 并校验 publicKeyHex 一致——保留旧路径的
+ *      "单 key 走 active"语义。
+ *   2. `input.keyId` 走 `deps.getActiveKey` 但**强制**校验
+ *      `keyId === activeIdentity.keyId` —— 防止 caller 用"旧 keyId"
+ *      偷渡到 active key namespace。
+ *   3. 老 widget / overview 路径**无** ownerPublicKeyHex / keyId：
+ *      兜底走 active key。
+ */
+async function resolveOwnerKeyIdentity(
+  deps: P2pkhTransferServiceDeps,
+  input: { ownerPublicKeyHex?: string; keyId?: string }
+): Promise<ReadyKeyIdentity> {
+  if (input.ownerPublicKeyHex) {
+    const active = deps.getActiveKey();
+    if (active.publicKeyHex === input.ownerPublicKeyHex) {
+      // 兼容老 widget / overview 路径：ownerPublicKeyHex 与当前
+      // active key publicKeyHex 一致 → 直接走 active key，不强制
+      // 走 `getKeyForOwner` 解析。
+      return active;
+    }
+    if (!deps.getKeyForOwner) {
+      throw new Error(
+        `P2PKH transfer: owner ${input.ownerPublicKeyHex} != active key ${active.publicKeyHex} and getKeyForOwner is not wired`
+      );
+    }
+    const key = await deps.getKeyForOwner(input.ownerPublicKeyHex);
+    if (!key || !key.keyId || !key.publicKeyHex) {
+      throw new Error(
+        `P2PKH transfer: owner ${input.ownerPublicKeyHex} is not ready (no keyId / publicKeyHex)`
+      );
+    }
+    if (key.publicKeyHex !== input.ownerPublicKeyHex) {
+      throw new Error(
+        `P2PKH transfer: resolved key publicKeyHex ${key.publicKeyHex} != requested owner ${input.ownerPublicKeyHex}`
+      );
+    }
+    return key;
+  }
+  if (input.keyId) {
+    const active = deps.getActiveKey();
+    if (active.keyId !== input.keyId) {
+      throw new Error(
+        `P2PKH transfer: requested keyId ${input.keyId} != active keyId ${active.keyId}`
+      );
+    }
+    return active;
+  }
+  // 兜底：老 widget / overview 路径无 owner / keyId 信息，走 active key。
+  return deps.getActiveKey();
 }
 
 type AllocationFailureInfo = {

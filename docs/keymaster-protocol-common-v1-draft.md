@@ -37,6 +37,65 @@
 - `closing` 是 popup **窗口**生命周期的主动通知，**不**是“单条 request 收尾”的通知；popup 可以连续处理多条 request，期间不发 `closing`。
 - `popup.closed === true` 是浏览器给的兜底真值。两者并联收敛到断开态，本协议**不**引入心跳、**不**引入 MessageChannel。
 
+## 三层会话语义（施工单 2026-06-28 001 硬切换）
+
+V1 把"窗口生命周期 / connect 会话 / popup 解锁运行时"分到三条独立的时间线上：
+
+```txt
+popup transport session
+  = popup 窗口级 postMessage 收发会话
+
+connect auth session
+  = caller 对当前 origin 已获得授权的持久会话
+
+popup unlock runtime
+  = 当前 popup 文档内可直接执行私钥操作的短期运行时材料
+```
+
+约束：
+
+1. **transport session 断开 ≠ auth session 失效**。`closing` /
+   `popup.closed === true` 只是窗口断开信号，**不**直接吊销
+   connect session；caller 后续可以靠 `connect.resume` 恢复。
+2. **auth session 存在 ≠ popup 当前文档已解锁**。session 真值在
+   `keymaster.protocol` 的 `connectSessions` store 里持久化；popup
+   当前文档刷新 / 关闭后，session 真值仍在；解锁 runtime 丢失。
+3. **unlock runtime 失效 ≠ caller 需要重新登录**。caller 通过
+   `connect.resume` 即可触发"补 unlock"流程，不需要重新选 key、
+   不需要重新确认身份。
+
+popup 当前文档的 unlock runtime 由 vault 在 `locked` 时清空全部
+派生材料（masterKey / masterSalt）实现；popup 刷新 / 关闭后
+window 全局变量被回收，效果与 locked 等价。**任何时候都不允许把
+unlock runtime 写入 `localStorage` / `sessionStorage` / `IndexedDB`**。
+
+业务请求（identity.get / intent.sign / cipher.encrypt / cipher.decrypt /
+p2pkh.transfer / feepool.prepare / feepool.commit）的执行身份**统一**
+按 `connectSessionId` 区分（施工单 2026-06-28 002 硬切换）：
+
+- 所有上述方法**必须**携带 `connectSessionId`；service 通过 sessionId
+  找到绑定 key，**不**读取钱包全局 active key。
+- owner 唯一真值 = session 绑定的 `ownerPublicKeyHex`；`ownerKeyId` **不**
+  出现在 protocol contract / session record / request record / result
+  payload / fee pool key / pending operation key / service 分支判断里。
+- **Confirm timeout 语义（施工单 2026-06-28 002 硬切换收口）**：
+  - request 进入 `confirming` 的瞬间决定 timeout 快照——同步 cache
+    命中则用 cache 真值（`startedFromFallback = false`），cache miss
+    则用默认 `30s` 兜底（`startedFromFallback = true`）。
+  - DB 真值晚到时**只**允许**缩短** deadline（clamp down），**不**允许
+    延长；已走 cache 真值启动的 request **不**允许热更新。
+  - newDeadline `<=` 当前时间时立即 `finalizeRequestByTimeout`，
+    不等下一个 tick——晚到的更小 timeout 立即超时。
+- `connect.login` 是唯一不要求 `connectSessionId` 的入口方法——它
+  本身负责建 session。`connect.resume` / `connect.logout` 必传
+  `connectSessionId`。
+- 旧钱包主站语义"按全局 active key 执行"已被硬切换收口——所有
+  外部业务方法都属于某个 `connectSessionId`。
+- 登录入口走 `connect.login` → 持久化 `connectSessionId`；之后
+  所有业务方法（identity.get / intent.sign / cipher.* / p2pkh.transfer /
+  feepool.*）都必传 `connectSessionId`；不推荐用 `identity.get` 当登录
+  入口真值。
+
 ## Popup 生命周期与业务请求生命周期
 
 V1 把"窗口生命周期"与"业务请求生命周期"分到两条独立的时间线上。

@@ -611,10 +611,21 @@ function ReadOnlyBody({
           </dd>
         </>
       ) : null}
-      <dt>{t("protocol.feed.activeKey", { defaultValue: "签名公钥" })}</dt>
+      {/* 施工单 2026-06-28 002 硬切换：owner 唯一真值 = `ownerPublicKeyHex`。
+          业务方法（除 connect.login）展示"该 request 所属 session owner 公钥"；
+          connect.login 记录上 ownerPublicKeyHex 在用户点确认时落定。 */}
+      <dt>{t("protocol.feed.ownerKey", { defaultValue: "owner 公钥" })}</dt>
       <dd>
-        <code>{command.activePublicKeyHex || "n/a"}</code>
+        <code>{command.ownerPublicKeyHex || "n/a"}</code>
       </dd>
+      {command.connectSessionId ? (
+        <>
+          <dt>{t("protocol.feed.connectSessionId", { defaultValue: "session id" })}</dt>
+          <dd>
+            <code>{command.connectSessionId}</code>
+          </dd>
+        </>
+      ) : null}
       {command.errorCode ? (
         <>
           <dt>{t("protocol.feed.error", { defaultValue: "错误" })}</dt>

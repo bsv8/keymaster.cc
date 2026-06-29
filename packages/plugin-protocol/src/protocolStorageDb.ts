@@ -1,22 +1,42 @@
 // packages/plugin-protocol/src/protocolStorageDb.ts
-// popup 协议存储 IndexedDB（commands / origins / feePools 三 store）。
+// popup 协议存储 IndexedDB（commands / origins / feePools / connectSessions
+// 四 store）。
 //
-// 设计缘由（施工单 002 硬切换）：
+// 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 硬切换）：
 //   - DB 名：`keymaster.protocol`。**不**挂到 `keyspace.openKeyStorage()`
 //     的 per-key namespace，因为命令历史按 domain 走，按 key 走会让
 //     "切了 key 看不到旧站点历史" 这种行为偷偷出现。
-//   - DB version：2。本次把单 `commands` store 升级为三 store。
+//   - DB version：5。
+//       - v2：单 `commands` store 升级为三 store（commands / origins / feePools）；
+//       - v3：feePools record 结构变了（新增 `draftSpendTxHex` /
+//         `draftClientSignBytes`），升级时清空 feePools store（不迁数据）；
+//       - v4：新增 `connectSessions` store（auth session 真值；不含
+//         unlock runtime / 密码）；
+//       - v5（施工单 2026-06-28 002 硬切换）：owner 真值收口成
+//         `ownerPublicKeyHex`，`ownerKeyId` 不再落库；feePool key 维度
+//         补 `ownerPublicKeyHex`；旧 `connectSessions` / `feePools` /
+//         `commands` 全部清空（owner 真值、session 归属、fee pool key、
+//         业务方法 contract 都改了——为了保留旧数据而引入双读 / 双写
+//         不值得；直接重建 DB 更简单）。commands 同步加
+//         `connectSessionId` + `ownerPublicKeyHex` 字段。
 //   - `commands`：命令流历史，主键 `record.id`（与 transport requestId
 //     解耦）。索引 `origin` / `updatedAt` / compound `[origin, updatedAt]`。
 //   - `origins`：按 exact origin 存站点级配置；主键 `origin`。
-//   - `feePools`：按 `${origin}::${counterpartyPublicKeyHex}` 复合 key 存
-//     费用池状态；主键 `poolKey`；索引 `origin`（便于按 origin 列出）。
+//   - `feePools`：按 `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`
+//     复合 key 存费用池状态（v5 补 ownerPublicKeyHex 维度）；主键 `poolKey`；
+//     索引 `origin`（便于按 origin 列出）。
+//   - `connectSessions`：auth session 真值；主键 `sessionId`；索引 `origin`
+//     （便于按 origin 列出该站点的所有 session 含已 revoked 的）。
 //   - **不**存 `operations` store（pending fee pool operation 走内存）。
 //   - **不**存敏感正文：参见 "历史持久化范围"。
+//   - **不**存密码 / 不存 unlock runtime 任何派生材料。
+//   - **不**存 `ownerKeyId`：vault 内部借用句柄按需从 keyspace 解析。
 //   - DB 异常一律 `console.error + rethrow`；调用方拿到错误时自己决定
-//     怎么降级（p2pkh → manual confirm；feepool → fail-closed）。
+//     怎么降级（p2pkh → manual confirm；feepool → fail-closed；connect
+//     session 不可用 → caller 被要求重新登录）。
 
 import type {
+  ConnectSessionRecord,
   ProtocolCommandRecord,
   ProtocolFeePoolRecord,
   ProtocolOriginSettingsRecord,
@@ -24,13 +44,18 @@ import type {
 } from "@keymaster/contracts";
 
 const DB_NAME = "keymaster.protocol";
-// V3：fee pool 持久化记录加 `draftSpendTxHex` / `draftClientSignBytes` 两字段。
-// V3 迁移策略：旧 `feePools` store 的结构不可信；onupgradeneeded 里直接
-// 清空该 store（粗暴简单，不做数据迁移）。
-const DB_VERSION = 3;
+// V5（施工单 2026-06-28 002 硬切换）：owner 真值收口成 `ownerPublicKeyHex`，
+// `ownerKeyId` 不再落库；feePool 持久化 key 补 `ownerPublicKeyHex` 维度；
+// `connectSessions` / `feePools` / `commands` 全部清空重建。
+// 设计缘由：硬切换改的是 owner 真值 / session 归属 / fee pool key /
+// 业务方法 contract；为了保留旧数据而引入双读 / 双写 / 旧 shape 兼容
+// 分支比直接重建 DB 更复杂也更脏。命令历史按 origin 归档，跨升级
+// 失去历史不影响协议功能。
+const DB_VERSION = 5;
 const STORE_COMMANDS = "commands";
 const STORE_ORIGINS = "origins";
 const STORE_FEE_POOLS = "feePools";
+const STORE_CONNECT_SESSIONS = "connectSessions";
 
 /**
  * 打开协议存储 DB。同一进程内只打开一次；后续 `openProtocolStorageDb()`
@@ -80,6 +105,45 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
         const store = db.createObjectStore(STORE_FEE_POOLS, { keyPath: "poolKey" });
         store.createIndex("origin", "origin", { unique: false });
       }
+      // V4 迁移（施工单 2026-06-28 001 硬切换）：新增 connectSessions store；
+      // 主键 sessionId，索引 origin（便于按 origin 列出该站点的所有
+      // session，包括已 revoked）。无任何"密码 / 解锁运行时材料"字段
+      // 落盘。
+      if (!db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
+        const store = db.createObjectStore(STORE_CONNECT_SESSIONS, { keyPath: "sessionId" });
+        store.createIndex("origin", "origin", { unique: false });
+      }
+      // V5 迁移（施工单 2026-06-28 002 硬切换）：重建 commands / feePools /
+      // connectSessions 三 store；origins 不动（per-origin 站点配置是
+      // 业务策略，不属于"owner 真值 / 业务方法 contract"硬切范围）。
+      // commands / feePools / connectSessions 数据全部清空——
+      // owner 真值、session 归属、fee pool key、业务方法 contract 全部
+      // 改过；保留旧数据需要为每个老 shape 写双读分支，比重建更脏。
+      // site 升级后 caller 须重新走 connect.login；老 sessionId 全部
+      // 失效——这是设计明确的边界。
+      if (oldVersion < 5) {
+        for (const storeName of [
+          STORE_COMMANDS,
+          STORE_FEE_POOLS,
+          STORE_CONNECT_SESSIONS
+        ]) {
+          if (db.objectStoreNames.contains(storeName)) {
+            db.deleteObjectStore(storeName);
+          }
+        }
+        // commands：主键 id，索引 origin / updatedAt / [origin, updatedAt]。
+        const cmdStore = db.createObjectStore(STORE_COMMANDS, { keyPath: "id" });
+        cmdStore.createIndex("origin", "origin", { unique: false });
+        cmdStore.createIndex("updatedAt", "updatedAt", { unique: false });
+        cmdStore.createIndex("origin_updatedAt", ["origin", "updatedAt"], { unique: false });
+        // feePools：v5 补 ownerPublicKeyHex 维度，但 IndexedDB 不需要单独的
+        // ownerPublicKeyHex 索引（listFeePoolsByOrigin 已经够用）。如果
+        // 未来需要按 owner 维度拉取，可再加 `origin_owner` 索引。
+        const poolStore = db.createObjectStore(STORE_FEE_POOLS, { keyPath: "poolKey" });
+        poolStore.createIndex("origin", "origin", { unique: false });
+        const sessionStore = db.createObjectStore(STORE_CONNECT_SESSIONS, { keyPath: "sessionId" });
+        sessionStore.createIndex("origin", "origin", { unique: false });
+      }
       void newVersion;
     };
     req.onsuccess = () => {
@@ -106,6 +170,9 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
   }
   function txFeePools(mode: IDBTransactionMode): IDBObjectStore {
     return db.transaction(STORE_FEE_POOLS, mode).objectStore(STORE_FEE_POOLS);
+  }
+  function txConnectSessions(mode: IDBTransactionMode): IDBObjectStore {
+    return db.transaction(STORE_CONNECT_SESSIONS, mode).objectStore(STORE_CONNECT_SESSIONS);
   }
 
   return {
@@ -306,6 +373,68 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
         });
       } catch (err) {
         console.error("[protocol.storageDb] listFeePoolsByOrigin failed", {
+          origin,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+
+    /* ============== connectSessions（施工单 2026-06-28 001） ============== */
+    async putConnectSession(record: ConnectSessionRecord): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = txConnectSessions("readwrite").put(record);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error ?? new Error("putConnectSession failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] putConnectSession failed", {
+          sessionId: record.sessionId,
+          origin: record.origin,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async getConnectSession(sessionId: string): Promise<ConnectSessionRecord | null> {
+      try {
+        return await new Promise<ConnectSessionRecord | null>((resolve, reject) => {
+          const req = txConnectSessions("readonly").get(sessionId);
+          req.onsuccess = () => {
+            const v = req.result as ConnectSessionRecord | undefined;
+            resolve(v ?? null);
+          };
+          req.onerror = () => reject(req.error ?? new Error("getConnectSession failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] getConnectSession failed", {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async listConnectSessionsByOrigin(origin: string): Promise<ConnectSessionRecord[]> {
+      try {
+        return await new Promise<ConnectSessionRecord[]>((resolve, reject) => {
+          const store = txConnectSessions("readonly");
+          const idx = store.index("origin");
+          const out: ConnectSessionRecord[] = [];
+          const req = idx.openCursor(IDBKeyRange.only(origin));
+          req.onsuccess = () => {
+            const cursor = req.result;
+            if (cursor) {
+              out.push(cursor.value as ConnectSessionRecord);
+              cursor.continue();
+            } else {
+              resolve(out);
+            }
+          };
+          req.onerror = () => reject(req.error ?? new Error("listConnectSessionsByOrigin failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] listConnectSessionsByOrigin failed", {
           origin,
           error: err instanceof Error ? err.message : String(err)
         });
