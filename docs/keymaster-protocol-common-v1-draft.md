@@ -42,9 +42,31 @@
 popup 在 V1 不再仅是"第三方站点拉起的窗口"，而是统一为 **Session Window**。同一份代码、同一个 `/protocol/v1/popup` 入口承载两种启动模式：
 
 - `connect` mode（缺省）：第三方 client web `window.open` 拉起，等待外部 request；
-- `appView` mode：Keymaster launcher 拉起，URL 上加 `?boot=appView`；Session Window 在挂载时进入"等待 launcher bootstrap"状态，launcher 通过一次性同源 postMessage 移交 `AppBootstrapPayload`（含 unlock runtime + connectSessionId + launchToken + app 信息）。
+- `appView` mode：Keymaster launcher 拉起，URL 上加 `?boot=appView`；Session Window 在挂载时进入"等待 launcher bootstrap"状态，launcher 通过一次性同源 `__keymaster_session_window_bootstrap__.acquire(token)` 把 `AppBootstrapPayload`（含 unlock runtime + connectSessionId + launchToken + app 信息）移交过去。token 一次性消费，命中即从 launcher registry 删除。
 
 两种 mode 在启动后走同一套 service / 同一套 transport / 同一套协议方法族。差异只存在于**启动阶段**。
+
+#### plugin-apps 内部 launcher（施工单 2026-06-29 002 硬切换）
+
+Keymaster 内部 `plugin-apps` 是 `appView` mode 的**唯一**业务调用方。app 启动链路：
+
+- `plugin-apps` 读取本地 `appsCatalog.json`（首个 app = `https://justnote.apps.bsv8.com/`），在 `/apps` 页面与首页 widget 展示 app 卡片；
+- 用户点击 `Open App` 时，`plugin-apps` **只**调 `protocol.service.launchAppView(input)`，自己**不**直接 import `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL；
+- `protocol.service.launchAppView(...)` 内部一次性收口整套 launcher 流程：
+  1. 校验 vault 已解锁、active key ready；
+  2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
+  3. 解析 claims 快照；
+  4. **预建 connect session**（与 `connect.login` 同语义，但用户不在 popup 走 auth UI）；
+  5. 调 `vault.exportUnlockRuntimeForSessionWindow()` 导出一性 unlock runtime 交接包；
+  6. 生成新 `launchToken`；
+  7. 组装 `AppBootstrapPayload`；
+  8. 在 launcher `window` 上挂一次性 bootstrap registry；
+  9. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")` 打开 Session Window。
+- 任何一道闸失败：抛错，**不**补偿、**不**回退、**不**做"半启动"。
+- `connect.launch` 与 `connect.login` / `connect.resume` 三者边界：
+  - `connect.launch` **只**消费 launchToken；它**不**创建 session。
+  - 真正"创建 connect session"的时机是 launcher 点击 `Open App` 时（即 `protocol.service.launchAppView(...)` 内部），不是等 client app 发 `connect.launch`。
+  - `plugin-apps` **不**自己直接 import / 调 `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL——所有这些细节都收口在 `protocol.service.launchAppView(...)` 内部。
 
 更细节的 storage / connect.* / Session Window 启动顺序见：
 

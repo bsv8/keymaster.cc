@@ -17,6 +17,7 @@
 //     标记 defaultEnabled=true 的会自动装载，business 插件可通过配置 store 控制。
 
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
+import { appsPlugin } from "@keymaster/plugin-apps";
 import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
 import { collectiblesPlugin } from "@keymaster/plugin-collectibles";
@@ -51,10 +52,10 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     i18nDebug: !isProd
   });
 
-  // 硬切换 001 + 施工单 004：按"依赖先后保证 capability 顺序"的顺序
+  // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序
   // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //
-  // 关键顺序（施工单 004）：
+  // 关键顺序（施工单 004 + 2026-06-29 002）：
   //   vault
   //   protocol
   //   home
@@ -70,6 +71,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   //   p2pkh
   //   token / collectible 业务插件（依赖 p2pkh.service + woc.*）
   //   importers
+  //   apps（施工单 2026-06-29 002：plugin-apps 依赖 protocol.service.launchAppView）
   //
   // 设计缘由：
   //   - wocPlugin 必须在 p2pkhPlugin 之前装载（plugin-p2pkh 内部会拿
@@ -79,6 +81,9 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   //     直接依赖 p2pkh.service / woc.bsv21.service / woc.stas.service /
   //     woc.1satordinals.service；plugin-p2pkh 与 plugin-woc 是这些
   //     capability 的唯一提供方。
+  //   - appsPlugin 必须在 protocolPlugin 之后：plugin-apps 直接调
+  //     `protocol.service.launchAppView(...)`，没有 protocol.service
+  //     capability 时 setup 会被 host 拒绝。
   const ordered = [
     vaultPlugin,
     protocolPlugin,
@@ -99,7 +104,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     pokerPlugin,
     wifImporterPlugin,
     hexImporterPlugin,
-    jsonFileImporterPlugin
+    jsonFileImporterPlugin,
+    appsPlugin
   ];
 
   await host.registerAll(ordered);

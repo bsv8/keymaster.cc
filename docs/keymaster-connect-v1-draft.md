@@ -79,6 +79,33 @@ appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 boot
 4. 失败时按 fail-closed 返回 `user_rejected` / `invalid_origin` / `internal_error`；**不**自动 fallback 到 `connect.login`。
 5. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*` / `storage.*`。
 
+### `connect.launch` 与 launcher 预建 session 的关系（施工单 2026-06-29 002 硬切换）
+
+施工单 2026-06-29 001 硬切换已经定义：launcher 拉起 Session Window 时，session **先在 launcher 一侧**建好（与 `app.appOrigin` + 当前 owner key 绑定），launchToken 由 launcher 生成并交给 Session Window。`connect.launch` **不**创建 session，它只消费 launchToken 并把"已存在的 session"接上已开好的 Session Window。
+
+launcher 预建 session 的入口收口在 `protocol.service.launchAppView(...)`：
+
+```txt
+plugin-apps（apps 页面 / 首页 widget）
+  ──点击 Open App──> protocol.service.launchAppView(app)
+                       │
+                       ├── 1. 校验 vault 已解锁 + active key ready
+                       ├── 2. 校验 app 配置合法
+                       ├── 3. 解析 claims 快照
+                       ├── 4. 创建新 connectSessionId（落 IndexedDB）
+                       ├── 5. 导出 unlock runtime 交接包
+                       ├── 6. 生成新 launchToken
+                       ├── 7. 装 AppBootstrapPayload + bootstrap registry
+                       └── 8. window.open("/protocol/v1/popup?boot=appView&...")
+```
+
+关键边界：
+
+- `plugin-apps` 是该入口**唯一**业务调用方；它**不**直接 import `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL。
+- `connect.launch` **不**创建 session；session 已经在 launcher 预建阶段落库。
+- `connect.launch` 失败时**不**回退到 `connect.login`；用户回到 `plugin-apps` 重新点 `Open App` 即可。
+- session 真值 = `connectSessionId` + `ownerPublicKeyHex` + `app.appOrigin` + `resolvedClaims`；这套三元组同时也是后续 `storage.*` / `cipher.*` 的 namespace 真值（与 `appViewContext` 字段无关，appViewContext 仅用于 UI / 启动决策）。
+
 ### `connect.login`
 
 #### 输入

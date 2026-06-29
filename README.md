@@ -12,6 +12,7 @@ plugin-background   通用后台任务平台（注册、调度、去重、暂停
 plugin-p2pkh        P2PKH 资产实现（两类后台任务 recent-sync / history-backfill、reservation、Transfer Widget）
 plugin-transfer     Transfer 平台（列 Offer，挂载 provider Widget，不解释 P2PKH/UTXO/地址/金额）
 plugin-poker        浏览器原生扑克（与外部 poker-proxy 通信，本地签名 / 验签）
+plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 app，在当前 Keymaster 窗口作为 launcher 发起 appView Session Window（首个 app = https://justnote.apps.bsv8.com/）
 ```
 
 ### 不变量

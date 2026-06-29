@@ -23,6 +23,7 @@
     { "path": "./packages/plugin-protocol" },
     { "path": "./packages/plugin-token-bsv21" },
     { "path": "./packages/plugin-token-stas" },
-    { "path": "./packages/plugin-collectible-1satordinals" }
+    { "path": "./packages/plugin-collectible-1satordinals" },
+    { "path": "./packages/plugin-apps" }
   ]
 }

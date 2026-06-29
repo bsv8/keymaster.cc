@@ -9,9 +9,13 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MessageBus } from "@keymaster/runtime";
-import { createVaultService, KeyPersistedButActivationFailedError } from "./vaultService.js";
+import {
+  createVaultService,
+  KeyPersistedButActivationFailedError
+} from "./vaultService.js";
 import { createKeyspaceService } from "./keyspaceService.js";
 import { disposeVaultDb, vaultDb } from "./vaultDb.js";
+import type { UnlockRuntimeHandoff } from "@keymaster/contracts";
 
 const TEST_PRIV = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
@@ -1964,9 +1968,6 @@ type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
 /* ============== 施工单 2026-06-29 001：Session Window unlock runtime 一次性交接 ============== */
 
-import { createVaultService } from "./vaultService.js";
-import type { UnlockRuntimeHandoff } from "@keymaster/contracts";
-
 describe("施工单 2026-06-29 001：unlock runtime 一次性交接", () => {
   it("exportUnlockRuntimeForSessionWindow 在 locked 时拒绝", async () => {
     // 构造一个最小 vault service：未解锁时直接拒。
@@ -2029,26 +2030,43 @@ describe("施工单 2026-06-29 001：unlock runtime 一次性交接", () => {
   });
 });
 
-function makeFakeMessageBus(): {
-  publish: (type: string, payload?: unknown) => void;
-  subscribe: (type: string, handler: (payload: unknown) => void) => () => void;
-} {
+function makeFakeMessageBus(): MessageBus {
   const handlers = new Map<string, Set<(payload: unknown) => void>>();
+  const snapshotListeners = new Set<(s: { total: number; queued: number; inFlight: number; completed: number; failed: number; canceled: number; byTarget: Record<string, number> }) => void>();
+  let messageCounter = 0;
   return {
-    publish(type, payload) {
-      const set = handlers.get(type);
-      if (!set) return;
-      for (const h of set) h(payload);
+    publish(_type, _payload) {
+      return `m-${++messageCounter}`;
     },
-    subscribe(type, handler) {
+    subscribe<T>(type: string, handler: (payload: T) => void) {
       let set = handlers.get(type);
       if (!set) {
         set = new Set();
-        handlers.set(type, set);
+        handlers.set(type, set as Set<(payload: unknown) => void>);
       }
-      set.add(handler);
+      set.add(handler as unknown as (payload: unknown) => void);
       return () => {
-        set?.delete(handler);
+        set?.delete(handler as unknown as (payload: unknown) => void);
+      };
+    },
+    dispatch(_type, _payload) {
+      return `m-${++messageCounter}`;
+    },
+    request: <T,>(): Promise<T> => Promise.reject(new Error("not used in test")),
+    handle: () => () => undefined,
+    snapshot: () => ({
+      total: 0,
+      queued: 0,
+      inFlight: 0,
+      completed: 0,
+      failed: 0,
+      canceled: 0,
+      byTarget: {}
+    }),
+    onSnapshot(handler) {
+      snapshotListeners.add(handler);
+      return () => {
+        snapshotListeners.delete(handler);
       };
     }
   };

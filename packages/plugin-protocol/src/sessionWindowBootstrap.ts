@@ -207,12 +207,13 @@ export async function consumeLauncherBootstrap(
   if (!registry || typeof registry.acquire !== "function") {
     return { bootstrap: null, failureReason: "launcher_registry_missing" };
   }
+  const acquire = registry.acquire;
   // 调 acquire + race 超时。launcher 可能"立即返回"也可能"还在准备"；
   // 我们的 Promise.race 让两端时序自由。
   let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
   try {
-    const result = await Promise.race<Awaited<ReturnType<NonNullable<typeof registry>["acquire"]>>>([
-      Promise.resolve().then(() => registry.acquire!(input.token!)),
+    const result = await Promise.race<AppBootstrapPayload | null>([
+      Promise.resolve().then(() => acquire(input.token!)),
       new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(() => {
           reject(new Error("bootstrap_acquire_timeout"));

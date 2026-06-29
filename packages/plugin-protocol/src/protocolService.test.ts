@@ -15,6 +15,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PROTOCOL_VERSION,
+  LaunchAppViewError,
   type KeyspaceService,
   type VaultService,
   type ConnectSessionRecord,
@@ -89,7 +90,22 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
-    recoverEmptyVaultToUninitialized: async () => undefined
+    recoverEmptyVaultToUninitialized: async () => undefined,
+    // 施工单 2026-06-29 002：launchAppView 调 exportUnlockRuntime。
+    exportUnlockRuntimeForSessionWindow: async () => ({
+      masterSalt: new ArrayBuffer(32),
+      masterKeyBytes: new ArrayBuffer(32),
+      keySnapshot: [
+        {
+          id: "k1",
+          label: "Key A",
+          publicKeyHex,
+          identityStatus: "ready" as const
+        }
+      ],
+      activePublicKeyHex: publicKeyHex,
+      createdAt: Date.now()
+    })
   } as unknown as VaultService;
 }
 
@@ -5987,3 +6003,317 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     expect(loginResult.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
   });
 });
+
+/* ============== launchAppView（施工单 2026-06-29 002 硬切换） ============== */
+
+/**
+ * 注入一个 minimal window shim，覆盖 launchAppView 内部用到的几个
+ * surface（`window.open` / `window.location.origin` / 挂 bootstrap
+ * registry）。protocolService.test.ts 跑在 node 环境，没有 global window。
+ */
+function installWindowShim() {
+  const g = globalThis as unknown as Record<string, unknown>;
+  if (typeof g.window === "undefined") {
+    const win = {
+      open: () => null,
+      location: { origin: "https://keymaster.local" }
+    };
+    g.window = win;
+  }
+  return g.window as Window & {
+    open: (url: string | URL, target?: string) => Window | null;
+    location: { origin: string };
+  };
+}
+
+describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
+  const JUSTNOTE = {
+    appId: "justnote",
+    appOrigin: "https://justnote.apps.bsv8.com",
+    appUrl: "https://justnote.apps.bsv8.com/"
+  };
+
+  /** 给测试构造可观察的 window.open 替换 + bootstrap registry 装/卸。 */
+  function setupWindow(extra: { openReturns?: Window | null } = {}) {
+    const win = installWindowShim();
+    const openCalls: Array<{ url: string; target: string }> = [];
+    const originalOpen = win.open;
+    const originalLocation = win.location;
+    // 强制 location.origin 为一个稳定值。
+    Object.defineProperty(win, "location", {
+      value: { origin: "https://keymaster.local" },
+      configurable: true
+    });
+    win.open = ((url: string | URL, target?: string) => {
+      openCalls.push({ url: String(url), target: String(target ?? "_blank") });
+      return extra.openReturns === undefined
+        ? ({} as Window)
+        : extra.openReturns;
+    }) as typeof win.open;
+    // 启动时清掉之前测试可能挂的 registry。
+    try {
+      delete (win as unknown as Record<string, unknown>)[
+        "__keymaster_session_window_bootstrap__"
+      ];
+    } catch {
+      // ignore
+    }
+    return {
+      openCalls,
+      restore() {
+        try {
+          win.open = originalOpen;
+          Object.defineProperty(win, "location", {
+            value: originalLocation,
+            configurable: true
+          });
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }
+
+  it("成功路径：预建 session + 导出 unlock runtime + 装 bootstrap registry + 打开 Session Window", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb,
+        generateId: (() => {
+          let n = 0;
+          return () => `id-${++n}`;
+        })()
+      });
+      const out = await service.launchAppView(JUSTNOTE);
+      expect(out.sessionWindowOpened).toBe(true);
+      expect(out.connectSessionId).toMatch(/^id-/);
+      expect(out.launchToken).toMatch(/^launch-id-/);
+      expect(out.appUrl).toContain(`launchToken=${out.launchToken}`);
+      // 1) connect session 已落 DB，且 ownerPublicKeyHex 锁定为 active key。
+      const session = await storageDb.getConnectSession(out.connectSessionId);
+      expect(session).not.toBeNull();
+      expect(session?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+      expect(session?.origin).toBe(JUSTNOTE.appOrigin);
+      expect(session?.revokedAt).toBeNull();
+      // 2) bootstrap registry 已挂在 launcher window 上。
+      const reg = (installWindowShim() as unknown as Record<string, unknown>)[
+        "__keymaster_session_window_bootstrap__"
+      ] as { acquire: (t: string) => Promise<unknown> };
+      expect(typeof reg?.acquire).toBe("function");
+      // 3) Session Window 已被 window.open 打开。
+      expect(env.openCalls.length).toBe(1);
+      expect(env.openCalls[0]?.target).toBe("_blank");
+      expect(env.openCalls[0]?.url).toContain("boot=appView");
+      expect(env.openCalls[0]?.url).toContain("bootstrapToken=");
+      // 4) 同一 launcher 窗口内连续两次 Open App 不会互相覆盖：
+      //    registry 持久挂在 window 上，第二次 launchAppView 不会重新挂
+      //    registry（避免把第一次的 token 覆盖掉）。两次产生的 token 都
+      //    可以从 registry acquire 拿到。
+      const firstToken = env.openCalls[0]?.url.match(/bootstrapToken=([^&]+)/)?.[1];
+      expect(firstToken).toBeTruthy();
+      const second = await service.launchAppView(JUSTNOTE);
+      const secondToken = `bt-${second.launchToken}`;
+      // 第一次的 token 仍能 acquire（说明没被覆盖）。
+      const firstAcquired = await reg.acquire(firstToken!);
+      expect(firstAcquired).toBeTruthy();
+      // 第二次的 token 也能 acquire。
+      const secondAcquired = await reg.acquire(secondToken);
+      expect(secondAcquired).toBeTruthy();
+      // 二次消费后再次 acquire 应为 null（一次性）。
+      expect(await reg.acquire(firstToken!)).toBeNull();
+      expect(await reg.acquire(secondToken)).toBeNull();
+      // 两次都开了 Session Window。
+      expect(env.openCalls.length).toBe(2);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("vault 未解锁 → 抛错，不打开 Session Window", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const vault = makeVaultStub(TEST_PUB_HEX);
+      // 强制 status 返回 locked。
+      (vault as unknown as { status: () => string }).status = () => "locked";
+      const service = new ProtocolServiceImpl({ vault, keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView(JUSTNOTE);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("vault_locked");
+      expect(env.openCalls.length).toBe(0);
+      // session 也没有被预建。
+      const sessions = await storageDb.listConnectSessionsByOrigin(JUSTNOTE.appOrigin);
+      expect(sessions.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("appUrl 与 appOrigin 不一致 → 抛错，不打开 Session Window", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb
+      });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView({
+          appId: "justnote",
+          appOrigin: "https://justnote.apps.bsv8.com",
+          appUrl: "https://evil.example/"
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("invalid_app_config");
+      expect(env.openCalls.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("appUrl 不是合法 URL → 抛错", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb
+      });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView({
+          appId: "justnote",
+          appOrigin: "https://justnote.apps.bsv8.com",
+          appUrl: "not-a-url"
+        });
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("invalid_app_config");
+      expect(env.openCalls.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("window.open 返回 null → 抛错", async () => {
+    const env = setupWindow({ openReturns: null });
+    try {
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb
+      });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView(JUSTNOTE);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("open_session_window_blocked");
+      // 失败语义：session 已经被预建（fail-closed 也会落库，但 UI 提示失败）。
+      // 这里只验证"不会再次成功打开窗口"。
+      expect(env.openCalls.length).toBe(1);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("storageDb 缺失 → 抛错", async () => {
+    const env = setupWindow();
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+        // 故意不传 storageDb
+      });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView(JUSTNOTE);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("session_storage_unavailable");
+      expect(env.openCalls.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("active key 不 ready → 抛错", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
+      (keyspace as unknown as { getKey: (h: string) => Promise<unknown> }).getKey = async () => ({
+        keyId: "k1",
+        publicKeyHex: TEST_PUB_HEX,
+        label: "Key A",
+        identityStatus: "failed"
+      });
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace,
+        storageDb
+      });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView(JUSTNOTE);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("no_active_key");
+      expect(env.openCalls.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("vault.exportUnlockRuntimeForSessionWindow 抛错 → export_unlock_runtime_failed", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const vault = makeVaultStub(TEST_PUB_HEX);
+      (vault as unknown as { exportUnlockRuntimeForSessionWindow: () => Promise<never> })
+        .exportUnlockRuntimeForSessionWindow = async () => {
+          throw new Error("simulated export failure");
+        };
+      const service = new ProtocolServiceImpl({
+        vault,
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb
+      });
+      let caught: unknown = null;
+      try {
+        await service.launchAppView(JUSTNOTE);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LaunchAppViewError);
+      expect((caught as LaunchAppViewError).code).toBe("export_unlock_runtime_failed");
+      expect(env.openCalls.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+});
+

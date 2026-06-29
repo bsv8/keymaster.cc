@@ -66,6 +66,7 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   PROTOCOL_VERSION,
+  LaunchAppViewError,
   type AppBootstrapPayload,
   type AppViewContext,
   type BinaryField,
@@ -91,6 +92,9 @@ import {
   type IntentSignParams,
   type IntentSignResult,
   type KeyspaceService,
+  type LaunchAppViewInput,
+  type LaunchAppViewResult,
+  type LauncherBootstrapRegistry,
   type MethodParams,
   type MethodResult,
   type P2pkhProtocolAdapter,
@@ -126,6 +130,7 @@ import {
   type StorageProviderConfig,
   type StoragePutParams,
   type StoragePutResult,
+  type UnlockRuntimeHandoff,
   type VaultService
 } from "@keymaster/contracts";
 import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
@@ -139,6 +144,8 @@ import {
 import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
 import { consumeLauncherBootstrap, parseBootstrapToken } from "./sessionWindowBootstrap.js";
+import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
+import { installLauncherBootstrapRegistry } from "@keymaster/contracts";
 import {
   createStorageObjectService,
   createSigV4Adapter,
@@ -508,6 +515,25 @@ export class ProtocolServiceImpl implements ProtocolService {
       consumed: boolean;
     }
   > = new Map();
+
+  /**
+   * launcher 一次性 bootstrap entries Map：token -> AppBootstrapPayload。
+   *
+   * 设计缘由（施工单 2026-06-29 002 硬切换 + 用户反馈 issue #1）：
+   *   - launcher 同一窗口里**允许多次**点 `Open App` 各自预建 session；
+   *     各次点击不能互相打断。
+   *   - 旧实现每次 `launchAppView()` 都新建一个**只**含当前 token 的
+   *     registry 并 `installLauncherBootstrapRegistry(window, ...)` 覆盖
+   *     旧 registry；前一次还没 acquire 的 token 会被**直接覆盖**导致
+   *     启动失败。
+   *   - 新实现：把 entries Map 提升为 service 实例字段；首次 `launchAppView`
+   *     时挂一次 launcher-side registry（其 acquire 直接读 entries Map
+   *     并 delete 命中项），后续 `launchAppView` 只往 entries Map 加新
+   *     token，**不**重新挂 registry。
+   *   - 同一 token 仍保持"一次性消费"语义（acquire 命中即从 Map 删除）。
+   */
+  private readonly launcherBootstrapEntries: Map<string, AppBootstrapPayload> = new Map();
+  private launcherBootstrapRegistryInstalled = false;
 
   /**
  * 当前 Session Window 一次性 bootstrap consume 状态。
@@ -1352,6 +1378,209 @@ export class ProtocolServiceImpl implements ProtocolService {
       });
       return null;
     }
+  }
+
+  /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+
+  /**
+   * Keymaster 内部 app launcher 启动入口（`plugin-apps` 唯一允许调用）。
+   *
+   * 设计缘由（施工单 2026-06-29 002 硬切换）：
+   *   - plugin-apps 是**唯一**允许调用本入口的业务插件；plugin-apps 自己
+   *     **不**直接 import / 操作：
+   *       - `protocolStorageDb`
+   *       - `buildAppBootstrapPayload`
+   *       - `installLauncherBootstrapRegistry`
+   *       - `window.open("/protocol/v1/popup?...")`
+   *   - 完整 launcher 流程在 service 内部一次性收口：
+   *       1. 校验 vault 已解锁（否则 throw "vault_locked"）；
+   *       2. 校验当前 keyspace active key ready（否则 throw "active_key_unavailable"）；
+   *       3. 校验 app 配置合法（`appOrigin` 是合法 origin；
+   *          `new URL(appUrl).origin === appOrigin`；否则 throw "invalid_request"）；
+   *       4. 解析 claims 快照（按 input.claims 走 builtin claim 解析，与
+   *          `connect.login` 一致）；
+   *       5. 创建新 `connectSessionId`（按 `putConnectSessionAndRevokeOriginPeers`
+   *          原子落库 + 吊销同 origin 旧 session）；
+   *       6. 调 `vault.exportUnlockRuntimeForSessionWindow()` 导出一次性交接包；
+   *       7. 生成新 `launchToken`（`crypto.randomUUID()`）；
+   *       8. 组装 `AppBootstrapPayload`；
+   *       9. 在 launcher `window` 上挂一次性 bootstrap registry；
+   *       10. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")`；
+   *       11. `window.open` 失败 → throw "launcher_window_open_failed"；
+   *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
+   *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
+   *     只消费 `launchToken`、不创建 session。
+   */
+  async launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult> {
+    // 1) 校验入参基本完整性。
+    if (!input || !input.appId || !input.appOrigin || !input.appUrl) {
+      throw new Error("launchAppView: missing app fields");
+    }
+    // 2) 校验 vault 已解锁。
+    if (this.deps.vault.status() !== "unlocked") {
+      throw new LaunchAppViewError("vault_locked", "launchAppView: vault not unlocked");
+    }
+    // 3) 校验 active key ready。
+    const active = this.deps.keyspace.active().activePublicKeyHex;
+    if (!active) {
+      throw new LaunchAppViewError("no_active_key", "launchAppView: no active key");
+    }
+    const key = await this.deps.keyspace.getKey(active);
+    if (!key || !key.publicKeyHex) {
+      throw new LaunchAppViewError(
+        "no_active_key",
+        "launchAppView: owner key not found"
+      );
+    }
+    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      throw new LaunchAppViewError(
+        "no_active_key",
+        "launchAppView: owner key not ready"
+      );
+    }
+    // 4) 校验 app 配置合法：appOrigin 是合法 origin，且 new URL(appUrl).origin === appOrigin。
+    let parsedAppUrl: URL;
+    try {
+      parsedAppUrl = new URL(input.appUrl);
+    } catch {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        "launchAppView: invalid appUrl"
+      );
+    }
+    if (parsedAppUrl.origin !== input.appOrigin) {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        "launchAppView: appOrigin does not match appUrl.origin"
+      );
+    }
+    if (typeof window === "undefined") {
+      throw new LaunchAppViewError(
+        "window_unavailable",
+        "launchAppView: window undefined"
+      );
+    }
+    if (!this.deps.storageDb) {
+      throw new LaunchAppViewError(
+        "session_storage_unavailable",
+        "launchAppView: session storage unavailable"
+      );
+    }
+    // 5) 解析 claims 快照（与 connect.login 同语义）。
+    const resolvedClaims = resolveClaims(input.claims ?? [], (name) =>
+      resolveBuiltinClaim(name, { activeKeyLabel: key.label })
+    );
+    // 6) 创建新 connect session：原子落库 + 吊销同 origin 旧 session。
+    const now = Date.now();
+    const sessionId = this.deps.generateId ? this.deps.generateId() : crypto.randomUUID();
+    const sessionRecord: ConnectSessionRecord = {
+      sessionId,
+      origin: input.appOrigin,
+      ownerPublicKeyHex: key.publicKeyHex,
+      ownerLabel: key.label,
+      claimsSnapshot: resolvedClaims,
+      createdAt: now,
+      lastUsedAt: now,
+      revokedAt: null
+    };
+    await this.deps.storageDb.putConnectSessionAndRevokeOriginPeers(sessionRecord);
+    // 7) 导出一性 unlock runtime 交接包。
+    let unlockRuntime: UnlockRuntimeHandoff;
+    try {
+      unlockRuntime = await this.deps.vault.exportUnlockRuntimeForSessionWindow();
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.launcher",
+        event: "exportUnlockRuntime.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw new LaunchAppViewError(
+        "export_unlock_runtime_failed",
+        "launchAppView: exportUnlockRuntimeForSessionWindow failed"
+      );
+    }
+    // 8) 生成新 launchToken。
+    const launchToken = this.deps.generateId
+      ? `launch-${this.deps.generateId()}`
+      : `launch-${crypto.randomUUID()}`;
+    // 9) 拼 client app URL：把 launchToken 拼到 appUrl 的 query 上。
+    const appUrlWithLaunchToken = (() => {
+      try {
+        const u = new URL(input.appUrl);
+        u.searchParams.set("launchToken", launchToken);
+        return u.toString();
+      } catch {
+        return input.appUrl;
+      }
+    })();
+    // 10) 组装 AppBootstrapPayload。
+    const bootstrap = buildAppBootstrapPayload({
+      appId: input.appId,
+      appOrigin: input.appOrigin,
+      appUrl: appUrlWithLaunchToken,
+      connectSessionId: sessionId,
+      ownerPublicKeyHex: key.publicKeyHex,
+      resolvedClaims: resolvedClaims as Record<string, unknown>,
+      resolvedAt: now,
+      launchToken,
+      expiresAt: now + 24 * 60 * 60 * 1000,
+      unlockRuntime
+    });
+    // 11) 在 launcher window 上挂一次性 bootstrap registry。
+    //     设计缘由（issue #1）：同一 launcher 窗口里多次点 `Open App` 时
+    //     不能互相覆盖。这里用 service 实例字段 `launcherBootstrapEntries`
+    //     + 一次性 install；后续 `launchAppView()` 只往 entries Map 加新
+    //     token，**不**重新挂 registry。token 一次性消费（命中即 delete）。
+    const token = `bt-${launchToken}`;
+    this.launcherBootstrapEntries.set(token, bootstrap);
+    if (!this.launcherBootstrapRegistryInstalled && typeof window !== "undefined") {
+      const registry: LauncherBootstrapRegistry = {
+        acquire: async (t: string) => {
+          const v = this.launcherBootstrapEntries.get(t);
+          if (!v) return null;
+          this.launcherBootstrapEntries.delete(t);
+          return v;
+        }
+      };
+      installLauncherBootstrapRegistry(window, registry);
+      this.launcherBootstrapRegistryInstalled = true;
+    }
+    // 12) 打开 Session Window。
+    const popupUrl = `/protocol/v1/popup?boot=appView&bootstrapToken=${encodeURIComponent(token)}`;
+    let popup: Window | null = null;
+    try {
+      popup = window.open(popupUrl, "_blank");
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.launcher",
+        event: "openSessionWindow.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw new LaunchAppViewError(
+        "open_session_window_failed",
+        "launchAppView: window.open popup failed"
+      );
+    }
+    if (!popup) {
+      throw new LaunchAppViewError(
+        "open_session_window_blocked",
+        "launchAppView: window.open returned null"
+      );
+    }
+    this.deps.logger?.info?.({
+      scope: "protocol.launcher",
+      event: "launchAppView.ok",
+      appId: input.appId,
+      appOrigin: input.appOrigin,
+      sessionId,
+      launchToken
+    });
+    return {
+      sessionWindowOpened: true,
+      connectSessionId: sessionId,
+      launchToken,
+      appUrl: appUrlWithLaunchToken
+    };
   }
 
   async getStorageProviderConfig(): Promise<StorageProviderConfig | null> {

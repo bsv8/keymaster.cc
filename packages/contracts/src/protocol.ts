@@ -1055,6 +1055,99 @@ export interface ConnectLaunchResult {
   resolvedAt: number;
 }
 
+/* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+
+/**
+ * `protocol.service.launchAppView(...)` 的入参。
+ *
+ * 设计缘由（施工单 2026-06-29 002 硬切换）：
+ *   - 这是 `plugin-apps` **唯一**允许调用的 appView 启动入口；plugin-apps
+ *     自己**不**直接操作 `protocolStorageDb` / `buildAppBootstrapPayload`
+ *     / `installLauncherBootstrapRegistry` / `window.open` popup URL。
+ *   - `appOrigin` 必须是 exact origin；`new URL(appUrl).origin` 必须
+ *     === `appOrigin`，否则视为配置错误、整次启动 fail-closed。
+ *   - `claims` 是 launcher 期望在 `connect.login` 时一次解析的 claim
+ *     列表；与 `identity.get.claims` 同语义。V1 不传时取空数组。
+ */
+export interface LaunchAppViewInput {
+  /** app 注册 id，例如 "justnote"。 */
+  appId: string;
+  /** app 的 exact origin（必须等于 `new URL(appUrl).origin`）。 */
+  appOrigin: string;
+  /** client app 真正打开的 URL（appView bootstrap 后会带上 `?launchToken=`）。 */
+  appUrl: string;
+  /**
+   * 期望在 connect.login 快照的 claim 列表；与 `connect.login.claims`
+   * 同语义。V1 不传时取空数组。
+   */
+  claims?: string[];
+}
+
+/**
+ * `protocol.service.launchAppView(...)` 的成功结果。
+ *
+ * 设计缘由（施工单 2026-06-29 002 硬切换）：
+ *   - 成功意味着 launcher 已完成整套：vault 已解锁校验 + owner key 已 ready
+ *     校验 + app 配置合法 + 预建 connect session + 导出 unlock runtime +
+ *     生成 launchToken + 安装 bootstrap registry + 打开 Session Window。
+ *   - 启动失败（任何一道闸）一律 throw，**不**返回 `sessionWindowOpened=false`
+ *     的"半成功"语义——避免业务插件"先显示成功，再去查"等隐式兼容路径。
+ *   - 返回的 `appUrl` 是已拼上 `?launchToken=<id>` 的真实打开 URL；
+ *     `plugin-apps` 仅作展示用，**不**自己再去 `window.open(appUrl)`。
+ */
+export interface LaunchAppViewResult {
+  /** Session Window 是否已成功打开新窗口。 */
+  sessionWindowOpened: boolean;
+  /** launcher 在点击 `Open App` 时预建的 connect sessionId。 */
+  connectSessionId: string;
+  /** 本次为该 app 生成的 launchToken；client app 首条 `connect.launch` 消费。 */
+  launchToken: string;
+  /** 已拼上 `?launchToken=<id>` 的 client app URL。 */
+  appUrl: string;
+}
+
+/**
+ * `protocol.service.launchAppView(...)` 失败时抛出的 typed error。
+ *
+ * 设计缘由（施工单 2026-06-29 002 硬切换 + 用户反馈）：
+ *   - 内部异常文案（`"launchAppView: vault not unlocked"` 等）属于实现
+ *     细节，**不**应该直接展示给用户。
+ *   - UI 按 `code` 字段映射到对应 i18n 文案，并给出"先解锁 / 允许弹窗 /
+ *     配置错误"等明确指引。
+ *   - 收口在 `protocol.service` 内部，**不**让业务插件自己解析 error
+ *     message 字符串。
+ *   - 失败一律 fail-closed：service **不**补偿、不回退、不半启动；UI 仅
+ *     按 code 渲染错误态。
+ */
+export type LaunchAppViewErrorCode =
+  /** vault 当前已锁定；提示用户先解锁 Keymaster。 */
+  | "vault_locked"
+  /** 当前没有可用的 active key / owner key 不 ready。 */
+  | "no_active_key"
+  /** app 配置非法（appUrl 非法 / appOrigin 与 appUrl 不一致）。 */
+  | "invalid_app_config"
+  /** 当前运行环境不支持 window / window 不可用。 */
+  | "window_unavailable"
+  /** connect session 存储不可用。 */
+  | "session_storage_unavailable"
+  /** vault 导出 unlock runtime 失败。 */
+  | "export_unlock_runtime_failed"
+  /** `window.open` 抛出异常。 */
+  | "open_session_window_failed"
+  /** `window.open` 返回 null（被浏览器拦截 / 被禁用）。 */
+  | "open_session_window_blocked"
+  /** 内部未知错误兜底。 */
+  | "internal_error";
+
+export class LaunchAppViewError extends Error {
+  readonly code: LaunchAppViewErrorCode;
+  constructor(code: LaunchAppViewErrorCode, message: string) {
+    super(message);
+    this.name = "LaunchAppViewError";
+    this.code = code;
+  }
+}
+
 /* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
 
 /**
@@ -2203,6 +2296,37 @@ export interface ProtocolService {
    *     transport。
    */
   openClientApp(): Window | null;
+
+  /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
+
+  /**
+   * Keymaster 内部 app launcher 启动入口（`plugin-apps` 唯一允许依赖）。
+   *
+   * 设计缘由（施工单 2026-06-29 002 硬切换）：
+   *   - 这是 plugin-apps 唯一允许的 appView 启动入口。plugin-apps 自己
+   *     **不**直接 import / 操作：
+   *       - `protocolStorageDb`
+   *       - `buildAppBootstrapPayload`
+   *       - `installLauncherBootstrapRegistry`
+   *       - `window.open("/protocol/v1/popup?...")` popup URL
+   *     这些细节全部收口在 service 内部，避免协议真值散落到业务插件。
+   *   - 完整流程：
+   *       1. 校验 vault 已解锁 + active key ready；
+   *       2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
+   *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
+   *       4. 创建新 `connectSessionId` 并落 DB；
+   *       5. 调 `vault.exportUnlockRuntimeForSessionWindow()` 导出一
+   *          次性交接包；
+   *       6. 生成 `launchToken`；
+   *       7. 组装 `AppBootstrapPayload`；
+   *       8. 在 launcher window 上挂一次性 bootstrap registry；
+   *       9. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")`。
+   *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
+   *     `plugin-apps` 必须以"打开失败就失败"语义收口。
+   *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
+   *     只消费 `launchToken`、不创建 session。
+   */
+  launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult>;
 
   /* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
 
