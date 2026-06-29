@@ -11,8 +11,19 @@ export function assertWebCryptoAvailable(): void {
   }
 }
 
-/** 派生 AES-GCM key（用于私钥加密）。 */
-export async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+/**
+ * PBKDF2 派生参数（200k 迭代 + SHA-256）。
+ *
+ * 设计缘由（施工单 2026-06-29 001）：派生参数必须在 launcher 与
+ * Session Window 之间完全一致；统一收敛在一处常量。
+ */
+export const PBKDF2_PARAMS = {
+  iterations: 200_000,
+  hash: "SHA-256"
+} as const;
+
+/** PBKDF2 派生 raw 256-bit key material。 */
+export async function deriveKeyRawBits(password: string, salt: Uint8Array): Promise<Uint8Array> {
   assertWebCryptoAvailable();
   const enc = new TextEncoder();
   const baseKey = await crypto.subtle.importKey(
@@ -20,20 +31,40 @@ export async function deriveKey(password: string, salt: Uint8Array): Promise<Cry
     enc.encode(password) as BufferSource,
     "PBKDF2",
     false,
-    ["deriveKey"]
+    ["deriveBits"]
   );
-  return crypto.subtle.deriveKey(
+  const bits = await crypto.subtle.deriveBits(
     {
       name: "PBKDF2",
       salt: salt as BufferSource,
-      iterations: 200_000,
-      hash: "SHA-256"
+      iterations: PBKDF2_PARAMS.iterations,
+      hash: PBKDF2_PARAMS.hash
     },
     baseKey,
+    256
+  );
+  return new Uint8Array(bits);
+}
+
+/** 从 raw 256-bit key material 导入 AES-GCM CryptoKey。 */
+export async function aesGcmKeyFromRawBits(rawBits: Uint8Array): Promise<CryptoKey> {
+  assertWebCryptoAvailable();
+  if (rawBits.byteLength !== 32) {
+    throw new Error("AES-GCM key material must be exactly 32 bytes");
+  }
+  return crypto.subtle.importKey(
+    "raw",
+    rawBits as BufferSource,
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"]
   );
+}
+
+/** 派生 AES-GCM key（用于私钥加密）。 */
+export async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
+  const rawBits = await deriveKeyRawBits(password, salt);
+  return aesGcmKeyFromRawBits(rawBits);
 }
 
 export interface EncryptedBlob {

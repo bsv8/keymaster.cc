@@ -24,6 +24,7 @@ import { LOG_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { PluginManagerPage } from "./PluginManagerPage.js";
 import { LanguageSettingsPage } from "./LanguageSettingsPage.js";
 import { LogSettingsPage } from "./LogSettingsPage.js";
+import { StorageSettingsPage } from "./StorageSettingsPage.js";
 
 /** 设置 i18n 资源。设计缘由：route / menu / 设置项 label 全部走 I18nText。 */
 const settingsResources: I18nPluginResources = {
@@ -36,13 +37,16 @@ const settingsResources: I18nPluginResources = {
       "settings.route.language": "Language",
       "settings.route.plugins": "Plugins",
       "settings.route.logs": "System logs",
+      "settings.route.storage": "Storage",
       "settings.menu.language": "Language",
       "settings.menu.plugins": "Plugins",
       "settings.menu.logs": "System logs",
+      "settings.menu.storage": "Storage",
       "settings.crumb.settings": "Settings",
       "settings.crumb.language": "Language",
       "settings.crumb.plugins": "Plugins",
       "settings.crumb.logs": "System logs",
+      "settings.crumb.storage": "Storage",
       "settings.language.title": "Language",
       "settings.language.description": "Choose display language. Affects all UI text; switch is instant.",
       "settings.language.option.en": "English",
@@ -111,19 +115,33 @@ const settingsResources: I18nPluginResources = {
       "logSettings.entry.data": "data",
       "logSettings.entry.error": "error",
       "logSettings.cleared": "Cleared ${removed} entries",
-      "logSettings.pruned": "Pruned ${removed} expired entries"
+      "logSettings.pruned": "Pruned ${removed} expired entries",
+      // 施工单 2026-06-29 001：storage 设置页文案。
+      "storageSettings.title": "Storage",
+      "storageSettings.description":
+        "Configure an S3-compatible storage provider. Keymaster uses this to store app data (storage.*). The configuration is local-only and never shared with apps.",
+      "storageSettings.field.endpoint": "Endpoint",
+      "storageSettings.field.region": "Region",
+      "storageSettings.field.bucket": "Bucket",
+      "storageSettings.field.accessKeyId": "Access key id",
+      "storageSettings.field.secretAccessKey": "Secret access key",
+      "storageSettings.field.forcePathStyle": "Force path-style addressing (recommended for self-hosted)",
+      "storageSettings.action.clear": "Clear"
     },
     "zh-CN": {
       "settings.route.language": "语言",
       "settings.route.plugins": "插件",
       "settings.route.logs": "系统日志",
+      "settings.route.storage": "存储",
       "settings.menu.language": "语言",
       "settings.menu.plugins": "插件",
       "settings.menu.logs": "系统日志",
+      "settings.menu.storage": "存储",
       "settings.crumb.language": "语言",
       "settings.crumb.settings": "设置",
       "settings.crumb.plugins": "插件",
       "settings.crumb.logs": "系统日志",
+      "settings.crumb.storage": "存储",
       "settings.language.title": "语言",
       "settings.language.description": "选择界面显示语言，影响所有 UI 文案；切换立即生效。",
       "settings.language.option.en": "English",
@@ -190,7 +208,18 @@ const settingsResources: I18nPluginResources = {
       "logSettings.entry.data": "data",
       "logSettings.entry.error": "error",
       "logSettings.cleared": "已清理 ${removed} 条 entry",
-      "logSettings.pruned": "已清理 ${removed} 条过期 entry"
+      "logSettings.pruned": "已清理 ${removed} 条过期 entry",
+      // 施工单 2026-06-29 001：storage 设置页文案。
+      "storageSettings.title": "存储",
+      "storageSettings.description":
+        "配置 S3-compatible 存储 provider。Keymaster 用它存储 app 数据（storage.*）。配置仅存本地，不会分享给 app。",
+      "storageSettings.field.endpoint": "Endpoint",
+      "storageSettings.field.region": "Region",
+      "storageSettings.field.bucket": "Bucket",
+      "storageSettings.field.accessKeyId": "Access key id",
+      "storageSettings.field.secretAccessKey": "Secret access key",
+      "storageSettings.field.forcePathStyle": "强制 path-style（自部署推荐）",
+      "storageSettings.action.clear": "清除"
     }
   }
 };
@@ -252,6 +281,23 @@ export const settingsPlugin: PluginManifest = {
       visibleWhen: () => true,
       component: LogSettingsPage
     });
+    // 施工单 2026-06-29 001 硬切换：/settings/storage 全局 storage provider
+    // 配置页。仅 unlocked 后可见（配置页面进入需要 vault 已解锁，避免未
+    // 解锁态下误操作）。依赖 protocol.service（读写 storageProviderConfig）。
+    settings.register({
+      id: "settings.storage",
+      path: "/settings/storage",
+      label: { key: "settings.route.storage", fallback: "Storage" },
+      description: {
+        key: "storageSettings.description",
+        fallback:
+          "Configure an S3-compatible storage provider. Keymaster uses this to store app data."
+      },
+      order: 4,
+      icon: "Database",
+      visibleWhen: ({ unlocked }) => unlocked,
+      component: StorageSettingsPage
+    });
 
     // 面包屑：当前路径匹配时第一段固定为不可点击的"设置"分类节点。
     // 这样 plugin 的 settings breadcrumb 不再回指不存在的 /settings，
@@ -284,6 +330,15 @@ export const settingsPlugin: PluginManifest = {
       resolve: () => [
         { label: { key: "settings.crumb.settings", fallback: "Settings" } },
         { label: { key: "settings.crumb.logs", fallback: "System logs" } }
+      ]
+    });
+    breadcrumbs.register({
+      id: "settings.storage.crumbs",
+      order: 5,
+      match: (path) => path === "/settings/storage",
+      resolve: () => [
+        { label: { key: "settings.crumb.settings", fallback: "Settings" } },
+        { label: { key: "settings.crumb.storage", fallback: "Storage" } }
       ]
     });
 

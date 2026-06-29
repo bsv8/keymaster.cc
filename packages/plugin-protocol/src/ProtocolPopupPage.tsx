@@ -118,6 +118,11 @@ export function ProtocolPopupPage() {
     window.addEventListener("pagehide", onPageHide);
     window.addEventListener("beforeunload", onBeforeUnload);
     service.startSession();
+    // 施工单 2026-06-29 001 硬切换：appView mode 下挂一次性 bootstrap listener。
+    // listener 内部幂等：第二次调用直接忽略；endSession 时由 service 内部清。
+    if (service.bootMode() === "appView") {
+      service.awaitLauncherBootstrap();
+    }
     return () => {
       console.info("[protocol-popup] unmount");
       window.removeEventListener("message", onMessage);
@@ -164,6 +169,23 @@ export function ProtocolPopupPage() {
     return () => clearInterval(id);
   }, []);
 
+  // 施工单 2026-06-29 001 硬切换：appView mode 下 bootstrap 成功后
+  // 自动打开 client app。只在 appViewContext 由 null 变为非空时触发一次；
+  // 后续 render 不重复调用 openClientApp。
+  const appViewContextValue = service.appViewContext();
+  const openedClientAppRef = useRef(false);
+  useEffect(() => {
+    if (service.bootMode() !== "appView") return;
+    if (!appViewContextValue) return;
+    if (openedClientAppRef.current) return;
+    openedClientAppRef.current = true;
+    try {
+      service.openClientApp();
+    } catch (err) {
+      console.error("[protocol-popup] openClientApp failed", err);
+    }
+  }, [service, appViewContextValue]);
+
   // 新命令出现时自动滚回活请求区顶部（施工单 2026-06-27 002 硬切换）。
   // jsdom 不支持 scrollIntoView；显式检测后再调，避免单测报
   // `scrollIntoView is not a function`。
@@ -194,6 +216,30 @@ export function ProtocolPopupPage() {
         service={service}
         auth={auth}
       />
+    );
+  }
+  // 施工单 2026-06-29 001 硬切换：appView mode 下 Session Window 在 bootstrap
+  // 完成前先渲染"等待 launcher"壳层；bootstrap 成功后渲染"正在打开 app"
+  // 壳层。失败则渲染错误态（fail-closed）。
+  // 这些壳层**只**在 appView mode 下出现；connect mode 永不渲染。
+  if (service.bootMode() === "appView") {
+    // 修复 issue #3：bootstrap 失败时显式渲染错误页，**不**继续等。
+    if (service.bootstrapFailed()) {
+      return (
+        <AppViewBootstrapFailedPage
+          t={t}
+          reason={service.bootstrapFailureReason()}
+        />
+      );
+    }
+    const appViewContext = service.appViewContext();
+    if (!appViewContext) {
+      return (
+        <AppViewBootstrapWaitPage t={t} />
+      );
+    }
+    return (
+      <AppViewBootstrapDonePage t={t} appId={appViewContext.appId} />
     );
   }
   // 锁屏态分支：locked 且没有 auth owner 时直接渲染锁屏页（不渲染顶栏 / 站点配置 / 命令流）。
@@ -388,6 +434,122 @@ function LockScreenPage({
             });
           })()}
         </p>
+      </div>
+    </div>
+  );
+}
+
+/* ============== Session Window appView 启动期壳层（施工单 2026-06-29 001） ============== */
+
+/**
+ * appView mode 下 Session Window 在 bootstrap 完成前的等待页。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - 这个页面只渲染"等待 launcher"壳层；不渲染主 popup 顶栏 / 命令流。
+ *   - 当 launcher 在 bootstrap 完成前关闭 / 刷新时，Session Window 仍
+ *     停在这页：用户可以关闭本窗口重新从 launcher 启动 app。
+ *   - 不主动探测 launcher；Session Window 由 `awaitLauncherBootstrap`
+ *     内部**主动**从同源 `window.opener` 拉取 capsule
+ *     （`consumeLauncherBootstrap()`），超时则走 `bootstrapFailed` 错误页。
+ */
+function AppViewBootstrapWaitPage({
+  t
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+}) {
+  return (
+    <div className="protocol-popup protocol-popup--appview-wait" data-testid="appview-wait">
+      <div className="protocol-popup__panel">
+        <h2>
+          {t("protocol.sessionWindow.appView.waiting.title", {
+            defaultValue: "Waiting for launcher"
+          })}
+        </h2>
+        <p>
+          {t("protocol.sessionWindow.appView.waiting.desc", {
+            defaultValue:
+              "Keymaster is starting this app. Keep this window open — it will hand off the session to the app."
+          })}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * appView mode 下 Session Window bootstrap 完成后、打开 client app 之前的
+ * 过渡页。
+ *
+ * 设计缘由：
+ *   - 实际"打开 client app"由 ProtocolPopupPage 的 useEffect 在 bootstrap
+ *     完成后调用 `service.openClientApp()` 完成；本页只显示"正在打开"。
+ *   - 如果 `openClientApp()` 失败（浏览器拦截 / popup blocker），UI 仍
+ *     显示"正在打开"——用户可手动复制 appUrl 重新打开。
+ */
+function AppViewBootstrapDonePage({
+  t,
+  appId
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  appId: string;
+}) {
+  return (
+    <div className="protocol-popup protocol-popup--appview-done" data-testid="appview-done">
+      <div className="protocol-popup__panel">
+        <h2>
+          {t("protocol.sessionWindow.title", { defaultValue: "Session Window" })}
+        </h2>
+        <p>
+          {t("protocol.sessionWindow.appView.openingClientApp", {
+            defaultValue: "Opening the app…"
+          })}
+        </p>
+        <p className="protocol-popup__muted">{appId}</p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * appView mode 下 bootstrap 失败的错误页（修复 issue #3）。
+ *
+ * 设计缘由：
+ *   - 旧实现失败 / 超时永远停在"等待 launcher"——用户看到的是"卡死"。
+ *   - 新实现：launcher 在合理时间（如 30s）内未发 bootstrap，或 payload
+ *     不合法，或 unlock runtime 导入失败 → 立即渲染此错误页；用户可以
+ *     关闭 Session Window 重新从 Keymaster 应用商店启动 app。
+ *   - 错误文案按 `reason` 区分大致类别（timeout / payload / import）；
+ *     详细本地 reason 不暴露给用户，避免泄漏内部细节。
+ */
+function AppViewBootstrapFailedPage({
+  t,
+  reason
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  reason: string | null;
+}) {
+  return (
+    <div
+      className="protocol-popup protocol-popup--appview-failed"
+      data-testid="appview-failed"
+    >
+      <div className="protocol-popup__panel">
+        <h2>
+          {t("protocol.sessionWindow.appView.failed.title", {
+            defaultValue: "Could not start the app"
+          })}
+        </h2>
+        <p>
+          {t("protocol.sessionWindow.appView.failed.desc", {
+            defaultValue:
+              "Launcher failed to hand off the session. Please try starting the app again from the Keymaster app store."
+          })}
+        </p>
+        {reason ? (
+          <p className="protocol-popup__muted" data-testid="appview-failed-reason">
+            {reason}
+          </p>
+        ) : null}
       </div>
     </div>
   );

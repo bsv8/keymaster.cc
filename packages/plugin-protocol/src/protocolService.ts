@@ -66,11 +66,15 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   PROTOCOL_VERSION,
+  type AppBootstrapPayload,
+  type AppViewContext,
   type BinaryField,
   type CipherDecryptParams,
   type CipherDecryptResult,
   type CipherEncryptParams,
   type CipherEncryptResult,
+  type ConnectLaunchParams,
+  type ConnectLaunchResult,
   type ConnectLoginParams,
   type ConnectLoginResult,
   type ConnectLogoutParams,
@@ -111,6 +115,17 @@ import {
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type ProtocolStorageDb,
+  type StorageDeleteParams,
+  type StorageDeleteResult,
+  type StorageGetParams,
+  type StorageGetResult,
+  type StorageListAllParams,
+  type StorageListEntry,
+  type StorageListParams,
+  type StorageListResult,
+  type StorageProviderConfig,
+  type StoragePutParams,
+  type StoragePutResult,
   type VaultService
 } from "@keymaster/contracts";
 import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
@@ -123,6 +138,15 @@ import {
 } from "./protocolCrypto.js";
 import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
+import { consumeLauncherBootstrap, parseBootstrapToken } from "./sessionWindowBootstrap.js";
+import {
+  createStorageObjectService,
+  createSigV4Adapter,
+  StorageObjectNotFoundError,
+  StorageProviderNotConfiguredError,
+  type StorageObjectService,
+  type StorageCryptoBridge
+} from "./storageObjectService.js";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
   sdkBuildBaseTx,
@@ -148,6 +172,17 @@ const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
  *     不视为"关闭"，而是回退到缺省 30。
  */
 const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
+
+/**
+ * Session Window 等待 launcher bootstrap 的最长时间（施工单 2026-06-29 001）。
+ *
+ * 设计缘由（修复 issue #3）：
+ *   - launcher 在合理时间内（如 30s）必须把 bootstrap 发过来；超过这个时间
+ *     视同 launcher 已关闭 / 失败 / 走错路径。
+ *   - 到点 fail-closed：UI 渲染错误态，让用户关闭 Session Window 重新从
+ *     launcher 启动 app。**不**无限等待。
+ */
+const BOOTSTRAP_TIMEOUT_MS = 30_000;
 
 /**
  * 把 DB 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 DB。
@@ -209,6 +244,23 @@ export interface ProtocolServiceDeps {
    * 自定义 ID 生成器。默认用 `crypto.randomUUID()`；测试可注入稳定 id。
    */
   generateId?: () => string;
+  /* ============== Session Window / storage（施工单 2026-06-29 001） ============== */
+  /**
+   * 当前 Session Window 启动模式。`undefined` 时按 `connect` 走。
+   * 设计缘由：mode 在启动期由 URL `?boot=appView` 一次性解析；service
+   * 不再次解析——避免 URL 被中途篡改。
+   */
+  bootMode?: "connect" | "appView";
+  /**
+   * 构造 storageObjectService 用的工厂；缺时 storage.* 走 internal_error。
+   * 测试可注入 fake 实现。
+   */
+  createStorageObjectService?: typeof createStorageObjectService;
+  /**
+   * 构造 storage content encryption key 的 bridge。
+   * 测试可注入 fake；生产由 manifest 注入（vault withPrivateKey）。
+   */
+  storageCryptoBridge?: StorageCryptoBridge;
 }
 
 /**
@@ -414,8 +466,79 @@ export class ProtocolServiceImpl implements ProtocolService {
   /** auth 页触发的解锁是否还在进行中；用于抑制全局 unlock 批量推进。 */
   private authUnlockInProgress: string | null = null;
 
+  /* ============== Session Window（施工单 2026-06-29 001） ============== */
+  /**
+   * 当前 Session Window boot mode。
+   *
+   * 设计缘由：
+   *   - 一次性解析，**不**可变；URL 中的 `?boot=appView` 在 popup 挂载时
+   *     解析一次并通过 deps.bootMode 注入；service 不再二次解析 URL。
+   *   - 缺省 `connect`。
+   */
+  private readonly bootModeValue: "connect" | "appView";
+
+  /**
+   * 当前 appView 上下文；仅在 appView mode + bootstrap 成功后非空。
+   *
+   * 设计缘由：
+   *   - 用于 UI / 启动决策 / `connect.launch` 的 caller origin 校验。
+   *   - **不**参与 storage.* 的 namespace 真值；storage 仍按
+   *     `sessionRecord.origin + sessionRecord.ownerPublicKeyHex` 取真值。
+   */
+  private currentAppViewContext: AppViewContext | null = null;
+
+  /**
+   * launchToken 内存 Map：token -> LaunchTokenRecord（V1 **不**落盘）。
+   *
+   * 设计缘由（施工单 2026-06-29 001 硬切换）：
+   *   - launchToken 只在 Session Window 当前内存有效；Session Window 刷新
+   *     / 关闭即失效。
+   *   - 不允许通过 IndexedDB 持久化，避免"刷新后旧 token 仍能消费"。
+   */
+  private readonly launchTokensByToken: Map<
+    string,
+    {
+      appId: string;
+      appOrigin: string;
+      appUrl: string;
+      connectSessionId: string;
+      ownerPublicKeyHex: string;
+      resolvedClaims: Record<string, unknown>;
+      resolvedAt: number;
+      consumed: boolean;
+    }
+  > = new Map();
+
+  /**
+ * 当前 Session Window 一次性 bootstrap consume 状态。
+ *
+ * 设计缘由（修复 issue #1 / #3）：
+ *   - 旧实现用 postMessage listener 等 launcher 推消息，存在时序竞态
+ *     （launcher 在子窗口 listener 挂好之前发消息会丢失）。
+ *   - 新实现：Session Window mount 时**主动**调
+ *     `consumeLauncherBootstrap({ token, opener, ownOrigin, timeoutMs })`，
+ *     内部走 `window.opener.__keymaster_session_window_bootstrap__
+ *     .acquire(token)` 同源直接调用——**没有**时序竞态。
+ *   - 该 flag 用于幂等门禁：避免重复触发 consume；startSession 时重置。
+ */
+  private bootstrapConsumed: boolean = false;
+
+  /**
+   * bootstrap 失败标记。
+   *
+   * 设计缘由（修复 issue #3）：
+   *   - 旧实现失败 / 超时永远停在"等待 launcher"，对用户无意义。
+   *   - 新实现：launcher registry 不存在 / acquire 抛错 / 超时 / token
+   *     不命中 / vault import 失败 / payload 不全都会设置
+   *     `bootstrapFailed = true`，UI 据此渲染明确错误态。
+   */
+  private bootstrapFailedFlag: boolean = false;
+  /** bootstrap 失败原因（local reason；不进对外 result，仅本地历史）。 */
+  private bootstrapFailureReasonValue: string | null = null;
+
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageDb);
+    this.bootModeValue = deps.bootMode ?? "connect";
   }
 
   /**
@@ -468,6 +591,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.phase = "waiting";
     this.lockStateValue = this.readVaultLockState();
     this.closingSent = false;
+    // 6. 清空 appView 启动上下文 + launchToken 缓存 + bootstrap 监听：
+    //    Session Window 重新启动会话时不允许复用旧 launcher handoff。
+    this.currentAppViewContext = null;
+    this.launchTokensByToken.clear();
+    this.bootstrapConsumed = false;
+    this.bootstrapFailedFlag = false;
+    this.bootstrapFailureReasonValue = null;
     this.emit();
     this.emitFeed();
     this.postReadyIfPossible();
@@ -1103,6 +1233,217 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!rec) return;
     if (!this.isRequestCancellable(rec)) return;
     await this.finalizeRequestByCancel(recordId, "user_canceled");
+  }
+
+  /* ============== Session Window / storage 公共 API（施工单 2026-06-29 001） ============== */
+
+  /** Session Window 当前 boot mode。 */
+  bootMode(): "connect" | "appView" {
+    return this.bootModeValue;
+  }
+
+  /** 当前 appView 上下文；仅 appView mode + bootstrap 成功后非空。 */
+  appViewContext(): AppViewContext | null {
+    return this.currentAppViewContext;
+  }
+
+  /**
+   * Session Window 一次性 bootstrap consume 入口。
+   *
+   * 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认；修复 issue #1）：
+   *   - 仅在 appView mode 下启用；connect mode 下是 no-op。
+   *   - **不**挂 message listener、**不**做 postMessage handoff——
+   *     postMessage 是事件队列，launcher 在子窗口 listener 挂好之前发
+   *     消息会**丢失**。
+   *   - 改走"Session Window 主动从同源 `window.opener` 直接消费
+   *     bootstrap capsule"模型：`consumeLauncherBootstrap()` 内部调
+   *     `window.opener.__keymaster_session_window_bootstrap__.acquire(token)`，
+   *     是同源普通 JS 函数调用，**没有**事件队列时序竞态。
+   *   - consume 内置超时（`BOOTSTRAP_TIMEOUT_MS`）→ 到点未拉到
+   *     capsule → fail-closed（`bootstrapFailed = true`，UI 渲染错误态）。
+   *   - 该方法**幂等**：第二次调用直接忽略。
+   */
+  awaitLauncherBootstrap(): void {
+    if (this.bootModeValue !== "appView") return;
+    if (this.bootstrapConsumed || this.bootstrapFailedFlag) return;
+    this.bootstrapConsumed = true;
+    if (typeof window === "undefined") {
+      this.markBootstrapFailed("window_undefined");
+      return;
+    }
+    const token = parseBootstrapToken(window.location.search);
+    void (async () => {
+      const out = await consumeLauncherBootstrap({
+        token,
+        opener: window.opener ?? null,
+        ownOrigin: window.location.origin,
+        timeoutMs: BOOTSTRAP_TIMEOUT_MS
+      });
+      if (out.failureReason || !out.bootstrap) {
+        this.markBootstrapFailed(out.failureReason ?? "bootstrap_unknown");
+        return;
+      }
+      await this.applyLauncherBootstrap(out.bootstrap);
+    })();
+  }
+
+  /** bootstrap 是否失败。 */
+  bootstrapFailed(): boolean {
+    return this.bootstrapFailedFlag;
+  }
+
+  /** bootstrap 失败原因（仅本地历史；不进对外 result）。 */
+  bootstrapFailureReason(): string | null {
+    return this.bootstrapFailureReasonValue;
+  }
+
+  /**
+   * 把 bootstrap 状态切到 failed；UI 立刻据此渲染错误页。
+   *
+   * 设计缘由：
+   *   - 不抛错：抛错会被 await 的 caller 吞掉、不传到 UI。
+   *   - 触发 emit() 让 UI 立即收到状态变更。
+   */
+  private markBootstrapFailed(reason: string): void {
+    if (this.bootstrapFailedFlag) return;
+    this.bootstrapFailedFlag = true;
+    this.bootstrapFailureReasonValue = reason;
+    this.deps.logger?.error?.({
+      scope: "protocol.sessionWindow",
+      event: "bootstrap.failed",
+      reason
+    });
+    this.emit();
+  }
+
+  /**
+   * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken）
+   * 在新窗口打开。
+   *
+   * 设计缘由：
+   *   - 仅允许在 appViewContext 非空时调用；否则 throw。
+   *   - 通过 `window.open(appUrl, "_blank")` 打开；**不**带 `noopener`。
+   *     否则 client app 拿不到 `window.opener = Session Window`，现有
+   *     popup transport（`request` / `result` 走 `event.source` ↔ opener
+   *     关系）就**完全**失效——client app 根本无法把第一条 `connect.launch`
+   *     发到 Session Window。
+   *   - 安全代价：client app 拿到 `window.opener` 后可以尝试导航 Session
+   *     Window。接受这个代价的原因是：Session Window 与 client app 本身
+   *     就是同源、同信任域（launcher 在 app 注册阶段已经校验过 origin
+   *     合法）；app 不应主动攻击 Session Window。如需额外防御，可让
+   *     client app 在收到第一条 `ready` 后自己 `window.opener = null`。
+   *   - 不负责 client app 的运行期状态；运行期交互完全走现有 popup
+   *     transport（ready → request → result）。
+   *   - 返回被打开的 window；失败返回 null（best-effort）。
+   */
+  openClientApp(): Window | null {
+    const ctx = this.currentAppViewContext;
+    if (!ctx) {
+      throw new Error("openClientApp: appViewContext not set");
+    }
+    if (typeof window === "undefined") return null;
+    try {
+      return window.open(ctx.appUrl, "_blank");
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.sessionWindow",
+        event: "openClientApp.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+  }
+
+  async getStorageProviderConfig(): Promise<StorageProviderConfig | null> {
+    if (!this.deps.storageDb) return null;
+    try {
+      return await this.deps.storageDb.getStorageProviderConfig();
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.storageConfig",
+        event: "get.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+  }
+
+  async setStorageProviderConfig(record: StorageProviderConfig): Promise<void> {
+    if (!this.deps.storageDb) {
+      throw new Error("storageDb unavailable");
+    }
+    await this.deps.storageDb.putStorageProviderConfig(record);
+  }
+
+  async clearStorageProviderConfig(): Promise<void> {
+    if (!this.deps.storageDb) return;
+    try {
+      await this.deps.storageDb.deleteStorageProviderConfig();
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.storageConfig",
+        event: "delete.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+    }
+  }
+
+  /**
+   * 应用 launcher bootstrap payload：导入 unlock runtime + 写
+   * appViewContext + 缓存 launchToken + 向 opener 发 ack。
+   *
+   * 设计缘由：handler 内部已经过 listener 的 source / origin 校验；
+   * 这里只做 payload 完整性 + vault 导入 + 内部状态写入。
+   */
+  private async applyLauncherBootstrap(payload: AppBootstrapPayload): Promise<void> {
+    if (!payload || !payload.app || !payload.launchToken) {
+      this.markBootstrapFailed("bootstrap_payload_invalid");
+      return;
+    }
+    if (!payload.unlockRuntime) {
+      this.markBootstrapFailed("bootstrap_unlock_runtime_missing");
+      return;
+    }
+    // 1) 导入 unlock runtime：vault 自己负责 verifier 校验与回滚。
+    try {
+      await this.deps.vault.importUnlockRuntimeFromLauncher(payload.unlockRuntime);
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.sessionWindow",
+        event: "importUnlockRuntime.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      this.markBootstrapFailed("bootstrap_unlock_runtime_import_failed");
+      return;
+    }
+    // 2) 写入 appViewContext + launchToken 缓存。
+    const claimsSnapshot = payload.resolvedClaims as AppViewContext["resolvedClaims"];
+    this.currentAppViewContext = {
+      appId: payload.app.appId,
+      appOrigin: payload.app.appOrigin,
+      appUrl: payload.app.appUrl,
+      connectSessionId: payload.connectSessionId,
+      ownerPublicKeyHex: payload.ownerPublicKeyHex,
+      resolvedClaims: claimsSnapshot,
+      resolvedAt: payload.resolvedAt
+    };
+    this.launchTokensByToken.set(payload.launchToken, {
+      appId: payload.app.appId,
+      appOrigin: payload.app.appOrigin,
+      appUrl: payload.app.appUrl,
+      connectSessionId: payload.connectSessionId,
+      ownerPublicKeyHex: payload.ownerPublicKeyHex,
+      resolvedClaims: claimsSnapshot,
+      resolvedAt: payload.resolvedAt,
+      consumed: false
+    });
+    // 3) 状态写入完成。bootstrap consume 已成功：不再做超时 / listener
+    //    收尾（direct consume 模型没有 listener）。
+    this.emit();
+    // 注：**不**向 launcher 发 ack。用户已确认"session window 不需要
+    // 和 launcher 做任何沟通"；launcher 自己决定何时关窗（信任开窗即
+    // 成功，或信任用户在 UI 上重试）。launcher 端 `acquire` 命中后会从
+    // registry 删除 entry，token 一次性消费。
   }
 
   /**
@@ -2148,6 +2489,18 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeConnectResume(rec);
         case "connect.logout":
           return await this.executeConnectLogout(rec);
+        case "connect.launch":
+          return await this.executeConnectLaunch(rec);
+        case "storage.put":
+          return await this.executeStoragePut(rec);
+        case "storage.get":
+          return await this.executeStorageGet(rec);
+        case "storage.list":
+          return await this.executeStorageList(rec);
+        case "storage.listAll":
+          return await this.executeStorageListAll(rec);
+        case "storage.delete":
+          return await this.executeStorageDelete(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -2616,6 +2969,251 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw localFailure("internal_error", "connect.logout: vault lock failed");
     }
     return result;
+  }
+
+  /* ============== connect.launch（施工单 2026-06-29 001 硬切换） ============== */
+
+  /**
+   * 执行 connect.launch。
+   *
+   * 设计缘由（施工单 2026-06-29 001 硬切换）：
+   *   - `connect.launch` 是 `appView` mode 下 client app 的唯一首登入口；
+   *     消费 launcher 在 bootstrap 阶段交给 Session Window 的 launchToken。
+   *   - 不在 `connect` mode 下使用；非 appView mode 一律 fail-closed。
+   *   - launchToken 必须存在、未消费；caller origin 必须与 bootstrap 期
+   *     launcher 给的 `app.appOrigin` 一致。
+   *   - launchToken 一次性消费；成功立即标记 consumed=true。
+   *   - 成功结果与 `connect.login` 对齐：返回 sessionId + owner + claims
+   *     快照。后续 caller 走同一套 connect.resume / cipher.* / storage.*。
+   */
+  private async executeConnectLaunch(rec: RequestRecord): Promise<ConnectLaunchResult> {
+    if (this.bootModeValue !== "appView") {
+      throw localFailure(
+        "internal_error",
+        "connect.launch only allowed in appView mode"
+      );
+    }
+    const params = rec.params as ConnectLaunchParams;
+    if (!params.launchToken) {
+      throw protocolError("invalid_request", "connect.launch: missing launchToken");
+    }
+    const record = this.launchTokensByToken.get(params.launchToken);
+    if (!record) {
+      throw localFailure("internal_error", "connect.launch: unknown launchToken");
+    }
+    if (record.consumed) {
+      throw localFailure("internal_error", "connect.launch: launchToken already consumed");
+    }
+    if (record.appOrigin !== rec.origin) {
+      throw protocolError(
+        "invalid_origin",
+        "connect.launch: caller origin does not match bootstrap app origin"
+      );
+    }
+    // 校验 Session Window 当前 appViewContext 与 token 记录一致——避免
+    // "token 与当前 app 不匹配" 的中间态。
+    const ctx = this.currentAppViewContext;
+    if (!ctx || ctx.appId !== record.appId || ctx.appOrigin !== record.appOrigin) {
+      throw localFailure(
+        "internal_error",
+        "connect.launch: appViewContext not aligned with launchToken"
+      );
+    }
+    if (!this.deps.storageDb) {
+      throw localFailure(
+        "internal_error",
+        "connect.launch: session storage unavailable"
+      );
+    }
+    // 校验 session 真值（与 connect.resume 同一路径）：session 不存在 /
+    // 已 revoke / origin 不匹配 / owner 不 ready 都拒掉。
+    const session = await this.deps.storageDb.getConnectSession(record.connectSessionId);
+    if (!session) {
+      throw localFailure(
+        "internal_error",
+        "connect.launch: connect session not found"
+      );
+    }
+    if (session.revokedAt !== null) {
+      throw localFailure(
+        "internal_error",
+        "connect.launch: connect session revoked"
+      );
+    }
+    if (session.origin !== record.appOrigin) {
+      throw protocolError(
+        "invalid_origin",
+        "connect.launch: session origin mismatch"
+      );
+    }
+    const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+    if (!key || !key.publicKeyHex) {
+      throw localFailure(
+        "internal_error",
+        "connect.launch: owner key not found"
+      );
+    }
+    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      throw localFailure(
+        "internal_error",
+        "connect.launch: owner key not ready"
+      );
+    }
+    // 消费 token：一次性，幂等。
+    this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
+    const now = Date.now();
+    const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
+    try {
+      await this.deps.storageDb.putConnectSession(next);
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.connect.launch",
+        event: "touchSession.failed",
+        sessionId: session.sessionId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+    }
+    return {
+      connectSessionId: session.sessionId,
+      ownerPublicKeyHex: session.ownerPublicKeyHex,
+      resolvedClaims: session.claimsSnapshot,
+      resolvedAt: now
+    };
+  }
+
+  /* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
+
+  /**
+   * 取 storageObjectService；缺 deps 时返回 null（storage.* 走 internal_error）。
+   *
+   * 设计缘由：service 不直接持有 storageObjectService 实例；每次按需
+   * 构造，避免长时间持有对 S3 adapter 的引用。
+   */
+  private getStorageObjectServiceOrNull(): StorageObjectService | null {
+    const ctor = this.deps.createStorageObjectService ?? createStorageObjectService;
+    const bridge = this.deps.storageCryptoBridge;
+    if (!bridge) return null;
+    if (!this.deps.storageDb) return null;
+    return ctor({
+      getProviderConfig: () => this.deps.storageDb!.getStorageProviderConfig(),
+      resolveAdapter: (cfg) => createSigV4Adapter(cfg),
+      cryptoBridge: bridge
+    });
+  }
+
+  private async executeStoragePut(rec: RequestRecord): Promise<StoragePutResult> {
+    const params = rec.params as StoragePutParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const svc = this.getStorageObjectServiceOrNull();
+    if (!svc) {
+      throw localFailure("internal_error", "storage.* bridge unavailable");
+    }
+    try {
+      return await svc.put({
+        origin: session.origin,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        params
+      });
+    } catch (err) {
+      this.mapStorageError(err);
+    }
+  }
+
+  private async executeStorageGet(rec: RequestRecord): Promise<StorageGetResult> {
+    const params = rec.params as StorageGetParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const svc = this.getStorageObjectServiceOrNull();
+    if (!svc) {
+      throw localFailure("internal_error", "storage.* bridge unavailable");
+    }
+    try {
+      const out = await svc.get({
+        origin: session.origin,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        params
+      });
+      if (!out) {
+        throw protocolError("not_found", `storage.get: object not found at ${params.path}`);
+      }
+      return out;
+    } catch (err) {
+      this.mapStorageError(err);
+    }
+  }
+
+  private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
+    const params = rec.params as StorageListParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const svc = this.getStorageObjectServiceOrNull();
+    if (!svc) {
+      throw localFailure("internal_error", "storage.* bridge unavailable");
+    }
+    try {
+      return await svc.list({
+        origin: session.origin,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        params
+      });
+    } catch (err) {
+      this.mapStorageError(err);
+    }
+  }
+
+  private async executeStorageListAll(rec: RequestRecord): Promise<StorageListResult> {
+    const params = rec.params as StorageListAllParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const svc = this.getStorageObjectServiceOrNull();
+    if (!svc) {
+      throw localFailure("internal_error", "storage.* bridge unavailable");
+    }
+    try {
+      return await svc.listAll({
+        origin: session.origin,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        params
+      });
+    } catch (err) {
+      this.mapStorageError(err);
+    }
+  }
+
+  private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {
+    const params = rec.params as StorageDeleteParams;
+    const session = await this.requireConnectSession(rec, params.connectSessionId);
+    const svc = this.getStorageObjectServiceOrNull();
+    if (!svc) {
+      throw localFailure("internal_error", "storage.* bridge unavailable");
+    }
+    try {
+      const out = await svc.delete({
+        origin: session.origin,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        params
+      });
+      if (!out) {
+        throw protocolError("not_found", `storage.delete: object not found at ${params.path}`);
+      }
+      return out;
+    } catch (err) {
+      this.mapStorageError(err);
+    }
+  }
+
+  /**
+   * storage.* 错误映射：把 storageObjectService 抛的内部 Error 类映射到
+   * 协议错误码 / `localFailure`。**只**抛错，不返回值。
+   */
+  private mapStorageError(err: unknown): never {
+    if (err instanceof StorageObjectNotFoundError) {
+      throw protocolError("not_found", err.message);
+    }
+    if (err instanceof StorageProviderNotConfiguredError) {
+      throw localFailure("storage_provider_not_configured", err.message);
+    }
+    if (err instanceof Error) {
+      throw localFailure("storage_io_error", err.message);
+    }
+    throw localFailure("storage_io_error", "storage io error");
   }
 
   /* ============== p2pkh.transfer ============== */

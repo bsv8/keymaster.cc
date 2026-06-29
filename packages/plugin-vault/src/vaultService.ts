@@ -33,10 +33,12 @@ import {
   type KeyRef,
   type PluginLogger,
   type PrivateKeyMaterial,
+  type UnlockRuntimeHandoff,
   type VaultService,
   type VaultStatus
 } from "@keymaster/contracts";
 import {
+  aesGcmKeyFromRawBits,
   assertWebCryptoAvailable,
   bytesToHex,
   decryptBytes,
@@ -948,6 +950,145 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
       statusListeners.clear();
       noticeListeners.clear();
+    },
+
+    /* ============== 同源 Session Window bootstrap 一次性交接（施工单 2026-06-29 001） ============== */
+
+    /**
+     * 导出当前 vault 的 unlock runtime 交接包，**仅供同源 Session Window
+     * bootstrap 使用**。
+     *
+     * 设计缘由（施工单 2026-06-29 001 硬切换）：
+     *   - 必须仅在 `status === "unlocked"` 时允许；其它状态 throw。
+     *   - 交接包只服务于本次 Session Window bootstrap；**不**写入任何
+     *     长期存储（localStorage / sessionStorage / IndexedDB / URL）。
+     *   - **不**走 postMessage 事件队列（launcher 在子窗口 listener 挂好
+     *     之前发消息会丢失）。handoff 由 launcher 持有在自己 `window`
+     *     上的 registry 中；Session Window mount 时**主动**调
+     *     `window.opener.__keymaster_session_window_bootstrap__.acquire
+     *     (token)` 拉取——同源直接 JS 调用，**没有**时序竞态。
+     *   - 导出后 launcher 可以立即关窗；Session Window 通过
+     *     `importUnlockRuntimeFromLauncher(handoff)` 导入，导入成功后
+     *     Session Window 自身进入与正常 `unlock()` 成功后等价的内存态。
+     *   - **不**做"持久化 unlock runtime"——只做一次性内存交接；刷新 /
+     *     关闭后 Session Window 仍然必须走解锁 / `connect.resume`。
+     *   - 关键安全语义：handoff 包含 masterKey raw bytes（PBKDF2 输出）
+     *     + masterSalt。两者一并发送意味着 launcher 把解锁态内存材料
+     *     全部交给 Session Window；launcher 关窗后这些材料**只**存在
+     *     Session Window 当前内存中。**信任域 = 同源**——只有 launcher
+     *     主动发起的同源子窗口可以消费。
+     */
+    async exportUnlockRuntimeForSessionWindow(): Promise<UnlockRuntimeHandoff> {
+      if (status !== "unlocked") {
+        throw new Error("Vault is not unlocked");
+      }
+      if (!masterKey || !masterSalt) {
+        throw new Error("Vault unlock runtime not initialized");
+      }
+      // 1) 从 masterKey (CryptoKey) 反向导出 raw 256-bit key material。
+      //    CryptoKey 不可结构化克隆，必须走 exportKey('raw') 拿原始字节。
+      const masterKeyBytes = new Uint8Array(await crypto.subtle.exportKey("raw", masterKey));
+      // 2) 列出当前 vault 内已就绪 key 列表快照（仅公开字段）。
+      //    keyCache 由 unlock 路径维护；unlocked 状态下必有值。
+      const keySnapshot: UnlockRuntimeHandoff["keySnapshot"] = (keyCache ?? []).map((k) => ({
+        id: k.id,
+        label: k.label,
+        publicKeyHex: k.publicKeyHex,
+        identityStatus: k.identityStatus
+      }));
+      // 3) 当前 keyspace active key 公钥 hex（可选；keyspace 不存在时省略）。
+      const activePublicKeyHex = deps.keyspace?.active().activePublicKeyHex;
+      return {
+        masterSalt: masterSalt.slice().buffer,
+        masterKeyBytes: masterKeyBytes.buffer,
+        keySnapshot,
+        activePublicKeyHex,
+        createdAt: Date.now()
+      };
+    },
+
+    /**
+     * 导入同源 launcher 一次性交接的 unlock runtime 包。
+     *
+     * 设计缘由（施工单 2026-06-29 001 硬切换）：
+     *   - 必须仅在 `status === "locked"` 时允许；unlocked 状态下不重复导入。
+     *   - 导入成功后当前 vault 进入 `unlocked` 态：masterKey / masterSalt /
+     *     keyCache / keyspace.onVaultUnlocked 全部生效。
+     *   - **不**对 launcher 内部对象保留任何活引用；导入后 Session Window
+     *     独立运行。
+     *   - 校验失败（包损坏 / masterKey 无法 restore / vault_meta 缺失）
+     *     一律 fail-closed；状态回 `locked`，清空内存会话。
+     *   - **不**写任何长期存储；handoff 仅存在于本次调用栈。
+     *   - 关键不变量：与 `unlock()` 一致，必须**先**完成 identity backfill
+     *     + keyspace.onVaultUnlocked，再 `setStatus("unlocked")` + emit。
+     *     中间步骤失败按 `unlock()` 的回滚语义清理内存会话并抛错。
+     */
+    async importUnlockRuntimeFromLauncher(handoff: UnlockRuntimeHandoff): Promise<void> {
+      if (status !== "locked") {
+        throw new Error("Vault is not in locked state for bootstrap import");
+      }
+      if (!handoff) {
+        throw new Error("Empty unlock runtime handoff");
+      }
+      if (!handoff.masterSalt || !handoff.masterKeyBytes) {
+        throw new Error("Invalid unlock runtime handoff: missing key material");
+      }
+      // 1) 校验 meta 必须存在（uninitialized 状态拒掉导入）。
+      const meta = await vaultDb.getMeta();
+      if (!meta) {
+        throw new Error("Vault not initialized");
+      }
+      // 2) 校验 handoff.masterSalt 与 meta.saltB64 一致——这是防
+      //    "launcher 把别处的 unlock runtime 灌到当前 vault" 的兜底。
+      const handoffSaltHex = bytesToHex(new Uint8Array(handoff.masterSalt));
+      if (handoffSaltHex !== meta.saltB64) {
+        throw new Error("Unlock runtime handoff salt does not match vault meta");
+      }
+      // 3) 反向重建 CryptoKey：raw bytes → AES-GCM key。
+      let restoredKey: CryptoKey;
+      try {
+        restoredKey = await aesGcmKeyFromRawBits(new Uint8Array(handoff.masterKeyBytes));
+      } catch (err) {
+        throw new Error(
+          `Failed to restore master key from handoff: ${
+            err instanceof Error ? err.message : String(err)
+          }`
+        );
+      }
+      // 4) 校验 verifier：与 unlock() 一致，确认 raw bytes 确实对应
+      //    当前 vault 的合法密码派生结果。
+      const verifierOk = await verifyVerifier(restoredKey, {
+        salt: hexToBytes(meta.verifierSaltB64),
+        iv: hexToBytes(meta.verifierIvB64),
+        ciphertext: hexToBytes(meta.verifierCipherB64)
+      });
+      if (!verifierOk) {
+        throw new Error("Unlock runtime handoff does not match vault verifier");
+      }
+      // 5) 写入 masterKey / masterSalt / keyCache；走与 unlock() 一致的
+      //    ready 边界：backfillIdentities -> keyspace.onVaultUnlocked ->
+      //    setStatus("unlocked") + emit。中间步骤失败按 unlock() 的
+      //    回滚语义清理并抛错。
+      masterSalt = new Uint8Array(handoff.masterSalt);
+      masterKey = restoredKey;
+      // handoff 带 key 列表快照：仅作为"导入时已有 key"的快速路径；
+      // backfillIdentities 仍按 DB 真值执行（DB 是真值；snapshot 只是
+      // 一种 hint，本地 DB 才是 source of truth）。
+      try {
+        await backfillIdentities();
+        if (deps.keyspace) {
+          await deps.keyspace.onVaultUnlocked();
+        }
+      } catch (err) {
+        // ready 边界失败：清理内存会话，状态保持 locked。
+        masterKey = null;
+        masterSalt = null;
+        keyCache = null;
+        setStatus("locked");
+        throw err;
+      }
+      setStatus("unlocked");
+      deps.messageBus.publish("vault.unlocked", { at: new Date().toISOString() });
     },
 
     /**

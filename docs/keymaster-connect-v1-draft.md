@@ -46,6 +46,38 @@ connect session 与 popup transport、popup unlock runtime 三层语义
 | `connect.login` | 重新认证 + 选 key + 建新 session | 进入全屏 `login` auth 页；用户输入密码并选 key 后提交 | 进入全屏 `login` auth 页；仍需重新验证密码并选 key |
 | `connect.resume` | 恢复既有 session | 进入全屏 `resume` auth 页；用户输入密码后继续恢复 | 进入全屏 `resume` auth 页；仍需对当前 session 绑定 owner 做密码验证 |
 | `connect.logout` | caller 主动注销 | 进入 waiting_unlock_manual；解锁后**不**经过 confirming，直接 queued → executing | **不**经过 confirming，直接 queued → executing |
+| `connect.launch` | appView mode 下 client app 首登；消费 launchToken | 仅在 appView mode 启用；launcher 已解锁时 Session Window 已经在 bootstrap 阶段 importUnlockRuntime，状态为 unlocked | 仅在 appView mode 启用；用户**不**需要再点确认；校验 token 后直接 queued → executing |
+
+### `connect.launch`（施工单 2026-06-29 001 硬切换）
+
+appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 bootstrap 阶段交给 Session Window 的 launchToken，返回与 `connect.login` 对齐的 session 三元组。
+
+#### 输入
+
+```ts
+{
+  launchToken: string;
+}
+```
+
+#### 成功结果
+
+```ts
+{
+  connectSessionId: string;
+  ownerPublicKeyHex: string;
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  resolvedAt: number;
+}
+```
+
+#### 关键约束
+
+1. 仅在 Session Window 处于 `appView` mode 时启用；其它 mode 一律 fail-closed。
+2. launchToken 一次性消费；成功后立即标记 `consumed = true`。
+3. caller `event.origin` 必须与 bootstrap 期记录的 `app.appOrigin` 一致；不一致 → `invalid_origin`。
+4. 失败时按 fail-closed 返回 `user_rejected` / `invalid_origin` / `internal_error`；**不**自动 fallback 到 `connect.login`。
+5. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*` / `storage.*`。
 
 ### `connect.login`
 

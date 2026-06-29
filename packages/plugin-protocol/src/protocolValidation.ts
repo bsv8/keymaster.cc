@@ -23,6 +23,7 @@ import type {
   BinaryField,
   CipherDecryptParams,
   CipherEncryptParams,
+  ConnectLaunchParams,
   ConnectLoginParams,
   ConnectLogoutParams,
   ConnectResumeParams,
@@ -34,7 +35,12 @@ import type {
   P2pkhTransferParams,
   ProtocolErrorCode,
   ProtocolMethod,
-  ProtocolRequestMessage
+  ProtocolRequestMessage,
+  StorageDeleteParams,
+  StorageGetParams,
+  StorageListAllParams,
+  StorageListParams,
+  StoragePutParams
 } from "@keymaster/contracts";
 import { PROTOCOL_METHODS, PROTOCOL_VERSION } from "@keymaster/contracts";
 
@@ -103,7 +109,20 @@ function validateParams(
       return validateConnectResumeParams(raw);
     case "connect.logout":
       return validateConnectLogoutParams(raw);
+    case "connect.launch":
+      return validateConnectLaunchParams(raw);
+    case "storage.put":
+      return validateStoragePutParams(raw);
+    case "storage.get":
+      return validateStorageGetParams(raw);
+    case "storage.list":
+      return validateStorageListParams(raw);
+    case "storage.listAll":
+      return validateStorageListAllParams(raw);
+    case "storage.delete":
+      return validateStorageDeleteParams(raw);
   }
+  throw new ProtocolValidationError("invalid_request", "Unknown method");
 }
 
 function validateIdentityGetParams(raw: unknown): IdentityGetParams {
@@ -290,6 +309,53 @@ function validateConnectLogoutParams(raw: unknown): ConnectLogoutParams {
   return { connectSessionId };
 }
 
+/* ============== connect.launch / storage.*（施工单 2026-06-29 001 硬切换） ============== */
+
+function validateConnectLaunchParams(raw: unknown): ConnectLaunchParams {
+  const obj = expectObject(raw, "connect.launch params");
+  const launchToken = expectNonEmptyString(obj.launchToken, "launchToken");
+  return { launchToken };
+}
+
+function validateStoragePutParams(raw: unknown): StoragePutParams {
+  const obj = expectObject(raw, "storage.put params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  const path = expectNonEmptyString(obj.path, "path");
+  const contentType =
+    typeof obj.contentType === "string" ? obj.contentType : undefined;
+  const content = expectBinaryField(obj.content, "content");
+  const out: StoragePutParams = { connectSessionId, path, content };
+  if (contentType !== undefined) out.contentType = contentType;
+  return out;
+}
+
+function validateStorageGetParams(raw: unknown): StorageGetParams {
+  const obj = expectObject(raw, "storage.get params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  const path = expectNonEmptyString(obj.path, "path");
+  return { connectSessionId, path };
+}
+
+function validateStorageListParams(raw: unknown): StorageListParams {
+  const obj = expectObject(raw, "storage.list params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  const prefix = typeof obj.prefix === "string" ? obj.prefix : "";
+  return { connectSessionId, prefix };
+}
+
+function validateStorageListAllParams(raw: unknown): StorageListAllParams {
+  const obj = expectObject(raw, "storage.listAll params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  return { connectSessionId };
+}
+
+function validateStorageDeleteParams(raw: unknown): StorageDeleteParams {
+  const obj = expectObject(raw, "storage.delete params");
+  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
+  const path = expectNonEmptyString(obj.path, "path");
+  return { connectSessionId, path };
+}
+
 /* ============== helpers ============== */
 
 /**
@@ -380,6 +446,28 @@ function expectObject(v: unknown, name: string): Record<string, unknown> {
     throw new ProtocolValidationError("invalid_request", `${name} must be an object`);
   }
   return v;
+}
+
+function expectBinaryField(v: unknown, name: string): BinaryField {
+  const obj = expectObject(v, name);
+  if (obj.$type !== "binary") {
+    throw new ProtocolValidationError("invalid_request", `${name}.$type must be "binary"`);
+  }
+  if (!(obj.bytes instanceof ArrayBuffer) && !(obj.bytes instanceof Uint8Array)) {
+    throw new ProtocolValidationError("invalid_request", `${name}.bytes must be an ArrayBuffer`);
+  }
+  let bytes: ArrayBuffer;
+  if (obj.bytes instanceof ArrayBuffer) {
+    bytes = obj.bytes;
+  } else {
+    const u8 = obj.bytes as Uint8Array;
+    const out = new ArrayBuffer(u8.byteLength);
+    new Uint8Array(out).set(u8);
+    bytes = out;
+  }
+  const out: BinaryField = { $type: "binary", bytes };
+  if (typeof obj.mime === "string") out.mime = obj.mime;
+  return out;
 }
 
 function expectString(v: unknown, name: string): string {

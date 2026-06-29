@@ -2,7 +2,7 @@
 // 对外协议插件：popup 路由 + service capability + 协议页 i18n +
 // 命令流 IndexedDB。
 //
-// 设计缘由（施工单 002 硬切换：popup 复用与命令流）：
+// 设计缘由（施工单 002 硬切换 + 2026-06-28 002 + 2026-06-29 001）：
 //   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
 //     `closing` 由 pageUnloading 路径发出。
 //   - 命令流历史走 `keymaster.protocol` IndexedDB：store=commands，
@@ -11,6 +11,9 @@
 //     切换 origin 时重新载入；DB 失败时 `historyAvailable=false` 降级。
 //   - popup 入口路径只有一条 `/protocol/v1/popup`，**不**注册到
 //     `route.registry`（与施工单 001 公共语义保持一致）。
+//   - 施工单 2026-06-29 001 硬切换：popup 语义统一为 Session Window；
+//     `boot=appView` 模式下额外挂一次性 bootstrap listener；storage.*
+//     与 connect.* 走同一套 dispatch。
 
 import type {
   I18nPluginResources,
@@ -25,10 +28,13 @@ import {
   createProtocolService
 } from "./protocolService.js";
 import { openProtocolStorageDb } from "./protocolStorageDb.js";
+import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js";
+import {
+  createStorageObjectService,
+  type StorageCryptoBridge
+} from "./storageObjectService.js";
 
 export const PROTOCOL_PLUGIN_ID = "protocol";
-
-/** 协议页 i18n 资源。 */
 const protocolResources: I18nPluginResources = {
   namespace: "protocol",
   resources: {
@@ -186,7 +192,24 @@ const protocolResources: I18nPluginResources = {
       "protocol.connect.logout.confirm": "Confirm logout",
       "protocol.connect.cancel": "Cancel",
       "protocol.connect.sessionExpired":
-        "This session has expired or its key is no longer available. Please ask the site to log in again."
+        "This session has expired or its key is no longer available. Please ask the site to log in again.",
+      /* ============== 施工单 2026-06-29 001：Session Window / storage ============== */
+      "protocol.sessionWindow.title": "Session Window",
+      "protocol.sessionWindow.appView.waiting.title": "Waiting for launcher",
+      "protocol.sessionWindow.appView.waiting.desc":
+        "Keymaster is starting this app. Keep this window open — it will hand off the session to the app and then you can close this tab.",
+      "protocol.sessionWindow.appView.failed.title": "Could not start the app",
+      "protocol.sessionWindow.appView.failed.desc":
+        "Launcher failed to hand off the session. Please try starting the app again from the Keymaster app store.",
+      "protocol.sessionWindow.appView.openingClientApp": "Opening the app…",
+      "protocol.connect.launch.title": "App sign-in",
+      "protocol.connect.launch.desc":
+        "The app is asking Keymaster to confirm this session. You can close this window after the app loads.",
+      "protocol.storage.error.not_found": "Object not found.",
+      "protocol.storage.error.storage_provider_not_configured":
+        "Storage is not configured yet. Please set up a storage provider in Keymaster Settings → Storage.",
+      "protocol.storage.error.storage_io_error":
+        "Storage backend error. Please check your storage provider configuration."
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -336,7 +359,24 @@ const protocolResources: I18nPluginResources = {
       "protocol.connect.logout.confirm": "确认注销",
       "protocol.connect.cancel": "取消",
       "protocol.connect.sessionExpired":
-        "该会话已失效或绑定 key 不可用。请回到站点重新登录。"
+        "该会话已失效或绑定 key 不可用。请回到站点重新登录。",
+      /* ============== 施工单 2026-06-29 001：Session Window / storage ============== */
+      "protocol.sessionWindow.title": "Session Window",
+      "protocol.sessionWindow.appView.waiting.title": "等待 launcher 启动",
+      "protocol.sessionWindow.appView.waiting.desc":
+        "Keymaster 正在启动此 app。请保持本窗口打开 — 它会把会话交给 app，然后你可以关闭此标签页。",
+      "protocol.sessionWindow.appView.failed.title": "无法启动 app",
+      "protocol.sessionWindow.appView.failed.desc":
+        "Launcher 未成功完成会话交接。请回到 Keymaster 应用商店重新启动该 app。",
+      "protocol.sessionWindow.appView.openingClientApp": "正在打开 app…",
+      "protocol.connect.launch.title": "App 登录",
+      "protocol.connect.launch.desc":
+        "App 正在请求 Keymaster 确认本次会话。App 加载完成后即可关闭此窗口。",
+      "protocol.storage.error.not_found": "对象不存在。",
+      "protocol.storage.error.storage_provider_not_configured":
+        "尚未配置 storage。请到 Keymaster 设置 → 存储 中配置 storage provider。",
+      "protocol.storage.error.storage_io_error":
+        "存储后端错误。请检查 storage provider 配置。"
     }
   }
 };
@@ -439,6 +479,16 @@ export const protocolPlugin: PluginManifest = {
         keyspace: keyspaceService,
         storageDb,
         p2pkhService: p2pkhService as never,
+        // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
+        // 仅在 popup 挂载时解析一次；session 启动后不再变动。
+        bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",
+        // 施工单 2026-06-29 001：storage.* 需要一个 crypto bridge 来派生
+        // owner-bound storage content key；这里走 vault.withPrivateKey 在
+        // 闭包内派生。生产环境实现是 HKDF(cipher 站点密钥 || "storage" tag)，
+        // 但 V1 简化为：直接复用 masterKey 作为 storage key material 的
+        // 输入（仍隔域），并按 ownerPublicKeyHex 走 HKDF domain separation。
+        storageCryptoBridge: createVaultBackedStorageCryptoBridge(vaultService),
+        createStorageObjectService,
         logger: {
           info: (input) =>
             ctx.logger.info({
@@ -489,3 +539,59 @@ export const protocolPlugin: PluginManifest = {
     })();
   }
 };
+
+/**
+ * 用 vault withPrivateKey 派生 owner-bound storage content key。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - storage content key 必须按 owner 维度派生；不能像 cipher 那样按 origin，
+ *     否则不同 app 之间能互相解对方的密文。
+ *   - 与 cipher 站点密钥**隔域**：用 HKDF-SHA256 做 domain separation，
+ *     info = `"keymaster.storage.v1" || ownerPublicKeyHex`。
+ *   - 实现走 vault.withPrivateKey：明文私钥只在闭包内短暂存在；
+ *     派生出来的 storage key 在闭包外是 raw bytes，service 持有后用于
+ *     AES-GCM encrypt/decrypt。
+ *
+ * 注意：HKDF 的"input keying material"用 private key hex 派生出一个固定
+ * 长度的 seed，再做 domain-separated HKDF。这里直接用私钥 hex 做 IKM
+ * 是常见模式——等价于"用私钥当一次性 seed"，在 V1 接受范围内。
+ */
+function createVaultBackedStorageCryptoBridge(vault: VaultService): StorageCryptoBridge {
+  return {
+    async deriveStorageContentKey(ownerPublicKeyHex: string): Promise<Uint8Array> {
+      // V1 简化：从 keyspace 找对应 keyId，走 vault.withPrivateKey 借用明文 hex。
+      // 然后用 WebCrypto HKDF 做 domain separation。
+      const keyspace = (vault as unknown as {
+        getKey?: (hex: string) => Promise<{ keyId?: string } | undefined>;
+      }).getKey;
+      let keyId: string | undefined;
+      if (keyspace) {
+        const k = await keyspace.call(vault, ownerPublicKeyHex);
+        keyId = k?.keyId;
+      }
+      if (!keyId) {
+        throw new Error("storage crypto: owner key not found");
+      }
+      return vault.withPrivateKey(keyId, async (material) => {
+        const ikm = new TextEncoder().encode(material.hex);
+        const salt = new Uint8Array(32); // 空 salt；domain separation 在 info。
+        const info = new TextEncoder().encode(
+          "keymaster.storage.v1" + ownerPublicKeyHex
+        );
+        const baseKey = await crypto.subtle.importKey(
+          "raw",
+          ikm as BufferSource,
+          "HKDF",
+          false,
+          ["deriveBits"]
+        );
+        const bits = await crypto.subtle.deriveBits(
+          { name: "HKDF", hash: "SHA-256", salt: salt as BufferSource, info: info as BufferSource },
+          baseKey,
+          256
+        );
+        return new Uint8Array(bits);
+      });
+    }
+  };
+}

@@ -210,7 +210,17 @@ function makeFakeService(): ProtocolService & {
     connectResumeRecord: () => null,
     confirmConnectLogin: async () => undefined,
     confirmConnectResume: async () => undefined,
-    rejectConnectRequest: async () => undefined
+    rejectConnectRequest: async () => undefined,
+    // 施工单 2026-06-29 001 硬切换：Session Window / storage 公共 API。
+    bootMode: () => "connect" as const,
+    appViewContext: () => null,
+    bootstrapFailed: () => false,
+    bootstrapFailureReason: () => null,
+    awaitLauncherBootstrap: () => undefined,
+    openClientApp: () => null,
+    async getStorageProviderConfig() { return null; },
+    async setStorageProviderConfig() { return; },
+    async clearStorageProviderConfig() { return; }
   };
   return svc;
 }

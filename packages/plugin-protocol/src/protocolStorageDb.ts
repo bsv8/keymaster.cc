@@ -1,12 +1,12 @@
 // packages/plugin-protocol/src/protocolStorageDb.ts
-// popup 协议存储 IndexedDB（commands / origins / feePools / connectSessions
-// 四 store）。
+// popup 协议存储 IndexedDB（commands / origins / feePools / connectSessions /
+// storageProviderConfig / launchTokens 六 store）。
 //
-// 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 硬切换）：
+// 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 + 2026-06-29 001 硬切换）：
 //   - DB 名：`keymaster.protocol`。**不**挂到 `keyspace.openKeyStorage()`
 //     的 per-key namespace，因为命令历史按 domain 走，按 key 走会让
 //     "切了 key 看不到旧站点历史" 这种行为偷偷出现。
-//   - DB version：5。
+//   - DB version：6。
 //       - v2：单 `commands` store 升级为三 store（commands / origins / feePools）；
 //       - v3：feePools record 结构变了（新增 `draftSpendTxHex` /
 //         `draftClientSignBytes`），升级时清空 feePools store（不迁数据）；
@@ -19,6 +19,10 @@
 //         业务方法 contract 都改了——为了保留旧数据而引入双读 / 双写
 //         不值得；直接重建 DB 更简单）。commands 同步加
 //         `connectSessionId` + `ownerPublicKeyHex` 字段。
+//       - v6（施工单 2026-06-29 001 硬切换）：新增 `storageProviderConfig`
+//         + `launchTokens` 两 store；commands / origins / feePools /
+//         connectSessions 不动——session-bound 方法 contract 没动过，
+//         历史数据兼容。
 //   - `commands`：命令流历史，主键 `record.id`（与 transport requestId
 //     解耦）。索引 `origin` / `updatedAt` / compound `[origin, updatedAt]`。
 //   - `origins`：按 exact origin 存站点级配置；主键 `origin`。
@@ -27,6 +31,12 @@
 //     索引 `origin`（便于按 origin 列出）。
 //   - `connectSessions`：auth session 真值；主键 `sessionId`；索引 `origin`
 //     （便于按 origin 列出该站点的所有 session 含已 revoked 的）。
+//   - `storageProviderConfig`：单条全局配置；主键 `"singleton"`。
+//   - `launchTokens`：launcher 给 client app 的 launchToken 缓存；主键
+//     `token`；索引 `connectSessionId`（便于按 session 找到 token）。
+//     **V1 显式不启用持久化路径**——service 默认走内存 Map，仅当 service
+//     显式注入 `storageDb` 时才落 IndexedDB；DB schema 保留是为将来
+//     "重启 launcher 后仍能恢复 launchToken"留出口。
 //   - **不**存 `operations` store（pending fee pool operation 走内存）。
 //   - **不**存敏感正文：参见 "历史持久化范围"。
 //   - **不**存密码 / 不存 unlock runtime 任何派生材料。
@@ -37,25 +47,28 @@
 
 import type {
   ConnectSessionRecord,
+  LaunchTokenRecord,
   ProtocolCommandRecord,
   ProtocolFeePoolRecord,
   ProtocolOriginSettingsRecord,
-  ProtocolStorageDb
+  ProtocolStorageDb,
+  StorageProviderConfig
 } from "@keymaster/contracts";
 
 const DB_NAME = "keymaster.protocol";
-// V5（施工单 2026-06-28 002 硬切换）：owner 真值收口成 `ownerPublicKeyHex`，
-// `ownerKeyId` 不再落库；feePool 持久化 key 补 `ownerPublicKeyHex` 维度；
-// `connectSessions` / `feePools` / `commands` 全部清空重建。
-// 设计缘由：硬切换改的是 owner 真值 / session 归属 / fee pool key /
-// 业务方法 contract；为了保留旧数据而引入双读 / 双写 / 旧 shape 兼容
-// 分支比直接重建 DB 更复杂也更脏。命令历史按 origin 归档，跨升级
-// 失去历史不影响协议功能。
-const DB_VERSION = 5;
+// V6（施工单 2026-06-29 001 硬切换）：新增 storageProviderConfig + launchTokens
+// 两 store；commands / origins / feePools / connectSessions 全部沿用 v5 schema。
+// 设计缘由：session-bound 方法 contract 未改；storage.* 是新方法、新物理层。
+// 已落库历史数据不动；launchTokens 默认走 service 内存，DB 仅作为可选落盘口。
+const DB_VERSION = 6;
 const STORE_COMMANDS = "commands";
 const STORE_ORIGINS = "origins";
 const STORE_FEE_POOLS = "feePools";
 const STORE_CONNECT_SESSIONS = "connectSessions";
+const STORE_STORAGE_PROVIDER_CONFIG = "storageProviderConfig";
+const STORE_LAUNCH_TOKENS = "launchTokens";
+/** storageProviderConfig 主键固定为 "singleton"——全局唯一配置。 */
+const STORAGE_PROVIDER_CONFIG_KEY = "singleton";
 
 /**
  * 打开协议存储 DB。同一进程内只打开一次；后续 `openProtocolStorageDb()`
@@ -144,6 +157,16 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
         const sessionStore = db.createObjectStore(STORE_CONNECT_SESSIONS, { keyPath: "sessionId" });
         sessionStore.createIndex("origin", "origin", { unique: false });
       }
+      // V6 迁移（施工单 2026-06-29 001 硬切换）：新增 storageProviderConfig +
+      // launchTokens 两 store。commands / origins / feePools / connectSessions
+      // 不动——session-bound 方法 contract 未改；storage.* 是新方法、新物理层。
+      if (!db.objectStoreNames.contains(STORE_STORAGE_PROVIDER_CONFIG)) {
+        db.createObjectStore(STORE_STORAGE_PROVIDER_CONFIG);
+      }
+      if (!db.objectStoreNames.contains(STORE_LAUNCH_TOKENS)) {
+        const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
+        tokenStore.createIndex("connectSessionId", "connectSessionId", { unique: false });
+      }
       void newVersion;
     };
     req.onsuccess = () => {
@@ -173,6 +196,12 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
   }
   function txConnectSessions(mode: IDBTransactionMode): IDBObjectStore {
     return db.transaction(STORE_CONNECT_SESSIONS, mode).objectStore(STORE_CONNECT_SESSIONS);
+  }
+  function txStorageProviderConfig(mode: IDBTransactionMode): IDBObjectStore {
+    return db.transaction(STORE_STORAGE_PROVIDER_CONFIG, mode).objectStore(STORE_STORAGE_PROVIDER_CONFIG);
+  }
+  function txLaunchTokens(mode: IDBTransactionMode): IDBObjectStore {
+    return db.transaction(STORE_LAUNCH_TOKENS, mode).objectStore(STORE_LAUNCH_TOKENS);
   }
 
   return {
@@ -469,6 +498,138 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
       } catch (err) {
         console.error("[protocol.storageDb] listConnectSessionsByOrigin failed", {
           origin,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+
+    /* ============== storageProviderConfig（施工单 2026-06-29 001） ============== */
+    async getStorageProviderConfig(): Promise<StorageProviderConfig | null> {
+      try {
+        return await new Promise<StorageProviderConfig | null>((resolve, reject) => {
+          const req = txStorageProviderConfig("readonly").get(STORAGE_PROVIDER_CONFIG_KEY);
+          req.onsuccess = () => {
+            const v = req.result as StorageProviderConfig | undefined;
+            resolve(v ?? null);
+          };
+          req.onerror = () => reject(req.error ?? new Error("getStorageProviderConfig failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] getStorageProviderConfig failed", {
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async putStorageProviderConfig(record: StorageProviderConfig): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = txStorageProviderConfig("readwrite").put(record, STORAGE_PROVIDER_CONFIG_KEY);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error ?? new Error("putStorageProviderConfig failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] putStorageProviderConfig failed", {
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async deleteStorageProviderConfig(): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = txStorageProviderConfig("readwrite").delete(STORAGE_PROVIDER_CONFIG_KEY);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error ?? new Error("deleteStorageProviderConfig failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] deleteStorageProviderConfig failed", {
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+
+    /* ============== launchTokens（施工单 2026-06-29 001，可选落盘） ============== */
+    // 设计缘由：V1 service 内部以 Map 持有 launchToken；DB 接口保留
+    // 是为将来"重启 launcher 后仍能恢复 launchToken"留出口，service
+    // 暂不主动调用本组方法。已实现完整 CRUD 以便需要时直接启用。
+    async putLaunchToken(record: LaunchTokenRecord): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = txLaunchTokens("readwrite").put(record);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error ?? new Error("putLaunchToken failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] putLaunchToken failed", {
+          token: record.token,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async getLaunchToken(token: string): Promise<LaunchTokenRecord | null> {
+      try {
+        return await new Promise<LaunchTokenRecord | null>((resolve, reject) => {
+          const req = txLaunchTokens("readonly").get(token);
+          req.onsuccess = () => {
+            const v = req.result as LaunchTokenRecord | undefined;
+            resolve(v ?? null);
+          };
+          req.onerror = () => reject(req.error ?? new Error("getLaunchToken failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] getLaunchToken failed", {
+          token,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async consumeLaunchToken(token: string): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(STORE_LAUNCH_TOKENS, "readwrite");
+          const store = tx.objectStore(STORE_LAUNCH_TOKENS);
+          const getReq = store.get(token);
+          getReq.onsuccess = () => {
+            const current = getReq.result as LaunchTokenRecord | undefined;
+            if (!current) {
+              resolve();
+              return;
+            }
+            if (current.consumed) {
+              resolve();
+              return;
+            }
+            const putReq = store.put({ ...current, consumed: true });
+            putReq.onerror = () => reject(putReq.error ?? new Error("consumeLaunchToken failed"));
+          };
+          getReq.onerror = () => reject(getReq.error ?? new Error("consumeLaunchToken failed"));
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error ?? new Error("consumeLaunchToken failed"));
+          tx.onabort = () => reject(tx.error ?? new Error("consumeLaunchToken aborted"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] consumeLaunchToken failed", {
+          token,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
+    async deleteLaunchToken(token: string): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const req = txLaunchTokens("readwrite").delete(token);
+          req.onsuccess = () => resolve();
+          req.onerror = () => reject(req.error ?? new Error("deleteLaunchToken failed"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] deleteLaunchToken failed", {
+          token,
           error: err instanceof Error ? err.message : String(err)
         });
         throw err instanceof Error ? err : new Error(String(err));

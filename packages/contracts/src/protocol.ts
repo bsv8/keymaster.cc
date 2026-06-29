@@ -66,6 +66,26 @@
 //         / invalid_origin；不进 waiting_unlock / confirming UI）。
 //       - 业务执行阶段再次校验 session 仍有效（logout 后同 session 下挂
 //         的旧 request 后续执行必须失败；不允许"老 session 复用新 key"）。
+//   - 施工单 2026-06-29 001 硬切换：Session Window 统一 + appView 启动 +
+//     `connect.launch` + `storage.*`：
+//       - 唯一窗口入口仍是 `/protocol/v1/popup`，无第二套路由；语义上称
+//         Session Window（"popup"只是窗口形态称谓，不再承载权限模型）。
+//       - Session Window 只允许两种 boot mode：`connect`（默认）与
+//         `appView`（由 launcher 一次性 bootstrap 启动）；同一套
+//         `protocolService` / `ProtocolPopupPage` 同时承载两种 mode，
+//         启动后执行路径不再区分 mode。
+//       - 新增 `connect.launch`：appView mode 下 client app 首登入口；
+//         入参 `{ launchToken }`，成功结果形状与 `connect.login` 对齐；
+//         launchToken 一次性消费；不允许 fallback 到 `connect.login`。
+//       - 新增 `storage.put` / `storage.get` / `storage.list` /
+//         `storage.listAll` / `storage.delete`：全部要求 `connectSessionId`；
+//         namespace 真值 = `session.origin + session.ownerPublicKeyHex`；
+//         appViewContext 只用于 UI / 启动决策，**不**参与 storage 真值。
+//       - 物理上只一份全局 S3 provider 配置；逻辑上按
+//         `/{originEncoded}/{ownerPublicKeyHex}/{relativePath}` 划分虚拟
+//         桶；Keymaster 透明加解密对象内容，不加密路径名。
+//       - 新增协议错误码 `not_found`（storage.get / storage.delete 命中
+//         缺失对象）。
 
 /**
  * 二进制字段。V1 协议里所有二进制内容（密文、签名、信封真值、文件本体、
@@ -100,7 +120,13 @@ export const PROTOCOL_METHODS = [
   "feepool.commit",
   "connect.login",
   "connect.resume",
-  "connect.logout"
+  "connect.logout",
+  "connect.launch",
+  "storage.put",
+  "storage.get",
+  "storage.list",
+  "storage.listAll",
+  "storage.delete"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -136,6 +162,7 @@ export type ProtocolErrorCode =
   | "user_rejected"
   | "active_key_unavailable"
   | "decrypt_failed"
+  | "not_found"
   | "internal_error";
 
 /** 协议错误对象。 */
@@ -771,6 +798,8 @@ export type ProtocolFailureReason =
   | "unknown_operation"
   | "cross_origin_operation"
   | "request_timeout"
+  | "storage_provider_not_configured"
+  | "storage_io_error"
   | "internal_error";
 
 /**
@@ -963,7 +992,7 @@ export interface ConnectLogoutResult {
  * 设计缘由：login / resume 现在由统一 auth owner 快照仲裁；login 是
  * 重新认证并新建 session，resume 是恢复既有 session。
  */
-export type ConnectRequestKind = "login" | "resume" | "logout";
+export type ConnectRequestKind = "login" | "resume" | "logout" | "launch";
 
 /**
  * connect auth owner 的只读快照。
@@ -996,6 +1025,361 @@ export interface ProtocolConnectAuthSnapshot {
   } | null;
 }
 
+/* ============== connect.launch（施工单 2026-06-29 001 硬切换） ============== */
+
+/**
+ * `connect.launch` 请求参数。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - `connect.launch` 是 `appView` mode 下 client app 的**唯一**首登
+ *     入口；消费 launcher 交给 client app 的 `launchToken`。
+ *   - 不传 aud / iat / exp —— login 时机由 launcher 一次性 bootstrap 阶段
+ *     决定；launch 自身只验 token + 走 sessionRecord 落库；不重新选 key，
+ *     不重新认证。
+ *   - 失败时按 fail-closed：launchToken 缺失 / 已消费 / 当前 Session Window
+ *     不在 `appView` mode / caller origin 与 bootstrap 期记录不一致 → 拒掉；
+ *     不允许 fallback 到 `connect.login`。
+ *   - 成功结果形状与 `connect.login` 对齐，便于 caller 走同一套"持久化
+ *     sessionId + 后续 connect.resume / cipher.* / storage.*"路径。
+ */
+export interface ConnectLaunchParams {
+  /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
+  launchToken: string;
+}
+
+/** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
+export interface ConnectLaunchResult {
+  connectSessionId: string;
+  ownerPublicKeyHex: string;
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  resolvedAt: number;
+}
+
+/* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
+
+/**
+ * `storage.put` 请求参数。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - `connectSessionId` 强制输入；namespace 真值完全来自 session，不读
+ *     `appViewContext`。
+ *   - `path` 是相对路径：必须不以 `/` 开头、不含 `..`、非空、不含 `\` 与
+ *     `\0`；Keymaster 在 execute 入口做 normalize + 越界检查，非法直接
+ *     `invalid_request`。
+ *   - `contentType` 可选；与明文一起被透明加密进对象内容；解密时原样
+ *     返回。
+ *   - `content` 是 `BinaryField`，明文写入由 Keymaster 在 Session Window
+ *     内部完成加密；S3 侧只能看到密文 + 路径名 + 元数据。
+ */
+export interface StoragePutParams {
+  connectSessionId: string;
+  /** 相对路径，统一 `/` 分隔。 */
+  path: string;
+  contentType?: string;
+  content: BinaryField;
+}
+
+/** `storage.put` 成功结果。 */
+export interface StoragePutResult {
+  /** 物理对象 key。app 端一般不感知；用于调试 / 测试。 */
+  objectKey: string;
+  /** 服务端最后更新时间（unix milliseconds）。S3 侧回填。 */
+  updatedAt: number;
+}
+
+/** `storage.get` 请求参数。 */
+export interface StorageGetParams {
+  connectSessionId: string;
+  path: string;
+}
+
+/** `storage.get` 成功结果。对象不存在时返回 `not_found` 错误。 */
+export interface StorageGetResult {
+  contentType?: string;
+  content: BinaryField;
+  updatedAt?: number;
+}
+
+/** `storage.list` 请求参数。 */
+export interface StorageListParams {
+  connectSessionId: string;
+  /** 相对路径前缀；空串表示当前虚拟桶根。 */
+  prefix: string;
+}
+
+/** 单条 list 结果。 */
+export interface StorageListEntry {
+  path: string;
+  updatedAt?: number;
+}
+
+/** `storage.list` / `storage.listAll` 成功结果。 */
+export interface StorageListResult {
+  entries: StorageListEntry[];
+}
+
+/** `storage.listAll` 请求参数。 */
+export interface StorageListAllParams {
+  connectSessionId: string;
+}
+
+/** `storage.delete` 请求参数。对象不存在时返回 `not_found` 错误。 */
+export interface StorageDeleteParams {
+  connectSessionId: string;
+  path: string;
+}
+
+/** `storage.delete` 成功结果。 */
+export interface StorageDeleteResult {
+  deleted: true;
+  updatedAt: number;
+}
+
+/* ============== Storage provider config（施工单 2026-06-29 001 硬切换） ============== */
+
+/**
+ * 全局 storage provider 配置。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - 只支持单一全局 S3-compatible 配置；不做多 profile / 不暴露给 client
+ *     app / 不放 localStorage。
+ *   - 配置由 Keymaster 设置页写入 IndexedDB 单条记录；Session Window 与
+ *     storage.* 路径都从这里取真值。
+ *   - V1 仅支持最小字段：endpoint / region / bucket / accessKeyId /
+ *     secretAccessKey / forcePathStyle；不引入 multipart / SSE-KMS /
+ *     accelerate 等高级选项。
+ *   - `secretAccessKey` 走 IndexedDB 而非 localStorage：IndexedDB 与 vault
+ *     DB 同 lifecycle；localStorage 是同步 + 跨标签页立即可见，V1 不走它。
+ *   - 不写 S3 凭证到任何会被导出 / 同步的路径；只在本地 IndexedDB。
+ */
+export interface StorageProviderConfig {
+  /** 固定 "s3-compatible"。 */
+  provider: "s3-compatible";
+  /** S3 endpoint（host 或 https://host）。 */
+  endpoint: string;
+  /** AWS region。 */
+  region: string;
+  /** bucket 名。V1 不支持多 bucket。 */
+  bucket: string;
+  /** Access key id。 */
+  accessKeyId: string;
+  /** Secret access key。 */
+  secretAccessKey: string;
+  /** 是否强制 path-style（minio / 自部署常用）。可选；缺省 false。 */
+  forcePathStyle?: boolean;
+  /** 最后更新时间，unix milliseconds。 */
+  updatedAt: number;
+}
+
+/**
+ * Session Window 的 appView 当前上下文（仅 UI / 启动用）。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - 这是 Session Window 当前服务的 app 上下文；用来渲染 UI、决定打开
+ *     client app 的 URL、校验 `connect.launch` 的 caller origin。
+ *   - **不**参与 storage.* 的 namespace 真值；storage 仍按
+ *     `sessionRecord.origin + sessionRecord.ownerPublicKeyHex` 取真值。
+ *   - 仅在 Session Window 处于 `appView` mode 且 bootstrap 成功后非空；
+ *     `connect` mode 下恒为 null。
+ */
+export interface AppViewContext {
+  appId: string;
+  appOrigin: string;
+  /** 启动 client app 用的 URL（含 launchToken）。 */
+  appUrl: string;
+  /** bootstrap 时 launcher 已建的 connectSessionId；与 storage 真值同源。 */
+  connectSessionId: string;
+  /** bootstrap 时锁定的 owner public key hex。 */
+  ownerPublicKeyHex: string;
+  /** bootstrap 时一次解析的 claims 快照。 */
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  /** bootstrap 时间（unix milliseconds）。 */
+  resolvedAt: number;
+}
+
+/**
+ * Launcher 在 bootstrap 阶段一次性塞给 Session Window 的 capsule。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - **不**走 postMessage handoff。Launcher 在 `window` 上挂一个
+ *     `LauncherBootstrapRegistry` 接口（`__keymaster_session_window_bootstrap__`），
+ *     Session Window mount 后**主动**从同源 `window.opener` 调
+ *     `acquire(token)` 拉取 capsule。
+ *   - URL 里**只**承载"此窗口要以哪种模式启动"的轻量标记
+ *     （`?boot=appView&bootstrapToken=<id>`）：token 是 launcher 生成的
+ *     不透明 ID，本身不敏感；真正的 unlock runtime + session 真值只在
+ *     launcher 的当前内存中。
+ *   - capsule 包含 launcher 已建的 session 真值、claims 快照、launchToken，
+ *     以及由 vault 一次性导出的 unlock runtime 交接包（见
+ *     `UnlockRuntimeHandoff`）。
+ *   - Session Window 拿到 capsule 后做校验：launchToken 非空 / unlock
+ *     runtime 完整 / 当前 mode === "appView"；通过后导入 unlock runtime
+ *     + 应用 appViewContext + 缓存 launchToken。
+ */
+export interface AppBootstrapPayload {
+  /** 当前 app 信息（仅 UI / 启动用）。 */
+  app: {
+    appId: string;
+    appOrigin: string;
+    appUrl: string;
+  };
+  /** launcher 已建的 connect sessionId（与 storage 真值同源）。 */
+  connectSessionId: string;
+  ownerPublicKeyHex: string;
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  resolvedAt: number;
+  /** launcher 给 client app 的 launchToken；Session Window 收 bootstrap 时缓存、消费在 connect.launch。 */
+  launchToken: string;
+  /** vault 一次性导出的 unlock runtime 交接包（仅内存用，不落盘）。 */
+  unlockRuntime: UnlockRuntimeHandoff;
+}
+
+/**
+ * Vault 一次性导出的 unlock runtime 交接包。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - **只**在 `status === "unlocked"` 时导出；导出的包只服务于本次
+ *     Session Window bootstrap，不允许落盘到任何长期存储。
+ *   - 通过 launcher → Session Window 的**同源直接调用**（`window.opener`
+ *     上的 `acquire(token)`）拉取；不走 postMessage 事件队列，避免
+ *     "launcher 在子窗口 listener 挂好之前就发消息导致丢失"的时序竞态。
+ *   - Session Window 导入成功后，自己的 vault service 进入与正常
+ *     `unlock()` 成功后等价的内存态；之后**不**反向保持对 launcher
+ *     内部对象的活引用。
+ */
+export interface UnlockRuntimeHandoff {
+  /** 解密私钥派生的 master key salt（原始字节）。 */
+  masterSalt: ArrayBuffer;
+  /** 由密码派生的 master key（CryptoKey 在结构化克隆时不可用；走 raw bytes）。 */
+  masterKeyBytes: ArrayBuffer;
+  /** vault 已解锁的 key 列表元数据快照（含 publicKeyHex）。 */
+  keySnapshot: Array<{
+    id: string;
+    label: string;
+    publicKeyHex?: string;
+    identityStatus?: "ready" | "failed";
+  }>;
+  /** 当前 keyspace active key 公钥 hex。 */
+  activePublicKeyHex?: string;
+  /** handoff 创建时间，unix milliseconds。仅用于调试 / 失效判定。 */
+  createdAt: number;
+}
+
+/**
+ * Launcher 在 `window` 上挂的 bootstrap registry 接口。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认）：
+ *   - **不**用 postMessage listener 做 handoff——launcher 在子窗口
+ *     listener 挂好之前发出消息会丢失。
+ *   - launcher 在自己的 `window.__keymaster_session_window_bootstrap__`
+ *     挂一个对象；Session Window mount 后**主动**调 `window.opener.____
+ *     keymaster_session_window_bootstrap__.acquire(token)`。
+ *   - 这是同源直接调用：launcher 和 Session Window 同 origin，
+ *     `window.opener` 是 launcher's window；acquire 是普通 JS 函数调用，
+ *     不是事件队列消息，**不**有时序竞态。
+ *   - launcher 在打开 Session Window 之前**先**把 capsule 放进 registry；
+ *     Session Window 可能在 launcher 之后 mount，所以 acquire 既要支持
+ *     "立即返回"也要支持"launcher 还在准备"（返回 Promise）。
+ *   - acquire 成功一次后 launcher 把对应 entry 从 registry 删除，保证
+ *     一次性消费（与 `AppBootstrapPayload.launchToken` 一次性语义对齐）。
+ *   - URL 中只承载 `bootstrapToken=<id>`（不透明 ID，非敏感），URL
+ *     不承载 capsule 内容。
+ *   - Session Window 端的 consume 逻辑封装在
+ *     `consumeLauncherBootstrap()`；launcher 端的安装逻辑封装在
+ *     `installLauncherBootstrapRegistry()`。
+ */
+export interface LauncherBootstrapRegistry {
+  /**
+   * Session Window 主动调此函数拉取 capsule。
+   *
+   * @param token launcher 写入 URL 的 `bootstrapToken`，与 launcher
+   *   注册时的 key 一一对应。
+   * @returns 成功返回 capsule；token 未知 / 已消费 / launcher 已
+   *   关闭 → 返回 null。launcher vault 未解锁 / 无 active key → throw。
+   */
+  acquire(token: string): Promise<AppBootstrapPayload | null>;
+}
+
+/**
+ * 安装 launcher 端 bootstrap registry。
+ *
+ * 设计缘由：
+ *   - launcher 在打开 Session Window 之前调用本函数挂好 registry；
+ *     Session Window mount 后通过 `window.opener.__...__.acquire(token)`
+ *     拉取 capsule。
+ *   - 返回 uninstall 函数；launcher 自己决定何时卸载（launcher 关闭、
+ *     Session Window 消费完、明确放弃时）。
+ *   - 挂载前 launcher 自己持有 `Map<token, AppBootstrapPayload>`；
+ *     acquire 命中即 `delete`。
+ *   - 同一窗口只允许挂一个 registry；重复挂载会覆盖并返回旧 uninstall。
+ */
+export function installLauncherBootstrapRegistry(
+  host: Window,
+  registry: LauncherBootstrapRegistry
+): () => void {
+  const symbol = "__keymaster_session_window_bootstrap__" as keyof Window;
+  const previous = host[symbol] as LauncherBootstrapRegistry | undefined;
+  (host as unknown as Record<string, unknown>)[symbol] = registry;
+  return () => {
+    const current = host[symbol] as LauncherBootstrapRegistry | undefined;
+    if (current === registry) {
+      if (previous) {
+        (host as unknown as Record<string, unknown>)[symbol] = previous;
+      } else {
+        delete (host as unknown as Record<string, unknown>)[symbol];
+      }
+    }
+  };
+}
+
+/**
+ * Session Window 端：启动一次性的 launcher bootstrap consume 流程。
+ *
+ * 流程：
+ *   1. 解析 URL `?bootstrapToken=<id>`（opaque、非敏感）；
+ *   2. 校验 `window.opener` 存在、未关闭、当前 origin 同 launcher origin；
+ *   3. 校验 opener 上挂的 `__keymaster_session_window_bootstrap__.acquire`
+ *      是函数；
+ *   4. 调 `acquire(token)`，与超时定时器 race；
+ *   5. 返回 capsule；token 未知 / launcher 异常 / 超时 → 返回 failureReason。
+ *
+ * 设计缘由：
+ *   - 整个 consume 是同源直接调用，**不**挂 message listener，**不**
+ *     做 postMessage handoff——完全消除"launcher 在子窗口 listener
+ *     挂好之前发消息导致丢失"的时序竞态。
+ *   - 一次成功调用之后 launcher 端应把对应 entry 从 registry 删除；
+ *     Session Window 端**不**重复调 acquire（`awaitLauncherBootstrap`
+ *     内部幂等）。
+ */
+export interface SessionWindowBootstrapConsumerInput {
+  /** URL 解析出来的 bootstrapToken；opaque、不透明。 */
+  token: string | null;
+  /** Session Window 的 `window.opener`，即 launcher 的 window。 */
+  opener: Window | null;
+  /** 当前窗口 origin（用于同源校验）。 */
+  ownOrigin: string;
+  /** 超时毫秒；到点未拉到 capsule → fail-closed。 */
+  timeoutMs: number;
+}
+export interface SessionWindowBootstrapConsumerOutput {
+  bootstrap: AppBootstrapPayload | null;
+  /** 失败原因；null 表示成功。 */
+  failureReason: string | null;
+}
+
+/**
+ * 从 URL 解析 bootstrap token；不存在时返回 null。
+ *
+ * 设计缘由：URL 只承载 `?boot=appView&bootstrapToken=<id>`。token 是
+ * launcher 生成的不透明 ID，本身**不**敏感；URL 中**不**承载 capsule。
+ */
+export function parseBootstrapToken(search: string): string | null {
+  if (typeof search !== "string" || search.length === 0) return null;
+  const params = new URLSearchParams(search.startsWith("?") ? search : `?${search}`);
+  const t = params.get("bootstrapToken");
+  return t && t.length > 0 ? t : null;
+}
+
 /* ============== Method dispatch ============== */
 
 /**
@@ -1013,6 +1397,12 @@ export interface MethodParamsMap {
   "connect.login": ConnectLoginParams;
   "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
+  "connect.launch": ConnectLaunchParams;
+  "storage.put": StoragePutParams;
+  "storage.get": StorageGetParams;
+  "storage.list": StorageListParams;
+  "storage.listAll": StorageListAllParams;
+  "storage.delete": StorageDeleteParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -1030,6 +1420,12 @@ export interface MethodResultMap {
   "connect.login": ConnectLoginResult;
   "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;
+  "connect.launch": ConnectLaunchResult;
+  "storage.put": StoragePutResult;
+  "storage.get": StorageGetResult;
+  "storage.list": StorageListResult;
+  "storage.listAll": StorageListResult;
+  "storage.delete": StorageDeleteResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
@@ -1339,6 +1735,72 @@ export interface ProtocolStorageDb {
    * session 收口；这两个写入必须绑在同一条存储事务里，避免半成功。
    */
   putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord): Promise<void>;
+
+  /* ----- storageProviderConfig（施工单 2026-06-29 001 硬切换） ----- */
+  /**
+   * 读全局 storage provider 配置；未配置时返回 null。
+   *
+   * 设计缘由：单一全局记录；key 固定 `"singleton"`。V1 不做多 profile。
+   */
+  getStorageProviderConfig(): Promise<StorageProviderConfig | null>;
+  /**
+   * 写全局 storage provider 配置；同 key 覆盖。
+   *
+   * 设计缘由：配置写盘走 IndexedDB，**不**走 localStorage / sessionStorage；
+   * 写入字段含 `secretAccessKey`，仍只在本地落盘，**不**对外暴露。
+   */
+  putStorageProviderConfig(record: StorageProviderConfig): Promise<void>;
+  /** 删除全局 storage provider 配置；调用方负责后续清理。 */
+  deleteStorageProviderConfig(): Promise<void>;
+
+  /* ----- launchTokens（施工单 2026-06-29 001 硬切换） ----- */
+  /**
+   * 写一条 launchToken 记录；同 token 覆盖。
+   *
+   * 设计缘由：launchToken 是 launcher 给 client app 的一次性凭证；
+   * Session Window 在 bootstrap 阶段把它连同 unlock runtime 一起接进
+   * 当前内存上下文。**不**写 IndexedDB——V1 显式要求 launchToken 只
+   * 存在 Session Window 当前内存，刷新 / 关闭即失效。本接口保留
+   * 为可选（实现可走内存 Map），便于将来如果需要"重启 launcher 后仍
+   * 能恢复 launchToken"再开启持久化路径。
+   */
+  putLaunchToken?(record: LaunchTokenRecord): Promise<void>;
+  /** 按 token 读一条记录；未消费时返回，未命中返回 null。 */
+  getLaunchToken?(token: string): Promise<LaunchTokenRecord | null>;
+  /** 标记 token 已消费（保留记录但 `consumed = true`）。幂等。 */
+  consumeLaunchToken?(token: string): Promise<void>;
+  /** 删除一条 token 记录。 */
+  deleteLaunchToken?(token: string): Promise<void>;
+}
+
+/**
+ * Launcher 给 client app 的一次性 launchToken 记录。
+ *
+ * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ *   - V1 **不**走持久化；service 内部以 `Map<token, record>` 持有。
+ *   - 字段语义：
+ *       * `token`：唯一 id；
+ *       * `appId` / `appOrigin` / `appUrl`：UI / 启动决策用，与
+ *         `AppViewContext` 同源；
+ *       * `connectSessionId`：bootstrap 期 launcher 已建的 session，
+ *         与 storage 真值同源；
+ *       * `ownerPublicKeyHex`：bootstrap 期锁定的 owner；
+ *       * `resolvedClaims` / `resolvedAt`：bootstrap 期快照；
+ *       * `consumed`：true 表示该 token 已被 `connect.launch` 消费；
+ *       * `expiresAt`：当前 Session Window 关闭即作废；V1 不写盘，因此
+ *         实际不做 wall-clock 校验，仅供未来扩展时使用。
+ */
+export interface LaunchTokenRecord {
+  token: string;
+  appId: string;
+  appOrigin: string;
+  appUrl: string;
+  connectSessionId: string;
+  ownerPublicKeyHex: string;
+  resolvedClaims: Record<string, ResolvedClaimValue>;
+  resolvedAt: number;
+  consumed: boolean;
+  expiresAt: number;
 }
 
 /**
@@ -1667,6 +2129,93 @@ export interface ProtocolService {
    *     这条允许跑完；执行器暂停取新任务。
    */
   setVaultLockState(locked: boolean): void;
+
+  /* ============== Session Window（施工单 2026-06-29 001 硬切换） ============== */
+
+  /**
+   * Session Window 当前 boot mode。
+   *
+   * 设计缘由（施工单 2026-06-29 001 硬切换）：
+   *   - `connect` 是缺省 mode；`appView` 是 launcher 启动模式。
+   *   - mode 仅在启动阶段决定；一旦 session 建立，后续执行路径不再
+   *     区分两种 mode（`connect.resume` / `cipher.*` / `storage.*` 都
+   *     按同一套代码走）。
+   */
+  bootMode(): "connect" | "appView";
+
+  /**
+   * 当前 appView 上下文。
+   *
+   * 设计缘由：
+   *   - 仅当 Session Window 处于 `appView` mode 且 bootstrap 成功后
+   *     非空；`connect` mode 下恒为 null。
+   *   - **不**参与 storage.* 的 namespace 真值；storage 仍按
+   *     `sessionRecord.origin + sessionRecord.ownerPublicKeyHex` 取真值。
+   */
+  appViewContext(): AppViewContext | null;
+
+  /**
+   * bootstrap 是否已失败。
+   *
+   * 设计缘由（修复 issue #3）：
+   *   - 旧实现失败 / 超时永远停在"等待 launcher"，对用户无意义。
+   *   - 新实现：launcher 在合理时间（如 30s）内未把 bootstrap 发过来 → 标记
+   *     `bootstrapFailed = true`；UI 据此渲染明确错误态，让用户关闭 Session
+   *     Window 重新从 launcher 启动 app。**不**无限等待。
+   */
+  bootstrapFailed(): boolean;
+  /** bootstrap 失败原因（仅本地历史；不进对外 result）。 */
+  bootstrapFailureReason(): string | null;
+
+  /**
+   * Session Window 主动从同源 `window.opener` 拉取 bootstrap capsule。
+   *
+   * 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认；修复 issue #1）：
+   *   - **不**做 postMessage handoff——postMessage 是事件队列，launcher
+   *     在子窗口 message listener 挂好之前发消息会**丢失**。
+   *   - Session Window mount 时**主动**调 launcher `window` 上的
+   *     `__keymaster_session_window_bootstrap__.acquire(token)`（同源
+   *     普通 JS 函数调用），把 token 作为不透明 ID 通过 URL
+   *     `?bootstrapToken=<id>` 传递。
+   *   - 内部走 `consumeLauncherBootstrap` helper：读 URL token + 校验
+   *     `window.opener` 同源 + 读 registry + 调 `acquire(token)` + race
+   *     超时（30s 默认）。到点未拉到 → `bootstrapFailed = true`，UI 渲染
+   *     错误态；用户可关闭 Session Window 重新从 Keymaster 启动 app。
+   *   - launcher 自己持有 `Map<token, AppBootstrapPayload>`；`acquire`
+   *     命中即从 map 删除——一次性消费。
+   *   - 该方法**幂等**：第二次调用直接忽略。
+   */
+  awaitLauncherBootstrap(): void;
+
+  /**
+   * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken）
+   * 在新窗口打开。Session Window 与 client app 后续走现有 transport
+   * （ready → request → result）。
+   *
+   * 设计缘由：
+   *   - 仅允许在 appViewContext 非空时调用；否则 throw；
+   *   - 通过 `window.open(appUrl, "_blank")` 打开；**不**带 `noopener`。
+   *     否则 client app 拿不到 `window.opener = Session Window`，现有
+   *     popup transport（`request` / `result` 走 `event.source` ↔ opener
+   *     关系）就**完全**失效——client app 根本无法把第一条 `connect.launch`
+   *     发到 Session Window。
+   *   - 不负责 client app 的运行期状态；运行期交互完全走现有 popup
+   *     transport。
+   */
+  openClientApp(): Window | null;
+
+  /* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
+
+  /**
+   * 读全局 storage provider 配置；未配置时返回 null。
+   */
+  getStorageProviderConfig(): Promise<StorageProviderConfig | null>;
+  /**
+   * 写全局 storage provider 配置。
+   */
+  setStorageProviderConfig(record: StorageProviderConfig): Promise<void>;
+  /** 删除全局 storage provider 配置。 */
+  clearStorageProviderConfig(): Promise<void>;
 
   /* ============== connect.*（施工单 2026-06-28 001 硬切换） ============== */
 

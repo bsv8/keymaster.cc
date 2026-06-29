@@ -37,6 +37,20 @@
 - `closing` 是 popup **窗口**生命周期的主动通知，**不**是“单条 request 收尾”的通知；popup 可以连续处理多条 request，期间不发 `closing`。
 - `popup.closed === true` 是浏览器给的兜底真值。两者并联收敛到断开态，本协议**不**引入心跳、**不**引入 MessageChannel。
 
+### Session Window（施工单 2026-06-29 001 硬切换）
+
+popup 在 V1 不再仅是"第三方站点拉起的窗口"，而是统一为 **Session Window**。同一份代码、同一个 `/protocol/v1/popup` 入口承载两种启动模式：
+
+- `connect` mode（缺省）：第三方 client web `window.open` 拉起，等待外部 request；
+- `appView` mode：Keymaster launcher 拉起，URL 上加 `?boot=appView`；Session Window 在挂载时进入"等待 launcher bootstrap"状态，launcher 通过一次性同源 postMessage 移交 `AppBootstrapPayload`（含 unlock runtime + connectSessionId + launchToken + app 信息）。
+
+两种 mode 在启动后走同一套 service / 同一套 transport / 同一套协议方法族。差异只存在于**启动阶段**。
+
+更细节的 storage / connect.* / Session Window 启动顺序见：
+
+- `docs/keymaster-storage-v1-draft.md`：storage.* 协议族；
+- `docs/keymaster-connect-v1-draft.md`：connect.* + connect.launch；
+
 ## 三层会话语义（施工单 2026-06-28 001 硬切换）
 
 V1 把"窗口生命周期 / connect 会话 / popup 解锁运行时"分到三条独立的时间线上：
