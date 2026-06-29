@@ -169,17 +169,17 @@ const protocolResources: I18nPluginResources = {
       "protocol.lockscreen.unlockHint":
         "After unlock, {{total}} pending request(s) will automatically enter the confirmation / execution flow.",
       /* ============== 施工单 2026-06-28 001：connect 视图文案 ============== */
-      "protocol.connect.login.title": "Choose sign-in identity",
+      "protocol.connect.login.title": "Re-authenticate and create a new session",
       "protocol.connect.login.desc":
-        "This site is asking to open a connect session. Pick a key as the session's bound identity; all subsequent business methods (identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit) will use only this key, not the global active key.",
+        "This site is asking for re-authentication. Pick a key and enter your password again. A successful login will create a new connect session and revoke the old one for the same origin.",
       "protocol.connect.login.empty":
         "No ready key is available in this wallet. Please create or import one in Keymaster first.",
-      "protocol.connect.login.confirm": "Sign in with this key",
-      "protocol.connect.resume.title": "Resume authorized session",
+      "protocol.connect.login.confirm": "Re-authenticate and create session",
+      "protocol.connect.resume.title": "Resume current session",
       "protocol.connect.resume.desc":
-        "This site is asking to resume a previously established connect session. The session-bound key is unchanged; you do not need to pick a key again.",
+        "This site still has a valid session. Enter your password to resume the current session without choosing a key again.",
       "protocol.connect.resume.ownerLabel": "Bound key",
-      "protocol.connect.resume.confirm": "Resume",
+      "protocol.connect.resume.confirm": "Resume current session",
       "protocol.connect.logout.title": "Log out connect session",
       "protocol.connect.logout.desc":
         "This site is asking to log out the current connect session. After this, resume / cipher with the same sessionId will fail; you will need to log in again.",
@@ -319,17 +319,17 @@ const protocolResources: I18nPluginResources = {
       "protocol.lockscreen.unlockHint":
         "解锁后，{{total}} 条待处理请求会自动进入确认 / 执行流程。",
       /* ============== 施工单 2026-06-28 001：connect 视图文案 ============== */
-      "protocol.connect.login.title": "选择登录身份",
+      "protocol.connect.login.title": "重新认证并建立新会话",
       "protocol.connect.login.desc":
-        "该站点请求建立 connect 会话。请选择一把 key 作为本次会话的绑定身份；后续所有外部业务方法（identity.get / intent.sign / cipher.encrypt / cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）都将只走这把 key，不再读取全局 active key。",
+        "该站点请求重新认证。请选择一把 key，并再次输入密码。成功后会创建新的 connect session，并吊销同 origin 的旧 session。",
       "protocol.connect.login.empty":
         "当前钱包没有 ready 的 key。请先回到 Keymaster 创建或导入一把 key。",
-      "protocol.connect.login.confirm": "用此 key 登录",
-      "protocol.connect.resume.title": "恢复已授权会话",
+      "protocol.connect.login.confirm": "重新认证并建立会话",
+      "protocol.connect.resume.title": "恢复当前会话",
       "protocol.connect.resume.desc":
-        "该站点请求恢复已建立的 connect 会话。会话绑定的 key 与原 session 不变；不需要重新选 key。",
+        "该站点的 session 仍然有效。输入密码后即可恢复当前会话，不会重新选择 key。",
       "protocol.connect.resume.ownerLabel": "绑定 key",
-      "protocol.connect.resume.confirm": "恢复",
+      "protocol.connect.resume.confirm": "恢复当前会话",
       "protocol.connect.logout.title": "注销 connect 会话",
       "protocol.connect.logout.desc":
         "该站点请求注销本次 connect 会话。注销后该 sessionId 的 resume / cipher 将全部失败，需要重新 login。",

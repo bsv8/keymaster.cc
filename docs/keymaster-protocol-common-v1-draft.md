@@ -61,8 +61,10 @@ popup unlock runtime
    `keymaster.protocol` 的 `connectSessions` store 里持久化；popup
    当前文档刷新 / 关闭后，session 真值仍在；解锁 runtime 丢失。
 3. **unlock runtime 失效 ≠ caller 需要重新登录**。caller 通过
-   `connect.resume` 即可触发"补 unlock"流程，不需要重新选 key、
-   不需要重新确认身份。
+   `connect.resume` 即可恢复既有 session；它不重新选 key，也不回到
+   `connect.login` 的重新认证流程。
+4. popup 任一时刻只允许一个 auth owner；`connect.login` / `connect.resume`
+   的 auth 页面必须互斥，不能和主页面混排。
 
 popup 当前文档的 unlock runtime 由 vault 在 `locked` 时清空全部
 派生材料（masterKey / masterSalt）实现；popup 刷新 / 关闭后

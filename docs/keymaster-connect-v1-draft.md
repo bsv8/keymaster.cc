@@ -3,10 +3,11 @@
 本文档定义 Keymaster 对外协议 V1 的 connect session 方法族。
 
 connect session 是**所有外部业务方法**的正式真值（施工单 2026-06-28 002
-硬切换）。caller 在接入时通过 `connect.login` 建会话并绑定 owner
-public key；后续 `identity.get` / `intent.sign` / `cipher.encrypt` /
-`cipher.decrypt` / `p2pkh.transfer` / `feepool.prepare` / `feepool.commit`
-全部必须基于此 session 绑定的 owner 执行，**不**读取钱包全局 active key。
+硬切换）。caller 在接入时通过 `connect.login` 重新认证并建立新的会话，
+owner public key 由本次 auth owner 明确选定；后续 `identity.get` /
+`intent.sign` / `cipher.encrypt` / `cipher.decrypt` / `p2pkh.transfer` /
+`feepool.prepare` / `feepool.commit` 全部必须基于此 session 绑定的 owner
+执行，**不**读取钱包全局 active key。
 
 ## 适用边界
 
@@ -17,10 +18,10 @@ connect 方法族**仅**为外部站点提供"会话级"语义；所有外部业
 
 持续登录 caller 在接入时应当：
 
-1. 首次调用 `connect.login` → 拿到 `connectSessionId`；
+1. 首次调用 `connect.login` → 经过重新认证后拿到新的 `connectSessionId`；
 2. 把 `connectSessionId` 持久化在 caller 本地（localStorage / IndexedDB）；
 3. 后续所有业务方法都必传 `connectSessionId`；
-4. 启动 / popup 断线重建后调用 `connect.resume` 恢复会话；
+4. 启动 / popup 断线重建后调用 `connect.resume` 恢复既有会话；
 5. 主动注销时调用 `connect.logout`。
 
 ## 三层语义
@@ -32,15 +33,18 @@ connect session 与 popup transport、popup unlock runtime 三层语义
 - transport 断开（`closing` / `popup.closed === true`）**不**吊销
   connect session；caller 通过 `connect.resume` 恢复。
 - popup unlock runtime 失效（refresh / close / relock）**不**要求
-  caller 重新 `connect.login`；`connect.resume` 触发补 unlock 即可。
+  caller 重新 `connect.login`；`connect.resume` 只恢复既有 session，并按
+  当前 vault 状态补齐所需密码验证。
 - `connect.logout` 是 auth 失效的**唯一**正常路径。
+- popup 任一时刻只允许一个 auth owner；`connect.login` / `connect.resume`
+  的 auth 页面互斥显示。
 
 ## 方法族
 
 | 方法 | 用途 | popup 当前文档 locked 时 | popup unlocked 时 |
 | --- | --- | --- | --- |
-| `connect.login` | 首次显式登录 + 选 key + 落 session | 进入 waiting_unlock_manual；解锁后进入"选 key + 确认"视图（confirming） | 进入"选 key + 确认"视图（confirming） |
-| `connect.resume` | caller 持 sessionId，恢复会话 | 进入 waiting_unlock_manual；解锁后**直接** queued → executing → approved（**不**经 confirming / 不弹"恢复"按钮） | **直接** queued → executing → approved（**不**经 confirming / 不弹"恢复"按钮） |
+| `connect.login` | 重新认证 + 选 key + 建新 session | 进入全屏 `login` auth 页；用户输入密码并选 key 后提交 | 进入全屏 `login` auth 页；仍需重新验证密码并选 key |
+| `connect.resume` | 恢复既有 session | 进入全屏 `resume` auth 页；用户输入密码后继续恢复 | 进入全屏 `resume` auth 页；仍需对当前 session 绑定 owner 做密码验证 |
 | `connect.logout` | caller 主动注销 | 进入 waiting_unlock_manual；解锁后**不**经过 confirming，直接 queued → executing | **不**经过 confirming，直接 queued → executing |
 
 ### `connect.login`
@@ -56,10 +60,9 @@ connect session 与 popup transport、popup unlock runtime 三层语义
 
 **关键（硬切换修复）：** `ownerPublicKeyHex` **不**在 params 里。owner
 是用户在 popup UI 上**明确**选定的；service 不能替 caller 决定。
-caller 发起 `connect.login` 后 popup 解锁 → 展示 ready key 列表
-让用户选 → 用户点"用此 key 登录"时由 UI 调
-`service.confirmConnectLogin(recordId, ownerPublicKeyHex)` 一次性写入
-service 内部 record。
+`connect.login` 进入独立全屏 auth 页面，用户在同一屏里输入密码并选 key，
+再由 UI 调 `service.confirmConnectLogin(recordId, ownerPublicKeyHex, password)`
+一次性写入 service 内部 record。
 
 `origin` 不在 params 里——service 按 `event.origin` 取真值。
 
@@ -76,17 +79,17 @@ service 内部 record。
 
 #### 行为
 
-1. popup 若 locked，先进入 unlock UI（解锁表单 + 待处理概要）；
-2. unlock 成功后进入"选择 key + 确认授权"视图；
-3. 用户明确选定一把 key；UI 调 `confirmConnectLogin(recordId, ownerPublicKeyHex)`；
+1. popup 进入全屏 `connect.login` auth 页面；
+2. 用户输入密码并明确选定一把 key；
+3. UI 调 `confirmConnectLogin(recordId, ownerPublicKeyHex, password)`；
 4. Keymaster 建立 `ConnectSessionRecord` 记录（写 IndexedDB
    `connectSessions` store）；
-5. 返回 `connectSessionId` 与身份快照。
+5. 成功后返回新的 `connectSessionId` 与身份快照。
 
 #### 失败语义
 
-- popup locked 时用户取消解锁 → `user_rejected`；
-- 用户在选 key 视图点"取消" → `user_rejected`；
+- popup locked 时用户取消输入密码 → `user_rejected`；
+- 用户在 auth 页面点"取消" → `user_rejected`；
 - 候选 key 列表为空（无 ready key）→ `user_rejected`（UI 展示"无
   ready key"兜底文案，但 confirm 按钮 disable）；
 - DB 不可用 → `internal_error`（本地 reason），对外 `user_rejected`；
@@ -131,10 +134,10 @@ service 内部 record。
 3. **预校验通过 + popup 当前未解锁** → 进入 `waiting_unlock_manual`，
    走锁屏页（解锁表单 + 待处理概要）。
 4. **解锁后**：`connect.resume` **不**经过任何 confirming UI，**不**
-   要求用户再点"恢复"按钮——**直接** queued → executing → approved。
-   这是施工单 4.3 + 9.2 / 9.3 明确要求的"只补解锁，自动恢复"。
-5. **预校验通过 + popup 已 unlocked** → 同 4，直接 queued → executing
-   → approved（同样不弹"恢复"按钮）。
+   要求用户再点"恢复"按钮——如果需要继续密码验证，则由 `resume`
+   auth 页面直接完成，不再切回主页面。
+5. **预校验通过 + popup 已 unlocked** → 仍走 `resume` auth 页面，不让
+   `login` / `resume` 共占屏幕。
 6. 执行阶段再次校验 session 真值（防止 acceptRequest 与 execute 之间
    session 被另一 tab 改 DB 吊销）；任何校验失败 → `user_rejected` +
    `internal_error`。

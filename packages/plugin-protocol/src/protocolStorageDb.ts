@@ -397,6 +397,39 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
         throw err instanceof Error ? err : new Error(String(err));
       }
     },
+    async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord): Promise<void> {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const tx = db.transaction(STORE_CONNECT_SESSIONS, "readwrite");
+          const store = tx.objectStore(STORE_CONNECT_SESSIONS);
+          const revokeAt = Date.now();
+          const putReq = store.put(record);
+          putReq.onerror = () => reject(putReq.error ?? new Error("putConnectSessionAndRevokeOriginPeers failed"));
+          const idx = store.index("origin");
+          const req = idx.openCursor(IDBKeyRange.only(record.origin));
+          req.onsuccess = () => {
+            const cursor = req.result;
+            if (!cursor) return;
+            const current = cursor.value as ConnectSessionRecord;
+            if (current.sessionId !== record.sessionId && current.revokedAt === null) {
+              cursor.update({ ...current, revokedAt: revokeAt });
+            }
+            cursor.continue();
+          };
+          req.onerror = () => reject(req.error ?? new Error("putConnectSessionAndRevokeOriginPeers failed"));
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => reject(tx.error ?? new Error("putConnectSessionAndRevokeOriginPeers failed"));
+          tx.onabort = () => reject(tx.error ?? new Error("putConnectSessionAndRevokeOriginPeers aborted"));
+        });
+      } catch (err) {
+        console.error("[protocol.storageDb] putConnectSessionAndRevokeOriginPeers failed", {
+          sessionId: record.sessionId,
+          origin: record.origin,
+          error: err instanceof Error ? err.message : String(err)
+        });
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+    },
     async getConnectSession(sessionId: string): Promise<ConnectSessionRecord | null> {
       try {
         return await new Promise<ConnectSessionRecord | null>((resolve, reject) => {

@@ -13,6 +13,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import type {
   ProtocolCommandFeedState,
+  ProtocolConnectAuthSnapshot,
   ProtocolMethod,
   ProtocolService,
   ProtocolSessionSnapshot
@@ -69,6 +70,7 @@ function makeFakeService(): ProtocolService & {
   postReadyCalls: number;
   rejectCalls: number;
   confirmCalls: number;
+  resumeAfterUnlockCalls: number;
   handleMessageCalls: number;
   pageUnloadingCalls: number;
   closingSent: boolean;
@@ -76,6 +78,9 @@ function makeFakeService(): ProtocolService & {
   messageListenerInstalledBeforeReady: boolean | null;
   feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
   feed: ProtocolCommandFeedState;
+  authSnapshot: ProtocolConnectAuthSnapshot | null;
+  vaultStatusListeners: Set<(s: "booting" | "uninitialized" | "locked" | "unlocked") => void>;
+  emitVaultStatus: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void;
 } {
   const snap: ProtocolSessionSnapshot = {
     phase: "waiting",
@@ -87,6 +92,7 @@ function makeFakeService(): ProtocolService & {
   };
   const listeners = new Set<(s: ProtocolSessionSnapshot) => void>();
   const feedListeners = new Set<(s: ProtocolCommandFeedState) => void>();
+  const vaultStatusListeners = new Set<(s: "booting" | "uninitialized" | "locked" | "unlocked") => void>();
   const feed: ProtocolCommandFeedState = {
     currentOrigin: null,
     commands: [],
@@ -101,6 +107,7 @@ function makeFakeService(): ProtocolService & {
     postReadyCalls: 0,
     rejectCalls: 0,
     confirmCalls: 0,
+    resumeAfterUnlockCalls: 0,
     handleMessageCalls: 0,
     pageUnloadingCalls: 0,
     closingSent: false,
@@ -108,7 +115,14 @@ function makeFakeService(): ProtocolService & {
     messageListenerInstalledBeforeReady: null as boolean | null,
     listeners,
     feedListeners,
+    vaultStatusListeners,
     feed,
+    authSnapshot: null as ProtocolConnectAuthSnapshot | null,
+    emitVaultStatus(next: "booting" | "uninitialized" | "locked" | "unlocked") {
+      for (const listener of Array.from(vaultStatusListeners)) {
+        listener(next);
+      }
+    },
     startSession() {
       this.phase = "waiting";
       this.postReadyCalls++;
@@ -139,6 +153,7 @@ function makeFakeService(): ProtocolService & {
       for (const l of listeners) l({ ...snap, phase: this.phase });
     },
     resumeAfterUnlock() {
+      this.resumeAfterUnlockCalls++;
       this.phase = "confirming";
       for (const l of listeners) l({ ...snap, phase: this.phase });
     },
@@ -176,10 +191,16 @@ function makeFakeService(): ProtocolService & {
     setSystemSettings: async () => undefined,
     lockState: () => "unlocked" as const,
     lockSummarySnapshot: () => null,
-    // Mock vault service —— 测试仅要求接口存在，不实际触发状态变化。
+    connectAuthSnapshot() {
+      return this.authSnapshot;
+    },
+    // Mock vault service —— 测试可手动触发 onStatusChange。
     getVaultService: (() => ({
       status: () => "unlocked" as const,
-      onStatusChange: (_h: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void) => () => undefined,
+      onStatusChange: (h: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void) => {
+        vaultStatusListeners.add(h);
+        return () => vaultStatusListeners.delete(h);
+      },
       unlock: async () => undefined
     })) as unknown as ProtocolService["getVaultService"],
     setVaultLockState: () => undefined,
@@ -232,6 +253,51 @@ describe("ProtocolPopupPage", () => {
         "等待来自外部站点的第一条请求。命令历史会按该站点的 origin 归档。"
       )
     ).toBeTruthy();
+  });
+
+  it("renders login auth page without auto-selecting a key", () => {
+    const service = makeFakeService();
+    service.authSnapshot = {
+      ownerType: "login",
+      recordId: "login-record",
+      canSubmit: true,
+      submitted: false,
+      login: {
+        recordId: "login-record",
+        availableKeys: [
+          { publicKeyHex: "02" + "11".repeat(32), label: "Key A" },
+          { publicKeyHex: "02" + "22".repeat(32), label: "Key B" }
+        ]
+      },
+      resume: null
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    expect(screen.getByText("重新认证并建立新会话")).toBeTruthy();
+    const radios = screen.getAllByRole("radio") as HTMLInputElement[];
+    expect(radios).toHaveLength(2);
+    expect(radios.every((r) => r.checked === false)).toBe(true);
+    const submit = screen.getByRole("button", { name: "重新认证并建立新会话" }) as HTMLButtonElement;
+    expect(submit.disabled).toBe(true);
+  });
+
+  it("does not resume waiting requests automatically when auth owner is visible", () => {
+    const service = makeFakeService();
+    service.authSnapshot = {
+      ownerType: "login",
+      recordId: "login-record",
+      canSubmit: true,
+      submitted: false,
+      login: {
+        recordId: "login-record",
+        availableKeys: [{ publicKeyHex: "02" + "11".repeat(32), label: "Key A" }]
+      },
+      resume: null
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    service.emitVaultStatus("unlocked");
+    expect(service.resumeAfterUnlockCalls).toBe(0);
   });
 
   it("renders command feed: live section + history section (施工单 2026-06-27 002 硬切换)", async () => {

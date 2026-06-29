@@ -56,6 +56,10 @@
 //         同 origin 不同 owner 不再串池。
 //       - `ProtocolCommandRecord` 上的 owner snapshot 字段统一改为
 //         `ownerPublicKeyHex` + 新增 `connectSessionId`（业务方法必填）。
+//       - `connect.login` = 重新认证并新建 session；`connect.resume` =
+//         恢复既有 session，只补 unlock。
+//       - popup 任一时刻只允许一个 auth owner；`connect.resume` 有效时
+//         优先于未提交 `connect.login`。
 //       - 所有业务 request 在 accept 阶段即预校验 session 真值
 //         （fail-fast：session 不存在 / 已 revoke / origin 不匹配 /
 //         owner key 不 ready → 直接 phase=failed，对外回 user_rejected
@@ -758,6 +762,7 @@ export interface ProtocolFeePoolRecord {
 export type ProtocolFailureReason =
   | "user_canceled"
   | "client_canceled"
+  | "superseded_by_resume"
   | "insufficient_balance"
   | "invalid_address"
   | "invalid_amount"
@@ -857,7 +862,7 @@ export interface ConnectSessionRecord {
  *     UI 上**选定的，service 不能代替 caller 决定。
  *   - caller 发起 `connect.login` 时只需要传 `text` + 可选 `claims`；
  *     popup 解锁后展示 ready key 列表给用户选；用户点"用此 key 登录"
- *     后由 UI 调 `service.confirmConnectLogin(recordId, ownerPublicKeyHex)`
+ *     后由 UI 调 `service.confirmConnectLogin(recordId, ownerPublicKeyHex, password)`
  *     写入 service 内部 record。
  *   - `origin` 仍按 `event.origin` 由 service 在执行时填，params 里
  *     不允许覆盖。
@@ -955,12 +960,41 @@ export interface ConnectLogoutResult {
  * connect method 在 popup 当前文档处于 `waiting_unlock_*` 时进入的"选 key"
  * UI 行为约束。
  *
- * 设计缘由：login / resume 在 popup 当前文档处于 locked 时进入 unlock UI；
- * 解锁后：
- *   - login → 进入"选 key + 确认"视图；
- *   - resume → 直接恢复（不重新选 key、不重新确认）。
+ * 设计缘由：login / resume 现在由统一 auth owner 快照仲裁；login 是
+ * 重新认证并新建 session，resume 是恢复既有 session。
  */
 export type ConnectRequestKind = "login" | "resume" | "logout";
+
+/**
+ * connect auth owner 的只读快照。
+ *
+ * 设计缘由：
+ *   - popup 任一时刻只允许一个 auth owner 控制全屏 auth 页；
+ *   - login / resume 的仲裁真值由 service 决定，UI 只读这个快照渲染；
+ *   - `canSubmit` 反映 service 侧是否已具备提交条件（login: 候选 key
+ *     是否存在；resume: 只读会话是否有效）。
+ */
+export interface ProtocolConnectAuthSnapshot {
+  /** 当前 auth owner 类型；`null` 表示没有 auth owner。 */
+  ownerType: "login" | "resume" | null;
+  /** 当前 auth owner 对应的 recordId；无 owner 时为 null。 */
+  recordId: string | null;
+  /** service 侧当前是否已具备提交条件。 */
+  canSubmit: boolean;
+  /** 当前 auth 请求是否已经提交过；用于 UI 呈现 busy / 禁用态。 */
+  submitted: boolean;
+  /** login auth owner 的候选 key；无 login owner 时为 null。 */
+  login: {
+    recordId: string;
+    availableKeys: Array<{ publicKeyHex: string; label: string }>;
+  } | null;
+  /** resume auth owner 的只读会话信息；无 resume owner 时为 null。 */
+  resume: {
+    recordId: string;
+    ownerPublicKeyHex: string;
+    ownerLabel: string;
+  } | null;
+}
 
 /* ============== Method dispatch ============== */
 
@@ -1298,6 +1332,13 @@ export interface ProtocolStorageDb {
   getConnectSession(sessionId: string): Promise<ConnectSessionRecord | null>;
   /** 按 origin 列出该站点下所有 connect session（含 revoked）。 */
   listConnectSessionsByOrigin(origin: string): Promise<ConnectSessionRecord[]>;
+  /**
+   * 写一条新 connect session，并原子吊销同 origin 下其它仍有效 session。
+   *
+   * 设计缘由：connect.login 成功后要先落新 session，再把同 origin 旧
+   * session 收口；这两个写入必须绑在同一条存储事务里，避免半成功。
+   */
+  putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord): Promise<void>;
 }
 
 /**
@@ -1592,6 +1633,14 @@ export interface ProtocolService {
    */
   lockState(): ProtocolPopupLockState;
   /**
+   * 当前 connect auth owner 只读快照。
+   *
+   * 设计缘由：popup 任一时刻只允许一个 auth owner 控制全屏 auth 页；
+   * login / resume 的仲裁真值由 service 决定，UI 只读这个快照渲染。
+   * 当没有 auth owner 时返回 `null`。
+   */
+  connectAuthSnapshot(): ProtocolConnectAuthSnapshot | null;
+  /**
    * 锁屏页用的待处理摘要（施工单 2026-06-27 001 硬切换）。
    *
    * 数据由 service 从 request store 派生；调用方也可以读
@@ -1623,9 +1672,7 @@ export interface ProtocolService {
 
   /**
    * 当前 popup 是否存在"等待用户处理"的 connect login 流程。
-   * UI 用此决定是否在 command stream 上方渲染 connect 选 key 视图。
-   *
-   * `recordId` 缺省时取首张；新 UI 应**始终**传 recordId。
+   * 兼容旧 UI；新 UI 应优先读 `connectAuthSnapshot()`。
    */
   connectLoginRecord(recordId?: string): {
     recordId: string;
@@ -1634,9 +1681,7 @@ export interface ProtocolService {
   } | null;
   /**
    * 当前 popup 是否存在"等待用户恢复"的 connect resume 流程。
-   * UI 用此决定是否在 command stream 上方渲染 connect 解锁视图。
-   *
-   * `recordId` 缺省时取首张；新 UI 应**始终**传 recordId。
+   * 兼容旧 UI；新 UI 应优先读 `connectAuthSnapshot()`。
    */
   connectResumeRecord(recordId?: string): {
     recordId: string;
@@ -1645,16 +1690,16 @@ export interface ProtocolService {
     ownerLabel: string;
   } | null;
   /**
-   * 用户在 connect login 视图选定 key 并确认。service 推进 request 从
-   * `waiting_unlock_manual` / `confirming` → `queued` → `executing`，
-   * 完成后回 `result`。
+   * 用户在 connect login 视图选定 key 并提交密码。service 先重新验密；
+   * 若 vault 当前已锁定，则会先解锁再建立新 session，成功后原子吊销
+   * 同 origin 旧 session。
    */
-  confirmConnectLogin(recordId: string, ownerPublicKeyHex: string): Promise<void>;
+  confirmConnectLogin(recordId: string, ownerPublicKeyHex: string, password: string): Promise<void>;
   /**
-   * 用户在 connect resume 视图点击"恢复"。service 推进 request 从
-   * `waiting_unlock_manual` → `queued` → `executing`，完成后回 `result`。
+   * 用户在 connect resume 视图提交密码。service 先验密；若 vault 当前
+   * 已锁定，则会先解锁再恢复既有 session。
    */
-  confirmConnectResume(recordId: string): Promise<void>;
+  confirmConnectResume(recordId: string, password: string): Promise<void>;
   /**
    * 用户在 connect login / resume / cipher confirm / 任何视图点击"取消"，
    * service 把 request 收尾为 `rejected`，对外回 `user_rejected`。

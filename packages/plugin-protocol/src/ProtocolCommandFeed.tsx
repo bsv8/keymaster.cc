@@ -63,6 +63,11 @@ function decisionLabelForCommand(
         defaultValue: "对方主动取消"
       });
     }
+    if (command.failureReason === "superseded_by_resume") {
+      return t("protocol.feed.decision.rejected.superseded_by_resume", {
+        defaultValue: "已被恢复会话取代"
+      });
+    }
     return t("protocol.feed.decision.rejected", { defaultValue: "已拒绝" });
   }
   const decisionKey = DECISION_LABEL_KEY[command.decision];

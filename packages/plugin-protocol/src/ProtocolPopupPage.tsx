@@ -26,6 +26,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@keymaster/runtime";
 import type {
+  ProtocolConnectAuthSnapshot,
   MethodParams,
   ProtocolCommandFeedState,
   ProtocolCommandRecord,
@@ -67,6 +68,7 @@ export function ProtocolPopupPage() {
   const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
   const feedTopRef = useRef<HTMLDivElement | null>(null);
+  const auth = service.connectAuthSnapshot();
 
   useEffect(() => {
     console.info("[protocol-popup] mounted", {
@@ -145,7 +147,9 @@ export function ProtocolPopupPage() {
     return vault.onStatusChange((s) => {
       if (s === "unlocked") {
         (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(false);
-        void service.resumeAfterUnlock?.();
+        if (!service.connectAuthSnapshot()) {
+          void service.resumeAfterUnlock?.();
+        }
       } else if (s === "locked") {
         (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(true);
       }
@@ -173,7 +177,26 @@ export function ProtocolPopupPage() {
     }
   }, [feed.commands.length, feed.currentOrigin]);
 
-  // 锁屏态分支：locked 时直接渲染锁屏页（不渲染顶栏 / 站点配置 / 命令流）。
+  // auth owner 优先级高于主页面；无 auth owner 才回到锁屏 / 主页面。
+  if (auth?.ownerType === "login") {
+    return (
+      <ConnectLoginAuthPage
+        t={t}
+        service={service}
+        auth={auth}
+      />
+    );
+  }
+  if (auth?.ownerType === "resume") {
+    return (
+      <ConnectResumeAuthPage
+        t={t}
+        service={service}
+        auth={auth}
+      />
+    );
+  }
+  // 锁屏态分支：locked 且没有 auth owner 时直接渲染锁屏页（不渲染顶栏 / 站点配置 / 命令流）。
   if (snap.lockState === "locked") {
     return (
       <LockScreenPage
@@ -247,7 +270,6 @@ export function ProtocolPopupPage() {
       ) : null}
       <div className="protocol-popup__content">
         {snap.phase === "error" ? <SessionErrorBanner t={t} /> : null}
-        <ConnectSection t={t} service={service} feed={feed} />
         <ProtocolCommandFeed
           t={t}
           feed={feed}
@@ -477,7 +499,7 @@ function ConnectLoginView({
     if (!selected || busy) return;
     setBusy(true);
     try {
-      await service.confirmConnectLogin(recordId, selected);
+      await service.confirmConnectLogin(recordId, selected, "");
     } finally {
       setBusy(false);
     }
@@ -692,4 +714,231 @@ function pickConfirmingConnectRecordId(service: ProtocolService, method: "connec
     }
   }
   return null;
+}
+
+/* ============== 施工单 2026-06-28 003：auth owner 全屏页 ============== */
+
+function ConnectLoginAuthPage({
+  t,
+  service,
+  auth
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
+  auth: ProtocolConnectAuthSnapshot;
+}) {
+  const login = auth.login;
+  const [selected, setSelected] = useState<string>("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (busy || !login || !selected || !password || !auth.canSubmit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await service.confirmConnectLogin(auth.recordId!, selected, password);
+      setPassword("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Login failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="protocol-auth protocol-auth--login">
+      <section className="protocol-auth__panel">
+        <header className="protocol-auth__header">
+          <p className="protocol-auth__eyebrow">
+            {t("protocol.auth.login.eyebrow", { defaultValue: "重新认证" })}
+          </p>
+          <h1 className="protocol-auth__title">
+            {t("protocol.connect.login.title", { defaultValue: "重新登录并建立新会话" })}
+          </h1>
+          <p className="protocol-auth__desc">
+            {t("protocol.connect.login.desc", {
+              defaultValue:
+                "该站点请求重新认证。请选择一把 key，并再次输入密码。成功后会创建新的 connect session，并吊销同 origin 的旧 session。"
+            })}
+          </p>
+        </header>
+        <form onSubmit={submit} className="protocol-auth__form">
+          {login && login.availableKeys.length > 0 ? (
+            <ul className="protocol-connect__keylist" role="radiogroup" aria-label="connect login keys">
+              {login.availableKeys.map((k) => {
+                const checked = selected === k.publicKeyHex;
+                return (
+                  <li key={k.publicKeyHex} className="protocol-connect__keyitem">
+                    <label className="protocol-connect__keylabel">
+                      <input
+                        type="radio"
+                        name="connect-login-key"
+                        value={k.publicKeyHex}
+                        checked={checked}
+                        disabled={busy || auth.submitted}
+                        onChange={(e) => setSelected(e.currentTarget.value)}
+                      />
+                      <span className="protocol-connect__keylabel-text">{k.label}</span>
+                      <code className="protocol-connect__keylabel-hex">
+                        {k.publicKeyHex.slice(0, 8)}…{k.publicKeyHex.slice(-6)}
+                      </code>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <div className="protocol-connect__empty">
+              {t("protocol.connect.login.empty", {
+                defaultValue: "当前钱包没有 ready 的 key。请先回到 Keymaster 创建或导入一把 key。"
+              })}
+            </div>
+          )}
+          <label className="protocol-auth__password">
+            <span className="protocol-auth__label">
+              {t("protocol.unlock.password", { defaultValue: "密码" })}
+            </span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              disabled={busy || auth.submitted}
+              onChange={(e) => setPassword(e.currentTarget.value)}
+            />
+          </label>
+          {error ? (
+            <div className="protocol-auth__error" role="alert">
+              <code>{error}</code>
+            </div>
+          ) : null}
+          <div className="protocol-popup__actions">
+            <button
+              type="button"
+              className="protocol-popup__back-top"
+              disabled={busy}
+              onClick={() => {
+                void service.rejectConnectRequest(auth.recordId!);
+              }}
+            >
+              {t("protocol.connect.cancel", { defaultValue: "取消" })}
+            </button>
+            <button
+              type="submit"
+              className="protocol-popup__back-top protocol-popup__back-top--primary"
+              disabled={busy || auth.submitted || !auth.canSubmit || !selected || !password}
+            >
+              {t("protocol.connect.login.confirm", {
+                defaultValue: "重新认证并建立新会话"
+              })}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function ConnectResumeAuthPage({
+  t,
+  service,
+  auth
+}: {
+  t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
+  auth: ProtocolConnectAuthSnapshot;
+}) {
+  const resume = auth.resume;
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (busy || !resume || !password || !auth.canSubmit) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await service.confirmConnectResume(auth.recordId!, password);
+      setPassword("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Resume failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="protocol-auth protocol-auth--resume">
+      <section className="protocol-auth__panel">
+        <header className="protocol-auth__header">
+          <p className="protocol-auth__eyebrow">
+            {t("protocol.auth.resume.eyebrow", { defaultValue: "恢复会话" })}
+          </p>
+          <h1 className="protocol-auth__title">
+            {t("protocol.connect.resume.title", { defaultValue: "恢复当前会话" })}
+          </h1>
+          <p className="protocol-auth__desc">
+            {t("protocol.connect.resume.desc", {
+              defaultValue:
+                "该站点的 session 仍然有效。输入密码后即可恢复当前会话，不会重新选择 key。"
+            })}
+          </p>
+        </header>
+        {resume ? (
+          <div className="protocol-auth__readonly">
+            <span className="protocol-auth__label">
+              {t("protocol.connect.resume.ownerLabel", { defaultValue: "绑定 key" })}
+            </span>
+            <div className="protocol-auth__readonly-value">
+              <strong>{resume.ownerLabel}</strong>
+              <code>
+                {resume.ownerPublicKeyHex.slice(0, 8)}…{resume.ownerPublicKeyHex.slice(-6)}
+              </code>
+            </div>
+          </div>
+        ) : null}
+        <form onSubmit={submit} className="protocol-auth__form">
+          <label className="protocol-auth__password">
+            <span className="protocol-auth__label">
+              {t("protocol.unlock.password", { defaultValue: "密码" })}
+            </span>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              disabled={busy || auth.submitted}
+              onChange={(e) => setPassword(e.currentTarget.value)}
+            />
+          </label>
+          {error ? (
+            <div className="protocol-auth__error" role="alert">
+              <code>{error}</code>
+            </div>
+          ) : null}
+          <div className="protocol-popup__actions">
+            <button
+              type="button"
+              className="protocol-popup__back-top"
+              disabled={busy}
+              onClick={() => {
+                void service.rejectConnectRequest(auth.recordId!);
+              }}
+            >
+              {t("protocol.connect.cancel", { defaultValue: "取消" })}
+            </button>
+            <button
+              type="submit"
+              className="protocol-popup__back-top protocol-popup__back-top--primary"
+              disabled={busy || auth.submitted || !auth.canSubmit || !password}
+            >
+              {t("protocol.connect.resume.confirm", { defaultValue: "恢复当前会话" })}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
 }

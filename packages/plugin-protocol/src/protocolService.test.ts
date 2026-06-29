@@ -217,6 +217,16 @@ function makeFakeStorageDb(): ProtocolStorageDb & { writes: number; readFailures
       return Array.from(sessions.values())
         .filter((r) => r.origin === origin)
         .map((r) => ({ ...r }));
+    },
+    async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+      const revokeAt = Date.now();
+      sessions.set(record.sessionId, { ...record });
+      for (const [sessionId, value] of sessions.entries()) {
+        if (value.origin !== record.origin) continue;
+        if (sessionId === record.sessionId) continue;
+        if (value.revokedAt !== null) continue;
+        sessions.set(sessionId, { ...value, revokedAt: revokeAt });
+      }
     }
   };
 }
@@ -274,6 +284,17 @@ function makeFakeStorageDbWithSession(
       return null;
     },
     async listConnectSessionsByOrigin() { return []; }
+    ,
+    async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+      await base.putConnectSession(record);
+      const all = await base.listConnectSessionsByOrigin(record.origin);
+      const revokeAt = Date.now();
+      for (const session of all) {
+        if (session.sessionId === record.sessionId) continue;
+        if (session.revokedAt !== null) continue;
+        await base.putConnectSession({ ...session, revokedAt: revokeAt });
+      }
+    }
   };
   return { ...base, ...stubOverrides };
 }
@@ -1104,6 +1125,9 @@ describe("ProtocolServiceImpl", () => {
       },
       async listConnectSessionsByOrigin() {
         return [];
+      },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await stubDb.putConnectSession(record);
       }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
@@ -1235,6 +1259,9 @@ describe("ProtocolServiceImpl", () => {
       },
       async listConnectSessionsByOrigin() {
         return [];
+      },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await stubDb.putConnectSession(record);
       }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
@@ -1760,6 +1787,9 @@ describe("ProtocolServiceImpl", () => {
       },
       async listConnectSessionsByOrigin() {
         throw new Error("db down");
+      },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await failingDb.putConnectSession(record);
       }
     };
     const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingDb);
@@ -1961,6 +1991,9 @@ describe("ProtocolServiceImpl", () => {
       },
       async listConnectSessionsByOrigin() {
         return [];
+      },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await failingDb.putConnectSession(record);
       }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, failingDb);
@@ -3243,6 +3276,9 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       },
       async listConnectSessionsByOrigin() {
         return [];
+      },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        throw new Error("db down");
       }
     };
   }
@@ -3795,7 +3831,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(view?.availableKeys.length).toBe(1);
     expect(view?.availableKeys[0]?.publicKeyHex).toBe(TEST_PUB_HEX);
     // 用户在 popup UI 上点"用此 key 登录"：推进到 queued → executing → approved。
-    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX);
+    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
     await new Promise((r) => setTimeout(r, 30));
     const r = getResult();
     expect(r?.ok).toBe(true);
@@ -3809,6 +3845,78 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(stored?.origin).toBe(ORIGIN);
     expect(stored?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
     expect(stored?.revokedAt).toBeNull();
+  });
+
+  it("connect.resume 只会抢占同 origin 的未提交 connect.login", async () => {
+    const { service, opener, deps } = makeService();
+    deps.vault.status = () => "locked" as const;
+    // 让 login/resume 都停在 waiting_unlock_manual，便于观察抢占边界。
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "login-a",
+          method: "connect.login",
+          params: { text: "login-a" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "login-b",
+          method: "connect.login",
+          params: { text: "login-b" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    // 有效 resume 只应当收掉同 origin 的 login-b，不影响 origin-a 的 login-a。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "resume-b",
+          method: "connect.resume",
+          params: { connectSessionId: "sess-origin-b" }
+        },
+        "https://origin-b.example",
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const feedB = service.feedSnapshot().commands;
+    const cancelledLoginB = feedB.find((c) => c.requestId === "login-b");
+    expect(cancelledLoginB?.phase).toBe("rejected");
+    expect(cancelledLoginB?.failureReason).toBe("superseded_by_resume");
+
+    // 再切回 origin-a，确认 login-a 仍然存在且未被误伤。
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "probe-a",
+          method: "identity.get",
+          params: { aud: "https://origin-a.example", iat: 1, exp: 2, text: "probe", connectSessionId: "sess-origin-a" }
+        },
+        "https://origin-a.example",
+        opener
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+    const feedA = service.feedSnapshot().commands;
+    const loginA = feedA.find((c) => c.requestId === "login-a");
+    expect(loginA?.phase).toBe("waiting_unlock_manual");
+    expect(loginA?.failureReason).toBeUndefined();
   });
 
   it("connect.resume：session 有效 + popup 未解锁（unlocked）→ 直接执行，不需 confirm", async () => {
@@ -4716,7 +4824,10 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         }
         return null;
       },
-      async listConnectSessionsByOrigin() { return []; }
+      async listConnectSessionsByOrigin() { return []; },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await slowDb.putConnectSession(record);
+      }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, slowDb);
     service.startSession();
@@ -4786,7 +4897,10 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         }
         return null;
       },
-      async listConnectSessionsByOrigin() { return []; }
+      async listConnectSessionsByOrigin() { return []; },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await stubDb.putConnectSession(record);
+      }
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
     service.startSession();
@@ -4883,7 +4997,10 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         }
         return null;
       },
-      async listConnectSessionsByOrigin() { return []; }
+      async listConnectSessionsByOrigin() { return []; },
+      async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
+        await stubDb.putConnectSession(record);
+      }
     };
     try {
       const { service, opener, getResult, posted } = makeService(TEST_PUB_HEX, stubDb);
@@ -5792,7 +5909,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     );
     const view = service.connectLoginRecord();
     expect(view).not.toBeNull();
-    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX);
+    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
     await new Promise((r) => setTimeout(r, 30));
     const r = getResult();
     if (!r || r.ok !== true) throw new Error("login failed");

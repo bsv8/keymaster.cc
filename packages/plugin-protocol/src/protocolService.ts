@@ -95,6 +95,7 @@ import {
   type ProtocolClosingMessage,
   type ProtocolCommandFeedState,
   type ProtocolCommandRecord,
+  type ProtocolConnectAuthSnapshot,
   type ProtocolError,
   type ProtocolErrorCode,
   type ProtocolFailureReason,
@@ -282,6 +283,8 @@ interface RequestRecord {
    * 视图点"确认选 key"时由 `confirmConnectLogin` 写入；执行阶段读此字段。
    */
   connectLoginSelected?: string;
+  /** connect.* auth 是否已经提交过；用于阻止未提交 login 被 resume 抢占。 */
+  connectAuthSubmittedAt?: number;
   /**
    * `connect.resume` 进入时的 session 快照（ownerPublicKeyHex /
    * ownerLabel / claimsSnapshot）；只在 `method === "connect.resume"`
@@ -408,6 +411,8 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** popup 当前会话是否已经向 opener 发过 `closing`。 */
   private closingSent = false;
+  /** auth 页触发的解锁是否还在进行中；用于抑制全局 unlock 批量推进。 */
+  private authUnlockInProgress: string | null = null;
 
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageDb);
@@ -506,6 +511,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.feedCommands = [];
     this.historyLoadInFlightByOrigin.clear();
     this.historyLoadToken++;
+    this.authUnlockInProgress = null;
     this.phase = "waiting";
     // 同时推 session 快照 + feed 快照：feed 订阅者拿到空 feed；
     // session 订阅者拿到 phase="waiting" + lockState 不变（vault 状态
@@ -744,6 +750,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 不生效。
    */
   async resumeAfterUnlock(recordId?: string): Promise<void> {
+    if (this.authUnlockInProgress) {
+      return;
+    }
     if (this.lockStateValue === "locked") {
       // 整个会话解锁。
       this.lockStateValue = "unlocked";
@@ -867,6 +876,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
+   * 当前 connect auth owner 的只读快照。
+   *
+   * 优先级固定为：有效 resume > 未提交 login > null。
+   */
+  connectAuthSnapshot(): ProtocolConnectAuthSnapshot | null {
+    return this.resolveConnectAuthSnapshot();
+  }
+
+  /**
    * 暴露底层 vault service 引用，供 popup 顶层监听 vault.onStatusChange。
    *
    * 设计缘由：vault 状态变化（unlock / relock）需要在 `ProtocolPopupPage`
@@ -969,7 +987,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `connectLoginRecord()` 检查）；任何路径出错时记录日志，不阻塞
    *     其它请求。
    */
-  async confirmConnectLogin(recordId: string, ownerPublicKeyHex: string): Promise<void> {
+  async confirmConnectLogin(recordId: string, ownerPublicKeyHex: string, password: string): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.login") return;
@@ -983,6 +1001,27 @@ export class ProtocolServiceImpl implements ProtocolService {
         ownerPublicKeyHex
       });
       return;
+    }
+    if (this.lockStateValue === "locked") {
+      this.authUnlockInProgress = recordId;
+      rec.connectAuthSubmittedAt = Date.now();
+      try {
+        await this.deps.vault.unlock(password);
+      } catch (err) {
+        rec.connectAuthSubmittedAt = undefined;
+        this.authUnlockInProgress = null;
+        throw err;
+      } finally {
+        this.authUnlockInProgress = null;
+      }
+    } else {
+      rec.connectAuthSubmittedAt = Date.now();
+      try {
+        await this.deps.vault.verifyPassword(password);
+      } catch (err) {
+        rec.connectAuthSubmittedAt = undefined;
+        throw err;
+      }
     }
     rec.connectLoginSelected = ownerPublicKeyHex;
     // 关键（施工单 2026-06-28 002 硬切换）：login record 在用户点确认时
@@ -1007,7 +1046,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - snapshot 缺失（DB 不可用 / session 失效）时不推进，UI 应当展示
    *     "该会话已失效，请重新登录"。
    */
-  async confirmConnectResume(recordId: string): Promise<void> {
+  async confirmConnectResume(recordId: string, password: string): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
     if (rec.method !== "connect.resume") return;
@@ -1019,6 +1058,27 @@ export class ProtocolServiceImpl implements ProtocolService {
         recordId
       });
       return;
+    }
+    if (this.lockStateValue === "locked") {
+      this.authUnlockInProgress = recordId;
+      rec.connectAuthSubmittedAt = Date.now();
+      try {
+        await this.deps.vault.unlock(password);
+      } catch (err) {
+        rec.connectAuthSubmittedAt = undefined;
+        this.authUnlockInProgress = null;
+        throw err;
+      } finally {
+        this.authUnlockInProgress = null;
+      }
+    } else {
+      rec.connectAuthSubmittedAt = Date.now();
+      try {
+        await this.deps.vault.verifyPassword(password);
+      } catch (err) {
+        rec.connectAuthSubmittedAt = undefined;
+        throw err;
+      }
     }
     this.clearConfirmTimeout(recordId);
     this.setRecordPhase(recordId, "queued");
@@ -1046,6 +1106,48 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
+   * 计算当前 auth owner 快照。
+   *
+   * 规则：
+   *   - resume 有效时优先于 login；
+   *   - login 只在未被 resume 取代时显示；
+   *   - 两者都没有时返回 null。
+   */
+  private resolveConnectAuthSnapshot(): ProtocolConnectAuthSnapshot | null {
+    const origin = this.currentOriginValue ?? undefined;
+    const resume = this.pickConnectRecord("connect.resume", undefined, origin);
+    if (resume && resume.connectResumeSnapshot) {
+      return {
+        ownerType: "resume",
+        recordId: resume.recordId,
+        canSubmit: !resume.connectAuthSubmittedAt,
+        submitted: Boolean(resume.connectAuthSubmittedAt),
+        login: null,
+        resume: {
+          recordId: resume.recordId,
+          ownerPublicKeyHex: resume.connectResumeSnapshot.ownerPublicKeyHex,
+          ownerLabel: resume.connectResumeSnapshot.ownerLabel
+        }
+      };
+    }
+    const login = this.pickConnectRecord("connect.login", undefined, origin);
+    if (login) {
+      return {
+        ownerType: "login",
+        recordId: login.recordId,
+        canSubmit: !login.connectAuthSubmittedAt && (login.connectLoginCandidates?.length ?? 0) > 0,
+        submitted: Boolean(login.connectAuthSubmittedAt),
+        login: {
+          recordId: login.recordId,
+          availableKeys: login.connectLoginCandidates ?? []
+        },
+        resume: null
+      };
+    }
+    return null;
+  }
+
+  /**
    * 按 method + recordId 选取"等待用户处理"的 connect record。
    *
    * - `recordId` 优先；存在但 method 不符 / phase 不符时返回 null。
@@ -1054,18 +1156,21 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private pickConnectRecord(
     method: "connect.login" | "connect.resume",
-    recordId?: string
+    recordId?: string,
+    origin?: string
   ): RequestRecord | null {
     if (recordId) {
       const rec = this.requestsByRecordId.get(recordId);
       if (!rec) return null;
       if (rec.method !== method) return null;
+      if (origin && rec.origin !== origin) return null;
       if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") return null;
       return rec;
     }
     let pick: RequestRecord | null = null;
     for (const [, rec] of this.requestsByRecordId) {
       if (rec.method !== method) continue;
+      if (origin && rec.origin !== origin) continue;
       if (rec.phase !== "waiting_unlock_manual" && rec.phase !== "confirming") continue;
       if (!pick || rec.createdAt < pick.createdAt) pick = rec;
     }
@@ -1234,6 +1339,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       if (resumePre !== null) {
         this.scheduleFailFastRequest(recordId, resumePre.code, resumePre.reason);
         return;
+      }
+      const pendingLogin = this.pickConnectRecord("connect.login", undefined, origin);
+      if (pendingLogin && !pendingLogin.connectAuthSubmittedAt) {
+        await this.finalizeRequestByCancel(pendingLogin.recordId, "superseded_by_resume");
       }
       // session 有效：locked → waiting_unlock_manual；unlocked → 直接
       // queued（**不**经过 confirming）。解锁后同样直接 queued。
@@ -1741,6 +1850,9 @@ export class ProtocolServiceImpl implements ProtocolService {
       // queued 保持；executing 当前这一条允许跑完。
       // 执行器暂停取新任务：drainExecutionQueue 会判定 lockState。
     } else {
+      if (this.authUnlockInProgress) {
+        return;
+      }
       // unlock 批量推进。
       const manualRecs: RequestRecord[] = [];
       const autoRecs: RequestRecord[] = [];
@@ -1940,7 +2052,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async finalizeRequestByCancel(
     recordId: string,
-    failureReason: "user_canceled" | "client_canceled"
+    failureReason: "user_canceled" | "client_canceled" | "superseded_by_resume"
   ): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
@@ -2373,7 +2485,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       lastUsedAt: now,
       revokedAt: null
     };
-    await this.deps.storageDb.putConnectSession(record);
+    await this.deps.storageDb.putConnectSessionAndRevokeOriginPeers(record);
     return {
       connectSessionId: sessionId,
       ownerPublicKeyHex: key.publicKeyHex,

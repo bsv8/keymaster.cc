@@ -58,6 +58,125 @@
   gap: 1rem;
 }
 
+/* ============== 施工单 2026-06-28 003：auth owner 全屏页 ============== */
+
+.protocol-auth {
+  min-height: calc(100vh - 56px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem 1rem;
+  background:
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 36%),
+    radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.05), transparent 28%),
+    var(--bg-base, #ffffff);
+}
+
+.protocol-auth__panel {
+  width: min(720px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.75rem;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.1);
+}
+
+.protocol-auth--resume .protocol-auth__panel {
+  border-color: rgba(16, 185, 129, 0.2);
+}
+
+.protocol-auth__header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.protocol-auth__eyebrow {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent, #2563eb);
+}
+
+.protocol-auth--resume .protocol-auth__eyebrow {
+  color: #0f766e;
+}
+
+.protocol-auth__title {
+  margin: 0;
+  font-size: 1.55rem;
+  line-height: 1.15;
+}
+
+.protocol-auth__desc {
+  margin: 0;
+  color: var(--text-muted, #6b7280);
+  font-size: 13px;
+}
+
+.protocol-auth__form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+}
+
+.protocol-auth__password {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.protocol-auth__password input {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--border-card, #e4e4e7);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.protocol-auth__readonly {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  background: rgba(15, 23, 42, 0.03);
+  border: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.protocol-auth__readonly-value {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.75rem;
+}
+
+.protocol-auth__label {
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+}
+
+.protocol-auth__readonly-value code {
+  font-family: var(--font-mono, ui-monospace, "Cascadia Code", "Consolas", monospace);
+  font-size: 12px;
+  padding: 0 0.3rem;
+  border-radius: 4px;
+  background: var(--bg-code, #f1f1f3);
+}
+
+.protocol-auth__error {
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  font-size: 12.5px;
+}
+
 .protocol-popup__form {
   display: flex;
   flex-direction: column;

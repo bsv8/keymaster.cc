@@ -96,6 +96,7 @@ function makeMockService(): MockService {
     setVaultLockState: () => undefined,
     // 施工单 2026-06-28 001：connect.* UI 接口的 mock。origin settings
     // 测试不实际触发 connect 流程；只要求接口存在。
+    connectAuthSnapshot: () => null,
     connectLoginRecord: () => null,
     connectResumeRecord: () => null,
     confirmConnectLogin: async () => undefined,
