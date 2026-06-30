@@ -108,6 +108,8 @@ function makeMockService(): MockService {
     bootstrapFailed: () => false,
     bootstrapFailureReason: () => null,
     appClientConnectTimedOut: () => false,
+    appClientWaitingForReady: () => false,
+    childReady: () => false,
     awaitLauncherBootstrap: () => undefined,
     openClientApp: () => null,
     // 施工单 2026-06-29 002：plugin-apps launcher 入口；测试不直接调用。

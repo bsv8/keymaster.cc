@@ -2393,14 +2393,44 @@ export interface ProtocolService {
   /**
    * `Open App` 后 child app 是否已触发连接超时提示。
    *
-   * 设计缘由：
-   *   - Session Window 点击 `Open App` 后会在短窗口内重发 `ready`；
-   *   - 若 5s 内仍未收到 child app 第一条合法 request，则 UI 要提示
-   *     "连接超时/连接较慢"；
-   *   - 这是**软超时**：只停重发泵、提示用户，不终止会话；迟到的
-   *     `connect.launch` 仍允许把会话拉活。
+   * 设计缘由（施工单 2026-06-30 003 硬切换）：
+   *   - Session Window 点击 `Open App` 后会启动 5s 软超时；
+   *   - 若 5s 内仍未收到合法 child `ready`，UI 要提示"连接较慢"。
+   *   - 这是**软超时**：只清掉等待态、提示用户；不重建 `connectSessionId`、
+   *     不重新 bootstrap、不偷偷补偿；按钮恢复可点。
+   *   - 迟到 child `ready` 仍允许进入 popup 阶段；同时清掉本提示。
+   *   - 跑 `connect.*` / 业务方法的请求与本超时**互不绑定**——超时只表达
+   *     "child 还未声明 listener 就绪"，不是"child 没在工作"。
    */
   appClientConnectTimedOut(): boolean;
+
+  /**
+   * Session Window 启动早期是否有"等待 child `ready`"的活跃等待态。
+   *
+   * 设计缘由（施工单 2026-06-30 003 硬切换）：
+   *   - true：用户点过 `Open App`，且 child `ready` 仍未到达、5s 软超时
+   *     也未到点；UI 用此把 `Open App` 按钮置为 disabled。
+   *   - false：未点过 `Open App`、child `ready` 已到达、软超时已触发，
+   *     三者任一即 false。**不**因为该 flag 重新进入 waiting。
+   *   - 软超时到点**只**让本 flag 翻回 false；**不**重建 `connectSessionId`、
+   *     **不**重发 bootstrap、**不**重开 child 窗口。
+   */
+  appClientWaitingForReady(): boolean;
+
+  /**
+   * child app 是否已发来合法 `ready`（施工单 2026-06-30 003 硬切换）。
+   *
+   * 设计缘由：
+   *   - `ready` 方向对称：`client web -> Session Window` 发 `ready`
+   *     （与传统 popup 流 `Session Window -> client web` 对称）。
+   *   - Session Window UI 的 appView 两段式以此为切换信号：
+   *     `show app`（child 未 ready） → `popup`（child 已 ready）。
+   *   - 合法性按 `event.origin === appViewContext.appOrigin` + 当前
+   *     `currentAppClientSource`（如已绑定）双重校验。
+   *   - `connect mode` 下恒为 false；`appView mode` 但 bootstrap 未完成
+   *     也恒为 false。
+   */
+  childReady(): boolean;
 
   /**
    * Session Window 主动从同源 `window.opener` 拉取 bootstrap capsule。
@@ -2424,18 +2454,26 @@ export interface ProtocolService {
 
   /**
    * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken）
-   * 在新窗口打开。Session Window 与 client app 后续走现有 transport
-   * （ready → request → result）。
+   * 在命名窗口打开。Session Window 与 client app 后续走现有 transport
+   * （child → Session Window `ready` → request → result）。
    *
-   * 设计缘由：
-   *   - 仅允许在 appViewContext 非空时调用；否则 throw；
-   *   - 通过 `window.open(appUrl, "_blank")` 打开；**不**带 `noopener`。
-   *     否则 client app 拿不到 `window.opener = Session Window`，现有
-   *     popup transport（`request` / `result` 走 `event.source` ↔ opener
-   *     关系）就**完全**失效——client app 根本无法把第一条 `connect.launch`
-   *     发到 Session Window。
-   *   - 不负责 client app 的运行期状态；运行期交互完全走现有 popup
-   *     transport。
+   * 设计缘由（施工单 2026-06-30 003 硬切换）：
+   *   - 仅允许在 appViewContext 非空时调用；否则 throw。
+   *   - **不**带 `noopener`：client app 必须能拿到 `window.opener =
+   *     Session Window`，否则无法把第一条 `connect.launch` 发回。
+   *   - 命名窗口 target = `keymaster-app-<encodeOrigin(appOrigin)>`；
+   *     浏览器会按 target 复用同一扇 child app 窗口，避免 `_blank`
+   *     每次点 `Open App` 都新开一扇。
+   *   - **不**主动向 child 发 `ready` / 不再走 ready 泵：
+   *     `ready` 方向对称要求 child 在自己的 listener 就绪后向 Session
+   *     Window 发 `ready`。Session Window 不再猜测 child listener 是否
+   *     就绪。
+   *   - **不**负责 child app 的运行期状态；运行期交互完全走现有 popup
+   *     transport（child 发 `ready` → Session Window 进入 popup 阶段 →
+   *     child 发 request → Session Window 回 result）。
+   *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
+   *     `connectSessionId` / `launchToken` / bootstrap。
+   *   - 返回被打开的 window；失败返回 null（best-effort）。
    */
   openClientApp(): Window | null;
 

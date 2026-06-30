@@ -85,6 +85,8 @@ function makeFakeService(): ProtocolService & {
   bootstrapFailedValue: boolean;
   bootstrapFailureReasonValue: string | null;
   appClientConnectTimedOutValue: boolean;
+  appClientWaitingForReadyValue: boolean;
+  childReadyValue: boolean;
   vaultStatusListeners: Set<(s: "booting" | "uninitialized" | "locked" | "unlocked") => void>;
   emitVaultStatus: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void;
 } {
@@ -130,6 +132,8 @@ function makeFakeService(): ProtocolService & {
     bootstrapFailedValue: false,
     bootstrapFailureReasonValue: null,
     appClientConnectTimedOutValue: false,
+    appClientWaitingForReadyValue: false,
+    childReadyValue: false,
     emitVaultStatus(next: "booting" | "uninitialized" | "locked" | "unlocked") {
       for (const listener of Array.from(vaultStatusListeners)) {
         listener(next);
@@ -238,6 +242,12 @@ function makeFakeService(): ProtocolService & {
     },
     appClientConnectTimedOut() {
       return this.appClientConnectTimedOutValue;
+    },
+    appClientWaitingForReady() {
+      return this.appClientWaitingForReadyValue;
+    },
+    childReady() {
+      return this.childReadyValue;
     },
     awaitLauncherBootstrap: () => undefined,
     openClientApp() {
@@ -383,6 +393,125 @@ describe("ProtocolPopupPage", () => {
     expect(screen.getByTestId("appview-done")).toBeTruthy();
     expect(screen.getByTestId("appview-open-app-timeout")).toBeTruthy();
     expect(screen.getByText(/within 5 seconds after Open App/i)).toBeTruthy();
+  });
+
+  it("appView 等待 child ready 时 Open App 按钮 disabled（施工单 2026-06-30 003 3.6）", () => {
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    service.appClientWaitingForReadyValue = true;
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    const btn = screen.getByTestId("appview-open-app") as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("appView child ready 到达后从 show app 切回传统 popup（两段式切换）", async () => {
+    // 施工单 2026-06-30 003 硬切换：`show app` → `popup` 两段式。
+    // child `ready` 到达后：show app 壳层不再渲染，UI 落回传统 popup
+    // 主界面（顶栏 + 命令流）。
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    // 初始：child 未 ready，渲染 show app 壳层。
+    expect(screen.getByTestId("appview-done")).toBeTruthy();
+    // 模拟 child `ready` 到达（service 翻 childReady）。
+    act(() => {
+      service.childReadyValue = true;
+      const listeners = (service as unknown as {
+        listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+      }).listeners;
+      for (const l of listeners) l({ ...service.snapshot() });
+    });
+    // 切到传统 popup：show app 壳层不再渲染；顶栏 / 命令流出现。
+    expect(screen.queryByTestId("appview-done")).toBeNull();
+    expect(screen.queryByTestId("appview-open-app")).toBeNull();
+    expect(screen.getByText("关闭")).toBeTruthy();
+    expect(screen.getByText("回到最新")).toBeTruthy();
+  });
+
+  it("appView popup 阶段：vault locked 但无 pendingUnlock 请求时不渲染全屏锁屏", () => {
+    // 施工单 2026-06-30 003 硬切换 4.5：`lockState` 不再是 appView popup
+    // 入口的全局总闸；没有待处理锁屏请求时直接显示传统 popup 主界面。
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    service.childReadyValue = true;
+    // 模拟 vault locked，但 lockSummary 为 null（无 pending 请求）。
+    const lockedSnap: ProtocolSessionSnapshot = {
+      phase: "waiting",
+      boundSource: null,
+      boundOrigin: null,
+      method: null,
+      requestId: null,
+      lockState: "locked"
+    };
+    const listeners = (service as unknown as {
+      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
+    }).listeners;
+    const feedListeners = service.feedListeners;
+    currentService = service;
+    act(() => {
+      // 直接同步最新快照与 feed snapshot。
+      for (const l of listeners) l(lockedSnap);
+      for (const l of feedListeners) {
+        l({
+          currentOrigin: "https://justnote.apps.bsv8.com",
+          commands: [],
+          historyAvailable: true,
+          lockSummary: null
+        });
+      }
+    });
+    render(<ProtocolPopupPage />);
+    // 锁屏页（"解锁后继续" 标题）不应出现。
+    expect(screen.queryByText("解锁后继续")).toBeNull();
+    // 顶栏与 feed 应在。
+    expect(screen.getByText("关闭")).toBeTruthy();
+    expect(screen.getByText("回到最新")).toBeTruthy();
+  });
+
+  it("appView popup 阶段：有 pendingUnlock 请求时仍渲染锁屏", () => {
+    // 施工单 2026-06-30 003 硬切换 4.5：有 waiting_unlock_* 请求才切锁屏。
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    service.childReadyValue = true;
+    service.feed = {
+      currentOrigin: "https://justnote.apps.bsv8.com",
+      commands: [],
+      historyAvailable: true,
+      lockSummary: {
+        pendingTotal: 1,
+        waitingUnlockManual: 1,
+        waitingUnlockAuto: 0,
+        queued: 0,
+        executing: 0,
+        byMethod: [{ method: "cipher.decrypt", count: 1 }]
+      }
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    // 锁屏页应出现。
+    expect(screen.getByText("解锁后继续")).toBeTruthy();
   });
 
   it("renders command feed: live section + history section (施工单 2026-06-27 002 硬切换)", async () => {

@@ -201,11 +201,17 @@ export function ProtocolPopupPage() {
       />
     );
   }
-  // 施工单 2026-06-29 001 硬切换：appView mode 下 Session Window 在 bootstrap
-  // 完成前先渲染"等待 launcher"壳层；bootstrap 成功后渲染 app show 页面，
-  // 由用户手动点击打开 app。失败则渲染错误态（fail-closed）。
-  // 这些壳层**只**在 appView mode 下出现；connect mode 永不渲染。
-  if (service.bootMode() === "appView") {
+  // 施工单 2026-06-29 001 硬切换 + 2026-06-30 003 硬切换：appView mode 下
+  // Session Window UI 固定两段式 `show app` → `popup`。
+  //   - bootstrap 失败：渲染错误页（fail-closed）。
+  //   - bootstrap 未完成：渲染"等待 launcher"。
+  //   - bootstrap 已完成但 child 未发来合法 `ready`：渲染 `show app` 页
+  //     （用户点 `Open App` 后再等 child `ready`）。
+  //   - bootstrap 已完成且 child 已发来合法 `ready`：**不**再渲染 show app
+  //     页，落回传统 popup 主界面（在下方渲染）。
+  // 这些壳层**只**在 appView mode + child 未 ready 时出现；child ready
+  // 后与 connect mode 走同一套渲染路径。
+  if (service.bootMode() === "appView" && !service.childReady()) {
     // 修复 issue #3：bootstrap 失败时显式渲染错误页，**不**继续等。
     if (service.bootstrapFailed()) {
       return (
@@ -229,8 +235,18 @@ export function ProtocolPopupPage() {
       />
     );
   }
-  // 锁屏态分支：locked 且没有 auth owner 时直接渲染锁屏页（不渲染顶栏 / 站点配置 / 命令流）。
-  if (snap.lockState === "locked") {
+  // 锁屏态分支：
+  //   - connect mode：locked 即渲染锁屏页（保持旧行为）；
+  //   - appView popup 阶段（child 已 ready）：**只**当确实有"待处理锁屏
+  //     请求"（`lockSummary.pendingTotal > 0`）才渲染锁屏页。
+  //     否则**不**因 vault 默认 locked 状态把页面打回全屏锁屏——
+  //     `lockState` 仍表达 vault 本地状态，但不再是 appView `popup` 入口
+  //     的全局总闸（施工单 2026-06-30 003 硬切换 4.5）。
+  const inAppViewPopupMode = service.bootMode() === "appView" && service.childReady();
+  const shouldShowLockScreen = inAppViewPopupMode
+    ? (feed.lockSummary?.pendingTotal ?? 0) > 0
+    : snap.lockState === "locked";
+  if (shouldShowLockScreen) {
     return (
       <LockScreenPage
         t={t}
@@ -466,14 +482,19 @@ function AppViewBootstrapWaitPage({
 /**
  * appView mode 下 Session Window bootstrap 完成后的 app show 页面。
  *
- * 设计缘由：
+ * 设计缘由（施工单 2026-06-29 001 + 2026-06-30 003 硬切换）：
  *   - Session Window 是常驻控制窗口，不再 bootstrap 完成后自动 open
  *     app；避免它退化成一次性跳板页。
  *   - 用户明确点击大按钮后才调用 `service.openClientApp()`；这样 launcher
  *     不被打断，Session Window 也能稳定停留。
- *   - `openClientApp()` 失败时仅在本页显示简短错误，不补复杂恢复逻辑。
- *   - `Open App` 后若 5s 内仍未收到 child app 第一条合法 request，
- *     本页显示软超时提示；迟到连接到来后提示自动消失。
+ *   - `Open App` 后 5s 内若未收到 child `ready`，按钮恢复可点 + 显示
+ *     软超时提示（"连接较慢"）；迟到 child `ready` 到达后：
+ *       - waiting / 软超时 flag 一并清掉；
+ *       - UI 从 `show app` 直接切到传统 popup 主界面。
+ *   - **不**在本页偷偷重建 `connectSessionId` / `launchToken` /
+ *     bootstrap（施工单 2026-06-30 003 硬切换 2.4 / 4.3）。
+ *   - **不**主动向 child 发 `ready`：child 必须在自己 listener 就绪后
+ *     向 Session Window 发 `ready`（方向对称）。
  */
 function AppViewBootstrapDonePage({
   t,
@@ -485,13 +506,30 @@ function AppViewBootstrapDonePage({
   appId: string;
 }) {
   const [openError, setOpenError] = useState<string | null>(null);
-  const connectTimedOut = service.appClientConnectTimedOut();
+  // 订阅 service 快照：等待态 / 软超时态 / childReady 变化时重渲染。
+  // `childReady` 一旦翻 true，整个组件树在父级切回主 popup，本组件被卸。
+  // 这里订阅主要服务于"等待态 + 软超时态"两件事。
+  const [waitingForChildReady, setWaitingForChildReady] = useState(
+    () => service.appClientWaitingForReady()
+  );
+  const [connectTimedOut, setConnectTimedOut] = useState(
+    () => service.appClientConnectTimedOut()
+  );
+
+  useEffect(() => {
+    const off = service.subscribe(() => {
+      setWaitingForChildReady(service.appClientWaitingForReady());
+      setConnectTimedOut(service.appClientConnectTimedOut());
+    });
+    return off;
+  }, [service]);
 
   function handleOpenApp() {
     setOpenError(null);
     try {
       const opened = service.openClientApp();
       if (!opened) {
+        // 打开失败：等待态在 service 内部已翻回 false；这里只展示错误。
         setOpenError("Failed to open the app window.");
       }
     } catch (err) {
@@ -515,6 +553,9 @@ function AppViewBootstrapDonePage({
           className="protocol-popup__open-app-button"
           data-testid="appview-open-app"
           onClick={handleOpenApp}
+          // 施工单 2026-06-30 003 硬切换 3.6：等待 child `ready` 期间
+          // 按钮 disabled；超时 / 收到 ready / 打开失败任一即恢复可点。
+          disabled={waitingForChildReady}
         >
           {t("protocol.sessionWindow.appView.openApp", {
             defaultValue: "Open App"

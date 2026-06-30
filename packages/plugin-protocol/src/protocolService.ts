@@ -145,7 +145,7 @@ import {
 } from "./protocolCrypto.js";
 import { cborDecode, cborEncode, type CborValue } from "./protocolCbor.js";
 import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } from "./protocolClaims.js";
-import { consumeLauncherBootstrap, parseBootstrapToken } from "./sessionWindowBootstrap.js";
+import { consumeLauncherBootstrap, encodeOrigin, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
 import { installLauncherBootstrapRegistry } from "@keymaster/contracts";
 import {
@@ -193,7 +193,17 @@ const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
  *     launcher 启动 app。**不**无限等待。
  */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
-const APPVIEW_READY_RETRY_INTERVAL_MS = 300;
+/**
+ * Session Window 等待 child `ready` 的最长时间（施工单 2026-06-30 003）。
+ *
+ * 设计缘由：
+ *   - child `ready` 是 UI 切段信号，到点未到**只**用于提示"连接较慢"。
+ *   - 到点只清等待态、提示用户，不重建 `connectSessionId` / `launchToken` /
+ *     bootstrap、不偷偷重发 ready。
+ *   - 旧 `APPVIEW_READY_RETRY_INTERVAL_MS`（300ms pump 间隔）已删除：
+ *     `ready` 方向对称，child 自己声明 listener 就绪，Session Window
+ *     不再主动 pump。
+ */
 const APPVIEW_READY_RETRY_WINDOW_MS = 5_000;
 
 /**
@@ -520,14 +530,51 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     Session Window 打开的 child app 窗口；
    *   - 因此 appView **不能**继续把 `window.opener` 当成唯一合法 source。
    *   - 本字段在 appView 下绑定"当前合法 client app source"：
-   *       1. `openClientApp()` 成功返回 window 句柄时先记下；
-   *       2. 若没有句柄，则第一次收到合法 `connect.launch` 时再绑定；
-   *       3. 绑定后后续 request 只接受这一个 source。
+   *       1. 第一次收到合法 child `ready` 时绑定（方向对称；
+   *          施工单 2026-06-30 003）；
+   *       2. 若 child `ready` 还没到，则第一次收到合法 `connect.launch`
+   *          时再绑定（向后兼容：部分 client 可能漏发 `ready` 直接发
+   *          `connect.launch`，仍然要让请求能跑）；
+   *       3. 绑定后后续 `ready` / request 只接受这一个 source。
    */
   private currentAppClientSource: Window | null = null;
-  private appClientReadyPumpHandle: ReturnType<typeof setInterval> | null = null;
-  private appClientReadyTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * child app 是否已发来合法 `ready`（施工单 2026-06-30 003 硬切换）。
+   *
+   * 设计缘由：
+   *   - `ready` 方向对称：`client web -> Session Window`。
+   *   - 这是 appView UI 的"两段式"切段信号：未 ready → `show app`；
+   *     ready → 切回传统 popup 界面。
+   *   - `connect mode` 下恒为 false；`appView mode` 但 bootstrap 未完成
+   *     时也恒为 false。
+   *   - 一旦置 true 不再回 false；同 Session Window 生命周期内
+   *     不可重复切段。
+   */
+  private childReadyFlag: boolean = false;
+  /**
+   * child `ready` 软超时（施工单 2026-06-30 003）。
+   *
+   * 设计缘由：
+   *   - Session Window 不再向 child 主动泵 `ready`；因此这里的 setTimeout
+   *     只表达"等待 child 主动发来 `ready`"的 5s 软超时。
+   *   - 到点只把 `appClientConnectTimedOutFlag = true` 并清掉
+   *     `appClientWaitingForReadyFlag`，**不**重建 `connectSessionId`、
+   *     **不**重新 bootstrap、**不**偷偷重发 ready。
+   *   - 旧 `appClientReadyPumpHandle`（setInterval 反复 pump ready）
+   *     已删除；`ready` 职责改由 child 自己声明。
+   */
+  private appClientConnectTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
   private appClientConnectTimedOutFlag: boolean = false;
+  /**
+   * "等待 child `ready`"的活跃等待态（施工单 2026-06-30 003）。
+   *
+   * 设计缘由：
+   *   - 用户点过 `Open App` 且 child `ready` 仍未到、5s 软超时也未触发
+   *     → true；UI 据此把 `Open App` 按钮置 disabled。
+   *   - child `ready` 到达、软超时触发、`Open App` 打开失败，三者任一
+   *     → false。
+   */
+  private appClientWaitingForReadyFlag: boolean = false;
 
   /**
    * launchToken 内存 Map：token -> LaunchTokenRecord（V1 **不**落盘）。
@@ -678,7 +725,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    Session Window 重新启动会话时不允许复用旧 launcher handoff。
     this.currentAppViewContext = null;
     this.currentAppClientSource = null;
-    this.stopAppClientReadyPump();
+    // 施工单 2026-06-30 003：appView UI 两段式。重启会话时 child `ready`
+    // 必须重置回 false，否则新会话会在第一次启动时就直接进入 popup 阶段。
+    this.childReadyFlag = false;
+    this.appClientWaitingForReadyFlag = false;
+    this.stopAppClientConnectTimer();
     this.launchTokensByToken.clear();
     // 施工单 2026-06-30 002 硬切换：startSession 也要清空 owner runtimes
     // 防止上一会话残留的 bootstrap runtime 干扰本会话。
@@ -737,7 +788,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 与 popup 生命周期解耦，由 setVaultLockState 单独管理）。
     this.currentAppViewContext = null;
     this.currentAppClientSource = null;
-    this.stopAppClientReadyPump();
+    // 施工单 2026-06-30 003：endSession 同样要把 child `ready` 等待态
+    // 重置；否则下次 startSession 启动新会话时等待态可能跨会话污染。
+    this.childReadyFlag = false;
+    this.appClientWaitingForReadyFlag = false;
+    this.stopAppClientConnectTimer();
     this.appClientConnectTimedOutFlag = false;
     this.launchTokensByToken.clear();
     // 施工单 2026-06-30 002 硬切换：endSession 清空 owner runtimes。
@@ -875,6 +930,14 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 新 request 立刻建 record，按 lockState + auto-approve 决定初始 phase。
    */
   async handleMessage(event: MessageEvent): Promise<void> {
+    // 施工单 2026-06-30 003 硬切换：appView 模式下先把顶层 `ready` 单独
+    // 识别出来——它**不是** request / cancel，是 transport-ready 信号，
+    // 由 child app 主动向 Session Window（opener）发，方向对称于传统
+    // popup 流的 `Session Window -> client web`。
+    if (looksLikeReady(event.data)) {
+      this.tryAcceptChildReady(event);
+      return;
+    }
     // 先尝试按 cancel 解析：失败 / 不是 cancel 都按 request 走。
     if (looksLikeCancel(event.data)) {
       let parsed: { id: string };
@@ -921,7 +984,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.currentAppClientSource &&
       event.source === this.currentAppClientSource
     ) {
-      this.stopAppClientReadyPump();
+      // 施工单 2026-06-30 003：bound source 发来 request → child 显然活着，
+      // 软超时等待态与提示一并清掉，便于 UI 立即从"show app / 提示"切回
+      // 传统 popup 主界面。
+      this.stopAppClientConnectTimer();
       this.clearAppClientConnectTimeout();
     }
 
@@ -1410,6 +1476,25 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
+   * 是否有"等待 child `ready`"的活跃等待态（施工单 2026-06-30 003）。
+   */
+  appClientWaitingForReady(): boolean {
+    return this.appClientWaitingForReadyFlag;
+  }
+
+  /**
+   * child app 是否已发来合法 `ready`（施工单 2026-06-30 003 硬切换）。
+   *
+   * 设计缘由：
+   *   - UI 据此决定渲染 `show app` 页（false）还是回传统 popup 页（true）。
+   *   - 一旦 true 在当前 Session Window 生命周期内不再回 false；
+   *     重新启动会话时由 `startSession` 清回 false。
+   */
+  childReady(): boolean {
+    return this.childReadyFlag;
+  }
+
+  /**
    * 把 bootstrap 状态切到 failed；UI 立刻据此渲染错误页。
    *
    * 设计缘由：
@@ -1418,7 +1503,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private markBootstrapFailed(reason: string): void {
     if (this.bootstrapFailedFlag) return;
-    this.stopAppClientReadyPump();
+    this.stopAppClientConnectTimer();
     this.currentAppClientSource = null;
     this.bootstrapFailedFlag = true;
     this.bootstrapFailureReasonValue = reason;
@@ -1432,23 +1517,29 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken）
-   * 在新窗口打开。
+   * 在命名窗口打开。Session Window 与 client app 后续走现有 transport
+   * （child → Session Window `ready` → request → result）。
    *
-   * 设计缘由：
+   * 设计缘由（施工单 2026-06-30 003 硬切换）：
    *   - 仅允许在 appViewContext 非空时调用；否则 throw。
-   *   - 通过 `window.open(appUrl, "_blank")` 打开；**不**带 `noopener`。
-   *     否则 client app 拿不到 `window.opener = Session Window`，现有
-   *     popup transport（`request` / `result` 走 `event.source` ↔ opener
-   *     关系）就**完全**失效——client app 根本无法把第一条 `connect.launch`
-   *     发到 Session Window。
-   *   - 安全代价：client app 拿到 `window.opener` 后可以尝试导航 Session
-   *     Window。接受这个代价的原因是：Session Window 与 client app 本身
-   *     就是同源、同信任域（launcher 在 app 注册阶段已经校验过 origin
-   *     合法）；app 不应主动攻击 Session Window。如需额外防御，可让
-   *     client app 在收到第一条 `ready` 后自己 `window.opener = null`。
-   *   - 不负责 client app 的运行期状态；运行期交互完全走现有 popup
-   *     transport（ready → request → result）。
+   *   - 命名窗口 target = `keymaster-app-<encodeOrigin(appOrigin)>`：
+   *     浏览器按 target 复用同一扇 child app 窗口，避免 `_blank` 每次
+   *     点 `Open App` 都新开一扇、多个 client 实例互相打架。
+   *   - **不**带 `noopener`：client app 必须能拿到
+   *     `window.opener = Session Window`，否则无法把第一条
+   *     `connect.launch` 发回，transport 完全失效。
+   *   - **不**主动向 child 发 `ready` / 不再走 ready 泵（施工单
+   *     2026-06-30 003）：
+   *     `ready` 方向对称要求 child 在自己 listener 就绪后向 Session
+   *     Window 发 `ready`。Session Window 不再猜测 child listener
+   *     是否就绪。
+   *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
+   *     `connectSessionId` / `launchToken` / bootstrap。
    *   - 返回被打开的 window；失败返回 null（best-effort）。
+   *   - **不**在打开后立即绑定 `currentAppClientSource`——`ready` 应当
+   *     由 child 自己声明，source 绑定由 child `ready` 到达后做；
+   *     若 child 漏发 `ready` 直接发 `connect.launch`，再由
+   *     `isAllowedRequestSource` 兜底绑定。
    */
   openClientApp(): Window | null {
     const ctx = this.currentAppViewContext;
@@ -1456,15 +1547,26 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw new Error("openClientApp: appViewContext not set");
     }
     if (typeof window === "undefined") return null;
+    // 施工单 2026-06-30 003：命名窗口 target。浏览器按 target 复用同一扇
+    // child 窗口；encodeOrigin 来自 sessionWindowBootstrap，与 storage.*
+    // 物理 key 同源，但这里**只**用 target 字符串，不参与 storage 真值。
+    const target = `keymaster-app-${encodeOrigin(ctx.appOrigin)}`;
     try {
-      const opened = window.open(ctx.appUrl, "_blank");
-      if (opened) {
-        this.currentAppClientSource = opened;
-        this.clearAppClientConnectTimeout();
-        this.beginAppClientReadyPump(opened);
+      const opened = window.open(ctx.appUrl, target);
+      // 失败 / null：视为打开失败。`show app` 页面据此展示错误，
+      // 用户可再次点击；不新建 session，不重建 launchToken。
+      if (!opened) {
+        this.appClientWaitingForReadyFlag = false;
+        this.stopAppClientConnectTimer();
+        return null;
       }
+      // 打开成功：进入 5s 等待 child `ready` 的软超时。超时**只**清等待态
+      // 和标记"连接较慢"提示，**不**重建 session / launchToken / bootstrap。
+      this.beginAppClientConnectTimer();
       return opened;
     } catch (err) {
+      this.appClientWaitingForReadyFlag = false;
+      this.stopAppClientConnectTimer();
       this.deps.logger?.error?.({
         scope: "protocol.sessionWindow",
         event: "openClientApp.failed",
@@ -1961,37 +2063,40 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * appView child app ready 重发泵。
+   * 启动 child `ready` 软超时（施工单 2026-06-30 003）。
    *
    * 设计缘由：
-   *   - `window.open()` 返回后 child app 文档可能还没挂好 message listener；
-   *     若只发一条 ready，很容易像 bootstrap 早期那样丢事件。
-   *   - 这里不引入新协议；只在短窗口内低频重发现有 `ready`，直到：
-   *       1. 收到 child app 的第一条合法 request；
-   *       2. 超过重发窗口；
-   *       3. 会话结束 / 重新 open app。
-   *   - `ready` 是幂等的 transport-ready 信号，重复发送不会改变授权状态。
+   *   - 旧实现这里用 setInterval 反复 pump `ready`；新实现已删除 pump，
+   *     `ready` 方向对称要求 child 自己声明。
+   *   - 这里只启动 5s setTimeout：到点只把 `appClientConnectTimedOut = true`
+   *     并清掉等待态，**不**重建 `connectSessionId` / `launchToken` /
+   *     bootstrap、**不**重发 `ready`、**不**自动补救。
+   *   - child `ready` 到达或 child request 到达都会清掉 timer。
    */
-  private beginAppClientReadyPump(target: Window): void {
-    this.stopAppClientReadyPump();
-    this.postReadyToTarget(target);
-    this.appClientReadyTimeoutHandle = setTimeout(() => {
-      this.stopAppClientReadyPump();
+  private beginAppClientConnectTimer(): void {
+    this.stopAppClientConnectTimer();
+    this.appClientWaitingForReadyFlag = true;
+    this.appClientConnectTimeoutHandle = setTimeout(() => {
+      this.appClientConnectTimeoutHandle = null;
+      this.appClientWaitingForReadyFlag = false;
       this.markAppClientConnectTimedOut();
     }, APPVIEW_READY_RETRY_WINDOW_MS);
-    this.appClientReadyPumpHandle = setInterval(() => {
-      this.postReadyToTarget(target);
-    }, APPVIEW_READY_RETRY_INTERVAL_MS);
   }
 
-  private stopAppClientReadyPump(): void {
-    if (this.appClientReadyPumpHandle !== null) {
-      clearInterval(this.appClientReadyPumpHandle);
-      this.appClientReadyPumpHandle = null;
-    }
-    if (this.appClientReadyTimeoutHandle !== null) {
-      clearTimeout(this.appClientReadyTimeoutHandle);
-      this.appClientReadyTimeoutHandle = null;
+  /**
+   * 停止 child `ready` 软超时 timer（施工单 2026-06-30 003）。
+   *
+   * 设计缘由：
+   *   - 旧 `stopAppClientReadyPump` 同时 clearInterval + clearTimeout；
+   *     新实现不再有 setInterval，仅 clearTimeout 一项。
+   *   - 本方法**不**改 waiting / 软超时提示 flag；flag 由
+   *     `markChildReady` / `markAppClientConnectTimedOut` /
+   *     `clearAppClientConnectTimeout` 单独维护。
+   */
+  private stopAppClientConnectTimer(): void {
+    if (this.appClientConnectTimeoutHandle !== null) {
+      clearTimeout(this.appClientConnectTimeoutHandle);
+      this.appClientConnectTimeoutHandle = null;
     }
   }
 
@@ -2000,13 +2105,16 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 设计缘由：
    *   - 这是 UI 层的软超时，不是协议硬失败；
-   *   - 5s 到点后只提示用户"连接较慢/超时"，并停止 ready 重发；
-   *   - 迟到的 `connect.launch` 仍允许恢复，因此**不能**复用
+   *   - 5s 到点后只提示用户"连接较慢/超时"；
+   *   - 迟到的 `ready` / `connect.launch` 仍允许恢复，因此**不能**复用
    *     `bootstrapFailed` 这条 fail-closed 真值。
+   *   - 施工单 2026-06-30 003：到点**不**重建 session / launchToken /
+   *     bootstrap；只翻 flag 让 UI 把按钮恢复可点 + 显示提示。
    */
   private markAppClientConnectTimedOut(): void {
     if (this.appClientConnectTimedOutFlag) return;
     this.appClientConnectTimedOutFlag = true;
+    this.appClientWaitingForReadyFlag = false;
     this.deps.logger?.warn?.({
       scope: "protocol.sessionWindow",
       event: "appClient.connectTimeout"
@@ -2014,10 +2122,64 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.emit();
   }
 
-  /** child app 迟到连回后，清掉软超时提示。 */
+  /**
+   * child app 连回后清掉软超时提示（施工单 2026-06-30 003）。
+   *
+   * 设计缘由：
+   *   - 由 `tryAcceptChildReady` 与"bound source 收到 request"路径调用；
+   *   - 同时把 waiting flag 也清掉，保证按钮态与提示态同步。
+   */
   private clearAppClientConnectTimeout(): void {
-    if (!this.appClientConnectTimedOutFlag) return;
+    this.appClientWaitingForReadyFlag = false;
+    if (!this.appClientConnectTimedOutFlag) {
+      this.emit();
+      return;
+    }
     this.appClientConnectTimedOutFlag = false;
+    this.emit();
+  }
+
+  /**
+   * 处理 child `ready`（施工单 2026-06-30 003 硬切换）。
+   *
+   * 设计缘由：
+   *   - 仅在 appView mode 下生效；connect mode 收到 ready 视为非法忽略。
+   *   - 合法性：event.origin === appViewContext.appOrigin；若
+   *     `currentAppClientSource` 已绑定则 event.source 必须等于它；
+   *     若未绑定则把 event.source 绑定为当前合法 child app source。
+   *   - `childReadyFlag` 翻转后**不**再回 false；同 Session Window 生命周期
+   *     内 UI 切到 popup 阶段后不再回 show app 阶段。
+   *   - 收到合法 ready 后清掉 waiting flag、停止软超时 timer、清除
+   *     `appClientConnectTimedOut` 提示。
+   *   - 重复 ready 到达：`childReadyFlag` 已经 true → 直接忽略，不重复 emit
+   *     避免 UI 闪烁。
+   */
+  private tryAcceptChildReady(event: MessageEvent): void {
+    if (this.bootModeValue !== "appView") return;
+    const ctx = this.currentAppViewContext;
+    if (!ctx) return;
+    if (event.origin !== ctx.appOrigin) return;
+    const source = event.source as Window | null;
+    if (!source) return;
+    // 已绑定 source：必须严格匹配，错误窗口的 ready 直接忽略。
+    if (this.currentAppClientSource && this.currentAppClientSource !== source) return;
+    // 旧 `appClientReadyPumpHandle` / pump 已删除；这里不再调用
+    // postReadyToTarget。
+    if (!this.currentAppClientSource) {
+      this.currentAppClientSource = source;
+    }
+    if (this.childReadyFlag) {
+      // 已 ready：重复 ready 直接忽略；source 绑定已稳定，重复 ready
+      // 不再触发 UI 切段、不再 emit。
+      return;
+    }
+    this.childReadyFlag = true;
+    this.stopAppClientConnectTimer();
+    this.clearAppClientConnectTimeout();
+    this.deps.logger?.info?.({
+      scope: "protocol.sessionWindow",
+      event: "appClient.ready"
+    });
     this.emit();
   }
 
@@ -5364,6 +5526,22 @@ function looksLikeCancel(v: unknown): boolean {
     o.type === "cancel" &&
     typeof o.id === "string"
   );
+}
+
+/**
+ * 顶层 `ready` 报文形状判定（施工单 2026-06-30 003）。
+ *
+ * 设计缘由：
+ *   - `ready` 是顶层协议消息（无 method / 无 id），与 request / cancel
+ *     互斥。
+ *   - 不带 `id`：与 cancel 区分；不带 `method`：与 request 区分。
+ *   - 这里**只**做结构判定，合法性（origin + source）由 `handleMessage`
+ *     调用 `tryAcceptChildReady` 时集中判定。
+ */
+function looksLikeReady(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return o.v === PROTOCOL_VERSION && o.type === "ready";
 }
 
 function toBinaryField(bytes: Uint8Array, mime?: string) {

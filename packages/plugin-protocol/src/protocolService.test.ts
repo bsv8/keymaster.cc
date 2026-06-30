@@ -6435,7 +6435,15 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     expect(internals.currentAppClientSource).toBe(appSource);
   });
 
-  it("openClientApp 打开 child app 后立即向该窗口发送 ready", () => {
+  it("openClientApp 用命名窗口 keymaster-app-<encodedOrigin> 打开，不主动向 child 发 ready", () => {
+    // 施工单 2026-06-30 003 硬切换：`ready` 方向对称 → child 自己声明。
+    // Session Window 不再向 child 主动 pump ready；打开 client app 时
+    // 只做两件事：
+    //   1) 用命名窗口 target `keymaster-app-<encodedOrigin>` 调
+    //      `window.open`，让浏览器复用同一扇 child app 窗口；
+    //   2) 启动 5s 软超时，等待 child 自己发 `ready`。
+    //   不立即绑定 currentAppClientSource；source 绑定由 child `ready`
+    //   到达后做。
     const win = installWindowShim();
     const originalOpen = win.open;
     const childMessages: unknown[] = [];
@@ -6444,7 +6452,11 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         childMessages.push(msg);
       }
     } as unknown as Window;
-    win.open = (() => childWindow) as typeof win.open;
+    const openCalls: Array<{ url: string; target: string }> = [];
+    win.open = ((url: string | URL, target?: string) => {
+      openCalls.push({ url: String(url), target: String(target ?? "_blank") });
+      return childWindow;
+    }) as typeof win.open;
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
@@ -6467,62 +6479,30 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       };
       const opened = service.openClientApp();
       expect(opened).toBe(childWindow);
-      expect(internals.currentAppClientSource).toBe(childWindow);
-      expect(childMessages).toEqual([{ v: PROTOCOL_VERSION, type: "ready" }]);
+      // 不再向 child 发 ready。
+      expect(childMessages).toEqual([]);
+      // 不立即绑定 source —— 等 child 自己发 `ready`。
+      expect(internals.currentAppClientSource).toBeNull();
+      // 命名窗口 target：`keymaster-app-<encodedOrigin>`。
+      expect(openCalls).toHaveLength(1);
+      expect(openCalls[0]?.target.startsWith("keymaster-app-")).toBe(true);
+      expect(openCalls[0]?.target.length ?? 0).toBeGreaterThan("keymaster-app-".length);
+      // 进入等待 child `ready` 态。
+      expect(service.appClientWaitingForReady()).toBe(true);
+      expect(service.childReady()).toBe(false);
     } finally {
       win.open = originalOpen;
     }
   });
 
-  it("openClientApp 在短窗口内重发 ready，覆盖 child app listener 挂载竞态", () => {
+  it("openClientApp 在 5 秒内未收到 child `ready`：仅翻软超时提示，不重建 session/launchToken/bootstrap", () => {
+    // 施工单 2026-06-30 003 硬切换：soft timeout 只翻提示 + 清等待态。
+    // 不重建 connectSessionId / launchToken / bootstrap；按钮恢复可点。
     vi.useFakeTimers();
     const win = installWindowShim();
     const originalOpen = win.open;
-    const childMessages: unknown[] = [];
     const childWindow = {
-      postMessage: (msg: unknown) => {
-        childMessages.push(msg);
-      }
-    } as unknown as Window;
-    win.open = (() => childWindow) as typeof win.open;
-    try {
-      const service = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
-        bootMode: "appView"
-      });
-      const internals = service as unknown as {
-        currentAppViewContext: {
-          appId: string;
-          appOrigin: string;
-          appUrl: string;
-        } | null;
-      };
-      internals.currentAppViewContext = {
-        appId: "justnote",
-        appOrigin: "https://justnote.apps.bsv8.com",
-        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag"
-      };
-      service.openClientApp();
-      expect(childMessages).toHaveLength(1);
-      vi.advanceTimersByTime(1000);
-      expect(childMessages.length).toBeGreaterThan(1);
-    } finally {
-      win.open = originalOpen;
-      vi.useRealTimers();
-    }
-  });
-
-  it("openClientApp 在 5 秒内等不到 child app 第一条 request 时显示软超时并停止重发", () => {
-    vi.useFakeTimers();
-    const win = installWindowShim();
-    const originalOpen = win.open;
-    const childMessages: unknown[] = [];
-    const childWindow = {
-      postMessage: (msg: unknown) => {
-        childMessages.push(msg);
-      }
+      postMessage: (_msg: unknown) => undefined
     } as unknown as Window;
     win.open = (() => childWindow) as typeof win.open;
     try {
@@ -6548,14 +6528,205 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       service.openClientApp();
       vi.advanceTimersByTime(5000);
       expect(service.bootstrapFailed()).toBe(false);
+      // 软超时翻到；等待态翻回。
       expect(service.appClientConnectTimedOut()).toBe(true);
-      expect(internals.currentAppClientSource).toBe(childWindow);
-      const countAtTimeout = childMessages.length;
-      vi.advanceTimersByTime(1000);
-      expect(childMessages.length).toBe(countAtTimeout);
+      expect(service.appClientWaitingForReady()).toBe(false);
+      // child `ready` 未到；source 未绑；UI 仍在 show app 阶段。
+      expect(service.childReady()).toBe(false);
+      expect(internals.currentAppClientSource).toBeNull();
     } finally {
       win.open = originalOpen;
       vi.useRealTimers();
+    }
+  });
+
+  it("child `ready` 到达：source 绑定、childReady=true、软超时 / 等待态全部清掉", async () => {
+    // 施工单 2026-06-30 003 硬切换：方向对称，child 自己声明 listener 就绪。
+    // Session Window 收到合法 `ready`（origin 合法、source 可绑）后：
+    //   - 绑定 currentAppClientSource；
+    //   - 翻 childReady = true（一旦 true 不再回 false）；
+    //   - 清掉 waiting / 软超时提示；
+    //   - 不重建 session / launchToken / bootstrap；
+    //   - 触发 emit 让 UI 切回传统 popup。
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childWindow = {
+      postMessage: (_msg: unknown) => undefined
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-ready"
+      };
+      service.openClientApp();
+      expect(service.appClientWaitingForReady()).toBe(true);
+      expect(service.childReady()).toBe(false);
+      // 触发 child `ready`。
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "ready"
+          },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      // source 绑定。
+      expect(internals.currentAppClientSource).toBe(childWindow);
+      // childReady 翻 true；等待态清掉。
+      expect(service.childReady()).toBe(true);
+      expect(service.appClientWaitingForReady()).toBe(false);
+      expect(service.appClientConnectTimedOut()).toBe(false);
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+
+  it("child `ready` origin 不匹配：忽略，不翻 childReady、不绑 source", async () => {
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childWindow = {
+      postMessage: (_msg: unknown) => undefined
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-origin-mismatch"
+      };
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "ready"
+          },
+          "https://evil.example",
+          childWindow
+        )
+      );
+      expect(service.childReady()).toBe(false);
+      expect(internals.currentAppClientSource).toBeNull();
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+
+  it("重复 child `ready`：第二次直接忽略，UI 不闪烁", async () => {
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childWindow = {
+      postMessage: (_msg: unknown) => undefined
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    let emitCount = 0;
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const off = service.subscribe(() => {
+        emitCount++;
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-dup-ready"
+      };
+      // 第一次 ready：翻 childReady。
+      await service.handleMessage(
+        makeEvent(
+          { v: PROTOCOL_VERSION, type: "ready" },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      expect(service.childReady()).toBe(true);
+      const emitsAfterFirst = emitCount;
+      // 第二次 ready：重复到达应直接忽略，**不**重复 emit。
+      await service.handleMessage(
+        makeEvent(
+          { v: PROTOCOL_VERSION, type: "ready" },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      expect(service.childReady()).toBe(true);
+      expect(emitCount).toBe(emitsAfterFirst);
+      off();
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+
+  it("connect mode 收到顶层 ready：忽略，不污染 connect 流", async () => {
+    // 传统 connect 流下 child / opener 走的是 Session Window 自己发 ready；
+    // 现在反过来收到 client web 发来的顶层 ready 不应影响 connect 流。
+    const win = installWindowShim();
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb()
+      });
+      service.startSession();
+      const fakeOpener = {
+        postMessage: (_msg: unknown) => undefined
+      } as unknown as Window;
+      await service.handleMessage(
+        makeEvent(
+          { v: PROTOCOL_VERSION, type: "ready" },
+          "https://demo.example",
+          fakeOpener
+        )
+      );
+      // connect mode 下 childReady 永远为 false（构造不依赖该 flag），
+      // 不影响 connect 流。
+      expect(service.childReady()).toBe(false);
+    } finally {
+      // installWindowShim 无副作用，无需 restore。
+      void win;
     }
   });
 
