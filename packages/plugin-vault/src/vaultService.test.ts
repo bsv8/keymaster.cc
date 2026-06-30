@@ -8,7 +8,11 @@
 //   - 在 withPrivateKey 回调内才能拿到 material。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { MessageBus } from "@keymaster/runtime";
+import {
+  getFatalError,
+  resetFatalErrorForTest,
+  type MessageBus
+} from "@keymaster/runtime";
 import {
   createVaultService,
   KeyPersistedButActivationFailedError
@@ -2021,3 +2025,178 @@ function makeFakeMessageBus(): MessageBus {
     }
   };
 }
+
+// 施工单 2026-06-30 001 硬切换收口：
+//   bootstrap 阶段的关键持久化异常不再静默降级为 uninitialized。
+//   - meta 不存在 -> 正常 uninitialized。
+//   - meta 存在但 getMeta 抛错 -> reportFatalError。
+//   - meta 存在但 listKeys 抛错 -> reportFatalError。
+//   - 正常路径仍能进 locked。
+describe("VaultService.bootstrap fatal escalation (施工单 001)", () => {
+  beforeEach(() => {
+    resetFatalErrorForTest();
+  });
+  afterEach(() => {
+    resetFatalErrorForTest();
+    vi.restoreAllMocks();
+  });
+
+  it("collapses to uninitialized when meta is missing (no fatal)", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    // meta 缺失：不是 fatal,只是正常首启。
+    expect(getFatalError()).toBeNull();
+  });
+
+  it("reports fatal when getMeta throws (IndexedDB read failure)", async () => {
+    // meta 已写入,然后在 bootstrap 之前把 vaultDb.getMeta mock 成抛错。
+    await vaultDb.putMeta({
+      id: "singleton",
+      saltB64: "00",
+      verifierSaltB64: "00",
+      verifierIvB64: "00",
+      verifierCipherB64: "00",
+      createdAt: new Date().toISOString()
+    });
+    // 在 createVaultService 之前把 spy 装上：spyOn 在 module 上,需要在
+    // import 之后、createVaultService 之前执行。
+    const spy = vi
+      .spyOn(vaultDb, "getMeta")
+      .mockRejectedValueOnce(new Error("IndexedDB schema corrupt"));
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    // bootstrap 是 fire-and-forget;等待一个 microtask 让它跑完。
+    await new Promise((r) => setTimeout(r, 30));
+    spy.mockRestore();
+    const fatal = getFatalError();
+    expect(fatal).not.toBeNull();
+    expect(fatal?.phase).toBe("vault.bootstrap");
+    expect(fatal?.scope).toBe("vault-service");
+    expect(fatal?.message).toMatch(/read vault meta/i);
+    // 不应继续走 uninitialized——状态保持 booting,因为"不可信"不能
+    // 伪装成首启。
+    expect(vault.status()).toBe("booting");
+  });
+
+  it("reports fatal when listKeys throws after meta exists (corrupt keys store)", async () => {
+    // meta 已写入(模拟本地残留数据)。
+    await vaultDb.putMeta({
+      id: "singleton",
+      saltB64: "00",
+      verifierSaltB64: "00",
+      verifierIvB64: "00",
+      verifierCipherB64: "00",
+      createdAt: new Date().toISOString()
+    });
+    const spy = vi
+      .spyOn(vaultDb, "listKeys")
+      .mockRejectedValueOnce(new Error("vault_keys object store missing"));
+    const { messageBus: events } = makeMessageBus();
+    createVaultService({ messageBus: events });
+    await new Promise((r) => setTimeout(r, 30));
+    spy.mockRestore();
+    const fatal = getFatalError();
+    expect(fatal).not.toBeNull();
+    expect(fatal?.phase).toBe("vault.bootstrap");
+    expect(fatal?.message).toMatch(/read vault keys/i);
+  });
+
+  it("collapses to uninitialized when meta exists but keys list is empty (0-key guard)", async () => {
+    // meta 存在但 vault_keys 已空：硬切换 005 收尾的护栏应清 meta 并
+    // 收敛到 uninitialized。这条路径**不**升级 fatal——它不是"数据损坏"，
+    // 而是"已自愈的异常态"。
+    await vaultDb.putMeta({
+      id: "singleton",
+      saltB64: "00",
+      verifierSaltB64: "00",
+      verifierIvB64: "00",
+      verifierCipherB64: "00",
+      createdAt: new Date().toISOString()
+    });
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    expect(getFatalError()).toBeNull();
+    expect(await vaultDb.getMeta()).toBeUndefined();
+  });
+
+  it("reports fatal when meta record shape is corrupt (missing saltB64)", async () => {
+    // meta 存在但缺关键字段：施工单 001 收口要求启动期升级 fatal,
+    // 而不是把"坏数据"放行进 unlock 阶段。
+    await vaultDb.putMeta({
+      id: "singleton",
+      // 故意漏掉 saltB64 / verifierSaltB64 / verifierIvB64 / verifierCipherB64
+      createdAt: new Date().toISOString()
+    } as never);
+    const { messageBus: events } = makeMessageBus();
+    createVaultService({ messageBus: events });
+    await new Promise((r) => setTimeout(r, 30));
+    const fatal = getFatalError();
+    expect(fatal).not.toBeNull();
+    expect(fatal?.phase).toBe("vault.bootstrap");
+    expect(fatal?.message).toMatch(/vault_meta record is corrupt/);
+    expect(fatal?.message).toMatch(/saltB64/);
+  });
+
+  it("reports fatal when a vault_keys record is missing required cipher fields", async () => {
+    // meta 写好,然后注入一条 cipherB64 缺失的 key 记录。
+    await vaultDb.putMeta({
+      id: "singleton",
+      saltB64: "00",
+      verifierSaltB64: "00",
+      verifierIvB64: "00",
+      verifierCipherB64: "00",
+      createdAt: new Date().toISOString()
+    });
+    await vaultDb.putKey({
+      id: "k-broken",
+      label: "broken",
+      address: "",
+      network: "main",
+      format: "generated",
+      capabilities: ["p2pkh"],
+      createdAt: new Date().toISOString(),
+      // 故意漏掉 cipher* 字段,模拟持久化损坏。
+      publicKeyHex: "02ab".padEnd(66, "0")
+    } as never);
+    const { messageBus: events } = makeMessageBus();
+    createVaultService({ messageBus: events });
+    await new Promise((r) => setTimeout(r, 30));
+    const fatal = getFatalError();
+    expect(fatal).not.toBeNull();
+    expect(fatal?.phase).toBe("vault.bootstrap");
+    expect(fatal?.message).toMatch(/vault_keys record is corrupt/);
+    expect(fatal?.message).toMatch(/cipher/);
+  });
+
+  it("does NOT report fatal when key record lacks publicKeyHex (backfill handles it)", async () => {
+    // publicKeyHex 缺失是已知的"backfill 阶段会补"的字段;它不是形状
+    // 错误,不应触发 fatal。bootstrap 应走正常 locked 路径。
+    await vaultDb.putMeta({
+      id: "singleton",
+      saltB64: "00",
+      verifierSaltB64: "00",
+      verifierIvB64: "00",
+      verifierCipherB64: "00",
+      createdAt: new Date().toISOString()
+    });
+    await vaultDb.putKey({
+      id: "k-needs-backfill",
+      label: "needs-backfill",
+      address: "",
+      network: "main",
+      format: "generated",
+      capabilities: ["p2pkh"],
+      createdAt: new Date().toISOString(),
+      cipherSaltB64: "00",
+      cipherIvB64: "00",
+      cipherB64: "00"
+      // 故意不写 publicKeyHex。
+    });
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "locked");
+    expect(getFatalError()).toBeNull();
+  });
+});

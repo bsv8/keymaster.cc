@@ -38,3 +38,19 @@ export * from "./i18n/createI18nService.js";
 // 业务插件只通过 ctx.logger 写入；本入口只暴露 createLogService 供 host
 // 装配和测试夹具使用，DB 层不外暴露。
 export * from "./log/logService.js";
+
+// 施工单 2026-06-30 001：全局 fatal store。apps/web 与 plugin-vault 等
+// 都通过本入口上报 / 订阅 fatal 错误。`resetFatalErrorForTest` 与
+// disposeLogDb 同样作为测试夹具浅 re-export 暴露，业务代码不依赖。
+export {
+  reportFatalError,
+  getFatalError,
+  getFatalTail,
+  subscribeFatalError,
+  resetFatalErrorForTest,
+  type FatalErrorReportInput,
+  type FatalErrorSnapshot,
+  type FatalPhase,
+  type FatalScope,
+  type FatalSource
+} from "./fatalErrorStore.js";

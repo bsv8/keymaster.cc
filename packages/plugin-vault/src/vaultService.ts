@@ -24,6 +24,7 @@
 //     忽略，回写时也不再续命。
 
 import type { MessageBus } from "@keymaster/runtime";
+import { reportFatalError } from "@keymaster/runtime";
 import {
   EVENT_ACTIVE_KEY_CHANGED,
   KeyPersistedButActivationFailedError,
@@ -97,6 +98,73 @@ function defaultInitialKeyLabel(): string {
   return `Key ${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(
     d.getHours()
   )}:${pad(d.getMinutes())}`;
+}
+
+/**
+ * 施工单 2026-06-30 001 收口：meta 形状校验。
+ * 返回 null 表示通过；返回字符串表示具体缺哪个字段/类型不对。
+ * 用于启动期（bootstrap）判坏"可读但形状错"的持久化数据,避免被
+ * 静默放行到 unlock 阶段才炸。
+ */
+function validateMetaShape(meta: unknown): string | null {
+  if (!meta || typeof meta !== "object") return "meta is not an object";
+  const m = meta as Record<string, unknown>;
+  if (m.id !== "singleton") return `meta.id must be "singleton", got ${JSON.stringify(m.id)}`;
+  if (typeof m.saltB64 !== "string" || m.saltB64.length === 0) {
+    return "meta.saltB64 missing or empty";
+  }
+  if (typeof m.verifierSaltB64 !== "string" || m.verifierSaltB64.length === 0) {
+    return "meta.verifierSaltB64 missing or empty";
+  }
+  if (typeof m.verifierIvB64 !== "string" || m.verifierIvB64.length === 0) {
+    return "meta.verifierIvB64 missing or empty";
+  }
+  if (typeof m.verifierCipherB64 !== "string" || m.verifierCipherB64.length === 0) {
+    return "meta.verifierCipherB64 missing or empty";
+  }
+  if (typeof m.createdAt !== "string" || m.createdAt.length === 0) {
+    return "meta.createdAt missing or empty";
+  }
+  return null;
+}
+
+/**
+ * 施工单 2026-06-30 001 收口：vault_key 形状校验。
+ * 必要字段（密码学材料 + 元数据）缺失一律视为损坏,启动期 fatal。
+ * 字段如 publicKeyHex / identityStatus / identityError 是 backfill
+ * 阶段维护的可选字段,缺不算损坏——保留走 backfill 的修复路径。
+ */
+function validateKeyShape(record: unknown): string | null {
+  if (!record || typeof record !== "object") return "key record is not an object";
+  const r = record as Record<string, unknown>;
+  if (typeof r.id !== "string" || r.id.length === 0) {
+    return "key.id missing or empty";
+  }
+  if (typeof r.label !== "string" || r.label.length === 0) {
+    return `key(${String(r.id)}).label missing or empty`;
+  }
+  if (r.network !== "main" && r.network !== "test") {
+    return `key(${String(r.id)}).network must be "main" or "test", got ${JSON.stringify(r.network)}`;
+  }
+  if (typeof r.format !== "string" || r.format.length === 0) {
+    return `key(${String(r.id)}).format missing or empty`;
+  }
+  if (!Array.isArray(r.capabilities) || r.capabilities.length === 0) {
+    return `key(${String(r.id)}).capabilities missing or empty`;
+  }
+  if (typeof r.createdAt !== "string" || r.createdAt.length === 0) {
+    return `key(${String(r.id)}).createdAt missing or empty`;
+  }
+  if (typeof r.cipherSaltB64 !== "string" || r.cipherSaltB64.length === 0) {
+    return `key(${String(r.id)}).cipherSaltB64 missing or empty`;
+  }
+  if (typeof r.cipherIvB64 !== "string" || r.cipherIvB64.length === 0) {
+    return `key(${String(r.id)}).cipherIvB64 missing or empty`;
+  }
+  if (typeof r.cipherB64 !== "string" || r.cipherB64.length === 0) {
+    return `key(${String(r.id)}).cipherB64 missing or empty`;
+  }
+  return null;
 }
 
 export interface VaultServiceDeps {
@@ -184,31 +252,123 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   }
 
   async function bootstrap() {
+    // 施工单 2026-06-30 001 硬切换：关键持久化异常不再静默降级为
+    // uninitialized。区分四类场景：
+    //   - 正常首启：meta 不存在 -> uninitialized。
+    //   - meta 存在但读取抛错 / 形状错误 -> reportFatalError,不动
+    //     VaultStatus；UI 由 fatal crash page 接管。
+    //   - meta 存在 + listKeys 抛错 / 任何一条 key 记录形状错误 ->
+    //     reportFatalError。
+    //   - meta 存在 + keys 列表为空（0-key 护栏）：清 meta + uninitialized。
+    // 设计缘由：旧实现把"本地数据损坏"伪装成"像第一次启动",误导用户
+    // 也让排障失真。系统已经"不可信",继续走 LockedShell 欢迎页是
+    // 错误语义。
     try {
       assertWebCryptoAvailable();
-      const meta = await vaultDb.getMeta();
-      if (!meta) {
-        setStatus("uninitialized");
-        return;
-      }
-      // 硬切换 005 收尾：meta 存在但 vault_keys 已空是异常态——
-      // 不允许进入"locked / unlocked 但 0 key"的假状态。直接清理 meta
-      // 并收敛到 uninitialized，让用户进入首启 welcome。
-      const keys = await vaultDb.listKeys();
-      if (keys.length === 0) {
-        try {
-          await vaultDb.deleteMeta();
-        } catch (delErr) {
-          console.error("vaultDb.deleteMeta during empty-bootstrap failed", delErr);
-        }
-        setStatus("uninitialized");
-        return;
-      }
-      setStatus("locked");
     } catch (err) {
-      console.error("Vault bootstrap failed", err);
-      setStatus("uninitialized");
+      // WebCrypto 缺失：这是致命环境问题(main.tsx checkEnvironment
+      // 应已拦下);这里作为最后一道防线升级 fatal。
+      reportFatalError({
+        phase: "vault.bootstrap",
+        scope: "vault-service",
+        source: "app-bundle",
+        message: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack : undefined,
+        cause: err
+      });
+      return;
     }
+    let meta: Awaited<ReturnType<typeof vaultDb.getMeta>>;
+    try {
+      meta = await vaultDb.getMeta();
+    } catch (err) {
+      // 打开/读取 meta 失败：meta 是否存在都不可知,不能伪装成首启。
+      // 升级 fatal,UI 切到崩溃页。
+      reportFatalError({
+        phase: "vault.bootstrap",
+        scope: "vault-service",
+        source: "app-bundle",
+        message:
+          "Failed to read vault meta from IndexedDB. The local runtime is no longer trusted.",
+        stack: err instanceof Error ? err.stack : undefined,
+        cause: err
+      });
+      return;
+    }
+    if (!meta) {
+      // 正常首启:进入 uninitialized。
+      setStatus("uninitialized");
+      return;
+    }
+    // 关键记录形状校验：meta 存在但任何必要字段缺失/类型不对,
+    // 都意味着"本地有系统数据,但当前代码不能可信使用它"。
+    // 这一类"形状错误"在旧实现里被静默放行,直到后续 unlock / 业务
+    // 读取时才炸——现在统一在启动期升级为 fatal。
+    const metaShapeError = validateMetaShape(meta);
+    if (metaShapeError) {
+      reportFatalError({
+        phase: "vault.bootstrap",
+        scope: "vault-service",
+        source: "app-bundle",
+        message:
+          `vault_meta record is corrupt: ${metaShapeError}. ` +
+          "The local runtime is no longer trusted.",
+        cause: { meta }
+      });
+      return;
+    }
+    // 硬切换 005 收尾：meta 存在但 vault_keys 已空是异常态——
+    // 不允许进入"locked / unlocked 但 0 key"的假状态。直接清理 meta
+    // 并收敛到 uninitialized，让用户进入首启 welcome。
+    let keys: Awaited<ReturnType<typeof vaultDb.listKeys>>;
+    try {
+      keys = await vaultDb.listKeys();
+    } catch (err) {
+      // meta 存在但读 keys 失败:这意味着"本地有系统数据,但当前代码
+      // 不能可信使用它"——不能再伪装成首启,直接 fatal。
+      reportFatalError({
+        phase: "vault.bootstrap",
+        scope: "vault-service",
+        source: "app-bundle",
+        message:
+          "Failed to read vault keys from IndexedDB. The local runtime is no longer trusted.",
+        stack: err instanceof Error ? err.stack : undefined,
+        cause: err
+      });
+      return;
+    }
+    // 关键记录形状校验：每条 key 记录都满足当前代码前提才允许进入
+    // locked。必要字段(密码学材料 + 元数据)缺失一律 fatal。
+    // publicKeyHex 是 backfill 阶段才会补的字段；缺它不算形状错误,
+    // 仍走正常 locked + backfill 流程。
+    for (const k of keys) {
+      const keyShapeError = validateKeyShape(k);
+      if (keyShapeError) {
+        reportFatalError({
+          phase: "vault.bootstrap",
+          scope: "vault-service",
+          source: "app-bundle",
+          message:
+            `vault_keys record is corrupt: ${keyShapeError}. ` +
+            "The local runtime is no longer trusted.",
+          cause: { keyId: k.id, record: k }
+        });
+        return;
+      }
+    }
+    if (keys.length === 0) {
+      try {
+        await vaultDb.deleteMeta();
+      } catch (delErr) {
+        // 删 meta 失败:这是 0-key 护栏的内部步骤,既不是"真"首启也不是
+        // "数据损坏"——降级时 DB 里残留 meta,下次 bootstrap 会再走这
+        // 条护栏。先把当前状态收敛到 uninitialized 即可,不再升级 fatal。
+        console.error("vaultDb.deleteMeta during empty-bootstrap failed", delErr);
+      }
+      setStatus("uninitialized");
+      return;
+    }
+    setStatus("locked");
   }
 
   bootstrap();
