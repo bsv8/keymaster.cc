@@ -11,9 +11,9 @@
 //   - `forcePathStyle` 是可选；缺省 false。
 
 import { useEffect, useState } from "react";
-import { useI18n } from "@keymaster/runtime";
 import { PROTOCOL_SERVICE_CAPABILITY, type ProtocolService, type StorageProviderConfig } from "@keymaster/contracts";
-import { useCapability } from "@keymaster/runtime";
+import { useCapability, useI18n } from "@keymaster/runtime";
+import { Button, PageHeader, TextInput } from "@keymaster/ui";
 
 interface FormState {
   endpoint: string;
@@ -40,6 +40,24 @@ function validate(form: FormState): { ok: true } | { ok: false; reason: string }
   if (!form.accessKeyId.trim()) return { ok: false, reason: "accessKeyId required" };
   if (!form.secretAccessKey.trim()) return { ok: false, reason: "secretAccessKey required" };
   return { ok: true };
+}
+
+function statusText(input: {
+  t: ReturnType<typeof useI18n>["t"];
+  loading: boolean;
+  saving: boolean;
+  hasConfig: boolean;
+}): string {
+  if (input.loading) {
+    return input.t("common.status.loading", { defaultValue: "Loading…" });
+  }
+  if (input.saving) {
+    return input.t("common.status.saving", { defaultValue: "Saving…" });
+  }
+  if (input.hasConfig) {
+    return input.t("storageSettings.status.configured", { defaultValue: "Configured locally" });
+  }
+  return input.t("storageSettings.status.empty", { defaultValue: "Not configured" });
 }
 
 export function StorageSettingsPage() {
@@ -125,104 +143,153 @@ export function StorageSettingsPage() {
   }
 
   return (
-    <div className="settings-page settings-page--storage" data-testid="storage-settings">
-      <h2>{t("storageSettings.title", { defaultValue: "Storage" })}</h2>
-      <p>
-        {t("storageSettings.description", {
+    <div className="storage-settings-page" data-testid="storage-settings">
+      <PageHeader
+        title={t("storageSettings.title", { defaultValue: "Storage" })}
+        description={t("storageSettings.description", {
           defaultValue:
             "Configure an S3-compatible storage provider. Keymaster uses this to store app data (storage.*). The configuration is local-only and never shared with apps."
         })}
-      </p>
+        actions={
+          <div className="storage-settings-page__status" data-testid="storage-status">
+            {statusText({ t, loading, saving, hasConfig })}
+          </div>
+        }
+      />
       {loading ? (
-        <p>{t("common.status.loading", { defaultValue: "Loading…" })}</p>
+        <section className="storage-settings-panel">
+          <p className="storage-settings-panel__hint">
+            {t("common.status.loading", { defaultValue: "Loading…" })}
+          </p>
+        </section>
       ) : (
         <form
+          className="storage-settings-form"
           onSubmit={(e) => {
             e.preventDefault();
             void handleSave();
           }}
         >
-          <label>
-            <span>{t("storageSettings.field.endpoint", { defaultValue: "Endpoint" })}</span>
-            <input
-              type="text"
-              data-testid="storage-endpoint"
-              value={form.endpoint}
-              onChange={(e) => setForm({ ...form, endpoint: e.target.value })}
-              placeholder="https://s3.amazonaws.com"
-            />
-          </label>
-          <label>
-            <span>{t("storageSettings.field.region", { defaultValue: "Region" })}</span>
-            <input
-              type="text"
-              data-testid="storage-region"
-              value={form.region}
-              onChange={(e) => setForm({ ...form, region: e.target.value })}
-              placeholder="us-east-1"
-            />
-          </label>
-          <label>
-            <span>{t("storageSettings.field.bucket", { defaultValue: "Bucket" })}</span>
-            <input
-              type="text"
-              data-testid="storage-bucket"
-              value={form.bucket}
-              onChange={(e) => setForm({ ...form, bucket: e.target.value })}
-            />
-          </label>
-          <label>
-            <span>{t("storageSettings.field.accessKeyId", { defaultValue: "Access key id" })}</span>
-            <input
-              type="text"
-              data-testid="storage-access-key-id"
-              value={form.accessKeyId}
-              onChange={(e) => setForm({ ...form, accessKeyId: e.target.value })}
-            />
-          </label>
-          <label>
-            <span>{t("storageSettings.field.secretAccessKey", { defaultValue: "Secret access key" })}</span>
-            <input
-              type="password"
-              data-testid="storage-secret-access-key"
-              value={form.secretAccessKey}
-              onChange={(e) => setForm({ ...form, secretAccessKey: e.target.value })}
-            />
-          </label>
-          <label>
-            <input
-              type="checkbox"
-              data-testid="storage-force-path-style"
-              checked={form.forcePathStyle}
-              onChange={(e) => setForm({ ...form, forcePathStyle: e.target.checked })}
-            />
-            <span>
-              {t("storageSettings.field.forcePathStyle", {
-                defaultValue: "Force path-style addressing (recommended for self-hosted)"
-              })}
-            </span>
-          </label>
+          <section className="storage-settings-panel">
+            <div className="storage-settings-panel__header">
+              <h2 className="storage-settings-panel__title">
+                {t("storageSettings.section.connection", { defaultValue: "Connection" })}
+              </h2>
+              <p className="storage-settings-panel__hint">
+                {t("storageSettings.section.connectionHint", {
+                  defaultValue: "Endpoint, region, and bucket identify the storage target used by Keymaster."
+                })}
+              </p>
+            </div>
+            <div className="storage-settings-grid">
+              <TextInput
+                type="text"
+                data-testid="storage-endpoint"
+                label={t("storageSettings.field.endpoint", { defaultValue: "Endpoint" })}
+                value={form.endpoint}
+                onChange={(e) => setForm({ ...form, endpoint: e.target.value })}
+                placeholder="https://s3.amazonaws.com"
+                description={t("storageSettings.field.endpointHint", {
+                  defaultValue: "Use the full HTTPS endpoint of your S3-compatible provider."
+                })}
+              />
+              <TextInput
+                type="text"
+                data-testid="storage-region"
+                label={t("storageSettings.field.region", { defaultValue: "Region" })}
+                value={form.region}
+                onChange={(e) => setForm({ ...form, region: e.target.value })}
+                placeholder="us-east-1"
+              />
+              <TextInput
+                type="text"
+                data-testid="storage-bucket"
+                label={t("storageSettings.field.bucket", { defaultValue: "Bucket" })}
+                value={form.bucket}
+                onChange={(e) => setForm({ ...form, bucket: e.target.value })}
+              />
+            </div>
+          </section>
+
+          <section className="storage-settings-panel">
+            <div className="storage-settings-panel__header">
+              <h2 className="storage-settings-panel__title">
+                {t("storageSettings.section.credentials", { defaultValue: "Credentials" })}
+              </h2>
+              <p className="storage-settings-panel__hint">
+                {t("storageSettings.section.credentialsHint", {
+                  defaultValue: "Credentials stay in local IndexedDB and are never exposed to apps."
+                })}
+              </p>
+            </div>
+            <div className="storage-settings-grid">
+              <TextInput
+                type="text"
+                data-testid="storage-access-key-id"
+                label={t("storageSettings.field.accessKeyId", { defaultValue: "Access key id" })}
+                value={form.accessKeyId}
+                onChange={(e) => setForm({ ...form, accessKeyId: e.target.value })}
+              />
+              <TextInput
+                type="password"
+                data-testid="storage-secret-access-key"
+                label={t("storageSettings.field.secretAccessKey", { defaultValue: "Secret access key" })}
+                value={form.secretAccessKey}
+                onChange={(e) => setForm({ ...form, secretAccessKey: e.target.value })}
+              />
+            </div>
+            <label className="storage-settings-checkbox">
+              <input
+                type="checkbox"
+                data-testid="storage-force-path-style"
+                checked={form.forcePathStyle}
+                onChange={(e) => setForm({ ...form, forcePathStyle: e.target.checked })}
+              />
+              <span className="storage-settings-checkbox__copy">
+                <span className="storage-settings-checkbox__label">
+                  {t("storageSettings.field.forcePathStyle", {
+                    defaultValue: "Force path-style addressing (recommended for self-hosted)"
+                  })}
+                </span>
+                <span className="storage-settings-checkbox__hint">
+                  {t("storageSettings.field.forcePathStyleHint", {
+                    defaultValue: "Enable this for MinIO and other self-hosted S3-compatible deployments."
+                  })}
+                </span>
+              </span>
+            </label>
+          </section>
+
           {error ? (
-            <p className="settings-page__error" data-testid="storage-error">
+            <p className="storage-settings-page__error" data-testid="storage-error">
               {error}
             </p>
           ) : null}
-          <div className="settings-page__actions">
-            <button type="submit" disabled={saving} data-testid="storage-save">
-              {saving
-                ? t("common.status.saving", { defaultValue: "Saving…" })
-                : t("common.actions.save", { defaultValue: "Save" })}
-            </button>
-            {hasConfig ? (
-              <button
-                type="button"
-                disabled={saving}
-                onClick={() => void handleClear()}
-                data-testid="storage-clear"
-              >
-                {t("storageSettings.action.clear", { defaultValue: "Clear" })}
-              </button>
-            ) : null}
+
+          <div className="storage-settings-form__footer">
+            <div className="storage-settings-form__actions">
+              <Button type="submit" disabled={saving} data-testid="storage-save">
+                {saving
+                  ? t("common.status.saving", { defaultValue: "Saving…" })
+                  : t("common.actions.save", { defaultValue: "Save" })}
+              </Button>
+              {hasConfig ? (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={saving}
+                  onClick={() => void handleClear()}
+                  data-testid="storage-clear"
+                >
+                  {t("storageSettings.action.clear", { defaultValue: "Clear" })}
+                </Button>
+              ) : null}
+            </div>
+            <p className="storage-settings-form__note">
+              {t("storageSettings.note", {
+                defaultValue: "Only one global storage profile is supported in V1."
+              })}
+            </p>
           </div>
         </form>
       )}

@@ -508,6 +508,22 @@ export class ProtocolServiceImpl implements ProtocolService {
   private currentAppViewContext: AppViewContext | null = null;
 
   /**
+   * appView 运行期当前绑定的 client app window。
+   *
+   * 设计缘由：
+   *   - connect mode 下 transport 对端 = `window.opener`；
+   *   - appView mode 下 launcher 只是 bootstrap 提供方，真正发
+   *     `connect.launch` / `identity.*` / `storage.*` 的对端是被
+   *     Session Window 打开的 child app 窗口；
+   *   - 因此 appView **不能**继续把 `window.opener` 当成唯一合法 source。
+   *   - 本字段在 appView 下绑定"当前合法 client app source"：
+   *       1. `openClientApp()` 成功返回 window 句柄时先记下；
+   *       2. 若没有句柄，则第一次收到合法 `connect.launch` 时再绑定；
+   *       3. 绑定后后续 request 只接受这一个 source。
+   */
+  private currentAppClientSource: Window | null = null;
+
+  /**
    * launchToken 内存 Map：token -> LaunchTokenRecord（V1 **不**落盘）。
    *
    * 设计缘由（施工单 2026-06-29 001 硬切换）：
@@ -652,6 +668,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 6. 清空 appView 启动上下文 + launchToken 缓存 + bootstrap 监听：
     //    Session Window 重新启动会话时不允许复用旧 launcher handoff。
     this.currentAppViewContext = null;
+    this.currentAppClientSource = null;
     this.launchTokensByToken.clear();
     // 施工单 2026-06-29 003 硬切换：startSession 也要清空 session signer
     // runtimes（防止上一会话残留的 signer 干扰本会话）。
@@ -708,6 +725,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // session 订阅者拿到 phase="waiting" + lockState 不变（vault 状态
     // 与 popup 生命周期解耦，由 setVaultLockState 单独管理）。
     this.currentAppViewContext = null;
+    this.currentAppClientSource = null;
     this.launchTokensByToken.clear();
     // 施工单 2026-06-29 003 硬切换：endSession 清空 session signer runtimes。
     this.sessionSignerRuntimes.clear();
@@ -878,9 +896,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
-    // 校验 source 与 opener 一致（不接受"伪 source"伪造）。
-    const opener = this.getOpener();
-    if (!opener || event.source !== opener) return;
+    // transport 对端校验：
+    //   - connect mode：只接受 `window.opener`；
+    //   - appView mode：只接受当前 app client window；launcher 只是 bootstrap
+    //     提供方，不再是运行期 request source。
+    if (!this.isAllowedRequestSource(event, parsed.method)) return;
 
     // 重复 requestId 拒绝：同 source + origin + transportRequestId 还有
     // 未终态记录，则忽略。
@@ -1408,7 +1428,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (typeof window === "undefined") return null;
     try {
-      return window.open(ctx.appUrl, "_blank");
+      const opened = window.open(ctx.appUrl, "_blank");
+      if (opened) {
+        this.currentAppClientSource = opened;
+        this.postReadyToTarget(opened);
+      }
+      return opened;
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.sessionWindow",
@@ -1898,12 +1923,27 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.setPhase("error");
       return;
     }
+    this.postReadyToTarget(opener);
+  }
+
+  /**
+   * 向指定 transport 对端发送 `ready`。
+   *
+   * 设计缘由：
+   *   - connect mode：startSession 时给 opener 发 ready；
+   *   - appView mode：手动 `Open App` 后必须给新开的 child app 再发一条
+   *     ready，否则它会一直停在"等待 Session Window ready"阶段，永远不发
+   *     `connect.launch`。
+   *   - `ready` 是 transport-ready 信号，不承载授权语义；重复发送的
+   *     语义是幂等的。
+   */
+  private postReadyToTarget(target: Window): void {
     if (this.deps.postReady) {
-      this.deps.postReady(opener, READY_MESSAGE);
+      this.deps.postReady(target, READY_MESSAGE);
       return;
     }
     try {
-      opener.postMessage(READY_MESSAGE, "*");
+      target.postMessage(READY_MESSAGE, "*");
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.transport",
@@ -2036,6 +2076,18 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.ownerPublicKeyHex = rec.connectResumeSnapshot?.ownerPublicKeyHex ?? "";
       rec.autoExecuteAfterUnlock = true;
       this.applyManualPhaseDecision(recordId, origin, /* skipConfirmWhenUnlocked */ true);
+      return;
+    } else if (method === "connect.launch") {
+      // appView 首登：launchToken 是唯一真值；**不**要求 connectSessionId，
+      // **不**需要解锁 / 确认 UI。无论当前 vault 是否 locked，都直接
+      // queued → executing，由 executeConnectLaunch 内部按 launchToken +
+      // session_signer runtime 做 fail-closed 校验。
+      this.setRecordPhase(recordId, "queued");
+      rec.enteredPhaseAt = Date.now();
+      this.executionQueue.push(recordId);
+      this.emit();
+      this.emitFeed();
+      void this.drainExecutionQueue();
       return;
     } else {
       // 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于某个
@@ -4455,6 +4507,35 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (typeof window === "undefined") return null;
     return window.opener;
+  }
+
+  /**
+   * request source 白名单校验。
+   *
+   * 设计缘由：
+   *   - connect mode 沿用旧语义：只接受 `window.opener`；
+   *   - appView mode 下真正的 transport peer 是 child app，不是 launcher；
+   *   - 为了保持实现简单，appView 只允许一条稳定 source：
+   *       - 若 `openClientApp()` 已返回 window 句柄，则只接受该句柄；
+   *       - 否则第一次合法 `connect.launch` 按 `appOrigin` 绑定 source；
+   *       - 绑定后其它 source 一律忽略。
+   */
+  private isAllowedRequestSource(event: MessageEvent, method: ProtocolMethod): boolean {
+    const source = event.source as Window | null;
+    if (!source) return false;
+    if (this.bootModeValue !== "appView") {
+      const opener = this.getOpener();
+      return Boolean(opener && source === opener);
+    }
+    const ctx = this.currentAppViewContext;
+    if (!ctx) return false;
+    if (event.origin !== ctx.appOrigin) return false;
+    if (this.currentAppClientSource) {
+      return source === this.currentAppClientSource;
+    }
+    if (method !== "connect.launch") return false;
+    this.currentAppClientSource = source;
+    return true;
   }
 
   /* ============== 命令流（feed）+ DB ============== */

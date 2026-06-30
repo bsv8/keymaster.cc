@@ -126,6 +126,19 @@ const settingsResources: I18nPluginResources = {
       "storageSettings.field.accessKeyId": "Access key id",
       "storageSettings.field.secretAccessKey": "Secret access key",
       "storageSettings.field.forcePathStyle": "Force path-style addressing (recommended for self-hosted)",
+      "storageSettings.field.endpointHint":
+        "Use the full HTTPS endpoint of your S3-compatible provider.",
+      "storageSettings.field.forcePathStyleHint":
+        "Enable this for MinIO and other self-hosted S3-compatible deployments.",
+      "storageSettings.section.connection": "Connection",
+      "storageSettings.section.connectionHint":
+        "Endpoint, region, and bucket identify the storage target used by Keymaster.",
+      "storageSettings.section.credentials": "Credentials",
+      "storageSettings.section.credentialsHint":
+        "Credentials stay in local IndexedDB and are never exposed to apps.",
+      "storageSettings.status.configured": "Configured locally",
+      "storageSettings.status.empty": "Not configured",
+      "storageSettings.note": "Only one global storage profile is supported in V1.",
       "storageSettings.action.clear": "Clear"
     },
     "zh-CN": {
@@ -219,6 +232,18 @@ const settingsResources: I18nPluginResources = {
       "storageSettings.field.accessKeyId": "Access key id",
       "storageSettings.field.secretAccessKey": "Secret access key",
       "storageSettings.field.forcePathStyle": "强制 path-style（自部署推荐）",
+      "storageSettings.field.endpointHint": "填写 S3-compatible provider 的完整 HTTPS endpoint。",
+      "storageSettings.field.forcePathStyleHint":
+        "MinIO 或其它自部署 S3-compatible 存储通常建议开启。",
+      "storageSettings.section.connection": "连接配置",
+      "storageSettings.section.connectionHint":
+        "Endpoint、Region、Bucket 一起决定 Keymaster 写入的目标存储位置。",
+      "storageSettings.section.credentials": "凭证与行为",
+      "storageSettings.section.credentialsHint":
+        "凭证只保存在本地 IndexedDB，不会暴露给 app。",
+      "storageSettings.status.configured": "已在本地配置",
+      "storageSettings.status.empty": "尚未配置",
+      "storageSettings.note": "V1 只支持一套全局 storage profile。",
       "storageSettings.action.clear": "清除"
     }
   }

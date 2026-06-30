@@ -6345,3 +6345,123 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 });
+
+describe("ProtocolServiceImpl appView transport source binding", () => {
+  it("appView 接受 child app source 的 connect.launch，而不是错误地只认 launcher opener", async () => {
+    const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+      bootMode: "appView"
+    });
+    service.startSession();
+    const now = Date.now();
+    await storageDb.putConnectSession({
+      sessionId: "sess-appview",
+      origin: "https://justnote.apps.bsv8.com",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: { "key.label": "Key A" },
+      createdAt: now,
+      lastUsedAt: now,
+      runtimeBinding: "session_signer",
+      revokedAt: null
+    });
+    const privHex = TEST_PRIV_HEX;
+    const internals = service as unknown as {
+      currentAppViewContext: {
+        appId: string;
+        appOrigin: string;
+        appUrl: string;
+      } | null;
+      launchTokensByToken: Map<string, unknown>;
+      sessionSignerRuntimes: Map<string, unknown>;
+      currentAppClientSource: Window | null;
+    };
+    internals.currentAppViewContext = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag"
+    };
+    internals.currentAppClientSource = null;
+    internals.launchTokensByToken.set("launch-diag", {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag",
+      connectSessionId: "sess-appview",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      resolvedClaims: { "key.label": "Key A" },
+      resolvedAt: now,
+      consumed: false
+    });
+    internals.sessionSignerRuntimes.set("sess-appview", {
+      signer: {
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        privateKeyHex: privHex,
+        capabilities: [],
+        createdAt: now
+      },
+      createdAt: now
+    });
+
+    const appSource = {} as Window;
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "connect-launch-1",
+          method: "connect.launch",
+          params: { launchToken: "launch-diag" }
+        },
+        "https://justnote.apps.bsv8.com",
+        appSource
+      )
+    );
+    await new Promise((r) => setTimeout(r, 30));
+
+    const result = getResult();
+    expect(result?.ok).toBe(true);
+    if (!result || result.ok !== true) return;
+    expect(result.result.connectSessionId).toBe("sess-appview");
+    expect(result.result.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+    expect(internals.currentAppClientSource).toBe(appSource);
+  });
+
+  it("openClientApp 打开 child app 后立即向该窗口发送 ready", () => {
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childMessages: unknown[] = [];
+    const childWindow = {
+      postMessage: (msg: unknown) => {
+        childMessages.push(msg);
+      }
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag"
+      };
+      const opened = service.openClientApp();
+      expect(opened).toBe(childWindow);
+      expect(internals.currentAppClientSource).toBe(childWindow);
+      expect(childMessages).toEqual([{ v: PROTOCOL_VERSION, type: "ready" }]);
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+});
