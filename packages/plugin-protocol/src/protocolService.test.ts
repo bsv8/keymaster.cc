@@ -7089,6 +7089,149 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
   });
 });
 
+/* ============== 施工单 2026-06-30 003：首条合法 child 协议消息（不只 ready） ============== */
+/**
+ * 关键收口（施工单 2026-06-30 003 硬切换）：
+ *   - `childReady` 不再只盯显式 `ready`；首条合法 child 协议消息
+ *     （connect.* request / cancel / 显式 ready）即视为 child alive。
+ *   - `isAllowedRequestSource` 放宽：首条任意合法 child request 都绑
+ *     source，不限于 `connect.launch`。命名窗口 + origin 校验作为兜底。
+ */
+
+describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-06-30 003）", () => {
+  it("appView 首条 request 是 cipher.decrypt（非 connect.launch）也能绑 source + 翻 childReady", async () => {
+    // 旧实现要求"首条 request 必须是 connect.launch"才能绑 source；
+    // 新实现放宽：任何首条合法 child request 都绑 source。这与施工单
+    // 文档"首条合法 child 协议消息即可成为 child alive 信号"对齐。
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childWindow = {
+      postMessage: (_msg: unknown) => undefined
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const { service, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+        bootMode: "appView"
+      });
+      service.startSession();
+      const now = Date.now();
+      const sessionId = "sess-cipher-first";
+      await storageDb.putConnectSession({
+        sessionId,
+        origin: "https://justnote.apps.bsv8.com",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        claimsSnapshot: {},
+        createdAt: now,
+        lastUsedAt: now,
+        revokedAt: null
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        ownerRuntimesBySessionId: Map<string, unknown>;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-cipher-first"
+      };
+      internals.ownerRuntimesBySessionId.set(sessionId, {
+        runtime: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          privateKeyHex: TEST_PRIV_HEX,
+          capabilities: [],
+          createdAt: now
+        },
+        createdAt: now
+      });
+      // 直接进"child 已开窗"等待态。
+      service.openClientApp();
+      expect(service.childReady()).toBe(false);
+      expect(internals.currentAppClientSource).toBeNull();
+
+      // 关键：首条 request 是 cipher.decrypt（不是 connect.launch）。
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "cipher-decrypt-first",
+            method: "cipher.decrypt",
+            params: {
+              text: "hi",
+              nonce: { $type: "binary", bytes: new ArrayBuffer(12) },
+              cipherbytes: { $type: "binary", bytes: new ArrayBuffer(8) },
+              connectSessionId: sessionId
+            }
+          },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      // 绑 source + childReady 翻 true（首条合法 child request 即视为 child alive）。
+      expect(internals.currentAppClientSource).toBe(childWindow);
+      expect(service.childReady()).toBe(true);
+      expect(service.appClientWaitingForReady()).toBe(false);
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+
+  it("appView 首条 cancel 找不到对应 record 时不翻 childReady（cancel 本身合法性不足）", async () => {
+    // cancel 路径：若 cancel.id 对应不到任何 record（findRequestByTransportId
+    // 返回 null），整条消息被视为非法、忽略，不触发 child alive。
+    // 防御性验证：避免"任意同源 cancel 都能翻 childReady"。
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childWindow = {
+      postMessage: (_msg: unknown) => undefined
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const { service } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+        bootMode: "appView"
+      });
+      service.startSession();
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-cancel"
+      };
+      service.openClientApp();
+      // 收到一个对不存在 record 的 cancel：忽略。
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "cancel",
+            id: "no-such-rec"
+          },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      expect(service.childReady()).toBe(false);
+      expect(internals.currentAppClientSource).toBeNull();
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+});
+
 /* ============== 施工单 2026-06-30 002：locked 但 bootstrap_owner runtime ready ============== */
 /**
  * 关键回归：旧实现下 `connect.launch` 一旦 Session Window 的 `lockState === "locked"`

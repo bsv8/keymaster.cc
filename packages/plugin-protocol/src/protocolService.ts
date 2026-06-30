@@ -951,6 +951,13 @@ export class ProtocolServiceImpl implements ProtocolService {
       const rec = this.findRequestByTransportId(event.source as Window | null, event.origin, parsed.id);
       if (!rec) return;
       if (!this.isRequestCancellable(rec)) return;
+      // 施工单 2026-06-30 003 硬切换：cancel 与首条 request 同属"合法
+      // child 协议消息"——即便 record 是从已 bound source 创建的
+      //（childReady 理论上已翻 true），这里仍对齐：防御性同步
+      // childReady + 清等待态 / 软超时提示，确保任何路径到达都不
+      // 留遗漏。`markChildAliveFromBoundSource` 幂等，已 true 时
+      // 不重复 emit。
+      this.markChildAliveFromBoundSource();
       await this.finalizeRequestByCancel(rec.recordId, "client_canceled");
       return;
     }
@@ -5036,12 +5043,23 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由：
    *   - connect mode 沿用旧语义：只接受 `window.opener`；
    *   - appView mode 下真正的 transport peer 是 child app，不是 launcher；
-   *   - 为了保持实现简单，appView 只允许一条稳定 source：
-   *       - 若 `openClientApp()` 已返回 window 句柄，则只接受该句柄；
-   *       - 否则第一次合法 `connect.launch` 按 `appOrigin` 绑定 source；
-   *       - 绑定后其它 source 一律忽略。
+   *   - appView 只允许一条稳定 source：
+   *       - 若已绑定 `currentAppClientSource`，只接受该 source；
+   *       - 否则**首条合法 child request**按 `appOrigin` 绑定 source
+   *         并放行（施工单 2026-06-30 003 硬切换 4.1 + 7.1）。
+   *
+   * 设计缘由（首条 request 不再只限 `connect.launch`）：
+   *   - 旧实现要求"首条 request 必须是 `connect.launch`"才能绑 source；
+   *     这与文档"首条合法 child 协议消息即可成为 child alive 信号"
+   *     的表述不一致——其他 connect.* / cipher.* / identity.* 等
+   *     业务方法首条到达时会被静默拒绝，request 处理逻辑根本走不到。
+   *   - 新实现：首条任意 method 只要 origin + bootstrap 校验通过，
+   *     都允许绑定 + 翻 childReady + 进入正常 request 处理。
+   *   - 安全兜底：命名窗口 + origin 校验两道闸；appView mode 之外
+   *     仍走 connect mode 旧逻辑（opener 白名单）。
+   *   - 不再需要 method 维度判断。
    */
-  private isAllowedRequestSource(event: MessageEvent, method: ProtocolMethod): boolean {
+  private isAllowedRequestSource(event: MessageEvent, _method: ProtocolMethod): boolean {
     const source = event.source as Window | null;
     if (!source) return false;
     if (this.bootModeValue !== "appView") {
@@ -5054,7 +5072,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.currentAppClientSource) {
       return source === this.currentAppClientSource;
     }
-    if (method !== "connect.launch") return false;
+    // 首条合法 child request 即绑 source。`handleMessage` 紧随其后调
+    // `markChildAliveFromBoundSource`，把 childReady 翻 true。
     this.currentAppClientSource = source;
     return true;
   }
