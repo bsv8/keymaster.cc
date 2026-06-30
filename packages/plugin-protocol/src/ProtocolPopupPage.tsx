@@ -515,11 +515,15 @@ function AppViewBootstrapDonePage({
  *
  * 设计缘由：
  *   - 旧实现失败 / 超时永远停在"等待 launcher"——用户看到的是"卡死"。
- *   - 新实现：launcher 在合理时间（如 30s）内未发 bootstrap，或 payload
- *     不合法，或 unlock runtime 导入失败 → 立即渲染此错误页；用户可以
+ *   - 新实现：launcher 在合理时间（如 30s）内未发 bootstrap / payload
+ *     不合法 / session signer 校验失败 → 立即渲染此错误页；用户可以
  *     关闭 Session Window 重新从 Keymaster 应用商店启动 app。
- *   - 错误文案按 `reason` 区分大致类别（timeout / payload / import）；
- *     详细本地 reason 不暴露给用户，避免泄漏内部细节。
+ *   - 错误文案按 `reason` 区分大致类别（signer 缺失 / signer 与
+ *     session 不匹配 / payload 不合法 / 其它）；详细本地 reason
+ *     不暴露给用户，避免泄漏内部细节。
+ *   - 施工单 2026-06-29 003 硬切换：appView mode 不再"导入 unlock
+ *     runtime"；bootstrap 失败主要落在 session signer 校验（hex
+ *     与 ownerPublicKeyHex 不一致 / signer 缺失）。
  */
 function AppViewBootstrapFailedPage({
   t,
@@ -528,6 +532,27 @@ function AppViewBootstrapFailedPage({
   t: (k: string, v?: { defaultValue?: string }) => string;
   reason: string | null;
 }) {
+  // reason 取值约定（protocol.service 内部定）：
+  //   - bootstrap_payload_invalid
+  //   - bootstrap_session_signer_missing
+  //   - bootstrap_session_signer_invalid
+  //   - bootstrap_session_signer_pubkey_mismatch
+  //   - bootstrap_token_missing / launcher_*
+  //   - 其它：兜底"could not start the app"
+  let titleKey =
+    "protocol.sessionWindow.appView.failed.title";
+  let descKey =
+    "protocol.sessionWindow.appView.failed.desc";
+  if (reason === "bootstrap_session_signer_missing") {
+    titleKey = "protocol.sessionWindow.appView.signerMissing.title";
+    descKey = "protocol.sessionWindow.appView.signerMissing.desc";
+  } else if (
+    reason === "bootstrap_session_signer_invalid" ||
+    reason === "bootstrap_session_signer_pubkey_mismatch"
+  ) {
+    titleKey = "protocol.sessionWindow.appView.signerMismatch.title";
+    descKey = "protocol.sessionWindow.appView.signerMismatch.desc";
+  }
   return (
     <div
       className="protocol-popup protocol-popup--appview-failed"
@@ -535,12 +560,12 @@ function AppViewBootstrapFailedPage({
     >
       <div className="protocol-popup__panel">
         <h2>
-          {t("protocol.sessionWindow.appView.failed.title", {
+          {t(titleKey, {
             defaultValue: "Could not start the app"
           })}
         </h2>
         <p>
-          {t("protocol.sessionWindow.appView.failed.desc", {
+          {t(descKey, {
             defaultValue:
               "Launcher failed to hand off the session. Please try starting the app again from the Keymaster app store."
           })}

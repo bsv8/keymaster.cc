@@ -1,7 +1,8 @@
 // packages/plugin-protocol/src/sessionWindowBootstrap.ts
 // Session Window 启动模式 + launcher 一次性 bootstrap consume（direct call）。
 //
-// 设计缘由（施工单 2026-06-29 001 硬切换 + 用户确认）：
+// 设计缘由（施工单 2026-06-29 001 硬切换 + 2026-06-29 003 硬切换 +
+// 用户确认）：
 //   - Session Window 仍只有唯一入口 `/protocol/v1/popup`；本文件负责
 //     解析 URL 上的 `boot` + `bootstrapToken` 标记，并管理 appView mode 下
 //     Session Window **主动**从同源 `window.opener` 拉取 bootstrap capsule。
@@ -27,10 +28,13 @@
 //         `window.opener.__keymaster_session_window_bootstrap__.acquire(token)`；
 //       * launcher 命中 token → 返回 capsule，并从 registry 删除该 entry
 //         （一次性消费）；token 不命中 / launcher 关闭 → 返回 null；
-//         vault 未解锁 / 无 active key → throw；
 //       * Session Window 拿到 capsule 后调用 `handler(payload)`，由
 //         `protocolService.applyLauncherBootstrap` 应用。
 //   - **不**做持续 RPC / keepalive / reconnect；`acquire` 是**一次**调用。
+//   - 施工单 2026-06-29 003 硬切换：bootstrap 内容从 `unlockRuntime`
+//     改成 `sessionSigner`：launcher 只把"这次 session 绑定 owner 的
+//     私钥材料"交给 Session Window；Session Window 拿到后**只**在
+//     当前窗口的 signer runtime 注册，**不**模拟"完整解锁钱包窗口"。
 
 import type { AppBootstrapPayload } from "@keymaster/contracts";
 
@@ -237,16 +241,19 @@ export async function consumeLauncherBootstrap(
 /* ============== Launcher 端：构造 handoff payload ============== */
 
 /**
- * launcher 用于构造一次性 bootstrap payload 的依赖。
+ * launcher 用于构造一次性 bootstrap payload 的依赖（施工单 2026-06-29 003）。
  *
  * 设计缘由：
- *   - launcher 已经持有 vault unlock runtime；本接口只声明它需要传入
- *     哪些已就绪数据，**不**替代 launcher 自己决定"是否允许启动
- *     appView"的策略。
+ *   - launcher 已经借到"这次 session 绑定 owner 的私钥材料"（用
+ *     `vault.withPrivateKey(keyId, fn)` 借出明文 hex）；本接口只声明
+ *     它需要传入哪些已就绪数据，**不**替代 launcher 自己决定"是否
+ *     允许启动 appView"的策略。
  *   - `appUrl` 必须已经拼好 launchToken；Session Window bootstrap 完成后
  *     会用 `window.open(appUrl, "_blank")` 直接打开 client app
  *     （保留 `window.opener` 让 client app 能 `postMessage` 回
  *     Session Window，走现有 popup transport）。
+ *   - **不**再包含 `unlockRuntime`：appView mode 不导入整套 vault
+ *     unlock runtime，改为只把"owner 私钥材料"塞进 `sessionSigner`。
  */
 export interface LauncherHandoffInput {
   appId: string;
@@ -259,7 +266,12 @@ export interface LauncherHandoffInput {
   launchToken: string;
   /** launchToken 过期时间（unix milliseconds）。Session Window 刷新后失效。 */
   expiresAt: number;
-  unlockRuntime: unknown;
+  /**
+   * 本次 session 绑定 owner 的 session signer bootstrap。
+   * 必填；由 launcher 端 `vault.withPrivateKey` 借出 owner 私钥 hex
+   * 后组装。
+   */
+  sessionSigner: AppBootstrapPayload["sessionSigner"];
 }
 
 /**
@@ -277,8 +289,17 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
   if (!input.launchToken) {
     throw new Error("Launcher handoff missing launchToken");
   }
-  if (!input.unlockRuntime) {
-    throw new Error("Launcher handoff missing unlock runtime");
+  if (!input.sessionSigner) {
+    throw new Error("Launcher handoff missing sessionSigner");
+  }
+  if (input.sessionSigner.ownerPublicKeyHex !== input.ownerPublicKeyHex) {
+    throw new Error("Launcher handoff sessionSigner.ownerPublicKeyHex mismatch");
+  }
+  if (
+    !input.sessionSigner.privateKeyHex ||
+    input.sessionSigner.privateKeyHex.length !== 64
+  ) {
+    throw new Error("Launcher handoff sessionSigner.privateKeyHex invalid");
   }
   return {
     app: {
@@ -291,6 +312,6 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
     resolvedClaims: input.resolvedClaims as AppBootstrapPayload["resolvedClaims"],
     resolvedAt: input.resolvedAt,
     launchToken: input.launchToken,
-    unlockRuntime: input.unlockRuntime as AppBootstrapPayload["unlockRuntime"]
+    sessionSigner: input.sessionSigner
   };
 }

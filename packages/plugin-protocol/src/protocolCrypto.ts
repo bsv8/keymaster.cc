@@ -137,3 +137,28 @@ function hexToBytes(hex: string): Uint8Array {
   }
   return out;
 }
+
+/** bytes -> hex（小写）。 */
+export function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (let i = 0; i < bytes.length; i++) {
+    out += (bytes[i] ?? 0).toString(16).padStart(2, "0");
+  }
+  return out;
+}
+
+/**
+ * 从 32 字节 secp256k1 私钥推出压缩公钥 hex（33 字节）。
+ *
+ * 设计缘由（施工单 2026-06-29 003 硬切换）：`applyLauncherBootstrap`
+ * 用此方法校验 launcher 交过来的 session signer 私钥 hex 真的对应
+ * 声明的 `ownerPublicKeyHex`。
+ */
+export function getCompressedPubHexFromPrivHex(privHex: string): string {
+  const priv = hexToBytes(privHex);
+  if (priv.length !== 32) {
+    throw new Error("Private key must be 32 bytes");
+  }
+  const pub = secp256k1.getPublicKey(priv, true);
+  return bytesToHex(pub);
+}

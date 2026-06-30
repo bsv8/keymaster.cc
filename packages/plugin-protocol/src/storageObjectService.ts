@@ -2,7 +2,7 @@
 // storage.* 协议方法的物理对象层：虚拟桶 key 派生 + AES-GCM 透明加解密
 // + 最小 S3-compatible 适配。
 //
-// 设计缘由（施工单 2026-06-29 001 硬切换）：
+// 设计缘由（施工单 2026-06-29 001 硬切换 + 施工单 2026-06-29 003 硬切换）：
 //   - 物理上只一份全局 S3 provider 配置；逻辑上按
 //     `/{originEncoded}/{ownerPublicKeyHex}/{relativePath}` 划分虚拟桶。
 //   - 透明加解密：每个对象独立随机 nonce（AES-GCM-256）；相同路径重复
@@ -13,6 +13,12 @@
 //   - storageObjectService 不依赖 React；单元测试可直接 import。
 //   - 入口 `createStorageObjectService(deps)` 接收 S3 adapter 注入；
 //     单元测试可传 fake adapter。
+//   - **施工单 2026-06-29 003**：内容加密 key 的派生走
+//     `StorageCryptoBridge.deriveStorageContentKey(ikr)`，由 protocolService
+//     先解析好 `OwnerKeyResolution`（vault / session_signer 任一）再传入。
+//     storage 自身**不**直接 import vault / session signer 任何具体实现。
+//     这样 storage 与 cipher / intent.sign / p2pkh / feepool 走同一条
+//     owner 解析真值，不再强依赖 vault。
 
 import type {
   BinaryField,
@@ -30,16 +36,49 @@ import type {
 } from "@keymaster/contracts";
 import { encodeOrigin, normalizeStoragePath } from "./sessionWindowBootstrap.js";
 
-/** storage 内容加密 / 解密需要的服务：可访问 vault withPrivateKey。 */
+/**
+ * 解析好的 owner 私钥材料（施工单 2026-06-29 003 硬切换）。
+ *
+ * 设计缘由：
+ *   - `vault` runtime 走 `vault.withPrivateKey(keyId, fn)`；fn 拿到
+ *     `{ hex, wif? }` 在闭包内使用。
+ *   - `session_signer` runtime 走 Session Window 内存里的 signer
+ *     runtime；fn 同样拿到 `{ hex }`。
+ *   - storage 与 cipher / intent.sign 走**同一条** owner 解析真值
+ *     （`resolveOwnerKeyMaterial(...)`），但**不**用同一个 keyId 概念
+ *     ——这里给的是"已经能拿到私钥 hex 的回调"，调用方负责闭包
+ *     安全性。storage 自身不知道 vault / session signer 之间的差异。
+ *   - 不允许走"全局 active key"路径。
+ */
+export interface OwnerKeyResolution {
+  ownerPublicKeyHex: string;
+  /** 在闭包内拿 owner 私钥 hex；用完即丢，闭包外不允许保留。 */
+  withPrivateKeyHex<T>(fn: (material: { hex: string }) => Promise<T> | T): Promise<T>;
+}
+
+/**
+ * storage 内容加密 / 解密需要的服务（施工单 2026-06-29 003）。
+ *
+ * 设计缘由：
+ *   - `deriveStorageContentKey(resolution)` 由 protocolService 在执行
+ *     `storage.*` 前先解析好 owner 执行材料再传入。
+ *   - bridge 内部用 `resolution.withPrivateKeyHex` 拿 owner 私钥 hex，
+ *     在闭包内做 HKDF 派生 storage content key，**不**直接 import
+ *     vault 或 session signer。
+ *   - 这样 storage 与签名 / 加解密链路**共用同一条** owner 解析
+ *     真值——session_signer session 的 storage 内容 key 与 cipher /
+ *     intent.sign 用同一把 owner 私钥派生。
+ */
 export interface StorageCryptoBridge {
   /**
    * 派生 owner 绑定的 storage 内容加密 key。
    *
    * 设计缘由：与 cipher 站点密钥同源但隔域；domain separation =
-   * `"keymaster.storage.v1" || ownerPublicKeyHex`。实现走 PBKDF2 →
-   * HKDF（在 vault 闭包内 withPrivateKey 完成）。
+   * `"keymaster.storage.v1" || ownerPublicKeyHex`。实现走 HKDF（IKM =
+   * owner 私钥 hex；salt = 空；info = `"keymaster.storage.v1" ||
+   * ownerPublicKeyHex`）。
    */
-  deriveStorageContentKey(ownerPublicKeyHex: string): Promise<Uint8Array>;
+  deriveStorageContentKey(resolution: OwnerKeyResolution): Promise<Uint8Array>;
 }
 
 /* ============== 物理对象 key 派生 ============== */
@@ -184,26 +223,41 @@ export interface StorageObjectService {
   put(input: {
     origin: string;
     ownerPublicKeyHex: string;
+    /**
+     * 已解析好的 owner 私钥材料（施工单 2026-06-29 003 硬切换）。
+     * 由 protocolService 在执行 storage.* 前解析好；service 内部走
+     * 同一套 owner execution runtime resolver。
+     */
+    ownerKeyResolution: OwnerKeyResolution;
     params: StoragePutParams;
   }): Promise<StoragePutResult>;
   get(input: {
     origin: string;
     ownerPublicKeyHex: string;
+    ownerKeyResolution: OwnerKeyResolution;
     params: StorageGetParams;
   }): Promise<StorageGetResult | null>;
   list(input: {
     origin: string;
     ownerPublicKeyHex: string;
+    /**
+     * list / listAll 不需要 owner 私钥；但接口形状对齐
+     * 其它 storage.* 方法；调用方仍可传同一个 resolution，service
+     * 内部**不**调用 `withPrivateKeyHex`。
+     */
+    ownerKeyResolution: OwnerKeyResolution;
     params: StorageListParams;
   }): Promise<StorageListResult>;
   listAll(input: {
     origin: string;
     ownerPublicKeyHex: string;
+    ownerKeyResolution: OwnerKeyResolution;
     params: StorageListAllParams;
   }): Promise<StorageListResult>;
   delete(input: {
     origin: string;
     ownerPublicKeyHex: string;
+    ownerKeyResolution: OwnerKeyResolution;
     params: StorageDeleteParams;
   }): Promise<StorageDeleteResult | null>;
 }
@@ -241,16 +295,16 @@ export function createStorageObjectService(deps: StorageObjectServiceDeps): Stor
     return deps.resolveAdapter(cfg);
   }
 
-  async function getOwnerKey(ownerPublicKeyHex: string): Promise<Uint8Array> {
-    return deps.cryptoBridge.deriveStorageContentKey(ownerPublicKeyHex);
+  async function getOwnerKey(resolution: OwnerKeyResolution): Promise<Uint8Array> {
+    return deps.cryptoBridge.deriveStorageContentKey(resolution);
   }
 
   return {
-    async put({ origin, ownerPublicKeyHex, params }) {
+    async put({ origin, ownerPublicKeyHex, ownerKeyResolution, params }) {
       const path = normalizeStoragePath(params.path);
       const key = buildObjectKey({ origin, ownerPublicKeyHex, relativePath: path });
       const adapter = await getAdapter();
-      const ownerKey = await getOwnerKey(ownerPublicKeyHex);
+      const ownerKey = await getOwnerKey(ownerKeyResolution);
       const cipher = await encryptObjectContent(
         ownerKey,
         params.contentType,
@@ -264,11 +318,11 @@ export function createStorageObjectService(deps: StorageObjectServiceDeps): Stor
       return { objectKey: key, updatedAt: out.updatedAt };
     },
 
-    async get({ origin, ownerPublicKeyHex, params }) {
+    async get({ origin, ownerPublicKeyHex, ownerKeyResolution, params }) {
       const path = normalizeStoragePath(params.path);
       const key = buildObjectKey({ origin, ownerPublicKeyHex, relativePath: path });
       const adapter = await getAdapter();
-      const ownerKey = await getOwnerKey(ownerPublicKeyHex);
+      const ownerKey = await getOwnerKey(ownerKeyResolution);
       const obj = await adapter.getObject({ key });
       if (!obj) return null;
       const decoded = await decryptObjectContent(ownerKey, undefined, obj.body);
@@ -326,12 +380,14 @@ export function createStorageObjectService(deps: StorageObjectServiceDeps): Stor
       return { entries };
     },
 
-    async delete({ origin, ownerPublicKeyHex, params }) {
+    async delete({ origin, ownerPublicKeyHex, ownerKeyResolution, params }) {
       const path = normalizeStoragePath(params.path);
       const key = buildObjectKey({ origin, ownerPublicKeyHex, relativePath: path });
       const adapter = await getAdapter();
       // 先 GET 探一次：S3 DELETE 是幂等成功（即使对象不存在也回 204），
       // 这里由 storageObjectService 显式区分"对象不存在"。
+      // 注：ownerKeyResolution 仅作接口形状对齐，delete 不需要 owner 私钥。
+      void ownerKeyResolution;
       const probe = await adapter.getObject({ key });
       if (!probe) {
         throw new StorageObjectNotFoundError(key);

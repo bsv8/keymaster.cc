@@ -2,7 +2,8 @@
 // 对外协议插件：popup 路由 + service capability + 协议页 i18n +
 // 命令流 IndexedDB。
 //
-// 设计缘由（施工单 002 硬切换 + 2026-06-28 002 + 2026-06-29 001）：
+// 设计缘由（施工单 002 硬切换 + 2026-06-28 002 + 2026-06-29 001 +
+// 2026-06-29 003）：
 //   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
 //     `closing` 由 pageUnloading 路径发出。
 //   - 命令流历史走 `keymaster.protocol` IndexedDB：store=commands，
@@ -14,6 +15,12 @@
 //   - 施工单 2026-06-29 001 硬切换：popup 语义统一为 Session Window；
 //     `boot=appView` 模式下额外挂一次性 bootstrap listener；storage.*
 //     与 connect.* 走同一套 dispatch。
+//   - 施工单 2026-06-29 003 硬切换：appView Session Window 改为
+//     session signer runtime——`storage.*` 与签名 / 加解密走同一套
+//     owner execution runtime resolver；**不**再 import unlock runtime
+//     交接包。plugin-protocol 的能力依赖描述从"协议需要 active key 与
+//     withPrivateKey" 改成 "connect mode 需要 vault；appView mode 可走
+//     session signer runtime"。
 
 import type {
   I18nPluginResources,
@@ -31,6 +38,7 @@ import { openProtocolStorageDb } from "./protocolStorageDb.js";
 import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import {
   createStorageObjectService,
+  type OwnerKeyResolution,
   type StorageCryptoBridge
 } from "./storageObjectService.js";
 
@@ -198,6 +206,12 @@ const protocolResources: I18nPluginResources = {
       "protocol.sessionWindow.appView.waiting.title": "Waiting for launcher",
       "protocol.sessionWindow.appView.waiting.desc":
         "Keymaster is starting this app. Keep this window open — it will hand off the session to the app and then you can close this tab.",
+      "protocol.sessionWindow.appView.signerMissing.title": "Session signer missing",
+      "protocol.sessionWindow.appView.signerMissing.desc":
+        "The app session signer is no longer available. Please reopen the app from the Keymaster app store.",
+      "protocol.sessionWindow.appView.signerMismatch.title": "Could not start the app",
+      "protocol.sessionWindow.appView.signerMismatch.desc":
+        "The app session signer does not match this session. Please reopen the app from the Keymaster app store.",
       "protocol.sessionWindow.appView.failed.title": "Could not start the app",
       "protocol.sessionWindow.appView.failed.desc":
         "Launcher failed to hand off the session. Please try starting the app again from the Keymaster app store.",
@@ -365,6 +379,12 @@ const protocolResources: I18nPluginResources = {
       "protocol.sessionWindow.appView.waiting.title": "等待 launcher 启动",
       "protocol.sessionWindow.appView.waiting.desc":
         "Keymaster 正在启动此 app。请保持本窗口打开 — 它会把会话交给 app，然后你可以关闭此标签页。",
+      "protocol.sessionWindow.appView.signerMissing.title": "session signer 已失效",
+      "protocol.sessionWindow.appView.signerMissing.desc":
+        "app 的 session signer 不可用，请回到 Keymaster 应用商店重新启动该 app。",
+      "protocol.sessionWindow.appView.signerMismatch.title": "无法启动 app",
+      "protocol.sessionWindow.appView.signerMismatch.desc":
+        "app 的 session signer 与本次会话不匹配，请回到 Keymaster 应用商店重新启动该 app。",
       "protocol.sessionWindow.appView.failed.title": "无法启动 app",
       "protocol.sessionWindow.appView.failed.desc":
         "Launcher 未成功完成会话交接。请回到 Keymaster 应用商店重新启动该 app。",
@@ -394,8 +414,11 @@ export const protocolPlugin: PluginManifest = {
   },
   i18n: protocolResources,
   dependencies: [
-    { capability: "vault.service", reason: "协议需要 active key 与 withPrivateKey" },
-    { capability: "keyspace.service", reason: "协议需要 active key 状态" }
+    {
+      capability: "vault.service",
+      reason: "connect mode 需要 vault（withPrivateKey 借 owner 私钥）；appView mode 可走 session signer runtime"
+    },
+    { capability: "keyspace.service", reason: "协议需要 owner key 状态" }
   ],
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
@@ -487,7 +510,7 @@ export const protocolPlugin: PluginManifest = {
         // 闭包内派生。生产环境实现是 HKDF(cipher 站点密钥 || "storage" tag)，
         // 但 V1 简化为：直接复用 masterKey 作为 storage key material 的
         // 输入（仍隔域），并按 ownerPublicKeyHex 走 HKDF domain separation。
-        storageCryptoBridge: createVaultBackedStorageCryptoBridge(vaultService),
+        storageCryptoBridge: createVaultBackedStorageCryptoBridge(),
         createStorageObjectService,
         logger: {
           info: (input) =>
@@ -541,38 +564,28 @@ export const protocolPlugin: PluginManifest = {
 };
 
 /**
- * 用 vault withPrivateKey 派生 owner-bound storage content key。
+ * 派生 owner-bound storage content key（施工单 2026-06-29 003 硬切换）。
  *
- * 设计缘由（施工单 2026-06-29 001 硬切换）：
+ * 设计缘由：
  *   - storage content key 必须按 owner 维度派生；不能像 cipher 那样按 origin，
  *     否则不同 app 之间能互相解对方的密文。
  *   - 与 cipher 站点密钥**隔域**：用 HKDF-SHA256 做 domain separation，
  *     info = `"keymaster.storage.v1" || ownerPublicKeyHex`。
- *   - 实现走 vault.withPrivateKey：明文私钥只在闭包内短暂存在；
- *     派生出来的 storage key 在闭包外是 raw bytes，service 持有后用于
- *     AES-GCM encrypt/decrypt。
+ *   - 实现走 `OwnerKeyResolution.withPrivateKeyHex(...)`：明文私钥只在
+ *     闭包内短暂存在；resolution 由 protocolService 的统一 execution
+ *     runtime resolver 提供；vault / session_signer 任一执行面都走
+ *     同一闭包签名。**不**再"vault only"——session_signer session 的
+ *     storage 内容 key 与签名 / 加解密共用同一把 owner 私钥派生。
  *
  * 注意：HKDF 的"input keying material"用 private key hex 派生出一个固定
  * 长度的 seed，再做 domain-separated HKDF。这里直接用私钥 hex 做 IKM
  * 是常见模式——等价于"用私钥当一次性 seed"，在 V1 接受范围内。
  */
-function createVaultBackedStorageCryptoBridge(vault: VaultService): StorageCryptoBridge {
+function createVaultBackedStorageCryptoBridge(): StorageCryptoBridge {
   return {
-    async deriveStorageContentKey(ownerPublicKeyHex: string): Promise<Uint8Array> {
-      // V1 简化：从 keyspace 找对应 keyId，走 vault.withPrivateKey 借用明文 hex。
-      // 然后用 WebCrypto HKDF 做 domain separation。
-      const keyspace = (vault as unknown as {
-        getKey?: (hex: string) => Promise<{ keyId?: string } | undefined>;
-      }).getKey;
-      let keyId: string | undefined;
-      if (keyspace) {
-        const k = await keyspace.call(vault, ownerPublicKeyHex);
-        keyId = k?.keyId;
-      }
-      if (!keyId) {
-        throw new Error("storage crypto: owner key not found");
-      }
-      return vault.withPrivateKey(keyId, async (material) => {
+    async deriveStorageContentKey(resolution: OwnerKeyResolution): Promise<Uint8Array> {
+      return resolution.withPrivateKeyHex(async (material) => {
+        const ownerPublicKeyHex = resolution.ownerPublicKeyHex;
         const ikm = new TextEncoder().encode(material.hex);
         const salt = new Uint8Array(32); // 空 salt；domain separation 在 info。
         const info = new TextEncoder().encode(
