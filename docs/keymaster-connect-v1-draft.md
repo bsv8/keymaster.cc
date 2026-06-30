@@ -46,11 +46,15 @@ connect session 与 popup transport、popup unlock runtime 三层语义
 | `connect.login` | 重新认证 + 选 key + 建新 session | 进入全屏 `login` auth 页；用户输入密码并选 key 后提交 | 进入全屏 `login` auth 页；仍需重新验证密码并选 key |
 | `connect.resume` | 恢复既有 session | 进入全屏 `resume` auth 页；用户输入密码后继续恢复 | 进入全屏 `resume` auth 页；仍需对当前 session 绑定 owner 做密码验证 |
 | `connect.logout` | caller 主动注销 | 进入 waiting_unlock_manual；解锁后**不**经过 confirming，直接 queued → executing | **不**经过 confirming，直接 queued → executing |
-| `connect.launch` | appView mode 下 client app 首登；消费 launchToken | 仅在 appView mode 启用；launcher 已解锁时 Session Window 已经在 bootstrap 阶段 importUnlockRuntime，状态为 unlocked | 仅在 appView mode 启用；用户**不**需要再点确认；校验 token 后直接 queued → executing |
+| `connect.launch` | appView mode 下 client app 首登；消费 launchToken | 仅在 appView mode 启用；launcher 已解锁时 Session Window 已经在 bootstrap 阶段注册 session signer runtime，vault 可能仍 locked（由 `runtimeBinding = "session_signer"` 决定走 in-memory signer） | 仅在 appView mode 启用；用户**不**需要再点确认；校验 token + session signer runtime 就绪后直接 queued → executing |
 
-### `connect.launch`（施工单 2026-06-29 001 硬切换）
+### `connect.launch`（施工单 2026-06-29 001 硬切换 + 2026-06-29 003 硬切换）
 
 appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 bootstrap 阶段交给 Session Window 的 launchToken，返回与 `connect.login` 对齐的 session 三元组。
+
+施工单 2026-06-29 003 硬切换新增：
+
+- 该入口拿到的 session 在 `connectSessionId -> ownerPublicKeyHex -> runtimeBinding = "session_signer"` 真值上。`connect.launch` 校验**必须**确认 `runtimeBinding === "session_signer"` 且当前 Session Window 内存的 `sessionSignerRuntimes` 已就绪（`sessionSigner.ownerPublicKeyHex === session.ownerPublicKeyHex`）。校验失败一律 `internal_error`，**不**fallback 到 `connect.login` / `connect.resume` / 当前 active key。
 
 #### 输入
 
@@ -78,8 +82,9 @@ appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 boot
 3. caller `event.origin` 必须与 bootstrap 期记录的 `app.appOrigin` 一致；不一致 → `invalid_origin`。
 4. 失败时按 fail-closed 返回 `user_rejected` / `invalid_origin` / `internal_error`；**不**自动 fallback 到 `connect.login`。
 5. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*` / `storage.*`。
+6. 后续业务方法（`identity.*` / `intent.sign` / `cipher.*` / `storage.*` / `p2pkh.transfer` / `feepool.*`）必须按 session 真值的 `runtimeBinding` 走 in-memory session signer，**不**读 vault / active key。Session Window 刷新后 signer 丢失，session 仍存在但后续业务方法 fail-closed（`runtime_missing` 类错误）；用户从 Keymaster 重新启动 app。
 
-### `connect.launch` 与 launcher 预建 session 的关系（施工单 2026-06-29 002 硬切换）
+### `connect.launch` 与 launcher 预建 session 的关系（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）
 
 施工单 2026-06-29 001 硬切换已经定义：launcher 拉起 Session Window 时，session **先在 launcher 一侧**建好（与 `app.appOrigin` + 当前 owner key 绑定），launchToken 由 launcher 生成并交给 Session Window。`connect.launch` **不**创建 session，它只消费 launchToken 并把"已存在的 session"接上已开好的 Session Window。
 
@@ -89,11 +94,11 @@ launcher 预建 session 的入口收口在 `protocol.service.launchAppView(...)`
 plugin-apps（apps 页面 / 首页 widget）
   ──点击 Open App──> protocol.service.launchAppView(app)
                        │
-                       ├── 1. 校验 vault 已解锁 + active key ready
+                       ├── 1. 校验 vault 已解锁 + active key ready + owner 有 vault keyId
                        ├── 2. 校验 app 配置合法
                        ├── 3. 解析 claims 快照
-                       ├── 4. 创建新 connectSessionId（落 IndexedDB）
-                       ├── 5. 导出 unlock runtime 交接包
+                       ├── 4. 创建新 connectSessionId（runtimeBinding = "session_signer"，落 IndexedDB）
+                       ├── 5. 调 vault.withPrivateKey(keyId, fn) 借 owner 私钥 hex，组装 SessionSignerBootstrap
                        ├── 6. 生成新 launchToken
                        ├── 7. 装 AppBootstrapPayload + bootstrap registry
                        └── 8. window.open("/protocol/v1/popup?boot=appView&...")
@@ -102,6 +107,8 @@ plugin-apps（apps 页面 / 首页 widget）
 关键边界：
 
 - `plugin-apps` 是该入口**唯一**业务调用方；它**不**直接 import `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL。
+- `AppBootstrapPayload` 携带 `sessionSigner: SessionSignerBootstrap`，**不再**携带 `unlockRuntime`；Session Window 收到后只把 signer 注册到当前内存的 `sessionSignerRuntimes` map，**不**调 `vault.importUnlockRuntime*`（已删除）。
+- Session Window 内部 vault 仍可能处于 `locked` 态——业务方法是否可执行取决于 `connectSessionId` 的 `runtimeBinding` 与对应 runtime 是否就绪。
 - `connect.launch` **不**创建 session；session 已经在 launcher 预建阶段落库。
 - `connect.launch` 失败时**不**回退到 `connect.login`；用户回到 `plugin-apps` 重新点 `Open App` 即可。
 - session 真值 = `connectSessionId` + `ownerPublicKeyHex` + `app.appOrigin` + `resolvedClaims`；这套三元组同时也是后续 `storage.*` / `cipher.*` 的 namespace 真值（与 `appViewContext` 字段无关，appViewContext 仅用于 UI / 启动决策）。

@@ -37,27 +37,42 @@
 - `closing` 是 popup **窗口**生命周期的主动通知，**不**是“单条 request 收尾”的通知；popup 可以连续处理多条 request，期间不发 `closing`。
 - `popup.closed === true` 是浏览器给的兜底真值。两者并联收敛到断开态，本协议**不**引入心跳、**不**引入 MessageChannel。
 
-### Session Window（施工单 2026-06-29 001 硬切换）
+### Session Window（施工单 2026-06-29 001 硬切换 + 2026-06-29 003 硬切换）
 
 popup 在 V1 不再仅是"第三方站点拉起的窗口"，而是统一为 **Session Window**。同一份代码、同一个 `/protocol/v1/popup` 入口承载两种启动模式：
 
 - `connect` mode（缺省）：第三方 client web `window.open` 拉起，等待外部 request；
-- `appView` mode：Keymaster launcher 拉起，URL 上加 `?boot=appView`；Session Window 在挂载时进入"等待 launcher bootstrap"状态，launcher 通过一次性同源 `__keymaster_session_window_bootstrap__.acquire(token)` 把 `AppBootstrapPayload`（含 unlock runtime + connectSessionId + launchToken + app 信息）移交过去。token 一次性消费，命中即从 launcher registry 删除。
+- `appView` mode：Keymaster launcher 拉起，URL 上加 `?boot=appView`；Session Window 在挂载时进入"等待 launcher bootstrap"状态，launcher 通过一次性同源 `__keymaster_session_window_bootstrap__.acquire(token)` 把 `AppBootstrapPayload`（**含 session signer bootstrap** + connectSessionId + launchToken + app 信息）移交过去。token 一次性消费，命中即从 launcher registry 删除。
 
 两种 mode 在启动后走同一套 service / 同一套 transport / 同一套协议方法族。差异只存在于**启动阶段**。
 
-#### plugin-apps 内部 launcher（施工单 2026-06-29 002 硬切换）
+#### Session signer 替代 unlock runtime（施工单 2026-06-29 003 硬切换）
+
+`appView` mode 在 V1 不再把整套 vault unlock runtime（masterKey / masterSalt / keySnapshot / activePublicKeyHex）交给 Session Window。理由：
+
+1. 同源不等于共享 launcher 当前内存态：Session Window 打开后是新的浏览器上下文，天然拿不到 launcher 的 masterKey / masterSalt / 已解锁 keyspace 内存；
+2. appView 真正需要的是"这次 session 绑定 owner 的签名 / 派生能力"，不是整套钱包解锁态；导入 unlock runtime 会把 vault 全局解锁态、launcher 当下 active key 语义带进 Session Window，权限面过大。
+
+硬切后：
+
+- `appView` mode 的 Session Window 只持有 `SessionSignerBootstrap`（ownerPublicKeyHex + privateKeyHex + ownerLabel + capabilities + createdAt），足够跑 `identity.*` / `intent.sign` / `cipher.*` / `storage.*` / `p2pkh.transfer` / `feepool.*`；
+- Session Window **不**调用 `vault.importUnlockRuntime*`（已删除）；**不**把 vault 切到 unlocked 态；
+- Session Window 刷新 / 关闭后 signer 随窗口内存丢失；V1 不持久化、不自动恢复，用户从 Keymaster 重新启动 app。
+
+`AppBootstrapPayload` 字段从 `unlockRuntime: UnlockRuntimeHandoff` 改成 `sessionSigner: SessionSignerBootstrap`。`UnlockRuntimeHandoff` 与 `vault.export/importUnlockRuntime*` 已删除。
+
+#### plugin-apps 内部 launcher（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）
 
 Keymaster 内部 `plugin-apps` 是 `appView` mode 的**唯一**业务调用方。app 启动链路：
 
-- `plugin-apps` 读取本地 `appsCatalog.json`（首个 app = `https://justnote.apps.bsv8.com/`），在 `/apps` 页面与首页 widget 展示 app 卡片；
+- `plugin-apps` 读取本地 `appsCatalog.json`（包含 `justnote` 与 `demo` 两 app），在 `/apps` 页面与首页 widget 展示 app 卡片；
 - 用户点击 `Open App` 时，`plugin-apps` **只**调 `protocol.service.launchAppView(input)`，自己**不**直接 import `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL；
 - `protocol.service.launchAppView(...)` 内部一次性收口整套 launcher 流程：
-  1. 校验 vault 已解锁、active key ready；
+  1. 校验 vault 已解锁、active key ready、owner key 有 vault keyId；
   2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
   3. 解析 claims 快照；
-  4. **预建 connect session**（与 `connect.login` 同语义，但用户不在 popup 走 auth UI）；
-  5. 调 `vault.exportUnlockRuntimeForSessionWindow()` 导出一性 unlock runtime 交接包；
+  4. **预建 connect session**（`runtimeBinding = "session_signer"`）；
+  5. 调 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥 hex，组装 `SessionSignerBootstrap`；
   6. 生成新 `launchToken`；
   7. 组装 `AppBootstrapPayload`；
   8. 在 launcher `window` 上挂一次性 bootstrap registry；
@@ -957,3 +972,25 @@ type ProtocolFeePoolRecord = {
 
 site **不**应通过 `error.message` 反推本地敏感状态（余额 / 池状态 / 失败原因）。
 新错误码不引入；现有 `ProtocolErrorCode` 集合保持稳定。
+
+## Connect session 运行时绑定（施工单 2026-06-29 003 硬切换）
+
+`ConnectSessionRecord` 在 V1 新增 `runtimeBinding: "vault" | "session_signer"` 字段，是 session 的稳定真值。规则：
+
+- `connect.login` 写的 session → `runtimeBinding = "vault"`：传统 connect popup 流程，执行时从已解锁 vault 借 owner 私钥；
+- `launchAppView` 写的 session → `runtimeBinding = "session_signer"`：appView 流程，执行时只使用当前 Session Window 内存里的 session signer runtime。
+
+业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` / `feepool.*` / `storage.*`）的执行路径**必须**先按 `connectSessionId` 取 session 真值，再按 `runtimeBinding` 决定执行面：
+
+- `"vault"` → 走 `vault.withPrivateKey(keyId, fn)`，从已解锁 vault 借 owner 私钥；
+- `"session_signer"` → 走当前 Session Window 内存的 `sessionSignerRuntimes` map，按 `connectSessionId` 取 signer 私钥 hex。
+
+不允许：
+
+- `runtimeBinding = "session_signer"` 的 session 在 signer 缺失时 fallback 到 vault 或当前 active key；
+- 依据"当前 bootMode"或"vault.status()"临时猜测执行路径；
+- 把 `unlockRuntime` 落回 `AppBootstrapPayload` / `storageDb` / launchToken 缓存 / `localStorage` / `sessionStorage` / URL。
+
+`storage.*` 的内容 key 派生与签名 / 加解密走同一条 owner 解析真值：vault 路径走 `vault.withPrivateKey` 借 owner 私钥派生，session_signer 路径直接用 signer 私钥派生。两路径**不**允许在同一 `connectSessionId` 下混用。
+
+`protocolStorageDb` version 升到 7：重建 `connectSessions` store，新增 `runtimeBinding` schema；commands / origins / feePools / storageProviderConfig / launchTokens 沿用 v6 schema。
