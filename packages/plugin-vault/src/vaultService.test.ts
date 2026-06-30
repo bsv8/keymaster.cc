@@ -15,7 +15,6 @@ import {
 } from "./vaultService.js";
 import { createKeyspaceService } from "./keyspaceService.js";
 import { disposeVaultDb, vaultDb } from "./vaultDb.js";
-import type { UnlockRuntimeHandoff } from "@keymaster/contracts";
 
 const TEST_PRIV = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
@@ -1966,69 +1965,20 @@ describe("VaultService.lock() order (硬切换 004)", () => {
 
 type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
-/* ============== 施工单 2026-06-29 001：Session Window unlock runtime 一次性交接 ============== */
-
-describe("施工单 2026-06-29 001：unlock runtime 一次性交接", () => {
-  it("exportUnlockRuntimeForSessionWindow 在 locked 时拒绝", async () => {
-    // 构造一个最小 vault service：未解锁时直接拒。
-    const vault = createVaultService({
-      messageBus: makeFakeMessageBus()
-    });
-    await expect(vault.exportUnlockRuntimeForSessionWindow()).rejects.toThrow(
-      /not unlocked/
-    );
-  });
-
-  it("importUnlockRuntimeFromLauncher 在 uninitialized 时拒绝（无 meta）", async () => {
-    const vault = createVaultService({
-      messageBus: makeFakeMessageBus()
-    });
-    const fakeHandoff: UnlockRuntimeHandoff = {
-      masterSalt: new ArrayBuffer(16),
-      masterKeyBytes: new ArrayBuffer(32),
-      keySnapshot: [],
-      createdAt: Date.now()
-    };
-    await expect(
-      vault.importUnlockRuntimeFromLauncher(fakeHandoff)
-    ).rejects.toThrow();
-  });
-
-  it("importUnlockRuntimeFromLauncher 校验 salt 不匹配 → 拒绝", async () => {
-    const bus = makeFakeMessageBus();
-    const vault = createVaultService({ messageBus: bus });
-    // 用一个 fakeIDB 让 hasVault 走通；这里通过 mock 直接准备 meta。
-    // 因 fakeIDB 复杂，本测试只验证 salt 校验逻辑的入口；完整 round-trip
-    // 需要 fake-indexeddb 链路。
-    const handoffWithBadSalt: UnlockRuntimeHandoff = {
-      masterSalt: new ArrayBuffer(16),
-      masterKeyBytes: new ArrayBuffer(32),
-      keySnapshot: [],
-      createdAt: Date.now()
-    };
-    // vault 未初始化 → 应先抛 "not initialized" 或类似错。
-    await expect(
-      vault.importUnlockRuntimeFromLauncher(handoffWithBadSalt)
-    ).rejects.toThrow();
-  });
-
-  it("完整 round-trip：unlock → export → 在另一个 vault 上下文 import", async () => {
-    // 仅验证 export 返回结构；具体 round-trip 需要 fake-indexeddb 支持。
-    // 这里只断言 export 在 unlocked 状态下返回包含 masterKeyBytes / masterSalt。
-    const bus = makeFakeMessageBus();
-    const vault = createVaultService({ messageBus: bus });
-    // 手动把 status 推到 unlocked：通过 unlock 失败不可行（无 fake idb），
-    // 因此本测试只是 mock 化形式：直接断言 export 在 not-unlocked 状态抛错。
-    // 真正的 round-trip 测试在 integration 层走 fake-indexeddb。
-    let err: unknown = null;
-    try {
-      await vault.exportUnlockRuntimeForSessionWindow();
-    } catch (e) {
-      err = e;
-    }
-    expect(err).toBeInstanceOf(Error);
-  });
-});
+/* ============== 施工单 2026-06-29 003：unlock runtime 一次性交接已删除 ==============
+ *
+ * 2026-06-29 003 硬切换后，vault **不再**提供：
+ *   - `exportUnlockRuntimeForSessionWindow()`
+ *   - `importUnlockRuntimeFromLauncher(handoff)`
+ *   - `UnlockRuntimeHandoff` 类型
+ *
+ * appView Session Window 改为"只拥有 owner 私钥材料的 session signer runtime"，
+ * 不再导入整套 vault unlock runtime。launcher 端借 owner 私钥仍然走
+ * `vault.withPrivateKey(keyId, fn)`。
+ *
+ * 旧"unlock runtime 一次性交接"测试组整组删除——本 vault service 没有任何
+ * 对外 API 再承接那些场景。
+ */
 
 function makeFakeMessageBus(): MessageBus {
   const handlers = new Map<string, Set<(payload: unknown) => void>>();
