@@ -2,11 +2,12 @@
 // popup 协议存储 IndexedDB（commands / origins / feePools / connectSessions /
 // storageProviderConfig / launchTokens 六 store）。
 //
-// 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 + 2026-06-29 001 硬切换）：
+// 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 + 2026-06-29 001 +
+// 2026-06-29 003 硬切换）：
 //   - DB 名：`keymaster.protocol`。**不**挂到 `keyspace.openKeyStorage()`
 //     的 per-key namespace，因为命令历史按 domain 走，按 key 走会让
 //     "切了 key 看不到旧站点历史" 这种行为偷偷出现。
-//   - DB version：6。
+//   - DB version：7。
 //       - v2：单 `commands` store 升级为三 store（commands / origins / feePools）；
 //       - v3：feePools record 结构变了（新增 `draftSpendTxHex` /
 //         `draftClientSignBytes`），升级时清空 feePools store（不迁数据）；
@@ -15,14 +16,16 @@
 //       - v5（施工单 2026-06-28 002 硬切换）：owner 真值收口成
 //         `ownerPublicKeyHex`，`ownerKeyId` 不再落库；feePool key 维度
 //         补 `ownerPublicKeyHex`；旧 `connectSessions` / `feePools` /
-//         `commands` 全部清空（owner 真值、session 归属、fee pool key、
-//         业务方法 contract 都改了——为了保留旧数据而引入双读 / 双写
-//         不值得；直接重建 DB 更简单）。commands 同步加
-//         `connectSessionId` + `ownerPublicKeyHex` 字段。
+//         `commands` 全部清空。
 //       - v6（施工单 2026-06-29 001 硬切换）：新增 `storageProviderConfig`
 //         + `launchTokens` 两 store；commands / origins / feePools /
-//         connectSessions 不动——session-bound 方法 contract 没动过，
-//         历史数据兼容。
+//         connectSessions 不动。
+//       - v7（施工单 2026-06-29 003 硬切换）：`connectSessions` 重建——
+//         session record 新增 `runtimeBinding` 真值字段（"vault" /
+//         "session_signer"）；这是 session 真值的硬切，必须重建而不是
+//         写入空字段兜底（业务执行路径不能容忍"runtimeBinding 缺失
+//         走默认"语义）。commands / origins / feePools /
+//         storageProviderConfig / launchTokens 不动。
 //   - `commands`：命令流历史，主键 `record.id`（与 transport requestId
 //     解耦）。索引 `origin` / `updatedAt` / compound `[origin, updatedAt]`。
 //   - `origins`：按 exact origin 存站点级配置；主键 `origin`。
@@ -31,6 +34,7 @@
 //     索引 `origin`（便于按 origin 列出）。
 //   - `connectSessions`：auth session 真值；主键 `sessionId`；索引 `origin`
 //     （便于按 origin 列出该站点的所有 session 含已 revoked 的）。
+//     v7 起 session record **必须**带 `runtimeBinding`。
 //   - `storageProviderConfig`：单条全局配置；主键 `"singleton"`。
 //   - `launchTokens`：launcher 给 client app 的 launchToken 缓存；主键
 //     `token`；索引 `connectSessionId`（便于按 session 找到 token）。
@@ -56,11 +60,15 @@ import type {
 } from "@keymaster/contracts";
 
 const DB_NAME = "keymaster.protocol";
-// V6（施工单 2026-06-29 001 硬切换）：新增 storageProviderConfig + launchTokens
-// 两 store；commands / origins / feePools / connectSessions 全部沿用 v5 schema。
-// 设计缘由：session-bound 方法 contract 未改；storage.* 是新方法、新物理层。
-// 已落库历史数据不动；launchTokens 默认走 service 内存，DB 仅作为可选落盘口。
-const DB_VERSION = 6;
+// V7（施工单 2026-06-29 003 硬切换）：connectSessions 重建——session
+// record 新增 `runtimeBinding` 字段；commands / origins / feePools /
+// storageProviderConfig / launchTokens 沿用 v6 schema。
+// 设计缘由：执行路径不允许靠"当前 bootMode"临时猜测；必须读 session
+// 真值。runtimeBinding 缺字段会模糊 vault / session_signer 的执行语义，
+// 旧的"vault" session 在新版"会默认走什么"是模糊状态——直接重建
+// connectSessions store 是更简单的硬切。commands 不重建（record 上
+// 的 owner 字段没改 contract）。
+const DB_VERSION = 7;
 const STORE_COMMANDS = "commands";
 const STORE_ORIGINS = "origins";
 const STORE_FEE_POOLS = "feePools";
@@ -166,6 +174,18 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
       if (!db.objectStoreNames.contains(STORE_LAUNCH_TOKENS)) {
         const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
         tokenStore.createIndex("connectSessionId", "connectSessionId", { unique: false });
+      }
+      // V7 迁移（施工单 2026-06-29 003 硬切换）：重建 connectSessions store
+      // ——session record 新增 `runtimeBinding` 真值字段
+      // （"vault" / "session_signer"）。旧 v6 record 没有这个字段，保留
+      // 旧数据会让"runtimeBinding 缺失走默认"语义偷偷出现；这是
+      // 执行路径的硬切，必须重建。
+      if (oldVersion < 7 && db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
+        db.deleteObjectStore(STORE_CONNECT_SESSIONS);
+      }
+      if (!db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
+        const sessionStore = db.createObjectStore(STORE_CONNECT_SESSIONS, { keyPath: "sessionId" });
+        sessionStore.createIndex("origin", "origin", { unique: false });
       }
       void newVersion;
     };
