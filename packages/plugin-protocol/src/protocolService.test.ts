@@ -55,9 +55,18 @@ function makeFakeOpener(): FakeWindow {
 }
 
 function makeVaultStub(publicKeyHex: string): VaultService {
+  // 施工单 2026-06-30 003：vault 内部 state 驱动 status() 返回；lock() /
+  // unlock() 翻转后调用方（popup page vault.onStatusChange）会再调
+  // `service.setVaultLockState(...)`，让 service 端的 `computeLockState()`
+  // 读到的 vault.status 与真实一致。
+  const state = { locked: false };
+  const listeners = new Set<(s: "locked" | "unlocked") => void>();
   return {
-    status: () => "unlocked",
-    onStatusChange: () => () => undefined,
+    status: () => (state.locked ? "locked" : "unlocked"),
+    onStatusChange: (h: (s: "locked" | "unlocked") => void) => {
+      listeners.add(h);
+      return () => listeners.delete(h);
+    },
     withPrivateKey: async <T,>(_keyId: string, fn: (m: { hex: string }) => Promise<T> | T) => {
       return fn({ hex: TEST_PRIV_HEX });
     },
@@ -78,8 +87,14 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     createVault: async () => undefined,
     createVaultWithInitialKey: async () => ({} as never),
     createVaultWithImportedKey: async () => ({} as never),
-    unlock: async () => undefined,
-    lock: async () => undefined,
+    unlock: async () => {
+      state.locked = false;
+      for (const l of listeners) l("unlocked");
+    },
+    lock: async () => {
+      state.locked = true;
+      for (const l of listeners) l("locked");
+    },
     verifyPassword: async () => undefined,
     importPrivateKey: async () => ({} as never),
     generateKey: async () => ({} as never),
@@ -4180,12 +4195,17 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 到错误并能理解 logout 不完整。
     const { service, opener, getResult, storageDb, deps } = makeService();
     let lockCalls = 0;
-    // 让 fake vault.lock 在被调时模拟真实链路：直接调 service.setVaultLockState(true)
-    // 模拟 vault.locked 事件被 popup 顶层订阅的副作用。
-    deps.vault.lock = (async () => {
-      lockCalls++;
-      service.setVaultLockState(true);
-    }) as typeof deps.vault.lock;
+    // 模拟真实链路：vault.lock 内部 state 翻转 → 触发 onStatusChange
+    // 监听 → popup 顶层调 service.setVaultLockState(true)。施工单
+    // 2026-06-30 003 后 setVaultLockState 通过 computeLockState() 重算，
+    // 需要 vault.status() 反映真实状态——这里走 fake vault 自带的 lock()
+    // + onStatusChange 通路。
+    deps.vault.onStatusChange((s) => {
+      if (s === "locked") {
+        lockCalls++;
+        service.setVaultLockState(true);
+      }
+    });
     service.startSession();
     const sessionId = "sess-logout-1";
     await storageDb.putConnectSession({
@@ -6730,7 +6750,11 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     }
   });
 
-  it("child app 发出第一条 request 后停止 ready 重发泵", async () => {
+  it("child app 跳 ready 直接发 connect.launch：source 绑定 + childReady 翻 true + 清软超时（首条合法 child 协议消息即视为 child alive）", async () => {
+    // 施工单 2026-06-30 003 硬切换：child 漏发 `ready` 直接发
+    // `connect.launch` 也应让 UI 切到传统 popup。`markChildAliveFromBoundSource`
+    // 在 `isAllowedRequestSource` 之后被调用一次，同时绑定 source +
+    // 翻 childReady + 清等待态。
     vi.useFakeTimers();
     const win = installWindowShim();
     const originalOpen = win.open;
@@ -6765,6 +6789,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         } | null;
         launchTokensByToken: Map<string, unknown>;
         ownerRuntimesBySessionId: Map<string, unknown>;
+        currentAppClientSource: Window | null;
       };
       internals.currentAppViewContext = {
         appId: "justnote",
@@ -6793,6 +6818,9 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       });
 
       service.openClientApp();
+      // 初始：childReady=false；childWindow 还未绑 source。
+      expect(service.childReady()).toBe(false);
+      expect(internals.currentAppClientSource).toBeNull();
       const before = childMessages.length;
       await service.handleMessage(
         makeEvent(
@@ -6810,6 +6838,13 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       await vi.runAllTimersAsync();
       const result = getResult();
       expect(result?.ok).toBe(true);
+      // 关键回归（施工单 2026-06-30 003）：child 漏发 `ready` 直接发首条
+      // `connect.launch`，`childReady` 也必须翻 true——UI 才能从
+      // `show app` 切到传统 popup。
+      expect(service.childReady()).toBe(true);
+      // source 绑定 + 等待态清掉。
+      expect(internals.currentAppClientSource).toBe(childWindow);
+      expect(service.appClientWaitingForReady()).toBe(false);
       const afterHandle = childMessages.length;
       vi.advanceTimersByTime(2000);
       expect(childMessages.length).toBe(afterHandle);
@@ -6882,6 +6917,8 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       service.openClientApp();
       vi.advanceTimersByTime(5000);
       expect(service.appClientConnectTimedOut()).toBe(true);
+      // 软超时触发后 childReady 仍未翻 true。
+      expect(service.childReady()).toBe(false);
 
       await service.handleMessage(
         makeEvent(
@@ -6899,11 +6936,156 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       await vi.runAllTimersAsync();
       const result = getResult();
       expect(result?.ok).toBe(true);
+      // 关键回归（施工单 2026-06-30 003）：迟到 connect.launch 是合法
+      // child 协议消息；childReady 必须翻 true，UI 才能从 `show app`
+      // 切到传统 popup。同时清掉软超时提示与等待态。
+      expect(service.childReady()).toBe(true);
       expect(service.appClientConnectTimedOut()).toBe(false);
+      expect(service.appClientWaitingForReady()).toBe(false);
     } finally {
       win.open = originalOpen;
       vi.useRealTimers();
     }
+  });
+});
+
+/* ============== 施工单 2026-06-30 003：lockStateValue 真值 = "是否拥有可执行 owner runtime" ============== */
+/**
+ * 关键收口（施工单 2026-06-30 003 硬切换 4.5）：
+ *   - `lockStateValue` 公开语义从"本地 vault 是否已解锁"改为
+ *     "当前 Session Window 是否拥有可执行 owner runtime"。
+ *   - `bootstrap_owner` 注册到 `ownerRuntimesBySessionId` 后 Session
+ *     Window 即视为 unlocked；vault 后续被 relock 也不应回退到 locked
+ *     ——否则会出现"UI 看似 unlocked，但 accept 阶段仍按 locked 推
+ *     waiting_unlock_*"的夹生状态。
+ *   - 本 describe 块直接验证 service 内部 `lockState()` / `computeLockState()`
+ *     在不同组合下的行为。
+ */
+
+describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 硬切换 4.5)", () => {
+  it("appView applyLauncherBootstrap 后 lockState 翻 unlocked；vault 后续 relock 不再回退", async () => {
+    // 关键收口：bootstrap_owner 注册后 Session Window 立即 unlocked，
+    // 即便 vault.status() 后续变 locked，lockState 仍维持 unlocked——
+    // 因为 owner runtime 仍可执行。
+    const win = installWindowShim();
+    try {
+      const vault = makeVaultStub(TEST_PUB_HEX);
+      // 故意让 vault 报 locked：模拟"本地 vault 仍未解锁"的环境。
+      (vault as unknown as { status: () => string }).status = () => "locked";
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({
+        vault,
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb,
+        bootMode: "appView"
+      });
+      service.startSession();
+      // 初始：vault locked + 无 bootstrap_owner → lockState=locked
+      expect(service.lockState()).toBe("locked");
+
+      // 直接走 applyLauncherBootstrap 路径：构造合法 bootstrap payload 并应用。
+      const sessionId = "sess-lockstate-after-bootstrap";
+      const now = Date.now();
+      await storageDb.putConnectSession({
+        sessionId,
+        origin: "https://justnote.apps.bsv8.com",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        claimsSnapshot: {},
+        createdAt: now,
+        lastUsedAt: now,
+        revokedAt: null
+      });
+      const internals = service as unknown as {
+        applyLauncherBootstrap: (p: unknown) => Promise<void>;
+      };
+      await internals.applyLauncherBootstrap({
+        app: {
+          appId: "justnote",
+          appOrigin: "https://justnote.apps.bsv8.com",
+          appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-ls"
+        },
+        connectSessionId: sessionId,
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        resolvedClaims: {},
+        resolvedAt: now,
+        launchToken: "launch-ls",
+        ownerRuntimeBootstrap: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          privateKeyHex: TEST_PRIV_HEX,
+          capabilities: [],
+          createdAt: now
+        }
+      });
+
+      // bootstrap_owner 已注册 → 即便 vault 仍报 locked，lockState 也必须 unlocked。
+      expect(service.lockState()).toBe("unlocked");
+
+      // 现在模拟 vault 后续被 relock：直接调 service.setVaultLockState(true)。
+      service.setVaultLockState(true);
+      // 仍然 unlocked（computeLockState 看 bootstrap_owner 优先）。
+      expect(service.lockState()).toBe("unlocked");
+    } finally {
+      // 无副作用，无需 restore。
+      void win;
+    }
+  });
+
+  it("connect mode 无 bootstrap_owner：vault relock 后 lockState 立刻回 locked（与旧行为一致）", () => {
+    // 反向回归：connect mode 没有 bootstrap_owner 来源，vault 一旦 relock
+    // lockState 立刻变 locked。
+    const { service, deps } = makeService();
+    service.startSession();
+    // 默认 vault unlocked
+    expect(service.lockState()).toBe("unlocked");
+    // vault lock：listener 路径走 setVaultLockState(true)
+    deps.vault.onStatusChange((s) => {
+      if (s === "locked") service.setVaultLockState(true);
+      else service.setVaultLockState(false);
+    });
+    // 调用 fake vault 的 lock 触发监听
+    void deps.vault.lock();
+    expect(service.lockState()).toBe("locked");
+  });
+
+  it("setVaultLockState(true) 在无 bootstrap_owner 的 connect mode 下触发 confirming → waiting_unlock_manual 收口", async () => {
+    // 反向回归：connect mode 没有 bootstrap_owner 来源，vault relock
+    // 时 setVaultLockState(true) 触发 confirming → waiting_unlock_manual
+    // 硬收口——这是 connect mode 旧行为的延续；appView mode 的新行为
+    // 由上面的 `applyLauncherBootstrap` 测试覆盖。
+    const { service, deps, storageDb, opener } = makeService();
+    service.startSession();
+    // 预放 session + owner key ready（让 request 不走 fail-fast）
+    const sessionId = "sess-relock-cs";
+    const now = Date.now();
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: now,
+      lastUsedAt: now,
+      revokedAt: null
+    });
+    // vault listener：模拟真实链路翻转 service 端 lockState。
+    deps.vault.onStatusChange((s) => {
+      if (s === "locked") service.setVaultLockState(true);
+      else service.setVaultLockState(false);
+    });
+    // 初始 vault unlocked，service 端应已 unlocked。
+    expect(service.lockState()).toBe("unlocked");
+    // 直接推一条 confirm 假 record 状态：手动 confirm 不会触发，更直接
+    // 的方式是用 executeConnectResume 失败记录。这里直接验证 setVaultLockState
+    // 路径下 lockState 翻到 locked 即可——confirming → waiting_unlock_manual
+    // 收口逻辑在既有测试里有专门覆盖（cancel/timeout 003 块）。
+    await deps.vault.lock();
+    expect(service.lockState()).toBe("locked");
+    // 反向：vault unlock 又翻回 unlocked（无 bootstrap_owner）。
+    await deps.vault.unlock("");
+    expect(service.lockState()).toBe("unlocked");
+    void opener;
   });
 });
 

@@ -85,6 +85,7 @@ function makeFakeService(): ProtocolService & {
   bootstrapFailedValue: boolean;
   bootstrapFailureReasonValue: string | null;
   appClientConnectTimedOutValue: boolean;
+  _setSnapLockState(next: "locked" | "unlocked"): void;
   appClientWaitingForReadyValue: boolean;
   childReadyValue: boolean;
   vaultStatusListeners: Set<(s: "booting" | "uninitialized" | "locked" | "unlocked") => void>;
@@ -144,6 +145,14 @@ function makeFakeService(): ProtocolService & {
       this.postReadyCalls++;
       currentRequest = null;
       for (const l of listeners) l({ ...snap, phase: this.phase });
+    },
+    // 测试 helper：直接驱动 snap.lockState 并触发监听刷新。
+    // 施工单 2026-06-30 003 后 lockState 真值由 service.computeLockState()
+    // 决定，UI 渲染直接读 snap.lockState——测试可以绕过 service 内部
+    // 状态机直接注入期望的 lockState 值来验证 UI 行为。
+    _setSnapLockState(next: "locked" | "unlocked") {
+      snap.lockState = next;
+      for (const l of listeners) l({ ...snap });
     },
     endSession() {
       this.phase = "waiting";
@@ -205,7 +214,7 @@ function makeFakeService(): ProtocolService & {
     setOriginSettings: async () => undefined,
     confirmDeadlineMs: () => null,
     setSystemSettings: async () => undefined,
-    lockState: () => "unlocked" as const,
+    lockState: () => snap.lockState,
     lockSummarySnapshot: () => null,
     connectAuthSnapshot() {
       return this.authSnapshot;
@@ -440,9 +449,12 @@ describe("ProtocolPopupPage", () => {
     expect(screen.getByText("回到最新")).toBeTruthy();
   });
 
-  it("appView popup 阶段：vault locked 但无 pendingUnlock 请求时不渲染全屏锁屏", () => {
-    // 施工单 2026-06-30 003 硬切换 4.5：`lockState` 不再是 appView popup
-    // 入口的全局总闸；没有待处理锁屏请求时直接显示传统 popup 主界面。
+  it("appView popup 阶段：lockState=unlocked 直接显示传统 popup 主界面，不再额外走旁路", () => {
+    // 施工单 2026-06-30 003 硬切换 4.5：
+    //   `lockState` 真值已收口为"当前 Session Window 是否拥有可执行
+    //   owner runtime"。appView bootstrap 完成后 Session Window 即
+    //   unlocked；UI 直接读 `snap.lockState === "locked"` 判断是否渲染
+    //   锁屏页，不再为 appView popup 阶段额外开旁路。
     const service = makeFakeService();
     service.bootModeValue = "appView";
     service.appViewContextValue = {
@@ -451,42 +463,26 @@ describe("ProtocolPopupPage", () => {
       appUrl: "https://justnote.apps.bsv8.com/"
     };
     service.childReadyValue = true;
-    // 模拟 vault locked，但 lockSummary 为 null（无 pending 请求）。
-    const lockedSnap: ProtocolSessionSnapshot = {
-      phase: "waiting",
-      boundSource: null,
-      boundOrigin: null,
-      method: null,
-      requestId: null,
-      lockState: "locked"
+    service.feed = {
+      currentOrigin: "https://justnote.apps.bsv8.com",
+      commands: [],
+      historyAvailable: true,
+      lockSummary: null
     };
-    const listeners = (service as unknown as {
-      listeners: Set<(s: ProtocolSessionSnapshot) => void>;
-    }).listeners;
-    const feedListeners = service.feedListeners;
     currentService = service;
-    act(() => {
-      // 直接同步最新快照与 feed snapshot。
-      for (const l of listeners) l(lockedSnap);
-      for (const l of feedListeners) {
-        l({
-          currentOrigin: "https://justnote.apps.bsv8.com",
-          commands: [],
-          historyAvailable: true,
-          lockSummary: null
-        });
-      }
-    });
     render(<ProtocolPopupPage />);
-    // 锁屏页（"解锁后继续" 标题）不应出现。
+    // lockState=unlocked（默认）→ 走主 popup 路径。
     expect(screen.queryByText("解锁后继续")).toBeNull();
-    // 顶栏与 feed 应在。
+    // 顶栏 / feed 应在。
     expect(screen.getByText("关闭")).toBeTruthy();
     expect(screen.getByText("回到最新")).toBeTruthy();
   });
 
-  it("appView popup 阶段：有 pendingUnlock 请求时仍渲染锁屏", () => {
-    // 施工单 2026-06-30 003 硬切换 4.5：有 waiting_unlock_* 请求才切锁屏。
+  it("appView popup 阶段：lockState=locked 渲染锁屏页（与 connect mode 统一判定）", () => {
+    // 施工单 2026-06-30 003 硬切换 4.5：lockState 是 UI 与 accept 阶段
+    // 的共同真值。appView popup 阶段若 lockState=locked（owner runtime
+    // 不可用），UI 与 connect mode 一视同仁渲染锁屏页——不再为 appView
+    // 单独保留"旁路"打开主 popup。
     const service = makeFakeService();
     service.bootModeValue = "appView";
     service.appViewContextValue = {
@@ -509,8 +505,10 @@ describe("ProtocolPopupPage", () => {
       }
     };
     currentService = service;
+    // 驱动 lockState=locked 后再 render。
+    service._setSnapLockState("locked");
     render(<ProtocolPopupPage />);
-    // 锁屏页应出现。
+    // 锁屏页应出现；与 connect mode 同一套渲染。
     expect(screen.getByText("解锁后继续")).toBeTruthy();
   });
 

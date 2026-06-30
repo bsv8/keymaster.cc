@@ -978,18 +978,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     //     提供方，不再是运行期 request source。
     if (!this.isAllowedRequestSource(event, parsed.method)) return;
 
-    if (
-      this.bootModeValue === "appView" &&
-      event.source &&
-      this.currentAppClientSource &&
-      event.source === this.currentAppClientSource
-    ) {
-      // 施工单 2026-06-30 003：bound source 发来 request → child 显然活着，
-      // 软超时等待态与提示一并清掉，便于 UI 立即从"show app / 提示"切回
-      // 传统 popup 主界面。
-      this.stopAppClientConnectTimer();
-      this.clearAppClientConnectTimeout();
-    }
+    // 施工单 2026-06-30 003 硬切换：appView mode 下首条合法 child 协议
+    // 消息（无论是顶层 `ready`，还是首条 `connect.launch` 等 request）
+    // 都应把 `childReady` 翻 true，让 UI 从 `show app` 切回传统 popup。
+    // `isAllowedRequestSource` 已经在必要时绑定 `currentAppClientSource`，
+    // 这里再统一翻 childReady + 清等待态 / 软超时提示。
+    this.markChildAliveFromBoundSource();
 
     // 重复 requestId 拒绝：同 source + origin + transportRequestId 还有
     // 未终态记录，则忽略。
@@ -1174,6 +1168,18 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 同步取会话级锁状态。
+   *
+   * 设计缘由（施工单 2026-06-30 003 硬切换 4.5）：
+   *   - 真值从"本地 vault 是否解锁"收口为"当前 Session Window 是否拥有
+   *     可执行 owner runtime"。
+   *   - 任一来源就绪即 unlocked：
+   *       * `bootstrap_owner`（appView mode 下 `applyLauncherBootstrap`
+   *         注册到 `ownerRuntimesBySessionId`）；
+   *       * `vault_unlock`（本窗口用户后续解锁，vault.status() 返回
+   *         `"unlocked"`）。
+   *   - 两者皆不可用才是 locked。
+   *   - UI 据此决定渲染锁屏页还是主 popup；accept 阶段据此决定 request
+   *     推进到 `confirming` / `queued` 还是 `waiting_unlock_*`。
    */
   lockState(): ProtocolPopupLockState {
     return this.lockStateValue;
@@ -1877,12 +1883,14 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.markBootstrapFailed("bootstrap_owner_runtime_invalid");
       return;
     }
-    if (runtime.ownerPublicKeyHex !== payload.ownerPublicKeyHex) {
+    if (runtime.ownerPublicKeyHex.toLowerCase() !== payload.ownerPublicKeyHex.toLowerCase()) {
       this.markBootstrapFailed("bootstrap_owner_runtime_pubkey_mismatch");
       return;
     }
     // 1) 校验私钥 hex 确实对应声明的 ownerPublicKeyHex：直接派生
     //    压缩公钥并比对；不一致 → fail-closed。
+    //    派生得到的是小写 hex；payload / runtime 内的 hex 可能大小写不一，
+    //    比较时统一 toLowerCase。
     let derivedPubHex: string;
     try {
       derivedPubHex = await this.deriveCompressedPubHexFromPrivHex(runtime.privateKeyHex);
@@ -1895,7 +1903,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.markBootstrapFailed("bootstrap_owner_runtime_invalid");
       return;
     }
-    if (derivedPubHex !== runtime.ownerPublicKeyHex) {
+    if (derivedPubHex !== runtime.ownerPublicKeyHex.toLowerCase()) {
       this.markBootstrapFailed("bootstrap_owner_runtime_pubkey_mismatch");
       return;
     }
@@ -1931,6 +1939,16 @@ export class ProtocolServiceImpl implements ProtocolService {
     });
     // 3) 状态写入完成。bootstrap consume 已成功：不再做超时 / listener
     //    收尾（direct consume 模型没有 listener）。
+    //
+    // 施工单 2026-06-30 003 硬切换 4.5：appView bootstrap 成功并建立
+    // 可执行 owner runtime 后，Session Window 应视为 unlocked。即使
+    // 本地 vault 仍是 locked，bootstrap_owner 来源已足够跑业务方法。
+    // 这里走 `setVaultLockState(vault.status() === "unlocked")` 让
+    // `computeLockState()` 重新计算；如果之前因 vault locked 已经有
+    // `waiting_unlock_*` record，这里会顺便批量推进到 confirming /
+    // queued。如果 lockState 已是 unlocked，setVaultLockState 内部
+    // 早返回，不重复触发收口。
+    this.setVaultLockState(this.deps.vault.status() === "unlocked");
     this.emit();
     // 注：**不**向 launcher 发 ack。用户已确认"session window 不需要
     // 和 launcher 做任何沟通"；launcher 自己决定何时关窗（信任开窗即
@@ -2153,6 +2171,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `appClientConnectTimedOut` 提示。
    *   - 重复 ready 到达：`childReadyFlag` 已经 true → 直接忽略，不重复 emit
    *     避免 UI 闪烁。
+   *   - 注：`childReadyFlag` 也可在首条合法 request 路径由
+   *     `markChildAliveFromBoundSource` 翻 true（见 handleMessage）。
+   *     本函数仅处理显式 `ready` 路径；两路汇到同一份真值。
    */
   private tryAcceptChildReady(event: MessageEvent): void {
     if (this.bootModeValue !== "appView") return;
@@ -2163,8 +2184,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!source) return;
     // 已绑定 source：必须严格匹配，错误窗口的 ready 直接忽略。
     if (this.currentAppClientSource && this.currentAppClientSource !== source) return;
-    // 旧 `appClientReadyPumpHandle` / pump 已删除；这里不再调用
-    // postReadyToTarget。
     if (!this.currentAppClientSource) {
       this.currentAppClientSource = source;
     }
@@ -2179,6 +2198,36 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.deps.logger?.info?.({
       scope: "protocol.sessionWindow",
       event: "appClient.ready"
+    });
+    this.emit();
+  }
+
+  /**
+   * 标记 child 已"活着"：appView mode 下首条合法 child 协议消息到达
+   * 即触发；后续不论来自显式 `ready` 还是首条 `connect.*`，UI 都应
+   * 切到传统 popup（施工单 2026-06-30 003 硬切换）。
+   *
+   * 设计缘由：
+   *   - 之前只有显式 `ready` 才能翻 childReady；child app 漏发 ready
+   *     直接发 connect.launch 时 UI 仍会卡在 `show app` 分支——但请求
+   *     已经被执行，状态错位。
+   *   - 现在任何从 bound source 来的合法协议消息（无论是 ready /
+   *     request / cancel）都把 childReady 翻 true；source 绑定已由
+   *     `tryAcceptChildReady` / `isAllowedRequestSource` 在调用本方法
+   *     之前完成。
+   *   - 幂等：childReadyFlag 已 true 时直接返回，不重复 emit。
+   */
+  private markChildAliveFromBoundSource(): void {
+    if (this.bootModeValue !== "appView") return;
+    // 即便 childReadyFlag 已是 true，也顺手清掉等待态 / 软超时提示——
+    // 例如迟到的 connect.* 在软超时之后到达，仍应清掉"连接较慢"提示。
+    this.stopAppClientConnectTimer();
+    this.clearAppClientConnectTimeout();
+    if (this.childReadyFlag) return;
+    this.childReadyFlag = true;
+    this.deps.logger?.info?.({
+      scope: "protocol.sessionWindow",
+      event: "appClient.aliveFromRequest"
     });
     this.emit();
   }
@@ -2210,9 +2259,45 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
+  /**
+   * 当前 Session Window 拥有的"可执行 owner runtime"真值
+   * （施工单 2026-06-30 003 硬切换 4.5）。
+   *
+   * 设计缘由：
+   *   - `lockStateValue` 公开语义从"本地 vault 是否已解锁"正式收口为
+   *     "当前 Session Window 是否已经拥有可执行 owner runtime"。
+   *   - 可执行 owner runtime 的两种来源：
+   *       1. `bootstrap_owner`：launcher 一次性注入的 owner runtime
+   *          材料，appView mode 下 `applyLauncherBootstrap` 注册到
+   *          `ownerRuntimesBySessionId` 后即对当前窗口持续有效。
+   *       2. `vault_unlock`：本窗口用户后续解锁 + keyspace 中 owner key
+   *          可读时由 `resolveOwnerRuntime` 切换到 vault_unlock 来源。
+   *   - 任一来源可用 → `unlocked`；两者皆不可用 → `locked`。
+   *   - 这条真值收口让 appView popup 阶段不再"UI 看似 unlocked，但 accept
+   *     阶段仍按 locked 推 waiting_unlock_*"——accept / UI 收口逻辑全部
+   *     统一读这一份真值。
+   */
+  private hasExecutableOwnerRuntime(): boolean {
+    // 优先 bootstrap_owner：哪怕 vault 后续被 relock，runtime 仍有效。
+    if (this.ownerRuntimesBySessionId.size > 0) return true;
+    // 否则靠 vault 解锁。
+    return this.deps.vault.status() === "unlocked";
+  }
+
+  /**
+   * 按当前 Session Window 状态计算 `lockStateValue`（施工单 2026-06-30 003）。
+   *
+   * 不读 `this.lockStateValue` 旧值；只读两类真值源。这样所有"谁能执行"
+   * 的判定都走同一个出口，避免再出现"旧值没刷新导致 accept / UI 错位"。
+   */
+  private computeLockState(): ProtocolPopupLockState {
+    return this.hasExecutableOwnerRuntime() ? "unlocked" : "locked";
+  }
+
   private readVaultLockState(): ProtocolPopupLockState {
-    const s = this.deps.vault.status();
-    return s === "unlocked" ? "unlocked" : "locked";
+    // 施工单 2026-06-30 003：startSession 时清空 ownerRuntimesBySessionId，
+    // 此时 hasExecutableOwnerRuntime 完全由 vault 状态决定——行为与旧语义一致。
+    return this.computeLockState();
   }
 
   /**
@@ -2827,12 +2912,28 @@ export class ProtocolServiceImpl implements ProtocolService {
    * vault 状态变化时由外部（popup 或 vault）调用：service 同步 lockState
    * 并执行 relock / unlock 收口。
    *
-   * - locked → unlocked：批量推进所有 waiting_unlock_*。
-   * - unlocked → locked：confirming → waiting_unlock_manual + 清 timeout；
-   *   queued 保持；executing 当前这一条允许跑完；执行器暂停取新任务。
+   * 设计缘由（施工单 2026-06-30 003 硬切换 4.5）：
+   *   - `lockStateValue` 真值 = "当前 Session Window 是否拥有可执行
+   *     owner runtime"。`setVaultLockState(locked)` 传的 `locked` 只是
+   *     当前 vault 的状态；最终 `lockStateValue` 由 `computeLockState()`
+   *     同时参考 vault 状态 + `ownerRuntimesBySessionId` 是否非空决定。
+   *   - 因此即便 vault 被 relock，只要 `ownerRuntimesBySessionId` 里还
+   *     有 bootstrap_owner runtime，`lockStateValue` 仍保持 unlocked——
+   *     不再为了保留"本地 vault locked"细节把 UI / accept 阶段重新推
+   *     进解锁流。
+   *   - 同样被 `applyLauncherBootstrap` 在注册完 owner runtime 后调用
+   *     一次，让 vault locked + bootstrap_owner 已就绪 的组合也能立刻
+   *     把已存在的 `waiting_unlock_*` 记录推进到 confirming / queued。
+   *
+   * 收口语义：
+   *   - 状态从 unlocked → locked：所有 `confirming` → `waiting_unlock_manual`
+   *     + 清 timeout；`queued` 保持；`executing` 当前这条允许跑完。
+   *   - 状态从 locked → unlocked：批量推进 `waiting_unlock_*`。
+   *     `authUnlockInProgress` 期间跳过批量推进（auth 页自己处理）。
    */
-  setVaultLockState(locked: boolean): void {
-    const next = locked ? "locked" : "unlocked";
+  setVaultLockState(_vaultLocked: boolean): void {
+    // 参数 `_vaultLocked` 仅保留兼容入口；最终态由 computeLockState 统一决定。
+    const next = this.computeLockState();
     if (this.lockStateValue === next) return;
     this.lockStateValue = next;
     if (next === "locked") {
@@ -3628,7 +3729,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     const bootEntry = this.ownerRuntimesBySessionId.get(session.sessionId);
     if (bootEntry) {
       const runtime = bootEntry.runtime;
-      if (runtime.ownerPublicKeyHex !== session.ownerPublicKeyHex) {
+      // 公钥比较统一 toLowerCase：launcher 端可能用大小写不一。
+      if (runtime.ownerPublicKeyHex.toLowerCase() !== session.ownerPublicKeyHex.toLowerCase()) {
         throw localFailure(
           "internal_error",
           "owner runtime ownerPublicKeyHex mismatch"

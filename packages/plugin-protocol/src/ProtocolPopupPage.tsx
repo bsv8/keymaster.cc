@@ -135,7 +135,7 @@ export function ProtocolPopupPage() {
   }, [service]);
 
   /**
-   * vault 锁状态监听挂在父组件（施工单 2026-06-27 001 反馈修复）：
+   * vault 锁状态监听挂在父组件（施工单 2026-06-27 001 反馈修复 + 2026-06-30 003）：
    *
    * 旧实现把监听放在 `LockScreenPage` 子组件里；解锁后切到主 popup 时
    * `LockScreenPage` 卸载 → 监听消失 → 主页面状态下重新锁定时
@@ -145,6 +145,11 @@ export function ProtocolPopupPage() {
    * 现在监听挂在 `ProtocolPopupPage`，跨越 locked / unlocked 视图切换仍生效。
    * LockScreenPage 里旧的 `useEffect(() => vault.onStatusChange(...))` 已
    * 删除（避免重复监听）。
+   *
+   * 施工单 2026-06-30 003 硬切换 4.5：传入的 `locked` 仅表达 vault 当前
+   * 状态；`setVaultLockState` 内部用 `computeLockState()` 同时参考
+   * `bootstrap_owner` 是否已注册——appView bootstrap 完成后即便 vault
+   * 被 relock，Session Window 仍维持 unlocked，不被错误送回全屏锁屏。
    */
   useEffect(() => {
     const vault = (service as unknown as { getVaultService?: () => VaultService }).getVaultService?.();
@@ -236,17 +241,12 @@ export function ProtocolPopupPage() {
     );
   }
   // 锁屏态分支：
-  //   - connect mode：locked 即渲染锁屏页（保持旧行为）；
-  //   - appView popup 阶段（child 已 ready）：**只**当确实有"待处理锁屏
-  //     请求"（`lockSummary.pendingTotal > 0`）才渲染锁屏页。
-  //     否则**不**因 vault 默认 locked 状态把页面打回全屏锁屏——
-  //     `lockState` 仍表达 vault 本地状态，但不再是 appView `popup` 入口
-  //     的全局总闸（施工单 2026-06-30 003 硬切换 4.5）。
-  const inAppViewPopupMode = service.bootMode() === "appView" && service.childReady();
-  const shouldShowLockScreen = inAppViewPopupMode
-    ? (feed.lockSummary?.pendingTotal ?? 0) > 0
-    : snap.lockState === "locked";
-  if (shouldShowLockScreen) {
+  // 施工单 2026-06-30 003 硬切换 4.5：`lockStateValue` 真值已收口为
+  // "当前 Session Window 是否拥有可执行 owner runtime"。appView bootstrap
+  // 成功后 Session Window 即视为 unlocked；vault 默认 locked 不再触发
+  // 全屏锁屏。这里直接读 `snap.lockState`，不再为 appView popup 阶段
+  // 单独开旁路判断——accept 阶段与 UI 渲染共用一份真值。
+  if (snap.lockState === "locked") {
     return (
       <LockScreenPage
         t={t}

@@ -39,7 +39,7 @@
   1. `show app`
   2. `popup`
 - `show app` 页面保留，不删除，不自动跳过；
-- child app 一旦发来合法 `ready`，Session Window 立刻进入传统 popup 界面；
+- child app 一旦发来合法顶层协议消息，Session Window 就视为 child ready，并立刻进入传统 popup 界面；
 - 重复点击 `Open App` 不再用 `_blank` 开无限新窗，而是复用命名窗口：
   - `keymaster-app-<origin编码后>`
 - soft timeout 只恢复按钮可点，**不**重建 `connectSessionId`，**不**重发 bootstrap，**不**偷偷补救。
@@ -108,7 +108,7 @@
 
 因此本单固定：
 
-- “没有及时收到 child `ready`” 只说明 app 没起来或起来慢了；
+- “没有及时收到 child 合法消息” 只说明 app 没起来或起来慢了；
 - 它**不**等于这次 launcher 预建的 session 已失效；
 - soft timeout 不得重建 `connectSessionId`，不得重做 bootstrap，按钮恢复可点即可。
 
@@ -127,15 +127,16 @@
    - `popup`
 4. bootstrap 未完成时显示 waiting launcher。
 5. bootstrap 完成后显示 `show app` 页面。
-6. 用户点击 `Open App` 后，按钮进入等待态；若 5 秒内未收到合法 child `ready`，按钮恢复可点。
+6. 用户点击 `Open App` 后，按钮进入等待态；若 5 秒内未收到合法 child 协议消息，按钮恢复可点。
 7. soft timeout 只恢复按钮可点；不重建 `connectSessionId`，不重建 `launchToken`，不重新 bootstrap。
-8. 收到合法 child `ready` 后，Session Window 立即进入传统 popup 界面。
+8. 收到合法 child 协议消息后，Session Window 立即进入传统 popup 界面。
 9. 进入 popup 后，不再额外隐藏历史，不再加第三段过渡态。
 10. `Open App` 使用命名窗口 `keymaster-app-<origin编码后>`，不再用 `_blank`。
 11. 再次点击 `Open App` 时优先复用同一扇 client 窗口，减少重复窗口与迟到消息混乱。
-12. appView 下 child `ready` 的合法性按 `origin + source` 校验；不接受任意同源窗口乱发 `ready`。
+12. appView 下 child ready 的合法性按 `origin + source + 顶层协议消息形状` 校验；不接受任意同源窗口乱发垃圾消息。
 13. 传统 connect popup 流仍保持原语义：Session Window 继续向 opener 发 `ready`。
 14. `connect.launch`、后续业务 request、统一 owner runtime 逻辑不因本单而分叉成第二套执行模型。
+15. `lockStateValue` 的公开语义改成“当前 Session Window 是否已经拥有可执行的 owner runtime”，不再限制为“本地 vault 是否已解锁”。
 
 ---
 
@@ -167,6 +168,23 @@
 1. `ready` 仍是顶层协议消息，不带 method。
 2. 不新增第二种“只给 appView 用”的 ready 类消息。
 3. 不把 `ready` 变成业务态确认；它只表达 listener 就绪。
+4. 对 appView 来说，显式 `ready` 只是最直接的 child ready 信号，不是唯一信号。
+5. 任何来自合法 child source 的顶层协议消息，只要已足以证明 child listener 在工作，就等价视为 implicit `ready`。
+
+这里的“合法 child 协议消息”最少要满足：
+
+1. `event.origin === appViewContext.appOrigin`
+2. `event.source` 已绑定为当前 child source，或可被接纳为首个 child source
+3. 消息形状属于现有顶层协议消息，例如：
+   - `ready`
+   - `request`
+   - `cancel`
+
+也就是说：
+
+- 显式 `ready` 可以切 `show app -> popup`
+- 首条合法 child 协议消息也可以切 `show app -> popup`
+- `ready` 仍保留；只是系统不再要求“必须先看到显式 ready，后续 request 才算 child 已起来”
 
 ### 4.2 Session Window UI 两段式
 
@@ -182,9 +200,9 @@ appView UI
 
 - `show app`
   = launcher bootstrap 已成功
-  = child app 尚未发来合法 `ready`
+  = child app 尚未发来合法 child 协议消息
 - `popup`
-  = child app 已发来合法 `ready`
+  = child app 已发来合法 child 协议消息
   = Session Window 回到传统 popup 界面
 
 关键约束：
@@ -192,6 +210,7 @@ appView UI
 1. `show app` 页面保留。
 2. `popup` 页面就是传统 popup 页面，不再造一份 appView 专属主界面。
 3. 不新增 “show app -> waiting request -> popup” 第三段。
+4. “收到第一条合法 child 协议消息即切 popup” 是 child ready 的隐式判定，不是新增第三段状态。
 
 ### 4.3 `Open App` 重试真值
 
@@ -223,31 +242,60 @@ window.open(appUrl, "keymaster-app-<origin编码后>")
 2. 不再使用 `_blank`。
 3. 不单独维护一个额外的 `stableWindowName` 状态变量。
 
-### 4.5 popup 模式下的锁屏接管规则
+### 4.5 `lockStateValue` 真值
+
+本次固定：
+
+```txt
+lockStateValue
+  = 当前 Session Window 是否已经拥有可执行的 owner runtime
+```
+
+含义：
+
+- `locked`
+  = 当前 Session Window 没有可执行 owner runtime
+- `unlocked`
+  = 当前 Session Window 已有可执行 owner runtime
+
+来源允许有两种：
+
+1. `bootstrap_owner`
+   = launcher / bootstrap 继承过来的 owner runtime
+2. `vault_unlock`
+   = 本窗口后续通过本地 vault 解锁得到的 owner runtime
+
+关键约束：
+
+1. 这次硬切换后，`lockStateValue` **不再**专指“本地 vault 是否已解锁”。
+2. appView bootstrap 成功并建立可执行 owner runtime 后，Session Window 就应视为 `unlocked`。
+3. 不能为了保留“本地 vault locked”这个细节，再让 UI / accept 阶段继续把 request 推进解锁流。
+
+### 4.6 popup 模式下的锁屏接管规则
 
 本次固定：
 
 ```txt
 appView 进入 popup 后
-不能因为 vault 默认 locked
+不能因为底层本地 vault 仍是 locked
 就立刻把页面打回全屏锁屏
 ```
 
 关键约束：
 
-1. child `ready` 到达后，如果当前没有 auth owner、也没有待处理锁屏请求，页面应先显示传统 popup 主界面。
+1. child ready 到达后，如果当前没有 auth owner、也没有待处理锁屏请求，页面应先显示传统 popup 主界面。
 2. 只有真正出现：
    - `connect.login` auth owner
    - `connect.resume` auth owner
    - `waiting_unlock_*` / 需要锁屏接管的请求
    才允许切到现有 auth / lock 全屏。
-3. `lockState` 仍然表达 vault 本地状态，但不再是 appView `popup` 入口的全局总闸。
+3. `lockStateValue` 已经表达“当前 Session Window 是否可执行”，因此 appView popup 阶段不应再额外保留“虽然可执行但 UI 仍视作 locked”的旁路。
 
 ---
 
 ## 5. 怎么做
 
-### 一、把 child app `ready` 变成 appView 切段信号
+### 一、把 child ready 变成 appView 切段信号
 
 需要在 `protocolService` 内部显式维护“child app 是否已 ready”真值。
 
@@ -256,14 +304,16 @@ appView 进入 popup 后
 1. 新增 appView 运行期状态：
    - child ready 是否已收到
    - 当前 `Open App` 按钮是否处于等待态
-2. `handleMessage(event)` 在 appView 下先识别顶层 `ready`：
+2. `handleMessage(event)` 在 appView 下先识别合法 child 协议消息：
    - `event.origin === appViewContext.appOrigin`
    - `event.source` 合法
-3. 合法 `ready` 命中后：
+   - 消息形状属于允许接纳的顶层协议消息
+3. 合法 child 协议消息命中后：
    - 绑定 / 确认 `currentAppClientSource`
    - 关闭 soft timeout / 停止等待态
    - 切 `childReady = true`
    - 触发 UI 进入 popup
+4. 若命中消息本身就是业务消息，例如 `request`，则它在触发 implicit ready 后继续按原协议流程处理，不允许因为“还没显式 ready”被丢弃。
 
 ### 二、`ProtocolPopupPage` 只保留 appView 的启动壳，不再长期霸占主界面分支
 
@@ -290,7 +340,7 @@ appView 进入 popup 后
 它只需要承载：
 
 1. `Open App` 按钮
-2. 正在等待 child `ready` 时的 disabled 态
+2. 正在等待 child ready 时的 disabled 态
 3. 5 秒 soft timeout 后的提示
 4. 再次点击重试
 
@@ -351,18 +401,16 @@ soft timeout 到点时：
 
 ### 七、popup 模式下恢复传统 popup，但不被默认 locked 态立即打回锁屏
 
-需要明确切开两个概念：
-
-- “我是不是已进入 popup 模式”
-- “当前有没有请求要求锁屏 / auth 接管”
-
 appView child ready 后：
 
 1. 先进入 popup 模式
-2. 若当前无 auth owner、无待处理锁屏请求，则显示传统 popup 主界面
-3. 后续真的来了 `connect.launch` / `connect.resume` / 其它 request，再按现有 auth / lock 规则演进
+2. 由于 bootstrap owner runtime 已经在当前 Session Window 内成立，此时 `lockStateValue` 应视为 `unlocked`
+3. 若当前无 auth owner、无待处理锁屏请求，则显示传统 popup 主界面
+4. 后续真的来了 `connect.launch` / `connect.resume` / 其它 request，按普通 unlocked popup 规则推进：
+   - manual -> `confirming`
+   - auto -> `queued`
 
-这样才符合“show app / popup 两段式”，而不是 ready 一到又立刻被默认 `locked` 打回第三段锁屏。
+这样才符合“show app / popup 两段式”，而不是 child 已经可证明在线、却又因为保留旧 `lockState` 语义被重新打进解锁流。
 
 ---
 
@@ -372,7 +420,7 @@ appView child ready 后：
 
 2. 不能保留 `Session Window -> child app` 的 ready 泵，同时又再收 child ready，做成双向握手。
 
-3. 不能把 appView 切 popup 的信号绑到“收到第一条 request”而不是 `ready`。
+3. 不能把 appView 切 popup 的信号只绑到显式 `ready`，导致合法 child 业务消息已经到达却仍卡在 `show app`。
 
 4. 不能把 `show app` 页面删掉，直接点 `Open App` 后自动切 popup。
 
@@ -380,7 +428,7 @@ appView child ready 后：
 
 6. 不能在 soft timeout 后偷偷重建 `connectSessionId`。
 
-7. 不能在 popup 模式下因为 `lockState === "locked"` 就无条件全屏锁屏，导致根本看不到传统 popup。
+7. 不能继续把 `lockStateValue` 只解释成“本地 vault 是否解锁”，导致 appView 明明已继承可执行 runtime，request 仍被送进 `waiting_unlock_*`。
 
 8. 不能为了让 UI 看起来简单，把 appView 再做成第二套独立 popup service 或第二套 request/feed 模型。
 
@@ -395,22 +443,22 @@ appView child ready 后：
 1. 使用同一个命名窗口 target。
 2. 浏览器可复用同一扇 child 窗口。
 3. Session Window 不新建 session，不新建 launchToken。
-4. 谁先发来合法 `ready` / request，由当前合法 child source 规则决定。
+4. 谁先发来合法 child 协议消息，由当前合法 child source 规则决定。
 
-### 7.2 第一次点击后 child app 很慢，5 秒内没 ready
+### 7.2 第一次点击后 child app 很慢，5 秒内没任何合法消息
 
 处理原则：
 
 1. 这是 soft timeout，不是启动失败。
 2. 按钮恢复可点。
-3. 迟到的合法 `ready` 仍然接受。
+3. 迟到的合法 child 协议消息仍然接受。
 4. 不重建 session。
 
-### 7.3 child app 迟到发来 `ready`
+### 7.3 child app 迟到发来消息
 
 处理原则：
 
-1. 只要当前 bootstrap / appViewContext 仍有效，且 `origin + source` 合法，就接受。
+1. 只要当前 bootstrap / appViewContext 仍有效，且 `origin + source + 顶层协议消息形状` 合法，就接受。
 2. 一旦接受，立即进入 popup。
 3. 同时清掉 soft timeout 提示。
 
@@ -423,7 +471,7 @@ appView child ready 后：
 3. 用户可再次点击。
 4. 不新建 session。
 
-### 7.5 child `ready` 来自错误窗口
+### 7.5 child 消息来自错误窗口
 
 处理原则：
 
@@ -439,7 +487,8 @@ appView child ready 后：
 
 1. appView 不新增任何新顶层消息类型。
 2. `ready` 语义在传统 popup 与 appView 中保持方向对称。
-3. appView runtime 有明确 child ready 真值，而不是拿“是否收到第一条 request”凑合。
+3. appView runtime 有明确 child ready 真值，并且该真值可由显式 `ready` 或首条合法 child 协议消息触发。
+4. `lockStateValue` 真值已经从“本地 vault 是否解锁”收口为“当前 Session Window 是否拥有可执行 owner runtime”。
 
 ### 8.2 Session Window UI
 
@@ -447,8 +496,9 @@ appView child ready 后：
 2. bootstrap 完成后显示 `show app` 页面。
 3. 点击 `Open App` 后按钮 disabled。
 4. soft timeout 后按钮恢复可点。
-5. 收到合法 child `ready` 后，页面切到传统 popup。
+5. 收到合法 child 协议消息后，页面切到传统 popup。
 6. 切到 popup 后不再停留在 `show app` 页面。
+7. appView popup 阶段的普通业务 request 不再被错误送进解锁 UI。
 
 ### 8.3 窗口复用
 
@@ -462,3 +512,21 @@ appView child ready 后：
 2. `connect.launch`、统一 owner runtime、命令流、历史、授权按钮继续走同一套 popup 逻辑。
 3. 现有 appView bootstrap 失败态仍可 fail-closed。
 
+---
+
+## 9. 给实施者的短说明
+
+本单这次修正的关键不是再补一个 appView 特判，而是**改真值**：
+
+- `lockStateValue` 现在表示“当前 Session Window 是否已经拥有可执行的 owner runtime”
+- 不再表示“本地 vault 是否已解锁”
+
+因此实施时请按下面的方向收口：
+
+1. appView bootstrap 成功后，当前窗口应视为 `unlocked`
+2. 不要继续保留“UI 看起来 unlocked，但 accept 阶段仍按 locked 推 `waiting_unlock_*`”的夹生状态
+3. 尽量删掉 appView popup 阶段为旧 `lockState` 语义打的补丁，改成统一走普通 unlocked popup 路径
+
+一句话：这次要的是**统一真值**，不是再加一层旁路。
+
+下次检查实现时，要再次提醒实施者：不要把 child ready 收窄成“只认显式 `ready`”，必须按本单定义实现成“显式 `ready` 或首条合法 child 协议消息都算 ready”。

@@ -1871,6 +1871,26 @@ export interface ProtocolLockSummary {
  *   - `lockSummarySnapshot()` 是 service 暴露的独立只读 getter，行为与
  *     `feedSnapshot().lockSummary` 一致；调用方择一即可。
  */
+
+/**
+ * Session Window 会话级锁状态（施工单 2026-06-27 001 硬切换 + 2026-06-30 003 硬切换）。
+ *
+ * 设计缘由（施工单 2026-06-30 003 硬切换 4.5）：
+ *   - 公开语义从"本地 vault 是否已解锁"收口为
+ *     "当前 Session Window 是否拥有可执行 owner runtime"。
+ *   - `locked`
+ *     = 当前 Session Window 没有可执行 owner runtime
+ *   - `unlocked`
+ *     = 当前 Session Window 已有可执行 owner runtime
+ *   - 可执行 owner runtime 来源有两种：
+ *       1. `bootstrap_owner`：launcher / bootstrap 继承过来的 owner runtime
+ *          （appView mode 下 `applyLauncherBootstrap` 注册到
+ *          `ownerRuntimesBySessionId` 后即对当前窗口持续有效）；
+ *       2. `vault_unlock`：本窗口用户后续通过本地 vault 解锁得到的
+ *          owner runtime。
+ *   - UI 据此决定渲染锁屏页还是主 popup；accept 阶段据此决定 request
+ *     推进到 `confirming` / `queued` 还是 `waiting_unlock_*`。
+ */
 export type ProtocolPopupLockState = "locked" | "unlocked";
 
 /**
@@ -2073,9 +2093,17 @@ export interface ProtocolSessionSnapshot {
   /** 已绑定 request 的 id（绑定前为 null）。 */
   requestId: string | null;
   /**
-   * 当前会话级锁状态（施工单 2026-06-27 001 硬切换）。
-   * - `unlocked` → 进入主 popup 页面（顶栏 + 命令流 + 站点配置）；
-   * - `locked`   → 全页锁屏页（解锁表单 + 待处理摘要）。
+   * 当前会话级锁状态（施工单 2026-06-27 001 硬切换 + 2026-06-30 003 硬切换 4.5）。
+   * - `unlocked` → 当前 Session Window 拥有可执行 owner runtime；进入
+   *   主 popup 页面（顶栏 + 命令流 + 站点配置）；
+   * - `locked`   → 当前 Session Window 没有可执行 owner runtime；全页
+   *   锁屏页（解锁表单 + 待处理摘要）。
+   *
+   * 真值来源：
+   *   - `bootstrap_owner`：appView mode 下 launcher 一次性注入的
+   *     owner runtime，bootstrap 成功后即对当前窗口持续有效。
+   *   - `vault_unlock`：本窗口用户后续通过本地 vault 解锁。
+   *   - 任一可用即 `unlocked`；二者皆不可用才是 `locked`。
    *
    * 注意：`phase` 与 `lockState` 是两层语义；不允许把 phase 改写
    * 成 lockState，也不允许把 lockState 合并进 phase。
@@ -2309,9 +2337,17 @@ export interface ProtocolService {
    */
   confirmDeadlineMs(recordId?: string): number | null;
   /**
-   * 当前会话级锁状态（施工单 2026-06-27 001 硬切换）。
+   * 当前会话级锁状态（施工单 2026-06-27 001 硬切换 + 2026-06-30 003 硬切换 4.5）。
    *
-   * 同步读：UI 用此决定渲染锁屏页还是主 popup 页面。
+   * 同步读：UI / accept 阶段据此决定渲染锁屏页还是主 popup 页面。
+   *
+   * 设计缘由（施工单 2026-06-30 003）：
+   *   - 真值已收口为"当前 Session Window 是否拥有可执行 owner runtime"
+   *     ——任一来源（`bootstrap_owner` / `vault_unlock`）可用即
+   *     `unlocked`，二者皆不可用才是 `locked`。
+   *   - appView bootstrap 完成后 Session Window 即视为 unlocked；
+   *     后续即便 vault 被 relock，只要 bootstrap_owner runtime 仍在
+   *     `ownerRuntimesBySessionId` 内，就保持 unlocked。
    */
   lockState(): ProtocolPopupLockState;
   /**
@@ -2340,13 +2376,20 @@ export interface ProtocolService {
   /**
    * 由 popup 顶层 vault.onStatusChange 调用的切换入口。
    *
-   * 语义：
-   *   - locked → unlocked：批量推进 `waiting_unlock_*`；manual 进
-   *     `confirming`（启动 timer + 异步 clamp 到 DB 真值），auto 进
-   *     `queued`；尝试启动执行器。
-   *   - unlocked → locked：所有 `confirming` 立即回到
-   *     `waiting_unlock_manual` + 清 timer；queued 保持；executing 当前
-   *     这条允许跑完；执行器暂停取新任务。
+   * 设计缘由（施工单 2026-06-30 003 硬切换 4.5）：
+   *   - 传入的 `locked` 仅表达当前 vault 状态；最终 `lockStateValue`
+   *     由 service 内部用 `computeLockState()` 同时参考 vault 状态 +
+   *     `ownerRuntimesBySessionId` 是否非空统一决定。
+   *   - 因此：
+   *       * vault unlock 后 → 至少有一路 owner runtime 可用 → unlocked；
+   *         已存在的 `waiting_unlock_*` 记录批量推进到
+   *         `confirming` / `queued`。
+   *       * vault lock 后 → 如果 `ownerRuntimesBySessionId` 里还保留
+   *         bootstrap_owner runtime，仍维持 unlocked；否则推回 locked
+   *         并触发 `confirming` → `waiting_unlock_manual` 的硬收口。
+   *   - 同方法也被 `applyLauncherBootstrap` 在注册完 owner runtime 后
+   *     调用一次，使 appView bootstrap 完成即可立刻把当前 Session Window
+   *     视为 unlocked。
    */
   setVaultLockState(locked: boolean): void;
 
@@ -2418,14 +2461,17 @@ export interface ProtocolService {
   appClientWaitingForReady(): boolean;
 
   /**
-   * child app 是否已发来合法 `ready`（施工单 2026-06-30 003 硬切换）。
+   * child app 是否已"活着"（施工单 2026-06-30 003 硬切换）。
    *
    * 设计缘由：
    *   - `ready` 方向对称：`client web -> Session Window` 发 `ready`
    *     （与传统 popup 流 `Session Window -> client web` 对称）。
-   *   - Session Window UI 的 appView 两段式以此为切换信号：
-   *     `show app`（child 未 ready） → `popup`（child 已 ready）。
-   *   - 合法性按 `event.origin === appViewContext.appOrigin` + 当前
+   *   - UI 的 appView 两段式切换信号不**只**盯显式 `ready`——首条
+   *     合法 child 协议消息（无论是顶层 `ready` 还是首条 `connect.*`
+   *     request / cancel）都视为 child 已"活着"，立刻把 UI 切到
+   *     传统 popup。`childReady` 一旦 true 在 Session Window 生命周期
+   *     内不再回 false。
+   *   - 合法性统一按 `event.origin === appViewContext.appOrigin` +
    *     `currentAppClientSource`（如已绑定）双重校验。
    *   - `connect mode` 下恒为 false；`appView mode` 但 bootstrap 未完成
    *     也恒为 false。
