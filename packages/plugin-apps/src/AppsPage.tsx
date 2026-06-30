@@ -1,7 +1,7 @@
 // packages/plugin-apps/src/AppsPage.tsx
 // `/apps` 页面：从 `appsCatalog.json` 读取 app 清单，提供 Open App 入口。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换）：
+// 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
 //   - 页面只调 `protocol.service.launchAppView(...)`；**不**直接操作
 //     `protocolStorageDb` / `buildAppBootstrapPayload` /
 //     `installLauncherBootstrapRegistry` / `window.open` popup URL。
@@ -10,6 +10,10 @@
 //     **不**直接把 `err.message` 抛给用户（避免把"vault not unlocked"等
 //     内部实现细节展示到 UI 上）。
 //   - 启动失败一律 fail-closed：抛错，UI 显示错误，不补偿不重试。
+//   - 施工单 2026-06-29 003 硬切换：错误码从
+//     `"export_unlock_runtime_failed"` 改成
+//     `"export_session_signer_failed"`（语义对应 launcher 端借 owner
+//     私钥失败）。
 
 import { useState } from "react";
 import { useCapability, useI18n, navigateTo } from "@keymaster/runtime";
@@ -42,8 +46,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
       return "apps.open.error.windowUnavailable";
     case "session_storage_unavailable":
       return "apps.open.error.sessionStorageUnavailable";
-    case "export_unlock_runtime_failed":
-      return "apps.open.error.exportUnlockRuntimeFailed";
+    case "export_session_signer_failed":
+      return "apps.open.error.exportSessionSignerFailed";
     case "open_session_window_failed":
       return "apps.open.error.openSessionWindowFailed";
     case "open_session_window_blocked":

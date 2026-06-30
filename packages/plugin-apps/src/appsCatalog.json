@@ -6,5 +6,13 @@
     "appOrigin": "https://justnote.apps.bsv8.com",
     "appUrl": "https://justnote.apps.bsv8.com/",
     "claims": []
+  },
+  {
+    "id": "demo",
+    "name": "Demo",
+    "summary": "Demo app powered by Keymaster (施工单 2026-06-29 003 验收).",
+    "appOrigin": "https://demo.apps.bsv8.com",
+    "appUrl": "https://demo.apps.bsv8.com/",
+    "claims": []
   }
 ]

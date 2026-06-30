@@ -1,13 +1,16 @@
 // packages/plugin-apps/src/AppsHomeWidget.tsx
 // 首页 widget：展示前 3 张 app 卡片 + 跳转 `/apps` 入口。
 //
-// 设计缘由（施工单 2026-06-29 002 硬切换）：
+// 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
 //   - 与 `/apps` 页面**共用**同一份 `appsCatalog.json` 与同一个
 //     `protocol.service.launchAppView(...)` 调用；
 //   - 不维护第二套启动逻辑、不维护第二套字段映射；
 //   - 只展示前 3 条，UI 提示"more"；
 //   - 启动失败按 `LaunchAppViewError.code` 映射到 i18n 文案，**不**直接
 //     暴露 `err.message` 给用户。
+//   - 施工单 2026-06-29 003 硬切换：错误码从
+//     `"export_unlock_runtime_failed"` 改成
+//     `"export_session_signer_failed"`。
 
 import { useState } from "react";
 import { useCapability, useI18n, navigateTo } from "@keymaster/runtime";
@@ -36,8 +39,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
       return "apps.open.error.windowUnavailable";
     case "session_storage_unavailable":
       return "apps.open.error.sessionStorageUnavailable";
-    case "export_unlock_runtime_failed":
-      return "apps.open.error.exportUnlockRuntimeFailed";
+    case "export_session_signer_failed":
+      return "apps.open.error.exportSessionSignerFailed";
     case "open_session_window_failed":
       return "apps.open.error.openSessionWindowFailed";
     case "open_session_window_blocked":
