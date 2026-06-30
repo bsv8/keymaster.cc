@@ -472,6 +472,8 @@ function AppViewBootstrapWaitPage({
  *   - 用户明确点击大按钮后才调用 `service.openClientApp()`；这样 launcher
  *     不被打断，Session Window 也能稳定停留。
  *   - `openClientApp()` 失败时仅在本页显示简短错误，不补复杂恢复逻辑。
+ *   - `Open App` 后若 5s 内仍未收到 child app 第一条合法 request，
+ *     本页显示软超时提示；迟到连接到来后提示自动消失。
  */
 function AppViewBootstrapDonePage({
   t,
@@ -483,6 +485,7 @@ function AppViewBootstrapDonePage({
   appId: string;
 }) {
   const [openError, setOpenError] = useState<string | null>(null);
+  const connectTimedOut = service.appClientConnectTimedOut();
 
   function handleOpenApp() {
     setOpenError(null);
@@ -522,6 +525,16 @@ function AppViewBootstrapDonePage({
             <code>{openError}</code>
           </p>
         ) : null}
+        {connectTimedOut ? (
+          <p className="protocol-popup__appview-error" data-testid="appview-open-app-timeout">
+            <code>
+              {t("protocol.sessionWindow.appView.connectTimeout.soft", {
+                defaultValue:
+                  "The app has not connected to this Session Window within 5 seconds after Open App. You can keep this window open and wait, or click Open App again."
+              })}
+            </code>
+          </p>
+        ) : null}
         <p className="protocol-popup__muted">{appId}</p>
       </div>
     </div>
@@ -534,8 +547,8 @@ function AppViewBootstrapDonePage({
  * 设计缘由：
  *   - 旧实现失败 / 超时永远停在"等待 launcher"——用户看到的是"卡死"。
  *   - 新实现：launcher 在合理时间（如 30s）内未发 bootstrap / payload
- *     不合法 / session signer 校验失败 → 立即渲染此错误页；用户可以
- *     关闭 Session Window 重新从 Keymaster 应用商店启动 app。
+ *     不合法 / session signer 校验失败 → 立即渲染此错误页；用户可以关闭
+ *     Session Window 重新从 Keymaster 应用商店启动 app。
  *   - 错误文案按 `reason` 区分大致类别（signer 缺失 / signer 与
  *     session 不匹配 / payload 不合法 / 其它）；详细本地 reason
  *     不暴露给用户，避免泄漏内部细节。

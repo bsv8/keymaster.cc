@@ -6464,4 +6464,267 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       win.open = originalOpen;
     }
   });
+
+  it("openClientApp 在短窗口内重发 ready，覆盖 child app listener 挂载竞态", () => {
+    vi.useFakeTimers();
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childMessages: unknown[] = [];
+    const childWindow = {
+      postMessage: (msg: unknown) => {
+        childMessages.push(msg);
+      }
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-diag"
+      };
+      service.openClientApp();
+      expect(childMessages).toHaveLength(1);
+      vi.advanceTimersByTime(1000);
+      expect(childMessages.length).toBeGreaterThan(1);
+    } finally {
+      win.open = originalOpen;
+      vi.useRealTimers();
+    }
+  });
+
+  it("openClientApp 在 5 秒内等不到 child app 第一条 request 时显示软超时并停止重发", () => {
+    vi.useFakeTimers();
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childMessages: unknown[] = [];
+    const childWindow = {
+      postMessage: (msg: unknown) => {
+        childMessages.push(msg);
+      }
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-timeout"
+      };
+      service.openClientApp();
+      vi.advanceTimersByTime(5000);
+      expect(service.bootstrapFailed()).toBe(false);
+      expect(service.appClientConnectTimedOut()).toBe(true);
+      expect(internals.currentAppClientSource).toBe(childWindow);
+      const countAtTimeout = childMessages.length;
+      vi.advanceTimersByTime(1000);
+      expect(childMessages.length).toBe(countAtTimeout);
+    } finally {
+      win.open = originalOpen;
+      vi.useRealTimers();
+    }
+  });
+
+  it("child app 发出第一条 request 后停止 ready 重发泵", async () => {
+    vi.useFakeTimers();
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childMessages: unknown[] = [];
+    const childWindow = {
+      postMessage: (msg: unknown) => {
+        childMessages.push(msg);
+      }
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+        bootMode: "appView"
+      });
+      service.startSession();
+      const now = Date.now();
+      await storageDb.putConnectSession({
+        sessionId: "sess-appview-stop",
+        origin: "https://justnote.apps.bsv8.com",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        claimsSnapshot: {},
+        createdAt: now,
+        lastUsedAt: now,
+        runtimeBinding: "session_signer",
+        revokedAt: null
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        launchTokensByToken: Map<string, unknown>;
+        sessionSignerRuntimes: Map<string, unknown>;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-stop"
+      };
+      internals.launchTokensByToken.set("launch-stop", {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-stop",
+        connectSessionId: "sess-appview-stop",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        resolvedClaims: {},
+        resolvedAt: now,
+        consumed: false
+      });
+      internals.sessionSignerRuntimes.set("sess-appview-stop", {
+        signer: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          privateKeyHex: TEST_PRIV_HEX,
+          capabilities: [],
+          createdAt: now
+        },
+        createdAt: now
+      });
+
+      service.openClientApp();
+      const before = childMessages.length;
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "connect-launch-stop",
+            method: "connect.launch",
+            params: { launchToken: "launch-stop" }
+          },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      await vi.runAllTimersAsync();
+      const result = getResult();
+      expect(result?.ok).toBe(true);
+      const afterHandle = childMessages.length;
+      vi.advanceTimersByTime(2000);
+      expect(childMessages.length).toBe(afterHandle);
+      expect(afterHandle).toBeGreaterThanOrEqual(before);
+    } finally {
+      win.open = originalOpen;
+      vi.useRealTimers();
+    }
+  });
+
+  it("appView 连接软超时后仍接受迟到的 connect.launch，并自动清掉提示", async () => {
+    vi.useFakeTimers();
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childWindow = {
+      postMessage: (_msg: unknown) => undefined
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+        bootMode: "appView"
+      });
+      service.startSession();
+      const now = Date.now();
+      await storageDb.putConnectSession({
+        sessionId: "sess-appview-late",
+        origin: "https://justnote.apps.bsv8.com",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        claimsSnapshot: {},
+        createdAt: now,
+        lastUsedAt: now,
+        runtimeBinding: "session_signer",
+        revokedAt: null
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+        launchTokensByToken: Map<string, unknown>;
+        sessionSignerRuntimes: Map<string, unknown>;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-late"
+      };
+      internals.launchTokensByToken.set("launch-late", {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-late",
+        connectSessionId: "sess-appview-late",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        resolvedClaims: {},
+        resolvedAt: now,
+        consumed: false
+      });
+      internals.sessionSignerRuntimes.set("sess-appview-late", {
+        signer: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          privateKeyHex: TEST_PRIV_HEX,
+          capabilities: [],
+          createdAt: now
+        },
+        createdAt: now
+      });
+
+      service.openClientApp();
+      vi.advanceTimersByTime(5000);
+      expect(service.appClientConnectTimedOut()).toBe(true);
+
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "connect-launch-late",
+            method: "connect.launch",
+            params: { launchToken: "launch-late" }
+          },
+          "https://justnote.apps.bsv8.com",
+          childWindow
+        )
+      );
+      await vi.runAllTimersAsync();
+      const result = getResult();
+      expect(result?.ok).toBe(true);
+      expect(service.appClientConnectTimedOut()).toBe(false);
+    } finally {
+      win.open = originalOpen;
+      vi.useRealTimers();
+    }
+  });
 });

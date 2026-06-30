@@ -82,6 +82,9 @@ function makeFakeService(): ProtocolService & {
   authSnapshot: ProtocolConnectAuthSnapshot | null;
   bootModeValue: "connect" | "appView";
   appViewContextValue: unknown | null;
+  bootstrapFailedValue: boolean;
+  bootstrapFailureReasonValue: string | null;
+  appClientConnectTimedOutValue: boolean;
   vaultStatusListeners: Set<(s: "booting" | "uninitialized" | "locked" | "unlocked") => void>;
   emitVaultStatus: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void;
 } {
@@ -124,6 +127,9 @@ function makeFakeService(): ProtocolService & {
     authSnapshot: null as ProtocolConnectAuthSnapshot | null,
     bootModeValue: "connect" as const,
     appViewContextValue: null as unknown | null,
+    bootstrapFailedValue: false,
+    bootstrapFailureReasonValue: null,
+    appClientConnectTimedOutValue: false,
     emitVaultStatus(next: "booting" | "uninitialized" | "locked" | "unlocked") {
       for (const listener of Array.from(vaultStatusListeners)) {
         listener(next);
@@ -224,8 +230,15 @@ function makeFakeService(): ProtocolService & {
     appViewContext() {
       return this.appViewContextValue as ReturnType<ProtocolService["appViewContext"]>;
     },
-    bootstrapFailed: () => false,
-    bootstrapFailureReason: () => null,
+    bootstrapFailed() {
+      return this.bootstrapFailedValue;
+    },
+    bootstrapFailureReason() {
+      return this.bootstrapFailureReasonValue;
+    },
+    appClientConnectTimedOut() {
+      return this.appClientConnectTimedOutValue;
+    },
     awaitLauncherBootstrap: () => undefined,
     openClientApp() {
       this.openClientAppCalls++;
@@ -354,6 +367,22 @@ describe("ProtocolPopupPage", () => {
     render(<ProtocolPopupPage />);
     fireEvent.click(screen.getByTestId("appview-open-app"));
     expect(service.openClientAppCalls).toBe(1);
+  });
+
+  it("appView 在 open app 连接超时后显示软超时提示", () => {
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    service.appClientConnectTimedOutValue = true;
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    expect(screen.getByTestId("appview-done")).toBeTruthy();
+    expect(screen.getByTestId("appview-open-app-timeout")).toBeTruthy();
+    expect(screen.getByText(/within 5 seconds after Open App/i)).toBeTruthy();
   });
 
   it("renders command feed: live section + history section (施工单 2026-06-27 002 硬切换)", async () => {

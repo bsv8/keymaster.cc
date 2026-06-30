@@ -192,6 +192,8 @@ const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
  *     launcher 启动 app。**不**无限等待。
  */
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
+const APPVIEW_READY_RETRY_INTERVAL_MS = 300;
+const APPVIEW_READY_RETRY_WINDOW_MS = 5_000;
 
 /**
  * Session Window 打开参数。
@@ -522,6 +524,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    *       3. 绑定后后续 request 只接受这一个 source。
    */
   private currentAppClientSource: Window | null = null;
+  private appClientReadyPumpHandle: ReturnType<typeof setInterval> | null = null;
+  private appClientReadyTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  private appClientConnectTimedOutFlag: boolean = false;
 
   /**
    * launchToken 内存 Map：token -> LaunchTokenRecord（V1 **不**落盘）。
@@ -669,6 +674,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //    Session Window 重新启动会话时不允许复用旧 launcher handoff。
     this.currentAppViewContext = null;
     this.currentAppClientSource = null;
+    this.stopAppClientReadyPump();
     this.launchTokensByToken.clear();
     // 施工单 2026-06-29 003 硬切换：startSession 也要清空 session signer
     // runtimes（防止上一会话残留的 signer 干扰本会话）。
@@ -676,6 +682,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.bootstrapConsumed = false;
     this.bootstrapFailedFlag = false;
     this.bootstrapFailureReasonValue = null;
+    this.appClientConnectTimedOutFlag = false;
     this.emit();
     this.emitFeed();
     this.postReadyIfPossible();
@@ -726,6 +733,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 与 popup 生命周期解耦，由 setVaultLockState 单独管理）。
     this.currentAppViewContext = null;
     this.currentAppClientSource = null;
+    this.stopAppClientReadyPump();
+    this.appClientConnectTimedOutFlag = false;
     this.launchTokensByToken.clear();
     // 施工单 2026-06-29 003 硬切换：endSession 清空 session signer runtimes。
     this.sessionSignerRuntimes.clear();
@@ -901,6 +910,16 @@ export class ProtocolServiceImpl implements ProtocolService {
     //   - appView mode：只接受当前 app client window；launcher 只是 bootstrap
     //     提供方，不再是运行期 request source。
     if (!this.isAllowedRequestSource(event, parsed.method)) return;
+
+    if (
+      this.bootModeValue === "appView" &&
+      event.source &&
+      this.currentAppClientSource &&
+      event.source === this.currentAppClientSource
+    ) {
+      this.stopAppClientReadyPump();
+      this.clearAppClientConnectTimeout();
+    }
 
     // 重复 requestId 拒绝：同 source + origin + transportRequestId 还有
     // 未终态记录，则忽略。
@@ -1382,6 +1401,10 @@ export class ProtocolServiceImpl implements ProtocolService {
     return this.bootstrapFailureReasonValue;
   }
 
+  appClientConnectTimedOut(): boolean {
+    return this.appClientConnectTimedOutFlag;
+  }
+
   /**
    * 把 bootstrap 状态切到 failed；UI 立刻据此渲染错误页。
    *
@@ -1391,6 +1414,8 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private markBootstrapFailed(reason: string): void {
     if (this.bootstrapFailedFlag) return;
+    this.stopAppClientReadyPump();
+    this.currentAppClientSource = null;
     this.bootstrapFailedFlag = true;
     this.bootstrapFailureReasonValue = reason;
     this.deps.logger?.error?.({
@@ -1431,7 +1456,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       const opened = window.open(ctx.appUrl, "_blank");
       if (opened) {
         this.currentAppClientSource = opened;
-        this.postReadyToTarget(opened);
+        this.clearAppClientConnectTimeout();
+        this.beginAppClientReadyPump(opened);
       }
       return opened;
     } catch (err) {
@@ -1924,6 +1950,67 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
     this.postReadyToTarget(opener);
+  }
+
+  /**
+   * appView child app ready 重发泵。
+   *
+   * 设计缘由：
+   *   - `window.open()` 返回后 child app 文档可能还没挂好 message listener；
+   *     若只发一条 ready，很容易像 bootstrap 早期那样丢事件。
+   *   - 这里不引入新协议；只在短窗口内低频重发现有 `ready`，直到：
+   *       1. 收到 child app 的第一条合法 request；
+   *       2. 超过重发窗口；
+   *       3. 会话结束 / 重新 open app。
+   *   - `ready` 是幂等的 transport-ready 信号，重复发送不会改变授权状态。
+   */
+  private beginAppClientReadyPump(target: Window): void {
+    this.stopAppClientReadyPump();
+    this.postReadyToTarget(target);
+    this.appClientReadyTimeoutHandle = setTimeout(() => {
+      this.stopAppClientReadyPump();
+      this.markAppClientConnectTimedOut();
+    }, APPVIEW_READY_RETRY_WINDOW_MS);
+    this.appClientReadyPumpHandle = setInterval(() => {
+      this.postReadyToTarget(target);
+    }, APPVIEW_READY_RETRY_INTERVAL_MS);
+  }
+
+  private stopAppClientReadyPump(): void {
+    if (this.appClientReadyPumpHandle !== null) {
+      clearInterval(this.appClientReadyPumpHandle);
+      this.appClientReadyPumpHandle = null;
+    }
+    if (this.appClientReadyTimeoutHandle !== null) {
+      clearTimeout(this.appClientReadyTimeoutHandle);
+      this.appClientReadyTimeoutHandle = null;
+    }
+  }
+
+  /**
+   * 标记 app 已触发连接超时提示。
+   *
+   * 设计缘由：
+   *   - 这是 UI 层的软超时，不是协议硬失败；
+   *   - 5s 到点后只提示用户"连接较慢/超时"，并停止 ready 重发；
+   *   - 迟到的 `connect.launch` 仍允许恢复，因此**不能**复用
+   *     `bootstrapFailed` 这条 fail-closed 真值。
+   */
+  private markAppClientConnectTimedOut(): void {
+    if (this.appClientConnectTimedOutFlag) return;
+    this.appClientConnectTimedOutFlag = true;
+    this.deps.logger?.warn?.({
+      scope: "protocol.sessionWindow",
+      event: "appClient.connectTimeout"
+    });
+    this.emit();
+  }
+
+  /** child app 迟到连回后，清掉软超时提示。 */
+  private clearAppClientConnectTimeout(): void {
+    if (!this.appClientConnectTimedOutFlag) return;
+    this.appClientConnectTimedOutFlag = false;
+    this.emit();
   }
 
   /**

@@ -2322,17 +2322,32 @@ export interface ProtocolService {
   appViewContext(): AppViewContext | null;
 
   /**
-   * bootstrap 是否已失败。
+   * appView bootstrap 是否已失败。
    *
    * 设计缘由（修复 issue #3）：
-   *   - 旧实现失败 / 超时永远停在"等待 launcher"，对用户无意义。
-   *   - 新实现：launcher 在合理时间（如 30s）内未把 bootstrap 发过来 → 标记
-   *     `bootstrapFailed = true`；UI 据此渲染明确错误态，让用户关闭 Session
-   *     Window 重新从 launcher 启动 app。**不**无限等待。
+   *   - 这里只承载 launcher -> Session Window 这一步的硬失败：
+   *       - launcher 在合理时间（如 30s）内未把 bootstrap 发过来；
+   *       - bootstrap payload / session signer 校验失败。
+   *   - UI 据此渲染明确错误态，让用户关闭 Session Window 重新从 launcher
+   *     启动 app。**不**无限等待。
+   *   - `Open App` 后 child app 连接超时属于软超时，不写进这里；迟到连接
+   *     仍允许恢复。
    */
   bootstrapFailed(): boolean;
   /** bootstrap 失败原因（仅本地历史；不进对外 result）。 */
   bootstrapFailureReason(): string | null;
+
+  /**
+   * `Open App` 后 child app 是否已触发连接超时提示。
+   *
+   * 设计缘由：
+   *   - Session Window 点击 `Open App` 后会在短窗口内重发 `ready`；
+   *   - 若 5s 内仍未收到 child app 第一条合法 request，则 UI 要提示
+   *     "连接超时/连接较慢"；
+   *   - 这是**软超时**：只停重发泵、提示用户，不终止会话；迟到的
+   *     `connect.launch` 仍允许把会话拉活。
+   */
+  appClientConnectTimedOut(): boolean;
 
   /**
    * Session Window 主动从同源 `window.opener` 拉取 bootstrap capsule。
