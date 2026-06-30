@@ -169,23 +169,6 @@ export function ProtocolPopupPage() {
     return () => clearInterval(id);
   }, []);
 
-  // 施工单 2026-06-29 001 硬切换：appView mode 下 bootstrap 成功后
-  // 自动打开 client app。只在 appViewContext 由 null 变为非空时触发一次；
-  // 后续 render 不重复调用 openClientApp。
-  const appViewContextValue = service.appViewContext();
-  const openedClientAppRef = useRef(false);
-  useEffect(() => {
-    if (service.bootMode() !== "appView") return;
-    if (!appViewContextValue) return;
-    if (openedClientAppRef.current) return;
-    openedClientAppRef.current = true;
-    try {
-      service.openClientApp();
-    } catch (err) {
-      console.error("[protocol-popup] openClientApp failed", err);
-    }
-  }, [service, appViewContextValue]);
-
   // 新命令出现时自动滚回活请求区顶部（施工单 2026-06-27 002 硬切换）。
   // jsdom 不支持 scrollIntoView；显式检测后再调，避免单测报
   // `scrollIntoView is not a function`。
@@ -219,8 +202,8 @@ export function ProtocolPopupPage() {
     );
   }
   // 施工单 2026-06-29 001 硬切换：appView mode 下 Session Window 在 bootstrap
-  // 完成前先渲染"等待 launcher"壳层；bootstrap 成功后渲染"正在打开 app"
-  // 壳层。失败则渲染错误态（fail-closed）。
+  // 完成前先渲染"等待 launcher"壳层；bootstrap 成功后渲染 app show 页面，
+  // 由用户手动点击打开 app。失败则渲染错误态（fail-closed）。
   // 这些壳层**只**在 appView mode 下出现；connect mode 永不渲染。
   if (service.bootMode() === "appView") {
     // 修复 issue #3：bootstrap 失败时显式渲染错误页，**不**继续等。
@@ -239,7 +222,11 @@ export function ProtocolPopupPage() {
       );
     }
     return (
-      <AppViewBootstrapDonePage t={t} appId={appViewContext.appId} />
+      <AppViewBootstrapDonePage
+        t={t}
+        service={service}
+        appId={appViewContext.appId}
+      />
     );
   }
   // 锁屏态分支：locked 且没有 auth owner 时直接渲染锁屏页（不渲染顶栏 / 站点配置 / 命令流）。
@@ -477,22 +464,38 @@ function AppViewBootstrapWaitPage({
 }
 
 /**
- * appView mode 下 Session Window bootstrap 完成后、打开 client app 之前的
- * 过渡页。
+ * appView mode 下 Session Window bootstrap 完成后的 app show 页面。
  *
  * 设计缘由：
- *   - 实际"打开 client app"由 ProtocolPopupPage 的 useEffect 在 bootstrap
- *     完成后调用 `service.openClientApp()` 完成；本页只显示"正在打开"。
- *   - 如果 `openClientApp()` 失败（浏览器拦截 / popup blocker），UI 仍
- *     显示"正在打开"——用户可手动复制 appUrl 重新打开。
+ *   - Session Window 是常驻控制窗口，不再 bootstrap 完成后自动 open
+ *     app；避免它退化成一次性跳板页。
+ *   - 用户明确点击大按钮后才调用 `service.openClientApp()`；这样 launcher
+ *     不被打断，Session Window 也能稳定停留。
+ *   - `openClientApp()` 失败时仅在本页显示简短错误，不补复杂恢复逻辑。
  */
 function AppViewBootstrapDonePage({
   t,
+  service,
   appId
 }: {
   t: (k: string, v?: { defaultValue?: string }) => string;
+  service: ProtocolService;
   appId: string;
 }) {
+  const [openError, setOpenError] = useState<string | null>(null);
+
+  function handleOpenApp() {
+    setOpenError(null);
+    try {
+      const opened = service.openClientApp();
+      if (!opened) {
+        setOpenError("Failed to open the app window.");
+      }
+    } catch (err) {
+      setOpenError(err instanceof Error ? err.message : "Failed to open the app window.");
+    }
+  }
+
   return (
     <div className="protocol-popup protocol-popup--appview-done" data-testid="appview-done">
       <div className="protocol-popup__panel">
@@ -500,10 +503,25 @@ function AppViewBootstrapDonePage({
           {t("protocol.sessionWindow.title", { defaultValue: "Session Window" })}
         </h2>
         <p>
-          {t("protocol.sessionWindow.appView.openingClientApp", {
-            defaultValue: "Opening the app…"
+          {t("protocol.sessionWindow.appView.ready", {
+            defaultValue: "Session ready. Open the app when you want."
           })}
         </p>
+        <button
+          type="button"
+          className="protocol-popup__open-app-button"
+          data-testid="appview-open-app"
+          onClick={handleOpenApp}
+        >
+          {t("protocol.sessionWindow.appView.openApp", {
+            defaultValue: "Open App"
+          })}
+        </button>
+        {openError ? (
+          <p className="protocol-popup__appview-error" data-testid="appview-open-app-error">
+            <code>{openError}</code>
+          </p>
+        ) : null}
         <p className="protocol-popup__muted">{appId}</p>
       </div>
     </div>

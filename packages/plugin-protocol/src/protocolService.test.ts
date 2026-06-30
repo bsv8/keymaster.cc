@@ -6035,7 +6035,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   /** 给测试构造可观察的 window.open 替换 + bootstrap registry 装/卸。 */
   function setupWindow(extra: { openReturns?: Window | null } = {}) {
     const win = installWindowShim();
-    const openCalls: Array<{ url: string; target: string }> = [];
+    const openCalls: Array<{ url: string; target: string; features: string }> = [];
     const originalOpen = win.open;
     const originalLocation = win.location;
     // 强制 location.origin 为一个稳定值。
@@ -6043,8 +6043,12 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       value: { origin: "https://keymaster.local" },
       configurable: true
     });
-    win.open = ((url: string | URL, target?: string) => {
-      openCalls.push({ url: String(url), target: String(target ?? "_blank") });
+    win.open = ((url: string | URL, target?: string, features?: string) => {
+      openCalls.push({
+        url: String(url),
+        target: String(target ?? "_blank"),
+        features: String(features ?? "")
+      });
       return extra.openReturns === undefined
         ? ({} as Window)
         : extra.openReturns;
@@ -6107,6 +6111,9 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       expect(env.openCalls[0]?.target).toBe("_blank");
       expect(env.openCalls[0]?.url).toContain("boot=appView");
       expect(env.openCalls[0]?.url).toContain("bootstrapToken=");
+      expect(env.openCalls[0]?.features).toContain("popup=yes");
+      expect(env.openCalls[0]?.features).toContain("width=460");
+      expect(env.openCalls[0]?.features).toContain("height=820");
       // 4) 同一 launcher 窗口内连续两次 Open App 不会互相覆盖：
       //    registry 持久挂在 window 上，第二次 launchAppView 不会重新挂
       //    registry（避免把第一次的 token 覆盖掉）。两次产生的 token 都
@@ -6338,4 +6345,3 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 });
-

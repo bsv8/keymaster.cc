@@ -9,7 +9,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import type {
   ProtocolCommandFeedState,
@@ -73,12 +73,15 @@ function makeFakeService(): ProtocolService & {
   resumeAfterUnlockCalls: number;
   handleMessageCalls: number;
   pageUnloadingCalls: number;
+  openClientAppCalls: number;
   closingSent: boolean;
   closingEmitted: number;
   messageListenerInstalledBeforeReady: boolean | null;
   feedListeners: Set<(s: ProtocolCommandFeedState) => void>;
   feed: ProtocolCommandFeedState;
   authSnapshot: ProtocolConnectAuthSnapshot | null;
+  bootModeValue: "connect" | "appView";
+  appViewContextValue: unknown | null;
   vaultStatusListeners: Set<(s: "booting" | "uninitialized" | "locked" | "unlocked") => void>;
   emitVaultStatus: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void;
 } {
@@ -110,6 +113,7 @@ function makeFakeService(): ProtocolService & {
     resumeAfterUnlockCalls: 0,
     handleMessageCalls: 0,
     pageUnloadingCalls: 0,
+    openClientAppCalls: 0,
     closingSent: false,
     closingEmitted: 0,
     messageListenerInstalledBeforeReady: null as boolean | null,
@@ -118,6 +122,8 @@ function makeFakeService(): ProtocolService & {
     vaultStatusListeners,
     feed,
     authSnapshot: null as ProtocolConnectAuthSnapshot | null,
+    bootModeValue: "connect" as const,
+    appViewContextValue: null as unknown | null,
     emitVaultStatus(next: "booting" | "uninitialized" | "locked" | "unlocked") {
       for (const listener of Array.from(vaultStatusListeners)) {
         listener(next);
@@ -212,12 +218,19 @@ function makeFakeService(): ProtocolService & {
     confirmConnectResume: async () => undefined,
     rejectConnectRequest: async () => undefined,
     // 施工单 2026-06-29 001 硬切换：Session Window / storage 公共 API。
-    bootMode: () => "connect" as const,
-    appViewContext: () => null,
+    bootMode() {
+      return this.bootModeValue;
+    },
+    appViewContext() {
+      return this.appViewContextValue as ReturnType<ProtocolService["appViewContext"]>;
+    },
     bootstrapFailed: () => false,
     bootstrapFailureReason: () => null,
     awaitLauncherBootstrap: () => undefined,
-    openClientApp: () => null,
+    openClientApp() {
+      this.openClientAppCalls++;
+      return {} as Window;
+    },
     // 施工单 2026-06-29 002：plugin-apps launcher 入口；测试不直接调用。
     launchAppView: async () => {
       throw new Error("launchAppView not used in ProtocolPopupPage tests");
@@ -312,6 +325,35 @@ describe("ProtocolPopupPage", () => {
     render(<ProtocolPopupPage />);
     service.emitVaultStatus("unlocked");
     expect(service.resumeAfterUnlockCalls).toBe(0);
+  });
+
+  it("appView ready page does not auto-open client app on mount", () => {
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    expect(screen.getByTestId("appview-done")).toBeTruthy();
+    expect(screen.getByTestId("appview-open-app")).toBeTruthy();
+    expect(service.openClientAppCalls).toBe(0);
+  });
+
+  it("appView ready page opens client app only after user click", () => {
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    service.appViewContextValue = {
+      appId: "justnote",
+      appOrigin: "https://justnote.apps.bsv8.com",
+      appUrl: "https://justnote.apps.bsv8.com/"
+    };
+    currentService = service;
+    render(<ProtocolPopupPage />);
+    fireEvent.click(screen.getByTestId("appview-open-app"));
+    expect(service.openClientAppCalls).toBe(1);
   });
 
   it("renders command feed: live section + history section (施工单 2026-06-27 002 硬切换)", async () => {

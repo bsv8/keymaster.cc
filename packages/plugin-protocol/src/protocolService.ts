@@ -194,6 +194,17 @@ const DEFAULT_CONFIRM_TIMEOUT_SECONDS = 30;
 const BOOTSTRAP_TIMEOUT_MS = 30_000;
 
 /**
+ * Session Window 打开参数。
+ *
+ * 设计缘由：
+ *   - 明确请求浏览器以 popup/window 形态打开，而不是普通新 tab；
+ *   - 这只是请求，不是强保证；浏览器可按自己的策略降级；
+ *   - **不能**带 `noopener`，否则 Session Window 拿不到 launcher 的
+ *     `window.opener`，bootstrap consume 会直接失效。
+ */
+const SESSION_WINDOW_OPEN_FEATURES = "popup=yes,width=460,height=820,resizable=yes,scrollbars=yes";
+
+/**
  * 把 DB 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 DB。
  */
 function normalizeOriginSettings(
@@ -1599,10 +1610,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.launcherBootstrapRegistryInstalled = true;
     }
     // 12) 打开 Session Window。
+    //     显式请求 popup features，提高浏览器把它作为独立窗口打开的概率；
+    //     launcher 自身不跳转、不被中断。
     const popupUrl = `/protocol/v1/popup?boot=appView&bootstrapToken=${encodeURIComponent(token)}`;
     let popup: Window | null = null;
     try {
-      popup = window.open(popupUrl, "_blank");
+      popup = window.open(popupUrl, "_blank", SESSION_WINDOW_OPEN_FEATURES);
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.launcher",

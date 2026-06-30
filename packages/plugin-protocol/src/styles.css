@@ -58,6 +58,79 @@
   gap: 1rem;
 }
 
+.protocol-popup--appview-wait,
+.protocol-popup--appview-done,
+.protocol-popup--appview-failed {
+  justify-content: center;
+  padding: 2rem 1rem;
+  background:
+    radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 36%),
+    radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.05), transparent 28%),
+    var(--bg-base, #ffffff);
+}
+
+.protocol-popup__panel {
+  width: min(440px, 100%);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  padding: 1.5rem;
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98));
+  border: 1px solid rgba(37, 99, 235, 0.16);
+  box-shadow: 0 18px 50px rgba(15, 23, 42, 0.1);
+}
+
+.protocol-popup__panel h2 {
+  margin: 0;
+  font-size: 1.5rem;
+  line-height: 1.15;
+}
+
+.protocol-popup__panel p {
+  margin: 0;
+}
+
+.protocol-popup__muted {
+  color: var(--text-muted, #6b7280);
+  font-size: 12.5px;
+}
+
+.protocol-popup__open-app-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 64px;
+  padding: 0.9rem 1.2rem;
+  border: 0;
+  border-radius: 14px;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: #ffffff;
+  font-size: 1.05rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 14px 30px rgba(37, 99, 235, 0.26);
+}
+
+.protocol-popup__open-app-button:hover {
+  filter: brightness(1.03);
+}
+
+.protocol-popup__open-app-button:active {
+  transform: translateY(1px);
+}
+
+.protocol-popup__appview-error {
+  padding: 0.6rem 0.75rem;
+  border-radius: 8px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+  font-size: 12.5px;
+}
+
 /* ============== 施工单 2026-06-28 003：auth owner 全屏页 ============== */
 
 .protocol-auth {
