@@ -3,11 +3,11 @@
 // storageProviderConfig / launchTokens 六 store）。
 //
 // 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 + 2026-06-29 001 +
-// 2026-06-29 003 硬切换）：
+// 2026-06-30 002 硬切换）：
 //   - DB 名：`keymaster.protocol`。**不**挂到 `keyspace.openKeyStorage()`
 //     的 per-key namespace，因为命令历史按 domain 走，按 key 走会让
 //     "切了 key 看不到旧站点历史" 这种行为偷偷出现。
-//   - DB version：7。
+//   - DB version：8。
 //       - v2：单 `commands` store 升级为三 store（commands / origins / feePools）；
 //       - v3：feePools record 结构变了（新增 `draftSpendTxHex` /
 //         `draftClientSignBytes`），升级时清空 feePools store（不迁数据）；
@@ -20,12 +20,10 @@
 //       - v6（施工单 2026-06-29 001 硬切换）：新增 `storageProviderConfig`
 //         + `launchTokens` 两 store；commands / origins / feePools /
 //         connectSessions 不动。
-//       - v7（施工单 2026-06-29 003 硬切换）：`connectSessions` 重建——
-//         session record 新增 `runtimeBinding` 真值字段（"vault" /
-//         "session_signer"）；这是 session 真值的硬切，必须重建而不是
-//         写入空字段兜底（业务执行路径不能容忍"runtimeBinding 缺失
-//         走默认"语义）。commands / origins / feePools /
-//         storageProviderConfig / launchTokens 不动。
+//       - v8（当前 DB_VERSION）：session 真值收口为三元组
+//         `sessionId + origin + ownerPublicKeyHex`；runtime 来源不落库。
+//         commands / origins / feePools / storageProviderConfig /
+//         launchTokens 不动。
 //   - `commands`：命令流历史，主键 `record.id`（与 transport requestId
 //     解耦）。索引 `origin` / `updatedAt` / compound `[origin, updatedAt]`。
 //   - `origins`：按 exact origin 存站点级配置；主键 `origin`。
@@ -34,7 +32,8 @@
 //     索引 `origin`（便于按 origin 列出）。
 //   - `connectSessions`：auth session 真值；主键 `sessionId`；索引 `origin`
 //     （便于按 origin 列出该站点的所有 session 含已 revoked 的）。
-//     v7 起 session record **必须**带 `runtimeBinding`。
+//     当前 session record 字段：`sessionId + origin + ownerPublicKeyHex +
+//     ownerLabel + claimsSnapshot + createdAt + lastUsedAt + revokedAt`。
 //   - `storageProviderConfig`：单条全局配置；主键 `"singleton"`。
 //   - `launchTokens`：launcher 给 client app 的 launchToken 缓存；主键
 //     `token`；索引 `connectSessionId`（便于按 session 找到 token）。
@@ -44,6 +43,7 @@
 //   - **不**存 `operations` store（pending fee pool operation 走内存）。
 //   - **不**存敏感正文：参见 "历史持久化范围"。
 //   - **不**存密码 / 不存 unlock runtime 任何派生材料。
+//   - **不**存 bootstrap 私钥材料（`OwnerRuntimeBootstrap.privateKeyHex`）。
 //   - **不**存 `ownerKeyId`：vault 内部借用句柄按需从 keyspace 解析。
 //   - DB 异常一律 `console.error + rethrow`；调用方拿到错误时自己决定
 //     怎么降级（p2pkh → manual confirm；feepool → fail-closed；connect
@@ -60,15 +60,11 @@ import type {
 } from "@keymaster/contracts";
 
 const DB_NAME = "keymaster.protocol";
-// V7（施工单 2026-06-29 003 硬切换）：connectSessions 重建——session
-// record 新增 `runtimeBinding` 字段；commands / origins / feePools /
-// storageProviderConfig / launchTokens 沿用 v6 schema。
-// 设计缘由：执行路径不允许靠"当前 bootMode"临时猜测；必须读 session
-// 真值。runtimeBinding 缺字段会模糊 vault / session_signer 的执行语义，
-// 旧的"vault" session 在新版"会默认走什么"是模糊状态——直接重建
-// connectSessions store 是更简单的硬切。commands 不重建（record 上
-// 的 owner 字段没改 contract）。
-const DB_VERSION = 7;
+// 当前 DB_VERSION = 8：connectSessions 真值三元组
+// `sessionId + origin + ownerPublicKeyHex`，runtime 来源不落库。
+// commands / origins / feePools / storageProviderConfig / launchTokens
+// 不引用 runtime 来源，不需要重建。
+const DB_VERSION = 8;
 const STORE_COMMANDS = "commands";
 const STORE_ORIGINS = "origins";
 const STORE_FEE_POOLS = "feePools";
@@ -98,6 +94,7 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
       const db = req.result;
       const oldVersion = event.oldVersion;
       const newVersion = event.newVersion ?? DB_VERSION;
+      void newVersion;
       // commands（v1 已建过；v0 → v2 也会落这里）
       if (!db.objectStoreNames.contains(STORE_COMMANDS)) {
         const store = db.createObjectStore(STORE_COMMANDS, { keyPath: "id" });
@@ -175,19 +172,37 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
         const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
         tokenStore.createIndex("connectSessionId", "connectSessionId", { unique: false });
       }
-      // V7 迁移（施工单 2026-06-29 003 硬切换）：重建 connectSessions store
-      // ——session record 新增 `runtimeBinding` 真值字段
-      // （"vault" / "session_signer"）。旧 v6 record 没有这个字段，保留
-      // 旧数据会让"runtimeBinding 缺失走默认"语义偷偷出现；这是
-      // 执行路径的硬切，必须重建。
-      if (oldVersion < 7 && db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
-        db.deleteObjectStore(STORE_CONNECT_SESSIONS);
+      // 从老版本（不论是哪一个）升级上来时，重建 connectSessions + launchTokens，
+      // 确保 schema 与 v8 真值三元组一致。
+      if (oldVersion < 8) {
+        if (db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
+          db.deleteObjectStore(STORE_CONNECT_SESSIONS);
+        }
+        if (db.objectStoreNames.contains(STORE_LAUNCH_TOKENS)) {
+          db.deleteObjectStore(STORE_LAUNCH_TOKENS);
+        }
       }
       if (!db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
         const sessionStore = db.createObjectStore(STORE_CONNECT_SESSIONS, { keyPath: "sessionId" });
         sessionStore.createIndex("origin", "origin", { unique: false });
       }
-      void newVersion;
+      // Schema：session 真值收口为三元组
+      // `sessionId + origin + ownerPublicKeyHex`，runtime 来源不落库。
+      //
+      // 真删 + 重建 connectSessions / launchTokens 的语义：
+      //   - 老用户设备上若有残留 session record，其 schema 已不再吻合
+      //     v8 真值三元组；
+      //   - 升级路径**真删**两个 store，避免老字段长期残留；
+      //   - 副作用：site 升级后 caller 必须重新走 `connect.login`；
+      //     老 sessionId 全部失效——这是设计明确的边界。
+      if (!db.objectStoreNames.contains(STORE_CONNECT_SESSIONS)) {
+        const sessionStore = db.createObjectStore(STORE_CONNECT_SESSIONS, { keyPath: "sessionId" });
+        sessionStore.createIndex("origin", "origin", { unique: false });
+      }
+      if (!db.objectStoreNames.contains(STORE_LAUNCH_TOKENS)) {
+        const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
+        tokenStore.createIndex("connectSessionId", "connectSessionId", { unique: false });
+      }
     };
     req.onsuccess = () => {
       const db = req.result;

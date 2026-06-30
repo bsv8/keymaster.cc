@@ -91,10 +91,11 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     onInitialActivationNoticeChange: () => () => undefined,
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
     recoverEmptyVaultToUninitialized: async () => undefined
-    // 施工单 2026-06-29 003 硬切换：vault 已删除
-    // `exportUnlockRuntimeForSessionWindow` / `importUnlockRuntimeFromLauncher`。
-    // launcher 端改用现有 `vault.withPrivateKey(keyId, fn)` 借 owner 私钥 hex
-    // 拼 SessionSignerBootstrap。launchAppView 测试只走 `withPrivateKey` 路径，
+    // 施工单 2026-06-30 002 硬切换：vault 已删除
+    // `exportUnlockRuntimeForSessionWindow` / `importUnlockRuntimeFromLauncher`
+    // （2026-06-29/003 已删除，002 沿用）。launcher 端改用现有
+    // `vault.withPrivateKey(keyId, fn)` 借 owner 私钥 hex 拼
+    // `OwnerRuntimeBootstrap`。launchAppView 测试只走 `withPrivateKey` 路径，
     // 不再需要 unlock runtime 假实现。
   } as unknown as VaultService;
 }
@@ -313,7 +314,7 @@ function makeFakeStorageDbWithSession(
           claimsSnapshot: {},
           createdAt: Date.now(),
           lastUsedAt: Date.now(),
-          runtimeBinding: "vault",revokedAt: null
+          revokedAt: null
         };
       }
       return null;
@@ -401,7 +402,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     }).catch(() => undefined);
     void db.putConnectSession({
       sessionId: "sess-fresh",
@@ -411,7 +412,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     }).catch(() => undefined);
     // 切换 origin 测试常用 ORIGIN_FRESH / origin-a.example / origin-b.example / other.example。
     // 默认 seed 这些 origin 下的 sess-* session，避免每个测试单独 setup。
@@ -423,7 +424,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     }).catch(() => undefined);
     void db.putConnectSession({
       sessionId: "sess-origin-b",
@@ -433,7 +434,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     }).catch(() => undefined);
     void db.putConnectSession({
       sessionId: "sess-other",
@@ -443,7 +444,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     }).catch(() => undefined);
   }
   return {
@@ -486,7 +487,7 @@ async function seedConnectSession(
     claimsSnapshot: {},
     createdAt: now,
     lastUsedAt: now,
-    runtimeBinding: "vault",revokedAt: null
+    revokedAt: null
   });
 }
 
@@ -1168,7 +1169,7 @@ describe("ProtocolServiceImpl", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -1305,7 +1306,7 @@ describe("ProtocolServiceImpl", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -2043,7 +2044,7 @@ describe("ProtocolServiceImpl", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -2377,7 +2378,7 @@ describe("ProtocolServiceImpl", () => {
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     const service = new reloaded.ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
@@ -3331,7 +3332,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -3471,7 +3472,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -3523,7 +3524,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     // 先发 encrypt 拿到 nonce / cipherbytes。
     await service.handleMessage(
@@ -3836,7 +3837,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     // 故意用非法 nonce / cipherbytes → executeCipherDecrypt 内部 throw protocolError("decrypt_failed", ...)。
     await service.handleMessage(
@@ -3999,7 +4000,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: { "profile.nickname": "alice" },
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -4045,7 +4046,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: { "profile.nickname": "bob" },
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -4089,7 +4090,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       ownerPublicKeyHex: TEST_PUB_HEX,
       ownerLabel: "Key A",
       claimsSnapshot: {},
-      runtimeBinding: "vault",
+
       createdAt: Date.now() - 1000,
       lastUsedAt: Date.now() - 1000,
       revokedAt: Date.now() - 500
@@ -4136,7 +4137,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       ownerPublicKeyHex: TEST_PUB_HEX,
       ownerLabel: "Key A",
       claimsSnapshot: {},
-      runtimeBinding: "vault",
+
       createdAt: Date.now() - 1000,
       lastUsedAt: Date.now() - 1000,
       revokedAt: Date.now() - 500
@@ -4195,7 +4196,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -4251,7 +4252,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -4396,7 +4397,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -4438,7 +4439,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.handleMessage(
       makeEvent(
@@ -4479,7 +4480,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     const content = new TextEncoder().encode("note body");
     await service.handleMessage(
@@ -4524,7 +4525,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     // 1. logout
     await service.handleMessage(
@@ -4886,7 +4887,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -4962,7 +4963,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -5065,7 +5066,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
             claimsSnapshot: {},
             createdAt: Date.now(),
             lastUsedAt: Date.now(),
-            runtimeBinding: "vault",revokedAt: null
+            revokedAt: null
           };
         }
         return null;
@@ -5656,7 +5657,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       ownerPublicKeyHex: TEST_PUB_HEX,
       ownerLabel: "Key A",
       claimsSnapshot: {},
-      runtimeBinding: "vault",
+
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
       revokedAt: Date.now() - 100
@@ -5695,7 +5696,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     service.startSession();
     await service.handleMessage(
@@ -5736,7 +5737,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     service.startSession();
     // 用户在中途切换 active key：但 keyspace.active() 仍然返回 TEST_PUB_HEX，
@@ -5785,7 +5786,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     // ownerB 在 keyspace stub 内也注册好（getKey(publicKeyHex=ownerB)）。
     deps.keyspace.getKey = async (hex: string) => {
@@ -5820,7 +5821,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await service.setOriginSettings({
       origin: ORIGIN,
@@ -5876,7 +5877,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     await storageDb.putConnectSession({
       sessionId: "sess-B",
@@ -5886,7 +5887,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       claimsSnapshot: {},
       createdAt: Date.now(),
       lastUsedAt: Date.now(),
-      runtimeBinding: "vault",revokedAt: null
+      revokedAt: null
     });
     deps.keyspace.getKey = async (hex: string) => {
       if (hex === TEST_PUB_HEX) {
@@ -6077,7 +6078,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     };
   }
 
-  it("成功路径：预建 session (runtimeBinding=session_signer) + 借 owner 私钥拼 sessionSigner + 装 bootstrap registry + 打开 Session Window（施工单 2026-06-29 003 硬切换）", async () => {
+  it("成功路径：预建 session + 借 owner 私钥拼 ownerRuntimeBootstrap + 装 bootstrap registry + 打开 Session Window（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
       const storageDb = makeFakeStorageDb();
@@ -6294,7 +6295,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 
-  it("vault.withPrivateKey 抛错 → export_session_signer_failed（施工单 2026-06-29 003 硬切换）", async () => {
+  it("vault.withPrivateKey 抛错 → export_owner_runtime_failed（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
       const storageDb = makeFakeStorageDb();
@@ -6315,14 +6316,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
         caught = err;
       }
       expect(caught).toBeInstanceOf(LaunchAppViewError);
-      expect((caught as LaunchAppViewError).code).toBe("export_session_signer_failed");
+      expect((caught as LaunchAppViewError).code).toBe("export_owner_runtime_failed");
       expect(env.openCalls.length).toBe(0);
     } finally {
       env.restore();
     }
   });
 
-  it("launchAppView 成功：预建 connect session 写 runtimeBinding=session_signer", async () => {
+  it("launchAppView 成功：预建 connect session 真值三元组（sessionId + origin + ownerPublicKeyHex）", async () => {
     const env = setupWindow();
     try {
       const storageDb = makeFakeStorageDb();
@@ -6334,12 +6335,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const out = await service.launchAppView(JUSTNOTE);
       expect(out.sessionWindowOpened).toBe(true);
       expect(out.connectSessionId).toBeTruthy();
-      // 关键验收（施工单 2026-06-29 003）：launcher 端写入的 session
-      // **必须**是 session_signer；这是运行期执行面真值。
+      // 关键验收（施工单 2026-06-30 002）：launcher 端写入的 session
+      // **不**带 runtimeBinding；runtime 来源由 resolveOwnerRuntime
+      // 在每次执行时按当前窗口状态决定。
       const stored = await storageDb.getConnectSession(out.connectSessionId);
       expect(stored).not.toBeNull();
-      expect(stored?.runtimeBinding).toBe("session_signer");
+      expect((stored as unknown as Record<string, unknown>).runtimeBinding).toBeUndefined();
       expect(stored?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+      expect(stored?.origin).toBe(JUSTNOTE.appOrigin);
     } finally {
       env.restore();
     }
@@ -6361,7 +6364,6 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       claimsSnapshot: { "key.label": "Key A" },
       createdAt: now,
       lastUsedAt: now,
-      runtimeBinding: "session_signer",
       revokedAt: null
     });
     const privHex = TEST_PRIV_HEX;
@@ -6372,7 +6374,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         appUrl: string;
       } | null;
       launchTokensByToken: Map<string, unknown>;
-      sessionSignerRuntimes: Map<string, unknown>;
+      ownerRuntimesBySessionId: Map<string, unknown>;
       currentAppClientSource: Window | null;
     };
     internals.currentAppViewContext = {
@@ -6391,8 +6393,8 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       resolvedAt: now,
       consumed: false
     });
-    internals.sessionSignerRuntimes.set("sess-appview", {
-      signer: {
+    internals.ownerRuntimesBySessionId.set("sess-appview", {
+      runtime: {
         ownerPublicKeyHex: TEST_PUB_HEX,
         ownerLabel: "Key A",
         privateKeyHex: privHex,
@@ -6421,8 +6423,15 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     const result = getResult();
     expect(result?.ok).toBe(true);
     if (!result || result.ok !== true) return;
-    expect(result.result.connectSessionId).toBe("sess-appview");
-    expect(result.result.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+    // 严格断言 connect.launch 的结果形状：只断言 connectSessionId /
+    // ownerPublicKeyHex 字段；MethodResult 是 union，因此显式指定
+    // `as { connectSessionId?: string; ownerPublicKeyHex?: string }`。
+    const connectLaunchResult = result.result as unknown as {
+      connectSessionId?: string;
+      ownerPublicKeyHex?: string;
+    };
+    expect(connectLaunchResult.connectSessionId).toBe("sess-appview");
+    expect(connectLaunchResult.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
     expect(internals.currentAppClientSource).toBe(appSource);
   });
 
@@ -6575,7 +6584,6 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         claimsSnapshot: {},
         createdAt: now,
         lastUsedAt: now,
-        runtimeBinding: "session_signer",
         revokedAt: null
       });
       const internals = service as unknown as {
@@ -6585,7 +6593,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
           appUrl: string;
         } | null;
         launchTokensByToken: Map<string, unknown>;
-        sessionSignerRuntimes: Map<string, unknown>;
+        ownerRuntimesBySessionId: Map<string, unknown>;
       };
       internals.currentAppViewContext = {
         appId: "justnote",
@@ -6602,8 +6610,8 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         resolvedAt: now,
         consumed: false
       });
-      internals.sessionSignerRuntimes.set("sess-appview-stop", {
-        signer: {
+      internals.ownerRuntimesBySessionId.set("sess-appview-stop", {
+        runtime: {
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           privateKeyHex: TEST_PRIV_HEX,
@@ -6663,7 +6671,6 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         claimsSnapshot: {},
         createdAt: now,
         lastUsedAt: now,
-        runtimeBinding: "session_signer",
         revokedAt: null
       });
       const internals = service as unknown as {
@@ -6673,7 +6680,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
           appUrl: string;
         } | null;
         launchTokensByToken: Map<string, unknown>;
-        sessionSignerRuntimes: Map<string, unknown>;
+        ownerRuntimesBySessionId: Map<string, unknown>;
       };
       internals.currentAppViewContext = {
         appId: "justnote",
@@ -6690,8 +6697,8 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         resolvedAt: now,
         consumed: false
       });
-      internals.sessionSignerRuntimes.set("sess-appview-late", {
-        signer: {
+      internals.ownerRuntimesBySessionId.set("sess-appview-late", {
+        runtime: {
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
           privateKeyHex: TEST_PRIV_HEX,
@@ -6728,3 +6735,289 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     }
   });
 });
+
+/* ============== 施工单 2026-06-30 002：locked 但 bootstrap_owner runtime ready ============== */
+/**
+ * 关键回归：旧实现下 `connect.launch` 一旦 Session Window 的 `lockState === "locked"`
+ * 就会被 `drainExecutionQueue` 全局 `lockStateValue === "unlocked"` 卡死，
+ * 永远入队不执行（也就是本次硬切的现场故障）。
+ *
+ * 新实现下 drainExecutionQueue 改为按 record 自己能否解析到 owner runtime
+ * 决定执行条件；`bootstrap_owner` 来源下 locked 也能直接 execute。
+ */
+
+describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)", () => {
+  it("vault locked + bootstrap_owner runtime ready → connect.launch 立即执行（不卡在 waiting_unlock）", async () => {
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const childMessages: unknown[] = [];
+    const childWindow = {
+      postMessage: (msg: unknown) => {
+        childMessages.push(msg);
+      }
+    } as unknown as Window;
+    win.open = (() => childWindow) as typeof win.open;
+    try {
+      const storageDb = makeFakeStorageDb();
+      const vault = makeVaultStub(TEST_PUB_HEX);
+      // **故意**让 vault status 报 locked —— 旧实现下这条
+      // connect.launch 会被全局 lockState 闸门卡住。
+      (vault as unknown as { status: () => string }).status = () => "locked";
+      const service = new ProtocolServiceImpl({
+        vault,
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb,
+        bootMode: "appView"
+      });
+      service.startSession();
+      const now = Date.now();
+      const sessionId = "sess-locked-runtime-ready";
+      await storageDb.putConnectSession({
+        sessionId,
+        origin: "https://justnote.apps.bsv8.com",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        claimsSnapshot: {},
+        createdAt: now,
+        lastUsedAt: now,
+        revokedAt: null
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: unknown;
+        launchTokensByToken: Map<string, unknown>;
+        ownerRuntimesBySessionId: Map<string, unknown>;
+        currentAppClientSource: Window | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-locked-ready"
+      };
+      const token = "launch-locked-ready";
+      internals.launchTokensByToken.set(token, {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=" + token,
+        connectSessionId: sessionId,
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        resolvedClaims: {},
+        resolvedAt: now,
+        consumed: false
+      });
+      internals.ownerRuntimesBySessionId.set(sessionId, {
+        runtime: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          privateKeyHex: TEST_PRIV_HEX,
+          capabilities: [],
+          createdAt: now
+        },
+        createdAt: now
+      });
+      const postedResults: ProtocolResultMessage[] = [];
+      const appSource = {
+        postMessage: (msg: unknown) => {
+          postedResults.push(msg as ProtocolResultMessage);
+        }
+      } as unknown as Window;
+      await service.handleMessage(
+        makeEvent(
+          {
+            v: PROTOCOL_VERSION,
+            type: "request",
+            id: "connect-launch-locked-ready",
+            method: "connect.launch",
+            params: { launchToken: token }
+          },
+          "https://justnote.apps.bsv8.com",
+          appSource
+        )
+      );
+      // 即使 vault locked，bootstrap_owner 已就绪 ⇒ 不应卡在
+      // waiting_unlock_*；executeConnectLaunch 必须给出 ok=true 结果。
+      await new Promise((r) => setTimeout(r, 30));
+      const acked = postedResults.find(
+        (m) => (m as { id?: string }).id === "connect-launch-locked-ready"
+      );
+      expect(acked).toBeDefined();
+      expect((acked as { ok?: boolean }).ok).toBe(true);
+    } finally {
+      win.open = originalOpen;
+    }
+  });
+
+  it("resolveOwnerRuntime：vault unlocked + 同 owner 在 vault 可读 → 切到 vault_unlock 来源", async () => {
+    const service = new ProtocolServiceImpl({
+      vault: makeVaultStub(TEST_PUB_HEX),
+      keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+    });
+    const internals = service as unknown as {
+      resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<{
+        ownerPublicKeyHex: string;
+        source: "bootstrap_owner" | "vault_unlock";
+      }>;
+    };
+    const session: ConnectSessionRecord = {
+      sessionId: "sess-unlock",
+      origin: "https://x",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: 0,
+      lastUsedAt: 0,
+      revokedAt: null
+    };
+    // 没有 bootstrap_owner，但 vault 已 unlock → vault_unlock。
+    const r = await internals.resolveOwnerRuntime(session);
+    expect(r.source).toBe("vault_unlock");
+    expect(r.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
+  });
+
+  it("resolveOwnerRuntime：bootstrap_owner 已就绪 → 切到 bootstrap_owner 来源（不走 vault）", async () => {
+    const service = new ProtocolServiceImpl({
+      vault: makeVaultStub(TEST_PUB_HEX),
+      keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+    });
+    const internals = service as unknown as {
+      ownerRuntimesBySessionId: Map<string, unknown>;
+      resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<{
+        ownerPublicKeyHex: string;
+        source: "bootstrap_owner" | "vault_unlock";
+      }>;
+    };
+    internals.ownerRuntimesBySessionId.set("sess-boot", {
+      runtime: {
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        privateKeyHex: TEST_PRIV_HEX,
+        capabilities: [],
+        createdAt: 0
+      },
+      createdAt: 0
+    });
+    const session: ConnectSessionRecord = {
+      sessionId: "sess-boot",
+      origin: "https://x",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: 0,
+      lastUsedAt: 0,
+      revokedAt: null
+    };
+    const r = await internals.resolveOwnerRuntime(session);
+    expect(r.source).toBe("bootstrap_owner");
+  });
+});
+
+  it("probeExecutionCondition：locked + keyspace 查不到 owner → 直接 fail-fast（不卡 waiting_unlock）", async () => {
+    // 验证施工单 7.5:已删 / 根本不在本地 vault 的 owner key 不应让用户先去解锁。
+    const storageDb = makeFakeStorageDb();
+    const service = new ProtocolServiceImpl({
+      vault: makeVaultStub(TEST_PUB_HEX),
+      keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+      storageDb
+    });
+    service.startSession();
+    const now = Date.now();
+    await storageDb.putConnectSession({
+      sessionId: "sess-key-removed",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: now,
+      lastUsedAt: now,
+      revokedAt: null
+    });
+    // 让 keyspace 显式返回 undefined：模拟 owner key 已被用户从 vault 删除。
+    const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
+    (keyspace as unknown as { getKey: () => Promise<undefined> }).getKey = async () => undefined;
+    (service as unknown as { deps: { keyspace: typeof keyspace } }).deps.keyspace = keyspace;
+    // 强制 service 仍处于 locked 态。
+    (service as unknown as { lockStateValue: "locked" | "unlocked" }).lockStateValue = "locked";
+
+    const internals = service as unknown as {
+      probeExecutionCondition: (rec: unknown) => Promise<
+        | { kind: "execute" }
+        | { kind: "block_unlock" }
+        | { kind: "fail" }
+      >;
+    };
+    const decision = await internals.probeExecutionCondition({
+      recordId: "rec-test",
+      transportRequestId: "x",
+      method: "cipher.encrypt",
+      params: { connectSessionId: "sess-key-removed", text: "x" },
+      phase: "queued",
+      decision: "pending",
+      status: "queued",
+      enteredPhaseAt: 0,
+      autoApproved: false,
+      connectSessionId: "sess-key-removed",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      createdAt: 0,
+      updatedAt: 0,
+      finishedAt: 0,
+      errorCode: "",
+      errorMessage: "",
+      source: undefined,
+      origin: ORIGIN
+    });
+    expect(decision.kind).toBe("fail");
+  });
+
+  it("probeExecutionCondition：locked + keyspace 找到 owner key ready → 推 waiting_unlock（仍允许解锁路径）", async () => {
+    // 现有 fakeKeyspaceStub 默认返回 ready key——验证 locked 但 key ready
+    // 的合法请求仍走 waiting_unlock_manual，不被错误短路由掉。
+    const storageDb = makeFakeStorageDb();
+    const service = new ProtocolServiceImpl({
+      vault: makeVaultStub(TEST_PUB_HEX),
+      keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+      storageDb
+    });
+    service.startSession();
+    const now = Date.now();
+    await storageDb.putConnectSession({
+      sessionId: "sess-key-ok",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: now,
+      lastUsedAt: now,
+      revokedAt: null
+    });
+    (service as unknown as { lockStateValue: "locked" | "unlocked" }).lockStateValue = "locked";
+    const internals = service as unknown as {
+      probeExecutionCondition: (rec: unknown) => Promise<
+        | { kind: "execute" }
+        | { kind: "block_unlock"; targetPhase: string }
+        | { kind: "fail" }
+      >;
+    };
+    const decision = await internals.probeExecutionCondition({
+      recordId: "rec-test",
+      transportRequestId: "x",
+      method: "cipher.encrypt",
+      params: { connectSessionId: "sess-key-ok", text: "x" },
+      phase: "queued",
+      decision: "pending",
+      status: "queued",
+      enteredPhaseAt: 0,
+      autoApproved: false,
+      connectSessionId: "sess-key-ok",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      createdAt: 0,
+      updatedAt: 0,
+      finishedAt: 0,
+      errorCode: "",
+      errorMessage: "",
+      source: undefined,
+      origin: ORIGIN
+    });
+    expect(decision.kind).toBe("block_unlock");
+    if (decision.kind === "block_unlock") {
+      expect(decision.targetPhase).toBe("waiting_unlock_manual");
+    }
+  });

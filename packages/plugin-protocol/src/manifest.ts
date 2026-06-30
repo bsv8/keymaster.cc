@@ -572,10 +572,10 @@ export const protocolPlugin: PluginManifest = {
  *   - 与 cipher 站点密钥**隔域**：用 HKDF-SHA256 做 domain separation，
  *     info = `"keymaster.storage.v1" || ownerPublicKeyHex`。
  *   - 实现走 `OwnerKeyResolution.withPrivateKeyHex(...)`：明文私钥只在
- *     闭包内短暂存在；resolution 由 protocolService 的统一 execution
- *     runtime resolver 提供；vault / session_signer 任一执行面都走
- *     同一闭包签名。**不**再"vault only"——session_signer session 的
- *     storage 内容 key 与签名 / 加解密共用同一把 owner 私钥派生。
+ *     闭包内短暂存在；resolution 由 protocolService 的统一
+ *     `OwnerExecutionRuntime` resolver 提供；`bootstrap_owner` /
+ *     `vault_unlock` 任一来源都走同一闭包签名。**不**再"vault only"——
+ *     同一把 owner 私钥派生 storage 内容 key 与签名 / 加解密。
  *
  * 注意：HKDF 的"input keying material"用 private key hex 派生出一个固定
  * 长度的 seed，再做 domain-separated HKDF。这里直接用私钥 hex 做 IKM

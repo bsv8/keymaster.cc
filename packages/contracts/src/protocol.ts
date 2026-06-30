@@ -86,30 +86,25 @@
 //         桶；Keymaster 透明加解密对象内容，不加密路径名。
 //       - 新增协议错误码 `not_found`（storage.get / storage.delete 命中
 //         缺失对象）。
-//   - 施工单 2026-06-29 003 硬切换：appView Session Window 改成 session signer
-//     runtime，**不再**导入整套 vault unlock runtime：
-//       - 删 `UnlockRuntimeHandoff` 与 `vault.export/importUnlockRuntime*`；
-//         改用 `SessionSignerBootstrap`：launcher 只交接"这次 session 绑定
-//         owner 的私钥材料"给 Session Window。
-//       - `AppBootstrapPayload` 把 `unlockRuntime` 字段换成 `sessionSigner`
-//         字段；Session Window consume 后**只在内存**注册 session signer
-//         runtime，**不**模拟"完整解锁钱包窗口"。
-//       - `ConnectSessionRecord` 新增 `runtimeBinding` 真值字段
-//         （`"vault"` / `"session_signer"`）：`connect.login` 写的 session
-//         是 `runtimeBinding=vault`；`launchAppView` 写的 session 是
-//         `runtimeBinding=session_signer`。
-//       - protocolService 新增统一 execution runtime resolver
-//         （`resolveExecutionRuntime(connectSessionId)`）：按
-//         `connectSessionId -> ownerPublicKeyHex -> runtimeBinding` 决定走
-//         vault 闭包还是 session signer 内存 runtime。**不允许** session
-//         signer 缺失时 fallback 到全局 active key 或 vault。
-//       - `storage.*` 的内容 key 派生与签名 / 加解密走同一条 owner 解析
-//         真值；session_signer session 直接用 session signer 私钥派生。
-//       - Session Window 刷新后 signer runtime 丢失；V1 不做自动恢复，
-//         用户从 Keymaster 重新启动 app。
-//       - `LaunchAppViewErrorCode.export_unlock_runtime_failed` 改名为
-//         `export_session_signer_failed`；语义对应 launcher 用现有
-//         `vault.withPrivateKey` 借 owner 私钥失败的场景。
+//   - 统一 owner execution runtime：`OwnerExecutionRuntime` 承载同一份
+//     owner 私钥闭包；runtime 只允许两路来源——`bootstrap_owner`
+//     （launcher 一次性注入的 owner 私钥材料，本窗口当前主要来源）与
+//     `vault_unlock`（Session Window 解锁后从本地 vault 重建）。两路对
+//     外行为一致；执行路径**不**依据"runtimeBinding"二分（已删除）。
+//       - session 真值收口为 `sessionId + origin + ownerPublicKeyHex`，
+//         **不**持久化 runtime 来源；执行时按当前窗口能解析到的 owner
+//         runtime 立即决定能不能跑。
+//       - `drainExecutionQueue()` 取消 `lockState === "unlocked"` 全局
+//         卡死门：执行条件改成"按 record 自己能否解析到 owner runtime
+//         来决定立即执行 / waiting unlock / fail-fast"。
+//       - `AppBootstrapPayload.ownerRuntimeBootstrap` 承载
+//         `OwnerRuntimeBootstrap` 材料；Session Window 只在当前内存注册
+//         owner runtime，**不**假装是"完整解锁钱包窗口"，**不**写
+//         IndexedDB / localStorage / URL。
+//       - 所有业务方法（`identity.*` / `intent.sign` / `cipher.*` /
+//         `storage.*` / `p2pkh.transfer` / `feepool.*`）走同一个
+//         `resolveOwnerRuntime(session)` 入口；runtime 解析顺序：
+//         `bootstrap_owner` → `vault_unlock` → 解析失败。
 
 /**
  * 二进制字段。V1 协议里所有二进制内容（密文、签名、信封真值、文件本体、
@@ -824,6 +819,18 @@ export type ProtocolFailureReason =
   | "request_timeout"
   | "storage_provider_not_configured"
   | "storage_io_error"
+  /**
+   * 当前 Session Window 拿不到 owner execution runtime（施工单
+   * 2026-06-30 002 硬切换）。
+   *
+   * 触发：bootstrap runtime 丢失（刷新 / 关闭），且本窗口用户
+   * 还未在本窗口 unlock；当前窗口既无法用 bootstrap runtime 也
+   * 无法从本地 vault 重建。
+   *
+   * 处置：fail-closed，要求用户重新从 Keymaster 启动 app。
+   * 对外统一 `user_rejected`；本地 reason = `runtime_missing`。
+   */
+  | "runtime_missing"
   | "internal_error";
 
 /**
@@ -865,7 +872,7 @@ export type ProtocolFailureReason =
 /**
  * 持久化的 connect session 记录。
  *
- * 设计缘由（施工单 2026-06-28 002 硬切换 + 施工单 2026-06-29 003 硬切换）：
+ * 设计缘由（施工单 2026-06-28 002 硬切换 + 施工单 2026-06-30 002 硬切换）：
  *   - 这是 auth session 真值；**不**是 unlock runtime。
  *   - 允许持久化（IndexedDB `connectSessions` store）。
  *   - **不**混入 pending request / 中间密文 / 解锁材料。
@@ -875,25 +882,21 @@ export type ProtocolFailureReason =
  *     出现在 session record / request record / result payload / fee pool
  *     key / service 分支判断里——它会制造第二套 owner 身份。Vault 内部
  *     借用句柄按需从 keyspace 解析，**不**落 session 持久化。
- *   - `runtimeBinding`（施工单 2026-06-29 003 硬切换）必须持久化到
- *     session record 真值里；执行路径不允许靠"当前 bootMode"临时猜测。
- *     - `vault`：传统 connect popup 流程；执行时从已解锁 vault 借
- *       owner 私钥。
- *     - `session_signer`：appView 流程；执行时只使用当前 Session Window
- *       内存里的 session signer。**绝不**允许 fallback 到 vault。
+ *   - **不**持久化执行 runtime 来源：`runtimeBinding` 已从 session
+ *     真值里删掉。同一 session 在窗口生命周期内可以从
+ *     `bootstrap_owner` 切到 `vault_unlock`——这是允许的；
+ *     持久化来源会阻止这条切换路径。runtime 来源是窗口内运行时状态，
+ *     不是业务真值。
  *
  * 关键不变量：
  *   - `ownerPublicKeyHex` 在创建后**不**可变（resume 不重新选 key）。
- *   - origin / sessionId / ownerPublicKeyHex / runtimeBinding 四元组是
- *     session 的稳定真值。
- *   - 执行 owner 判定时按 `ownerPublicKeyHex` 查 keyspace.getKey() →
- *     拿当前 vault 内部 keyId（仅在 runtimeBinding === "vault" 路径），
- *     不存第二份 ownerKeyId。
- *   - `runtimeBinding` 在创建后**不**可变；session 真值在 IndexedDB 里
- *     长期有效，V1 不做"老 session 升降级 runtimeBinding"路径。
+ *   - origin / sessionId / ownerPublicKeyHex 三元组是 session 的稳定真值。
+ *   - 执行 owner 解析时按 `sessionId -> ownerPublicKeyHex` 走
+ *     `resolveOwnerRuntime(session)`，统一在
+ *     `bootstrap_owner | vault_unlock` 两条来源里挑当前可用的那条。
  */
 export interface ConnectSessionRecord {
-  /** sessionId：service 在 connect.login 时生成；UUID。 */
+  /** sessionId：service 在 connect.login / launchAppView 时生成；UUID。 */
   sessionId: string;
   /** exact event.origin；connect.resume / 业务方法必须严格匹配。 */
   origin: string;
@@ -902,23 +905,11 @@ export interface ConnectSessionRecord {
   /** 绑定 key 的 label 快照（仅展示用，不参与身份判定）。 */
   ownerLabel: string;
   /**
-   * identity.get 解析时返回的 claims 真值快照（本次 connect.login 时
-   * 取一次）。site 后续 `connect.resume` 拿同一份快照，不必再发一次
-   * `identity.get`。
+   * identity.get 解析时返回的 claims 真值快照（本次 connect.login / 启动
+   * bootstrap 时取一次）。site 后续 `connect.resume` 拿同一份快照，不必
+   * 再发一次 `identity.get`。
    */
   claimsSnapshot: Record<string, ResolvedClaimValue>;
-  /**
-   * 运行时绑定真值（施工单 2026-06-29 003 硬切换）。
-   *
-   * `connect.login` / connect popup 路径写的 session = `"vault"`；
-   * `launchAppView` 写的 session = `"session_signer"`。
-   *
-   * 业务方法执行时**必须**按 session 的 `runtimeBinding` 决定走哪条
-   * owner 执行路径；**不允许**依据"当前 bootMode"或"vault.status()"
-   * 临时猜测。`runtimeBinding = "session_signer"` 时缺 signer runtime
-   * 是 fail-closed，**绝不**fallback 到 vault。
-   */
-  runtimeBinding: "vault" | "session_signer";
   /**
    * 创建时间，unix milliseconds。
    */
@@ -1177,14 +1168,14 @@ export type LaunchAppViewErrorCode =
   /** connect session 存储不可用。 */
   | "session_storage_unavailable"
   /**
-   * 借 owner 私钥 / 准备 session signer 失败（施工单 2026-06-29 003）。
+   * 借 owner 私钥 / 准备 owner runtime bootstrap 失败（施工单
+   * 2026-06-30 002）。
    *
-   * 设计缘由：appView 不再走 vault unlock runtime 交接；改为 launcher
-   * 用 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥 hex 拼
-   * sessionSigner bootstrap。借不到（vault 状态错 / key 状态错）时报
-   * 这个 code。
+   * 设计缘由：launcher 用 `vault.withPrivateKey(keyId, fn)` 借出
+   * owner 私钥 hex 拼 owner runtime bootstrap。借不到（vault 状态
+   * 错 / key 状态错）时报这个 code。
    */
-  | "export_session_signer_failed"
+  | "export_owner_runtime_failed"
   /** `window.open` 抛出异常。 */
   | "open_session_window_failed"
   /** `window.open` 返回 null（被浏览器拦截 / 被禁用）。 */
@@ -1344,29 +1335,34 @@ export interface AppViewContext {
 }
 
 /**
- * Session signer bootstrap：launcher → Session Window 一次性交接的
- * "这次 session 绑定 owner 的私钥材料"（施工单 2026-06-29 003 硬切换）。
+ * Owner runtime bootstrap：launcher → Session Window 一次性交接的
+ * "Session Window 启动早期注入统一 owner execution runtime 用的材料"。
  *
- * 设计缘由：
- *   - Session Window 在 appView mode 下**不**导入整套 vault unlock
- *     runtime；它只拥有这一把 owner 私钥材料，足够跑 `identity.*` /
- *     `intent.sign` / `cipher.*` / `storage.*` / `p2pkh.transfer` /
- *     `feepool.*`。
- *   - 持有这把私钥就拥有这扇 Session Window 的全部签名 / 派生能力；
+ * 设计缘由（施工单 2026-06-30 002 硬切换）：
+ *   - bootstrap 内字段叫 `ownerRuntimeBootstrap`，表达"启动时注入的
+ *     统一 owner runtime 材料"。
+ *   - Session Window 在 bootstrap 成功后**只在内存**注册 owner runtime；
+ *     **不**导入整套 vault unlock runtime，**不**把 vault 切到
+ *     unlocked 态——appView mode 下 Session Window 不假装是"完整解锁
+ *     钱包窗口"。
+ *   - 持有这套材料就持有这扇 Session Window 的全部签名 / 派生能力；
  *     不需要 masterKey / masterSalt / keySnapshot / activePublicKeyHex。
  *   - 校验：Session Window consume 时必须验
  *     `ownerPublicKeyHex === payload.ownerPublicKeyHex` 且
  *     `privateKeyHex` 派生的压缩公钥确实等于该 publicKeyHex。
- *   - 失败一律 fail-closed：不缓存半残 signer / 不写 appViewContext /
+ *   - 失败一律 fail-closed：不缓存半残 runtime / 不写 appViewContext /
  *     不打开 client app。
  *   - **不**走 postMessage 事件队列（launcher 在子窗口 listener 挂好
  *     之前发消息会丢失）。Session Window mount 时**主动**调 launcher
  *     `window` 上的 `__keymaster_session_window_bootstrap__.acquire
  *     (token)` 拉取——同源普通 JS 函数调用，**没有**时序竞态。
- *   - 失败 / refresh 后 session signer 随 Session Window 当前内存一
- *     起丢失；V1 不持久化、不自动恢复。
+ *   - Session Window 刷新 / 关闭后 bootstrap runtime 随窗口内存丢失；
+ *     是允许的，本窗口用户后续 unlock 可按同 owner 从 vault 重建 runtime。
+ *   - `privateKeyHex` **不**写 IndexedDB / localStorage / sessionStorage
+ *     / URL / command history / 明文日志；只允许存在于 launcher 当前内存
+ *     与 Session Window 当前内存。
  */
-export interface SessionSignerBootstrap {
+export interface OwnerRuntimeBootstrap {
   /** 绑定 key 的压缩公钥 hex；与 payload.ownerPublicKeyHex 必须一致。 */
   ownerPublicKeyHex: string;
   /** 绑定 key 的 label（仅展示用）。 */
@@ -1378,35 +1374,38 @@ export interface SessionSignerBootstrap {
    * 与 `ownerPublicKeyHex` 一致；不一致直接 fail-closed。
    */
   privateKeyHex: string;
-  /** 该 signer 拥有的能力列表（例如 `["p2pkh"]`）；与 vault KeyRef
+  /** 该 runtime 拥有的能力列表（例如 `["p2pkh"]`）；与 vault KeyRef
    * capabilities 对齐。V1 简化为只校验存在性。 */
   capabilities: string[];
-  /** signer 创建时间，unix milliseconds。 */
+  /** runtime 创建时间，unix milliseconds。 */
   createdAt: number;
 }
 
 /**
  * Launcher 在 bootstrap 阶段一次性塞给 Session Window 的 capsule。
  *
- * 设计缘由（施工单 2026-06-29 001 硬切换 + 施工单 2026-06-29 003 硬切换）：
+ * 设计缘由（施工单 2026-06-30 002 硬切换，撤销 2026-06-29/003）：
  *   - **不**走 postMessage handoff。Launcher 在 `window` 上挂一个
  *     `LauncherBootstrapRegistry` 接口（`__keymaster_session_window_bootstrap__`），
  *     Session Window mount 后**主动**从同源 `window.opener` 调
  *     `acquire(token)` 拉取 capsule。
  *   - URL 里**只**承载"此窗口要以哪种模式启动"的轻量标记
  *     （`?boot=appView&bootstrapToken=<id>`）：token 是 launcher 生成的
- *     不透明 ID，本身不敏感；真正的 session signer + session 真值只在
+ *     不透明 ID，本身不敏感；真正的 owner runtime + session 真值只在
  *     launcher 的当前内存中。
  *   - capsule 包含 launcher 已建的 session 真值、claims 快照、
- *     launchToken，以及本次 session 绑定 owner 的 signer bootstrap
- *     （见 `SessionSignerBootstrap`）。
+ *     launchToken，以及本次 session 绑定 owner 的 owner runtime bootstrap
+ *     （见 `OwnerRuntimeBootstrap`）。
  *   - Session Window 拿到 capsule 后做校验：launchToken 非空 /
- *     signer payload 完整 / `signer.ownerPublicKeyHex ===
- *     payload.ownerPublicKeyHex` / `signer.privateKeyHex` 派生公钥
- *     与 `ownerPublicKeyHex` 一致；通过后**只在内存**注册 session
- *     signer runtime + 应用 appViewContext + 缓存 launchToken。
+ *     bootstrap payload 完整 / `bootstrap.ownerPublicKeyHex ===
+ *     payload.ownerPublicKeyHex` / `bootstrap.privateKeyHex` 派生
+ *     公钥与 `ownerPublicKeyHex` 一致；通过后**只在内存**注册 owner
+ *     runtime + 应用 appViewContext + 缓存 launchToken。
  *   - **不**导入 unlock runtime，**不**把 vault 切到 unlocked 态；
  *     appView mode 下的 Session Window 不假装是"完整解锁钱包窗口"。
+ *   - 这只是"启动时拥有 owner runtime 的一种方式"：当本窗口用户后续
+ *     在 Session Window 内 unlock，且 vault 里 owner 可读，运行时
+ *     自动按同 owner 切到 `vault_unlock` 来源继续处理同 session request。
  */
 export interface AppBootstrapPayload {
   /** 当前 app 信息（仅 UI / 启动用）。 */
@@ -1423,13 +1422,66 @@ export interface AppBootstrapPayload {
   /** launcher 给 client app 的 launchToken；Session Window 收 bootstrap 时缓存、消费在 connect.launch。 */
   launchToken: string;
   /**
-   * 本次 session 绑定 owner 的 session signer bootstrap（施工单
-   * 2026-06-29 003 硬切换）。
+   * 本次 session 绑定 owner 的 owner runtime bootstrap（施工单
+   * 2026-06-30 002 硬切换）。
    *
-   * Session Window 校验通过后**只**把它注册到当前窗口的 session signer
+   * Session Window 校验通过后**只**把它注册到当前窗口的 owner
    * runtime，**不**写任何长期存储，**不**调用 vault import runtime。
+   * `privateKeyHex` 与 session signer 共同遵守"不在长期存储落库"
+   * 边界。
    */
-  sessionSigner: SessionSignerBootstrap;
+  ownerRuntimeBootstrap: OwnerRuntimeBootstrap;
+}
+
+/**
+ * Owner execution runtime 当前来源（施工单 2026-06-30 002 硬切换）。
+ *
+ * 设计缘由：
+ *   - `runtimeBinding` 已从 `ConnectSessionRecord` 删除；
+ *     runtime 来源不再落库，不再作执行路径二分。
+ *   - 同一 session 在 Session Window 生命周期内可以从
+ *     `bootstrap_owner` 切到 `vault_unlock`：
+ *       - 启动早期 `bootstrap_owner`：launcher 一次性注入的 owner 私钥
+ *         材料，足够跑 `identity.*` / `intent.sign` / `cipher.*` /
+ *         `storage.*` / `p2pkh.transfer` / `feepool.*`。
+ *       - 本窗口用户后续 unlock + vault owner 可读 → `vault_unlock`：
+ *         从本地 vault 按 `ownerPublicKeyHex` 重建 owner runtime，
+ *         覆盖 `bootstrap_owner` 的同一把 owner；服务外部行为一致。
+ *   - 这是窗口内运行时状态 + 调试信息；**不**是 session 业务真值，
+ *     **不**影响 storage.* / cipher.* / p2pkh.transfer 的对外语义。
+ */
+export type OwnerRuntimeSource = "bootstrap_owner" | "vault_unlock";
+
+/**
+ * 统一 owner execution runtime 接口。
+ *
+ * 设计缘由：
+ *   - 业务方法（`identity.*` / `intent.sign` / `cipher.*` / `storage.*` /
+ *     `p2pkh.transfer` / `feepool.*`）只通过 `withPrivateKeyHex(...)`
+ *     闭包持有 owner 私钥；业务方法**不**知道也不依赖 `source` 是哪一条。
+ *   - `bootstrap_owner` 来源：launcher 在 Session Window 启动早期注入；
+ *     `vault_unlock` 来源：本窗口用户后续 unlock 后从 vault 重建。两条
+ *     路径对外行为完全一致。
+ *   - 解析入口 `resolveOwnerRuntime(session)`：`bootstrap_owner` →
+ *     `vault_unlock` → 解析失败。解析失败时业务方走 fail-fast
+ *     （不再 fallback 到 vault 或活动 active key）。
+ *   - `ownerPublicKeyHex` 是返回值上的唯一标识；执行时与
+ *     `session.ownerPublicKeyHex` 严格比对。
+ *   - 闭包内短暂暴露私钥 hex；调用方负责"用完即丢"，**不**把
+ *     `material.hex` 写出 `withPrivateKeyHex` 范围之外。
+ */
+export interface OwnerExecutionRuntime {
+  /** 会话绑定 owner 的压缩公钥 hex；与 session.ownerPublicKeyHex 一致。 */
+  ownerPublicKeyHex: string;
+  /** 当前 owner runtime 来源（仅调试 / 日志用，业务方不依赖）。 */
+  source: OwnerRuntimeSource;
+  /**
+   * 在闭包内短暂持有 owner 私钥 hex；调用方回 `fn(material)` 后
+   * material 即丢弃。失败时抛 localFailure；调用方按业务方法语义映射。
+   */
+  withPrivateKeyHex: <T>(
+    fn: (material: { hex: string }) => Promise<T> | T
+  ) => Promise<T>;
 }
 
 /**
@@ -1841,10 +1893,11 @@ export const PROTOCOL_STORAGE_DB_CAPABILITY = "protocol.storageDb";
  * 协议存储 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
  *
  * 关键不变量：
- *   - DB 名固定 `keymaster.protocol`，version 5（施工单 2026-06-28 002
- *     硬切换：owner 真值收口成 `ownerPublicKeyHex`，feePool key 维度
- *     补 `ownerPublicKeyHex`，从 4 升到 5；commands / feePools /
- *     connectSessions 三 store 全部重建）。
+ *   - DB 名固定 `keymaster.protocol`，version 8（施工单 2026-06-30 002
+ *     硬切换：撤销 runtimeBinding 二分路，重建 connectSessions store
+ *     去掉 `runtimeBinding` 字段；commands / origins / feePools /
+ *     storageProviderConfig / launchTokens 沿用旧 schema 不动；session
+ *     真值收口为 sessionId + origin + ownerPublicKeyHex 三元组）。
  *   - 四 store 各司其职：
  *       - `commands`：命令流历史（一条 request = 一条 record）；
  *       - `origins`：按 exact origin 存站点级配置；
@@ -2399,16 +2452,17 @@ export interface ProtocolService {
    *       - `installLauncherBootstrapRegistry`
    *       - `window.open("/protocol/v1/popup?...")` popup URL
    *     这些细节全部收口在 service 内部，避免协议真值散落到业务插件。
-   *   - 完整流程（施工单 2026-06-29 003 硬切换）：
+   *   - 完整流程（施工单 2026-06-30 002 硬切换）：
    *       1. 校验 vault 已解锁 + active key ready + owner key 有 vault keyId；
    *       2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
    *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
-   *       4. 创建新 `connectSessionId` 并落 DB，
-   *          写 `runtimeBinding = "session_signer"`；
+   *       4. 创建新 `connectSessionId` 并落 DB，写 session 真值三元组
+   *          （sessionId + origin + ownerPublicKeyHex）；
    *       5. 调 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥 hex，
-   *          组装 `SessionSignerBootstrap`；
+   *          组装 `OwnerRuntimeBootstrap`；
    *       6. 生成 `launchToken`；
-   *       7. 组装 `AppBootstrapPayload`（**不**再含 unlock runtime）；
+   *       7. 组装 `AppBootstrapPayload`（含 `ownerRuntimeBootstrap`，
+   *          **不**含 unlock runtime）；
    *       8. 在 launcher window 上挂一次性 bootstrap registry；
    *       9. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")`。
    *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。

@@ -1111,34 +1111,19 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       noticeListeners.clear();
     },
 
-    /* ============== 同源 Session Window bootstrap 一次性交接（施工单 2026-06-29 001） ============== */
+    /* ============== 同源 Session Window bootstrap 一次性交接（施工单 2026-06-30 002 取代 003） ============== */
 
-    /**
-     * 导出当前 vault 的 unlock runtime 交接包，**仅供同源 Session Window
-     * bootstrap 使用**。
+    /* 同源 Session Window bootstrap 一次性交接相关 API 已删除：
      *
-     * 施工单 2026-06-29 003 硬切换：**已删除**。
-     *   - appView Session Window **不再**导入整套 vault unlock runtime；
-     *     launcher 改为用现有 `withPrivateKey(keyId, fn)` 借出 owner
-     *     私钥明文 hex，把它交给 Session Window 拼成
-     *     `SessionSignerBootstrap`。
-     *   - 本方法不允许再以任何形式复活——V1 不支持"为单 key 持久化跨
-     *     窗口 unlock runtime"。如果未来真要支持，单独出施工单。
-     */
-    // exportUnlockRuntimeForSessionWindow 已删除（施工单 2026-06-29 003 硬切换）。
-
-    /**
-     * 导入同源 launcher 一次性交接的 unlock runtime 包。
+     * `exportUnlockRuntimeForSessionWindow()` 与
+     * `importUnlockRuntimeFromLauncher(handoff)` 都已删除——appView
+     * Session Window 不导入整套 vault unlock runtime，launcher 改为用
+     * 现有 `withPrivateKey(keyId, fn)` 借出 owner 私钥明文 hex 拼
+     * `OwnerRuntimeBootstrap`。
      *
-     * 施工单 2026-06-29 003 硬切换：**已删除**。
-     *   - appView Session Window **不再**导入整套 vault unlock runtime；
-     *     launcher 改为用现有 `withPrivateKey(keyId, fn)` 借出 owner
-     *     私钥明文 hex，把它交给 Session Window 拼成
-     *     `SessionSignerBootstrap`。
-     *   - 本方法不允许再以任何形式复活——V1 不支持"为单 key 持久化跨
-     *     窗口 unlock runtime"。如果未来真要支持，单独出施工单。
+     * V1 不支持"为单 key 持久化跨窗口 unlock runtime"。如未来真要支持，
+     * 另出一份施工单。
      */
-    // importUnlockRuntimeFromLauncher 已删除（施工单 2026-06-29 003 硬切换）。
 
     /**
      * 硬切换 002：仅校验锁屏密码，不改变 Vault 状态。

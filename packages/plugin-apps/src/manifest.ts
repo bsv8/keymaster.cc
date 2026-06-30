@@ -11,9 +11,9 @@
 //     `protocol.service`。
 //   - 元数据走 `business`：plugin-apps 是面向用户的 launcher 入口，**不**是
 //     core 平台能力；缺省启用、可被禁用。
-//   - 施工单 2026-06-29 003 硬切换：错误文案从
-//     `"exportUnlockRuntimeFailed"` 改成 `"exportSessionSignerFailed"`；
-//     语义对应 launcher 端用 `vault.withPrivateKey` 借 owner 私钥失败。
+//   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；
+//     当前激活错误码 `export_owner_runtime_failed` 表示 launcher 端
+//     用 `vault.withPrivateKey` 借 owner 私钥失败。
 
 import type {
   HomeRegistry,
@@ -54,8 +54,8 @@ const appsResources: I18nPluginResources = {
         "This browser environment cannot open the app.",
       "apps.open.error.sessionStorageUnavailable":
         "Keymaster local storage is unavailable. Please try again later.",
-      "apps.open.error.exportSessionSignerFailed":
-        "Failed to prepare the app session signer. Please try again.",
+      "apps.open.error.exportOwnerRuntimeFailed":
+        "Failed to prepare the app owner runtime. Please try again.",
       "apps.open.error.openSessionWindowFailed":
         "Failed to open the Session Window. Please try again.",
       "apps.open.error.openSessionWindowBlocked":
@@ -84,7 +84,7 @@ const appsResources: I18nPluginResources = {
       "apps.open.error.invalidAppConfig": "该应用配置非法，请联系应用提供方。",
       "apps.open.error.windowUnavailable": "当前浏览器环境无法打开该应用。",
       "apps.open.error.sessionStorageUnavailable": "Keymaster 本地存储不可用，请稍后再试。",
-      "apps.open.error.exportSessionSignerFailed": "app session signer 准备失败，请稍后再试。",
+      "apps.open.error.exportOwnerRuntimeFailed": "app owner runtime 准备失败，请稍后再试。",
       "apps.open.error.openSessionWindowFailed": "打开 Session Window 失败，请稍后再试。",
       "apps.open.error.openSessionWindowBlocked": "浏览器拦截了 Session Window 的打开。请允许 Keymaster 弹出窗口后再试一次。",
       "apps.open.error.internal": "打开应用失败，请稍后再试。",

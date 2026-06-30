@@ -2,7 +2,7 @@
 // storage.* 协议方法的物理对象层：虚拟桶 key 派生 + AES-GCM 透明加解密
 // + 最小 S3-compatible 适配。
 //
-// 设计缘由（施工单 2026-06-29 001 硬切换 + 施工单 2026-06-29 003 硬切换）：
+// 设计缘由（施工单 2026-06-29 001 硬切换 + 施工单 2026-06-30 002 硬切换）：
 //   - 物理上只一份全局 S3 provider 配置；逻辑上按
 //     `/{originEncoded}/{ownerPublicKeyHex}/{relativePath}` 划分虚拟桶。
 //   - 透明加解密：每个对象独立随机 nonce（AES-GCM-256）；相同路径重复
@@ -13,12 +13,12 @@
 //   - storageObjectService 不依赖 React；单元测试可直接 import。
 //   - 入口 `createStorageObjectService(deps)` 接收 S3 adapter 注入；
 //     单元测试可传 fake adapter。
-//   - **施工单 2026-06-29 003**：内容加密 key 的派生走
+//   - 内容加密 key 的派生走
 //     `StorageCryptoBridge.deriveStorageContentKey(ikr)`，由 protocolService
-//     先解析好 `OwnerKeyResolution`（vault / session_signer 任一）再传入。
-//     storage 自身**不**直接 import vault / session signer 任何具体实现。
-//     这样 storage 与 cipher / intent.sign / p2pkh / feepool 走同一条
-//     owner 解析真值，不再强依赖 vault。
+//     先解析好 `OwnerExecutionRuntime`（`bootstrap_owner` / `vault_unlock`
+//     任一来源）再传入。storage 自身**不**直接 import vault 任何具体
+//     实现。这样 storage 与 cipher / intent.sign / p2pkh / feepool 走
+//     同一条 owner 解析真值。
 
 import type {
   BinaryField,
@@ -37,17 +37,15 @@ import type {
 import { encodeOrigin, normalizeStoragePath } from "./sessionWindowBootstrap.js";
 
 /**
- * 解析好的 owner 私钥材料（施工单 2026-06-29 003 硬切换）。
+ * 解析好的 owner 私钥材料（施工单 2026-06-30 002 硬切换）。
  *
  * 设计缘由：
- *   - `vault` runtime 走 `vault.withPrivateKey(keyId, fn)`；fn 拿到
- *     `{ hex, wif? }` 在闭包内使用。
- *   - `session_signer` runtime 走 Session Window 内存里的 signer
- *     runtime；fn 同样拿到 `{ hex }`。
- *   - storage 与 cipher / intent.sign 走**同一条** owner 解析真值
- *     （`resolveOwnerKeyMaterial(...)`），但**不**用同一个 keyId 概念
- *     ——这里给的是"已经能拿到私钥 hex 的回调"，调用方负责闭包
- *     安全性。storage 自身不知道 vault / session signer 之间的差异。
+ *   - `OwnerExecutionRuntime` 由 protocolService 按
+ *     `bootstrap_owner` → `vault_unlock` 顺序解析出，调用方拿到的
+ *     `withPrivateKeyHex(fn)` 闭包与具体来源无关。
+ *   - fn 在闭包内拿到 `{ hex }`，用完即丢；闭包外不允许保留。
+ *   - storage 与 cipher / intent.sign / feepool 走**同一条** owner
+ *     解析真值（统一 `resolveOwnerRuntime`），不再区分 session 来源。
  *   - 不允许走"全局 active key"路径。
  */
 export interface OwnerKeyResolution {
@@ -57,7 +55,7 @@ export interface OwnerKeyResolution {
 }
 
 /**
- * storage 内容加密 / 解密需要的服务（施工单 2026-06-29 003）。
+ * storage 内容加密 / 解密需要的服务（施工单 2026-06-30 002）。
  *
  * 设计缘由：
  *   - `deriveStorageContentKey(resolution)` 由 protocolService 在执行
@@ -66,8 +64,8 @@ export interface OwnerKeyResolution {
  *     在闭包内做 HKDF 派生 storage content key，**不**直接 import
  *     vault 或 session signer。
  *   - 这样 storage 与签名 / 加解密链路**共用同一条** owner 解析
- *     真值——session_signer session 的 storage 内容 key 与 cipher /
- *     intent.sign 用同一把 owner 私钥派生。
+ *     真值——bootstrap 注入的 owner runtime 与 unlock 后从 vault 重建
+ *     的 owner runtime 在 storage 这里对外完全一致。
  */
 export interface StorageCryptoBridge {
   /**

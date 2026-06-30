@@ -431,17 +431,18 @@ export interface VaultService {
    */
   withPrivateKey<T>(keyId: string, fn: (material: PrivateKeyMaterial) => Promise<T> | T): Promise<T>;
 
-  /* ============== appView session signer bootstrap（施工单 2026-06-29 003 硬切换） ============== */
-  // 设计缘由（施工单 2026-06-29 003 硬切换）：
-  //   - appView Session Window **不再**导入整套 vault unlock runtime；
-  //     launcher 改为用现有 `withPrivateKey(keyId, fn)` 借出 owner 私钥
-  //     明文 hex，把它交给 Session Window 拼成 `SessionSignerBootstrap`。
+  /* ============== appView owner runtime bootstrap ============== */
+  // 设计缘由（施工单 2026-06-30 002）：
+  //   - appView Session Window **不**导入整套 vault unlock runtime；
+  //     launcher 用现有 `withPrivateKey(keyId, fn)` 借出 owner 私钥
+  //     明文 hex，交给 Session Window 拼成 `OwnerRuntimeBootstrap`。
   //   - `exportUnlockRuntimeForSessionWindow()` /
-  //     `importUnlockRuntimeFromLauncher(handoff)` 这两个 API 已删除：
-  //     不允许再让 appView Session Window 模拟"完整解锁钱包窗口"。
-  //   - Session Window 的 vault 在 appView mode 下可以是 `locked` 态——
-  //     业务方法是否可执行取决于 `connectSessionId` 的 `runtimeBinding`
-  //     与对应 runtime 是否就绪。
-  //   - 如果未来真要支持"为单 key 持久化"或"key 级别跨窗口 unlock"，
-  //     那是另一份施工单；本单**不**重开 unlock runtime export/import。
+  //     `importUnlockRuntimeFromLauncher(handoff)` 已删除：不允许让
+  //     appView Session Window 模拟"完整解锁钱包窗口"。
+  //   - Session Window 在 appView mode 下可以是 `locked` 态——业务方法
+  //     是否可执行取决于 `OwnerExecutionRuntime` 能否解析到：
+  //     `bootstrap_owner`（Session Window 启动早期注入的）或
+  //     `vault_unlock`（本窗口 unlock 后从 vault 重建）。
+  //   - 未来若要支持"为单 key 持久化"或"key 级别跨窗口 unlock"，
+  //     另出一份施工单；本接口**不**重开 unlock runtime export/import。
 }

@@ -8,9 +8,9 @@
 //   - 只展示前 3 条，UI 提示"more"；
 //   - 启动失败按 `LaunchAppViewError.code` 映射到 i18n 文案，**不**直接
 //     暴露 `err.message` 给用户。
-//   - 施工单 2026-06-29 003 硬切换：错误码从
-//     `"export_unlock_runtime_failed"` 改成
-//     `"export_session_signer_failed"`。
+//   - `LaunchAppViewError.code = "export_owner_runtime_failed"` 表示
+//     launcher 端借 owner 私钥失败；详细语义由
+//     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
 import { useCapability, useI18n, navigateTo } from "@keymaster/runtime";
@@ -39,8 +39,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
       return "apps.open.error.windowUnavailable";
     case "session_storage_unavailable":
       return "apps.open.error.sessionStorageUnavailable";
-    case "export_session_signer_failed":
-      return "apps.open.error.exportSessionSignerFailed";
+    case "export_owner_runtime_failed":
+      return "apps.open.error.exportOwnerRuntimeFailed";
     case "open_session_window_failed":
       return "apps.open.error.openSessionWindowFailed";
     case "open_session_window_blocked":

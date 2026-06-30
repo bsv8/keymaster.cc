@@ -10,10 +10,9 @@
 //     **不**直接把 `err.message` 抛给用户（避免把"vault not unlocked"等
 //     内部实现细节展示到 UI 上）。
 //   - 启动失败一律 fail-closed：抛错，UI 显示错误，不补偿不重试。
-//   - 施工单 2026-06-29 003 硬切换：错误码从
-//     `"export_unlock_runtime_failed"` 改成
-//     `"export_session_signer_failed"`（语义对应 launcher 端借 owner
-//     私钥失败）。
+//   - `LaunchAppViewError.code = "export_owner_runtime_failed"` 表示
+//     launcher 端借 owner 私钥失败；详细语义由
+//     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
 import { useCapability, useI18n, navigateTo } from "@keymaster/runtime";
@@ -46,8 +45,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
       return "apps.open.error.windowUnavailable";
     case "session_storage_unavailable":
       return "apps.open.error.sessionStorageUnavailable";
-    case "export_session_signer_failed":
-      return "apps.open.error.exportSessionSignerFailed";
+    case "export_owner_runtime_failed":
+      return "apps.open.error.exportOwnerRuntimeFailed";
     case "open_session_window_failed":
       return "apps.open.error.openSessionWindowFailed";
     case "open_session_window_blocked":

@@ -1,5 +1,23 @@
 # 003 appView Session Signer 替代 Unlock Runtime 硬切换一次性迭代施工单
 
+> ⚠️ **已被 `施工单/2026-06-30/002-launcher-popup-unified-owner-runtime-hard-switch.md` 整体撤销并取代**。
+>
+> 003 提出的 `runtimeBinding` 二分路（`vault` / `session_signer`）、
+> `SessionSignerBootstrap` 类型、`sessionSigner` payload 命名，
+> 以及 `drainExecutionQueue` 以全局 `lockState === "unlocked"`
+> 作为所有 request 统一前置门的设计，均已**删除**：
+>
+> - `runtimeBinding` 不再落库；session 真值收口为
+>   `sessionId + origin + ownerPublicKeyHex` 三元组。
+> - bootstrap 启动材料统一改名为 `OwnerRuntimeBootstrap`，
+>   业务方法收口到 `resolveOwnerRuntime(session)`：
+>   `bootstrap_owner` → `vault_unlock` → fail-fast。
+> - `drainExecutionQueue()` 改按 record 自己能否解析到
+>   owner runtime 决定立即执行 / waiting_unlock / fail-fast。
+>
+> 本单**仅留作历史追溯**；后续禁止在不参考 2026-06-30/002 的情况下
+> 单独推进 003 的实现。
+
 ## 参考文档与现状代码
 
 本次施工、联调、验收以下列文档与代码为准：

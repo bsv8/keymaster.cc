@@ -97,6 +97,8 @@ import {
   type LauncherBootstrapRegistry,
   type MethodParams,
   type MethodResult,
+  type OwnerExecutionRuntime,
+  type OwnerRuntimeBootstrap,
   type P2pkhProtocolAdapter,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
@@ -119,7 +121,6 @@ import {
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type ProtocolStorageDb,
-  type SessionSignerBootstrap,
   type StorageDeleteParams,
   type StorageDeleteResult,
   type StorageGetParams,
@@ -551,22 +552,25 @@ export class ProtocolServiceImpl implements ProtocolService {
   > = new Map();
 
   /**
-   * Session signer runtime 内存 Map（施工单 2026-06-29 003 硬切换）：
-   * `connectSessionId -> { signer: SessionSignerBootstrap; createdAt: number }`。
+   * Session Window 当前已注册 owner runtime 内存 Map（施工单 2026-06-30 002
+   * 硬切换）：
+   * `connectSessionId -> { runtime: OwnerRuntimeBootstrap; createdAt: number }`。
    *
    * 设计缘由：
-   *   - appView mode 下 Session Window consume bootstrap 后**只**在
-   *     当前窗口内存注册 session signer runtime；**不**导入 unlock
-   *     runtime，**不**把 vault 切到 unlocked 态。
-   *   - signer runtime 与 `connectSessionId` 一一对应；业务方法按
-   *     `connectSessionId` 取 signer。`runtimeBinding = "session_signer"`
-   *     的 session 缺 signer → 报 `runtime_missing` 错误，**不**fallback。
-   *   - 刷新 / 关闭 Session Window 后 signer 随窗口内存丢失；V1 不
-   *     做自动恢复 / 持久化 / 重建——用户从 Keymaster 重新启动 app。
+   *   - 来源 = `bootstrap_owner`：launcher consume bootstrap 后**只**在
+   *     当前窗口内存注册 owner runtime；**不**导入 unlock runtime，
+   *     **不**把 vault 切到 unlocked 态。
+   *   - 与 `connectSessionId` 一一对应；业务方法按 `connectSessionId`
+   *     取 runtime。runtime 不存在时 service 再尝试 `vault_unlock`
+   *     来源；从 vault 借 owner 私钥 hex 提供同一份 runtime。
+   *   - 两条来源对外行为一致（同一把 owner 同一份私钥 hex）；允许同一
+   *     session 在窗口生命周期内从 `bootstrap_owner` 切到 `vault_unlock`。
+   *   - 刷新 / 关闭 Session Window 后 bootstrap runtime 随窗口内存
+   *     丢失；用户在本窗口后续 unlock 可按同 owner 从 vault 重建。
    */
-  private readonly sessionSignerRuntimes: Map<
+  private readonly ownerRuntimesBySessionId: Map<
     string,
-    { signer: SessionSignerBootstrap; createdAt: number }
+    { runtime: OwnerRuntimeBootstrap; createdAt: number }
   > = new Map();
 
   /**
@@ -676,9 +680,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.currentAppClientSource = null;
     this.stopAppClientReadyPump();
     this.launchTokensByToken.clear();
-    // 施工单 2026-06-29 003 硬切换：startSession 也要清空 session signer
-    // runtimes（防止上一会话残留的 signer 干扰本会话）。
-    this.sessionSignerRuntimes.clear();
+    // 施工单 2026-06-30 002 硬切换：startSession 也要清空 owner runtimes
+    // 防止上一会话残留的 bootstrap runtime 干扰本会话。
+    this.ownerRuntimesBySessionId.clear();
     this.bootstrapConsumed = false;
     this.bootstrapFailedFlag = false;
     this.bootstrapFailureReasonValue = null;
@@ -736,8 +740,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.stopAppClientReadyPump();
     this.appClientConnectTimedOutFlag = false;
     this.launchTokensByToken.clear();
-    // 施工单 2026-06-29 003 硬切换：endSession 清空 session signer runtimes。
-    this.sessionSignerRuntimes.clear();
+    // 施工单 2026-06-30 002 硬切换：endSession 清空 owner runtimes。
+    this.ownerRuntimesBySessionId.clear();
     this.emit();
     this.emitFeed();
   }
@@ -1475,7 +1479,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * Keymaster 内部 app launcher 启动入口（`plugin-apps` 唯一允许调用）。
    *
-   * 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
+   * 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-30 002 硬切换）：
    *   - plugin-apps 是**唯一**允许调用本入口的业务插件；plugin-apps 自己
    *     **不**直接 import / 操作：
    *       - `protocolStorageDb`
@@ -1489,21 +1493,21 @@ export class ProtocolServiceImpl implements ProtocolService {
    *          `new URL(appUrl).origin === appOrigin`；否则 throw "invalid_app_config"）；
    *       4. 解析 claims 快照（按 input.claims 走 builtin claim 解析，与
    *          `connect.login` 一致）；
-   *       5. 创建新 `connectSessionId`，`runtimeBinding = "session_signer"`
-   *          （按 `putConnectSessionAndRevokeOriginPeers` 原子落库 +
-   *          吊销同 origin 旧 session）；
+   *       5. 创建新 `connectSessionId`，按 session 真值三元组落库
+   *          （sessionId + origin + ownerPublicKeyHex，无 `runtimeBinding`）；
    *       6. 用现有 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥
-   *          hex，组装 `SessionSignerBootstrap`；
+   *          hex，组装 `OwnerRuntimeBootstrap`；
    *       7. 生成新 `launchToken`（`crypto.randomUUID()`）；
-   *       8. 组装 `AppBootstrapPayload`；
+   *       8. 组装 `AppBootstrapPayload`（含 `ownerRuntimeBootstrap`）；
    *       9. 在 launcher `window` 上挂一次性 bootstrap registry；
    *       10. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")`；
    *       11. `window.open` 失败 → throw "open_session_window_*"。
    *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
    *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
    *     只消费 `launchToken`、不创建 session。
-   *   - **不**再调 `vault.exportUnlockRuntimeForSessionWindow()`（已删除）；
-   *     改为借 owner 私钥 hex 走 sessionSigner bootstrap。
+   *   - 借 owner 私钥 hex 失败时 throw `export_owner_runtime_failed`；
+   *     `exportUnlockRuntimeForSessionWindow` / `UnlockRuntimeHandoff`
+   *     已删除，不再向 Session Window 交接整套 vault unlock runtime。
    */
   async launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult> {
     // 1) 校验入参基本完整性。
@@ -1571,8 +1575,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       resolveBuiltinClaim(name, { activeKeyLabel: key.label })
     );
     // 6) 创建新 connect session：原子落库 + 吊销同 origin 旧 session。
-    //    写 `runtimeBinding = "session_signer"`（施工单 2026-06-29 003）：
-    //    这是 session 真值，**不**靠"当前 bootMode"临时猜测。
+    //    施工单 2026-06-30 002 硬切换：session 真值收口为三元组
+    //    （sessionId + origin + ownerPublicKeyHex），不再写
+    //    `runtimeBinding`——执行路径不允许靠"当前 bootMode"临时猜测，
+    //    必须读 session 真值。runtime 来源由 `resolveOwnerRuntime`
+    //    在每次执行时按当前窗口状态决定。
     const now = Date.now();
     const sessionId = this.deps.generateId ? this.deps.generateId() : crypto.randomUUID();
     const sessionRecord: ConnectSessionRecord = {
@@ -1581,19 +1588,18 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
-      runtimeBinding: "session_signer",
       createdAt: now,
       lastUsedAt: now,
       revokedAt: null
     };
     await this.deps.storageDb.putConnectSessionAndRevokeOriginPeers(sessionRecord);
     // 7) 用现有 `vault.withPrivateKey` 借 owner 私钥 hex，组装
-    //    `SessionSignerBootstrap`（施工单 2026-06-29 003 硬切换）。
+    //    `OwnerRuntimeBootstrap`（施工单 2026-06-30 002 硬切换）。
     //    `exportUnlockRuntimeForSessionWindow` / `UnlockRuntimeHandoff`
     //    已删除；不再向 Session Window 交接整套 vault unlock runtime。
-    let sessionSigner: SessionSignerBootstrap;
+    let ownerRuntimeBootstrap: OwnerRuntimeBootstrap;
     try {
-      sessionSigner = await this.deps.vault.withPrivateKey(
+      ownerRuntimeBootstrap = await this.deps.vault.withPrivateKey(
         key.keyId,
         async (material) => ({
           ownerPublicKeyHex: key.publicKeyHex!,
@@ -1606,12 +1612,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.launcher",
-        event: "exportSessionSigner.failed",
+        event: "exportOwnerRuntime.failed",
         err: err instanceof Error ? err.message : String(err)
       });
       throw new LaunchAppViewError(
-        "export_session_signer_failed",
-        "launchAppView: failed to export session signer"
+        "export_owner_runtime_failed",
+        "launchAppView: failed to export owner runtime bootstrap"
       );
     }
     // 8) 生成新 launchToken。
@@ -1628,7 +1634,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         return input.appUrl;
       }
     })();
-    // 10) 组装 AppBootstrapPayload。
+    // 10) 组装 AppBootstrapPayload（含 `ownerRuntimeBootstrap`，不含 `runtimeBinding`）。
     const bootstrap = buildAppBootstrapPayload({
       appId: input.appId,
       appOrigin: input.appOrigin,
@@ -1639,7 +1645,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       resolvedAt: now,
       launchToken,
       expiresAt: now + 24 * 60 * 60 * 1000,
-      sessionSigner
+      ownerRuntimeBootstrap
     });
     // 11) 在 launcher window 上挂一次性 bootstrap registry。
     //     设计缘由（issue #1）：同一 launcher 窗口里多次点 `Open App` 时
@@ -1735,18 +1741,20 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 应用 launcher bootstrap payload（施工单 2026-06-29 003 硬切换）。
+   * 应用 launcher bootstrap payload（施工单 2026-06-30 002 硬切换）。
    *
    * 设计缘由：
-   *   - 校验 payload 完整性 + session signer 真值（hex 派生的压缩公钥
-   *     必须等于 payload.ownerPublicKeyHex）；
-   *   - 校验通过后**只**在当前 Session Window 内存里注册 session signer
-   *     runtime，**不**调用 `vault.importUnlockRuntime*`（已删除）；
-   *   - 写 `appViewContext` + launchToken 缓存 + 内部 `sessionSignerRuntimes`。
+   *   - 校验 payload 完整性 + owner runtime bootstrap 真值（hex 派生
+   *     的压缩公钥必须等于 payload.ownerPublicKeyHex）；
+   *   - 校验通过后**只**在当前 Session Window 内存里注册 owner runtime，
+   *     `OwnerRuntimeSource = "bootstrap_owner"`；**不**调用
+   *     `vault.importUnlockRuntime*`（已删除）；
+   *   - 写 `appViewContext` + launchToken 缓存 + 内部
+   *     `ownerRuntimesBySessionId`。
    *
    * 关键约束：
    *   - **不**导入 unlock runtime；**不**把 vault 切到 unlocked 态。
-   *   - 校验失败一律 fail-closed：不缓存半残 signer / 不写 appViewContext /
+   *   - 校验失败一律 fail-closed：不缓存半残 runtime / 不写 appViewContext /
    *     不打开 client app。`bootstrapFailed = true` 让 UI 渲染错误页。
    */
   private async applyLauncherBootstrap(payload: AppBootstrapPayload): Promise<void> {
@@ -1754,47 +1762,47 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.markBootstrapFailed("bootstrap_payload_invalid");
       return;
     }
-    if (!payload.sessionSigner) {
-      this.markBootstrapFailed("bootstrap_session_signer_missing");
+    if (!payload.ownerRuntimeBootstrap) {
+      this.markBootstrapFailed("bootstrap_owner_runtime_missing");
       return;
     }
-    const signer = payload.sessionSigner;
+    const runtime = payload.ownerRuntimeBootstrap;
     if (
-      !signer.ownerPublicKeyHex ||
-      !signer.privateKeyHex ||
-      signer.privateKeyHex.length !== 64
+      !runtime.ownerPublicKeyHex ||
+      !runtime.privateKeyHex ||
+      runtime.privateKeyHex.length !== 64
     ) {
-      this.markBootstrapFailed("bootstrap_session_signer_invalid");
+      this.markBootstrapFailed("bootstrap_owner_runtime_invalid");
       return;
     }
-    if (signer.ownerPublicKeyHex !== payload.ownerPublicKeyHex) {
-      this.markBootstrapFailed("bootstrap_session_signer_pubkey_mismatch");
+    if (runtime.ownerPublicKeyHex !== payload.ownerPublicKeyHex) {
+      this.markBootstrapFailed("bootstrap_owner_runtime_pubkey_mismatch");
       return;
     }
-    // 1) 校验 signer 私钥 hex 确实对应声明的 ownerPublicKeyHex：直接
-    //    派生压缩公钥并比对；不一致 → fail-closed。
+    // 1) 校验私钥 hex 确实对应声明的 ownerPublicKeyHex：直接派生
+    //    压缩公钥并比对；不一致 → fail-closed。
     let derivedPubHex: string;
     try {
-      derivedPubHex = await this.deriveCompressedPubHexFromPrivHex(signer.privateKeyHex);
+      derivedPubHex = await this.deriveCompressedPubHexFromPrivHex(runtime.privateKeyHex);
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.sessionWindow",
-        event: "signerPubkeyDerive.failed",
+        event: "ownerRuntimePubkeyDerive.failed",
         err: err instanceof Error ? err.message : String(err)
       });
-      this.markBootstrapFailed("bootstrap_session_signer_invalid");
+      this.markBootstrapFailed("bootstrap_owner_runtime_invalid");
       return;
     }
-    if (derivedPubHex !== signer.ownerPublicKeyHex) {
-      this.markBootstrapFailed("bootstrap_session_signer_pubkey_mismatch");
+    if (derivedPubHex !== runtime.ownerPublicKeyHex) {
+      this.markBootstrapFailed("bootstrap_owner_runtime_pubkey_mismatch");
       return;
     }
-    // 2) 写入 appViewContext + launchToken 缓存 + session signer runtime。
+    // 2) 写入 appViewContext + launchToken 缓存 + owner runtime。
     //    注意 Session Window **不**调 `vault.importUnlockRuntime*`——
     //    那是 unlock runtime 模型下的旧接口，本单已删除。appView mode
-    //    下 vault 仍可能处于 `locked` 态，业务方法是否可执行取决于
-    //    `connectSessionId -> ownerPublicKeyHex -> runtimeBinding =
-    //    session_signer -> in-memory session signer` 真值。
+    //    下 vault 仍可能处于 `locked` 态；业务方法是否可执行只看
+    //    `OwnerExecutionRuntime` 当前能否解析到（`bootstrap_owner` 或
+    //    后续 `vault_unlock`）——**不**再依"是否 locked"。
     const claimsSnapshot = payload.resolvedClaims as AppViewContext["resolvedClaims"];
     this.currentAppViewContext = {
       appId: payload.app.appId,
@@ -1815,8 +1823,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       resolvedAt: payload.resolvedAt,
       consumed: false
     });
-    this.sessionSignerRuntimes.set(payload.connectSessionId, {
-      signer,
+    this.ownerRuntimesBySessionId.set(payload.connectSessionId, {
+      runtime,
       createdAt: Date.now()
     });
     // 3) 状态写入完成。bootstrap consume 已成功：不再做超时 / listener
@@ -2166,9 +2174,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     } else if (method === "connect.launch") {
       // appView 首登：launchToken 是唯一真值；**不**要求 connectSessionId，
-      // **不**需要解锁 / 确认 UI。无论当前 vault 是否 locked，都直接
-      // queued → executing，由 executeConnectLaunch 内部按 launchToken +
-      // session_signer runtime 做 fail-closed 校验。
+      // **不**需要解锁 / 确认 UI。无论当前 vault 是否 locked，record 都先
+      // 入 `executionQueue`；由 `drainExecutionQueue()` 走
+      // `probeExecutionCondition` 决定立即执行还是 fail-fast。
+      // executeConnectLaunch 内部再用 launchToken + 统一
+      // `resolveOwnerRuntime` 做 fail-closed 校验。
       this.setRecordPhase(recordId, "queued");
       rec.enteredPhaseAt = Date.now();
       this.executionQueue.push(recordId);
@@ -2903,16 +2913,73 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 执行器：从 `executionQueue` FIFO 取一条执行；同一时刻只允许一条
-   * `executing`。relock 时执行器暂停取新任务。
+   * `executing`。
+   *
+   * 施工单 2026-06-30 002 硬切换：取消 `lockStateValue === "unlocked"`
+   * 作为所有 request 的统一前置门。每条 record 在入队执行前都先
+   * `probeExecutionCondition(rec)`：
+   *   - 当前 record 能解析到 owner runtime → 立即执行；
+   *   - 当前 record 解析不到 owner runtime，但 unlock 后能从 vault
+   *     重建 → 推到 `waiting_unlock_manual`（沿用旧 manual 卡路径）；
+   *   - 当前 record 解析不到 owner runtime，且解锁也无法成立 →
+   *     fail-fast，本地 reason = `runtime_missing`，对外
+   *     `user_rejected`。
+   *
+   * 这样 lockState 不再是"全局总闸"；locked 时只要 bootstrap owner
+   * runtime 已就绪，`connect.launch` 等业务请求照常执行——正是本次硬切
+   * 要修复的现场故障。
    */
   private async drainExecutionQueue(): Promise<void> {
     if (this.executingRecordId !== null) return; // 已有正在执行的；当前条跑完后由 `runRequest` 内的 finally 触发下一次 drain。
-    while (this.executionQueue.length > 0 && this.lockStateValue === "unlocked") {
-      const recordId = this.executionQueue.shift()!;
+    if (this.executionQueue.length === 0) return;
+    while (this.executionQueue.length > 0 && this.executingRecordId === null) {
+      const recordId = this.executionQueue[0];
+      if (typeof recordId !== "string") {
+        // 防御性：executionQueue 在代码内只 push 字符串，但 TS 推导
+        // 出 `string | undefined`（数组下标）；非字符串时直接 shift。
+        this.executionQueue.shift();
+        continue;
+      }
       const rec = this.requestsByRecordId.get(recordId);
-      if (!rec) continue;
-      if (rec.phase !== "queued") continue;
-      // 执行。
+      if (!rec) {
+        this.executionQueue.shift();
+        continue;
+      }
+      if (rec.phase !== "queued") {
+        this.executionQueue.shift();
+        continue;
+      }
+      // 按当前 record 自己判定能否执行——不再用全局 lockState 卡。
+      const decision = await this.probeExecutionCondition(rec);
+      if (decision.kind === "block_unlock") {
+        // 等 vault 解锁；保持队首，等待 `setVaultLockState(false)` 后
+        // 由它触发的 drainExecutionQueue 再走一遍。
+        this.setRecordPhase(rec.recordId, decision.targetPhase);
+        rec.enteredPhaseAt = Date.now();
+        this.executionQueue.shift();
+        this.emit();
+        this.emitFeed();
+        continue;
+      }
+      if (decision.kind === "fail") {
+        // runtime 真拿不到（bootstrap lost 且 vault 也不能重建）——
+        // 立即 fail-fast，写本地 reason = `runtime_missing`，对外
+        // `user_rejected`。
+        this.executionQueue.shift();
+        rec.phase = "failed";
+        rec.errorCode = "user_rejected";
+        rec.errorMessage = "User rejected";
+        rec.failureReason = "runtime_missing";
+        rec.finishedAt = Date.now();
+        rec.updatedAt = rec.finishedAt;
+        this.writeFeedCommandFor(rec);
+        await this.replyErrorToRec(rec, "user_rejected", "User rejected");
+        this.emitFeed();
+        this.emit();
+        continue;
+      }
+      // decision.kind === "execute"：取出队首并执行。
+      this.executionQueue.shift();
       this.executingRecordId = recordId;
       this.setRecordPhase(recordId, "executing");
       rec.enteredPhaseAt = Date.now();
@@ -2929,6 +2996,124 @@ export class ProtocolServiceImpl implements ProtocolService {
         this.executingRecordId = null;
       }
     }
+  }
+
+  /**
+   * 按当前 record 自己判定能否立即执行。
+   *
+   * 设计缘由（施工单 2026-06-30 002 硬切换）：
+   *   - 不再用全局 `lockState === "unlocked"` 做总闸；
+   *   - 改为按 record 实际能拿到的 owner runtime 决定：
+   *       - `execute`: 当前能解析到 owner runtime（任一来源）；
+   *       - `block_unlock`: 当前解析不到，但解锁后能从 vault 重建；
+   *       - `fail`: 解析不到，且解锁也无法成立。
+   *   - `connect.login` / `connect.resume` / `connect.logout` 由
+   *     connect.* auth 流程单独处理；这里只覆盖外部业务方法（含
+   *     `connect.launch`）。
+   *
+   * 返回 `targetPhase`：当返回 `block_unlock` 时推到该 phase，便于 caller
+   * （`drainExecutionQueue`）把 record 状态写入。
+   */
+  private async probeExecutionCondition(
+    rec: RequestRecord
+  ): Promise<
+    | { kind: "execute" }
+    | { kind: "block_unlock"; targetPhase: "waiting_unlock_manual" | "waiting_unlock_auto" }
+    | { kind: "fail" }
+  > {
+    // connect.* 自有登录 UI / 流程，由 service 走专门的 connect auth
+    // 路径；不依赖 owner runtime resolver。直接 execute。
+    if (
+      rec.method === "connect.login" ||
+      rec.method === "connect.resume" ||
+      rec.method === "connect.logout"
+    ) {
+      return { kind: "execute" };
+    }
+    // connect.launch 是唯一的非 connectSessionId 业务入口；session 真值
+    // 通过 launchToken 在 `launchTokensByToken` 内取。
+    let sessionId: string | undefined;
+    if (rec.method === "connect.launch") {
+      const token = (rec.params as { launchToken?: string } | undefined)?.launchToken;
+      if (!token) {
+        return { kind: "fail" };
+      }
+      const record = this.launchTokensByToken.get(token);
+      if (!record) {
+        return { kind: "fail" };
+      }
+      sessionId = record.connectSessionId;
+    } else {
+      const params = rec.params as { connectSessionId?: string } | undefined;
+      sessionId = params?.connectSessionId;
+    }
+    if (!sessionId) {
+      return { kind: "fail" };
+    }
+    let session: ConnectSessionRecord | null = null;
+    try {
+      session = await this.fetchSessionForBinding(sessionId);
+    } catch {
+      session = null;
+    }
+    if (!session || session.revokedAt !== null) {
+      return { kind: "fail" };
+    }
+    // 1. bootstrap_owner 来源：刚启动 Session Window 时已有。
+    if (this.ownerRuntimesBySessionId.has(session.sessionId)) {
+      return { kind: "execute" };
+    }
+    // 2. vault_unlock 来源：本窗口 vault 已 unlock 且能拿到 owner key。
+    if (this.lockStateValue === "unlocked") {
+      try {
+        const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+        if (
+          key &&
+          key.publicKeyHex &&
+          key.keyId &&
+          key.identityStatus !== "failed" &&
+          key.identityStatus !== "uninitialized"
+        ) {
+          return { kind: "execute" };
+        }
+      } catch {
+        // fallthrough
+      }
+      // unlocked 但解析不到 owner → fail-fast。
+      return { kind: "fail" };
+    }
+    // 3. 当前窗口 locked。
+    //   - 先**预判**"解锁后能不能拿到 owner runtime"——这一步只读
+    //     keyspace 元数据，**不**要求 vault 解锁：
+    //       - keyspace 根本查不到该 owner key（用户已删 / 同步丢失）
+    //         → 解锁了也拿不到 → 直接 fail-fast，让用户明确知道
+    //         "session 绑定的 key 已经不在本地 vault 里"。
+    //       - key 存在但 `identityStatus` 是 `failed` / `uninitialized`
+    //         → 解锁后即便读到也用不了 → 同样 fail-fast。
+    //       - key 存在且 ready → 等解锁；解锁后由 setVaultLockState
+    //         重新触发 drainExecutionQueue → 走第 2 步拿到 execute。
+    //   - 这把 "locked + 等下去也无解" 的请求挡在 unlocked 流程之前；
+    //     避免无谓解锁。
+    try {
+      const keyMeta = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
+      if (
+        !keyMeta ||
+        !keyMeta.publicKeyHex ||
+        !keyMeta.keyId ||
+        keyMeta.identityStatus === "failed" ||
+        keyMeta.identityStatus === "uninitialized"
+      ) {
+        return { kind: "fail" };
+      }
+    } catch {
+      // keyspace 异常：保守走 unlock 路径（解锁后由第 2 步再判定）。
+    }
+    // - 如果该方法是 connect.launch，bootstrap 没就绪就根本不会被
+    //   consume；这里 probe 也会命中该路径。
+    return {
+      kind: "block_unlock",
+      targetPhase: rec.autoApproved ? "waiting_unlock_auto" : "waiting_unlock_manual"
+    };
   }
 
   /**
@@ -3026,9 +3211,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 施工单 2026-06-28 002 硬切换：subject 取自 session 绑定 owner，
     // 不再读钱包全局 active key。session 真值在 accept 阶段已预校验
     // 过一次；执行阶段再校验一次防"中段时间窗"内 session 注销 / 失效。
-    // 施工单 2026-06-29 003 硬切换：签名 / 公钥派生走 session-aware
-    // helper（vault 路径走 vault.withPrivateKey；session_signer 路径
-    // 走 in-memory signer 私钥 hex）。**不**直接读 keyId。
+    // 施工单 2026-06-30 002 硬切换：签名 / 公钥派生走统一 owner
+    // runtime resolver（`bootstrap_owner` / `vault_unlock` 来源对外
+    // 行为一致）；**不**直接读 keyId。
     const session = await this.requireConnectSession(rec, params.connectSessionId);
     const publicKeyBytes = await this.fetchPublicKeyBytesWithSession(session);
     const label = await this.withSessionOwnerPrivateKey(session, async () => {
@@ -3065,9 +3250,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (params.aud !== rec.origin) {
       throw protocolError("invalid_origin", "aud does not match event origin");
     }
-    // 施工单 2026-06-28 002 硬切换：签名主体公钥取自 session 绑定 owner。
-    // 施工单 2026-06-29 003 硬切换：走 session-aware helper，session_signer
-    // session 直接用内存 signer 私钥签名。
+    // 签名主体公钥取自 session 绑定 owner；走统一 `resolveOwnerRuntime`
+    // resolver，两条来源（`bootstrap_owner` / `vault_unlock`）对外行为一致。
     const session = await this.requireConnectSession(rec, params.connectSessionId);
     const publicKeyBytes = await this.fetchPublicKeyBytesWithSession(session);
     const contentSha256 = sha256Bytes(new Uint8Array(params.content.bytes));
@@ -3220,17 +3404,11 @@ export class ProtocolServiceImpl implements ProtocolService {
       }
       throw localFailure("internal_error", "connect session not found / revoked");
     }
-    // 施工单 2026-06-29 003 硬切换：只有 `runtimeBinding === "vault"`
-    // 路径在这里预校验 owner key 仍可读；`session_signer` 路径不在
-    // 这里校验（owner key 可能已被用户删，但 live app session 已拿到
-    // 私钥材料——与施工单 7.5 语义一致：V1 不做跨窗口 revoke / kill-switch）。
-    // 业务方法最终走 `resolveExecutionRuntime` 时再做执行面校验。
-    if (session.runtimeBinding === "vault") {
-      const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      if (!key || !key.publicKeyHex || key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
-        throw localFailure("internal_error", "connect session owner key not ready");
-      }
-    }
+    // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源。
+    // 业务路径一律走 `resolveOwnerRuntime(session)`；accept 阶段
+    // 不再为 `runtimeBinding === "vault"` 这条已删除的旧路径预校验
+    // owner key——执行阶段 `resolveOwnerRuntime` 走 `bootstrap_owner`
+    // → `vault_unlock` 顺序按当前窗口状态决定能不能拿到 runtime。
     return session;
   }
 
@@ -3241,22 +3419,25 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 落 session 持久化；执行时按 `ownerPublicKeyHex` → keyspace.getKey() →
    * `keyId` 解析。`keyId` 是 vault 内部细节，按需解析。
    *
-   * 注意（施工单 2026-06-29 003 硬切换）：`resolveOwnerKeyMaterial` 仅
-   * 在 `runtimeBinding === "vault"` 路径上调用；`session_signer` 路径
-   * 不读 keyspace，直接走 `sessionSignerRuntimes`。
+   * 施工单 2026-06-30 002 硬切换：本方法仅在 `resolveOwnerRuntime`
+   * 走 `vault_unlock` 来源时调用；`bootstrap_owner` 来源直接拿
+   * `ownerRuntimeBootstrap.privateKeyHex`。
    */
   private async resolveOwnerKeyMaterial(
     ownerPublicKeyHex: string
-  ): Promise<{ keyId: string; label: string }> {
+  ): Promise<{ keyId: string; label: string } | null> {
     const key = await this.deps.keyspace.getKey(ownerPublicKeyHex);
-    if (!key || !key.keyId) {
-      throw localFailure("internal_error", "owner key material not available");
+    if (!key || !key.keyId || !key.publicKeyHex) {
+      return null;
+    }
+    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      return null;
     }
     return { keyId: key.keyId, label: key.label };
   }
 
   /**
-   * 统一 owner execution runtime resolver（施工单 2026-06-29 003 硬切换）。
+   * 统一 owner execution runtime resolver（施工单 2026-06-30 002 硬切换）。
    *
    * 设计缘由：
    *   - 业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` /
@@ -3265,51 +3446,55 @@ export class ProtocolServiceImpl implements ProtocolService {
    *       - `keyspace.getKey(...)`
    *       - `vault.withPrivateKey(...)`
    *       - 直接读 `keyspace.active()` 的 active key
-   *   - 解析路径由 session 真值 `runtimeBinding` 决定：
-   *       - `"vault"`：走 `resolveOwnerKeyMaterial(...)` 拿 `keyId`，
-   *         再用 `vault.withPrivateKey(keyId, fn)` 借私钥；
-   *       - `"session_signer"`：走当前 Session Window 内存的
-   *         `sessionSignerRuntimes`，直接拿 signer 私钥 hex。
-   *   - 缺 signer 不会 fallback 到 vault；`runtimeBinding` 缺字段也
-   *     fail-closed。
+   *   - 解析顺序固定为：
+   *       1. **`bootstrap_owner`**：当前 Session Window 内存里已
+   *          bootstrap 注入的 owner runtime；命中后直接拿私钥 hex，
+   *          **不**再读 keyspace / vault。这是 launcher 启动早期
+   *          与`vault.locked`态下的主要来源。
+   *       2. **`vault_unlock`**：当前窗口 vault 已 unlocked 且
+   *          `ownerPublicKeyHex` 对应的 key 可读 → 现解析 vault
+   *          `keyId` → 用 `vault.withPrivateKey(keyId, fn)` 借出。
+   *       3. 解析失败：抛 `runtime_missing`（对外 `user_rejected`）。
    *   - 业务方法拿到的 `OwnerKeyResolution` 与 `storageObjectService`
    *     共享同一份 owner 真值——`storage.*` 的内容 key 派生与签名
    *     走同一条 owner 解析路径。
    */
-  private async resolveExecutionRuntime(
+  private async resolveOwnerRuntime(
     session: ConnectSessionRecord
-  ): Promise<OwnerKeyResolution> {
-    if (session.runtimeBinding === "session_signer") {
-      const entry = this.sessionSignerRuntimes.get(session.sessionId);
-      if (!entry) {
-        // **不**fallback 到 vault；session_signer 缺 signer 就是
-        // fail-closed。常见原因：Session Window 刷新后 signer 丢失。
+  ): Promise<OwnerExecutionRuntime> {
+    // 1) bootstrap_owner 来源：拿当前窗口已注入的 owner runtime。
+    const bootEntry = this.ownerRuntimesBySessionId.get(session.sessionId);
+    if (bootEntry) {
+      const runtime = bootEntry.runtime;
+      if (runtime.ownerPublicKeyHex !== session.ownerPublicKeyHex) {
         throw localFailure(
           "internal_error",
-          "session signer runtime missing: please reopen the app from Keymaster"
-        );
-      }
-      const signer = entry.signer;
-      if (signer.ownerPublicKeyHex !== session.ownerPublicKeyHex) {
-        throw localFailure(
-          "internal_error",
-          "session signer ownerPublicKeyHex mismatch"
+          "owner runtime ownerPublicKeyHex mismatch"
         );
       }
       return {
         ownerPublicKeyHex: session.ownerPublicKeyHex,
+        source: "bootstrap_owner",
         withPrivateKeyHex: async <T>(
           fn: (material: { hex: string }) => Promise<T> | T
         ): Promise<T> => {
-          // signer 私钥 hex 在闭包内短暂暴露；调用方负责"用完即丢"。
-          return fn({ hex: signer.privateKeyHex });
+          // runtime 私钥 hex 在闭包内短暂暴露；调用方负责"用完即丢"。
+          return fn({ hex: runtime.privateKeyHex });
         }
       };
     }
-    // `"vault"` 路径：走 vault 借用句柄。
-    const { keyId } = await this.resolveOwnerKeyMaterial(session.ownerPublicKeyHex);
+    // 2) vault_unlock 来源：本窗口 vault 解锁后从本地 vault 重建。
+    const material = await this.resolveOwnerKeyMaterial(session.ownerPublicKeyHex);
+    if (!material) {
+      throw localFailure(
+        "runtime_missing",
+        "owner runtime not available in current window: please reopen the app from Keymaster"
+      );
+    }
+    const { keyId } = material;
     return {
       ownerPublicKeyHex: session.ownerPublicKeyHex,
+      source: "vault_unlock",
       withPrivateKeyHex: async <T>(
         fn: (material: { hex: string }) => Promise<T> | T
       ): Promise<T> => {
@@ -3322,25 +3507,24 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 用 session 绑定的 owner public key 派生站点密钥。
    *
    * 设计缘由：cipher.* 必须基于 session 绑定的 key；**不**读取钱包全局
-   * active key。`keyId` 在闭包内由 `resolveOwnerKeyMaterial` 解析出，
-   * 不在 `ConnectSessionRecord` 持久化。
+   * active key。
    *
-   * 施工单 2026-06-29 003 硬切换：按 session.runtimeBinding 走不同
-   * execution path；session_signer 直接用 signer 私钥派生，**不**走
-   * vault.withPrivateKey。
+   * 施工单 2026-06-30 002 硬切换：cipher 路径改走
+   * `resolveOwnerRuntime(session)` 统一入口；无论 runtime 来源
+   * （`bootstrap_owner` / `vault_unlock`），对外行为完全一致。
    */
   private async deriveSiteKeyWithSession(
     session: ConnectSessionRecord,
     exactOrigin: string
   ): Promise<Uint8Array> {
-    const resolution = await this.resolveExecutionRuntime(session);
+    const resolution = await this.resolveOwnerRuntime(session);
     return resolution.withPrivateKeyHex(async (material) => {
       return deriveSiteKey(material.hex, exactOrigin);
     });
   }
 
   /**
-   * 在 session 绑定的 owner 私钥闭包内执行回调（施工单 2026-06-29 003）。
+   * 在 session 绑定的 owner 私钥闭包内执行回调（施工单 2026-06-30 002）。
    *
    * 取代 `vault.withPrivateKey(keyId, fn)` 的"按 session"版。业务方法
    * **统一**走这一个入口持有 owner 私钥 hex；**不**各自手写 keyId 解析。
@@ -3349,17 +3533,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     session: ConnectSessionRecord,
     fn: (material: { hex: string }) => Promise<T> | T
   ): Promise<T> {
-    const resolution = await this.resolveExecutionRuntime(session);
+    const resolution = await this.resolveOwnerRuntime(session);
     return resolution.withPrivateKeyHex(fn);
   }
 
   /**
-   * 从 `rec` 上拿 connect session 真值（施工单 2026-06-29 003）。
+   * 从 `rec` 上拿 connect session 真值（施工单 2026-06-30 002）。
    *
    * 设计缘由：feepool / p2pkh 等业务方法先前直接用 `keyId` 调
-   * `vault.withPrivateKey(keyId, fn)`；`session_signer` 路径下
-   * `keyId` 拿不到。`rec.connectSessionId` 是已预校验过的 sessionId；
-   * 这里走 `fetchSessionForBinding` 取 session 真值。
+   * `vault.withPrivateKey(keyId, fn)`；本单让所有业务方法统一走
+   * `resolveOwnerRuntime` 后，session 真值通过 `rec.connectSessionId`
+   * + `fetchSessionForBinding` 取出。
    */
   private async requireSessionFromRec(
     rec: RequestRecord
@@ -3471,10 +3655,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
-      // 施工单 2026-06-29 003 硬切换：connect.login 写
-      // `runtimeBinding = "vault"`——传统 connect popup 流程；
-      // 执行时从已解锁 vault 借 owner 私钥。
-      runtimeBinding: "vault",
+      // 施工单 2026-06-30 002 硬切换：session 真值收口为三元组
+      // （sessionId + origin + ownerPublicKeyHex），**不**写
+      // `runtimeBinding`——执行路径走统一 owner runtime resolver，
+      // 不再依赖 session 真值上的分叉。
       createdAt: now,
       lastUsedAt: now,
       revokedAt: null
@@ -3687,31 +3871,17 @@ export class ProtocolServiceImpl implements ProtocolService {
         "connect.launch: session origin mismatch"
       );
     }
-    // 施工单 2026-06-29 003 硬切换：connect.launch 的 session 必须是
-    // `runtimeBinding = "session_signer"`——这是 appView mode 启动
-    // 期间预建的 session；如果出现 `runtimeBinding = "vault"`，说明
-    // 状态串了，拒掉。vault-only 流程**不**走 connect.launch。
-    if (session.runtimeBinding !== "session_signer") {
-      throw localFailure(
-        "internal_error",
-        "connect.launch: connect session runtimeBinding is not session_signer"
-      );
-    }
-    // 校验 session signer runtime 已就绪；缺 signer → fail-closed，
-    // **不**fallback 到 vault。
-    const signerEntry = this.sessionSignerRuntimes.get(session.sessionId);
-    if (!signerEntry) {
-      throw localFailure(
-        "internal_error",
-        "connect.launch: session signer runtime missing"
-      );
-    }
-    if (signerEntry.signer.ownerPublicKeyHex !== session.ownerPublicKeyHex) {
-      throw localFailure(
-        "internal_error",
-        "connect.launch: session signer ownerPublicKeyHex mismatch"
-      );
-    }
+    // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源；
+    // `connect.launch` 校验的不是 `runtimeBinding`，而是
+    // `sessionId + origin + ownerPublicKeyHex` 三元组 + 当前窗口能
+    // 解析到 owner runtime。具体说来：
+    //   - launchToken 必须存在、未消费；
+    //   - 上面已经校过 token 与 appViewContext 一致；
+    //   - 上面已经校过 session 的 origin 与 owner 与 bootstrap 同源；
+    //   - `resolveOwnerRuntime(session)` 应在 `drainExecutionQueue` 阶段
+    //     通过 probe 验证过；如果到这里仍然解析不到，再单独做一次
+    //     兜底校验，明确告诉用户"runtime 丢失请重新打开 app"。
+    await this.resolveOwnerRuntime(session);
     // 消费 token：一次性，幂等。
     this.launchTokensByToken.set(params.launchToken, { ...record, consumed: true });
     const now = Date.now();
@@ -3761,10 +3931,10 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!svc) {
       throw localFailure("internal_error", "storage.* bridge unavailable");
     }
-    // 施工单 2026-06-29 003 硬切换：storage.* 走统一 owner execution
-    // runtime resolver；session_signer session 直接用内存 signer 私钥
-    // 派生 storage content key，与签名 / 加解密共用同一把 owner key。
-    const ownerKeyResolution = await this.resolveExecutionRuntime(session);
+    // 施工单 2026-06-30 002 硬切换：storage.* 走统一 owner execution
+    // runtime resolver；无论 `bootstrap_owner` / `vault_unlock` 哪条来源，
+    // 都与签名 / 加解密共用同一把 owner key。
+    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
     try {
       return await svc.put({
         origin: session.origin,
@@ -3784,7 +3954,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!svc) {
       throw localFailure("internal_error", "storage.* bridge unavailable");
     }
-    const ownerKeyResolution = await this.resolveExecutionRuntime(session);
+    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
     try {
       const out = await svc.get({
         origin: session.origin,
@@ -3808,7 +3978,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!svc) {
       throw localFailure("internal_error", "storage.* bridge unavailable");
     }
-    const ownerKeyResolution = await this.resolveExecutionRuntime(session);
+    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
     try {
       return await svc.list({
         origin: session.origin,
@@ -3828,7 +3998,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!svc) {
       throw localFailure("internal_error", "storage.* bridge unavailable");
     }
-    const ownerKeyResolution = await this.resolveExecutionRuntime(session);
+    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
     try {
       return await svc.listAll({
         origin: session.origin,
@@ -3848,7 +4018,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!svc) {
       throw localFailure("internal_error", "storage.* bridge unavailable");
     }
-    const ownerKeyResolution = await this.resolveExecutionRuntime(session);
+    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
     try {
       const out = await svc.delete({
         origin: session.origin,
@@ -3986,9 +4156,9 @@ export class ProtocolServiceImpl implements ProtocolService {
         nextServerAmount = params.amountSatoshis;
       }
 
-      // 施工单 2026-06-29 003 硬切换：feepool 走 session-aware helper。
-      // `session_signer` 路径直接用 in-memory signer 私钥，**不**走
-      // vault.withPrivateKey。
+      // 施工单 2026-06-30 002 硬切换：feepool 走统一 owner runtime
+      // resolver；`bootstrap_owner` / `vault_unlock` 两条来源对外
+      // 行为一致，都返回同一份 owner 私钥 hex。
       const clientPrivateKeyHex = await this.getSessionOwnerPrivHex(session);
       const operationId = this.nextRecordId();
       const preparedAt = Date.now();

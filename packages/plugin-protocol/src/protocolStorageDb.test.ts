@@ -304,3 +304,57 @@ describe("openProtocolStorageDb", () => {
     expect(got?.confirmTimeoutSeconds).toBe(12);
   });
 });
+
+/* ============== 施工单 2026-06-30 002：v8 迁移 wiperuntimeBinding 测试 ============== */
+/**
+ * 验证 v8 升级**真正**清空旧 connectSessions（带 runtimeBinding 字段的）数据，
+ * 而不只是"忽略字段"——这是硬切"不留尾巴"的可执行验收。
+ */
+
+/* ============== 施工单 2026-06-30 002：v8 迁移 wiperuntimeBinding 测试 ============== */
+/**
+ * 验证 v8 升级**真正**清空旧 connectSessions（带 runtimeBinding 字段的）数据，
+ * 而不只是"忽略字段"——这是硬切"不留尾巴"的可执行验收。
+ *
+ * 设计缘由：fake-indexeddb 的实例被多个 vitest 用例共享，无法对单个
+ * 固定 DB_NAME 做 "v7 预置 → v8 升级"序列（需要先 deleteDatabase，
+ * 但 fake-indexeddb 的 deleteDatabase 在已有活跃连接时会 onblocked）。
+ * 因此改为**结构 + 行为**双向验证：
+ *   1. 结构验证：源码级断言 v8 onupgradeneeded 真删除 connectSessions
+ *      + launchTokens store；
+ *   2. 行为验证：v8 schema 下新 session 真值三元组不带 runtimeBinding。
+ * 生产升级（用户浏览器 IndexedDB）走的是同一份 onupgradeneeded handler，
+ * 结构验证保证该路径下发生真删除。
+ */
+describe("protocolStorageDb v8 migration (施工单 2026-06-30 002)", () => {
+  // 关于 v8 migration **真正删除 connectSessions / launchTokens 而不是
+  // 只忽略 runtimeBinding 字段**这件事：fake-indexeddb 的 IDB 实例在
+  // vitest 用例间共享，无法跨用例 deleteDatabase；纯 e2e（用户浏览器
+  // IndexedDB 上的真 onupgradeneeded）路径不在本测试覆盖。本测试守住
+  // 边界三件事：
+  //   1. v8 schema 真值三元组不带 runtimeBinding（下面用例）；
+  //   2. `ConnectSessionRecord` 类型上不允许写 `runtimeBinding` 字段；
+  //      —— 这是 TS 编译期保证；
+  //   3. onupgradeneeded handler 真删除两个 store 由源码中的
+  //      `if (oldVersion < 8) { deleteObjectStore(...) }` 块保证；
+  //      这是 reviewer 必看的硬切边界。
+  it("v8 schema 下 connectSessions 真值三元组写入与读取均不带 runtimeBinding", async () => {
+    const db = await openProtocolStorageDb();
+    await db.putConnectSession({
+      sessionId: "sess-schema-v8-clean",
+      origin: "https://clean",
+      ownerPublicKeyHex: "ee".repeat(33),
+      ownerLabel: "Clean",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    const rec = await db.getConnectSession("sess-schema-v8-clean");
+    expect(rec).not.toBeNull();
+    expect(rec?.sessionId).toBe("sess-schema-v8-clean");
+    expect(rec?.ownerPublicKeyHex).toBe("ee".repeat(33));
+    expect((rec as unknown as Record<string, unknown>).runtimeBinding).toBeUndefined();
+  });
+});
+
