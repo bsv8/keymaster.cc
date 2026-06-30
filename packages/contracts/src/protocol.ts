@@ -1599,6 +1599,37 @@ export function parseBootstrapToken(search: string): string | null {
   return t && t.length > 0 ? t : null;
 }
 
+/**
+ * 从 URL 解析 `sessionWindowOrigin`。
+ *
+ * 设计缘由（施工单 2026-06-30 004 硬切换）：
+ *   - appView / launch 模式下 transport target origin 真值 =
+ *     `sessionWindowOrigin`：Session Window 在 `openClientApp()` 时
+ *     把自己的 `window.location.origin` 显式注入 child app URL；下游
+ *     client app 在 appView 模式下**只**认这个值，**不**再读 UI /
+ *     用户输入的 `targetOrigin`。
+ *   - 校验：必须是完整 origin（scheme + host + 合法端口），不允许省略
+ *     scheme、不允许只传 `domain:port`、不允许传 `*` / 非 http(s)
+ *     scheme（file: / blob: / data: / chrome-extension: 等）。
+ *   - 校验失败或缺失一律返回 null；调用方按 fail-closed 处理。
+ */
+export function parseSessionWindowOrigin(search: string): string | null {
+  if (typeof search !== "string" || search.length === 0) return null;
+  const params = new URLSearchParams(search.startsWith("?") ? search : `?${search}`);
+  const raw = params.get("sessionWindowOrigin");
+  if (!raw || raw.length === 0) return null;
+  if (raw === "*") return null;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.origin !== raw) return null;
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return null;
+  return parsed.origin;
+}
+
 /* ============== Method dispatch ============== */
 
 /**

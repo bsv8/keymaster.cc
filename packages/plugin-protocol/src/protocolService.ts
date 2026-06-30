@@ -1529,11 +1529,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken）
-   * 在命名窗口打开。Session Window 与 client app 后续走现有 transport
-   * （child → Session Window `ready` → request → result）。
+   * Session Window bootstrap 成功后调用：把 client app URL（含 launchToken
+   * + `sessionWindowOrigin`）在命名窗口打开。Session Window 与 client app
+   * 后续走现有 transport（child → Session Window `ready` → request →
+   * result）。
    *
-   * 设计缘由（施工单 2026-06-30 003 硬切换）：
+   * 设计缘由（施工单 2026-06-30 003 硬切换 + 2026-06-30 004 硬切换）：
    *   - 仅允许在 appViewContext 非空时调用；否则 throw。
    *   - 命名窗口 target = `keymaster-app-<encodeOrigin(appOrigin)>`：
    *     浏览器按 target 复用同一扇 child app 窗口，避免 `_blank` 每次
@@ -1546,6 +1547,12 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `ready` 方向对称要求 child 在自己 listener 就绪后向 Session
    *     Window 发 `ready`。Session Window 不再猜测 child listener
    *     是否就绪。
+   *   - **显式注入 `sessionWindowOrigin`**（施工单 2026-06-30 004）：
+   *     当前 Session Window 的 `window.location.origin` 作为 query 参数
+   *     拼到 child URL 上；下游 client app 在 appView 模式下**只**认
+   *     这份值做 transport target origin，不再使用 UI / 用户输入的
+   *     `targetOrigin`。构造失败一律按 fail-closed 返回 null，不重建
+   *     session / launchToken / bootstrap。
    *   - 5s 软超时只用于 UI 提示"连接较慢"；到点只清等待态，**不**重建
    *     `connectSessionId` / `launchToken` / bootstrap。
    *   - 返回被打开的 window；失败返回 null（best-effort）。
@@ -1564,8 +1571,41 @@ export class ProtocolServiceImpl implements ProtocolService {
     // child 窗口；encodeOrigin 来自 sessionWindowBootstrap，与 storage.*
     // 物理 key 同源，但这里**只**用 target 字符串，不参与 storage 真值。
     const target = `keymaster-app-${encodeOrigin(ctx.appOrigin)}`;
+    // 施工单 2026-06-30 004：显式注入 `sessionWindowOrigin`。以当前
+    // Session Window `window.location.origin` 为真值，写入 child URL
+    // 的 query 里；下游 client app 用它做 transport target origin。
+    // 不读 UI 默认 `targetOrigin`、不读 popup targetOrigin；当前窗口
+    // origin 缺失 / 非法时按 fail-closed 返回 null（不开窗）。
+    const sessionWindowOrigin =
+      typeof window.location?.origin === "string" && window.location.origin.length > 0
+        ? window.location.origin
+        : "";
+    let childUrlWithSessionWindowOrigin: string;
+    if (!sessionWindowOrigin) {
+      this.deps.logger?.error?.({
+        scope: "protocol.sessionWindow",
+        event: "openClientApp.sessionWindowOrigin.missing"
+      });
+      this.appClientWaitingForReadyFlag = false;
+      this.stopAppClientConnectTimer();
+      return null;
+    }
     try {
-      const opened = window.open(ctx.appUrl, target);
+      const u = new URL(ctx.appUrl);
+      u.searchParams.set("sessionWindowOrigin", sessionWindowOrigin);
+      childUrlWithSessionWindowOrigin = u.toString();
+    } catch {
+      this.deps.logger?.error?.({
+        scope: "protocol.sessionWindow",
+        event: "openClientApp.sessionWindowOrigin.invalid_app_url",
+        appUrl: ctx.appUrl
+      });
+      this.appClientWaitingForReadyFlag = false;
+      this.stopAppClientConnectTimer();
+      return null;
+    }
+    try {
+      const opened = window.open(childUrlWithSessionWindowOrigin, target);
       // 失败 / null：视为打开失败。`show app` 页面据此展示错误，
       // 用户可再次点击；不新建 session，不重建 launchToken。
       if (!opened) {

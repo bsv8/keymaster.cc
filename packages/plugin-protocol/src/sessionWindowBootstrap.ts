@@ -85,6 +85,52 @@ export function parseBootstrapToken(search: string): string | null {
   return t && t.length > 0 ? t : null;
 }
 
+/**
+ * 解析 URL 上的 `sessionWindowOrigin`。
+ *
+ * 设计缘由（施工单 2026-06-30 004 硬切换）：
+ *   - 启动期 appView launch 真值收口为 `sessionWindowOrigin`：由 Session
+ *     Window 在 `openClientApp()` 时把自己的 `window.location.origin`
+ *     显式注入 child app URL；下游 client app 在 appView 模式下**只**
+ *     认这个值做 transport target origin，**不**再读 UI / 用户输入的
+ *     `targetOrigin`。
+ *   - 解析时校验它必须是完整 `origin`（scheme + host + port）：
+ *       1. URL 里**不**允许省略 scheme；
+ *       2. URL 里**不**允许只传 `domain:port`；
+ *       3. URL 里**不**允许传 `*` / 跨 scheme 占位字符串。
+ *   - 校验失败一律返回 null；调用方按 fail-closed 处理（appView 启动
+ *     直接拒绝、不隐式回退到 `targetOrigin` 或默认值）。
+ *   - 缺省行为（不传 `sessionWindowOrigin`）返回 null；下游 client app
+ *     在检测到 `launchToken` 但 `sessionWindowOrigin` 缺失时按 fail-closed
+ *     收口。
+ */
+export function parseSessionWindowOrigin(search: string): string | null {
+  if (typeof search !== "string" || search.length === 0) return null;
+  const params = new URLSearchParams(search.startsWith("?") ? search : `?${search}`);
+  const raw = params.get("sessionWindowOrigin");
+  if (!raw || raw.length === 0) return null;
+  // 拒绝明确占位 / 通配。
+  if (raw === "*") return null;
+  // 必须能被 URL 解析为完整 origin；只有 scheme + host (+ 可选 port)
+  // 才算合法 origin；缺任何一段都视为非法。
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (parsed.origin !== raw) {
+    // 含路径 / 查询 / 片段 → 不是 origin。
+    return null;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    // V1 只承认 http(s)；file: / blob: / data: / chrome-extension: 等
+    // 一律不视为可作 transport target 的 origin。
+    return null;
+  }
+  return parsed.origin;
+}
+
 /* ============== 路径 normalize（storage.* 共享） ============== */
 
 /**

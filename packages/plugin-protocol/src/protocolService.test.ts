@@ -6507,10 +6507,67 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       expect(openCalls).toHaveLength(1);
       expect(openCalls[0]?.target.startsWith("keymaster-app-")).toBe(true);
       expect(openCalls[0]?.target.length ?? 0).toBeGreaterThan("keymaster-app-".length);
+      // 施工单 2026-06-30 004：child URL 上必须带 sessionWindowOrigin =
+      // 当前 Session Window 的 location.origin；不读 UI targetOrigin。
+      expect(openCalls[0]?.url).toContain("sessionWindowOrigin=");
+      expect(openCalls[0]?.url).toContain(
+        "sessionWindowOrigin=https%3A%2F%2Fkeymaster.local"
+      );
+      expect(openCalls[0]?.url).toContain("launchToken=launch-diag");
       // 进入等待 child `ready` 态。
       expect(service.appClientWaitingForReady()).toBe(true);
       expect(service.childReady()).toBe(false);
     } finally {
+      win.open = originalOpen;
+    }
+  });
+
+  it("openClientApp 在 Session Window origin 缺失时按 fail-closed 返回 null，不开窗", () => {
+    // 施工单 2026-06-30 004 硬切换：launch 模式 transport target origin
+    // 真值 = `sessionWindowOrigin`；它来自 Session Window 当前
+    // `window.location.origin`。当前 origin 缺失时不允许回退到 UI
+    // 默认 targetOrigin、不允许开窗；按 fail-closed 返回 null。
+    const win = installWindowShim();
+    const originalOpen = win.open;
+    const originalLocation = win.location;
+    const openCalls: Array<{ url: string; target: string }> = [];
+    win.open = ((url: string | URL, target?: string) => {
+      openCalls.push({ url: String(url), target: String(target ?? "_blank") });
+      return {} as Window;
+    }) as typeof win.open;
+    Object.defineProperty(win, "location", {
+      value: { origin: "" },
+      configurable: true
+    });
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      const internals = service as unknown as {
+        currentAppViewContext: {
+          appId: string;
+          appOrigin: string;
+          appUrl: string;
+        } | null;
+      };
+      internals.currentAppViewContext = {
+        appId: "justnote",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-no-origin"
+      };
+      const opened = service.openClientApp();
+      expect(opened).toBeNull();
+      // 没有调用 window.open；等待态保持 false。
+      expect(openCalls).toHaveLength(0);
+      expect(service.appClientWaitingForReady()).toBe(false);
+    } finally {
+      Object.defineProperty(win, "location", {
+        value: originalLocation,
+        configurable: true
+      });
       win.open = originalOpen;
     }
   });
