@@ -16,6 +16,7 @@
 //   - 因此旧的"按顺序 registerAll"在新模型下也保持兼容：core / settings / home 等
 //     标记 defaultEnabled=true 的会自动装载，business 插件可通过配置 store 控制。
 
+import type { PluginManifest } from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
 import { assetsPlugin } from "@keymaster/plugin-assets";
@@ -39,6 +40,65 @@ import { transferPlugin } from "@keymaster/plugin-transfer";
 import { vaultPlugin } from "@keymaster/plugin-vault";
 import { wocPlugin } from "@keymaster/plugin-woc";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
+
+/**
+ * 启动期每个插件注册的最长等待时间。
+ *
+ * 设计缘由：
+ *   - 本次线上故障不是 throw，而是 `indexedDB.open("keymaster.protocol")`
+ *     永久 pending，导致 `bootstrapPlugins()` 不返回、`#root` 一直为空。
+ *   - 这里把"插件注册永久 pending"提升成显式启动错误；由 main.tsx 现有
+ *     fatal 通道统一接管。
+ *   - 不在 runtime host 内做全局超时：runtime 是通用层，不应该知道
+ *     web 首屏"多久算崩溃"；装配层最适合定义这个阈值。
+ */
+export const BOOTSTRAP_PLUGIN_TIMEOUT_MS = 15_000;
+
+/** protocol 插件当前已知的高风险启动步骤提示。 */
+function bootstrapStepHint(pluginId: string): string | undefined {
+  if (pluginId === "protocol") {
+    return 'opening IndexedDB "keymaster.protocol"';
+  }
+  return undefined;
+}
+
+/** 生成启动步骤的人类可读描述，用于 fatal / 日志。 */
+export function describeBootstrapStep(pluginId: string): string {
+  const hint = bootstrapStepHint(pluginId);
+  if (!hint) return `plugin "${pluginId}"`;
+  return `plugin "${pluginId}" (${hint})`;
+}
+
+/**
+ * 按装配层语义注册单个插件：若注册 Promise 长时间不返回，则视为启动挂死。
+ *
+ * 注意：
+ *   - 这里只解决"永久 pending"这类系统故障；
+ *   - host.register() 自身若同步/异步失败，仍保持 runtime 既有语义。
+ */
+export async function registerPluginWithTimeout(
+  host: PluginHost,
+  plugin: PluginManifest,
+  timeoutMs = BOOTSTRAP_PLUGIN_TIMEOUT_MS
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      host.register(plugin),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `Bootstrap timed out while registering ${describeBootstrapStep(plugin.id)} after ${timeoutMs}ms`
+            )
+          );
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 export async function bootstrapPlugins(): Promise<PluginHost> {
   // 装配层把缺 key warning 打开：开发期方便排查未翻译文案。
@@ -108,6 +168,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     appsPlugin
   ];
 
-  await host.registerAll(ordered);
+  for (const plugin of ordered) {
+    await registerPluginWithTimeout(host, plugin);
+  }
   return host;
 }
