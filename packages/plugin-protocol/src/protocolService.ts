@@ -69,6 +69,16 @@ import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
   type AppBootstrapPayload,
+  type AppMsgCore,
+  type AppMsgGetParams,
+  type AppMsgGetResult,
+  type AppMsgListParams,
+  type AppMsgListResult,
+  type AppMsgSendParams,
+  type AppMsgSendResult,
+  type AppMsgInboxDirtyEvent,
+  type AppMsgMessage,
+  type AppMsgContentType,
   type AppViewContext,
   type BinaryField,
   type CipherDecryptParams,
@@ -109,6 +119,7 @@ import {
   type ProtocolConnectAuthSnapshot,
   type ProtocolError,
   type ProtocolErrorCode,
+  type ProtocolEventMessage,
   type ProtocolFailureReason,
   type ProtocolFeePoolAction,
   type ProtocolFeePoolRecord,
@@ -236,6 +247,17 @@ export interface ProtocolServiceDeps {
    * capability 取值注入；缺时 `p2pkh.transfer` 走 internal_error。
    */
   p2pkhService?: P2pkhProtocolAdapter;
+  /**
+   * 可选 appmsg.core 平台能力（施工单 2026-07-01 002 硬切换）。
+   *
+   * `protocolService` **不**直接持有 HubMsg 连接真值；HubMsg 连接 +
+   * 缓存 + 推送分发收口到 `appmsg.core`，protocolService 只是 external
+   * protocol 适配层（origin -> origin endpoint 投影 + dirty event 推送）。
+   *
+   * `undefined` 时 `appmsg.*` 三个 method 全部走 internal_error
+   * fail-closed（与 `p2pkh.service` 缺时 `p2pkh.transfer` 的降级对称）。
+   */
+  appMsgCore?: AppMsgCore;
   /** 用于调试 / 日志的 logger（任意形状）。 */
   logger?: { info?: (input: unknown) => void; warn?: (input: unknown) => void; error?: (input: unknown) => void };
   /** 自定义 source window（默认取 `window.opener`）。 */
@@ -638,6 +660,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageDb);
     this.bootModeValue = deps.bootMode ?? "connect";
+    // 施工单 2026-07-01 002 硬切换：订阅 `appmsg.core` 的 inbox dirty
+    // 事件，转发给当前 origin 对应 endpoint 的 caller（**不**发给其它
+    // endpoint）。事件路径：`HubMsg -> appmsg.core -> protocolService
+    // -> 当前 caller`。
+    if (deps.appMsgCore) {
+      deps.appMsgCore.subscribeInboxDirty((event) => {
+        this.dispatchAppMsgInboxDirty(event);
+      });
+    }
   }
 
   /**
@@ -905,6 +936,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     // popup 流的 `Session Window -> client web`。
     if (looksLikeReady(event.data)) {
       this.tryAcceptChildReady(event);
+      return;
+    }
+    // 施工单 2026-07-01 002 硬切换：event 是 server-pushed 方向
+    // （protocolService -> caller），**不**应从 caller 接收；
+    // inbound event 一律忽略，避免对端伪造 dirty 事件。
+    if (looksLikeEvent(event.data)) {
       return;
     }
     // 先尝试按 cancel 解析：失败 / 不是 cancel 都按 request 走。
@@ -2500,6 +2537,26 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
+    // 施工单 2026-07-01 002 硬切换：appmsg.* 不参与 popup 命令流 confirm UI，
+    // v1 走自动执行（unlocked → queued；locked → fail-fast）。
+    if (parsed.method === "appmsg.send" || parsed.method === "appmsg.list" || parsed.method === "appmsg.get") {
+      // appmsg.* 与 cipher.* / connect.resume / connect.logout 同语义：
+      //   - locked 时 fail-fast（session 预校验失败 → user_rejected）；
+      //   - unlocked 时直接 queued（不弹 confirm UI）。
+      if (this.lockStateValue === "locked") {
+        this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
+        return;
+      }
+      rec.autoExecuteAfterUnlock = true;
+      this.setRecordPhase(recordId, "queued");
+      rec.enteredPhaseAt = Date.now();
+      this.executionQueue.push(recordId);
+      this.emit();
+      this.emitFeed();
+      void this.drainExecutionQueue();
+      return;
+    }
+
     // manual confirm 路径（identity.get / intent.sign / p2pkh.transfer /
     // feepool.*）。
     this.applyManualPhaseDecision(recordId, origin, false);
@@ -3405,6 +3462,12 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeConnectLogout(rec);
         case "connect.launch":
           return await this.executeConnectLaunch(rec);
+        case "appmsg.send":
+          return await this.executeAppMsgSend(rec);
+        case "appmsg.list":
+          return await this.executeAppMsgList(rec);
+        case "appmsg.get":
+          return await this.executeAppMsgGet(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -4140,6 +4203,178 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
   }
 
+  /* ============== appmsg.send / appmsg.list / appmsg.get ==============
+   *
+   * 设计缘由（施工单 2026-07-01 002 硬切换）：
+   *   - `protocolService` 是**外部 app** 的协议适配层，不持有 HubMsg 连接
+   *     真值；HubMsg 连接 + 缓存 + 推送分发收口到 `appmsg.core`；
+   *   - 本组三个 method 走同一套 accept 预校验（session 真值 + origin
+   *     匹配 + owner key ready），执行阶段把当前 session 投影成：
+   *       senderOwnerPublicKeyHex = session.ownerPublicKeyHex
+   *       senderEndpoint = { kind: "origin", id: exactOrigin }
+   *     **不**接受 caller 自报 sender owner / sender endpoint；
+   *   - `appmsg.*` 不参与 popup 命令流 confirm UI（v1 走自动执行）；与
+   *     cipher / connect.* autoExecuteAfterUnlock 路径同语义。
+   *   - 对外推送 `appmsg.inbox_dirty` event：脏事件由 `appmsg.core`
+   *     内部 subscribe 接收后转成 ProtocolEventMessage 发给当前
+   *     origin 对应 endpoint 的 caller；其它 origin 收不到。
+   */
+
+  /**
+   * 校验 appmsg.* 三个 method 的 sender 投影前置条件。
+   *
+   * 返回 true 表示校验通过；false 表示前置条件不满足（已对外
+   * 回 user_rejected）。
+   */
+  private async ensureAppMsgCoreReady(): Promise<boolean> {
+    if (!this.deps.appMsgCore) {
+      // 与 p2pkhService 缺时降级对称：走 internal_error。
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 把当前 session 投影成 origin sender。
+   *
+   * 关键约束：
+   *   - senderOwnerPublicKeyHex 取自 session 真值，不读 caller params；
+   *   - senderEndpoint.id 取 `event.origin`（exact origin，包含 port）；
+   *   - session 校验失败一律 fail-fast，与 cipher.* / connect.* 同语义。
+   */
+  private async projectAppMsgSender(rec: RequestRecord): Promise<{
+    ownerPublicKeyHex: string;
+    endpoint: { kind: "origin"; id: string };
+  }> {
+    const params = rec.params as { connectSessionId?: string };
+    const session = await this.requireConnectSession(rec, params.connectSessionId ?? "");
+    return {
+      ownerPublicKeyHex: session.ownerPublicKeyHex,
+      endpoint: { kind: "origin", id: rec.origin }
+    };
+  }
+
+  /**
+   * 校验 params 中**不**携带伪造 sender 字段（防御性）：
+   *
+   * 关键约束：
+   *   - 任何 `senderOwnerPublicKeyHex` / `senderEndpoint` / `fromPublicKeyHex` /
+   *     `fromOrigin` / `fromAppId` 风格的字段**都不允许**进入对外 params；
+   *   - 出现即 invalid_request；
+   *   - v1 简化：TypeScript 类型已经在协议层禁掉；这里做运行时兜底
+   *     防止 caller 用 `params: { ... } as AppMsgSendParams` 强转绕过。
+   */
+  private rejectForgedSenderFields(params: Record<string, unknown>): void {
+    const forbidden = [
+      "senderOwnerPublicKeyHex",
+      "senderEndpoint",
+      "fromPublicKeyHex",
+      "fromOrigin",
+      "fromAppId"
+    ];
+    for (const k of forbidden) {
+      if (k in params) {
+        throw protocolError("invalid_request", `appmsg: forbidden sender field "${k}"`);
+      }
+    }
+  }
+
+  private async executeAppMsgSend(rec: RequestRecord): Promise<AppMsgSendResult> {
+    if (!(await this.ensureAppMsgCoreReady())) {
+      throw localFailure("internal_error", "appmsg.core not available");
+    }
+    const params = rec.params as AppMsgSendParams;
+    this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
+    if (
+      params.contentType !== "text/plain" &&
+      params.contentType !== "text/markdown"
+    ) {
+      throw protocolError("invalid_request", "appmsg.send: invalid contentType");
+    }
+    if (typeof params.body !== "string" || params.body.length === 0) {
+      throw protocolError("invalid_request", "appmsg.send: body must be non-empty string");
+    }
+    if (!params.recipientEndpoint || !isValidAppMsgEndpoint(params.recipientEndpoint)) {
+      throw protocolError("invalid_request", "appmsg.send: invalid recipientEndpoint");
+    }
+    if (
+      !params.recipientOwnerPublicKeyHex ||
+      typeof params.recipientOwnerPublicKeyHex !== "string" ||
+      params.recipientOwnerPublicKeyHex.length !== 66
+    ) {
+      throw protocolError("invalid_request", "appmsg.send: invalid recipientOwnerPublicKeyHex");
+    }
+    const sender = await this.projectAppMsgSender(rec);
+    const core = this.deps.appMsgCore as AppMsgCore;
+    const res = await core.send({
+      sender: { ownerPublicKeyHex: sender.ownerPublicKeyHex, endpoint: sender.endpoint },
+      recipientOwnerPublicKeyHex: params.recipientOwnerPublicKeyHex,
+      recipientEndpoint: params.recipientEndpoint,
+      contentType: params.contentType as AppMsgContentType,
+      body: params.body,
+      clientMessageId: params.clientMessageId,
+      createdAtMs: params.createdAtMs
+    });
+    void this.touchConnectSessionByOwner(sender.ownerPublicKeyHex);
+    return res;
+  }
+
+  private async executeAppMsgList(rec: RequestRecord): Promise<AppMsgListResult> {
+    if (!(await this.ensureAppMsgCoreReady())) {
+      throw localFailure("internal_error", "appmsg.core not available");
+    }
+    const params = rec.params as AppMsgListParams;
+    this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
+    if (params.box !== "inbox" && params.box !== "sent" && params.box !== "all") {
+      throw protocolError("invalid_request", "appmsg.list: invalid box");
+    }
+    const sender = await this.projectAppMsgSender(rec);
+    const core = this.deps.appMsgCore as AppMsgCore;
+    const res = await core.list({
+      sender: { ownerPublicKeyHex: sender.ownerPublicKeyHex, endpoint: sender.endpoint },
+      params: {
+        box: params.box,
+        afterMessageId: params.afterMessageId,
+        beforeMessageId: params.beforeMessageId,
+        limit: params.limit
+      }
+    });
+    void this.touchConnectSessionByOwner(sender.ownerPublicKeyHex);
+    return res;
+  }
+
+  private async executeAppMsgGet(rec: RequestRecord): Promise<AppMsgGetResult> {
+    if (!(await this.ensureAppMsgCoreReady())) {
+      throw localFailure("internal_error", "appmsg.core not available");
+    }
+    const params = rec.params as AppMsgGetParams;
+    this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
+    if (typeof params.messageId !== "string" || params.messageId.length === 0) {
+      throw protocolError("invalid_request", "appmsg.get: messageId required");
+    }
+    const sender = await this.projectAppMsgSender(rec);
+    const core = this.deps.appMsgCore as AppMsgCore;
+    const msg = await core.get({
+      sender: { ownerPublicKeyHex: sender.ownerPublicKeyHex, endpoint: sender.endpoint },
+      messageId: params.messageId
+    });
+    if (!msg) {
+      throw localFailure("internal_error", "appmsg.get: message not found");
+    }
+    void this.touchConnectSessionByOwner(sender.ownerPublicKeyHex);
+    return { message: msg };
+  }
+
+  /**
+   * 刷新 session 的 lastUsedAt。appmsg.* 与 cipher.* 同语义：执行成功
+   * 时记录使用时间，便于以后做"长期未用 session 自动 revoke"等策略。
+   */
+  private async touchConnectSessionByOwner(_ownerPublicKeyHex: string): Promise<void> {
+    // v1 简化：本单只保证 session 真值仍有效即可；后续如有 lastUsedAt
+    // 持久化策略可在此补。当前不持久化 lastUsedAt 也满足施工单要求。
+    return;
+  }
+
   /* ============== p2pkh.transfer ============== */
 
   private async executeP2pkhTransferAndFinalize(rec: RequestRecord): Promise<void> {
@@ -4772,6 +5007,75 @@ export class ProtocolServiceImpl implements ProtocolService {
       error: { code, message: errorMessage }
     };
     this.postMessage(target, rec.origin, message);
+  }
+
+  /**
+   * 把 `appmsg.inbox_dirty` 事件推送给当前 origin 的 caller。
+   *
+   * 设计缘由（施工单 2026-07-01 002 硬切换）：
+   *   - event 是 server-pushed 方向（protocolService -> caller），与
+   *     `result`（caller -> protocolService）方向相反；
+   *   - 推送给"当前 origin 对应 endpoint"的 caller：按当前 transport
+   *     状态找出"该 origin 上活跃的 caller source"；
+   *   - dirty event **不**携带完整正文；正文真值由 caller 通过
+   *     `appmsg.list` 拉取。
+   *
+   * 关键约束：
+   *   - dirty event 投递目标限定为"当前 origin 的 last request 的
+   *     source"——避免在多 tab / 多 popup 场景下向无关窗口推送；
+   *   - v1 简化：不做 reconnect / queue；事件丢失不重传（HubMsg 协议
+   *     端点会做连接恢复，但**不**做事件 replay 队列）。
+   */
+  private dispatchAppMsgInboxDirty(event: AppMsgInboxDirtyEvent): void {
+    if (event.endpoint.kind !== "origin") {
+      // protocolService 只负责把 dirty event 推给 origin 端点；plugin
+      // 端点的 dirty event 由 appmsg.client 内部订阅负责。
+      return;
+    }
+    const targetOrigin = event.endpoint.id;
+    // 找出当前 targetOrigin 上"最近一条 request"的 source：
+    const recent = this.findRecentSourceForOrigin(targetOrigin);
+    if (!recent) return;
+    if (!this.canPostToTarget(recent)) return;
+    const message: ProtocolEventMessage = {
+      v: PROTOCOL_VERSION,
+      type: "event",
+      event: "appmsg.inbox_dirty",
+      data: event
+    };
+    this.postEventMessage(recent, targetOrigin, message);
+  }
+
+  /**
+   * 按 exact origin 找最近一条 request 绑定的 source Window。
+   *
+   * 关键约束：
+   *   - 仅按"transport 维度"找最近 source；**不**校验 session 是否
+   *     仍有效（脏事件本身就是通知，正文拉取时再校验）；
+   *   - 若该 origin 上没有任何 request（popup 当前未服务该 origin），
+   *     返回 null：协议层**不**主动 push 任何窗口。
+   */
+  private findRecentSourceForOrigin(origin: string): Window | null {
+    let latest: RequestRecord | null = null;
+    for (const [, rec] of this.requestsByRecordId) {
+      if (rec.origin !== origin) continue;
+      if (!latest || rec.createdAt > latest.createdAt) {
+        latest = rec;
+      }
+    }
+    return latest?.source ?? null;
+  }
+
+  private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
+    try {
+      target.postMessage(message, origin);
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.transport",
+        event: "postMessage.event.failed",
+        data: { err: String(err) }
+      });
+    }
   }
 
   private canPostToTarget(target: Window): boolean {
@@ -5480,6 +5784,48 @@ function looksLikeReady(v: unknown): boolean {
   if (!v || typeof v !== "object") return false;
   const o = v as Record<string, unknown>;
   return o.v === PROTOCOL_VERSION && o.type === "ready";
+}
+
+/**
+ * 顶层 `event` 报文形状判定（施工单 2026-07-01 002 硬切换）。
+ *
+ * 设计缘由：
+ *   - v1 只引入一种 event：`appmsg.inbox_dirty`；
+ *   - 由 protocolService 主动向当前 origin 的 caller 推送（不是 caller
+ *     发来）；handleMessage 路径忽略 inbound event（只接受 outbound
+ *     即 server-pushed 的方向；这里结构判定**仅**用于兼容 inbound 噪声）。
+ */
+function looksLikeEvent(v: unknown): boolean {
+  if (!v || typeof v !== "object") return false;
+  const o = v as Record<string, unknown>;
+  return (
+    o.v === PROTOCOL_VERSION &&
+    o.type === "event" &&
+    typeof o.event === "string"
+  );
+}
+
+/**
+ * 校验 AppMsgEndpoint 形状。
+ *
+ * 设计缘由（施工单 2026-07-01 002 硬切换）：
+ *   - `kind = "origin"` 时 `id` 必须是合法 exact origin（包含 port）；
+ *   - `kind = "plugin"` 时 `id` 必须符合 `isValidPluginEndpointIdShape`；
+ *   - 其它 kind / 空 id 一律 false。
+ */
+function isValidAppMsgEndpoint(ep: unknown): boolean {
+  if (!ep || typeof ep !== "object") return false;
+  const o = ep as Record<string, unknown>;
+  const kind = o.kind;
+  const id = o.id;
+  if (typeof id !== "string" || id.length === 0) return false;
+  if (kind === "origin") {
+    return /^(https?):\/\/([^/:]+):(\d+)$/.test(id);
+  }
+  if (kind === "plugin") {
+    return /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(id);
+  }
+  return false;
 }
 
 function toBinaryField(bytes: Uint8Array, mime?: string) {

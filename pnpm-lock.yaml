@@ -78,6 +78,9 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../../packages/contracts
+      '@keymaster/plugin-appmsg':
+        specifier: '*'
+        version: link:../../packages/plugin-appmsg
       '@keymaster/plugin-apps':
         specifier: '*'
         version: link:../../packages/plugin-apps
@@ -155,6 +158,15 @@ importers:
         version: 6.0.3
 
   packages/contracts: {}
+
+  packages/plugin-appmsg:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
 
   packages/plugin-apps:
     dependencies:

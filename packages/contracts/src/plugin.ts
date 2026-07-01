@@ -107,6 +107,29 @@ export interface PluginManifest {
    */
   i18n?: I18nPluginResources;
   /**
+   * 可选：声明本插件拥有"应用消息总线端点"。
+   *
+   * 设计缘由（施工单 2026-07-01 002 硬切换）：
+   *   - 声明后，runtime 在 setup 阶段会向插件 `ctx.get(APPMESSAGE_CLIENT_CAPABILITY)`
+   *     注入一个 sender endpoint 已绑定的 scoped `appmsg.client`。
+   *   - 插件**不**允许自报 sender endpoint；sender endpoint 固定为
+   *     `endpointId`（稳定 pluginEndpointId）。
+   *   - `endpointId` **不**等于 Vault `keyId`；**不**要求等于 manifest id；
+   *     必须在同 Keymaster 安装内全局唯一，runtime 注册阶段做唯一性校验，
+   *     冲突即 fail-closed。
+   *   - 未声明 endpoint 的插件拿不到 `appmsg.client`：`ctx.get(...)` 抛错。
+   *
+   * 字段命名约束：
+   *   - `endpointId` 形状见 `isValidPluginEndpointIdShape`（portable subset）。
+   *   - **不**叫 `keyId` / `keyid`（与 Vault 私钥句柄语义冲突）。
+   */
+  appMessageEndpoint?: {
+    /** 远端消息端点 id；全局唯一；不等于 keyId；不等于 manifest id 必须。 */
+    endpointId: string;
+    /** 可选人类可读描述，便于诊断。 */
+    description?: string;
+  };
+  /**
    * 插件的 setup 钩子，所有注册动作都发生在这里。
    * 硬切换 001：可以返回 teardown 清理函数；host 在 disable / unregister 时
    * 调用它。teardown 必须是幂等、可重复调用、可容忍部分资源已被清理。

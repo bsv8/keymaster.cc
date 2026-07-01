@@ -3,7 +3,7 @@
 // 命令流 IndexedDB。
 //
 // 设计缘由（施工单 002 硬切换 + 2026-06-28 002 + 2026-06-29 001 +
-// 2026-06-30 002 + 2026-07-01 001）：
+// 2026-06-30 002 + 2026-07-01 001 + 2026-07-01 002）：
 //   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
 //     `closing` 由 pageUnloading 路径发出。
 //   - 命令流历史走 `keymaster.protocol` IndexedDB：store=commands，
@@ -23,15 +23,20 @@
 //   - 施工单 2026-07-01 001 硬切换：彻底移除 `storage.*` / S3 provider
 //     配置能力；现行协议族 = identity.* / intent.sign / cipher.* /
 //     p2pkh.transfer / feepool.* / connect.*（含 connect.launch）。
+//   - 施工单 2026-07-01 002 硬切换：新增 `appmsg.*` 三个 method（origin
+//     endpoint）；plugin-protocol 自身**不**持有 HubMsg 连接真值；
+//     service 通过 capability `appmsg.core` 反向消费 plugin-appmsg
+//     平台单例。
 
 import type {
+  AppMsgCore,
   I18nPluginResources,
   KeyspaceService,
   PluginContext,
   PluginManifest,
   VaultService
 } from "@keymaster/contracts";
-import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { APPMESSAGE_CORE_CAPABILITY, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
@@ -484,11 +489,22 @@ export const protocolPlugin: PluginManifest = {
         p2pkhService = undefined;
       }
 
+      // 施工单 2026-07-01 002 硬切换：protocolService 通过 capability 总线
+      // 反向消费 `appmsg.core`（plugin-appmsg 平台单例）。缺时 `appmsg.*`
+      // 三个 method 走 internal_error 降级（与 p2pkhService 缺时同语义）。
+      let appMsgCore: AppMsgCore | undefined;
+      try {
+        appMsgCore = ctx.get<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
+      } catch {
+        appMsgCore = undefined;
+      }
+
       const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
         storageDb,
         p2pkhService: p2pkhService as never,
+        appMsgCore,
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",

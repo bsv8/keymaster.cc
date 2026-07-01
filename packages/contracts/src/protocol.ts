@@ -141,7 +141,13 @@ export const PROTOCOL_METHODS = [
   "connect.login",
   "connect.resume",
   "connect.logout",
-  "connect.launch"
+  "connect.launch",
+  // 施工单 2026-07-01 002 硬切换：应用消息总线对外方法族。
+  // 与 storage.* / cipher.* 同样属于 session-bound 外部业务方法；
+  // 强制要求 connectSessionId；sender 相关字段不进入对外 params。
+  "appmsg.send",
+  "appmsg.list",
+  "appmsg.get"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -232,6 +238,30 @@ export interface ProtocolCancelMessage {
   id: string;
 }
 
+/* ============== 顶层 event 报文（施工单 2026-07-01 002 硬切换） ============== */
+
+/**
+ * 顶层 `event` 报文（server-pushed）。
+ *
+ * 设计缘由（施工单 2026-07-01 002 硬切换）：
+ *   - V1 只引入一种 event：`appmsg.inbox_dirty`；新消息到达时由
+ *     protocolService 向当前 origin 的 caller 推送 dirty hint；
+ *     **不**直接把完整消息正文作为对外 event 真值。
+ *   - 完整消息正文由 caller 通过 `appmsg.list` / `appmsg.get` 取；
+ *     dirty event 只负责"通知对方有变化"，把"消息正文"留作业务请求
+ *     真值。
+ *   - event 是单向推送，**不**回 result；与 `result` 不混淆。
+ *   - 推送给当前 origin 对应 endpoint 的 caller（按 `event.source`
+ *     与"当前 origin"双重定位）；其它 endpoint 不收。
+ */
+export interface ProtocolEventMessage {
+  v: typeof PROTOCOL_VERSION;
+  type: "event";
+  /** 事件名；V1 仅 `appmsg.inbox_dirty`。 */
+  event: "appmsg.inbox_dirty";
+  data: AppMsgInboxDirtyEventData;
+}
+
 /** 顶层 request 报文。 */
 export interface ProtocolRequestMessage<M extends ProtocolMethod = ProtocolMethod> {
   v: typeof PROTOCOL_VERSION;
@@ -280,7 +310,8 @@ export type ProtocolMessage =
   | ProtocolRequestMessage
   | ProtocolResultMessage
   | ProtocolClosingMessage
-  | ProtocolCancelMessage;
+  | ProtocolCancelMessage
+  | ProtocolEventMessage;
 
 /* ============== identity.get ============== */
 
@@ -1085,6 +1116,109 @@ export interface ConnectLaunchResult {
   resolvedAt: number;
 }
 
+/* ============== appmsg.*（施工单 2026-07-01 002 硬切换：应用消息总线对外方法族） ============== */
+
+/**
+ * appmsg 对外方法族。
+ *
+ * 设计缘由（施工单 2026-07-01 002 硬切换）：
+ *   - 与 `cipher.*` / `p2pkh.transfer` 一样属于 session-bound 外部业务方法；
+ *     强制要求 `connectSessionId`；sender 真值由 protocolService 从
+ *     `connectSession.ownerPublicKeyHex` + `event.origin`（exact origin）
+ *     投影，不接受 caller 自报 sender owner / sender endpoint。
+ *   - 调用方只能指定 `recipientOwnerPublicKeyHex` + `recipientEndpoint`
+ *     （recipientEndpoint 是 `{ kind: "origin", id: exactOrigin }` 或
+ *     `{ kind: "plugin", id: pluginEndpointId }`）。
+ *   - 收件地址模型见 `appmsg.ts` 的 `AppMsgAddress`；v1 只支持
+ *     `text/plain` 与 `text/markdown`；不做未读计数、已读回执、群聊、
+ *     附件、撤回、跨节点 session 恢复。
+ *   - 对外实时提示仅 `appmsg.inbox_dirty`（dirty event）；正文真值来自
+ *     `appmsg.list` / `appmsg.get`。
+ *   - protocolService **不**持有 HubMsg 连接真值；HubMsg 连接 + 缓存 +
+ *     推送分发收口到 `appmsg.core` 平台能力，protocolService 只做
+ *     external protocol 适配。
+ *
+ * 关键边界：
+ *   - params 中**不**允许出现 `senderOwnerPublicKeyHex` / `senderEndpoint`
+ *     / `fromPublicKeyHex` / `fromOrigin` / `fromAppId` 等"自报 sender"字段；
+ *     出现即 invalid_request。
+ *   - session owner key 不 ready（vault locked 且 owner key 状态错）时
+ *     走 fail-fast；与 cipher.* 同语义。
+ *   - recipient endpoint 必须是合法 `AppMsgEndpoint`（`origin` 必须包含
+ *     port，`plugin` 必须符合 `isValidPluginEndpointIdShape`）。
+ */
+
+import type {
+  AppMsgEndpoint,
+  AppMsgInboxDirtyEvent,
+  AppMsgContentType,
+  AppMsgListBox,
+  AppMsgListResult,
+  AppMsgMessage,
+  AppMsgMessageReceivedEvent,
+  AppMsgSendResult
+} from "./appmsg.js";
+
+// 平台内部形状（无 connectSessionId 字段语义）由 appmsg.ts 定义；
+// 对外"业务方法结果"通过下面的 re-export 让外部 caller 继续用
+// `protocol.ts` 暴露的名字；这两组形状字段一致，避免重复定义。
+export type { AppMsgListResult, AppMsgSendResult };
+export type AppMsgMessageReceivedEventData = AppMsgMessageReceivedEvent;
+
+/** `appmsg.send` 请求参数。 */
+export interface AppMsgSendParams {
+  recipientOwnerPublicKeyHex: string;
+  recipientEndpoint: AppMsgEndpoint;
+  contentType: AppMsgContentType;
+  body: string;
+  clientMessageId: string;
+  createdAtMs: number;
+  /** 必填：当前 connectSessionId。 */
+  connectSessionId: string;
+}
+
+/** `appmsg.list` 请求参数。 */
+export interface AppMsgListParams {
+  box: AppMsgListBox;
+  afterMessageId?: string;
+  beforeMessageId?: string;
+  limit?: number;
+  /** 必填：当前 connectSessionId。 */
+  connectSessionId: string;
+}
+
+/** `appmsg.get` 请求参数。 */
+export interface AppMsgGetParams {
+  messageId: string;
+  /** 必填：当前 connectSessionId。 */
+  connectSessionId: string;
+}
+
+/** `appmsg.get` 成功结果。 */
+export interface AppMsgGetResult {
+  message: AppMsgMessage;
+}
+
+/**
+ * 对外 `appmsg.inbox_dirty` event 数据类型。
+ *
+ * 关键约束：
+ *   - v1 对外 event 只携带 dirty hint（owner + endpoint + atMs），
+ *     **不**携带完整消息正文；
+ *   - 接收方按 `ownerPublicKeyHex + endpoint` 识别 dirty box，
+ *     然后调 `appmsg.list` 拉正文；
+ *   - 推送给"当前 exact origin 对应 endpoint"的 caller；其它 endpoint
+ *     收不到自己的 dirty 事件（也不应该收）。
+ */
+export type AppMsgInboxDirtyEventData = AppMsgInboxDirtyEvent;
+
+/**
+ * 内部 `appmsg.message_received` event 数据类型（仅 platform 内部使用）。
+ *
+ * 类型定义从 `appmsg.ts` 的 `AppMsgMessageReceivedEvent` 复用；
+ * protocol.ts 这里仅给一个对外可读别名。
+ */
+
 /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 
 /**
@@ -1524,6 +1658,9 @@ export interface MethodParamsMap {
   "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
   "connect.launch": ConnectLaunchParams;
+  "appmsg.send": AppMsgSendParams;
+  "appmsg.list": AppMsgListParams;
+  "appmsg.get": AppMsgGetParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -1542,6 +1679,9 @@ export interface MethodResultMap {
   "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;
   "connect.launch": ConnectLaunchResult;
+  "appmsg.send": AppMsgSendResult;
+  "appmsg.list": AppMsgListResult;
+  "appmsg.get": AppMsgGetResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap

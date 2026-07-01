@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@keymaster/contracts": "*",
+    "@keymaster/plugin-appmsg": "*",
     "@keymaster/plugin-apps": "*",
     "@keymaster/plugin-assets": "*",
     "@keymaster/plugin-background": "*",

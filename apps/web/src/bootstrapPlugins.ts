@@ -19,6 +19,7 @@
 import type { PluginManifest } from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
+import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
 import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
 import { collectiblesPlugin } from "@keymaster/plugin-collectibles";
@@ -115,8 +116,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序
   // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //
-  // 关键顺序（施工单 004 + 2026-06-29 002）：
+  // 关键顺序（施工单 004 + 2026-06-29 002 + 2026-07-01 002）：
   //   vault
+  //   appmsg-platform（施工单 2026-07-01 002：在 protocol 之前装载，
+  //     plugin-appmsg 自身依赖 vault / keyspace；plugin-protocol 在
+  //     setup 时反向消费 `appmsg.core`）
   //   protocol
   //   home
   //   settings
@@ -144,8 +148,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   //   - appsPlugin 必须在 protocolPlugin 之后：plugin-apps 直接调
   //     `protocol.service.launchAppView(...)`，没有 protocol.service
   //     capability 时 setup 会被 host 拒绝。
+  //   - appmsgPlatformPlugin 必须在 protocolPlugin 之前：plugin-protocol
+  //     在 setup 时通过 capability 总线取 `appmsg.core`；appmsg.core
+  //     缺时 `appmsg.*` 三个 method 走 internal_error fail-closed（与
+  //     `p2pkh.service` 缺时 `p2pkh.transfer` 的降级对称）。
   const ordered = [
     vaultPlugin,
+    appmsgPlatformPlugin,
     protocolPlugin,
     homePlugin,
     settingsPlugin,
