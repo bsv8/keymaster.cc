@@ -86,8 +86,8 @@ appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 boot
 2. launchToken 一次性消费；成功后立即标记 `consumed = true`。
 3. caller `event.origin` 必须与 bootstrap 期记录的 `app.appOrigin` 一致；不一致 → `invalid_origin`。
 4. 失败时按 fail-closed 返回 `user_rejected` / `invalid_origin` / `internal_error`；**不**自动 fallback 到 `connect.login`。
-5. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*` / `storage.*`。
-6. 后续业务方法（`identity.*` / `intent.sign` / `cipher.*` / `storage.*` / `p2pkh.transfer` / `feepool.*`）必须走 `resolveOwnerRuntime(session)`，由当前窗口能拿到的来源执行；
+5. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*`。
+6. 后续业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` / `feepool.*`）必须走 `resolveOwnerRuntime(session)`，由当前窗口能拿到的来源执行；
    Session Window 刷新后 bootstrap runtime 丢失，session 仍存在；
    本窗口后续用户 unlock 后可按同 owner 从 vault 重建 runtime
    （`vault_unlock` 来源）；如果两个来源都拿不到 → fail-fast
@@ -127,7 +127,8 @@ plugin-apps（apps 页面 / 首页 widget）
   owner runtime（`bootstrap_owner` 或后续 `vault_unlock`）。
 - `connect.launch` **不**创建 session；session 已经在 launcher 预建阶段落库。
 - `connect.launch` 失败时**不**回退到 `connect.login`；用户回到 `plugin-apps` 重新点 `Open App` 即可。
-- session 真值 = `connectSessionId` + `ownerPublicKeyHex` + `app.appOrigin` + `resolvedClaims`；这套三元组同时也是后续 `storage.*` / `cipher.*` 的 namespace 真值（与 `appViewContext` 字段无关，appViewContext 仅用于 UI / 启动决策）。
+- session 真值 = `connectSessionId` + `ownerPublicKeyHex` + `app.appOrigin` + `resolvedClaims`；这套三元组是后续 `cipher.*` 等业务方法的 namespace 真值（与 `appViewContext` 字段无关，appViewContext 仅用于 UI / 启动决策）。
+- 现行真值（施工单 2026-07-01 001 硬切换）：Keymaster **不再**实现 `storage.*` 协议族 / S3 provider 配置能力；上述表述中的 `storage.*` 描述为历史草案，本文档不构成现行能力承诺。
 
 ### `connect.login`
 

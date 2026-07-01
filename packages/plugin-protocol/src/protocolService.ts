@@ -3,7 +3,8 @@
 // 调用 vault / keyspace + 构造 envelope + 签名/加解密 + 命令流历史 +
 // p2pkh.transfer / feepool.prepare / feepool.commit 执行。
 //
-// 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-28 002 硬切换）：
+// 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-28 002 硬切换 +
+// 2026-07-01 001 硬切换：移除 S3 / storage.*）：
 //   - 会话锁状态 (`ProtocolPopupLockState`) 与请求状态 (`ProtocolCommandPhase`)
 //     分层；不再共享一个中心 phase。
 //   - 内部数据：
@@ -121,17 +122,6 @@ import {
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type ProtocolStorageDb,
-  type StorageDeleteParams,
-  type StorageDeleteResult,
-  type StorageGetParams,
-  type StorageGetResult,
-  type StorageListAllParams,
-  type StorageListEntry,
-  type StorageListParams,
-  type StorageListResult,
-  type StorageProviderConfig,
-  type StoragePutParams,
-  type StoragePutResult,
   type VaultService
 } from "@keymaster/contracts";
 import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
@@ -148,15 +138,6 @@ import { buildClaimProjectionFromParams, resolveBuiltinClaim, resolveClaims } fr
 import { consumeLauncherBootstrap, encodeOrigin, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { buildAppBootstrapPayload } from "./sessionWindowBootstrap.js";
 import { installLauncherBootstrapRegistry } from "@keymaster/contracts";
-import {
-  createStorageObjectService,
-  createSigV4Adapter,
-  StorageObjectNotFoundError,
-  StorageProviderNotConfiguredError,
-  type OwnerKeyResolution,
-  type StorageObjectService,
-  type StorageCryptoBridge
-} from "./storageObjectService.js";
 import type { FeepoolPendingOpsMap } from "./feepoolOperations.js";
 import {
   sdkBuildBaseTx,
@@ -277,23 +258,13 @@ export interface ProtocolServiceDeps {
    * 自定义 ID 生成器。默认用 `crypto.randomUUID()`；测试可注入稳定 id。
    */
   generateId?: () => string;
-  /* ============== Session Window / storage（施工单 2026-06-29 001） ============== */
+  /* ============== Session Window（施工单 2026-06-29 001） ============== */
   /**
    * 当前 Session Window 启动模式。`undefined` 时按 `connect` 走。
    * 设计缘由：mode 在启动期由 URL `?boot=appView` 一次性解析；service
    * 不再次解析——避免 URL 被中途篡改。
    */
   bootMode?: "connect" | "appView";
-  /**
-   * 构造 storageObjectService 用的工厂；缺时 storage.* 走 internal_error。
-   * 测试可注入 fake 实现。
-   */
-  createStorageObjectService?: typeof createStorageObjectService;
-  /**
-   * 构造 storage content encryption key 的 bridge。
-   * 测试可注入 fake；生产由 manifest 注入（vault withPrivateKey）。
-   */
-  storageCryptoBridge?: StorageCryptoBridge;
 }
 
 /**
@@ -515,8 +486,6 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 设计缘由：
    *   - 用于 UI / 启动决策 / `connect.launch` 的 caller origin 校验。
-   *   - **不**参与 storage.* 的 namespace 真值；storage 仍按
-   *     `sessionRecord.origin + sessionRecord.ownerPublicKeyHex` 取真值。
    */
   private currentAppViewContext: AppViewContext | null = null;
 
@@ -526,7 +495,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由：
    *   - connect mode 下 transport 对端 = `window.opener`；
    *   - appView mode 下 launcher 只是 bootstrap 提供方，真正发
-   *     `connect.launch` / `identity.*` / `storage.*` 的对端是被
+   *     `connect.launch` / `identity.*` 的对端是被
    *     Session Window 打开的 child app 窗口；
    *   - 因此 appView **不能**继续把 `window.opener` 当成唯一合法 source。
    *   - 本字段在 appView 下绑定"当前合法 client app source"：
@@ -1422,7 +1391,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     await this.finalizeRequestByCancel(recordId, "user_canceled");
   }
 
-  /* ============== Session Window / storage 公共 API（施工单 2026-06-29 001） ============== */
+  /* ============== Session Window 公共 API（施工单 2026-06-29 001） ============== */
 
   /** Session Window 当前 boot mode。 */
   bootMode(): "connect" | "appView" {
@@ -1568,8 +1537,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     if (typeof window === "undefined") return null;
     // 施工单 2026-06-30 003：命名窗口 target。浏览器按 target 复用同一扇
-    // child 窗口；encodeOrigin 来自 sessionWindowBootstrap，与 storage.*
-    // 物理 key 同源，但这里**只**用 target 字符串，不参与 storage 真值。
+    // child 窗口；encodeOrigin 来自 sessionWindowBootstrap，仅用于
+    // 构造 window.name target，不承载任何业务真值。
     const target = `keymaster-app-${encodeOrigin(ctx.appOrigin)}`;
     // 施工单 2026-06-30 004：显式注入 `sessionWindowOrigin`。以当前
     // Session Window `window.location.origin` 为真值，写入 child URL
@@ -1859,40 +1828,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       launchToken,
       appUrl: appUrlWithLaunchToken
     };
-  }
-
-  async getStorageProviderConfig(): Promise<StorageProviderConfig | null> {
-    if (!this.deps.storageDb) return null;
-    try {
-      return await this.deps.storageDb.getStorageProviderConfig();
-    } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.storageConfig",
-        event: "get.failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
-      return null;
-    }
-  }
-
-  async setStorageProviderConfig(record: StorageProviderConfig): Promise<void> {
-    if (!this.deps.storageDb) {
-      throw new Error("storageDb unavailable");
-    }
-    await this.deps.storageDb.putStorageProviderConfig(record);
-  }
-
-  async clearStorageProviderConfig(): Promise<void> {
-    if (!this.deps.storageDb) return;
-    try {
-      await this.deps.storageDb.deleteStorageProviderConfig();
-    } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.storageConfig",
-        event: "delete.failed",
-        err: err instanceof Error ? err.message : String(err)
-      });
-    }
   }
 
   /**
@@ -3470,16 +3405,6 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeConnectLogout(rec);
         case "connect.launch":
           return await this.executeConnectLaunch(rec);
-        case "storage.put":
-          return await this.executeStoragePut(rec);
-        case "storage.get":
-          return await this.executeStorageGet(rec);
-        case "storage.list":
-          return await this.executeStorageList(rec);
-        case "storage.listAll":
-          return await this.executeStorageListAll(rec);
-        case "storage.delete":
-          return await this.executeStorageDelete(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -3751,7 +3676,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 设计缘由：
    *   - 业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` /
-   *     `feepool.*` / `storage.*`）**统一**走这一个入口解析 owner 执行
+   *     `feepool.*`）**统一**走这一个入口解析 owner 执行
    *     材料；**不**再各自手写：
    *       - `keyspace.getKey(...)`
    *       - `vault.withPrivateKey(...)`
@@ -3765,8 +3690,8 @@ export class ProtocolServiceImpl implements ProtocolService {
    *          `ownerPublicKeyHex` 对应的 key 可读 → 现解析 vault
    *          `keyId` → 用 `vault.withPrivateKey(keyId, fn)` 借出。
    *       3. 解析失败：抛 `runtime_missing`（对外 `user_rejected`）。
-   *   - 业务方法拿到的 `OwnerKeyResolution` 与 `storageObjectService`
-   *     共享同一份 owner 真值——`storage.*` 的内容 key 派生与签名
+   *   - 业务方法拿到的 `OwnerKeyResolution` 与签名 / 加解密链路
+   *     共享同一份 owner 真值——cipher / intent.sign / p2pkh / feepool
    *     走同一条 owner 解析路径。
    */
   private async resolveOwnerRuntime(
@@ -4120,7 +4045,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     launcher 给的 `app.appOrigin` 一致。
    *   - launchToken 一次性消费；成功立即标记 consumed=true。
    *   - 成功结果与 `connect.login` 对齐：返回 sessionId + owner + claims
-   *     快照。后续 caller 走同一套 connect.resume / cipher.* / storage.*。
+   *     快照。后续 caller 走同一套 connect.resume / cipher.*。
    */
   private async executeConnectLaunch(rec: RequestRecord): Promise<ConnectLaunchResult> {
     if (this.bootModeValue !== "appView") {
@@ -4213,154 +4138,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       resolvedClaims: session.claimsSnapshot,
       resolvedAt: now
     };
-  }
-
-  /* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
-
-  /**
-   * 取 storageObjectService；缺 deps 时返回 null（storage.* 走 internal_error）。
-   *
-   * 设计缘由：service 不直接持有 storageObjectService 实例；每次按需
-   * 构造，避免长时间持有对 S3 adapter 的引用。
-   */
-  private getStorageObjectServiceOrNull(): StorageObjectService | null {
-    const ctor = this.deps.createStorageObjectService ?? createStorageObjectService;
-    const bridge = this.deps.storageCryptoBridge;
-    if (!bridge) return null;
-    if (!this.deps.storageDb) return null;
-    return ctor({
-      getProviderConfig: () => this.deps.storageDb!.getStorageProviderConfig(),
-      resolveAdapter: (cfg) => createSigV4Adapter(cfg),
-      cryptoBridge: bridge
-    });
-  }
-
-  private async executeStoragePut(rec: RequestRecord): Promise<StoragePutResult> {
-    const params = rec.params as StoragePutParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
-    const svc = this.getStorageObjectServiceOrNull();
-    if (!svc) {
-      throw localFailure("internal_error", "storage.* bridge unavailable");
-    }
-    // 施工单 2026-06-30 002 硬切换：storage.* 走统一 owner execution
-    // runtime resolver；无论 `bootstrap_owner` / `vault_unlock` 哪条来源，
-    // 都与签名 / 加解密共用同一把 owner key。
-    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
-    try {
-      return await svc.put({
-        origin: session.origin,
-        ownerPublicKeyHex: session.ownerPublicKeyHex,
-        ownerKeyResolution,
-        params
-      });
-    } catch (err) {
-      this.mapStorageError(err);
-    }
-  }
-
-  private async executeStorageGet(rec: RequestRecord): Promise<StorageGetResult> {
-    const params = rec.params as StorageGetParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
-    const svc = this.getStorageObjectServiceOrNull();
-    if (!svc) {
-      throw localFailure("internal_error", "storage.* bridge unavailable");
-    }
-    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
-    try {
-      const out = await svc.get({
-        origin: session.origin,
-        ownerPublicKeyHex: session.ownerPublicKeyHex,
-        ownerKeyResolution,
-        params
-      });
-      if (!out) {
-        throw protocolError("not_found", `storage.get: object not found at ${params.path}`);
-      }
-      return out;
-    } catch (err) {
-      this.mapStorageError(err);
-    }
-  }
-
-  private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
-    const params = rec.params as StorageListParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
-    const svc = this.getStorageObjectServiceOrNull();
-    if (!svc) {
-      throw localFailure("internal_error", "storage.* bridge unavailable");
-    }
-    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
-    try {
-      return await svc.list({
-        origin: session.origin,
-        ownerPublicKeyHex: session.ownerPublicKeyHex,
-        ownerKeyResolution,
-        params
-      });
-    } catch (err) {
-      this.mapStorageError(err);
-    }
-  }
-
-  private async executeStorageListAll(rec: RequestRecord): Promise<StorageListResult> {
-    const params = rec.params as StorageListAllParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
-    const svc = this.getStorageObjectServiceOrNull();
-    if (!svc) {
-      throw localFailure("internal_error", "storage.* bridge unavailable");
-    }
-    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
-    try {
-      return await svc.listAll({
-        origin: session.origin,
-        ownerPublicKeyHex: session.ownerPublicKeyHex,
-        ownerKeyResolution,
-        params
-      });
-    } catch (err) {
-      this.mapStorageError(err);
-    }
-  }
-
-  private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {
-    const params = rec.params as StorageDeleteParams;
-    const session = await this.requireConnectSession(rec, params.connectSessionId);
-    const svc = this.getStorageObjectServiceOrNull();
-    if (!svc) {
-      throw localFailure("internal_error", "storage.* bridge unavailable");
-    }
-    const ownerKeyResolution = await this.resolveOwnerRuntime(session);
-    try {
-      const out = await svc.delete({
-        origin: session.origin,
-        ownerPublicKeyHex: session.ownerPublicKeyHex,
-        ownerKeyResolution,
-        params
-      });
-      if (!out) {
-        throw protocolError("not_found", `storage.delete: object not found at ${params.path}`);
-      }
-      return out;
-    } catch (err) {
-      this.mapStorageError(err);
-    }
-  }
-
-  /**
-   * storage.* 错误映射：把 storageObjectService 抛的内部 Error 类映射到
-   * 协议错误码 / `localFailure`。**只**抛错，不返回值。
-   */
-  private mapStorageError(err: unknown): never {
-    if (err instanceof StorageObjectNotFoundError) {
-      throw protocolError("not_found", err.message);
-    }
-    if (err instanceof StorageProviderNotConfiguredError) {
-      throw localFailure("storage_provider_not_configured", err.message);
-    }
-    if (err instanceof Error) {
-      throw localFailure("storage_io_error", err.message);
-    }
-    throw localFailure("storage_io_error", "storage io error");
   }
 
   /* ============== p2pkh.transfer ============== */

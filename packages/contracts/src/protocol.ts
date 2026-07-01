@@ -1,7 +1,8 @@
 // packages/contracts/src/protocol.ts
 // Keymaster 对外协议 V1 公共契约。
 //
-// 设计缘由（施工单 001 + 002 + 2026-06-27 002 硬切换 + 2026-06-28 002 硬切换）：
+// 设计缘由（施工单 001 + 002 + 2026-06-27 002 硬切换 + 2026-06-28 002 硬切换 +
+// 2026-07-01 001 硬切换：移除 S3 / storage.*）：
 //   - 协议方法集：identity.get / intent.sign / cipher.encrypt / cipher.decrypt
 //     （签名 + 加解密），p2pkh.transfer（受控转账），feepool.prepare /
 //     feepool.commit（双端费用池两步方法族）。所有方法走同一套 transport +
@@ -67,7 +68,7 @@
 //       - 业务执行阶段再次校验 session 仍有效（logout 后同 session 下挂
 //         的旧 request 后续执行必须失败；不允许"老 session 复用新 key"）。
 //   - 施工单 2026-06-29 001 硬切换：Session Window 统一 + appView 启动 +
-//     `connect.launch` + `storage.*`：
+//     `connect.launch`：
 //       - 唯一窗口入口仍是 `/protocol/v1/popup`，无第二套路由；语义上称
 //         Session Window（"popup"只是窗口形态称谓，不再承载权限模型）。
 //       - Session Window 只允许两种 boot mode：`connect`（默认）与
@@ -77,15 +78,15 @@
 //       - 新增 `connect.launch`：appView mode 下 client app 首登入口；
 //         入参 `{ launchToken }`，成功结果形状与 `connect.login` 对齐；
 //         launchToken 一次性消费；不允许 fallback 到 `connect.login`。
-//       - 新增 `storage.put` / `storage.get` / `storage.list` /
-//         `storage.listAll` / `storage.delete`：全部要求 `connectSessionId`；
-//         namespace 真值 = `session.origin + session.ownerPublicKeyHex`；
-//         appViewContext 只用于 UI / 启动决策，**不**参与 storage 真值。
-//       - 物理上只一份全局 S3 provider 配置；逻辑上按
-//         `/{originEncoded}/{ownerPublicKeyHex}/{relativePath}` 划分虚拟
-//         桶；Keymaster 透明加解密对象内容，不加密路径名。
-//       - 新增协议错误码 `not_found`（storage.get / storage.delete 命中
-//         缺失对象）。
+//   - 施工单 2026-07-01 001 硬切换：彻底移除 storage.* / S3 provider：
+//       - 协议方法集里**不再**存在 `storage.put` / `storage.get` /
+//         `storage.list` / `storage.listAll` / `storage.delete`；
+//       - `StorageProviderConfig` / storage params/result 类型
+//         全部从 contracts 抹去；
+//       - `ProtocolStorageDb` 不再提供 storage provider config CRUD；
+//       - `ProtocolService` 不再持有 storage config 读写接口；
+//       - DB schema 中 `storageProviderConfig` store 在升级时
+//         物理删除，旧配置随升级消失。
 //   - 统一 owner execution runtime：`OwnerExecutionRuntime` 承载同一份
 //     owner 私钥闭包；runtime 只允许两路来源——`bootstrap_owner`
 //     （launcher 一次性注入的 owner 私钥材料，本窗口当前主要来源）与
@@ -102,7 +103,7 @@
 //         owner runtime，**不**假装是"完整解锁钱包窗口"，**不**写
 //         IndexedDB / localStorage / URL。
 //       - 所有业务方法（`identity.*` / `intent.sign` / `cipher.*` /
-//         `storage.*` / `p2pkh.transfer` / `feepool.*`）走同一个
+//         `p2pkh.transfer` / `feepool.*`）走同一个
 //         `resolveOwnerRuntime(session)` 入口；runtime 解析顺序：
 //         `bootstrap_owner` → `vault_unlock` → 解析失败。
 
@@ -140,12 +141,7 @@ export const PROTOCOL_METHODS = [
   "connect.login",
   "connect.resume",
   "connect.logout",
-  "connect.launch",
-  "storage.put",
-  "storage.get",
-  "storage.list",
-  "storage.listAll",
-  "storage.delete"
+  "connect.launch"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -181,7 +177,6 @@ export type ProtocolErrorCode =
   | "user_rejected"
   | "active_key_unavailable"
   | "decrypt_failed"
-  | "not_found"
   | "internal_error";
 
 /** 协议错误对象。 */
@@ -817,8 +812,6 @@ export type ProtocolFailureReason =
   | "unknown_operation"
   | "cross_origin_operation"
   | "request_timeout"
-  | "storage_provider_not_configured"
-  | "storage_io_error"
   /**
    * 当前 Session Window 拿不到 owner execution runtime（施工单
    * 2026-06-30 002 硬切换）。
@@ -1077,7 +1070,7 @@ export interface ProtocolConnectAuthSnapshot {
  *     不在 `appView` mode / caller origin 与 bootstrap 期记录不一致 → 拒掉；
  *     不允许 fallback 到 `connect.login`。
  *   - 成功结果形状与 `connect.login` 对齐，便于 caller 走同一套"持久化
- *     sessionId + 后续 connect.resume / cipher.* / storage.*"路径。
+ *     sessionId + 后续 connect.resume / cipher.*"路径。
  */
 export interface ConnectLaunchParams {
   /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
@@ -1192,121 +1185,7 @@ export class LaunchAppViewError extends Error {
   }
 }
 
-/* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
-
-/**
- * `storage.put` 请求参数。
- *
- * 设计缘由（施工单 2026-06-29 001 硬切换）：
- *   - `connectSessionId` 强制输入；namespace 真值完全来自 session，不读
- *     `appViewContext`。
- *   - `path` 是相对路径：必须不以 `/` 开头、不含 `..`、非空、不含 `\` 与
- *     `\0`；Keymaster 在 execute 入口做 normalize + 越界检查，非法直接
- *     `invalid_request`。
- *   - `contentType` 可选；与明文一起被透明加密进对象内容；解密时原样
- *     返回。
- *   - `content` 是 `BinaryField`，明文写入由 Keymaster 在 Session Window
- *     内部完成加密；S3 侧只能看到密文 + 路径名 + 元数据。
- */
-export interface StoragePutParams {
-  connectSessionId: string;
-  /** 相对路径，统一 `/` 分隔。 */
-  path: string;
-  contentType?: string;
-  content: BinaryField;
-}
-
-/** `storage.put` 成功结果。 */
-export interface StoragePutResult {
-  /** 物理对象 key。app 端一般不感知；用于调试 / 测试。 */
-  objectKey: string;
-  /** 服务端最后更新时间（unix milliseconds）。S3 侧回填。 */
-  updatedAt: number;
-}
-
-/** `storage.get` 请求参数。 */
-export interface StorageGetParams {
-  connectSessionId: string;
-  path: string;
-}
-
-/** `storage.get` 成功结果。对象不存在时返回 `not_found` 错误。 */
-export interface StorageGetResult {
-  contentType?: string;
-  content: BinaryField;
-  updatedAt?: number;
-}
-
-/** `storage.list` 请求参数。 */
-export interface StorageListParams {
-  connectSessionId: string;
-  /** 相对路径前缀；空串表示当前虚拟桶根。 */
-  prefix: string;
-}
-
-/** 单条 list 结果。 */
-export interface StorageListEntry {
-  path: string;
-  updatedAt?: number;
-}
-
-/** `storage.list` / `storage.listAll` 成功结果。 */
-export interface StorageListResult {
-  entries: StorageListEntry[];
-}
-
-/** `storage.listAll` 请求参数。 */
-export interface StorageListAllParams {
-  connectSessionId: string;
-}
-
-/** `storage.delete` 请求参数。对象不存在时返回 `not_found` 错误。 */
-export interface StorageDeleteParams {
-  connectSessionId: string;
-  path: string;
-}
-
-/** `storage.delete` 成功结果。 */
-export interface StorageDeleteResult {
-  deleted: true;
-  updatedAt: number;
-}
-
-/* ============== Storage provider config（施工单 2026-06-29 001 硬切换） ============== */
-
-/**
- * 全局 storage provider 配置。
- *
- * 设计缘由（施工单 2026-06-29 001 硬切换）：
- *   - 只支持单一全局 S3-compatible 配置；不做多 profile / 不暴露给 client
- *     app / 不放 localStorage。
- *   - 配置由 Keymaster 设置页写入 IndexedDB 单条记录；Session Window 与
- *     storage.* 路径都从这里取真值。
- *   - V1 仅支持最小字段：endpoint / region / bucket / accessKeyId /
- *     secretAccessKey / forcePathStyle；不引入 multipart / SSE-KMS /
- *     accelerate 等高级选项。
- *   - `secretAccessKey` 走 IndexedDB 而非 localStorage：IndexedDB 与 vault
- *     DB 同 lifecycle；localStorage 是同步 + 跨标签页立即可见，V1 不走它。
- *   - 不写 S3 凭证到任何会被导出 / 同步的路径；只在本地 IndexedDB。
- */
-export interface StorageProviderConfig {
-  /** 固定 "s3-compatible"。 */
-  provider: "s3-compatible";
-  /** S3 endpoint（host 或 https://host）。 */
-  endpoint: string;
-  /** AWS region。 */
-  region: string;
-  /** bucket 名。V1 不支持多 bucket。 */
-  bucket: string;
-  /** Access key id。 */
-  accessKeyId: string;
-  /** Secret access key。 */
-  secretAccessKey: string;
-  /** 是否强制 path-style（minio / 自部署常用）。可选；缺省 false。 */
-  forcePathStyle?: boolean;
-  /** 最后更新时间，unix milliseconds。 */
-  updatedAt: number;
-}
+/* ============== Session Window 的 appView 当前上下文（仅 UI / 启动用） ============== */
 
 /**
  * Session Window 的 appView 当前上下文（仅 UI / 启动用）。
@@ -1314,8 +1193,6 @@ export interface StorageProviderConfig {
  * 设计缘由（施工单 2026-06-29 001 硬切换）：
  *   - 这是 Session Window 当前服务的 app 上下文；用来渲染 UI、决定打开
  *     client app 的 URL、校验 `connect.launch` 的 caller origin。
- *   - **不**参与 storage.* 的 namespace 真值；storage 仍按
- *     `sessionRecord.origin + sessionRecord.ownerPublicKeyHex` 取真值。
  *   - 仅在 Session Window 处于 `appView` mode 且 bootstrap 成功后非空；
  *     `connect` mode 下恒为 null。
  */
@@ -1324,7 +1201,7 @@ export interface AppViewContext {
   appOrigin: string;
   /** 启动 client app 用的 URL（含 launchToken）。 */
   appUrl: string;
-  /** bootstrap 时 launcher 已建的 connectSessionId；与 storage 真值同源。 */
+  /** bootstrap 时 launcher 已建的 connectSessionId。 */
   connectSessionId: string;
   /** bootstrap 时锁定的 owner public key hex。 */
   ownerPublicKeyHex: string;
@@ -1414,7 +1291,7 @@ export interface AppBootstrapPayload {
     appOrigin: string;
     appUrl: string;
   };
-  /** launcher 已建的 connect sessionId（与 storage 真值同源）。 */
+  /** launcher 已建的 connect sessionId。 */
   connectSessionId: string;
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
@@ -1427,8 +1304,7 @@ export interface AppBootstrapPayload {
    *
    * Session Window 校验通过后**只**把它注册到当前窗口的 owner
    * runtime，**不**写任何长期存储，**不**调用 vault import runtime。
-   * `privateKeyHex` 与 session signer 共同遵守"不在长期存储落库"
-   * 边界。
+   * `privateKeyHex` 遵守"不在长期存储落库"边界。
    */
   ownerRuntimeBootstrap: OwnerRuntimeBootstrap;
 }
@@ -1443,12 +1319,12 @@ export interface AppBootstrapPayload {
  *     `bootstrap_owner` 切到 `vault_unlock`：
  *       - 启动早期 `bootstrap_owner`：launcher 一次性注入的 owner 私钥
  *         材料，足够跑 `identity.*` / `intent.sign` / `cipher.*` /
- *         `storage.*` / `p2pkh.transfer` / `feepool.*`。
+ *         `p2pkh.transfer` / `feepool.*`。
  *       - 本窗口用户后续 unlock + vault owner 可读 → `vault_unlock`：
  *         从本地 vault 按 `ownerPublicKeyHex` 重建 owner runtime，
  *         覆盖 `bootstrap_owner` 的同一把 owner；服务外部行为一致。
  *   - 这是窗口内运行时状态 + 调试信息；**不**是 session 业务真值，
- *     **不**影响 storage.* / cipher.* / p2pkh.transfer 的对外语义。
+ *     **不**影响 cipher.* / p2pkh.transfer 的对外语义。
  */
 export type OwnerRuntimeSource = "bootstrap_owner" | "vault_unlock";
 
@@ -1456,7 +1332,7 @@ export type OwnerRuntimeSource = "bootstrap_owner" | "vault_unlock";
  * 统一 owner execution runtime 接口。
  *
  * 设计缘由：
- *   - 业务方法（`identity.*` / `intent.sign` / `cipher.*` / `storage.*` /
+ *   - 业务方法（`identity.*` / `intent.sign` / `cipher.*` /
  *     `p2pkh.transfer` / `feepool.*`）只通过 `withPrivateKeyHex(...)`
  *     闭包持有 owner 私钥；业务方法**不**知道也不依赖 `source` 是哪一条。
  *   - `bootstrap_owner` 来源：launcher 在 Session Window 启动早期注入；
@@ -1648,11 +1524,6 @@ export interface MethodParamsMap {
   "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
   "connect.launch": ConnectLaunchParams;
-  "storage.put": StoragePutParams;
-  "storage.get": StorageGetParams;
-  "storage.list": StorageListParams;
-  "storage.listAll": StorageListAllParams;
-  "storage.delete": StorageDeleteParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -1671,11 +1542,6 @@ export interface MethodResultMap {
   "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;
   "connect.launch": ConnectLaunchResult;
-  "storage.put": StoragePutResult;
-  "storage.get": StorageGetResult;
-  "storage.list": StorageListResult;
-  "storage.listAll": StorageListResult;
-  "storage.delete": StorageDeleteResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
@@ -1944,18 +1810,16 @@ export const PROTOCOL_STORAGE_DB_CAPABILITY = "protocol.storageDb";
  * 协议存储 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
  *
  * 关键不变量：
- *   - DB 名固定 `keymaster.protocol`，version 8（施工单 2026-06-30 002
- *     硬切换：撤销 runtimeBinding 二分路，重建 connectSessions store
- *     去掉 `runtimeBinding` 字段；commands / origins / feePools /
- *     storageProviderConfig / launchTokens 沿用旧 schema 不动；session
- *     真值收口为 sessionId + origin + ownerPublicKeyHex 三元组）。
- *   - 四 store 各司其职：
+ *   - DB 名固定 `keymaster.protocol`。施工单 2026-07-01 001 硬切换：
+ *     物理删除 `storageProviderConfig` store；DB version 升 9。
+ *   - 五 store 各司其职：
  *       - `commands`：命令流历史（一条 request = 一条 record）；
  *       - `origins`：按 exact origin 存站点级配置；
  *       - `feePools`：按
  *         `${origin}::${ownerPublicKeyHex}::${counterpartyPublicKeyHex}`
  *         复合 key 存费用池状态（v5 补 ownerPublicKeyHex 维度）；
  *       - `connectSessions`：auth session 真值（按 sessionId 主键）；
+ *       - `launchTokens`：launcher 给 client app 的一次性凭证缓存。
  *   - commands store 索引按 `origin + updatedAt desc`；
  *   - feePools store 索引 `origin`，便于按 origin 列出该站点的所有池；
  *   - connectSessions store 索引 `origin`，便于按 origin 列出该站点的
@@ -2007,23 +1871,6 @@ export interface ProtocolStorageDb {
    */
   putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord): Promise<void>;
 
-  /* ----- storageProviderConfig（施工单 2026-06-29 001 硬切换） ----- */
-  /**
-   * 读全局 storage provider 配置；未配置时返回 null。
-   *
-   * 设计缘由：单一全局记录；key 固定 `"singleton"`。V1 不做多 profile。
-   */
-  getStorageProviderConfig(): Promise<StorageProviderConfig | null>;
-  /**
-   * 写全局 storage provider 配置；同 key 覆盖。
-   *
-   * 设计缘由：配置写盘走 IndexedDB，**不**走 localStorage / sessionStorage；
-   * 写入字段含 `secretAccessKey`，仍只在本地落盘，**不**对外暴露。
-   */
-  putStorageProviderConfig(record: StorageProviderConfig): Promise<void>;
-  /** 删除全局 storage provider 配置；调用方负责后续清理。 */
-  deleteStorageProviderConfig(): Promise<void>;
-
   /* ----- launchTokens（施工单 2026-06-29 001 硬切换） ----- */
   /**
    * 写一条 launchToken 记录；同 token 覆盖。
@@ -2053,8 +1900,7 @@ export interface ProtocolStorageDb {
  *       * `token`：唯一 id；
  *       * `appId` / `appOrigin` / `appUrl`：UI / 启动决策用，与
  *         `AppViewContext` 同源；
- *       * `connectSessionId`：bootstrap 期 launcher 已建的 session，
- *         与 storage 真值同源；
+ *       * `connectSessionId`：bootstrap 期 launcher 已建的 session；
  *       * `ownerPublicKeyHex`：bootstrap 期锁定的 owner；
  *       * `resolvedClaims` / `resolvedAt`：bootstrap 期快照；
  *       * `consumed`：true 表示该 token 已被 `connect.launch` 消费；
@@ -2432,7 +2278,7 @@ export interface ProtocolService {
    * 设计缘由（施工单 2026-06-29 001 硬切换）：
    *   - `connect` 是缺省 mode；`appView` 是 launcher 启动模式。
    *   - mode 仅在启动阶段决定；一旦 session 建立，后续执行路径不再
-   *     区分两种 mode（`connect.resume` / `cipher.*` / `storage.*` 都
+   *     区分两种 mode（`connect.resume` / `cipher.*` 都
    *     按同一套代码走）。
    */
   bootMode(): "connect" | "appView";
@@ -2443,8 +2289,6 @@ export interface ProtocolService {
    * 设计缘由：
    *   - 仅当 Session Window 处于 `appView` mode 且 bootstrap 成功后
    *     非空；`connect` mode 下恒为 null。
-   *   - **不**参与 storage.* 的 namespace 真值；storage 仍按
-   *     `sessionRecord.origin + sessionRecord.ownerPublicKeyHex` 取真值。
    */
   appViewContext(): AppViewContext | null;
 
@@ -2454,7 +2298,7 @@ export interface ProtocolService {
    * 设计缘由（修复 issue #3）：
    *   - 这里只承载 launcher -> Session Window 这一步的硬失败：
    *       - launcher 在合理时间（如 30s）内未把 bootstrap 发过来；
-   *       - bootstrap payload / session signer 校验失败。
+   *       - bootstrap payload / owner runtime bootstrap 校验失败。
    *   - UI 据此渲染明确错误态，让用户关闭 Session Window 重新从 launcher
    *     启动 app。**不**无限等待。
    *   - `Open App` 后 child app 连接超时属于软超时，不写进这里；迟到连接
@@ -2586,19 +2430,6 @@ export interface ProtocolService {
    *     只消费 `launchToken`、不创建 session。
    */
   launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult>;
-
-  /* ============== storage.*（施工单 2026-06-29 001 硬切换） ============== */
-
-  /**
-   * 读全局 storage provider 配置；未配置时返回 null。
-   */
-  getStorageProviderConfig(): Promise<StorageProviderConfig | null>;
-  /**
-   * 写全局 storage provider 配置。
-   */
-  setStorageProviderConfig(record: StorageProviderConfig): Promise<void>;
-  /** 删除全局 storage provider 配置。 */
-  clearStorageProviderConfig(): Promise<void>;
 
   /* ============== connect.*（施工单 2026-06-28 001 硬切换） ============== */
 

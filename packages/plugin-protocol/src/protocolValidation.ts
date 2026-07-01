@@ -35,12 +35,7 @@ import type {
   P2pkhTransferParams,
   ProtocolErrorCode,
   ProtocolMethod,
-  ProtocolRequestMessage,
-  StorageDeleteParams,
-  StorageGetParams,
-  StorageListAllParams,
-  StorageListParams,
-  StoragePutParams
+  ProtocolRequestMessage
 } from "@keymaster/contracts";
 import { PROTOCOL_METHODS, PROTOCOL_VERSION } from "@keymaster/contracts";
 
@@ -111,16 +106,6 @@ function validateParams(
       return validateConnectLogoutParams(raw);
     case "connect.launch":
       return validateConnectLaunchParams(raw);
-    case "storage.put":
-      return validateStoragePutParams(raw);
-    case "storage.get":
-      return validateStorageGetParams(raw);
-    case "storage.list":
-      return validateStorageListParams(raw);
-    case "storage.listAll":
-      return validateStorageListAllParams(raw);
-    case "storage.delete":
-      return validateStorageDeleteParams(raw);
   }
   throw new ProtocolValidationError("invalid_request", "Unknown method");
 }
@@ -309,51 +294,12 @@ function validateConnectLogoutParams(raw: unknown): ConnectLogoutParams {
   return { connectSessionId };
 }
 
-/* ============== connect.launch / storage.*（施工单 2026-06-29 001 硬切换） ============== */
+/* ============== connect.launch（施工单 2026-06-29 001 硬切换） ============== */
 
 function validateConnectLaunchParams(raw: unknown): ConnectLaunchParams {
   const obj = expectObject(raw, "connect.launch params");
   const launchToken = expectNonEmptyString(obj.launchToken, "launchToken");
   return { launchToken };
-}
-
-function validateStoragePutParams(raw: unknown): StoragePutParams {
-  const obj = expectObject(raw, "storage.put params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  const path = expectNonEmptyString(obj.path, "path");
-  const contentType =
-    typeof obj.contentType === "string" ? obj.contentType : undefined;
-  const content = expectBinaryField(obj.content, "content");
-  const out: StoragePutParams = { connectSessionId, path, content };
-  if (contentType !== undefined) out.contentType = contentType;
-  return out;
-}
-
-function validateStorageGetParams(raw: unknown): StorageGetParams {
-  const obj = expectObject(raw, "storage.get params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  const path = expectNonEmptyString(obj.path, "path");
-  return { connectSessionId, path };
-}
-
-function validateStorageListParams(raw: unknown): StorageListParams {
-  const obj = expectObject(raw, "storage.list params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  const prefix = typeof obj.prefix === "string" ? obj.prefix : "";
-  return { connectSessionId, prefix };
-}
-
-function validateStorageListAllParams(raw: unknown): StorageListAllParams {
-  const obj = expectObject(raw, "storage.listAll params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  return { connectSessionId };
-}
-
-function validateStorageDeleteParams(raw: unknown): StorageDeleteParams {
-  const obj = expectObject(raw, "storage.delete params");
-  const connectSessionId = expectNonEmptyString(obj.connectSessionId, "connectSessionId");
-  const path = expectNonEmptyString(obj.path, "path");
-  return { connectSessionId, path };
 }
 
 /* ============== helpers ============== */

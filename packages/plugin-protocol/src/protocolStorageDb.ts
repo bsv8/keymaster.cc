@@ -1,13 +1,13 @@
 // packages/plugin-protocol/src/protocolStorageDb.ts
 // popup 协议存储 IndexedDB（commands / origins / feePools / connectSessions /
-// storageProviderConfig / launchTokens 六 store）。
+// launchTokens 五 store）。
 //
 // 设计缘由（施工单 002 + 2026-06-28 001 + 2026-06-28 002 + 2026-06-29 001 +
-// 2026-06-30 002 硬切换）：
+// 2026-06-30 002 + 2026-07-01 001 硬切换）：
 //   - DB 名：`keymaster.protocol`。**不**挂到 `keyspace.openKeyStorage()`
 //     的 per-key namespace，因为命令历史按 domain 走，按 key 走会让
 //     "切了 key 看不到旧站点历史" 这种行为偷偷出现。
-//   - DB version：8。
+//   - DB version：9。
 //       - v2：单 `commands` store 升级为三 store（commands / origins / feePools）；
 //       - v3：feePools record 结构变了（新增 `draftSpendTxHex` /
 //         `draftClientSignBytes`），升级时清空 feePools store（不迁数据）；
@@ -20,10 +20,13 @@
 //       - v6（施工单 2026-06-29 001 硬切换）：新增 `storageProviderConfig`
 //         + `launchTokens` 两 store；commands / origins / feePools /
 //         connectSessions 不动。
-//       - v8（当前 DB_VERSION）：session 真值收口为三元组
+//       - v8（施工单 2026-06-30 002 硬切换）：session 真值收口为三元组
 //         `sessionId + origin + ownerPublicKeyHex`；runtime 来源不落库。
 //         commands / origins / feePools / storageProviderConfig /
 //         launchTokens 不动。
+//       - v9（施工单 2026-07-01 001 硬切换）：物理删除 `storageProviderConfig`
+//         store；旧本地配置随升级清除。commands / origins / feePools /
+//         connectSessions / launchTokens 不动。
 //   - `commands`：命令流历史，主键 `record.id`（与 transport requestId
 //     解耦）。索引 `origin` / `updatedAt` / compound `[origin, updatedAt]`。
 //   - `origins`：按 exact origin 存站点级配置；主键 `origin`。
@@ -34,7 +37,6 @@
 //     （便于按 origin 列出该站点的所有 session 含已 revoked 的）。
 //     当前 session record 字段：`sessionId + origin + ownerPublicKeyHex +
 //     ownerLabel + claimsSnapshot + createdAt + lastUsedAt + revokedAt`。
-//   - `storageProviderConfig`：单条全局配置；主键 `"singleton"`。
 //   - `launchTokens`：launcher 给 client app 的 launchToken 缓存；主键
 //     `token`；索引 `connectSessionId`（便于按 session 找到 token）。
 //     **V1 显式不启用持久化路径**——service 默认走内存 Map，仅当 service
@@ -55,24 +57,19 @@ import type {
   ProtocolCommandRecord,
   ProtocolFeePoolRecord,
   ProtocolOriginSettingsRecord,
-  ProtocolStorageDb,
-  StorageProviderConfig
+  ProtocolStorageDb
 } from "@keymaster/contracts";
 
 const DB_NAME = "keymaster.protocol";
-// 当前 DB_VERSION = 8：connectSessions 真值三元组
-// `sessionId + origin + ownerPublicKeyHex`，runtime 来源不落库。
-// commands / origins / feePools / storageProviderConfig / launchTokens
-// 不引用 runtime 来源，不需要重建。
-const DB_VERSION = 8;
+// 当前 DB_VERSION = 9：物理删除 `storageProviderConfig` store。
+// commands / origins / feePools / connectSessions / launchTokens
+// 不引用 storageProviderConfig，不需要重建。
+const DB_VERSION = 9;
 const STORE_COMMANDS = "commands";
 const STORE_ORIGINS = "origins";
 const STORE_FEE_POOLS = "feePools";
 const STORE_CONNECT_SESSIONS = "connectSessions";
-const STORE_STORAGE_PROVIDER_CONFIG = "storageProviderConfig";
 const STORE_LAUNCH_TOKENS = "launchTokens";
-/** storageProviderConfig 主键固定为 "singleton"——全局唯一配置。 */
-const STORAGE_PROVIDER_CONFIG_KEY = "singleton";
 
 /**
  * 打开协议存储 DB。同一进程内只打开一次；后续 `openProtocolStorageDb()`
@@ -165,8 +162,10 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
       // V6 迁移（施工单 2026-06-29 001 硬切换）：新增 storageProviderConfig +
       // launchTokens 两 store。commands / origins / feePools / connectSessions
       // 不动——session-bound 方法 contract 未改；storage.* 是新方法、新物理层。
-      if (!db.objectStoreNames.contains(STORE_STORAGE_PROVIDER_CONFIG)) {
-        db.createObjectStore(STORE_STORAGE_PROVIDER_CONFIG);
+      if (oldVersion < 6) {
+        if (!db.objectStoreNames.contains("storageProviderConfig")) {
+          db.createObjectStore("storageProviderConfig");
+        }
       }
       if (!db.objectStoreNames.contains(STORE_LAUNCH_TOKENS)) {
         const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
@@ -203,6 +202,16 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
         const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
         tokenStore.createIndex("connectSessionId", "connectSessionId", { unique: false });
       }
+      // V9 迁移（施工单 2026-07-01 001 硬切换）：物理删除
+      // `storageProviderConfig` store。本次 storage.* / S3 provider 能力
+      // 硬切换真删除——旧本地配置随升级自动消失，**不**做导出、不做
+      // 迁移、不做远端清理。commands / origins / feePools /
+      // connectSessions / launchTokens 不动。
+      if (oldVersion < 9) {
+        if (db.objectStoreNames.contains("storageProviderConfig")) {
+          db.deleteObjectStore("storageProviderConfig");
+        }
+      }
     };
     req.onsuccess = () => {
       const db = req.result;
@@ -231,9 +240,6 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
   }
   function txConnectSessions(mode: IDBTransactionMode): IDBObjectStore {
     return db.transaction(STORE_CONNECT_SESSIONS, mode).objectStore(STORE_CONNECT_SESSIONS);
-  }
-  function txStorageProviderConfig(mode: IDBTransactionMode): IDBObjectStore {
-    return db.transaction(STORE_STORAGE_PROVIDER_CONFIG, mode).objectStore(STORE_STORAGE_PROVIDER_CONFIG);
   }
   function txLaunchTokens(mode: IDBTransactionMode): IDBObjectStore {
     return db.transaction(STORE_LAUNCH_TOKENS, mode).objectStore(STORE_LAUNCH_TOKENS);
@@ -533,53 +539,6 @@ function createImpl(db: IDBDatabase): ProtocolStorageDb {
       } catch (err) {
         console.error("[protocol.storageDb] listConnectSessionsByOrigin failed", {
           origin,
-          error: err instanceof Error ? err.message : String(err)
-        });
-        throw err instanceof Error ? err : new Error(String(err));
-      }
-    },
-
-    /* ============== storageProviderConfig（施工单 2026-06-29 001） ============== */
-    async getStorageProviderConfig(): Promise<StorageProviderConfig | null> {
-      try {
-        return await new Promise<StorageProviderConfig | null>((resolve, reject) => {
-          const req = txStorageProviderConfig("readonly").get(STORAGE_PROVIDER_CONFIG_KEY);
-          req.onsuccess = () => {
-            const v = req.result as StorageProviderConfig | undefined;
-            resolve(v ?? null);
-          };
-          req.onerror = () => reject(req.error ?? new Error("getStorageProviderConfig failed"));
-        });
-      } catch (err) {
-        console.error("[protocol.storageDb] getStorageProviderConfig failed", {
-          error: err instanceof Error ? err.message : String(err)
-        });
-        throw err instanceof Error ? err : new Error(String(err));
-      }
-    },
-    async putStorageProviderConfig(record: StorageProviderConfig): Promise<void> {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const req = txStorageProviderConfig("readwrite").put(record, STORAGE_PROVIDER_CONFIG_KEY);
-          req.onsuccess = () => resolve();
-          req.onerror = () => reject(req.error ?? new Error("putStorageProviderConfig failed"));
-        });
-      } catch (err) {
-        console.error("[protocol.storageDb] putStorageProviderConfig failed", {
-          error: err instanceof Error ? err.message : String(err)
-        });
-        throw err instanceof Error ? err : new Error(String(err));
-      }
-    },
-    async deleteStorageProviderConfig(): Promise<void> {
-      try {
-        await new Promise<void>((resolve, reject) => {
-          const req = txStorageProviderConfig("readwrite").delete(STORAGE_PROVIDER_CONFIG_KEY);
-          req.onsuccess = () => resolve();
-          req.onerror = () => reject(req.error ?? new Error("deleteStorageProviderConfig failed"));
-        });
-      } catch (err) {
-        console.error("[protocol.storageDb] deleteStorageProviderConfig failed", {
           error: err instanceof Error ? err.message : String(err)
         });
         throw err instanceof Error ? err : new Error(String(err));

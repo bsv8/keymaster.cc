@@ -169,7 +169,6 @@ function makeFakeStorageDb(): ProtocolStorageDb & { writes: number; readFailures
   const origins = new Map<string, ProtocolOriginSettingsRecord>();
   const pools = new Map<string, ProtocolFeePoolRecord>();
   const sessions = new Map<string, ConnectSessionRecord>();
-  let storageConfig: { provider: "s3-compatible"; endpoint: string; region: string; bucket: string; accessKeyId: string; secretAccessKey: string; forcePathStyle?: boolean; updatedAt: number } | null = null;
   const launchTokens = new Map<string, LaunchTokenRecord>();
   let writes = 0;
   let writeFailures = 0;
@@ -252,16 +251,6 @@ function makeFakeStorageDb(): ProtocolStorageDb & { writes: number; readFailures
         if (value.revokedAt !== null) continue;
         sessions.set(sessionId, { ...value, revokedAt: revokeAt });
       }
-    },
-    async getStorageProviderConfig() {
-      return storageConfig ? { ...storageConfig } : null;
-    },
-    async putStorageProviderConfig(record) {
-      writes++;
-      storageConfig = { ...record };
-    },
-    async deleteStorageProviderConfig() {
-      storageConfig = null;
     },
     async putLaunchToken(record) {
       launchTokens.set(record.token, { ...record });
@@ -346,9 +335,6 @@ function makeFakeStorageDbWithSession(
         await base.putConnectSession({ ...session, revokedAt: revokeAt });
       }
     },
-    async getStorageProviderConfig() { return base.getStorageProviderConfig(); },
-    async putStorageProviderConfig(record) { await base.putStorageProviderConfig(record); },
-    async deleteStorageProviderConfig() { await base.deleteStorageProviderConfig(); },
     async putLaunchToken(record) {
       if (base.putLaunchToken) await base.putLaunchToken(record);
     },
@@ -1195,9 +1181,7 @@ describe("ProtocolServiceImpl", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await stubDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
     service.startSession();
@@ -1332,9 +1316,7 @@ describe("ProtocolServiceImpl", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await stubDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
     service.startSession();
@@ -1863,9 +1845,7 @@ describe("ProtocolServiceImpl", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await failingDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingDb);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -2070,9 +2050,7 @@ describe("ProtocolServiceImpl", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await failingDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     const { service, opener } = makeService(TEST_PUB_HEX, failingDb);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -3358,9 +3336,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         throw new Error("db down");
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
   }
 
@@ -4916,9 +4892,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await slowDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     const { service, opener } = makeService(TEST_PUB_HEX, slowDb);
     service.startSession();
@@ -4992,9 +4966,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await stubDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
     service.startSession();
@@ -5095,9 +5067,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
         await stubDb.putConnectSession(record);
       },
-  async getStorageProviderConfig() { return null; },
-  async putStorageProviderConfig(record) { /* stub */ },
-  async deleteStorageProviderConfig() { /* stub */ }
+
     };
     try {
       const { service, opener, getResult, posted } = makeService(TEST_PUB_HEX, stubDb);

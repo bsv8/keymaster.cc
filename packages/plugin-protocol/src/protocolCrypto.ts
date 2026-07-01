@@ -150,9 +150,9 @@ export function bytesToHex(bytes: Uint8Array): string {
 /**
  * 从 32 字节 secp256k1 私钥推出压缩公钥 hex（33 字节）。
  *
- * 设计缘由（施工单 2026-06-29 003 硬切换）：`applyLauncherBootstrap`
- * 用此方法校验 launcher 交过来的 session signer 私钥 hex 真的对应
- * 声明的 `ownerPublicKeyHex`。
+ * 设计缘由（施工单 2026-06-30 002 硬切换）：`applyLauncherBootstrap`
+ * 用此方法校验 launcher 交过来的 owner runtime bootstrap 私钥 hex
+ * 真的对应声明的 `ownerPublicKeyHex`。
  */
 export function getCompressedPubHexFromPrivHex(privHex: string): string {
   const priv = hexToBytes(privHex);

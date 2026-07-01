@@ -266,10 +266,7 @@ function makeFakeService(): ProtocolService & {
     // 施工单 2026-06-29 002：plugin-apps launcher 入口；测试不直接调用。
     launchAppView: async () => {
       throw new Error("launchAppView not used in ProtocolPopupPage tests");
-    },
-    async getStorageProviderConfig() { return null; },
-    async setStorageProviderConfig() { return; },
-    async clearStorageProviderConfig() { return; }
+    }
   };
   return svc;
 }

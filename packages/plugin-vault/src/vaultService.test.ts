@@ -1976,9 +1976,9 @@ type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
  *   - `importUnlockRuntimeFromLauncher(handoff)`
  *   - `UnlockRuntimeHandoff` 类型
  *
- * appView Session Window 改为"只拥有 owner 私钥材料的 session signer runtime"，
- * 不再导入整套 vault unlock runtime。launcher 端借 owner 私钥仍然走
- * `vault.withPrivateKey(keyId, fn)`。
+ * appView Session Window 改为"只拥有 owner 私钥材料的 owner runtime
+ * bootstrap"，不再导入整套 vault unlock runtime。launcher 端借 owner
+ * 私钥仍然走 `vault.withPrivateKey(keyId, fn)`。
  *
  * 旧"unlock runtime 一次性交接"测试组整组删除——本 vault service 没有任何
  * 对外 API 再承接那些场景。

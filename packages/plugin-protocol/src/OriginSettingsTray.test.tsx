@@ -116,9 +116,6 @@ function makeMockService(): MockService {
     launchAppView: async () => {
       throw new Error("launchAppView not used in OriginSettingsTray tests");
     },
-    async getStorageProviderConfig() { return null; },
-    async setStorageProviderConfig() { return; },
-    async clearStorageProviderConfig() { return; }
   };
   return svc;
 }

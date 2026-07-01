@@ -131,57 +131,15 @@ export function parseSessionWindowOrigin(search: string): string | null {
   return parsed.origin;
 }
 
-/* ============== 路径 normalize（storage.* 共享） ============== */
-
 /**
- * 规范化 + 校验 storage 路径。
+ * 把 origin 编码成 base64url 形式（不含 padding）。仅用于
+ * Session Window 命名窗口 target（`keymaster-app-<encoded>`）；
+ * 不参与任何业务真值。
  *
- * 规则（施工单 2026-06-29 001 硬切换）：
- *   - 必须是非空字符串；
- *   - 不允许以 `/` 开头；
- *   - 不允许包含 `..` 段；
- *   - 不允许包含 `\`（会被规范化为 `/`）或 `\0`；
- *   - 统一使用 `/` 作为分隔符；连续 `/` 折叠为单个；
- *   - 单段长度不超过 1024 字符；
- *   - 越界直接 throw（由 caller 决定映射到 `invalid_request`）。
- *
- * 设计缘由：路径规则集中在 storage.* 入口校验；不在 S3 层校验，避免
- * 不同 adapter 各自实现一份。
- */
-export function normalizeStoragePath(path: string): string {
-  if (typeof path !== "string" || path.length === 0) {
-    throw new Error("Invalid storage path: empty");
-  }
-  if (path.startsWith("/")) {
-    throw new Error("Invalid storage path: must not start with /");
-  }
-  if (path.includes("\0")) {
-    throw new Error("Invalid storage path: contains NUL");
-  }
-  // 用 `/` 分隔，折叠连续分隔符。
-  const raw = path.replace(/\\/g, "/").split("/").filter((seg) => seg.length > 0);
-  if (raw.length === 0) {
-    throw new Error("Invalid storage path: empty after normalize");
-  }
-  for (const seg of raw) {
-    if (seg === "..") {
-      throw new Error("Invalid storage path: contains ..");
-    }
-    if (seg.length > 1024) {
-      throw new Error("Invalid storage path: segment too long");
-    }
-  }
-  return raw.join("/");
-}
-
-/**
- * 把 origin 编码成 base64url 形式（不含 padding），用作物理对象 key
- * 第一段。
- *
- * 设计缘由（施工单 2026-06-29 001 硬切换）：
- *   - origin 可能含 `:` `/` 等 S3 不友好字符；走 base64url 后只含
- *     `[A-Za-z0-9_-]`，所有 S3 实现都接受。
- *   - 不含 padding；保持 key 紧凑。
+ * 设计缘由（施工单 2026-06-30 003）：
+ *   - origin 可能含 `:` `/` 等字符不利于拼到 window.name 里；走 base64url
+ *     后只含 `[A-Za-z0-9_-]`，跨浏览器一致。
+ *   - 不含 padding；保持 target 紧凑。
  */
 export function encodeOrigin(origin: string): string {
   const bytes = new TextEncoder().encode(origin);
