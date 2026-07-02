@@ -14,4 +14,8 @@
 //     `manifest.appMessageEndpoint` 决定是否给该插件注入 scoped client。
 
 export { appmsgPlatformPlugin } from "./manifest.js";
+export { AppMsgPluginClientImpl } from "./pluginClient.js";
+export { AppMsgCoreImpl } from "./appmsgCore.js";
+export { HubMsgConnectionImpl } from "./hubmsgConnection.js";
+export { signCompactSecp256k1 } from "./signing.js";
 export type { AppMsgCore, AppMsgPluginClient } from "@keymaster/contracts";

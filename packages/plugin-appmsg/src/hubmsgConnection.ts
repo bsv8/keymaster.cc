@@ -29,11 +29,23 @@ export interface HubMsgConnectionConfig {
 export interface HubMsgBindSigner {
   publicKeyHex: string;
   /**
-   * 签 (sessionId || nonce || publicKeyHex || issuedAtMs) 的 secp256k1
-   * compact 64-byte sig。返回 hex 字符串。
-   * 实现：本插件调用 vault.withPrivateKey 借 owner 私钥 hex 后派生签名。
+   * 用 owner 私钥对 (sessionId, nonce, publicKeyHex, issuedAtMs) 这四元组
+   * 做 secp256k1 compact 64-byte 签名，返回 hex 字符串。
+   *
+   * 设计缘由：原文拼接规则是"两仓共用常数"，由
+   * `packages/contracts/src/appmsgBind.ts::canonicalBindText` 给出；
+   * 这里**不**让 caller 拼好 message 再传入——避免两仓拼接不一致。
+   *
+   * 实现：本插件调用 vault.withPrivateKey 借 owner 私钥 hex 后，
+   * 走 `signCompactSecp256k1(privHex, sessionId, nonce, publicKeyHex,
+   * issuedAtMs)` 派生签名。
    */
-  sign(message: string): Promise<string>;
+  sign(args: {
+    sessionId: string;
+    nonce: string;
+    publicKeyHex: string;
+    issuedAtMs: number;
+  }): Promise<string>;
 }
 
 /** 消息帧：从 HubMsg 服务端返回的 message 主表行（与 HubMsg `Message` 对齐）。 */
@@ -179,9 +191,15 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     await serverOpen;
 
     // 2) client_bind
+    // 原文拼接由 signer 内部走 `canonicalBindText`（两仓共用）；这里
+    // 只把四元组透传给 signer，避免两仓拼接规则漂移。
     const issuedAtMs = Date.now();
-    const message = `${this.sessionId}|${this.nonce}|${signer.publicKeyHex}|${issuedAtMs}`;
-    const sigHex = await signer.sign(message);
+    const sigHex = await signer.sign({
+      sessionId: this.sessionId ?? "",
+      nonce: this.nonce ?? "",
+      publicKeyHex: signer.publicKeyHex,
+      issuedAtMs
+    });
     const bindFrame = {
       v: 1,
       type: "client_bind",

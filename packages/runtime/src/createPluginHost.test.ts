@@ -260,3 +260,100 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.configStore.read().a).toBe(false);
   });
 });
+
+/* ============== 2026-07-01/003 appMessageEndpoint 注入测试 ============== */
+
+import { APPMESSAGE_CORE_CAPABILITY, type AppMsgPluginClient } from "@keymaster/contracts";
+
+describe("createPluginHost - manifest.appMessageEndpoint", () => {
+  function makeAppmsgCoreProvider(id: string): PluginManifest {
+    // 提供 appmsg.core 平台单例的 mock plugin。
+    return {
+      id,
+      name: "AppmsgProvider",
+      description: "provides appmsg.core (mock)",
+      meta: { kind: "platform", defaultEnabled: true, canDisable: false },
+      setup(ctx: PluginContext) {
+        // 提供一个空的 mock core；host 不会真调用它（scoped 注入只
+        // 验证 capability 是否挂上 + 类型是否符合 AppMsgPluginClient）。
+        const core = {
+          connectForOwner: async () => undefined,
+          disconnect: async () => undefined,
+          list: async () => ({ items: [], hasMore: false }),
+          get: async () => null,
+          send: async () => ({ messageId: "0", createdAtMs: 0 }),
+          subscribeInboxDirty: () => () => undefined,
+          subscribeMessageReceived: () => () => undefined
+        };
+        ctx.provide(APPMESSAGE_CORE_CAPABILITY, core);
+      }
+    };
+  }
+
+  function makeEndpointPlugin(id: string, endpointId: string): PluginManifest {
+    return {
+      id,
+      name: `EndpointPlugin ${id}`,
+      description: "declares appMessageEndpoint",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId },
+      dependencies: [{ capability: APPMESSAGE_CORE_CAPABILITY }],
+      setup() {
+        // 不主动 get scoped client（避免破坏"host 在 setup 后才注入"的契约）。
+      }
+    };
+  }
+
+  it("rejects endpointId with invalid shape", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(makeAppmsgCoreProvider("appmsg-core"));
+    const plugin: PluginManifest = {
+      id: "bad-shape",
+      name: "Bad",
+      description: "bad shape",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId: "Keymaster.Message" } // 大写、不符合 shape
+    };
+    await host.register(plugin);
+    // register 不重新抛错，但 state 应为 blocked / error-disabled
+    expect(["blocked", "error-disabled"]).toContain(host.state("bad-shape").kind);
+    expect(String(host.state("bad-shape").error ?? "")).toMatch(
+      /appMessageEndpoint/
+    );
+    expect(String(host.state("bad-shape").error ?? "")).toMatch(
+      /pluginEndpointId|shape/
+    );
+  });
+
+  it("injects scoped client into <pluginId>.appmsg.client on enable", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(makeAppmsgCoreProvider("appmsg-core"));
+    await host.register(makeEndpointPlugin("p1", "keymaster.message"));
+
+    const capKey = "p1.appmsg.client";
+    const client = host.capabilities.get<AppMsgPluginClient>(capKey);
+    expect(client).toBeTruthy();
+    expect(client.endpointId).toBe("keymaster.message");
+  });
+
+  it("does NOT inject scoped client if appmsg.core missing", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    // 不注册 appmsg.core provider
+    await host.register(makeEndpointPlugin("p1", "keymaster.orphan"));
+    expect(host.capabilities.has("p1.appmsg.client")).toBe(false);
+  });
+
+  it("releases endpointId on disable; another plugin can re-register it", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(makeAppmsgCoreProvider("appmsg-core"));
+    await host.register(makeEndpointPlugin("p1", "keymaster.message"));
+    expect(host.capabilities.has("p1.appmsg.client")).toBe(true);
+
+    await host.disable("p1");
+    expect(host.capabilities.has("p1.appmsg.client")).toBe(false);
+
+    // 复用同一 endpointId 注册新插件：应该通过
+    await host.register(makeEndpointPlugin("p2", "keymaster.message"));
+    expect(host.capabilities.has("p2.appmsg.client")).toBe(true);
+  });
+});

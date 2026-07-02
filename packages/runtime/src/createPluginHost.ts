@@ -13,6 +13,8 @@
 //   - 当前 route 属于被 disable 的 plugin 时，host 会先调用 navigateTo 跳走。
 
 import type {
+  AppMsgCore,
+  AppMsgPluginClient,
   HostListener,
   I18nPluginResources,
   I18nService,
@@ -29,11 +31,14 @@ import type {
   WocService
 } from "@keymaster/contracts";
 import {
+  APPMESSAGE_CORE_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
-  RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT
+  RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT,
+  isValidPluginEndpointIdShape
 } from "@keymaster/contracts";
+import { AppMsgPluginClientImpl } from "@keymaster/plugin-appmsg";
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
 import { createMessageBus } from "./messageBus.js";
 import { createAssetRegistry, type AssetRegistry } from "./registries/assetRegistry.js";
@@ -58,6 +63,16 @@ import { emptyOwnership, type PluginOwnership } from "./pluginOwnership.js";
 
 const RUNTIME_MESSAGE_BUS = RUNTIME_MESSAGE_BUS_CONTRACT;
 const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
+
+/**
+ * scoped `appmsg.client` capability 后缀（施工单 2026-07-01/003）。
+ *
+ * 注入规则：声明了 `manifest.appMessageEndpoint.endpointId` 的插件
+ * 在 enable 完成后，host 把 scoped client 挂到
+ * `<pluginId>.appmsg.client`。插件 `ctx.get("<pluginId>.appmsg.client")`
+ * 拿到 sender 已绑定的 client；**不**暴露全局工厂 capability。
+ */
+const APPMESSAGE_CLIENT_CAPABILITY_SUFFIX = ".appmsg.client";
 
 /** 硬切换 002：runtime 系统日志统一使用的 pluginId。
  * 设计缘由：plugin-host 自身记日志时不伪装成业务插件；统一用 "runtime"
@@ -300,6 +315,14 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const knownManifests = new Map<string, PluginManifest>();
   const records = new Map<string, PluginRecord>();
   const enabledSet = new Set<string>();
+  /**
+   * 已声明的 pluginEndpointId 集合（施工单 2026-07-01/003）。
+   *
+   * enable 阶段填：endpointId 形状合法 + 全局唯一才允许写入。
+   * disable 阶段同步删除，避免"插件 disable 后还能 inject 一个
+   * 同 id 的 plugin"导致的孤儿 endpoint 占用。
+   */
+  const appMessageEndpointIds = new Set<string>();
   let versionCounter = 0;
   const listeners = new Set<HostListener>();
   const safePath = options.safePath ?? "/settings/plugins";
@@ -613,6 +636,26 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           );
         }
       }
+      // 施工单 2026-07-01/003 对齐：manifest.appMessageEndpoint 校验
+      //   1) endpointId 形状合法（`isValidPluginEndpointIdShape`）；
+      //   2) endpointId 全局唯一（同 Keymaster 安装内不允许冲突）；
+      //   校验失败一律 fail-closed：不缓存半残 endpoint 记录、不让 setup 继续。
+      const appMsgEp = record.manifest.appMessageEndpoint;
+      if (appMsgEp) {
+        if (!isValidPluginEndpointIdShape(appMsgEp.endpointId)) {
+          record.state = "blocked";
+          throw new Error(
+            `Plugin "${pluginId}": appMessageEndpoint.endpointId "${appMsgEp.endpointId}" is not a valid pluginEndpointId shape`
+          );
+        }
+        if (appMessageEndpointIds.has(appMsgEp.endpointId)) {
+          record.state = "blocked";
+          throw new Error(
+            `Plugin "${pluginId}": appMessageEndpoint.endpointId "${appMsgEp.endpointId}" already registered by another plugin`
+          );
+        }
+        appMessageEndpointIds.add(appMsgEp.endpointId);
+      }
       // 注册 i18n 资源（幂等；i18n service 内部按 pluginId 跟踪）
       if (record.manifest.i18n) {
         i18n.registerResources(record.manifest.id, record.manifest.i18n);
@@ -635,6 +678,23 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
             }
           }
         }
+        // 施工单 2026-07-01/003 对齐：setup 完成后，host 给声明了
+        // `appMessageEndpoint` 的插件注入 scoped client 到
+        // `<pluginId>.appmsg.client` capability。插件作者最终体验是
+        // "声明 endpoint → 拿到 scoped client"，**不**走全局工厂。
+        if (appMsgEp && capabilities.has(APPMESSAGE_CORE_CAPABILITY)) {
+          const core = capabilities.get<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
+          const scopedClient = new AppMsgPluginClientImpl(core, appMsgEp.endpointId);
+          const scopedKey = `${pluginId}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX}`;
+          capabilities.provide(scopedKey, scopedClient);
+          // 关键：把 scoped client 加到 ownership.capabilities，让
+          // disable 时的 purgeOwnership 把它一起 revoke 掉。
+          //（snapshotOwnership 在 runSetup 内已经结束，这里直接补
+          // 到 record.ownership。）
+          if (!record.ownership.capabilities.includes(scopedKey)) {
+            record.ownership.capabilities.push(scopedKey);
+          }
+        }
         record.state = "enabled";
         record.error = undefined;
         configStore.setEnabled(pluginId, true);
@@ -655,6 +715,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         purgeOwnership(ownership);
         i18n.unregisterResources(record.manifest.id);
         record.ownership = emptyOwnership();
+        // 同步回滚已注册的 endpointId 占用。
+        if (appMsgEp) {
+          appMessageEndpointIds.delete(appMsgEp.endpointId);
+        }
         record.state = "error-disabled";
         record.error = err instanceof Error ? err.message : String(err);
         configStore.setEnabled(pluginId, false);
@@ -692,6 +756,11 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       const teardownErr = await runTeardown(record.ownership);
       purgeOwnership(record.ownership);
       i18n.unregisterResources(record.manifest.id);
+      // 同步释放 pluginEndpointId 占用（施工单 2026-07-01/003）：
+      // 失败回滚路径也走同一段。
+      if (record.manifest.appMessageEndpoint) {
+        appMessageEndpointIds.delete(record.manifest.appMessageEndpoint.endpointId);
+      }
       enabledSet.delete(pluginId);
       if (teardownErr) {
         record.state = "error-disabled";

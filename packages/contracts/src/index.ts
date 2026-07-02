@@ -31,3 +31,4 @@ export * from "./poker.js";
 export * from "./log.js";
 export * from "./protocol.js";
 export * from "./appmsg.js";
+export * from "./appmsgBind.js";

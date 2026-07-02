@@ -46,9 +46,9 @@ export class AppMsgPluginClientImpl implements AppMsgPluginClient {
     limit?: number;
   }): Promise<AppMsgListResult> {
     return this.core.list({
-      // sender.ownerPublicKeyHex 由 core 用当前 bind owner 覆盖；
+      // scope.ownerPublicKeyHex 由 core 用当前 bind owner 覆盖；
       // 这里只固定 endpoint 部分，owner 由 core 决定（平台单例）。
-      sender: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
+      scope: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
       params: {
         box: input.box,
         afterMessageId: input.afterMessageId,
@@ -60,7 +60,7 @@ export class AppMsgPluginClientImpl implements AppMsgPluginClient {
 
   async get(messageId: string): Promise<AppMsgMessage | null> {
     return this.core.get({
-      sender: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
+      scope: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
       messageId
     });
   }

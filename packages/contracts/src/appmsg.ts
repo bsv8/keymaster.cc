@@ -167,15 +167,19 @@ export const APPMESSAGE_CLIENT_CAPABILITY = "appmsg.client";
 /**
  * 平台 `appmsg.core` 内部接口。
  *
- * 关键约束（施工单 2026-07-01 002）：
+ * 关键约束（施工单 2026-07-01/002 共同冻结 + 003 对齐）：
  *   - 由 `packages/plugin-appmsg` 内部实现，是 HubMsg WSS 连接 + 本地
  *     缓存 + 推送分发的唯一真值；
  *   - `protocolService` 是**外部 app** 的协议适配层，仅消费此接口，
  *     **不**直接持有 HubMsg 连接；
+ *   - 连接 owner-bound，endpoint 随业务请求自带（`list / get` 用
+ *     `scope: AppMsgAddress`；`send` 用 `sender: AppMsgAddress`）；
+ *   - 服务端按 `scope` 做 ACL：仅当 `(scope.owner, scope.endpoint)`
+ *     匹配 sender 或 recipient 之一时返回；其它 endpoint 看不到；
  *   - `connectForOwner(ownerPublicKeyHex)` / `disconnect()` 由 plugin-appmsg
- *     在 owner 切换 / vault 锁状态变化时驱动（不需要外部调用方手动维护）；
- *   - 接口本身不区分 origin / plugin 端点：调用方传完整 `sender` 地址；
- *     校验由实现层负责（sender.endpoint.kind 必须合法）。
+ *     在 owner 切换 / vault 锁状态变化时驱动（不需要外部调用方手动维护）。
+ *   - `messageId` 全链路 string：DB int64，wire string；调用方**不**应
+ *     期待 number 类型。
  */
 export interface AppMsgCore {
   /** connect 当前 owner。幂等。 */
@@ -184,19 +188,22 @@ export interface AppMsgCore {
   /** 关闭连接；幂等。 */
   disconnect(): Promise<void>;
 
-  /** 列 inbox / sent。调用方必须传完整 `sender` 地址；`box` 决定方向。 */
+  /**
+   * 列 inbox / sent。`scope` 是"当前调用方的地址身份"，服务端用它
+   * 做 ACL：仅返回 sender 或 recipient 侧匹配 `scope` 的 message。
+   */
   list(input: {
-    sender: AppMsgAddress;
+    scope: AppMsgAddress;
     params: AppMsgListInternalParams;
   }): Promise<AppMsgListResult>;
 
-  /** 单条取消息。 */
+  /** 单条取消息。`scope` 同 list 的语义。 */
   get(input: {
-    sender: AppMsgAddress;
+    scope: AppMsgAddress;
     messageId: string;
   }): Promise<AppMsgMessage | null>;
 
-  /** 发消息；服务端落库后回 `messageId`。 */
+  /** 发消息；服务端落库后回 `messageId`。sender 由调用方提供完整地址。 */
   send(input: {
     sender: AppMsgAddress;
     recipientOwnerPublicKeyHex: string;
@@ -258,25 +265,16 @@ export interface AppMsgPluginClient {
 }
 
 /**
- * scoped client 工厂：plugin host 暴露给 plugin ctx，plugin 用 endpointId
- * 换取 sender 已绑定的 client。
+ * scoped client 注入由 `packages/runtime/src/createPluginHost.ts` 在
+ * enable 阶段直接完成：声明了 `appMessageEndpoint.endpointId` 的插件
+ * 在 enable 成功后，host 把 sender 已绑定的 `AppMsgPluginClient` 注入到
+ * `<pluginId>.appmsg.client`。插件作者最终体验是"声明 endpoint →
+ * 拿到 scoped client"，**不**再走"全局工厂 + 手动 forEndpoint()"的
+ * 中间形态。
  *
- * 设计缘由：单一 capability 不易携带"plugin 专属 endpoint"参数；
- * 这里把 capability 暴露为工厂形态——插件 `ctx.get<...>` 拿到 factory；
- * 再调 `forEndpoint(endpointId)` 取 scoped client。endpointId 必须在
- * 插件 manifest 的 `appMessageEndpoint.endpointId` 中声明；否则抛错
- * （fail-closed）。runtime 层在 plugin enable 阶段已校验 endpointId
- * 全局唯一。
+ * 工厂类型已在施工单 2026-07-01/003 落地后从 contracts 删去
+ * （避免插件作者把它当全局 capability 误用）。
  */
-export interface AppMsgPluginClientFactory {
-  /**
-   * 取一个 sender endpoint 已绑定的 scoped `appmsg.client`。
-   *
-   * @param endpointId 插件 manifest `appMessageEndpoint.endpointId`。
-   * @throws endpointId 非法 / 缺失时 fail-closed 抛错。
-   */
-  forEndpoint(endpointId: string): AppMsgPluginClient;
-}
 
 /**
  * 在用户视角判断 pluginEndpointId 字段命名的有效性。

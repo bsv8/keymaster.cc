@@ -8,6 +8,7 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
-    "@keymaster/contracts": "*"
+    "@keymaster/contracts": "*",
+    "@keymaster/plugin-appmsg": "*"
   }
 }

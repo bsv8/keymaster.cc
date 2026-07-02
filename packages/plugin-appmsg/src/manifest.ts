@@ -75,7 +75,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
     kind: "platform",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [APPMESSAGE_CORE_CAPABILITY, APPMESSAGE_CLIENT_CAPABILITY],
+    providesCapabilities: [APPMESSAGE_CORE_CAPABILITY],
     displayGroup: "platform"
   },
   i18n: appmsgResources,
@@ -104,8 +104,19 @@ export const appmsgPlatformPlugin: PluginManifest = {
         const pubHex: string = key.publicKeyHex;
         return await vault.withPrivateKey(key.keyId, async (material) => ({
           publicKeyHex: pubHex,
-          sign: async (message: string): Promise<string> =>
-            signCompactSecp256k1(material.hex, message)
+          sign: async (args: {
+            sessionId: string;
+            nonce: string;
+            publicKeyHex: string;
+            issuedAtMs: number;
+          }): Promise<string> =>
+            signCompactSecp256k1(
+              material.hex,
+              args.sessionId,
+              args.nonce,
+              args.publicKeyHex,
+              args.issuedAtMs
+            )
         }));
       } catch (err) {
         ctx.logger.error({
@@ -150,24 +161,16 @@ export const appmsgPlatformPlugin: PluginManifest = {
     ctx.provide<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY, core);
 
     /**
-     * scoped `appmsg.client` 工厂。
+     * scoped `appmsg.client` 注入由 runtime host 在 enable 阶段完成
+     * （施工单 2026-07-01/003）：host 按 `<pluginId>.appmsg.client`
+     * 形 key 注入 sender 已绑定的 client；**不**在 plugin-appmsg
+     * 平台单例里再暴露一个"全局工厂 capability + 手动 forEndpoint()"
+     * 路径——这条 UX 不再是插件作者最终体验。
      *
-     * 设计缘由：单一 capability 不易携带"plugin 专属 endpoint"参数；
-     * 这里把 capability 暴露为一个工厂形态——插件拿到的对象提供
-     * `forEndpoint(endpointId)` 方法；endpointId 必须在插件 manifest 的
-     * `appMessageEndpoint.endpointId` 中声明，否则抛错（fail-closed）。
-     *
-     * 关键约束：
-     *   - 插件**不**允许自报 endpoint；scoped 入口的 endpoint 由 runtime
-     *     在注入时校验；
-     *   - sender endpoint **不**进入插件入参：插件调 list / send / get
-     *     时不传 sender，scoped 内部统一填 sender = { kind: "plugin",
-     *     id: <endpointId> }。
+     * plugin-appmsg 这里**只**挂 `APPMESSAGE_CORE_CAPABILITY`（平台单例）；
+     * scoped client 由 host（`packages/runtime/src/createPluginHost.ts`）
+     * 在 enable 完成后自动 provide。
      */
-    ctx.provide<AppMsgPluginClientFactory>(
-      APPMESSAGE_CLIENT_CAPABILITY,
-      makePluginScopedClientFactory(core, ctx)
-    );
 
     /**
      * 订阅 owner / vault 变化驱动 reconnect。
@@ -225,40 +228,8 @@ export const appmsgPlatformPlugin: PluginManifest = {
  * scoped `appmsg.client` 工厂类型。
  *
  * runtime 在 setup 阶段对声明了 `appMessageEndpoint.endpointId` 的插件
- * 注入：插件 `ctx.get<AppMsgPluginClientFactory>(APPMESSAGE_CLIENT_CAPABILITY)`
- * 时拿到本工厂；再调 `forEndpoint(endpointId)` 取 scoped client。
+ * 注入：scoped client 由 host 直接挂到 `<pluginId>.appmsg.client`，
+ * 插件作者**不**需要 `forEndpoint()`。
  */
-export interface AppMsgPluginClientFactory {
-  /**
-   * 取一个 sender endpoint 已绑定的 scoped `appmsg.client`。
-   *
-   * @param endpointId 插件 manifest `appMessageEndpoint.endpointId`。
-   * @throws endpointId 非法 / 缺失时 fail-closed 抛错。
-   */
-  forEndpoint(endpointId: string): AppMsgPluginClient;
-}
-
-function makePluginScopedClientFactory(
-  core: AppMsgCore,
-  ctx: PluginContextLike
-): AppMsgPluginClientFactory {
-  return {
-    forEndpoint(endpointId: string): AppMsgPluginClient {
-      if (typeof endpointId !== "string" || endpointId.length === 0) {
-        throw new Error("appmsg.client: endpointId is required");
-      }
-      // runtime 层在 plugin enable 阶段已校验 endpointId 全局唯一 + 合法形状；
-      // 这里只做兜底：endpointId 非空。
-      ctx.logger.info({
-        scope: "appmsg.client",
-        event: "client.created",
-        message: "",
-        data: { endpointId }
-      });
-      return new AppMsgPluginClientImpl(core, endpointId);
-    }
-  };
-}
-
 // 仅用于内部引用；contracts 已经导出同名接口，这里 re-export 便于上层统一 import。
 export type { AppMsgEndpoint, AppMsgInboxDirtyEvent, AppMsgListBox, AppMsgListResult, AppMsgMessage, AppMsgSendResult };

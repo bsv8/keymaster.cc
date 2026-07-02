@@ -16,7 +16,7 @@ import type {
   AppMsgEndpoint,
   AppMsgInboxDirtyEvent,
   AppMsgListBox,
-  AppMsgListParams,
+  AppMsgListInternalParams,
   AppMsgListResult,
   AppMsgMessage,
   AppMsgMessageReceivedEvent,
@@ -190,36 +190,42 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   /* ============== 对外 AppMsgCore 接口实现 ============== */
 
+  /**
+   * 列 inbox / sent。`scope` 是"当前调用方的地址身份"，服务端按
+   * `(scope.owner, scope.endpoint)` 做 ACL：仅返回 sender 或 recipient
+   * 侧匹配 scope 的 message。
+   *
+   * 设计缘由（施工单 2026-07-01/003）：
+   *   - 之前命名 `sender` 引起歧义；`scope` 明确表达"这是读取 ACL
+   *     的地址身份，不是发送者"。
+   *   - `scope.endpoint` kind 不限：plugin endpoint 与 origin endpoint
+   *     都可作为 list scope；服务端按 ACL 拦截跨 endpoint 越权读取。
+   */
   async list(input: {
-    sender: AppMsgAddress;
-    params: Omit<AppMsgListParams, "connectSessionId">;
+    scope: AppMsgAddress;
+    params: AppMsgListInternalParams;
   }): Promise<AppMsgListResult> {
     if (!this.connection || this.connection.state() !== "bound") {
       throw new Error("appmsg.core: not connected");
     }
-    // sender.endpoint.kind 必须合法（origin 或 plugin）
-    if (input.sender.endpoint.kind !== "origin" && input.sender.endpoint.kind !== "plugin") {
-      throw new Error("appmsg.core: invalid sender endpoint kind");
+    if (input.scope.endpoint.kind !== "origin" && input.scope.endpoint.kind !== "plugin") {
+      throw new Error("appmsg.core: invalid scope endpoint kind");
     }
-    // ownerPublicKeyHex 必须非空（plugin client 传空时用当前 bind owner 覆盖）
     const effectiveOwner =
-      input.sender.ownerPublicKeyHex && input.sender.ownerPublicKeyHex.length > 0
-        ? input.sender.ownerPublicKeyHex
+      input.scope.ownerPublicKeyHex && input.scope.ownerPublicKeyHex.length > 0
+        ? input.scope.ownerPublicKeyHex
         : this.currentBoundOwner ?? "";
     if (!effectiveOwner) {
       throw new Error("appmsg.core: no bound owner for current call");
     }
-    const effectiveSender: AppMsgAddress = {
-      ownerPublicKeyHex: effectiveOwner,
-      endpoint: input.sender.endpoint
-    };
+    // HubMsg wire: MessageListParams.scopeEndpoint
     const params = {
       box: input.params.box,
       afterMessageId: input.params.afterMessageId ?? "",
       beforeMessageId: input.params.beforeMessageId ?? "",
       limit: input.params.limit ?? 50,
-      senderOwnerPublicKeyHex: effectiveSender.ownerPublicKeyHex,
-      senderEndpoint: effectiveSender.endpoint
+      scopeOwnerPublicKeyHex: effectiveOwner,
+      scopeEndpoint: input.scope.endpoint
     };
     const res = await this.connection.request<typeof params, { items: HubMsgMessageRecord[]; hasMore: boolean }>(
       "message.list",
@@ -231,24 +237,29 @@ export class AppMsgCoreImpl implements AppMsgCore {
     return { items, hasMore: Boolean(res.hasMore) };
   }
 
-  async get(input: { sender: AppMsgAddress; messageId: string }): Promise<AppMsgMessage | null> {
+  async get(input: { scope: AppMsgAddress; messageId: string }): Promise<AppMsgMessage | null> {
     if (!this.connection || this.connection.state() !== "bound") {
       throw new Error("appmsg.core: not connected");
     }
-    if (input.sender.endpoint.kind !== "origin" && input.sender.endpoint.kind !== "plugin") {
-      throw new Error("appmsg.core: invalid sender endpoint kind");
+    if (input.scope.endpoint.kind !== "origin" && input.scope.endpoint.kind !== "plugin") {
+      throw new Error("appmsg.core: invalid scope endpoint kind");
     }
     const effectiveOwner =
-      input.sender.ownerPublicKeyHex && input.sender.ownerPublicKeyHex.length > 0
-        ? input.sender.ownerPublicKeyHex
+      input.scope.ownerPublicKeyHex && input.scope.ownerPublicKeyHex.length > 0
+        ? input.scope.ownerPublicKeyHex
         : this.currentBoundOwner ?? "";
     if (!effectiveOwner) {
       throw new Error("appmsg.core: no bound owner for current call");
     }
-    const res = await this.connection.request<{ messageId: string }, { message: HubMsgMessageRecord | null }>(
-      "message.get",
-      { messageId: input.messageId }
-    );
+    // HubMsg wire: MessageGetParams.scopeEndpoint
+    const res = await this.connection.request<
+      { messageId: string; scopeOwnerPublicKeyHex: string; scopeEndpoint: AppMsgEndpoint },
+      { message: HubMsgMessageRecord | null }
+    >("message.get", {
+      messageId: input.messageId,
+      scopeOwnerPublicKeyHex: effectiveOwner,
+      scopeEndpoint: input.scope.endpoint
+    });
     if (!res.message) return null;
     const m = toAppMsgMessage(res.message);
     this.putCache(m);
@@ -278,9 +289,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       throw new Error("appmsg.core: no bound owner for current call");
     }
     void effectiveOwner; // server derives sender from bind; explicit reference kept for clarity.
+    // HubMsg wire: MessageSendParams.senderEndpoint
     const res = await this.connection.request<
       {
         clientMessageId: string;
+        senderOwnerPublicKeyHex: string;
+        senderEndpoint: AppMsgEndpoint;
         recipientOwnerPublicKeyHex: string;
         recipientEndpoint: AppMsgEndpoint;
         contentType: AppMsgContentType;
@@ -290,6 +304,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
       { messageId: string; createdAtMs: number }
     >("message.send", {
       clientMessageId: input.clientMessageId,
+      senderOwnerPublicKeyHex: effectiveOwner,
+      senderEndpoint: input.sender.endpoint,
       recipientOwnerPublicKeyHex: input.recipientOwnerPublicKeyHex,
       recipientEndpoint: input.recipientEndpoint,
       contentType: input.contentType,

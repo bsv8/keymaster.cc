@@ -4235,12 +4235,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 把当前 session 投影成 origin sender。
+   * 把当前 session 投影成 origin sender / scope。
    *
    * 关键约束：
-   *   - senderOwnerPublicKeyHex 取自 session 真值，不读 caller params；
-   *   - senderEndpoint.id 取 `event.origin`（exact origin，包含 port）；
+   *   - ownerPublicKeyHex 取自 session 真值，不读 caller params；
+   *   - endpoint.id 取 `event.origin`（exact origin，包含 port）；
    *   - session 校验失败一律 fail-fast，与 cipher.* / connect.* 同语义。
+   *   - 同一个 `(session.owner, event.origin)` 既作 `sender`（send）
+   *     又作 `scope`（list / get）：因为外部 app 只看自己这个 origin
+   *     endpoint 的 inbox/sent；不会越权读到其它 origin。
    */
   private async projectAppMsgSender(rec: RequestRecord): Promise<{
     ownerPublicKeyHex: string;
@@ -4328,10 +4331,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (params.box !== "inbox" && params.box !== "sent" && params.box !== "all") {
       throw protocolError("invalid_request", "appmsg.list: invalid box");
     }
-    const sender = await this.projectAppMsgSender(rec);
+    // 关键（施工单 2026-07-01/003 对齐）：`scope` = 当前 session +
+    // 当前 event.origin（exact origin）。外部 app 只能看自己这个 origin
+    // endpoint 的 inbox / sent。
+    const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
     const res = await core.list({
-      sender: { ownerPublicKeyHex: sender.ownerPublicKeyHex, endpoint: sender.endpoint },
+      scope: { ownerPublicKeyHex: projected.ownerPublicKeyHex, endpoint: projected.endpoint },
       params: {
         box: params.box,
         afterMessageId: params.afterMessageId,
@@ -4339,7 +4345,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         limit: params.limit
       }
     });
-    void this.touchConnectSessionByOwner(sender.ownerPublicKeyHex);
+    void this.touchConnectSessionByOwner(projected.ownerPublicKeyHex);
     return res;
   }
 
@@ -4352,16 +4358,16 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (typeof params.messageId !== "string" || params.messageId.length === 0) {
       throw protocolError("invalid_request", "appmsg.get: messageId required");
     }
-    const sender = await this.projectAppMsgSender(rec);
+    const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
     const msg = await core.get({
-      sender: { ownerPublicKeyHex: sender.ownerPublicKeyHex, endpoint: sender.endpoint },
+      scope: { ownerPublicKeyHex: projected.ownerPublicKeyHex, endpoint: projected.endpoint },
       messageId: params.messageId
     });
     if (!msg) {
       throw localFailure("internal_error", "appmsg.get: message not found");
     }
-    void this.touchConnectSessionByOwner(sender.ownerPublicKeyHex);
+    void this.touchConnectSessionByOwner(projected.ownerPublicKeyHex);
     return { message: msg };
   }
 
