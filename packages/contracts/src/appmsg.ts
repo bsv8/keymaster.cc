@@ -180,6 +180,10 @@ export const APPMESSAGE_CLIENT_CAPABILITY = "appmsg.client";
  *     在 owner 切换 / vault 锁状态变化时驱动（不需要外部调用方手动维护）。
  *   - `messageId` 全链路 string：DB int64，wire string；调用方**不**应
  *     期待 number 类型。
+ *   - `createPluginScopedClient(endpointId)` 由 runtime host 在 enable
+ *     阶段调用；返回 sender endpoint 已绑定的 `AppMsgPluginClient`。
+ *     runtime **不**直接 import `plugin-appmsg`——避免循环依赖；
+ *     工厂形态收口在 `AppMsgCore` 接口里。
  */
 export interface AppMsgCore {
   /** connect 当前 owner。幂等。 */
@@ -223,6 +227,21 @@ export interface AppMsgCore {
   subscribeMessageReceived(
     handler: (event: AppMsgMessageReceivedEvent) => void
   ): () => void;
+
+  /**
+   * runtime host 在 enable 阶段调用：产出一个 sender endpoint
+   * 已绑定到 `endpointId` 的 scoped `appmsg.client`。
+   *
+   * 设计缘由（施工单 2026-07-01/003）：
+   *   - runtime **不**直接 import plugin-appmsg（避免循环依赖）；
+   *     通过 contracts 的 `AppMsgCore.createPluginScopedClient` 间接
+   *     拿 scoped client。
+   *   - endpointId 必须在调用前由 runtime 完成 `isValidPluginEndpointIdShape`
+   *     + 全局唯一性校验；这里**不**再二次校验。
+   *   - 返回的 client 的 `endpointId` 字段就是传入的 endpointId，
+   *     插件作者拿到的最终形态是"声明 endpoint → 拿到 scoped client"。
+   */
+  createPluginScopedClient(endpointId: string): AppMsgPluginClient;
 }
 
 /**

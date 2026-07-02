@@ -38,7 +38,6 @@ import {
   RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT,
   isValidPluginEndpointIdShape
 } from "@keymaster/contracts";
-import { AppMsgPluginClientImpl } from "@keymaster/plugin-appmsg";
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
 import { createMessageBus } from "./messageBus.js";
 import { createAssetRegistry, type AssetRegistry } from "./registries/assetRegistry.js";
@@ -682,9 +681,15 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         // `appMessageEndpoint` 的插件注入 scoped client 到
         // `<pluginId>.appmsg.client` capability。插件作者最终体验是
         // "声明 endpoint → 拿到 scoped client"，**不**走全局工厂。
+        //
+        // 关键：runtime **不**直接 import plugin-appmsg；通过
+        // `AppMsgCore.createPluginScopedClient(endpointId)` 间接构造
+        // scoped client，避免 runtime ↔ plugin-appmsg 循环依赖。
         if (appMsgEp && capabilities.has(APPMESSAGE_CORE_CAPABILITY)) {
           const core = capabilities.get<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
-          const scopedClient = new AppMsgPluginClientImpl(core, appMsgEp.endpointId);
+          const scopedClient: AppMsgPluginClient = core.createPluginScopedClient(
+            appMsgEp.endpointId
+          );
           const scopedKey = `${pluginId}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX}`;
           capabilities.provide(scopedKey, scopedClient);
           // 关键：把 scoped client 加到 ownership.capabilities，让

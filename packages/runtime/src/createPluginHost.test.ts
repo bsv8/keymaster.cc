@@ -283,7 +283,14 @@ describe("createPluginHost - manifest.appMessageEndpoint", () => {
           get: async () => null,
           send: async () => ({ messageId: "0", createdAtMs: 0 }),
           subscribeInboxDirty: () => () => undefined,
-          subscribeMessageReceived: () => () => undefined
+          subscribeMessageReceived: () => () => undefined,
+          createPluginScopedClient: (endpointId: string): AppMsgPluginClient => ({
+            endpointId,
+            list: async () => ({ items: [], hasMore: false }),
+            get: async () => null,
+            send: async () => ({ messageId: "0", createdAtMs: 0 }),
+            subscribeInboxDirty: () => () => undefined
+          })
         };
         ctx.provide(APPMESSAGE_CORE_CAPABILITY, core);
       }
@@ -312,7 +319,10 @@ describe("createPluginHost - manifest.appMessageEndpoint", () => {
       name: "Bad",
       description: "bad shape",
       meta: { kind: "business", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "Keymaster.Message" } // 大写、不符合 shape
+      appMessageEndpoint: { endpointId: "Keymaster.Message" }, // 大写、不符合 shape
+      setup() {
+        // 不会跑到这里（enable 阶段就 fail-closed）
+      }
     };
     await host.register(plugin);
     // register 不重新抛错，但 state 应为 blocked / error-disabled

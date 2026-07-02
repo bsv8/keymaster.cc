@@ -20,10 +20,12 @@ import type {
   AppMsgListResult,
   AppMsgMessage,
   AppMsgMessageReceivedEvent,
+  AppMsgPluginClient,
   AppMsgSendParams,
   AppMsgSendResult,
   AppMsgContentType
 } from "@keymaster/contracts";
+import { AppMsgPluginClientImpl } from "./pluginClient.js";
 import {
   type HubMsgBindSigner,
   type HubMsgConnection,
@@ -324,6 +326,18 @@ export class AppMsgCoreImpl implements AppMsgCore {
     return () => {
       this.dirtySubs.delete(sub);
     };
+  }
+
+  /**
+   * runtime host 在 enable 阶段调用：产出一个 sender endpoint
+   * 已绑定到 `endpointId` 的 scoped `appmsg.client`。
+   *
+   * 实现：直接 new `AppMsgPluginClientImpl(this, endpointId)`。
+   * runtime 不需要 import plugin-appmsg：runtime 通过 `AppMsgCore`
+   * 接口间接拿到 scoped client。
+   */
+  createPluginScopedClient(endpointId: string): AppMsgPluginClient {
+    return new AppMsgPluginClientImpl(this, endpointId);
   }
 
   /**
