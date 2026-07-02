@@ -1,0 +1,195 @@
+/* packages/plugin-appmsg/src/styles.css
+ * appmsg 系统诊断页专属样式。
+ *
+ * 设计缘由：
+ *   - 视觉语言完全复用现有壳层 token：surface / border / radius / badge；
+ *   - 只整理诊断页的信息层级，不引入新的交互动效或独立色板；
+ *   - 样式跟随 plugin-appmsg 目录走，移除插件时一并删除。
+ */
+
+.appmsg-system-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.appmsg-system-page__card,
+.appmsg-system-page__table-wrap,
+.appmsg-system-page__empty-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+.appmsg-system-page__card {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+  overflow: hidden;
+}
+
+.appmsg-system-page__row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.appmsg-system-page__row:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.appmsg-system-page__row:nth-child(odd) {
+  border-right: 1px solid var(--border);
+}
+
+.appmsg-system-page__label {
+  font-size: 11px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.appmsg-system-page__value {
+  font-size: 13px;
+  color: var(--text);
+  line-height: 1.5;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.appmsg-system-page__value--mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.appmsg-system-page__table-wrap {
+  overflow-x: auto;
+}
+
+.appmsg-system-page__table {
+  width: 100%;
+  min-width: 840px;
+  border-collapse: collapse;
+}
+
+.appmsg-system-page__table th,
+.appmsg-system-page__table td {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.appmsg-system-page__table th {
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.appmsg-system-page__table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.appmsg-system-page__table-row.is-stale td {
+  background: rgba(214, 164, 23, 0.05);
+}
+
+.appmsg-system-page__table-row.is-failed td {
+  background: rgba(227, 90, 90, 0.04);
+}
+
+.appmsg-system-page__metric {
+  font-variant-numeric: tabular-nums;
+}
+
+.appmsg-system-page__chip,
+.appmsg-system-page__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.appmsg-system-page__chip--soft {
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.appmsg-system-page__status-pill {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.appmsg-system-page__status-pill--ok,
+.appmsg-system-page__status.is-ok {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.appmsg-system-page__status-pill--partial,
+.appmsg-system-page__status.is-partial {
+  color: #d6a417;
+  border-color: #d6a417;
+  background: rgba(214, 164, 23, 0.08);
+}
+
+.appmsg-system-page__status-pill--failed,
+.appmsg-system-page__status.is-failed {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(227, 90, 90, 0.08);
+}
+
+[data-theme="dark"] .appmsg-system-page__status-pill--partial,
+[data-theme="dark"] .appmsg-system-page__status.is-partial {
+  color: #f3c969;
+  border-color: #f3c969;
+}
+
+.appmsg-system-page__empty-card {
+  padding: 8px;
+}
+
+@media (max-width: 768px) {
+  .appmsg-system-page__card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .appmsg-system-page__row {
+    border-right: 0;
+  }
+
+  .appmsg-system-page__row:nth-child(odd) {
+    border-right: 0;
+  }
+
+  .appmsg-system-page__row:not(:last-child) {
+    border-bottom: 1px solid var(--border);
+  }
+}

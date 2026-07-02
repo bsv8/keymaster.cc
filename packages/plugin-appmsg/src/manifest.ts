@@ -87,6 +87,9 @@ const appmsgResources: I18nPluginResources = {
       "appmsg.system.rowStatus.stale": "stale",
       "appmsg.system.rowStatus.failed": "failed: {{error}}",
       "appmsg.system.empty": "No known channels for the current owner.",
+      "appmsg.system.empty.locked": "Channel counts are unavailable while the Vault is locked.",
+      "appmsg.system.empty.description":
+        "Known plugin endpoints and HubMsg origin history will appear here after the current owner starts using app messages.",
       "appmsg.system.lockedHint":
         "Unlock the Vault to see per-channel counts. The last successful snapshot, if any, is shown with a stale marker."
     },
@@ -128,6 +131,9 @@ const appmsgResources: I18nPluginResources = {
       "appmsg.system.rowStatus.stale": "陈旧",
       "appmsg.system.rowStatus.failed": "失败：{{error}}",
       "appmsg.system.empty": "当前 owner 没有已知渠道。",
+      "appmsg.system.empty.locked": "Vault 锁定时无法查看渠道数量。",
+      "appmsg.system.empty.description":
+        "当当前 owner 开始使用应用消息后，这里会展示已知插件端点和 HubMsg 历史 origin。",
       "appmsg.system.lockedHint":
         "解锁 Vault 后才能看到各渠道数量。保留的上次成功快照会用 stale 标记。"
     }

@@ -16,7 +16,7 @@
 //   - 页面**不**记录任何 message body / markdown / 私钥相关字段。
 
 import { useCallback, useEffect, useState } from "react";
-import { Button, PageHeader } from "@keymaster/ui";
+import { Button, EmptyState, PageHeader } from "@keymaster/ui";
 import {
   APPMESSAGE_CORE_CAPABILITY,
   type AppMsgAddress,
@@ -251,29 +251,43 @@ export function AppMsgSystemPage(): JSX.Element {
           key: "appmsg.system.description",
           fallback: "Connection status and per-channel message counts. Read-only diagnostics; no message body is shown here."
         })}
+        actions={(
+          <>
+            <Button
+              type="button"
+              onClick={() => void load()}
+              disabled={refreshDisabled}
+            >
+              {refreshing
+                ? text({ key: "appmsg.system.counts.refreshing", fallback: "Refreshing…" })
+                : text({ key: "appmsg.system.counts.refresh", fallback: "Refresh" })}
+            </Button>
+            <RefreshStatusLabel status={refreshStatus} />
+          </>
+        )}
       />
       <ConnectionCard conn={conn} unlocked={unlocked} />
-      <div className="appmsg-system-page__actions">
-        <Button
-          type="button"
-          onClick={() => void load()}
-          disabled={refreshDisabled}
-        >
-          {refreshing
-            ? text({ key: "appmsg.system.counts.refreshing", fallback: "Refreshing…" })
-            : text({ key: "appmsg.system.counts.refresh", fallback: "Refresh" })}
-        </Button>
-        <RefreshStatusLabel status={refreshStatus} />
-      </div>
       {rows.length > 0 && <ChannelTable rows={rows} />}
       {rows.length === 0 && !refreshing && (
-        <div className="appmsg-system-page__empty">
-          {unlocked
-            ? text({ key: "appmsg.system.empty", fallback: "No known channels for the current owner." })
-            : text({
-                key: "appmsg.system.lockedHint",
-                fallback: "Unlock the Vault to see per-channel counts. The last successful snapshot, if any, is shown with a stale marker."
-              })}
+        <div className="appmsg-system-page__empty-card">
+          <EmptyState
+            title={
+              unlocked
+                ? text({ key: "appmsg.system.empty", fallback: "No known channels for the current owner." })
+                : text({ key: "appmsg.system.empty.locked", fallback: "Channel counts are unavailable while the Vault is locked." })
+            }
+            description={
+              unlocked
+                ? text({
+                    key: "appmsg.system.empty.description",
+                    fallback: "Known plugin endpoints and HubMsg origin history will appear here after the current owner starts using app messages."
+                  })
+                : text({
+                    key: "appmsg.system.lockedHint",
+                    fallback: "Unlock the Vault to see per-channel counts. The last successful snapshot, if any, is shown with a stale marker."
+                  })
+            }
+          />
         </div>
       )}
     </div>
@@ -302,13 +316,17 @@ function ConnectionCard({ conn, unlocked }: { conn: AppMsgConnectionSnapshot; un
         <span className="appmsg-system-page__label">
           {text({ key: "appmsg.system.status.label", fallback: "State" })}
         </span>
-        <span className="appmsg-system-page__value">{stateLabel}</span>
+        <span
+          className={`appmsg-system-page__value appmsg-system-page__status-pill ${getConnectionStateClassName(conn, unlocked)}`}
+        >
+          {stateLabel}
+        </span>
       </div>
       <div className="appmsg-system-page__row">
         <span className="appmsg-system-page__label">
           {text({ key: "appmsg.system.owner", fallback: "Owner" })}
         </span>
-        <span className="appmsg-system-page__value">
+        <span className="appmsg-system-page__value appmsg-system-page__value--mono">
           {conn.ownerPublicKeyHex ?? "—"}
         </span>
       </div>
@@ -345,54 +363,62 @@ function ConnectionCard({ conn, unlocked }: { conn: AppMsgConnectionSnapshot; un
 function ChannelTable({ rows }: { rows: ChannelRow[] }): JSX.Element {
   const { text } = useI18n();
   return (
-    <table className="appmsg-system-page__table">
-      <thead>
-        <tr>
-          <th>{text({ key: "appmsg.system.counts.kind", fallback: "Kind" })}</th>
-          <th>{text({ key: "appmsg.system.counts.channel", fallback: "Channel" })}</th>
-          <th>{text({ key: "appmsg.system.counts.source", fallback: "Source" })}</th>
-          <th>{text({ key: "appmsg.system.counts.inbox", fallback: "Inbox" })}</th>
-          <th>{text({ key: "appmsg.system.counts.sent", fallback: "Sent" })}</th>
-          <th>{text({ key: "appmsg.system.counts.all", fallback: "All" })}</th>
-          <th>{text({ key: "appmsg.system.counts.lastRefreshed", fallback: "Last refreshed" })}</th>
-          <th>{text({ key: "appmsg.system.counts.status", fallback: "Status" })}</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((r) => (
-          <tr key={r.key} className={r.stale ? "is-stale" : undefined}>
-            <td>{r.kind}</td>
-            <td className="appmsg-system-page__value--mono">{r.channelId}</td>
-            <td>
-              {r.source === "hubmsg-origins"
-                ? text({
-                    key: "appmsg.system.counts.source.hubmsg-origins",
-                    fallback: "HubMsg origin history"
-                  })
-                : text({
-                    key: "appmsg.system.counts.source.plugin-endpoint",
-                    fallback: "Plugin endpoint"
-                  })}
-            </td>
-            <td>{r.counts?.inbox ?? "—"}</td>
-            <td>{r.counts?.sent ?? "—"}</td>
-            <td>{r.counts?.all ?? "—"}</td>
-            <td>{formatMs(r.lastRefreshedAtMs)}</td>
-            <td>
-              {r.stale
-                ? text({ key: "appmsg.system.rowStatus.stale", fallback: "stale" })
-                : r.rowStatus === "ok"
-                  ? text({ key: "appmsg.system.rowStatus.ok", fallback: "ok" })
-                  : text({
-                      key: "appmsg.system.rowStatus.failed",
-                      fallback: `failed: ${r.rowError ?? "unknown"}`,
-                      values: { error: r.rowError ?? "unknown" }
-                    })}
-            </td>
+    <div className="appmsg-system-page__table-wrap">
+      <table className="appmsg-system-page__table">
+        <thead>
+          <tr>
+            <th>{text({ key: "appmsg.system.counts.kind", fallback: "Kind" })}</th>
+            <th>{text({ key: "appmsg.system.counts.channel", fallback: "Channel" })}</th>
+            <th>{text({ key: "appmsg.system.counts.source", fallback: "Source" })}</th>
+            <th>{text({ key: "appmsg.system.counts.inbox", fallback: "Inbox" })}</th>
+            <th>{text({ key: "appmsg.system.counts.sent", fallback: "Sent" })}</th>
+            <th>{text({ key: "appmsg.system.counts.all", fallback: "All" })}</th>
+            <th>{text({ key: "appmsg.system.counts.lastRefreshed", fallback: "Last refreshed" })}</th>
+            <th>{text({ key: "appmsg.system.counts.status", fallback: "Status" })}</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.key} className={getChannelRowClassName(r)}>
+              <td>
+                <span className="appmsg-system-page__chip">{r.kind}</span>
+              </td>
+              <td className="appmsg-system-page__value--mono">{r.channelId}</td>
+              <td>
+                <span className="appmsg-system-page__chip appmsg-system-page__chip--soft">
+                  {r.source === "hubmsg-origins"
+                    ? text({
+                        key: "appmsg.system.counts.source.hubmsg-origins",
+                        fallback: "HubMsg origin history"
+                      })
+                    : text({
+                        key: "appmsg.system.counts.source.plugin-endpoint",
+                        fallback: "Plugin endpoint"
+                      })}
+                </span>
+              </td>
+              <td className="appmsg-system-page__metric">{r.counts?.inbox ?? "—"}</td>
+              <td className="appmsg-system-page__metric">{r.counts?.sent ?? "—"}</td>
+              <td className="appmsg-system-page__metric">{r.counts?.all ?? "—"}</td>
+              <td>{formatMs(r.lastRefreshedAtMs)}</td>
+              <td>
+                <span className={getChannelStatusClassName(r)}>
+                  {r.stale
+                    ? text({ key: "appmsg.system.rowStatus.stale", fallback: "stale" })
+                    : r.rowStatus === "ok"
+                      ? text({ key: "appmsg.system.rowStatus.ok", fallback: "ok" })
+                      : text({
+                          key: "appmsg.system.rowStatus.failed",
+                          fallback: `failed: ${r.rowError ?? "unknown"}`,
+                          values: { error: r.rowError ?? "unknown" }
+                        })}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -422,4 +448,24 @@ function formatMs(ms: number): string {
   } catch {
     return String(ms);
   }
+}
+
+function getConnectionStateClassName(conn: AppMsgConnectionSnapshot, unlocked: boolean): string {
+  if (!unlocked) return "appmsg-system-page__status-pill--failed";
+  if (conn.state === "bound") return "appmsg-system-page__status-pill--ok";
+  if (conn.state === "connecting") return "appmsg-system-page__status-pill--partial";
+  return "appmsg-system-page__status-pill--failed";
+}
+
+function getChannelRowClassName(row: ChannelRow): string {
+  const classes = ["appmsg-system-page__table-row"];
+  if (row.stale) classes.push("is-stale");
+  if (row.rowStatus === "failed") classes.push("is-failed");
+  return classes.join(" ");
+}
+
+function getChannelStatusClassName(row: ChannelRow): string {
+  if (row.stale) return "appmsg-system-page__status-pill appmsg-system-page__status-pill--partial";
+  if (row.rowStatus === "ok") return "appmsg-system-page__status-pill appmsg-system-page__status-pill--ok";
+  return "appmsg-system-page__status-pill appmsg-system-page__status-pill--failed";
 }
