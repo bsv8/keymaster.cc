@@ -12,6 +12,8 @@
 
 import type {
   AppMsgAddress,
+  AppMsgChannelCountBox,
+  AppMsgConnectionSnapshot,
   AppMsgCore,
   AppMsgEndpoint,
   AppMsgInboxDirtyEvent,
@@ -42,7 +44,8 @@ import {
  *   - `signerProvider`：本平台单例每次 connect 时调用它取当前 owner 的
  *     bind 签名材料（owner 切换 / vault 锁状态变化时由 plugin-appmsg
  *     驱动 reconnect）；
- *   - `logger`：可选，用于本地轨迹；
+ *   - `logger`：可选；用于本地轨迹（系统级日志真值仍走
+ *     `ctx.logger`，但本字段的 logger 可以做平台层本地 trace）；
  *   - `capabilityForBind`：`plugin-appmsg` 必须拿到 owner runtime 才能
  *     bind；这里以 signer provider 闭包形式注入。
  */
@@ -59,6 +62,43 @@ export interface AppMsgCoreConfig {
     warn?: (input: unknown) => void;
     error?: (input: unknown) => void;
   };
+}
+
+/**
+ * 结构化 logger 写方法（施工单 2026-07-02 001）。
+ *
+ * 设计缘由：与 `AppMsgCoreConfig.logger` 形状相同，但语义约束为
+ * 平台内部"系统级日志"——本单统一用这套入口输出
+ * `appmsg.connect.begin / .bound / .failed` / `appmsg.send.*` /
+ * `appmsg.receive.pushed` / `appmsg.counts.refresh.*` 等固定事件。
+ * 不让 caller 把 `event` 当杂烩传进来。
+ *
+ * 隐私边界（施工单 2026-07-02 001 §4.5）：
+ *   - **不**允许 `body` 字段进日志。
+ *   - 允许 `bodyBytes`（正文字节数）作为唯一"大小"指标。
+ *   - 其它 key 透传。
+ */
+function emitLog(
+  logger: AppMsgCoreConfig["logger"] | undefined,
+  level: "info" | "warn" | "error",
+  event: string,
+  data?: Record<string, unknown>
+): void {
+  if (!logger) return;
+  const fn = logger[level];
+  if (!fn) return;
+  const safe: Record<string, unknown> = { event };
+  if (data) {
+    for (const k of Object.keys(data)) {
+      if (k === "body") continue;
+      safe[k] = data[k];
+    }
+  }
+  try {
+    fn(safe);
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -108,6 +148,21 @@ export class AppMsgCoreImpl implements AppMsgCore {
    * v1 简化：纯内存，不持久化（与 HubMsg "断线重连靠 afterMessageId 补拉"对齐）。
    */
   private readonly cache = new Map<string, AppMsgMessage[]>();
+  /**
+   * 已登记的 plugin 端点 id 注册表（施工单 2026-07-02 001）。
+   *
+   * 真值来源：`createPluginScopedClient(endpointId)` 调用时 `add`。
+   * 没有反注册路径——v1 简化为"enable 阶段注册一次，整个生命周期有效"。
+   * 卸载插件时 plugin-appmsg 进程级销毁，Set 随实例一起被回收。
+   */
+  private readonly pluginEndpoints = new Set<string>();
+  /* ============== 施工单 2026-07-02 001：诊断快照状态 ============== */
+  /** 最近一次成功 bind 的时间戳（unix ms）；0 表示从未成功。 */
+  private lastBoundAtMsValue: number = 0;
+  /** 最近一次连接 / bind / 接收 / send 错误 message；null 表示无错。 */
+  private lastErrorMessageValue: string | null = null;
+  /** 最近一次收到 push 消息的时间戳（unix ms）；0 表示从未收到。 */
+  private lastReceivedAtMsValue: number = 0;
 
   constructor(cfg: AppMsgCoreConfig) {
     this.cfg = cfg;
@@ -126,13 +181,14 @@ export class AppMsgCoreImpl implements AppMsgCore {
     if (this.currentBoundOwner === ownerPublicKeyHex && this.connection?.state() === "bound") {
       return;
     }
+    emitLog(this.cfg.logger, "info", "appmsg.connect.begin", { ownerPublicKeyHex });
     await this.disconnect();
     const signer = await this.cfg.signerProvider();
     if (!signer) {
-      this.cfg.logger?.warn?.({
-        scope: "appmsg.core",
-        event: "connect.noSigner",
-        ownerPublicKeyHex
+      this.lastErrorMessageValue = "no signer available (vault locked or no active key)";
+      emitLog(this.cfg.logger, "warn", "appmsg.connect.failed", {
+        ownerPublicKeyHex,
+        reason: "no_signer"
       });
       return;
     }
@@ -169,12 +225,72 @@ export class AppMsgCoreImpl implements AppMsgCore {
             }
           }
         }
+        // 4. 诊断真值：记录最近一次收到消息时间
+        this.lastReceivedAtMsValue = Date.now();
+        // 5. 系统日志：只记元数据，不记 body
+        emitLog(this.cfg.logger, "info", "appmsg.receive.pushed", {
+          messageId: msg.messageId,
+          clientMessageId: msg.clientMessageId,
+          senderEndpoint: msg.sender.endpoint,
+          recipientEndpoint: msg.recipient.endpoint,
+          contentType: msg.contentType,
+          bodyBytes: msg.body.length
+        });
       }
     );
-    await conn.connect(signer);
+    try {
+      await conn.connect(signer);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastErrorMessageValue = msg;
+      emitLog(this.cfg.logger, "error", "appmsg.connect.failed", {
+        ownerPublicKeyHex,
+        reason: "bind_error",
+        err: msg
+      });
+      try {
+        conn.close();
+      } catch {
+        // ignore
+      }
+      this.connection = null;
+      return;
+    }
     this.currentBoundOwner = ownerPublicKeyHex;
+    this.lastBoundAtMsValue = Date.now();
+    this.lastErrorMessageValue = null;
+    emitLog(this.cfg.logger, "info", "appmsg.connect.bound", { ownerPublicKeyHex });
     // 重连后按 afterMessageId 补拉（v1 简化：当前实现仅做基础 connect；
     //     真正补拉由调用方调 `listAsOrigin(box="inbox", afterMessageId=...)` 触发）。
+  }
+
+  /**
+   * reconnect：仅供"刷新时 best-effort 重连"使用（系统页手动刷新时）。
+   *
+   * 与 `connectForOwner` 的区别：本方法在当前 owner 已经 bound 时只发
+   * `appmsg.reconnect.begin` 日志、**不**走完整 connect 流程；
+   * 否则等同 `connectForOwner`。
+   */
+  async reconnectIfNeeded(): Promise<void> {
+    emitLog(this.cfg.logger, "info", "appmsg.reconnect.begin", {
+      ownerPublicKeyHex: this.currentBoundOwner
+    });
+    try {
+      if (this.connection?.state() === "bound" && this.currentBoundOwner) {
+        return;
+      }
+      if (!this.currentBoundOwner) {
+        // 没有当前 owner —— 让 caller 自己走 `connectForOwner` 决定。
+        return;
+      }
+      await this.connectForOwner(this.currentBoundOwner);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastErrorMessageValue = msg;
+      emitLog(this.cfg.logger, "error", "appmsg.reconnect.failed", {
+        err: msg
+      });
+    }
   }
 
   /** 关闭连接；幂等。 */
@@ -186,6 +302,9 @@ export class AppMsgCoreImpl implements AppMsgCore {
         // ignore
       }
       this.connection = null;
+      emitLog(this.cfg.logger, "info", "appmsg.connect.closed", {
+        ownerPublicKeyHex: this.currentBoundOwner
+      });
     }
     this.currentBoundOwner = null;
   }
@@ -278,9 +397,18 @@ export class AppMsgCoreImpl implements AppMsgCore {
     createdAtMs: number;
   }): Promise<AppMsgSendResult> {
     if (!this.connection || this.connection.state() !== "bound") {
-      throw new Error("appmsg.core: not connected");
+      const err = "appmsg.core: not connected";
+      emitLog(this.cfg.logger, "warn", "appmsg.send.failed", {
+        clientMessageId: input.clientMessageId,
+        reason: "not_connected"
+      });
+      throw new Error(err);
     }
     if (input.sender.endpoint.kind !== "origin" && input.sender.endpoint.kind !== "plugin") {
+      emitLog(this.cfg.logger, "warn", "appmsg.send.failed", {
+        clientMessageId: input.clientMessageId,
+        reason: "invalid_sender_endpoint_kind"
+      });
       throw new Error("appmsg.core: invalid sender endpoint kind");
     }
     const effectiveOwner =
@@ -288,33 +416,58 @@ export class AppMsgCoreImpl implements AppMsgCore {
         ? input.sender.ownerPublicKeyHex
         : this.currentBoundOwner ?? "";
     if (!effectiveOwner) {
+      emitLog(this.cfg.logger, "warn", "appmsg.send.failed", {
+        clientMessageId: input.clientMessageId,
+        reason: "no_bound_owner"
+      });
       throw new Error("appmsg.core: no bound owner for current call");
     }
     void effectiveOwner; // server derives sender from bind; explicit reference kept for clarity.
-    // HubMsg wire: MessageSendParams.senderEndpoint
-    const res = await this.connection.request<
-      {
-        clientMessageId: string;
-        senderOwnerPublicKeyHex: string;
-        senderEndpoint: AppMsgEndpoint;
-        recipientOwnerPublicKeyHex: string;
-        recipientEndpoint: AppMsgEndpoint;
-        contentType: AppMsgContentType;
-        body: string;
-        createdAtMs: number;
-      },
-      { messageId: string; createdAtMs: number }
-    >("message.send", {
+    emitLog(this.cfg.logger, "info", "appmsg.send.begin", {
       clientMessageId: input.clientMessageId,
-      senderOwnerPublicKeyHex: effectiveOwner,
       senderEndpoint: input.sender.endpoint,
-      recipientOwnerPublicKeyHex: input.recipientOwnerPublicKeyHex,
       recipientEndpoint: input.recipientEndpoint,
       contentType: input.contentType,
-      body: input.body,
-      createdAtMs: input.createdAtMs
+      bodyBytes: input.body.length
     });
-    return { messageId: res.messageId, createdAtMs: res.createdAtMs };
+    try {
+      // HubMsg wire: MessageSendParams.senderEndpoint
+      const res = await this.connection.request<
+        {
+          clientMessageId: string;
+          senderOwnerPublicKeyHex: string;
+          senderEndpoint: AppMsgEndpoint;
+          recipientOwnerPublicKeyHex: string;
+          recipientEndpoint: AppMsgEndpoint;
+          contentType: AppMsgContentType;
+          body: string;
+          createdAtMs: number;
+        },
+        { messageId: string; createdAtMs: number }
+      >("message.send", {
+        clientMessageId: input.clientMessageId,
+        senderOwnerPublicKeyHex: effectiveOwner,
+        senderEndpoint: input.sender.endpoint,
+        recipientOwnerPublicKeyHex: input.recipientOwnerPublicKeyHex,
+        recipientEndpoint: input.recipientEndpoint,
+        contentType: input.contentType,
+        body: input.body,
+        createdAtMs: input.createdAtMs
+      });
+      emitLog(this.cfg.logger, "info", "appmsg.send.ok", {
+        messageId: res.messageId,
+        clientMessageId: input.clientMessageId
+      });
+      return { messageId: res.messageId, createdAtMs: res.createdAtMs };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastErrorMessageValue = msg;
+      emitLog(this.cfg.logger, "error", "appmsg.send.failed", {
+        clientMessageId: input.clientMessageId,
+        err: msg
+      });
+      throw err;
+    }
   }
 
   subscribeInboxDirty(handler: (event: AppMsgInboxDirtyEvent) => void): () => void {
@@ -335,8 +488,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
    * 实现：直接 new `AppMsgPluginClientImpl(this, endpointId)`。
    * runtime 不需要 import plugin-appmsg：runtime 通过 `AppMsgCore`
    * 接口间接拿到 scoped client。
+   *
+   * 同时把 `endpointId` 登记到 plugin 端点注册表
+   * （`listKnownPluginEndpoints()` 的真值），供系统页渲染
+   * "plugin 渠道" 行。重复登记幂等。
    */
   createPluginScopedClient(endpointId: string): AppMsgPluginClient {
+    this.pluginEndpoints.add(endpointId);
     return new AppMsgPluginClientImpl(this, endpointId);
   }
 
@@ -361,6 +519,146 @@ export class AppMsgCoreImpl implements AppMsgCore {
    */
   readCache(address: AppMsgAddress): AppMsgMessage[] {
     return this.cache.get(cacheKey(address)) ?? [];
+  }
+
+  /* ============== 施工单 2026-07-02 001：系统级诊断内部方法 ============== */
+
+  /**
+   * 同步读当前连接快照。
+   *
+   * 不抛错、不重连；任何状态下都能读。
+   */
+  inspectConnection(): AppMsgConnectionSnapshot {
+    const conn = this.connection;
+    const state: AppMsgConnectionSnapshot["state"] = conn
+      ? (conn.state() as AppMsgConnectionSnapshot["state"])
+      : this.currentBoundOwner
+        ? "closed"
+        : "idle";
+    return {
+      state,
+      ownerPublicKeyHex: this.currentBoundOwner,
+      url: this.cfg.url,
+      lastBoundAtMs: this.lastBoundAtMsValue,
+      lastError: this.lastErrorMessageValue,
+      lastReceivedAtMs: this.lastReceivedAtMsValue
+    };
+  }
+
+  /**
+   * 列出已登记的 plugin 端点 id。
+   */
+  listKnownPluginEndpoints(): string[] {
+    return [...this.pluginEndpoints];
+  }
+
+  /**
+   * 拉取当前 owner 在 HubMsg 中已知 origin 列表。
+   *
+   * 失败时（无 owner / 连接断开 / HubMsg 报错）reject；调用方
+   * 应当把失败映射成"刷新失败"状态，**不**把整页渲染崩掉。
+   */
+  async listKnownOrigins(): Promise<string[]> {
+    if (!this.connection || this.connection.state() !== "bound" || !this.currentBoundOwner) {
+      throw new Error("appmsg.core: not connected");
+    }
+    const res = await this.connection.request<Record<string, never>, { origins: string[] }>(
+      "message.origins",
+      {}
+    );
+    return Array.isArray(res.origins) ? res.origins : [];
+  }
+
+  /**
+   * 批量取若干 scope 的 inbox / sent / all 计数。
+   *
+   * 单个 scope 的失败不打断其它 scope：失败 scope 收到
+   * `error` 非空的 `AppMsgChannelCountBox`。整体调用失败时
+   * 全部 scope 收到 error（让 UI 一次性标"刷新失败"）。
+   *
+   * 日志事件名：施工单 2026-07-02 001 §7.4 收敛为
+   * `appmsg.diagnostics.refresh.*`（**不**用 `appmsg.counts.refresh.*`）
+   * ——"diagnostics"才是系统页语义，counts 只是其中一项。
+   */
+  async countScopes(scopes: AppMsgAddress[]): Promise<AppMsgChannelCountBox[]> {
+    if (scopes.length === 0) return [];
+    if (!this.connection || this.connection.state() !== "bound" || !this.currentBoundOwner) {
+      const msg = "appmsg.core: not connected";
+      return scopes.map((s) => ({ scope: s, counts: null, error: msg }));
+    }
+    emitLog(this.cfg.logger, "info", "appmsg.diagnostics.refresh.begin", {
+      count: scopes.length
+    });
+    try {
+      const endpoints = scopes.map((s) => s.endpoint);
+      const res = await this.connection.request<
+        { endpoints: AppMsgEndpoint[] },
+        { items: Array<{ endpoint: AppMsgEndpoint; inbox: number; sent: number; all: number }> }
+      >("message.counts", { endpoints });
+      // 按 input order 配对
+      const byKey = new Map<string, { inbox: number; sent: number; all: number }>();
+      for (const item of res.items ?? []) {
+        byKey.set(`${item.endpoint.kind}::${item.endpoint.id}`, {
+          inbox: Number(item.inbox) || 0,
+          sent: Number(item.sent) || 0,
+          all: Number(item.all) || 0
+        });
+      }
+      const out: AppMsgChannelCountBox[] = scopes.map((s) => {
+        const k = `${s.endpoint.kind}::${s.endpoint.id}`;
+        const c = byKey.get(k);
+        return {
+          scope: s,
+          counts: c ? { inbox: c.inbox, sent: c.sent, all: c.all } : null,
+          error: c ? null : "no_result_for_scope"
+        };
+      });
+      const failed = out.filter((b) => b.error !== null).length;
+      if (failed === 0) {
+        emitLog(this.cfg.logger, "info", "appmsg.diagnostics.refresh.ok", {
+          count: scopes.length
+        });
+      } else if (failed < scopes.length) {
+        emitLog(this.cfg.logger, "warn", "appmsg.diagnostics.refresh.partial_failed", {
+          count: scopes.length,
+          failed
+        });
+      } else {
+        emitLog(this.cfg.logger, "error", "appmsg.diagnostics.refresh.failed", {
+          count: scopes.length,
+          reason: "all_scopes_failed"
+        });
+      }
+      return out;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastErrorMessageValue = msg;
+      emitLog(this.cfg.logger, "error", "appmsg.diagnostics.refresh.failed", {
+        count: scopes.length,
+        err: msg
+      });
+      return scopes.map((s) => ({ scope: s, counts: null, error: msg }));
+    }
+  }
+
+  /**
+   * 系统页 page-level 失败日志入口（施工单 2026-07-02 001）：
+   * 把 `reconnectIfNeeded` / `listKnownOrigins` 阶段失败也写进
+   * `appmsg.diagnostics.refresh.failed` 事件，方便 `/settings/logs`
+   * 按事件名检索到完整失败链路。
+   *
+   * 本身不抛错：日志写失败吞掉。
+   */
+  async logDiagnosticsRefreshFailed(input: { stage: string; err: string; durationMs: number }): Promise<void> {
+    try {
+      emitLog(this.cfg.logger, "error", "appmsg.diagnostics.refresh.failed", {
+        stage: input.stage,
+        err: input.err,
+        durationMs: input.durationMs
+      });
+    } catch {
+      // ignore
+    }
   }
 
   /* ============== 私有工具 ============== */

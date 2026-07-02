@@ -128,6 +128,74 @@ export interface AppMsgListResult {
   hasMore: boolean;
 }
 
+/* ============== 施工单 2026-07-02 001：appmsg 系统级诊断 ============== */
+
+/**
+ * `appmsg.core.inspectConnection()` 返回的连接快照。
+ *
+ * 设计缘由（施工单 2026-07-02 001）：
+ *   - 这是系统页（`/system/messages`）唯一读到的"连接真值"；UI 用它
+ *     展示状态 / owner / URL / 最近一次成功 bind 时间 / 最近一次错误
+ *     / 最近一次收到消息时间。
+ *   - 同步返回；不允许做"重连后取数"等隐式行为。
+ *   - 锁定态（vault locked / 无 active key）下也允许读：state 会
+ *     显示 `disconnected` / `no_owner`，但其它字段（url、lastError）
+ *     仍可展示。
+ */
+export interface AppMsgConnectionSnapshot {
+  /** 当前 connection state：与 `HubMsgConnectionState` 同语义。 */
+  state: "idle" | "connecting" | "bound" | "closed";
+  /** 当前绑定 owner；未 bind 时为 null。 */
+  ownerPublicKeyHex: string | null;
+  /** HubMsg WSS URL（从 `AppMsgCoreConfig.url` 投影；与运行时一致）。 */
+  url: string;
+  /** 最近一次成功 bind 时间（unix ms；0 = 从未 bind）。 */
+  lastBoundAtMs: number;
+  /** 最近一次 bind / connect / receive 错误 message（无错误时为 null）。 */
+  lastError: string | null;
+  /** 最近一次收到 push 消息的时间（unix ms；0 = 从未收到）。 */
+  lastReceivedAtMs: number;
+}
+
+/**
+ * 单个 channel（origin / plugin endpoint）的消息数量。
+ *
+ * 设计缘由（施工单 2026-07-02 001）：
+ *   - 这是 HubMsg `message.counts` 内部 RPC 的内部投影形状。
+ *   - `inbox` = 当前 owner 收到的、`recipientEndpoint` 匹配该 channel
+ *     的消息数；`sent` = 当前 owner 发出的、`senderEndpoint` 匹配该
+ *     channel 的消息数；`all = inbox + sent`。
+ *   - self-send（sender == recipient）既计入 inbox 也计入 sent——
+ *     与 HubMsg 服务端语义一致。
+ *   - **不**包含任何 message body / markdown / 私钥相关字段。
+ */
+export interface AppMsgChannelCount {
+  /** inbox 数量。 */
+  inbox: number;
+  /** sent 数量。 */
+  sent: number;
+  /** all 数量（= inbox + sent）。 */
+  all: number;
+}
+
+/**
+ * `appmsg.core.countScopes()` 返回的每 scope 计数结果。
+ *
+ * 设计缘由（施工单 2026-07-02 001）：
+ *   - 内部 UI 读方法；**不**对外暴露给第三方 app。
+ *   - 任何 scope 整体调用失败时 `error` 字段非空，`counts` 为 null；
+ *     单 scope 内的部分失败不细化（按"全成功 / 全失败"两态上报）。
+ *   - 单次调用中 scopes 之间相互独立：一个 scope 失败不影响其它。
+ */
+export interface AppMsgChannelCountBox {
+  /** 该 scope 对应的完整地址（owner + endpoint）。 */
+  scope: AppMsgAddress;
+  /** 数量；`error` 非空时为 null。 */
+  counts: AppMsgChannelCount | null;
+  /** 错误 message（成功时为 null）。 */
+  error: string | null;
+}
+
 /** `appmsg.send` 成功结果。 */
 export interface AppMsgSendResult {
   messageId: string;
@@ -240,8 +308,97 @@ export interface AppMsgCore {
    *     + 全局唯一性校验；这里**不**再二次校验。
    *   - 返回的 client 的 `endpointId` 字段就是传入的 endpointId，
    *     插件作者拿到的最终形态是"声明 endpoint → 拿到 scoped client"。
+   *   - 同时，**内部**把 `endpointId` 登记到 plugin endpoint 注册表
+   *     （`listKnownPluginEndpoints()` 的真值），供系统页渲染
+   *     "plugin 渠道" 行。
    */
   createPluginScopedClient(endpointId: string): AppMsgPluginClient;
+
+  /* ============== 施工单 2026-07-02 001：系统级诊断内部方法 ============== */
+
+  /**
+   * best-effort reconnect（系统页手动刷新用）。
+   *
+   * 当前已 bound 时 no-op；未 bound 但有 current owner 时尝试一次
+   * `connectForOwner(currentBoundOwner)`；失败时记录 `lastError`。
+   * 失败时**不**抛错——best-effort。
+   *
+   * 之所以存在：系统页手动刷新要走这条路径（**不**直接调
+   * `connectForOwner`），才能让 `appmsg.reconnect.begin / .failed`
+   * 落到 `/settings/logs`，否则验收项 8.1 的 reconnect 日志会失配。
+   */
+  reconnectIfNeeded(): Promise<void>;
+
+  /**
+   * 同步读当前连接快照。
+   *
+   * 边界：
+   *   - **不**重连、不抛错；任何状态下都能读。
+   *   - 锁定 / 无 active key 时 `state = "idle"`,`ownerPublicKeyHex = null`,
+   *     `lastError` 仍可能保留上一次失败信息。
+   *   - 内部仅供平台 UI（系统页 `AppMsgSystemPage`）使用；
+   *     **不**通过 capability 暴露给第三方 app。
+   */
+  inspectConnection(): AppMsgConnectionSnapshot;
+
+  /**
+   * 同步列出已通过 `createPluginScopedClient(endpointId)` 登记过的
+   * plugin 端点 id。
+   *
+   * 边界：
+   *   - 这是 plugin 渠道目录的**唯一**真值：仅当一个插件 manifest
+   *     声明了 `appMessageEndpoint.endpointId` 并被 host enable
+   *     后，id 才会出现在这里。
+   *   - **不**包含 origin 渠道；origin 渠道通过
+   *     `listKnownOrigins()` 从 HubMsg 取真值。
+   *   - 顺序无保证；UI 自己按需排序。
+   *   - 内部仅供平台 UI 使用；**不**对外暴露。
+   */
+  listKnownPluginEndpoints(): string[];
+
+  /**
+   * 同步拉取当前 owner 在 HubMsg 中已知 origin 列表。
+   *
+   * 边界：
+   *   - 这是 origin 渠道目录的真值；与 `listKnownPluginEndpoints()`
+   *     互补。
+   *   - 底层调 HubMsg `message.origins` 内部 RPC；连接断开 /
+   *     无 owner 时 reject。
+   *   - 内部仅供平台 UI 使用；**不**对外暴露给第三方 app。
+   */
+  listKnownOrigins(): Promise<string[]>;
+
+  /**
+   * 批量取若干 scope 的 `inbox / sent / all` 计数。
+   *
+   * 边界（施工单 2026-07-02 001）：
+   *   - scopes 之间相互独立：一个 scope 失败只让对应 `AppMsgChannelCountBox`
+   *     的 `error` 字段非空，其它 scope 仍正常返回。
+   *   - 整体调用失败（如连接断开 / 无 owner）时**所有** scope 的
+   *     `error` 字段都非空，UI 据此把"刷新状态"标为失败。
+   *   - 底层调 HubMsg `message.counts` 内部 RPC；**不**通过
+   *     `message.list` 拉明细再本地计数。
+   *   - 内部仅供平台 UI 使用；**不**对外暴露。
+   */
+  countScopes(scopes: AppMsgAddress[]): Promise<AppMsgChannelCountBox[]>;
+
+  /**
+   * 系统页 (`/system/messages`) 失败阶段的 page-level 系统日志入口。
+   *
+   * 用途：`countScopes` 内部只在它的"自己跑完 message.counts RPC"
+   * 阶段写 `appmsg.diagnostics.refresh.*` 日志。但页面流程里
+   * `listKnownOrigins` / `reconnectIfNeeded` 也可能失败——这些阶段
+   * 失败时，page 应当**主动**调本方法写一条
+   * `appmsg.diagnostics.refresh.failed`，让 `/settings/logs` 能按
+   * 事件名检索到完整刷新失败链路。
+   *
+   * `stage` 字段语义：
+   *   - `reconnect` —— `reconnectIfNeeded` 抛错
+   *   - `list_known_origins` —— `listKnownOrigins` 抛错
+   *
+   * 本方法本身**不**抛错：日志写失败吞掉，**不**反向影响页面渲染。
+   */
+  logDiagnosticsRefreshFailed(input: { stage: string; err: string; durationMs: number }): Promise<void>;
 }
 
 /**

@@ -19,11 +19,14 @@ import type {
   AppMsgMessage,
   AppMsgPluginClient,
   AppMsgSendResult,
+  BreadcrumbRegistry,
   I18nPluginResources,
   KeyspaceService,
+  MenuRegistry,
   PluginContext,
   PluginManifest,
   PluginLogger,
+  RouteRegistry,
   VaultService
 } from "@keymaster/contracts";
 import {
@@ -32,6 +35,7 @@ import {
 } from "@keymaster/contracts";
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
 import { AppMsgPluginClientImpl } from "./pluginClient.js";
+import { AppMsgSystemPage } from "./AppMsgSystemPage.js";
 import { signCompactSecp256k1 } from "./signing.js";
 
 /** plugin-appmsg 平台插件 id。 */
@@ -46,11 +50,86 @@ const appmsgResources: I18nPluginResources = {
     en: {
       "appmsg.platform.title": "Application Messages",
       "appmsg.platform.desc":
-        "Bridges between local apps / plugins and the centralized HubMsg service."
+        "Bridges between local apps / plugins and the centralized HubMsg service.",
+      /* ============== 施工单 2026-07-02 001：系统级诊断页文案 ============== */
+      "appmsg.system.title": "Message system",
+      "appmsg.system.description":
+        "Connection status and per-channel message counts. Read-only diagnostics; no message body is shown here.",
+      "appmsg.system.menu": "Message system",
+      "appmsg.system.breadcrumb": "Message system",
+      "appmsg.system.status.label": "State",
+      "appmsg.system.status.bound": "bound",
+      "appmsg.system.status.connecting": "connecting",
+      "appmsg.system.status.closed": "closed",
+      "appmsg.system.status.disconnected": "disconnected",
+      "appmsg.system.status.no_owner": "no owner (vault locked)",
+      "appmsg.system.status.ok": "OK",
+      "appmsg.system.status.partialFailed": "Partial",
+      "appmsg.system.status.failed": "Failed",
+      "appmsg.system.owner": "Owner",
+      "appmsg.system.url": "HubMsg URL",
+      "appmsg.system.lastBoundAt": "Last bound at",
+      "appmsg.system.lastReceivedAt": "Last received at",
+      "appmsg.system.lastError": "Last error",
+      "appmsg.system.counts.kind": "Kind",
+      "appmsg.system.counts.channel": "Channel",
+      "appmsg.system.counts.source": "Source",
+      "appmsg.system.counts.source.hubmsg-origins": "HubMsg origin history",
+      "appmsg.system.counts.source.plugin-endpoint": "Plugin endpoint",
+      "appmsg.system.counts.inbox": "Inbox",
+      "appmsg.system.counts.sent": "Sent",
+      "appmsg.system.counts.all": "All",
+      "appmsg.system.counts.lastRefreshed": "Last refreshed",
+      "appmsg.system.counts.status": "Status",
+      "appmsg.system.counts.refresh": "Refresh",
+      "appmsg.system.counts.refreshing": "Refreshing…",
+      "appmsg.system.rowStatus.ok": "ok",
+      "appmsg.system.rowStatus.stale": "stale",
+      "appmsg.system.rowStatus.failed": "failed: {{error}}",
+      "appmsg.system.empty": "No known channels for the current owner.",
+      "appmsg.system.lockedHint":
+        "Unlock the Vault to see per-channel counts. The last successful snapshot, if any, is shown with a stale marker."
     },
     "zh-CN": {
       "appmsg.platform.title": "应用消息总线",
-      "appmsg.platform.desc": "连接本地应用 / 插件与中心化 HubMsg 服务。"
+      "appmsg.platform.desc": "连接本地应用 / 插件与中心化 HubMsg 服务。",
+      "appmsg.system.title": "消息系统",
+      "appmsg.system.description":
+        "连接状态 + 各渠道消息数量。只读诊断页；这里**不**显示任何消息正文。",
+      "appmsg.system.menu": "消息系统",
+      "appmsg.system.breadcrumb": "消息系统",
+      "appmsg.system.status.label": "状态",
+      "appmsg.system.status.bound": "已绑定",
+      "appmsg.system.status.connecting": "连接中",
+      "appmsg.system.status.closed": "已关闭",
+      "appmsg.system.status.disconnected": "未连接",
+      "appmsg.system.status.no_owner": "无 owner（Vault 锁定）",
+      "appmsg.system.status.ok": "正常",
+      "appmsg.system.status.partialFailed": "部分失败",
+      "appmsg.system.status.failed": "失败",
+      "appmsg.system.owner": "Owner",
+      "appmsg.system.url": "HubMsg URL",
+      "appmsg.system.lastBoundAt": "最近一次成功 bind",
+      "appmsg.system.lastReceivedAt": "最近一次收到消息",
+      "appmsg.system.lastError": "最近一次错误",
+      "appmsg.system.counts.kind": "类型",
+      "appmsg.system.counts.channel": "渠道",
+      "appmsg.system.counts.source": "来源",
+      "appmsg.system.counts.source.hubmsg-origins": "HubMsg 历史 origin",
+      "appmsg.system.counts.source.plugin-endpoint": "插件端点",
+      "appmsg.system.counts.inbox": "收件",
+      "appmsg.system.counts.sent": "发件",
+      "appmsg.system.counts.all": "总数",
+      "appmsg.system.counts.lastRefreshed": "最近刷新",
+      "appmsg.system.counts.status": "状态",
+      "appmsg.system.counts.refresh": "刷新",
+      "appmsg.system.counts.refreshing": "刷新中…",
+      "appmsg.system.rowStatus.ok": "正常",
+      "appmsg.system.rowStatus.stale": "陈旧",
+      "appmsg.system.rowStatus.failed": "失败：{{error}}",
+      "appmsg.system.empty": "当前 owner 没有已知渠道。",
+      "appmsg.system.lockedHint":
+        "解锁 Vault 后才能看到各渠道数量。保留的上次成功快照会用 stale 标记。"
     }
   }
 };
@@ -66,6 +145,11 @@ type PluginContextLike = Pick<PluginContext, "logger">;
  *     capability 总线反向消费 `appmsg.core`；
  *   - 依赖 vault.service / keyspace.service 用于借 owner 私钥签名；
  *   - 通过订阅 keyspace.onActiveChange + vault.onStatusChange 驱动 reconnect。
+ *   - 自身注册 `/system/messages` 路由 + `group="system"` 菜单项（施工单
+ *     2026-07-02 001）。这个页面是系统级诊断页，归属 plugin-appmsg；
+ *     它通过 `appmsg.core.inspectConnection / listKnownOrigins /
+ *     countScopes` 直接与 HubMsg 内部 RPC 通信，**不**走 protocol popup
+ *     路径，也不读取 connect session 真值。
  */
 export const appmsgPlatformPlugin: PluginManifest = {
   id: APPMSG_PLUGIN_ID,
@@ -81,7 +165,10 @@ export const appmsgPlatformPlugin: PluginManifest = {
   i18n: appmsgResources,
   dependencies: [
     { capability: "vault.service", reason: "借 owner 私钥签 HubMsg client_bind" },
-    { capability: "keyspace.service", reason: "解析 owner publicKeyHex" }
+    { capability: "keyspace.service", reason: "解析 owner publicKeyHex" },
+    { capability: "route.registry", reason: "注册 /system/messages 诊断页路由" },
+    { capability: "menu.registry", reason: "注册 system 分组下「消息系统」菜单项" },
+    { capability: "breadcrumb.registry", reason: "为 /system/messages 提供面包屑" }
   ],
   setup(ctx) {
     const vault = ctx.get<VaultService>("vault.service");
@@ -134,27 +221,47 @@ export const appmsgPlatformPlugin: PluginManifest = {
       heartbeatSec: 30,
       signerProvider,
       logger: {
-        info: (input) =>
+        // 平台内部 logger bridge：把 core 内部 emitLog 输出的对象
+        // 转换为 ctx.logger 调用。
+        //
+        // 关键（施工单 2026-07-02 001）：必须保留 input.event 真值
+        // （如 `appmsg.connect.begin` / `appmsg.send.failed` / ...），
+        // 不能硬写成级别名 `info/warn/error`——否则 `/settings/logs`
+        // 按 event 检索会失配，验收项 8.1（pluginId=appmsg + event 名
+        // 检索）做不出来。
+        //
+        // 兜底：input 不是对象 / 没有 event 字段时，回退到该级别名
+        // 自身，保持向前兼容。
+        info: (input) => {
+          const obj = (input ?? {}) as Record<string, unknown>;
+          const ev = typeof obj.event === "string" ? obj.event : "info";
           ctx.logger.info({
             scope: "appmsg.core",
-            event: "info",
+            event: ev,
             message: "",
-            data: input as Record<string, unknown>
-          }),
-        warn: (input) =>
+            data: obj
+          });
+        },
+        warn: (input) => {
+          const obj = (input ?? {}) as Record<string, unknown>;
+          const ev = typeof obj.event === "string" ? obj.event : "warn";
           ctx.logger.warn({
             scope: "appmsg.core",
-            event: "warn",
+            event: ev,
             message: "",
-            data: input as Record<string, unknown>
-          }),
-        error: (input) =>
+            data: obj
+          });
+        },
+        error: (input) => {
+          const obj = (input ?? {}) as Record<string, unknown>;
+          const ev = typeof obj.event === "string" ? obj.event : "error";
           ctx.logger.error({
             scope: "appmsg.core",
-            event: "error",
+            event: ev,
             message: "",
-            data: input as Record<string, unknown>
-          })
+            data: obj
+          });
+        }
       }
     };
     const core = new AppMsgCoreImpl(cfg);
@@ -215,6 +322,47 @@ export const appmsgPlatformPlugin: PluginManifest = {
     // plugin-appmsg 在 setup 结束后立即尝试一次 connect（best-effort）：
     // 如果 vault 已解锁且有 active key，立即建立连接。
     tryReconnect();
+
+    /* ============== 施工单 2026-07-02 001：注册系统级诊断页 ============== */
+    // 路由 + 菜单 + 面包屑：平台插件自注册，不走 settings.registry。
+    // - route id "appmsg.system.messages"（全局唯一）
+    // - menu group "system"（分类键；展示文案由 Sidebar 走 i18n 解析）
+    // - breadcrumb 第一段固定为 "系统"（与 menu group 同 key 的 i18n 解析）
+    const routes = ctx.get<RouteRegistry>("route.registry");
+    const menus = ctx.get<MenuRegistry>("menu.registry");
+    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+
+    routes.register({
+      id: "appmsg.system.messages",
+      path: "/system/messages",
+      label: { key: "appmsg.system.title", fallback: "Message system" },
+      component: AppMsgSystemPage,
+      inMenu: true,
+      menuGroup: "system",
+      order: 10,
+      icon: "MessagesSquare"
+    });
+    menus.register({
+      id: "appmsg.system.messages.menu",
+      label: { key: "appmsg.system.menu", fallback: "Message system" },
+      path: "/system/messages",
+      group: "system",
+      order: 10,
+      icon: "MessagesSquare"
+    });
+    breadcrumbs.register({
+      id: "appmsg.system.messages.crumbs",
+      order: 5,
+      match: (path) => path === "/system/messages",
+      resolve: () => [
+        // 第一段：与 menu group "system" 共享 i18n key（Sidebar
+        // 走 `shell.menu.group.system` 解析，breadcrumb 这里
+        // 走 `appmsg.system.breadcrumb` 解析；二者同语义、当前
+        // 翻译一致）。保留两份 key 是为了让 sidebar 跟 breadcrumb
+        // 各自走自己的 i18n 通道，避免互相耦合。
+        { label: { key: "appmsg.system.breadcrumb", fallback: "Message system" } }
+      ]
+    });
 
     return () => {
       unsubActive();

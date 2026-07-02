@@ -140,7 +140,10 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     >
       {[...groups.entries()].map(([group, list]) => (
         <div key={group} className="app-sidebar__group">
-          <h4>{group}</h4>
+          {/* 硬切换 003 + 施工单 2026-07-02 001：group 当前仅作分类键，
+              展示文案走 i18n key `shell.menu.group.<id>`；未注册的
+              group 退回原 id（fallback），保持向前兼容。 */}
+          <h4>{host.i18n.text({ key: `shell.menu.group.${group}`, fallback: group })}</h4>
           <ul>
             {list.map((entry) => {
               const path = entry.path;

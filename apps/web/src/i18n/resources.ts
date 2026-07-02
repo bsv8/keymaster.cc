@@ -108,6 +108,11 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       // 硬切换 011 修复：步骤进度 `<nav>` 的 aria-label 也必须 i18n，
       // 辅助技术读到的导航名才能跟随语言切换。
       "shell.onboarding.step.navLabel": "Import wizard steps",
+      // 施工单 2026-07-02 001：sidebar group 走 i18n 解析，未注册时
+      // 回退到原 group id。`settings` 由 plugin-settings 的 menu / 路由
+      // 注入时已经走 Sidebar 特殊分支，这里补的 key 仅供"普通 menu
+      // 分组"使用；settings 分组仍然由 host.settings.list() 单独渲染。
+      "shell.menu.group.system": "System",
       "common.action.back": "Back",
       "common.action.next": "Next"
     },
@@ -182,6 +187,8 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.onboarding.step.state.done": "已完成",
       "shell.onboarding.step.state.upcoming": "未开始",
       "shell.onboarding.step.navLabel": "首启导入向导步骤",
+      // 施工单 2026-07-02 001：sidebar group 走 i18n 解析。
+      "shell.menu.group.system": "系统",
       "common.action.back": "返回",
       "common.action.next": "下一步"
     }
