@@ -464,9 +464,6 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
-      '@keymaster/plugin-appmsg':
-        specifier: '*'
-        version: link:../plugin-appmsg
 
   packages/ui: {}
 
