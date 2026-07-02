@@ -167,6 +167,9 @@ importers:
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0
