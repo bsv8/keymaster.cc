@@ -165,7 +165,7 @@ function makeFakeVault(opts: FakeVaultOptions): VaultService & { __setStatus: (s
 
 /* ============== test fixtures ============== */
 
-const URL = "wss://hubmsg.local/ws/v1";
+const URL = "wss://msg.keymaster.cc/ws/v1";
 const OWNER = "02aaaa".padEnd(66, "a");
 
 const SNAP_BOUND: AppMsgConnectionSnapshot = {

@@ -24,7 +24,7 @@ import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
 import type { HubMsgBindSigner } from "./hubmsgConnection.js";
 
 const OWNER = "02aaaa".padEnd(66, "a");
-const URL = "wss://hubmsg.local/ws/v1";
+const URL = "wss://msg.keymaster.cc/ws/v1";
 const SAMPLE_EP_ORIGIN = { kind: "origin" as const, id: "https://justnote.example:443" };
 const SAMPLE_EP_PLUGIN = { kind: "plugin" as const, id: "keymaster.test.plugin" };
 

@@ -42,7 +42,7 @@ import { signCompactSecp256k1 } from "./signing.js";
 export const APPMSG_PLUGIN_ID = "appmsg";
 
 /** HubMsg WSS 入口。V1 固定单 WSS；装配层可通过环境变量覆盖（v1 不做）。 */
-const DEFAULT_HUBMSG_URL = "wss://hubmsg.local/ws/v1";
+const DEFAULT_HUBMSG_URL = "wss://msg.keymaster.cc/ws/v1";
 
 const appmsgResources: I18nPluginResources = {
   namespace: "appmsg",
