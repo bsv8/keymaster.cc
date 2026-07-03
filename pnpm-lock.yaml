@@ -117,6 +117,9 @@ importers:
       '@keymaster/plugin-key-import':
         specifier: '*'
         version: link:../../packages/plugin-key-import
+      '@keymaster/plugin-message':
+        specifier: '*'
+        version: link:../../packages/plugin-message
       '@keymaster/plugin-p2pkh':
         specifier: '*'
         version: link:../../packages/plugin-p2pkh
@@ -313,6 +316,18 @@ importers:
         version: link:../runtime
 
   packages/plugin-key-import:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+
+  packages/plugin-message:
     dependencies:
       '@keymaster/contracts':
         specifier: '*'

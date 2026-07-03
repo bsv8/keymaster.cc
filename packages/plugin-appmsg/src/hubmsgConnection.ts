@@ -1,21 +1,26 @@
 // packages/plugin-appmsg/src/hubmsgConnection.ts
-// HubMsg 单 WSS 连接管理。
+// HubMsg 单 WSS 连接管理（v1，硬切换 001 之后）。
 //
-// 设计缘由（施工单 2026-07-01 002 硬切换 + HubMsg 施工单 001）：
+// 设计缘由（施工单 2026-07-03 001）：
 //   - 单一 WSS 入口：HubMsg 真值层提供的 `wss://<host>/ws/v1`；
 //   - 三步握手：server_open -> client_bind -> bind_ready；
 //   - 业务帧：request / result / event；
-//   - 内部缓存：最近消息列表（按 owner + endpoint 分片）；
-//   - 推送分发：服务端 event → 本地缓存 → dirty event → 调用方订阅者。
+//   - 推送事件：`message.received`（HubMsg → keymaster，payload 为完整
+//     `HubMsgMessageRecord`）；
+//   - 旧 `appmsg.inbox_dirty` 事件已彻底删除（硬切换 001 后 platform
+//     不再使用；external app 通过 `appmsg.message_received` event
+//     收到完整消息）。
+//   - 协议 RPC：message.send / message.list / message.get / message.online。
+//   - 旧 message.origins / message.counts 内部诊断 RPC 全部删除。
 //
 // 边界：
 //   - 本模块**不**依赖具体签名 / 私钥操作；client_bind 的签名由 caller
 //     （本插件 setup 阶段借 owner 私钥）提供；
-//   - 断线重连 / afterMessageId 补拉交给 `recover()`；
+//   - 断线重连 / afterMessageId 补拉交给 appmsgSync；
 //   - 本文件**不**做未读计数（v1 不做）；
 //   - 本文件**不**做群聊 / 附件 / 撤回 / 编辑 / 已读回执。
 
-import type { AppMsgContentType, AppMsgEndpoint, AppMsgListBox, AppMsgMessage } from "@keymaster/contracts";
+import type { AppMsgContentType, AppMsgMessage } from "@keymaster/contracts";
 
 /** HubMsg 单 WSS 入口配置。 */
 export interface HubMsgConnectionConfig {
@@ -48,14 +53,71 @@ export interface HubMsgBindSigner {
   }): Promise<string>;
 }
 
-/** 消息帧：从 HubMsg 服务端返回的 message 主表行（与 HubMsg `Message` 对齐）。 */
+/** v1 RPC method 名常量集合。 */
+export const HUBMSG_METHOD = {
+  MessageSend: "message.send",
+  MessageList: "message.list",
+  MessageGet: "message.get",
+  MessageOnline: "message.online"
+} as const;
+
+/** 服务端 push 给 keymaster 的完整消息事件名（硬切换 001 后唯一事件）。 */
+export const HUBMSG_EVENT = {
+  MessageReceived: "message.received"
+} as const;
+
+/**
+ * HubMsg `message.received` 事件 data 形态。
+ */
+export interface HubMsgMessageReceivedData {
+  message: HubMsgMessageRecord;
+}
+
+/**
+ * HubMsg `message.online` 入参。
+ */
+export interface HubMsgOnlineParams {
+  publicKeyHexes: string[];
+}
+
+/**
+ * HubMsg `message.online` 出参。
+ *
+ * 返回当前已 bind owner 集合中匹配 `publicKeyHexes` 的子集；调用方按
+ * "在集合内 == online；不在 == offline" 推断。
+ */
+export interface HubMsgOnlineResult {
+  onlinePublicKeyHexes: string[];
+}
+
+/**
+ * 复用平台同步器所需的最小连接形状。
+ *
+ * 设计缘由：appmsgSync.ts 与 appmsgCore.ts 都按此形状消费连接；
+ * `HubMsgConnection` 接口本身比这更大，但同步器只关心 request + 状态。
+ */
+export interface HubMsgConnectionLike {
+  state(): HubMsgConnectionState;
+  request<TParams, TResult>(
+    method: string,
+    params: TParams,
+    options?: { timeoutMs?: number }
+  ): Promise<TResult>;
+}
+
+/**
+ * HubMsg 服务端内部消息记录（plugin 内核使用，与 HubMsg wire / store 对齐）。
+ *
+ * 注意：本结构是 platform internal—— public 消息视图见
+ * `contracts/src/appmsg.ts::AppMsgMessage`。
+ */
 export interface HubMsgMessageRecord {
   messageId: string;
   clientMessageId: string;
   senderOwnerPublicKeyHex: string;
-  senderEndpoint: AppMsgEndpoint;
+  senderEndpoint: { kind: "origin" | "plugin"; id: string };
   recipientOwnerPublicKeyHex: string;
-  recipientEndpoint: AppMsgEndpoint;
+  recipientEndpoint: { kind: "origin" | "plugin"; id: string };
   contentType: AppMsgContentType;
   body: string;
   createdAtMs: number;
@@ -70,21 +132,17 @@ export interface HubMsgResultFrame<T> {
 }
 
 /** 连接状态。 */
-export type HubMsgConnectionState =
-  | "idle"
-  | "connecting"
-  | "bound"
-  | "closed";
+export type HubMsgConnectionState = "idle" | "connecting" | "bound" | "closed";
 
 /**
- * HubMsg 单 WSS 客户端。
+ * HubMsg 单 WSS 客户端接口。
  *
  * 边界：
  *   - **不**直接持有 owner 私钥：bind 时通过 `HubMsgBindSigner` 闭包借用；
- *   - **不**做持久化：消息列表 / inbox / sent 只在内存；
+ *   - **不**做持久化：消息列表 / inbox / sent 只在本地 DB；
  *   - **不**做缓存淘汰策略：v1 不实现 LRU（设计缘由：保持简单）。
  */
-export interface HubMsgConnection {
+export interface HubMsgConnection extends HubMsgConnectionLike {
   /** 当前连接状态。 */
   state(): HubMsgConnectionState;
 
@@ -127,7 +185,8 @@ export interface HubMsgConnection {
  *   - 保持最小：仅实现"建连 + bind + request + event"四件套；
  *   - 真实浏览器侧走 `WebSocket`；Node / 测试可注入 fake socket；
  *   - ping/pong 由内部 timer 自动维护；
- *   - 重连由 `recover()` 单独驱动，**不**内置指数退避（保持简单）。
+ *   - 重连由 caller 驱动（`appmsg.core.connectForOwner`），**不**内置
+ *     指数退避（保持简单）。
  */
 export class HubMsgConnectionImpl implements HubMsgConnection {
   private readonly cfg: HubMsgConnectionConfig;
@@ -140,7 +199,11 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
   /** pending request 等待表。 */
   private readonly pendingById = new Map<
     string,
-    { resolve: (v: unknown) => void; reject: (err: unknown) => void; timer: ReturnType<typeof setTimeout> | null }
+    {
+      resolve: (v: unknown) => void;
+      reject: (err: unknown) => void;
+      timer: ReturnType<typeof setTimeout> | null;
+    }
   >();
   /** 事件订阅表。 */
   private readonly eventHandlers = new Map<string, Set<(data: unknown) => void>>();
@@ -186,13 +249,14 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         }
       };
       sock.addEventListener("message", onMessage);
-      sock.addEventListener("error", (err) => reject(err instanceof Error ? err : new Error(String(err))));
+      sock.addEventListener("error", (err) =>
+        reject(err instanceof Error ? err : new Error(String(err)))
+      );
     });
     await serverOpen;
 
-    // 2) client_bind
-    // 原文拼接由 signer 内部走 `canonicalBindText`（两仓共用）；这里
-    // 只把四元组透传给 signer，避免两仓拼接规则漂移。
+    // 2) client_bind：原文拼接由 signer 内部走 `canonicalBindText`（两仓
+    //    共用）；这里只把四元组透传给 signer。
     const issuedAtMs = Date.now();
     const sigHex = await signer.sign({
       sessionId: this.sessionId ?? "",
@@ -362,9 +426,7 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     this.pingHandle = setInterval(() => {
       if (!this.socket || this.stateValue !== "bound") return;
       try {
-        this.socket.send(
-          JSON.stringify({ v: 1, type: "ping", tsMs: Date.now() })
-        );
+        this.socket.send(JSON.stringify({ v: 1, type: "ping", tsMs: Date.now() }));
       } catch {
         // ignore
       }
@@ -398,8 +460,6 @@ function createWebSocket(url: string): WebSocketLike {
     throw new Error("HubMsg: WebSocket is not available in this environment");
   }
   const ws = new WebSocket(url);
-  // 适配最小 WebSocketLike 形状：监听"message"时拿到的 raw 形参是 unknown，
-  // 内部按 string / ArrayBufferLike 分支处理。
   const listeners = new Map<string, Set<(ev: unknown) => void>>();
   const dispatch = (type: string, ev: unknown): void => {
     const set = listeners.get(type);
@@ -448,25 +508,31 @@ function newId(): string {
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** list 参数的 box；与 `appmsg.ts` 同语义。 */
-export type HubMsgListBox = AppMsgListBox;
-
-/** list 返回 items；service 内部转 AppMsgMessage。 */
-export interface HubMsgListResult {
-  items: HubMsgMessageRecord[];
-  hasMore: boolean;
-}
-
-/** 把 HubMsg 内部 record 转成 contracts 暴露的 AppMsgMessage。 */
+/**
+ * 把 HubMsg 服务端的 wire message record 转成公开 `AppMsgMessage`。
+ *
+ * 兼容旧仓库的辅助函数名（`toAppMsgMessage`）——保持 plugin 内核引用稳定。
+ */
 export function toAppMsgMessage(rec: HubMsgMessageRecord): AppMsgMessage {
-  return {
+  const sOrigin = rec.senderEndpoint.kind === "origin" ? rec.senderEndpoint.id : undefined;
+  const sAppId = rec.senderEndpoint.kind === "plugin" ? rec.senderEndpoint.id : undefined;
+  const rOrigin =
+    rec.recipientEndpoint.kind === "origin" ? rec.recipientEndpoint.id : undefined;
+  const rAppId =
+    rec.recipientEndpoint.kind === "plugin" ? rec.recipientEndpoint.id : undefined;
+  const out: AppMsgMessage = {
     messageId: rec.messageId,
     clientMessageId: rec.clientMessageId,
-    sender: { ownerPublicKeyHex: rec.senderOwnerPublicKeyHex, endpoint: rec.senderEndpoint },
-    recipient: { ownerPublicKeyHex: rec.recipientOwnerPublicKeyHex, endpoint: rec.recipientEndpoint },
+    senderPublicKeyHex: rec.senderOwnerPublicKeyHex,
+    recipientPublicKeyHex: rec.recipientOwnerPublicKeyHex,
     contentType: rec.contentType,
     body: rec.body,
     createdAtMs: rec.createdAtMs,
     insertedAtMs: rec.insertedAtMs
   };
+  if (sOrigin) out.senderOrigin = sOrigin;
+  else if (sAppId) out.senderAppId = sAppId;
+  if (rOrigin) out.recipientOrigin = rOrigin;
+  else if (rAppId) out.recipientAppId = rAppId;
+  return out;
 }

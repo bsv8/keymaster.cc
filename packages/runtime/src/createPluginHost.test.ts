@@ -263,7 +263,7 @@ describe("createPluginHost - lifecycle", () => {
 
 /* ============== 2026-07-01/003 appMessageEndpoint 注入测试 ============== */
 
-import { APPMESSAGE_CORE_CAPABILITY, type AppMsgPluginClient } from "@keymaster/contracts";
+import { APPMESSAGE_CORE_CAPABILITY, type AppMsgSimpleClient } from "@keymaster/contracts";
 
 describe("createPluginHost - manifest.appMessageEndpoint", () => {
   function makeAppmsgCoreProvider(id: string): PluginManifest {
@@ -275,21 +275,20 @@ describe("createPluginHost - manifest.appMessageEndpoint", () => {
       meta: { kind: "platform", defaultEnabled: true, canDisable: false },
       setup(ctx: PluginContext) {
         // 提供一个空的 mock core；host 不会真调用它（scoped 注入只
-        // 验证 capability 是否挂上 + 类型是否符合 AppMsgPluginClient）。
+        // 验证 capability 是否挂上 + 类型是否符合 AppMsgSimpleClient）。
         const core = {
           connectForOwner: async () => undefined,
           disconnect: async () => undefined,
-          list: async () => ({ items: [], hasMore: false }),
-          get: async () => null,
-          send: async () => ({ messageId: "0", createdAtMs: 0 }),
-          subscribeInboxDirty: () => () => undefined,
-          subscribeMessageReceived: () => () => undefined,
-          createPluginScopedClient: (endpointId: string): AppMsgPluginClient => ({
-            endpointId,
-            list: async () => ({ items: [], hasMore: false }),
-            get: async () => null,
-            send: async () => ({ messageId: "0", createdAtMs: 0 }),
-            subscribeInboxDirty: () => () => undefined
+          listLocalMessages: async () => ({ items: [], hasMore: false }),
+          getLocalMessage: async () => null,
+          sendMessage: async () => ({ messageId: "0", createdAtMs: 0 }),
+          subscribeMessages: () => () => undefined,
+          createMessageScopedClient: (): AppMsgSimpleClient => ({
+            sendMessage: async () => ({ messageId: "0", createdAtMs: 0 }),
+            listMessages: async () => ({ items: [], hasMore: false }),
+            getMessage: async () => null,
+            subscribeMessages: () => () => undefined,
+            checkOnline: async () => ({})
           })
         };
         ctx.provide(APPMESSAGE_CORE_CAPABILITY, core);
@@ -341,9 +340,12 @@ describe("createPluginHost - manifest.appMessageEndpoint", () => {
     await host.register(makeEndpointPlugin("p1", "keymaster.message"));
 
     const capKey = "p1.appmsg.client";
-    const client = host.capabilities.get<AppMsgPluginClient>(capKey);
+    const client = host.capabilities.get<AppMsgSimpleClient>(capKey);
     expect(client).toBeTruthy();
-    expect(client.endpointId).toBe("keymaster.message");
+    // 验证 scoped client 的 sendMessage / listMessages 等门面方法已挂上。
+    expect(typeof client?.sendMessage).toBe("function");
+    expect(typeof client?.listMessages).toBe("function");
+    expect(typeof client?.subscribeMessages).toBe("function");
   });
 
   it("does NOT inject scoped client if appmsg.core missing", async () => {

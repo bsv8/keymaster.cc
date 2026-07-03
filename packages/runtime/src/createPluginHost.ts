@@ -677,25 +677,35 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
             }
           }
         }
-        // 施工单 2026-07-01/003 对齐：setup 完成后，host 给声明了
-        // `appMessageEndpoint` 的插件注入 scoped client 到
+        // 施工单 2026-07-03 001 硬切换：setup 完成后，host 给声明了
+        // `appMessageEndpoint` 的插件注入 scoped message client 到
         // `<pluginId>.appmsg.client` capability。插件作者最终体验是
         // "声明 endpoint → 拿到 scoped client"，**不**走全局工厂。
         //
         // 关键：runtime **不**直接 import plugin-appmsg；通过
-        // `AppMsgCore.createPluginScopedClient(endpointId)` 间接构造
-        // scoped client，避免 runtime ↔ plugin-appmsg 循环依赖。
+        // `AppMsgCore.createMessageScopedClient(...)` 间接构造
+        // `AppMsgSimpleClient`，避免 runtime ↔ plugin-appmsg 循环依赖。
         if (appMsgEp && capabilities.has(APPMESSAGE_CORE_CAPABILITY)) {
           const core = capabilities.get<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
-          const scopedClient: AppMsgPluginClient = core.createPluginScopedClient(
-            appMsgEp.endpointId
-          );
+          // 取当前 owner publicKeyHex 作为 sender；如果拿不到（vault locked），
+          // 给空串——sender 还是固定由 creator 决定，调用方无法更改。
+          let ownerHex = "";
+          if (capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) {
+            try {
+              const ks = capabilities.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
+              ownerHex = ks.active().activePublicKeyHex ?? "";
+            } catch {
+              ownerHex = "";
+            }
+          }
+          const scopedClient = core.createMessageScopedClient({
+            senderPublicKeyHex: ownerHex,
+            senderAppId: appMsgEp.endpointId
+          });
           const scopedKey = `${pluginId}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX}`;
           capabilities.provide(scopedKey, scopedClient);
           // 关键：把 scoped client 加到 ownership.capabilities，让
           // disable 时的 purgeOwnership 把它一起 revoke 掉。
-          //（snapshotOwnership 在 runSetup 内已经结束，这里直接补
-          // 到 record.ownership。）
           if (!record.ownership.capabilities.includes(scopedKey)) {
             record.ownership.capabilities.push(scopedKey);
           }

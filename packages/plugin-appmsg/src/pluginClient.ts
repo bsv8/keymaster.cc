@@ -1,95 +1,80 @@
 // packages/plugin-appmsg/src/pluginClient.ts
-// 面向插件的 scoped `appmsg.client` 实现。
+// 插件 scoped message client 适配层。
 //
-// 设计缘由（施工单 2026-07-01 002 硬切换）：
-//   - 注入到插件 `ctx.get(APPMESSAGE_CLIENT_CAPABILITY)` 时，sender endpoint
-//     已经固定为插件 manifest 声明的 `pluginEndpointId`；插件只传
-//     recipient / body / contentType。
-//   - 插件**不**允许自报 sender endpoint；scoped client 内部统一填 sender。
-//   - owner runtime 来自 platform 注入：本组件**不**持有 owner 私钥；
-//     sender.ownerPublicKeyHex 由 platform `appmsg.core` 用当前 bind owner
-//     覆盖。
+// 设计缘由（施工单 2026-07-03 001 §8.5）：
+//   - 注入到插件 `ctx.get(APPMESSAGE_CLIENT_CAPABILITY)` 时，sender 已经
+//     固定为插件 manifest 声明的 `appMessageEndpoint.endpointId`；
+//   - 插件只传 `recipientPublicKeyHex` + `recipientOrigin|recipientAppId`
+//     + `body` + `contentType`，**不**允许自报 sender。
+//   - 公开接口只暴露 `sendMessage` / `listMessages` / `getMessage` /
+//     `subscribeMessages`——sender 投影、owner、endpoint、box、atMs 全部
+//     不可见。
+//   - 与 runtime host 的对接：`createMessageScopedClient(...)` 返回
+//     `AppMsgSimpleClient`；本类只是把 sender 已经固定的 client 进一步
+//     收口到"按插件角度看"。
+//
+// 本仓库**不**再保留旧 `AppMsgPluginClient.subscribeInboxDirty(...)` 或
+// `AppMsgPluginClient.list(... box ...)` 这类以 box 为中心的接口。
 
-import type {
-  AppMsgCore,
-  AppMsgEndpoint,
-  AppMsgInboxDirtyEvent,
-  AppMsgListBox,
-  AppMsgListResult,
-  AppMsgMessage,
-  AppMsgPluginClient,
-  AppMsgSendResult,
-  AppMsgContentType
-} from "@keymaster/contracts";
+import type { AppMsgCore, AppMsgSimpleClient } from "@keymaster/contracts";
 
 /**
- * scoped `appmsg.client` 实现。
+ * 插件 scoped message client 形态。
  *
- * 关键约束：
- *   - endpointId 在创建时**一次性**绑定到 sender endpoint；
- *   - 任何 list / get / send 都用 platform 提供的当前 owner；
- *   - 订阅 dirty event 时**只**收自己 endpoint 的事件（按 kind/id 过滤）。
+ * 与 `AppMsgSimpleClient` 同义；保留类型别名仅为兼容旧 import。
  */
-export class AppMsgPluginClientImpl implements AppMsgPluginClient {
-  public readonly endpointId: string;
-  private readonly core: AppMsgCore;
+export type AppMsgPluginClient = AppMsgSimpleClient;
 
-  constructor(core: AppMsgCore, endpointId: string) {
-    this.core = core;
+/**
+ * 工厂：构造一个 sender 已绑定的 scoped `appmsg.client`。
+ *
+ * `endpointId` 在本仓库模型中等价于 `appId`；runtime 在 enable 阶段
+ * 通过 `manifest.appMessageEndpoint.endpointId` 注入；binding 后这条
+ * 投影**不变**。
+ *
+ * 本函数不保存 endpointId 状态——插件拿到的是 `AppMsgSimpleClient`，
+ * 内部 sender 投影已经固定，调用方无法更改。
+ */
+export function makePluginScopedClient(
+  core: AppMsgCore,
+  endpointId: string,
+  ownerPublicKeyHex: string
+): AppMsgSimpleClient {
+  return core.createMessageScopedClient({
+    senderPublicKeyHex: ownerPublicKeyHex,
+    senderAppId: endpointId
+  });
+}
+
+/**
+ * 兼容旧名字的 `AppMsgPluginClientImpl`。
+ *
+ * 新代码应直接用 `AppMsgSimpleClient`；本类只为旧 import 留一个空壳。
+ */
+export class AppMsgPluginClientImpl implements AppMsgSimpleClient {
+  readonly endpointId: string;
+  private readonly inner: AppMsgSimpleClient;
+
+  constructor(core: AppMsgCore, endpointId: string, ownerPublicKeyHex: string) {
     this.endpointId = endpointId;
+    this.inner = makePluginScopedClient(core, endpointId, ownerPublicKeyHex);
   }
 
-  async list(input: {
-    box: AppMsgListBox;
-    afterMessageId?: string;
-    beforeMessageId?: string;
-    limit?: number;
-  }): Promise<AppMsgListResult> {
-    return this.core.list({
-      // scope.ownerPublicKeyHex 由 core 用当前 bind owner 覆盖；
-      // 这里只固定 endpoint 部分，owner 由 core 决定（平台单例）。
-      scope: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
-      params: {
-        box: input.box,
-        afterMessageId: input.afterMessageId,
-        beforeMessageId: input.beforeMessageId,
-        limit: input.limit
-      }
-    });
+  sendMessage(input: Parameters<AppMsgSimpleClient["sendMessage"]>[0]) {
+    return this.inner.sendMessage(input);
   }
-
-  async get(messageId: string): Promise<AppMsgMessage | null> {
-    return this.core.get({
-      scope: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
-      messageId
-    });
+  listMessages(input?: Parameters<AppMsgSimpleClient["listMessages"]>[0]) {
+    return this.inner.listMessages(input);
   }
-
-  async send(input: {
-    recipientOwnerPublicKeyHex: string;
-    recipientEndpoint: AppMsgEndpoint;
-    contentType: AppMsgContentType;
-    body: string;
-    clientMessageId: string;
-    createdAtMs: number;
-  }): Promise<AppMsgSendResult> {
-    return this.core.send({
-      sender: { ownerPublicKeyHex: "", endpoint: { kind: "plugin", id: this.endpointId } },
-      recipientOwnerPublicKeyHex: input.recipientOwnerPublicKeyHex,
-      recipientEndpoint: input.recipientEndpoint,
-      contentType: input.contentType,
-      body: input.body,
-      clientMessageId: input.clientMessageId,
-      createdAtMs: input.createdAtMs
-    });
+  getMessage(input: Parameters<AppMsgSimpleClient["getMessage"]>[0]) {
+    return this.inner.getMessage(input);
   }
-
-  subscribeInboxDirty(handler: (event: AppMsgInboxDirtyEvent) => void): () => void {
-    const filtered = (event: AppMsgInboxDirtyEvent) => {
-      if (event.endpoint.kind === "plugin" && event.endpoint.id === this.endpointId) {
-        handler(event);
-      }
-    };
-    return this.core.subscribeInboxDirty(filtered);
+  subscribeMessages(
+    handler: Parameters<AppMsgSimpleClient["subscribeMessages"]>[0]
+  ): () => void {
+    return this.inner.subscribeMessages(handler);
+  }
+  checkOnline(input: Parameters<AppMsgSimpleClient["checkOnline"]>[0]) {
+    return this.inner.checkOnline(input);
   }
 }

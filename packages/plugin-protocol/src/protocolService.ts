@@ -75,9 +75,9 @@ import {
   type AppMsgListResult,
   type AppMsgSendParams,
   type AppMsgSendResult,
-  type AppMsgInboxDirtyEvent,
   type AppMsgMessage,
   type AppMsgContentType,
+  type AppMsgSimpleClient,
   type AppViewContext,
   type BinaryField,
   type CipherDecryptParams,
@@ -659,13 +659,13 @@ export class ProtocolServiceImpl implements ProtocolService {
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageDb);
     this.bootModeValue = deps.bootMode ?? "connect";
-    // 施工单 2026-07-01 002 硬切换：订阅 `appmsg.core` 的 inbox dirty
-    // 事件，转发给当前 origin 对应 endpoint 的 caller（**不**发给其它
-    // endpoint）。事件路径：`HubMsg -> appmsg.core -> protocolService
-    // -> 当前 caller`。
+    // 施工单 2026-07-03 001 硬切换：订阅 `appmsg.core` 的完整消息推送
+    // （**不**再是 dirty hint），转发给当前 origin 对应 endpoint 的 caller
+    // （其它 origin 收不到）。事件路径：
+    //   `HubMsg -> appmsg.core -> protocolService -> 当前 caller`。
     if (deps.appMsgCore) {
-      deps.appMsgCore.subscribeInboxDirty((event) => {
-        this.dispatchAppMsgInboxDirty(event);
+      deps.appMsgCore.subscribeMessages((msg) => {
+        this.dispatchAppMsgMessageReceived(msg);
       });
     }
   }
@@ -4204,19 +4204,21 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /* ============== appmsg.send / appmsg.list / appmsg.get ==============
    *
-   * 设计缘由（施工单 2026-07-01 002 硬切换）：
+   * 设计缘由（施工单 2026-07-03 001 硬切换）：
    *   - `protocolService` 是**外部 app** 的协议适配层，不持有 HubMsg 连接
-   *     真值；HubMsg 连接 + 缓存 + 推送分发收口到 `appmsg.core`；
+   *     真值；HubMsg 连接 + 本地 DB + 推送分发收口到 `appmsg.core`；
    *   - 本组三个 method 走同一套 accept 预校验（session 真值 + origin
-   *     匹配 + owner key ready），执行阶段把当前 session 投影成：
-   *       senderOwnerPublicKeyHex = session.ownerPublicKeyHex
-   *       senderEndpoint = { kind: "origin", id: exactOrigin }
-   *     **不**接受 caller 自报 sender owner / sender endpoint；
+   *     匹配 + owner key ready），执行阶段把当前 session 投影成 sender
+   *     `{ senderPublicKeyHex = session.ownerPublicKeyHex,
+   *       senderOrigin = event.origin }`，**不**接受 caller 自报 sender；
+   *   - 公开 params **不**含 `box` / `atMs` / `ownerPublicKeyHex` /
+   *     `endpoint` 字段；只允许 `recipientPublicKeyHex` +
+   *     `recipientOrigin` 或 `recipientAppId`；
    *   - `appmsg.*` 不参与 popup 命令流 confirm UI（v1 走自动执行）；与
    *     cipher / connect.* autoExecuteAfterUnlock 路径同语义。
-   *   - 对外推送 `appmsg.inbox_dirty` event：脏事件由 `appmsg.core`
-   *     内部 subscribe 接收后转成 ProtocolEventMessage 发给当前
-   *     origin 对应 endpoint 的 caller；其它 origin 收不到。
+   *   - 对外推送 `appmsg.message_received` event（完整消息）；由 `appmsg.core`
+   *     内部 subscribe 接收后转成 ProtocolEventMessage 发给当前 origin
+   *     对应 endpoint 的 caller；其它 origin 收不到。
    */
 
   /**
@@ -4234,34 +4236,34 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 把当前 session 投影成 origin sender / scope。
+   * 把当前 session 投影成对外 sender（公开消息视图）。
    *
    * 关键约束：
-   *   - ownerPublicKeyHex 取自 session 真值，不读 caller params；
-   *   - endpoint.id 取 `event.origin`（exact origin，包含 port）；
+   *   - `senderPublicKeyHex` 取自 session 真值，不读 caller params；
+   *   - `senderOrigin` 取 `event.origin`（exact origin，包含 port）；
    *   - session 校验失败一律 fail-fast，与 cipher.* / connect.* 同语义。
-   *   - 同一个 `(session.owner, event.origin)` 既作 `sender`（send）
-   *     又作 `scope`（list / get）：因为外部 app 只看自己这个 origin
-   *     endpoint 的 inbox/sent；不会越权读到其它 origin。
+   *   - list / get 走的也是同一组 sender 投影——对外按 session.origin
+   *     收件维度返回数据。
    */
   private async projectAppMsgSender(rec: RequestRecord): Promise<{
-    ownerPublicKeyHex: string;
-    endpoint: { kind: "origin"; id: string };
+    senderPublicKeyHex: string;
+    senderOrigin: string;
   }> {
     const params = rec.params as { connectSessionId?: string };
     const session = await this.requireConnectSession(rec, params.connectSessionId ?? "");
     return {
-      ownerPublicKeyHex: session.ownerPublicKeyHex,
-      endpoint: { kind: "origin", id: rec.origin }
+      senderPublicKeyHex: session.ownerPublicKeyHex,
+      senderOrigin: rec.origin
     };
   }
 
   /**
-   * 校验 params 中**不**携带伪造 sender 字段（防御性）：
+   * 校验 params 中**不**携带系统内部地址 / dirty 字段（防御性）：
    *
-   * 关键约束：
-   *   - 任何 `senderOwnerPublicKeyHex` / `senderEndpoint` / `fromPublicKeyHex` /
-   *     `fromOrigin` / `fromAppId` 风格的字段**都不允许**进入对外 params；
+   * 关键约束（施工单 §4.4 / §6.2）：
+   *   - 任何 `senderOwnerPublicKeyHex` / `senderEndpoint` / `endpoint` /
+   *     `box` / `atMs` / `fromPublicKeyHex` / `fromOrigin` / `fromAppId`
+   *     风格的字段**都不允许**进入对外 params；
    *   - 出现即 invalid_request；
    *   - v1 简化：TypeScript 类型已经在协议层禁掉；这里做运行时兜底
    *     防止 caller 用 `params: { ... } as AppMsgSendParams` 强转绕过。
@@ -4270,13 +4272,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     const forbidden = [
       "senderOwnerPublicKeyHex",
       "senderEndpoint",
+      "senderAddress",
+      "endpoint",
+      "box",
+      "atMs",
       "fromPublicKeyHex",
       "fromOrigin",
       "fromAppId"
     ];
     for (const k of forbidden) {
       if (k in params) {
-        throw protocolError("invalid_request", `appmsg: forbidden sender field "${k}"`);
+        throw protocolError("invalid_request", `appmsg: forbidden field "${k}"`);
       }
     }
   }
@@ -4296,28 +4302,49 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (typeof params.body !== "string" || params.body.length === 0) {
       throw protocolError("invalid_request", "appmsg.send: body must be non-empty string");
     }
-    if (!params.recipientEndpoint || !isValidAppMsgEndpoint(params.recipientEndpoint)) {
-      throw protocolError("invalid_request", "appmsg.send: invalid recipientEndpoint");
+    const hasOrigin = typeof params.recipientOrigin === "string" && params.recipientOrigin.length > 0;
+    const hasAppId = typeof params.recipientAppId === "string" && params.recipientAppId.length > 0;
+    if (hasOrigin === hasAppId) {
+      throw protocolError(
+        "invalid_request",
+        "appmsg.send: exactly one of recipientOrigin / recipientAppId required"
+      );
+    }
+    if (hasOrigin && !/^(https?):\/\/([^/:]+):(\d+)$/.test(params.recipientOrigin as string)) {
+      throw protocolError("invalid_request", "appmsg.send: invalid recipientOrigin");
+    }
+    if (hasAppId && !/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(params.recipientAppId as string)) {
+      throw protocolError("invalid_request", "appmsg.send: invalid recipientAppId");
     }
     if (
-      !params.recipientOwnerPublicKeyHex ||
-      typeof params.recipientOwnerPublicKeyHex !== "string" ||
-      params.recipientOwnerPublicKeyHex.length !== 66
+      !params.recipientPublicKeyHex ||
+      typeof params.recipientPublicKeyHex !== "string" ||
+      params.recipientPublicKeyHex.length !== 66
     ) {
-      throw protocolError("invalid_request", "appmsg.send: invalid recipientOwnerPublicKeyHex");
+      throw protocolError(
+        "invalid_request",
+        "appmsg.send: invalid recipientPublicKeyHex"
+      );
     }
-    const sender = await this.projectAppMsgSender(rec);
+    const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
-    const res = await core.send({
-      sender: { ownerPublicKeyHex: sender.ownerPublicKeyHex, endpoint: sender.endpoint },
-      recipientOwnerPublicKeyHex: params.recipientOwnerPublicKeyHex,
-      recipientEndpoint: params.recipientEndpoint,
+
+    // 构造一个 sender 已绑定的对外 `AppMsgSimpleClient`，由它在内部
+    // 完成 owner / endpoint 投影。
+    const scoped = core.createMessageScopedClient({
+      senderPublicKeyHex: projected.senderPublicKeyHex,
+      senderOrigin: projected.senderOrigin
+    });
+    const res = await scoped.sendMessage({
+      recipientPublicKeyHex: params.recipientPublicKeyHex,
+      recipientOrigin: hasOrigin ? (params.recipientOrigin as string) : undefined,
+      recipientAppId: hasAppId ? (params.recipientAppId as string) : undefined,
       contentType: params.contentType as AppMsgContentType,
       body: params.body,
       clientMessageId: params.clientMessageId,
       createdAtMs: params.createdAtMs
     });
-    void this.touchConnectSessionByOwner(sender.ownerPublicKeyHex);
+    void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
     return res;
   }
 
@@ -4327,24 +4354,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const params = rec.params as AppMsgListParams;
     this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
-    if (params.box !== "inbox" && params.box !== "sent" && params.box !== "all") {
-      throw protocolError("invalid_request", "appmsg.list: invalid box");
-    }
-    // 关键（施工单 2026-07-01/003 对齐）：`scope` = 当前 session +
-    // 当前 event.origin（exact origin）。外部 app 只能看自己这个 origin
-    // endpoint 的 inbox / sent。
     const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
-    const res = await core.list({
-      scope: { ownerPublicKeyHex: projected.ownerPublicKeyHex, endpoint: projected.endpoint },
-      params: {
-        box: params.box,
-        afterMessageId: params.afterMessageId,
-        beforeMessageId: params.beforeMessageId,
-        limit: params.limit
-      }
+    const scoped = core.createMessageScopedClient({
+      senderPublicKeyHex: projected.senderPublicKeyHex,
+      senderOrigin: projected.senderOrigin
     });
-    void this.touchConnectSessionByOwner(projected.ownerPublicKeyHex);
+    const res = await scoped.listMessages({
+      afterMessageId: params.afterMessageId,
+      limit: params.limit
+    });
+    void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
     return res;
   }
 
@@ -4359,14 +4379,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
-    const msg = await core.get({
-      scope: { ownerPublicKeyHex: projected.ownerPublicKeyHex, endpoint: projected.endpoint },
-      messageId: params.messageId
+    const scoped = core.createMessageScopedClient({
+      senderPublicKeyHex: projected.senderPublicKeyHex,
+      senderOrigin: projected.senderOrigin
     });
+    const msg = await scoped.getMessage({ messageId: params.messageId });
     if (!msg) {
       throw localFailure("internal_error", "appmsg.get: message not found");
     }
-    void this.touchConnectSessionByOwner(projected.ownerPublicKeyHex);
+    void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
     return { message: msg };
   }
 
@@ -5005,40 +5026,34 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 把 `appmsg.inbox_dirty` 事件推送给当前 origin 的 caller。
+   * 把 `appmsg.message_received` 事件推送给当前 origin 的 caller。
    *
-   * 设计缘由（施工单 2026-07-01 002 硬切换）：
+   * 设计缘由（施工单 2026-07-03 001 硬切换）：
    *   - event 是 server-pushed 方向（protocolService -> caller），与
    *     `result`（caller -> protocolService）方向相反；
-   *   - 推送给"当前 origin 对应 endpoint"的 caller：按当前 transport
-   *     状态找出"该 origin 上活跃的 caller source"；
-   *   - dirty event **不**携带完整正文；正文真值由 caller 通过
-   *     `appmsg.list` 拉取。
-   *
-   * 关键约束：
-   *   - dirty event 投递目标限定为"当前 origin 的 last request 的
-   *     source"——避免在多 tab / 多 popup 场景下向无关窗口推送；
-   *   - v1 简化：不做 reconnect / queue；事件丢失不重传（HubMsg 协议
-   *     端点会做连接恢复，但**不**做事件 replay 队列）。
+   *   - 事件名 = `appmsg.message_received`；data 直接携带完整公开消息；
+   *   - 推送给"当前 origin 对应 endpoint"的 caller：按消息的
+   *     `senderOrigin` 找到对应 transport source；其它 origin 不收。
+   *   - 当前 session 没有活动 caller 时静默丢弃。
    */
-  private dispatchAppMsgInboxDirty(event: AppMsgInboxDirtyEvent): void {
-    if (event.endpoint.kind !== "origin") {
-      // protocolService 只负责把 dirty event 推给 origin 端点；plugin
-      // 端点的 dirty event 由 appmsg.client 内部订阅负责。
-      return;
-    }
-    const targetOrigin = event.endpoint.id;
-    // 找出当前 targetOrigin 上"最近一条 request"的 source：
-    const recent = this.findRecentSourceForOrigin(targetOrigin);
+  private dispatchAppMsgMessageReceived(msg: AppMsgMessage): void {
+    const senderOrigin = msg.senderOrigin;
+    if (!senderOrigin) return; // plugin 端推送不通过 protocolService
+    const recent = this.findRecentSourceForOrigin(senderOrigin);
     if (!recent) return;
     if (!this.canPostToTarget(recent)) return;
     const message: ProtocolEventMessage = {
       v: PROTOCOL_VERSION,
       type: "event",
-      event: "appmsg.inbox_dirty",
-      data: event
+      event: "appmsg.message_received",
+      data: { message: msg }
     };
-    this.postEventMessage(recent, targetOrigin, message);
+    this.postEventMessage(recent, senderOrigin, message);
+  }
+
+  /** 兼容旧符号名的薄壳——保留类型对账兼容，不再被任何路径调用。 */
+  private dispatchAppMsgInboxDirty(_event: unknown): void {
+    void _event;
   }
 
   /**

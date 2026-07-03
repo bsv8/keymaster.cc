@@ -238,18 +238,17 @@ export interface ProtocolCancelMessage {
   id: string;
 }
 
-/* ============== 顶层 event 报文（施工单 2026-07-01 002 硬切换） ============== */
+/* ============== 顶层 event 报文（施工单 2026-07-03 001 硬切换） ============== */
 
 /**
  * 顶层 `event` 报文（server-pushed）。
  *
- * 设计缘由（施工单 2026-07-01 002 硬切换）：
- *   - V1 只引入一种 event：`appmsg.inbox_dirty`；新消息到达时由
- *     protocolService 向当前 origin 的 caller 推送 dirty hint；
- *     **不**直接把完整消息正文作为对外 event 真值。
- *   - 完整消息正文由 caller 通过 `appmsg.list` / `appmsg.get` 取；
- *     dirty event 只负责"通知对方有变化"，把"消息正文"留作业务请求
- *     真值。
+ * 设计缘由（施工单 2026-07-03 001 硬切换）：
+ *   - V1 只引入一种 event：`appmsg.message_received`；新消息到达时由
+ *     protocolService 向当前 origin 的 caller 推送完整消息；
+ *     直接把完整消息正文作为对外 event 真值（**不**再用 dirty hint）。
+ *   - 调用方按需再调 `appmsg.list` / `appmsg.get` 验证 / 取详情；
+ *     event 自身已携带完整正文，**不**要求调用方再发请求。
  *   - event 是单向推送，**不**回 result；与 `result` 不混淆。
  *   - 推送给当前 origin 对应 endpoint 的 caller（按 `event.source`
  *     与"当前 origin"双重定位）；其它 endpoint 不收。
@@ -257,9 +256,10 @@ export interface ProtocolCancelMessage {
 export interface ProtocolEventMessage {
   v: typeof PROTOCOL_VERSION;
   type: "event";
-  /** 事件名；V1 仅 `appmsg.inbox_dirty`。 */
-  event: "appmsg.inbox_dirty";
-  data: AppMsgInboxDirtyEventData;
+  /** 事件名；V1 仅 `appmsg.message_received`。 */
+  event: "appmsg.message_received";
+  /** 完整消息正文（公开视图）。 */
+  data: AppMsgMessageReceivedEventData;
 }
 
 /** 顶层 request 报文。 */
@@ -1129,46 +1129,43 @@ export interface ConnectLaunchResult {
   resolvedAt: number;
 }
 
-/* ============== appmsg.*（施工单 2026-07-01 002 硬切换：应用消息总线对外方法族） ============== */
+/* ============== appmsg.*（施工单 2026-07-03 001 硬切换：应用消息总线对外方法族） ============== */
 
 /**
  * appmsg 对外方法族。
  *
- * 设计缘由（施工单 2026-07-01 002 硬切换）：
+ * 设计缘由（施工单 2026-07-03 001 硬切换）：
  *   - 与 `cipher.*` / `p2pkh.transfer` 一样属于 session-bound 外部业务方法；
  *     强制要求 `connectSessionId`；sender 真值由 protocolService 从
  *     `connectSession.ownerPublicKeyHex` + `event.origin`（exact origin）
- *     投影，不接受 caller 自报 sender owner / sender endpoint。
- *   - 调用方只能指定 `recipientOwnerPublicKeyHex` + `recipientEndpoint`
- *     （recipientEndpoint 是 `{ kind: "origin", id: exactOrigin }` 或
- *     `{ kind: "plugin", id: pluginEndpointId }`）。
- *   - 收件地址模型见 `appmsg.ts` 的 `AppMsgAddress`；v1 只支持
+ *     投影，**不**接受 caller 自报 sender owner / sender endpoint。
+ *   - 调用方只能指定 `recipientPublicKeyHex` + `recipientOrigin` /
+ *     `recipientAppId`；**不**再传 generic endpoint 字段。
+ *   - 收件形态见 `appmsg.ts` 的 `AppMsgRecipient`；v1 只支持
  *     `text/plain` 与 `text/markdown`；不做未读计数、已读回执、群聊、
  *     附件、撤回、跨节点 session 恢复。
- *   - 对外实时提示仅 `appmsg.inbox_dirty`（dirty event）；正文真值来自
- *     `appmsg.list` / `appmsg.get`。
- *   - protocolService **不**持有 HubMsg 连接真值；HubMsg 连接 + 缓存 +
+ *   - 对外实时提示仅 `appmsg.message_received`（完整消息 event）；
+ *     **不**再用 `appmsg.inbox_dirty`（dirty hint 已删除）。
+ *   - protocolService **不**持有 HubMsg 连接真值；HubMsg 连接 + 本地库 +
  *     推送分发收口到 `appmsg.core` 平台能力，protocolService 只做
  *     external protocol 适配。
  *
  * 关键边界：
  *   - params 中**不**允许出现 `senderOwnerPublicKeyHex` / `senderEndpoint`
- *     / `fromPublicKeyHex` / `fromOrigin` / `fromAppId` 等"自报 sender"字段；
- *     出现即 invalid_request。
+ *     / `fromPublicKeyHex` / `fromOrigin` / `fromAppId` / `box` / `atMs`
+ *     等任何"系统内部地址模型 / dirty 模型"字段；出现即 invalid_request。
  *   - session owner key 不 ready（vault locked 且 owner key 状态错）时
  *     走 fail-fast；与 cipher.* 同语义。
- *   - recipient endpoint 必须是合法 `AppMsgEndpoint`（`origin` 必须包含
- *     port，`plugin` 必须符合 `isValidPluginEndpointIdShape`）。
+ *   - `appmsg.send` 必须恰好指定 `recipientOrigin` 或 `recipientAppId` 之一；
+ *     都给或都不给都视为 invalid_request。
  */
 
 import type {
-  AppMsgEndpoint,
-  AppMsgInboxDirtyEvent,
   AppMsgContentType,
-  AppMsgListBox,
+  AppMsgListInput,
   AppMsgListResult,
   AppMsgMessage,
-  AppMsgMessageReceivedEvent,
+  AppMsgSendInput,
   AppMsgSendResult
 } from "./appmsg.js";
 
@@ -1176,26 +1173,28 @@ import type {
 // 对外"业务方法结果"通过下面的 re-export 让外部 caller 继续用
 // `protocol.ts` 暴露的名字；这两组形状字段一致，避免重复定义。
 export type { AppMsgListResult, AppMsgSendResult };
-export type AppMsgMessageReceivedEventData = AppMsgMessageReceivedEvent;
+
+/**
+ * 对外 `appmsg.message_received` event 数据类型。
+ *
+ * 关键约束：
+ *   - v1 对外 event 直接携带完整消息正文（公开视图），**不**再携带
+ *     dirty hint；
+ *   - 接收方直接拿到完整 `AppMsgMessage`，**不**必须再调 `appmsg.list`
+ *     / `appmsg.get`（但仍可调，例如用于 UI 兜底 / 增量合并）；
+ *   - 推送给"当前 exact origin 对应 endpoint"的 caller；其它 endpoint
+ *     收不到自己的事件（也不应该收）。
+ */
+export type AppMsgMessageReceivedEventData = { message: AppMsgMessage };
 
 /** `appmsg.send` 请求参数。 */
-export interface AppMsgSendParams {
-  recipientOwnerPublicKeyHex: string;
-  recipientEndpoint: AppMsgEndpoint;
-  contentType: AppMsgContentType;
-  body: string;
-  clientMessageId: string;
-  createdAtMs: number;
+export interface AppMsgSendParams extends AppMsgSendInput {
   /** 必填：当前 connectSessionId。 */
   connectSessionId: string;
 }
 
 /** `appmsg.list` 请求参数。 */
-export interface AppMsgListParams {
-  box: AppMsgListBox;
-  afterMessageId?: string;
-  beforeMessageId?: string;
-  limit?: number;
+export interface AppMsgListParams extends AppMsgListInput {
   /** 必填：当前 connectSessionId。 */
   connectSessionId: string;
 }
@@ -1212,25 +1211,11 @@ export interface AppMsgGetResult {
   message: AppMsgMessage;
 }
 
-/**
- * 对外 `appmsg.inbox_dirty` event 数据类型。
- *
- * 关键约束：
- *   - v1 对外 event 只携带 dirty hint（owner + endpoint + atMs），
- *     **不**携带完整消息正文；
- *   - 接收方按 `ownerPublicKeyHex + endpoint` 识别 dirty box，
- *     然后调 `appmsg.list` 拉正文；
- *   - 推送给"当前 exact origin 对应 endpoint"的 caller；其它 endpoint
- *     收不到自己的 dirty 事件（也不应该收）。
- */
-export type AppMsgInboxDirtyEventData = AppMsgInboxDirtyEvent;
+/* 兼容性：保留旧的 type alias，但语义收口为"完整消息事件的数据"。
+ * 旧 `AppMsgMessageReceivedEvent` 已从 contracts 抹去；这里 alias 是
+ * 给 plugin-appmsg / plugin-protocol 之间用——本文件不再对外暴露
+ * dirty 相关类型。 */
 
-/**
- * 内部 `appmsg.message_received` event 数据类型（仅 platform 内部使用）。
- *
- * 类型定义从 `appmsg.ts` 的 `AppMsgMessageReceivedEvent` 复用；
- * protocol.ts 这里仅给一个对外可读别名。
- */
 
 /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
 

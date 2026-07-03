@@ -20,6 +20,7 @@ import type { PluginManifest } from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
 import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
+import { messagePlatformPlugin } from "@keymaster/plugin-message";
 import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
 import { collectiblesPlugin } from "@keymaster/plugin-collectibles";
@@ -156,6 +157,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     vaultPlugin,
     appmsgPlatformPlugin,
     protocolPlugin,
+    messagePlatformPlugin,
     homePlugin,
     settingsPlugin,
     assetsPlugin,
