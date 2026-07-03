@@ -7,16 +7,19 @@ import { makeResourceId, type P2pkhKeyResource, type P2pkhUtxo } from "./p2pkhCo
 
 const ACTIVE_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
 const ACTIVE = deriveP2pkhAddress(ACTIVE_PRIV_HEX, "main");
+// 硬切换 002 收尾：测试里所有"当前 owner"必须落到同一把真实公钥；
+// ACTIVE_PUBLIC_KEY_HEX 与 vault stub 借出的私钥严格对位。
+const ACTIVE_PUBLIC_KEY_HEX = ACTIVE.publicKeyHex;
 const RECEIVER = deriveP2pkhAddress("0000000000000000000000000000000000000000000000000000000000000002", "main");
 /** 链上 HASH160(compressed public key),用于 P2PKH 锁脚本。 */
-const ACTIVE_PUBKEY_HASH160_HEX = hash160(ACTIVE.publicKeyHex);
+const ACTIVE_PUBKEY_HASH160_HEX = hash160(ACTIVE_PUBLIC_KEY_HEX);
 
 function makeUtxo(value: number): P2pkhUtxo {
   return {
     id: `u-${value}`,
-    resourceId: makeResourceId("ignored", "main"),
-    keyId: "k1",
-    publicKeyHex: ACTIVE.publicKeyHex,
+    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+    resourceId: makeResourceId("main"),
+    
     network: "main",
     address: ACTIVE.address,
     txid: "0000000000000000000000000000000000000000000000000000000000000009",
@@ -49,6 +52,38 @@ function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
     },
     async putLocalInputClaim(value: unknown) {
       inputClaims.push(value);
+    },
+    // 硬切换 002 收尾：mock 简化——直接 push submission 和 claims
+    // （保留原 `putLocalSubmission` 行为用于 post-broadcast 状态
+    // 更新）。真实实现走单 readwrite 事务 + 冲突检测；mock 不模
+    // 拟冲突，并发防重测试由专门的 test 覆盖。
+    async tryClaimSubmissionWithInputs(input: { submission: unknown; inputs: P2pkhUtxo[] }) {
+      submissions.push(input.submission);
+      const claimIds: string[] = [];
+      for (const u of input.inputs) {
+        const id = `${input.submission && (input.submission as { resourceId: string }).resourceId}:${u.txid}:${u.vout}`;
+        inputClaims.push({
+          id,
+          submissionId: (input.submission as { id: string }).id,
+          resourceId: (input.submission as { resourceId: string }).resourceId,
+          publicKeyHex: (input.submission as { publicKeyHex: string }).publicKeyHex,
+          network: u.network,
+          txid: u.txid,
+          vout: u.vout,
+          state: "claimed",
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        });
+        claimIds.push(id);
+      }
+      return { claimIds };
+    },
+    async releaseLocalInputClaims(claimIds: string[]) {
+      const set = new Set(claimIds);
+      for (let i = inputClaims.length - 1; i >= 0; i--) {
+        const c = inputClaims[i] as { id: string };
+        if (set.has(c.id)) inputClaims.splice(i, 1);
+      }
     }
   };
 }
@@ -56,10 +91,10 @@ function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
 describe("createP2pkhTransferService", () => {
   it("prepares a final signed preview and submit only broadcasts the preview hex", async () => {
     const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("ignored", "main"),
-      keyId: "k1",
-      publicKeyHex: ACTIVE.publicKeyHex,
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      
       label: "active",
+
       address: ACTIVE.address,
       network: "main",
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -80,26 +115,28 @@ describe("createP2pkhTransferService", () => {
     const service = createP2pkhTransferService({
       vault: {
         status: () => "unlocked",
-        withPrivateKey: async (_keyId: string, fn: (m: { hex: string }) => Promise<string> | string) => {
+        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) => {
           vaultCalls += 1;
           return fn({ hex: ACTIVE_PRIV_HEX });
         }
       } as never,
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => db as never,
+      getDb: async (_publicKeyHex: string) => db as never,
       getActiveKey: () => ({
-        keyId: "k1",
-        publicKeyHex: ACTIVE.publicKeyHex,
+        
+publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
-      })
+      }),
+      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
     });
 
     const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       assetId: "bsv",
-      keyId: "k1",
+      
       recipientAddress: RECEIVER.address,
       amountSatoshis: 1000,
       feeRateSatoshisPerKb: 1
@@ -130,10 +167,10 @@ describe("createP2pkhTransferService", () => {
 
   it("accepts reversed provider txid as broadcast", async () => {
     const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("ignored", "main"),
-      keyId: "k1",
-      publicKeyHex: ACTIVE.publicKeyHex,
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      
       label: "active",
+
       address: ACTIVE.address,
       network: "main",
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -154,24 +191,26 @@ describe("createP2pkhTransferService", () => {
     const service = createP2pkhTransferService({
       vault: {
         status: () => "unlocked",
-        withPrivateKey: async (_keyId: string, fn: (m: { hex: string }) => Promise<string> | string) =>
+        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) =>
           fn({ hex: ACTIVE_PRIV_HEX })
       } as never,
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => db as never,
+      getDb: async (_publicKeyHex: string) => db as never,
       getActiveKey: () => ({
-        keyId: "k1",
-        publicKeyHex: ACTIVE.publicKeyHex,
+        
+publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
-      })
+      }),
+      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
     });
 
     const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       assetId: "bsv",
-      keyId: "k1",
+      
       recipientAddress: RECEIVER.address,
       amountSatoshis: 1000,
       feeRateSatoshisPerKb: 1
@@ -184,10 +223,10 @@ describe("createP2pkhTransferService", () => {
 
   it("marks provider-inconsistent when broadcast txid does not match canonical txid", async () => {
     const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("ignored", "main"),
-      keyId: "k1",
-      publicKeyHex: ACTIVE.publicKeyHex,
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      
       label: "active",
+
       address: ACTIVE.address,
       network: "main",
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -208,26 +247,28 @@ describe("createP2pkhTransferService", () => {
     const service = createP2pkhTransferService({
       vault: {
         status: () => "unlocked",
-        withPrivateKey: async (_keyId: string, fn: (m: { hex: string }) => Promise<string> | string) => {
+        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) => {
           vaultCalls += 1;
           return fn({ hex: ACTIVE_PRIV_HEX });
         }
       } as never,
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => db as never,
+      getDb: async (_publicKeyHex: string) => db as never,
       getActiveKey: () => ({
-        keyId: "k1",
-        publicKeyHex: ACTIVE.publicKeyHex,
+        
+publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
-      })
+      }),
+      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
     });
 
     const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       assetId: "bsv",
-      keyId: "k1",
+      
       recipientAddress: RECEIVER.address,
       amountSatoshis: 1000,
       feeRateSatoshisPerKb: 1
@@ -248,10 +289,10 @@ describe("createP2pkhTransferService", () => {
 
   it("does not create local input claims when broadcast is rejected", async () => {
     const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("ignored", "main"),
-      keyId: "k1",
-      publicKeyHex: ACTIVE.publicKeyHex,
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      
       label: "active",
+
       address: ACTIVE.address,
       network: "main",
       createdAt: "2024-01-01T00:00:00.000Z",
@@ -265,26 +306,28 @@ describe("createP2pkhTransferService", () => {
     const service = createP2pkhTransferService({
       vault: {
         status: () => "unlocked",
-        withPrivateKey: async (_keyId: string, fn: (m: { hex: string }) => Promise<string> | string) => {
+        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) => {
           vaultCalls += 1;
           return fn({ hex: ACTIVE_PRIV_HEX });
         }
       } as never,
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => db as never,
+      getDb: async (_publicKeyHex: string) => db as never,
       getActiveKey: () => ({
-        keyId: "k1",
-        publicKeyHex: ACTIVE.publicKeyHex,
+        
+publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
         label: "active",
         capabilities: [],
         createdAt: "2024-01-01T00:00:00.000Z"
-      })
+      }),
+      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
     });
 
     const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       assetId: "bsv",
-      keyId: "k1",
+      
       recipientAddress: RECEIVER.address,
       amountSatoshis: 1000,
       feeRateSatoshisPerKb: 1

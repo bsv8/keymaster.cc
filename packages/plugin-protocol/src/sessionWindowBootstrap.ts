@@ -253,7 +253,7 @@ export async function consumeLauncherBootstrap(
  *
  * 设计缘由：
  *   - launcher 已经借到"这次 session 绑定 owner 的私钥材料"（用
- *     `vault.withPrivateKey(keyId, fn)` 借出明文 hex）；本接口只声明
+ *     `vault.withPrivateKey(publicKeyHex, fn)` 借出明文 hex）；本接口只声明
  *     它需要传入哪些已就绪数据，**不**替代 launcher 自己决定"是否
  *     允许启动 appView"的策略。
  *   - `appUrl` 必须已经拼好 launchToken；Session Window bootstrap 完成后

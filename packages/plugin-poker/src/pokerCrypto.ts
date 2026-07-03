@@ -24,10 +24,10 @@ import type { VaultService } from "@keymaster/contracts";
  */
 export async function signDigestWithVault(
   vault: VaultService,
-  keyId: string,
+  publicKeyHex: string,
   digest: Uint8Array
 ): Promise<string> {
-  return vault.withPrivateKey(keyId, async (material) => {
+  return vault.withPrivateKey(publicKeyHex, async (material) => {
     if (!material.hex) {
       throw new Error("Empty private key material");
     }

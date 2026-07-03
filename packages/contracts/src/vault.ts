@@ -2,23 +2,36 @@
 // Vault 契约：私钥存储 + 内存解密的统一入口。
 // 关键安全约束：明文私钥只允许在 withPrivateKey 回调内短暂存在。
 //
-// 硬切换（007 + 001 收口）后的根身份：
+// 硬切换（007 + 001 + 002 收尾）后的根身份：
 //   - KeyRef / KeyIdentity 使用公钥身份（publicKeyHex）。平台根身份
-//     字段唯一，不再保留 `publicKeyHash`。
+//     字段唯一,系统**不再**存在 key 域 surrogate id：
+//       * `KeyRef` 不再持有 `id`（vault 内部 uuid 主键已删除）。
+//       * Vault canonical store 主键 = publicKeyHex。
+//       * `withPrivateKey` / `exportPrivateKey` / `deleteKey` 入参
+//         都是 publicKeyHex。
+//         已删；硬切换 002 之后不再有 "failed / uninitialized" 稳态。
 //   - 短公钥属于 UI 显示格式，**不**作为 KeyRef 字段持有；展示时由
 //     UI 调 `formatShortPublicKey(publicKeyHex)` 现算。
 //   - 旧 `fingerprint` 概念已废弃，不再是 contract / storage / 业务对象的字段。
-//   - `address` 与 `network` 不再是 KeyRef 的根身份字段；仅作为兼容展示
-//     字段保留，业务方不应再通过 address 反查 key。
-//   - 找 key 的主路径是 publicKeyHex，地址查找应交给 P2PKH 自己的 namespace。
-//   - `keyId` 是 Vault 内部借用句柄，不是 namespace 根 id。
+//   - `address` 与 `network` 仍作为兼容展示字段保留——它们**不是**
+//     owner 真值、不是 key 根身份。新逻辑禁止用这两字段做身份 / 地
+//     址 / 网络 / 资产判断；地址应从 P2PKH resource 派生，网络由具
+//     体 plugin / resource 持有，资产判断走对应 plugin 的 namespace。
 
 export type BsvNetwork = "main" | "test";
 
-/** 私钥元数据，写入 IndexedDB 时持久化的部分。 */
+/** 私钥元数据，写入 IndexedDB 时持久化的部分。
+ *
+ * 硬切换 002 收尾：
+ *   - 删除 `id` 字段（vault 内部 uuid）。canonical 主键是 publicKeyHex
+ *     （同样也是记录落库前的身份派生前置条件，不允许先随机生成再回填）。
+ *   - publicKeyHex 是 ready 记录必填的字段；缺它意味着迁移未完成。
+ *   - 系统中**不再**存在 `identityStatus = uninitialized | failed` 的稳态。
+ *     本接口上为兼容以前的显式字段不再出现。
+ */
 export interface KeyRef {
-  /** 唯一 key id，由 vault 生成。 */
-  id: string;
+  /** 平台公开身份根字段：压缩公钥 hex；ready 记录必填。 */
+  publicKeyHex: string;
   /** 人类可读标签。 */
   label: string;
   /** 私钥格式，例如 "wif"、"hex"、"json-file"。 */
@@ -29,30 +42,20 @@ export interface KeyRef {
   createdAt: string;
   /** 导入来源，可选。 */
   source?: string;
-  /** 压缩公钥 hex；平台公开身份根字段。ready 必有，failed 可能缺省。 */
-  publicKeyHex?: string;
   /**
-   * 硬切换 008：identity backfill 状态。缺省或 "ready" 表示可作为
-   * active key 候选；"failed" 表示 backfill 失败，keyspace 不会选为
-   * active key。vault.listKeys 在 refreshKeyCache 时把 status 映射到 KeyRef。
-   *
-   * 硬切换 003 收尾：短公钥不属于 contract 字段，UI 展示时由
-   * `formatShortPublicKey(publicKeyHex)` 现算。
-   *
-   * 硬切换 001 收口：旧 `publicKeyHash` 平台身份字段已从 KeyRef 删除。
-   */
-  identityStatus?: "ready" | "failed";
-  /** backfill 失败原因；仅在 identityStatus === "failed" 时有值。 */
-  identityError?: string;
-  /**
-   * 兼容字段：派生出来的 BSV 主网地址。已不再是 key 根身份。
-   * 保留仅用于 Vault 设置页等兼容展示；业务插件应通过 P2PKH namespace
-   * 在自己的 resource 内查地址。
+   * 兼容字段：派生出来的 BSV 主网地址。**不是 owner 真值，不是
+   * key 根身份。** 保留仅用于 Vault 设置页等历史兼容展示；新逻辑
+   * 禁止依赖此字段做身份 / 地址判断——业务插件需要地址时，应从
+   * P2PKH resource（`p2pkh_addresses` store）按
+   * `publicKeyHex + network` 派生，或在签名路径用
+   * `vault.withPrivateKey(publicKeyHex, ...)` 现算。
    */
   address?: string;
   /**
-   * 兼容字段：导入时推断的网络。已不再是 key 根身份。
-   * 网络由具体 plugin/resource 派生。
+   * 兼容字段：导入时推断的网络。**不是 owner 真值，不是 key 根身
+   * 份。** 网络判断由具体 plugin / resource（`p2pkh_addresses` 的
+   * `network` 字段）持有；Vault 行上的 `network` 仅作历史兼容展
+   * 示。新逻辑禁止依赖此字段做资产 / 网络判断。
    */
   network?: BsvNetwork;
 }
@@ -67,21 +70,22 @@ export interface PrivateKeyMaterial {
 
 /** Vault 状态机。
  *
- * 硬切换 008：`VaultStatus = "unlocked"` 的语义被收紧。
+ * 硬切换 002 收尾：`VaultStatus = "unlocked"` 的语义被再次收紧。
  *
  * - 旧语义：`masterKey` 已放入内存，masterSalt 已放入内存。
  * - 新语义：表示 Vault 会话**和** keyspace ready 边界都已完成——
  *   1) masterKey / masterSalt 已在内存；
- *   2) identity backfill（逐把 key 派生公钥身份）已完成；
+ *   2) vault migration（一次性 legacy staging 迁移 + 派生 / 校验
+ *      publicKeyHex）已完成；
  *   3) keyspace.onVaultUnlocked() 已 await 完成（即 keyspace 处于
- *      一致状态，active key 已选定或进入 mode="all"）。
+ *      一致状态，active key 已选定）。
  *
  * 业务插件在 status === "unlocked" 之后才允许读取 key-scoped storage。
  * 旧实现中"unlocked 早于 keyspace ready"会触发
  * "Key storage is not ready"，属于根因泄漏到 UI 的错误。
  *
  * 实现保证：unlock() 的完成顺序必须为
- *   backfillIdentities -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit
+ *   migrateLegacyStaging -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit
  * 失败时回退到 "locked" 并清空内存会话（fail-closed）。
  */
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
@@ -121,7 +125,7 @@ export interface KeyExportEnvelope {
  *     `notifyKeyCreated` / `activateCreatedKey` 抛错，active 没切。
  *   - UI 必须**不**把这种错误当作"完全失败"——私钥材料已经安全落库，
  *     用户仍可继续导出 / 删除 / 手动切 active。错误携带完整公开
- *     `KeyRef`（`err.key`），调用方拿到 `err.key.id` 就能直接走
+ *     KeyRef（`err.key`），调用方基于 `err.key.publicKeyHex` 即可对位
  *     后续管理动作，不再需要去列表里反查。
  *   - 错误信息使用英文。
  *
@@ -147,16 +151,16 @@ export class KeyPersistedButActivationFailedError extends Error {
 }
 
 /**
- * "首 Key 已落库但未自动 active"待展示 notice（硬切换 009 收尾）。
+ * "首 Key 已落库但未自动 active"待展示 notice（硬切换 009 收尾 +
+ * 硬切换 002 收尾）。
  *
  * 由 `vault.createVaultWithInitialKey` 命中
  * `KeyPersistedButActivationFailedError` 时设置；UI 通过
- * `vault.getInitialActivationNotice()` 读取并展示。字段足够让
- * Key 管理页定位具体那一把 key，无需再去兜底列表里反查。
+ * `vault.getInitialActivationNotice()` 读取并展示。`publicKeyHex` 已
+ * 足够定位那一把 key，无需额外的 vault 内部句柄。
  */
 export interface InitialActivationNotice {
-  keyId: string;
-  publicKeyHex?: string;
+  publicKeyHex: string;
   label: string;
 }
 
@@ -211,7 +215,7 @@ export interface VaultService {
    * 首启"新建钱包"高层能力：创建空 Vault + 立即在 Vault 内部生成首把 Key +
    * 设为 active key。
    *
-   * 设计缘由（硬切换 009）：
+   * 设计缘由（硬切换 009 + 硬切换 002）：
    *   - "新建钱包"是一个**业务动作**，不是"创建空 Vault"与"生成 Key"两个
    *     独立底层调用的拼装。把事务边界放在 Vault 内部，页面层不需要关心
    *     失败时 meta 是否需要回滚、内存会话是否需要清理。
@@ -241,7 +245,7 @@ export interface VaultService {
    * **一次性**写 `vault_meta` + 把导入私钥加密落库 + 设为 active + 切到
    * `unlocked`。
    *
-   * 设计缘由（硬切换 010）：
+   * 设计缘由（硬切换 010 + 硬切换 002 收尾）：
    *   - 首启导入是一个完整业务动作，不是"创建空 Vault" + "保存首把导入
    *     Key"两个可分离产品步骤的拼装。把事务边界收敛在 Vault 内部，
    *     页面层不需要关心：
@@ -286,7 +290,7 @@ export interface VaultService {
       source?: string;
     };
   }): Promise<KeyRef>;
-  /** 用密码解锁，会解密所有 key 索引（不解密私钥本身）。 */
+  /** 用密码解锁，解密所有 key 索引（不解密私钥本身），完成 legacy staging 迁移。 */
   unlock(password: string): Promise<void>;
   /** 锁定，丢弃内存中的明文。 */
   lock(): Promise<void>;
@@ -302,10 +306,10 @@ export interface VaultService {
    *     平台入口，由 Vault 自己拿 verifier 比对，不能让业务插件复制
    *     一套密码校验逻辑。
    *   - 与 `unlock(password)` 严格区分：
-   *       * `unlock` 会派生 masterKey、跑 identity backfill、通知
-   *         keyspace、emit `vault.unlocked`，创建一段新会话；
+   *       * `unlock` 会派生 masterKey、跑一次性 legacy staging migration、
+   *         通知 keyspace、emit `vault.unlocked`，创建一段新会话；
    *       * `verifyPassword` **只**比对 verifier，不会改变 `masterKey
-   *         / masterSalt / keyCache / status`，不会重跑 backfill，
+   *         / masterSalt / keyCache / status`，不会触发 migration，
    *         不会发任何事件。
    *   - 调用前 Vault 不要求处于特定状态：locked / unlocked 都允许，
    *     uninitialized / booting 必须 fail closed（没有 verifier 可校验）。
@@ -358,16 +362,17 @@ export interface VaultService {
 
   /** 列出所有 key 元数据。 */
   listKeys(): Promise<KeyRef[]>;
-  /** 按 id 取单个 key 元数据。 */
-  getKey(id: string): Promise<KeyRef | undefined>;
   /**
-   * 按 publicKeyHex 查找 key 元数据。平台身份查找的主路径。
-   * 设计缘由：硬切换后地址不再是根 id，平台找 key 必须走公钥身份。
+   * 按 publicKeyHex 查找 key 元数据——平台身份查找的主路径。
+   *
+   * 设计缘由：硬切换后系统不再存在 vault 内部 uuid 主键；任何需要
+   * 定位 key 的调用方都按 `publicKeyHex` 走。地址查找如果仍需保留，
+   * 由 `findByAddress` 兜底。
    */
-  getKeyByPublicKeyHex(publicKeyHex: string): Promise<KeyRef | undefined>;
+  getKey(publicKeyHex: string): Promise<KeyRef | undefined>;
   /**
    * 兼容接口：按 address 查找 key 元数据。
-   * 设计缘由：保留只是给历史路径兜底；新代码应使用 getKeyByPublicKeyHex。
+   * 设计缘由：保留只是给历史路径兜底；新代码应使用 `getKey(publicKeyHex)`。
    */
   findByAddress?(address: string): Promise<KeyRef | undefined>;
 
@@ -387,8 +392,8 @@ export interface VaultService {
    *     `utils.randomPrivateKey()`）生成；调用方只能拿到公开 KeyRef，
    *     永远拿不到明文私钥。
    *   - 明文私钥只允许在 `generateKey` 局部调用链中短暂存在；生成后立即
-   *     按现有加密规则写入 `vault_keys`，并复用 `importPrivateKey` 的
-   *     身份派生、重复检查、active 切换与事件发布路径。
+   *     按现有加密规则写入 `vault_keys`（keyPath = publicKeyHex），并复用
+   *     `importPrivateKey` 的身份派生、重复检查、active 切换与事件发布路径。
    *   - 仅允许 Vault 已解锁时调用；locked 状态必须 fail closed。
    *   - 默认 `capabilities = ["p2pkh"]`；记录字段固定为
    *     `format = "generated"`、`source = "vault-generated"`，方便审计
@@ -401,7 +406,7 @@ export interface VaultService {
     capabilities?: string[];
   }): Promise<KeyRef>;
   /**
-   * 删除一个 key 及其加密材料（硬切换 008）。
+   * 删除一个 key 及其加密材料（硬切换 008 + 硬切换 002）。
    * 设计缘由：实际删除流程由 keyspace.deleteKey 统一调度：
    *   1) background.cancelByKey
    *   2) 关闭 namespace db
@@ -410,31 +415,31 @@ export interface VaultService {
    *   5) emit key.deleted（由 keyspace 统一发一次）
    * 不允许业务插件直接调本方法绕过 keyspace。
    */
-  deleteKeyMaterial(id: string): Promise<void>;
+  deleteKeyMaterial(publicKeyHex: string): Promise<void>;
   /**
    * @deprecated 改用 keyspace.deleteKey。本方法保留仅为满足 contract 编译，
    * 实际调用将抛出 "Use keyspace.deleteKey instead"。
    */
-  removeKey(id: string): Promise<void>;
+  removeKey(publicKeyHex: string): Promise<void>;
 
   /**
    * 导出私钥为 bsv8 加密 envelope。
    * 设计缘由：明文私钥只能从 withPrivateKey 借出，因此导出必须经过 Vault。
    * 该方法不修改 key 列表，不触发 key.created / key.deleted 事件。
    */
-  exportPrivateKey(input: { keyId: string; password: string }): Promise<KeyExportEnvelope>;
+  exportPrivateKey(input: { publicKeyHex: string; password: string }): Promise<KeyExportEnvelope>;
 
   /**
    * 临时借用私钥。
    * 关键设计缘由：明文私钥永远不进入 React state、不写普通 IndexedDB、不进 global capability。
    * 签名逻辑（如 P2PKH signer）必须通过 withPrivateKey 在闭包内使用，调用结束后立即释放。
    */
-  withPrivateKey<T>(keyId: string, fn: (material: PrivateKeyMaterial) => Promise<T> | T): Promise<T>;
+  withPrivateKey<T>(publicKeyHex: string, fn: (material: PrivateKeyMaterial) => Promise<T> | T): Promise<T>;
 
   /* ============== appView owner runtime bootstrap ============== */
   // 设计缘由（施工单 2026-06-30 002）：
   //   - appView Session Window **不**导入整套 vault unlock runtime；
-  //     launcher 用现有 `withPrivateKey(keyId, fn)` 借出 owner 私钥
+  //     launcher 用现有 `withPrivateKey(publicKeyHex, fn)` 借出 owner 私钥
   //     明文 hex，交给 Session Window 拼成 `OwnerRuntimeBootstrap`。
   //   - `exportUnlockRuntimeForSessionWindow()` /
   //     `importUnlockRuntimeFromLauncher(handoff)` 已删除：不允许让

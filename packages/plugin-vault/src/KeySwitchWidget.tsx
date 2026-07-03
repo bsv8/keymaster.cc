@@ -48,9 +48,8 @@ export function KeySwitchWidget() {
     async function loadSwitchableKeys() {
       try {
         const all = await keyspace.listKeys();
-        const switchable = all.filter(
-          (k) => k.identityStatus === "ready" && k.publicKeyHex
-        );
+        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+        const switchable = all.filter((k) => k.publicKeyHex);
         if (!cancelled) setKeys(switchable);
       } catch {
         if (!cancelled) setKeys([]);
@@ -83,19 +82,18 @@ export function KeySwitchWidget() {
       void (async () => {
         try {
           const all = await keyspace.listKeys();
-          const switchable = all.filter(
-            (k) => k.identityStatus === "ready" && k.publicKeyHex
-          );
+          // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+          const switchable = all.filter((k) => k.publicKeyHex);
           setKeys(switchable);
         } catch {
           // 静默
         }
       })();
     };
-    offs.push(messageBus.subscribe<{ keyId: string; publicKeyHex: string; label: string }>("key.created", trigger));
-    offs.push(messageBus.subscribe<{ publicKeyHex: string; keyId?: string }>("key.deleted", trigger));
-    offs.push(messageBus.subscribe<{ keyId: string; publicKeyHex: string }>("key.identity.ready", trigger));
-    offs.push(messageBus.subscribe<{ keyId: string; label?: string; error: string }>("key.identity.failed", trigger));
+    // 硬切换 002 收尾：所有 key.* 事件 payload 不再携带 publicKeyHex (硬切换 002 收尾)；
+    // platform identity 根字段只有 publicKeyHex。
+    offs.push(messageBus.subscribe<{ publicKeyHex: string; label: string }>("key.created", trigger));
+    offs.push(messageBus.subscribe<{ publicKeyHex: string }>("key.deleted", trigger));
     return () => {
       for (const off of offs) off();
     };
@@ -153,8 +151,7 @@ export function KeySwitchWidget() {
               key={k.publicKeyHex}
               className={`key-switch__item ${active.activePublicKeyHex === k.publicKeyHex ? "key-switch__active" : ""}`}
               onClick={() => k.publicKeyHex && pick(k.publicKeyHex)}
-              disabled={busy || k.identityStatus !== "ready" || !k.publicKeyHex}
-              title={k.identityStatus !== "ready" ? t("vault.keySwitch.notReady", { defaultValue: "身份尚未就绪" }) : undefined}
+              disabled={busy || !k.publicKeyHex}
             >
               <span className="key-switch__item-label">
                 <span>{k.label || unnamed}</span>
@@ -164,7 +161,6 @@ export function KeySwitchWidget() {
                 <span className="key-switch__caps">{k.capabilities.join(", ")}</span>
               </span>
               {active.activePublicKeyHex === k.publicKeyHex ? <Check size={14} /> : null}
-              {k.identityStatus !== "ready" ? <AlertTriangle size={14} /> : null}
             </button>
           ))}
           {keys.length === 0 ? (

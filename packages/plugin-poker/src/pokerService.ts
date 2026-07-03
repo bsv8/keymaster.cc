@@ -289,7 +289,7 @@ class PokerServiceImpl implements PokerService {
     // 上直到下次自然失败。必须改用 this.deps.keyspace.active() 同步读，
     // 这样无论 init 是否完成都能给出正确答案（keyspace 是同步数据源）。
     this.keyDeletingUnsub = deps.messageBus.subscribe("key.deleting", (p) => {
-      const ev = p as { publicKeyHex?: string; keyId?: string } | undefined;
+      const ev = p as { publicKeyHex?: string } | undefined;
       const hash = ev?.publicKeyHex;
       if (!hash) return;
       // 用 keyspace.active() 同步判定：activePublicKeyHex === hash 才是
@@ -315,7 +315,7 @@ class PokerServiceImpl implements PokerService {
     //     （active key state 由 keyspace 决定下一把）；
     //   - 真正触发重建的是后续 `activeKey.changed`。
     this.keyDeletedUnsub = deps.messageBus.subscribe("key.deleted", (p) => {
-      const ev = p as { publicKeyHex?: string; keyId?: string } | undefined;
+      const ev = p as { publicKeyHex?: string } | undefined;
       const hash = ev?.publicKeyHex;
       if (!hash) return;
       this.pruneReferencesToKey(hash);
@@ -1178,7 +1178,7 @@ class PokerServiceImpl implements PokerService {
     const digest = pokerSha256(nonceBytes);
     let signature: string;
     try {
-      signature = await signDigestWithVault(this.deps.vault, sessionKey.keyId, digest);
+      signature = await signDigestWithVault(this.deps.vault, sessionKey.publicKeyHex, digest);
     } catch {
       this.disconnect();
       return;

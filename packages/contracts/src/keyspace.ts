@@ -5,6 +5,10 @@
 //     网络作为根 id。私钥材料只留在 Vault 的 withPrivateKey 闭包内。
 //   - 平台根身份 = publicKeyHex = 压缩公钥 hex、lowercase、无 0x 前缀、
 //     长度 66。本字段是平台对外唯一 key identity 根字段。
+//   - 平台 key 域**不再**存在任何 surrogate id（硬切换 002 收尾）。
+//     新建 / 导入 key 时必须在落库前先得到 publicKeyHex，并以
+//     `publicKeyHex` 作为 vault canonical 主键；私钥借用入参、删除
+//     入参、事件 payload 全部按 publicKeyHex 走。
 //   - 短公钥属于 UI 显示格式，**不**作为 KeyIdentity 字段持有：
 //     需要短串展示时由 UI 侧 `formatShortPublicKey(publicKeyHex)` 现算。
 //   - 旧 `fingerprint` 概念已废弃,不再是 contract / storage / 业务对象的字段。
@@ -19,40 +23,28 @@
 //     不再有"all mode 只读总览"语义。
 //   - 硬切换 001（publicKeyHex 收口）：旧 `publicKeyHash` 平台身份字段已
 //     从 contract 删除；新代码不允许再读 / 再传 `publicKeyHash`。
-//     `keyId` 仍存在,但职责收窄为 Vault 内部借用句柄,不是 namespace 根。
 
 /**
- * 平台公开的 key 身份；不包含任何私钥材料。
+ * 平台公开的 key 身份；不包含任何私钥材料，也不持有 vault 内部 uuid。
  *
- * 字段可选性约束（硬切换 008 收尾 + 硬切换 003 收尾）：
- *   - `ready` key 必须有 `publicKeyHex`。
- *   - `failed` key 可以没有这个字段：例如 backfill 阶段解密失败,或老
- *     旧记录尚未 backfill 的情况。
- *   - `failed` key 只能导出 / 删除；不允许作为 active key。
- *   - `uninitialized` key 通常是 import 后 backfill 暂未跑完；UI 显示
- *     "初始化中"。
- *   - 短公钥属于 UI 显示格式,**不**作为 KeyIdentity 字段持有。展示时
+ * 字段可选性约束（硬切换 002 收尾）：
+ *   - `ready` key 必有 `publicKeyHex`（平台身份根字段）。
+ *   - 系统中**不再**保留 `identityStatus = uninitialized | failed` 的稳态：
+ *     新建 / 导入时 publicKeyHex 必须先派生再落库，unlock 后不再跑逐把
+ *     key backfill；老历史 key 缺 identity 字段视为需要一次性迁移状态，
+ *     迁移态由 vault migration 内部处理。
+ *   - 短公钥属于 UI 显示格式，**不**作为 KeyIdentity 字段持有。展示时
  *     调 `formatShortPublicKey(publicKeyHex)` 现算。
  */
 export interface KeyIdentity {
-  /** Vault 内部 key id,签名时传给 vault.withPrivateKey 借用私钥。 */
-  keyId: string;
-  /** 压缩公钥 hex；ready 必有,failed 可能缺省。 */
-  publicKeyHex?: string;
+  /** 平台公开身份根字段：压缩公钥 hex，lowercase、无 0x 前缀、长度 66。 */
+  publicKeyHex: string;
   /** 用户标签。 */
   label: string;
   /** 私钥支持能力,例如 ["p2pkh"]。 */
   capabilities: string[];
   /** 创建时间 ISO 字符串。 */
   createdAt: string;
-  /**
-   * identity 状态：uninitialized 标识 Vault 解锁后 backfill 尚未完成,
-   * failed 标识 backfill 解密失败。这两种状态下不允许作为 active key 候选。
-   * 未设置或 "ready" 表示可以正常参与 active key 切换。
-   */
-  identityStatus?: "ready" | "uninitialized" | "failed";
-  /** backfill 失败原因；仅在 identityStatus === "failed" 时有值。 */
-  identityError?: string;
 }
 
 /**
@@ -157,33 +149,10 @@ export interface KeyspaceService {
    *   - namespace DB 删除失败或 blocked 时拒绝继续删除 Vault 私钥,
    *     否则会留下归属丢失的业务数据；密码正确也不破例。
    *
-   * 约束：仅允许 `identityStatus === "ready"` 的 key 通过；传 failed key
-   * 的 hex 会抛 "Key not found"。要清理 failed key 必须改走
-   * deleteKeyById(keyId)。
+   * 约束：仅允许仍处于 ready 状态的 key 通过；找不到 hex 或 key 不
+   * 存在时抛 "Key not found"。
    */
   deleteKey(input: { publicKeyHex: string; password: string }): Promise<void>;
-
-  /**
-   * 按 keyId 删除一个 key（管理入口）。
-   *
-   * 硬切换 002：与 `deleteKey` 一样,第一步必须是 `vault.verifyPassword
-   * (password)`；通过后再走 namespace 清理 + 私钥删除 + active fallback /
-   * empty-vault finalize 主流程。
-   *
-   * 设计缘由：硬切换 008 收尾——failed key 仍可能有 publicKeyHex（vault
-   * 不在 putKeyIdentityFailed 时清空 identity 字段）,deleteKey(hex) 又
-   * 拒绝 failed,因此 UI 管理页必须走 keyId 路径。本方法覆盖四种情况：
-   *   - ready + 有 hex：走完整 namespace 清理（cancelByKey + 删 namespace
-   *     DB + 删私钥材料 + emit key.deleted）。
-   *   - failed + 有 hex：同上（不依赖 identityStatus 过滤）。
-   *   - ready / failed + 无 hex：仅删私钥材料 + emit key.deleted（payload
-   *     不带 publicKeyHex,因为没有 namespace DB 可删）。
-   *   - 不存在的 keyId：抛 "Key not found"。
-   * active fallback：删的是 active key 时切到下一把 ready key；删空最后
-   * 一把 key 时调 `vault.finalizeEmptyVaultAfterLastKeyDeletion()` 让
-   * Vault 最终状态收敛到 `uninitialized`。
-   */
-  deleteKeyById(input: { keyId: string; password: string }): Promise<void>;
 
   /**
    * 由 background 插件在装载时调用：把 background service 注入 keyspace,
@@ -204,32 +173,29 @@ export interface KeyspaceService {
 /** keyspace capability key。 */
 export const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
 
-/** 事件：key 被创建。payload 携带 keyId / publicKeyHex / label。 */
+/** 事件：key 被创建。payload 携带 publicKeyHex / label。 */
 export const EVENT_KEY_CREATED = "key.created";
 /** 事件：key 即将被删除。payload 携带 publicKeyHex,订阅者必须 abort 任务与关闭 handle。 */
 export const EVENT_KEY_DELETING = "key.deleting";
-/** 事件：key 已删除。payload 携带 publicKeyHex / keyId（仅诊断用）。 */
+/** 事件：key 已删除。payload 携带 publicKeyHex。 */
 export const EVENT_KEY_DELETED = "key.deleted";
 /** 事件：active key 切换。payload 是新的 ActiveKeyState。 */
 export const EVENT_ACTIVE_KEY_CHANGED = "activeKey.changed";
-/** 事件：identity backfill 状态变化。payload: { initializing: boolean }。 */
+/** 事件：identity backfill 状态变化（硬切换 002 收尾后只在一次性 legacy migration 阶段短暂触发）。payload: { initializing: boolean }。 */
 export const EVENT_KEYSPACE_INITIALIZATION = "keyspace.initialization";
 
 /** keyspace 事件 payload 类型。 */
 export interface KeyCreatedEvent {
-  keyId: string;
   publicKeyHex: string;
   label: string;
 }
 
 export interface KeyDeletingEvent {
   publicKeyHex: string;
-  keyId?: string;
 }
 
 export interface KeyDeletedEvent {
   publicKeyHex: string;
-  keyId?: string;
 }
 
 export interface ActiveKeyChangedEvent extends ActiveKeyState {}

@@ -67,17 +67,19 @@ function makeVaultStub(publicKeyHex: string): VaultService {
       listeners.add(h);
       return () => listeners.delete(h);
     },
-    withPrivateKey: async <T,>(_keyId: string, fn: (m: { hex: string }) => Promise<T> | T) => {
+    // 硬切换 002 收尾：withPrivateKey 必须按 `(publicKeyHex, fn)` 签名调用；
+    // stub 按新签名接收 publicKeyHex 后再调 fn 借 material。这里 publicKeyHex
+    // 形状不影响 stub 行为（fixture 都是同一把 TEST_PUB_HEX），但契约要对。
+    withPrivateKey: async <T,>(_publicKeyHex: string, fn: (m: { hex: string }) => Promise<T> | T) => {
       return fn({ hex: TEST_PRIV_HEX });
     },
     listKeys: async () => [
       {
-        id: "k1",
+        publicKeyHex: TEST_PUB_HEX,
         label: "Key A",
         format: "generated",
         capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString(),
-        publicKeyHex
+        createdAt: new Date().toISOString()
       }
     ],
     getKey: async () => undefined,
@@ -105,26 +107,26 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
-    recoverEmptyVaultToUninitialized: async () => undefined
+    recoverEmptyVaultToUninitialized: async () => undefined,
     // 施工单 2026-06-30 002 硬切换：vault 已删除
     // `exportUnlockRuntimeForSessionWindow` / `importUnlockRuntimeFromLauncher`
     // （2026-06-29/003 已删除，002 沿用）。launcher 端改用现有
-    // `vault.withPrivateKey(keyId, fn)` 借 owner 私钥 hex 拼
+    // `vault.withPrivateKey(publicKeyHex, fn)` 借 owner 私钥 hex 拼
     // `OwnerRuntimeBootstrap`。launchAppView 测试只走 `withPrivateKey` 路径，
     // 不再需要 unlock runtime 假实现。
   } as unknown as VaultService;
 }
 
+// KeyspaceService stub：与 makeVaultStub 配套使用，cipher.* / connect.* 测试
+// 默认返回"单 key ready"，让 ownerPublicKeyHex 查 key 路径可以跑通。
 function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
   return {
     listKeys: async () => [
       {
-        keyId: "k1",
         publicKeyHex,
         label: "Key A",
         capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString(),
-        identityStatus: "ready"
+        createdAt: new Date().toISOString()
       }
     ],
     // 施工单 2026-06-28 001：cipher.* / connect.* 现在按 session.ownerPublicKeyHex
@@ -132,18 +134,15 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
     getKey: async (hex: string) => {
       if (hex !== publicKeyHex) return undefined;
       return {
-        keyId: "k1",
         publicKeyHex,
         label: "Key A",
         capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString(),
-        identityStatus: "ready" as const
+        createdAt: new Date().toISOString()
       };
     },
     active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
-      keyId: "k1",
       publicKeyHex,
       label: "Key A",
       capabilities: ["p2pkh"],
@@ -154,7 +153,6 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
-    deleteKeyById: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   } as unknown as KeyspaceService;
@@ -1510,12 +1508,10 @@ describe("ProtocolServiceImpl", () => {
       ...makeKeyspaceStub(initialOwner),
       active: () => ({ activePublicKeyHex: currentActiveKey }),
       requireActiveKey: () => ({
-        keyId: "k1",
-        publicKeyHex: currentActiveKey,
+        publicKeyHex: "k1",
         label: "Key A",
         capabilities: ["p2pkh"],
-        createdAt: new Date().toISOString(),
-        identityStatus: "ready"
+        createdAt: new Date().toISOString()
       })
     };
     const { service, opener, storageDb, deps } = makeService(initialOwner, undefined, {
@@ -4646,7 +4642,6 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         {
           v: PROTOCOL_VERSION,
           type: "cancel",
-          id: "req-wrong-id"
         },
         ORIGIN,
         opener
@@ -4680,7 +4675,6 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         {
           v: PROTOCOL_VERSION,
           type: "cancel",
-          id: "req-cancel-3"
         },
         "https://evil.example",
         opener
@@ -4698,7 +4692,6 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
         {
           v: PROTOCOL_VERSION,
           type: "cancel",
-          id: "any-id"
         },
         ORIGIN,
         opener
@@ -5280,7 +5273,6 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
           {
             v: PROTOCOL_VERSION,
             type: "cancel",
-            id: "req-race"
           },
           ORIGIN,
           opener
@@ -5712,13 +5704,150 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     expect(card?.phase).toBe("failed");
   });
 
-  it("p2pkh.transfer 不再受全局 active key 变化影响（session 绑定的 owner 是真值）", async () => {
-    // 施工单 7.5.5：p2pkh.transfer 不再受全局 active key 变化影响。
+  it("p2pkh.transfer：session.owner != active key 时，protocol 层必须 fail-closed，**不**走到 p2pkh service", async () => {
+    // 硬切换 002 收尾：旧测试「p2pkh.transfer 不再受全局 active key
+    // 变化影响」语义已过时——硬门禁下 `session.owner === active` 是
+    // 调用方的不变量，**不**相等时必须由 protocol 层以 user_rejected
+    // 拒绝，**不**暴露底层「Key storage is not ready」。
+    const prepareTransfer = vi.fn(makeP2pkhServiceStub002().prepareTransfer);
+    const submitTransfer = vi.fn(makeP2pkhServiceStub002().submitTransfer);
+    const p2pkh = {
+      listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }]),
+      prepareTransfer,
+      submitTransfer
+    };
+    const otherActive = "02" + "cc".repeat(32);
+    const otherKeyspace: KeyspaceService = {
+      ...makeKeyspaceStub(otherActive),
+      active: () => ({ activePublicKeyHex: otherActive }),
+      // 业务方仍然可以查得到 session owner，但 active 不等于 owner。
+      getKey: async (hex: string) =>
+        hex === TEST_PUB_HEX || hex === otherActive
+          ? {
+              publicKeyHex: hex,
+              label: hex === TEST_PUB_HEX ? "A" : "C",
+              capabilities: ["p2pkh"],
+              createdAt: new Date().toISOString()
+            }
+          : undefined
+    };
+    const { service, opener, storageDb } = makeService(otherActive, undefined, {
+      p2pkhService: p2pkh as never,
+      keyspace: otherKeyspace
+    });
+    await storageDb.putConnectSession({
+      sessionId: "sess-mismatch",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "p2pkh-mismatch",
+          method: "p2pkh.transfer",
+          params: {
+            recipientAddress: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+            amountSatoshis: 1000,
+            connectSessionId: "sess-mismatch"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((res) => setTimeout(res, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-mismatch");
+    // 关键断言：phase = failed（不是 approved），errorCode = user_rejected，
+    // failureReason = session_owner_mismatch。
+    expect(card?.phase).toBe("failed");
+    expect(card?.errorCode).toBe("user_rejected");
+    expect(card?.failureReason).toBe("session_owner_mismatch");
+    // 关键断言：p2pkh service 完全没被调用（assertSessionOwnerIsActive 提前抛错）。
+    expect(prepareTransfer).not.toHaveBeenCalled();
+    expect(submitTransfer).not.toHaveBeenCalled();
+  });
+
+  it("feepool.prepare：session.owner != active key 时，protocol 层必须 fail-closed", async () => {
+    // 硬切换 002 收尾：feepool.prepare 通过
+    // `buildAndMaybeBuildBaseTx` -> `p2pkhService.listUtxos({ owner })`
+    // 取 value。session.owner != active 时，protocol 层必须提前
+    // 拒绝，**不**让硬门禁在底层冒泡「Key storage is not ready」。
+    const otherActive = "02" + "dd".repeat(32);
+    const otherKeyspace: KeyspaceService = {
+      ...makeKeyspaceStub(otherActive),
+      active: () => ({ activePublicKeyHex: otherActive }),
+      getKey: async (hex: string) =>
+        hex === TEST_PUB_HEX || hex === otherActive
+          ? {
+              publicKeyHex: hex,
+              label: hex === TEST_PUB_HEX ? "A" : "D",
+              capabilities: ["p2pkh"],
+              createdAt: new Date().toISOString()
+            }
+          : undefined
+    };
+    const p2pkh = {
+      listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }])
+    };
+    const { service, opener, storageDb } = makeService(otherActive, undefined, {
+      p2pkhService: p2pkh as never,
+      keyspace: otherKeyspace
+    });
+    await storageDb.putConnectSession({
+      sessionId: "sess-fp-mismatch",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "fp-mismatch",
+          method: "feepool.prepare",
+          params: {
+            connectSessionId: "sess-fp-mismatch",
+            counterpartyPublicKeyHex: "02" + "ee".repeat(32),
+            amountSatoshis: 1000
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((res) => setTimeout(res, 30));
+    const card = service.feedSnapshot().commands.find((c) => c.requestId === "fp-mismatch");
+    expect(card?.phase).toBe("failed");
+    expect(card?.errorCode).toBe("user_rejected");
+    expect(card?.failureReason).toBe("session_owner_mismatch");
+    // 关键断言：p2pkh service 的 listUtxos 完全没被调用。
+    expect(p2pkh.listUtxos).not.toHaveBeenCalled();
+  });
+
+  it("p2pkh.transfer：session.owner == active key 时正常通过（positive 路径）", async () => {
+    // 正向对照：旧测试「session owner 是真值」的精神保留——但语义
+    // 收口为「session.owner == active」是必要条件，不是「active 切
+    // 走不影响 transfer」。
     const p2pkh = makeP2pkhServiceStub002();
-    const { service, opener, storageDb, deps } = makeService(TEST_PUB_HEX, undefined, {
+    const { service, opener, storageDb } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    // session 绑定的 owner = TEST_PUB_HEX（key1）。
     await storageDb.putConnectSession({
       sessionId: "sess-stable",
       origin: ORIGIN,
@@ -5730,8 +5859,6 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       revokedAt: null
     });
     service.startSession();
-    // 用户在中途切换 active key：但 keyspace.active() 仍然返回 TEST_PUB_HEX，
-    // session 仍走 session owner 真值，与 active key 无关。
     await service.handleMessage(
       makeEvent(
         {
@@ -5750,8 +5877,6 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       )
     );
     await service.confirmByUser();
-    const r = deps; // sanity
-    void r;
     await new Promise((res) => setTimeout(res, 30));
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "p2pkh-stable");
     expect(card?.decision).toBe("approved");
@@ -5782,22 +5907,18 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     deps.keyspace.getKey = async (hex: string) => {
       if (hex === TEST_PUB_HEX) {
         return {
-          keyId: "kA",
-          publicKeyHex: TEST_PUB_HEX,
+          publicKeyHex: "kA",
           label: "Owner A",
           capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString(),
-          identityStatus: "ready"
+          createdAt: new Date().toISOString()
         };
       }
       if (hex === ownerB) {
         return {
-          keyId: "kB",
-          publicKeyHex: ownerB,
+          publicKeyHex: "kB",
           label: "Owner B",
           capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString(),
-          identityStatus: "ready"
+          createdAt: new Date().toISOString()
         };
       }
       return undefined;
@@ -5882,22 +6003,18 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     deps.keyspace.getKey = async (hex: string) => {
       if (hex === TEST_PUB_HEX) {
         return {
-          keyId: "kA",
-          publicKeyHex: TEST_PUB_HEX,
+          publicKeyHex: "kA",
           label: "Owner A",
           capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString(),
-          identityStatus: "ready"
+          createdAt: new Date().toISOString()
         };
       }
       if (hex === ownerB) {
         return {
-          keyId: "kB",
-          publicKeyHex: ownerB,
+          publicKeyHex: "kB",
           label: "Owner B",
           capabilities: ["p2pkh"],
-          createdAt: new Date().toISOString(),
-          identityStatus: "ready"
+          createdAt: new Date().toISOString()
         };
       }
       return undefined;
@@ -6255,17 +6372,15 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 
-  it("active key 不 ready → 抛错", async () => {
+  it("active key 找不到 → 抛错", async () => {
     const env = setupWindow();
     try {
       const storageDb = makeFakeStorageDb();
       const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
-      (keyspace as unknown as { getKey: (h: string) => Promise<unknown> }).getKey = async () => ({
-        keyId: "k1",
-        publicKeyHex: TEST_PUB_HEX,
-        label: "Key A",
-        identityStatus: "failed"
-      });
+      // 硬切换 002 收尾：identityStatus 已删除，per-key "not ready" 不再是
+      // 合法稳态。本测试在新模型下覆盖"owner key 找不到"分支——
+      // getKey 返回 undefined，launchAppView 必须抛 LaunchAppViewError("no_active_key")。
+      (keyspace as unknown as { getKey: (h: string) => Promise<unknown> }).getKey = async () => undefined;
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace,
@@ -7245,7 +7360,6 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
           {
             v: PROTOCOL_VERSION,
             type: "cancel",
-            id: "no-such-rec"
           },
           "https://justnote.apps.bsv8.com",
           childWindow

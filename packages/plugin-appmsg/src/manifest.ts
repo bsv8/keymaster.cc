@@ -193,9 +193,9 @@ export const appmsgPlatformPlugin: PluginManifest = {
         const active = keyspace.active().activePublicKeyHex;
         if (!active) return null;
         const key = await keyspace.getKey(active);
-        if (!key || !key.keyId || !key.publicKeyHex) return null;
+        if (!key || !key.publicKeyHex) return null;
         const pubHex: string = key.publicKeyHex;
-        return await vault.withPrivateKey(key.keyId, async (material) => ({
+        return await vault.withPrivateKey(pubHex, async (material) => ({
           publicKeyHex: pubHex,
           sign: async (args: {
             sessionId: string;

@@ -114,17 +114,17 @@ export interface PluginManifest {
    *     注入一个 sender endpoint 已绑定的 scoped `appmsg.client`。
    *   - 插件**不**允许自报 sender endpoint；sender endpoint 固定为
    *     `endpointId`（稳定 pluginEndpointId）。
-   *   - `endpointId` **不**等于 Vault `keyId`；**不**要求等于 manifest id；
-   *     必须在同 Keymaster 安装内全局唯一，runtime 注册阶段做唯一性校验，
-   *     冲突即 fail-closed。
+   *   - `endpointId` **不**等于 Vault key 域真值（`publicKeyHex`）；**不**
+   *     要求等于 manifest id；必须在同 Keymaster 安装内全局唯一，runtime
+   *     注册阶段做唯一性校验，冲突即 fail-closed。
    *   - 未声明 endpoint 的插件拿不到 `appmsg.client`：`ctx.get(...)` 抛错。
    *
    * 字段命名约束：
    *   - `endpointId` 形状见 `isValidPluginEndpointIdShape`（portable subset）。
-   *   - **不**叫 `keyId` / `keyid`（与 Vault 私钥句柄语义冲突）。
+   *     冲突；硬切换 002 后 key 域已无 surrogate id）。
    */
   appMessageEndpoint?: {
-    /** 远端消息端点 id；全局唯一；不等于 keyId；不等于 manifest id 必须。 */
+    /** 远端消息端点 id；全局唯一；不等于 vault key 域真值；不等于 manifest id。 */
     endpointId: string;
     /** 可选人类可读描述，便于诊断。 */
     description?: string;

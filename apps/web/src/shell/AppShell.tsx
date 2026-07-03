@@ -393,14 +393,11 @@ interface RepairGuardProps {
 }
 
 function RepairGuard({ keys, onGoToKeyManagement, t }: RepairGuardProps) {
-  const failedCount = useMemo(
-    () => keys.filter((k) => k.identityStatus === "failed").length,
-    [keys]
-  );
-  const uninitializedCount = useMemo(
-    () => keys.filter((k) => k.identityStatus === "uninitialized").length,
-    [keys]
-  );
+  // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready；
+  // RepairGuard 永远不会再展示"failed / uninitialized"行；保留入口
+  // 仅为兜底 0-key 护栏。
+  const failedCount = useMemo(() => 0, [keys]);
+  const uninitializedCount = useMemo(() => 0, [keys]);
   return (
     <div className="app-shell__repair">
       <PageHeader
@@ -424,20 +421,13 @@ function RepairGuard({ keys, onGoToKeyManagement, t }: RepairGuardProps) {
       />
       <ul className="app-shell__repair-list">
         {keys.map((k) => (
-          <li key={k.keyId} className="app-shell__repair-item">
+          <li key={k.publicKeyHex} className="app-shell__repair-item">
             <span className="app-shell__repair-label">
               {k.label || t("vault.settings.empty.label", { defaultValue: "未命名" })}
             </span>
-            <span className={`app-shell__repair-status app-shell__repair-status--${k.identityStatus ?? "uninitialized"}`}>
-              {k.identityStatus === "failed"
-                ? t("vault.settings.status.failed", { defaultValue: "身份失败" })
-                : k.identityStatus === "uninitialized"
-                ? t("vault.settings.status.initializing", { defaultValue: "初始化中" })
-                : t("vault.settings.status.ready", { defaultValue: "可用" })}
+            <span className="app-shell__repair-status app-shell__repair-status--ready">
+              {t("vault.settings.status.ready", { defaultValue: "可用" })}
             </span>
-            {k.identityError ? (
-              <code className="app-shell__repair-error">{k.identityError}</code>
-            ) : null}
           </li>
         ))}
       </ul>

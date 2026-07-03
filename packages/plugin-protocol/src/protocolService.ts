@@ -32,7 +32,6 @@
 //   - **owner 唯一真值 = `ownerPublicKeyHex`**：`ownerKeyId` **不**出现
 //     在 record / result payload / 内部 pendingOp 字段里。执行时按
 //     `session.ownerPublicKeyHex` 查 keyspace.getKey() 拿当前 vault 内
-//     借用句柄（keyId 是 vault 内部细节，按需解析）。
 //   - record 在创建时立即绑定 `connectSessionId` + `ownerPublicKeyHex`；
 //     record 生命周期内**不**可漂移。执行阶段再次校验 session 仍有效
 //     （logout 后同 session 下旧 request 后续执行必须失败）。
@@ -1656,7 +1655,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *          `connect.login` 一致）；
    *       5. 创建新 `connectSessionId`，按 session 真值三元组落库
    *          （sessionId + origin + ownerPublicKeyHex，无 `runtimeBinding`）；
-   *       6. 用现有 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥
+   *       6. 用现有 `vault.withPrivateKey(publicKeyHex, fn)` 借出 owner 私钥
    *          hex，组装 `OwnerRuntimeBootstrap`；
    *       7. 生成新 `launchToken`（`crypto.randomUUID()`）；
    *       8. 组装 `AppBootstrapPayload`（含 `ownerRuntimeBootstrap`）；
@@ -1691,18 +1690,9 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: owner key not found"
       );
     }
-    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
-      throw new LaunchAppViewError(
-        "no_active_key",
-        "launchAppView: owner key not ready"
-      );
-    }
-    if (!key.keyId) {
-      throw new LaunchAppViewError(
-        "no_active_key",
-        "launchAppView: owner key has no vault keyId"
-      );
-    }
+    // 硬切换 002 收尾：identityStatus 字段已删除；KeyIdentity 必 ready。
+    // 旧 owner key not ready 失败语义不再存在——canonical store 必
+    // 持有 publicKeyHex 与 hex 身份派生一致。
     // 4) 校验 app 配置合法：appOrigin 是合法 origin，且 new URL(appUrl).origin === appOrigin。
     let parsedAppUrl: URL;
     try {
@@ -1761,7 +1751,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     let ownerRuntimeBootstrap: OwnerRuntimeBootstrap;
     try {
       ownerRuntimeBootstrap = await this.deps.vault.withPrivateKey(
-        key.keyId,
+        key.publicKeyHex!,
         async (material) => ({
           ownerPublicKeyHex: key.publicKeyHex!,
           ownerLabel: key.label,
@@ -2621,7 +2611,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     try {
       const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      if (!key || !key.publicKeyHex || key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+      if (!key || !key.publicKeyHex) {
         return { code: "user_rejected", reason: "internal_error" };
       }
     } catch {
@@ -2752,7 +2743,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       const keys = await this.deps.keyspace.listKeys();
       const candidates = keys
-        .filter((k) => k.publicKeyHex && k.identityStatus !== "failed" && k.identityStatus !== "uninitialized")
+        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+        .filter((k) => k.publicKeyHex)
         .map((k) => ({ publicKeyHex: k.publicKeyHex as string, label: k.label }));
       rec.connectLoginCandidates = candidates;
     } catch (err) {
@@ -2805,7 +2797,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (session.origin !== origin) return { code: "invalid_origin", reason: "internal_error" };
     try {
       const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      if (!key || !key.publicKeyHex || key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
+      // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+      if (!key || !key.publicKeyHex) {
         return { code: "user_rejected", reason: "internal_error" };
       }
     } catch (err) {
@@ -3369,13 +3362,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.lockStateValue === "unlocked") {
       try {
         const key = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-        if (
-          key &&
-          key.publicKeyHex &&
-          key.keyId &&
-          key.identityStatus !== "failed" &&
-          key.identityStatus !== "uninitialized"
-        ) {
+        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+        if (key && key.publicKeyHex) {
           return { kind: "execute" };
         }
       } catch {
@@ -3398,13 +3386,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     //     避免无谓解锁。
     try {
       const keyMeta = await this.deps.keyspace.getKey(session.ownerPublicKeyHex);
-      if (
-        !keyMeta ||
-        !keyMeta.publicKeyHex ||
-        !keyMeta.keyId ||
-        keyMeta.identityStatus === "failed" ||
-        keyMeta.identityStatus === "uninitialized"
-      ) {
+      // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+      if (!keyMeta || !keyMeta.publicKeyHex) {
         return { kind: "fail" };
       }
     } catch {
@@ -3511,7 +3494,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 过一次；执行阶段再校验一次防"中段时间窗"内 session 注销 / 失效。
     // 施工单 2026-06-30 002 硬切换：签名 / 公钥派生走统一 owner
     // runtime resolver（`bootstrap_owner` / `vault_unlock` 来源对外
-    // 行为一致）；**不**直接读 keyId。
     const session = await this.requireConnectSession(rec, params.connectSessionId);
     const publicKeyBytes = await this.fetchPublicKeyBytesWithSession(session);
     const label = await this.withSessionOwnerPrivateKey(session, async () => {
@@ -3711,11 +3693,40 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 用 session 绑定的 owner public key 解析当前 vault 内部借用句柄（keyId）。
+   * 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
+   * active key。硬门禁（`keyspace.openKeyStorage` 要求
+   * `active === input.publicKeyHex`）会在底层挡掉，但「Key storage
+   * is not ready」是偶发底层错误，**不**适合作为协议失败语义。
+   * 提前在协议层以 `user_rejected / session_owner_mismatch` 显式
+   * fail-closed，让 caller / UI 拿到明确错误。
+   *
+   * 边界：
+   *   - 任何用到 `session.ownerPublicKeyHex` 调
+   *     `p2pkh.transfer` / `feepool.prepare` 走 P2PKH value 的入口
+   *     都必须先过这个断言。
+   *   - 「不依赖 owner」的命令（不需要 P2PKH value 的命令）**不**
+   *     走这个断言。
+   */
+  private assertSessionOwnerIsActive(session: ConnectSessionRecord): void {
+    const active = this.deps.keyspace.active().activePublicKeyHex;
+    if (!active) {
+      throw localFailure(
+        "session_owner_mismatch",
+        "connect session owner is not bound to current active key: no active key"
+      );
+    }
+    if (active !== session.ownerPublicKeyHex) {
+      throw localFailure(
+        "session_owner_mismatch",
+        `connect session owner is not bound to current active key: session=${session.ownerPublicKeyHex}, active=${active}`
+      );
+    }
+  }
+
+  /**
    *
    * 设计缘由（施工单 2026-06-28 002 硬切换）：`ownerKeyId` **不**允许
    * 落 session 持久化；执行时按 `ownerPublicKeyHex` → keyspace.getKey() →
-   * `keyId` 解析。`keyId` 是 vault 内部细节，按需解析。
    *
    * 施工单 2026-06-30 002 硬切换：本方法仅在 `resolveOwnerRuntime`
    * 走 `vault_unlock` 来源时调用；`bootstrap_owner` 来源直接拿
@@ -3723,15 +3734,12 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async resolveOwnerKeyMaterial(
     ownerPublicKeyHex: string
-  ): Promise<{ keyId: string; label: string } | null> {
+  ): Promise<{ publicKeyHex: string; label: string } | null> {
     const key = await this.deps.keyspace.getKey(ownerPublicKeyHex);
-    if (!key || !key.keyId || !key.publicKeyHex) {
+    if (!key || !key.publicKeyHex) {
       return null;
     }
-    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
-      return null;
-    }
-    return { keyId: key.keyId, label: key.label };
+    return { publicKeyHex: key.publicKeyHex, label: key.label };
   }
 
   /**
@@ -3751,7 +3759,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *          与`vault.locked`态下的主要来源。
    *       2. **`vault_unlock`**：当前窗口 vault 已 unlocked 且
    *          `ownerPublicKeyHex` 对应的 key 可读 → 现解析 vault
-   *          `keyId` → 用 `vault.withPrivateKey(keyId, fn)` 借出。
+   *          `publicKeyHex` → 用 `vault.withPrivateKey(publicKeyHex, fn)` 借出。
    *       3. 解析失败：抛 `runtime_missing`（对外 `user_rejected`）。
    *   - 业务方法拿到的 `OwnerKeyResolution` 与签名 / 加解密链路
    *     共享同一份 owner 真值——cipher / intent.sign / p2pkh / feepool
@@ -3790,14 +3798,14 @@ export class ProtocolServiceImpl implements ProtocolService {
         "owner runtime not available in current window: please reopen the app from Keymaster"
       );
     }
-    const { keyId } = material;
+    const { publicKeyHex } = material;
     return {
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       source: "vault_unlock",
       withPrivateKeyHex: async <T>(
         fn: (material: { hex: string }) => Promise<T> | T
       ): Promise<T> => {
-        return this.deps.vault.withPrivateKey(keyId, async (m) => fn(m));
+        return this.deps.vault.withPrivateKey(publicKeyHex, async (m) => fn(m));
       }
     };
   }
@@ -3825,8 +3833,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 在 session 绑定的 owner 私钥闭包内执行回调（施工单 2026-06-30 002）。
    *
-   * 取代 `vault.withPrivateKey(keyId, fn)` 的"按 session"版。业务方法
-   * **统一**走这一个入口持有 owner 私钥 hex；**不**各自手写 keyId 解析。
+   * 取代 `vault.withPrivateKey(publicKeyHex, fn)` 的"按 session"版。业务方法
    */
   private async withSessionOwnerPrivateKey<T>(
     session: ConnectSessionRecord,
@@ -3839,8 +3846,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 从 `rec` 上拿 connect session 真值（施工单 2026-06-30 002）。
    *
-   * 设计缘由：feepool / p2pkh 等业务方法先前直接用 `keyId` 调
-   * `vault.withPrivateKey(keyId, fn)`；本单让所有业务方法统一走
+   * `vault.withPrivateKey(publicKeyHex, fn)`；本单让所有业务方法统一走
    * `resolveOwnerRuntime` 后，session 真值通过 `rec.connectSessionId`
    * + `fetchSessionForBinding` 取出。
    */
@@ -3860,7 +3866,6 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 在 session 绑定的 owner 私钥上做 secp256k1 签名（compact 64 字节）。
    *
-   * 取代 `signWithOwnerKey(keyId, bytes)` 的"按 session"版。
    */
   private async signWithSessionOwner(
     session: ConnectSessionRecord,
@@ -3874,7 +3879,6 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 取 session 绑定的 owner 压缩公钥字节（envelope / subject 字段用）。
    *
-   * 取代 `fetchPublicKeyBytes(publicKeyHex, keyId)` 的"按 session"版。
    */
   private async fetchPublicKeyBytesWithSession(
     session: ConnectSessionRecord
@@ -3916,7 +3920,6 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - ownerPublicKeyHex 必须是用户在 UI 上选定的那把 key 公钥 hex
    *     （来自 rec.connectLoginSelected；用户在 confirmConnectLogin 时写入）；
    *   - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**落
-   *     session record；vault 内部 keyId 按需在执行时从 keyspace 解析。
    *   - owner key 必须在 keyspace 内可查，且 identityStatus === "ready"；
    *   - DB 不可用时直接拒掉（fail-closed）。
    */
@@ -3930,9 +3933,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!key || !key.publicKeyHex) {
       throw localFailure("internal_error", "connect.login: owner key not found");
     }
-    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
-      throw localFailure("internal_error", "connect.login: owner key not ready");
-    }
+    // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
     if (!this.deps.storageDb) {
       throw localFailure("internal_error", "connect.login: session storage unavailable");
     }
@@ -3990,9 +3991,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!key || !key.publicKeyHex) {
       throw localFailure("internal_error", "connect.resume: owner key not found");
     }
-    if (key.identityStatus === "failed" || key.identityStatus === "uninitialized") {
-      throw localFailure("internal_error", "connect.resume: owner key not ready");
-    }
+    // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
     const now = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
     if (this.deps.storageDb) {
@@ -4400,10 +4399,16 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 施工单 2026-06-28 002 硬切换：p2pkh.transfer 走 session 绑定 owner，
       // 不再读全局 active key。execute 阶段先 requireConnectSession 校验
       // session 仍有效，再把 session 绑定的 owner public key 交给
-      // p2pkhService（plugin-p2pkh 内部按 ownerPublicKeyHex 解析 keyId
       // 走选币 + 签名）。
       const session = await this.requireConnectSession(rec, params.connectSessionId);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
+      // 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
+      // active key。硬门禁（`keyspace.openKeyStorage` 要求
+      // `active === input.publicKeyHex`）会在底层挡掉，但「Key
+      // storage is not ready」是偶发底层错误，**不**适合作为协议
+      // 失败语义。提前在协议层以「session is no longer bound to
+      // active key」显式 fail-closed，让 caller / UI 拿到明确错误。
+      this.assertSessionOwnerIsActive(session);
       const card = this.feedCommands.find((c) => c.id === rec.recordId);
       if (card) {
         card.recipientAddress = params.recipientAddress;
@@ -4468,6 +4473,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       // poolKey 补 ownerPublicKeyHex 维度（不再仅按 origin + counterparty）。
       const session = await this.requireConnectSession(rec, params.connectSessionId);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
+      // 硬切换 002 收尾：feepool.prepare 会通过 `buildAndMaybeBuildBaseTx`
+      // 走 `p2pkhService.listUtxos({ ownerPublicKeyHex })` 取 value。协议
+      // 层必须先校验 session owner == 当前 active key，否则底层硬门禁
+      // 挡掉时只会冒出「Key storage is not ready」这种偶发错误，不适
+      // 合作为协议失败语义。
+      this.assertSessionOwnerIsActive(session);
       const poolKey = `${rec.origin}::${ownerPublicKeyHex}::${params.counterpartyPublicKeyHex}`;
       const prior = await this.deps.storageDb.getFeePool(poolKey);
       const originSettings = await this.getOriginSettingsCached(rec.origin);
@@ -4708,7 +4719,6 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由（施工单 2026-06-28 002 硬切换）：
    *   - UTXO 选币按 `ownerPublicKeyHex`（session 绑定 owner）走，**不**
    *     读全局 active key 的 namespace。`clientPrivateKeyHex` 由调用方
-   *     从 session owner 解析出来的 keyId 借出，与 ownerPublicKeyHex
    *     在 plugin-p2pkh 内部必须同源。
    *   - 旧实现读 `listUtxos({ assetId: "bsv" })` 等于"取当前 active key
    *     namespace"——会与签名 key 错位。本实现强制传 owner 让 plugin-p2pkh
@@ -4953,35 +4963,14 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /* ============== vault / 私钥 helpers ============== */
 
-  /**
-   * 借出 private key 拿 hex 文本。feepool 等场景要拿私钥 hex 给 SDK 签名
-   * 草稿；通过 `keyId` 借用，不走全局 active key。
-   */
-  private async getActiveKeyHex(keyId: string): Promise<string> {
-    return this.deps.vault.withPrivateKey(keyId, async (material) => material.hex);
-  }
-
-  /**
-   * 用指定 key（由 `ownerPublicKeyHex` 解析出的 vault keyId）做 compact
-   * secp256k1 签名。identity.get / intent.sign / 任何业务方法**都**走
-   * 这条路径——不允许 fallback 到钱包全局 active key。
-   */
-  private async signWithOwnerKey(keyId: string, bytes: Uint8Array): Promise<Uint8Array> {
-    return this.deps.vault.withPrivateKey(keyId, async (material) => {
-      return signCompactSecp256k1(material.hex, bytes);
-    });
-  }
-
-  /**
-   * 取 owner 压缩公钥字节（用于 envelope / subject 字段）。走 vault 借用
-   * 私钥 hex → noble secp256k1 推出 compressed pubkey。
-   */
-  private async fetchPublicKeyBytes(publicKeyHex: string, keyId: string): Promise<Uint8Array> {
-    return this.deps.vault.withPrivateKey(keyId, async (material) => {
-      const pub = secp256k1.getPublicKey(hexToBytes(material.hex), true);
-      return pub;
-    });
-  }
+  // 硬切换 002 收尾：旧 `getActiveKeyHex` / `signWithOwnerKey` /
+  // `fetchPublicKeyBytes` 三个 legacy helper 已删除。vault 不再携带
+  // 任何 key 域 surrogate id 维度——所有业务方法的 owner 借用都按
+  // `vault.withPrivateKey(publicKeyHex, fn)` 唯一入口走，不存在
+  //
+  // 路径存在；2026-07-02 硬切换收尾后 `KeyIdentity` / `KeyRef` 不再
+  // 借私钥 hex，复用 `withSessionOwnerPrivateKey` / `resolveOwnerRuntime`
+  // 即可。
 
   /* ============== 发送 ============== */
 

@@ -446,8 +446,7 @@ export const protocolPlugin: PluginManifest = {
       // 硬切换 002：listUtxos / prepareTransfer / submitTransfer 全部
       // 接受 `ownerPublicKeyHex`（session 绑定 owner）。plugin-protocol
       // 在 `executeP2pkhTransferAndFinalize` / `buildAndMaybeBuildBaseTx`
-      // 内从 session 取 owner 后传入。plugin-p2pkh 内部按 owner 解析
-      // keyId 走选币 + 签名，**不**走全局 active key。
+      // 内从 session 取 owner 后传入。plugin-p2pkh 内部按 owner 直接
       let p2pkhService:
         | {
             listUtxos(filter?: {
@@ -464,8 +463,7 @@ export const protocolPlugin: PluginManifest = {
             submitTransfer(preview: {
               assetId: "bsv";
               network: "main";
-              ownerPublicKeyHex?: string;
-              keyId?: string;
+              ownerPublicKeyHex: string;
               recipientAddress: string;
               amountSatoshis: number;
               feeRateSatoshisPerKb: number;

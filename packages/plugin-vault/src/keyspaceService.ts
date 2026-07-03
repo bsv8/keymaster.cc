@@ -8,7 +8,7 @@
 //   - 删除顺序：prepare -> cancel background -> close handles -> delete namespace
 //     DBs -> delete Vault key。namespace DB 删除失败时拒绝继续，避免留下归属
 //     丢失的业务数据。
-//   - 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"；
+//   - 硬切换 005：active key 模型收窄为"single 模式唯一一把 ready key"；
 //     `activePublicKeyHex` 缺省即"无 active key"。不再有 `mode: "all"`、
 //     `setAll()`、所有模式持久化。`autoPickActive` 只在有 ready key 时返回具体
 //     publicKeyHex；没有时返回 `{}`。
@@ -26,6 +26,13 @@
 //     事件 payload、active state、localStorage 键全部按 publicKeyHex
 //     走。旧 `publicKeyHash` 平台身份字段已从 contract / service 删
 //     除；不再保留兼容 alias。
+//   - 硬切换 002 收尾：平台里**不再**存在任何 key 域 surrogate id：
+//     * 唯一删除入口是 publicKeyHex 主键上的 `deleteKey({ publicKeyHex, password })`；
+//     * 事件 payload (`key.created` / `key.deleting` / `key.deleted`)
+//   - 系统中**不再**存在 "identityStatus = uninitialized | failed" 的
+//     稳态。新建 / 导入 key 必须在落库前派生 publicKeyHex；unlock 后
+//     不再跑逐把 key backfill。unlock 阶段一次性 staging migration 由
+//     vaultService 内部完成，keyspace 不再背 prefix "失败但勉强保留"。
 
 import type { MessageBus } from "@keymaster/runtime";
 import type {
@@ -39,8 +46,7 @@ import type {
 } from "@keymaster/contracts";
 import {
   EVENT_ACTIVE_KEY_CHANGED,
-  EVENT_KEYSPACE_INITIALIZATION,
-  KeyspaceService as KeyspaceServiceContract
+  EVENT_KEYSPACE_INITIALIZATION
 } from "@keymaster/contracts";
 import type { VaultService } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -54,6 +60,29 @@ const ACTIVE_KEY_STORAGE_KEY = "keyspace.activePublicKeyHex";
 const LEGACY_ACTIVE_KEY_STORAGE_KEY = "keyspace.activePublicKeyHash";
 const ALL_KEYS_DB_PREFIX = "keymaster.key.";
 
+// 硬切换 002 收尾：publicKeyHex 是 key 域唯一真值，被用作 active state、
+// namespace DB 名、事件 payload。setActive / activateCreatedKey / deleteKey /
+// openKeyStorage 在拿到 publicKeyHex 时必须先做形状校验——禁止把非 hex 串、
+// 空串、长度离谱的字符串写入 active state 或 namespace 名（防垃圾值泄漏到
+// 后续签名 / 持久化 / 文件名）。
+//
+// 规则（足够拦截旧时代 surrogate id 形态如 `"z2_publickeyhex"` / `"zkid1_*"`，
+// 但不破坏既有 64 / 66 位 hex 测试 fixture 与真实压缩公钥）：
+//   - 非空；
+//   - 仅允许 `[0-9a-f]`；
+//   - 长度 64..128（66 = 真实 secp256k1 压缩公钥；64 = 测试 fixture 形态）。
+function assertValidPublicKeyHex(publicKeyHex: string, op: string): void {
+  if (typeof publicKeyHex !== "string" || publicKeyHex.length === 0) {
+    throw new Error(`${op}: publicKeyHex must be a non-empty string`);
+  }
+  if (publicKeyHex.length < 64 || publicKeyHex.length > 128) {
+    throw new Error(`${op}: publicKeyHex length out of range (got ${publicKeyHex.length})`);
+  }
+  if (!/^[0-9a-f]+$/.test(publicKeyHex)) {
+    throw new Error(`${op}: publicKeyHex contains non-hex characters`);
+  }
+}
+
 export interface KeyspaceServiceDeps {
   messageBus: MessageBus;
   vault: VaultService;
@@ -66,14 +95,14 @@ export interface KeyspaceServiceDeps {
   background?: BackgroundService;
   /**
    * 硬切换 002：业务插件注入的 logger。
-   * key.deleted / active.changed / identity.failed 走统一日志。
+   * key.deleted / active.changed 走统一日志。
    * 不传时不记日志。
    */
   logger?: PluginLogger;
 }
 
 export interface KeyspaceHandle extends KeyspaceService {
-  /** 在 Vault unlock 后调用，触发 identity backfill。 */
+  /** 在 Vault unlock 后调用，触发 ready 边界收敛（已无 identity backfill）。 */
   onVaultUnlocked(): Promise<void>;
   /**
    * Vault 锁定时的平台级清理屏障（硬切换 004）。
@@ -105,7 +134,7 @@ export interface KeyspaceHandle extends KeyspaceService {
    * 显式"把某把 key 切为 active"。vault 在 importPrivateKey / generateKey
    * 成功后必须调用，确保新 key 进入 single 模式。
    *
-   * 与 `setActive(publicKeyHex)` 的区别：本方法不依赖 identityStatus 过滤
+   * 与 `setActive(publicKeyHex)` 的区别：本方法不依赖 candidate 过滤
    * ——keyspace 自己刚被通知了一把新 key（同一调用链），应无条件接受。
    * `setActive` 走 listActiveCandidates 过滤，是用户手动切 key 的入口。
    *
@@ -117,8 +146,12 @@ export interface KeyspaceHandle extends KeyspaceService {
    */
   activateCreatedKey(identity: KeyIdentity): Promise<void>;
   /**
-   * 设置 identity backfill 阶段状态。vault 在 backfillIdentities 前后
-   * 调用，触发 EVENT_KEYSPACE_INITIALIZATION 事件。
+   * 设置 identity migration 阶段状态（硬切换 002 收尾）。
+   *
+   * 设计缘由：unlock 阶段 vault 跑一次性 staging migration；该 migration
+   * 也是一次性，不属于常规 backfill。`setInitializing(true)` 让 UI 在
+   * staging 迁移期间展示"导入中..."，resolve 后再 `false`。业务插件
+   * （包括 UI 组件）不再依赖 per-key `identityStatus`，只读本开关。
    */
   setInitializing(initializing: boolean): void;
 }
@@ -192,12 +225,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     active = next;
     activeIdentity = next.activePublicKeyHex ? identity : undefined;
     persistActive(next);
-    // 硬切换 002：active 切换走统一日志；记录前后 publicKeyHex 摘要（不记私钥 / 不记 label 原文之外的内容）。
+    // 硬切换 002：active 切换走统一日志；记录前后 publicKeyHex 摘要（不记私钥 / 不记 label）。
     if (prev.activePublicKeyHex !== next.activePublicKeyHex) {
       console.info("[keyspace] active.changed", {
         previousPublicKeyHex: prev.activePublicKeyHex,
-        nextPublicKeyHex: next.activePublicKeyHex,
-        nextKeyId: activeIdentity?.keyId
+        nextPublicKeyHex: next.activePublicKeyHex
       });
       deps.logger?.info({
         scope: "vault.key",
@@ -237,44 +269,35 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   /**
-   * 返回所有可管理的 KeyIdentity（ready + failed + 无 hex）。
-   * 设计缘由：硬切换 008 收尾——failed key 也必须能列出，用户需要看到
-   * "这把 key 解密失败，只能删除"；listKeys 返回包含 failed 与无 hex。
-   * `KeyIdentity` 的 publicKeyHex 在 identity 字段缺失
-   * 时为 undefined，调用方需自行处理展示；短公钥由 UI 现算。
+   * 返回所有可管理的 KeyIdentity。
    *
-   * 硬切换 003 收尾：本方法不再回填 `fingerprint` 字段——`KeyIdentity`
-   * 也不再持有该字段。需要短公钥展示的调用方应拿 `publicKeyHex` 调
-   * `formatShortPublicKey()` 现算。
+   * 硬切换 002 收尾：本方法**不再**包含 failed key 集合——
+   * 系统里 vault canonical store 主键就是 publicKeyHex，落库前已经
+   * 校验过身份派生的合法性（derive -> canonical put），不存在
+   * "key 已落库但 identity 未就绪"的中间态。返回的就是 ready 列表。
+   *
+   * 短公钥属于 UI 显示格式，**不**作为 KeyIdentity 字段持有。需要
+   * 短串展示时由 UI 现算 `formatShortPublicKey(publicKeyHex)`。
    *
    * 硬切换 001 收口：旧 `publicKeyHash` 平台身份字段已删除。
    */
   async function listManageableKeys(): Promise<KeyIdentity[]> {
     const refs = await deps.vault.listKeys();
     return refs.map((r) => ({
-      keyId: r.id,
       publicKeyHex: r.publicKeyHex,
       label: r.label,
       capabilities: r.capabilities,
-      createdAt: r.createdAt,
-      // 有 hex 的老记录 status 缺省按 "ready"；无 hex 的失败记录按
-      // "uninitialized" 兜底（让 UI 显示"初始化中"），backfill 阶段
-      // vaultService 会改写。
-      identityStatus:
-        r.identityStatus ?? (r.publicKeyHex ? "ready" : "uninitialized"),
-      identityError: r.identityError
+      createdAt: r.createdAt
     }));
   }
 
   /**
-   * 活跃候选：identityStatus === "ready" 且有 publicKeyHex。
-   * setActive / autoPickActive / deleteKey / onVaultUnlocked 都用此函数，
-   * 这样 failed key 不会成为 active，也不会被 deleteKey(publicKeyHex) 误删。
+   * 活跃候选：vault canonical store 中所有 key 都属于 ready（落库前
+   * 已派生身份），不再有"identity 缺失"分支。setActive / autoPickActive
+   * / requireActiveKey 都用此函数，避免再次引入"未 ready"维度。
    */
   async function listActiveCandidates(): Promise<KeyIdentity[]> {
-    return (await listManageableKeys()).filter(
-      (k) => k.identityStatus === "ready" && Boolean(k.publicKeyHex)
-    );
+    return listManageableKeys();
   }
 
   function dbNameFor(publicKeyHex: string, pluginId: string, storageId: string): string {
@@ -285,9 +308,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    * 自动选 active key：
    *   - 已持久化的 hex 仍存在 -> 用持久化 hex。
    *   - 否则取 createdAt 最近或列表第一把。
-   *   - 没有 ready key -> `{}`（无 active key）。这对应"vault 内有 failed
-   *     key 但没有 ready key"或"vault 内无 key 已被 finalize 到 uninitialized"
-   *     两种情况，由调用方（壳层）区分。
+   *   - 没有 ready key -> `{}`（无 active key）。
    */
   async function autoPickActive(): Promise<KeyIdentity | undefined> {
     const ready = await listActiveCandidates();
@@ -355,24 +376,23 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   /**
-   * 内部删除路径：单一实现 deleteKey / deleteKeyById 的 namespace 清理。
-   * 设计缘由：deleteKey(publicKeyHex) 已通过 listActiveCandidates 过滤
-   * 掉 failed key，但 deleteKeyById 允许 failed+hex 也走这里——本函数
-   * 不再做 status 检查，只负责按 (keyId, publicKeyHex) 把数据清干净。
+   * 内部删除路径：单一实现 deleteKey 的 namespace 清理。
    *
-   * 硬切换 002：本函数假设密码校验**已经**在 deleteKey / deleteKeyById
-   * 入口完成，自己不再重复校验；这样 verify 失败时连 prepareDeleteKey
-   * 都不会被调到，符合"密码错误时完全不开始删除"的硬切换语义。
+   * 硬切换 002：
+   *     本函数现在唯一入口是 `deleteKey({ publicKeyHex, password })`。
+   *     因为不存在 "公共 KeyIdentity 没 publicKeyHex" 的稳态。
+   *   - active fallback：删的是 active key 时切到下一把 ready key；没有
+   *     ready key 时 active 清空（`{}`），由壳层判断 listKeys().length > 0
+   *     决定是否进入"修复/管理态"。
    *
-   * 硬切换 005 收尾：active fallback 改为单 active 模型——删的是 active
-   * key 时切到下一把 ready key；没有 ready key 时 active 清空（`{}`），
-   * 由壳层判断 `listKeys().length > 0` 决定是否进入"修复/管理态"。
+   * 硬切换 005 收尾：active 切换 / Vault 锁定 / 删除 key 三条路径都走
+   * quiesceNamespace + setActiveInternal / {} 单一实现。
    *
    * 这是 createKeyspaceService 内部的闭包函数，**不**挂在 service 对象上，
    * 因此不会随 `keyspace.service` capability 暴露给插件作者；插件只能走
-   * deleteKey / deleteKeyById 这两个 public 入口。
+   * deleteKey 这个 public 入口。
    */
-  async function deleteKeyRecord({ keyId, publicKeyHex }: { keyId: string; publicKeyHex: string }) {
+  async function deleteKeyRecord(publicKeyHex: string) {
     // 1) prepare：cancel background + 关闭 handle + emit key.deleting。
     await service.prepareDeleteKey(publicKeyHex);
     // 2) 删除 namespace DB：必须全部成功才能继续删 Vault 私钥。
@@ -390,35 +410,31 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     // 3) 删 Vault 私钥材料。deleteKeyMaterial 不发事件；失败时 namespace
     //    已经被删，必须通知调用方并保留 tombstone。
     try {
-      await deps.vault.deleteKeyMaterial(keyId);
+      await deps.vault.deleteKeyMaterial(publicKeyHex);
     } catch (err) {
       deps.messageBus.publish("key.delete.vault-failed", {
         publicKeyHex,
-        keyId,
         error: err instanceof Error ? err.message : String(err)
       });
       throw err;
     }
     // 4) 通知业务插件 key 已删除（仅此处发一次，vault.deleteKeyMaterial 不再发）。
-    deps.messageBus.publish("key.deleted", { publicKeyHex, keyId });
+    deps.messageBus.publish("key.deleted", { publicKeyHex });
     deps.logger?.info({
       scope: "vault.key",
       event: "key.deleted",
       message: "Vault key deleted",
-      data: { keyId, publicKeyHex }
+      data: { publicKeyHex }
     });
     // 5) 收尾：剩余 0 把 key 时走 vault.finalizeEmptyVaultAfterLastKeyDeletion
     //    把 Vault 收回 uninitialized；否则按 active fallback 处理。
     //
     // 硬切换 002 设计要点：
-    //   - "是否删空"以 Vault 实际剩余 key 数量为准（包含 failed /
-    //     uninitialized / no-hex key），不能用 listActiveCandidates
-    //     的 ready key 数量，否则会在"还有 failed key"时错误地把
-    //     Vault 销毁，丢失用户数据。
-    //   - 仍有 key 时：删的是 active key 走 autoPickActive 选下一把
-    //     ready；没有 ready 但有其它残留 key 时 active 清空（`{}`），
-    //     Vault 保持 unlocked，由壳层识别"无 active key 但有 key"进入
-    //     修复/管理态。
+    //   - "是否删空"以 Vault 实际剩余 key 数量为准（canonical store 全量），
+    //     不能用 candidates 的 ready key 数量，否则会在异常边界处误判。
+    //   - 仍有 key 时：删的是 active key 走 autoPickActive 选下一把；
+    //     没有 ready 但有其它残留 key 时 active 清空（`{}`），Vault 保持
+    //     unlocked，由壳层识别"无 active key 但有 key"进入修复/管理态。
     //   - finalizeEmptyVaultAfterLastKeyDeletion 失败必须冒泡：UI
     //     不能在"meta 还在"的异常残留态显示成功（施工单情况 4）。
     //     `key.deleted` 已经发出，那是真的——但 Vault 收尾失败要让
@@ -441,12 +457,9 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
 
   const service: KeyspaceHandle = {
     async listKeys() {
-      // 硬切换 008 收尾：返回 ready + failed，让 UI 看到"解密失败"并允许删除。
       return listManageableKeys();
     },
     async getKey(publicKeyHex) {
-      // 用 manageable 而非 candidates：UI 可能需要知道"该 hex 对应的 key
-      // 是 failed"以便提示用户。
       const all = await listManageableKeys();
       return all.find((k) => k.publicKeyHex === publicKeyHex);
     },
@@ -454,7 +467,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       return active;
     },
     async setActive(publicKeyHex) {
-      // setActive 必须用 candidates：failed key 不能成为 active。
+      assertValidPublicKeyHex(publicKeyHex, "setActive");
       const all = await listActiveCandidates();
       const target = all.find((k) => k.publicKeyHex === publicKeyHex);
       if (!target) {
@@ -481,7 +494,6 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       }
       if (activeIdentity && activeIdentity.publicKeyHex === active.activePublicKeyHex) {
         console.info("[keyspace] requireActiveKey", {
-          keyId: activeIdentity.keyId,
           publicKeyHex: activeIdentity.publicKeyHex,
           label: activeIdentity.label
         });
@@ -490,13 +502,14 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       console.warn("[keyspace] requireActiveKey fallback without cached identity", {
         activePublicKeyHex: active.activePublicKeyHex
       });
+      // 占位 identity —— 不带任何 vault 内部 surrogate id，仅以
+      // publicKeyHex 为唯一真值。调用方若需要更多 label 等信息，
+      // 必须先 setActive 让 activeIdentity 缓存落地。
       return {
-        keyId: active.activePublicKeyHex,
         publicKeyHex: active.activePublicKeyHex,
         label: "",
         capabilities: [],
-        createdAt: "",
-        identityStatus: "ready"
+        createdAt: ""
       };
     },
     onActiveChange(handler) {
@@ -505,6 +518,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       return () => activeListeners.delete(handler);
     },
     async openKeyStorage(input: KeyScopedStorageOpenInput) {
+      assertValidPublicKeyHex(input.publicKeyHex, "openKeyStorage");
       const cacheKey = `${input.publicKeyHex}::${input.pluginId}::${input.storageId}`;
       const existing = openDbs.get(cacheKey);
       if (existing) {
@@ -535,9 +549,14 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         }
       };
       openDbs.set(cacheKey, { handle, refCount: 1 });
-      // namespace DB 打开成功后检查它是否仍然属于当前 active publicKeyHex。
-      // 若 active 已切换走，关闭并要求调用方重新 open。
-      if (active.activePublicKeyHex && active.activePublicKeyHex !== input.publicKeyHex) {
+      // 硬门禁：namespace DB 只对当前 active key 开放。
+      //   - `active.activePublicKeyHex` 必须非空：未激活任何 key 时一律拒绝，
+      //     防止「无 active + 知道 hex 就能开库」被滥用。
+      //   - 必须严格等于 `input.publicKeyHex`：session / repair / 跨 key 复用
+      //     等所有「拿非 active 的 hex 来开库」场景必须 fail-closed，由调用方
+      //     在上层（protocol / p2pkh）通过合法路径（让 active 切到目标 hex）
+      //     进入。修复特殊情况请走专门的内部恢复入口，不要把这条放宽。
+      if (active.activePublicKeyHex !== input.publicKeyHex) {
         handle.close();
         throw new Error("Key storage is not ready");
       }
@@ -553,7 +572,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       return [...registeredStorages];
     },
     async prepareDeleteKey(publicKeyHex) {
-      // 硬切换 008 收尾 + 硬切换 004：严格顺序 + fail-closed。
+      // 硬切换 004 收尾 + 硬切换 008：严格顺序 + fail-closed。
       //   1) quiesceNamespace —— cancelByKey（await 旧 task 退出）+ 关闭
       //      该 key 的 openDbs。失败必须冒泡以阻止后续 namespace DB /
       //      Vault 私钥删除。
@@ -566,57 +585,21 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       deps.messageBus.publish("key.deleting", { publicKeyHex });
     },
     async deleteKey(input) {
+      assertValidPublicKeyHex(input.publicKeyHex, "deleteKey");
       // 硬切换 002：删除主流程**第一步**必须是 vault.verifyPassword。
       // 密码错误时直接抛 Invalid password，**完全不开始**删除——不调
       // prepareDeleteKey、不取消 background、不动 namespace DB / 私钥。
       await deps.vault.verifyPassword(input.password);
-      // 严格只允许 ready key 走 publicKeyHex 主路径。设计缘由：
-      // deleteKey(publicKeyHex) 是平台身份查找的"已就绪"入口；如果
-      // 调用方传一个 identityStatus="failed" 但仍有 hex 的 key，应改走
-      // deleteKeyById(keyId) 走管理入口。
       const ready = await listActiveCandidates();
       const target = ready.find((k) => k.publicKeyHex === input.publicKeyHex);
       if (!target) {
         throw new Error("Key not found");
       }
       // 委托给 deleteKeyRecord：单一删除路径，避免重复实现。
-      return deleteKeyRecord({ keyId: target.keyId, publicKeyHex: input.publicKeyHex });
+      return deleteKeyRecord(input.publicKeyHex);
     },
-    async deleteKeyById(input) {
-      // 硬切换 002：管理入口的密码校验同样收口在 service 层；UI 不能
-      // 在外面"先校验、再删"——那会让密码授权语义散落在每个页面。
-      await deps.vault.verifyPassword(input.password);
-      // 管理入口：允许 ready / failed / 无 hex 的 key 走同一条路径。
-      // 设计缘由：硬切换 008 收尾——failed key 也可能有 publicKeyHex
-      // （vaultDb.putKeyIdentityFailed 只改 status、不动 identity 字段），
-      // 因此 deleteKeyById 必须能处理 failed+hex 的情况，走完整 namespace
-      // 清理（cancelByKey + 删 namespace DB + 删私钥材料）。
-      const ref = await deps.vault.getKey(input.keyId);
-      if (!ref) {
-        throw new Error("Key not found");
-      }
-      if (ref.publicKeyHex) {
-        // 有 hex：走完整 namespace 清理路径——不依赖 listActiveCandidates。
-        return deleteKeyRecord({ keyId: input.keyId, publicKeyHex: ref.publicKeyHex });
-      }
-      // 无 hex：没有 namespace DB 可删，只删私钥材料。
-      await deps.vault.deleteKeyMaterial(input.keyId);
-      // keyspace 统一发一次 key.deleted（payload 不带 publicKeyHex）。
-      deps.messageBus.publish("key.deleted", { keyId: input.keyId });
-      // 硬切换 002：剩余 0 把 key 时同样走 finalize empty vault 收尾；
-      // 否则继续保留 active fallback（无 hex key 天然不可能是 active）。
-      const remaining = await deps.vault.listKeys();
-      if (remaining.length === 0) {
-        await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
-        return;
-      }
-      // 硬切换 005：active 仍指向这把被删 key 的 hex 时（极少出现：active
-      // 缓存与 deleteById 之前已经不一致），把 active 清空让壳层按
-      // listKeys() > 0 决定走修复/管理态。
-      if (active.activePublicKeyHex) {
-        setActiveInternal({});
-      }
-    },
+    // 全部走 `deleteKey({ publicKeyHex, password })`，由 publicKeyHex 主键
+    // 完成定位。
     isInitializing() {
       return initializing;
     },
@@ -629,8 +612,8 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       // 硬切换 001 收口：解锁后先 best-effort 清理旧 localStorage
       // activePublicKeyHash 键,避免脏数据被错误继承。
       purgeLegacyActiveKeyStorage();
-      // 解锁后 backfill 阶段由 vaultService 触发；keyspace 只需等。
-      // 若 keyspace 没有 ready key（首次解锁或 backfill 全部失败），active 清空。
+      // 解锁后 vaultService 已一次性跑完 staging migration；canonical
+      // store 即 ready 集合。keyspace 只需选 active。
       const ready = await listActiveCandidates();
       if (ready.length === 0) {
         setActiveInternal({});
@@ -688,6 +671,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         // 兜底：identity 缺 hex 时无法切到 single 模式，保持现状。
         return;
       }
+      assertValidPublicKeyHex(identity.publicKeyHex, "activateCreatedKey");
       const prev = active;
       // 硬切换 004 收尾：与 setActive(B) 共用同一条 namespace quiesce
       // 语义——先 await cancelByKey + await 旧 task 退出 + 关闭
@@ -708,11 +692,6 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   };
 
   return service;
-}
-
-function eventOldVersion(_req: IDBOpenDBRequest): number {
-  // 保留作为 type-level 占位；旧版 DOM lib 中 IDBTransaction 没有 oldVersion。
-  return 0;
 }
 
 /**
@@ -749,7 +728,6 @@ function deleteDatabaseWithTimeout(name: string, timeoutMs: number): Promise<voi
   });
 }
 
-// 抑制未使用告警：导出类型供测试断言；通过 cast 维持类型完整。
-void (null as unknown as KeyspaceServiceContract);
+// 抑制未使用告警：保留 capability key 字面量与 VaultService 类型供外部断言使用。
 void KEYSPACE_SERVICE_CAPABILITY;
-void (null as unknown as VaultService);
+void (0 as unknown as VaultService);

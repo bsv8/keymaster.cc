@@ -21,8 +21,7 @@ const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 function makeResource(generation = 0): P2pkhKeyResource {
   return {
     resourceId: "k1:main",
-    keyId: "k1",
-    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+    publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
     label: "l",
     address: "a",
     network: "main",
@@ -38,7 +37,7 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
     active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
-      keyId: "k1",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
 
       label: "l",
       capabilities: ["p2pkh"],
@@ -71,8 +70,7 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
     // 硬切换 008 收尾：fake 上是 no-op。
-    deleteKeyById: async () => undefined,
-    isInitializing: () => false,
+        isInitializing: () => false,
     onInitializationChange: () => () => undefined,
     // 硬切换 008：attachBackgroundService 在测试 fake 上是 no-op。
     attachBackgroundService: () => undefined

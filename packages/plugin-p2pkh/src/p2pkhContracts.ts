@@ -2,6 +2,14 @@
 // P2PKH 专属类型与 P2pkhService 契约。
 // 设计缘由：硬切换后这些类型默认只在 plugin-p2pkh 内部使用，不进入全局 contracts。
 // 包含 WOC 硬切换后的扩展：recent sync、history backfill、本地提交、本地输入占用。
+//
+// 硬切换 002 收尾（key 域彻底收尾）：
+//   - P2PKH 资源 / UTXO / history / submission / claim / transfer input /
+//   - `readyKeyIdentity` 收窄为只持有 `publicKeyHex` 等公开身份字段，
+//     不再持有 vault 内部 surrogate id。
+//   - `onKeyImported` / `onKeyRemoved` 入参改为 `publicKeyHex`。
+//     当前打开的 namespace DB 隐式表达（每个 key 的 namespace 独立 DB）。
+//     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import type { BsvNetwork, KeyIdentity } from "@keymaster/contracts";
 
@@ -35,15 +43,17 @@ export const P2PKH_ASSETS: Record<P2pkhAssetId, P2pkhAssetDef> = {
   }
 };
 
-/** P2PKH 资源：当前 active key namespace 下的一个网络资源。
- *  设计缘由：硬切换 007 后 P2PKH 资源归属 publicKeyHex；keyId 仍保留为诊断字段，
- *  不再作为删除/隔离主路径。resourceId 不再拼接 keyId，改为
- *  `p2pkh:<network>:<scriptType>`，区分同 key 下的不同网络。 */
+/**
+ * P2PKH 资源：当前 active key namespace 下的一个网络资源。
+ *
+ * 硬切换 007 + 硬切换 002 收尾：
+ *   - 资源归属通过当前打开的 namespace DB（`publicKeyHex` 维度）隐式
+ *     区分，不再需要资源字段上自带一个 key id。
+ *   - resourceId 仅按 `p2pkh:<network>` 区分同 key 下的不同网络资源。
+ */
 export interface P2pkhKeyResource {
   resourceId: string;
-  /** Vault 内部 key id，诊断字段。 */
-  keyId: string;
-  /** active key 公钥 hash；硬切换后用于诊断与迁移回查。 */
+  /** owner 公开身份：压缩公钥 hex；仅作为展示字段，与当前 namespace DB 的归属一致。 */
   publicKeyHex: string;
   label: string;
   address: string;
@@ -78,12 +88,13 @@ export interface P2pkhGlobalSettings {
   includeTestnet: boolean;
 }
 
-/** P2PKH UTXO。 */
+/** P2PKH UTXO。
+ *
+ * 硬切换 002 收尾：UTXO 持有 `publicKeyHex`（owner 真值），不再持有
+ */
 export interface P2pkhUtxo {
   id: string;
   resourceId: string;
-  /** 诊断字段，删除主路径不再依赖。 */
-  keyId: string;
   publicKeyHex: string;
   network: BsvNetwork;
   address: string;
@@ -97,12 +108,12 @@ export interface P2pkhUtxo {
   syncedAt: string;
 }
 
-/** P2PKH 历史记录条目。 */
+/** P2PKH 历史记录条目。
+ *
+ */
 export interface P2pkhHistoryItem {
   id: string;
   resourceId: string;
-  /** 诊断字段，删除主路径不再依赖。 */
-  keyId: string;
   publicKeyHex: string;
   network: BsvNetwork;
   address: string;
@@ -121,39 +132,38 @@ export interface P2pkhHistoryItem {
 }
 
 /**
- * UTXO 过滤条件。
+ * UTXO 过滤条件（硬切换 002 收尾）。
  *
- * 设计缘由（施工单 2026-06-28 002 硬切换）：
- *   - `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值；plugin
- *     内部解析为 `keyId` 后再用 `keyId` 过滤 UTXO。
- *   - `keyId` 仍保留为内部维度：plugin 内部某些路径（如后台同步、
- *     旧调用方）直接拿 vault keyId 走选币，避免每次都查 keyspace。
- *   - 两者**不**冲突：若两者都给，则 `keyId` 优先（plugin 内部已
- *     解析过 owner，避免重复解析）。
+ * `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值；plugin
+ * 不再依赖 vault 内部 surrogate id 维度。
+ *
+ * 调用方语义：
+ *   - 传 `ownerPublicKeyHex`：结果严格按该 owner 的 namespace DB 过滤。
+ *     跨 owner 调用（protocol feepool 等）**必须**传，不传就拿不到对
+ *     的 value。底层硬门禁要求 `active === ownerPublicKeyHex`，由
+ *     protocol 层 `assertSessionOwnerIsActive` 显式保证。
+ *   - 不传：仅作 UI 本地读路径兜底，service 实现可回落到当前 active
+ *     key namespace（老 widget / overview 仍可工作）；这**不**作
+ *     为对外契约，跨 owner 调用禁止依赖此兜底。
  */
 export interface P2pkhUtxoFilter {
   assetId?: P2pkhAssetId;
   /**
-   * session / caller 视角的 owner public key hex（施工单 002 硬切换）。
-   * 缺省 = "取 active key namespace"是兜底路径，**只**为兼容旧调用。
-   * 002 之后所有调用方都应传 owner 或 keyId。
+   * owner public key hex。跨 owner 调用必填；不传时仅作 UI 本地读
+   * 路径兜底，行为**不**作为对外契约。
    */
   ownerPublicKeyHex?: string;
-  keyId?: string;
   resourceId?: string;
 }
 
 /**
- * UTXO 分配请求（硬切换 001）。
- * 设计缘由：移除 `allowUnconfirmed`。一旦"未在 WOC 未花费集合里"
- * 才会让该输入不参与分配——本地输入占用由 service 层过滤后传入。
+ * UTXO 分配请求（硬切换 001 + 硬切换 002 收尾）。
  */
 export interface UtxoAllocationRequest {
   amountSatoshis: number;
   feeReserveSatoshis?: number;
   strategy?: "smallest-first" | "largest-first";
   assetId: P2pkhAssetId;
-  keyId?: string;
 }
 
 /** UTXO 分配结果。 */
@@ -207,7 +217,6 @@ export type P2pkhLocalSubmissionStatus = "submitting" | "broadcast" | "confirmed
 export interface P2pkhLocalSubmission {
   id: string;
   resourceId: string;
-  keyId: string;
   publicKeyHex: string;
   network: BsvNetwork;
   assetId: P2pkhAssetId;
@@ -225,14 +234,15 @@ export interface P2pkhLocalSubmission {
   error?: string;
 }
 
-/** 本地输入占用。 */
+/** 本地输入占用。
+ *
+ */
 export type P2pkhLocalInputClaimState = "claimed" | "observed-consumed" | "released";
 
 export interface P2pkhLocalInputClaim {
   id: string;
   submissionId: string;
   resourceId: string;
-  keyId: string;
   publicKeyHex: string;
   network: BsvNetwork;
   txid: string;
@@ -250,7 +260,7 @@ export interface P2pkhBackfillCommit {
   expectedRevision: number;
   /** 资源代际；与 store 当前 generation 不一致时丢弃响应。 */
   expectedGeneration: number;
-  /** 资源元数据，用于在 history 记录中填入正确的 keyId/network/address。 */
+  /** 资源元数据，用于在 history 记录中填入正确的 owner / network / address。 */
   resource: P2pkhKeyResource;
   /** 当前页 history；按 (resourceId, txid) upsert。 */
   page: Array<{ txid: string; height: number; status: "confirmed"; source: "woc-confirmed" }>;
@@ -259,16 +269,13 @@ export interface P2pkhBackfillCommit {
 }
 
 /**
- * P2pkhRecentCommit（硬切换 001）。
- * 设计缘由：移除 `balance` 字段。recent-sync 不再请求 WOC balance
- * endpoint，也不再把余额写回 DB；余额真值由 service 每次基于当前
- * UTXO 快照现算。
+ * P2pkhRecentCommit（硬切换 001 + 硬切换 002 收尾）。
  */
 export interface P2pkhRecentCommit {
   resourceId: string;
   /** 资源代际；提交时与 store 当前 generation 不一致则拒绝写入。 */
   expectedGeneration?: number;
-  /** 资源元数据，用于在 history 中填入正确的 keyId/network/address。 */
+  /** 资源元数据，用于在 history 中填入正确的 owner hex / network / address。 */
   resource?: P2pkhKeyResource;
   /** resource 替换式 UTXO 快照。 */
   utxos?: P2pkhUtxo[];
@@ -286,48 +293,29 @@ export interface P2pkhRecentCommit {
 }
 
 /**
- * 转移输入参数（硬切换 001 + 施工单 2026-06-28 002 硬切换）。
+ * 转移输入参数（硬切换 001 + 硬切换 002 收尾）。
  *
- * 设计缘由：
- *   - 移除 `allowUnconfirmed`。所有未在本地输入占用中占用的未花费
- *     UTXO 都会参与选币；WOC 已看不到的输入也不会进入。
- *   - `ownerPublicKeyHex` 是**强制**输入字段（002 硬切换）。UTXO
- *     选币、签名 key、resourceId 全部按该 owner 走；不允许 fallback
- *     到当前 active key。Plugin-protocol 调用时永远传 session 绑定
- *     owner；老路径（widget / overview）保留 `keyId` 作为兜底。
- *   - `keyId` 仍保留：plugin 内部已知 owner 时直接传 keyId 走"已
- *     解析"路径，避免每次都查 keyspace。
+ * `ownerPublicKeyHex` 是 session / caller 视角的 owner 真值，本参数
  */
 export interface P2pkhTransferInput {
   assetId: P2pkhAssetId;
-  /**
-   * session / caller 视角的 owner public key hex。
-   * 002 之后所有外部调用方都应填该字段；老路径（widget / overview）
-   * 仍允许只传 `keyId` 走 active-key 兜底。
-   */
-  ownerPublicKeyHex?: string;
-  /**
-   * vault 内部借用句柄。plugin 内部直接给 keyId 走"已解析"路径；
-   * ownerPublicKeyHex 与 keyId 二选一即可（**不**强制都填）。
-   */
-  keyId?: string;
+  /** session / caller 视角的 owner public key hex；UTXO 选币 / 签名 key / resourceId 全按该 owner 走。 */
+  ownerPublicKeyHex: string;
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb?: number;
 }
 
 /**
- * 转移预览结果。
+ * 转移预览结果（硬切换 002 收尾）。
  *
- * 设计缘由（施工单 2026-06-28 002 硬切换）：`ownerPublicKeyHex` 透传到
- * preview 上，让 submit 阶段可以校验 resource / 签名 key 与该 owner
- * 一致——owner 变了就拒绝广播。
+ * `ownerPublicKeyHex` 透传到 preview 上，让 submit 阶段可以校验 resource /
+ * 签名 key 与该 owner 一致——owner 变了就拒绝广播。
  */
 export interface P2pkhTransferPreview {
   assetId: P2pkhAssetId;
   network: BsvNetwork;
-  ownerPublicKeyHex?: string;
-  keyId?: string;
+  ownerPublicKeyHex: string;
   recipientAddress: string;
   amountSatoshis: number;
   feeRateSatoshisPerKb: number;
@@ -428,8 +416,16 @@ export interface P2pkhService {
   /** 转移：广播 preview 中已经生成好的最终交易。 */
   submitTransfer(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
 
-  onKeyImported(keyId: string): Promise<void>;
-  onKeyRemoved(keyId: string): Promise<void>;
+  /**
+   * 通知 P2PKH 新 key 已就绪（按 publicKeyHex 触发 rehydrate / background sync）。
+   */
+  onKeyImported(publicKeyHex: string): Promise<void>;
+  /**
+   * 通知 P2PKH 对应 publicKeyHex 的 key 已删除。service 应清理该 hex 的
+   * 派生 cache / 取消 background 任务；但不要触碰 namespace DB——该工作
+   * 已经由 keyspace.deleteKey 在前面完成。
+   */
+  onKeyRemoved(publicKeyHex: string): Promise<void>;
   /** Vault 锁定时调用：取消当前所有 P2PKH 后台运行。 */
   onVaultLocked(): void;
   /** Vault 解锁时调用：触发一次 recent-sync。 */
@@ -454,70 +450,50 @@ export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {
 }
 
 /**
- * 硬切换 008 收尾 + 硬切换 003 收尾：KeyIdentity 收窄类型。
- * 设计缘由：contract 的 KeyIdentity 字段 publicKeyHex / publicKeyHex
- * 是 optional（兼容 failed / uninitialized 状态），但 P2PKH 业务只在
- * ready 状态下运行。`requireReadyKey` 内部做断言后返回
- * `ReadyKeyIdentity`，调用方拿到的就是 publicKeyHex / publicKeyHex
- * 必填的窄类型，写入 P2pkhKeyResource.publicKeyHex 等必填字段时不再
- * 需要 `!`。
+ * Ready 状态 key 身份（硬切换 002 收尾）。
  *
- * 硬切换 003 收尾：`fingerprint` 字段已从 contract 中删除；
- * 短公钥属于 UI 展示格式，需要时由 UI 拿 `publicKeyHex` 调
- * `formatShortPublicKey()` 现算。本窄类型也不再持有 `fingerprint`。
+ * KeyIdentity 已是 ready：canonical store 主键就是 publicKeyHex，build-time
+ * 校验 + unlock-time staging migration 已经确保所有"存活 key"都派生出了
+ * identity。`ReadyKeyIdentity` 保留只是为了在 service 层里做窄类型投影，
+ * 让"必须带 publicKeyHex"在静态检查层面成立。
  */
 export interface ReadyKeyIdentity {
-  keyId: string;
   publicKeyHex: string;
   label: string;
   capabilities: string[];
   createdAt: string;
-  identityStatus?: "ready" | "uninitialized" | "failed";
-  identityError?: string;
 }
 
 /**
  * 把 KeyIdentity 收窄为 ReadyKeyIdentity。
  * 设计缘由：业务边界显式断言 + 抛出英文错误；调用方无需再用 `!` 糊过去。
- * 错误信息保持英文，调用方应处理 "Active key is not ready" 这一支。
  *
- * 收尾建议：当前 keyspace.listActiveCandidates 已经过滤掉
- * `identityStatus !== "ready"`，所以运行期传进来的 key 通常要么
- * status === "ready" 要么是 undefined / 老记录（无 status）。
- * 这里仍然显式拒绝 "failed" 与 "uninitialized"——前者是 backfill
- * 解密失败（不能让 P2PKH 拿去做签名），后者是 backfill 未完成
- * 的中间态（不能让 P2PKH 在命名空间还没就绪时打开 DB）。同时
- * publicKeyHex / publicKeyHex 必须存在，老 v1/v2 记录缺字段时也会被拒。
- *
- * 硬切换 003 收尾：本函数不再检查或回填 `fingerprint`——该字段已
- * 从 KeyIdentity / ReadyKeyIdentity 中删除。短公钥由 UI 现算。
+ * 硬切换 002 收尾：系统中**不再**存在 `identityStatus = failed |
+ * uninitialized` 的稳态；`KeyIdentity.publicKeyHex` 缺失即视为"非 ready"。
+ * 本函数不再持有也不回填 vault 内部 surrogate id。
  */
 export function requireReadyKey(key: KeyIdentity | undefined | null): ReadyKeyIdentity {
   if (!key) throw new Error("Active key is not ready");
-  if (key.identityStatus === "failed") throw new Error("Active key is not ready");
-  if (key.identityStatus === "uninitialized") throw new Error("Active key is not ready");
   if (!key.publicKeyHex) throw new Error("Active key is not ready");
   return {
-    keyId: key.keyId,
     publicKeyHex: key.publicKeyHex,
     label: key.label,
     capabilities: key.capabilities,
-    createdAt: key.createdAt,
-    identityStatus: key.identityStatus,
-    identityError: key.identityError
+    createdAt: key.createdAt
   };
 }
 
 /**
  * 构造 P2PKH 资源 id。
- * 硬切换 007：resourceId 不再拼接 Vault keyId；同一 active key 下用
- * `p2pkh:<network>` 区分 main/test 两个网络资源。
+ *
+ * `p2pkh:<network>` 区分 main/test 两个网络资源，`publicKeyHex` 通过
+ * 当前打开的 namespace DB 隐式表达。
  */
-export function makeResourceId(_keyId: string, network: BsvNetwork): string {
+export function makeResourceId(network: BsvNetwork): string {
   return `p2pkh:${network}`;
 }
 
-/** assetId 视角的 resourceId；与 makeResourceId("ignored", network) 等价。 */
+/** assetId 视角的 resourceId；与 makeResourceId(assetIdToNetwork(assetId)) 等价。 */
 export function makeResourceIdForAsset(assetId: P2pkhAssetId): string {
   return `p2pkh:${assetIdToNetwork(assetId)}`;
 }

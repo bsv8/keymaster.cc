@@ -41,9 +41,8 @@ describe("buildP2pkhTx", () => {
       feeReserveSatoshis: 200,
       selected: [
         {
-          id: "r1:t1:0",
           resourceId: "r1",
-          keyId: "k1",
+          publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
           network: "main",
           address: TEST_ADDR,
           txid: "t1",
@@ -78,9 +77,8 @@ describe("signP2pkhTx", () => {
       feeReserveSatoshis: 200,
       selected: [
         {
-          id: "r1:t1:0",
           resourceId: "r1",
-          keyId: "k1",
+          publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
           network: "main",
           address: TEST_ADDR,
           txid: "0000000000000000000000000000000000000000000000000000000000000001",
@@ -111,9 +109,8 @@ describe("signP2pkhTx", () => {
       feeReserveSatoshis: 100,
       selected: [
         {
-          id: "r1:t1:0",
           resourceId: "r1",
-          keyId: "k1",
+          publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
           network: "main",
           address: TEST_ADDR,
           txid: "0000000000000000000000000000000000000000000000000000000000000001",
@@ -162,9 +159,8 @@ describe("signP2pkhTx", () => {
       feeReserveSatoshis: 200,
       selected: [
         {
-          id: "r1:t1:0",
           resourceId: "r1",
-          keyId: "k1",
+          publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
           network: "main",
           address: TEST_ADDR,
           txid: "0000000000000000000000000000000000000000000000000000000000000001",

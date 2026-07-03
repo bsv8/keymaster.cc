@@ -2,7 +2,7 @@
 // P2PKH 资产 provider（硬切换 007 / 008 收尾 + 硬切换 001）。
 // 设计缘由：
 //   - single 模式：每个 asset 行只代表当前 active key 的余额。
-//   - AssetProvider 必须是通用资产协议，不允许把 UTXO / keyId 塞进 AssetSummary。
+//   - AssetProvider 必须是通用资产协议，不允许把 UTXO 塞进 AssetSummary。
 //   - 资产网络由 assetId 决定。
 //   - onChange 内部订阅 P2PKH 同步事件、active key 变化、keyspace 初始化、global settings。
 //

@@ -25,13 +25,16 @@ import type {
 /**
  * 从 `keyspace.active()` 取一把"可作为 Poker 身份的 KeyIdentity"。
  *
- * 行为约定（硬切换 004 + 硬切换 005 收尾）：
+ * 行为约定（硬切换 002 + 硬切换 004 + 硬切换 005 收尾）：
  *   - vault 未解锁 → `{ kind: "vaultLocked" }`。
  *   - activePublicKeyHex 缺省 → `{ kind: "noActiveKey" }`。
- *   - single + 有 hash：尝试 `keyspace.getKey(hash)`；
- *       * 未找到 → `{ kind: "missing" }`。
- *       * identityStatus === "ready" → `{ kind: "ready", key }`。
- *       * 其它 identityStatus（uninitialized / failed）→ `{ kind: "notReady", key, reason }`。
+ *   - 有 activePublicKeyHex：尝试 `keyspace.getKey(publicKeyHex)`；
+ *       * 未找到 / 缺 publicKeyHex → `{ kind: "missing" }`。
+ *       * 找到 → `{ kind: "ready", key }`（vault canonical store 主键
+ *         = publicKeyHex，缺它即该记录已不存在于 canonical，按 missing 处理）。
+ *
+ * 硬切换 002 收尾：identityStatus 字段已删除，per-key uninitialized / failed
+ * 不再是合法稳态；本函数不再返回 `notReady` 这一 kind。
  *
  * 该函数**不**做连接判断、不开 storage、不读 settings——只解析身份。
  */
@@ -44,10 +47,11 @@ export async function resolvePokerSessionKey(
   if (!active.activePublicKeyHex) return { kind: "noActiveKey" };
   const key: KeyIdentity | undefined = await keyspace.getKey(active.activePublicKeyHex);
   if (!key) return { kind: "missing" };
-  const status = key.identityStatus ?? "ready";
-  if (status === "ready") return { kind: "ready", key };
-  const reason = status === "failed" ? key.identityError ?? "failed" : status;
-  return { kind: "notReady", key, reason };
+  // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+  // canonical store 主键 = publicKeyHex；vault 落库前已派生，缺 hex
+  // 即这条记录已不存在于 canonical——按 missing 处理。
+  if (!key.publicKeyHex) return { kind: "missing" };
+  return { kind: "ready", key };
 }
 
 /**

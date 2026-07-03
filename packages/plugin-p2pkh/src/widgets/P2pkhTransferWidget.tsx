@@ -2,8 +2,10 @@
 // P2PKH 完整转移 Widget（硬切换 007）。
 // 设计缘由：
 //   - 平台不再拥有地址/金额/矿工费/UTXO 控件；Widget 内部负责输入、校验、预览、签名、广播。
-//   - 不再有"来源 key"选择：active key 由平台决定，签名通过 vault.withPrivateKey(activeKeyId)。
-//   - all 模式下禁止 prepare / submit；Widget 顶部明确提示先选择 key。
+//   - 不再有"来源 key"选择：active key 由平台决定，
+//     签名由 transfer service 按 owner publicKeyHex 借私钥完成；Widget 不直接持有 key 身份。
+//   - 不再有 all 模式：缺 activePublicKeyHex 时属于 noActiveKey，
+//     Widget 顶部明确提示先选择 key。
 //   - active key 切换时清空 preview（activeKey.changed 事件）。
 //   - 成功后保留 widget 实例展示结果；用户关闭后才 onCompleted。
 //
@@ -168,7 +170,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
       recipientAddress: form.recipient,
       amountSatoshis: amount,
       feeRateSatoshisPerKb: feeRate,
-      keyId: activeIdentity?.keyId ?? ""
+      ownerPublicKeyHex: activeIdentity?.publicKeyHex ?? ""
     };
   }
 

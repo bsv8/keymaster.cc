@@ -213,8 +213,7 @@ function makeFakeVaultService(): VaultService {
     recoverEmptyVaultToUninitialized: async () => undefined,
     listKeys: async () => [],
     getKey: async () => undefined,
-    getKeyByPublicKeyHex: async () => undefined,
-    importPrivateKey: async () => {
+        importPrivateKey: async () => {
       throw new Error("not used");
     },
     generateKey: async () => {
@@ -248,7 +247,6 @@ function makeFakeKeyspace(): ConstructorParameters<typeof ProtocolServiceImpl>[0
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
-    deleteKeyById: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   } as unknown as ConstructorParameters<typeof ProtocolServiceImpl>[0]["keyspace"];
@@ -673,8 +671,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       recoverEmptyVaultToUninitialized: async () => undefined,
       listKeys: async () => [],
       getKey: async () => undefined,
-      getKeyByPublicKeyHex: async () => undefined,
-      importPrivateKey: async () => {
+            importPrivateKey: async () => {
         throw new Error("not used");
       },
       generateKey: async () => {

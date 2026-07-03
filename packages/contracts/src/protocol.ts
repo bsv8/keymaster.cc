@@ -855,6 +855,18 @@ export type ProtocolFailureReason =
    * 对外统一 `user_rejected`；本地 reason = `runtime_missing`。
    */
   | "runtime_missing"
+  /**
+   * Connect session 的 owner 不等于当前 active key（硬切换 002 收尾）。
+   *
+   * 触发：protocol 层 `assertSessionOwnerIsActive` 在调用
+   * `p2pkh.transfer` / `feepool.prepare`（任何走 P2PKH value 的
+   * 入口）前显式校验 session owner == active key；不等时主动
+   * fail-closed，**不**让硬门禁在底层冒泡「Key storage is not
+   * ready」这种偶发错误作为协议失败语义。
+   *
+   * 处置：对外 `user_rejected`；本地 reason = `session_owner_mismatch`。
+   */
+  | "session_owner_mismatch"
   | "internal_error";
 
 /**
@@ -976,8 +988,9 @@ export interface ConnectLoginParams {
  * sessionId 持久化在本地；后续 connect.resume / 业务方法都用这个 sessionId
  * 找回绑定关系。
  *
- * 关键（施工单 2026-06-28 002 硬切换）：**不**再返回 `ownerKeyId`。
- * owner 唯一真值 = `ownerPublicKeyHex`；vault 内部 keyId 属于实现细节。
+ * 关键（施工单 2026-06-28 002 硬切换 + 硬切换 002 收尾）：**不**再返回
+ * `ownerKeyId`。owner 唯一真值 = `ownerPublicKeyHex`；vault 不再保留
+ * 任何 key 域 surrogate id（硬切换 002 后连内部借用句柄也按 hex 走）。
  */
 export interface ConnectLoginResult {
   /** 持久化 sessionId；caller 必须存本地。 */
@@ -1298,8 +1311,8 @@ export type LaunchAppViewErrorCode =
    * 借 owner 私钥 / 准备 owner runtime bootstrap 失败（施工单
    * 2026-06-30 002）。
    *
-   * 设计缘由：launcher 用 `vault.withPrivateKey(keyId, fn)` 借出
-   * owner 私钥 hex 拼 owner runtime bootstrap。借不到（vault 状态
+   * 设计缘由：launcher 用 `vault.withPrivateKey(publicKeyHex, fn)`
+   * 借出 owner 私钥 hex 拼 owner runtime bootstrap。借不到（vault 状态
    * 错 / key 状态错）时报这个 code。
    */
   | "export_owner_runtime_failed"
@@ -2552,12 +2565,12 @@ export interface ProtocolService {
    *       - `window.open("/protocol/v1/popup?...")` popup URL
    *     这些细节全部收口在 service 内部，避免协议真值散落到业务插件。
    *   - 完整流程（施工单 2026-06-30 002 硬切换）：
-   *       1. 校验 vault 已解锁 + active key ready + owner key 有 vault keyId；
+   *       1. 校验 vault 已解锁 + active key ready + owner key 命中；
    *       2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
    *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
    *       4. 创建新 `connectSessionId` 并落 DB，写 session 真值三元组
    *          （sessionId + origin + ownerPublicKeyHex）；
-   *       5. 调 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥 hex，
+   *       5. 调 `vault.withPrivateKey(publicKeyHex, fn)` 借出 owner 私钥 hex，
    *          组装 `OwnerRuntimeBootstrap`；
    *       6. 生成 `launchToken`；
    *       7. 组装 `AppBootstrapPayload`（含 `ownerRuntimeBootstrap`，

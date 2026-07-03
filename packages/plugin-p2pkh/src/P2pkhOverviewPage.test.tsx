@@ -32,8 +32,7 @@ const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0
 function makeResource(): P2pkhKeyResource {
   return {
     resourceId: "p2pkh:main",
-    keyId: "k1",
-    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+    publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
     label: "test-key",
     address: "addr-main",
     network: "main",
@@ -148,12 +147,10 @@ function makeFakeKeyspace(): KeyspaceService {
     active: () => active,
     setActive: async () => undefined,
     requireActiveKey: () => ({
-      keyId: "k1",
-      publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
       label: "test",
       capabilities: ["p2pkh"],
-      createdAt: "2024-01-01T00:00:00.000Z",
-      identityStatus: "ready" as const
+      createdAt: "2024-01-01T00:00:00.000Z" as const
     }),
     onActiveChange: (h: (s: ActiveKeyState) => void) => {
       listeners.add(h);
@@ -166,7 +163,6 @@ function makeFakeKeyspace(): KeyspaceService {
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
-    deleteKeyById: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined,
     attachBackgroundService: () => undefined

@@ -202,7 +202,6 @@ async function syncOne(
   const historyRows: P2pkhHistoryItem[] = recentItems.map((h) => ({
     id: `${resource.resourceId}:${h.txid}`,
     resourceId: resource.resourceId,
-    keyId: resource.keyId,
     publicKeyHex: resource.publicKeyHex,
     network,
     address: resource.address,
@@ -215,7 +214,6 @@ async function syncOne(
   const unconfirmedRows: P2pkhHistoryItem[] = unconfirmedHistory.items.map((h) => ({
     id: `${resource.resourceId}:${h.txid}`,
     resourceId: resource.resourceId,
-    keyId: resource.keyId,
     publicKeyHex: resource.publicKeyHex,
     network,
     address: resource.address,
@@ -310,7 +308,6 @@ function utxoFromWoc(
   return {
     id: `${resource.resourceId}:${u.txid}:${u.vout}`,
     resourceId: resource.resourceId,
-    keyId: resource.keyId,
     publicKeyHex: resource.publicKeyHex,
     network: resource.network,
     address: resource.address,

@@ -9,7 +9,6 @@
 //   - 收件地址两种 kind：
 //       * "origin"：id = exact origin（scheme + host + port，端口不可丢）。
 //       * "plugin"：id = 稳定 pluginEndpointId。
-//   - 字段命名：**不**叫 `keyId`（已被 Vault 私钥句柄占用）；
 //     **不**要求等于 manifest.id；要求全局唯一。
 //   - v1 只支持 `text/plain` 与 `text/markdown`；不做未读计数、已读回执、
 //     群聊、附件、撤回、跨节点 session 恢复。
@@ -456,7 +455,7 @@ export interface AppMsgPluginClient {
  * 在用户视角判断 pluginEndpointId 字段命名的有效性。
  *
  * 关键约束（施工单 2026-07-01 002 第 6 节）：
- *   - **不**允许叫 `keyId` / `keyid`（与 Vault 私钥句柄语义冲突）；
+ *     冲突；硬切换 002 后 key 域已无 surrogate id）；
  *   - **不**要求等于 manifest id；
  *   - 要求在同 Keymaster 安装内全局唯一；
  *   - runtime 在 register 阶段做唯一性校验，冲突即 fail-closed。

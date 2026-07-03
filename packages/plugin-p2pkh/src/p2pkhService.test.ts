@@ -221,8 +221,7 @@ describe("createP2pkhRecentSync.runOnce", () => {
   it("logs per-resource started / completed events with utxoCount and recentConfirmedCount", async () => {
     const resource: P2pkhKeyResource = {
       resourceId: "p2pkh:main",
-      keyId: "k1",
-      publicKeyHex: "h1",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
       label: "k",
       address: "addr-main",
       network: "main",
@@ -285,8 +284,7 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
   it("logs per-resource started / completed with final backfill state summary", async () => {
     const resource: P2pkhKeyResource = {
       resourceId: "p2pkh:main",
-      keyId: "k1",
-      publicKeyHex: "h1",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
       label: "k",
       address: "addr-main",
       network: "main",

@@ -27,30 +27,29 @@ import type {
 } from "@keymaster/contracts";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 
-const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 const ACTIVE_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
+// 硬切换 002 收尾：ACTIVE_PUBLIC_KEY_HEX 必须从 ACTIVE_PRIV_HEX 派生，
+// 保证 stub 借出的 material 与 keyspace / DB name 用的 hex 严格对位；
+// 旧测试里那条 64 位拼凑假 hex 已不再通过新模型。
+const ACTIVE_PUBLIC_KEY_HEX = deriveP2pkhAddress(ACTIVE_PRIV_HEX, "main").publicKeyHex;
+const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 
 function makeKeyspace(publicKeyHex: string): KeyspaceService {
   return {
     listKeys: async () => [],
-    getKey: async (keyId: string): Promise<KeyIdentity | undefined> => ({
-      keyId,
+    getKey: async (publicKeyHex: string): Promise<KeyIdentity | undefined> => ({
       publicKeyHex,
       label: "active",
       capabilities: ["p2pkh"],
-      createdAt: "2024-01-01T00:00:00.000Z",
-      identityStatus: "ready"
+      createdAt: "2024-01-01T00:00:00.000Z"
     }),
     active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
-      keyId: "k1",
       publicKeyHex,
       label: "active",
       capabilities: ["p2pkh"],
-      createdAt: "2024-01-01T00:00:00.000Z",
-      identityStatus: "ready"
+      createdAt: "2024-01-01T00:00:00.000Z"
     }),
     onActiveChange: () => () => undefined,
     openKeyStorage: async (input) => {
@@ -72,7 +71,6 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
-    deleteKeyById: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined,
     attachBackgroundService: () => undefined
@@ -80,7 +78,12 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
 }
 
 function makeVault(): VaultService & { withPrivateKey: ReturnType<typeof vi.fn> } {
-  const withPrivateKey = vi.fn(async (_keyId: string, fn: (m: { hex: string }) => Promise<unknown>) => {
+  // 硬切换 002 收尾：withPrivateKey 必须按 `(publicKeyHex, fn)` 签名调用。
+  // stub 接收 publicKeyHex 后调 fn，借出 ACTIVE_PRIV_HEX 对应的 material.hex；
+  // publicKeyHex 形状不影响 stub 行为（fixture 都是同一把），但契约要对，
+  // 否则 service 内部 `vault.withPrivateKey(active.publicKeyHex, ...)` 会
+  // 把 hex 当 fn 调用、抛 "is not a function"。
+  const withPrivateKey = vi.fn(async <T>(_publicKeyHex: string, fn: (m: { hex: string }) => Promise<T> | T): Promise<T> => {
     return fn({ hex: ACTIVE_PRIV_HEX });
   });
   return {
@@ -90,7 +93,7 @@ function makeVault(): VaultService & { withPrivateKey: ReturnType<typeof vi.fn> 
     getInitialActivationNotice: () => null,
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
-    hasVault: async () => true
+    hasVault: async () => true,
     // 其余方法在测试中不需要；通过 unknown 强制收敛。
   } as unknown as VaultService & { withPrivateKey: ReturnType<typeof vi.fn> };
 }

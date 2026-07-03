@@ -4,7 +4,7 @@
 //   - 页面是唯一正式 Key 管理入口：查看 / 设为 active / 导出 / 删除 / 新建。
 //   - "新建 Key" 调用 vault.generateKey，私钥生成完全在 Vault 内部完成；
 //     本页面不接触私钥材料、不调用 crypto / noble。
-//   - 删除仍走 keyspace.deleteKeyById(keyId)；不在页面直接调 vault.deleteKeyMaterial。
+//   - 删除仍走 keyspace.deleteKey({ publicKeyHex, password })；不在页面直接调 vault.deleteKeyMaterial。
 //   - 桌面端用 DataTable 紧凑展示；移动端改成纵向 Key 条目，状态 / 标签 /
 //     短公钥 / 能力 / 时间 / 操作折叠成单条记录，避免横向滚动。
 //   - 失败 / uninitialized / 无 publicKeyHex 等边界沿用硬切换 008 防御。
@@ -125,18 +125,20 @@ export function VaultSettingsPage() {
 
   async function handleExport(password: string): Promise<KeyExportEnvelope> {
     if (!exporting) throw new Error("No key selected");
-    return vault.exportPrivateKey({ keyId: exporting.keyId, password });
+    // 硬切换 002 收尾：vault.exportPrivateKey 入参改为 publicKeyHex。
+    return vault.exportPrivateKey({ publicKeyHex: exporting.publicKeyHex, password });
   }
 
   async function handleDelete(password: string) {
     if (!deleting) return;
     try {
-      // 硬切换 002：删除入口必须带锁屏密码；service 层负责校验真伪、
-      // 决定是否触发"空 Vault 收尾"。页面只透传 modal 收集的密码，
-      // **不**在这里多调一次 vault.verifyPassword（会让授权语义出现
-      // 两个真值来源），也**不**在这里判断"删完是否要跳欢迎页"——
-      // 真正的状态源是 vault.status()，由 App 自然切回 LockedShell。
-      await keyspace.deleteKeyById({ keyId: deleting.keyId, password });
+      // 硬切换 002 收尾：删除入口必须带锁屏密码 + publicKeyHex；
+      // service 层负责校验真伪、决定是否触发"空 Vault 收尾"。
+      // 页面只透传 modal 收集的密码，**不**在这里多调一次
+      // vault.verifyPassword（会让授权语义出现两个真值来源），
+      // 也**不**在这里判断"删完是否要跳欢迎页"——真正的状态源
+      // 是 vault.status()，由 App 自然切回 LockedShell。
+      await keyspace.deleteKey({ publicKeyHex: deleting.publicKeyHex, password });
       await refresh();
     } catch (err) {
       setError(
@@ -152,7 +154,7 @@ export function VaultSettingsPage() {
 
   async function setAsActive(k: KeyIdentity) {
     if (!k.publicKeyHex) return;
-    if (k.identityStatus && k.identityStatus !== "ready") return;
+    // 硬切换 002 收尾：identityStatus 字段已删除，KeyIdentity 必 ready。
     try {
       await keyspace.setActive(k.publicKeyHex);
       // 硬切换 009 收尾：如果 vault 还有"首 Key 未自动 active"
@@ -164,7 +166,7 @@ export function VaultSettingsPage() {
         typeof vault.getInitialActivationNotice === "function"
           ? vault.getInitialActivationNotice()
           : null;
-      if (notice && notice.keyId === k.keyId) {
+      if (notice && notice.publicKeyHex === k.publicKeyHex) {
         vault.clearInitialActivationNotice();
       }
     } catch (err) {
@@ -265,13 +267,15 @@ export function VaultSettingsPage() {
       }
     }
     return list.find(
-      (k) => k.label === label && (k.publicKeyHex || k.identityStatus === "failed")
+      // 硬切换 002 收尾：identityStatus 已删除，按 publicKeyHex 判 ready。
+      (k) => k.label === label && Boolean(k.publicKeyHex)
     );
   }
 
   function keyIdentityToKeyRef(identity: KeyIdentity): KeyRef {
+    // 硬切换 002 收尾：KeyRef 不再含 `id` 字段（vault 内部 uuid 已删）；
+    // `publicKeyHex` 是平台身份根字段。
     return {
-      id: identity.keyId,
       label: identity.label,
       format: "generated",
       capabilities: identity.capabilities,
@@ -282,13 +286,12 @@ export function VaultSettingsPage() {
   }
 
   function handleCreateExport(key: KeyRef) {
+    // 硬切换 002 收尾：KeyRef 不再持有 `id`；`publicKeyHex` 唯一真值。
     const identity: KeyIdentity = {
-      keyId: key.id,
       publicKeyHex: key.publicKeyHex ?? "",
       label: key.label,
       capabilities: key.capabilities,
-      createdAt: key.createdAt,
-      identityStatus: "ready"
+      createdAt: key.createdAt
     };
     setExporting(identity);
   }
@@ -309,11 +312,11 @@ export function VaultSettingsPage() {
       key: "status",
       header: t("vault.settings.col.status", { defaultValue: "状态" }),
       render: (r) => {
-        const status = r.identityStatus ?? (r.publicKeyHex ? "ready" : "uninitialized");
-        if (status === "failed") {
+        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+        if (!r.publicKeyHex) {
           return (
-            <span className="vault-key-status vault-key-status--failed" title={r.identityError}>
-              {statusFailedText}
+            <span className="vault-key-status vault-key-status--init">
+              {statusInitText}
             </span>
           );
         }
@@ -380,7 +383,8 @@ export function VaultSettingsPage() {
       header: t("vault.settings.col.actions", { defaultValue: "操作" }),
       render: (r) => {
         const isActive = active.activePublicKeyHex === r.publicKeyHex;
-        const canSetActive = Boolean(r.publicKeyHex) && (!r.identityStatus || r.identityStatus === "ready");
+        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+        const canSetActive = Boolean(r.publicKeyHex);
         return (
           <div className="vault-key-actions">
             <Button
@@ -423,19 +427,16 @@ export function VaultSettingsPage() {
     <ul className="vault-key-list">
       {keys.map((r) => {
         const isActive = active.activePublicKeyHex === r.publicKeyHex;
-        const canSetActive =
-          Boolean(r.publicKeyHex) && (!r.identityStatus || r.identityStatus === "ready");
-        const status = r.identityStatus ?? (r.publicKeyHex ? "ready" : "uninitialized");
-        const statusLabel =
-          status === "failed" ? statusFailedText : status === "uninitialized" ? statusInitText : statusReadyText;
+        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
+        const canSetActive = Boolean(r.publicKeyHex);
+        const status = r.publicKeyHex ? "ready" : "uninitialized";
+        const statusLabel = status === "uninitialized" ? statusInitText : statusReadyText;
         const statusClass =
-          status === "failed"
-            ? "vault-key-status--failed"
-            : status === "uninitialized"
+          status === "uninitialized"
             ? "vault-key-status--init"
             : "vault-key-status--ready";
         return (
-          <li key={r.keyId} className="vault-key-list__item">
+          <li key={r.publicKeyHex} className="vault-key-list__item">
             <div className="vault-key-list__head">
               <span className="vault-key-list__label">{r.label || unnamedText}</span>
               <span className={`vault-key-status ${statusClass}`}>{statusLabel}</span>
@@ -563,7 +564,7 @@ export function VaultSettingsPage() {
       ) : (
         <>
           <div className="vault-page__table">
-            <DataTable columns={columns} rows={keys} rowKey={(r) => r.keyId} />
+            <DataTable columns={columns} rows={keys} rowKey={(r) => r.publicKeyHex} />
           </div>
           <div className="vault-page__mobile">{mobileList}</div>
         </>
@@ -572,7 +573,7 @@ export function VaultSettingsPage() {
       {exporting ? (
         <VaultKeyExportModal
           open={Boolean(exporting)}
-          keyId={exporting.keyId}
+          publicKeyHex={exporting.publicKeyHex}
           keyLabel={exporting.label}
           onExport={handleExport}
           onClose={() => setExporting(null)}

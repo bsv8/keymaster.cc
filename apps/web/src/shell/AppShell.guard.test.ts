@@ -25,29 +25,24 @@ import type { KeyIdentity } from "@keymaster/contracts";
 const KEY_MANAGEMENT_PATH = "/settings/vault";
 
 const READY_KEY: KeyIdentity = {
-  keyId: "k1",
-  publicKeyHex: "02" + "ab".repeat(32),
+  publicKeyHex: "02".padEnd(66, "1"),
   label: "ready",
   capabilities: ["p2pkh"],
-  createdAt: "2024-01-01T00:00:00.000Z",
-  identityStatus: "ready"
+  createdAt: "2024-01-01T00:00:00.000Z"
 };
 
 const FAILED_KEY: KeyIdentity = {
-  keyId: "k2",
+  publicKeyHex: "02".padEnd(66, "2"),
   label: "failed",
   capabilities: ["p2pkh"],
-  createdAt: "2024-01-01T00:00:00.000Z",
-  identityStatus: "failed",
-  identityError: "decrypt failed"
+  createdAt: "2024-01-01T00:00:00.000Z"
 };
 
 const UNINITIALIZED_KEY: KeyIdentity = {
-  keyId: "k3",
+  publicKeyHex: "02".padEnd(66, "3"),
   label: "uninit",
   capabilities: ["p2pkh"],
-  createdAt: "2024-01-01T00:00:00.000Z",
-  identityStatus: "uninitialized"
+  createdAt: "2024-01-01T00:00:00.000Z"
 };
 
 beforeEach(() => {

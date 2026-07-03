@@ -6,6 +6,7 @@
 //   - 不在页面明文展示完整私钥；下载流程失败时保留 modal 让用户重试。
 //
 // 硬切换 003：所有展示文案走 i18n。
+// 硬切换 002 收尾：modal 接收 `publicKeyHex`（平台身份根字段），不再接收
 
 import { useState } from "react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
@@ -15,7 +16,7 @@ export interface VaultKeyExportModalProps {
   open: boolean;
   /** 当前正在导出的 key 元数据；用作下载文件名。 */
   keyLabel: string;
-  keyId: string;
+  publicKeyHex: string;
   /** 父组件传入的导出调用；返回加密 envelope。 */
   onExport(password: string): Promise<unknown>;
   onClose(): void;
@@ -35,7 +36,7 @@ function fileTimestamp(d = new Date()): string {
 }
 
 function safeSlug(input: string): string {
-  // 文件名只保留字母数字、下划线、短横线；空时退回 keyId 前 8 位。
+  // 文件名只保留字母数字、下划线、短横线；空时退回 publicKeyHex 前 8 位。
   const cleaned = input.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   return cleaned || "key";
 }
@@ -43,7 +44,7 @@ function safeSlug(input: string): string {
 export function VaultKeyExportModal({
   open,
   keyLabel,
-  keyId,
+  publicKeyHex,
   onExport,
   onClose
 }: VaultKeyExportModalProps) {
@@ -85,7 +86,7 @@ export function VaultKeyExportModal({
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
-      const slug = safeSlug(keyLabel || keyId.slice(0, 8));
+      const slug = safeSlug(keyLabel || publicKeyHex.slice(0, 8));
       a.href = url;
       a.download = `keymaster-key-${slug}-${fileTimestamp()}.json`;
       document.body.appendChild(a);

@@ -12,7 +12,27 @@
 
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { createPokerService } from "./pokerService.js";
+
+// 硬切换 002 收尾：测试里"当前 owner"必须落到真实压缩公钥；旧 fixture
+// 的 `"kA"` / `"kB"` / `PUB_A` 等拼接假 hex 在运行期会被
+// `Invalid hex string` 拒绝。这里用 secp256k1 从真实私钥派生公钥，保证
+// pubkey 校验、签名路径、payload 字段形状全部走通。
+function derivePubHex(privHex: string): string {
+  const clean = privHex.replace(/^0x/, "");
+  const bytes = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < bytes.length; i++) {
+    bytes[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  const pub = secp256k1.getPublicKey(bytes, true);
+  return Array.from(pub, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const PRIV_A = "0000000000000000000000000000000000000000000000000000000000000001";
+const PRIV_B = "0000000000000000000000000000000000000000000000000000000000000002";
+const PUB_A = derivePubHex(PRIV_A);
+const PUB_B = derivePubHex(PRIV_B);
 import {
   clearPokerGlobalConfig,
   readPokerGlobalConfig,
@@ -52,20 +72,16 @@ class FakeMessageBus {
 }
 
 const KEY_A = {
-  keyId: "kA",
-  publicKeyHex: "02" + "ab".repeat(32),
+  publicKeyHex: PUB_A,
   label: "A",
   capabilities: ["poker"],
-  createdAt: "",
-  identityStatus: "ready" as const
+  createdAt: "" as const
 };
 const KEY_B = {
-  keyId: "kB",
-  publicKeyHex: "03" + "cd".repeat(32),
+  publicKeyHex: PUB_B,
   label: "B",
   capabilities: ["poker"],
-  createdAt: "",
-  identityStatus: "ready" as const
+  createdAt: "" as const
 };
 
 class FakeVault {
@@ -128,18 +144,20 @@ class FakeVault {
   async exportPrivateKey() {
     throw new Error("not used");
   }
-  async withPrivateKey<T>(_id: string, fn: (m: any) => Promise<T>) {
-    return fn({ hex: "11".repeat(32) });
+  async withPrivateKey<T>(_publicKeyHex: string, fn: (m: any) => Promise<T>) {
+    return fn({ hex: PRIV_A });
   }
 }
 
 class FakeKeyspace {
-  private state = { mode: "single" as "single" | "all", activePublicKeyHex: "02" + "ab".repeat(32) as string | undefined };
+  // 硬切换 005 收尾：active state 不再有 `mode` 字段，只表达 activePublicKeyHex
+  // 存在 / 缺省；老 `mode: "all" / setAll()` 已删除。
+  private state: { activePublicKeyHex?: string } = { activePublicKeyHex: PUB_A };
   private dbs = new Map<string, IDBDatabase>();
   private activeHandlers = new Set<(s: any) => void>();
   private keyMeta = new Map<string, any>([
-    ["02" + "ab".repeat(32), KEY_A],
-    ["03" + "cd".repeat(32), KEY_B]
+    [PUB_A, KEY_A],
+    [PUB_B, KEY_B]
   ]);
 
   async listKeys() {
@@ -179,12 +197,6 @@ class FakeKeyspace {
   emitKeyDeleted(pkh: string) {
     this.bus.publish("key.deleted", { publicKeyHex: pkh });
   }
-  /** 测试钩子：让下一次 getKey 返回特定状态。 */
-  setKeyStatus(pkh: string, identityStatus: "ready" | "uninitialized" | "failed", identityError?: string) {
-    const cur = this.keyMeta.get(pkh);
-    if (!cur) return;
-    this.keyMeta.set(pkh, { ...cur, identityStatus, identityError });
-  }
   /** 测试钩子：模拟 key 从 keyspace 中删除。 */
   removeKeyMeta(pkh: string) {
     this.keyMeta.delete(pkh);
@@ -218,7 +230,6 @@ class FakeKeyspace {
   }
   async prepareDeleteKey() {}
   async deleteKey() {}
-  async deleteKeyById() {}
   attachBackgroundService() {}
   isInitializing() {
     return false;
@@ -262,13 +273,13 @@ beforeEach(async () => {
   // 解决：用 init rebind 的最终稳定态作为同步信号——
   //   rebind 走完"不同 key"分支时，会按 (userWantsConnection=false &&
   //   proxyEndpoint="") 不调 connect，currentStatus 保持 "idle"，且
-  //   currentSessionKeyHash === "02" + "ab".repeat(32)、activeKeyState.kind === "ready"。
+  //   currentSessionKeyHash === PUB_A、activeKeyState.kind === "ready"。
   // 三个条件同时成立才能确保 rebind 已"过了"connect 检查那一行（因为
   // connect 会把 currentStatus 改成 "connecting"）。所以这里轮询到三态稳定
   // 才放行测试开始 patch。
   for (let i = 0; i < 50; i++) {
     if (
-      (svc as any).currentSessionKeyHash === "02" + "ab".repeat(32) &&
+      (svc as any).currentSessionKeyHash === PUB_A &&
       (svc as any).currentStatus === "idle" &&
       (svc as any).activeKeyState?.kind === "ready"
     ) {
@@ -291,21 +302,12 @@ describe("pokerService (active-key-driven)", () => {
     const state = svc.getActivePokerKey();
     expect(state.kind).toBe("ready");
     if (state.kind === "ready") {
-      expect(state.key.publicKeyHex).toBe("02" + "ab".repeat(32));
+      expect(state.key.publicKeyHex).toBe(PUB_A);
     }
   });
 
   it("connect fails when proxyEndpoint empty", async () => {
     await expect(svc.connect()).rejects.toThrow(/proxyEndpoint/);
-  });
-
-  it("connect fails when active key not ready (failed)", async () => {
-    keyspace.setKeyStatus("02" + "ab".repeat(32), "failed", "decrypt failed");
-    // 触发一次 activeKey.changed 让 service 重新评估。
-    await keyspace.setActive("02" + "ab".repeat(32));
-    await new Promise((r) => setTimeout(r, 0));
-    await svc.updateSettings({ proxyEndpoint: "wss://example" });
-    await expect(svc.connect()).rejects.toThrow(/not ready/);
   });
 
   it("no-active-key fails-closed: connect throws and no ws opens", async () => {
@@ -349,22 +351,22 @@ describe("pokerService (active-key-driven)", () => {
     await svc.updateSettings({ proxyEndpoint: "wss://example" });
     // 模拟 ready 并推送一条 presences，确认切 key 时会被清。
     (svc as any).currentStatus = "ready";
-    (svc as any).presences.set("02" + "ab".repeat(32), {
-      publicKeyHex: "02" + "ab".repeat(32),
+    (svc as any).presences.set(PUB_A, {
+      publicKeyHex: PUB_A,
       seenAt: 1
     });
     expect(svc.listPresences().length).toBe(1);
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     await new Promise((r) => setTimeout(r, 0));
     const state = svc.getActivePokerKey();
     expect(state.kind).toBe("ready");
     if (state.kind === "ready") {
-      expect(state.key.publicKeyHex).toBe("03" + "cd".repeat(32));
+      expect(state.key.publicKeyHex).toBe(PUB_B);
     }
     // 旧 presences 已清空（service 切 key 时 clearSessionInMemory）。
     expect(svc.listPresences().length).toBe(0);
     // internal session key hash 也切到 pkhB。
-    expect((svc as any).currentSessionKeyHash).toBe("03" + "cd".repeat(32));
+    expect((svc as any).currentSessionKeyHash).toBe(PUB_B);
   });
 
   it("active key cleared (noActiveKey) clears session and surfaces noActiveKey state", async () => {
@@ -381,7 +383,7 @@ describe("pokerService (active-key-driven)", () => {
   it("key.deleting for current session key teardown immediately", async () => {
     await svc.updateSettings({ proxyEndpoint: "wss://example" });
     (svc as any).currentStatus = "ready";
-    keyspace.emitKeyDeleting("02" + "ab".repeat(32));
+    keyspace.emitKeyDeleting(PUB_A);
     await new Promise((r) => setTimeout(r, 0));
     expect(svc.status()).toBe("closed");
     expect(svc.listPresences().length).toBe(0);
@@ -395,7 +397,7 @@ describe("pokerService (active-key-driven)", () => {
     // 当前 active key 是 pkhA；在内存里挂一条 pkhB 的 presence（模拟
     // 之前观察到的另一玩家；不应该因为 pkhB 被删就被清）。
     const ghostPresence = {
-      publicKeyHex: "03" + "cd".repeat(32),
+      publicKeyHex: PUB_B,
       seenAt: 1
     };
     (svc as any).presences.set(ghostPresence.publicKeyHex, ghostPresence);
@@ -404,20 +406,20 @@ describe("pokerService (active-key-driven)", () => {
       variant: "TexasHoldem",
       seats: 4,
       stakes: 0,
-      ownerPub: "03" + "cd".repeat(32)
+      ownerPub: PUB_B
     };
     (svc as any).tables.set(ghostTable.tableId, ghostTable);
     expect(svc.listPresences().length).toBe(1);
     expect(svc.listTables().length).toBe(1);
     // 删除非 active key（pkhB）。
-    keyspace.emitKeyDeleted("03" + "cd".repeat(32));
+    keyspace.emitKeyDeleted(PUB_B);
     await new Promise((r) => setTimeout(r, 0));
     // 关键不变量（硬切换 004 情况 4）：当前 active key 没变，且当前
     // session 的 presences / tables 必须原样保留——删除非当前 key
     // 不能清空当前会话的内存态。
     expect(svc.getActivePokerKey().kind).toBe("ready");
     if (svc.getActivePokerKey().kind === "ready") {
-      expect(svc.getActivePokerKey().key.publicKeyHex).toBe("02" + "ab".repeat(32));
+      expect(svc.getActivePokerKey().key.publicKeyHex).toBe(PUB_A);
     }
     expect(svc.listPresences().length).toBe(1);
     expect(svc.listPresences()[0]?.publicKeyHex).toBe(ghostPresence.publicKeyHex);
@@ -452,7 +454,7 @@ describe("pokerService (active-key-driven)", () => {
       proxyEndpoint: "wss://persist.example",
       allowFallbackBroadcast: false
     });
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     await new Promise((r) => setTimeout(r, 0));
     // 切 key 不应改变全局 settings。
     expect(svc.getSettings().proxyEndpoint).toBe("wss://persist.example");
@@ -498,7 +500,7 @@ describe("pokerService (active-key-driven)", () => {
     expect(resp).toBeTruthy();
     expect(resp.payload.nonce).toBe(nonceHex);
     expect(typeof resp.payload.signature).toBe("string");
-    expect(resp.payload.publicKeyHex).toContain("02ab");
+    expect(resp.payload.publicKeyHex).toBe(PUB_A);
   });
 
   it("ensureReady rejects when session key drifted from active key", async () => {
@@ -513,7 +515,7 @@ describe("pokerService (active-key-driven)", () => {
     svc.onActivePokerKeyChange((s) => {
       seen.push(s.kind);
     });
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     await new Promise((r) => setTimeout(r, 0));
     expect(seen).toContain("ready");
   });
@@ -570,14 +572,14 @@ describe("pokerService (active-key-driven)", () => {
       messageBus: localBus as any
     });
     // 这时：(fresh as any).currentSessionKeyHash 还是 null（init 没填），
-    // 但 keyspace.active().activePublicKeyHex === "02" + "ab".repeat(32)——后者是同步
+    // 但 keyspace.active().activePublicKeyHex === PUB_A——后者是同步
     // 数据源，handler 改用它就不会漏掉 teardown。
     expect((fresh as any).currentSessionKeyHash).toBeNull();
-    expect(localKeyspace.active().activePublicKeyHex).toBe("02" + "ab".repeat(32));
+    expect(localKeyspace.active().activePublicKeyHex).toBe(PUB_A);
 
     // 在 init rebind 完成前发 key.deleting：必须命中"当前 session key"
     // 分支并 teardown。
-    localKeyspace.emitKeyDeleting("02" + "ab".repeat(32));
+    localKeyspace.emitKeyDeleting(PUB_A);
 
     // 给 rebind + teardown 多个 tick 走完。
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
@@ -604,18 +606,18 @@ describe("pokerService (active-key-driven)", () => {
       (svc as any).currentStatus = "ready";
     };
 
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     // rebindToActiveKey 是 microtask 异步；多等几轮让它走完
     // hydrateFromKeyScopedDb → connect() → openSocket() 整条链。
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
 
     // 关键不变量（硬切换 004）：切 key 后必须按新 key 重建连接。
     expect(openSocketCalls).toBeGreaterThanOrEqual(1);
-    expect((svc as any).currentSessionKeyHash).toBe("03" + "cd".repeat(32));
+    expect((svc as any).currentSessionKeyHash).toBe(PUB_B);
     const state = svc.getActivePokerKey();
     expect(state.kind).toBe("ready");
     if (state.kind === "ready") {
-      expect(state.key.publicKeyHex).toBe("03" + "cd".repeat(32));
+      expect(state.key.publicKeyHex).toBe(PUB_B);
     }
     expect(svc.status()).toBe("ready");
     // userWantsConnection 在自动重建后必须仍然为 true（保留用户意图）。
@@ -631,10 +633,10 @@ describe("pokerService (active-key-driven)", () => {
       openSocketCalls += 1;
       (svc as any).currentStatus = "ready";
     };
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
     expect(openSocketCalls).toBe(0);
-    expect((svc as any).currentSessionKeyHash).toBe("03" + "cd".repeat(32));
+    expect((svc as any).currentSessionKeyHash).toBe(PUB_B);
     expect(svc.status()).not.toBe("ready");
   });
 
@@ -649,7 +651,7 @@ describe("pokerService (active-key-driven)", () => {
     };
     svc.disconnect();
     expect((svc as any).userWantsConnection).toBe(false);
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
     // 用户已经主动断开 → 切 key 不能再连回去。
@@ -679,7 +681,7 @@ describe("pokerService (active-key-driven)", () => {
     };
     vault.setStatus("unlocked");
     await new Promise((r) => setTimeout(r, 0));
-    await keyspace.setActive("02" + "ab".repeat(32)); // 触发 onActiveChange → rebind
+    await keyspace.setActive(PUB_A); // 触发 onActiveChange → rebind
     await new Promise((r) => setTimeout(r, 0));
     await new Promise((r) => setTimeout(r, 0));
     // vault.unlock 不应触发自动 reconnect；用户必须显式点 Connect。
@@ -699,7 +701,7 @@ describe("pokerService (active-key-driven)", () => {
     };
 
     // 1) key.deleting 命中当前 session key：teardown，userWantsConnection 保留。
-    keyspace.emitKeyDeleting("02" + "ab".repeat(32));
+    keyspace.emitKeyDeleting(PUB_A);
     await new Promise((r) => setTimeout(r, 0));
     expect(svc.status()).toBe("closed");
     expect((svc as any).currentSessionKeyHash).toBeNull();
@@ -707,28 +709,28 @@ describe("pokerService (active-key-driven)", () => {
     expect(openSocketCalls).toBe(0); // 这一步还没连。
 
     // 2) key.deleted → pruneReferencesToKey 不动当前内存态（已空）。
-    keyspace.emitKeyDeleted("02" + "ab".repeat(32));
+    keyspace.emitKeyDeleted(PUB_A);
     await new Promise((r) => setTimeout(r, 0));
 
     // 3) keyspace 决定新 active key = pkhB → 触发 onActiveChange →
     //    rebindToActiveKey 看到 state=ready 且 userWantsConnection=true，
     //    必须自动 connect。
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
 
     expect(openSocketCalls).toBeGreaterThanOrEqual(1);
-    expect((svc as any).currentSessionKeyHash).toBe("03" + "cd".repeat(32));
+    expect((svc as any).currentSessionKeyHash).toBe(PUB_B);
     const state = svc.getActivePokerKey();
     expect(state.kind).toBe("ready");
     if (state.kind === "ready") {
-      expect(state.key.publicKeyHex).toBe("03" + "cd".repeat(32));
+      expect(state.key.publicKeyHex).toBe(PUB_B);
     }
   });
 
   it("hydrates presences / tables / txIngest from current active key's IDB on init", async () => {
     // 准备：在 pkhA 的 DB 里写入若干 cached 行。
     const handle = await keyspace.openKeyStorage({
-      publicKeyHex: "02" + "ab".repeat(32),
+      publicKeyHex: PUB_A,
       pluginId: "plugin-poker",
       storageId: "poker",
       version: 3,
@@ -786,7 +788,7 @@ describe("pokerService (active-key-driven)", () => {
     }
 
     // 构造一个新 service：构造函数会触发 rebindToActiveKey("init") →
-    // hydrateFromKeyScopedDb("02" + "ab".repeat(32))，应能恢复上面写入的 tables / presences。
+    // hydrateFromKeyScopedDb(PUB_A)，应能恢复上面写入的 tables / presences。
     const svc2 = createPokerService({
       vault: vault as any,
       keyspace: keyspace as any,
@@ -825,7 +827,7 @@ describe("pokerService (active-key-driven)", () => {
       }
     };
     const handleA = await keyspace.openKeyStorage({
-      publicKeyHex: "02" + "ab".repeat(32),
+      publicKeyHex: PUB_A,
       pluginId: "plugin-poker",
       storageId: "poker",
       version: 3,
@@ -868,7 +870,7 @@ describe("pokerService (active-key-driven)", () => {
     expect(ids).toEqual(["tx-0", "tx-1", "tx-2", "tx-3", "tx-4"]);
 
     // 防御性：再次调 hydrate，验证 idempotent。
-    await (local as any).hydrateFromKeyScopedDb("02" + "ab".repeat(32));
+    await (local as any).hydrateFromKeyScopedDb(PUB_A);
     expect(local.recentTxEvents(100).length).toBe(5);
   });
 
@@ -890,7 +892,7 @@ describe("pokerService (active-key-driven)", () => {
       }
     };
     const handleA = await keyspace.openKeyStorage({
-      publicKeyHex: "02" + "ab".repeat(32),
+      publicKeyHex: PUB_A,
       pluginId: "plugin-poker",
       storageId: "poker",
       version: 3,
@@ -913,7 +915,7 @@ describe("pokerService (active-key-driven)", () => {
 
     // 2) 在 pkhB 的 DB 写 table-B。
     const handleB = await keyspace.openKeyStorage({
-      publicKeyHex: "03" + "cd".repeat(32),
+      publicKeyHex: PUB_B,
       pluginId: "plugin-poker",
       storageId: "poker",
       version: 3,
@@ -945,7 +947,7 @@ describe("pokerService (active-key-driven)", () => {
     expect(svc2.listTables().find((t) => t.tableId === "t-B")).toBeFalsy();
 
     // 4) 切到 pkhB → 必须 hydrate pkhB 的 DB；不应保留 t-A。
-    await keyspace.setActive("03" + "cd".repeat(32));
+    await keyspace.setActive(PUB_B);
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
     const tables = svc2.listTables();
     expect(tables.find((t) => t.tableId === "t-B")).toBeTruthy();

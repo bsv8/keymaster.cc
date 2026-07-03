@@ -5,6 +5,8 @@
 //   - 预览阶段不写本地提交 / 本地输入占用；只有进入应用内广播流程后才写。
 // 设计缘由：preview 必须是最终承诺对象，否则用户看到的内容和实际广播的交易
 // 可能不是同一笔，后续无法安全复制 rawTxHex 进行外部广播。
+//
+// 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
 import type { MessageBus, PluginLogger, VaultService, WocService } from "@keymaster/contracts";
 import type {
@@ -33,22 +35,32 @@ export interface P2pkhTransferServiceDeps {
   vault: VaultService;
   woc: WocService;
   messageBus: MessageBus;
-  /** 每次需要操作时由 p2pkhService 提供的当前 namespace db。 */
-  getDb: () => Promise<P2pkhDbHandle>;
+  /**
+   * 硬切换 002 收尾 + 多 owner 支持：按 `publicKeyHex` 返回该 owner
+   * 的 P2PKH namespace DB。transfer 内部所有读 DB 的入口（prepare
+   * 选币 / submit 取 resource / claim / submission 写入）都传
+   * `input.ownerPublicKeyHex` 或 `preview.ownerPublicKeyHex`——
+   * 严格按调用方指定的 owner 走 namespace，不再从 active key 推导。
+   *
+   * 上层 p2pkhService 的硬门禁（`keyspace.openKeyStorage` 要求
+   * `active === input.publicKeyHex`）保证 `publicKeyHex` 在调用
+   * 时刻等于 active key。
+   */
+  getDb: (publicKeyHex: string) => Promise<P2pkhDbHandle>;
   /**
    * 当前 active key。p2pkhService.rebindActiveKey 内部用 requireReadyKey
    * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHex 必填）。
    *
-   * 002 硬切换：仍保留作为兜底（旧 widget / overview 路径）；新路径
-   * 全部走 `getKeyForOwner` 按 session 绑定 owner 取 key。
+   * 硬切换 002 收尾：本路径仅作"未传 owner 时的兜底"使用；新代码
+   * 一律走 `getKeyForOwner`。
    */
   getActiveKey: () => ReadyKeyIdentity;
   /**
-   * 按 owner public key hex 解析 ReadyKeyIdentity（002 硬切换）。
+   * 按 owner public key hex 解析 ReadyKeyIdentity（硬切换 002 收尾）。
    * 解析失败时抛 `Error`，调用方（plugin-protocol）已经校验过 owner
    * key ready 才进入 transfer 流程。
    */
-  getKeyForOwner?: (ownerPublicKeyHex: string) => Promise<ReadyKeyIdentity>;
+  getKeyForOwner: (ownerPublicKeyHex: string) => Promise<ReadyKeyIdentity>;
   /** 硬切换 002：业务插件注入的 logger。 */
   logger?: PluginLogger;
 }
@@ -63,9 +75,9 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
     async prepare(input) {
       const validated = validateTransferInput(input);
       const network = assetIdToNetwork(validated.assetId);
-      const db = await deps.getDb();
-      const owner = await resolveOwnerKeyIdentity(deps, input);
-      const resourceId = makeResourceId(owner.keyId, network);
+      const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
+      const db = await deps.getDb(owner.publicKeyHex);
+      const resourceId = makeResourceId(network);
       const resource = await db.getResource(resourceId);
       if (!resource) {
         throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
@@ -99,11 +111,14 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 
       const sorted = [...candidates].sort((a, b) => a.value - b.value);
       const { address: changeAddress, publicKeyHex } = await deps.vault.withPrivateKey(
-        owner.keyId,
+        owner.publicKeyHex,
         async (material) => deriveP2pkhAddress(material.hex, network)
       );
       const signRawTx = async (unsigned: UnsignedTx, selected: P2pkhUtxo[]): Promise<string> =>
-        deps.vault.withPrivateKey(owner.keyId, async (material) => signP2pkhTx(unsigned, selected, material, publicKeyHex));
+        deps.vault.withPrivateKey(
+          owner.publicKeyHex,
+          async (material) => signP2pkhTx(unsigned, selected, material, publicKeyHex)
+        );
 
       let bestError: AllocationFailureInfo | undefined;
       for (let count = 1; count <= sorted.length; count++) {
@@ -118,14 +133,13 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           signRawTx
         });
         if (solution.ok) {
-          // 关键（002 硬切换）：preview 必须携带 owner 信息，让
+          // 关键（硬切换 002 收尾）：preview 必须携带 owner 信息，让
           // submit 阶段可校验"同一 owner 才能广播"——避免 caller / widget
           // 在 prepare 与 submit 之间切换 owner 导致"用 keyA 准备、
           // 用 keyB 广播"的错位。
           return {
             ...solution.preview,
-            ownerPublicKeyHex: owner.publicKeyHex,
-            keyId: owner.keyId
+            ownerPublicKeyHex: owner.publicKeyHex
           };
         }
         bestError = solution.error;
@@ -143,10 +157,10 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
     },
 
     async submit(preview) {
-      const db = await deps.getDb();
-      const owner = await resolveOwnerKeyIdentity(deps, preview);
+      const owner = await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
+      const db = await deps.getDb(owner.publicKeyHex);
       const network = preview.network;
-      const resourceId = makeResourceId(owner.keyId, network);
+      const resourceId = makeResourceId(network);
       const resource = await db.getResource(resourceId);
       if (!resource) {
         throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
@@ -166,7 +180,6 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const submissionBase: P2pkhLocalSubmission = {
         id: submissionId,
         resourceId: resource.resourceId,
-        keyId: owner.keyId,
         publicKeyHex: owner.publicKeyHex,
         network,
         assetId: preview.assetId,
@@ -180,7 +193,16 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         createdAt: now,
         updatedAt: now
       };
-      await db.putLocalSubmission(submissionBase);
+      // 硬切换 002 收尾：原子地写 submission + 所有 input claim
+      // （tryClaimSubmissionWithInputs 内部走单一 readwrite 事务）。
+      // 冲突时整事务 abort，submission / claims 都不写——这是
+      // 并发防重的事务层保险。两个并发 submit 撞到同一对
+      // (txid, vout) 时，第二个会抛「already claimed」，外层
+      // 不进 broadcast。
+      const { claimIds: localInputClaimIds } = await db.tryClaimSubmissionWithInputs({
+        submission: submissionBase,
+        inputs: preview.allocation.selected
+      });
 
       let broadcastRes:
         | {
@@ -197,6 +219,11 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         const msg = err instanceof Error ? err.message : String(err);
         const isDefinitiveRejection = isDefinitivelyRejectedError(msg);
         if (isDefinitiveRejection) {
+          // definitive rejection：value 没在链上花掉，释放本次 claim
+          // 让这些 outpoint 重新可被后续分配选到。审计信息保留在
+          // failed submission 行里。不引入 `released` 状态——直接
+          // delete 行，状态机保持单一。
+          await db.releaseLocalInputClaims(localInputClaimIds);
           await db.putLocalSubmission({
             ...submissionBase,
             status: "failed",
@@ -207,7 +234,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             scope: "p2pkh.transfer",
             event: "transfer.broadcast.rejected",
             message: `P2PKH transfer broadcast rejected: ${preview.txid}`,
-            data: { resourceId: resource.resourceId, network, txid: preview.txid },
+            data: { resourceId: resource.resourceId, network, txid: preview.txid, releasedClaimCount: localInputClaimIds.length },
             keyScope: { publicKeyHex: owner.publicKeyHex },
             error: { name: err instanceof Error ? err.name : "Error", message: msg }
           });
@@ -221,14 +248,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           };
         }
 
-        const localInputClaimIds = await claimInputs(db, {
-          submissionId,
-          resourceId: resource.resourceId,
-          keyId: owner.keyId,
-          publicKeyHex: owner.publicKeyHex,
-          network,
-          inputs: preview.allocation.selected
-        });
+        // ambiguous / network error：保留 claim，让 recent-sync 对账。
+        // 这与 rejection 不同——UTXO 可能已经花掉，释放会留双花窗口。
         await db.putLocalSubmission({
           ...submissionBase,
           status: "unknown",
@@ -258,14 +279,6 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         throw new Error("Broadcast result is missing");
       }
 
-      const localInputClaimIds = await claimInputs(db, {
-        submissionId,
-        resourceId: resource.resourceId,
-        keyId: owner.keyId,
-        publicKeyHex: owner.publicKeyHex,
-        network,
-        inputs: preview.allocation.selected
-      });
       // 关键不变量（硬切换 003 收尾）：本判断依赖的是 plugin-woc 已归一化
       // 后的 WocBroadcastResult.txidIntegrity（exact / reversed / mismatch /
       // missing）。plugin-p2pkh 不再自行 reverse / normalize provider 原始
@@ -315,60 +328,32 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 }
 
 /**
- * 按 owner public key hex 解析 ReadyKeyIdentity（施工单 002 硬切换）。
+ * 按 owner public key hex 解析 ReadyKeyIdentity（硬切换 002 收尾）。
  *
- * 解析优先级（与 P2pkhUtxoFilter / P2pkhTransferInput 维度一致）：
- *   1. `input.ownerPublicKeyHex` 走 `deps.getKeyForOwner`（002 新路径）。
- *      若 `getKeyForOwner` 未注入（兼容老 widget / overview 路径），
- *      退到 active key 并校验 publicKeyHex 一致——保留旧路径的
- *      "单 key 走 active"语义。
- *   2. `input.keyId` 走 `deps.getActiveKey` 但**强制**校验
- *      `keyId === activeIdentity.keyId` —— 防止 caller 用"旧 keyId"
- *      偷渡到 active key namespace。
- *   3. 老 widget / overview 路径**无** ownerPublicKeyHex / keyId：
- *      兜底走 active key。
+ * 解析路径：
+ *   1. `ownerPublicKeyHex === active.publicKeyHex` → 走 active key 缓存。
+ *   2. 否则走 `deps.getKeyForOwner(publicKeyHex)` 按 hex 解析；不允许
  */
 async function resolveOwnerKeyIdentity(
   deps: P2pkhTransferServiceDeps,
-  input: { ownerPublicKeyHex?: string; keyId?: string }
+  ownerPublicKeyHex: string
 ): Promise<ReadyKeyIdentity> {
-  if (input.ownerPublicKeyHex) {
-    const active = deps.getActiveKey();
-    if (active.publicKeyHex === input.ownerPublicKeyHex) {
-      // 兼容老 widget / overview 路径：ownerPublicKeyHex 与当前
-      // active key publicKeyHex 一致 → 直接走 active key，不强制
-      // 走 `getKeyForOwner` 解析。
-      return active;
-    }
-    if (!deps.getKeyForOwner) {
-      throw new Error(
-        `P2PKH transfer: owner ${input.ownerPublicKeyHex} != active key ${active.publicKeyHex} and getKeyForOwner is not wired`
-      );
-    }
-    const key = await deps.getKeyForOwner(input.ownerPublicKeyHex);
-    if (!key || !key.keyId || !key.publicKeyHex) {
-      throw new Error(
-        `P2PKH transfer: owner ${input.ownerPublicKeyHex} is not ready (no keyId / publicKeyHex)`
-      );
-    }
-    if (key.publicKeyHex !== input.ownerPublicKeyHex) {
-      throw new Error(
-        `P2PKH transfer: resolved key publicKeyHex ${key.publicKeyHex} != requested owner ${input.ownerPublicKeyHex}`
-      );
-    }
-    return key;
-  }
-  if (input.keyId) {
-    const active = deps.getActiveKey();
-    if (active.keyId !== input.keyId) {
-      throw new Error(
-        `P2PKH transfer: requested keyId ${input.keyId} != active keyId ${active.keyId}`
-      );
-    }
+  const active = deps.getActiveKey();
+  if (active.publicKeyHex === ownerPublicKeyHex) {
     return active;
   }
-  // 兜底：老 widget / overview 路径无 owner / keyId 信息，走 active key。
-  return deps.getActiveKey();
+  const key = await deps.getKeyForOwner(ownerPublicKeyHex);
+  if (!key || !key.publicKeyHex) {
+    throw new Error(
+      `P2PKH transfer: owner ${ownerPublicKeyHex} is not ready (no publicKeyHex)`
+    );
+  }
+  if (key.publicKeyHex !== ownerPublicKeyHex) {
+    throw new Error(
+      `P2PKH transfer: resolved key publicKeyHex ${key.publicKeyHex} != requested owner ${ownerPublicKeyHex}`
+    );
+  }
+  return key;
 }
 
 type AllocationFailureInfo = {
@@ -430,6 +415,7 @@ async function solveForSelectedInputs(params: {
       return {
         ok: true,
         preview: {
+          ownerPublicKeyHex: "", // 硬切换 002 收尾：solve 阶段无法直接拿 owner，由 prepare 入口在 spread 时补 ownerPublicKeyHex
           assetId: params.assetId,
           network: assetIdToNetworkMap[params.assetId],
           recipientAddress: params.recipientAddress,
@@ -495,6 +481,7 @@ async function solveForSelectedInputs(params: {
   return {
     ok: true,
     preview: {
+      ownerPublicKeyHex: "", // 硬切换 002 收尾：solve 阶段拿不到 owner，由 prepare 入口补 ownerPublicKeyHex
       assetId: params.assetId,
       network: assetIdToNetworkMap[params.assetId],
       recipientAddress: params.recipientAddress,
@@ -516,7 +503,6 @@ async function claimInputs(
   params: {
     submissionId: string;
     resourceId: string;
-    keyId: string;
     publicKeyHex: string;
     network: "main" | "test";
     inputs: P2pkhUtxo[];
@@ -530,7 +516,6 @@ async function claimInputs(
       id,
       submissionId: params.submissionId,
       resourceId: params.resourceId,
-      keyId: params.keyId,
       publicKeyHex: params.publicKeyHex,
       network: params.network,
       txid: u.txid,

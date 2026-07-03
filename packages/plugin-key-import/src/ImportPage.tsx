@@ -163,7 +163,7 @@ export function ImportPage() {
         capabilities: ["p2pkh"],
         source: importer.id
       });
-      messageBus.publish("key.imported", { keyId: null });
+      // 硬切换 002 收尾：vault 自己已发 `key.created`；旧 import 流程
       dispatch({ type: "reset" });
     } catch (err) {
       dispatch({

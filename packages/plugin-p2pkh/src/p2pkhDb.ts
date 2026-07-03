@@ -1,41 +1,40 @@
 // packages/plugin-p2pkh/src/p2pkhDb.ts
-// P2PKH 资源库（硬切换 005 + 硬切换 007 + 硬切换 001 + 硬切换 003）。
+// P2PKH 资源库（硬切换 005 + 硬切换 007 + 硬切换 001 + 硬切换 003 + 硬切换 002 收尾）。
 // 设计缘由：
-//   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 active key 一个 namespace DB，
-//     通过 keyspace.openKeyStorage 打开。
+//   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 owner publicKeyHex 一个
+//     namespace DB，通过 keyspace.openKeyStorage 打开。
 //   - DB name 形如 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`。
-//   - store 中 keyId 字段保留为诊断字段，但删除 / 清理不再以 keyId index 为主路径。
-//   - resourceId 改为不包含 Vault keyId：`p2pkh:<network>`。
-//   - 原子提交：commitBackfillPage / commitRecentSnapshot 行为不变，但写入的 DB
-//     是当前 key 的 namespace DB，不再有跨 key 数据混合风险。
-//   - 切换 active key 时调用方需要重新拿 p2pkhDb(publicKeyHex) 才能继续访问。
-//   - 硬切换 001：DB schema 升级，删除 `p2pkh_balances` store；
-//     余额改为 service 每次基于当前 UTXO 快照现算，不再落库。
+//     `publicKeyHex` + 链上数据。UTXO / history 过滤完全按 hex。
+//   - module 内部用 `Map<publicKeyHex, OpenHandle>` 缓存「多 owner
+//     并存」的 handle：打开新 owner 的 DB **不会** 关闭其它 owner 的
+//     handle。每个 owner 的 IDBDatabase 独立持有、独立关闭。
+//   - 调用方按 owner 取 handle：transfer 走 session owner，recent /
+//     backfill 走 active key。同 owner 的二次 open 走 cache hit
+//     (`db.reused`)，不重新打开 namespace DB。
 //
-// 硬切换 005（2026-06-19）：P2PKH DB 版本硬切换 6 -> 7。
-//   - 目标版本 = 7；不兼容旧 schema，**不做老数据迁移**。
+// 硬切换 005（2026-06-19）：P2PKH DB 版本硬切换 6 -> 7（history）。
+// 硬切换 002（2026-07-02）：P2PKH DB 版本硬切换 7 -> 8（key 域彻底收尾）。
 //   - 打开语义收口为单一规则：版本不匹配即整库 rebuild。
-//     - `oldVersion < 7`：进入 onupgradeneeded 事务，删光当前 DB 内所有
-//       p2pkh_* stores，按 v7 完整重建。
-//     - `oldVersion === 7`：直接使用，不做额外 schema 扫描。
-//     - `oldVersion > 7`：keyspace.openKeyStorage 会抛 VersionError，
+//     - `oldVersion < 8`：进入 onupgradeneeded 事务，删光当前 DB 内所有
+//       p2pkh_* stores，按 v8 完整重建。
+//     - `oldVersion === 8`：直接使用，不做额外 schema 扫描。
+//     - `oldVersion > 8`：keyspace.openKeyStorage 会抛 VersionError，
 //       p2pkh 在 openP2pkhDb 捕获后执行
-//       `close cached handle -> deleteDatabase -> reopen(name, 7)`。
+//       `close cached handle -> deleteDatabase -> reopen(name, 8)`。
 //   - `deleteDatabase` blocked / 失败必须冒泡，**不允许**"假装已经 rebuild"。
 //   - 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`，
 //     不与其它 plugin 共库；整库删除不会误伤别的业务。
 //
 // 硬切换 003：
 //   - 旧全局 "p2pkh" DB 不再作为恢复路径，也不再接入任何启动路径。
-//   - `migrateLegacyP2pkhDb()` 保留代码用于历史诊断，但不在 unlock、rehydrate、
-//     手工同步、key.deleted 等路径里调用。
+//   - 旧 `migrateLegacyP2pkhDb()` 已删除：硬切换 002 之后资源归属不再依赖
 //   - 老 key 即使残留旧全局 DB 也允许被放弃；恢复路径是
 //     `rehydrate + recent-sync + history-backfill`，从 WOC 链上真值重建。
 //   - 旧的"best-effort 一次性迁移"注释已经被本硬切换覆盖；新代码若需要把
 //     历史 v3 数据搬过来，也必须通过 active key 自己的 namespace DB
 //     升级路径，而不是再造一条与 active key 模型平行的迁移链。
 
-import type { BsvNetwork, KeyspaceService, PluginLogger } from "@keymaster/contracts";
+import type { BsvNetwork } from "@keymaster/contracts";
 import type {
   P2pkhBackfillState,
   P2pkhHistoryItem,
@@ -50,29 +49,13 @@ import { makeResourceId } from "./p2pkhContracts.js";
 
 const P2PKH_STORAGE_ID = "state";
 /**
- * 硬切换 005：P2PKH namespace DB schema 版本升级到 7。
- * 本次是硬切换——不兼容 v6 schema，**不做老数据迁移**。
- * 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`：
- *   - `oldVersion < 7`：onupgradeneeded 事务内删光旧 p2pkh_* stores，
- *     按 v7 完整重建。
- *   - `oldVersion > 7`：VersionError -> close cached handle ->
- *     deleteDatabase -> reopen(name, 7)。
+ * 硬切换 002 收尾：P2PKH namespace DB schema 版本升级到 8。
+ * 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`。
  *
  * 导出以供 service 层日志 / 验收脚本使用——所有需要报告
  * "P2PKH 当前目标版本"的位置都应从这里取真值，不要再硬编码数字。
  */
-export const P2PKH_DB_VERSION = 7;
-
-/**
- * 旧全局 DB（v3）。保留常量以便调试 / 单元测试 / 一次性诊断脚本；
- * 硬切换 003 起不再有调用方接入这条路径。
- *
- * 设计缘由：当前系统对老 key 不再做一次性迁移，链上真值（rehydrate +
- * recent-sync + history-backfill）就是唯一恢复路径。即使本地残留
- * `p2pkh` v3 DB，也允许它留在原地被忽略，不影响当前 namespace 升级。
- */
-const LEGACY_DB_NAME = "p2pkh";
-const LEGACY_DB_VERSION = 3;
+export const P2PKH_DB_VERSION = 8;
 
 interface P2pkhDbBundle {
   /** 关闭当前 namespace db handle。 */
@@ -91,15 +74,23 @@ interface OpenHandle {
   getDb(): IDBDatabase;
 }
 
-let openHandle: OpenHandle | undefined;
+/**
+ * 硬切换 002 收尾 + 多 owner 支持：module-level handle 缓存改为
+ * `Map<publicKeyHex, OpenHandle>`。旧实现是单变量，调用方 A 打开
+ * ownerA 的 DB 后、B 打开 ownerB 的 DB 会把 A 的 handle 静默关掉
+ * —— 任何「同时对两个 owner 持有 IDBDatabase」的路径都会拿到
+ * 悬空句柄。Map 化后两个 owner 的 DB 各自持有自己的句柄，独立
+ * 关闭。
+ */
+const openHandles: Map<string, OpenHandle> = new Map();
 
 /**
- * 硬切换 003 + 硬切换 005：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
+ * 硬切换 002 收尾 + 硬切换 005：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
  * 自动修复当前 key 的 namespace DB。upgrade 回调能拿到 oldVersion：
  *   - oldVersion === 0：DB 第一次被创建；
- *   - 0 < oldVersion < newVersion：旧版本被升级（**不迁移旧数据，删光 p2pkh stores 重建**）；
- *   - oldVersion === newVersion：普通打开，不动 schema。
- *   - oldVersion > newVersion：不会进入 upgrade；浏览器层抛 VersionError，
+ *   - 0 < oldVersion < 8：旧版本被升级（**不迁移旧数据，删光 p2pkh stores 重建 v8**）；
+ *   - oldVersion === 8：普通打开，不动 schema。
+ *   - oldVersion > 8：不会进入 upgrade；浏览器层抛 VersionError，
  *     本函数在下方 try/catch 命中后走 `close -> deleteDatabase -> reopen`。
  * 配合传入的 logger 即可在日志上区分这几种情况。
  */
@@ -113,7 +104,7 @@ interface UpgradeAudit {
   storeSnapshot: Record<string, boolean>;
 }
 
-function auditV7Stores(db: IDBDatabase): Record<string, boolean> {
+function auditV8Stores(db: IDBDatabase): Record<string, boolean> {
   const required = [
     "p2pkh_addresses",
     "p2pkh_utxos",
@@ -131,30 +122,59 @@ function auditV7Stores(db: IDBDatabase): Record<string, boolean> {
 }
 
 /**
- * 打开当前 active key 的 P2PKH namespace db。
- * 设计缘由：plugin 内部通过 keyspace 获取当前 active key，再打开对应 namespace。
- * 切换 active key 后必须重新调用此函数。
+ * 打开 owner publicKeyHex 的 P2PKH namespace db（按 owner 缓存）。
  *
- * 硬切换 005：版本不匹配即整库 rebuild——收口在 `openP2pkhDb()` 一处。
- *   - `oldVersion < 7`：onupgradeneeded 事务内删光旧 p2pkh_* stores，重建 v7。
- *   - `oldVersion > 7`：keyspace 内部 `indexedDB.open(name, 7)` 抛 VersionError，
- *     本函数捕获后执行 `close cached handle -> deleteDatabase -> reopen`。
- *   - `oldVersion === 7`：普通打开。
+ * 设计缘由：硬切换 002 收尾 + 多 owner 支持——每个 owner 各自一个
+ * 物理 IDB 数据库；module 内部 `openHandles: Map<publicKeyHex, OpenHandle>`
+ * 让多 owner 的 handle **并存**，打开新 owner **不会** 关闭其它
+ * owner 的 handle。调用方按 owner 取 handle：
+ *   - transfer 走 session owner（protocol 强制 `session.owner === active`）。
+ *   - recent-sync / backfill 走 active key。
+ *   - 同 owner 二次 open 走 cache hit（`db.reused`），不重开 IDB。
+ *
+ * 硬切换 002 收尾：版本不匹配即整库 rebuild——收口在 `openP2pkhDb()` 一处。
+ *   - `oldVersion < 8`：onupgradeneeded 事务内删光旧 p2pkh_* stores，重建 v8。
+ *   - `oldVersion > 8`：keyspace 内部 `indexedDB.open(name, 8)` 抛 VersionError，
+ *     本函数捕获后只关掉「本 owner 的」cached handle（避免 deleteDatabase
+ *     被自己的连接阻塞），再 `deleteDatabase -> reopen`。
+ *   - `oldVersion === 8`：普通打开。
  *   - `deleteDatabase` 被 blocked / 失败必须冒泡，**不允许**假装 rebuild 成功。
  *
  * 硬切换 003：调用方可通过 `logger` 让本函数在 upgrade 阶段补全"新建 /
  * 升级 / 普通打开"日志；不传时不记日志。
  */
 export async function openP2pkhDb(input: {
-  keyspace: KeyspaceService;
+  keyspace: import("@keymaster/contracts").KeyspaceService;
   publicKeyHex: string;
-  logger?: PluginLogger;
+  logger?: import("@keymaster/contracts").PluginLogger;
 }): Promise<P2pkhDbBundle> {
-  if (openHandle && openHandle.publicKeyHex === input.publicKeyHex) {
-    return openHandle as P2pkhDbBundle;
+  // 命中缓存：同一 owner 的 DB 已开过，直接复用。
+  const cached = openHandles.get(input.publicKeyHex);
+  if (cached) {
+    // 硬切换 003 收尾：缓存命中也必须留痕（p2pkh service 层不再
+    // 持有 service-level cache，per-owner map 命中由 module 内部
+    // 记日志）；调用方后续不会看到 db.opening 事件。
+    input.logger?.info({
+      scope: "p2pkh.db",
+      event: "db.reused",
+      message: "P2PKH reusing cached namespace db handle",
+      data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION }
+    });
+    return cached as P2pkhDbBundle;
   }
-  // 切换 namespace：关闭旧的。
-  closeCachedHandle();
+  // 硬切换 002 收尾：把「意图开 / 开成功 / 失败」三类日志都搬
+  // 到 module 层——service 层只看 p2pkhDb 的 map，cache hit 时
+  // service 不再误报 db.opening / db.opened。
+  input.logger?.info({
+    scope: "p2pkh.db",
+    event: "db.opening",
+    message: "P2PKH opening namespace db for owner",
+    data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION }
+  });
+  // 硬切换 002 收尾：多 owner 并存缓存下，主路径**不**主动关闭任
+  // 何 cached handle——其它 owner 的 IDBDatabase 必须保持存活。VersionError
+  // 重建路径会单独 `closeCachedHandle(input.publicKeyHex)`，只关
+  // 「本 owner 的」handle 避免 deleteDatabase 被自己阻塞。
   let audit: UpgradeAudit | undefined;
   let handle: import("@keymaster/contracts").KeyScopedStorageHandle;
   try {
@@ -164,20 +184,20 @@ export async function openP2pkhDb(input: {
       storageId: P2PKH_STORAGE_ID,
       version: P2PKH_DB_VERSION,
       upgrade: (db, oldVersion, newVersion) => {
-        // 硬切换 005：oldVersion < 7 进入 upgrade 是"删光旧 stores 重建 v7"，
+        // 硬切换 002 收尾：oldVersion < 8 进入 upgrade 是"删光旧 stores 重建 v8"，
         // **不是**数据迁移。oldVersion === 0（首次创建）和
-        // 0 < oldVersion < 7（旧版本）都统一落到 createV7Stores——
+        // 0 < oldVersion < 8（旧版本）都统一落到 createV8Stores——
         // 区别仅在日志分类 kind 上。
         // newVersion 在 contract 里允许 null（DB 被删除的特殊场景）；本路径
         // 下若为 null 也按 created 处理——这只是日志分类，不需要阻断。
         const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
         const kind: OpenKind = oldVersion === 0 ? "created" : "upgraded";
-        createV7Stores(db);
+        createV8Stores(db);
         audit = {
           kind,
           oldVersion,
           newVersion: resolvedNewVersion,
-          storeSnapshot: auditV7Stores(db)
+          storeSnapshot: auditV8Stores(db)
         };
         input.logger?.info({
           scope: "p2pkh.db",
@@ -194,13 +214,13 @@ export async function openP2pkhDb(input: {
       }
     });
   } catch (err) {
-    // 硬切换 005：oldVersion > 7 走"close -> deleteDatabase -> reopen"重建。
+    // 硬切换 005：oldVersion > 8 走"close -> deleteDatabase -> reopen"重建。
     // 非 VersionError 直接冒泡，**不**在 p2pkh 层吞错。
     if (!isVersionError(err)) throw err;
-    // 防御性：捕获当前模块缓存的 openHandle 句柄（若本函数上方某次
-    // 早返回路径已让 openHandle 残留，这里也要先关掉，避免
-    // deleteDatabase 被自己的连接阻塞）。
-    closeCachedHandle();
+    // 防御性：关掉本 owner 的 cached handle（若上次半路残留），
+    // 避免 deleteDatabase 被自己的连接阻塞。其它 owner 的 handle
+    // 不动。
+    closeCachedHandle(input.publicKeyHex);
     const name = namespaceDbName(input.publicKeyHex);
     input.logger?.warn({
       scope: "p2pkh.db",
@@ -217,12 +237,12 @@ export async function openP2pkhDb(input: {
       upgrade: (db, oldVersion, newVersion) => {
         // 重建路径：上一轮 DB 已被 deleteDatabase，oldVersion === 0。
         const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
-        createV7Stores(db);
+        createV8Stores(db);
         audit = {
           kind: "created",
           oldVersion,
           newVersion: resolvedNewVersion,
-          storeSnapshot: auditV7Stores(db)
+          storeSnapshot: auditV8Stores(db)
         };
         input.logger?.info({
           scope: "p2pkh.db",
@@ -246,7 +266,7 @@ export async function openP2pkhDb(input: {
       kind: "opened",
       oldVersion: P2PKH_DB_VERSION,
       newVersion: P2PKH_DB_VERSION,
-      storeSnapshot: auditV7Stores(handle.db)
+      storeSnapshot: auditV8Stores(handle.db)
     };
     input.logger?.info({
       scope: "p2pkh.db",
@@ -269,36 +289,66 @@ export async function openP2pkhDb(input: {
       } catch {
         // 静默
       }
-      if (openHandle === next) openHandle = undefined;
+      if (openHandles.get(input.publicKeyHex) === next) {
+        openHandles.delete(input.publicKeyHex);
+      }
     },
     getDb: () => handle.db
   };
-  openHandle = next;
+  openHandles.set(input.publicKeyHex, next);
+  // 硬切换 002 收尾：与 db.opening 配对的 db.opened 日志也在 module
+  // 层发出，service 层不再有 service-level cache，也就不必再记。
+  input.logger?.info({
+    scope: "p2pkh.db",
+    event: "db.opened",
+    message: "P2PKH namespace db ready",
+    data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION }
+  });
   return next as P2pkhDbBundle;
 }
 
-/** 关闭并清空缓存的 db handle（仅用于测试与 dispose）。 */
-export function disposeP2pkhDb(): void {
-  closeCachedHandle();
+/**
+ * 关闭并清空缓存的 db handle（仅用于测试与 dispose）。
+ * 不传 publicKeyHex：关闭所有 owner 的 cached handle。
+ * 传入 publicKeyHex：只关掉该 owner 的 handle（其它 owner 不动）。
+ */
+export function disposeP2pkhDb(publicKeyHex?: string): void {
+  if (publicKeyHex === undefined) {
+    closeCachedHandle();
+    return;
+  }
+  closeCachedHandle(publicKeyHex);
 }
 
 /**
- * 内部：关掉模块级 openHandle（如果存在）。把这段逻辑抽到独立函数，
+ * 内部：关掉 module-level cached handle（如果存在）。把这段逻辑抽到独立函数，
  * 避免在 openP2pkhDb 内被 TypeScript 跨 try-catch 的窄化分析吃成 `never`。
+ * 不传 publicKeyHex：关掉所有 owner；传入：只关指定 owner。
  */
-function closeCachedHandle(): void {
-  const current = openHandle;
+function closeCachedHandle(publicKeyHex?: string): void {
+  if (publicKeyHex === undefined) {
+    for (const handle of [...openHandles.values()]) {
+      try {
+        handle.close();
+      } catch {
+        // 静默
+      }
+    }
+    openHandles.clear();
+    return;
+  }
+  const current = openHandles.get(publicKeyHex);
   if (!current) return;
   try {
     current.close();
   } catch {
     // 静默
   }
-  openHandle = undefined;
+  openHandles.delete(publicKeyHex);
 }
 
 /**
- * 硬切换 005：把 `oldVersion > 7` 时的浏览器抛错识别为 VersionError。
+ * 硬切换 005：把 `oldVersion > 8` 时的浏览器抛错识别为 VersionError。
  * 浏览器原生是 `DOMException` 且 `name === "VersionError"`；
  * fake-indexeddb 同样以 DOMException 模拟。
  */
@@ -337,20 +387,18 @@ function deleteDatabaseOrThrow(name: string): Promise<void> {
 }
 
 /**
- * v7 schema（硬切换 005 + 硬切换 003 / 001）：
- *   - 硬切换 005：进入 upgrade 事务即删光当前 DB 内**所有** `p2pkh_` 前缀
- *     的 store（包括任何历史遗留 / 未来被废弃但忘了在硬编码列表里登记
- *     的 store），然后按 v7 完整重建；**不迁移**任何旧数据。
- *   - 硬切换 001：删除 `p2pkh_balances` store；余额不再是持久化实体。
- *   - 删除 `p2pkh_pending_transfers / p2pkh_utxo_reservations` 旧 store。
- *   - 新建 `p2pkh_local_submissions / p2pkh_local_input_claims`。
+ * v8 schema（硬切换 002 收尾）：
+ *   - 进入 upgrade 事务即删光当前 DB 内**所有** `p2pkh_` 前缀的 store
+ *     （包括任何历史遗留 / 未来被废弃但忘了在硬编码列表里登记的 store），
+ *     然后按 v8 schema 完整重建；**不迁移**任何旧数据。
+ *     但 canonical record（`P2pkhKeyResource` / `P2pkhUtxo` 等）
  */
 const P2PKH_STORE_PREFIX = "p2pkh_";
 
-function createV7Stores(db: IDBDatabase) {
-  // v7：进入 onupgradeneeded 时**先**遍历 `db.objectStoreNames`，把所有
-  // `p2pkh_` 前缀的 store 全部删掉，再**无条件**按 v7 schema 重建——这是
-  // 硬切换 005 的硬规则。
+function createV8Stores(db: IDBDatabase) {
+  // v8：进入 onupgradeneeded 时**先**遍历 `db.objectStoreNames`，把所有
+  // `p2pkh_` 前缀的 store 全部删掉，再**无条件**按 v8 schema 重建——这是
+  // 硬切换 002 收尾的硬规则。
   //
   // 为什么不用硬编码的 store 名列表：硬编码列表是脆弱的——只要未来哪个
   // 开发者加了一个新 `p2pkh_xxx` store 又被回退/弃用，硬编码列表里
@@ -366,7 +414,8 @@ function createV7Stores(db: IDBDatabase) {
   }
   if (!db.objectStoreNames.contains("p2pkh_addresses")) {
     const store = db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
-    // publicKeyHex 是诊断字段（key switch 时排错用），不再做唯一约束。
+    // publicKeyHex 是唯一 owner 维度；同 namespace 内不同 publicKeyHex 的
+    // 旧记录在 v8 不存在——upgrade 时整库重建，DB 内不会跨 owner 串行。
     store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
     store.createIndex("network", "network", { unique: false });
     store.createIndex("address", "address", { unique: true });
@@ -506,8 +555,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
         reqAsPromise(t.objectStore("p2pkh_addresses").get(resourceId))
       );
     },
-    async listResourcesByKey(_keyId: string): Promise<P2pkhKeyResource[]> {
-      // key scoped DB 里 keyId 不可靠；列出当前 namespace 全部 resource。
+    /** 当前 namespace 内所有 resource（key scoped DB 已按 owner hex 隔离）。 */
+    async listResourcesByKey(): Promise<P2pkhKeyResource[]> {
       return tx(handle, "p2pkh_addresses", "readonly", (t) =>
         reqAsPromise(t.objectStore("p2pkh_addresses").getAll())
       );
@@ -653,6 +702,89 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
         reqAsPromise(store.objectStore("p2pkh_local_input_claims").delete(id))
       );
     },
+    /**
+     * 硬切换 002 收尾：原子地写「submission + 所有 input claim」——
+     * 单一 readwrite 事务，冲突时整笔 abort，submission 行和 claim
+     * 行都不落库。这是 transfer 并发防重的事务层保险：两个并发
+     * `submit(preview)` 在 `put` 同一对 `(resourceId, txid, vout)`
+     * claim 时，第二个会撞到第一个的 `state: claimed` 行，整个事务
+     * 中止并抛出「input already claimed」——调用方（transfer.submit）
+     * 看到 throw 就不会调 woc.broadcast。
+     *
+     * 关键不变量：
+     *   - 任何 input 被另一笔 submission `claimed` → 整事务 abort
+     *     并抛错（fail-closed）。
+     *   - 同一 submission 的重复调用（idempotent replay）→ 已存在的
+     *     claim 视为可覆盖（state=claimed 且 submissionId 相同），不
+     *     视为冲突。
+     *   - `state=released` / `observed-consumed` 的 claim 视为已释放
+     *     / 已对账完成，新 submission 可重新占（覆盖语义）。
+     *   - submission 行在所有 claim 写完之后再写；任何一个 claim 失败
+     *     都会让 submission 也不落地。
+     */
+    async tryClaimSubmissionWithInputs(input: {
+      submission: P2pkhLocalSubmission;
+      inputs: P2pkhUtxo[];
+    }): Promise<{ claimIds: string[] }> {
+      return tx(
+        handle,
+        ["p2pkh_local_submissions", "p2pkh_local_input_claims"],
+        "readwrite",
+        async (t) => {
+          const subStore = t.objectStore("p2pkh_local_submissions");
+          const claimStore = t.objectStore("p2pkh_local_input_claims");
+          const now = new Date().toISOString();
+          const claimIds: string[] = [];
+          for (const u of input.inputs) {
+            const id = localInputClaimIdFor(input.submission.resourceId, u.txid, u.vout);
+            const existing = await reqAsPromise<P2pkhLocalInputClaim | undefined>(claimStore.get(id));
+            if (existing && existing.state === "claimed" && existing.submissionId !== input.submission.id) {
+              // 冲突：被另一笔 submission 占用。fn 抛错 → tx helper
+              // 调 t.abort() → 整事务回滚；submission / claims 都不写。
+              throw new Error(
+                `P2PKH input already claimed by another submission: ${u.txid}:${u.vout} (submissionId=${existing.submissionId})`
+              );
+            }
+            const claim: P2pkhLocalInputClaim = {
+              id,
+              submissionId: input.submission.id,
+              resourceId: input.submission.resourceId,
+              publicKeyHex: input.submission.publicKeyHex,
+              network: input.submission.network,
+              txid: u.txid,
+              vout: u.vout,
+              state: "claimed",
+              createdAt: now,
+              updatedAt: now
+            };
+            await reqAsPromise(claimStore.put(claim));
+            claimIds.push(id);
+          }
+          // 所有 claim 写完后再写 submission：任一 claim 失败
+          // → 上面 throw → 整事务 abort → submission 也不落地。
+          await reqAsPromise(subStore.put(input.submission));
+          return { claimIds };
+        }
+      );
+    },
+    /**
+     * 释放一组 claim 行。transfer 在 `definitive rejection` 路径上
+     * 调用：广播被节点明确拒绝（duplicate / invalid 等），value 没
+     * 在链上花掉，claim 必须释放，避免后续分配一直排除这些
+     * 「本可重试」的 outpoint。审计信息保留在 `failed` submission
+     * 行里。
+     *
+     * 单事务整批 delete；中途出错会冒泡，调用方按 fail-closed 处理
+     * （这种失败极少发生，DB 层 delete 不通通常意味着存储已坏，
+     * 后续 unrecoverable）。
+     */
+    async releaseLocalInputClaims(claimIds: string[]): Promise<void> {
+      if (claimIds.length === 0) return;
+      await tx(handle, "p2pkh_local_input_claims", "readwrite", async (t) => {
+        const store = t.objectStore("p2pkh_local_input_claims");
+        await Promise.all(claimIds.map((id) => reqAsPromise(store.delete(id))));
+      });
+    },
 
     // ---------- 原子提交 ----------
     async commitBackfillPage(commit: P2pkhBackfillCommit): Promise<void> {
@@ -685,7 +817,6 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
             const merged: P2pkhHistoryItem = {
               id,
               resourceId: commit.resourceId,
-              keyId: currentAddress.keyId,
               publicKeyHex: currentAddress.publicKeyHex,
               network: currentAddress.network,
               address: currentAddress.address,
@@ -760,10 +891,10 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
               const id = newHistoryId(commit.resourceId, h.txid);
               const prev = await reqAsPromise<P2pkhHistoryItem | undefined>(histStore.get(id));
               if (prev?.status === "confirmed" && h.status !== "confirmed") continue;
+              // 硬切换 002 收尾：history 仅持有 publicKeyHex。
               const merged: P2pkhHistoryItem = {
                 id,
                 resourceId: commit.resourceId,
-                keyId: effectiveResource.keyId,
                 publicKeyHex: effectiveResource.publicKeyHex,
                 network: effectiveResource.network,
                 address: effectiveResource.address,
@@ -845,10 +976,10 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
 
     // ---------- 清理 ----------
     /** 清理当前 namespace 内所有数据。设计缘由：删除 key 时 namespace DB 整体删除，
-     *  本方法用于手动重置或迁移失败回滚。硬切换 001：余额不再落库，
-     *  clearAll 不再调用 clearBalance。 */
+     * 本方法用于手动重置或迁移失败回滚。硬切换 001：余额不再落库，
+     * clearAll 不再调用 clearBalance。 */
     async clearAll(): Promise<void> {
-      const resources = await this.listResourcesByKey("");
+      const resources = await this.listResourcesByKey();
       for (const r of resources) {
         await this.removeResource(r.resourceId);
         await this.clearUtxosForResource(r.resourceId);
@@ -865,142 +996,11 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
 
 export type P2pkhDbHandle = ReturnType<typeof createP2pkhDb>;
 
-/** 工具：从已知的 keyId/network 构造 resourceId（保留供 transfer service 等调用）。 */
-export function resourceIdFor(keyId: string, network: BsvNetwork): string {
-  return makeResourceId(keyId, network);
+export function resourceIdFor(network: BsvNetwork): string {
+  return makeResourceId(network);
 }
 
 /** 工具：本地输入占用 id。 */
 export function localInputClaimIdFor(resourceId: string, txid: string, vout: number): string {
   return newLocalInputClaimId(resourceId, txid, vout);
-}
-
-/**
- * 硬切换 003：legacy migration 仅作为诊断工具保留，**不再被任何运行时
- * 路径调用**——不在 unlock、rehydrate、手工同步、key.deleted、indexedDB
- * 升级钩子里触发。
- *
- * 历史设计：将全局 `p2pkh` v3 DB 的记录按 keyId 找对应 publicKeyHex，
- * 写入对应 namespace DB；迁移成功后删除旧 DB；失败时只丢弃旧缓存。
- *
- * 现在 P2PKH 的恢复路径是 `rehydrate + recent-sync + history-backfill`：
- * 旧 DB 即使还在 indexedDB 里也只是死缓存；不需要为了它再造一条与
- * active key 模型平行的迁移链，否则只会增加系统复杂度。
- *
- * 调用方必须明确知道自己在做什么；任何"启动时自动迁移"或"unlock 时
- * 顺带迁移"的接法都是硬切换 003 禁止的。
- */
-export interface LegacyMigrationSummary {
-  migrated: number;
-  failed: number;
-  abandoned: boolean;
-}
-
-export async function migrateLegacyP2pkhDb(input: {
-  keyspace: KeyspaceService;
-  /** 把旧记录 keyId 映射到当前 active 的 publicKeyHex；找不到时跳过。 */
-  resolvePublicKeyHash: (oldKeyId: string) => Promise<string | undefined>;
-  onProgress?: (summary: LegacyMigrationSummary) => void;
-}): Promise<LegacyMigrationSummary> {
-  if (typeof indexedDB === "undefined") {
-    return { migrated: 0, failed: 0, abandoned: false };
-  }
-  // 1) 读取旧 DB。
-  const oldDb = await new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(LEGACY_DB_NAME, LEGACY_DB_VERSION);
-    req.onupgradeneeded = () => {
-      // 旧 DB 不应该在我们手里被升级；保留 onupgradeneeded 占位但不创建新 store。
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  }).catch(() => undefined);
-  if (!oldDb) return { migrated: 0, failed: 0, abandoned: false };
-  try {
-    const stores = [...oldDb.objectStoreNames];
-    if (!stores.includes("p2pkh_addresses")) {
-      return { migrated: 0, failed: 0, abandoned: false };
-    }
-    const oldResources = await readAllFromLegacy<P2pkhKeyResource>(oldDb, "p2pkh_addresses");
-    const oldUtxos = await readAllFromLegacy<P2pkhUtxo>(oldDb, "p2pkh_utxos");
-    const oldHistory = await readAllFromLegacy<P2pkhHistoryItem>(oldDb, "p2pkh_history");
-    // 硬切换 001：不再迁移旧 balance 行——余额改为 service 现算，
-    // 即使旧 DB 仍有 p2pkh_balances 行也只能让它们随旧 DB 删除一起丢弃。
-    const summary: LegacyMigrationSummary = { migrated: 0, failed: 0, abandoned: false };
-    // 按 keyId 分组写到对应 namespace。
-    const byKey = new Map<string, { resources: P2pkhKeyResource[]; utxos: P2pkhUtxo[]; history: P2pkhHistoryItem[] }>();
-    function bucket(keyId: string) {
-      let b = byKey.get(keyId);
-      if (!b) {
-        b = { resources: [], utxos: [], history: [] };
-        byKey.set(keyId, b);
-      }
-      return b;
-    }
-    for (const r of oldResources) bucket(r.keyId).resources.push(r);
-    for (const u of oldUtxos) bucket(u.keyId).utxos.push(u);
-    for (const h of oldHistory) bucket(h.keyId).history.push(h);
-    for (const [oldKeyId, group] of byKey) {
-      const publicKeyHex = await input.resolvePublicKeyHash(oldKeyId);
-      if (!publicKeyHex) {
-        summary.failed += group.resources.length;
-        continue;
-      }
-      try {
-        const handle = await input.keyspace.openKeyStorage({
-          publicKeyHex,
-          pluginId: "p2pkh",
-          storageId: P2PKH_STORAGE_ID,
-          version: P2PKH_DB_VERSION,
-          upgrade: (db) => createV7Stores(db)
-        });
-        const target = createP2pkhDb({
-          publicKeyHex,
-          close: () => handle.close(),
-          getDb: () => handle.db
-        });
-        for (const r of group.resources) {
-          await target.putAddress({ ...r, publicKeyHex });
-        }
-        for (const u of group.utxos) {
-          await target.putUtxos([{ ...u, publicKeyHex }]);
-        }
-        for (const h of group.history) {
-          await target.putHistory([{ ...h, publicKeyHex }]);
-        }
-        handle.close();
-        summary.migrated += group.resources.length;
-      } catch (err) {
-        summary.failed += group.resources.length;
-        summary.abandoned = true;
-        console.error("P2PKH legacy migration failed for key", oldKeyId, err);
-      }
-    }
-    input.onProgress?.(summary);
-    // 2) 迁移成功后删除旧 DB。
-    await new Promise<void>((resolve, reject) => {
-      const req = indexedDB.deleteDatabase(LEGACY_DB_NAME);
-      req.onsuccess = () => resolve();
-      req.onerror = () => reject(req.error);
-      req.onblocked = () => reject(new Error("legacy p2pkh DB delete blocked"));
-    });
-    return summary;
-  } catch (err) {
-    console.error("P2PKH legacy migration failed", err);
-    return { migrated: 0, failed: 0, abandoned: true };
-  } finally {
-    try {
-      oldDb.close();
-    } catch {
-      // 静默
-    }
-  }
-}
-
-function readAllFromLegacy<T>(db: IDBDatabase, storeName: string): Promise<T[]> {
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(storeName, "readonly");
-    const req = tx.objectStore(storeName).getAll();
-    req.onsuccess = () => resolve(req.result as T[]);
-    req.onerror = () => reject(req.error);
-  });
 }

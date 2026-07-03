@@ -2,9 +2,9 @@
 // 硬切换 005 + 硬切换 007 后单测：
 //   - 通过 fake keyspace 打开 key-scoped namespace db。
 //   - 硬切换 005：version 不匹配走 rebuild 语义
-//     - v0 -> v7 首次创建，v7 stores 全部建立；
-//     - v6 -> v7 进入 onupgradeneeded，**不迁移**旧数据，按 v7 重建；
-//     - v8 -> v7 触发 VersionError，close -> deleteDatabase -> reopen 收敛到 v7。
+//     - v0 -> v8 首次创建，v7 stores 全部建立；
+//     - v7 -> v8 进入 onupgradeneeded，**不迁移**旧数据，按 v7 重建；
+//     - v9 -> v8 触发 VersionError，close -> deleteDatabase -> reopen 收敛到 v7。
 //   - commitBackfillPage / commitRecentSnapshot 校验不变。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -18,7 +18,6 @@ const DB_NAME = `keymaster.key.${ACTIVE_PUBLIC_KEY_HEX}.plugin.p2pkh.state`;
 function makeResource(generation = 0): P2pkhKeyResource {
   return {
     resourceId: "key1:main",
-    keyId: "key1",
     publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     label: "test",
     address: "addr-main",
@@ -35,12 +34,11 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
     active: () => ({ activePublicKeyHex: publicKeyHex }),
     setActive: async () => undefined,
     requireActiveKey: () => ({
-      keyId: "key1",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
 
       label: "test",
       capabilities: ["p2pkh"],
-      createdAt: "2024-01-01T00:00:00.000Z",
-      identityStatus: "ready"
+      createdAt: "2024-01-01T00:00:00.000Z"
     }),
     onActiveChange: () => () => undefined,
     openKeyStorage: async (input) => {
@@ -67,8 +65,6 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
-    // 硬切换 008 收尾：fake 上是 no-op。
-    deleteKeyById: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined,
     // 硬切换 008：attachBackgroundService 在测试 fake 上是 no-op。
@@ -78,7 +74,7 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
 
 /**
  * 硬切换 005：使用真实 IDBVersionChangeEvent 语义的 keyspace。
- * 默认 fake 总是把 oldVersion 传成 0，无法覆盖 v6 -> v7 / v8 -> v7 路径；
+ * 默认 fake 总是把 oldVersion 传成 0，无法覆盖 v7 -> v8 / v9 -> v8 路径；
  * 本 fake 透传浏览器自身的 oldVersion / VersionError，验证 rebuild 分支。
  */
 function makeRealKeyspace(publicKeyHex: string): KeyspaceService {
@@ -183,7 +179,7 @@ afterEach(async () => {
   await resetDb();
 });
 
-describe("p2pkhDb v7 stores", () => {
+describe("p2pkhDb v8 stores", () => {
   it("creates all required stores on first open and does not have p2pkh_balances", async () => {
     const db = await openDb();
     await db.listAddresses();
@@ -209,7 +205,7 @@ describe("p2pkhDb v7 stores", () => {
     // 硬切换 001：余额不再落库。
     expect(raw.objectStoreNames.contains("p2pkh_balances")).toBe(false);
     // 硬切换 005：DB 版本必须固定为 7。
-    expect(raw.version).toBe(7);
+    expect(raw.version).toBe(8);
     raw.close();
   });
 });
@@ -228,7 +224,7 @@ describe("p2pkhDb namespaceDbName (硬切换 005 name source)", () => {
 });
 
 describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
-  it("v6 -> v7 enters onupgradeneeded, drops old p2pkh stores, rebuilds v7 (no migration)", async () => {
+  it("v7 -> v8 enters onupgradeneeded, drops old p2pkh stores, rebuilds v7 (no migration)", async () => {
     // 前置：DB 已存在 v6（v6 schema stores），并保留一条旧记录——
     // 验证硬切换 005 不会把这条记录搬到 v7。
     const seeded = await preOpenAtVersion(6, [
@@ -244,7 +240,6 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       const t = seeded.transaction("p2pkh_addresses", "readwrite");
       t.objectStore("p2pkh_addresses").put({
         resourceId: "stale:row",
-        keyId: "stale",
         publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
         label: "stale",
         address: "stale-addr",
@@ -267,7 +262,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
-    expect(raw.version).toBe(7);
+    expect(raw.version).toBe(8);
     for (const name of [
       "p2pkh_addresses",
       "p2pkh_utxos",
@@ -286,7 +281,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     expect(rows.find((r) => r.resourceId === "stale:row")).toBeUndefined();
   });
 
-  it("v6 -> v7 cleans up stray p2pkh_orphan stores that are not in the v6 known list", async () => {
+  it("v7 -> v8 cleans up stray p2pkh_orphan stores that are not in the v6 known list", async () => {
     // 硬切换 005 收尾验证：不能用"硬编码 store 名列表"实现 delete。
     // 这里故意在 v6 库内塞一个 `p2pkh_orphan`——它**不在**任何已知
     // schema 列表里，模拟"未来某次迭代加了一个 p2pkh_xxx store，后来
@@ -307,7 +302,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
-    expect(raw.version).toBe(7);
+    expect(raw.version).toBe(8);
     // 任何 p2pkh_ 前缀的 store 都不能残留——包括 v6 已知表之外的 stray。
     for (const stray of [...raw.objectStoreNames]) {
       expect(stray.startsWith("p2pkh_"), `unexpected non-p2pkh store: ${stray}`).toBe(true);
@@ -320,10 +315,10 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     createP2pkhDb(nsHandle).listAddresses();
   });
 
-  it("v8 -> v7 triggers VersionError; close->deleteDatabase->reopen converges to v7", async () => {
-    // 前置：DB 已存在 v8（mock 一个比目标 v7 高的 version）。
-    // v8 stores 故意和 v7 不一样，验证整库删除而不是逐表迁移。
-    const seeded = await preOpenAtVersion(8, [
+  it("v9 -> v8 triggers VersionError; close->deleteDatabase->reopen converges to v8", async () => {
+    // 前置：DB 已存在 v9（mock 一个比目标 v8 高的 version）。
+    // v9 stores 故意和 v8 不一样，验证整库删除而不是逐表迁移。
+    const seeded = await preOpenAtVersion(9, [
       "p2pkh_addresses",
       "p2pkh_future_legacy_table",
       "p2pkh_orphan"
@@ -338,8 +333,8 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
-    expect(raw.version).toBe(7);
-    // v8 残留 stores 不应被保留（整库删除后重建）。
+    expect(raw.version).toBe(8);
+    // v9 残留 stores 不应被保留（整库删除后重建）。
     expect(raw.objectStoreNames.contains("p2pkh_future_legacy_table")).toBe(false);
     expect(raw.objectStoreNames.contains("p2pkh_orphan")).toBe(false);
     for (const name of [
@@ -392,7 +387,7 @@ describe("p2pkhDb commitBackfillPage", () => {
     expect(history1).toHaveLength(1);
     expect(history1[0]!.id).toBe("key1:main:tx-a");
     expect(history1[0]!.network).toBe("main");
-    expect(history1[0]!.keyId).toBe("key1");
+    expect(history1[0]!.publicKeyHex).toBe(ACTIVE_PUBLIC_KEY_HEX);
     const state1 = await db.getBackfillState(r.resourceId);
     expect(state1?.revision).toBe(1);
     expect(state1?.nextPageToken).toBe("tok-1");
@@ -465,7 +460,6 @@ describe("p2pkhDb commitRecentSnapshot", () => {
         {
           id: `${r.resourceId}:t1:0`,
           resourceId: r.resourceId,
-          keyId: r.keyId,
           publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
@@ -507,7 +501,6 @@ describe("p2pkhDb commitRecentSnapshot", () => {
         {
           id: `${r.resourceId}:t-conf`,
           resourceId: r.resourceId,
-          keyId: r.keyId,
           publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
@@ -551,7 +544,6 @@ describe("p2pkhDb commitRecentSnapshot", () => {
         {
           id: `${r.resourceId}:t1:0`,
           resourceId: r.resourceId,
-          keyId: r.keyId,
           publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
@@ -566,7 +558,6 @@ describe("p2pkhDb commitRecentSnapshot", () => {
         {
           id: `${r.resourceId}:t2:0`,
           resourceId: r.resourceId,
-          keyId: r.keyId,
           publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,
@@ -588,7 +579,6 @@ describe("p2pkhDb commitRecentSnapshot", () => {
         {
           id: `${r.resourceId}:t1:0`,
           resourceId: r.resourceId,
-          keyId: r.keyId,
           publicKeyHex: r.publicKeyHex,
           network: "main",
           address: r.address,

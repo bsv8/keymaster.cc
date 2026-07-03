@@ -43,7 +43,7 @@ export interface VaultKeyDeleteModalProps {
   onExportBackup?(): void;
   /**
    * 用户在最终 step 输入的锁屏密码会原样回传；调用方再把它喂给
-   * `keyspace.deleteKeyById({ keyId, password })`。modal **不**校验密码
+   * `keyspace.deleteKey({ publicKeyHex, password })`。modal **不**校验密码
    * 真伪——校验在 `vault.verifyPassword` 中完成。
    */
   onConfirmDelete(password: string): Promise<void> | void;

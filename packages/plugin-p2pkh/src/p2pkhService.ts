@@ -1,8 +1,14 @@
 // packages/plugin-p2pkh/src/p2pkhService.ts
-// P2PKH 服务实现（硬切换 007 + 硬切换 005 收尾）。
+// P2PKH 服务实现（硬切换 007 + 硬切换 005 + 硬切换 002 收尾）。
 // 关键设计：
 //   - 默认方法只读当前 active key namespace；不再支持 all-mode 聚合。
-//   - 切换 active key 时由本服务重建 p2pkh db handle 并通知同步协调器。
+//   - transfer / 跨 owner 读路径走 `ensureDbForOwner(publicKeyHex)`：
+//     transfer 严格按 session owner 取 DB，listUtxos / listHistory 在
+//     filter 传 `ownerPublicKeyHex` 时也按 owner 取 DB。**owner 由调
+//     用方提供**，service 层不主动从 active key 推导——在硬门禁下
+//     `session.owner === active` 由 protocol / caller 保证。
+//   - DB handle 缓存由 p2pkhDb module 的 per-owner map 负责；
+//     service 层不持有单一 handle / currentPublicKeyHash。
 //   - 同步入口：依赖 WocService + BackgroundService；不直接 fetch WOC。
 //   - 单一 SyncCoordinator 协调 recent-sync 与 history-backfill 写库。
 //   - recent-sync 由 BackgroundService 调度；history-backfill 单独注册。
@@ -108,13 +114,16 @@ export interface P2pkhServiceDeps {
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   const coordinator = createP2pkhSyncCoordinator({ getDb: () => ensureDb() });
-  let p2pkhDbHandle: P2pkhDbHandle | null = null;
-  let currentPublicKeyHash: string | undefined;
-  let activeKeyId: string | undefined;
+  // 硬切换 002 收尾 + 多 owner 支持：p2pkhDb module 自己用 per-owner
+  // map 做缓存（openP2pkhDb / disposeP2pkhDb），service 层不再持有
+  // 单一 handle / 单一 currentPublicKeyHash。所有 DB 入口走
+  // `ensureDbForOwner(publicKeyHex)`，由 p2pkhDb 内部按 hex 复用。
+  // 硬切换 002 收尾：active key 的"内部 id"已删除；signing 走
+  // `vault.withPrivateKey(publicKeyHex, ...)` 唯一入口。`activeKeyId`
   // 硬切换 008 收尾 + 硬切换 003 收尾：activeIdentity 是 ReadyKeyIdentity，
-  // publicKeyHex / publicKeyHex 必填。rebind 时通过 requireReadyKey 断言；
-  // 写入 P2pkhKeyResource 时不需要再 `!`。短公钥不再作为字段持有，UI
-  // 需要展示时由 `formatShortPublicKey(publicKeyHex)` 现算。
+  // publicKeyHex 必填。rebind 时通过 requireReadyKey 断言；写入
+  // P2pkhKeyResource 时不需要再 `!`。短公钥不再作为字段持有，UI 需要
+  // 展示时由 `formatShortPublicKey(publicKeyHex)` 现算。
   let activeIdentity: ReadyKeyIdentity | undefined;
   // 硬切换 001：进程内 settings 缓存。所有 read 路径在做 testnet 过滤
   // 时都通过 `getCurrentSettings()` 拿值，确保与最近一次写入一致。
@@ -152,7 +161,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     vault: deps.vault,
     woc: deps.woc,
     messageBus: deps.messageBus,
-    getDb: () => ensureDb(),
+    /**
+     * 硬切换 002 收尾 + 多 owner 支持：transfer 走 session owner 的
+     * namespace DB。在硬门禁（`keyspace.openKeyStorage` 要求
+     * `active === input.publicKeyHex`）下，session owner 在调用
+     * transfer 时必须等于 active key——上层 protocol 必须先校验这
+     * 个不变量，否则 `ensureDbForOwner` 会被硬门禁挡掉，transfer
+     * 安全失败。
+     */
+    getDb: (publicKeyHex) => ensureDbForOwner(publicKeyHex),
     logger: deps.logger,
     getActiveKey: () => {
       const state = getActiveKeyState();
@@ -168,27 +185,30 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return activeIdentity;
     },
     /**
-     * 硬切换 002：按 owner public key hex 解析 ReadyKeyIdentity。
+     * 硬切换 002 收尾：按 owner public key hex 解析 ReadyKeyIdentity。
      * plugin-protocol 调用 transfer.prepare / transfer.submit 时必传
-     * `ownerPublicKeyHex`；transfer 内部用本函数解析出 keyId / publicKeyHex
-     * 走签名 + 选币 + resourceId 解析。不依赖 active key 状态——owner
-     * 变了 / 切了 active key 都不影响 transfer 行为。
+     * `ownerPublicKeyHex`；transfer 内部用本函数解析出 publicKeyHex
+     * 走签名 + 选币 + resourceId 解析。
+     *
+     * 设计缘由：transfer 的 owner 由调用方（protocol）提供，不在
+     * service 层从 active key 取——这是修复"session owner 与 active
+     * key DB 不一致"语义的关键。硬门禁（`keyspace.openKeyStorage`）
+     * 会保证 `session.ownerPublicKeyHex === active.publicKeyHex`
+     * 时才能开库；上层 protocol 在调用 transfer 前必须先做这个校验。
      */
     getKeyForOwner: async (ownerPublicKeyHex: string) => {
       const key = await deps.keyspace.getKey(ownerPublicKeyHex);
       if (!key) {
         throw new Error(`P2PKH owner key not found: ${ownerPublicKeyHex}`);
       }
-      if (!key.keyId || !key.publicKeyHex) {
+      if (!key.publicKeyHex) {
         throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
       }
       return {
-        keyId: key.keyId,
         publicKeyHex: key.publicKeyHex,
         label: key.label,
         capabilities: key.capabilities,
-        createdAt: key.createdAt,
-        identityStatus: key.identityStatus ?? "ready"
+        createdAt: key.createdAt
       } as ReadyKeyIdentity;
     }
   });
@@ -327,115 +347,94 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       throw new Error("Active key is required");
     }
     if (!activeIdentity || activeIdentity.publicKeyHex !== state.activePublicKeyHex) {
-      // 占位 identity：转账流程会在 vault.withPrivateKey 时拿到真实 keyId。
-      // 这里不抛错；调用方在签名时必须通过 vault 拿到真实 key。
+      // 硬切换 002 收尾：active identity 不再持有 vault 内部 surrogate id；
+      // 签名路径由 `vault.withPrivateKey(publicKeyHex, fn)` 自行解析。
       throw new Error("Active key is not ready");
     }
     return activeIdentity;
   }
 
   /**
-   * 重新打开当前 active key 的 namespace db。
-   * 设计缘由：active key 切换 / Vault 锁定后必须重建 handle；缓存的旧 handle
-   * 可能已关闭或属于上一个 key 的 namespace。
+   * 打开 owner publicKeyHex 的 P2PKH namespace DB。多次打开由
+   * p2pkhDb module 内部 per-owner map 缓存负责——service 层不再
+   * 持有单一 handle / currentPublicKeyHash。
+   *
+   * 设计缘由：硬切换 002 收尾 + 多 owner 支持——
+   *   - transfer 走 session owner；session owner 在硬门禁下必须
+   *     等于 active key，否则 `keyspace.openKeyStorage` 会 fail-closed。
+   *   - recent-sync / backfill 走 active key namespace。
+   *   - 两种调用方都通过本函数传 owner，p2pkhDb 内部按 hex 复用。
    *
    * 硬切换 003：缺 DB / 缺表 / 版本旧都通过 `keyspace.openKeyStorage({ version, upgrade })`
    * 自动修复到 P2PKH_DB_VERSION；这是 P2PKH 存储自愈的唯一入口。底
    * 层 `openP2pkhDb` 内部不再调用 legacy migration——本系统对旧全局
    * `p2pkh` DB 不做任何迁移，链上真值才是 P2PKH 的恢复路径。
+   *
+   * 日志：db.opening / db.opened / db.reused 全部由 p2pkhDb module
+   * 内部按 hex 缓存命中状态发出；本函数不再额外打日志，避免 cache
+   * hit 时误报 db.opening。
    */
-  async function ensureDb(): Promise<P2pkhDbHandle> {
-    const state = getActiveKeyState();
-    if (!state.activePublicKeyHex) {
-      throw new Error("Key storage is not ready");
-    }
-    if (p2pkhDbHandle && currentPublicKeyHash === state.activePublicKeyHex) {
-      // 硬切换 003 收尾：缓存命中也必须留痕，否则日志上看不出"为什么
-      // 这次没有任何 db.opening/db.opened"。
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "db.reused",
-        message: "P2PKH reusing cached namespace db handle",
-        data: {
-          publicKeyHex: state.activePublicKeyHex,
-          targetVersion: P2PKH_DB_VERSION
-        }
-      });
-      return p2pkhDbHandle;
-    }
-    if (p2pkhDbHandle) {
-      disposeP2pkhDb();
-      p2pkhDbHandle = null;
-    }
-    // 硬切换 003：先记录"重新打开 namespace DB"的意图；后续由
-    // `openP2pkhDb` 内部的 upgrade 回调补出 schema 是 created /
-    // upgraded / opened 的精确分类。
-    deps.logger?.info({
-      scope: "p2pkh.service",
-      event: "db.opening",
-      message: "P2PKH opening namespace db for active key",
-      data: {
-        publicKeyHex: state.activePublicKeyHex,
-        targetVersion: P2PKH_DB_VERSION
-      }
-    });
+  async function ensureDbForOwner(publicKeyHex: string): Promise<P2pkhDbHandle> {
     try {
       const bundle: P2pkhDbBundle = await openP2pkhDb({
         keyspace: deps.keyspace,
-        publicKeyHex: state.activePublicKeyHex,
+        publicKeyHex,
         logger: deps.logger
       });
-      p2pkhDbHandle = createP2pkhDb(bundle);
-      currentPublicKeyHash = state.activePublicKeyHex;
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "db.opened",
-        message: "P2PKH namespace db ready",
-        data: {
-          publicKeyHex: state.activePublicKeyHex,
-          targetVersion: P2PKH_DB_VERSION
-        }
-      });
-      return p2pkhDbHandle;
+      return createP2pkhDb(bundle);
     } catch (err) {
       // 硬切换 003：浏览器层面 `indexedDB.open` 失败是真实错误，必须可观测。
       deps.logger?.error({
         scope: "p2pkh.service",
         event: "db.openFailed",
         message: "P2PKH failed to open namespace db",
-        data: { publicKeyHex: state.activePublicKeyHex },
+        data: { publicKeyHex },
         error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
       });
       throw err;
     }
   }
 
-  /** 切换 active key 后的 hook：重建 identity 缓存与 db handle。
+  /**
+   * Active key 的 namespace DB 入口。语义同
+   * `ensureDbForOwner(active)`，但额外校验 active 必须就绪。
+   * recent-sync / backfill / 业务读路径走这里；transfer 走
+   * `ensureDbForOwner(sessionOwner)`。
+   */
+  async function ensureDb(): Promise<P2pkhDbHandle> {
+    const state = getActiveKeyState();
+    if (!state.activePublicKeyHex) {
+      throw new Error("Key storage is not ready");
+    }
+    return ensureDbForOwner(state.activePublicKeyHex);
+  }
+
+  /** 切换 active key 后的 hook：重建 identity 缓存。
    * 设计缘由：硬切换 008 收尾 + 硬切换 003 收尾——通过 requireReadyKey
-   * 把 KeyIdentity 收窄成 ReadyKeyIdentity，publicKeyHex / publicKeyHex
-   * 必填；写入 P2pkhKeyResource 等位置时不再需要 `!`。短公钥不再是
-   * contract 字段，UI 需要时由 `formatShortPublicKey(publicKeyHex)` 现算。
+   * 把 KeyIdentity 收窄成 ReadyKeyIdentity，publicKeyHex 必填；写
+   * 入 P2pkhKeyResource 等位置时不再需要 `!`。短公钥不再是 contract
+   * 字段，UI 需要时由 `formatShortPublicKey(publicKeyHex)` 现算。
+   *
+   * 硬切换 002 收尾 + 多 owner 支持：DB handle 不再在 service 层缓
+   * 存——p2pkhDb module 的 per-owner map 负责 reuse。rebind 仅刷
+   * activeIdentity，不预开 DB（DB 在下次 `ensureDb / ensureDbForOwner`
+   * 时按需打开）。
    */
   async function rebindActiveKey() {
     const state = getActiveKeyState();
     if (!state.activePublicKeyHex) {
-      activeKeyId = undefined;
       activeIdentity = undefined;
-      p2pkhDbHandle = null;
-      currentPublicKeyHash = undefined;
       return;
     }
     const identity = await deps.keyspace.getKey(state.activePublicKeyHex);
     if (!identity) {
       throw new Error("Active key identity not found");
     }
-    // requireReadyKey 会断言 ready 状态 + 必填字段；failed / uninitialized
-    // key 抛 "Active key is not ready"。调用方（keyspace.listActiveCandidates
-    // 选出来的就是 ready）一般不会触发，但保留断言作为 fail-closed 保险。
+    // requireReadyKey 会断言 publicKeyHex 必填；硬切换 002 收尾后已无
+    // `identityStatus = failed | uninitialized` 稳态，调用方
+    // (keyspace.listActiveCandidates 选出来的就是 ready) 一般不会触发，
+    // 但保留断言作为 fail-closed 保险。
     activeIdentity = requireReadyKey(identity);
-    activeKeyId = activeIdentity.keyId;
-    // 重建 db handle。
-    await ensureDb();
   }
 
   // 监听 keyspace 变化。
@@ -495,16 +494,18 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     } catch (err) {
       console.error("P2PKH key.deleted handler failed", err);
     }
-    if (currentPublicKeyHash === payload.publicKeyHex) {
-      disposeP2pkhDb();
-      p2pkhDbHandle = null;
-      currentPublicKeyHash = undefined;
+    // 硬切换 002 收尾 + 多 owner 支持：只关掉被删 key 的 cached handle，
+    // 其它 owner 的 namespace DB 不动（不影响它们的资源 / UTXO）。
+    try {
+      disposeP2pkhDb(payload.publicKeyHex);
+    } catch {
+      // swallow
     }
   });
 
   async function getOrCreateAddress(network: "main" | "test"): Promise<P2pkhKeyResource | null> {
     const db = await ensureDb();
-    const resourceId = makeResourceId("", network);
+    const resourceId = makeResourceId(network);
     const existing = await db.getResource(resourceId);
     if (existing) {
       deps.logger?.info({
@@ -514,7 +515,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         data: {
           resourceId,
           network,
-          keyId: existing.keyId,
           publicKeyHex: existing.publicKeyHex,
           address: existing.address,
           created: false
@@ -523,11 +523,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return existing;
     }
     const key = requireActiveKeyIdentity();
-    return await deps.vault.withPrivateKey(key.keyId, async (material) => {
+    return await deps.vault.withPrivateKey(key.publicKeyHex, async (material) => {
       const { address, publicKeyHex } = deriveP2pkhAddress(material.hex, network);
       const resource: P2pkhKeyResource = {
         resourceId,
-        keyId: key.keyId,
         publicKeyHex: key.publicKeyHex,
         label: key.label,
         address,
@@ -538,7 +537,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       };
       await db.putAddress(resource);
       deps.messageBus.publish(P2PKH_MSG.ADDRESS_DERIVED, {
-        keyId: key.keyId,
         publicKeyHex: key.publicKeyHex,
         network,
         address,
@@ -551,7 +549,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         data: {
           resourceId,
           network,
-          keyId: key.keyId,
           publicKeyHex: key.publicKeyHex,
           address,
           created: true
@@ -659,8 +656,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    *
    * 本方法只做本地缓存 / 句柄释放：
    *   - status 收回 idle；
-   *   - 释放 p2pkh DB handle；
-   *   - 清空 currentPublicKeyHash / activeIdentity / activeKeyId。
+   *   - 释放所有 owner 的 p2pkh DB handle（lock 后没有任何 owner 可
+   *     访问，硬门禁会一律 fail-closed，所以可以全关）；
+   *   - 清空 activeIdentity。
    *
    * 故意不调 backgroundService.cancel —— 该调用在旧实现里是 fire-and-forget
    * 保险，但它的正确性依赖于"keyspace 没在切换 active 前先 cancel"，
@@ -670,10 +668,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   function onVaultLocked() {
     setStatus("idle");
     disposeP2pkhDb();
-    p2pkhDbHandle = null;
-    currentPublicKeyHash = undefined;
     activeIdentity = undefined;
-    activeKeyId = undefined;
   }
 
   async function onVaultUnlocked() {
@@ -734,7 +729,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       message: "P2PKH rehydrate started for active key",
       data: {
         publicKeyHex: state.activePublicKeyHex,
-        keyId: activeIdentity.keyId,
         includeTestnet,
         targetNetworks
       }
@@ -744,7 +738,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     let rehydrateError: unknown;
     try {
       const db = await ensureDb();
-      const mainId = makeResourceId("", "main");
+      const mainId = makeResourceId("main");
       const mainExisted = Boolean(await db.getResource(mainId));
       await getOrCreateAddress("main");
       // getOrCreateAddress 在已存在时只 putAddress 不会变 ——
@@ -753,7 +747,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       if (mainExisted) existingResources.push(mainId);
       else createdResources.push(mainId);
       if (includeTestnet) {
-        const testId = makeResourceId("", "test");
+        const testId = makeResourceId("test");
         const testExisted = Boolean(await db.getResource(testId));
         await getOrCreateAddress("test");
         if (testExisted) existingResources.push(testId);
@@ -765,7 +759,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     if (rehydrateError) {
       const msg = rehydrateError instanceof Error ? rehydrateError.message : String(rehydrateError);
       deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
-        keyId: activeIdentity.keyId,
         error: msg
       });
       deps.logger?.warn({
@@ -774,7 +767,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         message: "P2PKH rehydrate failed",
         data: {
           publicKeyHex: state.activePublicKeyHex,
-          keyId: activeIdentity.keyId,
           includeTestnet
         },
         error: { name: rehydrateError instanceof Error ? rehydrateError.name : "Error", message: msg }
@@ -787,7 +779,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       message: "P2PKH rehydrate completed",
       data: {
         publicKeyHex: state.activePublicKeyHex,
-        keyId: activeIdentity.keyId,
         includeTestnet,
         existingResources,
         createdResources
@@ -951,20 +942,24 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return filtered.filter((r) => r.network === network);
     },
     async listUtxos(filter) {
-      const db = await ensureDb();
+      // 硬切换 002 收尾：owner 感知读路径。filter 传 `ownerPublicKeyHex`
+      // 时严格按该 owner 走 namespace DB（protocol feepool 等跨 owner
+      // 调用必须传）；未传时仅作 UI 本地读路径兜底（= 当前 active key
+      // namespace），**不**作为对外契约——见 P2pkhUtxoFilter 注释。
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
       const all = await db.listUtxos();
       const settings = getCurrentSettings();
       const withoutTestnet = settings.includeTestnet
         ? all
         : all.filter((u) => u.network === "main");
-      // 硬切换 002：plugin-protocol 调用 listUtxos 时**必须**传
-      // `ownerPublicKeyHex`（或 `keyId`），filter 内自动按 owner 过滤。
-      // 老 widget / overview 不传 owner 时按"全部"兜底（但调用方
-      // 自己按需过滤）。
       return filterUtxos(withoutTestnet, filter);
     },
     async listHistory(filter) {
-      const db = await ensureDb();
+      // 同 listUtxos：owner 感知读路径。filter 传 `ownerPublicKeyHex` 时
+      // 严格按该 owner 走 namespace DB；未传时仅作 UI 本地读路径兜底。
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
       const all = await db.listHistory();
       const settings = getCurrentSettings();
       const withoutTestnet = settings.includeTestnet
@@ -1026,8 +1021,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         ? all
         : all.filter((u) => u.network === "main");
       const filtered = filterUtxos(withoutTestnet, {
-        assetId: request.assetId,
-        keyId: request.keyId
+        assetId: request.assetId
       });
       const reservations = await db.listLocalInputClaims();
       const reserved = new Set(
@@ -1040,16 +1034,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     },
 
     prepareTransfer: (input) => {
-      // 硬切换 002：`ownerPublicKeyHex` 是**强制**输入字段（plugin-protocol
-      // 调用时永远传 session 绑定 owner）。老 widget / overview 路径
-      // 仍允许不传 `ownerPublicKeyHex` 但必须传 `keyId` 走 active-key
-      // 兜底。两条路径**都**拒绝无 owner 也无 keyId 的"裸"调用——避免
-      // 静默 fallback 到全局 active key。
-      if (!input.ownerPublicKeyHex && !input.keyId) {
+      // 硬切换 002 收尾：`ownerPublicKeyHex` 是**强制**输入字段
+      // (plugin-protocol 调用时永远传 session 绑定 owner)。系统不再
+      if (!input.ownerPublicKeyHex) {
         return Promise.reject(
-          new Error(
-            "P2PKH prepareTransfer requires ownerPublicKeyHex (preferred) or keyId (legacy)"
-          )
+          new Error("P2PKH prepareTransfer requires ownerPublicKeyHex")
         );
       }
       // 硬切换 001：includeTestnet=false 时禁止 testnet 转账。
@@ -1060,14 +1049,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return transfer.prepare(input);
     },
     submitTransfer: (preview) => {
-      // 硬切换 002：submit 阶段必须能解析出 owner——preview 上若没带
-      // ownerPublicKeyHex / keyId，**必须**从 session 真值 / 老 active
-      // key 解析，**不**做静默 fallback。
-      if (!preview.ownerPublicKeyHex && !preview.keyId) {
+      // 硬切换 002 收尾：submit 阶段必须能解析出 owner——preview 上若
+      // 没带 ownerPublicKeyHex 即拒绝。**不**做静默 fallback。
+      if (!preview.ownerPublicKeyHex) {
         return Promise.reject(
-          new Error(
-            "P2PKH submitTransfer requires ownerPublicKeyHex (preferred) or keyId (legacy)"
-          )
+          new Error("P2PKH submitTransfer requires ownerPublicKeyHex")
         );
       }
       const settings = getCurrentSettings();
@@ -1143,14 +1129,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       }
     },
 
-    async onKeyImported(_keyId) {
+    async onKeyImported(publicKeyHex: string) {
       // 当前 namespace 是 active key；rehydrate 会为 active key 补齐资源。
-      // 旧 keyId 参数保留以兼容旧接口，逻辑走 active key。
+      // 硬切换 002 收尾：入参改为 publicKeyHex；plugin 内部用对应 hex
+      // 决定是否触发同步（本参数当前仅供日志使用，未来按 hex 决定
+      // 同步范围时再扩展）。
       deps.logger?.info({
         scope: "p2pkh.service",
         event: "key.imported",
         message: "P2PKH reacting to key import; rehydrating active key",
-        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
+        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null, importedHex: publicKeyHex }
       });
       try {
         await rehydrateResources();
@@ -1166,13 +1154,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         });
       }
     },
-    async onKeyRemoved(_keyId) {
+    async onKeyRemoved(publicKeyHex: string) {
       // 实际删除由 keyspace.deleteKey 统一调度；这里只清理协调器 lane。
+      // 入参为被删 key 的 publicKeyHex；目前只用于日志与扩展点。
       try {
         const resources = await listAllResources().catch(() => []);
         for (const r of resources) coordinator.removeResource(r.resourceId);
       } catch (err) {
-        console.error("P2PKH onKeyRemoved failed", err);
+        console.error("P2PKH onKeyRemoved failed", err, publicKeyHex);
       }
     },
     onVaultLocked,
@@ -1216,12 +1205,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       } catch {
         // swallow
       }
-      p2pkhDbHandle = null;
     }
   };
 }
 
-function filterUtxos<T extends { network: "main" | "test"; keyId: string; publicKeyHex: string; resourceId: string }>(
+function filterUtxos<T extends { network: "main" | "test"; publicKeyHex: string; resourceId: string }>(
   rows: T[],
   filter: P2pkhUtxoFilter | undefined
 ): T[] {
@@ -1231,15 +1219,10 @@ function filterUtxos<T extends { network: "main" | "test"; keyId: string; public
       const net = assetIdToNetwork(filter.assetId);
       if (r.network !== net) return false;
     }
-    // 硬切换 002：owner 真值（session / caller 视角）按 `publicKeyHex`
-    // 直接过滤；不依赖 vault keyId 这层中间表示。
-    // keyId 是内部细节（vault.withPrivateKey 借用句柄），owner 真值
-    // 仍然是 publicKeyHex。`ownerPublicKeyHex` 与 `keyId` 二选一即可；
-    // 都给时 keyId 优先（内部已解析过）。
-    if (filter.keyId) {
-      if (r.keyId !== filter.keyId) return false;
-    } else if (filter.ownerPublicKeyHex) {
-      if (r.publicKeyHex !== filter.ownerPublicKeyHex) return false;
+    // 硬切换 002 收尾：owner 真值 = publicKeyHex；vault 不再保留
+    // 任何 key 域 surrogate id 维度。
+    if (filter.ownerPublicKeyHex && r.publicKeyHex !== filter.ownerPublicKeyHex) {
+      return false;
     }
     if (filter.resourceId && r.resourceId !== filter.resourceId) return false;
     return true;

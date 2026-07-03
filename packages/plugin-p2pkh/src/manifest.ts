@@ -80,7 +80,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.col.label": "Label",
       "p2pkh.col.address": "Address",
       "p2pkh.col.network": "Network",
-      "p2pkh.col.keyId": "keyId",
+      "p2pkh.col.publicKeyHex": "Public key",
       "p2pkh.col.resourceId": "resourceId",
       "p2pkh.col.lastSync": "Last sync",
       "p2pkh.col.neverSynced": "Never synced",
@@ -233,7 +233,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.col.label": "标签",
       "p2pkh.col.address": "地址",
       "p2pkh.col.network": "网络",
-      "p2pkh.col.keyId": "keyId",
+      "p2pkh.col.publicKeyHex": "公钥",
       "p2pkh.col.resourceId": "resourceId",
       "p2pkh.col.lastSync": "最近同步",
       "p2pkh.col.neverSynced": "未同步",
@@ -407,9 +407,10 @@ export const p2pkhPlugin: PluginManifest = {
 
     void service.rehydrate();
 
-    const keyCreatedUnsub = messageBus.subscribe<{ keyId: string; publicKeyHex: string; label: string }>("key.created", async (payload) => {
-      if (!payload.keyId) return;
-      await service.onKeyImported(payload.keyId);
+    // 硬切换 002 收尾：key.created payload 只携带 publicKeyHex；service 按 publicKeyHex 工作。
+    const keyCreatedUnsub = messageBus.subscribe<{ publicKeyHex: string; label: string }>("key.created", async (payload) => {
+      if (!payload.publicKeyHex) return;
+      await service.onKeyImported(payload.publicKeyHex);
     });
 
     const assets = ctx.get<AssetRegistry>("asset.registry");

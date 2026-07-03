@@ -27,7 +27,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
 import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
-import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
+import { formatShortPublicKey, type ActiveKeyState, type KeyspaceService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhBackfillState,
@@ -272,7 +272,7 @@ export function P2pkhOverviewPage() {
       { key: "label", header: t("p2pkh.col.label", { defaultValue: "标签" }), render: (r) => r.label },
       { key: "address", header: t("p2pkh.col.address", { defaultValue: "地址" }), render: (r) => <code>{r.address}</code> },
       { key: "network", header: t("p2pkh.col.network", { defaultValue: "网络" }), render: (r) => r.network },
-      { key: "keyId", header: t("p2pkh.col.keyId", { defaultValue: "keyId" }), render: (r) => <code>{r.keyId}</code> },
+      { key: "publicKeyHex", header: t("p2pkh.col.publicKeyHex", { defaultValue: "公钥" }), render: (r) => <code>{formatShortPublicKey(r.publicKeyHex)}</code> },
       { key: "resourceId", header: t("p2pkh.col.resourceId", { defaultValue: "resourceId" }), render: (r) => <code>{r.resourceId}</code> },
       {
         key: "sync",

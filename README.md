@@ -27,10 +27,10 @@ plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 
 - plugin-poker 不直接 import 其它 plugin-* 内部实现；只走 contracts capability。
 - poker-proxy 与 plugin-poker 的内部浏览器协议有版本号（`POKER_BROWSER_PROTOCOL_VERSION`）；不匹配时立即断连，不进入半可用状态。
 
-### Key 身份与 namespace（硬切换 001 收口）
+### Key 身份与 namespace（硬切换 002 收尾）
 
 - 平台根身份 = `publicKeyHex` = 压缩公钥 hex、lowercase、无 `0x` 前缀、长度 66。`KeyIdentity` / `KeyRef` / `ActiveKeyState` / `Contact` 等所有 contract 字段只持有 `publicKeyHex`；旧平台身份字段 `publicKeyHash` 已彻底删除。
-- `keyId` 只作为 Vault 内部借用句柄（`vault.withPrivateKey(keyId)` / `keyspace.deleteKeyById(keyId)`），不是 namespace 根 id。
+- **平台 key 域不再存在任何 surrogate id**（硬切换 002 收尾）：`KeyIdentity.keyId` / `KeyRef.id` / `KeyspaceService.deleteKeyById` 全部从 contract 删除；`vault.withPrivateKey` / `exportPrivateKey` / `deleteKey` 全部按 `publicKeyHex` 入参。Vault canonical store `vault_keys` 的 `keyPath` 已是 `publicKeyHex`；新建 / 导入 key 时必须先派生 publicKeyHex 再落库。
 - key-scoped IndexedDB 命名统一为 `keymaster.key.<publicKeyHex>.plugin.<pluginId>.<storageId>`；业务插件只能通过 `keyspace.openKeyStorage` 进入。
 - P2PKH 链上脚本材料 `HASH160(compressed public key)` 在 `plugin-p2pkh` 内部统一命名为 `pubKeyHash160Hex`（或语义等价名），不允许再叫 `publicKeyHash`。
 - 旧命名空间（按 `sha256(publicKeyHex)`）只允许一次性迁移 / 清理；`p2pkh` / `poker` 直接放弃（best-effort 删旧 DB），`contacts` 一次性复制旧联系人到新 namespace 后再删旧 DB；`p2pkh` / `poker` 失败 / 部分写入都保留旧库以便重试。
