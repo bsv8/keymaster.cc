@@ -101,6 +101,14 @@ export function createReconnectCoordinator(
   deps: ReconnectCoordinatorDeps
 ): ReconnectCoordinator {
   const { core, vault, keyspace, logger } = deps;
+  const logInfo = (event: string, data: Record<string, unknown>): void => {
+    logger.info({
+      scope: "appmsg.core",
+      event,
+      message: "",
+      data
+    });
+  };
 
   /**
    * 协调器内部三个状态量（反馈"必改"第五轮定型）：
@@ -154,12 +162,7 @@ export function createReconnectCoordinator(
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
       core.setNextReconnectAtMs(null);
-      logger.info({
-        scope: "appmsg.core",
-        event: "appmsg.connect.retry.canceled",
-        message: "",
-        data: { reason, epoch }
-      });
+      logInfo("appmsg.connect.retry.canceled", { reason, epoch });
     }
   };
 
@@ -213,12 +216,7 @@ export function createReconnectCoordinator(
         data: { reason, err: err instanceof Error ? err.message : String(err) }
       });
     }
-    logger.info({
-      scope: "appmsg.core",
-      event: "appmsg.connect.structurally_offline",
-      message: "",
-      data: { reason }
-    });
+    logInfo("appmsg.connect.structurally_offline", { reason });
     lastSeenOpen = false;
   };
 
@@ -227,16 +225,11 @@ export function createReconnectCoordinator(
     const myEpoch = epoch;
     const nextAt = Date.now() + RECONNECT_INTERVAL_MS;
     core.setNextReconnectAtMs(nextAt);
-    logger.info({
-      scope: "appmsg.core",
-      event: "appmsg.connect.retry.scheduled",
-      message: "",
-      data: {
-        reason,
-        epoch: myEpoch,
-        delayMs: RECONNECT_INTERVAL_MS,
-        nextReconnectAtMs: nextAt
-      }
+    logInfo("appmsg.connect.retry.scheduled", {
+      reason,
+      epoch: myEpoch,
+      delayMs: RECONNECT_INTERVAL_MS,
+      nextReconnectAtMs: nextAt
     });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -326,6 +319,13 @@ export function createReconnectCoordinator(
    *     `onStructuralChange` 事件去驱动"结构条件变可连"那次连接。
    */
   const reconcileQueuedEpoch = (queuedEpoch: number | null): void => {
+    logInfo("appmsg.connect.pending.reconcile", {
+      queuedEpoch,
+      epoch,
+      disposed,
+      hasPendingTimer: reconnectTimer !== null,
+      hasInFlight: inFlightConnect !== null
+    });
     if (queuedEpoch === null) return;
     if (disposed) return;
     if (reconnectTimer !== null) return;
@@ -336,9 +336,17 @@ export function createReconnectCoordinator(
     }
     const cond = structuralConnectable();
     if (cond.ok) {
+      logInfo("appmsg.connect.pending.reconcile_attempt", {
+        queuedEpoch,
+        ownerPublicKeyHex: cond.ownerPublicKeyHex
+      });
       void attemptConnect();
       return;
     }
+    logInfo("appmsg.connect.pending.reconcile_blocked", {
+      queuedEpoch,
+      reason: cond.reason
+    });
     // 当前仍不可连接：不 attempt，让后续 onStructuralChange 事件
     // （vault 解锁 / 切 key / 切 provider）驱动下一次 attempt。
   };
@@ -359,25 +367,65 @@ export function createReconnectCoordinator(
    */
   const attemptConnect = (): Promise<void> => {
     if (inFlightConnect) {
+      logInfo("appmsg.connect.attempt.inflight_reused", {
+        epoch,
+        pendingEpoch,
+        hasPendingTimer: reconnectTimer !== null
+      });
       return inFlightConnect;
     }
     const myEpoch = epoch;
+    logInfo("appmsg.connect.attempt.started", {
+      epoch: myEpoch,
+      pendingEpoch,
+      hasPendingTimer: reconnectTimer !== null
+    });
     inFlightConnect = (async () => {
       try {
         const cond = structuralConnectable();
         if (!cond.ok) {
+          logInfo("appmsg.connect.attempt.structurally_blocked", {
+            epoch: myEpoch,
+            reason: cond.reason
+          });
           goStructurallyOffline(cond.reason);
           return;
         }
-        if (myEpoch !== epoch) return;
+        if (myEpoch !== epoch) {
+          logInfo("appmsg.connect.attempt.stale_before_core", {
+            attemptEpoch: myEpoch,
+            currentEpoch: epoch
+          });
+          return;
+        }
         const targetOwner: string = cond.ownerPublicKeyHex;
+        logInfo("appmsg.connect.call_core.begin", {
+          epoch: myEpoch,
+          ownerPublicKeyHex: targetOwner
+        });
         // callerEpoch 仅作"自检 token"使用：core 内部不校验；caller
         // 在 await 后自检"我的 epoch 是不是没变"决定是否采用结果。
         const outcome: AppMsgConnectOutcome = await core.connectForOwner(
           targetOwner,
           myEpoch
         );
-        if (myEpoch !== epoch) return;
+        logInfo("appmsg.connect.call_core.outcome", {
+          epoch: myEpoch,
+          ownerPublicKeyHex: targetOwner,
+          outcomeKind: outcome.kind,
+          outcomeReason:
+            "reason" in outcome && typeof outcome.reason === "string"
+              ? outcome.reason
+              : null
+        });
+        if (myEpoch !== epoch) {
+          logInfo("appmsg.connect.attempt.stale_after_core", {
+            attemptEpoch: myEpoch,
+            currentEpoch: epoch,
+            outcomeKind: outcome.kind
+          });
+          return;
+        }
         switch (outcome.kind) {
           case "connected":
             handleConnected();
@@ -394,6 +442,12 @@ export function createReconnectCoordinator(
         }
       } finally {
         inFlightConnect = null;
+        logInfo("appmsg.connect.attempt.finally", {
+          attemptEpoch: myEpoch,
+          currentEpoch: epoch,
+          pendingEpoch,
+          hasPendingTimer: reconnectTimer !== null
+        });
         // in-flight 期间若积压了新的结构变化（`onStructuralChange` /
         // `onCoreStateChange` 远端断线分支命中时设了 `pendingEpoch`），
         // 在 finally 末尾消费一次快照并交给 `reconcileQueuedEpoch`
@@ -404,6 +458,11 @@ export function createReconnectCoordinator(
         if (pendingEpoch !== null) {
           const queuedEpoch = pendingEpoch;
           pendingEpoch = null;
+          logInfo("appmsg.connect.pending.consume", {
+            attemptEpoch: myEpoch,
+            queuedEpoch,
+            currentEpoch: epoch
+          });
           // 边界：本 attempt 入口记的 `myEpoch` 一定 <= `queuedEpoch`
           // —— `onStructuralChange`/`onCoreStateChange` 入队
           // `pendingEpoch` 时总是跟 `++epoch` 同步或单独写 `epoch`，
@@ -442,19 +501,23 @@ export function createReconnectCoordinator(
   const onStructuralChange = (reason: "setup" | "vault" | "keyspace" | "provider" | "core"): void => {
     if (disposed) return;
     const cond = structuralConnectable();
-    logger.info({
-      scope: "appmsg.core",
-      event: "appmsg.connect.kick",
-      message: "",
-      data: {
-        reason,
-        previousEpoch: epoch,
-        connectable: cond.ok,
-        structuralReason: cond.ok ? null : cond.reason,
-        ownerPublicKeyHex: cond.ok ? cond.ownerPublicKeyHex : null
-      }
+    logInfo("appmsg.connect.kick", {
+      reason,
+      previousEpoch: epoch,
+      connectable: cond.ok,
+      structuralReason: cond.ok ? null : cond.reason,
+      ownerPublicKeyHex: cond.ok ? cond.ownerPublicKeyHex : null
     });
-    epoch += 1;
+    const nextEpoch = epoch + 1;
+    logInfo("appmsg.connect.kick.dispatch", {
+      reason,
+      previousEpoch: epoch,
+      nextEpoch,
+      hadInFlight: inFlightConnect !== null,
+      pendingEpoch,
+      hasPendingTimer: reconnectTimer !== null
+    });
+    epoch = nextEpoch;
     clearReconnectTimer("structural_change");
     lastSeenOpen = false;
     if (inFlightConnect) {
@@ -462,6 +525,11 @@ export function createReconnectCoordinator(
       // 变化（locked → unlocked）时直接覆盖——后者才是当前最新要的
       // 那个 attempt。
       pendingEpoch = epoch;
+      logInfo("appmsg.connect.pending.set", {
+        reason,
+        epoch,
+        pendingEpoch
+      });
       return;
     }
     // inFlightConnect === null：直接 attemptConnect。attempt IIFE
@@ -497,6 +565,11 @@ export function createReconnectCoordinator(
           // 是让 attempt 完成后立刻再 attempt 一次（attemptConnect 入口
           // 重新看 structuralConnectable + 视 outcome 决定 schedule）。
           pendingEpoch = epoch;
+          logInfo("appmsg.connect.pending.set", {
+            reason: "remote_close",
+            epoch,
+            pendingEpoch
+          });
         }
       }
     }

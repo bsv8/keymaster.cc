@@ -1176,11 +1176,12 @@ describe("AppMsgCoreImpl - markStructurallyOffline", () => {
     const { core } = makeCore({ providers: [slowProvider] });
     const p = core.connectForOwner(OWNER);
     // 等 connectForOwner 走过 disconnect / openLocalDbForOwner /
-    // signerProvider 几个 microtask，跑到 `await provider.bind(...)`。
-    // microtask 链较长，用 setTimeout(0) 切到 macrotask 强制推进。
-    await new Promise<void>((r) => setTimeout(r, 0));
-    // 此时 `resolveBind` 已被赋值。
-    expect(typeof resolveBind).toBe("function");
+    // signerProvider 几个异步步骤，最终跑到 `await provider.bind(...)`。
+    // 这里不再依赖单次 macrotask 恰好够用，改为 waitFor 直到
+    // `resolveBind` 真被赋值，避免不同运行环境下时序抖动。
+    await vi.waitFor(() => {
+      expect(typeof resolveBind).toBe("function");
+    });
     // 在 bind 还没 resolve 时调 markStructurallyOffline：会抬 connectEpoch。
     core.markStructurallyOffline();
     // 然后让 bind 完成。
