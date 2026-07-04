@@ -837,7 +837,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
     this.attachHandleCloseHook(this.boundHandle);
     this.reattachUnfilteredSubscriptions();
 
-    void this.triggerSync();
+    void this.triggerSync("background").catch(() => undefined);
     this.fireStateChange();
     return { kind: "connected" };
   }
@@ -1408,7 +1408,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
           // ignore
         }
       }
-      void this.triggerSync();
+      void this.triggerSync("background").catch(() => undefined);
       emitLog(this.cfg.logger, "info", "appmsg.receive.pushed", {
         messageId: m.messageId,
         clientMessageId: m.clientMessageId,
@@ -1438,22 +1438,80 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   /* ====== 同步 ====== */
 
-  async triggerSync(): Promise<void> {
+  async triggerSync(mode: "manual" | "background" = "manual"): Promise<void> {
+    const manual = mode === "manual";
+    if (manual) {
+      emitLog(this.cfg.logger, "info", "appmsg.sync.manual.requested", {
+        state: this.inspectLocalDb().state,
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId
+      });
+    }
     if (this.syncInFlight) {
+      if (manual) {
+        emitLog(this.cfg.logger, "info", "appmsg.sync.manual.join_existing", {
+          ownerPublicKeyHex: this.currentBoundOwner,
+          providerId: this.currentProviderId
+        });
+      }
       await this.syncInFlight.catch(() => {
         // ignore
       });
     }
+    if (
+      !this.currentBoundOwner ||
+      !this.currentProviderId ||
+      !this.boundHandle ||
+      !this.localOps
+    ) {
+      if (!manual) return;
+      const msg = "appmsg.sync: not_connected";
+      this.lastErrorMessageValue = msg;
+      emitLog(this.cfg.logger, "warn", "appmsg.sync.manual.skipped_not_connected", {
+        state: this.inspectLocalDb().state,
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        hasHandle: this.boundHandle !== null,
+        hasLocalDb: this.localOps !== null
+      });
+      this.fireStateChange();
+      throw new Error(msg);
+    }
     this.syncInFlight = this.doSync();
     try {
       await this.syncInFlight;
+      if (manual) {
+        emitLog(this.cfg.logger, "info", "appmsg.sync.manual.completed", {
+          ownerPublicKeyHex: this.currentBoundOwner,
+          providerId: this.currentProviderId
+        });
+      }
+    } catch (err) {
+      if (manual) {
+        const msg = err instanceof Error ? err.message : String(err);
+        this.lastErrorMessageValue = msg;
+        emitLog(this.cfg.logger, "error", "appmsg.sync.manual.failed", {
+          ownerPublicKeyHex: this.currentBoundOwner,
+          providerId: this.currentProviderId,
+          err: msg
+        });
+        this.fireStateChange();
+      }
+      throw err;
     } finally {
       this.syncInFlight = null;
     }
   }
 
   private async doSync(): Promise<void> {
-    if (!this.currentBoundOwner || !this.currentProviderId) return;
+    if (
+      !this.currentBoundOwner ||
+      !this.currentProviderId ||
+      !this.boundHandle ||
+      !this.localOps
+    ) {
+      return;
+    }
     const scopes = await this.collectKnownScopes();
     if (scopes.length === 0) return;
     await syncAllScopes({

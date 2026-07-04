@@ -147,10 +147,19 @@ export function createReconnectCoordinator(
   let pendingEpoch: number | null = null;
   let disposed = false;
 
-  const clearReconnectTimer = (): void => {
+  const clearReconnectTimer = (
+    reason: "structural_change" | "connected" | "structurally_offline" | "dispose" | "replaced_timer"
+  ): void => {
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
+      core.setNextReconnectAtMs(null);
+      logger.info({
+        scope: "appmsg.core",
+        event: "appmsg.connect.retry.canceled",
+        message: "",
+        data: { reason, epoch }
+      });
     }
   };
 
@@ -193,7 +202,7 @@ export function createReconnectCoordinator(
    */
   const goStructurallyOffline = (reason: StructuralOfflineReason): void => {
     epoch += 1;
-    clearReconnectTimer();
+    clearReconnectTimer("structurally_offline");
     try {
       core.markStructurallyOffline();
     } catch (err) {
@@ -213,11 +222,22 @@ export function createReconnectCoordinator(
     lastSeenOpen = false;
   };
 
-  const scheduleReconnect = (): void => {
-    clearReconnectTimer();
+  const scheduleReconnect = (reason: "retryable_failure" | "remote_close"): void => {
+    clearReconnectTimer("replaced_timer");
     const myEpoch = epoch;
     const nextAt = Date.now() + RECONNECT_INTERVAL_MS;
     core.setNextReconnectAtMs(nextAt);
+    logger.info({
+      scope: "appmsg.core",
+      event: "appmsg.connect.retry.scheduled",
+      message: "",
+      data: {
+        reason,
+        epoch: myEpoch,
+        delayMs: RECONNECT_INTERVAL_MS,
+        nextReconnectAtMs: nextAt
+      }
+    });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (disposed) return;
@@ -261,7 +281,7 @@ export function createReconnectCoordinator(
   const handleRetryableFailure = (): void => {
     const cond = structuralConnectable();
     if (cond.ok) {
-      scheduleReconnect();
+      scheduleReconnect("retryable_failure");
     } else {
       goStructurallyOffline(cond.reason);
     }
@@ -419,10 +439,23 @@ export function createReconnectCoordinator(
    * 不论是否 in-flight，`epoch` 都会 ++，避免旧 attempt 在 await 之后
    * 仍然用旧的 `myEpoch` 把结果留下来（caller 端自检会丢弃）。
    */
-  const onStructuralChange = (): void => {
+  const onStructuralChange = (reason: "setup" | "vault" | "keyspace" | "provider" | "core"): void => {
     if (disposed) return;
+    const cond = structuralConnectable();
+    logger.info({
+      scope: "appmsg.core",
+      event: "appmsg.connect.kick",
+      message: "",
+      data: {
+        reason,
+        previousEpoch: epoch,
+        connectable: cond.ok,
+        structuralReason: cond.ok ? null : cond.reason,
+        ownerPublicKeyHex: cond.ok ? cond.ownerPublicKeyHex : null
+      }
+    });
     epoch += 1;
-    clearReconnectTimer();
+    clearReconnectTimer("structural_change");
     lastSeenOpen = false;
     if (inFlightConnect) {
       // 已有 in-flight：把"最新待补发 epoch"记录下来，连续多次结构
@@ -452,7 +485,13 @@ export function createReconnectCoordinator(
       const cond = structuralConnectable();
       if (cond.ok) {
         if (reconnectTimer === null && inFlightConnect === null) {
-          scheduleReconnect();
+          logger.warn({
+            scope: "appmsg.core",
+            event: "appmsg.connect.remote_closed",
+            message: "",
+            data: { epoch, ownerPublicKeyHex: snap.ownerPublicKeyHex }
+          });
+          scheduleReconnect("remote_close");
         } else if (inFlightConnect !== null) {
           // 这里**不**++epoch：远端断线期间仍属当前结构代次，只
           // 是让 attempt 完成后立刻再 attempt 一次（attemptConnect 入口
@@ -462,25 +501,23 @@ export function createReconnectCoordinator(
       }
     }
     if (isOpen && reconnectTimer !== null) {
-      clearReconnectTimer();
-      core.setNextReconnectAtMs(null);
+      clearReconnectTimer("connected");
     }
   };
 
-  const unsubActive = keyspace.onActiveChange(() => onStructuralChange());
-  const unsubVault = vault.onStatusChange(() => onStructuralChange());
+  const unsubActive = keyspace.onActiveChange(() => onStructuralChange("keyspace"));
+  const unsubVault = vault.onStatusChange(() => onStructuralChange("vault"));
   const unsubProviderActive = core.providers().onActiveChange(() =>
-    onStructuralChange()
+    onStructuralChange("provider")
   );
   const unsubCoreState = core.onStateChange(onCoreStateChange);
 
   // setup 阶段首次尝试。
-  onStructuralChange();
+  onStructuralChange("setup");
 
   return {
     kick: (reason) => {
-      void reason;
-      onStructuralChange();
+      onStructuralChange(reason);
     },
     dispose: () => {
       disposed = true;
@@ -489,7 +526,7 @@ export function createReconnectCoordinator(
       unsubProviderActive();
       unsubCoreState();
       epoch += 1;
-      clearReconnectTimer();
+      clearReconnectTimer("dispose");
       lastSeenOpen = false;
       pendingEpoch = null;
       // 反馈"必改"第六轮：forcefully 清掉 `inFlightConnect`，让

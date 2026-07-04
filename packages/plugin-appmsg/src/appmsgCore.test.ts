@@ -463,6 +463,20 @@ describe("AppMsgCoreImpl - provider registry", () => {
   });
 });
 
+describe("AppMsgCoreImpl - manual sync diagnostics", () => {
+  it("manual triggerSync when not connected rejects, records lastError, and logs skipped_not_connected", async () => {
+    const { core, log } = makeCore();
+
+    await expect(core.triggerSync()).rejects.toThrow("appmsg.sync: not_connected");
+    expect(core.inspectLocalDb().lastError).toBe("appmsg.sync: not_connected");
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "appmsg.sync.manual.skipped_not_connected"
+      })
+    );
+  });
+});
+
 describe("AppMsgCoreImpl - connectForOwner", () => {
   it("no active provider: stays not-ready, no throw", async () => {
     const { core } = makeCore();
