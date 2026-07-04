@@ -211,6 +211,18 @@ function createBrowserRTCPeerConnectionLike(pc: RTCPeerConnection): RTCPeerConne
   let stateCb: ((s: string) => void) | null = null;
   let trackCb: ((s: MediaStreamLike) => void) | null = null;
   let localStream: MediaStream | null = null;
+  /**
+   * sender 真值缓存。
+   *
+   * 设计缘由：
+   *   - 新建 `RTCPeerConnection` 时 `pc.getSenders()` 为空；如果只做
+   *     `replaceTrack()`，不会自动把本地 track 加进连接；
+   *   - 这正是“看起来连上了，但远端没声音没画面”的根因：本地预览来自
+   *     `getUserMedia()`，不是来自对端真正收到的媒体；
+   *   - 因此浏览器侧必须在第一次接入本地流时，对缺失 kind 显式
+   *     `pc.addTrack(track, stream)`，之后同 kind 才走 `replaceTrack()`。
+   */
+  const senderByKind = new Map<string, RTCRtpSender>();
 
   pc.onicecandidate = (ev) => {
     if (!iceCb) return;
@@ -256,9 +268,10 @@ function createBrowserRTCPeerConnectionLike(pc: RTCPeerConnection): RTCPeerConne
       trackCb = cb;
     },
     replaceLocalStream: (stream) => {
-      const senders = pc.getSenders();
       if (stream === null) {
-        for (const s of senders) s.replaceTrack(null).catch(() => undefined);
+        for (const sender of senderByKind.values()) {
+          sender.replaceTrack(null).catch(() => undefined);
+        }
         localStream?.getTracks().forEach((t) => t.stop());
         localStream = null;
         return;
@@ -266,11 +279,29 @@ function createBrowserRTCPeerConnectionLike(pc: RTCPeerConnection): RTCPeerConne
       const ms = stream.native;
       if (!(ms instanceof MediaStream)) return;
       const tracks = ms.getTracks();
-      for (const s of senders) {
-        const kind = s.track?.kind;
-        const track = kind ? tracks.find((t) => t.kind === kind) : undefined;
-        if (track) s.replaceTrack(track).catch(() => undefined);
+      const nextKinds = new Set(tracks.map((t) => t.kind));
+
+      // 先把新流中存在的 kind 对上：已有 sender → replace；缺 sender → addTrack。
+      for (const track of tracks) {
+        const existing = senderByKind.get(track.kind);
+        if (existing) {
+          existing.replaceTrack(track).catch(() => undefined);
+          continue;
+        }
+        try {
+          const sender = pc.addTrack(track, ms);
+          senderByKind.set(track.kind, sender);
+        } catch {
+          // addTrack 失败时不抛到 UI；后续 SDP/连接失败会走现有错误路径。
+        }
       }
+
+      // 新流里已没有的 kind 要主动摘掉，否则旧 sender 仍继续发旧轨。
+      for (const [kind, sender] of senderByKind.entries()) {
+        if (nextKinds.has(kind)) continue;
+        sender.replaceTrack(null).catch(() => undefined);
+      }
+
       localStream?.getTracks().forEach((t) => t.stop());
       localStream = ms;
     },
