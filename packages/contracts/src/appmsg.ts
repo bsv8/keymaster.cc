@@ -1,9 +1,9 @@
 // packages/contracts/src/appmsg.ts
-// 应用消息总线契约（施工单 2026-07-03 001：appmsg 本地真值、完整消息推送、在线状态、
-// 系统消息应用硬切换）。
+// 应用消息总线契约（施工单 2026-07-03 001 + 2026-07-04 001 反馈）。
 //
 // 设计缘由：
-//   - 单真值在 Keymaster 本地 DB；HubMsg 只负责远端持久化 / 在线实时推送 / 在线查询。
+//   - 单真值在 Keymaster 本地 DB；HubMsg 只负责远端持久化 / 在线实时推送 /
+//     在线查询。
 //   - app / plugin 公开接口**不**暴露 `ownerPublicKeyHex` / `endpoint` /
 //     `senderEndpoint` / `scopeEndpoint` / `box` / `atMs` 这些系统内部概念。
 //   - 公开接收目标只允许两种：
@@ -23,8 +23,14 @@
 //     它们是 plugin-appmsg 内核内部路由 / HubMsg wire 适配层唯一允许的
 //     "地址模型"——app / plugin **不**直接看到。
 //   - 本文件 Public 类型（`AppMsgMessage` / `AppMsgSendInput` / 等）
-//     是 app / plugin 的对外契约；HubMsg wire 上的 `AppMsgMessageRecord`
-//     与内部 `AppMsgMessage` 之间的转换由 plugin-appmsg 内核内部完成。
+//     是 app / plugin 的对外契约；HubMsg wire 上的 `HubMsgMessageRecord`
+//     （plugin-appmsg 内核内部）与公开 `AppMsgMessage` 之间的转换由
+//     plugin-appmsg 内核内部完成。
+//   - `AppMsgCore` 接口明确包含 scoped 内部接口（`sendScopedMessage` /
+//     `listScopedMessages` / `getScopedMessage` / `subscribeScopedMessages`），
+//     实现层**必须**沿用 sender 投影做严格的 ACL 隔离；任何"全库读"路径
+//     必须经专门的 `createSystemMessageClient(...)` / `createUnfilteredClient(...)`
+//     才能开出（**仅** keymaster.message 系统消息应用允许）。
 
 import type { KeyScopedStorageHandle, KeyspaceService } from "./keyspace.js";
 
@@ -70,7 +76,7 @@ export type AppMsgContentType = "text/plain" | "text/markdown";
 /**
  * 公开消息视图：app / plugin 看到的就是这个形状。
  *
- * 关键约束（施工单 §4.4）：
+ * 关键约束（施工单 §4.4 + 反馈 §"必须修改"）：
  *   - **不**包含 `endpoint` 字段，也不暴露 `ownerPublicKeyHex` / `atMs`。
  *   - sender / recipient 都用 `senderPublicKeyHex` + （`origin` 或 `appId`）
  *     表达：外部 app 用 `origin`，内部插件 / 系统应用用 `appId`。
@@ -166,6 +172,40 @@ export interface AppMsgGetInput {
   messageId: string;
 }
 
+/* ============== 平台 internal：sender 投影 + scope ============== */
+
+/**
+ * sender 投影——平台内部用，描述"我以什么身份发 / 收消息"。
+ *
+ * 与 sender 一起被显式带入 `AppMsgCore` 的所有 scoped 方法；任何 caller
+ * 都**必须**在自己手里持有 `senderPublicKeyHex`（来自当前 connect session
+ * 或自己 manifest 上声明的 endpointId）才能调这些方法。
+ */
+export interface AppMsgSenderProjection {
+  senderPublicKeyHex: string;
+  /** 外部 app 形式：exact origin（scheme + host + port）。 */
+  senderOrigin?: string;
+  /** 内部插件 / 系统应用形式：pluginEndpointId / appId。 */
+  senderAppId?: string;
+}
+
+/**
+ * 平台内部 sender 可见 scope——用于本地 DB 读取 / 订阅时做 ACL 隔离。
+ *
+ *   - `kind = "origin"` → 仅 `recipientOrigin === scope.id` 或
+ *     `senderOrigin === scope.id` 的消息可见；
+ *   - `kind = "plugin"` → 仅 `recipientAppId === scope.id` 或
+ *     `senderAppId === scope.id` 的消息可见；
+ *   - `kind = "all"`   → 当前 owner 维度的全部消息可见（**仅** keymaster.message
+ *     系统消息应用允许使用——见 `createSystemMessageClient(...)`）。
+ */
+export interface AppMsgScope {
+  ownerPublicKeyHex: string;
+  kind: "origin" | "plugin" | "all";
+  /** scope = origin / plugin 时填 `id`（origin 或 appId）；`all` 时为 null。 */
+  id: string | null;
+}
+
 /* ============== 在线状态 ============== */
 
 /**
@@ -193,11 +233,6 @@ export type AppMsgOnlineInput = string[];
 
 /**
  * 单个本地收件目标的同步状态（施工单 §8.2）。
- *
- * 真值写在 key-scoped 本地 DB；每个本地"收件目标" = 一个 (recipient + sender
- * 身份) 维度的 lastSyncedMessageId / lastReceivedAtMs / lastSyncError。
- *
- * UI 渲染或系统消息应用读取此形状；对外**不**走 dirty hint。
  */
 export interface AppMsgTargetSyncState {
   /** 收件目标维度稳定 key：`<origin|appId>:<id>`。 */
@@ -216,20 +251,11 @@ export interface AppMsgTargetSyncState {
 
 /**
  * 当前 owner 的本地消息库连接状态（用于系统消息应用展示）。
- *
- * 设计缘由（施工单 §5.4）：
- *   - 状态由本地库决定，**不**走远端 HubMsg 数量统计。
- *   - 锁定 / 无 active key：state = "idle"，不抛错，其余字段尽量保留
- *     上一次的快照便于 UI 渲染 stale 标记。
  */
 export interface AppMsgLocalDbSnapshot {
-  /** "idle" | "open" | "closed" —— 与本地 DB handle 状态对齐。 */
   state: "idle" | "open" | "closed";
-  /** 当前绑定 owner publicKeyHex；未绑定时为 null。 */
   ownerPublicKeyHex: string | null;
-  /** 本地库最后写入时间（unix ms；0 = 从未）。 */
   lastInsertedAtMs: number;
-  /** 本地库最后错误 message（无错误时为 null）。 */
   lastError: string | null;
 }
 
@@ -238,83 +264,171 @@ export interface AppMsgLocalDbSnapshot {
 /**
  * app / plugin 面向系统的统一消息 facade。
  *
- * 设计缘由（施工单 §4.4 / §8.3）：
+ * 设计缘由（施工单 §4.4 / §8.3 + 反馈 §"必须修改"）：
  *   - 统一 5 个公开方法：`sendMessage` / `listMessages` / `getMessage` /
  *     `subscribeMessages` / `checkOnline`。
  *   - 公开调用入参**不**包含 owner / endpoint / box / atMs 等内部概念。
- *   - 系统内部自动处理 owner 归属、endpoint 路由、本地缓存、补同步、
- *     重连、在线查询失败降级——调用方完全无感。
- *   - 失败语义：
- *       * `sendMessage` 失败 → reject；**不**回退本地写——消息必须经过
- *         HubMsg 后才算发出。
- *       * `listMessages` / `getMessage` 失败 → reject；调用方可重试或
- *         走 UI 兜底。
- *       * `subscribeMessages` handler 内部抛错 → 被吞掉，**不**反向
- *         阻断推送分发。
- *       * `checkOnline` 内部失败 → 对应 key 返回 `unknown`，不影响其它
- *         key 的查询；整体失败时**不**抛错，全部返回 `unknown`。
+ *   - 系统内部根据"创建 facade 时固化的 sender 投影"做严格的 ACL 隔离：
+ *       * `sendMessage(recipient, ...)`：sender 自动取 facade 固化的 sender；
+ *       * `listMessages()`：仅返回 sender scope 内可见的消息；
+ *       * `getMessage({messageId})`：不在 sender scope 内时返回 null；
+ *       * `subscribeMessages(handler)`：仅分发 sender scope 内的事件；
+ *       * `checkOnline(hexes)`：与 sender 解耦，全局行为。
+ *   - facade 持有 sender 投影不可变；调用方不可改。
+ *
+ * 失败语义：
+ *   - `sendMessage` 失败 → reject；message 必须经过 HubMsg 才算发出；
+ *   - `listMessages` / `getMessage` 失败 → reject 或空；
+ *   - `subscribeMessages` handler 内部抛错 → 吞掉；
+ *   - `checkOnline` 内部失败 → 对应 key 返回 `unknown`，不影响其它 key。
  */
 export interface AppMsgSimpleClient {
-  /** 发消息。 */
   sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult>;
-
-  /** 列"属于自己"的本地消息（v1 简化为正向增量 list）。 */
   listMessages(input?: AppMsgListInput): Promise<AppMsgListResult>;
-
-  /** 单条取本地消息。 */
   getMessage(input: AppMsgGetInput): Promise<AppMsgMessage | null>;
-
-  /**
-   * 订阅对端推送的完整消息（先落本地库再分发给订阅者）。
-   *
-   * 调用方拿到的就是 `AppMsgMessage` 完整消息，**不**是 dirty hint。
-   * 返回取消订阅函数。
-   */
   subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
-
-  /**
-   * 批量查若干 publicKeyHex 当前是否在线。
-   *
-   * 全部失败时**不**抛错，回退为全 `unknown`；不会阻塞 sendMessage。
-   */
   checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult>;
 }
-
-/**
- * 兼容别名：插件 scoped message client = `AppMsgSimpleClient`。
- *
- * 旧仓库 `AppMsgPluginClient` 接口在硬切换 001 后语义收口为简单 facade；
- * 本 alias 仅维持 import 兼容；新代码请直接 `AppMsgSimpleClient`。
- */
-export type AppMsgPluginClient = AppMsgSimpleClient;
 
 /* ============== 平台 internal 接口（plugin-appmsg 单例实现） ============== */
 
 /** appmsg 平台核心 capability key。 */
 export const APPMESSAGE_CORE_CAPABILITY = "appmsg.core";
 
+/** 系统消息应用固定 appId（施工单 §4.5 / §8.6）。 */
+export const KEYMASTER_MESSAGE_APP_ID = "keymaster.message";
+
 /**
- * 插件消息应用 scoped client capability key（plugin 侧）。
- *
- * 设计缘由：
- *   - 声明了 `manifest.appMessageEndpoint.endpointId` 的插件 enable 完成
- *     后，runtime host 会把 sender endpoint 已绑定的 scoped client 注入到
- *     `ctx.get(APPMSG_PLUGIN_CLIENT_CAPABILITY)`。
- *   - 未声明 endpoint 的插件 `ctx.get` 抛错（fail-closed）。
- *   - scoped client 的 `senderAppId` 固定为插件 manifest 声明的
- *     `endpointId`；插件**不**允许自报 sender endpoint。
+ * 插件 scoped client capability key（plugin 侧）。
  */
 export const APPMESSAGE_PLUGIN_CLIENT_CAPABILITY = "appmsg.client";
 
 /**
- * 面向插件的 scoped client capability key（向下兼容）。
- *
- * 同 `APPMESSAGE_PLUGIN_CLIENT_CAPABILITY`，保留别名便于旧 import。
+ * 兼容别名：插件 scoped message client = `AppMsgSimpleClient`。
  */
-export const APPMESSAGE_CLIENT_CAPABILITY = APPMESSAGE_PLUGIN_CLIENT_CAPABILITY;
+export type AppMsgPluginClient = AppMsgSimpleClient;
 
-/** 系统消息应用固定 appId（施工单 §4.5 / §8.6）。 */
-export const KEYMASTER_MESSAGE_APP_ID = "keymaster.message";
+/* === Scoped 输入形状 === */
+
+/** 平台 internal: 发送（已含 sender 投影）。 */
+export interface AppMsgSendScopedInput extends AppMsgSenderProjection, AppMsgRecipient {
+  contentType: AppMsgContentType;
+  body: string;
+  clientMessageId: string;
+  createdAtMs: number;
+}
+
+/** 平台 internal: list（已含 sender 投影）。 */
+export interface AppMsgListScopedInput extends AppMsgSenderProjection {
+  afterMessageId?: string;
+  limit?: number;
+}
+
+/** 平台 internal: get（已含 sender 投影）。 */
+export interface AppMsgGetScopedInput extends AppMsgSenderProjection {
+  messageId: string;
+}
+
+/** 平台 internal: 订阅（已含 sender 投影）。 */
+export interface AppMsgSubscribeScopedInput extends AppMsgSenderProjection {
+  handler: (msg: AppMsgMessage) => void;
+}
+
+/**
+ * appmsg 平台 internal 接口（plugin-appmsg 单例）。
+ *
+ * 设计缘由：
+ *   - 平台 external 公开接口收口为 `AppMsgSimpleClient`：5 个简单方法，
+ *     sender 投影在 facade 创建时固化。
+ *   - 平台 internal 完整接口在 `AppMsgCore` 内显式声明 scoped 操作；
+ *     任何实现必须按 sender 投影做 ACL 隔离，**不允许**走"全库读"。
+ *   - `subscribeScopedMessages` 内部保存 `match(msg)` 过滤项；
+ *     call site 只在自己 scope 内的事件被分发。
+ *   - `createMessageScopedClient(...)` 用固化 sender 投影构造对外 facade。
+ *   - `createUnfilteredClient(...)` **仅** keymaster.message 系统应用允许
+ *     ——这个工厂在 plugin-appmsg 单例内由 `KEYMASTER_MESSAGE_APP_ID` 校验；
+ *     其它 caller 拿到的是受限 `AppMsgSimpleClient`。
+ *
+ * 关键边界：
+ *   - `messageId` 全链路 string。
+ *   - send / list / get / subscribe 任何操作都**必须**带 sender 投影
+ *     （不存在"无 sender 的 list"路径）；
+ *   - 唯一例外是 `createUnfilteredClient` —— 它仅给系统消息应用使用，
+ *     由 `createSystemMessageClient(ownerPublicKeyHex)` 工厂代理。
+ */
+export interface AppMsgCore {
+  /* ====== 连接管理 ====== */
+
+  /** connect 当前 owner。幂等。 */
+  connectForOwner(ownerPublicKeyHex: string): Promise<void>;
+  /** 关闭连接；幂等。 */
+  disconnect(): Promise<void>;
+
+  /* ====== 本地 DB 状态 ====== */
+
+  /** 当前连接快照。 */
+  inspectLocalDb(): AppMsgLocalDbSnapshot;
+  /** 给指定 owner 打开本地消息库；失败时返回 null（DB 不可用降级）。 */
+  openLocalDb(input: { publicKeyHex: string }): Promise<KeyScopedStorageHandle | null>;
+
+  /* ====== Scoped 操作（platform internal） ====== */
+
+  /** send（按 sender 投影路由 + 严格映射 endpoint）。 */
+  sendScopedMessage(input: AppMsgSendScopedInput): Promise<AppMsgSendResult>;
+
+  /** list（按 sender 投影过滤可见消息）。 */
+  listScopedMessages(input: AppMsgListScopedInput): Promise<AppMsgListResult>;
+
+  /** get（按 sender 投影过滤可见消息；不在 scope 内返回 null）。 */
+  getScopedMessage(input: AppMsgGetScopedInput): Promise<AppMsgMessage | null>;
+
+  /** 订阅完整消息（按 sender 投影过滤）。返回取消订阅函数。 */
+  subscribeScopedMessages(input: AppMsgSubscribeScopedInput): () => void;
+
+  /**
+   * 平台 internal 全量订阅——**仅** keymaster.message 系统消息应用允许
+   * 构造。Plugin-appmsg 实现层在收到此调用时校验调用方具备
+   * "system message app" 身份（manifest.appMessageEndpoint.endpointId
+   * === KEYMASTER_MESSAGE_APP_ID），否则拒绝。
+   */
+  subscribeUnfilteredMessages(handler: (msg: AppMsgMessage) => void): () => void;
+
+  /**
+   * 平台 internal 全量读——与 `subscribeUnfilteredMessages` 同作用域。
+   */
+  listUnfilteredMessages(input?: AppMsgListInput): Promise<AppMsgListResult>;
+
+  /* ====== 公开 facade 构造 ====== */
+
+  /** 构造 sender 固化的对外 facade。 */
+  createMessageScopedClient(input: AppMsgSenderProjection): AppMsgSimpleClient;
+
+  /**
+   * 系统消息应用专用 facade：appId = keymaster.message，sender = 当前 owner
+   * publicKeyHex；其内部使用 `subscribeUnfilteredMessages` / `listUnfilteredMessages`。
+   */
+  createSystemMessageClient(input: { ownerPublicKeyHex: string }): AppMsgSimpleClient;
+
+  /* ====== 同步 ====== */
+
+  triggerSync(): Promise<void>;
+  listTargetSyncStates(): Promise<AppMsgTargetSyncState[]>;
+
+  /* ====== 在线 ====== */
+
+  checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult>;
+}
+
+/**
+ * 反注册 key-scoped storage 时由 plugin-appmsg 提供的 helper 形态。
+ */
+export interface AppMsgPluginKeyspaceAdapter {
+  resolveActivePublicKeyHex(): string | null;
+  onKeyspaceChange(handler: () => void): () => void;
+  keyspace: KeyspaceService;
+  pluginId: string;
+  storageId: string;
+}
 
 /**
  * pluginEndpointId 字段命名合法性（runtime / contracts 共享）。
@@ -339,123 +453,4 @@ export function isValidExactOriginShape(origin: string): boolean {
   if (typeof origin !== "string" || origin.length === 0) return false;
   const re = /^(https?):\/\/([^/:]+):(\d+)$/;
   return re.test(origin);
-}
-
-/**
- * appmsg 平台 internal 接口（plugin-appmsg 单例）。
- *
- * 设计缘由（施工单 §8.1 / §8.3）：
- *   - 由 `packages/plugin-appmsg` 内部实现，是"HubMsg WSS 连接 + key-scoped
- *     本地 DB + 推送分发 + 增量同步 + 在线查询"的唯一真值。
- *   - `protocolService` 是**外部 app** 的协议适配层，仅消费其中"给协议层
- *     用"的子集，**不**直接持有 HubMsg 连接。
- *   - owner 切换 / vault 锁状态变化时由 plugin-appmsg 自身驱动
- *     `connectForOwner` / `disconnect`；调用方不需要手动维护。
- *   - `openLocalDb(...)` 在 enable / owner 切换时由内部逻辑按 `publicKeyHex`
- *     调用 keyspace.openKeyStorage，DB 名由 plugin-appmsg 内部选定。
- *   - `messageId` 全链路 string。
- *   - `createMessageScopedClient(...)` 由 runtime host 在 enable 阶段调用；
- *     返回 sender 已绑定的对外 `AppMsgSimpleClient`。
- */
-export interface AppMsgCore {
-  /** connect 当前 owner。幂等。 */
-  connectForOwner(ownerPublicKeyHex: string): Promise<void>;
-
-  /** 关闭连接；幂等。 */
-  disconnect(): Promise<void>;
-
-  /** 当前连接快照（系统消息应用展示 / 诊断；不参与业务主路径）。 */
-  inspectLocalDb(): AppMsgLocalDbSnapshot;
-
-  /**
-   * 给指定 owner 打开 / 复用本地消息库。
-   *
-   * 平台内部按 `publicKeyHex` + 固定 `storageId = "messages"` 走
-   * `keyspace.openKeyStorage(...)`；打开后把 handle 缓存进 plugin-appmsg
-   * 单例，切换 owner 时关闭旧 handle。
-   *
-   * 失败 / 不可用时返回 `null`；调用方对 null 的语义是"暂时没有本地库，
-   * 列表 / 同步暂时降级"。
-   */
-  openLocalDb(input: { publicKeyHex: string }): Promise<KeyScopedStorageHandle | null>;
-
-  /**
-   * 列"属于自己"的本地消息。
-   *
-   * 关键约束（施工单 §5.3）：
-   *   - **不**走 HubMsg `message.list`；本地 DB 是真值。
-   *   - 失败时按 DB 不可用降级：调用方拿到的 `items` 为空数组；
-   *     `hasMore = false`。
-   */
-  listLocalMessages(input?: AppMsgListInput): Promise<AppMsgListResult>;
-
-  /** 单条取本地消息；不存在或 DB 不可用 → null。 */
-  getLocalMessage(input: AppMsgGetInput): Promise<AppMsgMessage | null>;
-
-  /** 全量发消息 + 落本地库（recipient 自己也是当前 owner 时直接本地落库）。 */
-  sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult>;
-
-  /**
-   * 订阅完整消息推送。
-   *
-   * 调用方拿到的就是完整 `AppMsgMessage`（**不**是 dirty hint）；
-   * 内部路径：HubMsg push → appmsg.core 落本地库 → 派发给本订阅者。
-   */
-  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
-
-  /**
-   * 主动触发一次增量同步（best-effort）。
-   *
-   * 设计缘由：
-   *   - 重连成功 / 收到推送后 / 手动刷新：异步调一次，不会阻塞调用方。
-   *   - 同步失败时记录 `lastSyncError`，**不**抛错——失败就失败，靠下次
-   *     重连 / 下次推送恢复。
-   */
-  triggerSync(): Promise<void>;
-
-  /**
-   * 读出当前 owner 所有本地目标同步状态。
-   *
-   * 主要给系统消息应用渲染"最近同步时间 / 最近错误"。
-   */
-  listTargetSyncStates(): Promise<AppMsgTargetSyncState[]>;
-
-  /**
-   * 批量查若干公钥是否连着 HubMsg。
-   *
-   * 实现：走 HubMsg `message.online`（最小 RPC）；连接断开 / 无 owner 时
-   * 整体返回 `unknown` 对象，**不**抛错。
-   */
-  checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult>;
-
-  /**
-   * 构造 sender 已绑定的对外 `AppMsgSimpleClient`。
-   *
-   * 实现：plugin-appmsg 内部 `new MessageScopedClient(this, sender)`；构造
-   * 即固定 sender 投影，调用方无法更改。
-   *
-   * sender 形态：
-   *   - 外部 app（keymaster protocol 侧）：sender = { publicKeyHex, origin }；
-   *   - 内部插件（manifest.appMessageEndpoint）：sender = { publicKeyHex, appId }；
-   *   - 系统消息应用（keymaster.message）：sender = { publicKeyHex, appId }。
-   */
-  createMessageScopedClient(input: {
-    senderPublicKeyHex: string;
-    senderOrigin?: string;
-    senderAppId?: string;
-  }): AppMsgSimpleClient;
-}
-
-/** 反注册 key-scoped storage 时由 plugin-appmsg 提供的 helper 形态。 */
-export interface AppMsgPluginKeyspaceAdapter {
-  /** 暴露当前 owner；缺失返回 null。 */
-  resolveActivePublicKeyHex(): string | null;
-
-  /** 同步监听 owner / vault 变化。 */
-  onKeyspaceChange(handler: () => void): () => void;
-
-  /** 调 keyspace.openKeyStorage 时的 pluginId / storageId 注入器。 */
-  keyspace: KeyspaceService;
-  pluginId: string;
-  storageId: string;
 }

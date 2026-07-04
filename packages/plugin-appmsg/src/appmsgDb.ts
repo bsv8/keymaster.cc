@@ -1,7 +1,7 @@
 // packages/plugin-appmsg/src/appmsgDb.ts
 // appmsg 本地消息库（key-scoped IndexedDB）。
 //
-// 设计缘由（施工单 2026-07-03 001）：
+// 设计缘由（施工单 2026-07-03 001 + 反馈 §"必须修改"）：
 //   - 本地库是消息真值。每把 key 一个 namespace DB（storageId="messages"），
 //     由 `keyspace.openKeyStorage(...)` 打开；删除 key 时该 DB 由 keyspace
 //     自动清理，禁止组件内 `indexedDB.deleteDatabase` 直接删。
@@ -13,15 +13,16 @@
 //       * `messages.createdAtMs`（数值索引）
 //       * `messages.insertedAtMs`（数值索引）
 //   - 去重：写入时按 messageId 幂等；同一 message 在此 DB 只存在一份。
-//   - 读路径（list / get）只读本地库；**不**走 HubMsg。
-//   - 写路径（HubMsg push）先调 put 写本地库，再让 appmsg.core 派发给订阅者。
-//
-// 与传统 200 条内存缓存的关系：旧内存缓存被本组件完全替代——本地 DB
-// 容量由 IndexedDB 配额决定，不人为限条数。
+//   - **scoped API**：低层不允许"全库读 / 全库 get"——
+//     ACL 边界收口在 DB 层：所有 get / list 都**必须**经 scoped 方法
+//     （`getMessageForScope` / `listMessagesForScope` /
+//     `getMessageForTarget` / `listMessagesForTarget` / `listAllMessages`），
+//     上层不能"自己拼"。
 
 import type {
   AppMsgLocalDbSnapshot,
   AppMsgMessage,
+  AppMsgScope,
   AppMsgTargetSyncState,
   KeyScopedStorageHandle,
   KeyspaceService
@@ -85,31 +86,42 @@ interface StoredMessage {
 }
 
 /**
- * 公开 origin/appId → 内部 endpoint。
+ * 把 `AppMsgScope` 转换为"我看哪些消息"的判定函数。
  *
- * 注：本函数**仅**在 plugin-appmsg 内部映射时使用；公开消息统一走
- * 公开 `AppMsgMessage` 形态。`appmsg.ts` 不再保留 `AppMsgMessageRecord`。
+ * 关键约束：
+ *   - 跨 owner 永远不可见；
+ *   - 同 owner 下，sender 端与 recipient 端必须**严格对称**——本 scope
+ *     只看见 owner 在自己 endpoint 上发送 / 接收的消息。
+ *   - kind = "all"（仅系统消息应用）可见 owner 维度内任意消息。
  */
-function toEndpoint(
-  origin: string | undefined,
-  appId: string | undefined
-): { kind: "origin" | "plugin"; id: string } {
-  if (origin) return { kind: "origin", id: origin };
-  if (appId) return { kind: "plugin", id: appId };
-  // 兜底：本仓库不允许；调用方必须保证 origin 或 appId 二选一。
-  return { kind: "plugin", id: "" };
+function messageMatchesScope(m: AppMsgMessage, scope: AppMsgScope): boolean {
+  if (m.senderPublicKeyHex !== scope.ownerPublicKeyHex &&
+      m.recipientPublicKeyHex !== scope.ownerPublicKeyHex) {
+    return false;
+  }
+  if (scope.kind === "all") return true;
+  if (!scope.id) return false;
+  if (scope.kind === "origin") {
+    return (
+      (m.senderPublicKeyHex === scope.ownerPublicKeyHex &&
+        m.senderOrigin === scope.id) ||
+      (m.recipientPublicKeyHex === scope.ownerPublicKeyHex &&
+        m.recipientOrigin === scope.id)
+    );
+  }
+  if (scope.kind === "plugin") {
+    return (
+      (m.senderPublicKeyHex === scope.ownerPublicKeyHex &&
+        m.senderAppId === scope.id) ||
+      (m.recipientPublicKeyHex === scope.ownerPublicKeyHex &&
+        m.recipientAppId === scope.id)
+    );
+  }
+  return false;
 }
 
 /**
- * 单个本地收件目标维度稳定 id（targetKey）。
- *
- * 维度策略：发送方 perspective 时 recipient 决定；接收方 perspective 时
- * "我是当前 owner 收件"决定。我们只关心"我是当前 owner 时，与我相关的
- * 收件维度"：
- *   - 当 current owner 也是 recipient 时：targetId =
- *     `recipientOrigin ?? recipientAppId`。
- *   - 其它场景（自己发给别人）：仍然记录到同一 DB，但 targetId 用
- *     "我以这个维度发给对方"的稳定 key，便于后续按维度分组。
+ * single target key（<kind>:<id>）↔ target id 转换。
  */
 export function computeTargetId(input: {
   recipientOrigin?: string | null;
@@ -120,9 +132,12 @@ export function computeTargetId(input: {
   return "unknown:";
 }
 
-/** 由公开消息构造 targetId。 */
+/** 公开消息 → target key。 */
 export function targetIdFromMessage(m: AppMsgMessage): string {
-  return computeTargetId({ recipientOrigin: m.recipientOrigin, recipientAppId: m.recipientAppId });
+  return computeTargetId({
+    recipientOrigin: m.recipientOrigin,
+    recipientAppId: m.recipientAppId
+  });
 }
 
 /** DB row → 公开 message。 */
@@ -174,7 +189,6 @@ export async function openAppMsgLocalDb(input: {
 } | null> {
   if (!input.publicKeyHex) return null;
   if (openHandle && openHandle.publicKeyHex === input.publicKeyHex) {
-    // 复用；KeyScopedStorageHandle 由 caller 持有。
     return {
       handle: { db: openHandle.db, name: openHandle.db.name, close: openHandle.close },
       publicKeyHex: openHandle.publicKeyHex
@@ -240,10 +254,199 @@ export function disposeAppMsgLocalDb(): void {
 }
 
 /**
- * 获取当前本地 DB handle 公开快照（state / owner / lastInsertedAtMs / lastError）。
+ * 工厂：构造绑定到当前 openHandle 的 db 操作集合（scoped）。
  *
- * 设计缘由（施工单 §5.4）：状态由本地 DB 决定；锁定 / 无 owner 时
- * state = "idle"。
+ * 关键边界：DB 层**不**暴露"无 scope 的全库读"。所有读取必须经
+ * 下方方法之一：
+ *   - `getMessageForScope(...)` / `listMessagesForScope(...)`：按
+ *     `AppMsgScope` 过滤；用于 `AppMsgCore.list/get` 路径；
+ *   - `getMessageForTarget(...)` / `listMessagesForTarget(...)`：按单
+ *     targetKey 维度过滤；用于 sync 路径；
+ *   - `listAllMessages(...)`：仅 `subscribeUnfilteredMessages` / system
+ *     message app 这条有限路径使用。
+ */
+export function createAppMsgLocalDbOps(handle: KeyScopedStorageHandle) {
+  const db = handle.db;
+
+  /* ====== 写（不涉及 scope） ====== */
+
+  async function putMessage(m: AppMsgMessage): Promise<void> {
+    const row = toRow(m);
+    const tx = db.transaction("messages", "readwrite");
+    tx.objectStore("messages").put(row);
+    await txDone(tx);
+  }
+
+  async function putMessages(list: AppMsgMessage[]): Promise<number> {
+    if (list.length === 0) return 0;
+    const tx = db.transaction("messages", "readwrite");
+    const store = tx.objectStore("messages");
+    let written = 0;
+    for (const m of list) {
+      store.put(toRow(m));
+      written += 1;
+    }
+    await txDone(tx);
+    return written;
+  }
+
+  /* ====== 读（scoped） ====== */
+
+  /**
+   * scope ACL 读取：取单条 message，但仅在该 `scope` 可见时才返回。
+   *
+   * `noScopeAccess = true` 时返回 `null`。调用方**不**能直接调此方法
+   * 读全库——这是一个 ACL 收口。
+   */
+  async function getMessageForScope(input: {
+    messageId: string;
+    scope: AppMsgScope;
+  }): Promise<AppMsgMessage | null> {
+    const tx = db.transaction("messages", "readonly");
+    const row = (await reqAsPromise(tx.objectStore("messages").get(input.messageId))) as
+      | StoredMessage
+      | undefined;
+    if (!row) return null;
+    const m = toMessage(row);
+    return messageMatchesScope(m, input.scope) ? m : null;
+  }
+
+  /**
+   * scope ACL list：取 scope 内可见的全部消息，按 insertedAtMs desc。
+   *
+   * 全表扫描 + 内存过滤——v1 简化：对单 key 维度来说，DB 量级可控。
+   */
+  async function listMessagesForScope(input: {
+    scope: AppMsgScope;
+    afterMessageId?: string;
+    limit?: number;
+  }): Promise<AppMsgMessage[]> {
+    const tx = db.transaction("messages", "readonly");
+    const rows = (await reqAsPromise(tx.objectStore("messages").getAll())) as StoredMessage[];
+    const out: AppMsgMessage[] = [];
+    for (const r of rows) {
+      const m = toMessage(r);
+      if (!messageMatchesScope(m, input.scope)) continue;
+      if (input.afterMessageId && r.messageId <= input.afterMessageId) continue;
+      out.push(m);
+    }
+    out.sort((a, b) => b.insertedAtMs - a.insertedAtMs);
+    return out.slice(0, Math.max(1, input.limit ?? 50));
+  }
+
+  /**
+   * 单 target 维度同步：sync 路径专用。
+   *
+   * 行为：按 targetId 索引读取——比 scope list 快得多（命中索引命中）。
+   * **不**做 ACL（targetId 维度 = 仅"我以这个 target 维度收"）。
+   */
+  async function getMessageForTarget(input: {
+    messageId: string;
+    targetId: string;
+  }): Promise<AppMsgMessage | null> {
+    const tx = db.transaction("messages", "readonly");
+    const store = tx.objectStore("messages");
+    const row = (await reqAsPromise(store.get(input.messageId))) as StoredMessage | undefined;
+    if (!row) return null;
+    if (row.targetId !== input.targetId) return null;
+    return toMessage(row);
+  }
+
+  /** 单 target 增量 list（按 messageId > cursor 过滤）。 */
+  async function listMessagesForTarget(input: {
+    targetId: string;
+    afterMessageId?: string;
+    limit?: number;
+  }): Promise<AppMsgMessage[]> {
+    const tx = db.transaction("messages", "readonly");
+    const store = tx.objectStore("messages");
+    const idx = store.index("targetId");
+    const range = IDBKeyRange.only(input.targetId);
+    const rows = (await reqAsPromise(idx.getAll(range))) as StoredMessage[];
+    const out: AppMsgMessage[] = [];
+    for (const r of rows) {
+      if (input.afterMessageId && r.messageId <= input.afterMessageId) continue;
+      out.push(toMessage(r));
+    }
+    out.sort((a, b) => b.insertedAtMs - a.insertedAtMs);
+    return out.slice(0, Math.max(1, input.limit ?? 100));
+  }
+
+  /**
+   * 系统消息应用专用全量读——本 DB 操作层不强制锁，仅在 `appmsg.core`
+   * 工厂层用 `KEYMASTER_MESSAGE_APP_ID` 校验调用方，**仅**允许系统
+   * 消息应用构造者使用。
+   */
+  async function listAllMessages(input?: {
+    afterMessageId?: string;
+    limit?: number;
+  }): Promise<AppMsgMessage[]> {
+    const tx = db.transaction("messages", "readonly");
+    const rows = (await reqAsPromise(tx.objectStore("messages").getAll())) as StoredMessage[];
+    const out: AppMsgMessage[] = [];
+    for (const r of rows) {
+      if (input?.afterMessageId && r.messageId <= input.afterMessageId) continue;
+      out.push(toMessage(r));
+    }
+    out.sort((a, b) => b.insertedAtMs - a.insertedAtMs);
+    return out.slice(0, Math.max(1, input?.limit ?? 200));
+  }
+
+  /* ====== targets / 同步状态 ====== */
+
+  async function listTargetIds(): Promise<string[]> {
+    const tx = db.transaction("targets", "readonly");
+    const rows = (await reqAsPromise(tx.objectStore("targets").getAllKeys())) as IDBValidKey[];
+    return rows.map((k) => String(k));
+  }
+
+  async function getTargetState(targetId: string): Promise<AppMsgTargetSyncState | null> {
+    const tx = db.transaction("targets", "readonly");
+    const row = (await reqAsPromise(tx.objectStore("targets").get(targetId))) as
+      | (Omit<AppMsgTargetSyncState, "targetKey"> & { targetKey?: string })
+      | undefined;
+    if (!row) return null;
+    return {
+      targetKey: targetId,
+      lastSyncedMessageId: row.lastSyncedMessageId ?? "",
+      lastReceivedAtMs: row.lastReceivedAtMs ?? 0,
+      lastSyncStartedAtMs: row.lastSyncStartedAtMs ?? 0,
+      lastSyncCompletedAtMs: row.lastSyncCompletedAtMs ?? 0,
+      lastSyncError: row.lastSyncError ?? null
+    };
+  }
+
+  async function putTargetState(state: AppMsgTargetSyncState): Promise<void> {
+    const tx = db.transaction("targets", "readwrite");
+    tx.objectStore("targets").put(state);
+    await txDone(tx);
+  }
+
+  async function listTargetStates(): Promise<AppMsgTargetSyncState[]> {
+    const tx = db.transaction("targets", "readonly");
+    const rows = (await reqAsPromise(tx.objectStore("targets").getAll())) as AppMsgTargetSyncState[];
+    return rows ?? [];
+  }
+
+  return {
+    putMessage,
+    putMessages,
+    getMessageForScope,
+    listMessagesForScope,
+    getMessageForTarget,
+    listMessagesForTarget,
+    listAllMessages,
+    listTargetIds,
+    getTargetState,
+    putTargetState,
+    listTargetStates
+  };
+}
+
+export type AppMsgLocalDbOps = ReturnType<typeof createAppMsgLocalDbOps>;
+
+/**
+ * 同步全库 snapshot（仅供 `inspectLocalDb` 阶段使用；不暴露给 caller）。
  */
 export function inspectLocalDb(input: {
   currentBoundOwner: string | null;
@@ -264,130 +467,41 @@ export function inspectLocalDb(input: {
 }
 
 /**
- * 工厂：构造绑定到当前 openHandle 的 db 操作集合。
+ * 把 sender 投影转成 `AppMsgScope`。
  *
- * 调用方应在每次操作前确认 handle 仍处于 active；如果 owner 切换了，
- * 调用方负责重新调用 `openAppMsgLocalDb(...)` 拿到新 handle。
+ * 设计缘由：
+ *   - 把"origin caller vs plugin caller vs system all"统一为一个
+ *     scope 判定函数；
+ *   - 上层（core / facade）只用 `AppMsgScope` 做 ACL，避免散落的
+ *     if-else。
  */
-export function createAppMsgLocalDbOps(handle: KeyScopedStorageHandle) {
-  const db = handle.db;
-
-  /** 写一条消息（按 messageId 幂等）。 */
-  async function putMessage(m: AppMsgMessage): Promise<void> {
-    const row = toRow(m);
-    const tx = db.transaction("messages", "readwrite");
-    tx.objectStore("messages").put(row);
-    await txDone(tx);
-  }
-
-  /** 批量写（同一事务）。 */
-  async function putMessages(list: AppMsgMessage[]): Promise<number> {
-    if (list.length === 0) return 0;
-    const tx = db.transaction("messages", "readwrite");
-    const store = tx.objectStore("messages");
-    let written = 0;
-    for (const m of list) {
-      store.put(toRow(m));
-      written += 1;
-    }
-    await txDone(tx);
-    return written;
-  }
-
-  /** 按 messageId 单条取。 */
-  async function getMessage(messageId: string): Promise<AppMsgMessage | null> {
-    const tx = db.transaction("messages", "readonly");
-    const row = (await reqAsPromise(tx.objectStore("messages").get(messageId))) as
-      | StoredMessage
-      | undefined;
-    return row ? toMessage(row) : null;
-  }
-
-  /**
-   * 增量正向 list：返回 `messageId > afterMessageId` 的最近 limit 条记录；
-   * `afterMessageId` 缺省时不过滤。
-   *
-   * 入参 `targetId`（可选）：仅返回与某一 targetKey 相关的消息。
-   * 缺省 = 当前 owner 的所有消息（sender 或 recipient 都算）。
-   */
-  async function listMessages(input?: {
-    targetId?: string;
-    limit?: number;
-    afterMessageId?: string;
-  }): Promise<AppMsgMessage[]> {
-    const limit = input?.limit ?? 50;
-    const tx = db.transaction("messages", "readonly");
-    const store = tx.objectStore("messages");
-    const items: AppMsgMessage[] = [];
-    if (input?.targetId) {
-      const idx = store.index("targetId");
-      const range = IDBKeyRange.only(input.targetId);
-      const rows = (await reqAsPromise(idx.getAll(range))) as StoredMessage[];
-      for (const r of rows) {
-        if (input.afterMessageId && r.messageId <= input.afterMessageId) continue;
-        items.push(toMessage(r));
-      }
-    } else {
-      const rows = (await reqAsPromise(store.getAll())) as StoredMessage[];
-      for (const r of rows) {
-        if (input?.afterMessageId && r.messageId <= input.afterMessageId) continue;
-        items.push(toMessage(r));
-      }
-    }
-    // 按 insertedAtMs 倒序（最新优先）
-    items.sort((a, b) => b.insertedAtMs - a.insertedAtMs);
-    // 截断 limit；hasMore 由调用方在结果集合比 limit 多 1 时推断。
-    return items.slice(0, Math.max(1, limit));
-  }
-
-  /** 取一个 owner 维度下所有不重复 targetId 列表。 */
-  async function listTargetIds(): Promise<string[]> {
-    const tx = db.transaction("targets", "readonly");
-    const rows = (await reqAsPromise(tx.objectStore("targets").getAllKeys())) as IDBValidKey[];
-    return rows.map((k) => String(k));
-  }
-
-  /** 取单个 target 的同步状态。 */
-  async function getTargetState(targetId: string): Promise<AppMsgTargetSyncState | null> {
-    const tx = db.transaction("targets", "readonly");
-    const row = (await reqAsPromise(tx.objectStore("targets").get(targetId))) as
-      | (Omit<AppMsgTargetSyncState, "targetKey"> & { targetKey?: string })
-      | undefined;
-    if (!row) return null;
+export function senderProjectionToScope(input: {
+  senderPublicKeyHex: string;
+  senderOrigin?: string;
+  senderAppId?: string;
+}): AppMsgScope {
+  if (input.senderOrigin) {
     return {
-      targetKey: targetId,
-      lastSyncedMessageId: row.lastSyncedMessageId ?? "",
-      lastReceivedAtMs: row.lastReceivedAtMs ?? 0,
-      lastSyncStartedAtMs: row.lastSyncStartedAtMs ?? 0,
-      lastSyncCompletedAtMs: row.lastSyncCompletedAtMs ?? 0,
-      lastSyncError: row.lastSyncError ?? null
+      ownerPublicKeyHex: input.senderPublicKeyHex,
+      kind: "origin",
+      id: input.senderOrigin
     };
   }
-
-  /** 写单个 target 的同步状态（按 targetKey 幂等）。 */
-  async function putTargetState(state: AppMsgTargetSyncState): Promise<void> {
-    const tx = db.transaction("targets", "readwrite");
-    tx.objectStore("targets").put(state);
-    await txDone(tx);
+  if (input.senderAppId) {
+    return {
+      ownerPublicKeyHex: input.senderPublicKeyHex,
+      kind: "plugin",
+      id: input.senderAppId
+    };
   }
-
-  /** 列出所有 target 同步状态。 */
-  async function listTargetStates(): Promise<AppMsgTargetSyncState[]> {
-    const tx = db.transaction("targets", "readonly");
-    const rows = (await reqAsPromise(tx.objectStore("targets").getAll())) as AppMsgTargetSyncState[];
-    return rows ?? [];
-  }
-
+  // 兜底：如果既没 origin 也没 appId，给个"全" scope（**仅** system message
+  // app 应使用；调用方应在 facade 层就拒绝这种输入）。
   return {
-    putMessage,
-    putMessages,
-    getMessage,
-    listMessages,
-    listTargetIds,
-    getTargetState,
-    putTargetState,
-    listTargetStates
+    ownerPublicKeyHex: input.senderPublicKeyHex,
+    kind: "all",
+    id: null
   };
 }
 
-export type AppMsgLocalDbOps = ReturnType<typeof createAppMsgLocalDbOps>;
+// 防止 IDE 报 unused
+void 0;

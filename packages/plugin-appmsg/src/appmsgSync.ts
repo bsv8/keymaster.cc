@@ -153,9 +153,25 @@ export async function syncOneScope(input: {
     toWrite.push(recordToPublicMessage(item));
     if (item.messageId > maxMessageId) maxMessageId = item.messageId;
   }
+  // 写入前先**用本地 DB 的 target 维度去重**——同一 message 已经在 DB
+  // 命中 targetId 时本次跳过，避免"重复 cover"表面写入。
+  const filtered: AppMsgMessage[] = [];
+  for (const m of toWrite) {
+    let skip = false;
+    try {
+      const existing = await input.ops.getMessageForTarget({
+        messageId: m.messageId,
+        targetId: input.targetKey
+      });
+      if (existing) skip = true;
+    } catch {
+      // 取失败不阻断写入
+    }
+    if (!skip) filtered.push(m);
+  }
   let written = 0;
   try {
-    written = await input.ops.putMessages(toWrite);
+    written = await input.ops.putMessages(filtered);
   } catch (err) {
     return fail(
       input.ops,

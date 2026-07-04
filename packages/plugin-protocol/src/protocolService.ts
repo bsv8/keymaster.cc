@@ -663,8 +663,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     // （**不**再是 dirty hint），转发给当前 origin 对应 endpoint 的 caller
     // （其它 origin 收不到）。事件路径：
     //   `HubMsg -> appmsg.core -> protocolService -> 当前 caller`。
+    //   协议层在 popup main thread 上订阅全量事件；`appmsg.core` 内部
+    //   按 scope 派发，但协议层做的是"按 event.origin 找到当前 caller
+    //   source window"——所以这里走 unfiltered 订阅，必要时由
+    //   dispatch 内部再做 origin 过滤。
     if (deps.appMsgCore) {
-      deps.appMsgCore.subscribeMessages((msg) => {
+      deps.appMsgCore.subscribeUnfilteredMessages((msg) => {
         this.dispatchAppMsgMessageReceived(msg);
       });
     }
@@ -5797,13 +5801,14 @@ function looksLikeReady(v: unknown): boolean {
 }
 
 /**
- * 顶层 `event` 报文形状判定（施工单 2026-07-01 002 硬切换）。
+ * 顶层 `event` 报文形状判定（施工单 2026-07-03 001 硬切换）。
  *
  * 设计缘由：
- *   - v1 只引入一种 event：`appmsg.inbox_dirty`；
+ *   - v1 只引入一种 event：`appmsg.message_received`；
  *   - 由 protocolService 主动向当前 origin 的 caller 推送（不是 caller
  *     发来）；handleMessage 路径忽略 inbound event（只接受 outbound
  *     即 server-pushed 的方向；这里结构判定**仅**用于兼容 inbound 噪声）。
+ *   - 旧 `appmsg.inbox_dirty` 已彻底删除（硬切换 2026-07-03/001）。
  */
 function looksLikeEvent(v: unknown): boolean {
   if (!v || typeof v !== "object") return false;

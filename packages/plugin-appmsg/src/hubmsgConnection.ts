@@ -1,17 +1,15 @@
 // packages/plugin-appmsg/src/hubmsgConnection.ts
-// HubMsg 单 WSS 连接管理（v1，硬切换 001 之后）。
+// HubMsg 单 WSS 连接管理（v1，硬切换 2026-07-03/001 之后）。
 //
-// 设计缘由（施工单 2026-07-03 001）：
+// 设计缘由：
 //   - 单一 WSS 入口：HubMsg 真值层提供的 `wss://<host>/ws/v1`；
 //   - 三步握手：server_open -> client_bind -> bind_ready；
 //   - 业务帧：request / result / event；
 //   - 推送事件：`message.received`（HubMsg → keymaster，payload 为完整
-//     `HubMsgMessageRecord`）；
-//   - 旧 `appmsg.inbox_dirty` 事件已彻底删除（硬切换 001 后 platform
-//     不再使用；external app 通过 `appmsg.message_received` event
-//     收到完整消息）。
+//     `HubMsgMessageRecord`）—— keymaster 自己按 origin/appId 分发。
 //   - 协议 RPC：message.send / message.list / message.get / message.online。
-//   - 旧 message.origins / message.counts 内部诊断 RPC 全部删除。
+//   - 旧 `appmsg.inbox_dirty` / `message.origins` / `message.counts`
+//     已彻底删除（硬切换 2026-07-03/001）。
 //
 // 边界：
 //   - 本模块**不**依赖具体签名 / 私钥操作；client_bind 的签名由 caller

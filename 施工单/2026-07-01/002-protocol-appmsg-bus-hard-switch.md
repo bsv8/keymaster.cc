@@ -1,5 +1,21 @@
 # 002 protocol appmsg 应用消息总线 + 插件端点统一地址模型硬切换一次性迭代施工单
 
+> **⚠️ 已被 2026-07-03/001 硬切换部分废止**
+>
+> 本单对 inbox_dirty / box 维度 / 远端 owner 统计 / 系统诊断页路径 /
+> `appmsg.inbox_dirty` 公开事件的描述**全部**已被
+> [../2026-07-03/001-keymaster-appmsg-local-truth-full-push-online-hard-switch.md](../2026-07-03/001-keymaster-appmsg-local-truth-full-push-online-hard-switch.md)
+> 硬切换覆盖：
+>
+> - 真值已从"远端 DB + dirty hint"收口为"keymaster 本地 DB + 完整消息事件"；
+> - `appmsg.inbox_dirty` 已彻底删除；
+> - `box = inbox|sent|all` 已不再作为公开主接口；
+> - owner 级诊断 RPC（`message.origins` / `message.counts`）已彻底删除；
+> - 系统页 `/system/messages` 已彻底删除。
+>
+> 本文档**仅**作为历史参考保留；**不要**基于本单写新代码，
+> 与本单冲突时一律以 2026-07-03/001 为准。
+
 ## 参考文档与现状代码
 
 本次施工、联调、验收以下列文档与代码为准：

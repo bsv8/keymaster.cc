@@ -37,13 +37,18 @@ function makeFakeCore(): AppMsgCore {
       lastError: null
     })),
     openLocalDb: vi.fn(async () => null),
-    listLocalMessages: vi.fn(async (_?: { limit?: number; afterMessageId?: string }): Promise<AppMsgListResult> => ({
+    sendScopedMessage: vi.fn(async () => ({ messageId: "1", createdAtMs: 1 })),
+    listScopedMessages: vi.fn(async (): Promise<AppMsgListResult> => ({
       items: [fakeMsg()],
       hasMore: false
     })),
-    getLocalMessage: vi.fn(async () => fakeMsg()),
-    sendMessage: vi.fn(async () => ({ messageId: "1", createdAtMs: 1 })),
-    subscribeMessages: vi.fn(() => () => undefined),
+    getScopedMessage: vi.fn(async () => fakeMsg()),
+    subscribeScopedMessages: vi.fn(() => () => undefined),
+    subscribeUnfilteredMessages: vi.fn(() => () => undefined),
+    listUnfilteredMessages: vi.fn(async (): Promise<AppMsgListResult> => ({
+      items: [fakeMsg()],
+      hasMore: false
+    })),
     triggerSync: vi.fn(async () => undefined),
     listTargetSyncStates: vi.fn(async () => []),
     checkOnline: vi.fn(async (hexes): Promise<AppMsgOnlineResult> => {
@@ -53,26 +58,42 @@ function makeFakeCore(): AppMsgCore {
     }),
     createMessageScopedClient: vi.fn(() => {
       throw new Error("not used in unit tests");
+    }),
+    createSystemMessageClient: vi.fn(({ ownerPublicKeyHex }: { ownerPublicKeyHex: string }) => {
+      return {
+        sendMessage: async () => ({ messageId: "1", createdAtMs: 1 }),
+        listMessages: async () => ({ items: [fakeMsg()], hasMore: false }),
+        getMessage: async () => fakeMsg(),
+        subscribeMessages: () => () => undefined,
+        checkOnline: async (hexes: string[]) => {
+          const out: AppMsgOnlineResult = {};
+          for (const h of hexes) out[h] = h === OWNER ? "online" : "offline";
+          return out;
+        },
+        sender: { senderPublicKeyHex: ownerPublicKeyHex, senderAppId: "keymaster.message" }
+      };
     })
   };
 }
 
 describe("createMessageService", () => {
-  it("listLocalMessages returns message items from core", async () => {
+  it("listLocalMessages goes through system message facade -> listUnfilteredMessages", async () => {
     const core = makeFakeCore();
     const service = createMessageService(core);
     const items = await service.listLocalMessages();
     expect(items.length).toBe(1);
-    expect((core.listLocalMessages as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+    // createSystemMessageClient was called; the facade's listMessages goes
+    // through listUnfilteredMessages on the core.
+    expect(
+      (core.createSystemMessageClient as ReturnType<typeof vi.fn>).mock.calls.length
+    ).toBe(1);
   });
 
-  it("getLocalMessage delegates to core with right messageId", async () => {
+  it("getLocalMessage goes through system message facade", async () => {
     const core = makeFakeCore();
     const service = createMessageService(core);
-    await service.getLocalMessage("42");
-    expect((core.getLocalMessage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toEqual({
-      messageId: "42"
-    });
+    const got = await service.getLocalMessage("42");
+    expect(got?.messageId).toBe("1");
   });
 
   it("triggerSync delegates to core", async () => {

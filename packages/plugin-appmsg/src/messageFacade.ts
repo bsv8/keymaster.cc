@@ -1,54 +1,45 @@
 // packages/plugin-appmsg/src/messageFacade.ts
-// app/plugin 统一简单 facade。
+// app/plugin 统一简单 facade 实现。
 //
-// 设计缘由（施工单 2026-07-03 001 §4.4 / §5 / §8.3）：
-//   - app / plugin 通过 `AppMsgSimpleClient` 拿到系统消息能力；
-//   - facade 内部对 sender 投影做"自动补 owner / endpoint"——调用方**不**
-//     允许也不需要传 sender / endpoint / box / atMs；
-//   - facade 内部按本地 DB / 在线 RPC 走真值，**不**暴露同步 / 缓存细节；
-//   - 失败语义：send / list / get 走 reject；subscribeMessages handler
-//     内部抛错吞掉；checkOnline 整体失败时不抛错，全 `unknown`。
+// 设计缘由（施工单 2026-07-03 001 + 反馈 §"必须修改"）：
+//   - 每个 facade 实例在构造时把 `AppMsgSenderProjection` 固化；
+//   - 任何 sendMessage / listMessages / getMessage / subscribeMessages
+//     都**带这个 sender 投影走到 core**；
+//   - 不允许 facade 端"假设 core 自动知道 sender"——这一假设在反馈
+//     §"必须修改"中已明确指出会引入 ACL 漏洞。
+//   - facade 还提供校验入参合法性的工具函数（recipient 必须给出
+//     一个且唯一的 `recipientOrigin` / `recipientAppId`）；
+//   - 系统消息应用专用 facade：单独由 `makeSystemMessageAppClient`
+//     工厂构造，senderAppId 固定为 `keymaster.message`。
 //
-// 本文件不实现具体业务（都是透传到 appmsg.core）——只把 sender 投影从
-// 公开 caller 视角切到 platform 内部视角；以及保证 facade 不会"漏"出
-// 任何 owner / endpoint 字段。
+// 本文件**不**持有任何 owner 私钥 / HubMsg 连接真值——所有能力来
+// 自 `AppMsgCore`。
 
 import type {
   AppMsgCore,
   AppMsgGetInput,
+  AppMsgGetScopedInput,
   AppMsgListInput,
+  AppMsgListScopedInput,
   AppMsgListResult,
   AppMsgMessage,
   AppMsgOnlineInput,
   AppMsgOnlineResult,
-  AppMsgRecipient,
   AppMsgSendInput,
   AppMsgSendResult,
-  AppMsgSimpleClient
+  AppMsgSendScopedInput,
+  AppMsgSenderProjection,
+  AppMsgSimpleClient,
+  AppMsgSubscribeScopedInput
+} from "@keymaster/contracts";
+import {
+  KEYMASTER_MESSAGE_APP_ID
 } from "@keymaster/contracts";
 
 /**
- * sender 投影（platform 内部身份）。
+ * 校验 facade 入参。
  *
- * 构造后不可变：sender 身份 + pubkey 在创建时固定，调用方无法更改。
- */
-export interface SenderProjection {
-  senderPublicKeyHex: string;
-  senderOrigin?: string;
-  senderAppId?: string;
-}
-
-/**
- * 把 sender 投影 + 公开 send 入参转成 `appmsg.core.sendMessage(...)` 真实入参。
- *
- * `appmsg.core.sendMessage` 接受公开 `AppMsgSendInput`（仅 `recipient*` /
- * `body` / `contentType` / `clientMessageId` / `createdAtMs`）；sender 投影
- * 由 core 内部从 "当前 owner runtime" + "当前 caller 是 origin 还是 appId"
- * 推断；facade 这里**不**替 caller 决定 sender——它由 runtime 在构造
- * `MessageScopedClient` 时固定，不在 send 调用时再传。
- *
- * 因此本函数仅做 recipient 必填字段合法性校验：必须恰好指定
- * `recipientOrigin` 或 `recipientAppId` 之一。
+ * 失败路径：抛 `Error`——调用方在 facade 自己 try/catch。
  */
 export function validateSendInput(input: AppMsgSendInput): void {
   const hasOrigin = typeof input.recipientOrigin === "string" && input.recipientOrigin.length > 0;
@@ -67,44 +58,80 @@ export function validateSendInput(input: AppMsgSendInput): void {
   if (!input.clientMessageId) {
     throw new Error("appmsg: send requires clientMessageId");
   }
+  if (!input.recipientPublicKeyHex || input.recipientPublicKeyHex.length !== 66) {
+    throw new Error("appmsg: send requires valid recipientPublicKeyHex");
+  }
+  if (hasOrigin && !/^(https?):\/\/([^/:]+):(\d+)$/.test(input.recipientOrigin as string)) {
+    throw new Error("appmsg: invalid recipientOrigin (must be scheme://host:port)");
+  }
+  if (hasAppId && !/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(input.recipientAppId as string)) {
+    throw new Error("appmsg: invalid recipientAppId (must be portable shape)");
+  }
 }
 
 /**
  * 简单 facade 实现。
  *
- * 实现要点：
- *   - `sendMessage`：透传到 core；发送时 sender 由 core 自动从"当前 bind owner
- *     + senderProjection"得到—— facade 这里**不**给 sender。
- *   - `listMessages` / `getMessage`：透传到本地库读。
- *   - `subscribeMessages`：透传到 core；core 内部在 HubMsg push 时先写本地
- *     库再分发给订阅者，**不**再有 inbox_dirty 间接路径。
- *   - `checkOnline`：透传到 core；core 内部调 HubMsg `message.online`，
- *     失败整体回 `unknown`，**不**抛错。
+ * 关键约束：
+ *   - `sender` 在构造时固定，**不**变更；任何对 facade 的方法调用都
+ *     自动带入 `sender` 给 core；
+ *   - send / list / get / subscribe 全部走 core 的 scoped 接口；
+ *   - subscribeMessages 的内部回调只在 scope 内事件触发时被调；
+ *   - checkOnline 不带 sender 投影（与 sender 解耦）。
  */
 export class MessageScopedClient implements AppMsgSimpleClient {
-  readonly sender: SenderProjection;
-  private readonly core: AppMsgCore;
+  readonly sender: AppMsgSenderProjection;
 
-  constructor(core: AppMsgCore, sender: SenderProjection) {
-    this.core = core;
+  constructor(private readonly core: AppMsgCore, sender: AppMsgSenderProjection) {
     this.sender = sender;
   }
 
   async sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult> {
     validateSendInput(input);
-    return this.core.sendMessage(input);
+    const scoped: AppMsgSendScopedInput = {
+      senderPublicKeyHex: this.sender.senderPublicKeyHex,
+      senderOrigin: this.sender.senderOrigin,
+      senderAppId: this.sender.senderAppId,
+      recipientPublicKeyHex: input.recipientPublicKeyHex,
+      recipientOrigin: input.recipientOrigin,
+      recipientAppId: input.recipientAppId,
+      contentType: input.contentType,
+      body: input.body,
+      clientMessageId: input.clientMessageId,
+      createdAtMs: input.createdAtMs
+    };
+    return this.core.sendScopedMessage(scoped);
   }
 
   async listMessages(input?: AppMsgListInput): Promise<AppMsgListResult> {
-    return this.core.listLocalMessages(input);
+    const scoped: AppMsgListScopedInput = {
+      senderPublicKeyHex: this.sender.senderPublicKeyHex,
+      senderOrigin: this.sender.senderOrigin,
+      senderAppId: this.sender.senderAppId,
+      afterMessageId: input?.afterMessageId,
+      limit: input?.limit
+    };
+    return this.core.listScopedMessages(scoped);
   }
 
   async getMessage(input: AppMsgGetInput): Promise<AppMsgMessage | null> {
-    return this.core.getLocalMessage(input);
+    const scoped: AppMsgGetScopedInput = {
+      senderPublicKeyHex: this.sender.senderPublicKeyHex,
+      senderOrigin: this.sender.senderOrigin,
+      senderAppId: this.sender.senderAppId,
+      messageId: input.messageId
+    };
+    return this.core.getScopedMessage(scoped);
   }
 
   subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void {
-    return this.core.subscribeMessages(handler);
+    const scoped: AppMsgSubscribeScopedInput = {
+      senderPublicKeyHex: this.sender.senderPublicKeyHex,
+      senderOrigin: this.sender.senderOrigin,
+      senderAppId: this.sender.senderAppId,
+      handler
+    };
+    return this.core.subscribeScopedMessages(scoped);
   }
 
   async checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult> {
@@ -114,47 +141,94 @@ export class MessageScopedClient implements AppMsgSimpleClient {
 
 /**
  * 工厂：构造一个对外的 sender 已绑定 scoped client。
- *
- * runtime host 在 enable / 调用方在组装时用本工厂；本工厂**不**记录
- * 任何状态，只把 sender 投影固化在闭包里。
  */
 export function makeMessageScopedClient(
   core: AppMsgCore,
-  sender: SenderProjection
+  sender: AppMsgSenderProjection
 ): AppMsgSimpleClient {
   return new MessageScopedClient(core, sender);
 }
 
 /**
- * `MessageAppScopedClient` —— keymaster.message 系统消息应用专用。
+ * 系统消息应用 facade。
  *
- * 与 `MessageScopedClient` 行为一致，但标记 appId，方便以后日志/审计
- * 在记录时知道这是系统消息应用。
+ * 关键约束：
+ *   - senderAppId 固定为 `keymaster.message`；
+ *   - 内部走 `subscribeUnfilteredMessages` / `listUnfilteredMessages`——
+ *     也就是说系统消息应用看得见所有消息真值；
+ *   - 由 `AppMsgCore.createSystemMessageClient(...)` 工厂层校验
+ *     `KEYMASTER_MESSAGE_APP_ID` 一致，不允许其它 caller 制造这种 client。
  */
-export class SystemMessageAppClient extends MessageScopedClient {
-  readonly appId: string;
-  constructor(core: AppMsgCore, sender: SenderProjection, appId: string) {
-    super(core, sender);
-    this.appId = appId;
+export class SystemMessageAppClient implements AppMsgSimpleClient {
+  static readonly APP_ID: string = KEYMASTER_MESSAGE_APP_ID;
+  readonly sender: AppMsgSenderProjection;
+
+  constructor(private readonly core: AppMsgCore, ownerPublicKeyHex: string) {
+    this.sender = {
+      senderPublicKeyHex: ownerPublicKeyHex,
+      senderAppId: SystemMessageAppClient.APP_ID
+    };
+  }
+
+  async sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult> {
+    validateSendInput(input);
+    const scoped: AppMsgSendScopedInput = {
+      senderPublicKeyHex: this.sender.senderPublicKeyHex,
+      senderOrigin: this.sender.senderOrigin,
+      senderAppId: this.sender.senderAppId,
+      recipientPublicKeyHex: input.recipientPublicKeyHex,
+      recipientOrigin: input.recipientOrigin,
+      recipientAppId: input.recipientAppId,
+      contentType: input.contentType,
+      body: input.body,
+      clientMessageId: input.clientMessageId,
+      createdAtMs: input.createdAtMs
+    };
+    return this.core.sendScopedMessage(scoped);
+  }
+
+  /**
+   * 系统消息应用自己的 list：走"全库读"——**不**走 scoped。
+   *
+   * 由 `AppMsgCore.createSystemMessageClient` 工厂层再次守门；非系统
+   * 消息应用路径**不**应能调到这里。
+   */
+  async listMessages(input?: AppMsgListInput): Promise<AppMsgListResult> {
+    return this.core.listUnfilteredMessages(input);
+  }
+
+  async getMessage(input: AppMsgGetInput): Promise<AppMsgMessage | null> {
+    // 系统消息应用读单条仍走 unfiltered——允许看任何 message。
+    const res = await this.core.listUnfilteredMessages({ limit: 200 });
+    return res.items.find((m) => m.messageId === input.messageId) ?? null;
+  }
+
+  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void {
+    return this.core.subscribeUnfilteredMessages(handler);
+  }
+
+  async checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult> {
+    return this.core.checkOnline(input);
   }
 }
 
 /**
- * 工厂：构造系统消息应用自身的 scoped client。
+ * 工厂：构造系统消息应用 scoped client。
  *
- * 调用方传 core + 当前 owner publicKeyHex + 系统消息应用 appId
- * （固定为 `keymaster.message`）。
+ * 调用方传 core + 当前 owner publicKeyHex；不再需要 caller 自报
+ * appId——本工厂直接固化为 `keymaster.message`。
  */
 export function makeSystemMessageAppClient(
   core: AppMsgCore,
   ownerPublicKeyHex: string
 ): AppMsgSimpleClient {
-  return new SystemMessageAppClient(
-    core,
-    { senderPublicKeyHex: ownerPublicKeyHex, senderAppId: "keymaster.message" },
-    "keymaster.message"
-  );
+  return new SystemMessageAppClient(core, ownerPublicKeyHex);
 }
 
-// 防止被 IDE 报告 unused
-export type { AppMsgRecipient };
+/**
+ * 兼容旧 `AppMsgPluginClient` 别名。
+ */
+export type { AppMsgPluginClient } from "@keymaster/contracts";
+
+// 防止 IDE 报 unused
+void (0);
