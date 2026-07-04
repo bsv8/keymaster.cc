@@ -342,7 +342,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
             muted
             data-webrtc-video="local"
           />
-          <span style={{ position: "absolute", padding: 4 }}>local</span>
+          <span className="km-webrtc-page__media-tile-label">local</span>
         </div>
         <div className="km-webrtc-page__media-tile">
           <video
@@ -352,7 +352,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
             playsInline
             data-webrtc-video="remote"
           />
-          <span style={{ position: "absolute", padding: 4 }}>remote</span>
+          <span className="km-webrtc-page__media-tile-label">remote</span>
         </div>
       </div>
     </section>

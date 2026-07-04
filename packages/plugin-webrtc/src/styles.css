@@ -118,6 +118,7 @@
 }
 
 .km-webrtc-page__media-tile {
+  position: relative; /* 让 local / remote 角标的 absolute 定位锚到本 tile */
   flex: 1 1 320px;
   background: black;
   border-radius: 6px;
@@ -127,6 +128,19 @@
   justify-content: center;
   min-height: 200px;
   color: #ddd;
+}
+
+.km-webrtc-page__media-tile-label {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #eee;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 1;
 }
 
 .km-webrtc-page__video {
@@ -149,8 +163,11 @@
 }
 
 .km-webrtc-page__stun-row__url {
-  flex: 1;
   font-family: monospace;
+}
+/* 仅 flex 行内的 url 占满剩余空间；table 里的 td 不应走该规则。 */
+.km-webrtc-page__stun-row > .km-webrtc-page__stun-row__url {
+  flex: 1;
 }
 
 .km-webrtc-page__stun-row__status {
