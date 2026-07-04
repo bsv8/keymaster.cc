@@ -22,6 +22,7 @@ import { appsPlugin } from "@keymaster/plugin-apps";
 import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
 import { hubmsgPlatformPlugin } from "@keymaster/plugin-hubmsg";
 import { messagePlatformPlugin } from "@keymaster/plugin-message";
+import { webrtcPlugin } from "@keymaster/plugin-webrtc";
 import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
 import { collectiblesPlugin } from "@keymaster/plugin-collectibles";
@@ -149,6 +150,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     hubmsgPlatformPlugin,
     protocolPlugin,
     messagePlatformPlugin,
+    webrtcPlugin,
     homePlugin,
     settingsPlugin,
     assetsPlugin,

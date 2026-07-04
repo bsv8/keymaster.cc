@@ -33,6 +33,7 @@
     "@keymaster/plugin-token-stas": "*",
     "@keymaster/plugin-transfer": "*",
     "@keymaster/plugin-vault": "*",
+    "@keymaster/plugin-webrtc": "*",
     "@keymaster/plugin-woc": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",

@@ -1,0 +1,176 @@
+/* packages/plugin-webrtc/src/styles.css
+ * WebRTC 插件样式（施工单 2026-07-04 002 硬切换）。
+ *
+ * 设计缘由：
+ *   - 仅承载 plugin-webrtc 自己页面 / 卡片样式；
+ *   - 不写全局 token；不反向写 apps/web/global.css。
+ */
+
+.km-webrtc-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+  max-width: 960px;
+}
+
+.km-webrtc-page__title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.km-webrtc-page__hint {
+  color: var(--km-color-text-muted, #6b7280);
+  font-size: 13px;
+  margin: 0;
+}
+
+.km-webrtc-page__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.km-webrtc-page__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+}
+
+.km-webrtc-page__field-label {
+  font-size: 13px;
+  color: var(--km-color-text-muted, #6b7280);
+}
+
+.km-webrtc-page__input {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: monospace;
+  border: 1px solid var(--km-color-border, #d1d5db);
+  border-radius: 4px;
+  background: var(--km-color-surface, #fff);
+  color: var(--km-color-text, #111827);
+}
+
+.km-webrtc-page__button {
+  padding: 8px 14px;
+  border: 1px solid var(--km-color-border, #d1d5db);
+  border-radius: 4px;
+  background: var(--km-color-surface, #fff);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.km-webrtc-page__button--primary {
+  background: var(--km-color-primary, #2563eb);
+  color: white;
+  border-color: var(--km-color-primary, #2563eb);
+}
+
+.km-webrtc-page__button--danger {
+  background: var(--km-color-danger, #dc2626);
+  color: white;
+  border-color: var(--km-color-danger, #dc2626);
+}
+
+.km-webrtc-page__button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.km-webrtc-page__status {
+  padding: 8px 12px;
+  border: 1px solid var(--km-color-border, #d1d5db);
+  border-radius: 4px;
+  background: var(--km-color-surface-soft, #f9fafb);
+  font-size: 13px;
+}
+
+.km-webrtc-page__error {
+  color: var(--km-color-danger, #dc2626);
+  font-size: 13px;
+  border: 1px solid var(--km-color-danger, #dc2626);
+  background: rgba(220, 38, 38, 0.05);
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+
+.km-webrtc-page__notice {
+  color: var(--km-color-text, #111827);
+  font-size: 14px;
+  border: 1px solid var(--km-color-warning, #f59e0b);
+  background: rgba(245, 158, 11, 0.07);
+  padding: 8px 12px;
+  border-radius: 4px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.km-webrtc-page__media {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.km-webrtc-page__media-tile {
+  flex: 1 1 320px;
+  background: black;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  color: #ddd;
+}
+
+.km-webrtc-page__video {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.km-webrtc-page__stun-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.km-webrtc-page__stun-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--km-color-border, #e5e7eb);
+}
+
+.km-webrtc-page__stun-row__url {
+  flex: 1;
+  font-family: monospace;
+}
+
+.km-webrtc-page__stun-row__status {
+  width: 80px;
+  text-align: center;
+}
+
+.km-webrtc-page__stun-row__status--ok {
+  color: var(--km-color-success, #16a34a);
+}
+
+.km-webrtc-page__stun-row__status--timeout {
+  color: var(--km-color-warning, #d97706);
+}
+
+.km-webrtc-page__stun-row__status--error {
+  color: var(--km-color-danger, #dc2626);
+}
+
+.km-webrtc-page__field-error {
+  color: var(--km-color-danger, #dc2626);
+  font-size: 12px;
+}

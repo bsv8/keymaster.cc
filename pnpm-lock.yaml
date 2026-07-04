@@ -147,6 +147,9 @@ importers:
       '@keymaster/plugin-vault':
         specifier: '*'
         version: link:../../packages/plugin-vault
+      '@keymaster/plugin-webrtc':
+        specifier: '*'
+        version: link:../../packages/plugin-webrtc
       '@keymaster/plugin-woc':
         specifier: '*'
         version: link:../../packages/plugin-woc
@@ -479,6 +482,18 @@ importers:
       '@noble/secp256k1':
         specifier: ^2.2.0
         version: 2.3.0
+
+  packages/plugin-webrtc:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
 
   packages/plugin-woc:
     dependencies:
