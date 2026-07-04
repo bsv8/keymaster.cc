@@ -291,7 +291,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
         </div>
       </div>
 
-      {snap.direction === "incoming" ? (
+      {snap.phase === "incoming" ? (
         <div className="km-webrtc-page__status" data-webrtc-incoming>
           <strong>{t("webrtc.page.workbench.phase.incoming", { defaultValue: "incoming" })}</strong>{" "}
           {snap.remotePublicKeyHex ? shortHex(snap.remotePublicKeyHex) : ""}
