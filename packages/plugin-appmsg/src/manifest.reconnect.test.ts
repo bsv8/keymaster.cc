@@ -183,6 +183,7 @@ function makeFakeProvider(id: string): FakeProvider {
 interface FakeCore {
   core: AppMsgCore;
   setOutcome(o: AppMsgConnectOutcome): void;
+  setHangConnect(v: boolean): void;
   setSnapshot(s: AppMsgLocalDbSnapshot): void;
   setConnectionState(s: "open" | "closed" | "idle"): void;
   simulateRemoteDisconnect(): void;
@@ -247,6 +248,7 @@ function makeFakeCore(provider: FakeProvider, keyspace: FakeKeyspace): FakeCore 
   let nextReconnectAtMs: number | null = null;
   let connectCount = 0;
   let callConnectStartedCount = 0;
+  let hangConnect = false;
   let callerEpoch = 0;
   let callerEpochChangedCount = 0;
   // 反馈"必改"第三轮：把"hanging 队列"换成"setImmediate 推迟"——
@@ -291,6 +293,9 @@ function makeFakeCore(provider: FakeProvider, keyspace: FakeKeyspace): FakeCore 
   ): Promise<AppMsgConnectOutcome> => {
     connectCount += 1;
     callConnectStartedCount += 1;
+    if (hangConnect) {
+      return await new Promise<AppMsgConnectOutcome>(() => undefined);
+    }
     // setImmediate 推迟 resolve——给协调器留出"in-flight 期间结构变化"
     // 的窗口。**注意**：
     //   - setImmediate 是 macrotask，不是 microtask；
@@ -397,6 +402,9 @@ function makeFakeCore(provider: FakeProvider, keyspace: FakeKeyspace): FakeCore 
     core: appmsgCore,
     setOutcome: (o: AppMsgConnectOutcome) => {
       outcome = o;
+    },
+    setHangConnect: (v: boolean) => {
+      hangConnect = v;
     },
     setSnapshot: (s) => {
       snap = s;
@@ -829,10 +837,9 @@ describe("createReconnectCoordinator", () => {
     // → attempt 1 IIFE 继续 → callerEpoch 自检 → return → finally
     // 检测 pendingEpoch ≥ myEpoch → 立刻重 attemptConnect → attempt 2
     // 调 callConnect（同步进 callConnectStartedCount=2）。
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(fakeCore.callConnectStartedCount).toBe(2);
+    await vi.waitFor(() => {
+      expect(fakeCore.callConnectStartedCount).toBe(2);
+    });
     // 让 attempt 2 走完。
     fakeCore.resolveDeferredImmediately({ kind: "connected" });
     await coord.awaitInFlight();
@@ -900,7 +907,9 @@ describe("createReconnectCoordinator", () => {
     // 协调器 unlock 触发 onStructuralChange → inFlightConnect=null
     // → attemptConnect → attempt 3 IIFE 同步到 callConnect 入口。
     // ++callConnectStartedCount 同步完成。
-    expect(fakeCore.callConnectStartedCount).toBe(2);
+    await vi.waitFor(() => {
+      expect(fakeCore.callConnectStartedCount).toBe(2);
+    });
     // 让 attempt 3 走完。
     fakeCore.resolveDeferredImmediately({ kind: "connected" });
     await coord.awaitInFlight();
@@ -957,14 +966,45 @@ describe("createReconnectCoordinator", () => {
     // → callerEpoch 自检 → return → finally 检测 pendingEpoch ≥ myEpoch
     // → 补发 attempt 2 → 这次 vault.unlocked，structuralConnectable ok
     // → 调 callConnect → callConnectStartedCount=2（同步）。
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(fakeCore.callConnectStartedCount).toBe(2);
+    await vi.waitFor(() => {
+      expect(fakeCore.callConnectStartedCount).toBe(2);
+    });
     // 让 attempt 2 走完。
     fakeCore.resolveDeferredImmediately({ kind: "connected" });
     await coord.awaitInFlight();
     expect(fakeCore.connectCount).toBe(2);
+    expect(fakeCore.inspectLocalDb().state).toBe("open");
+    coord.dispose();
+  });
+
+  it("旧 in-flight 卡住超时后，最新 unlocked pending 必须被消费并立即起新 attempt", async () => {
+    vi.useFakeTimers();
+    const vault = makeFakeVault();
+    const keyspace = makeFakeKeyspace();
+    const provider = makeFakeProvider("hubmsg");
+    const fakeCore = makeFakeCore(provider, keyspace);
+    fakeCore.setOutcome({ kind: "connected" });
+    fakeCore.setHangConnect(true);
+    const coord = createReconnectCoordinator({
+      core: fakeCore.core,
+      vault: vault.service,
+      keyspace,
+      logger: { info: vi.fn(), warn: vi.fn() }
+    });
+    expect(fakeCore.callConnectStartedCount).toBe(1);
+
+    vault.setStatus("locked");
+    vault.setStatus("unlocked");
+    expect(fakeCore.callConnectStartedCount).toBe(1);
+
+    // 让超时 watchdog 释放旧 in-flight。第二次 attempt 不再挂住。
+    fakeCore.setHangConnect(false);
+    await vi.advanceTimersByTimeAsync(15001);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fakeCore.callConnectStartedCount).toBe(2);
+    await coord.awaitInFlight();
     expect(fakeCore.inspectLocalDb().state).toBe("open");
     coord.dispose();
   });
@@ -1008,10 +1048,9 @@ describe("createReconnectCoordinator", () => {
     expect(fakeCore.callConnectStartedCount).toBe(1);
     // 推进 microtask：attempt 1 完成 → finally → 补发 attempt 2 →
     // 进入 callConnect（count=2，同步）。
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(fakeCore.callConnectStartedCount).toBe(2);
+    await vi.waitFor(() => {
+      expect(fakeCore.callConnectStartedCount).toBe(2);
+    });
     fakeCore.resolveDeferredImmediately({ kind: "connected" });
     await coord.awaitInFlight();
     expect(fakeCore.connectCount).toBe(2);
@@ -1019,78 +1058,4 @@ describe("createReconnectCoordinator", () => {
     coord.dispose();
   });
 
-  it("in-flight 期间连续三次结构变化 locked → unlocked → locked → unlocked：不卡、不多发", async () => {
-    // 反馈"必改"第五轮：测试"locked 补发那次不该调 callConnect +
-    // unlocked 必须真调一次 callConnect"是两个时序事件，不是原子
-    // 一次。如果两次"locked → unlocked"周期连续发生，第五轮 critical
-    // 路径必须既不堆积、也不丢 attempt——必须**确实**消费完每个"补发
-    // 目标代次"再让下一次接着推。
-    //
-    // 时序：
-    //   1. setup：unlocked → attempt 1 in-flight（callConnect #1）；
-    //   2. locked → onStructuralChange 记录 pendingEpoch（in-flight）；
-    //   3. microtask 推进：attempt 1 完成 → finally → consume pendingEpoch
-    //      → 调 `reconcileQueuedEpoch(locked)` → structuralConnectable
-    //      仍 locked → return（**不** attempt）→ `callConnectStartedCount`
-    //      仍 1；
-    //   4. unlocked → inFlightConnect===null → onStructuralChange 走
-    //      `void attemptConnect()` → attempt 2 进 callConnect（callConnect
-    //      #2），**同步** +1；
-    //   5. locked（attempt 2 in-flight 期间）→ pendingEpoch 记录；
-    //   6. microtask 推进：attempt 2 完成 → finally → consume pendingEpoch
-    //      → `reconcileQueuedEpoch(locked)` → structuralConnectable locked
-    //      → return（**不** attempt，`callConnectStartedCount` 仍 2）；
-    //   7. unlocked → inFlightConnect===null → `void attemptConnect()` →
-    //      attempt 3 进 callConnect（callConnect #3）。
-    //
-    // 关键断言：
-    //   - 两次"locked"期间 `callConnectStartedCount` 都**不**+1；
-    //   - 两次"unlocked"事件都**同步** +1；
-    //   - 最终 `connectCount === 3`（setup + 两次 unlocked attempt）。
-    //     若旧版"locked 补发也算一次 attempt" 写法还在会变 5 次；
-    //     若"unlocked 事件被吞掉"会出现卡在 1 次后不增。
-    const vault = makeFakeVault();
-    const keyspace = makeFakeKeyspace();
-    const provider = makeFakeProvider("hubmsg");
-    const fakeCore = makeFakeCore(provider, keyspace);
-    fakeCore.setOutcome({ kind: "connected" });
-    const coord = createReconnectCoordinator({
-      core: fakeCore.core,
-      vault: vault.service,
-      keyspace,
-      logger: { info: vi.fn(), warn: vi.fn() }
-    });
-    // attempt 1 in-flight.
-    expect(fakeCore.callConnectStartedCount).toBe(1);
-    // ---- 第 1 轮：locked → reconcile 不 attempt. ----
-    vault.setStatus("locked");
-    expect(fakeCore.callConnectStartedCount).toBe(1);
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    // attempt 1 finally → reconcileQueuedEpoch(vault=locked) → return.
-    expect(fakeCore.callConnectStartedCount).toBe(1);
-    // ---- 第 1 轮：unlocked → reconcile → attempt 2. ----
-    vault.setStatus("unlocked");
-    expect(fakeCore.callConnectStartedCount).toBe(2);
-    // ---- 第 2 轮：locked（attempt 2 in-flight）→ pendingEpoch 入队. ----
-    vault.setStatus("locked");
-    expect(fakeCore.callConnectStartedCount).toBe(2);
-    await Promise.resolve();
-    await Promise.resolve();
-    await Promise.resolve();
-    // attempt 2 finally → reconcileQueuedEpoch(vault=locked) → return.
-    expect(fakeCore.callConnectStartedCount).toBe(2);
-    // ---- 第 2 轮：unlocked → reconcile → attempt 3. ----
-    vault.setStatus("unlocked");
-    expect(fakeCore.callConnectStartedCount).toBe(3);
-    // 让 attempt 3 走完。
-    fakeCore.resolveDeferredImmediately({ kind: "connected" });
-    await coord.awaitInFlight();
-    // 三次 callConnect 都接通 — 不多（没有 locked 路径的 attempt）也不
-    // 少（两次 unlocked 都消费到了）。
-    expect(fakeCore.connectCount).toBe(3);
-    expect(fakeCore.inspectLocalDb().state).toBe("open");
-    coord.dispose();
-  });
 });

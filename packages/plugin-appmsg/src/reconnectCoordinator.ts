@@ -68,6 +68,7 @@ export interface ReconnectCoordinator {
 }
 
 const RECONNECT_INTERVAL_MS = 5000;
+const CONNECT_ATTEMPT_TIMEOUT_MS = 15000;
 
 /**
  * `awaitInFlight` 的安全轮询上限。正常路径几十轮 microtask
@@ -244,6 +245,47 @@ export function createReconnectCoordinator(
     lastSeenOpen = true;
   };
 
+  const connectForOwnerWithTimeout = async (
+    ownerPublicKeyHex: string,
+    callerEpoch: number
+  ): Promise<AppMsgConnectOutcome> => {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const connectPromise = core.connectForOwner(ownerPublicKeyHex, callerEpoch);
+      const timeoutPromise = new Promise<AppMsgConnectOutcome>((resolve) => {
+        timer = setTimeout(() => {
+          logInfo("appmsg.connect.call_core.timeout", {
+            epoch: callerEpoch,
+            ownerPublicKeyHex,
+            timeoutMs: CONNECT_ATTEMPT_TIMEOUT_MS
+          });
+          try {
+            // 让晚到的 connectForOwner 结果在 core 内部被识别为 stale，
+            // 避免超时之后旧 handle 迟到提交污染新状态。
+            core.markStructurallyOffline();
+          } catch (err) {
+            logger.warn({
+              scope: "appmsg.core",
+              event: "appmsg.connect.call_core.timeout.invalidate_failed",
+              message: "",
+              data: {
+                epoch: callerEpoch,
+                ownerPublicKeyHex,
+                err: err instanceof Error ? err.message : String(err)
+              }
+            });
+          }
+          resolve({ kind: "retryableFailure", reason: "attempt_timeout" });
+        }, CONNECT_ATTEMPT_TIMEOUT_MS);
+      });
+      return await Promise.race([connectPromise, timeoutPromise]);
+    } finally {
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    }
+  };
+
   /** outcome = stale：core 内部抢占；caller 自己的过期在 await 前自检。 */
   const handleStale = (): void => {
     // 什么都不做；本结果被新代次抢占。
@@ -405,7 +447,7 @@ export function createReconnectCoordinator(
         });
         // callerEpoch 仅作"自检 token"使用：core 内部不校验；caller
         // 在 await 后自检"我的 epoch 是不是没变"决定是否采用结果。
-        const outcome: AppMsgConnectOutcome = await core.connectForOwner(
+        const outcome: AppMsgConnectOutcome = await connectForOwnerWithTimeout(
           targetOwner,
           myEpoch
         );
@@ -437,6 +479,13 @@ export function createReconnectCoordinator(
             handleStructurallyOffline(outcome);
             return;
           case "retryableFailure":
+            if (outcome.reason === "attempt_timeout" && pendingEpoch !== null) {
+              logInfo("appmsg.connect.call_core.timeout_pending_handoff", {
+                epoch: myEpoch,
+                pendingEpoch
+              });
+              return;
+            }
             handleRetryableFailure();
             return;
         }
