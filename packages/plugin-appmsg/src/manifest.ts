@@ -213,6 +213,21 @@ export const appmsgPlatformPlugin: PluginManifest = {
   setup(ctx) {
     const vault = ctx.get<VaultService>("vault.service");
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const isRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null;
+    const forwardAppmsgLog = (
+      level: "info" | "warn" | "error",
+      fallbackScope: string,
+      input: unknown
+    ): void => {
+      const obj = isRecord(input) ? input : {};
+      const scope =
+        typeof obj.scope === "string" && obj.scope.length > 0 ? obj.scope : fallbackScope;
+      const event = typeof obj.event === "string" ? obj.event : level;
+      const message = typeof obj.message === "string" ? obj.message : "";
+      const data = isRecord(obj.data) ? obj.data : undefined;
+      ctx.logger[level]({ scope, event, message, data });
+    };
 
     /**
      * signer provider：plugin-appmsg 不持有 owner 私钥；通过闭包从
@@ -274,21 +289,9 @@ export const appmsgPlatformPlugin: PluginManifest = {
           ? (globalThis as { localStorage: Storage }).localStorage
           : null,
       logger: {
-        info: (input) => {
-          const obj = (input ?? {}) as Record<string, unknown>;
-          const ev = typeof obj.event === "string" ? obj.event : "info";
-          ctx.logger.info({ scope: "appmsg.core", event: ev, message: "", data: obj });
-        },
-        warn: (input) => {
-          const obj = (input ?? {}) as Record<string, unknown>;
-          const ev = typeof obj.event === "string" ? obj.event : "warn";
-          ctx.logger.warn({ scope: "appmsg.core", event: ev, message: "", data: obj });
-        },
-        error: (input) => {
-          const obj = (input ?? {}) as Record<string, unknown>;
-          const ev = typeof obj.event === "string" ? obj.event : "error";
-          ctx.logger.error({ scope: "appmsg.core", event: ev, message: "", data: obj });
-        }
+        info: (input) => forwardAppmsgLog("info", "appmsg.core", input),
+        warn: (input) => forwardAppmsgLog("warn", "appmsg.core", input),
+        error: (input) => forwardAppmsgLog("error", "appmsg.core", input)
       }
     };
     const core = new AppMsgCoreImpl(cfg);
@@ -312,26 +315,8 @@ export const appmsgPlatformPlugin: PluginManifest = {
       vault,
       keyspace,
       logger: {
-        info: (input) => {
-          const obj = input as unknown as Record<string, unknown>;
-          const ev = typeof obj.event === "string" ? obj.event : "info";
-          ctx.logger.info({
-            scope: "appmsg.core",
-            event: ev,
-            message: "",
-            data: obj
-          });
-        },
-        warn: (input) => {
-          const obj = input as unknown as Record<string, unknown>;
-          const ev = typeof obj.event === "string" ? obj.event : "warn";
-          ctx.logger.warn({
-            scope: "appmsg.core",
-            event: ev,
-            message: "",
-            data: obj
-          });
-        }
+        info: (input) => ctx.logger.info(input),
+        warn: (input) => ctx.logger.warn(input)
       }
     });
 

@@ -25,7 +25,8 @@ import {
   HubMsgBindSignerAdapter,
   HubMsgConnectionImpl,
   HubMsgProviderOperations,
-  type HubMsgConnection
+  type HubMsgConnection,
+  type HubMsgConnectionLogger
 } from "./hubmsgConnection.js";
 
 /** HubMsg provider id（plugin-appmsg 用它识别 provider）。 */
@@ -45,6 +46,10 @@ export interface HubMsgProviderConfig {
   url?: string;
   /** 心跳秒数；缺省 30s。 */
   heartbeatSec?: number;
+  /** 握手超时毫秒；缺省沿用连接层默认值。 */
+  handshakeTimeoutMs?: number;
+  /** 可选日志出口。 */
+  logger?: HubMsgConnectionLogger;
 }
 
 /**
@@ -69,7 +74,30 @@ export class HubMsgProvider implements MessageProvider {
     this.cfg = { url: DEFAULT_HUBMSG_URL, heartbeatSec: 30, ...cfg };
   }
 
+  private emitLog(
+    level: "info" | "warn" | "error",
+    event: string,
+    data?: Record<string, unknown>
+  ): void {
+    const logger = this.cfg.logger;
+    if (!logger) return;
+    try {
+      logger[level]({
+        scope: "hubmsg.provider",
+        event,
+        message: "",
+        data
+      });
+    } catch {
+      // ignore
+    }
+  }
+
   async bind(input: { signer: ProviderSigner }): Promise<MessageProviderHandle> {
+    this.emitLog("info", "hubmsg.provider.bind.started", {
+      url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
+      publicKeyHex: input.signer.publicKeyHex
+    });
     // 重复 bind：先关旧 connection。
     if (this.currentConn) {
       try {
@@ -82,7 +110,9 @@ export class HubMsgProvider implements MessageProvider {
     }
     const conn = new HubMsgConnectionImpl({
       url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
-      heartbeatSec: this.cfg.heartbeatSec ?? 30
+      heartbeatSec: this.cfg.heartbeatSec ?? 30,
+      handshakeTimeoutMs: this.cfg.handshakeTimeoutMs,
+      logger: this.cfg.logger
     });
     const adapter = new HubMsgBindSignerAdapter(input.signer);
     try {
@@ -90,12 +120,22 @@ export class HubMsgProvider implements MessageProvider {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.lastErrorMessage = msg;
+      this.emitLog("error", "hubmsg.provider.bind.failed", {
+        url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
+        publicKeyHex: input.signer.publicKeyHex,
+        err: msg
+      });
       throw err;
     }
     this.currentConn = conn;
     this.currentOps = new HubMsgProviderOperations(conn);
     this.lastErrorMessage = null;
     this.lastConnectedAtMsValue = Date.now();
+    this.emitLog("info", "hubmsg.provider.bind.succeeded", {
+      url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
+      publicKeyHex: input.signer.publicKeyHex,
+      lastConnectedAtMs: this.lastConnectedAtMsValue
+    });
     return this.currentOps;
   }
 
@@ -109,6 +149,9 @@ export class HubMsgProvider implements MessageProvider {
       this.currentConn = null;
       this.currentOps = null;
       this.lastErrorMessage = "shut down";
+      this.emitLog("info", "hubmsg.provider.shutdown", {
+        url: this.cfg.url ?? DEFAULT_HUBMSG_URL
+      });
     }
   }
 

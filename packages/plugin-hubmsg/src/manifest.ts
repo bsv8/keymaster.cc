@@ -54,7 +54,13 @@ export const hubmsgPlatformPlugin: PluginManifest = {
   ],
   setup(ctx) {
     const registry = ctx.get<MessageProviderRegistry>(MESSAGE_PROVIDER_REGISTRY_CAPABILITY);
-    const provider: HubMsgProvider = createHubMsgProvider();
+    const provider: HubMsgProvider = createHubMsgProvider({
+      logger: {
+        info: (input) => ctx.logger.info(input),
+        warn: (input) => ctx.logger.warn(input),
+        error: (input) => ctx.logger.error(input)
+      }
+    });
     registry.register(provider);
     return () => {
       registry.unregister(provider.id);

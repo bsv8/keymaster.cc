@@ -80,6 +80,17 @@ export interface HubMsgConnectionConfig {
   url: string;
   /** 心跳秒数；缺省 30s。 */
   heartbeatSec?: number;
+  /** 握手超时毫秒；缺省 10s。 */
+  handshakeTimeoutMs?: number;
+  /** 可选日志出口；供系统日志页追连接阶段。 */
+  logger?: HubMsgConnectionLogger;
+}
+
+/** HubMsg 连接层日志出口。 */
+export interface HubMsgConnectionLogger {
+  info(input: { scope: string; event: string; message: string; data?: Record<string, unknown> }): void;
+  warn(input: { scope: string; event: string; message: string; data?: Record<string, unknown> }): void;
+  error(input: { scope: string; event: string; message: string; data?: Record<string, unknown> }): void;
 }
 
 /* ============== Provider 绑定阶段 ============== */
@@ -402,6 +413,21 @@ function decodeEnvelopeSummary(bytes: Uint8Array): {
   };
 }
 
+function describeUnknownEvent(ev: unknown): string {
+  if (ev instanceof Error && ev.message) return ` (${ev.message})`;
+  if (typeof ev === "object" && ev !== null) {
+    const obj = ev as Record<string, unknown>;
+    const parts: string[] = [];
+    if (typeof obj.type === "string" && obj.type) parts.push(`type=${obj.type}`);
+    if (typeof obj.code === "number") parts.push(`code=${obj.code}`);
+    if (typeof obj.reason === "string" && obj.reason) parts.push(`reason=${obj.reason}`);
+    if (typeof obj.message === "string" && obj.message) parts.push(`message=${obj.message}`);
+    if (typeof obj.wasClean === "boolean") parts.push(`wasClean=${obj.wasClean}`);
+    if (parts.length > 0) return ` (${parts.join(", ")})`;
+  }
+  return "";
+}
+
 /* ============== endpoint kind 字面量在 wire 上的整数映射 ============== */
 
 import {
@@ -462,6 +488,7 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
   private pingHandle: ReturnType<typeof setInterval> | null = null;
   private negotiatedHeartbeatSec: number | null = null;
   private static readonly DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+  private static readonly DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
 
   constructor(cfg: HubMsgConnectionConfig) {
     this.cfg = { heartbeatSec: 30, ...cfg };
@@ -471,103 +498,219 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     return this.stateValue;
   }
 
+  private emitLog(
+    level: "info" | "warn" | "error",
+    event: string,
+    data?: Record<string, unknown>
+  ): void {
+    const logger = this.cfg.logger;
+    if (!logger) return;
+    try {
+      logger[level]({
+        scope: "hubmsg.connection",
+        event,
+        message: "",
+        data
+      });
+    } catch {
+      // ignore
+    }
+  }
+
+  private resetAfterFailedConnect(): void {
+    this.stopHeartbeat();
+    if (this.socket) {
+      try {
+        this.socket.close();
+      } catch {
+        // ignore
+      }
+    }
+    this.socket = null;
+    this.stateValue = "closed";
+    this.sessionId = null;
+    this.nonce = null;
+    this.negotiatedHeartbeatSec = null;
+  }
+
+  private waitForHandshakeStage<T>(args: {
+    socket: WebSocketLike;
+    stage: "server_open" | "bind_ready";
+    timeoutMs: number;
+    onMessage(frame: HubFrame): T;
+  }): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = (): void => {
+        args.socket.removeEventListener("message", onMessage);
+        args.socket.removeEventListener("error", onError);
+        args.socket.removeEventListener("close", onClose);
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      };
+
+      const fail = (err: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err instanceof Error ? err : new Error(String(err)));
+      };
+
+      const succeed = (value: T): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+
+      const onMessage = (raw: unknown): void => {
+        try {
+          const bytes = ensureBytes(raw);
+          const frame = decodeHubFrame(bytes);
+          succeed(args.onMessage(frame));
+        } catch (err) {
+          fail(err);
+        }
+      };
+
+      const onError = (ev: unknown): void => {
+        fail(new Error(`HubMsg: websocket error during ${args.stage}${describeUnknownEvent(ev)}`));
+      };
+
+      const onClose = (ev: unknown): void => {
+        fail(new Error(`HubMsg: websocket closed during ${args.stage}${describeUnknownEvent(ev)}`));
+      };
+
+      timer = setTimeout(() => {
+        fail(new Error(`HubMsg: ${args.stage} timeout after ${args.timeoutMs}ms`));
+      }, args.timeoutMs);
+
+      args.socket.addEventListener("message", onMessage);
+      args.socket.addEventListener("error", onError);
+      args.socket.addEventListener("close", onClose);
+    });
+  }
+
   async connect(signer: HubMsgBindSigner): Promise<void> {
     if (this.stateValue === "bound") return;
     if (this.stateValue === "connecting") {
       throw new Error("HubMsg: connect already in progress");
     }
     this.stateValue = "connecting";
+    const handshakeTimeoutMs = Math.max(
+      1,
+      this.cfg.handshakeTimeoutMs ?? HubMsgConnectionImpl.DEFAULT_HANDSHAKE_TIMEOUT_MS
+    );
+    this.emitLog("info", "hubmsg.connect.started", {
+      url: this.cfg.url,
+      handshakeTimeoutMs,
+      publicKeyHex: signer.publicKeyHex
+    });
     const sock = createWebSocket(this.cfg.url);
     this.socket = sock;
-
-    // 1) 等 server_open：[sessionId, nonce, heartbeatSec]
-    const serverOpen = new Promise<{
-      sessionId: string;
-      nonce: string;
-      heartbeatSec: number;
-    }>((resolve, reject) => {
-      const onMessage = (raw: unknown) => {
-        try {
-          const bytes = ensureBytes(raw);
-          const frame = decodeHubFrame(bytes);
-          if (frame.frameKind === HUB_FRAME_KIND.ServerOpen) {
-            const body = decodeServerOpenBody(frame.frameBody);
-            sock.removeEventListener("message", onMessage);
-            resolve({ sessionId: body[0], nonce: body[1], heartbeatSec: body[2] });
-          } else {
-            // 握手阶段只接受 ServerOpen；其它 kind 一律 close。
-            reject(
-              new Error(
-                `HubMsg: expected server_open (kind=${HUB_FRAME_KIND.ServerOpen}), got kind=${frame.frameKind}`
-              )
+    let stage: "server_open" | "sign_challenge" | "send_client_bind" | "bind_ready" =
+      "server_open";
+    try {
+      const so = await this.waitForHandshakeStage({
+        socket: sock,
+        stage: "server_open",
+        timeoutMs: handshakeTimeoutMs,
+        onMessage: (frame) => {
+          if (frame.frameKind !== HUB_FRAME_KIND.ServerOpen) {
+            throw new Error(
+              `HubMsg: expected server_open (kind=${HUB_FRAME_KIND.ServerOpen}), got kind=${frame.frameKind}`
             );
           }
-        } catch (err) {
-          reject(err instanceof Error ? err : new Error(String(err)));
+          const body = decodeServerOpenBody(frame.frameBody);
+          return { sessionId: body[0], nonce: body[1], heartbeatSec: body[2] };
         }
-      };
-      sock.addEventListener("message", onMessage);
-      sock.addEventListener("error", (err) =>
-        reject(err instanceof Error ? err : new Error(String(err)))
+      });
+      this.sessionId = so.sessionId;
+      this.nonce = so.nonce;
+      this.negotiatedHeartbeatSec = so.heartbeatSec;
+      this.emitLog("info", "hubmsg.connect.server_open", {
+        sessionId: so.sessionId,
+        heartbeatSec: so.heartbeatSec
+      });
+
+      stage = "sign_challenge";
+      const issuedAtMs = Date.now();
+      const plainText = canonicalBindText(
+        this.sessionId,
+        this.nonce,
+        signer.publicKeyHex,
+        issuedAtMs
       );
-    });
-    const so = await serverOpen;
-    this.sessionId = so.sessionId;
-    this.nonce = so.nonce;
-    this.negotiatedHeartbeatSec = so.heartbeatSec;
+      const plainBytes = new TextEncoder().encode(plainText);
+      const sigHex = await signer.signChallenge({ challenge: plainBytes });
+      const clientBindBody: HubFrameClientBindBody = [
+        this.sessionId,
+        signer.publicKeyHex,
+        issuedAtMs,
+        sigHex
+      ];
+      const clientBindFrame: HubFrame = {
+        frameVersion: HUB_FRAME_VERSION,
+        frameKind: HUB_FRAME_KIND.ClientBind,
+        frameBody: encodeClientBindBody(clientBindBody)
+      };
 
-    // 2) client_bind：[sessionId, publicKeyHex, issuedAtMs, signatureHex]
-    const issuedAtMs = Date.now();
-    const plainText = canonicalBindText(
-      this.sessionId,
-      this.nonce,
-      signer.publicKeyHex,
-      issuedAtMs
-    );
-    const plainBytes = new TextEncoder().encode(plainText);
-    const sigHex = await signer.signChallenge({ challenge: plainBytes });
-    const clientBindBody: HubFrameClientBindBody = [this.sessionId, signer.publicKeyHex, issuedAtMs, sigHex];
-    const clientBindFrame: HubFrame = {
-      frameVersion: HUB_FRAME_VERSION,
-      frameKind: HUB_FRAME_KIND.ClientBind,
-      frameBody: encodeClientBindBody(clientBindBody)
-    };
+      stage = "send_client_bind";
+      sock.send(encodeHubFrame(clientBindFrame));
+      this.emitLog("info", "hubmsg.connect.bind_sent", {
+        sessionId: this.sessionId,
+        publicKeyHex: signer.publicKeyHex
+      });
 
-    // 3) 等 bind_ready：[sessionId]
-    const bindReady = new Promise<void>((resolve, reject) => {
-      const onMessage = (raw: unknown) => {
-        try {
-          const bytes = ensureBytes(raw);
-          const frame = decodeHubFrame(bytes);
+      stage = "bind_ready";
+      await this.waitForHandshakeStage<void>({
+        socket: sock,
+        stage: "bind_ready",
+        timeoutMs: handshakeTimeoutMs,
+        onMessage: (frame) => {
           if (frame.frameKind === HUB_FRAME_KIND.BindReady) {
             const body = decodeBindReadyBody(frame.frameBody);
-            if (body[0] === this.sessionId) {
-              sock.removeEventListener("message", onMessage);
-              resolve();
+            if (body[0] !== this.sessionId) {
+              throw new Error(
+                `HubMsg: bind_ready session mismatch; expected ${this.sessionId}, got ${body[0]}`
+              );
             }
-          } else if (frame.frameKind === HUB_FRAME_KIND.Close) {
-            const body = decodeCloseBody(frame.frameBody);
-            reject(new Error(`HubMsg: bind closed (${body[0]})`));
-          } else {
-            reject(
-              new Error(
-                `HubMsg: expected bind_ready (kind=${HUB_FRAME_KIND.BindReady}), got kind=${frame.frameKind}`
-              )
-            );
+            return;
           }
-        } catch (err) {
-          reject(err instanceof Error ? err : new Error(String(err)));
+          if (frame.frameKind === HUB_FRAME_KIND.Close) {
+            const body = decodeCloseBody(frame.frameBody);
+            throw new Error(`HubMsg: bind closed (${body[0]})`);
+          }
+          throw new Error(
+            `HubMsg: expected bind_ready (kind=${HUB_FRAME_KIND.BindReady}), got kind=${frame.frameKind}`
+          );
         }
-      };
-      sock.addEventListener("message", onMessage);
-    });
-    sock.send(encodeHubFrame(clientBindFrame));
-    await bindReady;
-    this.stateValue = "bound";
+      });
+      this.stateValue = "bound";
 
-    sock.addEventListener("message", (raw: unknown) => this.onSocketMessage(raw));
-    sock.addEventListener("close", () => this.onSocketClose());
-    this.startHeartbeat();
+      sock.addEventListener("message", (raw: unknown) => this.onSocketMessage(raw));
+      sock.addEventListener("close", (ev: unknown) => this.onSocketClose("socket_event", ev));
+      this.startHeartbeat();
+      this.emitLog("info", "hubmsg.connect.bound", {
+        sessionId: this.sessionId,
+        heartbeatSec: this.negotiatedHeartbeatSec,
+        publicKeyHex: signer.publicKeyHex
+      });
+    } catch (err) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      this.emitLog("error", "hubmsg.connect.failed", {
+        stage,
+        url: this.cfg.url,
+        sessionId: this.sessionId,
+        err: error.message
+      });
+      this.resetAfterFailedConnect();
+      throw error;
+    }
   }
 
   close(): void {
@@ -727,12 +870,18 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         p.reject(new Error(`HubMsg: server closed (${body[0]})`));
       }
       this.pendingById.clear();
-      this.onSocketClose();
+      this.onSocketClose("close_frame", { reason: body[0] });
     }
   }
 
-  private onSocketClose(): void {
+  private onSocketClose(source: "socket_event" | "close_frame", ev?: unknown): void {
     if (this.stateValue === "closed") return;
+    this.emitLog("warn", "hubmsg.socket.closed", {
+      source,
+      state: this.stateValue,
+      sessionId: this.sessionId,
+      detail: describeUnknownEvent(ev)
+    });
     this.stateValue = "closed";
     this.stopHeartbeat();
     for (const [, p] of this.pendingById) {

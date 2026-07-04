@@ -131,6 +131,7 @@ describe("HubMsgConnectionImpl", () => {
   afterEach(() => {
     FakeSocket.instances.length = 0;
     vi.restoreAllMocks();
+    vi.useRealTimers();
     globalThis.WebSocket = originalWebSocket;
   });
 
@@ -175,6 +176,56 @@ describe("HubMsgConnectionImpl", () => {
     const pongFrame = decodeFrame(requireValue(sock.sent[1], "test: missing pong frame"));
     expect(pongFrame.kind).toBe(HUB_FRAME_KIND.Pong);
     expect(pongFrame.body).toEqual([999]);
+  });
+
+  it("server_open 前 socket close：connect reject，不会永久挂住", async () => {
+    globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+
+    const signer = {
+      publicKeyHex: "02aa".padEnd(66, "a"),
+      signChallenge: vi.fn(async () => "11".repeat(64))
+    };
+    const conn = new HubMsgConnectionImpl({ url: "wss://hubmsg.test/ws/v1" });
+    const connectPromise = conn.connect(signer);
+    const sock = requireValue(FakeSocket.instances[0], "test: missing fake socket");
+
+    sock.close();
+
+    await expect(connectPromise).rejects.toThrow(/websocket closed during server_open/i);
+    expect(conn.state()).toBe("closed");
+  });
+
+  it("server_open 超时：connect reject，并记录 failed 日志", async () => {
+    vi.useFakeTimers();
+    globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const signer = {
+      publicKeyHex: "02aa".padEnd(66, "a"),
+      signChallenge: vi.fn(async () => "11".repeat(64))
+    };
+    const conn = new HubMsgConnectionImpl({
+      url: "wss://hubmsg.test/ws/v1",
+      handshakeTimeoutMs: 50,
+      logger
+    });
+    const connectPromise = conn.connect(signer).catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(51);
+
+    const err = await connectPromise;
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toMatch(/server_open timeout after 50ms/i);
+    expect(conn.state()).toBe("closed");
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: "hubmsg.connect.failed"
+      })
+    );
   });
 });
 
