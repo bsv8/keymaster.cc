@@ -80,11 +80,22 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
     throw new Error("IndexedDB is not available in this environment");
   }
   return new Promise<ProtocolStorageDb>((resolve, reject) => {
+    let settled = false;
+    function resolveOnce(value: ProtocolStorageDb): void {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    }
+    function rejectOnce(err: Error): void {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    }
     let req: IDBOpenDBRequest;
     try {
       req = indexedDB.open(DB_NAME, DB_VERSION);
     } catch (err) {
-      reject(err instanceof Error ? err : new Error(String(err)));
+      rejectOnce(err instanceof Error ? err : new Error(String(err)));
       return;
     }
     req.onupgradeneeded = (event) => {
@@ -215,15 +226,28 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
     };
     req.onsuccess = () => {
       const db = req.result;
-      resolve(createImpl(db));
+      // 设计缘由：
+      //   - 若后续有其它 tab / 新代码版本触发 versionchange，旧连接应立刻让路，
+      //     避免下一次 open / upgrade 卡在 blocked。
+      db.onversionchange = () => {
+        try {
+          db.close();
+        } catch {
+          // 静默：versionchange 收尾不应再抛出新错误。
+        }
+      };
+      resolveOnce(createImpl(db));
     };
     req.onerror = () => {
       const err = req.error ?? new Error("Failed to open keymaster.protocol");
-      reject(err);
+      rejectOnce(err);
     };
     req.onblocked = () => {
-      // 另一标签页正持有旧连接，提示但不抛。
-      console.error("[protocol.storageDb] open blocked by another tab");
+      // 设计缘由：
+      //   - protocol 库只是协议历史 / session 持久化层，不是整站启动真值；
+      //   - blocked 时必须快速失败，让上层走 historyAvailable=false 降级，
+      //     绝不能把 bootstrap 挂成永久 pending。
+      rejectOnce(new Error('Opening IndexedDB "keymaster.protocol" was blocked by another connection'));
     };
   });
 }

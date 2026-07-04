@@ -10,7 +10,7 @@
 //   - feePools 按 poolKey 复合 key 隔离；
 //   - 不存在 `operations` store。
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ProtocolCommandRecord,
   ProtocolFeePoolRecord,
@@ -303,6 +303,46 @@ describe("openProtocolStorageDb", () => {
     const got = await db.getOrigin(origin);
     expect(got?.confirmTimeoutSeconds).toBe(12);
   });
+
+  it("fails fast when IndexedDB open is blocked", async () => {
+    const req = {} as IDBOpenDBRequest;
+    const openSpy = vi.spyOn(indexedDB, "open").mockImplementation(() => {
+      setTimeout(() => {
+        req.onblocked?.(new Event("blocked"));
+      }, 0);
+      return req;
+    });
+    try {
+      await expect(openProtocolStorageDb()).rejects.toThrow(
+        'Opening IndexedDB "keymaster.protocol" was blocked by another connection'
+      );
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
+
+  it("closes the raw IndexedDB connection on versionchange", async () => {
+    const close = vi.fn();
+    const fakeDb = {
+      close,
+      onversionchange: null
+    } as unknown as IDBDatabase;
+    const req = { result: fakeDb } as IDBOpenDBRequest;
+    const openSpy = vi.spyOn(indexedDB, "open").mockImplementation(() => {
+      setTimeout(() => {
+        req.onsuccess?.(new Event("success"));
+      }, 0);
+      return req;
+    });
+    try {
+      await openProtocolStorageDb();
+      expect(typeof fakeDb.onversionchange).toBe("function");
+      fakeDb.onversionchange?.(new Event("versionchange"));
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      openSpy.mockRestore();
+    }
+  });
 });
 
 /* ============== 施工单 2026-06-30 002：v8 迁移 wiperuntimeBinding 测试 ============== */
@@ -357,4 +397,3 @@ describe("protocolStorageDb v8 migration (施工单 2026-06-30 002)", () => {
     expect((rec as unknown as Record<string, unknown>).runtimeBinding).toBeUndefined();
   });
 });
-
