@@ -31,7 +31,7 @@ function makeFakeCore(): AppMsgCore {
     connectForOwner: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
     inspectLocalDb: vi.fn(() => ({
-      state: "open",
+      state: "open" as const,
       ownerPublicKeyHex: OWNER,
       lastInsertedAtMs: 1,
       lastError: null

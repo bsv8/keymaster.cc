@@ -23,11 +23,19 @@ import type {
  *   - **不**走远端 HubMsg 数量统计；
  *   - 写动作只有 triggerSync（手动刷新），其它写都走 `appmsg.core`
  *     内部（推送 / 增量同步）。
+ *
+ * **本文件是 `plugin-message` 的简化 facade**：故意不暴露 `hasMore`
+ * 等分页状态——系统消息页不需要翻页。如未来真的要做分页，**不要**在
+ * 这里逐步加 `hasMore` 字段，应当一次性升级 MessagePage + service
+ * + 同步状态字段；半点改接口会重新把 contract 弄复杂。
  */
 export interface MessageService {
   /** 当前 owner 的本地消息库状态。 */
   getLocalDbSnapshot(): AppMsgLocalDbSnapshot;
-  /** 列本地消息（系统消息应用可见的所有消息）。 */
+  /**
+   * 列本地消息（系统消息应用可见的所有消息）。**不**返回分页信息——
+   * 系统消息页用内部 slice 暂存就够了；如真有分页需求，单独升级此接口。
+   */
   listLocalMessages(input?: {
     limit?: number;
     afterMessageId?: string;

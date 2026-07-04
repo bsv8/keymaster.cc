@@ -65,8 +65,8 @@ function MessagePageInner({ core }: { core: AppMsgCore }): React.ReactElement {
 
   const refresh = useCallback(async () => {
     setSnapshot(service.getLocalDbSnapshot());
-    const listRes = await service.listLocalMessages({ limit: 200 });
-    setMessages(listRes.items);
+    const items = await service.listLocalMessages({ limit: 200 });
+    setMessages(items);
     setTargets(await service.listTargetSyncStates());
   }, [service]);
 
