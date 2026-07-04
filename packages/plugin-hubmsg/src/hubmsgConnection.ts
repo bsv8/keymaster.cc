@@ -188,6 +188,19 @@ export interface HubMsgConnection {
   ): Promise<TResult>;
   /** 订阅服务端推送的 event；返回取消订阅函数。 */
   subscribeEvent<TData>(eventName: string, handler: (data: TData) => void): () => void;
+  /**
+   * 订阅远端断线事件（硬切换 003 反馈"必改"）。
+   *
+   * 触发条件：
+   *   - 服务端主动 close；
+   *   - 网络断 / WSS onclose 触发；
+   *   - 本模块内 `close()` 主动调用**不**触发（避免与调用方自身的
+   *     状态机产生自激）。
+   *
+   * 返回的 unsub 函数用于停止监听；调用方在主动 disconnect 时**应**
+   * 解订阅以避免泄漏。
+   */
+  onClose(handler: () => void): () => void;
 }
 
 /* ============== HubMsg 单 WSS 客户端实现 ============== */
@@ -211,6 +224,8 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
   >();
   /** 事件订阅表。 */
   private readonly eventHandlers = new Map<string, Set<(data: unknown) => void>>();
+  /** 远端断线订阅表（硬切换 003 反馈"必改"）。 */
+  private readonly closeHandlers = new Set<() => void>();
   private pingHandle: ReturnType<typeof setInterval> | null = null;
   /** 默认请求超时 30s。 */
   private static readonly DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
@@ -374,6 +389,23 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     };
   }
 
+  onClose(handler: () => void): () => void {
+    this.closeHandlers.add(handler);
+    return () => {
+      this.closeHandlers.delete(handler);
+    };
+  }
+
+  private emitClose(): void {
+    for (const h of this.closeHandlers) {
+      try {
+        h();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
   private onSocketMessage(raw: unknown): void {
     if (typeof raw !== "string") return;
     let frame: unknown;
@@ -425,6 +457,9 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     this.socket = null;
     this.sessionId = null;
     this.nonce = null;
+    // 远端 / 网络被动断线 → 通知订阅者。**不**在 `close()` 主动路径
+    // 触发，避免与调用方自己的 disconnect 状态机互激。
+    this.emitClose();
   }
 
   private startHeartbeat(): void {
@@ -689,6 +724,17 @@ export class HubMsgProviderOperations {
         }
       }
     );
+  }
+
+  /**
+   * 远端断线订阅（硬切换 003 反馈"必改"）。
+   *
+   * 透传到底层 `HubMsgConnection.onClose`：被动断线（服务端 close /
+   * 网络断）触发；本类 `close()` 主动调用**不**触发。`plugin-appmsg`
+   * 通过订阅此事件识别"刚 bound → 突然不在 bound"，触发 5 秒重试。
+   */
+  onClose(handler: () => void): () => void {
+    return this.conn.onClose(handler);
   }
 
   async checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult> {

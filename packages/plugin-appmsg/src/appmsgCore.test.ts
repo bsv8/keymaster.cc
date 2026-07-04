@@ -374,9 +374,16 @@ describe("AppMsgCoreImpl - provider registry", () => {
 describe("AppMsgCoreImpl - connectForOwner", () => {
   it("no active provider: stays not-ready, no throw", async () => {
     const { core } = makeCore();
-    await core.connectForOwner(OWNER);
+    const outcome = await core.connectForOwner(OWNER);
     expect(core.currentHandle()).toBeNull();
+    // 硬切换 003 反馈"必改"修订：尝试过连接失败后，state 必须稳定
+    // 回到 `idle`（**不**被 `lastError` 顶成 `closed`）。结构性不可
+    // 连接场景由 `markStructurallyOffline()` 显式擦除 lastError。
     expect(core.inspectLocalDb().state).toBe("idle");
+    expect(outcome.kind).toBe("structurallyOffline");
+    if (outcome.kind === "structurallyOffline") {
+      expect(outcome.reason).toBe("no_active_provider");
+    }
   });
 
   it("active provider + signer available: bind succeeds", async () => {
@@ -810,3 +817,361 @@ describe("AppMsgCoreImpl - subscribe migration on owner/provider change", () => 
 
 // 防止 IDE 报 unused
 void APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY;
+
+/* ============== 硬切换 003：等待重连倒计时真值 ============== */
+
+describe("AppMsgCoreImpl - nextReconnectAtMs countdown truth", () => {
+  it("setNextReconnectAtMs writes the value and fires state change", () => {
+    const { core } = makeCore();
+    const handlers = new Set<() => void>();
+    core.onStateChange(() => handlers.add(() => undefined));
+    const off = core.onStateChange(() => undefined);
+    void off;
+    const seen: number[] = [];
+    const off2 = core.onStateChange(() => seen.push(Date.now()));
+    core.setNextReconnectAtMs(Date.now() + 5000);
+    expect(core.getNextReconnectAtMs()).not.toBeNull();
+    expect(seen.length).toBeGreaterThan(0);
+    off2();
+    void handlers;
+  });
+
+  it("connectForOwner success clears any pending nextReconnectAtMs", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    core.setNextReconnectAtMs(Date.now() + 5000);
+    expect(core.getNextReconnectAtMs()).not.toBeNull();
+    await core.connectForOwner(OWNER);
+    expect(core.getNextReconnectAtMs()).toBeNull();
+    // 真实 boundHandle.state() === "bound" → snapshot.state === "open"
+    // 且 nextReconnectAtMs === null。
+    const snap = core.inspectLocalDb();
+    expect(snap.state).toBe("open");
+    expect(snap.nextReconnectAtMs).toBeNull();
+  });
+
+  it("disconnect() clears nextReconnectAtMs", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    await core.connectForOwner(OWNER);
+    core.setNextReconnectAtMs(Date.now() + 5000);
+    expect(core.getNextReconnectAtMs()).not.toBeNull();
+    await core.disconnect();
+    expect(core.getNextReconnectAtMs()).toBeNull();
+    expect(core.inspectLocalDb().nextReconnectAtMs).toBeNull();
+  });
+
+  it("connectForOwner with no active provider records lastError and stays idle/closed", async () => {
+    const { core } = makeCore();
+    core.setNextReconnectAtMs(Date.now() + 5000);
+    await core.connectForOwner(OWNER);
+    // 没有 provider / 没有成功 bind → state 既不是 open，也不应仍报
+    // "有重连倒计时"——本次尝试走结构性降级。
+    const snap = core.inspectLocalDb();
+    expect(snap.state).not.toBe("open");
+    expect(snap.nextReconnectAtMs).toBeNull();
+    expect(snap.lastError).toMatch(/no active provider/);
+  });
+
+  it("boundHandle.state() !== 'bound' is reported as not-open, not 'open'", async () => {
+    // 模拟：远端已断开但 handle 引用未清。inspectLocalDb 必须如实报告
+    // 非 open。
+    const handle = makeMockProviderOps({ state: "closed" });
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    await core.connectForOwner(OWNER);
+    expect(core.inspectLocalDb().state).not.toBe("open");
+  });
+
+  it("inspectLocalDb exposes nextReconnectAtMs only when state=closed", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    await core.connectForOwner(OWNER);
+    // bound 时即使 setNextReconnectAtMs 写入，inspectLocalDb 也要返回
+    // null（§4.4 约束：open 时必须为 null）。
+    core.setNextReconnectAtMs(Date.now() + 5000);
+    expect(core.inspectLocalDb().nextReconnectAtMs).toBeNull();
+    // 断开后倒计时才能透出。
+    await core.disconnect();
+    core.setNextReconnectAtMs(Date.now() + 5000);
+    const snap = core.inspectLocalDb();
+    expect(snap.state).toBe("closed");
+    expect(snap.nextReconnectAtMs).not.toBeNull();
+  });
+});
+
+/* ============== 硬切换 003 反馈"必改"测试 ============== */
+
+describe("AppMsgCoreImpl - connectForOwner outcome + stale guard", () => {
+  it("connectForOwner returns connected on success", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    const out = await core.connectForOwner(OWNER);
+    expect(out.kind).toBe("connected");
+  });
+
+  it("connectForOwner returns retryableFailure on bind error", async () => {
+    const failingProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: async () => {
+        throw new Error("bind failed");
+      },
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: false, lastError: "x", lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const { core } = makeCore({ providers: [failingProvider] });
+    const out = await core.connectForOwner(OWNER);
+    expect(out.kind).toBe("retryableFailure");
+    if (out.kind === "retryableFailure") {
+      expect(out.reason).toMatch(/bind failed/);
+    }
+  });
+
+  it("connectForOwner returns structurallyOffline when no provider", async () => {
+    const { core } = makeCore();
+    const out = await core.connectForOwner(OWNER);
+    expect(out.kind).toBe("structurallyOffline");
+    if (out.kind === "structurallyOffline") {
+      expect(out.reason).toBe("no_active_provider");
+    }
+  });
+
+  it("connectForOwner returns structurallyOffline when signer is null", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({
+      providers: [p],
+      signerProvider: async () => null
+    });
+    const out = await core.connectForOwner(OWNER);
+    expect(out.kind).toBe("structurallyOffline");
+    if (out.kind === "structurallyOffline") {
+      expect(out.reason).toBe("no_signer");
+    }
+  });
+
+  it("connectForOwner ignores callerEpoch token (does not stale on it)", async () => {
+    // 反馈"必改"第二轮：core 内部不再做"传入 callerEpoch 必须等于
+    // connectEpoch"校验；callerEpoch 仅作 caller 端"await 后自检"
+    // 的 token，core 不读不校验。
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    // 任意 callerEpoch（包括明显"过期"的 -1）都**不**让 core 立即
+    // 返回 stale；core 按真实 outcome 推进。
+    const out = await core.connectForOwner(OWNER, -1);
+    expect(out.kind).toBe("connected");
+    expect(core.currentHandle()).toBe(handle);
+  });
+
+  it("同一结构代次下的两次 connectForOwner 都不 stale（callerEpoch 不变）", async () => {
+    // 反馈"必改"第二轮：旧实现会把 `callerEpoch` 当成必须等于
+    // connectEpoch 的 token，导致 5 秒重试全部变 stale。新设计下，
+    // callerEpoch 仅作标识，core 内部不读；同一 callerEpoch 下第
+    // 二次调用仍能正常走完。
+    const failingProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: async () => {
+        throw new Error("net down");
+      },
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: false, lastError: "x", lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const { core } = makeCore({ providers: [failingProvider] });
+    // 第一次：callerEpoch=1 失败。
+    const out1 = await core.connectForOwner(OWNER, 1);
+    expect(out1.kind).toBe("retryableFailure");
+    // 第二次：callerEpoch 仍是 1（旧实现下会变 stale）。
+    const out2 = await core.connectForOwner(OWNER, 1);
+    expect(out2.kind).toBe("retryableFailure");
+  });
+
+  it("in-flight connect overtaken by a newer call returns stale; older result is discarded", async () => {
+    // 两次都按同一 owner 调（keyspace active 仍是 OWNER），靠
+    // connectEpoch 代次抢占让第一次返回 stale。
+    const slowHandle = makeMockProviderOps();
+    const slowProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: async () => {
+        await new Promise((r) => setTimeout(r, 30));
+        return slowHandle as MessageProviderHandle;
+      },
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: true, lastError: null, lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const { core } = makeCore({ providers: [slowProvider] });
+    const slowP = core.connectForOwner(OWNER).then((o) => ({ tag: "slow" as const, o }));
+    // 立刻发起第二次 connect（覆盖 connectEpoch）。
+    const out2 = await core.connectForOwner(OWNER);
+    expect(out2.kind).toBe("connected");
+    expect(core.currentHandle()).toBe(slowHandle);
+    // 等第一次返回。
+    const r1 = await slowP;
+    expect(r1.tag).toBe("slow");
+    expect(r1.o.kind).toBe("stale");
+    // 不应被回写：bound owner 仍是 OWNER，boundHandle 仍是 slowHandle。
+    expect(core.inspectLocalDb().ownerPublicKeyHex).toBe(OWNER);
+    expect(core.inspectLocalDb().state).toBe("open");
+  });
+});
+
+describe("AppMsgCoreImpl - markStructurallyOffline", () => {
+  it("after connectForOwner fails, markStructurallyOffline brings state to idle and clears lastError", async () => {
+    const failingProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: async () => {
+        throw new Error("boom");
+      },
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: false, lastError: "x", lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const { core } = makeCore({ providers: [failingProvider] });
+    await core.connectForOwner(OWNER);
+    // 失败路径下 `currentBoundOwner` 不会被提交（§5.6 提交前校验），
+    // 所以 state 仍稳定在 `idle`，与 §5.7 修正一致。
+    expect(core.inspectLocalDb().state).toBe("idle");
+    expect(core.inspectLocalDb().lastError).toMatch(/boom/);
+    core.markStructurallyOffline();
+    const snap = core.inspectLocalDb();
+    expect(snap.state).toBe("idle");
+    expect(snap.lastError).toBeNull();
+    expect(snap.ownerPublicKeyHex).toBeNull();
+  });
+
+  it("in-flight connect is invalidated after markStructurallyOffline", async () => {
+    let resolveBind!: (h: MessageProviderHandle) => void;
+    const handle = makeMockProviderOps();
+    const slowProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: () =>
+        new Promise<MessageProviderHandle>((resolve) => {
+          resolveBind = (h) => resolve(h);
+        }),
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: true, lastError: null, lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const { core } = makeCore({ providers: [slowProvider] });
+    const p = core.connectForOwner(OWNER);
+    // 等 connectForOwner 走过 disconnect / openLocalDbForOwner /
+    // signerProvider 几个 microtask，跑到 `await provider.bind(...)`。
+    // microtask 链较长，用 setTimeout(0) 切到 macrotask 强制推进。
+    await new Promise<void>((r) => setTimeout(r, 0));
+    // 此时 `resolveBind` 已被赋值。
+    expect(typeof resolveBind).toBe("function");
+    // 在 bind 还没 resolve 时调 markStructurallyOffline：会抬 connectEpoch。
+    core.markStructurallyOffline();
+    // 然后让 bind 完成。
+    resolveBind(handle as MessageProviderHandle);
+    const out = await p;
+    expect(out.kind).toBe("stale");
+    expect(core.inspectLocalDb().state).toBe("idle");
+    // 防止泄漏：handle 已被 close。
+    expect((handle.close as ReturnType<typeof vi.fn>)).toBeDefined();
+  });
+});
+
+describe("AppMsgCoreImpl - inspectLocalDb closed semantics (no lastError fallback)", () => {
+  it("closed is only set by currentBoundOwner or nextReconnectAtMs; lastError alone stays idle", async () => {
+    const { core } = makeCore();
+    // 模拟一次失败后只残留 lastError 的情况（不应让 state 升到 closed）。
+    // 通过 retryableFailure 路径产生 lastError：
+    const failingProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: async () => {
+        throw new Error("net down");
+      },
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: false, lastError: "x", lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const c2 = makeCore({ providers: [failingProvider] });
+    await c2.core.connectForOwner(OWNER);
+    expect(c2.core.inspectLocalDb().lastError).toMatch(/net down/);
+    // 失败但未写 currentBoundOwner/nextReconnectAtMs → state=idle。
+    expect(c2.core.inspectLocalDb().state).toBe("idle");
+    // 显式 markStructurallyOffline 也会清掉。
+    c2.core.markStructurallyOffline();
+    expect(c2.core.inspectLocalDb().state).toBe("idle");
+    expect(c2.core.inspectLocalDb().lastError).toBeNull();
+    void core;
+  });
+});
+
+describe("AppMsgCoreImpl - onClose hook (remote disconnect)", () => {
+  it("handle.state() going from bound to closed triggers handleGoneAfterBound", async () => {
+    const inner = {
+      state: "bound" as "bound" | "closed"
+    };
+    const handle = {
+      state: () => inner.state,
+      close: () => {
+        inner.state = "closed";
+      },
+      sendMessage: async () => ({ messageId: "m", createdAtMs: 0 }),
+      listMessages: async () => ({ items: [], hasMore: false }),
+      getMessage: async () => null,
+      subscribeMessages: () => () => undefined,
+      checkOnline: async () => ({})
+    } as unknown as MessageProviderOperations;
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    const seen: number[] = [];
+    core.onStateChange(() => seen.push(Date.now()));
+    await core.connectForOwner(OWNER);
+    expect(core.inspectLocalDb().state).toBe("open");
+    // 模拟远端断开：state 转入 closed。fallback 轮询每秒跑一次。
+    inner.state = "closed";
+    await new Promise((r) => setTimeout(r, 1100));
+    expect(core.inspectLocalDb().state).not.toBe("open");
+    expect(seen.length).toBeGreaterThan(0);
+  });
+
+  it("handle providing native onClose is preferred over fallback polling", async () => {
+    const inner = {
+      state: "bound" as "bound" | "closed",
+      closeHandlers: new Set<() => void>()
+    };
+    const handle = {
+      state: () => inner.state,
+      close: () => {
+        inner.state = "closed";
+      },
+      sendMessage: async () => ({ messageId: "m", createdAtMs: 0 }),
+      listMessages: async () => ({ items: [], hasMore: false }),
+      getMessage: async () => null,
+      subscribeMessages: () => () => undefined,
+      checkOnline: async () => ({})
+    } as unknown as MessageProviderOperations & {
+      onClose?: (h: () => void) => () => void;
+    };
+    (handle as unknown as { onClose?: (h: () => void) => () => void }).onClose =
+      (h: () => void) => {
+        inner.closeHandlers.add(h);
+        return () => inner.closeHandlers.delete(h);
+      };
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    await core.connectForOwner(OWNER);
+    expect(core.inspectLocalDb().state).toBe("open");
+    // 模拟远端断线。
+    inner.state = "closed";
+    for (const h of inner.closeHandlers) h();
+    // 不需要等 1s 轮询。
+    expect(core.inspectLocalDb().state).not.toBe("open");
+  });
+});

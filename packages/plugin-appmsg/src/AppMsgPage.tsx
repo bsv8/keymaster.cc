@@ -64,6 +64,9 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   const [providerMsg, setProviderMsg] = useState<{ kind: "ok" | "fail"; text: string } | null>(
     null
   );
+  // UI 专用 tick：用于驱动倒计时文案逐秒刷新。**不**触发业务侧任何
+  // 重连——所有重连生命周期都由 plugin-appmsg 内的协调器持有。
+  const [tick, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
     setSnapshot(service.inspectLocalDb());
@@ -77,6 +80,17 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
     void refresh();
   }, [refresh]);
 
+  // 订阅 core 状态变化（连接 / 断开 / 重连倒计时变化 / unfiltered 推送）。
+  // 不依赖收到 push 才更新连接态。
+  useEffect(() => {
+    const off = core.onStateChange(() => {
+      setSnapshot(service.inspectLocalDb());
+    });
+    return () => {
+      off();
+    };
+  }, [core, service]);
+
   // 订阅 unfiltered 推送：让统计 / 浏览能随推送增量更新。
   useEffect(() => {
     const off = core.subscribeUnfilteredMessages(() => {
@@ -86,6 +100,24 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
       off();
     };
   }, [core, refresh]);
+
+  // 1s UI tick：仅在等待重连时启动；用于倒计时文案逐秒刷新。
+  useEffect(() => {
+    if (snapshot.nextReconnectAtMs === null) return;
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => {
+      clearInterval(id);
+    };
+  }, [snapshot.nextReconnectAtMs]);
+
+  // 倒计时显示文案：`Math.max(1, ceil((nextReconnectAtMs - now)/1000))`。
+  // tick 依赖保证文案每秒重算。
+  const reconnectRemainingSec = useMemo(() => {
+    void tick;
+    if (snapshot.nextReconnectAtMs === null) return null;
+    const diffMs = snapshot.nextReconnectAtMs - Date.now();
+    return Math.max(1, Math.ceil(diffMs / 1000));
+  }, [snapshot.nextReconnectAtMs, tick]);
 
   /**
    * 单一规则：每条消息可能同时携带 sender 端和 recipient 端 endpoint——
@@ -290,6 +322,21 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
             {snapshot.lastError ?? i18n.t("appmsg.page.connection.lastError.none")}
           </span>
         </div>
+        {snapshot.state === "closed" && reconnectRemainingSec !== null ? (
+          <div className="appmsg-system-page__row" data-appmsg-reconnect-row>
+            <span className="appmsg-system-page__label">
+              {i18n.t("appmsg.page.connection.reconnect")}
+            </span>
+            <span
+              className="appmsg-system-page__value"
+              data-appmsg-reconnect-remaining={reconnectRemainingSec}
+            >
+              {i18n.t("appmsg.page.connection.reconnect.value", {
+                seconds: reconnectRemainingSec
+              })}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       {/* ===== 区块 4：同步态 ===== */}

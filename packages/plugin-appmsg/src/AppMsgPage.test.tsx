@@ -89,12 +89,14 @@ function makeFakeCore(opts?: {
   listProviders?: Array<{ id: string; displayName: string }>;
   checkOnlineImpl?: (input: string[]) => Promise<AppMsgOnlineResult>;
   providers?: () => unknown;
+  onStateChangeImpl?: (handler: () => void) => () => void;
 }): FakeCoreHandle {
   const snapshot = opts?.snapshot ?? {
     state: "open" as const,
     ownerPublicKeyHex: OWNER,
     lastInsertedAtMs: 1,
-    lastError: null
+    lastError: null,
+    nextReconnectAtMs: null
   };
   const activeProvider =
     opts?.activeProvider ?? {
@@ -112,13 +114,14 @@ function makeFakeCore(opts?: {
   const listProviders = opts?.listProviders ?? [{ id: "hubmsg", displayName: "HubMsg" }];
 
   const core = {
-    inspectLocalDb: () => snapshot,
-    activeProviderSnapshot: () => activeProvider,
+    inspectLocalDb: () => ({ ...snapshot }),
+    activeProviderSnapshot: () => ({ ...activeProvider }),
     listUnfilteredMessages: async () => ({ items: messages, hasMore: false }),
     listTargetSyncStates: async () => targets,
     triggerSync: triggerSyncImpl,
     checkOnline: opts?.checkOnlineImpl ?? (async () => ({})),
     subscribeUnfilteredMessages: () => () => undefined,
+    onStateChange: opts?.onStateChangeImpl ?? (() => () => undefined),
     providers: opts?.providers ?? (() => ({
       list: () => listProviders,
       activeSnapshot: () => activeProvider,
@@ -390,5 +393,170 @@ describe("AppMsgPage in PluginHostProvider", () => {
       expect(nodes.length).toBeGreaterThan(0);
     });
     expect(triggerSyncImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+/* ============== 硬切换 003：连接区倒计时展示 ============== */
+
+describe("AppMsgPage - reconnect countdown display", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
+  it("does not render reconnect row when nextReconnectAtMs is null", async () => {
+    const h = makeFakeCore({
+      snapshot: {
+        state: "open",
+        ownerPublicKeyHex: OWNER,
+        lastInsertedAtMs: 1,
+        lastError: null,
+        nextReconnectAtMs: null
+      }
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    expect(document.querySelector("[data-appmsg-reconnect-row]")).toBeNull();
+  });
+
+  it("renders reconnect row with remaining seconds when nextReconnectAtMs is set", async () => {
+    const h = makeFakeCore({
+      snapshot: {
+        state: "closed",
+        ownerPublicKeyHex: OWNER,
+        lastInsertedAtMs: 1,
+        lastError: "boom",
+        nextReconnectAtMs: Date.now() + 5000
+      }
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    // 倒计时行必须存在，且剩余秒数 data 属性 >= 1。
+    const row = document.querySelector("[data-appmsg-reconnect-row]");
+    expect(row).toBeTruthy();
+    const remaining = document.querySelector("[data-appmsg-reconnect-remaining]");
+    expect(remaining).toBeTruthy();
+    const n = Number(remaining!.getAttribute("data-appmsg-reconnect-remaining"));
+    expect(n).toBeGreaterThanOrEqual(1);
+    expect(n).toBeLessThanOrEqual(5);
+  });
+
+  it("subscribes to onStateChange and refreshes the connection snapshot", async () => {
+    const listeners: Array<() => void> = [];
+    const dynamicSnapshot: AppMsgLocalDbSnapshot = {
+      state: "open",
+      ownerPublicKeyHex: OWNER,
+      lastInsertedAtMs: 1,
+      lastError: null,
+      nextReconnectAtMs: null
+    };
+    const onStateChangeImpl = (handler: () => void) => {
+      listeners.push(handler);
+      return () => {
+        const i = listeners.indexOf(handler);
+        if (i >= 0) listeners.splice(i, 1);
+      };
+    };
+    const h = makeFakeCore({
+      snapshot: dynamicSnapshot,
+      onStateChangeImpl
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    // 订阅已挂上。
+    expect(listeners.length).toBe(1);
+    // 没有 nextReconnectAtMs → 不显示倒计时行。
+    expect(document.querySelector("[data-appmsg-reconnect-row]")).toBeNull();
+    // 改 snapshot 并通知 → 页面应立即刷新。
+    dynamicSnapshot.state = "closed";
+    dynamicSnapshot.lastError = "net down";
+    dynamicSnapshot.nextReconnectAtMs = Date.now() + 5000;
+    for (const l of listeners) {
+      try {
+        l();
+      } catch {
+        // ignore
+      }
+    }
+    await waitFor(() => {
+      const row = document.querySelector("[data-appmsg-reconnect-row]");
+      expect(row).toBeTruthy();
+    });
+  });
+
+  it("state=idle + lastError 残留时不显示倒计时", async () => {
+    // 反馈"必改"测试：page 不应被 `lastError` 残留顶出 closed 倒计时。
+    const h = makeFakeCore({
+      snapshot: {
+        state: "idle",
+        ownerPublicKeyHex: null,
+        lastInsertedAtMs: 0,
+        lastError: "an old error from a previous failed attempt",
+        nextReconnectAtMs: null
+      }
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    // state=idle 区块文案展示。
+    expect(
+      screen.getByText("appmsg.page.connection.state.idle")
+    ).toBeTruthy();
+    // 不显示倒计时行。
+    expect(document.querySelector("[data-appmsg-reconnect-row]")).toBeNull();
+    // lastError 仍在 lastError 行展示（信息不丢）。
+    expect(
+      screen.getByText("an old error from a previous failed attempt")
+    ).toBeTruthy();
+  });
+
+  it("nextReconnectAtMs 不在 closed 时不显示倒计时（防止语义漂移）", async () => {
+    // 反馈"必改"测试：仅在 `state === "closed"` 才显示倒计时。
+    const h = makeFakeCore({
+      snapshot: {
+        // 异常态：nextReconnectAtMs 有值但 state 不是 closed——不应显示。
+        state: "open",
+        ownerPublicKeyHex: OWNER,
+        lastInsertedAtMs: 0,
+        lastError: null,
+        nextReconnectAtMs: Date.now() + 5000
+      }
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    expect(document.querySelector("[data-appmsg-reconnect-row]")).toBeNull();
   });
 });

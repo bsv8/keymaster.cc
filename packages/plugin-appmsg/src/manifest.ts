@@ -41,6 +41,7 @@ import {
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
 import { AppMsgPage } from "./AppMsgPage.js";
 import type { AppMsgBindSigner } from "./appmsgCore.js";
+import { createReconnectCoordinator } from "./reconnectCoordinator.js";
 
 /** plugin-appmsg 平台插件 id。 */
 export const APPMSG_PLUGIN_ID = "appmsg";
@@ -298,50 +299,40 @@ export const appmsgPlatformPlugin: PluginManifest = {
     ctx.provide(APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, core.endpointRegistry());
 
     /**
-     * 订阅 owner / vault / active provider 变化驱动 reconnect。
+     * 单一重连协调器（施工单 2026-07-04 003 硬切换 + 反馈"必改"第二轮）。
      *
-     * 注意：runtime 不再持有消息业务生命周期——这些 owner / vault 监听是
-     * plugin-appmsg **自身**的职责，因为它拥有连接真值。runtime 只负责
-     * 通用 plugin 装配。
+     * 实际逻辑落在 `reconnectCoordinator.ts`；本处只做依赖装配与
+     * teardown 转发。独立抽离的理由：协调器是连接生命周期真值拥有
+     * 者，必须可被单测覆盖完整路径（5s 重试 / 远端断线 / 切
+     * provider / 锁定取消 / 切 key 等）。
      */
-    let reconnectInFlight: Promise<void> | null = null;
-    const tryReconnect = (): void => {
-      if (reconnectInFlight) return;
-      reconnectInFlight = (async () => {
-        try {
-          if (vault.status() !== "unlocked") {
-            await core.disconnect();
-            return;
-          }
-          const active = keyspace.active().activePublicKeyHex;
-          if (!active) {
-            await core.disconnect();
-            return;
-          }
-          await core.connectForOwner(active);
-        } catch (err) {
+    const coordinator = createReconnectCoordinator({
+      core,
+      vault,
+      keyspace,
+      logger: {
+        info: (input) => {
+          const obj = input as unknown as Record<string, unknown>;
+          const ev = typeof obj.event === "string" ? obj.event : "info";
+          ctx.logger.info({
+            scope: "appmsg.core",
+            event: ev,
+            message: "",
+            data: obj
+          });
+        },
+        warn: (input) => {
+          const obj = input as unknown as Record<string, unknown>;
+          const ev = typeof obj.event === "string" ? obj.event : "warn";
           ctx.logger.warn({
             scope: "appmsg.core",
-            event: "tryReconnect.failed",
-            message: "reconnect failed",
-            data: { err: err instanceof Error ? err.message : String(err) }
+            event: ev,
+            message: "",
+            data: obj
           });
-        } finally {
-          reconnectInFlight = null;
         }
-      })();
-    };
-
-    const unsubActive = keyspace.onActiveChange(() => tryReconnect());
-    const unsubVault = vault.onStatusChange?.(() => tryReconnect());
-
-    // 订阅 provider active 变化：用户切换 provider 时也要重新 connect。
-    const unsubProviderActive = core.providers().onActiveChange(() => {
-      tryReconnect();
+      }
     });
-
-    // plugin-appmsg 在 setup 结束后立即尝试一次 connect（best-effort）
-    tryReconnect();
 
     /**
      * AppMsg 管理面：路由 / 菜单 / 面包屑。
@@ -404,9 +395,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
     });
 
     return () => {
-      unsubActive();
-      unsubVault?.();
-      unsubProviderActive();
+      coordinator.dispose();
       void core.disconnect();
     };
   }

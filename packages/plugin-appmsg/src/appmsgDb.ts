@@ -549,6 +549,9 @@ export type AppMsgLocalDbOps = ReturnType<typeof createAppMsgLocalDbOps>;
 
 /**
  * 同步全库 snapshot（仅供 `inspectLocalDb` 阶段使用；不暴露给 caller）。
+ *
+ * 注意：当前实现是历史遗留死代码——core 层直接构造快照，**不**经过
+ * 本函数。保留仅为向后兼容；新接入请走 `appmsgCore.inspectLocalDb()`。
  */
 export function inspectLocalDb(input: {
   currentBoundOwner: string | null;
@@ -564,7 +567,8 @@ export function inspectLocalDb(input: {
     state,
     ownerPublicKeyHex: input.currentBoundOwner,
     lastInsertedAtMs: input.lastInsertedAtMs,
-    lastError: input.lastError
+    lastError: input.lastError,
+    nextReconnectAtMs: null
   };
 }
 

@@ -275,12 +275,24 @@ export interface AppMsgTargetSyncState {
 
 /**
  * 当前 owner 的本地消息库连接状态（用于系统消息应用展示）。
+ *
+ * `nextReconnectAtMs`（施工单 2026-07-04 003 硬切换新增）：
+ *   - 仅在 `state === "closed"` 且系统正在等待下一次自动重连时为未来
+ *     时间戳（unix ms）；
+ *   - `state === "open"` / `state === "idle"` / 结构性不可连接场景
+ *     （vault locked / 无 active key / 无 active provider）必须为
+ *     `null`；
+ *   - 此字段是管理页倒计时展示的**唯一真值**——页面不靠 `lastError`
+ *     反推，也不自己起 5 秒定时器；
+ *   - 5 秒重试间隔由 plugin-appmsg setup 内的重连协调器固定持有，
+ *     写一次，触发一次状态变更即可。
  */
 export interface AppMsgLocalDbSnapshot {
   state: "idle" | "open" | "closed";
   ownerPublicKeyHex: string | null;
   lastInsertedAtMs: number;
   lastError: string | null;
+  nextReconnectAtMs: number | null;
 }
 
 /* ============== 公开 facade（endpoint service 形态） ============== */
@@ -355,6 +367,42 @@ export interface AppMsgEndpointServiceRegistry {
 /** endpoint service registry capability key。 */
 export const APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY = "appmsg.endpoint.registry";
 
+/**
+ * `connectForOwner` 的结果分类（硬切换 003 修订 + 反馈"必改"第二轮）。
+ *
+ * 设计缘由（施工单 2026-07-04 003 §5.5 / §7 + 反馈"必改"第二轮）：
+ *   - 旧契约 `connectForOwner(...): Promise<void>` 失败时只写
+ *     `lastError` 不抛错，导致上层协调器分不清"已成功绑定"和"静默
+ *     失败"——必须靠 `inspectLocalDb().state` 反推，且无法表达"绑定
+ *     已完成但被结构性条件变化作废"的过期结果；
+ *   - 新契约直接返回结构化结果，把"成功 / 结构性不可连接 / 可重试
+ *     失败 / 过期（被 core 内部抢占）"四种状态外显给唯一调用者
+ *     （`plugin-appmsg` setup 内的重连协调器）；
+ *   - 业务插件**不**直接调 `connectForOwner`——它走 `endpoint service`
+ *     路径；本类型属于 platform internal。
+ *
+ * `local_db_unavailable` reason 显式表达"本地消息库打不开"——本字段
+ * 真实反映 core 内 `openLocalDbForOwner` 失败的真值；如果实现与本
+ * 契约漂移，按"文档型契约漂移"对待。
+ */
+export type AppMsgConnectOutcome =
+  /** bind 成功且提交未被新代次覆盖，当前 handle 真实进入 `bound`。 */
+  | { kind: "connected" }
+  /** 结构性条件不满足（无 provider / 无 signer / 本地 DB 不可用），不应继续 5 秒循环。 */
+  | {
+      kind: "structurallyOffline";
+      reason: "no_active_provider" | "no_signer" | "local_db_unavailable";
+    }
+  /** bind 抛错或远端拒绝，可重试。协调器会安排固定 5 秒后再次尝试。 */
+  | { kind: "retryableFailure"; reason: string }
+  /**
+   * core 内部 `connectEpoch` 自增（被同实例另一次 `connectForOwner`
+   * 抢占）——结果不应被采用。**不**用于 caller 端结构代次校验；caller
+   * 端过期由 caller 自己在 `await` 前后自检（详见 `connectForOwner`
+   * 注释）。
+   */
+  | { kind: "stale" };
+
 /* ============== 平台 internal 接口（plugin-appmsg 单例实现） ============== */
 
 /** appmsg 平台核心 capability key。 */
@@ -404,10 +452,54 @@ export interface AppMsgCore {
 
   /* ====== 连接管理 ====== */
 
-  /** connect 当前 owner（rebind 当前 active provider）。幂等。 */
-  connectForOwner(ownerPublicKeyHex: string): Promise<void>;
+  /**
+   * connect 当前 owner（rebind 当前 active provider）。
+   *
+   * 参数：
+   *   - `ownerPublicKeyHex`：要绑定的 owner；
+   *   - `callerEpoch`（可选，**仅** `plugin-appmsg` setup 内的重连
+   *     协调器使用）：caller 端用来做"await 后自检"的标识 token。
+   *     core 内部**不**读 / 不校验此值——**不是**要求与 core 内部
+   *     `connectEpoch` 相等的"必须匹配 token"。caller 在 await 之前
+   *     记下自己当时的 epoch，await 后若 epoch 变了就视为 stale 丢弃
+   *     结果——这与"提交前校验"语义等价。
+   *
+   * 失败语义（硬切换 003 反馈"必改"第二轮）：
+   *   - 旧实现 "失败只写 `lastError` 不抛错" 已被废弃；本方法直接返回
+   *     `AppMsgConnectOutcome` 表达"connected / structurallyOffline /
+   *     retryableFailure / stale"四种真值；
+   *   - `stale` 来自 core 内部 `connectEpoch` 自增（被同实例另一次
+   *     `connectForOwner` 抢占），**不**来自 callerEpoch；
+   *   - `structurallyOffline.reason` 包含 `no_active_provider` /
+   *     `no_signer` / `local_db_unavailable` 三种真值，caller 应
+   *     尊重 `outcome.reason`，**不**应自己覆盖；
+   *   - `disconnect` 仍保持"幂等"语义，无返回值。
+   */
+  connectForOwner(
+    ownerPublicKeyHex: string,
+    callerEpoch?: number
+  ): Promise<AppMsgConnectOutcome>;
   /** 关闭连接；幂等。 */
   disconnect(): Promise<void>;
+  /**
+   * 把 core 拉到"结构性不可连接"态（硬切换 003 反馈"必改"）。
+   *
+   * 与 `disconnect()` 区别：
+   *   - `disconnect()`：纯 IO 关闭，**不**清 `lastError`；
+   *   - `markStructurallyOffline()`：清 `lastError` + 清
+   *     `nextReconnectAtMs` + 清 `currentBoundOwner` + 抬内部
+   *     `connectEpoch`，让 `inspectLocalDb().state` 稳定回 `idle`。
+   *
+   * 唯一调用者是 `plugin-appmsg` setup 内的重连协调器。
+   */
+  markStructurallyOffline(): void;
+  /**
+   * 由重连协调器写入下一次自动重连截止时间戳。`null` 表示清空。
+   * 写入后 fire state change，让管理页立即刷新。
+   */
+  setNextReconnectAtMs(value: number | null): void;
+  /** 读取当前等待重连截止时间戳（仅诊断）。 */
+  getNextReconnectAtMs(): number | null;
 
   /* ====== 本地 DB 状态 ====== */
 

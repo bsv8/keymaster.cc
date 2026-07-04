@@ -36,6 +36,7 @@
 import type {
   ActiveMessageProviderSnapshot,
   AppMsgAddress,
+  AppMsgConnectOutcome,
   AppMsgContentType,
   AppMsgCore,
   AppMsgEndpointId,
@@ -586,6 +587,20 @@ export class AppMsgCoreImpl implements AppMsgCore {
   private lastInsertedAtMsValue: number = 0;
   /** 最近一次错误 message。 */
   private lastErrorMessageValue: string | null = null;
+  /**
+   * 等待下一次自动重连的截止时间戳（unix ms）。
+   *
+   * 真值由 `plugin-appmsg` setup 内的重连协调器写入，core 本身**不**
+   * 负责起 timer；core 仅持有"是否在等待重连"这一最小真值，以便
+   * 管理页 `inspectLocalDb()` 拿到一致快照。
+   *
+   * 约束（施工单 2026-07-04 003 §5.5 / §5.6 / §5.7）：
+   *   - 仅在 `boundHandle` 不存在 / 已不再 `bound`，且结构条件仍满足
+   *     时，由协调器写入未来时间戳；
+   *   - 连接成功、显式 `disconnect()`、结构性不可连接、provider 切换
+   *     离开本次 owner → 必须被清空（`null`）。
+   */
+  private nextReconnectAtMsValue: number | null = null;
   /** 防止同时多次 triggerSync 并发。 */
   private syncInFlight: Promise<void> | null = null;
   /** keyspace 引用（platform internal）。 */
@@ -640,18 +655,89 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   /* ====== 连接管理 ====== */
 
-  async connectForOwner(ownerPublicKeyHex: string): Promise<void> {
+  /**
+   * 内部连接代次计数器（硬切换 003 反馈"必改"第二轮）。
+   *
+   * 每次 `connectForOwner` 入口 `++`。**仅**用于 core 内部"是否被更
+   * 新的一次 `connectForOwner` 抢占"的校验——与"调用方结构代次"无关。
+   *
+   * 旧实现"async 完成时同时校验调用方 epoch 和内部 connectEpoch 等
+   * 值"会让同一结构代次下的 5 秒重试（callerEpoch 不变，但每次都进
+   * connectForOwner 都会 ++connectEpoch）直接返回 stale。本字段
+   * 仅防"被同实例另一次 connectForOwner 抢占"，caller 端的过期由
+   * 协调器自检。
+   */
+  private connectEpoch: number = 0;
+  /** 关闭已握手的 handle 时（远端断线 / 显式 close）同步解除；`null` 表示未挂订阅。 */
+  private handleCloseOff: (() => void) | null = null;
+  /**
+   * 远端断线时由 provider 主动触发；fireStateChange 后 manifest 协调
+   * 器订阅 `onStateChange` 即可识别"上次 open → 突然不在 bound"，重
+   * 新进入 5 秒循环。
+   */
+  private onHandleGoneAfterBound: () => void = () => undefined;
+
+  /**
+   * connect 当前 owner。
+   *
+   * 参数 `callerEpoch`（反馈"必改"第二轮修订）：
+   *   - **仅**是 caller 端用来做"await 后自检"的标识——**不是**要求
+   *     与 core 内部 `connectEpoch` 相等的"必须匹配 token"；
+   *   - core 内部**不**读 / 不校验 callerEpoch；caller 在 await 之前
+   *     记下自己当时的 epoch，await 后若 epoch 变了就视为 stale 丢弃
+   *     结果——这与"提交前校验"语义等价（反馈"必改"第二轮指明 caller
+   *     端自检的可行性）；
+   *   - 旧实现"`epoch !== myEpoch` 直接 stale"的语义会让同一结构代
+   *     次下的 5 秒重试全部变 stale，本次拆解后 callerEpoch 与
+   *     connectEpoch 互不干扰。
+   */
+  async connectForOwner(
+    ownerPublicKeyHex: string,
+    callerEpoch?: number
+  ): Promise<AppMsgConnectOutcome> {
+    // 1. 短路径：当前已连到同一 owner 且 handle 真在 bound。
     if (
       this.currentBoundOwner === ownerPublicKeyHex &&
       this.boundHandle &&
       this.boundHandle.state() === "bound"
     ) {
-      return;
+      return { kind: "connected" };
     }
-    emitLog(this.cfg.logger, "info", "appmsg.connect.begin", { ownerPublicKeyHex });
-    await this.disconnect();
-    await this.openLocalDbForOwner(ownerPublicKeyHex);
 
+    // 2. 进入新一轮：自增内部 connectEpoch，记录 myEpoch。
+    //    `callerEpoch` 仅由调用方在 await 后自检（用于决定是否采用本
+    //    结果），core 内部**不**做等值比较。
+    this.connectEpoch += 1;
+    const myEpoch = this.connectEpoch;
+    void callerEpoch;
+
+    emitLog(this.cfg.logger, "info", "appmsg.connect.begin", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch
+    });
+    // 先断开旧 handle，释放本地 DB 占位。disconnect 不会重置 connectEpoch。
+    await this.disconnect();
+    if (myEpoch !== this.connectEpoch) {
+      return { kind: "stale" };
+    }
+    // 3. 打开本地 DB：失败视为结构性离线（硬切换 003 反馈"必改"第二轮
+    //    补的 `local_db_unavailable` 分支）。打不开 DB 后续 bind 不可
+    //    继续——必须结构性离线，不排 5 秒重试。
+    await this.openLocalDbForOwner(ownerPublicKeyHex);
+    if (myEpoch !== this.connectEpoch) {
+      return { kind: "stale" };
+    }
+    if (!this.localHandle || !this.localOps) {
+      this.lastErrorMessageValue = "local db not available";
+      emitLog(this.cfg.logger, "error", "appmsg.connect.failed", {
+        ownerPublicKeyHex,
+        reason: "local_db_unavailable"
+      });
+      this.fireStateChange();
+      return { kind: "structurallyOffline", reason: "local_db_unavailable" };
+    }
+
+    // 4. 结构性条件检查（在签名 + bind 之前）。
     const provider = this.providerRegistryInstance.active();
     if (!provider) {
       this.lastErrorMessageValue = "no active provider registered";
@@ -660,10 +746,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
         reason: "no_active_provider"
       });
       this.fireStateChange();
-      return;
+      return { kind: "structurallyOffline", reason: "no_active_provider" };
     }
 
     const signer = await this.cfg.signerProvider();
+    if (myEpoch !== this.connectEpoch) {
+      return { kind: "stale" };
+    }
     if (!signer) {
       this.lastErrorMessageValue = "no signer available (vault locked or no active key)";
       emitLog(this.cfg.logger, "warn", "appmsg.connect.failed", {
@@ -671,9 +760,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
         reason: "no_signer"
       });
       this.fireStateChange();
-      return;
+      return { kind: "structurallyOffline", reason: "no_signer" };
+    }
+    if (myEpoch !== this.connectEpoch) {
+      return { kind: "stale" };
     }
 
+    // 5. bind 阶段：抛错统一收口为 retryableFailure。
     let handle: MessageProviderHandle;
     try {
       handle = await provider.bind({ signer });
@@ -686,26 +779,79 @@ export class AppMsgCoreImpl implements AppMsgCore {
         err: msg
       });
       this.fireStateChange();
-      return;
+      return { kind: "retryableFailure", reason: msg };
+    }
+    if (myEpoch !== this.connectEpoch) {
+      // bind 期间被新调用抢占：自己持有的 handle 必须立即关掉，避免泄漏。
+      try {
+        (handle as MessageProviderOperations).close();
+      } catch {
+        // ignore
+      }
+      return { kind: "stale" };
     }
     if (!(handle as MessageProviderOperations).sendMessage) {
       // 类型守卫：bind 必须返回 typed operations。
+      try {
+        (handle as MessageProviderOperations).close();
+      } catch {
+        // ignore
+      }
       this.lastErrorMessageValue = "provider.bind returned untyped handle";
       emitLog(this.cfg.logger, "error", "appmsg.connect.failed", {
         ownerPublicKeyHex,
         reason: "untyped_handle"
       });
       this.fireStateChange();
-      return;
+      return { kind: "retryableFailure", reason: "untyped_handle" };
     }
+
+    // 6. 提交前再校验 owner / provider 真值是否仍是本轮发起时记录的。
+    //    这是 §7.2 / §7.3 / §7.4"旧连接污染新状态"的最后一道关卡。
+    const currentOwner = this.cfg.keyspace.active().activePublicKeyHex ?? null;
+    if (currentOwner !== ownerPublicKeyHex) {
+      try {
+        (handle as MessageProviderOperations).close();
+      } catch {
+        // ignore
+      }
+      return { kind: "stale" };
+    }
+    if (this.providerRegistryInstance.active()?.id !== provider.id) {
+      try {
+        (handle as MessageProviderOperations).close();
+      } catch {
+        // ignore
+      }
+      return { kind: "stale" };
+    }
+    if (myEpoch !== this.connectEpoch) {
+      try {
+        (handle as MessageProviderOperations).close();
+      } catch {
+        // ignore
+      }
+      return { kind: "stale" };
+    }
+
+    // 6. 正式提交：写入 boundHandle / currentBoundOwner / currentProviderId。
     this.boundHandle = handle as MessageProviderOperations;
     this.currentBoundOwner = ownerPublicKeyHex;
     this.currentProviderId = provider.id;
     this.lastErrorMessageValue = null;
+    // 连接成功 → 重连协调器已写入的等待倒计时作废。
+    this.nextReconnectAtMsValue = null;
     emitLog(this.cfg.logger, "info", "appmsg.connect.bound", {
       ownerPublicKeyHex,
-      providerId: provider.id
+      providerId: provider.id,
+      connectEpoch: myEpoch
     });
+
+    // 6.1 远端断线观测（硬切换 003 反馈"必改"）：bind 成功后立刻挂
+    //     onClose 订阅。handle 真的断开时 fire state change，manifest
+    //     协调器会通过 onStateChange 识别"刚 bound → 现在不在 bound"
+    //     并重新进入 5 秒循环。
+    this.attachHandleCloseHook(this.boundHandle);
 
     // 重挂 unfiltered 订阅（如果有）。
     this.reattachUnfilteredSubscriptions();
@@ -713,6 +859,141 @@ export class AppMsgCoreImpl implements AppMsgCore {
     // 触发同步。
     void this.triggerSync();
     this.fireStateChange();
+    return { kind: "connected" };
+  }
+
+  /**
+   * 把 core 拉到结构性离线态（硬切换 003 反馈"必改"）。
+   *
+   * 与 `disconnect()` 区别：
+   *   - `disconnect()`：纯 IO 关闭，**不**清 `lastError`（用户手动断开
+   *     时也希望保留最近错误文案）；
+   *   - `markStructurallyOffline()`：把"曾经尝试过连接失败"的痕迹一
+   *     并擦掉——`lastError` + `nextReconnectAtMs` + `currentBoundOwner`
+   *     全部清回 null，让 `inspectLocalDb().state` 干净地回到 `idle`。
+   *
+   * 唯一调用者是 manifest 协调器内的 `goStructurallyOffline()`。
+   */
+  markStructurallyOffline(): void {
+    // 1. 抬 connectEpoch：任何在飞的 connectForOwner 在 commit 前会
+    //    发现 epoch 已变并自动返回 stale，不会污染本方法清理后的状态。
+    this.connectEpoch += 1;
+    // 2. 关 handle + 解 onClose 订阅。
+    if (this.boundHandle) {
+      try {
+        this.boundHandle.close();
+      } catch {
+        // ignore
+      }
+      this.boundHandle = null;
+    }
+    if (this.handleCloseOff) {
+      try {
+        this.handleCloseOff();
+      } catch {
+        // ignore
+      }
+      this.handleCloseOff = null;
+    }
+    // 3. 清所有结构性离线痕迹。
+    this.currentBoundOwner = null;
+    this.currentProviderId = null;
+    this.lastErrorMessageValue = null;
+    this.nextReconnectAtMsValue = null;
+    // 4. 关本地 DB（disconnect 也会做，但本入口独立可用）。
+    if (this.localHandle) {
+      try {
+        this.localHandle.close();
+      } catch {
+        // ignore
+      }
+      this.localHandle = null;
+      this.localOps = null;
+    }
+    if (this.currentUnfilteredOff) {
+      try {
+        this.currentUnfilteredOff();
+      } catch {
+        // ignore
+      }
+      this.currentUnfilteredOff = null;
+    }
+    this.fireStateChange();
+  }
+
+  /**
+   * 给当前 bound handle 挂远端断线观测。
+   *
+   * 实现原则：
+   *   - 不依赖具体 provider 的 wire 接口；任何实现 `MessageProviderOperations`
+   *     的 handle 若自带 onClose 钩子，立即挂上；没有则降级为定时
+   *     `state()` 轮询（≥1s 间隔）——这只是 fallback，**不**作为
+   *     5 秒重连逻辑的驱动者，5 秒循环由 manifest 协调器持有。
+   *   - 触发条件：handle `state()` 转入 `closed` / `idle` 且
+   *     `currentBoundOwner` 仍记着同一个 owner；
+   *     此时清掉本地的 `boundHandle` 引用并 fire state change，让
+   *     manifest 协调器通过 `onStateChange` 检测"刚 bound → 突然不
+   *     在 bound"并重新 attemptConnect。
+   */
+  private attachHandleCloseHook(handle: MessageProviderOperations): void {
+    if (this.handleCloseOff) {
+      try {
+        this.handleCloseOff();
+      } catch {
+        // ignore
+      }
+      this.handleCloseOff = null;
+    }
+    // 1) 优先尝试 typed onClose（HubMsg 等 provider 可选实现）。
+    const maybeOnClose = (handle as unknown as {
+      onClose?: (h: () => void) => () => void;
+    }).onClose;
+    if (typeof maybeOnClose === "function") {
+      const off = maybeOnClose(() => this.handleGoneAfterBound());
+      this.handleCloseOff = () => {
+        try {
+          off();
+        } catch {
+          // ignore
+        }
+      };
+      return;
+    }
+    // 2) Fallback：低频 state() 轮询。**不**作为健康检查 / 计时依据，
+    //    仅用于把"远端静默断开"翻译成一次 fireStateChange。
+    const poller = setInterval(() => {
+      const h = this.boundHandle;
+      if (!h) {
+        clearInterval(poller);
+        return;
+      }
+      const st = h.state();
+      if (st !== "bound") {
+        clearInterval(poller);
+        this.handleGoneAfterBound();
+      }
+    }, 1000);
+    this.handleCloseOff = () => {
+      clearInterval(poller);
+    };
+  }
+
+  /**
+   * 远端断线处理（硬切换 003 反馈"必改"）。
+   *
+   * 触发后：
+   *   - 清掉 `boundHandle` 引用（保持 `currentBoundOwner` 不变——仍
+   *     记着"曾试图连上这个 owner"，管理页可正确显示 `closed`）；
+   *   - 不自动排 5 秒 timer——manifest 协调器通过订阅
+   *     `onStateChange()` 识别此事件后才会触发 `attemptConnect()`，
+   *     保证"重连驱动逻辑只在 manifest 一处"。
+   */
+  private handleGoneAfterBound(): void {
+    if (this.boundHandle && this.boundHandle.state() !== "bound") {
+      this.boundHandle = null;
+      this.lastErrorMessageValue = "connection closed by remote";
+      this.fireStateChange();
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -725,12 +1006,24 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.boundHandle = null;
     }
+    if (this.handleCloseOff) {
+      try {
+        this.handleCloseOff();
+      } catch {
+        // ignore
+      }
+      this.handleCloseOff = null;
+    }
     if (wasBound) {
       emitLog(this.cfg.logger, "info", "appmsg.connect.closed", {
         ownerPublicKeyHex: this.currentBoundOwner
       });
     }
     this.currentBoundOwner = null;
+    // 显式 / 结构性断开：等待中的下一次自动重连截止时间一律作废。
+    // 注意：这里的清空**不**触发 `fireStateChange()`——`disconnect` 本
+    // 身在末尾会触发一次 state change；避免重复通知。
+    this.nextReconnectAtMsValue = null;
     if (this.currentUnfilteredOff) {
       try {
         this.currentUnfilteredOff();
@@ -790,19 +1083,54 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   inspectLocalDb(): AppMsgLocalDbSnapshot {
-    // state 真值：boundHandle 存在 → open；曾经连接过但当前无 → closed；
-    // 从未连接过 → idle。
-    const state: AppMsgLocalDbSnapshot["state"] = this.boundHandle
+    // state 真值（硬切换 003 §5.7 修正 + 反馈"必改"）：
+    //   - boundHandle 存在 **且** `boundHandle.state() === "bound"` → open；
+    //   - 否则按"是否应当重连"决定 closed / idle：
+    //       * `currentBoundOwner !== null`：曾连上 owner，但 handle 不
+    //         在 bound（远端断线 / 显式断开）→ 当前应当重连 → `closed`；
+    //       * `nextReconnectAtMs !== null`：协调器已写入等待重连截止时
+    //         间 → `closed`；
+    //       * 其余情形：从未连过 / 结构性不可连接 → `idle`。
+    //
+    // **不**再用 `lastErrorMessageValue !== null` 兜底——曾经的失败
+    // 不代表"当前应当重连"；结构性不可连接场景必须能稳定回到 `idle`。
+    const isOpen = Boolean(
+      this.boundHandle && this.boundHandle.state() === "bound"
+    );
+    const state: AppMsgLocalDbSnapshot["state"] = isOpen
       ? "open"
-      : this.currentBoundOwner !== null
+      : this.nextReconnectAtMsValue !== null || this.currentBoundOwner !== null
         ? "closed"
         : "idle";
     return {
       state,
       ownerPublicKeyHex: this.currentBoundOwner,
       lastInsertedAtMs: this.lastInsertedAtMsValue,
-      lastError: this.lastErrorMessageValue
+      lastError: this.lastErrorMessageValue,
+      nextReconnectAtMs: isOpen ? null : this.nextReconnectAtMsValue
     };
+  }
+
+  /**
+   * 由 setup 内的重连协调器写入下一次自动重连截止时间戳。
+   *
+   * - `value` 必须为未来时间戳；`null` 表示清空；
+   * - 写入后立即触发 `fireStateChange()`，让订阅 `onStateChange` 的
+   *   管理页立即刷新倒计时展示；
+   * - 该入口是 plugin-appmsg **唯一**允许写入 `nextReconnectAtMs`
+   *   的通道；core 内部不再自己起 5 秒定时器。
+   */
+  setNextReconnectAtMs(value: number | null): void {
+    const normalized =
+      typeof value === "number" && Number.isFinite(value) ? value : null;
+    if (this.nextReconnectAtMsValue === normalized) return;
+    this.nextReconnectAtMsValue = normalized;
+    this.fireStateChange();
+  }
+
+  /** 读取当前等待重连截止时间戳（仅 setup 协调器内部诊断用）。 */
+  getNextReconnectAtMs(): number | null {
+    return this.nextReconnectAtMsValue;
   }
 
   /* ====== Endpoint service 内部调用 ============== */
