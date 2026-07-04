@@ -20,6 +20,7 @@ import type { PluginManifest } from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
 import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
+import { hubmsgPlatformPlugin } from "@keymaster/plugin-hubmsg";
 import { messagePlatformPlugin } from "@keymaster/plugin-message";
 import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
@@ -117,45 +118,35 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序
   // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //
-  // 关键顺序（施工单 004 + 2026-06-29 002 + 2026-07-01 002）：
+  // 关键顺序（施工单 2026-07-04 001 硬切换）：
   //   vault
-  //   appmsg-platform（施工单 2026-07-01 002：在 protocol 之前装载，
-  //     plugin-appmsg 自身依赖 vault / keyspace；plugin-protocol 在
-  //     setup 时反向消费 `appmsg.core`）
+  //   appmsg-platform（先装，把 `message.provider.registry` capability
+  //     挂到 capability bus；hubmsg 之后 register 自身）
+  //   hubmsg-platform（在 appmsg 之后 register 自身；plugin-hubmsg
+  //     自身不依赖 `appmsg.core`——它依赖 `message.provider.registry`）
   //   protocol
+  //   message（plugin-message 依赖 `appmsg.endpoint.registry`，由
+  //     plugin-appmsg 在 setup 阶段 provide）
   //   home
   //   settings
-  //   assets
-  //   collectibles
-  //   collectible-transfer
-  //   key-import
-  //   transfer
-  //   contacts
-  //   woc
-  //   background
-  //   p2pkh
-  //   token / collectible 业务插件（依赖 p2pkh.service + woc.*）
-  //   importers
-  //   apps（施工单 2026-06-29 002：plugin-apps 依赖 protocol.service.launchAppView）
+  //   ...
   //
   // 设计缘由：
-  //   - wocPlugin 必须在 p2pkhPlugin 之前装载（plugin-p2pkh 内部会拿
-  //     woc.service；plugin-woc 自身在 manifest provide WOC capabilities）。
-  //   - backgroundPlugin 也必须在 p2pkhPlugin 之前。
-  //   - token / collectible 业务插件必须在 p2pkhPlugin 之后，因为它们
-  //     直接依赖 p2pkh.service / woc.bsv21.service / woc.stas.service /
-  //     woc.1satordinals.service；plugin-p2pkh 与 plugin-woc 是这些
-  //     capability 的唯一提供方。
-  //   - appsPlugin 必须在 protocolPlugin 之后：plugin-apps 直接调
-  //     `protocol.service.launchAppView(...)`，没有 protocol.service
-  //     capability 时 setup 会被 host 拒绝。
-  //   - appmsgPlatformPlugin 必须在 protocolPlugin 之前：plugin-protocol
-  //     在 setup 时通过 capability 总线取 `appmsg.core`；appmsg.core
-  //     缺时 `appmsg.*` 三个 method 走 internal_error fail-closed（与
-  //     `p2pkh.service` 缺时 `p2pkh.transfer` 的降级对称）。
+  //   - 硬切换 2026-07-04 001：plugin-hubmsg **不**再依赖 `appmsg.core`；
+  //     它依赖 `message.provider.registry`，由 plugin-appmsg 在 setup
+  //     时 provide。plugin-hubmsg 装载顺序**必须**在 plugin-appmsg 之
+  //     后、其它业务插件之前；
+  //   - plugin-message 装载顺序**必须**在 plugin-appmsg 之后（拿
+  //     `appmsg.endpoint.registry`）；
+  //   - protocolPlugin 仍然在 appmsgPlatformPlugin 之后：plugin-protocol
+  //     在 setup 时通过 capability 总线取 `appmsg.core.subscribeUnfilteredMessages`
+  //     + `appmsg.core.sendAsOrigin` / `listAsOrigin` / `getAsOrigin`
+  //     （协议层系统特殊方，按 origin 路由完整消息是合理特权；不走
+  //     endpoint service，路径与 subscribe 同属"系统特殊方特权"）。
   const ordered = [
     vaultPlugin,
     appmsgPlatformPlugin,
+    hubmsgPlatformPlugin,
     protocolPlugin,
     messagePlatformPlugin,
     homePlugin,

@@ -1,5 +1,5 @@
 // packages/plugin-message/src/MessagePage.tsx
-// 消息业务页（施工单 2026-07-03 002 硬切换）。
+// 消息业务页（施工单 2026-07-04 001 硬切换）。
 //
 // 设计缘由：
 //   - 本页**只**展示 `keymaster.message` scope 内的消息业务：
@@ -7,10 +7,16 @@
 //       * 搜索区（按本地已同步消息正文过滤）
 //       * 列表区（点击进入单条详情）
 //   - **不**展示 HubMsg 连接态、target sync 状态、在线查询按钮、全局错误
-//     信息、全局统计——这些归 `plugin-appmsg` 的 `/system/hubmsg` 管理页；
+//     信息、全局统计——这些归 `plugin-appmsg` 的 `/system/appmsg` 管理页；
 //   - **不**通过 props / 全局兜底路径注入；直接通过 `useCapability`
-//     从平台 runtime 拿 scoped message service（由 plugin-message.setup
+//     从平台 runtime 拿 stable message service（由 plugin-message.setup
 //     provide）。
+//   - **不**订阅 `subscriptionSource()` 这种"subscription token"——
+//     endpoint service 内部自动迁移订阅；本组件在 `useEffect` 里**只**
+//     调一次 `service.subscribeMessages(...)`，不依赖任何"client 引用
+//     变化"信号。
+//   - owner / provider 切换对 React 组件**完全透明**——上层 effect 不
+//     需要 cleanup 旧订阅、绑定新订阅；endpoint service 自己处理。
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useCapability, useI18n, router } from "@keymaster/runtime";
@@ -90,7 +96,9 @@ function MessagePageInner({ service }: { service: MessageService }): React.React
     void refresh();
   }, [refresh]);
 
-  // 订阅：进入页面后保持实时刷新。
+  // 实时订阅：endpoint service 内部自动处理 owner / provider 切换的
+  // 订阅迁移。本 effect **只**依赖 `service` 引用本身——业务层**不**
+  // 关心 client 引用变化。
   useEffect(() => {
     const off = service.subscribeMessages(() => {
       void refresh();

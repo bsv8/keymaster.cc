@@ -1,14 +1,15 @@
 /* packages/plugin-appmsg/src/styles.css
- * HubMsg 管理页专属样式（施工单 2026-07-03 002 硬切换）。
+ * AppMsg 系统管理页专属样式（施工单 2026-07-04 001 硬切换）。
  *
  * 设计缘由：
  *   - 视觉语言完全复用现有壳层 token：surface / border / radius / shadow；
- *   - 只整理管理页的信息层级（连接 / 同步 / 统计 / 全局消息浏览），不引入
- *     新的交互动效或独立色板；
+ *   - 管理页（`/system/appmsg`）的信息层级包括：active provider / 已注册
+ *     provider 列表 / 连接 / 同步 / 统计 / 在线查询 / 本地消息浏览；
  *   - 样式跟随 plugin-appmsg 目录走，移除插件时一并删除；
  *   - 装配层（apps/web/src/styles/plugins.css）显式
  *     `@import "@keymaster/plugin-appmsg/styles.css"` 引入；
- *   - 类名与 `HubMsgPage.tsx` JSX 一一对应，**不**留双命名体系。
+ *   - 类名沿用 `appmsg-system-page*`，与 `AppMsgPage.tsx` JSX 一一对应，
+ *     **不**留双命名体系。
  */
 
 .appmsg-system-page {

@@ -1,22 +1,25 @@
 // packages/plugin-message/src/MessagePage.test.tsx
-// 消息业务页契约测试（施工单 2026-07-03 002 硬切换）。
+// 消息业务页契约测试（施工单 2026-07-04 001 硬切换）。
 //
-// 关键验证点（反馈 §"测试未真正 render 页面" + 文件级修改意见 §7）：
+// 关键验证点：
 //   - MessagePage 在 PluginHostProvider 下能真渲染；
 //   - 页面契约至少呈现：标题、消息 body、发送区、搜索区、列表区；
 //   - **不**出现 sync state / connection / online UI；
 //   - service 不可用时显示降级空态——**这是唯一允许的降级路径**；
-//   - **不**走任何 window 全局兜底（__kmMessageService / __keymaster_appmsg_core__）。
+//   - **不**走任何 window 全局兜底；
+//   - **不**再依赖 `subscriptionSource()` 旧接口；订阅由 endpoint service
+//     内部自动迁移，本组件**不**关心 client 引用变化。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import type {
+  AppMsgEndpointService,
   AppMsgMessage,
   I18nService,
   I18nText,
   I18nValues,
-  SupportedLanguage,
   LanguageMode,
+  SupportedLanguage,
   SupportedLanguageDescriptor
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -27,9 +30,6 @@ import type { MessageService } from "./messageService.js";
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 
-/**
- * 最小可用 I18nService stub：满足 useI18n() 真实需要的全部方法。
- */
 function makeFakeI18n(): I18nService {
   return {
     mode: (): LanguageMode => "manual",
@@ -49,23 +49,36 @@ function makeFakeI18n(): I18nService {
   };
 }
 
+/**
+ * 构造 fake MessageService（直接传 endpoint service 引用）。
+ */
 function makeFakeService(opts?: {
   messages?: AppMsgMessage[];
 }): MessageService {
   const messages = opts?.messages ?? [];
-  return {
+  const endpoint: AppMsgEndpointService = {
+    endpoint: { kind: "plugin", id: "keymaster.message" },
     isReady: () => true,
-    listMessages: async () => messages,
-    getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
+    sendMessage: async () => ({ messageId: "0", createdAtMs: 0 }),
+    listMessages: async () => ({ items: messages, hasMore: false }),
+    getMessage: async (input: { messageId: string }) =>
+      messages.find((m) => m.messageId === input.messageId) ?? null,
+    subscribeMessages: () => () => undefined,
+    checkOnline: async () => ({})
+  };
+  return {
+    isReady: () => endpoint.isReady(),
+    listMessages: async (input) => {
+      const res = await endpoint.listMessages(input);
+      return res.items;
+    },
+    getMessage: async (id) => endpoint.getMessage({ messageId: id }),
     sendTextMessage: async () => undefined,
-    subscribeMessages: () => () => undefined
+    subscribeMessages: (handler) => endpoint.subscribeMessages(handler)
   };
 }
 
-/**
- * 最小 pluginHost stub：仅满足 useCapability 与 useI18n 需要的接口。
- */
-function makeFakeHost(service: MessageService | null): PluginHost {
+function makeFakeHost(service: MessageService | null) {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY]: makeFakeI18n()
   };
@@ -90,6 +103,8 @@ function makeFakeHost(service: MessageService | null): PluginHost {
       delete providers[k];
     }
   };
+  let currentVersion = 1;
+  const listeners = new Set<(snap: { version: number }) => void>();
   const host = {
     capabilities,
     messageBus: {} as never,
@@ -112,14 +127,14 @@ function makeFakeHost(service: MessageService | null): PluginHost {
     installed: () => [],
     manifests: () => [],
     state: () => ({ id: "fake", kind: "enabled" }),
-    graph: () => ({
-      plugins: [],
-      dependencies: {},
-      provides: {},
-      reverse: {}
-    }),
-    version: () => 1,
-    subscribe: () => () => undefined,
+    graph: () => ({ plugins: [], dependencies: {}, provides: {}, reverse: {} }),
+    version: () => currentVersion,
+    subscribe: (l: (snap: { version: number }) => void) => {
+      listeners.add(l);
+      return () => {
+        listeners.delete(l);
+      };
+    },
     getManifest: () => undefined,
     reverseDeps: () => [],
     register: async () => undefined,
@@ -128,7 +143,19 @@ function makeFakeHost(service: MessageService | null): PluginHost {
     disable: async () => ({ ok: true as const }),
     unregister: async () => undefined
   };
-  return host as unknown as PluginHost;
+  return {
+    host: host as unknown as PluginHost,
+    bumpVersion: () => {
+      currentVersion += 1;
+      for (const l of [...listeners]) {
+        try {
+          l({ version: currentVersion });
+        } catch {
+          // ignore
+        }
+      }
+    }
+  };
 }
 
 describe("MessagePage in PluginHostProvider", () => {
@@ -150,7 +177,7 @@ describe("MessagePage in PluginHostProvider", () => {
       insertedAtMs: 1
     };
     const service = makeFakeService({ messages: [sampleMessage] });
-    const host = makeFakeHost(service);
+    const { host } = makeFakeHost(service);
     const { MessagePage } = await import("./MessagePage.js");
     render(
       <PluginHostProvider host={host}>
@@ -158,17 +185,14 @@ describe("MessagePage in PluginHostProvider", () => {
       </PluginHostProvider>
     );
 
-    // 标题：i18n.t 返回 key 自身。
     await waitFor(() => {
       const el = screen.getByText("message.page.title");
       expect(el).toBeTruthy();
     });
-    // 消息 body：fetch 完成后被渲染。
     await waitFor(() => {
       const el = screen.getByText("real rendered body");
       expect(el).toBeTruthy();
     });
-    // 发送区、搜索区、列表区段标题。
     await waitFor(() => {
       expect(screen.getByText("message.page.send.label")).toBeTruthy();
       expect(screen.getByText("message.page.search.label")).toBeTruthy();
@@ -178,7 +202,7 @@ describe("MessagePage in PluginHostProvider", () => {
 
   it("does NOT render sync / connection / online UI", async () => {
     const service = makeFakeService({ messages: [] });
-    const host = makeFakeHost(service);
+    const { host } = makeFakeHost(service);
     const { MessagePage } = await import("./MessagePage.js");
     render(
       <PluginHostProvider host={host}>
@@ -189,7 +213,6 @@ describe("MessagePage in PluginHostProvider", () => {
       const el = screen.getByText("message.page.title");
       expect(el).toBeTruthy();
     });
-    // 这些文案应当**不**存在——管理面语义已切走。
     expect(screen.queryByText("message.page.sync.state.label")).toBeNull();
     expect(screen.queryByText("message.page.checkOnline")).toBeNull();
     expect(screen.queryByText("message.page.online.label")).toBeNull();
@@ -197,7 +220,7 @@ describe("MessagePage in PluginHostProvider", () => {
   });
 
   it("renders missing-service empty state when capability is missing (唯一降级路径)", async () => {
-    const host = makeFakeHost(null);
+    const { host } = makeFakeHost(null);
     const { MessagePage } = await import("./MessagePage.js");
     render(
       <PluginHostProvider host={host}>
@@ -210,6 +233,10 @@ describe("MessagePage in PluginHostProvider", () => {
     });
     expect(screen.queryByText("message.page.send.label")).toBeNull();
   });
+
+  // endpoint service 内部已自动迁移订阅；本组件**不**关心 client 引用
+  // 变化。`subscriptionSource()` 旧接口已彻底删除——这里不写任何"切换
+  // subscription token"的测试。
 });
 
 // 防止 IDE 报 unused

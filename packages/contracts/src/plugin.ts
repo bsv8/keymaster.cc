@@ -109,19 +109,27 @@ export interface PluginManifest {
   /**
    * 可选：声明本插件拥有"应用消息总线端点"。
    *
-   * 设计缘由（施工单 2026-07-01 002 硬切换）：
-   *   - 声明后，runtime 在 setup 阶段会向插件 `ctx.get(APPMESSAGE_CLIENT_CAPABILITY)`
-   *     注入一个 sender endpoint 已绑定的 scoped `appmsg.client`。
-   *   - 插件**不**允许自报 sender endpoint；sender endpoint 固定为
-   *     `endpointId`（稳定 pluginEndpointId）。
+   * 设计缘由（施工单 2026-07-04 001 硬切换）：
+   *   - 声明后，runtime 在 enable 阶段对 `endpointId` 做形状校验
+   *     （`isValidPluginEndpointIdShape`）+ 全局唯一性校验，冲突即
+   *     fail-closed；
+   *   - **不再**由 runtime 注入 `<pluginId>.appmsg.client` capability。
+   *     业务插件需要时在自己的 `setup` 里通过
+   *     `appmsg.endpoint.registry` capability 拿一个 endpoint 对应的
+   *     稳定 `AppMsgEndpointService`；
    *   - `endpointId` **不**等于 Vault key 域真值（`publicKeyHex`）；**不**
-   *     要求等于 manifest id；必须在同 Keymaster 安装内全局唯一，runtime
-   *     注册阶段做唯一性校验，冲突即 fail-closed。
-   *   - 未声明 endpoint 的插件拿不到 `appmsg.client`：`ctx.get(...)` 抛错。
+   *     要求等于 manifest id；必须在同 Keymaster 安装内全局唯一；
+   *   - **不**声明 endpoint 的插件：runtime 不做任何注入，也不影响其
+   *     它 capability；
+   *   - 端点 service 内部自动处理 owner 真值 / provider 切换的迁移，
+   *     插件**不需要**自己监听 keyspace / vault / provider；
+   *   - endpoint service 的生命周期由 plugin-appmsg 内部持有——业务
+   *     插件在 teardown 时调用 `endpointRegistry.releaseEndpoint(...)`
+   *     释放即可。
    *
    * 字段命名约束：
-   *   - `endpointId` 形状见 `isValidPluginEndpointIdShape`（portable subset）。
-   *     冲突；硬切换 002 后 key 域已无 surrogate id）。
+   *   - `endpointId` 形状见 `isValidPluginEndpointIdShape`（portable
+   *     subset）。
    */
   appMessageEndpoint?: {
     /** 远端消息端点 id；全局唯一；不等于 vault key 域真值；不等于 manifest id。 */

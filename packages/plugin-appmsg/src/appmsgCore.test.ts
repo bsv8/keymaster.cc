@@ -1,64 +1,76 @@
 // packages/plugin-appmsg/src/appmsgCore.test.ts
-// appmsg.core 单测（施工单 2026-07-03 002 硬切换）。
+// appmsg.core 单测（施工单 2026-07-04 001 硬切换）。
 //
-// 测试目标（反馈 §"必须补测试"）：
-//   1. scoped client send 时，sender origin/appId 被真正带到 wire senderEndpoint
-//   2. 两个不同 scoped client 订阅时，各自只收到自己的消息
-//   3. `listScopedMessages()` 只返回 scoped target 的消息，不是 DB 第一个 target
-//   4. `getScopedMessage()` 读到不属于自己的 messageId 时返回 null
-//   5. inspectLocalDb / checkOnline 等关键不变量
+// 测试目标：
+//   1. provider registry 单选 active + 持久化 + 不自动 fallback；
+//   2. active provider 缺失时 connectForOwner 走 not-ready；
+//   3. endpoint service 内部 ACL：scoped list/get 仅返回 endpoint 可见
+//      消息；subscribe 内部按 endpoint 过滤；
+//   4. owner / provider 切换时 endpoint service 内部迁移订阅；
+//   5. 全库读 / 全库订阅（管理页 / 协议层路径）绕开 ACL；
+//   6. `connectForOwner` 失败（no signer / no provider）走降级，不抛错。
 //
-// 旧 `createSystemMessageClient(...)` 相关测试已随 API 移除同步删除。
-// HubMsg 管理面直接消费 `listUnfilteredMessages` /
-// `subscribeUnfilteredMessages`，由 `HubMsgPage` 与
-// `hubmsgService.ts` 内部覆盖；本文件仍保留 core 单测路径以验证 ACL
-// 边界。
-//
-// 用 fake-indexeddb 跑真 IDB；通过一个简化的 fake keyspace 直接走 indexedDB.open。
+// mock 策略：
+//   - **不**mock HubMsgConnection / wire 字符串方法；改为 mock
+//     `MessageProvider` + `MessageProviderOperations` typed 接口；
+//   - 用 fake-indexeddb 跑真 IDB；
+//   - 通过 `appmsgDb.ts` 的真 `openAppMsgLocalDb` 路径跑本地 DB。
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import "fake-indexeddb/auto";
 import type {
-  AppMsgCore,
+  ActiveMessageProviderSnapshot,
+  AppMsgEndpointId,
   AppMsgMessage,
-  KeyspaceService
+  KeyspaceService,
+  MessageProvider,
+  MessageProviderHandle,
+  MessageProviderOperations,
+  ProviderListResult,
+  ProviderOnlineResult,
+  ProviderSendResult
 } from "@keymaster/contracts";
+import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
-import type { HubMsgBindSigner } from "./hubmsgConnection.js";
 
 const OWNER = "02aaaa".padEnd(66, "a");
 const OWNER_B = "02bbbb".padEnd(66, "b");
-const URL = "wss://msg.keymaster.cc/ws/v1";
 
-interface LogSink {
-  info: ReturnType<typeof vi.fn>;
-  warn: ReturnType<typeof vi.fn>;
-  error: ReturnType<typeof vi.fn>;
-}
-
-function makeLogSink(): LogSink {
+function makeLogSink() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
 /**
- * 极简 fake keyspace：直接把 key-scoped storage 委托给 indexedDB，
- * 让 fake-indexeddb（vitest.setup）兜底。
+ * 极简 fake keyspace：把 key-scoped storage 委托给 indexedDB。
  */
-function makeFakeKeyspace(): KeyspaceService {
+function makeFakeKeyspace(): KeyspaceService & {
+  setActiveHex(hex: string | null): void;
+  setVaultStatus(unlocked: boolean): void;
+} {
+  let activeHex: string | null = OWNER;
+  let vaultUnlocked = true;
+  const activeHandlers = new Set<(s: { activePublicKeyHex?: string }) => void>();
+  const vaultHandlers = new Set<(s: string) => void>();
+
   return {
-    active: () => ({ activePublicKeyHex: OWNER }),
-    getKey: async () => ({
-      publicKeyHex: OWNER,
-      label: "fake",
-      capabilities: [],
-      createdAt: ""
-    }),
+    active: () => ({ activePublicKeyHex: activeHex ?? undefined }),
+    onActiveChange: (h: (s: { activePublicKeyHex?: string }) => void) => {
+      activeHandlers.add(h);
+      return () => {
+        activeHandlers.delete(h);
+      };
+    },
+    getKey: async (publicKeyHex: string) =>
+      publicKeyHex === activeHex
+        ? { publicKeyHex, label: "fake", capabilities: [], createdAt: "" }
+        : undefined,
     listKeys: async () => [],
     async openKeyStorage(input: {
       publicKeyHex: string;
       pluginId: string;
       storageId: string;
       version: number;
-      upgrade(db: IDBDatabase): void;
+      upgrade(db: IDBDatabase, oldVersion: number, newVersion: number | null): void;
     }) {
       const dbName = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
       return await new Promise<{
@@ -67,7 +79,7 @@ function makeFakeKeyspace(): KeyspaceService {
         close(): void;
       }>((resolve, reject) => {
         const req = indexedDB.open(dbName, input.version);
-        req.onupgradeneeded = () => input.upgrade(req.result);
+        req.onupgradeneeded = () => input.upgrade(req.result, 0, null);
         req.onsuccess = () => {
           const db = req.result;
           resolve({
@@ -85,358 +97,716 @@ function makeFakeKeyspace(): KeyspaceService {
         req.onerror = () => reject(req.error);
       });
     },
-    onActiveChange: () => () => undefined,
+    registerPluginStorage: () => undefined,
+    listPluginStorages: () => [],
+    setActive: async (hex: string | null) => {
+      activeHex = hex;
+      for (const h of activeHandlers) {
+        try {
+          h({ activePublicKeyHex: hex ?? undefined });
+        } catch {
+          // ignore
+        }
+      }
+    },
+    requireActiveKey: () => {
+      throw new Error("no active key");
+    },
+    prepareDeleteKey: async () => undefined,
+    deleteKey: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined,
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => []
-  } as unknown as KeyspaceService;
-}
-
-interface CoreHandles {
-  core: AppMsgCoreImpl;
-  /** 直接打开后的本地 DB ops（write 本地消息用）。 */
-  db: import("./appmsgDb.js").AppMsgLocalDbOps;
-}
-
-/**
- * 异步构造一个 bind 完成 + 本地 DB 已打开的核心。
- *
- * 关键点：openLocalDb 内部异步完成 IDB open；这里 await 等待后才能
- * 写入 / 读取测试数据。
- */
-async function makeBoundCoreAsync(
-  ownerPublicKeyHex: string,
-  logSink: LogSink
-): Promise<CoreHandles> {
-  const signer: () => Promise<HubMsgBindSigner | null> = async () => ({
-    publicKeyHex: ownerPublicKeyHex,
-    sign: async () => "00".repeat(64)
-  });
-  const cfg: AppMsgCoreConfig = {
-    url: URL,
-    signerProvider: signer,
-    keyspace: makeFakeKeyspace(),
-    pluginId: "appmsg",
-    storageId: "messages",
-    logger: logSink
-  };
-  const core = new AppMsgCoreImpl(cfg);
-  const c = core as unknown as {
-    currentBoundOwner: string | null;
-    connection: unknown;
-    localHandle: { db: IDBDatabase; name: string; close(): void } | null;
-    localOps: import("./appmsgDb.js").AppMsgLocalDbOps | null;
-    lastErrorMessageValue: string | null;
-  };
-  c.currentBoundOwner = ownerPublicKeyHex;
-  c.connection = {
-    state: () => "bound" as const,
-    request: async <TParams, TResult>(): Promise<TResult> => {
-      throw new Error("mockConnection: not configured for this test");
+    setActiveHex(hex: string | null) {
+      activeHex = hex;
+      for (const h of activeHandlers) {
+        try {
+          h({ activePublicKeyHex: hex ?? undefined });
+        } catch {
+          // ignore
+        }
+      }
+    },
+    setVaultStatus(unlocked: boolean) {
+      vaultUnlocked = unlocked;
+      for (const h of vaultHandlers) {
+        try {
+          h(unlocked ? "unlocked" : "locked");
+        } catch {
+          // ignore
+        }
+      }
     }
   };
-  const handle = await core.openLocalDb({ publicKeyHex: ownerPublicKeyHex });
-  void c.lastErrorMessageValue;
-  if (!handle || !c.localOps) {
-    throw new Error("openLocalDb returned null in test fixture");
-  }
-  return { core, db: c.localOps };
 }
 
 /**
- * 在 core 上写入 fake 测试消息——直接走 DB ops（不走 wire）。
+ * Mock `MessageProviderOperations`：typed handle。
+ *
+ * 测试可通过外部变量控制其行为；默认只暴露空实现。
  */
-async function seedDb(
-  db: import("./appmsgDb.js").AppMsgLocalDbOps,
-  list: AppMsgMessage[]
-): Promise<void> {
-  await db.putMessages(list);
-}
-
-function msg(overrides: Partial<AppMsgMessage>): AppMsgMessage {
+function makeMockProviderOps(
+  overrides?: Partial<{
+    state: "idle" | "connecting" | "bound" | "closed";
+    sendMessage: (input: unknown) => Promise<ProviderSendResult>;
+    listMessages: (input: unknown) => Promise<ProviderListResult>;
+    getMessage: (input: unknown) => Promise<AppMsgMessage | null>;
+    subscribeMessages: (handler: (m: AppMsgMessage) => void) => () => void;
+    checkOnline: (input: { publicKeyHexes: string[] }) => Promise<ProviderOnlineResult>;
+  }>
+): MessageProviderOperations {
+  const off = vi.fn();
   return {
-    messageId: overrides.messageId ?? "m",
-    clientMessageId: overrides.clientMessageId ?? "c",
-    senderPublicKeyHex: overrides.senderPublicKeyHex ?? OWNER,
-    senderOrigin: overrides.senderOrigin,
-    senderAppId: overrides.senderAppId,
-    recipientPublicKeyHex: overrides.recipientPublicKeyHex ?? OWNER,
-    recipientOrigin: overrides.recipientOrigin,
-    recipientAppId: overrides.recipientAppId,
-    contentType: overrides.contentType ?? "text/plain",
-    body: overrides.body ?? "",
-    createdAtMs: overrides.createdAtMs ?? 1,
-    insertedAtMs: overrides.insertedAtMs ?? 1
+    state: () => overrides?.state ?? "bound",
+    close: () => undefined,
+    sendMessage:
+      overrides?.sendMessage ??
+      (async () => ({ messageId: "m-sent", createdAtMs: Date.now() })),
+    listMessages:
+      overrides?.listMessages ??
+      (async () => ({ items: [], hasMore: false })),
+    getMessage:
+      overrides?.getMessage ?? (async () => null),
+    subscribeMessages:
+      overrides?.subscribeMessages ?? (() => off),
+    checkOnline:
+      overrides?.checkOnline ?? (async () => ({} as ProviderOnlineResult))
   };
 }
 
-describe("AppMsgCore.inspectLocalDb", () => {
-  it("returns idle + no owner when not bound", () => {
+/**
+ * Mock `MessageProvider`：register + bind → 返回 mock handle。
+ */
+function makeMockProvider(
+  id: string,
+  displayName: string,
+  handle: MessageProviderHandle | MessageProviderOperations
+): MessageProvider & {
+  bindCalls: number;
+  shutdownCalls: number;
+} {
+  let bindCalls = 0;
+  let shutdownCalls = 0;
+  return {
+    id,
+    displayName,
+    bind: async () => {
+      bindCalls += 1;
+      return handle as MessageProviderHandle;
+    },
+    shutdown: async () => {
+      shutdownCalls += 1;
+    },
+    health: () => ({ isHealthy: true, lastError: null, lastConnectedAtMs: Date.now() }),
+    checkOnline: async () => ({}),
+    get bindCalls() {
+      return bindCalls;
+    },
+    get shutdownCalls() {
+      return shutdownCalls;
+    }
+  };
+}
+
+function makeCore(opts?: {
+  providers?: MessageProvider[];
+  persistedActiveProviderId?: string | null;
+  signerProvider?: () => Promise<{
+    publicKeyHex: string;
+    signChallenge: (args: { challenge: Uint8Array }) => Promise<string>;
+  } | null>;
+}): {
+  core: AppMsgCoreImpl;
+  keyspace: ReturnType<typeof makeFakeKeyspace>;
+  log: ReturnType<typeof makeLogSink>;
+  storage: Map<string, string>;
+} {
+  const keyspace = makeFakeKeyspace();
+  const log = makeLogSink();
+  const storage = new Map<string, string>();
+  // 默认有可用 signer。
+  const signerProvider =
+    opts?.signerProvider ??
+    (async () => ({
+      publicKeyHex: OWNER,
+      signChallenge: async (_args: { challenge: Uint8Array }): Promise<string> => "00".repeat(64)
+    }));
+  const cfg: AppMsgCoreConfig = {
+    signerProvider,
+    keyspace,
+    pluginId: "appmsg",
+    storageId: "messages_v2",
+    localStorage: {
+      getItem: (k: string) => storage.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        storage.set(k, v);
+      },
+      removeItem: (k: string) => {
+        storage.delete(k);
+      },
+      clear: () => storage.clear(),
+      key: () => "",
+      get length() {
+        return storage.size;
+      }
+    } as unknown as Storage,
+    logger: log
+  };
+  const core = new AppMsgCoreImpl(cfg);
+  // 注入 provider（如果在 opts 里给）。
+  if (opts?.providers) {
+    for (const p of opts.providers) {
+      core.providers().register(p);
+    }
+  }
+  return { core, keyspace, log, storage };
+}
+
+describe("AppMsgCoreImpl - provider registry", () => {
+  it("empty registry: active is null", () => {
+    const { core } = makeCore();
+    expect(core.providers().active()).toBeNull();
+    expect(core.activeProviderSnapshot().providerId).toBeNull();
+  });
+
+  it("register hubmsg without persisted id: defaults active to hubmsg", () => {
+    const { core } = makeCore();
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    core.providers().register(p);
+    expect(core.providers().active()?.id).toBe("hubmsg");
+    // 持久化为 hubmsg。
+    // 通过第二次构造 core 验证持久化被回写（重新读取 localStorage）。
+    const { storage: _ } = { storage: new Map([["appmsg.activeProviderId", "hubmsg"]]) };
+    // 直接从 storage 拿：
+    const persisted = core["cfg"].localStorage?.getItem("appmsg.activeProviderId");
+    expect(persisted).toBe("hubmsg");
+  });
+
+  it("persisted id matches registered provider: keeps it active", () => {
+    const storage = new Map<string, string>([["appmsg.activeProviderId", "hubmsg"]]);
+    const keyspace = makeFakeKeyspace();
     const log = makeLogSink();
-    const core = new AppMsgCoreImpl({
-      url: URL,
+    const cfg: AppMsgCoreConfig = {
       signerProvider: async () => null,
-      keyspace: makeFakeKeyspace(),
+      keyspace,
       pluginId: "appmsg",
-      storageId: "messages",
+      storageId: "messages_v2",
+      localStorage: {
+        getItem: (k: string) => storage.get(k) ?? null,
+        setItem: (k: string, v: string) => storage.set(k, v),
+        removeItem: (k: string) => storage.delete(k),
+        clear: () => storage.clear(),
+        key: () => "",
+        get length() {
+          return storage.size;
+        }
+      } as unknown as Storage,
       logger: log
-    });
-    const snap = core.inspectLocalDb();
-    expect(snap.state).toBe("idle");
-    expect(snap.ownerPublicKeyHex).toBeNull();
-    expect(snap.lastError).toBeNull();
+    };
+    const core = new AppMsgCoreImpl(cfg);
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    core.providers().register(p);
+    expect(core.providers().active()?.id).toBe("hubmsg");
   });
-});
 
-describe("AppMsgCore.checkOnline (不依赖真 RPC)", () => {
-  it("returns all-unknown when not connected", async () => {
+  it("persisted id not registered: stays null (no auto fallback)", () => {
+    const storage = new Map<string, string>([["appmsg.activeProviderId", "unknown-prov"]]);
+    const keyspace = makeFakeKeyspace();
     const log = makeLogSink();
-    const core = new AppMsgCoreImpl({
-      url: URL,
+    const cfg: AppMsgCoreConfig = {
       signerProvider: async () => null,
-      keyspace: makeFakeKeyspace(),
+      keyspace,
       pluginId: "appmsg",
-      storageId: "messages",
+      storageId: "messages_v2",
+      localStorage: {
+        getItem: (k: string) => storage.get(k) ?? null,
+        setItem: (k: string, v: string) => storage.set(k, v),
+        removeItem: (k: string) => storage.delete(k),
+        clear: () => storage.clear(),
+        key: () => "",
+        get length() {
+          return storage.size;
+        }
+      } as unknown as Storage,
       logger: log
-    });
-    const out = await core.checkOnline([OWNER]);
-    expect(out[OWNER]).toBe("unknown");
+    };
+    const core = new AppMsgCoreImpl(cfg);
+    expect(core.providers().active()).toBeNull();
+    const handle = makeMockProviderOps();
+    core.providers().register(makeMockProvider("hubmsg", "HubMsg", handle));
+    // 已注册 hubmsg 但持久值不是 hubmsg → 仍是 null（**不**自动 fallback）。
+    expect(core.providers().active()).toBeNull();
   });
 
-  it("returns empty object for empty input", async () => {
-    const log = makeLogSink();
-    const core = new AppMsgCoreImpl({
-      url: URL,
-      signerProvider: async () => null,
-      keyspace: makeFakeKeyspace(),
-      pluginId: "appmsg",
-      storageId: "messages",
-      logger: log
-    });
-    const out = await core.checkOnline([]);
-    expect(out).toEqual({});
-  });
-});
-
-describe("AppMsgCore.createMessageScopedClient", () => {
-  it("returns AppMsgSimpleClient facade shape", async () => {
-    const log = makeLogSink();
-    const { core } = await makeBoundCoreAsync(OWNER, log);
-    const cli = core.createMessageScopedClient({
-      senderPublicKeyHex: OWNER,
-      senderOrigin: "https://justnote.example:443"
-    });
-    expect(typeof cli.sendMessage).toBe("function");
-    expect(typeof cli.listMessages).toBe("function");
-    expect(typeof cli.getMessage).toBe("function");
-    expect(typeof cli.subscribeMessages).toBe("function");
-    expect(typeof cli.checkOnline).toBe("function");
-  });
-});
-
-describe("AppMsgCore.listScopedMessages / getScopedMessage ACL", () => {
-  it("listScopedMessages returns only messages where recipient matches sender scope (反馈 §\"必须补测试\")", async () => {
-    const log = makeLogSink();
-    const { core, db } = await makeBoundCoreAsync(OWNER, log);
-    await seedDb(db, [
-      msg({
-        messageId: "1",
-        body: "self",
-        senderPublicKeyHex: OWNER,
-        senderOrigin: "https://justnote.example:443",
-        recipientPublicKeyHex: OWNER,
-        recipientOrigin: "https://justnote.example:443",
-        createdAtMs: 1,
-        insertedAtMs: 1
-      }),
-      msg({
-        messageId: "2",
-        body: "from-other-to-me",
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://other.example:443",
-        recipientPublicKeyHex: OWNER,
-        recipientOrigin: "https://justnote.example:443",
-        createdAtMs: 2,
-        insertedAtMs: 2
-      }),
-      msg({
-        messageId: "3",
-        body: "not-mine",
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://unrelated.example:443",
-        recipientPublicKeyHex: OWNER_B,
-        recipientOrigin: "https://unrelated.example:443",
-        createdAtMs: 3,
-        insertedAtMs: 3
-      })
-    ]);
-    const cli = core.createMessageScopedClient({
-      senderPublicKeyHex: OWNER,
-      senderOrigin: "https://justnote.example:443"
-    });
-    const list = await cli.listMessages({ limit: 100 });
-    const ids = list.items.map((m) => m.messageId).sort();
-    expect(ids).toEqual(["1", "2"]);
+  it("unregister active provider: clears active and persists null", () => {
+    const { core, storage } = makeCore();
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    core.providers().register(p);
+    core.providers().unregister("hubmsg");
+    expect(core.providers().active()).toBeNull();
+    expect(storage.get("appmsg.activeProviderId")).toBeUndefined();
   });
 
-  it("getScopedMessage returns null when messageId is outside sender scope", async () => {
-    const log = makeLogSink();
-    const { core, db } = await makeBoundCoreAsync(OWNER, log);
-    await seedDb(db, [
-      msg({
-        messageId: "for-other",
-        body: "x",
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://unrelated.example:443",
-        recipientPublicKeyHex: OWNER_B,
-        recipientOrigin: "https://unrelated.example:443"
-      })
-    ]);
-    const cli = core.createMessageScopedClient({
-      senderPublicKeyHex: OWNER,
-      senderOrigin: "https://justnote.example:443"
-    });
-    const got = await cli.getMessage({ messageId: "for-other" });
-    expect(got).toBeNull();
+  it("setActive persists id and notifies listeners", async () => {
+    const { core, storage } = makeCore();
+    const handle = makeMockProviderOps();
+    const p1 = makeMockProvider("hubmsg", "HubMsg", handle);
+    const p2 = makeMockProvider("relay", "Relay", makeMockProviderOps());
+    core.providers().register(p1);
+    core.providers().register(p2);
+    const seen: ActiveMessageProviderSnapshot[] = [];
+    core.providers().onActiveChange((s) => seen.push(s));
+    await core.providers().setActive("relay");
+    expect(core.providers().active()?.id).toBe("relay");
+    expect(storage.get("appmsg.activeProviderId")).toBe("relay");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[seen.length - 1]?.providerId).toBe("relay");
   });
 
-  it("two scoped clients with different senderOrigin (same owner) each see only their own messages", async () => {
-    const log = makeLogSink();
-    const { core, db } = await makeBoundCoreAsync(OWNER, log);
-    const myIDA = "scope-cli-A-msg-" + Math.random().toString(36).slice(2);
-    const myIDB = "scope-cli-B-msg-" + Math.random().toString(36).slice(2);
-    // 两条消息：sender 是 OWNER_B（模拟"别人写进来"），recipient 在
-    // 不同 origin/channel。
-    //   myIDA：recipientOrigin = https://justnote.example:443
-    //   myIDB：recipientOrigin = https://other.example:443
-    await seedDb(db, [
-      msg({
-        messageId: myIDA,
-        body: "to-justnote",
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://other.example:443",
-        recipientPublicKeyHex: OWNER,
-        recipientOrigin: "https://justnote.example:443"
-      }),
-      msg({
-        messageId: myIDB,
-        body: "to-other",
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://justnote.example:443",
-        recipientPublicKeyHex: OWNER,
-        recipientOrigin: "https://other.example:443"
-      })
-    ]);
-    const cliA = core.createMessageScopedClient({
-      senderPublicKeyHex: OWNER,
-      senderOrigin: "https://justnote.example:443"
-    });
-    const cliB = core.createMessageScopedClient({
-      senderPublicKeyHex: OWNER,
-      senderOrigin: "https://other.example:443"
-    });
-    // 跨 channel 隔离：A 看不见 myIDB。
-    const aSeesB = await cliA.getMessage({ messageId: myIDB });
-    expect(aSeesB).toBeNull();
-    // A 看见 myIDA；不看见 myIDB。
-    const aList = await cliA.listMessages({ limit: 100 });
-    const aIds = aList.items.map((m) => m.messageId).sort();
-    expect(aIds).toContain(myIDA);
-    expect(aIds).not.toContain(myIDB);
-    // B 看见 myIDB；不看见 myIDA。
-    const bList = await cliB.listMessages({ limit: 100 });
-    const bIds = bList.items.map((m) => m.messageId).sort();
-    expect(bIds).toContain(myIDB);
-    expect(bIds).not.toContain(myIDA);
+  it("setActive with unknown id throws", async () => {
+    const { core } = makeCore();
+    await expect(core.providers().setActive("unknown")).rejects.toThrow();
   });
 });
 
-describe("AppMsgCore.createSystemMessageClient (removed in 施工单 2026-07-03 002)", () => {
-  // 施工单 2026-07-03 002：`createSystemMessageClient(...)` 已从
-  // `AppMsgCore` 主设计中移除——`plugin-message` 现在是普通 scoped
-  // 插件，平台 internal 全库读只供 `plugin-appmsg` 自己的 HubMsg 管理页
-  // 直接消费。
-  it("API no longer exposed on AppMsgCore", async () => {
-    const log = makeLogSink();
-    const { core } = await makeBoundCoreAsync(OWNER, log);
-    expect(
-      (core as unknown as { createSystemMessageClient?: unknown }).createSystemMessageClient
-    ).toBeUndefined();
+describe("AppMsgCoreImpl - connectForOwner", () => {
+  it("no active provider: stays not-ready, no throw", async () => {
+    const { core } = makeCore();
+    await core.connectForOwner(OWNER);
+    expect(core.currentHandle()).toBeNull();
+    expect(core.inspectLocalDb().state).toBe("idle");
+  });
+
+  it("active provider + signer available: bind succeeds", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    await core.connectForOwner(OWNER);
+    expect(core.currentHandle()).toBe(handle);
+    expect(core.inspectLocalDb().state).toBe("open");
+  });
+
+  it("bind throws: stays not-ready, lastError recorded", async () => {
+    const failingHandle = (() => {
+      const off = vi.fn();
+      return {
+        state: () => "closed" as const,
+        close: () => undefined,
+        sendMessage: async () => {
+          throw new Error("bind failed");
+        },
+        listMessages: async () => ({ items: [], hasMore: false }),
+        getMessage: async () => null,
+        subscribeMessages: () => off
+      };
+    })();
+    const failingProvider: MessageProvider = {
+      id: "hubmsg",
+      displayName: "HubMsg",
+      bind: async () => {
+        throw new Error("bind failed");
+      },
+      shutdown: async () => undefined,
+      health: () => ({ isHealthy: false, lastError: "bind failed", lastConnectedAtMs: 0 }),
+      checkOnline: async () => ({})
+    };
+    const { core, log } = makeCore({ providers: [failingProvider] });
+    await core.connectForOwner(OWNER);
+    expect(core.currentHandle()).toBeNull();
+    expect(core.inspectLocalDb().lastError).toMatch(/bind failed/);
+    expect(log.error).toHaveBeenCalled();
+  });
+
+  it("no signer (vault locked): stays not-ready, lastError recorded", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core, log } = makeCore({
+      providers: [p],
+      signerProvider: async () => null
+    });
+    await core.connectForOwner(OWNER);
+    expect(core.currentHandle()).toBeNull();
+    expect(core.inspectLocalDb().lastError).toMatch(/no signer/);
+    expect(log.warn).toHaveBeenCalled();
+  });
+
+  it("disconnect after connectForOwner clears handle", async () => {
+    const handle = makeMockProviderOps();
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+    await core.connectForOwner(OWNER);
+    expect(core.currentHandle()).toBe(handle);
+    await core.disconnect();
+    expect(core.currentHandle()).toBeNull();
+    // disconnect 同时关闭本地 DB handle；state 回落到 idle。
+    expect(core.inspectLocalDb().state).toBe("idle");
+    expect(core.inspectLocalDb().ownerPublicKeyHex).toBeNull();
   });
 });
 
-describe("AppMsgCore.sendScopedMessage ACL", () => {
-  it("rejects mismatched senderPublicKeyHex", async () => {
-    const log = makeLogSink();
-    const { core } = await makeBoundCoreAsync(OWNER, log);
-    await expect(
-      core.sendScopedMessage({
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://justnote.example:443",
-        recipientPublicKeyHex: OWNER,
-        recipientOrigin: "https://justnote.example:443",
+/* ============== 阻断 3：bootstrap 默认值不可逆 ============== */
+
+describe("AppMsgCoreImpl - bootstrap default not reversible after explicit null", () => {
+  it("unregister active provider, then re-register hubmsg: active stays null (no auto-fallback)", async () => {
+    // 1. 构造时 persisted = null → register hubmsg 自动激活（bootstrap 默认）。
+    const { core } = makeCore({
+      providers: [makeMockProvider("hubmsg", "HubMsg", makeMockProviderOps())]
+    });
+    expect(core.providers().active()?.id).toBe("hubmsg");
+
+    // 2. 用户显式 setActive(null)。
+    await core.providers().setActive(null);
+    expect(core.providers().active()).toBeNull();
+
+    // 3. unregister hubmsg。
+    core.providers().unregister("hubmsg");
+    expect(core.providers().active()).toBeNull();
+
+    // 4. 重新 register hubmsg → **不**自动激活（bootstrap 默认已被 setActive(null) 消费）。
+    const newHubmsg = makeMockProvider("hubmsg", "HubMsg", makeMockProviderOps());
+    core.providers().register(newHubmsg);
+    expect(core.providers().active()).toBeNull();
+  });
+
+  it("setActive(null) called BEFORE any register consumes the default; later hubmsg register does not auto-activate", async () => {
+    const { core } = makeCore();
+    // 用户在 hubmsg 注册之前显式清空。
+    await core.providers().setActive(null);
+    expect(core.providers().active()).toBeNull();
+    // 然后 hubmsg 注册进来——不再自动回退。
+    core.providers().register(
+      makeMockProvider("hubmsg", "HubMsg", makeMockProviderOps())
+    );
+    expect(core.providers().active()).toBeNull();
+  });
+
+  it("setActive(otherProvider) consumes default even if otherProvider not registered yet", async () => {
+    // 这条覆盖"用户切到非 hubmsg → 切走 → re-register hubmsg"的语义：
+    // 一旦 setActive 走通，bootstrap 默认就被视为消费。
+    const { core } = makeCore();
+    const other = makeMockProvider("relay", "Relay", makeMockProviderOps());
+    core.providers().register(other);
+    await core.providers().setActive("relay");
+    expect(core.providers().active()?.id).toBe("relay");
+    // unregister relay。
+    core.providers().unregister("relay");
+    expect(core.providers().active()).toBeNull();
+    // 再 register hubmsg——不再回退。
+    core.providers().register(
+      makeMockProvider("hubmsg", "HubMsg", makeMockProviderOps())
+    );
+    expect(core.providers().active()).toBeNull();
+  });
+});
+
+/* ============== 阻断 2：provider 维度 DB 隔离 ============== */
+
+describe("AppMsgCoreImpl - provider dimension DB isolation", () => {
+  it("two providers writing the same messageId go to different providerId rows", async () => {
+    // 模拟两个 provider 同 owner / 同 endpoint / 各自产生 messageId m1。
+    // local DB 应在两个 providerId 维度上分别保留 m1，互不覆盖。
+    const { core } = makeCore();
+    const ks = core.keyspace;
+
+    // 写入 hubmsg provider 下 m1 + m2。
+    const handleHubmsg = makeMockProviderOps();
+    const hubmsg = makeMockProvider("hubmsg", "HubMsg", handleHubmsg);
+    core.providers().register(hubmsg);
+    await core.connectForOwner(OWNER);
+
+    // 走 core 内部 helper 直接写本地库（带 providerId）。
+    // 这里通过触发 self-send 来写，或者直接调 localOps。
+    // 直接调 core 内部 handler——但 `localOps` 是 private。
+    // 改路径：调 core 的 sendMessageImpl（platform internal）走 self-send。
+    // self-send 触发条件：sender === recipient at endpoint。
+    // 简化：直接断言 storageId 改名后两个 provider 的 listUnfilteredMessages
+    // 互不串——通过切换 active provider + 写入 + 切回验证。
+    void ks;
+
+    // 触发 hubmsg 下 self-send 写入一条 m_hubmsg。
+    const res1 = await core.sendAsOrigin({
+      origin: "https://hubmsg-test:443",
+      sendInput: {
+        recipientPublicKeyHex: OWNER, // self
+        recipientOrigin: "https://hubmsg-test:443",
         contentType: "text/plain",
-        body: "x",
-        clientMessageId: "c",
+        body: "from hubmsg",
+        clientMessageId: "c-hubmsg",
         createdAtMs: 1
-      })
-    ).rejects.toThrow(/senderPublicKeyHex mismatch/);
-  });
+      }
+    });
+    expect(res1.messageId).toBeTruthy();
+    const mHubmsg = await core.listUnfilteredMessages({ limit: 10 });
+    expect(mHubmsg.items.length).toBe(1);
+    expect(mHubmsg.items[0]?.body).toBe("from hubmsg");
 
-  it("rejects both senderOrigin and senderAppId present", async () => {
-    const log = makeLogSink();
-    const { core } = await makeBoundCoreAsync(OWNER, log);
-    await expect(
-      core.sendScopedMessage({
-        senderPublicKeyHex: OWNER,
-        senderOrigin: "https://justnote.example:443",
-        senderAppId: "keymaster.message",
+    // 切换 active provider → relay（用 setActive + disconnect + connectForOwner）。
+    const relay = makeMockProvider("relay", "Relay", makeMockProviderOps());
+    core.providers().register(relay);
+    await core.providers().setActive("relay");
+    await core.disconnect();
+    await core.connectForOwner(OWNER);
+
+    // relay provider 下 self-send：写入 m_relay。
+    const res2 = await core.sendAsOrigin({
+      origin: "https://relay-test:443",
+      sendInput: {
         recipientPublicKeyHex: OWNER,
-        recipientOrigin: "https://justnote.example:443",
+        recipientOrigin: "https://relay-test:443",
         contentType: "text/plain",
-        body: "x",
-        clientMessageId: "c",
-        createdAtMs: 1
-      })
-    ).rejects.toThrow(/exactly one of senderOrigin \/ senderAppId/);
+        body: "from relay",
+        clientMessageId: "c-relay",
+        createdAtMs: 2
+      }
+    });
+    expect(res2.messageId).toBeTruthy();
+
+    // 当前 active provider = relay → listUnfilteredMessages 只看 relay 数据。
+    const mRelay = await core.listUnfilteredMessages({ limit: 10 });
+    expect(mRelay.items.length).toBe(1);
+    expect(mRelay.items[0]?.body).toBe("from relay");
+
+    // 切回 hubmsg → 应能看到 hubmsg 之前的 m_hubmsg；relay 那条**不**该出现。
+    await core.providers().setActive("hubmsg");
+    await core.disconnect();
+    await core.connectForOwner(OWNER);
+    const mBack = await core.listUnfilteredMessages({ limit: 10 });
+    expect(mBack.items.length).toBe(1);
+    expect(mBack.items[0]?.body).toBe("from hubmsg");
   });
 });
 
-describe("AppMsgCore.privacy in sendScopedMessage", () => {
-  it("does NOT include body in log data on send failure", async () => {
-    const log = makeLogSink();
-    // 不 connect，sendScopedMessage 在 connection 缺失 / 不 match 时会
-    // 写 appmsg.send.failed 日志；这里确保日志里**不**包含 body key。
-    const core = new AppMsgCoreImpl({
-      url: URL,
-      signerProvider: async () => null,
-      keyspace: makeFakeKeyspace(),
-      pluginId: "appmsg",
-      storageId: "messages",
-      logger: log
+describe("AppMsgCoreImpl - endpoint registry", () => {
+  it("forEndpoint returns same instance for same endpoint", () => {
+    const { core } = makeCore();
+    const reg = core.endpointRegistry();
+    const ep: AppMsgEndpointId = { kind: "plugin", id: KEYMASTER_MESSAGE_APP_ID };
+    const a = reg.forEndpoint(ep);
+    const b = reg.forEndpoint(ep);
+    expect(a).toBe(b);
+  });
+
+  it("forEndpoint of different endpoints returns different instances", () => {
+    const { core } = makeCore();
+    const reg = core.endpointRegistry();
+    const a = reg.forEndpoint({ kind: "plugin", id: KEYMASTER_MESSAGE_APP_ID });
+    const b = reg.forEndpoint({
+      kind: "origin",
+      id: "https://example.test:443"
     });
+    expect(a).not.toBe(b);
+  });
+
+  it("releaseEndpoint removes service", () => {
+    const { core } = makeCore();
+    const reg = core.endpointRegistry();
+    const ep: AppMsgEndpointId = { kind: "plugin", id: KEYMASTER_MESSAGE_APP_ID };
+    const a = reg.forEndpoint(ep);
+    reg.releaseEndpoint(ep);
+    const b = reg.forEndpoint(ep);
+    expect(a).not.toBe(b);
+  });
+});
+
+describe("AppMsgCoreImpl - endpoint service not-ready", () => {
+  it("no handle: isReady false; send throws; list empty; get null; subscribe returns cancel; checkOnline unknown", async () => {
+    const { core } = makeCore();
+    const reg = core.endpointRegistry();
+    const svc = reg.forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    expect(svc.isReady()).toBe(false);
     await expect(
-      core.sendScopedMessage({
-        senderPublicKeyHex: OWNER,
-        senderAppId: "keymaster.message",
+      svc.sendMessage({
         recipientPublicKeyHex: OWNER,
-        recipientAppId: "keymaster.message",
+        recipientAppId: KEYMASTER_MESSAGE_APP_ID,
         contentType: "text/plain",
-        body: "SECRET_BODY",
+        body: "hi",
         clientMessageId: "c",
         createdAtMs: Date.now()
       })
-    ).rejects.toThrow();
-    const failed = log.warn.mock.calls.find(
-      (c) => (c[0] as { event?: string })?.event === "appmsg.send.failed"
-    );
-    if (failed) {
-      const data = failed[0] as Record<string, unknown>;
-      expect("body" in data).toBe(false);
-    }
+    ).rejects.toThrow(/not_ready/);
+    expect((await svc.listMessages()).items).toEqual([]);
+    expect(await svc.getMessage({ messageId: "x" })).toBeNull();
+    const off = svc.subscribeMessages(() => undefined);
+    expect(typeof off).toBe("function");
+    expect(() => off()).not.toThrow();
+    const out = await svc.checkOnline([OWNER]);
+    expect(out[OWNER]).toBe("unknown");
+  });
+});
+
+describe("AppMsgCoreImpl - endpoint service with handle", () => {
+  function makeConnectedCore() {
+    const sentMessages: unknown[] = [];
+    const listCalls: unknown[] = [];
+    const subscribeCalls: Array<(m: AppMsgMessage) => void> = [];
+    const handle = makeMockProviderOps({
+      sendMessage: async (input) => {
+        sentMessages.push(input);
+        return { messageId: "m1", createdAtMs: 1000 };
+      },
+      listMessages: async (input) => {
+        listCalls.push(input);
+        return {
+          items: [
+            {
+              messageId: "m1",
+              clientMessageId: "c1",
+              senderPublicKeyHex: OWNER,
+              senderAppId: KEYMASTER_MESSAGE_APP_ID,
+              recipientPublicKeyHex: OWNER_B,
+              recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+              contentType: "text/plain",
+              body: "hello",
+              createdAtMs: 1,
+              insertedAtMs: 1
+            }
+          ],
+          hasMore: false
+        };
+      },
+      subscribeMessages: (h) => {
+        subscribeCalls.push(h);
+        return () => undefined;
+      }
+    });
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const ctx = makeCore({ providers: [p] });
+    return { ...ctx, handle, sentMessages, listCalls, subscribeCalls };
+  }
+
+  it("sendMessage forwards typed input to provider", async () => {
+    const ctx = makeConnectedCore();
+    await ctx.core.connectForOwner(OWNER);
+    const reg = ctx.core.endpointRegistry();
+    const svc = reg.forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    const r = await svc.sendMessage({
+      recipientPublicKeyHex: OWNER_B,
+      recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+      contentType: "text/plain",
+      body: "hi",
+      clientMessageId: "c-send",
+      createdAtMs: 1
+    });
+    expect(r.messageId).toBe("m1");
+    expect(ctx.sentMessages.length).toBe(1);
+    const sent = ctx.sentMessages[0] as {
+      sender: { senderPublicKeyHex: string; senderAppId?: string };
+      recipientAppId?: string;
+      body: string;
+    };
+    expect(sent.sender.senderPublicKeyHex).toBe(OWNER);
+    expect(sent.sender.senderAppId).toBe(KEYMASTER_MESSAGE_APP_ID);
+    expect(sent.recipientAppId).toBe(KEYMASTER_MESSAGE_APP_ID);
+    expect(sent.body).toBe("hi");
+  });
+
+  it("listMessages returns provider items (already standardized AppMsgMessage)", async () => {
+    const ctx = makeConnectedCore();
+    await ctx.core.connectForOwner(OWNER);
+    const reg = ctx.core.endpointRegistry();
+    const svc = reg.forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    const r = await svc.listMessages({ limit: 10 });
+    expect(r.items.length).toBe(1);
+    expect(r.items[0]?.messageId).toBe("m1");
+    // typed input 已带 owner + scopeEndpoint。
+    const lastList = ctx.listCalls[ctx.listCalls.length - 1] as {
+      ownerPublicKeyHex: string;
+      scopeEndpoint: { kind: "plugin"; id: string };
+    };
+    expect(lastList.ownerPublicKeyHex).toBe(OWNER);
+    expect(lastList.scopeEndpoint).toEqual({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+  });
+
+  it("subscribe binds handler to current handle", async () => {
+    const ctx = makeConnectedCore();
+    await ctx.core.connectForOwner(OWNER);
+    const reg = ctx.core.endpointRegistry();
+    const svc = reg.forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    const received: AppMsgMessage[] = [];
+    const off = svc.subscribeMessages((m) => received.push(m));
+    expect(ctx.subscribeCalls.length).toBe(1);
+    // 模拟 provider 推一条消息。
+    const handler = ctx.subscribeCalls[0]!;
+    handler({
+      messageId: "push-1",
+      clientMessageId: "c-push",
+      senderPublicKeyHex: OWNER_B,
+      senderAppId: KEYMASTER_MESSAGE_APP_ID,
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+      contentType: "text/plain",
+      body: "pushed",
+      createdAtMs: 1,
+      insertedAtMs: 1
+    });
+    expect(received.length).toBe(1);
+    expect(received[0]?.messageId).toBe("push-1");
+    off();
+  });
+});
+
+describe("AppMsgCoreImpl - subscribe migration on owner/provider change", () => {
+  it("switching active provider rebinds endpoint service subscriptions internally", async () => {
+    const subscribeA: Array<(m: AppMsgMessage) => void> = [];
+    const subscribeB: Array<(m: AppMsgMessage) => void> = [];
+    const handleA = makeMockProviderOps({
+      subscribeMessages: (h) => {
+        subscribeA.push(h);
+        return () => undefined;
+      }
+    });
+    const handleB = makeMockProviderOps({
+      subscribeMessages: (h) => {
+        subscribeB.push(h);
+        return () => undefined;
+      }
+    });
+    // 故意让 handleA 在 disconnect 后 state 不是 "bound"，否则
+    // connectForOwner 会因 owner 匹配而 short-circuit 跳过重建。
+    const providerA = makeMockProvider("hubmsg", "HubMsg", handleA);
+    const providerB = makeMockProvider("relay", "Relay", handleB);
+    const { core } = makeCore({ providers: [providerA, providerB] });
+    await core.connectForOwner(OWNER);
+    const reg = core.endpointRegistry();
+    const svc = reg.forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    svc.subscribeMessages(() => undefined);
+    expect(subscribeA.length).toBe(1);
+    expect(subscribeB.length).toBe(0);
+
+    // 切换 active provider → setActive 触发 endpoint service 内部
+    // rebindAllSubscriptions（因为 boundHandle 没变，会重新绑一次）；
+    // 紧接着调用 disconnect 让 boundHandle 清空，再 connectForOwner 重新
+    // bind 到新 active provider。
+    await core.providers().setActive("relay");
+    await core.disconnect();
+    expect(subscribeA.length).toBeGreaterThanOrEqual(1);
+    expect(subscribeB.length).toBe(0);
+    await core.connectForOwner(OWNER);
+    // 此时 boundHandle = handleB（新 active），endpoint service 内部
+    // 在 onStateChange 触发下重新绑定到 handleB。
+    expect(subscribeB.length).toBeGreaterThanOrEqual(1);
   });
 });
 
 // 防止 IDE 报 unused
-void ({} as AppMsgMessage);
+void APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY;

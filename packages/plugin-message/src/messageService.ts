@@ -1,39 +1,43 @@
 // packages/plugin-message/src/messageService.ts
-// 消息业务插件 service 层（施工单 2026-07-03 002 硬切换）。
+// 消息业务插件 service 层（施工单 2026-07-04 001 硬切换）。
 //
 // 设计缘由：
-//   - `plugin-message` 是一个**普通 scoped 消息插件**，appId =
-//     `keymaster.message`；service 只封装 scoped client 的业务动作；
-//   - sender 投影由 runtime 在 enable 阶段固化到注入的 scoped client
-//     里；这里**不**再关心 sender / owner / endpoint；
-//   - 不接触 `appmsg.core` 全库接口、不走 `createSystemMessageClient`
-//     特权旁路；
-//   - 管理 / 诊断方法（triggerSync / listTargetSyncStates /
-//     checkOnline / getLocalDbSnapshot）**全部删除**——这些由
-//     `plugin-appmsg` 的 HubMsg 管理页消费 `appmsg.core` 展示。
+//   - `plugin-message` 是一个**极薄业务插件**，appId =
+//     `keymaster.message`；
+//   - service 直接消费由 plugin-appmsg 通过 `appmsg.endpoint.registry` 给
+//     出的稳定长寿 `AppMsgEndpointService`——它内部已经自动处理 owner
+//     真值 / active provider 切换；
+//   - **不**订阅 keyspace / vault / provider；
+//   - **不**暴露 `subscriptionSource()` 之类"subscription token"——
+//     endpoint service 内部自动迁移订阅；
+//   - 当前未就绪时（vault locked / 无 active key / 无 active provider）
+//     走降级：list/get 返回空态；send 抛 `not_ready`；subscribe 返回
+//     noop 取消函数；
+//   - 不接触 `appmsg.core` 全库接口；走 endpoint service 的稳定 5 方法。
 
 import type {
   AppMsgContentType,
-  AppMsgMessage,
-  AppMsgSimpleClient
+  AppMsgEndpointService,
+  AppMsgMessage
 } from "@keymaster/contracts";
 import { KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 
 /**
  * 消息业务插件对外 service。
  *
- * 最小职责：4 个方法，全部走 scoped client。
+ * 最小职责：4 个方法，全部走稳定长寿 endpoint service。
  *   - `listMessages`：列自己 scope 内的本地消息；
  *   - `getMessage`：读单条；scope 外返回 null；
  *   - `sendTextMessage`：发一条文本消息到 `recipientAppId =
  *     keymaster.message` 的对方；
- *   - `subscribeMessages`：订阅自己 scope 内的事件。
+ *   - `subscribeMessages`：订阅自己 scope 内的事件；endpoint service
+ *     内部已自动迁移订阅——上层 React effect **不需要**重新订阅；
+ *   - `isReady`：当前 endpoint service 是否可用。
  *
  * 搜索**不**作为 service 暴露——UI 在拿到 list 后做本地字符串过滤。
- * 这是显式选择：不为"消息搜索"扩张 contract。
  */
 export interface MessageService {
-  /** scoped client 是否可用（runtime 注入 + 当前 vault 状态）。 */
+  /** endpoint service 是否可用。 */
   isReady(): boolean;
   /** 列本地消息（scoped）。 */
   listMessages(input?: { limit?: number; afterMessageId?: string }): Promise<AppMsgMessage[]>;
@@ -57,35 +61,32 @@ export interface MessageService {
 /**
  * 构造消息业务 service。
  *
- * 入参 `getClient`：每次调用时再解析 scoped client；返回 `null` 表示
- * scoped client 当前不可用（runtime 没注入 / sender 不存在）。
+ * 入参 `endpointService`：plugin-appmsg 提供的稳定长寿 service。service
+ * 内部已处理 owner / provider 切换，本层只读不写。
  *
  * 这样设计的好处：
- *   - vault 解锁 → owner 切换 → runtime 重新注入 scoped client，
- *     service **不**需要重新构造；
- *   - 当前未就绪时（vault locked / 无 owner）所有方法静默走降级：
- *     list/get 返回空态；send 抛 `not_ready`；subscribe 返回 noop 取消函数。
+ *   - vault 解锁 / 切 key / 切换 active provider 时，endpoint service
+ *     **内部**自动迁移订阅 / 更新 sender 投影——本 service **不需要**
+ *     重建也不需要重新构造；
+ *   - 当前未就绪时所有方法静默走降级：list/get 返回空态；send 抛
+ *     `not_ready`；subscribe 返回 noop 取消函数。
+ *   - 业务页只关心 `isReady()` 返回值；owner / provider 切换完全由
+ *     plugin-appmsg 透明处理。
  */
 export function createMessageService(
-  getClient: () => AppMsgSimpleClient | null
+  endpointService: AppMsgEndpointService
 ): MessageService {
   return {
-    isReady: () => getClient() !== null,
+    isReady: () => endpointService.isReady(),
     listMessages: async (input) => {
-      const cli = getClient();
-      if (!cli) return [];
-      const res = await cli.listMessages(input);
+      const res = await endpointService.listMessages(input);
       return res.items;
     },
     getMessage: async (messageId) => {
-      const cli = getClient();
-      if (!cli) return null;
-      return cli.getMessage({ messageId });
+      return endpointService.getMessage({ messageId });
     },
     sendTextMessage: async (input) => {
-      const cli = getClient();
-      if (!cli) throw new Error("message.service: scoped appmsg.client not ready");
-      await cli.sendMessage({
+      await endpointService.sendMessage({
         recipientPublicKeyHex: input.recipientPublicKeyHex,
         recipientAppId: KEYMASTER_MESSAGE_APP_ID,
         contentType: input.contentType ?? "text/plain",
@@ -95,9 +96,7 @@ export function createMessageService(
       });
     },
     subscribeMessages: (handler) => {
-      const cli = getClient();
-      if (!cli) return () => undefined;
-      return cli.subscribeMessages(handler);
+      return endpointService.subscribeMessages(handler);
     }
   };
 }

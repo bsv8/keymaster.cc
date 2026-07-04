@@ -105,6 +105,9 @@ importers:
       '@keymaster/plugin-home':
         specifier: '*'
         version: link:../../packages/plugin-home
+      '@keymaster/plugin-hubmsg':
+        specifier: '*'
+        version: link:../../packages/plugin-hubmsg
       '@keymaster/plugin-importer-hex':
         specifier: '*'
         version: link:../../packages/plugin-importer-hex
@@ -278,6 +281,12 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+
+  packages/plugin-hubmsg:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
 
   packages/plugin-importer-hex:
     dependencies:

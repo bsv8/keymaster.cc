@@ -19,6 +19,7 @@
     "@keymaster/plugin-collectibles": "*",
     "@keymaster/plugin-contacts": "*",
     "@keymaster/plugin-home": "*",
+    "@keymaster/plugin-hubmsg": "*",
     "@keymaster/plugin-importer-hex": "*",
     "@keymaster/plugin-importer-json-file": "*",
     "@keymaster/plugin-importer-wif": "*",

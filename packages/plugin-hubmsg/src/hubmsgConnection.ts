@@ -1,24 +1,45 @@
-// packages/plugin-appmsg/src/hubmsgConnection.ts
-// HubMsg 单 WSS 连接管理（v1，硬切换 2026-07-03/001 之后）。
+// packages/plugin-hubmsg/src/hubmsgConnection.ts
+// HubMsg 单 WSS 连接管理（v1，硬切换 2026-07-04 001 之后）。
 //
 // 设计缘由：
 //   - 单一 WSS 入口：HubMsg 真值层提供的 `wss://<host>/ws/v1`；
 //   - 三步握手：server_open -> client_bind -> bind_ready；
 //   - 业务帧：request / result / event；
-//   - 推送事件：`message.received`（HubMsg → keymaster，payload 为完整
-//     `HubMsgMessageRecord`）—— keymaster 自己按 origin/appId 分发。
-//   - 协议 RPC：message.send / message.list / message.get / message.online。
+//   - 推送事件：`message.received`（HubMsg → keymaster），本模块内部
+//     把 wire `HubMsgMessageRecord` 翻译为标准化 `AppMsgMessage`，对外
+//     只暴露标准化输出——**plugin-appmsg 不再接触 wire record**；
+//   - 协议 RPC：message.send / message.list / message.get / message.online
+//     ——本模块把它们包装成 typed `MessageProviderOperations` 业务方法
+//     （sendMessage / listMessages / getMessage / subscribeMessages /
+//     checkOnline），**不**暴露字符串方法名给上层；
+//   - 本模块**不**依赖具体签名 / 私钥操作；client_bind 的签名由 caller
+//     （plugin-appmsg 在 setup 阶段借 owner 私钥）通过 `ProviderSigner`
+//     提供；
 //   - 旧 `appmsg.inbox_dirty` / `message.origins` / `message.counts`
 //     已彻底删除（硬切换 2026-07-03/001）。
 //
 // 边界：
-//   - 本模块**不**依赖具体签名 / 私钥操作；client_bind 的签名由 caller
-//     （本插件 setup 阶段借 owner 私钥）提供；
-//   - 断线重连 / afterMessageId 补拉交给 appmsgSync；
-//   - 本文件**不**做未读计数（v1 不做）；
-//   - 本文件**不**做群聊 / 附件 / 撤回 / 编辑 / 已读回执。
+//   - 本模块**不**依赖具体签名 / 私钥操作；
+//   - 本模块**不**做持久化（消息本地库在 plugin-appmsg）；
+//   - 本模块**不**做未读计数（v1 不做）；
+//   - 本模块**不**做群聊 / 附件 / 撤回 / 编辑 / 已读回执。
 
-import type { AppMsgContentType, AppMsgMessage } from "@keymaster/contracts";
+import { canonicalBindText } from "@keymaster/contracts";
+import type {
+  AppMsgContentType,
+  AppMsgMessage,
+  AppMsgOnlineStatus,
+  ProviderEndpointRef,
+  ProviderGetInput,
+  ProviderListInput,
+  ProviderListResult,
+  ProviderOnlineInput,
+  ProviderOnlineResult,
+  ProviderSendInput,
+  ProviderSendResult,
+  ProviderSenderProjection,
+  ProviderSigner
+} from "@keymaster/contracts";
 
 /** HubMsg 单 WSS 入口配置。 */
 export interface HubMsgConnectionConfig {
@@ -28,30 +49,49 @@ export interface HubMsgConnectionConfig {
   heartbeatSec?: number;
 }
 
-/** 客户端 bind 时的签名材料（由 owner runtime 提供）。 */
+/* ============== Provider 绑定阶段 ============== */
+
+/**
+ * Bind signer 抽象（plugin-appmsg 提供）。
+ *
+ * 设计缘由（硬切换 2026-07-04 001 修订）：
+ *   - 本模块**不**直接拿 owner 私钥 hex；它接收 `HubMsgBindSigner`
+ *     闭包，由自己决定何时调用；
+ *   - HubMsg 特有的四元组 `(sessionId, nonce, publicKeyHex, issuedAtMs)`
+ *     拼接规则（`canonicalBindText`）**下沉**到 `plugin-hubmsg`；
+ *   - signer 通用抽象 `signChallenge({challenge})` 接受任意字节返回
+ *     hex 签名——provider 内部决定 challenge 内容；当前平台 vault
+ *     持有 secp256k1 私钥，所以走 SHA-256 + secp256k1 + compact。
+ */
 export interface HubMsgBindSigner {
   publicKeyHex: string;
   /**
-   * 用 owner 私钥对 (sessionId, nonce, publicKeyHex, issuedAtMs) 这四元组
-   * 做 secp256k1 compact 64-byte 签名，返回 hex 字符串。
-   *
-   * 设计缘由：原文拼接规则是"两仓共用常数"，由
-   * `packages/contracts/src/appmsgBind.ts::canonicalBindText` 给出；
-   * 这里**不**让 caller 拼好 message 再传入——避免两仓拼接不一致。
-   *
-   * 实现：本插件调用 vault.withPrivateKey 借 owner 私钥 hex 后，
-   * 走 `signCompactSecp256k1(privHex, sessionId, nonce, publicKeyHex,
-   * issuedAtMs)` 派生签名。
+   * 用 owner 私钥对 `challenge` 字节做 secp256k1 签名（SHA-256 + compact
+   * 64-byte），返回小写 hex。
    */
-  sign(args: {
-    sessionId: string;
-    nonce: string;
-    publicKeyHex: string;
-    issuedAtMs: number;
-  }): Promise<string>;
+  signChallenge(args: { challenge: Uint8Array }): Promise<string>;
 }
 
-/** v1 RPC method 名常量集合。 */
+/**
+ * 把通用 `ProviderSigner` 适配到 HubMsg 内部 `HubMsgBindSigner`。
+ *
+ * HubMsg bind 流程需要的 challenge 内容由 `canonicalBindText` 给出——
+ * 本类**只**做"拼 canonicalBindText → 调通用 signChallenge"，把
+ * HubMsg 特有的协议拼接收口在 `plugin-hubmsg` 内部。
+ */
+export class HubMsgBindSignerAdapter implements HubMsgBindSigner {
+  constructor(private readonly providerSigner: ProviderSigner) {}
+  get publicKeyHex(): string {
+    return this.providerSigner.publicKeyHex;
+  }
+  async signChallenge(args: { challenge: Uint8Array }): Promise<string> {
+    return this.providerSigner.signChallenge({ challenge: args.challenge });
+  }
+}
+
+/* ============== v1 RPC method / event 名 ============== */
+
+/** v1 RPC method 名常量集合（**仅**本模块内部使用，**不**暴露给上层）。 */
 export const HUBMSG_METHOD = {
   MessageSend: "message.send",
   MessageList: "message.list",
@@ -64,50 +104,14 @@ export const HUBMSG_EVENT = {
   MessageReceived: "message.received"
 } as const;
 
-/**
- * HubMsg `message.received` 事件 data 形态。
- */
-export interface HubMsgMessageReceivedData {
-  message: HubMsgMessageRecord;
-}
+/* ============== HubMsg wire 内部类型（**不**暴露给上层） ============== */
 
 /**
- * HubMsg `message.online` 入参。
- */
-export interface HubMsgOnlineParams {
-  publicKeyHexes: string[];
-}
-
-/**
- * HubMsg `message.online` 出参。
+ * HubMsg 服务端内部消息记录（plugin-hubmsg 内部使用，与 HubMsg wire /
+ * store 对齐）。
  *
- * 返回当前已 bind owner 集合中匹配 `publicKeyHexes` 的子集；调用方按
- * "在集合内 == online；不在 == offline" 推断。
- */
-export interface HubMsgOnlineResult {
-  onlinePublicKeyHexes: string[];
-}
-
-/**
- * 复用平台同步器所需的最小连接形状。
- *
- * 设计缘由：appmsgSync.ts 与 appmsgCore.ts 都按此形状消费连接；
- * `HubMsgConnection` 接口本身比这更大，但同步器只关心 request + 状态。
- */
-export interface HubMsgConnectionLike {
-  state(): HubMsgConnectionState;
-  request<TParams, TResult>(
-    method: string,
-    params: TParams,
-    options?: { timeoutMs?: number }
-  ): Promise<TResult>;
-}
-
-/**
- * HubMsg 服务端内部消息记录（plugin 内核使用，与 HubMsg wire / store 对齐）。
- *
- * 注意：本结构是 platform internal—— public 消息视图见
- * `contracts/src/appmsg.ts::AppMsgMessage`。
+ * **不**作为公开类型导出。本模块**只**在内部把 `HubMsgMessageRecord`
+ * 翻译成标准化 `AppMsgMessage` 后再返回 / 推送。
  */
 export interface HubMsgMessageRecord {
   messageId: string;
@@ -122,6 +126,21 @@ export interface HubMsgMessageRecord {
   insertedAtMs: number;
 }
 
+/** `message.received` 事件 data 形态（HubMsg wire）。 */
+export interface HubMsgMessageReceivedData {
+  message: HubMsgMessageRecord;
+}
+
+/** `message.online` 入参（HubMsg wire）。 */
+export interface HubMsgOnlineParams {
+  publicKeyHexes: string[];
+}
+
+/** `message.online` 出参（HubMsg wire）。 */
+export interface HubMsgOnlineResult {
+  onlinePublicKeyHexes: string[];
+}
+
 /** 单条 result 帧。 */
 export interface HubMsgResultFrame<T> {
   ok: boolean;
@@ -132,18 +151,16 @@ export interface HubMsgResultFrame<T> {
 /** 连接状态。 */
 export type HubMsgConnectionState = "idle" | "connecting" | "bound" | "closed";
 
-/**
- * HubMsg 单 WSS 客户端接口。
- *
- * 边界：
- *   - **不**直接持有 owner 私钥：bind 时通过 `HubMsgBindSigner` 闭包借用；
- *   - **不**做持久化：消息列表 / inbox / sent 只在本地 DB；
- *   - **不**做缓存淘汰策略：v1 不实现 LRU（设计缘由：保持简单）。
- */
-export interface HubMsgConnection extends HubMsgConnectionLike {
-  /** 当前连接状态。 */
-  state(): HubMsgConnectionState;
+/* ============== HubMsg 单 WSS 客户端接口（**仅**本模块内部使用） ============== */
 
+/**
+ * HubMsg 单 WSS 客户端接口（**仅**本模块内部使用）。
+ *
+ * **不**作为公开契约导出。对外暴露的是 `MessageProviderOperations`
+ * typed 方法。
+ */
+export interface HubMsgConnection {
+  state(): HubMsgConnectionState;
   /**
    * 异步 connect + bind。
    *
@@ -154,38 +171,27 @@ export interface HubMsgConnection extends HubMsgConnectionLike {
    *   4. 等 bind_ready → state = "bound"。
    */
   connect(signer: HubMsgBindSigner): Promise<void>;
-
   /** 关闭连接；幂等。 */
   close(): void;
-
   /**
    * 同步发出 request；用消息 id 与 promise 解耦。
    *
    * 失败语义：
    *   - 超时：reject；调用方决定如何降级；
    *   - 服务端 result(ok=false)：reject with code / message；
-   *   - 连接断开中：reject；
+   *   - 连接断开中：reject。
    */
   request<TParams, TResult>(
     method: string,
     params: TParams,
     options?: { timeoutMs?: number }
   ): Promise<TResult>;
-
   /** 订阅服务端推送的 event；返回取消订阅函数。 */
   subscribeEvent<TData>(eventName: string, handler: (data: TData) => void): () => void;
 }
 
-/**
- * HubMsg 单 WSS 客户端实现。
- *
- * 设计缘由：
- *   - 保持最小：仅实现"建连 + bind + request + event"四件套；
- *   - 真实浏览器侧走 `WebSocket`；Node / 测试可注入 fake socket；
- *   - ping/pong 由内部 timer 自动维护；
- *   - 重连由 caller 驱动（`appmsg.core.connectForOwner`），**不**内置
- *     指数退避（保持简单）。
- */
+/* ============== HubMsg 单 WSS 客户端实现 ============== */
+
 export class HubMsgConnectionImpl implements HubMsgConnection {
   private readonly cfg: HubMsgConnectionConfig;
   /** 注入 socket；默认用浏览器 WebSocket；测试可注入 fake。 */
@@ -253,15 +259,18 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     });
     await serverOpen;
 
-    // 2) client_bind：原文拼接由 signer 内部走 `canonicalBindText`（两仓
-    //    共用）；这里只把四元组透传给 signer。
+    // 2) client_bind：原文拼接走本模块**内部**的 `canonicalBindText`
+    //    （HubMsg 特有协议拼接收口，**不**泄漏给通用 ProviderSigner）；
+    //    调用通用 signer.signChallenge({challenge: utf8(canonicalBindText)})。
     const issuedAtMs = Date.now();
-    const sigHex = await signer.sign({
-      sessionId: this.sessionId ?? "",
-      nonce: this.nonce ?? "",
-      publicKeyHex: signer.publicKeyHex,
+    const plainText = canonicalBindText(
+      this.sessionId ?? "",
+      this.nonce ?? "",
+      signer.publicKeyHex,
       issuedAtMs
-    });
+    );
+    const plainBytes = new TextEncoder().encode(plainText);
+    const sigHex = await signer.signChallenge({ challenge: plainBytes });
     const bindFrame = {
       v: 1,
       type: "client_bind",
@@ -506,12 +515,15 @@ function newId(): string {
   return `req-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/* ============== wire record → 标准化 AppMsgMessage 翻译（**仅**本模块内部） ============== */
+
 /**
- * 把 HubMsg 服务端的 wire message record 转成公开 `AppMsgMessage`。
+ * HubMsg wire `HubMsgMessageRecord` → 标准化 `AppMsgMessage`。
  *
- * 兼容旧仓库的辅助函数名（`toAppMsgMessage`）——保持 plugin 内核引用稳定。
+ * **本模块唯一**允许做这个翻译的地方。plugin-appmsg 拿到的永远是
+ * `AppMsgMessage`，**不**直接看到 `HubMsgMessageRecord`。
  */
-export function toAppMsgMessage(rec: HubMsgMessageRecord): AppMsgMessage {
+function wireRecordToPublic(rec: HubMsgMessageRecord): AppMsgMessage {
   const sOrigin = rec.senderEndpoint.kind === "origin" ? rec.senderEndpoint.id : undefined;
   const sAppId = rec.senderEndpoint.kind === "plugin" ? rec.senderEndpoint.id : undefined;
   const rOrigin =
@@ -533,4 +545,202 @@ export function toAppMsgMessage(rec: HubMsgMessageRecord): AppMsgMessage {
   if (rOrigin) out.recipientOrigin = rOrigin;
   else if (rAppId) out.recipientAppId = rAppId;
   return out;
+}
+
+/* ============== wire request 形态（**仅**本模块内部） ============== */
+
+interface WireSendParams {
+  clientMessageId: string;
+  senderOwnerPublicKeyHex: string;
+  senderEndpoint: { kind: "origin" | "plugin"; id: string };
+  recipientOwnerPublicKeyHex: string;
+  recipientEndpoint: { kind: "origin" | "plugin"; id: string };
+  contentType: AppMsgContentType;
+  body: string;
+  createdAtMs: number;
+}
+
+interface WireMessageListParams {
+  ownerPublicKeyHex: string;
+  scopeEndpoint: { kind: "origin" | "plugin"; id: string };
+  afterMessageId?: string;
+  limit?: number;
+}
+
+interface WireMessageListResult {
+  items: HubMsgMessageRecord[];
+  hasMore: boolean;
+}
+
+interface WireMessageGetParams {
+  ownerPublicKeyHex: string;
+  scopeEndpoint: { kind: "origin" | "plugin"; id: string };
+  messageId: string;
+}
+
+/* ============== 对外 typed 接口（HubMsgProviderOperations） ============== */
+
+/**
+ * `MessageProviderOperations` typed handle 的 HubMsg 实现。
+ *
+ * 设计缘由：
+ *   - 本类把 wire 层 `HubMsgConnection` 包装成 typed `MessageProviderOperations`：
+ *     - `sendMessage(input)` → wire `message.send`；
+ *     - `listMessages(input)` → wire `message.list`，返回标准化结果；
+ *     - `getMessage(input)` → wire `message.get`，scope 外返回 null；
+ *     - `subscribeMessages(handler)` → wire `message.received`，handler
+ *       收到标准化 `AppMsgMessage`；
+ *     - `checkOnline(input)` → wire `message.online`，失败 → 所有
+ *       `"unknown"`。
+ *   - plugin-appmsg **不**直接接触 `HubMsgConnection`；它只接触
+ *     `MessageProviderOperations`。
+ */
+export class HubMsgProviderOperations {
+  private readonly conn: HubMsgConnection;
+  /** wire 端 endpointId 派生函数（plugin-endpoint → hubmsg wire scope）。 */
+  private static readonly providerId = "hubmsg";
+
+  constructor(conn: HubMsgConnection) {
+    this.conn = conn;
+  }
+
+  state(): "idle" | "connecting" | "bound" | "closed" {
+    return this.conn.state();
+  }
+
+  close(): void {
+    this.conn.close();
+  }
+
+  async sendMessage(input: ProviderSendInput): Promise<ProviderSendResult> {
+    if (this.conn.state() !== "bound") {
+      throw new Error("HubMsg: not bound; cannot send");
+    }
+    const senderEp = senderProjectionToEndpoint(input.sender);
+    const recipientEp = recipientProjectionToEndpoint(input);
+    const wireParams: WireSendParams = {
+      clientMessageId: input.clientMessageId,
+      senderOwnerPublicKeyHex: input.sender.senderPublicKeyHex,
+      senderEndpoint: senderEp,
+      recipientOwnerPublicKeyHex: input.recipientPublicKeyHex,
+      recipientEndpoint: recipientEp,
+      contentType: input.contentType,
+      body: input.body,
+      createdAtMs: input.createdAtMs
+    };
+    const res = await this.conn.request<
+      WireSendParams,
+      { messageId: string; createdAtMs: number }
+    >(HUBMSG_METHOD.MessageSend, wireParams);
+    return { messageId: res.messageId, createdAtMs: res.createdAtMs };
+  }
+
+  async listMessages(input: ProviderListInput): Promise<ProviderListResult> {
+    if (this.conn.state() !== "bound") {
+      return { items: [], hasMore: false };
+    }
+    const wireParams: WireMessageListParams = {
+      ownerPublicKeyHex: input.ownerPublicKeyHex,
+      scopeEndpoint: providerEndpointToWire(input.scopeEndpoint),
+      afterMessageId: input.afterMessageId,
+      limit: input.limit
+    };
+    const res = await this.conn.request<WireMessageListParams, WireMessageListResult>(
+      HUBMSG_METHOD.MessageList,
+      wireParams
+    );
+    return {
+      items: res.items.map(wireRecordToPublic),
+      hasMore: res.hasMore
+    };
+  }
+
+  async getMessage(input: ProviderGetInput): Promise<AppMsgMessage | null> {
+    if (this.conn.state() !== "bound") {
+      return null;
+    }
+    const wireParams: WireMessageGetParams = {
+      ownerPublicKeyHex: input.ownerPublicKeyHex,
+      scopeEndpoint: providerEndpointToWire(input.scopeEndpoint),
+      messageId: input.messageId
+    };
+    try {
+      const rec = await this.conn.request<WireMessageGetParams, HubMsgMessageRecord | null>(
+        HUBMSG_METHOD.MessageGet,
+        wireParams
+      );
+      if (!rec) return null;
+      return wireRecordToPublic(rec);
+    } catch {
+      // 失败按"scope 外 / 不存在"处理；不向上抛。
+      return null;
+    }
+  }
+
+  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void {
+    return this.conn.subscribeEvent<HubMsgMessageReceivedData>(
+      HUBMSG_EVENT.MessageReceived,
+      (data) => {
+        if (!data?.message) return;
+        try {
+          handler(wireRecordToPublic(data.message));
+        } catch {
+          // ignore
+        }
+      }
+    );
+  }
+
+  async checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult> {
+    if (this.conn.state() !== "bound") {
+      const out: ProviderOnlineResult = {};
+      for (const h of input.publicKeyHexes) out[h] = "unknown" satisfies AppMsgOnlineStatus;
+      return out;
+    }
+    try {
+      const res = await this.conn.request<HubMsgOnlineParams, HubMsgOnlineResult>(
+        HUBMSG_METHOD.MessageOnline,
+        { publicKeyHexes: input.publicKeyHexes }
+      );
+      const onlineSet = new Set(res.onlinePublicKeyHexes ?? []);
+      const out: ProviderOnlineResult = {};
+      for (const h of input.publicKeyHexes) {
+        out[h] = (onlineSet.has(h) ? "online" : "offline") satisfies AppMsgOnlineStatus;
+      }
+      return out;
+    } catch {
+      const out: ProviderOnlineResult = {};
+      for (const h of input.publicKeyHexes) out[h] = "unknown" satisfies AppMsgOnlineStatus;
+      return out;
+    }
+  }
+}
+
+/** provider id 字面量；plugin-appmsg 在调用 `providers().list()` 时看到。 */
+export const HUBMSG_PROVIDER_ID = "hubmsg";
+
+function providerEndpointToWire(ep: ProviderEndpointRef): {
+  kind: "origin" | "plugin";
+  id: string;
+} {
+  return { kind: ep.kind, id: ep.id };
+}
+
+function senderProjectionToEndpoint(sender: ProviderSenderProjection): {
+  kind: "origin" | "plugin";
+  id: string;
+} {
+  if (sender.senderOrigin) return { kind: "origin", id: sender.senderOrigin };
+  if (sender.senderAppId) return { kind: "plugin", id: sender.senderAppId };
+  // 兜底为空 endpoint；调用方应该在 endpoint service 层就拒绝这种输入。
+  return { kind: "plugin", id: "" };
+}
+
+function recipientProjectionToEndpoint(input: {
+  recipientOrigin?: string;
+  recipientAppId?: string;
+}): { kind: "origin" | "plugin"; id: string } {
+  if (input.recipientOrigin) return { kind: "origin", id: input.recipientOrigin };
+  if (input.recipientAppId) return { kind: "plugin", id: input.recipientAppId };
+  return { kind: "plugin", id: "" };
 }

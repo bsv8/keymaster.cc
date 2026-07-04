@@ -1,10 +1,10 @@
-// packages/plugin-appmsg/src/signing.test.ts
+// packages/plugin-appmsg/src/signer.test.ts
 // signCompactSecp256k1 单测：与 HubMsg Go 端 SignBind / VerifyBindSignature
 // 必须 bit 级一致。
 import { describe, expect, it } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { signCompactSecp256k1 } from "./signing.js";
+import { signCompactSecp256k1 } from "./signer.js";
 
 describe("signCompactSecp256k1", () => {
   it("round-trip: verify recovers the same public key", () => {

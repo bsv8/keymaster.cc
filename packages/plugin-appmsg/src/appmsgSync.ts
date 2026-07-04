@@ -1,43 +1,25 @@
 // packages/plugin-appmsg/src/appmsgSync.ts
-// appmsg 增量同步器。
+// appmsg 增量同步器（施工单 2026-07-04 001 硬切换后）。
 //
-// 设计缘由（施工单 2026-07-03 001 §5.2 / §7.3 / §7.5）：
-//   - 每个本地收件目标保存自己的 `lastSyncedMessageId`。
-//   - 重连后 / 收到推送后 / 手动刷新后，按游标增量从 HubMsg `message.list`
-//     拉取新消息，按 messageId 去重写本地库。
-//   - 同步是平台内部行为，app / plugin 无感知。
-//   - 失败就失败：靠下次重连 / 下次推送 / 下次手动刷新继续；**不**抛错反
-//     向阻塞推送分发，不引入额外 replay 队列。
-//   - HubMsg 已删的旧消息不影响本地已写入的副本（施工单 §7.5）。
+// 设计缘由：
+//   - 每个本地收件目标保存自己的 `lastSyncedMessageId`；
+//   - 重连后 / 收到推送后 / 手动刷新后，按游标增量从 active provider
+//     拉取新消息，按 messageId 去重写本地库；
+//   - 同步是平台内部行为，app / plugin 无感知；
+//   - 失败就失败：靠下次重连 / 下次推送 / 下次手动刷新继续；**不**抛错
+//     反向阻塞推送分发，不引入额外 replay 队列；
+//   - provider 已删的旧消息不影响本地已写入的副本（施工单 §7.5）；
+//   - **不**再调用 wire 字符串方法 `request("message.list", ...)` ——
+//     走 typed `MessageProviderOperations.listMessages(...)`；wire 翻译
+//     完全由 provider 内部负责。
 
-import type { AppMsgMessage } from "@keymaster/contracts";
-import type { HubMsgConnectionLike, HubMsgMessageRecord } from "./hubmsgConnection.js";
+import type {
+  AppMsgMessage,
+  MessageProviderOperations,
+  ProviderListInput,
+  ProviderListResult
+} from "@keymaster/contracts";
 import type { AppMsgLocalDbOps } from "./appmsgDb.js";
-
-/**
- * 把 HubMsg wire `HubMsgMessageRecord` 转成公开 `AppMsgMessage`。
- */
-function recordToPublicMessage(rec: HubMsgMessageRecord): AppMsgMessage {
-  const sOrigin = rec.senderEndpoint.kind === "origin" ? rec.senderEndpoint.id : undefined;
-  const sAppId = rec.senderEndpoint.kind === "plugin" ? rec.senderEndpoint.id : undefined;
-  const rOrigin = rec.recipientEndpoint.kind === "origin" ? rec.recipientEndpoint.id : undefined;
-  const rAppId = rec.recipientEndpoint.kind === "plugin" ? rec.recipientEndpoint.id : undefined;
-  const out: AppMsgMessage = {
-    messageId: rec.messageId,
-    clientMessageId: rec.clientMessageId,
-    senderPublicKeyHex: rec.senderOwnerPublicKeyHex,
-    recipientPublicKeyHex: rec.recipientOwnerPublicKeyHex,
-    contentType: rec.contentType,
-    body: rec.body,
-    createdAtMs: rec.createdAtMs,
-    insertedAtMs: rec.insertedAtMs
-  };
-  if (sOrigin) out.senderOrigin = sOrigin;
-  else if (sAppId) out.senderAppId = sAppId;
-  if (rOrigin) out.recipientOrigin = rOrigin;
-  else if (rAppId) out.recipientAppId = rAppId;
-  return out;
-}
 
 export interface AppMsgSyncOutcome {
   /** 本次增量同步写入了多少条新消息到本地库。 */
@@ -65,22 +47,24 @@ function baseTargetState(targetKey: string) {
 /**
  * 一次单 scope 增量同步。
  *
- * 流程见施工单 §5.2：
- *   1. 从本地库读出 lastSyncedMessageId 作为 cursor（无则 `""`）。
+ * 流程（施工单 2026-07-04 001 后）：
+ *   1. 从本地库读出 `(providerId, targetKey)` 复合键的 lastSyncedMessageId
+ *      作为 cursor（无则 `""`）。
  *   2. 写 `lastSyncStartedAtMs = now` 到 targets。
- *   3. 调 HubMsg `message.list`（scope = owner+endpoint，afterMessageId = cursor）。
- *   4. 把 items 按 messageId 去重（write 自身就是幂等的，但不去重会增加
- *      写开销；这里仅做数量统计）后 put 到本地库。
- *   5. 更新 target 的 `lastSyncedMessageId` 为本次 items 中最大 messageId；
- *      同时写 `lastSyncCompletedAtMs` / `lastSyncError`。
+ *   3. 调 `providerOperations.listMessages({ownerPublicKeyHex,
+ *      scopeEndpoint, afterMessageId, limit})`。
+ *   4. 把 items 按 messageId 去重后 put 到本地库（带 providerId）。
+ *   5. 更新 target 的 `lastSyncedMessageId` 为本次 items 中最大
+ *      messageId；同时写 `lastSyncCompletedAtMs` / `lastSyncError`。
  *
  * 任何一步失败：
  *   - 把 err 写到 `lastSyncError`；
  *   - `ok = false`，**不**抛错。
  */
 export async function syncOneScope(input: {
-  conn: HubMsgConnectionLike | null;
+  handle: MessageProviderOperations | null;
   ops: AppMsgLocalDbOps | null;
+  providerId: string;
   ownerPublicKeyHex: string;
   scopeEndpoint: { kind: "origin" | "plugin"; id: string };
   targetKey: string;
@@ -91,9 +75,9 @@ export async function syncOneScope(input: {
   if (input.ops) {
     try {
       const prev =
-        (await input.ops.getTargetState(input.targetKey)) ??
+        (await input.ops.getTargetState(input.providerId, input.targetKey)) ??
         baseTargetState(input.targetKey);
-      await input.ops.putTargetState({
+      await input.ops.putTargetState(input.providerId, {
         ...prev,
         lastSyncStartedAtMs: startedAt
       });
@@ -102,31 +86,29 @@ export async function syncOneScope(input: {
     }
   }
 
-  if (!input.conn || !input.ops) {
-    return fail(input.ops, input.targetKey, startedAt, "no connection or local db");
+  if (!input.handle || !input.ops) {
+    return fail(
+      input.ops,
+      input.providerId,
+      input.targetKey,
+      startedAt,
+      "no connection or local db"
+    );
   }
 
-  let res: { items?: HubMsgMessageRecord[] };
+  let res: ProviderListResult;
   try {
-    res = await input.conn.request<
-      {
-        scopeEndpoint: { kind: "origin" | "plugin"; id: string };
-        scopeOwnerPublicKeyHex: string;
-        afterMessageId: string;
-        limit: number;
-        box: "all";
-      },
-      { items?: HubMsgMessageRecord[] }
-    >("message.list", {
+    const listInput: ProviderListInput = {
+      ownerPublicKeyHex: input.ownerPublicKeyHex,
       scopeEndpoint: input.scopeEndpoint,
-      scopeOwnerPublicKeyHex: input.ownerPublicKeyHex,
       afterMessageId: input.cursorMessageId,
-      limit: input.pageLimit ?? 100,
-      box: "all"
-    });
+      limit: input.pageLimit ?? 100
+    };
+    res = await input.handle.listMessages(listInput);
   } catch (err) {
     return fail(
       input.ops,
+      input.providerId,
       input.targetKey,
       startedAt,
       err instanceof Error ? err.message : String(err)
@@ -134,7 +116,13 @@ export async function syncOneScope(input: {
   }
   const items = res?.items ?? [];
   if (items.length === 0) {
-    await okIdle(input.ops, input.targetKey, startedAt, input.cursorMessageId);
+    await okIdle(
+      input.ops,
+      input.providerId,
+      input.targetKey,
+      startedAt,
+      input.cursorMessageId
+    );
     return {
       written: 0,
       newCursorMessageId: input.cursorMessageId,
@@ -150,16 +138,18 @@ export async function syncOneScope(input: {
     if (!item?.messageId) continue;
     if (seen.has(item.messageId)) continue;
     seen.add(item.messageId);
-    toWrite.push(recordToPublicMessage(item));
+    toWrite.push(item);
     if (item.messageId > maxMessageId) maxMessageId = item.messageId;
   }
-  // 写入前先**用本地 DB 的 target 维度去重**——同一 message 已经在 DB
-  // 命中 targetId 时本次跳过，避免"重复 cover"表面写入。
+  // 写入前先**用本地 DB 的 (providerId, targetId) 维度去重**——同一
+  // message 已经在 DB 命中 targetId 时本次跳过，避免"重复 cover"表面
+  // 写入。
   const filtered: AppMsgMessage[] = [];
   for (const m of toWrite) {
     let skip = false;
     try {
       const existing = await input.ops.getMessageForTarget({
+        providerId: input.providerId,
         messageId: m.messageId,
         targetId: input.targetKey
       });
@@ -171,10 +161,11 @@ export async function syncOneScope(input: {
   }
   let written = 0;
   try {
-    written = await input.ops.putMessages(filtered);
+    written = await input.ops.putMessages(input.providerId, filtered);
   } catch (err) {
     return fail(
       input.ops,
+      input.providerId,
       input.targetKey,
       startedAt,
       err instanceof Error ? err.message : String(err)
@@ -182,9 +173,9 @@ export async function syncOneScope(input: {
   }
   try {
     const prev =
-      (await input.ops.getTargetState(input.targetKey)) ??
+      (await input.ops.getTargetState(input.providerId, input.targetKey)) ??
       baseTargetState(input.targetKey);
-    await input.ops.putTargetState({
+    await input.ops.putTargetState(input.providerId, {
       ...prev,
       lastSyncedMessageId: maxMessageId,
       lastSyncStartedAtMs: startedAt,
@@ -204,14 +195,17 @@ export async function syncOneScope(input: {
 
 async function okIdle(
   ops: AppMsgLocalDbOps | null,
+  providerId: string,
   targetKey: string,
   startedAt: number,
   cursor: string
 ): Promise<void> {
   if (!ops) return;
   try {
-    const prev = (await ops.getTargetState(targetKey)) ?? baseTargetState(targetKey);
-    await ops.putTargetState({
+    const prev =
+      (await ops.getTargetState(providerId, targetKey)) ??
+      baseTargetState(targetKey);
+    await ops.putTargetState(providerId, {
       ...prev,
       lastSyncedMessageId: prev.lastSyncedMessageId || cursor,
       lastSyncStartedAtMs: startedAt,
@@ -225,14 +219,17 @@ async function okIdle(
 
 async function fail(
   ops: AppMsgLocalDbOps | null,
+  providerId: string,
   targetKey: string,
   startedAt: number,
   err: string
 ): Promise<AppMsgSyncOutcome> {
   if (ops) {
     try {
-      const prev = (await ops.getTargetState(targetKey)) ?? baseTargetState(targetKey);
-      await ops.putTargetState({
+      const prev =
+        (await ops.getTargetState(providerId, targetKey)) ??
+        baseTargetState(targetKey);
+      await ops.putTargetState(providerId, {
         ...prev,
         lastSyncStartedAtMs: startedAt,
         lastSyncCompletedAtMs: Date.now(),
@@ -247,10 +244,13 @@ async function fail(
 
 /**
  * 全量一次同步：把所有已知 scopeEndpoint 都同步一次。
+ *
+ * cursor key = `(providerId, targetKey)`——切 provider 后 cursor 不串。
  */
 export async function syncAllScopes(input: {
-  conn: HubMsgConnectionLike | null;
+  handle: MessageProviderOperations | null;
   ops: AppMsgLocalDbOps | null;
+  providerId: string;
   ownerPublicKeyHex: string;
   scopeEndpoints: Array<{ kind: "origin" | "plugin"; id: string }>;
   pageLimit?: number;
@@ -263,8 +263,9 @@ export async function syncAllScopes(input: {
     const cursor = await input.loadCursor(targetKey).catch(() => "");
     out.push(
       await syncOneScope({
-        conn: input.conn,
+        handle: input.handle,
         ops: input.ops,
+        providerId: input.providerId,
         ownerPublicKeyHex: input.ownerPublicKeyHex,
         scopeEndpoint: ep,
         targetKey,

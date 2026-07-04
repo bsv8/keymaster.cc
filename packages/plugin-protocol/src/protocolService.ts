@@ -77,7 +77,6 @@ import {
   type AppMsgSendResult,
   type AppMsgMessage,
   type AppMsgContentType,
-  type AppMsgSimpleClient,
   type AppViewContext,
   type BinaryField,
   type CipherDecryptParams,
@@ -4333,20 +4332,25 @@ export class ProtocolServiceImpl implements ProtocolService {
     const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
 
-    // 构造一个 sender 已绑定的对外 `AppMsgSimpleClient`，由它在内部
-    // 完成 owner / endpoint 投影。
-    const scoped = core.createMessageScopedClient({
-      senderPublicKeyHex: projected.senderPublicKeyHex,
-      senderOrigin: projected.senderOrigin
-    });
-    const res = await scoped.sendMessage({
-      recipientPublicKeyHex: params.recipientPublicKeyHex,
-      recipientOrigin: hasOrigin ? (params.recipientOrigin as string) : undefined,
-      recipientAppId: hasAppId ? (params.recipientAppId as string) : undefined,
-      contentType: params.contentType as AppMsgContentType,
-      body: params.body,
-      clientMessageId: params.clientMessageId,
-      createdAtMs: params.createdAtMs
+    // 硬切换 2026-07-04 001 高优 4：plugin-protocol 是**系统特殊方**，
+    // 通过 `appmsg.core` 的系统内部入口 `sendAsOrigin` 直接以 caller
+    // origin 身份发消息——**不**走 endpoint service（endpoint service
+    // 是给业务页用的稳定长寿抽象；popup 协议层每条 request 一次性的
+    // origin sender 投影**不**适合这种抽象）。
+    //
+    // send 路径与 subscribe 路径（`subscribeUnfilteredMessages`）
+    // 同属"系统特殊方特权"——保持口径一致。
+    const res = await core.sendAsOrigin({
+      origin: projected.senderOrigin ?? "",
+      sendInput: {
+        recipientPublicKeyHex: params.recipientPublicKeyHex,
+        recipientOrigin: hasOrigin ? (params.recipientOrigin as string) : undefined,
+        recipientAppId: hasAppId ? (params.recipientAppId as string) : undefined,
+        contentType: params.contentType as AppMsgContentType,
+        body: params.body,
+        clientMessageId: params.clientMessageId,
+        createdAtMs: params.createdAtMs
+      }
     });
     void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
     return res;
@@ -4360,13 +4364,14 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
     const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
-    const scoped = core.createMessageScopedClient({
-      senderPublicKeyHex: projected.senderPublicKeyHex,
-      senderOrigin: projected.senderOrigin
-    });
-    const res = await scoped.listMessages({
-      afterMessageId: params.afterMessageId,
-      limit: params.limit
+    // 硬切换 2026-07-04 001 高优 4：与 send 路径口径一致——通过
+    // `appmsg.core.listAsOrigin` 系统内部入口。
+    const res = await core.listAsOrigin({
+      origin: projected.senderOrigin ?? "",
+      listInput: {
+        afterMessageId: params.afterMessageId,
+        limit: params.limit
+      }
     });
     void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
     return res;
@@ -4383,11 +4388,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     const projected = await this.projectAppMsgSender(rec);
     const core = this.deps.appMsgCore as AppMsgCore;
-    const scoped = core.createMessageScopedClient({
-      senderPublicKeyHex: projected.senderPublicKeyHex,
-      senderOrigin: projected.senderOrigin
+    // 硬切换 2026-07-04 001 高优 4：与 send/list 路径口径一致——通过
+    // `appmsg.core.getAsOrigin` 系统内部入口。
+    const msg = await core.getAsOrigin({
+      origin: projected.senderOrigin ?? "",
+      getInput: { messageId: params.messageId }
     });
-    const msg = await scoped.getMessage({ messageId: params.messageId });
     if (!msg) {
       throw localFailure("internal_error", "appmsg.get: message not found");
     }

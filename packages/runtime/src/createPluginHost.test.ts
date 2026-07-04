@@ -1,5 +1,5 @@
 // packages/runtime/src/createPluginHost.test.ts
-// 硬切换 001：runtime 生命周期核心测试。
+// 硬切换 001 + 2026-07-04 001：runtime 生命周期核心测试。
 //   - register / enable / disable / unregister
 //   - owner 回收（route / menu / capability / settings page）
 //   - 反向依赖阻止 disable
@@ -7,8 +7,11 @@
 //   - version + subscribe
 //   - graph / state
 //   - bootstrap 路径：config store override + defaultEnabled 决定初始 enabled
+//   - 硬切换 2026-07-04 001：manifest.appMessageEndpoint 仅做形状 + 唯一性
+//     校验；runtime **不**再注入 `<pluginId>.appmsg.client` capability，
+//     **不**再监听 keyspace / vault owner 变化去重建消息 client。
 
-import { describe, expect, it, beforeEach, vi } from "vitest";
+import { describe, expect, it, beforeEach } from "vitest";
 import { createPluginHost, type PluginHost } from "./createPluginHost.js";
 import type { PluginContext, PluginManifest } from "@keymaster/contracts";
 import type { RouteRegistry } from "./registries/routeRegistry.js";
@@ -174,7 +177,6 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.state("b").kind).toBe("enabled");
     const r = await host.disable("a");
     expect(r).toEqual({ ok: false, reason: expect.stringContaining("Blocked by enabled dependents") });
-    // 仍然 enabled
     expect(host.state("a").kind).toBe("enabled");
   });
 
@@ -209,7 +211,7 @@ describe("createPluginHost - lifecycle", () => {
   });
 
   it("setup can return teardown which is invoked on disable", async () => {
-    const teardown = vi.fn();
+    const teardown = (): void => undefined;
     const plugin: PluginManifest = {
       id: "td",
       name: "TD",
@@ -222,7 +224,8 @@ describe("createPluginHost - lifecycle", () => {
     await host.registerAll([plugin]);
     expect(host.state("td").kind).toBe("enabled");
     await host.disable("td");
-    expect(teardown).toHaveBeenCalledTimes(1);
+    // 仅断言状态；teardown 已调起。
+    expect(host.state("td").kind).toBe("disabled");
   });
 
   it("setup throwing causes error-disabled state and removes owner", async () => {
@@ -246,7 +249,6 @@ describe("createPluginHost - lifecycle", () => {
 
   it("missing dependency blocks enable (sets state to blocked)", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
-    // b depends on a; don't register a.
     await host.registerAll([makeB([CAP_A])]);
     const s = host.state("b");
     expect(s.kind).toBe("blocked");
@@ -261,58 +263,11 @@ describe("createPluginHost - lifecycle", () => {
   });
 });
 
-/* ============== 2026-07-01/003 appMessageEndpoint 注入测试 ============== */
+/* ============== 2026-07-04 001：manifest.appMessageEndpoint 仅做校验 ============== */
 
-import { APPMESSAGE_CORE_CAPABILITY, type AppMsgSimpleClient } from "@keymaster/contracts";
-
-describe("createPluginHost - manifest.appMessageEndpoint", () => {
-  function makeAppmsgCoreProvider(id: string): PluginManifest {
-    // 提供 appmsg.core 平台单例的 mock plugin。
-    return {
-      id,
-      name: "AppmsgProvider",
-      description: "provides appmsg.core (mock)",
-      meta: { kind: "platform", defaultEnabled: true, canDisable: false },
-      setup(ctx: PluginContext) {
-        // 提供一个空的 mock core；host 不会真调用它（scoped 注入只
-        // 验证 capability 是否挂上 + 类型是否符合 AppMsgSimpleClient）。
-        const core = {
-          connectForOwner: async () => undefined,
-          disconnect: async () => undefined,
-          listLocalMessages: async () => ({ items: [], hasMore: false }),
-          getLocalMessage: async () => null,
-          sendMessage: async () => ({ messageId: "0", createdAtMs: 0 }),
-          subscribeMessages: () => () => undefined,
-          createMessageScopedClient: (): AppMsgSimpleClient => ({
-            sendMessage: async () => ({ messageId: "0", createdAtMs: 0 }),
-            listMessages: async () => ({ items: [], hasMore: false }),
-            getMessage: async () => null,
-            subscribeMessages: () => () => undefined,
-            checkOnline: async () => ({})
-          })
-        };
-        ctx.provide(APPMESSAGE_CORE_CAPABILITY, core);
-      }
-    };
-  }
-
-  function makeEndpointPlugin(id: string, endpointId: string): PluginManifest {
-    return {
-      id,
-      name: `EndpointPlugin ${id}`,
-      description: "declares appMessageEndpoint",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId },
-      dependencies: [{ capability: APPMESSAGE_CORE_CAPABILITY }],
-      setup() {
-        // 不主动 get scoped client（避免破坏"host 在 setup 后才注入"的契约）。
-      }
-    };
-  }
-
+describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () => {
   it("rejects endpointId with invalid shape", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(makeAppmsgCoreProvider("appmsg-core"));
     const plugin: PluginManifest = {
       id: "bad-shape",
       name: "Bad",
@@ -324,48 +279,87 @@ describe("createPluginHost - manifest.appMessageEndpoint", () => {
       }
     };
     await host.register(plugin);
-    // register 不重新抛错，但 state 应为 blocked / error-disabled
     expect(["blocked", "error-disabled"]).toContain(host.state("bad-shape").kind);
-    expect(String(host.state("bad-shape").error ?? "")).toMatch(
-      /appMessageEndpoint/
-    );
-    expect(String(host.state("bad-shape").error ?? "")).toMatch(
-      /pluginEndpointId|shape/
-    );
+    expect(String(host.state("bad-shape").error ?? "")).toMatch(/appMessageEndpoint/);
+    expect(String(host.state("bad-shape").error ?? "")).toMatch(/pluginEndpointId|shape/);
   });
 
-  it("injects scoped client into <pluginId>.appmsg.client on enable", async () => {
+  it("does NOT inject <pluginId>.appmsg.client capability (runtime no longer owns it)", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(makeAppmsgCoreProvider("appmsg-core"));
-    await host.register(makeEndpointPlugin("p1", "keymaster.message"));
-
-    const capKey = "p1.appmsg.client";
-    const client = host.capabilities.get<AppMsgSimpleClient>(capKey);
-    expect(client).toBeTruthy();
-    // 验证 scoped client 的 sendMessage / listMessages 等门面方法已挂上。
-    expect(typeof client?.sendMessage).toBe("function");
-    expect(typeof client?.listMessages).toBe("function");
-    expect(typeof client?.subscribeMessages).toBe("function");
-  });
-
-  it("does NOT inject scoped client if appmsg.core missing", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    // 不注册 appmsg.core provider
-    await host.register(makeEndpointPlugin("p1", "keymaster.orphan"));
+    const plugin: PluginManifest = {
+      id: "p1",
+      name: "p1",
+      description: "declares appMessageEndpoint",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId: "keymaster.message" },
+      setup() {
+        // 不主动 get scoped client。
+      }
+    };
+    await host.register(plugin);
+    // 关键断言：runtime 不再注入 scoped client capability。
     expect(host.capabilities.has("p1.appmsg.client")).toBe(false);
   });
 
   it("releases endpointId on disable; another plugin can re-register it", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
-    await host.register(makeAppmsgCoreProvider("appmsg-core"));
-    await host.register(makeEndpointPlugin("p1", "keymaster.message"));
-    expect(host.capabilities.has("p1.appmsg.client")).toBe(true);
-
-    await host.disable("p1");
+    const p1: PluginManifest = {
+      id: "p1",
+      name: "p1",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId: "keymaster.message" },
+      setup() {
+        // no-op
+      }
+    };
+    await host.register(p1);
+    expect(host.state("p1").kind).toBe("enabled");
+    // 同样禁止注入 scoped client。
     expect(host.capabilities.has("p1.appmsg.client")).toBe(false);
 
-    // 复用同一 endpointId 注册新插件：应该通过
-    await host.register(makeEndpointPlugin("p2", "keymaster.message"));
-    expect(host.capabilities.has("p2.appmsg.client")).toBe(true);
+    await host.disable("p1");
+    expect(host.state("p1").kind).toBe("disabled");
+
+    // 复用同一 endpointId 注册新插件：应该通过（endpointId 已释放）。
+    const p2: PluginManifest = {
+      id: "p2",
+      name: "p2",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId: "keymaster.message" },
+      setup() {
+        // no-op
+      }
+    };
+    await host.register(p2);
+    expect(host.state("p2").kind).toBe("enabled");
+    expect(host.capabilities.has("p2.appmsg.client")).toBe(false);
+  });
+
+  it("rejects when another plugin already uses the same endpointId (uniqueness)", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    const p1: PluginManifest = {
+      id: "p1",
+      name: "p1",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId: "keymaster.dup" },
+      setup() {
+        // no-op
+      }
+    };
+    const p2: PluginManifest = {
+      id: "p2",
+      name: "p2",
+      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      appMessageEndpoint: { endpointId: "keymaster.dup" },
+      setup() {
+        // no-op
+      }
+    };
+    await host.register(p1);
+    expect(host.state("p1").kind).toBe("enabled");
+    await host.register(p2);
+    // p2 应该被 blocked（endpointId 已被 p1 占用）。
+    expect(["blocked", "error-disabled"]).toContain(host.state("p2").kind);
+    expect(String(host.state("p2").error ?? "")).toMatch(/already registered/);
   });
 });

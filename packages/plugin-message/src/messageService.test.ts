@@ -1,18 +1,17 @@
 // packages/plugin-message/src/messageService.test.ts
-// 消息业务 service 单测（施工单 2026-07-03 002 硬切换）。
+// 消息业务 service 单测（施工单 2026-07-04 001 硬切换）。
 //
 // 验证：
 //   - 4 个最小方法（listMessages / getMessage / sendTextMessage /
-//     subscribeMessages）按预期走 scoped client；
-//   - scoped client 不存在时降级空态；
+//     subscribeMessages）直接转发到稳定长寿 endpoint service；
 //   - sendTextMessage 固定带 `recipientAppId = keymaster.message`；
-//   - 不再使用 `createSystemMessageClient(...)` / `listUnfilteredMessages`。
+//   - 不再使用 `subscriptionSource` / `createSystemMessageClient` 旧接口。
 
 import { describe, expect, it, vi } from "vitest";
 import type {
+  AppMsgEndpointService,
   AppMsgMessage,
-  AppMsgOnlineResult,
-  AppMsgSimpleClient
+  AppMsgOnlineResult
 } from "@keymaster/contracts";
 import { createMessageService } from "./messageService.js";
 
@@ -34,12 +33,14 @@ function fakeMsg(overrides: Partial<AppMsgMessage> = {}): AppMsgMessage {
   };
 }
 
-function makeFakeClient(): {
-  client: AppMsgSimpleClient;
+function makeFakeEndpointService(): {
+  service: AppMsgEndpointService;
   calls: { method: string; args: unknown }[];
 } {
   const calls: { method: string; args: unknown }[] = [];
-  const client: AppMsgSimpleClient = {
+  const service: AppMsgEndpointService = {
+    endpoint: { kind: "plugin", id: "keymaster.message" },
+    isReady: () => true,
     sendMessage: vi.fn(async (args) => {
       calls.push({ method: "sendMessage", args });
       return { messageId: "m-sent", createdAtMs: Date.now() };
@@ -53,7 +54,10 @@ function makeFakeClient(): {
       return fakeMsg();
     }),
     subscribeMessages: vi.fn((handler) => {
-      calls.push({ method: "subscribeMessages", args: { handlerPresent: typeof handler === "function" } });
+      calls.push({
+        method: "subscribeMessages",
+        args: { handlerPresent: typeof handler === "function" }
+      });
       return () => undefined;
     }),
     checkOnline: vi.fn(async (hexes): Promise<AppMsgOnlineResult> => {
@@ -62,52 +66,51 @@ function makeFakeClient(): {
       return out;
     })
   };
-  return { client, calls };
+  return { service, calls };
 }
 
-describe("createMessageService (scoped client path)", () => {
-  it("isReady reports scoped client availability", () => {
-    const { client } = makeFakeClient();
-    const service = createMessageService(() => client);
-    expect(service.isReady()).toBe(true);
+describe("createMessageService (stable endpoint service)", () => {
+  it("isReady delegates to endpoint service", () => {
+    const { service } = makeFakeEndpointService();
+    const ms = createMessageService(service);
+    expect(ms.isReady()).toBe(true);
   });
 
-  it("isReady reports not-ready when scoped client is null", () => {
-    const service = createMessageService(() => null);
-    expect(service.isReady()).toBe(false);
+  it("isReady reflects endpoint service not-ready", () => {
+    const service: AppMsgEndpointService = {
+      endpoint: { kind: "plugin", id: "keymaster.message" },
+      isReady: () => false,
+      sendMessage: async () => ({ messageId: "", createdAtMs: 0 }),
+      listMessages: async () => ({ items: [], hasMore: false }),
+      getMessage: async () => null,
+      subscribeMessages: () => () => undefined,
+      checkOnline: async () => ({})
+    };
+    const ms = createMessageService(service);
+    expect(ms.isReady()).toBe(false);
   });
 
-  it("listMessages delegates to scoped client", async () => {
-    const { client, calls } = makeFakeClient();
-    const service = createMessageService(() => client);
-    const items = await service.listMessages({ limit: 50 });
+  it("listMessages delegates to endpoint service", async () => {
+    const { service, calls } = makeFakeEndpointService();
+    const ms = createMessageService(service);
+    const items = await ms.listMessages({ limit: 50 });
     expect(items.length).toBe(1);
     expect(calls.some((c) => c.method === "listMessages")).toBe(true);
   });
 
-  it("listMessages returns empty when scoped client is null", async () => {
-    const service = createMessageService(() => null);
-    await expect(service.listMessages()).resolves.toEqual([]);
-  });
-
-  it("getMessage delegates to scoped client", async () => {
-    const { client, calls } = makeFakeClient();
-    const service = createMessageService(() => client);
-    const got = await service.getMessage("42");
+  it("getMessage delegates to endpoint service", async () => {
+    const { service, calls } = makeFakeEndpointService();
+    const ms = createMessageService(service);
+    const got = await ms.getMessage("42");
     expect(got?.messageId).toBe("1");
     const lastGet = [...calls].reverse().find((c) => c.method === "getMessage");
     expect((lastGet?.args as { messageId: string }).messageId).toBe("42");
   });
 
-  it("getMessage returns null when scoped client is null", async () => {
-    const service = createMessageService(() => null);
-    await expect(service.getMessage("42")).resolves.toBeNull();
-  });
-
   it("sendTextMessage pins recipientAppId = keymaster.message", async () => {
-    const { client, calls } = makeFakeClient();
-    const service = createMessageService(() => client);
-    await service.sendTextMessage({
+    const { service, calls } = makeFakeEndpointService();
+    const ms = createMessageService(service);
+    await ms.sendTextMessage({
       recipientPublicKeyHex: "02bbbb".padEnd(66, "b"),
       body: "hello"
     });
@@ -122,26 +125,33 @@ describe("createMessageService (scoped client path)", () => {
     expect(args.body).toBe("hello");
   });
 
-  it("sendTextMessage throws when scoped client is null", async () => {
-    const service = createMessageService(() => null);
+  it("sendTextMessage propagates not_ready error from endpoint service", async () => {
+    const service: AppMsgEndpointService = {
+      endpoint: { kind: "plugin", id: "keymaster.message" },
+      isReady: () => false,
+      sendMessage: async () => {
+        throw new Error("not_ready: no current owner");
+      },
+      listMessages: async () => ({ items: [], hasMore: false }),
+      getMessage: async () => null,
+      subscribeMessages: () => () => undefined,
+      checkOnline: async () => ({})
+    };
+    const ms = createMessageService(service);
     await expect(
-      service.sendTextMessage({ recipientPublicKeyHex: OWNER, body: "x" })
-    ).rejects.toThrow(/not ready/);
+      ms.sendTextMessage({ recipientPublicKeyHex: OWNER, body: "x" })
+    ).rejects.toThrow(/not_ready/);
   });
 
-  it("subscribeMessages forwards handler to scoped client", () => {
-    const { client, calls } = makeFakeClient();
-    const service = createMessageService(() => client);
+  it("subscribeMessages forwards handler to endpoint service", () => {
+    const { service, calls } = makeFakeEndpointService();
+    const ms = createMessageService(service);
     const handler = vi.fn();
-    const off = service.subscribeMessages(handler);
+    const off = ms.subscribeMessages(handler);
     expect(typeof off).toBe("function");
     expect(calls.some((c) => c.method === "subscribeMessages")).toBe(true);
   });
 
-  it("subscribeMessages returns no-op cancel when scoped client is null", () => {
-    const service = createMessageService(() => null);
-    const off = service.subscribeMessages(() => undefined);
-    expect(typeof off).toBe("function");
-    expect(() => off()).not.toThrow();
-  });
+  // endpoint service 内部已自动迁移订阅；本 service **不**暴露
+  // subscriptionSource / subscription token。
 });

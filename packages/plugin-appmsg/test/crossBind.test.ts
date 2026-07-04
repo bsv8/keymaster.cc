@@ -24,7 +24,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { signCompactSecp256k1 } from "../src/signing.js";
+import { signCompactSecp256k1 } from "../src/signer.js";
 import { canonicalBindText } from "@keymaster/contracts";
 
 interface BindFixture {

@@ -1,41 +1,41 @@
 // packages/plugin-message/src/manifest.ts
-// 消息业务插件 manifest（施工单 2026-07-03 002 硬切换）。
+// 消息业务插件 manifest（施工单 2026-07-04 001 硬切换）。
 //
 // 设计缘由：
-//   - `plugin-message` 是一个**普通 scoped 消息插件**，
-//     appId = `keymaster.message`；它**不**再拥有"看全库" / "系统管理员
-//     身份"的特权；
-//   - 声明 `appMessageEndpoint.endpointId = "keymaster.message"` 后，
-//     runtime host 在 enable 阶段把 sender 已绑定的 scoped client
-//     注入到 `<pluginId>.appmsg.client` capability，本插件通过它读 / 发
-//     自己 scope 内的消息；
+//   - `plugin-message` 是一个**极薄业务插件**，appId = `keymaster.message`，
+//     **不**再感知 owner / provider / 任何 provider 细节；
+//   - **不**订阅 keyspace.onActiveChange / vault.onStatusChange；
+//   - **不**走 `<pluginId>.appmsg.client` 旧 capability（runtime 已经
+//     移除该注入路径）；
+//   - **不**通过 plugin-facade 透传 `subscriptionSource()` 这种"subscription
+//     token"——服务内部自动迁移订阅；
+//   - 在自己的 `setup` 阶段：
+//       * `ctx.get<...>("appmsg.endpoint.registry").forEndpoint(...)` 拿到
+//         稳定长寿的 `AppMsgEndpointService`；
+//       * `service` 内部已自动处理 owner / provider 变化；
+//       * 把 service 透传给 `createMessageService(service)` 作为公开
+//         `message.service` capability。
 //   - 页面路由固定归本插件：
 //       * `/messages`            —— 业务页（发送 / 搜索 / 列表）
 //       * `/messages/:messageId` —— 单条详情
-//     **不**再注册 `/system/messages` / 系统菜单 / 系统面包屑——HubMsg
-//     管理面归 `plugin-appmsg`。
-//   - HubMsg 连接 / 同步 / 在线 / 全局统计 / 错误信息由 `plugin-appmsg`
-//     的 `/system/hubmsg` 管理页直接消费 `appmsg.core` 展示，
-//     本插件**不**展示这些信息。
+//     **不**再注册 `/system/messages` / 系统菜单 / 系统面包屑——AppMsg
+//     管理面归 `plugin-appmsg` 的 `/system/appmsg`。
 
 import type {
+  AppMsgEndpointId,
+  AppMsgEndpointService,
+  AppMsgEndpointServiceRegistry,
   I18nPluginResources,
   PluginContext,
   PluginManifest
 } from "@keymaster/contracts";
-import { APPMESSAGE_CLIENT_CAPABILITY_SUFFIX, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
+import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 import { MessagePage } from "./MessagePage.js";
 import { MessageDetailPage } from "./MessageDetailPage.js";
 import { createMessageService } from "./messageService.js";
 
 /** 插件 id（与 keymaster.message 不一致；plugin manifest 仍唯一）。 */
 export const MESSAGE_PLUGIN_ID = "message";
-
-/**
- * scoped `appmsg.client` capability key（plugin 侧）。runtime host 在
- * enable 阶段把 sender 已绑定的 client 挂到 `<pluginId>.appmsg.client`。
- */
-const APPMESSAGE_CLIENT_CAPABILITY_SUFFIX_LOCAL = APPMESSAGE_CLIENT_CAPABILITY_SUFFIX;
 
 const messageResources: I18nPluginResources = {
   namespace: "message",
@@ -64,7 +64,7 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.meta.messageId": "Message id",
       "message.page.detail.meta.clientMessageId": "Client message id",
       "message.page.detail.empty": "Message not found in this scope.",
-      "message.page.noClient": "scoped appmsg.client is not available.",
+      "message.page.noClient": "appmsg.endpoint service is not available.",
       "message.page.back": "Back"
     },
     "zh-CN": {
@@ -91,10 +91,18 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.meta.messageId": "消息 id",
       "message.page.detail.meta.clientMessageId": "客户端消息 id",
       "message.page.detail.empty": "当前 scope 内未找到该消息。",
-      "message.page.noClient": "scoped appmsg.client 不可用。",
+      "message.page.noClient": "appmsg.endpoint service 不可用。",
       "message.page.back": "返回"
     }
   }
+};
+
+/**
+ * plugin-message 的固定 endpoint id。
+ */
+const PLUGIN_MESSAGE_ENDPOINT: AppMsgEndpointId = {
+  kind: "plugin",
+  id: KEYMASTER_MESSAGE_APP_ID
 };
 
 /**
@@ -112,11 +120,10 @@ export const messagePlatformPlugin: PluginManifest = {
     displayGroup: "platform"
   },
   i18n: messageResources,
-  keyScopedStorages: [], // 该插件不持久化自己的状态；只读 scoped client
+  keyScopedStorages: [], // 该插件不持久化自己的状态；只读 endpoint service
   /**
-   * 声明 endpointId = `keymaster.message` 后，runtime host 在 enable
-   * 完成时把 sender 已绑定 scoped client 注入到
-   * `message.appmsg.client` capability；本插件通过 `ctx.get(...)` 拿。
+   * 声明 endpointId = `keymaster.message`：runtime 仅做形状校验 +
+   * 唯一性校验；**不**注入任何 scoped client capability。
    *
    * `endpointId` 形状必须满足 `isValidPluginEndpointIdShape`——
    * "keymaster.message" 满足（a.b 形式 portable subset）。
@@ -126,6 +133,10 @@ export const messagePlatformPlugin: PluginManifest = {
     description: "keymaster.message business app"
   },
   dependencies: [
+    {
+      capability: APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
+      reason: "拿 endpoint service（plugin-appmsg 提供）"
+    },
     { capability: "route.registry", reason: "注册 /messages 与 /messages/:messageId 路由" },
     { capability: "menu.registry", reason: "注册「消息」菜单项" },
     {
@@ -134,16 +145,14 @@ export const messagePlatformPlugin: PluginManifest = {
     }
   ],
   setup(ctx) {
-    // scoped client capability key：runtime 在 enable 阶段已经把
-    // sender 投影固化的 client 挂到 `<pluginId>.appmsg.client`。
-    const scopedKey = `${MESSAGE_PLUGIN_ID}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX_LOCAL}`;
-    // 这里**不**在 setup 阶段强依赖 client：
-    //   - vault 锁定时 client 可能仍然挂在 cap bus 上（sender = ""）；
-    //   - 如果完全拿不到（runtime 没注入），service 走"未就绪"空态。
-    // 因此 setup 不 require，而是让页面按 capability 是否存在降级。
-    const service = createMessageService(() =>
-      ctx.has(scopedKey) ? ctx.get(scopedKey) : null
+    // 从 plugin-appmsg 的 endpoint registry 拿稳定长寿的 endpoint service。
+    // service 内部自动处理 owner 真值 / active provider 变化；
+    // plugin-message **不需要**监听 keyspace / vault / provider 任何事件。
+    const registry = ctx.get<AppMsgEndpointServiceRegistry>(
+      APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY
     );
+    const endpointService = registry.forEndpoint(PLUGIN_MESSAGE_ENDPOINT);
+    const service = createMessageService(endpointService);
     ctx.provide("message.service", service);
 
     const routes = ctx.get<{
@@ -202,7 +211,6 @@ export const messagePlatformPlugin: PluginManifest = {
       order: 5,
       icon: "Mail"
     });
-    // /messages 面包屑：固定节点。
     breadcrumbs.register({
       id: "message.page.crumbs",
       order: 4,
@@ -213,7 +221,8 @@ export const messagePlatformPlugin: PluginManifest = {
     });
 
     return () => {
-      // 不持有资源，无需清理。
+      // 释放 endpoint service；plugin-appmsg 回收内部订阅迁移资源。
+      registry.releaseEndpoint(PLUGIN_MESSAGE_ENDPOINT);
     };
   }
 };

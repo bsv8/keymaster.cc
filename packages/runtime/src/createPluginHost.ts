@@ -11,10 +11,17 @@
 //   - 新 plugin setup 可返回 teardown 函数（PluginTeardown）。
 //   - i18n 资源通过 pluginId 跟踪，unregisterResources(pluginId) 精确回收。
 //   - 当前 route 属于被 disable 的 plugin 时，host 会先调用 navigateTo 跳走。
+//
+// 硬切换 2026-07-04 001（施工单）：runtime 删除消息专用生命周期。
+//   - 不再监听 keyspace / vault owner 变化、不再注入
+//     `<pluginId>.appmsg.client` capability、不再调用
+//     `appmsg.core.createMessageScopedClient(...)`；
+//   - 业务消息的 owner / provider / endpoint service 迁移由
+//     plugin-appmsg 内部持有；
+//   - runtime 只保留通用装配能力：manifest 元数据校验、registry /
+//     capability 通用装配、endpoint shape 校验 + 唯一性校验。
 
 import type {
-  AppMsgCore,
-  AppMsgPluginClient,
   HostListener,
   I18nPluginResources,
   I18nService,
@@ -28,17 +35,16 @@ import type {
   PluginState,
   PluginStateKind,
   TopbarRegistry,
-  WocService
+  VaultService
 } from "@keymaster/contracts";
 import {
-  APPMESSAGE_CLIENT_CAPABILITY_SUFFIX,
-  APPMESSAGE_CORE_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
   RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT,
   isValidPluginEndpointIdShape
 } from "@keymaster/contracts";
+
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
 import { createMessageBus } from "./messageBus.js";
 import { createAssetRegistry, type AssetRegistry } from "./registries/assetRegistry.js";
@@ -64,22 +70,7 @@ import { emptyOwnership, type PluginOwnership } from "./pluginOwnership.js";
 const RUNTIME_MESSAGE_BUS = RUNTIME_MESSAGE_BUS_CONTRACT;
 const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
 
-/**
- * scoped `appmsg.client` capability 后缀（施工单 2026-07-01/003）。
- *
- * 注入规则：声明了 `manifest.appMessageEndpoint.endpointId` 的插件
- * 在 enable 完成后，host 把 scoped client 挂到
- * `<pluginId>.appmsg.client`。插件 `ctx.get("<pluginId>.appmsg.client")`
- * 拿到 sender 已绑定的 client；**不**暴露全局工厂 capability。
- *
- * 常量真值由 `@keymaster/contracts` 提供；这里仅 re-export 旧 import
- * 兼容使用点。
- */
-const APPMESSAGE_CLIENT_CAPABILITY_SUFFIX_LOCAL = APPMESSAGE_CLIENT_CAPABILITY_SUFFIX;
-
-/** 硬切换 002：runtime 系统日志统一使用的 pluginId。
- * 设计缘由：plugin-host 自身记日志时不伪装成业务插件；统一用 "runtime"
- * 让用户能一眼分辨"系统轨迹"和"业务插件轨迹"。 */
+/** 硬切换 002：runtime 系统日志统一使用的 pluginId。 */
 const RUNTIME_SYSTEM_PLUGIN_ID = "runtime";
 
 /** runtime messageBus capability key；重新导出以便 manifest 集中引用。 */
@@ -108,61 +99,31 @@ export interface PluginHost {
   configStore: PluginConfigStore;
 
   // ===== 查询 / 旧兼容 =====
-  /** 兼容旧 API：返回当前 enabled 的 plugin id 列表。 */
   installed(): string[];
-  /** 列出所有已知 manifest id。 */
   manifests(): string[];
-  /** 单个 plugin 当前状态。 */
   state(pluginId: string): PluginState;
-  /** 推导依赖图。 */
   graph(): PluginGraph;
-  /** 当前 host version（每次 enable / disable / unregister 递增）。 */
   version(): number;
-  /** 订阅 host 变化（version / state）。返回 unsubscribe。 */
   subscribe(listener: HostListener): () => void;
-  /** 取某 plugin 的 manifest（bootstrap 时注册的）。 */
   getManifest(pluginId: string): PluginManifest | undefined;
-  /** 反向依赖该 plugin 的启用中插件。 */
   reverseDeps(pluginId: string): PluginReverseDep[];
 
   // ===== 旧 register 流程 =====
-  /** 把 plugin manifest 加入"已知集合"，按 config store 决定是否自动 enable。 */
   register(plugin: PluginManifest): Promise<void>;
   registerAll(plugins: PluginManifest[]): Promise<void>;
   /** 注册一个 builtin capability（语义上等同于 plugin provide）。 */
   provide<T>(key: string, value: T): void;
 
   // ===== 新生命周期 =====
-  /** 启用一个已 registered 的 plugin。 */
   enable(pluginId: string): Promise<void>;
-  /**
-   * 禁用一个 plugin：调 teardown，回收 owner，反向依赖阻止策略。
-   * 失败原因：被其它 enabled 插件依赖 / canDisable=false / 当前 route 属于该 plugin。
-   */
   disable(pluginId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
-  /** 从 host 彻底移除（已 disabled 之后或强制）。 */
   unregister(pluginId: string): Promise<void>;
 }
 
 export interface CreatePluginHostOptions {
-  /**
-   * 启动前注入到 i18n service 的额外资源（apps/web 用）。
-   * 必须在 plugin 注册前可用；这里注入后再创建 host。
-   */
   initialI18nResources?: I18nPluginResources[];
-  /**
-   * 启动 i18n service 时是否打印缺 key warning。
-   * 默认 false（与 i18next 默认行为一致）。
-   */
   i18nDebug?: boolean;
-  /**
-   * 测试用：禁用 config store 写盘与 storage 事件订阅。
-   */
   disableConfigPersistence?: boolean;
-  /**
-   * 可选：覆盖"跳到安全页"的默认目标；默认 /settings/plugins。
-   * 用于在卸载前先把用户从目标 plugin 页面带离。
-   */
   safePath?: string;
 }
 
@@ -272,20 +233,11 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const collectibles = createCollectibleRegistry();
   const collectibleTransfer = createCollectibleTransferRegistry();
   const topbar = createTopbarRegistry();
-  // i18n service 必须在 plugin 注册前完成初始化：
-  //   - host 创建时立即 provide "i18n.service" capability；
-  //   - plugin setup 可能引用 plugin.i18n 资源对应的 i18n key，资源
-  //     必须在 setup 前可用，否则注册时回退到 fallback。
-  // 插件注册流程在 host.register 内强制为：依赖检查 -> 注册 plugin.i18n 资源 -> 执行 setup。
   const i18n = createI18nService({
     initialResources: options.initialI18nResources,
     debug: options.i18nDebug
   });
 
-  // 硬切换 002：log.service 也是 runtime 内建 capability。
-  //   - 必须在 plugin 注册前 provide，保证 ctx.logger 在 setup 内可用；
-  //   - 即便 plugin 自己的 setup 是异步的，ctx.logger 也是同步可拿的；
-  //   - service 内部写库失败不能反向阻断 plugin lifecycle。
   const logService: LogServiceHandle = createLogService();
 
   // 把内置 registry + messageBus + i18n + log 暴露成 capability。
@@ -300,17 +252,16 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<AssetRegistry>("asset.registry", assets);
   capabilities.provide<TokenRegistry>("token.registry", tokens);
   capabilities.provide<CollectibleRegistry>("collectible.registry", collectibles);
-  capabilities.provide<CollectibleTransferRegistry>("collectible-transfer.registry", collectibleTransfer);
+  capabilities.provide<CollectibleTransferRegistry>(
+    "collectible-transfer.registry",
+    collectibleTransfer
+  );
   capabilities.provide<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY, topbar);
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
   capabilities.provide<LogService>(LOG_SERVICE_CAPABILITY, logService);
 
-  // 硬切换 003：注入 route.registry 的 path 探测函数。
-  // settings.registry 在 register 时会调用这个 probe，避免同一 path 同时
-  // 由 settings.registry 与 route.registry 各注册一份导致双渲染真值。
-  // 用 byPath 而非 list + 精确比对，保证与 RouteRenderer 的"先 route 后
-  // settings"匹配顺序一致：若已经在 route.registry，settings.register 必须抛错。
+  // route.registry path 探测，避免 settings.registry 与 route.registry 双渲染。
   settings.setRoutePathProbe((path) => routes.byPath(path) !== undefined);
 
   const configStore = createPluginConfigStore({ readOnly: options.disableConfigPersistence });
@@ -319,11 +270,14 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const records = new Map<string, PluginRecord>();
   const enabledSet = new Set<string>();
   /**
-   * 已声明的 pluginEndpointId 集合（施工单 2026-07-01/003）。
+   * 已声明的 pluginEndpointId 集合。
    *
    * enable 阶段填：endpointId 形状合法 + 全局唯一才允许写入。
    * disable 阶段同步删除，避免"插件 disable 后还能 inject 一个
    * 同 id 的 plugin"导致的孤儿 endpoint 占用。
+   *
+   * 硬切换 2026-07-04 001：**不**再用于 runtime 注入 scoped client
+   * capability——只是用于形状 + 唯一性校验。
    */
   const appMessageEndpointIds = new Set<string>();
   let versionCounter = 0;
@@ -355,7 +309,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       has: (k) => capabilities.has(k),
       require: (k) => capabilities.require(k),
       messageBus,
-      // 硬切换 002：logger 已天然绑定当前 pluginId；插件作者禁止再传。
       logger: logService.forPlugin(record.manifest.id)
     };
   }
@@ -382,11 +335,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   function registerCapabilitiesFor(record: PluginRecord): void {
     for (const cap of record.manifest.meta?.providesCapabilities ?? []) {
       if (capabilities.has(cap)) {
-        // 已有（host 内置或同 plugin 之前已注册）：跳过
         continue;
       }
-      // 占位：plugin 在 setup 中通常会再 provide 覆盖；
-      // 我们不强制 require plugin 在 setup 之外也要 provide，留出"声明"语义。
     }
   }
 
@@ -399,9 +349,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         | (() => void | Promise<void>)
         | undefined;
     } catch (err) {
-      // 硬切换 001：setup 中途抛错时，**已经注册的资源**仍要被回收。
-      // 先做 post-snapshot（即使 throw 也会经过这里），diff 出来后保存，
-      // 然后再 re-throw，让上层（enable / register 入口）走错误处理。
       const after = snapshotOwnership();
       const diff = ownershipDiff(before, after);
       record.ownership = {
@@ -409,8 +356,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         ...diff,
         teardown: undefined
       };
-      // 硬切换 002：记系统日志（pluginId 固定 "runtime"，不伪装成业务插件）。
-      // 写库失败被 service 内部吞掉，不会反向影响 enable 主流程。
       logService.append({
         level: "error",
         pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
@@ -440,7 +385,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const pluginId of enabledSet) {
       const r = records.get(pluginId);
       if (!r) continue;
-      // 业务路由：owner 拥有的 route ids 中的 path 必须能命中当前路径。
       const routeIds = r.ownership.routes;
       for (const rid of routeIds) {
         const route = routes.byId(rid);
@@ -449,9 +393,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           return pluginId;
         }
       }
-      // 设置详情页（硬切换 003）：settings.registry 的 path 是设置详情页的真值；
-      // 用户停留在 /settings/<plugin> 时，宿主必须能识别"当前页面属于该插件"，
-      // 才能在 disable 时先跳离到安全页，避免渲染崩溃。
       for (const sid of r.ownership.settingsRoutes) {
         const settingsRoute = settings.byId(sid);
         if (!settingsRoute) continue;
@@ -463,7 +404,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     return undefined;
   }
 
-  // simple prefix matcher for routes that include ":param"
   function matchPath(pattern: string, path: string): boolean {
     if (!pattern.includes(":")) return pattern === path;
     const patternParts = pattern.split("/");
@@ -487,9 +427,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   }
 
   function purgeOwnership(ownership: PluginOwnership): void {
-    // 顺序：先注销"展示层"（route / menu / home / settings / breadcrumb / topbar），
-    // 再注销 service 层（command / importer / transfer / asset），最后 revoke capability。
-    // 即便某步抛错，宿主继续走完清理。
     const errors: unknown[] = [];
     function safe(fn: () => void, name: string) {
       try {
@@ -502,15 +439,21 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const id of ownership.routes) safe(() => routes.unregister(id), `route:${id}`);
     for (const id of ownership.menus) safe(() => menus.unregister(id), `menu:${id}`);
     for (const id of ownership.homeWidgets) safe(() => home.unregister(id), `home:${id}`);
-    for (const id of ownership.settingsRoutes) safe(() => settings.unregister(id), `settingsRoute:${id}`);
-    for (const id of ownership.breadcrumbs) safe(() => breadcrumbs.unregister(id), `breadcrumb:${id}`);
+    for (const id of ownership.settingsRoutes)
+      safe(() => settings.unregister(id), `settingsRoute:${id}`);
+    for (const id of ownership.breadcrumbs)
+      safe(() => breadcrumbs.unregister(id), `breadcrumb:${id}`);
     for (const id of ownership.commands) safe(() => commands.unregister(id), `command:${id}`);
     for (const id of ownership.importers) safe(() => importers.unregister(id), `importer:${id}`);
-    for (const id of ownership.transferProviders) safe(() => transfers.unregister(id), `transfer:${id}`);
-    for (const id of ownership.assetProviders) safe(() => assets.unregister(id), `asset:${id}`);
+    for (const id of ownership.transferProviders)
+      safe(() => transfers.unregister(id), `transfer:${id}`);
+    for (const id of ownership.assetProviders)
+      safe(() => assets.unregister(id), `asset:${id}`);
     for (const id of ownership.tokenProviders) safe(() => tokens.unregister(id), `token:${id}`);
-    for (const id of ownership.collectibleProviders) safe(() => collectibles.unregister(id), `collectible:${id}`);
-    for (const id of ownership.collectibleTransferHandlers) safe(() => collectibleTransfer.unregister(id), `collectibleTransfer:${id}`);
+    for (const id of ownership.collectibleProviders)
+      safe(() => collectibles.unregister(id), `collectible:${id}`);
+    for (const id of ownership.collectibleTransferHandlers)
+      safe(() => collectibleTransfer.unregister(id), `collectibleTransfer:${id}`);
     for (const cap of ownership.capabilities) safe(() => capabilities.revoke(cap), `capability:${cap}`);
     if (errors.length > 0) {
       // eslint-disable-next-line no-console
@@ -578,11 +521,12 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
 
     provide(key, value) {
       capabilities.provide(key, value);
+      // 硬切换 2026-07-04 001：不再因 vault / keyspace 注入触发
+      // scoped client 刷新——runtime 已不持有消息业务生命周期。
     },
 
     async register(plugin) {
       if (knownManifests.has(plugin.id)) {
-        // 重复 register：覆盖 manifest 但不重新触发 setup；调用方应使用 enable/disable。
         knownManifests.set(plugin.id, plugin);
         return;
       }
@@ -592,7 +536,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         state: defaultStateFor(plugin),
         ownership: emptyOwnership()
       });
-      // 根据 config store 决定初始 enabled。
       const snapshot = configStore.read();
       let shouldEnable: boolean;
       if (plugin.id in snapshot) {
@@ -606,8 +549,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         } catch (err) {
           const r = records.get(plugin.id);
           if (r) {
-            // enable 内部已把 state 设为 "blocked"（依赖缺失）或保持 enabled。
-            // 这里只在非 blocked 时降级为 error-disabled。
             const msg = err instanceof Error ? err.message : String(err);
             r.error = msg;
             if (r.state !== "blocked") {
@@ -630,7 +571,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         throw new Error(`Plugin "${pluginId}" is not registered`);
       }
       if (record.state === "enabled") return;
-      // 依赖检查：依赖的 capability 必须都已存在（由其它 enabled plugin 或 host builtin 提供）
       for (const dep of record.manifest.dependencies ?? []) {
         if (!capabilities.has(dep.capability)) {
           record.state = "blocked";
@@ -639,10 +579,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           );
         }
       }
-      // 施工单 2026-07-01/003 对齐：manifest.appMessageEndpoint 校验
-      //   1) endpointId 形状合法（`isValidPluginEndpointIdShape`）；
-      //   2) endpointId 全局唯一（同 Keymaster 安装内不允许冲突）；
-      //   校验失败一律 fail-closed：不缓存半残 endpoint 记录、不让 setup 继续。
+      // 硬切换 2026-07-04 001：manifest.appMessageEndpoint 仅做形状 +
+      // 唯一性校验；**不**注入任何 scoped client capability。
       const appMsgEp = record.manifest.appMessageEndpoint;
       if (appMsgEp) {
         if (!isValidPluginEndpointIdShape(appMsgEp.endpointId)) {
@@ -659,17 +597,13 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         }
         appMessageEndpointIds.add(appMsgEp.endpointId);
       }
-      // 注册 i18n 资源（幂等；i18n service 内部按 pluginId 跟踪）
       if (record.manifest.i18n) {
         i18n.registerResources(record.manifest.id, record.manifest.i18n);
       }
-      // 标记 enabled 在 setup 之前——内部 enable 顺序内的 capability 引用（同一个 plugin
-      // 内部的 provide + get）允许出现在 setup 期间。
       enabledSet.add(pluginId);
       registerCapabilitiesFor(record);
       try {
         await runSetup(record);
-        // 装载 keyspace storage 声明
         if (record.manifest.keyScopedStorages && record.manifest.keyScopedStorages.length > 0) {
           if (capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) {
             const keyspace = capabilities.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
@@ -681,43 +615,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
             }
           }
         }
-        // 施工单 2026-07-03 001 硬切换：setup 完成后，host 给声明了
-        // `appMessageEndpoint` 的插件注入 scoped message client 到
-        // `<pluginId>.appmsg.client` capability。插件作者最终体验是
-        // "声明 endpoint → 拿到 scoped client"，**不**走全局工厂。
-        //
-        // 关键：runtime **不**直接 import plugin-appmsg；通过
-        // `AppMsgCore.createMessageScopedClient(...)` 间接构造
-        // `AppMsgSimpleClient`，避免 runtime ↔ plugin-appmsg 循环依赖。
-        if (appMsgEp && capabilities.has(APPMESSAGE_CORE_CAPABILITY)) {
-          const core = capabilities.get<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
-          // 取当前 owner publicKeyHex 作为 sender；如果拿不到（vault locked），
-          // 给空串——sender 还是固定由 creator 决定，调用方无法更改。
-          let ownerHex = "";
-          if (capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) {
-            try {
-              const ks = capabilities.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-              ownerHex = ks.active().activePublicKeyHex ?? "";
-            } catch {
-              ownerHex = "";
-            }
-          }
-          const scopedClient = core.createMessageScopedClient({
-            senderPublicKeyHex: ownerHex,
-            senderAppId: appMsgEp.endpointId
-          });
-          const scopedKey = `${pluginId}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX_LOCAL}`;
-          capabilities.provide(scopedKey, scopedClient);
-          // 关键：把 scoped client 加到 ownership.capabilities，让
-          // disable 时的 purgeOwnership 把它一起 revoke 掉。
-          if (!record.ownership.capabilities.includes(scopedKey)) {
-            record.ownership.capabilities.push(scopedKey);
-          }
-        }
         record.state = "enabled";
         record.error = undefined;
         configStore.setEnabled(pluginId, true);
-        // 硬切换 002：plugin enabled 系统轨迹。失败不阻断主流程。
         logService.append({
           level: "info",
           pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
@@ -728,20 +628,17 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         });
         bumpVersion();
       } catch (err) {
-        // 回滚：把 setup 中已经产生的 owner 资源全部回收。
         enabledSet.delete(pluginId);
         const ownership = record.ownership;
         purgeOwnership(ownership);
         i18n.unregisterResources(record.manifest.id);
         record.ownership = emptyOwnership();
-        // 同步回滚已注册的 endpointId 占用。
         if (appMsgEp) {
           appMessageEndpointIds.delete(appMsgEp.endpointId);
         }
         record.state = "error-disabled";
         record.error = err instanceof Error ? err.message : String(err);
         configStore.setEnabled(pluginId, false);
-        // setup 失败日志在 runSetup 内部已记录；这里不再重复。
         bumpVersion();
         throw err;
       }
@@ -753,15 +650,12 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         return { ok: false, reason: `Plugin "${pluginId}" is not registered` };
       }
       if (record.state !== "enabled") {
-        // 已 disabled / blocked / error-disabled：noop，但写回 store 保证一致。
         configStore.setEnabled(pluginId, false);
         return { ok: true };
       }
-      // canDisable 守门
       if (record.manifest.meta?.canDisable === false) {
         return { ok: false, reason: "Plugin is marked canDisable=false" };
       }
-      // 反向依赖：只阻断"启用中"的反向依赖；不级联 disable。
       const rev = host.reverseDeps(pluginId);
       if (rev.length > 0) {
         return {
@@ -769,14 +663,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           reason: `Blocked by enabled dependents: ${rev.map((d) => d.pluginId).join(", ")}`
         };
       }
-      // 跳走当前路由
       safeNavigateAway(pluginId);
-      // 调 teardown；捕获错误但仍继续回收。
       const teardownErr = await runTeardown(record.ownership);
       purgeOwnership(record.ownership);
       i18n.unregisterResources(record.manifest.id);
-      // 同步释放 pluginEndpointId 占用（施工单 2026-07-01/003）：
-      // 失败回滚路径也走同一段。
       if (record.manifest.appMessageEndpoint) {
         appMessageEndpointIds.delete(record.manifest.appMessageEndpoint.endpointId);
       }
@@ -784,7 +674,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       if (teardownErr) {
         record.state = "error-disabled";
         record.error = teardownErr instanceof Error ? teardownErr.message : String(teardownErr);
-        // 硬切换 002：teardown 失败系统轨迹。
         logService.append({
           level: "error",
           pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
@@ -800,7 +689,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       } else {
         record.state = "disabled";
         record.error = undefined;
-        // 硬切换 002：plugin disabled 系统轨迹。
         logService.append({
           level: "info",
           pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
@@ -822,32 +710,26 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       if (record.state === "enabled") {
         const r = await host.disable(pluginId);
         if (!r.ok) {
-          // 阻止 unregister 的原因
           throw new Error(`Cannot unregister "${pluginId}": ${r.reason}`);
         }
       }
-      // host 内部彻底移除该 plugin 实例
       const m = records.get(pluginId);
       if (m?.manifest.i18n) {
-        // 重复调用 unregisterResources 是 no-op
         i18n.unregisterResources(m.manifest.id);
       }
       records.delete(pluginId);
       knownManifests.delete(pluginId);
       enabledSet.delete(pluginId);
-      // config store 不删除——下次 bootstrap 时残留 id 会被忽略。
       bumpVersion();
     }
   };
 
-  // 订阅 config store 变化（多标签页同步）：其它标签页改 config 时，本标签也
-  // 跟随 enable / disable。
+  // 订阅 config store 变化（多标签页同步）。
   configStore.subscribe((snap) => {
     for (const [id, record] of records) {
       const want = snap[id] ?? record.manifest.meta?.defaultEnabled ?? false;
       const isEnabled = record.state === "enabled";
       if (want && !isEnabled) {
-        // 依赖可能尚未满足，跳过由 host.enable 自己抛错
         void host.enable(id).catch(() => {
           /* ignore: 留给 UI 显示错误 */
         });
@@ -860,5 +742,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   return host;
 }
 
-// 抑制未使用告警：WocService 在 contract 中由 plugin-woc 重新导出。
-void (null as unknown as WocService);
+// 抑制未使用告警：vault / keyspace service 在 host 通用能力里
+// 不再被使用；这里保留 import 兼容外部类型扩展。
+void (null as unknown as VaultService);
+void (null as unknown as KeyspaceService);

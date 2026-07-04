@@ -22,6 +22,7 @@ import {
   type AppMsgMessage
 } from "@keymaster/contracts";
 import { PROTOCOL_VERSION } from "@keymaster/contracts";
+import type { KeyspaceService } from "@keymaster/contracts";
 import { ProtocolServiceImpl } from "./protocolService.js";
 
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
@@ -48,7 +49,31 @@ function makeCoreProbe(): CoreProbe {
 }
 
 function makeProbeCore(probe: CoreProbe): AppMsgCore {
+  // 硬切换 2026-07-04 001 高优 4：plugin-protocol 走
+  // `appmsg.core` 系统内部入口 `sendAsOrigin` / `listAsOrigin` /
+  // `getAsOrigin`——probe 把 origin 写到 probe 上供断言。
   return {
+    providers: () => ({
+      register: () => undefined,
+      unregister: () => undefined,
+      list: () => [],
+      setActive: async () => undefined,
+      active: () => null,
+      activeSnapshot: () => ({
+        providerId: null,
+        displayName: null,
+        isHealthy: false,
+        lastError: null
+      }),
+      onActiveChange: () => () => undefined
+    }),
+    endpointRegistry: () => ({
+      forEndpoint: () => {
+        throw new Error("probe: endpointRegistry.forEndpoint should not be called");
+      },
+      releaseEndpoint: () => undefined,
+      listEndpoints: () => []
+    }),
     connectForOwner: async () => undefined,
     disconnect: async () => undefined,
     inspectLocalDb: () => ({
@@ -58,22 +83,6 @@ function makeProbeCore(probe: CoreProbe): AppMsgCore {
       lastError: null
     }),
     openLocalDb: async () => null,
-    sendScopedMessage: async (input: { senderOrigin?: string }) => {
-      probe.senderOriginForLastSend = input.senderOrigin ?? null;
-      return { messageId: "0", createdAtMs: 0 };
-    },
-    listScopedMessages: async (input: { senderOrigin?: string }) => {
-      probe.senderOriginForLastList = input.senderOrigin ?? null;
-      return { items: [], hasMore: false };
-    },
-    getScopedMessage: async (input: {
-      messageId: string;
-      senderOrigin?: string;
-    }) => {
-      probe.senderOriginForLastGet = input.senderOrigin ?? null;
-      return null;
-    },
-    subscribeScopedMessages: () => () => undefined,
     subscribeUnfilteredMessages: (handler: (m: AppMsgMessage) => void) => {
       probe.unfilteredSubscribers.push(handler);
       return () => {
@@ -85,35 +94,47 @@ function makeProbeCore(probe: CoreProbe): AppMsgCore {
     triggerSync: async () => undefined,
     listTargetSyncStates: async () => [],
     checkOnline: async () => ({}),
-    createMessageScopedClient: (input: {
-      senderOrigin?: string;
-      senderPublicKeyHex: string;
-    }) => {
-      // record sender origin for assertion downstream
-      return {
-        sendMessage: async (m: { recipientPublicKeyHex: string; recipientOrigin?: string }) => {
-          // sender projections 由 facade 合并到 core.sendScopedMessage。
-          // probe 直接把 senderOrigin 同步写到 probe 上。
-          probe.senderOriginForLastSend = input.senderOrigin ?? null;
-          // 也走 core.sendScopedMessage——这样跑通测试。
-          return (await (
-            ((): Promise<{ messageId: string; createdAtMs: number }> =>
-              Promise.resolve({ messageId: "0", createdAtMs: 0 }))
-          )());
-          void m;
-        },
-        listMessages: async () => {
-          probe.senderOriginForLastList = input.senderOrigin ?? null;
-          return { items: [], hasMore: false };
-        },
-        getMessage: async () => {
-          probe.senderOriginForLastGet = input.senderOrigin ?? null;
-          return null;
-        },
-        subscribeMessages: () => () => undefined,
-        checkOnline: async () => ({})
-      };
-    }
+    activeProviderSnapshot: () => ({
+      providerId: null,
+      displayName: null,
+      isHealthy: false,
+      lastError: null
+    }),
+    onStateChange: () => () => undefined,
+    currentHandle: () => null,
+    sendAsOrigin: async (input: { origin: string; sendInput: { contentType: string; body: string; clientMessageId: string; createdAtMs: number } }) => {
+      probe.senderOriginForLastSend = input.origin;
+      probe.dispatchedThroughFacade = probe.dispatchedThroughFacade;
+      void input;
+      return { messageId: "0", createdAtMs: 0 };
+    },
+    listAsOrigin: async (input: { origin: string }) => {
+      probe.senderOriginForLastList = input.origin;
+      return { items: [], hasMore: false };
+    },
+    getAsOrigin: async (input: { origin: string }) => {
+      probe.senderOriginForLastGet = input.origin;
+      return null;
+    },
+    keyspace: {
+      active: () => ({ activePublicKeyHex: TEST_PUB_HEX }),
+      getKey: async () => undefined,
+      listKeys: async () => [],
+      onActiveChange: () => () => undefined,
+      setActive: async () => undefined,
+      requireActiveKey: () => {
+        throw new Error("no active key");
+      },
+      openKeyStorage: async () => {
+        throw new Error("not implemented in probe");
+      },
+      registerPluginStorage: () => undefined,
+      listPluginStorages: () => [],
+      prepareDeleteKey: async () => undefined,
+      deleteKey: async () => undefined,
+      isInitializing: () => false,
+      onInitializationChange: () => () => undefined
+    } as unknown as KeyspaceService
   } as unknown as AppMsgCore;
 }
 
