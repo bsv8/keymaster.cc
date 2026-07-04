@@ -478,6 +478,8 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
   private readonly pendingById = new Map<
     string,
     {
+      methodId: number;
+      startedAtMs: number;
       resolve: (v: unknown) => void;
       reject: (err: unknown) => void;
       timer: ReturnType<typeof setTimeout> | null;
@@ -751,20 +753,40 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     };
     const timeoutMs = options?.timeoutMs ?? HubMsgConnectionImpl.DEFAULT_REQUEST_TIMEOUT_MS;
     return new Promise<TResult>((resolve, reject) => {
+      const startedAtMs = Date.now();
       const timer = setTimeout(() => {
         this.pendingById.delete(requestId);
+        this.emitLog("error", "hubmsg.request.timeout", {
+          requestId,
+          methodId,
+          timeoutMs,
+          durationMs: Date.now() - startedAtMs
+        });
         reject(new Error(`HubMsg: request timeout after ${timeoutMs}ms`));
       }, timeoutMs);
       this.pendingById.set(requestId, {
+        methodId,
+        startedAtMs,
         resolve: (v) => resolve(v as TResult),
         reject,
         timer
+      });
+      this.emitLog("info", "hubmsg.request.sent", {
+        requestId,
+        methodId,
+        timeoutMs,
+        payloadBytes: params.length
       });
       try {
         this.socket!.send(encodeHubFrame(frame));
       } catch (err) {
         if (timer) clearTimeout(timer);
         this.pendingById.delete(requestId);
+        this.emitLog("error", "hubmsg.request.send_failed", {
+          requestId,
+          methodId,
+          err: err instanceof Error ? err.message : String(err)
+        });
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });
@@ -840,11 +862,26 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       this.pendingById.delete(body[0]);
       if (p.timer) clearTimeout(p.timer);
       if (body[1]) {
+        this.emitLog("info", "hubmsg.request.result", {
+          requestId: body[0],
+          methodId: p.methodId,
+          ok: true,
+          durationMs: Date.now() - p.startedAtMs,
+          resultBytes: body[2].length
+        });
         p.resolve(body[2]);
       } else {
         const errInfo = decodeResultError(body[3]);
         const e = new Error(`${errInfo.code}: ${errInfo.message}`);
         (e as Error & { code?: string }).code = errInfo.code;
+        this.emitLog("warn", "hubmsg.request.result", {
+          requestId: body[0],
+          methodId: p.methodId,
+          ok: false,
+          durationMs: Date.now() - p.startedAtMs,
+          errorCode: errInfo.code,
+          errorMessage: errInfo.message
+        });
         p.reject(e);
       }
       return;

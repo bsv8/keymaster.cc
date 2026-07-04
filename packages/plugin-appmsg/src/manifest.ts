@@ -245,19 +245,62 @@ export const appmsgPlatformPlugin: PluginManifest = {
      *   - 其它 provider（未来）可使用任意 `challenge` 字节内容，
      *     signer 不关心 provider 协议。
      */
-    const signerProvider: AppMsgCoreConfig["signerProvider"] = async () => {
-      try {
-        if (vault.status() !== "unlocked") return null;
-        const active = keyspace.active().activePublicKeyHex;
-        if (!active) return null;
-        const key = await keyspace.getKey(active);
-        if (!key || !key.publicKeyHex) return null;
-        const pubHex: string = key.publicKeyHex;
-        return await vault.withPrivateKey(pubHex, async (material) => {
-          const { signChallengeWithSecp256k1 } = await import("./signer.js");
-          return {
-            publicKeyHex: pubHex,
-            privateKeyHex: material.hex,
+	    const signerProvider: AppMsgCoreConfig["signerProvider"] = async () => {
+	      try {
+	        const vaultStatus = vault.status();
+	        const active = keyspace.active().activePublicKeyHex ?? null;
+	        ctx.logger.info({
+	          scope: "appmsg.core",
+	          event: "appmsg.signer_provider.begin",
+	          message: "",
+	          data: { vaultStatus, activePublicKeyHex: active }
+	        });
+	        if (vaultStatus !== "unlocked") {
+	          ctx.logger.info({
+	            scope: "appmsg.core",
+	            event: "appmsg.signer_provider.skipped_locked",
+	            message: "",
+	            data: { vaultStatus, activePublicKeyHex: active }
+	          });
+	          return null;
+	        }
+	        if (!active) {
+	          ctx.logger.warn({
+	            scope: "appmsg.core",
+	            event: "appmsg.signer_provider.skipped_no_active_key",
+	            message: "",
+	            data: { vaultStatus }
+	          });
+	          return null;
+	        }
+	        const key = await keyspace.getKey(active);
+	        if (!key || !key.publicKeyHex) {
+	          ctx.logger.warn({
+	            scope: "appmsg.core",
+	            event: "appmsg.signer_provider.key_missing",
+	            message: "",
+	            data: { activePublicKeyHex: active }
+	          });
+	          return null;
+	        }
+	        const pubHex: string = key.publicKeyHex;
+	        ctx.logger.info({
+	          scope: "appmsg.core",
+	          event: "appmsg.signer_provider.borrow.begin",
+	          message: "",
+	          data: { publicKeyHex: pubHex }
+	        });
+	        return await vault.withPrivateKey(pubHex, async (material) => {
+	          const { signChallengeWithSecp256k1 } = await import("./signer.js");
+	          ctx.logger.info({
+	            scope: "appmsg.core",
+	            event: "appmsg.signer_provider.ready",
+	            message: "",
+	            data: { publicKeyHex: pubHex }
+	          });
+	          return {
+	            publicKeyHex: pubHex,
+	            privateKeyHex: material.hex,
             signChallenge: async (args: {
               challenge: Uint8Array;
             }): Promise<string> => {
@@ -265,13 +308,13 @@ export const appmsgPlatformPlugin: PluginManifest = {
             }
           };
         });
-      } catch (err) {
-        ctx.logger.error({
-          scope: "appmsg.core",
-          event: "signerProvider.failed",
-          message: "failed to build signer",
-          data: { err: err instanceof Error ? err.message : String(err) }
-        });
+	      } catch (err) {
+	        ctx.logger.error({
+	          scope: "appmsg.core",
+	          event: "appmsg.signer_provider.failed",
+	          message: "failed to build signer",
+	          data: { err: err instanceof Error ? err.message : String(err) }
+	        });
         return null;
       }
     };

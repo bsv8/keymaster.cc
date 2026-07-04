@@ -708,12 +708,31 @@ export class AppMsgCoreImpl implements AppMsgCore {
       connectEpoch: myEpoch
     });
     // 先断开旧 handle，释放本地 DB 占位。
+    emitLog(this.cfg.logger, "info", "appmsg.connect.disconnect.begin", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch,
+      hadHandle: this.boundHandle !== null,
+      currentOwnerPublicKeyHex: this.currentBoundOwner
+    });
     await this.disconnect();
+    emitLog(this.cfg.logger, "info", "appmsg.connect.disconnect.done", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch
+    });
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
     }
     // 3. 打开本地 DB。
+    emitLog(this.cfg.logger, "info", "appmsg.connect.local_db.open.begin", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch
+    });
     await this.openLocalDbForOwner(ownerPublicKeyHex);
+    emitLog(this.cfg.logger, "info", "appmsg.connect.local_db.open.done", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch,
+      hasLocalDb: this.localHandle !== null && this.localOps !== null
+    });
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
     }
@@ -738,8 +757,33 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.fireStateChange();
       return { kind: "structurallyOffline", reason: "no_active_provider" };
     }
+    emitLog(this.cfg.logger, "info", "appmsg.connect.provider.selected", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch,
+      providerId: provider.id
+    });
 
-    const signer = await this.cfg.signerProvider();
+    emitLog(this.cfg.logger, "info", "appmsg.connect.signer.requested", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch,
+      providerId: provider.id
+    });
+    let signer: AppMsgBindSigner | null;
+    try {
+      signer = await this.cfg.signerProvider();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.lastErrorMessageValue = msg;
+      emitLog(this.cfg.logger, "error", "appmsg.connect.failed", {
+        ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
+        reason: "signer_provider_error",
+        err: msg
+      });
+      this.fireStateChange();
+      return { kind: "retryableFailure", reason: "signer_provider_error" };
+    }
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
     }
@@ -747,11 +791,19 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.lastErrorMessageValue = "no signer available (vault locked or no active key)";
       emitLog(this.cfg.logger, "warn", "appmsg.connect.failed", {
         ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
         reason: "no_signer"
       });
       this.fireStateChange();
       return { kind: "structurallyOffline", reason: "no_signer" };
     }
+    emitLog(this.cfg.logger, "info", "appmsg.connect.signer.ready", {
+      ownerPublicKeyHex,
+      connectEpoch: myEpoch,
+      providerId: provider.id,
+      signerPublicKeyHex: signer.publicKeyHex
+    });
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
     }
@@ -759,12 +811,25 @@ export class AppMsgCoreImpl implements AppMsgCore {
     // 5. bind 阶段：抛错统一收口为 retryableFailure。
     let handle: MessageProviderHandle;
     try {
+      emitLog(this.cfg.logger, "info", "appmsg.connect.provider_bind.begin", {
+        ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
+        signerPublicKeyHex: signer.publicKeyHex
+      });
       handle = await provider.bind({ signer });
+      emitLog(this.cfg.logger, "info", "appmsg.connect.provider_bind.done", {
+        ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch
+      });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.lastErrorMessageValue = msg;
       emitLog(this.cfg.logger, "error", "appmsg.connect.failed", {
         ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
         reason: "bind_error",
         err: msg
       });
@@ -777,6 +842,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       } catch {
         // ignore
       }
+      emitLog(this.cfg.logger, "warn", "appmsg.connect.stale_after_bind", {
+        ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
+        currentConnectEpoch: this.connectEpoch
+      });
       return { kind: "stale" };
     }
     if (!(handle as MessageProviderOperations).sendMessage) {
@@ -788,6 +859,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.lastErrorMessageValue = "provider.bind returned untyped handle";
       emitLog(this.cfg.logger, "error", "appmsg.connect.failed", {
         ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
         reason: "untyped_handle"
       });
       this.fireStateChange();
@@ -802,6 +875,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       } catch {
         // ignore
       }
+      emitLog(this.cfg.logger, "warn", "appmsg.connect.stale_owner_changed", {
+        expectedOwnerPublicKeyHex: ownerPublicKeyHex,
+        currentOwnerPublicKeyHex: currentOwner,
+        providerId: provider.id,
+        connectEpoch: myEpoch
+      });
       return { kind: "stale" };
     }
     if (this.providerRegistryInstance.active()?.id !== provider.id) {
@@ -810,6 +889,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       } catch {
         // ignore
       }
+      emitLog(this.cfg.logger, "warn", "appmsg.connect.stale_provider_changed", {
+        ownerPublicKeyHex,
+        providerId: provider.id,
+        currentProviderId: this.providerRegistryInstance.active()?.id ?? null,
+        connectEpoch: myEpoch
+      });
       return { kind: "stale" };
     }
     if (myEpoch !== this.connectEpoch) {
@@ -818,6 +903,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       } catch {
         // ignore
       }
+      emitLog(this.cfg.logger, "warn", "appmsg.connect.stale_after_commit_check", {
+        ownerPublicKeyHex,
+        providerId: provider.id,
+        connectEpoch: myEpoch,
+        currentConnectEpoch: this.connectEpoch
+      });
       return { kind: "stale" };
     }
 
