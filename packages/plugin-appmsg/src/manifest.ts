@@ -43,7 +43,7 @@ const DEFAULT_HUBMSG_URL = "wss://msg.keymaster.cc/ws/v1";
 export const HUBMSG_ROUTE_PATH = "/system/hubmsg";
 
 const hubmsgResources: I18nPluginResources = {
-  namespace: "appmsg",
+  namespace: "hubmsg",
   resources: {
     en: {
       "hubmsg.menu": "HubMsg",
