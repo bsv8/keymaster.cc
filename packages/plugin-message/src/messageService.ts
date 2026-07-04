@@ -57,22 +57,38 @@ export interface MessageService {
  * `appMessageEndpoint.endpointId === "keymaster.message"`，经由
  * `AppMsgCore.createSystemMessageClient(...)` 校验通过后才允许产出
  * 这个 service。
+ *
+ * 关键约束：
+ *   - **不能**在构造期强依赖 owner；web 首屏时 vault 可能尚未解锁，
+ *     这属于正常未就绪状态，不应让 plugin setup 失败；
+ *   - 因此 owner / system client 都改为"每次调用时再解析"；
+ *   - 当前未绑定 owner 时：
+ *       * list/get 返回空态；
+ *       * triggerSync noop；
+ *       * checkOnline 仍委托 core（其内部会回退 `unknown`）。
  */
 export function createMessageService(core: AppMsgCore): MessageService {
-  // 关键：以"系统消息应用"身份构造 facade——sender 固定为当前 owner +
-  // appId=keymaster.message；系统消息应用可以读全库。
-  // 这里我们**不**传 owner，让 core 用自己的 owner；事实上
-  // createSystemMessageClient 会在 owner 不匹配时抛错。
-  const sysCli = createSystemClientForCurrentOwner(core);
   return {
     getLocalDbSnapshot: () => core.inspectLocalDb(),
     listLocalMessages: async (input) => {
+      const sysCli = createSystemClientForCurrentOwner(core);
+      if (!sysCli) return [];
       const res = await sysCli.listMessages(input);
       return res.items;
     },
-    getLocalMessage: async (messageId) => sysCli.getMessage({ messageId }),
-    listTargetSyncStates: () => core.listTargetSyncStates(),
-    triggerSync: () => core.triggerSync(),
+    getLocalMessage: async (messageId) => {
+      const sysCli = createSystemClientForCurrentOwner(core);
+      if (!sysCli) return null;
+      return sysCli.getMessage({ messageId });
+    },
+    listTargetSyncStates: async () => {
+      if (!hasBoundOwner(core.inspectLocalDb())) return [];
+      return core.listTargetSyncStates();
+    },
+    triggerSync: async () => {
+      if (!hasBoundOwner(core.inspectLocalDb())) return;
+      await core.triggerSync();
+    },
     checkOnline: (hexes) => core.checkOnline(hexes)
   };
 }
@@ -81,20 +97,23 @@ export function createMessageService(core: AppMsgCore): MessageService {
  * 构造系统消息应用 facade。
  *
  * 当前 owner 取自 `core.inspectLocalDb()`——caller 已经把 owner 绑好
- * 后再调用本工厂。如果 owner 尚未绑定，本工厂**不**主动 connect，由
- * caller 自行确保 `connectForOwner(...)` 已完成。
+ * 后再调用本工厂。如果 owner 尚未绑定，本工厂返回 `null`：
+ * 这是正常未就绪状态，不是 plugin setup 错误。
  */
-function createSystemClientForCurrentOwner(core: AppMsgCore): AppMsgSimpleClient {
-  // 关键：currentBoundOwner 已经是 caller 真实 owner；从 inspect 派生
-  // 即可。
+function createSystemClientForCurrentOwner(core: AppMsgCore): AppMsgSimpleClient | null {
   const snap = core.inspectLocalDb();
   const owner = snap.ownerPublicKeyHex;
-  if (!owner) {
-    throw new Error(
-      "MessageService: appmsg.core 当前未绑定 owner（vault 锁定或无 active key）"
-    );
+  if (!owner) return null;
+  try {
+    return core.createSystemMessageClient({ ownerPublicKeyHex: owner });
+  } catch {
+    return null;
   }
-  return core.createSystemMessageClient({ ownerPublicKeyHex: owner });
+}
+
+/** 当前是否已有可用 bound owner。 */
+function hasBoundOwner(snap: AppMsgLocalDbSnapshot): boolean {
+  return typeof snap.ownerPublicKeyHex === "string" && snap.ownerPublicKeyHex.length > 0;
 }
 
 /** 系统消息应用 appId（固定字符串）。 */

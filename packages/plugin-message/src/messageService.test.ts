@@ -4,6 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type {
   AppMsgCore,
+  AppMsgLocalDbSnapshot,
   AppMsgListResult,
   AppMsgMessage,
   AppMsgOnlineResult
@@ -26,16 +27,19 @@ function fakeMsg(overrides: Partial<AppMsgMessage> = {}): AppMsgMessage {
   };
 }
 
-function makeFakeCore(): AppMsgCore {
+function makeFakeCore(opts?: {
+  snapshot?: AppMsgLocalDbSnapshot;
+}): AppMsgCore {
+  const snapshot: AppMsgLocalDbSnapshot = opts?.snapshot ?? {
+    state: "open",
+    ownerPublicKeyHex: OWNER,
+    lastInsertedAtMs: 1,
+    lastError: null
+  };
   return {
     connectForOwner: vi.fn(async () => undefined),
     disconnect: vi.fn(async () => undefined),
-    inspectLocalDb: vi.fn(() => ({
-      state: "open" as const,
-      ownerPublicKeyHex: OWNER,
-      lastInsertedAtMs: 1,
-      lastError: null
-    })),
+    inspectLocalDb: vi.fn(() => snapshot),
     openLocalDb: vi.fn(async () => null),
     sendScopedMessage: vi.fn(async () => ({ messageId: "1", createdAtMs: 1 })),
     listScopedMessages: vi.fn(async (): Promise<AppMsgListResult> => ({
@@ -122,5 +126,27 @@ describe("createMessageService", () => {
     const out = onlineFallback([OWNER, "02bbbb".padEnd(66, "b")]);
     expect(out[OWNER]).toBe("unknown");
     Object.values(out).forEach((v) => expect(v).toBe("unknown"));
+  });
+
+  it("does not throw during construction when owner is not bound yet", async () => {
+    const core = makeFakeCore({
+      snapshot: {
+        state: "idle",
+        ownerPublicKeyHex: null,
+        lastInsertedAtMs: 0,
+        lastError: null
+      }
+    });
+    const service = createMessageService(core);
+
+    await expect(service.listLocalMessages()).resolves.toEqual([]);
+    await expect(service.getLocalMessage("42")).resolves.toBeNull();
+    await expect(service.listTargetSyncStates()).resolves.toEqual([]);
+    await expect(service.triggerSync()).resolves.toBeUndefined();
+
+    expect(
+      (core.createSystemMessageClient as ReturnType<typeof vi.fn>).mock.calls.length
+    ).toBe(0);
+    expect((core.triggerSync as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
   });
 });
