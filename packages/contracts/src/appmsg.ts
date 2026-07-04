@@ -101,7 +101,7 @@ export type AppMsgContentType = "text/plain" | "text/markdown";
  *   - sender / recipient 都用 `senderPublicKeyHex` + （`origin` 或 `appId`）
  *     表达：外部 app 用 `origin`，内部插件 / 系统应用用 `appId`；
  *     同一消息至多携带其中一个（同源端互斥）；
- *   - body 是明文 / markdown 字符串；v1 不做端到端加密；
+ *   - body 是明文 / markdown 字符串；v1 已做端到端密封（`static-static ECDH` + `AES-256-GCM`，详见 §4.2 / §4.5）；明文 / 密文边界由 `plugin-appmsg` 唯一持有，外部调用方仍按本明文 API 编程；
  *   - `clientMessageId` 是发送方侧幂等键（发送方自己带，接收方透传）。
  */
 export interface AppMsgMessage {
@@ -123,7 +123,7 @@ export interface AppMsgMessage {
   recipientAppId?: string;
   /** 正文内容类型。 */
   contentType: AppMsgContentType;
-  /** 正文。v1 不做加密。 */
+  /** 正文。v1 走端到端密封；调用方仍通过明文字符串 API 读写。 */
   body: string;
   /** 客户端声明的创建时间（unix milliseconds）。 */
   createdAtMs: number;
@@ -647,3 +647,281 @@ export function isValidExactOriginShape(origin: string): boolean {
   const re = /^(https?):\/\/([^/:]+):(\d+)$/;
   return re.test(origin);
 }
+
+/* ============== appmsg 加密密封：永久消息壳 + 密文正文（施工单 2026-07-04 004 硬切换） ============== */
+//
+// 设计缘由：
+//   - 本次把"传输壳 / 永久消息壳 / 加密正文"切成三层：
+//       * 传输壳（`HubFrame`）= WebSocket binary frame，由 plugin-hubmsg
+//         与 HubMsg 服务端共享；
+//       * 永久消息壳（`AppMsgEnvelopeV1`）= HubMsg 持久化、转发、接收方
+//         验签的唯一真值；**不**包含 RPC 壳字段（`requestId` / `method`
+//         / `connectSessionId`）；
+//       * 加密正文（`AppMsgPlaintextV1`）= 仅收发双方可解的业务内容；
+//   - 公开 `AppMsgMessage` 业务语义保持不变；sealed record 是 platform
+//     internal 形态，**不**由 app / plugin 直接接触。
+//   - 加密方案（`sealSuiteId = 1`）：
+//       * secp256k1 static-static ECDH（sender 长期私钥 + recipient
+//         长期公钥）；
+//       * HKDF-SHA256 with info = "keymaster:appmsg:seal:v1"；
+//       * AES-256-GCM 12-byte 随机 nonce；
+//       * envelope 签名 = sender owner 私钥对 SHA-256(envelopeBytes)
+//         签 compact 64-byte secp256k1 ECDSA。
+//   - 接收方必须按"先 verify signature、后 decrypt ciphertext"顺序；
+//     任一步失败都 fail-closed（不落本地明文）。
+
+/** `AppMsgEnvelopeV1` 版本号；hard-switch 锁死 v1。 */
+export const APPMSG_ENVELOPE_VERSION_V1 = 1;
+/** `AppMsgPlaintextV1` 版本号；hard-switch 锁死 v1。 */
+export const APPMSG_PLAINTEXT_VERSION_V1 = 1;
+/** HKDF info 字面量（`sealSuiteId = 1` 专用）。 */
+export const APPMSG_SEAL_V1_HKDF_INFO = "keymaster:appmsg:seal:v1";
+
+/** 加密套件 id：v1 = secp256k1 static-static ECDH + HKDF-SHA256 + AES-256-GCM。 */
+export const APPMSG_SEAL_SUITE_ID_V1 = 1 as const;
+
+/** 端点 kind 在 envelope 真值里的整数编码。 */
+export const APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN = 1 as const;
+export const APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN = 2 as const;
+
+/**
+ * sealed envelope 的内存字段形状（platform internal）。
+ *
+ * 这是 `AppMsgEnvelopeV1` 解析后的中间形态——`plugin-appmsg` 内部用
+ * 来跑 verify / decrypt。HubMsg 服务端与链路上**只**看到 deterministic
+ * CBOR 字节，**不**接触这个解析形态。
+ *
+ * 关键约束（施工单 2026-07-04 004 §4.2）：
+ *   - `envelopeVersion === 1`；
+ *   - `senderPublicKeyBytes.length === 33`（compressed secp256k1）；
+ *   - `recipientPublicKeyBytes.length === 33`；
+ *   - `nonceBytes.length === 12`（AES-GCM nonce）；
+ *   - `ciphertext` 长度 0..N（GCM tag 含在 ciphertext 末尾 16 字节）；
+ *   - `clientMessageId` / `createdAtMs` / endpoint id 等都是 envelope 真
+ *     值的一部分，由 HubMsg 持久化、转发、接收方验签；
+ *   - **不**包含 `requestId` / `method` / `connectSessionId`——这些只属于
+ *     RPC 调用壳，**不**属于永久消息壳。
+ */
+export interface AppMsgEnvelopeV1 {
+  envelopeVersion: typeof APPMSG_ENVELOPE_VERSION_V1;
+  senderPublicKeyBytes: Uint8Array;
+  senderEndpointKind:
+    | typeof APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN
+    | typeof APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN;
+  senderEndpointId: string;
+  recipientPublicKeyBytes: Uint8Array;
+  recipientEndpointKind:
+    | typeof APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN
+    | typeof APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN;
+  recipientEndpointId: string;
+  /** sender 侧幂等键；与公开 `AppMsgMessage.clientMessageId` 一一对应。 */
+  clientMessageId: string;
+  /** sender 声明的创建时间（unix milliseconds）。 */
+  createdAtMs: number;
+  /** 加密套件 id；本次固定 `1`。 */
+  sealSuiteId: typeof APPMSG_SEAL_SUITE_ID_V1;
+  /** AES-GCM nonce；12 字节。 */
+  nonceBytes: Uint8Array;
+  /** AES-GCM ciphertext（含 16 字节 auth tag）。 */
+  ciphertext: Uint8Array;
+}
+
+/**
+ * 加密正文（platform internal）：只在密文被解出后由 plugin-appmsg 拿到。
+ *
+ * 关键约束：
+ *   - `plaintextVersion === 1`；
+ *   - `contentType` 仅 `text/plain` / `text/markdown`；
+ *   - `body` 已被 UTF-8 编码为字节；**不**做 base64。
+ */
+export interface AppMsgPlaintextV1 {
+  plaintextVersion: typeof APPMSG_PLAINTEXT_VERSION_V1;
+  contentType: "text/plain" | "text/markdown";
+  body: Uint8Array;
+}
+
+/**
+ * 永久消息签名壳（platform internal）：envelope 真值字节 + sender 签名。
+ *
+ * 关键约束：
+ *   - `signatureBytes.length === 64`（compact secp256k1 r||s）；
+ *   - 签名对象是 `envelopeBytes`（deterministic CBOR 真值字节），**不**
+ *     是 envelope 重新解析后再编码的字节——收验签必须直接对 envelopeBytes
+ *     验签；
+ *   - HubMsg 持久化 / 转发的也是 envelopeBytes + signatureBytes；收方先
+ *     verify，后用 sender 公钥 + 自己 recipient 私钥派生密钥解密。
+ */
+export interface SignedAppMsgEnvelopeV1 {
+  envelopeBytes: Uint8Array;
+  signatureBytes: Uint8Array;
+}
+
+/**
+ * 传输壳 frame kind 整数常量（platform internal；与 HubMsg 服务端共享）。
+ *
+ * 设计缘由（施工单 §4.1）：
+ *   - 不再传 JSON 字符串 / 不再传方法名字符串 / 不再传 base64；
+ *   - frame kind 与 method id 都用整数常量；
+ *   - 握手顺序固定：`ServerOpen`（服务端首帧）→ `ClientBind`（客户端
+ *     响应）→ `BindReady`（服务端确认）；**不**再混用 `BindReady` 充
+ *     当首帧或兜底字段；
+ *   - 业务帧：`Request` / `Result` / `Event`；心跳 `Ping` / `Pong`；
+ *     控制帧 `Close`。
+ */
+export const HUB_FRAME_KIND = {
+  ServerOpen: 1,
+  ClientBind: 2,
+  BindReady: 3,
+  Request: 4,
+  Result: 5,
+  Event: 6,
+  Ping: 7,
+  Pong: 8,
+  Close: 9
+} as const;
+
+export type HubFrameKind = (typeof HUB_FRAME_KIND)[keyof typeof HUB_FRAME_KIND];
+
+/** 传输壳 frame 版本。 */
+export const HUB_FRAME_VERSION = 1 as const;
+
+/**
+ * 传输壳形状（platform internal）。
+ *
+ * 关键约束（施工单 §4.1）：
+ *   - 整型 frameVersion / frameKind；
+ *   - `frameBody` 是按 frameKind 解释的二进制真值；
+ *   - 最终 wire 形式 = `cborEncode([frameVersion, frameKind, frameBody])`
+ *     （固定顺序数组）；
+ *   - WebSocket 上只传二进制，**不**传 JSON 字符串。
+ */
+export interface HubFrame {
+  frameVersion: typeof HUB_FRAME_VERSION;
+  frameKind: HubFrameKind;
+  frameBody: Uint8Array;
+}
+
+/**
+ * 传输壳 wire frame body 数组形态（platform internal）。
+ *
+ * 施工单 §2.3 锁定"固定顺序数组，不用 map"：所有 frame body / method
+ * params / method results 都必须用 `CborValue[]` 固定顺序数组，**不**
+ * 用对象 map。本类型只是给业务代码提供"按位置拿值"的 TS 视图——wire
+ * 编码一律走 `cborEncode([...])`。
+ */
+
+/** `server_open` frame body：[sessionId, nonce, heartbeatSec] */
+export type HubFrameServerOpenBody = readonly [
+  sessionId: string,
+  nonce: string,
+  heartbeatSec: number
+];
+
+/** `client_bind` frame body：[sessionId, publicKeyHex, issuedAtMs, signatureHex] */
+export type HubFrameClientBindBody = readonly [
+  sessionId: string,
+  publicKeyHex: string,
+  issuedAtMs: number,
+  signatureHex: string
+];
+
+/** `bind_ready` frame body：[sessionId] */
+export type HubFrameBindReadyBody = readonly [sessionId: string];
+
+/** `request` frame body：[requestId, methodId, methodPayloadBytes] */
+export type HubFrameRequestBody = readonly [
+  requestId: string,
+  methodId: number,
+  methodPayloadBytes: Uint8Array
+];
+
+/** `result` frame body：[requestId, ok, resultBytes, errorBytes] */
+export type HubFrameResultBody = readonly [
+  requestId: string,
+  ok: boolean,
+  resultBytes: Uint8Array,
+  errorBytes: Uint8Array
+];
+
+/** `event` frame body：[eventId, dataBytes] */
+export type HubFrameEventBody = readonly [eventId: number, dataBytes: Uint8Array];
+
+/** `close` frame body：[reason] */
+export type HubFrameCloseBody = readonly [reason: string];
+
+/** `ping` / `pong` frame body：[tsMs] */
+export type HubFramePingBody = readonly [tsMs: number];
+
+/* ============== v1 RPC method / event 整数 id ============== */
+
+/** v1 RPC method 整数 id（**仅** wire 层使用，**不**暴露给上层）。 */
+export const HUBMSG_METHOD = {
+  MessageSend: 1,
+  MessageList: 2,
+  MessageGet: 3,
+  MessageOnline: 4
+} as const;
+
+/** v1 server-pushed event 整数 id（**仅** wire 层使用）。 */
+export const HUBMSG_EVENT = {
+  MessageReceived: 1
+} as const;
+
+/* ============== wire method params / results（platform internal；固定顺序数组） ============== */
+
+/**
+ * `message.send` 入参 wire 形态（platform internal）。
+ *
+ * 设计缘由：plugin-appmsg 入站边界已经完成 seal + sign；HubMsg 现行
+ * wire 只接收最小 `SignedAppMsgEnvelopeV1`，不再重复镜像 sender /
+ * recipient / createdAtMs 等 envelope 内字段。
+ */
+export type HubMsgWireSendParams = readonly [
+  envelopeBytes: Uint8Array,
+  signatureBytes: Uint8Array
+];
+
+/** `message.send` 出参 wire 形态：[messageId, insertedAtMs] */
+export type HubMsgWireSendResult = readonly [messageId: string, insertedAtMs: number];
+
+/** `message.list` 入参：[ownerPublicKeyHex, scopeKind, scopeId, box, afterMessageId, beforeMessageId, limit] */
+export type HubMsgWireListParams = readonly [
+  ownerPublicKeyHex: string,
+  scopeKind: number,
+  scopeId: string,
+  box: "inbox" | "sent" | "all",
+  afterMessageId: string,
+  beforeMessageId: string,
+  limit: number
+];
+
+/** `message.list` 出参：[recordBytes..., hasMore] */
+export type HubMsgWireListResult = readonly [...recordBytes: Uint8Array[], hasMore: boolean];
+
+/** `message.get` 入参：[messageId, ownerPublicKeyHex, scopeKind, scopeId] */
+export type HubMsgWireGetParams = readonly [
+  messageId: string,
+  ownerPublicKeyHex: string,
+  scopeKind: number,
+  scopeId: string
+];
+
+/** `message.online` 入参：publicKeyHex 扁平数组。 */
+export type HubMsgWireOnlineParams = readonly string[];
+
+/** `message.online` 出参：在线 publicKeyHex 数组。 */
+export type HubMsgWireOnlineResult = readonly string[];
+
+/**
+ * 单条 wire stored envelope record（platform internal；**仅**
+ * plugin-hubmsg 内部与 HubMsg 服务端共享）。
+ *
+ * HubMsg 持久化层只保留最小四元组，sender / recipient / createdAtMs /
+ * clientMessageId 等都从 `envelopeBytes` 解析，不在 record 外层重复镜像。
+ */
+export type HubMsgWireSealedRecord = readonly [
+  messageId: string,
+  insertedAtMs: number,
+  envelopeBytes: Uint8Array,
+  signatureBytes: Uint8Array
+];

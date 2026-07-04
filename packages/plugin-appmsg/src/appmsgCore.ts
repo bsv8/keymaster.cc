@@ -1,5 +1,5 @@
 // packages/plugin-appmsg/src/appmsgCore.ts
-// appmsg.core 平台单例（施工单 2026-07-04 001 硬切换）。
+// appmsg.core 平台单例（施工单 2026-07-04 001 + 2026-07-04 004 硬切换）。
 //
 // 设计缘由：
 //   - 系统中心：plugin-appmsg 持有唯一的 `AppMsgCoreImpl` 单例，提供
@@ -8,6 +8,12 @@
 //     的 wire 实现。所有 send / list / get / subscribe / checkOnline 走
 //     typed `MessageProviderOperations` 接口，由 provider 内部完成 wire
 //     → 标准化 `AppMsgMessage` 翻译；
+//   - **唯一 seal/open + sign/verify 边界**：plugin-appmsg 是系统中
+//     唯一允许调 ECDH / HKDF / AES-GCM / envelope 编解码 / 签名验签的
+//     路径（施工单 2026-07-04 004 §5.3）；
+//   - **provider 业务层 sealed record**：`sendMessage` / `listMessages`
+//     / `getMessage` / `subscribeMessages` 全部走 sealed envelope record，
+//     provider 不接触明文 body（§5.4 / §5.5）；
 //   - **provider registry 真值**：`MessageProviderRegistryImpl` 由 plugin-appmsg
 //     在构造时创建并挂到 `message.provider.registry` capability；provider
 //     插件（plugin-hubmsg）只负责 `register(...)`，**不**持有 registry。
@@ -19,7 +25,7 @@
 //     业务插件（plugin-message / plugin-protocol）通过
 //     `appmsg.endpoint.registry` capability 拿到稳定长寿的
 //     `AppMsgEndpointService` 实例；
-//   - **本地 DB 真值**：key-scoped IndexedDB，storageId = `messages_v2`（硬
+//   - **本地 DB 真值**：key-scoped IndexedDB，storageId = `messages_v3`（硬
 //     切换）；旧 `messages` 不迁移、不兼容读、不 fall through；
 //   - **单真值在本地 DB**：provider 仅做远端持久化 / 实时推送 / 在线查询；
 //   - **严格 sender 投影 + ACL**：endpoint service 内部把 owner 真值 +
@@ -63,9 +69,11 @@ import type {
   MessageProviderHealth,
   MessageProviderOperations,
   MessageProviderRegistry,
+  ProviderListInput,
   ProviderListResult,
   ProviderOnlineInput,
   ProviderOnlineResult,
+  ProviderSealedMessageRecord,
   ProviderSenderProjection
 } from "@keymaster/contracts";
 import { KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
@@ -78,6 +86,14 @@ import {
   type AppMsgLocalDbOps
 } from "./appmsgDb.js";
 import { syncAllScopes } from "./appmsgSync.js";
+import {
+  AppMsgCryptoError,
+  bytesToHex,
+  hexToBytes,
+  openAppMessage,
+  readEnvelopeRoute,
+  sealAppMessage
+} from "./appmsgCrypto.js";
 
 /* ============== AppMsgCore 配置 ============== */
 
@@ -107,9 +123,15 @@ export interface AppMsgCoreConfig {
  *
  * 注意：此类型**不**再保留 HubMsg 特有的四元组签名接口；该拼接规则
  * 已下沉到 `plugin-hubmsg::HubMsgBindSignerAdapter`。
+ *
+ * 施工单 2026-07-04 004：同时暴露 owner 私钥 hex——`plugin-appmsg`
+ * 入站 / 出站都需要 ECDH + envelope 签名，不能只走 `signChallenge`。
+ * `privateKeyHex` 闭包在 `vault.withPrivateKey` 范围内持有；调用方
+ * 用完即丢，**不**持久化 / **不**写日志 / **不**出现在任何长期真值。
  */
 export interface AppMsgBindSigner {
   publicKeyHex: string;
+  privateKeyHex: string;
   signChallenge(args: { challenge: Uint8Array }): Promise<string>;
 }
 
@@ -159,13 +181,6 @@ function recipientEndpointFor(input: AppMsgRecipient): {
   if (input.recipientOrigin) return { kind: "origin", id: input.recipientOrigin };
   if (input.recipientAppId) return { kind: "plugin", id: input.recipientAppId };
   return { kind: "plugin", id: "" };
-}
-
-function senderToProviderProjection(sender: AppMsgSenderProjection): ProviderSenderProjection {
-  const out: ProviderSenderProjection = { senderPublicKeyHex: sender.senderPublicKeyHex };
-  if (sender.senderOrigin) out.senderOrigin = sender.senderOrigin;
-  if (sender.senderAppId) out.senderAppId = sender.senderAppId;
-  return out;
 }
 
 function matchesScope(m: AppMsgMessage, scope: AppMsgScope): boolean {
@@ -499,7 +514,9 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
       return;
     }
     const scopeMatch = this.scopeMatch();
-    const filteredHandler = (m: AppMsgMessage) => {
+    const filteredHandler = (rec: ProviderSealedMessageRecord) => {
+      const m = this.core.openSealedToMessage(rec);
+      if (!m) return;
       if (!scopeMatch(m)) return;
       try {
         handler(m);
@@ -571,6 +588,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
   private boundHandle: MessageProviderOperations | null = null;
   /** 当前绑定的 owner publicKeyHex。 */
   private currentBoundOwner: string | null = null;
+  /** 当前绑定的 owner privateKeyHex（plugin-appmsg 唯一持有位）。 */
+  private currentBoundOwnerPrivateKeyHex: string | null = null;
   /** 当前 active provider id（DB 写路径必须带这个维度）。 */
   private currentProviderId: string | null = null;
   /** 本地 DB handle。 */
@@ -657,39 +676,14 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   /**
    * 内部连接代次计数器（硬切换 003 反馈"必改"第二轮）。
-   *
-   * 每次 `connectForOwner` 入口 `++`。**仅**用于 core 内部"是否被更
-   * 新的一次 `connectForOwner` 抢占"的校验——与"调用方结构代次"无关。
-   *
-   * 旧实现"async 完成时同时校验调用方 epoch 和内部 connectEpoch 等
-   * 值"会让同一结构代次下的 5 秒重试（callerEpoch 不变，但每次都进
-   * connectForOwner 都会 ++connectEpoch）直接返回 stale。本字段
-   * 仅防"被同实例另一次 connectForOwner 抢占"，caller 端的过期由
-   * 协调器自检。
    */
   private connectEpoch: number = 0;
   /** 关闭已握手的 handle 时（远端断线 / 显式 close）同步解除；`null` 表示未挂订阅。 */
   private handleCloseOff: (() => void) | null = null;
-  /**
-   * 远端断线时由 provider 主动触发；fireStateChange 后 manifest 协调
-   * 器订阅 `onStateChange` 即可识别"上次 open → 突然不在 bound"，重
-   * 新进入 5 秒循环。
-   */
   private onHandleGoneAfterBound: () => void = () => undefined;
 
   /**
    * connect 当前 owner。
-   *
-   * 参数 `callerEpoch`（反馈"必改"第二轮修订）：
-   *   - **仅**是 caller 端用来做"await 后自检"的标识——**不是**要求
-   *     与 core 内部 `connectEpoch` 相等的"必须匹配 token"；
-   *   - core 内部**不**读 / 不校验 callerEpoch；caller 在 await 之前
-   *     记下自己当时的 epoch，await 后若 epoch 变了就视为 stale 丢弃
-   *     结果——这与"提交前校验"语义等价（反馈"必改"第二轮指明 caller
-   *     端自检的可行性）；
-   *   - 旧实现"`epoch !== myEpoch` 直接 stale"的语义会让同一结构代
-   *     次下的 5 秒重试全部变 stale，本次拆解后 callerEpoch 与
-   *     connectEpoch 互不干扰。
    */
   async connectForOwner(
     ownerPublicKeyHex: string,
@@ -705,8 +699,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
     }
 
     // 2. 进入新一轮：自增内部 connectEpoch，记录 myEpoch。
-    //    `callerEpoch` 仅由调用方在 await 后自检（用于决定是否采用本
-    //    结果），core 内部**不**做等值比较。
     this.connectEpoch += 1;
     const myEpoch = this.connectEpoch;
     void callerEpoch;
@@ -715,14 +707,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       ownerPublicKeyHex,
       connectEpoch: myEpoch
     });
-    // 先断开旧 handle，释放本地 DB 占位。disconnect 不会重置 connectEpoch。
+    // 先断开旧 handle，释放本地 DB 占位。
     await this.disconnect();
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
     }
-    // 3. 打开本地 DB：失败视为结构性离线（硬切换 003 反馈"必改"第二轮
-    //    补的 `local_db_unavailable` 分支）。打不开 DB 后续 bind 不可
-    //    继续——必须结构性离线，不排 5 秒重试。
+    // 3. 打开本地 DB。
     await this.openLocalDbForOwner(ownerPublicKeyHex);
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
@@ -782,7 +772,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
       return { kind: "retryableFailure", reason: msg };
     }
     if (myEpoch !== this.connectEpoch) {
-      // bind 期间被新调用抢占：自己持有的 handle 必须立即关掉，避免泄漏。
       try {
         (handle as MessageProviderOperations).close();
       } catch {
@@ -791,7 +780,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
       return { kind: "stale" };
     }
     if (!(handle as MessageProviderOperations).sendMessage) {
-      // 类型守卫：bind 必须返回 typed operations。
       try {
         (handle as MessageProviderOperations).close();
       } catch {
@@ -807,7 +795,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
     }
 
     // 6. 提交前再校验 owner / provider 真值是否仍是本轮发起时记录的。
-    //    这是 §7.2 / §7.3 / §7.4"旧连接污染新状态"的最后一道关卡。
     const currentOwner = this.cfg.keyspace.active().activePublicKeyHex ?? null;
     if (currentOwner !== ownerPublicKeyHex) {
       try {
@@ -834,12 +821,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       return { kind: "stale" };
     }
 
-    // 6. 正式提交：写入 boundHandle / currentBoundOwner / currentProviderId。
+    // 6. 正式提交。
     this.boundHandle = handle as MessageProviderOperations;
     this.currentBoundOwner = ownerPublicKeyHex;
+    this.currentBoundOwnerPrivateKeyHex = signer.privateKeyHex;
     this.currentProviderId = provider.id;
     this.lastErrorMessageValue = null;
-    // 连接成功 → 重连协调器已写入的等待倒计时作废。
     this.nextReconnectAtMsValue = null;
     emitLog(this.cfg.logger, "info", "appmsg.connect.bound", {
       ownerPublicKeyHex,
@@ -847,38 +834,16 @@ export class AppMsgCoreImpl implements AppMsgCore {
       connectEpoch: myEpoch
     });
 
-    // 6.1 远端断线观测（硬切换 003 反馈"必改"）：bind 成功后立刻挂
-    //     onClose 订阅。handle 真的断开时 fire state change，manifest
-    //     协调器会通过 onStateChange 识别"刚 bound → 现在不在 bound"
-    //     并重新进入 5 秒循环。
     this.attachHandleCloseHook(this.boundHandle);
-
-    // 重挂 unfiltered 订阅（如果有）。
     this.reattachUnfilteredSubscriptions();
 
-    // 触发同步。
     void this.triggerSync();
     this.fireStateChange();
     return { kind: "connected" };
   }
 
-  /**
-   * 把 core 拉到结构性离线态（硬切换 003 反馈"必改"）。
-   *
-   * 与 `disconnect()` 区别：
-   *   - `disconnect()`：纯 IO 关闭，**不**清 `lastError`（用户手动断开
-   *     时也希望保留最近错误文案）；
-   *   - `markStructurallyOffline()`：把"曾经尝试过连接失败"的痕迹一
-   *     并擦掉——`lastError` + `nextReconnectAtMs` + `currentBoundOwner`
-   *     全部清回 null，让 `inspectLocalDb().state` 干净地回到 `idle`。
-   *
-   * 唯一调用者是 manifest 协调器内的 `goStructurallyOffline()`。
-   */
   markStructurallyOffline(): void {
-    // 1. 抬 connectEpoch：任何在飞的 connectForOwner 在 commit 前会
-    //    发现 epoch 已变并自动返回 stale，不会污染本方法清理后的状态。
     this.connectEpoch += 1;
-    // 2. 关 handle + 解 onClose 订阅。
     if (this.boundHandle) {
       try {
         this.boundHandle.close();
@@ -895,12 +860,11 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.handleCloseOff = null;
     }
-    // 3. 清所有结构性离线痕迹。
     this.currentBoundOwner = null;
+    this.currentBoundOwnerPrivateKeyHex = null;
     this.currentProviderId = null;
     this.lastErrorMessageValue = null;
     this.nextReconnectAtMsValue = null;
-    // 4. 关本地 DB（disconnect 也会做，但本入口独立可用）。
     if (this.localHandle) {
       try {
         this.localHandle.close();
@@ -921,20 +885,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
     this.fireStateChange();
   }
 
-  /**
-   * 给当前 bound handle 挂远端断线观测。
-   *
-   * 实现原则：
-   *   - 不依赖具体 provider 的 wire 接口；任何实现 `MessageProviderOperations`
-   *     的 handle 若自带 onClose 钩子，立即挂上；没有则降级为定时
-   *     `state()` 轮询（≥1s 间隔）——这只是 fallback，**不**作为
-   *     5 秒重连逻辑的驱动者，5 秒循环由 manifest 协调器持有。
-   *   - 触发条件：handle `state()` 转入 `closed` / `idle` 且
-   *     `currentBoundOwner` 仍记着同一个 owner；
-   *     此时清掉本地的 `boundHandle` 引用并 fire state change，让
-   *     manifest 协调器通过 `onStateChange` 检测"刚 bound → 突然不
-   *     在 bound"并重新 attemptConnect。
-   */
   private attachHandleCloseHook(handle: MessageProviderOperations): void {
     if (this.handleCloseOff) {
       try {
@@ -944,7 +894,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.handleCloseOff = null;
     }
-    // 1) 优先尝试 typed onClose（HubMsg 等 provider 可选实现）。
     const maybeOnClose = (handle as unknown as {
       onClose?: (h: () => void) => () => void;
     }).onClose;
@@ -959,8 +908,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
       };
       return;
     }
-    // 2) Fallback：低频 state() 轮询。**不**作为健康检查 / 计时依据，
-    //    仅用于把"远端静默断开"翻译成一次 fireStateChange。
     const poller = setInterval(() => {
       const h = this.boundHandle;
       if (!h) {
@@ -978,16 +925,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
     };
   }
 
-  /**
-   * 远端断线处理（硬切换 003 反馈"必改"）。
-   *
-   * 触发后：
-   *   - 清掉 `boundHandle` 引用（保持 `currentBoundOwner` 不变——仍
-   *     记着"曾试图连上这个 owner"，管理页可正确显示 `closed`）；
-   *   - 不自动排 5 秒 timer——manifest 协调器通过订阅
-   *     `onStateChange()` 识别此事件后才会触发 `attemptConnect()`，
-   *     保证"重连驱动逻辑只在 manifest 一处"。
-   */
   private handleGoneAfterBound(): void {
     if (this.boundHandle && this.boundHandle.state() !== "bound") {
       this.boundHandle = null;
@@ -1020,9 +957,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       });
     }
     this.currentBoundOwner = null;
-    // 显式 / 结构性断开：等待中的下一次自动重连截止时间一律作废。
-    // 注意：这里的清空**不**触发 `fireStateChange()`——`disconnect` 本
-    // 身在末尾会触发一次 state change；避免重复通知。
+    this.currentBoundOwnerPrivateKeyHex = null;
     this.nextReconnectAtMsValue = null;
     if (this.currentUnfilteredOff) {
       try {
@@ -1083,17 +1018,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   inspectLocalDb(): AppMsgLocalDbSnapshot {
-    // state 真值（硬切换 003 §5.7 修正 + 反馈"必改"）：
-    //   - boundHandle 存在 **且** `boundHandle.state() === "bound"` → open；
-    //   - 否则按"是否应当重连"决定 closed / idle：
-    //       * `currentBoundOwner !== null`：曾连上 owner，但 handle 不
-    //         在 bound（远端断线 / 显式断开）→ 当前应当重连 → `closed`；
-    //       * `nextReconnectAtMs !== null`：协调器已写入等待重连截止时
-    //         间 → `closed`；
-    //       * 其余情形：从未连过 / 结构性不可连接 → `idle`。
-    //
-    // **不**再用 `lastErrorMessageValue !== null` 兜底——曾经的失败
-    // 不代表"当前应当重连"；结构性不可连接场景必须能稳定回到 `idle`。
     const isOpen = Boolean(
       this.boundHandle && this.boundHandle.state() === "bound"
     );
@@ -1111,15 +1035,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
     };
   }
 
-  /**
-   * 由 setup 内的重连协调器写入下一次自动重连截止时间戳。
-   *
-   * - `value` 必须为未来时间戳；`null` 表示清空；
-   * - 写入后立即触发 `fireStateChange()`，让订阅 `onStateChange` 的
-   *   管理页立即刷新倒计时展示；
-   * - 该入口是 plugin-appmsg **唯一**允许写入 `nextReconnectAtMs`
-   *   的通道；core 内部不再自己起 5 秒定时器。
-   */
   setNextReconnectAtMs(value: number | null): void {
     const normalized =
       typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -1128,22 +1043,144 @@ export class AppMsgCoreImpl implements AppMsgCore {
     this.fireStateChange();
   }
 
-  /** 读取当前等待重连截止时间戳（仅 setup 协调器内部诊断用）。 */
   getNextReconnectAtMs(): number | null {
     return this.nextReconnectAtMsValue;
   }
 
-  /* ====== Endpoint service 内部调用 ============== */
-  /* 由 AppMsgEndpointServiceImpl 直接调用本类内部的 `sendMessageImpl` / */
-  /* `listMessagesImpl` / `getMessageImpl`，不暴露为 public API。 */
+  /* ====== seal / open helpers（platform internal） ============== */
 
-  /* platform-internal: 由 AppMsgEndpointServiceImpl 调用 */
+  /**
+   * 把入站 sealed record 解密 + 验签后翻译为公开 `AppMsgMessage`。
+   *
+   * 关键约束：
+   *   - 必须**先 verify 后 decrypt**——任何一步失败都 fail-closed；
+   *   - 用当前 bound owner 的私钥做 recipient 端解密（`static-static ECDH`）
+   *     ——如果 envelope 真值里的 recipientPublicKeyBytes 与当前 bound
+   *     owner 的公钥不匹配，open 会直接失败（验签 / 解密任一步都不会
+   *     通过）；
+   *   - 失败一律 swallow 到调用方——调用方（inbound handler / list / get）
+   *     记录英文日志并继续处理其它记录。
+   *
+   * 公开原因：endpoint service impl 需要在 provider.subscribe handler
+   * 里解 sealed record → public message；同文件内访问即可。
+   */
+  openSealedToMessage(rec: ProviderSealedMessageRecord): AppMsgMessage | null {
+    const ownerPriv = this.currentBoundOwnerPrivateKeyHex;
+    if (!ownerPriv) {
+      return null;
+    }
+    let opened;
+    try {
+      opened = openAppMessage({
+        signed: rec.envelope,
+        recipientPrivateKeyHex: ownerPriv
+      });
+    } catch (err) {
+      const reason =
+        err instanceof AppMsgCryptoError
+          ? err.reason
+          : err instanceof Error
+            ? "decrypt_failed"
+            : "decrypt_failed";
+      emitLog(this.cfg.logger, "warn", "appmsg.inbound.crypto.failed", {
+        reason,
+        messageId: rec.messageId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
+    const bodyStr = new TextDecoder("utf-8", { fatal: true }).decode(opened.bodyUtf8);
+    const out: AppMsgMessage = {
+      messageId: rec.messageId,
+      clientMessageId: opened.clientMessageId,
+      senderPublicKeyHex: opened.senderPublicKeyHex,
+      recipientPublicKeyHex: opened.recipientPublicKeyHex,
+      contentType: opened.contentType,
+      body: bodyStr,
+      createdAtMs: opened.createdAtMs,
+      insertedAtMs: rec.insertedAtMs
+    };
+    if (opened.senderEndpointKind === "origin") out.senderOrigin = opened.senderEndpointId;
+    else if (opened.senderEndpointKind === "plugin") out.senderAppId = opened.senderEndpointId;
+    if (opened.recipientEndpointKind === "origin") out.recipientOrigin = opened.recipientEndpointId;
+    else if (opened.recipientEndpointKind === "plugin")
+      out.recipientAppId = opened.recipientEndpointId;
+    return out;
+  }
+
+  /** 把公开 send input + sender projection 翻译为 sealed record。 */
+  private sealSendInput(input: {
+    sender: AppMsgSenderProjection;
+    recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string };
+    contentType: AppMsgContentType;
+    body: string;
+    clientMessageId: string;
+    createdAtMs: number;
+  }): { record: ProviderSealedMessageRecord } | { error: string } {
+    const ownerPub = this.currentBoundOwner;
+    const ownerPriv = this.currentBoundOwnerPrivateKeyHex;
+    if (!ownerPub || !ownerPriv) {
+      return { error: "appmsg.core: not_ready (no current owner / private key)" };
+    }
+    const senderEp = senderEndpointFor(input.sender);
+    const recipientEp = recipientEndpointFor(input.recipient);
+    if (senderEp.kind !== "origin" && senderEp.kind !== "plugin") {
+      return { error: "appmsg.core: senderEndpointKind invalid" };
+    }
+    if (recipientEp.kind !== "origin" && recipientEp.kind !== "plugin") {
+      return { error: "appmsg.core: recipientEndpointKind invalid" };
+    }
+    if (!input.recipient.recipientPublicKeyHex) {
+      return { error: "appmsg.core: recipientPublicKeyHex required" };
+    }
+    if (input.contentType !== "text/plain" && input.contentType !== "text/markdown") {
+      return { error: "appmsg.core: invalid contentType" };
+    }
+    if (typeof input.body !== "string" || input.body.length === 0) {
+      return { error: "appmsg.core: body must be non-empty" };
+    }
+    if (!input.clientMessageId) {
+      return { error: "appmsg.core: clientMessageId required" };
+    }
+    try {
+      const sealed = sealAppMessage({
+        senderPrivateKeyHex: ownerPriv,
+        senderPublicKeyHex: ownerPub,
+        recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
+        senderEndpoint: senderEp,
+        recipientEndpoint: recipientEp,
+        contentType: input.contentType,
+        body: input.body,
+        clientMessageId: input.clientMessageId,
+        createdAtMs: input.createdAtMs
+      });
+      return {
+        record: {
+          messageId: "", // 由 HubMsg 服务端在 send 成功后分配
+          senderPublicKeyHex: ownerPub,
+          senderEndpointId: senderEp.id,
+          senderEndpointKind: senderEp.kind,
+          recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
+          recipientEndpointId: recipientEp.id,
+          recipientEndpointKind: recipientEp.kind,
+          clientMessageId: input.clientMessageId,
+          createdAtMs: input.createdAtMs,
+          insertedAtMs: input.createdAtMs,
+          envelope: sealed.envelope
+        }
+      };
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /* ====== Endpoint service 内部调用 ============== */
+
   async sendMessageImpl(
     handle: MessageProviderOperations,
     sender: AppMsgSenderProjection,
     input: AppMsgSendInput
   ): Promise<AppMsgSendResult> {
-    // 校验输入（owner / endpoint 等已在 endpoint service 层做完）。
     const hasSenderOrigin =
       typeof sender.senderOrigin === "string" && sender.senderOrigin.length > 0;
     const hasSenderAppId = typeof sender.senderAppId === "string" && sender.senderAppId.length > 0;
@@ -1177,20 +1214,25 @@ export class AppMsgCoreImpl implements AppMsgCore {
       bodyBytes: input.body.length,
       senderKind: hasSenderOrigin ? "origin" : hasSenderAppId ? "plugin" : "none"
     });
-    const senderEp = senderEndpointFor(sender);
-    let res: { messageId: string; createdAtMs: number };
-    try {
-      const providerSender = senderToProviderProjection(sender);
-      res = await handle.sendMessage({
-        sender: providerSender,
+
+    const sealed = this.sealSendInput({
+      sender,
+      recipient: {
         recipientPublicKeyHex: input.recipientPublicKeyHex,
         recipientOrigin: input.recipientOrigin,
-        recipientAppId: input.recipientAppId,
-        contentType: input.contentType,
-        body: input.body,
-        clientMessageId: input.clientMessageId,
-        createdAtMs: input.createdAtMs
-      });
+        recipientAppId: input.recipientAppId
+      },
+      contentType: input.contentType,
+      body: input.body,
+      clientMessageId: input.clientMessageId,
+      createdAtMs: input.createdAtMs
+    });
+    if ("error" in sealed) {
+      throw new Error(sealed.error);
+    }
+    let res: { messageId: string; insertedAtMs: number };
+    try {
+      res = await handle.sendMessage({ record: sealed.record });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.lastErrorMessageValue = msg;
@@ -1205,8 +1247,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       clientMessageId: input.clientMessageId
     });
 
-    // self-send：sender == recipient at endpoint；本地 DB 写一份（HubMsg 服务端
-    // 不再 push）。
+    // self-send：sender == recipient at endpoint；本地 DB 写一份明文投影。
     const isSelfSend =
       sender.senderPublicKeyHex === input.recipientPublicKeyHex &&
       ((hasSenderOrigin && sender.senderOrigin === input.recipientOrigin) ||
@@ -1225,17 +1266,16 @@ export class AppMsgCoreImpl implements AppMsgCore {
           contentType: input.contentType,
           body: input.body,
           createdAtMs: input.createdAtMs,
-          insertedAtMs: res.createdAtMs
+          insertedAtMs: res.insertedAtMs
         });
         this.lastInsertedAtMsValue = Date.now();
       } catch (err) {
         this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
       }
     }
-    return { messageId: res.messageId, createdAtMs: res.createdAtMs };
+    return { messageId: res.messageId, createdAtMs: input.createdAtMs };
   }
 
-  /* platform-internal: 由 AppMsgEndpointServiceImpl 调用 */
   async listMessagesImpl(
     handle: MessageProviderOperations,
     ownerPublicKeyHex: string,
@@ -1250,8 +1290,25 @@ export class AppMsgCoreImpl implements AppMsgCore {
         afterMessageId: input?.afterMessageId,
         limit
       });
-      const items = res.items;
-      return { items, hasMore: res.hasMore };
+      const out: AppMsgMessage[] = [];
+      for (const rec of res.items) {
+        const m = this.openSealedToMessage(rec);
+        if (!m) continue;
+        out.push(m);
+        // 同步路径把解密后的明文投影写本地库（best-effort）。
+        if (this.localOps && this.currentProviderId) {
+          try {
+            await this.localOps.putMessage(this.currentProviderId, m);
+            this.lastInsertedAtMsValue = Date.now();
+          } catch (err) {
+            emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
+              err: err instanceof Error ? err.message : String(err),
+              messageId: m.messageId
+            });
+          }
+        }
+      }
+      return { items: out, hasMore: res.hasMore };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.lastErrorMessageValue = msg;
@@ -1259,7 +1316,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
     }
   }
 
-  /* platform-internal: 由 AppMsgEndpointServiceImpl 调用 */
   async getMessageImpl(
     handle: MessageProviderOperations,
     ownerPublicKeyHex: string,
@@ -1267,11 +1323,26 @@ export class AppMsgCoreImpl implements AppMsgCore {
     input: AppMsgGetInput
   ): Promise<AppMsgMessage | null> {
     try {
-      return await handle.getMessage({
+      const rec = await handle.getMessage({
         ownerPublicKeyHex,
         scopeEndpoint: endpoint,
         messageId: input.messageId
       });
+      if (!rec) return null;
+      const m = this.openSealedToMessage(rec);
+      if (!m) return null;
+      if (this.localOps && this.currentProviderId) {
+        try {
+          await this.localOps.putMessage(this.currentProviderId, m);
+          this.lastInsertedAtMsValue = Date.now();
+        } catch (err) {
+          emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
+            err: err instanceof Error ? err.message : String(err),
+            messageId: m.messageId
+          });
+        }
+      }
+      return m;
     } catch (err) {
       this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
       return null;
@@ -1308,37 +1379,41 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.currentUnfilteredOff = null;
     }
     if (this.unfilteredSubs.size === 0 || !this.boundHandle) return;
-    this.currentUnfilteredOff = this.boundHandle.subscribeMessages((msg) => {
-      // 写本地库（best-effort）—— 带当前 providerId 维度。
-      this.localOps && this.currentProviderId
-        ? this.localOps.putMessage(this.currentProviderId, msg)
-        : Promise.resolve()
-        .then(() => {
-          this.lastInsertedAtMsValue = Date.now();
-          this.recordTargetLastReceived(msg);
-        })
-        .catch((err) => {
-          this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
-          emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
-            err: this.lastErrorMessageValue,
-            messageId: msg.messageId
+    this.currentUnfilteredOff = this.boundHandle.subscribeMessages((rec) => {
+      const m = this.openSealedToMessage(rec);
+      if (!m) return;
+      if (this.localOps && this.currentProviderId) {
+        try {
+          awaitPromise(
+            this.localOps.putMessage(this.currentProviderId, m).then(() => {
+              this.lastInsertedAtMsValue = Date.now();
+              this.recordTargetLastReceived(m);
+            })
+          ).catch((err) => {
+            this.lastErrorMessageValue =
+              err instanceof Error ? err.message : String(err);
+            emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
+              err: this.lastErrorMessageValue,
+              messageId: m.messageId
+            });
           });
-        });
-      // 派发给 unfiltered 订阅者。
+        } catch (err) {
+          this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
+        }
+      }
       for (const h of this.unfilteredSubs) {
         try {
-          h(msg);
+          h(m);
         } catch {
           // ignore
         }
       }
-      // 触发一次增量同步。
       void this.triggerSync();
       emitLog(this.cfg.logger, "info", "appmsg.receive.pushed", {
-        messageId: msg.messageId,
-        clientMessageId: msg.clientMessageId,
-        contentType: msg.contentType,
-        bodyBytes: msg.body.length
+        messageId: m.messageId,
+        clientMessageId: m.clientMessageId,
+        contentType: m.contentType,
+        bodyBytes: m.body.length
       });
     });
   }
@@ -1394,7 +1469,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
         if (!this.localOps || !this.currentProviderId) return "";
         const st = await this.localOps.getTargetState(this.currentProviderId, targetKey);
         return st?.lastSyncedMessageId ?? "";
-      }
+      },
+      openSealed: (rec) => this.openSealedToMessage(rec)
     });
   }
 
@@ -1503,7 +1579,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   /* ====== keyspace / provider 切换适配 ====== */
 
-  /** 触发 state change 通知（endpoint service 内部迁移订阅用）。 */
   private fireStateChange(): void {
     for (const l of this.stateChangeListeners) {
       try {
@@ -1544,6 +1619,20 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 }
 
+/**
+ * fire-and-forget promise helper（避免在 sync 推送 handler 内 async）。
+ */
+function awaitPromise(p: Promise<unknown>): Promise<void> {
+  return p.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
 // 防止 IDE 报 unused
 void ({} as AppMsgAddress);
 void ({} as ProviderOnlineResult);
+void ({} as ProviderSenderProjection);
+void bytesToHex;
+void hexToBytes;
+void readEnvelopeRoute;

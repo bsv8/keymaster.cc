@@ -166,7 +166,11 @@ importers:
         specifier: ^6.0.3
         version: 6.0.3
 
-  packages/contracts: {}
+  packages/contracts:
+    dependencies:
+      cborg:
+        specifier: ^5.1.6
+        version: 5.1.6
 
   packages/plugin-appmsg:
     dependencies:
@@ -1163,6 +1167,10 @@ packages:
 
   caniuse-lite@1.0.30001799:
     resolution: {integrity: sha512-hG1bReV+OUU+MOqK4t/ZWI0tZOyz3rqS9XuhOUz1cIcbwBKjOyJEJuw9ER5JuNyqxNk8u/JUVbGibBOL1yrjFw==}
+
+  cborg@5.1.6:
+    resolution: {integrity: sha512-apu/mOSODJ98JXBz3cbiv/gAFX4oaCZQQ53+8b4IPjc1wylYxd8eJis87QP7ic4AOE4O02j02jjfUgVZUJIIvA==}
+    hasBin: true
 
   chai@5.3.3:
     resolution: {integrity: sha512-4zNhdJD/iOjSH0A05ea+Ke6MU5mmpQcbQsSOkgdaUMJ9zTlDTD/GYlwohmIE2u0gaxHYiVHEn1Fw9mZ/ktJWgw==}
@@ -2420,6 +2428,8 @@ snapshots:
       function-bind: 1.1.2
 
   caniuse-lite@1.0.30001799: {}
+
+  cborg@5.1.6: {}
 
   chai@5.3.3:
     dependencies:

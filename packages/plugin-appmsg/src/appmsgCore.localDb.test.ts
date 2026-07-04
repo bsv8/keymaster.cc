@@ -62,7 +62,7 @@ function makeProvider(id: string): MessageProvider {
   const handle: MessageProviderOperations = {
     state: () => "bound",
     close: () => undefined,
-    sendMessage: async () => ({ messageId: "m", createdAtMs: 0 } as ProviderSendResult),
+    sendMessage: async () => ({ messageId: "m", insertedAtMs: 0 } as ProviderSendResult),
     listMessages: async () => ({ items: [], hasMore: false } as ProviderListResult),
     getMessage: async () => null as AppMsgMessage | null,
     subscribeMessages: () => off,
@@ -96,7 +96,7 @@ describe("AppMsgCoreImpl - local db unavailable", () => {
       }
     };
     const cfg: AppMsgCoreConfig = {
-      signerProvider: async () => ({ publicKeyHex: OWNER, signChallenge: async () => "00".repeat(64) }),
+      signerProvider: async () => ({ publicKeyHex: OWNER, privateKeyHex: "00".repeat(32), signChallenge: async () => "00".repeat(64) }),
       keyspace,
       pluginId: "appmsg",
       storageId: "messages_v2",

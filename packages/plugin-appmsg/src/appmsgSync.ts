@@ -1,5 +1,5 @@
 // packages/plugin-appmsg/src/appmsgSync.ts
-// appmsg 增量同步器（施工单 2026-07-04 001 硬切换后）。
+// appmsg 增量同步器（施工单 2026-07-04 001 + 2026-07-04 004 硬切换）。
 //
 // 设计缘由：
 //   - 每个本地收件目标保存自己的 `lastSyncedMessageId`；
@@ -9,15 +9,19 @@
 //   - 失败就失败：靠下次重连 / 下次推送 / 下次手动刷新继续；**不**抛错
 //     反向阻塞推送分发，不引入额外 replay 队列；
 //   - provider 已删的旧消息不影响本地已写入的副本（施工单 §7.5）；
-//   - **不**再调用 wire 字符串方法 `request("message.list", ...)` ——
+//   - **不再**调用 wire 字符串方法 `request("message.list", ...)` ——
 //     走 typed `MessageProviderOperations.listMessages(...)`；wire 翻译
-//     完全由 provider 内部负责。
+//     完全由 provider 内部负责；
+//   - 同步拿到的每条记录都是 sealed envelope record（**不再**含明文
+//     body）；本模块**不**做 verify / decrypt——把解密委托给调用方
+//     注入的 `openSealed` 回调（plugin-appmsgCore 唯一持有 ECDH 私钥）。
 
 import type {
   AppMsgMessage,
   MessageProviderOperations,
   ProviderListInput,
-  ProviderListResult
+  ProviderListResult,
+  ProviderSealedMessageRecord
 } from "@keymaster/contracts";
 import type { AppMsgLocalDbOps } from "./appmsgDb.js";
 
@@ -47,14 +51,16 @@ function baseTargetState(targetKey: string) {
 /**
  * 一次单 scope 增量同步。
  *
- * 流程（施工单 2026-07-04 001 后）：
+ * 流程（施工单 2026-07-04 004 硬切换后）：
  *   1. 从本地库读出 `(providerId, targetKey)` 复合键的 lastSyncedMessageId
  *      作为 cursor（无则 `""`）。
  *   2. 写 `lastSyncStartedAtMs = now` 到 targets。
  *   3. 调 `providerOperations.listMessages({ownerPublicKeyHex,
- *      scopeEndpoint, afterMessageId, limit})`。
- *   4. 把 items 按 messageId 去重后 put 到本地库（带 providerId）。
- *   5. 更新 target 的 `lastSyncedMessageId` 为本次 items 中最大
+ *      scopeEndpoint, afterMessageId, limit})` 拿 sealed records。
+ *   4. 用 `openSealed` 把每条 sealed record 解密 → 公开 `AppMsgMessage`；
+ *      验签 / 解密失败由 `openSealed` 内部 swallow 并返回 null。
+ *   5. 把 items 按 messageId 去重后 put 到本地库（带 providerId）。
+ *   6. 更新 target 的 `lastSyncedMessageId` 为本次 items 中最大
  *      messageId；同时写 `lastSyncCompletedAtMs` / `lastSyncError`。
  *
  * 任何一步失败：
@@ -70,6 +76,12 @@ export async function syncOneScope(input: {
   targetKey: string;
   cursorMessageId: string;
   pageLimit?: number;
+  /**
+   * 把 sealed record 翻译成公开 `AppMsgMessage`；由调用方注入
+   * （plugin-appmsgCore）以保证密钥闭包仅在 core 内持有。返回 null
+   * 表示该条 sealed record 验签或解密失败——按 fail-closed 跳过。
+   */
+  openSealed: (rec: ProviderSealedMessageRecord) => AppMsgMessage | null;
 }): Promise<AppMsgSyncOutcome> {
   const startedAt = Date.now();
   if (input.ops) {
@@ -134,12 +146,14 @@ export async function syncOneScope(input: {
   const seen = new Set<string>();
   const toWrite: AppMsgMessage[] = [];
   let maxMessageId = input.cursorMessageId;
-  for (const item of items) {
-    if (!item?.messageId) continue;
-    if (seen.has(item.messageId)) continue;
-    seen.add(item.messageId);
-    toWrite.push(item);
-    if (item.messageId > maxMessageId) maxMessageId = item.messageId;
+  for (const rec of items) {
+    if (!rec?.messageId) continue;
+    if (seen.has(rec.messageId)) continue;
+    seen.add(rec.messageId);
+    const m = input.openSealed(rec);
+    if (!m) continue;
+    toWrite.push(m);
+    if (m.messageId > maxMessageId) maxMessageId = m.messageId;
   }
   // 写入前先**用本地 DB 的 (providerId, targetId) 维度去重**——同一
   // message 已经在 DB 命中 targetId 时本次跳过，避免"重复 cover"表面
@@ -256,6 +270,7 @@ export async function syncAllScopes(input: {
   pageLimit?: number;
   resolveTargetKey: (ep: { kind: "origin" | "plugin"; id: string }) => string;
   loadCursor: (targetKey: string) => Promise<string>;
+  openSealed: (rec: ProviderSealedMessageRecord) => AppMsgMessage | null;
 }): Promise<AppMsgSyncOutcome[]> {
   const out: AppMsgSyncOutcome[] = [];
   for (const ep of input.scopeEndpoints) {
@@ -270,7 +285,8 @@ export async function syncAllScopes(input: {
         scopeEndpoint: ep,
         targetKey,
         cursorMessageId: cursor,
-        pageLimit: input.pageLimit
+        pageLimit: input.pageLimit,
+        openSealed: input.openSealed
       })
     );
   }

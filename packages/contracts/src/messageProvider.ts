@@ -1,5 +1,5 @@
 // packages/contracts/src/messageProvider.ts
-// 消息服务 provider 契约（施工单 2026-07-04 001 硬切换）。
+// 消息服务 provider 契约（施工单 2026-07-04 001 + 2026-07-04 004 硬切换）。
 //
 // 设计缘由：
 //   - `hubmsg` 只是某一种消息服务的 provider；未来还可能有第二种。
@@ -14,8 +14,22 @@
 //   - provider 共享注册表（registry）由 `plugin-appmsg` 提供；provider
 //     自己只负责 `register(...)`，**不**持有 registry 真值——避免"第二个
 //     provider 来时谁拥有注册表"再次出现。
+//
+// 施工单 2026-07-04 004 硬切换（appmsg 签名壳 / 密文正文）：
+//   - provider 业务层的入参 / 出参从明文 `body` 改为 sealed envelope
+//     record（`ProviderSealedMessageRecord`）；
+//   - **明文** `contentType + body` 只在 plugin-appmsg 内部出现；
+//   - provider 仍负责"wire ↔ sealed record"翻译，但**不**做解密 / 验签
+//     ——sealed 真值对 provider 是不透明字节；
+//   - sealed record 内部同时携带路由头（sender / recipient owner +
+//     endpoint id）+ clientMessageId + 时间戳 + envelope 真值 bytes +
+//     signature bytes——保证 provider 完全不需要去碰明文业务语义。
 
-import type { AppMsgMessage, AppMsgOnlineStatus } from "./appmsg.js";
+import type {
+  AppMsgMessage,
+  AppMsgOnlineStatus,
+  SignedAppMsgEnvelopeV1
+} from "./appmsg.js";
 
 /* ============== provider 注册表 capability ============== */
 
@@ -158,45 +172,63 @@ export interface MessageProvider {
   checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult>;
 }
 
+/* ============== sealed envelope record（施工单 2026-07-04 004 硬切换） ============== */
+
 /**
- * 给 `MessageProviderHandle` 加上的业务方法扩展。
+ * Provider 业务层 sealed message record（platform internal）。
  *
- * 设计缘由：`MessageProviderHandle` 只描述"如何关闭 / 看状态"这种
- * provider-neutral 行为；具体的"发消息 / 拉消息 / 订阅"是 provider
- * 业务层行为。`MessageProvider` 在 `bind()` 返回值上**直接**返回这个
- * 复合类型（typed handler），让 plugin-appmsg 通过 typed 方法操作。
- *
- * 实现层（例如 plugin-hubmsg）`MessageProviderHandle` 同时实现 `state()`
- * `close()` 和这些业务方法。
+ * 设计缘由：
+ *   - plugin-appmsg 在 send 路径把明文 `AppMsgSendInput` 经 seal + sign
+ *     后**直接**构成本 record；HubMsg 服务端只持久化 / 转发本 record 的
+ *     `envelope` 字段（`SignedAppMsgEnvelopeV1`），不需要解出明文；
+ *   - list / get / received 返回的也是本 record：provider 内部把 wire
+ *     record 翻译成本 record；plugin-appmsg 入站侧拿到本 record 后做
+ *     verify → decrypt → 投影成公开 `AppMsgMessage` → 落本地库；
+ *   - 路由头（`senderPublicKeyHex` / `senderOrigin` / `senderAppId` /
+ *     `recipientPublicKeyHex` / `recipientOrigin` / `recipientAppId`）
+ *     都从 `envelope.envelopeBytes` 解出来；本结构对它们做一次镜像缓存
+ *     以避免 plugin-appmsg 每次都重新解析 envelope 真值；
+ *   - 接收方"自发给自己" / "清空本地 DB 后重拉历史"由 static-static
+ *     ECDH 保证：用 sender 长期公钥 + recipient 长期私钥同样可解；
+ *   - provider **不**做 verify / decrypt——它对 envelope 真值是不透明
+ *     字节；这是平台"明文不漏到 provider"的硬边界。
  */
-export interface MessageProviderOperations extends MessageProviderHandle {
-  /** 发送一条消息到指定 recipient。失败语义由 provider 自己定义。 */
-  sendMessage(input: ProviderSendInput): Promise<ProviderSendResult>;
-  /** 拉取一个 endpoint 的历史消息（按时间正向）。 */
-  listMessages(input: ProviderListInput): Promise<ProviderListResult>;
-  /** 按 messageId 拉单条。scope 外返回 null。 */
-  getMessage(input: ProviderGetInput): Promise<AppMsgMessage | null>;
-  /**
-   * 订阅推送消息。
-   *
-   * handler 收到的是标准化 `AppMsgMessage`，provider 内部负责 wire →
-   * public 翻译。返回取消订阅函数。
-   */
-  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
-  /**
-   * 批量在线查询。
-   *
-   * 失败语义同 `MessageProvider.checkOnline`。
-   */
-  checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult>;
+export interface ProviderSealedMessageRecord {
+  /** 服务端主键；客户端不可伪造。 */
+  messageId: string;
+  /** sender owner 公钥（66 hex 字符）；镜像 envelope 真值里的 senderPublicKey。 */
+  senderPublicKeyHex: string;
+  /** sender endpoint id（origin / appId / ""）；空字符串 = 系统无 endpoint。 */
+  senderEndpointId: string;
+  /** sender endpoint kind；与 senderEndpointId 配套。 */
+  senderEndpointKind: "origin" | "plugin" | "";
+  /** recipient owner 公钥（66 hex 字符）；镜像 envelope 真值里的 recipientPublicKey。 */
+  recipientPublicKeyHex: string;
+  /** recipient endpoint id（origin / appId / ""）；空字符串 = 系统无 endpoint。 */
+  recipientEndpointId: string;
+  /** recipient endpoint kind；与 recipientEndpointId 配套。 */
+  recipientEndpointKind: "origin" | "plugin" | "";
+  /** sender 侧幂等键；镜像 envelope 真值里的 clientMessageId。 */
+  clientMessageId: string;
+  /** sender 声明的创建时间（unix milliseconds）。 */
+  createdAtMs: number;
+  /** 服务端入库时间（unix milliseconds）。 */
+  insertedAtMs: number;
+  /** 永久消息真值字节 + sender 签名。 */
+  envelope: SignedAppMsgEnvelopeV1;
 }
 
-/* ============== provider 业务层输入 / 输出形状 ============== */
+/* ============== provider 业务层输入 / 输出形状（施工单 2026-07-04 004 硬切换：sealed） ============== */
 
 /**
  * provider 业务层的 sender 投影：plugin-appmsg 在每次 send 时把
  * 当前 owner 的 sender projection 注入；provider 负责把它映射成
  * 自己 wire 的 sender 字段。
+ *
+ * 施工单 2026-07-04 004 硬切换后保留本类型用于 plugin-appmsg 内部
+ * 协议层 adapter；sender 投影在 seal 之前完成，**不再**进入 sealed
+ * record 入参字段——sealed record 已经把 sender 公钥 / endpoint id
+ * 镜像进 envelope 真值。
  */
 export interface ProviderSenderProjection {
   senderPublicKeyHex: string;
@@ -205,26 +237,27 @@ export interface ProviderSenderProjection {
 }
 
 /**
- * provider 业务层的发送入参。
+
+/**
+ * provider 业务层的发送入参（施工单 2026-07-04 004 硬切换：sealed record）。
  *
- * 设计缘由：与 `AppMsgSendInput` 同形，但**不**带任何系统内部概念
- * （owner / endpoint / box / atMs 等），由 provider 自己决定如何映射。
+ * 关键约束：
+ *   - **不再**带明文 `contentType + body`——plugin-appmsg 在边界已完成
+ *     seal + sign；
+ *   - `record.envelope` 已经把 sender / recipient 公钥 + endpoint id +
+ *     clientMessageId + createdAtMs + nonce + ciphertext 都签进 envelope
+ *     真值；provider 不需要也不允许重新解读它们；
+ *   - 本字段集合是**唯一**允许进入 provider wire 的形状。
  */
 export interface ProviderSendInput {
-  sender: ProviderSenderProjection;
-  recipientPublicKeyHex: string;
-  recipientOrigin?: string;
-  recipientAppId?: string;
-  contentType: "text/plain" | "text/markdown";
-  body: string;
-  clientMessageId: string;
-  createdAtMs: number;
+  /** 已经 seal + sign 完成的 sealed message record。 */
+  record: ProviderSealedMessageRecord;
 }
 
 /** provider 业务层的发送结果。 */
 export interface ProviderSendResult {
   messageId: string;
-  createdAtMs: number;
+  insertedAtMs: number;
 }
 
 /**
@@ -244,11 +277,12 @@ export interface ProviderListInput {
 /**
  * provider 业务层的 list 结果。
  *
- * **每条 item 已经是标准化 `AppMsgMessage`**——provider 内部把 wire record
- * 翻译成公开形态再返回。
+ * 每条 item 是 sealed record——provider 内部完成 wire → sealed 翻译；
+ * **不**做 verify / decrypt，verify + decrypt 由 plugin-appmsg 入站侧
+ * 统一完成（保证密钥逻辑只在一处）。
  */
 export interface ProviderListResult {
-  items: AppMsgMessage[];
+  items: ProviderSealedMessageRecord[];
   hasMore: boolean;
 }
 
@@ -267,6 +301,42 @@ export interface ProviderGetInput {
 export interface ProviderEndpointRef {
   kind: "origin" | "plugin";
   id: string;
+}
+
+/* ============== 给 `MessageProviderHandle` 加上的业务方法扩展 ============== */
+
+/**
+ * 给 `MessageProviderHandle` 加上的业务方法扩展。
+ *
+ * 设计缘由：`MessageProviderHandle` 只描述"如何关闭 / 看状态"这种
+ * provider-neutral 行为；具体的"发消息 / 拉消息 / 订阅"是 provider
+ * 业务层行为。`MessageProvider` 在 `bind()` 返回值上**直接**返回这个
+ * 复合类型（typed handler），让 plugin-appmsg 通过 typed 方法操作。
+ *
+ * 实现层（例如 plugin-hubmsg）`MessageProviderHandle` 同时实现 `state()`
+ * `close()` 和这些业务方法。
+ */
+export interface MessageProviderOperations extends MessageProviderHandle {
+  /** 发送一条消息到指定 recipient。失败语义由 provider 自己定义。 */
+  sendMessage(input: ProviderSendInput): Promise<ProviderSendResult>;
+  /** 拉取一个 endpoint 的历史消息（按时间正向）。 */
+  listMessages(input: ProviderListInput): Promise<ProviderListResult>;
+  /** 按 messageId 拉单条。scope 外返回 null。 */
+  getMessage(input: ProviderGetInput): Promise<ProviderSealedMessageRecord | null>;
+  /**
+   * 订阅推送消息。
+   *
+   * handler 收到的是 sealed record；plugin-appmsg 入站侧负责
+   * verify → decrypt → 投影成 `AppMsgMessage` 后再分发给订阅者。
+   * 返回取消订阅函数。
+   */
+  subscribeMessages(handler: (rec: ProviderSealedMessageRecord) => void): () => void;
+  /**
+   * 批量在线查询。
+   *
+   * 失败语义同 `MessageProvider.checkOnline`。
+   */
+  checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult>;
 }
 
 /* ============== 当前 active provider 快照 ============== */

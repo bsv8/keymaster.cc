@@ -242,6 +242,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
           const { signChallengeWithSecp256k1 } = await import("./signer.js");
           return {
             publicKeyHex: pubHex,
+            privateKeyHex: material.hex,
             signChallenge: async (args: {
               challenge: Uint8Array;
             }): Promise<string> => {

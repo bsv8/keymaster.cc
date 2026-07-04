@@ -33,3 +33,4 @@ export * from "./protocol.js";
 export * from "./appmsg.js";
 export * from "./messageProvider.js";
 export * from "./appmsgBind.js";
+export * from "./cbor.js";

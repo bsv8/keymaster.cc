@@ -28,13 +28,25 @@ import type {
   MessageProviderOperations,
   ProviderListResult,
   ProviderOnlineResult,
+  ProviderSealedMessageRecord,
   ProviderSendResult
 } from "@keymaster/contracts";
 import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
+import { sealAppMessage } from "./appmsgCrypto.js";
+import { bytesToHex, hexToBytes } from "./appmsgCrypto.js";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { sha256 as sha256Bytes } from "@noble/hashes/sha2.js";
 
-const OWNER = "02aaaa".padEnd(66, "a");
-const OWNER_B = "02bbbb".padEnd(66, "b");
+// 测试用真实 keypair：OWNER_PRIV 派生 OWNER 公钥（33-byte compressed
+// secp256k1），OWNER_B_PRIV 派生 OWNER_B 公钥。所有走 ECDH 的路径
+// 都用真实 keypair 而不是占位 hex。
+const OWNER_KP = makeRealKeyPair(11);
+const OWNER_B_KP = makeRealKeyPair(22);
+const OWNER = OWNER_KP.pubHex;
+const OWNER_B = OWNER_B_KP.pubHex;
+const OWNER_PRIV = OWNER_KP.privHex;
+const OWNER_B_PRIV = OWNER_B_KP.privHex;
 
 function makeLogSink() {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
@@ -149,8 +161,8 @@ function makeMockProviderOps(
     state: "idle" | "connecting" | "bound" | "closed";
     sendMessage: (input: unknown) => Promise<ProviderSendResult>;
     listMessages: (input: unknown) => Promise<ProviderListResult>;
-    getMessage: (input: unknown) => Promise<AppMsgMessage | null>;
-    subscribeMessages: (handler: (m: AppMsgMessage) => void) => () => void;
+    getMessage: (input: unknown) => Promise<ProviderSealedMessageRecord | null>;
+    subscribeMessages: (handler: (rec: ProviderSealedMessageRecord) => void) => () => void;
     checkOnline: (input: { publicKeyHexes: string[] }) => Promise<ProviderOnlineResult>;
   }>
 ): MessageProviderOperations {
@@ -160,7 +172,7 @@ function makeMockProviderOps(
     close: () => undefined,
     sendMessage:
       overrides?.sendMessage ??
-      (async () => ({ messageId: "m-sent", createdAtMs: Date.now() })),
+      (async () => ({ messageId: "m-sent", insertedAtMs: Date.now() })),
     listMessages:
       overrides?.listMessages ??
       (async () => ({ items: [], hasMore: false })),
@@ -172,6 +184,82 @@ function makeMockProviderOps(
       overrides?.checkOnline ?? (async () => ({} as ProviderOnlineResult))
   };
 }
+
+/**
+ * 测试用 keypair：根据 hex pub 生成匹配的 priv（用于构造 sender ↔ recipient
+ * 都用真实 ECDH 流程的 sealed record）。
+ */
+function keyPairFromPubHex(pubHex: string): { privHex: string; pubHex: string } {
+  // 解析 pubHex → 反推私钥：测试 fixture 在 setUpMock 阶段用此函数；
+  // 我们**不**在测试里用这个反推——而是用 secp256k1 给定私钥现算公钥。
+  void pubHex;
+  throw new Error("not used in tests; use direct priv/pub pair");
+}
+
+/**
+ * 测试 fixture：构造一组 real keypair（SHA-256(seed) 作为 priv）。
+ */
+function makeRealKeyPair(seed: number): { privHex: string; pubHex: string } {
+  const priv = sha256Bytes(new TextEncoder().encode(`appmsg.test:seed:${seed}`));
+  const pub = secp256k1.getPublicKey(priv, true);
+  return { privHex: bytesToHex(priv), pubHex: bytesToHex(pub) };
+}
+
+/**
+ * 用 ownerPriv/ownerPub 构造一条 sealed record（明文 → envelope）。
+ * 接收方公钥 = recipientPublicKeyHex；测试 fixture 自行保证 priv↔pub
+ * 配对。
+ */
+function makeSealedRecord(input: {
+  messageId: string;
+  senderPrivateKeyHex: string;
+  senderPublicKeyHex: string;
+  recipientPublicKeyHex: string;
+  clientMessageId: string;
+  createdAtMs: number;
+  insertedAtMs: number;
+  contentType: "text/plain" | "text/markdown";
+  body: string;
+  senderEndpointKind?: "origin" | "plugin";
+  senderEndpointId?: string;
+  recipientEndpointKind?: "origin" | "plugin";
+  recipientEndpointId?: string;
+}): ProviderSealedMessageRecord {
+  const sealed = sealAppMessage({
+    senderPrivateKeyHex: input.senderPrivateKeyHex,
+    senderPublicKeyHex: input.senderPublicKeyHex,
+    recipientPublicKeyHex: input.recipientPublicKeyHex,
+    senderEndpoint: {
+      kind: input.senderEndpointKind ?? "plugin",
+      id: input.senderEndpointId ?? KEYMASTER_MESSAGE_APP_ID
+    },
+    recipientEndpoint: {
+      kind: input.recipientEndpointKind ?? "plugin",
+      id: input.recipientEndpointId ?? KEYMASTER_MESSAGE_APP_ID
+    },
+    contentType: input.contentType,
+    body: input.body,
+    clientMessageId: input.clientMessageId,
+    createdAtMs: input.createdAtMs
+  });
+  return {
+    messageId: input.messageId,
+    senderPublicKeyHex: input.senderPublicKeyHex,
+    senderEndpointKind: input.senderEndpointKind ?? "plugin",
+    senderEndpointId: input.senderEndpointId ?? KEYMASTER_MESSAGE_APP_ID,
+    recipientPublicKeyHex: input.recipientPublicKeyHex,
+    recipientEndpointKind: input.recipientEndpointKind ?? "plugin",
+    recipientEndpointId: input.recipientEndpointId ?? KEYMASTER_MESSAGE_APP_ID,
+    clientMessageId: input.clientMessageId,
+    createdAtMs: input.createdAtMs,
+    insertedAtMs: input.insertedAtMs,
+    envelope: sealed.envelope
+  };
+}
+
+// 防止 IDE 报 unused
+void keyPairFromPubHex;
+void hexToBytes;
 
 /**
  * Mock `MessageProvider`：register + bind → 返回 mock handle。
@@ -212,6 +300,7 @@ function makeCore(opts?: {
   persistedActiveProviderId?: string | null;
   signerProvider?: () => Promise<{
     publicKeyHex: string;
+    privateKeyHex: string;
     signChallenge: (args: { challenge: Uint8Array }) => Promise<string>;
   } | null>;
 }): {
@@ -223,11 +312,14 @@ function makeCore(opts?: {
   const keyspace = makeFakeKeyspace();
   const log = makeLogSink();
   const storage = new Map<string, string>();
-  // 默认有可用 signer。
+  // 默认有可用 signer——给 OWNER 一个真实 ECDH / envelope 签名能力。
+  // 注意：测试场景下 mock 的 provider.sendMessage / list / subscribe
+  // 不会真正使用 signer；signChallenge 仅在 provider.bind 阶段可能调。
   const signerProvider =
     opts?.signerProvider ??
     (async () => ({
       publicKeyHex: OWNER,
+      privateKeyHex: OWNER_PRIV,
       signChallenge: async (_args: { challenge: Uint8Array }): Promise<string> => "00".repeat(64)
     }));
   const cfg: AppMsgCoreConfig = {
@@ -650,29 +742,29 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
   function makeConnectedCore() {
     const sentMessages: unknown[] = [];
     const listCalls: unknown[] = [];
-    const subscribeCalls: Array<(m: AppMsgMessage) => void> = [];
+    const subscribeCalls: Array<(rec: ProviderSealedMessageRecord) => void> = [];
+    // 构造一条 OWNER → OWNER_B 的真实 sealed record（mock provider
+    // 返回这条 record；plugin-appmsgCore 入站边界用 OWNER_PRIV 解出明文）。
+    const sealedHello = makeSealedRecord({
+      messageId: "m1",
+      senderPrivateKeyHex: OWNER_PRIV,
+      senderPublicKeyHex: OWNER,
+      recipientPublicKeyHex: OWNER_B,
+      clientMessageId: "c1",
+      createdAtMs: 1,
+      insertedAtMs: 1,
+      contentType: "text/plain",
+      body: "hello"
+    });
     const handle = makeMockProviderOps({
       sendMessage: async (input) => {
         sentMessages.push(input);
-        return { messageId: "m1", createdAtMs: 1000 };
+        return { messageId: "m1", insertedAtMs: 1000 };
       },
       listMessages: async (input) => {
         listCalls.push(input);
         return {
-          items: [
-            {
-              messageId: "m1",
-              clientMessageId: "c1",
-              senderPublicKeyHex: OWNER,
-              senderAppId: KEYMASTER_MESSAGE_APP_ID,
-              recipientPublicKeyHex: OWNER_B,
-              recipientAppId: KEYMASTER_MESSAGE_APP_ID,
-              contentType: "text/plain",
-              body: "hello",
-              createdAtMs: 1,
-              insertedAtMs: 1
-            }
-          ],
+          items: [sealedHello],
           hasMore: false
         };
       },
@@ -686,7 +778,7 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     return { ...ctx, handle, sentMessages, listCalls, subscribeCalls };
   }
 
-  it("sendMessage forwards typed input to provider", async () => {
+  it("sendMessage seals plaintext + forwards sealed record to provider", async () => {
     const ctx = makeConnectedCore();
     await ctx.core.connectForOwner(OWNER);
     const reg = ctx.core.endpointRegistry();
@@ -705,17 +797,18 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     expect(r.messageId).toBe("m1");
     expect(ctx.sentMessages.length).toBe(1);
     const sent = ctx.sentMessages[0] as {
-      sender: { senderPublicKeyHex: string; senderAppId?: string };
-      recipientAppId?: string;
-      body: string;
+      record: ProviderSealedMessageRecord;
     };
-    expect(sent.sender.senderPublicKeyHex).toBe(OWNER);
-    expect(sent.sender.senderAppId).toBe(KEYMASTER_MESSAGE_APP_ID);
-    expect(sent.recipientAppId).toBe(KEYMASTER_MESSAGE_APP_ID);
-    expect(sent.body).toBe("hi");
+    expect(sent.record.senderPublicKeyHex).toBe(OWNER);
+    expect(sent.record.senderEndpointKind).toBe("plugin");
+    expect(sent.record.senderEndpointId).toBe(KEYMASTER_MESSAGE_APP_ID);
+    expect(sent.record.recipientPublicKeyHex).toBe(OWNER_B);
+    expect(sent.record.recipientEndpointId).toBe(KEYMASTER_MESSAGE_APP_ID);
+    expect(sent.record.envelope.signatureBytes.length).toBe(64);
+    expect(sent.record.envelope.envelopeBytes.length).toBeGreaterThan(0);
   });
 
-  it("listMessages returns provider items (already standardized AppMsgMessage)", async () => {
+  it("listMessages opens sealed records and returns public AppMsgMessage", async () => {
     const ctx = makeConnectedCore();
     await ctx.core.connectForOwner(OWNER);
     const reg = ctx.core.endpointRegistry();
@@ -726,6 +819,7 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     const r = await svc.listMessages({ limit: 10 });
     expect(r.items.length).toBe(1);
     expect(r.items[0]?.messageId).toBe("m1");
+    expect(r.items[0]?.body).toBe("hello");
     // typed input 已带 owner + scopeEndpoint。
     const lastList = ctx.listCalls[ctx.listCalls.length - 1] as {
       ownerPublicKeyHex: string;
@@ -738,7 +832,7 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     });
   });
 
-  it("subscribe binds handler to current handle", async () => {
+  it("subscribe opens incoming sealed record and dispatches public message", async () => {
     const ctx = makeConnectedCore();
     await ctx.core.connectForOwner(OWNER);
     const reg = ctx.core.endpointRegistry();
@@ -749,30 +843,31 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     const received: AppMsgMessage[] = [];
     const off = svc.subscribeMessages((m) => received.push(m));
     expect(ctx.subscribeCalls.length).toBe(1);
-    // 模拟 provider 推一条消息。
-    const handler = ctx.subscribeCalls[0]!;
-    handler({
+    // 模拟 provider 推一条 sealed record（OWNER_B → OWNER，OWNER 端可解）。
+    const pushed = makeSealedRecord({
       messageId: "push-1",
-      clientMessageId: "c-push",
+      senderPrivateKeyHex: OWNER_B_PRIV,
       senderPublicKeyHex: OWNER_B,
-      senderAppId: KEYMASTER_MESSAGE_APP_ID,
       recipientPublicKeyHex: OWNER,
-      recipientAppId: KEYMASTER_MESSAGE_APP_ID,
-      contentType: "text/plain",
-      body: "pushed",
+      clientMessageId: "c-push",
       createdAtMs: 1,
-      insertedAtMs: 1
+      insertedAtMs: 1,
+      contentType: "text/plain",
+      body: "pushed"
     });
+    const handler = ctx.subscribeCalls[0]!;
+    handler(pushed);
     expect(received.length).toBe(1);
     expect(received[0]?.messageId).toBe("push-1");
+    expect(received[0]?.body).toBe("pushed");
     off();
   });
 });
 
 describe("AppMsgCoreImpl - subscribe migration on owner/provider change", () => {
   it("switching active provider rebinds endpoint service subscriptions internally", async () => {
-    const subscribeA: Array<(m: AppMsgMessage) => void> = [];
-    const subscribeB: Array<(m: AppMsgMessage) => void> = [];
+    const subscribeA: Array<(rec: ProviderSealedMessageRecord) => void> = [];
+    const subscribeB: Array<(rec: ProviderSealedMessageRecord) => void> = [];
     const handleA = makeMockProviderOps({
       subscribeMessages: (h) => {
         subscribeA.push(h);
@@ -1122,7 +1217,7 @@ describe("AppMsgCoreImpl - onClose hook (remote disconnect)", () => {
       close: () => {
         inner.state = "closed";
       },
-      sendMessage: async () => ({ messageId: "m", createdAtMs: 0 }),
+      sendMessage: async () => ({ messageId: "m", insertedAtMs: 0 }),
       listMessages: async () => ({ items: [], hasMore: false }),
       getMessage: async () => null,
       subscribeMessages: () => () => undefined,
@@ -1151,7 +1246,7 @@ describe("AppMsgCoreImpl - onClose hook (remote disconnect)", () => {
       close: () => {
         inner.state = "closed";
       },
-      sendMessage: async () => ({ messageId: "m", createdAtMs: 0 }),
+      sendMessage: async () => ({ messageId: "m", insertedAtMs: 0 }),
       listMessages: async () => ({ items: [], hasMore: false }),
       getMessage: async () => null,
       subscribeMessages: () => () => undefined,

@@ -132,7 +132,7 @@ function makeFakeProvider(id: string): FakeProvider {
     close: () => {
       handleState = "closed";
     },
-    sendMessage: async () => ({ messageId: "m", createdAtMs: 0 } as ProviderSendResult),
+    sendMessage: async () => ({ messageId: "m", insertedAtMs: 0 } as ProviderSendResult),
     listMessages: async () => ({ items: [], hasMore: false } as ProviderListResult),
     getMessage: async () => null as AppMsgMessage | null,
     subscribeMessages: () => off,

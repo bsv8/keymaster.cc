@@ -1,22 +1,23 @@
 // packages/plugin-hubmsg/src/hubmsgProvider.test.ts
-// HubMsg MessageProvider 契约测试（施工单 2026-07-04 001）。
+// HubMsg MessageProvider 契约测试（施工单 2026-07-04 001 + 2026-07-04 004）。
 //
 // 验证目标：
 //   - Provider 的 typed 方法（sendMessage / listMessages / getMessage /
 //     subscribeMessages / checkOnline）都走标准化的入参 / 出参，**不**
 //     暴露 wire 字符串方法名；
-//   - `subscribeMessages` 的 handler 收到的是标准化 `AppMsgMessage`，
-//     **不**是 `HubMsgMessageRecord`；
+//   - `subscribeMessages` 的 handler 收到的是 sealed envelope record，
+//     **不**是 `HubMsgWireSealedRecord`；
+//   - `sendMessage` / `listMessages` / `getMessage` 入参出参都是 sealed
+//     record（**不**含明文 `contentType + body`）；
 //   - 失败语义：bind 失败 → lastError 写入 health；handle 未建立时
 //     send / list / get / checkOnline 走降级；
 //   - shutdown 是幂等的。
 
 import { describe, expect, it, vi } from "vitest";
 import {
-  type AppMsgMessage,
   type MessageProviderHandle,
   type ProviderOnlineInput,
-  type ProviderSenderProjection
+  type ProviderSealedMessageRecord
 } from "@keymaster/contracts";
 import { createHubMsgProvider } from "./hubmsgProvider.js";
 
@@ -69,33 +70,55 @@ describe("HubMsgProvider operations surface", () => {
     expect(p.health().isHealthy).toBe(false);
   });
 
-  it("providers carry only AppMsgMessage in subscribeMessages handler (no wire record leakage)", () => {
+  it("providers carry sealed envelope record in subscribeMessages handler (no plaintext leakage)", () => {
     // 类型层面：MessageProviderOperations.subscribeMessages 的 handler
-    // 参数类型就是 AppMsgMessage；不允许传 wire 类型。这是静态检查
-    // 即可保证的——这里记录测试意图，未来添加运行时断言时启用。
+    // 参数类型就是 ProviderSealedMessageRecord；不允许传 AppMsgMessage
+    // 或 wire 类型。这是静态检查即可保证的——这里记录测试意图。
     const handlerArg: Parameters<MessageProviderHandle["close"]> = [];
     void handlerArg;
 
-    // 真实可测的形状：构造一个 typed sender projection，证明 provider 域
-    // 类型干净。
-    const sender: ProviderSenderProjection = {
-      senderPublicKeyHex: OWNER,
-      senderAppId: "keymaster.message"
-    };
-    const msg: AppMsgMessage = {
+    // 真实可测的形状：构造一个 sealed record，证明 provider 域类型干净。
+    const sealed: ProviderSealedMessageRecord = {
       messageId: "m",
       clientMessageId: "c",
       senderPublicKeyHex: OWNER,
-      senderAppId: "keymaster.message",
+      senderEndpointKind: "plugin",
+      senderEndpointId: "keymaster.message",
       recipientPublicKeyHex: OWNER,
-      recipientAppId: "keymaster.message",
-      contentType: "text/plain",
-      body: "hi",
+      recipientEndpointKind: "plugin",
+      recipientEndpointId: "keymaster.message",
       createdAtMs: 1,
-      insertedAtMs: 1
+      insertedAtMs: 1,
+      envelope: {
+        envelopeBytes: new Uint8Array([0x80]),
+        signatureBytes: new Uint8Array(64)
+      }
     };
-    expect(msg.messageId).toBe("m");
-    expect(sender.senderAppId).toBe("keymaster.message");
+    expect(sealed.messageId).toBe("m");
+    expect(sealed.envelope.envelopeBytes.length).toBeGreaterThan(0);
+    expect(sealed.envelope.signatureBytes.length).toBe(64);
+  });
+
+  it("sendMessage input shape is sealed record (no plaintext contentType / body)", () => {
+    // 静态类型层面：ProviderSendInput 仅有 `record` 字段，无 contentType /
+    // body；这条测试作为未来添加运行时校验时的占位。
+    const sealed: ProviderSealedMessageRecord = {
+      messageId: "",
+      clientMessageId: "c1",
+      senderPublicKeyHex: OWNER,
+      senderEndpointKind: "plugin",
+      senderEndpointId: "keymaster.message",
+      recipientPublicKeyHex: "02bbbb".padEnd(66, "b"),
+      recipientEndpointKind: "plugin",
+      recipientEndpointId: "keymaster.message",
+      createdAtMs: 1,
+      insertedAtMs: 1,
+      envelope: {
+        envelopeBytes: new Uint8Array([0x80]),
+        signatureBytes: new Uint8Array(64)
+      }
+    };
+    expect(sealed.envelope.signatureBytes.length).toBe(64);
   });
 });
 
