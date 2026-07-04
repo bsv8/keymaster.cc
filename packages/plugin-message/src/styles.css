@@ -1,0 +1,263 @@
+/* packages/plugin-message/src/styles.css
+ * plugin-message 业务页样式（施工单 2026-07-03 002 硬切换）。
+ *
+ * 设计缘由：
+ *   - 视觉语言完全复用现有壳层 token：surface / border / radius / shadow；
+ *   - 只整理业务页（/messages）与详情页（/messages/:messageId）的视觉
+ *     信息层级，不引入新的交互动效或独立色板；
+ *   - 样式跟随 plugin-message 目录走，移除插件时一并删除；
+ *   - 装配层（apps/web/src/styles/plugins.css）显式
+ *     `@import "@keymaster/plugin-message/styles.css"` 引入。
+ */
+
+.km-message-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.km-message-page__title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.km-message-page__section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0 0 8px 0;
+}
+
+.km-message-page__send,
+.km-message-page__search,
+.km-message-page__list {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
+}
+
+.km-message-page__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.km-message-page__field-label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.km-message-page__input,
+.km-message-page__textarea {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.km-message-page__textarea {
+  resize: vertical;
+  min-height: 64px;
+  font-family: inherit;
+}
+
+.km-message-page__send-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.km-message-page__send-button {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--primary, var(--border));
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.km-message-page__send-button:hover {
+  filter: brightness(1.1);
+}
+
+.km-message-page__send-error {
+  font-size: 12px;
+  color: var(--danger, currentColor);
+}
+
+.km-message-page__list-items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.km-message-page__list-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.km-message-page__list-item:last-child {
+  border-bottom: 0;
+}
+
+.km-message-page__list-item:hover {
+  background: var(--surface-2, rgba(0, 0, 0, 0.02));
+}
+
+.km-message-page__list-meta {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+}
+
+.km-message-page__list-meta-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+
+.km-message-page__list-body {
+  font-size: 14px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.km-message-page__empty {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+/* Detail page */
+
+.km-message-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px;
+}
+
+.km-message-detail__header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.km-message-detail__back {
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.km-message-detail__back:hover {
+  filter: brightness(1.1);
+}
+
+.km-message-detail__title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.km-message-detail__meta {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0;
+  margin: 0;
+  box-shadow: var(--shadow);
+}
+
+.km-message-detail__row {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.km-message-detail__row:last-child {
+  border-bottom: 0;
+}
+
+.km-message-detail__row-label {
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.km-message-detail__row-value {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.km-message-detail__section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+
+.km-message-detail__body {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  font-size: 14px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  box-shadow: var(--shadow);
+}
+
+.km-message-detail__empty {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+[data-theme="dark"] .km-message-page__send,
+[data-theme="dark"] .km-message-page__search,
+[data-theme="dark"] .km-message-page__list,
+[data-theme="dark"] .km-message-detail__meta,
+[data-theme="dark"] .km-message-detail__body {
+  background: var(--surface);
+}
+
+[data-theme="dark"] .km-message-page__list-item:hover {
+  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+}

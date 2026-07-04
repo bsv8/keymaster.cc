@@ -1,15 +1,16 @@
-// packages/plugin-message/src/MessagePage.test.tsx
-// 消息业务页契约测试（施工单 2026-07-03 002 硬切换）。
+// packages/plugin-message/src/MessageDetailPage.test.tsx
+// 消息详情页契约测试（施工单 2026-07-03 002 硬切换 + 文件级修改意见 §8）。
 //
-// 关键验证点（反馈 §"测试未真正 render 页面" + 文件级修改意见 §7）：
-//   - MessagePage 在 PluginHostProvider 下能真渲染；
-//   - 页面契约至少呈现：标题、消息 body、发送区、搜索区、列表区；
-//   - **不**出现 sync state / connection / online UI；
-//   - service 不可用时显示降级空态——**这是唯一允许的降级路径**；
-//   - **不**走任何 window 全局兜底（__kmMessageService / __keymaster_appmsg_core__）。
+// 验证：
+//   - `/messages/:messageId` 路由下，详情页能从 scoped service 拉到单条消息；
+//   - 越权 messageId（不在 scope 内）→ 显示空态；
+//   - 详情页**不**展示 HubMsg 连接态 / 同步态 / 全局统计；
+//   - capability 缺失时显示降级空态——**这是唯一允许的降级路径**；
+//   - **不**走任何 window 全局兜底（__kmMessageService）。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router";
 import type {
   AppMsgMessage,
   I18nService,
@@ -27,9 +28,6 @@ import type { MessageService } from "./messageService.js";
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 
-/**
- * 最小可用 I18nService stub：满足 useI18n() 真实需要的全部方法。
- */
 function makeFakeI18n(): I18nService {
   return {
     mode: (): LanguageMode => "manual",
@@ -49,9 +47,7 @@ function makeFakeI18n(): I18nService {
   };
 }
 
-function makeFakeService(opts?: {
-  messages?: AppMsgMessage[];
-}): MessageService {
+function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService {
   const messages = opts?.messages ?? [];
   return {
     isReady: () => true,
@@ -62,9 +58,6 @@ function makeFakeService(opts?: {
   };
 }
 
-/**
- * 最小 pluginHost stub：仅满足 useCapability 与 useI18n 需要的接口。
- */
 function makeFakeHost(service: MessageService | null): PluginHost {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY]: makeFakeI18n()
@@ -131,86 +124,100 @@ function makeFakeHost(service: MessageService | null): PluginHost {
   return host as unknown as PluginHost;
 }
 
-describe("MessagePage in PluginHostProvider", () => {
+describe("MessageDetailPage in PluginHostProvider", () => {
   afterEach(() => {
     cleanup();
   });
 
-  it("renders title, send area, search area, list area and message body", async () => {
-    const sampleMessage: AppMsgMessage = {
-      messageId: "real-id-1",
-      clientMessageId: "c-1",
+  it("renders single-message body when messageId is in scope", async () => {
+    const sample: AppMsgMessage = {
+      messageId: "id-detail-1",
+      clientMessageId: "c-detail-1",
       senderPublicKeyHex: "02aaaa".padEnd(66, "a"),
       senderAppId: "keymaster.message",
       recipientPublicKeyHex: OWNER,
       recipientAppId: "keymaster.message",
       contentType: "text/plain",
-      body: "real rendered body",
-      createdAtMs: 1,
-      insertedAtMs: 1
+      body: "detail body text",
+      createdAtMs: 1000,
+      insertedAtMs: 2000
     };
-    const service = makeFakeService({ messages: [sampleMessage] });
+    const service = makeFakeService({ messages: [sample] });
     const host = makeFakeHost(service);
-    const { MessagePage } = await import("./MessagePage.js");
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
     render(
-      <PluginHostProvider host={host}>
-        <MessagePage />
-      </PluginHostProvider>
+      <MemoryRouter initialEntries={["/messages/id-detail-1"]}>
+        <PluginHostProvider host={host}>
+          <Routes>
+            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+          </Routes>
+        </PluginHostProvider>
+      </MemoryRouter>
     );
-
-    // 标题：i18n.t 返回 key 自身。
     await waitFor(() => {
-      const el = screen.getByText("message.page.title");
-      expect(el).toBeTruthy();
+      expect(screen.getByText("detail body text")).toBeTruthy();
     });
-    // 消息 body：fetch 完成后被渲染。
+    // messageId 字段出现在 meta 区。
     await waitFor(() => {
-      const el = screen.getByText("real rendered body");
-      expect(el).toBeTruthy();
-    });
-    // 发送区、搜索区、列表区段标题。
-    await waitFor(() => {
-      expect(screen.getByText("message.page.send.label")).toBeTruthy();
-      expect(screen.getByText("message.page.search.label")).toBeTruthy();
-      expect(screen.getByText("message.page.list.label")).toBeTruthy();
+      expect(screen.getByText("id-detail-1")).toBeTruthy();
     });
   });
 
-  it("does NOT render sync / connection / online UI", async () => {
+  it("renders empty state when messageId is out of scope", async () => {
     const service = makeFakeService({ messages: [] });
     const host = makeFakeHost(service);
-    const { MessagePage } = await import("./MessagePage.js");
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
     render(
-      <PluginHostProvider host={host}>
-        <MessagePage />
-      </PluginHostProvider>
+      <MemoryRouter initialEntries={["/messages/not-in-scope"]}>
+        <PluginHostProvider host={host}>
+          <Routes>
+            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+          </Routes>
+        </PluginHostProvider>
+      </MemoryRouter>
     );
     await waitFor(() => {
-      const el = screen.getByText("message.page.title");
-      expect(el).toBeTruthy();
+      expect(screen.getByText("message.page.detail.empty")).toBeTruthy();
     });
-    // 这些文案应当**不**存在——管理面语义已切走。
-    expect(screen.queryByText("message.page.sync.state.label")).toBeNull();
-    expect(screen.queryByText("message.page.checkOnline")).toBeNull();
-    expect(screen.queryByText("message.page.online.label")).toBeNull();
-    expect(screen.queryByText("message.page.refresh")).toBeNull();
   });
 
   it("renders missing-service empty state when capability is missing (唯一降级路径)", async () => {
     const host = makeFakeHost(null);
-    const { MessagePage } = await import("./MessagePage.js");
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
     render(
-      <PluginHostProvider host={host}>
-        <MessagePage />
-      </PluginHostProvider>
+      <MemoryRouter initialEntries={["/messages/any"]}>
+        <PluginHostProvider host={host}>
+          <Routes>
+            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+          </Routes>
+        </PluginHostProvider>
+      </MemoryRouter>
     );
     await waitFor(() => {
-      const empty = screen.getByText("message.page.noClient");
-      expect(empty).toBeTruthy();
+      expect(screen.getByText("message.page.noClient")).toBeTruthy();
     });
-    expect(screen.queryByText("message.page.send.label")).toBeNull();
+  });
+
+  it("does NOT render sync / connection / global stat UI", async () => {
+    const service = makeFakeService({ messages: [] });
+    const host = makeFakeHost(service);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    render(
+      <MemoryRouter initialEntries={["/messages/x"]}>
+        <PluginHostProvider host={host}>
+          <Routes>
+            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+          </Routes>
+        </PluginHostProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.title")).toBeTruthy();
+    });
+    expect(screen.queryByText("message.page.sync.state.label")).toBeNull();
+    expect(screen.queryByText("message.page.online.label")).toBeNull();
+    expect(screen.queryByText("message.page.list.label")).toBeNull();
   });
 });
 
-// 防止 IDE 报 unused
 void vi;

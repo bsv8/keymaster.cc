@@ -31,6 +31,7 @@ import type {
   WocService
 } from "@keymaster/contracts";
 import {
+  APPMESSAGE_CLIENT_CAPABILITY_SUFFIX,
   APPMESSAGE_CORE_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -70,8 +71,11 @@ const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
  * 在 enable 完成后，host 把 scoped client 挂到
  * `<pluginId>.appmsg.client`。插件 `ctx.get("<pluginId>.appmsg.client")`
  * 拿到 sender 已绑定的 client；**不**暴露全局工厂 capability。
+ *
+ * 常量真值由 `@keymaster/contracts` 提供；这里仅 re-export 旧 import
+ * 兼容使用点。
  */
-const APPMESSAGE_CLIENT_CAPABILITY_SUFFIX = ".appmsg.client";
+const APPMESSAGE_CLIENT_CAPABILITY_SUFFIX_LOCAL = APPMESSAGE_CLIENT_CAPABILITY_SUFFIX;
 
 /** 硬切换 002：runtime 系统日志统一使用的 pluginId。
  * 设计缘由：plugin-host 自身记日志时不伪装成业务插件；统一用 "runtime"
@@ -702,7 +706,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
             senderPublicKeyHex: ownerHex,
             senderAppId: appMsgEp.endpointId
           });
-          const scopedKey = `${pluginId}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX}`;
+          const scopedKey = `${pluginId}${APPMESSAGE_CLIENT_CAPABILITY_SUFFIX_LOCAL}`;
           capabilities.provide(scopedKey, scopedClient);
           // 关键：把 scoped client 加到 ownership.capabilities，让
           // disable 时的 purgeOwnership 把它一起 revoke 掉。

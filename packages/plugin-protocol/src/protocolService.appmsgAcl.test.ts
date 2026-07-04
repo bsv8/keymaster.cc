@@ -113,9 +113,6 @@ function makeProbeCore(probe: CoreProbe): AppMsgCore {
         subscribeMessages: () => () => undefined,
         checkOnline: async () => ({})
       };
-    },
-    createSystemMessageClient: () => {
-      throw new Error("not used in this test");
     }
   } as unknown as AppMsgCore;
 }

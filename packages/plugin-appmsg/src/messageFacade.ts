@@ -1,7 +1,7 @@
 // packages/plugin-appmsg/src/messageFacade.ts
-// app/plugin 统一简单 facade 实现。
+// app/plugin 统一简单 facade 实现（施工单 2026-07-03 002 硬切换）。
 //
-// 设计缘由（施工单 2026-07-03 001 + 反馈 §"必须修改"）：
+// 设计缘由：
 //   - 每个 facade 实例在构造时把 `AppMsgSenderProjection` 固化；
 //   - 任何 sendMessage / listMessages / getMessage / subscribeMessages
 //     都**带这个 sender 投影走到 core**；
@@ -9,8 +9,9 @@
 //     §"必须修改"中已明确指出会引入 ACL 漏洞。
 //   - facade 还提供校验入参合法性的工具函数（recipient 必须给出
 //     一个且唯一的 `recipientOrigin` / `recipientAppId`）；
-//   - 系统消息应用专用 facade：单独由 `makeSystemMessageAppClient`
-//     工厂构造，senderAppId 固定为 `keymaster.message`。
+//   - 旧 `SystemMessageAppClient` 与 `makeSystemMessageAppClient` 已
+//     从主设计中移除——`plugin-message` 现在是一个普通 scoped 消息插件
+//     （appId = `keymaster.message`），不再走"系统消息应用 facade"。
 //
 // 本文件**不**持有任何 owner 私钥 / HubMsg 连接真值——所有能力来
 // 自 `AppMsgCore`。
@@ -31,9 +32,6 @@ import type {
   AppMsgSenderProjection,
   AppMsgSimpleClient,
   AppMsgSubscribeScopedInput
-} from "@keymaster/contracts";
-import {
-  KEYMASTER_MESSAGE_APP_ID
 } from "@keymaster/contracts";
 
 /**
@@ -150,85 +148,6 @@ export function makeMessageScopedClient(
 }
 
 /**
- * 系统消息应用 facade。
- *
- * 关键约束：
- *   - senderAppId 固定为 `keymaster.message`；
- *   - 内部走 `subscribeUnfilteredMessages` / `listUnfilteredMessages`——
- *     也就是说系统消息应用看得见所有消息真值；
- *   - 由 `AppMsgCore.createSystemMessageClient(...)` 工厂层校验
- *     `KEYMASTER_MESSAGE_APP_ID` 一致，不允许其它 caller 制造这种 client。
- */
-export class SystemMessageAppClient implements AppMsgSimpleClient {
-  static readonly APP_ID: string = KEYMASTER_MESSAGE_APP_ID;
-  readonly sender: AppMsgSenderProjection;
-
-  constructor(private readonly core: AppMsgCore, ownerPublicKeyHex: string) {
-    this.sender = {
-      senderPublicKeyHex: ownerPublicKeyHex,
-      senderAppId: SystemMessageAppClient.APP_ID
-    };
-  }
-
-  async sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult> {
-    validateSendInput(input);
-    const scoped: AppMsgSendScopedInput = {
-      senderPublicKeyHex: this.sender.senderPublicKeyHex,
-      senderOrigin: this.sender.senderOrigin,
-      senderAppId: this.sender.senderAppId,
-      recipientPublicKeyHex: input.recipientPublicKeyHex,
-      recipientOrigin: input.recipientOrigin,
-      recipientAppId: input.recipientAppId,
-      contentType: input.contentType,
-      body: input.body,
-      clientMessageId: input.clientMessageId,
-      createdAtMs: input.createdAtMs
-    };
-    return this.core.sendScopedMessage(scoped);
-  }
-
-  /**
-   * 系统消息应用自己的 list：走"全库读"——**不**走 scoped。
-   *
-   * 由 `AppMsgCore.createSystemMessageClient` 工厂层再次守门；非系统
-   * 消息应用路径**不**应能调到这里。
-   */
-  async listMessages(input?: AppMsgListInput): Promise<AppMsgListResult> {
-    return this.core.listUnfilteredMessages(input);
-  }
-
-  async getMessage(input: AppMsgGetInput): Promise<AppMsgMessage | null> {
-    // 系统消息应用读单条仍走 unfiltered——允许看任何 message。
-    const res = await this.core.listUnfilteredMessages({ limit: 200 });
-    return res.items.find((m) => m.messageId === input.messageId) ?? null;
-  }
-
-  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void {
-    return this.core.subscribeUnfilteredMessages(handler);
-  }
-
-  async checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult> {
-    return this.core.checkOnline(input);
-  }
-}
-
-/**
- * 工厂：构造系统消息应用 scoped client。
- *
- * 调用方传 core + 当前 owner publicKeyHex；不再需要 caller 自报
- * appId——本工厂直接固化为 `keymaster.message`。
- */
-export function makeSystemMessageAppClient(
-  core: AppMsgCore,
-  ownerPublicKeyHex: string
-): AppMsgSimpleClient {
-  return new SystemMessageAppClient(core, ownerPublicKeyHex);
-}
-
-/**
  * 兼容旧 `AppMsgPluginClient` 别名。
  */
 export type { AppMsgPluginClient } from "@keymaster/contracts";
-
-// 防止 IDE 报 unused
-void (0);

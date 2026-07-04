@@ -1,138 +1,111 @@
 // packages/plugin-message/src/messageService.ts
-// 系统消息应用服务层：通过 `createSystemMessageClient(...)` 获取对系统消息
-// 应用可见的 facade，对 plugin-appmsg 单例做 facade。
+// 消息业务插件 service 层（施工单 2026-07-03 002 硬切换）。
+//
+// 设计缘由：
+//   - `plugin-message` 是一个**普通 scoped 消息插件**，appId =
+//     `keymaster.message`；service 只封装 scoped client 的业务动作；
+//   - sender 投影由 runtime 在 enable 阶段固化到注入的 scoped client
+//     里；这里**不**再关心 sender / owner / endpoint；
+//   - 不接触 `appmsg.core` 全库接口、不走 `createSystemMessageClient`
+//     特权旁路；
+//   - 管理 / 诊断方法（triggerSync / listTargetSyncStates /
+//     checkOnline / getLocalDbSnapshot）**全部删除**——这些由
+//     `plugin-appmsg` 的 HubMsg 管理页消费 `appmsg.core` 展示。
 
 import type {
-  AppMsgCore,
-  AppMsgLocalDbSnapshot,
+  AppMsgContentType,
   AppMsgMessage,
-  AppMsgOnlineResult,
-  AppMsgOnlineStatus,
-  AppMsgSimpleClient,
-  AppMsgTargetSyncState
+  AppMsgSimpleClient
 } from "@keymaster/contracts";
+import { KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 
 /**
- * 系统消息应用对外 service。
+ * 消息业务插件对外 service。
  *
- * 设计缘由（施工单 §4.5 / §5.4 + 反馈 §"必须修改"）：
- *   - 这是「查看 / 管理本地消息」的 service 层；UI 通过它读本地消息、
- *     同步状态、在线状态；
- *   - 走系统消息应用 facade（`keymaster.message`），**不**走 scoped
- *     facade；只能由 `AppMsgCore.createSystemMessageClient(...)` 产出；
- *   - **不**走远端 HubMsg 数量统计；
- *   - 写动作只有 triggerSync（手动刷新），其它写都走 `appmsg.core`
- *     内部（推送 / 增量同步）。
+ * 最小职责：4 个方法，全部走 scoped client。
+ *   - `listMessages`：列自己 scope 内的本地消息；
+ *   - `getMessage`：读单条；scope 外返回 null；
+ *   - `sendTextMessage`：发一条文本消息到 `recipientAppId =
+ *     keymaster.message` 的对方；
+ *   - `subscribeMessages`：订阅自己 scope 内的事件。
  *
- * **本文件是 `plugin-message` 的简化 facade**：故意不暴露 `hasMore`
- * 等分页状态——系统消息页不需要翻页。如未来真的要做分页，**不要**在
- * 这里逐步加 `hasMore` 字段，应当一次性升级 MessagePage + service
- * + 同步状态字段；半点改接口会重新把 contract 弄复杂。
+ * 搜索**不**作为 service 暴露——UI 在拿到 list 后做本地字符串过滤。
+ * 这是显式选择：不为"消息搜索"扩张 contract。
  */
 export interface MessageService {
-  /** 当前 owner 的本地消息库状态。 */
-  getLocalDbSnapshot(): AppMsgLocalDbSnapshot;
+  /** scoped client 是否可用（runtime 注入 + 当前 vault 状态）。 */
+  isReady(): boolean;
+  /** 列本地消息（scoped）。 */
+  listMessages(input?: { limit?: number; afterMessageId?: string }): Promise<AppMsgMessage[]>;
+  /** 单条取本地消息；scope 外返回 null。 */
+  getMessage(messageId: string): Promise<AppMsgMessage | null>;
   /**
-   * 列本地消息（系统消息应用可见的所有消息）。**不**返回分页信息——
-   * 系统消息页用内部 slice 暂存就够了；如真有分页需求，单独升级此接口。
+   * 发一条 `recipientAppId = keymaster.message` 的文本消息。
+   * `recipientAppId` 固定为 `keymaster.message`——这是 `plugin-message`
+   * 的业务语义：对方也是这个 app 的用户。
    */
-  listLocalMessages(input?: {
-    limit?: number;
-    afterMessageId?: string;
-  }): Promise<AppMsgMessage[]>;
-  /** 单条取本地消息。 */
-  getLocalMessage(messageId: string): Promise<AppMsgMessage | null>;
-  /** 列出本地目标同步状态。 */
-  listTargetSyncStates(): Promise<AppMsgTargetSyncState[]>;
-  /** 触发一次手动同步（best-effort）。 */
-  triggerSync(): Promise<void>;
-  /** 批量查在线状态。失败整体回退 `unknown`。 */
-  checkOnline(publicKeyHexes: string[]): Promise<AppMsgOnlineResult>;
+  sendTextMessage(input: {
+    recipientPublicKeyHex: string;
+    body: string;
+    contentType?: AppMsgContentType;
+    clientMessageId?: string;
+  }): Promise<void>;
+  /** 订阅自己 scope 内的完整消息事件。返回取消订阅函数。 */
+  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
 }
 
 /**
- * 构造系统消息应用 service。
+ * 构造消息业务 service。
  *
- * caller 通常是 plugin-message.setup(): 它已经在自身 manifest 上声明
- * `appMessageEndpoint.endpointId === "keymaster.message"`，经由
- * `AppMsgCore.createSystemMessageClient(...)` 校验通过后才允许产出
- * 这个 service。
+ * 入参 `getClient`：每次调用时再解析 scoped client；返回 `null` 表示
+ * scoped client 当前不可用（runtime 没注入 / sender 不存在）。
  *
- * 关键约束：
- *   - **不能**在构造期强依赖 owner；web 首屏时 vault 可能尚未解锁，
- *     这属于正常未就绪状态，不应让 plugin setup 失败；
- *   - 因此 owner / system client 都改为"每次调用时再解析"；
- *   - 当前未绑定 owner 时：
- *       * list/get 返回空态；
- *       * triggerSync noop；
- *       * checkOnline 仍委托 core（其内部会回退 `unknown`）。
+ * 这样设计的好处：
+ *   - vault 解锁 → owner 切换 → runtime 重新注入 scoped client，
+ *     service **不**需要重新构造；
+ *   - 当前未就绪时（vault locked / 无 owner）所有方法静默走降级：
+ *     list/get 返回空态；send 抛 `not_ready`；subscribe 返回 noop 取消函数。
  */
-export function createMessageService(core: AppMsgCore): MessageService {
+export function createMessageService(
+  getClient: () => AppMsgSimpleClient | null
+): MessageService {
   return {
-    getLocalDbSnapshot: () => core.inspectLocalDb(),
-    listLocalMessages: async (input) => {
-      const sysCli = createSystemClientForCurrentOwner(core);
-      if (!sysCli) return [];
-      const res = await sysCli.listMessages(input);
+    isReady: () => getClient() !== null,
+    listMessages: async (input) => {
+      const cli = getClient();
+      if (!cli) return [];
+      const res = await cli.listMessages(input);
       return res.items;
     },
-    getLocalMessage: async (messageId) => {
-      const sysCli = createSystemClientForCurrentOwner(core);
-      if (!sysCli) return null;
-      return sysCli.getMessage({ messageId });
+    getMessage: async (messageId) => {
+      const cli = getClient();
+      if (!cli) return null;
+      return cli.getMessage({ messageId });
     },
-    listTargetSyncStates: async () => {
-      if (!hasBoundOwner(core.inspectLocalDb())) return [];
-      return core.listTargetSyncStates();
+    sendTextMessage: async (input) => {
+      const cli = getClient();
+      if (!cli) throw new Error("message.service: scoped appmsg.client not ready");
+      await cli.sendMessage({
+        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+        contentType: input.contentType ?? "text/plain",
+        body: input.body,
+        clientMessageId: input.clientMessageId ?? makeClientMessageId(),
+        createdAtMs: Date.now()
+      });
     },
-    triggerSync: async () => {
-      if (!hasBoundOwner(core.inspectLocalDb())) return;
-      await core.triggerSync();
-    },
-    checkOnline: (hexes) => core.checkOnline(hexes)
+    subscribeMessages: (handler) => {
+      const cli = getClient();
+      if (!cli) return () => undefined;
+      return cli.subscribeMessages(handler);
+    }
   };
 }
 
-/**
- * 构造系统消息应用 facade。
- *
- * 当前 owner 取自 `core.inspectLocalDb()`——caller 已经把 owner 绑好
- * 后再调用本工厂。如果 owner 尚未绑定，本工厂返回 `null`：
- * 这是正常未就绪状态，不是 plugin setup 错误。
- */
-function createSystemClientForCurrentOwner(core: AppMsgCore): AppMsgSimpleClient | null {
-  const snap = core.inspectLocalDb();
-  const owner = snap.ownerPublicKeyHex;
-  if (!owner) return null;
-  try {
-    return core.createSystemMessageClient({ ownerPublicKeyHex: owner });
-  } catch {
-    return null;
+/** 生成客户端幂等键。 */
+function makeClientMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `km-msg-${crypto.randomUUID()}`;
   }
+  return `km-msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
-
-/** 当前是否已有可用 bound owner。 */
-function hasBoundOwner(snap: AppMsgLocalDbSnapshot): boolean {
-  return typeof snap.ownerPublicKeyHex === "string" && snap.ownerPublicKeyHex.length > 0;
-}
-
-/** 系统消息应用 appId（固定字符串）。 */
-export const SYSTEM_MESSAGE_APP_ID = "keymaster.message";
-
-/** 当查询失败时给所有候选 key 回退状态。 */
-export function onlineFallback(hexes: string[]): AppMsgOnlineResult {
-  const out: AppMsgOnlineResult = {};
-  for (const h of hexes) {
-    out[h] = "unknown";
-  }
-  return out;
-}
-
-/** 在线状态展示用文案（系统消息应用 UI 使用）。 */
-export function onlineStatusLabel(s: AppMsgOnlineStatus): "online" | "offline" | "unknown" {
-  return s;
-}
-
-// 防止 IDE 报 unused
-void ({} as AppMsgMessage);
-void ({} as AppMsgTargetSyncState);

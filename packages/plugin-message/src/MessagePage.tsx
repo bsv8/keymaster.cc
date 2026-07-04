@@ -1,78 +1,104 @@
 // packages/plugin-message/src/MessagePage.tsx
-// 系统消息应用页面：查看 / 管理本地消息。
+// 消息业务页（施工单 2026-07-03 002 硬切换）。
 //
-// 设计缘由（施工单 2026-07-03 001 + 反馈 §"必须修改"）：
-//   - 列表 / 搜索 / 按 appId/origin 分组 / 本地统计 / 本地同步状态 /
-//     在线查询都从这里出；**不**依赖远端 HubMsg 数量统计。
-//   - 渲染：尽量简，只展示 message body + sender + 同步状态 + 在线状态。
-//   - 接入方式：插件页面直接通过 `useCapability<AppMsgCore>("appmsg.core")`
-//     从平台 runtime 取 core；**不**通过 props 注入主路径，也不访问任何
-//     `window.__keymaster_appmsg_core__` 全局变量。
+// 设计缘由：
+//   - 本页**只**展示 `keymaster.message` scope 内的消息业务：
+//       * 发送区（输入 publicKeyHex + 正文 → sendMessage）
+//       * 搜索区（按本地已同步消息正文过滤）
+//       * 列表区（点击进入单条详情）
+//   - **不**展示 HubMsg 连接态、target sync 状态、在线查询按钮、全局错误
+//     信息、全局统计——这些归 `plugin-appmsg` 的 `/system/hubmsg` 管理页；
+//   - **不**通过 props / 全局兜底路径注入；直接通过 `useCapability`
+//     从平台 runtime 拿 scoped message service（由 plugin-message.setup
+//     provide）。
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
-import type {
-  AppMsgCore,
-  AppMsgLocalDbSnapshot,
-  AppMsgMessage,
-  AppMsgTargetSyncState
-} from "@keymaster/contracts";
-import { APPMESSAGE_CORE_CAPABILITY } from "@keymaster/contracts";
-import { createMessageService } from "./messageService.js";
+import { useCapability, useI18n, router } from "@keymaster/runtime";
+import type { AppMsgMessage } from "@keymaster/contracts";
+import type { MessageService } from "./messageService.js";
 
 /**
- * 系统消息应用页面。
+ * plugin-message 内部 service capability key（与 manifest setup 内
+ * `ctx.provide("message.service", ...)` 一致）。
+ */
+const MESSAGE_SERVICE_CAPABILITY = "message.service";
+
+/**
+ * 消息业务页。
  *
- * 直接通过 `useCapability` 取 `appmsg.core`；**不**走 props 注入。
- * 在宿主通过 `PluginHostProvider` / `usePluginContext` 等提供的 React 上下文
- * 里渲染即可拿到。
+ * 接入方式（**唯一**允许的来源）：
+ *   - 通过 `useCapability<MessageService>(MESSAGE_SERVICE_CAPABILITY)`
+ *     从 capability bus 拿 plugin-message 自己 provide 的 service；
+ *   - 没有 service 时（capability 缺失）显示降级空态；
+ *   - **不**走任何 window 全局兜底：plugin-message 的"业务页 = 走正式
+ *     注入路径"这条边界不允许偷偷绕开 capability bus；
+ *   - 组件 mount 时 plugin-message 必须 enabled；disable 时 route 已被
+ *     注销，本组件不会被路由。
  */
 export function MessagePage(): React.ReactElement {
-  const core = useCapability<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
   const i18n = useI18n();
+  const service = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
 
-  // 在没有 appmsg.core 的极端 host（裸测试 / 单元测试场景）下，给一个空态。
-  if (!core) {
+  if (!service) {
     return (
-      <section data-appmsg-page="missing-core" style={{ padding: 16 }}>
-        <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12 }}>
-          {i18n.t("message.platform.title")}
-        </h1>
-        <p style={{ color: "var(--km-fg-muted, #888)" }}>
-          appmsg.core capability is not available.
-        </p>
+      <section
+        className="km-message-page km-message-page--missing"
+        data-message-page="missing-service"
+      >
+        <h1 className="km-message-page__title">{i18n.t("message.page.title")}</h1>
+        <p className="km-message-page__empty">{i18n.t("message.page.noClient")}</p>
       </section>
     );
   }
 
-  return <MessagePageInner core={core} />;
+  return <MessagePageInner service={service} />;
 }
 
 /**
- * 内部分离式组件——避免每次 core 变化时 useI18n 被重置。
+ * 兼容版 `useCapability`：capability 不存在时返回 null（**不**抛错）。
+ *
+ * 设计缘由：plugin-message 的 route 在 plugin enable 后才被注册；本组件
+ * 一旦被路由命中，capability bus 上就一定有 `message.service`。但极端
+ * host（如未通过 host 渲染）下 capability 可能没注册——这里仅做防御
+ * 性兼容，**不**作为生产主路径，也**不**引入任何 window 兜底。
  */
-function MessagePageInner({ core }: { core: AppMsgCore }): React.ReactElement {
+function useCapabilityOrNull<T>(key: string): T | null {
+  try {
+    return useCapability<T>(key);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 内部分离式组件：业务渲染。
+ */
+function MessagePageInner({ service }: { service: MessageService }): React.ReactElement {
   const i18n = useI18n();
-  const service = useMemo(() => createMessageService(core), [core]);
-  const [snapshot, setSnapshot] = useState<AppMsgLocalDbSnapshot>(() =>
-    service.getLocalDbSnapshot()
-  );
   const [messages, setMessages] = useState<AppMsgMessage[]>([]);
-  const [targets, setTargets] = useState<AppMsgTargetSyncState[]>([]);
   const [searchInput, setSearchInput] = useState("");
-  const [onlineQueryHex, setOnlineQueryHex] = useState("");
-  const [onlineResult, setOnlineResult] = useState<Record<string, string>>({});
+  const [recipient, setRecipient] = useState("");
+  const [body, setBody] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    setSnapshot(service.getLocalDbSnapshot());
-    const items = await service.listLocalMessages({ limit: 200 });
+    const items = await service.listMessages({ limit: 200 });
     setMessages(items);
-    setTargets(await service.listTargetSyncStates());
   }, [service]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // 订阅：进入页面后保持实时刷新。
+  useEffect(() => {
+    const off = service.subscribeMessages(() => {
+      void refresh();
+    });
+    return () => {
+      off();
+    };
+  }, [service, refresh]);
 
   // 过滤（UI 本地行为）
   const filtered = useMemo(() => {
@@ -81,143 +107,127 @@ function MessagePageInner({ core }: { core: AppMsgCore }): React.ReactElement {
     return messages.filter((m) => (m.body ?? "").toLowerCase().includes(q));
   }, [messages, searchInput]);
 
-  const syncStateLabel =
-    snapshot.state === "open"
-      ? i18n.t("message.page.sync.state.open")
-      : snapshot.state === "closed"
-        ? i18n.t("message.page.sync.state.closed")
-        : i18n.t("message.page.sync.state.idle");
+  const onSend = useCallback(async () => {
+    setSendError(null);
+    const hex = recipient.trim();
+    if (!/^[0-9a-f]{66}$/i.test(hex)) {
+      setSendError("invalid recipient publicKeyHex");
+      return;
+    }
+    if (!body.trim()) {
+      setSendError("body is empty");
+      return;
+    }
+    try {
+      await service.sendTextMessage({ recipientPublicKeyHex: hex, body: body.trim() });
+      setBody("");
+      void refresh();
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : String(err));
+    }
+  }, [body, recipient, refresh, service]);
 
   return (
-    <section data-appmsg-page="messages" style={{ padding: 16 }}>
-      <h1 style={{ fontSize: 18, fontWeight: 600, marginBottom: 12 }}>
-        {i18n.t("message.platform.title")}
-      </h1>
-      <div
-        style={{
-          display: "flex",
-          gap: 12,
-          alignItems: "center",
-          marginBottom: 12
-        }}
-      >
-        <span data-appmsg-sync-state={snapshot.state}>{syncStateLabel}</span>
-        <button
-          type="button"
-          onClick={() => {
-            void service.triggerSync().then(() => refresh());
-          }}
-        >
-          {i18n.t("message.page.refresh")}
-        </button>
+    <section className="km-message-page" data-message-page="messages">
+      <h1 className="km-message-page__title">{i18n.t("message.page.title")}</h1>
+
+      <div className="km-message-page__send">
+        <h2 className="km-message-page__section-title">
+          {i18n.t("message.page.send.label")}
+        </h2>
+        <label className="km-message-page__field">
+          <span className="km-message-page__field-label">
+            {i18n.t("message.page.send.recipient")}
+          </span>
+          <input
+            className="km-message-page__input"
+            type="text"
+            value={recipient}
+            onChange={(e) => setRecipient(e.target.value)}
+            placeholder="02... (66 hex chars)"
+          />
+        </label>
+        <label className="km-message-page__field">
+          <span className="km-message-page__field-label">
+            {i18n.t("message.page.send.body")}
+          </span>
+          <textarea
+            className="km-message-page__textarea"
+            value={body}
+            onChange={(e) => setBody(e.target.value)}
+            rows={3}
+          />
+        </label>
+        <div className="km-message-page__send-row">
+          <button
+            className="km-message-page__send-button"
+            type="button"
+            onClick={() => {
+              void onSend();
+            }}
+          >
+            {i18n.t("message.page.send.submit")}
+          </button>
+          {sendError ? (
+            <span className="km-message-page__send-error">{sendError}</span>
+          ) : null}
+        </div>
       </div>
 
-      <div style={{ marginBottom: 12 }}>
-        <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-          {i18n.t("message.page.sync.state.label")}
+      <div className="km-message-page__search">
+        <h2 className="km-message-page__section-title">
+          {i18n.t("message.page.search.label")}
         </h2>
-        {targets.length === 0 ? (
-          <p style={{ color: "var(--km-fg-muted, #888)" }}>
-            {i18n.t("message.page.sync.state.no_targets")}
-          </p>
+        <input
+          className="km-message-page__input"
+          type="text"
+          value={searchInput}
+          onChange={(e) => setSearchInput(e.target.value)}
+          placeholder={i18n.t("message.page.search.placeholder")}
+        />
+      </div>
+
+      <div className="km-message-page__list">
+        <h2 className="km-message-page__section-title">
+          {i18n.t("message.page.list.label")}
+        </h2>
+        {filtered.length === 0 ? (
+          <p className="km-message-page__empty">{i18n.t("message.page.empty")}</p>
         ) : (
-          <ul>
-            {targets.map((t) => (
-              <li key={t.targetKey}>
-                <code>{t.targetKey}</code>
-                {" — "} {i18n.t("message.page.sync.lastSynced")}:{" "}
-                {t.lastSyncedMessageId || "(none)"}
-                {t.lastSyncError ? ` (${i18n.t("message.page.sync.error")}: ${t.lastSyncError})` : ""}
+          <ul className="km-message-page__list-items">
+            {filtered.map((m) => (
+              <li
+                key={m.messageId}
+                className="km-message-page__list-item"
+                data-message-id={m.messageId}
+                onClick={() => router.push(`/messages/${encodeURIComponent(m.messageId)}`)}
+              >
+                <div className="km-message-page__list-meta">
+                  <span className="km-message-page__list-meta-label">
+                    {i18n.t("message.page.sender.label")}
+                  </span>{" "}
+                  <code>{shortHex(m.senderPublicKeyHex)}</code>
+                  {m.senderOrigin ? ` (${m.senderOrigin})` : ""}
+                  {m.senderAppId ? ` (${m.senderAppId})` : ""}
+                  {" → "}
+                  <span className="km-message-page__list-meta-label">
+                    {i18n.t("message.page.recipient.label")}
+                  </span>{" "}
+                  <code>{shortHex(m.recipientPublicKeyHex)}</code>
+                  {m.recipientOrigin ? ` (${m.recipientOrigin})` : ""}
+                  {m.recipientAppId ? ` (${m.recipientAppId})` : ""}
+                </div>
+                <div className="km-message-page__list-body">{m.body}</div>
               </li>
             ))}
           </ul>
         )}
       </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-          {i18n.t("message.page.search.label")}
-        </h2>
-        <input
-          type="text"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-          placeholder={i18n.t("message.page.search.placeholder")}
-          style={{ width: 280 }}
-        />
-      </div>
-
-      <div style={{ marginBottom: 12 }}>
-        <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-          {i18n.t("message.page.online.label")}
-        </h2>
-        <input
-          type="text"
-          value={onlineQueryHex}
-          onChange={(e) => setOnlineQueryHex(e.target.value)}
-          placeholder={i18n.t("message.page.online.placeholder")}
-          style={{ width: 360 }}
-        />
-        <button
-          type="button"
-          onClick={async () => {
-            const hex = onlineQueryHex.trim();
-            if (!/^[0-9a-f]{66}$/i.test(hex)) return;
-            const res = await service.checkOnline([hex]);
-            setOnlineResult(res as unknown as Record<string, string>);
-          }}
-        >
-          {i18n.t("message.page.checkOnline")}
-        </button>
-        <ul>
-          {Object.entries(onlineResult).map(([k, v]) => (
-            <li key={k}>
-              <code>{k.slice(0, 8)}…</code>:{" "}
-              {v === "online"
-                ? i18n.t("message.page.online.online")
-                : v === "offline"
-                  ? i18n.t("message.page.online.offline")
-                  : i18n.t("message.page.online.unknown")}
-            </li>
-          ))}
-        </ul>
-      </div>
-
-      <h2 style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>
-        {i18n.t("message.page.list.label")}
-      </h2>
-      {filtered.length === 0 ? (
-        <p style={{ color: "var(--km-fg-muted, #888)" }}>
-          {i18n.t("message.page.empty")}
-        </p>
-      ) : (
-        <ul style={{ listStyle: "none", padding: 0 }}>
-          {filtered.map((m) => (
-            <li
-              key={m.messageId}
-              style={{
-                padding: "8px 0",
-                borderBottom: "1px solid var(--km-border, #eee)"
-              }}
-            >
-              <div
-                style={{ fontSize: 12, color: "var(--km-fg-muted, #888)" }}
-              >
-                {i18n.t("message.page.sender.label")}{" "}
-                <code>{m.senderPublicKeyHex.slice(0, 8)}…</code>
-                {m.senderOrigin ? ` (${m.senderOrigin})` : ""}
-                {m.senderAppId ? ` (${m.senderAppId})` : ""}
-                {" → "}
-                {i18n.t("message.page.recipient.label")}{" "}
-                <code>{m.recipientPublicKeyHex.slice(0, 8)}…</code>
-                {m.recipientOrigin ? ` (${m.recipientOrigin})` : ""}
-                {m.recipientAppId ? ` (${m.recipientAppId})` : ""}
-              </div>
-              <div style={{ whiteSpace: "pre-wrap" }}>{m.body}</div>
-            </li>
-          ))}
-        </ul>
-      )}
     </section>
   );
+}
+
+function shortHex(h: string): string {
+  if (h.length <= 12) return h;
+  return `${h.slice(0, 8)}…`;
 }

@@ -1,5 +1,5 @@
 // packages/contracts/src/appmsg.ts
-// 应用消息总线契约（施工单 2026-07-03 001 + 2026-07-04 001 反馈）。
+// 应用消息总线契约（施工单 2026-07-03 002 硬切换）。
 //
 // 设计缘由：
 //   - 单真值在 Keymaster 本地 DB；HubMsg 只负责远端持久化 / 在线实时推送 /
@@ -8,13 +8,13 @@
 //     `senderEndpoint` / `scopeEndpoint` / `box` / `atMs` 这些系统内部概念。
 //   - 公开接收目标只允许两种：
 //       * 外部 app：`origin`（exact origin，scheme + host + port）
-//       * 内部插件 / 系统应用：`appId`（pluginEndpointId）
+//       * 内部插件：`appId`（pluginEndpointId）
 //   - 公开订阅模式只有"完整消息 hook"：`subscribeMessages(handler)` 直接拿到
 //     完整 `AppMsgMessage`，**不**再以 `appmsg.inbox_dirty` 这种 dirty hint
 //     为对外协议根模型。
-//   - 旧远端 owner 级诊断接口（`message.origins` / `message.counts`）以及
-//     `AppMsgSystemPage` 全部删除。
-//   - 系统消息应用固定 appId = `keymaster.message`，查看/管理本地消息真值。
+//   - 平台全库读 / 全库订阅接口（`listUnfilteredMessages` /
+//     `subscribeUnfilteredMessages`）**仅**供 `plugin-appmsg` 自己的 HubMsg
+//     管理页直接消费，不再包装成"系统消息应用 facade"对外暴露。
 //   - 在线语义固定为"对方当前是否连着 HubMsg、是否能立即收到实时推送"，
 //     不携带"对方有没有历史消息 / 曾经登录过 / 以后能不能补同步"等额外含义。
 //
@@ -28,9 +28,14 @@
 //     plugin-appmsg 内核内部完成。
 //   - `AppMsgCore` 接口明确包含 scoped 内部接口（`sendScopedMessage` /
 //     `listScopedMessages` / `getScopedMessage` / `subscribeScopedMessages`），
-//     实现层**必须**沿用 sender 投影做严格的 ACL 隔离；任何"全库读"路径
-//     必须经专门的 `createSystemMessageClient(...)` / `createUnfilteredClient(...)`
-//     才能开出（**仅** keymaster.message 系统消息应用允许）。
+//     实现层**必须**沿用 sender 投影做严格的 ACL 隔离；
+//     `listUnfilteredMessages` / `subscribeUnfilteredMessages` 是 platform
+//     internal 全库能力，**只**给 plugin-appmsg 的 HubMsg 管理页直接消费，
+//     app / plugin 公开 facade 不暴露这条路径。
+//   - 施工单 2026-07-03 002：`createSystemMessageClient(...)` 与
+//     `SystemMessageAppClient` 已从主设计中移除——`plugin-message` 现在
+//     是一个普通的 scoped 消息插件（appId = `keymaster.message`），通过
+//     runtime 注入的 `<pluginId>.appmsg.client` 拿到 scoped client。
 
 import type { KeyScopedStorageHandle, KeyspaceService } from "./keyspace.js";
 
@@ -196,8 +201,12 @@ export interface AppMsgSenderProjection {
  *     `senderOrigin === scope.id` 的消息可见；
  *   - `kind = "plugin"` → 仅 `recipientAppId === scope.id` 或
  *     `senderAppId === scope.id` 的消息可见；
- *   - `kind = "all"`   → 当前 owner 维度的全部消息可见（**仅** keymaster.message
- *     系统消息应用允许使用——见 `createSystemMessageClient(...)`）。
+ *   - `kind = "all"`   → 当前 owner 维度的全部消息可见。
+ *     **仅** `plugin-appmsg` 自己的 HubMsg 管理页内部使用：
+ *     管理页直接消费 `AppMsgCore.listUnfilteredMessages` /
+ *     `subscribeUnfilteredMessages`，不走 plugin facade；其它路径
+ *     （plugin-message 业务页 / 任意声明 endpoint 的插件）**不允许**走
+ *     `kind = "all"`。
  */
 export interface AppMsgScope {
   ownerPublicKeyHex: string;
@@ -264,7 +273,7 @@ export interface AppMsgLocalDbSnapshot {
 /**
  * app / plugin 面向系统的统一消息 facade。
  *
- * 设计缘由（施工单 §4.4 / §8.3 + 反馈 §"必须修改"）：
+ * 设计缘由（施工单 2026-07-03 002）：
  *   - 统一 5 个公开方法：`sendMessage` / `listMessages` / `getMessage` /
  *     `subscribeMessages` / `checkOnline`。
  *   - 公开调用入参**不**包含 owner / endpoint / box / atMs 等内部概念。
@@ -275,6 +284,9 @@ export interface AppMsgLocalDbSnapshot {
  *       * `subscribeMessages(handler)`：仅分发 sender scope 内的事件；
  *       * `checkOnline(hexes)`：与 sender 解耦，全局行为。
  *   - facade 持有 sender 投影不可变；调用方不可改。
+ *   - facade **不**再提供"全库读"路径——`plugin-message` 现在也是一个
+ *     普通 scoped 插件，appId = `keymaster.message`，**只能**看自己
+ *     scope 内的消息。
  *
  * 失败语义：
  *   - `sendMessage` 失败 → reject；message 必须经过 HubMsg 才算发出；
@@ -295,13 +307,32 @@ export interface AppMsgSimpleClient {
 /** appmsg 平台核心 capability key。 */
 export const APPMESSAGE_CORE_CAPABILITY = "appmsg.core";
 
-/** 系统消息应用固定 appId（施工单 §4.5 / §8.6）。 */
+/**
+ * `plugin-message` 的固定 appId / `appMessageEndpoint.endpointId`
+ * （施工单 2026-07-03 002）。
+ *
+ * 设计缘由：
+ *   - `plugin-message` 是一个普通的 scoped 消息插件（**不**是"系统管理员
+ *     身份"），appId = `keymaster.message`；
+ *   - 它的 sender 投影在 runtime enable 阶段被注入到
+ *     `<pluginId>.appmsg.client`，**不**走任何特权旁路；
+ *   - 它**只**能看 / 发自己 scope 内的消息，看不到全库、看不到连接态、
+ *     看不到在线态。
+ */
 export const KEYMASTER_MESSAGE_APP_ID = "keymaster.message";
 
 /**
  * 插件 scoped client capability key（plugin 侧）。
  */
 export const APPMESSAGE_PLUGIN_CLIENT_CAPABILITY = "appmsg.client";
+
+/**
+ * scoped client capability 后缀（runtime 注入规则）：
+ * `<pluginId>.appmsg.client`。Plugin manifest 上声明了
+ * `appMessageEndpoint.endpointId` 后，runtime host 在 enable 完成时
+ * 把 sender 已绑定的 scoped client 挂到这个 capability。
+ */
+export const APPMESSAGE_CLIENT_CAPABILITY_SUFFIX = ".appmsg.client";
 
 /**
  * 兼容别名：插件 scoped message client = `AppMsgSimpleClient`。
@@ -337,24 +368,28 @@ export interface AppMsgSubscribeScopedInput extends AppMsgSenderProjection {
 /**
  * appmsg 平台 internal 接口（plugin-appmsg 单例）。
  *
- * 设计缘由：
+ * 设计缘由（施工单 2026-07-03 002 硬切换）：
  *   - 平台 external 公开接口收口为 `AppMsgSimpleClient`：5 个简单方法，
  *     sender 投影在 facade 创建时固化。
  *   - 平台 internal 完整接口在 `AppMsgCore` 内显式声明 scoped 操作；
- *     任何实现必须按 sender 投影做 ACL 隔离，**不允许**走"全库读"。
+ *     任何实现必须按 sender 投影做 ACL 隔离，**不允许**走"全库读"路径
+ *     对外暴露。
  *   - `subscribeScopedMessages` 内部保存 `match(msg)` 过滤项；
  *     call site 只在自己 scope 内的事件被分发。
- *   - `createMessageScopedClient(...)` 用固化 sender 投影构造对外 facade。
- *   - `createUnfilteredClient(...)` **仅** keymaster.message 系统应用允许
- *     ——这个工厂在 plugin-appmsg 单例内由 `KEYMASTER_MESSAGE_APP_ID` 校验；
- *     其它 caller 拿到的是受限 `AppMsgSimpleClient`。
+ *   - `createMessageScopedClient(...)` 用固化 sender 投影构造对外 facade，
+ *     供 runtime 在插件 enable 阶段注入 `<pluginId>.appmsg.client`。
+ *   - `subscribeUnfilteredMessages` / `listUnfilteredMessages` 仍保留为
+ *     **platform internal** 全库能力，但**仅**供 `plugin-appmsg` 自己的
+ *     HubMsg 管理页直接消费，**不**再被任何 plugin facade 包装。
+ *   - 旧 `createSystemMessageClient(...)` 与 `SystemMessageAppClient`
+ *     已从主设计中移除——`plugin-message` 现在是一个普通 scoped 消息
+ *     插件（appId = `keymaster.message`），通过 runtime 注入的 scoped
+ *     client 工作。
  *
  * 关键边界：
  *   - `messageId` 全链路 string。
  *   - send / list / get / subscribe 任何操作都**必须**带 sender 投影
- *     （不存在"无 sender 的 list"路径）；
- *   - 唯一例外是 `createUnfilteredClient` —— 它仅给系统消息应用使用，
- *     由 `createSystemMessageClient(ownerPublicKeyHex)` 工厂代理。
+ *     （不存在"无 sender 的 list"路径）。
  */
 export interface AppMsgCore {
   /* ====== 连接管理 ====== */
@@ -386,28 +421,21 @@ export interface AppMsgCore {
   subscribeScopedMessages(input: AppMsgSubscribeScopedInput): () => void;
 
   /**
-   * 平台 internal 全量订阅——**仅** keymaster.message 系统消息应用允许
-   * 构造。Plugin-appmsg 实现层在收到此调用时校验调用方具备
-   * "system message app" 身份（manifest.appMessageEndpoint.endpointId
-   * === KEYMASTER_MESSAGE_APP_ID），否则拒绝。
+   * 平台 internal 全量订阅——**仅** `plugin-appmsg` 自己的 HubMsg 管理页
+   * 直接消费；任何其它 caller 拿到这条入口都属于越权。
    */
   subscribeUnfilteredMessages(handler: (msg: AppMsgMessage) => void): () => void;
 
   /**
-   * 平台 internal 全量读——与 `subscribeUnfilteredMessages` 同作用域。
+   * 平台 internal 全量读——与 `subscribeUnfilteredMessages` 同作用域：
+   * **仅** `plugin-appmsg` 自己的 HubMsg 管理页直接消费。
    */
   listUnfilteredMessages(input?: AppMsgListInput): Promise<AppMsgListResult>;
 
   /* ====== 公开 facade 构造 ====== */
 
-  /** 构造 sender 固化的对外 facade。 */
+  /** 构造 sender 固化的对外 facade。供 runtime 在 enable 阶段注入。 */
   createMessageScopedClient(input: AppMsgSenderProjection): AppMsgSimpleClient;
-
-  /**
-   * 系统消息应用专用 facade：appId = keymaster.message，sender = 当前 owner
-   * publicKeyHex；其内部使用 `subscribeUnfilteredMessages` / `listUnfilteredMessages`。
-   */
-  createSystemMessageClient(input: { ownerPublicKeyHex: string }): AppMsgSimpleClient;
 
   /* ====== 同步 ====== */
 

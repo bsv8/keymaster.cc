@@ -1,10 +1,14 @@
 /* packages/plugin-appmsg/src/styles.css
- * appmsg 系统诊断页专属样式。
+ * HubMsg 管理页专属样式（施工单 2026-07-03 002 硬切换）。
  *
  * 设计缘由：
- *   - 视觉语言完全复用现有壳层 token：surface / border / radius / badge；
- *   - 只整理诊断页的信息层级，不引入新的交互动效或独立色板；
- *   - 样式跟随 plugin-appmsg 目录走，移除插件时一并删除。
+ *   - 视觉语言完全复用现有壳层 token：surface / border / radius / shadow；
+ *   - 只整理管理页的信息层级（连接 / 同步 / 统计 / 全局消息浏览），不引入
+ *     新的交互动效或独立色板；
+ *   - 样式跟随 plugin-appmsg 目录走，移除插件时一并删除；
+ *   - 装配层（apps/web/src/styles/plugins.css）显式
+ *     `@import "@keymaster/plugin-appmsg/styles.css"` 引入；
+ *   - 类名与 `HubMsgPage.tsx` JSX 一一对应，**不**留双命名体系。
  */
 
 .appmsg-system-page {
@@ -13,20 +17,129 @@
   gap: 16px;
 }
 
-.appmsg-system-page__card,
-.appmsg-system-page__table-wrap,
-.appmsg-system-page__empty-card {
+.appmsg-system-page__title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.appmsg-system-page__card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
-.appmsg-system-page__card {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0;
-  overflow: hidden;
+.appmsg-system-page__card--sync,
+.appmsg-system-page__card--stats,
+.appmsg-system-page__card--online,
+.appmsg-system-page__card--browse {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 16px;
+}
+
+.appmsg-system-page__section-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+}
+
+.appmsg-system-page__sub-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 8px 0 0 0;
+}
+
+.appmsg-system-page__sync-row,
+.appmsg-system-page__online-row,
+.appmsg-system-page__browse-filter {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.appmsg-system-page__sync-msg {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.appmsg-system-page__sync-msg--ok {
+  color: var(--primary);
+}
+
+.appmsg-system-page__sync-msg--fail {
+  color: var(--danger);
+}
+
+.appmsg-system-page__button {
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--primary, var(--border));
+  border-radius: var(--radius);
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+.appmsg-system-page__button:hover {
+  filter: brightness(1.1);
+}
+
+.appmsg-system-page__input {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 10px;
+  min-width: 220px;
+  box-sizing: border-box;
+}
+
+.appmsg-system-page__stats-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.appmsg-system-page__online-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.appmsg-system-page__online-list li {
+  padding: 4px 0;
+}
+
+.appmsg-system-page__body-cell {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-width: 480px;
+}
+
+.appmsg-system-page__empty {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0;
 }
 
 .appmsg-system-page__row {
@@ -38,11 +151,23 @@
   border-bottom: 1px solid var(--border);
 }
 
-.appmsg-system-page__row:nth-last-child(-n + 2) {
+/**
+ * 连接区（默认 `.appmsg-system-page__card`）内部使用 2 列网格；通过
+ * `:first-child` 选中第一个 `.appmsg-system-page__card`（连接 card）
+ * 而不是所有 card——同步 / 统计 / 浏览 card 是 vertical flex，已在
+ * `.appmsg-system-page__card--sync/--stats/...` 里覆盖。
+ */
+.appmsg-system-page__card > .appmsg-system-page__row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0;
+}
+
+.appmsg-system-page__card > .appmsg-system-page__row:nth-last-child(-n + 2) {
   border-bottom: 0;
 }
 
-.appmsg-system-page__row:nth-child(odd) {
+.appmsg-system-page__card > .appmsg-system-page__row:nth-child(odd) {
   border-right: 1px solid var(--border);
 }
 
@@ -64,6 +189,43 @@
 .appmsg-system-page__value--mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
+}
+
+.appmsg-system-page__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.appmsg-system-page__status.is-ok {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.appmsg-system-page__status.is-partial {
+  color: #d6a417;
+  border-color: #d6a417;
+  background: rgba(214, 164, 23, 0.08);
+}
+
+.appmsg-system-page__status.is-failed {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: rgba(227, 90, 90, 0.08);
+}
+
+[data-theme="dark"] .appmsg-system-page__status.is-partial {
+  color: #f3c969;
+  border-color: #f3c969;
 }
 
 .appmsg-system-page__table-wrap {
@@ -112,84 +274,20 @@
   font-variant-numeric: tabular-nums;
 }
 
-.appmsg-system-page__chip,
-.appmsg-system-page__status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 24px;
-  padding: 3px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.2;
-}
-
-.appmsg-system-page__chip--soft {
-  font-weight: 500;
-  color: var(--text-dim);
-}
-
-.appmsg-system-page__status-pill {
-  display: inline-flex;
-  align-items: center;
-  max-width: 100%;
-  padding: 3px 9px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-2);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.3;
-}
-
-.appmsg-system-page__status-pill--ok,
-.appmsg-system-page__status.is-ok {
-  color: var(--primary);
-  border-color: var(--primary);
-}
-
-.appmsg-system-page__status-pill--partial,
-.appmsg-system-page__status.is-partial {
-  color: #d6a417;
-  border-color: #d6a417;
-  background: rgba(214, 164, 23, 0.08);
-}
-
-.appmsg-system-page__status-pill--failed,
-.appmsg-system-page__status.is-failed {
-  color: var(--danger);
-  border-color: var(--danger);
-  background: rgba(227, 90, 90, 0.08);
-}
-
-[data-theme="dark"] .appmsg-system-page__status-pill--partial,
-[data-theme="dark"] .appmsg-system-page__status.is-partial {
-  color: #f3c969;
-  border-color: #f3c969;
-}
-
-.appmsg-system-page__empty-card {
-  padding: 8px;
-}
-
 @media (max-width: 768px) {
-  .appmsg-system-page__card {
+  .appmsg-system-page__card > .appmsg-system-page__row {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .appmsg-system-page__row {
+  .appmsg-system-page__card > .appmsg-system-page__row {
     border-right: 0;
   }
 
-  .appmsg-system-page__row:nth-child(odd) {
+  .appmsg-system-page__card > .appmsg-system-page__row:nth-child(odd) {
     border-right: 0;
   }
 
-  .appmsg-system-page__row:not(:last-child) {
+  .appmsg-system-page__card > .appmsg-system-page__row:not(:last-child) {
     border-bottom: 1px solid var(--border);
   }
 }

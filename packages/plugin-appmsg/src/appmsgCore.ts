@@ -2,7 +2,7 @@
 // appmsg.core 平台单例：HubMsg 连接 + 本地消息库 + 推送分发 + 增量同步 +
 // 在线查询 + 严格 sender/scope ACL。
 //
-// 设计缘由（施工单 2026-07-03 001 + 反馈 §"必须修改"）：
+// 设计缘由（施工单 2026-07-03 002 硬切换）：
 //   - 单例：HubMsg WSS 一条连接；owner 切换时由本组件 reconnect；vault
 //     锁时关闭。
 //   - **单真值在 Keymaster 本地 DB**（`packages/plugin-appmsg/src/appmsgDb.ts`）：
@@ -15,9 +15,10 @@
 //   - **scoped 订阅**：core 内部保存 `{match: (msg) => boolean, handler}`，
 //     每个订阅都有自己的 match；`subscribeScopedMessages` 的 match 由 sender
 //     投影导出 scope，事件只在 scope 内分发。
-//   - 唯一可走全库读 / 全库订阅的是 `keymaster.message` 系统消息应用——
-//     通过 `createSystemMessageClient(...)` 工厂；调用方具备 manifest 上
-//     `appMessageEndpoint.endpointId === KEYMASTER_MESSAGE_APP_ID` 才会被放行。
+//   - 全库读 / 全库订阅（`listUnfilteredMessages` /
+//     `subscribeUnfilteredMessages`）仍保留为 **platform internal** 能力，
+//     **仅**供 `plugin-appmsg` 自己的 HubMsg 管理页直接消费；它们不再被
+//     任何 plugin facade 包装，也**不**再有"系统消息应用特权旁路"。
 //   - send：sender 投影**严格映射**为 HubMsg senderEndpoint（origin ↔
 //     origin endpoint；appId ↔ plugin endpoint）；recipient = 自己时同时写
 //     本地副本（因为 HubMsg 服务端对 self-send 不再 push）。
@@ -66,7 +67,7 @@ import {
   type AppMsgLocalDbOps
 } from "./appmsgDb.js";
 import { syncAllScopes, syncOneScope } from "./appmsgSync.js";
-import { makeMessageScopedClient, SystemMessageAppClient } from "./messageFacade.js";
+import { makeMessageScopedClient } from "./messageFacade.js";
 
 /**
  * appmsg.core 配置。
@@ -561,8 +562,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   subscribeUnfilteredMessages(handler: (msg: AppMsgMessage) => void): () => void {
-    // 本方法**仅**由 `createSystemMessageClient` 调用；调用方应在
-    // facade 工厂层校验 `KEYMASTER_MESSAGE_APP_ID`，但这里也再守一遍。
+    // 本方法**仅**由 `plugin-appmsg` 自己的 HubMsg 管理页直接消费；
+    // 它绕开所有 scope ACL——这是 platform internal 的全库订阅入口。
     const sub: MessageSubscription = {
       match: () => true,
       handler
@@ -592,20 +593,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   createMessageScopedClient(input: AppMsgSenderProjection): AppMsgSimpleClient {
     return makeMessageScopedClient(this, input);
-  }
-
-  createSystemMessageClient(input: { ownerPublicKeyHex: string }): AppMsgSimpleClient {
-    // 严格检查：仅允许 owner publicKeyHex 等于当前 bind owner 且走
-    // 系统消息 appId；这是平台 internal 二次守门——facade 工厂层也应
-    // 自己校验过 KEYMASTER_MESSAGE_APP_ID。
-    if (!this.currentBoundOwner || this.currentBoundOwner !== input.ownerPublicKeyHex) {
-      throw new Error(
-        "appmsg.core: createSystemMessageClient requires current bound owner"
-      );
-    }
-    // 关键：系统消息应用走 unfiltered——**不**走简单 facade（那个会
-    // 受 scope 限制）。
-    return new SystemMessageAppClient(this, input.ownerPublicKeyHex);
   }
 
   /* ====== 同步 ====== */

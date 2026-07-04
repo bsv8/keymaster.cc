@@ -1,12 +1,18 @@
 // packages/plugin-appmsg/src/appmsgCore.test.ts
-// appmsg.core 单测（施工单 2026-07-03 001 + 2026-07-04 001 反馈）。
+// appmsg.core 单测（施工单 2026-07-03 002 硬切换）。
 //
 // 测试目标（反馈 §"必须补测试"）：
 //   1. scoped client send 时，sender origin/appId 被真正带到 wire senderEndpoint
 //   2. 两个不同 scoped client 订阅时，各自只收到自己的消息
 //   3. `listScopedMessages()` 只返回 scoped target 的消息，不是 DB 第一个 target
 //   4. `getScopedMessage()` 读到不属于自己的 messageId 时返回 null
-//   5. inspectLocalDb / checkOnline / 系统消息应用 facade 等关键不变量
+//   5. inspectLocalDb / checkOnline 等关键不变量
+//
+// 旧 `createSystemMessageClient(...)` 相关测试已随 API 移除同步删除。
+// HubMsg 管理面直接消费 `listUnfilteredMessages` /
+// `subscribeUnfilteredMessages`，由 `HubMsgPage` 与
+// `hubmsgService.ts` 内部覆盖；本文件仍保留 core 单测路径以验证 ACL
+// 边界。
 //
 // 用 fake-indexeddb 跑真 IDB；通过一个简化的 fake keyspace 直接走 indexedDB.open。
 
@@ -346,38 +352,17 @@ describe("AppMsgCore.listScopedMessages / getScopedMessage ACL", () => {
   });
 });
 
-describe("AppMsgCore.createSystemMessageClient", () => {
-  it("throws when owner does not match currentBoundOwner", async () => {
+describe("AppMsgCore.createSystemMessageClient (removed in 施工单 2026-07-03 002)", () => {
+  // 施工单 2026-07-03 002：`createSystemMessageClient(...)` 已从
+  // `AppMsgCore` 主设计中移除——`plugin-message` 现在是普通 scoped
+  // 插件，平台 internal 全库读只供 `plugin-appmsg` 自己的 HubMsg 管理页
+  // 直接消费。
+  it("API no longer exposed on AppMsgCore", async () => {
     const log = makeLogSink();
     const { core } = await makeBoundCoreAsync(OWNER, log);
-    expect(() =>
-      core.createSystemMessageClient({ ownerPublicKeyHex: OWNER_B })
-    ).toThrow(/current bound owner/);
-  });
-
-  it("returns a facade that can read all messages (unfiltered)", async () => {
-    const log = makeLogSink();
-    const { core, db } = await makeBoundCoreAsync(OWNER, log);
-    const uniqID = "sysapp-uniq-" + Math.random().toString(36).slice(2);
-    await seedDb(db, [
-      msg({
-        messageId: uniqID,
-        body: "any",
-        senderPublicKeyHex: OWNER_B,
-        senderOrigin: "https://other.example:443",
-        recipientPublicKeyHex: OWNER_B,
-        recipientOrigin: "https://other.example:443"
-      })
-    ]);
-    const sysCli = core.createSystemMessageClient({
-      ownerPublicKeyHex: OWNER
-    });
-    const got = await sysCli.getMessage({ messageId: uniqID });
-    expect(got?.messageId).toBe(uniqID);
-    // 还应能 list 出来——具体条数随其它测试残留变化，仅验证 uniqID 在
-    // list 内。
-    const list = await sysCli.listMessages({ limit: 200 });
-    expect(list.items.find((m) => m.messageId === uniqID)?.messageId).toBe(uniqID);
+    expect(
+      (core as unknown as { createSystemMessageClient?: unknown }).createSystemMessageClient
+    ).toBeUndefined();
   });
 });
 

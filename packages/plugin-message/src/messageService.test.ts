@@ -1,15 +1,20 @@
 // packages/plugin-message/src/messageService.test.ts
-// 系统消息应用 service 单测。
+// 消息业务 service 单测（施工单 2026-07-03 002 硬切换）。
+//
+// 验证：
+//   - 4 个最小方法（listMessages / getMessage / sendTextMessage /
+//     subscribeMessages）按预期走 scoped client；
+//   - scoped client 不存在时降级空态；
+//   - sendTextMessage 固定带 `recipientAppId = keymaster.message`；
+//   - 不再使用 `createSystemMessageClient(...)` / `listUnfilteredMessages`。
 
 import { describe, expect, it, vi } from "vitest";
 import type {
-  AppMsgCore,
-  AppMsgLocalDbSnapshot,
-  AppMsgListResult,
   AppMsgMessage,
-  AppMsgOnlineResult
+  AppMsgOnlineResult,
+  AppMsgSimpleClient
 } from "@keymaster/contracts";
-import { createMessageService, onlineFallback } from "./messageService.js";
+import { createMessageService } from "./messageService.js";
 
 const OWNER = "02aaaa".padEnd(66, "a");
 
@@ -18,7 +23,9 @@ function fakeMsg(overrides: Partial<AppMsgMessage> = {}): AppMsgMessage {
     messageId: "1",
     clientMessageId: "c-1",
     senderPublicKeyHex: OWNER,
+    senderAppId: "keymaster.message",
     recipientPublicKeyHex: OWNER,
+    recipientAppId: "keymaster.message",
     contentType: "text/plain",
     body: "hi",
     createdAtMs: 1,
@@ -27,126 +34,114 @@ function fakeMsg(overrides: Partial<AppMsgMessage> = {}): AppMsgMessage {
   };
 }
 
-function makeFakeCore(opts?: {
-  snapshot?: AppMsgLocalDbSnapshot;
-}): AppMsgCore {
-  const snapshot: AppMsgLocalDbSnapshot = opts?.snapshot ?? {
-    state: "open",
-    ownerPublicKeyHex: OWNER,
-    lastInsertedAtMs: 1,
-    lastError: null
-  };
-  return {
-    connectForOwner: vi.fn(async () => undefined),
-    disconnect: vi.fn(async () => undefined),
-    inspectLocalDb: vi.fn(() => snapshot),
-    openLocalDb: vi.fn(async () => null),
-    sendScopedMessage: vi.fn(async () => ({ messageId: "1", createdAtMs: 1 })),
-    listScopedMessages: vi.fn(async (): Promise<AppMsgListResult> => ({
-      items: [fakeMsg()],
-      hasMore: false
-    })),
-    getScopedMessage: vi.fn(async () => fakeMsg()),
-    subscribeScopedMessages: vi.fn(() => () => undefined),
-    subscribeUnfilteredMessages: vi.fn(() => () => undefined),
-    listUnfilteredMessages: vi.fn(async (): Promise<AppMsgListResult> => ({
-      items: [fakeMsg()],
-      hasMore: false
-    })),
-    triggerSync: vi.fn(async () => undefined),
-    listTargetSyncStates: vi.fn(async () => []),
+function makeFakeClient(): {
+  client: AppMsgSimpleClient;
+  calls: { method: string; args: unknown }[];
+} {
+  const calls: { method: string; args: unknown }[] = [];
+  const client: AppMsgSimpleClient = {
+    sendMessage: vi.fn(async (args) => {
+      calls.push({ method: "sendMessage", args });
+      return { messageId: "m-sent", createdAtMs: Date.now() };
+    }),
+    listMessages: vi.fn(async (args) => {
+      calls.push({ method: "listMessages", args });
+      return { items: [fakeMsg()], hasMore: false };
+    }),
+    getMessage: vi.fn(async (args) => {
+      calls.push({ method: "getMessage", args });
+      return fakeMsg();
+    }),
+    subscribeMessages: vi.fn((handler) => {
+      calls.push({ method: "subscribeMessages", args: { handlerPresent: typeof handler === "function" } });
+      return () => undefined;
+    }),
     checkOnline: vi.fn(async (hexes): Promise<AppMsgOnlineResult> => {
       const out: AppMsgOnlineResult = {};
-      for (const h of hexes) out[h] = h === OWNER ? "online" : "offline";
+      for (const h of hexes) out[h] = "online";
       return out;
-    }),
-    createMessageScopedClient: vi.fn(() => {
-      throw new Error("not used in unit tests");
-    }),
-    createSystemMessageClient: vi.fn(({ ownerPublicKeyHex }: { ownerPublicKeyHex: string }) => {
-      return {
-        sendMessage: async () => ({ messageId: "1", createdAtMs: 1 }),
-        listMessages: async () => ({ items: [fakeMsg()], hasMore: false }),
-        getMessage: async () => fakeMsg(),
-        subscribeMessages: () => () => undefined,
-        checkOnline: async (hexes: string[]) => {
-          const out: AppMsgOnlineResult = {};
-          for (const h of hexes) out[h] = h === OWNER ? "online" : "offline";
-          return out;
-        },
-        sender: { senderPublicKeyHex: ownerPublicKeyHex, senderAppId: "keymaster.message" }
-      };
     })
   };
+  return { client, calls };
 }
 
-describe("createMessageService", () => {
-  it("listLocalMessages goes through system message facade -> listUnfilteredMessages", async () => {
-    const core = makeFakeCore();
-    const service = createMessageService(core);
-    const items = await service.listLocalMessages();
+describe("createMessageService (scoped client path)", () => {
+  it("isReady reports scoped client availability", () => {
+    const { client } = makeFakeClient();
+    const service = createMessageService(() => client);
+    expect(service.isReady()).toBe(true);
+  });
+
+  it("isReady reports not-ready when scoped client is null", () => {
+    const service = createMessageService(() => null);
+    expect(service.isReady()).toBe(false);
+  });
+
+  it("listMessages delegates to scoped client", async () => {
+    const { client, calls } = makeFakeClient();
+    const service = createMessageService(() => client);
+    const items = await service.listMessages({ limit: 50 });
     expect(items.length).toBe(1);
-    // createSystemMessageClient was called; the facade's listMessages goes
-    // through listUnfilteredMessages on the core.
-    expect(
-      (core.createSystemMessageClient as ReturnType<typeof vi.fn>).mock.calls.length
-    ).toBe(1);
+    expect(calls.some((c) => c.method === "listMessages")).toBe(true);
   });
 
-  it("getLocalMessage goes through system message facade", async () => {
-    const core = makeFakeCore();
-    const service = createMessageService(core);
-    const got = await service.getLocalMessage("42");
+  it("listMessages returns empty when scoped client is null", async () => {
+    const service = createMessageService(() => null);
+    await expect(service.listMessages()).resolves.toEqual([]);
+  });
+
+  it("getMessage delegates to scoped client", async () => {
+    const { client, calls } = makeFakeClient();
+    const service = createMessageService(() => client);
+    const got = await service.getMessage("42");
     expect(got?.messageId).toBe("1");
+    const lastGet = [...calls].reverse().find((c) => c.method === "getMessage");
+    expect((lastGet?.args as { messageId: string }).messageId).toBe("42");
   });
 
-  it("triggerSync delegates to core", async () => {
-    const core = makeFakeCore();
-    const service = createMessageService(core);
-    await service.triggerSync();
-    expect((core.triggerSync as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+  it("getMessage returns null when scoped client is null", async () => {
+    const service = createMessageService(() => null);
+    await expect(service.getMessage("42")).resolves.toBeNull();
   });
 
-  it("checkOnline passes hexes through", async () => {
-    const core = makeFakeCore();
-    const service = createMessageService(core);
-    const out = await service.checkOnline([OWNER]);
-    expect(out[OWNER]).toBe("online");
-  });
-
-  it("getLocalDbSnapshot exposes the local db snapshot", () => {
-    const core = makeFakeCore();
-    const service = createMessageService(core);
-    const snap = service.getLocalDbSnapshot();
-    expect(snap.state).toBe("open");
-    expect(snap.ownerPublicKeyHex).toBe(OWNER);
-  });
-
-  it("onlineFallback returns unknown for each hex", () => {
-    const out = onlineFallback([OWNER, "02bbbb".padEnd(66, "b")]);
-    expect(out[OWNER]).toBe("unknown");
-    Object.values(out).forEach((v) => expect(v).toBe("unknown"));
-  });
-
-  it("does not throw during construction when owner is not bound yet", async () => {
-    const core = makeFakeCore({
-      snapshot: {
-        state: "idle",
-        ownerPublicKeyHex: null,
-        lastInsertedAtMs: 0,
-        lastError: null
-      }
+  it("sendTextMessage pins recipientAppId = keymaster.message", async () => {
+    const { client, calls } = makeFakeClient();
+    const service = createMessageService(() => client);
+    await service.sendTextMessage({
+      recipientPublicKeyHex: "02bbbb".padEnd(66, "b"),
+      body: "hello"
     });
-    const service = createMessageService(core);
+    const sendCall = calls.find((c) => c.method === "sendMessage");
+    expect(sendCall).toBeTruthy();
+    const args = sendCall?.args as {
+      recipientPublicKeyHex: string;
+      recipientAppId?: string;
+      body: string;
+    };
+    expect(args.recipientAppId).toBe("keymaster.message");
+    expect(args.body).toBe("hello");
+  });
 
-    await expect(service.listLocalMessages()).resolves.toEqual([]);
-    await expect(service.getLocalMessage("42")).resolves.toBeNull();
-    await expect(service.listTargetSyncStates()).resolves.toEqual([]);
-    await expect(service.triggerSync()).resolves.toBeUndefined();
+  it("sendTextMessage throws when scoped client is null", async () => {
+    const service = createMessageService(() => null);
+    await expect(
+      service.sendTextMessage({ recipientPublicKeyHex: OWNER, body: "x" })
+    ).rejects.toThrow(/not ready/);
+  });
 
-    expect(
-      (core.createSystemMessageClient as ReturnType<typeof vi.fn>).mock.calls.length
-    ).toBe(0);
-    expect((core.triggerSync as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+  it("subscribeMessages forwards handler to scoped client", () => {
+    const { client, calls } = makeFakeClient();
+    const service = createMessageService(() => client);
+    const handler = vi.fn();
+    const off = service.subscribeMessages(handler);
+    expect(typeof off).toBe("function");
+    expect(calls.some((c) => c.method === "subscribeMessages")).toBe(true);
+  });
+
+  it("subscribeMessages returns no-op cancel when scoped client is null", () => {
+    const service = createMessageService(() => null);
+    const off = service.subscribeMessages(() => undefined);
+    expect(typeof off).toBe("function");
+    expect(() => off()).not.toThrow();
   });
 });
