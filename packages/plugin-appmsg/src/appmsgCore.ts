@@ -1048,16 +1048,16 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.handleCloseOff = null;
     }
-    const maybeOnClose = (handle as unknown as {
+    const closeAwareHandle = handle as MessageProviderOperations & {
       onClose?: (h: () => void) => () => void;
-    }).onClose;
-    if (typeof maybeOnClose === "function") {
+    };
+    if (typeof closeAwareHandle.onClose === "function") {
       emitLog(this.cfg.logger, "info", "appmsg.connect.handle_close_hook.attached", {
         mode: "native_onClose",
         ownerPublicKeyHex: this.currentBoundOwner,
         providerId: this.currentProviderId
       });
-      const off = maybeOnClose(() => this.handleGoneAfterBound());
+      const off = closeAwareHandle.onClose(() => this.handleGoneAfterBound());
       this.handleCloseOff = () => {
         try {
           off();

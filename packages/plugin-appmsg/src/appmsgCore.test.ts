@@ -501,6 +501,37 @@ describe("AppMsgCoreImpl - connectForOwner", () => {
     expect(core.inspectLocalDb().state).toBe("open");
   });
 
+  it("handle onClose 依赖 this 时，connectForOwner 不应因方法解绑定崩溃", async () => {
+    const off = vi.fn();
+    const conn = {
+      onClose: vi.fn((_handler: () => void) => off)
+    };
+    const handle = {
+      state: () => "bound" as const,
+      close: () => undefined,
+      sendMessage: async () => ({ messageId: "m-sent", insertedAtMs: Date.now() }),
+      listMessages: async () => ({ items: [], hasMore: false }),
+      getMessage: async () => null,
+      subscribeMessages: () => off,
+      checkOnline: async () => ({} as ProviderOnlineResult),
+      conn,
+      onClose(handler: () => void): () => void {
+        return this.conn.onClose(handler);
+      }
+    } satisfies MessageProviderOperations & {
+      conn: { onClose(handler: () => void): () => void };
+      onClose(handler: () => void): () => void;
+    };
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const { core } = makeCore({ providers: [p] });
+
+    const outcome = await core.connectForOwner(OWNER);
+
+    expect(outcome.kind).toBe("connected");
+    expect(core.currentHandle()).toBe(handle);
+    expect(conn.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("bind throws: stays not-ready, lastError recorded", async () => {
     const failingHandle = (() => {
       const off = vi.fn();
