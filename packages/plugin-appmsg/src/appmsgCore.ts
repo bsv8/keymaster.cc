@@ -689,12 +689,17 @@ export class AppMsgCoreImpl implements AppMsgCore {
     ownerPublicKeyHex: string,
     callerEpoch?: number
   ): Promise<AppMsgConnectOutcome> {
+    const connectStartedAt = Date.now();
     // 1. 短路径：当前已连到同一 owner 且 handle 真在 bound。
     if (
       this.currentBoundOwner === ownerPublicKeyHex &&
       this.boundHandle &&
       this.boundHandle.state() === "bound"
     ) {
+      emitLog(this.cfg.logger, "info", "appmsg.connect.short_circuit_already_bound", {
+        ownerPublicKeyHex,
+        currentProviderId: this.currentProviderId
+      });
       return { kind: "connected" };
     }
 
@@ -714,10 +719,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       hadHandle: this.boundHandle !== null,
       currentOwnerPublicKeyHex: this.currentBoundOwner
     });
+    const disconnectStartedAt = Date.now();
     await this.disconnect();
     emitLog(this.cfg.logger, "info", "appmsg.connect.disconnect.done", {
       ownerPublicKeyHex,
-      connectEpoch: myEpoch
+      connectEpoch: myEpoch,
+      elapsedMs: Date.now() - disconnectStartedAt
     });
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
@@ -727,11 +734,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
       ownerPublicKeyHex,
       connectEpoch: myEpoch
     });
+    const openLocalDbStartedAt = Date.now();
     await this.openLocalDbForOwner(ownerPublicKeyHex);
     emitLog(this.cfg.logger, "info", "appmsg.connect.local_db.open.done", {
       ownerPublicKeyHex,
       connectEpoch: myEpoch,
-      hasLocalDb: this.localHandle !== null && this.localOps !== null
+      hasLocalDb: this.localHandle !== null && this.localOps !== null,
+      elapsedMs: Date.now() - openLocalDbStartedAt
     });
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
@@ -769,6 +778,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       providerId: provider.id
     });
     let signer: AppMsgBindSigner | null;
+    const signerStartedAt = Date.now();
     try {
       signer = await this.cfg.signerProvider();
     } catch (err) {
@@ -779,6 +789,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
         providerId: provider.id,
         connectEpoch: myEpoch,
         reason: "signer_provider_error",
+        elapsedMs: Date.now() - signerStartedAt,
         err: msg
       });
       this.fireStateChange();
@@ -793,7 +804,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
         ownerPublicKeyHex,
         providerId: provider.id,
         connectEpoch: myEpoch,
-        reason: "no_signer"
+        reason: "no_signer",
+        elapsedMs: Date.now() - signerStartedAt
       });
       this.fireStateChange();
       return { kind: "structurallyOffline", reason: "no_signer" };
@@ -802,7 +814,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
       ownerPublicKeyHex,
       connectEpoch: myEpoch,
       providerId: provider.id,
-      signerPublicKeyHex: signer.publicKeyHex
+      signerPublicKeyHex: signer.publicKeyHex,
+      elapsedMs: Date.now() - signerStartedAt
     });
     if (myEpoch !== this.connectEpoch) {
       return { kind: "stale" };
@@ -810,6 +823,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
     // 5. bind 阶段：抛错统一收口为 retryableFailure。
     let handle: MessageProviderHandle;
+    const bindStartedAt = Date.now();
     try {
       emitLog(this.cfg.logger, "info", "appmsg.connect.provider_bind.begin", {
         ownerPublicKeyHex,
@@ -821,7 +835,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
       emitLog(this.cfg.logger, "info", "appmsg.connect.provider_bind.done", {
         ownerPublicKeyHex,
         providerId: provider.id,
-        connectEpoch: myEpoch
+        connectEpoch: myEpoch,
+        elapsedMs: Date.now() - bindStartedAt
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -831,6 +846,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
         providerId: provider.id,
         connectEpoch: myEpoch,
         reason: "bind_error",
+        elapsedMs: Date.now() - bindStartedAt,
         err: msg
       });
       this.fireStateChange();
@@ -922,7 +938,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
     emitLog(this.cfg.logger, "info", "appmsg.connect.bound", {
       ownerPublicKeyHex,
       providerId: provider.id,
-      connectEpoch: myEpoch
+      connectEpoch: myEpoch,
+      elapsedMs: Date.now() - connectStartedAt
     });
 
     this.attachHandleCloseHook(this.boundHandle);
@@ -934,6 +951,17 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   markStructurallyOffline(): void {
+    const previousOwnerPublicKeyHex = this.currentBoundOwner;
+    const previousProviderId = this.currentProviderId;
+    const hadHandle = this.boundHandle !== null;
+    const hadLocalDb = this.localHandle !== null || this.localOps !== null;
+    emitLog(this.cfg.logger, "info", "appmsg.connect.structurally_offline.begin", {
+      previousOwnerPublicKeyHex,
+      previousProviderId,
+      hadHandle,
+      hadLocalDb,
+      previousConnectEpoch: this.connectEpoch
+    });
     this.connectEpoch += 1;
     if (this.boundHandle) {
       try {
@@ -973,6 +1001,9 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.currentUnfilteredOff = null;
     }
+    emitLog(this.cfg.logger, "info", "appmsg.connect.structurally_offline.done", {
+      currentConnectEpoch: this.connectEpoch
+    });
     this.fireStateChange();
   }
 
@@ -989,6 +1020,11 @@ export class AppMsgCoreImpl implements AppMsgCore {
       onClose?: (h: () => void) => () => void;
     }).onClose;
     if (typeof maybeOnClose === "function") {
+      emitLog(this.cfg.logger, "info", "appmsg.connect.handle_close_hook.attached", {
+        mode: "native_onClose",
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId
+      });
       const off = maybeOnClose(() => this.handleGoneAfterBound());
       this.handleCloseOff = () => {
         try {
@@ -999,6 +1035,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
       };
       return;
     }
+    emitLog(this.cfg.logger, "info", "appmsg.connect.handle_close_hook.attached", {
+      mode: "polling",
+      ownerPublicKeyHex: this.currentBoundOwner,
+      providerId: this.currentProviderId,
+      pollIntervalMs: 1000
+    });
     const poller = setInterval(() => {
       const h = this.boundHandle;
       if (!h) {
@@ -1017,14 +1059,31 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   private handleGoneAfterBound(): void {
-    if (this.boundHandle && this.boundHandle.state() !== "bound") {
+    const currentState = this.boundHandle?.state() ?? null;
+    emitLog(this.cfg.logger, "warn", "appmsg.connect.handle_gone_detected", {
+      ownerPublicKeyHex: this.currentBoundOwner,
+      providerId: this.currentProviderId,
+      handleState: currentState
+    });
+    if (this.boundHandle && currentState !== "bound") {
       this.boundHandle = null;
       this.lastErrorMessageValue = "connection closed by remote";
+      emitLog(this.cfg.logger, "warn", "appmsg.connect.handle_gone_committed", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        handleState: currentState
+      });
       this.fireStateChange();
     }
   }
 
   async disconnect(): Promise<void> {
+    emitLog(this.cfg.logger, "info", "appmsg.connect.disconnect.requested", {
+      ownerPublicKeyHex: this.currentBoundOwner,
+      providerId: this.currentProviderId,
+      hadHandle: this.boundHandle !== null,
+      hadLocalDb: this.localHandle !== null || this.localOps !== null
+    });
     const wasBound = this.boundHandle !== null;
     if (this.boundHandle) {
       try {
@@ -1074,19 +1133,41 @@ export class AppMsgCoreImpl implements AppMsgCore {
 
   async openLocalDb(input: { publicKeyHex: string }): Promise<KeyScopedStorageHandle | null> {
     if (this.currentBoundOwner && this.currentBoundOwner !== input.publicKeyHex) {
+      emitLog(this.cfg.logger, "warn", "appmsg.local_db.open.rejected_owner_mismatch", {
+        requestedOwnerPublicKeyHex: input.publicKeyHex,
+        currentOwnerPublicKeyHex: this.currentBoundOwner
+      });
       return null;
     }
+    const startedAt = Date.now();
+    emitLog(this.cfg.logger, "info", "appmsg.local_db.open.begin", {
+      publicKeyHex: input.publicKeyHex
+    });
     const opened = await openAppMsgLocalDb({
       keyspace: this.cfg.keyspace,
       publicKeyHex: input.publicKeyHex
     });
-    if (!opened) return null;
+    if (!opened) {
+      emitLog(this.cfg.logger, "warn", "appmsg.local_db.open.unavailable", {
+        publicKeyHex: input.publicKeyHex,
+        elapsedMs: Date.now() - startedAt
+      });
+      return null;
+    }
     this.localHandle = opened.handle;
     this.localOps = createAppMsgLocalDbOps(opened.handle);
+    emitLog(this.cfg.logger, "info", "appmsg.local_db.open.done", {
+      publicKeyHex: input.publicKeyHex,
+      elapsedMs: Date.now() - startedAt
+    });
     return opened.handle;
   }
 
   private async openLocalDbForOwner(publicKeyHex: string): Promise<void> {
+    const startedAt = Date.now();
+    emitLog(this.cfg.logger, "info", "appmsg.local_db.owner_open.begin", {
+      publicKeyHex
+    });
     if (this.localHandle) {
       try {
         this.localHandle.close();
@@ -1102,10 +1183,18 @@ export class AppMsgCoreImpl implements AppMsgCore {
     });
     if (!opened) {
       this.lastErrorMessageValue = "local db not available";
+      emitLog(this.cfg.logger, "warn", "appmsg.local_db.owner_open.unavailable", {
+        publicKeyHex,
+        elapsedMs: Date.now() - startedAt
+      });
       return;
     }
     this.localHandle = opened.handle;
     this.localOps = createAppMsgLocalDbOps(opened.handle);
+    emitLog(this.cfg.logger, "info", "appmsg.local_db.owner_open.done", {
+      publicKeyHex,
+      elapsedMs: Date.now() - startedAt
+    });
   }
 
   inspectLocalDb(): AppMsgLocalDbSnapshot {
@@ -1601,26 +1690,68 @@ export class AppMsgCoreImpl implements AppMsgCore {
       !this.boundHandle ||
       !this.localOps
     ) {
+      emitLog(this.cfg.logger, "warn", "appmsg.sync.skipped_missing_runtime", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        hasHandle: this.boundHandle !== null,
+        hasLocalDb: this.localOps !== null
+      });
       return;
     }
-    const scopes = await this.collectKnownScopes();
-    if (scopes.length === 0) return;
-    await syncAllScopes({
-      handle: this.boundHandle,
-      ops: this.localOps,
-      providerId: this.currentProviderId,
-      ownerPublicKeyHex: this.currentBoundOwner,
-      scopeEndpoints: scopes,
-      pageLimit: 100,
-      resolveTargetKey: (ep) =>
-        ep.kind === "origin" ? `origin:${ep.id}` : `appId:${ep.id}`,
-      loadCursor: async (targetKey) => {
-        if (!this.localOps || !this.currentProviderId) return "";
-        const st = await this.localOps.getTargetState(this.currentProviderId, targetKey);
-        return st?.lastSyncedMessageId ?? "";
-      },
-      openSealed: (rec) => this.openSealedToMessage(rec)
-    });
+    const startedAt = Date.now();
+    try {
+      const scopes = await this.collectKnownScopes();
+      emitLog(this.cfg.logger, "info", "appmsg.sync.begin", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        scopeCount: scopes.length
+      });
+      if (scopes.length === 0) {
+        emitLog(this.cfg.logger, "info", "appmsg.sync.skipped_no_scopes", {
+          ownerPublicKeyHex: this.currentBoundOwner,
+          providerId: this.currentProviderId,
+          elapsedMs: Date.now() - startedAt
+        });
+        return;
+      }
+      const outcomes = await syncAllScopes({
+        handle: this.boundHandle,
+        ops: this.localOps,
+        providerId: this.currentProviderId,
+        ownerPublicKeyHex: this.currentBoundOwner,
+        scopeEndpoints: scopes,
+        pageLimit: 100,
+        resolveTargetKey: (ep) =>
+          ep.kind === "origin" ? `origin:${ep.id}` : `appId:${ep.id}`,
+        loadCursor: async (targetKey) => {
+          if (!this.localOps || !this.currentProviderId) return "";
+          const st = await this.localOps.getTargetState(this.currentProviderId, targetKey);
+          return st?.lastSyncedMessageId ?? "";
+        },
+        openSealed: (rec) => this.openSealedToMessage(rec),
+        logger: this.cfg.logger
+      });
+      const okCount = outcomes.filter((item) => item.ok).length;
+      const failCount = outcomes.length - okCount;
+      const written = outcomes.reduce((sum, item) => sum + item.written, 0);
+      emitLog(this.cfg.logger, "info", "appmsg.sync.completed", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        scopeCount: outcomes.length,
+        okCount,
+        failCount,
+        written,
+        elapsedMs: Date.now() - startedAt
+      });
+    } catch (err) {
+      emitLog(this.cfg.logger, "error", "appmsg.sync.failed", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        elapsedMs: Date.now() - startedAt,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw err;
+    }
   }
 
   private async collectKnownScopes(): Promise<Array<{ kind: "origin" | "plugin"; id: string }>> {

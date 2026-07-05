@@ -273,7 +273,22 @@ export const appmsgPlatformPlugin: PluginManifest = {
 	          });
 	          return null;
 	        }
+	        ctx.logger.info({
+	          scope: "appmsg.core",
+	          event: "appmsg.signer_provider.key_lookup.begin",
+	          message: "",
+	          data: { activePublicKeyHex: active }
+	        });
 	        const key = await keyspace.getKey(active);
+	        ctx.logger.info({
+	          scope: "appmsg.core",
+	          event: "appmsg.signer_provider.key_lookup.done",
+	          message: "",
+	          data: {
+	            activePublicKeyHex: active,
+	            found: Boolean(key?.publicKeyHex)
+	          }
+	        });
 	        if (!key || !key.publicKeyHex) {
 	          ctx.logger.warn({
 	            scope: "appmsg.core",
@@ -304,7 +319,28 @@ export const appmsgPlatformPlugin: PluginManifest = {
             signChallenge: async (args: {
               challenge: Uint8Array;
             }): Promise<string> => {
-              return signChallengeWithSecp256k1(material.hex, args.challenge);
+              ctx.logger.info({
+                scope: "appmsg.core",
+                event: "appmsg.signer_provider.sign.begin",
+                message: "",
+                data: {
+                  publicKeyHex: pubHex,
+                  challengeBytes: args.challenge.length
+                }
+              });
+              const startedAt = Date.now();
+              const signature = await signChallengeWithSecp256k1(material.hex, args.challenge);
+              ctx.logger.info({
+                scope: "appmsg.core",
+                event: "appmsg.signer_provider.sign.done",
+                message: "",
+                data: {
+                  publicKeyHex: pubHex,
+                  challengeBytes: args.challenge.length,
+                  elapsedMs: Date.now() - startedAt
+                }
+              });
+              return signature;
             }
           };
         });
@@ -344,6 +380,19 @@ export const appmsgPlatformPlugin: PluginManifest = {
       core.providers()
     );
     ctx.provide(APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, core.endpointRegistry());
+    const offProviderSnapshot = core.providers().onActiveChange((snap) => {
+      ctx.logger.info({
+        scope: "appmsg.core",
+        event: "appmsg.provider.active.changed",
+        message: "",
+        data: {
+          providerId: snap.providerId,
+          displayName: snap.displayName,
+          isHealthy: snap.isHealthy,
+          lastError: snap.lastError
+        }
+      });
+    });
 
     /**
      * 单一重连协调器（施工单 2026-07-04 003 硬切换 + 反馈"必改"第二轮）。
@@ -424,6 +473,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
     });
 
     return () => {
+      offProviderSnapshot();
       coordinator.dispose();
       void core.disconnect();
     };

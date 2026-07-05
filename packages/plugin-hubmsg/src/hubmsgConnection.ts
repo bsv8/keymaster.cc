@@ -573,21 +573,42 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         try {
           const bytes = ensureBytes(raw);
           const frame = decodeHubFrame(bytes);
+          this.emitLog("info", "hubmsg.handshake.frame.received", {
+            stage: args.stage,
+            frameKind: frame.frameKind,
+            frameBytes: bytes.length
+          });
           succeed(args.onMessage(frame));
         } catch (err) {
+          this.emitLog("warn", "hubmsg.handshake.frame.invalid", {
+            stage: args.stage,
+            err: err instanceof Error ? err.message : String(err)
+          });
           fail(err);
         }
       };
 
       const onError = (ev: unknown): void => {
+        this.emitLog("warn", "hubmsg.handshake.socket_error", {
+          stage: args.stage,
+          detail: describeUnknownEvent(ev)
+        });
         fail(new Error(`HubMsg: websocket error during ${args.stage}${describeUnknownEvent(ev)}`));
       };
 
       const onClose = (ev: unknown): void => {
+        this.emitLog("warn", "hubmsg.handshake.socket_close", {
+          stage: args.stage,
+          detail: describeUnknownEvent(ev)
+        });
         fail(new Error(`HubMsg: websocket closed during ${args.stage}${describeUnknownEvent(ev)}`));
       };
 
       timer = setTimeout(() => {
+        this.emitLog("error", "hubmsg.handshake.timeout", {
+          stage: args.stage,
+          timeoutMs: args.timeoutMs
+        });
         fail(new Error(`HubMsg: ${args.stage} timeout after ${args.timeoutMs}ms`));
       }, args.timeoutMs);
 
@@ -614,9 +635,16 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     });
     const sock = createWebSocket(this.cfg.url);
     this.socket = sock;
+    this.emitLog("info", "hubmsg.connect.socket.created", {
+      url: this.cfg.url
+    });
     let stage: "server_open" | "sign_challenge" | "send_client_bind" | "bind_ready" =
       "server_open";
     try {
+      this.emitLog("info", "hubmsg.connect.server_open.waiting", {
+        url: this.cfg.url,
+        timeoutMs: handshakeTimeoutMs
+      });
       const so = await this.waitForHandshakeStage({
         socket: sock,
         stage: "server_open",
@@ -648,7 +676,18 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         issuedAtMs
       );
       const plainBytes = new TextEncoder().encode(plainText);
+      this.emitLog("info", "hubmsg.connect.sign.begin", {
+        sessionId: this.sessionId,
+        publicKeyHex: signer.publicKeyHex,
+        challengeBytes: plainBytes.length
+      });
       const sigHex = await signer.signChallenge({ challenge: plainBytes });
+      this.emitLog("info", "hubmsg.connect.sign.done", {
+        sessionId: this.sessionId,
+        publicKeyHex: signer.publicKeyHex,
+        challengeBytes: plainBytes.length,
+        signatureHexLength: sigHex.length
+      });
       const clientBindBody: HubFrameClientBindBody = [
         this.sessionId,
         signer.publicKeyHex,
@@ -669,6 +708,10 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       });
 
       stage = "bind_ready";
+      this.emitLog("info", "hubmsg.connect.bind_ready.waiting", {
+        sessionId: this.sessionId,
+        timeoutMs: handshakeTimeoutMs
+      });
       await this.waitForHandshakeStage<void>({
         socket: sock,
         stage: "bind_ready",
@@ -827,15 +870,27 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     let bytes: Uint8Array;
     try {
       bytes = ensureBytes(raw);
-    } catch {
+    } catch (err) {
+      this.emitLog("warn", "hubmsg.socket.message.invalid_bytes", {
+        err: err instanceof Error ? err.message : String(err)
+      });
       return;
     }
     let frame: HubFrame;
     try {
       frame = decodeHubFrame(bytes);
-    } catch {
+    } catch (err) {
+      this.emitLog("warn", "hubmsg.socket.message.invalid_frame", {
+        frameBytes: bytes.length,
+        err: err instanceof Error ? err.message : String(err)
+      });
       return;
     }
+    this.emitLog("info", "hubmsg.socket.message.received", {
+      frameKind: frame.frameKind,
+      frameBytes: bytes.length,
+      sessionId: this.sessionId
+    });
     if (frame.frameKind === HUB_FRAME_KIND.Ping) {
       const body = decodePingBody(frame.frameBody);
       if (!this.socket || this.stateValue !== "bound") return;
@@ -846,6 +901,10 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       };
       try {
         this.socket.send(encodeHubFrame(pongFrame));
+        this.emitLog("info", "hubmsg.socket.pong_sent", {
+          tsMs: body[0],
+          sessionId: this.sessionId
+        });
       } catch {
         // ignore
       }
@@ -853,6 +912,9 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     }
     if (frame.frameKind === HUB_FRAME_KIND.Pong) {
       // 心跳响应——无需任何业务处理。
+      this.emitLog("info", "hubmsg.socket.pong_received", {
+        sessionId: this.sessionId
+      });
       return;
     }
     if (frame.frameKind === HUB_FRAME_KIND.Result) {
@@ -889,6 +951,11 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     if (frame.frameKind === HUB_FRAME_KIND.Event) {
       const body = decodeEventBody(frame.frameBody);
       const set = this.eventHandlers.get(body[0]);
+      this.emitLog("info", "hubmsg.socket.event.received", {
+        eventId: body[0],
+        payloadBytes: body[1].length,
+        handlerCount: set?.size ?? 0
+      });
       if (!set) return;
       for (const h of set) {
         try {
@@ -901,6 +968,10 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
     }
     if (frame.frameKind === HUB_FRAME_KIND.Close) {
       const body = decodeCloseBody(frame.frameBody);
+      this.emitLog("warn", "hubmsg.socket.close_frame", {
+        reason: body[0],
+        pendingRequestCount: this.pendingById.size
+      });
       // 业务流上收到的 close：触发所有 pending 失败 + 远端断线事件。
       for (const [, p] of this.pendingById) {
         if (p.timer) clearTimeout(p.timer);
@@ -908,7 +979,12 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       }
       this.pendingById.clear();
       this.onSocketClose("close_frame", { reason: body[0] });
+      return;
     }
+    this.emitLog("warn", "hubmsg.socket.message.unhandled_kind", {
+      frameKind: frame.frameKind,
+      sessionId: this.sessionId
+    });
   }
 
   private onSocketClose(source: "socket_event" | "close_frame", ev?: unknown): void {
@@ -917,6 +993,7 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       source,
       state: this.stateValue,
       sessionId: this.sessionId,
+      pendingRequestCount: this.pendingById.size,
       detail: describeUnknownEvent(ev)
     });
     this.stateValue = "closed";

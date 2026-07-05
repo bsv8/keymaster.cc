@@ -94,12 +94,18 @@ export class HubMsgProvider implements MessageProvider {
   }
 
   async bind(input: { signer: ProviderSigner }): Promise<MessageProviderHandle> {
+    const startedAt = Date.now();
     this.emitLog("info", "hubmsg.provider.bind.started", {
       url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
       publicKeyHex: input.signer.publicKeyHex
     });
     // 重复 bind：先关旧 connection。
     if (this.currentConn) {
+      this.emitLog("info", "hubmsg.provider.bind.replacing_existing", {
+        url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
+        publicKeyHex: input.signer.publicKeyHex,
+        currentState: this.currentConn.state()
+      });
       try {
         this.currentConn.close();
       } catch {
@@ -123,6 +129,7 @@ export class HubMsgProvider implements MessageProvider {
       this.emitLog("error", "hubmsg.provider.bind.failed", {
         url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
         publicKeyHex: input.signer.publicKeyHex,
+        elapsedMs: Date.now() - startedAt,
         err: msg
       });
       throw err;
@@ -134,7 +141,8 @@ export class HubMsgProvider implements MessageProvider {
     this.emitLog("info", "hubmsg.provider.bind.succeeded", {
       url: this.cfg.url ?? DEFAULT_HUBMSG_URL,
       publicKeyHex: input.signer.publicKeyHex,
-      lastConnectedAtMs: this.lastConnectedAtMsValue
+      lastConnectedAtMs: this.lastConnectedAtMsValue,
+      elapsedMs: Date.now() - startedAt
     });
     return this.currentOps;
   }

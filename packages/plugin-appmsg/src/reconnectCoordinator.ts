@@ -235,7 +235,18 @@ export function createReconnectCoordinator(
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       if (disposed) return;
-      if (myEpoch !== epoch) return;
+      if (myEpoch !== epoch) {
+        logInfo("appmsg.connect.retry.timer_ignored_stale", {
+          timerEpoch: myEpoch,
+          currentEpoch: epoch,
+          reason
+        });
+        return;
+      }
+      logInfo("appmsg.connect.retry.timer_fired", {
+        epoch: myEpoch,
+        reason
+      });
       void attemptConnect();
     }, RECONNECT_INTERVAL_MS);
   };
@@ -593,6 +604,14 @@ export function createReconnectCoordinator(
     const snap = core.inspectLocalDb();
     const wasOpen = lastSeenOpen;
     const isOpen = snap.state === "open";
+    logInfo("appmsg.connect.core_state.observed", {
+      state: snap.state,
+      wasOpen,
+      isOpen,
+      ownerPublicKeyHex: snap.ownerPublicKeyHex,
+      nextReconnectAtMs: snap.nextReconnectAtMs,
+      lastError: snap.lastError
+    });
     lastSeenOpen = isOpen;
     if (wasOpen && !isOpen) {
       // 远端断线 → 重新进入 5 秒循环。若 in-flight 期间触发（理论
@@ -618,6 +637,11 @@ export function createReconnectCoordinator(
             reason: "remote_close",
             epoch,
             pendingEpoch
+          });
+        } else {
+          logInfo("appmsg.connect.remote_close.already_waiting", {
+            epoch,
+            hasPendingTimer: reconnectTimer !== null
           });
         }
       }

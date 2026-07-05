@@ -61,9 +61,33 @@ export const hubmsgPlatformPlugin: PluginManifest = {
         error: (input) => ctx.logger.error(input)
       }
     });
+    ctx.logger.info({
+      scope: "hubmsg.provider",
+      event: "hubmsg.provider.register.begin",
+      message: "",
+      data: { providerId: provider.id }
+    });
     registry.register(provider);
+    ctx.logger.info({
+      scope: "hubmsg.provider",
+      event: "hubmsg.provider.register.done",
+      message: "",
+      data: { providerId: provider.id }
+    });
     return () => {
+      ctx.logger.info({
+        scope: "hubmsg.provider",
+        event: "hubmsg.provider.unregister.begin",
+        message: "",
+        data: { providerId: provider.id }
+      });
       registry.unregister(provider.id);
+      ctx.logger.info({
+        scope: "hubmsg.provider",
+        event: "hubmsg.provider.unregister.done",
+        message: "",
+        data: { providerId: provider.id }
+      });
       // 异步 close；不阻塞 teardown 主流程。
       void provider.shutdown();
     };

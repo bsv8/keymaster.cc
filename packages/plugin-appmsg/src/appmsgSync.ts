@@ -25,6 +25,34 @@ import type {
 } from "@keymaster/contracts";
 import type { AppMsgLocalDbOps } from "./appmsgDb.js";
 
+export interface AppMsgSyncLogger {
+  info?: (input: unknown) => void;
+  warn?: (input: unknown) => void;
+  error?: (input: unknown) => void;
+}
+
+function emitSyncLog(
+  logger: AppMsgSyncLogger | undefined,
+  level: "info" | "warn" | "error",
+  event: string,
+  data?: Record<string, unknown>
+): void {
+  if (!logger) return;
+  const fn = logger[level];
+  if (!fn) return;
+  try {
+    const payload: Record<string, unknown> = { event };
+    if (data) {
+      for (const key of Object.keys(data)) {
+        payload[key] = data[key];
+      }
+    }
+    fn(payload);
+  } catch {
+    // ignore
+  }
+}
+
 export interface AppMsgSyncOutcome {
   /** 本次增量同步写入了多少条新消息到本地库。 */
   written: number;
@@ -82,8 +110,20 @@ export async function syncOneScope(input: {
    * 表示该条 sealed record 验签或解密失败——按 fail-closed 跳过。
    */
   openSealed: (rec: ProviderSealedMessageRecord) => AppMsgMessage | null;
+  logger?: AppMsgSyncLogger;
 }): Promise<AppMsgSyncOutcome> {
   const startedAt = Date.now();
+  emitSyncLog(input.logger, "info", "appmsg.sync.scope.begin", {
+    providerId: input.providerId,
+    ownerPublicKeyHex: input.ownerPublicKeyHex,
+    targetKey: input.targetKey,
+    scopeKind: input.scopeEndpoint.kind,
+    scopeId: input.scopeEndpoint.id,
+    cursorMessageId: input.cursorMessageId,
+    pageLimit: input.pageLimit ?? 100,
+    hasHandle: input.handle !== null,
+    hasLocalDb: input.ops !== null
+  });
   if (input.ops) {
     try {
       const prev =
@@ -116,14 +156,36 @@ export async function syncOneScope(input: {
       afterMessageId: input.cursorMessageId,
       limit: input.pageLimit ?? 100
     };
+    emitSyncLog(input.logger, "info", "appmsg.sync.scope.list.begin", {
+      providerId: input.providerId,
+      targetKey: input.targetKey,
+      scopeKind: input.scopeEndpoint.kind,
+      scopeId: input.scopeEndpoint.id,
+      afterMessageId: input.cursorMessageId,
+      limit: listInput.limit
+    });
     res = await input.handle.listMessages(listInput);
+    emitSyncLog(input.logger, "info", "appmsg.sync.scope.list.done", {
+      providerId: input.providerId,
+      targetKey: input.targetKey,
+      itemCount: res?.items?.length ?? 0,
+      hasMore: res?.hasMore ?? false,
+      elapsedMs: Date.now() - startedAt
+    });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    emitSyncLog(input.logger, "error", "appmsg.sync.scope.list.failed", {
+      providerId: input.providerId,
+      targetKey: input.targetKey,
+      elapsedMs: Date.now() - startedAt,
+      err: msg
+    });
     return fail(
       input.ops,
       input.providerId,
       input.targetKey,
       startedAt,
-      err instanceof Error ? err.message : String(err)
+      msg
     );
   }
   const items = res?.items ?? [];
@@ -135,6 +197,12 @@ export async function syncOneScope(input: {
       startedAt,
       input.cursorMessageId
     );
+    emitSyncLog(input.logger, "info", "appmsg.sync.scope.idle", {
+      providerId: input.providerId,
+      targetKey: input.targetKey,
+      cursorMessageId: input.cursorMessageId,
+      elapsedMs: Date.now() - startedAt
+    });
     return {
       written: 0,
       newCursorMessageId: input.cursorMessageId,
@@ -146,19 +214,39 @@ export async function syncOneScope(input: {
   const seen = new Set<string>();
   const toWrite: AppMsgMessage[] = [];
   let maxMessageId = input.cursorMessageId;
+  let openedCount = 0;
+  let skippedDuplicateCount = 0;
+  let skippedCryptoCount = 0;
   for (const rec of items) {
     if (!rec?.messageId) continue;
-    if (seen.has(rec.messageId)) continue;
+    if (seen.has(rec.messageId)) {
+      skippedDuplicateCount += 1;
+      continue;
+    }
     seen.add(rec.messageId);
     const m = input.openSealed(rec);
-    if (!m) continue;
+    if (!m) {
+      skippedCryptoCount += 1;
+      continue;
+    }
+    openedCount += 1;
     toWrite.push(m);
     if (m.messageId > maxMessageId) maxMessageId = m.messageId;
   }
+  emitSyncLog(input.logger, "info", "appmsg.sync.scope.opened", {
+    providerId: input.providerId,
+    targetKey: input.targetKey,
+    receivedCount: items.length,
+    openedCount,
+    skippedDuplicateCount,
+    skippedCryptoCount,
+    maxMessageId
+  });
   // 写入前先**用本地 DB 的 (providerId, targetId) 维度去重**——同一
   // message 已经在 DB 命中 targetId 时本次跳过，避免"重复 cover"表面
   // 写入。
   const filtered: AppMsgMessage[] = [];
+  let skippedExistingCount = 0;
   for (const m of toWrite) {
     let skip = false;
     try {
@@ -171,18 +259,44 @@ export async function syncOneScope(input: {
     } catch {
       // 取失败不阻断写入
     }
-    if (!skip) filtered.push(m);
+    if (!skip) {
+      filtered.push(m);
+    } else {
+      skippedExistingCount += 1;
+    }
   }
+  emitSyncLog(input.logger, "info", "appmsg.sync.scope.filtered", {
+    providerId: input.providerId,
+    targetKey: input.targetKey,
+    candidateCount: toWrite.length,
+    filteredCount: filtered.length,
+    skippedExistingCount
+  });
   let written = 0;
   try {
     written = await input.ops.putMessages(input.providerId, filtered);
+    emitSyncLog(input.logger, "info", "appmsg.sync.scope.write.done", {
+      providerId: input.providerId,
+      targetKey: input.targetKey,
+      filteredCount: filtered.length,
+      written,
+      elapsedMs: Date.now() - startedAt
+    });
   } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    emitSyncLog(input.logger, "error", "appmsg.sync.scope.write.failed", {
+      providerId: input.providerId,
+      targetKey: input.targetKey,
+      filteredCount: filtered.length,
+      elapsedMs: Date.now() - startedAt,
+      err: msg
+    });
     return fail(
       input.ops,
       input.providerId,
       input.targetKey,
       startedAt,
-      err instanceof Error ? err.message : String(err)
+      msg
     );
   }
   try {
@@ -199,6 +313,13 @@ export async function syncOneScope(input: {
   } catch {
     // swallow
   }
+  emitSyncLog(input.logger, "info", "appmsg.sync.scope.completed", {
+    providerId: input.providerId,
+    targetKey: input.targetKey,
+    written,
+    newCursorMessageId: maxMessageId,
+    elapsedMs: Date.now() - startedAt
+  });
   return {
     written,
     newCursorMessageId: maxMessageId,
@@ -271,11 +392,27 @@ export async function syncAllScopes(input: {
   resolveTargetKey: (ep: { kind: "origin" | "plugin"; id: string }) => string;
   loadCursor: (targetKey: string) => Promise<string>;
   openSealed: (rec: ProviderSealedMessageRecord) => AppMsgMessage | null;
+  logger?: AppMsgSyncLogger;
 }): Promise<AppMsgSyncOutcome[]> {
+  const startedAt = Date.now();
+  emitSyncLog(input.logger, "info", "appmsg.sync.all.begin", {
+    providerId: input.providerId,
+    ownerPublicKeyHex: input.ownerPublicKeyHex,
+    scopeCount: input.scopeEndpoints.length,
+    hasHandle: input.handle !== null,
+    hasLocalDb: input.ops !== null
+  });
   const out: AppMsgSyncOutcome[] = [];
   for (const ep of input.scopeEndpoints) {
     const targetKey = input.resolveTargetKey(ep);
     const cursor = await input.loadCursor(targetKey).catch(() => "");
+    emitSyncLog(input.logger, "info", "appmsg.sync.all.scope_queued", {
+      providerId: input.providerId,
+      targetKey,
+      scopeKind: ep.kind,
+      scopeId: ep.id,
+      cursorMessageId: cursor
+    });
     out.push(
       await syncOneScope({
         handle: input.handle,
@@ -286,9 +423,21 @@ export async function syncAllScopes(input: {
         targetKey,
         cursorMessageId: cursor,
         pageLimit: input.pageLimit,
-        openSealed: input.openSealed
+        openSealed: input.openSealed,
+        logger: input.logger
       })
     );
   }
+  const okCount = out.filter((item) => item.ok).length;
+  const failCount = out.length - okCount;
+  const written = out.reduce((sum, item) => sum + item.written, 0);
+  emitSyncLog(input.logger, "info", "appmsg.sync.all.completed", {
+    providerId: input.providerId,
+    scopeCount: out.length,
+    okCount,
+    failCount,
+    written,
+    elapsedMs: Date.now() - startedAt
+  });
   return out;
 }
