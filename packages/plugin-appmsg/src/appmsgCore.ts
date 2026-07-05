@@ -238,11 +238,17 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
   private bootstrapDefaultConsumed = false;
   private readonly listeners = new Set<(s: ActiveMessageProviderSnapshot) => void>();
   private readonly localStorageRef: Storage | null;
+  private readonly loggerRef: AppMsgCoreConfig["logger"] | undefined;
 
-  constructor(opts: { persisted: string | null; localStorage: Storage | null }) {
+  constructor(opts: {
+    persisted: string | null;
+    localStorage: Storage | null;
+    logger?: AppMsgCoreConfig["logger"];
+  }) {
     this.activeProviderId = opts.persisted;
     this.persistedProviderId = opts.persisted;
     this.localStorageRef = opts.localStorage;
+    this.loggerRef = opts.logger;
     // 如果持久值存在（无论是不是 null），意味着用户已做过选择
     // （即使是 null 也算"显式清除"），bootstrap 默认值不再适用。
     this.bootstrapDefaultConsumed = opts.persisted !== null;
@@ -255,6 +261,12 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
       );
     }
     this.providersById.set(provider.id, provider);
+    emitLog(this.loggerRef, "info", "appmsg.provider_registry.registered", {
+      providerId: provider.id,
+      providerCount: this.providersById.size,
+      activeProviderId: this.activeProviderId,
+      persistedProviderId: this.persistedProviderId
+    });
 
     // 触发 1：持久化的 id 命中 provider 注册进来 → 激活。
     if (
@@ -287,6 +299,11 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
   unregister(providerId: string): void {
     if (!this.providersById.has(providerId)) return;
     this.providersById.delete(providerId);
+    emitLog(this.loggerRef, "info", "appmsg.provider_registry.unregistered", {
+      providerId,
+      providerCount: this.providersById.size,
+      activeProviderId: this.activeProviderId
+    });
     if (this.activeProviderId === providerId) {
       this.activeProviderId = null;
       this.persistActive(null);
@@ -299,6 +316,11 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
   }
 
   async setActive(providerId: string | null): Promise<void> {
+    emitLog(this.loggerRef, "info", "appmsg.provider_registry.set_active.requested", {
+      nextProviderId: providerId,
+      currentProviderId: this.activeProviderId,
+      providerCount: this.providersById.size
+    });
     if (providerId === null) {
       this.activeProviderId = null;
       this.persistActive(null);
@@ -369,6 +391,15 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
 
   private fireChange(): void {
     const snap = this.activeSnapshot();
+    emitLog(this.loggerRef, "info", "appmsg.provider_registry.changed", {
+      providerId: snap.providerId,
+      displayName: snap.displayName,
+      isHealthy: snap.isHealthy,
+      lastError: snap.lastError,
+      providerCount: this.providersById.size,
+      listenerCount: this.listeners.size,
+      bootstrapDefaultConsumed: this.bootstrapDefaultConsumed
+    });
     for (const h of this.listeners) {
       try {
         h(snap);
@@ -630,7 +661,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
     this.keyspace = cfg.keyspace;
     this.providerRegistryInstance = new MessageProviderRegistryImpl({
       persisted: readPersistedActiveProvider(cfg.localStorage ?? null),
-      localStorage: cfg.localStorage ?? null
+      localStorage: cfg.localStorage ?? null,
+      logger: cfg.logger
     });
     this.endpointRegistryInstance = new AppMsgEndpointServiceRegistryImpl(this);
   }
@@ -1219,6 +1251,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
     const normalized =
       typeof value === "number" && Number.isFinite(value) ? value : null;
     if (this.nextReconnectAtMsValue === normalized) return;
+    emitLog(this.cfg.logger, "info", "appmsg.connect.next_reconnect.updated", {
+      previousNextReconnectAtMs: this.nextReconnectAtMsValue,
+      nextReconnectAtMs: normalized,
+      ownerPublicKeyHex: this.currentBoundOwner,
+      providerId: this.currentProviderId
+    });
     this.nextReconnectAtMsValue = normalized;
     this.fireStateChange();
   }
@@ -1755,11 +1793,14 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   private async collectKnownScopes(): Promise<Array<{ kind: "origin" | "plugin"; id: string }>> {
+    const startedAt = Date.now();
     const out: Array<{ kind: "origin" | "plugin"; id: string }> = [];
     out.push({ kind: "plugin", id: KEYMASTER_MESSAGE_APP_ID });
+    let loadedTargetCount = 0;
     if (this.localOps && this.currentProviderId) {
       try {
         const tids = await this.localOps.listTargetIds(this.currentProviderId);
+        loadedTargetCount = tids.length;
         for (const t of tids) {
           if (t.startsWith("origin:")) {
             out.push({ kind: "origin", id: t.slice("origin:".length) });
@@ -1767,10 +1808,32 @@ export class AppMsgCoreImpl implements AppMsgCore {
             out.push({ kind: "plugin", id: t.slice("appId:".length) });
           }
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        emitLog(this.cfg.logger, "warn", "appmsg.sync.collect_scopes.list_target_ids_failed", {
+          providerId: this.currentProviderId,
+          ownerPublicKeyHex: this.currentBoundOwner,
+          elapsedMs: Date.now() - startedAt,
+          err: err instanceof Error ? err.message : String(err)
+        });
       }
     }
+    const uniqueKeys = new Set(out.map((item) => `${item.kind}:${item.id}`));
+    let originCount = 0;
+    let pluginCount = 0;
+    for (const key of uniqueKeys) {
+      if (key.startsWith("origin:")) originCount += 1;
+      else pluginCount += 1;
+    }
+    emitLog(this.cfg.logger, "info", "appmsg.sync.collect_scopes.done", {
+      providerId: this.currentProviderId,
+      ownerPublicKeyHex: this.currentBoundOwner,
+      loadedTargetCount,
+      scopeCount: out.length,
+      uniqueScopeCount: uniqueKeys.size,
+      originCount,
+      pluginCount,
+      elapsedMs: Date.now() - startedAt
+    });
     return out;
   }
 
@@ -1860,6 +1923,17 @@ export class AppMsgCoreImpl implements AppMsgCore {
   /* ====== keyspace / provider 切换适配 ====== */
 
   private fireStateChange(): void {
+    const snap = this.inspectLocalDb();
+    emitLog(this.cfg.logger, "info", "appmsg.state.changed", {
+      state: snap.state,
+      ownerPublicKeyHex: snap.ownerPublicKeyHex,
+      lastError: snap.lastError,
+      nextReconnectAtMs: snap.nextReconnectAtMs,
+      listenerCount: this.stateChangeListeners.size,
+      providerId: this.currentProviderId,
+      hasHandle: this.boundHandle !== null,
+      hasLocalDb: this.localOps !== null
+    });
     for (const l of this.stateChangeListeners) {
       try {
         l();

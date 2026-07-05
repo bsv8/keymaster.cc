@@ -69,6 +69,10 @@ export interface ReconnectCoordinator {
 
 const RECONNECT_INTERVAL_MS = 5000;
 const CONNECT_ATTEMPT_TIMEOUT_MS = 15000;
+const INFLIGHT_WATCHDOG_INITIAL_DELAY_MS = 20000;
+const INFLIGHT_WATCHDOG_REPEAT_MS = 30000;
+let reconnectCoordinatorCounter = 0;
+let reconnectAttemptCounter = 0;
 
 /**
  * `awaitInFlight` 的安全轮询上限。正常路径几十轮 microtask
@@ -102,12 +106,18 @@ export function createReconnectCoordinator(
   deps: ReconnectCoordinatorDeps
 ): ReconnectCoordinator {
   const { core, vault, keyspace, logger } = deps;
+  const coordinatorId = `coord-${++reconnectCoordinatorCounter}`;
+  const currentAttemptAgeMs = (): number | null =>
+    currentAttemptStartedAtMs === null ? null : Math.max(0, Date.now() - currentAttemptStartedAtMs);
   const logInfo = (event: string, data: Record<string, unknown>): void => {
     logger.info({
       scope: "appmsg.core",
       event,
       message: "",
-      data
+      data: {
+        coordinatorId,
+        ...data
+      }
     });
   };
 
@@ -155,6 +165,56 @@ export function createReconnectCoordinator(
   let lastSeenOpen = false;
   let pendingEpoch: number | null = null;
   let disposed = false;
+  let currentAttemptId: string | null = null;
+  let currentAttemptStage: string | null = null;
+  let currentAttemptStartedAtMs: number | null = null;
+  let inFlightWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearInFlightWatchdog = (): void => {
+    if (inFlightWatchdogTimer !== null) {
+      clearTimeout(inFlightWatchdogTimer);
+      inFlightWatchdogTimer = null;
+    }
+  };
+
+  const scheduleInFlightWatchdog = (delayMs: number): void => {
+    clearInFlightWatchdog();
+    if (currentAttemptId === null || currentAttemptStartedAtMs === null) return;
+    inFlightWatchdogTimer = setTimeout(() => {
+      inFlightWatchdogTimer = null;
+      if (disposed) return;
+      if (inFlightConnect === null || currentAttemptId === null) return;
+      logInfo("appmsg.connect.attempt.watchdog", {
+        epoch,
+        attemptId: currentAttemptId,
+        stage: currentAttemptStage,
+        ageMs: currentAttemptAgeMs(),
+        pendingEpoch,
+        hasPendingTimer: reconnectTimer !== null
+      });
+      scheduleInFlightWatchdog(INFLIGHT_WATCHDOG_REPEAT_MS);
+    }, delayMs);
+  };
+
+  const startAttemptLifecycle = (): string => {
+    const attemptId = `attempt-${++reconnectAttemptCounter}`;
+    currentAttemptId = attemptId;
+    currentAttemptStage = "created";
+    currentAttemptStartedAtMs = Date.now();
+    scheduleInFlightWatchdog(INFLIGHT_WATCHDOG_INITIAL_DELAY_MS);
+    return attemptId;
+  };
+
+  const setAttemptStage = (stage: string): void => {
+    currentAttemptStage = stage;
+  };
+
+  const finishAttemptLifecycle = (): void => {
+    clearInFlightWatchdog();
+    currentAttemptId = null;
+    currentAttemptStage = null;
+    currentAttemptStartedAtMs = null;
+  };
 
   const clearReconnectTimer = (
     reason: "structural_change" | "connected" | "structurally_offline" | "dispose" | "replaced_timer"
@@ -163,7 +223,13 @@ export function createReconnectCoordinator(
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
       core.setNextReconnectAtMs(null);
-      logInfo("appmsg.connect.retry.canceled", { reason, epoch });
+      logInfo("appmsg.connect.retry.canceled", {
+        reason,
+        epoch,
+        attemptId: currentAttemptId,
+        attemptStage: currentAttemptStage,
+        inFlightAgeMs: currentAttemptAgeMs()
+      });
     }
   };
 
@@ -214,10 +280,22 @@ export function createReconnectCoordinator(
         scope: "appmsg.core",
         event: "appmsg.structurally_offline.failed",
         message: "",
-        data: { reason, err: err instanceof Error ? err.message : String(err) }
+        data: {
+          coordinatorId,
+          attemptId: currentAttemptId,
+          attemptStage: currentAttemptStage,
+          inFlightAgeMs: currentAttemptAgeMs(),
+          reason,
+          err: err instanceof Error ? err.message : String(err)
+        }
       });
     }
-    logInfo("appmsg.connect.structurally_offline", { reason });
+    logInfo("appmsg.connect.structurally_offline", {
+      reason,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs()
+    });
     lastSeenOpen = false;
   };
 
@@ -230,7 +308,10 @@ export function createReconnectCoordinator(
       reason,
       epoch: myEpoch,
       delayMs: RECONNECT_INTERVAL_MS,
-      nextReconnectAtMs: nextAt
+      nextReconnectAtMs: nextAt,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs()
     });
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
@@ -245,7 +326,8 @@ export function createReconnectCoordinator(
       }
       logInfo("appmsg.connect.retry.timer_fired", {
         epoch: myEpoch,
-        reason
+        reason,
+        pendingEpoch
       });
       void attemptConnect();
     }, RECONNECT_INTERVAL_MS);
@@ -268,7 +350,10 @@ export function createReconnectCoordinator(
           logInfo("appmsg.connect.call_core.timeout", {
             epoch: callerEpoch,
             ownerPublicKeyHex,
-            timeoutMs: CONNECT_ATTEMPT_TIMEOUT_MS
+            timeoutMs: CONNECT_ATTEMPT_TIMEOUT_MS,
+            attemptId: currentAttemptId,
+            attemptStage: currentAttemptStage,
+            ageMs: currentAttemptAgeMs()
           });
           try {
             // 让晚到的 connectForOwner 结果在 core 内部被识别为 stale，
@@ -282,6 +367,8 @@ export function createReconnectCoordinator(
               data: {
                 epoch: callerEpoch,
                 ownerPublicKeyHex,
+                attemptId: currentAttemptId,
+                attemptStage: currentAttemptStage,
                 err: err instanceof Error ? err.message : String(err)
               }
             });
@@ -377,7 +464,10 @@ export function createReconnectCoordinator(
       epoch,
       disposed,
       hasPendingTimer: reconnectTimer !== null,
-      hasInFlight: inFlightConnect !== null
+      hasInFlight: inFlightConnect !== null,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs()
     });
     if (queuedEpoch === null) return;
     if (disposed) return;
@@ -391,14 +481,18 @@ export function createReconnectCoordinator(
     if (cond.ok) {
       logInfo("appmsg.connect.pending.reconcile_attempt", {
         queuedEpoch,
-        ownerPublicKeyHex: cond.ownerPublicKeyHex
+        ownerPublicKeyHex: cond.ownerPublicKeyHex,
+        previousAttemptId: currentAttemptId
       });
       void attemptConnect();
       return;
     }
     logInfo("appmsg.connect.pending.reconcile_blocked", {
       queuedEpoch,
-      reason: cond.reason
+      reason: cond.reason,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs()
     });
     // 当前仍不可连接：不 attempt，让后续 onStructuralChange 事件
     // （vault 解锁 / 切 key / 切 provider）驱动下一次 attempt。
@@ -423,38 +517,52 @@ export function createReconnectCoordinator(
       logInfo("appmsg.connect.attempt.inflight_reused", {
         epoch,
         pendingEpoch,
-        hasPendingTimer: reconnectTimer !== null
+        hasPendingTimer: reconnectTimer !== null,
+        attemptId: currentAttemptId,
+        attemptStage: currentAttemptStage,
+        inFlightAgeMs: currentAttemptAgeMs()
       });
       return inFlightConnect;
     }
     const myEpoch = epoch;
+    const attemptId = startAttemptLifecycle();
     logInfo("appmsg.connect.attempt.started", {
+      attemptId,
       epoch: myEpoch,
       pendingEpoch,
       hasPendingTimer: reconnectTimer !== null
     });
     inFlightConnect = (async () => {
       try {
+        setAttemptStage("structural_check");
         const cond = structuralConnectable();
         if (!cond.ok) {
           logInfo("appmsg.connect.attempt.structurally_blocked", {
+            attemptId,
             epoch: myEpoch,
-            reason: cond.reason
+            reason: cond.reason,
+            stage: currentAttemptStage,
+            ageMs: currentAttemptAgeMs()
           });
           goStructurallyOffline(cond.reason);
           return;
         }
         if (myEpoch !== epoch) {
           logInfo("appmsg.connect.attempt.stale_before_core", {
+            attemptId,
             attemptEpoch: myEpoch,
-            currentEpoch: epoch
+            currentEpoch: epoch,
+            ageMs: currentAttemptAgeMs()
           });
           return;
         }
         const targetOwner: string = cond.ownerPublicKeyHex;
+        setAttemptStage("call_core");
         logInfo("appmsg.connect.call_core.begin", {
+          attemptId,
           epoch: myEpoch,
-          ownerPublicKeyHex: targetOwner
+          ownerPublicKeyHex: targetOwner,
+          ageMs: currentAttemptAgeMs()
         });
         // callerEpoch 仅作"自检 token"使用：core 内部不校验；caller
         // 在 await 后自检"我的 epoch 是不是没变"决定是否采用结果。
@@ -462,38 +570,49 @@ export function createReconnectCoordinator(
           targetOwner,
           myEpoch
         );
+        setAttemptStage(`call_core:${outcome.kind}`);
         logInfo("appmsg.connect.call_core.outcome", {
+          attemptId,
           epoch: myEpoch,
           ownerPublicKeyHex: targetOwner,
           outcomeKind: outcome.kind,
           outcomeReason:
             "reason" in outcome && typeof outcome.reason === "string"
               ? outcome.reason
-              : null
+              : null,
+          ageMs: currentAttemptAgeMs()
         });
         if (myEpoch !== epoch) {
           logInfo("appmsg.connect.attempt.stale_after_core", {
+            attemptId,
             attemptEpoch: myEpoch,
             currentEpoch: epoch,
-            outcomeKind: outcome.kind
+            outcomeKind: outcome.kind,
+            ageMs: currentAttemptAgeMs()
           });
           return;
         }
         switch (outcome.kind) {
           case "connected":
+            setAttemptStage("connected");
             handleConnected();
             return;
           case "stale":
+            setAttemptStage("stale");
             handleStale();
             return;
           case "structurallyOffline":
+            setAttemptStage("structurally_offline");
             handleStructurallyOffline(outcome);
             return;
           case "retryableFailure":
+            setAttemptStage("retryable_failure");
             if (outcome.reason === "attempt_timeout" && pendingEpoch !== null) {
               logInfo("appmsg.connect.call_core.timeout_pending_handoff", {
+                attemptId,
                 epoch: myEpoch,
-                pendingEpoch
+                pendingEpoch,
+                ageMs: currentAttemptAgeMs()
               });
               return;
             }
@@ -503,10 +622,13 @@ export function createReconnectCoordinator(
       } finally {
         inFlightConnect = null;
         logInfo("appmsg.connect.attempt.finally", {
+          attemptId,
           attemptEpoch: myEpoch,
           currentEpoch: epoch,
           pendingEpoch,
-          hasPendingTimer: reconnectTimer !== null
+          hasPendingTimer: reconnectTimer !== null,
+          stage: currentAttemptStage,
+          ageMs: currentAttemptAgeMs()
         });
         // in-flight 期间若积压了新的结构变化（`onStructuralChange` /
         // `onCoreStateChange` 远端断线分支命中时设了 `pendingEpoch`），
@@ -519,9 +641,11 @@ export function createReconnectCoordinator(
           const queuedEpoch = pendingEpoch;
           pendingEpoch = null;
           logInfo("appmsg.connect.pending.consume", {
+            attemptId,
             attemptEpoch: myEpoch,
             queuedEpoch,
-            currentEpoch: epoch
+            currentEpoch: epoch,
+            ageMs: currentAttemptAgeMs()
           });
           // 边界：本 attempt 入口记的 `myEpoch` 一定 <= `queuedEpoch`
           // —— `onStructuralChange`/`onCoreStateChange` 入队
@@ -532,6 +656,7 @@ export function createReconnectCoordinator(
             reconcileQueuedEpoch(queuedEpoch);
           }
         }
+        finishAttemptLifecycle();
       }
     })();
     return inFlightConnect;
@@ -566,7 +691,11 @@ export function createReconnectCoordinator(
       previousEpoch: epoch,
       connectable: cond.ok,
       structuralReason: cond.ok ? null : cond.reason,
-      ownerPublicKeyHex: cond.ok ? cond.ownerPublicKeyHex : null
+      ownerPublicKeyHex: cond.ok ? cond.ownerPublicKeyHex : null,
+      hadInFlight: inFlightConnect !== null,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs()
     });
     const nextEpoch = epoch + 1;
     logInfo("appmsg.connect.kick.dispatch", {
@@ -575,7 +704,10 @@ export function createReconnectCoordinator(
       nextEpoch,
       hadInFlight: inFlightConnect !== null,
       pendingEpoch,
-      hasPendingTimer: reconnectTimer !== null
+      hasPendingTimer: reconnectTimer !== null,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs()
     });
     epoch = nextEpoch;
     clearReconnectTimer("structural_change");
@@ -588,7 +720,10 @@ export function createReconnectCoordinator(
       logInfo("appmsg.connect.pending.set", {
         reason,
         epoch,
-        pendingEpoch
+        pendingEpoch,
+        attemptId: currentAttemptId,
+        attemptStage: currentAttemptStage,
+        inFlightAgeMs: currentAttemptAgeMs()
       });
       return;
     }
@@ -610,7 +745,12 @@ export function createReconnectCoordinator(
       isOpen,
       ownerPublicKeyHex: snap.ownerPublicKeyHex,
       nextReconnectAtMs: snap.nextReconnectAtMs,
-      lastError: snap.lastError
+      lastError: snap.lastError,
+      hadInFlight: inFlightConnect !== null,
+      attemptId: currentAttemptId,
+      attemptStage: currentAttemptStage,
+      inFlightAgeMs: currentAttemptAgeMs(),
+      pendingEpoch
     });
     lastSeenOpen = isOpen;
     if (wasOpen && !isOpen) {
@@ -636,7 +776,10 @@ export function createReconnectCoordinator(
           logInfo("appmsg.connect.pending.set", {
             reason: "remote_close",
             epoch,
-            pendingEpoch
+            pendingEpoch,
+            attemptId: currentAttemptId,
+            attemptStage: currentAttemptStage,
+            inFlightAgeMs: currentAttemptAgeMs()
           });
         } else {
           logInfo("appmsg.connect.remote_close.already_waiting", {
@@ -659,6 +802,11 @@ export function createReconnectCoordinator(
   const unsubCoreState = core.onStateChange(onCoreStateChange);
 
   // setup 阶段首次尝试。
+  logInfo("appmsg.connect.coordinator.created", {
+    epoch,
+    pendingEpoch,
+    hasPendingTimer: false
+  });
   onStructuralChange("setup");
 
   return {
@@ -666,6 +814,15 @@ export function createReconnectCoordinator(
       onStructuralChange(reason);
     },
     dispose: () => {
+      logInfo("appmsg.connect.coordinator.dispose.begin", {
+        epoch,
+        pendingEpoch,
+        hadInFlight: inFlightConnect !== null,
+        attemptId: currentAttemptId,
+        attemptStage: currentAttemptStage,
+        inFlightAgeMs: currentAttemptAgeMs(),
+        hasPendingTimer: reconnectTimer !== null
+      });
       disposed = true;
       unsubActive();
       unsubVault();
@@ -673,6 +830,7 @@ export function createReconnectCoordinator(
       unsubCoreState();
       epoch += 1;
       clearReconnectTimer("dispose");
+      clearInFlightWatchdog();
       lastSeenOpen = false;
       pendingEpoch = null;
       // 反馈"必改"第六轮：forcefully 清掉 `inFlightConnect`，让
@@ -682,6 +840,12 @@ export function createReconnectCoordinator(
       // 测试一起跑时若 fake core 的 deferred resolver 漏 drain，
       // vitest worker 就 hang。
       inFlightConnect = null;
+      finishAttemptLifecycle();
+      logInfo("appmsg.connect.coordinator.dispose.done", {
+        epoch,
+        pendingEpoch,
+        hasPendingTimer: reconnectTimer !== null
+      });
     },
     awaitInFlight: async () => {
       // 反馈"必改"第三轮发现：用 `await inFlightConnect` 不够——
