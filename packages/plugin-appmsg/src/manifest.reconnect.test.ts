@@ -577,6 +577,31 @@ describe("createReconnectCoordinator", () => {
     coord.dispose();
   });
 
+  it("构造期 keyspace 立即回放 + locked 同步完成，不应留下幽灵 in-flight", async () => {
+    const vault = makeFakeVault();
+    vault.setStatus("locked");
+    const keyspace = makeFakeKeyspace();
+    const provider = makeFakeProvider("hubmsg");
+    const fakeCore = makeFakeCore(provider, keyspace);
+    const warn = vi.fn();
+    const coord = createReconnectCoordinator({
+      core: fakeCore.core,
+      vault: vault.service,
+      keyspace,
+      logger: { info: vi.fn(), warn }
+    });
+
+    keyspace.fireActiveChange();
+    await Promise.resolve();
+
+    const mismatchEvents = warn.mock.calls
+      .map((call) => call[0] as { event?: string })
+      .filter((entry) => entry?.event === "appmsg.connect.inflight_meta_mismatch");
+    expect(mismatchEvents).toHaveLength(0);
+    expect(coord.hasPendingTimer).toBe(false);
+    coord.dispose();
+  });
+
   it("切 active key 触发新 attempt（旧 in-flight 结果作废）", async () => {
     const vault = makeFakeVault();
     const keyspace = makeFakeKeyspace();

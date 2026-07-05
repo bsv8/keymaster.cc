@@ -568,13 +568,20 @@ export function createReconnectCoordinator(
     }
     const myEpoch = epoch;
     const attemptId = startAttemptLifecycle();
+    let resolveInFlight!: () => void;
+    let rejectInFlight!: (err: unknown) => void;
+    const attemptPromise = new Promise<void>((resolve, reject) => {
+      resolveInFlight = resolve;
+      rejectInFlight = reject;
+    });
+    inFlightConnect = attemptPromise;
     logInfo("appmsg.connect.attempt.started", {
       attemptId,
       epoch: myEpoch,
       pendingEpoch,
       hasPendingTimer: reconnectTimer !== null
     });
-    inFlightConnect = (async () => {
+    void (async () => {
       try {
         setAttemptStage("structural_check");
         const cond = structuralConnectable();
@@ -661,6 +668,9 @@ export function createReconnectCoordinator(
             handleRetryableFailure();
             return;
         }
+      } catch (err) {
+        rejectInFlight(err);
+        throw err;
       } finally {
         inFlightConnect = null;
         logInfo("appmsg.connect.attempt.finally", {
@@ -699,9 +709,21 @@ export function createReconnectCoordinator(
           }
         }
         finishAttemptLifecycle(attemptId);
+        resolveInFlight();
       }
-    })();
-    return inFlightConnect;
+    })().catch((err) => {
+      logger.warn({
+        scope: "appmsg.core",
+        event: "appmsg.connect.attempt.unhandled_error",
+        message: "",
+        data: {
+          coordinatorId,
+          attemptId,
+          err: err instanceof Error ? err.message : String(err)
+        }
+      });
+    });
+    return attemptPromise;
   };
 
   /**
