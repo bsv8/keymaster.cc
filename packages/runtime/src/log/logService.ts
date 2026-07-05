@@ -218,6 +218,8 @@ export interface CreateLogServiceOptions {
 export interface LogServiceHandle extends LogService {
   /** 关闭 db 句柄并清掉 listeners；仅测试 / dispose 使用。 */
   dispose(): void;
+  /** 等待当前已入队日志 best-effort 落库；仅 runtime 内部 / 测试使用。 */
+  flush(options?: { timeoutMs?: number }): Promise<void>;
 }
 
 export function createLogService(options: CreateLogServiceOptions = {}): LogServiceHandle {
@@ -234,6 +236,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   // 错过 DB 真值（debugEnabled / retentionDays）。改成共享 Promise 后，
   // 任意调用方在 DB 读取完成前都会被挂起，等首次 init 落定才继续。
   let initPromise: Promise<void> | null = null;
+  let writeTail: Promise<void> = Promise.resolve();
   function ensureInit(): Promise<void> {
     if (initPromise) return initPromise;
     initPromise = (async () => {
@@ -303,17 +306,49 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   }
 
   async function appendInternal(input: LogAppendInput): Promise<void> {
+    const task = async (): Promise<void> => {
+      await ensureInit();
+      // debug 关闭时直接 no-op；不写库、不排队。
+      if (input.level === "debug" && !config.debugEnabled) {
+        return;
+      }
+      const entry = toEntry(input, input.pluginId ?? "runtime");
+      try {
+        await putEntry(entry);
+      } catch (err) {
+        // 关键：日志写失败不能反向阻断业务。
+        onWriteError(err);
+      }
+    };
+    const next = writeTail.then(task, task);
+    // 持续保持 tail 可复用；即使某次 task 抛错，后续写入也不能断链。
+    writeTail = next.catch(() => undefined);
+    await next;
+  }
+
+  async function flushPendingWrites(options?: { timeoutMs?: number }): Promise<void> {
     await ensureInit();
-    // debug 关闭时直接 no-op；不写库、不排队。
-    if (input.level === "debug" && !config.debugEnabled) {
+    const pending = writeTail;
+    const timeoutMs =
+      typeof options?.timeoutMs === "number" && options.timeoutMs > 0
+        ? Math.floor(options.timeoutMs)
+        : null;
+    if (timeoutMs === null) {
+      await pending;
       return;
     }
-    const entry = toEntry(input, input.pluginId ?? "runtime");
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     try {
-      await putEntry(entry);
-    } catch (err) {
-      // 关键：日志写失败不能反向阻断业务。
-      onWriteError(err);
+      await Promise.race([
+        pending,
+        new Promise<void>((resolve) => {
+          timeoutHandle = setTimeout(resolve, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeoutHandle !== null) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 
@@ -339,26 +374,19 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
         return inputScope ?? "";
       }
       function write(level: LogLevel, input: LogWriteInput): void {
-        // 关键：debug 判断也要等 ensureInit 完成；否则首次 init 未结束时
-        // 会基于默认 debugEnabled=false 把用户的 debug 调用直接丢掉。
-        // 整体仍走 fire-and-forget：业务侧 logger.debug() 同步返回，
-        // 内部 await 一次确保 DB 真值。
-        void (async () => {
-          await ensureInit();
-          if (level === "debug" && !config.debugEnabled) return;
-          const entry: LogAppendInput = {
-            level,
-            pluginId,
-            scope: composeScope(input.scope),
-            event: input.event,
-            message: input.message,
-            data: input.data,
-            keyScope: input.keyScope,
-            error: input.error
-          };
-          // 业务侧不等；append 内部吞掉错误。
-          void appendInternal(entry);
-        })();
+        // 关键：同步把日志写入任务入队，再由 appendInternal 串行落库。
+        // 这样即使调用方立刻 listEntries()/flush()，也能看到这条待写日志。
+        const entry: LogAppendInput = {
+          level,
+          pluginId,
+          scope: composeScope(input.scope),
+          event: input.event,
+          message: input.message,
+          data: input.data,
+          keyScope: input.keyScope,
+          error: input.error
+        };
+        void appendInternal(entry);
       }
       return {
         debug: (i) => write("debug", i),
@@ -400,7 +428,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
     },
 
     async listEntries(query) {
-      await ensureInit();
+      await flushPendingWrites();
       const q = query ?? {};
       const limit = typeof q.limit === "number" && q.limit > 0 ? q.limit : 200;
       const desc = q.descending !== false;
@@ -426,7 +454,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
     },
 
     async clearEntries(query) {
-      await ensureInit();
+      await flushPendingWrites();
       const q = query ?? {};
       // 安全兜底：必须至少有一个限制条件。
       if (!q.pluginId && !q.level && !q.olderThan) {
@@ -442,7 +470,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
     },
 
     async clearAllEntries() {
-      await ensureInit();
+      await flushPendingWrites();
       try {
         const removed = await deleteWhere(() => true);
         return removed;
@@ -453,7 +481,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
     },
 
     async pruneExpired(now) {
-      await ensureInit();
+      await flushPendingWrites();
       const nowStr = now ?? nowIso();
       const cutoffMs = Date.parse(nowStr) - config.retentionDays * 24 * 60 * 60 * 1000;
       if (!Number.isFinite(cutoffMs)) return 0;
@@ -476,11 +504,45 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
       return () => listeners.delete(handler);
     },
 
+    async flush(options) {
+      await flushPendingWrites(options);
+    },
+
     dispose() {
       listeners.clear();
-      void disposeLogDb();
+      removeBrowserFlushHooks?.();
+      void (async () => {
+        await flushPendingWrites({ timeoutMs: 250 });
+        await disposeLogDb();
+        resetInit();
+      })();
     }
   };
+
+  let removeBrowserFlushHooks: (() => void) | null = null;
+  if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+    const bestEffortFlush = () => {
+      void service.flush({ timeoutMs: 150 });
+    };
+    const onVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+      if (document.visibilityState === "hidden") {
+        bestEffortFlush();
+      }
+    };
+    window.addEventListener("pagehide", bestEffortFlush);
+    window.addEventListener("beforeunload", bestEffortFlush);
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+    removeBrowserFlushHooks = () => {
+      window.removeEventListener("pagehide", bestEffortFlush);
+      window.removeEventListener("beforeunload", bestEffortFlush);
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+      }
+    };
+  }
 
   // 触发一次 ensureInit（不等待）。第一次 append / list 时也会兜底 init。
   // ensureInit 完成后 best-effort 做一次启动 prune，遵循施工单

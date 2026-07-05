@@ -76,6 +76,29 @@ describe("createLogService - basics", () => {
     svc.dispose();
   });
 
+  it("listEntries flushes queued logger writes without manual delay", async () => {
+    const svc = createLogService();
+    const logger = svc.forPlugin("demo", "demo");
+    logger.info({ scope: "x", event: "instant", message: "queued" });
+    const list = await svc.listEntries({ pluginId: "demo" });
+    expect(list.length).toBe(1);
+    expect(list[0]!.message).toBe("queued");
+    svc.dispose();
+  });
+
+  it("dispose best-effort flushes queued writes before closing DB", async () => {
+    const writer = createLogService({ skipStartupPrune: true });
+    const logger = writer.forPlugin("demo", "demo");
+    logger.info({ scope: "x", event: "before.dispose", message: "persist-me" });
+    writer.dispose();
+    await new Promise((r) => setTimeout(r, 100));
+
+    const reader = createLogService({ skipStartupPrune: true });
+    const list = await reader.listEntries({ pluginId: "demo" });
+    expect(list.some((entry) => entry.message === "persist-me")).toBe(true);
+    reader.dispose();
+  });
+
   it("drop debug entries when debugEnabled=false; future debug writes after toggle", async () => {
     const svc = createLogService();
     const logger = svc.forPlugin("demo", "demo");
