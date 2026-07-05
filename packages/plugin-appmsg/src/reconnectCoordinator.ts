@@ -170,20 +170,27 @@ export function createReconnectCoordinator(
   let currentAttemptStartedAtMs: number | null = null;
   let inFlightWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 
-  const clearInFlightWatchdog = (): void => {
+  const clearInFlightWatchdog = (expectedAttemptId?: string): void => {
+    if (
+      typeof expectedAttemptId === "string" &&
+      currentAttemptId !== null &&
+      currentAttemptId !== expectedAttemptId
+    ) {
+      return;
+    }
     if (inFlightWatchdogTimer !== null) {
       clearTimeout(inFlightWatchdogTimer);
       inFlightWatchdogTimer = null;
     }
   };
 
-  const scheduleInFlightWatchdog = (delayMs: number): void => {
-    clearInFlightWatchdog();
-    if (currentAttemptId === null || currentAttemptStartedAtMs === null) return;
+  const scheduleInFlightWatchdog = (delayMs: number, watchedAttemptId: string): void => {
+    clearInFlightWatchdog(watchedAttemptId);
+    if (currentAttemptId !== watchedAttemptId || currentAttemptStartedAtMs === null) return;
     inFlightWatchdogTimer = setTimeout(() => {
       inFlightWatchdogTimer = null;
       if (disposed) return;
-      if (inFlightConnect === null || currentAttemptId === null) return;
+      if (inFlightConnect === null || currentAttemptId !== watchedAttemptId) return;
       logInfo("appmsg.connect.attempt.watchdog", {
         epoch,
         attemptId: currentAttemptId,
@@ -192,7 +199,7 @@ export function createReconnectCoordinator(
         pendingEpoch,
         hasPendingTimer: reconnectTimer !== null
       });
-      scheduleInFlightWatchdog(INFLIGHT_WATCHDOG_REPEAT_MS);
+      scheduleInFlightWatchdog(INFLIGHT_WATCHDOG_REPEAT_MS, watchedAttemptId);
     }, delayMs);
   };
 
@@ -201,7 +208,7 @@ export function createReconnectCoordinator(
     currentAttemptId = attemptId;
     currentAttemptStage = "created";
     currentAttemptStartedAtMs = Date.now();
-    scheduleInFlightWatchdog(INFLIGHT_WATCHDOG_INITIAL_DELAY_MS);
+    scheduleInFlightWatchdog(INFLIGHT_WATCHDOG_INITIAL_DELAY_MS, attemptId);
     return attemptId;
   };
 
@@ -209,11 +216,45 @@ export function createReconnectCoordinator(
     currentAttemptStage = stage;
   };
 
-  const finishAttemptLifecycle = (): void => {
-    clearInFlightWatchdog();
+  const finishAttemptLifecycle = (expectedAttemptId: string): void => {
+    if (currentAttemptId !== expectedAttemptId) {
+      logInfo("appmsg.connect.attempt.cleanup_skipped", {
+        expectedAttemptId,
+        currentAttemptId,
+        currentAttemptStage,
+        inFlightAgeMs: currentAttemptAgeMs()
+      });
+      return;
+    }
+    clearInFlightWatchdog(expectedAttemptId);
     currentAttemptId = null;
     currentAttemptStage = null;
     currentAttemptStartedAtMs = null;
+  };
+
+  const hasInFlightMetaMismatch = (): boolean =>
+    inFlightConnect !== null &&
+    (currentAttemptId === null ||
+      currentAttemptStage === null ||
+      currentAttemptStartedAtMs === null);
+
+  const logInFlightMetaMismatch = (source: string): void => {
+    if (!hasInFlightMetaMismatch()) return;
+    logger.warn({
+      scope: "appmsg.core",
+      event: "appmsg.connect.inflight_meta_mismatch",
+      message: "",
+      data: {
+        coordinatorId,
+        source,
+        epoch,
+        pendingEpoch,
+        hasPendingTimer: reconnectTimer !== null,
+        currentAttemptId,
+        currentAttemptStage,
+        currentAttemptStartedAtMs
+      }
+    });
   };
 
   const clearReconnectTimer = (
@@ -514,6 +555,7 @@ export function createReconnectCoordinator(
    */
   const attemptConnect = (): Promise<void> => {
     if (inFlightConnect) {
+      logInFlightMetaMismatch("attemptConnect.reuse");
       logInfo("appmsg.connect.attempt.inflight_reused", {
         epoch,
         pendingEpoch,
@@ -656,7 +698,7 @@ export function createReconnectCoordinator(
             reconcileQueuedEpoch(queuedEpoch);
           }
         }
-        finishAttemptLifecycle();
+        finishAttemptLifecycle(attemptId);
       }
     })();
     return inFlightConnect;
@@ -685,6 +727,7 @@ export function createReconnectCoordinator(
    */
   const onStructuralChange = (reason: "setup" | "vault" | "keyspace" | "provider" | "core"): void => {
     if (disposed) return;
+    logInFlightMetaMismatch(`onStructuralChange:${reason}`);
     const cond = structuralConnectable();
     logInfo("appmsg.connect.kick", {
       reason,
@@ -736,6 +779,7 @@ export function createReconnectCoordinator(
 
   const onCoreStateChange = (): void => {
     if (disposed) return;
+    logInFlightMetaMismatch("onCoreStateChange");
     const snap = core.inspectLocalDb();
     const wasOpen = lastSeenOpen;
     const isOpen = snap.state === "open";
@@ -840,7 +884,9 @@ export function createReconnectCoordinator(
       // 测试一起跑时若 fake core 的 deferred resolver 漏 drain，
       // vitest worker 就 hang。
       inFlightConnect = null;
-      finishAttemptLifecycle();
+      if (currentAttemptId !== null) {
+        finishAttemptLifecycle(currentAttemptId);
+      }
       logInfo("appmsg.connect.coordinator.dispose.done", {
         epoch,
         pendingEpoch,

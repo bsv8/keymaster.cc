@@ -1009,6 +1009,55 @@ describe("createReconnectCoordinator", () => {
     coord.dispose();
   });
 
+  it("旧 attempt finally 不得清掉新 attempt 的元信息", async () => {
+    const vault = makeFakeVault();
+    const keyspace = makeFakeKeyspace();
+    const provider = makeFakeProvider("hubmsg");
+    const fakeCore = makeFakeCore(provider, keyspace);
+    const info = vi.fn();
+    const warn = vi.fn();
+    fakeCore.setOutcome({ kind: "connected" });
+    const coord = createReconnectCoordinator({
+      core: fakeCore.core,
+      vault: vault.service,
+      keyspace,
+      logger: { info, warn }
+    });
+
+    // attempt 1 在 setup 期间已进入 callConnect。把 hang 打开，使
+    // attempt 2 在 finally 补发后保持 in-flight，便于观察其元信息是否
+    // 会被 attempt 1 的 cleanup 误清掉。
+    expect(fakeCore.callConnectStartedCount).toBe(1);
+    fakeCore.setHangConnect(true);
+
+    vault.setStatus("locked");
+    vault.setStatus("unlocked");
+
+    await vi.waitFor(() => {
+      expect(fakeCore.callConnectStartedCount).toBe(2);
+    });
+
+    keyspace.fireActiveChange();
+
+    const pendingSetEvents = info.mock.calls
+      .map((call) => call[0] as { event?: string; data?: Record<string, unknown> })
+      .filter((entry) => entry?.event === "appmsg.connect.pending.set");
+    const lastPendingSet = pendingSetEvents.at(-1);
+
+    expect(lastPendingSet).toBeTruthy();
+    expect(lastPendingSet?.data?.attemptId).toEqual(expect.any(String));
+    expect(lastPendingSet?.data?.attemptId).not.toBe("");
+    expect(lastPendingSet?.data?.attemptStage).toEqual(expect.any(String));
+    expect(lastPendingSet?.data?.attemptStage).not.toBe("");
+
+    const mismatchEvents = warn.mock.calls
+      .map((call) => call[0] as { event?: string })
+      .filter((entry) => entry?.event === "appmsg.connect.inflight_meta_mismatch");
+    expect(mismatchEvents).toHaveLength(0);
+
+    coord.dispose();
+  });
+
   it("in-flight 期间 provider 切换两次，只采用最后一个 provider 触发新 attempt", async () => {
     // 反馈"必改"第四轮第二条：in-flight 期间 provider 切换两次（都
     // 走 onStructuralChange），必须只采用最后一个。本测试通过 fake
