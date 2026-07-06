@@ -5,9 +5,9 @@
 本次施工、联调、验收以下列文档与代码为准：
 
 - `施工单/2026-06-29/001-session-window-app-view-and-virtual-storage-hard-switch.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
-- `docs/keymaster-storage-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-storage-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/contracts/src/plugin.ts`
 - `packages/contracts/src/home.ts`
@@ -476,7 +476,7 @@ claims 若无额外要求，V1 采用最保守最小集合；不要预埋复杂�
    - session 在点击 `Open App` 时预建；
    - `connect.launch` 只消费 token，不创建 session。
 
-#### 2. `docs/keymaster-protocol-common-v1-draft.md`
+#### 2. `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 补充：
 
@@ -484,7 +484,7 @@ claims 若无额外要求，V1 采用最保守最小集合；不要预埋复杂�
 2. launcher 点击 app 卡片时预建 session；
 3. `plugin-apps` 不直接参与 client app transport。
 
-#### 3. `docs/keymaster-connect-v1-draft.md`
+#### 3. `docs/protocol/keymaster-connect-v1-draft.md`
 
 补充：
 

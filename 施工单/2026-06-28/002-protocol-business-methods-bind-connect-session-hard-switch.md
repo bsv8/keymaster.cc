@@ -4,14 +4,14 @@
 
 本次施工、联调、验收以下列文档与代码为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
-- `docs/keymaster-identity-get-v1-draft.md`
-- `docs/keymaster-intent-sign-v1-draft.md`
-- `docs/keymaster-cipher-v1-draft.md`
-- `docs/keymaster-p2pkh-transfer-v1-draft.md`
-- `docs/keymaster-feepool-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-identity-get-v1-draft.md`
+- `docs/protocol/keymaster-intent-sign-v1-draft.md`
+- `docs/protocol/keymaster-cipher-v1-draft.md`
+- `docs/protocol/keymaster-p2pkh-transfer-v1-draft.md`
+- `docs/protocol/keymaster-feepool-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/protocolStorageDb.ts`
@@ -486,7 +486,7 @@ origin + counterpartyPublicKeyHex
 
 ## 7.1 协议文档
 
-### `docs/keymaster-protocol-common-v1-draft.md`
+### `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 要做：
 
@@ -495,7 +495,7 @@ origin + counterpartyPublicKeyHex
 3. 明确 request record 创建时要绑定 `connectSessionId + ownerPublicKeyHex`。
 4. 加入“旧请求不得漂移进新 session”的公共约束。
 
-### `docs/keymaster-protocol-v1-draft.md`
+### `docs/protocol/keymaster-protocol-v1-draft.md`
 
 要做：
 
@@ -503,7 +503,7 @@ origin + counterpartyPublicKeyHex
 2. 把 `identity.get` 从“登录推荐入口”改成“会话内身份断言能力”。
 3. 明确 `p2pkh.transfer` / `feepool.*` 也走 `connectSessionId`。
 
-### `docs/keymaster-connect-v1-draft.md`
+### `docs/protocol/keymaster-connect-v1-draft.md`
 
 要做：
 
@@ -512,7 +512,7 @@ origin + counterpartyPublicKeyHex
 3. 固定 `ConnectSessionRecord` 只保留 `ownerPublicKeyHex` 作为 owner 真值。
 4. 增加“业务请求创建时绑定 session”的章节。
 
-### `docs/keymaster-identity-get-v1-draft.md`
+### `docs/protocol/keymaster-identity-get-v1-draft.md`
 
 要做：
 
@@ -521,7 +521,7 @@ origin + counterpartyPublicKeyHex
 3. 明确 subject 取自 session 绑定 owner，而不是当前 active key。
 4. 明确待确认请求若 session 已失效，执行时直接拒绝。
 
-### `docs/keymaster-intent-sign-v1-draft.md`
+### `docs/protocol/keymaster-intent-sign-v1-draft.md`
 
 要做：
 
@@ -529,7 +529,7 @@ origin + counterpartyPublicKeyHex
 2. 明确 subject 取自 session 绑定 owner。
 3. 删除“登录场景推荐 identity.get”的旧叙事，改成“登录先走 connect.login”。
 
-### `docs/keymaster-cipher-v1-draft.md`
+### `docs/protocol/keymaster-cipher-v1-draft.md`
 
 要做：
 
@@ -537,7 +537,7 @@ origin + counterpartyPublicKeyHex
 2. 改成“基于 session 绑定 ownerPublicKeyHex 派生站点密钥”。
 3. 明确 contract / result 中不再出现 `ownerKeyId`。
 
-### `docs/keymaster-p2pkh-transfer-v1-draft.md`
+### `docs/protocol/keymaster-p2pkh-transfer-v1-draft.md`
 
 要做：
 
@@ -545,7 +545,7 @@ origin + counterpartyPublicKeyHex
 2. 明确资金 owner 取自 session 绑定 owner，不再读取全局 active key。
 3. 明确旧 session 失效时 fail-fast。
 
-### `docs/keymaster-feepool-v1-draft.md`
+### `docs/protocol/keymaster-feepool-v1-draft.md`
 
 要做：
 

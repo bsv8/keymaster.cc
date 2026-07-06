@@ -4,11 +4,11 @@
 
 可以参考以下需求文档，施工与验收以这些文档与本单"本单补充定义"段的合集为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-identity-get-v1-draft.md`
-- `docs/keymaster-intent-sign-v1-draft.md`
-- `docs/keymaster-cipher-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-identity-get-v1-draft.md`
+- `docs/protocol/keymaster-intent-sign-v1-draft.md`
+- `docs/protocol/keymaster-cipher-v1-draft.md`
 
 需求文档与本单发生冲突时：
 
@@ -35,8 +35,8 @@
   不支持 DER / recovered / 其它变体。`signature.bytes` 必须可直接被
   第三方接入方按 `r(32 bytes) || s(32 bytes)` 解析为两组 32 字节大整数
   再做 secp256k1 验签。若后续要换格式，必须先改本段与
-  `docs/keymaster-identity-get-v1-draft.md` /
-  `docs/keymaster-intent-sign-v1-draft.md`，再改 contract 与测试向量。
+  `docs/protocol/keymaster-identity-get-v1-draft.md` /
+  `docs/protocol/keymaster-intent-sign-v1-draft.md`，再改 contract 与测试向量。
 
 - **错误码集合**：V1 公开错误码为
 

@@ -4,8 +4,8 @@
 
 施工与验收以现有协议文档、已落地实现、上一批 protocol 施工单与本单“本单补充定义”段的合集为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/ProtocolPopupPage.tsx`
@@ -517,12 +517,12 @@ current timeout deadline
   - `ProtocolFailureReason` 新增 `request_timeout`
   - 补充命令卡 `status` 可为 `timed_out` 的中文注释
 
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
   - 增补顶层 `cancel` 报文定义
   - 增补“当前请求交互在命令流卡片内完成”语义
   - 增补超时与取消规则
 
-- `docs/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
   - 增补本次 popup 交互收口说明
 
 ### 二、协议校验与 service

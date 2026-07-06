@@ -4,8 +4,8 @@
 
 本次施工、联调、验收以下列文档与代码为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/ProtocolPopupPage.tsx`
@@ -379,7 +379,7 @@ executing
 
 ### 一、contract 与协议文档层
 
-1. 在 `docs/keymaster-protocol-v1-draft.md`、`docs/keymaster-protocol-common-v1-draft.md` 更新 popup connect 语义：
+1. 在 `docs/protocol/keymaster-protocol-v1-draft.md`、`docs/protocol/keymaster-protocol-common-v1-draft.md` 更新 popup connect 语义：
    - 锁屏为全页面。
    - 多 request 并存。
    - confirm timeout 只在 confirming。
@@ -565,10 +565,10 @@ executing
 
 ### 一、协议与 contract
 
-- `docs/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
   - 更新 popup 锁屏、请求状态、取消、timeout、全局串行执行语义。
 
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
   - 补充 `cancel`、requestId 去重、终态对外语义的公共约束。
 
 - `packages/contracts/src/protocol.ts`

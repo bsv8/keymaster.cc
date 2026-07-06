@@ -4,8 +4,8 @@
 
 本次施工、联调、验收以下列文档与代码为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/ProtocolPopupPage.tsx`
@@ -373,8 +373,8 @@ DB 历史
 
 需要修改：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 必须改成：
 

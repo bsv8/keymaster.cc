@@ -7,9 +7,9 @@
 - `施工单/2026-06-29/001-session-window-app-view-and-virtual-storage-hard-switch.md`
 - `施工单/2026-06-29/002-plugin-apps-appview-launcher-hard-switch.md`
 - `施工单/2026-06-29/003-appview-session-signer-hard-switch.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
-- `docs/keymaster-storage-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-storage-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/protocolStorageDb.ts`
@@ -547,12 +547,12 @@ bootstrap 私钥材料只允许出现在：
 
 - `施工单/2026-06-29/003-appview-session-signer-hard-switch.md`
   - 标注被本单取代，避免后续继续按错误模型施工。
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
   - 删除 `runtimeBinding` 作为 session 真值的定义。
   - 改写 launcher / popup 统一 owner runtime 语义。
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
   - 改写 `connect.launch`、`connect.resume`、unlock 与 runtime 解析关系。
-- `docs/keymaster-storage-v1-draft.md`
+- `docs/protocol/keymaster-storage-v1-draft.md`
   - 改写 `storage.*` 对 owner runtime 的统一依赖，去掉 `session_signer` 特判语义。
 - `packages/contracts/src/protocol.ts`
   - 删除 `ConnectSessionRecord.runtimeBinding`。

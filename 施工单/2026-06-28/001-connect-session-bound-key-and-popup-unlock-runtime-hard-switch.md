@@ -4,10 +4,10 @@
 
 本次施工、联调、验收以下列文档与代码为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-identity-get-v1-draft.md`
-- `docs/keymaster-cipher-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-identity-get-v1-draft.md`
+- `docs/protocol/keymaster-cipher-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/ProtocolPopupPage.tsx`
@@ -540,7 +540,7 @@ unlock runtime 必须满足：
 
 ## 8. 文件级实施方案
 
-## 8.1 `docs/keymaster-protocol-v1-draft.md`
+## 8.1 `docs/protocol/keymaster-protocol-v1-draft.md`
 
 目标：
 
@@ -554,7 +554,7 @@ unlock runtime 必须满足：
 3. 明确 `cipher.*` 的 session 绑定执行语义。
 4. 明确 popup refresh 只丢 unlock runtime，不等于 logout。
 
-## 8.2 `docs/keymaster-protocol-common-v1-draft.md`
+## 8.2 `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 目标：
 
@@ -567,7 +567,7 @@ unlock runtime 必须满足：
 3. 明确 caller 断线后可通过 `resume` 恢复。
 4. 明确 unlock runtime 只在 popup 当前文档内存中存在。
 
-## 8.3 新增 `docs/keymaster-connect-v1-draft.md`
+## 8.3 新增 `docs/protocol/keymaster-connect-v1-draft.md`
 
 目标：
 

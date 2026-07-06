@@ -5,8 +5,8 @@
 施工与验收以现有协议文档、上一张施工单以及本单补充定义的合集为准：
 
 - `施工单/2026-06-26/001-protocol-popup-origin-auto-approve-and-wallet-entry-hard-switch.md`
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
 - `packages/plugin-protocol/src/OriginSettingsTray.tsx`
 - `packages/plugin-protocol/src/styles.css`
 - `packages/plugin-protocol/src/protocolService.ts`

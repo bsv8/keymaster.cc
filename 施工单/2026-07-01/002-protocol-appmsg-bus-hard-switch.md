@@ -29,8 +29,8 @@
 - `packages/plugin-apps/src/manifest.ts`
 - `packages/plugin-apps/src/AppsPage.tsx`
 - `apps/web/src/bootstrapPlugins.ts`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
 - `施工单/2026-06-28/001-connect-session-bound-key-and-popup-unlock-runtime-hard-switch.md`
 - `施工单/2026-06-28/002-protocol-business-methods-bind-connect-session-hard-switch.md`
 - `施工单/2026-06-29/001-session-window-app-view-and-virtual-storage-hard-switch.md`

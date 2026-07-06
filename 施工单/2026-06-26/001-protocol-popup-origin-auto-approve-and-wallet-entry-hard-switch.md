@@ -4,10 +4,10 @@
 
 可以参考以下文档与现有实现；施工与验收以这些文档和本单“本单补充定义”合并后的结果为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-cipher-v1-draft.md`
-- `docs/keymaster-identity-get-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-cipher-v1-draft.md`
+- `docs/protocol/keymaster-identity-get-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/ProtocolPopupPage.tsx`
 - `packages/plugin-protocol/src/OriginSettingsTray.tsx`

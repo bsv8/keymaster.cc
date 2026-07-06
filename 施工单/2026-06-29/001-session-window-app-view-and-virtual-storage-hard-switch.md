@@ -4,8 +4,8 @@
 
 本次施工、联调、验收以下列文档与代码为准：
 
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/contracts/src/vault.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
@@ -750,18 +750,18 @@ connect.launch
 
 必须修改：
 
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
   - 把“popup”统一上升为 Session Window 概念；
   - 新增 boot mode 语义；
   - 新增 `connect.launch` 与 `storage.*` 的公共约定；
   - 明确 appView bootstrap 只是一段启动期行为，不是长期内部 RPC。
 
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
   - 新增 `connect.launch`；
   - 明确 `connect.login / resume / launch` 三者边界；
   - 明确 appView mode 启动时 launcher 预建 session 的语义。
 
-- `docs/keymaster-storage-v1-draft.md`（新增）
+- `docs/protocol/keymaster-storage-v1-draft.md`（新增）
   - 定义 `storage.put/get/list/listAll/delete`；
   - 定义虚拟桶、路径规则、透明加解密、安全边界。
 

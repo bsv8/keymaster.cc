@@ -93,7 +93,7 @@ Keymaster 内部 `plugin-apps` 是 `appView` mode 的**唯一**业务调用方�
 
 更细节的 connect.* / Session Window 启动顺序见：
 
-- `docs/keymaster-connect-v1-draft.md`：connect.* + connect.launch；
+- `docs/protocol/keymaster-connect-v1-draft.md`：connect.* + connect.launch；
 
 > 现行真值（施工单 2026-07-01 001 硬切换）：Keymaster 已彻底移除 `storage.*` 协议族与 S3 provider 配置能力；上文中"更细节的 storage / connect.*"为历史描述，本文档不构成现行能力承诺。
 

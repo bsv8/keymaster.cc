@@ -4,8 +4,8 @@
 
 本次施工、联调、验收以下列文档与代码为准：
 
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/ProtocolPopupPage.tsx`
@@ -407,7 +407,7 @@ auth owner 候选仅包括：
 
 ## 7.1 协议文档
 
-### `docs/keymaster-connect-v1-draft.md`
+### `docs/protocol/keymaster-connect-v1-draft.md`
 
 要做：
 
@@ -417,7 +417,7 @@ auth owner 候选仅包括：
 4. 新增 auth owner / auth 页面仲裁章节。
 5. 新增“有效 resume 抢占未提交 login；已提交 login 不可反抢”的规则。
 
-### `docs/keymaster-protocol-common-v1-draft.md`
+### `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 要做：
 

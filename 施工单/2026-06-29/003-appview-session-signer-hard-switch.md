@@ -24,9 +24,9 @@
 
 - `施工单/2026-06-29/001-session-window-app-view-and-virtual-storage-hard-switch.md`
 - `施工单/2026-06-29/002-plugin-apps-appview-launcher-hard-switch.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
-- `docs/keymaster-storage-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-storage-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/contracts/src/vault.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
@@ -523,7 +523,7 @@ resolveExecutionRuntime(connectSessionId)
 
 ### 一、协议文档
 
-#### 1. `docs/keymaster-protocol-common-v1-draft.md`
+#### 1. `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 必须修改：
 
@@ -532,7 +532,7 @@ resolveExecutionRuntime(connectSessionId)
 3. 明确 `appView` 运行期 owner 执行面来自 session signer，不来自 vault unlock runtime。
 4. 明确 Session Window 刷新后 signer 丢失，用户需重新启动 app。
 
-#### 2. `docs/keymaster-connect-v1-draft.md`
+#### 2. `docs/protocol/keymaster-connect-v1-draft.md`
 
 必须修改：
 
@@ -540,7 +540,7 @@ resolveExecutionRuntime(connectSessionId)
 2. `connect.launch` 成功后返回的 session 仍是普通 `connectSessionId`，但运行时绑定是 `session_signer`。
 3. `connect.resume` 对 appView stale session 不自动恢复 signer。
 
-#### 3. `docs/keymaster-storage-v1-draft.md`
+#### 3. `docs/protocol/keymaster-storage-v1-draft.md`
 
 必须修改：
 

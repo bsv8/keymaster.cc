@@ -4,9 +4,9 @@
 
 可以参考以下需求文档，施工与验收以这些文档与本单“本单补充定义”段的合集为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-intent-sign-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-intent-sign-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 - `packages/plugin-protocol/src/protocolService.ts`
 - `packages/plugin-protocol/src/protocolCommandDb.ts`
@@ -694,7 +694,7 @@ site request
 
 ### 一、`docs`
 
-#### 1. `docs/keymaster-protocol-v1-draft.md`
+#### 1. `docs/protocol/keymaster-protocol-v1-draft.md`
 
 更新总览：
 
@@ -704,7 +704,7 @@ site request
   - `feepool.commit`
 - 说明 `fee pool` 是两步方法族，不是单步转账。
 
-#### 2. `docs/keymaster-protocol-common-v1-draft.md`
+#### 2. `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 补公共约定：
 
@@ -713,7 +713,7 @@ site request
 - 明确历史与配置分 store；
 - 明确 pending fee pool operation 不持久化。
 
-#### 3. `docs/keymaster-p2pkh-transfer-v1-draft.md`（新增）
+#### 3. `docs/protocol/keymaster-p2pkh-transfer-v1-draft.md`（新增）
 
 定义：
 
@@ -723,7 +723,7 @@ site request
 - 余额不足隐私边界
 - 确认页展示要求
 
-#### 4. `docs/keymaster-feepool-v1-draft.md`（新增）
+#### 4. `docs/protocol/keymaster-feepool-v1-draft.md`（新增）
 
 定义：
 
@@ -890,10 +890,10 @@ site request
 
 ### 一、文档验收
 
-1. `docs/keymaster-protocol-v1-draft.md` 已把三种新方法纳入总览。
-2. `docs/keymaster-protocol-common-v1-draft.md` 已明确站点配置、命令历史、费用池状态边界。
-3. 已新增 `docs/keymaster-p2pkh-transfer-v1-draft.md`。
-4. 已新增 `docs/keymaster-feepool-v1-draft.md`。
+1. `docs/protocol/keymaster-protocol-v1-draft.md` 已把三种新方法纳入总览。
+2. `docs/protocol/keymaster-protocol-common-v1-draft.md` 已明确站点配置、命令历史、费用池状态边界。
+3. 已新增 `docs/protocol/keymaster-p2pkh-transfer-v1-draft.md`。
+4. 已新增 `docs/protocol/keymaster-feepool-v1-draft.md`。
 5. 文档里不再出现“最小值 / 最低金额”这种与行为冲突的阈值命名。
 
 ### 二、contract 验收

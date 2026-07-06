@@ -4,8 +4,8 @@
 
 可以参考以下需求文档，施工与验收以这些文档与本单“本单补充定义”段的合集为准：
 
-- `docs/keymaster-protocol-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-protocol-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
 - `packages/contracts/src/protocol.ts`
 
 需求文档与本单发生冲突时：
@@ -485,7 +485,7 @@ client 轮询 `popup.closed` 建议固定为：
 
 ### 一、`docs`
 
-#### 1. `docs/keymaster-protocol-common-v1-draft.md`
+#### 1. `docs/protocol/keymaster-protocol-common-v1-draft.md`
 
 补充公共 transport 定义：
 
@@ -499,7 +499,7 @@ client 轮询 `popup.closed` 建议固定为：
 - 明确本次不做心跳
 - 明确本次不引入 MessageChannel
 
-#### 2. `docs/keymaster-protocol-v1-draft.md`
+#### 2. `docs/protocol/keymaster-protocol-v1-draft.md`
 
 补一段总览说明：
 

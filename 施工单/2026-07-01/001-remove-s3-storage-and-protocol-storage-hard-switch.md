@@ -19,9 +19,9 @@
 - `packages/plugin-protocol/src/ProtocolPopupPage.test.tsx`
 - `packages/plugin-protocol/src/OriginSettingsTray.test.tsx`
 - `README.md`
-- `docs/keymaster-storage-v1-draft.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-storage-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
 - `施工单/2026-06-29/001-session-window-app-view-and-virtual-storage-hard-switch.md`
 - `施工单/2026-06-30/002-launcher-popup-unified-owner-runtime-hard-switch.md`
 
@@ -307,8 +307,8 @@ Keymaster 当前不在 protocol DB 中保存 storage provider 配置
 现行文档处理原则：
 
 - `README.md`：删除现行能力描述。
-- `docs/keymaster-storage-v1-draft.md`：不再作为现行能力文档。可删除文件，或明确改成“已撤回/已移除”的状态说明，但不能继续写成有效协议草案。
-- `docs/keymaster-protocol-common-v1-draft.md` / `docs/keymaster-connect-v1-draft.md`：删除把 `storage.*` 视为现行方法族的描述。
+- `docs/protocol/keymaster-storage-v1-draft.md`：不再作为现行能力文档。可删除文件，或明确改成“已撤回/已移除”的状态说明，但不能继续写成有效协议草案。
+- `docs/protocol/keymaster-protocol-common-v1-draft.md` / `docs/protocol/keymaster-connect-v1-draft.md`：删除把 `storage.*` 视为现行方法族的描述。
 
 要求：
 
@@ -468,17 +468,17 @@ Keymaster 当前不在 protocol DB 中保存 storage provider 配置
 - `packages/plugin-protocol/src/index.ts`
 - `packages/plugin-settings/src/manifest.ts`
 - `README.md`
-- `docs/keymaster-protocol-common-v1-draft.md`
-- `docs/keymaster-connect-v1-draft.md`
+- `docs/protocol/keymaster-protocol-common-v1-draft.md`
+- `docs/protocol/keymaster-connect-v1-draft.md`
 
 ### B. 预期删除文件
 
 - `packages/plugin-protocol/src/storageObjectService.ts`
 - `packages/plugin-settings/src/StorageSettingsPage.tsx`
 - `packages/plugin-settings/src/StorageSettingsPage.test.tsx`
-- `docs/keymaster-storage-v1-draft.md`
+- `docs/protocol/keymaster-storage-v1-draft.md`
 
-> 若执行时决定 `docs/keymaster-storage-v1-draft.md` 不直接删除，则必须把文件头部和正文明确改成“已撤回/不再支持”，不能继续保留为有效草案。
+> 若执行时决定 `docs/protocol/keymaster-storage-v1-draft.md` 不直接删除，则必须把文件头部和正文明确改成“已撤回/不再支持”，不能继续保留为有效草案。
 
 ### C. 必改测试文件
 
@@ -544,7 +544,7 @@ Keymaster 当前不在 protocol DB 中保存 storage provider 配置
 
 - [ ] README 不再宣称系统支持 storage.* / S3 provider。
 - [ ] 现行 docs 不再把 storage.* 当成有效方法族。
-- [ ] `docs/keymaster-storage-v1-draft.md` 已删除，或已明确改成撤回状态。
+- [ ] `docs/protocol/keymaster-storage-v1-draft.md` 已删除，或已明确改成撤回状态。
 - [ ] 历史施工单未被修改。
 
 ### 10.4 搜索验收
