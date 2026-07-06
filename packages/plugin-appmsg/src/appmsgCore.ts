@@ -459,20 +459,70 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
 
   async sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult> {
     const handle = this.core.currentHandle();
+    const owner = this.core.resolveCurrentOwner();
+    const providerId = this.core.currentProviderIdSnapshot();
     if (!handle) {
+      this.core.emitInternalLog("warn", "appmsg.endpoint.send.rejected_not_ready", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        reason: "no_handle",
+        recipientPublicKeyHex: input.recipientPublicKeyHex
+      });
       throw new Error("appmsg.endpoint: not_ready (no active provider handle)");
     }
-    const owner = this.core.resolveCurrentOwner();
     if (!owner) {
+      this.core.emitInternalLog("warn", "appmsg.endpoint.send.rejected_not_ready", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        reason: "no_owner",
+        recipientPublicKeyHex: input.recipientPublicKeyHex
+      });
       throw new Error("appmsg.endpoint: not_ready (no current owner)");
     }
+    this.core.emitInternalLog("info", "appmsg.endpoint.send.begin", {
+      endpointKind: this.endpoint.kind,
+      endpointId: this.endpoint.id,
+      providerId,
+      ownerPublicKeyHex: owner,
+      recipientPublicKeyHex: input.recipientPublicKeyHex,
+      contentType: input.contentType,
+      clientMessageId: input.clientMessageId,
+      bodyBytes: input.body.length
+    });
     const sender: AppMsgSenderProjection = (() => {
       if (this.endpoint.kind === "plugin") {
         return { senderPublicKeyHex: owner, senderAppId: this.endpoint.id };
       }
       return { senderPublicKeyHex: owner, senderOrigin: this.endpoint.id };
     })();
-    return this.core.sendMessageImpl(handle, sender, input);
+    try {
+      const res = await this.core.sendMessageImpl(handle, sender, input);
+      this.core.emitInternalLog("info", "appmsg.endpoint.send.ok", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        messageId: res.messageId,
+        clientMessageId: input.clientMessageId
+      });
+      return res;
+    } catch (err) {
+      this.core.emitInternalLog("warn", "appmsg.endpoint.send.failed", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        clientMessageId: input.clientMessageId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw err;
+    }
   }
 
   async listMessages(input?: AppMsgListInput): Promise<AppMsgListResult> {
@@ -513,14 +563,62 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
 
   async checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult> {
     const handle = this.core.currentHandle();
+    const owner = this.core.resolveCurrentOwner();
+    const providerId = this.core.currentProviderIdSnapshot();
     if (!handle) {
       const out: AppMsgOnlineResult = {};
       for (const h of input) out[h] = "unknown";
+      this.core.emitInternalLog("warn", "appmsg.endpoint.online.skipped_not_ready", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        requestedCount: input.length
+      });
       return out;
     }
-    const providerIn: ProviderOnlineInput = { publicKeyHexes: input };
-    const providerOut = await handle.checkOnline(providerIn);
-    return providerOut as AppMsgOnlineResult;
+    this.core.emitInternalLog("info", "appmsg.endpoint.online.begin", {
+      endpointKind: this.endpoint.kind,
+      endpointId: this.endpoint.id,
+      providerId,
+      ownerPublicKeyHex: owner,
+      requestedCount: input.length
+    });
+    try {
+      const providerIn: ProviderOnlineInput = { publicKeyHexes: input };
+      const providerOut = await handle.checkOnline(providerIn);
+      let onlineCount = 0;
+      let offlineCount = 0;
+      let unknownCount = 0;
+      for (const value of Object.values(providerOut)) {
+        if (value === "online") onlineCount += 1;
+        else if (value === "offline") offlineCount += 1;
+        else unknownCount += 1;
+      }
+      this.core.emitInternalLog("info", "appmsg.endpoint.online.completed", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        requestedCount: input.length,
+        onlineCount,
+        offlineCount,
+        unknownCount
+      });
+      return providerOut as AppMsgOnlineResult;
+    } catch (err) {
+      const out: AppMsgOnlineResult = {};
+      for (const h of input) out[h] = "unknown";
+      this.core.emitInternalLog("warn", "appmsg.endpoint.online.failed", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        requestedCount: input.length,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return out;
+    }
   }
 
   /** 当前 scope match 函数（按 endpoint 解析）。 */
@@ -702,6 +800,18 @@ export class AppMsgCoreImpl implements AppMsgCore {
     } catch {
       return null;
     }
+  }
+
+  currentProviderIdSnapshot(): string | null {
+    return this.currentProviderId;
+  }
+
+  emitInternalLog(
+    level: "info" | "warn" | "error",
+    event: string,
+    data?: Record<string, unknown>
+  ): void {
+    emitLog(this.cfg.logger, level, event, data);
   }
 
   /* ====== 连接管理 ====== */
@@ -1853,21 +1963,50 @@ export class AppMsgCoreImpl implements AppMsgCore {
     if (!input || input.length === 0) return out;
     if (!this.boundHandle) {
       for (const h of input) out[h] = "unknown";
+      emitLog(this.cfg.logger, "warn", "appmsg.online.skipped_not_ready", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        requestedCount: input.length
+      });
       return out;
     }
+    emitLog(this.cfg.logger, "info", "appmsg.online.begin", {
+      ownerPublicKeyHex: this.currentBoundOwner,
+      providerId: this.currentProviderId,
+      requestedCount: input.length
+    });
     try {
       const res: ProviderOnlineResult = await this.boundHandle.checkOnline({
         publicKeyHexes: input
       });
       const out2: AppMsgOnlineResult = {};
+      let onlineCount = 0;
+      let offlineCount = 0;
+      let unknownCount = 0;
       for (const [k, v] of Object.entries(res)) {
         out2[k] = (v as AppMsgOnlineStatus) satisfies AppMsgOnlineStatus;
+        if (v === "online") onlineCount += 1;
+        else if (v === "offline") offlineCount += 1;
+        else unknownCount += 1;
       }
+      emitLog(this.cfg.logger, "info", "appmsg.online.completed", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        requestedCount: input.length,
+        onlineCount,
+        offlineCount,
+        unknownCount
+      });
       return out2;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.lastErrorMessageValue = msg;
-      emitLog(this.cfg.logger, "warn", "appmsg.online.failed", { err: msg });
+      emitLog(this.cfg.logger, "warn", "appmsg.online.failed", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId,
+        requestedCount: input.length,
+        err: msg
+      });
       for (const h of input) out[h] = "unknown";
       return out;
     }

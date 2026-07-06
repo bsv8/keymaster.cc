@@ -1153,9 +1153,29 @@ function decodeResultError(bytes: Uint8Array): { code: string; message: string }
  */
 export class HubMsgProviderOperations {
   private readonly conn: HubMsgConnection;
+  private readonly logger?: HubMsgConnectionLogger;
 
-  constructor(conn: HubMsgConnection) {
+  constructor(conn: HubMsgConnection, logger?: HubMsgConnectionLogger) {
     this.conn = conn;
+    this.logger = logger;
+  }
+
+  private emitLog(
+    level: "info" | "warn" | "error",
+    event: string,
+    data?: Record<string, unknown>
+  ): void {
+    if (!this.logger) return;
+    try {
+      this.logger[level]({
+        scope: "hubmsg.provider",
+        event,
+        message: "",
+        data
+      });
+    } catch {
+      // ignore
+    }
   }
 
   state(): "idle" | "connecting" | "bound" | "closed" {
@@ -1171,20 +1191,40 @@ export class HubMsgProviderOperations {
       throw new Error("HubMsg: not bound; cannot send");
     }
     const r = input.record;
+    this.emitLog("info", "hubmsg.provider.send.begin", {
+      clientMessageId: r.clientMessageId,
+      recipientPublicKeyHex: r.recipientPublicKeyHex,
+      envelopeBytes: r.envelope.envelopeBytes.length,
+      signatureBytes: r.envelope.signatureBytes.length
+    });
     const wireParams: HubMsgWireSendParams = [
       r.envelope.envelopeBytes,
       r.envelope.signatureBytes
     ];
-    const resBytes = await this.conn.request<Uint8Array>(
-      HUBMSG_METHOD.MessageSend,
-      cborEncode([...wireParams])
-    );
-    const res = cborDecode(resBytes) as unknown;
-    if (!Array.isArray(res) || res.length !== 2) {
-      throw new Error("HubMsg: malformed message.send result");
+    try {
+      const resBytes = await this.conn.request<Uint8Array>(
+        HUBMSG_METHOD.MessageSend,
+        cborEncode([...wireParams])
+      );
+      const res = cborDecode(resBytes) as unknown;
+      if (!Array.isArray(res) || res.length !== 2) {
+        throw new Error("HubMsg: malformed message.send result");
+      }
+      const [messageId, insertedAtMs] = res as unknown as HubMsgWireSendResult;
+      this.emitLog("info", "hubmsg.provider.send.ok", {
+        clientMessageId: r.clientMessageId,
+        messageId,
+        insertedAtMs
+      });
+      return { messageId, insertedAtMs };
+    } catch (err) {
+      this.emitLog("warn", "hubmsg.provider.send.failed", {
+        clientMessageId: r.clientMessageId,
+        recipientPublicKeyHex: r.recipientPublicKeyHex,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw err;
     }
-    const [messageId, insertedAtMs] = res as unknown as HubMsgWireSendResult;
-    return { messageId, insertedAtMs };
   }
 
   async listMessages(input: ProviderListInput): Promise<ProviderListResult> {
@@ -1251,9 +1291,18 @@ export class HubMsgProviderOperations {
       HUBMSG_EVENT.MessageReceived,
       (dataBytes) => {
         try {
-          handler(wireSealedToPublic(decodeWireSealedRecordBytes(dataBytes)));
-        } catch {
-          // ignore
+          const rec = wireSealedToPublic(decodeWireSealedRecordBytes(dataBytes));
+          this.emitLog("info", "hubmsg.provider.event.delivered", {
+            messageId: rec.messageId,
+            clientMessageId: rec.clientMessageId,
+            payloadBytes: dataBytes.length
+          });
+          handler(rec);
+        } catch (err) {
+          this.emitLog("warn", "hubmsg.provider.event.decode_failed", {
+            payloadBytes: dataBytes.length,
+            err: err instanceof Error ? err.message : String(err)
+          });
         }
       }
     );
@@ -1270,8 +1319,14 @@ export class HubMsgProviderOperations {
     if (this.conn.state() !== "bound") {
       const out: ProviderOnlineResult = {};
       for (const h of input.publicKeyHexes) out[h] = "unknown" satisfies AppMsgOnlineStatus;
+      this.emitLog("warn", "hubmsg.provider.online.skipped_not_bound", {
+        requestedCount: input.publicKeyHexes.length
+      });
       return out;
     }
+    this.emitLog("info", "hubmsg.provider.online.begin", {
+      requestedCount: input.publicKeyHexes.length
+    });
     try {
       const wireParams: HubMsgWireOnlineParams = [...input.publicKeyHexes];
       const resBytes = await this.conn.request<Uint8Array>(
@@ -1281,11 +1336,23 @@ export class HubMsgProviderOperations {
       const onlinePublicKeyHexes = decodeOnlineResult(cborDecode(resBytes) as unknown);
       const onlineSet = new Set(onlinePublicKeyHexes);
       const out: ProviderOnlineResult = {};
+      let onlineCount = 0;
       for (const h of input.publicKeyHexes) {
-        out[h] = (onlineSet.has(h) ? "online" : "offline") satisfies AppMsgOnlineStatus;
+        const status = (onlineSet.has(h) ? "online" : "offline") satisfies AppMsgOnlineStatus;
+        if (status === "online") onlineCount += 1;
+        out[h] = status;
       }
+      this.emitLog("info", "hubmsg.provider.online.completed", {
+        requestedCount: input.publicKeyHexes.length,
+        onlineCount,
+        offlineCount: input.publicKeyHexes.length - onlineCount
+      });
       return out;
-    } catch {
+    } catch (err) {
+      this.emitLog("warn", "hubmsg.provider.online.failed", {
+        requestedCount: input.publicKeyHexes.length,
+        err: err instanceof Error ? err.message : String(err)
+      });
       return this.fallbackUnknown(input.publicKeyHexes);
     }
   }

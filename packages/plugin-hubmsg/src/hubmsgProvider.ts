@@ -135,7 +135,7 @@ export class HubMsgProvider implements MessageProvider {
       throw err;
     }
     this.currentConn = conn;
-    this.currentOps = new HubMsgProviderOperations(conn);
+    this.currentOps = new HubMsgProviderOperations(conn, this.cfg.logger);
     this.lastErrorMessage = null;
     this.lastConnectedAtMsValue = Date.now();
     this.emitLog("info", "hubmsg.provider.bind.succeeded", {
