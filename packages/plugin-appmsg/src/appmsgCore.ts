@@ -526,21 +526,60 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
   }
 
   async listMessages(input?: AppMsgListInput): Promise<AppMsgListResult> {
-    const handle = this.core.currentHandle();
     const owner = this.core.resolveCurrentOwner();
-    if (!handle || !owner) {
+    const providerId = this.core.currentProviderIdSnapshot();
+    if (!owner || !providerId) {
       return { items: [], hasMore: false };
     }
-    return this.core.listMessagesImpl(handle, owner, this.endpoint, input);
+    const scope: AppMsgScope = {
+      ownerPublicKeyHex: owner,
+      kind: this.endpoint.kind,
+      id: this.endpoint.id
+    };
+    const limit = input?.limit ?? 50;
+    try {
+      const items = await this.core.listLocalMessagesForScope({
+        scope,
+        afterMessageId: input?.afterMessageId,
+        limit
+      });
+      return { items, hasMore: items.length >= limit };
+    } catch (err) {
+      this.core.emitInternalLog("warn", "appmsg.endpoint.list.failed", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return { items: [], hasMore: false };
+    }
   }
 
   async getMessage(input: AppMsgGetInput): Promise<AppMsgMessage | null> {
-    const handle = this.core.currentHandle();
     const owner = this.core.resolveCurrentOwner();
-    if (!handle || !owner) {
+    const providerId = this.core.currentProviderIdSnapshot();
+    if (!owner || !providerId) {
       return null;
     }
-    return this.core.getMessageImpl(handle, owner, this.endpoint, input);
+    const scope: AppMsgScope = {
+      ownerPublicKeyHex: owner,
+      kind: this.endpoint.kind,
+      id: this.endpoint.id
+    };
+    try {
+      return await this.core.getLocalMessageForScope({ scope, messageId: input.messageId });
+    } catch (err) {
+      this.core.emitInternalLog("warn", "appmsg.endpoint.get.failed", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        messageId: input.messageId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      return null;
+    }
   }
 
   subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void {
@@ -647,11 +686,22 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
       const m = this.core.openSealedToMessage(rec);
       if (!m) return;
       if (!scopeMatch(m)) return;
-      try {
-        handler(m);
-      } catch {
-        // ignore
-      }
+      void this.core.persistLocalMessageProjection(m)
+        .catch((err) => {
+          this.core.emitInternalLog("warn", "appmsg.endpoint.subscribe.local_put_failed", {
+            endpointKind: this.endpoint.kind,
+            endpointId: this.endpoint.id,
+            messageId: m.messageId,
+            err: err instanceof Error ? err.message : String(err)
+          });
+        })
+        .finally(() => {
+          try {
+            handler(m);
+          } catch {
+            // ignore
+          }
+        });
     };
     const off = handle.subscribeMessages(filteredHandler);
     this.currentSubsByHandler.set(handler, off);
@@ -812,6 +862,46 @@ export class AppMsgCoreImpl implements AppMsgCore {
     data?: Record<string, unknown>
   ): void {
     emitLog(this.cfg.logger, level, event, data);
+  }
+
+  persistLocalMessageProjection(message: AppMsgMessage): Promise<void> {
+    if (!this.localOps || !this.currentProviderId) {
+      return Promise.resolve();
+    }
+    return this.localOps.putMessage(this.currentProviderId, message).then(() => {
+      this.lastInsertedAtMsValue = Date.now();
+      this.recordTargetLastReceived(message);
+    });
+  }
+
+  async listLocalMessagesForScope(input: {
+    scope: AppMsgScope;
+    afterMessageId?: string;
+    limit?: number;
+  }): Promise<AppMsgMessage[]> {
+    if (!this.localOps || !this.currentProviderId) {
+      return [];
+    }
+    return await this.localOps.listMessagesForScope({
+      providerId: this.currentProviderId,
+      scope: input.scope,
+      afterMessageId: input.afterMessageId,
+      limit: input.limit
+    });
+  }
+
+  async getLocalMessageForScope(input: {
+    scope: AppMsgScope;
+    messageId: string;
+  }): Promise<AppMsgMessage | null> {
+    if (!this.localOps || !this.currentProviderId) {
+      return null;
+    }
+    return await this.localOps.getMessageForScope({
+      providerId: this.currentProviderId,
+      messageId: input.messageId,
+      scope: input.scope
+    });
   }
 
   /* ====== 连接管理 ====== */
@@ -1575,12 +1665,9 @@ export class AppMsgCoreImpl implements AppMsgCore {
       clientMessageId: input.clientMessageId
     });
 
-    // self-send：sender == recipient at endpoint；本地 DB 写一份明文投影。
-    const isSelfSend =
-      sender.senderPublicKeyHex === input.recipientPublicKeyHex &&
-      ((hasSenderOrigin && sender.senderOrigin === input.recipientOrigin) ||
-        (hasSenderAppId && sender.senderAppId === input.recipientAppId));
-    if (isSelfSend && this.localOps && this.currentProviderId) {
+    // send 成功后立刻把发送侧明文投影写入本地库。后续 sync / push 再次写入
+    // 也只是同 messageId 幂等覆盖，不会放大复杂度。
+    if (this.localOps && this.currentProviderId) {
       try {
         await this.localOps.putMessage(this.currentProviderId, {
           messageId: res.messageId,
@@ -1597,6 +1684,20 @@ export class AppMsgCoreImpl implements AppMsgCore {
           insertedAtMs: res.insertedAtMs
         });
         this.lastInsertedAtMsValue = Date.now();
+        this.recordTargetLastReceived({
+          messageId: res.messageId,
+          clientMessageId: input.clientMessageId,
+          senderPublicKeyHex: sender.senderPublicKeyHex,
+          senderOrigin: hasSenderOrigin ? sender.senderOrigin : undefined,
+          senderAppId: hasSenderAppId ? sender.senderAppId : undefined,
+          recipientPublicKeyHex: input.recipientPublicKeyHex,
+          recipientOrigin: hasRecipientOrigin ? input.recipientOrigin : undefined,
+          recipientAppId: hasRecipientAppId ? input.recipientAppId : undefined,
+          contentType: input.contentType,
+          body: input.body,
+          createdAtMs: input.createdAtMs,
+          insertedAtMs: res.insertedAtMs
+        });
       } catch (err) {
         this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
       }
@@ -2034,29 +2135,31 @@ export class AppMsgCoreImpl implements AppMsgCore {
     origin: string;
     listInput?: AppMsgListInput;
   }): Promise<AppMsgListResult> {
-    const handle = this.boundHandle;
     const owner = this.currentBoundOwner;
-    if (!handle || !owner) {
+    if (!owner) {
       return { items: [], hasMore: false };
     }
-    return this.listMessagesImpl(handle, owner, { kind: "origin", id: input.origin }, input.listInput);
+    const limit = input.listInput?.limit ?? 50;
+    const items = await this.listLocalMessagesForScope({
+      scope: { ownerPublicKeyHex: owner, kind: "origin", id: input.origin },
+      afterMessageId: input.listInput?.afterMessageId,
+      limit
+    });
+    return { items, hasMore: items.length >= limit };
   }
 
   async getAsOrigin(input: {
     origin: string;
     getInput: AppMsgGetInput;
   }): Promise<AppMsgMessage | null> {
-    const handle = this.boundHandle;
     const owner = this.currentBoundOwner;
-    if (!handle || !owner) {
+    if (!owner) {
       return null;
     }
-    return this.getMessageImpl(
-      handle,
-      owner,
-      { kind: "origin", id: input.origin },
-      input.getInput
-    );
+    return await this.getLocalMessageForScope({
+      scope: { ownerPublicKeyHex: owner, kind: "origin", id: input.origin },
+      messageId: input.getInput.messageId
+    });
   }
 
   /* ====== keyspace / provider 切换适配 ====== */

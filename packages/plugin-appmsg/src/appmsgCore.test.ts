@@ -851,9 +851,11 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     expect(sent.record.recipientEndpointId).toBe(KEYMASTER_MESSAGE_APP_ID);
     expect(sent.record.envelope.signatureBytes.length).toBe(64);
     expect(sent.record.envelope.envelopeBytes.length).toBeGreaterThan(0);
+    const listed = await svc.listMessages({ limit: 10 });
+    expect(listed.items.map((item) => item.messageId)).toContain("m1");
   });
 
-  it("listMessages opens sealed records and returns public AppMsgMessage", async () => {
+  it("listMessages reads scoped local db truth", async () => {
     const ctx = makeConnectedCore();
     await ctx.core.connectForOwner(OWNER);
     const reg = ctx.core.endpointRegistry();
@@ -861,20 +863,32 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
       kind: "plugin",
       id: KEYMASTER_MESSAGE_APP_ID
     });
-    const r = await svc.listMessages({ limit: 10 });
-    expect(r.items.length).toBe(1);
-    expect(r.items[0]?.messageId).toBe("m1");
-    expect(r.items[0]?.body).toBe("hello");
-    // typed input 已带 owner + scopeEndpoint。
-    const lastList = ctx.listCalls[ctx.listCalls.length - 1] as {
-      ownerPublicKeyHex: string;
-      scopeEndpoint: { kind: "plugin"; id: string };
-    };
-    expect(lastList.ownerPublicKeyHex).toBe(OWNER);
-    expect(lastList.scopeEndpoint).toEqual({
-      kind: "plugin",
-      id: KEYMASTER_MESSAGE_APP_ID
+    const localOps = (ctx.core as unknown as {
+      localOps: {
+        putMessage(providerId: string, message: AppMsgMessage): Promise<void>;
+      } | null;
+      currentProviderId: string | null;
+    }).localOps;
+    const providerId = (ctx.core as unknown as { currentProviderId: string | null }).currentProviderId;
+    expect(localOps).not.toBeNull();
+    expect(providerId).toBe("hubmsg");
+    await localOps!.putMessage(providerId!, {
+      messageId: "local-1",
+      clientMessageId: "c-local-1",
+      senderPublicKeyHex: OWNER_B,
+      senderAppId: KEYMASTER_MESSAGE_APP_ID,
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+      contentType: "text/plain",
+      body: "hello local",
+      createdAtMs: 2,
+      insertedAtMs: 2
     });
+    const r = await svc.listMessages({ limit: 10 });
+    expect(r.items.some((item) => item.messageId === "local-1")).toBe(true);
+    const localItem = r.items.find((item) => item.messageId === "local-1");
+    expect(localItem?.body).toBe("hello local");
+    expect(ctx.listCalls.length).toBe(0);
   });
 
   it("subscribe opens incoming sealed record and dispatches public message", async () => {
@@ -902,10 +916,53 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     });
     const handler = ctx.subscribeCalls[0]!;
     handler(pushed);
-    expect(received.length).toBe(1);
+    await vi.waitFor(() => {
+      expect(received.length).toBe(1);
+    });
     expect(received[0]?.messageId).toBe("push-1");
     expect(received[0]?.body).toBe("pushed");
+    const listed = await svc.listMessages({ limit: 10 });
+    expect(listed.items.map((item) => item.messageId)).toContain("push-1");
     off();
+  });
+
+  it("listAsOrigin/getAsOrigin read local scoped db instead of remote provider list/get", async () => {
+    const ctx = makeConnectedCore();
+    await ctx.core.connectForOwner(OWNER);
+    const localOps = (ctx.core as unknown as {
+      localOps: {
+        putMessage(providerId: string, message: AppMsgMessage): Promise<void>;
+      } | null;
+      currentProviderId: string | null;
+    }).localOps;
+    const providerId = (ctx.core as unknown as { currentProviderId: string | null }).currentProviderId;
+    expect(localOps).not.toBeNull();
+    expect(providerId).toBe("hubmsg");
+    await localOps!.putMessage(providerId!, {
+      messageId: "origin-local-1",
+      clientMessageId: "c-origin-local-1",
+      senderPublicKeyHex: OWNER_B,
+      senderOrigin: "https://example.test:443",
+      recipientPublicKeyHex: OWNER,
+      recipientOrigin: "https://example.test:443",
+      contentType: "text/plain",
+      body: "hello origin local",
+      createdAtMs: 3,
+      insertedAtMs: 3
+    });
+
+    const listed = await ctx.core.listAsOrigin({
+      origin: "https://example.test:443",
+      listInput: { limit: 10 }
+    });
+    expect(listed.items.some((item: AppMsgMessage) => item.messageId === "origin-local-1")).toBe(true);
+
+    const got = await ctx.core.getAsOrigin({
+      origin: "https://example.test:443",
+      getInput: { messageId: "origin-local-1" }
+    });
+    expect(got?.body).toBe("hello origin local");
+    expect(ctx.listCalls.length).toBe(0);
   });
 });
 
