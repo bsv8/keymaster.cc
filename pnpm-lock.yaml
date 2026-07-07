@@ -90,6 +90,9 @@ importers:
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:../../packages/plugin-background
+      '@keymaster/plugin-broadcast':
+        specifier: '*'
+        version: link:../../packages/plugin-broadcast
       '@keymaster/plugin-collectible-1satordinals':
         specifier: '*'
         version: link:../../packages/plugin-collectible-1satordinals
@@ -105,6 +108,9 @@ importers:
       '@keymaster/plugin-home':
         specifier: '*'
         version: link:../../packages/plugin-home
+      '@keymaster/plugin-hubcast':
+        specifier: '*'
+        version: link:../../packages/plugin-hubcast
       '@keymaster/plugin-hubmsg':
         specifier: '*'
         version: link:../../packages/plugin-hubmsg
@@ -232,6 +238,18 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
 
+  packages/plugin-broadcast:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
+      '@noble/hashes':
+        specifier: ^2.2.0
+        version: 2.2.0
+
   packages/plugin-collectible-1satordinals:
     dependencies:
       '@keymaster/contracts':
@@ -291,6 +309,12 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+
+  packages/plugin-hubcast:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
 
   packages/plugin-hubmsg:
     dependencies:

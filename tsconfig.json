@@ -25,6 +25,8 @@
     { "path": "./packages/plugin-token-stas" },
     { "path": "./packages/plugin-collectible-1satordinals" },
     { "path": "./packages/plugin-appmsg" },
+    { "path": "./packages/plugin-broadcast" },
+    { "path": "./packages/plugin-hubcast" },
     { "path": "./packages/plugin-apps" },
     { "path": "./packages/plugin-message" }
   ]

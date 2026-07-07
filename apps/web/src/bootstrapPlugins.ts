@@ -20,6 +20,8 @@ import type { PluginManifest } from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
 import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
+import { broadcastPlatformPlugin } from "@keymaster/plugin-broadcast";
+import { hubcastPlatformPlugin } from "@keymaster/plugin-hubcast";
 import { hubmsgPlatformPlugin } from "@keymaster/plugin-hubmsg";
 import { messagePlatformPlugin } from "@keymaster/plugin-message";
 import { webrtcPlugin } from "@keymaster/plugin-webrtc";
@@ -119,8 +121,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序
   // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //
-  // 关键顺序（施工单 2026-07-04 001 硬切换）：
+  // 关键顺序（施工单 2026-07-04 001 硬切换 + 2026-07-06 001 硬切换）：
   //   vault
+  //   broadcast（先装，把 `broadcast.core` + `broadcast.provider.registry`
+  //     capability 挂到 capability bus；hubcast 之后 register 自身）
+  //   hubcast（在 broadcast 之后 register 自身；plugin-hubcast 依赖
+  //     `broadcast.provider.registry`，**不**依赖 `appmsg.core` / 任何
+  //     消息系统概念）
   //   appmsg-platform（先装，把 `message.provider.registry` capability
   //     挂到 capability bus；hubmsg 之后 register 自身）
   //   hubmsg-platform（在 appmsg 之后 register 自身；plugin-hubmsg
@@ -133,6 +140,11 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   //   ...
   //
   // 设计缘由：
+  //   - 硬切换 2026-07-06 001：plugin-broadcast / plugin-hubcast 与
+  //     plugin-appmsg / plugin-hubmsg **互不依赖**；两套系统的 capability
+  //     真值独立，**不**互相 import；
+  //   - 硬切换 2026-07-06 001：plugin-hubcast **必须**在 plugin-broadcast
+  //     之后装载——hubcast 依赖 `broadcast.provider.registry`；
   //   - 硬切换 2026-07-04 001：plugin-hubmsg **不**再依赖 `appmsg.core`；
   //     它依赖 `message.provider.registry`，由 plugin-appmsg 在 setup
   //     时 provide。plugin-hubmsg 装载顺序**必须**在 plugin-appmsg 之
@@ -146,6 +158,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   //     endpoint service，路径与 subscribe 同属"系统特殊方特权"）。
   const ordered = [
     vaultPlugin,
+    broadcastPlatformPlugin,
+    hubcastPlatformPlugin,
     appmsgPlatformPlugin,
     hubmsgPlatformPlugin,
     protocolPlugin,
