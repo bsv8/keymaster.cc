@@ -2,7 +2,7 @@
 // 会话详情页契约测试。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   ActiveKeyState,
   AppMsgMessage,
@@ -184,7 +184,85 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       expect(screen.getByText("detail body text")).toBeTruthy();
     });
     await waitFor(() => {
-      expect(screen.getAllByText(peer).length).toBeGreaterThan(0);
+      expect(screen.getAllByText("02aaaaaa...aaaaaaaa").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("renders newest messages closer to the composer", async () => {
+    const peer = "02eeee".padEnd(66, "e");
+    const older: AppMsgMessage = {
+      messageId: "id-detail-old",
+      clientMessageId: "c-detail-old",
+      senderPublicKeyHex: peer,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: "older message",
+      createdAtMs: 1000,
+      insertedAtMs: 1000
+    };
+    const newer: AppMsgMessage = {
+      messageId: "id-detail-new",
+      clientMessageId: "c-detail-new",
+      senderPublicKeyHex: OWNER,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: peer,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: "newer message",
+      createdAtMs: 2000,
+      insertedAtMs: 2000
+    };
+    const service = makeFakeService({ messages: [older, newer] });
+    const host = makeFakeHost(service);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("older message")).toBeTruthy();
+      expect(screen.getByText("newer message")).toBeTruthy();
+    });
+    const bodies = screen.getAllByText(/message$/);
+    expect(bodies[0]?.textContent).toBe("newer message");
+    expect(bodies[1]?.textContent).toBe("older message");
+  });
+
+  it("shows 20 messages by default and loads 20 more on demand", async () => {
+    const peer = "02ffff".padEnd(66, "f");
+    const messages: AppMsgMessage[] = Array.from({ length: 25 }, (_, index) => ({
+      messageId: `id-${index}`,
+      clientMessageId: `c-${index}`,
+      senderPublicKeyHex: index % 2 === 0 ? OWNER : peer,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: index % 2 === 0 ? peer : OWNER,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: `message-${index}`,
+      createdAtMs: index + 1,
+      insertedAtMs: index + 1
+    }));
+    const service = makeFakeService({ messages });
+    const host = makeFakeHost(service);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message-24")).toBeTruthy();
+    });
+    expect(screen.getByText("message-5")).toBeTruthy();
+    expect(screen.queryByText("message-4")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "message.page.detail.loadMore" }));
+    await waitFor(() => {
+      expect(screen.getByText("message-4")).toBeTruthy();
     });
   });
 

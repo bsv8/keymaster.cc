@@ -186,6 +186,26 @@
   gap: 12px;
 }
 
+.km-message-detail__pager {
+  display: flex;
+  justify-content: flex-start;
+}
+
+.km-message-detail__load-more {
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.km-message-detail__load-more:hover {
+  filter: brightness(1.1);
+}
+
 .km-message-detail__send {
   font: inherit;
   font-size: 13px;

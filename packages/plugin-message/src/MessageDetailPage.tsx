@@ -3,8 +3,9 @@
 //
 // 设计缘由：
 //   - 路由参数是对端 publicKeyHex，不再是单条 messageId；
-//   - 页面展示这个对端的全部会话记录，按入库时间正序；
+//   - 页面展示这个对端的全部会话记录，按入库时间倒序；
 //   - 发送入口收口到详情页；
+//   - 默认只展示最新 20 条，避免单页堆太多消息；
 //   - 联系人名称优先来自 contacts.service，缺失时回退短公钥。
 
 import { useEffect, useMemo, useState } from "react";
@@ -16,6 +17,7 @@ import { listConversationMessages, shortPublicKeyHex } from "./messageConversati
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
 const MESSAGE_READ_WINDOW = 10_000;
+const DEFAULT_VISIBLE_MESSAGE_COUNT = 20;
 
 export function MessageDetailPage(): JSX.Element {
   const i18n = useI18n();
@@ -29,6 +31,7 @@ export function MessageDetailPage(): JSX.Element {
   const [contact, setContact] = useState<Contact | null>(null);
   const [sendBody, setSendBody] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE_MESSAGE_COUNT);
 
   useEffect(() => {
     return keyspace.onActiveChange((state) => {
@@ -88,6 +91,17 @@ export function MessageDetailPage(): JSX.Element {
     if (!ownerPublicKeyHex || !peerPublicKeyHex) return [];
     return listConversationMessages(messages, ownerPublicKeyHex, peerPublicKeyHex);
   }, [messages, ownerPublicKeyHex, peerPublicKeyHex]);
+
+  useEffect(() => {
+    setVisibleCount(DEFAULT_VISIBLE_MESSAGE_COUNT);
+  }, [ownerPublicKeyHex, peerPublicKeyHex]);
+
+  const visibleMessages = useMemo(
+    () => conversationMessages.slice(0, visibleCount),
+    [conversationMessages, visibleCount]
+  );
+
+  const hasMoreMessages = conversationMessages.length > visibleMessages.length;
 
   if (!service) {
     return (
@@ -158,7 +172,6 @@ export function MessageDetailPage(): JSX.Element {
         </button>
         <div className="km-message-detail__headline">
           <h1 className="km-message-detail__title">{title}</h1>
-          <code className="km-message-detail__key">{peerPublicKeyHex}</code>
         </div>
       </header>
 
@@ -183,28 +196,39 @@ export function MessageDetailPage(): JSX.Element {
           description={i18n.t("message.page.detail.empty.desc", { defaultValue: "Send a message below to start the thread." })}
         />
       ) : (
-        <ul className="km-message-detail__thread">
-          {conversationMessages.map((message) => {
-            const fromMe = message.senderPublicKeyHex === ownerPublicKeyHex;
-            return (
-              <li key={message.messageId} className={`km-message-detail__message ${fromMe ? "is-me" : "is-peer"}`}>
-                <div className="km-message-detail__bubble">
-                  <div className="km-message-detail__message-meta">
-                    <span>{fromMe ? i18n.t("message.page.detail.from.me", { defaultValue: "Me" }) : title}</span>
-                    <span>{formatTime(message.insertedAtMs)}</span>
+        <>
+          {hasMoreMessages ? (
+            <div className="km-message-detail__pager">
+              <button
+                className="km-message-detail__load-more"
+                type="button"
+                onClick={() => {
+                  setVisibleCount((current) => current + DEFAULT_VISIBLE_MESSAGE_COUNT);
+                }}
+              >
+                {i18n.t("message.page.detail.loadMore", { defaultValue: "Load 20 older messages" })}
+              </button>
+            </div>
+          ) : null}
+          <ul className="km-message-detail__thread">
+            {visibleMessages.map((message) => {
+              const fromMe = message.senderPublicKeyHex === ownerPublicKeyHex;
+              return (
+                <li key={message.messageId} className={`km-message-detail__message ${fromMe ? "is-me" : "is-peer"}`}>
+                  <div className="km-message-detail__bubble">
+                    <div className="km-message-detail__message-meta">
+                      <span>{fromMe ? i18n.t("message.page.detail.from.me", { defaultValue: "Me" }) : title}</span>
+                      <span>{formatTime(message.insertedAtMs)}</span>
+                    </div>
+                    <pre className="km-message-detail__body">{message.body}</pre>
                   </div>
-                  <pre className="km-message-detail__body">{message.body}</pre>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
 
-      <p className="km-message-detail__full-key">
-        <strong>publicKeyHex: </strong>
-        <code>{peerPublicKeyHex}</code>
-      </p>
     </section>
   );
 }

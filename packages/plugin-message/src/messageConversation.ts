@@ -55,7 +55,7 @@ export function listConversationMessages(
   return messages
     .filter((message) => getConversationPeerPublicKeyHex(message, ownerPublicKeyHex) === peerPublicKeyHex)
     .slice()
-    .sort((a, b) => a.insertedAtMs - b.insertedAtMs);
+    .sort((a, b) => b.insertedAtMs - a.insertedAtMs);
 }
 
 export function shortPublicKeyHex(publicKeyHex: string): string {
