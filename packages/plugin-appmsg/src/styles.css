@@ -79,8 +79,16 @@
   color: var(--primary);
 }
 
+.appmsg-system-page__sync-msg--loading {
+  color: var(--text-dim);
+}
+
 .appmsg-system-page__sync-msg--fail {
   color: var(--danger);
+}
+
+.appmsg-system-page__sync-msg--partial {
+  color: #d6a417;
 }
 
 .appmsg-system-page__button {

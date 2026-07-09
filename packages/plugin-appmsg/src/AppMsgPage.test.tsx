@@ -67,6 +67,20 @@ function msg(overrides: Partial<AppMsgMessage>): AppMsgMessage {
   };
 }
 
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+  reject: (reason?: unknown) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 interface FakeCoreHandle {
   host: PluginHost;
   snapshot: AppMsgLocalDbSnapshot;
@@ -393,6 +407,179 @@ describe("AppMsgPage in PluginHostProvider", () => {
       expect(nodes.length).toBeGreaterThan(0);
     });
     expect(triggerSyncImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("online query shows validation error for invalid hex and clears old error on success", async () => {
+    const gate = deferred<AppMsgOnlineResult>();
+    const checkOnlineImpl = vi.fn(async () => gate.promise);
+    const h = makeFakeCore({ checkOnlineImpl });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    const input = screen.getByPlaceholderText("appmsg.page.online.placeholder");
+    const button = screen.getByText("appmsg.page.online.check");
+
+    fireEvent.change(input, { target: { value: "abc" } });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.online.fail.invalidHex")).toBeTruthy();
+    });
+    expect(checkOnlineImpl).not.toHaveBeenCalled();
+
+    fireEvent.change(input, { target: { value: OWNER } });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(button.hasAttribute("disabled")).toBe(true);
+      expect(screen.getByText("appmsg.page.online.loading")).toBeTruthy();
+    });
+
+    gate.resolve({ [OWNER]: "offline" });
+
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.online.offline")).toBeTruthy();
+    });
+    expect(document.querySelector("[data-appmsg-online-result=\"offline\"]")).toBeTruthy();
+    expect(document.querySelector("[data-appmsg-online-phase=\"success\"]")).toBeTruthy();
+    expect(screen.queryByText("appmsg.page.online.fail.invalidHex")).toBeNull();
+    expect(button.hasAttribute("disabled")).toBe(false);
+    expect(checkOnlineImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("online query shows explicit failure when appmsg is not ready", async () => {
+    const checkOnlineImpl = vi.fn(async () => ({}));
+    const h = makeFakeCore({
+      activeProvider: {
+        providerId: null,
+        displayName: null,
+        isHealthy: false,
+        lastError: null
+      },
+      snapshot: {
+        state: "closed",
+        ownerPublicKeyHex: null,
+        lastInsertedAtMs: 1,
+        lastError: null,
+        nextReconnectAtMs: null
+      },
+      checkOnlineImpl
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    const input = screen.getByPlaceholderText("appmsg.page.online.placeholder");
+    const button = screen.getByText("appmsg.page.online.check");
+
+    fireEvent.change(input, { target: { value: OWNER } });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      const feedback = document.querySelector(
+        "[data-appmsg-online-feedback][data-appmsg-online-phase=\"error\"]"
+      );
+      expect(feedback).toBeTruthy();
+      expect((feedback?.textContent ?? "")).toContain("appmsg.page.online.fail.notReady");
+    });
+    expect(screen.getByText("appmsg.page.provider.none")).toBeTruthy();
+    expect(checkOnlineImpl).not.toHaveBeenCalled();
+  });
+
+  it("online query shows unknown as visible partial feedback", async () => {
+    const checkOnlineImpl = vi.fn(async () => ({ [OWNER]: "unknown" as const }));
+    const h = makeFakeCore({ checkOnlineImpl });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    const input = screen.getByPlaceholderText("appmsg.page.online.placeholder");
+    const button = screen.getByText("appmsg.page.online.check");
+
+    fireEvent.change(input, { target: { value: OWNER } });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.online.unknown")).toBeTruthy();
+    });
+    expect(document.querySelector("[data-appmsg-online-feedback][data-appmsg-online-phase=\"success\"]")).toBeTruthy();
+    expect(document.querySelector("[data-appmsg-online-result=\"unknown\"]")).toBeTruthy();
+    expect(checkOnlineImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("online query shows success feedback for explicit online result", async () => {
+    const checkOnlineImpl = vi.fn(async () => ({ [OWNER]: "online" as const }));
+    const h = makeFakeCore({ checkOnlineImpl });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    const input = screen.getByPlaceholderText("appmsg.page.online.placeholder");
+    const button = screen.getByText("appmsg.page.online.check");
+
+    fireEvent.change(input, { target: { value: OWNER } });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.online.online")).toBeTruthy();
+    });
+    expect(document.querySelector("[data-appmsg-online-feedback][data-appmsg-online-phase=\"success\"]")).toBeTruthy();
+    expect(document.querySelector("[data-appmsg-online-result=\"online\"]")).toBeTruthy();
+    expect(checkOnlineImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("online query shows failure context when core degrades provider error to unknown", async () => {
+    const h = makeFakeCore({
+      checkOnlineImpl: async (_input: string[]) => {
+        h.snapshot.lastError = "provider connection lost";
+        return { [OWNER]: "unknown" as const };
+      }
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("appmsg.page.title")).toBeTruthy();
+    });
+    const input = screen.getByPlaceholderText("appmsg.page.online.placeholder");
+    const button = screen.getByText("appmsg.page.online.check");
+
+    fireEvent.change(input, { target: { value: OWNER } });
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      const feedback = document.querySelector(
+        "[data-appmsg-online-feedback][data-appmsg-online-phase=\"error\"]"
+      );
+      expect(feedback).toBeTruthy();
+      expect((feedback?.textContent ?? "")).toContain("appmsg.page.online.fail.queryFailed");
+      expect((feedback?.textContent ?? "")).toContain("provider connection lost");
+    });
+    expect(document.querySelector("[data-appmsg-online-result=\"unknown\"]")).toBeNull();
   });
 });
 

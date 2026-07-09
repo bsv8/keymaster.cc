@@ -102,6 +102,11 @@ const appmsgResources: I18nPluginResources = {
       "appmsg.page.online.label": "Online check",
       "appmsg.page.online.placeholder": "publicKeyHex (66 hex chars)",
       "appmsg.page.online.check": "Check online",
+      "appmsg.page.online.loading": "Checking...",
+      "appmsg.page.online.fail.invalidHex": "Invalid publicKeyHex. Expected 66 hex characters.",
+      "appmsg.page.online.fail.notReady": "AppMsg is not ready for online check.",
+      "appmsg.page.online.fail.ownerMissing": "Owner public key is not available.",
+      "appmsg.page.online.fail.queryFailed": "Online check failed.",
       "appmsg.page.online.online": "online",
       "appmsg.page.online.offline": "offline",
       "appmsg.page.online.unknown": "unknown"
@@ -156,6 +161,11 @@ const appmsgResources: I18nPluginResources = {
       "appmsg.page.online.label": "在线查询",
       "appmsg.page.online.placeholder": "publicKeyHex (66 个 hex)",
       "appmsg.page.online.check": "查询在线",
+      "appmsg.page.online.loading": "查询中...",
+      "appmsg.page.online.fail.invalidHex": "publicKeyHex 非法，必须是 66 位 hex。",
+      "appmsg.page.online.fail.notReady": "AppMsg 当前未就绪，无法查询在线。",
+      "appmsg.page.online.fail.ownerMissing": "当前 owner 公钥不可用。",
+      "appmsg.page.online.fail.queryFailed": "在线查询失败。",
       "appmsg.page.online.online": "在线",
       "appmsg.page.online.offline": "离线",
       "appmsg.page.online.unknown": "未知"

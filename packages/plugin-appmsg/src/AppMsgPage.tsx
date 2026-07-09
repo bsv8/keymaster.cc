@@ -27,11 +27,17 @@ import type {
   AppMsgCore,
   AppMsgLocalDbSnapshot,
   AppMsgMessage,
-  AppMsgOnlineResult,
+  AppMsgOnlineStatus,
   AppMsgTargetSyncState
 } from "@keymaster/contracts";
 import { APPMESSAGE_CORE_CAPABILITY } from "@keymaster/contracts";
 import { createAppMsgService } from "./appmsgService.js";
+
+type AppMsgOnlineQueryState =
+  | { phase: "idle" }
+  | { phase: "loading" }
+  | { phase: "error"; text: string }
+  | { phase: "success"; key: string; status: AppMsgOnlineStatus };
 
 export function AppMsgPage(): React.ReactElement {
   const i18n = useI18n();
@@ -59,7 +65,7 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   const [search, setSearch] = useState("");
   const [endpointFilter, setEndpointFilter] = useState<string>("");
   const [onlineHex, setOnlineHex] = useState("");
-  const [onlineResult, setOnlineResult] = useState<AppMsgOnlineResult>({});
+  const [onlineQuery, setOnlineQuery] = useState<AppMsgOnlineQueryState>({ phase: "idle" });
   const [syncMsg, setSyncMsg] = useState<{ kind: "ok" | "fail"; text: string } | null>(null);
   const [providerMsg, setProviderMsg] = useState<{ kind: "ok" | "fail"; text: string } | null>(
     null
@@ -158,6 +164,96 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   }, [messages]);
 
   const providers = service.listProviders();
+
+  const onlineFeedback = useMemo(() => {
+    if (onlineQuery.phase === "idle") return null;
+    if (onlineQuery.phase === "loading") {
+      return {
+        kind: "loading" as const,
+        text: i18n.t("appmsg.page.online.loading")
+      };
+    }
+    if (onlineQuery.phase === "error") {
+      return {
+        kind: "fail" as const,
+        text: onlineQuery.text
+      };
+    }
+    return {
+      kind: onlineQuery.status === "unknown" ? ("partial" as const) : ("ok" as const),
+      text:
+        onlineQuery.status === "online"
+          ? i18n.t("appmsg.page.online.online")
+          : onlineQuery.status === "offline"
+            ? i18n.t("appmsg.page.online.offline")
+            : i18n.t("appmsg.page.online.unknown")
+    };
+  }, [i18n, onlineQuery]);
+
+  const runOnlineCheck = useCallback(async () => {
+    const hex = onlineHex.trim();
+    if (!/^[0-9a-f]{66}$/i.test(hex)) {
+      setOnlineQuery({
+        phase: "error",
+        text: i18n.t("appmsg.page.online.fail.invalidHex")
+      });
+      return;
+    }
+    if (activeProvider.providerId === null) {
+      setOnlineQuery({
+        phase: "error",
+        text: `${i18n.t("appmsg.page.online.fail.notReady")}: ${i18n.t("appmsg.page.provider.none")}`
+      });
+      return;
+    }
+    if (snapshot.state !== "open") {
+      setOnlineQuery({
+        phase: "error",
+        text: `${i18n.t("appmsg.page.online.fail.notReady")}: ${i18n.t(
+          `appmsg.page.connection.state.${snapshot.state}`
+        )}`
+      });
+      return;
+    }
+    if (!snapshot.ownerPublicKeyHex) {
+      setOnlineQuery({
+        phase: "error",
+        text: `${i18n.t("appmsg.page.online.fail.notReady")}: ${i18n.t(
+          "appmsg.page.online.fail.ownerMissing"
+        )}`
+      });
+      return;
+    }
+    const beforeSnapshot = service.inspectLocalDb();
+    setOnlineQuery({ phase: "loading" });
+    try {
+      const out = await service.checkOnline([hex]);
+      const status: AppMsgOnlineStatus = out[hex] ?? "unknown";
+      const afterSnapshot = service.inspectLocalDb();
+      if (status === "unknown" && afterSnapshot.lastError) {
+        const detail =
+          afterSnapshot.lastError !== beforeSnapshot.lastError || !beforeSnapshot.lastError
+            ? afterSnapshot.lastError
+            : i18n.t("appmsg.page.online.fail.queryFailed");
+        setOnlineQuery({
+          phase: "error",
+          text: `${i18n.t("appmsg.page.online.fail.queryFailed")}: ${detail}`
+        });
+        return;
+      }
+      setOnlineQuery({
+        phase: "success",
+        key: hex,
+        status
+      });
+    } catch (err: unknown) {
+      const text = err instanceof Error ? err.message : String(err);
+      setOnlineQuery({
+        phase: "error",
+        text: `${i18n.t("appmsg.page.online.fail.queryFailed")}: ${text}`
+      });
+    }
+  }, [activeProvider.providerId, i18n, onlineHex, service, snapshot.ownerPublicKeyHex, snapshot.state]);
 
   return (
     <section className="appmsg-system-page" data-appmsg-page="ok">
@@ -470,28 +566,37 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
           <button
             type="button"
             className="appmsg-system-page__button"
-            onClick={async () => {
-              const hex = onlineHex.trim();
-              if (!/^[0-9a-f]{66}$/i.test(hex)) return;
-              const out = await service.checkOnline([hex]);
-              setOnlineResult(out);
+            disabled={onlineQuery.phase === "loading"}
+            aria-busy={onlineQuery.phase === "loading"}
+            onClick={() => {
+              void runOnlineCheck();
             }}
           >
             {i18n.t("appmsg.page.online.check")}
           </button>
         </div>
-        {Object.keys(onlineResult).length > 0 ? (
+        {onlineFeedback ? (
+          <span
+            className={`appmsg-system-page__sync-msg appmsg-system-page__sync-msg--${onlineFeedback.kind}`}
+            data-appmsg-online-feedback
+            data-appmsg-online-phase={onlineQuery.phase}
+            data-appmsg-online-key={
+              onlineQuery.phase === "success" ? onlineQuery.key : undefined
+            }
+          >
+            {onlineFeedback.text}
+          </span>
+        ) : null}
+        {onlineQuery.phase === "success" ? (
           <ul className="appmsg-system-page__online-list">
-            {Object.entries(onlineResult).map(([k, v]) => (
-              <li key={k}>
-                <code>{k.slice(0, 8)}…</code>:{" "}
-                {v === "online"
-                  ? i18n.t("appmsg.page.online.online")
-                  : v === "offline"
-                    ? i18n.t("appmsg.page.online.offline")
-                    : i18n.t("appmsg.page.online.unknown")}
-              </li>
-            ))}
+            <li key={onlineQuery.key} data-appmsg-online-result={onlineQuery.status}>
+              <code>{onlineQuery.key.slice(0, 8)}…</code>:{" "}
+              {onlineQuery.status === "online"
+                ? i18n.t("appmsg.page.online.online")
+                : onlineQuery.status === "offline"
+                  ? i18n.t("appmsg.page.online.offline")
+                  : i18n.t("appmsg.page.online.unknown")}
+            </li>
           </ul>
         ) : null}
       </div>

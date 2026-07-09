@@ -50,7 +50,7 @@ export interface AppMsgService {
    * 能进入"失败反馈"分支；service 不再吞错。
    */
   triggerSync(): Promise<void>;
-  /** 批量查询在线状态。失败回退 `unknown`。 */
+  /** 批量查询在线状态。失败语义交给上层处理，不在此处额外吞错。 */
   checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult>;
 }
 
@@ -58,8 +58,8 @@ export interface AppMsgService {
  * 构造 AppMsg 管理页 service。
  *
  * 失败语义：
- *   - `listTargetSyncStates` / `checkOnline` 失败时静默降级（空态 /
- *     `unknown`），管理页不展示失败原因；
+ *   - `listTargetSyncStates` 失败时静默降级为空态；
+ *   - `checkOnline` 只做薄转发，不在这里额外吞错；
  *   - `triggerSync` **透出**错误——手动同步是用户主动点击的动作，失败
  *     必须能被 UI 看见，否则用户点完毫无反馈（修复 issue 003）；
  *   - `setActiveProvider` 透出错误——provider 不存在 / 切换失败必须展示。
@@ -85,14 +85,6 @@ export function createAppMsgService(core: AppMsgCore): AppMsgService {
       }
     },
     triggerSync: () => core.triggerSync(),
-    checkOnline: async (input) => {
-      try {
-        return await core.checkOnline(input);
-      } catch {
-        const out: AppMsgOnlineResult = {};
-        for (const h of input) out[h] = "unknown";
-        return out;
-      }
-    }
+    checkOnline: (input) => core.checkOnline(input)
   };
 }
