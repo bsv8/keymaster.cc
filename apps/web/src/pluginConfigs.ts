@@ -11,11 +11,12 @@
  * PriceCast publisher 公钥 hex 来源：
  *
  * 优先级：
- *   1) `globalThis.__PRICECAST_PUBLISHER_PUBKEY__`（启动脚本注入）；
- *   2) 默认空串 → plugin 进入 `not_configured`。
+ *   1) `globalThis.__PRICECAST_PUBLISHER_PUBKEY__`（启动脚本注入 seed）；
+ *   2) 默认空串 → 仅作为首次 seed 候选；若本地已有
+ *      `localStorage["bsv-price.settings"]`，则以本地为准。
  *
  * 注：本文件里的 `__PRICECAST_PUBLISHER_PUBKEY__` 是**装配层**读
- * （用于桥接到 `manifest.config`），不是 plugin 自己的入口。
+ * （用于桥接到 `manifest.config` seed），不是 plugin 自己的入口。
  */
 function readPublisherPublicKeyHex(): string {
   if (
@@ -30,8 +31,8 @@ function readPublisherPublicKeyHex(): string {
 }
 
 /**
- * 对 `bsv-price` plugin 的强类型配置注入；这条真值会出现在
- * `bsvPricePlugin.config`，由 plugin 自己从 `ctx.config` 读。
+ * 对 `bsv-price` plugin 的强类型配置注入；这里只是首次 seed，
+ * 运行时真值会由 `localStorage["bsv-price.settings"]` 接管。
  */
 export const bsvPriceConfig = {
   pricePublisherPublicKeyHex: readPublisherPublicKeyHex()

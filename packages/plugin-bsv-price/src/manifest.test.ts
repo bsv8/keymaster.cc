@@ -6,7 +6,7 @@
 //   - 显式配置时，插件只读取 `ctx.config`，**不**依赖全局隐式注入；
 //   - 这些断言锁住 manifest.config → ctx.config 这条显式配置链路。
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type {
   BroadcastCore,
   BroadcastMessage,
@@ -89,12 +89,19 @@ class FakeBroadcastCore implements BroadcastCore {
 function makeContext(core: BroadcastCore, config: Record<string, unknown>): PluginContext & {
   provided: Map<string, unknown>;
   registries: Record<string, FakeRegistry>;
+  settingsCalls: unknown[];
 } {
   const provided = new Map<string, unknown>();
+  const settingsCalls: unknown[] = [];
   const registries: Record<string, FakeRegistry> = {
     "route.registry": { register: () => undefined },
     "menu.registry": { register: () => undefined },
-    "breadcrumb.registry": { register: () => undefined }
+    "breadcrumb.registry": { register: () => undefined },
+    "settings.registry": {
+      register: (input: unknown) => {
+        settingsCalls.push(input);
+      }
+    }
   };
   const logger: {
     debug: () => void;
@@ -112,6 +119,7 @@ function makeContext(core: BroadcastCore, config: Record<string, unknown>): Plug
   return {
     provided,
     registries,
+    settingsCalls,
     config,
     provide(key: string, value: unknown) {
       provided.set(key, value);
@@ -134,6 +142,12 @@ function makeContext(core: BroadcastCore, config: Record<string, unknown>): Plug
     logger: logger as never
   };
 }
+
+beforeEach(() => {
+  if (typeof localStorage !== "undefined") {
+    localStorage.clear();
+  }
+});
 
 afterEach(() => {
   delete (globalThis as { __PRICECAST_PUBLISHER_PUBKEY__?: string }).__PRICECAST_PUBLISHER_PUBKEY__;
@@ -177,6 +191,19 @@ describe("plugin-bsv-price manifest config boundary", () => {
     expect(service?.snapshot()).toMatchObject({
       channelId: buildPriceChannelId(publisherHex),
       configured: true
+    });
+  });
+
+  it("registers /settings/bsv-price as a settings detail page", () => {
+    const core = new FakeBroadcastCore();
+    const ctx = makeContext(core, {});
+
+    bsvPricePlugin.setup(ctx);
+
+    expect(ctx.settingsCalls).toHaveLength(1);
+    expect(ctx.settingsCalls[0]).toMatchObject({
+      id: "bsv-price.settings",
+      path: "/settings/bsv-price"
     });
   });
 });

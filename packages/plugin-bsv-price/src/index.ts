@@ -13,6 +13,16 @@ export {
   type BsvPriceServiceStatus
 } from "./bsvPriceService.js";
 export {
+  BSV_PRICE_SETTINGS_STORAGE_KEY,
+  createLocalStorageBsvPriceSettingsStore,
+  normalizePublisherPublicKeyHex,
+  readBsvPriceGlobalConfig,
+  writeBsvPriceGlobalConfig,
+  type BsvPriceGlobalConfig,
+  type BsvPricePublicKeyCheck,
+  type BsvPriceSettingsStore
+} from "./bsvPriceSettings.js";
+export {
   decodePriceBody,
   type BsvPriceQuote,
   type BsvPriceSnapshot
@@ -20,7 +30,9 @@ export {
 export {
   PRICECAST_PROTOCOL_ID,
   PRICECAST_CHANNEL_SUFFIX,
+  BSV_PRICE_SETTINGS_PATH,
   BSV_PRICE_CONFIG_KEY,
   buildPriceChannelId
 } from "./constants.js";
 export { BsvPricePage } from "./BsvPricePage.js";
+export { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";

@@ -193,13 +193,13 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   ];
 
   // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 显式注入
-  // `pricePublisherPublicKeyHex` 配置；这条真值直接出现在
-  // `bsvPricePlugin.config`，由 plugin 自己从 `ctx.config` 读取。
+  // `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
+  // 默认值，运行时真值由 `localStorage["bsv-price.settings"]` 接管。
   //
   // 关键约束：
   //   - 装配层**不**自己改 plugin manifest；改为把已构造好的 `config`
   //     对象透传给 plugin；plugin 用 `ctx.config[BSV_PRICE_CONFIG_KEY]`
-  //     读；
+  //     读来决定首次 seed；
   //   - 配置来源集中：`pluginConfigs.ts`；
   //   - plugin 自己**不**走 `globalThis.__XXX__` 隐式注入路径。
   //

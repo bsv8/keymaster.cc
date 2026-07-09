@@ -6,10 +6,14 @@
 //     protocolId 的消息，其它一律丢弃；
 //   - 频道名是动态拼接：由 `pricePublisherPublicKeyHex` + 后缀
 //     `.pricecast.bsvusdt`；不允许写死完整常量化整个频道；
-//   - 后缀稳定不变；只在配置层暴露公钥真值。
+//   - 后缀稳定不变；只在配置层暴露公钥真值；
+//   - `pricePublisherPublicKeyHex` 的长期运行时真值现在由
+//     `localStorage["bsv-price.settings"]` 承担；`manifest.config` 只作首次 seed。
 
 export const PRICECAST_PROTOCOL_ID = "pricecast.bsv_price.v1";
 export const PRICECAST_CHANNEL_SUFFIX = ".pricecast.bsvusdt";
+/** BSV Price 设置页路径。 */
+export const BSV_PRICE_SETTINGS_PATH = "/settings/bsv-price";
 
 /** 由 publisher 公钥 hex 拼出订阅频道名。 */
 export function buildPriceChannelId(publisherPublicKeyHex: string): string {
@@ -26,6 +30,6 @@ export function buildPriceChannelId(publisherPublicKeyHex: string): string {
  * plugin-bsv-price 配置 key 名（用于 manifest 装配）。
  *
  * 持久化路径：装配时由运维人员注入 `pricePublisherPublicKeyHex`；
- * 本次**不**走运行时 UI 编辑器，**不**走任何自动发现路径。
+ * 这里只作为首次 seed，不再是长期运行时真值。
  */
 export const BSV_PRICE_CONFIG_KEY = "pricePublisherPublicKeyHex";

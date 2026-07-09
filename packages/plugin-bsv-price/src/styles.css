@@ -85,3 +85,76 @@
   color: var(--km-danger, #c33);
   font-size: 0.85rem;
 }
+
+.km-bsv-price-settings-page {
+  padding: 24px;
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.km-bsv-price-settings-page__title {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+.km-bsv-price-settings-page__card {
+  display: grid;
+  gap: 18px;
+  padding: 20px;
+  border: 1px solid var(--km-divider, #e2e2e2);
+  border-radius: 14px;
+  background: var(--km-bg-surface, #fff);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+}
+
+.km-bsv-price-settings-page__row {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.km-bsv-price-settings-page__label {
+  color: var(--km-text-muted, #777);
+  font-size: 0.92rem;
+  padding-top: 2px;
+}
+
+.km-bsv-price-settings-page__value {
+  word-break: break-all;
+}
+
+.km-bsv-price-settings-page__mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.86rem;
+}
+
+.km-bsv-price-settings-page__hint {
+  margin: 0;
+  color: var(--km-text-muted, #666);
+  font-size: 0.9rem;
+}
+
+.km-bsv-price-settings-page__message {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--km-bg-subtle, #f7f7f9);
+  color: var(--km-text, #222);
+}
+
+.km-bsv-price-settings-page__empty {
+  color: var(--km-text-muted, #999);
+  font-style: italic;
+}
+
+.km-bsv-price-settings-page--missing {
+  padding: 24px;
+}
+
+@media (max-width: 720px) {
+  .km-bsv-price-settings-page__row {
+    grid-template-columns: 1fr;
+  }
+}
