@@ -462,7 +462,7 @@ function renderTimelineItem(
     case "webrtc_call_record": {
       const record = item.record;
       return (
-        <div className="km-message-detail__system">
+        <div className={`km-message-detail__system ${record.direction === "outgoing" ? "is-me" : "is-peer"}`}>
           <div className="km-message-detail__message-meta">
             <span>
               {record.kind === "audio_call"

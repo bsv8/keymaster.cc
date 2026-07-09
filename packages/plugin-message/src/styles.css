@@ -333,8 +333,12 @@
   padding: 12px 14px;
 }
 
-.km-message-detail__system {
+.km-message-detail__system.is-me {
   margin-left: auto;
+  background: color-mix(in srgb, var(--primary, currentColor) 8%, var(--surface));
+}
+
+.km-message-detail__system.is-peer {
   margin-right: auto;
 }
 

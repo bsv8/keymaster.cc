@@ -440,6 +440,66 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     expect(incomingAttachment?.className.includes("is-peer")).toBe(true);
   });
 
+  it("aligns outgoing and incoming call records by direction", async () => {
+    const peer = "02acac".padEnd(66, "c");
+    const service = makeFakeService({ messages: [] });
+    const webrtc = makeFakeWebrtcService({
+      history: [
+        {
+          recordId: "call-outgoing",
+          ownerPublicKeyHex: OWNER,
+          peerPublicKeyHex: peer,
+          kind: "video_call",
+          direction: "outgoing",
+          status: "completed",
+          startedAtMs: 1000,
+          endedAtMs: 2000,
+          durationSec: 1,
+          itemType: "call"
+        },
+        {
+          recordId: "call-incoming",
+          ownerPublicKeyHex: OWNER,
+          peerPublicKeyHex: peer,
+          kind: "audio_call",
+          direction: "incoming",
+          status: "missed",
+          startedAtMs: 3000,
+          endedAtMs: 4000,
+          durationSec: 1,
+          itemType: "call"
+        }
+      ]
+    });
+    const host = makeFakeHost(service, webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getAllByText("message.page.detail.timeline.call.video").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("message.page.detail.timeline.call.audio").length).toBeGreaterThan(0);
+    });
+
+    const outgoingCall = screen.getAllByText((_, element) =>
+      element?.classList.contains("km-message-detail__system-line")
+        ? element.textContent?.includes("message.page.detail.timeline.call.outgoing") ?? false
+        : false
+    )[0]?.closest(".km-message-detail__system");
+    const incomingCall = screen.getAllByText((_, element) =>
+      element?.classList.contains("km-message-detail__system-line")
+        ? element.textContent?.includes("message.page.detail.timeline.call.incoming") ?? false
+        : false
+    )[0]?.closest(".km-message-detail__system");
+
+    expect(outgoingCall?.className.includes("is-me")).toBe(true);
+    expect(incomingCall?.className.includes("is-peer")).toBe(true);
+  });
+
   it("maps attachment failures to localized error keys", async () => {
     const peer = "02acac".padEnd(66, "a");
     const service = makeFakeService({ messages: [] });
