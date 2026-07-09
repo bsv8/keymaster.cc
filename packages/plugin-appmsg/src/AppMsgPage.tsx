@@ -30,7 +30,7 @@ import type {
   AppMsgOnlineStatus,
   AppMsgTargetSyncState
 } from "@keymaster/contracts";
-import { APPMESSAGE_CORE_CAPABILITY } from "@keymaster/contracts";
+import { APPMESSAGE_CORE_CAPABILITY, formatShortPublicKey } from "@keymaster/contracts";
 import { createAppMsgService } from "./appmsgService.js";
 
 type AppMsgOnlineQueryState =
@@ -590,7 +590,7 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
         {onlineQuery.phase === "success" ? (
           <ul className="appmsg-system-page__online-list">
             <li key={onlineQuery.key} data-appmsg-online-result={onlineQuery.status}>
-              <code>{onlineQuery.key.slice(0, 8)}…</code>:{" "}
+              <code>{formatShortPublicKey(onlineQuery.key)}</code>:{" "}
               {onlineQuery.status === "online"
                 ? i18n.t("appmsg.page.online.online")
                 : onlineQuery.status === "offline"
@@ -721,6 +721,5 @@ export function connectionStatusClass(
 }
 
 function shortHex(h: string): string {
-  if (h.length <= 12) return h;
-  return `${h.slice(0, 8)}…`;
+  return formatShortPublicKey(h);
 }

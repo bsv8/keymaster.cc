@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
 import {
+  formatShortPublicKey,
   LOG_SERVICE_CAPABILITY,
   type LogConfig,
   type LogEntry,
@@ -380,7 +381,7 @@ export function LogSettingsPage() {
                   {e.keyScope?.publicKeyHex ? (
                     <div className="log-entry__key">
                       <span className="muted">key</span>{" "}
-                      <code>{e.keyScope.publicKeyHex.slice(0, 16)}…</code>
+                      <code>{formatShortPublicKey(e.keyScope.publicKeyHex)}</code>
                     </div>
                   ) : null}
                   <div className="log-entry__actions">

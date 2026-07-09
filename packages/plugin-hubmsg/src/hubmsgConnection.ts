@@ -35,6 +35,7 @@
 //   - 本模块**不**做群聊 / 附件 / 撤回 / 编辑 / 已读回执。
 
 import {
+  formatShortPublicKey,
   HUB_FRAME_KIND,
   HUB_FRAME_VERSION,
   HUBMSG_EVENT,
@@ -1426,7 +1427,7 @@ function providerEndpointToWire(ep: ProviderEndpointRef): {
 }
 
 function previewPublicKeyHexes(publicKeyHexes: readonly string[]): string[] {
-  return publicKeyHexes.slice(0, 3).map((h) => `${h.slice(0, 8)}…`);
+  return publicKeyHexes.slice(0, 3).map((h) => formatShortPublicKey(h));
 }
 
 function previewPendingRequestIds(

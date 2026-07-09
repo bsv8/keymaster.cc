@@ -184,7 +184,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       expect(screen.getByText("detail body text")).toBeTruthy();
     });
     await waitFor(() => {
-      expect(screen.getAllByText("02aaaaaa...aaaaaaaa").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("02aa...aaaa").length).toBeGreaterThan(0);
     });
   });
 

@@ -176,9 +176,8 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
         <div className="km-message-page__conversations">
           {conversations.map((conversation) => {
             const contact = contactsByHex[conversation.peerPublicKeyHex];
-            const title = contact?.name?.trim()
-              ? contact.name
-              : shortPublicKeyHex(conversation.peerPublicKeyHex);
+            const contactName = contact?.name?.trim() ?? "";
+            const title = contactName || shortPublicKeyHex(conversation.peerPublicKeyHex);
             return (
               <article
                 key={conversation.peerPublicKeyHex}
@@ -189,7 +188,11 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
                 <header className="km-message-page__conversation-header">
                   <div className="km-message-page__conversation-title-group">
                     <h2 className="km-message-page__conversation-title">{title}</h2>
-                    <code className="km-message-page__conversation-key">{conversation.peerPublicKeyHex}</code>
+                    {contactName ? (
+                      <code className="km-message-page__conversation-key">
+                        {shortPublicKeyHex(conversation.peerPublicKeyHex)}
+                      </code>
+                    ) : null}
                   </div>
                   <span className="km-message-page__conversation-time">
                     {formatTime(conversation.latestInsertedAtMs)}

@@ -76,7 +76,7 @@ import type {
   ProviderSealedMessageRecord,
   ProviderSenderProjection
 } from "@keymaster/contracts";
-import { KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
+import { formatShortPublicKey, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 import {
   createAppMsgLocalDbOps,
   disposeAppMsgLocalDb,
@@ -2230,7 +2230,7 @@ function awaitPromise(p: Promise<unknown>): Promise<void> {
 }
 
 function previewOnlineKeys(publicKeyHexes: readonly string[]): string[] {
-  return publicKeyHexes.slice(0, 3).map((h) => `${h.slice(0, 8)}…`);
+  return publicKeyHexes.slice(0, 3).map((h) => formatShortPublicKey(h));
 }
 
 // 防止 IDE 报 unused

@@ -17,6 +17,7 @@
 
 import { useState } from "react";
 import { Button, PageHeader } from "@keymaster/ui";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ProtocolCommandFeedState,
   ProtocolCommandRecord,
@@ -592,11 +593,7 @@ function ReadOnlyBody({
         <>
           <dt>{t("protocol.feed.counterparty", { defaultValue: "对端公钥" })}</dt>
           <dd>
-            <code>
-              {command.counterpartyPublicKeyHex.length > 30
-                ? `${command.counterpartyPublicKeyHex.slice(0, 14)}…${command.counterpartyPublicKeyHex.slice(-12)}`
-                : command.counterpartyPublicKeyHex}
-            </code>
+            <code>{formatShortPublicKey(command.counterpartyPublicKeyHex)}</code>
           </dd>
         </>
       ) : null}
@@ -809,20 +806,14 @@ function ConfirmDetails({
           </>
         ) : null}
         {method.startsWith("feepool.") && command.counterpartyPublicKeyHex ? (
-          <>
-            <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
-            <dd>
-              <code>{shortHex(command.counterpartyPublicKeyHex, 12)}</code>
-            </dd>
-          </>
-        ) : null}
+        <>
+          <dt>{t("protocol.confirm.feepool.counterparty", { defaultValue: "对端公钥" })}</dt>
+          <dd>
+              <code>{formatShortPublicKey(command.counterpartyPublicKeyHex)}</code>
+          </dd>
+        </>
+      ) : null}
       </dl>
     </>
   );
-}
-
-/** 截短 hex 显示（feepool 公钥 66 字符太长）。 */
-function shortHex(hex: string, head: number): string {
-  if (hex.length <= head * 2 + 3) return hex;
-  return `${hex.slice(0, head)}…${hex.slice(-head)}`;
 }

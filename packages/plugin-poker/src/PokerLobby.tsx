@@ -18,6 +18,7 @@ import { useTranslation } from "react-i18next";
 import { EmptyState, PageHeader } from "@keymaster/ui";
 import { router, useCapability } from "@keymaster/runtime";
 import {
+  formatShortPublicKey,
   POKER_SERVICE_CAPABILITY,
   type PokerService,
   type PokerPresence,
@@ -159,10 +160,10 @@ export function PokerLobby(): React.ReactElement {
               {presences.map((p) => (
                 <li key={p.publicKeyHex} className="poker-lobby__presence">
                   <span className="poker-lobby__presence-nick">
-                    {p.nick ?? p.publicKeyHex.slice(0, 8)}
+                    {p.nick ?? formatShortPublicKey(p.publicKeyHex)}
                   </span>
                   <span className="poker-lobby__presence-pubkey">
-                    <code>{p.publicKeyHex.slice(0, 16)}…</code>
+                    <code>{formatShortPublicKey(p.publicKeyHex)}</code>
                   </span>
                 </li>
               ))}

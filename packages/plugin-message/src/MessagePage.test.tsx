@@ -194,7 +194,7 @@ describe("MessagePage in PluginHostProvider", () => {
     });
     await waitFor(() => {
       expect(screen.getByText("real rendered body")).toBeTruthy();
-      expect(screen.getByText("02aaaaaa...aaaaaaaa")).toBeTruthy();
+      expect(screen.getByText("02aa...aaaa")).toBeTruthy();
     });
     expect(screen.queryByText("message.page.send.label")).toBeNull();
   });

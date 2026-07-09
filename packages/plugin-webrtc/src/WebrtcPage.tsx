@@ -18,6 +18,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useCapability, useI18n } from "@keymaster/runtime";
 import { PageHeader } from "@keymaster/ui";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
 import type {
   WebrtcRemoteNotice,
@@ -393,6 +394,5 @@ function RemoteNoticeBanner({
 }
 
 function shortHex(h: string): string {
-  if (h.length <= 12) return h;
-  return `${h.slice(0, 8)}…`;
+  return formatShortPublicKey(h);
 }

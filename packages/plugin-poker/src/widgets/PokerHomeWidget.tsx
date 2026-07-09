@@ -14,6 +14,7 @@ import React, { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useCapability } from "@keymaster/runtime";
 import {
+  formatShortPublicKey,
   POKER_SERVICE_CAPABILITY,
   type PokerConnectionStatus,
   type PokerService,
@@ -84,7 +85,7 @@ export function PokerHomeWidget(): React.ReactElement {
             <span>{t("poker.home.identity", { defaultValue: "Current poker identity" })}</span>
             <span className="addr">
               <code>
-                {session.key.label} · {(session.key.publicKeyHex ?? "").slice(0, 12)}…
+                {session.key.label} · {formatShortPublicKey(session.key.publicKeyHex)}
               </code>
             </span>
           </li>

@@ -59,8 +59,8 @@ export function listConversationMessages(
 }
 
 export function shortPublicKeyHex(publicKeyHex: string): string {
-  if (publicKeyHex.length <= 16) {
+  if (publicKeyHex.length <= 8) {
     return publicKeyHex;
   }
-  return `${publicKeyHex.slice(0, 8)}...${publicKeyHex.slice(-8)}`;
+  return `${publicKeyHex.slice(0, 4)}...${publicKeyHex.slice(-4)}`;
 }

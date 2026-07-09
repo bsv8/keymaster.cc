@@ -25,6 +25,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useI18n } from "@keymaster/runtime";
+import { formatShortPublicKey, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   ProtocolConnectAuthSnapshot,
   MethodParams,
@@ -36,7 +37,6 @@ import type {
   ProtocolSessionSnapshot,
   VaultService
 } from "@keymaster/contracts";
-import { PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { useCapability } from "@keymaster/runtime";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
 import { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
@@ -802,7 +802,7 @@ function ConnectLoginView({
                     />
                     <span className="protocol-connect__keylabel-text">{k.label}</span>
                     <code className="protocol-connect__keylabel-hex">
-                      {k.publicKeyHex.slice(0, 8)}…{k.publicKeyHex.slice(-6)}
+                      {formatShortPublicKey(k.publicKeyHex)}
                     </code>
                   </label>
                 </li>
@@ -1042,7 +1042,7 @@ function ConnectLoginAuthPage({
                       />
                       <span className="protocol-connect__keylabel-text">{k.label}</span>
                       <code className="protocol-connect__keylabel-hex">
-                        {k.publicKeyHex.slice(0, 8)}…{k.publicKeyHex.slice(-6)}
+                        {formatShortPublicKey(k.publicKeyHex)}
                       </code>
                     </label>
                   </li>
@@ -1154,7 +1154,7 @@ function ConnectResumeAuthPage({
             <div className="protocol-auth__readonly-value">
               <strong>{resume.ownerLabel}</strong>
               <code>
-                {resume.ownerPublicKeyHex.slice(0, 8)}…{resume.ownerPublicKeyHex.slice(-6)}
+                {formatShortPublicKey(resume.ownerPublicKeyHex)}
               </code>
             </div>
           </div>

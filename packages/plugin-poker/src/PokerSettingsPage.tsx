@@ -20,6 +20,7 @@ import { useTranslation } from "react-i18next";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { useCapability } from "@keymaster/runtime";
 import {
+  formatShortPublicKey,
   POKER_SERVICE_CAPABILITY,
   type PokerConnectionStatus,
   type PokerService,
@@ -41,17 +42,11 @@ function describeSession(state: PokerSessionKeyState): {
     case "ready":
       return {
         tone: "ok",
-        text: `${state.key.label} · ${shortHex(state.key.publicKeyHex ?? "")}`
+        text: `${state.key.label} · ${formatShortPublicKey(state.key.publicKeyHex)}`
       };
     default:
       return { tone: "fail", text: "unavailable" };
   }
-}
-
-function shortHex(hex: string): string {
-  if (!hex) return "";
-  if (hex.length <= 16) return hex;
-  return `${hex.slice(0, 16)}…`;
 }
 
 export function PokerSettingsPage(): React.ReactElement {
