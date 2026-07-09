@@ -1,32 +1,24 @@
 // packages/plugin-contacts/src/contactsService.ts
-// 联系人服务实现（硬切换 008 收尾 + 硬切换 005 收尾）。
+// 联系人服务实现。
 //
-// 关键设计：
-//   - 数据按 key namespace 隔离：contacts 存储在 key-scoped DB 内。
-//   - 所有读写（addContact / updateContact / removeContact / listContacts /
-//     findByAddress）都要求有 active publicKeyHex；缺失时抛
-//     ContactsNoActiveKeyError（保留错误类型以兼容旧 i18n / 调用方）。
-//   - 硬切换 005 收尾：删掉 all-mode 分支。activePublicKeyHex 缺失是
-//     异常态，由壳层 AppShell 守卫（uninitialized / 修复/管理态），本
-//     service 只在收到具体的 active key 后才正常服务；旧的 `mode === "all"`
-//     分支不再存在。
-//   - UI 仍然做 keyspace guard：调用前检查 activePublicKeyHex 存在，
-//     订阅 onActiveChange 清空本地缓存并重新拉取。
-//   - 切 active key 时发 onChange 通知 UI 重新拉。
-//   - key.deleting / key.deleted 事件不做事：namespace DB 由 keyspace 整体删。
+// 设计缘由：
+//   - 联系人按 active key 的 key-scoped DB 隔离；
+//   - canonical 身份只有 publicKeyHex；
+//   - 不保留 address / publicKeyHex 双语义，不做猜测式迁移；
+//   - service 只负责联系人读写，不承担消息 / p2pkh 的投影逻辑。
 
 import type { Contact, ContactInput, ContactsService, KeyspaceService } from "@keymaster/contracts";
 import { createContactsDb, openContactsDb, type ContactsDbHandle } from "./contactsDb.js";
 
 export class ContactsDuplicateError extends Error {
-  constructor(public readonly address: string) {
-    super(`Contact for address ${address} already exists`);
+  constructor(public readonly publicKeyHex: string) {
+    super(`Contact for publicKeyHex ${publicKeyHex} already exists`);
   }
 }
 
 export class ContactsNoActiveKeyError extends Error {
   constructor() {
-    super("Contacts require an active key; the shell guard should have prevented this call");
+    super("Contacts require an active key");
   }
 }
 
@@ -36,7 +28,6 @@ export interface ContactsServiceDeps {
 
 export function createContactsService(deps: ContactsServiceDeps): ContactsService {
   const listeners = new Set<() => void>();
-  // 缓存当前 namespace 的 db handle；切 active key 时由 handle 内部 close。
   let handle: ContactsDbHandle | undefined;
   let handleFor: string | undefined;
 
@@ -44,14 +35,6 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     for (const l of listeners) l();
   }
 
-  /**
-   * 取得当前 namespace 的 db handle：active key 缺失时抛
-   * ContactsNoActiveKeyError。
-   *
-   * 硬切换 005 收尾：不再区分 single / all 模式——无 active key 唯一指
-   * "activePublicKeyHex 缺失"；壳层 AppShell 会拦截该情况，service 内部
-   * 仍 fail-closed 抛 ContactsNoActiveKeyError。
-   */
   async function getDbForActiveKey(): Promise<ContactsDbHandle> {
     const state = deps.keyspace.active();
     if (!state.activePublicKeyHex) {
@@ -64,7 +47,7 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       try {
         handle.close();
       } catch {
-        // 静默
+        // 静默。
       }
       handle = undefined;
       handleFor = undefined;
@@ -78,17 +61,15 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     return handle;
   }
 
-  // 监听 active key 变化：清空 handle + 通知监听者。
   deps.keyspace.onActiveChange((state) => {
     if (handle && state.activePublicKeyHex === handleFor) {
-      // 未切换
       return;
     }
     if (handle) {
       try {
         handle.close();
       } catch {
-        // 静默
+        // 静默。
       }
       handle = undefined;
       handleFor = undefined;
@@ -98,19 +79,18 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
 
   return {
     async addContact(input) {
-      if (!input.address) throw new Error("Address is required");
       const db = await getDbForActiveKey();
-      const existing = await db.findByAddress(input.address);
-      if (existing) throw new ContactsDuplicateError(input.address);
+      if (!input.publicKeyHex) throw new Error("publicKeyHex is required");
+      if (!input.name.trim()) throw new Error("Name is required");
+      const existing = await db.findByPublicKeyHex(input.publicKeyHex);
+      if (existing) throw new ContactsDuplicateError(input.publicKeyHex);
       const now = new Date().toISOString();
-      const publicKeyHex = deps.keyspace.active().activePublicKeyHex;
       const contact: Contact = {
         id: crypto.randomUUID(),
-        name: input.name,
-        address: input.address,
+        publicKeyHex: input.publicKeyHex,
+        name: input.name.trim(),
         note: input.note,
         tags: input.tags ?? [],
-        publicKeyHex,
         createdAt: now,
         updatedAt: now
       };
@@ -122,14 +102,21 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       const db = await getDbForActiveKey();
       const existing = await db.get(id);
       if (!existing) throw new Error(`Contact ${id} not found`);
-      const publicKeyHex = deps.keyspace.active().activePublicKeyHex;
+      if (!input.publicKeyHex) throw new Error("publicKeyHex is required");
+      if (!input.name.trim()) throw new Error("Name is required");
+      const sameIdentity = existing.publicKeyHex === input.publicKeyHex;
+      if (!sameIdentity) {
+        const duplicate = await db.findByPublicKeyHex(input.publicKeyHex);
+        if (duplicate && duplicate.id !== id) {
+          throw new ContactsDuplicateError(input.publicKeyHex);
+        }
+      }
       const updated: Contact = {
         ...existing,
-        name: input.name,
-        address: input.address,
+        publicKeyHex: input.publicKeyHex,
+        name: input.name.trim(),
         note: input.note,
         tags: input.tags ?? existing.tags,
-        publicKeyHex,
         updatedAt: new Date().toISOString()
       };
       await db.put(updated);
@@ -145,9 +132,13 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       const db = await getDbForActiveKey();
       return db.list();
     },
-    async findByAddress(address) {
+    async findByPublicKeyHex(publicKeyHex) {
       const db = await getDbForActiveKey();
-      return db.findByAddress(address);
+      return db.findByPublicKeyHex(publicKeyHex);
+    },
+    async findByPublicKeyHexes(publicKeyHexes) {
+      const db = await getDbForActiveKey();
+      return db.findByPublicKeyHexes(publicKeyHexes);
     },
     onChange(handler) {
       listeners.add(handler);

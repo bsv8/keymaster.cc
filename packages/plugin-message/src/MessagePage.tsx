@@ -1,73 +1,47 @@
 // packages/plugin-message/src/MessagePage.tsx
-// 消息业务页（施工单 2026-07-04 001 硬切换）。
+// 消息首页：会话列表。
 //
 // 设计缘由：
-//   - 本页**只**展示 `keymaster.message` scope 内的消息业务：
-//       * 发送区（输入 publicKeyHex + 正文 → sendMessage）
-//       * 搜索区（按本地已同步消息正文过滤）
-//       * 列表区（点击进入单条详情）
-//   - **不**展示 HubMsg 连接态、target sync 状态、在线查询按钮、全局错误
-//     信息、全局统计——这些归 `plugin-appmsg` 的 `/system/appmsg` 管理页；
-//   - **不**通过 props / 全局兜底路径注入；直接通过 `useCapability`
-//     从平台 runtime 拿 stable message service（由 plugin-message.setup
-//     provide）。
-//   - **不**订阅 `subscriptionSource()` 这种"subscription token"——
-//     endpoint service 内部自动迁移订阅；本组件在 `useEffect` 里**只**
-//     调一次 `service.subscribeMessages(...)`，不依赖任何"client 引用
-//     变化"信号。
-//   - owner / provider 切换对 React 组件**完全透明**——上层 effect 不
-//     需要 cleanup 旧订阅、绑定新订阅；endpoint service 自己处理。
+//   - 首页只负责按对端 publicKeyHex 聚合会话；
+//   - 联系人名称回填来自 contacts.service；
+//   - 新增 / 编辑联系人通过 contacts.editor capability 打开，message
+//     页面不复制联系人表单；
+//   - 会话主入口是 /messages/:publicKeyHex，而不是单条 messageId。
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useCapability, useI18n, router } from "@keymaster/runtime";
-import type { AppMsgMessage } from "@keymaster/contracts";
+import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import { EmptyState, PageHeader } from "@keymaster/ui";
 import type { MessageService } from "./messageService.js";
+import { buildConversationSummaries, shortPublicKeyHex } from "./messageConversation.js";
 
-/**
- * plugin-message 内部 service capability key（与 manifest setup 内
- * `ctx.provide("message.service", ...)` 一致）。
- */
+interface ContactsEditorProps {
+  open: boolean;
+  mode: "create" | "edit";
+  publicKeyHex?: string;
+  contactId?: string;
+  onClose: () => void;
+  onSaved: (contact: Contact) => void;
+}
+
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
+const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
+const CONTACTS_EDITOR_CAPABILITY = "contacts.editor";
 
-/**
- * 消息业务页。
- *
- * 接入方式（**唯一**允许的来源）：
- *   - 通过 `useCapability<MessageService>(MESSAGE_SERVICE_CAPABILITY)`
- *     从 capability bus 拿 plugin-message 自己 provide 的 service；
- *   - 没有 service 时（capability 缺失）显示降级空态；
- *   - **不**走任何 window 全局兜底：plugin-message 的"业务页 = 走正式
- *     注入路径"这条边界不允许偷偷绕开 capability bus；
- *   - 组件 mount 时 plugin-message 必须 enabled；disable 时 route 已被
- *     注销，本组件不会被路由。
- */
-export function MessagePage(): React.ReactElement {
+export function MessagePage(): JSX.Element {
   const i18n = useI18n();
   const service = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
-
   if (!service) {
     return (
-      <section
-        className="km-message-page km-message-page--missing"
-        data-message-page="missing-service"
-      >
+      <section className="km-message-page km-message-page--missing" data-message-page="missing-service">
         <h1 className="km-message-page__title">{i18n.t("message.page.title")}</h1>
         <p className="km-message-page__empty">{i18n.t("message.page.noClient")}</p>
       </section>
     );
   }
-
   return <MessagePageInner service={service} />;
 }
 
-/**
- * 兼容版 `useCapability`：capability 不存在时返回 null（**不**抛错）。
- *
- * 设计缘由：plugin-message 的 route 在 plugin enable 后才被注册；本组件
- * 一旦被路由命中，capability bus 上就一定有 `message.service`。但极端
- * host（如未通过 host 渲染）下 capability 可能没注册——这里仅做防御
- * 性兼容，**不**作为生产主路径，也**不**引入任何 window 兜底。
- */
 function useCapabilityOrNull<T>(key: string): T | null {
   try {
     return useCapability<T>(key);
@@ -76,166 +50,210 @@ function useCapabilityOrNull<T>(key: string): T | null {
   }
 }
 
-/**
- * 内部分离式组件：业务渲染。
- */
-function MessagePageInner({ service }: { service: MessageService }): React.ReactElement {
+function MessagePageInner({ service }: { service: MessageService }): JSX.Element {
   const i18n = useI18n();
+  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const contacts = useCapabilityOrNull<ContactsService>(CONTACTS_SERVICE_CAPABILITY);
+  const ContactsEditor = useCapabilityOrNull<ComponentType<ContactsEditorProps>>(CONTACTS_EDITOR_CAPABILITY);
+  const [ownerPublicKeyHex, setOwnerPublicKeyHex] = useState<string | null>(keyspace.active().activePublicKeyHex ?? null);
   const [messages, setMessages] = useState<AppMsgMessage[]>([]);
-  const [searchInput, setSearchInput] = useState("");
-  const [recipient, setRecipient] = useState("");
-  const [body, setBody] = useState("");
-  const [sendError, setSendError] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    const items = await service.listMessages({ limit: 200 });
-    setMessages(items);
-  }, [service]);
+  const [contactsByHex, setContactsByHex] = useState<Record<string, Contact>>({});
+  const [editorState, setEditorState] = useState<{
+    open: boolean;
+    mode: "create" | "edit";
+    publicKeyHex?: string;
+    contactId?: string;
+  }>({ open: false, mode: "create" });
 
   useEffect(() => {
+    return keyspace.onActiveChange((state) => {
+      setOwnerPublicKeyHex(state.activePublicKeyHex ?? null);
+    });
+  }, [keyspace]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const refresh = async () => {
+      if (!ownerPublicKeyHex || !service.isReady()) {
+        if (!cancelled) setMessages([]);
+        return;
+      }
+      try {
+        const items = await service.listMessages({ limit: 500 });
+        if (!cancelled) setMessages(items);
+      } catch {
+        if (!cancelled) setMessages([]);
+      }
+    };
     void refresh();
-  }, [refresh]);
-
-  // 实时订阅：endpoint service 内部自动处理 owner / provider 切换的
-  // 订阅迁移。本 effect **只**依赖 `service` 引用本身——业务层**不**
-  // 关心 client 引用变化。
-  useEffect(() => {
     const off = service.subscribeMessages(() => {
       void refresh();
     });
     return () => {
+      cancelled = true;
       off();
     };
-  }, [service, refresh]);
+  }, [ownerPublicKeyHex, service]);
 
-  // 过滤（UI 本地行为）
-  const filtered = useMemo(() => {
-    const q = searchInput.trim().toLowerCase();
-    if (!q) return messages;
-    return messages.filter((m) => (m.body ?? "").toLowerCase().includes(q));
-  }, [messages, searchInput]);
+  const conversations = useMemo(() => {
+    if (!ownerPublicKeyHex) return [];
+    return buildConversationSummaries(messages, ownerPublicKeyHex);
+  }, [messages, ownerPublicKeyHex]);
 
-  const onSend = useCallback(async () => {
-    setSendError(null);
-    const hex = recipient.trim();
-    if (!/^[0-9a-f]{66}$/i.test(hex)) {
-      setSendError("invalid recipient publicKeyHex");
+  const peerListKey = useMemo(
+    () => conversations.map((c) => c.peerPublicKeyHex).join("|"),
+    [conversations]
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!contacts || !peerListKey) {
+      setContactsByHex({});
       return;
     }
-    if (!body.trim()) {
-      setSendError("body is empty");
-      return;
-    }
-    try {
-      await service.sendTextMessage({ recipientPublicKeyHex: hex, body: body.trim() });
-      setBody("");
-      void refresh();
-    } catch (err) {
-      setSendError(err instanceof Error ? err.message : String(err));
-    }
-  }, [body, recipient, refresh, service]);
+    const refreshContacts = async () => {
+      try {
+        const list = await contacts.findByPublicKeyHexes(conversations.map((c) => c.peerPublicKeyHex));
+        if (cancelled) return;
+        const next: Record<string, Contact> = {};
+        for (const c of list) next[c.publicKeyHex] = c;
+        setContactsByHex(next);
+      } catch {
+        if (!cancelled) setContactsByHex({});
+      }
+    };
+    void refreshContacts();
+    const off = contacts.onChange(refreshContacts);
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [contacts, conversations, peerListKey]);
+
+  if (!ownerPublicKeyHex) {
+    return (
+      <section className="km-message-page">
+        <PageHeader title={i18n.t("message.page.title")} description={i18n.t("message.page.desc")} />
+        <EmptyState
+          title={i18n.t("message.page.noOwner.title", { defaultValue: "Pick a key" })}
+          description={i18n.t("message.page.noOwner.desc", { defaultValue: "Switch to an active key to view conversations." })}
+        />
+      </section>
+    );
+  }
+
+  const openCreateContact = (peerPublicKeyHex: string) => {
+    setEditorState({
+      open: true,
+      mode: "create",
+      publicKeyHex: peerPublicKeyHex
+    });
+  };
+
+  const openEditContact = (contact: Contact) => {
+    setEditorState({
+      open: true,
+      mode: "edit",
+      contactId: contact.id,
+      publicKeyHex: contact.publicKeyHex
+    });
+  };
 
   return (
     <section className="km-message-page" data-message-page="messages">
-      <h1 className="km-message-page__title">{i18n.t("message.page.title")}</h1>
+      <PageHeader
+        title={i18n.t("message.page.title")}
+        description={i18n.t("message.page.desc", { defaultValue: "Conversation list grouped by peer publicKeyHex." })}
+      />
 
-      <div className="km-message-page__send">
-        <h2 className="km-message-page__section-title">
-          {i18n.t("message.page.send.label")}
-        </h2>
-        <label className="km-message-page__field">
-          <span className="km-message-page__field-label">
-            {i18n.t("message.page.send.recipient")}
-          </span>
-          <input
-            className="km-message-page__input"
-            type="text"
-            value={recipient}
-            onChange={(e) => setRecipient(e.target.value)}
-            placeholder="02... (66 hex chars)"
-          />
-        </label>
-        <label className="km-message-page__field">
-          <span className="km-message-page__field-label">
-            {i18n.t("message.page.send.body")}
-          </span>
-          <textarea
-            className="km-message-page__textarea"
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            rows={3}
-          />
-        </label>
-        <div className="km-message-page__send-row">
-          <button
-            className="km-message-page__send-button"
-            type="button"
-            onClick={() => {
-              void onSend();
-            }}
-          >
-            {i18n.t("message.page.send.submit")}
-          </button>
-          {sendError ? (
-            <span className="km-message-page__send-error">{sendError}</span>
-          ) : null}
-        </div>
-      </div>
-
-      <div className="km-message-page__search">
-        <h2 className="km-message-page__section-title">
-          {i18n.t("message.page.search.label")}
-        </h2>
-        <input
-          className="km-message-page__input"
-          type="text"
-          value={searchInput}
-          onChange={(e) => setSearchInput(e.target.value)}
-          placeholder={i18n.t("message.page.search.placeholder")}
+      {conversations.length === 0 ? (
+        <EmptyState
+          title={i18n.t("message.page.empty", { defaultValue: "No local conversations yet." })}
+          description={i18n.t("message.page.empty.desc", { defaultValue: "Send a message from a conversation detail page to start one." })}
         />
-      </div>
-
-      <div className="km-message-page__list">
-        <h2 className="km-message-page__section-title">
-          {i18n.t("message.page.list.label")}
-        </h2>
-        {filtered.length === 0 ? (
-          <p className="km-message-page__empty">{i18n.t("message.page.empty")}</p>
-        ) : (
-          <ul className="km-message-page__list-items">
-            {filtered.map((m) => (
-              <li
-                key={m.messageId}
-                className="km-message-page__list-item"
-                data-message-id={m.messageId}
-                onClick={() => router.push(`/messages/${encodeURIComponent(m.messageId)}`)}
+      ) : (
+        <div className="km-message-page__conversations">
+          {conversations.map((conversation) => {
+            const contact = contactsByHex[conversation.peerPublicKeyHex];
+            const title = contact?.name?.trim()
+              ? contact.name
+              : shortPublicKeyHex(conversation.peerPublicKeyHex);
+            return (
+              <article
+                key={conversation.peerPublicKeyHex}
+                className="km-message-page__conversation"
+                data-peer-public-key-hex={conversation.peerPublicKeyHex}
+                onClick={() => router.push(`/messages/${encodeURIComponent(conversation.peerPublicKeyHex)}`)}
               >
-                <div className="km-message-page__list-meta">
-                  <span className="km-message-page__list-meta-label">
-                    {i18n.t("message.page.sender.label")}
-                  </span>{" "}
-                  <code>{shortHex(m.senderPublicKeyHex)}</code>
-                  {m.senderOrigin ? ` (${m.senderOrigin})` : ""}
-                  {m.senderAppId ? ` (${m.senderAppId})` : ""}
-                  {" → "}
-                  <span className="km-message-page__list-meta-label">
-                    {i18n.t("message.page.recipient.label")}
-                  </span>{" "}
-                  <code>{shortHex(m.recipientPublicKeyHex)}</code>
-                  {m.recipientOrigin ? ` (${m.recipientOrigin})` : ""}
-                  {m.recipientAppId ? ` (${m.recipientAppId})` : ""}
-                </div>
-                <div className="km-message-page__list-body">{m.body}</div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
+                <header className="km-message-page__conversation-header">
+                  <div className="km-message-page__conversation-title-group">
+                    <h2 className="km-message-page__conversation-title">{title}</h2>
+                    <code className="km-message-page__conversation-key">{conversation.peerPublicKeyHex}</code>
+                  </div>
+                  <span className="km-message-page__conversation-time">
+                    {formatTime(conversation.latestInsertedAtMs)}
+                  </span>
+                </header>
+                <p className="km-message-page__conversation-preview">
+                  {conversation.latestMessage.body}
+                </p>
+                <footer className="km-message-page__conversation-footer">
+                  <span className="km-message-page__conversation-count">
+                    {i18n.t("message.page.conversation.count", { defaultValue: "{{count}} messages", count: conversation.messageCount })}
+                  </span>
+                  {ContactsEditor ? (
+                    contact ? (
+                      <button
+                        type="button"
+                        className="km-message-page__conversation-action"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditContact(contact);
+                        }}
+                      >
+                        {i18n.t("message.page.conversation.editContact", { defaultValue: "Edit contact" })}
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="km-message-page__conversation-action"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openCreateContact(conversation.peerPublicKeyHex);
+                        }}
+                      >
+                        {i18n.t("message.page.conversation.addContact", { defaultValue: "Add contact" })}
+                      </button>
+                    )
+                  ) : null}
+                </footer>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
+      {ContactsEditor ? (
+        <ContactsEditor
+          open={editorState.open}
+          mode={editorState.mode}
+          publicKeyHex={editorState.publicKeyHex}
+          contactId={editorState.contactId}
+          onClose={() => setEditorState({ open: false, mode: "create" })}
+          onSaved={() => {
+            setEditorState({ open: false, mode: "create" });
+          }}
+        />
+      ) : null}
     </section>
   );
 }
 
-function shortHex(h: string): string {
-  if (h.length <= 12) return h;
-  return `${h.slice(0, 8)}…`;
+function formatTime(ms: number): string {
+  if (!ms) return "";
+  try {
+    return new Date(ms).toLocaleString();
+  } catch {
+    return String(ms);
+  }
 }

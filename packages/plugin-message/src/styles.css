@@ -1,156 +1,13 @@
 /* packages/plugin-message/src/styles.css
- * plugin-message 业务页样式（施工单 2026-07-03 002 硬切换）。
+ * plugin-message 业务页样式（会话列表 + 会话详情）。
  *
  * 设计缘由：
- *   - 视觉语言完全复用现有壳层 token：surface / border / radius / shadow；
- *   - 只整理业务页（/messages）与详情页（/messages/:messageId）的视觉
- *     信息层级，不引入新的交互动效或独立色板；
- *   - 样式跟随 plugin-message 目录走，移除插件时一并删除；
- *   - 装配层（apps/web/src/styles/plugins.css）显式
- *     `@import "@keymaster/plugin-message/styles.css"` 引入。
+ *   - 首页以会话卡片为主，不再像调试列表；
+ *   - 详情页用上下文清晰的消息线程样式；
+ *   - 只使用现有壳层 token：surface / border / radius / shadow。
  */
 
-.km-message-page {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding: 16px;
-}
-
-.km-message-page__title {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text);
-  margin: 0;
-}
-
-.km-message-page__section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 0 0 8px 0;
-}
-
-.km-message-page__send,
-.km-message-page__search,
-.km-message-page__list {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  box-shadow: var(--shadow);
-}
-
-.km-message-page__field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-bottom: 10px;
-}
-
-.km-message-page__field-label {
-  font-size: 12px;
-  color: var(--text-dim);
-}
-
-.km-message-page__input,
-.km-message-page__textarea {
-  font: inherit;
-  font-size: 13px;
-  color: var(--text);
-  background: var(--surface-2, var(--surface));
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 6px 10px;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.km-message-page__textarea {
-  resize: vertical;
-  min-height: 64px;
-  font-family: inherit;
-}
-
-.km-message-page__send-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 8px;
-}
-
-.km-message-page__send-button {
-  font: inherit;
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--primary, currentColor);
-  background: transparent;
-  border: 1px solid var(--primary, var(--border));
-  border-radius: var(--radius);
-  padding: 6px 14px;
-  cursor: pointer;
-}
-
-.km-message-page__send-button:hover {
-  filter: brightness(1.1);
-}
-
-.km-message-page__send-error {
-  font-size: 12px;
-  color: var(--danger, currentColor);
-}
-
-.km-message-page__list-items {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-
-.km-message-page__list-item {
-  padding: 10px 0;
-  border-bottom: 1px solid var(--border);
-  cursor: pointer;
-  transition: background 0.1s ease;
-}
-
-.km-message-page__list-item:last-child {
-  border-bottom: 0;
-}
-
-.km-message-page__list-item:hover {
-  background: var(--surface-2, rgba(0, 0, 0, 0.02));
-}
-
-.km-message-page__list-meta {
-  font-size: 12px;
-  color: var(--text-dim);
-  margin-bottom: 4px;
-  overflow-wrap: anywhere;
-}
-
-.km-message-page__list-meta-label {
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  font-size: 10px;
-}
-
-.km-message-page__list-body {
-  font-size: 14px;
-  color: var(--text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-.km-message-page__empty {
-  font-size: 13px;
-  color: var(--text-dim);
-  margin: 0;
-}
-
-/* Detail page */
-
+.km-message-page,
 .km-message-detail {
   display: flex;
   flex-direction: column;
@@ -158,10 +15,137 @@
   padding: 16px;
 }
 
-.km-message-detail__header {
+.km-message-page__title,
+.km-message-detail__title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.km-message-page__conversations {
+  display: grid;
+  gap: 12px;
+}
+
+.km-message-page__conversation {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: transform 0.12s ease, border-color 0.12s ease, background 0.12s ease;
+}
+
+.km-message-page__conversation:hover {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--primary, currentColor) 35%, var(--border));
+  background: var(--surface-2, var(--surface));
+}
+
+.km-message-page__conversation-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.km-message-page__conversation-title-group {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.km-message-page__conversation-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.km-message-page__conversation-key,
+.km-message-detail__key,
+.km-message-page__conversation-preview,
+.km-message-detail__body {
+  overflow-wrap: anywhere;
+}
+
+.km-message-page__conversation-key,
+.km-message-detail__key {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.km-message-page__conversation-time {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.km-message-page__conversation-preview {
+  margin: 10px 0 0 0;
+  font-size: 14px;
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.km-message-page__conversation-footer {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 12px;
+  margin-top: 12px;
+}
+
+.km-message-page__conversation-count {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.km-message-page__conversation-action {
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+.km-message-page__conversation-action:hover,
+.km-message-detail__back:hover,
+.km-message-detail__send:hover {
+  filter: brightness(1.08);
+}
+
+.km-message-page__empty,
+.km-message-detail__empty,
+.km-message-detail__error {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.km-message-page--missing {
+  padding: 16px;
+}
+
+.km-message-detail__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.km-message-detail__headline {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
 }
 
 .km-message-detail__back {
@@ -173,91 +157,120 @@
   border-radius: var(--radius);
   padding: 4px 10px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
-.km-message-detail__back:hover {
-  filter: brightness(1.1);
+.km-message-detail__key {
+  font-size: 12px;
 }
 
-.km-message-detail__title {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text);
-  margin: 0;
-}
-
-.km-message-detail__meta {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 0;
-  margin: 0;
-  box-shadow: var(--shadow);
-}
-
-.km-message-detail__row {
-  display: grid;
-  grid-template-columns: 160px 1fr;
-  gap: 12px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  font-size: 13px;
-  color: var(--text);
-}
-
-.km-message-detail__row:last-child {
-  border-bottom: 0;
-}
-
-.km-message-detail__row-label {
-  margin: 0;
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-}
-
-.km-message-detail__row-value {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.km-message-detail__section-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin: 0;
-}
-
-.km-message-detail__body {
+.km-message-detail__composer,
+.km-message-detail__thread,
+.km-message-detail__full-key {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 14px 16px;
-  font-size: 14px;
-  color: var(--text);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  margin: 0;
   box-shadow: var(--shadow);
 }
 
-.km-message-detail__empty {
+.km-message-detail__composer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.km-message-detail__composer-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.km-message-detail__send {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--primary, var(--border));
+  border-radius: var(--radius);
+  padding: 6px 14px;
+  cursor: pointer;
+}
+
+.km-message-detail__thread {
+  list-style: none;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.km-message-detail__message {
+  display: flex;
+}
+
+.km-message-detail__message.is-me {
+  justify-content: flex-end;
+}
+
+.km-message-detail__message.is-peer {
+  justify-content: flex-start;
+}
+
+.km-message-detail__bubble {
+  max-width: min(720px, 100%);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface-2, rgba(0, 0, 0, 0.02));
+  padding: 12px 14px;
+}
+
+.km-message-detail__message.is-me .km-message-detail__bubble {
+  background: color-mix(in srgb, var(--primary, currentColor) 8%, var(--surface));
+}
+
+.km-message-detail__message-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.km-message-detail__body {
+  margin: 0;
+  white-space: pre-wrap;
+  font-size: 14px;
+  color: var(--text);
+}
+
+.km-message-detail__full-key {
   font-size: 13px;
   color: var(--text-dim);
-  margin: 0;
 }
 
-[data-theme="dark"] .km-message-page__send,
-[data-theme="dark"] .km-message-page__search,
-[data-theme="dark"] .km-message-page__list,
-[data-theme="dark"] .km-message-detail__meta,
-[data-theme="dark"] .km-message-detail__body {
-  background: var(--surface);
+.km-message-detail__empty {
+  padding: 8px 0;
 }
 
-[data-theme="dark"] .km-message-page__list-item:hover {
-  background: var(--surface-2, rgba(255, 255, 255, 0.04));
+.km-message-page--missing .km-message-page__title,
+.km-message-detail--missing .km-message-detail__title {
+  margin-bottom: 8px;
+}
+
+@media (max-width: 720px) {
+  .km-message-page,
+  .km-message-detail {
+    padding: 12px;
+  }
+
+  .km-message-page__conversation-header,
+  .km-message-page__conversation-footer,
+  .km-message-detail__header,
+  .km-message-detail__message-meta {
+    flex-direction: column;
+    align-items: flex-start;
+  }
 }

@@ -18,18 +18,33 @@
 //   - class 命名从 `p2pkh-transfer-widget__fingerprint` 改为
 //     `p2pkh-transfer-widget__pubkey`，避免名称漂移。
 
-import { useEffect, useState } from "react";
-import { Button, PageHeader, Select, TextInput } from "@keymaster/ui";
+import { useEffect, useState, type ComponentType } from "react";
+import { Button, PageHeader, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
-import type { Contact, ContactsService, KeyIdentity, KeyspaceService, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
+import type { KeyIdentity, KeyspaceService, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { assetIdToNetwork } from "../p2pkhContracts.js";
+import { publicKeyHexToP2pkhAddress } from "../p2pkhSigner.js";
+
+interface ContactPickerProps {
+  value?: string;
+  onChange: (publicKeyHex: string) => void;
+  placeholder?: string;
+}
 
 interface FormState {
   recipient: string;
   amount: string;
   feeRate: string;
+}
+
+function useCapabilityOrNull<T>(key: string): T | null {
+  try {
+    return useCapability<T>(key);
+  } catch {
+    return null;
+  }
 }
 
 export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps) {
@@ -38,10 +53,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   const host = usePluginHost();
   const { t } = useI18n();
   useI18n().language();
-  const hasContacts = useCapability<ContactsService | undefined>(
-    "contacts.service"
-  );
-  const contacts = hasContacts ?? undefined;
+  const ContactPicker = useCapabilityOrNull<ComponentType<ContactPickerProps>>("contacts.picker");
 
   const assetId: P2pkhAssetId = offer.assetId as P2pkhAssetId;
   const network = assetIdToNetwork(assetId);
@@ -53,7 +65,6 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     amount: "0",
     feeRate: "1000"
   });
-  const [contactList, setContactList] = useState<Contact[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [hexCopied, setHexCopied] = useState(false);
@@ -129,11 +140,6 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     };
   }, [service, assetId, hasNoActiveKey]);
 
-  useEffect(() => {
-    if (!contacts) return;
-    contacts.listContacts().then(setContactList);
-  }, [contacts]);
-
   const networkAddress = resource?.address;
 
   function update<K extends keyof FormState>(k: K, v: FormState[K]) {
@@ -146,8 +152,8 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     setHexCopied(false);
   }
 
-  function fillFromContact(c: Contact) {
-    update("recipient", c.address);
+  function fillFromContact(publicKeyHex: string) {
+    update("recipient", publicKeyHexToP2pkhAddress(publicKeyHex, network));
   }
 
   function buildInput() {
@@ -333,18 +339,11 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
             value={form.recipient}
             onChange={(e) => update("recipient", e.currentTarget.value)}
           />
-          {contacts && contactList.length > 0 ? (
-            <Select
-              label={t("p2pkh.transfer.form.contactSelect", { defaultValue: "从联系人选择" })}
+          {ContactPicker ? (
+            <ContactPicker
               value=""
-              onChange={(e) => {
-                const c = contactList.find((x) => x.id === e.currentTarget.value);
-                if (c) fillFromContact(c);
-              }}
-              options={[
-                { label: t("p2pkh.transfer.form.contactPlaceholder", { defaultValue: "未选择" }), value: "" },
-                ...contactList.map((c) => ({ label: c.name, value: c.id }))
-              ]}
+              onChange={(publicKeyHex) => fillFromContact(publicKeyHex)}
+              placeholder={t("p2pkh.transfer.form.contactPlaceholder", { defaultValue: "未选择" })}
             />
           ) : null}
           <TextInput

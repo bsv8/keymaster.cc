@@ -1,23 +1,15 @@
 // packages/plugin-message/src/MessagePage.test.tsx
-// 消息业务页契约测试（施工单 2026-07-04 001 硬切换）。
-//
-// 关键验证点：
-//   - MessagePage 在 PluginHostProvider 下能真渲染；
-//   - 页面契约至少呈现：标题、消息 body、发送区、搜索区、列表区；
-//   - **不**出现 sync state / connection / online UI；
-//   - service 不可用时显示降级空态——**这是唯一允许的降级路径**；
-//   - **不**走任何 window 全局兜底；
-//   - **不**再依赖 `subscriptionSource()` 旧接口；订阅由 endpoint service
-//     内部自动迁移，本组件**不**关心 client 引用变化。
+// 消息首页契约测试。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import type {
-  AppMsgEndpointService,
+  ActiveKeyState,
   AppMsgMessage,
   I18nService,
   I18nText,
   I18nValues,
+  KeyspaceService,
   LanguageMode,
   SupportedLanguage,
   SupportedLanguageDescriptor
@@ -29,6 +21,7 @@ import type { MessageService } from "./messageService.js";
 
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
+const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
 
 function makeFakeI18n(): I18nService {
   return {
@@ -49,38 +42,49 @@ function makeFakeI18n(): I18nService {
   };
 }
 
-/**
- * 构造 fake MessageService（直接传 endpoint service 引用）。
- */
-function makeFakeService(opts?: {
-  messages?: AppMsgMessage[];
-}): MessageService {
-  const messages = opts?.messages ?? [];
-  const endpoint: AppMsgEndpointService = {
-    endpoint: { kind: "plugin", id: "keymaster.message" },
-    isReady: () => true,
-    sendMessage: async () => ({ messageId: "0", createdAtMs: 0 }),
-    listMessages: async () => ({ items: messages, hasMore: false }),
-    getMessage: async (input: { messageId: string }) =>
-      messages.find((m) => m.messageId === input.messageId) ?? null,
-    subscribeMessages: () => () => undefined,
-    checkOnline: async () => ({})
-  };
+function makeFakeKeyspace(): KeyspaceService {
+  const listeners = new Set<(state: ActiveKeyState) => void>();
+  let active: ActiveKeyState = { activePublicKeyHex: OWNER };
   return {
-    isReady: () => endpoint.isReady(),
-    listMessages: async (input) => {
-      const res = await endpoint.listMessages(input);
-      return res.items;
+    listKeys: async () => [],
+    getKey: async () => undefined,
+    active: () => active,
+    setActive: async (publicKeyHex: string) => {
+      active = { activePublicKeyHex: publicKeyHex };
+      for (const listener of listeners) listener(active);
     },
-    getMessage: async (id) => endpoint.getMessage({ messageId: id }),
+    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" }),
+    onActiveChange: (handler) => {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    },
+    openKeyStorage: async () => {
+      throw new Error("not implemented");
+    },
+    registerPluginStorage: () => undefined,
+    listPluginStorages: () => [],
+    prepareDeleteKey: async () => undefined,
+    deleteKey: async () => undefined,
+    isInitializing: () => false,
+    onInitializationChange: () => () => undefined
+  };
+}
+
+function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService {
+  const messages = opts?.messages ?? [];
+  return {
+    isReady: () => true,
+    listMessages: async () => messages,
+    getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
     sendTextMessage: async () => undefined,
-    subscribeMessages: (handler) => endpoint.subscribeMessages(handler)
+    subscribeMessages: () => () => undefined
   };
 }
 
 function makeFakeHost(service: MessageService | null) {
   const providers: Record<string, unknown> = {
-    [I18N_SERVICE_CAPABILITY]: makeFakeI18n()
+    [I18N_SERVICE_CAPABILITY]: makeFakeI18n(),
+    [KEYSPACE_SERVICE_CAPABILITY]: makeFakeKeyspace()
   };
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY] = service;
@@ -163,7 +167,7 @@ describe("MessagePage in PluginHostProvider", () => {
     cleanup();
   });
 
-  it("renders title, send area, search area, list area and message body", async () => {
+  it("renders conversation list and peer body", async () => {
     const sampleMessage: AppMsgMessage = {
       messageId: "real-id-1",
       clientMessageId: "c-1",
@@ -186,18 +190,13 @@ describe("MessagePage in PluginHostProvider", () => {
     );
 
     await waitFor(() => {
-      const el = screen.getByText("message.page.title");
-      expect(el).toBeTruthy();
+      expect(screen.getByText("message.page.title")).toBeTruthy();
     });
     await waitFor(() => {
-      const el = screen.getByText("real rendered body");
-      expect(el).toBeTruthy();
+      expect(screen.getByText("real rendered body")).toBeTruthy();
+      expect(screen.getByText("02aaaaaa...aaaaaaaa")).toBeTruthy();
     });
-    await waitFor(() => {
-      expect(screen.getByText("message.page.send.label")).toBeTruthy();
-      expect(screen.getByText("message.page.search.label")).toBeTruthy();
-      expect(screen.getByText("message.page.list.label")).toBeTruthy();
-    });
+    expect(screen.queryByText("message.page.send.label")).toBeNull();
   });
 
   it("does NOT render sync / connection / online UI", async () => {
@@ -210,8 +209,7 @@ describe("MessagePage in PluginHostProvider", () => {
       </PluginHostProvider>
     );
     await waitFor(() => {
-      const el = screen.getByText("message.page.title");
-      expect(el).toBeTruthy();
+      expect(screen.getByText("message.page.title")).toBeTruthy();
     });
     expect(screen.queryByText("message.page.sync.state.label")).toBeNull();
     expect(screen.queryByText("message.page.checkOnline")).toBeNull();
@@ -228,16 +226,9 @@ describe("MessagePage in PluginHostProvider", () => {
       </PluginHostProvider>
     );
     await waitFor(() => {
-      const empty = screen.getByText("message.page.noClient");
-      expect(empty).toBeTruthy();
+      expect(screen.getByText("message.page.noClient")).toBeTruthy();
     });
-    expect(screen.queryByText("message.page.send.label")).toBeNull();
   });
-
-  // endpoint service 内部已自动迁移订阅；本组件**不**关心 client 引用
-  // 变化。`subscriptionSource()` 旧接口已彻底删除——这里不写任何"切换
-  // subscription token"的测试。
 });
 
-// 防止 IDE 报 unused
 void vi;

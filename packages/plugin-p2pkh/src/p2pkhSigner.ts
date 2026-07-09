@@ -58,6 +58,23 @@ export function deriveP2pkhAddress(privateKeyHex: string, network: "main" | "tes
 }
 
 /**
+ * 从压缩公钥 hex 派生 P2PKH 地址。
+ *
+ * 设计缘由：联系人与消息侧只提供 publicKeyHex，P2PKH 自己负责把身份
+ * 投影成链上地址，不把地址派生逻辑塞回 contacts。
+ */
+export function publicKeyHexToP2pkhAddress(publicKeyHex: string, network: "main" | "test" = "main"): string {
+  const pub = hexToBytes(publicKeyHex);
+  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
+  const sha = sha256(pub);
+  const ripe = ripemd160(sha);
+  const versionByte = network === "main" ? 0x00 : 0x6f;
+  const payload = concatBytes(new Uint8Array([versionByte]), ripe);
+  const checksum = sha256(sha256(payload)).slice(0, 4);
+  return base58Encode(concatBytes(payload, checksum));
+}
+
+/**
  * 计算链上 P2PKH 锁脚本所需的 HASH160(compressed public key),即
  * `ripemd160(sha256(pub))`,20 字节 hex。
  *

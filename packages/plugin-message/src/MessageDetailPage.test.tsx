@@ -1,23 +1,18 @@
 // packages/plugin-message/src/MessageDetailPage.test.tsx
-// 消息详情页契约测试（施工单 2026-07-03 002 硬切换 + 文件级修改意见 §8）。
-//
-// 验证：
-//   - `/messages/:messageId` 路由下，详情页能从 scoped service 拉到单条消息；
-//   - 越权 messageId（不在 scope 内）→ 显示空态；
-//   - 详情页**不**展示 HubMsg 连接态 / 同步态 / 全局统计；
-//   - capability 缺失时显示降级空态——**这是唯一允许的降级路径**；
-//   - **不**走任何 window 全局兜底（__kmMessageService）。
+// 会话详情页契约测试。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router";
 import type {
+  ActiveKeyState,
   AppMsgMessage,
   I18nService,
   I18nText,
   I18nValues,
-  SupportedLanguage,
+  KeyspaceService,
   LanguageMode,
+  SupportedLanguage,
   SupportedLanguageDescriptor
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -27,6 +22,7 @@ import type { MessageService } from "./messageService.js";
 
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
+const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
 
 function makeFakeI18n(): I18nService {
   return {
@@ -47,6 +43,34 @@ function makeFakeI18n(): I18nService {
   };
 }
 
+function makeFakeKeyspace(): KeyspaceService {
+  const listeners = new Set<(state: ActiveKeyState) => void>();
+  let active: ActiveKeyState = { activePublicKeyHex: OWNER };
+  return {
+    listKeys: async () => [],
+    getKey: async () => undefined,
+    active: () => active,
+    setActive: async (publicKeyHex: string) => {
+      active = { activePublicKeyHex: publicKeyHex };
+      for (const listener of listeners) listener(active);
+    },
+    requireActiveKey: () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" }),
+    onActiveChange: (handler) => {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    },
+    openKeyStorage: async () => {
+      throw new Error("not implemented");
+    },
+    registerPluginStorage: () => undefined,
+    listPluginStorages: () => [],
+    prepareDeleteKey: async () => undefined,
+    deleteKey: async () => undefined,
+    isInitializing: () => false,
+    onInitializationChange: () => () => undefined
+  };
+}
+
 function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService {
   const messages = opts?.messages ?? [];
   return {
@@ -60,7 +84,8 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService 
 
 function makeFakeHost(service: MessageService | null): PluginHost {
   const providers: Record<string, unknown> = {
-    [I18N_SERVICE_CAPABILITY]: makeFakeI18n()
+    [I18N_SERVICE_CAPABILITY]: makeFakeI18n(),
+    [KEYSPACE_SERVICE_CAPABILITY]: makeFakeKeyspace()
   };
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY] = service;
@@ -129,11 +154,12 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     cleanup();
   });
 
-  it("renders single-message body when messageId is in scope", async () => {
+  it("renders conversation body when peer is in scope", async () => {
+    const peer = "02aaaa".padEnd(66, "a");
     const sample: AppMsgMessage = {
       messageId: "id-detail-1",
       clientMessageId: "c-detail-1",
-      senderPublicKeyHex: "02aaaa".padEnd(66, "a"),
+      senderPublicKeyHex: peer,
       senderAppId: "keymaster.message",
       recipientPublicKeyHex: OWNER,
       recipientAppId: "keymaster.message",
@@ -146,10 +172,10 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     const host = makeFakeHost(service);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
     render(
-      <MemoryRouter initialEntries={["/messages/id-detail-1"]}>
+      <MemoryRouter initialEntries={[`/messages/${peer}`]}>
         <PluginHostProvider host={host}>
           <Routes>
-            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
           </Routes>
         </PluginHostProvider>
       </MemoryRouter>
@@ -157,21 +183,21 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     await waitFor(() => {
       expect(screen.getByText("detail body text")).toBeTruthy();
     });
-    // messageId 字段出现在 meta 区。
     await waitFor(() => {
-      expect(screen.getByText("id-detail-1")).toBeTruthy();
+      expect(screen.getAllByText(peer).length).toBeGreaterThan(0);
     });
   });
 
-  it("renders empty state when messageId is out of scope", async () => {
+  it("renders empty state when peer conversation is empty", async () => {
+    const peer = "02cccc".padEnd(66, "c");
     const service = makeFakeService({ messages: [] });
     const host = makeFakeHost(service);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
     render(
-      <MemoryRouter initialEntries={["/messages/not-in-scope"]}>
+      <MemoryRouter initialEntries={[`/messages/${peer}`]}>
         <PluginHostProvider host={host}>
           <Routes>
-            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
           </Routes>
         </PluginHostProvider>
       </MemoryRouter>
@@ -188,7 +214,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       <MemoryRouter initialEntries={["/messages/any"]}>
         <PluginHostProvider host={host}>
           <Routes>
-            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
           </Routes>
         </PluginHostProvider>
       </MemoryRouter>
@@ -206,13 +232,13 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       <MemoryRouter initialEntries={["/messages/x"]}>
         <PluginHostProvider host={host}>
           <Routes>
-            <Route path="/messages/:messageId" element={<MessageDetailPage />} />
+            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
           </Routes>
         </PluginHostProvider>
       </MemoryRouter>
     );
     await waitFor(() => {
-      expect(screen.getByText("message.page.detail.title")).toBeTruthy();
+      expect(screen.getByRole("heading", { name: "x" })).toBeTruthy();
     });
     expect(screen.queryByText("message.page.sync.state.label")).toBeNull();
     expect(screen.queryByText("message.page.online.label")).toBeNull();

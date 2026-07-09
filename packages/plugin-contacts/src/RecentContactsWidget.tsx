@@ -1,21 +1,15 @@
 // packages/plugin-contacts/src/RecentContactsWidget.tsx
-// 最近联系人 widget：按 updatedAt 倒序展示前 N 条。
+// 最近联系人 widget。
 //
-// 硬切换 008 收尾：
-//   - 接入 keyspace：无 active key 时不调用 service.listContacts，
-//     直接清空 rows，避免 ContactsNoActiveKeyError 冒到 React 渲染。
-//   - 订阅 onActiveChange：active 切换时重新拉；active 缺失时清空。
-//
-// 硬切换 005 收尾：删掉 "all 模式" 分支。activePublicKeyHex 缺失由
-// 壳层守卫收敛，本 widget 只在 active key 缺失时清空 rows，不展示
-// 任何"全部 key"提示。
-//
-// 硬切换 003：title 与 empty 走 i18n。
+// 设计缘由：
+//   - 只展示联系人 name + short publicKeyHex；
+//   - active key 缺失时直接清空，不做 all-mode 回退；
+//   - 作为首页侧栏只提供快速识别，不承载编辑逻辑。
 
 import { useEffect, useState } from "react";
 import { EmptyState } from "@keymaster/ui";
 import { useCapability, useI18n } from "@keymaster/runtime";
-import type { Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import { formatShortPublicKey, type Contact, type ContactsService, type KeyspaceService } from "@keymaster/contracts";
 
 export function RecentContactsWidget() {
   const service = useCapability<ContactsService>("contacts.service");
@@ -47,16 +41,16 @@ export function RecentContactsWidget() {
   return (
     <div className="home-widget home-widget--contacts-recent">
       <header className="home-widget__head">
-        <h3>{t("contacts.home.recent", { defaultValue: "最近联系人" })}</h3>
+        <h3>{t("contacts.home.recent", { defaultValue: "Recent contacts" })}</h3>
       </header>
       {rows.length === 0 ? (
-        <EmptyState title={t("contacts.empty.recent", { defaultValue: "还没有联系人" })} />
+        <EmptyState title={t("contacts.empty.recent", { defaultValue: "No contacts yet" })} />
       ) : (
         <ul className="home-widget__list">
           {rows.map((c) => (
             <li key={c.id}>
               <span className="name">{c.name}</span>
-              <code className="addr">{c.address}</code>
+              <code className="addr">{formatShortPublicKey(c.publicKeyHex)}</code>
             </li>
           ))}
         </ul>

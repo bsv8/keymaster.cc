@@ -1,160 +1,210 @@
 // packages/plugin-message/src/MessageDetailPage.tsx
-// 单条消息详情页（施工单 2026-07-03 002 硬切换）。
+// 会话详情页。
 //
 // 设计缘由：
-//   - 路由 `/messages/:messageId`：从 URL 拿 messageId，调 scoped client
-//     `getMessage({ messageId })` 拉单条；
-//   - 仅展示 `keymaster.message` scope 内可见消息；越权 `messageId`
-//     返回 null → 详情页显示空态；
-//   - 详情页**不**展示 HubMsg 连接态 / 同步态 / 全局统计；
-//   - 顶部"返回"链到 `/messages`。
+//   - 路由参数是对端 publicKeyHex，不再是单条 messageId；
+//   - 页面展示这个对端的全部会话记录，按入库时间正序；
+//   - 发送入口收口到详情页；
+//   - 联系人名称优先来自 contacts.service，缺失时回退短公钥。
 
-import React, { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCapability, useI18n, router } from "@keymaster/runtime";
+import { EmptyState, TextArea } from "@keymaster/ui";
 import { useParams } from "react-router";
-import type { AppMsgMessage } from "@keymaster/contracts";
+import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
-
-/**
- * plugin-message 内部 service capability key（与 manifest setup 内
- * `ctx.provide("message.service", ...)` 一致）。
- */
+import { listConversationMessages, shortPublicKeyHex } from "./messageConversation.js";
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
+const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
 
-export function MessageDetailPage(): React.ReactElement {
+export function MessageDetailPage(): JSX.Element {
   const i18n = useI18n();
-  const params = useParams<{ messageId?: string }>();
-  const messageId = typeof params.messageId === "string" ? params.messageId : "";
+  const params = useParams<{ publicKeyHex?: string }>();
+  const peerPublicKeyHex = typeof params.publicKeyHex === "string" ? decodeURIComponent(params.publicKeyHex) : "";
   const service = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
-  const [msg, setMsg] = useState<AppMsgMessage | null>(null);
-  const [loading, setLoading] = useState(false);
+  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const contacts = useCapabilityOrNull<ContactsService>(CONTACTS_SERVICE_CAPABILITY);
+  const [ownerPublicKeyHex, setOwnerPublicKeyHex] = useState<string | null>(keyspace.active().activePublicKeyHex ?? null);
+  const [messages, setMessages] = useState<AppMsgMessage[]>([]);
+  const [contact, setContact] = useState<Contact | null>(null);
+  const [sendBody, setSendBody] = useState("");
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  useEffect(() => {
+    return keyspace.onActiveChange((state) => {
+      setOwnerPublicKeyHex(state.activePublicKeyHex ?? null);
+    });
+  }, [keyspace]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!service || !messageId) {
-      setMsg(null);
-      return;
-    }
-    setLoading(true);
-    void service
-      .getMessage(messageId)
-      .then((got) => {
+    const refresh = async () => {
+      if (!service || !ownerPublicKeyHex || !peerPublicKeyHex || !service.isReady()) {
+        if (!cancelled) setMessages([]);
+        return;
+      }
+      try {
+        const items = await service.listMessages({ limit: 500 });
         if (cancelled) return;
-        setMsg(got);
-        setLoading(false);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setMsg(null);
-        setLoading(false);
-      });
+        setMessages(items);
+      } catch {
+        if (!cancelled) setMessages([]);
+      }
+    };
+    void refresh();
+    if (!service) return;
+    const off = service.subscribeMessages(() => {
+      void refresh();
+    });
     return () => {
       cancelled = true;
+      off();
     };
-  }, [service, messageId]);
+  }, [ownerPublicKeyHex, peerPublicKeyHex, service]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!contacts || !peerPublicKeyHex) {
+      setContact(null);
+      return;
+    }
+    const refresh = async () => {
+      try {
+        const found = await contacts.findByPublicKeyHex(peerPublicKeyHex);
+        if (!cancelled) setContact(found ?? null);
+      } catch {
+        if (!cancelled) setContact(null);
+      }
+    };
+    void refresh();
+    const off = contacts.onChange(refresh);
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [contacts, peerPublicKeyHex]);
+
+  const conversationMessages = useMemo(() => {
+    if (!ownerPublicKeyHex || !peerPublicKeyHex) return [];
+    return listConversationMessages(messages, ownerPublicKeyHex, peerPublicKeyHex);
+  }, [messages, ownerPublicKeyHex, peerPublicKeyHex]);
 
   if (!service) {
     return (
       <section className="km-message-detail km-message-detail--missing" data-message-detail="missing-service">
         <h1 className="km-message-detail__title">{i18n.t("message.page.detail.title")}</h1>
         <p className="km-message-detail__empty">{i18n.t("message.page.noClient")}</p>
-        <button
-          className="km-message-detail__back"
-          type="button"
-          onClick={() => router.push("/messages")}
-        >
+        <button className="km-message-detail__back" type="button" onClick={() => router.push("/messages")}>
           {i18n.t("message.page.back")}
         </button>
       </section>
     );
   }
+  const messageService = service;
 
-  if (!msg) {
+  if (!ownerPublicKeyHex) {
     return (
-      <section className="km-message-detail" data-message-detail="not-found">
+      <section className="km-message-detail">
         <h1 className="km-message-detail__title">{i18n.t("message.page.detail.title")}</h1>
-        <p className="km-message-detail__empty">
-          {loading ? "…" : i18n.t("message.page.detail.empty")}
-        </p>
-        <button
-          className="km-message-detail__back"
-          type="button"
-          onClick={() => router.push("/messages")}
-        >
-          {i18n.t("message.page.back")}
-        </button>
+        <EmptyState
+          title={i18n.t("message.page.noOwner.title", { defaultValue: "Pick a key" })}
+          description={i18n.t("message.page.noOwner.desc", { defaultValue: "Switch to an active key to view this conversation." })}
+        />
       </section>
     );
+  }
+
+  if (!peerPublicKeyHex) {
+    return (
+      <section className="km-message-detail">
+        <h1 className="km-message-detail__title">{i18n.t("message.page.detail.title")}</h1>
+        <EmptyState
+          title={i18n.t("message.page.detail.empty", { defaultValue: "Conversation not found." })}
+          description={i18n.t("message.page.back", { defaultValue: "Back" })}
+          action={
+            <button className="km-message-detail__back" type="button" onClick={() => router.push("/messages")}>
+              {i18n.t("message.page.back")}
+            </button>
+          }
+        />
+      </section>
+    );
+  }
+
+  const title = contact?.name?.trim() ? contact.name : shortPublicKeyHex(peerPublicKeyHex);
+
+  async function send() {
+    setSendError(null);
+    const body = sendBody.trim();
+    if (!body) {
+      setSendError(i18n.t("message.page.send.empty", { defaultValue: "Body is empty" }));
+      return;
+    }
+    try {
+      await messageService.sendTextMessage({ recipientPublicKeyHex: peerPublicKeyHex, body });
+      setSendBody("");
+      const items = await messageService.listMessages({ limit: 500 });
+      setMessages(items);
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : String(err));
+    }
   }
 
   return (
-    <section className="km-message-detail" data-message-detail="ok" data-message-id={msg.messageId}>
+    <section className="km-message-detail" data-message-detail="ok" data-peer-public-key-hex={peerPublicKeyHex}>
       <header className="km-message-detail__header">
-        <button
-          className="km-message-detail__back"
-          type="button"
-          onClick={() => router.push("/messages")}
-        >
+        <button className="km-message-detail__back" type="button" onClick={() => router.push("/messages")}>
           {i18n.t("message.page.back")}
         </button>
-        <h1 className="km-message-detail__title">{i18n.t("message.page.detail.title")}</h1>
+        <div className="km-message-detail__headline">
+          <h1 className="km-message-detail__title">{title}</h1>
+          <code className="km-message-detail__key">{peerPublicKeyHex}</code>
+        </div>
       </header>
 
-      <dl className="km-message-detail__meta">
-        <div className="km-message-detail__row">
-          <dt className="km-message-detail__row-label">
-            {i18n.t("message.page.sender.label")}
-          </dt>
-          <dd className="km-message-detail__row-value">
-            <code>{msg.senderPublicKeyHex}</code>
-            {msg.senderOrigin ? ` (${msg.senderOrigin})` : ""}
-            {msg.senderAppId ? ` (${msg.senderAppId})` : ""}
-          </dd>
+      <section className="km-message-detail__composer">
+        <TextArea
+          label={i18n.t("message.page.detail.body")}
+          value={sendBody}
+          onChange={(e) => setSendBody(e.currentTarget.value)}
+          rows={4}
+        />
+        <div className="km-message-detail__composer-row">
+          <button className="km-message-detail__send" type="button" onClick={() => void send()}>
+            {i18n.t("message.page.send.submit")}
+          </button>
+          {sendError ? <span className="km-message-detail__error">{sendError}</span> : null}
         </div>
-        <div className="km-message-detail__row">
-          <dt className="km-message-detail__row-label">
-            {i18n.t("message.page.recipient.label")}
-          </dt>
-          <dd className="km-message-detail__row-value">
-            <code>{msg.recipientPublicKeyHex}</code>
-            {msg.recipientOrigin ? ` (${msg.recipientOrigin})` : ""}
-            {msg.recipientAppId ? ` (${msg.recipientAppId})` : ""}
-          </dd>
-        </div>
-        <div className="km-message-detail__row">
-          <dt className="km-message-detail__row-label">
-            {i18n.t("message.page.detail.meta.createdAt")}
-          </dt>
-          <dd className="km-message-detail__row-value">{formatTime(msg.createdAtMs)}</dd>
-        </div>
-        <div className="km-message-detail__row">
-          <dt className="km-message-detail__row-label">
-            {i18n.t("message.page.detail.meta.insertedAt")}
-          </dt>
-          <dd className="km-message-detail__row-value">{formatTime(msg.insertedAtMs)}</dd>
-        </div>
-        <div className="km-message-detail__row">
-          <dt className="km-message-detail__row-label">
-            {i18n.t("message.page.detail.meta.messageId")}
-          </dt>
-          <dd className="km-message-detail__row-value">
-            <code>{msg.messageId}</code>
-          </dd>
-        </div>
-        <div className="km-message-detail__row">
-          <dt className="km-message-detail__row-label">
-            {i18n.t("message.page.detail.meta.clientMessageId")}
-          </dt>
-          <dd className="km-message-detail__row-value">
-            <code>{msg.clientMessageId}</code>
-          </dd>
-        </div>
-      </dl>
+      </section>
 
-      <h2 className="km-message-detail__section-title">
-        {i18n.t("message.page.detail.body")}
-      </h2>
-      <pre className="km-message-detail__body">{msg.body}</pre>
+      {conversationMessages.length === 0 ? (
+        <EmptyState
+          title={i18n.t("message.page.detail.empty", { defaultValue: "No messages in this conversation." })}
+          description={i18n.t("message.page.detail.empty.desc", { defaultValue: "Send a message below to start the thread." })}
+        />
+      ) : (
+        <ul className="km-message-detail__thread">
+          {conversationMessages.map((message) => {
+            const fromMe = message.senderPublicKeyHex === ownerPublicKeyHex;
+            return (
+              <li key={message.messageId} className={`km-message-detail__message ${fromMe ? "is-me" : "is-peer"}`}>
+                <div className="km-message-detail__bubble">
+                  <div className="km-message-detail__message-meta">
+                    <span>{fromMe ? i18n.t("message.page.detail.from.me", { defaultValue: "Me" }) : title}</span>
+                    <span>{formatTime(message.insertedAtMs)}</span>
+                  </div>
+                  <pre className="km-message-detail__body">{message.body}</pre>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <p className="km-message-detail__full-key">
+        <strong>publicKeyHex: </strong>
+        <code>{peerPublicKeyHex}</code>
+      </p>
     </section>
   );
 }
@@ -170,7 +220,7 @@ function useCapabilityOrNull<T>(key: string): T | null {
 function formatTime(ms: number): string {
   if (!ms) return "";
   try {
-    return new Date(ms).toISOString();
+    return new Date(ms).toLocaleString();
   } catch {
     return String(ms);
   }
