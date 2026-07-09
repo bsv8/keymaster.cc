@@ -16,6 +16,7 @@ import type { MessageService } from "./messageService.js";
 import { listConversationMessages, shortPublicKeyHex } from "./messageConversation.js";
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
+const MESSAGE_READ_WINDOW = 10_000;
 
 export function MessageDetailPage(): JSX.Element {
   const i18n = useI18n();
@@ -44,7 +45,7 @@ export function MessageDetailPage(): JSX.Element {
         return;
       }
       try {
-        const items = await service.listMessages({ limit: 500 });
+        const items = await service.listMessages({ limit: MESSAGE_READ_WINDOW });
         if (cancelled) return;
         setMessages(items);
       } catch {
@@ -143,7 +144,7 @@ export function MessageDetailPage(): JSX.Element {
     try {
       await messageService.sendTextMessage({ recipientPublicKeyHex: peerPublicKeyHex, body });
       setSendBody("");
-      const items = await messageService.listMessages({ limit: 500 });
+      const items = await messageService.listMessages({ limit: MESSAGE_READ_WINDOW });
       setMessages(items);
     } catch (err) {
       setSendError(err instanceof Error ? err.message : String(err));

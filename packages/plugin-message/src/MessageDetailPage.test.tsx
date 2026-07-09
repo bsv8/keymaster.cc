@@ -71,11 +71,14 @@ function makeFakeKeyspace(): KeyspaceService {
   };
 }
 
-function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService {
+function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (input?: { limit?: number; afterMessageId?: string }) => void }): MessageService {
   const messages = opts?.messages ?? [];
   return {
     isReady: () => true,
-    listMessages: async () => messages,
+    listMessages: async (input) => {
+      opts?.onListMessages?.(input);
+      return messages;
+    },
     getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
     sendTextMessage: async () => undefined,
     subscribeMessages: () => () => undefined
@@ -205,6 +208,44 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     await waitFor(() => {
       expect(screen.getByText("message.page.detail.empty")).toBeTruthy();
     });
+  });
+
+  it("loads a larger message window for older conversations", async () => {
+    const peer = "02dddd".padEnd(66, "d");
+    const seenLimits: number[] = [];
+    const sample: AppMsgMessage = {
+      messageId: "id-detail-window",
+      clientMessageId: "c-detail-window",
+      senderPublicKeyHex: peer,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: "older conversation body",
+      createdAtMs: 1000,
+      insertedAtMs: 2000
+    };
+    const service = makeFakeService({
+      messages: [sample],
+      onListMessages: (input) => {
+        seenLimits.push(input?.limit ?? 0);
+      }
+    });
+    const host = makeFakeHost(service);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    render(
+      <MemoryRouter initialEntries={[`/messages/${peer}`]}>
+        <PluginHostProvider host={host}>
+          <Routes>
+            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
+          </Routes>
+        </PluginHostProvider>
+      </MemoryRouter>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("older conversation body")).toBeTruthy();
+    });
+    expect(seenLimits.some((limit) => limit >= 10_000)).toBe(true);
   });
 
   it("renders missing-service empty state when capability is missing (唯一降级路径)", async () => {

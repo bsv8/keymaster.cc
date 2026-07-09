@@ -27,6 +27,7 @@ interface ContactsEditorProps {
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
 const CONTACTS_EDITOR_CAPABILITY = "contacts.editor";
+const MESSAGE_READ_WINDOW = 10_000;
 
 export function MessagePage(): JSX.Element {
   const i18n = useI18n();
@@ -79,7 +80,7 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
         return;
       }
       try {
-        const items = await service.listMessages({ limit: 500 });
+        const items = await service.listMessages({ limit: MESSAGE_READ_WINDOW });
         if (!cancelled) setMessages(items);
       } catch {
         if (!cancelled) setMessages([]);
