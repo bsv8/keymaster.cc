@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useCurrentPath, useI18n, usePluginHost, useRegistry, router } from "@keymaster/runtime";
+import { useCapability, useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   InitialActivationNotice,
@@ -115,14 +115,21 @@ export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [activationNotice, setActivationNotice] =
     useState<InitialActivationNotice | null>(null);
+  const [notices, setNotices] = useState<NoticeRecord[]>([]);
   const [guard, setGuard] = useState<ShellGuardState>({ kind: "normal" });
+  const host = usePluginHost();
   const vault = useCapability<VaultService>("vault.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const path = useCurrentPath();
   const { t } = useI18n();
-  const notices = useRegistry((h) => h.notice.list());
   // 触发 languageChanged 重渲染。
   useI18n().language();
+
+  useEffect(() => {
+    // notice 变化与 host.version 无关，shell 需要直接订阅 notice registry，
+    // 才能保证挂载后新增 / 更新 notice 立即进入当前 React 树。
+    return host.notice.subscribe(setNotices);
+  }, [host]);
 
   useEffect(() => {
     if (!vault || typeof vault.onInitialActivationNoticeChange !== "function") {
@@ -236,6 +243,7 @@ export function AppShell() {
             defaultValue: "读取 key 列表时出错；为避免误删数据，壳层守卫已暂停自动恢复路径。"
           })}
         />
+        <NoticeRail host={host} notices={notices} />
         <EmptyState
           title={t("shell.appShell.diagnostic.errorTitle", { defaultValue: "读取失败" })}
           description={guard.error}
@@ -260,6 +268,7 @@ export function AppShell() {
             defaultValue: "检测到 Vault 内已无 key，正在回到首启页面。"
           })}
         />
+        <NoticeRail host={host} notices={notices} />
       </div>
     );
   }
@@ -284,6 +293,7 @@ export function AppShell() {
         setMobileOpen,
         activationNotice,
         dismissNotice,
+        host,
         notices,
         t
       });
@@ -305,6 +315,7 @@ export function AppShell() {
             />
           ) : null}
           <main className="app-shell__main">
+            <NoticeRail host={host} notices={notices} />
             <RepairGuard
               keys={guard.keys}
               onGoToKeyManagement={() => router.push(KEY_MANAGEMENT_PATH)}
@@ -322,6 +333,7 @@ export function AppShell() {
     setMobileOpen,
     activationNotice,
     dismissNotice,
+    host,
     notices,
     t
   });
@@ -332,6 +344,7 @@ interface NormalShellArgs {
   setMobileOpen: (next: boolean | ((prev: boolean) => boolean)) => void;
   activationNotice: InitialActivationNotice | null;
   dismissNotice: () => void;
+  host: ReturnType<typeof usePluginHost>;
   notices: NoticeRecord[];
   t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
 }
@@ -341,6 +354,7 @@ function renderNormalShell({
   setMobileOpen,
   activationNotice,
   dismissNotice,
+  host,
   notices,
   t
 }: NormalShellArgs) {
@@ -374,13 +388,11 @@ function renderNormalShell({
             onClick={() => setMobileOpen(false)}
           />
           ) : null}
-        <main className={`app-shell__main${notices.length > 0 ? " has-notice-rail" : ""}`}>
-          <NoticeRail notices={notices} />
+        <main className="app-shell__main">
+          <NoticeRail host={host} notices={notices} />
           {/*
-            硬切换 013：把「面包屑下方业务页」包进 .app-shell__paged，
-            让窄屏 grid 收敛规则有明确的边界——repair 分支虽然也在
-            .app-shell__main 里但不进这个 wrapper，因此不会被纳入，
-            也就不依赖「repair 恰好没 actions」这个隐性不变量。
+            notice rail 现在是内容区顶部整宽块；业务页仍只挂在
+            .app-shell__paged 里，避免 rail 和 route 内容互相耦合。
           */}
           <div className="app-shell__paged">
             <Breadcrumbs />
@@ -394,12 +406,12 @@ function renderNormalShell({
 }
 
 interface NoticeRailProps {
+  host: ReturnType<typeof usePluginHost>;
   notices: NoticeRecord[];
 }
 
-function NoticeRail({ notices }: NoticeRailProps) {
+function NoticeRail({ host, notices }: NoticeRailProps) {
   const { t } = useI18n();
-  const host = usePluginHost();
   if (notices.length === 0) return null;
   return (
     <aside className="app-notice-rail" aria-label={t("shell.noticeRail.label", { defaultValue: "紧急通知" })}>

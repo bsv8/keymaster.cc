@@ -243,17 +243,12 @@ button { font-family: inherit; }
   gap: 16px;
   align-items: start;
 }
-.app-shell__main.has-notice-rail {
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
-}
 .app-notice-rail {
-  order: 2;
+  width: 100%;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  position: sticky;
-  top: 16px;
-  align-self: start;
+  min-width: 0;
 }
 .app-notice-rail__header {
   display: flex;
@@ -269,18 +264,11 @@ button { font-family: inherit; }
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
-.app-notice-rail__overflow {
-  font-size: 12px;
-  color: var(--text-dim);
-}
 .app-notice-rail__list {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: min(72vh, calc(100vh - 140px));
-  overflow-y: auto;
-  padding-right: 4px;
-  scrollbar-gutter: stable;
+  width: 100%;
 }
 .app-notice-card {
   background: linear-gradient(180deg, color-mix(in srgb, var(--primary) 10%, var(--surface)), var(--surface));
@@ -1167,10 +1155,6 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   .app-topbar__nav-toggle { display: inline-flex; }
   .app-shell__body { display: block; }
   .app-shell__main { grid-template-columns: minmax(0, 1fr); }
-  .app-notice-rail {
-    position: static;
-    order: 0;
-  }
   .app-sidebar {
     position: fixed;
     top: 0; bottom: 0; left: 0;

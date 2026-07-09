@@ -71,6 +71,24 @@ function createHost() {
   });
   host.capabilities.provide<VaultService>("vault.service", makeVault());
   host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
+  host.routes.register({
+    id: "test.messages.list",
+    path: "/messages",
+    label: { key: "test.messages.list", fallback: "Messages" },
+    component: () => <div data-testid="messages-route">Messages route</div>
+  });
+  host.routes.register({
+    id: "test.messages.detail",
+    path: "/messages/:publicKeyHex",
+    label: { key: "test.messages.detail", fallback: "Conversation" },
+    component: () => <div data-testid="messages-detail-route">Messages detail route</div>
+  });
+  host.routes.register({
+    id: "test.message.detail.alias",
+    path: "/message/:publicKeyHex",
+    label: { key: "test.message.detail.alias", fallback: "Conversation alias" },
+    component: () => <div data-testid="message-detail-alias-route">Message alias route</div>
+  });
   return host;
 }
 
@@ -94,17 +112,18 @@ afterEach(() => {
 });
 
 describe("AppShell notice rail", () => {
-  it("renders all notices instead of clipping to 3", async () => {
+  it("renders notices after mount when the registry is updated later", async () => {
     const host = createHost();
-    for (let index = 1; index <= 5; index += 1) {
-      host.notice.upsert(makeNotice(String(index)));
-    }
 
     render(
       <PluginHostProvider host={host}>
         <AppShell />
       </PluginHostProvider>
     );
+
+    for (let index = 1; index <= 5; index += 1) {
+      host.notice.upsert(makeNotice(String(index)));
+    }
 
     await waitFor(() => {
       expect(document.querySelectorAll("[data-notice-id]").length).toBe(5);
@@ -130,5 +149,59 @@ describe("AppShell notice rail", () => {
     await waitFor(() => {
       expect(window.location.pathname).toBe("/settings/vault");
     });
+  });
+
+  it("shows the same notice under the /messages route", async () => {
+    const host = createHost();
+    window.history.pushState({}, "", "/messages");
+
+    render(
+      <PluginHostProvider host={host}>
+        <AppShell />
+      </PluginHostProvider>
+    );
+
+    host.notice.upsert(makeNotice("messages", "/messages/peer"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Notice messages")).toBeTruthy();
+    });
+    expect(screen.getByTestId("messages-route")).toBeTruthy();
+  });
+
+  it("shows the same notice under the /messages/:publicKeyHex route", async () => {
+    const host = createHost();
+    window.history.pushState({}, "", "/messages/peer");
+
+    render(
+      <PluginHostProvider host={host}>
+        <AppShell />
+      </PluginHostProvider>
+    );
+
+    host.notice.upsert(makeNotice("detail", "/messages/peer"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Notice detail")).toBeTruthy();
+    });
+    expect(screen.getByTestId("messages-detail-route")).toBeTruthy();
+  });
+
+  it("shows the same notice under the /message/:publicKeyHex alias route", async () => {
+    const host = createHost();
+    window.history.pushState({}, "", "/message/peer");
+
+    render(
+      <PluginHostProvider host={host}>
+        <AppShell />
+      </PluginHostProvider>
+    );
+
+    host.notice.upsert(makeNotice("alias", "/message/peer"));
+
+    await waitFor(() => {
+      expect(screen.getByText("Notice alias")).toBeTruthy();
+    });
+    expect(screen.getByTestId("message-detail-alias-route")).toBeTruthy();
   });
 });
