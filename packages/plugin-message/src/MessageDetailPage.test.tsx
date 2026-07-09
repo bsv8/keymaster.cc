@@ -3,7 +3,6 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
-import { MemoryRouter, Route, Routes } from "react-router";
 import type {
   ActiveKeyState,
   AppMsgMessage,
@@ -155,6 +154,7 @@ function makeFakeHost(service: MessageService | null): PluginHost {
 describe("MessageDetailPage in PluginHostProvider", () => {
   afterEach(() => {
     cleanup();
+    window.history.pushState({}, "", "/");
   });
 
   it("renders conversation body when peer is in scope", async () => {
@@ -174,14 +174,11 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     const service = makeFakeService({ messages: [sample] });
     const host = makeFakeHost(service);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
     render(
-      <MemoryRouter initialEntries={[`/messages/${peer}`]}>
-        <PluginHostProvider host={host}>
-          <Routes>
-            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
-          </Routes>
-        </PluginHostProvider>
-      </MemoryRouter>
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
     );
     await waitFor(() => {
       expect(screen.getByText("detail body text")).toBeTruthy();
@@ -196,14 +193,11 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     const service = makeFakeService({ messages: [] });
     const host = makeFakeHost(service);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
     render(
-      <MemoryRouter initialEntries={[`/messages/${peer}`]}>
-        <PluginHostProvider host={host}>
-          <Routes>
-            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
-          </Routes>
-        </PluginHostProvider>
-      </MemoryRouter>
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
     );
     await waitFor(() => {
       expect(screen.getByText("message.page.detail.empty")).toBeTruthy();
@@ -233,14 +227,11 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     });
     const host = makeFakeHost(service);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
     render(
-      <MemoryRouter initialEntries={[`/messages/${peer}`]}>
-        <PluginHostProvider host={host}>
-          <Routes>
-            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
-          </Routes>
-        </PluginHostProvider>
-      </MemoryRouter>
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
     );
     await waitFor(() => {
       expect(screen.getByText("older conversation body")).toBeTruthy();
@@ -251,14 +242,11 @@ describe("MessageDetailPage in PluginHostProvider", () => {
   it("renders missing-service empty state when capability is missing (唯一降级路径)", async () => {
     const host = makeFakeHost(null);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", "/messages/any");
     render(
-      <MemoryRouter initialEntries={["/messages/any"]}>
-        <PluginHostProvider host={host}>
-          <Routes>
-            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
-          </Routes>
-        </PluginHostProvider>
-      </MemoryRouter>
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
     );
     await waitFor(() => {
       expect(screen.getByText("message.page.noClient")).toBeTruthy();
@@ -269,14 +257,11 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     const service = makeFakeService({ messages: [] });
     const host = makeFakeHost(service);
     const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", "/messages/x");
     render(
-      <MemoryRouter initialEntries={["/messages/x"]}>
-        <PluginHostProvider host={host}>
-          <Routes>
-            <Route path="/messages/:publicKeyHex" element={<MessageDetailPage />} />
-          </Routes>
-        </PluginHostProvider>
-      </MemoryRouter>
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
     );
     await waitFor(() => {
       expect(screen.getByRole("heading", { name: "x" })).toBeTruthy();

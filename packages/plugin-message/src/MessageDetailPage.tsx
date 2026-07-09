@@ -8,9 +8,8 @@
 //   - 联系人名称优先来自 contacts.service，缺失时回退短公钥。
 
 import { useEffect, useMemo, useState } from "react";
-import { useCapability, useI18n, router } from "@keymaster/runtime";
+import { useCapability, useCurrentPath, useI18n, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
-import { useParams } from "react-router";
 import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
 import { listConversationMessages, shortPublicKeyHex } from "./messageConversation.js";
@@ -20,8 +19,8 @@ const MESSAGE_READ_WINDOW = 10_000;
 
 export function MessageDetailPage(): JSX.Element {
   const i18n = useI18n();
-  const params = useParams<{ publicKeyHex?: string }>();
-  const peerPublicKeyHex = typeof params.publicKeyHex === "string" ? decodeURIComponent(params.publicKeyHex) : "";
+  const currentPath = useCurrentPath();
+  const peerPublicKeyHex = parsePeerPublicKeyHexFromPath(currentPath);
   const service = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const contacts = useCapabilityOrNull<ContactsService>(CONTACTS_SERVICE_CAPABILITY);
@@ -224,5 +223,17 @@ function formatTime(ms: number): string {
     return new Date(ms).toLocaleString();
   } catch {
     return String(ms);
+  }
+}
+
+function parsePeerPublicKeyHexFromPath(path: string): string {
+  const segments = path.split("/").filter(Boolean);
+  if (segments.length !== 2 || segments[0] !== "messages") {
+    return "";
+  }
+  try {
+    return decodeURIComponent(segments[1] ?? "");
+  } catch {
+    return segments[1] ?? "";
   }
 }
