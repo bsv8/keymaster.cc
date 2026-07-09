@@ -26,6 +26,7 @@ import type {
   ActiveBroadcastProviderSnapshot,
   BroadcastConnectOutcome,
   BroadcastCore,
+  BroadcastCoreOps,
   BroadcastCoreSnapshot,
   BroadcastCoreState,
   BroadcastMessage,
@@ -46,6 +47,7 @@ import type {
   VaultService
 } from "@keymaster/contracts";
 import {
+  BROADCAST_ACTIVE_PROVIDER_ID_STORAGE_KEY,
   BROADCAST_DEFAULT_RECONNECT_DELAY_MS,
   HUBCAST_ENVELOPE_VERSION_V1,
   cborDecode,
@@ -87,6 +89,29 @@ export interface BroadcastCoreConfig {
     warn?: (input: unknown) => void;
     error?: (input: unknown) => void;
   };
+  /**
+   * localStorage 句柄（用于 active provider id 持久化）。
+   *
+   * 设计缘由：
+   *   - SSR / Node 测试下 localStorage 不存在；装配层注入 fallback
+   *     （内存 map）保证核心不致空指针；
+   *   - 装配层**不**直接读写 storage key；统一走 core 注入。
+   */
+  storage?: StorageLike;
+}
+
+/**
+ * Storage 句柄的最小抽象（装配层注入）。
+ *
+ * 实现要点：
+ *   - 浏览器环境注入真实 `window.localStorage`；
+ *   - 测试 / Node 环境注入内存 `Map<string,string>` 替代实现；
+ *   - 任何异常（disabled / quota）返回 `null` / silently no-op。
+ */
+export interface StorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
 }
 
 /**
@@ -144,9 +169,15 @@ class BroadcastProviderRegistryImpl implements BroadcastProviderRegistry {
   private readonly handlers = new Set<(snap: ActiveBroadcastProviderSnapshot) => void>();
   /** 由 core 注入的"active 变化时执行 rebind"回调。 */
   private rebindHook: (() => void | Promise<void>) | null = null;
+  /** 由 core 注入的"provider 注册完成"回调；用于自动激活决策。 */
+  private registerHook: ((provider: BroadcastProvider) => void) | null = null;
 
   setRebindHook(hook: (() => void | Promise<void>) | null): void {
     this.rebindHook = hook;
+  }
+
+  setRegisterHook(hook: ((provider: BroadcastProvider) => void) | null): void {
+    this.registerHook = hook;
   }
 
   register(provider: BroadcastProvider): void {
@@ -156,9 +187,15 @@ class BroadcastProviderRegistryImpl implements BroadcastProviderRegistry {
       );
     }
     this.providers.set(provider.id, provider);
-    // 新注册时若当前无 active 且持久化默认值匹配，**不**自动激活：
-    // 广播系统本次不持久化 activeProviderId（v1 不带管理页），由装配
-    // 层在合适时机显式 setActive。
+    // 通知 core 让它运行"自动激活决策"——见 `BroadcastCoreImpl` 内部
+    // 注册的 registerHook。
+    if (this.registerHook) {
+      try {
+        this.registerHook(provider);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   unregister(providerId: string): void {
@@ -253,7 +290,7 @@ class BroadcastProviderRegistryImpl implements BroadcastProviderRegistry {
  *   - 不持有历史 / 不持久化订阅；
  *   - 重连策略固定为"远端断开 5 秒后重试"，不做指数退避。
  */
-export class BroadcastCoreImpl implements BroadcastCore {
+export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   private readonly cfg: BroadcastCoreConfig;
   private readonly registry = new BroadcastProviderRegistryImpl();
   /** 当前 bound session。null = 未连接。 */
@@ -276,16 +313,151 @@ export class BroadcastCoreImpl implements BroadcastCore {
   private nextReconnectAtMsValue: number | null = null;
   /** connectForOwner 内部 epoch；自增代表"被同实例另一次 connectForOwner 抢占"。 */
   private connectEpochValue = 0;
+  /**
+   * 用户主动清空信号（true = 显式 setActive(null) 已发生）。
+   *
+   * 设计缘由（施工单 2026-07-08 001 §4.5 + §8.四）：
+   *   - 用户在管理页主动 setActive(null) 后，**不**允许"默认自动
+   *     抢回"覆盖用户意愿；
+   *   - 只在用户切换到另一个 provider 时才清；
+   *   - 装配层在 setup 阶段按"持久值匹配 → 自动激活 / 否则等显式
+   *     选择"决定是否立刻 activate。
+   */
+  private userCleared = false;
 
   constructor(cfg: BroadcastCoreConfig) {
     this.cfg = cfg;
     this.registry.setRebindHook(() => this.rebindForCurrentOwner());
+    // 注册 hook：每当新 provider 注册，立即评估默认激活路径。
+    // 见 `onProviderRegistered()`。
+    this.registry.setRegisterHook((p) => this.onProviderRegistered(p));
   }
 
   /* ============== registry ============== */
 
   providers(): BroadcastProviderRegistry {
     return this.registry;
+  }
+
+  /* ============== active provider ops ============== */
+
+  /**
+   * 切换 active provider；写入持久化 + 完成内部 setActive。
+   *
+   * 关键语义（施工单 §8.四）：
+   *   - providerId === null = 显式清空；写入 storage + 设 userCleared；
+   *   - providerId !== null = 切换；写入 storage + 清 userCleared；
+   *   - providerId 不在已注册集合里 → reject；
+   *   - 注册表 setActive 后 core 内部会触发 rebind；本方法不在内部
+   *     做额外 bind 等待。
+   */
+  async setActiveProviderId(providerId: string | null): Promise<void> {
+    await this.registry.setActive(providerId);
+    if (providerId === null) {
+      this.userCleared = true;
+      try {
+        this.cfg.storage?.removeItem(BROADCAST_ACTIVE_PROVIDER_ID_STORAGE_KEY);
+      } catch {
+        // ignore
+      }
+    } else {
+      this.userCleared = false;
+      try {
+        this.cfg.storage?.setItem(
+          BROADCAST_ACTIVE_PROVIDER_ID_STORAGE_KEY,
+          providerId
+        );
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  /**
+   * 当前 active provider id；未选择或正等待默认激活时返回 null。
+   */
+  getActiveProviderId(): string | null {
+    return this.registry.activeSnapshot().providerId;
+  }
+
+  /**
+   * 装配层在 setup 阶段决定初始 active provider 时调用。
+   *
+   * 语义：
+   *   - 若 storage 中已有持久值且对应 provider 已在注册表中 → 激活；
+   *   - 否则若 userCleared === false 且当前注册表非空 → 激活注册表中
+   *     第一个 provider（按 register 顺序）；
+   *   - 显式清空过一次（userCleared === true）→ **不**自动激活；
+   *   - 注册表为空 → 直接 no-op。
+   *
+   * 设计缘由（施工单 §4.5）：
+   *   - 缺省行为必须与"显式清空"严格区分：装配层 boot 时如果 storage
+   *     没值，按"用户没表达过偏好"处理 → 给一个默认值；
+   *   - 用户主动 setActive(null) 后即使 storage 也有值（因为被显式
+   *     清空 → removeItem），下一次启动也按 userCleared=true 处理
+   *     → 不默认激活。
+   */
+  bootstrapActiveProvider(): boolean {
+    const stored = readPersistedProviderId(this.cfg.storage);
+    if (stored !== null) {
+      const all = this.registry.list();
+      const p = all.find((pp) => pp.id === stored);
+      if (p) {
+        void this.setActiveProviderId(p.id);
+        return true;
+      }
+    }
+    if (this.userCleared) return false;
+    const all = this.registry.list();
+    if (all.length === 0) return false;
+    const first = all[0];
+    if (!first) return false;
+    void this.setActiveProviderId(first.id);
+    return true;
+  }
+
+  /**
+   * 标记"用户在管理页显式 setActive(null) 过一次"。
+   *
+   * 用法：本方法由 core 内部在 setActiveProviderId(null) 路径调用；
+   * 也供装配层在测试 / 跨场景注入（例如 plugin 重启但 storage 被清理）。
+   */
+  markUserCleared(): void {
+    this.userCleared = true;
+  }
+
+  /** 当前是否显式清空过（仅诊断 / 测试使用）。 */
+  hasUserCleared(): boolean {
+    return this.userCleared;
+  }
+
+  /**
+   * 默认激活决策：每当新 provider 注册时调用一次。
+   *
+   * 语义（施工单 §4.5 + §8.四）：
+   *   - 若当前 active 已确定（持久值命中或用户显式选过） → 不动；
+   *   - 若 storage 里有持久值且该 provider 已在注册表 → 激活；
+   *   - 否则若 userCleared === true → **不**自动激活（尊重用户清空）；
+   *   - 否则若这是注册表里第一个 provider 且 userCleared === false →
+   *     自动激活为 active。
+   *
+   * 失败语义：本方法只触发 setActive；setActive 内部不抛错。
+   */
+  private onProviderRegistered(provider: BroadcastProvider): void {
+    if (this.userCleared) return;
+    if (this.registry.activeSnapshot().providerId !== null) return;
+    const stored = readPersistedProviderId(this.cfg.storage);
+    if (stored !== null) {
+      if (stored === provider.id) {
+        void this.setActiveProviderId(provider.id);
+        return;
+      }
+      // 持久值不匹配当前 provider：不动；让其它路径决定。
+      return;
+    }
+    // 无持久值、用户没有显式清空、当前无 active →
+    // 把当前 provider 自动激活为默认值。
+    void this.setActiveProviderId(provider.id);
   }
 
   /* ============== 连接管理 ============== */
@@ -734,6 +906,27 @@ function hexToBytes(hex: string): Uint8Array {
     out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
   }
   return out;
+}
+
+/**
+ * 读取 localStorage 中的持久化 active provider id。
+ *
+ * 关键约束：
+ *   - storage 缺失 / 抛错 → 返回 null；
+ *   - 空字符串 / 非字符串 → 返回 null；
+ *   - storage 里有值但对应 provider **当前未注册** 也返回该值（让
+ *     调用方决定是否激活；本函数不做注册表检查）。
+ */
+function readPersistedProviderId(storage: StorageLike | undefined): string | null {
+  if (!storage) return null;
+  let raw: string | null = null;
+  try {
+    raw = storage.getItem(BROADCAST_ACTIVE_PROVIDER_ID_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  return raw;
 }
 
 /* ============== 重新导出（向后兼容 + 测试便捷） ============== */

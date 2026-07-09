@@ -79,6 +79,15 @@ import {
   type AppMsgContentType,
   type AppViewContext,
   type BinaryField,
+  type BroadcastCore,
+  type BroadcastMessage,
+  type BroadcastMessagePublicView,
+  type BroadcastPublishParams,
+  type BroadcastPublishResult,
+  type BroadcastSubscriptionListParams,
+  type BroadcastSubscriptionListResult,
+  type BroadcastSubscriptionSetParams,
+  type BroadcastSubscriptionSetResult,
   type CipherDecryptParams,
   type CipherDecryptResult,
   type CipherEncryptParams,
@@ -256,6 +265,19 @@ export interface ProtocolServiceDeps {
    * fail-closed（与 `p2pkh.service` 缺时 `p2pkh.transfer` 的降级对称）。
    */
   appMsgCore?: AppMsgCore;
+  /**
+   * 可选 broadcast.core 平台能力（施工单 2026-07-08 001 硬切换）。
+   *
+   * `protocolService` **不**直接持有 wire / provider handle；`broadcast.*`
+   * 三个 method 通过 `BroadcastCore` 公开 facade 调用：
+   *   - `broadcast.publish` → `core.publish(...)`；
+   *   - `broadcast.subscription_set` / `_list` → 由 service 内部维护 caller
+   *     维度的订阅集合，挂到 `core.subscribe(...)`。
+   *
+   * `undefined` 时 `broadcast.*` 全部走 internal_error fail-closed
+   * （与 `appmsg.core` 缺时 `appmsg.*` 的降级对称）。
+   */
+  broadcastCore?: BroadcastCore;
   /** 用于调试 / 日志的 logger（任意形状）。 */
   logger?: { info?: (input: unknown) => void; warn?: (input: unknown) => void; error?: (input: unknown) => void };
   /** 自定义 source window（默认取 `window.opener`）。 */
@@ -799,6 +821,11 @@ export class ProtocolServiceImpl implements ProtocolService {
     this.launchTokensByToken.clear();
     // 施工单 2026-06-30 002 硬切换：endSession 清空 owner runtimes。
     this.ownerRuntimesBySessionId.clear();
+    // 施工单 2026-07-08 001 硬切换：endSession 清空所有 caller 的
+    // broadcast 订阅集合（不残留 union）。
+    for (const sid of this.callerSubscriptionsBySessionId.keys()) {
+      this.cleanupCallerBroadcastSubscriptions(sid);
+    }
     this.emit();
     this.emitFeed();
   }
@@ -2550,6 +2577,29 @@ export class ProtocolServiceImpl implements ProtocolService {
       return;
     }
 
+    // 施工单 2026-07-08 001 硬切换：broadcast.* 与 appmsg.* 同语义：
+    //   - 不参与 popup 命令流 confirm UI；
+    //   - locked 时 fail-fast；
+    //   - unlocked 时直接 queued（auto-execute）。
+    if (
+      parsed.method === "broadcast.publish" ||
+      parsed.method === "broadcast.subscription_set" ||
+      parsed.method === "broadcast.subscription_list"
+    ) {
+      if (this.lockStateValue === "locked") {
+        this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
+        return;
+      }
+      rec.autoExecuteAfterUnlock = true;
+      this.setRecordPhase(recordId, "queued");
+      rec.enteredPhaseAt = Date.now();
+      this.executionQueue.push(recordId);
+      this.emit();
+      this.emitFeed();
+      void this.drainExecutionQueue();
+      return;
+    }
+
     // manual confirm 路径（identity.get / intent.sign / p2pkh.transfer /
     // feepool.*）。
     this.applyManualPhaseDecision(recordId, origin, false);
@@ -3454,6 +3504,12 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeAppMsgList(rec);
         case "appmsg.get":
           return await this.executeAppMsgGet(rec);
+        case "broadcast.publish":
+          return await this.executeBroadcastPublish(rec);
+        case "broadcast.subscription_set":
+          return await this.executeBroadcastSubscriptionSet(rec);
+        case "broadcast.subscription_list":
+          return await this.executeBroadcastSubscriptionList(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -4409,6 +4465,302 @@ export class ProtocolServiceImpl implements ProtocolService {
     // v1 简化：本单只保证 session 真值仍有效即可；后续如有 lastUsedAt
     // 持久化策略可在此补。当前不持久化 lastUsedAt 也满足施工单要求。
     return;
+  }
+
+  /* ============== broadcast.*（施工单 2026-07-08 001） ============== */
+
+  /**
+   * broadcast 协议族：直接消费 `BroadcastCore`，不接触 wire / handle。
+   *
+   * 关键约束（施工单 §4.4 + §5.2）：
+   *   - 每个 connectSessionId 对应一份"caller 订阅集合"；
+   *   - `subscription_set` 是 replace 语义，不是 add/remove；
+   *   - protocol 层**不**做重连、不持有 provider handle；
+   *   - 真值始终在 `BroadcastCore`；
+   *   - caller 销毁 / popup 关闭时清掉 caller 自己的订阅。
+   *
+   * 业务方订阅与本地 union 的关系：
+   *   - core.inspect().subscribedChannels = "由所有 caller / 业务插件"
+   *     共同贡献的 union；
+   *   - 每个 caller 自己只看到自己贡献的那部分（list 返回）。
+   */
+
+  /**
+   * 广播方法共享前同步校验：
+   *   - connectSessionId 非空；
+   *   - session 真实存在且未 revoke；
+   *   - core 已就绪（active provider + bound）。
+   */
+  /**
+   * 异步校验 broadcast.* 入参：拿 session 真值 + 当前 caller 订阅集合。
+   *
+   * 失败语义：
+   *   - broadcast core 不可用 → internal_error；
+   *   - sessionId 不存在 / 已 revoke → invalid_request；
+   *   - session origin !== 当前 caller origin → invalid_origin。
+   *
+   * session 真值解析复用现有 `fetchSessionForBinding`：与 cipher.* /
+   * appmsg.* / p2pkh 共用同一份 storage 真值。
+   */
+  private async requireBroadcastSession(
+    rec: RequestRecord,
+    params: { connectSessionId?: string }
+  ): Promise<{
+    session: ConnectSessionRecord;
+    sessionId: string;
+    channelIds: string[];
+  }> {
+    if (!this.deps.broadcastCore) {
+      throw localFailure("internal_error", "broadcast.core not available");
+    }
+    const sessionId = params.connectSessionId;
+    if (typeof sessionId !== "string" || sessionId.length === 0) {
+      throw protocolError("invalid_request", "broadcast.*: connectSessionId required");
+    }
+    let session: ConnectSessionRecord | null = null;
+    try {
+      session = await this.fetchSessionForBinding(sessionId);
+    } catch (err) {
+      this.deps.logger?.warn?.({
+        scope: "protocol.broadcast",
+        event: "requireBroadcastSession.dbError",
+        sessionId,
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw protocolError("invalid_request", "broadcast.*: session storage unavailable");
+    }
+    if (!session) {
+      throw protocolError("invalid_request", "broadcast.*: unknown sessionId");
+    }
+    if (session.origin !== rec.origin) {
+      throw protocolError("invalid_origin", "broadcast.*: origin mismatch");
+    }
+    return {
+      session,
+      sessionId,
+      channelIds: this.callerSubscriptions(sessionId)
+    };
+  }
+
+  private async executeBroadcastPublish(rec: RequestRecord): Promise<BroadcastPublishResult> {
+    const core = this.deps.broadcastCore as BroadcastCore;
+    const params = rec.params as BroadcastPublishParams;
+    // session 真值校验（与 cipher.* 一致：fail-fast）。
+    await this.requireBroadcastSession(rec, params);
+    // 1. 基本字段校验
+    if (typeof params.channelId !== "string" || params.channelId.length === 0) {
+      throw protocolError("invalid_request", "broadcast.publish: channelId required");
+    }
+    if (typeof params.protocolId !== "string" || params.protocolId.length === 0) {
+      throw protocolError("invalid_request", "broadcast.publish: protocolId required");
+    }
+    if (typeof params.clientMessageId !== "string" || params.clientMessageId.length === 0) {
+      throw protocolError("invalid_request", "broadcast.publish: clientMessageId required");
+    }
+    if (typeof params.createdAtMs !== "number" || params.createdAtMs <= 0) {
+      throw protocolError("invalid_request", "broadcast.publish: createdAtMs must be > 0");
+    }
+    if (typeof params.bodyBase64 !== "string") {
+      throw protocolError("invalid_request", "broadcast.publish: bodyBase64 must be string");
+    }
+    // 2. bodyBase64 → Uint8Array
+    let bodyBytes: Uint8Array;
+    try {
+      bodyBytes = base64ToBytes(params.bodyBase64);
+    } catch {
+      throw protocolError("invalid_request", "broadcast.publish: bodyBase64 invalid");
+    }
+    // 3. 当前 active provider 必须就绪（与 cipher.* 一致：fail-fast）。
+    if (!core.isReady()) {
+      throw localFailure("internal_error", "broadcast.publish: core not ready");
+    }
+    // 4. 调用 core.publish（core 内部按当前 owner 签名 envelope）。
+    const msg = await core.publish({
+      channelId: params.channelId,
+      protocolId: params.protocolId,
+      clientMessageId: params.clientMessageId,
+      createdAtMs: params.createdAtMs,
+      bodyBytes
+    });
+    return {
+      channelId: msg.channelId,
+      protocolId: msg.protocolId,
+      clientMessageId: msg.clientMessageId,
+      createdAtMs: msg.createdAtMs,
+      bodyBase64: bytesToBase64(msg.bodyBytes),
+      publisherPublicKeyHex: msg.publisherPublicKeyHex
+    };
+  }
+
+  private async executeBroadcastSubscriptionSet(
+    rec: RequestRecord
+  ): Promise<BroadcastSubscriptionSetResult> {
+    const core = this.deps.broadcastCore as BroadcastCore;
+    const params = rec.params as BroadcastSubscriptionSetParams;
+    const { session, sessionId } = await this.requireBroadcastSession(rec, params);
+    if (!Array.isArray(params.channelIds)) {
+      throw protocolError(
+        "invalid_request",
+        "broadcast.subscription_set: channelIds must be array"
+      );
+    }
+    for (const ch of params.channelIds) {
+      if (typeof ch !== "string" || ch.length === 0) {
+        throw protocolError("invalid_request", "broadcast.subscription_set: invalid channelId");
+      }
+    }
+    // 1. 替换 caller 维度的本地订阅集合。
+    this.setCallerSubscriptions(sessionId, params.channelIds);
+    // 2. 在 core 上挂一条 caller 自己的订阅；同一 caller 多次 set
+    // 走 replace：覆盖旧 handle、保留同一 unsubscribe 入口。
+    const handle = (msg: BroadcastMessage): void => {
+      if (!this.shouldDeliverToCaller(sessionId, msg.channelId)) return;
+      this.pushBroadcastMessageToCaller(sessionId, msg);
+    };
+    this.subscribeCallerChannelIds(sessionId, params.channelIds, handle);
+    // 3. 记 caller source（event 推送目标 window + origin）。
+    this.callerSourceAndOriginBySessionId.set(sessionId, {
+      source: rec.source,
+      origin: rec.origin
+    });
+    void core;
+    void session; // session 主要用于 origin 校验；set 后再次发 set 也按相同校验路径
+    return { channelIds: [...params.channelIds] };
+  }
+
+  private async executeBroadcastSubscriptionList(
+    rec: RequestRecord
+  ): Promise<BroadcastSubscriptionListResult> {
+    const params = rec.params as BroadcastSubscriptionListParams;
+    const { channelIds } = await this.requireBroadcastSession(rec, params);
+    return { channelIds: [...channelIds] };
+  }
+
+  /**
+   * 内部：以 caller 维度维护 subscription 集合。
+   *
+   * `callerSubscriptionsBySessionId` key = connectSessionId（即 caller 真值）。
+   * 同一 sessionId 多次 set → 覆盖；空数组 = 清空。
+   */
+  private callerSubscriptionsBySessionId: Map<string, string[]> = new Map();
+
+  /** 当前 caller 订阅的频道集合副本。 */
+  private callerSubscriptions(sessionId: string): string[] {
+    const list = this.callerSubscriptionsBySessionId.get(sessionId);
+    return list ? [...list] : [];
+  }
+
+  /** 替换当前 caller 订阅集合（**不**直接发 core.subscribe；由 caller dispose 后再走 core）。 */
+  private setCallerSubscriptions(sessionId: string, channelIds: string[]): void {
+    this.callerSubscriptionsBySessionId.set(sessionId, [...channelIds]);
+  }
+
+  /**
+   * 在 core 上挂一条 caller 自己维护的订阅订阅；
+   * caller 销毁时（endSession 路径）清理。
+   */
+  private callerCoreSubscriptions: Map<
+    string,
+    { unsubscribe: () => void; handle: (msg: BroadcastMessage) => void }
+  > = new Map();
+
+  /**
+   * caller source window 映射（origin-bound）：用 postMessage 推 event
+   * 时使用。
+   *
+   * 设计缘由：event / result / closing 通道一律按 caller 的 session.origin
+   * 发送，**不**走 "*"。把 origin 一起存进 map，省去每次查 session。
+   */
+  private callerSourceAndOriginBySessionId: Map<
+    string,
+    { source: Window; origin: string }
+  > = new Map();
+
+  private subscribeCallerChannelIds(
+    sessionId: string,
+    channelIds: string[],
+    handle: (msg: BroadcastMessage) => void
+  ): void {
+    const core = this.deps.broadcastCore as BroadcastCore;
+    if (!core) return;
+    const existing = this.callerCoreSubscriptions.get(sessionId);
+    if (existing) {
+      try {
+        existing.unsubscribe();
+      } catch {
+        // ignore
+      }
+      this.callerCoreSubscriptions.delete(sessionId);
+    }
+    if (channelIds.length === 0) return;
+    const unsubscribe = core.subscribe({
+      channelIds,
+      handler: handle
+    });
+    this.callerCoreSubscriptions.set(sessionId, { unsubscribe, handle });
+  }
+
+  /** 是否应把消息下推给当前 caller？按 exact channelId 在该 caller 订阅集合里判断。 */
+  private shouldDeliverToCaller(sessionId: string, channelId: string): boolean {
+    return this.callerSubscriptionsBySessionId.get(sessionId)?.includes(channelId) ?? false;
+  }
+
+  /**
+   * 把 core 推送的 BroadcastMessage 转成对外 event 推送给当前 caller。
+   *
+   * 设计缘由（施工单 §4.4 + §6.7）：
+   *   - 业务侧走 protocol 等价于走 Session Window transport；
+   *   - 必须复用既有 `postEventMessage(target, origin, msg)` 通道；
+   *     "result" / "event" / "closing" 通道都是 origin-bound；
+   *   - origin = session 绑定 origin（**不**用 "*"）；session window
+   *     跨 origin 后续导航后这条 session.source 在 popup 销毁时
+   *     会自然失效；
+   *   - `callerSourceBySessionId` 记录最近一次出现的 caller window。
+   */
+  private pushBroadcastMessageToCaller(
+    sessionId: string,
+    msg: BroadcastMessage
+  ): void {
+    const entry = this.callerSourceAndOriginBySessionId.get(sessionId);
+    if (!entry) return;
+    const event: ProtocolEventMessage = {
+      v: PROTOCOL_VERSION,
+      type: "event",
+      event: "broadcast.message_received",
+      data: {
+        message: this.bytesToBase64View(msg)
+      }
+    };
+    this.postEventMessage(entry.source, entry.origin, event);
+  }
+
+  private bytesToBase64View(msg: BroadcastMessage): BroadcastMessagePublicView {
+    return {
+      channelId: msg.channelId,
+      protocolId: msg.protocolId,
+      clientMessageId: msg.clientMessageId,
+      createdAtMs: msg.createdAtMs,
+      bodyBase64: bytesToBase64(msg.bodyBytes),
+      publisherPublicKeyHex: msg.publisherPublicKeyHex
+    };
+  }
+
+  /**
+   * 在 caller 销毁 / session revoke / connect.logout 路径上调用：
+   * 把 caller 自己的订阅从 core 摘掉。
+   */
+  private cleanupCallerBroadcastSubscriptions(sessionId: string): void {
+    const existing = this.callerCoreSubscriptions.get(sessionId);
+    if (existing) {
+      try {
+        existing.unsubscribe();
+      } catch {
+        // ignore
+      }
+      this.callerCoreSubscriptions.delete(sessionId);
+    }
+    this.callerSubscriptionsBySessionId.delete(sessionId);
+    this.callerSourceAndOriginBySessionId.delete(sessionId);
   }
 
   /* ============== p2pkh.transfer ============== */
@@ -5855,6 +6207,36 @@ function toBinaryField(bytes: Uint8Array, mime?: string) {
   return mime
     ? { $type: "binary" as const, bytes: ab, mime }
     : { $type: "binary" as const, bytes: ab };
+}
+
+/* ============== base64 helpers（broadcast.* 协议族 2026-07-08 001） ============== */
+
+/**
+ * base64 → Uint8Array。
+ *
+ * 失败语义：抛 Error（由 caller catch 并 translate 为 `invalid_request`）。
+ */
+function base64ToBytes(b64: string): Uint8Array {
+  // 兼容浏览器 / Node：atob 在浏览器天然存在；Node 18+ 也自带 globalThis.atob；
+  // 这里走 atob + 手写 char-to-byte，避免依赖 Buffer。
+  if (typeof b64 !== "string") throw new Error("base64 input not string");
+  const cleaned = b64.replace(/[^A-Za-z0-9+/=]/g, "");
+  const bin = (globalThis as { atob?: (s: string) => string }).atob?.(cleaned ?? "");
+  if (typeof bin !== "string") throw new Error("atob unavailable");
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * Uint8Array → base64 string。
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  if (!(bytes instanceof Uint8Array)) return "";
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] ?? 0);
+  const b64 = (globalThis as { btoa?: (s: string) => string }).btoa?.(bin ?? "");
+  return typeof b64 === "string" ? b64 : "";
 }
 
 function valToCbor(v: unknown): CborValue {

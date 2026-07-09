@@ -1,0 +1,87 @@
+/* packages/plugin-bsv-price/src/styles.css
+ * BSV 价格页样式（施工单 2026-07-08 001）。
+ */
+
+.km-bsv-price-page {
+  padding: 24px;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.km-bsv-price-page__title {
+  font-size: 1.4rem;
+  font-weight: 600;
+  margin: 0 0 16px;
+}
+
+.km-bsv-price-page__row {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--km-divider, #e2e2e2);
+}
+
+.km-bsv-price-page__label {
+  color: var(--km-text-muted, #777);
+  font-size: 0.9rem;
+}
+
+.km-bsv-price-page__value {
+  word-break: break-all;
+}
+
+.km-bsv-price-page__mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+
+.km-bsv-price-page__section {
+  margin-top: 24px;
+}
+
+.km-bsv-price-page__section-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0 0 12px;
+}
+
+.km-bsv-price-page__empty {
+  color: var(--km-text-muted, #999);
+  font-style: italic;
+}
+
+.km-bsv-price-page__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.95rem;
+}
+
+.km-bsv-price-page__table th,
+.km-bsv-price-page__table td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--km-divider, #eee);
+}
+
+.km-bsv-price-page__table th {
+  font-weight: 600;
+  background: var(--km-bg-subtle, #f7f7f9);
+}
+
+.km-bsv-price-page__exchange {
+  font-weight: 500;
+}
+
+.km-bsv-price-page__price {
+  text-align: right;
+}
+
+.km-bsv-price-page__error {
+  margin-top: 16px;
+  padding: 8px;
+  background: var(--km-bg-error, #fff2f2);
+  border-left: 3px solid var(--km-danger, #c33);
+  color: var(--km-danger, #c33);
+  font-size: 0.85rem;
+}

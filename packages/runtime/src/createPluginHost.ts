@@ -309,7 +309,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       has: (k) => capabilities.has(k),
       require: (k) => capabilities.require(k),
       messageBus,
-      logger: logService.forPlugin(record.manifest.id)
+      logger: logService.forPlugin(record.manifest.id),
+      // 2026-07-08 001 硬切换：plugin 作者通过 `manifest.config` 注入的
+      // 强类型配置真值；缺省 = `{}`，插件对每个字段自处理缺值降级。
+      config: record.manifest.config ?? {}
     };
   }
 

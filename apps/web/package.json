@@ -14,6 +14,7 @@
     "@keymaster/plugin-apps": "*",
     "@keymaster/plugin-assets": "*",
     "@keymaster/plugin-broadcast": "*",
+    "@keymaster/plugin-bsv-price": "*",
     "@keymaster/plugin-background": "*",
     "@keymaster/plugin-collectible-1satordinals": "*",
     "@keymaster/plugin-collectible-transfer": "*",

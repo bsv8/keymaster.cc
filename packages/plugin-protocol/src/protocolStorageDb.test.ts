@@ -18,6 +18,10 @@ import type {
 } from "@keymaster/contracts";
 import { openProtocolStorageDb } from "./protocolStorageDb.js";
 
+function makeVersionChangeEvent(type: string): IDBVersionChangeEvent {
+  return new Event(type) as IDBVersionChangeEvent;
+}
+
 function makeRecord(
   id: string,
   origin: string,
@@ -308,7 +312,7 @@ describe("openProtocolStorageDb", () => {
     const req = {} as IDBOpenDBRequest;
     const openSpy = vi.spyOn(indexedDB, "open").mockImplementation(() => {
       setTimeout(() => {
-        req.onblocked?.(new Event("blocked"));
+        req.onblocked?.(makeVersionChangeEvent("blocked"));
       }, 0);
       return req;
     });
@@ -330,14 +334,14 @@ describe("openProtocolStorageDb", () => {
     const req = { result: fakeDb } as IDBOpenDBRequest;
     const openSpy = vi.spyOn(indexedDB, "open").mockImplementation(() => {
       setTimeout(() => {
-        req.onsuccess?.(new Event("success"));
+        req.onsuccess?.(makeVersionChangeEvent("success"));
       }, 0);
       return req;
     });
     try {
       await openProtocolStorageDb();
       expect(typeof fakeDb.onversionchange).toBe("function");
-      fakeDb.onversionchange?.(new Event("versionchange"));
+      fakeDb.onversionchange?.(makeVersionChangeEvent("versionchange"));
       expect(close).toHaveBeenCalledTimes(1);
     } finally {
       openSpy.mockRestore();

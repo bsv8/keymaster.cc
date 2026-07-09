@@ -772,3 +772,62 @@ export type HubCastWireBroadcastReceivedEvent = readonly [
  * journal。断线后回来即可。
  */
 export const BROADCAST_DEFAULT_RECONNECT_DELAY_MS = 5_000;
+
+/* ============== active provider 持久化（施工单 2026-07-08 001） ============== */
+
+/**
+ * active provider id 持久化的 localStorage key。
+ *
+ * 设计缘由：
+ *   - 走 `localStorage` 而**不**走 IndexedDB，原因：active provider
+ *     选择是高频、低体量、单 key 单 value 的系统级配置；localStorage
+ *     同步 API 足以承载，避免引入异步路径；
+ *   - key 名固定在 contracts；装配层只**读**不**改**该 key 名；
+ *   - 该 key 缺失 / 值为 null / 值不是已注册 provider id 时，core 走
+ *     "默认值语义"（参见 `BroadcastProviderRegistry.setActive` 文档）。
+ */
+export const BROADCAST_ACTIVE_PROVIDER_ID_STORAGE_KEY = "keymaster.broadcast.activeProviderId";
+
+/**
+ * 持久化的 active provider id 真值类型。
+ *
+ * 设计缘由：v1 只持久化 id；显示名 / 健康状态每次从 `inspect()` 派生。
+ * 持久化"把当前选中的 provider 记下来"，**不**持久化"某 provider 是否
+ * 健康"。
+ */
+export type PersistedBroadcastProviderId = string | null;
+
+/* ============== core 公开扩展（施工单 2026-07-08 001） ============== */
+
+/**
+ * BroadcastCore 暴露给管理页 / 业务的扩展能力。
+ *
+ * 设计缘由：
+ *   - v1 把 activeProviderId 的持久化 / 默认值语义统一收到 core；
+ *   - 装配层只需 `core.providers()` 注册 provider；core 自己根据
+ *     localStorage 持久值 + 默认值 + 显式 `setActive(null)` 决策；
+ *   - 管理页直接 `await core.setActiveProviderId("hubcast")` 切换，
+ *     core 内部负责落盘 + 触发 rebind。
+ */
+export interface BroadcastCoreOps {
+  /**
+   * 切换 active provider。
+   *
+   * @param providerId 要切换到的 provider id；`null` 显式清空。
+   * @returns 设置成功；providerId 不在已注册集合里时 reject。
+   *
+   * 失败语义：
+   *   - `providerId === null` → 当前 active 立即清空；
+   *   - `providerId` 不在已注册集合里 → reject。
+   *
+   * 设置成功 = 持久化已写入 localStorage + core 内 setActive 已完成 +
+   * rebind 已被调度（fire-and-forget）。
+   */
+  setActiveProviderId(providerId: string | null): Promise<void>;
+  /**
+   * 当前 active provider id；未选择或正等待默认激活时返回 null。
+   *
+   * 语义与 `inspect().providerId` 一致；本方法是供管理页快速读用。
+   */
+  getActiveProviderId(): string | null;
+}

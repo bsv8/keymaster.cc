@@ -93,6 +93,9 @@ importers:
       '@keymaster/plugin-broadcast':
         specifier: '*'
         version: link:../../packages/plugin-broadcast
+      '@keymaster/plugin-bsv-price':
+        specifier: '*'
+        version: link:../../packages/plugin-bsv-price
       '@keymaster/plugin-collectible-1satordinals':
         specifier: '*'
         version: link:../../packages/plugin-collectible-1satordinals
@@ -243,12 +246,30 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
       '@noble/curves':
         specifier: ^2.2.0
         version: 2.2.0
       '@noble/hashes':
         specifier: ^2.2.0
         version: 2.2.0
+
+  packages/plugin-bsv-price:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
 
   packages/plugin-collectible-1satordinals:
     dependencies:

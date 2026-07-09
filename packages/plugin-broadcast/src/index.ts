@@ -14,15 +14,22 @@ export {
 export {
   BroadcastCoreImpl,
   type BroadcastCoreConfig,
-  type BroadcastSignerContext
+  type BroadcastSignerContext,
+  type StorageLike
 } from "./broadcastCore.js";
 export {
   createReconnectCoordinator,
   type ReconnectLogger,
   type CreateReconnectCoordinatorInput
 } from "./reconnectCoordinator.js";
+export {
+  createBroadcastService,
+  type BroadcastService
+} from "./broadcastService.js";
+export { BroadcastPage } from "./BroadcastPage.js";
 export type {
   BroadcastCore,
+  BroadcastCoreOps,
   BroadcastProvider,
   BroadcastProviderHandle,
   BroadcastProviderOperations,

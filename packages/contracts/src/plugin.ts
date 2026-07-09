@@ -31,6 +31,20 @@ export interface PluginContext {
    *   - child(scope) 仅用于在同一插件内细分模块。
    */
   logger: PluginLogger;
+  /**
+   * 当前 plugin 的显式配置面（施工单 2026-07-08 001 硬切换）。
+   *
+   * 由装配层在 `registerPlugin(manifest)` 期间按 `manifest.config` 注入；
+   * plugin 的 `setup(ctx)` 直接按 `ctx.config?.[key]` 读取。
+   *
+   * 关键边界：
+   *   - 这是 plugin **唯一**允许读取"装配层注入真值"的接口；
+   *   - **不**允许 plugin 反向写入 `ctx.config`（只读视图）；
+   *   - 缺值时按 plugin 自己声明的降级路径处理（如显示"未配置"）；
+   *   - 与 `PluginConfigStore`（启停配置）**不**共用：后者是 runtime
+   *     内部 store；前者是插件作者自定义字段。
+   */
+  readonly config?: Record<string, unknown>;
 }
 
 /** 插件依赖描述。 */
@@ -95,6 +109,23 @@ export interface PluginManifest {
    * 的 key 相关 DB。
    */
   keyScopedStorages?: PluginKeyStorageDeclaration[];
+  /**
+   * 显式配置面（施工单 2026-07-08 001 硬切换）。
+   *
+   * 设计缘由：
+   *   - 装配层（`apps/web/src/bootstrapPlugins.ts`）按依赖顺序对每个
+   *     plugin 注入一份强类型配置真值；
+   *   - 插件自己的 `setup` 通过 `ctx.config` 直接读；
+   *   - **不**走 `globalThis.__XXX__` 隐式注入路径；
+   *   - **不**走运行时编辑器（本次硬切换明确不做）；
+   *   - 缺省 `{}`：插件必须对每个字段做"缺值时降级到无害空态"处理。
+   *
+   * 用途示例：
+   *   - `plugin-bsv-price` 的 `pricePublisherPublicKeyHex` —— PriceCast
+   *     publisher 公钥 hex 强配置注入；
+   *   - 任何"装配层硬编码的部署侧真值"都走这里。
+   */
+  config?: Record<string, unknown>;
   /**
    * 可选：插件的 i18n 资源。
    * 设计缘由：插件 setup 中可能引用自己的 i18n key 注册 route / menu / settings。

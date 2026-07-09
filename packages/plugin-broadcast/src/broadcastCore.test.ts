@@ -289,9 +289,14 @@ describe("BroadcastCoreImpl", () => {
     harness = await makeCore({ activeProvider: false });
     const reg = harness.core.providers();
     expect(reg.list().length).toBe(1);
+    // 2026-07-08 001 硬切换：core 在 `register()` 阶段会按 userCleared /
+    // 持久值决策自动 setActive；本次没有持久值且 userCleared=false →
+    // 第一个 provider 注册后立即成为默认 active。
+    expect(reg.activeSnapshot().providerId).toBe("hubcast");
     const dup = new FakeProvider("hubcast");
     expect(() => reg.register(dup)).toThrow(/already registered/);
-    expect(reg.activeSnapshot().providerId).toBeNull();
+    // 重复注册抛错后，原 active 保持不变；**不**回退到 null。
+    expect(reg.activeSnapshot().providerId).toBe("hubcast");
     await reg.setActive("hubcast");
     expect(reg.activeSnapshot().providerId).toBe("hubcast");
     reg.unregister("hubcast");
@@ -556,4 +561,84 @@ describe("BroadcastCoreImpl", () => {
     expect(arr[5]).toBe(1234);
     expect(arr[6]).toBeInstanceOf(Uint8Array);
   });
+
+  /* ============== 2026-07-08 001 硬切换:active provider 持久化/默认激活 ============== */
+
+  it("auto-activates the only registered provider when nothing is persisted and user has not cleared", async () => {
+    const mem = new Map<string, string>();
+    const core = BroadcastCoreImpl.create({
+      signerProvider: async () => null,
+      keyspace: makeFakeKeyspace(PUB_HEX),
+      vault: makeFakeVault(true),
+      reconnectDelayMs: 5_000,
+      storage: memLike(mem)
+    });
+    expect(core.getActiveProviderId()).toBeNull();
+    core.providers().register(new FakeProvider("hubcast"));
+    expect(core.getActiveProviderId()).toBe("hubcast");
+    // storage 写入是 fire-and-forget 的异步副作用；轮询直到命中或超时。
+    await waitFor(() => mem.get("keymaster.broadcast.activeProviderId") === "hubcast", 1000);
+  });
+
+  it("does NOT auto-activate after user explicitly cleared active", async () => {
+    const mem = new Map<string, string>();
+    const core = BroadcastCoreImpl.create({
+      signerProvider: async () => null,
+      keyspace: makeFakeKeyspace(PUB_HEX),
+      vault: makeFakeVault(true),
+      reconnectDelayMs: 5_000,
+      storage: memLike(mem)
+    });
+    await core.setActiveProviderId(null);
+    core.providers().register(new FakeProvider("hubcast"));
+    expect(core.getActiveProviderId()).toBeNull();
+  });
+
+  it("restores persisted provider id when matching registered provider is found", async () => {
+    const mem = new Map<string, string>([["keymaster.broadcast.activeProviderId", "hubcast"]]);
+    const core = BroadcastCoreImpl.create({
+      signerProvider: async () => null,
+      keyspace: makeFakeKeyspace(PUB_HEX),
+      vault: makeFakeVault(true),
+      reconnectDelayMs: 5_000,
+      storage: memLike(mem)
+    });
+    core.providers().register(new FakeProvider("hubcast"));
+    expect(core.getActiveProviderId()).toBe("hubcast");
+  });
 });
+
+/**
+ * 测试内存 storage 适配器：等价于浏览器 localStorage 的最小子集。
+ */
+function memLike(map: Map<string, string>): {
+  getItem(k: string): string | null;
+  setItem(k: string, v: string): void;
+  removeItem(k: string): void;
+} {
+  return {
+    getItem: (k) => (map.has(k) ? (map.get(k) as string) : null),
+    setItem: (k, v) => {
+      map.set(k, v);
+    },
+    removeItem: (k) => {
+      map.delete(k);
+    }
+  };
+}
+
+/**
+ * 极简轮询 helper：在 timeoutMs 内轮询 predicate；命中立即 resolve。
+ * 测试中 fire-and-forget 副作用的等待用。
+ */
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (predicate()) return;
+    await new Promise<void>((r) => setTimeout(r, 5));
+  }
+  throw new Error(`waitFor timeout after ${timeoutMs}ms`);
+}

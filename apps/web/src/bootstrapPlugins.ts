@@ -21,6 +21,7 @@ import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
 import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
 import { broadcastPlatformPlugin } from "@keymaster/plugin-broadcast";
+import { bsvPricePlugin } from "@keymaster/plugin-bsv-price";
 import { hubcastPlatformPlugin } from "@keymaster/plugin-hubcast";
 import { hubmsgPlatformPlugin } from "@keymaster/plugin-hubmsg";
 import { messagePlatformPlugin } from "@keymaster/plugin-message";
@@ -45,6 +46,7 @@ import { stasTokenPlugin } from "@keymaster/plugin-token-stas";
 import { transferPlugin } from "@keymaster/plugin-transfer";
 import { vaultPlugin } from "@keymaster/plugin-vault";
 import { wocPlugin } from "@keymaster/plugin-woc";
+import { bsvPriceConfig } from "./pluginConfigs.js";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
 
 /**
@@ -183,11 +185,40 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     wifImporterPlugin,
     hexImporterPlugin,
     jsonFileImporterPlugin,
+    // 施工单 2026-07-08 001 硬切换：plugin-bsv-price 必须在 hubcast 注册
+    // 完成之后才能 setup（它依赖 `broadcast.core`）；放在 hubcast 之后、
+    // apps 之前，与 broadcast -> protocol 序列保持一致。
+    bsvPricePlugin,
     appsPlugin
   ];
 
-  for (const plugin of ordered) {
+  // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 显式注入
+  // `pricePublisherPublicKeyHex` 配置；这条真值直接出现在
+  // `bsvPricePlugin.config`，由 plugin 自己从 `ctx.config` 读取。
+  //
+  // 关键约束：
+  //   - 装配层**不**自己改 plugin manifest；改为把已构造好的 `config`
+  //     对象透传给 plugin；plugin 用 `ctx.config[BSV_PRICE_CONFIG_KEY]`
+  //     读；
+  //   - 配置来源集中：`pluginConfigs.ts`；
+  //   - plugin 自己**不**走 `globalThis.__XXX__` 隐式注入路径。
+  //
+  // 这里用 `withConfig` 给 bsvPricePlugin 临时挂上 config，避免对其它
+  // plugin 的 manifest 顺序造成影响。
+  const orderedWithConfig: PluginManifest[] = ordered.map((p) => {
+    if (p.id === "bsv-price") {
+      return { ...p, config: { ...bsvPriceConfig } };
+    }
+    return p;
+  });
+
+  for (const plugin of orderedWithConfig) {
     await registerPluginWithTimeout(host, plugin);
   }
+
+  // 施工单 2026-07-08 001：plugin-broadcast 在 hubcast 注册之后由
+  // registry.register hook 自动激活默认 active provider；此处不需要
+  // 显式调用。如果未来变更激活策略，改为在这里显式调
+  // `host.capabilities.get<BroadcastCore>(BROADCAST_CORE_CAPABILITY).bootstrapActiveProvider()`。
   return host;
 }
