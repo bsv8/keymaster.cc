@@ -227,6 +227,46 @@ describe("HubMsgConnectionImpl", () => {
       })
     );
   });
+
+  it("request accepts result frame whose inactive bytes field is null", async () => {
+    globalThis.WebSocket = FakeSocket as unknown as typeof WebSocket;
+
+    const signer = {
+      publicKeyHex: "02aa".padEnd(66, "a"),
+      signChallenge: vi.fn(async () => "11".repeat(64))
+    };
+    const conn = new HubMsgConnectionImpl({ url: "wss://hubmsg.test/ws/v1" });
+    const connectPromise = conn.connect(signer);
+    const sock = requireValue(FakeSocket.instances[0], "test: missing fake socket");
+
+    sock.receive(
+      cborEncode([
+        1,
+        HUB_FRAME_KIND.ServerOpen,
+        cborEncode(["sid-1", "nonce-1", 45])
+      ])
+    );
+    await vi.waitFor(() => expect(sock.sent).toHaveLength(1));
+    sock.receive(cborEncode([1, HUB_FRAME_KIND.BindReady, cborEncode(["sid-1"])]));
+    await connectPromise;
+
+    const reqPromise = conn.request<Uint8Array>(HUBMSG_METHOD.MessageOnline, cborEncode([]));
+    await vi.waitFor(() => expect(sock.sent).toHaveLength(2));
+    const reqFrame = decodeFrame(requireValue(sock.sent[1], "test: missing request frame"));
+    expect(reqFrame.kind).toBe(HUB_FRAME_KIND.Request);
+    const requestId = reqFrame.body[0];
+    expect(typeof requestId).toBe("string");
+
+    sock.receive(
+      cborEncode([
+        1,
+        HUB_FRAME_KIND.Result,
+        cborEncode([requestId, true, cborEncode(["02aa".padEnd(66, "a")]), null])
+      ])
+    );
+
+    await expect(reqPromise).resolves.toBeInstanceOf(Uint8Array);
+  });
 });
 
 describe("HubMsgProviderOperations", () => {

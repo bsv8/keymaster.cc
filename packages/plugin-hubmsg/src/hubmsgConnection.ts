@@ -247,13 +247,16 @@ function decodeResultBody(body: Uint8Array): HubFrameResultBody {
     !Array.isArray(v) ||
     v.length !== 4 ||
     typeof v[0] !== "string" ||
-    typeof v[1] !== "boolean" ||
-    !(v[2] instanceof Uint8Array) ||
-    !(v[3] instanceof Uint8Array)
+    typeof v[1] !== "boolean"
   ) {
     throw new Error("HubMsg: result body must be [requestId, ok, resultBytes, errorBytes]");
   }
-  return [v[0], v[1], v[2] as Uint8Array, v[3] as Uint8Array];
+  const resultBytes = normalizeOptionalBytes(v[2]);
+  const errorBytes = normalizeOptionalBytes(v[3]);
+  if (!resultBytes || !errorBytes) {
+    throw new Error("HubMsg: result body field types invalid");
+  }
+  return [v[0], v[1], resultBytes, errorBytes];
 }
 
 function encodeEventBody(body: HubFrameEventBody): Uint8Array {
@@ -1176,6 +1179,12 @@ function decodeResultError(bytes: Uint8Array): { code: string; message: string }
     return { code: "unknown", message: "HubMsg: request failed" };
   }
   return { code: raw[0], message: raw[1] };
+}
+
+function normalizeOptionalBytes(value: unknown): Uint8Array | null {
+  if (value === null) return new Uint8Array();
+  if (value instanceof Uint8Array) return value;
+  return null;
 }
 
 /* ============== 对外 typed 接口（HubMsgProviderOperations） ============== */
