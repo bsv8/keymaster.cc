@@ -151,6 +151,37 @@ describe("AppShell notice rail", () => {
     });
   });
 
+  it("navigates to the singular /message route when an action provides navigateTo", async () => {
+    const host = createHost();
+    host.notice.upsert({
+      ...makeNotice("action"),
+      actions: [
+        {
+          id: "accept",
+          label: "Accept",
+          variant: "primary",
+          run: async () => undefined,
+          navigateTo: "/message/peer",
+          autoDismiss: true
+        }
+      ]
+    });
+
+    render(
+      <PluginHostProvider host={host}>
+        <AppShell />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("Accept")).toBeTruthy();
+    });
+    fireEvent.click(screen.getByText("Accept"));
+    await waitFor(() => {
+      expect(window.location.pathname).toBe("/message/peer");
+    });
+  });
+
   it("shows the same notice under the /messages route", async () => {
     const host = createHost();
     window.history.pushState({}, "", "/messages");
@@ -187,7 +218,7 @@ describe("AppShell notice rail", () => {
     expect(screen.getByTestId("messages-detail-route")).toBeTruthy();
   });
 
-  it("shows the same notice under the /message/:publicKeyHex alias route", async () => {
+  it("shows the same notice under the /message/:publicKeyHex route", async () => {
     const host = createHost();
     window.history.pushState({}, "", "/message/peer");
 

@@ -11,10 +11,9 @@
 //         稳定长寿的 `AppMsgEndpointService`（endpoint = plugin endpoint
 //         `keymaster.webrtc`）；
 //       * service 内部自动处理 owner / provider 变化；本插件**不**关心；
-//       * 页面 = `/system/webrtc`（工作台）与 `/settings/webrtc`（STUN 设置）；
-//   - 菜单入口**仅**放 system 分组（系统工具型业务，不是主业务入口）；
-//   - settings 走 `settings.registry` 单一真值——**不**再同时进
-//     route.registry / menu.registry（硬切换 003）。
+//       * 页面 = `/settings/webrtc`（STUN 设置）；
+//   - `/system/webrtc` 工作台已退出主流程，不再注册 route / menu / breadcrumb；
+//   - settings 走 `settings.registry` 单一真值。
 //   - i18n namespace：`webrtc`。
 
 import type {
@@ -24,11 +23,8 @@ import type {
   I18nPluginResources,
   KeyspaceService,
   PluginManifest,
-  SettingsRegistry,
-  RouteRegistry,
-  MenuRegistry,
-  BreadcrumbRegistry,
-  NoticeRegistry
+  NoticeRegistry,
+  SettingsRegistry
 } from "@keymaster/contracts";
 import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import {
@@ -36,10 +32,8 @@ import {
   WEBRTC_ENDPOINT_ID,
   WEBRTC_PLUGIN_ID,
   WEBRTC_SERVICE_CAPABILITY,
-  WEBRTC_SETTINGS_PATH,
-  WEBRTC_WORKBENCH_PATH
+  WEBRTC_SETTINGS_PATH
 } from "./constants.js";
-import { WebrtcPage } from "./WebrtcPage.js";
 import { WebrtcSettingsPage } from "./WebrtcSettingsPage.js";
 import {
   createLocalStorageWebrtcConfigStore,
@@ -218,12 +212,6 @@ export const webrtcPlugin: PluginManifest = {
     },
     { capability: "keyspace.service", reason: "打开 key-scoped 历史库" },
     { capability: "notice.registry", reason: "投递全局紧急 notice" },
-    { capability: "route.registry", reason: "注册 /system/webrtc 路由" },
-    { capability: "menu.registry", reason: "注册 system 分组菜单" },
-    {
-      capability: "breadcrumb.registry",
-      reason: "为 /system/webrtc 与 /settings/webrtc 提供面包屑"
-    },
     { capability: "settings.registry", reason: "注册 /settings/webrtc 设置详情页" }
   ],
   setup(ctx) {
@@ -278,39 +266,14 @@ export const webrtcPlugin: PluginManifest = {
     });
     ctx.provide(WEBRTC_SERVICE_CAPABILITY, service);
 
-    // routes
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    routes.register({
-      id: "webrtc.workbench",
-      path: WEBRTC_WORKBENCH_PATH,
-      label: { key: "webrtc.page.workbench.title", fallback: "WebRTC" },
-      component: WebrtcPage,
-      inMenu: false,
-      menuGroup: "system",
-      order: 80
-    });
-
-    // menus
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    menus.register({
-      id: "webrtc.workbench.menu",
-      label: { key: "webrtc.menu", fallback: "WebRTC" },
-      path: WEBRTC_WORKBENCH_PATH,
-      group: "system",
-      order: 80,
-      icon: "Radio"
-    });
-
-    // breadcrumbs
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
-    breadcrumbs.register({
-      id: "webrtc.workbench.crumbs",
-      order: 60,
-      match: (path) => path === WEBRTC_WORKBENCH_PATH,
-      resolve: () => [
-        { label: { key: "webrtc.breadcrumb.workbench", fallback: "WebRTC" } }
-      ]
-    });
+    const breadcrumbs = ctx.get<{
+      register(input: {
+        id: string;
+        order?: number;
+        match: (path: string) => boolean;
+        resolve: () => Array<{ label: { key: string; fallback: string } }>;
+      }): void;
+    }>("breadcrumb.registry");
     breadcrumbs.register({
       id: "webrtc.settings.crumbs",
       order: 60,

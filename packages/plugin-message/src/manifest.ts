@@ -17,8 +17,8 @@
 //         `message.service` capability。
 //   - 页面路由固定归本插件：
 //       * `/messages`                —— 会话列表
-//       * `/messages/:publicKeyHex`   —— 会话详情（主路由）
-//       * `/message/:publicKeyHex`    —— 会话详情别名，兼容旧口头路径
+//       * `/message/:publicKeyHex`    —— 会话详情（主承载路由）
+//       * `/messages/:publicKeyHex`   —— 会话详情别名，兼容旧口头路径
 //     **不**再注册 `/system/messages` / 系统菜单 / 系统面包屑——AppMsg
 //     管理面归 `plugin-appmsg` 的 `/system/appmsg`。
 
@@ -66,6 +66,31 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.empty": "No messages in this conversation.",
       "message.page.detail.empty.desc": "Send a message below to start the thread.",
       "message.page.detail.noConversation": "Conversation not found.",
+      "message.page.detail.call.title.video": "Video call",
+      "message.page.detail.call.title.audio": "Audio call",
+      "message.page.detail.call.peer": "Peer",
+      "message.page.detail.call.local": "Local",
+      "message.page.detail.call.remote": "Remote",
+      "message.page.detail.call.direction.incoming": "Incoming",
+      "message.page.detail.call.direction.outgoing": "Outgoing",
+      "message.page.detail.call.phase": "Phase",
+      "message.page.detail.call.mode": "Mode",
+      "message.page.detail.call.mode.audio": "Audio",
+      "message.page.detail.call.mode.video": "Video",
+      "message.page.detail.call.swap": "Swap",
+      "message.page.detail.call.fullscreen": "Fullscreen",
+      "message.page.detail.call.exitFullscreen": "Exit fullscreen",
+      "message.page.detail.call.accept": "Accept",
+      "message.page.detail.call.reject": "Decline",
+      "message.page.detail.call.hangup": "Hang up",
+      "message.page.detail.call.waitingRemote": "Waiting for remote video",
+      "message.page.detail.call.waitingLocal": "Waiting for local video",
+      "message.page.detail.call.phase.idle": "idle",
+      "message.page.detail.call.phase.inviting": "calling",
+      "message.page.detail.call.phase.incoming": "incoming",
+      "message.page.detail.call.phase.connecting": "connecting",
+      "message.page.detail.call.phase.connected": "connected",
+      "message.page.detail.call.phase.ended": "ended",
       "message.page.detail.from.me": "Me",
       "message.page.detail.timeline.call.audio": "Audio",
       "message.page.detail.timeline.call.video": "Video",
@@ -136,6 +161,31 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.empty": "当前会话暂无消息。",
       "message.page.detail.empty.desc": "在下方发送一条消息即可开始线程。",
       "message.page.detail.noConversation": "会话未找到。",
+      "message.page.detail.call.title.video": "视频通话",
+      "message.page.detail.call.title.audio": "音频通话",
+      "message.page.detail.call.peer": "对端",
+      "message.page.detail.call.local": "本地",
+      "message.page.detail.call.remote": "远端",
+      "message.page.detail.call.direction.incoming": "来电",
+      "message.page.detail.call.direction.outgoing": "呼出",
+      "message.page.detail.call.phase": "阶段",
+      "message.page.detail.call.mode": "模式",
+      "message.page.detail.call.mode.audio": "音频",
+      "message.page.detail.call.mode.video": "视频",
+      "message.page.detail.call.swap": "交换视频",
+      "message.page.detail.call.fullscreen": "全屏",
+      "message.page.detail.call.exitFullscreen": "退出全屏",
+      "message.page.detail.call.accept": "接听",
+      "message.page.detail.call.reject": "拒接",
+      "message.page.detail.call.hangup": "挂断",
+      "message.page.detail.call.waitingRemote": "等待对方画面",
+      "message.page.detail.call.waitingLocal": "等待本地画面",
+      "message.page.detail.call.phase.idle": "空闲",
+      "message.page.detail.call.phase.inviting": "呼叫中",
+      "message.page.detail.call.phase.incoming": "来电",
+      "message.page.detail.call.phase.connecting": "连接中",
+      "message.page.detail.call.phase.connected": "已接通",
+      "message.page.detail.call.phase.ended": "已结束",
       "message.page.detail.from.me": "我",
       "message.page.detail.timeline.call.audio": "音频",
       "message.page.detail.timeline.call.video": "视频",
@@ -226,11 +276,11 @@ export const messagePlatformPlugin: PluginManifest = {
     },
     { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
     { capability: "webrtc.service", reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
-    { capability: "route.registry", reason: "注册 /messages 与 /messages/:publicKeyHex 路由" },
+    { capability: "route.registry", reason: "注册 /message 与 /messages 详情路由" },
     { capability: "menu.registry", reason: "注册「消息」菜单项" },
     {
       capability: "breadcrumb.registry",
-      reason: "为 /messages 与 /messages/:publicKeyHex 提供面包屑"
+      reason: "为 /message 与 /messages 详情路由提供面包屑"
     }
   ],
   setup(ctx) {
@@ -287,14 +337,14 @@ export const messagePlatformPlugin: PluginManifest = {
     });
     routes.register({
       id: "message.detail",
-      path: "/messages/:publicKeyHex",
+      path: "/message/:publicKeyHex",
       label: { key: "message.page.detail.title", fallback: "Conversation" },
       component: MessageDetailPage,
       inMenu: false
     });
     routes.register({
       id: "message.detail.alias",
-      path: "/message/:publicKeyHex",
+      path: "/messages/:publicKeyHex",
       label: { key: "message.page.detail.title", fallback: "Conversation" },
       component: MessageDetailPage,
       inMenu: false
@@ -312,8 +362,8 @@ export const messagePlatformPlugin: PluginManifest = {
       order: 4,
       match: (path) =>
         path === "/messages" ||
-        /^\/messages\/[^/]+\/?$/.test(path) ||
-        /^\/message\/[^/]+\/?$/.test(path),
+        /^\/message\/[^/]+\/?$/.test(path) ||
+        /^\/messages\/[^/]+\/?$/.test(path),
       resolve: () => [
         { label: { key: "message.breadcrumb", fallback: "Messages" } }
       ]

@@ -2,7 +2,7 @@
 // 会话聚合纯函数。
 //
 // 设计缘由：
-//   - /messages 首页和 /messages/:publicKeyHex 详情页共用同一套会话归并规则；
+//   - /messages 首页和 /message/:publicKeyHex 详情页共用同一套会话归并规则；
 //   - 这里只放纯数据逻辑，不放 React 状态；
 //   - peer 身份只认 publicKeyHex。
 

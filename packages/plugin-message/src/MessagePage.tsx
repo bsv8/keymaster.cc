@@ -6,7 +6,7 @@
 //   - 联系人名称回填来自 contacts.service；
 //   - 新增 / 编辑联系人通过 contacts.editor capability 打开，message
 //     页面不复制联系人表单；
-//   - 会话主入口是 /messages/:publicKeyHex，而不是单条 messageId。
+//   - 会话详情主入口是 /message/:publicKeyHex，/messages/:publicKeyHex 仅作兼容别名；
 
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useCapability, useI18n, router } from "@keymaster/runtime";
@@ -225,7 +225,7 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
                 key={conversation.peerPublicKeyHex}
                 className="km-message-page__conversation"
                 data-peer-public-key-hex={conversation.peerPublicKeyHex}
-                onClick={() => router.push(`/messages/${encodeURIComponent(conversation.peerPublicKeyHex)}`)}
+                onClick={() => router.push(`/message/${encodeURIComponent(conversation.peerPublicKeyHex)}`)}
               >
                 <header className="km-message-page__conversation-header">
                   <div className="km-message-page__conversation-title-group">

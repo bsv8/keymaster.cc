@@ -9,7 +9,8 @@
 //   - **不**走 `<pluginId>.appmsg.client` 旧 capability（runtime 已经
 //     移除该注入路径）；
 //   - **不**暴露 `subscriptionSource()` 旧"subscription token"接口；
-//   - 页面 = `/system/webrtc`（工作台）与 `/settings/webrtc`（设置详情页）；
+//   - 页面主流程已收口到 `/settings/webrtc`；旧 `/system/webrtc` 工作台常量保留，
+//     但不再注册为用户可达入口；
 //   - **不**展示 AppMsg 连接态 / 在线查询 / 全库统计——这些由
 //     `plugin-appmsg` 的 `/system/appmsg` 管理页负责；
 //   - **不**做 TURN / 中继账号配置 / 通话记录 / 离线补偿。

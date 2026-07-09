@@ -574,7 +574,7 @@ export function createWebrtcService(input: {
         fallback: session.remotePublicKeyHex
       },
       createdAtMs: env.now(),
-      routeTo: `/messages/${encodeURIComponent(session.remotePublicKeyHex)}`,
+      routeTo: `/message/${encodeURIComponent(session.remotePublicKeyHex)}`,
       dismissible: false,
       actions: [
         {
@@ -584,7 +584,7 @@ export function createWebrtcService(input: {
           run: async () => {
             await acceptIncoming();
           },
-          navigateTo: `/messages/${encodeURIComponent(session.remotePublicKeyHex)}`,
+          navigateTo: `/message/${encodeURIComponent(session.remotePublicKeyHex)}`,
           autoDismiss: true
         },
         {

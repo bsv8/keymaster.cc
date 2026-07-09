@@ -20,7 +20,7 @@ export const WEBRTC_ENDPOINT_ID: AppMsgEndpointId = {
 /** plugin-webrtc 公开 service capability key。 */
 export const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
 
-/** 工作台路径（系统工具型，不放主业务菜单 → system 分组）。 */
+/** 旧工作台路径常量：主流程已退场，保留仅用于兼容引用。 */
 export const WEBRTC_WORKBENCH_PATH = "/system/webrtc";
 
 /** 设置详情页路径。 */

@@ -3,7 +3,7 @@
 // 设计缘由：
 //   - 路由参数是对端 publicKeyHex；
 //   - 文本消息与 WebRTC 历史分开存储、合并展示；
-//   - 发送动作保留文本输入，并在发送按钮后挂载 WebRTC 动作区；
+//   - 发送动作保留文本输入，并在正文区下方直接承载当前 peer 的通话面板；
 //   - 在线状态每 3 秒探测一次，离开页面立即停止。
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -13,7 +13,7 @@ import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@
 import type { MessageService } from "./messageService.js";
 import { buildMessageTimeline, type MessageTimelineItem } from "./messageTimeline.js";
 import { shortPublicKeyHex } from "./messageConversation.js";
-import type { WebrtcHistoryItem, WebrtcService } from "@keymaster/plugin-webrtc";
+import type { WebrtcHistoryItem, WebrtcService, WebrtcSessionSnapshot } from "@keymaster/plugin-webrtc";
 
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
@@ -59,10 +59,19 @@ export function MessageDetailPage(): JSX.Element {
   const [contact, setContact] = useState<Contact | null>(null);
   const [sendBody, setSendBody] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
+  const [webrtcSnapshot, setWebrtcSnapshot] = useState<WebrtcSessionSnapshot | null>(
+    () => webrtc?.snapshot() ?? null
+  );
+  const [callActionBusy, setCallActionBusy] = useState(false);
+  const [isLocalPrimary, setIsLocalPrimary] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE_MESSAGE_COUNT);
   const [onlineStatus, setOnlineStatus] = useState<"online" | "offline" | "unknown">("unknown");
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const callPanelRef = useRef<HTMLElement | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const service = messageService;
 
   useEffect(() => {
@@ -140,6 +149,19 @@ export function MessageDetailPage(): JSX.Element {
   }, [peerPublicKeyHex, webrtc]);
 
   useEffect(() => {
+    if (!webrtc) {
+      setWebrtcSnapshot(null);
+      return;
+    }
+    const off = webrtc.subscribe((snapshot) => {
+      setWebrtcSnapshot(snapshot);
+    });
+    return () => {
+      off();
+    };
+  }, [webrtc]);
+
+  useEffect(() => {
     let cancelled = false;
     if (!contacts || !peerPublicKeyHex) {
       setContact(null);
@@ -165,6 +187,28 @@ export function MessageDetailPage(): JSX.Element {
     setVisibleCount(DEFAULT_VISIBLE_MESSAGE_COUNT);
   }, [ownerPublicKeyHex, peerPublicKeyHex]);
 
+  const activeCallForCurrentPeer =
+    webrtcSnapshot &&
+    webrtcSnapshot.remotePublicKeyHex === peerPublicKeyHex &&
+    webrtcSnapshot.phase !== "idle" &&
+    webrtcSnapshot.phase !== "ended"
+      ? webrtcSnapshot
+      : null;
+  const isVideoSessionForCurrentPeer = activeCallForCurrentPeer?.mode === "video";
+  const hasAnyActiveWebrtcSession =
+    !!webrtcSnapshot && webrtcSnapshot.phase !== "idle" && webrtcSnapshot.phase !== "ended";
+  const activeCallTitleKey = isVideoSessionForCurrentPeer
+    ? "message.page.detail.call.title.video"
+    : "message.page.detail.call.title.audio";
+  const activeCallModeLabel = activeCallForCurrentPeer
+    ? i18n.t(`message.page.detail.call.mode.${activeCallForCurrentPeer.mode}`)
+    : "";
+  const activeCallPhaseLabel = activeCallForCurrentPeer
+    ? i18n.t(`message.page.detail.call.phase.${activeCallForCurrentPeer.phase}`, {
+        defaultValue: activeCallForCurrentPeer.phase
+      })
+    : "";
+
   const timeline = useMemo(() => {
     if (!ownerPublicKeyHex || !peerPublicKeyHex) return [];
     return buildMessageTimeline({
@@ -177,6 +221,46 @@ export function MessageDetailPage(): JSX.Element {
 
   const visibleItems = useMemo(() => timeline.slice(0, visibleCount), [timeline, visibleCount]);
   const hasMoreItems = timeline.length > visibleItems.length;
+
+  useEffect(() => {
+    if (!isVideoSessionForCurrentPeer) {
+      setIsLocalPrimary(false);
+      setIsFullscreen(false);
+    }
+  }, [isVideoSessionForCurrentPeer, peerPublicKeyHex]);
+
+  useEffect(() => {
+    if (!isVideoSessionForCurrentPeer) return;
+    const syncFullscreen = () => {
+      setIsFullscreen(document.fullscreenElement === callPanelRef.current);
+    };
+    document.addEventListener("fullscreenchange", syncFullscreen);
+    return () => {
+      document.removeEventListener("fullscreenchange", syncFullscreen);
+    };
+  }, [isVideoSessionForCurrentPeer]);
+
+  useEffect(() => {
+    if (!isVideoSessionForCurrentPeer) return;
+    const panel = callPanelRef.current;
+    const localEl = localVideoRef.current;
+    const remoteEl = remoteVideoRef.current;
+    if (!panel || !localEl || !remoteEl || !webrtc) return;
+    const offLocal = webrtc.attachToVideo("local", localEl);
+    const offRemote = webrtc.attachToVideo("remote", remoteEl);
+    return () => {
+      offLocal();
+      offRemote();
+    };
+  }, [
+    isVideoSessionForCurrentPeer,
+    isLocalPrimary,
+    webrtc,
+    activeCallForCurrentPeer?.hasLocalStream,
+    activeCallForCurrentPeer?.hasRemoteStream,
+    activeCallForCurrentPeer?.phase,
+    activeCallForCurrentPeer?.mode
+  ]);
 
   if (!service) {
     return (
@@ -221,6 +305,7 @@ export function MessageDetailPage(): JSX.Element {
 
   const title = contact?.name?.trim() ? contact.name : shortPublicKeyHex(peerPublicKeyHex);
   const actionsDisabled = onlineStatus !== "online";
+  const dialButtonsDisabled = actionsDisabled || hasAnyActiveWebrtcSession;
 
   async function sendText() {
     setSendError(null);
@@ -243,6 +328,10 @@ export function MessageDetailPage(): JSX.Element {
     if (!webrtc) return;
     if (actionsDisabled) {
       setSendError(i18n.t("message.page.detail.offline"));
+      return;
+    }
+    if (hasAnyActiveWebrtcSession) {
+      setSendError(i18n.t("message.page.detail.error.busy_local"));
       return;
     }
     try {
@@ -271,6 +360,41 @@ export function MessageDetailPage(): JSX.Element {
     }
   }
 
+  async function runCallAction(action: () => Promise<void>) {
+    if (!webrtc) return;
+    setSendError(null);
+    setCallActionBusy(true);
+    try {
+      await action();
+    } catch (err) {
+      setSendError(formatMessageDetailError(i18n, err));
+    } finally {
+      setCallActionBusy(false);
+    }
+  }
+
+  async function toggleFullscreen() {
+    const panel = callPanelRef.current;
+    if (!panel) return;
+    if (document.fullscreenElement === panel) {
+      if (typeof document.exitFullscreen !== "function") return;
+    try {
+      await document.exitFullscreen();
+      setIsFullscreen(false);
+    } catch {
+      return;
+    }
+    return;
+  }
+  if (typeof panel.requestFullscreen !== "function") return;
+  try {
+    await panel.requestFullscreen();
+    setIsFullscreen(true);
+  } catch {
+    return;
+  }
+  }
+
   return (
     <section className="km-message-detail" data-message-detail="ok" data-peer-public-key-hex={peerPublicKeyHex}>
       <header className="km-message-detail__header">
@@ -282,7 +406,7 @@ export function MessageDetailPage(): JSX.Element {
           <span className="km-message-detail__key">
             {shortPublicKeyHex(peerPublicKeyHex)}
           </span>
-            <span className="km-message-detail__status" data-online-status={onlineStatus}>
+          <span className="km-message-detail__status" data-online-status={onlineStatus}>
             {onlineStatus === "online"
               ? i18n.t("message.page.detail.online")
               : onlineStatus === "offline"
@@ -291,6 +415,194 @@ export function MessageDetailPage(): JSX.Element {
           </span>
         </div>
       </header>
+
+      {activeCallForCurrentPeer ? (
+        <section
+          className={`km-message-detail__call-panel ${
+            isVideoSessionForCurrentPeer
+              ? "km-message-detail__call-panel--video"
+              : "km-message-detail__call-panel--audio"
+          } ${isFullscreen ? "is-fullscreen" : ""}`}
+          ref={callPanelRef}
+          data-call-mode={activeCallForCurrentPeer.mode}
+          data-call-phase={activeCallForCurrentPeer.phase}
+        >
+          <header className="km-message-detail__call-panel-header">
+            <div className="km-message-detail__call-panel-headline">
+              <h2 className="km-message-detail__call-panel-title">
+                {i18n.t(activeCallTitleKey)}
+              </h2>
+              <div className="km-message-detail__call-panel-meta">
+                <span>
+                  {i18n.t("message.page.detail.call.peer")}: {shortPublicKeyHex(peerPublicKeyHex)}
+                </span>
+                <span>
+                  {i18n.t("message.page.detail.call.phase")}: {activeCallPhaseLabel}
+                </span>
+                <span>
+                  {i18n.t("message.page.detail.call.mode")}: {activeCallModeLabel}
+                </span>
+              </div>
+            </div>
+            <span className="km-message-detail__call-panel-direction">
+              {activeCallForCurrentPeer.direction === "incoming"
+                ? i18n.t("message.page.detail.call.direction.incoming")
+                : i18n.t("message.page.detail.call.direction.outgoing")}
+            </span>
+          </header>
+
+          {isVideoSessionForCurrentPeer ? (
+            <div
+              className={`km-message-detail__video-stage ${
+                isLocalPrimary
+                  ? "km-message-detail__video-stage--local-primary"
+                  : "km-message-detail__video-stage--remote-primary"
+              }`}
+            >
+              <section
+                className={`km-message-detail__video-tile km-message-detail__video-tile--primary ${
+                  isLocalPrimary ? "is-local" : "is-remote"
+                }`}
+              >
+                <span className="km-message-detail__video-tile-label">
+                  {isLocalPrimary
+                    ? i18n.t("message.page.detail.call.local")
+                    : i18n.t("message.page.detail.call.remote")}
+                </span>
+                {isLocalPrimary ? (
+                  activeCallForCurrentPeer.hasLocalStream ? (
+                    <video
+                      ref={localVideoRef}
+                      className="km-message-detail__video"
+                      autoPlay
+                      playsInline
+                      muted
+                    />
+                  ) : (
+                    <div className="km-message-detail__video-placeholder">
+                      {i18n.t("message.page.detail.call.waitingLocal")}
+                    </div>
+                  )
+                ) : activeCallForCurrentPeer.hasRemoteStream ? (
+                  <video
+                    ref={remoteVideoRef}
+                    className="km-message-detail__video"
+                    autoPlay
+                    playsInline
+                  />
+                ) : (
+                  <div className="km-message-detail__video-placeholder">
+                    {i18n.t("message.page.detail.call.waitingRemote")}
+                  </div>
+                )}
+              </section>
+              <section
+                className={`km-message-detail__video-tile km-message-detail__video-tile--secondary ${
+                  isLocalPrimary ? "is-remote" : "is-local"
+                }`}
+              >
+                <span className="km-message-detail__video-tile-label">
+                  {isLocalPrimary
+                    ? i18n.t("message.page.detail.call.remote")
+                    : i18n.t("message.page.detail.call.local")}
+                </span>
+                {isLocalPrimary ? (
+                  activeCallForCurrentPeer.hasRemoteStream ? (
+                    <video
+                      ref={remoteVideoRef}
+                      className="km-message-detail__video"
+                      autoPlay
+                      playsInline
+                    />
+                  ) : (
+                    <div className="km-message-detail__video-placeholder">
+                      {i18n.t("message.page.detail.call.waitingRemote")}
+                    </div>
+                  )
+                ) : activeCallForCurrentPeer.hasLocalStream ? (
+                  <video
+                    ref={localVideoRef}
+                    className="km-message-detail__video"
+                    autoPlay
+                    playsInline
+                    muted
+                  />
+                ) : (
+                  <div className="km-message-detail__video-placeholder">
+                    {i18n.t("message.page.detail.call.waitingLocal")}
+                  </div>
+                )}
+              </section>
+            </div>
+          ) : (
+            <div className="km-message-detail__audio-panel">
+              <div className="km-message-detail__audio-line">
+                {i18n.t("message.page.detail.call.peer")}: {shortPublicKeyHex(peerPublicKeyHex)}
+              </div>
+              <div className="km-message-detail__audio-line">
+                {i18n.t("message.page.detail.call.phase")}: {activeCallPhaseLabel}
+              </div>
+              <div className="km-message-detail__audio-line">
+                {i18n.t("message.page.detail.call.mode")}: {activeCallModeLabel}
+              </div>
+            </div>
+          )}
+
+          <div className="km-message-detail__call-panel-actions">
+            {activeCallForCurrentPeer.phase === "incoming" ? (
+              <>
+                <button
+                  className="km-message-detail__call-action km-message-detail__call-action--primary"
+                  type="button"
+                  disabled={callActionBusy}
+                  onClick={() => void runCallAction(() => webrtc!.acceptIncoming())}
+                >
+                  {i18n.t("message.page.detail.call.accept")}
+                </button>
+                <button
+                  className="km-message-detail__call-action"
+                  type="button"
+                  disabled={callActionBusy}
+                  onClick={() => void runCallAction(() => webrtc!.rejectIncoming())}
+                >
+                  {i18n.t("message.page.detail.call.reject")}
+                </button>
+              </>
+            ) : (
+              <button
+                className="km-message-detail__call-action km-message-detail__call-action--danger"
+                type="button"
+                disabled={callActionBusy}
+                onClick={() => void runCallAction(() => webrtc!.hangup())}
+              >
+                {i18n.t("message.page.detail.call.hangup")}
+              </button>
+            )}
+            {isVideoSessionForCurrentPeer ? (
+              <>
+                <button
+                  className="km-message-detail__call-action"
+                  type="button"
+                  onClick={() => setIsLocalPrimary((current) => !current)}
+                >
+                  {i18n.t("message.page.detail.call.swap")}
+                </button>
+                <button
+                  className="km-message-detail__call-action"
+                  type="button"
+                  onClick={() => {
+                    void toggleFullscreen();
+                  }}
+                >
+                  {isFullscreen
+                    ? i18n.t("message.page.detail.call.exitFullscreen")
+                    : i18n.t("message.page.detail.call.fullscreen")}
+                </button>
+              </>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
 
       <section className="km-message-detail__composer">
         <TextArea
@@ -307,7 +619,7 @@ export function MessageDetailPage(): JSX.Element {
           <button
             className="km-message-detail__action"
             type="button"
-            disabled={actionsDisabled}
+            disabled={dialButtonsDisabled}
             onClick={() => void startCall("video")}
           >
             {i18n.t("message.page.detail.video")}
@@ -315,7 +627,7 @@ export function MessageDetailPage(): JSX.Element {
           <button
             className="km-message-detail__action"
             type="button"
-            disabled={actionsDisabled}
+            disabled={dialButtonsDisabled}
             onClick={() => void startCall("audio")}
           >
             {i18n.t("message.page.detail.audio")}
@@ -370,7 +682,7 @@ export function MessageDetailPage(): JSX.Element {
           title={i18n.t("message.page.detail.empty")}
           description={i18n.t("message.page.detail.empty.desc")}
         />
-      ) : (
+          ) : (
         <>
           {hasMoreItems ? (
             <div className="km-message-detail__pager">
@@ -387,7 +699,7 @@ export function MessageDetailPage(): JSX.Element {
           ) : null}
           <ul className="km-message-detail__thread">
             {visibleItems.map((item) => (
-                <li key={describeTimelineItem(item)} className="km-message-detail__timeline-item">
+              <li key={describeTimelineItem(item)} className="km-message-detail__timeline-item">
                 {renderTimelineItem(item, {
                   i18n,
                   ownerPublicKeyHex,

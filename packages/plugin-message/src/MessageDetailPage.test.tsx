@@ -87,24 +87,32 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (
 }
 
 function makeFakeWebrtcService(opts?: {
+  snapshot?: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot;
   history?: WebrtcHistoryItem[];
   sendImage?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
   sendFile?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
+  attachToVideo?: (direction: "local" | "remote", videoEl: HTMLVideoElement) => void;
 }): WebrtcService {
   const history = opts?.history ?? [];
+  let currentSnapshot = opts?.snapshot ?? {
+    phase: "idle",
+    remotePublicKeyHex: null,
+    direction: null,
+    mode: null,
+    hasLocalStream: false,
+    hasRemoteStream: false,
+    remoteNotice: null,
+    serviceReady: true,
+    lastError: null
+  };
+  const subscribers = new Set<(snapshot: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot) => void>();
   return {
-    snapshot: () => ({
-      phase: "idle",
-      remotePublicKeyHex: null,
-      direction: null,
-      mode: null,
-      hasLocalStream: false,
-      hasRemoteStream: false,
-      remoteNotice: null,
-      serviceReady: true,
-      lastError: null
-    }),
-    subscribe: () => () => undefined,
+    snapshot: () => currentSnapshot,
+    subscribe: (handler) => {
+      subscribers.add(handler);
+      handler(currentSnapshot);
+      return () => subscribers.delete(handler);
+    },
     isReady: () => true,
     checkPeerOnline: async () => "online",
     listHistoryForPeer: async () => history,
@@ -116,7 +124,10 @@ function makeFakeWebrtcService(opts?: {
     rejectIncoming: async () => undefined,
     hangup: async () => undefined,
     consumeRemoteNotice: () => undefined,
-    attachToVideo: () => () => undefined,
+    attachToVideo: (direction, videoEl) => {
+      opts?.attachToVideo?.(direction, videoEl);
+      return () => undefined;
+    },
     runStunDiagnostics: async () => [],
     getStunServers: () => [],
     applyStunServers: async () => undefined,
@@ -231,7 +242,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     });
   });
 
-  it("accepts the singular /message/:publicKeyHex alias route", async () => {
+  it("accepts the singular /message/:publicKeyHex route", async () => {
     const peer = "02cccc".padEnd(66, "c");
     const sample: AppMsgMessage = {
       messageId: "id-detail-alias-1",
@@ -261,6 +272,108 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       expect(screen.getByText("message.page.detail.video")).toBeTruthy();
       expect(screen.getByText("message.page.detail.audio")).toBeTruthy();
     });
+  });
+
+  it("renders the video call panel for the current peer and binds both video streams", async () => {
+    const peer = "02dddd".padEnd(66, "d");
+    const attachCalls: Array<{ direction: "local" | "remote"; videoEl: HTMLVideoElement }> = [];
+    const webrtc = makeFakeWebrtcService({
+      snapshot: {
+        phase: "connected",
+        remotePublicKeyHex: peer,
+        direction: "outgoing",
+        mode: "video",
+        hasLocalStream: true,
+        hasRemoteStream: true,
+        remoteNotice: null,
+        serviceReady: true,
+        lastError: null
+      },
+      attachToVideo: (direction, videoEl) => {
+        attachCalls.push({ direction, videoEl });
+      }
+    });
+    const host = makeFakeHost(makeFakeService({ messages: [] }), webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/message/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.call.title.video")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.call.swap")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.call.fullscreen")).toBeTruthy();
+    });
+    expect(attachCalls.map((item) => item.direction)).toEqual(["local", "remote"]);
+  });
+
+  it("renders the audio call panel for the current peer and exposes call controls", async () => {
+    const peer = "02eeee".padEnd(66, "e");
+    const webrtc = makeFakeWebrtcService({
+      snapshot: {
+        phase: "incoming",
+        remotePublicKeyHex: peer,
+        direction: "incoming",
+        mode: "audio",
+        hasLocalStream: true,
+        hasRemoteStream: false,
+        remoteNotice: null,
+        serviceReady: true,
+        lastError: null
+      }
+    });
+    const host = makeFakeHost(makeFakeService({ messages: [] }), webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.call.title.audio")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.call.accept")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.call.reject")).toBeTruthy();
+    });
+    expect(screen.queryByText("message.page.detail.call.swap")).toBeNull();
+    expect(screen.queryByText("message.page.detail.call.fullscreen")).toBeNull();
+  });
+
+  it("disables start-call buttons when another peer already owns the active session", async () => {
+    const peer = "02abab".padEnd(66, "a");
+    const otherPeer = "02bcbc".padEnd(66, "b");
+    const webrtc = makeFakeWebrtcService({
+      snapshot: {
+        phase: "connecting",
+        remotePublicKeyHex: otherPeer,
+        direction: "outgoing",
+        mode: "video",
+        hasLocalStream: true,
+        hasRemoteStream: false,
+        remoteNotice: null,
+        serviceReady: true,
+        lastError: null
+      }
+    });
+    const host = makeFakeHost(makeFakeService({ messages: [] }), webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/message/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "message.page.detail.video" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "message.page.detail.audio" })).toBeTruthy();
+    });
+    expect((screen.getByRole("button", { name: "message.page.detail.video" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "message.page.detail.audio" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("renders newest messages closer to the composer", async () => {

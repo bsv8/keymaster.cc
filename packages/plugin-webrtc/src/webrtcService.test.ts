@@ -26,7 +26,8 @@ import type {
   AppMsgMessage,
   AppMsgOnlineInput,
   AppMsgOnlineResult,
-  KeyspaceService
+  KeyspaceService,
+  NoticeRegistry
 } from "@keymaster/contracts";
 
 const OWNER = "02aaaa".padEnd(66, "a");
@@ -366,6 +367,30 @@ function makeKeyspaceServiceFor(publicKeyHex: string): KeyspaceService {
     listKeys: async () => [],
     openKeyStorage: async () => null
   } as unknown as KeyspaceService;
+}
+
+function makeNoticeRegistryRecorder(): {
+  registry: NoticeRegistry;
+  notices: Array<import("@keymaster/contracts").NoticeRecord>;
+} {
+  const notices: Array<import("@keymaster/contracts").NoticeRecord> = [];
+  return {
+    notices,
+    registry: {
+      upsert: (notice) => {
+        const idx = notices.findIndex((item) => item.id === notice.id);
+        if (idx >= 0) {
+          notices[idx] = notice;
+        } else {
+          notices.push(notice);
+        }
+      },
+      dismiss: () => undefined,
+      list: () => notices.slice(),
+      subscribe: () => () => undefined,
+      removeBySourcePluginId: () => undefined
+    } as NoticeRegistry
+  };
 }
 
 function makeLoopbackTransferEnv() {
@@ -713,6 +738,32 @@ describe("createWebrtcService", () => {
     expect(ws.snapshot().direction).toBe("outgoing");
     expect(ws.snapshot().mode).toBe("audio");
     expect(ws.snapshot().hasLocalStream).toBe(true);
+  });
+
+  it("incoming notice points to /message/:publicKeyHex and keeps accept navigation on the same route", async () => {
+    const bus = makeLoopbackBus();
+    const receiverNotices = makeNoticeRegistryRecorder();
+    const sender = createWebrtcService({
+      endpointService: bus.createEndpoint(OWNER),
+      keyspace: makeKeyspaceServiceFor(OWNER),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: fakeEnv()
+    });
+    const receiver = createWebrtcService({
+      endpointService: bus.createEndpoint(TARGET),
+      keyspace: makeKeyspaceServiceFor(TARGET),
+      noticeRegistry: receiverNotices.registry,
+      configStore: createMemoryWebrtcConfigStore(),
+      env: fakeEnv()
+    });
+    void receiver;
+
+    await sender.startCall({ targetPublicKeyHex: TARGET, mode: "video" });
+    await new Promise((r) => setTimeout(r, 30));
+
+    const notice = receiverNotices.notices.find((item) => item.id.startsWith("webrtc-incoming-"));
+    expect(notice?.routeTo).toBe(`/message/${OWNER}`);
+    expect(notice?.actions.find((action) => action.id === "accept")?.navigateTo).toBe(`/message/${OWNER}`);
   });
 
   /* ----- 出站失败回滚（#5 / #12）----- */
