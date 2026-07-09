@@ -349,6 +349,15 @@
   gap: 10px;
 }
 
+.km-message-detail__attachment.is-me {
+  margin-left: auto;
+  background: color-mix(in srgb, var(--primary, currentColor) 8%, var(--surface));
+}
+
+.km-message-detail__attachment.is-peer {
+  margin-right: auto;
+}
+
 .km-message-detail__thumbnail-button {
   border: 1px solid var(--border);
   border-radius: calc(var(--radius) + 2px);

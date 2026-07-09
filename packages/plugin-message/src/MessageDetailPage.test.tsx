@@ -378,6 +378,68 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     });
   });
 
+  it("aligns outgoing and incoming attachments by direction", async () => {
+    const peer = "02adad".padEnd(66, "d");
+    const service = makeFakeService({ messages: [] });
+    const webrtc = makeFakeWebrtcService({
+      history: [
+        {
+          recordId: "image-outgoing",
+          ownerPublicKeyHex: OWNER,
+          peerPublicKeyHex: peer,
+          kind: "image",
+          direction: "outgoing",
+          status: "completed",
+          startedAtMs: 1000,
+          endedAtMs: 2000,
+          durationSec: 1,
+          fileName: "outgoing.png",
+          mimeType: "image/png",
+          byteLength: 128,
+          blobKey: "blob-outgoing",
+          itemType: "transfer"
+        },
+        {
+          recordId: "file-incoming",
+          ownerPublicKeyHex: OWNER,
+          peerPublicKeyHex: peer,
+          kind: "file",
+          direction: "incoming",
+          status: "completed",
+          startedAtMs: 3000,
+          endedAtMs: 4000,
+          durationSec: 1,
+          fileName: "incoming.pdf",
+          mimeType: "application/pdf",
+          byteLength: 2048,
+          blobKey: "blob-incoming",
+          itemType: "transfer"
+        }
+      ]
+    });
+    const host = makeFakeHost(service, webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("outgoing.png")).toBeTruthy();
+      expect(screen.getAllByText("incoming.pdf").length).toBeGreaterThan(0);
+    });
+
+    const outgoingAttachment = screen.getByText("outgoing.png").closest(".km-message-detail__attachment");
+    const incomingAttachment = screen.getByText((content, element) =>
+      element?.classList.contains("km-message-detail__system-line") ? content === "incoming.pdf" : false
+    ).closest(".km-message-detail__attachment");
+
+    expect(outgoingAttachment?.className.includes("is-me")).toBe(true);
+    expect(incomingAttachment?.className.includes("is-peer")).toBe(true);
+  });
+
   it("maps attachment failures to localized error keys", async () => {
     const peer = "02acac".padEnd(66, "a");
     const service = makeFakeService({ messages: [] });

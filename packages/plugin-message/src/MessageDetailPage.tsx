@@ -485,6 +485,7 @@ function renderTimelineItem(
       return (
         <AttachmentRecord
           kind="image"
+          fromMe={record.direction === "outgoing"}
           i18n={handlers.i18n}
           record={record}
           loadBlob={handlers.loadBlob}
@@ -498,6 +499,7 @@ function renderTimelineItem(
       return (
         <AttachmentRecord
           kind="file"
+          fromMe={record.direction === "outgoing"}
           i18n={handlers.i18n}
           record={record}
           loadBlob={handlers.loadBlob}
@@ -511,13 +513,14 @@ function renderTimelineItem(
 
 function AttachmentRecord(props: {
   kind: "image" | "file";
+  fromMe: boolean;
   i18n: ReturnType<typeof useI18n>;
   record: Extract<WebrtcHistoryItem, { itemType: "transfer" }>;
   loadBlob(blobKey: string): Promise<Blob | null>;
   onPreview(blobKey: string): Promise<void>;
   onDownload(blobKey: string, fileName?: string): Promise<void>;
 }) {
-  const { kind, i18n, record, loadBlob, onPreview, onDownload } = props;
+  const { kind, fromMe, i18n, record, loadBlob, onPreview, onDownload } = props;
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
     let revoked = false;
@@ -545,7 +548,7 @@ function AttachmentRecord(props: {
 
   if (kind === "image") {
     return (
-      <div className="km-message-detail__attachment km-message-detail__attachment--image">
+      <div className={`km-message-detail__attachment km-message-detail__attachment--image ${fromMe ? "is-me" : "is-peer"}`}>
         <div className="km-message-detail__message-meta">
           <span>{record.fileName ?? i18n.t("message.page.detail.timeline.attachment.image")}</span>
           <span>{formatTime(record.endedAtMs ?? record.startedAtMs)}</span>
@@ -585,7 +588,7 @@ function AttachmentRecord(props: {
     );
   }
   return (
-    <div className="km-message-detail__attachment km-message-detail__attachment--file">
+    <div className={`km-message-detail__attachment km-message-detail__attachment--file ${fromMe ? "is-me" : "is-peer"}`}>
       <div className="km-message-detail__message-meta">
         <span>{record.fileName ?? i18n.t("message.page.detail.timeline.attachment.file")}</span>
         <span>{formatBytes(record.byteLength ?? 0)}</span>
