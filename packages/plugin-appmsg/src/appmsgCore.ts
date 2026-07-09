@@ -2067,14 +2067,16 @@ export class AppMsgCoreImpl implements AppMsgCore {
       emitLog(this.cfg.logger, "warn", "appmsg.online.skipped_not_ready", {
         ownerPublicKeyHex: this.currentBoundOwner,
         providerId: this.currentProviderId,
-        requestedCount: input.length
+        requestedCount: input.length,
+        keyPreview: previewOnlineKeys(input)
       });
       return out;
     }
     emitLog(this.cfg.logger, "info", "appmsg.online.begin", {
       ownerPublicKeyHex: this.currentBoundOwner,
       providerId: this.currentProviderId,
-      requestedCount: input.length
+      requestedCount: input.length,
+      keyPreview: previewOnlineKeys(input)
     });
     try {
       const res: ProviderOnlineResult = await this.boundHandle.checkOnline({
@@ -2096,7 +2098,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
         requestedCount: input.length,
         onlineCount,
         offlineCount,
-        unknownCount
+        unknownCount,
+        keyPreview: previewOnlineKeys(input)
       });
       return out2;
     } catch (err) {
@@ -2106,6 +2109,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
         ownerPublicKeyHex: this.currentBoundOwner,
         providerId: this.currentProviderId,
         requestedCount: input.length,
+        keyPreview: previewOnlineKeys(input),
         err: msg
       });
       for (const h of input) out[h] = "unknown";
@@ -2223,6 +2227,10 @@ function awaitPromise(p: Promise<unknown>): Promise<void> {
     () => undefined,
     () => undefined
   );
+}
+
+function previewOnlineKeys(publicKeyHexes: readonly string[]): string[] {
+  return publicKeyHexes.slice(0, 3).map((h) => `${h.slice(0, 8)}…`);
 }
 
 // 防止 IDE 报 unused

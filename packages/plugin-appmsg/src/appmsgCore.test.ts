@@ -926,6 +926,22 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     off();
   });
 
+  it("core checkOnline catches provider failure, records lastError, and degrades to unknown", async () => {
+    const handle = makeMockProviderOps({
+      checkOnline: async () => {
+        throw new Error("HubMsg: request timeout after 5000ms");
+      }
+    });
+    const p = makeMockProvider("hubmsg", "HubMsg", handle);
+    const ctx = makeCore({ providers: [p] });
+    await ctx.core.connectForOwner(OWNER);
+
+    const out = await ctx.core.checkOnline([OWNER_B]);
+
+    expect(out[OWNER_B]).toBe("unknown");
+    expect(ctx.core.inspectLocalDb().lastError).toMatch(/request timeout after 5000ms/i);
+  });
+
   it("listAsOrigin/getAsOrigin read local scoped db instead of remote provider list/get", async () => {
     const ctx = makeConnectedCore();
     await ctx.core.connectForOwner(OWNER);

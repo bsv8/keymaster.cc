@@ -491,6 +491,9 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
   private negotiatedHeartbeatSec: number | null = null;
   private static readonly DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
   private static readonly DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
+  // 在线查询是轻量探针，不应沿用通用 30s 请求超时；否则页面会长期停在
+  // “查询中...”，而真正的问题信号被拖迟。
+  static readonly ONLINE_REQUEST_TIMEOUT_MS = 5_000;
 
   constructor(cfg: HubMsgConnectionConfig) {
     this.cfg = { heartbeatSec: 30, ...cfg };
@@ -1320,18 +1323,24 @@ export class HubMsgProviderOperations {
       const out: ProviderOnlineResult = {};
       for (const h of input.publicKeyHexes) out[h] = "unknown" satisfies AppMsgOnlineStatus;
       this.emitLog("warn", "hubmsg.provider.online.skipped_not_bound", {
-        requestedCount: input.publicKeyHexes.length
+        requestedCount: input.publicKeyHexes.length,
+        connState: this.conn.state(),
+        keyPreview: previewPublicKeyHexes(input.publicKeyHexes)
       });
       return out;
     }
     this.emitLog("info", "hubmsg.provider.online.begin", {
-      requestedCount: input.publicKeyHexes.length
+      requestedCount: input.publicKeyHexes.length,
+      connState: this.conn.state(),
+      timeoutMs: HubMsgConnectionImpl.ONLINE_REQUEST_TIMEOUT_MS,
+      keyPreview: previewPublicKeyHexes(input.publicKeyHexes)
     });
     try {
       const wireParams: HubMsgWireOnlineParams = [...input.publicKeyHexes];
       const resBytes = await this.conn.request<Uint8Array>(
         HUBMSG_METHOD.MessageOnline,
-        cborEncode([...wireParams])
+        cborEncode([...wireParams]),
+        { timeoutMs: HubMsgConnectionImpl.ONLINE_REQUEST_TIMEOUT_MS }
       );
       const onlinePublicKeyHexes = decodeOnlineResult(cborDecode(resBytes) as unknown);
       const onlineSet = new Set(onlinePublicKeyHexes);
@@ -1345,22 +1354,20 @@ export class HubMsgProviderOperations {
       this.emitLog("info", "hubmsg.provider.online.completed", {
         requestedCount: input.publicKeyHexes.length,
         onlineCount,
-        offlineCount: input.publicKeyHexes.length - onlineCount
+        offlineCount: input.publicKeyHexes.length - onlineCount,
+        keyPreview: previewPublicKeyHexes(input.publicKeyHexes)
       });
       return out;
     } catch (err) {
       this.emitLog("warn", "hubmsg.provider.online.failed", {
         requestedCount: input.publicKeyHexes.length,
+        connState: this.conn.state(),
+        timeoutMs: HubMsgConnectionImpl.ONLINE_REQUEST_TIMEOUT_MS,
+        keyPreview: previewPublicKeyHexes(input.publicKeyHexes),
         err: err instanceof Error ? err.message : String(err)
       });
-      return this.fallbackUnknown(input.publicKeyHexes);
+      throw err;
     }
-  }
-
-  private fallbackUnknown(publicKeyHexes: string[]): ProviderOnlineResult {
-    const out: ProviderOnlineResult = {};
-    for (const h of publicKeyHexes) out[h] = "unknown" satisfies AppMsgOnlineStatus;
-    return out;
   }
 }
 
@@ -1372,4 +1379,8 @@ function providerEndpointToWire(ep: ProviderEndpointRef): {
   id: string;
 } {
   return { kind: ep.kind, id: ep.id };
+}
+
+function previewPublicKeyHexes(publicKeyHexes: readonly string[]): string[] {
+  return publicKeyHexes.slice(0, 3).map((h) => `${h.slice(0, 8)}…`);
 }

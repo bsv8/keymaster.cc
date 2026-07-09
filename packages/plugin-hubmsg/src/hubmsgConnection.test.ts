@@ -231,20 +231,28 @@ describe("HubMsgConnectionImpl", () => {
 
 describe("HubMsgProviderOperations", () => {
   function makeConn(args: {
-    request?: (methodId: number, params: Uint8Array) => Promise<Uint8Array>;
+    request?: (
+      methodId: number,
+      params: Uint8Array,
+      options?: { timeoutMs?: number }
+    ) => Promise<Uint8Array>;
     subscribeEvent?: (eventId: number, handler: (data: Uint8Array) => void) => () => void;
   }): HubMsgConnection {
     return {
       state: () => "bound",
       connect: async () => undefined,
       close: () => undefined,
-      request: async <TResult>(methodId: number, params: Uint8Array) => {
+      request: async <TResult>(
+        methodId: number,
+        params: Uint8Array,
+        options?: { timeoutMs?: number }
+      ) => {
         const impl =
           args.request ??
           (async () => {
             throw new Error("not implemented");
           });
-        return (await impl(methodId, params)) as TResult;
+        return (await impl(methodId, params, options)) as TResult;
       },
       subscribeEvent:
         args.subscribeEvent ??
@@ -370,11 +378,15 @@ describe("HubMsgProviderOperations", () => {
   });
 
   it("checkOnline 走扁平数组，不再包一层列表", async () => {
-    const calls: Array<{ methodId: number; params: Uint8Array }> = [];
+    const calls: Array<{
+      methodId: number;
+      params: Uint8Array;
+      options?: { timeoutMs?: number };
+    }> = [];
     const ops = new HubMsgProviderOperations(
       makeConn({
-        request: async (methodId, params) => {
-          calls.push({ methodId, params });
+        request: async (methodId, params, options) => {
+          calls.push({ methodId, params, options });
           return cborEncode(["02aa".padEnd(66, "a")]);
         }
       })
@@ -388,9 +400,26 @@ describe("HubMsgProviderOperations", () => {
       "02aa".padEnd(66, "a"),
       "02bb".padEnd(66, "b")
     ]);
+    expect(calls[0]?.options?.timeoutMs).toBe(5_000);
     expect(out).toEqual({
       ["02aa".padEnd(66, "a")]: "online",
       ["02bb".padEnd(66, "b")]: "offline"
     });
+  });
+
+  it("checkOnline 请求失败时向上抛错，不在 provider 层吞成 unknown", async () => {
+    const ops = new HubMsgProviderOperations(
+      makeConn({
+        request: async () => {
+          throw new Error("HubMsg: request timeout after 5000ms");
+        }
+      })
+    );
+
+    await expect(
+      ops.checkOnline({
+        publicKeyHexes: ["02aa".padEnd(66, "a")]
+      })
+    ).rejects.toThrow(/request timeout after 5000ms/i);
   });
 });
