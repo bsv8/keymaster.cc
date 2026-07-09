@@ -805,11 +805,15 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         this.emitLog("error", "hubmsg.request.timeout", {
           requestId,
           methodId,
+          methodName: describeMethodId(methodId),
           timeoutMs,
-          durationMs: Date.now() - startedAtMs
+          durationMs: Date.now() - startedAtMs,
+          pendingRequestCount: this.pendingById.size,
+          pendingPreview: previewPendingRequestIds(this.pendingById)
         });
         reject(new Error(`HubMsg: request timeout after ${timeoutMs}ms`));
       }, timeoutMs);
+      const pendingBefore = this.pendingById.size;
       this.pendingById.set(requestId, {
         methodId,
         startedAtMs,
@@ -820,8 +824,11 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       this.emitLog("info", "hubmsg.request.sent", {
         requestId,
         methodId,
+        methodName: describeMethodId(methodId),
         timeoutMs,
-        payloadBytes: params.length
+        payloadBytes: params.length,
+        pendingBeforeCount: pendingBefore,
+        pendingAfterCount: this.pendingById.size
       });
       try {
         this.socket!.send(encodeHubFrame(frame));
@@ -831,6 +838,8 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         this.emitLog("error", "hubmsg.request.send_failed", {
           requestId,
           methodId,
+          methodName: describeMethodId(methodId),
+          pendingAfterCount: this.pendingById.size,
           err: err instanceof Error ? err.message : String(err)
         });
         reject(err instanceof Error ? err : new Error(String(err)));
@@ -921,18 +930,42 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
       return;
     }
     if (frame.frameKind === HUB_FRAME_KIND.Result) {
-      const body = decodeResultBody(frame.frameBody);
+      let body: HubFrameResultBody;
+      try {
+        body = decodeResultBody(frame.frameBody);
+      } catch (err) {
+        this.emitLog("warn", "hubmsg.request.result_decode_failed", {
+          frameBytes: bytes.length,
+          frameBodyBytes: frame.frameBody.length,
+          pendingRequestCount: this.pendingById.size,
+          pendingPreview: previewPendingRequestIds(this.pendingById),
+          err: err instanceof Error ? err.message : String(err)
+        });
+        return;
+      }
       const p = this.pendingById.get(body[0]);
-      if (!p) return;
+      if (!p) {
+        this.emitLog("warn", "hubmsg.request.result_orphaned", {
+          requestId: body[0],
+          ok: body[1],
+          resultBytes: body[2].length,
+          errorBytes: body[3].length,
+          pendingRequestCount: this.pendingById.size,
+          pendingPreview: previewPendingRequestIds(this.pendingById)
+        });
+        return;
+      }
       this.pendingById.delete(body[0]);
       if (p.timer) clearTimeout(p.timer);
       if (body[1]) {
         this.emitLog("info", "hubmsg.request.result", {
           requestId: body[0],
           methodId: p.methodId,
+          methodName: describeMethodId(p.methodId),
           ok: true,
           durationMs: Date.now() - p.startedAtMs,
-          resultBytes: body[2].length
+          resultBytes: body[2].length,
+          pendingAfterCount: this.pendingById.size
         });
         p.resolve(body[2]);
       } else {
@@ -942,10 +975,12 @@ export class HubMsgConnectionImpl implements HubMsgConnection {
         this.emitLog("warn", "hubmsg.request.result", {
           requestId: body[0],
           methodId: p.methodId,
+          methodName: describeMethodId(p.methodId),
           ok: false,
           durationMs: Date.now() - p.startedAtMs,
           errorCode: errInfo.code,
-          errorMessage: errInfo.message
+          errorMessage: errInfo.message,
+          pendingAfterCount: this.pendingById.size
         });
         p.reject(e);
       }
@@ -1383,4 +1418,30 @@ function providerEndpointToWire(ep: ProviderEndpointRef): {
 
 function previewPublicKeyHexes(publicKeyHexes: readonly string[]): string[] {
   return publicKeyHexes.slice(0, 3).map((h) => `${h.slice(0, 8)}…`);
+}
+
+function previewPendingRequestIds(
+  pendingById: ReadonlyMap<string, { methodId: number }>
+): string[] {
+  const out: string[] = [];
+  for (const [requestId, pending] of pendingById.entries()) {
+    out.push(`${requestId.slice(0, 8)}…:${describeMethodId(pending.methodId)}`);
+    if (out.length >= 5) break;
+  }
+  return out;
+}
+
+function describeMethodId(methodId: number): string {
+  switch (methodId) {
+    case HUBMSG_METHOD.MessageSend:
+      return "message.send";
+    case HUBMSG_METHOD.MessageList:
+      return "message.list";
+    case HUBMSG_METHOD.MessageGet:
+      return "message.get";
+    case HUBMSG_METHOD.MessageOnline:
+      return "message.online";
+    default:
+      return `unknown(${methodId})`;
+  }
 }
