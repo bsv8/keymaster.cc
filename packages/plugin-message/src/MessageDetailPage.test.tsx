@@ -18,10 +18,12 @@ import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { PluginHostProvider } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
 import type { MessageService } from "./messageService.js";
+import type { WebrtcService, WebrtcHistoryItem } from "@keymaster/plugin-webrtc";
 
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
+const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
 
 function makeFakeI18n(): I18nService {
   return {
@@ -84,13 +86,54 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (
   };
 }
 
-function makeFakeHost(service: MessageService | null): PluginHost {
+function makeFakeWebrtcService(opts?: {
+  history?: WebrtcHistoryItem[];
+  sendImage?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
+  sendFile?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
+}): WebrtcService {
+  const history = opts?.history ?? [];
+  return {
+    snapshot: () => ({
+      phase: "idle",
+      remotePublicKeyHex: null,
+      direction: null,
+      mode: null,
+      hasLocalStream: false,
+      hasRemoteStream: false,
+      remoteNotice: null,
+      serviceReady: true,
+      lastError: null
+    }),
+    subscribe: () => () => undefined,
+    isReady: () => true,
+    checkPeerOnline: async () => "online",
+    listHistoryForPeer: async () => history,
+    getTransferBlob: async () => null,
+    startCall: async () => undefined,
+    sendImage: opts?.sendImage ?? (async () => undefined),
+    sendFile: opts?.sendFile ?? (async () => undefined),
+    acceptIncoming: async () => undefined,
+    rejectIncoming: async () => undefined,
+    hangup: async () => undefined,
+    consumeRemoteNotice: () => undefined,
+    attachToVideo: () => () => undefined,
+    runStunDiagnostics: async () => [],
+    getStunServers: () => [],
+    applyStunServers: async () => undefined,
+    dispose: () => undefined
+  };
+}
+
+function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcService | null): PluginHost {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY]: makeFakeI18n(),
     [KEYSPACE_SERVICE_CAPABILITY]: makeFakeKeyspace()
   };
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY] = service;
+  }
+  if (webrtcService) {
+    providers[WEBRTC_SERVICE_CAPABILITY] = webrtcService;
   }
   const capabilities = {
     keys: () => Object.keys(providers),
@@ -230,6 +273,178 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     const bodies = screen.getAllByText(/message$/);
     expect(bodies[0]?.textContent).toBe("newer message");
     expect(bodies[1]?.textContent).toBe("older message");
+  });
+
+  it("renders timeline labels through i18n keys", async () => {
+    const peer = "02abab".padEnd(66, "a");
+    const messages: AppMsgMessage[] = [{
+      messageId: "id-timeline-text",
+      clientMessageId: "c-timeline-text",
+      senderPublicKeyHex: OWNER,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: peer,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: "timeline body",
+      createdAtMs: 1000,
+      insertedAtMs: 1000
+    }];
+    const history: WebrtcHistoryItem[] = [
+      {
+        recordId: "call-1",
+        ownerPublicKeyHex: OWNER,
+        peerPublicKeyHex: peer,
+        kind: "audio_call",
+        direction: "outgoing",
+        status: "completed",
+        startedAtMs: 2000,
+        endedAtMs: 3000,
+        durationSec: 1,
+        itemType: "call"
+      },
+      {
+        recordId: "file-1",
+        ownerPublicKeyHex: OWNER,
+        peerPublicKeyHex: peer,
+        kind: "file",
+        direction: "outgoing",
+        status: "completed",
+        startedAtMs: 4000,
+        endedAtMs: 5000,
+        durationSec: 1,
+        fileName: "report.pdf",
+        mimeType: "application/pdf",
+        byteLength: 42,
+        blobKey: "blob-1",
+        itemType: "transfer"
+      }
+    ];
+    const service = makeFakeService({ messages });
+    const webrtc = makeFakeWebrtcService({ history });
+    const host = makeFakeHost(service, webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.from.me")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.timeline.call.audio")).toBeTruthy();
+      expect(
+        screen.getAllByText((_, element) =>
+          element?.textContent?.includes("message.page.detail.timeline.call.outgoing") ?? false
+        ).length
+      ).toBeGreaterThan(0);
+      expect(
+        screen.getAllByText((_, element) =>
+          element?.textContent?.includes("message.page.detail.timeline.call.status.completed") ?? false
+        ).length
+      ).toBeGreaterThan(0);
+      expect(screen.getByText("message.page.detail.timeline.download")).toBeTruthy();
+    });
+  });
+
+  it("maps attachment failures to localized error keys", async () => {
+    const peer = "02acac".padEnd(66, "a");
+    const service = makeFakeService({ messages: [] });
+    const webrtc = makeFakeWebrtcService({
+      sendImage: async () => {
+        throw new Error("transfer_too_large");
+      }
+    });
+    const host = makeFakeHost(service, webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.online")).toBeTruthy();
+    });
+    const input = await screen.findByLabelText("message.page.detail.body");
+    expect(input).toBeTruthy();
+    const fileInput = document.querySelector('input[type="file"][accept="image/*"]') as HTMLInputElement | null;
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, {
+      target: { files: [new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" })] }
+    });
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.error.transfer_too_large")).toBeTruthy();
+    });
+  });
+
+  it("maps raw transfer timeout failures to localized error keys", async () => {
+    const peer = "02adad".padEnd(66, "a");
+    const service = makeFakeService({ messages: [] });
+    const webrtc = makeFakeWebrtcService({
+      sendImage: async () => {
+        throw new Error("transfer_timeout");
+      }
+    });
+    const host = makeFakeHost(service, webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.online")).toBeTruthy();
+    });
+    const fileInput = document.querySelector('input[type="file"][accept="image/*"]') as HTMLInputElement | null;
+    expect(fileInput).toBeTruthy();
+    fireEvent.change(fileInput!, {
+      target: { files: [new File([new Uint8Array([1, 2, 3])], "a.png", { type: "image/png" })] }
+    });
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.error.transfer_timeout")).toBeTruthy();
+    });
+  });
+
+  it("maps missing local blob failures to localized error keys", async () => {
+    const peer = "02aeae".padEnd(66, "a");
+    const service = makeFakeService({ messages: [] });
+    const webrtc = makeFakeWebrtcService({
+      history: [
+        {
+          recordId: "file-local-blob",
+          ownerPublicKeyHex: OWNER,
+          peerPublicKeyHex: peer,
+          kind: "file",
+          direction: "outgoing",
+          status: "completed",
+          startedAtMs: 1000,
+          endedAtMs: 2000,
+          durationSec: 1,
+          fileName: "report.pdf",
+          mimeType: "application/pdf",
+          byteLength: 42,
+          blobKey: "blob-local-blob",
+          itemType: "transfer"
+        }
+      ]
+    });
+    const host = makeFakeHost(service, webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/messages/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.online")).toBeTruthy();
+    });
+    const downloadButton = await screen.findByRole("button", { name: "message.page.detail.timeline.download" });
+    fireEvent.click(downloadButton);
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.error.local_blob_unavailable")).toBeTruthy();
+    });
   });
 
   it("shows 20 messages by default and loads 20 more on demand", async () => {

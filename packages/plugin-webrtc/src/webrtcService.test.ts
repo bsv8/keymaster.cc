@@ -11,9 +11,11 @@ import { KEYMASTER_WEBRTC_APP_ID } from "./constants.js";
 import {
   createWebrtcService,
   type MediaStreamLike,
+  type DataChannelLike,
   type RTCPeerConnectionLike
 } from "./webrtcService.js";
 import { createMemoryWebrtcConfigStore } from "./webrtcConfig.js";
+import type { WebrtcHistoryService } from "./webrtcHistoryService.js";
 import {
   parseSignalBody,
   serializeSignal,
@@ -23,7 +25,8 @@ import type {
   AppMsgEndpointService,
   AppMsgMessage,
   AppMsgOnlineInput,
-  AppMsgOnlineResult
+  AppMsgOnlineResult,
+  KeyspaceService
 } from "@keymaster/contracts";
 
 const OWNER = "02aaaa".padEnd(66, "a");
@@ -41,14 +44,26 @@ interface FakePc {
 }
 
 function installRTCPeerConnectionLike(pc: FakePc): RTCPeerConnectionLike {
+  const channel: DataChannelLike = {
+    label: "stub",
+    get readyState(): DataChannelLike["readyState"] {
+      return "open";
+    },
+    send: () => undefined,
+    close: () => undefined,
+    onOpen: () => undefined,
+    onMessage: () => undefined,
+    onClose: () => undefined,
+    onError: () => undefined
+  };
   return {
     get connectionState() {
       return "new";
     },
     setLocalDescription: async () => undefined,
     setRemoteDescription: async () => undefined,
-    createOffer: async () => ({ type: "offer", sdp: "v=0" }),
-    createAnswer: async () => ({ type: "answer", sdp: "v=0" }),
+    createOffer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: "v=0" }),
+    createAnswer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: "v=0" }),
     addIceCandidate: async () => undefined,
     onIceCandidate: (cb) => {
       pc.ice = cb;
@@ -58,8 +73,9 @@ function installRTCPeerConnectionLike(pc: FakePc): RTCPeerConnectionLike {
     },
     onConnectionStateChange: () => undefined,
     onTrack: () => undefined,
+    onDataChannel: () => undefined,
     replaceLocalStream: () => undefined,
-    createDataChannel: () => ({ label: "stub" }),
+    createDataChannel: () => channel,
     close: () => {
       pc.closed = true;
     }
@@ -73,10 +89,10 @@ function makeFakeEndpointService(input: {
   ) => Promise<import("@keymaster/contracts").AppMsgSendResult>;
 }): {
   service: AppMsgEndpointService;
-  sent: Array<{ recipientPublicKeyHex: string; body: string }>;
+  sent: Array<{ recipientPublicKeyHex: string; body: string; clientMessageId?: string }>;
   incomingSubs: Array<(msg: AppMsgMessage) => void>;
 } {
-  const sent: Array<{ recipientPublicKeyHex: string; body: string }> = [];
+  const sent: Array<{ recipientPublicKeyHex: string; body: string; clientMessageId?: string }> = [];
   const incomingSubs: Array<(msg: AppMsgMessage) => void> = [];
   const onlineFn = input.online ?? (async () => {
     const r: AppMsgOnlineResult = {};
@@ -90,10 +106,18 @@ function makeFakeEndpointService(input: {
     sendMessage: vi.fn(async (msg) => {
       if (sendFn) {
         const res = await sendFn(msg);
-        sent.push({ recipientPublicKeyHex: msg.recipientPublicKeyHex, body: msg.body });
+        sent.push({
+          recipientPublicKeyHex: msg.recipientPublicKeyHex,
+          body: msg.body,
+          clientMessageId: msg.clientMessageId
+        });
         return res;
       }
-      sent.push({ recipientPublicKeyHex: msg.recipientPublicKeyHex, body: msg.body });
+      sent.push({
+        recipientPublicKeyHex: msg.recipientPublicKeyHex,
+        body: msg.body,
+        clientMessageId: msg.clientMessageId
+      });
       return { messageId: "m-sent-" + sent.length, createdAtMs: 1 };
     }),
     listMessages: async () => ({ items: [], hasMore: false }),
@@ -118,6 +142,43 @@ function makeFakeStream(): MediaStreamLike {
       return undefined;
     }
   };
+}
+
+function makeHistoryRecorder(): {
+  service: WebrtcHistoryService;
+  calls: Array<{ status: string; peerPublicKeyHex: string }>;
+  transfers: Array<{ status: string; peerPublicKeyHex: string; byteLength?: number; blobSize?: number | null }>;
+} {
+  const calls: Array<{ status: string; peerPublicKeyHex: string }> = [];
+  const transfers: Array<{ status: string; peerPublicKeyHex: string; byteLength?: number; blobSize?: number | null }> = [];
+  return {
+    calls,
+    transfers,
+    service: {
+      listForPeer: async () => [],
+      appendCall: async (row) => {
+        calls.push({ status: row.status, peerPublicKeyHex: row.peerPublicKeyHex });
+      },
+      appendTransfer: async (row, blob) => {
+        transfers.push({
+          status: row.status,
+          peerPublicKeyHex: row.peerPublicKeyHex,
+          byteLength: row.byteLength,
+          blobSize: blob ? blob.size : null
+        });
+      },
+      getBlob: async () => null
+    }
+  };
+}
+
+function makeKeyspaceService(): KeyspaceService {
+  return {
+    active: () => ({ activePublicKeyHex: OWNER }),
+    onActiveChange: () => () => undefined,
+    listKeys: async () => [],
+    openKeyStorage: async () => null
+  } as unknown as KeyspaceService;
 }
 
 function fakeEnv(opts: {
@@ -151,6 +212,292 @@ function fakeEnv(opts: {
     delay: (ms) => new Promise((r) => setTimeout(r, ms)),
     stunDiagnosticTimeoutMs: 200
   };
+}
+
+function makeTransferIceRoutingEnv() {
+  const pcs: Array<{
+    addIceCandidate: ReturnType<typeof vi.fn>;
+  }> = [];
+  const env: import("./webrtcService.js").WebrtcEnvironment = {
+    createPeerConnection: () => {
+      const addIceCandidate = vi.fn(async (_candidate: RTCIceCandidateInit) => undefined);
+      const pc = {
+        connectionState: "new" as const,
+        setLocalDescription: async () => undefined,
+        setRemoteDescription: async () => undefined,
+        createOffer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: "v=0" }),
+        createAnswer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: "v=0" }),
+        addIceCandidate,
+        onIceCandidate: (_cb: (c: RTCIceCandidateInit) => void) => undefined,
+        onIceGatheringStateChange: (_cb: (s: string) => void) => undefined,
+        onConnectionStateChange: (_cb: (s: string) => void) => undefined,
+        onTrack: (_cb: (stream: MediaStreamLike) => void) => undefined,
+        onDataChannel: (_cb: (channel: DataChannelLike) => void) => undefined,
+        replaceLocalStream: (_stream: MediaStreamLike) => undefined,
+        createDataChannel: (_label: string): DataChannelLike => ({
+          label: _label,
+          get readyState(): DataChannelLike["readyState"] {
+            return "open";
+          },
+          send: () => undefined,
+          close: () => undefined,
+          onOpen: () => undefined,
+          onMessage: () => undefined,
+          onClose: () => undefined,
+          onError: () => undefined
+        }),
+        close: () => undefined
+      } satisfies RTCPeerConnectionLike;
+      pcs.push({ addIceCandidate: pc.addIceCandidate });
+      return pc;
+    },
+    getUserMedia: async () => makeFakeStream(),
+    generateSessionId: () => "sess-fake",
+    now: () => Date.now(),
+    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+    stunDiagnosticTimeoutMs: 200
+  };
+  return { pcs, env };
+}
+
+function makeTransferIceSignalEnv() {
+  return {
+    env: {
+      createPeerConnection: () => {
+        const pc: RTCPeerConnectionLike & { iceCb: ((c: RTCIceCandidateInit) => void) | null } = {
+          connectionState: "new",
+          iceCb: null,
+          setLocalDescription: async () => {
+            setTimeout(() => {
+              pc.iceCb?.({
+                candidate: "candidate:signal 1 udp 1 1.2.3.4 1234 typ host",
+                sdpMid: "0",
+                sdpMLineIndex: 0
+              });
+            }, 0);
+          },
+          setRemoteDescription: async () => undefined,
+          createOffer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: "v=0" }),
+          createAnswer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: "v=0" }),
+          addIceCandidate: async () => undefined,
+          onIceCandidate: (cb) => {
+            pc.iceCb = cb;
+          },
+          onIceGatheringStateChange: () => undefined,
+          onConnectionStateChange: () => undefined,
+          onTrack: () => undefined,
+          onDataChannel: () => undefined,
+          replaceLocalStream: () => undefined,
+          createDataChannel: () => ({
+            label: "signal",
+            get readyState(): DataChannelLike["readyState"] {
+              return "open";
+            },
+            send: () => undefined,
+            close: () => undefined,
+            onOpen: () => undefined,
+            onMessage: () => undefined,
+            onClose: () => undefined,
+            onError: () => undefined
+          }),
+          close: () => undefined
+        };
+        return pc;
+      },
+      getUserMedia: async () => makeFakeStream(),
+      generateSessionId: () => "sess-fake",
+      now: () => Date.now(),
+      delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+      stunDiagnosticTimeoutMs: 200
+    } satisfies import("./webrtcService.js").WebrtcEnvironment
+  };
+}
+
+function makeLoopbackBus() {
+  const subscribers: Array<{ ownerHex: string; handler: (msg: AppMsgMessage) => void }> = [];
+  const messages: Array<import("@keymaster/contracts").AppMsgSendInput> = [];
+  return {
+    messages,
+    createEndpoint(senderHex: string): AppMsgEndpointService {
+      return {
+        endpoint: { kind: "plugin", id: KEYMASTER_WEBRTC_APP_ID },
+        isReady: () => true,
+        sendMessage: vi.fn(async (msg: import("@keymaster/contracts").AppMsgSendInput) => {
+          messages.push(msg);
+          const out: AppMsgMessage = {
+            messageId: `m-${messages.length}`,
+            clientMessageId: msg.clientMessageId,
+            senderPublicKeyHex: senderHex,
+            recipientPublicKeyHex: msg.recipientPublicKeyHex,
+            contentType: msg.contentType,
+            body: msg.body,
+            createdAtMs: msg.createdAtMs,
+            insertedAtMs: msg.createdAtMs
+          };
+          for (const sub of subscribers) {
+            if (sub.ownerHex === msg.recipientPublicKeyHex) {
+              sub.handler(out);
+            }
+          }
+          return { messageId: out.messageId, createdAtMs: out.createdAtMs };
+        }),
+        listMessages: async () => ({ items: [], hasMore: false }),
+        getMessage: async () => null,
+        subscribeMessages: (handler: (msg: AppMsgMessage) => void) => {
+          subscribers.push({ ownerHex: senderHex, handler });
+          return () => undefined;
+        },
+        checkOnline: async (xs) => {
+          const out: AppMsgOnlineResult = {};
+          for (const key of xs as string[]) {
+            out[key] = "online";
+          }
+          return out;
+        }
+      };
+    },
+  };
+}
+
+function makeKeyspaceServiceFor(publicKeyHex: string): KeyspaceService {
+  return {
+    active: () => ({ activePublicKeyHex: publicKeyHex }),
+    onActiveChange: () => () => undefined,
+    listKeys: async () => [],
+    openKeyStorage: async () => null
+  } as unknown as KeyspaceService;
+}
+
+function makeLoopbackTransferEnv() {
+  const pcs = new Map<string, LoopbackPc>();
+  let seq = 0;
+  class LoopbackChannel implements DataChannelLike {
+    private openCb: (() => void) | null = null;
+    private messageCb: ((data: string | ArrayBuffer | ArrayBufferView) => void) | null = null;
+    private closeCb: (() => void) | null = null;
+    private errorCb: ((err: unknown) => void) | null = null;
+    private peer: LoopbackChannel | null = null;
+    private state: "connecting" | "open" | "closing" | "closed" = "connecting";
+    constructor(readonly label: string) {}
+    get readyState(): DataChannelLike["readyState"] {
+      return this.state;
+    }
+    connect(peer: LoopbackChannel): void {
+      this.peer = peer;
+      this.state = "open";
+    }
+    send(data: string | ArrayBuffer | ArrayBufferView): void {
+      if (!this.peer) {
+        this.errorCb?.(new Error("loopback_peer_missing"));
+        return;
+      }
+      this.peer.messageCb?.(data);
+    }
+    close(): void {
+      if (this.state === "closed") return;
+      this.state = "closed";
+      this.closeCb?.();
+      if (this.peer && this.peer.state !== "closed") {
+        this.peer.state = "closed";
+        this.peer.closeCb?.();
+      }
+    }
+    onOpen(cb: () => void): void {
+      this.openCb = cb;
+      if (this.state === "open") cb();
+    }
+    onMessage(cb: (data: string | ArrayBuffer | ArrayBufferView) => void): void {
+      this.messageCb = cb;
+    }
+    onClose(cb: () => void): void {
+      this.closeCb = cb;
+    }
+    onError(cb: (err: unknown) => void): void {
+      this.errorCb = cb;
+    }
+    open(): void {
+      this.state = "open";
+      this.openCb?.();
+    }
+  }
+  class LoopbackPc implements RTCPeerConnectionLike {
+    readonly id = `pc-${++seq}`;
+    remoteId: string | null = null;
+    localChannel: LoopbackChannel | null = null;
+    remoteChannelHandler: ((channel: DataChannelLike) => void) | null = null;
+    iceCb: ((c: RTCIceCandidateInit) => void) | null = null;
+    stateCb: ((s: string) => void) | null = null;
+    closeCb: (() => void) | null = null;
+    constructor() {
+      pcs.set(this.id, this);
+    }
+    get connectionState() {
+      return "new";
+    }
+    setLocalDescription = async () => {
+      setTimeout(() => {
+        this.iceCb?.({
+          candidate: `candidate:loop-${this.id}`,
+          sdpMid: "0",
+          sdpMLineIndex: 0
+        });
+      }, 0);
+    };
+    setRemoteDescription = async (desc: RTCSessionDescriptionInit) => {
+      const parts = String(desc.sdp ?? "").split(":");
+      this.remoteId = parts[1] ?? null;
+      this.maybeLink();
+    };
+    createOffer = async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: `loop:${this.id}` });
+    createAnswer = async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: `loop:${this.id}` });
+    addIceCandidate = async () => undefined;
+    onIceCandidate = (cb: (c: RTCIceCandidateInit) => void) => {
+      this.iceCb = cb;
+    };
+    onIceGatheringStateChange = () => undefined;
+    onConnectionStateChange = (cb: (s: string) => void) => {
+      this.stateCb = cb;
+    };
+    onTrack = () => undefined;
+    onDataChannel = (cb: (channel: DataChannelLike) => void) => {
+      this.remoteChannelHandler = cb;
+      this.maybeLink();
+    };
+    replaceLocalStream = () => undefined;
+    createDataChannel = (label: string): DataChannelLike => {
+      const channel = new LoopbackChannel(label);
+      this.localChannel = channel;
+      this.maybeLink();
+      return channel;
+    };
+    close = () => {
+      pcs.delete(this.id);
+      this.localChannel?.close();
+      this.stateCb?.("closed");
+      this.closeCb?.();
+    };
+    private maybeLink(): void {
+      if (!this.localChannel || !this.remoteId) return;
+      const peer = pcs.get(this.remoteId);
+      if (!peer) return;
+      if (peer.remoteId !== this.id) return;
+      if (!peer.remoteChannelHandler) return;
+      const remote = new LoopbackChannel(this.localChannel.label);
+      this.localChannel.connect(remote);
+      remote.connect(this.localChannel);
+      peer.remoteChannelHandler(remote);
+      this.localChannel.open();
+      remote.open();
+    }
+  }
+  return {
+    createPeerConnection: () => new LoopbackPc(),
+    getUserMedia: async () => makeFakeStream(),
+    generateSessionId: () => `loop-${++seq}`,
+    now: () => Date.now(),
+    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
+    stunDiagnosticTimeoutMs: 200
+  } satisfies import("./webrtcService.js").WebrtcEnvironment;
 }
 
 /**
@@ -213,11 +560,23 @@ function stunEnv(opts: { okHost: string; failHost?: string }) {
           },
           onConnectionStateChange: () => undefined,
           onTrack: () => undefined,
+          onDataChannel: () => undefined,
           replaceLocalStream: () => undefined,
-          createDataChannel: (label) => {
+          createDataChannel: (label): DataChannelLike => {
             calls.push({ kind: "createDataChannel" });
             dataChannelCreated = true;
-            return { label };
+            return {
+              label,
+              get readyState(): DataChannelLike["readyState"] {
+                return "open";
+              },
+              send: () => undefined,
+              close: () => undefined,
+              onOpen: () => undefined,
+              onMessage: () => undefined,
+              onClose: () => undefined,
+              onError: () => undefined
+            };
           },
           close: () => {
             pc.closed = true;
@@ -389,7 +748,7 @@ describe("createWebrtcService", () => {
     const off = ws.subscribe((s) => snapshotTrace.push(s.phase));
     await expect(
       ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/crash/);
+    ).rejects.toThrow(/create_offer_failed/);
     await new Promise((r) => setTimeout(r, 20));
     expect(sent).toHaveLength(0);
     expect(ws.snapshot().phase).toBe("idle");
@@ -556,12 +915,86 @@ describe("createWebrtcService", () => {
     expect(sent).toHaveLength(0);
   });
 
-  it("hangup transitions phase to ended briefly then back to idle", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({});
+  it("transfer ice routes to activeTransfer.addIceCandidate", async () => {
+    const { service: endpoint, incomingSubs } = makeFakeEndpointService({});
+    const { env, pcs } = makeTransferIceRoutingEnv();
     const ws = createWebrtcService({
       endpointService: endpoint,
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
+      env
+    });
+    const invite = serializeSignal({
+      schema: "keymaster.webrtc.v1",
+      type: "transfer_invite",
+      sessionId: "sess-transfer-ice",
+      createdAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      kind: "file",
+      byteLength: 5,
+      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
+    });
+    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), invite));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(pcs).toHaveLength(1);
+
+    const ice = serializeSignal({
+      schema: "keymaster.webrtc.v1",
+      type: "ice",
+      sessionId: "sess-transfer-ice",
+      createdAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      candidate: {
+        candidate: "candidate:1 1 udp 1 1.2.3.4 1234 typ host",
+        sdpMid: "0",
+        sdpMLineIndex: 0
+      }
+    });
+    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), ice));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(pcs[0]?.addIceCandidate).toHaveBeenCalledTimes(1);
+    expect(pcs[0]?.addIceCandidate).toHaveBeenCalledWith({
+      candidate: "candidate:1 1 udp 1 1.2.3.4 1234 typ host",
+      sdpMid: "0",
+      sdpMLineIndex: 0
+    });
+  });
+
+  it("transfer ice uses transfer-scoped clientMessageId", async () => {
+    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
+    const { env } = makeTransferIceSignalEnv();
+    createWebrtcService({
+      endpointService: endpoint,
+      configStore: createMemoryWebrtcConfigStore(),
+      env
+    });
+    const invite = serializeSignal({
+      schema: "keymaster.webrtc.v1",
+      type: "transfer_invite",
+      sessionId: "sess-transfer-ice-id",
+      createdAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      kind: "file",
+      byteLength: 5,
+      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
+    });
+    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), invite));
+    await new Promise((r) => setTimeout(r, 30));
+    const ice = sent.find((msg) => {
+      const parsed = parseSignalBody(msg.body);
+      return parsed.ok && parsed.signal.type === "ice";
+    });
+    expect(ice?.clientMessageId).toContain("km-wrtc-ice-transfer-");
+  });
+
+  it("hangup transitions phase to ended briefly then back to idle", async () => {
+    const { service: endpoint, sent } = makeFakeEndpointService({});
+    const history = makeHistoryRecorder();
+    const ws = createWebrtcService({
+      endpointService: endpoint,
+      keyspace: makeKeyspaceService(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: fakeEnv(),
+      historyService: history.service
     });
     await ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
     expect(ws.snapshot().phase).toBe("inviting");
@@ -575,7 +1008,88 @@ describe("createWebrtcService", () => {
     expect(["idle", "ended"]).toContain(ws.snapshot().phase);
     off();
     expect(phases).toContain("ended");
+    expect(history.calls).toEqual([{ status: "failed", peerPublicKeyHex: TARGET }]);
     void sent;
+  });
+
+  it("remote hangup before answer records missed on incoming calls", async () => {
+    const { service: endpoint, incomingSubs } = makeFakeEndpointService({});
+    const history = makeHistoryRecorder();
+    const ws = createWebrtcService({
+      endpointService: endpoint,
+      keyspace: makeKeyspaceService(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: fakeEnv(),
+      historyService: history.service
+    });
+    const inv: WebrtcInviteSignal = {
+      schema: "keymaster.webrtc.v1",
+      type: "invite",
+      sessionId: "sess-incoming-missed",
+      createdAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      mode: "audio",
+      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
+    };
+    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(inv)));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(ws.snapshot().phase).toBe("incoming");
+    const hangup = serializeSignal({
+      schema: "keymaster.webrtc.v1",
+      type: "hangup",
+      sessionId: "sess-incoming-missed",
+      createdAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      reason: "hangup"
+    });
+    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), hangup));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(history.calls).toEqual([{ status: "missed", peerPublicKeyHex: "02cccc".padEnd(66, "c") }]);
+  });
+
+  it("sendImage sends a loopback transfer and records histories on both sides", async () => {
+    const bus = makeLoopbackBus();
+    const env = makeLoopbackTransferEnv();
+    const senderHistory = makeHistoryRecorder();
+    const receiverHistory = makeHistoryRecorder();
+    const sender = createWebrtcService({
+      endpointService: bus.createEndpoint(OWNER),
+      keyspace: makeKeyspaceServiceFor(OWNER),
+      historyService: senderHistory.service,
+      configStore: createMemoryWebrtcConfigStore(),
+      env
+    });
+    const receiver = createWebrtcService({
+      endpointService: bus.createEndpoint(TARGET),
+      keyspace: makeKeyspaceServiceFor(TARGET),
+      historyService: receiverHistory.service,
+      configStore: createMemoryWebrtcConfigStore(),
+      env
+    });
+    void receiver;
+
+    const file = new Blob([new Uint8Array([1, 2, 3, 4, 5])], { type: "image/png" });
+    await sender.sendImage({ targetPublicKeyHex: TARGET, file });
+    await new Promise((r) => setTimeout(r, 25));
+
+    expect(senderHistory.transfers).toHaveLength(1);
+    expect(senderHistory.transfers[0]).toMatchObject({
+      status: "completed",
+      peerPublicKeyHex: TARGET,
+      byteLength: 5,
+      blobSize: 5
+    });
+    expect(receiverHistory.transfers).toHaveLength(1);
+    expect(receiverHistory.transfers[0]).toMatchObject({
+      status: "completed",
+      peerPublicKeyHex: OWNER,
+      byteLength: 5,
+      blobSize: 5
+    });
+    await expect(sender.sendFile({ targetPublicKeyHex: TARGET, file })).resolves.toBeUndefined();
+    await new Promise((r) => setTimeout(r, 25));
+    expect(senderHistory.transfers).toHaveLength(2);
+    expect(receiverHistory.transfers).toHaveLength(2);
   });
 
   /* ----- STUN 诊断：fake 必须依赖 createOffer + setLocalDescription 触发 gather ----- */

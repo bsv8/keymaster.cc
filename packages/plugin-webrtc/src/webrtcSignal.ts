@@ -14,7 +14,9 @@
 //     → `{ ok: false, reason: "<具体原因>" }`；
 //   - `isSignalExpired(env, now)`：true → 调用方丢弃且**不**回包；
 //   - `isAcceptableRemoteSessionId(env, localSessionId)`：用于"陌生 sessionId 的
-//     answer/ice/hangup 必须 fail-closed"边界。
+//     answer/ice/hangup 必须 fail-closed"边界；
+//   - `ice` 同时服务通话会话和 transfer 会话，是否路由到哪类活动会话由
+//     service 按当前 active / activeTransfer 真值决定。
 
 import type { AppMsgMessage } from "@keymaster/contracts";
 
@@ -32,7 +34,10 @@ export type WebrtcSignalType =
   | "reject"
   | "busy"
   | "hangup"
-  | "fallback_required";
+  | "fallback_required"
+  | "transfer_invite"
+  | "transfer_answer"
+  | "transfer_reject";
 
 /** 信令拒绝原因。 */
 export type WebrtcRejectReason =
@@ -43,6 +48,9 @@ export type WebrtcRejectReason =
 
 /** 信令挂断原因。 */
 export type WebrtcHangupReason = "hangup" | "ice_disconnected" | "page_unload";
+
+/** 传输拒绝原因。 */
+export type WebrtcTransferRejectReason = "busy" | "invalid_state" | "file_too_large";
 
 /** 信令模式（业务层与本协议层语义相同）。 */
 export type WebrtcMode = "audio" | "video";
@@ -104,6 +112,28 @@ export interface WebrtcFallbackRequiredSignal extends WebrtcSignalEnvelope {
   suggestedMode: WebrtcSuggestedMode;
 }
 
+/** `transfer_invite` 信令。 */
+export interface WebrtcTransferInviteSignal extends WebrtcSignalEnvelope {
+  type: "transfer_invite";
+  kind: "image" | "file";
+  fileName?: string;
+  mimeType?: string;
+  byteLength: number;
+  sdp: string;
+}
+
+/** `transfer_answer` 信令。 */
+export interface WebrtcTransferAnswerSignal extends WebrtcSignalEnvelope {
+  type: "transfer_answer";
+  sdp: string;
+}
+
+/** `transfer_reject` 信令。 */
+export interface WebrtcTransferRejectSignal extends WebrtcSignalEnvelope {
+  type: "transfer_reject";
+  reason: WebrtcTransferRejectReason;
+}
+
 /** 所有信令 union。 */
 export type WebrtcSignal =
   | WebrtcInviteSignal
@@ -112,7 +142,10 @@ export type WebrtcSignal =
   | WebrtcRejectSignal
   | WebrtcBusySignal
   | WebrtcHangupSignal
-  | WebrtcFallbackRequiredSignal;
+  | WebrtcFallbackRequiredSignal
+  | WebrtcTransferInviteSignal
+  | WebrtcTransferAnswerSignal
+  | WebrtcTransferRejectSignal;
 
 /** 信令解析结果。失败原因只用于诊断，**不**展示到 UI。 */
 export type ParseSignalResult =
@@ -252,6 +285,44 @@ export function parseSignalBody(body: string): ParseSignalResult {
       }
       return { ok: true, signal: { ...base, type, reason, suggestedMode } };
     }
+    case "transfer_invite": {
+      if (env.kind !== "image" && env.kind !== "file") {
+        return { ok: false, reason: "transfer_invite_missing_kind" };
+      }
+      if (!isString(env.sdp)) {
+        return { ok: false, reason: "transfer_invite_missing_sdp" };
+      }
+      if (!isNumber(env.byteLength) || env.byteLength < 0) {
+        return { ok: false, reason: "transfer_invite_missing_byte_length" };
+      }
+      const out: WebrtcTransferInviteSignal = {
+        ...base,
+        type,
+        kind: env.kind,
+        sdp: env.sdp,
+        byteLength: env.byteLength
+      };
+      if (isString(env.fileName)) out.fileName = env.fileName;
+      if (isString(env.mimeType)) out.mimeType = env.mimeType;
+      return { ok: true, signal: out };
+    }
+    case "transfer_answer": {
+      if (!isString(env.sdp)) {
+        return { ok: false, reason: "transfer_answer_missing_sdp" };
+      }
+      return { ok: true, signal: { ...base, type, sdp: env.sdp } };
+    }
+    case "transfer_reject": {
+      const reason = env.reason;
+      const allowed: WebrtcTransferRejectReason[] = ["busy", "invalid_state", "file_too_large"];
+      if (typeof reason !== "string" || !allowed.includes(reason as WebrtcTransferRejectReason)) {
+        return { ok: false, reason: "transfer_reject_missing_reason" };
+      }
+      return {
+        ok: true,
+        signal: { ...base, type, reason: reason as WebrtcTransferRejectReason }
+      };
+    }
     default:
       return { ok: false, reason: "unknown_type" };
   }
@@ -266,17 +337,17 @@ export function isSignalExpired(env: WebrtcSignalEnvelope, nowMs = Date.now()): 
  * 检查一条非 `invite` 信令的 sessionId 是否与"当前已存在会话的 sessionId"
  * 一致。**不**一致 → 视为非法包，丢弃。
  *
- * 设计缘由：施工单 §7.6——"只允许 `invite` 开新会话；其它信令必须附着在
+ * 设计缘由：施工单 §7.6——"只允许 `invite` / `transfer_invite` 开新会话；其它信令必须附着在
  * 已存在会话上"。
  *
- * `invite` 信令**始终**允许通过（接收方在收到 invite 时建立新会话），调用方
+ * `invite` / `transfer_invite` 信令**始终**允许通过（接收方在收到 invite 时建立新会话），调用方
  * 应在"已存在会话"判定为 false 时先 try-create 会话。
  */
 export function isAcceptableRemoteSessionId(
   env: WebrtcSignalEnvelope,
   localSessionId: string | null
 ): boolean {
-  if (env.type === "invite") return true;
+  if (env.type === "invite" || env.type === "transfer_invite") return true;
   if (localSessionId === null) return false;
   return env.sessionId === localSessionId;
 }

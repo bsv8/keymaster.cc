@@ -11,6 +11,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "@keymaster/ui": "*"
+    "@keymaster/ui": "*",
+    "@keymaster/plugin-webrtc": "*"
   }
 }

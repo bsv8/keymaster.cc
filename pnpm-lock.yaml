@@ -396,6 +396,9 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts
+      '@keymaster/plugin-webrtc':
+        specifier: '*'
+        version: link:../plugin-webrtc
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime

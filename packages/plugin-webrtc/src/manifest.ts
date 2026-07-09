@@ -22,11 +22,13 @@ import type {
   AppMsgEndpointService,
   AppMsgEndpointServiceRegistry,
   I18nPluginResources,
+  KeyspaceService,
   PluginManifest,
   SettingsRegistry,
   RouteRegistry,
   MenuRegistry,
-  BreadcrumbRegistry
+  BreadcrumbRegistry,
+  NoticeRegistry
 } from "@keymaster/contracts";
 import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import {
@@ -43,6 +45,7 @@ import {
   createLocalStorageWebrtcConfigStore,
   getDefaultWebrtcLocalStorage
 } from "./webrtcConfig.js";
+import { createWebrtcHistoryService } from "./webrtcHistoryService.js";
 import { createWebrtcService } from "./webrtcService.js";
 
 const webrtcResources: I18nPluginResources = {
@@ -78,6 +81,10 @@ const webrtcResources: I18nPluginResources = {
         "failed to create offer",
       "webrtc.page.workbench.block.invalid_state":
         "invalid session state",
+      "webrtc.page.workbench.block.transfer_too_large":
+        "attachment is larger than 16 MiB",
+      "webrtc.page.workbench.block.transfer_protocol_unavailable":
+        "attachment transfer protocol is unavailable",
       "webrtc.page.workbench.direction.outgoing": "outgoing",
       "webrtc.page.workbench.direction.incoming": "incoming",
       "webrtc.page.workbench.phase.idle": "idle",
@@ -94,6 +101,10 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.workbench.notice.rejected": "peer rejected the call",
       "webrtc.page.workbench.notice.busy": "peer is busy",
       "webrtc.page.workbench.notice.dismiss": "dismiss",
+      "webrtc.notice.incoming.title": "Incoming call",
+      "webrtc.notice.incoming.body": "A peer is calling you",
+      "webrtc.notice.accept": "Accept",
+      "webrtc.notice.reject": "Decline",
       "webrtc.page.settings.title": "WebRTC settings",
       "webrtc.page.settings.desc":
         "Configure STUN servers. STUN-only; no TURN. Changes auto-save on blur.",
@@ -132,6 +143,8 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.workbench.block.send_invite_failed": "发送邀请失败",
       "webrtc.page.workbench.block.create_offer_failed": "创建 offer 失败",
       "webrtc.page.workbench.block.invalid_state": "会话状态非法",
+      "webrtc.page.workbench.block.transfer_too_large": "附件超过 16 MiB",
+      "webrtc.page.workbench.block.transfer_protocol_unavailable": "附件传输协议不可用",
       "webrtc.page.workbench.direction.outgoing": "呼出",
       "webrtc.page.workbench.direction.incoming": "来电",
       "webrtc.page.workbench.phase.idle": "空闲",
@@ -148,6 +161,10 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.workbench.notice.rejected": "对方拒绝了通话",
       "webrtc.page.workbench.notice.busy": "对方忙",
       "webrtc.page.workbench.notice.dismiss": "知道了",
+      "webrtc.notice.incoming.title": "来电",
+      "webrtc.notice.incoming.body": "有对端正在呼叫你",
+      "webrtc.notice.accept": "接听",
+      "webrtc.notice.reject": "拒接",
       "webrtc.page.settings.title": "WebRTC 设置",
       "webrtc.page.settings.desc":
         "配置 STUN 服务器列表。仅 STUN，不含 TURN。字段失焦后自动保存。",
@@ -189,7 +206,7 @@ export const webrtcPlugin: PluginManifest = {
     displayGroup: "platform"
   },
   i18n: webrtcResources,
-  keyScopedStorages: [],
+  keyScopedStorages: [{ storageId: "history", description: "WebRTC 本地历史（通话 / 传输）" }],
   appMessageEndpoint: {
     endpointId: WEBRTC_ENDPOINT_ID.id,
     description: "keymaster.webrtc business app"
@@ -199,6 +216,8 @@ export const webrtcPlugin: PluginManifest = {
       capability: APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
       reason: "拿 endpoint service（plugin-appmsg 提供）"
     },
+    { capability: "keyspace.service", reason: "打开 key-scoped 历史库" },
+    { capability: "notice.registry", reason: "投递全局紧急 notice" },
     { capability: "route.registry", reason: "注册 /system/webrtc 路由" },
     { capability: "menu.registry", reason: "注册 system 分组菜单" },
     {
@@ -211,14 +230,23 @@ export const webrtcPlugin: PluginManifest = {
     const registry = ctx.get<AppMsgEndpointServiceRegistry>(
       APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY
     );
+    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const noticeRegistry = ctx.get<NoticeRegistry>("notice.registry");
     const endpointService: AppMsgEndpointService =
       registry.forEndpoint(PLUGIN_WEBRTC_ENDPOINT);
     const configStore = createLocalStorageWebrtcConfigStore(
       getDefaultWebrtcLocalStorage()
     );
+    const historyService = createWebrtcHistoryService({
+      keyspace,
+      ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null
+    });
     const service = createWebrtcService({
       endpointId: PLUGIN_WEBRTC_ENDPOINT,
       endpointService,
+      keyspace,
+      historyService,
+      noticeRegistry,
       configStore,
       logger: {
         info: (scope, msg, data) => {

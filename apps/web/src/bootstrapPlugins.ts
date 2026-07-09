@@ -135,8 +135,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   //   hubmsg-platform（在 appmsg 之后 register 自身；plugin-hubmsg
   //     自身不依赖 `appmsg.core`——它依赖 `message.provider.registry`）
   //   protocol
-  //   message（plugin-message 依赖 `appmsg.endpoint.registry`，由
-  //     plugin-appmsg 在 setup 阶段 provide）
+  //   webrtc（plugin-message / notice 需要它）
+  //   message（plugin-message 依赖 `appmsg.endpoint.registry` + `webrtc.service`）
   //   home
   //   settings
   //   ...
@@ -165,8 +165,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     appmsgPlatformPlugin,
     hubmsgPlatformPlugin,
     protocolPlugin,
-    messagePlatformPlugin,
     webrtcPlugin,
+    messagePlatformPlugin,
     homePlugin,
     settingsPlugin,
     assetsPlugin,

@@ -22,6 +22,7 @@ export * from "./registries/importerRegistry.js";
 export * from "./registries/transferRegistry.js";
 export * from "./registries/assetRegistry.js";
 export * from "./registries/topbarRegistry.js";
+export * from "./registries/noticeRegistry.js";
 export * from "./navigate.js";
 export * from "./react/PluginHostProvider.js";
 export * from "./react/useCapability.js";

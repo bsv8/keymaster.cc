@@ -6,6 +6,7 @@
 import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, MenuItem, SettingsRoute, TransferRegistry as ITransferRegistry } from "./index.js";
 import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
+import type { NoticeRecord } from "./notice.js";
 import type { I18nText } from "./i18n.js";
 
 export interface RouteRegistry {
@@ -84,3 +85,13 @@ export type {
   ITopbarRegistry as TopbarRegistryContract
 };
 export type { IBackgroundRegistry as BackgroundRegistryContract, IBackgroundService as BackgroundServiceContract };
+
+/** 全局 notice registry。 */
+export interface NoticeRegistry {
+  upsert(record: NoticeRecord): void;
+  dismiss(id: string): void;
+  list(): NoticeRecord[];
+  subscribe(handler: (records: NoticeRecord[]) => void): () => void;
+  /** 清理某个插件投递的全部 notice。 */
+  removeBySourcePluginId(sourcePluginId: string): void;
+}

@@ -34,6 +34,7 @@ import type {
   PluginReverseDep,
   PluginState,
   PluginStateKind,
+  NoticeRegistry,
   TopbarRegistry,
   VaultService
 } from "@keymaster/contracts";
@@ -55,6 +56,7 @@ import { createCommandRegistry, type CommandRegistry } from "./registries/comman
 import { createHomeRegistry, type HomeRegistry } from "./registries/homeRegistry.js";
 import { createImporterRegistry, type ImporterRegistry } from "./registries/importerRegistry.js";
 import { createMenuRegistry, type MenuRegistry } from "./registries/menuRegistry.js";
+import { createNoticeRegistry } from "./registries/noticeRegistry.js";
 import { createRouteRegistry, type RouteRegistry } from "./registries/routeRegistry.js";
 import { createSettingsRegistry, type SettingsRegistry } from "./registries/settingsRegistry.js";
 import { createTokenRegistry, type TokenRegistry } from "./registries/tokenRegistry.js";
@@ -92,6 +94,7 @@ export interface PluginHost {
   collectibles: CollectibleRegistry;
   collectibleTransfer: CollectibleTransferRegistry;
   topbar: TopbarRegistry;
+  notice: NoticeRegistry;
   i18n: I18nService;
   /** 硬切换 002：runtime 内建 log service（统一日志平台）。 */
   log: LogService;
@@ -233,6 +236,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const collectibles = createCollectibleRegistry();
   const collectibleTransfer = createCollectibleTransferRegistry();
   const topbar = createTopbarRegistry();
+  const notice = createNoticeRegistry();
   const i18n = createI18nService({
     initialResources: options.initialI18nResources,
     debug: options.i18nDebug
@@ -257,6 +261,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     collectibleTransfer
   );
   capabilities.provide<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY, topbar);
+  capabilities.provide<NoticeRegistry>("notice.registry", notice);
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
   capabilities.provide<LogService>(LOG_SERVICE_CAPABILITY, logService);
@@ -464,6 +469,12 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
+  function purgePluginNotices(pluginId: string): void {
+    if (!capabilities.has("notice.registry")) return;
+    const registry = capabilities.get<NoticeRegistry>("notice.registry");
+    registry.removeBySourcePluginId(pluginId);
+  }
+
   async function runTeardown(ownership: PluginOwnership): Promise<unknown> {
     if (!ownership.teardown) return undefined;
     try {
@@ -489,6 +500,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     collectibles,
     collectibleTransfer,
     topbar,
+    notice,
     i18n,
     log: logService,
     configStore,
@@ -634,6 +646,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         enabledSet.delete(pluginId);
         const ownership = record.ownership;
         purgeOwnership(ownership);
+        purgePluginNotices(record.manifest.id);
         i18n.unregisterResources(record.manifest.id);
         record.ownership = emptyOwnership();
         if (appMsgEp) {
@@ -669,6 +682,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       safeNavigateAway(pluginId);
       const teardownErr = await runTeardown(record.ownership);
       purgeOwnership(record.ownership);
+      purgePluginNotices(pluginId);
       i18n.unregisterResources(record.manifest.id);
       if (record.manifest.appMessageEndpoint) {
         appMessageEndpointIds.delete(record.manifest.appMessageEndpoint.endpointId);
@@ -720,6 +734,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       if (m?.manifest.i18n) {
         i18n.unregisterResources(m.manifest.id);
       }
+      purgePluginNotices(pluginId);
       records.delete(pluginId);
       knownManifests.delete(pluginId);
       enabledSet.delete(pluginId);

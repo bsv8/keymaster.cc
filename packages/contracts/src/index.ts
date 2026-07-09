@@ -19,6 +19,7 @@ export * from "./contacts.js";
 export * from "./messageBus.js";
 export * from "./registries.js";
 export * from "./topbar.js";
+export * from "./notice.js";
 export * from "./background.js";
 export * from "./woc.js";
 export * from "./wocTokens.js";

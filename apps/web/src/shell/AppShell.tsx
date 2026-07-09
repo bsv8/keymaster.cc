@@ -29,12 +29,13 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useCurrentPath, useI18n, router } from "@keymaster/runtime";
+import { useCapability, useCurrentPath, useI18n, usePluginHost, useRegistry, router } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   InitialActivationNotice,
   KeyIdentity,
   KeyspaceService,
+  NoticeRecord,
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
@@ -119,6 +120,7 @@ export function AppShell() {
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const path = useCurrentPath();
   const { t } = useI18n();
+  const notices = useRegistry((h) => h.notice.list());
   // 触发 languageChanged 重渲染。
   useI18n().language();
 
@@ -282,6 +284,7 @@ export function AppShell() {
         setMobileOpen,
         activationNotice,
         dismissNotice,
+        notices,
         t
       });
     }
@@ -319,6 +322,7 @@ export function AppShell() {
     setMobileOpen,
     activationNotice,
     dismissNotice,
+    notices,
     t
   });
 }
@@ -328,6 +332,7 @@ interface NormalShellArgs {
   setMobileOpen: (next: boolean | ((prev: boolean) => boolean)) => void;
   activationNotice: InitialActivationNotice | null;
   dismissNotice: () => void;
+  notices: NoticeRecord[];
   t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string;
 }
 
@@ -336,6 +341,7 @@ function renderNormalShell({
   setMobileOpen,
   activationNotice,
   dismissNotice,
+  notices,
   t
 }: NormalShellArgs) {
   return (
@@ -367,8 +373,9 @@ function renderNormalShell({
             aria-label="关闭菜单"
             onClick={() => setMobileOpen(false)}
           />
-        ) : null}
-        <main className="app-shell__main">
+          ) : null}
+        <main className={`app-shell__main${notices.length > 0 ? " has-notice-rail" : ""}`}>
+          <NoticeRail notices={notices} />
           {/*
             硬切换 013：把「面包屑下方业务页」包进 .app-shell__paged，
             让窄屏 grid 收敛规则有明确的边界——repair 分支虽然也在
@@ -383,6 +390,113 @@ function renderNormalShell({
       </div>
       <SiteFooter variant="app" />
     </div>
+  );
+}
+
+interface NoticeRailProps {
+  notices: NoticeRecord[];
+}
+
+function NoticeRail({ notices }: NoticeRailProps) {
+  const { t } = useI18n();
+  const host = usePluginHost();
+  if (notices.length === 0) return null;
+  return (
+    <aside className="app-notice-rail" aria-label={t("shell.noticeRail.label", { defaultValue: "紧急通知" })}>
+      <div className="app-notice-rail__header">
+        <h2 className="app-notice-rail__title">
+          {t("shell.noticeRail.title", { defaultValue: "紧急通知" })}
+        </h2>
+      </div>
+      <div className="app-notice-rail__list">
+        {notices.map((notice) => (
+          <NoticeCard
+            key={notice.id}
+            notice={notice}
+            onDismiss={() => host.notice.dismiss(notice.id)}
+            onAction={async (action) => {
+              try {
+                if (action.run) {
+                  await action.run();
+                }
+                if (action.navigateTo) {
+                  router.push(action.navigateTo);
+                }
+                if (action.autoDismiss) {
+                  host.notice.dismiss(notice.id);
+                }
+              } catch (err) {
+                console.error("notice action failed", err);
+              }
+            }}
+          />
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function NoticeCard(props: {
+  notice: NoticeRecord;
+  onDismiss: () => void;
+  onAction: (action: NoticeRecord["actions"][number]) => Promise<void>;
+}) {
+  const { notice, onDismiss, onAction } = props;
+  const { t, text } = useI18n();
+  const canNavigate = typeof notice.routeTo === "string" && notice.routeTo.length > 0;
+  return (
+    <section
+      className={`app-notice-card${canNavigate ? " app-notice-card--clickable" : ""}`}
+      data-notice-id={notice.id}
+      role={canNavigate ? "link" : undefined}
+      tabIndex={canNavigate ? 0 : undefined}
+      aria-label={canNavigate ? text(notice.title) : undefined}
+      onClick={() => {
+        if (canNavigate) {
+          router.push(notice.routeTo!);
+        }
+      }}
+      onKeyDown={(event) => {
+        if (!canNavigate) return;
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        router.push(notice.routeTo!);
+      }}
+    >
+      <header className="app-notice-card__header">
+        <div className="app-notice-card__headline">
+          <h3 className="app-notice-card__title">{text(notice.title)}</h3>
+          {notice.body ? <p className="app-notice-card__body">{text(notice.body)}</p> : null}
+        </div>
+        {notice.dismissible !== false ? (
+          <button
+            className="app-notice-card__dismiss"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              onDismiss();
+            }}
+          >
+            {t("shell.noticeRail.dismiss", { defaultValue: "关闭" })}
+          </button>
+        ) : null}
+      </header>
+      <div className="app-notice-card__actions">
+        {notice.actions.map((action) => (
+          <button
+            key={action.id}
+            type="button"
+            className={`app-notice-card__action app-notice-card__action--${action.variant ?? "secondary"}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              void onAction(action);
+            }}
+          >
+            {text(action.label)}
+          </button>
+        ))}
+      </div>
+    </section>
   );
 }
 

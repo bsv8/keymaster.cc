@@ -45,6 +45,11 @@ export {
   type WebrtcLogger
 } from "./webrtcService.js";
 export {
+  createWebrtcHistoryService,
+  type WebrtcHistoryService,
+  type WebrtcHistoryItem
+} from "./webrtcHistoryService.js";
+export {
   type WebrtcConfig,
   type WebrtcConfigStore,
   DEFAULT_STUN_SERVERS,

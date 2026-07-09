@@ -164,6 +164,11 @@
   font-size: 12px;
 }
 
+.km-message-detail__status {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .km-message-detail__composer,
 .km-message-detail__thread,
 .km-message-detail__full-key {
@@ -184,6 +189,33 @@
   display: flex;
   align-items: center;
   gap: 12px;
+  flex-wrap: wrap;
+}
+
+.km-message-detail__divider {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.km-message-detail__action,
+.km-message-detail__attachment-action {
+  font: inherit;
+  font-size: 12px;
+  color: var(--primary, currentColor);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+
+.km-message-detail__action[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.km-message-detail__hidden-input {
+  display: none;
 }
 
 .km-message-detail__pager {
@@ -226,6 +258,10 @@
   gap: 12px;
 }
 
+.km-message-detail__timeline-item {
+  display: flex;
+}
+
 .km-message-detail__message {
   display: flex;
 }
@@ -250,6 +286,14 @@
   background: color-mix(in srgb, var(--primary, currentColor) 8%, var(--surface));
 }
 
+.km-message-detail__bubble.is-me {
+  margin-left: auto;
+}
+
+.km-message-detail__bubble.is-peer {
+  margin-right: auto;
+}
+
 .km-message-detail__message-meta {
   display: flex;
   justify-content: space-between;
@@ -257,6 +301,53 @@
   font-size: 11px;
   color: var(--text-dim);
   margin-bottom: 8px;
+}
+
+.km-message-detail__system,
+.km-message-detail__attachment {
+  max-width: min(720px, 100%);
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.km-message-detail__system {
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.km-message-detail__system-line {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.km-message-detail__attachment {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.km-message-detail__thumbnail-button {
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  padding: 0;
+  background: var(--surface-2);
+  overflow: hidden;
+  cursor: pointer;
+  max-width: 320px;
+  align-self: flex-start;
+}
+
+.km-message-detail__thumbnail {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 320px;
+}
+
+.km-message-detail__attachment--file {
+  align-self: flex-start;
 }
 
 .km-message-detail__body {
