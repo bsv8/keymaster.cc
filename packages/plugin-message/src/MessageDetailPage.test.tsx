@@ -88,6 +88,7 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (
 
 function makeFakeWebrtcService(opts?: {
   snapshot?: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot;
+  startCallSnapshot?: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot | ((input: { targetPublicKeyHex: string; mode: "audio" | "video" }) => import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot);
   history?: WebrtcHistoryItem[];
   sendImage?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
   sendFile?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
@@ -117,7 +118,17 @@ function makeFakeWebrtcService(opts?: {
     checkPeerOnline: async () => "online",
     listHistoryForPeer: async () => history,
     getTransferBlob: async () => null,
-    startCall: async () => undefined,
+    startCall: async (input) => {
+      if (!opts?.startCallSnapshot) return undefined;
+      currentSnapshot =
+        typeof opts.startCallSnapshot === "function"
+          ? opts.startCallSnapshot(input)
+          : opts.startCallSnapshot;
+      for (const handler of subscribers) {
+        handler(currentSnapshot);
+      }
+      return undefined;
+    },
     sendImage: opts?.sendImage ?? (async () => undefined),
     sendFile: opts?.sendFile ?? (async () => undefined),
     acceptIncoming: async () => undefined,
@@ -308,6 +319,53 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       expect(screen.getByText("message.page.detail.call.fullscreen")).toBeTruthy();
     });
     expect(attachCalls.map((item) => item.direction)).toEqual(["local", "remote"]);
+  });
+
+  it("shows the call panel after startCall emits an outgoing snapshot", async () => {
+    const peer = "02efef".padEnd(66, "e");
+    const routedPeer = peer.toUpperCase();
+    const webrtc = makeFakeWebrtcService({
+      snapshot: {
+        phase: "idle",
+        remotePublicKeyHex: null,
+        direction: null,
+        mode: null,
+        hasLocalStream: false,
+        hasRemoteStream: false,
+        remoteNotice: null,
+        serviceReady: true,
+        lastError: null
+      },
+      startCallSnapshot: {
+        phase: "inviting",
+        remotePublicKeyHex: peer,
+        direction: "outgoing",
+        mode: "video",
+        hasLocalStream: true,
+        hasRemoteStream: false,
+        remoteNotice: null,
+        serviceReady: true,
+        lastError: null
+      }
+    });
+    const host = makeFakeHost(makeFakeService({ messages: [] }), webrtc);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/message/${routedPeer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "message.page.detail.video" })).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole("button", { name: "message.page.detail.video" }));
+    await waitFor(() => {
+      expect(screen.getByText("message.page.detail.call.title.video")).toBeTruthy();
+      expect(screen.getByRole("button", { name: "message.page.detail.call.hangup" })).toBeTruthy();
+    });
+    expect(document.querySelector('[data-call-phase="inviting"]')).toBeTruthy();
   });
 
   it("renders the audio call panel for the current peer and exposes call controls", async () => {

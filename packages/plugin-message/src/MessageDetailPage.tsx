@@ -49,6 +49,7 @@ export function MessageDetailPage(): JSX.Element {
   const i18n = useI18n();
   const currentPath = useCurrentPath();
   const peerPublicKeyHex = parsePeerPublicKeyHexFromPath(currentPath);
+  const normalizedPeerPublicKeyHex = normalizePublicKeyHexForMatch(peerPublicKeyHex);
   const messageService = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const contacts = useCapabilityOrNull<ContactsService>(CONTACTS_SERVICE_CAPABILITY);
@@ -83,7 +84,7 @@ export function MessageDetailPage(): JSX.Element {
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
-      if (!service || !ownerPublicKeyHex || !peerPublicKeyHex || !service.isReady()) {
+      if (!service || !ownerPublicKeyHex || !normalizedPeerPublicKeyHex || !service.isReady()) {
         if (!cancelled) setMessages([]);
         return;
       }
@@ -102,17 +103,17 @@ export function MessageDetailPage(): JSX.Element {
       cancelled = true;
       off();
     };
-  }, [service, ownerPublicKeyHex, peerPublicKeyHex]);
+  }, [service, ownerPublicKeyHex, normalizedPeerPublicKeyHex]);
 
   useEffect(() => {
     let cancelled = false;
     const refresh = async () => {
-      if (!webrtc || !ownerPublicKeyHex || !peerPublicKeyHex) {
+      if (!webrtc || !ownerPublicKeyHex || !normalizedPeerPublicKeyHex) {
         if (!cancelled) setHistory([]);
         return;
       }
       try {
-        const items = await webrtc.listHistoryForPeer(peerPublicKeyHex);
+        const items = await webrtc.listHistoryForPeer(normalizedPeerPublicKeyHex);
         if (!cancelled) setHistory(items);
       } catch {
         if (!cancelled) setHistory([]);
@@ -126,16 +127,16 @@ export function MessageDetailPage(): JSX.Element {
       cancelled = true;
       off();
     };
-  }, [ownerPublicKeyHex, peerPublicKeyHex, webrtc]);
+  }, [ownerPublicKeyHex, normalizedPeerPublicKeyHex, webrtc]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!webrtc || !peerPublicKeyHex) {
+    if (!webrtc || !normalizedPeerPublicKeyHex) {
       setOnlineStatus("unknown");
       return;
     }
     const refresh = async () => {
-      const status = await webrtc.checkPeerOnline(peerPublicKeyHex);
+      const status = await webrtc.checkPeerOnline(normalizedPeerPublicKeyHex);
       if (!cancelled) setOnlineStatus(status);
     };
     void refresh();
@@ -146,7 +147,7 @@ export function MessageDetailPage(): JSX.Element {
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [peerPublicKeyHex, webrtc]);
+  }, [normalizedPeerPublicKeyHex, webrtc]);
 
   useEffect(() => {
     if (!webrtc) {
@@ -163,13 +164,13 @@ export function MessageDetailPage(): JSX.Element {
 
   useEffect(() => {
     let cancelled = false;
-    if (!contacts || !peerPublicKeyHex) {
+    if (!contacts || !normalizedPeerPublicKeyHex) {
       setContact(null);
       return;
     }
     const refresh = async () => {
       try {
-        const found = await contacts.findByPublicKeyHex(peerPublicKeyHex);
+        const found = await contacts.findByPublicKeyHex(normalizedPeerPublicKeyHex);
         if (!cancelled) setContact(found ?? null);
       } catch {
         if (!cancelled) setContact(null);
@@ -181,15 +182,15 @@ export function MessageDetailPage(): JSX.Element {
       cancelled = true;
       off();
     };
-  }, [contacts, peerPublicKeyHex]);
+  }, [contacts, normalizedPeerPublicKeyHex]);
 
   useEffect(() => {
     setVisibleCount(DEFAULT_VISIBLE_MESSAGE_COUNT);
-  }, [ownerPublicKeyHex, peerPublicKeyHex]);
+  }, [ownerPublicKeyHex, normalizedPeerPublicKeyHex]);
 
   const activeCallForCurrentPeer =
     webrtcSnapshot &&
-    webrtcSnapshot.remotePublicKeyHex === peerPublicKeyHex &&
+    normalizePublicKeyHexForMatch(webrtcSnapshot.remotePublicKeyHex) === normalizedPeerPublicKeyHex &&
     webrtcSnapshot.phase !== "idle" &&
     webrtcSnapshot.phase !== "ended"
       ? webrtcSnapshot
@@ -210,14 +211,14 @@ export function MessageDetailPage(): JSX.Element {
     : "";
 
   const timeline = useMemo(() => {
-    if (!ownerPublicKeyHex || !peerPublicKeyHex) return [];
+    if (!ownerPublicKeyHex || !normalizedPeerPublicKeyHex) return [];
     return buildMessageTimeline({
       messages,
       history,
       ownerPublicKeyHex,
-      peerPublicKeyHex
+      peerPublicKeyHex: normalizedPeerPublicKeyHex
     });
-  }, [history, messages, ownerPublicKeyHex, peerPublicKeyHex]);
+  }, [history, messages, ownerPublicKeyHex, normalizedPeerPublicKeyHex]);
 
   const visibleItems = useMemo(() => timeline.slice(0, visibleCount), [timeline, visibleCount]);
   const hasMoreItems = timeline.length > visibleItems.length;
@@ -227,7 +228,7 @@ export function MessageDetailPage(): JSX.Element {
       setIsLocalPrimary(false);
       setIsFullscreen(false);
     }
-  }, [isVideoSessionForCurrentPeer, peerPublicKeyHex]);
+  }, [isVideoSessionForCurrentPeer, normalizedPeerPublicKeyHex]);
 
   useEffect(() => {
     if (!isVideoSessionForCurrentPeer) return;
@@ -315,7 +316,7 @@ export function MessageDetailPage(): JSX.Element {
       return;
     }
     try {
-      await service!.sendTextMessage({ recipientPublicKeyHex: peerPublicKeyHex, body });
+      await service!.sendTextMessage({ recipientPublicKeyHex: normalizedPeerPublicKeyHex, body });
       setSendBody("");
       const items = await service!.listMessages({ limit: MESSAGE_READ_WINDOW });
       setMessages(items);
@@ -335,7 +336,7 @@ export function MessageDetailPage(): JSX.Element {
       return;
     }
     try {
-      await webrtc.startCall({ targetPublicKeyHex: peerPublicKeyHex, mode });
+      await webrtc.startCall({ targetPublicKeyHex: normalizedPeerPublicKeyHex, mode });
     } catch (err) {
       setSendError(formatMessageDetailError(i18n, err));
     }
@@ -349,11 +350,11 @@ export function MessageDetailPage(): JSX.Element {
     }
     try {
       if (kind === "image") {
-        await webrtc.sendImage({ targetPublicKeyHex: peerPublicKeyHex, file });
+        await webrtc.sendImage({ targetPublicKeyHex: normalizedPeerPublicKeyHex, file });
       } else {
-        await webrtc.sendFile({ targetPublicKeyHex: peerPublicKeyHex, file });
+        await webrtc.sendFile({ targetPublicKeyHex: normalizedPeerPublicKeyHex, file });
       }
-      const items = await webrtc.listHistoryForPeer(peerPublicKeyHex);
+      const items = await webrtc.listHistoryForPeer(normalizedPeerPublicKeyHex);
       setHistory(items);
     } catch (err) {
       setSendError(formatMessageDetailError(i18n, err));
@@ -378,25 +379,25 @@ export function MessageDetailPage(): JSX.Element {
     if (!panel) return;
     if (document.fullscreenElement === panel) {
       if (typeof document.exitFullscreen !== "function") return;
+      try {
+        await document.exitFullscreen();
+        setIsFullscreen(false);
+      } catch {
+        return;
+      }
+      return;
+    }
+    if (typeof panel.requestFullscreen !== "function") return;
     try {
-      await document.exitFullscreen();
-      setIsFullscreen(false);
+      await panel.requestFullscreen();
+      setIsFullscreen(true);
     } catch {
       return;
     }
-    return;
-  }
-  if (typeof panel.requestFullscreen !== "function") return;
-  try {
-    await panel.requestFullscreen();
-    setIsFullscreen(true);
-  } catch {
-    return;
-  }
   }
 
   return (
-    <section className="km-message-detail" data-message-detail="ok" data-peer-public-key-hex={peerPublicKeyHex}>
+    <section className="km-message-detail" data-message-detail="ok" data-peer-public-key-hex={normalizedPeerPublicKeyHex}>
       <header className="km-message-detail__header">
         <button className="km-message-detail__back" type="button" onClick={() => router.push("/messages")}>
           {i18n.t("message.page.back")}
@@ -1009,4 +1010,11 @@ function parsePeerPublicKeyHexFromPath(path: string): string {
   } catch {
     return segments[1] ?? "";
   }
+}
+
+/**
+ * 仅用于页面内匹配与 service 调用的最小规整，不做合法性校验。
+ */
+function normalizePublicKeyHexForMatch(publicKeyHex: string | null | undefined): string {
+  return (publicKeyHex ?? "").trim().toLowerCase();
 }
