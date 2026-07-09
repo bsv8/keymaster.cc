@@ -116,9 +116,23 @@
 }
 
 .km-message-page__new-chat {
-  min-width: 38px;
-  padding-inline: 0;
-  font-size: 18px;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+  align-self: center;
+}
+
+.km-message-page__new-chat > span {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
   line-height: 1;
 }
 

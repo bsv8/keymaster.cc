@@ -231,6 +231,38 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     });
   });
 
+  it("accepts the singular /message/:publicKeyHex alias route", async () => {
+    const peer = "02cccc".padEnd(66, "c");
+    const sample: AppMsgMessage = {
+      messageId: "id-detail-alias-1",
+      clientMessageId: "c-detail-alias-1",
+      senderPublicKeyHex: peer,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: "alias route body",
+      createdAtMs: 1000,
+      insertedAtMs: 2000
+    };
+    const service = makeFakeService({ messages: [sample] });
+    const host = makeFakeHost(service, makeFakeWebrtcService());
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/message/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByLabelText("message.page.detail.body")).toBeTruthy();
+      expect(screen.getByText("message.page.send.submit")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.video")).toBeTruthy();
+      expect(screen.getByText("message.page.detail.audio")).toBeTruthy();
+    });
+  });
+
   it("renders newest messages closer to the composer", async () => {
     const peer = "02eeee".padEnd(66, "e");
     const older: AppMsgMessage = {

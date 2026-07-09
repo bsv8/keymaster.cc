@@ -683,7 +683,10 @@ function formatCallStatus(i18n: ReturnType<typeof useI18n>, status: string): str
 
 function parsePeerPublicKeyHexFromPath(path: string): string {
   const segments = path.split("/").filter(Boolean);
-  if (segments.length !== 2 || segments[0] !== "messages") {
+  if (segments.length !== 2) {
+    return "";
+  }
+  if (segments[0] !== "messages" && segments[0] !== "message") {
     return "";
   }
   try {
