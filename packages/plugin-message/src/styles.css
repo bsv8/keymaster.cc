@@ -115,6 +115,13 @@
   cursor: pointer;
 }
 
+.km-message-page__new-chat {
+  min-width: 38px;
+  padding-inline: 0;
+  font-size: 18px;
+  line-height: 1;
+}
+
 .km-message-page__conversation-action:hover,
 .km-message-detail__back:hover,
 .km-message-detail__send:hover {

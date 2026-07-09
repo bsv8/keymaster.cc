@@ -17,7 +17,8 @@
 //         `message.service` capability。
 //   - 页面路由固定归本插件：
 //       * `/messages`                —— 会话列表
-//       * `/messages/:publicKeyHex`   —— 会话详情
+//       * `/messages/:publicKeyHex`   —— 会话详情（主路由）
+//       * `/message/:publicKeyHex`    —— 会话详情别名，兼容旧口头路径
 //     **不**再注册 `/system/messages` / 系统菜单 / 系统面包屑——AppMsg
 //     管理面归 `plugin-appmsg` 的 `/system/appmsg`。
 
@@ -50,6 +51,13 @@ const messageResources: I18nPluginResources = {
       "message.page.empty.desc": "Open a conversation detail page to send a message and start a thread.",
       "message.page.noOwner.title": "Pick a key",
       "message.page.noOwner.desc": "Switch to an active key to view conversations.",
+      "message.page.newChat.open": "Start a new chat",
+      "message.page.newChat.title": "Start a new chat",
+      "message.page.newChat.label": "publicKeyHex",
+      "message.page.newChat.placeholder": "66 hex characters",
+      "message.page.newChat.submit": "Go to chat",
+      "message.page.newChat.cancel": "Cancel",
+      "message.page.newChat.error.invalid": "Invalid publicKeyHex. Expected 66 hex characters.",
       "message.page.conversation.count": "{{count}} messages",
       "message.page.conversation.addContact": "Add contact",
       "message.page.conversation.editContact": "Edit contact",
@@ -113,6 +121,13 @@ const messageResources: I18nPluginResources = {
       "message.page.empty.desc": "进入会话详情页即可发送消息并开始线程。",
       "message.page.noOwner.title": "请选择一个 key",
       "message.page.noOwner.desc": "切换到 active key 后即可查看会话。",
+      "message.page.newChat.open": "新建聊天",
+      "message.page.newChat.title": "新建聊天",
+      "message.page.newChat.label": "publicKeyHex",
+      "message.page.newChat.placeholder": "66 位 hex",
+      "message.page.newChat.submit": "去聊天",
+      "message.page.newChat.cancel": "取消",
+      "message.page.newChat.error.invalid": "publicKeyHex 非法，必须是 66 位 hex。",
       "message.page.conversation.count": "{{count}} 条消息",
       "message.page.conversation.addContact": "新增联系人",
       "message.page.conversation.editContact": "编辑联系人",
@@ -277,6 +292,13 @@ export const messagePlatformPlugin: PluginManifest = {
       component: MessageDetailPage,
       inMenu: false
     });
+    routes.register({
+      id: "message.detail.alias",
+      path: "/message/:publicKeyHex",
+      label: { key: "message.page.detail.title", fallback: "Conversation" },
+      component: MessageDetailPage,
+      inMenu: false
+    });
     menus.register({
       id: "message.page.menu",
       label: { key: "message.menu", fallback: "Messages" },
@@ -288,7 +310,10 @@ export const messagePlatformPlugin: PluginManifest = {
     breadcrumbs.register({
       id: "message.page.crumbs",
       order: 4,
-      match: (path) => path === "/messages" || /^\/messages\/[^/]+\/?$/.test(path),
+      match: (path) =>
+        path === "/messages" ||
+        /^\/messages\/[^/]+\/?$/.test(path) ||
+        /^\/message\/[^/]+\/?$/.test(path),
       resolve: () => [
         { label: { key: "message.breadcrumb", fallback: "Messages" } }
       ]

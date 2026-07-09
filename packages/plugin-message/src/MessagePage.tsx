@@ -11,7 +11,7 @@
 import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useCapability, useI18n, router } from "@keymaster/runtime";
 import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
-import { EmptyState, PageHeader } from "@keymaster/ui";
+import { Button, EmptyState, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import type { MessageService } from "./messageService.js";
 import { buildConversationSummaries, shortPublicKeyHex } from "./messageConversation.js";
 
@@ -28,6 +28,7 @@ const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
 const CONTACTS_EDITOR_CAPABILITY = "contacts.editor";
 const MESSAGE_READ_WINDOW = 10_000;
+const PUBLIC_KEY_HEX_PATTERN = /^[0-9a-f]{66}$/;
 
 export function MessagePage(): JSX.Element {
   const i18n = useI18n();
@@ -65,6 +66,9 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
     publicKeyHex?: string;
     contactId?: string;
   }>({ open: false, mode: "create" });
+  const [newChatOpen, setNewChatOpen] = useState(false);
+  const [newChatPublicKeyHex, setNewChatPublicKeyHex] = useState("");
+  const [newChatError, setNewChatError] = useState<string | null>(null);
 
   useEffect(() => {
     return keyspace.onActiveChange((state) => {
@@ -160,11 +164,49 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
     });
   };
 
+  const openNewChatDialog = () => {
+    setNewChatError(null);
+    setNewChatPublicKeyHex("");
+    setNewChatOpen(true);
+  };
+
+  const closeNewChatDialog = () => {
+    setNewChatOpen(false);
+    setNewChatError(null);
+    setNewChatPublicKeyHex("");
+  };
+
+  const submitNewChat = () => {
+    const normalized = normalizePublicKeyHex(newChatPublicKeyHex);
+    if (!isValidPublicKeyHex(normalized)) {
+      setNewChatError(
+        i18n.t("message.page.newChat.error.invalid", {
+          defaultValue: "Invalid publicKeyHex. Expected 66 hex characters."
+        })
+      );
+      return;
+    }
+    closeNewChatDialog();
+    router.push(`/message/${encodeURIComponent(normalized)}`);
+  };
+
   return (
     <section className="km-message-page" data-message-page="messages">
       <PageHeader
         title={i18n.t("message.page.title")}
         description={i18n.t("message.page.desc", { defaultValue: "Conversation list grouped by peer publicKeyHex." })}
+        actions={
+          <Button
+            variant="ghost"
+            size="sm"
+            className="km-message-page__new-chat"
+            aria-label={i18n.t("message.page.newChat.open", { defaultValue: "Start a new chat" })}
+            title={i18n.t("message.page.newChat.open", { defaultValue: "Start a new chat" })}
+            onClick={openNewChatDialog}
+          >
+            +
+          </Button>
+        }
       />
 
       {conversations.length === 0 ? (
@@ -249,6 +291,40 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
           }}
         />
       ) : null}
+
+      <Modal
+        open={newChatOpen}
+        title={i18n.t("message.page.newChat.title", { defaultValue: "Start a new chat" })}
+        onClose={closeNewChatDialog}
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeNewChatDialog}>
+              {i18n.t("message.page.newChat.cancel", { defaultValue: "Cancel" })}
+            </Button>
+            <Button onClick={() => void submitNewChat()}>
+              {i18n.t("message.page.newChat.submit", { defaultValue: "Go to chat" })}
+            </Button>
+          </>
+        }
+      >
+        <TextInput
+          label={i18n.t("message.page.newChat.label", { defaultValue: "publicKeyHex" })}
+          value={newChatPublicKeyHex}
+          onChange={(e) => {
+            setNewChatPublicKeyHex(e.currentTarget.value);
+            if (newChatError) setNewChatError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submitNewChat();
+            }
+          }}
+          placeholder={i18n.t("message.page.newChat.placeholder", { defaultValue: "66 hex characters" })}
+          error={newChatError ?? undefined}
+          autoFocus
+        />
+      </Modal>
     </section>
   );
 }
@@ -260,4 +336,27 @@ function formatTime(ms: number): string {
   } catch {
     return String(ms);
   }
+}
+
+/**
+ * 把用户输入规整成可校验的 publicKeyHex。
+ *
+ * 设计缘由：
+ *   - 这里不做复杂容错，只允许去掉首尾空白并统一小写；
+ *   - 用户输入一旦不是 66 位 hex，就直接报错，不做隐式修复；
+ *   - 这样弹窗提交逻辑简单，失败时用户能明确看到输入问题。
+ */
+function normalizePublicKeyHex(input: string): string {
+  return input.trim().toLowerCase();
+}
+
+/**
+ * 校验压缩公钥 hex 是否可用于直接跳转到会话页。
+ *
+ * 设计缘由：
+ *   - 只接受 66 位 hex，避免把明显错误输入推到路由层后再失败；
+ *   - 错误必须在本地表单内拦住，避免列表页跳转到无意义的空页面。
+ */
+function isValidPublicKeyHex(publicKeyHex: string): boolean {
+  return PUBLIC_KEY_HEX_PATTERN.test(publicKeyHex);
 }

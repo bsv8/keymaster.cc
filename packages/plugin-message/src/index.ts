@@ -10,7 +10,8 @@
 //   - **不**走 `<pluginId>.appmsg.client` 旧 capability（runtime 已经
 //     移除该注入路径）；
 //   - **不**暴露 `subscriptionSource()` 旧"subscription token"接口；
-//   - 页面 = `/messages`（会话列表）与 `/messages/:publicKeyHex`（会话详情）；
+//   - 页面 = `/messages`（会话列表）与 `/messages/:publicKeyHex`（会话详情主路由）；
+//   - 同时兼容 `/message/:publicKeyHex` 作为会话详情别名；
 //   - **不**展示 AppMsg 连接态 / 同步态 / 在线查询 / 全库统计——
 //     这些由 `plugin-appmsg` 的 `/system/appmsg` 管理页负责。
 //

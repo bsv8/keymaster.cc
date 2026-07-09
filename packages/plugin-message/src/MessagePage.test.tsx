@@ -2,7 +2,7 @@
 // 消息首页契约测试。
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   ActiveKeyState,
   AppMsgMessage,
@@ -228,6 +228,57 @@ describe("MessagePage in PluginHostProvider", () => {
     await waitFor(() => {
       expect(screen.getByText("message.page.noClient")).toBeTruthy();
     });
+  });
+
+  it("opens the new chat modal and navigates to the detail route", async () => {
+    const service = makeFakeService({ messages: [] });
+    const { host } = makeFakeHost(service);
+    const { MessagePage } = await import("./MessagePage.js");
+    window.history.pushState({}, "", "/messages");
+    render(
+      <PluginHostProvider host={host}>
+        <MessagePage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("message.page.title")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "message.page.newChat.open" }));
+
+    const input = screen.getByLabelText("message.page.newChat.label");
+    fireEvent.change(input, { target: { value: OWNER } });
+    fireEvent.click(screen.getByRole("button", { name: "message.page.newChat.submit" }));
+
+    await waitFor(() => {
+      expect(window.location.pathname).toBe(`/message/${OWNER}`);
+    });
+  });
+
+  it("rejects invalid publicKeyHex in the new chat modal", async () => {
+    const service = makeFakeService({ messages: [] });
+    const { host } = makeFakeHost(service);
+    const { MessagePage } = await import("./MessagePage.js");
+    window.history.pushState({}, "", "/messages");
+    render(
+      <PluginHostProvider host={host}>
+        <MessagePage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("message.page.title")).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "message.page.newChat.open" }));
+    fireEvent.change(screen.getByLabelText("message.page.newChat.label"), {
+      target: { value: "abc" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: "message.page.newChat.submit" }));
+
+    expect(screen.getByText("message.page.newChat.error.invalid")).toBeTruthy();
+    expect(window.location.pathname).toBe("/messages");
   });
 });
 
