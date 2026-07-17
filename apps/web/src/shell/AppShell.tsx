@@ -53,6 +53,14 @@ export type ShellGuardState =
   | { kind: "diagnostic"; error: string };
 
 const KEY_MANAGEMENT_PATH = "/settings/vault";
+const AUTO_LOCK_IDLE_MS = 5 * 60 * 1000;
+const AUTO_LOCK_ACTIVITY_EVENTS: Array<keyof WindowEventMap> = [
+  "pointerdown",
+  "keydown",
+  "mousemove",
+  "touchstart",
+  "wheel"
+];
 
 /**
  * 纯函数：评估当前已解锁状态下的壳层守卫。
@@ -120,6 +128,7 @@ export function AppShell() {
   const host = usePluginHost();
   const vault = useCapability<VaultService>("vault.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const [vaultStatus, setVaultStatus] = useState<VaultStatus>(vault.status());
   const path = useCurrentPath();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -139,6 +148,61 @@ export function AppShell() {
       setActivationNotice(notice);
     });
   }, [vault]);
+
+  useEffect(() => {
+    setVaultStatus(vault.status());
+    return vault.onStatusChange((status) => {
+      setVaultStatus(status);
+    });
+  }, [vault]);
+
+  // 硬切换 003 / 6.3：5 分钟无活动自动锁定。
+  // 页面隐藏期间不暂停计时，只在用户活动时重置。
+  useEffect(() => {
+    if (vaultStatus !== "unlocked") {
+      return;
+    }
+    let timer: ReturnType<typeof window.setTimeout> | null = null;
+    let disposed = false;
+
+    const schedule = () => {
+      if (disposed) return;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      timer = window.setTimeout(() => {
+        if (disposed) return;
+        void vault.lock().catch((err) => {
+          console.error("AppShell auto-lock failed", err);
+        });
+      }, AUTO_LOCK_IDLE_MS);
+    };
+    const onActivity = () => {
+      schedule();
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        schedule();
+      }
+    };
+
+    schedule();
+    for (const eventName of AUTO_LOCK_ACTIVITY_EVENTS) {
+      window.addEventListener(eventName, onActivity, { passive: true });
+    }
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      disposed = true;
+      if (timer !== null) {
+        window.clearTimeout(timer);
+      }
+      for (const eventName of AUTO_LOCK_ACTIVITY_EVENTS) {
+        window.removeEventListener(eventName, onActivity);
+      }
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [vault, vaultStatus]);
 
   // 硬切换 005 收尾：已解锁壳层守卫。
   // 不变量：

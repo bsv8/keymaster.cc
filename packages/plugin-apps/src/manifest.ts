@@ -13,7 +13,7 @@
 //     core 平台能力；缺省启用、可被禁用。
 //   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；
 //     当前激活错误码 `export_owner_runtime_failed` 表示 launcher 端
-//     用 `vault.withPrivateKey` 借 owner 私钥失败。
+//     生成 appView owner runtime capability 失败。
 
 import type {
   HomeRegistry,
@@ -62,6 +62,12 @@ const appsResources: I18nPluginResources = {
         "The browser blocked opening the Session Window. Please allow popups for Keymaster and try again.",
       "apps.open.error.internal":
         "Failed to open the app. Please try again.",
+      "apps.launch.title": "Open {name}",
+      "apps.launch.titleFallback": "Open App",
+      "apps.launch.key": "Key",
+      "apps.launch.keyHint": "Choose which Vault key this app session should bind to.",
+      "apps.launch.password": "Vault password",
+      "apps.launch.error.noKeys": "No Vault key is available.",
       "apps.widget.title": "Apps",
       "apps.widget.empty": "No apps registered yet.",
       "apps.widget.viewAll": "View all apps"
@@ -88,6 +94,12 @@ const appsResources: I18nPluginResources = {
       "apps.open.error.openSessionWindowFailed": "打开 Session Window 失败，请稍后再试。",
       "apps.open.error.openSessionWindowBlocked": "浏览器拦截了 Session Window 的打开。请允许 Keymaster 弹出窗口后再试一次。",
       "apps.open.error.internal": "打开应用失败，请稍后再试。",
+      "apps.launch.title": "打开 {name}",
+      "apps.launch.titleFallback": "打开应用",
+      "apps.launch.key": "密钥",
+      "apps.launch.keyHint": "选择这个应用会话要绑定的 Vault key。",
+      "apps.launch.password": "Vault 密码",
+      "apps.launch.error.noKeys": "没有可用的 Vault key。",
       "apps.widget.title": "应用",
       "apps.widget.empty": "尚未注册应用。",
       "apps.widget.viewAll": "查看所有应用"

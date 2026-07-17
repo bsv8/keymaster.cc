@@ -18,9 +18,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   LaunchAppViewError,
+  KEYSPACE_SERVICE_CAPABILITY,
   PROTOCOL_SERVICE_CAPABILITY,
   type LaunchAppViewInput,
   type LaunchAppViewResult,
+  type KeyIdentity,
+  type KeyspaceService,
   type ProtocolService
 } from "@keymaster/contracts";
 import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
@@ -41,6 +44,32 @@ interface MountHandle {
   };
   host: ReturnType<typeof createPluginHost>;
   unmount(): void;
+}
+
+const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
+
+function makeKeyspaceService(): KeyspaceService {
+  const key: KeyIdentity = {
+    publicKeyHex: TEST_PUB_HEX,
+    label: "Key A",
+    capabilities: ["p2pkh"],
+    createdAt: new Date().toISOString()
+  };
+  return {
+    listKeys: async () => [key],
+    getKey: async (publicKeyHex: string) => (publicKeyHex === TEST_PUB_HEX ? key : undefined),
+    active: () => ({ activePublicKeyHex: TEST_PUB_HEX }),
+    setActive: async () => undefined,
+    requireActiveKey: () => key,
+    onActiveChange: () => () => undefined,
+    openKeyStorage: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
+    registerPluginStorage: () => undefined,
+    listPluginStorages: () => [],
+    prepareDeleteKey: async () => undefined,
+    deleteKey: async () => undefined,
+    isInitializing: () => false,
+    onInitializationChange: () => () => undefined
+  } as unknown as KeyspaceService;
 }
 
 function makeService(): ProtocolService & {
@@ -68,6 +97,7 @@ function mount(): MountHandle {
     initialI18nResources: appsPlugin.i18n ? [appsPlugin.i18n] : []
   });
   host.provide(PROTOCOL_SERVICE_CAPABILITY, service);
+  host.provide(KEYSPACE_SERVICE_CAPABILITY, makeKeyspaceService());
   const renderResult = render(
     <PluginHostProvider host={host}>
       <AppsPage />
@@ -94,18 +124,31 @@ describe("AppsPage - 渲染 ok 记录", () => {
 });
 
 describe("AppsPage - 点击启动", () => {
-  it("点击 Open App → 调 launchAppView，参数与 catalog 一致", async () => {
+  it("点击 Open App → 打开授权 modal，提交后调 launchAppView", async () => {
     const handle = mount();
     const button = screen.getByTestId("apps-open-justnote") as HTMLButtonElement;
     await act(async () => {
       fireEvent.click(button);
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("app-launch-modal")).toBeTruthy();
+    });
+    const password = screen.getByLabelText(/vault password/i) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(password, { target: { value: "vault-password" } });
+    });
+    const confirm = screen.getByTestId("app-launch-confirm") as HTMLButtonElement;
+    await act(async () => {
+      fireEvent.click(confirm);
     });
     expect(handle.service.launchAppViewCalls.length).toBe(1);
     expect(handle.service.launchAppViewCalls[0]).toEqual({
       appId: "justnote",
       appOrigin: "https://justnote.apps.bsv8.com",
       appUrl: "https://justnote.apps.bsv8.com/",
-      claims: []
+      claims: [],
+      publicKeyHex: TEST_PUB_HEX,
+      password: "vault-password"
     });
   });
 
@@ -136,6 +179,13 @@ describe("AppsPage - 启动失败", () => {
     await act(async () => {
       fireEvent.click(button);
     });
+    const password = screen.getByLabelText(/vault password/i) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(password, { target: { value: "vault-password" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-launch-confirm"));
+    });
     await waitFor(() => {
       const err = screen.getByTestId("apps-card-error-justnote");
       expect(err).toBeTruthy();
@@ -159,6 +209,13 @@ describe("AppsPage - 启动失败", () => {
     await act(async () => {
       fireEvent.click(button);
     });
+    const password = screen.getByLabelText(/vault password/i) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(password, { target: { value: "vault-password" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-launch-confirm"));
+    });
     await waitFor(() => {
       const err = screen.getByTestId("apps-card-error-justnote");
       expect(err).toBeTruthy();
@@ -177,6 +234,13 @@ describe("AppsPage - 启动失败", () => {
     const button = screen.getByTestId("apps-open-justnote") as HTMLButtonElement;
     await act(async () => {
       fireEvent.click(button);
+    });
+    const password = screen.getByLabelText(/vault password/i) as HTMLInputElement;
+    await act(async () => {
+      fireEvent.change(password, { target: { value: "vault-password" } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("app-launch-confirm"));
     });
     await waitFor(() => {
       const err = screen.getByTestId("apps-card-error-justnote");

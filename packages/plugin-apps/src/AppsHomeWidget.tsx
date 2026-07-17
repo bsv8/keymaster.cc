@@ -19,9 +19,9 @@ import {
   LaunchAppViewError,
   PROTOCOL_SERVICE_CAPABILITY,
   type LaunchAppViewErrorCode,
-  type LaunchAppViewInput,
   type ProtocolService
 } from "@keymaster/contracts";
+import { AppLaunchModal } from "./AppLaunchModal.js";
 import { loadCatalog, type AppCatalogEntry } from "./catalog.js";
 
 const HOME_WIDGET_PREVIEW_LIMIT = 3;
@@ -57,6 +57,8 @@ export function AppsHomeWidget() {
   useI18n().language();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [launchEntry, setLaunchEntry] = useState<AppCatalogEntry | null>(null);
+  const [launchError, setLaunchError] = useState<string | null>(null);
   const [errorById, setErrorById] = useState<Record<string, string>>({});
 
   const visible = validation.ok.slice(0, HOME_WIDGET_PREVIEW_LIMIT);
@@ -64,29 +66,36 @@ export function AppsHomeWidget() {
 
   const handleOpen = async (entry: AppCatalogEntry) => {
     if (launchingId) return;
-    setLaunchingId(entry.id);
+    setLaunchEntry(entry);
+    setLaunchError(null);
     setErrorById((m) => {
       const { [entry.id]: _omit, ...rest } = m;
       void _omit;
       return rest;
     });
+  };
+
+  const handleConfirmLaunch = async (input: { publicKeyHex: string; password: string }) => {
+    if (!launchEntry) return;
+    setLaunchingId(launchEntry.id);
+    setLaunchError(null);
     try {
-      const input: LaunchAppViewInput = {
-        appId: entry.id,
-        appOrigin: entry.appOrigin,
-        appUrl: entry.appUrl,
-        claims: entry.claims
-      };
-      await protocol.launchAppView(input);
+      await protocol.launchAppView({
+        appId: launchEntry.id,
+        appOrigin: launchEntry.appOrigin,
+        appUrl: launchEntry.appUrl,
+        claims: launchEntry.claims,
+        publicKeyHex: input.publicKeyHex,
+        password: input.password
+      });
+      setLaunchEntry(null);
     } catch (err) {
-      const code =
-        err instanceof LaunchAppViewError
-          ? err.code
-          : "internal_error";
+      const code = err instanceof LaunchAppViewError ? err.code : "internal_error";
       const message = t(errorMessageKey(code), {
         defaultValue: t("apps.open.error.internal", { defaultValue: "Failed to open the app." })
       });
-      setErrorById((m) => ({ ...m, [entry.id]: message }));
+      setLaunchError(message);
+      setErrorById((m) => ({ ...m, [launchEntry.id]: message }));
     } finally {
       setLaunchingId(null);
     }
@@ -99,6 +108,18 @@ export function AppsHomeWidget() {
       <div className="apps-home-widget__title">
         {t("apps.widget.title", { defaultValue: "Apps" })}
       </div>
+      <AppLaunchModal
+        open={launchEntry !== null}
+        entry={launchEntry}
+        busy={launchingId !== null}
+        error={launchError}
+        onClose={() => {
+          if (launchingId) return;
+          setLaunchEntry(null);
+          setLaunchError(null);
+        }}
+        onConfirm={handleConfirmLaunch}
+      />
       {visible.length === 0 ? (
         <div className="apps-home-widget__empty">
           {t("apps.widget.empty", { defaultValue: "No apps registered yet." })}
@@ -142,4 +163,3 @@ export function AppsHomeWidget() {
     </div>
   );
 }
-

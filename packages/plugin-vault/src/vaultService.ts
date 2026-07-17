@@ -1,26 +1,22 @@
 // packages/plugin-vault/src/vaultService.ts
 // VaultService 实现。
 // 关键不变量：
-//   - 明文私钥只存在于 withPrivateKey 回调闭包内，回调结束即丢。
-//   - 不持有全局明文缓存；多签名者顺序调用即依次解密。
+//   - 明文私钥只存在于受控 session capability 的短生命周期内部，调用结束即丢。
+//   - 不持有全局明文缓存；每次受控能力调用都按需解密、按需释放。
 //   - 状态机：booting -> uninitialized -> locked -> unlocked。
-//   - 导出必须由 Vault 完成，因为只有 Vault 能通过 withPrivateKey 受控借用明文私钥。
+//   - 导出必须由 Vault 完成，因为只有 Vault 能在本地会话里受控处理明文私钥。
 //   - importPrivateKey 必须拒绝重复 publicKeyHex；错误信息使用英文。
 //   - 硬切换 002 收尾：`vault_keys` canonical store 主键 = publicKeyHex。
 //     新建 / 导入 key 时必须**先**派生 publicKeyHex 再落库；不存在
 //     "先 uuid、再回填身份"的路径。`crypto.randomUUID()` 不再被 vault
 //     用作 key 域主键。
-//   - 一次性 legacy staging migration：unlock 时把 v4 之前没有
-//     publicKeyHex 的旧行 derive 出 publicKeyHex 写到 canonical store；
-//     migration 失败或重号一律 fail-closed（不进入 unlocked）。迁移
-//     完成后 staging store 物理删除；下次访问 staging 已不存在。
 //   - emit key.created / key.deleted 时 payload 只携带 publicKeyHex。
 //
 // 硬切换 002 收尾：unlock 完成边界收紧——"unlocked" 对 UI / 业务
 // 插件的语义是"keyspace ready 边界已完成，业务可以安全读取 key-scoped
-// storage"。具体顺序：password 校验 -> 派生 masterKey/masterSalt ->
-// migrateLegacyStaging -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit。
-// 失败时回退到 locked 并清空内存会话。
+// storage"。具体顺序：password 校验 -> 派生 vault session key ->
+// keyspace.onVaultUnlocked -> setStatus("unlocked") + emit。
+// 失败时回退到 locked 并清空会话。
 //
 // 硬切换 003 收尾：
 //   - 系统不再生成、缓存、回写、透传 `fingerprint` 字段。
@@ -33,31 +29,53 @@ import type { MessageBus } from "@keymaster/runtime";
 import { reportFatalError } from "@keymaster/runtime";
 import {
   EVENT_ACTIVE_KEY_CHANGED,
+  ActiveKeySessionRevokedError,
   KeyPersistedButActivationFailedError,
   type ActiveKeyState,
-  type KeyExportEnvelope,
   type KeyIdentity,
   type KeyRef,
   type PluginLogger,
-  type PrivateKeyMaterial,
+  type ProviderSealedMessageRecord,
   type VaultService,
   type VaultStatus
 } from "@keymaster/contracts";
+import type { VaultSessionState } from "@keymaster/contracts";
+import { type AppMsgMessage } from "@keymaster/contracts";
 import {
   aesGcmKeyFromRawBits,
   assertWebCryptoAvailable,
-  bytesToHex,
   decryptBytes,
+  decryptBytesWithAad,
   deriveKey,
-  encryptBytes,
   encryptVerifier,
   hexToBytes,
+  vaultKeyAad,
   verifyVerifier
 } from "./crypto.js";
-import { encryptBsv8KeyEnvelope } from "./keyEnvelope.js";
+import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
+import { encodeKeyBackup } from "./keyBackup.js";
+import { decodeKeyBackup } from "./keyBackup.js";
 import { deriveKeyIdentity, generatePrivateKeyHex } from "./keyIdentity.js";
-import { vaultDb, type VaultKeyLegacyStagingRecord, type VaultKeyRecord, type VaultMetaRecord } from "./vaultDb.js";
+import {
+  buildVaultMeta as coordinatorBuildVaultMeta,
+  decryptVaultKeyMaterialForMigration as coordinatorDecryptVaultKeyMaterialForMigration,
+  encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial,
+  deriveVaultPasswordKey as coordinatorDeriveVaultPasswordKey,
+  migrateVaultKeysToV2Aad as coordinatorMigrateVaultKeysToV2Aad,
+  verifyVaultPasswordKey as coordinatorVerifyVaultPasswordKey
+} from "./vaultCoordinator.js";
+import {
+  createSessionCryptoEngine,
+  type SessionCryptoClientOptions
+} from "./sessionCryptoClient.js";
+import { vaultDb, type VaultKeyRecord, type VaultMetaRecord } from "./vaultDb.js";
 import type { KeyspaceHandle } from "./keyspaceService.js";
+import type { ActiveKeyCrypto } from "@keymaster/contracts";
+
+interface VaultKeyMaterial {
+  hex: string;
+  wif?: string;
+}
 
 // 透传 contracts 中的 KeyPersistedButActivationFailedError：
 // plugin-vault 内部旧实现 / 测试仍可直接 import 本文件的符号，
@@ -175,6 +193,7 @@ function validateKeyShape(record: unknown): string | null {
 export interface VaultServiceDeps {
   messageBus: MessageBus;
   keyspace?: KeyspaceHandle;
+  sessionCryptoEngineOptions?: SessionCryptoClientOptions;
   /**
    * 硬切换 002：业务插件注入的 logger。
    * vault 关键轨迹（unlock / lock / key created / deleted / active changed /
@@ -186,12 +205,30 @@ export interface VaultServiceDeps {
 export function createVaultService(deps: VaultServiceDeps): VaultService {
   const statusListeners = new Set<(s: VaultStatus) => void>();
   let status: VaultStatus = "booting";
-  /** 当前解锁后的派生 key；锁定时为 null。 */
-  let masterKey: CryptoKey | null = null;
-  /** 当前解锁后的 master salt。 */
-  let masterSalt: Uint8Array | null = null;
+  type SessionCryptoEngine = Awaited<ReturnType<typeof createSessionCryptoEngine>>;
+  interface VaultSessionStateInternal extends VaultSessionState {
+    activeCrypto: SessionCryptoEngine | null;
+  }
+  let vaultSession: VaultSessionStateInternal | null = null;
   /** 当前 key 列表的内存缓存（identity 字段已就绪），避免每次都 await IndexedDB。 */
   let keyCache: KeyRef[] | null = null;
+  /**
+   * 当前创建过的 active-key capability 句柄。
+   *
+   * 设计缘由：锁定 / 删除材料 / dispose 时必须能够主动让旧 capability
+   * 失效，而不是只依赖调用方“别再用”。
+   */
+  const activeKeyCryptoLeases = new Set<{
+    publicKeyHex: string;
+    revoke: (reason: string) => void;
+  }>();
+  const appViewSessions = new Map<
+    string,
+    {
+      publicKeyHex: string;
+      crypto: SessionCryptoEngine;
+    }
+  >();
   /**
    * "首 Key 已落库但未自动 active"待展示 notice。
    * 见 {@link InitialActivationNotice}。
@@ -213,26 +250,196 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     for (const l of noticeListeners) l(next);
   }
 
+  function revokeActiveKeyCryptoLeases(publicKeyHex?: string, reason = "vault lifecycle"): void {
+    for (const lease of Array.from(activeKeyCryptoLeases)) {
+      if (publicKeyHex && lease.publicKeyHex !== publicKeyHex) continue;
+      try {
+        lease.revoke(reason);
+      } catch {
+        /* noop */
+      } finally {
+        activeKeyCryptoLeases.delete(lease);
+      }
+    }
+  }
+
+  function disposeAppViewSession(sessionId: string, reason = "appView session disposed"): void {
+    const session = appViewSessions.get(sessionId);
+    if (!session) return;
+    appViewSessions.delete(sessionId);
+    try {
+      session.crypto.dispose(reason);
+    } catch {
+      /* noop */
+    }
+  }
+
+  function disposeAllAppViewSessions(reason = "appView session disposed"): void {
+    for (const sessionId of Array.from(appViewSessions.keys())) {
+      disposeAppViewSession(sessionId, reason);
+    }
+  }
+
+  async function createAndInstallSessionActiveCrypto(
+    record: VaultKeyRecord,
+    passwordKey: CryptoKey,
+    sessionId?: string
+  ): Promise<void> {
+    if (!vaultSession) {
+      throw new Error("Vault is locked");
+    }
+    const activeCrypto = await createActiveCryptoForRecord(record, passwordKey, sessionId);
+    setSessionActiveCrypto(record.publicKeyHex, activeCrypto);
+  }
+
+  async function installCurrentSessionActiveCrypto(passwordKey: CryptoKey): Promise<void> {
+    if (!vaultSession) {
+      return;
+    }
+    const activePublicKeyHex = deps.keyspace?.active().activePublicKeyHex;
+    let record: VaultKeyRecord | undefined;
+    if (activePublicKeyHex) {
+      record = await vaultDb.getKey(activePublicKeyHex);
+    }
+    if (!record) {
+      const records = await vaultDb.listKeys();
+      if (records.length === 0) {
+        return;
+      }
+      record = [...records].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0];
+    }
+    if (!record) {
+      return;
+    }
+    await createAndInstallSessionActiveCrypto(record, passwordKey);
+  }
+
+  function startVaultSession(): void {
+    const activePublicKeyHex = deps.keyspace?.active().activePublicKeyHex;
+    vaultSession = {
+      sessionId: crypto.randomUUID(),
+      kind: "keymaster",
+      publicKeyHex: activePublicKeyHex,
+      revoked: false,
+      activeCrypto: null
+    };
+  }
+
+  function clearVaultSession(reason = "vault session cleared"): void {
+    revokeActiveKeyCryptoLeases(undefined, reason);
+    if (vaultSession) {
+      vaultSession.revoked = true;
+      try {
+        vaultSession.activeCrypto?.dispose(reason);
+      } catch {
+        /* noop */
+      }
+    }
+    keyCache = null;
+    setPendingActivationNotice(null);
+    if (activeChangeUnsub) {
+      activeChangeUnsub();
+      activeChangeUnsub = null;
+    }
+    vaultSession = null;
+  }
+
+  async function createActiveCryptoForRecord(
+    record: VaultKeyRecord,
+    passwordKey: CryptoKey,
+    sessionId?: string
+  ): Promise<SessionCryptoEngine> {
+    const identity = await recordToIdentity(record);
+    return createSessionCryptoEngine(
+      {
+        sessionId: sessionId ?? crypto.randomUUID(),
+        publicKeyHex: record.publicKeyHex,
+        passwordKey,
+        encryptedPrivateKey: {
+          publicKeyHex: record.publicKeyHex,
+          cipherVersion: record.cipherVersion ?? "v1",
+          cipherSaltB64: record.cipherSaltB64,
+          cipherIvB64: record.cipherIvB64,
+          cipherB64: record.cipherB64
+        },
+        label: identity.label,
+        capabilities: identity.capabilities,
+        createdAt: identity.createdAt
+      },
+      deps.sessionCryptoEngineOptions ?? {
+        allowLocalEngineForTests: Boolean(
+          (globalThis as { process?: { env?: { VITEST?: string } } }).process?.env?.VITEST
+        )
+      }
+    );
+  }
+
+  function wrapActiveKeyCrypto(
+    record: VaultKeyRecord,
+    engine: SessionCryptoEngine,
+    onDispose?: (reason: string) => void
+  ): ActiveKeyCrypto {
+    return {
+      getIdentity() {
+        return engine.getIdentity();
+      },
+      async signDigest(input) {
+        return engine.signDigest(input);
+      },
+      async deriveP2pkhAddress(input) {
+        return engine.deriveP2pkhAddress(input);
+      },
+      sealSendInput(input) {
+        return engine.sealSendInput(input);
+      },
+      async openSealed(rec: ProviderSealedMessageRecord) {
+        return engine.openSealed(rec);
+      },
+      async exportEncryptedKeyBackup(input) {
+        if (input.publicKeyHex !== record.publicKeyHex) {
+          throw new Error("session_key_mismatch");
+        }
+        const backup = encodeKeyBackup({
+          backupVersion: 1,
+          sourceVaultMeta: (await vaultDb.getMeta())!,
+          keyRecord: record
+        });
+        return {
+          publicKeyHex: record.publicKeyHex,
+          backup: new TextEncoder().encode(backup).buffer
+        };
+      },
+      dispose(reason = "dispose") {
+        try {
+          engine.dispose(reason);
+        } finally {
+          onDispose?.(reason);
+        }
+      }
+    };
+  }
+
+  function setSessionActiveCrypto(publicKeyHex: string, activeCrypto: SessionCryptoEngine): void {
+    if (!vaultSession) {
+      throw new Error("Vault is locked");
+    }
+    try {
+      vaultSession.activeCrypto?.dispose("active key replaced");
+    } catch {
+      /* noop */
+    }
+    vaultSession.publicKeyHex = publicKeyHex;
+    vaultSession.activeCrypto = activeCrypto;
+  }
+
   function setStatus(next: VaultStatus) {
-    status = next;
-    for (const l of statusListeners) l(next);
     if (next === "locked" || next === "uninitialized") {
-      // 锁定时清空内存会话：明文 key 与 salt 全部丢弃。
-      masterKey = null;
-      masterSalt = null;
-      keyCache = null;
-      // 锁定时清除"首 Key 未激活"notice：会话结束，下一次 unlock
-      // 不应再展示上一次会话的 notice。
-      setPendingActivationNotice(null);
+      clearVaultSession("vault status changed");
       deps.logger?.info({
         scope: "vault.lifecycle",
         event: "vault.locked",
         message: "Vault locked"
       });
-      if (activeChangeUnsub) {
-        activeChangeUnsub();
-        activeChangeUnsub = null;
-      }
     } else if (next === "unlocked") {
       deps.logger?.info({
         scope: "vault.lifecycle",
@@ -253,6 +460,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         activeChangeUnsub = deps.messageBus.subscribe(EVENT_ACTIVE_KEY_CHANGED, handler);
       }
     }
+    status = next;
+    for (const l of statusListeners) l(next);
   }
 
   async function bootstrap() {
@@ -376,23 +585,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
   bootstrap();
 
-  function requireMasterKey(): { key: CryptoKey; salt: Uint8Array } {
-    if (!masterKey || !masterSalt) throw new Error("Vault is locked");
-    return { key: masterKey, salt: masterSalt };
-  }
-
-  async function decryptMaterial(record: VaultKeyRecord): Promise<PrivateKeyMaterial> {
-    const { key } = requireMasterKey();
-    const plain = await decryptBytes(key, {
-      salt: hexToBytes(record.cipherSaltB64),
-      iv: hexToBytes(record.cipherIvB64),
-      ciphertext: hexToBytes(record.cipherB64)
-    });
-    const decoded = new TextDecoder().decode(plain);
-    const parsed = JSON.parse(decoded) as { hex: string; wif?: string };
-    return { hex: parsed.hex, wif: parsed.wif };
-  }
-
   function recordToRef(record: VaultKeyRecord): KeyRef {
     return {
       publicKeyHex: record.publicKeyHex,
@@ -421,86 +613,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   }
 
   /**
-   * 一次性 legacy staging migration（硬切换 002 收尾）。
-   *
-   * 触发：unlock 进入主流程时，遍历 `vault_keys_legacy_staging` 中每条
-   * 缺 publicKeyHex 的旧行：
-   *   1) 用 masterKey 解密私钥材料；
-   *   2) 从私钥派生 publicKeyHex；
-   *   3) 写 canonical vault_keys（keyPath = publicKeyHex）；
-   *   4) 删 staging record。
-   *
-   * fail-closed（施工单情况 3 + 4）：
-   *   - 任一 staging 行解密失败或派生失败 -> 整次 migration 抛错，
-   *     unlock 失败回退到 locked。系统拒绝带"无法派生 publicKeyHex"
-   *     的旧 key 进入 unlocked；UI 端按 "本地遗留 key 无法迁移到
-   *     publicKeyHex canonical model" 给出明确报告。
-   *   - 派生出来的 publicKeyHex 已存在 canonical store 中 -> 失败；
-   *     不允许 silent overwrite。提示用户显式处理本地重复脏数据。
-   *
-   * staging store 在所有行迁完后被物理删除；下次访问不应再存在。
-   * 进入这一函数前必须已经派生好 masterKey；否则 throw。
-   */
-  async function migrateLegacyStaging(): Promise<void> {
-    const stagingRows = await vaultDb.listLegacyStaging();
-    if (stagingRows.length === 0) {
-      // 没有 staging:canonical store 已经一致,直接返回。
-      // staging store 自身可能已被 DB 升级 hook 物理删除（如果升级时
-      // 没产生 staging 行），不需要做任何事。
-      return;
-    }
-    requireMasterKey();
-    const seenHex = new Set<string>();
-    // 先扫一遍 canonical,把已存在的 publicKeyHex 收集到 seenHex；
-    // 这样 staging 中碰到相同 hex 时可以马上报"重号"。
-    const existingKeys = await vaultDb.listKeys();
-    for (const k of existingKeys) {
-      if (k.publicKeyHex) seenHex.add(k.publicKeyHex);
-    }
-    for (const staging of stagingRows) {
-      const material = await decryptMaterial(staging as VaultKeyRecord);
-      const identity = deriveKeyIdentity(material.hex);
-      const newHex = identity.publicKeyHex;
-      if (!newHex) {
-        throw new Error("legacy staging: derived publicKeyHex is empty");
-      }
-      if (seenHex.has(newHex)) {
-        throw new Error(
-          "legacy staging migration aborted: duplicate publicKeyHex collision"
-        );
-      }
-      seenHex.add(newHex);
-      // 写到 canonical store。Record 字段白名单构造，避免把 `legacyId`
-      // 续命到 canonical；同时不再保留 identityStatus / identityError。
-      // 硬切换 002 收尾：`address` / `network` 从 staging 带过来仅作
-      // 兼容展示保留——它们不是 owner 真值、不是 key 根身份；新代码
-      // 禁止依赖这两字段做身份 / 地址 / 资产判断。
-      const promoted: VaultKeyRecord = {
-        publicKeyHex: newHex,
-        label: staging.label,
-        address: staging.address || "",
-        network: staging.network,
-        format: staging.format,
-        capabilities: staging.capabilities,
-        createdAt: staging.createdAt,
-        source: staging.source,
-        cipherSaltB64: staging.cipherSaltB64,
-        cipherIvB64: staging.cipherIvB64,
-        cipherB64: staging.cipherB64
-      };
-      await vaultDb.putKey(promoted);
-      await vaultDb.deleteLegacyStagingRecord(staging.legacyId);
-    }
-    // 全部迁完，staging 应当空。
-    const remaining = await vaultDb.legacyStagingCount();
-    if (remaining !== 0) {
-      throw new Error(
-        "legacy staging migration: staging still has rows after migration"
-      );
-    }
-  }
-
-  /**
    * 硬切换 002：从 importPrivateKey 抽出的统一私钥持久化内部函数。
    * 负责：trim 标签 / 校验长度 / 派生公钥身份 / 重复检查 / 加密私钥 /
    * 写入 vault_keys / 清 keyCache / 通知 keyspace 新 Key / 发布 key.created。
@@ -515,15 +627,21 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
    * key 域主键。
    */
   async function persistPrivateKey(input: {
-    material: PrivateKeyMaterial;
+    material: VaultKeyMaterial;
     label: string;
     format: string;
     capabilities: string[];
     source?: string;
+    passwordKey: CryptoKey;
+    encryptVaultKeyMaterial: (publicKeyHex: string, material: VaultKeyMaterial) => Promise<{
+      cipherVersion: "v2";
+      cipherSaltB64: string;
+      cipherIvB64: string;
+      cipherB64: string;
+    }>;
   }): Promise<KeyRef> {
     // 1) 锁定守卫：locked 状态 fail closed，避免在外层调用方
     //    看不到错误就泄漏。
-    const { key } = requireMasterKey();
     // 2) 标签校验：trim / 非空 / 长度上限。空标签和超长标签在入口
     //    一律拒绝，错误信息使用英文。
     const label = input.label.trim();
@@ -532,16 +650,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       throw new Error(`Label must be at most ${LABEL_MAX_LENGTH} characters`);
     }
     // 3) 派生公钥身份并按 publicKeyHex 重复检查。
-    const identity = deriveKeyIdentity(input.material.hex);
+    const identity = deriveKeyIdentity(hexToBytes(input.material.hex));
     const existing = await vaultDb.getKey(identity.publicKeyHex);
     if (existing) {
       throw new Error("Key already exists");
     }
     // 4) 加密私钥材料。原始 hex/WIF 不会落盘，也不会出现在 KeyRef。
-    const payload = new TextEncoder().encode(
-      JSON.stringify({ hex: input.material.hex, wif: input.material.wif })
-    );
-    const blob = await encryptBytes(key, payload);
+    const encrypted = await input.encryptVaultKeyMaterial(identity.publicKeyHex, input.material);
     // 硬切换 002 收尾：`address` / `network` 写空 + main 仅作兼容
     // 字段保留——它们不是 owner 真值、不是 key 根身份；新代码禁
     // 止依赖这两字段做身份 / 地址 / 资产判断。
@@ -554,9 +669,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       capabilities: input.capabilities,
       createdAt: new Date().toISOString(),
       source: input.source,
-      cipherSaltB64: bytesToHex(blob.salt),
-      cipherIvB64: bytesToHex(blob.iv),
-      cipherB64: bytesToHex(blob.ciphertext)
+      ...encrypted
     };
     // 5) DB 写入必须发生在 notify / emit 之前——失败时 keyspace
     //    不会误把不存在的 key 选为 active，订阅者也不会收到
@@ -590,6 +703,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
     }
     // 7) 仅在 active 切换成功后才发 key.created。
+    await createAndInstallSessionActiveCrypto(record, input.passwordKey);
     deps.messageBus.publish("key.created", {
       publicKeyHex: identity.publicKeyHex,
       label
@@ -611,6 +725,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     onStatusChange(handler) {
       statusListeners.add(handler);
       return () => statusListeners.delete(handler);
+    },
+    getSessionState() {
+      if (!vaultSession) return null;
+      return {
+        sessionId: vaultSession.sessionId,
+        kind: vaultSession.kind,
+        publicKeyHex: vaultSession.publicKeyHex,
+        revoked: vaultSession.revoked
+      };
     },
 
     /**
@@ -653,8 +776,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      *     "uninitialized" 状态。否则出现"内存说未初始化、存储里
      *     已有 Vault meta"的不一致——bootstrap 会把状态读到 locked
      *     而 UI 期望 uninitialized，导入 / 解锁链路都会错位。
-     *   - in-memory 的 masterKey / masterSalt 必须清空，与 uninitialized
-     *     状态匹配。
+     *   - in-memory 会话材料必须清空，与 uninitialized 状态匹配。
      */
     async createVault(password) {
       if (status !== "uninitialized") {
@@ -663,22 +785,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const key = await deriveKey(password, salt);
       const verifier = await encryptVerifier(key);
-      const meta: VaultMetaRecord = {
-        id: "singleton",
-        saltB64: bytesToHex(salt),
-        verifierSaltB64: bytesToHex(verifier.salt),
-        verifierIvB64: bytesToHex(verifier.iv),
-        verifierCipherB64: bytesToHex(verifier.ciphertext),
-        createdAt: new Date().toISOString()
-      };
+      const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultDb.putMeta(meta);
-      masterSalt = salt;
-      masterKey = key;
+      startVaultSession();
       try {
         // 与 unlock 一致：先把 keyspace 推到 ready 状态，再宣布 unlocked。
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
+        await installCurrentSessionActiveCrypto(key);
       } catch (err) {
         // 设计缘由：createVault 失败时必须把 meta 也删掉，保证"状态 =
         // uninitialized"与"存储里没有 Vault"一致。删除 meta 失败时仍
@@ -688,8 +803,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         } catch (deleteErr) {
           console.error("vaultDb.deleteMeta failed during createVault rollback", deleteErr);
         }
-        masterSalt = null;
-        masterKey = null;
+        clearVaultSession();
         setStatus("uninitialized");
         throw err;
       }
@@ -745,22 +859,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const key = await deriveKey(input.password, salt);
       const verifier = await encryptVerifier(key);
-      const meta: VaultMetaRecord = {
-        id: "singleton",
-        saltB64: bytesToHex(salt),
-        verifierSaltB64: bytesToHex(verifier.salt),
-        verifierIvB64: bytesToHex(verifier.iv),
-        verifierCipherB64: bytesToHex(verifier.ciphertext),
-        createdAt: new Date().toISOString()
-      };
+      const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultDb.putMeta(meta);
-      masterSalt = salt;
-      masterKey = key;
+      startVaultSession();
       // 2) keyspace ready 边界（与 createVault / unlock 一致）。
       try {
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
+        await installCurrentSessionActiveCrypto(key);
       } catch (err) {
         // keyspace ready 失败：与 createVault 同样的回滚——删 meta、
         // 清空内存会话、抛原错。状态保持 uninitialized（从未切到 unlocked）。
@@ -772,17 +879,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             deleteErr
           );
         }
-        masterSalt = null;
-        masterKey = null;
+        clearVaultSession();
         throw err;
       }
       // 3) 生成首 Key。复用 generateKey 走 persistPrivateKey 统一路径。
       const label = (input.label ?? defaultInitialKeyLabel()).trim();
       let firstKeyRef: KeyRef;
       try {
-        firstKeyRef = await this.generateKey({
+        firstKeyRef = await persistPrivateKey({
+          material: { hex: generatePrivateKeyHex() },
           label,
-          capabilities: input.capabilities
+          format: GENERATED_FORMAT,
+          capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
+          source: GENERATED_SOURCE,
+          passwordKey: key,
+          encryptVaultKeyMaterial: (publicKeyHex, material) =>
+            coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material)
         });
       } catch (err) {
         if (err instanceof KeyPersistedButActivationFailedError) {
@@ -809,8 +921,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             deleteErr
           );
         }
-        masterSalt = null;
-        masterKey = null;
+        clearVaultSession();
         setStatus("uninitialized");
         throw err;
       }
@@ -875,22 +986,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const salt = crypto.getRandomValues(new Uint8Array(16));
       const key = await deriveKey(input.vaultPassword, salt);
       const verifier = await encryptVerifier(key);
-      const meta: VaultMetaRecord = {
-        id: "singleton",
-        saltB64: bytesToHex(salt),
-        verifierSaltB64: bytesToHex(verifier.salt),
-        verifierIvB64: bytesToHex(verifier.iv),
-        verifierCipherB64: bytesToHex(verifier.ciphertext),
-        createdAt: new Date().toISOString()
-      };
+      const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultDb.putMeta(meta);
-      masterSalt = salt;
-      masterKey = key;
+      startVaultSession();
       // 2) keyspace ready 边界（与 createVault / unlock 一致）。
       try {
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
+        await installCurrentSessionActiveCrypto(key);
       } catch (err) {
         // keyspace ready 失败：与 createVault 同样的回滚——删 meta、
         // 清空内存会话、抛原错。状态保持 uninitialized（从未切到 unlocked）。
@@ -902,20 +1006,22 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             deleteErr
           );
         }
-        masterSalt = null;
-        masterKey = null;
+        clearVaultSession();
         throw err;
       }
       // 3) 持久化首把导入 Key。复用 importPrivateKey -> persistPrivateKey
       //    统一路径：身份派生 / 查重 / 加密落库 / active 切换 / 事件。
       let firstKeyRef: KeyRef;
       try {
-        firstKeyRef = await this.importPrivateKey({
+        firstKeyRef = await persistPrivateKey({
           label: input.key.label,
           material: input.key.material,
           format: input.key.format,
           capabilities: input.key.capabilities,
-          source: input.key.source
+          source: input.key.source,
+          passwordKey: key,
+          encryptVaultKeyMaterial: (publicKeyHex, material) =>
+            coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material)
         });
       } catch (err) {
         if (err instanceof KeyPersistedButActivationFailedError) {
@@ -942,8 +1048,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             deleteErr
           );
         }
-        masterSalt = null;
-        masterKey = null;
+        clearVaultSession();
         setStatus("uninitialized");
         throw err;
       }
@@ -957,14 +1062,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      * 硬切换 002：unlock 的完成边界。
      * 目标顺序（必须严格按此执行）：
      *   1) 校验 meta / password
-     *   2) 派生 masterKey / masterSalt 并放入内存（migration 需要解密）
-     *   3) migrateLegacyStaging()：一次性把 v4 缺 publicKeyHex 的旧行
-     *      迁到 canonical store；任一失败 fail-closed。
-     *   4) deps.keyspace.onVaultUnlocked()：选择 active key（single 模式）
-     *   5) setStatus("unlocked") + emit "vault.unlocked"
+     *   2) 派生会话 key / salt 并放入内存
+     *   3) deps.keyspace.onVaultUnlocked()：选择 active key（single 模式）
+     *   4) setStatus("unlocked") + emit "vault.unlocked"
      * 业务主界面（UnlockedShell / P2PKH widget）只在 status === "unlocked" 后
      * 渲染，keyspace 也已 ready，避免 widget 抢跑触发 "Key storage is not ready"。
-     * 失败时必须清理 masterKey / masterSalt 并回退到 locked，避免 UI 仍停
+     * 失败时必须清理会话 key / salt 并回退到 locked，避免 UI 仍停
      * 在 locked 但内存里有解锁态材料。
      *
      * 硬切换 005 收尾：unlock 收尾前再次校验 vault_keys 不为 0；空列表
@@ -974,25 +1077,23 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async unlock(password) {
       const meta = await vaultDb.getMeta();
       if (!meta) throw new Error("Vault not initialized");
-      const salt = hexToBytes(meta.saltB64);
-      const key = await deriveKey(password, salt);
-      const ok = await verifyVerifier(key, {
-        salt: hexToBytes(meta.verifierSaltB64),
-        iv: hexToBytes(meta.verifierIvB64),
-        ciphertext: hexToBytes(meta.verifierCipherB64)
-      });
-      if (!ok) throw new Error("Invalid password");
-      masterSalt = salt;
-      masterKey = key;
+      const key = await coordinatorVerifyVaultPasswordKey(password, meta);
+      startVaultSession();
       try {
-        // 1) 一次性 legacy staging migration：失败 fail-closed，
-        //    不进入 unlocked 也不宣布异常成功。
-        await migrateLegacyStaging();
+        await coordinatorMigrateVaultKeysToV2Aad({
+          meta,
+          records: await vaultDb.listKeys(),
+          decryptRecord: (record) => coordinatorDecryptVaultKeyMaterialForMigration(key, record),
+          encryptRecord: (publicKeyHex, material) =>
+            coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material),
+          putMeta: (nextMeta) => vaultDb.putMeta(nextMeta),
+          putMetaAndKeys: (nextMeta, records) => vaultDb.putMetaAndKeys(nextMeta, records)
+        });
         // 硬切换 005 收尾：unlock 收尾前若 vault_keys 已空，按"meta 残留"
         // 路径收敛到 uninitialized——直接清空内存会话、删 meta，不再走
         // keyspace.onVaultUnlocked / setStatus("unlocked")。
-        const remaining = await vaultDb.listKeys();
-        if (remaining.length === 0) {
+      const remaining = await vaultDb.listKeys();
+      if (remaining.length === 0) {
           if (deps.keyspace) {
             try {
               await deps.keyspace.onVaultLocked();
@@ -1005,25 +1106,24 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           } catch (delErr) {
             console.error("vaultDb.deleteMeta during empty-unlock failed", delErr);
           }
-          masterKey = null;
-          masterSalt = null;
+          clearVaultSession();
           keyCache = null;
           setStatus("uninitialized");
           return;
         }
-        // 2) keyspace 选择 active key：必须发生在 setStatus/emit 之前，
+        // 1) keyspace 选择 active key：必须发生在 setStatus/emit 之前，
         //    否则业务插件看到 unlocked 时 active 仍是初始化期状态。
         if (deps.keyspace) {
           await deps.keyspace.onVaultUnlocked();
         }
+        await installCurrentSessionActiveCrypto(key);
       } catch (err) {
-        // 设计缘由：ready 边界由状态机保证；migrateLegacyStaging 失败或
-        // keyspace.onVaultUnlocked 失败即抛到这里。**必须**先清空
-        // in-memory 会话（masterKey / masterSalt / keyCache），再
+        // 设计缘由：ready 边界由状态机保证；keyspace.onVaultUnlocked 失败
+        // 即抛到这里。**必须**先清空
+        // in-memory 会话（session key / salt / keyCache），再
         // setStatus("locked")，避免 UI 看到 locked 但内存里仍持有
         // 已解锁私钥材料；这条 fail-closed 与注释保持一致。
-        masterKey = null;
-        masterSalt = null;
+        clearVaultSession();
         keyCache = null;
         setPendingActivationNotice(null);
         setStatus("locked");
@@ -1050,6 +1150,72 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         await deps.keyspace.onVaultLocked();
       }
       deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
+    },
+
+    /**
+     * 硬切换 6.5：修改锁屏密码。
+     *
+     * 事务边界：
+     *   1) 先校验旧密码，失败则 fail closed，不改状态、不改数据；
+     *   2) 旧密码正确后先 lock()，把当前会话和 session worker 全部销毁；
+     *   3) 临时派生新密码密钥，重加密所有 canonical key；
+     *   4) 单个 IndexedDB 原子事务更新 vault_meta + vault_keys；
+     *   5) 成功后保持 locked，不自动重新解锁。
+     */
+    async changePassword(input: { oldPassword: string; newPassword: string }) {
+      if (status !== "unlocked") {
+        throw new Error("Vault must be unlocked");
+      }
+      const oldPassword = input.oldPassword;
+      const newPassword = input.newPassword;
+      if (!oldPassword) {
+        throw new Error("Old password is required");
+      }
+      if (!newPassword) {
+        throw new Error("New password is required");
+      }
+      if (newPassword.length < 8) {
+        throw new Error("Password must be at least 8 characters");
+      }
+      const meta = await vaultDb.getMeta();
+      if (!meta) {
+        throw new Error("Vault not initialized");
+      }
+      const oldKey = await coordinatorVerifyVaultPasswordKey(oldPassword, meta);
+      // 旧密码已确认正确，进入 maintenance：先锁定并收回当前 session。
+      await this.lock();
+      disposeAllAppViewSessions("vault password changed");
+      const targetSalt = crypto.getRandomValues(new Uint8Array(16));
+      const targetKey = await coordinatorDeriveVaultPasswordKey(newPassword, targetSalt);
+      const targetVerifier = await encryptVerifier(targetKey);
+      const records = await vaultDb.listKeys();
+      const rotatedRecords: VaultKeyRecord[] = [];
+      for (const record of records) {
+        const material = await coordinatorDecryptVaultKeyMaterialForMigration(oldKey, record);
+        const identity = deriveKeyIdentity(hexToBytes(material.hex));
+        if (identity.publicKeyHex !== record.publicKeyHex) {
+          throw new Error(
+            `vault key ${record.publicKeyHex} failed identity verification during password rotation`
+          );
+        }
+      const encrypted = await coordinatorEncryptVaultKeyMaterial(
+        targetKey,
+        record.publicKeyHex,
+        material
+      );
+        rotatedRecords.push({
+          ...record,
+          ...encrypted
+        });
+      }
+      const nextMeta = coordinatorBuildVaultMeta({
+        salt: targetSalt,
+        verifier: targetVerifier,
+        createdAt: meta.createdAt,
+        cryptoVersion: "v2"
+      });
+      await vaultDb.putMetaAndKeys(nextMeta, rotatedRecords);
+      keyCache = null;
     },
 
     /**
@@ -1090,9 +1256,9 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           console.error("keyspace.onVaultLocked during recover failed", err);
         }
       }
+      disposeAllAppViewSessions("vault recovered to uninitialized");
       // 3) 清空内存会话。
-      masterKey = null;
-      masterSalt = null;
+      clearVaultSession();
       keyCache = null;
       setPendingActivationNotice(null);
       if (activeChangeUnsub) {
@@ -1114,7 +1280,9 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      * 幂等：host teardown 多次调用安全。当前动作是清空内存中的 status listener
      * 与 active-change 订阅。
      */
-    dispose() {
+  dispose() {
+      revokeActiveKeyCryptoLeases(undefined, "dispose");
+      disposeAllAppViewSessions("dispose");
       if (activeChangeUnsub) {
         activeChangeUnsub();
         activeChangeUnsub = null;
@@ -1131,11 +1299,11 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      *      时直接抛 `Vault not initialized`——没有 verifier 可校验，
      *      fail closed。
      *   2) 用传入密码 + meta.salt 派生临时 key，仅用于比对 verifier；
-     *      派生出的 key **不**写入 `masterKey` 内存槽，调用结束就丢。
+     *      派生出的 key **不**写入常驻会话槽，调用结束就丢。
      *   3) `verifyVerifier` 失败抛 `Invalid password`，与 `unlock` 错误
      *      文案一致以便 UI 统一处理。
-     *   4) **不**调用 setStatus、**不**修改 `masterKey / masterSalt /
-     *      keyCache`、**不**触发 staging migration、**不**发任何 messageBus 事件。
+     *   4) **不**调用 setStatus、**不**修改会话材料 / `keyCache`、
+     *      **不**触发 pre-v7 记录 AAD 升级、**不**发任何 messageBus 事件。
      *      keyspace.deleteKey 调用本方法后再走 prepareDeleteKey / 删
      *      namespace DB / 删私钥材料的主流程。
      */
@@ -1150,8 +1318,58 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         ciphertext: hexToBytes(meta.verifierCipherB64)
       });
       if (!ok) throw new Error("Invalid password");
-      // 不动 masterKey / masterSalt / keyCache / status / cache
+      // 不动会话材料 / keyCache / status / cache
       // / 不 emit 任何事件。
+    },
+
+    /**
+     * 硬切换 001 收口：Vault 统一执行 active key 切换。
+     *
+     * 设计缘由：
+     *   - UI 先验密码、再单独调 keyspace.setActive 的旧流程有两条真值
+     *     来源；这里把密码校验、目标 key 解密校验、keyspace 切换与旧
+     *     capability 回收收敛到一个 Vault API。
+     *   - 成功前不会破坏当前 active key；失败时仍保留旧 key 可用。
+     */
+    async activateKey(input: { publicKeyHex: string; password: string }) {
+      if (status !== "unlocked") {
+        throw new Error("Vault must be unlocked");
+      }
+      if (!input.publicKeyHex) {
+        throw new Error("publicKeyHex is required");
+      }
+      if (!input.password) {
+        throw new Error("Password is required");
+      }
+      const meta = await vaultDb.getMeta();
+      if (!meta) {
+        throw new Error("Vault not initialized");
+      }
+      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
+      const record = await vaultDb.getKey(input.publicKeyHex);
+      if (!record) {
+        throw new Error(`Unknown key ${input.publicKeyHex}`);
+      }
+      const material = await coordinatorDecryptVaultKeyMaterialForMigration(passwordKey, record);
+      const identity = deriveKeyIdentity(hexToBytes(material.hex));
+      if (identity.publicKeyHex !== record.publicKeyHex) {
+        throw new Error(
+          `vault key ${record.publicKeyHex} failed identity verification during active switch`
+        );
+      }
+      const previousActive = deps.keyspace?.active().activePublicKeyHex;
+      if (deps.keyspace) {
+        if (!previousActive) {
+          throw new Error("Vault is locked");
+        }
+        if (previousActive === input.publicKeyHex) {
+          await createAndInstallSessionActiveCrypto(record, passwordKey);
+          return;
+        }
+        await deps.keyspace.setActive(input.publicKeyHex);
+      }
+      await createAndInstallSessionActiveCrypto(record, passwordKey);
+      revokeActiveKeyCryptoLeases(previousActive, "active key changed");
     },
 
     /**
@@ -1162,8 +1380,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      *      keyspace 判断剩余 0 是基于自己的 listKeys，本方法直接查
      *      底层 vaultDb，避免任何中间层判断错误导致误删 meta。
      *      若仍有 key 抛 `Vault still has keys`，不动任何状态。
-     *   2) 清理内存会话：`masterKey / masterSalt / keyCache` 必须先
-     *      置空，避免后续异步路径还能解密私钥。
+     *   2) 清理内存会话：会话材料 / `keyCache` 必须先置空，避免后续
+     *      异步路径还能解密私钥。
      *   3) 触发会话结束清理：现有插件（如 p2pkh）依赖 `vault.locked`
      *      事件释放 namespace 资源；删空最后一把 key 时这条链路必须
      *      被走一次。这里先 emit `vault.locked` 再 setStatus，确保
@@ -1179,9 +1397,9 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      *     这一步在清理内存之前抛错，所以 in-memory 会话和 status 都
      *     不会被动到，调用方拿到原始错误即可。
      *   - 步骤 2-4 任一失败：必须把 status 收敛到 `uninitialized`——
-     *     原因：步骤 2 已经把 `masterKey / masterSalt / keyCache` 清空，
+     *     原因：步骤 2 已经把会话材料 / `keyCache` 清空，
      *     步骤 3 已经发了 `vault.locked`；如果状态仍停在 `unlocked`，
-     *     App 不会切回欢迎页，但后续任何 withPrivateKey / sign 都会撞上
+     *     App 不会切回欢迎页，但后续任何受控 capability / sign 都会撞上
      *     `"Vault is locked"` 这种状态机错位错误。所以最终 setStatus
      *     必须在 `finally` 块中钉死，无论前面是否抛错。
      *     失败时 meta 可能仍在 DB 里（= 下次 bootstrap 读到 locked，
@@ -1201,8 +1419,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       try {
         // 2) 清理内存会话——必须在删 meta 之前，避免任何异步路径
         //    在 meta 已删但会话还在的情况下尝试 decryptMaterial。
-        masterKey = null;
-        masterSalt = null;
+        clearVaultSession();
         keyCache = null;
         setPendingActivationNotice(null);
         if (activeChangeUnsub) {
@@ -1233,6 +1450,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         } catch (err) {
           console.error("publish vault.locked failed during finalize", err);
         }
+        disposeAllAppViewSessions("vault emptied");
         // 4) 删除 vault_meta。如果失败，错误将被外层 catch 捕获，
         //    finally 仍会把 status 收敛到 uninitialized。
         await vaultDb.deleteMeta();
@@ -1282,13 +1500,28 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return r ? recordToRef(r) : undefined;
     },
 
-    async importPrivateKey(input) {
+    async importPrivateKey(input: {
+      password: string;
+      label: string;
+      material: VaultKeyMaterial;
+      format: string;
+      capabilities: string[];
+      source?: string;
+    }) {
+      const meta = await vaultDb.getMeta();
+      if (!meta) {
+        throw new Error("Vault not initialized");
+      }
+      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
       return persistPrivateKey({
         material: input.material,
         label: input.label,
         format: input.format,
         capabilities: input.capabilities,
-        source: input.source
+        source: input.source,
+        passwordKey,
+        encryptVaultKeyMaterial: (publicKeyHex, material) =>
+          coordinatorEncryptVaultKeyMaterial(passwordKey, publicKeyHex, material)
       });
     },
 
@@ -1298,10 +1531,17 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      * 局部闭包内存在；身份派生、加密、active 切换、事件发布全部复用
      * `persistPrivateKey` 这条统一路径。
      */
-    async generateKey(input) {
+    async generateKey(input: { password: string; label: string; capabilities?: string[] }) {
+      const meta = await vaultDb.getMeta();
+      if (!meta) {
+        throw new Error("Vault not initialized");
+      }
+      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
       // 1) 锁定 fail closed。放在调用 noble 之前，避免产生私钥材料
       //    之后才发现需要清场。
-      requireMasterKey();
+      if (!vaultSession) {
+        throw new Error("Vault is locked");
+      }
       // 2) 在 Vault 内部生成 secp256k1 私钥 hex。noble 内部走
       //    crypto.getRandomValues，安全随机源。
       const hex = generatePrivateKeyHex();
@@ -1314,7 +1554,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         label: input.label,
         format: GENERATED_FORMAT,
         capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
-        source: GENERATED_SOURCE
+        source: GENERATED_SOURCE,
+        passwordKey,
+        encryptVaultKeyMaterial: (publicKeyHex, material) =>
+          coordinatorEncryptVaultKeyMaterial(passwordKey, publicKeyHex, material)
       });
     },
 
@@ -1331,39 +1574,232 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
      * 统一发一次，确保全流程只发一次。
      */
     async deleteKeyMaterial(publicKeyHex) {
+      revokeActiveKeyCryptoLeases(publicKeyHex, "key material deleted");
+      for (const [sessionId, session] of Array.from(appViewSessions.entries())) {
+        if (session.publicKeyHex === publicKeyHex) {
+          disposeAppViewSession(sessionId, "appView owner key deleted");
+        }
+      }
       await vaultDb.deleteKey(publicKeyHex);
       keyCache = null;
     },
 
-    async exportPrivateKey({ publicKeyHex, password }) {
-      // 设计缘由：明文私钥只能从 withPrivateKey 借出，因此导出必须经过 Vault。
-      // 这里不修改 key 列表、不触发 key.created / key.deleted 事件。
-      if (!password) throw new Error("Backup password is required");
-      const record = await vaultDb.getKey(publicKeyHex);
-      if (!record) throw new Error("Unknown key");
-      console.info("[vault] exportPrivateKey", { publicKeyHex });
-      return this.withPrivateKey(
-        publicKeyHex,
-        (material) => encryptBsv8KeyEnvelope(material.hex, password)
-      );
+    async exportKeyBackup(publicKeyHex: string): Promise<string> {
+      const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(publicKeyHex);
+      return encodeKeyBackup({
+        backupVersion: 1,
+        sourceVaultMeta,
+        keyRecord
+      });
     },
 
-    async withPrivateKey(publicKeyHex, fn) {
-      console.info("[vault] withPrivateKey begin", { publicKeyHex });
-      const record = await vaultDb.getKey(publicKeyHex);
-      if (!record) throw new Error(`Unknown key ${publicKeyHex}`);
-      const material = await decryptMaterial(record);
-      try {
-        const out = await fn(material);
-        console.info("[vault] withPrivateKey success", { publicKeyHex });
-        return out;
-      } finally {
-        // material 在闭包结束后不再可达，由 GC 回收。
-        // 这里不显式 zero，避免额外开销且不真正安全。
+    async importKeyBackup(input: {
+      backup: string;
+      sourcePassword: string;
+      targetPassword: string;
+    }): Promise<KeyRef> {
+      const backup = decodeKeyBackup(input.backup);
+      const sourceSalt = hexToBytes(backup.sourceVaultMeta.saltB64);
+      const sourceKey = await deriveKey(input.sourcePassword, sourceSalt);
+      const sourceVerifierOk = await verifyVerifier(sourceKey, {
+        salt: hexToBytes(backup.sourceVaultMeta.verifierSaltB64),
+        iv: hexToBytes(backup.sourceVaultMeta.verifierIvB64),
+        ciphertext: hexToBytes(backup.sourceVaultMeta.verifierCipherB64)
+      });
+      if (!sourceVerifierOk) {
+        throw new Error("Invalid source password");
       }
-    }
+      const sourceBlob = {
+        salt: hexToBytes(backup.keyRecord.cipherSaltB64),
+        iv: hexToBytes(backup.keyRecord.cipherIvB64),
+        ciphertext: hexToBytes(backup.keyRecord.cipherB64)
+      };
+      if (backup.keyRecord.cipherVersion !== "v2") {
+        throw new Error("Key backup must be v2");
+      }
+      const plain = await decryptBytesWithAad(
+        sourceKey,
+        sourceBlob,
+        vaultKeyAad(backup.keyRecord.publicKeyHex)
+      );
+      const decoded = new TextDecoder().decode(plain);
+      const parsed = JSON.parse(decoded) as { hex: string; wif?: string };
+      const material: VaultKeyMaterial = { hex: parsed.hex, wif: parsed.wif };
+      const identity = deriveKeyIdentity(hexToBytes(material.hex));
+      if (identity.publicKeyHex !== backup.keyRecord.publicKeyHex) {
+        throw new Error("Key backup public key mismatch");
+      }
+      const targetMeta = await vaultDb.getMeta();
+      if (!targetMeta) {
+        throw new Error("Vault not initialized");
+      }
+      const targetSalt = hexToBytes(targetMeta.saltB64);
+      const targetKey = await deriveKey(input.targetPassword, targetSalt);
+      const targetVerifierOk = await verifyVerifier(targetKey, {
+        salt: hexToBytes(targetMeta.verifierSaltB64),
+        iv: hexToBytes(targetMeta.verifierIvB64),
+        ciphertext: hexToBytes(targetMeta.verifierCipherB64)
+      });
+      if (!targetVerifierOk) {
+        throw new Error("Invalid password");
+      }
+      const existing = await vaultDb.getKey(identity.publicKeyHex);
+      if (existing) {
+        throw new Error("Key already exists");
+      }
+      const encrypted = await coordinatorEncryptVaultKeyMaterial(
+        targetKey,
+        identity.publicKeyHex,
+        material
+      );
+      const record: VaultKeyRecord = {
+        publicKeyHex: identity.publicKeyHex,
+        label: backup.keyRecord.label,
+        address: backup.keyRecord.address,
+        network: backup.keyRecord.network,
+        format: backup.keyRecord.format,
+        capabilities: backup.keyRecord.capabilities,
+        createdAt: backup.keyRecord.createdAt,
+        source: backup.keyRecord.source,
+        ...encrypted
+      };
+      await vaultDb.putKey(record);
+      keyCache = null;
+      return recordToRef(record);
+    },
+
+    async createAppViewSession(input: {
+      sessionId: string;
+      publicKeyHex: string;
+      password: string;
+    }) {
+      if (status !== "unlocked") {
+        throw new Error("Vault must be unlocked");
+      }
+      if (!input.sessionId) {
+        throw new Error("sessionId is required");
+      }
+      if (!input.publicKeyHex) {
+        throw new Error("publicKeyHex is required");
+      }
+      if (!input.password) {
+        throw new Error("Password is required");
+      }
+      const meta = await vaultDb.getMeta();
+      if (!meta) {
+        throw new Error("Vault not initialized");
+      }
+      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
+      const record = await vaultDb.getKey(input.publicKeyHex);
+      if (!record) {
+        throw new Error(`Unknown key ${input.publicKeyHex}`);
+      }
+      const material = await coordinatorDecryptVaultKeyMaterialForMigration(passwordKey, record);
+      const identity = deriveKeyIdentity(hexToBytes(material.hex));
+      if (identity.publicKeyHex !== record.publicKeyHex) {
+        throw new Error(
+          `vault key ${record.publicKeyHex} failed identity verification during appView session export`
+        );
+      }
+      disposeAppViewSession(input.sessionId, "appView session replaced");
+      const engine = await createActiveCryptoForRecord(record, passwordKey, input.sessionId);
+      const crypto = wrapActiveKeyCrypto(record, engine, () => {
+        appViewSessions.delete(input.sessionId);
+      });
+      appViewSessions.set(input.sessionId, {
+        publicKeyHex: record.publicKeyHex,
+        crypto: engine
+      });
+      return crypto;
+    },
+
+    disposeAppViewSession(sessionId: string, reason?: string) {
+      disposeAppViewSession(sessionId, reason);
+    },
+
+    disposeAllAppViewSessions(reason?: string) {
+      disposeAllAppViewSessions(reason);
+    },
+
+    async createActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto> {
+      const record = await vaultDb.getKey(publicKeyHex);
+      if (!record) {
+        throw new Error(`Unknown key ${publicKeyHex}`);
+      }
+      const activePublicKeyHex = deps.keyspace?.active().activePublicKeyHex;
+      if (deps.keyspace) {
+        if (!activePublicKeyHex) {
+          throw new Error("Vault is locked");
+        }
+        if (activePublicKeyHex !== publicKeyHex) {
+          throw new Error("session_key_mismatch");
+        }
+      }
+      if (!vaultSession || !vaultSession.activeCrypto) {
+        throw new Error("Vault is locked");
+      }
+      if (vaultSession.publicKeyHex !== publicKeyHex) {
+        throw new Error("session_key_mismatch");
+      }
+      const engine = vaultSession.activeCrypto;
+      let revoked = false;
+      const lease = {
+        publicKeyHex,
+        revoke: (reason: string) => {
+          revoked = true;
+        }
+      };
+      activeKeyCryptoLeases.add(lease);
+      const ensureLive = (): void => {
+        if (revoked) {
+          throw new ActiveKeySessionRevokedError();
+        }
+      };
+      return {
+        getIdentity() {
+          ensureLive();
+          return engine.getIdentity();
+        },
+        async signDigest(input) {
+          ensureLive();
+          return engine.signDigest(input);
+        },
+        async deriveP2pkhAddress(input) {
+          if (input.publicKeyHex !== publicKeyHex) {
+            throw new Error("session_key_mismatch");
+          }
+          return engine.deriveP2pkhAddress(input);
+        },
+        sealSendInput(input) {
+          ensureLive();
+          return engine.sealSendInput(input);
+        },
+        async openSealed(rec: ProviderSealedMessageRecord) {
+          ensureLive();
+          return engine.openSealed(rec);
+        },
+        async exportEncryptedKeyBackup(input) {
+          ensureLive();
+          if (input.publicKeyHex !== publicKeyHex) {
+            throw new Error("session_key_mismatch");
+          }
+          const backup = encodeKeyBackup({
+            backupVersion: 1,
+            sourceVaultMeta: (await vaultDb.getMeta())!,
+            keyRecord: record
+          });
+          return {
+            publicKeyHex,
+            backup: new TextEncoder().encode(backup).buffer
+          };
+        },
+        dispose(reason = "dispose") {
+          if (revoked) return;
+          revoked = true;
+          activeKeyCryptoLeases.delete(lease);
+        }
+      };
+    },
+
   };
 }
-
-// 抑制未使用告警：派生 staging record 类型仅在内部使用，但保留 export 便于测试断言。
-void (0 as unknown as VaultKeyLegacyStagingRecord);

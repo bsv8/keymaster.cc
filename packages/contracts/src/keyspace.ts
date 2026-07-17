@@ -2,7 +2,7 @@
 // Keyspace 平台契约：Active Key + Key Namespace 存储 + Key 删除。
 // 设计缘由：
 //   - KeyIdentity 使用公钥身份（publicKeyHex），不使用私钥、地址或
-//     网络作为根 id。私钥材料只留在 Vault 的 withPrivateKey 闭包内。
+//     网络作为根 id。私钥材料只留在 Vault 内部。
 //   - 平台根身份 = publicKeyHex = 压缩公钥 hex、lowercase、无 0x 前缀、
 //     长度 66。本字段是平台对外唯一 key identity 根字段。
 //   - 平台 key 域**不再**存在任何 surrogate id（硬切换 002 收尾）。

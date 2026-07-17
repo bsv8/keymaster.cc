@@ -268,7 +268,7 @@ export type PokerSessionKeyState =
  *   - 宿主（topbar / home widget / lobby / table）通过
  *     `ctx.get<PokerService>(POKER_SERVICE_CAPABILITY)` 拿到 service，
  *     订阅 status / tables / presences / txEvents / activePokerKey。
- *   - service 内不暴露私钥、不留明文材料；签名走 vault.withPrivateKey 闭包。
+ *   - service 内不暴露私钥、不留明文材料；签名走受控 capability。
  *   - Poker 身份永远来自 `keyspace.active()`；本服务不再提供任何
  *     "把某把 key 绑定为 poker identity" 的 API（硬切换 004）。
  */

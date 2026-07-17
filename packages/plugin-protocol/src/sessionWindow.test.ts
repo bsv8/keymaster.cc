@@ -18,6 +18,23 @@ const TEST_PRIV_HEX_PRIV1 =
   "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PUB_HEX_PRIV1 =
   "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+function makeFakeOwnerCrypto(publicKeyHex: string) {
+  return {
+    getIdentity: () => ({
+      publicKeyHex,
+      label: "Key A",
+      sessionId: "session-a",
+      capabilities: ["p2pkh"],
+      createdAt: ""
+    }),
+    signDigest: async () => ({ publicKeyHex, signature: new Uint8Array(64).buffer }),
+    deriveP2pkhAddress: async () => ({ publicKeyHex, address: "mock" }),
+    sealSendInput: () => ({ error: "not used" }),
+    openSealed: async () => null,
+    exportEncryptedKeyBackup: async () => ({ publicKeyHex, backup: new Uint8Array().buffer }),
+    dispose: () => undefined
+  } as const;
+}
 
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -185,7 +202,7 @@ describe("protocolStorageDb stores (smoke)", () => {
  *   1. signer 私钥派生的公钥与声明的 ownerPublicKeyHex 不一致
  *      （原"vault.importUnlockRuntimeFromLauncher 抛错"对应现在的
  *      "ownerRuntime 校验失败"）；
- *   2. payload 缺 ownerRuntimeBootstrap（原"缺 unlockRuntime"）；
+ *   2. payload 缺 sessionRuntimeBootstrap（原"缺 unlockRuntime"）；
  *   3. bootstrap 失败时不再向 opener 发 ack（修复 issue #2）。
  */
 
@@ -195,6 +212,7 @@ function makeFakeVaultService(): VaultService {
   return {
     status: () => "locked",
     onStatusChange: () => () => undefined,
+    getSessionState: () => null,
     getInitialActivationNotice: () => null,
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
@@ -208,7 +226,32 @@ function makeFakeVaultService(): VaultService {
     },
     unlock: async () => undefined,
     lock: async () => undefined,
+    activateKey: async () => undefined,
     verifyPassword: async () => undefined,
+    changePassword: async () => undefined,
+    createAppViewSession: async () => ({
+      getIdentity: () => ({
+        sessionId: "fake",
+        publicKeyHex: "02".padEnd(66, "a"),
+        label: "fake",
+        capabilities: [],
+        createdAt: ""
+      }),
+      signDigest: async () => ({
+        publicKeyHex: "02".padEnd(66, "a"),
+        signature: new Uint8Array(64).buffer
+      }),
+      deriveP2pkhAddress: async () => ({
+        publicKeyHex: "02".padEnd(66, "a"),
+        address: "fake"
+      }),
+      sealSendInput: () => ({ error: "not used" }),
+      openSealed: async () => null,
+      exportEncryptedKeyBackup: async () => ({ publicKeyHex: "02".padEnd(66, "a"), backup: new Uint8Array().buffer }),
+      dispose: () => undefined
+    }),
+    disposeAppViewSession: () => undefined,
+    disposeAllAppViewSessions: () => undefined,
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
     recoverEmptyVaultToUninitialized: async () => undefined,
     listKeys: async () => [],
@@ -223,12 +266,31 @@ function makeFakeVaultService(): VaultService {
     removeKey: async () => {
       throw new Error("not used");
     },
-    exportPrivateKey: async () => {
-      throw new Error("not used");
-    },
-    withPrivateKey: async () => {
-      throw new Error("not used");
-    }
+    exportKeyBackup: async () => "not used",
+    createActiveKeyCrypto: async () => ({
+      getIdentity: () => ({
+        sessionId: "fake",
+        publicKeyHex: "02".padEnd(66, "a"),
+        label: "fake",
+        capabilities: [],
+        createdAt: ""
+      }),
+      signDigest: async () => ({
+        publicKeyHex: "02".padEnd(66, "a"),
+        signature: new Uint8Array(64).buffer
+      }),
+      deriveP2pkhAddress: async () => ({
+        publicKeyHex: "02".padEnd(66, "a"),
+        address: "fake"
+      }),
+      sealSendInput: () => ({ error: "not used" }),
+      openSealed: async () => null,
+      exportEncryptedKeyBackup: async () => ({
+        publicKeyHex: "02".padEnd(66, "a"),
+        backup: new Uint8Array(0).buffer
+      }),
+      dispose: () => undefined
+    }),
   };
 }
 
@@ -253,7 +315,7 @@ function makeFakeKeyspace(): ConstructorParameters<typeof ProtocolServiceImpl>[0
 }
 
 describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
-  it("ownerRuntimeBootstrap 私钥派生的公钥 ≠ signer.ownerPublicKeyHex → bootstrapFailed = true", async () => {
+  it("sessionRuntimeBootstrap 私钥派生的公钥 ≠ signer.ownerPublicKeyHex → bootstrapFailed = true", async () => {
     const { ProtocolServiceImpl } = await import("./protocolService.js");
     const vault = makeFakeVaultService();
     const svc = new ProtocolServiceImpl({
@@ -269,7 +331,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
     const priv = svc as unknown as PrivProto;
     // 用真实 priv=0x...01 配对派生出真实公钥，但 payload 声明的
     // ownerPublicKeyHex 是 "a".repeat(66)——故意错配，触发
-    // `bootstrap_owner_runtime_pubkey_mismatch` 失败路径。
+    // `bootstrap_runtime_pubkey_mismatch` 失败路径。
     await priv.applyLauncherBootstrap({
       app: { appId: "a", appOrigin: "https://x", appUrl: "https://x" },
       connectSessionId: "s",
@@ -277,19 +339,19 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      ownerRuntimeBootstrap: {
+      sessionRuntimeBootstrap: {
         ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
         ownerLabel: "Key A",
-        privateKeyHex: TEST_PRIV_HEX_PRIV1,
         capabilities: ["p2pkh"],
-        createdAt: 0
+        createdAt: 0,
+        crypto: makeFakeOwnerCrypto(TEST_PUB_HEX_PRIV1)
       }
     });
     expect(priv.bootstrapFailed()).toBe(true);
     expect(priv.bootstrapFailureReason()).toMatch(/pubkey_mismatch|invalid|missing/i);
   });
 
-  it("payload 不完整（缺 ownerRuntimeBootstrap）→ bootstrapFailed = true", async () => {
+  it("payload 不完整（缺 sessionRuntimeBootstrap）→ bootstrapFailed = true", async () => {
     const { ProtocolServiceImpl } = await import("./protocolService.js");
     const vault = makeFakeVaultService();
     const svc = new ProtocolServiceImpl({
@@ -310,11 +372,11 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      // ownerRuntimeBootstrap 故意缺字段
-      ownerRuntimeBootstrap: undefined as unknown as never
+      // sessionRuntimeBootstrap 故意缺字段
+      sessionRuntimeBootstrap: undefined as unknown as never
     });
     expect(priv.bootstrapFailed()).toBe(true);
-    expect(priv.bootstrapFailureReason()).toMatch(/owner_runtime_missing|invalid/i);
+    expect(priv.bootstrapFailureReason()).toMatch(/runtime_missing|invalid/i);
   });
 
   it("applyLauncherBootstrap 失败时不再向 opener 发 ack（修复 issue #2）", async () => {
@@ -344,7 +406,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
         applyLauncherBootstrap: (payload: unknown) => Promise<void>;
       };
       const priv = svc as unknown as PrivProto;
-      // ownerRuntimeBootstrap 缺字段 → 走失败路径。
+      // sessionRuntimeBootstrap 缺字段 → 走失败路径。
       await priv.applyLauncherBootstrap({
         app: { appId: "a", appOrigin: "https://x", appUrl: "https://x" },
         connectSessionId: "s",
@@ -352,7 +414,7 @@ describe("ProtocolService bootstrap fail-closed (修复 issue #3)", () => {
         resolvedClaims: {},
         resolvedAt: 0,
         launchToken: "tok",
-        ownerRuntimeBootstrap: undefined as unknown as never
+        sessionRuntimeBootstrap: undefined as unknown as never
       });
       // 修复 issue #2：失败路径**不**发任何 ack。
       const ackCalls = postedMessages.filter((m) => m.type === "session-window.bootstrap.ack");
@@ -399,12 +461,12 @@ describe("consumeLauncherBootstrap direct-consume 模型 (修复 issue #1)", () 
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      ownerRuntimeBootstrap: {
+      sessionRuntimeBootstrap: {
         ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
         ownerLabel: "Key A",
-        privateKeyHex: TEST_PRIV_HEX_PRIV1,
         capabilities: ["p2pkh"],
-        createdAt: 0
+        createdAt: 0,
+        crypto: makeFakeOwnerCrypto(TEST_PUB_HEX_PRIV1)
       }
     };
   }
@@ -636,12 +698,12 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       resolvedClaims: {},
       resolvedAt: 0,
       launchToken: "tok",
-      ownerRuntimeBootstrap: {
+      sessionRuntimeBootstrap: {
         ownerPublicKeyHex: TEST_PUB_HEX_PRIV1,
         ownerLabel: "Key A",
-        privateKeyHex: TEST_PRIV_HEX_PRIV1,
         capabilities: ["p2pkh"],
-        createdAt: 0
+        createdAt: 0,
+        crypto: makeFakeOwnerCrypto(TEST_PUB_HEX_PRIV1)
       },
       ...overrides
     };
@@ -653,6 +715,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
     return {
       status: () => "locked",
       onStatusChange: () => () => undefined,
+      getSessionState: () => null,
       getInitialActivationNotice: () => null,
       clearInitialActivationNotice: () => undefined,
       onInitialActivationNoticeChange: () => () => undefined,
@@ -666,7 +729,35 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       },
       unlock: async () => undefined,
       lock: async () => undefined,
+      activateKey: async () => undefined,
       verifyPassword: async () => undefined,
+      changePassword: async () => undefined,
+      createAppViewSession: async () => ({
+        getIdentity: () => ({
+          sessionId: "fake",
+          publicKeyHex: "02".padEnd(66, "a"),
+          label: "fake",
+          capabilities: [],
+          createdAt: ""
+        }),
+        signDigest: async () => ({
+          publicKeyHex: "02".padEnd(66, "a"),
+          signature: new Uint8Array(64).buffer
+        }),
+        deriveP2pkhAddress: async () => ({
+          publicKeyHex: "02".padEnd(66, "a"),
+          address: "fake"
+        }),
+        sealSendInput: () => ({ error: "not used" }),
+        openSealed: async () => null,
+        exportEncryptedKeyBackup: async () => ({
+          publicKeyHex: "02".padEnd(66, "a"),
+          backup: new Uint8Array().buffer
+        }),
+        dispose: () => undefined
+      }),
+      disposeAppViewSession: () => undefined,
+      disposeAllAppViewSessions: () => undefined,
       finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
       recoverEmptyVaultToUninitialized: async () => undefined,
       listKeys: async () => [],
@@ -681,14 +772,33 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       removeKey: async () => {
         throw new Error("not used");
       },
-      exportPrivateKey: async () => {
-        throw new Error("not used");
-      },
-      withPrivateKey: async () => {
-        throw new Error("not used");
-      }
-    };
-  }
+      exportKeyBackup: async () => "not used",
+      createActiveKeyCrypto: async () => ({
+        getIdentity: () => ({
+          sessionId: "fake",
+          publicKeyHex: "02".padEnd(66, "a"),
+          label: "fake",
+          capabilities: [],
+      createdAt: ""
+        }),
+        signDigest: async () => ({
+          publicKeyHex: "02".padEnd(66, "a"),
+          signature: new Uint8Array(64).buffer
+        }),
+        deriveP2pkhAddress: async () => ({
+          publicKeyHex: "02".padEnd(66, "a"),
+          address: "fake"
+      }),
+      sealSendInput: () => ({ error: "not used" }),
+      openSealed: async () => null,
+      exportEncryptedKeyBackup: async () => ({
+        publicKeyHex: "02".padEnd(66, "a"),
+        backup: new Uint8Array(0).buffer
+      }),
+      dispose: () => undefined
+    })
+  };
+}
 
   it("happy path：URL token 命中 launcher → appViewContext 写入 + bootstrapFailed=false", async () => {
     const capsule = makeFakeBootstrap();

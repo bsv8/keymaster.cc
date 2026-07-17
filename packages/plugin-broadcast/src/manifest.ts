@@ -28,8 +28,6 @@ import {
   BROADCAST_CORE_CAPABILITY,
   BROADCAST_PROVIDER_REGISTRY_CAPABILITY
 } from "@keymaster/contracts";
-import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { sha256 } from "@noble/hashes/sha2.js";
 import {
   BroadcastCoreImpl,
   type BroadcastCoreConfig,
@@ -39,41 +37,6 @@ import {
 import { createReconnectCoordinator } from "./reconnectCoordinator.js";
 import { BroadcastPage } from "./BroadcastPage.js";
 import { createBroadcastService } from "./broadcastService.js";
-
-/**
- * 通用 secp256k1 签名原语：与 plugin-appmsg::signChallengeWithSecp256k1
- * 等价。
- *
- * 本插件**不**依赖 plugin-appmsg 的内部模块；签名工具直接复刻一份，
- * 保持广播系统与消息系统硬隔离。
- */
-function signChallengeWithSecp256k1(
-  privKeyHex: string,
-  challenge: Uint8Array
-): string {
-  if (typeof privKeyHex !== "string" || privKeyHex.length !== 64) {
-    throw new Error("signChallengeWithSecp256k1: privKeyHex must be 32-byte hex");
-  }
-  if (!(challenge instanceof Uint8Array)) {
-    throw new Error("signChallengeWithSecp256k1: challenge must be Uint8Array");
-  }
-  const privBytes = hexToBytes(privKeyHex);
-  const digest = sha256(challenge);
-  const sig = secp256k1.sign(digest, privBytes, { prehash: false, format: "compact" });
-  if (sig.length !== 64) {
-    throw new Error("signChallengeWithSecp256k1: compact signature must be 64 bytes");
-  }
-  return bytesToHex(sig);
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  if (hex.length % 2 !== 0) throw new Error("hex length must be even");
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
-  }
-  return out;
-}
 
 function bytesToHex(bytes: Uint8Array): string {
   let s = "";
@@ -265,15 +228,17 @@ export const broadcastPlatformPlugin: PluginManifest = {
         const key = await keyspace.getKey(active);
         if (!key || !key.publicKeyHex) return null;
         const pubHex: string = key.publicKeyHex;
-        return await vault.withPrivateKey(pubHex, async (material) => {
-          return {
-            publicKeyHex: pubHex,
-            privateKeyHex: material.hex,
-            signChallenge: async (args: { challenge: Uint8Array }): Promise<string> => {
-              return signChallengeWithSecp256k1(material.hex, args.challenge);
-            }
-          } satisfies BroadcastSignerContext;
-        });
+        const activeCrypto = await vault.createActiveKeyCrypto(pubHex);
+        return {
+          publicKeyHex: pubHex,
+          signChallenge: async (args: { challenge: Uint8Array }): Promise<string> => {
+            const sig = await activeCrypto.signDigest({
+              publicKeyHex: pubHex,
+              digest: new Uint8Array(args.challenge).buffer
+            });
+            return bytesToHex(new Uint8Array(sig.signature));
+          }
+        } satisfies BroadcastSignerContext;
       } catch (err) {
         ctx.logger.error({
           scope: "broadcast.core",

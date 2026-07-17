@@ -109,7 +109,7 @@ export async function syncOneScope(input: {
    * （plugin-appmsgCore）以保证密钥闭包仅在 core 内持有。返回 null
    * 表示该条 sealed record 验签或解密失败——按 fail-closed 跳过。
    */
-  openSealed: (rec: ProviderSealedMessageRecord) => AppMsgMessage | null;
+  openSealed: (rec: ProviderSealedMessageRecord) => Promise<AppMsgMessage | null>;
   logger?: AppMsgSyncLogger;
 }): Promise<AppMsgSyncOutcome> {
   const startedAt = Date.now();
@@ -224,7 +224,7 @@ export async function syncOneScope(input: {
       continue;
     }
     seen.add(rec.messageId);
-    const m = input.openSealed(rec);
+    const m = await input.openSealed(rec);
     if (!m) {
       skippedCryptoCount += 1;
       continue;
@@ -391,7 +391,7 @@ export async function syncAllScopes(input: {
   pageLimit?: number;
   resolveTargetKey: (ep: { kind: "origin" | "plugin"; id: string }) => string;
   loadCursor: (targetKey: string) => Promise<string>;
-  openSealed: (rec: ProviderSealedMessageRecord) => AppMsgMessage | null;
+  openSealed: (rec: ProviderSealedMessageRecord) => Promise<AppMsgMessage | null>;
   logger?: AppMsgSyncLogger;
 }): Promise<AppMsgSyncOutcome[]> {
   const startedAt = Date.now();

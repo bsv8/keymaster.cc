@@ -16,32 +16,29 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 
 /**
- * 用 secp256k1 私钥对 `envelopeBytes` 做签名，返回 compact 64-byte hex。
+ * 用受控签名能力对 `envelopeBytes` 做签名，返回 compact 64-byte hex。
  *
  * 关键约束：
- *   - `privKeyHex` 必须是 32 字节小写 hex；非法长度抛错；
+ *   - `signDigest` 必须返回 64 字节 compact 签名；
  *   - 输出是 `r || s`（32 + 32 = 64 字节）的小写 hex；
  *   - 签名算法 = `ecdsa.Sign(SHA-256(envelopeBytes))`。
  */
 export function signBroadcastEnvelope(
-  privKeyHex: string,
-  envelopeBytes: Uint8Array
-): string {
-  if (typeof privKeyHex !== "string" || privKeyHex.length !== 64) {
-    throw new Error("signBroadcastEnvelope: privKeyHex must be 32-byte hex");
-  }
+  envelopeBytes: Uint8Array,
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array> | Uint8Array
+): Promise<string> {
   if (!(envelopeBytes instanceof Uint8Array)) {
     throw new Error("signBroadcastEnvelope: envelopeBytes must be Uint8Array");
   }
-  const privBytes = hexToBytes(privKeyHex);
   // 显式 SHA-256：避免 noble 在 prehash:false 模式下对超 32 字节
   // 输入的 mod n 缩减行为。
   const digest = sha256(envelopeBytes);
-  const sig = secp256k1.sign(digest, privBytes, { prehash: false, format: "compact" });
-  if (sig.length !== 64) {
-    throw new Error("signBroadcastEnvelope: compact signature must be 64 bytes");
-  }
-  return bytesToHex(sig);
+  return Promise.resolve(signDigest(digest)).then((sig) => {
+    if (!(sig instanceof Uint8Array) || sig.length !== 64) {
+      throw new Error("signBroadcastEnvelope: compact signature must be 64 bytes");
+    }
+    return bytesToHex(sig);
+  });
 }
 
 /**

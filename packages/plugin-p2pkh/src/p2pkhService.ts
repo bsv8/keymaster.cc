@@ -119,7 +119,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   // 单一 handle / 单一 currentPublicKeyHash。所有 DB 入口走
   // `ensureDbForOwner(publicKeyHex)`，由 p2pkhDb 内部按 hex 复用。
   // 硬切换 002 收尾：active key 的"内部 id"已删除；signing 走
-  // `vault.withPrivateKey(publicKeyHex, ...)` 唯一入口。`activeKeyId`
+  // `vault.createActiveKeyCrypto(publicKeyHex)` 唯一入口。`activeKeyId`
   // 硬切换 008 收尾 + 硬切换 003 收尾：activeIdentity 是 ReadyKeyIdentity，
   // publicKeyHex 必填。rebind 时通过 requireReadyKey 断言；写入
   // P2pkhKeyResource 时不需要再 `!`。短公钥不再作为字段持有，UI 需要
@@ -348,7 +348,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     }
     if (!activeIdentity || activeIdentity.publicKeyHex !== state.activePublicKeyHex) {
       // 硬切换 002 收尾：active identity 不再持有 vault 内部 surrogate id；
-      // 签名路径由 `vault.withPrivateKey(publicKeyHex, fn)` 自行解析。
+      // 签名路径由 `vault.createActiveKeyCrypto(publicKeyHex)` 自行解析。
       throw new Error("Active key is not ready");
     }
     return activeIdentity;
@@ -523,39 +523,41 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return existing;
     }
     const key = requireActiveKeyIdentity();
-    return await deps.vault.withPrivateKey(key.publicKeyHex, async (material) => {
-      const { address, publicKeyHex } = deriveP2pkhAddress(material.hex, network);
-      const resource: P2pkhKeyResource = {
-        resourceId,
-        publicKeyHex: key.publicKeyHex,
-        label: key.label,
-        address,
-        network,
-        createdAt: key.createdAt,
-        lastSyncedAt: undefined,
-        generation: 0
-      };
-      await db.putAddress(resource);
-      deps.messageBus.publish(P2PKH_MSG.ADDRESS_DERIVED, {
-        publicKeyHex: key.publicKeyHex,
-        network,
-        address,
-        generation: 0
-      });
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "address.created",
-        message: "P2PKH resource created via self-heal for active key",
-        data: {
-          resourceId,
-          network,
-          publicKeyHex: key.publicKeyHex,
-          address,
-          created: true
-        }
-      });
-      return resource;
+    const crypto = await resolveActiveKeyCrypto(deps.vault, key.publicKeyHex);
+    const { address } = await crypto.deriveP2pkhAddress({
+      publicKeyHex: key.publicKeyHex,
+      network
     });
+    const resource: P2pkhKeyResource = {
+      resourceId,
+      publicKeyHex: key.publicKeyHex,
+      label: key.label,
+      address,
+      network,
+      createdAt: key.createdAt,
+      lastSyncedAt: undefined,
+      generation: 0
+    };
+    await db.putAddress(resource);
+    deps.messageBus.publish(P2PKH_MSG.ADDRESS_DERIVED, {
+      publicKeyHex: key.publicKeyHex,
+      network,
+      address,
+      generation: 0
+    });
+    deps.logger?.info({
+      scope: "p2pkh.service",
+      event: "address.created",
+      message: "P2PKH resource created via self-heal for active key",
+      data: {
+        resourceId,
+        network,
+        publicKeyHex: key.publicKeyHex,
+        address,
+        created: true
+      }
+    });
+    return resource;
   }
 
   // ---- 注册 background tasks ----
@@ -1207,6 +1209,21 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       }
     }
   };
+}
+
+async function resolveActiveKeyCrypto(vault: VaultService, publicKeyHex: string) {
+  const anyVault = vault as VaultService & {
+    createActiveKeyCrypto?: (hex: string) => Promise<{
+      deriveP2pkhAddress: (input: { publicKeyHex: string; network: "main" | "test" }) => Promise<{
+        publicKeyHex: string;
+        address: string;
+      }>;
+    }>;
+  };
+  if (typeof anyVault.createActiveKeyCrypto === "function") {
+    return await anyVault.createActiveKeyCrypto(publicKeyHex);
+  }
+  throw new Error("Vault does not provide createActiveKeyCrypto");
 }
 
 function filterUtxos<T extends { network: "main" | "test"; publicKeyHex: string; resourceId: string }>(

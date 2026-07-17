@@ -1,15 +1,14 @@
 // packages/contracts/src/vault.ts
 // Vault 契约：私钥存储 + 内存解密的统一入口。
-// 关键安全约束：明文私钥只允许在 withPrivateKey 回调内短暂存在。
+// 关键安全约束：明文私钥只允许在 Vault 内部短暂存在。
 //
 // 硬切换（007 + 001 + 002 收尾）后的根身份：
 //   - KeyRef / KeyIdentity 使用公钥身份（publicKeyHex）。平台根身份
 //     字段唯一,系统**不再**存在 key 域 surrogate id：
 //       * `KeyRef` 不再持有 `id`（vault 内部 uuid 主键已删除）。
 //       * Vault canonical store 主键 = publicKeyHex。
-//       * `withPrivateKey` / `exportPrivateKey` / `deleteKey` 入参
-//         都是 publicKeyHex。
-//         已删；硬切换 002 之后不再有 "failed / uninitialized" 稳态。
+//       * `deleteKey` 入参是 publicKeyHex。
+//         硬切换 002 之后不再有 "failed / uninitialized" 稳态。
 //   - 短公钥属于 UI 显示格式，**不**作为 KeyRef 字段持有；展示时由
 //     UI 调 `formatShortPublicKey(publicKeyHex)` 现算。
 //   - 旧 `fingerprint` 概念已废弃，不再是 contract / storage / 业务对象的字段。
@@ -17,6 +16,9 @@
 //     owner 真值、不是 key 根身份。新逻辑禁止用这两字段做身份 / 地
 //     址 / 网络 / 资产判断；地址应从 P2PKH resource 派生，网络由具
 //     体 plugin / resource 持有，资产判断走对应 plugin 的 namespace。
+
+import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
+import type { VaultSessionState } from "./vaultSession.js";
 
 export type BsvNetwork = "main" | "test";
 
@@ -47,8 +49,7 @@ export interface KeyRef {
    * key 根身份。** 保留仅用于 Vault 设置页等历史兼容展示；新逻辑
    * 禁止依赖此字段做身份 / 地址判断——业务插件需要地址时，应从
    * P2PKH resource（`p2pkh_addresses` store）按
-   * `publicKeyHex + network` 派生，或在签名路径用
-   * `vault.withPrivateKey(publicKeyHex, ...)` 现算。
+   * `publicKeyHex + network` 派生。
    */
   address?: string;
   /**
@@ -60,8 +61,8 @@ export interface KeyRef {
   network?: BsvNetwork;
 }
 
-/** 私钥明文材料：仅在内存中使用，禁止落盘。 */
-export interface PrivateKeyMaterial {
+/** Key 明文材料：仅在内存中使用，禁止落盘。 */
+interface VaultKeyMaterial {
   /** 32 字节十六进制小写编码。 */
   hex: string;
   /** 原始 WIF（如果导入时提供）。 */
@@ -72,10 +73,10 @@ export interface PrivateKeyMaterial {
  *
  * 硬切换 002 收尾：`VaultStatus = "unlocked"` 的语义被再次收紧。
  *
- * - 旧语义：`masterKey` 已放入内存，masterSalt 已放入内存。
+ * - 旧语义：一份常驻的全局解锁材料放在内存里。
  * - 新语义：表示 Vault 会话**和** keyspace ready 边界都已完成——
- *   1) masterKey / masterSalt 已在内存；
- *   2) vault migration（一次性 legacy staging 迁移 + 派生 / 校验
+ *   1) 当前 session 的解锁材料已在内存；
+ *   2) vault migration（一次性 pre-v7 记录 AAD 升级 + 派生 / 校验
  *      publicKeyHex）已完成；
  *   3) keyspace.onVaultUnlocked() 已 await 完成（即 keyspace 处于
  *      一致状态，active key 已选定）。
@@ -85,15 +86,15 @@ export interface PrivateKeyMaterial {
  * "Key storage is not ready"，属于根因泄漏到 UI 的错误。
  *
  * 实现保证：unlock() 的完成顺序必须为
- *   migrateLegacyStaging -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit
+ *   migrateVaultKeysToV2Aad -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit
  * 失败时回退到 "locked" 并清空内存会话（fail-closed）。
  */
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
 /**
  * 私钥导出 envelope（bsv8 key envelope）。
- * 设计缘由：导出必须由 Vault 完成，因为只有 Vault 能通过 withPrivateKey
- * 受控借用明文私钥。importer 插件不能借用明文，因此不能实现导出。
+ * 设计缘由：导出必须由 Vault 完成，因为只有 Vault 能接触到明文私钥。
+ * importer 插件不能接触明文，因此不能实现导出。
  * 格式与外部生态（bsv8）一致：加密 JSON（Argon2id + XChaCha20-Poly1305），
  * 不是 Keymaster 私有格式，也不提供明文 hex / WIF 导出。
  */
@@ -170,6 +171,8 @@ export interface VaultService {
   status(): VaultStatus;
   /** 订阅状态变化，返回取消订阅函数。 */
   onStatusChange(handler: (status: VaultStatus) => void): () => void;
+  /** 当前 session 快照；无 session 时返回 null。 */
+  getSessionState(): VaultSessionState | null;
 
   /**
    * "首 Key 已落库但未自动 active"待展示 notice。
@@ -190,6 +193,15 @@ export interface VaultService {
    */
   getInitialActivationNotice(): InitialActivationNotice | null;
   clearInitialActivationNotice(): void;
+  /**
+   * 由 Vault 统一完成的 active key 切换。
+   *
+   * 设计缘由：切 active 需要先验证锁屏密码，再重新建立当前 session
+   * 的 active-key capability，最后才同步 keyspace active 状态。把这段
+   * 事务边界收口到 Vault，避免 UI 先校验密码、再单独调用 keyspace
+   * 造成两条真值来源。
+   */
+  activateKey(input: { publicKeyHex: string; password: string }): Promise<void>;
   /**
    * 订阅 notice 变化（设置 / 清除）。返回取消订阅函数。
    * 订阅时会立即把当前 notice 值喂给 handler，避免新挂载的 UI 漏掉
@@ -283,17 +295,27 @@ export interface VaultService {
     /** 导入解析成功后交给 Vault 落库的私钥材料。 */
     key: {
       label: string;
-      material: PrivateKeyMaterial;
+      material: VaultKeyMaterial;
       /** importer 推断出的格式，例如 "wif-mainnet"、"bsv8-key-envelope"。 */
       format: string;
       capabilities: string[];
       source?: string;
     };
   }): Promise<KeyRef>;
-  /** 用密码解锁，解密所有 key 索引（不解密私钥本身），完成 legacy staging 迁移。 */
+  /** 用密码解锁，解密所有 key 索引（不解密私钥本身），并完成 pre-v7 记录的 AAD 升级。 */
   unlock(password: string): Promise<void>;
   /** 锁定，丢弃内存中的明文。 */
   lock(): Promise<void>;
+  /**
+   * 修改锁屏密码。
+   *
+   * 设计缘由：
+   *   - 需要同时重加密 `vault_meta` 与全部 `vault_keys`，因此必须由
+   *     Vault 自己完成原子轮换，UI 不能拆成"先改 meta 再改 key"。
+   *   - 成功后旧密码立即失效，且 Vault 保持锁定状态，不自动重新解锁。
+   *   - 失败必须保持旧数据可用，不写入半成品记录。
+   */
+  changePassword(input: { oldPassword: string; newPassword: string }): Promise<void>;
   /** 硬切换 001：宿主 teardown 时调用。幂等：可重复调用；可容忍部分资源已清。 */
   dispose?(): void;
 
@@ -306,10 +328,10 @@ export interface VaultService {
    *     平台入口，由 Vault 自己拿 verifier 比对，不能让业务插件复制
    *     一套密码校验逻辑。
    *   - 与 `unlock(password)` 严格区分：
-   *       * `unlock` 会派生 masterKey、跑一次性 legacy staging migration、
+   *       * `unlock` 会派生当前 session 材料、跑一次性 pre-v7 记录 AAD 升级、
    *         通知 keyspace、emit `vault.unlocked`，创建一段新会话；
-   *       * `verifyPassword` **只**比对 verifier，不会改变 `masterKey
-   *         / masterSalt / keyCache / status`，不会触发 migration，
+   *       * `verifyPassword` **只**比对 verifier，不会改变 session 材料
+   *         / `keyCache` / `status`，不会触发 migration，
    *         不会发任何事件。
    *   - 调用前 Vault 不要求处于特定状态：locked / unlocked 都允许，
    *     uninitialized / booting 必须 fail closed（没有 verifier 可校验）。
@@ -332,7 +354,7 @@ export interface VaultService {
    *         判断剩余 0；fail-closed 防御）；
    *       * 不空则抛错，例如 `Vault still has keys`，绝不能继续删
    *         meta 把用户其它 key 弄成"无 meta、有 key"的脏状态。
-   *   - 内部必须：清理内存会话（masterKey / masterSalt / keyCache）
+   *   - 内部必须：清理内存会话（session 材料 / keyCache）
    *     -> 删除 `vault_meta` -> 通知现有依赖 `vault.locked` 的清理
    *     链路（业务插件需要结束 unlocked 会话内存）-> 最终
    *     `setStatus("uninitialized")`。
@@ -378,8 +400,9 @@ export interface VaultService {
 
   /** 导入一个私钥，保存后返回 KeyRef。允许同一个 vault 存在多个 key。 */
   importPrivateKey(input: {
+    password: string;
     label: string;
-    material: PrivateKeyMaterial;
+    material: VaultKeyMaterial;
     format: string;
     capabilities: string[];
     source?: string;
@@ -400,8 +423,9 @@ export interface VaultService {
    *     与回归测试。
    *
    * 不在公开契约中暴露：明文 hex / WIF、`material`、随机源替代接口。
-   */
+  */
   generateKey(input: {
+    password: string;
     label: string;
     capabilities?: string[];
   }): Promise<KeyRef>;
@@ -423,31 +447,52 @@ export interface VaultService {
   removeKey(publicKeyHex: string): Promise<void>;
 
   /**
-   * 导出私钥为 bsv8 加密 envelope。
-   * 设计缘由：明文私钥只能从 withPrivateKey 借出，因此导出必须经过 Vault。
-   * 该方法不修改 key 列表，不触发 key.created / key.deleted 事件。
+   * 导出单 Key Backup。
+   * 设计缘由：备份只复制当前 Vault 的 `vault_meta + selected vault_keys`
+   * 记录，不要求再次输入密码，也不接触明文私钥。
+   * 返回值是可直接下载的 JSON 字符串。
    */
-  exportPrivateKey(input: { publicKeyHex: string; password: string }): Promise<KeyExportEnvelope>;
+  exportKeyBackup(publicKeyHex: string): Promise<string>;
+  /**
+   * 导入单 Key Backup。
+   * 设计缘由：恢复需要来源 Vault 密码和目标 Vault 密码，导入侧不接触
+   * 明文私钥，只负责按目标 Vault 重新加密并落库。
+   */
+  importKeyBackup?(input: {
+    backup: string;
+    sourcePassword: string;
+    targetPassword: string;
+  }): Promise<KeyRef>;
 
   /**
-   * 临时借用私钥。
-   * 关键设计缘由：明文私钥永远不进入 React state、不写普通 IndexedDB、不进 global capability。
-   * 签名逻辑（如 P2PKH signer）必须通过 withPrivateKey 在闭包内使用，调用结束后立即释放。
+   * 返回受控 active key capability。调用方不能拿到 raw private key。
    */
-  withPrivateKey<T>(publicKeyHex: string, fn: (material: PrivateKeyMaterial) => Promise<T> | T): Promise<T>;
+  createActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto>;
+  /**
+   * 为独立 appView session 创建专属 worker capability。
+   * appView 不能复用 Keymaster 当前 session capability。
+   */
+  createAppViewSession(input: {
+    sessionId: string;
+    publicKeyHex: string;
+    password: string;
+  }): Promise<ActiveKeyCrypto>;
+  /** 销毁单个 appView session。 */
+  disposeAppViewSession(sessionId: string, reason?: string): void;
+  /** 销毁全部 appView session。 */
+  disposeAllAppViewSessions(reason?: string): void;
 
   /* ============== appView owner runtime bootstrap ============== */
   // 设计缘由（施工单 2026-06-30 002）：
-  //   - appView Session Window **不**导入整套 vault unlock runtime；
-  //     launcher 用现有 `withPrivateKey(publicKeyHex, fn)` 借出 owner 私钥
-  //     明文 hex，交给 Session Window 拼成 `OwnerRuntimeBootstrap`。
-  //   - `exportUnlockRuntimeForSessionWindow()` /
-  //     `importUnlockRuntimeFromLauncher(handoff)` 已删除：不允许让
-  //     appView Session Window 模拟"完整解锁钱包窗口"。
+  //   - appView Session Window **不**导入整套 vault runtime；
+  //     launcher 用受控 `createAppViewSession({ sessionId, publicKeyHex, password })`
+  //     capability，交给 Session Window 拼成 `SessionRuntimeBootstrap`。
+  //   - 旧的 runtime handoff 已删除：不允许让 appView Session Window
+  //     模拟"完整解锁钱包窗口"。
   //   - Session Window 在 appView mode 下可以是 `locked` 态——业务方法
   //     是否可执行取决于 `OwnerExecutionRuntime` 能否解析到：
-  //     `bootstrap_owner`（Session Window 启动早期注入的）或
-  //     `vault_unlock`（本窗口 unlock 后从 vault 重建）。
+  //     `bootstrap_runtime`（Session Window 启动早期注入的）；
+  //     appView mode 不允许后续回退到 `vault_runtime`。
   //   - 未来若要支持"为单 key 持久化"或"key 级别跨窗口 unlock"，
   //     另出一份施工单；本接口**不**重开 unlock runtime export/import。
 }

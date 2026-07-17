@@ -1,6 +1,6 @@
 // packages/plugin-importer-hex/src/hexImporter.ts
 // 解析 32 字节 hex 私钥。
-// 设计缘由：importer 只能输出标准 PrivateKeyMaterial，不假设网络（由调用方决定）。
+// 设计缘由：importer 只能输出标准导入材料，不假设网络（由调用方决定）。
 
 import type { KeyImporter, KeyImportInput, KeyImportResult } from "@keymaster/contracts";
 

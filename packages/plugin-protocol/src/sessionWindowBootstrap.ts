@@ -31,16 +31,16 @@
 //       * Session Window 拿到 capsule 后调用 `handler(payload)`，由
 //         `protocolService.applyLauncherBootstrap` 应用。
 //   - **不**做持续 RPC / keepalive / reconnect；`acquire` 是**一次**调用。
-//   - bootstrap payload 的 `ownerRuntimeBootstrap` 字段承载
-//     `OwnerRuntimeBootstrap`，表达"启动期一次性注入的 owner runtime
+//   - bootstrap payload 的 `sessionRuntimeBootstrap` 字段承载
+//     `SessionRuntimeBootstrap`，表达"启动期一次性注入的 owner runtime
 //     材料"——让 Session Window 在 unlock 前就能跑业务方法。
 //       - Session Window 拿到后**只**在当前窗口的 owner runtime 注册，
 //         **不**模拟"完整解锁钱包窗口"。
-//       - bootstrap runtime 后续可通过 `vault_unlock` 来源替换为同一
-//         owner 在 vault 内的私钥；Service 内 `resolveOwnerRuntime`
-//         负责这条切换。
+//       - connect mode 下，bootstrap runtime 后续可由本窗口 unlock 后的
+//         `vault_runtime` 接手；appView mode 不允许在 bootstrap 缺失时
+//         自动回退。
 
-import type { AppBootstrapPayload, OwnerRuntimeBootstrap } from "@keymaster/contracts";
+import type { AppBootstrapPayload, SessionRuntimeBootstrap } from "@keymaster/contracts";
 
 /* ============== boot mode 解析 ============== */
 
@@ -253,7 +253,7 @@ export async function consumeLauncherBootstrap(
  *
  * 设计缘由：
  *   - launcher 已经借到"这次 session 绑定 owner 的私钥材料"（用
- *     `vault.withPrivateKey(publicKeyHex, fn)` 借出明文 hex）；本接口只声明
+ *     `createAppViewSession()` 取 capability）；本接口只声明
  *     它需要传入哪些已就绪数据，**不**替代 launcher 自己决定"是否
  *     允许启动 appView"的策略。
  *   - `appUrl` 必须已经拼好 launchToken；Session Window bootstrap 完成后
@@ -262,7 +262,7 @@ export async function consumeLauncherBootstrap(
  *     Session Window，走现有 popup transport）。
  *   - **不**包含 `unlockRuntime`：appView mode 不导入整套 vault
  *     unlock runtime，改为只把"owner 私钥材料"塞进
- *     `ownerRuntimeBootstrap`。
+ *     `sessionRuntimeBootstrap`。
  */
 export interface LauncherHandoffInput {
   appId: string;
@@ -277,10 +277,10 @@ export interface LauncherHandoffInput {
   expiresAt: number;
   /**
    * 本次 session 绑定 owner 的 owner runtime bootstrap。
-   * 必填；由 launcher 端 `vault.withPrivateKey` 借出 owner 私钥 hex
+   * 必填；由 launcher 端的 owner capability 提供
    * 后组装。
    */
-  ownerRuntimeBootstrap: OwnerRuntimeBootstrap;
+  sessionRuntimeBootstrap: SessionRuntimeBootstrap;
 }
 
 /**
@@ -298,17 +298,15 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
   if (!input.launchToken) {
     throw new Error("Launcher handoff missing launchToken");
   }
-  if (!input.ownerRuntimeBootstrap) {
-    throw new Error("Launcher handoff missing ownerRuntimeBootstrap");
+  if (!input.sessionRuntimeBootstrap) {
+    throw new Error("Launcher handoff missing sessionRuntimeBootstrap");
   }
-  if (input.ownerRuntimeBootstrap.ownerPublicKeyHex !== input.ownerPublicKeyHex) {
-    throw new Error("Launcher handoff ownerRuntimeBootstrap.ownerPublicKeyHex mismatch");
+  if (input.sessionRuntimeBootstrap.ownerPublicKeyHex !== input.ownerPublicKeyHex) {
+    throw new Error("Launcher handoff sessionRuntimeBootstrap.ownerPublicKeyHex mismatch");
   }
-  if (
-    !input.ownerRuntimeBootstrap.privateKeyHex ||
-    input.ownerRuntimeBootstrap.privateKeyHex.length !== 64
-  ) {
-    throw new Error("Launcher handoff ownerRuntimeBootstrap.privateKeyHex invalid");
+  const identity = input.sessionRuntimeBootstrap.crypto?.getIdentity?.();
+  if (!identity || identity.publicKeyHex !== input.ownerPublicKeyHex) {
+    throw new Error("Launcher handoff sessionRuntimeBootstrap.crypto identity invalid");
   }
   return {
     app: {
@@ -321,6 +319,6 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
     resolvedClaims: input.resolvedClaims as AppBootstrapPayload["resolvedClaims"],
     resolvedAt: input.resolvedAt,
     launchToken: input.launchToken,
-    ownerRuntimeBootstrap: input.ownerRuntimeBootstrap
+    sessionRuntimeBootstrap: input.sessionRuntimeBootstrap
   };
 }

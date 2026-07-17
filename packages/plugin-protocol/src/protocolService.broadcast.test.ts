@@ -48,7 +48,7 @@ function makeFakeOpener(): FakeWindow {
 function makeVaultStub(): VaultService {
   return {
     status: () => "unlocked" as const,
-    async withPrivateKey() {
+    async createActiveKeyCrypto() {
       return { hex: TEST_PRIV_HEX } as { hex: string };
     },
     async withMasterKey(masterKey: unknown, fn: (k: unknown) => unknown) {

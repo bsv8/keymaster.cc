@@ -160,6 +160,7 @@ export function ImportPage() {
     try {
       await persistImport(vault, state.result, {
         label: state.label || `key-${Date.now()}`,
+        password: state.password,
         capabilities: ["p2pkh"],
         source: importer.id
       });

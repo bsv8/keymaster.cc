@@ -124,15 +124,19 @@ export interface AppMsgCoreConfig {
  * 注意：此类型**不**再保留 HubMsg 特有的四元组签名接口；该拼接规则
  * 已下沉到 `plugin-hubmsg::HubMsgBindSignerAdapter`。
  *
- * 施工单 2026-07-04 004：同时暴露 owner 私钥 hex——`plugin-appmsg`
- * 入站 / 出站都需要 ECDH + envelope 签名，不能只走 `signChallenge`。
- * `privateKeyHex` 闭包在 `vault.withPrivateKey` 范围内持有；调用方
- * 用完即丢，**不**持久化 / **不**写日志 / **不**出现在任何长期真值。
  */
 export interface AppMsgBindSigner {
   publicKeyHex: string;
-  privateKeyHex: string;
   signChallenge(args: { challenge: Uint8Array }): Promise<string>;
+  openSealed(rec: ProviderSealedMessageRecord): Promise<AppMsgMessage | null>;
+  sealSendInput(input: {
+    sender: AppMsgSenderProjection;
+    recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string };
+    contentType: AppMsgContentType;
+    body: string;
+    clientMessageId: string;
+    createdAtMs: number;
+  }): { record: ProviderSealedMessageRecord } | { error: string };
 }
 
 function emitLog(
@@ -683,25 +687,30 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
     }
     const scopeMatch = this.scopeMatch();
     const filteredHandler = (rec: ProviderSealedMessageRecord) => {
-      const m = this.core.openSealedToMessage(rec);
-      if (!m) return;
-      if (!scopeMatch(m)) return;
-      void this.core.persistLocalMessageProjection(m)
-        .catch((err) => {
+      void (async () => {
+        const m = await this.core.openSealedToMessage(rec);
+        if (!m) return;
+        if (!scopeMatch(m)) return;
+        await this.core.persistLocalMessageProjection(m).catch((err) => {
           this.core.emitInternalLog("warn", "appmsg.endpoint.subscribe.local_put_failed", {
             endpointKind: this.endpoint.kind,
             endpointId: this.endpoint.id,
             messageId: m.messageId,
             err: err instanceof Error ? err.message : String(err)
           });
-        })
-        .finally(() => {
-          try {
-            handler(m);
-          } catch {
-            // ignore
-          }
         });
+        try {
+          handler(m);
+        } catch {
+          // ignore
+        }
+      })().catch((err) => {
+        this.core.emitInternalLog("warn", "appmsg.endpoint.subscribe.open_failed", {
+          endpointKind: this.endpoint.kind,
+          endpointId: this.endpoint.id,
+          err: err instanceof Error ? err.message : String(err)
+        });
+      });
     };
     const off = handle.subscribeMessages(filteredHandler);
     this.currentSubsByHandler.set(handler, off);
@@ -767,8 +776,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
   private boundHandle: MessageProviderOperations | null = null;
   /** 当前绑定的 owner publicKeyHex。 */
   private currentBoundOwner: string | null = null;
-  /** 当前绑定的 owner privateKeyHex（plugin-appmsg 唯一持有位）。 */
-  private currentBoundOwnerPrivateKeyHex: string | null = null;
+  /** 当前绑定的 owner signer capability。 */
+  private currentBoundSigner: AppMsgBindSigner | null = null;
   /** 当前 active provider id（DB 写路径必须带这个维度）。 */
   private currentProviderId: string | null = null;
   /** 本地 DB handle。 */
@@ -1163,7 +1172,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
     // 6. 正式提交。
     this.boundHandle = handle as MessageProviderOperations;
     this.currentBoundOwner = ownerPublicKeyHex;
-    this.currentBoundOwnerPrivateKeyHex = signer.privateKeyHex;
+    this.currentBoundSigner = signer;
     this.currentProviderId = provider.id;
     this.lastErrorMessageValue = null;
     this.nextReconnectAtMsValue = null;
@@ -1212,7 +1221,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.handleCloseOff = null;
     }
     this.currentBoundOwner = null;
-    this.currentBoundOwnerPrivateKeyHex = null;
+    this.currentBoundSigner = null;
     this.currentProviderId = null;
     this.lastErrorMessageValue = null;
     this.nextReconnectAtMsValue = null;
@@ -1339,7 +1348,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       });
     }
     this.currentBoundOwner = null;
-    this.currentBoundOwnerPrivateKeyHex = null;
+    this.currentBoundSigner = null;
     this.nextReconnectAtMsValue = null;
     if (this.currentUnfilteredOff) {
       try {
@@ -1482,17 +1491,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
    * 公开原因：endpoint service impl 需要在 provider.subscribe handler
    * 里解 sealed record → public message；同文件内访问即可。
    */
-  openSealedToMessage(rec: ProviderSealedMessageRecord): AppMsgMessage | null {
-    const ownerPriv = this.currentBoundOwnerPrivateKeyHex;
-    if (!ownerPriv) {
+  async openSealedToMessage(rec: ProviderSealedMessageRecord): Promise<AppMsgMessage | null> {
+    const signer = this.currentBoundSigner;
+    if (!signer) {
       return null;
     }
-    let opened;
     try {
-      opened = openAppMessage({
-        signed: rec.envelope,
-        recipientPrivateKeyHex: ownerPriv
-      });
+      return await signer.openSealed(rec);
     } catch (err) {
       const reason =
         err instanceof AppMsgCryptoError
@@ -1507,23 +1512,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
       });
       return null;
     }
-    const bodyStr = new TextDecoder("utf-8", { fatal: true }).decode(opened.bodyUtf8);
-    const out: AppMsgMessage = {
-      messageId: rec.messageId,
-      clientMessageId: opened.clientMessageId,
-      senderPublicKeyHex: opened.senderPublicKeyHex,
-      recipientPublicKeyHex: opened.recipientPublicKeyHex,
-      contentType: opened.contentType,
-      body: bodyStr,
-      createdAtMs: opened.createdAtMs,
-      insertedAtMs: rec.insertedAtMs
-    };
-    if (opened.senderEndpointKind === "origin") out.senderOrigin = opened.senderEndpointId;
-    else if (opened.senderEndpointKind === "plugin") out.senderAppId = opened.senderEndpointId;
-    if (opened.recipientEndpointKind === "origin") out.recipientOrigin = opened.recipientEndpointId;
-    else if (opened.recipientEndpointKind === "plugin")
-      out.recipientAppId = opened.recipientEndpointId;
-    return out;
   }
 
   /** 把公开 send input + sender projection 翻译为 sealed record。 */
@@ -1536,60 +1524,11 @@ export class AppMsgCoreImpl implements AppMsgCore {
     createdAtMs: number;
   }): { record: ProviderSealedMessageRecord } | { error: string } {
     const ownerPub = this.currentBoundOwner;
-    const ownerPriv = this.currentBoundOwnerPrivateKeyHex;
-    if (!ownerPub || !ownerPriv) {
-      return { error: "appmsg.core: not_ready (no current owner / private key)" };
+    const signer = this.currentBoundSigner;
+    if (!ownerPub || !signer) {
+      return { error: "appmsg.core: not_ready (no current owner / signer)" };
     }
-    const senderEp = senderEndpointFor(input.sender);
-    const recipientEp = recipientEndpointFor(input.recipient);
-    if (senderEp.kind !== "origin" && senderEp.kind !== "plugin") {
-      return { error: "appmsg.core: senderEndpointKind invalid" };
-    }
-    if (recipientEp.kind !== "origin" && recipientEp.kind !== "plugin") {
-      return { error: "appmsg.core: recipientEndpointKind invalid" };
-    }
-    if (!input.recipient.recipientPublicKeyHex) {
-      return { error: "appmsg.core: recipientPublicKeyHex required" };
-    }
-    if (input.contentType !== "text/plain" && input.contentType !== "text/markdown") {
-      return { error: "appmsg.core: invalid contentType" };
-    }
-    if (typeof input.body !== "string" || input.body.length === 0) {
-      return { error: "appmsg.core: body must be non-empty" };
-    }
-    if (!input.clientMessageId) {
-      return { error: "appmsg.core: clientMessageId required" };
-    }
-    try {
-      const sealed = sealAppMessage({
-        senderPrivateKeyHex: ownerPriv,
-        senderPublicKeyHex: ownerPub,
-        recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
-        senderEndpoint: senderEp,
-        recipientEndpoint: recipientEp,
-        contentType: input.contentType,
-        body: input.body,
-        clientMessageId: input.clientMessageId,
-        createdAtMs: input.createdAtMs
-      });
-      return {
-        record: {
-          messageId: "", // 由 HubMsg 服务端在 send 成功后分配
-          senderPublicKeyHex: ownerPub,
-          senderEndpointId: senderEp.id,
-          senderEndpointKind: senderEp.kind,
-          recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
-          recipientEndpointId: recipientEp.id,
-          recipientEndpointKind: recipientEp.kind,
-          clientMessageId: input.clientMessageId,
-          createdAtMs: input.createdAtMs,
-          insertedAtMs: input.createdAtMs,
-          envelope: sealed.envelope
-        }
-      };
-    } catch (err) {
-      return { error: err instanceof Error ? err.message : String(err) };
-    }
+    return signer.sealSendInput(input);
   }
 
   /* ====== Endpoint service 内部调用 ============== */
@@ -1721,7 +1660,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       });
       const out: AppMsgMessage[] = [];
       for (const rec of res.items) {
-        const m = this.openSealedToMessage(rec);
+        const m = await this.openSealedToMessage(rec);
         if (!m) continue;
         out.push(m);
         // 同步路径把解密后的明文投影写本地库（best-effort）。
@@ -1758,7 +1697,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
         messageId: input.messageId
       });
       if (!rec) return null;
-      const m = this.openSealedToMessage(rec);
+      const m = await this.openSealedToMessage(rec);
       if (!m) return null;
       if (this.localOps && this.currentProviderId) {
         try {
@@ -1809,40 +1748,39 @@ export class AppMsgCoreImpl implements AppMsgCore {
     }
     if (this.unfilteredSubs.size === 0 || !this.boundHandle) return;
     this.currentUnfilteredOff = this.boundHandle.subscribeMessages((rec) => {
-      const m = this.openSealedToMessage(rec);
-      if (!m) return;
-      if (this.localOps && this.currentProviderId) {
-        try {
-          awaitPromise(
-            this.localOps.putMessage(this.currentProviderId, m).then(() => {
-              this.lastInsertedAtMsValue = Date.now();
-              this.recordTargetLastReceived(m);
-            })
-          ).catch((err) => {
+      void (async () => {
+        const m = await this.openSealedToMessage(rec);
+        if (!m) return;
+        if (this.localOps && this.currentProviderId) {
+          try {
+            await this.localOps.putMessage(this.currentProviderId, m);
+            this.lastInsertedAtMsValue = Date.now();
+            this.recordTargetLastReceived(m);
+          } catch (err) {
             this.lastErrorMessageValue =
               err instanceof Error ? err.message : String(err);
             emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
               err: this.lastErrorMessageValue,
               messageId: m.messageId
             });
-          });
-        } catch (err) {
-          this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
+          }
         }
-      }
-      for (const h of this.unfilteredSubs) {
-        try {
-          h(m);
-        } catch {
-          // ignore
+        for (const h of this.unfilteredSubs) {
+          try {
+            h(m);
+          } catch {
+            // ignore
+          }
         }
-      }
-      void this.triggerSync("background").catch(() => undefined);
-      emitLog(this.cfg.logger, "info", "appmsg.receive.pushed", {
-        messageId: m.messageId,
-        clientMessageId: m.clientMessageId,
-        contentType: m.contentType,
-        bodyBytes: m.body.length
+        void this.triggerSync("background").catch(() => undefined);
+        emitLog(this.cfg.logger, "info", "appmsg.receive.pushed", {
+          messageId: m.messageId,
+          clientMessageId: m.clientMessageId,
+          contentType: m.contentType,
+          bodyBytes: m.body.length
+        });
+      })().catch((err) => {
+        this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
       });
     });
   }
@@ -2217,16 +2155,6 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
     })();
   }
-}
-
-/**
- * fire-and-forget promise helper（避免在 sync 推送 handler 内 async）。
- */
-function awaitPromise(p: Promise<unknown>): Promise<void> {
-  return p.then(
-    () => undefined,
-    () => undefined
-  );
 }
 
 function previewOnlineKeys(publicKeyHexes: readonly string[]): string[] {

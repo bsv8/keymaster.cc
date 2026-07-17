@@ -1,6 +1,6 @@
 // packages/plugin-importer-wif/src/wifImporter.ts
 // WIF 解析：把 WIF 字符串解出 32 字节 hex 私钥。
-// 设计缘由：importer 只能输出标准 PrivateKeyMaterial，禁止写 Vault。
+// 设计缘由：importer 只能输出标准导入材料，禁止写 Vault。
 // 这里 inline 了一份最小 WIF 解码，避免跨 plugin 互相 import。
 
 import type { KeyImporter, KeyImportInput, KeyImportResult } from "@keymaster/contracts";

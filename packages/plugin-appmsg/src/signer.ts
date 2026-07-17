@@ -3,7 +3,7 @@
 //
 // 设计缘由（硬切换 2026-07-04 001 修订）：
 //   - 这是平台 vault 持有的 secp256k1 私钥对应的"通用签名原语"；
-//   - `signChallengeWithSecp256k1(privKeyHex, challenge)` 接受任意
+//   - `signChallengeWithSecp256k1(signDigest, challenge)` 接受任意
 //     `challenge` 字节并返回 secp256k1 签名；
 //   - **不**夹带任何具体 provider 的协议字段；HubMsg 的 `canonicalBindText`
 //     拼接收口**只**存在于 `plugin-hubmsg` 的 `HubMsgBindSignerAdapter`；
@@ -20,10 +20,10 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { canonicalBindText } from "@keymaster/contracts";
 
 /**
- * 用 secp256k1 私钥对 `challenge` 字节做签名，返回 compact 64-byte hex。
+ * 用受控签名能力对 `challenge` 字节做签名，返回 compact 64-byte hex。
  *
  * 关键约束：
- *   - `privKeyHex` 必须是 32 字节小写 hex；非法长度抛错；
+ *   - `signDigest` 必须返回 64-byte compact 签名；
  *   - 输出是 `r || s`（32 + 32 = 64 字节）的小写 hex；
  *   - 签名算法 = `ecdsa.Sign(SHA-256(challenge))`，与 Go 端
  *     `ecdsa.Sign(SHA-256(plaintext))` 等价；
@@ -31,24 +31,21 @@ import { canonicalBindText } from "@keymaster/contracts";
  *     其它 provider 可自行验证格式）。
  */
 export function signChallengeWithSecp256k1(
-  privKeyHex: string,
+  signDigest: (digest: Uint8Array) => Uint8Array | Promise<Uint8Array>,
   challenge: Uint8Array
-): string {
-  if (typeof privKeyHex !== "string" || privKeyHex.length !== 64) {
-    throw new Error("signChallengeWithSecp256k1: privKeyHex must be 32-byte hex");
-  }
+): Promise<string> {
   if (!(challenge instanceof Uint8Array)) {
     throw new Error("signChallengeWithSecp256k1: challenge must be Uint8Array");
   }
-  const privBytes = hexToBytes(privKeyHex);
   // 显式 SHA-256：避免 noble 在 `prehash: false` 模式下对超 32 字节
   // 输入的 mod n 缩减行为。
   const digest = sha256(challenge);
-  const sig = secp256k1.sign(digest, privBytes, { prehash: false, format: "compact" });
-  if (sig.length !== 64) {
-    throw new Error("signChallengeWithSecp256k1: compact signature must be 64 bytes");
-  }
-  return bytesToHex(sig);
+  return Promise.resolve(signDigest(digest)).then((sig) => {
+    if (!(sig instanceof Uint8Array) || sig.length !== 64) {
+      throw new Error("signChallengeWithSecp256k1: compact signature must be 64 bytes");
+    }
+    return bytesToHex(sig);
+  });
 }
 
 /**
@@ -64,25 +61,26 @@ export function signChallengeWithSecp256k1(
  *     一层。
  */
 export function signCompactSecp256k1(
-  privKeyHex: string,
+  signDigest: ((digest: Uint8Array) => Uint8Array | Promise<Uint8Array>) | string,
   sessionId: string,
   nonce: string,
   publicKeyHex: string,
   issuedAtMs: number
-): string {
+): Promise<string> | string {
   const plainText = canonicalBindText(sessionId, nonce, publicKeyHex, issuedAtMs);
   const plainBytes = new TextEncoder().encode(plainText);
-  return signChallengeWithSecp256k1(privKeyHex, plainBytes);
-}
-
-/** hex -> Uint8Array（小写 hex）。 */
-function hexToBytes(hex: string): Uint8Array {
-  if (hex.length % 2 !== 0) throw new Error("hex length must be even");
-  const out = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  if (typeof signDigest === "string") {
+    const privHex = signDigest;
+    const priv = hexToBytes(privHex);
+    if (priv.length !== 32) {
+      throw new Error("signCompactSecp256k1: private key must be 32 bytes");
+    }
+    const digest = sha256(plainBytes);
+    const sig = secp256k1.sign(digest, priv, { prehash: false, format: "compact" });
+    const out = sig instanceof Uint8Array ? sig : new Uint8Array(sig);
+    return bytesToHex(out);
   }
-  return out;
+  return signChallengeWithSecp256k1(signDigest, plainBytes);
 }
 
 /** Uint8Array -> 小写 hex。 */
@@ -93,4 +91,12 @@ function bytesToHex(bytes: Uint8Array): string {
     s += b.toString(16).padStart(2, "0");
   }
   return s;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    out[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+  return out;
 }

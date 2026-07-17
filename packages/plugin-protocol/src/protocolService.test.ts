@@ -67,12 +67,68 @@ function makeVaultStub(publicKeyHex: string): VaultService {
       listeners.add(h);
       return () => listeners.delete(h);
     },
-    // 硬切换 002 收尾：withPrivateKey 必须按 `(publicKeyHex, fn)` 签名调用；
-    // stub 按新签名接收 publicKeyHex 后再调 fn 借 material。这里 publicKeyHex
+    // 硬切换 002 收尾：createActiveKeyCrypto 必须按 `publicKeyHex` 取受控 capability。
+    // stub 按新签名接收 publicKeyHex 后返回 capability。这里 publicKeyHex
     // 形状不影响 stub 行为（fixture 都是同一把 TEST_PUB_HEX），但契约要对。
-    withPrivateKey: async <T,>(_publicKeyHex: string, fn: (m: { hex: string }) => Promise<T> | T) => {
-      return fn({ hex: TEST_PRIV_HEX });
-    },
+    createActiveKeyCrypto: async () => ({
+      getIdentity: () => ({
+        sessionId: "session-a",
+        publicKeyHex: TEST_PUB_HEX,
+        label: "test",
+        capabilities: [],
+        createdAt: new Date().toISOString()
+      }),
+      signDigest: async ({ digest }: { digest: ArrayBuffer }) => ({
+        publicKeyHex: TEST_PUB_HEX,
+        signature: secp256k1
+          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" })
+          .buffer
+      }),
+      deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
+      sealSendInput: () => ({ error: "not used" }),
+      openSealed: () => null,
+      exportEncryptedKeyBackup: async () => ({ publicKeyHex: TEST_PUB_HEX, backup: new Uint8Array(0).buffer })
+    }),
+    unlockKeymasterSession: async () => ({
+      getIdentity: () => ({
+        sessionId: "session-a",
+        publicKeyHex: TEST_PUB_HEX,
+        label: "test",
+        capabilities: [],
+        createdAt: new Date().toISOString()
+      }),
+      signDigest: async ({ digest }: { digest: ArrayBuffer }) => ({
+        publicKeyHex: TEST_PUB_HEX,
+        signature: secp256k1
+          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" })
+          .buffer
+      }),
+      deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
+      sealSendInput: () => ({ error: "not used" }),
+      openSealed: () => null,
+      exportEncryptedKeyBackup: async () => ({ publicKeyHex: TEST_PUB_HEX, backup: new Uint8Array(0).buffer })
+    }),
+    createAppViewSession: async () => ({
+      getIdentity: () => ({
+        sessionId: "session-app",
+        publicKeyHex: TEST_PUB_HEX,
+        label: "test",
+        capabilities: [],
+        createdAt: new Date().toISOString()
+      }),
+      signDigest: async ({ digest }: { digest: ArrayBuffer }) => ({
+        publicKeyHex: TEST_PUB_HEX,
+        signature: secp256k1
+          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" })
+          .buffer
+      }),
+      deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
+      sealSendInput: () => ({ error: "not used" }),
+      openSealed: () => null,
+      exportEncryptedKeyBackup: async () => ({ publicKeyHex: TEST_PUB_HEX, backup: new Uint8Array(0).buffer })
+    }),
+    disposeAppViewSession: () => undefined,
+    disposeAllAppViewSessions: () => undefined,
     listKeys: async () => [
       {
         publicKeyHex: TEST_PUB_HEX,
@@ -98,11 +154,12 @@ function makeVaultStub(publicKeyHex: string): VaultService {
       for (const l of listeners) l("locked");
     },
     verifyPassword: async () => undefined,
+    changePassword: async () => undefined,
     importPrivateKey: async () => ({} as never),
     generateKey: async () => ({} as never),
     removeKey: async () => undefined,
     deleteKeyMaterial: async () => undefined,
-    exportPrivateKey: async () => ({} as never),
+    exportKeyBackup: async () => "not used",
     getInitialActivationNotice: () => null,
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
@@ -111,9 +168,8 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     // 施工单 2026-06-30 002 硬切换：vault 已删除
     // `exportUnlockRuntimeForSessionWindow` / `importUnlockRuntimeFromLauncher`
     // （2026-06-29/003 已删除，002 沿用）。launcher 端改用现有
-    // `vault.withPrivateKey(publicKeyHex, fn)` 借 owner 私钥 hex 拼
-    // `OwnerRuntimeBootstrap`。launchAppView 测试只走 `withPrivateKey` 路径，
-    // 不再需要 unlock runtime 假实现。
+    // `vault.createActiveKeyCrypto(publicKeyHex)` 取 capability 拼
+    // `OwnerRuntimeBootstrap`。launchAppView 测试不再需要旧导出 runtime 假实现。
   } as unknown as VaultService;
 }
 
@@ -674,7 +730,7 @@ describe("ProtocolServiceImpl", () => {
     if (!r1 || r1.ok !== true) return;
     const enc = r1.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
 
-    const siteKey = deriveSiteKey(TEST_PRIV_HEX, ORIGIN);
+    const siteKey = deriveSiteKey(TEST_PUB_HEX, ORIGIN);
     const plain = aesGcmDecrypt(siteKey, new Uint8Array(enc.nonce.bytes), new Uint8Array(enc.cipherbytes.bytes));
     const decoded = cborDecode(plain) as unknown[];
     expect(decoded[0]).toBe(PROTOCOL_VERSION);
@@ -4214,6 +4270,9 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 关键修复（v2）：service 同步 await vault.lock()，所以 lockCalls
     // 必须在 await 链路里被观察到（不是 microtask 后才发生）。
     expect(lockCalls).toBe(1);
+    // 关键修复（本轮）：logout 后当前 session 的 bootstrap runtime
+    // 必须从内存里摘掉，不能继续常驻。
+    expect((service as unknown as { ownerRuntimesBySessionId: Map<string, unknown> }).ownerRuntimesBySessionId.size).toBe(0);
     // vault.locked 触发 setVaultLockState → service.lockStateValue === "locked"。
     expect(service.lockState()).toBe("locked");
     // 落库：session.revokedAt 已写入。
@@ -4221,12 +4280,12 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(stored?.revokedAt).toBe(logoutResult.revokedAt);
   });
 
-  it("connect.logout：vault.lock() 抛出 → fail-closed（caller 看到 internal_error；session 已 revoked 但 unlock runtime 未清）", async () => {
+  it("connect.logout：vault.lock() 抛出 → fail-closed（caller 看到 internal_error；session revoked 且 bootstrap runtime 仍应被清理）", async () => {
     // 关键修复（反例反馈 v2）：vault.lock() 失败时不能继续对外报 ok=true。
-    // 当前实现：DB 已写 revokedAt（commit），然后 vault.lock() 抛错 →
-    // service 抛 localFailure → dispatch catch 写 failed + replyErrorToRec
-    // → caller 收到 ok=false。但 session 真值层面 logout 已生效（后续
-    // resume / cipher 仍会按 fail-fast 失败）。这是 fail-closed 安全语义。
+    // 当前实现：DB 已写 revokedAt（commit），bootstrap runtime 先被清理，
+    // 然后 vault.lock() 抛错 → service 抛 localFailure → dispatch catch 写
+    // failed + replyErrorToRec → caller 收到 ok=false。session 真值层面
+    // logout 已生效（后续 resume / cipher 仍会按 fail-fast 失败）。
     const { service, opener, getResult, storageDb, deps } = makeService();
     let lockCalls = 0;
     deps.vault.lock = (async () => {
@@ -4269,6 +4328,8 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // DB 层面：session.revokedAt 已被 commit（fail-closed 安全语义）。
     const stored = await storageDb.getConnectSession(sessionId);
     expect(stored?.revokedAt).not.toBeNull();
+    // 关键修复（本轮）：即便 vault.lock 抛错，bootstrap runtime 也已被清理。
+    expect((service as unknown as { ownerRuntimesBySessionId: Map<string, unknown> }).ownerRuntimesBySessionId.size).toBe(0);
     // 本地 record: phase=failed + failureReason="internal_error"（让 UI 历史区可见）。
     const card = service.feedSnapshot().commands.find((c) => c.requestId === "logout-lockfail");
     expect(card?.phase).toBe("failed");
@@ -4498,7 +4559,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     if (!r || r.ok !== true) return;
     const enc = r.result as { nonce: { bytes: ArrayBuffer }; cipherbytes: { bytes: ArrayBuffer } };
     // 解密方用 session 绑定 key 的 siteKey 派生，必须能解出原文。
-    const siteKey = deriveSiteKey(TEST_PRIV_HEX, ORIGIN);
+    const siteKey = deriveSiteKey(TEST_PUB_HEX, ORIGIN);
     const plain = aesGcmDecrypt(siteKey, new Uint8Array(enc.nonce.bytes), new Uint8Array(enc.cipherbytes.bytes));
     const decoded = cborDecode(plain) as unknown[];
     expect(new TextDecoder().decode(decoded[2] as Uint8Array)).toBe("note body");
@@ -4563,7 +4624,14 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
 describe("signCompactSecp256k1", () => {
   it("produces 64-byte compact and verifies against pubkey", async () => {
     const msg = new TextEncoder().encode("hello");
-    const sig = signCompactSecp256k1(TEST_PRIV_HEX, msg);
+    const sig = await signCompactSecp256k1(
+      async (digest) => {
+        const priv = hexToBytes(TEST_PRIV_HEX);
+        const out = secp256k1.sign(digest, priv, { prehash: false, format: "compact" });
+        return out instanceof Uint8Array ? out : new Uint8Array(out);
+      },
+      msg
+    );
     expect(sig.length).toBe(64);
     const pub = secp256k1.getPublicKey(hexToBytes(TEST_PRIV_HEX), true);
     expect(verifyCompactSecp256k1(sig, msg, pub)).toBe(true);
@@ -6137,7 +6205,9 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   const JUSTNOTE = {
     appId: "justnote",
     appOrigin: "https://justnote.apps.bsv8.com",
-    appUrl: "https://justnote.apps.bsv8.com/"
+    appUrl: "https://justnote.apps.bsv8.com/",
+    publicKeyHex: TEST_PUB_HEX,
+    password: "vault-password"
   };
 
   /** 给测试构造可观察的 window.open 替换 + bootstrap registry 装/卸。 */
@@ -6185,7 +6255,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     };
   }
 
-  it("成功路径：预建 session + 借 owner 私钥拼 ownerRuntimeBootstrap + 装 bootstrap registry + 打开 Session Window（施工单 2026-06-30 002 硬切换）", async () => {
+  it("成功路径：预建 session + 借 owner 私钥拼 sessionRuntimeBootstrap + 装 bootstrap registry + 打开 Session Window（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
       const storageDb = makeFakeStorageDb();
@@ -6285,7 +6355,9 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
         await service.launchAppView({
           appId: "justnote",
           appOrigin: "https://justnote.apps.bsv8.com",
-          appUrl: "https://evil.example/"
+          appUrl: "https://evil.example/",
+          publicKeyHex: TEST_PUB_HEX,
+          password: "vault-password"
         });
       } catch (err) {
         caught = err;
@@ -6312,7 +6384,9 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
         await service.launchAppView({
           appId: "justnote",
           appOrigin: "https://justnote.apps.bsv8.com",
-          appUrl: "not-a-url"
+          appUrl: "not-a-url",
+          publicKeyHex: TEST_PUB_HEX,
+          password: "vault-password"
         });
       } catch (err) {
         caught = err;
@@ -6400,14 +6474,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 
-  it("vault.withPrivateKey 抛错 → export_owner_runtime_failed（施工单 2026-06-30 002 硬切换）", async () => {
+  it("vault.createAppViewSession 抛错 → export_owner_runtime_failed（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
       const storageDb = makeFakeStorageDb();
       const vault = makeVaultStub(TEST_PUB_HEX);
-      // 模拟 launcher 端借 owner 私钥失败：withPrivateKey 抛错。
-      (vault as unknown as { withPrivateKey: () => Promise<never> }).withPrivateKey = async () => {
-        throw new Error("simulated withPrivateKey failure");
+      // 模拟 launcher 端取 owner capability 失败。
+      (vault as unknown as { createAppViewSession: () => Promise<never> }).createAppViewSession = async () => {
+        throw new Error("simulated createAppViewSession failure");
       };
       const service = new ProtocolServiceImpl({
         vault,
@@ -7096,7 +7170,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
  * 关键收口（施工单 2026-06-30 003 硬切换 4.5）：
  *   - `lockStateValue` 公开语义从"本地 vault 是否已解锁"改为
  *     "当前 Session Window 是否拥有可执行 owner runtime"。
- *   - `bootstrap_owner` 注册到 `ownerRuntimesBySessionId` 后 Session
+ *   - `bootstrap_runtime` 注册到 `ownerRuntimesBySessionId` 后 Session
  *     Window 即视为 unlocked；vault 后续被 relock 也不应回退到 locked
  *     ——否则会出现"UI 看似 unlocked，但 accept 阶段仍按 locked 推
  *     waiting_unlock_*"的夹生状态。
@@ -7106,7 +7180,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
 
 describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 硬切换 4.5)", () => {
   it("appView applyLauncherBootstrap 后 lockState 翻 unlocked；vault 后续 relock 不再回退", async () => {
-    // 关键收口：bootstrap_owner 注册后 Session Window 立即 unlocked，
+    // 关键收口：bootstrap_runtime 注册后 Session Window 立即 unlocked，
     // 即便 vault.status() 后续变 locked，lockState 仍维持 unlocked——
     // 因为 owner runtime 仍可执行。
     const win = installWindowShim();
@@ -7115,6 +7189,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       // 故意让 vault 报 locked：模拟"本地 vault 仍未解锁"的环境。
       (vault as unknown as { status: () => string }).status = () => "locked";
       const storageDb = makeFakeStorageDb();
+      const disposeReasons: string[] = [];
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
@@ -7122,7 +7197,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
         bootMode: "appView"
       });
       service.startSession();
-      // 初始：vault locked + 无 bootstrap_owner → lockState=locked
+      // 初始：vault locked + 无 bootstrap_runtime → lockState=locked
       expect(service.lockState()).toBe("locked");
 
       // 直接走 applyLauncherBootstrap 路径：构造合法 bootstrap payload 并应用。
@@ -7152,30 +7227,193 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
         resolvedClaims: {},
         resolvedAt: now,
         launchToken: "launch-ls",
-        ownerRuntimeBootstrap: {
+        sessionRuntimeBootstrap: {
           ownerPublicKeyHex: TEST_PUB_HEX,
           ownerLabel: "Key A",
-          privateKeyHex: TEST_PRIV_HEX,
           capabilities: [],
-          createdAt: now
+          createdAt: now,
+          crypto: {
+            getIdentity: () => ({
+              sessionId: "sess-lockstate-after-bootstrap",
+              publicKeyHex: TEST_PUB_HEX,
+              label: "Key A",
+              capabilities: [],
+              createdAt: new Date(now).toISOString()
+            }),
+            signDigest: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              signature: new Uint8Array(64).buffer
+            }),
+            deriveP2pkhAddress: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              address: "fake"
+            }),
+            sealSendInput: () => ({ error: "not used" }),
+            openSealed: () => null,
+            exportEncryptedKeyBackup: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              backup: new Uint8Array(0).buffer
+            }),
+            dispose: (reason?: string) => {
+              disposeReasons.push(reason ?? "dispose");
+            }
+          }
         }
       });
 
-      // bootstrap_owner 已注册 → 即便 vault 仍报 locked，lockState 也必须 unlocked。
+      const replaceReasons: string[] = [];
+      await internals.applyLauncherBootstrap({
+        app: {
+          appId: "justnote",
+          appOrigin: "https://justnote.apps.bsv8.com",
+          appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-ls-2"
+        },
+        connectSessionId: sessionId,
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        resolvedClaims: {},
+        resolvedAt: now + 1,
+        launchToken: "launch-ls-2",
+        sessionRuntimeBootstrap: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          capabilities: [],
+          createdAt: now + 1,
+          crypto: {
+            getIdentity: () => ({
+              sessionId: "sess-lockstate-after-bootstrap",
+              publicKeyHex: TEST_PUB_HEX,
+              label: "Key A",
+              capabilities: [],
+              createdAt: new Date(now + 1).toISOString()
+            }),
+            signDigest: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              signature: new Uint8Array(64).buffer
+            }),
+            deriveP2pkhAddress: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              address: "fake"
+            }),
+            sealSendInput: () => ({ error: "not used" }),
+            openSealed: () => null,
+            exportEncryptedKeyBackup: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              backup: new Uint8Array(0).buffer
+            }),
+            dispose: (reason?: string) => {
+              replaceReasons.push(reason ?? "dispose");
+            }
+          }
+        }
+      });
+      expect(disposeReasons).toContain("replaced");
+
+      // bootstrap_runtime 已注册 → 即便 vault 仍报 locked，lockState 也必须 unlocked。
       expect(service.lockState()).toBe("unlocked");
 
       // 现在模拟 vault 后续被 relock：直接调 service.setVaultLockState(true)。
       service.setVaultLockState(true);
-      // 仍然 unlocked（computeLockState 看 bootstrap_owner 优先）。
+      // 仍然 unlocked（computeLockState 看 bootstrap_runtime 优先）。
       expect(service.lockState()).toBe("unlocked");
+
+      service.endSession();
+      expect(replaceReasons).toContain("window-close");
+      expect(service.snapshot().phase).toBe("waiting");
+      expect(service.lockState()).toBe("locked");
     } finally {
       // 无副作用，无需 restore。
       void win;
     }
   });
 
-  it("connect mode 无 bootstrap_owner：vault relock 后 lockState 立刻回 locked（与旧行为一致）", () => {
-    // 反向回归：connect mode 没有 bootstrap_owner 来源，vault 一旦 relock
+  it("appView startSession 会回收上一轮 sessionRuntimeBootstrap（session-reset）", async () => {
+    const win = installWindowShim();
+    try {
+      const opener = makeFakeOpener();
+      const vault = makeVaultStub(TEST_PUB_HEX);
+      (vault as unknown as { status: () => string }).status = () => "locked";
+      const storageDb = makeFakeStorageDb();
+      const disposeReasons: string[] = [];
+      const service = new ProtocolServiceImpl({
+        vault,
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb,
+        resolveOpener: () => opener as unknown as Window,
+        postReady: () => undefined,
+        bootMode: "appView"
+      });
+      service.startSession();
+      const sessionId = "sess-reset-bootstrap";
+      const now = Date.now();
+      await storageDb.putConnectSession({
+        sessionId,
+        origin: "https://justnote.apps.bsv8.com",
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        ownerLabel: "Key A",
+        claimsSnapshot: {},
+        createdAt: now,
+        lastUsedAt: now,
+        revokedAt: null
+      });
+      const internals = service as unknown as {
+        applyLauncherBootstrap: (p: unknown) => Promise<void>;
+      };
+      await internals.applyLauncherBootstrap({
+        app: {
+          appId: "justnote",
+          appOrigin: "https://justnote.apps.bsv8.com",
+          appUrl: "https://justnote.apps.bsv8.com/?launchToken=launch-reset"
+        },
+        connectSessionId: sessionId,
+        ownerPublicKeyHex: TEST_PUB_HEX,
+        resolvedClaims: {},
+        resolvedAt: now,
+        launchToken: "launch-reset",
+        sessionRuntimeBootstrap: {
+          ownerPublicKeyHex: TEST_PUB_HEX,
+          ownerLabel: "Key A",
+          capabilities: [],
+          createdAt: now,
+          crypto: {
+            getIdentity: () => ({
+              sessionId: "sess-reset-bootstrap",
+              publicKeyHex: TEST_PUB_HEX,
+              label: "Key A",
+              capabilities: [],
+              createdAt: new Date(now).toISOString()
+            }),
+            signDigest: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              signature: new Uint8Array(64).buffer
+            }),
+            deriveP2pkhAddress: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              address: "fake"
+            }),
+            sealSendInput: () => ({ error: "not used" }),
+            openSealed: () => null,
+            exportEncryptedKeyBackup: async () => ({
+              publicKeyHex: TEST_PUB_HEX,
+              backup: new Uint8Array(0).buffer
+            }),
+            dispose: (reason?: string) => {
+              disposeReasons.push(reason ?? "dispose");
+            }
+          }
+        }
+      });
+      expect(service.lockState()).toBe("unlocked");
+      service.startSession();
+      expect(disposeReasons).toContain("session-reset");
+      expect(service.snapshot().phase).toBe("waiting");
+      expect(service.lockState()).toBe("locked");
+    } finally {
+      void win;
+    }
+  });
+
+  it("connect mode 无 bootstrap_runtime：vault relock 后 lockState 立刻回 locked（与旧行为一致）", () => {
+    // 反向回归：connect mode 没有 bootstrap_runtime 来源，vault 一旦 relock
     // lockState 立刻变 locked。
     const { service, deps } = makeService();
     service.startSession();
@@ -7191,8 +7429,8 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
     expect(service.lockState()).toBe("locked");
   });
 
-  it("setVaultLockState(true) 在无 bootstrap_owner 的 connect mode 下触发 confirming → waiting_unlock_manual 收口", async () => {
-    // 反向回归：connect mode 没有 bootstrap_owner 来源，vault relock
+  it("setVaultLockState(true) 在无 bootstrap_runtime 的 connect mode 下触发 confirming → waiting_unlock_manual 收口", async () => {
+    // 反向回归：connect mode 没有 bootstrap_runtime 来源，vault relock
     // 时 setVaultLockState(true) 触发 confirming → waiting_unlock_manual
     // 硬收口——这是 connect mode 旧行为的延续；appView mode 的新行为
     // 由上面的 `applyLauncherBootstrap` 测试覆盖。
@@ -7224,10 +7462,33 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
     // 收口逻辑在既有测试里有专门覆盖（cancel/timeout 003 块）。
     await deps.vault.lock();
     expect(service.lockState()).toBe("locked");
-    // 反向：vault unlock 又翻回 unlocked（无 bootstrap_owner）。
+    // 反向：vault unlock 又翻回 unlocked（无 bootstrap_runtime）。
     await deps.vault.unlock("");
     expect(service.lockState()).toBe("unlocked");
     void opener;
+  });
+
+  it("appView + 无 bootstrap_runtime + 本地 vault unlocked → lockState 仍为 locked（fail-closed）", () => {
+    // 修复前：hasExecutableOwnerRuntime() 在 appView 没有 bootstrap runtime 时，
+    // 只要本地 vault unlocked 就返回 true，导致 UI 显示 unlocked 但 execute 阶段
+    // resolveOwnerRuntime() 按 locked 处理，造成 UI/执行状态不一致。
+    const win = installWindowShim();
+    try {
+      const vault = makeVaultStub(TEST_PUB_HEX);
+      // vault 报 unlocked——但 appView 没有 bootstrap_runtime。
+      (vault as unknown as { status: () => string }).status = () => "unlocked";
+      const service = new ProtocolServiceImpl({
+        vault,
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb: makeFakeStorageDb(),
+        bootMode: "appView"
+      });
+      service.startSession();
+      // appView 没有 bootstrap_runtime + 本地 vault unlocked → 必须 locked。
+      expect(service.lockState()).toBe("locked");
+    } finally {
+      void win;
+    }
   });
 });
 
@@ -7373,18 +7634,18 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
   });
 });
 
-/* ============== 施工单 2026-06-30 002：locked 但 bootstrap_owner runtime ready ============== */
+/* ============== 施工单 2026-06-30 002：locked 但 bootstrap_runtime ready ============== */
 /**
  * 关键回归：旧实现下 `connect.launch` 一旦 Session Window 的 `lockState === "locked"`
  * 就会被 `drainExecutionQueue` 全局 `lockStateValue === "unlocked"` 卡死，
  * 永远入队不执行（也就是本次硬切的现场故障）。
  *
  * 新实现下 drainExecutionQueue 改为按 record 自己能否解析到 owner runtime
- * 决定执行条件；`bootstrap_owner` 来源下 locked 也能直接 execute。
+ * 决定执行条件；`bootstrap_runtime` 来源下 locked 也能直接 execute。
  */
 
 describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)", () => {
-  it("vault locked + bootstrap_owner runtime ready → connect.launch 立即执行（不卡在 waiting_unlock）", async () => {
+  it("vault locked + bootstrap_runtime runtime ready → connect.launch 立即执行（不卡在 waiting_unlock）", async () => {
     const win = installWindowShim();
     const originalOpen = win.open;
     const childMessages: unknown[] = [];
@@ -7470,7 +7731,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
           appSource
         )
       );
-      // 即使 vault locked，bootstrap_owner 已就绪 ⇒ 不应卡在
+      // 即使 vault locked，bootstrap_runtime 已就绪 ⇒ 不应卡在
       // waiting_unlock_*；executeConnectLaunch 必须给出 ok=true 结果。
       await new Promise((r) => setTimeout(r, 30));
       const acked = postedResults.find(
@@ -7483,7 +7744,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     }
   });
 
-  it("resolveOwnerRuntime：vault unlocked + 同 owner 在 vault 可读 → 切到 vault_unlock 来源", async () => {
+  it("resolveOwnerRuntime：vault unlocked + 同 owner 在 vault 可读 → 切到 vault_runtime 来源", async () => {
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
       keyspace: makeKeyspaceStub(TEST_PUB_HEX)
@@ -7491,7 +7752,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     const internals = service as unknown as {
       resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<{
         ownerPublicKeyHex: string;
-        source: "bootstrap_owner" | "vault_unlock";
+        source: "bootstrap_runtime" | "vault_runtime";
       }>;
     };
     const session: ConnectSessionRecord = {
@@ -7504,13 +7765,13 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       lastUsedAt: 0,
       revokedAt: null
     };
-    // 没有 bootstrap_owner，但 vault 已 unlock → vault_unlock。
+    // 没有 bootstrap_runtime，但 vault 已 unlock → vault_runtime。
     const r = await internals.resolveOwnerRuntime(session);
-    expect(r.source).toBe("vault_unlock");
+    expect(r.source).toBe("vault_runtime");
     expect(r.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
   });
 
-  it("resolveOwnerRuntime：bootstrap_owner 已就绪 → 切到 bootstrap_owner 来源（不走 vault）", async () => {
+  it("resolveOwnerRuntime：bootstrap_runtime 已就绪 → 切到 bootstrap_runtime 来源（不走 vault）", async () => {
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
       keyspace: makeKeyspaceStub(TEST_PUB_HEX)
@@ -7519,7 +7780,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       ownerRuntimesBySessionId: Map<string, unknown>;
       resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<{
         ownerPublicKeyHex: string;
-        source: "bootstrap_owner" | "vault_unlock";
+        source: "bootstrap_runtime" | "vault_runtime";
       }>;
     };
     internals.ownerRuntimesBySessionId.set("sess-boot", {
@@ -7543,7 +7804,38 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       revokedAt: null
     };
     const r = await internals.resolveOwnerRuntime(session);
-    expect(r.source).toBe("bootstrap_owner");
+    expect(r.source).toBe("bootstrap_runtime");
+  });
+
+  it("resolveOwnerRuntime：appView 缺少 bootstrap 时直接 fail-closed，不回退 vault_runtime", async () => {
+    const vault = makeVaultStub(TEST_PUB_HEX);
+    let createActiveKeyCryptoCalls = 0;
+    (vault as unknown as { createActiveKeyCrypto: () => Promise<never> }).createActiveKeyCrypto = async () => {
+      createActiveKeyCryptoCalls++;
+      throw new Error("vault fallback must not be used in appView");
+    };
+    const service = new ProtocolServiceImpl({
+      vault,
+      keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+    });
+    (service as unknown as { bootModeValue: "connect" | "appView" }).bootModeValue = "appView";
+    const internals = service as unknown as {
+      resolveOwnerRuntime: (s: ConnectSessionRecord) => Promise<unknown>;
+    };
+    const session: ConnectSessionRecord = {
+      sessionId: "sess-appview",
+      origin: "https://x",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: 0,
+      lastUsedAt: 0,
+      revokedAt: null
+    };
+    await expect(internals.resolveOwnerRuntime(session)).rejects.toThrow(
+      /appView bootstrap runtime missing/i
+    );
+    expect(createActiveKeyCryptoCalls).toBe(0);
   });
 });
 

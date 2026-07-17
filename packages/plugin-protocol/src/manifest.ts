@@ -18,7 +18,7 @@
 //     `owner execution runtime`——签名 / 加解密 / p2pkh / feepool
 //     走同一套 `resolveOwnerRuntime` resolver；**不**再 import unlock
 //     runtime 交接包。plugin-protocol 的能力依赖描述从"协议需要
-//     active key 与 withPrivateKey"改成"connect mode 需要 vault；
+//     active key 与受控 capability"改成"connect mode 需要 vault；
 //     appView mode 可走 owner runtime bootstrap"。
 //   - 施工单 2026-07-01 001 硬切换：彻底移除 `storage.*` / S3 provider
 //     配置能力；现行协议族 = identity.* / intent.sign / cipher.* /
@@ -408,7 +408,7 @@ export const protocolPlugin: PluginManifest = {
   dependencies: [
     {
       capability: "vault.service",
-      reason: "connect mode 需要 vault（withPrivateKey 借 owner 私钥）；appView mode 可走 owner runtime bootstrap"
+      reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
     },
     { capability: "keyspace.service", reason: "协议需要 owner key 状态" }
   ],

@@ -258,7 +258,7 @@ export const pokerPlugin: PluginManifest = {
     { storageId: "poker", description: "Poker settings / tables / presences / tx ingest" }
   ],
   dependencies: [
-    { capability: "vault.service", reason: "need vault.withPrivateKey for signing" },
+    { capability: "vault.service", reason: "need createActiveKeyCrypto for signing" },
     { capability: "keyspace.service", reason: "active key + key-scoped storage" },
     { capability: "runtime.messageBus", reason: "event subscription + publish" },
     { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },

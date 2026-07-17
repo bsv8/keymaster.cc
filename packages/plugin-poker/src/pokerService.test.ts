@@ -13,6 +13,7 @@
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { IDBFactory as FDBFactory } from "fake-indexeddb";
 import { createPokerService } from "./pokerService.js";
 
 // 硬切换 002 收尾：测试里"当前 owner"必须落到真实压缩公钥；旧 fixture
@@ -141,12 +142,42 @@ class FakeVault {
   async removeKey() {
     throw new Error("deprecated");
   }
-  async exportPrivateKey() {
-    throw new Error("not used");
+  async createActiveKeyCrypto(publicKeyHex: string) {
+    if (publicKeyHex !== PUB_A && publicKeyHex !== PUB_B) {
+      throw new Error("unknown key");
+    }
+    const privHex = publicKeyHex === PUB_A ? PRIV_A : PRIV_B;
+    return {
+      getIdentity: () => ({
+        sessionId: publicKeyHex,
+        publicKeyHex,
+        label: "test",
+        capabilities: [],
+        createdAt: new Date().toISOString()
+      }),
+      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+        if (input.publicKeyHex !== publicKeyHex) {
+          throw new Error("session_key_mismatch");
+        }
+        return {
+          publicKeyHex,
+          signature: new Uint8Array(64).fill(privHex === PRIV_A ? 0xa1 : 0xb2).buffer
+        };
+      }
+    };
   }
   async withPrivateKey<T>(_publicKeyHex: string, fn: (m: any) => Promise<T>) {
     return fn({ hex: PRIV_A });
   }
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
 }
 
 class FakeKeyspace {
@@ -252,10 +283,7 @@ let bus: FakeMessageBus;
 beforeEach(async () => {
   // 每个测试重置 localStorage 与 IndexedDB。
   if (typeof localStorage !== "undefined") localStorage.clear();
-  // fake-indexeddb 提供 reset 方法（dynamic require 避免 ts 抱怨）。
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const fdb = require("fake-indexeddb/lib/FDBFactory");
-  (globalThis as any).indexedDB = new fdb();
+  (globalThis as any).indexedDB = new FDBFactory();
   vault = new FakeVault();
   keyspace = new FakeKeyspace();
   bus = new FakeMessageBus();
@@ -418,8 +446,9 @@ describe("pokerService (active-key-driven)", () => {
     // session 的 presences / tables 必须原样保留——删除非当前 key
     // 不能清空当前会话的内存态。
     expect(svc.getActivePokerKey().kind).toBe("ready");
-    if (svc.getActivePokerKey().kind === "ready") {
-      expect(svc.getActivePokerKey().key.publicKeyHex).toBe(PUB_A);
+    const current = svc.getActivePokerKey();
+    if (current.kind === "ready") {
+      expect(current.key.publicKeyHex).toBe(PUB_A);
     }
     expect(svc.listPresences().length).toBe(1);
     expect(svc.listPresences()[0]?.publicKeyHex).toBe(ghostPresence.publicKeyHex);
@@ -486,6 +515,8 @@ describe("pokerService (active-key-driven)", () => {
 
   it("auth.response echoes challenge nonce verbatim and signs with active key", async () => {
     (svc as any).currentStatus = "connecting";
+    (svc as any).currentSessionKey = KEY_A;
+    (svc as any).currentSessionKeyHash = PUB_A;
     const sent: any[] = [];
     (svc as any).send = (env: any) => {
       sent.push(env);
@@ -557,8 +588,7 @@ describe("pokerService (active-key-driven)", () => {
     // 不能依赖 this.currentSessionKeyHash（异步 init 才填），必须用
     // keyspace.active() 同步判定。
     if (typeof localStorage !== "undefined") localStorage.clear();
-    const fdb = require("fake-indexeddb/lib/FDBFactory");
-    (globalThis as any).indexedDB = new fdb();
+    (globalThis as any).indexedDB = new FDBFactory();
     const localVault = new FakeVault();
     const localKeyspace = new FakeKeyspace();
     const localBus = new FakeMessageBus();
@@ -794,8 +824,17 @@ describe("pokerService (active-key-driven)", () => {
       keyspace: keyspace as any,
       messageBus: bus as any
     });
-    await new Promise((r) => setTimeout(r, 0));
-    await new Promise((r) => setTimeout(r, 0));
+    for (let i = 0; i < 50; i++) {
+      const tables = svc2.listTables();
+      const presences = svc2.listPresences();
+      if (
+        tables.some((t) => t.tableId === "t-cached") &&
+        presences.some((p) => p.publicKeyHex === "02cached")
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 0));
+    }
 
     const tables = svc2.listTables();
     const presences = svc2.listPresences();

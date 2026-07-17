@@ -2,26 +2,29 @@
 // VaultService 关键行为单测：
 //   - createVault / unlock / lock 状态机。
 //   - importPrivateKey 允许同 vault 存多把 key（不再有"已有 key 禁止导入"逻辑）。
-//   - exportPrivateKey 走 bsv8 envelope；不改变 key 列表；不触发 key.created / key.deleted。
+//   - exportKeyBackup 直接复制 canonical vault_meta + vault_keys，不要求解锁。
+//   - importKeyBackup 可将同一备份从删除后的 Vault 还原回来。
 //   - removeKey 硬切换 008：抛 "Use keyspace.deleteKey instead"，不再发事件。
 //   - deleteKeyMaterial：仅删材料，不发 key.deleted 事件（事件由 keyspace 统一发一次）。
 //   - 在 withPrivateKey 回调内才能拿到 material。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  getFatalError,
-  resetFatalErrorForTest,
-  type MessageBus
-} from "@keymaster/runtime";
+import { getFatalError, resetFatalErrorForTest, type MessageBus } from "@keymaster/runtime";
+import { ActiveKeySessionRevokedError } from "@keymaster/contracts";
 import {
   createVaultService,
   KeyPersistedButActivationFailedError
 } from "./vaultService.js";
+import { bytesToHex, deriveKey, encryptBytes, encryptVerifier } from "./crypto.js";
 import { createKeyspaceService } from "./keyspaceService.js";
+import { deriveKeyIdentity } from "./keyIdentity.js";
+import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
+import { __testCreateSessionCryptoRequestHandler } from "./sessionCryptoWorker.js";
 import { disposeVaultDb, vaultDb } from "./vaultDb.js";
 
 const TEST_PRIV = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
+const TEST_PRIV_3 = "0000000000000000000000000000000000000000000000000000000000000003";
 /** 与 vaultService 内部常量保持一致，避免跨包 import 测试私有常量。 */
 const LABEL_MAX_LENGTH = 64;
 
@@ -63,6 +66,67 @@ function makeMessageBus(): { messageBus: MessageBus; records: EventRecord[] } {
   return { messageBus, records };
 }
 
+class RecordingWorker {
+  static instances: RecordingWorker[] = [];
+  onmessage:
+    | ((event: MessageEvent<{ requestId: string; ok: boolean; result?: unknown; error?: string }>) => void)
+    | null = null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  onmessageerror: ((event: MessageEvent) => void) | null = null;
+  terminated = false;
+  sessionId: string | null = null;
+  publicKeyHex: string | null = null;
+  private readonly handleRequest: (msg: Record<string, unknown>) => Promise<
+    Array<{ requestId: string; ok: boolean; result?: unknown; error?: string }>
+  >;
+
+  constructor() {
+    RecordingWorker.instances.push(this);
+    this.handleRequest = __testCreateSessionCryptoRequestHandler();
+  }
+
+  postMessage(msg: Record<string, unknown>) {
+    if (this.terminated) return;
+    if ((msg as { kind?: string }).kind === "init") {
+      const init = msg as { sessionId?: string; publicKeyHex?: string };
+      this.sessionId = init.sessionId ?? null;
+      this.publicKeyHex = init.publicKeyHex ?? null;
+    }
+    queueMicrotask(async () => {
+      if (this.terminated) return;
+      const responses = await this.handleRequest(msg as never);
+      for (const response of responses) {
+        if (this.terminated) return;
+        this.onmessage?.({
+          data: response
+        } as MessageEvent<{ requestId: string; ok: boolean; result?: unknown; error?: string }>);
+      }
+    });
+  }
+
+  terminate() {
+    this.terminated = true;
+  }
+}
+
+function installRecordingWorker(): () => void {
+  const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+  RecordingWorker.instances = [];
+  (globalThis as { Worker?: typeof Worker }).Worker = RecordingWorker as unknown as typeof Worker;
+  return () => {
+    (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+  };
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
 async function resetDb(): Promise<void> {
   // 关键：先关闭 db 连接，否则 delete 会被阻塞。
   disposeVaultDb();
@@ -72,6 +136,42 @@ async function resetDb(): Promise<void> {
     req.onerror = () => resolve();
     req.onblocked = () => resolve();
   });
+}
+
+async function seedLegacyV1Vault(input: {
+  password: string;
+  privateKeyHex: string;
+  label: string;
+}): Promise<string> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(input.password, salt);
+  const verifier = await encryptVerifier(key);
+  const meta = {
+    id: "singleton" as const,
+    saltB64: bytesToHex(salt),
+    verifierSaltB64: bytesToHex(verifier.salt),
+    verifierIvB64: bytesToHex(verifier.iv),
+    verifierCipherB64: bytesToHex(verifier.ciphertext),
+    createdAt: new Date().toISOString()
+  };
+  const identity = deriveKeyIdentity(hexToBytes(input.privateKeyHex));
+  const payload = new TextEncoder().encode(JSON.stringify({ hex: input.privateKeyHex }));
+  const blob = await encryptBytes(key, payload);
+  const record = {
+    publicKeyHex: identity.publicKeyHex,
+    label: input.label,
+    address: publicKeyHexToP2pkhAddress(identity.publicKeyHex, "test"),
+    network: "test" as const,
+    format: "hex",
+    capabilities: ["p2pkh"],
+    createdAt: new Date().toISOString(),
+    cipherSaltB64: bytesToHex(blob.salt),
+    cipherIvB64: bytesToHex(blob.iv),
+    cipherB64: bytesToHex(blob.ciphertext)
+  };
+  await vaultDb.putMeta(meta);
+  await vaultDb.putKey(record);
+  return identity.publicKeyHex;
 }
 
 /** 等到 vaultService.bootstrap() 完成、status 落定。 */
@@ -101,12 +201,14 @@ describe("VaultService.importPrivateKey", () => {
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const a = await vault.importPrivateKey({
+      password: "test-pw",
       label: "first",
       material: { hex: TEST_PRIV },
       format: "hex",
       capabilities: ["p2pkh"]
     });
     const b = await vault.importPrivateKey({
+      password: "test-pw",
       label: "second",
       material: { hex: TEST_PRIV_2 },
       format: "hex",
@@ -115,6 +217,8 @@ describe("VaultService.importPrivateKey", () => {
     expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
     const list = await vault.listKeys();
     expect(list.map((k) => k.label).sort()).toEqual(["first", "second"]);
+    expect((await vaultDb.getKey(a.publicKeyHex))?.cipherVersion).toBe("v2");
+    expect((await vaultDb.getKey(b.publicKeyHex))?.cipherVersion).toBe("v2");
   });
 
   it("emits key.created AFTER keyspace switches active key (硬切换 008 收尾)", async () => {
@@ -125,6 +229,7 @@ describe("VaultService.importPrivateKey", () => {
     // 硬切换 005：bootstrap 路径新增 0-key 护栏。先 import 一把 key 让
     // 新 vault bootstrap 走正常 "locked" 路径。
     await vault.importPrivateKey({
+      password: "test-pw",
       label: "seed",
       material: { hex: TEST_PRIV_2 },
       format: "hex",
@@ -168,6 +273,7 @@ describe("VaultService.importPrivateKey", () => {
     };
 
     await vaultWithKeyspace.importPrivateKey({
+      password: "test-pw",
       label: "first",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -193,62 +299,84 @@ describe("VaultService.importPrivateKey", () => {
   });
 });
 
-describe("VaultService.exportPrivateKey", () => {
-  it(
-    "produces bsv8 envelope and does not mutate key list",
-    async () => {
+describe("VaultService.exportKeyBackup", () => {
+  it("exports canonical backup JSON without requiring unlocked session", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: TEST_PRIV },
       format: "hex",
       capabilities: ["p2pkh"]
     });
-    const listBefore = await vault.listKeys();
-    const envelope = await vault.exportPrivateKey({ publicKeyHex: ref.publicKeyHex, password: "backup" });
-    const listAfter = await vault.listKeys();
-    expect(envelope.version).toBe("kek-v1");
-    expect(envelope.cipher).toBe("xchacha20poly1305");
-    expect(envelope.kdf).toBe("argon2id");
-    expect(listAfter.length).toBe(listBefore.length);
-  },
-  // Argon2id 65536 KiB 在 node 下偏慢，给 30s。
-  30_000
-  );
+    await vault.lock();
+    await waitForStatus(vault, "locked");
+    const { decodeKeyBackup } = await import("./keyBackup.js");
+    const payload = await vault.exportKeyBackup(ref.publicKeyHex);
+    const decoded = decodeKeyBackup(payload);
+    expect(decoded.backupVersion).toBe(1);
+    expect(decoded.sourceVaultMeta.id).toBe("singleton");
+    expect(decoded.keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(decoded.keyRecord.label).toBe("k");
+  });
+});
 
-  it("rejects unknown key", async () => {
+describe("VaultService.importKeyBackup", () => {
+  it("restores a deleted key from canonical backup JSON", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
-    await vault.createVault("test-pw");
-    await expect(
-      vault.exportPrivateKey({ publicKeyHex: "missing", password: "x" })
-    ).rejects.toThrow(/Unknown key/i);
+    await vault.createVault("restore-pw");
+    const ref = await vault.importPrivateKey({
+      password: "restore-pw",
+      label: "restore-me",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const backup = await vault.exportKeyBackup(ref.publicKeyHex);
+    await vault.deleteKeyMaterial(ref.publicKeyHex);
+    const before = await vault.listKeys();
+    expect(before.find((k) => k.publicKeyHex === ref.publicKeyHex)).toBeUndefined();
+    const restored = await vault.importKeyBackup!({
+      backup,
+      sourcePassword: "restore-pw",
+      targetPassword: "restore-pw"
+    });
+    expect(restored.publicKeyHex).toBe(ref.publicKeyHex);
+    const after = await vault.listKeys();
+    expect(after.find((k) => k.publicKeyHex === ref.publicKeyHex)).toBeDefined();
   });
 
-  it("requires backup password", async () => {
+  it("rejects wrong source password", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
-    await vault.createVault("test-pw");
+    await vault.createVault("restore-pw");
     const ref = await vault.importPrivateKey({
-      label: "k",
+      password: "restore-pw",
+      label: "restore-me",
       material: { hex: TEST_PRIV },
       format: "hex",
       capabilities: ["p2pkh"]
     });
+    const backup = await vault.exportKeyBackup(ref.publicKeyHex);
     await expect(
-      vault.exportPrivateKey({ publicKeyHex: ref.publicKeyHex, password: "" })
-    ).rejects.toThrow(/Backup password/i);
+      vault.importKeyBackup!({
+        backup,
+        sourcePassword: "wrong-source",
+        targetPassword: "restore-pw"
+      })
+    ).rejects.toThrow(/Invalid source password/);
   });
 });
 
 describe("VaultService.verifyPassword (硬切换 002 删除授权)", () => {
   // 关键不变量：
-  //   - 密码正确 resolve；不修改 status / masterKey / 内存会话 / 不发事件。
+  //   - 密码正确 resolve；不修改 status / session key / 内存会话 / 不发事件。
   //   - 密码错误抛 Invalid password；同样不副作用。
   //   - uninitialized / booting 状态没有 verifier，必须 fail closed。
   //   - locked 与 unlocked 状态都允许调用（删除前重新鉴权）。
@@ -301,14 +429,15 @@ describe("VaultService.verifyPassword (硬切换 002 删除授权)", () => {
     expect(vault.status()).toBe("uninitialized");
   });
 
-  it("does not unlock the cache or allow withPrivateKey when called on locked vault", async () => {
-    // 关键不变量：verifyPassword 必须**不**派生 masterKey，所以 withPrivateKey
+  it("does not unlock the cache or allow active crypto when called on locked vault", async () => {
+    // 关键不变量：verifyPassword 必须**不**派生 session key，所以 active crypto
     // 仍应抛 "Vault is locked"。这是与 unlock(password) 的本质区别。
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -319,7 +448,225 @@ describe("VaultService.verifyPassword (硬切换 002 删除授权)", () => {
     await vault.verifyPassword("test-pw");
     // 仍然是 locked；明文私钥不可借出。
     expect(vault.status()).toBe("locked");
-    await expect(vault.withPrivateKey(ref.publicKeyHex, () => "x")).rejects.toThrow(/locked/i);
+    await expect(vault.createActiveKeyCrypto(ref.publicKeyHex)).rejects.toThrow(/locked/i);
+  });
+});
+
+describe("VaultService.changePassword (硬切换 6.5)", () => {
+  it("rotates vault_meta and vault_keys atomically and keeps the vault locked", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("old-pw");
+    const ref = await vault.importPrivateKey({
+      password: "old-pw",
+      label: "rotate-me",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const before = await vault.listKeys();
+    expect(before).toHaveLength(1);
+
+    await vault.changePassword({ oldPassword: "old-pw", newPassword: "new-password" });
+
+    expect(vault.status()).toBe("locked");
+    await expect(vault.verifyPassword("old-pw")).rejects.toThrow(/Invalid password/);
+    await vault.verifyPassword("new-password");
+    await vault.unlock("new-password");
+    await waitForStatus(vault, "unlocked");
+    const after = await vault.listKeys();
+    expect(after).toHaveLength(1);
+    expect(after[0]?.publicKeyHex).toBe(ref.publicKeyHex);
+    const crypto = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    expect(crypto.getIdentity().publicKeyHex).toBe(ref.publicKeyHex);
+  });
+
+  it("fails closed on wrong old password without changing status or data", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("old-pw");
+    const ref = await vault.importPrivateKey({
+      password: "old-pw",
+      label: "rotate-me",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+
+    await expect(
+      vault.changePassword({ oldPassword: "wrong-old", newPassword: "new-password" })
+    ).rejects.toThrow(/Invalid password/);
+
+    expect(vault.status()).toBe("unlocked");
+    await vault.verifyPassword("old-pw");
+    const after = await vault.listKeys();
+    expect(after).toHaveLength(1);
+    expect(after[0]?.publicKeyHex).toBe(ref.publicKeyHex);
+  });
+});
+
+describe("VaultService.createAppViewSession (Worker 生命周期)", () => {
+  it("appA/appB 使用不同 key 时会创建两个独立 Worker；关闭 appA 不影响 appB 与 Keymaster", async () => {
+    const restoreWorker = installRecordingWorker();
+    try {
+      const { messageBus: events } = makeMessageBus();
+      const vault = createVaultService({ messageBus: events });
+      await waitForStatus(vault, "uninitialized");
+      await vault.createVault("test-pw");
+
+      const appAKey = await vault.importPrivateKey({
+        password: "test-pw",
+        label: "app-a",
+        material: { hex: TEST_PRIV },
+        format: "hex",
+        capabilities: ["p2pkh"]
+      });
+      const appBKey = await vault.importPrivateKey({
+        password: "test-pw",
+        label: "app-b",
+        material: { hex: TEST_PRIV_2 },
+        format: "hex",
+        capabilities: ["p2pkh"]
+      });
+
+      const appA = await vault.createAppViewSession({
+        sessionId: "app-a-session",
+        publicKeyHex: appAKey.publicKeyHex,
+        password: "test-pw"
+      });
+      const appB = await vault.createAppViewSession({
+        sessionId: "app-b-session",
+        publicKeyHex: appBKey.publicKeyHex,
+        password: "test-pw"
+      });
+
+      const appWorkers = RecordingWorker.instances.filter((worker) =>
+        worker.sessionId?.startsWith("app-")
+      );
+      expect(appWorkers).toHaveLength(2);
+      expect(appA.getIdentity().publicKeyHex).toBe(appAKey.publicKeyHex);
+      expect(appB.getIdentity().publicKeyHex).toBe(appBKey.publicKeyHex);
+
+      const keymasterCrypto = await vault.createActiveKeyCrypto(appBKey.publicKeyHex);
+      const digest = () => {
+        const bytes = new Uint8Array(32);
+        bytes.fill(7);
+        return bytes.buffer;
+      };
+
+      await expect(
+        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: digest() })
+      ).resolves.toMatchObject({ publicKeyHex: appAKey.publicKeyHex });
+      await expect(
+        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+      ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
+      await expect(
+        keymasterCrypto.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+      ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
+
+      vault.disposeAppViewSession("app-a-session", "window-close");
+      await new Promise((resolve) => setTimeout(resolve, 75));
+
+      const appAWorker = appWorkers.find((worker) => worker.sessionId === "app-a-session");
+      const appBWorker = appWorkers.find((worker) => worker.sessionId === "app-b-session");
+      expect(appAWorker?.terminated).toBe(true);
+      expect(appBWorker?.terminated).toBe(false);
+      await expect(
+        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: digest() })
+      ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
+      await expect(
+        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+      ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
+      await expect(
+        keymasterCrypto.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+      ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
+    } finally {
+      restoreWorker();
+    }
+  });
+
+  it("changePassword 会销毁全部 appView Worker", async () => {
+    const restoreWorker = installRecordingWorker();
+    try {
+      const { messageBus: events } = makeMessageBus();
+      const vault = createVaultService({ messageBus: events });
+      await waitForStatus(vault, "uninitialized");
+      await vault.createVault("old-pw");
+
+      const appAKey = await vault.importPrivateKey({
+        password: "old-pw",
+        label: "app-a",
+        material: { hex: TEST_PRIV },
+        format: "hex",
+        capabilities: ["p2pkh"]
+      });
+      const appBKey = await vault.importPrivateKey({
+        password: "old-pw",
+        label: "app-b",
+        material: { hex: TEST_PRIV_2 },
+        format: "hex",
+        capabilities: ["p2pkh"]
+      });
+
+      const appA = await vault.createAppViewSession({
+        sessionId: "app-a-session",
+        publicKeyHex: appAKey.publicKeyHex,
+        password: "old-pw"
+      });
+      const appB = await vault.createAppViewSession({
+        sessionId: "app-b-session",
+        publicKeyHex: appBKey.publicKeyHex,
+        password: "old-pw"
+      });
+
+      const appWorkers = RecordingWorker.instances.filter((worker) =>
+        worker.sessionId?.startsWith("app-")
+      );
+      expect(appWorkers).toHaveLength(2);
+
+      await vault.changePassword({ oldPassword: "old-pw", newPassword: "new-password" });
+      await new Promise((resolve) => setTimeout(resolve, 75));
+
+      expect(vault.status()).toBe("locked");
+      expect(appWorkers.every((worker) => worker.terminated)).toBe(true);
+      await expect(
+        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: new Uint8Array(32).buffer })
+      ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
+      await expect(
+        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: new Uint8Array(32).buffer })
+      ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
+    } finally {
+      restoreWorker();
+    }
+  });
+});
+
+describe("VaultService.unlock AAD migration (硬切换 4.3)", () => {
+  it("re-encrypts legacy v1 key records to v2 AAD and updates vault_meta", async () => {
+    const legacyPublicKeyHex = await seedLegacyV1Vault({
+      password: "test-pw",
+      privateKeyHex: TEST_PRIV,
+      label: "legacy"
+    });
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "locked");
+
+    await vault.unlock("test-pw");
+
+    expect(vault.status()).toBe("unlocked");
+    const meta = await vaultDb.getMeta();
+    expect(meta?.cryptoVersion).toBe("v2");
+    expect(meta?.kdf).toBe("pbkdf2-sha256");
+    expect(meta?.iterations).toBe(200_000);
+    expect(meta?.keyLengthBits).toBe(256);
+    const migrated = await vaultDb.getKey(legacyPublicKeyHex);
+    expect(migrated?.cipherVersion).toBe("v2");
+    expect(migrated?.cipherB64).toBeDefined();
+    const crypto = await vault.createActiveKeyCrypto(legacyPublicKeyHex);
+    expect(crypto.getIdentity().publicKeyHex).toBe(legacyPublicKeyHex);
   });
 });
 
@@ -328,7 +675,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
   //   - 仅在 vault_keys 为空时 resolve；否则 fail closed。
   //   - 成功后 status = uninitialized，vault_meta 已删，下次 bootstrap
   //     仍读到 uninitialized。
-  //   - 内存会话（masterKey / masterSalt / keyCache）被清空。
+  //   - 内存会话（session key / keyCache）被清空。
   //   - 触发一次 vault.locked 事件 + keyspace.onVaultLocked()，与现有
   //     插件清理链路保持兼容。
 
@@ -377,6 +724,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     await vault.importPrivateKey({
+      password: "test-pw",
       label: "still-here",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -392,8 +740,8 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     expect(list).toHaveLength(1);
   });
 
-  it("clears in-memory session so withPrivateKey fails after finalize", async () => {
-    // 设计缘由：finalize 必须把 masterKey / masterSalt / keyCache 清空，
+  it("clears in-memory session so active crypto fails after finalize", async () => {
+    // 设计缘由：finalize 必须把 session key / keyCache 清空，
     // 避免后续异步路径还能解密私钥；这里通过先 import 一把 key 再
     // 删材料 + finalize 来观察。
     const { messageBus: events } = makeMessageBus();
@@ -401,6 +749,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "to-be-wiped",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -411,8 +760,8 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     await vault.deleteKeyMaterial(ref.publicKeyHex);
     await vault.finalizeEmptyVaultAfterLastKeyDeletion();
     expect(vault.status()).toBe("uninitialized");
-    // withPrivateKey 此刻必须抛错（key 已不存在 + vault 已 uninitialized）。
-    await expect(vault.withPrivateKey(ref.publicKeyHex, () => "x")).rejects.toBeTruthy();
+    // active crypto 此刻必须抛错（key 已不存在 + vault 已 uninitialized）。
+    await expect(vault.createActiveKeyCrypto(ref.publicKeyHex)).rejects.toBeTruthy();
   });
 
   it("collapses status to uninitialized even when vaultDb.deleteMeta throws (no half-state)", async () => {
@@ -529,6 +878,7 @@ describe("VaultService.removeKey (deprecated)", () => {
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "rm",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -545,6 +895,7 @@ describe("VaultService.deleteKeyMaterial (硬切换 008)", () => {
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "rm",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -557,36 +908,134 @@ describe("VaultService.deleteKeyMaterial (硬切换 008)", () => {
     expect(records.some((r) => r.type === "key.deleted")).toBe(false);
   });
 
-  it("rejects withPrivateKey on material-deleted key", async () => {
+  it("rejects createActiveKeyCrypto on material-deleted key", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "rm",
       material: { hex: TEST_PRIV },
       format: "hex",
       capabilities: ["p2pkh"]
     });
     await vault.deleteKeyMaterial(ref.publicKeyHex);
-    await expect(vault.withPrivateKey(ref.publicKeyHex, () => "x")).rejects.toThrow(/Unknown key/i);
+    await expect(vault.createActiveKeyCrypto(ref.publicKeyHex)).rejects.toThrow(/Unknown key/i);
   });
 });
 
-describe("VaultService.withPrivateKey", () => {
-  it("borrows material in closure", async () => {
+describe("VaultService.createActiveKeyCrypto", () => {
+  it("returns a usable capability", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const ref = await vault.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: TEST_PRIV },
       format: "hex",
       capabilities: ["p2pkh"]
     });
-    const out = await vault.withPrivateKey(ref.publicKeyHex, (m) => m.hex);
-    expect(out).toBe(TEST_PRIV);
+    const crypto = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    expect(crypto.getIdentity().publicKeyHex).toBe(ref.publicKeyHex);
+  });
+
+  it("does not expose unlockKeymasterSession on the runtime service", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    expect("unlockKeymasterSession" in (vault as unknown as Record<string, unknown>)).toBe(false);
+    expect((vault as unknown as Record<string, unknown>).unlockKeymasterSession).toBeUndefined();
+  });
+
+  it("rejects non-active keys when a real keyspace is attached", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault0 = createVaultService({ messageBus: events });
+    await waitForStatus(vault0, "uninitialized");
+    await vault0.createVault("test-pw");
+    await vault0.importPrivateKey({
+      password: "test-pw",
+      label: "seed",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const keyspace = createKeyspaceService({ messageBus: events, vault: vault0 });
+    const vault = createVaultService({ messageBus: events, keyspace });
+    await waitForStatus(vault, "locked");
+    await vault.unlock("test-pw");
+
+    const first = await vault.importPrivateKey({
+      password: "test-pw",
+      label: "active",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const second = await vault.importPrivateKey({
+      password: "test-pw",
+      label: "next",
+      material: { hex: TEST_PRIV_3 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    expect(keyspace.active().activePublicKeyHex).toBe(second.publicKeyHex);
+    await expect(vault.createActiveKeyCrypto(first.publicKeyHex)).rejects.toThrow(
+      /session_key_mismatch/i
+    );
+  });
+
+  it("revokes a previously borrowed capability when vault locks", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    const ref = await vault.importPrivateKey({
+      password: "test-pw",
+      label: "k",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const crypto = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    await vault.lock();
+    await expect(
+      crypto.signDigest({
+        publicKeyHex: ref.publicKeyHex,
+        digest: new Uint8Array(32).buffer
+      })
+    ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
+  });
+});
+
+describe("VaultService.getSessionState", () => {
+  it("exposes the live session during unlock and clears it on lock", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+
+    const session = vault.getSessionState();
+    expect(session).toEqual(
+      expect.objectContaining({
+        kind: "keymaster",
+        revoked: false
+      })
+    );
+    expect(session).toEqual(
+      expect.not.objectContaining({
+        activeCrypto: expect.anything(),
+        encryptVaultKeyMaterial: expect.anything(),
+        createActiveCrypto: expect.anything()
+      })
+    );
+    expect(session?.sessionId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(session?.publicKeyHex).toBeUndefined();
+
+    await vault.lock();
+    expect(vault.getSessionState()).toBeNull();
   });
 });
 
@@ -622,6 +1071,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     // 0 key 时直接收敛到 uninitialized。这里先 import 一把 key，让
     // 后续新 vault 的 bootstrap 能正常进 "locked"。
     await vault0.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: TEST_PRIV_2 },
       format: "hex",
@@ -681,7 +1131,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     expect(vault.status()).toBe("unlocked");
     // 硬切换 002 收尾：不再把 `keyspace.setInitializing(false)` 当作
     // unlock 成功的必要信号——per-key backfill 已删除，本开关只覆盖
-    // unlock 阶段一次性 staging migration 的指示位，不是 backfill 终
+    // unlock 阶段一次性 AAD 升级的指示位，不是 backfill 终态。
     // 态断言。验证 ready boundary：onVaultUnlocked 必须 enter 在 emit
     // 之前、且 onVaultUnlocked 内部观察到 vault.status() === "locked"。
     expect(records.some((r) => r.type === "vault.unlocked")).toBe(true);
@@ -693,9 +1143,10 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     await waitForStatus(vault0, "uninitialized");
     await vault0.createVault("test-pw");
     // 关键：先导入一把真实 key，拿到真实 publicKeyHex。
-    // 否则 withPrivateKey("anything") 会先抛 "Unknown key"，无法证明
-    // masterKey 被清理（vault.is locked 才是 fail-closed 的预期错误）。
+    // 否则 createActiveKeyCrypto("anything") 会先抛 "Unknown key"，无法证明
+    // session key 被清理（vault.is locked 才是 fail-closed 的预期错误）。
     const ref = await vault0.importPrivateKey({
+      password: "test-pw",
       label: "rollback-key",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -720,12 +1171,10 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     // unlock 应抛错且 status 回退到 locked。
     await expect(vault.unlock("test-pw")).rejects.toThrow(/simulated keyspace failure/);
     expect(vault.status()).toBe("locked");
-    // 关键修复：用真实 publicKeyHex 调 withPrivateKey，验证 fail-closed。
-    // 旧的 "anything" 会先抛 "Unknown key"，无法证明 masterKey 已被清空。
+    // 关键修复：用真实 publicKeyHex 调 createActiveKeyCrypto，验证 fail-closed。
+    // 旧的 "anything" 会先抛 "Unknown key"，无法证明 session key 已被清空。
     // 现在 vault 应抛 "Vault is locked"——这是 vault 状态机层的 fail-closed 错误。
-    await expect(
-      vault.withPrivateKey(ref.publicKeyHex, () => "x")
-    ).rejects.toThrow(/locked/i);
+    await expect(vault.createActiveKeyCrypto(ref.publicKeyHex)).rejects.toThrow(/locked/i);
   });
 
   it("createVault also calls keyspace.onVaultUnlocked before setStatus(unlocked)", async () => {
@@ -800,7 +1249,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
-    const ref = await vault.generateKey({ label: "first-generated" });
+    const ref = await vault.generateKey({ password: "test-pw", label: "first-generated" });
     expect(ref.format).toBe("generated");
     expect(ref.source).toBe("vault-generated");
     expect(ref.capabilities).toEqual(["p2pkh"]);
@@ -829,26 +1278,47 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
-    const a = await vault.generateKey({ label: "k1" });
-    const b = await vault.generateKey({ label: "k2" });
+    const a = await vault.generateKey({ password: "test-pw", label: "k1" });
+    const b = await vault.generateKey({ password: "test-pw", label: "k2" });
     expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
     expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
   });
 
-  it("withPrivateKey returns a valid 32-byte private key derived from generated material", async () => {
+  it("createActiveKeyCrypto returns a usable capability for generated material", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
-    const ref = await vault.generateKey({ label: "borrow" });
-    let capturedHex = "";
-    await vault.withPrivateKey(ref.publicKeyHex, (m) => {
-      capturedHex = m.hex;
+    const ref = await vault.generateKey({ password: "test-pw", label: "borrow" });
+    const crypto = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    const identity = crypto.getIdentity();
+    expect(identity.publicKeyHex).toBe(ref.publicKeyHex);
+    const sig = await crypto.signDigest({
+      publicKeyHex: ref.publicKeyHex,
+      digest: new Uint8Array(32).buffer
     });
-    // 关键：测试只能通过 withPrivateKey 拿到明文；本测试不输出材料。
-    expect(/^[0-9a-f]{64}$/.test(capturedHex)).toBe(true);
-    // 长度校验是 32 字节 hex；不在断言里包含明文值。
-    expect(capturedHex.length).toBe(64);
+    expect(sig.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(new Uint8Array(sig.signature).length).toBeGreaterThan(0);
+  });
+
+  it("exportEncryptedKeyBackup returns canonical backup JSON and is revoked on lock", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    const ref = await vault.generateKey({ password: "test-pw", label: "backup-cap" });
+    const crypto = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    const exported = await crypto.exportEncryptedKeyBackup({
+      publicKeyHex: ref.publicKeyHex
+    });
+    const { decodeKeyBackup } = await import("./keyBackup.js");
+    const decoded = decodeKeyBackup(new TextDecoder().decode(exported.backup));
+    expect(exported.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(decoded.keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
+    await vault.lock();
+    await expect(
+      crypto.exportEncryptedKeyBackup({ publicKeyHex: ref.publicKeyHex })
+    ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
   });
 
   it("calls notifyKeyCreated before key.created (硬切换 002 收尾：只断言调用顺序)", async () => {
@@ -865,6 +1335,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     // 硬切换 005：bootstrap 路径新增 0-key 护栏。先 import 一把 key 让
     // 新 vault bootstrap 走正常 "locked" 路径。
     await vault0.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: TEST_PRIV_2 },
       format: "hex",
@@ -891,7 +1362,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
       return originalPublish(event, payload, _opts as never);
     };
 
-    await vault.generateKey({ label: "ordering" });
+    await vault.generateKey({ password: "test-pw", label: "ordering" });
     // 关键断言：notifyKeyCreated 必须先于 publish("key.created")。
     const notifyIdx = callOrder.indexOf("notifyKeyCreated");
     const createdIdx = callOrder.indexOf("publish:key.created");
@@ -907,7 +1378,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     await vault.createVault("test-pw");
     await vault.lock();
     await waitForStatus(vault, "locked");
-    await expect(vault.generateKey({ label: "x" })).rejects.toThrow(/locked/i);
+    await expect(vault.generateKey({ password: "test-pw", label: "x" })).rejects.toThrow(/locked/i);
   });
 
   it("rejects empty / whitespace label and labels longer than 64 chars", async () => {
@@ -915,9 +1386,9 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
-    await expect(vault.generateKey({ label: "" })).rejects.toThrow(/Label is required/);
-    await expect(vault.generateKey({ label: "   " })).rejects.toThrow(/Label is required/);
-    await expect(vault.generateKey({ label: "x".repeat(65) })).rejects.toThrow(
+    await expect(vault.generateKey({ password: "test-pw", label: "" })).rejects.toThrow(/Label is required/);
+    await expect(vault.generateKey({ password: "test-pw", label: "   " })).rejects.toThrow(/Label is required/);
+    await expect(vault.generateKey({ password: "test-pw", label: "x".repeat(65) })).rejects.toThrow(
       /at most 64 characters/
     );
   });
@@ -928,7 +1399,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const before = await vault.listKeys();
-    const ref = await vault.generateKey({ label: "fresh" });
+    const ref = await vault.generateKey({ password: "test-pw", label: "fresh" });
     const after = await vault.listKeys();
     expect(after.length).toBe(before.length + 1);
     expect(after.find((k) => k.publicKeyHex === ref.publicKeyHex)).toBeDefined();
@@ -939,11 +1410,9 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
-    const ref = await vault.generateKey({ label: "export-me" });
-    const envelope = await vault.exportPrivateKey({ publicKeyHex: ref.publicKeyHex, password: "backup" });
-    expect(envelope.cipher).toBe("xchacha20poly1305");
-    expect(envelope.kdf).toBe("argon2id");
-    expect(envelope.pubkey_hex).toBe(ref.publicKeyHex);
+    const ref = await vault.generateKey({ password: "test-pw", label: "export-me" });
+    const backup = await vault.exportKeyBackup(ref.publicKeyHex);
+    expect(backup).toContain(ref.publicKeyHex);
   }, 30_000);
 });
 
@@ -966,6 +1435,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     // "locked" 路径。0-key 护栏现在会让 meta 存在但 0 key 的 vault
     // 收敛到 uninitialized。
     await vault0.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: "0000000000000000000000000000000000000000000000000000000000000099" },
       format: "hex",
@@ -982,6 +1452,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     await vault.unlock("test-pw");
 
     const first = await vault.importPrivateKey({
+      password: "test-pw",
       label: "first",
       material: { hex: TEST_PRIV },
       format: "hex",
@@ -993,6 +1464,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
 
     // 第二把 key：必须切到 second。
     const second = await vault.importPrivateKey({
+      password: "test-pw",
       label: "second",
       material: { hex: TEST_PRIV_2 },
       format: "hex",
@@ -1030,6 +1502,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     await vault0.createVault("test-pw");
     // 硬切换 005：先 import 一把 key 让新 vault bootstrap 走 "locked"。
     await vault0.importPrivateKey({
+      password: "test-pw",
       label: "k",
       material: { hex: TEST_PRIV_2 },
       format: "hex",
@@ -1040,9 +1513,9 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     await waitForStatus(vault, "locked");
     await vault.unlock("test-pw");
 
-    const first = await vault.generateKey({ label: "g1" });
+    const first = await vault.generateKey({ password: "test-pw", label: "g1" });
     expect(keyspace.active().activePublicKeyHex).toBe(first.publicKeyHex);
-    const second = await vault.generateKey({ label: "g2" });
+    const second = await vault.generateKey({ password: "test-pw", label: "g2" });
     expect(keyspace.active().activePublicKeyHex).toBe(second.publicKeyHex);
   });
 
@@ -1053,8 +1526,8 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     //   2) error 携带完整公开 KeyRef（`err.key`），含真实 id / publicKeyHex / label；
     //   3) DB 里 key 存在（已持久化）；
     //   4) key.created 事件**不**被发布（避免与 active 状态不一致）；
-    //   5) 真实 key.publicKeyHex 可以走 exportPrivateKey 拿到 envelope（防止再次
-    //      出现"错误携带空 id"导致 UI 无法导出私钥的回归）。
+    //   5) 真实 key.publicKeyHex 可以走 exportKeyBackup 拿到 canonical
+    //      backup JSON，证明 publicKeyHex 可直接定位该 key。
     const { messageBus: events, records } = makeMessageBus();
     const explodingKeyspace = {
       active: () => ({}),
@@ -1072,7 +1545,8 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     let thrown: unknown;
     try {
       await vault.importPrivateKey({
-        label: "explode",
+      password: "test-pw",
+      label: "explode",
         material: { hex: TEST_PRIV },
         format: "hex",
         capabilities: ["p2pkh"]
@@ -1096,14 +1570,10 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     expect(stored?.publicKeyHex).toBe(wrapped.key.publicKeyHex);
     // 4) key.created 事件**不**被发布（active 切换失败）。
     expect(records.some((r) => r.type === "key.created")).toBe(false);
-    // 5) 真实 key.publicKeyHex 可以走 exportPrivateKey：防止再次出现"错误携带空
-    //    id"导致 UI 拿不到私钥备份的回归。
-    const envelope = await vault.exportPrivateKey({ publicKeyHex: wrapped.key.publicKeyHex,
-      password: "backup"
-    });
-    expect(envelope.version).toBe("kek-v1");
-    expect(envelope.cipher).toBe("xchacha20poly1305");
-    expect(envelope.kdf).toBe("argon2id");
+    // 5) 真实 key.publicKeyHex 可以走 exportKeyBackup，证明该 key 可被
+    //    canonical backup 精确定位。
+    const backup = await vault.exportKeyBackup(wrapped.key.publicKeyHex);
+    expect(backup).toContain(wrapped.key.publicKeyHex);
   }, 30_000);
 });
 
@@ -1937,9 +2407,9 @@ type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
  *   - `importUnlockRuntimeFromLauncher(handoff)`
  *   - `UnlockRuntimeHandoff` 类型
  *
- * appView Session Window 改为"只拥有 owner 私钥材料的 owner runtime
- * bootstrap"，不再导入整套 vault unlock runtime。launcher 端借 owner
- * 私钥仍然走 `vault.withPrivateKey(publicKeyHex, fn)`。
+ * appView Session Window 改为"只拥有 owner capability 的 owner runtime
+ * bootstrap"，不再导入整套 vault unlock runtime。launcher 端不再借出
+ * raw 私钥。
  *
  * 旧"unlock runtime 一次性交接"测试组整组删除——本 vault service 没有任何
  * 对外 API 再承接那些场景。

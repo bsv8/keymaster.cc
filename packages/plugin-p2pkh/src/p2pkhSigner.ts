@@ -1,5 +1,5 @@
 // packages/plugin-p2pkh/src/p2pkhSigner.ts
-// P2PKH 签名：使用 vault.withPrivateKey 拿到私钥后构造/签名交易。
+// P2PKH 签名：使用受控 signer capability 构造/签名交易。
 // 设计缘由：BSV 2018-fork 之后 P2PKH 必须使用 BIP143 sighash；不实现
 // 这个 sighash 交易会被网络拒绝。这里给出最小可用的 BIP143 实现，
 // 避免引入 @bsv/sdk 巨大依赖。
@@ -13,8 +13,7 @@
 
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";
-import { getPublicKey, signAsync } from "@noble/secp256k1";
-import type { PrivateKeyMaterial } from "@keymaster/contracts";
+import { getPublicKey } from "@noble/secp256k1";
 import type { P2pkhUtxo, UtxoAllocation } from "./p2pkhContracts.js";
 
 export interface TxInput {
@@ -38,14 +37,19 @@ export interface UnsignedTx {
 
 const SIGHASH_ALL_FORKID = 0x41;
 
-/** 从 32 字节 hex 私钥派生 P2PKH 压缩公钥与主网地址。 */
-export function deriveP2pkhAddress(privateKeyHex: string, network: "main" | "test" = "main"): {
+/**
+ * 从公钥 hex 派生 P2PKH 压缩公钥与地址。
+ *
+ * 设计缘由：生产路径只应传入 publicKeyHex；这里兼容 32 字节输入仅用于
+ * 现有测试与少量旧调用的平滑过渡。
+ */
+export function deriveP2pkhAddress(keyHex: string, network: "main" | "test" = "main"): {
   publicKeyHex: string;
   address: string;
 } {
-  const priv = hexToBytes(privateKeyHex);
-  if (priv.length !== 32) throw new Error("Private key must be 32 bytes");
-  const pub = getPublicKey(priv, true);
+  const key = hexToBytes(keyHex);
+  const pub = key.length === 32 ? getPublicKey(key, true) : key;
+  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
   const sha = sha256(pub);
   const ripe = ripemd160(sha);
   const versionByte = network === "main" ? 0x00 : 0x6f;
@@ -135,11 +139,9 @@ export function serializeTx(tx: UnsignedTx): Uint8Array {
 export async function signP2pkhTx(
   unsigned: UnsignedTx,
   utxos: P2pkhUtxo[],
-  key: PrivateKeyMaterial,
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
   publicKeyHex: string
 ): Promise<string> {
-  const priv = hexToBytes(key.hex);
-  if (priv.length !== 32) throw new Error("Private key must be 32 bytes");
   const pub = hexToBytes(publicKeyHex);
 
   const signedInputs: TxInput[] = unsigned.inputs.map((i) => ({ ...i, scriptSig: new Uint8Array(0) }));
@@ -148,10 +150,7 @@ export async function signP2pkhTx(
     const utxo = utxos[i]!;
     const scriptCode = addressToP2pkhScript(utxo.address);
     const sighash = calcBip143Sighash(unsigned, i, scriptCode, utxo.value);
-    // noble-secp256k1 v2 默认只启用 async HMAC；这里走 signAsync，
-    // 直接复用浏览器 / Node WebCrypto，避免额外注入 hmacSha256Sync。
-    const sig = await signAsync(sighash, priv, { lowS: true });
-    const der = encodeDERSignature(sig.r, sig.s);
+    const der = await signDigest(sighash);
     const sigWithType = concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
     signedInputs[i] = {
       ...signedInputs[i]!,

@@ -21,12 +21,19 @@
 //   - 不再读取、构造、回填 `KeyIdentity.fingerprint` 字段。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
+import {
+  Button,
+  DataTable,
+  EmptyState,
+  Modal,
+  PageHeader,
+  TextInput,
+  type DataTableColumn
+} from "@keymaster/ui";
 import { router, useCapability, useI18n, useLocale } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
-  KeyExportEnvelope,
   KeyIdentity,
   KeyRef,
   KeyspaceService,
@@ -34,6 +41,8 @@ import type {
   VaultService
 } from "@keymaster/contracts";
 import { VaultKeyCreateModal } from "./VaultKeyCreateModal.js";
+import { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
+import { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
 import { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
 import { VaultKeyExportModal } from "./VaultKeyExportModal.js";
 import { KeyPersistedButActivationFailedError } from "./vaultService.js";
@@ -54,6 +63,12 @@ export function VaultSettingsPage() {
   const [exporting, setExporting] = useState<KeyIdentity | null>(null);
   const [deleting, setDeleting] = useState<KeyIdentity | null>(null);
   const [creating, setCreating] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [importingBackup, setImportingBackup] = useState(false);
+  const [activating, setActivating] = useState<KeyIdentity | null>(null);
+  const [activatePassword, setActivatePassword] = useState("");
+  const [activateError, setActivateError] = useState<string | null>(null);
+  const [activateBusy, setActivateBusy] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   // 日期格式化器随 locale 重建；避免每次渲染都构造 Intl 实例。
@@ -123,10 +138,26 @@ export function VaultSettingsPage() {
     router.push("/import");
   }
 
-  async function handleExport(password: string): Promise<KeyExportEnvelope> {
+  function openChangePassword() {
+    setError(null);
+    setChangingPassword(true);
+  }
+
+  async function handleImportBackup(restored: KeyRef) {
+    setError(null);
+    setNotice(
+      t("vault.keyImportBackup.notice", {
+        defaultValue: "备份已恢复：{{label}}",
+        label: restored.label || t("vault.settings.empty.label", { defaultValue: "未命名" })
+      })
+    );
+    await refresh();
+  }
+
+  async function handleExport(): Promise<string> {
     if (!exporting) throw new Error("No key selected");
-    // 硬切换 002 收尾：vault.exportPrivateKey 入参改为 publicKeyHex。
-    return vault.exportPrivateKey({ publicKeyHex: exporting.publicKeyHex, password });
+    // 单 Key Backup：直接导出本机加密记录，不再要求输入密码。
+    return vault.exportKeyBackup(exporting.publicKeyHex);
   }
 
   async function handleDelete(password: string) {
@@ -152,29 +183,51 @@ export function VaultSettingsPage() {
     }
   }
 
-  async function setAsActive(k: KeyIdentity) {
+  function beginActivate(k: KeyIdentity) {
     if (!k.publicKeyHex) return;
-    // 硬切换 002 收尾：identityStatus 字段已删除，KeyIdentity 必 ready。
+    if (k.publicKeyHex === active.activePublicKeyHex) return;
+    setError(null);
+    setActivateError(null);
+    setActivatePassword("");
+    setActivating(k);
+  }
+
+  function closeActivate() {
+    if (activateBusy) return;
+    setActivating(null);
+    setActivatePassword("");
+    setActivateError(null);
+  }
+
+  async function confirmActivate() {
+    if (!activating?.publicKeyHex || activateBusy) return;
+    setActivateBusy(true);
+    setActivateError(null);
     try {
-      await keyspace.setActive(k.publicKeyHex);
+      await vault.activateKey({
+        publicKeyHex: activating.publicKeyHex,
+        password: activatePassword
+      });
       // 硬切换 009 收尾：如果 vault 还有"首 Key 未自动 active"
       // notice，且这把 key 正好就是 notice 里的 key，清掉它。
-      // vault 内部也会在 EVENT_ACTIVE_KEY_CHANGED 上做同样检查
-      // （防止其他入口也产生新 notice 后路径不一致），这里再调一
-      // 次是冗余但保险的快速路径。
       const notice =
         typeof vault.getInitialActivationNotice === "function"
           ? vault.getInitialActivationNotice()
           : null;
-      if (notice && notice.publicKeyHex === k.publicKeyHex) {
+      if (notice && notice.publicKeyHex === activating.publicKeyHex) {
         vault.clearInitialActivationNotice();
       }
+      setActivating(null);
+      setActivatePassword("");
+      setActivateError(null);
     } catch (err) {
-      setError(
+      setActivateError(
         err instanceof Error
           ? err.message
-          : t("vault.settings.err.setActive", { defaultValue: "Failed to switch key" })
+          : t("vault.settings.activate.err.failed", { defaultValue: "Failed to switch key" })
       );
+    } finally {
+      setActivateBusy(false);
     }
   }
 
@@ -210,9 +263,9 @@ export function VaultSettingsPage() {
     }
   }
 
-  async function handleCreate(label: string): Promise<KeyRef> {
+  async function handleCreate(label: string, password: string): Promise<KeyRef> {
     try {
-      const ref = await vault.generateKey({ label });
+      const ref = await vault.generateKey({ label, password });
       setError(null);
       setNotice(null);
       return ref;
@@ -390,7 +443,7 @@ export function VaultSettingsPage() {
             <Button
               variant={isActive ? "primary" : "secondary"}
               size="sm"
-              onClick={() => setAsActive(r)}
+              onClick={() => beginActivate(r)}
               disabled={isActive || !canSetActive}
             >
               {isActive
@@ -484,7 +537,7 @@ export function VaultSettingsPage() {
               <Button
                 variant={isActive ? "primary" : "secondary"}
                 size="sm"
-                onClick={() => setAsActive(r)}
+                onClick={() => beginActivate(r)}
                 disabled={isActive || !canSetActive}
               >
                 {isActive
@@ -523,6 +576,12 @@ export function VaultSettingsPage() {
       <Button onClick={() => setCreating(true)}>
         {t("vault.settings.action.new", { defaultValue: "新建 Key" })}
       </Button>
+      <Button variant="secondary" onClick={openChangePassword}>
+        {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
+      </Button>
+      <Button variant="secondary" onClick={() => setImportingBackup(true)}>
+        {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
+      </Button>
       <Button variant="secondary" onClick={goImport}>
         {t("vault.settings.action.import", { defaultValue: "导入 Key" })}
       </Button>
@@ -554,6 +613,12 @@ export function VaultSettingsPage() {
             <>
               <Button onClick={() => setCreating(true)}>
                 {t("vault.settings.action.new", { defaultValue: "新建 Key" })}
+              </Button>
+              <Button variant="secondary" onClick={openChangePassword}>
+                {t("vault.settings.action.changePassword", { defaultValue: "修改密码" })}
+              </Button>
+              <Button variant="secondary" onClick={() => setImportingBackup(true)}>
+                {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
               </Button>
               <Button variant="secondary" onClick={goImport}>
                 {t("vault.settings.action.import", { defaultValue: "导入 Key" })}
@@ -605,6 +670,59 @@ export function VaultSettingsPage() {
           onClose={() => setCreating(false)}
         />
       ) : null}
+
+      {changingPassword ? (
+        <VaultChangePasswordModal
+          open={changingPassword}
+          vault={vault}
+          onClose={() => setChangingPassword(false)}
+        />
+      ) : null}
+
+      {importingBackup ? (
+        <VaultKeyBackupImportModal
+          open={importingBackup}
+          vault={vault}
+          onImported={handleImportBackup}
+          onClose={() => setImportingBackup(false)}
+        />
+      ) : null}
+
+      <Modal
+        open={activating !== null}
+        title={t("vault.settings.activate.title", { defaultValue: "Confirm switch" })}
+        onClose={closeActivate}
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeActivate} disabled={activateBusy}>
+              {t("common.action.cancel", { defaultValue: "Cancel" })}
+            </Button>
+            <Button onClick={confirmActivate} loading={activateBusy} disabled={!activatePassword}>
+              {t("vault.settings.activate.submit", { defaultValue: "Confirm" })}
+            </Button>
+          </>
+        }
+      >
+        <p className="vault-settings-activate__hint">
+          {t("vault.settings.activate.hint", {
+            defaultValue: "Enter the Vault password to switch the active key."
+          })}
+        </p>
+        {activating ? (
+          <p className="vault-settings-activate__target">
+            {activating.label || unnamedText} <code>{formatShortPublicKey(activating.publicKeyHex)}</code>
+          </p>
+        ) : null}
+        <TextInput
+          label={t("vault.settings.activate.password", { defaultValue: "Password" })}
+          type="password"
+          autoComplete="current-password"
+          value={activatePassword}
+          onChange={(e) => setActivatePassword(e.currentTarget.value)}
+          error={activateError ?? undefined}
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }

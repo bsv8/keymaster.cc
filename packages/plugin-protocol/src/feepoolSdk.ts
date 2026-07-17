@@ -1,247 +1,464 @@
 // packages/plugin-protocol/src/feepoolSdk.ts
-// MultisigPool SDK 接入层（plugin-protocol 内**唯一**直接 import SDK 的文件）。
+// MultisigPool 适配层（capability 版）。
 //
-// 设计缘由（V4 收口）：feepool 真实模型是"两笔 tx + 持续协商的 B-Tx 草稿"。
-//   - A-Tx（base tx，建池时定）：client P2PKH UTXO → 2-of-2 multisig output，
-//     池大小 = multisig output 总额 = `feePoolDefaultFundSatoshis`。
-//   - B-Tx（spend 草稿）：multisig output → server + client change。
-//     每次 transfer 不再独立发一笔新 spend tx，而是在同一个 B-Tx 草稿上
-//     更新 `serverAmount` 字段；只有 close 时把草稿切到 FINAL_LOCKTIME
-//     最终版本，broadcast 后真正生效。
-//   - 草稿有"初始版"（create / close_and_recreate 的新池分支）vs
-//     "更新版"（spend / close_and_recreate 的 close 之前的 spend）。
-//     两种版本用不同 SDK 签名方法（spend sig vs update sig）。
-//
-//   - `keymaster-multisig-pool` 是 npm 包，提供 BSV multisig pool 的纯密码学
-//     函数；本文件负责把它压成 protocol service 直接可调的小型适配层。
-//   - `@bsv/sdk` 是 SDK 的底层依赖；本文件**不**直接 import 它——只透传
-//     SDK 内部已经处理好的 `Transaction` / `PublicKey` / `PrivateKey`。
-//   - 边界检查（`scripts/check-boundaries.mjs`）禁止 plugin-protocol 直接
-//     import plugin-p2pkh；本文件也遵守这一约束（feepoolSdk 只依赖 SDK
-//     包，**不**依赖任何 plugin）。
-//   - V1 只用 dual（2-of-2）路径；triple / HTTP client 类都不引入。
+// 设计缘由：
+//   - fee pool 不再接收 raw 私钥材料 / PrivateKey 对象；
+//   - 所有需要签名的路径都通过显式 `signDigest` capability；
+//   - 交易编解码只保留本文件内最小实现，避免把私钥边界扩散到
+//     protocol service。
 
+import { ripemd160 } from "../../../node_modules/@noble/hashes/esm/ripemd160.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 import {
-  buildDualFeePoolBaseTx,
-  clientDualFeePoolSpendTXUpdateSign,
   clientVerifyServerSpendSig,
-  clientVerifyServerUpdateSig,
-  FINAL_LOCKTIME,
-  loadDualFeePoolTx,
-  spendTXDualFeePoolClientSign,
-  subBuildDualFeePoolSpendTX
+  clientVerifyServerUpdateSig
 } from "keymaster-multisig-pool";
 
-/**
- * 暴露 SDK 的 `FINAL_LOCKTIME` 常量。close_and_recreate 的 close 部分把
- * 草稿切到"最终可立即生效版本"时使用（locktime + sequence 同时设置）。
- */
-export { FINAL_LOCKTIME };
+/** `FINAL_LOCKTIME`：close_and_recreate 的 close 部分用。 */
+export const FINAL_LOCKTIME = 0xffffffff;
 
-/** 适配 SDK 内部 UTXO 形状。 */
+/** 适配 tx 输入。 */
 export interface FeepoolSdkUtxo {
   txid: string;
   vout: number;
   satoshis: number;
 }
 
-/** `buildDualFeePoolBaseTx` 返回值（trim 自 SDK 内部类型）。 */
 export interface FeepoolSdkBaseTxResponse {
-  /** A-Tx（base tx）hex。 */
   txHex: string;
-  /** A-Tx 的 txid（service 用来构造下游 B-Tx 草稿的 prevTxId）。 */
   txid: string;
-  /** 2-of-2 multisig output 在 tx 里的 vout index。 */
   outputIndex: number;
-  /** multisig output 金额（satoshis）= 池大小 = `totalAmount`。 */
   amount: number;
 }
 
-/** 通用"B-Tx 草稿"返回形状。 */
 export interface FeepoolSdkDraftTxResponse {
-  /** B-Tx 草稿 hex。 */
   txHex: string;
 }
 
-/**
- * 建池 A-Tx（client P2PKH UTXO → 2-of-2 multisig output）。
- * client 签名（funding 输入）；**不需要** server sig。
- *
- * @param clientUtxos 当前 active key 的可用 P2PKH UTXO（已排除已被 claim 的）。
- * @param clientPrivateKeyHex 32-byte secp256k1 私钥 hex（66 字符）。
- * @param serverPublicKeyHex 33-byte compressed 公钥 hex（66 字符）。
- * @param feepoolAmount multisig output 金额（satoshis）= 池大小。
- * @param feeRate fee rate（sat/kB）。V1 用保守值 1。
- */
+export interface FeePoolSignDigest {
+  publicKeyHex: string;
+  digest: ArrayBuffer;
+}
+
+export interface FeePoolSigner {
+  signDigest(input: FeePoolSignDigest): Promise<{ publicKeyHex: string; signature: ArrayBuffer }>;
+}
+
+interface TxInput {
+  prevTxid: string;
+  prevVout: number;
+  scriptSig: Uint8Array;
+  sequence: number;
+}
+
+interface TxOutput {
+  value: number;
+  script: Uint8Array;
+}
+
+interface UnsignedTx {
+  version: number;
+  inputs: TxInput[];
+  outputs: TxOutput[];
+  lockTime: number;
+}
+
+const SIGHASH_ALL_FORKID = 0x41;
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "").trim();
+  if (clean.length % 2 !== 0) throw new Error("Invalid hex length");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += (b ?? 0).toString(16).padStart(2, "0");
+  return out;
+}
+
+function concatBytes(...chunks: Uint8Array[]): Uint8Array {
+  const len = chunks.reduce((sum, c) => sum + c.length, 0);
+  const out = new Uint8Array(len);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return out;
+}
+
+function u32LE(n: number): Uint8Array {
+  const out = new Uint8Array(4);
+  const view = new DataView(out.buffer);
+  view.setUint32(0, n >>> 0, true);
+  return out;
+}
+
+function u64LE(n: number): Uint8Array {
+  const out = new Uint8Array(8);
+  const view = new DataView(out.buffer);
+  view.setBigUint64(0, BigInt(n), true);
+  return out;
+}
+
+function encodeVarInt(n: number): Uint8Array {
+  if (n < 0xfd) return new Uint8Array([n]);
+  if (n <= 0xffff) return concatBytes(new Uint8Array([0xfd]), u16LE(n));
+  return concatBytes(new Uint8Array([0xfe]), u32LE(n));
+}
+
+function decodeVarInt(bytes: Uint8Array, offset: number): { value: number; next: number } {
+  const tag = bytes[offset];
+  if (tag == null) throw new Error("Unexpected EOF");
+  if (tag < 0xfd) return { value: tag, next: offset + 1 };
+  if (tag === 0xfd) {
+    const v = new DataView(bytes.buffer, bytes.byteOffset + offset + 1, 2).getUint16(0, true);
+    return { value: v, next: offset + 3 };
+  }
+  if (tag === 0xfe) {
+    const v = new DataView(bytes.buffer, bytes.byteOffset + offset + 1, 4).getUint32(0, true);
+    return { value: v, next: offset + 5 };
+  }
+  throw new Error("VarInt > 32 bits not supported");
+}
+
+function u16LE(n: number): Uint8Array {
+  const out = new Uint8Array(2);
+  new DataView(out.buffer).setUint16(0, n & 0xffff, true);
+  return out;
+}
+
+function dsha256(data: Uint8Array): Uint8Array {
+  return sha256(sha256(data));
+}
+
+function pubKeyHash160Hex(publicKeyHex: string): string {
+  const pub = hexToBytes(publicKeyHex);
+  if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
+  return bytesToHex(ripemd160(sha256(pub)));
+}
+
+function p2pkhLockScript(publicKeyHex: string): Uint8Array {
+  const h160 = hexToBytes(pubKeyHash160Hex(publicKeyHex));
+  return concatBytes(new Uint8Array([0x76, 0xa9, 0x14]), h160, new Uint8Array([0x88, 0xac]));
+}
+
+function dualMultisigScript(serverPublicKeyHex: string, clientPublicKeyHex: string): Uint8Array {
+  const server = hexToBytes(serverPublicKeyHex);
+  const client = hexToBytes(clientPublicKeyHex);
+  if (server.length !== 33 || client.length !== 33) {
+    throw new Error("Compressed public key must be 33 bytes");
+  }
+  return concatBytes(
+    new Uint8Array([0x52, 0x21]),
+    server,
+    new Uint8Array([0x21]),
+    client,
+    new Uint8Array([0x52, 0xae])
+  );
+}
+
+function fakeDualMultisigUnlockScript(): Uint8Array {
+  // 1 opcode + 2 pushed blobs；仅用于 size estimation。
+  const fakeSig = new Uint8Array(73);
+  return concatBytes(
+    new Uint8Array([0x00, 0x49]),
+    fakeSig,
+    new Uint8Array([0x49]),
+    fakeSig
+  );
+}
+
+function serializeTx(tx: UnsignedTx): Uint8Array {
+  const parts: Uint8Array[] = [u32LE(tx.version), encodeVarInt(tx.inputs.length)];
+  for (const i of tx.inputs) {
+    parts.push(hexToBytes(i.prevTxid).reverse());
+    parts.push(u32LE(i.prevVout));
+    parts.push(encodeVarInt(i.scriptSig.length));
+    parts.push(i.scriptSig);
+    parts.push(u32LE(i.sequence));
+  }
+  parts.push(encodeVarInt(tx.outputs.length));
+  for (const o of tx.outputs) {
+    parts.push(u64LE(o.value));
+    parts.push(encodeVarInt(o.script.length));
+    parts.push(o.script);
+  }
+  parts.push(u32LE(tx.lockTime));
+  return concatBytes(...parts);
+}
+
+function deserializeTx(bytes: Uint8Array): UnsignedTx {
+  let offset = 0;
+  const read = (n: number): Uint8Array => {
+    const slice = bytes.slice(offset, offset + n);
+    if (slice.length !== n) throw new Error("Unexpected EOF");
+    offset += n;
+    return slice;
+  };
+  const version = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, true);
+  offset += 4;
+  const inCount = decodeVarInt(bytes, offset);
+  offset = inCount.next;
+  const inputs: TxInput[] = [];
+  for (let i = 0; i < inCount.value; i++) {
+    const prevTxid = bytesToHex(read(32).reverse());
+    const prevVout = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, true);
+    offset += 4;
+    const scriptLen = decodeVarInt(bytes, offset);
+    offset = scriptLen.next;
+    const scriptSig = read(scriptLen.value);
+    const sequence = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, true);
+    offset += 4;
+    inputs.push({ prevTxid, prevVout, scriptSig, sequence });
+  }
+  const outCount = decodeVarInt(bytes, offset);
+  offset = outCount.next;
+  const outputs: TxOutput[] = [];
+  for (let i = 0; i < outCount.value; i++) {
+    const value = Number(new DataView(bytes.buffer, bytes.byteOffset + offset, 8).getBigUint64(0, true));
+    offset += 8;
+    const scriptLen = decodeVarInt(bytes, offset);
+    offset = scriptLen.next;
+    const script = read(scriptLen.value);
+    outputs.push({ value, script });
+  }
+  const lockTime = new DataView(bytes.buffer, bytes.byteOffset + offset, 4).getUint32(0, true);
+  return { version, inputs, outputs, lockTime };
+}
+
+function calcBip143Sighash(
+  tx: UnsignedTx,
+  inputIndex: number,
+  scriptCode: Uint8Array,
+  prevValue: number
+): Uint8Array {
+  const prevoutsConcat = concatBytes(
+    ...tx.inputs.map((i) => concatBytes(hexToBytes(i.prevTxid).reverse(), u32LE(i.prevVout)))
+  );
+  const hashPrevouts = dsha256(prevoutsConcat);
+  const sequencesConcat = concatBytes(...tx.inputs.map((i) => u32LE(i.sequence)));
+  const hashSequence = dsha256(sequencesConcat);
+  const outputsConcat = concatBytes(
+    ...tx.outputs.map((o) => concatBytes(u64LE(o.value), encodeVarInt(o.script.length), o.script))
+  );
+  const hashOutputs = dsha256(outputsConcat);
+  const input = tx.inputs[inputIndex];
+  if (!input) throw new Error(`Missing input ${inputIndex}`);
+  return concatBytes(
+    u32LE(tx.version),
+    hashPrevouts,
+    hashSequence,
+    hexToBytes(input.prevTxid).reverse(),
+    u32LE(input.prevVout),
+    encodeVarInt(scriptCode.length),
+    scriptCode,
+    u64LE(prevValue),
+    u32LE(input.sequence),
+    hashOutputs,
+    u32LE(tx.lockTime),
+    u32LE(SIGHASH_ALL_FORKID)
+  );
+}
+
+async function signP2pkhInputs(
+  unsigned: UnsignedTx,
+  utxos: FeepoolSdkUtxo[],
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
+  publicKeyHex: string
+): Promise<string> {
+  const pub = hexToBytes(publicKeyHex);
+  const signedInputs: TxInput[] = unsigned.inputs.map((i) => ({ ...i, scriptSig: new Uint8Array(0) }));
+  for (let i = 0; i < unsigned.inputs.length; i++) {
+    const utxo = utxos[i];
+    if (!utxo) throw new Error(`Missing UTXO for input ${i}`);
+    const scriptCode = p2pkhLockScript(publicKeyHex);
+    const sighash = calcBip143Sighash(unsigned, i, scriptCode, utxo.satoshis);
+    const der = await signDigest(sighash);
+    const sigWithType = concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
+    signedInputs[i] = {
+      prevTxid: unsigned.inputs[i]!.prevTxid,
+      prevVout: unsigned.inputs[i]!.prevVout,
+      sequence: unsigned.inputs[i]!.sequence,
+      scriptSig: concatBytes(
+        encodeVarInt(sigWithType.length),
+        sigWithType,
+        encodeVarInt(pub.length),
+        pub
+      )
+    };
+  }
+  return bytesToHex(serializeTx({ ...unsigned, inputs: signedInputs }));
+}
+
+function buildUnsignedBaseTx(params: {
+  clientUtxos: FeepoolSdkUtxo[];
+  clientPublicKeyHex: string;
+  serverPublicKeyHex: string;
+  feepoolAmount: number;
+  changeAmount: number;
+}): UnsignedTx {
+  const inputs = params.clientUtxos.map((u) => ({
+    prevTxid: u.txid,
+    prevVout: u.vout,
+    scriptSig: new Uint8Array(0),
+    sequence: 0xfffffffe
+  }));
+  return {
+    version: 1,
+    inputs,
+    outputs: [
+      { value: params.feepoolAmount, script: dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex) },
+      { value: params.changeAmount, script: p2pkhLockScript(params.clientPublicKeyHex) }
+    ],
+    lockTime: 0
+  };
+}
+
+function buildUnsignedSpendTx(params: {
+  prevTxId: string;
+  totalAmount: number;
+  serverAmount: number;
+  endHeight: number;
+  clientPublicKeyHex: string;
+  serverPublicKeyHex: string;
+}): UnsignedTx {
+  return {
+    version: 1,
+    inputs: [
+      {
+        prevTxid: params.prevTxId,
+        prevVout: 0,
+        scriptSig: new Uint8Array(0),
+        sequence: 1
+      }
+    ],
+    outputs: [
+      { value: params.serverAmount, script: p2pkhLockScript(params.serverPublicKeyHex) },
+      { value: params.totalAmount - params.serverAmount, script: p2pkhLockScript(params.clientPublicKeyHex) }
+    ],
+    lockTime: params.endHeight
+  };
+}
+
 export async function sdkBuildBaseTx(params: {
   clientUtxos: FeepoolSdkUtxo[];
-  clientPrivateKeyHex: string;
+  clientPublicKeyHex: string;
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
   serverPublicKeyHex: string;
   feepoolAmount: number;
   feeRate: number;
 }): Promise<FeepoolSdkBaseTxResponse> {
-  const { PrivateKey, PublicKey } = await import("@bsv/sdk");
-  const clientPrivKey = PrivateKey.fromHex(params.clientPrivateKeyHex);
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const resp = await buildDualFeePoolBaseTx(
-    params.clientUtxos.map((u) => ({
-      txid: u.txid,
-      vout: u.vout,
-      satoshis: u.satoshis
-    })),
-    clientPrivKey,
-    serverPubKey,
-    params.feepoolAmount,
-    params.feeRate
-  );
+  const totalValue = params.clientUtxos.reduce((sum, u) => sum + u.satoshis, 0);
+  if (params.feepoolAmount <= 0) throw new Error("feepoolAmount must be positive");
+  if (totalValue < params.feepoolAmount) {
+    throw new Error("Insufficient UTXO balance for fee pool base tx");
+  }
+  const initialChange = totalValue - params.feepoolAmount;
+  let unsigned = buildUnsignedBaseTx({
+    clientUtxos: params.clientUtxos,
+    clientPublicKeyHex: params.clientPublicKeyHex,
+    serverPublicKeyHex: params.serverPublicKeyHex,
+    feepoolAmount: params.feepoolAmount,
+    changeAmount: initialChange
+  });
+  let signedHex = await signP2pkhInputs(unsigned, params.clientUtxos, params.signDigest, params.clientPublicKeyHex);
+  const firstSize = signedHex.length / 2;
+  const firstFee = Math.max(1, Math.floor((firstSize / 1000) * params.feeRate));
+  if (totalValue < params.feepoolAmount + firstFee) {
+    throw new Error(`余额不足，需要 ${params.feepoolAmount + firstFee}，拥有 ${totalValue}`);
+  }
+  unsigned.outputs[1]!.value = totalValue - params.feepoolAmount - firstFee;
+  signedHex = await signP2pkhInputs(unsigned, params.clientUtxos, params.signDigest, params.clientPublicKeyHex);
   return {
-    txHex: resp.tx.toHex(),
-    txid: resp.tx.id("hex"),
-    outputIndex: resp.index,
-    amount: resp.amount
+    txHex: signedHex,
+    txid: calcTxidFromRawTxHex(signedHex),
+    outputIndex: 0,
+    amount: params.feepoolAmount
   };
 }
 
-/**
- * 构造**初始** B-Tx 草稿（V4 关键入口）。
- *
- * V4 收口：这个函数返回的**不是**"最终主 transfer tx"；是"持续协商的初始
- * B-Tx 草稿"。后续 spend 操作会用 `sdkLoadDraftSpendTx` 在此基础上
- * 更新 `serverAmount` 字段，**不**会构造新的独立 spend tx。
- *
- * 用在：
- *   - `create`：建池后的第一版草稿；`serverAmount = amountSatoshis`。
- *   - `close_and_recreate`：建新池后的第一版草稿（同上）。
- *
- * @param prevTxId 当前池 base tx（A-Tx）txid。
- * @param totalAmount multisig output 总额（= 池大小）。
- * @param serverAmount 草稿初始 `serverAmount` = site 想转给 server 的金额。
- * @param endHeight V1 固定 0。
- */
 export async function sdkBuildInitialDraftSpendTx(params: {
   prevTxId: string;
   totalAmount: number;
   serverAmount: number;
   endHeight: number;
-  clientPrivateKeyHex: string;
+  clientPublicKeyHex: string;
   serverPublicKeyHex: string;
   feeRate: number;
 }): Promise<FeepoolSdkDraftTxResponse> {
-  const { PrivateKey, PublicKey } = await import("@bsv/sdk");
-  const clientPrivKey = PrivateKey.fromHex(params.clientPrivateKeyHex);
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const resp = await subBuildDualFeePoolSpendTX(
-    params.prevTxId,
-    params.totalAmount,
-    params.serverAmount,
-    params.endHeight,
-    clientPrivKey,
-    serverPubKey,
-    params.feeRate
-  );
-  return { txHex: resp.tx.toHex() };
+  const tx = buildUnsignedSpendTx({
+    prevTxId: params.prevTxId,
+    totalAmount: params.totalAmount,
+    serverAmount: params.serverAmount,
+    endHeight: params.endHeight,
+    clientPublicKeyHex: params.clientPublicKeyHex,
+    serverPublicKeyHex: params.serverPublicKeyHex
+  });
+  tx.inputs[0]!.scriptSig = fakeDualMultisigUnlockScript();
+  const size = serializeTx(tx).length;
+  const fee = Math.max(1, Math.floor((size / 1000) * params.feeRate));
+  if (params.totalAmount < params.serverAmount + fee) {
+    throw new Error(`余额不足，需要 ${params.serverAmount + fee}，拥有 ${params.totalAmount}`);
+  }
+  tx.inputs[0]!.scriptSig = new Uint8Array(0);
+  tx.outputs[1]!.value = params.totalAmount - params.serverAmount - fee;
+  return { txHex: bytesToHex(serializeTx(tx)) };
 }
 
-/**
- * 在 B-Tx 草稿上做 client **初始** 签名。
- *
- * 用在 `create` / `close_and_recreate` 的新池分支：草稿是 SDK `subBuild*`
- * 构造的初始版，签名方法走 `spendTXDualFeePoolClientSign`（不是 update sign）。
- *
- * @param txHex B-Tx 草稿 hex。
- * @param totalAmount multisig output 总额（验签需要）。
- */
+export async function sdkLoadDraftSpendTx(params: {
+  prevDraftHex: string;
+  locktime: number | undefined;
+  sequenceNumber: number;
+  serverAmount: number;
+  serverPublicKeyHex: string;
+  clientPublicKeyHex: string;
+  targetAmount: number;
+}): Promise<FeepoolSdkDraftTxResponse> {
+  const tx = deserializeTx(hexToBytes(params.prevDraftHex));
+  if (params.locktime !== undefined) tx.lockTime = params.locktime;
+  tx.inputs[0]!.sequence = params.sequenceNumber;
+  tx.outputs[0]!.value = params.serverAmount;
+  tx.outputs[1]!.value = params.targetAmount - params.serverAmount;
+  // 确保脚本跟 caller 传入的公钥一致（防止旧 draft 被错 owner 复用）。
+  tx.outputs[0]!.script = p2pkhLockScript(params.serverPublicKeyHex);
+  tx.outputs[1]!.script = p2pkhLockScript(params.clientPublicKeyHex);
+  return { txHex: bytesToHex(serializeTx(tx)) };
+}
+
 export async function sdkClientSignInitialSpendTx(params: {
   txHex: string;
   totalAmount: number;
-  clientPrivateKeyHex: string;
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
+  clientPublicKeyHex: string;
   serverPublicKeyHex: string;
 }): Promise<Uint8Array> {
-  const { PrivateKey, PublicKey, Transaction } = await import("@bsv/sdk");
-  const clientPrivKey = PrivateKey.fromHex(params.clientPrivateKeyHex);
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const tx = Transaction.fromHex(params.txHex);
-  const sig = await spendTXDualFeePoolClientSign(
-    tx,
-    params.totalAmount,
-    clientPrivKey,
-    serverPubKey
-  );
-  return Uint8Array.from(sig);
+  const tx = deserializeTx(hexToBytes(params.txHex));
+  const scriptCode = dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex);
+  const sighash = calcBip143Sighash(tx, 0, scriptCode, params.totalAmount);
+  const der = await params.signDigest(sighash);
+  return concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
 }
 
-/**
- * 载入现有 B-Tx 草稿（V4 关键入口）。
- *
- * 用 SDK `loadTx` 改 `locktime` / `sequence` / `serverAmount` / `targetAmount`
- * 后返回新 Transaction 对象。**这是 spend 操作的核心**：不构造新 spend tx，
- * 而是在已有草稿上改字段。
- *
- * 用在：
- *   - `spend`：在旧草稿上把 `serverAmount` 改成 `prior.serverAmount + amountSatoshis`；
- *     locktime/sequence 保持未来生效值。
- *   - `close_and_recreate` 的 close 之前的 spend：同上（累加 `amountSatoshis`）。
- *   - `close_and_recreate` 的 close 部分：把 `serverAmount` 改成
- *     `prior.serverAmount + amountSatoshis`，**同时**把 `locktime = FINAL_LOCKTIME`、
- *     `sequence = 0xFFFFFFFF`，让草稿变成"最终可立即生效版本"。
- */
-export async function sdkLoadDraftSpendTx(params: {
-  prevDraftHex: string;
-  /** `undefined` 表示保持原 locktime；`FINAL_LOCKTIME` 表示 final close。 */
-  locktime: number | undefined;
-  /** `0xFFFFFFFF` 表示 final close（立即生效）；保持未来生效则用较小值。 */
-  sequenceNumber: number;
-  /** 新的 `serverAmount` 字段值。 */
-  serverAmount: number;
-  /** 当前池 server 公钥。 */
-  serverPublicKeyHex: string;
-  /** 当前池 client 公钥。 */
-  clientPublicKeyHex: string;
-  /** 池大小（multisig output 总额）。SDK 用它做 sighash 计算。 */
-  targetAmount: number;
-}): Promise<FeepoolSdkDraftTxResponse> {
-  const { PublicKey, Transaction } = await import("@bsv/sdk");
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const clientPubKey = PublicKey.fromString(params.clientPublicKeyHex);
-  const updated = loadDualFeePoolTx(
-    params.prevDraftHex,
-    params.locktime,
-    params.sequenceNumber,
-    params.serverAmount,
-    serverPubKey,
-    clientPubKey,
-    params.targetAmount
-  );
-  return { txHex: updated.toHex() };
-}
-
-/**
- * 在**更新后**的 B-Tx 草稿上做 client 重签。
- *
- * 用在 `spend`（在旧草稿上 `loadTx` 改 serverAmount 后重签）和
- * `close_and_recreate` 的 close 部分（同上重签）。注意：这是**初始签名
- * 的替换**——`clientDualFeePoolSpendTXUpdateSign` 会重写 inputs[0] 的
- * unlock script（清掉旧 client 签名，加新 client 签名）。
- */
 export async function sdkClientSignUpdatedSpendTx(params: {
   txHex: string;
-  clientPrivateKeyHex: string;
+  sourceSatoshis: number;
+  signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
+  clientPublicKeyHex: string;
   serverPublicKeyHex: string;
 }): Promise<Uint8Array> {
-  const { PrivateKey, PublicKey, Transaction } = await import("@bsv/sdk");
-  const clientPrivKey = PrivateKey.fromHex(params.clientPrivateKeyHex);
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const tx = Transaction.fromHex(params.txHex);
-  const sig = clientDualFeePoolSpendTXUpdateSign(tx, clientPrivKey, serverPubKey);
-  return Uint8Array.from(sig);
+  const tx = deserializeTx(hexToBytes(params.txHex));
+  const scriptCode = dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex);
+  const sighash = calcBip143Sighash(tx, 0, scriptCode, params.sourceSatoshis);
+  const der = await params.signDigest(sighash);
+  return concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
 }
 
-/**
- * 验签 server 在**初始 B-Tx 草稿**上的部分签名。
- *
- * 用在 commit 阶段 action=`create` / close_and_recreate 的新池分支。
- * `totalAmount` 是必需的：base tx 还没广播，sighash 必须显式给 satoshi 数。
- */
 export async function sdkVerifyServerInitialSpendSig(params: {
   txHex: string;
   totalAmount: number;
@@ -249,48 +466,43 @@ export async function sdkVerifyServerInitialSpendSig(params: {
   clientPublicKeyHex: string;
   serverSignBytes: Uint8Array;
 }): Promise<boolean> {
-  const { PublicKey, Transaction } = await import("@bsv/sdk");
-  const tx = Transaction.fromHex(params.txHex);
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const clientPubKey = PublicKey.fromString(params.clientPublicKeyHex);
+  const tx = deserializeTx(hexToBytes(params.txHex));
+  const serverPub = publicKeyLike(params.serverPublicKeyHex);
+  const clientPub = publicKeyLike(params.clientPublicKeyHex);
   return clientVerifyServerSpendSig(
-    tx,
+    tx as any,
     params.totalAmount,
-    serverPubKey,
-    clientPubKey,
+    serverPub as never,
+    clientPub as never,
     Array.from(params.serverSignBytes)
   );
 }
 
-/**
- * 验签 server 在**更新后 B-Tx 草稿**上的部分签名。
- *
- * 用在 commit 阶段 action=`spend` / close_and_recreate 的 close 部分。
- * 与 `clientVerifyServerSpendSig` 不同：update sig 的 sighash 计算方式不同，
- * SDK 因此分成两个独立函数。
- */
 export async function sdkVerifyServerUpdateSig(params: {
   txHex: string;
   serverPublicKeyHex: string;
   clientPublicKeyHex: string;
   serverSignBytes: Uint8Array;
 }): Promise<boolean> {
-  const { PublicKey, Transaction } = await import("@bsv/sdk");
-  const tx = Transaction.fromHex(params.txHex);
-  const serverPubKey = PublicKey.fromString(params.serverPublicKeyHex);
-  const clientPubKey = PublicKey.fromString(params.clientPublicKeyHex);
+  const tx = deserializeTx(hexToBytes(params.txHex));
   return clientVerifyServerUpdateSig(
-    tx,
-    serverPubKey,
-    clientPubKey,
+    tx as never,
+    publicKeyLike(params.serverPublicKeyHex) as never,
+    publicKeyLike(params.clientPublicKeyHex) as never,
     Array.from(params.serverSignBytes)
   );
 }
 
-/** 33-byte compressed 公钥 hex 合法性检查（在 commit 验签前再一次过滤）。 */
-export function isValidCompressedPubkeyHex(hex: string): boolean {
-  if (hex.length !== 66) return false;
-  if (!/^[0-9a-fA-F]+$/.test(hex)) return false;
-  // prefix 必须是 02 或 03（compressed secp256k1）
-  return hex.startsWith("02") || hex.startsWith("03");
+export function calcTxidFromRawTxHex(rawTxHex: string): string {
+  const bytes = hexToBytes(rawTxHex);
+  const hash = dsha256(bytes);
+  return bytesToHex(new Uint8Array([...hash].reverse()));
+}
+
+function publicKeyLike(hex: string): { toString(): string } {
+  return {
+    toString() {
+      return hex;
+    }
+  };
 }

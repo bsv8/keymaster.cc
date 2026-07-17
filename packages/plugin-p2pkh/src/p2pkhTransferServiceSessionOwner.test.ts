@@ -19,6 +19,7 @@
 import "fake-indexeddb/auto";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import type { KeyIdentity, KeyScopedStorageHandle, KeyspaceService } from "@keymaster/contracts";
 import {
   createP2pkhTransferService,
@@ -38,7 +39,66 @@ import {
 import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
 
 const OWNER_A_PRIV = "00000000000000000000000000000000000000000000000000000000000000a1";
-const OWNER_B_PRIV = "00000000000000000000000000000000000000000000000000000000000000b2";
+const OWNER_B_PRIV = "00000000000000000000000000000000000000000000000000000000000000b1";
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+function makeVault() {
+  return {
+    status: () => "unlocked",
+    createActiveKeyCrypto: async (publicKeyHex: string) => {
+      const privHex = publicKeyHex === OWNER_A_HEX ? OWNER_A_PRIV : OWNER_B_PRIV;
+      const derived = deriveP2pkhAddress(privHex, "main");
+      return {
+        getIdentity: () => ({
+          sessionId: "session-owner-test",
+          publicKeyHex: derived.publicKeyHex,
+          label: "test",
+          capabilities: ["p2pkh"],
+          createdAt: "2024-01-01T00:00:00.000Z"
+        }),
+        async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+          if (input.publicKeyHex !== derived.publicKeyHex) {
+            throw new Error("session_key_mismatch");
+          }
+          const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(privHex), {
+            lowS: true,
+            prehash: false,
+            format: "compact"
+          });
+          return {
+            publicKeyHex: derived.publicKeyHex,
+            signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
+          };
+        },
+        async deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }) {
+          if (input.publicKeyHex !== derived.publicKeyHex) {
+            throw new Error("session_key_mismatch");
+          }
+          const address = deriveP2pkhAddress(privHex, input.network);
+          return {
+            publicKeyHex: address.publicKeyHex,
+            address: address.address
+          };
+        }
+      };
+    },
+    withPrivateKey: async (
+      publicKeyHex: string,
+      fn: (material: { hex: string }) => Promise<string> | string
+    ) => {
+      const privHex = publicKeyHex === OWNER_A_HEX ? OWNER_A_PRIV : OWNER_B_PRIV;
+      return fn({ hex: privHex });
+    }
+  } as never;
+}
 const OWNER_A = deriveP2pkhAddress(OWNER_A_PRIV, "main");
 const OWNER_B = deriveP2pkhAddress(OWNER_B_PRIV, "main");
 const OWNER_A_HEX = OWNER_A.publicKeyHex;
@@ -180,16 +240,7 @@ function makeTransferFor(
   ownerHex: string
 ): P2pkhTransferService {
   return createP2pkhTransferService({
-    vault: {
-      status: () => "unlocked",
-      withPrivateKey: async (
-        publicKeyHex: string,
-        fn: (material: { hex: string }) => Promise<string> | string
-      ) => {
-        const priv = publicKeyHex === OWNER_A_HEX ? OWNER_A_PRIV : OWNER_B_PRIV;
-        return fn({ hex: priv });
-      }
-    } as never,
+    vault: makeVault(),
     woc: {
       broadcast: vi.fn(async (_n: "main" | "test", rawTxHex: string) => ({
         accepted: true,
@@ -349,11 +400,7 @@ describe("p2pkh.transfer session owner -> namespace db routing", () => {
     keyspace.setActive(OWNER_A_HEX);
     const service = await import("./p2pkhService.js").then((m) =>
       m.createP2pkhService({
-        vault: {
-          status: () => "unlocked",
-          withPrivateKey: async (_h: string, fn: (m: { hex: string }) => Promise<string> | string) =>
-            fn({ hex: OWNER_A_PRIV })
-        } as never,
+        vault: makeVault(),
         woc: {} as never,
         messageBus: { publish: () => undefined, subscribe: () => () => undefined } as never,
         backgroundRegistry: {
@@ -452,11 +499,7 @@ describe("p2pkh.transfer concurrent submit atomic claim", () => {
     });
     let broadcastCallCount = 0;
     const transferGated = createP2pkhTransferService({
-      vault: {
-        status: () => "unlocked",
-        withPrivateKey: async (_publicKeyHex: string, fn: (material: { hex: string }) => Promise<string> | string) =>
-          fn({ hex: OWNER_A_PRIV })
-      } as never,
+      vault: makeVault(),
       woc: {
         broadcast: vi.fn(async (_n: "main" | "test", rawTxHex: string) => {
           broadcastCallCount += 1;
@@ -535,11 +578,7 @@ describe("p2pkh.transfer definitive rejection releases claim", () => {
     //   - 错误信息里包含 "rejected" 字样。
     //   - WocService 抛错而不是返回 accepted=false。
     const transfer = createP2pkhTransferService({
-      vault: {
-        status: () => "unlocked",
-        withPrivateKey: async (_publicKeyHex: string, fn: (material: { hex: string }) => Promise<string> | string) =>
-          fn({ hex: OWNER_A_PRIV })
-      } as never,
+      vault: makeVault(),
       woc: {
         broadcast: vi.fn(async () => {
           throw new Error("transaction rejected by peer: bad-txns-inputs-missingorspent");

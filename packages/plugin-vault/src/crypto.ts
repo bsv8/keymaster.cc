@@ -74,26 +74,67 @@ export interface EncryptedBlob {
   iv: Uint8Array;
   /** AES-GCM 密文（包含 tag）。 */
   ciphertext: Uint8Array;
+  /** 版本化标识，便于调用方明确选择读取分支。 */
+  version?: "v1" | "v2";
 }
+
+/** Vault v2 固定 key AAD。 */
+export function vaultKeyAad(publicKeyHex: string): string {
+  return `${VAULT_KEY_AAD_PREFIX}${publicKeyHex}`;
+}
+
+/** Vault v2 固定 verifier AAD。 */
+export const VAULT_VERIFIER_AAD = "keymaster:v2|vault-verifier";
+
+/** Vault v2 固定 key AAD 前缀。 */
+export const VAULT_KEY_AAD_PREFIX = "keymaster:v2|vault-key|";
 
 /** 加密任意 bytes。 */
 export async function encryptBytes(key: CryptoKey, plaintext: Uint8Array): Promise<EncryptedBlob> {
+  return encryptBytesWithAad(key, plaintext, undefined);
+}
+
+/** 加密任意 bytes，并显式指定 AAD。 */
+export async function encryptBytesWithAad(
+  key: CryptoKey,
+  plaintext: Uint8Array,
+  aad: string | undefined
+): Promise<EncryptedBlob> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
+  const additionalData = aad ? new TextEncoder().encode(aad) : undefined;
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv as BufferSource },
+      {
+        name: "AES-GCM",
+        iv: iv as BufferSource,
+        additionalData: additionalData as BufferSource | undefined
+      },
       key,
       plaintext as BufferSource
     )
   );
-  return { salt, iv, ciphertext };
+  return { salt, iv, ciphertext, version: aad ? "v2" : "v1" };
 }
 
 /** 解密。失败抛错（密码错误、篡改都会触发）。 */
 export async function decryptBytes(key: CryptoKey, blob: EncryptedBlob): Promise<Uint8Array> {
+  return decryptBytesWithAad(key, blob, undefined);
+}
+
+/** 解密。失败抛错（密码错误、篡改都会触发）。 */
+export async function decryptBytesWithAad(
+  key: CryptoKey,
+  blob: EncryptedBlob,
+  aad: string | undefined
+): Promise<Uint8Array> {
+  const additionalData = aad ? new TextEncoder().encode(aad) : undefined;
   const plain = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv: blob.iv as BufferSource },
+    {
+      name: "AES-GCM",
+      iv: blob.iv as BufferSource,
+      additionalData: additionalData as BufferSource | undefined
+    },
     key,
     blob.ciphertext as BufferSource
   );
@@ -117,14 +158,14 @@ export function bytesToHex(bytes: Uint8Array): string {
 
 /** 验证密码：保存一份 verifier，密码错误时 verifier 也对不上。 */
 export async function encryptVerifier(key: CryptoKey): Promise<EncryptedBlob> {
-  const marker = new TextEncoder().encode("vault:v1");
-  return encryptBytes(key, marker);
+  const marker = new TextEncoder().encode(VAULT_VERIFIER_AAD);
+  return encryptBytesWithAad(key, marker, VAULT_VERIFIER_AAD);
 }
 
 export async function verifyVerifier(key: CryptoKey, blob: EncryptedBlob): Promise<boolean> {
   try {
-    const plain = await decryptBytes(key, blob);
-    return new TextDecoder().decode(plain) === "vault:v1";
+    const plain = await decryptBytesWithAad(key, blob, VAULT_VERIFIER_AAD);
+    return new TextDecoder().decode(plain) === VAULT_VERIFIER_AAD;
   } catch {
     return false;
   }

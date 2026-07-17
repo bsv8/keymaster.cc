@@ -148,7 +148,7 @@ export function ProtocolPopupPage() {
    *
    * 施工单 2026-06-30 003 硬切换 4.5：传入的 `locked` 仅表达 vault 当前
    * 状态；`setVaultLockState` 内部用 `computeLockState()` 同时参考
-   * `bootstrap_owner` 是否已注册——appView bootstrap 完成后即便 vault
+   * `bootstrap_runtime` 是否已注册——appView bootstrap 完成后即便 vault
    * 被 relock，Session Window 仍维持 unlocked，不被错误送回全屏锁屏。
    */
   useEffect(() => {
@@ -606,21 +606,21 @@ function AppViewBootstrapFailedPage({
 }) {
   // reason 取值约定（protocol.service 内部定）：
   //   - bootstrap_payload_invalid
-  //   - bootstrap_owner_runtime_missing
-  //   - bootstrap_owner_runtime_invalid
-  //   - bootstrap_owner_runtime_pubkey_mismatch
+  //   - bootstrap_runtime_missing
+  //   - bootstrap_runtime_invalid
+  //   - bootstrap_runtime_pubkey_mismatch
   //   - bootstrap_token_missing / launcher_*
   //   - 其它：兜底"could not start the app"
   let titleKey =
     "protocol.sessionWindow.appView.failed.title";
   let descKey =
     "protocol.sessionWindow.appView.failed.desc";
-  if (reason === "bootstrap_owner_runtime_missing") {
+  if (reason === "bootstrap_runtime_missing") {
     titleKey = "protocol.sessionWindow.appView.ownerRuntimeMissing.title";
     descKey = "protocol.sessionWindow.appView.ownerRuntimeMissing.desc";
   } else if (
-    reason === "bootstrap_owner_runtime_invalid" ||
-    reason === "bootstrap_owner_runtime_pubkey_mismatch"
+    reason === "bootstrap_runtime_invalid" ||
+    reason === "bootstrap_runtime_pubkey_mismatch"
   ) {
     titleKey = "protocol.sessionWindow.appView.ownerRuntimeMismatch.title";
     descKey = "protocol.sessionWindow.appView.ownerRuntimeMismatch.desc";

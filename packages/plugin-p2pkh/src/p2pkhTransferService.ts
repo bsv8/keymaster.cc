@@ -20,11 +20,11 @@ import type {
   ReadyKeyIdentity
 } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
+import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { localInputClaimIdFor, type P2pkhDbHandle } from "./p2pkhDb.js";
 import {
   buildP2pkhTx,
   calcTxidFromRawTxHex,
-  deriveP2pkhAddress,
   rawTxHexByteLength,
   signP2pkhTx,
   type UnsignedTx
@@ -77,6 +77,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const network = assetIdToNetwork(validated.assetId);
       const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
       const db = await deps.getDb(owner.publicKeyHex);
+      const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
       const resourceId = makeResourceId(network);
       const resource = await db.getResource(resourceId);
       if (!resource) {
@@ -110,14 +111,23 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       }
 
       const sorted = [...candidates].sort((a, b) => a.value - b.value);
-      const { address: changeAddress, publicKeyHex } = await deps.vault.withPrivateKey(
-        owner.publicKeyHex,
-        async (material) => deriveP2pkhAddress(material.hex, network)
-      );
+      const { address: changeAddress } = await activeCrypto.deriveP2pkhAddress({
+        publicKeyHex: owner.publicKeyHex,
+        network
+      });
+      const publicKeyHex = owner.publicKeyHex;
       const signRawTx = async (unsigned: UnsignedTx, selected: P2pkhUtxo[]): Promise<string> =>
-        deps.vault.withPrivateKey(
-          owner.publicKeyHex,
-          async (material) => signP2pkhTx(unsigned, selected, material, publicKeyHex)
+        signP2pkhTx(
+          unsigned,
+          selected,
+          (digest) =>
+            activeCrypto
+              .signDigest({
+                publicKeyHex,
+                digest: new Uint8Array(digest).buffer
+              })
+              .then((r) => new Uint8Array(r.signature)),
+          publicKeyHex
         );
 
       let bestError: AllocationFailureInfo | undefined;
@@ -325,6 +335,25 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       };
     }
   };
+}
+
+async function resolveActiveKeyCrypto(vault: VaultService, publicKeyHex: string) {
+  const anyVault = vault as VaultService & {
+    createActiveKeyCrypto?: (hex: string) => Promise<{
+      deriveP2pkhAddress: (input: { publicKeyHex: string; network: "main" | "test" }) => Promise<{
+        publicKeyHex: string;
+        address: string;
+      }>;
+      signDigest: (input: { publicKeyHex: string; digest: ArrayBuffer }) => Promise<{
+        publicKeyHex: string;
+        signature: ArrayBuffer;
+      }>;
+    }>;
+  };
+  if (typeof anyVault.createActiveKeyCrypto === "function") {
+    return await anyVault.createActiveKeyCrypto(publicKeyHex);
+  }
+  throw new Error("Vault does not provide createActiveKeyCrypto");
 }
 
 /**

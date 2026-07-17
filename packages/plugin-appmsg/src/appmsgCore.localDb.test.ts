@@ -21,6 +21,10 @@ import type {
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
 
 const OWNER = "02aaaa".padEnd(66, "a");
+const DUMMY_ENVELOPE = {
+  envelopeBytes: new Uint8Array(),
+  signatureBytes: new Uint8Array()
+} as any;
 
 // 关键 mock：在 `appmsgCore` import 之前替换 `appmsgDb` 模块的导出。
 vi.mock("./appmsgDb.js", () => ({
@@ -96,7 +100,28 @@ describe("AppMsgCoreImpl - local db unavailable", () => {
       }
     };
     const cfg: AppMsgCoreConfig = {
-      signerProvider: async () => ({ publicKeyHex: OWNER, privateKeyHex: "00".repeat(32), signChallenge: async () => "00".repeat(64) }),
+      signerProvider: async () => ({
+        publicKeyHex: OWNER,
+        signChallenge: async () => "00".repeat(64),
+        openSealed: async () => null,
+        sealSendInput: (input) => ({
+          record: {
+            messageId: "",
+            senderPublicKeyHex: OWNER,
+            senderEndpointId: input.sender.senderOrigin ?? input.sender.senderAppId ?? "",
+            senderEndpointKind: input.sender.senderOrigin ? "origin" : "plugin",
+            recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
+            recipientEndpointId: input.recipient.recipientOrigin ?? input.recipient.recipientAppId ?? "",
+            recipientEndpointKind: input.recipient.recipientOrigin ? "origin" : "plugin",
+            clientMessageId: input.clientMessageId,
+            contentType: input.contentType,
+            body: input.body,
+            createdAtMs: input.createdAtMs,
+            insertedAtMs: input.createdAtMs,
+            envelope: DUMMY_ENVELOPE
+          }
+        })
+      }),
       keyspace,
       pluginId: "appmsg",
       storageId: "messages_v2",

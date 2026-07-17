@@ -1,9 +1,15 @@
 // packages/contracts/src/keyImport.ts
 // 私钥导入契约：plugin-key-import 是平台，importer-* 是格式实现。
-// Importer 只负责解析输入并返回标准 PrivateKeyMaterial，禁止直接写 Vault。
+// Importer 只负责解析输入并返回标准导入材料，禁止直接写 Vault。
 
-import type { BsvNetwork, PrivateKeyMaterial } from "./vault.js";
+import type { BsvNetwork } from "./vault.js";
 import type { I18nText } from "./i18n.js";
+
+/** Importer 输出的私钥材料。 */
+export interface KeyImportMaterial {
+  hex: string;
+  wif?: string;
+}
 
 /**
  * Importer 输入类型。
@@ -19,8 +25,8 @@ export type KeyImportInput =
 
 /** 单条解析结果。 */
 export interface KeyImportResult {
-  /** 私钥材料。 */
-  material: PrivateKeyMaterial;
+  /** 导入材料。 */
+  material: KeyImportMaterial;
   /** 派生的 BSV 地址。 */
   address: string;
   /** 推断的网络；未指定时由调用方决定。 */

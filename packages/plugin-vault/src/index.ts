@@ -4,5 +4,7 @@
 
 export { vaultPlugin, VAULT_CAPABILITY } from "./manifest.js";
 export { VaultKeyExportModal } from "./VaultKeyExportModal.js";
+export { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
+export { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
 export { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
 export { KeySwitchWidget } from "./KeySwitchWidget.js";

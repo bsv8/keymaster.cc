@@ -26,9 +26,11 @@
 
 import type {
   AppMsgCore,
+  AppMsgContentType,
   I18nPluginResources,
   KeyspaceService,
   MessageProviderRegistry,
+  ProviderSealedMessageRecord,
   PluginContext,
   PluginManifest,
   VaultService
@@ -41,6 +43,7 @@ import {
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
 import { AppMsgPage } from "./AppMsgPage.js";
 import type { AppMsgBindSigner } from "./appmsgCore.js";
+import { AppMsgCryptoError, openAppMessage, sealAppMessage } from "./appmsgCrypto.js";
 import { createReconnectCoordinator } from "./reconnectCoordinator.js";
 
 /** plugin-appmsg 平台插件 id。 */
@@ -315,20 +318,71 @@ export const appmsgPlatformPlugin: PluginManifest = {
 	          message: "",
 	          data: { publicKeyHex: pubHex }
 	        });
-	        return await vault.withPrivateKey(pubHex, async (material) => {
-	          const { signChallengeWithSecp256k1 } = await import("./signer.js");
-	          ctx.logger.info({
-	            scope: "appmsg.core",
-	            event: "appmsg.signer_provider.ready",
-	            message: "",
-	            data: { publicKeyHex: pubHex }
-	          });
-	          return {
-	            publicKeyHex: pubHex,
-	            privateKeyHex: material.hex,
-            signChallenge: async (args: {
-              challenge: Uint8Array;
-            }): Promise<string> => {
+	        const crypto = await vault.createActiveKeyCrypto(pubHex);
+	        const { signChallengeWithSecp256k1 } = await import("./signer.js");
+	        const derToCompactSignature = (der: Uint8Array): Uint8Array => {
+	          if (der.length < 8 || der[0] !== 0x30) {
+	            throw new Error("appmsg.core: invalid DER signature");
+	          }
+	          let offset = 2;
+	          if (der[1]! & 0x80) {
+	            const lenBytes = der[1]! & 0x7f;
+	            offset = 2 + lenBytes;
+	          }
+	          const readInt = (): Uint8Array => {
+	            if (der[offset++] !== 0x02) throw new Error("appmsg.core: invalid DER signature");
+	            let len = der[offset++] ?? 0;
+	            if (len & 0x80) {
+	              const lenBytes = len & 0x7f;
+	              len = 0;
+	              for (let i = 0; i < lenBytes; i++) {
+	                len = (len << 8) | (der[offset++] ?? 0);
+	              }
+	            }
+	            const raw = der.slice(offset, offset + len);
+	            offset += len;
+	            let start = 0;
+	            while (start < raw.length - 1 && raw[start] === 0x00) start++;
+	            const trimmed = raw.slice(start);
+	            if (trimmed.length > 32) {
+	              throw new Error("appmsg.core: invalid compact signature length");
+	            }
+	            const out = new Uint8Array(32);
+	            out.set(trimmed, 32 - trimmed.length);
+	            return out;
+	          };
+	          const r = readInt();
+	          const s = readInt();
+	          const compact = new Uint8Array(64);
+	          compact.set(r, 0);
+	          compact.set(s, 32);
+	          return compact;
+	        };
+	        ctx.logger.info({
+	          scope: "appmsg.core",
+	          event: "appmsg.signer_provider.ready",
+	          message: "",
+	          data: { publicKeyHex: pubHex }
+	        });
+          const senderEndpointOf = (input: {
+            sender: { senderOrigin?: string; senderAppId?: string };
+          }): { kind: "origin" | "plugin"; id: string } => {
+            if (input.sender.senderOrigin) return { kind: "origin", id: input.sender.senderOrigin };
+            if (input.sender.senderAppId) return { kind: "plugin", id: input.sender.senderAppId };
+            throw new Error("appmsg.core: senderEndpointKind invalid");
+          };
+          const recipientEndpointOf = (input: {
+            recipient: { recipientOrigin?: string; recipientAppId?: string };
+          }): { kind: "origin" | "plugin"; id: string } => {
+            if (input.recipient.recipientOrigin)
+              return { kind: "origin", id: input.recipient.recipientOrigin };
+            if (input.recipient.recipientAppId)
+              return { kind: "plugin", id: input.recipient.recipientAppId };
+            throw new Error("appmsg.core: recipientEndpointKind invalid");
+          };
+          return {
+            publicKeyHex: pubHex,
+            signChallenge: async (args: { challenge: Uint8Array }): Promise<string> => {
               ctx.logger.info({
                 scope: "appmsg.core",
                 event: "appmsg.signer_provider.sign.begin",
@@ -339,7 +393,20 @@ export const appmsgPlatformPlugin: PluginManifest = {
                 }
               });
               const startedAt = Date.now();
-              const signature = await signChallengeWithSecp256k1(material.hex, args.challenge);
+              const signature = await signChallengeWithSecp256k1(
+                async (digest) =>
+                  derToCompactSignature(
+                    new Uint8Array(
+                      (
+                        await crypto.signDigest({
+                          publicKeyHex: pubHex,
+                          digest: digest.slice().buffer as ArrayBuffer
+                        })
+                      ).signature
+                    )
+                  ),
+                args.challenge
+              );
               ctx.logger.info({
                 scope: "appmsg.core",
                 event: "appmsg.signer_provider.sign.done",
@@ -351,9 +418,59 @@ export const appmsgPlatformPlugin: PluginManifest = {
                 }
               });
               return signature;
+            },
+            openSealed: async (rec: ProviderSealedMessageRecord) => {
+              const opened = await crypto.openSealed(rec);
+              if (!opened) {
+                return null;
+              }
+              return opened;
+            },
+            sealSendInput: (input) => {
+              try {
+                if (
+                  input.contentType !== "text/plain" &&
+                  input.contentType !== "text/markdown"
+                ) {
+                  return { error: "appmsg.core: invalid contentType" };
+                }
+                if (typeof input.body !== "string" || input.body.length === 0) {
+                  return { error: "appmsg.core: body must be non-empty" };
+                }
+                if (!input.clientMessageId) {
+                  return { error: "appmsg.core: clientMessageId required" };
+                }
+                if (!input.recipient.recipientPublicKeyHex) {
+                  return { error: "appmsg.core: recipientPublicKeyHex required" };
+                }
+                const sealed = crypto.sealSendInput({
+                  sender: {
+                    senderPublicKeyHex: pubHex,
+                    senderOrigin: input.sender.senderOrigin,
+                    senderAppId: input.sender.senderAppId
+                  },
+                  recipient: {
+                    recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
+                    recipientOrigin: input.recipient.recipientOrigin,
+                    recipientAppId: input.recipient.recipientAppId
+                  },
+                  contentType: input.contentType,
+                  body: input.body,
+                  clientMessageId: input.clientMessageId,
+                  createdAtMs: input.createdAtMs
+                });
+                if ("error" in sealed) {
+                  return sealed;
+                }
+                return {
+                  record: sealed.record
+                };
+              } catch (err) {
+                return { error: err instanceof Error ? err.message : String(err) };
+              }
             }
-          };
-        });
+          } as AppMsgBindSigner;
+
 	      } catch (err) {
 	        ctx.logger.error({
 	          scope: "appmsg.core",
@@ -482,13 +599,23 @@ export const appmsgPlatformPlugin: PluginManifest = {
       resolve: () => [{ label: { key: "appmsg.breadcrumb", fallback: "AppMsg" } }]
     });
 
-    return () => {
-      offProviderSnapshot();
-      coordinator.dispose();
-      void core.disconnect();
-    };
+	    return () => {
+	      offProviderSnapshot();
+	      coordinator.dispose();
+	      void core.disconnect();
+	    };
   }
 };
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.replace(/^0x/, "");
+  if (clean.length % 2 !== 0) throw new Error("hex length must be even");
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
 
 // 防止 IDE 报 unused
 void (null as unknown as AppMsgBindSigner);

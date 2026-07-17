@@ -39,7 +39,7 @@ describe("conformance: typed-output build/parse", () => {
 
   it("parse round-trips every template kind", () => {
     for (const kind of Object.keys(TX_TEMPLATES) as Array<keyof typeof TX_TEMPLATES>) {
-      const tpl = TX_TEMPLATES[kind];
+      const tpl = TX_TEMPLATES[kind]!;
       const fields = tpl.fields.map((name, i) => BsvEncoding.fromUtf8(`${kind}-${name}-${i}`));
       const built = buildTypedOutput(kind, fields, FIXED_PUB_A);
       const parsed = parseTypedOutput(built);

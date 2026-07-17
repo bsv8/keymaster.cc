@@ -26,13 +26,21 @@
 // 内部瞬时或异常兜底）。
 
 import { useEffect, useState } from "react";
-import { ChevronDown, KeyRound, Check, AlertTriangle } from "lucide-react";
+import { ChevronDown, KeyRound, Check } from "lucide-react";
 import { router, useCapability, useI18n } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
-import type { ActiveKeyState, KeyIdentity, KeyspaceService, MessageBus } from "@keymaster/contracts";
+import { Button, Modal, TextInput } from "@keymaster/ui";
+import type {
+  ActiveKeyState,
+  KeyIdentity,
+  KeyspaceService,
+  MessageBus,
+  VaultService
+} from "@keymaster/contracts";
 
 export function KeySwitchWidget() {
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const vault = useCapability<VaultService>("vault.service");
   const messageBus = useCapability<MessageBus>("runtime.messageBus");
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -42,6 +50,10 @@ export function KeySwitchWidget() {
   const [open, setOpen] = useState(false);
   const [initializing, setInitializing] = useState(keyspace.isInitializing());
   const [busy, setBusy] = useState(false);
+  const [pendingSwitch, setPendingSwitch] = useState<KeyIdentity | null>(null);
+  const [switchPassword, setSwitchPassword] = useState("");
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [switchBusy, setSwitchBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -103,16 +115,45 @@ export function KeySwitchWidget() {
     ? keys.find((k) => k.publicKeyHex === active.activePublicKeyHex)
     : undefined;
 
-  async function pick(hex: string) {
-    if (busy) return;
-    setBusy(true);
+  function closeSwitchDialog() {
+    if (switchBusy) return;
+    setPendingSwitch(null);
+    setSwitchPassword("");
+    setSwitchError(null);
+  }
+
+  async function pick(key: KeyIdentity) {
+    if (busy || switchBusy) return;
+    if (!key.publicKeyHex || key.publicKeyHex === active.activePublicKeyHex) {
+      setOpen(false);
+      return;
+    }
+    setPendingSwitch(key);
+    setSwitchPassword("");
+    setSwitchError(null);
+  }
+
+  async function submitSwitch() {
+    if (!pendingSwitch?.publicKeyHex || switchBusy) return;
+    setSwitchBusy(true);
+    setSwitchError(null);
     try {
-      await keyspace.setActive(hex);
+      await vault.activateKey({
+        publicKeyHex: pendingSwitch.publicKeyHex,
+        password: switchPassword
+      });
+      setPendingSwitch(null);
+      setSwitchPassword("");
+      setSwitchError(null);
       setOpen(false);
     } catch (err) {
-      console.error("Failed to switch key", err);
+      setSwitchError(
+        err instanceof Error
+          ? err.message
+          : t("vault.keySwitch.err.failed", { defaultValue: "Failed to switch key" })
+      );
     } finally {
-      setBusy(false);
+      setSwitchBusy(false);
     }
   }
 
@@ -150,7 +191,7 @@ export function KeySwitchWidget() {
               type="button"
               key={k.publicKeyHex}
               className={`key-switch__item ${active.activePublicKeyHex === k.publicKeyHex ? "key-switch__active" : ""}`}
-              onClick={() => k.publicKeyHex && pick(k.publicKeyHex)}
+              onClick={() => pick(k)}
               disabled={busy || !k.publicKeyHex}
             >
               <span className="key-switch__item-label">
@@ -179,6 +220,45 @@ export function KeySwitchWidget() {
           </button>
         </div>
       ) : null}
+      <Modal
+        open={pendingSwitch !== null}
+        title={t("vault.keySwitch.confirmTitle", { defaultValue: "Confirm switch" })}
+        onClose={closeSwitchDialog}
+        footer={
+          <>
+            <Button variant="ghost" onClick={closeSwitchDialog} disabled={switchBusy}>
+              {t("common.action.cancel", { defaultValue: "Cancel" })}
+            </Button>
+            <Button onClick={submitSwitch} loading={switchBusy} disabled={!switchPassword}>
+              {t("vault.keySwitch.confirm", { defaultValue: "Confirm" })}
+            </Button>
+          </>
+        }
+      >
+        <p className="key-switch__confirm-hint">
+          {t("vault.keySwitch.confirmHint", {
+            defaultValue: "Enter the Vault password to unlock the selected key."
+          })}
+        </p>
+        {pendingSwitch ? (
+          <p className="key-switch__confirm-target">
+            {pendingSwitch.label || unnamed}
+            {" "}
+            {pendingSwitch.publicKeyHex ? (
+              <code>{formatShortPublicKey(pendingSwitch.publicKeyHex)}</code>
+            ) : null}
+          </p>
+        ) : null}
+        <TextInput
+          label={t("vault.keySwitch.password", { defaultValue: "Password" })}
+          type="password"
+          autoComplete="current-password"
+          value={switchPassword}
+          onChange={(e) => setSwitchPassword(e.currentTarget.value)}
+          error={switchError ?? undefined}
+          autoFocus
+        />
+      </Modal>
     </div>
   );
 }

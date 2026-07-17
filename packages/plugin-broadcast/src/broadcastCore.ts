@@ -64,8 +64,8 @@ interface SubscribeHandle {
 
 interface BoundSession {
   ownerPublicKeyHex: string;
-  privKeyHex: string;
   handle: BroadcastProviderOperations;
+  signChallenge: (args: { challenge: Uint8Array }) => Promise<string>;
   /** 推送订阅清理函数（handle.subscribeBroadcasts 返回）。 */
   offReceive: BroadcastUnsubscribe | null;
   /** 远端断线订阅清理函数。 */
@@ -118,14 +118,13 @@ export interface StorageLike {
  * 给 provider 用的 owner signer 闭包（plugin-broadcast 内部类型）。
  *
  * 与 `AppMsgBindSigner` 同构风格：
- *   - `publicKeyHex` / `privateKeyHex`：闭包内短暂存在的明文；
+ *   - `publicKeyHex` / `signChallenge`：受控 capability；
  *   - `signChallenge`：通用 secp256k1 签名原语；
  *   - **不**夹带具体 provider 的协议字段；HubCast provider 内部
  *     自己决定 challenge 内容（bind 阶段四元组拼接下沉到 provider）。
  */
 export interface BroadcastSignerContext {
   publicKeyHex: string;
-  privateKeyHex: string;
   signChallenge(args: { challenge: Uint8Array }): Promise<string>;
 }
 
@@ -305,8 +304,6 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   private lastErrorValue: string | null = null;
   /** 当前 owner publicKeyHex（structural 视角）。null = 未就绪。 */
   private currentOwnerPublicKeyHex: string | null = null;
-  /** 当前 owner privateKeyHex（闭包内短暂持有；调用结束后清）。 */
-  private currentPrivKeyHex: string | null = null;
   /** 当前 core 状态。 */
   private stateValue: BroadcastCoreState = "idle";
   /** 下一次自动重连截止时间戳。null = 不等待。 */
@@ -478,7 +475,6 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     if (this.connectEpochValue !== myEpoch) {
       return { kind: "stale" };
     }
-    this.currentPrivKeyHex = ctx.privateKeyHex;
     const active = this.registry.active();
     if (!active) {
       this.lastErrorValue = "no_active_provider";
@@ -508,8 +504,8 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       const offClose = handle.onClose(() => this.onProviderClose());
       this.currentBound = {
         ownerPublicKeyHex,
-        privKeyHex: ctx.privateKeyHex,
         handle,
+        signChallenge: ctx.signChallenge,
         offReceive,
         offClose
       };
@@ -545,7 +541,6 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     this.lastErrorValue = null;
     this.nextReconnectAtMsValue = null;
     this.currentOwnerPublicKeyHex = null;
-    this.currentPrivKeyHex = null;
     this.fireStateChange();
   }
 
@@ -556,7 +551,6 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     this.lastErrorValue = null;
     this.nextReconnectAtMsValue = null;
     this.currentOwnerPublicKeyHex = null;
-    this.currentPrivKeyHex = null;
     this.fireStateChange();
   }
 
@@ -604,10 +598,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       envelope.createdAtMs,
       envelope.bodyBytes
     ]);
-    const signatureHex = signBroadcastEnvelope(
-      this.currentBound.privKeyHex,
-      envelopeBytes
-    );
+    const signatureHex = await this.currentBound.signChallenge({ challenge: envelopeBytes });
     const signatureBytes = hexToBytes(signatureHex);
     emitLog(this.cfg.logger, "info", "broadcast.core.publish.begin", {
       channelId: input.channelId,
@@ -728,8 +719,6 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   private async rebindForCurrentOwner(): Promise<void> {
     if (!this.currentOwnerPublicKeyHex) return;
     // setActive 触发的重连：owner 已在 setup 阶段被订阅过；当前
-    // privKeyHex 可能已失效（vault lock 切换 key），由 connectForOwner
-    // 内部重新调用 signerProvider 取最新。
     await this.connectForOwner(this.currentOwnerPublicKeyHex);
   }
 
@@ -823,7 +812,6 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     } catch {
       // ignore
     }
-    this.currentPrivKeyHex = null;
   }
 
   private fireStateChange(): void {

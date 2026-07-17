@@ -452,10 +452,10 @@ export function assetIdToNetwork(assetId: P2pkhAssetId): BsvNetwork {
 /**
  * Ready 状态 key 身份（硬切换 002 收尾）。
  *
- * KeyIdentity 已是 ready：canonical store 主键就是 publicKeyHex，build-time
- * 校验 + unlock-time staging migration 已经确保所有"存活 key"都派生出了
- * identity。`ReadyKeyIdentity` 保留只是为了在 service 层里做窄类型投影，
- * 让"必须带 publicKeyHex"在静态检查层面成立。
+ * KeyIdentity 已是 ready：canonical store 主键就是 publicKeyHex，Vault
+ * 解锁完成后已经完成 canonical records / AAD 升级，所有"存活 key"都
+ * 派生出了 identity。`ReadyKeyIdentity` 保留只是为了在 service 层里做
+ * 窄类型投影，让"必须带 publicKeyHex"在静态检查层面成立。
  */
 export interface ReadyKeyIdentity {
   publicKeyHex: string;

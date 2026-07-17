@@ -5,7 +5,7 @@
 //   - 协议层需要的密码学原语都收敛在文件里：
 //       sha256
 //       signCompactSecp256k1 （compact 64-byte r||s）
-//       deriveSiteKey         （HMAC-SHA256(privateKeySecret, "keymaster:cipher:v1|"+exactOrigin)）
+//       deriveSiteKey         （HMAC-SHA256(ownerPublicKeyHex, "keymaster:cipher:v1|"+exactOrigin)）
 //       aesGcmEncrypt / aesGcmDecrypt
 //   - cipher 的站点绑定不依赖 `aud` 参数，**只**从 event.origin 原样参与派生。
 //   - `AES-GCM` 固定 12 字节随机 nonce。
@@ -31,22 +31,16 @@ export function sha256Bytes(bytes: Uint8Array): Uint8Array {
  *     路径行为一致；不切换 DER / Schnorr。
  */
 export function signCompactSecp256k1(
-  privateKeyHex: string,
+  signDigest: (digest: Uint8Array) => Uint8Array | Promise<Uint8Array>,
   message: Uint8Array
-): Uint8Array {
-  const priv = hexToBytes(privateKeyHex);
-  if (priv.length !== 32) {
-    throw new Error("Private key must be 32 bytes");
-  }
-  // noble 的 secp256k1.sign 默认 prehash=true；我们输入的就是
-  // "已经准备好的真值字节"，不应当再被 prehash 一次。
-  // 施工单要求"对 envelope 真值字节直接签名"，所以这里显式
-  // prehash=false，避免双重 SHA-256。
-  const sig = secp256k1.sign(message, priv, { prehash: false, format: "compact" });
-  if (sig.length !== 64) {
-    throw new Error("Compact signature must be 64 bytes");
-  }
-  return sig;
+): Promise<Uint8Array> {
+  const digest = sha256Bytes(message);
+  return Promise.resolve(signDigest(digest)).then((sig) => {
+    if (!(sig instanceof Uint8Array) || sig.length !== 64) {
+      throw new Error("Compact signature must be 64 bytes");
+    }
+    return sig;
+  });
 }
 
 /** 验证 secp256k1 签名；只用于内部单测 / 调试。 */
@@ -55,7 +49,7 @@ export function verifyCompactSecp256k1(
   message: Uint8Array,
   publicKey: Uint8Array
 ): boolean {
-  return secp256k1.verify(signature, message, publicKey, {
+  return secp256k1.verify(signature, sha256Bytes(message), publicKey, {
     prehash: false,
     format: "compact"
   });
@@ -65,19 +59,18 @@ export function verifyCompactSecp256k1(
 export const CIPHER_CONTEXT_V1 = "keymaster:cipher:v1";
 
 /**
- * 从 session 绑定的 owner 私钥材料 + `exactOrigin` 推导 32 字节 siteKey。
+ * 从 session 绑定的 owner 公钥 + `exactOrigin` 推导 32 字节 siteKey。
  *
- * 严格按 `HMAC-SHA256(privateKeySecret, "keymaster:cipher:v1|"+exactOrigin)`。
+ * 严格按 `HMAC-SHA256(ownerPublicKeyHex, "keymaster:cipher:v1|"+exactOrigin)`。
  * `exactOrigin` 必须原样来自 `event.origin`；本函数不做任何归一化。
- * 这里不关心上层是怎么拿到私钥的，只负责按当前 session 的 owner 材料做派生。
  */
-export function deriveSiteKey(privateKeyHex: string, exactOrigin: string): Uint8Array {
-  const priv = hexToBytes(privateKeyHex);
-  if (priv.length !== 32) {
-    throw new Error("Private key must be 32 bytes");
+export function deriveSiteKey(ownerPublicKeyHex: string, exactOrigin: string): Uint8Array {
+  const owner = hexToBytes(ownerPublicKeyHex);
+  if (owner.length !== 33) {
+    throw new Error("Public key must be 33 bytes");
   }
   const message = new TextEncoder().encode(`${CIPHER_CONTEXT_V1}|${exactOrigin}`);
-  return hmac(sha256, priv, message);
+  return hmac(sha256, owner, message);
 }
 
 /**

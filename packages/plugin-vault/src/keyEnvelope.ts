@@ -5,7 +5,7 @@
 // 也不能提供明文 hex / WIF 导出。
 //
 // 该模块不访问 IndexedDB、不持有 React 状态、不保存密码、不处理文件下载：
-// 边界由 vaultService 持有，它负责把 withPrivateKey 借出的明文传入这里。
+// 边界由 vaultService 持有，它负责把受控会话里拿到的私钥 bytes 传入这里。
 
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { argon2id } from "@noble/hashes/argon2.js";
@@ -37,14 +37,14 @@ const SECP256K1_N_BYTES: Uint8Array = (() => {
 })();
 
 /**
- * 把 32 字节 secp256k1 私钥加密为 bsv8 envelope。
+ * 把 32 字节 secp256k1 私钥 bytes 加密为 bsv8 envelope。
  * 流程：Argon2id 派生 32 字节 key -> XChaCha20-Poly1305 加密 32 字节私钥
  *       -> 写 compressed pubkey_hex 便于 bsv8 导入 API 直接使用。
  */
-export function encryptBsv8KeyEnvelope(privateKeyHex: string, password: string): KeyExportEnvelope {
-  if (!privateKeyHex) throw new Error("Private key is required");
+export function encryptBsv8KeyEnvelope(privateKeyBytes: Uint8Array, password: string): KeyExportEnvelope {
+  if (!privateKeyBytes || privateKeyBytes.length === 0) throw new Error("Private key is required");
   if (!password) throw new Error("Backup password is required");
-  const priv = normalizeHex(privateKeyHex, 32, "private key");
+  const priv = normalizeKeyBytes(privateKeyBytes);
   if (!isLikelySecp256k1Priv(priv)) throw new Error("Invalid secp256k1 private key");
 
   const salt = randomBytes(16);
@@ -104,16 +104,12 @@ function bytesToHex(bytes: Uint8Array): string {
   return s;
 }
 
-function normalizeHex(value: string, expectedBytes: number, label: string): Uint8Array {
-  const clean = value.replace(/^0x/, "").trim().toLowerCase();
-  if (clean.length !== expectedBytes * 2) {
-    throw new Error(`${label} must be ${expectedBytes} bytes hex`);
+function normalizeKeyBytes(value: Uint8Array): Uint8Array {
+  if (value.length !== 32) {
+    throw new Error("private key must be 32 bytes");
   }
-  if (!/^[0-9a-f]+$/.test(clean)) throw new Error(`${label} contains non-hex characters`);
-  const out = new Uint8Array(expectedBytes);
-  for (let i = 0; i < expectedBytes; i++) {
-    out[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
-  }
+  const out = new Uint8Array(32);
+  out.set(value);
   return out;
 }
 

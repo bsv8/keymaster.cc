@@ -30,7 +30,7 @@ function bytesToHex(b: Uint8Array): string {
 
 describe("encryptBsv8KeyEnvelope", () => {
   it("produces a bsv8-shaped envelope with snake_case fields", { timeout: 30_000 }, () => {
-    const env = encryptBsv8KeyEnvelope(VALID_PRIV, "backup-pw");
+    const env = encryptBsv8KeyEnvelope(hexToBytes(VALID_PRIV), "backup-pw");
     expect(env.version).toBe("kek-v1");
     expect(env.key_id).toBe("default");
     expect(env.kdf).toBe("argon2id");
@@ -48,15 +48,15 @@ describe("encryptBsv8KeyEnvelope", () => {
   });
 
   it("produces a fresh salt/nonce/ciphertext each call", { timeout: 60_000 }, () => {
-    const a = encryptBsv8KeyEnvelope(VALID_PRIV, "pw");
-    const b = encryptBsv8KeyEnvelope(VALID_PRIV, "pw");
+    const a = encryptBsv8KeyEnvelope(hexToBytes(VALID_PRIV), "pw");
+    const b = encryptBsv8KeyEnvelope(hexToBytes(VALID_PRIV), "pw");
     expect(a.kdf_params.salt_hex).not.toBe(b.kdf_params.salt_hex);
     expect(a.nonce_hex).not.toBe(b.nonce_hex);
     expect(a.ciphertext_hex).not.toBe(b.ciphertext_hex);
   });
 
   it("round-trips with a manually-built decryptor using same primitives", { timeout: 30_000 }, () => {
-    const env = encryptBsv8KeyEnvelope(VALID_PRIV, "round-trip");
+    const env = encryptBsv8KeyEnvelope(hexToBytes(VALID_PRIV), "round-trip");
     const salt = hexToBytes(env.kdf_params.salt_hex);
     const nonce = hexToBytes(env.nonce_hex);
     const ct = hexToBytes(env.ciphertext_hex);
@@ -73,15 +73,15 @@ describe("encryptBsv8KeyEnvelope", () => {
   });
 
   it("requires backup password", () => {
-    expect(() => encryptBsv8KeyEnvelope(VALID_PRIV, "")).toThrow(/Backup password/i);
+    expect(() => encryptBsv8KeyEnvelope(hexToBytes(VALID_PRIV), "")).toThrow(/Backup password/i);
   });
 
   it("requires private key", () => {
-    expect(() => encryptBsv8KeyEnvelope("", "pw")).toThrow(/Private key/i);
+    expect(() => encryptBsv8KeyEnvelope(new Uint8Array(), "pw")).toThrow(/Private key/i);
   });
 
   it("rejects private key with wrong length", () => {
-    expect(() => encryptBsv8KeyEnvelope("aabbcc", "pw")).toThrow(/32 bytes/);
+    expect(() => encryptBsv8KeyEnvelope(hexToBytes("aabbcc"), "pw")).toThrow(/32 bytes/);
   });
 
   // ---- 私钥范围校验 ----
@@ -92,23 +92,23 @@ describe("encryptBsv8KeyEnvelope", () => {
     "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364140";
 
   it("rejects all-zero private key", () => {
-    const zero = "00".repeat(32);
+    const zero = new Uint8Array(32);
     expect(() => encryptBsv8KeyEnvelope(zero, "pw")).toThrow(/Invalid secp256k1/i);
   });
 
   it("rejects private key === secp256k1 n", () => {
-    expect(() => encryptBsv8KeyEnvelope(SECP256K1_N_HEX, "pw")).toThrow(
+    expect(() => encryptBsv8KeyEnvelope(hexToBytes(SECP256K1_N_HEX), "pw")).toThrow(
       /Invalid secp256k1/i
     );
   });
 
   it("rejects private key === secp256k1 n + 1", () => {
     const nPlus1 = "fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364142";
-    expect(() => encryptBsv8KeyEnvelope(nPlus1, "pw")).toThrow(/Invalid secp256k1/i);
+    expect(() => encryptBsv8KeyEnvelope(hexToBytes(nPlus1), "pw")).toThrow(/Invalid secp256k1/i);
   });
 
   it("accepts the largest legal private key n - 1", { timeout: 30_000 }, () => {
-    const env = encryptBsv8KeyEnvelope(SECP256K1_N_MINUS_1, "pw");
+    const env = encryptBsv8KeyEnvelope(hexToBytes(SECP256K1_N_MINUS_1), "pw");
     expect(env.version).toBe("kek-v1");
     expect(env.ciphertext_hex).toMatch(/^[0-9a-f]{96}$/);
   });

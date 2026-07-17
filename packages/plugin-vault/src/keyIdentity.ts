@@ -24,9 +24,9 @@ export interface KeyIdentityFields {
   publicKeyHex: string;
 }
 
-/** 从 32 字节私钥派生公钥身份。 */
-export function deriveKeyIdentity(privateKeyHex: string): KeyIdentityFields {
-  const priv = hexToBytes(privateKeyHex);
+/** 从 32 字节私钥 bytes 派生公钥身份。 */
+export function deriveKeyIdentity(privateKeyBytes: Uint8Array): KeyIdentityFields {
+  const priv = privateKeyBytes;
   if (priv.length !== 32) throw new Error("Private key must be 32 bytes");
   const pub = getPublicKey(priv, true);
   const publicKeyHex = bytesToHex(pub);

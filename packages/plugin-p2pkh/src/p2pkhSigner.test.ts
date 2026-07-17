@@ -21,6 +21,7 @@ import type { P2pkhUtxo, UtxoAllocation } from "./p2pkhContracts.js";
 const TEST_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PUB_HEX = deriveP2pkhAddress(TEST_PRIV_HEX, "main").publicKeyHex;
 const TEST_ADDR = deriveP2pkhAddress(TEST_PRIV_HEX, "main").address;
+const fakeSignDigest = async () => new Uint8Array([0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01]);
 
 describe("deriveP2pkhAddress", () => {
   it("produces stable address for known priv", () => {
@@ -29,8 +30,8 @@ describe("deriveP2pkhAddress", () => {
     expect(a.publicKeyHex).toBeTruthy();
   });
 
-  it("rejects wrong-length priv", () => {
-    expect(() => deriveP2pkhAddress("aabb", "main")).toThrow(/32 bytes/);
+  it("rejects wrong-length key", () => {
+    expect(() => deriveP2pkhAddress("aabb", "main")).toThrow(/33 bytes/);
   });
 });
 
@@ -98,7 +99,7 @@ describe("signP2pkhTx", () => {
       recipientAddress: TEST_ADDR,
       changeAddress: TEST_ADDR
     });
-    const hex = await signP2pkhTx(tx, allocation.selected, { hex: TEST_PRIV_HEX }, TEST_PUB_HEX);
+    const hex = await signP2pkhTx(tx, allocation.selected, fakeSignDigest, TEST_PUB_HEX);
     expect(hex).toMatch(/^[0-9a-f]+$/);
     expect(hex.length).toBeGreaterThan(100);
   });
@@ -137,7 +138,7 @@ describe("signP2pkhTx", () => {
         changeAddress: TEST_ADDR
       }),
       oneOutputAllocation.selected,
-      { hex: TEST_PRIV_HEX },
+      fakeSignDigest,
       TEST_PUB_HEX
     );
     const twoOutputHex = await signP2pkhTx(
@@ -147,7 +148,7 @@ describe("signP2pkhTx", () => {
         changeAddress: TEST_ADDR
       }),
       twoOutputAllocation.selected,
-      { hex: TEST_PRIV_HEX },
+      fakeSignDigest,
       TEST_PUB_HEX
     );
     expect(rawTxHexByteLength(twoOutputHex)).toBeGreaterThan(rawTxHexByteLength(oneOutputHex));
@@ -182,7 +183,7 @@ describe("signP2pkhTx", () => {
         changeAddress: TEST_ADDR
       }),
       allocation.selected,
-      { hex: TEST_PRIV_HEX },
+      fakeSignDigest,
       TEST_PUB_HEX
     );
     const txid = calcTxidFromRawTxHex(hex);

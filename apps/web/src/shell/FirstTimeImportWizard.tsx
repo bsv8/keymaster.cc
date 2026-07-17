@@ -68,7 +68,6 @@ import {
   KeyPersistedButActivationFailedError,
   type KeyImportResult,
   type KeyImporter,
-  type PrivateKeyMaterial,
   type VaultService
 } from "@keymaster/contracts";
 import { ImporterPicker } from "@keymaster/plugin-key-import/ImporterPicker";
@@ -281,16 +280,11 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     dispatch({ type: "import", action: { type: "parse-start" } });
     try {
       const parsed = state.importState.result;
-      // 把 KeyImportResult 收敛为 PrivateKeyMaterial——只把 hex / wif 喂给 Vault。
-      const material: PrivateKeyMaterial = {
-        hex: parsed.material.hex,
-        wif: parsed.material.wif
-      };
       await vault.createVaultWithImportedKey({
         vaultPassword: finalVaultPassword,
         key: {
           label: state.label.trim() || `key-${Date.now()}`,
-          material,
+          material: parsed.material,
           format: parsed.detectedFormat,
           capabilities: ["p2pkh"],
           source: importer?.id

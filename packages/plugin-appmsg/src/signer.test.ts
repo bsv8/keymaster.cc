@@ -7,7 +7,7 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { signCompactSecp256k1 } from "./signer.js";
 
 describe("signCompactSecp256k1", () => {
-  it("round-trip: verify recovers the same public key", () => {
+  it("round-trip: verify recovers the same public key", async () => {
     const priv = new Uint8Array(32);
     crypto.getRandomValues(priv);
     const pub = secp256k1.getPublicKey(priv, true);
@@ -19,7 +19,16 @@ describe("signCompactSecp256k1", () => {
     const privHex = bytesToHex(priv);
     const pubHex = bytesToHex(pub);
 
-    const sigHex = signCompactSecp256k1(privHex, sessionId, nonce, pubHex, issuedAtMs);
+    const sigHex = await signCompactSecp256k1(
+      async (digest) => {
+        const sig = secp256k1.sign(digest, priv, { prehash: false, format: "compact" });
+        return sig instanceof Uint8Array ? sig : new Uint8Array(sig);
+      },
+      sessionId,
+      nonce,
+      pubHex,
+      issuedAtMs
+    );
     expect(sigHex).toHaveLength(128); // 64 bytes * 2 hex chars
 
     // 重建原文（与 HubMsg 端拼接一致）并 SHA-256 后验签。
@@ -32,14 +41,22 @@ describe("signCompactSecp256k1", () => {
     expect(ok).toBe(true);
   });
 
-  it("rejects when tampered timestamp", () => {
+  it("rejects when tampered timestamp", async () => {
     const priv = new Uint8Array(32);
     crypto.getRandomValues(priv);
     const pub = secp256k1.getPublicKey(priv, true);
-    const privHex = bytesToHex(priv);
     const pubHex = bytesToHex(pub);
 
-    const sigHex = signCompactSecp256k1(privHex, "sid", "nonce", pubHex, 1700000000123);
+    const sigHex = await signCompactSecp256k1(
+      async (digest) => {
+        const sig = secp256k1.sign(digest, priv, { prehash: false, format: "compact" });
+        return sig instanceof Uint8Array ? sig : new Uint8Array(sig);
+      },
+      "sid",
+      "nonce",
+      pubHex,
+      1700000000123
+    );
     const tamperedText = `sid|nonce|${pubHex}|1700000000124`;
     const tamperedDigest = sha256Of(new TextEncoder().encode(tamperedText));
     const ok = secp256k1.verify(hexToBytes(sigHex), tamperedDigest, pub, {
@@ -49,8 +66,8 @@ describe("signCompactSecp256k1", () => {
     expect(ok).toBe(false);
   });
 
-  it("rejects bad privKeyHex length", () => {
-    expect(() => signCompactSecp256k1("abcd", "a", "b", "c", 1)).toThrow();
+  it("rejects bad privKeyHex length", async () => {
+    await expect(signCompactSecp256k1(async () => new Uint8Array(0), "a", "b", "c", 1)).rejects.toThrow();
   });
 });
 

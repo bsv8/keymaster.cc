@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { ripemd160 } from "@noble/hashes/ripemd160";
 import { sha256 } from "@noble/hashes/sha256";
 import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
@@ -88,6 +89,40 @@ function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
   };
 }
 
+function makeVault() {
+  return {
+    status: () => "unlocked",
+    createActiveKeyCrypto: async (_publicKeyHex: string) => ({
+      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+        if (input.publicKeyHex !== ACTIVE_PUBLIC_KEY_HEX) {
+          throw new Error("session_key_mismatch");
+        }
+        const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(ACTIVE_PRIV_HEX), {
+          lowS: true,
+          prehash: false,
+          format: "compact"
+        });
+        return {
+          publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+          signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
+        };
+      },
+      async deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }) {
+        if (input.publicKeyHex !== ACTIVE_PUBLIC_KEY_HEX) {
+          throw new Error("session_key_mismatch");
+        }
+        const derived = deriveP2pkhAddress(ACTIVE_PRIV_HEX, input.network);
+        return {
+          publicKeyHex: derived.publicKeyHex,
+          address: derived.address
+        };
+      }
+    }),
+    withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) =>
+      fn({ hex: ACTIVE_PRIV_HEX })
+  } as never;
+}
+
 describe("createP2pkhTransferService", () => {
   it("prepares a final signed preview and submit only broadcasts the preview hex", async () => {
     const resource: P2pkhKeyResource = {
@@ -113,13 +148,7 @@ describe("createP2pkhTransferService", () => {
       };
     });
     const service = createP2pkhTransferService({
-      vault: {
-        status: () => "unlocked",
-        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) => {
-          vaultCalls += 1;
-          return fn({ hex: ACTIVE_PRIV_HEX });
-        }
-      } as never,
+      vault: makeVault(),
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
       getDb: async (_publicKeyHex: string) => db as never,
@@ -189,11 +218,7 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       };
     });
     const service = createP2pkhTransferService({
-      vault: {
-        status: () => "unlocked",
-        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) =>
-          fn({ hex: ACTIVE_PRIV_HEX })
-      } as never,
+      vault: makeVault(),
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
       getDb: async (_publicKeyHex: string) => db as never,
@@ -245,13 +270,7 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       txidIntegrity: "mismatch" as const
     }));
     const service = createP2pkhTransferService({
-      vault: {
-        status: () => "unlocked",
-        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) => {
-          vaultCalls += 1;
-          return fn({ hex: ACTIVE_PRIV_HEX });
-        }
-      } as never,
+      vault: makeVault(),
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
       getDb: async (_publicKeyHex: string) => db as never,
@@ -304,13 +323,7 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
       throw new Error("invalid transaction");
     });
     const service = createP2pkhTransferService({
-      vault: {
-        status: () => "unlocked",
-        withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) => {
-          vaultCalls += 1;
-          return fn({ hex: ACTIVE_PRIV_HEX });
-        }
-      } as never,
+      vault: makeVault(),
       woc: { broadcast } as never,
       messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
       getDb: async (_publicKeyHex: string) => db as never,

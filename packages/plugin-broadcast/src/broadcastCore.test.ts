@@ -156,9 +156,6 @@ function makeFakeVault(unlocked: boolean): VaultService {
     removeKey: async () => {
       throw new Error("not used");
     },
-    exportPrivateKey: async () => {
-      throw new Error("not used");
-    },
     findByAddress: async () => undefined
   } as unknown as VaultService;
 }

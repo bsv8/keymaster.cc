@@ -17,7 +17,7 @@
 //   - AuthOK 之后立即把 lastPresence / lastTable announce / 订阅集合
 //     重新发送到 proxy，保证重连后 dashboard / 桌面状态不会"看起来
 //     在线、实际上 proxy 不再知道你存在"。
-//   - service 不暴露私钥、不留明文材料；签名走 vault.withPrivateKey 闭包。
+//   - service 不暴露私钥、不留明文材料；签名走 vault.createActiveKeyCrypto。
 //   - 平台事件：
 //       keyspace.onActiveChange → active key 切换（最终重建入口）
 //       messageBus.key.deleting → 删除前主清理钩子

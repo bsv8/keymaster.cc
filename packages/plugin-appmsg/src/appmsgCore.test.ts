@@ -33,7 +33,7 @@ import type {
 } from "@keymaster/contracts";
 import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 import { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
-import { sealAppMessage } from "./appmsgCrypto.js";
+import { openAppMessage, sealAppMessage } from "./appmsgCrypto.js";
 import { bytesToHex, hexToBytes } from "./appmsgCrypto.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 as sha256Bytes } from "@noble/hashes/sha2.js";
@@ -300,8 +300,16 @@ function makeCore(opts?: {
   persistedActiveProviderId?: string | null;
   signerProvider?: () => Promise<{
     publicKeyHex: string;
-    privateKeyHex: string;
     signChallenge: (args: { challenge: Uint8Array }) => Promise<string>;
+    openSealed: (rec: ProviderSealedMessageRecord) => Promise<AppMsgMessage | null>;
+    sealSendInput: (input: {
+      sender: { senderOrigin?: string; senderAppId?: string };
+      recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string };
+      contentType: "text/plain" | "text/markdown";
+      body: string;
+      clientMessageId: string;
+      createdAtMs: number;
+    }) => { record: ProviderSealedMessageRecord } | { error: string };
   } | null>;
 }): {
   core: AppMsgCoreImpl;
@@ -319,8 +327,65 @@ function makeCore(opts?: {
     opts?.signerProvider ??
     (async () => ({
       publicKeyHex: OWNER,
-      privateKeyHex: OWNER_PRIV,
-      signChallenge: async (_args: { challenge: Uint8Array }): Promise<string> => "00".repeat(64)
+      signChallenge: async (_args: { challenge: Uint8Array }): Promise<string> => "00".repeat(64),
+      openSealed: async (rec: ProviderSealedMessageRecord) =>
+        (() => {
+          const opened = openAppMessage({
+            signed: rec.envelope,
+            recipientPrivateKeyHex: OWNER_PRIV
+          });
+          return {
+            messageId: rec.messageId,
+            clientMessageId: opened.clientMessageId,
+            senderPublicKeyHex: opened.senderPublicKeyHex,
+            senderOrigin:
+            rec.senderEndpointKind === "origin" ? rec.senderEndpointId : undefined,
+            senderAppId:
+            rec.senderEndpointKind === "plugin" ? rec.senderEndpointId : undefined,
+            recipientPublicKeyHex: opened.recipientPublicKeyHex,
+            recipientOrigin:
+            rec.recipientEndpointKind === "origin" ? rec.recipientEndpointId : undefined,
+            recipientAppId:
+            rec.recipientEndpointKind === "plugin" ? rec.recipientEndpointId : undefined,
+            contentType: opened.contentType,
+            body: new TextDecoder().decode(opened.bodyUtf8),
+            createdAtMs: opened.createdAtMs,
+            insertedAtMs: rec.insertedAtMs
+          };
+        })(),
+      sealSendInput: (input) => ({
+        record: {
+          messageId: "",
+          senderPublicKeyHex: OWNER,
+          senderEndpointId: input.sender.senderOrigin ?? input.sender.senderAppId ?? "",
+          senderEndpointKind: input.sender.senderOrigin ? "origin" : "plugin",
+          recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
+          recipientEndpointId: input.recipient.recipientOrigin ?? input.recipient.recipientAppId ?? "",
+          recipientEndpointKind: input.recipient.recipientOrigin ? "origin" : "plugin",
+          clientMessageId: input.clientMessageId,
+          contentType: input.contentType,
+          body: input.body,
+          createdAtMs: input.createdAtMs,
+          insertedAtMs: input.createdAtMs,
+          envelope: sealAppMessage({
+            senderPrivateKeyHex: OWNER_PRIV,
+            senderPublicKeyHex: OWNER,
+            recipientPublicKeyHex: input.recipient.recipientPublicKeyHex,
+            senderEndpoint: {
+              kind: input.sender.senderOrigin ? "origin" : "plugin",
+              id: input.sender.senderOrigin ?? input.sender.senderAppId ?? ""
+            },
+            recipientEndpoint: {
+              kind: input.recipient.recipientOrigin ? "origin" : "plugin",
+              id: input.recipient.recipientOrigin ?? input.recipient.recipientAppId ?? ""
+            },
+            contentType: input.contentType,
+            body: input.body,
+            clientMessageId: input.clientMessageId,
+            createdAtMs: input.createdAtMs
+          }).envelope
+        }
+      })
     }));
   const cfg: AppMsgCoreConfig = {
     signerProvider,

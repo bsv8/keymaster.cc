@@ -7,6 +7,8 @@ import type { KeyImportResult, VaultService } from "@keymaster/contracts";
 export interface ImportOptions {
   /** 用户填写的标签。 */
   label: string;
+  /** 当前 Vault 密码。 */
+  password: string;
   /** 推断能力，默认 p2pkh。 */
   capabilities?: string[];
   /** 来源标记，例如 "wif"、"hex"、"json-file"。 */
@@ -20,6 +22,7 @@ export async function persistImport(
 ) {
   if (!options.label) throw new Error("Label is required");
   const ref = await vault.importPrivateKey({
+    password: options.password,
     label: options.label,
     material: result.material,
     format: result.detectedFormat,

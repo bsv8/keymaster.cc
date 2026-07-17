@@ -29,7 +29,7 @@ const LABEL_MAX_LENGTH = 64;
 export interface VaultKeyCreateModalProps {
   open: boolean;
   /** 父组件传入的"创建 Key"调用，返回公开 KeyRef。 */
-  onCreate(label: string): Promise<KeyRef>;
+  onCreate(label: string, password: string): Promise<KeyRef>;
   /** 创建成功后父组件如何打开导出 Modal。 */
   onExport(key: KeyRef): void;
   onClose(): void;
@@ -57,6 +57,7 @@ export function VaultKeyCreateModal({
   useI18n().language();
   const [phase, setPhase] = useState<Phase>("form");
   const [label, setLabel] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [created, setCreated] = useState<KeyRef | null>(null);
@@ -68,6 +69,7 @@ export function VaultKeyCreateModal({
       setBusy(false);
       setCreated(null);
       setLabel(defaultLabel());
+      setPassword("");
     }
   }, [open]);
 
@@ -89,9 +91,13 @@ export function VaultKeyCreateModal({
       );
       return;
     }
+    if (!password) {
+      setError(t("vault.keyCreate.err.password", { defaultValue: "请输入 Vault 密码" }));
+      return;
+    }
     setBusy(true);
     try {
-      const ref = await onCreate(trimmed);
+      const ref = await onCreate(trimmed, password);
       setCreated(ref);
       setPhase("success");
     } catch (err) {
@@ -113,7 +119,11 @@ export function VaultKeyCreateModal({
     }
   }
 
-  const canSubmit = !busy && label.trim().length > 0 && label.trim().length <= LABEL_MAX_LENGTH;
+  const canSubmit =
+    !busy &&
+    label.trim().length > 0 &&
+    label.trim().length <= LABEL_MAX_LENGTH &&
+    password.length > 0;
 
   return (
     <Modal
@@ -168,6 +178,13 @@ export function VaultKeyCreateModal({
             placeholder={t("vault.keyCreate.placeholder", { defaultValue: "例如：Key 2026-06-06 14:30" })}
             maxLength={LABEL_MAX_LENGTH}
             autoFocus
+          />
+          <TextInput
+            label={t("vault.keyCreate.password", { defaultValue: "Vault 密码" })}
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.currentTarget.value)}
           />
           <p className="vault-create-modal__note">
             {t("vault.keyCreate.note", { defaultValue: "标签不要求唯一；后续管理列表按公钥区分。" })}

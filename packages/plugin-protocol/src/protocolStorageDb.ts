@@ -45,7 +45,7 @@
 //   - **不**存 `operations` store（pending fee pool operation 走内存）。
 //   - **不**存敏感正文：参见 "历史持久化范围"。
 //   - **不**存密码 / 不存 unlock runtime 任何派生材料。
-//   - **不**存 bootstrap 私钥材料（`OwnerRuntimeBootstrap.privateKeyHex`）。
+//   - **不**存 bootstrap 关键材料（只存 `SessionRuntimeBootstrap.crypto` capability）。
 //   - **不**存 `ownerKeyId`：vault 内部借用句柄按需从 keyspace 解析。
 //   - DB 异常一律 `console.error + rethrow`；调用方拿到错误时自己决定
 //     怎么降级（p2pkh → manual confirm；feepool → fail-closed；connect

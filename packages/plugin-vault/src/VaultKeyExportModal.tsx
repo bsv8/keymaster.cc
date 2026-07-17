@@ -1,7 +1,7 @@
 // packages/plugin-vault/src/VaultKeyExportModal.tsx
-// 私钥导出 modal：输入备份密码 + 确认密码 -> 调用 exportPrivateKey -> 下载 JSON。
+// 单 Key Backup 导出 modal：直接请求 Vault 生成备份 JSON -> 下载文件。
 // 设计缘由：
-//   - 唯一允许的导出格式是 bsv8 加密 JSON（envelope）。
+//   - 备份只复制 vault_meta + 选中的 canonical vault_keys 记录，不接触明文私钥。
 //   - 该 modal 不直接调用 removeKey、不保存 key 列表、不参与删除流程。
 //   - 不在页面明文展示完整私钥；下载流程失败时保留 modal 让用户重试。
 //
@@ -9,7 +9,7 @@
 // 硬切换 002 收尾：modal 接收 `publicKeyHex`（平台身份根字段），不再接收
 
 import { useState } from "react";
-import { Button, Modal, TextInput } from "@keymaster/ui";
+import { Button, Modal } from "@keymaster/ui";
 import { useI18n } from "@keymaster/runtime";
 
 export interface VaultKeyExportModalProps {
@@ -17,8 +17,8 @@ export interface VaultKeyExportModalProps {
   /** 当前正在导出的 key 元数据；用作下载文件名。 */
   keyLabel: string;
   publicKeyHex: string;
-  /** 父组件传入的导出调用；返回加密 envelope。 */
-  onExport(password: string): Promise<unknown>;
+  /** 父组件传入的导出调用；返回单 Key Backup JSON 字符串。 */
+  onExport(): Promise<string>;
   onClose(): void;
 }
 
@@ -51,14 +51,10 @@ export function VaultKeyExportModal({
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
   useI18n().language();
-  const [password, setPassword] = useState("");
-  const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   function reset() {
-    setPassword("");
-    setConfirm("");
     setError(null);
     setBusy(false);
   }
@@ -71,18 +67,9 @@ export function VaultKeyExportModal({
 
   async function submit() {
     setError(null);
-    if (!password) {
-      setError(t("vault.keyExport.err.empty", { defaultValue: "请输入备份密码" }));
-      return;
-    }
-    if (password !== confirm) {
-      setError(t("vault.keyExport.err.mismatch", { defaultValue: "两次密码不一致" }));
-      return;
-    }
     setBusy(true);
     try {
-      const envelope = await onExport(password);
-      const json = JSON.stringify(envelope, null, 2);
+      const json = await onExport();
       const blob = new Blob([json], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -105,14 +92,14 @@ export function VaultKeyExportModal({
   return (
     <Modal
       open={open}
-      title={t("vault.keyExport.title", { defaultValue: "导出私钥" })}
+      title={t("vault.keyExport.title", { defaultValue: "导出备份" })}
       onClose={close}
       footer={
         <>
           <Button variant="ghost" onClick={close} disabled={busy}>
             {t("common.action.cancel", { defaultValue: "取消" })}
           </Button>
-          <Button onClick={submit} loading={busy} disabled={!password || !confirm}>
+          <Button onClick={submit} loading={busy}>
             {t("vault.keyExport.submit", { defaultValue: "下载备份文件" })}
           </Button>
         </>
@@ -121,24 +108,10 @@ export function VaultKeyExportModal({
       <p className="vault-export-modal__hint">
         {t("vault.keyExport.hint", {
           defaultValue:
-            "备份文件是加密 JSON（bsv8 envelope），需要用这个密码解密。请妥善保存密码与文件，删除 key 后本机无法恢复。"
+            "备份文件直接复制本机 Vault 的加密记录。请妥善保存文件；恢复时仍需要对应 Vault 密码。"
         })}
       </p>
-      <TextInput
-        label={t("vault.keyExport.passwordNew", { defaultValue: "备份密码" })}
-        type="password"
-        autoComplete="new-password"
-        value={password}
-        onChange={(e) => setPassword(e.currentTarget.value)}
-      />
-      <TextInput
-        label={t("vault.keyExport.passwordConfirm", { defaultValue: "确认密码" })}
-        type="password"
-        autoComplete="new-password"
-        value={confirm}
-        onChange={(e) => setConfirm(e.currentTarget.value)}
-        error={error ?? undefined}
-      />
+      {error ? <p className="vault-export-modal__error">{error}</p> : null}
     </Modal>
   );
 }

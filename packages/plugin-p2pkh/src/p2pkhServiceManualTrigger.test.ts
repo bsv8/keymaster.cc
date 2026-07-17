@@ -1,7 +1,7 @@
 // packages/plugin-p2pkh/src/p2pkhServiceManualTrigger.test.ts
 // 硬切换 003（2026-06-19）服务级单测：
 //   - 手工 triggerRecentSync / triggerHistoryBackfill 必须先 rehydrate 当前
-//     active key，再触发 background 任务（vault.withPrivateKey 被调用说明
+//     active key，再触发 background 任务（受控 capability 被调用说明
 //     走过了 rehydrate -> getOrCreateAddress 的自愈链路）。
 //   - 0 resource recent-sync / backfill 必须有 info 日志，不能 silent。
 //   - 老 key 没有旧缓存迁移时，service 能通过 rehydrate 在当前 active key
@@ -77,25 +77,38 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
   };
 }
 
-function makeVault(): VaultService & { withPrivateKey: ReturnType<typeof vi.fn> } {
-  // 硬切换 002 收尾：withPrivateKey 必须按 `(publicKeyHex, fn)` 签名调用。
-  // stub 接收 publicKeyHex 后调 fn，借出 ACTIVE_PRIV_HEX 对应的 material.hex；
+function makeVault(): VaultService & { createActiveKeyCrypto: ReturnType<typeof vi.fn> } {
+  // 硬切换 002 收尾：createActiveKeyCrypto 必须按 `publicKeyHex` 取受控 capability。
+  // stub 接收 publicKeyHex 后返回 capability，内部再借出 ACTIVE_PRIV_HEX 对应的材料；
   // publicKeyHex 形状不影响 stub 行为（fixture 都是同一把），但契约要对，
-  // 否则 service 内部 `vault.withPrivateKey(active.publicKeyHex, ...)` 会
-  // 把 hex 当 fn 调用、抛 "is not a function"。
-  const withPrivateKey = vi.fn(async <T>(_publicKeyHex: string, fn: (m: { hex: string }) => Promise<T> | T): Promise<T> => {
-    return fn({ hex: ACTIVE_PRIV_HEX });
-  });
+  // 否则 service 内部受控 capability 路径会拿不到签名能力。
+  const createActiveKeyCrypto = vi.fn(async (_publicKeyHex: string) => ({
+    getIdentity: () => ({
+      sessionId: "session-a",
+      publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      label: "active",
+      capabilities: ["p2pkh"],
+      createdAt: "2024-01-01T00:00:00.000Z"
+    }),
+    signDigest: async () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, signature: new Uint8Array(64).buffer }),
+    deriveP2pkhAddress: async (input: { publicKeyHex: string; network: "main" | "test" }) => {
+      const derived = deriveP2pkhAddress(ACTIVE_PRIV_HEX, input.network);
+      return { publicKeyHex: input.publicKeyHex, address: derived.address };
+    },
+    sealSendInput: () => ({ error: "not used" }),
+    openSealed: () => null,
+    exportEncryptedKeyBackup: async () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, backup: new Uint8Array(0).buffer })
+  }));
   return {
     status: () => "unlocked",
-    withPrivateKey,
+    createActiveKeyCrypto,
     onStatusChange: () => () => undefined,
     getInitialActivationNotice: () => null,
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
     hasVault: async () => true,
     // 其余方法在测试中不需要；通过 unknown 强制收敛。
-  } as unknown as VaultService & { withPrivateKey: ReturnType<typeof vi.fn> };
+  } as unknown as VaultService & { createActiveKeyCrypto: ReturnType<typeof vi.fn> };
 }
 
 function makeWoc(): WocService {
@@ -297,8 +310,8 @@ describe("createP2pkhService manual triggers", () => {
     // 让 microtask 走完（rebind + rehydrate 都是 async 链）
     await new Promise((r) => setTimeout(r, 0));
 
-    // rehydrate 必须走过 vault.withPrivateKey 才能派生 main 资源。
-    expect(vault.withPrivateKey).toHaveBeenCalled();
+    // rehydrate 必须走过受控 capability 才能派生 main 资源。
+    expect(vault.createActiveKeyCrypto).toHaveBeenCalled();
     // backgroundService.trigger 必须在 rehydrate 之后被调用；
     // recent trigger 至少出现一次。
     const recentTriggers = bg.triggers.filter((t) => t.id === P2PKH_TASK_RECENT);
@@ -329,7 +342,7 @@ describe("createP2pkhService manual triggers", () => {
     await service.triggerHistoryBackfill();
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(vault.withPrivateKey).toHaveBeenCalled();
+    expect(vault.createActiveKeyCrypto).toHaveBeenCalled();
     const backfillTriggers = bg.triggers.filter((t) => t.id === P2PKH_TASK_BACKFILL);
     expect(backfillTriggers.length).toBeGreaterThan(0);
     expect(backfillTriggers.at(-1)?.reason).toBe("manual");

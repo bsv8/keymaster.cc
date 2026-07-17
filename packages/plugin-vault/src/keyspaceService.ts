@@ -31,7 +31,7 @@
 //     * 事件 payload (`key.created` / `key.deleting` / `key.deleted`)
 //   - 系统中**不再**存在 "identityStatus = uninitialized | failed" 的
 //     稳态。新建 / 导入 key 必须在落库前派生 publicKeyHex；unlock 后
-//     不再跑逐把 key backfill。unlock 阶段一次性 staging migration 由
+//     不再跑逐把 key backfill。unlock 阶段一次性 AAD 升级由
 //     vaultService 内部完成，keyspace 不再背 prefix "失败但勉强保留"。
 
 import type { MessageBus } from "@keymaster/runtime";
@@ -146,11 +146,11 @@ export interface KeyspaceHandle extends KeyspaceService {
    */
   activateCreatedKey(identity: KeyIdentity): Promise<void>;
   /**
-   * 设置 identity migration 阶段状态（硬切换 002 收尾）。
+   * 设置 identity 初始化阶段状态（硬切换 002 收尾）。
    *
-   * 设计缘由：unlock 阶段 vault 跑一次性 staging migration；该 migration
-   * 也是一次性，不属于常规 backfill。`setInitializing(true)` 让 UI 在
-   * staging 迁移期间展示"导入中..."，resolve 后再 `false`。业务插件
+   * 设计缘由：unlock 阶段 vault 跑一次性 AAD 升级；该升级也是一次性，
+   * 不属于常规 backfill。`setInitializing(true)` 让 UI 在升级期间展示
+   * "导入中..."，resolve 后再 `false`。业务插件
    * （包括 UI 组件）不再依赖 per-key `identityStatus`，只读本开关。
    */
   setInitializing(initializing: boolean): void;
@@ -612,7 +612,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       // 硬切换 001 收口：解锁后先 best-effort 清理旧 localStorage
       // activePublicKeyHash 键,避免脏数据被错误继承。
       purgeLegacyActiveKeyStorage();
-      // 解锁后 vaultService 已一次性跑完 staging migration；canonical
+      // 解锁后 vaultService 已一次性跑完 AAD 升级；canonical
       // store 即 ready 集合。keyspace 只需选 active。
       const ready = await listActiveCandidates();
       if (ready.length === 0) {

@@ -12,7 +12,7 @@
 //
 // 测试策略：直接测 `createReconnectCoordinator` 函数，不通过
 // `appmsgPlatformPlugin.setup` 入口（manifest 内部自己 new AppMsgCoreImpl
-// 且依赖真实 vault.withPrivateKey，无法直接替换）。
+// 且依赖真实 vault capability，无法直接替换）。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import "fake-indexeddb/auto";
