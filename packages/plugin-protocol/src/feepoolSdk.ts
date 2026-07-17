@@ -7,8 +7,7 @@
 //   - 交易编解码只保留本文件内最小实现，避免把私钥边界扩散到
 //     protocol service。
 
-import { ripemd160 } from "../../../node_modules/@noble/hashes/esm/ripemd160.js";
-import { sha256 } from "@noble/hashes/sha2.js";
+import { Hash } from "@bsv/sdk";
 import {
   clientVerifyServerSpendSig,
   clientVerifyServerUpdateSig
@@ -134,13 +133,13 @@ function u16LE(n: number): Uint8Array {
 }
 
 function dsha256(data: Uint8Array): Uint8Array {
-  return sha256(sha256(data));
+  return new Uint8Array(Hash.hash256(data));
 }
 
 function pubKeyHash160Hex(publicKeyHex: string): string {
   const pub = hexToBytes(publicKeyHex);
   if (pub.length !== 33) throw new Error("Public key must be 33 bytes (compressed)");
-  return bytesToHex(ripemd160(sha256(pub)));
+  return bytesToHex(new Uint8Array(Hash.hash160(pub)));
 }
 
 function p2pkhLockScript(publicKeyHex: string): Uint8Array {
