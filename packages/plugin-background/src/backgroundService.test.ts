@@ -15,6 +15,7 @@
 // 之后 afterEach 自动 unstubAll。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { BackgroundRunEligibility } from "@keymaster/contracts";
 import { createBackgroundBundle } from "./backgroundService.js";
 
 beforeEach(() => {
@@ -469,7 +470,7 @@ describe("BackgroundService blocked task recheck", () => {
     vi.useFakeTimers();
     const { service, registry } = createBackgroundBundle();
     let runs = 0;
-    let canRunResult = { ready: false, reason: { key: "test.blocked", fallback: "Test blocked" }, retryOn: "interval" as const };
+    let canRunResult: BackgroundRunEligibility = { ready: false, reason: { key: "test.blocked", fallback: "Test blocked" }, retryOn: "interval" };
     registry.register({
       id: "t-blocked-recheck",
       pluginId: "test",
