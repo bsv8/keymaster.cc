@@ -399,6 +399,46 @@ describe("BackgroundService leader election (BC path)", () => {
       env.cleanup();
     }
   });
+
+  it("runs manual sync in the unlocked follower instead of a locked leader", async () => {
+    const env = installFakeBrowserNoLocks();
+    try {
+      const leader = createBackgroundBundle();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const unlockedFollower = createBackgroundBundle();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      let leaderRuns = 0;
+      let followerRuns = 0;
+      leader.registry.register({
+        id: "vault-session-task",
+        pluginId: "test",
+        label: "session",
+        canRun: () => ({ ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" }),
+        async run() {
+          leaderRuns += 1;
+        }
+      });
+      unlockedFollower.registry.register({
+        id: "vault-session-task",
+        pluginId: "test",
+        label: "session",
+        canRun: () => ({ ready: true }),
+        async run() {
+          followerRuns += 1;
+        }
+      });
+
+      unlockedFollower.service.runNow("vault-session-task");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      expect(followerRuns).toBe(1);
+      expect(leaderRuns).toBe(0);
+      leader.service.dispose();
+      unlockedFollower.service.dispose();
+    } finally {
+      env.cleanup();
+    }
+  });
 });
 
 describe("BackgroundService action delivery fallback", () => {
@@ -427,6 +467,8 @@ describe("BackgroundService action delivery fallback", () => {
       });
 
       follower.service.runNow("shared-storage-task");
+      // runNow 先异步确认本 tab 是否具备 Vault 会话资格；无资格才写邮箱转发。
+      await Promise.resolve();
       const actionKey = Array.from({ length: localStorage.length }, (_unused, index) => localStorage.key(index))
         .find((key) => key?.startsWith("background.leader.action."));
       expect(actionKey).toBeTruthy();

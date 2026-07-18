@@ -130,6 +130,10 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   /** 冷却 map：key -> lastRunAt。每个实例独立，不跨实例共享。 */
   const cooldownMap = new Map<string, number>();
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
+  // leader 的快照只代表 leader 所在标签页的会话。Vault 解锁是标签页内存态，
+  // 因此 follower 本地刚完成的 session-bound 任务不能再被 leader 的“等待解锁”
+  // 旧快照覆盖。
+  const leaderSnapshots = new Map<string, BackgroundTaskSnapshot>();
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
   let visibilityHandler: (() => void) | undefined;
   let disposed = false;
@@ -182,14 +186,69 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       keyScope: resolveKeyScope(task.def)
     };
   }
-  function emitAll() {
-    const list = [...tasks.values()].map(snapshot);
+  function snapshotListForDisplay(): BackgroundTaskSnapshot[] {
+    const localSnapshots = [...tasks.values()].map(snapshot);
+    if (leaderCtx.isLeader) return localSnapshots;
+    return localSnapshots.map((local) => {
+      const leader = leaderSnapshots.get(local.id);
+      if (!leader) return local;
+      const localAttempt = local.lastAttemptAt ? new Date(local.lastAttemptAt).getTime() : 0;
+      const leaderAttempt = leader.lastAttemptAt ? new Date(leader.lastAttemptAt).getTime() : 0;
+      // 本地正在执行，或本地已在 leader 最近一次尝试后执行过：本地是真实状态。
+      if (local.state === "queued" || local.state === "running" || (localAttempt > 0 && localAttempt >= leaderAttempt)) return local;
+      return leader;
+    });
+  }
+
+  function notifyListeners(list = snapshotListForDisplay()) {
     for (const l of listeners) l(list);
+  }
+
+  function emitAll() {
+    const localList = [...tasks.values()].map(snapshot);
+    notifyListeners();
     // 关键修复：leader 把最新任务快照广播给 follower，使 follower
     // 托盘也能看到真实状态（运行中、进度、错误等）。
     if (leaderCtx.isLeader) {
-      leaderCtx.broadcastSnapshots(list);
+      leaderCtx.broadcastSnapshots(localList);
     }
+  }
+
+  function isUnlockBlockedSnapshot(snapshot: BackgroundTaskSnapshot | undefined): boolean {
+    if (snapshot?.state !== "blocked") return false;
+    return typeof snapshot.blockedReason !== "string" && snapshot.blockedReason?.key === "background.blocked.unlock";
+  }
+
+  /**
+   * Vault / keyspace 是标签页内存会话，不能让已解锁的 follower 永远把操作
+   * 交给一个锁定的 leader。仅当本地 canRun 明确 ready 时，才在当前后台
+   * service 执行；没有资格仍按原路径转发，不会放宽任何门禁。
+   */
+  async function runLocallyIfEligible(t: TaskRuntime, reason: string): Promise<boolean> {
+    if (!t.def.canRun) return false;
+    try {
+      const eligibility = await t.def.canRun();
+      if (!eligibility.ready) return false;
+      await runOne(t, reason);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  function shouldUseLocalSession(t: TaskRuntime, reason: string): boolean {
+    // 用户主动点击、当前 tab 刚解锁，以及解锁后派生出的资源就绪事件，
+    // 都必须优先使用当前会话；否则 token 首次同步仍会被锁定 leader 吞掉。
+    if (
+      reason === "manual" ||
+      reason === "vault.unlocked" ||
+      reason === "first-sync" ||
+      reason === "p2pkh.resources-ready" ||
+      reason === "key.imported" ||
+      reason === "active-key.changed"
+    ) return true;
+    // 下游资产任务在 leader 已明确因锁定而阻塞时，也使用当前已解锁会话。
+    return isUnlockBlockedSnapshot(leaderSnapshots.get(t.def.id));
   }
 
   /**
@@ -508,6 +567,13 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
 
     // 关键修复：follower 标签页的 trigger 必须转发给 leader 执行
     if (!leaderCtx.isLeader) {
+      if (shouldUseLocalSession(t, reason)) {
+        void (async () => {
+          if (await runLocallyIfEligible(t, reason)) return;
+          leaderCtx.forwardAction({ type: "trigger", id, reason });
+        })();
+        return;
+      }
       leaderCtx.forwardAction({ type: "trigger", id, reason });
       return;
     }
@@ -525,7 +591,12 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
 
     // 关键修复：follower 标签页的 runNow 必须转发给 leader 执行
     if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "run-now", id });
+      // 手动点击优先使用当前 tab 的已解锁会话；若本地并未 ready，再交给
+      // leader，保持统一任务入口和原有跨标签兜底。
+      void (async () => {
+        if (await runLocallyIfEligible(t, "manual")) return;
+        leaderCtx.forwardAction({ type: "run-now", id });
+      })();
       return;
     }
     // manual 理由绕过普通冷却
@@ -701,8 +772,11 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       onAction: handleFollowerAction,
       getSnapshots: () => [...tasks.values()].map(snapshot),
       onSnapshots: (snapshots) => {
-        // follower 收到 leader 广播的快照：仅通知 listeners，不写入本地 tasks。
-        for (const l of listeners) l(snapshots);
+        // follower 收到 leader 广播的快照：保留为远端视图；本地已解锁会话
+        // 的新尝试优先于它，避免错误显示 leader 的“等待解锁”。
+        leaderSnapshots.clear();
+        for (const item of snapshots) leaderSnapshots.set(item.id, item);
+        notifyListeners();
       }
     });
     startTimer();
@@ -718,11 +792,11 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
 
   const service: BackgroundServiceHandle = {
     listSnapshots() {
-      return [...tasks.values()].map(snapshot);
+      return snapshotListForDisplay();
     },
     onChange(handler) {
       listeners.add(handler);
-      handler([...tasks.values()].map(snapshot));
+      handler(snapshotListForDisplay());
       return () => listeners.delete(handler);
     },
     runNow,
