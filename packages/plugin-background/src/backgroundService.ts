@@ -193,12 +193,15 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   }
 
   /**
-   * 关键修复：follower 标签页触发 runNow/cancel 时把操作转发到 leader；
+   * 关键修复：follower 标签页触发 trigger/runNow/cancel 时把操作转发到 leader；
    * leader 在本 tab 内执行对应的方法并广播结果快照。
    */
   function handleFollowerAction(action: FollowerAction) {
     if (!leaderCtx.isLeader) return;
     switch (action.type) {
+      case "trigger":
+        trigger(action.id, action.reason ?? "follower");
+        break;
       case "run-now":
         runNow(action.id);
         break;
@@ -297,6 +300,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
    * 计算任务的下一次运行时间。
    * 设计缘由：优先使用 schedule group 配置的 interval，否则使用任务定义的 intervalMs。
    * asset-holdings 组的 interval 从 BackgroundSyncSettings 读取。
+   * 关键修复：同时更新 lastScheduledAt，确保定时器和 UI 显示一致。
    */
   function scheduleNext(t: TaskRuntime) {
     let interval: number | undefined;
@@ -317,6 +321,8 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     const now = Date.now();
     const next = new Date(now + interval).toISOString();
     t.nextRunAt = next;
+    // 关键修复：同步更新 lastScheduledAt，确保定时器从当前时刻重新计时
+    t.lastScheduledAt = now;
   }
 
   /**
@@ -481,6 +487,34 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   }
 
   /**
+   * 触发任务运行（内部领域事件 API）。
+   * 设计缘由：业务插件用于后台领域事件触发，受普通冷却控制。
+   * "manual" / "first-sync" 理由绕过冷却；其他理由进入冷却/合并。
+   */
+  function trigger(id: string, reason = "interval"): void {
+    const t = tasks.get(id);
+    if (!t) return;
+
+    // 冷却检查：普通事件的同一 task/key scope 最短网络间隔为 2 分钟
+    if (reason !== "manual" && reason !== "first-sync") {
+      const cooldownKey = `${id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
+      const lastRun = cooldownMap.get(cooldownKey);
+      if (lastRun && Date.now() - lastRun < COOLDOWN_MS) {
+        // 冷却期内：标记 syncDue，冷却结束后自动唤醒
+        t.rerunRequested = true;
+        return;
+      }
+    }
+
+    // 关键修复：follower 标签页的 trigger 必须转发给 leader 执行
+    if (!leaderCtx.isLeader) {
+      leaderCtx.forwardAction({ type: "trigger", id, reason });
+      return;
+    }
+    void runOne(t, reason);
+  }
+
+  /**
    * 立即同步一次（UI 手动 API）。
    * 设计缘由：托盘唯一的手动动作，绕过普通冷却但不绕过门禁。
    * 等价于 trigger(taskId, "manual")，但语义更清晰。
@@ -566,7 +600,24 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       const now = Date.now();
       for (const t of tasks.values()) {
         if (t.runPromise) continue;
-        if (t.state === "running" || t.state === "queued" || t.state === "blocked") continue;
+        if (t.state === "running" || t.state === "queued") continue;
+
+        // blocked 任务：retryOn=interval 时到期后重新检查 eligibility
+        if (t.state === "blocked") {
+          const intervalMs = getEffectiveIntervalMs(t);
+          if (intervalMs == null) continue;
+          if (t.lastScheduledAt == null) {
+            t.lastScheduledAt = now;
+            continue;
+          }
+          if (now - t.lastScheduledAt >= intervalMs) {
+            t.lastScheduledAt = now;
+            if (leaderCtx.isLeader) {
+              void runOne(t, "interval-recheck");
+            }
+          }
+          continue;
+        }
 
         // 冷却唤醒：检查是否有待处理的 rerunRequested 且已过冷却期
         if (t.rerunRequested) {
@@ -603,9 +654,8 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       for (const t of tasks.values()) {
         if (t.runPromise) continue;
         if (t.state !== "idle") continue;
-        if (leaderCtx.isLeader) {
-          void runOne(t, "visibility");
-        }
+        // 改走受冷却控制的 trigger，避免绕过冷却
+        trigger(t.def.id, "visibility");
       }
     }
   }
@@ -615,15 +665,15 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
    * 让 P2PKH recent-sync 等业务能立即拿到最新链上状态。
    * 设计缘由：节流 / 离线期间任务的 nextRunAt 已过期，但 timer
    * 不会补跑；online 事件是唯一明确的"网络恢复"信号。
+   * 改走受冷却控制的 trigger，避免绕过冷却。
    */
   function handleOnline() {
     if (typeof navigator === "undefined" || !navigator.onLine) return;
     for (const t of tasks.values()) {
       if (t.runPromise) continue;
       if (t.state === "running" || t.state === "queued") continue;
-      if (leaderCtx.isLeader) {
-        void runOne(t, "online");
-      }
+      // 改走受冷却控制的 trigger，避免绕过冷却
+      trigger(t.def.id, "online");
     }
   }
 
@@ -676,7 +726,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       return () => listeners.delete(handler);
     },
     runNow,
-    trigger: runNow, // trigger 等价于 runNow，保留供业务插件内部使用
+    trigger,
     cancel,
     cancelByKey,
     getScheduleSettings() {
@@ -760,6 +810,7 @@ interface LeaderContext {
 }
 
 type FollowerAction =
+  | { type: "trigger"; id: string; reason?: string; fromTabId?: string }
   | { type: "run-now"; id: string; fromTabId?: string }
   | { type: "cancel"; id: string; fromTabId?: string }
   | { type: "cancel-by-key"; publicKeyHex: string; fromTabId?: string }

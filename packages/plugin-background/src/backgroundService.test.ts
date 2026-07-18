@@ -399,3 +399,148 @@ describe("BackgroundService migration", () => {
     service.dispose();
   });
 });
+
+describe("BackgroundService trigger vs runNow", () => {
+  it("普通 trigger 受冷却控制，runNow 绕过冷却", async () => {
+    const { service, registry } = createBackgroundBundle();
+    let runs = 0;
+    registry.register({
+      id: "t-cooldown",
+      pluginId: "test",
+      label: "t-cooldown",
+      intervalMs: 60_000,
+      async run() {
+        runs += 1;
+      }
+    });
+
+    // 第一次运行
+    service.trigger("t-cooldown", "interval");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(1);
+
+    // 立即再次 trigger：应被冷却阻止
+    service.trigger("t-cooldown", "interval");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(1);
+
+    // runNow 应绕过冷却
+    service.runNow("t-cooldown");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(2);
+
+    service.dispose();
+  });
+
+  it("领域事件 trigger 使用普通冷却", async () => {
+    const { service, registry } = createBackgroundBundle();
+    let runs = 0;
+    registry.register({
+      id: "t-domain",
+      pluginId: "test",
+      label: "t-domain",
+      intervalMs: 60_000,
+      async run() {
+        runs += 1;
+      }
+    });
+
+    // 第一次运行
+    service.trigger("t-domain", "resource-ready");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(1);
+
+    // 立即再次 trigger：应被冷却阻止
+    service.trigger("t-domain", "settings-change");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(1);
+
+    // runNow 应绕过冷却
+    service.runNow("t-domain");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(2);
+
+    service.dispose();
+  });
+});
+
+describe("BackgroundService blocked task recheck", () => {
+  it("blocked 任务到期后重新检查 eligibility", async () => {
+    vi.useFakeTimers();
+    const { service, registry } = createBackgroundBundle();
+    let runs = 0;
+    let canRunResult = { ready: false, reason: { key: "test.blocked", fallback: "Test blocked" }, retryOn: "interval" as const };
+    registry.register({
+      id: "t-blocked-recheck",
+      pluginId: "test",
+      label: "t-blocked-recheck",
+      intervalMs: 60_000,
+      canRun: () => canRunResult,
+      async run() {
+        runs += 1;
+      }
+    });
+
+    // 触发任务：应进入 blocked 状态
+    service.runNow("t-blocked-recheck");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(runs).toBe(0);
+    const snap1 = service.listSnapshots().find((s) => s.id === "t-blocked-recheck")!;
+    expect(snap1.state).toBe("blocked");
+
+    // 1 分钟后：仍在 blocked
+    await vi.advanceTimersByTimeAsync(60_000);
+    const snap2 = service.listSnapshots().find((s) => s.id === "t-blocked-recheck")!;
+    expect(snap2.state).toBe("blocked");
+
+    // 修改 canRun 为 ready
+    canRunResult = { ready: true };
+
+    // 再过 1 分钟（总计 2 分钟）：应重新检查并运行
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(runs).toBe(1);
+    const snap3 = service.listSnapshots().find((s) => s.id === "t-blocked-recheck")!;
+    expect(snap3.state).toBe("idle");
+
+    service.dispose();
+    vi.useRealTimers();
+  });
+});
+
+describe("BackgroundService cancel reschedules", () => {
+  it("取消后 nextRunAt 和 lastScheduledAt 从取消时刻重新计算", async () => {
+    vi.useFakeTimers();
+    const { service, registry } = createBackgroundBundle();
+    registry.register({
+      id: "t-cancel-reschedule",
+      pluginId: "test",
+      label: "t-cancel-reschedule",
+      intervalMs: 60_000,
+      async run(ctx) {
+        await new Promise<void>((resolve) => {
+          ctx.signal.addEventListener("abort", () => resolve(), { once: true });
+          // 永不主动完成
+        });
+      }
+    });
+
+    // 触发任务
+    service.runNow("t-cancel-reschedule");
+    await vi.advanceTimersByTimeAsync(10);
+
+    // 快进 30 秒后取消
+    await vi.advanceTimersByTimeAsync(30_000);
+    await service.cancel("t-cancel-reschedule");
+
+    const snap = service.listSnapshots().find((s) => s.id === "t-cancel-reschedule")!;
+    // nextRunAt 应该从取消时刻开始计算（60 秒后）
+    const nextRun = new Date(snap.nextRunAt!).getTime();
+    const now = Date.now();
+    // 允许 1 秒误差
+    expect(nextRun - now).toBeGreaterThanOrEqual(59_000);
+    expect(nextRun - now).toBeLessThanOrEqual(61_000);
+
+    service.dispose();
+    vi.useRealTimers();
+  });
+});
