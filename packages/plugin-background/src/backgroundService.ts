@@ -820,6 +820,17 @@ type LeaderToFollower =
   | { type: "snapshots"; snapshots: BackgroundTaskSnapshot[] }
   | { type: "action-result"; ok: boolean; actionId: string };
 
+/**
+ * BroadcastChannel 只是低延迟通道，不能作为操作投递的唯一保障：部分浏览器
+ * 可使用 Web Locks，却因隐私策略、WebView 或运行时错误而无法创建频道。
+ * 这时以 localStorage 的短期邮箱兜底；leader 取得资格后会扫描并消费邮箱。
+ */
+type PersistedFollowerAction = {
+  action: FollowerAction;
+  createdAt: number;
+  from: string;
+};
+
 function createLeaderContext(channelName: string, heartbeatMs: number): LeaderContext {
   let isLeader = false;
   let interval: ReturnType<typeof setInterval> | undefined;
@@ -842,6 +853,81 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : `tab-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const actionStoragePrefix = `${channelName}.action.`;
+  const actionTtlMs = 30_000;
+  const processedActionIds = new Set<string>();
+  let storageHandler: ((event: StorageEvent) => void) | undefined;
+
+  function rememberProcessedAction(actionId: string) {
+    processedActionIds.add(actionId);
+    // 操作 ID 只用于短期跨通道去重，避免长期运行的页面无限增长。
+    if (processedActionIds.size > 256) processedActionIds.clear();
+  }
+
+  function actionStorageKey(actionId: string) {
+    return `${actionStoragePrefix}${actionId}`;
+  }
+
+  function removePersistedAction(actionId: string) {
+    try {
+      localStorage.removeItem(actionStorageKey(actionId));
+    } catch {
+      // 存储可能被浏览器策略禁用；BroadcastChannel 仍可作为可用通道。
+    }
+  }
+
+  function deliverAction(action: FollowerAction, actionId: string, from: string) {
+    if (!isLeader || !onAction || processedActionIds.has(actionId)) return;
+    rememberProcessedAction(actionId);
+    removePersistedAction(actionId);
+    if (action.type === "sync-state") {
+      onAction({ type: "sync-state", fromTabId: from });
+    } else {
+      onAction({ ...action, fromTabId: from });
+    }
+  }
+
+  function consumePersistedAction(key: string, value: string) {
+    if (!key.startsWith(actionStoragePrefix)) return;
+    const actionId = key.slice(actionStoragePrefix.length);
+    if (!actionId) return;
+    try {
+      const persisted = JSON.parse(value) as PersistedFollowerAction;
+      if (!persisted?.action || typeof persisted.createdAt !== "number" || typeof persisted.from !== "string") return;
+      // 不执行过期的点击，防止浏览器崩溃恢复后意外补跑陈旧的手动操作。
+      if (Date.now() - persisted.createdAt > actionTtlMs) {
+        removePersistedAction(actionId);
+        return;
+      }
+      deliverAction(persisted.action, actionId, persisted.from);
+    } catch {
+      // 损坏的记录不能阻塞后续动作。
+      removePersistedAction(actionId);
+    }
+  }
+
+  function drainPersistedActions() {
+    if (!isLeader) return;
+    try {
+      const entries: Array<[string, string]> = [];
+      for (let i = 0; i < localStorage.length; i += 1) {
+        const key = localStorage.key(i);
+        if (!key?.startsWith(actionStoragePrefix)) continue;
+        const value = localStorage.getItem(key);
+        if (value !== null) entries.push([key, value]);
+      }
+      for (const [key, value] of entries) consumePersistedAction(key, value);
+    } catch {
+      // localStorage 不可用时由 BroadcastChannel 保持正常路径。
+    }
+  }
+
+  function becomeLeader() {
+    isLeader = true;
+    lastHeartbeat = Date.now();
+    if (bc) broadcastHeartbeat();
+    drainPersistedActions();
+  }
   function broadcastHeartbeat() {
     if (bc) bc.postMessage({ type: "heartbeat", t: Date.now(), from: tabId });
   }
@@ -873,9 +959,16 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
 
     // 非浏览器环境（node / 单进程测试）：没有跨 tab 协调需求，自任 leader。
     if (typeof window === "undefined") {
-      isLeader = true;
+      becomeLeader();
       return;
     }
+
+    // storage 事件不会回送给写入方；因此 leader 获取资格时还会主动扫描，
+    // 以覆盖 "点击发生在选举完成前" 的竞态。
+    storageHandler = (event) => {
+      if (event.key && event.newValue) consumePersistedAction(event.key, event.newValue);
+    };
+    window.addEventListener("storage", storageHandler);
 
     const locker = (navigator as Navigator & { locks?: WebLocksLike }).locks;
     if (locker) {
@@ -884,9 +977,7 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
       lockAbort = new AbortController();
       const myLockAbort = lockAbort;
       void locker.request(LEADER_LOCK_NAME, async () => {
-        isLeader = true;
-        lastHeartbeat = Date.now();
-        if (bc) broadcastHeartbeat();
+        becomeLeader();
         try {
           await new Promise<void>((resolve) => {
             if (myLockAbort.signal.aborted) {
@@ -928,7 +1019,7 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
     } catch {
       bc = null;
       // BroadcastChannel 不可用：单 tab 限流，自任 leader。
-      isLeader = true;
+      becomeLeader();
       return;
     }
     bc.onmessage = (ev) => handleBroadcastMessage(ev);
@@ -965,7 +1056,7 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
    */
   function runElection() {
     if (!bc) {
-      isLeader = true;
+      becomeLeader();
       return;
     }
     electionInProgress = true;
@@ -996,9 +1087,7 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
       }
       if (winner === tabId) {
         // 关键修复:自己 tabId 最小(没有更小者),赢得选举。
-        isLeader = true;
-        lastHeartbeat = Date.now();
-        broadcastHeartbeat();
+        becomeLeader();
         if (getSnapshots) broadcastSnapshotsImpl(getSnapshots());
       }
     }, 250);
@@ -1006,7 +1095,7 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
 
   function handleBroadcastMessage(ev: MessageEvent) {
     const data = ev.data as
-      | { type?: string; t?: number; from?: string; action?: FollowerAction; snapshots?: BackgroundTaskSnapshot[] }
+      | { type?: string; t?: number; from?: string; action?: FollowerAction; actionId?: string; snapshots?: BackgroundTaskSnapshot[] }
       | undefined;
     if (!data?.type || !data.from || data.from === tabId) return;
     if (data.type === "want") {
@@ -1037,14 +1126,9 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
     } else if (data.type === "snapshots" && Array.isArray(data.snapshots)) {
       if (onSnapshots) onSnapshots(data.snapshots);
     } else if (data.type === "action" && data.action) {
-      if (isLeader && onAction) {
-        const action = data.action;
-        if (action.type === "sync-state") {
-          onAction({ type: "sync-state", fromTabId: data.from });
-        } else {
-          onAction({ ...action, fromTabId: data.from });
-        }
-      }
+      // 即使此刻尚未成为 leader，动作已经在 localStorage 邮箱中，
+      // becomeLeader() 会在拿到锁/赢得选举后重放，不能在这里丢弃。
+      deliverAction(data.action, data.actionId ?? `${data.from}-${Date.now()}`, data.from);
     }
   }
 
@@ -1062,9 +1146,23 @@ function createLeaderContext(channelName: string, heartbeatMs: number): LeaderCo
     isLeader = false;
     electionInProgress = false;
     electionResult = null;
+    if (storageHandler && typeof window !== "undefined") {
+      window.removeEventListener("storage", storageHandler);
+      storageHandler = undefined;
+    }
   }
   function forwardAction(action: FollowerAction) {
-    if (bc) bc.postMessage({ type: "action", action, from: tabId });
+    const actionId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${tabId}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+    // 先写邮箱再发实时消息：leader 即使尚未就绪、或 BC 不可用，也能接到。
+    try {
+      localStorage.setItem(actionStorageKey(actionId), JSON.stringify({ action, createdAt: Date.now(), from: tabId } satisfies PersistedFollowerAction));
+    } catch {
+      // 允许降级到 BroadcastChannel；两者同时不可用时无法跨 tab 投递。
+    }
+    if (bc) bc.postMessage({ type: "action", action, actionId, from: tabId });
   }
   function sendToTab(_tabId: string, _message: LeaderToFollower) {
     // 当前实现：所有 leader->follower 消息都通过 broadcast 发送；

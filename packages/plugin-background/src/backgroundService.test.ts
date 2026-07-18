@@ -56,6 +56,55 @@ function installFakeBrowserNoLocks() {
   };
 }
 
+/** Web Locks 可用、但 BroadcastChannel 被运行时禁用的真实降级场景。 */
+function installFakeBrowserWithLocksWithoutBroadcastChannel() {
+  const listeners = new Map<string, Set<(event: StorageEvent) => void>>();
+  let lockTaken = false;
+  const win = {
+    addEventListener(type: string, listener: (event: StorageEvent) => void) {
+      const set = listeners.get(type) ?? new Set();
+      set.add(listener);
+      listeners.set(type, set);
+    },
+    removeEventListener(type: string, listener: (event: StorageEvent) => void) {
+      listeners.get(type)?.delete(listener);
+    }
+  };
+  const doc = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    visibilityState: "visible" as const
+  };
+  const locks = {
+    request(_name: string, callback: () => Promise<unknown>) {
+      if (!lockTaken) {
+        lockTaken = true;
+        return callback();
+      }
+      // 第二个 tab 作为 follower 保持排队，直到测试结束。
+      return new Promise<undefined>(() => {});
+    }
+  };
+  vi.stubGlobal("window", win);
+  vi.stubGlobal("document", doc);
+  vi.stubGlobal("navigator", { locks } as Navigator);
+  vi.stubGlobal("BroadcastChannel", class {
+    constructor() {
+      throw new Error("BroadcastChannel unavailable");
+    }
+  });
+  return {
+    dispatchStorage(key: string, newValue: string) {
+      for (const listener of listeners.get("storage") ?? []) {
+        listener({ key, newValue } as StorageEvent);
+      }
+    },
+    cleanup() {
+      vi.unstubAllGlobals();
+    }
+  };
+}
+
 describe("BackgroundService basics", () => {
   it("does not run the same task concurrently", async () => {
     const { service, registry } = createBackgroundBundle();
@@ -310,6 +359,85 @@ describe("BackgroundService leader election (BC path)", () => {
 
       a.service.dispose();
       b.service.dispose();
+    } finally {
+      env.cleanup();
+    }
+  });
+
+  it("replays a runNow sent before leader election finishes", async () => {
+    const env = installFakeBrowserNoLocks();
+    try {
+      const a = createBackgroundBundle();
+      const b = createBackgroundBundle();
+      let aRuns = 0;
+      let bRuns = 0;
+      a.registry.register({
+        id: "election-race-task",
+        pluginId: "test",
+        label: "race",
+        async run() {
+          aRuns += 1;
+        }
+      });
+      b.registry.register({
+        id: "election-race-task",
+        pluginId: "test",
+        label: "race",
+        async run() {
+          bRuns += 1;
+        }
+      });
+
+      // 两个 tab 都还未成为 leader 时，旧实现会直接忽略这条 action。
+      b.service.runNow("election-race-task");
+      await new Promise((resolve) => setTimeout(resolve, 600));
+
+      expect(aRuns + bRuns).toBe(1);
+      a.service.dispose();
+      b.service.dispose();
+    } finally {
+      env.cleanup();
+    }
+  });
+});
+
+describe("BackgroundService action delivery fallback", () => {
+  it("forwards runNow through the storage mailbox when Web Locks exist but BroadcastChannel does not", async () => {
+    const env = installFakeBrowserWithLocksWithoutBroadcastChannel();
+    try {
+      const leader = createBackgroundBundle();
+      const follower = createBackgroundBundle();
+      let leaderRuns = 0;
+      let followerRuns = 0;
+      leader.registry.register({
+        id: "shared-storage-task",
+        pluginId: "test",
+        label: "shared",
+        async run() {
+          leaderRuns += 1;
+        }
+      });
+      follower.registry.register({
+        id: "shared-storage-task",
+        pluginId: "test",
+        label: "shared",
+        async run() {
+          followerRuns += 1;
+        }
+      });
+
+      follower.service.runNow("shared-storage-task");
+      const actionKey = Array.from({ length: localStorage.length }, (_unused, index) => localStorage.key(index))
+        .find((key) => key?.startsWith("background.leader.action."));
+      expect(actionKey).toBeTruthy();
+      env.dispatchStorage(actionKey!, localStorage.getItem(actionKey!)!);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(leaderRuns).toBe(1);
+      expect(followerRuns).toBe(0);
+      expect(localStorage.getItem(actionKey!)).toBeNull();
+      leader.service.dispose();
+      follower.service.dispose();
     } finally {
       env.cleanup();
     }

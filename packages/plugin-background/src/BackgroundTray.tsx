@@ -4,7 +4,7 @@
 // 施工单 001：只渲染"立即同步一次"或"取消本次同步"，
 // 没有暂停、继续、重试。失败不是稳态，显示为"上次同步失败"。
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
 import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundTaskSnapshot, BackgroundTaskState } from "@keymaster/contracts";
@@ -20,10 +20,35 @@ export function BackgroundTray() {
   );
   const [open, setOpen] = useState(false);
   const [snapshots, setSnapshots] = useState<BackgroundTaskSnapshot[]>(service.listSnapshots());
+  // runNow 跨 tab 会先转发给 leader；在收到新快照前给出明确反馈，避免
+  // 用户把一次已经送出的点击误认为没有生效而重复点击。
+  const pendingStartedAt = useRef(new Map<string, number>());
+  const [pendingRunIds, setPendingRunIds] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
-    return service.onChange((s) => setSnapshots(s));
+    return service.onChange((s) => {
+      setSnapshots(s);
+      setPendingRunIds((previous) => {
+        const next = new Set(previous);
+        for (const id of previous) {
+          const snapshot = s.find((item) => item.id === id);
+          const requestedAt = pendingStartedAt.current.get(id);
+          const attemptedAt = snapshot?.lastAttemptAt ? new Date(snapshot.lastAttemptAt).getTime() : 0;
+          if (!snapshot || snapshot.state === "queued" || snapshot.state === "running" || (requestedAt && attemptedAt >= requestedAt)) {
+            next.delete(id);
+            pendingStartedAt.current.delete(id);
+          }
+        }
+        return next;
+      });
+    });
   }, [service]);
+
+  const requestRunNow = (id: string) => {
+    pendingStartedAt.current.set(id, Date.now());
+    setPendingRunIds((previous) => new Set(previous).add(id));
+    service.runNow(id);
+  };
 
   const counts = useMemo(() => {
     let running = 0;
@@ -76,7 +101,7 @@ export function BackgroundTray() {
                     <StateBadge state={s.state} t={t} />
                   </div>
                   <TaskMeta s={s} timeFmt={timeFmt} t={t} />
-                  <TaskActions s={s} service={service} t={t} />
+                  <TaskActions s={s} service={service} pending={pendingRunIds.has(s.id)} onRunNow={requestRunNow} t={t} />
                 </li>
               ))}
             </ul>
@@ -136,10 +161,14 @@ function TaskMeta({
 function TaskActions({
   s,
   service,
+  pending,
+  onRunNow,
   t
 }: {
   s: BackgroundTaskSnapshot;
   service: BackgroundService;
+  pending: boolean;
+  onRunNow: (id: string) => void;
   t: (k: string, opts?: { defaultValue?: string }) => string;
 }) {
   // running/queued: 取消本次同步
@@ -162,10 +191,15 @@ function TaskActions({
     <div className="background-tray__actions">
       <button
         type="button"
-        onClick={() => service.runNow(s.id)}
-        title={t("background.tray.action.runOnce", { defaultValue: "立即同步一次" })}
+        disabled={pending}
+        onClick={() => onRunNow(s.id)}
+        title={pending
+          ? t("background.tray.action.requesting", { defaultValue: "正在请求同步…" })
+          : t("background.tray.action.runOnce", { defaultValue: "立即同步一次" })}
       >
-        <Zap size={14} /> {t("background.tray.action.runOnce", { defaultValue: "立即同步一次" })}
+        <Zap size={14} /> {pending
+          ? t("background.tray.action.requesting", { defaultValue: "正在请求同步…" })
+          : t("background.tray.action.runOnce", { defaultValue: "立即同步一次" })}
       </button>
     </div>
   );
