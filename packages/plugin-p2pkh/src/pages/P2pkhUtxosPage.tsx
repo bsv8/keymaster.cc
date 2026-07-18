@@ -56,6 +56,15 @@ export function P2pkhUtxosPage() {
     return off;
   }, [service]);
 
+  // 订阅 data-changed：后台任务原子提交 DB 后重读。
+  useEffect(() => {
+    const off = service.onDataChanged(() => {
+      service.listUtxos(assetId ? { assetId } : undefined).then(setUtxos);
+      service.listLocalInputClaims().then(setInputClaims);
+    });
+    return off;
+  }, [service, assetId]);
+
   const rows: UtxoRow[] = useMemo(() => {
     const byOutpoint = new Map<string, P2pkhLocalInputClaim>();
     for (const r of inputClaims) {
@@ -111,13 +120,6 @@ export function P2pkhUtxosPage() {
             ) : null}
             <Button variant="ghost" onClick={() => setAssetId(undefined)}>
               {t("p2pkh.asset.all", { defaultValue: "全部" })}
-            </Button>
-            <Button
-              onClick={() => {
-                service.triggerRecentSync();
-              }}
-            >
-              {t("p2pkh.action.refresh", { defaultValue: "刷新" })}
             </Button>
           </>
         }

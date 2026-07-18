@@ -9,6 +9,7 @@
 // 硬切换 003：route / menu / home widget / settings / breadcrumb 全部走 I18nText。
 
 import type {
+  AssetDataNotifier,
   AssetRegistry,
   BackgroundRegistry,
   BackgroundService,
@@ -27,6 +28,7 @@ import type {
   WocService
 } from "@keymaster/contracts";
 import {
+  ASSET_DATA_NOTIFIER_CAPABILITY,
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -393,6 +395,9 @@ export const p2pkhPlugin: PluginManifest = {
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
     const backgroundRegistry = ctx.get<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY);
     const backgroundService = ctx.get<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY);
+    const assetDataNotifier = ctx.has(ASSET_DATA_NOTIFIER_CAPABILITY)
+      ? ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY)
+      : undefined;
 
     const service = createP2pkhService({
       vault,
@@ -401,6 +406,7 @@ export const p2pkhPlugin: PluginManifest = {
       backgroundRegistry,
       backgroundService,
       keyspace,
+      assetDataNotifier,
       logger: ctx.logger
     });
     ctx.provide(P2PKH_CAPABILITY, service);

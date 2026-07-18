@@ -101,8 +101,6 @@ export interface AssetProvider {
   getAsset(assetId: string): Promise<AssetDetail | undefined>;
   /** 列出该资产的活动。 */
   listActivity(assetId: string): Promise<AssetActivity[]>;
-  /** 触发同步：可指定 assetId，不指定时同步该 provider 全部资产。 */
-  sync(assetId?: string): Promise<void>;
   /** 订阅资产变化，返回取消订阅函数。 */
   onChange(handler: () => void): () => void;
 }
@@ -116,3 +114,34 @@ export interface AssetRegistry {
   /** 按 id 取 provider。 */
   get(id: string): AssetProvider | undefined;
 }
+
+/**
+ * 资产数据变更事件。
+ * 设计缘由：后台任务原子提交 provider DB 后发布此事件，通知页面重读。
+ * payload 不携带金额、UTXO、token 数据，只表达"哪个 provider 的哪类数据已变更"。
+ */
+export interface AssetDataChangedEvent {
+  /** 发生变更的 provider id。 */
+  providerId: string;
+  /** 变更归属的 key namespace（可选）。 */
+  publicKeyHex?: string;
+  /** 变更版本号；用于微任务合并重读。 */
+  revision: number;
+  /** 变更的数据类别。 */
+  kinds: Array<"resource" | "utxo" | "history" | "holding" | "claim" | "submission" | "settings">;
+}
+
+/**
+ * 资产数据变更通知器。
+ * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
+ * 页面收到通知后只重读本地 DB，不发起网络请求。
+ */
+export interface AssetDataNotifier {
+  /** 发布数据变更事件。只能在 provider DB write transaction 成功 resolve 后调用。 */
+  emit(event: AssetDataChangedEvent): void;
+  /** 订阅数据变更事件。返回取消订阅函数。 */
+  subscribe(handler: (event: AssetDataChangedEvent) => void): () => void;
+}
+
+/** AssetDataNotifier capability key。 */
+export const ASSET_DATA_NOTIFIER_CAPABILITY = "asset.dataNotifier";

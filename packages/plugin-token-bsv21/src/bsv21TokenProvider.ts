@@ -1,60 +1,70 @@
 // packages/plugin-token-bsv21/src/bsv21TokenProvider.ts
-// BSV-21 TokenProvider：聚合 bsv21Service 的 listActiveKeyTokens 为
-// TokenSummary / TokenDetail，注入 token.registry。
+// BSV-21 TokenProvider：从 snapshot DB 读取，注入 token.registry。
 //
 // 设计缘由：
-//   - phase 1 仅暴露列表 + 余额 + 详情；不做 transfer。
-//   - 列表稳定排序：按 origin 升序，避免同一 origin 出现多次（同一
-//     key 在 main / test 多个地址都持有时合并为一条）。
+//   - listTokens / getToken 只读 snapshot DB，不访问 WOC。
+//   - 后台 task 通过 bsv21Sync 写入 DB，页面通过 onChange 重读。
+//   - 同一 token（origin）可能被多个地址持有，需要按 origin 聚合余额。
+//   - 列表稳定排序：按 origin 升序。
 
 import type {
+  AssetDataNotifier,
+  KeyspaceService,
   TokenActivity,
   TokenDetail,
   TokenProvider,
   TokenSummary
 } from "@keymaster/contracts";
-import type { Bsv21ServiceHandle, TokenWithMeta } from "./bsv21Service.js";
+import type { Bsv21Db, Bsv21TokenSnapshot } from "./bsv21Db.js";
 
 export interface Bsv21TokenProviderOptions {
-  service: Bsv21ServiceHandle;
+  db: Bsv21Db;
+  keyspace: KeyspaceService;
+  assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): TokenProvider {
-  if (!options || !options.service) {
-    throw new Error("createBsv21TokenProvider: service is required");
+  if (!options || !options.db || !options.keyspace) {
+    throw new Error("createBsv21TokenProvider: db and keyspace are required");
   }
-  const service = options.service;
+  const { db, keyspace, assetDataNotifier } = options;
   const listeners = new Set<() => void>();
 
-  function emit() {
-    for (const l of listeners) l();
+  function notify() {
+    for (const l of [...listeners]) {
+      try { l(); } catch { /* 静默 */ }
+    }
   }
 
-  function summaryOf(t: TokenWithMeta): TokenSummary {
+  // 订阅 assetDataNotifier：收到 bsv21 provider 的 data-changed 后通知本地订阅者。
+  if (assetDataNotifier) {
+    assetDataNotifier.subscribe((event) => {
+      if (event.providerId === "bsv21") {
+        notify();
+      }
+    });
+  }
+
+  function summaryOf(
+    s: Bsv21TokenSnapshot,
+    aggregated: { confirmed: number; unconfirmed: number }
+  ): TokenSummary {
     return {
-      tokenId: t.meta.origin,
+      tokenId: s.origin,
       providerId: "bsv21",
-      symbol: t.meta.symbol ?? t.meta.origin.slice(0, 8),
-      label: t.meta.symbol ? t.meta.symbol : `BSV-21 ${t.meta.origin.slice(0, 8)}…`,
-      network: t.network,
+      symbol: s.meta.symbol ?? s.origin.slice(0, 8),
+      label: s.meta.symbol ? s.meta.symbol : `BSV-21 ${s.origin.slice(0, 8)}…`,
+      network: s.network,
       balance: {
-        amount: t.balance.confirmed + t.balance.unconfirmed,
-        unit: t.meta.symbol ?? "TOK",
-        display: `${t.balance.confirmed + t.balance.unconfirmed} ${t.meta.symbol ?? "TOK"}`
+        amount: aggregated.confirmed + aggregated.unconfirmed,
+        unit: s.meta.symbol ?? "TOK",
+        display: `${aggregated.confirmed + aggregated.unconfirmed} ${s.meta.symbol ?? "TOK"}`
       },
       status: "ready",
-      issuer: t.meta.issuer,
-      decimals: t.meta.decimals,
-      tags: ["bsv21", t.network]
+      issuer: s.meta.issuer,
+      decimals: s.meta.decimals,
+      tags: ["bsv21", s.network]
     };
-  }
-
-  let cached: TokenWithMeta[] = [];
-  let cacheAt = 0;
-  const CACHE_TTL_MS = 1000;
-  // 简单内存缓存：1 秒内多次 listTokens 复用上一次结果，避免对 WOC 重复打。
-  function isFresh(): boolean {
-    return Date.now() - cacheAt <= CACHE_TTL_MS;
   }
 
   return {
@@ -63,53 +73,85 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
     order: 10,
 
     async listTokens(): Promise<TokenSummary[]> {
-      let items = cached;
-      if (!isFresh()) {
-        items = await service.listActiveKeyTokens();
-        cached = items;
-        cacheAt = Date.now();
+      const state = keyspace.active();
+      if (!state.activePublicKeyHex) return [];
+
+      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+
+      // 按 origin 聚合多地址的 confirmed/unconfirmed 余额
+      const aggregated = new Map<string, {
+        snapshot: Bsv21TokenSnapshot;
+        confirmed: number;
+        unconfirmed: number;
+      }>();
+      for (const s of snapshots) {
+        const existing = aggregated.get(s.origin);
+        if (existing) {
+          existing.confirmed += s.balance.confirmed;
+          existing.unconfirmed += s.balance.unconfirmed;
+        } else {
+          aggregated.set(s.origin, {
+            snapshot: s,
+            confirmed: s.balance.confirmed,
+            unconfirmed: s.balance.unconfirmed,
+          });
+        }
       }
-      // 合并：同一 origin 选第一条（保持稳定）。
-      const seen = new Set<string>();
+
       const out: TokenSummary[] = [];
-      for (const t of items) {
-        if (seen.has(t.meta.origin)) continue;
-        seen.add(t.meta.origin);
-        out.push(summaryOf(t));
+      for (const [origin, entry] of aggregated) {
+        void origin;
+        out.push(summaryOf(entry.snapshot, {
+          confirmed: entry.confirmed,
+          unconfirmed: entry.unconfirmed,
+        }));
       }
       out.sort((a, b) => a.tokenId.localeCompare(b.tokenId));
       return out;
     },
 
     async getToken(tokenId): Promise<TokenDetail | undefined> {
-      const got = await service.getToken(tokenId);
-      if (!got) return undefined;
+      const state = keyspace.active();
+      if (!state.activePublicKeyHex) return undefined;
+
+      // 从 listByPublicKey 结果中按 origin 筛选并聚合
+      // 设计缘由：getByOrigin 需要 network/address 参数，但详情页只有 tokenId；
+      // 改为 list 后 filter/aggregate，与 listTokens 同构。
+      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+      const matching = snapshots.filter((s) => s.origin === tokenId);
+      if (matching.length === 0) return undefined;
+      const first = matching[0];
+      if (!first) return undefined;
+
+      // 聚合多地址的 confirmed/unconfirmed 余额
+      const aggregated = { confirmed: 0, unconfirmed: 0 };
+      const addresses: Array<{ address: string; network: string; confirmed: number; unconfirmed: number }> = [];
+      for (const s of matching) {
+        aggregated.confirmed += s.balance.confirmed;
+        aggregated.unconfirmed += s.balance.unconfirmed;
+        addresses.push({
+          address: s.address,
+          network: s.network,
+          confirmed: s.balance.confirmed,
+          unconfirmed: s.balance.unconfirmed,
+        });
+      }
+
       return {
-        summary: {
-          tokenId: got.meta.origin,
-          providerId: "bsv21",
-          symbol: got.meta.symbol ?? got.meta.origin.slice(0, 8),
-          label: got.meta.symbol ? got.meta.symbol : `BSV-21 ${got.meta.origin.slice(0, 8)}…`,
-          issuer: got.meta.issuer,
-          decimals: got.meta.decimals,
-          status: "ready"
-        },
+        summary: summaryOf(first, aggregated),
         activities: [],
-        extras: { origin: got.meta.origin, confirmed: got.balance.confirmed, unconfirmed: got.balance.unconfirmed }
+        extras: {
+          origin: tokenId,
+          confirmed: aggregated.confirmed,
+          unconfirmed: aggregated.unconfirmed,
+          addresses,
+        }
       };
     },
 
     async listActivity(): Promise<TokenActivity[]> {
       // phase 1：BSV-21 activity 端点未在 WOC 文档稳定，phase 1 返回空。
-      // 后续接入 activity 端点时再扩展。
       return [];
-    },
-
-    async sync(): Promise<void> {
-      // 简单 invalidate：清缓存 + 通知订阅者。
-      cached = [];
-      cacheAt = 0;
-      emit();
     },
 
     onChange(handler) {

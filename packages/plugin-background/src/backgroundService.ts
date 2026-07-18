@@ -24,10 +24,12 @@
 import type {
   BackgroundRegistry,
   BackgroundService,
+  BackgroundSyncSettings,
   BackgroundTaskContext,
   BackgroundTaskDefinition,
   BackgroundTaskKeyScope,
   BackgroundTaskProgress,
+  BackgroundTaskSchedule,
   BackgroundTaskSnapshot,
   BackgroundTaskState,
   PluginLogger
@@ -52,6 +54,43 @@ interface TaskRuntime {
 const LEADER_LOCK_NAME = "background.leader";
 const LEADER_HEARTBEAT_MS = 5000;
 const ENABLED_PREF_KEY = "background.enabled";
+
+/**
+ * 后台同步设置存储键。
+ * 设计缘由：设置属于后台任务平台，而不是某个业务插件。
+ * 影响 P2PKH、BSV-21、STAS 及未来所有资产 provider。
+ */
+const SCHEDULE_SETTINGS_KEY = "background.sync.settings";
+
+/** 默认设置。 */
+const DEFAULT_SYNC_SETTINGS: BackgroundSyncSettings = {
+  assetHoldingsIntervalMs: 900_000
+};
+
+/** 预设间隔值集合。 */
+const VALID_INTERVALS = new Set([300_000, 900_000, 1_800_000, 3_600_000]);
+
+/**
+ * 归一化 assetHoldingsIntervalMs。
+ * 设计缘由：统一 localStorage 读取、设置写入、跨标签 BroadcastChannel
+ * 消息处理的校验逻辑。要求：
+ *   - 有限数；
+ *   - 属于预设值集合；
+ *   - 不低于注册任务的最大 minIntervalMs；
+ *   - 非法值回退默认值。
+ */
+function normalizeAssetHoldingsInterval(
+  value: unknown,
+  minIntervalMs: number
+): number {
+  if (typeof value === "number" && Number.isFinite(value) && VALID_INTERVALS.has(value)) {
+    return Math.max(value, minIntervalMs);
+  }
+  return Math.max(DEFAULT_SYNC_SETTINGS.assetHoldingsIntervalMs, minIntervalMs);
+}
+
+/** 普通事件冷却时间：2 分钟。 */
+const COOLDOWN_MS = 2 * 60 * 1000;
 
 /**
  * 008：把 task 定义上的 keyScope 统一归一为对象或 undefined。
@@ -89,6 +128,8 @@ export interface CreateBackgroundServiceOptions {
 
 export function createBackgroundService(options: CreateBackgroundServiceOptions = {}): BackgroundServiceHandle {
   const tasks = new Map<string, TaskRuntime>();
+  /** 冷却 map：key -> lastRunAt。每个实例独立，不跨实例共享。 */
+  const cooldownMap = new Map<string, number>();
   const enabledOverrides = loadEnabledOverrides();
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
@@ -181,6 +222,60 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     }
   }
 
+  /**
+   * 读取后台同步设置。
+   * 设计缘由：从 localStorage 读取，使用 normalizeAssetHoldingsInterval
+   * 归一化（校验有限数 + 预设值集合），缺省返回默认值。
+   * 注意：不在此处校验 minIntervalMs（需要遍历 tasks），
+   * 由 getEffectiveIntervalMs 和 updateScheduleSettings 分别处理。
+   */
+  function loadScheduleSettings(): BackgroundSyncSettings {
+    try {
+      const raw = localStorage.getItem(SCHEDULE_SETTINGS_KEY);
+      if (!raw) return DEFAULT_SYNC_SETTINGS;
+      const obj = JSON.parse(raw) as Partial<BackgroundSyncSettings>;
+      return {
+        assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(obj.assetHoldingsIntervalMs, 0)
+      };
+    } catch {
+      return DEFAULT_SYNC_SETTINGS;
+    }
+  }
+
+  /**
+   * 保存后台同步设置。
+   * 设计缘由：写入 localStorage 并通过 BroadcastChannel 通知其他标签页。
+   */
+  function saveScheduleSettings(settings: BackgroundSyncSettings): void {
+    try {
+      localStorage.setItem(SCHEDULE_SETTINGS_KEY, JSON.stringify(settings));
+      // 通过 BroadcastChannel 通知其他标签页
+      if (settingsChannel) {
+        settingsChannel.postMessage({ type: "settings-changed", settings });
+      }
+    } catch {
+      // 静默失败。
+    }
+  }
+
+  /**
+   * 跨标签页设置同步通道。
+   * 设计缘由：leader 写入设置后通知 follower，follower 收到后重算 nextRunAt。
+   */
+  let settingsChannel: BroadcastChannel | null = null;
+  try {
+    settingsChannel = new BroadcastChannel("background.settings.sync");
+    settingsChannel.onmessage = (ev) => {
+      if (ev.data?.type === "settings-changed" && ev.data.settings) {
+        // 收到其他标签页的设置变更：重算 schedule
+        recalculateAssetHoldingsSchedule();
+      }
+    };
+  } catch {
+    // BroadcastChannel 不可用时退化为单 tab 模式
+    settingsChannel = null;
+  }
+
   function register(def: BackgroundTaskDefinition) {
     if (tasks.has(def.id)) {
       throw new Error(`Background task id "${def.id}" is already registered`);
@@ -204,14 +299,48 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     return tasks.get(id)?.def;
   }
 
+  /**
+   * 计算任务的下一次运行时间。
+   * 设计缘由：优先使用 schedule group 配置的 interval，否则使用任务定义的 intervalMs。
+   * asset-holdings 组的 interval 从 BackgroundSyncSettings 读取。
+   */
   function scheduleNext(t: TaskRuntime) {
-    if (!t.enabled || t.def.intervalMs == null) {
+    if (!t.enabled) {
       t.nextRunAt = undefined;
       return;
     }
+
+    let interval: number | undefined;
+
+    // 优先使用 schedule group 配置
+    if (t.def.schedule?.group === "asset-holdings") {
+      const settings = loadScheduleSettings();
+      interval = settings.assetHoldingsIntervalMs;
+    } else {
+      interval = t.def.intervalMs;
+    }
+
+    if (interval == null) {
+      t.nextRunAt = undefined;
+      return;
+    }
+
     const now = Date.now();
-    const next = new Date(now + t.def.intervalMs).toISOString();
+    const next = new Date(now + interval).toISOString();
     t.nextRunAt = next;
+  }
+
+  /**
+   * 重新计算所有 asset-holdings 组任务的下一次运行时间。
+   * 设计缘由：配置变更后需要重算，新周期从保存时刻开始计时。
+   */
+  function recalculateAssetHoldingsSchedule(): void {
+    for (const t of tasks.values()) {
+      if (t.def.schedule?.group === "asset-holdings") {
+        scheduleNext(t);
+      }
+    }
+    emitAll();
   }
 
   /**
@@ -294,6 +423,9 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
         t.ctl = undefined;
         scheduleNext(t);
         emitAll();
+        // 更新冷却时间戳
+        const cooldownKey = `${t.def.id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
+        cooldownMap.set(cooldownKey, Date.now());
       }
     })();
     t.runPromise = promise;
@@ -325,6 +457,11 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     }
   }
 
+  /**
+   * 触发任务运行。
+   * 设计缘由：支持冷却策略——普通事件的同一 task/key scope 最短网络间隔为 2 分钟。
+   * 首次没有 snapshot、显式后台"立即运行"、失败后用户"重试"可以绕过普通冷却。
+   */
   function trigger(id: string, reason = "manual") {
     const t = tasks.get(id);
     if (!t) return;
@@ -332,6 +469,18 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     // 必须是硬屏障，手动 trigger 也不能绕过。follower → leader 转发
     // 也走同样的判断，leader 端不会再 runOne。
     if (!t.enabled) return;
+
+    // 冷却检查（普通事件）
+    if (reason !== "manual" && reason !== "retry" && reason !== "first-sync") {
+      const cooldownKey = `${id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
+      const lastRun = cooldownMap.get(cooldownKey);
+      if (lastRun && Date.now() - lastRun < COOLDOWN_MS) {
+        // 冷却期内：标记 syncDue，不创建新任务
+        t.rerunRequested = true;
+        return;
+      }
+    }
+
     // 关键修复：follower 标签页的 trigger/pause/resume/cancel/retry 必须
     // 转发给 leader 执行；本 tab 不能再各自启动实例。
     if (!leaderCtx.isLeader) {
@@ -435,20 +584,46 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     emitAll();
   }
 
+  /**
+   * 获取任务的有效周期毫秒。
+   * 设计缘由：优先使用 schedule group 配置的 interval，否则使用任务定义的 intervalMs。
+   */
+  function getEffectiveIntervalMs(t: TaskRuntime): number | undefined {
+    if (t.def.schedule?.group === "asset-holdings") {
+      return loadScheduleSettings().assetHoldingsIntervalMs;
+    }
+    return t.def.intervalMs;
+  }
+
   function startTimer() {
     if (intervalTimer) return;
     intervalTimer = setInterval(() => {
       const now = Date.now();
       for (const t of tasks.values()) {
         if (!t.enabled) continue;
-        if (t.def.intervalMs == null) continue;
         if (t.runPromise) continue;
         if (t.state === "running" || t.state === "queued" || t.state === "failed" || t.state === "paused") continue;
+
+        // 冷却唤醒：检查是否有待处理的 rerunRequested 且已过冷却期
+        if (t.rerunRequested) {
+          const cooldownKey = `${t.def.id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
+          const lastRun = cooldownMap.get(cooldownKey);
+          if (!lastRun || now - lastRun >= COOLDOWN_MS) {
+            t.rerunRequested = false;
+            if (leaderCtx.isLeader) {
+              void runOne(t, "cooldown-wakeup");
+            }
+            continue;
+          }
+        }
+
+        const intervalMs = getEffectiveIntervalMs(t);
+        if (intervalMs == null) continue;
         if (t.lastScheduledAt == null) {
           t.lastScheduledAt = now;
           continue;
         }
-        if (now - t.lastScheduledAt >= t.def.intervalMs) {
+        if (now - t.lastScheduledAt >= intervalMs) {
           t.lastScheduledAt = now;
           if (leaderCtx.isLeader) {
             void runOne(t, "interval");
@@ -488,11 +663,25 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     }
   }
 
+  /**
+   * 监听 localStorage storage 事件（跨标签页同步的 fallback）。
+   * 设计缘由：BroadcastChannel 在某些浏览器可能不可用，
+   * storage 事件是更广泛的跨标签页同步机制。
+   */
+  let storageHandler: ((ev: StorageEvent) => void) | undefined;
+  function handleStorage(ev: StorageEvent) {
+    if (ev.key === SCHEDULE_SETTINGS_KEY) {
+      recalculateAssetHoldingsSchedule();
+    }
+  }
+
   function start() {
     if (typeof window !== "undefined") {
       visibilityHandler = handleVisibility;
       document.addEventListener("visibilitychange", visibilityHandler);
       window.addEventListener("online", handleOnline);
+      storageHandler = handleStorage;
+      window.addEventListener("storage", storageHandler);
     }
     leaderCtx.start({
       onAction: handleFollowerAction,
@@ -528,6 +717,33 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     cancel,
     retry,
     cancelByKey,
+    getScheduleSettings() {
+      return loadScheduleSettings();
+    },
+    updateScheduleSettings(settings) {
+      // 校验最小间隔：遍历所有 asset-holdings 组任务，取最大 minIntervalMs。
+      // 设计缘由：防止用户配置过短的同步间隔导致 API 限流或资源浪费。
+      let minIntervalMs = 0;
+      for (const t of tasks.values()) {
+        if (t.def.schedule?.group === "asset-holdings" && t.def.schedule.minIntervalMs) {
+          minIntervalMs = Math.max(minIntervalMs, t.def.schedule.minIntervalMs);
+        }
+      }
+      const validatedSettings: BackgroundSyncSettings = {
+        assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(settings.assetHoldingsIntervalMs, minIntervalMs)
+      };
+      saveScheduleSettings(validatedSettings);
+      // 重置所有 asset-holdings 组任务的 lastScheduledAt，让新周期从保存时刻开始。
+      // 设计缘由：不重置的话，旧 lastScheduledAt + 新 interval 可能导致
+      // 下一次触发时间不符合用户预期（例如旧周期刚触发过，新 interval 更短，
+      // 但 lastScheduledAt 还是旧值，下次触发要等新 interval）。
+      for (const t of tasks.values()) {
+        if (t.def.schedule?.group === "asset-holdings") {
+          t.lastScheduledAt = undefined;
+        }
+      }
+      recalculateAssetHoldingsSchedule();
+    },
     dispose() {
       if (disposed) return;
       disposed = true;
@@ -535,8 +751,15 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       if (visibilityHandler && typeof document !== "undefined") {
         document.removeEventListener("visibilitychange", visibilityHandler);
       }
+      if (storageHandler && typeof window !== "undefined") {
+        window.removeEventListener("storage", storageHandler);
+      }
       if (typeof window !== "undefined") {
         window.removeEventListener("online", handleOnline);
+      }
+      if (settingsChannel) {
+        try { settingsChannel.close(); } catch { /* 静默 */ }
+        settingsChannel = null;
       }
       for (const t of tasks.values()) {
         t.ctl?.abort();

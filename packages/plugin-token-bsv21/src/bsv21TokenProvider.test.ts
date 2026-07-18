@@ -1,0 +1,144 @@
+// packages/plugin-token-bsv21/src/bsv21TokenProvider.test.ts
+// BSV-21 TokenProvider 测试：
+//   1. 多地址同 origin 的余额应合并
+//   2. 详情页展示聚合余额和地址明细
+//   3. 不存在 token 返回 undefined
+//   4. 后台通知触发 onChange
+
+import { describe, expect, it, vi } from "vitest";
+import type { KeyspaceService, AssetDataNotifier } from "@keymaster/contracts";
+import { createBsv21TokenProvider } from "./bsv21TokenProvider.js";
+import type { Bsv21Db, Bsv21TokenSnapshot } from "./bsv21Db.js";
+
+const ACTIVE_PK = "pk-active";
+
+function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
+  return { active: () => ({ activePublicKeyHex }) } as unknown as KeyspaceService;
+}
+
+function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string }): Bsv21TokenSnapshot {
+  return {
+    origin: overrides.origin,
+    publicKeyHex: ACTIVE_PK,
+    network: "main",
+    address: overrides.address ?? "addr1",
+    balance: overrides.balance ?? { confirmed: 100, unconfirmed: 10 },
+    meta: overrides.meta ?? { origin: overrides.origin, symbol: "TOK" },
+    syncedAt: "2026-01-01T00:00:00Z",
+  };
+}
+
+function fakeDb(snapshots: Bsv21TokenSnapshot[]): Bsv21Db {
+  return {
+    put: vi.fn(),
+    replaceByPublicKey: vi.fn(),
+    listByPublicKey: vi.fn().mockResolvedValue(snapshots),
+    deleteByPublicKey: vi.fn(),
+  };
+}
+
+describe("bsv21TokenProvider", () => {
+  describe("listTokens", () => {
+    it("聚合多地址同 origin 的余额", async () => {
+      const snapshots = [
+        makeSnapshot({ origin: "tok1", address: "addr1", balance: { confirmed: 100, unconfirmed: 10 } }),
+        makeSnapshot({ origin: "tok1", address: "addr2", balance: { confirmed: 200, unconfirmed: 20 } }),
+        makeSnapshot({ origin: "tok2", address: "addr1", balance: { confirmed: 50, unconfirmed: 5 } }),
+      ];
+      const provider = createBsv21TokenProvider({
+        db: fakeDb(snapshots),
+        keyspace: fakeKeyspace(ACTIVE_PK),
+      });
+
+      const tokens = await provider.listTokens();
+      expect(tokens).toHaveLength(2);
+
+      const tok1 = tokens.find((t) => t.tokenId === "tok1");
+      if (!tok1) throw new Error("tok1 not found");
+      expect(tok1.balance!.amount).toBe(330); // 100+10 + 200+20
+
+      const tok2 = tokens.find((t) => t.tokenId === "tok2");
+      if (!tok2) throw new Error("tok2 not found");
+      expect(tok2.balance!.amount).toBe(55); // 50+5
+    });
+
+    it("无 active key 时返回空", async () => {
+      const provider = createBsv21TokenProvider({
+        db: fakeDb([]),
+        keyspace: fakeKeyspace(undefined),
+      });
+      expect(await provider.listTokens()).toEqual([]);
+    });
+  });
+
+  describe("getToken", () => {
+    it("聚合多地址的详情余额，extras 包含地址明细", async () => {
+      const snapshots = [
+        makeSnapshot({ origin: "tok1", address: "addr1", balance: { confirmed: 100, unconfirmed: 10 } }),
+        makeSnapshot({ origin: "tok1", address: "addr2", balance: { confirmed: 200, unconfirmed: 20 } }),
+      ];
+      const provider = createBsv21TokenProvider({
+        db: fakeDb(snapshots),
+        keyspace: fakeKeyspace(ACTIVE_PK),
+      });
+
+      const detail = await provider.getToken("tok1");
+      if (!detail) throw new Error("detail not found");
+      expect(detail.summary.balance!.amount).toBe(330);
+      expect(detail.extras!.confirmed).toBe(300);
+      expect(detail.extras!.unconfirmed).toBe(30);
+      expect(detail.extras!.addresses).toHaveLength(2);
+    });
+
+    it("不存在的 token 返回 undefined", async () => {
+      const provider = createBsv21TokenProvider({
+        db: fakeDb([]),
+        keyspace: fakeKeyspace(ACTIVE_PK),
+      });
+      expect(await provider.getToken("nonexistent")).toBeUndefined();
+    });
+
+    it("无 active key 时返回 undefined", async () => {
+      const provider = createBsv21TokenProvider({
+        db: fakeDb([]),
+        keyspace: fakeKeyspace(undefined),
+      });
+      expect(await provider.getToken("tok1")).toBeUndefined();
+    });
+  });
+
+  describe("onChange", () => {
+    it("assetDataNotifier 通知 bsv21 时触发 onChange", () => {
+      const listeners: Array<(event: { providerId: string }) => void> = [];
+      const notifier = {
+        emit: vi.fn(),
+        subscribe: vi.fn((handler: (event: { providerId: string }) => void) => {
+          listeners.push(handler);
+          return () => {};
+        }),
+      };
+
+      const handler = vi.fn();
+      const provider = createBsv21TokenProvider({
+        db: fakeDb([]),
+        keyspace: fakeKeyspace(ACTIVE_PK),
+        assetDataNotifier: notifier as unknown as AssetDataNotifier,
+      });
+
+      const off = provider.onChange(handler);
+      expect(notifier.subscribe).toHaveBeenCalled();
+
+      // 触发 bsv21 通知
+      const firstListener = listeners[0];
+      if (!firstListener) throw new Error("no listener registered");
+      firstListener({ providerId: "bsv21" });
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      // 非 bsv21 通知不触发
+      firstListener({ providerId: "p2pkh" });
+      expect(handler).toHaveBeenCalledTimes(1);
+
+      off();
+    });
+  });
+});

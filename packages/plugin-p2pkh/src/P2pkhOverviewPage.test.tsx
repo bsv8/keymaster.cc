@@ -47,6 +47,8 @@ interface FakeService {
   emitRecent: (s: P2pkhRecentSyncState | null) => void;
   /** 直接 push backfill 状态变化的 helper。 */
   emitBackfill: (s: P2pkhRecentSyncState | null) => void;
+  /** 触发 data-changed 事件。 */
+  emitDataChanged: () => void;
   /** 修改 listRecentSyncStates 即将返回的值。 */
   setRecentState: (s: P2pkhRecentSyncState[]) => void;
   setResources: (r: P2pkhKeyResource[]) => void;
@@ -59,6 +61,7 @@ function makeFakeService(): FakeService {
   type TaskStatus = "idle" | "syncing" | "ok" | "failed";
   const recentListeners = new Set<(s: TaskStatus) => void>();
   const backfillListeners = new Set<(s: TaskStatus) => void>();
+  const dataChangedListeners = new Set<() => void>();
   let recentTaskStatus: TaskStatus = "idle";
   let backfillTaskStatus: TaskStatus = "idle";
   let resources: P2pkhKeyResource[] = [makeResource()];
@@ -83,6 +86,10 @@ function makeFakeService(): FakeService {
       backfillListeners.add(h);
       return () => backfillListeners.delete(h);
     },
+    onDataChanged: (h: () => void) => {
+      dataChangedListeners.add(h);
+      return () => dataChangedListeners.delete(h);
+    },
     listResources: vi.fn(async () => resources),
     listBackfillStates: vi.fn(async () => backfillStates),
     listRecentSyncStates: vi.fn(async () => recentState),
@@ -92,10 +99,6 @@ function makeFakeService(): FakeService {
     listLocalInputClaims: vi.fn(async () => []),
     getAssetBalance: vi.fn(async () => ({ total: 0 })),
     getResourceBalance: vi.fn(async () => ({ total: 0 })),
-    triggerRecentSync: vi.fn(async () => undefined),
-    triggerHistoryBackfill: vi.fn(async () => undefined),
-    pauseHistoryBackfill: vi.fn(async () => undefined),
-    resumeHistoryBackfill: () => undefined,
     getGlobalSettings: () => ({ includeTestnet: false }),
     onGlobalSettingsChange: () => () => undefined,
     applyGlobalSettings: vi.fn(async () => undefined),
@@ -120,6 +123,8 @@ function makeFakeService(): FakeService {
       recentTaskStatus = next;
       recentStatusCalls.push(next);
       for (const l of recentListeners) l(next);
+      // 同时触发 data-changed（模拟后台任务提交 DB 后的通知）
+      for (const l of dataChangedListeners) l();
     },
     emitBackfill(s) {
       backfillTaskStatus = "syncing";
@@ -129,6 +134,11 @@ function makeFakeService(): FakeService {
       backfillTaskStatus = next;
       backfillStatusCalls.push(next);
       for (const l of backfillListeners) l(next);
+      // 同时触发 data-changed（模拟后台任务提交 DB 后的通知）
+      for (const l of dataChangedListeners) l();
+    },
+    emitDataChanged() {
+      for (const l of dataChangedListeners) l();
     },
     setRecentState(s) { recentState = s; },
     setResources(r) { resources = r; },

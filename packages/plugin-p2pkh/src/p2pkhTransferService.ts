@@ -8,7 +8,7 @@
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { MessageBus, PluginLogger, VaultService, WocService } from "@keymaster/contracts";
+import type { AssetDataNotifier, MessageBus, PluginLogger, VaultService, WocService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhLocalInputClaim,
@@ -35,6 +35,8 @@ export interface P2pkhTransferServiceDeps {
   vault: VaultService;
   woc: WocService;
   messageBus: MessageBus;
+  /** 资产数据变更通知器：转账成功后立即通知页面重读。 */
+  assetDataNotifier?: AssetDataNotifier;
   /**
    * 硬切换 002 收尾 + 多 owner 支持：按 `publicKeyHex` 返回该 owner
    * 的 P2PKH namespace DB。transfer 内部所有读 DB 的入口（prepare
@@ -240,6 +242,15 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
             error: msg,
             updatedAt: new Date().toISOString()
           });
+          // 通知页面重读：claim 已释放、submission 已写入
+          if (deps.assetDataNotifier) {
+            deps.assetDataNotifier.emit({
+              providerId: "p2pkh",
+              publicKeyHex: owner.publicKeyHex,
+              revision: Date.now(),
+              kinds: ["utxo", "submission", "claim"],
+            });
+          }
           deps.logger?.warn({
             scope: "p2pkh.transfer",
             event: "transfer.broadcast.rejected",
@@ -266,6 +277,15 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           error: msg,
           updatedAt: new Date().toISOString()
         });
+        // 通知页面重读：submission 已写入（claim 保留，由 recent-sync 对账）
+        if (deps.assetDataNotifier) {
+          deps.assetDataNotifier.emit({
+            providerId: "p2pkh",
+            publicKeyHex: owner.publicKeyHex,
+            revision: Date.now(),
+            kinds: ["utxo", "submission", "claim"],
+          });
+        }
         deps.logger?.error({
           scope: "p2pkh.transfer",
           event: "transfer.broadcast.unknown",
@@ -325,6 +345,19 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       }
 
       deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
+
+      // 立即通知页面重读：UTXO、submission 已变更。
+      // 设计缘由：仅靠 TRANSFER_BROADCAST 触发后台任务再发 assetDataNotifier
+      // 会导致页面延迟更新；这里在写库后立即通知，订阅 onDataChanged 的页面
+      //（如 UTXO 页、历史页）可即时刷新。
+      if (deps.assetDataNotifier) {
+        deps.assetDataNotifier.emit({
+          providerId: "p2pkh",
+          publicKeyHex: owner.publicKeyHex,
+          revision: Date.now(),
+          kinds: ["utxo", "submission", "claim"],
+        });
+      }
 
       return {
         status: nextStatus,

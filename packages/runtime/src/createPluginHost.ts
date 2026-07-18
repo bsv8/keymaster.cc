@@ -22,6 +22,8 @@
 //     capability 通用装配、endpoint shape 校验 + 唯一性校验。
 
 import type {
+  AssetDataChangedEvent,
+  AssetDataNotifier,
   HostListener,
   I18nPluginResources,
   I18nService,
@@ -39,6 +41,7 @@ import type {
   VaultService
 } from "@keymaster/contracts";
 import {
+  ASSET_DATA_NOTIFIER_CAPABILITY,
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
@@ -244,7 +247,14 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
 
   const logService: LogServiceHandle = createLogService();
 
-  // 把内置 registry + messageBus + i18n + log 暴露成 capability。
+  /**
+   * 资产数据变更通知器。
+   * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
+   * 后台任务原子提交 provider DB 后发布此事件，页面收到后只重读本地 DB。
+   */
+  const assetDataNotifier = createAssetDataNotifier();
+
+  // 把内置 registry + messageBus + i18n + log + assetDataNotifier 暴露成 capability。
   capabilities.provide<RouteRegistry>("route.registry", routes);
   capabilities.provide<MenuRegistry>("menu.registry", menus);
   capabilities.provide<BreadcrumbRegistry>("breadcrumb.registry", breadcrumbs);
@@ -265,6 +275,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
   capabilities.provide<LogService>(LOG_SERVICE_CAPABILITY, logService);
+  capabilities.provide<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY, assetDataNotifier);
 
   // route.registry path 探测，避免 settings.registry 与 route.registry 双渲染。
   settings.setRoutePathProbe((path) => routes.byPath(path) !== undefined);
@@ -764,3 +775,63 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
 // 不再被使用；这里保留 import 兼容外部类型扩展。
 void (null as unknown as VaultService);
 void (null as unknown as KeyspaceService);
+
+/**
+ * 创建资产数据变更通知器。
+ * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
+ * 后台任务原子提交 provider DB 后发布此事件，页面收到后只重读本地 DB。
+ *
+ * 跨标签页同步：
+ *   - 本 tab emit 时同时通过 BroadcastChannel 广播
+ *   - 其他 tab 收到广播后在本 tab 内 emit，触发本地订阅者
+ *   - payload 不携带余额、UTXO、token 数据，只表达"哪个 provider 的哪类数据已变更"
+ */
+function createAssetDataNotifier(): AssetDataNotifier {
+  const listeners = new Set<(event: AssetDataChangedEvent) => void>();
+  let bc: BroadcastChannel | null = null;
+
+  try {
+    bc = new BroadcastChannel("asset.data.changed");
+    bc.onmessage = (ev) => {
+      if (ev.data?.type === "asset-data-changed" && ev.data.event) {
+        // 收到其他 tab 的广播：在本 tab 内 emit
+        const event = ev.data.event as AssetDataChangedEvent;
+        for (const l of listeners) {
+          try {
+            l(event);
+          } catch (err) {
+            console.error("[assetDataNotifier] listener threw", err);
+          }
+        }
+      }
+    };
+  } catch {
+    // BroadcastChannel 不可用时退化为单 tab 模式
+    bc = null;
+  }
+
+  return {
+    emit(event: AssetDataChangedEvent) {
+      // 本 tab 通知
+      for (const l of listeners) {
+        try {
+          l(event);
+        } catch (err) {
+          console.error("[assetDataNotifier] listener threw", err);
+        }
+      }
+      // 跨 tab 通知
+      if (bc) {
+        try {
+          bc.postMessage({ type: "asset-data-changed", event });
+        } catch {
+          // 静默失败
+        }
+      }
+    },
+    subscribe(handler: (event: AssetDataChangedEvent) => void) {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    }
+  };
+}

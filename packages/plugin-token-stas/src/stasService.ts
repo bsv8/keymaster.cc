@@ -42,7 +42,7 @@ export interface StasTokenWithEntry {
 }
 
 export interface StasServiceHandle {
-  listActiveKeyTokens(): Promise<StasTokenWithEntry[]>;
+  listActiveKeyTokens(signal?: AbortSignal): Promise<StasTokenWithEntry[]>;
 }
 
 export interface CreateStasServiceOptions {
@@ -69,11 +69,12 @@ export function createStasService(options: CreateStasServiceOptions): StasServic
   }
 
   return {
-    async listActiveKeyTokens() {
+    async listActiveKeyTokens(signal?: AbortSignal) {
       const addresses = await activeKeyMainAddresses();
       const out: StasTokenWithEntry[] = [];
       for (const address of addresses) {
-        const entries = await wocStas.listAddressTokens(STAS_NETWORK, address);
+        if (signal?.aborted) break;
+        const entries = await wocStas.listAddressTokens(STAS_NETWORK, address, { signal });
         for (const entry of entries) {
           out.push({ entry, address, network: STAS_NETWORK });
         }

@@ -88,6 +88,20 @@ export async function loadAllAssets(registry: AssetRegistry): Promise<AssetProvi
   );
 }
 
+/** 加载单个 asset provider，供增量刷新使用。 */
+export async function loadSingleAssetProvider(provider: AssetProvider): Promise<AssetProviderLoadResult> {
+  try {
+    const assets = await provider.listAssets();
+    return { provider, assets };
+  } catch (err) {
+    return {
+      provider,
+      assets: [],
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
+}
+
 /** 并发加载 token registry 全部 provider，单 provider 失败隔离。 */
 export async function loadAllTokens(registry: TokenRegistry): Promise<TokenProviderLoadResult[]> {
   const providers = registry.list();
@@ -105,6 +119,20 @@ export async function loadAllTokens(registry: TokenRegistry): Promise<TokenProvi
       }
     })
   );
+}
+
+/** 加载单个 token provider，供增量刷新使用。 */
+export async function loadSingleTokenProvider(provider: TokenProvider): Promise<TokenProviderLoadResult> {
+  try {
+    const tokens = await provider.listTokens();
+    return { provider, tokens };
+  } catch (err) {
+    return {
+      provider,
+      tokens: [],
+      error: err instanceof Error ? err.message : String(err)
+    };
+  }
 }
 
 /** 一次性加载 asset + token，供 /assets 页面用。 */

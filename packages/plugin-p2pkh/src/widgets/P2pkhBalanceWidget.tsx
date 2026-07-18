@@ -92,6 +92,13 @@ export function P2pkhBalanceWidget() {
 
   useEffect(() => service.onSyncStatusChange(setStatus), [service]);
 
+  // 订阅 dataChanged：后台写库后自动重读余额。
+  // 设计缘由：后台 recent-sync 写库后通过 assetDataNotifier 通知，
+  // service 转发为 onDataChanged 事件；这里订阅后自动刷新余额。
+  useEffect(() => service.onDataChanged(() => {
+    if (readiness === "ready") void loadBalances();
+  }), [service, readiness, loadBalances]);
+
   // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
   // 同 tab 与跨 tab 通知。
   useEffect(() => {
@@ -118,18 +125,6 @@ export function P2pkhBalanceWidget() {
     };
   }, []);
 
-  const refreshAll = useCallback(async () => {
-    if (readiness !== "ready") {
-      return;
-    }
-    try {
-      await service.triggerRecentSync();
-    } catch {
-      // 静默
-    }
-    await loadBalances();
-  }, [readiness, service, loadBalances]);
-
   const stale = status === "failed" || status === "rate-limited" || lastError !== null;
   const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.total) : "—");
   const statusText = computeStatusText(readiness, status, lastError, t);
@@ -138,14 +133,6 @@ export function P2pkhBalanceWidget() {
     <div className={`home-widget home-widget--p2pkh-balance ${stale ? "is-stale" : ""}`}>
       <header className="home-widget__head">
         <h3>{t("p2pkh.balanceWidget.title", { defaultValue: "P2PKH 余额" })}</h3>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={refreshAll}
-          disabled={readiness !== "ready"}
-        >
-          {t("p2pkh.balanceWidget.refreshAll", { defaultValue: "刷新全部" })}
-        </Button>
       </header>
       <section className="home-widget__row">
         <div>

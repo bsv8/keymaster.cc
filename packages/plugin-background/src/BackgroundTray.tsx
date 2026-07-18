@@ -3,7 +3,7 @@
 // 设计缘由：托盘只显示通用任务信息，不出现 P2PKH 专属字段。
 
 import { useEffect, useMemo, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, Pause, Play, RotateCw, Square, X } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, Pause, Play, RotateCw, Square, X, Zap } from "lucide-react";
 import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundTaskSnapshot, BackgroundTaskState } from "@keymaster/contracts";
 
@@ -96,6 +96,15 @@ export function BackgroundTray() {
                         title={t("background.tray.action.retry", { defaultValue: "重试" })}
                       >
                         <RotateCw size={14} /> {t("background.tray.action.retry", { defaultValue: "重试" })}
+                      </button>
+                    ) : null}
+                    {s.state === "idle" || s.state === "queued" ? (
+                      <button
+                        type="button"
+                        onClick={() => service.trigger(s.id, "manual")}
+                        title={t("background.tray.action.runNow", { defaultValue: "立即运行" })}
+                      >
+                        <Zap size={14} /> {t("background.tray.action.runNow", { defaultValue: "立即运行" })}
                       </button>
                     ) : null}
                     {s.enabled ? (

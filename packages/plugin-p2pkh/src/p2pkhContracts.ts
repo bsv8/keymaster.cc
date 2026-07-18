@@ -346,6 +346,13 @@ export interface P2pkhService {
   onSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
 
   /**
+   * 订阅 P2PKH data-changed 事件。
+   * 设计缘由：后台任务原子提交 DB 后发布，页面收到后重读本地 DB。
+   * 不再依赖 sync status 变化猜测数据是否已提交。
+   */
+  onDataChanged(handler: () => void): () => void;
+
+  /**
    * 硬切换 003：单个任务级别的状态。`syncStatus` 是 recent + backfill 的
    * 聚合（任一 syncing -> syncing，任一 failed -> failed，全 ok -> ok），
    * 两个任务并发运行时聚合状态会在第一个任务完成时就退出 syncing；
@@ -358,13 +365,6 @@ export interface P2pkhService {
   onRecentSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
   onBackfillStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
 
-  /** 触发一次 recent-sync。 */
-  triggerRecentSync(): Promise<void>;
-  /** 触发 history-backfill（用户手动重试 / 继续）。 */
-  triggerHistoryBackfill(resourceId?: string): Promise<void>;
-  /** 暂停 history-backfill；返回的 Promise resolve 时表示旧实例已退出。 */
-  pauseHistoryBackfill(resourceId?: string): Promise<void>;
-  resumeHistoryBackfill(resourceId?: string): void;
 
   /**
    * 读取当前全局产品设置。始终返回最新同步值：

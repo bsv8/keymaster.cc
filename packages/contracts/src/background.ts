@@ -5,6 +5,16 @@
 
 import type { I18nText } from "./i18n.js";
 
+/**
+ * 后台同步设置。
+ * 设计缘由：统一管理资产同步频率，避免各业务插件自行创建 interval。
+ * 设置属于后台任务平台，而不是某个业务插件。
+ */
+export interface BackgroundSyncSettings {
+  /** 资产持仓同步周期毫秒。默认 900_000（15 分钟）。 */
+  assetHoldingsIntervalMs: number;
+}
+
 /** 任务状态。 */
 export type BackgroundTaskState =
   | "idle"
@@ -41,6 +51,20 @@ export interface BackgroundTaskProgress {
   label?: I18nText;
 }
 
+/**
+ * 任务调度组配置。
+ * 设计缘由：把同类任务归入同一个调度组，由 BackgroundService 统一管理
+ * 频率、冷却和配置变更。业务插件不得自行创建 interval 或 timer。
+ */
+export interface BackgroundTaskSchedule {
+  /** 调度组名称，例如 "asset-holdings"。 */
+  group: string;
+  /** 组默认周期毫秒。 */
+  defaultIntervalMs?: number;
+  /** 组最小周期毫秒；用户配置不得低于此值。 */
+  minIntervalMs?: number;
+}
+
 /** 任务定义：业务插件在 setup 阶段注册。 */
 export interface BackgroundTaskDefinition {
   /** 任务 id，全局唯一，使用命名空间。 */
@@ -53,6 +77,8 @@ export interface BackgroundTaskDefinition {
   description?: I18nText;
   /** 周期毫秒；缺省不自动调度。 */
   intervalMs?: number;
+  /** 调度组配置；与 intervalMs 互斥，优先使用 schedule.group。 */
+  schedule?: BackgroundTaskSchedule;
   /** 默认是否启用。 */
   defaultEnabled?: boolean;
   /**
@@ -149,6 +175,18 @@ export interface BackgroundService {
    * 硬切换 001 收口：入参是 publicKeyHex。
    */
   cancelByKey(publicKeyHex: string): Promise<void>;
+
+  /**
+   * 获取后台同步设置。
+   * 设计缘由：设置属于后台任务平台，影响所有资产 provider。
+   */
+  getScheduleSettings(): BackgroundSyncSettings;
+  /**
+   * 更新后台同步设置。
+   * 设计缘由：保存后重新计算 asset-holdings 组任务的 nextRunAt，
+   * 新周期从保存时刻开始计时，不立即触发网络同步。
+   */
+  updateScheduleSettings(settings: BackgroundSyncSettings): void;
 }
 
 /** capability keys。 */

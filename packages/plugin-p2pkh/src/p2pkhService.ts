@@ -18,6 +18,7 @@
 //     守护检查只看 `activePublicKeyHex` 是否存在。
 
 import type {
+  AssetDataNotifier,
   BackgroundRegistry,
   BackgroundService,
   KeyIdentity,
@@ -27,7 +28,7 @@ import type {
   VaultService,
   WocService
 } from "@keymaster/contracts";
-import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { ASSET_DATA_NOTIFIER_CAPABILITY, BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhBackfillState,
@@ -104,6 +105,7 @@ export interface P2pkhServiceDeps {
   backgroundRegistry: BackgroundRegistry;
   backgroundService: BackgroundService;
   keyspace: KeyspaceService;
+  assetDataNotifier?: AssetDataNotifier;
   /**
    * 硬切换 002：业务插件注入的 logger。
    * P2PKH 关键轨迹（recent sync、backfill、broadcast）走统一日志。
@@ -161,6 +163,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     vault: deps.vault,
     woc: deps.woc,
     messageBus: deps.messageBus,
+    assetDataNotifier: deps.assetDataNotifier,
     /**
      * 硬切换 002 收尾 + 多 owner 支持：transfer 走 session owner 的
      * namespace DB。在硬门禁（`keyspace.openKeyStorage` 要求
@@ -591,7 +594,11 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     pluginId: "p2pkh",
     label: { key: "p2pkh.task.recent.label", fallback: "P2PKH 近期同步" },
     description: { key: "p2pkh.task.recent.description", fallback: "检查余额、UTXO、近期 history 与本地输入占用对账（按 active key namespace）。" },
-    intervalMs: 60_000,
+    schedule: {
+      group: "asset-holdings",
+      defaultIntervalMs: 900_000,
+      minIntervalMs: 300_000,
+    },
     defaultEnabled: true,
     // 硬切换 008：传函数本身，由 backgroundService 延迟求值。
     keyScope: p2pkhTaskKeyScope,
@@ -609,6 +616,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       try {
         await recent.runOnce(ctx.signal);
         setRecentStatus("ok");
+        // 发布 data-changed：DB 已提交，页面应重读。
+        const state = getActiveKeyState();
+        if (state.activePublicKeyHex && deps.assetDataNotifier) {
+          deps.assetDataNotifier.emit({
+            providerId: "p2pkh",
+            publicKeyHex: state.activePublicKeyHex,
+            revision: Date.now(),
+            kinds: ["utxo", "resource", "history"],
+          });
+        }
       } catch (err) {
         setRecentStatus("failed");
         throw err;
@@ -635,6 +652,16 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       try {
         await backfill.runOnce(ctx.signal, { paused: backfillPaused });
         setBackfillStatus("ok");
+        // 发布 data-changed：DB 已提交，页面应重读。
+        const state = getActiveKeyState();
+        if (state.activePublicKeyHex && deps.assetDataNotifier) {
+          deps.assetDataNotifier.emit({
+            providerId: "p2pkh",
+            publicKeyHex: state.activePublicKeyHex,
+            revision: Date.now(),
+            kinds: ["history"],
+          });
+        }
       } catch (err) {
         setBackfillStatus("failed");
         throw err;
@@ -792,6 +819,22 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     deps.backgroundService.trigger(P2PKH_TASK_RECENT, "transfer.broadcast");
   });
 
+  // data-changed 订阅者集合。
+  const dataChangedListeners = new Set<() => void>();
+
+  // 订阅 assetDataNotifier：收到 p2pkh provider 的 data-changed 后通知本地订阅者。
+  if (deps.assetDataNotifier) {
+    messageBusUnsubs.push(
+      deps.assetDataNotifier.subscribe((event) => {
+        if (event.providerId === "p2pkh") {
+          for (const l of dataChangedListeners) {
+            try { l(); } catch { /* 静默 */ }
+          }
+        }
+      })
+    );
+  }
+
   return {
     syncStatus() {
       return status;
@@ -799,6 +842,10 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     onSyncStatusChange(handler) {
       statusListeners.add(handler);
       return () => statusListeners.delete(handler);
+    },
+    onDataChanged(handler) {
+      dataChangedListeners.add(handler);
+      return () => dataChangedListeners.delete(handler);
     },
 
     // 硬切换 003：per-task 状态 / 订阅。两个并发任务各自独立进出
@@ -816,71 +863,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     onBackfillStatusChange(handler) {
       backfillStatusListeners.add(handler);
       return () => backfillStatusListeners.delete(handler);
-    },
-
-    async triggerRecentSync() {
-      // 硬切换 003：手工 recent-sync 的第一职责不是"发任务"，
-      // 而是保证当前 active key 至少有可同步的 P2PKH resource。
-      // 0 resource 场景下直接 trigger background 只会让 recent-sync
-      // 静默 return，而页面继续显示"未同步"——这种情况下日志也会
-      // 缺少任何同步证据。先 rehydrate 当前 active key 再触发任务，
-      // 才能保证页面、托盘、日志对"这次同步有没有做事"有共同理解。
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "manual.recentSync.requested",
-        message: "Manual recent-sync requested",
-        data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
-      });
-      try {
-        await rebindActiveKey();
-        await rehydrateResources();
-      } catch (err) {
-        // rehydrate 失败也要继续 trigger：让 background 跑一次"0 resource"
-        // 分支并在日志上明确写出原因，而不是把请求吞掉。
-        deps.logger?.warn({
-          scope: "p2pkh.service",
-          event: "manual.recentSync.rehydrateFailed",
-          message: "Manual recent-sync rehydrate failed; will still trigger background task",
-          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null },
-          error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
-        });
-      }
-      deps.backgroundService.trigger(P2PKH_TASK_RECENT, "manual");
-    },
-    async triggerHistoryBackfill(resourceId) {
-      // 硬切换 003：手工 backfill 同样必须先 rehydrate 当前 active key，
-      // 否则当前 active key 没有任何 resource 时 backfill 会"看起来什么都没做"。
-      deps.logger?.info({
-        scope: "p2pkh.service",
-        event: "manual.backfill.requested",
-        message: "Manual history-backfill requested",
-        data: {
-          publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null,
-          resourceId: resourceId ?? null
-        }
-      });
-      try {
-        await rebindActiveKey();
-        await rehydrateResources();
-      } catch (err) {
-        deps.logger?.warn({
-          scope: "p2pkh.service",
-          event: "manual.backfill.rehydrateFailed",
-          message: "Manual history-backfill rehydrate failed; will still trigger background task",
-          data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null, resourceId: resourceId ?? null },
-          error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
-        });
-      }
-      deps.messageBus.publish(P2PKH_MSG.BACKFILL_REQUESTED, { resourceId });
-      deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, resourceId ? "manual:resource" : "manual");
-    },
-    async pauseHistoryBackfill() {
-      backfillPaused = true;
-      await deps.backgroundService.cancel(P2PKH_TASK_BACKFILL);
-    },
-    resumeHistoryBackfill: () => {
-      backfillPaused = false;
-      deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, "resume");
     },
 
     /**

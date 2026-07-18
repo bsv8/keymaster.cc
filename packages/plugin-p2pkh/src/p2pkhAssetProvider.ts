@@ -54,6 +54,8 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
     return off;
   }
   unsubs.push(deps.service.onSyncStatusChange(() => notify()));
+  // 订阅 data-changed：后台任务原子提交 DB 后通知页面重读。
+  unsubs.push(deps.service.onDataChanged(() => notify()));
   trackSubscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
   unsubs.push(deps.keyspace.onActiveChange(() => notify()));
@@ -173,11 +175,6 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
           occurredAt: h.syncedAt
         }))
       );
-    },
-    async sync(assetId) {
-      // sync 是写操作：未就绪时不能触发 recent sync（避免触发后端错误）。
-      if (isNotReady()) return;
-      await deps.service.triggerRecentSync();
     },
     onChange(handler) {
       listeners.add(handler);

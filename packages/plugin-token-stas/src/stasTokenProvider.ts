@@ -1,48 +1,95 @@
 // packages/plugin-token-stas/src/stasTokenProvider.ts
-// STAS TokenProvider：聚合 stasService 的 listActiveKeyTokens 为
-// TokenSummary / TokenDetail，注入 token.registry。
+// STAS TokenProvider：从 snapshot DB 读取，注入 token.registry。
 //
-// 特殊约束（施工单）：
+// 设计缘由：
+//   - listTokens / getToken 只读 snapshot DB，不访问 WOC。
+//   - 后台 task 通过 stasSync 写入 DB，页面通过 onChange 重读。
 //   - phase 1 只支持主网 STAS；零或负值不进入统一持仓页。
-//   - 列表稳定排序：按 symbol 升序。
+//   - 同 issuer+symbol 的多地址余额需要聚合。
+//   - tokenId 使用稳定形式 `stas:${issuer}:${symbol}`，避免不同发行方
+//     同名 symbol 相互覆盖。
+//   - 列表稳定排序：按 tokenId 升序。
 
 import type {
+  AssetDataNotifier,
+  KeyspaceService,
   TokenActivity,
   TokenDetail,
   TokenProvider,
   TokenSummary
 } from "@keymaster/contracts";
-import type { StasServiceHandle, StasTokenWithEntry } from "./stasService.js";
+import type { StasDb, StasTokenSnapshot } from "./stasDb.js";
 
 export interface StasTokenProviderOptions {
-  service: StasServiceHandle;
+  db: StasDb;
+  keyspace: KeyspaceService;
+  assetDataNotifier?: AssetDataNotifier;
+}
+
+/**
+ * 生成稳定的 tokenId。
+ * 设计缘由：issuer + symbol 唯一标识一个 STAS 资产。
+ * issuer 为空时用 "unknown" 占位，保证 tokenId 格式稳定。
+ */
+export function makeStasTokenId(issuer: string, symbol: string): string {
+  return `stas:${issuer || "unknown"}:${symbol}`;
+}
+
+/**
+ * 从 tokenId 解析出 issuer 和 symbol。
+ */
+export function parseStasTokenId(tokenId: string): { issuer: string; symbol: string } | undefined {
+  if (!tokenId.startsWith("stas:")) return undefined;
+  const rest = tokenId.slice("stas:".length);
+  const colonIdx = rest.indexOf(":");
+  if (colonIdx < 0) return undefined;
+  const issuer = rest.slice(0, colonIdx);
+  const symbol = rest.slice(colonIdx + 1);
+  if (!symbol) return undefined;
+  return { issuer: issuer === "unknown" ? "" : issuer, symbol };
 }
 
 export function createStasTokenProvider(options: StasTokenProviderOptions): TokenProvider {
-  if (!options || !options.service) {
-    throw new Error("createStasTokenProvider: service is required");
+  if (!options || !options.db || !options.keyspace) {
+    throw new Error("createStasTokenProvider: db and keyspace are required");
   }
-  const service = options.service;
+  const { db, keyspace, assetDataNotifier } = options;
   const listeners = new Set<() => void>();
 
-  function emit() {
-    for (const l of listeners) l();
+  function notify() {
+    for (const l of [...listeners]) {
+      try { l(); } catch { /* 静默 */ }
+    }
   }
 
-  function summaryOf(t: StasTokenWithEntry): TokenSummary {
+  // 订阅 assetDataNotifier：收到 stas provider 的 data-changed 后通知本地订阅者。
+  if (assetDataNotifier) {
+    assetDataNotifier.subscribe((event) => {
+      if (event.providerId === "stas") {
+        notify();
+      }
+    });
+  }
+
+  /** 聚合键：issuer + symbol。 */
+  function aggregateKey(s: StasTokenSnapshot): string {
+    return `${s.issuer || ""}:${s.symbol}`;
+  }
+
+  function summaryOf(tokenId: string, s: StasTokenSnapshot, aggregatedBalance: number): TokenSummary {
     return {
-      tokenId: `stas:${t.entry.symbol}`,
+      tokenId,
       providerId: "stas",
-      symbol: t.entry.symbol,
-      label: `STAS ${t.entry.symbol}`,
-      network: t.network,
+      symbol: s.symbol,
+      label: `STAS ${s.symbol}`,
+      network: s.network,
       balance: {
-        amount: t.entry.balance,
-        unit: t.entry.symbol,
-        display: `${t.entry.balance} ${t.entry.symbol}`
+        amount: aggregatedBalance,
+        unit: s.symbol,
+        display: `${aggregatedBalance} ${s.symbol}`
       },
       status: "ready",
-      issuer: t.entry.issuer,
+      issuer: s.issuer || undefined,
       tags: ["stas", "main"]
     };
   }
@@ -53,40 +100,76 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
     order: 20,
 
     async listTokens(): Promise<TokenSummary[]> {
-      const items = await service.listActiveKeyTokens();
-      // 阶段 1 约束：零或负值不进入统一持仓页。
-      const positive = items.filter((t) => Number.isFinite(t.entry.balance) && t.entry.balance > 0);
-      // 合并：同一 symbol 选第一条（保持稳定）。
-      const seen = new Set<string>();
-      const out: TokenSummary[] = [];
-      for (const t of positive) {
-        if (seen.has(t.entry.symbol)) continue;
-        seen.add(t.entry.symbol);
-        out.push(summaryOf(t));
+      const state = keyspace.active();
+      if (!state.activePublicKeyHex) return [];
+
+      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+
+      // 按 issuer+symbol 聚合多地址的余额
+      const aggregated = new Map<string, {
+        snapshot: StasTokenSnapshot;
+        balance: number;
+      }>();
+      for (const s of snapshots) {
+        const key = aggregateKey(s);
+        const existing = aggregated.get(key);
+        if (existing) {
+          existing.balance += s.balance;
+        } else {
+          aggregated.set(key, {
+            snapshot: s,
+            balance: s.balance,
+          });
+        }
       }
-      out.sort((a, b) => a.symbol.localeCompare(b.symbol));
+
+      const out: TokenSummary[] = [];
+      for (const [, entry] of aggregated) {
+        const tokenId = makeStasTokenId(entry.snapshot.issuer, entry.snapshot.symbol);
+        out.push(summaryOf(tokenId, entry.snapshot, entry.balance));
+      }
+      out.sort((a, b) => a.tokenId.localeCompare(b.tokenId));
       return out;
     },
 
     async getToken(tokenId): Promise<TokenDetail | undefined> {
-      const items = await service.listActiveKeyTokens();
-      const symbol = tokenId.startsWith("stas:") ? tokenId.slice("stas:".length) : tokenId;
-      const hit = items.find((t) => t.entry.symbol === symbol);
-      if (!hit) return undefined;
+      const state = keyspace.active();
+      if (!state.activePublicKeyHex) return undefined;
+
+      // 从 listByPublicKey 结果中按 tokenId 筛选并聚合
+      const parsed = parseStasTokenId(tokenId);
+      if (!parsed) return undefined;
+
+      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+      const matching = snapshots.filter(
+        (s) => (s.issuer || "") === parsed.issuer && s.symbol === parsed.symbol
+      );
+      if (matching.length === 0) return undefined;
+      const first = matching[0];
+      if (!first) return undefined;
+
+      // 聚合多地址余额
+      let aggregatedBalance = 0;
+      const addresses: Array<{ address: string; network: string; balance: number }> = [];
+      for (const s of matching) {
+        aggregatedBalance += s.balance;
+        addresses.push({ address: s.address, network: s.network, balance: s.balance });
+      }
+
       return {
-        summary: summaryOf(hit),
+        summary: summaryOf(tokenId, first, aggregatedBalance),
         activities: [],
-        extras: { issuer: hit.entry.issuer, balance: hit.entry.balance, address: hit.address }
+        extras: {
+          issuer: first.issuer || undefined,
+          balance: aggregatedBalance,
+          addresses,
+        }
       };
     },
 
     async listActivity(): Promise<TokenActivity[]> {
       // phase 1：STAS activity 端点未稳定，phase 1 返回空。
       return [];
-    },
-
-    async sync(): Promise<void> {
-      emit();
     },
 
     onChange(handler) {

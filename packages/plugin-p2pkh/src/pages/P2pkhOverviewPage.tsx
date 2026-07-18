@@ -235,36 +235,13 @@ export function P2pkhOverviewPage() {
     return off;
   }, [service]);
 
-  // 硬切换 003：订阅同步状态。在后台任务结束（syncing -> ok / failed / idle
-  // 任意完成态）时重新读取 recent_sync / resources / backfill state，
-  // 让"最近同步"列能跟随 recent_sync 真值刷新，不再依赖按钮点击瞬间的
-  // 假刷新。旧的行为（按钮点击后立即 setVersion）保留为立即反馈。
-  //
-  // 硬切换 003 收尾：recent-sync 与 history-backfill 并发时，聚合
-  // `syncStatus` 会在第一个任务完成时就翻成 ok/failed，第二个任务结束
-  // 时订阅侧如果只看聚合 status 会错过刷新事件。因此本页面同时订阅
-  // per-task `onRecentSyncStatusChange` / `onBackfillStatusChange`——
-  // 任一任务进入完成态（ok / failed / idle）都重新拉取 recent_sync /
-  // backfill state 真值。
+  // 订阅 P2PKH data-changed：后台任务原子提交 DB 后通知页面重读。
+  // 设计缘由：不再依赖 sync status 变化猜测数据是否已提交。
   useEffect(() => {
-    let prevRecent: string = service.recentSyncStatus();
-    let prevBackfill: string = service.backfillStatus();
-    const offRecent = service.onRecentSyncStatusChange((next) => {
-      if (prevRecent === "syncing" && next !== "syncing") {
-        setVersion((v) => v + 1);
-      }
-      prevRecent = next;
+    const off = service.onDataChanged(() => {
+      setVersion((v) => v + 1);
     });
-    const offBackfill = service.onBackfillStatusChange((next) => {
-      if (prevBackfill === "syncing" && next !== "syncing") {
-        setVersion((v) => v + 1);
-      }
-      prevBackfill = next;
-    });
-    return () => {
-      offRecent();
-      offBackfill();
-    };
+    return off;
   }, [service]);
 
   const columns: DataTableColumn<P2pkhKeyResource>[] = useMemo(
@@ -337,27 +314,6 @@ export function P2pkhOverviewPage() {
             ) : null}
             <Button variant="ghost" onClick={() => setAssetId(undefined)}>
               {t("p2pkh.asset.all", { defaultValue: "全部" })}
-            </Button>
-            <Button
-              onClick={() => {
-                if (readiness !== "ready") return;
-                void service.triggerRecentSync();
-                setVersion((v) => v + 1);
-              }}
-              disabled={readiness !== "ready"}
-            >
-              {t("p2pkh.action.triggerSync", { defaultValue: "触发同步" })}
-            </Button>
-            <Button
-              variant="ghost"
-              onClick={() => {
-                if (readiness !== "ready") return;
-                void service.triggerHistoryBackfill();
-                setVersion((v) => v + 1);
-              }}
-              disabled={readiness !== "ready"}
-            >
-              {t("p2pkh.action.triggerBackfill", { defaultValue: "触发回填" })}
             </Button>
           </>
         }

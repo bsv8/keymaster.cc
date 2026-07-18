@@ -23,6 +23,7 @@ import type {
   WocBsv21Service,
   WocBsv21TokenMeta
 } from "@keymaster/contracts";
+import type { Bsv21Db } from "./bsv21Db.js";
 
 /** p2pkh.service capability key；与 plugin-p2pkh manifest 提供的字符串一致。 */
 export const P2PKH_CAPABILITY = "p2pkh.service";
@@ -50,9 +51,9 @@ const BSV_TEST_NETWORK: BsvNetwork = "test";
 /** BSV-21 service 句柄。 */
 export interface Bsv21ServiceHandle {
   /** 列出当前 active key 全部 BSV 地址上的 token 余额（已合并）。 */
-  listActiveKeyTokens(): Promise<TokenWithMeta[]>;
+  listActiveKeyTokens(signal?: AbortSignal): Promise<TokenWithMeta[]>;
   /** 取单个 token 详情。 */
-  getToken(tokenId: string): Promise<{ meta: WocBsv21TokenMeta; balance: WocBsv21BalanceResponse } | null>;
+  getToken(tokenId: string, signal?: AbortSignal): Promise<{ meta: WocBsv21TokenMeta; balance: WocBsv21BalanceResponse } | null>;
 }
 
 /** token + meta + 当前余额；origin 即 tokenId。 */
@@ -107,23 +108,27 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
   }
 
   return {
-    async listActiveKeyTokens() {
+    async listActiveKeyTokens(signal?: AbortSignal) {
       const resources = await activeKeyResources();
       const out: TokenWithMeta[] = [];
       for (const r of resources) {
+        // 检查取消信号
+        if (signal?.aborted) break;
         // 不并发：phase 1 资源量小，避免对 WOC 触发突发流量。
         // 真正并发可以让 BSV-21 协议层暴露 batch endpoint 后再做。
-        const metas = await wocBsv21.listAddressTokens(r.network, r.address);
+        const opts = { signal };
+        const metas = await wocBsv21.listAddressTokens(r.network, r.address, opts);
         for (const meta of metas) {
-          const balance = await wocBsv21.getAddressTokenBalance(r.network, r.address, meta.origin);
+          if (signal?.aborted) break;
+          const balance = await wocBsv21.getAddressTokenBalance(r.network, r.address, meta.origin, opts);
           out.push({ meta, balance, address: r.address, network: r.network });
         }
       }
       return out;
     },
-    async getToken(tokenId) {
+    async getToken(tokenId, signal?: AbortSignal) {
       // tokenId 即 origin；当前 simple 实现按"任一持有此 origin 的地址"返回。
-      const all = await this.listActiveKeyTokens();
+      const all = await this.listActiveKeyTokens(signal);
       const hit = all.find((t) => t.meta.origin === tokenId);
       if (!hit) return null;
       return { meta: hit.meta, balance: hit.balance };

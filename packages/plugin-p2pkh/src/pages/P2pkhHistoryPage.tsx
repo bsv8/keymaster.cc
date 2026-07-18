@@ -58,6 +58,14 @@ export function P2pkhHistoryPage() {
     return off;
   }, [service]);
 
+  // 订阅 data-changed：后台任务原子提交 DB 后重读。
+  useEffect(() => {
+    const off = service.onDataChanged(() => {
+      setVersion((v) => v + 1);
+    });
+    return off;
+  }, [service]);
+
   const columns: DataTableColumn<P2pkhHistoryItem>[] = [
     { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (r) => <code>{r.txid}</code> },
     { key: "height", header: t("p2pkh.col.height", { defaultValue: "区块高度" }), render: (r) => r.height ?? "-" },
@@ -86,14 +94,6 @@ export function P2pkhHistoryPage() {
             ) : null}
             <Button variant="ghost" onClick={() => setAssetId(undefined)}>
               {t("p2pkh.asset.all", { defaultValue: "全部" })}
-            </Button>
-            <Button
-              onClick={() => {
-                service.triggerHistoryBackfill();
-                setVersion((v) => v + 1);
-              }}
-            >
-              {t("p2pkh.action.refillBackfill", { defaultValue: "重新回填" })}
             </Button>
           </>
         }

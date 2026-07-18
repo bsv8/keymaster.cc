@@ -36,7 +36,6 @@ function assetProvider(id: string, order: number | undefined, name: string): Ass
     listAssets: () => Promise.resolve([]),
     getAsset: () => Promise.resolve(undefined),
     listActivity: () => Promise.resolve([]),
-    sync: () => Promise.resolve(),
     onChange: () => () => {}
   };
 }
@@ -49,7 +48,6 @@ function tokenProvider(id: string, order: number | undefined, name: string): Tok
     listTokens: () => Promise.resolve([]),
     getToken: () => Promise.resolve(undefined),
     listActivity: () => Promise.resolve([]),
-    sync: () => Promise.resolve(),
     onChange: () => () => {}
   };
 }

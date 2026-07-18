@@ -105,8 +105,6 @@ export interface TokenProvider {
   getToken(tokenId: string): Promise<TokenDetail | undefined>;
   /** 列出该 token 的活动。 */
   listActivity(tokenId: string): Promise<TokenActivity[]>;
-  /** 触发同步：可指定 tokenId，不指定时同步该 provider 全部。 */
-  sync(tokenId?: string): Promise<void>;
   /** 订阅 token 变化。 */
   onChange(handler: () => void): () => void;
 }
