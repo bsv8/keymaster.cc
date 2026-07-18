@@ -8,8 +8,8 @@
 //   - 不写余额、UTXO、本地输入占用、本地提交。
 //   - 不写 recent watermark。
 //   - 不覆盖 recent-sync 已写入的 confirmed 状态。
-//   - 关键修复：循环跑到 complete / failed / paused / 取消。
-//   - 关键修复：failed / paused 状态在 resume() 后必须能被继续，重置为 running。
+//   - 关键修复：循环跑到 complete / failed / 取消。
+//   - 施工单 001：删除 paused 状态和 pause/resume 语义；只接受 AbortSignal 取消。
 
 import type { MessageBus, PluginLogger, WocService } from "@keymaster/contracts";
 import type {
@@ -37,13 +37,12 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
     /**
      * 执行 history-backfill。逐 resource 串行。
      * 每完成一页让出执行权；recentPending=true 时暂停等 recent。
-     * 直到 status=complete 或信号取消或 paused。
-     * 关键修复：failed / paused 状态在 resume() 触发本方法时，把 state
-     * 重置为 running 再继续；否则会永远停在 failed/paused。
+     * 直到 status=complete 或信号取消。
+     * 施工单 001：删除 paused 参数，只接受 AbortSignal 取消。
      * 关键修复：内部 backfillOne 把错误状态写库后必须把错误冒泡出来，
      * 否则通用后台任务会显示 ok 而实际有 resource 是 failed。
      */
-    async runOnce(signal: AbortSignal, pausedRef: { paused: boolean }): Promise<{ committed: boolean; cancelled: boolean }> {
+    async runOnce(signal: AbortSignal): Promise<{ committed: boolean; cancelled: boolean }> {
       const resources = await deps.getResources();
       deps.logger?.info({
         scope: "p2pkh.backfill",
@@ -67,7 +66,6 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
       let anyCommitted = false;
       for (const r of resources) {
         if (signal.aborted) return { committed: anyCommitted, cancelled: true };
-        if (pausedRef.paused) return { committed: anyCommitted, cancelled: false };
         deps.logger?.info({
           scope: "p2pkh.backfill",
           event: "backfill.resource.started",
@@ -75,7 +73,7 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
           data: { resourceId: r.resourceId, network: r.network, address: r.address }
         });
         try {
-          const summary = await backfillOne(r, signal, pausedRef, deps);
+          const summary = await backfillOne(r, signal, deps);
           if (summary.committed) anyCommitted = true;
           if (summary.cancelled) return { committed: anyCommitted, cancelled: true };
           deps.logger?.info({
@@ -145,12 +143,10 @@ export function createP2pkhHistoryBackfill(deps: P2pkhHistoryBackfillDeps) {
 async function backfillOne(
   resource: P2pkhKeyResource,
   signal: AbortSignal,
-  pausedRef: { paused: boolean },
   deps: P2pkhHistoryBackfillDeps
 ): Promise<{ status: string; pagesSynced: number; recordsSynced: number; committed: boolean; cancelled: boolean }> {
   // 硬切换 003：所有"提前结束"路径都要带回当前 backfill state 摘要，
-  // 让 runOnce 能写出"本 resource 已 complete / paused"日志，而不是
-  // silent return。
+  // 让 runOnce 能写出"本 resource 已 complete"日志，而不是 silent return。
   const summarize = (s: P2pkhBackfillState | undefined, committed = false, cancelled = false): { status: string; pagesSynced: number; recordsSynced: number; committed: boolean; cancelled: boolean } => ({
     status: s?.status ?? "unknown",
     pagesSynced: s?.pagesSynced ?? 0,
@@ -163,19 +159,14 @@ async function backfillOne(
   let state = await db.getBackfillState(resource.resourceId);
   let didCommit = false;
   if (signal.aborted) return summarize(state, false, true);
-  if (pausedRef.paused) return summarize(state);
   if (state?.status === "complete") return summarize(state);
 
   // 关键修复：failed 状态需要重置为 running 才能继续；
   // 但如果 saved state 的 nextPageToken 缺失（首次请求失败从未翻页），
   // 不能直接当 running 用 —— 必须从首页重新拉取。
-  // 关键修复：paused 状态保留 nextPageToken，可以直接继续。
   let mustRefetchFirstPage = false;
   if (state && state.status === "failed") {
     mustRefetchFirstPage = !state.nextPageToken;
-    await db.putBackfillState({ ...state, status: "running", updatedAt: new Date().toISOString() });
-    state = { ...state, status: "running" };
-  } else if (state && state.status === "paused") {
     await db.putBackfillState({ ...state, status: "running", updatedAt: new Date().toISOString() });
     state = { ...state, status: "running" };
   }
@@ -250,17 +241,9 @@ async function backfillOne(
   let current: P2pkhBackfillState | undefined = state;
   while (current && current.status === "running" && current.nextPageToken) {
     if (signal.aborted) return summarize(current, didCommit, true);
-    if (pausedRef.paused) {
-      await saveState(db, current, "paused");
-      return summarize({ ...current, status: "paused" }, didCommit);
-    }
     while (deps.coordinator.hasRecentPending(resource.resourceId)) {
       await new Promise((r) => setTimeout(r, 50));
       if (signal.aborted) return summarize(current, didCommit, true);
-      if (pausedRef.paused) {
-        await saveState(db, current, "paused");
-        return summarize({ ...current, status: "paused" }, didCommit);
-      }
     }
     deps.coordinator.requestBackfillYield(resource.resourceId);
     const expected = current.revision;

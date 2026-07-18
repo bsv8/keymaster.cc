@@ -2,27 +2,19 @@
 // 后台任务平台实现。
 // 设计缘由：
 //   - 任务注册 -> 调度 -> 运行 -> 状态变更订阅。
-//   - 同 task id 不并发：使用独立 runPromise 锁；pause/cancel/resume 必须等
-//     旧实例真正退出后才允许新实例启动。
-//   - pause 立即 abort 当前运行实例并等待其 finally 块退出；之后 state=paused。
-//   - cancel 仅 abort 一次；不重置 enabled。
-//   - retry 仅重试 failed 任务。
+//   - 同 task id 不并发：使用独立 runPromise 锁；cancel 必须等旧实例真正退出。
+//   - cancel 仅 abort 当前轮；不影响未来定时调度。
+//   - 失败不是稳态：保留错误信息后自动回到 idle 等待下一周期。
+//   - blocked 是门禁阻塞状态：Vault 锁定、keyspace 初始化中、无 active key。
 //   - 页面 visibility 变化与定时器节流恢复时只合并为一次 run。
 //   - leader lock：浏览器环境优先 Web Locks（FIFO 互斥）；不支持时回退
 //     BroadcastChannel + tabId 选举；非浏览器/无 BroadcastChannel 时单进程
 //     直接是 leader。
-//   - follower 标签页的 trigger/pause/resume/cancel/retry 必须转发到 leader。
-//
-// 硬切换 001 阶段 5 边界（轻量接入）：
-//   BackgroundService 负责触发消息，不直接拥有业务状态。
-//   未来把 BackgroundService 改造为 MessageBus 调度器时：
-//     - trigger / pause / resume / cancel / retry 改为 dispatch "background.task.*"；
-//     - 业务插件订阅这些消息并执行实际 run；
-//     - BackgroundService 仍负责 leader 选举、leader 心跳、follower 转发。
-//   本期不重写为 actor；只把未来职责边界写入注释，行为保持等价。
+//   - follower 标签页的 runNow/cancel 必须转发到 leader。
 
 import type {
   BackgroundRegistry,
+  BackgroundRunEligibility,
   BackgroundService,
   BackgroundSyncSettings,
   BackgroundTaskContext,
@@ -39,12 +31,19 @@ import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@
 interface TaskRuntime {
   def: BackgroundTaskDefinition;
   state: BackgroundTaskState;
-  enabled: boolean;
   progress?: BackgroundTaskProgress;
   lastStartedAt?: string;
   lastCompletedAt?: string;
+  /** 上次尝试时间（无论成功或失败）。 */
+  lastAttemptAt?: string;
   nextRunAt?: string;
+  /** 上次错误信息；下次成功后清除。 */
   error?: string;
+  /**
+   * 阻塞原因（仅 state="blocked" 时有值）。
+   * 设计缘由：让用户理解为什么任务没有运行，而不是静默等待。
+   */
+  blockedReason?: import("@keymaster/contracts").I18nText;
   rerunRequested: boolean;
   ctl?: AbortController;
   runPromise?: Promise<void>;
@@ -130,13 +129,37 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   const tasks = new Map<string, TaskRuntime>();
   /** 冷却 map：key -> lastRunAt。每个实例独立，不跨实例共享。 */
   const cooldownMap = new Map<string, number>();
-  const enabledOverrides = loadEnabledOverrides();
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
   let visibilityHandler: (() => void) | undefined;
   let disposed = false;
   const leaderCtx = createLeaderContext(LEADER_LOCK_NAME, LEADER_HEARTBEAT_MS);
   const logger = options.logger;
+
+  /**
+   * 一次性 migration：清除旧的 background.enabled 偏好。
+   * 设计缘由：施工单 001 要求所有任务默认持续启用，删除 pause/resume 语义。
+   * 读取旧值仅用于诊断日志，不能继承其中的 false。
+   */
+  function migrateEnabledPreferences(): void {
+    try {
+      const raw = localStorage.getItem(ENABLED_PREF_KEY);
+      if (raw) {
+        logger?.info({
+          scope: "background.migration",
+          event: "clearing-old-enabled-prefs",
+          message: "Clearing old background.enabled preferences (migration 001)",
+          data: { oldValue: raw }
+        });
+        localStorage.removeItem(ENABLED_PREF_KEY);
+      }
+    } catch {
+      // 静默失败
+    }
+  }
+
+  // 启动时执行 migration
+  migrateEnabledPreferences();
 
   function snapshot(task: TaskRuntime): BackgroundTaskSnapshot {
     return {
@@ -151,9 +174,10 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       progress: task.progress,
       lastStartedAt: task.lastStartedAt,
       lastCompletedAt: task.lastCompletedAt,
+      lastAttemptAt: task.lastAttemptAt,
       nextRunAt: task.nextRunAt,
       error: task.error,
-      enabled: task.enabled,
+      blockedReason: task.blockedReason,
       // 008：每次取快照时重新解析 keyScope，支持函数形式的延迟求值。
       keyScope: resolveKeyScope(task.def)
     };
@@ -169,26 +193,17 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   }
 
   /**
-   * 关键修复：follower 标签页触发 pause/resume/cancel/retry/trigger 时
-   * 把操作转发到 leader；leader 在本 tab 内执行对应的方法并广播结果快照。
+   * 关键修复：follower 标签页触发 runNow/cancel 时把操作转发到 leader；
+   * leader 在本 tab 内执行对应的方法并广播结果快照。
    */
   function handleFollowerAction(action: FollowerAction) {
     if (!leaderCtx.isLeader) return;
     switch (action.type) {
-      case "trigger":
-        trigger(action.id, action.reason ?? "follower");
-        break;
-      case "pause":
-        void pause(action.id);
-        break;
-      case "resume":
-        resume(action.id);
+      case "run-now":
+        runNow(action.id);
         break;
       case "cancel":
         void cancel(action.id);
-        break;
-      case "retry":
-        retry(action.id);
         break;
       case "cancel-by-key":
         void cancelByKey(action.publicKeyHex);
@@ -199,26 +214,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
           leaderCtx.sendToTab(action.fromTabId, { type: "snapshots", snapshots: [...tasks.values()].map(snapshot) });
         }
         break;
-    }
-  }
-
-  function loadEnabledOverrides(): Map<string, boolean> {
-    try {
-      const raw = localStorage.getItem(ENABLED_PREF_KEY);
-      if (!raw) return new Map();
-      const obj = JSON.parse(raw) as Record<string, boolean>;
-      return new Map(Object.entries(obj));
-    } catch {
-      return new Map();
-    }
-  }
-  function saveEnabledOverrides() {
-    try {
-      const obj: Record<string, boolean> = {};
-      for (const [k, v] of enabledOverrides) obj[k] = v;
-      localStorage.setItem(ENABLED_PREF_KEY, JSON.stringify(obj));
-    } catch {
-      // 静默失败。
     }
   }
 
@@ -280,15 +275,14 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     if (tasks.has(def.id)) {
       throw new Error(`Background task id "${def.id}" is already registered`);
     }
-    const enabled = enabledOverrides.has(def.id) ? enabledOverrides.get(def.id)! : def.defaultEnabled ?? true;
+    // 施工单 001：所有任务默认持续启用，删除 defaultEnabled 字段
     const t: TaskRuntime = {
       def,
       state: "idle",
-      enabled,
       rerunRequested: false
     };
     tasks.set(def.id, t);
-    if (t.enabled) scheduleNext(t);
+    scheduleNext(t);
     emitAll();
   }
 
@@ -305,11 +299,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
    * asset-holdings 组的 interval 从 BackgroundSyncSettings 读取。
    */
   function scheduleNext(t: TaskRuntime) {
-    if (!t.enabled) {
-      t.nextRunAt = undefined;
-      return;
-    }
-
     let interval: number | undefined;
 
     // 优先使用 schedule group 配置
@@ -345,12 +334,12 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
 
   /**
    * 关键修复：以 runPromise 锁 + state 双重防御保证同 id 不并发。
-   * 即使 pause/cancel 改了 state，旧的 runPromise 仍会继续执行到 finally，
+   * 即使 cancel 改了 state，旧的 runPromise 仍会继续执行到 finally，
    * finally 块会清掉 runPromise 并设置 state。
-   * 新的 trigger/pause/resume 会通过 await runPromise 等待旧实例退出。
+   * 新的 runNow 会通过 await runPromise 等待旧实例退出。
    *
-   * 关键修复：canRun=false 或抛错时必须先清掉 runPromise，否则
-   * task 永远停在 runPromise 状态，后续 trigger 不会启动新实例。
+   * 关键修复：canRun 返回 blocked 或抛错时必须先清掉 runPromise，否则
+   * task 永远停在 runPromise 状态，后续 runNow 不会启动新实例。
    * 关键修复：rerunRequested 必须真正消费——运行结束后若 rerunRequested=true
    * 要再次进入 run()；否则运行期间到达的 broadcast 触发的同步会被吞掉。
    */
@@ -362,27 +351,50 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     }
     t.state = "queued";
     t.rerunRequested = false;
+    t.blockedReason = undefined;
     logger?.info({ scope: "background.task", event: "triggered", message: `Task triggered: ${t.def.id}`, data: { taskId: t.def.id, reason } });
     emitAll();
     const promise = (async () => {
-      // canRun 检查：false 时只保持 idle/queued，不标记为 failed。
+      // canRun 检查：返回 blocked 时设置 blockedReason 和 blocked 状态。
       try {
         if (t.def.canRun) {
-          const ok = await t.def.canRun();
-          if (!ok) {
-            t.state = t.enabled ? "idle" : "paused";
+          const eligibility = await t.def.canRun();
+          if (!eligibility.ready) {
+            t.state = "blocked";
+            t.blockedReason = eligibility.reason;
+            t.lastAttemptAt = new Date().toISOString();
             scheduleNext(t);
+            logger?.info({
+              scope: "background.task",
+              event: "blocked",
+              message: `Task blocked: ${t.def.id}`,
+              data: { taskId: t.def.id, reason: eligibility.retryOn }
+            });
+            emitAll();
             return;
           }
         }
       } catch (err) {
-        t.error = err instanceof Error ? err.message : String(err);
-        t.state = "failed";
+        // canRun 抛错视为 blocked（门禁异常），不是网络失败
+        t.state = "blocked";
+        t.blockedReason = { key: "background.blocked.canRunError", fallback: err instanceof Error ? err.message : String(err) };
+        t.lastAttemptAt = new Date().toISOString();
+        scheduleNext(t);
+        logger?.error({
+          scope: "background.task",
+          event: "canRun-error",
+          message: `Task canRun error: ${t.def.id}`,
+          data: { taskId: t.def.id },
+          error: { name: err instanceof Error ? err.name : "Error", message: err instanceof Error ? err.message : String(err) }
+        });
+        emitAll();
         return;
       }
       t.state = "running";
       t.error = undefined;
+      t.blockedReason = undefined;
       t.lastStartedAt = new Date().toISOString();
+      t.lastAttemptAt = t.lastStartedAt;
       t.ctl = new AbortController();
       logger?.info({ scope: "background.task", event: "started", message: `Task started: ${t.def.id}`, data: { taskId: t.def.id, reason } });
       emitAll();
@@ -397,25 +409,28 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       try {
         await t.def.run(ctx);
         // 关键修复：框架级兜底——即使 run() 正常 resolve，若 signal 已被
-        // abort（cancel/pause 触发），必须走取消分支，不记 completed、不写
+        // abort（cancel 触发），必须走取消分支，不记 completed、不写
         // lastCompletedAt。不能只依赖各业务任务自行抛出 AbortError。
         if (t.ctl?.signal.aborted) {
-          t.state = t.enabled ? "idle" : "paused";
+          t.state = "idle";
           logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {
-          t.state = t.enabled ? "idle" : "paused";
+          t.state = "idle";
           t.lastCompletedAt = new Date().toISOString();
           t.progress = undefined;
+          // 成功后清除错误信息
+          t.error = undefined;
           logger?.info({ scope: "background.task", event: "completed", message: `Task completed: ${t.def.id}`, data: { taskId: t.def.id } });
         }
       } catch (err) {
         if (t.ctl?.signal.aborted) {
-          t.state = t.enabled ? "idle" : "paused";
+          t.state = "idle";
           logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {
+          // 网络或业务错误：保留错误信息，回到 idle 等待下一周期
           const msg = err instanceof Error ? err.message : String(err);
           t.error = msg;
-          t.state = "failed";
+          t.state = "idle";
           logger?.error({
             scope: "background.task",
             event: "failed",
@@ -443,11 +458,11 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       t.runPromise = undefined;
       emitAll();
       // 关键修复：消费 rerunRequested。运行期间到达的 trigger 合并为一次后续运行。
-      if (t.rerunRequested && t.enabled && !disposed) {
+      if (t.rerunRequested && !disposed) {
         t.rerunRequested = false;
         // 不递归 await runOne 以避免堆栈过深；通过 microtask 异步起新实例。
         queueMicrotask(() => {
-          if (!t.runPromise && t.enabled && !disposed) {
+          if (!t.runPromise && !disposed) {
             void runOne(t, "rerun");
           }
         });
@@ -466,76 +481,28 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   }
 
   /**
-   * 触发任务运行。
-   * 设计缘由：支持冷却策略——普通事件的同一 task/key scope 最短网络间隔为 2 分钟。
-   * 首次没有 snapshot、显式后台"立即运行"、失败后用户"重试"可以绕过普通冷却。
+   * 立即同步一次（UI 手动 API）。
+   * 设计缘由：托盘唯一的手动动作，绕过普通冷却但不绕过门禁。
+   * 等价于 trigger(taskId, "manual")，但语义更清晰。
    */
-  function trigger(id: string, reason = "manual") {
+  function runNow(id: string): void {
     const t = tasks.get(id);
     if (!t) return;
-    // 关键修复：paused 任务不可被 trigger 启动——托盘的"暂停"语义
-    // 必须是硬屏障，手动 trigger 也不能绕过。follower → leader 转发
-    // 也走同样的判断，leader 端不会再 runOne。
-    if (!t.enabled) return;
 
-    // 冷却检查（普通事件）
-    if (reason !== "manual" && reason !== "retry" && reason !== "first-sync") {
-      const cooldownKey = `${id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
-      const lastRun = cooldownMap.get(cooldownKey);
-      if (lastRun && Date.now() - lastRun < COOLDOWN_MS) {
-        // 冷却期内：标记 syncDue，不创建新任务
-        t.rerunRequested = true;
-        return;
-      }
-    }
-
-    // 关键修复：follower 标签页的 trigger/pause/resume/cancel/retry 必须
-    // 转发给 leader 执行；本 tab 不能再各自启动实例。
+    // 关键修复：follower 标签页的 runNow 必须转发给 leader 执行
     if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "trigger", id, reason });
+      leaderCtx.forwardAction({ type: "run-now", id });
       return;
     }
-    void runOne(t, reason);
+    // manual 理由绕过普通冷却
+    void runOne(t, "manual");
   }
+
   /**
-   * 关键修复：pause 立即 abort 当前实例并 await runPromise 退出，
-   * 之后才设置 state=paused 并更新 enabled 偏好。
+   * 取消当前运行。
+   * 设计缘由：只中止当前 instance，不会禁用任务、不会取消未来定时。
+   * 取消后以取消完成时为新周期起点。
    */
-  async function pause(id: string): Promise<void> {
-    const t = tasks.get(id);
-    if (!t) return;
-    if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "pause", id });
-      return;
-    }
-    t.enabled = false;
-    enabledOverrides.set(id, false);
-    saveEnabledOverrides();
-    t.ctl?.abort();
-    await awaitIdle(t);
-    // 旧实例退出后才能安全切到 paused；否则 pause 期间被 trigger 会启动新实例。
-    t.state = "paused";
-    t.nextRunAt = undefined;
-    logger?.info({ scope: "background.task", event: "paused", message: `Task paused: ${t.def.id}`, data: { taskId: t.def.id } });
-    emitAll();
-  }
-  function resume(id: string): void {
-    const t = tasks.get(id);
-    if (!t) return;
-    if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "resume", id });
-      return;
-    }
-    t.enabled = true;
-    enabledOverrides.set(id, true);
-    saveEnabledOverrides();
-    if (!t.runPromise) {
-      t.state = "idle";
-    }
-    scheduleNext(t);
-    logger?.info({ scope: "background.task", event: "resumed", message: `Task resumed: ${t.def.id}`, data: { taskId: t.def.id } });
-    emitAll();
-  }
   async function cancel(id: string): Promise<void> {
     const t = tasks.get(id);
     if (!t) return;
@@ -547,20 +514,10 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     t.rerunRequested = false;
     await awaitIdle(t);
     if (!t.runPromise) {
-      t.state = t.enabled ? "idle" : "paused";
+      t.state = "idle";
     }
     scheduleNext(t);
     emitAll();
-  }
-  function retry(id: string) {
-    const t = tasks.get(id);
-    if (!t) return;
-    if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "retry", id });
-      return;
-    }
-    if (t.state !== "failed") return;
-    void runOne(t, "retry");
   }
 
   /**
@@ -585,7 +542,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       t.rerunRequested = false;
       await awaitIdle(t);
       if (!t.runPromise) {
-        t.state = t.enabled ? "idle" : "paused";
+        t.state = "idle";
       }
       scheduleNext(t);
     }
@@ -608,9 +565,8 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     intervalTimer = setInterval(() => {
       const now = Date.now();
       for (const t of tasks.values()) {
-        if (!t.enabled) continue;
         if (t.runPromise) continue;
-        if (t.state === "running" || t.state === "queued" || t.state === "failed" || t.state === "paused") continue;
+        if (t.state === "running" || t.state === "queued" || t.state === "blocked") continue;
 
         // 冷却唤醒：检查是否有待处理的 rerunRequested 且已过冷却期
         if (t.rerunRequested) {
@@ -645,17 +601,17 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     if (typeof document === "undefined") return;
     if (document.visibilityState === "visible") {
       for (const t of tasks.values()) {
-        if (!t.enabled || t.runPromise) continue;
+        if (t.runPromise) continue;
         if (t.state !== "idle") continue;
         if (leaderCtx.isLeader) {
-          void runOne(t, "resume");
+          void runOne(t, "visibility");
         }
       }
     }
   }
 
   /**
-   * 关键修复：浏览器重新联网后触发一次所有 enabled 任务，
+   * 关键修复：浏览器重新联网后触发一次所有任务，
    * 让 P2PKH recent-sync 等业务能立即拿到最新链上状态。
    * 设计缘由：节流 / 离线期间任务的 nextRunAt 已过期，但 timer
    * 不会补跑；online 事件是唯一明确的"网络恢复"信号。
@@ -663,7 +619,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   function handleOnline() {
     if (typeof navigator === "undefined" || !navigator.onLine) return;
     for (const t of tasks.values()) {
-      if (!t.enabled || t.runPromise) continue;
+      if (t.runPromise) continue;
       if (t.state === "running" || t.state === "queued") continue;
       if (leaderCtx.isLeader) {
         void runOne(t, "online");
@@ -719,11 +675,9 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       handler([...tasks.values()].map(snapshot));
       return () => listeners.delete(handler);
     },
-    trigger,
-    pause,
-    resume,
+    runNow,
+    trigger: runNow, // trigger 等价于 runNow，保留供业务插件内部使用
     cancel,
-    retry,
     cancelByKey,
     getScheduleSettings() {
       return loadScheduleSettings();
@@ -806,11 +760,8 @@ interface LeaderContext {
 }
 
 type FollowerAction =
-  | { type: "trigger"; id: string; reason?: string; fromTabId?: string }
-  | { type: "pause"; id: string; fromTabId?: string }
-  | { type: "resume"; id: string; fromTabId?: string }
+  | { type: "run-now"; id: string; fromTabId?: string }
   | { type: "cancel"; id: string; fromTabId?: string }
-  | { type: "retry"; id: string; fromTabId?: string }
   | { type: "cancel-by-key"; publicKeyHex: string; fromTabId?: string }
   | { type: "sync-state"; fromTabId: string };
 

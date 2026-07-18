@@ -1,13 +1,12 @@
 // packages/plugin-background/src/backgroundService.test.ts
 // 后台任务平台单测：
-//   - trigger 不并发：同 task id 第二次 trigger 合并为 rerun。
-//   - pause abort 当前运行并等待旧实例退出。
-//   - pause 之后 trigger 不会启动第二个实例。
-//   - cancel 同 pause 的并发保护。
-//   - canRun 返回 false 时不进 running，state 保持 idle。
+//   - runNow/trigger 不并发：同 task id 第二次 trigger 合并为 rerun。
+//   - cancel abort 当前运行并等待旧实例退出。
+//   - canRun 返回 blocked 时任务进入 blocked 状态。
+//   - 失败后自动回到 idle，保留错误信息。
 //   - interval 触发不会补跑。
 //   - 跨 tab leader 选举：BC 路径下,先到 leader 不会被后到 tab 抢；
-//     follower 的 trigger 必须转发到 leader（不能本地 fork 第二实例）。
+//     follower 的 runNow 必须转发到 leader（不能本地 fork 第二实例）。
 //
 // 浏览器环境模拟：node 测试默认 typeof window === "undefined",
 // backgroundService 会短路成"单进程自任 leader"。要测试真正的 leader
@@ -20,6 +19,7 @@ import { createBackgroundBundle } from "./backgroundService.js";
 
 beforeEach(() => {
   localStorage.removeItem("background.enabled");
+  localStorage.removeItem("background.sync.settings");
 });
 
 afterEach(() => {
@@ -64,7 +64,6 @@ describe("BackgroundService basics", () => {
       id: "t1",
       pluginId: "test",
       label: "t1",
-      defaultEnabled: true,
       async run() {
         concurrent += 1;
         maxConcurrent = Math.max(maxConcurrent, concurrent);
@@ -72,15 +71,15 @@ describe("BackgroundService basics", () => {
         concurrent -= 1;
       }
     });
-    service.trigger("t1", "t1");
-    service.trigger("t1", "t1");
-    service.trigger("t1", "t1");
+    service.runNow("t1");
+    service.runNow("t1");
+    service.runNow("t1");
     await new Promise((r) => setTimeout(r, 100));
     expect(maxConcurrent).toBe(1);
     service.dispose();
   });
 
-  it("pause awaits current run and prevents new instance", async () => {
+  it("cancel awaits current run and returns to idle", async () => {
     const { service, registry } = createBackgroundBundle();
     let entered = false;
     let exited = false;
@@ -89,7 +88,6 @@ describe("BackgroundService basics", () => {
       id: "t2",
       pluginId: "test",
       label: "t2",
-      defaultEnabled: true,
       async run(ctx) {
         runs += 1;
         entered = true;
@@ -106,85 +104,111 @@ describe("BackgroundService basics", () => {
         }
       }
     });
-    service.trigger("t2", "manual");
+    service.runNow("t2");
     await new Promise((r) => setTimeout(r, 5));
     expect(entered).toBe(true);
     expect(runs).toBe(1);
-    const pausePromise = service.pause("t2");
-    service.trigger("t2", "manual-during-pause");
-    await pausePromise;
+    await service.cancel("t2");
     expect(exited).toBe(true);
     await new Promise((r) => setTimeout(r, 30));
     expect(runs).toBe(1);
     const snap = service.listSnapshots().find((s) => s.id === "t2")!;
-    expect(snap.state).toBe("paused");
+    expect(snap.state).toBe("idle");
     service.dispose();
   });
 
-  it("canRun false keeps task idle/paused", async () => {
+  it("canRun returning blocked sets blocked state", async () => {
     const { service, registry } = createBackgroundBundle();
     registry.register({
       id: "t3",
       pluginId: "test",
       label: "t3",
-      defaultEnabled: true,
-      canRun: () => false,
+      canRun: () => ({ ready: false, reason: { key: "test.blocked", fallback: "Test blocked" }, retryOn: "unlock" }),
       async run() {
         throw new Error("should not run");
       }
     });
-    service.trigger("t3", "manual");
+    service.runNow("t3");
     await new Promise((r) => setTimeout(r, 5));
     const snap = service.listSnapshots().find((s) => s.id === "t3")!;
-    expect(snap.state).not.toBe("failed");
+    expect(snap.state).toBe("blocked");
+    expect(snap.blockedReason).toEqual({ key: "test.blocked", fallback: "Test blocked" });
     service.dispose();
   });
 
-  it("retry only fires on failed state", async () => {
+  it("failed task returns to idle with error preserved", async () => {
     const { service, registry } = createBackgroundBundle();
     let runs = 0;
     registry.register({
       id: "t4",
       pluginId: "test",
       label: "t4",
-      defaultEnabled: true,
       async run() {
         runs += 1;
         throw new Error("boom");
       }
     });
-    service.trigger("t4", "manual");
+    service.runNow("t4");
     await new Promise((r) => setTimeout(r, 10));
     expect(runs).toBe(1);
-    service.retry("t4");
+    const snap = service.listSnapshots().find((s) => s.id === "t4")!;
+    // 施工单 001：失败不是稳态，自动回到 idle
+    expect(snap.state).toBe("idle");
+    expect(snap.error).toBe("boom");
+    // 可以再次 runNow
+    service.runNow("t4");
     await new Promise((r) => setTimeout(r, 10));
     expect(runs).toBe(2);
     service.dispose();
   });
 
-  // 关键修复：托盘 pause 后手动 trigger 也必须不启动新实例——
-  // "暂停"语义是硬屏障。旧实现只覆盖了 pause 等待期间的 trigger。
-  it("trigger after pause completes is a no-op", async () => {
+  it("runNow bypasses cooldown", async () => {
     const { service, registry } = createBackgroundBundle();
     let runs = 0;
     registry.register({
       id: "t5",
       pluginId: "test",
       label: "t5",
-      defaultEnabled: true,
       async run() {
         runs += 1;
       }
     });
-    await service.pause("t5");
-    const snap = service.listSnapshots().find((s) => s.id === "t5")!;
-    expect(snap.state).toBe("paused");
-    expect(snap.enabled).toBe(false);
-    service.trigger("t5", "manual-after-pause");
-    await new Promise((r) => setTimeout(r, 20));
-    expect(runs).toBe(0);
-    const snap2 = service.listSnapshots().find((s) => s.id === "t5")!;
-    expect(snap2.state).toBe("paused");
+    // 第一次运行
+    service.runNow("t5");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(1);
+    // 立即再次运行：runNow 应该绕过冷却
+    service.runNow("t5");
+    await new Promise((r) => setTimeout(r, 10));
+    expect(runs).toBe(2);
+    service.dispose();
+  });
+
+  it("cancel during queued state returns to idle", async () => {
+    const { service, registry } = createBackgroundBundle();
+    let runs = 0;
+    registry.register({
+      id: "t6",
+      pluginId: "test",
+      label: "t6",
+      async run() {
+        runs += 1;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+    });
+    // 触发第一次运行
+    service.runNow("t6");
+    await new Promise((r) => setTimeout(r, 5));
+    // 再次触发：会标记 rerunRequested
+    service.runNow("t6");
+    await new Promise((r) => setTimeout(r, 5));
+    // 取消：应清除 rerunRequested
+    await service.cancel("t6");
+    await new Promise((r) => setTimeout(r, 150));
+    // 只运行了一次
+    expect(runs).toBe(1);
+    const snap = service.listSnapshots().find((s) => s.id === "t6")!;
+    expect(snap.state).toBe("idle");
     service.dispose();
   });
 });
@@ -192,11 +216,11 @@ describe("BackgroundService basics", () => {
 describe("BackgroundService leader election (BC path)", () => {
   // 关键不变量：当跨 tab 协调走 BroadcastChannel 选举时,
   //   - 同名 task 在两个 service 上各自注册,
-  //   - 任意 tab 触发 trigger 后,**全应用范围**该任务最终只跑 1 次。
+  //   - 任意 tab 触发 runNow 后,**全应用范围**该任务最终只跑 1 次。
   // 旧实现因 runElection 把全局 lastHeartbeat 清零 + 部分时序窗口,
   // 可能短暂双 leader,导致两个 service 都跑 task,这条断言会失败。
 
-  it("trigger from any tab runs the task exactly once across both services", async () => {
+  it("runNow from any tab runs the task exactly once across both services", async () => {
     const env = installFakeBrowserNoLocks();
     try {
       const a = createBackgroundBundle();
@@ -210,7 +234,6 @@ describe("BackgroundService leader election (BC path)", () => {
         id: "shared-task",
         pluginId: "test",
         label: "shared",
-        defaultEnabled: true,
         async run() {
           aRuns += 1;
         }
@@ -219,15 +242,14 @@ describe("BackgroundService leader election (BC path)", () => {
         id: "shared-task",
         pluginId: "test",
         label: "shared",
-        defaultEnabled: true,
         async run() {
           bRuns += 1;
         }
       });
 
-      // 从 b trigger:若 b 是 follower,会转发到 a;若 b 是 leader,直接跑。
+      // 从 b runNow:若 b 是 follower,会转发到 a;若 b 是 leader,直接跑。
       // 不管谁是 leader,总运行次数必须严格等于 1。
-      b.service.trigger("shared-task", "from-b");
+      b.service.runNow("shared-task");
       await new Promise((r) => setTimeout(r, 200));
 
       // 关键断言:**恰好一次**——证明没有双 leader。
@@ -240,7 +262,7 @@ describe("BackgroundService leader election (BC path)", () => {
     }
   });
 
-  it("new tab joining after leader is established yields and forwards triggers to old leader", async () => {
+  it("new tab joining after leader is established yields and forwards runNow to old leader", async () => {
     // 关键修复(用户验收反馈):"已有 leader + 新 tab 加入" 场景。
     // 旧实现 runElection 清零 lastHeartbeat,导致新 tab 在 250ms 内
     // 即使旧 leader 已经心跳过也可能错误自任 leader。修复后:
@@ -248,7 +270,7 @@ describe("BackgroundService leader election (BC path)", () => {
     //   2. leader 收到 want 立即广播 heartbeat;
     //   3. 新 tab 收到 heartbeat 立即 electionResult="lost"。
     // 行为可观察的不变量：a 先到并已是 leader,b 后到注册任务后从 b
-    // 端 trigger,b 必须把请求转发给 a,a 跑、b 不跑。
+    // 端 runNow,b 必须把请求转发给 a,a 跑、b 不跑。
     const env = installFakeBrowserNoLocks();
     try {
       const a = createBackgroundBundle();
@@ -265,7 +287,6 @@ describe("BackgroundService leader election (BC path)", () => {
         id: "shared-task",
         pluginId: "test",
         label: "shared",
-        defaultEnabled: true,
         async run() {
           aRuns += 1;
         }
@@ -274,13 +295,12 @@ describe("BackgroundService leader election (BC path)", () => {
         id: "shared-task",
         pluginId: "test",
         label: "shared",
-        defaultEnabled: true,
         async run() {
           bRuns += 1;
         }
       });
 
-      b.service.trigger("shared-task", "from-b");
+      b.service.runNow("shared-task");
       await new Promise((r) => setTimeout(r, 200));
 
       // a 先成为 leader,b 必须认输并转发——a 跑、b 不跑是确定性结果。
@@ -303,7 +323,6 @@ describe("BackgroundService cancel semantics", () => {
       id: "t-cancel-resolve",
       pluginId: "test",
       label: "t-cancel-resolve",
-      defaultEnabled: true,
       async run(ctx) {
         // 任务内部在 abort 后仍正常 resolve（模拟业务层返回 cancelled）
         await new Promise<void>((resolve) => {
@@ -312,7 +331,7 @@ describe("BackgroundService cancel semantics", () => {
         });
       }
     });
-    service.trigger("t-cancel-resolve", "manual");
+    service.runNow("t-cancel-resolve");
     await new Promise((r) => setTimeout(r, 5));
     // 任务正在运行中
     const snapRunning = service.listSnapshots().find((s) => s.id === "t-cancel-resolve")!;
@@ -323,7 +342,7 @@ describe("BackgroundService cancel semantics", () => {
     await service.cancel("t-cancel-resolve");
 
     const snapAfter = service.listSnapshots().find((s) => s.id === "t-cancel-resolve")!;
-    // 关键断言：状态应为 idle（enabled=true），不是 failed
+    // 关键断言：状态应为 idle，不是 failed
     expect(snapAfter.state).toBe("idle");
     // 关键断言：lastCompletedAt 不应被更新——取消不是"完成"
     expect(snapAfter.lastCompletedAt).toBeUndefined();
@@ -339,7 +358,6 @@ describe("BackgroundService cancel semantics", () => {
       id: "t-cancel-throw",
       pluginId: "test",
       label: "t-cancel-throw",
-      defaultEnabled: true,
       async run(ctx) {
         await new Promise<void>((_resolve, reject) => {
           rejectRun = reject;
@@ -347,7 +365,7 @@ describe("BackgroundService cancel semantics", () => {
         });
       }
     });
-    service.trigger("t-cancel-throw", "manual");
+    service.runNow("t-cancel-throw");
     await new Promise((r) => setTimeout(r, 5));
 
     // cancel 触发 abort → run() 抛出 AbortError
@@ -358,6 +376,26 @@ describe("BackgroundService cancel semantics", () => {
     expect(snap.state).toBe("idle");
     expect(snap.error).toBeUndefined();
     expect(snap.lastCompletedAt).toBeUndefined();
+    service.dispose();
+  });
+});
+
+describe("BackgroundService migration", () => {
+  it("清除旧的 background.enabled 偏好", () => {
+    // 设置旧的 background.enabled
+    localStorage.setItem("background.enabled", JSON.stringify({ "task1": false, "task2": true }));
+    const { service, registry } = createBackgroundBundle();
+    // 创建服务后，旧偏好应被清除
+    expect(localStorage.getItem("background.enabled")).toBeNull();
+    // 所有任务默认持续启用
+    registry.register({
+      id: "task1",
+      pluginId: "test",
+      label: "task1",
+      async run() {}
+    });
+    const snap = service.listSnapshots().find((s) => s.id === "task1")!;
+    expect(snap.state).toBe("idle");
     service.dispose();
   });
 });

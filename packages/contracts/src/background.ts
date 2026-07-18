@@ -15,13 +15,27 @@ export interface BackgroundSyncSettings {
   assetHoldingsIntervalMs: number;
 }
 
-/** 任务状态。 */
+/**
+ * 任务状态。
+ * 设计缘由：删除 paused/failed 作为用户可操作的稳态。
+ * - failed 不再是稳态：失败后保留错误信息，自动回到 idle 等待下一周期
+ * - paused 完全删除：用户不应管理轮询开关
+ * - blocked 新增：任务被门禁阻塞（Vault 锁定、keyspace 初始化中、无 active key）
+ */
 export type BackgroundTaskState =
   | "idle"
   | "queued"
   | "running"
-  | "paused"
-  | "failed";
+  | "blocked";
+
+/**
+ * 后台任务运行资格判定。
+ * 设计缘由：canRun 从简单的 boolean 改为结构化结果，
+ * 让 UI 能展示明确的阻塞原因，而不是静默返回 idle。
+ */
+export type BackgroundRunEligibility =
+  | { ready: true }
+  | { ready: false; reason: I18nText; retryOn: "unlock" | "key-ready" | "interval" };
 
 /**
  * 任务归属的 key namespace（硬切换 007 / 008 / 001 收口）。
@@ -79,8 +93,6 @@ export interface BackgroundTaskDefinition {
   intervalMs?: number;
   /** 调度组配置；与 intervalMs 互斥，优先使用 schedule.group。 */
   schedule?: BackgroundTaskSchedule;
-  /** 默认是否启用。 */
-  defaultEnabled?: boolean;
   /**
    * 任务归属的 key namespace（硬切换 007 / 008）。
    * 设计缘由：删除 key 时由 keyspace 取消该 key 下所有 task；active key
@@ -90,8 +102,13 @@ export interface BackgroundTaskDefinition {
    * 在调用时再求值，避免 active key 切换后 task 仍指向旧 key 的 hash。
    */
   keyScope?: BackgroundTaskKeyScope | (() => BackgroundTaskKeyScope | undefined);
-  /** 当前是否允许运行；返回 false 时任务保持 idle/queued。 */
-  canRun?(): boolean | Promise<boolean>;
+  /**
+   * 运行资格判定。
+   * 设计缘由：返回结构化结果让 UI 展示阻塞原因，而不是静默返回 idle。
+   * 返回 { ready: true } 表示可以运行；返回 { ready: false, reason, retryOn }
+   * 表示被门禁阻塞，reason 是用户可见的 I18nText。
+   */
+  canRun?(): BackgroundRunEligibility | Promise<BackgroundRunEligibility>;
   /** 任务执行体。 */
   run(context: BackgroundTaskContext): Promise<void> | void;
 }
@@ -120,10 +137,16 @@ export interface BackgroundTaskSnapshot {
   progress?: BackgroundTaskProgress;
   lastStartedAt?: string;
   lastCompletedAt?: string;
+  /** 上次尝试时间（无论成功或失败）。 */
+  lastAttemptAt?: string;
   nextRunAt?: string;
+  /** 上次错误信息；下次成功后清除。 */
   error?: string;
-  /** 是否启用（与 paused 区分）。 */
-  enabled: boolean;
+  /**
+   * 阻塞原因（仅 state="blocked" 时有值）。
+   * 设计缘由：让用户理解为什么任务没有运行，而不是静默等待。
+   */
+  blockedReason?: I18nText;
   /**
    * key 上下文（硬切换 007 / 008 / 005）：任务归属哪个 key namespace。
    * 硬切换 005 收尾：BackgroundTray 只按当前 active key 展示任务；不再有
@@ -148,24 +171,27 @@ export interface BackgroundService {
   listSnapshots(): BackgroundTaskSnapshot[];
   onChange(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void;
 
-  /** 触发任务；运行中再次触发时合并为一次后续 rerun。 */
+  /**
+   * 立即同步一次（UI 手动 API）。
+   * 设计缘由：托盘唯一的手动动作，绕过普通冷却但不绕过门禁。
+   * 等价于 trigger(taskId, "manual")，但语义更清晰。
+   */
+  runNow(taskId: string): void;
+
+  /**
+   * 触发任务运行（内部领域事件 API）。
+   * 设计缘由：业务插件用于后台领域事件触发，不是 UI 控制 API。
+   * 页面不应调用此方法。
+   */
   trigger(taskId: string, reason?: string): void;
 
   /**
-   * 暂停任务：阻止后续自动触发并 abort 当前实例；返回的 Promise
-   * resolve 时表示旧实例已真正退出，可以安全进入 paused 状态。
-   * 关键设计：必须 await，否则后续 trigger 会启动第二个实例。
-   */
-  pause(taskId: string): Promise<void>;
-  /** 继续任务：恢复自动触发。 */
-  resume(taskId: string): void;
-  /**
-   * 取消当前运行；返回的 Promise resolve 时表示旧实例已退出。
-   * cancel 不影响 enabled；后续仍可能被 trigger。
+   * 取消当前运行。
+   * 设计缘由：只中止当前 instance，不会禁用任务、不会取消未来定时。
+   * 取消后以取消完成时为新周期起点。
    */
   cancel(taskId: string): Promise<void>;
-  /** 重试：仅重试失败任务。 */
-  retry(taskId: string): void;
+
   /**
    * 取消指定 key namespace 下所有 task（硬切换 007 / 001 收口）。
    * 设计缘由：keyspace.deleteKey 通知 background 停止该 key 的所有收尾,
@@ -192,14 +218,12 @@ export interface BackgroundService {
 /**
  * 后台任务触发原因常量。
  * 设计缘由：统一业务插件使用的 reason 字符串，避免拼写不一致；
- * backgroundService 内部对 "manual" / "retry" / "first-sync" 做冷却白名单，
+ * backgroundService 内部对 "manual" / "first-sync" 做冷却白名单，
  * 业务插件应使用这些常量而非硬编码字符串。
  */
 export const BACKGROUND_TRIGGER_REASON = {
   /** 手动触发（用户点击）。跳过冷却。 */
   MANUAL: "manual",
-  /** 重试失败任务。跳过冷却。 */
-  RETRY: "retry",
   /** 首次同步（无 snapshot 时）。跳过冷却。 */
   FIRST_SYNC: "first-sync",
 } as const;

@@ -1,9 +1,11 @@
 // packages/plugin-background/src/BackgroundTray.tsx
 // Topbar 后台任务托盘。
 // 设计缘由：托盘只显示通用任务信息，不出现 P2PKH 专属字段。
+// 施工单 001：只渲染"立即同步一次"或"取消本次同步"，
+// 没有暂停、继续、重试。失败不是稳态，显示为"上次同步失败"。
 
 import { useEffect, useMemo, useState } from "react";
-import { Activity, AlertCircle, CheckCircle2, Pause, Play, RotateCw, Square, X, Zap } from "lucide-react";
+import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
 import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundTaskSnapshot, BackgroundTaskState } from "@keymaster/contracts";
 
@@ -26,13 +28,13 @@ export function BackgroundTray() {
   const counts = useMemo(() => {
     let running = 0;
     let queued = 0;
-    let failed = 0;
+    let blocked = 0;
     for (const s of snapshots) {
       if (s.state === "running") running++;
       else if (s.state === "queued") queued++;
-      else if (s.state === "failed") failed++;
+      else if (s.state === "blocked") blocked++;
     }
-    return { running, queued, failed };
+    return { running, queued, blocked };
   }, [snapshots]);
 
   const trayLabel = t("background.topbar.label", { defaultValue: "后台任务" });
@@ -41,14 +43,14 @@ export function BackgroundTray() {
     <div className="background-tray">
       <button
         type="button"
-        className={`background-tray__button ${counts.failed > 0 ? "is-failed" : counts.running > 0 ? "is-running" : ""}`}
+        className={`background-tray__button ${counts.blocked > 0 ? "is-blocked" : counts.running > 0 ? "is-running" : ""}`}
         onClick={() => setOpen((v) => !v)}
         aria-label={trayLabel}
         title={trayLabel}
       >
         <Activity size={16} />
         {counts.running > 0 ? <span className="background-tray__count">{counts.running}</span> : null}
-        {counts.failed > 0 ? <span className="background-tray__count background-tray__count--failed">!</span> : null}
+        {counts.blocked > 0 ? <span className="background-tray__count background-tray__count--blocked">!</span> : null}
       </button>
       {open ? (
         <div className="background-tray__panel" role="dialog">
@@ -73,58 +75,8 @@ export function BackgroundTray() {
                     <span className="background-tray__name">{s.label}</span>
                     <StateBadge state={s.state} t={t} />
                   </div>
-                  <p className="background-tray__meta">
-                    {s.lastCompletedAt
-                      ? `${t("background.tray.lastCompletePrefix", { defaultValue: "上次完成 " })}${timeFmt.format(new Date(s.lastCompletedAt))}`
-                      : t("background.tray.neverRun", { defaultValue: "尚未运行" })}
-                    {s.nextRunAt ? `${t("background.tray.nextPrefix", { defaultValue: " · 下次 " })}${timeFmt.format(new Date(s.nextRunAt))}` : ""}
-                  </p>
-                  {s.error ? <p className="background-tray__error">{s.error}</p> : null}
-                  <div className="background-tray__actions">
-                    {s.state === "running" ? (
-                      <button
-                        type="button"
-                        onClick={() => service.cancel(s.id)}
-                        title={t("background.tray.action.cancel", { defaultValue: "取消" })}
-                      >
-                        <Square size={14} /> {t("background.tray.action.cancel", { defaultValue: "取消" })}
-                      </button>
-                    ) : s.state === "failed" ? (
-                      <button
-                        type="button"
-                        onClick={() => service.retry(s.id)}
-                        title={t("background.tray.action.retry", { defaultValue: "重试" })}
-                      >
-                        <RotateCw size={14} /> {t("background.tray.action.retry", { defaultValue: "重试" })}
-                      </button>
-                    ) : null}
-                    {s.state === "idle" || s.state === "queued" ? (
-                      <button
-                        type="button"
-                        onClick={() => service.trigger(s.id, "manual")}
-                        title={t("background.tray.action.runNow", { defaultValue: "立即运行" })}
-                      >
-                        <Zap size={14} /> {t("background.tray.action.runNow", { defaultValue: "立即运行" })}
-                      </button>
-                    ) : null}
-                    {s.enabled ? (
-                      <button
-                        type="button"
-                        onClick={() => service.pause(s.id)}
-                        title={t("background.tray.action.pause", { defaultValue: "暂停" })}
-                      >
-                        <Pause size={14} /> {t("background.tray.action.pause", { defaultValue: "暂停" })}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => service.resume(s.id)}
-                        title={t("background.tray.action.resume", { defaultValue: "继续" })}
-                      >
-                        <Play size={14} /> {t("background.tray.action.resume", { defaultValue: "继续" })}
-                      </button>
-                    )}
-                  </div>
+                  <TaskMeta s={s} timeFmt={timeFmt} t={t} />
+                  <TaskActions s={s} service={service} t={t} />
                 </li>
               ))}
             </ul>
@@ -135,22 +87,105 @@ export function BackgroundTray() {
   );
 }
 
+/**
+ * 任务元信息：显示上次完成/尝试时间、下次自动尝试、错误信息。
+ * 设计缘由：让用户理解任务状态，包括失败原因和下次尝试时间。
+ */
+function TaskMeta({
+  s,
+  timeFmt,
+  t
+}: {
+  s: BackgroundTaskSnapshot;
+  timeFmt: Intl.DateTimeFormat;
+  t: (k: string, opts?: { defaultValue?: string }) => string;
+}) {
+  return (
+    <>
+      <p className="background-tray__meta">
+        {s.lastCompletedAt
+          ? `${t("background.tray.lastCompletePrefix", { defaultValue: "上次完成 " })}${timeFmt.format(new Date(s.lastCompletedAt))}`
+          : s.lastAttemptAt
+            ? `${t("background.tray.lastAttemptPrefix", { defaultValue: "上次尝试 " })}${timeFmt.format(new Date(s.lastAttemptAt))}`
+            : t("background.tray.neverRun", { defaultValue: "尚未运行" })}
+        {s.nextRunAt ? `${t("background.tray.nextPrefix", { defaultValue: " · 下次 " })}${timeFmt.format(new Date(s.nextRunAt))}` : ""}
+      </p>
+      {/* blocked 原因 */}
+      {s.state === "blocked" && s.blockedReason ? (
+        <p className="background-tray__blocked-reason">
+          {typeof s.blockedReason === "string" ? s.blockedReason : s.blockedReason.fallback}
+        </p>
+      ) : null}
+      {/* 上次错误信息 */}
+      {s.error ? (
+        <p className="background-tray__error">
+          {t("background.tray.lastSyncFailed", { defaultValue: "上次同步失败：" })}{s.error}
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+/**
+ * 任务动作：只渲染"立即同步一次"或"取消本次同步"。
+ * 设计缘由：施工单 001 要求托盘只暴露两个用户动作：
+ * - idle/blocked: 立即同步一次
+ * - running/queued: 取消本次同步
+ * 没有暂停、继续、重试。
+ */
+function TaskActions({
+  s,
+  service,
+  t
+}: {
+  s: BackgroundTaskSnapshot;
+  service: BackgroundService;
+  t: (k: string, opts?: { defaultValue?: string }) => string;
+}) {
+  // running/queued: 取消本次同步
+  if (s.state === "running" || s.state === "queued") {
+    return (
+      <div className="background-tray__actions">
+        <button
+          type="button"
+          onClick={() => service.cancel(s.id)}
+          title={t("background.tray.action.cancelCurrentSync", { defaultValue: "取消本次同步" })}
+        >
+          <Square size={14} /> {t("background.tray.action.cancelCurrentSync", { defaultValue: "取消本次同步" })}
+        </button>
+      </div>
+    );
+  }
+
+  // idle/blocked: 立即同步一次
+  return (
+    <div className="background-tray__actions">
+      <button
+        type="button"
+        onClick={() => service.runNow(s.id)}
+        title={t("background.tray.action.runOnce", { defaultValue: "立即同步一次" })}
+      >
+        <Zap size={14} /> {t("background.tray.action.runOnce", { defaultValue: "立即同步一次" })}
+      </button>
+    </div>
+  );
+}
+
 function StateBadge({ state, t }: { state: BackgroundTaskState; t: (k: string, opts?: { defaultValue?: string }) => string }) {
   if (state === "running") return (
     <span className="background-tray__badge is-running">
-      <Activity size={12} /> {t("background.tray.state.running", { defaultValue: "运行中" })}
+      <Activity size={12} /> {t("background.tray.state.running", { defaultValue: "同步中" })}
     </span>
   );
   if (state === "queued") return <span className="background-tray__badge is-queued">{t("background.tray.state.queued", { defaultValue: "排队中" })}</span>;
-  if (state === "failed") return (
-    <span className="background-tray__badge is-failed">
-      <AlertCircle size={12} /> {t("background.tray.state.failed", { defaultValue: "失败" })}
+  if (state === "blocked") return (
+    <span className="background-tray__badge is-blocked">
+      <AlertCircle size={12} /> {t("background.tray.state.blocked", { defaultValue: "等待条件" })}
     </span>
   );
-  if (state === "paused") return <span className="background-tray__badge is-paused">{t("background.tray.state.paused", { defaultValue: "已暂停" })}</span>;
   return (
     <span className="background-tray__badge is-idle">
-      <CheckCircle2 size={12} /> {t("background.tray.state.idle", { defaultValue: "空闲" })}
+      <CheckCircle2 size={12} /> {t("background.tray.state.idle", { defaultValue: "等待同步" })}
     </span>
   );
 }

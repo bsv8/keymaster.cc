@@ -53,6 +53,11 @@ export function BackgroundSettingsPage() {
   return (
     <div className="background-settings">
       <h2>{t("background.settings.title", { defaultValue: "后台同步设置" })}</h2>
+      <p className="background-settings__description">
+        {t("background.settings.description", {
+          defaultValue: "后台同步始终由系统维持。您可以调整同步频率，或在托盘中点击「立即同步一次」手动触发一轮同步。"
+        })}
+      </p>
       <div className="background-settings__field">
         <label>
           {t("background.settings.assetHoldingsInterval", { defaultValue: "资产余额同步频率" })}

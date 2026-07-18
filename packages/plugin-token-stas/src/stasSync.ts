@@ -6,9 +6,11 @@
 //   - 归入 asset-holdings schedule group，由 BackgroundService 统一调度。
 //   - 成功后发布 data-changed 通知。
 //   - 取消后不提交 DB，也不发 data-changed。
+//   - 施工单 001：canRun 返回结构化 BackgroundRunEligibility。
 
 import type {
   AssetDataNotifier,
+  BackgroundRunEligibility,
   BackgroundTaskContext,
   BackgroundTaskDefinition,
   KeyspaceService,
@@ -47,17 +49,24 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
       defaultIntervalMs: 900_000,
       minIntervalMs: 300_000,
     },
-    defaultEnabled: true,
+    // 施工单 001：删除 defaultEnabled，所有任务默认持续启用
     keyScope: () => {
       const state = keyspace.active();
       return state.activePublicKeyHex ? { publicKeyHex: state.activePublicKeyHex } : undefined;
     },
-    canRun: () => {
-      // 与 P2PKH 同构：vault 已解锁 + keyspace 非初始化中 + 有 active key
-      if (vault.status() !== "unlocked") return false;
-      if (keyspace.isInitializing()) return false;
+    // 施工单 001：canRun 返回结构化 BackgroundRunEligibility
+    canRun: (): BackgroundRunEligibility => {
+      if (vault.status() !== "unlocked") {
+        return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
+      }
+      if (keyspace.isInitializing()) {
+        return { ready: false, reason: { key: "background.blocked.keyReady", fallback: "密钥空间初始化中" }, retryOn: "key-ready" };
+      }
       const state = keyspace.active();
-      return Boolean(state.activePublicKeyHex);
+      if (!Boolean(state.activePublicKeyHex)) {
+        return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
+      }
+      return { ready: true };
     },
     async run(ctx: BackgroundTaskContext) {
       const state = keyspace.active();

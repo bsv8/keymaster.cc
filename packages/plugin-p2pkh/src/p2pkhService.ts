@@ -20,6 +20,7 @@
 import type {
   AssetDataNotifier,
   BackgroundRegistry,
+  BackgroundRunEligibility,
   BackgroundService,
   KeyIdentity,
   KeyspaceService,
@@ -236,7 +237,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     return off;
   }
   let status: P2pkhSyncStatus = "idle";
-  let backfillPaused = false;
 
   // 硬切换 001：跨 tab 同步全局设置——其他标签页修改 p2pkh.settings 后
   // 通过 storage 事件回到本服务，本服务刷新缓存 + 通知订阅者 + 按需触发
@@ -599,18 +599,23 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       defaultIntervalMs: 900_000,
       minIntervalMs: 300_000,
     },
-    defaultEnabled: true,
+    // 硬切换 001：删除 defaultEnabled，所有任务默认持续启用
     // 硬切换 008：传函数本身，由 backgroundService 延迟求值。
     keyScope: p2pkhTaskKeyScope,
-    // 硬切换 008 收尾：canRun 必须包含 !keyspace.isInitializing()。
-    // 设计缘由：identity backfill 阶段 active key 还没有完全收敛，
-    // 让 recent-sync 抢跑会触发 "Key storage is not ready"。ready 边界
-    // 由 vault.unlock() 收紧后，这里只需作为保险（防止 background 调度
-    // 早于 vault.unlocked 事件订阅者注册）。
-    canRun: () =>
-      deps.vault.status() === "unlocked" &&
-      !deps.keyspace.isInitializing() &&
-      Boolean(getActiveKeyState().activePublicKeyHex),
+    // 硬切换 001：canRun 返回结构化 BackgroundRunEligibility。
+    // 设计缘由：让 UI 展示明确的阻塞原因，而不是静默返回 idle。
+    canRun: (): BackgroundRunEligibility => {
+      if (deps.vault.status() !== "unlocked") {
+        return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
+      }
+      if (deps.keyspace.isInitializing()) {
+        return { ready: false, reason: { key: "background.blocked.keyReady", fallback: "密钥空间初始化中" }, retryOn: "key-ready" };
+      }
+      if (!Boolean(getActiveKeyState().activePublicKeyHex)) {
+        return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
+      }
+      return { ready: true };
+    },
     async run(ctx) {
       setRecentStatus("syncing");
       try {
@@ -655,19 +660,26 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     pluginId: "p2pkh",
     label: { key: "p2pkh.task.backfill.label", fallback: "P2PKH 历史回填" },
     description: { key: "p2pkh.task.backfill.description", fallback: "分页同步完整确认历史（按 active key namespace）。" },
-    defaultEnabled: true,
+    // 硬切换 001：删除 defaultEnabled，所有任务默认持续启用
     // 硬切换 008：传函数本身。
     keyScope: p2pkhTaskKeyScope,
-    // 硬切换 008 收尾：canRun 也必须包含 !keyspace.isInitializing()。
-    canRun: () =>
-      deps.vault.status() === "unlocked" &&
-      !backfillPaused &&
-      !deps.keyspace.isInitializing() &&
-      Boolean(getActiveKeyState().activePublicKeyHex),
+    // 硬切换 001：canRun 返回结构化 BackgroundRunEligibility。
+    canRun: (): BackgroundRunEligibility => {
+      if (deps.vault.status() !== "unlocked") {
+        return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
+      }
+      if (deps.keyspace.isInitializing()) {
+        return { ready: false, reason: { key: "background.blocked.keyReady", fallback: "密钥空间初始化中" }, retryOn: "key-ready" };
+      }
+      if (!Boolean(getActiveKeyState().activePublicKeyHex)) {
+        return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
+      }
+      return { ready: true };
+    },
     async run(ctx) {
       setBackfillStatus("syncing");
       try {
-        const result = await backfill.runOnce(ctx.signal, { paused: backfillPaused });
+        const result = await backfill.runOnce(ctx.signal);
         // 关键修复：取消后不发布 data-changed、不设 ok 状态。
         if (ctx.signal.aborted || result.cancelled) {
           setBackfillStatus("idle");

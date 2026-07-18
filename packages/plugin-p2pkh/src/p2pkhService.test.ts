@@ -335,7 +335,7 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
       getDb: async () => db as never,
       logger
     });
-    await backfill.runOnce(new AbortController().signal, { paused: false });
+    await backfill.runOnce(new AbortController().signal);
 
     const events = logger.calls.filter((c) => c.level === "info").map((c) => c.input.event);
     expect(events).toContain("backfill.started");
@@ -368,7 +368,7 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
       getDb: async () => db as never,
       logger
     });
-    await backfill.runOnce(new AbortController().signal, { paused: false });
+    await backfill.runOnce(new AbortController().signal);
 
     const started = logger.calls.find((c) => c.input.event === "backfill.resource.started");
     expect(started?.input.data?.resourceId).toBe("p2pkh:main");
@@ -389,7 +389,7 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
       getDb: async () => db as never,
       logger
     });
-    const result = await backfill.runOnce(new AbortController().signal, { paused: false });
+    const result = await backfill.runOnce(new AbortController().signal);
     expect(result).toEqual({ committed: false, cancelled: false });
   });
 
@@ -415,7 +415,7 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
       getDb: async () => db as never,
       logger: makeLogger()
     });
-    const result = await backfill.runOnce(new AbortController().signal, { paused: false });
+    const result = await backfill.runOnce(new AbortController().signal);
     expect(result).toEqual({ committed: true, cancelled: false });
   });
 
@@ -440,31 +440,8 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
       getDb: async () => db as never,
       logger: makeLogger()
     });
-    const result = await backfill.runOnce(ac.signal, { paused: false });
+    const result = await backfill.runOnce(ac.signal);
     expect(result).toEqual({ committed: false, cancelled: true });
-  });
-
-  it("返回 { committed: false } 当 paused", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: "p2pkh:main",
-      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
-      label: "k",
-      address: "addr-main",
-      network: "main",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      generation: 0
-    };
-    const db = makeFakeDb();
-    const backfill = createP2pkhHistoryBackfill({
-      woc: makeWoc(),
-      messageBus: makeMessageBus(),
-      coordinator: makeCoordinator(() => db),
-      getResources: async () => [resource],
-      getDb: async () => db as never,
-      logger: makeLogger()
-    });
-    const result = await backfill.runOnce(new AbortController().signal, { paused: true });
-    expect(result).toEqual({ committed: false, cancelled: false });
   });
 });
 
