@@ -19,7 +19,6 @@ function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
 function makeSnapshot(overrides: Partial<StasTokenSnapshot> & { symbol: string }): StasTokenSnapshot {
   return {
     symbol: overrides.symbol,
-    publicKeyHex: ACTIVE_PK,
     network: "main",
     address: overrides.address ?? "addr1",
     balance: overrides.balance ?? 100,
@@ -31,9 +30,9 @@ function makeSnapshot(overrides: Partial<StasTokenSnapshot> & { symbol: string }
 function fakeDb(snapshots: StasTokenSnapshot[]): StasDb {
   return {
     put: vi.fn(),
-    replaceByPublicKey: vi.fn(),
-    listByPublicKey: vi.fn().mockResolvedValue(snapshots),
-    deleteByPublicKey: vi.fn(),
+    replaceAll: vi.fn(),
+    list: vi.fn().mockResolvedValue(snapshots),
+    close: vi.fn(),
   };
 }
 

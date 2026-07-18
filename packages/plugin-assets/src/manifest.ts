@@ -37,7 +37,6 @@ const assetsResources: I18nPluginResources = {
       "assets.page.empty.assets.title": "No assets yet",
       "assets.page.empty.assets.desc": "After importing or unlocking a wallet, assets will appear here.",
       "assets.page.error.load": " failed to load: ",
-      "assets.page.refresh": "Refresh",
       "assets.context.noKey": "No key",
       "assets.context.loading": "Loading…",
       "assets.context.unnamed": "Unnamed",
@@ -50,7 +49,6 @@ const assetsResources: I18nPluginResources = {
       "assets.table.col.status": "Status",
       "assets.table.col.detail": "Detail",
       "assets.table.open": "Open",
-      "assets.homeWidget.refresh": "Refresh",
       "assets.homeWidget.empty": "No assets yet",
       "assets.detail.title": "Asset detail",
       "assets.detail.loading": "Loading…",
@@ -81,7 +79,6 @@ const assetsResources: I18nPluginResources = {
       "assets.page.empty.assets.title": "暂无资产",
       "assets.page.empty.assets.desc": "导入或解锁钱包后这里会显示资产。",
       "assets.page.error.load": " 加载失败：",
-      "assets.page.refresh": "刷新",
       "assets.context.noKey": "无 key",
       "assets.context.loading": "加载中…",
       "assets.context.unnamed": "未命名",
@@ -94,7 +91,6 @@ const assetsResources: I18nPluginResources = {
       "assets.table.col.status": "状态",
       "assets.table.col.detail": "详情",
       "assets.table.open": "进入",
-      "assets.homeWidget.refresh": "刷新",
       "assets.homeWidget.empty": "暂无资产",
       "assets.detail.title": "资产详情",
       "assets.detail.loading": "正在加载…",
@@ -175,7 +171,7 @@ export const assetsPlugin: PluginManifest = {
       component: AssetsHomeWidget,
       order: 5,
       slot: "main",
-      refreshHint: "manual"
+      refreshHint: "realtime"
     };
     home.register(widget);
 

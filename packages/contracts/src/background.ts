@@ -189,6 +189,21 @@ export interface BackgroundService {
   updateScheduleSettings(settings: BackgroundSyncSettings): void;
 }
 
+/**
+ * 后台任务触发原因常量。
+ * 设计缘由：统一业务插件使用的 reason 字符串，避免拼写不一致；
+ * backgroundService 内部对 "manual" / "retry" / "first-sync" 做冷却白名单，
+ * 业务插件应使用这些常量而非硬编码字符串。
+ */
+export const BACKGROUND_TRIGGER_REASON = {
+  /** 手动触发（用户点击）。跳过冷却。 */
+  MANUAL: "manual",
+  /** 重试失败任务。跳过冷却。 */
+  RETRY: "retry",
+  /** 首次同步（无 snapshot 时）。跳过冷却。 */
+  FIRST_SYNC: "first-sync",
+} as const;
+
 /** capability keys。 */
 export const BACKGROUND_REGISTRY_CAPABILITY = "background.registry";
 export const BACKGROUND_SERVICE_CAPABILITY = "background.service";

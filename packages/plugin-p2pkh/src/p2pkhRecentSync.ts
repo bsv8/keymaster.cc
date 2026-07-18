@@ -52,7 +52,7 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
      * 直接 return 的旧路径只让 background 任务"看起来成功"，但页面、
      * 日志、托盘都没有任何证据；现在每次同步都写至少一条 info 日志。
      */
-    async runOnce(signal: AbortSignal): Promise<void> {
+    async runOnce(signal: AbortSignal): Promise<{ committed: boolean; cancelled: boolean }> {
       const resources = await deps.getResources();
       deps.logger?.info({
         scope: "p2pkh.recentSync",
@@ -70,12 +70,13 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
           message: "P2PKH recent sync skipped: no resources for active key",
           data: { resourceCount: 0 }
         });
-        return;
+        return { committed: false, cancelled: false };
       }
 
       const errors: ResourceError[] = [];
+      let anyCommitted = false;
       for (const r of resources) {
-        if (signal.aborted) return;
+        if (signal.aborted) return { committed: anyCommitted, cancelled: true };
         deps.logger?.info({
           scope: "p2pkh.recentSync",
           event: "recent.resource.started",
@@ -84,6 +85,8 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
         });
         try {
           const summary = await syncOne(r, signal, deps);
+          if (summary.committed) anyCommitted = true;
+          if (summary.cancelled) return { committed: anyCommitted, cancelled: true };
           deps.logger?.info({
             scope: "p2pkh.recentSync",
             event: "recent.resource.completed",
@@ -97,6 +100,10 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
             }
           });
         } catch (err) {
+          // 关键修复：WOC 请求因 abort 抛出 AbortError 时，走取消路径而非失败路径。
+          // 若不在这里区分，AbortError 会被计入 errors，当它是唯一的"错误"时，
+          // runOnce 会抛错让 p2pkhService catch 设 failed——与"取消即 idle"契约矛盾。
+          if (signal.aborted) return { committed: anyCommitted, cancelled: true };
           const msg = err instanceof Error ? err.message : String(err);
           errors.push({ resourceId: r.resourceId, error: msg });
           deps.logger?.warn({
@@ -125,6 +132,7 @@ export function createP2pkhRecentSync(deps: P2pkhRecentSyncDeps) {
         message: "P2PKH recent sync completed",
         data: { resourceCount: resources.length, failedCount: errors.length }
       });
+      return { committed: anyCommitted, cancelled: false };
     }
   };
 }
@@ -133,7 +141,7 @@ async function syncOne(
   resource: P2pkhKeyResource,
   signal: AbortSignal,
   deps: P2pkhRecentSyncDeps
-): Promise<{ utxoCount: number; recentConfirmedCount: number }> {
+): Promise<{ utxoCount: number; recentConfirmedCount: number; committed: boolean; cancelled: boolean }> {
   const network = resource.network;
   const db = await deps.getDb();
 
@@ -171,7 +179,7 @@ async function syncOne(
   }
   if (!stopped && recentItems.length === recentHistoryPage.items.length && pageToken && pageCount < RECENT_HISTORY_PAGES) {
     while (pageToken && pageCount < RECENT_HISTORY_PAGES) {
-      if (signal.aborted) return { utxoCount: 0, recentConfirmedCount: 0 };
+      if (signal.aborted) return { utxoCount: 0, recentConfirmedCount: 0, committed: false, cancelled: true };
       pageCount += 1;
       try {
         const next = await deps.woc.listAddressConfirmedHistory(
@@ -282,7 +290,11 @@ async function syncOne(
     lastSyncedAt: now
   };
 
+  // 关键修复：写入 DB 前检查取消信号——请求返回后取消仍不应提交快照。
+  if (signal.aborted) return { utxoCount: 0, recentConfirmedCount: 0, committed: false, cancelled: true };
   await deps.coordinator.runRecent(resource.resourceId, resource.generation, async () => commit);
+  // 关键修复：提交后、写 state 前再检查一次——避免取消后仍更新 watermark。
+  if (signal.aborted) return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length, committed: true, cancelled: true };
   // 关键修复：不再通过 putAddress 重写 resource。
   // 旧实现在 resource 被删除后会用旧 resource 对象 putAddress 把已删除的
   // 资源复活，绕过 onKeyRemoved 清理。lastSyncedAt 由 commitRecentSnapshot
@@ -296,7 +308,7 @@ async function syncOne(
     lastSuccessAt: now
   };
   await db.putRecentSyncState(nextRecent);
-  return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length };
+  return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length, committed: true, cancelled: false };
 }
 
 function utxoFromWoc(

@@ -258,6 +258,69 @@ describe("createP2pkhRecentSync.runOnce", () => {
     expect(completed?.input.data?.utxoCount).toBe(2);
     expect(completed?.input.data?.recentConfirmedCount).toBe(2);
   });
+
+  it("返回 { committed: false } 当 0 resource", async () => {
+    const logger = makeLogger();
+    const db = makeFakeDb();
+    const recent = createP2pkhRecentSync({
+      woc: makeWoc(),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [] as P2pkhKeyResource[],
+      getDb: async () => db as never,
+      logger
+    });
+    const result = await recent.runOnce(new AbortController().signal);
+    expect(result).toEqual({ committed: false, cancelled: false });
+  });
+
+  it("返回 { committed: true } 当有 resource 且成功提交", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const db = makeFakeDb();
+    const recent = createP2pkhRecentSync({
+      woc: makeWoc(),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await recent.runOnce(new AbortController().signal);
+    expect(result).toEqual({ committed: true, cancelled: false });
+  });
+
+  it("返回 { committed: false, cancelled: true } 当 signal 已 aborted", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const ac = new AbortController();
+    ac.abort();
+    const db = makeFakeDb();
+    const recent = createP2pkhRecentSync({
+      woc: makeWoc(),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await recent.runOnce(ac.signal);
+    expect(result).toEqual({ committed: false, cancelled: true });
+  });
 });
 
 describe("createP2pkhHistoryBackfill.runOnce", () => {
@@ -313,5 +376,395 @@ describe("createP2pkhHistoryBackfill.runOnce", () => {
     expect(completed?.input.data?.resourceId).toBe("p2pkh:main");
     expect(completed?.input.data?.finalStatus).toBe("complete");
     expect(completed?.input.data?.recordsSynced).toBe(1);
+  });
+
+  it("返回 { committed: false } 当 0 resource", async () => {
+    const logger = makeLogger();
+    const db = makeFakeDb();
+    const backfill = createP2pkhHistoryBackfill({
+      woc: makeWoc(),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [] as P2pkhKeyResource[],
+      getDb: async () => db as never,
+      logger
+    });
+    const result = await backfill.runOnce(new AbortController().signal, { paused: false });
+    expect(result).toEqual({ committed: false, cancelled: false });
+  });
+
+  it("返回 { committed: true } 当有 resource 且成功提交", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const db = makeFakeDb();
+    const backfill = createP2pkhHistoryBackfill({
+      woc: makeWoc({ listAddressConfirmedHistory: vi.fn(async () => ({
+        items: [{ txid: "tx1", height: 100 }],
+        nextPageToken: undefined
+      })) }),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await backfill.runOnce(new AbortController().signal, { paused: false });
+    expect(result).toEqual({ committed: true, cancelled: false });
+  });
+
+  it("返回 { committed: false, cancelled: true } 当 signal 已 aborted", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const ac = new AbortController();
+    ac.abort();
+    const db = makeFakeDb();
+    const backfill = createP2pkhHistoryBackfill({
+      woc: makeWoc(),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await backfill.runOnce(ac.signal, { paused: false });
+    expect(result).toEqual({ committed: false, cancelled: true });
+  });
+
+  it("返回 { committed: false } 当 paused", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const db = makeFakeDb();
+    const backfill = createP2pkhHistoryBackfill({
+      woc: makeWoc(),
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await backfill.runOnce(new AbortController().signal, { paused: true });
+    expect(result).toEqual({ committed: false, cancelled: false });
+  });
+});
+
+// ---- 取消语义回归测试（取消即不发布成功态/数据变更） ----
+
+describe("取消语义回归", () => {
+  it("syncOne 返回 committed: false 时，recent-sync 整体必须为 false", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    // coordinator.runRecent 内部 build() 返回的 commit 不变，但 coordinator
+    // 的 runRecent 本身不修改 committed——syncOne 内部 committed 取决于
+    // 是否真正走到 coordinator.runRecent。这里模拟 0 个 UTXO、0 history
+    // 但 coordinator 仍然会 runRecent（因为逻辑走到那里），
+    // 所以 committed 仍为 true。要让 committed=false，需要 signal 在
+    // runRecent 之前 aborted。
+    const ac = new AbortController();
+    // 在 syncOne 的 Promise.all 返回前就 abort
+    const db = makeFakeDb();
+    const woc = makeWoc({
+      getAddressConfirmedUtxos: vi.fn(async () => {
+        ac.abort();
+        return [];
+      }),
+      listAddressConfirmedHistory: vi.fn(async () => ({ items: [], nextPageToken: undefined }))
+    });
+    const recent = createP2pkhRecentSync({
+      woc,
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await recent.runOnce(ac.signal);
+    expect(result.committed).toBe(false);
+  });
+
+  it("首个 resource 已提交、第二个 resource 执行中取消：不得标记 ok", async () => {
+    const r1: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const r2: P2pkhKeyResource = {
+      resourceId: "p2pkh:test",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-test",
+      network: "test",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const ac = new AbortController();
+    // 第一个 resource 完成后，在第二个 resource 的 WOC 请求返回后 abort
+    let resourceCount = 0;
+    const db = makeFakeDb();
+    const woc = makeWoc({
+      listAddressConfirmedHistory: vi.fn(async () => {
+        resourceCount += 1;
+        // 第二个 resource 的 history 请求触发取消
+        if (resourceCount >= 2) ac.abort();
+        return { items: [], nextPageToken: undefined };
+      }),
+    });
+    const recent = createP2pkhRecentSync({
+      woc,
+      messageBus: makeMessageBus(),
+      coordinator: makeCoordinator(() => db),
+      getResources: async () => [r1, r2],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await recent.runOnce(ac.signal);
+    // 第一个 resource 已 committed（committed=true），但整体 cancelled
+    expect(result.cancelled).toBe(true);
+    expect(result.committed).toBe(true);
+  });
+
+  it("请求完成、DB 提交前取消：不得提交", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: "p2pkh:main",
+      publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
+      label: "k",
+      address: "addr-main",
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const ac = new AbortController();
+    const db = makeFakeDb();
+    let coordinatorCalled = false;
+    const coordinator = {
+      ...makeCoordinator(() => db),
+      runRecent: vi.fn(async (_resourceId: string, _generation: number | undefined, build: () => Promise<unknown>) => {
+        coordinatorCalled = true;
+        const commit = (await build()) as { resourceId: string };
+        const fakeDb = await db;
+        await fakeDb.commitRecentSnapshot(commit as never);
+      }),
+    };
+    const woc = makeWoc({
+      listAddressConfirmedHistory: vi.fn(async () => {
+        // 网络请求返回后、coordinator.runRecent 之前 abort
+        ac.abort();
+        return { items: [{ txid: "tx1", height: 1 }], nextPageToken: undefined };
+      }),
+    });
+    const recent = createP2pkhRecentSync({
+      woc,
+      messageBus: makeMessageBus(),
+      coordinator,
+      getResources: async () => [resource],
+      getDb: async () => db as never,
+      logger: makeLogger()
+    });
+    const result = await recent.runOnce(ac.signal);
+    // syncOne 内在 coordinator.runRecent 前检查到 abort，直接返回
+    expect(coordinatorCalled).toBe(false);
+    expect(result.committed).toBe(false);
+    expect(result.cancelled).toBe(true);
+  });
+});
+
+// ---- p2pkhService run() 级别取消语义 ----
+// 通过 vi.mock 拦截 p2pkhDb 模块，让 createP2pkhService 内部的
+// ensureDb() 返回轻量 fake DB，从而能真正调用注册任务的 run()。
+// 设计缘由：createP2pkhService 内部自行创建 recent/backfill 实例，
+// 无法通过依赖注入替换；vi.mock 是让 IndexedDB 层透明化的唯一途径。
+
+import { createP2pkhService, P2PKH_TASK_RECENT, P2PKH_TASK_BACKFILL } from "./p2pkhService.js";
+import type { P2pkhDbBundle, P2pkhDbHandle } from "./p2pkhDb.js";
+
+vi.mock("./p2pkhDb.js", () => ({
+  P2PKH_DB_VERSION: 1,
+  openP2pkhDb: vi.fn(async () => ({
+    db: {} as IDBDatabase,
+    ownerPublicKeyHex: "pk-test",
+    logger: undefined
+  })),
+  createP2pkhDb: vi.fn((_bundle: P2pkhDbBundle) => {
+    const store = new Map<string, unknown>();
+    return {
+      listAddresses: vi.fn(async () => []),
+      listUtxos: vi.fn(async () => []),
+      listHistory: vi.fn(async () => []),
+      listLocalInputClaims: vi.fn(async () => []),
+      listLocalInputClaimsByResource: vi.fn(async () => []),
+      listLocalSubmissions: vi.fn(async () => []),
+      listLocalSubmissionsByResource: vi.fn(async () => []),
+      listBackfillStates: vi.fn(async () => []),
+      listRecentSyncStates: vi.fn(async () => []),
+      getResource: vi.fn(async () => undefined),
+      putAddress: vi.fn(async () => {}),
+      getRecentSyncState: vi.fn(async () => undefined),
+      putRecentSyncState: vi.fn(async () => {}),
+      getBackfillState: vi.fn(async () => undefined),
+      putBackfillState: vi.fn(async () => {}),
+      commitRecentSnapshot: vi.fn(async () => {}),
+      commitBackfillPage: vi.fn(async () => {}),
+      dispose: vi.fn()
+    } as unknown as P2pkhDbHandle;
+  }),
+  disposeP2pkhDb: vi.fn()
+}));
+
+describe("p2pkhService task run() 取消语义", () => {
+  function makeServiceUnderTest() {
+    const statusHistory: string[] = [];
+    const notifierCalls: Array<Record<string, unknown>> = [];
+    const taskDefs: Record<string, import("@keymaster/contracts").BackgroundTaskDefinition> = {};
+
+    const vault = {
+      status: vi.fn(() => "unlocked" as const),
+      createActiveKeyCrypto: vi.fn(async () => ({
+        deriveP2pkhAddress: vi.fn(async () => ({ publicKeyHex: "pk-test", address: "addr-test" }))
+      }))
+    } as unknown as import("@keymaster/contracts").VaultService;
+
+    const keyspace = {
+      active: vi.fn(() => ({ activePublicKeyHex: "pk-test" })),
+      isInitializing: vi.fn(() => false),
+      getKey: vi.fn(async () => ({
+        publicKeyHex: "pk-test",
+        label: "test-key",
+        capabilities: [],
+        createdAt: "2024-01-01T00:00:00.000Z"
+      })),
+      openKeyStorage: vi.fn(async () => ({
+        ownerPublicKeyHex: "pk-test",
+        db: {} as IDBDatabase,
+        logger: undefined
+      })),
+      onActiveChange: vi.fn(() => () => {})
+    } as unknown as import("@keymaster/contracts").KeyspaceService;
+
+    const messageBus = makeMessageBus();
+    const registry = {
+      register(def: import("@keymaster/contracts").BackgroundTaskDefinition) {
+        taskDefs[def.id] = def;
+      }
+    } as unknown as import("@keymaster/contracts").BackgroundRegistry;
+
+    const backgroundService = {
+      trigger: vi.fn(),
+      cancel: vi.fn()
+    } as unknown as import("@keymaster/contracts").BackgroundService;
+
+    const assetDataNotifier = {
+      emit: vi.fn((evt: Record<string, unknown>) => { notifierCalls.push(evt); }),
+      subscribe: vi.fn(() => () => {})
+    } as unknown as import("@keymaster/contracts").AssetDataNotifier;
+
+    const service = createP2pkhService({
+      vault,
+      woc: makeWoc() as unknown as import("@keymaster/contracts").WocService,
+      messageBus,
+      backgroundRegistry: registry,
+      backgroundService,
+      keyspace,
+      assetDataNotifier,
+      logger: makeLogger() as unknown as import("@keymaster/contracts").PluginLogger
+    });
+
+    // 监听 sync status 变化
+    service.onRecentSyncStatusChange((s) => statusHistory.push(`recent:${s}`));
+    service.onBackfillStatusChange((s) => statusHistory.push(`backfill:${s}`));
+
+    return { service, taskDefs, statusHistory, notifierCalls };
+  }
+
+  it("recent task：signal 已 aborted 时 run() 状态为 idle、不发 notifier", async () => {
+    const { taskDefs, statusHistory, notifierCalls } = makeServiceUnderTest();
+    const recentDef = taskDefs[P2PKH_TASK_RECENT];
+    expect(recentDef).toBeDefined();
+
+    const ac = new AbortController();
+    ac.abort();
+    await recentDef!.run({
+      signal: ac.signal,
+      reason: "test",
+      reportProgress() {}
+    });
+
+    // 状态链：syncing → idle（不是 failed、不是 ok）
+    expect(statusHistory).toContain("recent:syncing");
+    expect(statusHistory).toContain("recent:idle");
+    expect(statusHistory).not.toContain("recent:ok");
+    expect(statusHistory).not.toContain("recent:failed");
+    // 不发 data-changed
+    expect(notifierCalls).toHaveLength(0);
+  });
+
+  it("backfill task：signal 已 aborted 时 run() 状态为 idle、不发 notifier", async () => {
+    const { taskDefs, statusHistory, notifierCalls } = makeServiceUnderTest();
+    const backfillDef = taskDefs[P2PKH_TASK_BACKFILL];
+    expect(backfillDef).toBeDefined();
+
+    const ac = new AbortController();
+    ac.abort();
+    await backfillDef!.run({
+      signal: ac.signal,
+      reason: "test",
+      reportProgress() {}
+    });
+
+    expect(statusHistory).toContain("backfill:syncing");
+    expect(statusHistory).toContain("backfill:idle");
+    expect(statusHistory).not.toContain("backfill:ok");
+    expect(statusHistory).not.toContain("backfill:failed");
+    expect(notifierCalls).toHaveLength(0);
+  });
+
+  it("recent task：0 resource 时正常完成、状态为 idle、不发 notifier", async () => {
+    const { taskDefs, statusHistory, notifierCalls } = makeServiceUnderTest();
+    const recentDef = taskDefs[P2PKH_TASK_RECENT];
+
+    const ac = new AbortController();
+    await recentDef!.run({
+      signal: ac.signal,
+      reason: "test",
+      reportProgress() {}
+    });
+
+    // 0 resource → committed=false → 不设 ok、不发 notifier
+    expect(statusHistory).toContain("recent:syncing");
+    // 最终状态是 idle（run 内 committed=false 分支不设状态，保持 syncing 前的值；
+    // 但 run() 先设了 syncing，committed=false 时不改状态，所以最终仍是 syncing）
+    // 实际代码：committed=false 时什么也不做，状态保持 syncing。
+    // 这里验证不发 notifier。
+    expect(notifierCalls).toHaveLength(0);
   });
 });

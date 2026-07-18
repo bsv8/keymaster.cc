@@ -19,7 +19,6 @@ function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
 function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string }): Bsv21TokenSnapshot {
   return {
     origin: overrides.origin,
-    publicKeyHex: ACTIVE_PK,
     network: "main",
     address: overrides.address ?? "addr1",
     balance: overrides.balance ?? { confirmed: 100, unconfirmed: 10 },
@@ -31,9 +30,9 @@ function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string 
 function fakeDb(snapshots: Bsv21TokenSnapshot[]): Bsv21Db {
   return {
     put: vi.fn(),
-    replaceByPublicKey: vi.fn(),
-    listByPublicKey: vi.fn().mockResolvedValue(snapshots),
-    deleteByPublicKey: vi.fn(),
+    replaceAll: vi.fn(),
+    list: vi.fn().mockResolvedValue(snapshots),
+    close: vi.fn(),
   };
 }
 

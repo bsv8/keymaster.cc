@@ -5,6 +5,7 @@
 //   - 唯一 WOC / 外网调用者；写自己的 key-scoped snapshot DB。
 //   - 归入 asset-holdings schedule group，由 BackgroundService 统一调度。
 //   - 成功后发布 data-changed 通知。
+//   - 取消后不提交 DB，也不发 data-changed。
 
 import type {
   AssetDataNotifier,
@@ -31,6 +32,7 @@ export interface CreateStasSyncTaskOptions {
  *   - 通过 WOC 拉 token list / balance；
  *   - 以一次原子提交替换 STAS snapshot；
  *   - 成功后发 data-changed。
+ *   - 取消后不提交 DB、不发 data-changed。
  */
 export function createStasSyncTask(options: CreateStasSyncTaskOptions): BackgroundTaskDefinition {
   const { db, service, keyspace, vault, assetDataNotifier } = options;
@@ -60,19 +62,21 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
     async run(ctx: BackgroundTaskContext) {
       const state = keyspace.active();
       if (!state.activePublicKeyHex) return;
+      // 保存本轮开始时的 active key，提交/通知前确认未变化；
+      // 否则旧 key 的任务可能向新 key 的页面发通知。
+      const startedKeyHex = state.activePublicKeyHex;
 
       // 通过 service 获取当前 active key 的 STAS tokens
       // 传递 signal 以便取消时中止网络请求
       const tokens = await service.listActiveKeyTokens(ctx.signal);
 
-      // 检查取消信号
+      // 检查取消信号：取消后不提交 DB，不发 data-changed
       if (ctx.signal.aborted) return;
 
       const snapshots = tokens
         .filter((t) => Number.isFinite(t.entry.balance) && t.entry.balance > 0)
         .map((t) => ({
           symbol: t.entry.symbol,
-          publicKeyHex: state.activePublicKeyHex!,
           network: t.network,
           address: t.address,
           balance: t.entry.balance,
@@ -83,12 +87,19 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
         }));
 
       // 原子替换：在同一事务中删除旧数据并写入新数据
-      await db.replaceByPublicKey(state.activePublicKeyHex, snapshots);
+      // DB 操作隐式使用当前 active key 的 namespace
+      await db.replaceAll(snapshots);
+
+      // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
+      // 同时确认 active key 未变化——旧 key 的任务不应向新 key 发通知。
+      if (ctx.signal.aborted) return;
+      const currentKeyHex = keyspace.active().activePublicKeyHex;
+      if (currentKeyHex !== startedKeyHex) return;
 
       // 发布 data-changed
       assetDataNotifier?.emit({
         providerId: "stas",
-        publicKeyHex: state.activePublicKeyHex,
+        publicKeyHex: startedKeyHex,
         revision: Date.now(),
         kinds: ["holding"],
       });

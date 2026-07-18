@@ -15,14 +15,7 @@
 //
 // 硬切换 003：所有展示文案走 i18n。
 //
-// 硬切换 003（2026-06-19）：页面真刷新订阅。
-//   - 旧实现：点击"触发同步"按钮后立刻 setVersion(v + 1) 触发一次 load，
-//     但这只在按钮点击瞬间读一次状态；后台任务跑完以后页面不会再次读取，
-//     recent_sync 真值变了页面却没刷新，用户长期看到"最近同步：未同步"。
-//   - 新实现：保留按钮点击后立即反馈（旧行为不能拆掉，否则用户完全没
-//     视觉确认），但同时订阅 service.onSyncStatusChange；
-//     在 `syncing -> ok / failed / idle` 任意完成态触发一次 reload，
-//     让最近一次同步时间能正确显示在表格上。
+// 页面只被动订阅 data-changed / settings 变化，不暴露手动同步入口。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";

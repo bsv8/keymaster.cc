@@ -1,24 +1,13 @@
 // packages/plugin-p2pkh/src/widgets/P2pkhBalanceWidget.tsx
-// P2PKH 余额 widget（硬切换 001）：
+// P2PKH 余额 widget：
 //   - 金额来源改为 `{ total }`；不再分 confirmed / unconfirmed。
 //   - testnet 行受 `includeTestnet` 控制：false 时不展示。
 //   - includeTestnet 通过 service.onGlobalSettingsChange 订阅；同 tab 写入
 //     由 settings 页调用 service.applyGlobalSettings 主动通知。
-//
-// 硬切换 008 收尾：UI 层防御，不作为主修复。
-// 关键不变量：
-//   - keyspace 初始化中（isInitializing === true）不调 service.getAssetBalance，
-//     避免触发 "Key storage is not ready" 未处理 Promise。
-//   - non-single 模式（无 active）金额显示 "—"，刷新按钮 disabled。
-//   - 组件卸载后不 setState；active key 在请求期间切换时旧请求结果必须丢弃。
-//   - 不把 readiness 错误转换为 0 余额：未就绪是本地状态，0 余额是链上结果。
-//   - refreshAll 与 effect loader 共用同一段"load + activeAtRequest + alive 守卫"逻辑，
-//     避免重复实现导致竞态不一致。
-//
-// 硬切换 003：所有展示文案走 i18n。
+//   - 只被动订阅 data-changed / status / settings 变化，不暴露手动同步入口。
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Button, formatSats } from "@keymaster/ui";
+import { formatSats } from "@keymaster/ui";
 import { useCapability, useI18n } from "@keymaster/runtime";
 import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";

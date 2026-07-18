@@ -9,6 +9,7 @@
 //   - tokenId 使用稳定形式 `stas:${issuer}:${symbol}`，避免不同发行方
 //     同名 symbol 相互覆盖。
 //   - 列表稳定排序：按 tokenId 升序。
+//   - DB 已按 active key namespace 隔离，不需要传 publicKeyHex。
 
 import type {
   AssetDataNotifier,
@@ -100,10 +101,12 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
     order: 20,
 
     async listTokens(): Promise<TokenSummary[]> {
+      // 无 active key 时返回空（不抛错）
       const state = keyspace.active();
       if (!state.activePublicKeyHex) return [];
 
-      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+      // DB 操作隐式使用当前 active key 的 namespace
+      const snapshots = await db.list();
 
       // 按 issuer+symbol 聚合多地址的余额
       const aggregated = new Map<string, {
@@ -133,14 +136,16 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
     },
 
     async getToken(tokenId): Promise<TokenDetail | undefined> {
+      // 无 active key 时返回 undefined
       const state = keyspace.active();
       if (!state.activePublicKeyHex) return undefined;
 
-      // 从 listByPublicKey 结果中按 tokenId 筛选并聚合
+      // 从 list 结果中按 tokenId 筛选并聚合
       const parsed = parseStasTokenId(tokenId);
       if (!parsed) return undefined;
 
-      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+      // DB 操作隐式使用当前 active key 的 namespace
+      const snapshots = await db.list();
       const matching = snapshots.filter(
         (s) => (s.issuer || "") === parsed.issuer && s.symbol === parsed.symbol
       );

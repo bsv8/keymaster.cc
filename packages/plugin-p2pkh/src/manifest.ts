@@ -111,10 +111,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.empty.noHistory": "No history yet",
       "p2pkh.empty.noHistoryDesc": "Run a sync or wait for history-backfill to complete.",
       "p2pkh.empty.noUtxo": "No UTXOs yet",
-      "p2pkh.action.triggerSync": "Trigger sync",
-      "p2pkh.action.triggerBackfill": "Trigger backfill",
-      "p2pkh.action.refillBackfill": "Re-backfill",
-      "p2pkh.action.refresh": "Refresh",
       "p2pkh.action.save": "Save",
       "p2pkh.action.saved": "Saved",
       "p2pkh.action.resetDefault": "Reset to default",
@@ -147,7 +143,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.settings.wocHint": "WOC endpoint, rate limit, and queue status are on the ",
       "p2pkh.settings.wocLink": "WOC settings",
       "p2pkh.balanceWidget.title": "P2PKH balance",
-      "p2pkh.balanceWidget.refreshAll": "Refresh all",
       "p2pkh.balanceWidget.bsvMain": "BSV (main)",
       "p2pkh.balanceWidget.bsvTest": "BSV Testnet (test)",
       "p2pkh.balanceWidget.statusLabel": "Status: ",
@@ -264,10 +259,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.empty.noHistory": "暂无历史",
       "p2pkh.empty.noHistoryDesc": "执行一次同步或等待 history-backfill 完成后这里会显示交易记录。",
       "p2pkh.empty.noUtxo": "暂无 UTXO",
-      "p2pkh.action.triggerSync": "触发同步",
-      "p2pkh.action.triggerBackfill": "触发回填",
-      "p2pkh.action.refillBackfill": "重新回填",
-      "p2pkh.action.refresh": "刷新",
       "p2pkh.action.save": "保存",
       "p2pkh.action.saved": "已保存",
       "p2pkh.action.resetDefault": "恢复缺省",
@@ -300,7 +291,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.settings.wocHint": "WOC endpoint、限流与队列状态请到 ",
       "p2pkh.settings.wocLink": "WOC 设置",
       "p2pkh.balanceWidget.title": "P2PKH 余额",
-      "p2pkh.balanceWidget.refreshAll": "刷新全部",
       "p2pkh.balanceWidget.bsvMain": "BSV (main)",
       "p2pkh.balanceWidget.bsvTest": "BSV Testnet (test)",
       "p2pkh.balanceWidget.statusLabel": "状态：",
@@ -477,7 +467,7 @@ export const p2pkhPlugin: PluginManifest = {
       component: P2pkhBalanceWidget,
       order: 20,
       slot: "main",
-      refreshHint: "manual"
+      refreshHint: "realtime"
     });
 
     const transferReg = ctx.get<import("@keymaster/contracts").TransferRegistry>("transfer.registry");

@@ -294,3 +294,70 @@ describe("BackgroundService leader election (BC path)", () => {
     }
   });
 });
+
+describe("BackgroundService cancel semantics", () => {
+  it("任务正常 resolve 前 signal 被 abort：状态为 idle，lastCompletedAt 不更新", async () => {
+    const { service, registry } = createBackgroundBundle();
+    let resolveRun: (() => void) | undefined;
+    registry.register({
+      id: "t-cancel-resolve",
+      pluginId: "test",
+      label: "t-cancel-resolve",
+      defaultEnabled: true,
+      async run(ctx) {
+        // 任务内部在 abort 后仍正常 resolve（模拟业务层返回 cancelled）
+        await new Promise<void>((resolve) => {
+          resolveRun = resolve;
+          ctx.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      }
+    });
+    service.trigger("t-cancel-resolve", "manual");
+    await new Promise((r) => setTimeout(r, 5));
+    // 任务正在运行中
+    const snapRunning = service.listSnapshots().find((s) => s.id === "t-cancel-resolve")!;
+    expect(snapRunning.state).toBe("running");
+    const startedAt = snapRunning.lastStartedAt;
+
+    // 取消：abort signal，但 run() 内部 abort listener 会 resolve（不抛错）
+    await service.cancel("t-cancel-resolve");
+
+    const snapAfter = service.listSnapshots().find((s) => s.id === "t-cancel-resolve")!;
+    // 关键断言：状态应为 idle（enabled=true），不是 failed
+    expect(snapAfter.state).toBe("idle");
+    // 关键断言：lastCompletedAt 不应被更新——取消不是"完成"
+    expect(snapAfter.lastCompletedAt).toBeUndefined();
+    // lastStartedAt 保持不变
+    expect(snapAfter.lastStartedAt).toBe(startedAt);
+    service.dispose();
+  });
+
+  it("任务 run() 抛错前 signal 已 abort：走取消分支而非 failed", async () => {
+    const { service, registry } = createBackgroundBundle();
+    let rejectRun: ((err: Error) => void) | undefined;
+    registry.register({
+      id: "t-cancel-throw",
+      pluginId: "test",
+      label: "t-cancel-throw",
+      defaultEnabled: true,
+      async run(ctx) {
+        await new Promise<void>((_resolve, reject) => {
+          rejectRun = reject;
+          ctx.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        });
+      }
+    });
+    service.trigger("t-cancel-throw", "manual");
+    await new Promise((r) => setTimeout(r, 5));
+
+    // cancel 触发 abort → run() 抛出 AbortError
+    await service.cancel("t-cancel-throw");
+
+    const snap = service.listSnapshots().find((s) => s.id === "t-cancel-throw")!;
+    // 走取消分支，不是 failed
+    expect(snap.state).toBe("idle");
+    expect(snap.error).toBeUndefined();
+    expect(snap.lastCompletedAt).toBeUndefined();
+    service.dispose();
+  });
+});

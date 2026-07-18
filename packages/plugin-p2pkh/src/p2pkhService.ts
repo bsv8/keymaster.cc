@@ -614,19 +614,36 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     async run(ctx) {
       setRecentStatus("syncing");
       try {
-        await recent.runOnce(ctx.signal);
-        setRecentStatus("ok");
-        // 发布 data-changed：DB 已提交，页面应重读。
-        const state = getActiveKeyState();
-        if (state.activePublicKeyHex && deps.assetDataNotifier) {
-          deps.assetDataNotifier.emit({
-            providerId: "p2pkh",
-            publicKeyHex: state.activePublicKeyHex,
-            revision: Date.now(),
-            kinds: ["utxo", "resource", "history"],
-          });
+        const result = await recent.runOnce(ctx.signal);
+        // 关键修复：取消后不发布 data-changed、不设 ok 状态。
+        // backgroundService.runOne 会在 run() 返回后兜底再检查一次 abort，
+        // 但业务层必须先守住——避免已取消的任务发出数据变更事件。
+        if (ctx.signal.aborted || result.cancelled) {
+          setRecentStatus("idle");
+          return;
+        }
+        // 仅在实际提交了 DB 后才发布 data-changed 和设 ok 状态；
+        // abort / 0 resource 路径不发布，避免下游误触发刷新。
+        if (result.committed) {
+          setRecentStatus("ok");
+          const state = getActiveKeyState();
+          if (state.activePublicKeyHex && deps.assetDataNotifier) {
+            deps.assetDataNotifier.emit({
+              providerId: "p2pkh",
+              publicKeyHex: state.activePublicKeyHex,
+              revision: Date.now(),
+              kinds: ["utxo", "resource", "history"],
+            });
+          }
         }
       } catch (err) {
+        // 关键修复：WOC 请求因 abort 抛出 AbortError 时，走取消路径而非失败路径。
+        // 若不判断，P2PKH 状态被设为 failed，但 backgroundService 最终判定为
+        // canceled——页面/托盘状态与后台任务状态不一致。
+        if (ctx.signal.aborted) {
+          setRecentStatus("idle");
+          return;
+        }
         setRecentStatus("failed");
         throw err;
       }
@@ -650,19 +667,32 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     async run(ctx) {
       setBackfillStatus("syncing");
       try {
-        await backfill.runOnce(ctx.signal, { paused: backfillPaused });
-        setBackfillStatus("ok");
-        // 发布 data-changed：DB 已提交，页面应重读。
-        const state = getActiveKeyState();
-        if (state.activePublicKeyHex && deps.assetDataNotifier) {
-          deps.assetDataNotifier.emit({
-            providerId: "p2pkh",
-            publicKeyHex: state.activePublicKeyHex,
-            revision: Date.now(),
-            kinds: ["history"],
-          });
+        const result = await backfill.runOnce(ctx.signal, { paused: backfillPaused });
+        // 关键修复：取消后不发布 data-changed、不设 ok 状态。
+        if (ctx.signal.aborted || result.cancelled) {
+          setBackfillStatus("idle");
+          return;
+        }
+        // 仅在实际提交了 DB 后才发布 data-changed 和设 ok 状态；
+        // abort / paused / 0 resource 路径不发布，避免下游误触发刷新。
+        if (result.committed) {
+          setBackfillStatus("ok");
+          const state = getActiveKeyState();
+          if (state.activePublicKeyHex && deps.assetDataNotifier) {
+            deps.assetDataNotifier.emit({
+              providerId: "p2pkh",
+              publicKeyHex: state.activePublicKeyHex,
+              revision: Date.now(),
+              kinds: ["history"],
+            });
+          }
         }
       } catch (err) {
+        // 关键修复：同 recent catch——abort 导致的异常走取消路径。
+        if (ctx.signal.aborted) {
+          setBackfillStatus("idle");
+          return;
+        }
         setBackfillStatus("failed");
         throw err;
       }
@@ -813,6 +843,18 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         createdResources
       }
     });
+
+    // 发布 resource data-changed 通知：P2PKH 地址已就绪。
+    // 设计缘由：token 插件（BSV-21 / STAS）订阅此事件来触发同步，
+    // 确保在 P2PKH 地址就绪后才拉取 token 持仓，避免产生空快照。
+    if (deps.assetDataNotifier) {
+      deps.assetDataNotifier.emit({
+        providerId: "p2pkh",
+        publicKeyHex: state.activePublicKeyHex,
+        revision: Date.now(),
+        kinds: ["resource"],
+      });
+    }
   }
 
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => {

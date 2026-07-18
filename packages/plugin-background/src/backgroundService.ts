@@ -396,12 +396,20 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       };
       try {
         await t.def.run(ctx);
-        t.state = t.enabled ? "idle" : "paused";
-        t.lastCompletedAt = new Date().toISOString();
-        t.progress = undefined;
-        logger?.info({ scope: "background.task", event: "completed", message: `Task completed: ${t.def.id}`, data: { taskId: t.def.id } });
+        // 关键修复：框架级兜底——即使 run() 正常 resolve，若 signal 已被
+        // abort（cancel/pause 触发），必须走取消分支，不记 completed、不写
+        // lastCompletedAt。不能只依赖各业务任务自行抛出 AbortError。
+        if (t.ctl?.signal.aborted) {
+          t.state = t.enabled ? "idle" : "paused";
+          logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
+        } else {
+          t.state = t.enabled ? "idle" : "paused";
+          t.lastCompletedAt = new Date().toISOString();
+          t.progress = undefined;
+          logger?.info({ scope: "background.task", event: "completed", message: `Task completed: ${t.def.id}`, data: { taskId: t.def.id } });
+        }
       } catch (err) {
-        if (t.ctl.signal.aborted) {
+        if (t.ctl?.signal.aborted) {
           t.state = t.enabled ? "idle" : "paused";
           logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {

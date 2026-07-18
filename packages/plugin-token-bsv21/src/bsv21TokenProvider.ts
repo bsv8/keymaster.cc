@@ -6,6 +6,7 @@
 //   - 后台 task 通过 bsv21Sync 写入 DB，页面通过 onChange 重读。
 //   - 同一 token（origin）可能被多个地址持有，需要按 origin 聚合余额。
 //   - 列表稳定排序：按 origin 升序。
+//   - DB 已按 active key namespace 隔离，不需要传 publicKeyHex。
 
 import type {
   AssetDataNotifier,
@@ -73,10 +74,12 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
     order: 10,
 
     async listTokens(): Promise<TokenSummary[]> {
+      // 无 active key 时返回空（不抛错）
       const state = keyspace.active();
       if (!state.activePublicKeyHex) return [];
 
-      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+      // DB 操作隐式使用当前 active key 的 namespace
+      const snapshots = await db.list();
 
       // 按 origin 聚合多地址的 confirmed/unconfirmed 余额
       const aggregated = new Map<string, {
@@ -111,13 +114,12 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
     },
 
     async getToken(tokenId): Promise<TokenDetail | undefined> {
+      // 无 active key 时返回 undefined
       const state = keyspace.active();
       if (!state.activePublicKeyHex) return undefined;
 
-      // 从 listByPublicKey 结果中按 origin 筛选并聚合
-      // 设计缘由：getByOrigin 需要 network/address 参数，但详情页只有 tokenId；
-      // 改为 list 后 filter/aggregate，与 listTokens 同构。
-      const snapshots = await db.listByPublicKey(state.activePublicKeyHex);
+      // DB 操作隐式使用当前 active key 的 namespace
+      const snapshots = await db.list();
       const matching = snapshots.filter((s) => s.origin === tokenId);
       if (matching.length === 0) return undefined;
       const first = matching[0];

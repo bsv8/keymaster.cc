@@ -5,17 +5,18 @@
 //   - 后台 task 原子提交 BSV-21 token snapshot，页面只读 DB。
 //   - 使用 IndexedDB 事务保证原子性：删除旧数据 + 写入新数据在同一事务中。
 //   - 跨标签页共享同一份持久化数据。
-//   - snapshot 按 (publicKeyHex, network, address, origin) 唯一标识。
-//     同一 token 可能被多个地址持有，需要按地址维度区分余额。
+//   - 每个 active key 拥有独立的 IndexedDB（通过 keyspace.openKeyStorage），
+//     主键为 [network, address, origin]，不需要 publicKeyHex 维度。
+//   - 不做 handle 缓存：每次 DB 操作都通过 keyspace.openKeyStorage() 取 handle；
+//     由 keyspace 负责 namespace 连接缓存、关闭和删除。避免 A→B→A 切换时
+//     复用 keyspace 已关闭的连接导致 InvalidStateError。
 
-import type { BsvNetwork } from "@keymaster/contracts";
+import type { BsvNetwork, KeyspaceService } from "@keymaster/contracts";
 
 /** BSV-21 token snapshot。 */
 export interface Bsv21TokenSnapshot {
   /** token origin（即 tokenId）。 */
   origin: string;
-  /** 归属的 key namespace。 */
-  publicKeyHex: string;
   /** 网络。 */
   network: BsvNetwork;
   /** 持有此 token 的地址。 */
@@ -33,63 +34,67 @@ export interface Bsv21TokenSnapshot {
   syncedAt: string;
 }
 
-/** BSV-21 DB 接口。 */
+/** BSV-21 DB 接口（key-scoped：所有操作隐式作用于当前 active key 的 namespace）。 */
 export interface Bsv21Db {
   put(snapshot: Bsv21TokenSnapshot): Promise<void>;
   /**
-   * 原子替换指定 publicKeyHex 的所有 snapshot。
+   * 原子替换当前 namespace 的所有 snapshot。
    * 设计缘由：在同一 IndexedDB 事务中删除旧数据并写入新数据，
    * 保证中途失败时旧数据仍然完整。
    */
-  replaceByPublicKey(publicKeyHex: string, snapshots: Bsv21TokenSnapshot[]): Promise<void>;
-  listByPublicKey(publicKeyHex: string): Promise<Bsv21TokenSnapshot[]>;
-  deleteByPublicKey(publicKeyHex: string): Promise<void>;
+  replaceAll(snapshots: Bsv21TokenSnapshot[]): Promise<void>;
+  /** 列出当前 namespace 的所有 snapshot。 */
+  list(): Promise<Bsv21TokenSnapshot[]>;
+  /** 关闭当前缓存的 DB handle。 */
+  close(): void;
 }
 
-const DB_NAME = "keymaster-bsv21-snapshots";
+const STORAGE_ID = "snapshots";
 const DB_VERSION = 2;
 const STORE_NAME = "snapshots";
 
 /**
- * 打开 IndexedDB 数据库。
- * 设计缘由：version 2 将主键从 [publicKeyHex, origin] 升级为
- * [publicKeyHex, network, address, origin]，以支持同一 token 被
- * 多个地址持有的场景。升级时删除旧 store 并重建（旧数据可由后台
- * 同步任务重新拉取，不需要迁移）。
+ * 打开 IndexedDB upgrade 回调。
+ * 主键 [network, address, origin]，不需要 publicKeyHex（已由 namespace 隔离）。
  */
-function openDb(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      // 删除旧 store（如果存在），重建为新主键结构
-      if (db.objectStoreNames.contains(STORE_NAME)) {
-        db.deleteObjectStore(STORE_NAME);
-      }
-      const store = db.createObjectStore(STORE_NAME, { keyPath: ["publicKeyHex", "network", "address", "origin"] });
-      store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
-    };
-  });
+function upgrade(db: IDBDatabase, oldVersion: number): void {
+  if (db.objectStoreNames.contains(STORE_NAME)) {
+    db.deleteObjectStore(STORE_NAME);
+  }
+  const store = db.createObjectStore(STORE_NAME, { keyPath: ["network", "address", "origin"] });
+  // 保留 network index 用于按网络过滤
+  store.createIndex("network", "network", { unique: false });
 }
 
 /**
- * 创建 IndexedDB 实现的 BSV-21 DB。
+ * 创建 key-scoped BSV-21 DB。
+ * 设计缘由：不做 handle 缓存，每次 DB 操作都通过 keyspace.openKeyStorage()
+ * 取 handle；由 keyspace 负责 namespace 连接缓存、关闭和删除。
+ * 这样 A→B→A 切换时不会复用 keyspace 已关闭的连接。
  */
-export function createBsv21Db(): Bsv21Db {
-  let dbPromise: Promise<IDBDatabase> | null = null;
-
-  function getDb(): Promise<IDBDatabase> {
-    if (!dbPromise) {
-      dbPromise = openDb();
+export function createBsv21Db(keyspace: KeyspaceService): Bsv21Db {
+  /**
+   * 获取当前 active key 的 DB handle。
+   * 每次调用都走 keyspace.openKeyStorage()，不做本地缓存。
+   */
+  async function getHandle(): Promise<{ db: IDBDatabase }> {
+    const state = keyspace.active();
+    if (!state.activePublicKeyHex) {
+      throw new Error("createBsv21Db: no active key");
     }
-    return dbPromise;
+    const handle = await keyspace.openKeyStorage({
+      publicKeyHex: state.activePublicKeyHex,
+      pluginId: "plugin-token-bsv21",
+      storageId: STORAGE_ID,
+      version: DB_VERSION,
+      upgrade,
+    });
+    return { db: handle.db };
   }
 
   return {
     async put(snapshot) {
-      const db = await getDb();
+      const { db } = await getHandle();
       return new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
@@ -99,15 +104,13 @@ export function createBsv21Db(): Bsv21Db {
       });
     },
 
-    async replaceByPublicKey(publicKeyHex, snapshots) {
-      const db = await getDb();
+    async replaceAll(snapshots) {
+      const { db } = await getHandle();
       return new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
-        const index = store.index("publicKeyHex");
-
-        // 删除该 publicKeyHex 的所有旧数据
-        const deleteRequest = index.openCursor(IDBKeyRange.only(publicKeyHex));
+        // 删除所有旧数据
+        const deleteRequest = store.openCursor();
         deleteRequest.onsuccess = () => {
           const cursor = deleteRequest.result;
           if (cursor) {
@@ -120,41 +123,24 @@ export function createBsv21Db(): Bsv21Db {
             }
           }
         };
-
         tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
       });
     },
 
-    async listByPublicKey(publicKeyHex) {
-      const db = await getDb();
+    async list() {
+      const { db } = await getHandle();
       return new Promise<Bsv21TokenSnapshot[]>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readonly");
         const store = tx.objectStore(STORE_NAME);
-        const index = store.index("publicKeyHex");
-        const request = index.getAll(IDBKeyRange.only(publicKeyHex));
+        const request = store.getAll();
         request.onsuccess = () => resolve(request.result);
         request.onerror = () => reject(request.error);
       });
     },
 
-    async deleteByPublicKey(publicKeyHex) {
-      const db = await getDb();
-      return new Promise<void>((resolve, reject) => {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        const store = tx.objectStore(STORE_NAME);
-        const index = store.index("publicKeyHex");
-        const request = index.openCursor(IDBKeyRange.only(publicKeyHex));
-        request.onsuccess = () => {
-          const cursor = request.result;
-          if (cursor) {
-            cursor.delete();
-            cursor.continue();
-          }
-        };
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    }
+    close() {
+      // no-op：handle 生命周期由 keyspace 管理，不再做本地缓存。
+    },
   };
 }

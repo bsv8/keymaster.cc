@@ -1,40 +1,28 @@
 // packages/plugin-token-stas/src/stasDb.test.ts
-// STAS snapshot DB 单元测试。
+// STAS snapshot DB 单元测试（keyspace namespace 模式）。
 // 使用 fake-indexeddb 提供真实 IndexedDB 环境（vitest.setup.ts 全局加载）。
+//
+// 测试场景：
+//   1. 不同 key 打开不同 DB（keyspace namespace 隔离）
+//   2. 切换 key 不串数据
+//   3. 同 issuer/symbol 多地址并存
+//   4. 不同 issuer 不混合
 
 import { describe, it, expect, afterEach } from "vitest";
+import { IDBFactory } from "fake-indexeddb";
 import { createStasDb } from "./stasDb";
 import type { StasTokenSnapshot } from "./stasDb";
-
-const DB_NAME = "keymaster-stas-snapshots";
+import type { KeyspaceService, KeyScopedStorageHandle, KeyScopedStorageOpenInput } from "@keymaster/contracts";
 
 const PK1 = "pk1111111111111111111111111111111111111111111111111111111111111111";
 const PK2 = "pk2222222222222222222222222222222222222222222222222222222222222222";
 
-/**
- * 设置 onversionchange 自动关闭连接，防止 deleteDatabase 阻塞。
- * 设计缘由：createStasDb() 在闭包中缓存 IDBDatabase 连接，afterEach 的
- * deleteDatabase 会因连接未关闭而阻塞（fake-indexeddb 忠实实现了
- * IndexedDB 规范中 deleteDatabase 等待所有连接关闭的行为）。此补丁让
- * 所有连接在收到 versionchange 事件时自动关闭，使 deleteDatabase 正常完成。
- */
-const _origOpen = indexedDB.open.bind(indexedDB);
-(indexedDB as any).open = (...args: Parameters<typeof indexedDB.open>) => {
-  const req = _origOpen(...args);
-  req.addEventListener("success", () => {
-    const db = req.result as IDBDatabase;
-    db.onversionchange = () => db.close();
-  });
-  return req;
-};
-
 /** 构造测试用 snapshot 的辅助函数。 */
 function makeSnapshot(
-  overrides: Partial<StasTokenSnapshot> & { symbol: string; publicKeyHex?: string },
+  overrides: Partial<StasTokenSnapshot> & { symbol: string },
 ): StasTokenSnapshot {
   return {
     symbol: overrides.symbol,
-    publicKeyHex: overrides.publicKeyHex ?? PK1,
     network: overrides.network ?? "main",
     address: overrides.address ?? "addr1",
     balance: overrides.balance ?? 100,
@@ -43,88 +31,173 @@ function makeSnapshot(
   };
 }
 
-afterEach(async () => {
-  const dbs = await indexedDB.databases();
-  for (const db of dbs) {
-    if (db.name) indexedDB.deleteDatabase(db.name);
+/**
+ * 创建 mock keyspace，支持切换 active key。
+ */
+function makeMockKeyspace(initialHex?: string) {
+  let activeHex = initialHex;
+  const handles = new Map<string, KeyScopedStorageHandle>();
+
+  const keyspace: KeyspaceService = {
+    active: () => ({ activePublicKeyHex: activeHex }),
+    openKeyStorage: async (input: KeyScopedStorageOpenInput) => {
+      const name = `keymaster.key.${input.publicKeyHex}.plugin.plugin-token-stas.snapshots`;
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open(name, input.version);
+        req.onupgradeneeded = () => input.upgrade(req.result, 0, input.version);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const handle: KeyScopedStorageHandle = {
+        db,
+        name,
+        close: () => { db.close(); handles.delete(input.publicKeyHex); },
+      };
+      handles.set(input.publicKeyHex, handle);
+      return handle;
+    },
+  } as unknown as KeyspaceService;
+
+  function setActive(hex: string) {
+    activeHex = hex;
   }
+
+  return { keyspace, setActive };
+}
+
+/**
+ * 清理：用全新的 IDBFactory 替换全局 indexedDB，丢弃所有旧数据和连接。
+ */
+afterEach(() => {
+  (globalThis as { indexedDB: IDBFactory }).indexedDB = new IDBFactory();
 });
 
 describe("stasDb", () => {
-  it("同地址同 symbol 不同 issuer 可以共存", async () => {
-    const db = createStasDb();
+  // 场景 1：不同 key 打开不同 DB
+  describe("不同 key 打开不同 DB", () => {
+    it("PK1 写入的数据对 PK2 不可见", async () => {
+      const { keyspace, setActive } = makeMockKeyspace(PK1);
+      const db = createStasDb(keyspace);
 
-    const snapA = makeSnapshot({ symbol: "TOKEN", issuer: "issuerA" });
-    const snapB = makeSnapshot({ symbol: "TOKEN", issuer: "issuerB" });
+      await db.put(makeSnapshot({ symbol: "TOK", issuer: "issA" }));
 
-    await db.put(snapA);
-    await db.put(snapB);
-
-    const list = await db.listByPublicKey(PK1);
-    expect(list).toHaveLength(2);
-
-    const issuers = list.map((s) => s.issuer).sort();
-    expect(issuers).toEqual(["issuerA", "issuerB"]);
-  });
-
-  it("deleteByPublicKey 只删除指定 publicKeyHex 的数据", async () => {
-    const db = createStasDb();
-
-    const snap1 = makeSnapshot({ symbol: "A", publicKeyHex: PK1 });
-    const snap2 = makeSnapshot({ symbol: "B", publicKeyHex: PK1 });
-    const snap3 = makeSnapshot({ symbol: "C", publicKeyHex: PK2 });
-
-    await db.put(snap1);
-    await db.put(snap2);
-    await db.put(snap3);
-
-    // 删除 PK1 的数据
-    await db.deleteByPublicKey(PK1);
-
-    const list1 = await db.listByPublicKey(PK1);
-    expect(list1).toHaveLength(0);
-
-    const list2 = await db.listByPublicKey(PK2);
-    expect(list2).toHaveLength(1);
-    expect(list2[0]!.symbol).toBe("C");
-  });
-
-  it("升级重建：从旧版本打开后 createStasDb 能正常工作", async () => {
-    // 第一步：手动以 version 1 打开 DB，创建旧 schema 并写入旧数据
-    await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open(DB_NAME, 1);
-      request.onupgradeneeded = () => {
-        const db = request.result;
-        db.createObjectStore("oldStore", { keyPath: "id" });
-      };
-      request.onsuccess = () => {
-        const db = request.result;
-        // 写入一条旧数据，验证升级后被丢弃
-        const tx = db.transaction("oldStore", "readwrite");
-        tx.objectStore("oldStore").put({ id: "old", value: "stale" });
-        tx.oncomplete = () => {
-          db.close();
-          resolve();
-        };
-        tx.onerror = () => reject(tx.error);
-      };
-      request.onerror = () => reject(request.error);
+      setActive(PK2);
+      const list = await db.list();
+      expect(list).toHaveLength(0);
     });
 
-    // 第二步：调用 createStasDb() 打开 version 3，触发 onupgradeneeded
-    // 旧 store 被删除重建，旧数据丢失
-    const db = createStasDb();
+    it("PK1 和 PK2 各自独立写入和读取", async () => {
+      const { keyspace, setActive } = makeMockKeyspace(PK1);
+      const db = createStasDb(keyspace);
 
-    // 旧数据应在升级时被丢弃
-    const list = await db.listByPublicKey(PK1);
-    expect(list).toHaveLength(0);
+      await db.put(makeSnapshot({ symbol: "TOK1", issuer: "issA" }));
 
-    // 验证新 schema 的 put/list 正常工作
-    const snap = makeSnapshot({ symbol: "NEW" });
-    await db.put(snap);
+      setActive(PK2);
+      await db.put(makeSnapshot({ symbol: "TOK2", issuer: "issB" }));
 
-    const listAfter = await db.listByPublicKey(PK1);
-    expect(listAfter).toHaveLength(1);
-    expect(listAfter[0]!.symbol).toBe("NEW");
+      const list2 = await db.list();
+      expect(list2).toHaveLength(1);
+      expect(list2[0]!.symbol).toBe("TOK2");
+
+      setActive(PK1);
+      const list1 = await db.list();
+      expect(list1).toHaveLength(1);
+      expect(list1[0]!.symbol).toBe("TOK1");
+    });
+  });
+
+  // 场景 2：切换 key 不串数据
+  describe("切换 key 不串数据", () => {
+    it("replaceAll 后切换 key，新 key 数据不受影响", async () => {
+      const { keyspace, setActive } = makeMockKeyspace(PK1);
+      const db = createStasDb(keyspace);
+
+      await db.replaceAll([
+        makeSnapshot({ symbol: "A", issuer: "iss1" }),
+        makeSnapshot({ symbol: "B", issuer: "iss1" }),
+      ]);
+
+      setActive(PK2);
+      await db.replaceAll([
+        makeSnapshot({ symbol: "C", issuer: "iss2" }),
+      ]);
+
+      const list2 = await db.list();
+      expect(list2).toHaveLength(1);
+      expect(list2[0]!.symbol).toBe("C");
+
+      setActive(PK1);
+      const list1 = await db.list();
+      expect(list1).toHaveLength(2);
+      const symbols = list1.map((s) => s.symbol).sort();
+      expect(symbols).toEqual(["A", "B"]);
+    });
+  });
+
+  // 场景 3：同 issuer/symbol 多地址并存
+  describe("同 issuer/symbol 多地址并存", () => {
+    it("同 issuer、同 symbol、不同 address 可以共存", async () => {
+      const { keyspace } = makeMockKeyspace(PK1);
+      const db = createStasDb(keyspace);
+
+      await db.put(makeSnapshot({ symbol: "TOK", issuer: "iss", address: "addr1" }));
+      await db.put(makeSnapshot({ symbol: "TOK", issuer: "iss", address: "addr2" }));
+
+      const list = await db.list();
+      expect(list).toHaveLength(2);
+      const addresses = list.map((s) => s.address).sort();
+      expect(addresses).toEqual(["addr1", "addr2"]);
+    });
+  });
+
+  // 场景 4：不同 issuer 不混合
+  describe("不同 issuer 不混合", () => {
+    it("同 symbol 不同 issuer 可以共存", async () => {
+      const { keyspace } = makeMockKeyspace(PK1);
+      const db = createStasDb(keyspace);
+
+      await db.put(makeSnapshot({ symbol: "TOK", issuer: "issuerA" }));
+      await db.put(makeSnapshot({ symbol: "TOK", issuer: "issuerB" }));
+
+      const list = await db.list();
+      expect(list).toHaveLength(2);
+      const issuers = list.map((s) => s.issuer).sort();
+      expect(issuers).toEqual(["issuerA", "issuerB"]);
+    });
+  });
+
+  // 场景 5：无 active key 时抛错
+  describe("无 active key 时抛错", () => {
+    it("list 抛错", async () => {
+      const { keyspace } = makeMockKeyspace(undefined);
+      const db = createStasDb(keyspace);
+
+      await expect(db.list()).rejects.toThrow("no active key");
+    });
+  });
+
+  // 场景 6：A→B→A handle 生命周期回归
+  // 设计缘由：验证移除 handle 缓存后，A→B→A 切换时不会复用
+  // keyspace 已关闭的连接，A 仍能打开并读取原 snapshot。
+  describe("A→B→A handle 生命周期", () => {
+    it("A 写入 → 切 B 并关闭 A handle → B 写入 → 切回 A → A 仍能读取原 snapshot", async () => {
+      const { keyspace, setActive } = makeMockKeyspace(PK1);
+      const db = createStasDb(keyspace);
+
+      // A 写入 snapshot
+      await db.put(makeSnapshot({ symbol: "TOK-A", issuer: "issA" }));
+
+      // 切到 B，模拟 keyspace 关闭 A 的 handle
+      setActive(PK2);
+      // B 写入
+      await db.put(makeSnapshot({ symbol: "TOK-B", issuer: "issB" }));
+
+      // 切回 A
+      setActive(PK1);
+      // A 仍能读取原 snapshot，不抛 InvalidStateError
+      const listA = await db.list();
+      expect(listA).toHaveLength(1);
+      expect(listA[0]!.symbol).toBe("TOK-A");
+    });
   });
 });

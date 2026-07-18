@@ -1,40 +1,64 @@
 // packages/plugin-token-stas/src/manifest.test.ts
 // STAS manifest setup 测试：
-//   1. vault.unlocked 触发 token-stas.sync
-//   2. key.deleted 调用 db.deleteByPublicKey
-//   3. dispose 后事件不再触发
+//   - vault.unlocked 不直接触发 token-stas.sync（由 P2PKH resource-ready 统一驱动）
+//   - active-key change 不直接触发 token-stas.sync
+//   - p2pkh resource 事件触发 token-stas.sync
+//   - 无 snapshot → "first-sync" reason（跳过冷却）
+//   - 有 snapshot → "p2pkh.resources-ready" reason（受冷却合并）
+//   - dispose 后事件不再触发
 
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // --- 模块 mock ---
 
+// 可配置的 db.list 返回值
+let mockDbListResult: unknown[] = [];
+
 vi.mock("./stasDb.js", () => ({
-  createStasDb: vi.fn(),
+  createStasDb: vi.fn(() => ({
+    put: vi.fn(),
+    replaceAll: vi.fn(),
+    list: vi.fn(() => Promise.resolve(mockDbListResult)),
+    close: vi.fn(),
+  })),
 }));
 
 vi.mock("./stasService.js", () => ({
-  createStasService: vi.fn(),
+  createStasService: vi.fn(() => ({
+    listActiveKeyTokens: vi.fn().mockResolvedValue([]),
+  })),
   P2PKH_CAPABILITY: "p2pkh.service",
 }));
 
 vi.mock("./stasSync.js", () => ({
-  createStasSyncTask: vi.fn(),
+  createStasSyncTask: vi.fn(() => ({
+    id: "token-stas.sync",
+    pluginId: "plugin-token-stas",
+    label: { key: "stas.task.sync", fallback: "STAS 同步" },
+    description: { key: "stas.task.sync.description", fallback: "" },
+    schedule: { group: "asset-holdings", defaultIntervalMs: 900_000, minIntervalMs: 300_000 },
+    defaultEnabled: true,
+    keyScope: () => undefined,
+    canRun: () => false,
+    run: vi.fn(),
+  })),
 }));
 
 vi.mock("./stasTokenProvider.js", () => ({
-  createStasTokenProvider: vi.fn(),
+  createStasTokenProvider: vi.fn(() => ({
+    id: "stas",
+    name: { key: "stas.provider.name", fallback: "STAS" },
+    order: 20,
+    listTokens: vi.fn().mockResolvedValue([]),
+    getToken: vi.fn().mockResolvedValue(undefined),
+    listActivity: vi.fn().mockResolvedValue([]),
+    onChange: vi.fn(() => () => {}),
+  })),
 }));
 
-import { createStasDb } from "./stasDb.js";
 import { stasTokenPlugin } from "./manifest.js";
 
-// --- 模块级 spy ---
-let deleteByPublicKeySpy: ReturnType<typeof vi.fn>;
-
 // --- messageBus mock ---
-// 设计缘由：mock subscribe 将 handler 存入 Map，
-// 并提供 emit 辅助函数模拟事件触发。
-// unsubscribe 从 Map 中移除 handler，模拟真实 messageBus 行为。
 const messageBusHandlers = new Map<string, (...args: unknown[]) => void>();
 
 const mockMessageBus = {
@@ -51,18 +75,19 @@ function emitMessageBus(type: string, payload?: unknown) {
   handler?.(payload);
 }
 
-function resetMocks() {
-  messageBusHandlers.clear();
-  mockMessageBus.subscribe.mockClear();
-  deleteByPublicKeySpy = vi.fn().mockResolvedValue(undefined);
+// --- assetDataNotifier mock ---
+const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void> = [];
 
-  vi.mocked(createStasDb).mockReturnValue({
-    put: vi.fn(),
-    replaceByPublicKey: vi.fn(),
-    listByPublicKey: vi.fn(),
-    deleteByPublicKey: deleteByPublicKeySpy,
-  } as unknown as ReturnType<typeof createStasDb>);
-}
+const mockDataNotifier = {
+  emit: vi.fn(),
+  subscribe: vi.fn((handler: (event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void) => {
+    dataNotifierListeners.push(handler);
+    return () => {
+      const idx = dataNotifierListeners.indexOf(handler);
+      if (idx >= 0) dataNotifierListeners.splice(idx, 1);
+    };
+  }),
+};
 
 // --- 构造 mock ctx ---
 function createMockCtx() {
@@ -75,18 +100,18 @@ function createMockCtx() {
   const capabilities = new Map<string, unknown>([
     ["p2pkh.service", { onGlobalSettingsChange }],
     ["woc.stas.service", {}],
-    ["keyspace.service", { onActiveChange, active: () => ({}) }],
+    ["keyspace.service", { onActiveChange, active: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openKeyStorage: vi.fn() }],
     ["token.registry", { register: tokenRegister }],
     ["background.registry", { register }],
     ["runtime.messageBus", mockMessageBus],
     ["vault.service", { status: () => "unlocked" }],
     ["background.service", { trigger }],
-    ["asset.dataNotifier", {}],
+    ["asset.dataNotifier", mockDataNotifier],
   ]);
 
   const ctx = {
     get: vi.fn((key: string) => capabilities.get(key)),
-    has: vi.fn((key: string) => capabilities.has(key)),
+    has: vi.fn(() => true),
   };
 
   return { ctx, trigger, register };
@@ -96,27 +121,69 @@ function createMockCtx() {
 
 describe("stasTokenPlugin manifest", () => {
   beforeEach(() => {
-    resetMocks();
+    vi.clearAllMocks();
+    messageBusHandlers.clear();
+    dataNotifierListeners.length = 0;
+    mockDbListResult = [];
   });
 
-  it("vault.unlocked 触发 token-stas.sync", () => {
+  it("vault.unlocked 不直接触发 token-stas.sync", async () => {
     const { ctx, trigger } = createMockCtx();
     stasTokenPlugin.setup!(ctx as never);
 
     emitMessageBus("vault.unlocked");
 
-    expect(trigger).toHaveBeenCalledWith("token-stas.sync", "vault-unlocked");
+    // 等待微任务完成
+    await vi.waitFor(() => {
+      // vault.unlocked 不应触发 sync
+      expect(trigger).not.toHaveBeenCalled();
+    });
   });
 
-  it("key.deleted 调用 db.deleteByPublicKey", async () => {
-    const { ctx } = createMockCtx();
+  it("p2pkh resource 事件触发 token-stas.sync（无 snapshot → first-sync）", async () => {
+    mockDbListResult = [];
+    const { ctx, trigger } = createMockCtx();
     stasTokenPlugin.setup!(ctx as never);
 
-    emitMessageBus("key.deleted", { publicKeyHex: "pk123" });
+    dataNotifierListeners.forEach((h) => h({
+      providerId: "p2pkh",
+      kinds: ["resource"],
+      publicKeyHex: "pk1",
+    }));
 
-    // deleteByPublicKey 是异步的（void 前缀），等待 microtask
     await vi.waitFor(() => {
-      expect(deleteByPublicKeySpy).toHaveBeenCalledWith("pk123");
+      expect(trigger).toHaveBeenCalledWith("token-stas.sync", "first-sync");
+    });
+  });
+
+  it("p2pkh resource 事件触发 token-stas.sync（有 snapshot → p2pkh.resources-ready）", async () => {
+    mockDbListResult = [{ symbol: "TOK", network: "main", address: "addr1" }];
+    const { ctx, trigger } = createMockCtx();
+    stasTokenPlugin.setup!(ctx as never);
+
+    dataNotifierListeners.forEach((h) => h({
+      providerId: "p2pkh",
+      kinds: ["resource"],
+      publicKeyHex: "pk1",
+    }));
+
+    await vi.waitFor(() => {
+      expect(trigger).toHaveBeenCalledWith("token-stas.sync", "p2pkh.resources-ready");
+    });
+  });
+
+  it("p2pkh resource 事件不匹配 active key 时不触发", async () => {
+    const { ctx, trigger } = createMockCtx();
+    stasTokenPlugin.setup!(ctx as never);
+
+    dataNotifierListeners.forEach((h) => h({
+      providerId: "p2pkh",
+      kinds: ["resource"],
+      publicKeyHex: "pk_other",
+    }));
+
+    await vi.waitFor(() => {
+      expect(trigger).not.toHaveBeenCalled();
     });
   });
 
@@ -124,15 +191,15 @@ describe("stasTokenPlugin manifest", () => {
     const { ctx, trigger } = createMockCtx();
     const dispose = stasTokenPlugin.setup!(ctx as never) as unknown as (() => void) | undefined;
 
-    // 先确认正常触发
+    // 先确认 vault.unlocked 不触发（新行为）
     emitMessageBus("vault.unlocked");
-    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(trigger).toHaveBeenCalledTimes(0);
 
-    // dispose 会调用 offUnlocked()，从 messageBus 中注销 handler
+    // dispose
     dispose?.();
 
-    // 再次 emit，trigger 不应再被调用
+    // 再次 emit，trigger 仍不被调用
     emitMessageBus("vault.unlocked");
-    expect(trigger).toHaveBeenCalledTimes(1);
+    expect(trigger).toHaveBeenCalledTimes(0);
   });
 });
