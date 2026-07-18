@@ -5,7 +5,8 @@
     "summary": "Encrypted notes powered by Keymaster.",
     "appOrigin": "https://justnote.apps.bsv8.com",
     "appUrl": "https://justnote.apps.bsv8.com/",
-    "claims": []
+    "claims": [],
+    "icon": "/app-icons/justnote.svg"
   },
   {
     "id": "demo",
@@ -13,6 +14,7 @@
     "summary": "Demo app powered by Keymaster (施工单 2026-06-29 003 验收).",
     "appOrigin": "https://demo.apps.bsv8.com",
     "appUrl": "https://demo.apps.bsv8.com/",
-    "claims": []
+    "claims": [],
+    "icon": "/app-icons/demo.svg"
   }
 ]

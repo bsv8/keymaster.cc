@@ -23,8 +23,31 @@ import {
   type LaunchAppViewErrorCode,
   type ProtocolService
 } from "@keymaster/contracts";
+import * as LucideIcons from "lucide-react";
 import { AppLaunchModal } from "./AppLaunchModal.js";
 import { loadCatalog, type AppCatalogEntry } from "./catalog.js";
+
+/**
+ * 根据图标配置返回对应的图标组件。
+ *
+ * 支持两种格式：
+ *   - lucide-react 图标名称（如 "StickyNote"）
+ *   - SVG 文件路径（如 "./icons/justnote.svg"）
+ *
+ * 设计缘由：icon 字段需要灵活支持内置图标和自定义 SVG，
+ * 通过判断是否包含 "/" 或 "." 来区分两种格式。
+ */
+function resolveIcon(icon?: string): { type: "lucide"; component: React.ComponentType<{ size?: number; className?: string }> } | { type: "svg"; src: string } | null {
+  if (!icon) return null;
+  // SVG 文件路径：包含 "/" 或以 ".svg" 结尾
+  if (icon.includes("/") || icon.endsWith(".svg")) {
+    return { type: "svg", src: icon };
+  }
+  // lucide-react 图标名称
+  const IconComponent = (LucideIcons as Record<string, unknown>)[icon];
+  if (!IconComponent || typeof IconComponent !== "function") return null;
+  return { type: "lucide", component: IconComponent as React.ComponentType<{ size?: number; className?: string }> };
+}
 
 /**
  * 把 `LaunchAppViewError.code` 映射到 i18n key。
@@ -143,28 +166,44 @@ export function AppsPage() {
         {validation.ok.map((entry) => {
           const launching = launchingId === entry.id;
           const errMsg = errorById[entry.id];
+          const icon = resolveIcon(entry.icon);
           return (
             <div
               key={entry.id}
               className="apps-card"
               data-testid={`apps-card-${entry.id}`}
             >
-              <div className="apps-card__title">{entry.name}</div>
-              <div className="apps-card__origin" data-testid={`apps-card-origin-${entry.id}`}>
-                {entry.appOrigin}
+              <div className="apps-card__header">
+                {icon ? (
+                  <div className="apps-card__icon">
+                    {icon.type === "svg" ? (
+                      <img src={icon.src} alt="" className="apps-card__icon-img" />
+                    ) : (
+                      <icon.component size={28} />
+                    )}
+                  </div>
+                ) : null}
+                <div className="apps-card__info">
+                  <div className="apps-card__title">{entry.name}</div>
+                  <div className="apps-card__origin" data-testid={`apps-card-origin-${entry.id}`}>
+                    {entry.appOrigin}
+                  </div>
+                </div>
               </div>
               {entry.summary ? (
                 <div className="apps-card__summary">{entry.summary}</div>
               ) : null}
-              <Button
-                onClick={() => void handleOpen(entry)}
-                disabled={launching}
-                data-testid={`apps-open-${entry.id}`}
-              >
-                {launching
-                  ? t("apps.open.launching", { defaultValue: "Opening…" })
-                  : t("apps.open.cta", { defaultValue: "Open App" })}
-              </Button>
+              <div className="apps-card__actions">
+                <Button
+                  onClick={() => void handleOpen(entry)}
+                  disabled={launching}
+                  data-testid={`apps-open-${entry.id}`}
+                >
+                  {launching
+                    ? t("apps.open.launching", { defaultValue: "Opening…" })
+                    : t("apps.open.cta", { defaultValue: "Open App" })}
+                </Button>
+              </div>
               {errMsg ? (
                 <div className="apps-card__error" data-testid={`apps-card-error-${entry.id}`}>
                   {errMsg}

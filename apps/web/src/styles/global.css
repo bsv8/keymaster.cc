@@ -192,7 +192,7 @@ button { font-family: inherit; }
   border: 1px solid rgba(17, 24, 39, 0.08);
   box-shadow: 0 4px 12px rgba(17, 24, 39, 0.12);
   background-color: #ffffff;
-  background-image: url("/keymaster-shield.png");
+  background-image: url("../../public/keymaster-shield.png");
   background-position: center;
   background-repeat: no-repeat;
   /* 原图留白较多，页头内适度放大裁切能提升小尺寸识别度。 */

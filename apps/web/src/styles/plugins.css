@@ -13,6 +13,7 @@
  *     样式不得反向写回 global.css。
  */
 
+@import "@keymaster/plugin-apps/styles.css";
 @import "@keymaster/plugin-settings/styles.css";
 @import "@keymaster/plugin-poker/styles.css";
 @import "@keymaster/plugin-protocol/styles.css";

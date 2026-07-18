@@ -19,7 +19,7 @@ import type {
   ProtocolSessionSnapshot
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_VERSION } from "@keymaster/contracts";
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode } from "react";
 
 const runtimeState = vi.hoisted(() => ({
   vault: "unlocked" as "booting" | "uninitialized" | "locked" | "unlocked"
@@ -84,6 +84,7 @@ function makeFakeService(): ProtocolService & {
   appViewContextValue: unknown | null;
   bootstrapFailedValue: boolean;
   bootstrapFailureReasonValue: string | null;
+  awaitLauncherBootstrapCalls: number;
   appClientConnectTimedOutValue: boolean;
   _setSnapLockState(next: "locked" | "unlocked"): void;
   appClientWaitingForReadyValue: boolean;
@@ -132,6 +133,7 @@ function makeFakeService(): ProtocolService & {
     appViewContextValue: null as unknown | null,
     bootstrapFailedValue: false,
     bootstrapFailureReasonValue: null,
+    awaitLauncherBootstrapCalls: 0,
     appClientConnectTimedOutValue: false,
     appClientWaitingForReadyValue: false,
     childReadyValue: false,
@@ -258,7 +260,9 @@ function makeFakeService(): ProtocolService & {
     childReady() {
       return this.childReadyValue;
     },
-    awaitLauncherBootstrap: () => undefined,
+    awaitLauncherBootstrap() {
+      this.awaitLauncherBootstrapCalls++;
+    },
     openClientApp() {
       this.openClientAppCalls++;
       return {} as Window;
@@ -284,6 +288,20 @@ afterEach(() => {
 });
 
 describe("ProtocolPopupPage", () => {
+  it("StrictMode 重挂载不会重复消费 appView bootstrap token", () => {
+    const service = makeFakeService();
+    service.bootModeValue = "appView";
+    currentService = service;
+
+    render(
+      <StrictMode>
+        <ProtocolPopupPage />
+      </StrictMode>
+    );
+
+    expect(service.awaitLauncherBootstrapCalls).toBe(1);
+  });
+
   it("shows topbar and feed empty state on mount", () => {
     const service = makeFakeService();
     currentService = service;

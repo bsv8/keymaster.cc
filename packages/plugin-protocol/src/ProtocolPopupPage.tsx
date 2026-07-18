@@ -68,6 +68,12 @@ export function ProtocolPopupPage() {
   const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
   const feedTopRef = useRef<HTMLDivElement | null>(null);
+  // bootstrap token 是当前浏览器窗口的一次性 capability，不是一次 React
+  // effect 的资源。React StrictMode 会在开发环境模拟一次 effect 的
+  // unmount/remount；若两次都调 acquire，第二次必然拿到
+  // `launcher_token_not_found`。ref 在 StrictMode 的模拟 remount 中会保留，
+  // 因此同一 Session Window 只请求一次 launcher bootstrap。
+  const launcherBootstrapRequestedRef = useRef(false);
   const auth = service.connectAuthSnapshot();
 
   useEffect(() => {
@@ -118,9 +124,10 @@ export function ProtocolPopupPage() {
     window.addEventListener("pagehide", onPageHide);
     window.addEventListener("beforeunload", onBeforeUnload);
     service.startSession();
-    // 施工单 2026-06-29 001 硬切换：appView mode 下挂一次性 bootstrap listener。
-    // listener 内部幂等：第二次调用直接忽略；endSession 时由 service 内部清。
-    if (service.bootMode() === "appView") {
+    // appView bootstrap 是浏览器窗口级的一次性交接，而非 React effect
+    // 级操作。StrictMode 的开发期 effect 重挂载不可再次消费同一 token。
+    if (service.bootMode() === "appView" && !launcherBootstrapRequestedRef.current) {
+      launcherBootstrapRequestedRef.current = true;
       service.awaitLauncherBootstrap();
     }
     return () => {

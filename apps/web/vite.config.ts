@@ -1,9 +1,9 @@
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
-const tailscaleHost = "usops01.degu-danio.ts.net";
-
 export default defineConfig({
+  // 构建产物的 HTML、JS、CSS 资源均按入口文件使用相对 URL。
+  base: "./",
   plugins: [react()],
   build: {
     // 设计缘由：
@@ -20,14 +20,8 @@ export default defineConfig({
   server: {
     // 只监听本机地址，外部访问统一通过 Tailscale HTTPS 转发到 localhost。
     host: "127.0.0.1",
-    // 允许 Tailscale HTTPS 反向代理使用该 Host 访问 dev server。
-    allowedHosts: [tailscaleHost],
-    // 设计缘由：页面通过 Tailscale HTTPS 5173 打开时，HMR 客户端也需要连接同一 HTTPS 端口。
-    hmr: {
-      host: tailscaleHost,
-      protocol: "wss",
-      clientPort: 5173
-    }
+    // 允许所有主机访问 dev server（避免需要逐个添加域名到白名单）。
+    allowedHosts: true
   },
   resolve: {
     alias: {

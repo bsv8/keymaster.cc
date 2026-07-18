@@ -19,6 +19,8 @@ export interface AppCatalogEntry {
   appOrigin: string;
   appUrl: string;
   claims: string[];
+  /** lucide-react 图标名称，如 "StickyNote"、"Play"。缺省不显示图标。 */
+  icon?: string;
 }
 
 /** 校验失败的 app 记录：保留原始数据 + 错误原因。 */
@@ -59,6 +61,7 @@ export function validateAppEntry(raw: unknown): AppCatalogRow {
   const claims = Array.isArray(r.claims)
     ? r.claims.filter((c): c is string => typeof c === "string")
     : [];
+  const icon = typeof r.icon === "string" && r.icon.length > 0 ? r.icon : undefined;
 
   if (!id) {
     return { kind: "invalid", entry: { raw, reason: "missing id", id: null } };
@@ -97,7 +100,7 @@ export function validateAppEntry(raw: unknown): AppCatalogRow {
   }
   return {
     kind: "ok",
-    entry: { id, name, summary, appOrigin, appUrl, claims }
+    entry: { id, name, summary, appOrigin, appUrl, claims, icon }
   };
 }
 

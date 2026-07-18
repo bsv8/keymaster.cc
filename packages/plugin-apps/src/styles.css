@@ -1,0 +1,259 @@
+/* packages/plugin-apps/src/styles.css
+ * Apps 页面和首页 Widget 的应用市场风格样式。
+ *
+ * 设计缘由：
+ *   - /apps 页面：网格卡片布局，图标 + 标题 + 描述 + 来源 + 操作按钮
+ *   - 首页 Widget：iOS App Store 风格横向网格，一排 3-5 个，自适应宽度
+ *   - 使用 BEM 命名约定，与项目其他插件保持一致
+ */
+
+/* ---------- Apps 页面 ---------- */
+.apps-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.apps-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+/* ---------- App 卡片 ---------- */
+.apps-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.apps-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+
+.apps-card--invalid {
+  border-color: var(--danger);
+  opacity: 0.7;
+}
+
+.apps-card__icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 12px;
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--surface-2);
+}
+
+.apps-card__icon-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.apps-card__header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.apps-card__info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.apps-card__title {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.apps-card__origin {
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0;
+  word-break: break-all;
+}
+
+.apps-card__summary {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin: 0;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.apps-card__actions {
+  margin-top: auto;
+}
+
+.apps-card__error {
+  color: var(--danger);
+  font-size: 12px;
+  margin: 0;
+  padding: 8px 10px;
+  background: rgba(227, 90, 90, 0.08);
+  border-radius: 4px;
+  border-left: 3px solid var(--danger);
+}
+
+/* ---------- 首页 Widget（iOS App Store 风格）---------- */
+.apps-home-widget {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.apps-home-widget__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+}
+
+.apps-home-widget__empty {
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 8px 0;
+}
+
+/* iOS App Store 风格：横向网格，一排 3-5 个 */
+.apps-home-widget__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 12px;
+}
+
+.apps-home-widget__item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  text-align: center;
+}
+
+.apps-home-widget__item-icon {
+  width: 64px;
+  height: 64px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.apps-home-widget__item-icon-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.apps-home-widget__item-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
+.apps-home-widget__item-btn {
+  min-width: 60px;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.apps-home-widget__item-error {
+  color: var(--danger);
+  font-size: 10px;
+  margin: 0;
+}
+
+.apps-home-widget__footer {
+  margin-top: 4px;
+}
+
+/* ---------- Launch Modal ---------- */
+.apps-launch-modal__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px;
+  background: var(--surface-2);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+}
+
+.apps-launch-modal__name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.apps-launch-modal__origin {
+  font-size: 12px;
+  color: var(--text-dim);
+  word-break: break-all;
+}
+
+.apps-launch-modal__summary {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.apps-launch-modal__error {
+  color: var(--danger);
+  font-size: 12px;
+  margin: 8px 0 0 0;
+}
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 640px) {
+  .apps-list {
+    grid-template-columns: 1fr;
+  }
+
+  .apps-card {
+    padding: 16px;
+  }
+
+  .apps-card__icon {
+    width: 48px;
+    height: 48px;
+  }
+
+  /* 窄屏：首页 widget 一排 2 个 */
+  .apps-home-widget__grid {
+    grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+    gap: 10px;
+  }
+
+  .apps-home-widget__item-icon {
+    width: 56px;
+    height: 56px;
+    border-radius: 12px;
+  }
+}

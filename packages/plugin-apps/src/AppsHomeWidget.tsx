@@ -21,8 +21,20 @@ import {
   type LaunchAppViewErrorCode,
   type ProtocolService
 } from "@keymaster/contracts";
+import * as LucideIcons from "lucide-react";
 import { AppLaunchModal } from "./AppLaunchModal.js";
 import { loadCatalog, type AppCatalogEntry } from "./catalog.js";
+
+/** 与 AppsPage 同步：根据图标配置返回对应的图标组件。 */
+function resolveIcon(icon?: string): { type: "lucide"; component: React.ComponentType<{ size?: number; className?: string }> } | { type: "svg"; src: string } | null {
+  if (!icon) return null;
+  if (icon.includes("/") || icon.endsWith(".svg")) {
+    return { type: "svg", src: icon };
+  }
+  const IconComponent = (LucideIcons as Record<string, unknown>)[icon];
+  if (!IconComponent || typeof IconComponent !== "function") return null;
+  return { type: "lucide", component: IconComponent as React.ComponentType<{ size?: number; className?: string }> };
+}
 
 const HOME_WIDGET_PREVIEW_LIMIT = 3;
 
@@ -125,40 +137,55 @@ export function AppsHomeWidget() {
           {t("apps.widget.empty", { defaultValue: "No apps registered yet." })}
         </div>
       ) : (
-        <ul className="apps-home-widget__list">
+        <div className="apps-home-widget__grid">
           {visible.map((entry) => {
             const launching = launchingId === entry.id;
             const errMsg = errorById[entry.id];
+            const icon = resolveIcon(entry.icon);
             return (
-              <li
+              <div
                 key={entry.id}
-                className="apps-home-widget__row"
+                className="apps-home-widget__item"
                 data-testid={`apps-home-row-${entry.id}`}
               >
-                <div className="apps-home-widget__row-name">{entry.name}</div>
+                <div className="apps-home-widget__item-icon">
+                  {icon ? (
+                    icon.type === "svg" ? (
+                      <img src={icon.src} alt="" className="apps-home-widget__item-icon-img" />
+                    ) : (
+                      <icon.component size={24} />
+                    )
+                  ) : null}
+                </div>
+                <div className="apps-home-widget__item-name">{entry.name}</div>
                 <Button
+                  variant="ghost"
+                  size="sm"
                   onClick={() => void handleOpen(entry)}
                   disabled={launching}
                   data-testid={`apps-home-open-${entry.id}`}
+                  className="apps-home-widget__item-btn"
                 >
                   {launching
                     ? t("apps.open.launching", { defaultValue: "Opening…" })
-                    : t("apps.open.cta", { defaultValue: "Open App" })}
+                    : t("apps.open.cta", { defaultValue: "GET" })}
                 </Button>
                 {errMsg ? (
-                  <div className="apps-home-widget__row-error" data-testid={`apps-home-error-${entry.id}`}>
+                  <div className="apps-home-widget__item-error" data-testid={`apps-home-error-${entry.id}`}>
                     {errMsg}
                   </div>
                 ) : null}
-              </li>
+              </div>
             );
           })}
-        </ul>
+        </div>
       )}
       {hasMore ? (
-        <Button variant="ghost" onClick={openAll}>
-          {t("apps.widget.viewAll", { defaultValue: "View all apps" })}
-        </Button>
+        <div className="apps-home-widget__footer">
+          <Button variant="ghost" onClick={openAll}>
+            {t("apps.widget.viewAll", { defaultValue: "查看全部" })}
+          </Button>
+        </div>
       ) : null}
     </div>
   );
