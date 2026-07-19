@@ -136,7 +136,7 @@ export interface AppMsgBindSigner {
     body: string;
     clientMessageId: string;
     createdAtMs: number;
-  }): { record: ProviderSealedMessageRecord } | { error: string };
+  }): Promise<{ record: ProviderSealedMessageRecord } | { error: string }> | { record: ProviderSealedMessageRecord } | { error: string };
 }
 
 function emitLog(
@@ -1515,14 +1515,14 @@ export class AppMsgCoreImpl implements AppMsgCore {
   }
 
   /** 把公开 send input + sender projection 翻译为 sealed record。 */
-  private sealSendInput(input: {
+  private async sealSendInput(input: {
     sender: AppMsgSenderProjection;
     recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string };
     contentType: AppMsgContentType;
     body: string;
     clientMessageId: string;
     createdAtMs: number;
-  }): { record: ProviderSealedMessageRecord } | { error: string } {
+  }): Promise<{ record: ProviderSealedMessageRecord } | { error: string }> {
     const ownerPub = this.currentBoundOwner;
     const signer = this.currentBoundSigner;
     if (!ownerPub || !signer) {
@@ -1572,7 +1572,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       senderKind: hasSenderOrigin ? "origin" : hasSenderAppId ? "plugin" : "none"
     });
 
-    const sealed = this.sealSendInput({
+    const sealed = await this.sealSendInput({
       sender,
       recipient: {
         recipientPublicKeyHex: input.recipientPublicKeyHex,

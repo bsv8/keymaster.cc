@@ -121,6 +121,8 @@ export interface BackgroundTaskContext {
   reason: string;
   /** 上报进度。 */
   reportProgress(progress: BackgroundTaskProgress): void;
+  /** Coordinator 任务在任何 DB commit 前调用，epoch/key/generation 失效时抛错。 */
+  assertSessionFresh?: () => void;
 }
 
 /** 任务快照：UI 展示用。 */
@@ -168,6 +170,8 @@ export interface BackgroundRegistry {
 
 /** Service 接口。 */
 export interface BackgroundService {
+  /** 释放 Coordinator 订阅；页面卸载/热重载时调用。 */
+  dispose?(): void;
   listSnapshots(): BackgroundTaskSnapshot[];
   onChange(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void;
 

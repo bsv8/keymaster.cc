@@ -30,6 +30,7 @@ export interface P2pkhRecentSyncDeps {
   getDb(): Promise<P2pkhDbHandle>;
   /** 硬切换 002：业务插件注入的 logger。 */
   logger?: PluginLogger;
+  assertSessionFresh?: () => void;
 }
 
 const HISTORY_PAGE_LIMIT = 50;
@@ -292,7 +293,8 @@ async function syncOne(
 
   // 关键修复：写入 DB 前检查取消信号——请求返回后取消仍不应提交快照。
   if (signal.aborted) return { utxoCount: 0, recentConfirmedCount: 0, committed: false, cancelled: true };
-  await deps.coordinator.runRecent(resource.resourceId, resource.generation, async () => commit);
+  deps.assertSessionFresh?.();
+  await deps.coordinator.runRecent(resource.resourceId, resource.generation, async () => { deps.assertSessionFresh?.(); return commit; });
   // 关键修复：提交后、写 state 前再检查一次——避免取消后仍更新 watermark。
   if (signal.aborted) return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length, committed: true, cancelled: true };
   // 关键修复：不再通过 putAddress 重写 resource。
@@ -307,6 +309,7 @@ async function syncOne(
     lastCheckedAt: now,
     lastSuccessAt: now
   };
+  deps.assertSessionFresh?.();
   await db.putRecentSyncState(nextRecent);
   return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length, committed: true, cancelled: false };
 }

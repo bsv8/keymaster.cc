@@ -68,7 +68,7 @@ export interface ActiveKeyCrypto {
     body: AppMsgSendInput["body"];
     clientMessageId: AppMsgSendInput["clientMessageId"];
     createdAtMs: AppMsgSendInput["createdAtMs"];
-  }): ActiveKeyCryptoSealSendInputResult | { error: string };
+  }): Promise<ActiveKeyCryptoSealSendInputResult | { error: string }> | ActiveKeyCryptoSealSendInputResult | { error: string };
   openSealed(rec: ProviderSealedMessageRecord): Promise<AppMsgMessage | null>;
   exportEncryptedKeyBackup(
     input: ActiveKeyCryptoExportBackupInput

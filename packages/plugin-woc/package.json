@@ -1,11 +1,9 @@
 {
   "name": "@keymaster/plugin-woc",
+  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts" },
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "exports": {
-    ".": "./src/index.ts"
-  },
   "types": "./src/index.ts",
   "dependencies": {
     "@keymaster/contracts": "*",

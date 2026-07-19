@@ -120,6 +120,17 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     i18nDebug: !isProd
   });
 
+  // 施工单 002：注入 Coordinator client
+  // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
+  const { createCoordinatorClient } = await import("./keymasterSessionCoordinatorClient.js");
+  const coordinatorClient = createCoordinatorClient();
+  await coordinatorClient.connect();
+  host.provide("session-coordinator.client", coordinatorClient);
+  const dataNotifier = host.capabilities.get<{ emit(event: { providerId: string; publicKeyHex: string; revision: number; kinds: string[] }): void }>("asset.data.notifier");
+  coordinatorClient.onEvent("data-changed", (event) => {
+    if (event.type === "data-changed") dataNotifier.emit(event);
+  });
+
   // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序
   // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //

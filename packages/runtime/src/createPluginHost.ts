@@ -788,27 +788,6 @@ void (null as unknown as KeyspaceService);
  */
 function createAssetDataNotifier(): AssetDataNotifier {
   const listeners = new Set<(event: AssetDataChangedEvent) => void>();
-  let bc: BroadcastChannel | null = null;
-
-  try {
-    bc = new BroadcastChannel("asset.data.changed");
-    bc.onmessage = (ev) => {
-      if (ev.data?.type === "asset-data-changed" && ev.data.event) {
-        // 收到其他 tab 的广播：在本 tab 内 emit
-        const event = ev.data.event as AssetDataChangedEvent;
-        for (const l of listeners) {
-          try {
-            l(event);
-          } catch (err) {
-            console.error("[assetDataNotifier] listener threw", err);
-          }
-        }
-      }
-    };
-  } catch {
-    // BroadcastChannel 不可用时退化为单 tab 模式
-    bc = null;
-  }
 
   return {
     emit(event: AssetDataChangedEvent) {
@@ -818,14 +797,6 @@ function createAssetDataNotifier(): AssetDataNotifier {
           l(event);
         } catch (err) {
           console.error("[assetDataNotifier] listener threw", err);
-        }
-      }
-      // 跨 tab 通知
-      if (bc) {
-        try {
-          bc.postMessage({ type: "asset-data-changed", event });
-        } catch {
-          // 静默失败
         }
       }
     },

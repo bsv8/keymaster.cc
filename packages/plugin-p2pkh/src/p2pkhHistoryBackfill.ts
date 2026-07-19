@@ -28,6 +28,7 @@ export interface P2pkhHistoryBackfillDeps {
   getDb(): Promise<P2pkhDbHandle>;
   /** 硬切换 002：业务插件注入的 logger。 */
   logger?: PluginLogger;
+  assertSessionFresh?: () => void;
 }
 
 const PAGE_LIMIT = 100;
@@ -205,6 +206,7 @@ async function backfillOne(
     }
     if (signal.aborted) return summarize(state, false, true);
     try {
+      deps.assertSessionFresh?.();
       await deps.coordinator.runBackfillPage(resource.resourceId, 0, resource.generation, async () => ({
         page: firstPage.items.map(toCommitItem),
         nextPageToken: firstPage.nextPageToken,
@@ -263,6 +265,7 @@ async function backfillOne(
     }
     if (signal.aborted) return summarize(current, didCommit, true);
     try {
+      deps.assertSessionFresh?.();
       await deps.coordinator.runBackfillPage(resource.resourceId, expected, resource.generation, async () => ({
         page: nextPage.items.map(toCommitItem),
         nextPageToken: nextPage.nextPageToken,

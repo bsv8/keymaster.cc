@@ -1,9 +1,11 @@
 // packages/plugin-vault/src/sessionCryptoClient.ts
 // Session Crypto capability client。
 //
-// 设计缘由：
-//   - 浏览器环境优先用 Worker 隔离私钥；
-//   - 本地实现只允许通过显式测试开关注入，生产路径 fail closed。
+// 设计缘由（施工单 002 硬切换）：
+//   - 所有 Keymaster 主页面 tab 共享同一个 SharedWorker 中的 Vault 会话
+//   - 私钥只在 Worker 内存中，永不离开
+//   - 删除每 tab 独立 Dedicated Worker 的旧路径
+//   - 本地实现只允许通过显式测试开关注入，生产路径 fail closed
 
 import type {
   ActiveKeyCryptoIdentity,
@@ -14,6 +16,13 @@ import type {
 } from "@keymaster/contracts";
 import { ActiveKeySessionRevokedError } from "@keymaster/contracts";
 import type { ActiveKeyCrypto } from "@keymaster/contracts";
+import type {
+  CoordinatorClientRequest,
+  CoordinatorResponse,
+  CoordinatorCryptoOperation,
+  CoordinatorCryptoResult,
+  SessionEpoch
+} from "@keymaster/contracts";
 import {
   deriveP2pkhAddress,
   hexToBytes,
@@ -45,7 +54,7 @@ interface SessionCryptoEngine {
     body: string;
     clientMessageId: string;
     createdAtMs: number;
-  }): ActiveKeyCryptoSealSendInputResult | { error: string };
+  }): Promise<ActiveKeyCryptoSealSendInputResult | { error: string }> | ActiveKeyCryptoSealSendInputResult | { error: string };
   openSealed(rec: ProviderSealedMessageRecord): Promise<AppMsgMessage | null>;
   encryptVaultKeyMaterial(input: {
     publicKeyHex: string;
@@ -62,10 +71,61 @@ interface SessionCryptoEngine {
 export interface SessionCryptoClientOptions {
   engineFactory?: (input: SessionCryptoEngineInput) => Promise<SessionCryptoEngine>;
   allowLocalEngineForTests?: boolean;
+  /** Coordinator SharedWorker 连接（施工单 002） */
+  coordinatorPort?: MessagePort;
+  sessionEpoch?: SessionEpoch;
+  mode?: "keymaster" | "appview";
 }
 
 function randomId(): string {
   return crypto.randomUUID();
+}
+
+/**
+ * 通过 Coordinator SharedWorker 执行 crypto 操作。
+ * 设计缘由（施工单 002）：所有 tab 共享同一个 Worker，私钥永不离开 Worker。
+ */
+async function requestCoordinatorCrypto(
+  port: MessagePort,
+  operation: CoordinatorCryptoOperation,
+  sessionEpoch: SessionEpoch
+): Promise<CoordinatorCryptoResult> {
+  const requestId = randomId();
+  return new Promise<CoordinatorCryptoResult>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      port.removeEventListener("message", handler);
+      reject(new Error("Coordinator crypto request timeout"));
+    }, 30000);
+
+    const handler = (event: MessageEvent<CoordinatorResponse>) => {
+      const msg = event.data;
+      if (msg.requestId !== requestId) return;
+      clearTimeout(timeout);
+      port.removeEventListener("message", handler);
+
+      if (msg.ack.status === "ok" && msg.cryptoResult) {
+        resolve(msg.cryptoResult);
+      } else {
+        reject(new Error(
+          msg.ack.status === "error" ? msg.ack.message :
+          msg.ack.status === "blocked" ? msg.ack.reason :
+          `Crypto operation failed: ${msg.ack.status}`
+        ));
+      }
+    };
+
+    port.addEventListener("message", handler);
+    port.start();
+
+    const request: CoordinatorClientRequest = {
+      kind: "crypto",
+      clientId: "session-crypto-client",
+      requestId,
+      operation,
+      expectedSessionEpoch: sessionEpoch
+    };
+    port.postMessage(request);
+  });
 }
 
 export async function createSessionCryptoEngine(
@@ -75,29 +135,45 @@ export async function createSessionCryptoEngine(
   if (options.engineFactory) {
     return options.engineFactory(input);
   }
+
+  // 施工单 002：优先使用 Coordinator SharedWorker（Keymaster 主页面）
+  if (options.coordinatorPort) {
+    return createCoordinatorBackedEngine(input, options.coordinatorPort, options.sessionEpoch ?? "boot");
+  }
+
+  if (options.mode !== "appview") {
+    throw new Error("Keymaster session crypto requires the Session Coordinator");
+  }
+
+  // appView session：显式授权后才使用独立 Worker
+  // 施工单 002：appView session 仍按其专属、显式授权的会话 Worker 运行，
+  // 不连接主 Coordinator，不继承主页面的全局解锁态。
   const canUseWorker = typeof Worker !== "undefined";
   if (canUseWorker) {
     return createWorkerBackedEngine(input);
   }
+
+  // 无 Worker 环境：仅测试显式允许本地 engine
   if (options.allowLocalEngineForTests) {
     return createLocalEngine(input);
   }
   throw new Error("Session crypto worker is unavailable");
 }
 
+/**
+ * 通过独立 Worker 创建 crypto engine（用于 appView session）。
+ * 设计缘由（施工单 002）：appView session 仍按其专属、显式授权的会话 Worker 运行。
+ */
 async function createWorkerBackedEngine(
   input: SessionCryptoEngineInput
 ): Promise<SessionCryptoEngine> {
-  const worker = new Worker(new URL("./sessionCryptoWorker.ts", import.meta.url), {
+  // 使用 globalThis.Worker 以便测试可以 stub
+  const WorkerConstructor = (globalThis as { Worker?: typeof Worker }).Worker ?? Worker;
+  const worker = new WorkerConstructor(new URL("./sessionCryptoWorker.ts", import.meta.url), {
     type: "module"
   });
-  const pending = new Map<
-    string,
-    {
-      resolve: (value: any) => void;
-      reject: (reason?: unknown) => void;
-    }
-  >();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pending = new Map<string, { resolve: (value: any) => void; reject: (reason?: unknown) => void }>();
   let disposed = false;
   let disposeCleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -199,7 +275,7 @@ async function createWorkerBackedEngine(
         address: string;
       };
     },
-    sealSendInput(sealInput) {
+    async sealSendInput(sealInput) {
       guard();
       return request<ActiveKeyCryptoSealSendInputResult | { error: string }>("sealSendInput", {
         input: sealInput
@@ -216,14 +292,14 @@ async function createWorkerBackedEngine(
         return null;
       }
     },
-    async encryptVaultKeyMaterial(input) {
+    async encryptVaultKeyMaterial(encryptInput) {
       guard();
       const encrypted = (await request<{
         cipherVersion: "v2";
         cipherSaltB64: string;
         cipherIvB64: string;
         cipherB64: string;
-      }>("encryptVaultKeyMaterial", input)) as {
+      }>("encryptVaultKeyMaterial", encryptInput)) as {
         cipherVersion: "v2";
         cipherSaltB64: string;
         cipherIvB64: string;
@@ -243,6 +319,109 @@ async function createWorkerBackedEngine(
   };
 }
 
+/**
+ * 通过 Coordinator SharedWorker 创建 crypto engine。
+ * 设计缘由（施工单 002）：所有 tab 共享同一个 Worker，私钥永不离开 Worker。
+ */
+async function createCoordinatorBackedEngine(
+  input: SessionCryptoEngineInput,
+  port: MessagePort,
+  sessionEpoch: SessionEpoch
+): Promise<SessionCryptoEngine> {
+  let disposed = false;
+
+  const identity: ActiveKeyCryptoIdentity = {
+    sessionId: input.sessionId,
+    publicKeyHex: input.publicKeyHex,
+    label: input.label,
+    capabilities: input.capabilities,
+    createdAt: input.createdAt
+  };
+
+  const guard = (): void => {
+    if (disposed) {
+      throw new ActiveKeySessionRevokedError();
+    }
+  };
+
+  const cryptoRequest = async (operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> => {
+    guard();
+    return requestCoordinatorCrypto(port, operation, sessionEpoch);
+  };
+
+  return {
+    getIdentity() {
+      guard();
+      return identity;
+    },
+    async signDigest(signInput): Promise<ActiveKeyCryptoSignDigestResult> {
+      // 将 ArrayBuffer 转为 hex 字符串
+      const digestBytes = new Uint8Array(signInput.digest);
+      const digestHex = Array.from(digestBytes).map(b => b.toString(16).padStart(2, "0")).join("");
+      const result = await cryptoRequest({
+        type: "signDigest",
+        digestHex
+      });
+      if (result.type !== "signDigest") throw new Error("Unexpected result type");
+      return {
+        publicKeyHex: input.publicKeyHex,
+        signature: hexToBytes(result.signatureHex).buffer as ArrayBuffer
+      };
+    },
+    async deriveP2pkhAddress(deriveInput) {
+      const result = await cryptoRequest({
+        type: "deriveP2pkhAddress",
+        network: deriveInput.network
+      });
+      if (result.type !== "deriveP2pkhAddress") throw new Error("Unexpected result type");
+      return {
+        publicKeyHex: input.publicKeyHex,
+        address: result.address
+      };
+    },
+    async sealSendInput(sealInput) {
+      const result = await cryptoRequest({ type: "sealSendInput", input: sealInput });
+      if (result.type !== "sealSendInput") return { error: "Unexpected result type" };
+      return { record: { messageId: "", senderPublicKeyHex: sealInput.sender.senderPublicKeyHex, senderEndpointId: sealInput.sender.senderOrigin ?? sealInput.sender.senderAppId ?? "", senderEndpointKind: sealInput.sender.senderOrigin ? "origin" : "plugin", recipientPublicKeyHex: sealInput.recipient.recipientPublicKeyHex, recipientEndpointId: sealInput.recipient.recipientOrigin ?? sealInput.recipient.recipientAppId ?? "", recipientEndpointKind: sealInput.recipient.recipientOrigin ? "origin" : "plugin", clientMessageId: sealInput.clientMessageId, createdAtMs: sealInput.createdAtMs, insertedAtMs: Date.now(), envelope: { envelopeBytes: result.envelope, signatureBytes: result.signature } } } as unknown as ActiveKeyCryptoSealSendInputResult;
+    },
+    async openSealed(rec): Promise<AppMsgMessage | null> {
+      try {
+        const result = await cryptoRequest({
+          type: "openSealed",
+          record: rec
+        });
+        if (result.type !== "openSealed") return null;
+        return JSON.parse(new TextDecoder().decode(result.plaintext)) as AppMsgMessage;
+      } catch {
+        return null;
+      }
+    },
+    async encryptVaultKeyMaterial(encryptInput) {
+      const result = await cryptoRequest({
+        type: "encryptVaultKeyMaterial",
+        plaintext: new TextEncoder().encode(JSON.stringify(encryptInput.material))
+      });
+      if (result.type !== "encryptVaultKeyMaterial") throw new Error("Unexpected result type");
+      return {
+        cipherVersion: "v2",
+        cipherSaltB64: "",
+        cipherIvB64: "",
+        cipherB64: new TextDecoder().decode(result.ciphertext)
+      };
+    },
+    dispose(reason = "dispose") {
+      if (disposed) return;
+      disposed = true;
+      // Coordinator port 不需要 terminate，由 Coordinator 管理生命周期
+    }
+  };
+}
+
+/**
+ * 本地测试用 engine。
+ * 设计缘由：仅允许通过显式测试开关注入，生产路径 fail closed。
+ * 施工单 002：生产代码不得使用此路径。
+ */
 async function createLocalEngine(input: SessionCryptoEngineInput): Promise<SessionCryptoEngine> {
   const privateKeyBytes = await decryptSessionPrivateKeyBytes({
     passwordKey: input.passwordKey,
@@ -283,7 +462,7 @@ async function createLocalEngine(input: SessionCryptoEngineInput): Promise<Sessi
         address: deriveP2pkhAddress(input.publicKeyHex, deriveInput.network)
       };
     },
-    sealSendInput(sealInput) {
+    async sealSendInput(sealInput) {
       guard();
       if (sealInput.sender.senderPublicKeyHex !== input.publicKeyHex) {
         return { error: "session_key_mismatch" };

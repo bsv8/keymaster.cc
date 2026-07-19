@@ -81,6 +81,7 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
 
       // 检查取消信号：取消后不提交 DB，不发 data-changed
       if (ctx.signal.aborted) return;
+      ctx.assertSessionFresh?.();
 
       const snapshots = tokens
         .filter((t) => Number.isFinite(t.entry.balance) && t.entry.balance > 0)
@@ -98,6 +99,7 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
       // 原子替换：在同一事务中删除旧数据并写入新数据
       // DB 操作隐式使用当前 active key 的 namespace
       await db.replaceAll(snapshots);
+      ctx.assertSessionFresh?.();
 
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
       // 同时确认 active key 未变化——旧 key 的任务不应向新 key 发通知。

@@ -28,14 +28,27 @@ import type {
   RouteRegistry,
   SettingsRegistry,
   TopbarRegistry
+  , VaultService
 } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
 import { createKeyspaceService, type KeyspaceHandle } from "./keyspaceService.js";
-import { createVaultService } from "./vaultService.js";
+import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
+import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { KeySwitchWidget } from "./KeySwitchWidget.js";
+
+/** Coordinator client 接口（通过 capability 获取） */
+interface CoordinatorClientLike {
+  getIsConnected(): boolean;
+  getState(): { vaultStatus: string; activePublicKeyHex?: string; keyspaceGeneration: number };
+  onStateChange(handler: (state: unknown) => void): () => void;
+  onEvent(eventType: string, handler: (event: unknown) => void): () => void;
+  unlock(password: string, publicKeyHex?: string): Promise<{ status: string }>;
+  lock(): Promise<{ status: string }>;
+  activateKey(password: string, publicKeyHex: string): Promise<{ status: string }>;
+}
 
 export const VAULT_CAPABILITY = "vault.service";
 
@@ -334,13 +347,24 @@ export const vaultPlugin: PluginManifest = {
   ],
   setup(ctx) {
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
-    // 先建一个未绑定 keyspace 的 vault 实例占位；keyspace 创建后再回填。
+
+    // 施工单 002：优先使用 Coordinator facade
+    let service!: VaultService;
     let keyspaceHandle: KeyspaceHandle | undefined = undefined;
-    const service = createVaultService({ messageBus, get keyspace() { return keyspaceHandle; }, logger: ctx.logger });
+
+    // 尝试获取 Coordinator client（通过 capability）
+    let coordinatorClient: CoordinatorClientLike | undefined;
+    coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    if (coordinatorClient.getIsConnected()) {
+      // 使用 Coordinator facade
+      service = createVaultServiceCoordinator({ coordinatorClient: coordinatorClient as never });
+      keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient as unknown as Parameters<typeof createKeyspaceServiceCoordinator>[0]) as unknown as KeyspaceHandle;
+    }
+
     ctx.provide(VAULT_CAPABILITY, service);
 
     // 创建 keyspace：依赖 vault.service。
-    keyspaceHandle = createKeyspaceService({ messageBus, vault: service, logger: ctx.logger });
+    if (!keyspaceHandle) throw new Error("Session Coordinator is unavailable");
     ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
 
     const routes = ctx.get<RouteRegistry>("route.registry");

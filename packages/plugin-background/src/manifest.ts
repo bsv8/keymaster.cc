@@ -13,11 +13,23 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
+  SESSION_COORDINATOR_CLIENT_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY
 } from "@keymaster/contracts";
-import { createBackgroundBundle } from "./backgroundService.js";
+import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinator.js";
 import { BackgroundTray } from "./BackgroundTray.js";
 import { BackgroundSettingsPage } from "./BackgroundSettingsPage.js";
+
+/** Coordinator client 接口（通过 capability 获取） */
+interface CoordinatorClientLike {
+  getIsConnected(): boolean;
+  getState(): { taskSnapshots: unknown[]; scheduleSettings: unknown };
+  onStateChange(handler: (state: unknown) => void): () => void;
+  onEvent(eventType: string, handler: (event: unknown) => void): () => void;
+  backgroundRunNow(taskId: string): Promise<{ status: string }>;
+  backgroundCancel(taskId: string): Promise<{ status: string }>;
+  backgroundSettingsUpdate(settings: unknown): Promise<{ status: string }>;
+}
 
 const backgroundResources: I18nPluginResources = {
   namespace: "background",
@@ -94,9 +106,21 @@ export const backgroundPlugin: PluginManifest = {
     { capability: "settings.registry", reason: "注册后台同步设置页" }
   ],
   setup(ctx) {
-    const { registry, service } = createBackgroundBundle({ logger: ctx.logger });
-    ctx.provide<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY, registry);
+    // 施工单 002：优先使用 Coordinator facade
+    let registry: BackgroundRegistry;
+    let service: BackgroundService;
+
+    const coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    if (coordinatorClient.getIsConnected()) {
+      // 使用 Coordinator facade
+      service = createBackgroundServiceCoordinator({ coordinatorClient: coordinatorClient as never });
+      // 保留旧 capability 契约，但 Coordinator 模式下 registry 永远不接受
+      // 页面任务注册；唯一任务注册表和执行权属于 SharedWorker。
+      registry = { register: () => undefined, list: () => [], get: () => undefined };
+    } else throw new Error("Session Coordinator is unavailable");
+
     ctx.provide<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY, service);
+    ctx.provide<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY, registry);
 
     if (ctx.has(KEYSPACE_SERVICE_CAPABILITY)) {
       const ks = ctx.get<{
@@ -124,8 +148,7 @@ export const backgroundPlugin: PluginManifest = {
     });
 
     return () => {
-      // 硬切换 001：service.dispose 停止 interval / visibility / leader lock。
-      service.dispose();
+      (service as BackgroundService & { dispose?: () => void }).dispose?.();
     };
   }
 };

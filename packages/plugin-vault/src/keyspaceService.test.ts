@@ -85,10 +85,10 @@ function makeFakeBackground(
     listSnapshots: () => [],
     onChange: () => () => undefined,
     trigger: () => undefined,
-    pause: async () => undefined,
-    resume: () => undefined,
     cancel: async () => undefined,
-    retry: () => undefined
+    runNow: () => undefined,
+    getScheduleSettings: () => ({ assetHoldingsIntervalMs: 900_000 }),
+    updateScheduleSettings: () => undefined
   };
 }
 
@@ -163,7 +163,7 @@ async function seedReadyKey(input: { publicKeyHex: string;
 describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
   it("emits key.deleted exactly once and calls background.cancelByKey", async () => {
     const { messageBus: events, records } = makeMessageBus();
-    const vault = createVaultService({ messageBus: events });
+    const vault = createVaultService({ messageBus: events, sessionCryptoEngineOptions: { allowLocalEngineForTests: true, mode: "appview" } });
     await seedVault(vault);
     // 多 seed 一把 key，避免删完后触发"空 Vault 收尾"路径，让本测试
     // 只覆盖 active fallback / 单 key 删除的事件语义。
@@ -392,7 +392,7 @@ describe("keyspaceService delete-last-key -> uninitialized (硬切换 010)", () 
 
   it("deleting the last key resets to uninitialized and a new createVaultWithImportedKey is required for next setup", async () => {
     const { messageBus: events } = makeMessageBus();
-    const vault = createVaultService({ messageBus: events });
+    const vault = createVaultService({ messageBus: events, sessionCryptoEngineOptions: { allowLocalEngineForTests: true, mode: "appview" } });
     await seedVault(vault);
     await seedReadyKey({ label: "only", publicKeyHex: "a".repeat(64) });
     const keyspace = createKeyspaceService({ messageBus: events, vault });

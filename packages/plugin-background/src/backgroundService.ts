@@ -1,5 +1,7 @@
 // packages/plugin-background/src/backgroundService.ts
 // 后台任务平台实现。
+// 施工单 002 硬切换：删除所有 leader 选举逻辑，由 Coordinator 统一管理。
+//
 // 设计缘由：
 //   - 任务注册 -> 调度 -> 运行 -> 状态变更订阅。
 //   - 同 task id 不并发：使用独立 runPromise 锁；cancel 必须等旧实例真正退出。
@@ -7,21 +9,17 @@
 //   - 失败不是稳态：保留错误信息后自动回到 idle 等待下一周期。
 //   - blocked 是门禁阻塞状态：Vault 锁定、keyspace 初始化中、无 active key。
 //   - 页面 visibility 变化与定时器节流恢复时只合并为一次 run。
-//   - leader lock：浏览器环境优先 Web Locks（FIFO 互斥）；不支持时回退
-//     BroadcastChannel + tabId 选举；非浏览器/无 BroadcastChannel 时单进程
-//     直接是 leader。
-//   - follower 标签页的 runNow/cancel 必须转发到 leader。
+//   - 施工单 002：删除 leader lock、BroadcastChannel 选举、follower 转发等逻辑。
+//     所有 tab 共享 Coordinator，不再需要跨 tab 协调。
 
 import type {
   BackgroundRegistry,
-  BackgroundRunEligibility,
   BackgroundService,
   BackgroundSyncSettings,
   BackgroundTaskContext,
   BackgroundTaskDefinition,
   BackgroundTaskKeyScope,
   BackgroundTaskProgress,
-  BackgroundTaskSchedule,
   BackgroundTaskSnapshot,
   BackgroundTaskState,
   PluginLogger
@@ -34,15 +32,9 @@ interface TaskRuntime {
   progress?: BackgroundTaskProgress;
   lastStartedAt?: string;
   lastCompletedAt?: string;
-  /** 上次尝试时间（无论成功或失败）。 */
   lastAttemptAt?: string;
   nextRunAt?: string;
-  /** 上次错误信息；下次成功后清除。 */
   error?: string;
-  /**
-   * 阻塞原因（仅 state="blocked" 时有值）。
-   * 设计缘由：让用户理解为什么任务没有运行，而不是静默等待。
-   */
   blockedReason?: import("@keymaster/contracts").I18nText;
   rerunRequested: boolean;
   ctl?: AbortController;
@@ -50,15 +42,7 @@ interface TaskRuntime {
   lastScheduledAt?: number;
 }
 
-const LEADER_LOCK_NAME = "background.leader";
-const LEADER_HEARTBEAT_MS = 5000;
 const ENABLED_PREF_KEY = "background.enabled";
-
-/**
- * 后台同步设置存储键。
- * 设计缘由：设置属于后台任务平台，而不是某个业务插件。
- * 影响 P2PKH、BSV-21、STAS 及未来所有资产 provider。
- */
 const SCHEDULE_SETTINGS_KEY = "background.sync.settings";
 
 /** 默认设置。 */
@@ -71,12 +55,6 @@ const VALID_INTERVALS = new Set([300_000, 900_000, 1_800_000, 3_600_000]);
 
 /**
  * 归一化 assetHoldingsIntervalMs。
- * 设计缘由：统一 localStorage 读取、设置写入、跨标签 BroadcastChannel
- * 消息处理的校验逻辑。要求：
- *   - 有限数；
- *   - 属于预设值集合；
- *   - 不低于注册任务的最大 minIntervalMs；
- *   - 非法值回退默认值。
  */
 function normalizeAssetHoldingsInterval(
   value: unknown,
@@ -92,10 +70,7 @@ function normalizeAssetHoldingsInterval(
 const COOLDOWN_MS = 2 * 60 * 1000;
 
 /**
- * 008：把 task 定义上的 keyScope 统一归一为对象或 undefined。
- * 支持传对象（注册时静态求值）和函数（注册时不求值，调用时才查 active key）。
- * 函数返回值若为 undefined 也视为"未绑定 namespace"——例如 active key
- * 不是 single 模式时。
+ * 把 task 定义上的 keyScope 统一归一为对象或 undefined。
  */
 function resolveKeyScope(
   def: BackgroundTaskDefinition
@@ -117,33 +92,23 @@ export interface BackgroundServiceHandle extends BackgroundService {
 }
 
 export interface CreateBackgroundServiceOptions {
-  /**
-   * 硬切换 002：业务插件注入的 logger。
-   * 设计缘由：后台任务的状态变化是系统诊断面，应有统一埋点。
-   * 不传时不记日志（保持旧行为）。
-   */
   logger?: PluginLogger;
 }
 
+/**
+ * 创建后台任务服务。
+ * 施工单 002：删除所有 leader 选举逻辑，由 Coordinator 统一管理。
+ */
 export function createBackgroundService(options: CreateBackgroundServiceOptions = {}): BackgroundServiceHandle {
   const tasks = new Map<string, TaskRuntime>();
-  /** 冷却 map：key -> lastRunAt。每个实例独立，不跨实例共享。 */
   const cooldownMap = new Map<string, number>();
   const listeners = new Set<(s: BackgroundTaskSnapshot[]) => void>();
-  // leader 的快照只代表 leader 所在标签页的会话。Vault 解锁是标签页内存态，
-  // 因此 follower 本地刚完成的 session-bound 任务不能再被 leader 的“等待解锁”
-  // 旧快照覆盖。
-  const leaderSnapshots = new Map<string, BackgroundTaskSnapshot>();
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
-  let visibilityHandler: (() => void) | undefined;
   let disposed = false;
-  const leaderCtx = createLeaderContext(LEADER_LOCK_NAME, LEADER_HEARTBEAT_MS);
   const logger = options.logger;
 
   /**
    * 一次性 migration：清除旧的 background.enabled 偏好。
-   * 设计缘由：施工单 001 要求所有任务默认持续启用，删除 pause/resume 语义。
-   * 读取旧值仅用于诊断日志，不能继承其中的 false。
    */
   function migrateEnabledPreferences(): void {
     try {
@@ -162,17 +127,12 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     }
   }
 
-  // 启动时执行 migration
   migrateEnabledPreferences();
 
   function snapshot(task: TaskRuntime): BackgroundTaskSnapshot {
     return {
       id: task.def.id,
       pluginId: task.def.pluginId,
-      // label 在 BackgroundTaskDefinition 是 I18nText；snapshot 字段类型
-      // 是已解析 string。这里用 task 上一次解析的结果（fallback 优先），
-      // 避免在每次 snapshot 都重新调用 i18n 解析——i18n.onChange 会触发
-      // 全量 snapshot 重发，UI 端自然重渲染。
       label: typeof task.def.label === "string" ? task.def.label : task.def.label.fallback,
       state: task.state,
       progress: task.progress,
@@ -182,109 +142,25 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       nextRunAt: task.nextRunAt,
       error: task.error,
       blockedReason: task.blockedReason,
-      // 008：每次取快照时重新解析 keyScope，支持函数形式的延迟求值。
       keyScope: resolveKeyScope(task.def)
     };
   }
-  function snapshotListForDisplay(): BackgroundTaskSnapshot[] {
-    const localSnapshots = [...tasks.values()].map(snapshot);
-    if (leaderCtx.isLeader) return localSnapshots;
-    return localSnapshots.map((local) => {
-      const leader = leaderSnapshots.get(local.id);
-      if (!leader) return local;
-      const localAttempt = local.lastAttemptAt ? new Date(local.lastAttemptAt).getTime() : 0;
-      const leaderAttempt = leader.lastAttemptAt ? new Date(leader.lastAttemptAt).getTime() : 0;
-      // 本地正在执行，或本地已在 leader 最近一次尝试后执行过：本地是真实状态。
-      if (local.state === "queued" || local.state === "running" || (localAttempt > 0 && localAttempt >= leaderAttempt)) return local;
-      return leader;
-    });
+
+  function snapshotList(): BackgroundTaskSnapshot[] {
+    return [...tasks.values()].map(snapshot);
   }
 
-  function notifyListeners(list = snapshotListForDisplay()) {
+  function notifyListeners() {
+    const list = snapshotList();
     for (const l of listeners) l(list);
   }
 
   function emitAll() {
-    const localList = [...tasks.values()].map(snapshot);
     notifyListeners();
-    // 关键修复：leader 把最新任务快照广播给 follower，使 follower
-    // 托盘也能看到真实状态（运行中、进度、错误等）。
-    if (leaderCtx.isLeader) {
-      leaderCtx.broadcastSnapshots(localList);
-    }
-  }
-
-  function isUnlockBlockedSnapshot(snapshot: BackgroundTaskSnapshot | undefined): boolean {
-    if (snapshot?.state !== "blocked") return false;
-    return typeof snapshot.blockedReason !== "string" && snapshot.blockedReason?.key === "background.blocked.unlock";
-  }
-
-  /**
-   * Vault / keyspace 是标签页内存会话，不能让已解锁的 follower 永远把操作
-   * 交给一个锁定的 leader。仅当本地 canRun 明确 ready 时，才在当前后台
-   * service 执行；没有资格仍按原路径转发，不会放宽任何门禁。
-   */
-  async function runLocallyIfEligible(t: TaskRuntime, reason: string): Promise<boolean> {
-    if (!t.def.canRun) return false;
-    try {
-      const eligibility = await t.def.canRun();
-      if (!eligibility.ready) return false;
-      await runOne(t, reason);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  function shouldUseLocalSession(t: TaskRuntime, reason: string): boolean {
-    // 用户主动点击、当前 tab 刚解锁，以及解锁后派生出的资源就绪事件，
-    // 都必须优先使用当前会话；否则 token 首次同步仍会被锁定 leader 吞掉。
-    if (
-      reason === "manual" ||
-      reason === "vault.unlocked" ||
-      reason === "first-sync" ||
-      reason === "p2pkh.resources-ready" ||
-      reason === "key.imported" ||
-      reason === "active-key.changed"
-    ) return true;
-    // 下游资产任务在 leader 已明确因锁定而阻塞时，也使用当前已解锁会话。
-    return isUnlockBlockedSnapshot(leaderSnapshots.get(t.def.id));
-  }
-
-  /**
-   * 关键修复：follower 标签页触发 trigger/runNow/cancel 时把操作转发到 leader；
-   * leader 在本 tab 内执行对应的方法并广播结果快照。
-   */
-  function handleFollowerAction(action: FollowerAction) {
-    if (!leaderCtx.isLeader) return;
-    switch (action.type) {
-      case "trigger":
-        trigger(action.id, action.reason ?? "follower");
-        break;
-      case "run-now":
-        runNow(action.id);
-        break;
-      case "cancel":
-        void cancel(action.id);
-        break;
-      case "cancel-by-key":
-        void cancelByKey(action.publicKeyHex);
-        break;
-      case "sync-state":
-        // follower 主动询问最新快照：响应一份给请求方。
-        if (action.fromTabId) {
-          leaderCtx.sendToTab(action.fromTabId, { type: "snapshots", snapshots: [...tasks.values()].map(snapshot) });
-        }
-        break;
-    }
   }
 
   /**
    * 读取后台同步设置。
-   * 设计缘由：从 localStorage 读取，使用 normalizeAssetHoldingsInterval
-   * 归一化（校验有限数 + 预设值集合），缺省返回默认值。
-   * 注意：不在此处校验 minIntervalMs（需要遍历 tasks），
-   * 由 getEffectiveIntervalMs 和 updateScheduleSettings 分别处理。
    */
   function loadScheduleSettings(): BackgroundSyncSettings {
     try {
@@ -301,43 +177,19 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
 
   /**
    * 保存后台同步设置。
-   * 设计缘由：写入 localStorage 并通过 BroadcastChannel 通知其他标签页。
    */
   function saveScheduleSettings(settings: BackgroundSyncSettings): void {
     try {
       localStorage.setItem(SCHEDULE_SETTINGS_KEY, JSON.stringify(settings));
-      // 通过 BroadcastChannel 通知其他标签页
-      if (settingsChannel) {
-        settingsChannel.postMessage({ type: "settings-changed", settings });
-      }
     } catch {
       // 静默失败。
     }
-  }
-
-  /**
-   * 跨标签页设置同步通道。
-   * 设计缘由：leader 写入设置后通知 follower，follower 收到后重算 nextRunAt。
-   */
-  let settingsChannel: BroadcastChannel | null = null;
-  try {
-    settingsChannel = new BroadcastChannel("background.settings.sync");
-    settingsChannel.onmessage = (ev) => {
-      if (ev.data?.type === "settings-changed" && ev.data.settings) {
-        // 收到其他标签页的设置变更：重算 schedule
-        recalculateAssetHoldingsSchedule();
-      }
-    };
-  } catch {
-    // BroadcastChannel 不可用时退化为单 tab 模式
-    settingsChannel = null;
   }
 
   function register(def: BackgroundTaskDefinition) {
     if (tasks.has(def.id)) {
       throw new Error(`Background task id "${def.id}" is already registered`);
     }
-    // 施工单 001：所有任务默认持续启用，删除 defaultEnabled 字段
     const t: TaskRuntime = {
       def,
       state: "idle",
@@ -351,20 +203,17 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   function list(): BackgroundTaskDefinition[] {
     return [...tasks.values()].map((t) => t.def);
   }
+
   function getDef(id: string) {
     return tasks.get(id)?.def;
   }
 
   /**
    * 计算任务的下一次运行时间。
-   * 设计缘由：优先使用 schedule group 配置的 interval，否则使用任务定义的 intervalMs。
-   * asset-holdings 组的 interval 从 BackgroundSyncSettings 读取。
-   * 关键修复：同时更新 lastScheduledAt，确保定时器和 UI 显示一致。
    */
   function scheduleNext(t: TaskRuntime) {
     let interval: number | undefined;
 
-    // 优先使用 schedule group 配置
     if (t.def.schedule?.group === "asset-holdings") {
       const settings = loadScheduleSettings();
       interval = settings.assetHoldingsIntervalMs;
@@ -380,13 +229,11 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     const now = Date.now();
     const next = new Date(now + interval).toISOString();
     t.nextRunAt = next;
-    // 关键修复：同步更新 lastScheduledAt，确保定时器从当前时刻重新计时
     t.lastScheduledAt = now;
   }
 
   /**
    * 重新计算所有 asset-holdings 组任务的下一次运行时间。
-   * 设计缘由：配置变更后需要重算，新周期从保存时刻开始计时。
    */
   function recalculateAssetHoldingsSchedule(): void {
     for (const t of tasks.values()) {
@@ -398,19 +245,10 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   }
 
   /**
-   * 关键修复：以 runPromise 锁 + state 双重防御保证同 id 不并发。
-   * 即使 cancel 改了 state，旧的 runPromise 仍会继续执行到 finally，
-   * finally 块会清掉 runPromise 并设置 state。
-   * 新的 runNow 会通过 await runPromise 等待旧实例退出。
-   *
-   * 关键修复：canRun 返回 blocked 或抛错时必须先清掉 runPromise，否则
-   * task 永远停在 runPromise 状态，后续 runNow 不会启动新实例。
-   * 关键修复：rerunRequested 必须真正消费——运行结束后若 rerunRequested=true
-   * 要再次进入 run()；否则运行期间到达的 broadcast 触发的同步会被吞掉。
+   * 执行单个任务。
    */
   async function runOne(t: TaskRuntime, reason: string): Promise<void> {
     if (t.runPromise) {
-      // 已在运行：合并为一次后续 rerun。
       t.rerunRequested = true;
       return t.runPromise;
     }
@@ -419,8 +257,9 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     t.blockedReason = undefined;
     logger?.info({ scope: "background.task", event: "triggered", message: `Task triggered: ${t.def.id}`, data: { taskId: t.def.id, reason } });
     emitAll();
+
     const promise = (async () => {
-      // canRun 检查：返回 blocked 时设置 blockedReason 和 blocked 状态。
+      // canRun 检查
       try {
         if (t.def.canRun) {
           const eligibility = await t.def.canRun();
@@ -440,7 +279,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
           }
         }
       } catch (err) {
-        // canRun 抛错视为 blocked（门禁异常），不是网络失败
         t.state = "blocked";
         t.blockedReason = { key: "background.blocked.canRunError", fallback: err instanceof Error ? err.message : String(err) };
         t.lastAttemptAt = new Date().toISOString();
@@ -455,6 +293,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
         emitAll();
         return;
       }
+
       t.state = "running";
       t.error = undefined;
       t.blockedReason = undefined;
@@ -463,6 +302,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
       t.ctl = new AbortController();
       logger?.info({ scope: "background.task", event: "started", message: `Task started: ${t.def.id}`, data: { taskId: t.def.id, reason } });
       emitAll();
+
       const ctx: BackgroundTaskContext = {
         signal: t.ctl.signal,
         reason,
@@ -471,11 +311,9 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
           emitAll();
         }
       };
+
       try {
         await t.def.run(ctx);
-        // 关键修复：框架级兜底——即使 run() 正常 resolve，若 signal 已被
-        // abort（cancel 触发），必须走取消分支，不记 completed、不写
-        // lastCompletedAt。不能只依赖各业务任务自行抛出 AbortError。
         if (t.ctl?.signal.aborted) {
           t.state = "idle";
           logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
@@ -483,7 +321,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
           t.state = "idle";
           t.lastCompletedAt = new Date().toISOString();
           t.progress = undefined;
-          // 成功后清除错误信息
           t.error = undefined;
           logger?.info({ scope: "background.task", event: "completed", message: `Task completed: ${t.def.id}`, data: { taskId: t.def.id } });
         }
@@ -492,7 +329,6 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
           t.state = "idle";
           logger?.info({ scope: "background.task", event: "canceled", message: `Task canceled: ${t.def.id}`, data: { taskId: t.def.id } });
         } else {
-          // 网络或业务错误：保留错误信息，回到 idle 等待下一周期
           const msg = err instanceof Error ? err.message : String(err);
           t.error = msg;
           t.state = "idle";
@@ -511,21 +347,19 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
         t.ctl = undefined;
         scheduleNext(t);
         emitAll();
-        // 更新冷却时间戳
         const cooldownKey = `${t.def.id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
         cooldownMap.set(cooldownKey, Date.now());
       }
     })();
+
     t.runPromise = promise;
     try {
       await promise;
     } finally {
       t.runPromise = undefined;
       emitAll();
-      // 关键修复：消费 rerunRequested。运行期间到达的 trigger 合并为一次后续运行。
       if (t.rerunRequested && !disposed) {
         t.rerunRequested = false;
-        // 不递归 await runOne 以避免堆栈过深；通过 microtask 异步起新实例。
         queueMicrotask(() => {
           if (!t.runPromise && !disposed) {
             void runOne(t, "rerun");
@@ -547,718 +381,202 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
 
   /**
    * 触发任务运行（内部领域事件 API）。
-   * 设计缘由：业务插件用于后台领域事件触发，受普通冷却控制。
-   * "manual" / "first-sync" 理由绕过冷却；其他理由进入冷却/合并。
    */
   function trigger(id: string, reason = "interval"): void {
     const t = tasks.get(id);
     if (!t) return;
 
-    // 冷却检查：普通事件的同一 task/key scope 最短网络间隔为 2 分钟
+    // 冷却检查
     if (reason !== "manual" && reason !== "first-sync") {
       const cooldownKey = `${id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
       const lastRun = cooldownMap.get(cooldownKey);
       if (lastRun && Date.now() - lastRun < COOLDOWN_MS) {
-        // 冷却期内：标记 syncDue，冷却结束后自动唤醒
         t.rerunRequested = true;
         return;
       }
     }
 
-    // 关键修复：follower 标签页的 trigger 必须转发给 leader 执行
-    if (!leaderCtx.isLeader) {
-      if (shouldUseLocalSession(t, reason)) {
-        void (async () => {
-          if (await runLocallyIfEligible(t, reason)) return;
-          leaderCtx.forwardAction({ type: "trigger", id, reason });
-        })();
-        return;
-      }
-      leaderCtx.forwardAction({ type: "trigger", id, reason });
-      return;
-    }
     void runOne(t, reason);
   }
 
   /**
    * 立即同步一次（UI 手动 API）。
-   * 设计缘由：托盘唯一的手动动作，绕过普通冷却但不绕过门禁。
-   * 等价于 trigger(taskId, "manual")，但语义更清晰。
    */
   function runNow(id: string): void {
     const t = tasks.get(id);
     if (!t) return;
-
-    // 关键修复：follower 标签页的 runNow 必须转发给 leader 执行
-    if (!leaderCtx.isLeader) {
-      // 手动点击优先使用当前 tab 的已解锁会话；若本地并未 ready，再交给
-      // leader，保持统一任务入口和原有跨标签兜底。
-      void (async () => {
-        if (await runLocallyIfEligible(t, "manual")) return;
-        leaderCtx.forwardAction({ type: "run-now", id });
-      })();
-      return;
-    }
-    // manual 理由绕过普通冷却
     void runOne(t, "manual");
   }
 
   /**
    * 取消当前运行。
-   * 设计缘由：只中止当前 instance，不会禁用任务、不会取消未来定时。
-   * 取消后以取消完成时为新周期起点。
+   * 施工单 002：cancel 必须清除 rerunRequested，避免取消后立即重新运行。
    */
   async function cancel(id: string): Promise<void> {
     const t = tasks.get(id);
     if (!t) return;
-    if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "cancel", id });
-      return;
-    }
-    t.ctl?.abort();
     t.rerunRequested = false;
-    await awaitIdle(t);
-    if (!t.runPromise) {
-      t.state = "idle";
+    if (t.ctl) {
+      t.ctl.abort();
     }
-    scheduleNext(t);
-    emitAll();
+    await awaitIdle(t);
   }
 
   /**
-   * 硬切换 007：取消指定 key namespace 下所有 task。
-   * follower 必须把操作转发给 leader；leader 在本 tab 内执行 cancel。
+   * 取消指定 key namespace 下所有 task。
    */
   async function cancelByKey(publicKeyHex: string): Promise<void> {
-    if (!leaderCtx.isLeader) {
-      leaderCtx.forwardAction({ type: "cancel-by-key", publicKeyHex });
-      return;
-    }
-    const targets: TaskRuntime[] = [];
+    const toCancel: TaskRuntime[] = [];
     for (const t of tasks.values()) {
-      // 008：用 resolveKeyScope 取最新求值结果——active key 切换后再调
-      // cancelByKey 也能匹配到正确 namespace。
-      if (resolveKeyScope(t.def)?.publicKeyHex === publicKeyHex) {
-        targets.push(t);
+      const ks = resolveKeyScope(t.def);
+      if (ks?.publicKeyHex === publicKeyHex) {
+        toCancel.push(t);
       }
     }
-    for (const t of targets) {
-      t.ctl?.abort();
-      t.rerunRequested = false;
+    for (const t of toCancel) {
+      if (t.ctl) t.ctl.abort();
+    }
+    for (const t of toCancel) {
       await awaitIdle(t);
-      if (!t.runPromise) {
-        t.state = "idle";
+    }
+  }
+
+  function listSnapshots(): BackgroundTaskSnapshot[] {
+    return snapshotList();
+  }
+
+  function onChange(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void {
+    listeners.add(handler);
+    handler(snapshotList());
+    return () => { listeners.delete(handler); };
+  }
+
+  function getScheduleSettings(): BackgroundSyncSettings {
+    return loadScheduleSettings();
+  }
+
+  function updateScheduleSettings(settings: BackgroundSyncSettings): void {
+    const minInterval = getMinIntervalMs();
+    const normalized: BackgroundSyncSettings = {
+      assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(settings.assetHoldingsIntervalMs, minInterval)
+    };
+    saveScheduleSettings(normalized);
+    recalculateAssetHoldingsSchedule();
+  }
+
+  function getMinIntervalMs(): number {
+    let min = 0;
+    for (const t of tasks.values()) {
+      if (t.def.schedule?.group === "asset-holdings" && t.def.schedule.minIntervalMs) {
+        min = Math.max(min, t.def.schedule.minIntervalMs);
       }
-      scheduleNext(t);
+    }
+    return min;
+  }
+
+  /**
+   * 设置定时器，定期触发任务。
+   */
+  function startScheduler(): void {
+    if (intervalTimer) return;
+    intervalTimer = setInterval(() => {
+      if (disposed) return;
+      const now = Date.now();
+      for (const t of tasks.values()) {
+        if (t.nextRunAt && new Date(t.nextRunAt).getTime() <= now) {
+          void runOne(t, "interval");
+        }
+      }
+    }, 10_000); // 每 10 秒检查一次
+  }
+
+  function stopScheduler(): void {
+    if (intervalTimer) {
+      clearInterval(intervalTimer);
+      intervalTimer = undefined;
+    }
+  }
+
+  /**
+   * 处理 Vault 锁定事件。
+   */
+  function onVaultLocked(): void {
+    for (const t of tasks.values()) {
+      const ks = resolveKeyScope(t.def);
+      if (ks?.publicKeyHex) {
+        // Vault 锁定时，标记任务为 blocked
+        if (t.state === "running" || t.state === "queued") {
+          t.state = "blocked";
+          t.blockedReason = { key: "background.blocked.unlock", fallback: "Vault locked" };
+          if (t.ctl) t.ctl.abort();
+        }
+      }
     }
     emitAll();
   }
 
   /**
-   * 获取任务的有效周期毫秒。
-   * 设计缘由：优先使用 schedule group 配置的 interval，否则使用任务定义的 intervalMs。
+   * 处理 Vault 解锁事件。
    */
-  function getEffectiveIntervalMs(t: TaskRuntime): number | undefined {
-    if (t.def.schedule?.group === "asset-holdings") {
-      return loadScheduleSettings().assetHoldingsIntervalMs;
-    }
-    return t.def.intervalMs;
-  }
-
-  function startTimer() {
-    if (intervalTimer) return;
-    intervalTimer = setInterval(() => {
-      const now = Date.now();
-      for (const t of tasks.values()) {
-        if (t.runPromise) continue;
-        if (t.state === "running" || t.state === "queued") continue;
-
-        // blocked 任务：retryOn=interval 时到期后重新检查 eligibility
-        if (t.state === "blocked") {
-          const intervalMs = getEffectiveIntervalMs(t);
-          if (intervalMs == null) continue;
-          if (t.lastScheduledAt == null) {
-            t.lastScheduledAt = now;
-            continue;
-          }
-          if (now - t.lastScheduledAt >= intervalMs) {
-            t.lastScheduledAt = now;
-            if (leaderCtx.isLeader) {
-              void runOne(t, "interval-recheck");
-            }
-          }
-          continue;
-        }
-
-        // 冷却唤醒：检查是否有待处理的 rerunRequested 且已过冷却期
-        if (t.rerunRequested) {
-          const cooldownKey = `${t.def.id}:${resolveKeyScope(t.def)?.publicKeyHex ?? "global"}`;
-          const lastRun = cooldownMap.get(cooldownKey);
-          if (!lastRun || now - lastRun >= COOLDOWN_MS) {
-            t.rerunRequested = false;
-            if (leaderCtx.isLeader) {
-              void runOne(t, "cooldown-wakeup");
-            }
-            continue;
-          }
-        }
-
-        const intervalMs = getEffectiveIntervalMs(t);
-        if (intervalMs == null) continue;
-        if (t.lastScheduledAt == null) {
-          t.lastScheduledAt = now;
-          continue;
-        }
-        if (now - t.lastScheduledAt >= intervalMs) {
-          t.lastScheduledAt = now;
-          if (leaderCtx.isLeader) {
-            void runOne(t, "interval");
-          }
-        }
-      }
-    }, 1000);
-  }
-
-  function handleVisibility() {
-    if (typeof document === "undefined") return;
-    if (document.visibilityState === "visible") {
-      for (const t of tasks.values()) {
-        if (t.runPromise) continue;
-        if (t.state !== "idle") continue;
-        // 改走受冷却控制的 trigger，避免绕过冷却
-        trigger(t.def.id, "visibility");
-      }
-    }
-  }
-
-  /**
-   * 关键修复：浏览器重新联网后触发一次所有任务，
-   * 让 P2PKH recent-sync 等业务能立即拿到最新链上状态。
-   * 设计缘由：节流 / 离线期间任务的 nextRunAt 已过期，但 timer
-   * 不会补跑；online 事件是唯一明确的"网络恢复"信号。
-   * 改走受冷却控制的 trigger，避免绕过冷却。
-   */
-  function handleOnline() {
-    if (typeof navigator === "undefined" || !navigator.onLine) return;
+  function onVaultUnlocked(): void {
     for (const t of tasks.values()) {
-      if (t.runPromise) continue;
-      if (t.state === "running" || t.state === "queued") continue;
-      // 改走受冷却控制的 trigger，避免绕过冷却
-      trigger(t.def.id, "online");
-    }
-  }
-
-  /**
-   * 监听 localStorage storage 事件（跨标签页同步的 fallback）。
-   * 设计缘由：BroadcastChannel 在某些浏览器可能不可用，
-   * storage 事件是更广泛的跨标签页同步机制。
-   */
-  let storageHandler: ((ev: StorageEvent) => void) | undefined;
-  function handleStorage(ev: StorageEvent) {
-    if (ev.key === SCHEDULE_SETTINGS_KEY) {
-      recalculateAssetHoldingsSchedule();
-    }
-  }
-
-  function start() {
-    if (typeof window !== "undefined") {
-      visibilityHandler = handleVisibility;
-      document.addEventListener("visibilitychange", visibilityHandler);
-      window.addEventListener("online", handleOnline);
-      storageHandler = handleStorage;
-      window.addEventListener("storage", storageHandler);
-    }
-    leaderCtx.start({
-      onAction: handleFollowerAction,
-      getSnapshots: () => [...tasks.values()].map(snapshot),
-      onSnapshots: (snapshots) => {
-        // follower 收到 leader 广播的快照：保留为远端视图；本地已解锁会话
-        // 的新尝试优先于它，避免错误显示 leader 的“等待解锁”。
-        leaderSnapshots.clear();
-        for (const item of snapshots) leaderSnapshots.set(item.id, item);
-        notifyListeners();
+      if (t.state === "blocked") {
+        const reason = t.blockedReason;
+        if (reason && typeof reason === "object" && "key" in reason && reason.key === "background.blocked.unlock") {
+          t.state = "idle";
+          t.blockedReason = undefined;
+          scheduleNext(t);
+        }
       }
-    });
-    startTimer();
+    }
+    emitAll();
   }
 
-  start();
+  // 启动定时器
+  startScheduler();
 
-  const registry: BackgroundRegistry = {
-    register,
-    list,
-    get: getDef
-  };
+  function dispose(): void {
+    if (disposed) return;
+    disposed = true;
+    stopScheduler();
+    for (const t of tasks.values()) {
+      if (t.ctl) t.ctl.abort();
+    }
+    tasks.clear();
+    listeners.clear();
+  }
 
-  const service: BackgroundServiceHandle = {
-    listSnapshots() {
-      return snapshotListForDisplay();
-    },
-    onChange(handler) {
-      listeners.add(handler);
-      handler(snapshotListForDisplay());
-      return () => listeners.delete(handler);
-    },
+  return {
+    listSnapshots,
+    onChange,
     runNow,
     trigger,
     cancel,
     cancelByKey,
-    getScheduleSettings() {
-      return loadScheduleSettings();
-    },
-    updateScheduleSettings(settings) {
-      // 校验最小间隔：遍历所有 asset-holdings 组任务，取最大 minIntervalMs。
-      // 设计缘由：防止用户配置过短的同步间隔导致 API 限流或资源浪费。
-      let minIntervalMs = 0;
-      for (const t of tasks.values()) {
-        if (t.def.schedule?.group === "asset-holdings" && t.def.schedule.minIntervalMs) {
-          minIntervalMs = Math.max(minIntervalMs, t.def.schedule.minIntervalMs);
-        }
-      }
-      const validatedSettings: BackgroundSyncSettings = {
-        assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(settings.assetHoldingsIntervalMs, minIntervalMs)
-      };
-      saveScheduleSettings(validatedSettings);
-      // 重置所有 asset-holdings 组任务的 lastScheduledAt，让新周期从保存时刻开始。
-      // 设计缘由：不重置的话，旧 lastScheduledAt + 新 interval 可能导致
-      // 下一次触发时间不符合用户预期（例如旧周期刚触发过，新 interval 更短，
-      // 但 lastScheduledAt 还是旧值，下次触发要等新 interval）。
-      for (const t of tasks.values()) {
-        if (t.def.schedule?.group === "asset-holdings") {
-          t.lastScheduledAt = undefined;
-        }
-      }
-      recalculateAssetHoldingsSchedule();
-    },
-    dispose() {
-      if (disposed) return;
-      disposed = true;
-      if (intervalTimer) clearInterval(intervalTimer);
-      if (visibilityHandler && typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", visibilityHandler);
-      }
-      if (storageHandler && typeof window !== "undefined") {
-        window.removeEventListener("storage", storageHandler);
-      }
-      if (typeof window !== "undefined") {
-        window.removeEventListener("online", handleOnline);
-      }
-      if (settingsChannel) {
-        try { settingsChannel.close(); } catch { /* 静默 */ }
-        settingsChannel = null;
-      }
-      for (const t of tasks.values()) {
-        t.ctl?.abort();
-      }
-      leaderCtx.stop();
-    }
-  };
-
-  return Object.assign(service, { __registry: registry } as { __registry: BackgroundRegistry });
+    getScheduleSettings,
+    updateScheduleSettings,
+    dispose,
+    // Registry 接口
+    register,
+    list,
+    get: getDef
+  } as BackgroundServiceHandle & BackgroundRegistry;
 }
 
-export interface BackgroundBundle {
+/**
+ * 创建 background bundle（registry + service）。
+ * 设计缘由：manifest 需要同时获取 registry 和 service。
+ */
+export function createBackgroundBundle(options: CreateBackgroundServiceOptions = {}): {
   registry: BackgroundRegistry;
   service: BackgroundServiceHandle;
-}
-
-export function createBackgroundBundle(options: CreateBackgroundServiceOptions = {}): BackgroundBundle {
+} {
   const service = createBackgroundService(options);
-  const registry = (service as unknown as { __registry: BackgroundRegistry }).__registry;
-  return { registry, service };
-}
-
-void BACKGROUND_REGISTRY_CAPABILITY;
-void BACKGROUND_SERVICE_CAPABILITY;
-
-interface LeaderContext {
-  isLeader: boolean;
-  start(handlers: { onAction: (action: FollowerAction) => void; getSnapshots: () => BackgroundTaskSnapshot[]; onSnapshots: (snapshots: BackgroundTaskSnapshot[]) => void }): void;
-  stop(): void;
-  /** Leader 把当前快照广播给所有 follower。 */
-  broadcastSnapshots(snapshots: BackgroundTaskSnapshot[]): void;
-  /** Follower 把操作转发给 leader。 */
-  forwardAction(action: FollowerAction): void;
-  /** Leader 主动向指定 tab 发送消息（未使用则保持扩展性）。 */
-  sendToTab(tabId: string, message: LeaderToFollower): void;
-}
-
-type FollowerAction =
-  | { type: "trigger"; id: string; reason?: string; fromTabId?: string }
-  | { type: "run-now"; id: string; fromTabId?: string }
-  | { type: "cancel"; id: string; fromTabId?: string }
-  | { type: "cancel-by-key"; publicKeyHex: string; fromTabId?: string }
-  | { type: "sync-state"; fromTabId: string };
-
-type LeaderToFollower =
-  | { type: "snapshots"; snapshots: BackgroundTaskSnapshot[] }
-  | { type: "action-result"; ok: boolean; actionId: string };
-
-/**
- * BroadcastChannel 只是低延迟通道，不能作为操作投递的唯一保障：部分浏览器
- * 可使用 Web Locks，却因隐私策略、WebView 或运行时错误而无法创建频道。
- * 这时以 localStorage 的短期邮箱兜底；leader 取得资格后会扫描并消费邮箱。
- */
-type PersistedFollowerAction = {
-  action: FollowerAction;
-  createdAt: number;
-  from: string;
-};
-
-function createLeaderContext(channelName: string, heartbeatMs: number): LeaderContext {
-  let isLeader = false;
-  let interval: ReturnType<typeof setInterval> | undefined;
-  let bc: BroadcastChannel | null = null;
-  let lastHeartbeat = 0;
-  let onAction: ((action: FollowerAction) => void) | undefined;
-  let getSnapshots: (() => BackgroundTaskSnapshot[]) | undefined;
-  let onSnapshots: ((snapshots: BackgroundTaskSnapshot[]) => void) | undefined;
-  // Web Locks 持有的 AbortController：用于在 stop() 时主动放弃 leadership。
-  let lockAbort: AbortController | null = null;
-  // 当前 tab 选举状态：用于 "want/claim" 协议期间判断自己是否已赢得选举。
-  let electionInProgress = false;
-  // 选举结果：在超时前收到其他 tab 的 heartbeat 则立即置 "lost"，
-  // 让 runElection 的超时回调认输，避免短暂双 leader。
-  let electionResult: "won" | "lost" | null = null;
-  // 选举期间收到的其他 tab 的 tabId（"want" 消息中携带），用于 tabId tiebreak。
-  const contenders = new Set<string>();
-  // 缓存 leader 自己的 tabId，用于把 action 标记来源。
-  const tabId =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `tab-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-  const actionStoragePrefix = `${channelName}.action.`;
-  const actionTtlMs = 30_000;
-  const processedActionIds = new Set<string>();
-  let storageHandler: ((event: StorageEvent) => void) | undefined;
-
-  function rememberProcessedAction(actionId: string) {
-    processedActionIds.add(actionId);
-    // 操作 ID 只用于短期跨通道去重，避免长期运行的页面无限增长。
-    if (processedActionIds.size > 256) processedActionIds.clear();
-  }
-
-  function actionStorageKey(actionId: string) {
-    return `${actionStoragePrefix}${actionId}`;
-  }
-
-  function removePersistedAction(actionId: string) {
-    try {
-      localStorage.removeItem(actionStorageKey(actionId));
-    } catch {
-      // 存储可能被浏览器策略禁用；BroadcastChannel 仍可作为可用通道。
-    }
-  }
-
-  function deliverAction(action: FollowerAction, actionId: string, from: string) {
-    if (!isLeader || !onAction || processedActionIds.has(actionId)) return;
-    rememberProcessedAction(actionId);
-    removePersistedAction(actionId);
-    if (action.type === "sync-state") {
-      onAction({ type: "sync-state", fromTabId: from });
-    } else {
-      onAction({ ...action, fromTabId: from });
-    }
-  }
-
-  function consumePersistedAction(key: string, value: string) {
-    if (!key.startsWith(actionStoragePrefix)) return;
-    const actionId = key.slice(actionStoragePrefix.length);
-    if (!actionId) return;
-    try {
-      const persisted = JSON.parse(value) as PersistedFollowerAction;
-      if (!persisted?.action || typeof persisted.createdAt !== "number" || typeof persisted.from !== "string") return;
-      // 不执行过期的点击，防止浏览器崩溃恢复后意外补跑陈旧的手动操作。
-      if (Date.now() - persisted.createdAt > actionTtlMs) {
-        removePersistedAction(actionId);
-        return;
-      }
-      deliverAction(persisted.action, actionId, persisted.from);
-    } catch {
-      // 损坏的记录不能阻塞后续动作。
-      removePersistedAction(actionId);
-    }
-  }
-
-  function drainPersistedActions() {
-    if (!isLeader) return;
-    try {
-      const entries: Array<[string, string]> = [];
-      for (let i = 0; i < localStorage.length; i += 1) {
-        const key = localStorage.key(i);
-        if (!key?.startsWith(actionStoragePrefix)) continue;
-        const value = localStorage.getItem(key);
-        if (value !== null) entries.push([key, value]);
-      }
-      for (const [key, value] of entries) consumePersistedAction(key, value);
-    } catch {
-      // localStorage 不可用时由 BroadcastChannel 保持正常路径。
-    }
-  }
-
-  function becomeLeader() {
-    isLeader = true;
-    lastHeartbeat = Date.now();
-    if (bc) broadcastHeartbeat();
-    drainPersistedActions();
-  }
-  function broadcastHeartbeat() {
-    if (bc) bc.postMessage({ type: "heartbeat", t: Date.now(), from: tabId });
-  }
-  function broadcastSnapshotsImpl(snapshots: BackgroundTaskSnapshot[]) {
-    if (bc) bc.postMessage({ type: "snapshots", snapshots, from: tabId });
-  }
-
-  /**
-   * 检查是否拿到 Web Lock。
-   * 关键修复：旧实现每个 tab 启动时无条件把 isLeader 设为 true，
-   * 收到首个 heartbeat 才降级——并发启动时可能短暂双 leader，也可能
-   * 互相降级后无 leader。
-   * 新实现：
-   *   - 非浏览器环境（无 window）：单进程，自任 leader。
-   *   - 有 navigator.locks：使用 Web Locks 做 FIFO 互斥；锁释放后下一个
-   *     requestor 自动获取。leader 死亡等价于浏览器关闭，浏览器会释放锁。
-   *   - 无 navigator.locks：使用 BroadcastChannel 选举（tabId tiebreak）。
-   *     每个 tab 广播 "want" + 自己的 tabId；tabId 最小者赢得选举；
-   *     leader 周期性 heartbeat；follower 超时未收到 heartbeat 重新参选。
-   */
-  function start(handlers: {
-    onAction: (action: FollowerAction) => void;
-    getSnapshots: () => BackgroundTaskSnapshot[];
-    onSnapshots: (snapshots: BackgroundTaskSnapshot[]) => void;
-  }) {
-    onAction = handlers.onAction;
-    getSnapshots = handlers.getSnapshots;
-    onSnapshots = handlers.onSnapshots;
-
-    // 非浏览器环境（node / 单进程测试）：没有跨 tab 协调需求，自任 leader。
-    if (typeof window === "undefined") {
-      becomeLeader();
-      return;
-    }
-
-    // storage 事件不会回送给写入方；因此 leader 获取资格时还会主动扫描，
-    // 以覆盖 "点击发生在选举完成前" 的竞态。
-    storageHandler = (event) => {
-      if (event.key && event.newValue) consumePersistedAction(event.key, event.newValue);
-    };
-    window.addEventListener("storage", storageHandler);
-
-    const locker = (navigator as Navigator & { locks?: WebLocksLike }).locks;
-    if (locker) {
-      // Web Locks 路径：FIFO 互斥，第一个 requestor 拿锁即成 leader。
-      // 锁一直持有到 callback 返回；lockAbort 用于 stop() 时主动放弃。
-      lockAbort = new AbortController();
-      const myLockAbort = lockAbort;
-      void locker.request(LEADER_LOCK_NAME, async () => {
-        becomeLeader();
-        try {
-          await new Promise<void>((resolve) => {
-            if (myLockAbort.signal.aborted) {
-              resolve();
-              return;
-            }
-            myLockAbort.signal.addEventListener("abort", () => resolve(), { once: true });
-          });
-        } finally {
-          isLeader = false;
-        }
-      });
-      // 仍然挂一个 BroadcastChannel 监听 follower 转发过来的操作；
-      // 没有 Web Locks 时这个 channel 也用于选举。
-      try {
-        bc = new BroadcastChannel(channelName);
-        bc.onmessage = (ev) => handleBroadcastMessage(ev);
-      } catch {
-        bc = null;
-      }
-      // 周期性把快照广播给 follower；心跳检测锁丢失。
-      interval = setInterval(() => {
-        if (isLeader) {
-          lastHeartbeat = Date.now();
-          if (bc) {
-            broadcastHeartbeat();
-            if (getSnapshots) broadcastSnapshotsImpl(getSnapshots());
-          }
-        } else if (bc) {
-          // 锁可能被另一 tab 抢到；继续观察但不主动让出。
-        }
-      }, heartbeatMs);
-      return;
-    }
-
-    // 无 Web Locks：BroadcastChannel 选举。
-    try {
-      bc = new BroadcastChannel(channelName);
-    } catch {
-      bc = null;
-      // BroadcastChannel 不可用：单 tab 限流，自任 leader。
-      becomeLeader();
-      return;
-    }
-    bc.onmessage = (ev) => handleBroadcastMessage(ev);
-    runElection();
-    interval = setInterval(() => {
-      const now = Date.now();
-      if (isLeader) {
-        lastHeartbeat = now;
-        broadcastHeartbeat();
-        if (getSnapshots) broadcastSnapshotsImpl(getSnapshots());
-      } else if (now - lastHeartbeat > heartbeatMs * 3) {
-        // 长期未收到 leader 心跳：重新参与选举。
-        runElection();
-      }
-    }, heartbeatMs);
-  }
-
-  /**
-   * 启动一次选举：广播 want + 自己的 tabId,等待一个选举超时窗口;
-   * 窗口结束后如果未发现比自己 tabId 更小的参选者,且没有听到 leader
-   * 心跳,就赢。
-   * 关键修复(用户验收反馈)：旧实现 250ms 超时只检查 contenders,没看
-   * 期间是否收到过 heartbeat——已有 leader 收到新 tab 的 want 后只 return,
-   * 没有立即响应,新 tab 在 250ms 内看不到任何 contender 就会自任 leader。
-   * 修复后 leader 收到 want 立即广播 heartbeat;新 tab 收到 heartbeat 后
-   * 立刻标 electionResult="lost",超时检查时直接认输。
-   *
-   * 关键修复(用户验收反馈,2026-06)：旧实现在 runElection 内
-   * `lastHeartbeat = 0`,会抹掉刚收到的旧 leader heartbeat。如果选举触发
-   * 与 heartbeat 到达的顺序刚好让 onMessage 的 electionResult="lost"
-   * 没能在 250ms 内执行,该 tab 会错误地自任 leader 形成短暂双 leader。
-   * 改成不清零 lastHeartbeat;改用局部 `electionStartedAt` 把"本轮选举
-   * 期间是否有任何新心跳"明确出来,超时时再做一次保险检查。
-   */
-  function runElection() {
-    if (!bc) {
-      becomeLeader();
-      return;
-    }
-    electionInProgress = true;
-    electionResult = null;
-    contenders.clear();
-    contenders.add(tabId);
-    const electionStartedAt = Date.now();
-    bc.postMessage({ type: "want", from: tabId, t: electionStartedAt });
-    setTimeout(() => {
-      electionInProgress = false;
-      if (electionResult === "lost") {
-        // 在 250ms 内收到了 leader 的 heartbeat——认输。
-        isLeader = false;
-        return;
-      }
-      if (isLeader) return;
-      // 关键修复:保险检查——如果 onMessage 未及时把 electionResult 置 lost
-      // (例如 heartbeat 与本回调几乎同时到达),通过 lastHeartbeat 的真实
-      // 时间戳兜底判定。lastHeartbeat 不再被本函数清零,可信任其值。
-      if (lastHeartbeat >= electionStartedAt) {
-        isLeader = false;
-        return;
-      }
-      // 取 contenders 中最小的 tabId;如果不是自己,说明有更低 tabId 在争。
-      let winner = tabId;
-      for (const c of contenders) {
-        if (c < winner) winner = c;
-      }
-      if (winner === tabId) {
-        // 关键修复:自己 tabId 最小(没有更小者),赢得选举。
-        becomeLeader();
-        if (getSnapshots) broadcastSnapshotsImpl(getSnapshots());
-      }
-    }, 250);
-  }
-
-  function handleBroadcastMessage(ev: MessageEvent) {
-    const data = ev.data as
-      | { type?: string; t?: number; from?: string; action?: FollowerAction; actionId?: string; snapshots?: BackgroundTaskSnapshot[] }
-      | undefined;
-    if (!data?.type || !data.from || data.from === tabId) return;
-    if (data.type === "want") {
-      // 另一个 tab 想要 leadership。
-      contenders.add(data.from);
-      if (isLeader) {
-        // 关键修复：已有 leader 立即广播 heartbeat 让新 tab 知道自己在线。
-        // 旧实现只 return，新 tab 250ms 内看不到任何 contender，会自任 leader
-        // 形成短暂双 leader（直到旧 leader 下一次 5s heartbeat 才纠正）。
-        broadcastHeartbeat();
-        return;
-      }
-      // 我不是 leader；什么都不做，等选举超时 + contenders tabId tiebreak。
-    } else if (data.type === "heartbeat" && typeof data.t === "number") {
-      if (data.t > lastHeartbeat) {
-        lastHeartbeat = data.t;
-        // 收到其他 tab 的心跳：让出 leadership。
-        if (data.from !== tabId) {
-          if (isLeader) {
-            isLeader = false;
-          } else if (electionInProgress) {
-            // 关键修复：election 中立即标 lost，不等超时——避免新 tab 与
-            // 旧 leader 短暂双 leader。
-            electionResult = "lost";
-          }
-        }
-      }
-    } else if (data.type === "snapshots" && Array.isArray(data.snapshots)) {
-      if (onSnapshots) onSnapshots(data.snapshots);
-    } else if (data.type === "action" && data.action) {
-      // 即使此刻尚未成为 leader，动作已经在 localStorage 邮箱中，
-      // becomeLeader() 会在拿到锁/赢得选举后重放，不能在这里丢弃。
-      deliverAction(data.action, data.actionId ?? `${data.from}-${Date.now()}`, data.from);
-    }
-  }
-
-  function stop() {
-    if (interval) clearInterval(interval);
-    interval = undefined;
-    if (lockAbort) {
-      try { lockAbort.abort(); } catch { /* 静默 */ }
-      lockAbort = null;
-    }
-    if (bc) {
-      try { bc.close(); } catch { /* 静默 */ }
-      bc = null;
-    }
-    isLeader = false;
-    electionInProgress = false;
-    electionResult = null;
-    if (storageHandler && typeof window !== "undefined") {
-      window.removeEventListener("storage", storageHandler);
-      storageHandler = undefined;
-    }
-  }
-  function forwardAction(action: FollowerAction) {
-    const actionId =
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${tabId}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
-    // 先写邮箱再发实时消息：leader 即使尚未就绪、或 BC 不可用，也能接到。
-    try {
-      localStorage.setItem(actionStorageKey(actionId), JSON.stringify({ action, createdAt: Date.now(), from: tabId } satisfies PersistedFollowerAction));
-    } catch {
-      // 允许降级到 BroadcastChannel；两者同时不可用时无法跨 tab 投递。
-    }
-    if (bc) bc.postMessage({ type: "action", action, actionId, from: tabId });
-  }
-  function sendToTab(_tabId: string, _message: LeaderToFollower) {
-    // 当前实现：所有 leader->follower 消息都通过 broadcast 发送；
-    // tab-targeted 消息保留扩展点（按需可改用 id 匹配过滤）。
-    if (bc) bc.postMessage({ type: "broadcast", from: tabId });
-  }
   return {
-    get isLeader() {
-      return isLeader;
-    },
-    start,
-    stop,
-    broadcastSnapshots: broadcastSnapshotsImpl,
-    forwardAction,
-    sendToTab
+    registry: service as unknown as BackgroundRegistry,
+    service
   };
 }
 
-/**
- * navigator.locks.request 的最小类型子集；运行时通过 navigator.locks 调用，
- * 不引入 dom lib 类型。
- */
-interface WebLocksLike {
-  request<T>(name: string, cb: () => Promise<T>): Promise<T | undefined>;
-}
+// Re-export capability keys
+export { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY };

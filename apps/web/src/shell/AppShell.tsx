@@ -156,51 +156,39 @@ export function AppShell() {
     });
   }, [vault]);
 
-  // 硬切换 003 / 6.3：5 分钟无活动自动锁定。
-  // 页面隐藏期间不暂停计时，只在用户活动时重置。
+  // 施工单 002：自动锁定改为向 Coordinator 发送节流 activity。
+  // 页面 hidden、blur、暂停不应立即 lock；无任意用户活动达到配置时长才全局 lock。
+  // Coordinator client 通过 capability 获取（在组件顶层调用 hook）。
+  let coordinatorClient: { getIsConnected(): boolean; sendActivity(): void } | null = null;
+  coordinatorClient = useCapability<{ getIsConnected(): boolean; sendActivity(): void }>("session-coordinator.client") ?? null;
+
   useEffect(() => {
     if (vaultStatus !== "unlocked") {
       return;
     }
-    let timer: ReturnType<typeof window.setTimeout> | null = null;
-    let disposed = false;
 
-    const schedule = () => {
-      if (disposed) return;
-      if (timer !== null) {
-        window.clearTimeout(timer);
-      }
-      timer = window.setTimeout(() => {
-        if (disposed) return;
-        void vault.lock().catch((err) => {
-          console.error("AppShell auto-lock failed", err);
-        });
-      }, AUTO_LOCK_IDLE_MS);
-    };
+    if (!coordinatorClient || !coordinatorClient.getIsConnected()) return;
+
+    // 使用 Coordinator：发送节流 activity
+    let lastActivityTime = 0;
+    const ACTIVITY_THROTTLE_MS = 5000; // 5 秒节流
+
     const onActivity = () => {
-      schedule();
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        schedule();
+      const now = Date.now();
+      if (now - lastActivityTime >= ACTIVITY_THROTTLE_MS) {
+        lastActivityTime = now;
+        coordinatorClient!.sendActivity();
       }
     };
 
-    schedule();
     for (const eventName of AUTO_LOCK_ACTIVITY_EVENTS) {
       window.addEventListener(eventName, onActivity, { passive: true });
     }
-    document.addEventListener("visibilitychange", onVisibilityChange);
 
     return () => {
-      disposed = true;
-      if (timer !== null) {
-        window.clearTimeout(timer);
-      }
       for (const eventName of AUTO_LOCK_ACTIVITY_EVENTS) {
         window.removeEventListener(eventName, onActivity);
       }
-      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [vault, vaultStatus]);
 

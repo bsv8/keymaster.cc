@@ -71,6 +71,10 @@ function createHost() {
   });
   host.capabilities.provide<VaultService>("vault.service", makeVault());
   host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
+  host.capabilities.provide("session-coordinator.client", {
+    getIsConnected: () => true,
+    sendActivity: () => undefined
+  });
   host.routes.register({
     id: "test.messages.list",
     path: "/messages",

@@ -426,7 +426,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
               }
               return opened;
             },
-            sealSendInput: (input) => {
+            sealSendInput: async (input) => {
               try {
                 if (
                   input.contentType !== "text/plain" &&
@@ -443,7 +443,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
                 if (!input.recipient.recipientPublicKeyHex) {
                   return { error: "appmsg.core: recipientPublicKeyHex required" };
                 }
-                const sealed = crypto.sealSendInput({
+                const sealed = await crypto.sealSendInput({
                   sender: {
                     senderPublicKeyHex: pubHex,
                     senderOrigin: input.sender.senderOrigin,

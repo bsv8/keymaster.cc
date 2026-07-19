@@ -104,7 +104,7 @@ describe("sessionCryptoClient", () => {
           label: "Key A",
           capabilities: ["p2pkh"],
           createdAt: new Date().toISOString()
-        })
+        }, { mode: "appview" })
       ).rejects.toThrow("Session crypto worker is unavailable");
     } finally {
       (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
@@ -128,7 +128,7 @@ describe("sessionCryptoClient", () => {
         label: "Key B",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
-      }, { allowLocalEngineForTests: true });
+      }, { allowLocalEngineForTests: true, mode: "appview" });
       const digest = new Uint8Array(32);
       digest.fill(9);
       await expect(
@@ -158,7 +158,7 @@ describe("sessionCryptoClient", () => {
           label: "Key C",
           capabilities: ["p2pkh"],
           createdAt: new Date().toISOString()
-        })
+        }, { mode: "appview" })
       ).rejects.toThrow("worker init failed");
     } finally {
       (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
@@ -184,7 +184,7 @@ describe("sessionCryptoClient", () => {
         label: "Key W",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
-      });
+      }, { mode: "appview" });
 
       expect(RecordingWorker.instances).toHaveLength(1);
       const worker = RecordingWorker.instances[0];

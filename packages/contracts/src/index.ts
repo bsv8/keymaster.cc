@@ -38,3 +38,4 @@ export * from "./appmsgBind.js";
 export * from "./broadcast.js";
 export * from "./cbor.js";
 export * from "./vaultSession.js";
+export * from "./sessionCoordinator.js";

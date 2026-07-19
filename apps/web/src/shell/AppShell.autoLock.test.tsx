@@ -57,13 +57,17 @@ function makeKeyspace(): KeyspaceService {
   } as unknown as KeyspaceService;
 }
 
-function createHost(vault: VaultService) {
+function createHost(vault: VaultService, sendActivity = vi.fn()) {
   const host = createPluginHost({
     disableConfigPersistence: true,
     initialI18nResources: [SHELL_RESOURCES]
   });
   host.capabilities.provide<VaultService>("vault.service", vault);
   host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
+  host.capabilities.provide("session-coordinator.client", {
+    getIsConnected: () => true,
+    sendActivity
+  });
   host.routes.register({
     id: "test.home",
     path: "/",
@@ -100,7 +104,7 @@ afterEach(() => {
 });
 
 describe("AppShell auto-lock", () => {
-  it("locks after 5 minutes of inactivity", async () => {
+  it("does not perform a tab-local lock after inactivity", async () => {
     const lock = vi.fn(async () => undefined);
     const vault = makeVault(lock);
     const host = createHost(vault);
@@ -117,13 +121,14 @@ describe("AppShell auto-lock", () => {
     expect(lock).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(lock).toHaveBeenCalledTimes(1);
+    expect(lock).not.toHaveBeenCalled();
   });
 
   it("resets the idle timer on user activity", async () => {
     const lock = vi.fn(async () => undefined);
+    const sendActivity = vi.fn();
     const vault = makeVault(lock);
-    const host = createHost(vault);
+    const host = createHost(vault, sendActivity);
 
     render(
       <PluginHostProvider host={host}>
@@ -139,7 +144,8 @@ describe("AppShell auto-lock", () => {
     expect(lock).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(lock).toHaveBeenCalledTimes(1);
+    expect(lock).not.toHaveBeenCalled();
+    expect(sendActivity).toHaveBeenCalledTimes(1);
   });
 
   it("reschedules the idle timer when the document becomes visible again", async () => {
@@ -166,6 +172,6 @@ describe("AppShell auto-lock", () => {
     expect(lock).not.toHaveBeenCalled();
 
     await vi.advanceTimersByTimeAsync(1000);
-    expect(lock).toHaveBeenCalledTimes(1);
+    expect(lock).not.toHaveBeenCalled();
   });
 });

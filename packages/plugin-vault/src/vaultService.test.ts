@@ -12,7 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getFatalError, resetFatalErrorForTest, type MessageBus } from "@keymaster/runtime";
 import { ActiveKeySessionRevokedError } from "@keymaster/contracts";
 import {
-  createVaultService,
+  createVaultService as createProductionVaultService,
   KeyPersistedButActivationFailedError
 } from "./vaultService.js";
 import { bytesToHex, deriveKey, encryptBytes, encryptVerifier } from "./crypto.js";
@@ -27,6 +27,21 @@ const TEST_PRIV_2 = "00000000000000000000000000000000000000000000000000000000000
 const TEST_PRIV_3 = "0000000000000000000000000000000000000000000000000000000000000003";
 /** 与 vaultService 内部常量保持一致，避免跨包 import 测试私有常量。 */
 const LABEL_MAX_LENGTH = 64;
+
+// 这些测试覆盖的是 tab-local VaultService 的状态机；Coordinator RPC 本身
+// 由 coordinator client/worker 测试覆盖。local crypto engine 必须在测试装配
+// 中显式声明，不能改变生产默认的 fail-closed 行为。
+function createVaultService(
+  deps: Parameters<typeof createProductionVaultService>[0]
+): ReturnType<typeof createProductionVaultService> {
+  return createProductionVaultService({
+    ...deps,
+    sessionCryptoEngineOptions: deps.sessionCryptoEngineOptions ?? {
+      allowLocalEngineForTests: true,
+      mode: "appview"
+    }
+  });
+}
 
 interface EventRecord {
   type: string;
