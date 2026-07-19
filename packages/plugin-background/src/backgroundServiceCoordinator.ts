@@ -123,16 +123,24 @@ export function createBackgroundServiceCoordinator(
       return () => { changeHandlers.delete(handler); };
     },
 
-    async runNow(taskId: string): Promise<void> {
-      const ack = await coordinatorClient.backgroundRunNow(taskId);
-      if (ack.status === "already-running" || ack.status === "accepted") return;
-      if (ack.status === "blocked") throw new Error(`Task ${taskId} is blocked: ${ack.reason ?? "等待解锁"}`);
-      throw new Error(`Run task failed: ${ack.status}${"message" in ack ? ` - ${ack.message}` : ""}`);
+    runNow(taskId: string): void {
+      // BackgroundService 的调用方（包括 React event handler）按契约不会 await
+      // 这个内部命令。blocked 是正常的门禁结果，不能让它变成
+      // global.unhandledrejection 并触发应用的 fatal crash page。
+      void coordinatorClient.backgroundRunNow(taskId).then(
+        () => notifyChange(),
+        () => notifyChange()
+      );
     },
 
-    async trigger(taskId: string, reason?: string): Promise<void> {
-      const ack = await coordinatorClient.backgroundTrigger(taskId, reason ?? "manual");
-      if (ack.status !== "accepted" && ack.status !== "already-running") throw new Error(`Trigger task failed: ${ack.status}`);
+    trigger(taskId: string, reason?: string): void {
+      // trigger 是领域事件 fire-and-forget API。Coordinator 会通过任务快照
+      // 广播 accepted / blocked / 失败后的状态；这里绝不可抛出异步异常。
+      // 否则 Vault 锁定时的合法 blocked ack 会令调用它的插件崩溃整个页面。
+      void coordinatorClient.backgroundTrigger(taskId, reason ?? "manual").then(
+        () => undefined,
+        () => undefined
+      );
     },
 
     async cancel(taskId: string): Promise<void> {
@@ -152,9 +160,12 @@ export function createBackgroundServiceCoordinator(
     },
 
     updateScheduleSettings(settings: BackgroundSyncSettings): void {
-      void coordinatorClient.backgroundSettingsUpdate(settings).then((ack) => {
-        if (ack.status !== "accepted" && ack.status !== "ok") throw new Error(`Schedule update failed: ${ack.status}`);
-      });
+      // 同样保持 void 契约：状态更新或连接失败会由 Coordinator state 广播，
+      // 而不是从一个未 await 的 UI 回调中泄漏 rejection。
+      void coordinatorClient.backgroundSettingsUpdate(settings).then(
+        () => undefined,
+        () => undefined
+      );
     },
     dispose: () => { unsubscribeState(); unsubscribeEvent(); changeHandlers.clear(); },
   };

@@ -34,7 +34,7 @@ export function BackgroundTray() {
           const snapshot = s.find((item) => item.id === id);
           const requestedAt = pendingStartedAt.current.get(id);
           const attemptedAt = snapshot?.lastAttemptAt ? new Date(snapshot.lastAttemptAt).getTime() : 0;
-          if (!snapshot || snapshot.state === "queued" || snapshot.state === "running" || (requestedAt && attemptedAt >= requestedAt)) {
+          if (!snapshot || snapshot.state === "queued" || snapshot.state === "running" || snapshot.state === "blocked" || (requestedAt && attemptedAt >= requestedAt)) {
             next.delete(id);
             pendingStartedAt.current.delete(id);
           }
