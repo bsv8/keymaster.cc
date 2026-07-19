@@ -4,6 +4,8 @@
 // 设计缘由：
 //   - 私钥 hex 只进入 worker 全局闭包，不进入插件 service / React state。
 //   - worker 只接受显式 operation，不执行任意回调。
+//
+// 施工单 001：signDigest 操作现在必须传递 format 参数
 
 import {
   deriveP2pkhAddress,
@@ -11,7 +13,7 @@ import {
   decryptSessionPrivateKeyBytes,
   openAppMessageLocalBytes,
   sealAppMessageLocalBytes,
-  signDigestBytes,
+  signEcdsaDigest,
   verifySessionKeyPair
 } from "./sessionCryptoCore.js";
 import { encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial } from "./vaultCoordinator.js";
@@ -116,14 +118,18 @@ function createSessionCryptoRequestHandler(stateRef: WorkerStateRef) {
         if (message.publicKeyHex !== s.publicKeyHex) {
           throw new Error("session_key_mismatch");
         }
+        const sig = await signEcdsaDigest({
+          privateKeyBytes: s.privateKeyBytes,
+          digest: new Uint8Array(message.digest),
+          format: message.format
+        });
         post({
           requestId: message.requestId,
           ok: true,
           result: {
             publicKeyHex: s.publicKeyHex,
-            signature: new Uint8Array(
-              await signDigestBytes(s.privateKeyBytes, new Uint8Array(message.digest))
-            ).buffer
+            format: message.format,
+            signature: new Uint8Array(sig).buffer
           }
         });
         return;

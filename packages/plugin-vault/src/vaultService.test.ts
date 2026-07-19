@@ -650,13 +650,13 @@ describe("VaultService.createAppViewSession (Worker 生命周期)", () => {
       };
 
       await expect(
-        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: digest() })
+        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: digest(), format: "der" })
       ).resolves.toMatchObject({ publicKeyHex: appAKey.publicKeyHex });
       await expect(
-        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest(), format: "der" })
       ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
       await expect(
-        keymasterCrypto.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+        keymasterCrypto.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest(), format: "der" })
       ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
 
       vault.disposeAppViewSession("app-a-session", "window-close");
@@ -667,13 +667,13 @@ describe("VaultService.createAppViewSession (Worker 生命周期)", () => {
       expect(appAWorker?.terminated).toBe(true);
       expect(appBWorker?.terminated).toBe(false);
       await expect(
-        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: digest() })
+        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: digest(), format: "der" })
       ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
       await expect(
-        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest(), format: "der" })
       ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
       await expect(
-        keymasterCrypto.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest() })
+        keymasterCrypto.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: digest(), format: "der" })
       ).resolves.toMatchObject({ publicKeyHex: appBKey.publicKeyHex });
     } finally {
       restoreWorker();
@@ -725,10 +725,10 @@ describe("VaultService.createAppViewSession (Worker 生命周期)", () => {
       expect(vault.status()).toBe("locked");
       expect(appWorkers.every((worker) => worker.terminated)).toBe(true);
       await expect(
-        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: new Uint8Array(32).buffer })
+        appA.signDigest({ publicKeyHex: appAKey.publicKeyHex, digest: new Uint8Array(32).buffer, format: "der" })
       ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
       await expect(
-        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: new Uint8Array(32).buffer })
+        appB.signDigest({ publicKeyHex: appBKey.publicKeyHex, digest: new Uint8Array(32).buffer, format: "der" })
       ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
     } finally {
       restoreWorker();
@@ -1122,7 +1122,8 @@ describe("VaultService.createActiveKeyCrypto", () => {
     await expect(
       crypto.signDigest({
         publicKeyHex: ref.publicKeyHex,
-        digest: new Uint8Array(32).buffer
+        digest: new Uint8Array(32).buffer,
+        format: "der"
       })
     ).rejects.toBeInstanceOf(ActiveKeySessionRevokedError);
   });
@@ -1413,7 +1414,8 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     expect(identity.publicKeyHex).toBe(ref.publicKeyHex);
     const sig = await crypto.signDigest({
       publicKeyHex: ref.publicKeyHex,
-      digest: new Uint8Array(32).buffer
+      digest: new Uint8Array(32).buffer,
+      format: "der"
     });
     expect(sig.publicKeyHex).toBe(ref.publicKeyHex);
     expect(new Uint8Array(sig.signature).length).toBeGreaterThan(0);

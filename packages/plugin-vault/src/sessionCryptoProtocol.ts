@@ -5,8 +5,10 @@
 //   - worker 与 client 共享同一份显式消息 schema，避免两边各自定义
 //     私钥能力传输形状导致漂移。
 //   - 只定义序列化 payload，不定义任何实现逻辑或私钥材料持久化。
+//
+// 施工单 001：signDigest 消息必须携带 format 字段
 
-import type { ProviderSealedMessageRecord } from "@keymaster/contracts";
+import type { EcdsaSignatureFormat, ProviderSealedMessageRecord } from "@keymaster/contracts";
 
 export interface SessionCryptoEncryptedKeyMaterial {
   publicKeyHex: string;
@@ -36,6 +38,7 @@ export interface SessionCryptoSignDigestMessage {
   requestId: string;
   publicKeyHex: string;
   digest: ArrayBuffer;
+  format: EcdsaSignatureFormat;
 }
 
 export interface SessionCryptoDeriveAddressMessage {

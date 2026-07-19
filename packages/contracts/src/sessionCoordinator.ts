@@ -6,8 +6,11 @@
 //   - 私钥只在 Worker 内存中，永不离开
 //   - 删除所有多 tab 竞争机制（leader 选举、BroadcastChannel 等）
 //   - sessionEpoch 是每个异步操作的世代栅栏
+//
+// 施工单 001：signDigest 操作必须携带 format 字段
 
 import type { AssetDataChangedEvent } from "./assets.js";
+import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -49,7 +52,7 @@ export type CoordinatorTopic = "vault" | "keyspace" | "background" | "data-chang
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
-  | { type: "signDigest"; digestHex: string }
+  | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; network: "main" | "test" }
   | { type: "sealSendInput"; input: { sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string }; recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string }; contentType: "text/plain" | "text/markdown"; body: string; clientMessageId: string; createdAtMs: number } }
   | { type: "openSealed"; record: unknown }
@@ -108,7 +111,7 @@ export interface CoordinatorResponse {
 
 /** Crypto 操作结果。 */
 export type CoordinatorCryptoResult =
-  | { type: "signDigest"; signatureHex: string }
+  | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; address: string }
   | { type: "sealSendInput"; envelope: Uint8Array; signature: Uint8Array }
   | { type: "openSealed"; plaintext: Uint8Array }
