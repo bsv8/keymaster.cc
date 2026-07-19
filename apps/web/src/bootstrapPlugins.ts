@@ -16,7 +16,11 @@
 //   - 因此旧的"按顺序 registerAll"在新模型下也保持兼容：core / settings / home 等
 //     标记 defaultEnabled=true 的会自动装载，business 插件可通过配置 store 控制。
 
-import type { PluginManifest } from "@keymaster/contracts";
+import {
+  ASSET_DATA_NOTIFIER_CAPABILITY,
+  type PluginManifest,
+  type AssetDataNotifier
+} from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
 import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
@@ -126,7 +130,9 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const coordinatorClient = createCoordinatorClient();
   await coordinatorClient.connect();
   host.provide("session-coordinator.client", coordinatorClient);
-  const dataNotifier = host.capabilities.get<{ emit(event: { providerId: string; publicKeyHex: string; revision: number; kinds: string[] }): void }>("asset.data.notifier");
+  const dataNotifier = host.capabilities.get<AssetDataNotifier>(
+    ASSET_DATA_NOTIFIER_CAPABILITY
+  );
   coordinatorClient.onEvent("data-changed", (event) => {
     if (event.type === "data-changed") dataNotifier.emit(event);
   });

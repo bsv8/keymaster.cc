@@ -4636,6 +4636,22 @@ describe("signCompactSecp256k1", () => {
     const pub = secp256k1.getPublicKey(hexToBytes(TEST_PRIV_HEX), true);
     expect(verifyCompactSecp256k1(sig, msg, pub)).toBe(true);
   });
+
+  it("normalizes the Vault signer's DER signature to protocol compact format", async () => {
+    const msg = new TextEncoder().encode("identity assertion");
+    const sig = await signCompactSecp256k1(
+      async (digest) =>
+        secp256k1.sign(digest, hexToBytes(TEST_PRIV_HEX), {
+          lowS: true,
+          prehash: false,
+          format: "der"
+        }),
+      msg
+    );
+    const pub = secp256k1.getPublicKey(hexToBytes(TEST_PRIV_HEX), true);
+    expect(sig).toHaveLength(64);
+    expect(verifyCompactSecp256k1(sig, msg, pub)).toBe(true);
+  });
 });
 
 /* ============== 003 硬切换：cancel / timeout ============== */

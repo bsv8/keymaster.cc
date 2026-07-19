@@ -56,7 +56,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(b.getState().sessionEpoch).toBe("shared-epoch");
       const observed: string[] = [];
       b.onStateChange((state) => observed.push(state.vaultStatus));
-      hub.broadcast({ type: "vault.status-changed", sessionEpoch: "unlocked-epoch", status: "unlocked", activePublicKeyHex: "a".repeat(64) });
+      hub.broadcast({ requestId: "legacy-vault-event", type: "vault.status-changed", sessionEpoch: "unlocked-epoch", status: "unlocked", activePublicKeyHex: "a".repeat(64) });
       expect(b.getState().vaultStatus).toBe("unlocked");
       expect(observed).toContain("unlocked");
       a.disconnect();
@@ -78,6 +78,19 @@ describe("KeymasterSessionCoordinatorClient", () => {
       port.onmessage = null;
       await expect(client.backgroundRunNow("missing")).rejects.toThrow();
       expect(client.getState().vaultStatus).toBe("booting");
+    } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("rejects immediately when the SharedWorker reports a startup error", async () => {
+    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const worker = { port, onerror: null as ((event: Event) => void) | null } as unknown as SharedWorker;
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => worker);
+    try {
+      const client = createCoordinatorClient({ requestTimeoutMs: 1_000, reconnectIntervalMs: 1_000 });
+      const connecting = client.connect();
+      worker.onerror?.({ message: "module failed to load" } as ErrorEvent);
+      await expect(connecting).rejects.toThrow("Coordinator worker error: module failed to load");
     } finally { globalThis.SharedWorker = original; }
   });
 });

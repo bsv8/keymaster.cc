@@ -7,6 +7,8 @@
 //   - 删除所有多 tab 竞争机制（leader 选举、BroadcastChannel 等）
 //   - sessionEpoch 是每个异步操作的世代栅栏
 
+import type { AssetDataChangedEvent } from "./assets.js";
+
 // ============================================================
 // 1. Session Epoch
 // ============================================================
@@ -149,7 +151,7 @@ export interface CoordinatorDataChangedEvent {
   providerId: string;
   publicKeyHex: string;
   revision: number;
-  kinds: string[];
+  kinds: AssetDataChangedEvent["kinds"];
 }
 
 // ============================================================

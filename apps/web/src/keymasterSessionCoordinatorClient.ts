@@ -102,6 +102,15 @@ export class KeymasterSessionCoordinatorClient {
         name: this.workerName,
         type: "module",
       });
+      this.worker.onerror = (event) => {
+        const workerMessage = "message" in event && typeof event.message === "string"
+          ? event.message
+          : undefined;
+        const message = workerMessage
+          ? `Coordinator worker error: ${workerMessage}`
+          : "Coordinator worker error";
+        this.handleWorkerError(message);
+      };
 
       this.port = this.worker.port;
       this.port.onmessage = this.handleMessage.bind(this);
@@ -163,15 +172,17 @@ export class KeymasterSessionCoordinatorClient {
   private handleMessage(event: MessageEvent): void {
     const data = event.data;
 
-    if (data && typeof data === "object" && "requestId" in data) {
-      const response = data as CoordinatorResponse;
-      this.handleResponse(response);
-      return;
-    }
-
+    // Coordinator 事件不依赖 requestId；先按 type 分流，兼容早期 Worker
+    // 曾错误附加 requestId 的状态事件，避免它们被当成 RPC 响应丢弃。
     if (data && typeof data === "object" && "type" in data) {
       const event = data as CoordinatorEvent;
       this.handleEvent(event);
+      return;
+    }
+
+    if (data && typeof data === "object" && "requestId" in data) {
+      const response = data as CoordinatorResponse;
+      this.handleResponse(response);
       return;
     }
   }
@@ -217,11 +228,15 @@ export class KeymasterSessionCoordinatorClient {
   }
 
   private handleMessageError(): void {
+    this.handleWorkerError("Coordinator transport error");
+  }
+
+  private handleWorkerError(message: string): void {
     this.isConnected = false;
     this.resetDisconnectedState();
     for (const [requestId, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);
-      pending.reject(new Error("Coordinator transport error"));
+      pending.reject(new Error(message));
       this.pendingRequests.delete(requestId);
     }
     this.scheduleReconnect();

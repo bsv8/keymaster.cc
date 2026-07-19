@@ -26,9 +26,12 @@ import type {
   CoordinatorBackgroundSyncSettings,
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
+  AssetDataChangedEvent,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, vaultKeyAad, deriveP2pkhAddress, signDigestBytes, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes } from "@keymaster/plugin-vault/coordinator";
-import { createMessageBus } from "@keymaster/runtime";
+// 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
+// React Refresh 注入 SharedWorker，后者没有 window。
+import { createMessageBus } from "@keymaster/runtime/messageBus";
 import { createWocService, createWocBsv21Service, createWocStasService } from "@keymaster/plugin-woc/coordinator";
 import { createP2pkhCoordinatorTasks, openP2pkhDb, createP2pkhDb } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
@@ -243,7 +246,7 @@ async function registerCoordinatorTasks(): Promise<void> {
   const keyspace = createWorkerKeyspace();
   const messageBus = createMessageBus();
   const woc = createWocService({ messageBus });
-  const emitDataChanged = (providerId: string, kinds: string[]) => broadcastToSubscribers("data-changed", { type: "data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", revision: ++dataRevision, kinds });
+  const emitDataChanged = (providerId: string, kinds: AssetDataChangedEvent["kinds"]) => broadcastToSubscribers("data-changed", { type: "data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", revision: ++dataRevision, kinds });
   const p2pkh = createP2pkhCoordinatorTasks({ keyspace, woc, messageBus, assertSessionFresh: (kind) => assertTaskFresh(kind === "recent" ? "p2pkh.recent-sync" : "p2pkh.history-backfill") });
   // 使用恢复后的配置，而非固定值
   const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
@@ -371,7 +374,6 @@ function handleHello(
     operationResult: buildSnapshot()
   });
   sendToPort(connectedPort.port, {
-    requestId: `hello-vault-${Date.now()}`,
     type: "vault.status-changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     status: coordinatorState.vaultStatus,
@@ -1170,6 +1172,10 @@ async function initializeCoordinator(): Promise<void> {
     }
   } catch {
     coordinatorState.vaultStatus = "fatal";
+  } finally {
+    // hello 可能先于异步 IndexedDB 初始化抵达。无论初始化成功或失败，
+    // 都必须广播最终状态，否则首个页面会永久停留在 booting。
+    broadcastVault();
   }
 }
 

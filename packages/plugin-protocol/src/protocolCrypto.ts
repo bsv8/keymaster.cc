@@ -27,8 +27,9 @@ export function sha256Bytes(bytes: Uint8Array): Uint8Array {
  *
  * 设计缘由（施工单 001 + 协议 J）：
  *   - 施工单明确钉死 compact 64-byte 是 signature.bytes 的唯一格式。
- *   - 用 noble 默认 ECDSA（lowS=true / prehash=true），与现有 P2PKH
- *     路径行为一致；不切换 DER / Schnorr。
+ *   - `ActiveKeyCrypto.signDigest` 是底层签名能力，链上 P2PKH 使用其
+ *     DER 产物；协议层在这里将该 DER 产物规范化为协议唯一接受的 compact
+ *     64-byte `r || s`，避免两个调用面的编码约束相互污染。
  */
 export function signCompactSecp256k1(
   signDigest: (digest: Uint8Array) => Uint8Array | Promise<Uint8Array>,
@@ -36,10 +37,21 @@ export function signCompactSecp256k1(
 ): Promise<Uint8Array> {
   const digest = sha256Bytes(message);
   return Promise.resolve(signDigest(digest)).then((sig) => {
-    if (!(sig instanceof Uint8Array) || sig.length !== 64) {
+    if (!(sig instanceof Uint8Array)) {
       throw new Error("Compact signature must be 64 bytes");
     }
-    return sig;
+    if (sig.length === 64) return sig;
+
+    // Vault 的受控 session signer 同时供 P2PKH 使用，因此按 Bitcoin
+    // 约定返回 DER。identity.get / intent.sign 则固定要求 compact；只在
+    // 协议边界做一次严格 DER -> compact 转换。
+    try {
+      const compact = secp256k1.Signature.fromBytes(sig, "der").toBytes("compact");
+      if (compact.length === 64) return compact;
+    } catch {
+      // Keep the protocol-facing error stable below.
+    }
+    throw new Error("Compact signature must be 64 bytes");
   });
 }
 
