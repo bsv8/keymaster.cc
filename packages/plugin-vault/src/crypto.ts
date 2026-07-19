@@ -156,6 +156,28 @@ export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * 旧版 Vault 曾按字段名把二进制材料实际编码成 base64，而当前格式使用
+ * hex。这个转换只用于读取旧持久化记录；所有新写入仍统一走 bytesToHex。
+ */
+export function base64ToBytes(value: string): Uint8Array {
+  // 兼容旧版 standard base64，也接受曾被导出的 URL-safe base64。
+  const normalized = value.trim().replace(/-/g, "+").replace(/_/g, "/");
+  if (!normalized || /[^A-Za-z0-9+/=]/.test(normalized)) {
+    throw new Error("Invalid base64");
+  }
+  const unpadded = normalized.replace(/=+$/, "");
+  const padded = unpadded.padEnd(Math.ceil(unpadded.length / 4) * 4, "=");
+  if (padded.length % 4 !== 0) throw new Error("Invalid base64 length");
+  let binary: string;
+  try {
+    binary = atob(padded);
+  } catch {
+    throw new Error("Invalid base64");
+  }
+  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
+}
+
 /** 验证密码：保存一份 verifier，密码错误时 verifier 也对不上。 */
 export async function encryptVerifier(key: CryptoKey): Promise<EncryptedBlob> {
   const marker = new TextEncoder().encode(VAULT_VERIFIER_AAD);

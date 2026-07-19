@@ -142,16 +142,21 @@ async function seedLegacyV1Vault(input: {
   password: string;
   privateKeyHex: string;
   label: string;
+  binaryEncoding?: "hex" | "base64";
 }): Promise<string> {
+  const encode = (bytes: Uint8Array): string =>
+    input.binaryEncoding === "base64"
+      ? btoa(String.fromCharCode(...bytes))
+      : bytesToHex(bytes);
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveKey(input.password, salt);
   const verifier = await encryptVerifier(key);
   const meta = {
     id: "singleton" as const,
-    saltB64: bytesToHex(salt),
-    verifierSaltB64: bytesToHex(verifier.salt),
-    verifierIvB64: bytesToHex(verifier.iv),
-    verifierCipherB64: bytesToHex(verifier.ciphertext),
+    saltB64: encode(salt),
+    verifierSaltB64: encode(verifier.salt),
+    verifierIvB64: encode(verifier.iv),
+    verifierCipherB64: encode(verifier.ciphertext),
     createdAt: new Date().toISOString()
   };
   const identity = deriveKeyIdentity(hexToBytes(input.privateKeyHex));
@@ -165,9 +170,9 @@ async function seedLegacyV1Vault(input: {
     format: "hex",
     capabilities: ["p2pkh"],
     createdAt: new Date().toISOString(),
-    cipherSaltB64: bytesToHex(blob.salt),
-    cipherIvB64: bytesToHex(blob.iv),
-    cipherB64: bytesToHex(blob.ciphertext)
+    cipherSaltB64: encode(blob.salt),
+    cipherIvB64: encode(blob.iv),
+    cipherB64: encode(blob.ciphertext)
   };
   await vaultDb.putMeta(meta);
   await vaultDb.putKey(record);
@@ -667,6 +672,31 @@ describe("VaultService.unlock AAD migration (硬切换 4.3)", () => {
     expect(migrated?.cipherB64).toBeDefined();
     const crypto = await vault.createActiveKeyCrypto(legacyPublicKeyHex);
     expect(crypto.getIdentity().publicKeyHex).toBe(legacyPublicKeyHex);
+  });
+
+  it("unlocks legacy base64 vault data and rewrites it to the current hex representation", async () => {
+    const legacyPublicKeyHex = await seedLegacyV1Vault({
+      password: "test-pw",
+      privateKeyHex: TEST_PRIV,
+      label: "legacy base64",
+      binaryEncoding: "base64"
+    });
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "locked");
+
+    await vault.unlock("test-pw");
+
+    expect(vault.status()).toBe("unlocked");
+    const meta = await vaultDb.getMeta();
+    const migrated = await vaultDb.getKey(legacyPublicKeyHex);
+    expect(meta?.saltB64).toMatch(/^[0-9a-f]{32}$/);
+    expect(meta?.verifierSaltB64).toMatch(/^[0-9a-f]{32}$/);
+    expect(migrated?.cipherSaltB64).toMatch(/^[0-9a-f]{32}$/);
+    expect(migrated?.cipherVersion).toBe("v2");
+    expect((await vault.createActiveKeyCrypto(legacyPublicKeyHex)).getIdentity().publicKeyHex).toBe(
+      legacyPublicKeyHex
+    );
   });
 });
 

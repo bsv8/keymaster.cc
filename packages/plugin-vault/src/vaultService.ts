@@ -44,13 +44,9 @@ import { type AppMsgMessage } from "@keymaster/contracts";
 import {
   aesGcmKeyFromRawBits,
   assertWebCryptoAvailable,
-  decryptBytes,
-  decryptBytesWithAad,
   deriveKey,
   encryptVerifier,
-  hexToBytes,
-  vaultKeyAad,
-  verifyVerifier
+  hexToBytes
 } from "./crypto.js";
 import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
 import { encodeKeyBackup } from "./keyBackup.js";
@@ -62,6 +58,7 @@ import {
   encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial,
   deriveVaultPasswordKey as coordinatorDeriveVaultPasswordKey,
   migrateVaultKeysToV2Aad as coordinatorMigrateVaultKeysToV2Aad,
+  resolveVaultPasswordKey as coordinatorResolveVaultPasswordKey,
   verifyVaultPasswordKey as coordinatorVerifyVaultPasswordKey
 } from "./vaultCoordinator.js";
 import {
@@ -1077,17 +1074,19 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async unlock(password) {
       const meta = await vaultDb.getMeta();
       if (!meta) throw new Error("Vault not initialized");
-      const key = await coordinatorVerifyVaultPasswordKey(password, meta);
+      const { key, encoding } = await coordinatorResolveVaultPasswordKey(password, meta);
       startVaultSession();
       try {
         await coordinatorMigrateVaultKeysToV2Aad({
           meta,
           records: await vaultDb.listKeys(),
-          decryptRecord: (record) => coordinatorDecryptVaultKeyMaterialForMigration(key, record),
+          decryptRecord: (record) => coordinatorDecryptVaultKeyMaterialForMigration(key, record, encoding),
           encryptRecord: (publicKeyHex, material) =>
             coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material),
           putMeta: (nextMeta) => vaultDb.putMeta(nextMeta),
-          putMetaAndKeys: (nextMeta, records) => vaultDb.putMetaAndKeys(nextMeta, records)
+          putMetaAndKeys: (nextMeta, records) => vaultDb.putMetaAndKeys(nextMeta, records),
+          forceReencrypt: encoding === "base64",
+          sourceEncoding: encoding
         });
         // 硬切换 005 收尾：unlock 收尾前若 vault_keys 已空，按"meta 残留"
         // 路径收敛到 uninitialized——直接清空内存会话、删 meta，不再走
@@ -1310,14 +1309,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async verifyPassword(password) {
       const meta = await vaultDb.getMeta();
       if (!meta) throw new Error("Vault not initialized");
-      const salt = hexToBytes(meta.saltB64);
-      const probe = await deriveKey(password, salt);
-      const ok = await verifyVerifier(probe, {
-        salt: hexToBytes(meta.verifierSaltB64),
-        iv: hexToBytes(meta.verifierIvB64),
-        ciphertext: hexToBytes(meta.verifierCipherB64)
-      });
-      if (!ok) throw new Error("Invalid password");
+      await coordinatorVerifyVaultPasswordKey(password, meta);
       // 不动会话材料 / keyCache / status / cache
       // / 不 emit 任何事件。
     },
@@ -1599,32 +1591,20 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       targetPassword: string;
     }): Promise<KeyRef> {
       const backup = decodeKeyBackup(input.backup);
-      const sourceSalt = hexToBytes(backup.sourceVaultMeta.saltB64);
-      const sourceKey = await deriveKey(input.sourcePassword, sourceSalt);
-      const sourceVerifierOk = await verifyVerifier(sourceKey, {
-        salt: hexToBytes(backup.sourceVaultMeta.verifierSaltB64),
-        iv: hexToBytes(backup.sourceVaultMeta.verifierIvB64),
-        ciphertext: hexToBytes(backup.sourceVaultMeta.verifierCipherB64)
-      });
-      if (!sourceVerifierOk) {
+      let source: Awaited<ReturnType<typeof coordinatorResolveVaultPasswordKey>>;
+      try {
+        source = await coordinatorResolveVaultPasswordKey(input.sourcePassword, backup.sourceVaultMeta);
+      } catch {
         throw new Error("Invalid source password");
       }
-      const sourceBlob = {
-        salt: hexToBytes(backup.keyRecord.cipherSaltB64),
-        iv: hexToBytes(backup.keyRecord.cipherIvB64),
-        ciphertext: hexToBytes(backup.keyRecord.cipherB64)
-      };
       if (backup.keyRecord.cipherVersion !== "v2") {
         throw new Error("Key backup must be v2");
       }
-      const plain = await decryptBytesWithAad(
-        sourceKey,
-        sourceBlob,
-        vaultKeyAad(backup.keyRecord.publicKeyHex)
+      const material = await coordinatorDecryptVaultKeyMaterialForMigration(
+        source.key,
+        backup.keyRecord,
+        source.encoding
       );
-      const decoded = new TextDecoder().decode(plain);
-      const parsed = JSON.parse(decoded) as { hex: string; wif?: string };
-      const material: VaultKeyMaterial = { hex: parsed.hex, wif: parsed.wif };
       const identity = deriveKeyIdentity(hexToBytes(material.hex));
       if (identity.publicKeyHex !== backup.keyRecord.publicKeyHex) {
         throw new Error("Key backup public key mismatch");
@@ -1633,16 +1613,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!targetMeta) {
         throw new Error("Vault not initialized");
       }
-      const targetSalt = hexToBytes(targetMeta.saltB64);
-      const targetKey = await deriveKey(input.targetPassword, targetSalt);
-      const targetVerifierOk = await verifyVerifier(targetKey, {
-        salt: hexToBytes(targetMeta.verifierSaltB64),
-        iv: hexToBytes(targetMeta.verifierIvB64),
-        ciphertext: hexToBytes(targetMeta.verifierCipherB64)
-      });
-      if (!targetVerifierOk) {
-        throw new Error("Invalid password");
-      }
+      const targetKey = await coordinatorVerifyVaultPasswordKey(input.targetPassword, targetMeta);
       const existing = await vaultDb.getKey(identity.publicKeyHex);
       if (existing) {
         throw new Error("Key already exists");

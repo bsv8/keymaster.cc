@@ -24,6 +24,7 @@ import {
   decryptVaultKeyMaterialForMigration,
   encryptVaultKeyMaterial,
   migrateVaultKeysToV2Aad,
+  resolveVaultPasswordKey,
   verifyVaultPasswordKey
 } from "./vaultCoordinator.js";
 
@@ -34,6 +35,10 @@ async function makeMeta(password: string, salt: Uint8Array) {
   const key = await deriveKey(password, salt);
   const verifier = await encryptVerifier(key);
   return { key, verifier, meta: buildVaultMeta({ salt, verifier, createdAt: "2026-07-17T00:00:00.000Z" }) };
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes));
 }
 
 describe("vaultCoordinator", () => {
@@ -61,6 +66,45 @@ describe("vaultCoordinator", () => {
 
     await expect(verifyVaultPasswordKey("vault-password", meta)).resolves.toBeDefined();
     await expect(verifyVaultPasswordKey("wrong-password", meta)).rejects.toThrow("Invalid password");
+  });
+
+  it("recognizes old base64 vault material only after its verifier validates", async () => {
+    const password = "vault-password";
+    const passwordSalt = crypto.getRandomValues(new Uint8Array(16));
+    const { key, verifier, meta } = await makeMeta(password, passwordSalt);
+    const material = { hex: TEST_PRIV_HEX };
+    const blob = await encryptBytesWithAad(
+      key,
+      new TextEncoder().encode(JSON.stringify(material)),
+      vaultKeyAad(TEST_PUB_HEX)
+    );
+    const legacyMeta: VaultMetaRecord = {
+      ...meta,
+      saltB64: bytesToBase64(passwordSalt),
+      verifierSaltB64: bytesToBase64(verifier.salt),
+      verifierIvB64: bytesToBase64(verifier.iv),
+      verifierCipherB64: bytesToBase64(verifier.ciphertext)
+    };
+    const legacyRecord: VaultKeyRecord = {
+      publicKeyHex: TEST_PUB_HEX,
+      cipherVersion: "v2",
+      label: "legacy key",
+      address: "",
+      network: "main",
+      format: "hex",
+      capabilities: ["p2pkh"],
+      createdAt: "2026-07-17T00:00:00.000Z",
+      cipherSaltB64: bytesToBase64(blob.salt),
+      cipherIvB64: bytesToBase64(blob.iv),
+      cipherB64: bytesToBase64(blob.ciphertext)
+    };
+
+    const resolved = await resolveVaultPasswordKey(password, legacyMeta);
+    expect(resolved.encoding).toBe("base64");
+    await expect(resolveVaultPasswordKey("wrong-password", legacyMeta)).rejects.toThrow("Invalid password");
+    await expect(
+      decryptVaultKeyMaterialForMigration(resolved.key, legacyRecord, resolved.encoding)
+    ).resolves.toEqual(material);
   });
 
   it("migrateVaultKeysToV2Aad upgrades legacy v1 records to v2 AAD", async () => {
