@@ -5,13 +5,17 @@
 //   - Worker-backed session capability 与 main-thread fallback 复用同一套
 //     编解码 / 签名 / 加解密逻辑，避免两份实现漂移。
 //   - 本文件不持有状态，只提供可共享的纯函数。
+//
+// 施工单 001：签名格式显式契约硬切换
+//   - signEcdsaDigest 替代旧的 signDigestBytes
+//   - 必须显式指定 format（"der" 或 "compact"）
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { gcm } from "@noble/ciphers/aes.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { signAsync } from "@noble/secp256k1";
-import type { AppMsgMessage, AppMsgPlaintextV1, ProviderSealedMessageRecord } from "@keymaster/contracts";
+import type { AppMsgMessage, AppMsgPlaintextV1, EcdsaSignatureFormat, ProviderSealedMessageRecord } from "@keymaster/contracts";
 import { APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN, APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN, APPMSG_ENVELOPE_VERSION_V1, APPMSG_PLAINTEXT_VERSION_V1, APPMSG_SEAL_SUITE_ID_V1, APPMSG_SEAL_V1_HKDF_INFO, cborDecode, cborEncode, type AppMsgContentType } from "@keymaster/contracts";
 import { decryptBytes, decryptBytesWithAad, vaultKeyAad } from "./crypto.js";
 import type { SessionCryptoEncryptedKeyMaterial } from "./sessionCryptoProtocol.js";
@@ -58,12 +62,83 @@ export function encodeDERSignature(r: bigint, s: bigint): Uint8Array {
   return concatBytes(new Uint8Array([0x30, seqLen]), rEnc, sEnc);
 }
 
-export async function signDigestBytes(
-  privateKeyBytes: Uint8Array,
-  digest: Uint8Array
-): Promise<Uint8Array> {
+/**
+ * 断言 DER 签名的结构合法性（strict DER parser）。
+ *
+ * 设计缘由（P1 输出断言）：
+ *   - 防止错误 mock 或 runtime 生成无效 DER 字节。
+ *   - 仅检查外层 SEQUENCE 结构，不校验 r/s 值域（由 noble 保证）。
+ */
+function assertStrictDERSignature(der: Uint8Array): void {
+  if (der.length < 8) {
+    throw new Error(`assertStrictDERSignature: too short (${der.length} bytes)`);
+  }
+  if (der[0] !== 0x30) {
+    throw new Error("assertStrictDERSignature: must start with 0x30 (SEQUENCE)");
+  }
+  const seqLen = der[1]!;
+  if (seqLen & 0x80) {
+    // 长格式长度字节
+    const lenBytes = seqLen & 0x7f;
+    if (lenBytes === 0 || 2 + lenBytes > der.length) {
+      throw new Error("assertStrictDERSignature: invalid long-form length");
+    }
+  } else {
+    // 短格式：剩余字节数必须等于 seqLen
+    if (2 + seqLen !== der.length) {
+      throw new Error(
+        `assertStrictDERSignature: SEQUENCE length ${seqLen} does not match remaining ${der.length - 2}`
+      );
+    }
+  }
+}
+
+/**
+ * ECDSA 签名唯一入口（施工单 001 硬切换）。
+ *
+ * 固定算法：
+ *   ECDSA/secp256k1
+ *   digest: 已哈希 32-byte digest（不二次 hash）
+ *   prehash: false
+ *   lowS: true
+ *   format: 调用方必传 der 或 compact
+ *
+ * @param params.privateKeyBytes 32 字节私钥
+ * @param params.digest 32 字节已哈希 digest
+ * @param params.format 签名编码格式
+ * @returns 按指定格式编码的签名字节
+ */
+export async function signEcdsaDigest(params: {
+  privateKeyBytes: Uint8Array;
+  digest: Uint8Array;
+  format: EcdsaSignatureFormat;
+}): Promise<Uint8Array> {
+  const { privateKeyBytes, digest, format } = params;
+
+  if (digest.length !== 32) {
+    throw new Error(`signEcdsaDigest: digest must be 32 bytes, got ${digest.length}`);
+  }
+  if (format !== "der" && format !== "compact") {
+    throw new Error(`signEcdsaDigest: unknown format "${format}"`);
+  }
+
   const sig = await signAsync(digest, privateKeyBytes, { lowS: true });
-  return encodeDERSignature(sig.r, sig.s);
+
+  if (format === "compact") {
+    // compact: r(32 bytes) || s(32 bytes)，固定 64 bytes
+    const rBytes = sig.toCompactRawBytes();
+    // P1: 输出断言 — compact 必须 64 字节
+    if (rBytes.length !== 64) {
+      throw new Error(`signEcdsaDigest: compact output expected 64 bytes, got ${rBytes.length}`);
+    }
+    return rBytes;
+  }
+
+  // format === "der"
+  const derBytes = encodeDERSignature(sig.r, sig.s);
+  // P1: 输出断言 — DER 必须能被 strict DER parser 解析（0x30 开头 + 合法长度）
+  assertStrictDERSignature(derBytes);
+  return derBytes;
 }
 
 export async function decryptSessionPrivateKeyBytes(input: {

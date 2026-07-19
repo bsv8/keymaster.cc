@@ -27,7 +27,7 @@ function makeFakeOwnerCrypto(publicKeyHex: string) {
       capabilities: ["p2pkh"],
       createdAt: ""
     }),
-    signDigest: async () => ({ publicKeyHex, signature: new Uint8Array(64).buffer }),
+    signDigest: async () => ({ publicKeyHex, format: "compact" as const, signature: new Uint8Array(64).buffer }),
     deriveP2pkhAddress: async () => ({ publicKeyHex, address: "mock" }),
     sealSendInput: () => ({ error: "not used" }),
     openSealed: async () => null,
@@ -239,6 +239,7 @@ function makeFakeVaultService(): VaultService {
       }),
       signDigest: async () => ({
         publicKeyHex: "02".padEnd(66, "a"),
+        format: "compact" as const,
         signature: new Uint8Array(64).buffer
       }),
       deriveP2pkhAddress: async () => ({
@@ -277,6 +278,7 @@ function makeFakeVaultService(): VaultService {
       }),
       signDigest: async () => ({
         publicKeyHex: "02".padEnd(66, "a"),
+        format: "compact" as const,
         signature: new Uint8Array(64).buffer
       }),
       deriveP2pkhAddress: async () => ({
@@ -742,6 +744,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
         }),
         signDigest: async () => ({
           publicKeyHex: "02".padEnd(66, "a"),
+          format: "compact" as const,
           signature: new Uint8Array(64).buffer
         }),
         deriveP2pkhAddress: async () => ({
@@ -783,6 +786,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
         }),
         signDigest: async () => ({
           publicKeyHex: "02".padEnd(66, "a"),
+          format: "compact" as const,
           signature: new Uint8Array(64).buffer
         }),
         deriveP2pkhAddress: async () => ({

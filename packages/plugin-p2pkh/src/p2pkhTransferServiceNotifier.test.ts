@@ -89,12 +89,13 @@ function makeVault() {
   return {
     status: () => "unlocked",
     createActiveKeyCrypto: async (_publicKeyHex: string) => ({
-      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
         const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(ACTIVE_PRIV_HEX), {
-          lowS: true, prehash: false, format: "compact"
+          lowS: true, prehash: false, format: input.format
         });
         return {
           publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+          format: input.format,
           signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
         };
       },

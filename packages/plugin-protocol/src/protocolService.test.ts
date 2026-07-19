@@ -78,10 +78,11 @@ function makeVaultStub(publicKeyHex: string): VaultService {
         capabilities: [],
         createdAt: new Date().toISOString()
       }),
-      signDigest: async ({ digest }: { digest: ArrayBuffer }) => ({
+      signDigest: async ({ digest, format }: { digest: ArrayBuffer; format: "der" | "compact" }) => ({
         publicKeyHex: TEST_PUB_HEX,
+        format,
         signature: secp256k1
-          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" })
+          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format })
           .buffer
       }),
       deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
@@ -97,10 +98,11 @@ function makeVaultStub(publicKeyHex: string): VaultService {
         capabilities: [],
         createdAt: new Date().toISOString()
       }),
-      signDigest: async ({ digest }: { digest: ArrayBuffer }) => ({
+      signDigest: async ({ digest, format }: { digest: ArrayBuffer; format: "der" | "compact" }) => ({
         publicKeyHex: TEST_PUB_HEX,
+        format,
         signature: secp256k1
-          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" })
+          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format })
           .buffer
       }),
       deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
@@ -116,10 +118,11 @@ function makeVaultStub(publicKeyHex: string): VaultService {
         capabilities: [],
         createdAt: new Date().toISOString()
       }),
-      signDigest: async ({ digest }: { digest: ArrayBuffer }) => ({
+      signDigest: async ({ digest, format }: { digest: ArrayBuffer; format: "der" | "compact" }) => ({
         publicKeyHex: TEST_PUB_HEX,
+        format,
         signature: secp256k1
-          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" })
+          .sign(new Uint8Array(digest), hexToBytes(TEST_PRIV_HEX), { prehash: false, format })
           .buffer
       }),
       deriveP2pkhAddress: async () => ({ publicKeyHex: TEST_PUB_HEX, address: "fake" }),
@@ -4637,21 +4640,9 @@ describe("signCompactSecp256k1", () => {
     expect(verifyCompactSecp256k1(sig, msg, pub)).toBe(true);
   });
 
-  it("normalizes the Vault signer's DER signature to protocol compact format", async () => {
-    const msg = new TextEncoder().encode("identity assertion");
-    const sig = await signCompactSecp256k1(
-      async (digest) =>
-        secp256k1.sign(digest, hexToBytes(TEST_PRIV_HEX), {
-          lowS: true,
-          prehash: false,
-          format: "der"
-        }),
-      msg
-    );
-    const pub = secp256k1.getPublicKey(hexToBytes(TEST_PRIV_HEX), true);
-    expect(sig).toHaveLength(64);
-    expect(verifyCompactSecp256k1(sig, msg, pub)).toBe(true);
-  });
+  // 施工单 001 硬切换：删除 DER -> compact fallback 测试
+  // signCompactSecp256k1 现在只接受 64 字节的 compact 签名，
+  // 不再做 DER -> compact 转换。格式应在 signer capability 请求时确定。
 });
 
 /* ============== 003 硬切换：cancel / timeout ============== */
@@ -7256,8 +7247,9 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
               capabilities: [],
               createdAt: new Date(now).toISOString()
             }),
-            signDigest: async () => ({
+            signDigest: async ({ format }: { format: "der" | "compact" }) => ({
               publicKeyHex: TEST_PUB_HEX,
+              format,
               signature: new Uint8Array(64).buffer
             }),
             deriveP2pkhAddress: async () => ({
@@ -7302,8 +7294,9 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
               capabilities: [],
               createdAt: new Date(now + 1).toISOString()
             }),
-            signDigest: async () => ({
+            signDigest: async ({ format }: { format: "der" | "compact" }) => ({
               publicKeyHex: TEST_PUB_HEX,
+              format,
               signature: new Uint8Array(64).buffer
             }),
             deriveP2pkhAddress: async () => ({
@@ -7398,8 +7391,9 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
               capabilities: [],
               createdAt: new Date(now).toISOString()
             }),
-            signDigest: async () => ({
+            signDigest: async ({ format }: { format: "der" | "compact" }) => ({
               publicKeyHex: TEST_PUB_HEX,
+              format,
               signature: new Uint8Array(64).buffer
             }),
             deriveP2pkhAddress: async () => ({
@@ -7966,3 +7960,31 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       expect(decision.targetPhase).toBe("waiting_unlock_manual");
     }
   });
+
+
+describe("ProtocolServiceImpl signDigest format mismatch rejection", () => {
+  it("signCompactSecp256k1 rejects when signer returns DER bytes (not 64-byte compact)", async () => {
+    // 模拟 identity.get 路径：signCompactSecp256k1 要求回调返回 64 字节 compact，
+    // 但如果 runtime 错误返回 DER 字节，assertCompactSignature 应拒绝。
+    const derBytes = secp256k1.sign(
+      new Uint8Array(32).fill(0xab),
+      hexToBytes(TEST_PRIV_HEX),
+      { prehash: false, format: "der" }
+    );
+    // DER 字节不是 64 字节，signCompactSecp256k1 应拒绝
+    await expect(
+      signCompactSecp256k1(async () => derBytes, new Uint8Array(32).fill(0xab))
+    ).rejects.toThrow("assertCompactSignature");
+  });
+
+  it("signCompactSecp256k1 accepts 64-byte compact signature", async () => {
+    const compactSig = secp256k1.sign(
+      new Uint8Array(32).fill(0xcd),
+      hexToBytes(TEST_PRIV_HEX),
+      { prehash: false, format: "compact" }
+    );
+    // compact 字节是 64 字节，应通过
+    const result = await signCompactSecp256k1(async () => compactSig, new Uint8Array(32).fill(0xcd));
+    expect(result.length).toBe(64);
+  });
+});

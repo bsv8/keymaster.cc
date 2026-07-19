@@ -64,17 +64,18 @@ function makeVault() {
           capabilities: ["p2pkh"],
           createdAt: "2024-01-01T00:00:00.000Z"
         }),
-        async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+        async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
           if (input.publicKeyHex !== derived.publicKeyHex) {
             throw new Error("session_key_mismatch");
           }
           const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(privHex), {
             lowS: true,
             prehash: false,
-            format: "compact"
+            format: input.format
           });
           return {
             publicKeyHex: derived.publicKeyHex,
+            format: input.format,
             signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
           };
         },

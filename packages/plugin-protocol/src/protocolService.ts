@@ -3944,6 +3944,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   /**
    * 在 session 绑定的 owner 私钥上做 secp256k1 签名（compact 64 字节）。
    *
+   * 施工单 001 硬切换：显式请求 compact 格式。
    */
   private async signWithSessionOwner(
     session: ConnectSessionRecord,
@@ -3953,8 +3954,15 @@ export class ProtocolServiceImpl implements ProtocolService {
     return signCompactSecp256k1(async (digest) => {
       const result = await resolution.crypto.signDigest({
         publicKeyHex: resolution.ownerPublicKeyHex,
-        digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer
+        digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer,
+        format: "compact"
       });
+      // P0: 校验回包 format 为 compact
+      if (result.format !== "compact") {
+        throw new Error(
+          `signWithSessionOwner format mismatch: requested "compact", got "${result.format}"`
+        );
+      }
       return new Uint8Array(result.signature);
     }, bytes);
   }
@@ -4907,8 +4915,15 @@ export class ProtocolServiceImpl implements ProtocolService {
       const signDigest = async (digest: Uint8Array) => {
         const result = await resolution.crypto.signDigest({
           publicKeyHex: clientPublicKeyHex,
-          digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer
+          digest: digest.buffer.slice(digest.byteOffset, digest.byteOffset + digest.byteLength) as ArrayBuffer,
+          format: "der"
         });
+        // P0: FeePool 路径校验回包 format 为 der
+        if (result.format !== "der") {
+          throw new Error(
+            `signDigest (FeePool) format mismatch: requested "der", got "${result.format}"`
+          );
+        }
         return new Uint8Array(result.signature);
       };
       const operationId = this.nextRecordId();

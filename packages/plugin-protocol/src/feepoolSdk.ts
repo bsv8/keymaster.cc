@@ -6,12 +6,15 @@
 //   - 所有需要签名的路径都通过显式 `signDigest` capability；
 //   - 交易编解码只保留本文件内最小实现，避免把私钥边界扩散到
 //     protocol service。
+//
+// 施工单 001：signDigest 必须显式携带 format 字段
 
 import { Hash } from "@bsv/sdk";
 import {
   clientVerifyServerSpendSig,
   clientVerifyServerUpdateSig
 } from "keymaster-multisig-pool";
+import type { EcdsaSignatureFormat } from "@keymaster/contracts";
 
 /** `FINAL_LOCKTIME`：close_and_recreate 的 close 部分用。 */
 export const FINAL_LOCKTIME = 0xffffffff;
@@ -37,10 +40,11 @@ export interface FeepoolSdkDraftTxResponse {
 export interface FeePoolSignDigest {
   publicKeyHex: string;
   digest: ArrayBuffer;
+  format: EcdsaSignatureFormat;
 }
 
 export interface FeePoolSigner {
-  signDigest(input: FeePoolSignDigest): Promise<{ publicKeyHex: string; signature: ArrayBuffer }>;
+  signDigest(input: FeePoolSignDigest): Promise<{ publicKeyHex: string; format: EcdsaSignatureFormat; signature: ArrayBuffer }>;
 }
 
 interface TxInput {
@@ -268,7 +272,7 @@ function calcBip143Sighash(
 async function signP2pkhInputs(
   unsigned: UnsignedTx,
   utxos: FeepoolSdkUtxo[],
-  signDigest: (digest: Uint8Array) => Promise<Uint8Array>,
+  signDerDigest: (digest: Uint8Array) => Promise<Uint8Array>,
   publicKeyHex: string
 ): Promise<string> {
   const pub = hexToBytes(publicKeyHex);
@@ -278,7 +282,11 @@ async function signP2pkhInputs(
     if (!utxo) throw new Error(`Missing UTXO for input ${i}`);
     const scriptCode = p2pkhLockScript(publicKeyHex);
     const sighash = calcBip143Sighash(unsigned, i, scriptCode, utxo.satoshis);
-    const der = await signDigest(sighash);
+    const der = await signDerDigest(sighash);
+    // P1: 断言返回的是 DER 签名（0x30 开头），防止 compact 混入交易
+    if (der.length < 8 || der[0] !== 0x30) {
+      throw new Error("signP2pkhInputs: expected DER signature from signDerDigest");
+    }
     const sigWithType = concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
     signedInputs[i] = {
       prevTxid: unsigned.inputs[i]!.prevTxid,
@@ -348,6 +356,7 @@ function buildUnsignedSpendTx(params: {
 export async function sdkBuildBaseTx(params: {
   clientUtxos: FeepoolSdkUtxo[];
   clientPublicKeyHex: string;
+  /** P1: 此回调必须返回 DER 格式签名（0x30 开头），不得返回 compact。 */
   signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
   serverPublicKeyHex: string;
   feepoolAmount: number;
@@ -433,6 +442,7 @@ export async function sdkLoadDraftSpendTx(params: {
 export async function sdkClientSignInitialSpendTx(params: {
   txHex: string;
   totalAmount: number;
+  /** P1: 此回调必须返回 DER 格式签名。 */
   signDigest: (digest: Uint8Array) => Promise<Uint8Array>;
   clientPublicKeyHex: string;
   serverPublicKeyHex: string;
@@ -441,6 +451,10 @@ export async function sdkClientSignInitialSpendTx(params: {
   const scriptCode = dualMultisigScript(params.serverPublicKeyHex, params.clientPublicKeyHex);
   const sighash = calcBip143Sighash(tx, 0, scriptCode, params.totalAmount);
   const der = await params.signDigest(sighash);
+  // P1: 断言返回的是 DER 签名
+  if (der.length < 8 || der[0] !== 0x30) {
+    throw new Error("sdkClientSignInitialSpendTx: expected DER signature");
+  }
   return concatBytes(der, new Uint8Array([SIGHASH_ALL_FORKID]));
 }
 

@@ -122,13 +122,20 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         signP2pkhTx(
           unsigned,
           selected,
-          (digest) =>
-            activeCrypto
-              .signDigest({
-                publicKeyHex,
-                digest: new Uint8Array(digest).buffer
-              })
-              .then((r) => new Uint8Array(r.signature)),
+          async (digest) => {
+            const r = await activeCrypto.signDigest({
+              publicKeyHex,
+              digest: new Uint8Array(digest).buffer,
+              format: "der"
+            });
+            // P0: 校验回包 format 为 der
+            if (r.format !== "der") {
+              throw new Error(
+                `signDigest (p2pkh) format mismatch: requested "der", got "${r.format}"`
+              );
+            }
+            return new Uint8Array(r.signature);
+          },
           publicKeyHex
         );
 

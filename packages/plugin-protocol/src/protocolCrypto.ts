@@ -11,6 +11,10 @@
 //   - `AES-GCM` 固定 12 字节随机 nonce。
 //   - 解密失败统一抛英文错误（"Decrypt failed"），不区分 origin / nonce / 密文。
 //   - 这里不依赖 vault 的"密码加密私钥"逻辑；cipher 的职责和 vault 不同。
+//
+// 施工单 001 硬切换：
+//   - signCompactSecp256k1 只接受长度恰好 64 的结果
+//   - 删除 DER -> compact fallback；格式应在 signer capability 请求时确定
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { gcm } from "@noble/ciphers/aes.js";
@@ -23,13 +27,29 @@ export function sha256Bytes(bytes: Uint8Array): Uint8Array {
 }
 
 /**
+ * 断言签名为 compact 64-byte r||s 格式。
+ *
+ * 设计缘由（施工单 001 硬切换）：
+ *   - 提取为独立函数，供 signCompactSecp256k1 及协议调用处复用。
+ *   - compact 格式固定 64 字节：r(32) || s(32)。
+ */
+export function assertCompactSignature(sig: unknown): asserts sig is Uint8Array {
+  if (!(sig instanceof Uint8Array)) {
+    throw new Error("assertCompactSignature: expected Uint8Array");
+  }
+  if (sig.length !== 64) {
+    throw new Error(`assertCompactSignature: expected 64 bytes, got ${sig.length}`);
+  }
+}
+
+/**
  * secp256k1 签名：固定 compact 64-byte r||s。
  *
- * 设计缘由（施工单 001 + 协议 J）：
+ * 设计缘由（施工单 001 硬切换）：
  *   - 施工单明确钉死 compact 64-byte 是 signature.bytes 的唯一格式。
- *   - `ActiveKeyCrypto.signDigest` 是底层签名能力，链上 P2PKH 使用其
- *     DER 产物；协议层在这里将该 DER 产物规范化为协议唯一接受的 compact
- *     64-byte `r || s`，避免两个调用面的编码约束相互污染。
+ *   - 调用方必须通过 `ActiveKeyCrypto.signDigest({ ..., format: "compact" })`
+ *     请求 compact 格式，本函数只做最终校验。
+ *   - 不再做 DER -> compact 转换；格式应在 signer capability 请求时确定。
  */
 export function signCompactSecp256k1(
   signDigest: (digest: Uint8Array) => Uint8Array | Promise<Uint8Array>,
@@ -37,21 +57,8 @@ export function signCompactSecp256k1(
 ): Promise<Uint8Array> {
   const digest = sha256Bytes(message);
   return Promise.resolve(signDigest(digest)).then((sig) => {
-    if (!(sig instanceof Uint8Array)) {
-      throw new Error("Compact signature must be 64 bytes");
-    }
-    if (sig.length === 64) return sig;
-
-    // Vault 的受控 session signer 同时供 P2PKH 使用，因此按 Bitcoin
-    // 约定返回 DER。identity.get / intent.sign 则固定要求 compact；只在
-    // 协议边界做一次严格 DER -> compact 转换。
-    try {
-      const compact = secp256k1.Signature.fromBytes(sig, "der").toBytes("compact");
-      if (compact.length === 64) return compact;
-    } catch {
-      // Keep the protocol-facing error stable below.
-    }
-    throw new Error("Compact signature must be 64 bytes");
+    assertCompactSignature(sig);
+    return sig;
   });
 }
 

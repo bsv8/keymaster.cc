@@ -320,44 +320,6 @@ export const appmsgPlatformPlugin: PluginManifest = {
 	        });
 	        const crypto = await vault.createActiveKeyCrypto(pubHex);
 	        const { signChallengeWithSecp256k1 } = await import("./signer.js");
-	        const derToCompactSignature = (der: Uint8Array): Uint8Array => {
-	          if (der.length < 8 || der[0] !== 0x30) {
-	            throw new Error("appmsg.core: invalid DER signature");
-	          }
-	          let offset = 2;
-	          if (der[1]! & 0x80) {
-	            const lenBytes = der[1]! & 0x7f;
-	            offset = 2 + lenBytes;
-	          }
-	          const readInt = (): Uint8Array => {
-	            if (der[offset++] !== 0x02) throw new Error("appmsg.core: invalid DER signature");
-	            let len = der[offset++] ?? 0;
-	            if (len & 0x80) {
-	              const lenBytes = len & 0x7f;
-	              len = 0;
-	              for (let i = 0; i < lenBytes; i++) {
-	                len = (len << 8) | (der[offset++] ?? 0);
-	              }
-	            }
-	            const raw = der.slice(offset, offset + len);
-	            offset += len;
-	            let start = 0;
-	            while (start < raw.length - 1 && raw[start] === 0x00) start++;
-	            const trimmed = raw.slice(start);
-	            if (trimmed.length > 32) {
-	              throw new Error("appmsg.core: invalid compact signature length");
-	            }
-	            const out = new Uint8Array(32);
-	            out.set(trimmed, 32 - trimmed.length);
-	            return out;
-	          };
-	          const r = readInt();
-	          const s = readInt();
-	          const compact = new Uint8Array(64);
-	          compact.set(r, 0);
-	          compact.set(s, 32);
-	          return compact;
-	        };
 	        ctx.logger.info({
 	          scope: "appmsg.core",
 	          event: "appmsg.signer_provider.ready",
@@ -394,17 +356,20 @@ export const appmsgPlatformPlugin: PluginManifest = {
               });
               const startedAt = Date.now();
               const signature = await signChallengeWithSecp256k1(
-                async (digest) =>
-                  derToCompactSignature(
-                    new Uint8Array(
-                      (
-                        await crypto.signDigest({
-                          publicKeyHex: pubHex,
-                          digest: digest.slice().buffer as ArrayBuffer
-                        })
-                      ).signature
-                    )
-                  ),
+                async (digest) => {
+                  const result = await crypto.signDigest({
+                    publicKeyHex: pubHex,
+                    digest: digest.slice().buffer as ArrayBuffer,
+                    format: "compact"
+                  });
+                  // P0: 校验回包 format 为 compact
+                  if (result.format !== "compact") {
+                    throw new Error(
+                      `appmsg.signChallenge format mismatch: requested "compact", got "${result.format}"`
+                    );
+                  }
+                  return new Uint8Array(result.signature);
+                },
                 args.challenge
               );
               ctx.logger.info({

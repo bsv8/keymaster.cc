@@ -92,7 +92,34 @@ export class VaultServiceCoordinator implements VaultService {
     const guard = () => { if (revoked || this.cachedSessionState?.publicKeyHex !== publicKeyHex) throw new Error("Active key session has been revoked"); };
     return {
       getIdentity: () => { guard(); return { publicKeyHex, label: "", capabilities: [], createdAt: "", sessionId }; },
-      async signDigest(input) { guard(); const r = await client.crypto!({ type: "signDigest", digestHex: Array.from(new Uint8Array(input.digest)).map((b) => b.toString(16).padStart(2, "0")).join("") }); if (r.ack.status !== "ok" || !r.result) throw new Error(r.ack.message ?? r.ack.reason ?? "Sign failed"); return { publicKeyHex, signature: Uint8Array.from((r.result as { signatureHex: string }).signatureHex.match(/../g)!.map((x) => parseInt(x, 16))).buffer }; },
+      async signDigest(input) {
+        guard();
+        const r = await client.crypto!({
+          type: "signDigest",
+          digestHex: Array.from(new Uint8Array(input.digest))
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join(""),
+          format: input.format
+        });
+        if (r.ack.status !== "ok" || !r.result) {
+          throw new Error(r.ack.message ?? r.ack.reason ?? "Sign failed");
+        }
+        const result = r.result as { signatureHex: string; format: string };
+        // P0: 校验 Coordinator 回包 format 为合法值且与请求一致
+        if (result.format !== "der" && result.format !== "compact") {
+          throw new Error(`signDigest: unexpected format "${result.format}" from Coordinator`);
+        }
+        if (result.format !== input.format) {
+          throw new Error(
+            `signDigest format mismatch: requested "${input.format}", got "${result.format}"`
+          );
+        }
+        return {
+          publicKeyHex,
+          format: result.format as import("@keymaster/contracts").EcdsaSignatureFormat,
+          signature: Uint8Array.from(result.signatureHex.match(/../g)!.map((x) => parseInt(x, 16))).buffer
+        };
+      },
       async deriveP2pkhAddress(input) { guard(); const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network }); if (r.ack.status !== "ok" || !r.result) throw new Error(r.ack.message ?? "Derive failed"); return { publicKeyHex, address: (r.result as { address: string }).address }; },
       async sealSendInput(sealInput) {
         guard();

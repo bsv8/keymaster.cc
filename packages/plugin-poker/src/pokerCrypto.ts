@@ -7,10 +7,12 @@
 //   - 签名算法：对 nonce / tableId announce 等做 secp256k1 ECDSA；
 //     proxy 仅做形式校验，签名算法本身与 bsv-poker 保持一致即可。
 //   - 浏览器侧用 @noble/curves/secp256k1，签名结果以 hex 形式交给 proxy。
+//
+// 施工单 001：signDigest 必须显式指定 format
 
 import { secp256k1 } from "@noble/curves/secp256k1";
 import { sha256 as nobleSha256 } from "@noble/hashes/sha256";
-import type { VaultService } from "@keymaster/contracts";
+import type { EcdsaSignatureFormat, VaultService } from "@keymaster/contracts";
 
 /**
  * 在受控 active-key capability 内对 digest 做 ECDSA 签名。
@@ -27,16 +29,24 @@ export async function signDigestWithVault(
   const crypto = await resolveActiveKeyCrypto(vault, publicKeyHex);
   const sig = await crypto.signDigest({
     publicKeyHex,
-    digest: new Uint8Array(digest).buffer
+    digest: new Uint8Array(digest).buffer,
+    format: "compact"
   });
+  // P1: 校验回包 format 为 compact
+  if (sig.format !== "compact") {
+    throw new Error(
+      `signDigestWithVault format mismatch: requested "compact", got "${sig.format}"`
+    );
+  }
   return toHex(new Uint8Array(sig.signature));
 }
 
 async function resolveActiveKeyCrypto(vault: VaultService, publicKeyHex: string) {
   const anyVault = vault as VaultService & {
     createActiveKeyCrypto?: (hex: string) => Promise<{
-      signDigest: (input: { publicKeyHex: string; digest: ArrayBuffer }) => Promise<{
+      signDigest: (input: { publicKeyHex: string; digest: ArrayBuffer; format: EcdsaSignatureFormat }) => Promise<{
         publicKeyHex: string;
+        format: EcdsaSignatureFormat;
         signature: ArrayBuffer;
       }>;
     }>;

@@ -234,8 +234,15 @@ export const broadcastPlatformPlugin: PluginManifest = {
           signChallenge: async (args: { challenge: Uint8Array }): Promise<string> => {
             const sig = await activeCrypto.signDigest({
               publicKeyHex: pubHex,
-              digest: new Uint8Array(args.challenge).buffer
+              digest: new Uint8Array(args.challenge).buffer,
+              format: "compact"
             });
+            // P1: 校验回包 format 为 compact
+            if (sig.format !== "compact") {
+              throw new Error(
+                `broadcast.signChallenge format mismatch: requested "compact", got "${sig.format}"`
+              );
+            }
             return bytesToHex(new Uint8Array(sig.signature));
           }
         } satisfies BroadcastSignerContext;

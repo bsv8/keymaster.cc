@@ -6,12 +6,15 @@
 //   - 私钥只在 Worker 内存中，永不离开
 //   - 删除每 tab 独立 Dedicated Worker 的旧路径
 //   - 本地实现只允许通过显式测试开关注入，生产路径 fail closed
+//
+// 施工单 001：signDigest 必须显式传递 format 参数
 
 import type {
   ActiveKeyCryptoIdentity,
   ActiveKeyCryptoSealSendInputResult,
   ActiveKeyCryptoSignDigestResult,
   AppMsgMessage,
+  EcdsaSignatureFormat,
   ProviderSealedMessageRecord
 } from "@keymaster/contracts";
 import { ActiveKeySessionRevokedError } from "@keymaster/contracts";
@@ -29,7 +32,7 @@ import {
   decryptSessionPrivateKeyBytes,
   openAppMessageLocalBytes,
   sealAppMessageLocalBytes,
-  signDigestBytes,
+  signEcdsaDigest,
   verifySessionKeyPair
 } from "./sessionCryptoCore.js";
 import { encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial } from "./vaultCoordinator.js";
@@ -42,7 +45,7 @@ interface SessionCryptoEngineInput extends SessionCryptoBootstrapInput {}
 
 interface SessionCryptoEngine {
   getIdentity(): ActiveKeyCryptoIdentity;
-  signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }): Promise<ActiveKeyCryptoSignDigestResult>;
+  signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: EcdsaSignatureFormat }): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(input: {
     publicKeyHex: string;
     network: "main" | "test";
@@ -262,10 +265,17 @@ async function createWorkerBackedEngine(
         "signDigest",
         {
           publicKeyHex: signInput.publicKeyHex,
-          digest: signInput.digest
+          digest: signInput.digest,
+          format: signInput.format
         },
         [signInput.digest]
       )) as ActiveKeyCryptoSignDigestResult;
+      // P0: 回包 format 必须与请求一致，防止 Worker 返回错误格式的签名
+      if (result.format !== signInput.format) {
+        throw new Error(
+          `signDigest format mismatch: requested "${signInput.format}", got "${result.format}"`
+        );
+      }
       return result;
     },
     async deriveP2pkhAddress(deriveInput) {
@@ -360,11 +370,22 @@ async function createCoordinatorBackedEngine(
       const digestHex = Array.from(digestBytes).map(b => b.toString(16).padStart(2, "0")).join("");
       const result = await cryptoRequest({
         type: "signDigest",
-        digestHex
+        digestHex,
+        format: signInput.format
       });
       if (result.type !== "signDigest") throw new Error("Unexpected result type");
+      // P0: 校验 Coordinator 回包 format 为合法值且与请求一致
+      if (result.format !== "der" && result.format !== "compact") {
+        throw new Error(`signDigest: unexpected format "${result.format}" from Coordinator`);
+      }
+      if (result.format !== signInput.format) {
+        throw new Error(
+          `signDigest format mismatch: requested "${signInput.format}", got "${result.format}"`
+        );
+      }
       return {
         publicKeyHex: input.publicKeyHex,
+        format: result.format,
         signature: hexToBytes(result.signatureHex).buffer as ArrayBuffer
       };
     },
@@ -449,8 +470,12 @@ async function createLocalEngine(input: SessionCryptoEngineInput): Promise<Sessi
       if (signInput.publicKeyHex !== input.publicKeyHex) {
         throw new Error("session_key_mismatch");
       }
-      const sig = await signDigestBytes(privateKeyBytes, new Uint8Array(signInput.digest));
-      return { publicKeyHex: input.publicKeyHex, signature: new Uint8Array(sig).buffer as ArrayBuffer };
+      const sig = await signEcdsaDigest({
+        privateKeyBytes,
+        digest: new Uint8Array(signInput.digest),
+        format: signInput.format
+      });
+      return { publicKeyHex: input.publicKeyHex, format: signInput.format, signature: new Uint8Array(sig).buffer as ArrayBuffer };
     },
     async deriveP2pkhAddress(deriveInput) {
       guard();

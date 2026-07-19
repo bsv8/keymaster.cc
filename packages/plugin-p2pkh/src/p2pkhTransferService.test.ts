@@ -93,17 +93,18 @@ function makeVault() {
   return {
     status: () => "unlocked",
     createActiveKeyCrypto: async (_publicKeyHex: string) => ({
-      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
         if (input.publicKeyHex !== ACTIVE_PUBLIC_KEY_HEX) {
           throw new Error("session_key_mismatch");
         }
         const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(ACTIVE_PRIV_HEX), {
           lowS: true,
           prehash: false,
-          format: "compact"
+          format: input.format
         });
         return {
           publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+          format: input.format,
           signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
         };
       },
@@ -355,6 +356,65 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     expect(db.inputClaims).toHaveLength(0);
     expect(db.submissions).toHaveLength(2);
     expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("failed");
+  });
+
+  it("rejects signing when runtime returns mismatched format (requested der, got compact)", async () => {
+    // 构造一个返回错误 format 的 vault mock
+    const mismatchVault = {
+      status: () => "unlocked",
+      createActiveKeyCrypto: async (_publicKeyHex: string) => ({
+        async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
+          const wrongFormat = input.format === "der" ? "compact" as const : "der" as const;
+          const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(ACTIVE_PRIV_HEX), {
+            lowS: true, prehash: false, format: wrongFormat
+          });
+          return {
+            publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+            format: wrongFormat,
+            signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
+          };
+        },
+        async deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }) {
+          const derived = deriveP2pkhAddress(ACTIVE_PRIV_HEX, input.network);
+          return { publicKeyHex: derived.publicKeyHex, address: derived.address };
+        }
+      }),
+      withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) =>
+        fn({ hex: ACTIVE_PRIV_HEX })
+    } as never;
+
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      label: "active",
+      address: ACTIVE.address,
+      network: "main",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      generation: 0
+    };
+    const db = makeDb([makeUtxo(3000)], resource);
+    const service = createP2pkhTransferService({
+      vault: mismatchVault,
+      woc: { broadcast: vi.fn() } as never,
+      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
+      getDb: async (_publicKeyHex: string) => db as never,
+      getActiveKey: () => ({
+        publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+        label: "active",
+        capabilities: [],
+        createdAt: "2024-01-01T00:00:00.000Z"
+      }),
+      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
+    });
+
+    await expect(
+      service.prepare({
+        ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+        assetId: "bsv",
+        recipientAddress: RECEIVER.address,
+        amountSatoshis: 1000,
+        feeRateSatoshisPerKb: 1
+      })
+    ).rejects.toThrow("signDigest (p2pkh) format mismatch");
   });
 });
 

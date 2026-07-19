@@ -78,6 +78,50 @@ class RecordingWorker {
   }
 }
 
+/**
+ * 模拟 Worker 返回错误 format 的场景，用于测试 format mismatch 拒绝逻辑。
+ * init 正常处理，signDigest 返回请求的对立格式。
+ */
+class FormatMismatchWorker {
+  static instances: FormatMismatchWorker[] = [];
+  onmessage: ((event: MessageEvent<{ requestId: string; ok: boolean; result?: unknown; error?: string }>) => void) | null =
+    null;
+  onerror: ((event: ErrorEvent) => void) | null = null;
+  onmessageerror: ((event: MessageEvent) => void) | null = null;
+  terminated = false;
+
+  constructor() {
+    FormatMismatchWorker.instances.push(this);
+  }
+
+  postMessage(msg: Record<string, unknown>) {
+    if (this.terminated) return;
+    queueMicrotask(async () => {
+      if (this.terminated) return;
+      const responses = await __testHandleSessionCryptoRequest(msg as never);
+      for (const response of responses) {
+        if (this.terminated) return;
+        // 对 signDigest 操作，翻转 format 字段
+        if (msg.kind === "signDigest" && response.ok && response.result) {
+          const result = response.result as { format: string; signature: ArrayBuffer; publicKeyHex: string };
+          const flippedFormat = result.format === "der" ? "compact" : "der";
+          this.onmessage?.({
+            data: { ...response, result: { ...result, format: flippedFormat } }
+          } as MessageEvent<{ requestId: string; ok: boolean; result?: unknown; error?: string }>);
+        } else {
+          this.onmessage?.({
+            data: response
+          } as MessageEvent<{ requestId: string; ok: boolean; result?: unknown; error?: string }>);
+        }
+      }
+    });
+  }
+
+  terminate() {
+    this.terminated = true;
+  }
+}
+
 describe("sessionCryptoClient", () => {
   afterEach(() => {
     // 恢复 Worker 全局，避免影响其它测试。
@@ -132,7 +176,7 @@ describe("sessionCryptoClient", () => {
       const digest = new Uint8Array(32);
       digest.fill(9);
       await expect(
-        engine.signDigest({ publicKeyHex, digest: digest.buffer })
+        engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "der" })
       ).resolves.toMatchObject({ publicKeyHex });
       engine.dispose?.("test");
     } finally {
@@ -193,7 +237,7 @@ describe("sessionCryptoClient", () => {
       const digest = new Uint8Array(32);
       digest.fill(11);
       await expect(
-        engine.signDigest({ publicKeyHex, digest: digest.buffer })
+        engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "der" })
       ).resolves.toMatchObject({ publicKeyHex });
 
       engine.dispose("window-close");
@@ -201,8 +245,177 @@ describe("sessionCryptoClient", () => {
       expect(worker?.terminated).toBe(true);
 
       await expect(
-        engine.signDigest({ publicKeyHex, digest: digest.buffer })
+        engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "der" })
       ).rejects.toThrow("Active key session has been revoked");
+    } finally {
+      (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+    }
+  });
+
+  it("worker-backed engine: compact signing returns format=compact and 64-byte signature", async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+    RecordingWorker.instances = [];
+    (globalThis as { Worker?: typeof Worker }).Worker =
+      RecordingWorker as unknown as typeof Worker;
+    try {
+      const privateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      );
+      const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
+      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const engine = await createSessionCryptoEngine({
+        sessionId: "session-compact",
+        publicKeyHex,
+        passwordKey,
+        encryptedPrivateKey,
+        label: "Key Compact",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      }, { mode: "appview" });
+
+      const digest = new Uint8Array(32);
+      digest.fill(0xcc);
+      const result = await engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "compact" });
+      expect(result.format).toBe("compact");
+      expect(result.publicKeyHex).toBe(publicKeyHex);
+      expect(new Uint8Array(result.signature).length).toBe(64);
+
+      engine.dispose("test");
+    } finally {
+      (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+    }
+  });
+
+  it("worker-backed engine: DER signing returns format=der and valid DER structure", async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+    RecordingWorker.instances = [];
+    (globalThis as { Worker?: typeof Worker }).Worker =
+      RecordingWorker as unknown as typeof Worker;
+    try {
+      const privateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      );
+      const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
+      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const engine = await createSessionCryptoEngine({
+        sessionId: "session-der",
+        publicKeyHex,
+        passwordKey,
+        encryptedPrivateKey,
+        label: "Key DER",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      }, { mode: "appview" });
+
+      const digest = new Uint8Array(32);
+      digest.fill(0xdd);
+      const result = await engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "der" });
+      expect(result.format).toBe("der");
+      expect(result.publicKeyHex).toBe(publicKeyHex);
+      const sigBytes = new Uint8Array(result.signature);
+      expect(sigBytes[0]).toBe(0x30); // DER SEQUENCE tag
+      expect(sigBytes.length).toBeGreaterThanOrEqual(8);
+
+      engine.dispose("test");
+    } finally {
+      (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+    }
+  });
+
+  it("local engine: compact signing returns format=compact and 64-byte signature", async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+    (globalThis as { Worker?: typeof Worker }).Worker = undefined;
+    try {
+      const privateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      );
+      const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
+      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const engine = await createSessionCryptoEngine({
+        sessionId: "session-local-compact",
+        publicKeyHex,
+        passwordKey,
+        encryptedPrivateKey,
+        label: "Key Local Compact",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      }, { allowLocalEngineForTests: true, mode: "appview" });
+
+      const digest = new Uint8Array(32);
+      digest.fill(0xee);
+      const result = await engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "compact" });
+      expect(result.format).toBe("compact");
+      expect(new Uint8Array(result.signature).length).toBe(64);
+
+      engine.dispose("test");
+    } finally {
+      (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+    }
+  });
+
+  it("worker-backed engine: rejects when Worker returns mismatched format (compact→der)", async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+    FormatMismatchWorker.instances = [];
+    (globalThis as { Worker?: typeof Worker }).Worker =
+      FormatMismatchWorker as unknown as typeof Worker;
+    try {
+      const privateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      );
+      const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
+      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const engine = await createSessionCryptoEngine({
+        sessionId: "session-mismatch",
+        publicKeyHex,
+        passwordKey,
+        encryptedPrivateKey,
+        label: "Key Mismatch",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      }, { mode: "appview" });
+
+      const digest = new Uint8Array(32);
+      digest.fill(0xff);
+      // 请求 compact，但 FormatMismatchWorker 会返回 der
+      await expect(
+        engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "compact" })
+      ).rejects.toThrow('signDigest format mismatch');
+
+      engine.dispose("test");
+    } finally {
+      (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+    }
+  });
+
+  it("worker-backed engine: rejects when Worker returns mismatched format (der→compact)", async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+    FormatMismatchWorker.instances = [];
+    (globalThis as { Worker?: typeof Worker }).Worker =
+      FormatMismatchWorker as unknown as typeof Worker;
+    try {
+      const privateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      );
+      const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
+      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const engine = await createSessionCryptoEngine({
+        sessionId: "session-mismatch-der",
+        publicKeyHex,
+        passwordKey,
+        encryptedPrivateKey,
+        label: "Key Mismatch DER",
+        capabilities: ["p2pkh"],
+        createdAt: new Date().toISOString()
+      }, { mode: "appview" });
+
+      const digest = new Uint8Array(32);
+      digest.fill(0xfe);
+      // 请求 der，但 FormatMismatchWorker 会返回 compact
+      await expect(
+        engine.signDigest({ publicKeyHex, digest: digest.buffer, format: "der" })
+      ).rejects.toThrow('signDigest format mismatch');
+
+      engine.dispose("test");
     } finally {
       (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
     }
