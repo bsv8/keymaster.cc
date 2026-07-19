@@ -256,7 +256,8 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   async removeKey(publicKeyHex: string): Promise<void> {
-    await this.call("removeKey", { publicKeyHex });
+    void publicKeyHex;
+    throw new Error("Use keyspace.deleteKey instead");
   }
 
   async exportKeyBackup(publicKeyHex: string): Promise<string> {

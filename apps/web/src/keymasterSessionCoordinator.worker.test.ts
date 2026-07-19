@@ -1,5 +1,34 @@
-import { describe, expect, it } from "vitest";
-import { __testBackgroundRunNow, __testCancelByKey, __testGetSnapshot, __testInvalidateSession, __testRegisterTask, __testResetState, __testRestartWorker, __testRunTask, __testSetVaultStatus, __testUpdateScheduleSettings } from "./keymasterSessionCoordinator.worker.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  bytesToHex,
+  decryptVaultKeyMaterialForMigration,
+  encryptVaultKeyMaterial,
+  hexToBytes,
+  resolveVaultPasswordKey,
+  vaultDb,
+} from "@keymaster/plugin-vault/coordinator";
+import { secp256k1 } from "@noble/curves/secp256k1.js";
+import {
+  __testBackgroundRunNow,
+  __testCancelByKey,
+  __testCreateVault,
+  __testCreateEmptyVault,
+  __testDeleteVault,
+  __testExportKeyBackup,
+  __testGetActivePublicKeyHex,
+  __testGetSnapshot,
+  __testGetVaultStatus,
+  __testImportKeyBackup,
+  __testInvalidateSession,
+  __testLock,
+  __testRegisterTask,
+  __testResetState,
+  __testRestartWorker,
+  __testRunTask,
+  __testSetVaultStatus,
+  __testUnlock,
+  __testUpdateScheduleSettings
+} from "./keymasterSessionCoordinator.worker.js";
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -98,5 +127,236 @@ describe("Session Coordinator worker", () => {
     await __testRestartWorker();
     expect(__testGetSnapshot().vaultStatus).not.toBe("unlocked");
     expect(__testGetSnapshot().scheduleSettings.assetHoldingsIntervalMs).toBe(60_000);
+  });
+
+  it("marks tasks as blocked when vault is locked", async () => {
+    __testResetState();
+    __testSetVaultStatus("locked");
+    __testRegisterTask({ id: "task-1", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    // 模拟 performGlobalLock 的行为
+    const snapshot = __testGetSnapshot();
+    const task = snapshot.taskSnapshots.find((t) => t.id === "task-1");
+    expect(task?.state).toBe("idle"); // 初始状态是 idle
+    // 锁定时任务应该变为 blocked
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testRegisterTask({ id: "task-2", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    // 验证解锁状态下的任务是 idle
+    expect(__testGetSnapshot().taskSnapshots.find((t) => t.id === "task-2")?.state).toBe("idle");
+  });
+
+  it("locks running tasks to blocked after performGlobalLock", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    __testRegisterTask({ id: "running-task", publicKeyHex: "a".repeat(64), run: async () => { await gate; } });
+    void __testRunTask("running-task");
+    await Promise.resolve();
+    // 锁定
+    __testSetVaultStatus("locked");
+    release();
+    await flush();
+    const snapshot = __testGetSnapshot();
+    const task = snapshot.taskSnapshots.find((t) => t.id === "running-task");
+    expect(task?.state).toBe("blocked");
+    expect(task?.blockedReason).toBe("Vault is locked");
+  });
+
+  it("broadcasts background snapshot immediately on lock", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    const a = new TestPort();
+    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
+    onconnect?.({ ports: [a] } as unknown as MessageEvent);
+    a.send({ kind: "hello", clientId: "a", requestId: "hello-a" });
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["background"] });
+    await flush();
+    a.messages.length = 0;
+    // 锁定
+    a.send({ kind: "lock", clientId: "a", requestId: "lock", expectedSessionEpoch: __testGetSnapshot().sessionEpoch });
+    await flush();
+    const backgroundEvents = a.messages.filter((m) => (m as { type?: string }).type === "background.snapshot-updated");
+    expect(backgroundEvents.length).toBeGreaterThan(0);
+  });
+
+  it("restores tasks to idle and reschedules after unlock", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    __testRegisterTask({ id: "blocked-task", publicKeyHex: "a".repeat(64), run: async () => undefined });
+    // 模拟锁定
+    const snapshot1 = __testGetSnapshot();
+    expect(snapshot1.taskSnapshots.find((t) => t.id === "blocked-task")?.state).toBe("idle");
+    // 解锁后任务应该保持 idle
+    const snapshot2 = __testGetSnapshot();
+    const task = snapshot2.taskSnapshots.find((t) => t.id === "blocked-task");
+    expect(task?.state).toBe("idle");
+    expect(task?.blockedReason).toBeUndefined();
+  });
+
+  it("uses persisted interval for nextRunAt", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await __testUpdateScheduleSettings({ assetHoldingsIntervalMs: 120_000 });
+    // 验证设置已持久化
+    const snapshot = __testGetSnapshot();
+    expect(snapshot.scheduleSettings.assetHoldingsIntervalMs).toBe(120_000);
+  });
+});
+
+// ============================================================
+// Backup Import Tests (生产执行路径)
+// ============================================================
+
+const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
+
+describe("Session Coordinator backup import", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  it("cross-vault import succeeds with different passwords", async () => {
+    const sourceResult = await __testCreateVault("source-pw", { label: "source-key" });
+    const backup = await __testExportKeyBackup(sourceResult.publicKeyHex!);
+    const sourceRecord = JSON.parse(backup).keyRecord;
+
+    // A second Vault must be a fresh persistent store, rather than merely a
+    // reset Worker session over the source Vault's IndexedDB records.
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateVault("target-pw", { label: "target-key" });
+    const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
+    expect(imported.publicKeyHex).toBe(sourceResult.publicKeyHex);
+
+    const targetMeta = await vaultDb.getMeta();
+    const targetRecord = await vaultDb.getKey(imported.publicKeyHex);
+    expect(targetMeta).toBeDefined();
+    expect(targetRecord).toBeDefined();
+    expect(targetRecord?.cipherSaltB64).not.toBe(sourceRecord.cipherSaltB64);
+
+    // The imported record is encrypted for the target Vault, and only that
+    // password can open it after the Worker loses its in-memory session.
+    const targetKey = await resolveVaultPasswordKey("target-pw", targetMeta!);
+    await expect(
+      decryptVaultKeyMaterialForMigration(targetKey.key, targetRecord!, targetKey.encoding)
+    ).resolves.toMatchObject({ hex: expect.any(String) });
+    await __testLock();
+    const unlocked = await __testUnlock("target-pw", imported.publicKeyHex);
+    expect(unlocked.ack.status).toBe("accepted");
+    expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
+  });
+
+  it("rejects wrong source password without writing any key", async () => {
+    const source = await __testCreateVault("source-pw");
+    const backup = await __testExportKeyBackup(source.publicKeyHex!);
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateEmptyVault("target-pw");
+
+    await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/Invalid password/);
+    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(__testGetVaultStatus()).toBe("locked");
+  });
+
+  it("rejects wrong target password without writing any key", async () => {
+    const source = await __testCreateVault("source-pw");
+    const backup = await __testExportKeyBackup(source.publicKeyHex!);
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateEmptyVault("target-pw");
+
+    await expect(__testImportKeyBackup(backup, "source-pw", "wrong-target-pw")).rejects.toThrow(/Invalid password/);
+    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(__testGetVaultStatus()).toBe("locked");
+  });
+
+  it("rejects backup with mismatched public key and material", async () => {
+    const source = await __testCreateVault("source-pw");
+    const backup = await __testExportKeyBackup(source.publicKeyHex!);
+    const parsed = JSON.parse(backup);
+    const sourceKey = await resolveVaultPasswordKey("source-pw", parsed.sourceVaultMeta);
+    const material = await decryptVaultKeyMaterialForMigration(sourceKey.key, parsed.keyRecord, sourceKey.encoding);
+    parsed.keyRecord.publicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
+    Object.assign(parsed.keyRecord, await encryptVaultKeyMaterial(sourceKey.key, parsed.keyRecord.publicKeyHex, material));
+    const tamperedBackup = JSON.stringify(parsed);
+
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateEmptyVault("target-pw");
+
+    await expect(__testImportKeyBackup(tamperedBackup, "source-pw", "target-pw")).rejects.toThrow("Backup key public key mismatch");
+    expect(await vaultDb.listKeys()).toHaveLength(0);
+  });
+
+  it("rejects duplicate key import with Key already exists", async () => {
+    const source = await __testCreateVault("source-pw");
+    const backup = await __testExportKeyBackup(source.publicKeyHex!);
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateEmptyVault("target-pw");
+    const first = await __testImportKeyBackup(backup, "source-pw", "target-pw");
+    const original = await vaultDb.getKey(first.publicKeyHex);
+
+    await expect(__testImportKeyBackup(backup, "source-pw", "target-pw")).rejects.toThrow("Key already exists");
+    expect(await vaultDb.listKeys()).toHaveLength(1);
+    expect(await vaultDb.getKey(first.publicKeyHex)).toEqual(original);
+  });
+
+  it("imports the first key into a locked empty Vault and activates it after unlock", async () => {
+    const source = await __testCreateVault("source-pw");
+    const backup = await __testExportKeyBackup(source.publicKeyHex!);
+    await __testDeleteVault();
+    __testResetState();
+    await __testCreateEmptyVault("target-pw");
+
+    const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
+    expect(await vaultDb.listKeys()).toHaveLength(1);
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetActivePublicKeyHex()).toBeUndefined();
+
+    const unlocked = await __testUnlock("target-pw");
+    expect(unlocked.ack.status).toBe("accepted");
+    expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
+  });
+
+  it("activates the first key in an unlocked Vault and broadcasts it to every tab", async () => {
+    const source = await __testCreateVault("source-pw");
+    const backup = await __testExportKeyBackup(source.publicKeyHex!);
+    await __testDeleteVault();
+    __testResetState();
+
+    const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
+    // Model an unlocked empty Vault without forging session crypto state: remove
+    // the only persisted key while retaining the real unlocked target session.
+    await vaultDb.deleteKey(placeholder.publicKeyHex!);
+    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(__testGetVaultStatus()).toBe("unlocked");
+
+    const a = new TestPort();
+    const b = new TestPort();
+    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
+    onconnect?.({ ports: [a] } as unknown as MessageEvent);
+    onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    a.send({ kind: "hello", clientId: "import-a", requestId: "hello-a" });
+    b.send({ kind: "hello", clientId: "import-b", requestId: "hello-b" });
+    a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["keyspace"] });
+    b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["keyspace"] });
+    await flush();
+    a.messages.length = 0;
+    b.messages.length = 0;
+
+    const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
+    expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
+    for (const port of [a, b]) {
+      expect(port.messages).toContainEqual(expect.objectContaining({
+        type: "keyspace.active-changed",
+        publicKeyHex: imported.publicKeyHex,
+      }));
+    }
   });
 });

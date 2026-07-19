@@ -73,4 +73,11 @@ describe("VaultServiceCoordinator", () => {
     expect(() => first.getIdentity()).toThrow(/revoked/i);
     expect(second.getIdentity().sessionId).toBe("reused");
   });
+
+  it("removeKey throws without sending RPC", async () => {
+    const client = makeClient();
+    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    await expect(vault.removeKey(PUBLIC_KEY)).rejects.toThrow("Use keyspace.deleteKey instead");
+    expect(client.vaultOperation).not.toHaveBeenCalledWith("removeKey", expect.anything());
+  });
 });

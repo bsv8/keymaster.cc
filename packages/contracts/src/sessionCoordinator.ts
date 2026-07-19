@@ -74,7 +74,8 @@ export type CoordinatorVaultOperation =
   | { type: "recoverEmptyVaultToUninitialized" }
   | { type: "generateKey"; password: string; label: string; capabilities?: string[] }
   | { type: "importPrivateKey"; password: string; label: string; material: { hex: string; wif?: string }; format: string; capabilities: string[]; source?: string }
-  | { type: "exportKeyBackup"; publicKeyHex: string };
+  | { type: "exportKeyBackup"; publicKeyHex: string }
+  | { type: "importKeyBackup"; backup: string; sourcePassword: string; targetPassword: string };
 
 // ============================================================
 // 3. Coordinator -> Client Response

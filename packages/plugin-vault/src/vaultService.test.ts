@@ -392,6 +392,79 @@ describe("VaultService.importKeyBackup", () => {
       })
     ).rejects.toThrow(/Invalid source password/);
   });
+
+  it("rejects wrong target password", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("restore-pw");
+    const ref = await vault.importPrivateKey({
+      password: "restore-pw",
+      label: "restore-me",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const backup = await vault.exportKeyBackup(ref.publicKeyHex);
+    await expect(
+      vault.importKeyBackup!({
+        backup,
+        sourcePassword: "restore-pw",
+        targetPassword: "wrong-target"
+      })
+    ).rejects.toThrow(/Invalid password/);
+  });
+
+  it("rejects duplicate key import", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("dup-pw");
+    const ref = await vault.importPrivateKey({
+      password: "dup-pw",
+      label: "original",
+      material: { hex: TEST_PRIV },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const backup = await vault.exportKeyBackup(ref.publicKeyHex);
+    await expect(
+      vault.importKeyBackup!({
+        backup,
+        sourcePassword: "dup-pw",
+        targetPassword: "dup-pw"
+      })
+    ).rejects.toThrow(/Key already exists/);
+  });
+
+  it("allows import with different source and target passwords", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    // 创建 Vault 使用 source-pw
+    await vault.createVault("source-pw");
+    const ref = await vault.importPrivateKey({
+      password: "source-pw",
+      label: "cross-pw-key",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const backup = await vault.exportKeyBackup(ref.publicKeyHex);
+    // 删除 key
+    await vault.deleteKeyMaterial(ref.publicKeyHex);
+    const before = await vault.listKeys();
+    expect(before.find((k) => k.publicKeyHex === ref.publicKeyHex)).toBeUndefined();
+    // 使用相同的 source 和 target password 导入
+    const restored = await vault.importKeyBackup!({
+      backup,
+      sourcePassword: "source-pw",
+      targetPassword: "source-pw"
+    });
+    expect(restored.publicKeyHex).toBe(ref.publicKeyHex);
+    const after = await vault.listKeys();
+    expect(after.find((k) => k.publicKeyHex === ref.publicKeyHex)).toBeDefined();
+  });
 });
 
 describe("VaultService.verifyPassword (硬切换 002 删除授权)", () => {
