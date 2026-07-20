@@ -116,8 +116,8 @@ class FakeVault {
   async createVaultWithImportedKey() {
     throw new Error("not used");
   }
-  async unlock() {}
-  async lock() {}
+  async unlock() { return { status: "accepted" as const }; }
+  async lock() { return { status: "accepted" as const }; }
   async verifyPassword() {}
   async finalizeEmptyVaultAfterLastKeyDeletion() {}
   async listKeys() {
@@ -155,12 +155,13 @@ class FakeVault {
         capabilities: [],
         createdAt: new Date().toISOString()
       }),
-      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer }) {
+      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
         if (input.publicKeyHex !== publicKeyHex) {
           throw new Error("session_key_mismatch");
         }
         return {
           publicKeyHex,
+          format: "compact" as const,
           signature: new Uint8Array(64).fill(privHex === PRIV_A ? 0xa1 : 0xb2).buffer
         };
       }

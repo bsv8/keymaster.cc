@@ -138,10 +138,14 @@ export function KeySwitchWidget() {
     setSwitchBusy(true);
     setSwitchError(null);
     try {
-      await vault.activateKey({
+      const result = await vault.activateKey({
         publicKeyHex: pendingSwitch.publicKeyHex,
         password: switchPassword
       });
+      if (result.status !== "accepted") {
+        setSwitchError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Failed to switch key: ${result.status}`);
+        return;
+      }
       setPendingSwitch(null);
       setSwitchPassword("");
       setSwitchError(null);

@@ -102,6 +102,15 @@ describe("installGlobalFatalHandlers", () => {
     expect(fatal?.message).toBe("rejection boom");
   });
 
+  it("keeps consumed command results outside the fatal boundary", async () => {
+    installGlobalFatalHandlers();
+    const blocked = await Promise.resolve({ status: "blocked", reason: { key: "background.blocked.unlock", fallback: "Vault is locked" } });
+    const transport = await Promise.resolve({ status: "transport-error", message: "Coordinator connection lost", retryable: true });
+    expect(blocked.status).toBe("blocked");
+    expect(transport.status).toBe("transport-error");
+    expect(getFatalError()).toBeNull();
+  });
+
   it("is idempotent — calling install twice only registers a single listener pair", () => {
     // 关键约束:重复 installGlobalFatalHandlers 不能在 window 上挂双份
     // listener;否则同一条错误会通过两个 listener 走到 reportFatalError。

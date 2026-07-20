@@ -751,7 +751,7 @@ async function handleActivateKey(
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: "Vault is locked" },
+      ack: { status: "blocked", reason: { key: "background.blocked.unlock", fallback: "Vault is locked" } },
     };
   }
 
@@ -806,7 +806,7 @@ async function handleCrypto(
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: "Vault is locked" },
+      ack: { status: "blocked", reason: { key: "background.blocked.unlock", fallback: "Vault is locked" } },
     };
   }
 
@@ -814,7 +814,7 @@ async function handleCrypto(
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: "No active key" },
+      ack: { status: "blocked", reason: { key: "background.blocked.noActiveKey", fallback: "No active key" } },
     };
   }
 
@@ -874,7 +874,7 @@ async function handleBackgroundRunNow(
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: "Vault is locked" },
+      ack: { status: "blocked", reason: { key: "background.blocked.unlock", fallback: "Vault is locked" } },
     };
   }
 
@@ -899,7 +899,7 @@ async function handleBackgroundRunNow(
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "blocked", reason: runtime.blockedReason ?? "Task blocked" },
+      ack: { status: "blocked", reason: { key: "background.blocked.task", fallback: runtime.blockedReason ?? "Task blocked" } },
     };
   }
 
@@ -1103,7 +1103,7 @@ function getTaskSnapshots(): CoordinatorTaskSnapshot[] {
       lastAttemptAt: runtime.lastAttemptAt,
       nextRunAt: runtime.nextRunAt,
       error: runtime.error,
-      blockedReason: runtime.blockedReason,
+      blockedReason: runtime.blockedReason ? { key: "background.blocked.task", fallback: runtime.blockedReason } : undefined,
       keyScope: resolveKeyScope(runtime),
     });
   }

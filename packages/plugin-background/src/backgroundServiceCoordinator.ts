@@ -10,6 +10,8 @@ import type {
   BackgroundService,
   BackgroundSyncSettings,
   BackgroundTaskSnapshot,
+  BackgroundCommandResult,
+  CoordinatorCommandResult,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -17,16 +19,17 @@ import type {
 // ============================================================
 
 /** Coordinator client 最小接口（避免跨包导入）。 */
-interface CoordinatorClientLike {
+export interface CoordinatorClientLike {
   getIsConnected(): boolean;
   getState(): { taskSnapshots: CoordinatorTaskSnapshotLike[]; scheduleSettings: BackgroundSyncSettings };
   onStateChange(handler: (state: { taskSnapshots: CoordinatorTaskSnapshotLike[]; scheduleSettings: BackgroundSyncSettings }) => void): () => void;
   onEvent(eventType: string, handler: (event: { type: string; snapshots?: CoordinatorTaskSnapshotLike[] }) => void): () => void;
-  backgroundRunNow(taskId: string): Promise<{ status: string; message?: string; reason?: string }>;
-  backgroundTrigger(taskId: string, reason: string): Promise<{ status: string; message?: string; reason?: string }>;
-  backgroundCancel(taskId: string): Promise<{ status: string; message?: string }>;
-  backgroundCancelByKey(publicKeyHex: string): Promise<{ status: string; message?: string }>;
-  backgroundSettingsUpdate(settings: BackgroundSyncSettings): Promise<{ status: string; message?: string; reason?: string }>;
+  backgroundRunNow(taskId: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
+  backgroundTrigger(taskId: string, reason: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
+  backgroundCancel(taskId: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
+  backgroundCancelByKey(publicKeyHex: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
+  backgroundSettingsUpdate(settings: BackgroundSyncSettings): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
+  reportRecoverableCoordinatorFailure?(kind: string, cause: unknown): void;
 }
 
 interface CoordinatorTaskSnapshotLike {
@@ -39,9 +42,11 @@ interface CoordinatorTaskSnapshotLike {
   lastAttemptAt?: string;
   nextRunAt?: string;
   error?: string;
-  blockedReason?: string;
+  blockedReason?: { key: string; fallback: string };
   keyScope?: { publicKeyHex: string; label?: string };
 }
+
+type CoordinatorResultLike = { status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean };
 
 export interface BackgroundServiceCoordinatorDeps {
   coordinatorClient: CoordinatorClientLike;
@@ -79,7 +84,7 @@ export function createBackgroundServiceCoordinator(
       lastAttemptAt: s.lastAttemptAt,
       nextRunAt: s.nextRunAt,
       error: s.error,
-      blockedReason: s.blockedReason ? { key: s.blockedReason, fallback: s.blockedReason } : undefined,
+      blockedReason: s.blockedReason,
       keyScope: s.keyScope,
     }));
     cachedSettings = state.scheduleSettings;
@@ -98,7 +103,7 @@ export function createBackgroundServiceCoordinator(
         lastAttemptAt: s.lastAttemptAt,
         nextRunAt: s.nextRunAt,
         error: s.error,
-        blockedReason: s.blockedReason ? { key: s.blockedReason, fallback: s.blockedReason } : undefined,
+        blockedReason: s.blockedReason,
         keyScope: s.keyScope,
       }));
       notifyChange();
@@ -123,14 +128,10 @@ export function createBackgroundServiceCoordinator(
       return () => { changeHandlers.delete(handler); };
     },
 
-    runNow(taskId: string): void {
-      // BackgroundService 的调用方（包括 React event handler）按契约不会 await
-      // 这个内部命令。blocked 是正常的门禁结果，不能让它变成
-      // global.unhandledrejection 并触发应用的 fatal crash page。
-      void coordinatorClient.backgroundRunNow(taskId).then(
-        () => notifyChange(),
-        () => notifyChange()
-      );
+    async runNow(taskId: string): Promise<BackgroundCommandResult> {
+      const result = await coordinatorClient.backgroundRunNow(taskId);
+      notifyChange();
+      return toBackgroundResult(result);
     },
 
     trigger(taskId: string, reason?: string): void {
@@ -138,35 +139,44 @@ export function createBackgroundServiceCoordinator(
       // 广播 accepted / blocked / 失败后的状态；这里绝不可抛出异步异常。
       // 否则 Vault 锁定时的合法 blocked ack 会令调用它的插件崩溃整个页面。
       void coordinatorClient.backgroundTrigger(taskId, reason ?? "manual").then(
-        () => undefined,
-        () => undefined
+        (result) => {
+          if (result.status !== "accepted" && result.status !== "ok") {
+            coordinatorClient.reportRecoverableCoordinatorFailure?.("background.trigger", result);
+          }
+        },
+        (cause) => {
+          coordinatorClient.reportRecoverableCoordinatorFailure?.("background.trigger", cause);
+        }
       );
     },
 
-    async cancel(taskId: string): Promise<void> {
-      const ack = await coordinatorClient.backgroundCancel(taskId);
-      if (ack.status !== "accepted" && ack.status !== "ok") {
-        throw new Error(`Cancel task failed: ${ack.status}${"message" in ack ? ` - ${ack.message}` : ""}`);
-      }
+    async cancel(taskId: string): Promise<BackgroundCommandResult> {
+      return toBackgroundResult(await coordinatorClient.backgroundCancel(taskId));
     },
 
-    async cancelByKey(publicKeyHex: string): Promise<void> {
-      const ack = await coordinatorClient.backgroundCancelByKey(publicKeyHex);
-      if (ack.status !== "accepted" && ack.status !== "ok") throw new Error(`Cancel tasks failed: ${ack.status}`);
+    async cancelByKey(publicKeyHex: string): Promise<BackgroundCommandResult> {
+      return toBackgroundResult(await coordinatorClient.backgroundCancelByKey(publicKeyHex));
     },
 
     getScheduleSettings(): BackgroundSyncSettings {
       return { ...cachedSettings };
     },
 
-    updateScheduleSettings(settings: BackgroundSyncSettings): void {
-      // 同样保持 void 契约：状态更新或连接失败会由 Coordinator state 广播，
-      // 而不是从一个未 await 的 UI 回调中泄漏 rejection。
-      void coordinatorClient.backgroundSettingsUpdate(settings).then(
-        () => undefined,
-        () => undefined
-      );
+    async updateScheduleSettings(settings: BackgroundSyncSettings): Promise<BackgroundCommandResult> {
+      const result = toBackgroundResult(await coordinatorClient.backgroundSettingsUpdate(settings));
+      notifyChange();
+      return result;
     },
     dispose: () => { unsubscribeState(); unsubscribeEvent(); changeHandlers.clear(); },
   };
+}
+
+function toBackgroundResult(result: CoordinatorResultLike): BackgroundCommandResult {
+  if (result.status === "ok") return { status: "accepted" };
+  if (result.status === "already-unlocked") return { status: "accepted" };
+  if (result.status === "blocked" && result.reason && typeof result.reason !== "string") return { status: "blocked", reason: result.reason };
+  if (result.status === "transport-error") return { status: "transport-error", message: result.message ?? "Coordinator connection lost" };
+  if (result.status === "validation-error" || result.status === "error") return { status: result.status, message: result.message ?? "Request failed" };
+  if (result.status === "accepted" || result.status === "already-running" || result.status === "locked" || result.status === "not-ready" || result.status === "stale-epoch") return { status: result.status };
+  return { status: "error", message: result.message ?? "Invalid Coordinator response" };
 }

@@ -91,7 +91,7 @@ function makeMockService(): MockService {
     getVaultService: (() => ({
       status: () => "unlocked" as const,
       onStatusChange: (_h: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void) => () => undefined,
-      unlock: async () => undefined
+      unlock: async () => ({ status: "accepted" as const })
     })) as unknown as MockService["getVaultService"],
     setVaultLockState: () => undefined,
     // 施工单 2026-06-28 001：connect.* UI 接口的 mock。origin settings

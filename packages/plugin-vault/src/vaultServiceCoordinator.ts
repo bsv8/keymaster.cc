@@ -15,6 +15,8 @@ import type {
   CoordinatorVaultStatus,
   CoordinatorCryptoOperation,
   CoordinatorCryptoResult,
+  CoordinatorCommandResult,
+  CoordinatorValueResult,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -27,20 +29,31 @@ interface VaultKeyMaterial {
 }
 
 /** Coordinator client 最小接口（避免跨包导入）。 */
-interface CoordinatorClientLike {
+export interface CoordinatorClientLike {
   getIsConnected(): boolean;
   getState(): { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string };
   onStateChange(handler: (state: { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string }) => void): () => void;
   onEvent(eventType: string, handler: (event: { type: string; status?: CoordinatorVaultStatus; activePublicKeyHex?: string }) => void): () => void;
-  unlock(password: string, publicKeyHex?: string): Promise<{ status: string; message?: string }>;
-  lock(): Promise<{ status: string; message?: string }>;
-  activateKey(password: string, publicKeyHex: string): Promise<{ status: string; message?: string }>;
-  vaultOperation(operation: string, input?: unknown): Promise<unknown>;
-  crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: { status: string; message?: string; reason?: string }; result?: CoordinatorCryptoResult }>;
+  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
+  lock(): Promise<CoordinatorCommandResult>;
+  activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  vaultOperation(operation: string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
+  crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
 }
 
 export interface VaultServiceCoordinatorDeps {
   coordinatorClient: CoordinatorClientLike;
+}
+
+function commandResultMessage(result: CoordinatorCommandResult, fallback: string): string {
+  if ("message" in result) return result.message;
+  if (result.status === "blocked") return typeof result.reason === "string" ? result.reason : result.reason.fallback;
+  return `${fallback}: ${result.status}`;
+}
+
+function unwrapValueResult<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
+  if (result.status === "ok") return result.value as T;
+  throw new Error(commandResultMessage(result, `${operation} failed`));
 }
 
 // ============================================================
@@ -80,9 +93,9 @@ export class VaultServiceCoordinator implements VaultService {
     });
   }
 
-  private async call(operation: string, input?: unknown): Promise<unknown> {
+  private async call<T>(operation: string, input?: unknown): Promise<T> {
     if (!this.coordinatorClient.getIsConnected()) throw new Error("Coordinator RPC unavailable");
-    return this.coordinatorClient.vaultOperation(operation, input);
+    return unwrapValueResult<T>(await this.coordinatorClient.vaultOperation(operation, input), operation);
   }
 
   private async createCoordinatorCrypto(publicKeyHex: string, sessionId = `${publicKeyHex}:${Date.now()}`): Promise<ActiveKeyCrypto> {
@@ -102,7 +115,7 @@ export class VaultServiceCoordinator implements VaultService {
           format: input.format
         });
         if (r.ack.status !== "ok" || !r.result) {
-          throw new Error(r.ack.message ?? r.ack.reason ?? "Sign failed");
+          throw new Error(commandResultMessage(r.ack, "Sign failed"));
         }
         const result = r.result as { signatureHex: string; format: string };
         // P0: 校验 Coordinator 回包 format 为合法值且与请求一致
@@ -120,11 +133,11 @@ export class VaultServiceCoordinator implements VaultService {
           signature: Uint8Array.from(result.signatureHex.match(/../g)!.map((x) => parseInt(x, 16))).buffer
         };
       },
-      async deriveP2pkhAddress(input) { guard(); const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network }); if (r.ack.status !== "ok" || !r.result) throw new Error(r.ack.message ?? "Derive failed"); return { publicKeyHex, address: (r.result as { address: string }).address }; },
+      async deriveP2pkhAddress(input) { guard(); const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network }); if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Derive failed")); return { publicKeyHex, address: (r.result as { address: string }).address }; },
       async sealSendInput(sealInput) {
         guard();
         const r = await client.crypto({ type: "sealSendInput", input: sealInput });
-        if (r.ack.status !== "ok" || !r.result || r.result.type !== "sealSendInput") return { error: r.ack.message ?? r.ack.reason ?? "Seal failed" };
+        if (r.ack.status !== "ok" || !r.result || r.result.type !== "sealSendInput") return { error: commandResultMessage(r.ack, "Seal failed") };
         return { record: { messageId: "", senderPublicKeyHex: sealInput.sender.senderPublicKeyHex, senderEndpointId: sealInput.sender.senderOrigin ?? sealInput.sender.senderAppId ?? "", senderEndpointKind: sealInput.sender.senderOrigin ? "origin" : "plugin", recipientPublicKeyHex: sealInput.recipient.recipientPublicKeyHex, recipientEndpointId: sealInput.recipient.recipientOrigin ?? sealInput.recipient.recipientAppId ?? "", recipientEndpointKind: sealInput.recipient.recipientOrigin ? "origin" : "plugin", clientMessageId: sealInput.clientMessageId, createdAtMs: sealInput.createdAtMs, insertedAtMs: Date.now(), envelope: { envelopeBytes: r.result.envelope, signatureBytes: r.result.signature } } } as unknown as import("@keymaster/contracts").ActiveKeyCryptoSealSendInputResult;
       },
       async openSealed(rec) {
@@ -137,7 +150,7 @@ export class VaultServiceCoordinator implements VaultService {
       },
       exportEncryptedKeyBackup: async (input) => {
         if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
-        const backup = await this.call("exportKeyBackup", input) as string;
+        const backup = await this.call<string>("exportKeyBackup", input);
         return { publicKeyHex, backup: new TextEncoder().encode(backup).buffer };
       },
       dispose: () => {
@@ -200,31 +213,28 @@ export class VaultServiceCoordinator implements VaultService {
     label?: string;
     capabilities?: string[];
   }): Promise<KeyRef> {
-    return await this.call("createVaultWithInitialKey", input) as KeyRef;
+    return await this.call<KeyRef>("createVaultWithInitialKey", input);
   }
 
   async createVaultWithImportedKey(input: {
     vaultPassword: string;
     key: { label: string; material: VaultKeyMaterial; format: string; capabilities: string[]; source?: string };
   }): Promise<KeyRef> {
-    return await this.call("createVaultWithImportedKey", input) as KeyRef;
+    return await this.call<KeyRef>("createVaultWithImportedKey", input);
   }
 
-  async unlock(password: string): Promise<void> {
-    const ack = await this.coordinatorClient.unlock(password);
-    if (ack.status === "already-unlocked") return;
-    if (ack.status !== "accepted") {
-      throw new Error(`Unlock failed: ${ack.status}${"message" in ack ? ` - ${ack.message}` : ""}`);
-    }
+  async unlock(password: string): Promise<CoordinatorCommandResult> {
+    const result = await this.coordinatorClient.unlock(password);
+    if (result.status === "accepted" || result.status === "already-unlocked") return result;
+    return result;
   }
 
-  async lock(): Promise<void> {
-    const ack = await this.coordinatorClient.lock();
-    if (ack.status !== "accepted") {
-      throw new Error(`Lock failed: ${ack.status}${"message" in ack ? ` - ${ack.message}` : ""}`);
-    }
+  async lock(): Promise<CoordinatorCommandResult> {
+    const result = await this.coordinatorClient.lock();
+    if (result.status !== "accepted" && result.status !== "ok") return result;
     this.initialActivationNotice = null;
     this.notifyNoticeChange();
+    return result;
   }
 
   async changePassword(input: { oldPassword: string; newPassword: string }): Promise<void> {
@@ -248,11 +258,11 @@ export class VaultServiceCoordinator implements VaultService {
   // ============================================================
 
   async listKeys(): Promise<KeyRef[]> {
-    return await this.call("listKeys") as KeyRef[];
+    return await this.call<KeyRef[]>("listKeys");
   }
 
   async getKey(publicKeyHex: string): Promise<KeyRef | undefined> {
-    return await this.call("getKey", { publicKeyHex }) as KeyRef | undefined;
+    return await this.call<KeyRef | undefined>("getKey", { publicKeyHex });
   }
 
   async findByAddress(address: string): Promise<KeyRef | undefined> {
@@ -267,7 +277,7 @@ export class VaultServiceCoordinator implements VaultService {
     capabilities: string[];
     source?: string;
   }): Promise<KeyRef> {
-    return await this.call("importPrivateKey", input) as KeyRef;
+    return await this.call<KeyRef>("importPrivateKey", input);
   }
 
   async generateKey(input: {
@@ -275,7 +285,7 @@ export class VaultServiceCoordinator implements VaultService {
     label: string;
     capabilities?: string[];
   }): Promise<KeyRef> {
-    return await this.call("generateKey", input) as KeyRef;
+    return await this.call<KeyRef>("generateKey", input);
   }
 
   async deleteKeyMaterial(publicKeyHex: string): Promise<void> {
@@ -288,7 +298,7 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   async exportKeyBackup(publicKeyHex: string): Promise<string> {
-    return await this.call("exportKeyBackup", { publicKeyHex }) as string;
+    return await this.call<string>("exportKeyBackup", { publicKeyHex });
   }
 
   async importKeyBackup?(input: {
@@ -296,7 +306,7 @@ export class VaultServiceCoordinator implements VaultService {
     sourcePassword: string;
     targetPassword: string;
   }): Promise<KeyRef> {
-    return await this.call("importKeyBackup", input) as KeyRef;
+    return await this.call<KeyRef>("importKeyBackup", input);
   }
 
   // ============================================================
@@ -333,11 +343,8 @@ export class VaultServiceCoordinator implements VaultService {
     this.appViewRevocations.clear();
   }
 
-  async activateKey(input: { publicKeyHex: string; password: string }): Promise<void> {
-    const ack = await this.coordinatorClient.activateKey(input.password, input.publicKeyHex);
-    if (ack.status !== "accepted") {
-      throw new Error(`Activate key failed: ${ack.status}${"message" in ack ? ` - ${ack.message}` : ""}`);
-    }
+  async activateKey(input: { publicKeyHex: string; password: string }): Promise<CoordinatorCommandResult> {
+    return this.coordinatorClient.activateKey(input.password, input.publicKeyHex);
   }
 
   dispose?(): void {

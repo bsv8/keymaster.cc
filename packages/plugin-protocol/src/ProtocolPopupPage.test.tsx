@@ -48,7 +48,7 @@ vi.mock("@keymaster/runtime", () => ({
           h(runtimeState.vault);
           return () => undefined;
         },
-        unlock: async () => undefined
+        unlock: async () => ({ status: "accepted" as const })
       };
     }
     return undefined;
@@ -228,7 +228,7 @@ function makeFakeService(): ProtocolService & {
         vaultStatusListeners.add(h);
         return () => vaultStatusListeners.delete(h);
       },
-      unlock: async () => undefined
+        unlock: async () => ({ status: "accepted" as const })
     })) as unknown as ProtocolService["getVaultService"],
     setVaultLockState: () => undefined,
     // 施工单 2026-06-28 001：connect.* UI 接口的 mock。测试不实际触发

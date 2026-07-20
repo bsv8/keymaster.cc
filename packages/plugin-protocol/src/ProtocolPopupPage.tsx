@@ -36,6 +36,7 @@ import type {
   ProtocolService,
   ProtocolSessionSnapshot,
   VaultService
+  , CoordinatorCommandResult
 } from "@keymaster/contracts";
 import { useCapability } from "@keymaster/runtime";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
@@ -363,7 +364,7 @@ function LockScreenPage({
   const vault = useCapability<{
     status(): "booting" | "uninitialized" | "locked" | "unlocked";
     onStatusChange(handler: (s: "booting" | "uninitialized" | "locked" | "unlocked") => void): () => void;
-    unlock(password: string): Promise<void>;
+    unlock(password: string): Promise<CoordinatorCommandResult>;
   }>("vault.service");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -378,7 +379,10 @@ function LockScreenPage({
     setBusy(true);
     setError(null);
     try {
-      await vault.unlock(password);
+      const result = await vault.unlock(password);
+      if (result.status !== "accepted" && result.status !== "already-unlocked") {
+        throw new Error("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Unlock failed: ${result.status}`);
+      }
       // resumeAfterUnlock 由父组件的 vault.onStatusChange 触发；这里不显式调。
     } catch (err) {
       setError(err instanceof Error ? err.message : t("protocol.unlock.err.failed", { defaultValue: "解锁失败" }));

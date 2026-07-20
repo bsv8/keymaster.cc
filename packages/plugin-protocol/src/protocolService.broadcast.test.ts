@@ -54,8 +54,8 @@ function makeVaultStub(): VaultService {
     async withMasterKey(masterKey: unknown, fn: (k: unknown) => unknown) {
       return fn(masterKey);
     },
-    unlock: async () => true,
-    lock: () => {},
+    unlock: async () => ({ status: "accepted" as const }),
+    lock: async () => ({ status: "accepted" as const }),
     isInitialized: () => true,
     importRuntime: async () => {},
     exportRuntimeBootstrap: async () => ({

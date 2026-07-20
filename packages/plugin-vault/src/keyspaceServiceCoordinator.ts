@@ -1,10 +1,20 @@
-import type { KeyIdentity, KeyScopedStorageHandle, KeyScopedStorageOpenInput, KeyspaceService } from "@keymaster/contracts";
+import type { KeyIdentity, KeyScopedStorageHandle, KeyScopedStorageOpenInput, KeyspaceService, CoordinatorCommandResult, CoordinatorValueResult } from "@keymaster/contracts";
 
 interface CoordinatorClientLike {
   getState(): { vaultStatus: string; activePublicKeyHex?: string; keyspaceGeneration: number };
   onStateChange(handler: (state: { vaultStatus: string; activePublicKeyHex?: string; keyspaceGeneration: number }) => void): () => void;
-  backgroundCancelByKey(publicKeyHex: string): Promise<unknown>;
-  vaultOperation(operation: string, input?: unknown): Promise<unknown>;
+  backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  vaultOperation(operation: string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
+}
+
+function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
+  if (result.status === "ok") return result.value as T;
+  const message = "message" in result
+    ? result.message
+    : result.status === "blocked"
+      ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
+      : `${operation} failed: ${result.status}`;
+  throw new Error(message);
 }
 
 export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike): KeyspaceService {
@@ -15,8 +25,8 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike):
   client.onStateChange((next) => { const previous = state.activePublicKeyHex; state = next; if (previous !== next.activePublicKeyHex) for (const h of handlers) h({ activePublicKeyHex: next.activePublicKeyHex }); });
   const requireReady = () => { if (state.vaultStatus !== "unlocked" || !state.activePublicKeyHex) throw new Error("Active key is unavailable"); return state.activePublicKeyHex; };
   return {
-    async listKeys() { return await client.vaultOperation("listKeys") as KeyIdentity[]; },
-    async getKey(publicKeyHex) { return await client.vaultOperation("getKey", { publicKeyHex }) as KeyIdentity | undefined; },
+    async listKeys() { return unwrap<KeyIdentity[]>(await client.vaultOperation("listKeys"), "listKeys"); },
+    async getKey(publicKeyHex) { return unwrap<KeyIdentity | undefined>(await client.vaultOperation("getKey", { publicKeyHex }), "getKey"); },
     active: () => ({ activePublicKeyHex: state.activePublicKeyHex }),
     async setActive() { throw new Error("Active key changes must go through vault.activateKey with password"); },
     requireActiveKey: () => { const publicKeyHex = requireReady(); return { publicKeyHex, label: "", capabilities: [], createdAt: "" }; },
@@ -25,7 +35,7 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike):
     registerPluginStorage(input) { if (!storages.some((s) => s.pluginId === input.pluginId && s.storageId === input.storageId)) storages.push(input); },
     listPluginStorages: () => [...storages],
     async prepareDeleteKey(publicKeyHex) { await client.backgroundCancelByKey(publicKeyHex); for (const db of openHandles.get(publicKeyHex) ?? []) db.close(); openHandles.delete(publicKeyHex); },
-    async deleteKey(input) { await client.vaultOperation("deleteKey", input); },
+    async deleteKey(input) { unwrap<void>(await client.vaultOperation("deleteKey", input), "deleteKey"); },
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   };

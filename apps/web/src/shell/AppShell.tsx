@@ -229,7 +229,10 @@ export function AppShell() {
           }
           // 旧版 vault service 没有此方法时的兜底：仍走 lock 路径。
           try {
-            await vault.lock();
+            const result = await vault.lock();
+            if (result.status !== "accepted" && result.status !== "ok") {
+              throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
+            }
           } catch (err) {
             console.error(
               "AppShell guard: vault.lock during empty-vault-recovery fallback failed",
@@ -277,7 +280,10 @@ export function AppShell() {
             await vault.recoverEmptyVaultToUninitialized();
             return;
           }
-          await vault.lock();
+          const result = await vault.lock();
+          if (result.status !== "accepted" && result.status !== "ok") {
+            throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
+          }
         }
       });
       setGuard(result.state);

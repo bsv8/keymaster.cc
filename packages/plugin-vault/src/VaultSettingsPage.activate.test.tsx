@@ -24,7 +24,7 @@ import { VaultSettingsPage } from "./VaultSettingsPage.js";
 const KEY_A = "02".padEnd(66, "a");
 const KEY_B = "03".padEnd(66, "b");
 
-function makeVault(activateKey = vi.fn(async () => undefined)): VaultService & {
+function makeVault(activateKey = vi.fn(async () => ({ status: "accepted" as const }))): VaultService & {
   activateKey: typeof activateKey;
 } {
   return {
@@ -38,8 +38,8 @@ function makeVault(activateKey = vi.fn(async () => undefined)): VaultService & {
     createVault: async () => undefined,
     createVaultWithInitialKey: async () => ({ publicKeyHex: KEY_A, label: "A", format: "hex", capabilities: ["p2pkh"], createdAt: new Date().toISOString() }),
     createVaultWithImportedKey: async () => ({ publicKeyHex: KEY_A, label: "A", format: "hex", capabilities: ["p2pkh"], createdAt: new Date().toISOString() }),
-    unlock: async () => undefined,
-    lock: async () => undefined,
+    unlock: async () => ({ status: "accepted" as const }),
+    lock: async () => ({ status: "accepted" as const }),
     changePassword: async () => undefined,
     dispose: () => undefined,
     activateKey,
@@ -126,6 +126,7 @@ describe("VaultSettingsPage active switching", () => {
     const keyspace = makeKeyspace();
     const activateKey = vi.fn(async ({ publicKeyHex }: { publicKeyHex: string; password: string }) => {
       await keyspace.setActive(publicKeyHex);
+      return { status: "accepted" as const };
     });
     const vault = makeVault(activateKey);
     const host = createPluginHost({ disableConfigPersistence: true });

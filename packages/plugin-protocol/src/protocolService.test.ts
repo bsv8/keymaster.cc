@@ -151,10 +151,12 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     unlock: async () => {
       state.locked = false;
       for (const l of listeners) l("unlocked");
+      return { status: "accepted" as const };
     },
     lock: async () => {
       state.locked = true;
       for (const l of listeners) l("locked");
+      return { status: "accepted" as const };
     },
     verifyPassword: async () => undefined,
     changePassword: async () => undefined,
@@ -3697,6 +3699,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     vaultLocked.unlock = async (_password: string) => {
       currentStatus = "unlocked";
       for (const l of unlockListeners) l("unlocked");
+      return { status: "accepted" as const };
     };
     const { service, opener, storageDb } = makeService(TEST_PUB_HEX, undefined, {
       vault: vaultLocked
@@ -4283,18 +4286,17 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(stored?.revokedAt).toBe(logoutResult.revokedAt);
   });
 
-  it("connect.logout：vault.lock() 抛出 → fail-closed（caller 看到 internal_error；session revoked 且 bootstrap runtime 仍应被清理）", async () => {
+  it("connect.logout：vault.lock() 返回 transport-error → fail-closed（caller 看到 internal_error；session revoked 且 bootstrap runtime 仍应被清理）", async () => {
     // 关键修复（反例反馈 v2）：vault.lock() 失败时不能继续对外报 ok=true。
     // 当前实现：DB 已写 revokedAt（commit），bootstrap runtime 先被清理，
-    // 然后 vault.lock() 抛错 → service 抛 localFailure → dispatch catch 写
+    // 然后 vault.lock() 返回 transport-error → service 转为 localFailure → dispatch catch 写
     // failed + replyErrorToRec → caller 收到 ok=false。session 真值层面
     // logout 已生效（后续 resume / cipher 仍会按 fail-fast 失败）。
     const { service, opener, getResult, storageDb, deps } = makeService();
     let lockCalls = 0;
     deps.vault.lock = (async () => {
       lockCalls++;
-      // 模拟 keyspace.onVaultLocked 抛错 / 业务订阅者抛错 / DB write 抛错。
-      throw new Error("simulated vault lock failure");
+      return { status: "transport-error" as const, message: "Coordinator connection lost", retryable: true };
     }) as typeof deps.vault.lock;
     service.startSession();
     const sessionId = "sess-logout-lockfail";

@@ -24,6 +24,7 @@ export function BackgroundTray() {
   // 用户把一次已经送出的点击误认为没有生效而重复点击。
   const pendingStartedAt = useRef(new Map<string, number>());
   const [pendingRunIds, setPendingRunIds] = useState<Set<string>>(() => new Set());
+  const [commandError, setCommandError] = useState<string | null>(null);
 
   useEffect(() => {
     return service.onChange((s) => {
@@ -47,7 +48,13 @@ export function BackgroundTray() {
   const requestRunNow = (id: string) => {
     pendingStartedAt.current.set(id, Date.now());
     setPendingRunIds((previous) => new Set(previous).add(id));
-    service.runNow(id);
+    void service.runNow(id).then((result) => {
+      if (result.status === "validation-error" || result.status === "error" || result.status === "transport-error") {
+        setPendingRunIds((previous) => { const next = new Set(previous); next.delete(id); return next; });
+        pendingStartedAt.current.delete(id);
+        setCommandError("message" in result ? result.message : t("background.tray.requestFailed", { defaultValue: "请求失败，请稍后重试。" }));
+      }
+    });
   };
 
   const counts = useMemo(() => {
@@ -90,6 +97,7 @@ export function BackgroundTray() {
               <X size={14} />
             </button>
           </header>
+          {commandError ? <p className="background-tray__error" role="status">{commandError}</p> : null}
           {snapshots.length === 0 ? (
             <p className="background-tray__empty">{t("background.tray.empty", { defaultValue: "没有已注册的后台任务。" })}</p>
           ) : (
@@ -101,7 +109,7 @@ export function BackgroundTray() {
                     <StateBadge state={s.state} t={t} />
                   </div>
                   <TaskMeta s={s} timeFmt={timeFmt} t={t} />
-                  <TaskActions s={s} service={service} pending={pendingRunIds.has(s.id)} onRunNow={requestRunNow} t={t} />
+                  <TaskActions s={s} service={service} pending={pendingRunIds.has(s.id)} onRunNow={requestRunNow} onCommandError={setCommandError} t={t} />
                 </li>
               ))}
             </ul>
@@ -163,12 +171,14 @@ function TaskActions({
   service,
   pending,
   onRunNow,
+  onCommandError,
   t
 }: {
   s: BackgroundTaskSnapshot;
   service: BackgroundService;
   pending: boolean;
   onRunNow: (id: string) => void;
+  onCommandError: (message: string) => void;
   t: (k: string, opts?: { defaultValue?: string }) => string;
 }) {
   // running/queued: 取消本次同步
@@ -177,7 +187,13 @@ function TaskActions({
       <div className="background-tray__actions">
         <button
           type="button"
-          onClick={() => service.cancel(s.id)}
+          onClick={() => {
+            void service.cancel(s.id).then((result) => {
+              if (result && result.status !== "accepted") {
+                onCommandError("message" in result ? result.message : t("background.tray.cancelFailed", { defaultValue: "取消失败，请稍后重试。" }));
+              }
+            });
+          }}
           title={t("background.tray.action.cancelCurrentSync", { defaultValue: "取消本次同步" })}
         >
           <Square size={14} /> {t("background.tray.action.cancelCurrentSync", { defaultValue: "取消本次同步" })}

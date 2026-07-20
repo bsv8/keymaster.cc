@@ -37,7 +37,8 @@ import {
   type PluginLogger,
   type ProviderSealedMessageRecord,
   type VaultService,
-  type VaultStatus
+  type VaultStatus,
+  type CoordinatorCommandResult
 } from "@keymaster/contracts";
 import type { VaultSessionState } from "@keymaster/contracts";
 import { type AppMsgMessage } from "@keymaster/contracts";
@@ -1108,7 +1109,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           clearVaultSession();
           keyCache = null;
           setStatus("uninitialized");
-          return;
+          return { status: "accepted" } satisfies CoordinatorCommandResult;
         }
         // 1) keyspace 选择 active key：必须发生在 setStatus/emit 之前，
         //    否则业务插件看到 unlocked 时 active 仍是初始化期状态。
@@ -1131,6 +1132,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       // 3) 业务可见的 unlocked：必须放到 keyspace ready 之后。
       setStatus("unlocked");
       deps.messageBus.publish("vault.unlocked", { at: new Date().toISOString() });
+      return { status: "accepted" } satisfies CoordinatorCommandResult;
     },
 
     async lock() {
@@ -1149,6 +1151,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         await deps.keyspace.onVaultLocked();
       }
       deps.messageBus.publish("vault.locked", { at: new Date().toISOString() });
+      return { status: "accepted" } satisfies CoordinatorCommandResult;
     },
 
     /**
@@ -1356,12 +1359,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         }
         if (previousActive === input.publicKeyHex) {
           await createAndInstallSessionActiveCrypto(record, passwordKey);
-          return;
+          return { status: "accepted" } satisfies CoordinatorCommandResult;
         }
         await deps.keyspace.setActive(input.publicKeyHex);
       }
       await createAndInstallSessionActiveCrypto(record, passwordKey);
       revokeActiveKeyCryptoLeases(previousActive, "active key changed");
+      return { status: "accepted" } satisfies CoordinatorCommandResult;
     },
 
     /**

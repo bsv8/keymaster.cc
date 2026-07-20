@@ -1,38 +1,50 @@
 import { describe, expect, it, vi } from "vitest";
 import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, KeyRef } from "@keymaster/contracts";
-import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
+import { createVaultServiceCoordinator, type CoordinatorClientLike } from "./vaultServiceCoordinator.js";
 
 const PUBLIC_KEY = "02".padEnd(66, "a");
 const KEY: KeyRef = { publicKeyHex: PUBLIC_KEY, label: "primary", address: "addr-1", capabilities: ["p2pkh"], createdAt: "now" } as KeyRef;
 
-function makeClient() {
+function makeClient(): CoordinatorClientLike {
   const state = { vaultStatus: "unlocked" as const, activePublicKeyHex: PUBLIC_KEY };
   const vaultOperation = vi.fn(async (operation: string, input?: unknown) => {
-    if (operation === "listKeys") return [KEY];
-    if (operation === "getKey") return (input as { publicKeyHex: string }).publicKeyHex === PUBLIC_KEY ? KEY : undefined;
-    if (operation === "verifyPassword") return true;
-    if (operation === "exportKeyBackup") return "backup";
-    throw new Error(`unexpected operation ${operation}`);
+    const value = operation === "listKeys" ? [KEY]
+      : operation === "getKey" ? ((input as { publicKeyHex: string }).publicKeyHex === PUBLIC_KEY ? KEY : undefined)
+      : operation === "verifyPassword" ? true
+      : operation === "exportKeyBackup" ? "backup"
+      : (() => { throw new Error(`unexpected operation ${operation}`); })();
+    return { status: "ok" as const, value, sessionEpoch: "test-epoch" };
   });
   const crypto = vi.fn(async (operation: CoordinatorCryptoOperation) => {
-    if (operation.type === "sealSendInput") return { ack: { status: "ok" }, result: { type: "sealSendInput", envelope: new Uint8Array([1, 2]), signature: new Uint8Array([3]) } satisfies CoordinatorCryptoResult };
-    if (operation.type === "openSealed") return { ack: { status: "ok" }, result: { type: "openSealed", plaintext: new TextEncoder().encode(JSON.stringify({ messageId: "m-1", body: "hello" })) } satisfies CoordinatorCryptoResult };
-    return { ack: { status: "ok" }, result: { type: "deriveP2pkhAddress", address: "addr-1" } satisfies CoordinatorCryptoResult };
+    if (operation.type === "sealSendInput") return { ack: { status: "ok" as const }, result: { type: "sealSendInput", envelope: new Uint8Array([1, 2]), signature: new Uint8Array([3]) } satisfies CoordinatorCryptoResult };
+    if (operation.type === "openSealed") return { ack: { status: "ok" as const }, result: { type: "openSealed", plaintext: new TextEncoder().encode(JSON.stringify({ messageId: "m-1", body: "hello" })) } satisfies CoordinatorCryptoResult };
+    return { ack: { status: "ok" as const }, result: { type: "deriveP2pkhAddress", address: "addr-1" } satisfies CoordinatorCryptoResult };
   });
   return {
     getIsConnected: () => true,
     getState: () => state,
     onStateChange: (handler: (value: typeof state) => void) => { handler(state); return () => undefined; },
     onEvent: () => () => undefined,
-    unlock: async () => ({ status: "accepted" }),
-    lock: async () => ({ status: "accepted" }),
-    activateKey: async () => ({ status: "accepted" }),
+    unlock: async () => ({ status: "accepted" as const }),
+    lock: async () => ({ status: "accepted" as const }),
+    activateKey: async () => ({ status: "accepted" as const }),
     vaultOperation,
     crypto
   };
 }
 
 describe("VaultServiceCoordinator", () => {
+  it("exposes unlock/lock/activate failures as command results", async () => {
+    const client = makeClient();
+    client.unlock = vi.fn(async () => ({ status: "blocked" as const, reason: { key: "vault.locked", fallback: "Vault is locked" } }));
+    client.lock = vi.fn(async () => ({ status: "transport-error" as const, message: "Coordinator connection lost", retryable: true }));
+    client.activateKey = vi.fn(async () => ({ status: "validation-error" as const, message: "Invalid key" }));
+    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    await expect(vault.unlock("pw")).resolves.toMatchObject({ status: "blocked" });
+    await expect(vault.lock()).resolves.toMatchObject({ status: "transport-error" });
+    await expect(vault.activateKey({ publicKeyHex: PUBLIC_KEY, password: "pw" })).resolves.toMatchObject({ status: "validation-error" });
+  });
+
   it("routes AppMsg seal/open through Coordinator crypto RPC", async () => {
     const client = makeClient();
     const vault = createVaultServiceCoordinator({ coordinatorClient: client });

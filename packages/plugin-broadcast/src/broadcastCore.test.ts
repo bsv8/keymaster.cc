@@ -141,8 +141,8 @@ function makeFakeVault(unlocked: boolean): VaultService {
     createVaultWithImportedKey: async () => {
       throw new Error("not used");
     },
-    unlock: async () => undefined,
-    lock: async () => undefined,
+    unlock: async () => ({ status: "accepted" as const }),
+    lock: async () => ({ status: "accepted" as const }),
     verifyPassword: async () => undefined,
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
     recoverEmptyVaultToUninitialized: async () => undefined,

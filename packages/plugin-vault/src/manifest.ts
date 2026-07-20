@@ -29,6 +29,11 @@ import type {
   SettingsRegistry,
   TopbarRegistry
   , VaultService
+  , CoordinatorValueResult
+  , CoordinatorCommandResult
+  , CoordinatorCryptoOperation
+  , CoordinatorCryptoResult
+  , CoordinatorVaultStatus
 } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
@@ -42,12 +47,14 @@ import { KeySwitchWidget } from "./KeySwitchWidget.js";
 /** Coordinator client 接口（通过 capability 获取） */
 interface CoordinatorClientLike {
   getIsConnected(): boolean;
-  getState(): { vaultStatus: string; activePublicKeyHex?: string; keyspaceGeneration: number };
-  onStateChange(handler: (state: unknown) => void): () => void;
-  onEvent(eventType: string, handler: (event: unknown) => void): () => void;
-  unlock(password: string, publicKeyHex?: string): Promise<{ status: string }>;
-  lock(): Promise<{ status: string }>;
-  activateKey(password: string, publicKeyHex: string): Promise<{ status: string }>;
+  getState(): { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string; keyspaceGeneration: number };
+  onStateChange(handler: (state: { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string }) => void): () => void;
+  onEvent(eventType: string, handler: (event: { type: string; status?: CoordinatorVaultStatus; activePublicKeyHex?: string }) => void): () => void;
+  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
+  lock(): Promise<CoordinatorCommandResult>;
+  activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  vaultOperation(operation: string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
+  crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
 }
 
 export const VAULT_CAPABILITY = "vault.service";
@@ -357,7 +364,7 @@ export const vaultPlugin: PluginManifest = {
     coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
     if (coordinatorClient.getIsConnected()) {
       // 使用 Coordinator facade
-      service = createVaultServiceCoordinator({ coordinatorClient: coordinatorClient as never });
+      service = createVaultServiceCoordinator({ coordinatorClient });
       keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient as unknown as Parameters<typeof createKeyspaceServiceCoordinator>[0]) as unknown as KeyspaceHandle;
     }
 
@@ -417,7 +424,10 @@ export const vaultPlugin: PluginManifest = {
       id: "vault.lock",
       label: { key: "vault.command.lock", fallback: "Lock wallet" },
       run: async () => {
-        await service.lock();
+        const result = await service.lock();
+        if (result.status !== "accepted" && result.status !== "ok") {
+          throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
+        }
       }
     });
 

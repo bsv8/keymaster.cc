@@ -11,6 +11,7 @@
 
 import type { AssetDataChangedEvent } from "./assets.js";
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
+import type { I18nText } from "./i18n.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -92,7 +93,7 @@ export type CoordinatorCommandAck =
   | { status: "accepted" }
   | { status: "already-unlocked" }
   | { status: "already-running" }
-  | { status: "blocked"; reason: string }
+  | { status: "blocked"; reason: I18nText }
   | { status: "stale-epoch" }
   | { status: "locked" }
   | { status: "not-ready" }
@@ -108,6 +109,19 @@ export interface CoordinatorResponse {
   cryptoResult?: CoordinatorCryptoResult;
   operationResult?: unknown;
 }
+
+/** Transport failures are recoverable command results, never public rejections. */
+export type CoordinatorTransportFailure = {
+  status: "transport-error";
+  message: string;
+  retryable: boolean;
+};
+
+export type CoordinatorCommandResult = CoordinatorCommandAck | CoordinatorTransportFailure;
+
+export type CoordinatorValueResult<T> =
+  | { status: "ok"; value: T; sessionEpoch: SessionEpoch }
+  | Exclude<CoordinatorCommandResult, { status: "ok" }>;
 
 /** Crypto 操作结果。 */
 export type CoordinatorCryptoResult =
@@ -182,7 +196,7 @@ export interface CoordinatorTaskSnapshot {
   lastAttemptAt?: string;
   nextRunAt?: string;
   error?: string;
-  blockedReason?: string;
+  blockedReason?: I18nText;
   keyScope?: { publicKeyHex: string; label?: string };
 }
 

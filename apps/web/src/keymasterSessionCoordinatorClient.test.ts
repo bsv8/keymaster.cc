@@ -76,8 +76,28 @@ describe("KeymasterSessionCoordinatorClient", () => {
       await client.connect();
       expect(client.getState().vaultStatus).toBe("unlocked");
       port.onmessage = null;
-      await expect(client.backgroundRunNow("missing")).rejects.toThrow();
+      await expect(client.backgroundRunNow("missing")).resolves.toMatchObject({ status: "transport-error", retryable: true });
       expect(client.getState().vaultStatus).toBe("booting");
+    } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("normalizes every public command/value facade on transport loss", async () => {
+    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    port.postMessage.mockImplementation((message: unknown) => {
+      const request = message as { requestId: string; kind: string };
+      if (request.kind === "hello" || request.kind === "subscribe") {
+        queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
+      }
+    });
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ requestTimeoutMs: 5, reconnectIntervalMs: 1000 });
+      await client.connect();
+      await expect(client.unlock("pw")).resolves.toMatchObject({ status: "transport-error" });
+      await expect(client.vaultOperation("listKeys")).resolves.toMatchObject({ status: "transport-error" });
+      await expect(client.crypto({ type: "deriveP2pkhAddress", network: "main" })).resolves.toMatchObject({ ack: { status: "transport-error" } });
+      expect(client.getRecoverableDiagnostics().length).toBeGreaterThan(0);
     } finally { globalThis.SharedWorker = original; }
   });
 

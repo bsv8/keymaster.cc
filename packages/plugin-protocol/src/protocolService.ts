@@ -442,6 +442,16 @@ interface ConfirmTimeoutState {
 const READY_MESSAGE: ProtocolReadyMessage = { v: PROTOCOL_VERSION, type: "ready" };
 const CLOSING_MESSAGE: ProtocolClosingMessage = { v: PROTOCOL_VERSION, type: "closing" };
 
+function requireVaultCommandAccepted(result: Awaited<ReturnType<import("@keymaster/contracts").VaultService["unlock"]>>, operation: string): void {
+  if (result.status === "accepted" || result.status === "already-unlocked" || (operation === "lock" && result.status === "ok")) return;
+  const message = "message" in result
+    ? result.message
+    : result.status === "blocked"
+      ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
+      : `${operation} failed: ${result.status}`;
+  throw new Error(message);
+}
+
 export class ProtocolServiceImpl implements ProtocolService {
   /** 会话级锁状态（施工单 2026-06-27 001 硬切换）。 */
   private lockStateValue: ProtocolPopupLockState = "locked";
@@ -1399,7 +1409,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.authUnlockInProgress = recordId;
       rec.connectAuthSubmittedAt = Date.now();
       try {
-        await this.deps.vault.unlock(password);
+        requireVaultCommandAccepted(await this.deps.vault.unlock(password), "unlock");
       } catch (err) {
         rec.connectAuthSubmittedAt = undefined;
         this.authUnlockInProgress = null;
@@ -1456,7 +1466,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.authUnlockInProgress = recordId;
       rec.connectAuthSubmittedAt = Date.now();
       try {
-        await this.deps.vault.unlock(password);
+        requireVaultCommandAccepted(await this.deps.vault.unlock(password), "unlock");
       } catch (err) {
         rec.connectAuthSubmittedAt = undefined;
         this.authUnlockInProgress = null;
@@ -4168,7 +4178,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // connect.resume / cipher.* 仍会按 fail-fast 路径失败（session
     // revoked）。这是 fail-closed 的安全语义，不是 bug。
     try {
-      await this.deps.vault.lock();
+      requireVaultCommandAccepted(await this.deps.vault.lock(), "lock");
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.connect",

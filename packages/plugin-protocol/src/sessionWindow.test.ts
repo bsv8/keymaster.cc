@@ -224,9 +224,9 @@ function makeFakeVaultService(): VaultService {
     createVaultWithImportedKey: async () => {
       throw new Error("not used");
     },
-    unlock: async () => undefined,
-    lock: async () => undefined,
-    activateKey: async () => undefined,
+    unlock: async () => ({ status: "accepted" as const }),
+    lock: async () => ({ status: "accepted" as const }),
+    activateKey: async () => ({ status: "accepted" as const }),
     verifyPassword: async () => undefined,
     changePassword: async () => undefined,
     createAppViewSession: async () => ({
@@ -729,9 +729,9 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       createVaultWithImportedKey: async () => {
         throw new Error("not used");
       },
-      unlock: async () => undefined,
-      lock: async () => undefined,
-      activateKey: async () => undefined,
+      unlock: async () => ({ status: "accepted" as const }),
+      lock: async () => ({ status: "accepted" as const }),
+      activateKey: async () => ({ status: "accepted" as const }),
       verifyPassword: async () => undefined,
       changePassword: async () => undefined,
       createAppViewSession: async () => ({

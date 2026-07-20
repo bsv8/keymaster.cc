@@ -111,7 +111,7 @@ async function requestCoordinatorCrypto(
       } else {
         reject(new Error(
           msg.ack.status === "error" ? msg.ack.message :
-          msg.ack.status === "blocked" ? msg.ack.reason :
+          msg.ack.status === "blocked" ? (typeof msg.ack.reason === "string" ? msg.ack.reason : msg.ack.reason.fallback) :
           `Crypto operation failed: ${msg.ack.status}`
         ));
       }

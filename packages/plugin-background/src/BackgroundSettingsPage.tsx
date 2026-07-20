@@ -29,6 +29,8 @@ export function BackgroundSettingsPage() {
   const currentSettings = backgroundService.getScheduleSettings();
   const [intervalMs, setIntervalMs] = useState(currentSettings.assetHoldingsIntervalMs);
   const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // 订阅后台设置变化：处理跨标签修改
   useEffect(() => {
@@ -42,12 +44,19 @@ export function BackgroundSettingsPage() {
     const settings: BackgroundSyncSettings = {
       assetHoldingsIntervalMs: intervalMs
     };
-    backgroundService.updateScheduleSettings(settings);
-    // 保存后读取实际生效值（可能因任务最小间隔被抬高）
-    const effective = backgroundService.getScheduleSettings();
-    setIntervalMs(effective.assetHoldingsIntervalMs);
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2000);
+    setSaving(true);
+    setSaveError(null);
+    void backgroundService.updateScheduleSettings(settings).then((result) => {
+      setSaving(false);
+      if (result.status !== "accepted") {
+        setSaveError("message" in result ? result.message : t("background.settings.saveFailed", { defaultValue: "保存失败，请稍后重试。" }));
+        return;
+      }
+      const effective = backgroundService.getScheduleSettings();
+      setIntervalMs(effective.assetHoldingsIntervalMs);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
+    });
   }
 
   return (
@@ -73,7 +82,7 @@ export function BackgroundSettingsPage() {
           </select>
         </label>
       </div>
-      <button onClick={handleSave}>
+      <button onClick={handleSave} disabled={saving}>
         {t("background.settings.save", { defaultValue: "保存" })}
       </button>
       {saved ? (
@@ -81,6 +90,7 @@ export function BackgroundSettingsPage() {
           {t("background.settings.saved", { defaultValue: "已保存" })}
         </p>
       ) : null}
+      {saveError ? <p className="background-settings__error">{saveError}</p> : null}
     </div>
   );
 }

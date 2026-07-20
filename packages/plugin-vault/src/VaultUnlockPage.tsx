@@ -21,7 +21,11 @@ export function VaultUnlockPage() {
     setBusy(true);
     setError(null);
     try {
-      await vault.unlock(password);
+      const result = await vault.unlock(password);
+      if (result.status !== "accepted" && result.status !== "already-unlocked") {
+        setError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Unlock failed: ${result.status}`);
+        return;
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("vault.unlock.err.failed", { defaultValue: "Unlock failed" }));
     } finally {

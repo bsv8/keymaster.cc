@@ -51,7 +51,7 @@ function makeVault(): VaultService {
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
     hasVault: async () => true,
-    lock: async () => undefined,
+    lock: async () => ({ status: "accepted" as const }),
     recoverEmptyVaultToUninitialized: async () => undefined
   } as unknown as VaultService;
 }

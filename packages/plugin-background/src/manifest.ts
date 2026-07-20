@@ -17,19 +17,9 @@ import {
   TOPBAR_REGISTRY_CAPABILITY
 } from "@keymaster/contracts";
 import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinator.js";
+import type { CoordinatorClientLike } from "./backgroundServiceCoordinator.js";
 import { BackgroundTray } from "./BackgroundTray.js";
 import { BackgroundSettingsPage } from "./BackgroundSettingsPage.js";
-
-/** Coordinator client 接口（通过 capability 获取） */
-interface CoordinatorClientLike {
-  getIsConnected(): boolean;
-  getState(): { taskSnapshots: unknown[]; scheduleSettings: unknown };
-  onStateChange(handler: (state: unknown) => void): () => void;
-  onEvent(eventType: string, handler: (event: unknown) => void): () => void;
-  backgroundRunNow(taskId: string): Promise<{ status: string }>;
-  backgroundCancel(taskId: string): Promise<{ status: string }>;
-  backgroundSettingsUpdate(settings: unknown): Promise<{ status: string }>;
-}
 
 const backgroundResources: I18nPluginResources = {
   namespace: "background",
@@ -113,7 +103,7 @@ export const backgroundPlugin: PluginManifest = {
     const coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
     if (coordinatorClient.getIsConnected()) {
       // 使用 Coordinator facade
-      service = createBackgroundServiceCoordinator({ coordinatorClient: coordinatorClient as never });
+      service = createBackgroundServiceCoordinator({ coordinatorClient });
       // 保留旧 capability 契约，但 Coordinator 模式下 registry 永远不接受
       // 页面任务注册；唯一任务注册表和执行权属于 SharedWorker。
       registry = { register: () => undefined, list: () => [], get: () => undefined };

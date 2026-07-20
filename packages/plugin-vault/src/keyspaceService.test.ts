@@ -85,10 +85,10 @@ function makeFakeBackground(
     listSnapshots: () => [],
     onChange: () => () => undefined,
     trigger: () => undefined,
-    cancel: async () => undefined,
-    runNow: () => undefined,
+    cancel: async () => ({ status: "accepted" as const }),
+    runNow: async () => ({ status: "accepted" as const }),
     getScheduleSettings: () => ({ assetHoldingsIntervalMs: 900_000 }),
-    updateScheduleSettings: () => undefined
+    updateScheduleSettings: async () => ({ status: "accepted" as const })
   };
 }
 

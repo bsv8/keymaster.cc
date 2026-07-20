@@ -131,7 +131,10 @@ export function VaultSettingsPage() {
   }, [vault, t]);
 
   async function lock() {
-    await vault.lock();
+    const result = await vault.lock();
+    if (result.status !== "accepted" && result.status !== "ok") {
+      setError("message" in result ? result.message : `Lock failed: ${result.status}`);
+    }
   }
 
   async function goImport() {
@@ -204,10 +207,14 @@ export function VaultSettingsPage() {
     setActivateBusy(true);
     setActivateError(null);
     try {
-      await vault.activateKey({
+      const result = await vault.activateKey({
         publicKeyHex: activating.publicKeyHex,
         password: activatePassword
       });
+      if (result.status !== "accepted") {
+        setActivateError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Activate key failed: ${result.status}`);
+        return;
+      }
       // 硬切换 009 收尾：如果 vault 还有"首 Key 未自动 active"
       // notice，且这把 key 正好就是 notice 里的 key，清掉它。
       const notice =

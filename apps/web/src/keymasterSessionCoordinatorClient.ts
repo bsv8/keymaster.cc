@@ -14,7 +14,9 @@ import type {
   CoordinatorEvent,
   CoordinatorSnapshot,
   CoordinatorTopic,
-  CoordinatorCommandAck,
+  CoordinatorCommandResult,
+  CoordinatorValueResult,
+  CoordinatorTransportFailure,
   CoordinatorCryptoOperation,
   CoordinatorCryptoResult,
   CoordinatorBackgroundSyncSettings,
@@ -41,6 +43,14 @@ export interface CoordinatorClientState {
   keyspaceGeneration: number;
   taskSnapshots: CoordinatorTaskSnapshot[];
   scheduleSettings: CoordinatorBackgroundSyncSettings;
+}
+
+export interface RecoverableCoordinatorDiagnostic {
+  kind: string;
+  status: string;
+  message: string;
+  sessionEpoch: SessionEpoch;
+  connected: boolean;
 }
 
 type EventListener<T> = (event: T) => void;
@@ -79,6 +89,7 @@ export class KeymasterSessionCoordinatorClient {
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private recoverableDiagnostics: RecoverableCoordinatorDiagnostic[] = [];
 
   constructor(options: CoordinatorClientOptions = {}) {
     this.workerName = options.workerName ?? "keymaster.session-coordinator.v1";
@@ -270,7 +281,7 @@ export class KeymasterSessionCoordinatorClient {
     await this.sendRequest(request);
   }
 
-  async unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandAck> {
+  async unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "unlock",
       clientId: this.clientId,
@@ -279,22 +290,20 @@ export class KeymasterSessionCoordinatorClient {
       publicKeyHex,
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return response.ack;
+    return this.requestCommand(request);
   }
 
-  async lock(): Promise<CoordinatorCommandAck> {
+  async lock(): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "lock",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return response.ack;
+    return this.requestCommand(request);
   }
 
-  async activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandAck> {
+  async activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "activate-key",
       clientId: this.clientId,
@@ -303,19 +312,23 @@ export class KeymasterSessionCoordinatorClient {
       publicKeyHex,
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return response.ack;
+    return this.requestCommand(request);
   }
 
-  async vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<unknown> {
+  async vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>> {
     const normalized = typeof operation === "string" ? ({ type: operation, ...(input as object ?? {}) } as unknown as CoordinatorVaultOperation) : operation;
-    const response = await this.sendRequest({ kind: "vault.operation", clientId: this.clientId, requestId: this.generateRequestId(), operation: normalized, expectedSessionEpoch: this.state.sessionEpoch });
-    if (response.ack.status !== "ok" && response.ack.status !== "accepted") throw new Error(response.ack.status === "error" ? response.ack.message : `Vault operation failed: ${response.ack.status}`);
-    return response.operationResult;
+    const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation: normalized, expectedSessionEpoch: this.state.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch } satisfies CoordinatorValueResult<unknown>;
+    } catch (cause) {
+      return this.normalizeTransportFailure(request.kind, cause);
+    }
   }
 
   async crypto(operation: CoordinatorCryptoOperation): Promise<{
-    ack: CoordinatorCommandAck;
+    ack: CoordinatorCommandResult;
     result?: CoordinatorCryptoResult;
   }> {
     const request: CoordinatorClientRequest = {
@@ -325,11 +338,16 @@ export class KeymasterSessionCoordinatorClient {
       operation,
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return { ack: response.ack, result: response.cryptoResult };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok" || !response.cryptoResult) return { ack: response.ack };
+      return { ack: response.ack, result: response.cryptoResult };
+    } catch (cause) {
+      return { ack: this.normalizeTransportFailure(request.kind, cause) };
+    }
   }
 
-  async backgroundRunNow(taskId: string): Promise<CoordinatorCommandAck> {
+  async backgroundRunNow(taskId: string): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "background.run-now",
       clientId: this.clientId,
@@ -337,16 +355,14 @@ export class KeymasterSessionCoordinatorClient {
       taskId,
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return response.ack;
+    return this.requestCommand(request);
   }
 
-  async backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandAck> {
-    const response = await this.sendRequest({ kind: "background.trigger", clientId: this.clientId, requestId: this.generateRequestId(), taskId, reason, expectedSessionEpoch: this.state.sessionEpoch });
-    return response.ack;
+  async backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "background.trigger", clientId: this.clientId, requestId: this.generateRequestId(), taskId, reason, expectedSessionEpoch: this.state.sessionEpoch });
   }
 
-  async backgroundCancel(taskId: string): Promise<CoordinatorCommandAck> {
+  async backgroundCancel(taskId: string): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "background.cancel",
       clientId: this.clientId,
@@ -354,16 +370,14 @@ export class KeymasterSessionCoordinatorClient {
       taskId,
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return response.ack;
+    return this.requestCommand(request);
   }
 
-  async backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandAck> {
-    const response = await this.sendRequest({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.state.sessionEpoch });
-    return response.ack;
+  async backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.state.sessionEpoch });
   }
 
-  async backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandAck> {
+  async backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "background.settings.update",
       clientId: this.clientId,
@@ -371,8 +385,7 @@ export class KeymasterSessionCoordinatorClient {
       settings,
       expectedSessionEpoch: this.state.sessionEpoch,
     };
-    const response = await this.sendRequest(request);
-    return response.ack;
+    return this.requestCommand(request);
   }
 
   sendActivity(): void {
@@ -393,6 +406,34 @@ export class KeymasterSessionCoordinatorClient {
   // ============================================================
   // 6. Request Management
   // ============================================================
+
+  private normalizeTransportFailure(kind: CoordinatorClientRequest["kind"], cause: unknown): CoordinatorTransportFailure {
+    this.isConnected = false;
+    this.resetDisconnectedState();
+    this.scheduleReconnect();
+    this.reportRecoverableCoordinatorFailure(kind, cause);
+    return { status: "transport-error", message: "Coordinator connection lost", retryable: true };
+  }
+
+  reportRecoverableCoordinatorFailure(kind: string, cause: unknown): void {
+    const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "Coordinator command failed";
+    this.recoverableDiagnostics.push({ kind, status: "recoverable", message: message.slice(0, 200), sessionEpoch: this.state.sessionEpoch, connected: this.isConnected });
+    if (this.recoverableDiagnostics.length > 50) this.recoverableDiagnostics.shift();
+  }
+
+  getRecoverableDiagnostics(): RecoverableCoordinatorDiagnostic[] {
+    return this.recoverableDiagnostics.map((diagnostic) => ({ ...diagnostic }));
+  }
+
+  /** The single boundary at which command transport failures become results. */
+  private async requestCommand(request: Exclude<CoordinatorClientRequest, { kind: "hello" | "subscribe" | "activity" }>): Promise<CoordinatorCommandResult> {
+    try {
+      const response = await this.sendRequest(request);
+      return response.ack;
+    } catch (cause) {
+      return this.normalizeTransportFailure(request.kind, cause);
+    }
+  }
 
   private async sendRequest(request: CoordinatorClientRequest): Promise<CoordinatorResponse> {
     if (!this.isConnected || !this.port) {

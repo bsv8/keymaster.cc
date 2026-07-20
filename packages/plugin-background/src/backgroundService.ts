@@ -22,6 +22,7 @@ import type {
   BackgroundTaskProgress,
   BackgroundTaskSnapshot,
   BackgroundTaskState,
+  BackgroundCommandResult,
   PluginLogger
 } from "@keymaster/contracts";
 import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -402,30 +403,33 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   /**
    * 立即同步一次（UI 手动 API）。
    */
-  function runNow(id: string): void {
+  async function runNow(id: string): Promise<BackgroundCommandResult> {
     const t = tasks.get(id);
-    if (!t) return;
+    if (!t) return { status: "validation-error", message: "Task not found" };
+    if (t.runPromise) return { status: "already-running" };
     void runOne(t, "manual");
+    return { status: "accepted" };
   }
 
   /**
    * 取消当前运行。
    * 施工单 002：cancel 必须清除 rerunRequested，避免取消后立即重新运行。
    */
-  async function cancel(id: string): Promise<void> {
+  async function cancel(id: string): Promise<BackgroundCommandResult> {
     const t = tasks.get(id);
-    if (!t) return;
+    if (!t) return { status: "validation-error", message: "Task not found" };
     t.rerunRequested = false;
     if (t.ctl) {
       t.ctl.abort();
     }
     await awaitIdle(t);
+    return { status: "accepted" };
   }
 
   /**
    * 取消指定 key namespace 下所有 task。
    */
-  async function cancelByKey(publicKeyHex: string): Promise<void> {
+  async function cancelByKey(publicKeyHex: string): Promise<BackgroundCommandResult> {
     const toCancel: TaskRuntime[] = [];
     for (const t of tasks.values()) {
       const ks = resolveKeyScope(t.def);
@@ -439,6 +443,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     for (const t of toCancel) {
       await awaitIdle(t);
     }
+    return { status: "accepted" };
   }
 
   function listSnapshots(): BackgroundTaskSnapshot[] {
@@ -455,13 +460,14 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     return loadScheduleSettings();
   }
 
-  function updateScheduleSettings(settings: BackgroundSyncSettings): void {
+  async function updateScheduleSettings(settings: BackgroundSyncSettings): Promise<BackgroundCommandResult> {
     const minInterval = getMinIntervalMs();
     const normalized: BackgroundSyncSettings = {
       assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(settings.assetHoldingsIntervalMs, minInterval)
     };
     saveScheduleSettings(normalized);
     recalculateAssetHoldingsSchedule();
+    return { status: "accepted" };
   }
 
   function getMinIntervalMs(): number {

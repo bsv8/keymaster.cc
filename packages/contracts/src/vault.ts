@@ -19,6 +19,7 @@
 
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 import type { VaultSessionState } from "./vaultSession.js";
+import type { CoordinatorCommandResult } from "./sessionCoordinator.js";
 
 export type BsvNetwork = "main" | "test";
 
@@ -201,7 +202,7 @@ export interface VaultService {
    * 事务边界收口到 Vault，避免 UI 先校验密码、再单独调用 keyspace
    * 造成两条真值来源。
    */
-  activateKey(input: { publicKeyHex: string; password: string }): Promise<void>;
+  activateKey(input: { publicKeyHex: string; password: string }): Promise<CoordinatorCommandResult>;
   /**
    * 订阅 notice 变化（设置 / 清除）。返回取消订阅函数。
    * 订阅时会立即把当前 notice 值喂给 handler，避免新挂载的 UI 漏掉
@@ -303,9 +304,9 @@ export interface VaultService {
     };
   }): Promise<KeyRef>;
   /** 用密码解锁，解密所有 key 索引（不解密私钥本身），并完成 pre-v7 记录的 AAD 升级。 */
-  unlock(password: string): Promise<void>;
+  unlock(password: string): Promise<CoordinatorCommandResult>;
   /** 锁定，丢弃内存中的明文。 */
-  lock(): Promise<void>;
+  lock(): Promise<CoordinatorCommandResult>;
   /**
    * 修改锁屏密码。
    *

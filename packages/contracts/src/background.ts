@@ -37,6 +37,13 @@ export type BackgroundRunEligibility =
   | { ready: true }
   | { ready: false; reason: I18nText; retryOn: "unlock" | "key-ready" | "interval" };
 
+export type BackgroundCommandResult =
+  | { status: "accepted" }
+  | { status: "already-running" }
+  | { status: "blocked"; reason: I18nText }
+  | { status: "locked" | "not-ready" | "stale-epoch" }
+  | { status: "validation-error" | "error" | "transport-error"; message: string };
+
 /**
  * 任务归属的 key namespace（硬切换 007 / 008 / 001 收口）。
  * 设计缘由：删除 key 时由 keyspace 取消该 key 下所有 task；active key
@@ -180,7 +187,7 @@ export interface BackgroundService {
    * 设计缘由：托盘唯一的手动动作，绕过普通冷却但不绕过门禁。
    * 等价于 trigger(taskId, "manual")，但语义更清晰。
    */
-  runNow(taskId: string): void;
+  runNow(taskId: string): Promise<BackgroundCommandResult>;
 
   /**
    * 触发任务运行（内部领域事件 API）。
@@ -194,7 +201,7 @@ export interface BackgroundService {
    * 设计缘由：只中止当前 instance，不会禁用任务、不会取消未来定时。
    * 取消后以取消完成时为新周期起点。
    */
-  cancel(taskId: string): Promise<void>;
+  cancel(taskId: string): Promise<BackgroundCommandResult>;
 
   /**
    * 取消指定 key namespace 下所有 task（硬切换 007 / 001 收口）。
@@ -204,7 +211,7 @@ export interface BackgroundService {
    *
    * 硬切换 001 收口：入参是 publicKeyHex。
    */
-  cancelByKey(publicKeyHex: string): Promise<void>;
+  cancelByKey(publicKeyHex: string): Promise<void | BackgroundCommandResult>;
 
   /**
    * 获取后台同步设置。
@@ -216,7 +223,7 @@ export interface BackgroundService {
    * 设计缘由：保存后重新计算 asset-holdings 组任务的 nextRunAt，
    * 新周期从保存时刻开始计时，不立即触发网络同步。
    */
-  updateScheduleSettings(settings: BackgroundSyncSettings): void;
+  updateScheduleSettings(settings: BackgroundSyncSettings): Promise<BackgroundCommandResult>;
 }
 
 /**

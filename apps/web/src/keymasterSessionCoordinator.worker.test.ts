@@ -159,7 +159,7 @@ describe("Session Coordinator worker", () => {
     const snapshot = __testGetSnapshot();
     const task = snapshot.taskSnapshots.find((t) => t.id === "running-task");
     expect(task?.state).toBe("blocked");
-    expect(task?.blockedReason).toBe("Vault is locked");
+    expect(task?.blockedReason).toMatchObject({ key: "background.blocked.task", fallback: "Vault is locked" });
   });
 
   it("broadcasts background snapshot immediately on lock", async () => {

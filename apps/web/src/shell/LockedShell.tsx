@@ -147,7 +147,10 @@ export function LockedShell() {
     setError(null);
     setBusy(true);
     try {
-      await vault.unlock(password);
+      const result = await vault.unlock(password);
+      if (result.status !== "accepted" && result.status !== "already-unlocked") {
+        setError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Unlock failed: ${result.status}`);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("shell.locked.unlockFailed", { defaultValue: "解锁失败" }));
     } finally {
