@@ -14,6 +14,7 @@ import type { ActiveKeyState, Contact, ContactsService, KeyspaceService } from "
 import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
 import { ContactsEditor } from "./ContactsEditor.js";
+import { contactsResources } from "./manifest.js";
 
 const INITIAL_KEY = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const NEXT_KEY = "02bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
@@ -76,7 +77,8 @@ function makeFakeContactsService() {
 
 function makeHost(service: ContactsService, keyspace: KeyspaceService): PluginHost {
   const host = createPluginHost({
-    disableConfigPersistence: true
+    disableConfigPersistence: true,
+    initialI18nResources: [contactsResources]
   });
   host.capabilities.provide("contacts.service", service);
   host.capabilities.provide("keyspace.service", keyspace);

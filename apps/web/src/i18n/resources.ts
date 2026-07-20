@@ -115,7 +115,13 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       // 回退到原 group id。`settings` 由 plugin-settings 的 menu / 路由
       // 注入时已经走 Sidebar 特殊分支，这里补的 key 仅供"普通 menu
       // 分组"使用；settings 分组仍然由 host.settings.list() 单独渲染。
+      "shell.menu.group.apps": "Apps",
+      "shell.menu.group.home": "Home",
+      "shell.menu.group.platform": "Platform",
+      "shell.menu.group.wallets": "Wallets",
       "shell.menu.group.system": "System",
+      "shell.menu.group.tools": "Tools",
+      "shell.menu.group.settings": "Settings",
       "common.action.back": "Back",
       "common.action.next": "Next"
     },
@@ -194,7 +200,13 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.noticeRail.title": "紧急通知",
       "shell.noticeRail.dismiss": "关闭",
       // 施工单 2026-07-02 001：sidebar group 走 i18n 解析。
+      "shell.menu.group.apps": "应用",
+      "shell.menu.group.home": "首页",
+      "shell.menu.group.platform": "平台",
+      "shell.menu.group.wallets": "钱包",
       "shell.menu.group.system": "系统",
+      "shell.menu.group.tools": "工具",
+      "shell.menu.group.settings": "设置",
       "common.action.back": "返回",
       "common.action.next": "下一步"
     }

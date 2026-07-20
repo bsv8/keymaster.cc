@@ -12,8 +12,14 @@ import type {
   MenuItem,
   MenuRegistry,
   PluginManifest,
-  RouteRegistry
+  ResourceRegistry,
+  RouteRegistry,
+  TransferOffer,
+  ActiveKeyState,
+  KeyspaceService,
+  TransferRegistry
 } from "@keymaster/contracts";
+import { RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { TransferPage } from "./TransferPage.js";
 
 const transferResources: I18nPluginResources = {
@@ -81,11 +87,66 @@ export const transferPlugin: PluginManifest = {
   i18n: transferResources,
   dependencies: [
     { capability: "transfer.registry", reason: "需要 transfer 注册表" },
+    { capability: "keyspace.service", reason: "读取 active key 资源" },
+    { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册资源定义" },
     { capability: "route.registry", reason: "注册 Transfer 页面" },
     { capability: "menu.registry", reason: "注册 Transfer 菜单入口" },
     { capability: "breadcrumb.registry", reason: "注册 Transfer 面包屑" }
   ],
   setup(ctx) {
+    const registry = ctx.get<TransferRegistry>("transfer.registry");
+    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+
+    // 注册资源定义（硬切换 003）
+    // transfer.offers：所有 provider 的 Transfer Offer 列表
+    resources.register<TransferOffer[], readonly string[]>({
+      id: "transfer.offers",
+      scope: "global",
+      key: () => ["transfer.offers"],
+      load: async () => {
+        const providers = registry.list();
+        const out: TransferOffer[] = [];
+        for (const p of providers) {
+          try {
+            const list = await p.listOffers();
+            for (const o of list) out.push(o);
+          } catch {
+            // 单 provider 失败不影响其他
+          }
+        }
+        return out;
+      },
+      subscribe: (_args, _ctx, invalidate) => {
+        const providers = registry.list();
+        const unsubs = providers.map((p) => p.onChange(invalidate));
+        return () => { for (const off of unsubs) off(); };
+      },
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        if (prev.length !== next.length) return false;
+        for (let i = 0; i < prev.length; i++) {
+          const a = prev[i];
+          const b = next[i];
+          if (!a || !b) return a === b;
+          if (a.id !== b.id) return false;
+        }
+        return true;
+      },
+      invalidation: "immediate"
+    });
+
+    resources.register<ActiveKeyState, readonly string[]>({
+      id: "transfer.active-key",
+      scope: "global",
+      key: () => ["transfer.active-key"],
+      load: async (_args, context) =>
+        context.getCapability<KeyspaceService>("keyspace.service")?.active() ?? { activePublicKeyHex: undefined },
+      subscribe: (_args, context, invalidate) =>
+        context.getCapability<KeyspaceService>("keyspace.service")?.onActiveChange(invalidate) ?? (() => {}),
+      equals: (a, b) => a?.activePublicKeyHex === b?.activePublicKeyHex,
+      invalidation: "immediate"
+    });
+
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({
       id: "transfer.page",

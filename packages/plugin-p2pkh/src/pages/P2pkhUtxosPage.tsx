@@ -3,10 +3,10 @@
 // testnet 切换按钮受 `includeTestnet` 控制；WOC 状态列只作为观察信息。
 // 直链 URL 上的 `assetId=bsvtest` 在 includeTestnet=false 时被夹回 undefined。
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
-import type { P2pkhAssetId, P2pkhLocalInputClaim, P2pkhService, P2pkhUtxo } from "../p2pkhContracts.js";
+import { useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import type { P2pkhAssetId, P2pkhLocalInputClaim, P2pkhUtxo, P2pkhGlobalSettings } from "../p2pkhContracts.js";
 
 function readAssetIdFromLocation(): P2pkhAssetId | undefined {
   const search = window.location.search;
@@ -31,39 +31,12 @@ interface UtxoRow extends P2pkhUtxo {
 }
 
 export function P2pkhUtxosPage() {
-  const service = useCapability<P2pkhService>("p2pkh.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
-  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(
-    () => clampAssetIdBySettings(readAssetIdFromLocation(), service.getGlobalSettings().includeTestnet)
-  );
-  const [utxos, setUtxos] = useState<P2pkhUtxo[]>([]);
-  const [inputClaims, setInputClaims] = useState<P2pkhLocalInputClaim[]>([]);
-
-  useEffect(() => {
-    service.listUtxos(assetId ? { assetId } : undefined).then(setUtxos);
-    service.listLocalInputClaims().then(setInputClaims);
-  }, [service, assetId, includeTestnet]);
-
-  // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
-  // 同 tab 与跨 tab 通知。
-  useEffect(() => {
-    const off = service.onGlobalSettingsChange((s) => {
-      setIncludeTestnet(s.includeTestnet);
-      setAssetId((prev) => clampAssetIdBySettings(prev, s.includeTestnet));
-    });
-    return off;
-  }, [service]);
-
-  // 订阅 data-changed：后台任务原子提交 DB 后重读。
-  useEffect(() => {
-    const off = service.onDataChanged(() => {
-      service.listUtxos(assetId ? { assetId } : undefined).then(setUtxos);
-      service.listLocalInputClaims().then(setInputClaims);
-    });
-    return off;
-  }, [service, assetId]);
+  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(() => readAssetIdFromLocation());
+  const includeTestnet = useResourceSelector<P2pkhGlobalSettings, boolean>(host.resourceStore, "p2pkh.settings", [], (s) => s.data?.includeTestnet ?? false);
+  const bundle = useResourceSelector<{ utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[] }, { utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[] }>(host.resourceStore, "p2pkh.utxos", [assetId ?? "all"], (s) => s.data ?? { utxos: [], claims: [] }, (a, b) => a === b);
+  const { utxos, claims: inputClaims } = bundle;
 
   const rows: UtxoRow[] = useMemo(() => {
     const byOutpoint = new Map<string, P2pkhLocalInputClaim>();

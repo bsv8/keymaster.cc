@@ -24,7 +24,7 @@
 //   - 文案中文；错误 message 原样显示英文。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useI18n } from "@keymaster/runtime";
+import { useI18n, usePluginHost, useResource, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   ProtocolConnectAuthSnapshot,
@@ -35,8 +35,7 @@ import type {
   ProtocolMethod,
   ProtocolService,
   ProtocolSessionSnapshot,
-  VaultService
-  , CoordinatorCommandResult
+  CoordinatorCommandResult
 } from "@keymaster/contracts";
 import { useCapability } from "@keymaster/runtime";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
@@ -61,11 +60,13 @@ function openWalletHomepage(): void {
 
 export function ProtocolPopupPage() {
   const service = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
+  const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
-  const [snap, setSnap] = useState<ProtocolSessionSnapshot>(() => service.snapshot());
-  const [feed, setFeed] = useState<ProtocolCommandFeedState>(() => service.feedSnapshot());
+  const protocolState = useResource<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }>(host.resourceStore, "protocol.state", []);
+  const snap = protocolState.data?.snapshot ?? service.snapshot();
+  const feed = protocolState.data?.feed ?? service.feedSnapshot();
+  const vaultStatus = useResourceSelector<string, string>(host.resourceStore, "protocol.vault-status", [], (s) => s.data ?? "locked");
   const [originSettingsOpen, setOriginSettingsOpen] = useState(false);
   const [now, setNow] = useState<number>(() => Date.now());
   const feedTopRef = useRef<HTMLDivElement | null>(null);
@@ -86,25 +87,6 @@ export function ProtocolPopupPage() {
 
   // 挂载时先装 message 监听，再启动会话；卸载时反向拆。
   useEffect(() => {
-    const offSnap = service.subscribe((next) => {
-      console.debug("[protocol-popup] snapshot", {
-        phase: next.phase,
-        method: next.method,
-        requestId: next.requestId,
-        boundOrigin: next.boundOrigin,
-        lockState: next.lockState
-      });
-      setSnap(next);
-    });
-    const offFeed = service.subscribeFeed((next) => {
-      console.debug("[protocol-popup] feed", {
-        currentOrigin: next.currentOrigin,
-        commandCount: next.commands.length,
-        historyAvailable: next.historyAvailable,
-        lockSummary: next.lockSummary
-      });
-      setFeed(next);
-    });
     function onMessage(event: MessageEvent) {
       console.debug("[protocol-popup] message", {
         origin: event.origin,
@@ -136,8 +118,6 @@ export function ProtocolPopupPage() {
       window.removeEventListener("message", onMessage);
       window.removeEventListener("pagehide", onPageHide);
       window.removeEventListener("beforeunload", onBeforeUnload);
-      offSnap();
-      offFeed();
       service.endSession();
     };
   }, [service]);
@@ -160,19 +140,15 @@ export function ProtocolPopupPage() {
    * 被 relock，Session Window 仍维持 unlocked，不被错误送回全屏锁屏。
    */
   useEffect(() => {
-    const vault = (service as unknown as { getVaultService?: () => VaultService }).getVaultService?.();
-    if (!vault) return;
-    return vault.onStatusChange((s) => {
-      if (s === "unlocked") {
+    if (vaultStatus === "unlocked") {
         (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(false);
         if (!service.connectAuthSnapshot()) {
           void service.resumeAfterUnlock?.();
         }
-      } else if (s === "locked") {
+    } else if (vaultStatus === "locked") {
         (service as unknown as { setVaultLockState?: (locked: boolean) => void }).setVaultLockState?.(true);
-      }
-    });
-  }, [service]);
+    }
+  }, [service, vaultStatus]);
 
   // 倒计时：每秒触发一次 re-render，让确认卡内的"剩余秒数"自然滚动。
   // setInterval 仅用于 re-render 触发，**不**用作超时触发器——超时真值
@@ -517,23 +493,13 @@ function AppViewBootstrapDonePage({
   appId: string;
 }) {
   const [openError, setOpenError] = useState<string | null>(null);
+  const host = usePluginHost();
   // 订阅 service 快照：等待态 / 软超时态 / childReady 变化时重渲染。
   // `childReady` 一旦翻 true，整个组件树在父级切回主 popup，本组件被卸。
   // 这里订阅主要服务于"等待态 + 软超时态"两件事。
-  const [waitingForChildReady, setWaitingForChildReady] = useState(
-    () => service.appClientWaitingForReady()
-  );
-  const [connectTimedOut, setConnectTimedOut] = useState(
-    () => service.appClientConnectTimedOut()
-  );
-
-  useEffect(() => {
-    const off = service.subscribe(() => {
-      setWaitingForChildReady(service.appClientWaitingForReady());
-      setConnectTimedOut(service.appClientConnectTimedOut());
-    });
-    return off;
-  }, [service]);
+  const bootstrapState = useResource<{ waiting: boolean; timedOut: boolean }>(host.resourceStore, "protocol.app-bootstrap", []);
+  const waitingForChildReady = bootstrapState.data?.waiting ?? service.appClientWaitingForReady();
+  const connectTimedOut = bootstrapState.data?.timedOut ?? service.appClientConnectTimedOut();
 
   function handleOpenApp() {
     setOpenError(null);

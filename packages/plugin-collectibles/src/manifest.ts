@@ -14,6 +14,9 @@
 import type {
   AppRoute,
   CollectibleRegistry,
+  CollectibleProvider,
+  CollectibleSummary,
+  ResourceRegistry,
   CollectibleTransferRegistry,
   I18nPluginResources,
   MenuItem,
@@ -97,6 +100,22 @@ export const collectiblesPlugin: PluginManifest = {
   ],
   setup(ctx) {
     const collectibles = ctx.get<CollectibleRegistry>("collectible.registry");
+    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    resources.register<Array<{ provider: CollectibleProvider; items: CollectibleSummary[]; error?: string }>, readonly string[]>({
+      id: "collectibles.list",
+      scope: "global",
+      key: () => ["collectibles.list"],
+      load: async () => Promise.all(collectibles.list().map(async (provider) => {
+        try { return { provider, items: await provider.listCollectibles() }; }
+        catch (err) { return { provider, items: [], error: err instanceof Error ? err.message : String(err) }; }
+      })),
+      subscribe: (_args, _context, invalidate) => {
+        const providers = collectibles.list();
+        const offs = providers.map((provider) => provider.onChange(invalidate));
+        return () => { for (const off of offs) off(); };
+      },
+      invalidation: "immediate"
+    });
     const transferRegistry = ctx.get<CollectibleTransferRegistry>("collectible-transfer.registry");
 
     const routes = ctx.get<RouteRegistry>("route.registry");

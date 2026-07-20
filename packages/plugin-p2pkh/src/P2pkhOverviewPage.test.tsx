@@ -148,6 +148,13 @@ function makeFakeService(): FakeService {
   };
 }
 
+function registerOverviewResources(host: ReturnType<typeof createPluginHost>, service: P2pkhService, keyspace: KeyspaceService): void {
+  const registry = host.capabilities.get<any>("resource.registry");
+  registry.register({ id: "p2pkh.settings", scope: "global", key: () => ["p2pkh.settings"], load: async () => service.getGlobalSettings(), subscribe: (_a: unknown, _c: unknown, invalidate: () => void) => service.onGlobalSettingsChange(invalidate), invalidation: "immediate" });
+  registry.register({ id: "p2pkh.readiness", scope: "active-key", key: (_a: unknown, c: { activePublicKeyHex?: string }) => ["p2pkh.readiness", c.activePublicKeyHex ?? "none"], load: async () => keyspace.isInitializing() ? "initializing" : (keyspace.active().activePublicKeyHex ? "ready" : "no-active-key"), subscribe: (_a: unknown, _c: unknown, invalidate: () => void) => keyspace.onActiveChange(invalidate), invalidation: "immediate" });
+  registry.register({ id: "p2pkh.overview", scope: "active-key", key: (args: readonly string[], c: { activePublicKeyHex?: string }) => ["p2pkh.overview", c.activePublicKeyHex ?? "none", args[0] ?? "all"], load: async (args: readonly string[]) => { const asset = args[0] === "bsv" || args[0] === "bsvtest" ? args[0] : undefined; const [rows, backfills, recent, balance] = await Promise.all([service.listResources(asset), service.listBackfillStates(), service.listRecentSyncStates(), asset ? service.getAssetBalance(asset) : Promise.resolve(null)]); return { rows, backfills, recent, balance }; }, subscribe: (_a: unknown, _c: unknown, invalidate: () => void) => { const offs = [service.onDataChanged(invalidate), service.onRecentSyncStatusChange(invalidate), service.onBackfillStatusChange(invalidate), keyspace.onActiveChange(invalidate)]; return () => offs.forEach((off) => off()); }, invalidation: "microtask" });
+}
+
 function makeFakeKeyspace(): KeyspaceService {
   const active: ActiveKeyState = { activePublicKeyHex: ACTIVE_PUBLIC_KEY_HEX };
   const listeners = new Set<(s: ActiveKeyState) => void>();
@@ -198,6 +205,7 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
     });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerOverviewResources(host, fake.service, keyspace);
 
     render(
       <PluginHostProvider host={host}>
@@ -244,6 +252,7 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
     });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerOverviewResources(host, fake.service, keyspace);
 
     // backfill state 在 first load 后已经有数据。
     fake.setBackfillStates([

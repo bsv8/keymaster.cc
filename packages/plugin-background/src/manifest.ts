@@ -4,8 +4,11 @@
 import type {
   BackgroundRegistry,
   BackgroundService,
+  BackgroundSyncSettings,
+  BackgroundTaskSnapshot,
   I18nPluginResources,
   PluginManifest,
+  ResourceRegistry,
   SettingsRegistry,
   TopbarRegistry
 } from "@keymaster/contracts";
@@ -13,6 +16,7 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
   SESSION_COORDINATOR_CLIENT_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY
 } from "@keymaster/contracts";
@@ -111,6 +115,44 @@ export const backgroundPlugin: PluginManifest = {
 
     ctx.provide<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY, service);
     ctx.provide<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY, registry);
+
+    // 注册资源定义（硬切换 003）
+    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+
+    // background.scheduleSettings：后台同步设置
+    resources.register<BackgroundSyncSettings, readonly string[]>({
+      id: "background.scheduleSettings",
+      scope: "global",
+      key: () => ["background.scheduleSettings"],
+      load: async () => service.getScheduleSettings(),
+      subscribe: (_args, _ctx, invalidate) => service.onChange(invalidate),
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        return prev.assetHoldingsIntervalMs === next.assetHoldingsIntervalMs;
+      },
+      invalidation: "immediate"
+    });
+
+    // background.taskSnapshots：后台任务快照列表
+    resources.register<BackgroundTaskSnapshot[], readonly string[]>({
+      id: "background.taskSnapshots",
+      scope: "global",
+      key: () => ["background.taskSnapshots"],
+      load: async () => service.listSnapshots(),
+      subscribe: (_args, _ctx, invalidate) => service.onChange(invalidate),
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        if (prev.length !== next.length) return false;
+        for (let i = 0; i < prev.length; i++) {
+          const a = prev[i];
+          const b = next[i];
+          if (!a || !b) return a === b;
+          if (a.id !== b.id || a.state !== b.state) return false;
+        }
+        return true;
+      },
+      invalidation: "immediate"
+    });
 
     if (ctx.has(KEYSPACE_SERVICE_CAPABILITY)) {
       const ks = ctx.get<{

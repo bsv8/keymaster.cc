@@ -10,31 +10,22 @@
 
 import { useEffect, useState } from "react";
 import { Button, PageHeader, Select } from "@keymaster/ui";
-import { AppLink, useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { AppLink, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { PluginManifest } from "@keymaster/contracts";
 import type { P2pkhGlobalSettings, P2pkhService } from "../p2pkhContracts.js";
-
-const STORAGE_KEY = "p2pkh.settings";
-
-function load(): P2pkhGlobalSettings {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const obj = JSON.parse(raw) as { includeTestnet?: unknown };
-      return { includeTestnet: obj.includeTestnet === true };
-    }
-  } catch {
-    // ignore
-  }
-  return { includeTestnet: false };
-}
 
 export function P2pkhSettingsPage() {
   const host = usePluginHost();
   const service = useCapability<P2pkhService>("p2pkh.service");
   const { t } = useI18n();
-  useI18n().language();
-  const [settings, setSettings] = useState<P2pkhGlobalSettings>(load);
+  const resourceSettings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+    host.resourceStore,
+    "p2pkh.settings",
+    [],
+    (snapshot) => snapshot.data ?? { includeTestnet: false },
+    (a, b) => a.includeTestnet === b.includeTestnet
+  );
+  const [settings, setSettings] = useState<P2pkhGlobalSettings>(resourceSettings);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 

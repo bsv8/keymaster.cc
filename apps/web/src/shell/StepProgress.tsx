@@ -50,7 +50,6 @@ export function StepProgress({
 }: StepProgressProps) {
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
 
   return (
     <nav

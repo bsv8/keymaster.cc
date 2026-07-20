@@ -31,7 +31,6 @@ export function AppLaunchModal({
 }: AppLaunchModalProps) {
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const { t } = useI18n();
-  useI18n().language();
   const [keys, setKeys] = useState<KeyIdentity[]>([]);
   const [selectedPublicKeyHex, setSelectedPublicKeyHex] = useState("");
   const [password, setPassword] = useState("");

@@ -7,9 +7,9 @@
 //   - 当前实际订阅频道由 service 直接给出，页面只读展示；
 //   - 空串是清空配置，不是错误。
 
-import { useEffect, useState, type ReactElement } from "react";
+import { useState, type ReactElement } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 
 const BSV_PRICE_SERVICE_CAPABILITY = "bsv-price.service";
@@ -58,18 +58,13 @@ function BsvPriceSettingsPageInner({
   service
 }: BsvPriceSettingsPageInnerProps): ReactElement {
   const { t } = useI18n();
-  const [snap, setSnap] = useState<BsvPriceServiceSnapshot>(() => service.snapshot());
+  const host = usePluginHost();
+  const snapshot = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
+  const snap = snapshot.data ?? service.snapshot();
   const [draft, setDraft] = useState<string>(() => service.getPublisherPublicKeyHex());
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    const off = service.subscribe(() => {
-      setSnap(service.snapshot());
-    });
-    return () => off();
-  }, [service]);
 
   function onSave(): void {
     setSaving(true);
@@ -84,7 +79,6 @@ function BsvPriceSettingsPageInner({
           ? t("bsv-price.settings.savedCleared", { defaultValue: "已清空配置" })
           : t("bsv-price.settings.saved", { defaultValue: "已保存" })
       );
-      setSnap(service.snapshot());
     } catch (err) {
       setSaveError(describeSaveError(err));
     } finally {

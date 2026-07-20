@@ -10,8 +10,8 @@
 //   - 配错 publisher 公钥时：页面渲染是空态（service 一直拿不到数据）。
 //   - **不**展示历史 / 图表 / 告警。
 
-import React, { useCallback, useEffect, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import React from "react";
+import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import type {
   BsvPriceService,
   BsvPriceServiceSnapshot
@@ -62,14 +62,9 @@ function BsvPricePageInner({
   service: BsvPriceService;
   i18n: { t: (key: string) => string };
 }): React.ReactElement {
-  const [snap, setSnap] = useState<BsvPriceServiceSnapshot>(() => service.snapshot());
-
-  const refresh = useCallback(() => setSnap(service.snapshot()), [service]);
-
-  useEffect(() => {
-    const off = service.subscribe(refresh);
-    return () => off();
-  }, [service, refresh]);
+  const host = usePluginHost();
+  const snapshot = useResource<BsvPriceServiceSnapshot>(host.resourceStore, "bsv-price.snapshot", []);
+  const snap = snapshot.data ?? service.snapshot();
 
   const connectionLabel = (() => {
     switch (snap.status) {

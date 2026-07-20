@@ -89,6 +89,7 @@ function mount() {
   const keyspace = makeKeyspace();
   host.capabilities.provide<VaultService>("vault.service", vault);
   host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+  registerVaultKeyState(host, keyspace, vault);
   return {
     vault,
     keyspace,
@@ -98,6 +99,19 @@ function mount() {
       </PluginHostProvider>
     )
   };
+}
+
+function registerVaultKeyState(host: ReturnType<typeof createPluginHost>, keyspace: KeyspaceService, vault: VaultService): void {
+  const registry = host.capabilities.get<any>("resource.registry");
+  registry.register({
+    id: "vault.key-state", scope: "global", key: () => ["vault.key-state"],
+    load: async () => ({ keys: await keyspace.listKeys(), active: keyspace.active(), initializing: keyspace.isInitializing(), notice: vault.getInitialActivationNotice?.() ?? null }),
+    subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => {
+      const off = keyspace.onActiveChange(invalidate);
+      const init = keyspace.onInitializationChange(invalidate);
+      return () => { off(); init(); };
+    }, invalidation: "immediate"
+  });
 }
 
 afterEach(() => {
@@ -132,6 +146,7 @@ describe("VaultSettingsPage active switching", () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     host.capabilities.provide<VaultService>("vault.service", vault);
     host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerVaultKeyState(host, keyspace, vault);
 
     render(
       <PluginHostProvider host={host}>

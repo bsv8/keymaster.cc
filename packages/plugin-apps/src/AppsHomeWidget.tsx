@@ -13,7 +13,7 @@
 //     `LaunchAppViewErrorCode` 类型 + 错误文案维护。
 
 import { useState } from "react";
-import { useCapability, useI18n, navigateTo } from "@keymaster/runtime";
+import { countRender, useCapability, useI18n, navigateTo } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import {
   LaunchAppViewError,
@@ -64,9 +64,9 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
 }
 
 export function AppsHomeWidget() {
+  countRender("plugin-apps/AppsHomeWidget");
   const protocol = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
   const { t } = useI18n();
-  useI18n().language();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchEntry, setLaunchEntry] = useState<AppCatalogEntry | null>(null);

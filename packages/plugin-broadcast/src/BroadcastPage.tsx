@@ -10,8 +10,8 @@
 //   - **不**直接持有 `BroadcastCore` 引用；走 capability 注入。
 //   - **不**展示 envelope / signature 等 wire 细节。
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import React, { useCallback, useMemo } from "react";
+import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import type {
   BroadcastCoreSnapshot,
   BroadcastProvider
@@ -62,18 +62,11 @@ function BroadcastPageInner({
   service: BroadcastService;
   i18n: { t: (key: string) => string };
 }): React.ReactElement {
-  const [snap, setSnap] = useState<BroadcastCoreSnapshot>(() => service.snapshot());
-  const [providers, setProviders] = useState<readonly BroadcastProvider[]>(() => service.providers());
-
-  const refresh = useCallback(() => {
-    setSnap(service.snapshot());
-    setProviders(service.providers());
-  }, [service]);
-
-  useEffect(() => {
-    const off = service.onChange(refresh);
-    return () => off();
-  }, [service, refresh]);
+  const host = usePluginHost();
+  const state = useResource<{ snapshot: BroadcastCoreSnapshot; providers: readonly BroadcastProvider[] }>(host.resourceStore, "broadcast.state", []);
+  const snap = state.data?.snapshot ?? service.snapshot();
+  const providers = state.data?.providers ?? service.providers();
+  const refresh = useCallback(() => host.resourceStore.invalidate("broadcast.state", []), [host]);
 
   const connectionLabel = useMemo(() => {
     switch (snap.state) {

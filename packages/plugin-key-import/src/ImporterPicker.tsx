@@ -16,7 +16,6 @@ export function ImporterPicker({ selected, onSelect }: ImporterPickerProps) {
   const registry = useCapability<ImporterRegistry>("importer.registry");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
   const list = registry.list();
   if (list.length === 0) {
     return <p className="importer-picker__empty">{t("keyImport.picker.empty", { defaultValue: "没有可用的导入器。" })}</p>;

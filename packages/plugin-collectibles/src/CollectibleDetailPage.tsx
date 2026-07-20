@@ -31,7 +31,6 @@ function readQuery(name: string): string {
 
 export function CollectibleDetailPage() {
   const { t } = useI18n();
-  useI18n().language();
   const providerId = readQuery("providerId");
   const collectibleId = readQuery("collectibleId");
 
@@ -56,7 +55,6 @@ function CollectibleDetail({ providerId, collectibleId }: CollectibleDetailProps
   const transferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
   const locale = useLocale();
   const dateFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),

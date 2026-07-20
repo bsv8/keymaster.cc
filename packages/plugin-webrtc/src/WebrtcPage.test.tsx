@@ -2,6 +2,7 @@
 // 工作台页面：接听后必须从 incoming UI 切到 connecting UI。
 
 import React from "react";
+import { useSyncExternalStore } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { WebrtcPage } from "./WebrtcPage.js";
@@ -27,6 +28,12 @@ vi.mock("@keymaster/runtime", async () => {
     ...actual,
     useCapability: <T,>(_key: string): T =>
       activeTestService.service as unknown as T,
+    usePluginHost: () => ({ resourceStore: {} }),
+    useResource: () => {
+      const service = activeTestService.service;
+      const snapshot = useSyncExternalStore(service.subscribe, service.snapshot, service.snapshot);
+      return { data: snapshot };
+    },
     useI18n: () => ({
       t: (_key: string, opts?: { defaultValue?: string }) =>
         opts?.defaultValue ?? _key,

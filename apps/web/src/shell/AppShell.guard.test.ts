@@ -19,7 +19,7 @@
 //     锁定该字符串以防被改坏。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { evaluateShellGuard } from "./AppShell.js";
+import { areShellGuardStatesEqual, evaluateShellGuard } from "./AppShell.js";
 import type { KeyIdentity } from "@keymaster/contracts";
 
 const KEY_MANAGEMENT_PATH = "/settings/vault";
@@ -55,6 +55,9 @@ afterEach(() => {
 });
 
 describe("evaluateShellGuard: normal 状态", () => {
+  it("相同 normal 状态视为相等，避免重复 setState", () => {
+    expect(areShellGuardStatesEqual({ kind: "normal" }, { kind: "normal" })).toBe(true);
+  });
   it("vault.status 不是 unlocked 时直接 normal", async () => {
     const result = await evaluateShellGuard({
       vaultStatus: "locked",
@@ -80,6 +83,29 @@ describe("evaluateShellGuard: normal 状态", () => {
       listKeys: async () => [READY_KEY]
     });
     expect(result.state).toEqual({ kind: "normal" });
+  });
+});
+
+describe("ShellGuard 状态语义比较", () => {
+  const key = {
+    publicKeyHex: "a",
+    label: "A",
+    capabilities: ["p2pkh"],
+    createdAt: "2026-01-01"
+  };
+
+  it("相同 needs-repair key 内容视为相等，不依赖对象引用", () => {
+    expect(areShellGuardStatesEqual(
+      { kind: "needs-repair", keys: [key] },
+      { kind: "needs-repair", keys: [{ ...key, capabilities: ["p2pkh"] }] }
+    )).toBe(true);
+  });
+
+  it("key 列表内容变化时视为不相等", () => {
+    expect(areShellGuardStatesEqual(
+      { kind: "needs-repair", keys: [key] },
+      { kind: "needs-repair", keys: [{ ...key, label: "B" }] }
+    )).toBe(false);
   });
 });
 

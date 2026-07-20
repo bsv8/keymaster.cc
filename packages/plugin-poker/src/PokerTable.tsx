@@ -14,9 +14,8 @@
 //     属 CSS。
 
 import React, { useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
 import { Button, PageHeader } from "@keymaster/ui";
-import { router, useCapability } from "@keymaster/runtime";
+import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { useParams } from "react-router";
 import {
   POKER_SERVICE_CAPABILITY,
@@ -25,42 +24,16 @@ import {
 } from "@keymaster/contracts";
 
 export function PokerTable(): React.ReactElement {
-  const { t } = useTranslation("poker");
+  const { t } = useI18n();
   const { tableId } = useParams<{ tableId: string }>();
   const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
+  const host = usePluginHost();
   const [joined, setJoined] = useState(false);
   const [frames, setFrames] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
-  const [session, setSession] = useState<PokerSessionKeyState>(() =>
-    service ? service.getActivePokerKey() : { kind: "vaultLocked" }
-  );
+  const session = useResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState));
   /** 当前订阅时锁定的 session key hash；若 activeKey 改变则视为失效。 */
   const [joinedKeyHash, setJoinedKeyHash] = useState<string | null>(null);
-
-  // 会话身份切换时强制收拢：清掉旧订阅，提示用户重新进入。
-  useEffect(() => {
-    if (!service) return;
-    const off = service.onActivePokerKeyChange((next) => {
-      setSession(next);
-      if (joinedKeyHash) {
-        const nextHash =
-          next.kind === "ready" ? next.key.publicKeyHex ?? null : null;
-        if (nextHash !== joinedKeyHash) {
-          setJoinedKeyHash(null);
-          setJoined(false);
-          setError(
-            t("poker.table.sessionClosed", {
-              defaultValue:
-                "The current session was closed. Please re-enter."
-            })
-          );
-        }
-      }
-    });
-    return () => {
-      off();
-    };
-  }, [service, joinedKeyHash, t]);
 
   useEffect(() => {
     if (!service || !tableId) return;

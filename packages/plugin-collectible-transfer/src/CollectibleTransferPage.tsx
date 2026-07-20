@@ -33,7 +33,6 @@ function readQuery(name: string): string {
 
 export function CollectibleTransferPage() {
   const { t } = useI18n();
-  useI18n().language();
   const providerId = readQuery("providerId");
   const collectibleId = readQuery("collectibleId");
 
@@ -65,7 +64,6 @@ function CollectibleTransferBody({ providerId, collectibleId }: BodyProps) {
   const transferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
 
   const [provider, setProvider] = useState<CollectibleProvider | undefined>(undefined);
   const [detail, setDetail] = useState<CollectibleDetail | null>(null);

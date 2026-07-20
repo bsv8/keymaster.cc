@@ -10,42 +10,21 @@
 //   - 硬切换 002：使用 home-widget / home-widget__head / home-widget__status
 //     这套共享 class，业务专属细节走 poker-home-widget* 修饰类。
 
-import React, { useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
-import { useCapability } from "@keymaster/runtime";
+import React from "react";
+import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
-  POKER_SERVICE_CAPABILITY,
   type PokerConnectionStatus,
-  type PokerService,
   type PokerSessionKeyState
 } from "@keymaster/contracts";
 
 export function PokerHomeWidget(): React.ReactElement {
-  const { t } = useTranslation("poker");
-  const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
-  const [status, setStatus] = useState<PokerConnectionStatus>("idle");
-  const [count, setCount] = useState(0);
-  const [session, setSession] = useState<PokerSessionKeyState>(() =>
-    service ? service.getActivePokerKey() : { kind: "vaultLocked" }
-  );
-
-  useEffect(() => {
-    if (!service) return;
-    const off = service.onStatusChange((next) => setStatus(next));
-    setCount(service.listPresences().length);
-    const offP = service.onPresenceChange(() => setCount(service.listPresences().length));
-    const offS = service.onActivePokerKeyChange((next) => {
-      setSession(next);
-      // 切 key 后 service 已清空内存 presences；这里再读一次保证 UI 一致。
-      setCount(service.listPresences().length);
-    });
-    return () => {
-      off();
-      offP();
-      offS();
-    };
-  }, [service]);
+  countRender("plugin-poker/PokerHomeWidget");
+  const { t } = useI18n();
+  const host = usePluginHost();
+  const status = useResourceSelector<PokerConnectionStatus, PokerConnectionStatus>(host.resourceStore, "poker.connection", [], (s) => s.data ?? "idle");
+  const session = useResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState));
+  const count = useResourceSelector<unknown[], number>(host.resourceStore, "poker.presences", [], (s) => s.data?.length ?? 0);
 
   return (
     <div className="home-widget poker-home-widget">
@@ -55,7 +34,7 @@ export function PokerHomeWidget(): React.ReactElement {
           {t(`poker.status.${status}`, { defaultValue: status })}
         </span>
       </header>
-      {!service ? (
+      {session.kind === "vaultLocked" ? (
         <p className="home-widget__status poker-home-widget__hint">
           {t("poker.home.empty", { defaultValue: "Not connected" })}
           <span className="poker-home-widget__hint-sub">

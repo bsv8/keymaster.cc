@@ -9,8 +9,10 @@ import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
-import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
+import type { ActiveKeyState, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
+import { RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";
+import { p2pkhResources } from "../manifest.js";
 import { P2pkhBalanceWidget } from "./P2pkhBalanceWidget.js";
 
 const ACTIVE_PK = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -81,6 +83,71 @@ function makeFakeKeyspace(activePublicKeyHex?: string) {
   };
 }
 
+/** 在 host 上注册 p2pkh 资源定义。 */
+function registerP2pkhResources(host: ReturnType<typeof createPluginHost>, service: P2pkhService) {
+  const resourceRegistry = host.capabilities.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY)!;
+
+  // p2pkh.balance
+  resourceRegistry.register({
+    id: "p2pkh.balance",
+    scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
+      ["p2pkh.balance", context.activePublicKeyHex ?? "none"],
+    load: async () => {
+      const include = service.getGlobalSettings().includeTestnet;
+      const calls = [service.getAssetBalance("bsv")];
+      if (include) calls.push(service.getAssetBalance("bsvtest"));
+      const results = await Promise.all(calls);
+      return { bsv: results[0] ?? null, bsvtest: include ? (results[1] ?? null) : null };
+    },
+    subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => {
+      const offData = service.onDataChanged(invalidate);
+      const offSettings = service.onGlobalSettingsChange(invalidate);
+      return () => { offData(); offSettings(); };
+    },
+    equals: (prev: any, next: any) => {
+      if (!prev || !next) return prev === next;
+      return prev.bsv?.total === next.bsv?.total && prev.bsvtest?.total === next.bsvtest?.total;
+    },
+    invalidation: "microtask"
+  });
+
+  // p2pkh.settings
+  resourceRegistry.register({
+    id: "p2pkh.settings",
+    scope: "global",
+    key: () => ["p2pkh.settings"],
+    load: async () => service.getGlobalSettings(),
+    subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => service.onGlobalSettingsChange(invalidate),
+    equals: (prev: any, next: any) => {
+      if (!prev || !next) return prev === next;
+      return prev.includeTestnet === next.includeTestnet;
+    },
+    invalidation: "immediate"
+  });
+
+  resourceRegistry.register({
+    id: "p2pkh.readiness",
+    scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
+      ["p2pkh.readiness", context.activePublicKeyHex ?? "none"],
+    load: async () => "ready",
+    subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => {
+      return () => { void invalidate; };
+    },
+    invalidation: "immediate"
+  });
+
+  resourceRegistry.register({
+    id: "p2pkh.sync-status",
+    scope: "global",
+    key: () => ["p2pkh.sync-status"],
+    load: async () => service.syncStatus(),
+    subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => service.onSyncStatusChange(invalidate),
+    invalidation: "immediate"
+  });
+}
+
 describe("P2pkhBalanceWidget", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -89,9 +156,10 @@ describe("P2pkhBalanceWidget", () => {
   it("onDataChanged 后重新读取余额", async () => {
     const fake = makeFakeService();
     const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
@@ -130,9 +198,10 @@ describe("P2pkhBalanceWidget", () => {
       },
     });
     const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
 
     render(
       <PluginHostProvider host={host}>
@@ -170,9 +239,10 @@ describe("P2pkhBalanceWidget", () => {
   it("卸载后不再更新", async () => {
     const fake = makeFakeService();
     const keyspace = makeFakeKeyspace();
-    const host = createPluginHost({ disableConfigPersistence: true });
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [p2pkhResources] });
     host.provide<P2pkhService>("p2pkh.service", fake.service);
     host.provide<KeyspaceService>("keyspace.service", keyspace.keyspace);
+    registerP2pkhResources(host, fake.service);
 
     const { unmount } = render(
       <PluginHostProvider host={host}>

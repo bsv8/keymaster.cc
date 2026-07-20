@@ -26,14 +26,35 @@ import type {
   AppMsgEndpointId,
   AppMsgEndpointService,
   AppMsgEndpointServiceRegistry,
+  AppMsgMessage,
+  Contact,
+  ContactsService,
   I18nPluginResources,
+  KeyspaceService,
   PluginContext,
-  PluginManifest
+  PluginManifest,
+  ResourceRegistry
 } from "@keymaster/contracts";
-import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
+import {
+  APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
+  KEYMASTER_MESSAGE_APP_ID,
+  RESOURCE_REGISTRY_CAPABILITY
+} from "@keymaster/contracts";
 import { MessagePage } from "./MessagePage.js";
 import { MessageDetailPage } from "./MessageDetailPage.js";
 import { createMessageService } from "./messageService.js";
+
+/** 消息会话聚合结果（Resource Store 数据模型） */
+export interface MessageConversationsData {
+  messages: AppMsgMessage[];
+  contactsByPeer: Record<string, Contact>;
+}
+
+/** 消息详情页数据（Resource Store 数据模型） */
+export interface MessageDetailData {
+  messages: AppMsgMessage[];
+  contact: Contact | null;
+}
 
 /** 插件 id（与 keymaster.message 不一致；plugin manifest 仍唯一）。 */
 export const MESSAGE_PLUGIN_ID = "message";
@@ -293,6 +314,88 @@ export const messagePlatformPlugin: PluginManifest = {
     const endpointService = registry.forEndpoint(PLUGIN_MESSAGE_ENDPOINT);
     const service = createMessageService(endpointService);
     ctx.provide("message.service", service);
+
+    // 注册资源定义（硬切换 003）
+    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const contacts = ctx.has("contacts.service")
+      ? ctx.get<ContactsService>("contacts.service")
+      : null;
+
+    // message.conversations：消息列表 + 联系人（MessagePage 用）
+    resources.register<MessageConversationsData, readonly string[]>({
+      id: "message.conversations",
+      scope: "active-key",
+      key: (_args, context) => ["message.conversations", context.activePublicKeyHex ?? "none"],
+      load: async (_args, _context, _signal) => {
+        const messages = await service.listMessages({ limit: 10_000 });
+        // 从消息中提取 peer publicKeyHex 列表
+        const ownerHex = keyspace.active().activePublicKeyHex;
+        const peerSet = new Set<string>();
+        for (const msg of messages) {
+          const peer = msg.senderPublicKeyHex === ownerHex
+            ? msg.recipientPublicKeyHex
+            : msg.senderPublicKeyHex;
+          if (peer) peerSet.add(peer);
+        }
+        const peerList = Array.from(peerSet);
+        // 查找联系人
+        let contactsByPeer: Record<string, Contact> = {};
+        if (contacts && peerList.length > 0) {
+          try {
+            const found = await contacts.findByPublicKeyHexes(peerList);
+            for (const c of found) contactsByPeer[c.publicKeyHex] = c;
+          } catch {
+            // 联系人查找失败不影响消息列表
+          }
+        }
+        return { messages, contactsByPeer };
+      },
+      subscribe: (_args, _ctx, invalidate) => {
+        const offMessages = service.subscribeMessages(invalidate);
+        const offContacts = contacts?.onChange(invalidate) ?? (() => {});
+        return () => { offMessages(); offContacts(); };
+      },
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        if (prev.messages.length !== next.messages.length) return false;
+        if (Object.keys(prev.contactsByPeer).length !== Object.keys(next.contactsByPeer).length) return false;
+        return true;
+      },
+      invalidation: "microtask"
+    });
+
+    // message.detail：消息详情页数据（消息 + 联系人）
+    resources.register<MessageDetailData, readonly string[]>({
+      id: "message.detail",
+      scope: "active-key",
+      key: (args, context) => ["message.detail", context.activePublicKeyHex ?? "none", args[0] ?? "none"],
+      load: async (args, _context, _signal) => {
+        const peerHex = args[0];
+        const messages = await service.listMessages({ limit: 10_000 });
+        let contact: Contact | null = null;
+        if (contacts && peerHex) {
+          try {
+            contact = await contacts.findByPublicKeyHex(peerHex) ?? null;
+          } catch {
+            // 联系人查找失败不影响消息列表
+          }
+        }
+        return { messages, contact };
+      },
+      subscribe: (args, _ctx, invalidate) => {
+        const offMessages = service.subscribeMessages(invalidate);
+        const offContacts = contacts?.onChange(invalidate) ?? (() => {});
+        return () => { offMessages(); offContacts(); };
+      },
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        if (prev.messages.length !== next.messages.length) return false;
+        if (prev.contact?.id !== next.contact?.id) return false;
+        return true;
+      },
+      invalidation: "microtask"
+    });
 
     const routes = ctx.get<{
       register(input: {

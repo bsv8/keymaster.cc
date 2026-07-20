@@ -38,7 +38,7 @@
 
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import {
   KeyPersistedButActivationFailedError,
   type VaultService
@@ -50,25 +50,15 @@ type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
 
 export function LockedShell() {
   const vault = useCapability<VaultService>("vault.service");
+  const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
-  const [status, setStatus] = useState(vault.status());
+  const status = useResourceSelector<ReturnType<VaultService["status"]>, ReturnType<VaultService["status"]>>(host.resourceStore, "shell.vault-status", [], (s) => s.data ?? "uninitialized");
   const [mode, setMode] = useState<Mode>("welcome");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setStatus(vault.status());
-    return vault.onStatusChange((s) => {
-      setStatus(s);
-      // 注意：硬切换 010 之后，首启导入完成后 status 切到 unlocked，
-      // App 卸载 LockedShell；不需要在这里主动 push("/import")。
-      // 旧实现里 "if (intent === import) push(/import)" 的逻辑已废弃。
-    });
-  }, [vault]);
 
   // uninitialized -> 始终显示欢迎页；
   // locked -> 跳到 unlock 模式。

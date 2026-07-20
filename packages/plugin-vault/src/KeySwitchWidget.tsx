@@ -25,91 +25,31 @@
 // "未选择"作为正常态文案（壳层会把这种情况识别为"修复/管理态"，这里是
 // 内部瞬时或异常兜底）。
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { ChevronDown, KeyRound, Check } from "lucide-react";
-import { router, useCapability, useI18n } from "@keymaster/runtime";
+import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import type {
-  ActiveKeyState,
-  KeyIdentity,
-  KeyspaceService,
-  MessageBus,
-  VaultService
-} from "@keymaster/contracts";
+import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
+import type { VaultKeyResourceState } from "./manifest.js";
 
 export function KeySwitchWidget() {
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const vault = useCapability<VaultService>("vault.service");
-  const messageBus = useCapability<MessageBus>("runtime.messageBus");
+  const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
-  const [keys, setKeys] = useState<KeyIdentity[]>([]);
-  const [active, setActive] = useState<ActiveKeyState>(keyspace.active());
+  const keyState = useResourceSelector<VaultKeyResourceState, VaultKeyResourceState>(host.resourceStore, "vault.key-state", [], (s) => s.data ?? { keys: [], active: { activePublicKeyHex: undefined }, initializing: false, notice: null }, (a, b) => JSON.stringify(a) === JSON.stringify(b));
+  const keys = keyState.keys;
+  const active = keyState.active;
   const [open, setOpen] = useState(false);
-  const [initializing, setInitializing] = useState(keyspace.isInitializing());
+  const initializing = keyState.initializing;
   const [busy, setBusy] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<KeyIdentity | null>(null);
   const [switchPassword, setSwitchPassword] = useState("");
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [switchBusy, setSwitchBusy] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function loadSwitchableKeys() {
-      try {
-        const all = await keyspace.listKeys();
-        // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-        const switchable = all.filter((k) => k.publicKeyHex);
-        if (!cancelled) setKeys(switchable);
-      } catch {
-        if (!cancelled) setKeys([]);
-      }
-    }
-    void loadSwitchableKeys();
-    const offActive = keyspace.onActiveChange((s) => {
-      if (!cancelled) {
-        setActive(s);
-        void loadSwitchableKeys();
-      }
-    });
-    const offInit = keyspace.onInitializationChange((v) => {
-      if (!cancelled) {
-        setInitializing(v);
-        if (!v) void loadSwitchableKeys();
-      }
-    });
-    return () => {
-      cancelled = true;
-      offActive();
-      offInit();
-    };
-  }, [keyspace]);
-
-  useEffect(() => {
-    if (!messageBus) return;
-    const offs: Array<() => void> = [];
-    const trigger = () => {
-      void (async () => {
-        try {
-          const all = await keyspace.listKeys();
-          // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-          const switchable = all.filter((k) => k.publicKeyHex);
-          setKeys(switchable);
-        } catch {
-          // 静默
-        }
-      })();
-    };
-    // 硬切换 002 收尾：所有 key.* 事件 payload 不再携带 publicKeyHex (硬切换 002 收尾)；
-    // platform identity 根字段只有 publicKeyHex。
-    offs.push(messageBus.subscribe<{ publicKeyHex: string; label: string }>("key.created", trigger));
-    offs.push(messageBus.subscribe<{ publicKeyHex: string }>("key.deleted", trigger));
-    return () => {
-      for (const off of offs) off();
-    };
-  }, [messageBus, keyspace]);
 
   const current = active.activePublicKeyHex
     ? keys.find((k) => k.publicKeyHex === active.activePublicKeyHex)

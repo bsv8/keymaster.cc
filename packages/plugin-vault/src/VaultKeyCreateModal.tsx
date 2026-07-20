@@ -54,7 +54,6 @@ export function VaultKeyCreateModal({
 }: VaultKeyCreateModalProps) {
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const [phase, setPhase] = useState<Phase>("form");
   const [label, setLabel] = useState("");
   const [password, setPassword] = useState("");

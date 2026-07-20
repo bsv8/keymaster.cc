@@ -20,6 +20,7 @@ import type {
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_VERSION } from "@keymaster/contracts";
 import { StrictMode, type ReactNode } from "react";
+import { useRef, useSyncExternalStore } from "react";
 
 const runtimeState = vi.hoisted(() => ({
   vault: "unlocked" as "booting" | "uninitialized" | "locked" | "unlocked"
@@ -53,6 +54,33 @@ vi.mock("@keymaster/runtime", () => ({
     }
     return undefined;
   },
+  usePluginHost: () => ({ resourceStore: { invalidate: () => undefined } }),
+  useResource: (_store: unknown, definitionId: string) => {
+    const revision = useRef(0);
+    const cached = useRef<{ revision: number; value: { data: unknown } } | undefined>(undefined);
+    const subscribe = (callback: () => void) => {
+      if (!currentService) return () => undefined;
+      if (definitionId === "protocol.state") {
+        let initialNotifications = 2;
+        const notify = () => { if (initialNotifications > 0) { initialNotifications -= 1; return; } revision.current += 1; callback(); };
+        const a = currentService.subscribe(notify);
+        const b = currentService.subscribeFeed(notify);
+        return () => { a(); b(); };
+      }
+      let initialNotification = true;
+      return currentService.subscribe(() => { if (initialNotification) { initialNotification = false; return; } revision.current += 1; callback(); });
+    };
+    const getSnapshot = () => {
+      if (cached.current?.revision === revision.current) return cached.current.value;
+      let value: { data: unknown } = { data: undefined };
+      if (currentService && definitionId === "protocol.state") value = { data: { snapshot: currentService.snapshot(), feed: currentService.feedSnapshot() } };
+      else if (currentService && definitionId === "protocol.app-bootstrap") value = { data: { waiting: currentService.appClientWaitingForReady(), timedOut: currentService.appClientConnectTimedOut() } };
+      cached.current = { revision: revision.current, value };
+      return value;
+    };
+    return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  },
+  useResourceSelector: (_store: unknown, _definitionId: string, _args: readonly string[], selector: (snapshot: { data: unknown }) => unknown) => selector({ data: runtimeState.vault }),
   useI18n: () => ({
     t: (key: string, values?: { defaultValue?: string; seconds?: number }) => {
       const tmpl = values?.defaultValue ?? key;

@@ -7,10 +7,11 @@
 //   - 只允许 5 / 15 / 30 / 60 分钟预设；不能保存小于 5 分钟、任意秒数或永不运行。
 //   - 保存后重新计算 asset-holdings 组任务的 nextRunAt，不立即触发网络同步。
 //   - 保存后显示实际生效的值（可能因任务最小间隔被抬高）。
-//   - 订阅后台设置变化以处理跨标签修改。
+//
+// 硬切换 003：使用 Resource Store 读取后台设置，跨标签同步由 resource subscribe 处理。
 
 import { useEffect, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundSyncSettings } from "@keymaster/contracts";
 
 /** 预设选项。 */
@@ -21,24 +22,33 @@ const INTERVAL_OPTIONS: Array<{ label: string; value: number }> = [
   { label: "background.settings.option.60min", value: 3_600_000 }
 ];
 
+const DEFAULT_SETTINGS: BackgroundSyncSettings = { assetHoldingsIntervalMs: 900_000 };
+
 export function BackgroundSettingsPage() {
   const backgroundService = useCapability<BackgroundService>("background.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
+  const store = host.resourceStore;
 
-  const currentSettings = backgroundService.getScheduleSettings();
-  const [intervalMs, setIntervalMs] = useState(currentSettings.assetHoldingsIntervalMs);
+  // 使用 Resource Store 读取后台设置（跨标签同步由 resource subscribe 处理）
+  const settings = useResourceSelector<BackgroundSyncSettings, BackgroundSyncSettings>(
+    store,
+    "background.scheduleSettings",
+    [],
+    (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
+    (a, b) => a.assetHoldingsIntervalMs === b.assetHoldingsIntervalMs
+  );
+
+  // 本地交互 state：表单值
+  const [intervalMs, setIntervalMs] = useState(settings.assetHoldingsIntervalMs);
   const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // 订阅后台设置变化：处理跨标签修改
+  // 当 resource 设置变化时（跨标签同步），更新表单值
   useEffect(() => {
-    return backgroundService.onChange(() => {
-      const latest = backgroundService.getScheduleSettings();
-      setIntervalMs(latest.assetHoldingsIntervalMs);
-    });
-  }, [backgroundService]);
+    setIntervalMs(settings.assetHoldingsIntervalMs);
+  }, [settings.assetHoldingsIntervalMs]);
 
   function handleSave() {
     const settings: BackgroundSyncSettings = {

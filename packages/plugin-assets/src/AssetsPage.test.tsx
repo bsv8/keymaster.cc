@@ -1,8 +1,7 @@
 // packages/plugin-assets/src/AssetsPage.test.tsx
-// 统一持仓页并发保护测试：
-//   1. 一个 provider 挂起时，已完成 provider 先显示。
-//   2. 触发 onChange 后返回新数据，旧请求晚到不得覆盖新数据。
-//   3. 组件卸载后不再 setState。
+// 统一持仓页集成测试：
+//   硬切换 003 后，并发保护职责已移至 Resource Store。
+//   本测试验证页面正确读取 Resource Store 快照并渲染。
 
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
@@ -13,45 +12,39 @@ import type {
   AssetProvider,
   AssetRegistry,
   KeyspaceService,
+  I18nPluginResources,
   TokenProvider,
   TokenRegistry,
 } from "@keymaster/contracts";
+import {
+  RESOURCE_REGISTRY_CAPABILITY,
+  ASSET_DATA_NOTIFIER_CAPABILITY
+} from "@keymaster/contracts";
 import { AssetsPage } from "./AssetsPage.js";
+import { loadAllHoldings } from "./holdingsFlow.js";
 
-/** 创建可控的 deferred promise。 */
-function deferred<T>() {
-  let resolve!: (v: T) => void;
-  let reject!: (e: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
-
-function makeAssetProvider(
-  id: string,
-  name: string,
-  listResult: () => Promise<unknown[]>
-): AssetProvider {
-  const listeners = new Set<() => void>();
-  return {
-    id,
-    name: { key: `${id}.name`, fallback: name },
-    order: 0,
-    kind: "coin",
-    listAssets: listResult as () => Promise<never[]>,
-    getAsset: () => Promise.resolve(undefined),
-    listActivity: () => Promise.resolve([]),
-    onChange: (h: () => void) => {
-      listeners.add(h);
-      return () => listeners.delete(h);
-    },
-    _emit: () => {
-      for (const l of [...listeners]) l();
-    },
-  } as unknown as AssetProvider & { _emit: () => void };
-}
+const ASSETS_PAGE_TEST_I18N: I18nPluginResources = {
+  namespace: "common",
+  resources: { en: {
+    "assets.context.loading": "Loading…",
+    "assets.context.noKey": "No key",
+    "assets.context.unnamed": "Unnamed",
+    "assets.context.identityMissing": "Identity unavailable",
+    "assets.page.title": "Assets",
+    "assets.page.loading": "Loading assets…",
+    "assets.page.descriptionPrefix": "Assets",
+    "assets.table.col.name": "Name",
+    "assets.table.col.kind": "Kind",
+    "assets.table.col.provider": "Provider",
+    "assets.table.col.network": "Network",
+    "assets.table.col.balance": "Balance",
+    "assets.table.col.status": "Status",
+    "assets.table.col.detail": "Detail",
+    "assets.page.error.load": "Failed to load assets",
+    "assets.page.empty.assets.title": "No assets",
+    "assets.page.empty.assets.desc": "No assets found"
+  } }
+};
 
 function makeTokenProvider(
   id: string,
@@ -76,22 +69,23 @@ function makeTokenProvider(
   } as unknown as TokenProvider & { _emit: () => void };
 }
 
-function makeAssetRegistry(providers: AssetProvider[]): AssetRegistry {
+function makeAssetProvider(
+  id: string,
+  name: string,
+  listResult: () => Promise<unknown[]>
+): AssetProvider {
   return {
-    list: () => providers,
-    get: (id: string) => providers.find((p) => p.id === id),
-    register: () => {},
-    unregister: () => {},
-  } as unknown as AssetRegistry;
-}
-
-function makeTokenRegistry(providers: TokenProvider[]): TokenRegistry {
-  return {
-    list: () => providers,
-    get: (id: string) => providers.find((p) => p.id === id),
-    register: () => {},
-    unregister: () => {},
-  } as unknown as TokenRegistry;
+    id,
+    name: { key: `${id}.name`, fallback: name },
+    order: 0,
+    kind: "coin",
+    listAssets: listResult as () => Promise<never[]>,
+    getAsset: () => Promise.resolve(undefined),
+    listActivity: () => Promise.resolve([]),
+    onChange: (h: () => void) => {
+      return () => {};
+    },
+  } as unknown as AssetProvider;
 }
 
 function makeKeyspace(publicKeyHex?: string): KeyspaceService {
@@ -123,33 +117,67 @@ function makeKeyspace(publicKeyHex?: string): KeyspaceService {
   } as unknown as KeyspaceService;
 }
 
-describe("AssetsPage - 并发保护", () => {
+/** 在 host 上注册 holdings 资源定义。 */
+function registerHoldingsResource(
+  host: ReturnType<typeof createPluginHost>,
+  assetReg: AssetRegistry,
+  tokenReg: TokenRegistry
+) {
+  const resourceRegistry = host.capabilities.get<any>(RESOURCE_REGISTRY_CAPABILITY);
+  const notifier = host.capabilities.get<any>(ASSET_DATA_NOTIFIER_CAPABILITY);
+  resourceRegistry.register({
+    id: "assets.holdings",
+    scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
+      ["assets.holdings", context.activePublicKeyHex ?? "none"],
+    load: async (_args: readonly string[], _context: unknown, _signal: AbortSignal) => {
+      return loadAllHoldings(assetReg, tokenReg);
+    },
+    subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => {
+      return notifier.subscribe(() => {
+        invalidate();
+      });
+    },
+    equals: (prev: unknown, next: unknown) => {
+      if (!prev || !next) return prev === next;
+      return JSON.stringify(prev) === JSON.stringify(next);
+    },
+    invalidation: "microtask"
+  });
+  resourceRegistry.register({
+    id: "assets.active-context", scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) => ["assets.active-context", context.activePublicKeyHex ?? "none"],
+    load: async () => {
+      const keyspace = host.capabilities.get<KeyspaceService>("keyspace.service");
+      const active = keyspace.active().activePublicKeyHex;
+      return active ? (await keyspace.getKey(active)) ?? null : null;
+    },
+    subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => host.capabilities.get<KeyspaceService>("keyspace.service").onActiveChange(invalidate),
+    invalidation: "immediate"
+  });
+}
+
+describe("AssetsPage - Resource Store 集成", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("一个 provider 挂起时，已完成 provider 先显示", async () => {
-    const hanging = deferred<never[]>();
-    const fastProvider = makeTokenProvider("fast", "Fast", () =>
+  it("渲染来自 Resource Store 的资产数据", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [ASSETS_PAGE_TEST_I18N] });
+    const tokenReg = host.tokens;
+    tokenReg.register(makeTokenProvider("tok1", "Token1", () =>
       Promise.resolve([
         {
           tokenId: "tok1",
-          providerId: "fast",
-          symbol: "FAST",
-          label: "Fast Token",
+          providerId: "tok1",
+          symbol: "TK1",
+          label: "Test Token",
           status: "ready",
         },
       ])
-    );
-    const slowProvider = makeTokenProvider("slow", "Slow", () => hanging.promise);
-
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const assetReg = host.assets;
-    const tokenReg = host.tokens;
-    assetReg.register(makeAssetProvider("noop", "Noop", () => Promise.resolve([])) as unknown as AssetProvider);
-    tokenReg.register(fastProvider);
-    tokenReg.register(slowProvider);
+    ));
     host.provide<KeyspaceService>("keyspace.service", makeKeyspace());
+    registerHoldingsResource(host, host.assets, tokenReg);
 
     render(
       <PluginHostProvider host={host}>
@@ -157,41 +185,19 @@ describe("AssetsPage - 并发保护", () => {
       </PluginHostProvider>
     );
 
-    // fast provider 完成后应先显示
     await waitFor(() => {
-      expect(screen.getByText("Fast Token")).toBeTruthy();
+      expect(screen.getByText("Test Token")).toBeTruthy();
     });
-
-    // slow provider 仍在挂起，不应阻塞页面
-    expect(screen.queryByText("Slow")).toBeFalsy();
-
-    // 清理：让 slow 也完成
-    hanging.resolve([]);
   });
 
-  it("旧请求晚到不得覆盖新数据", async () => {
-    const firstRequest = deferred<unknown[]>();
-    let callCount = 0;
-    const tokenProvider = makeTokenProvider("tok-p", "TokenP", () => {
-      callCount++;
-      if (callCount === 1) return firstRequest.promise;
-      // 第二次调用（onChange 触发）立即返回新数据
-      return Promise.resolve([
-        {
-          tokenId: "new-tok",
-          providerId: "tok-p",
-          symbol: "NEW",
-          label: "New Token",
-          status: "ready",
-        },
-      ]);
-    });
-
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const assetReg = host.assets;
+  it("provider 失败时显示错误信息", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [ASSETS_PAGE_TEST_I18N] });
     const tokenReg = host.tokens;
-    tokenReg.register(tokenProvider);
+    tokenReg.register(makeTokenProvider("fail-p", "FailP", () =>
+      Promise.reject(new Error("load failed"))
+    ));
     host.provide<KeyspaceService>("keyspace.service", makeKeyspace());
+    registerHoldingsResource(host, host.assets, tokenReg);
 
     render(
       <PluginHostProvider host={host}>
@@ -199,40 +205,8 @@ describe("AssetsPage - 并发保护", () => {
       </PluginHostProvider>
     );
 
-    // 等待初始加载开始
-    await vi.waitFor(() => {
-      expect(callCount).toBe(1);
-    });
-
-    // 触发 onChange → 第二次调用，返回新数据
-    const typedProvider = tokenProvider as unknown as { _emit: () => void };
-    await act(async () => {
-      typedProvider._emit();
-      // 让第二次调用的 microtask 执行
-      await new Promise((r) => setTimeout(r, 50));
-    });
-
-    // 新数据应已显示
     await waitFor(() => {
-      expect(screen.getByText("New Token")).toBeTruthy();
+      expect(screen.getByText(/load failed/)).toBeTruthy();
     });
-
-    // 现在让第一次请求晚到
-    await act(async () => {
-      firstRequest.resolve([
-        {
-          tokenId: "old-tok",
-          providerId: "tok-p",
-          symbol: "OLD",
-          label: "Old Token",
-          status: "ready",
-        },
-      ]);
-      await new Promise((r) => setTimeout(r, 50));
-    });
-
-    // 旧数据不应覆盖新数据
-    expect(screen.queryByText("Old Token")).toBeFalsy();
-    expect(screen.getByText("New Token")).toBeTruthy();
   });
 });

@@ -5,18 +5,21 @@
 //   - 文本消息与 WebRTC 历史分开存储、合并展示；
 //   - 发送动作保留文本输入，并在正文区下方直接承载当前 peer 的通话面板；
 //   - 在线状态每 3 秒探测一次，离开页面立即停止。
+//
+// 硬切换 003：消息和联系人数据使用 Resource Store。
+// WebRTC 会话快照和在线状态是实时状态，保留为本地订阅。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useCapability, useCurrentPath, useI18n, router } from "@keymaster/runtime";
+import { useCapability, useCurrentPath, useI18n, usePluginHost, useResource, useResourceSelector, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
-import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import type { KeyspaceService } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
+import type { MessageDetailData } from "./manifest.js";
 import { buildMessageTimeline, type MessageTimelineItem } from "./messageTimeline.js";
 import { shortPublicKeyHex } from "./messageConversation.js";
 import type { WebrtcHistoryItem, WebrtcService, WebrtcSessionSnapshot } from "@keymaster/plugin-webrtc";
 
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
-const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
 const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
 const MESSAGE_READ_WINDOW = 10_000;
 const DEFAULT_VISIBLE_MESSAGE_COUNT = 20;
@@ -52,17 +55,33 @@ export function MessageDetailPage(): JSX.Element {
   const normalizedPeerPublicKeyHex = normalizePublicKeyHexForMatch(peerPublicKeyHex);
   const messageService = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const contacts = useCapabilityOrNull<ContactsService>(CONTACTS_SERVICE_CAPABILITY);
   const webrtc = useCapabilityOrNull<WebrtcService>(WEBRTC_SERVICE_CAPABILITY);
-  const [ownerPublicKeyHex, setOwnerPublicKeyHex] = useState<string | null>(keyspace.active().activePublicKeyHex ?? null);
-  const [messages, setMessages] = useState<AppMsgMessage[]>([]);
-  const [history, setHistory] = useState<WebrtcHistoryItem[]>([]);
-  const [contact, setContact] = useState<Contact | null>(null);
+  const host = usePluginHost();
+  const store = host.resourceStore;
+  const ownerPublicKeyHex = keyspace.active().activePublicKeyHex ?? null;
+
+  // 使用 Resource Store 读取消息和联系人数据
+  const detailData = useResourceSelector<MessageDetailData, MessageDetailData>(
+    store,
+    "message.detail",
+    [normalizedPeerPublicKeyHex],
+    (snapshot) => snapshot.data ?? { messages: [], contact: null },
+    (a, b) => {
+      if (a.messages.length !== b.messages.length) return false;
+      if (a.contact?.id !== b.contact?.id) return false;
+      return true;
+    }
+  );
+  const messages = detailData.messages;
+  const contact = detailData.contact;
+
+  // WebRTC 相关状态（实时状态，保留为本地订阅）
+  const historyResource = useResource<WebrtcHistoryItem[]>(host.resourceStore, "webrtc.peer-history", [normalizedPeerPublicKeyHex]);
+  const history = historyResource.data ?? [];
   const [sendBody, setSendBody] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
-  const [webrtcSnapshot, setWebrtcSnapshot] = useState<WebrtcSessionSnapshot | null>(
-    () => webrtc?.snapshot() ?? null
-  );
+  const webrtcResource = useResource<WebrtcSessionSnapshot>(host.resourceStore, "webrtc.session", []);
+  const webrtcSnapshot = webrtcResource.data ?? (webrtc?.snapshot() ?? null);
   const [callActionBusy, setCallActionBusy] = useState(false);
   const [isLocalPrimary, setIsLocalPrimary] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -74,60 +93,6 @@ export function MessageDetailPage(): JSX.Element {
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const service = messageService;
-
-  useEffect(() => {
-    return keyspace.onActiveChange((state) => {
-      setOwnerPublicKeyHex(state.activePublicKeyHex ?? null);
-    });
-  }, [keyspace]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      if (!service || !ownerPublicKeyHex || !normalizedPeerPublicKeyHex || !service.isReady()) {
-        if (!cancelled) setMessages([]);
-        return;
-      }
-      try {
-        const items = await service.listMessages({ limit: MESSAGE_READ_WINDOW });
-        if (!cancelled) setMessages(items);
-      } catch {
-        if (!cancelled) setMessages([]);
-      }
-    };
-    void refresh();
-    const off = service?.subscribeMessages(() => {
-      void refresh();
-    }) ?? (() => undefined);
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [service, ownerPublicKeyHex, normalizedPeerPublicKeyHex]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      if (!webrtc || !ownerPublicKeyHex || !normalizedPeerPublicKeyHex) {
-        if (!cancelled) setHistory([]);
-        return;
-      }
-      try {
-        const items = await webrtc.listHistoryForPeer(normalizedPeerPublicKeyHex);
-        if (!cancelled) setHistory(items);
-      } catch {
-        if (!cancelled) setHistory([]);
-      }
-    };
-    void refresh();
-    const off = webrtc?.subscribe(() => {
-      void refresh();
-    }) ?? (() => undefined);
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [ownerPublicKeyHex, normalizedPeerPublicKeyHex, webrtc]);
 
   useEffect(() => {
     let cancelled = false;
@@ -148,41 +113,6 @@ export function MessageDetailPage(): JSX.Element {
       window.clearInterval(timer);
     };
   }, [normalizedPeerPublicKeyHex, webrtc]);
-
-  useEffect(() => {
-    if (!webrtc) {
-      setWebrtcSnapshot(null);
-      return;
-    }
-    const off = webrtc.subscribe((snapshot) => {
-      setWebrtcSnapshot(snapshot);
-    });
-    return () => {
-      off();
-    };
-  }, [webrtc]);
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!contacts || !normalizedPeerPublicKeyHex) {
-      setContact(null);
-      return;
-    }
-    const refresh = async () => {
-      try {
-        const found = await contacts.findByPublicKeyHex(normalizedPeerPublicKeyHex);
-        if (!cancelled) setContact(found ?? null);
-      } catch {
-        if (!cancelled) setContact(null);
-      }
-    };
-    void refresh();
-    const off = contacts.onChange(refresh);
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [contacts, normalizedPeerPublicKeyHex]);
 
   useEffect(() => {
     setVisibleCount(DEFAULT_VISIBLE_MESSAGE_COUNT);
@@ -318,8 +248,7 @@ export function MessageDetailPage(): JSX.Element {
     try {
       await service!.sendTextMessage({ recipientPublicKeyHex: normalizedPeerPublicKeyHex, body });
       setSendBody("");
-      const items = await service!.listMessages({ limit: MESSAGE_READ_WINDOW });
-      setMessages(items);
+      // 消息发送后，service.subscribeMessages 会触发 resource 失效，自动刷新列表
     } catch (err) {
       setSendError(formatMessageDetailError(i18n, err));
     }
@@ -354,8 +283,7 @@ export function MessageDetailPage(): JSX.Element {
       } else {
         await webrtc.sendFile({ targetPublicKeyHex: normalizedPeerPublicKeyHex, file });
       }
-      const items = await webrtc.listHistoryForPeer(normalizedPeerPublicKeyHex);
-      setHistory(items);
+      host.resourceStore.invalidate("webrtc.peer-history", [normalizedPeerPublicKeyHex]);
     } catch (err) {
       setSendError(formatMessageDetailError(i18n, err));
     }

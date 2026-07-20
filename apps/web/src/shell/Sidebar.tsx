@@ -80,8 +80,6 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
   const host = usePluginHost();
   const { vault } = useRuntimeStatus();
   const i18n = useI18n();
-  // 触发 languageChanged 重渲染；这样切语言后菜单 label 立即重解析。
-  i18n.language();
   const isNarrow = useIsNarrowViewport();
   // 响应式 pathname：路由一变（router.push / 浏览器前进后退）就重渲染，
   // 菜单 is-active 才会跟着切到新条目。

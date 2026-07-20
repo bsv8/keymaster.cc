@@ -11,7 +11,6 @@ export function VaultUnlockPage() {
   const vault = useCapability<VaultService>("vault.service");
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

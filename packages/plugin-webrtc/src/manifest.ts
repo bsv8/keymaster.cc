@@ -25,8 +25,9 @@ import type {
   PluginManifest,
   NoticeRegistry,
   SettingsRegistry
+  ,ResourceRegistry
 } from "@keymaster/contracts";
-import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import {
   KEYMASTER_WEBRTC_APP_ID,
   WEBRTC_ENDPOINT_ID,
@@ -35,6 +36,8 @@ import {
   WEBRTC_SETTINGS_PATH
 } from "./constants.js";
 import { WebrtcSettingsPage } from "./WebrtcSettingsPage.js";
+import type { WebrtcService, WebrtcSessionSnapshot } from "./webrtcService.js";
+import type { WebrtcHistoryItem } from "./webrtcHistoryService.js";
 import {
   createLocalStorageWebrtcConfigStore,
   getDefaultWebrtcLocalStorage
@@ -265,6 +268,28 @@ export const webrtcPlugin: PluginManifest = {
       }
     });
     ctx.provide(WEBRTC_SERVICE_CAPABILITY, service);
+    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    resources.register<WebrtcSessionSnapshot, readonly string[]>({
+      id: "webrtc.session",
+      scope: "global",
+      key: () => ["webrtc.session"],
+      load: async (_args, context) => context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)!.snapshot(),
+      subscribe: (_args, context, invalidate) => context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
+      equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      invalidation: "immediate"
+    });
+    resources.register<WebrtcHistoryItem[], readonly string[]>({
+      id: "webrtc.peer-history",
+      scope: "global",
+      key: (args) => ["webrtc.peer-history", args[0] ?? ""],
+      load: async (args, context) => {
+        const peer = args[0] ?? "";
+        if (!peer) return [];
+        return context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)?.listHistoryForPeer(peer) ?? [];
+      },
+      subscribe: (_args, context, invalidate) => context.getCapability<WebrtcService>(WEBRTC_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
+      invalidation: "immediate"
+    });
 
     const breadcrumbs = ctx.get<{
       register(input: {

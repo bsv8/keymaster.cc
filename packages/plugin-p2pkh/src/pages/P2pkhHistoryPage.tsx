@@ -3,10 +3,10 @@
 // pending/unconfirmed/confirmed；testnet 切换按钮受 `includeTestnet` 控制。
 // 直链 URL 上的 `assetId=bsvtest` 在 includeTestnet=false 时被夹回 undefined。
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
-import type { P2pkhAssetId, P2pkhBackfillState, P2pkhHistoryItem, P2pkhService } from "../p2pkhContracts.js";
+import { useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import type { P2pkhAssetId, P2pkhBackfillState, P2pkhHistoryItem, P2pkhGlobalSettings } from "../p2pkhContracts.js";
 
 function readAssetIdFromLocation(): P2pkhAssetId | undefined {
   const search = window.location.search;
@@ -26,45 +26,17 @@ function clampAssetIdBySettings(
 }
 
 export function P2pkhHistoryPage() {
-  const service = useCapability<P2pkhService>("p2pkh.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
   const locale = useLocale();
   const dateFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
     [locale]
   );
-  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
-  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(
-    () => clampAssetIdBySettings(readAssetIdFromLocation(), service.getGlobalSettings().includeTestnet)
-  );
-  const [rows, setRows] = useState<P2pkhHistoryItem[]>([]);
-  const [backfills, setBackfills] = useState<P2pkhBackfillState[]>([]);
-  const [version, setVersion] = useState(0);
-
-  useEffect(() => {
-    service.listHistory(assetId ? { assetId } : undefined).then(setRows);
-    service.listBackfillStates().then(setBackfills);
-  }, [service, assetId, version]);
-
-  // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
-  // 同 tab 与跨 tab 通知。
-  useEffect(() => {
-    const off = service.onGlobalSettingsChange((s) => {
-      setIncludeTestnet(s.includeTestnet);
-      setAssetId((prev) => clampAssetIdBySettings(prev, s.includeTestnet));
-      setVersion((v) => v + 1);
-    });
-    return off;
-  }, [service]);
-
-  // 订阅 data-changed：后台任务原子提交 DB 后重读。
-  useEffect(() => {
-    const off = service.onDataChanged(() => {
-      setVersion((v) => v + 1);
-    });
-    return off;
-  }, [service]);
+  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(() => readAssetIdFromLocation());
+  const includeTestnet = useResourceSelector<P2pkhGlobalSettings, boolean>(host.resourceStore, "p2pkh.settings", [], (s) => s.data?.includeTestnet ?? false);
+  const bundle = useResourceSelector<{ rows: P2pkhHistoryItem[]; backfills: P2pkhBackfillState[] }, { rows: P2pkhHistoryItem[]; backfills: P2pkhBackfillState[] }>(host.resourceStore, "p2pkh.history", [assetId ?? "all"], (s) => s.data ?? { rows: [], backfills: [] }, (a, b) => a === b);
+  const { rows, backfills } = bundle;
 
   const columns: DataTableColumn<P2pkhHistoryItem>[] = [
     { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (r) => <code>{r.txid}</code> },

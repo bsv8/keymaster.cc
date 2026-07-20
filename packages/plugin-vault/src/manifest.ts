@@ -28,6 +28,9 @@ import type {
   RouteRegistry,
   SettingsRegistry,
   TopbarRegistry
+  ,ResourceRegistry
+  ,ActiveKeyState
+  ,KeyIdentity
   , VaultService
   , CoordinatorValueResult
   , CoordinatorCommandResult
@@ -43,6 +46,13 @@ import { createKeyspaceService, type KeyspaceHandle } from "./keyspaceService.js
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { KeySwitchWidget } from "./KeySwitchWidget.js";
+
+export interface VaultKeyResourceState {
+  keys: KeyIdentity[];
+  active: ActiveKeyState;
+  initializing: boolean;
+  notice: { label: string } | null;
+}
 
 /** Coordinator client 接口（通过 capability 获取） */
 interface CoordinatorClientLike {
@@ -373,6 +383,40 @@ export const vaultPlugin: PluginManifest = {
     // 创建 keyspace：依赖 vault.service。
     if (!keyspaceHandle) throw new Error("Session Coordinator is unavailable");
     ctx.provide(KEYSPACE_SERVICE_CAPABILITY, keyspaceHandle);
+    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    resources.register<VaultKeyResourceState, readonly string[]>({
+      id: "vault.key-state",
+      scope: "global",
+      key: () => ["vault.key-state"],
+      load: async (_args, context) => {
+        const keyspace = context.getCapability<KeyspaceHandle>(KEYSPACE_SERVICE_CAPABILITY);
+        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
+        const keys = keyspace ? await keyspace.listKeys() : [];
+        return {
+          keys,
+          active: keyspace?.active() ?? { activePublicKeyHex: undefined },
+          initializing: keyspace?.isInitializing() ?? false,
+          notice: vault?.getInitialActivationNotice?.() ?? null
+        };
+      },
+      subscribe: (_args, context, invalidate) => {
+        const keyspace = context.getCapability<KeyspaceHandle>(KEYSPACE_SERVICE_CAPABILITY);
+        const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
+        const bus = context.getCapability<MessageBus>("runtime.messageBus");
+        const offs = [
+          keyspace?.onActiveChange(invalidate),
+          keyspace?.onInitializationChange(invalidate),
+          vault?.onInitialActivationNoticeChange?.(invalidate),
+          bus?.subscribe("key.created", invalidate),
+          bus?.subscribe("key.deleted", invalidate),
+          bus?.subscribe("key.identity.ready", invalidate),
+          bus?.subscribe("key.identity.failed", invalidate)
+        ].filter((off): off is () => void => typeof off === "function");
+        return () => { for (const off of offs) off(); };
+      },
+      equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      invalidation: "immediate"
+    });
 
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({

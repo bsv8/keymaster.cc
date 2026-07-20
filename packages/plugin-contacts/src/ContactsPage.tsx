@@ -6,52 +6,25 @@
 //   - 表单实现收口到 ContactsEditor，避免消息页再复制一套联系人 modal；
 //   - 联系人身份只显示 publicKeyHex，不再展示 address。
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
-import { formatShortPublicKey, type ActiveKeyState, type Contact, type ContactsService, type KeyspaceService } from "@keymaster/contracts";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { formatShortPublicKey, type Contact, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 
 export function ContactsPage() {
   const service = useCapability<ContactsService>("contacts.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [active, setActive] = useState<ActiveKeyState>(keyspace.active());
-  const [rows, setRows] = useState<Contact[]>([]);
+  const listState = useResourceSelector<Contact[], { rows: Contact[]; active: boolean; error?: string }>(
+    host.resourceStore, "contacts.list", [],
+    (snapshot) => ({ rows: snapshot.data ?? [], active: snapshot.key[2] !== "none", error: snapshot.error?.message }),
+    (a, b) => a.active === b.active && a.error === b.error && a.rows === b.rows
+  );
+  const { rows, active } = listState;
   const [editing, setEditing] = useState<Contact | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
-
-  const refresh = useCallback(async () => {
-    if (!active.activePublicKeyHex) {
-      setRows([]);
-      setError(null);
-      return;
-    }
-    try {
-      setRows(await service.listContacts());
-      setError(null);
-    } catch (err) {
-      setRows([]);
-      setError(err instanceof Error ? err.message : t("contacts.page.err.load", { defaultValue: "Failed to load contacts" }));
-    }
-  }, [active.activePublicKeyHex, service, t]);
-
-  useEffect(() => {
-    void refresh();
-    return service.onChange(refresh);
-  }, [refresh, service]);
-
-  useEffect(() => {
-    return keyspace.onActiveChange((s) => {
-      setActive(s);
-      setEditing(null);
-      setError(null);
-      setOpen(false);
-      void refresh();
-    });
-  }, [keyspace, refresh]);
 
   function startNew() {
     setEditing(null);
@@ -98,7 +71,7 @@ export function ContactsPage() {
     }
   ];
 
-  if (!active.activePublicKeyHex) {
+  if (!active) {
     return (
       <div className="contacts-page">
         <PageHeader
@@ -138,7 +111,7 @@ export function ContactsPage() {
         onSaved={async () => {
           setOpen(false);
           setEditing(null);
-          await refresh();
+          // The resource subscription observes the service change event.
         }}
       />
     </div>

@@ -16,9 +16,8 @@
 //     不直接写裸 <input>/<select>/<button>。
 
 import React, { useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
   POKER_SERVICE_CAPABILITY,
@@ -50,14 +49,18 @@ function describeSession(state: PokerSessionKeyState): {
 }
 
 export function PokerSettingsPage(): React.ReactElement {
-  const { t } = useTranslation("poker");
+  const { t } = useI18n();
   const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
+  const host = usePluginHost();
+  const settings = useResourceSelector<ReturnType<PokerService["getSettings"]>, ReturnType<PokerService["getSettings"]>>(host.resourceStore, "poker.settings", [], (s) => s.data ?? { proxyEndpoint: "", allowFallbackBroadcast: true });
+  const statusResource = useResourceSelector<PokerConnectionStatus, PokerConnectionStatus>(host.resourceStore, "poker.connection", [], (s) => s.data ?? "idle");
+  const sessionResource = useResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState));
   const [endpoint, setEndpoint] = useState("");
   const [p2pNodeAnnounce, setP2pNodeAnnounce] = useState("");
   const [txLinkAnnounce, setTxLinkAnnounce] = useState("");
   const [allowFallback, setAllowFallback] = useState(true);
-  const [status, setStatus] = useState<StatusKind>("idle");
-  const [session, setSession] = useState<PokerSessionKeyState>({ kind: "vaultLocked" });
+  const status = statusResource;
+  const session = sessionResource;
   const [saved, setSaved] = useState(false);
 
   // 加载 settings + 订阅 status / session / settings 变化。
@@ -68,24 +71,11 @@ export function PokerSettingsPage(): React.ReactElement {
   //   - 订阅 onActivePokerKeyChange，让 active key 切换时表单立即反映
   //     "Connect 是否禁用 / 当前身份"。
   useEffect(() => {
-    if (!service) return;
-    const apply = (s: ReturnType<PokerService["getSettings"]>) => {
-      setEndpoint(s.proxyEndpoint);
-      setP2pNodeAnnounce(s.announceP2PNodeEndpoint ?? "");
-      setTxLinkAnnounce(s.announceTxLinkEndpoint ?? "");
-      setAllowFallback(s.allowFallbackBroadcast);
-    };
-    apply(service.getSettings());
-    setSession(service.getActivePokerKey());
-    const offStatus = service.onStatusChange((next) => setStatus(next));
-    const offSession = service.onActivePokerKeyChange((next) => setSession(next));
-    const offSettings = service.onSettingsChange(apply);
-    return () => {
-      offStatus();
-      offSession();
-      offSettings();
-    };
-  }, [service]);
+    setEndpoint(settings.proxyEndpoint);
+    setP2pNodeAnnounce(settings.announceP2PNodeEndpoint ?? "");
+    setTxLinkAnnounce(settings.announceTxLinkEndpoint ?? "");
+    setAllowFallback(settings.allowFallbackBroadcast);
+  }, [settings]);
 
   if (!service) {
     return (

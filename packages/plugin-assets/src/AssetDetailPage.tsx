@@ -9,9 +9,9 @@
 //   - collectible 不进入这里：详情页结构（preview / attributes / media）
 //     与 coin / token 完全不同，硬塞会污染通用页面。
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { router, useCapability, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
+import { router, useCapability, useI18n, useLocale, usePluginHost, useResource } from "@keymaster/runtime";
 import type {
   AssetRegistry,
   I18nText,
@@ -23,7 +23,7 @@ export interface AssetDetailPageProps {
   assetId: string;
 }
 
-interface HoldingResolution {
+export interface HoldingResolution {
   kind: "asset" | "token";
   provider: { id: string; name: I18nText };
   detail: { summary: unknown; activities?: unknown[] };
@@ -36,111 +36,14 @@ export function AssetDetailPage({ providerId, assetId }: AssetDetailPageProps) {
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const locale = useLocale();
   const dateFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
     [locale]
   );
-  const [resolved, setResolved] = useState<HoldingResolution | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  // 竞态版本号：防止旧请求覆盖新请求的结果。
-  const versionRef = useRef(0);
-
-  // 重读详情数据的函数。
-  // 设计缘由：初次加载和 onChange 回调共用同一逻辑，避免重复代码。
-  const refetchDetail = useMemo(() => {
-    let cancelled = false;
-    return {
-      run: async () => {
-        const myVersion = ++versionRef.current;
-        // 开始新读取时清除旧错误，避免"数据已恢复但页面仍显示错误"
-        if (!cancelled) setError(null);
-
-        // asset 先查：保持 asset 组在前的语义与详情页 lookup 顺序一致。
-        const assetProvider = assetsRegistry.get(providerId);
-        if (assetProvider) {
-          try {
-            const detail = await assetProvider.getAsset(assetId);
-            if (cancelled || versionRef.current !== myVersion) return;
-            if (!detail) {
-              setError(`Asset "${assetId}" not found in provider "${providerId}"`);
-              return;
-            }
-            setResolved({
-              kind: "asset",
-              provider: { id: assetProvider.id, name: assetProvider.name },
-              detail: detail as unknown as HoldingResolution["detail"],
-              detailRoute: detail.summary.detailRoute
-            });
-            return;
-          } catch (err) {
-            if (!cancelled && versionRef.current === myVersion) {
-              setError(err instanceof Error ? err.message : String(err));
-            }
-            return;
-          }
-        }
-        const tokenProvider = tokensRegistry.get(providerId);
-        if (tokenProvider) {
-          try {
-            const detail = await tokenProvider.getToken(assetId);
-            if (cancelled || versionRef.current !== myVersion) return;
-            if (!detail) {
-              setError(`Token "${assetId}" not found in provider "${providerId}"`);
-              return;
-            }
-            setResolved({
-              kind: "token",
-              provider: { id: tokenProvider.id, name: tokenProvider.name },
-              detail: detail as unknown as HoldingResolution["detail"],
-              detailRoute: detail.summary.detailRoute
-            });
-          } catch (err) {
-            if (!cancelled && versionRef.current === myVersion) {
-              setError(err instanceof Error ? err.message : String(err));
-            }
-          }
-          return;
-        }
-        if (!cancelled && versionRef.current === myVersion) {
-          setError(`Unknown holding provider "${providerId}"`);
-        }
-      },
-      cancel: () => {
-        cancelled = true;
-      },
-      reset: () => {
-        cancelled = false;
-      }
-    };
-  }, [assetsRegistry, tokensRegistry, providerId, assetId]);
-
-  useEffect(() => {
-    refetchDetail.reset();
-    void refetchDetail.run();
-    return () => {
-      refetchDetail.cancel();
-    };
-  }, [refetchDetail]);
-
-  // 订阅 provider 的 onChange：后台更新 DB 后详情页自动刷新。
-  // 设计缘由：仅在初次进入时读取一次会导致后台同步后余额陈旧；
-  // 订阅 onChange 后，assetDataNotifier 通知会触发重读。
-  useEffect(() => {
-    const assetProvider = assetsRegistry.get(providerId);
-    if (assetProvider) {
-      return assetProvider.onChange(() => {
-        void refetchDetail.run();
-      });
-    }
-    const tokenProvider = tokensRegistry.get(providerId);
-    if (tokenProvider) {
-      return tokenProvider.onChange(() => {
-        void refetchDetail.run();
-      });
-    }
-  }, [assetsRegistry, tokensRegistry, providerId, refetchDetail]);
+  const detailSnapshot = useResource<HoldingResolution>(host.resourceStore, "assets.detail", [providerId, assetId]);
+  const resolved = detailSnapshot.data;
+  const error = detailSnapshot.error?.message ?? null;
 
   if (error) {
     return (

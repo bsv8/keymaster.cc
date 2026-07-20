@@ -13,7 +13,6 @@ import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } fro
 export function WocSettingsPage() {
   const service = useCapability<WocService>("woc.service");
   const { t } = useI18n();
-  useI18n().language();
   const locale = useLocale();
   const timeFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { timeStyle: "medium" }),

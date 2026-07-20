@@ -18,10 +18,12 @@ import type {
   HomeRegistry,
   I18nPluginResources,
   KeyspaceService,
+  KeyIdentity,
   MenuItem,
   MenuRegistry,
   MessageBus,
   PluginManifest,
+  ResourceRegistry,
   RouteRegistry,
   SettingsRegistry,
   VaultService,
@@ -32,8 +34,12 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
   WOC_CAPABILITY
 } from "@keymaster/contracts";
+import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhBackfillState, P2pkhRecentSyncState, P2pkhHistoryItem, P2pkhUtxo, P2pkhLocalInputClaim, P2pkhAssetId } from "./p2pkhContracts.js";
+
+type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
@@ -400,6 +406,146 @@ export const p2pkhPlugin: PluginManifest = {
       logger: ctx.logger
     });
     ctx.provide(P2PKH_CAPABILITY, service);
+
+    // 注册资源定义（硬切换 003）
+    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+
+    // p2pkh.balance：P2PKH 余额数据（bsv + bsvtest）
+    resources.register<{ bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null }, readonly string[]>({
+      id: "p2pkh.balance",
+      scope: "active-key",
+      key: (_args, context) => ["p2pkh.balance", context.activePublicKeyHex ?? "none"],
+      load: async (_args, context, _signal) => {
+        if (!context.activePublicKeyHex) {
+          return { bsv: null, bsvtest: null };
+        }
+        const include = service.getGlobalSettings().includeTestnet;
+        const calls: Promise<P2pkhBalance>[] = [service.getAssetBalance("bsv")];
+        if (include) calls.push(service.getAssetBalance("bsvtest"));
+        const results = await Promise.all(calls);
+        const bsv = results[0] ?? null;
+        const bsvtest = include ? (results[1] ?? null) : null;
+        return { bsv, bsvtest };
+      },
+      subscribe: (_args, _ctx, invalidate) => {
+        const offData = service.onDataChanged(invalidate);
+        const offSettings = service.onGlobalSettingsChange(invalidate);
+        return () => { offData(); offSettings(); };
+      },
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        return prev.bsv?.total === next.bsv?.total && prev.bsvtest?.total === next.bsvtest?.total;
+      },
+      invalidation: "microtask"
+    });
+
+    // p2pkh.settings：P2PKH 全局设置
+    resources.register<P2pkhGlobalSettings, readonly string[]>({
+      id: "p2pkh.settings",
+      scope: "global",
+      key: () => ["p2pkh.settings"],
+      load: async () => service.getGlobalSettings(),
+      subscribe: (_args, _ctx, invalidate) => service.onGlobalSettingsChange(invalidate),
+      equals: (prev, next) => {
+        if (!prev || !next) return prev === next;
+        return prev.includeTestnet === next.includeTestnet;
+      },
+      invalidation: "immediate"
+    });
+
+    resources.register<ReadinessState, readonly string[]>({
+      id: "p2pkh.readiness",
+      scope: "active-key",
+      key: (_args, context) => ["p2pkh.readiness", context.activePublicKeyHex ?? "none"],
+      load: async () => keyspace.isInitializing()
+        ? "initializing"
+        : (keyspace.active().activePublicKeyHex ? "ready" : "no-active-key"),
+      subscribe: (_args, _ctx, invalidate) => {
+        const offActive = keyspace.onActiveChange(invalidate);
+        const offInit = keyspace.onInitializationChange(invalidate);
+        return () => { offActive(); offInit(); };
+      },
+      invalidation: "immediate"
+    });
+
+    resources.register<P2pkhSyncStatus, readonly string[]>({
+      id: "p2pkh.sync-status",
+      scope: "global",
+      key: () => ["p2pkh.sync-status"],
+      load: async () => service.syncStatus(),
+      subscribe: (_args, _ctx, invalidate) => service.onSyncStatusChange(invalidate),
+      invalidation: "immediate"
+    });
+
+    resources.register<{ rows: P2pkhKeyResource[]; backfills: P2pkhBackfillState[]; recent: P2pkhRecentSyncState[]; balance: P2pkhBalance | null }, readonly string[]>({
+      id: "p2pkh.overview",
+      scope: "active-key",
+      key: (args, context) => ["p2pkh.overview", context.activePublicKeyHex ?? "none", args[0] ?? "all"],
+      load: async (args, context) => {
+        if (!context.activePublicKeyHex) {
+          return { rows: [], backfills: [], recent: [], balance: null };
+        }
+        const asset = args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined;
+        const [rows, backfills, recent, balance] = await Promise.all([
+          service.listResources(asset), service.listBackfillStates(), service.listRecentSyncStates(),
+          asset ? service.getAssetBalance(asset) : Promise.resolve(null)
+        ]);
+        return { rows, backfills, recent, balance };
+      },
+      subscribe: (_args, _ctx, invalidate) => {
+        const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), service.onRecentSyncStatusChange(invalidate), service.onBackfillStatusChange(invalidate), keyspace.onActiveChange(invalidate)];
+        return () => offs.forEach((off) => off());
+      },
+      invalidation: "microtask"
+    });
+    resources.register<{ rows: P2pkhHistoryItem[]; backfills: P2pkhBackfillState[] }, readonly string[]>({
+      id: "p2pkh.history",
+      scope: "active-key",
+      key: (args, context) => ["p2pkh.history", context.activePublicKeyHex ?? "none", args[0] ?? "all"],
+      load: async (args, context) => {
+        if (!context.activePublicKeyHex) {
+          return { rows: [], backfills: [] };
+        }
+        const asset = args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined;
+        return { rows: await service.listHistory(asset ? { assetId: asset } : undefined), backfills: await service.listBackfillStates() };
+      },
+      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveChange(invalidate)]; return () => offs.forEach((off) => off()); },
+      invalidation: "microtask"
+    });
+    resources.register<{ utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[] }, readonly string[]>({
+      id: "p2pkh.utxos",
+      scope: "active-key",
+      key: (args, context) => ["p2pkh.utxos", context.activePublicKeyHex ?? "none", args[0] ?? "all"],
+      load: async (args, context) => {
+        if (!context.activePublicKeyHex) {
+          return { utxos: [], claims: [] };
+        }
+        const asset = args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined;
+        return { utxos: await service.listUtxos(asset ? { assetId: asset } : undefined), claims: await service.listLocalInputClaims() };
+      },
+      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveChange(invalidate)]; return () => offs.forEach((off) => off()); },
+      invalidation: "microtask"
+    });
+    resources.register<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, readonly string[]>({
+      id: "p2pkh.transfer-context",
+      scope: "active-key",
+      key: (args, context) => ["p2pkh.transfer-context", context.activePublicKeyHex ?? "none", args[0] ?? ""],
+      load: async (args, context) => {
+        const publicKeyHex = context.activePublicKeyHex;
+        if (!publicKeyHex) return {};
+        const [identity, resourcesForKey] = await Promise.all([
+          keyspace.getKey(publicKeyHex),
+          service.listResources(args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined)
+        ]);
+        return { activePublicKeyHex: publicKeyHex, identity, resource: resourcesForKey[0] };
+      },
+      subscribe: (_args, _ctx, invalidate) => {
+        const off = keyspace.onActiveChange(invalidate);
+        const offData = service.onDataChanged(invalidate);
+        return () => { off(); offData(); };
+      },
+      invalidation: "immediate"
+    });
 
     void service.rehydrate();
 

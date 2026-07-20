@@ -16,7 +16,6 @@ export interface TransferOfferPickerProps {
 
 export function TransferOfferPicker({ offers, value, onChange }: TransferOfferPickerProps) {
   const { t } = useI18n();
-  useI18n().language();
   const host = usePluginHost();
   if (offers.length === 0) {
     return <p className="transfer-picker__empty">{t("transfer.page.empty.picker", { defaultValue: "当前没有可用的转账资产。" })}</p>;

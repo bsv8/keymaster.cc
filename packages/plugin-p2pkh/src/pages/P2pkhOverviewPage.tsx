@@ -17,17 +17,16 @@
 //
 // 页面只被动订阅 data-changed / settings 变化，不暴露手动同步入口。
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
-import { formatShortPublicKey, type ActiveKeyState, type KeyspaceService } from "@keymaster/contracts";
+import { useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
   P2pkhBackfillState,
   P2pkhGlobalSettings,
   P2pkhKeyResource,
   P2pkhRecentSyncState,
-  P2pkhService
 } from "../p2pkhContracts.js";
 import { P2PKH_ASSETS } from "../p2pkhContracts.js";
 
@@ -50,23 +49,10 @@ function clampAssetIdBySettings(
 
 type PageReadiness = "initializing" | "no-active-key" | "ready" | "failed";
 
-/**
- * 拉取 token：记录 activeAtRequest + cancelled 标记。
- * 关键不变量：active 在请求期间被切换或组件卸载时，旧 token 标记为
- * cancelled；请求完成时若 cancelled === true 则不写回 state，避免
- * 旧 key 的结果写到新 key 的 UI 上。
- */
-interface RequestToken {
-  active: ActiveKeyState;
-  cancelled: boolean;
-}
-
 export function P2pkhOverviewPage() {
-  const service = useCapability<P2pkhService>("p2pkh.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const locale = useLocale();
   const dateFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
@@ -74,95 +60,11 @@ export function P2pkhOverviewPage() {
   );
   // 硬切换 001：URL 上的 bsvtest 在 includeTestnet=false 时被夹回 undefined。
   // 设置的真值通过 service 提供——service 会跨 tab 同步并向本页面发出变更。
-  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
-  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(
-    () => clampAssetIdBySettings(readAssetIdFromLocation(), service.getGlobalSettings().includeTestnet)
-  );
-  const [rows, setRows] = useState<P2pkhKeyResource[]>([]);
-  const [backfills, setBackfills] = useState<P2pkhBackfillState[]>([]);
-  const [recentStates, setRecentStates] = useState<P2pkhRecentSyncState[]>([]);
-  const [version, setVersion] = useState(0);
-  const [readiness, setReadiness] = useState<PageReadiness>(() => computeReadiness(keyspace));
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [balanceDisplay, setBalanceDisplay] = useState<{ total: number } | null>(null);
-  // 余额加载 token 引用：cancel-and-replace 模式，新请求自动取消旧请求。
-  const balanceTokenRef = useRef<RequestToken | null>(null);
-  // 资源列表加载 token 引用。
-  const listTokenRef = useRef<RequestToken | null>(null);
-
-  // 订阅 keyspace 状态。
-  useEffect(() => {
-    const offInit = keyspace.onInitializationChange(() => {
-      setReadiness(computeReadiness(keyspace));
-    });
-    const offActive = keyspace.onActiveChange(() => {
-      setReadiness(computeReadiness(keyspace));
-      // 切 key 时清空数据并重拉 + 取消任何进行中的旧 token。
-      setRows([]);
-      setBackfills([]);
-      setRecentStates([]);
-      setBalanceDisplay(null);
-      if (listTokenRef.current) listTokenRef.current.cancelled = true;
-      listTokenRef.current = null;
-      if (balanceTokenRef.current) balanceTokenRef.current.cancelled = true;
-      balanceTokenRef.current = null;
-      setVersion((v) => v + 1);
-    });
-    return () => {
-      offInit();
-      offActive();
-    };
-  }, [keyspace]);
-
-  // 组件卸载时取消所有进行中的 token。
-  useEffect(() => {
-    return () => {
-      if (listTokenRef.current) listTokenRef.current.cancelled = true;
-      listTokenRef.current = null;
-      if (balanceTokenRef.current) balanceTokenRef.current.cancelled = true;
-      balanceTokenRef.current = null;
-    };
-  }, []);
-
-  useEffect(() => {
-    // 未就绪：不调用 service，直接清空展示。
-    if (readiness !== "ready") {
-      setRows([]);
-      setBackfills([]);
-      setRecentStates([]);
-      return;
-    }
-    const token: RequestToken = { active: keyspace.active(), cancelled: false };
-    if (listTokenRef.current) listTokenRef.current.cancelled = true;
-    listTokenRef.current = token;
-    let cancelled = false;
-    async function load() {
-      try {
-        const [r, b, s] = await Promise.all([
-          service.listResources(assetId),
-          service.listBackfillStates(),
-          service.listRecentSyncStates()
-        ]);
-        if (cancelled || token.cancelled) return;
-        if (!isSameActive(keyspace.active(), token.active)) return;
-        setRows(r);
-        setBackfills(b);
-        setRecentStates(s);
-        setLoadError(null);
-      } catch (err) {
-        if (cancelled || token.cancelled) return;
-        if (!isSameActive(keyspace.active(), token.active)) return;
-        setLoadError(err instanceof Error ? err.message : String(err));
-        setRows([]);
-        setBackfills([]);
-        setRecentStates([]);
-      }
-    }
-    void load();
-    return () => {
-      cancelled = true;
-    };
-  }, [service, keyspace, readiness, assetId, version]);
+  const includeTestnet = useResourceSelector<P2pkhGlobalSettings, boolean>(host.resourceStore, "p2pkh.settings", [], (s) => s.data?.includeTestnet ?? false);
+  const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(() => readAssetIdFromLocation());
+  const readiness = useResourceSelector<PageReadiness, PageReadiness>(host.resourceStore, "p2pkh.readiness", [], (s) => s.data ?? "initializing");
+  const overview = useResourceSelector<{ rows: P2pkhKeyResource[]; backfills: P2pkhBackfillState[]; recent: P2pkhRecentSyncState[]; balance: { total: number } | null }, { rows: P2pkhKeyResource[]; backfills: P2pkhBackfillState[]; recent: P2pkhRecentSyncState[]; balance: { total: number } | null; error?: string }>(host.resourceStore, "p2pkh.overview", [assetId ?? "all"], (s) => s.data ? { ...s.data, error: s.error?.message } : { rows: [], backfills: [], recent: [], balance: null, error: s.error?.message }, (a, b) => JSON.stringify(a) === JSON.stringify(b));
+  const { rows, backfills, recent: recentStates, balance: balanceDisplay, error: loadError } = overview;
 
   const recentByResource = useMemo(() => {
     const m = new Map<string, P2pkhRecentSyncState>();
@@ -181,61 +83,6 @@ export function P2pkhOverviewPage() {
         assetId: def.assetId
       })
     : t("p2pkh.overview.descDefault", { defaultValue: "BSV P2PKH 资源总览。" });
-
-  useEffect(() => {
-    if (readiness !== "ready" || !assetId) {
-      setBalanceDisplay(null);
-      return;
-    }
-    // 硬切换 001：includeTestnet=false 时不展示 testnet 余额。
-    if (!includeTestnet && assetId === "bsvtest") {
-      setBalanceDisplay(null);
-      return;
-    }
-    const token: RequestToken = { active: keyspace.active(), cancelled: false };
-    if (balanceTokenRef.current) balanceTokenRef.current.cancelled = true;
-    balanceTokenRef.current = token;
-    let cancelled = false;
-    service
-      .getAssetBalance(assetId)
-      .then((b) => {
-        if (cancelled || token.cancelled) return;
-        if (!isSameActive(keyspace.active(), token.active)) return;
-        setBalanceDisplay({ total: b.total });
-      })
-      .catch((err) => {
-        if (cancelled || token.cancelled) return;
-        if (!isSameActive(keyspace.active(), token.active)) return;
-        setBalanceDisplay(null);
-        setLoadError(err instanceof Error ? err.message : String(err));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [service, keyspace, readiness, assetId, version, includeTestnet]);
-
-  // 硬切换 001：订阅 service 的 settings 变化。同 tab 由 applyGlobalSettings
-  // 主动通知，跨 tab 由 service 内部的 storage 监听回灌——本页面只通过
-  // service.onGlobalSettingsChange 一条链路统一处理。
-  useEffect(() => {
-    const off = service.onGlobalSettingsChange((s) => {
-      setIncludeTestnet(s.includeTestnet);
-      // includeTestnet 由 true → false 时，把当前 bsvtest 视图夹回 undefined
-      // 避免显示空白 / 资源空态混乱。
-      setAssetId((prev) => clampAssetIdBySettings(prev, s.includeTestnet));
-      setVersion((v) => v + 1);
-    });
-    return off;
-  }, [service]);
-
-  // 订阅 P2PKH data-changed：后台任务原子提交 DB 后通知页面重读。
-  // 设计缘由：不再依赖 sync status 变化猜测数据是否已提交。
-  useEffect(() => {
-    const off = service.onDataChanged(() => {
-      setVersion((v) => v + 1);
-    });
-    return off;
-  }, [service]);
 
   const columns: DataTableColumn<P2pkhKeyResource>[] = useMemo(
     () => [
@@ -334,16 +181,4 @@ export function P2pkhOverviewPage() {
       {body}
     </div>
   );
-}
-
-function computeReadiness(keyspace: KeyspaceService): PageReadiness {
-  if (keyspace.isInitializing()) return "initializing";
-  // 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"；
-  // `mode` 字段已删除，readiness 仅以 activePublicKeyHex 是否存在判断。
-  if (!keyspace.active().activePublicKeyHex) return "no-active-key";
-  return "ready";
-}
-
-function isSameActive(a: ActiveKeyState, b: ActiveKeyState): boolean {
-  return a.activePublicKeyHex === b.activePublicKeyHex;
 }

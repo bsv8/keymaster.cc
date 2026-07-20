@@ -135,6 +135,11 @@ export interface AssetDataChangedEvent {
  * 资产数据变更通知器。
  * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
  * 页面收到通知后只重读本地 DB，不发起网络请求。
+ *
+ * 合并语义（由 runtime 实现）：
+ * - 同一 `providerId + publicKeyHex` 的同一 microtask 内事件合并
+ * - `kinds` 求并集
+ * - `revision` 取最新事件
  */
 export interface AssetDataNotifier {
   /** 发布数据变更事件。只能在 provider DB write transaction 成功 resolve 后调用。 */

@@ -1,121 +1,71 @@
 // packages/plugin-assets/src/AssetsHomeWidget.tsx
 // 首页统一持仓 widget：跨 asset + token provider 聚合概览。
 // 设计缘由：只使用 HoldingRow 视图模型，不展示 P2PKH UTXO 等具体字段。
-// 增量刷新：只重读发生变化的 provider，避免全量聚合。
+//
+// 硬切换 003：使用 Resource Store 替代手动 useEffect/ref/数据 state。
+// - holdings 资源由 manifest.ts 注册，包含 provider 级订阅和 microtask 合并
+// - 本组件只读取资源快照，不自行协调请求或订阅 provider
+// - 本地交互 state 仅保留 stale 标记（从资源错误状态派生）
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
-import type { AssetProvider, AssetRegistry, TokenProvider, TokenRegistry } from "@keymaster/contracts";
-import {
-  loadSingleAssetProvider,
-  loadSingleTokenProvider,
-  toHoldingRows,
-  type AssetProviderLoadResult,
-  type HoldingRow,
-  type HoldingsLoadResult,
-  type TokenProviderLoadResult
-} from "./holdingsFlow.js";
+import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import type { HoldingsLoadResult } from "./holdingsFlow.js";
+import { toHoldingRows, type HoldingRow } from "./holdingsFlow.js";
+
+/** 空数组引用：避免每次 render 创建新数组 */
+const EMPTY_ROWS: HoldingRow[] = [];
 
 export function AssetsHomeWidget() {
-  const assetsRegistry = useCapability<AssetRegistry>("asset.registry");
-  const tokensRegistry = useCapability<TokenRegistry>("token.registry");
+  countRender("plugin-assets/AssetsHomeWidget");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [rows, setRows] = useState<HoldingRow[] | null>(null);
-  const [stale, setStale] = useState(false);
+  const store = host.resourceStore;
 
-  // provider 级状态缓存
-  const assetResultsRef = useRef<Map<string, AssetProviderLoadResult>>(new Map());
-  const tokenResultsRef = useRef<Map<string, TokenProviderLoadResult>>(new Map());
-  // provider 级 revision：防止旧请求晚到覆盖新数据。
-  const assetRevisionRef = useRef<Map<string, number>>(new Map());
-  const tokenRevisionRef = useRef<Map<string, number>>(new Map());
-  const aliveRef = useRef(true);
+  // 使用 Resource Store 读取 holdings 数据
+  // selector 只在 rows 语义变化时重渲染
+  const rows = useResourceSelector<HoldingsLoadResult, HoldingRow[]>(
+    store,
+    "assets.holdings",
+    [],
+    (snapshot) => {
+      if (snapshot.data) {
+        return toHoldingRows(host, snapshot.data);
+      }
+      return EMPTY_ROWS;
+    },
+    (a, b) => {
+      // 语义相等：比较数组长度和每个元素的关键字段
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        const rowA = a[i];
+        const rowB = b[i];
+        if (!rowA || !rowB) return rowA === rowB;
+        if (
+          rowA.providerId !== rowB.providerId ||
+          rowA.itemId !== rowB.itemId ||
+          rowA.balanceDisplay !== rowB.balanceDisplay ||
+          rowA.status !== rowB.status
+        ) {
+          return false;
+        }
+      }
+      return true;
+    }
+  );
 
-  /** 从当前 provider 级缓存重建 rows。 */
-  const rebuildRows = useCallback(() => {
-    const result: HoldingsLoadResult = {
-      assets: [...assetResultsRef.current.values()],
-      tokens: [...tokenResultsRef.current.values()],
-    };
-    const hasError =
-      result.assets.some((r) => r.error) || result.tokens.some((r) => r.error);
-    setStale(hasError);
-    setRows(toHoldingRows(host, result));
-  }, [host]);
-
-  /**
-   * 渐进加载：每个 provider 独立请求，完成即写入 Map 并 rebuildRows。
-   * 设计缘由：一个 provider 挂起时，已完成 provider 的资产仍先显示。
-   * 每个 provider 请求前递增 revision，完成时仅在 revision 仍匹配时写入。
-   */
-  async function refreshAll() {
-    assetResultsRef.current.clear();
-    tokenResultsRef.current.clear();
-    const assetProviders = assetsRegistry.list();
-    const tokenProviders = tokensRegistry.list();
-    const promises = [
-      ...assetProviders.map(async (p) => {
-        const rev = (assetRevisionRef.current.get(p.id) ?? 0) + 1;
-        assetRevisionRef.current.set(p.id, rev);
-        const result = await loadSingleAssetProvider(p);
-        if (!aliveRef.current || assetRevisionRef.current.get(p.id) !== rev) return;
-        assetResultsRef.current.set(p.id, result);
-        rebuildRows();
-      }),
-      ...tokenProviders.map(async (p) => {
-        const rev = (tokenRevisionRef.current.get(p.id) ?? 0) + 1;
-        tokenRevisionRef.current.set(p.id, rev);
-        const result = await loadSingleTokenProvider(p);
-        if (!aliveRef.current || tokenRevisionRef.current.get(p.id) !== rev) return;
-        tokenResultsRef.current.set(p.id, result);
-        rebuildRows();
-      }),
-    ];
-    await Promise.allSettled(promises);
-  }
-
-  /** 增量刷新单个 asset provider。 */
-  async function refreshAssetProvider(provider: AssetProvider) {
-    const rev = (assetRevisionRef.current.get(provider.id) ?? 0) + 1;
-    assetRevisionRef.current.set(provider.id, rev);
-    const result = await loadSingleAssetProvider(provider);
-    if (!aliveRef.current || assetRevisionRef.current.get(provider.id) !== rev) return;
-    assetResultsRef.current.set(provider.id, result);
-    rebuildRows();
-  }
-
-  /** 增量刷新单个 token provider。 */
-  async function refreshTokenProvider(provider: TokenProvider) {
-    const rev = (tokenRevisionRef.current.get(provider.id) ?? 0) + 1;
-    tokenRevisionRef.current.set(provider.id, rev);
-    const result = await loadSingleTokenProvider(provider);
-    if (!aliveRef.current || tokenRevisionRef.current.get(provider.id) !== rev) return;
-    tokenResultsRef.current.set(provider.id, result);
-    rebuildRows();
-  }
-
-  useEffect(() => {
-    aliveRef.current = true;
-    refreshAll();
-    // 订阅每个 provider 的 onChange，只重读该 provider
-    const unsubs = [
-      ...assetsRegistry.list().map((p) => p.onChange(() => refreshAssetProvider(p))),
-      ...tokensRegistry.list().map((p) => p.onChange(() => refreshTokenProvider(p)))
-    ];
-    return () => {
-      aliveRef.current = false;
-      for (const off of unsubs) off();
-    };
-  }, [assetsRegistry, tokensRegistry]);
+  // 从资源快照派生 stale 状态
+  const stale = useResourceSelector<HoldingsLoadResult, boolean>(
+    store,
+    "assets.holdings",
+    [],
+    (snapshot) => snapshot.status === "stale" || snapshot.status === "error"
+  );
 
   return (
     <div className={`home-widget home-widget--assets ${stale ? "is-stale" : ""}`}>
       <header className="home-widget__head">
         <h3>{t("assets.home.overview", { defaultValue: "资产" })}</h3>
       </header>
-      {rows === null || rows.length === 0 ? (
+      {rows.length === 0 ? (
         <p className="home-widget__empty">
           {t("assets.homeWidget.empty", { defaultValue: "暂无资产" })}
         </p>

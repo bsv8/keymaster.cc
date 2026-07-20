@@ -6,10 +6,9 @@
 //   - 展示文本用 name + 短公钥；
 //   - 允许 transfer / message 等消费方只拿身份，不拿地址投影。
 
-import { useEffect, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { Select } from "@keymaster/ui";
-import { formatShortPublicKey, type Contact, type ContactsService } from "@keymaster/contracts";
+import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
 
 export interface ContactPickerProps {
   value?: string;
@@ -18,26 +17,13 @@ export interface ContactPickerProps {
 }
 
 export function ContactPicker({ value, onChange, placeholder }: ContactPickerProps) {
-  const service = useCapability<ContactsService>("contacts.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [contacts, setContacts] = useState<Contact[]>([]);
-
-  useEffect(() => {
-    let mounted = true;
-    service
-      .listContacts()
-      .then((list) => {
-        if (!mounted) return;
-        setContacts(list);
-      })
-      .catch(() => {
-        if (mounted) setContacts([]);
-      });
-    return () => {
-      mounted = false;
-    };
-  }, [service]);
+  const contacts = useResourceSelector<Contact[], Contact[]>(
+    host.resourceStore, "contacts.list", [],
+    (snapshot) => snapshot.data ?? [],
+    (a, b) => a === b
+  );
 
   return (
     <Select

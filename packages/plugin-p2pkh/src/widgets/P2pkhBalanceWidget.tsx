@@ -2,121 +2,54 @@
 // P2PKH 余额 widget：
 //   - 金额来源改为 `{ total }`；不再分 confirmed / unconfirmed。
 //   - testnet 行受 `includeTestnet` 控制：false 时不展示。
-//   - includeTestnet 通过 service.onGlobalSettingsChange 订阅；同 tab 写入
-//     由 settings 页调用 service.applyGlobalSettings 主动通知。
-//   - 只被动订阅 data-changed / status / settings 变化，不暴露手动同步入口。
+//   - 只被动订阅 data-changed / settings 变化，不暴露手动同步入口。
+//
+// 硬切换 003：使用 Resource Store 读取余额和设置数据。
+// 跨标签同步、请求去重、失效批处理由 resource 处理。
 
-import { useCallback, useEffect, useRef, useState } from "react";
 import { formatSats } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
-import type { ActiveKeyState, KeyspaceService } from "@keymaster/contracts";
-import type { P2pkhBalance, P2pkhService } from "../p2pkhContracts.js";
+import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus } from "../p2pkhContracts.js";
 
-interface BalancesState {
-  bsv: P2pkhBalance | null;
-  bsvtest: P2pkhBalance | null;
-}
+const DEFAULT_BALANCES: { bsv: P2pkhBalance | null; bsvtest: P2pkhBalance | null } = { bsv: null, bsvtest: null };
+const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 
-type ReadinessState = "initializing" | "no-active-key" | "ready" | "failed";
-
-interface RequestToken {
-  active: ActiveKeyState;
-  cancelled: boolean;
-}
+type ReadinessState = "initializing" | "no-active-key" | "ready";
 
 export function P2pkhBalanceWidget() {
-  const service = useCapability<P2pkhService>("p2pkh.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  countRender("plugin-p2pkh/P2pkhBalanceWidget");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [balances, setBalances] = useState<BalancesState>({ bsv: null, bsvtest: null });
-  const [status, setStatus] = useState(service.syncStatus());
-  const [readiness, setReadiness] = useState<ReadinessState>(() => computeReadiness(keyspace));
-  const [active, setActive] = useState<ActiveKeyState>(() => keyspace.active());
-  const [lastError, setLastError] = useState<string | null>(null);
-  const [includeTestnet, setIncludeTestnet] = useState<boolean>(() => service.getGlobalSettings().includeTestnet);
-  const tokenRef = useRef<RequestToken | null>(null);
+  const store = host.resourceStore;
 
-  const loadBalances = useCallback(async (): Promise<RequestToken> => {
-    const token: RequestToken = { active: keyspace.active(), cancelled: false };
-    if (tokenRef.current) tokenRef.current.cancelled = true;
-    tokenRef.current = token;
-    if (token.cancelled) return token;
-    try {
-      const include = service.getGlobalSettings().includeTestnet;
-      const calls: Promise<P2pkhBalance>[] = [service.getAssetBalance("bsv")];
-      if (include) calls.push(service.getAssetBalance("bsvtest"));
-      const results = await Promise.all(calls);
-      const bsv = results[0]!;
-      const bsvtest = include ? results[1] ?? null : null;
-      if (token.cancelled) return token;
-      if (!isSameActive(keyspace.active(), token.active)) return token;
-      setBalances({ bsv, bsvtest: include ? bsvtest : null });
-      setLastError(null);
-    } catch (err) {
-      if (token.cancelled) return token;
-      if (!isSameActive(keyspace.active(), token.active)) return token;
-      setLastError(err instanceof Error ? err.message : String(err));
-      setBalances({ bsv: null, bsvtest: null });
-    }
-    return token;
-  }, [service, keyspace]);
+  const readiness = useResourceSelector<ReadinessState, ReadinessState>(
+    store, "p2pkh.readiness", [], (snapshot) => snapshot.data ?? "initializing"
+  );
+  const status = useResourceSelector<P2pkhSyncStatus, P2pkhSyncStatus>(
+    store, "p2pkh.sync-status", [], (snapshot) => snapshot.data ?? "idle"
+  );
 
-  useEffect(() => {
-    const offInit = keyspace.onInitializationChange((v) => {
-      setReadiness(computeReadiness(keyspace, v));
-    });
-    const offActive = keyspace.onActiveChange((s) => {
-      setActive(s);
-      setReadiness(computeReadiness(keyspace));
-      setBalances({ bsv: null, bsvtest: null });
-      if (tokenRef.current) tokenRef.current.cancelled = true;
-      tokenRef.current = null;
-    });
-    return () => {
-      offInit();
-      offActive();
-    };
-  }, [keyspace]);
+  // 使用 Resource Store 读取余额数据
+  const balances = useResourceSelector<typeof DEFAULT_BALANCES, typeof DEFAULT_BALANCES>(
+    store,
+    "p2pkh.balance",
+    [],
+    (snapshot) => snapshot.data ?? DEFAULT_BALANCES,
+    (a, b) => a.bsv?.total === b.bsv?.total && a.bsvtest?.total === b.bsvtest?.total
+  );
 
-  useEffect(() => service.onSyncStatusChange(setStatus), [service]);
+  // 使用 Resource Store 读取设置
+  const settings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+    store,
+    "p2pkh.settings",
+    [],
+    (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
+    (a, b) => a.includeTestnet === b.includeTestnet
+  );
 
-  // 订阅 dataChanged：后台写库后自动重读余额。
-  // 设计缘由：后台 recent-sync 写库后通过 assetDataNotifier 通知，
-  // service 转发为 onDataChanged 事件；这里订阅后自动刷新余额。
-  useEffect(() => service.onDataChanged(() => {
-    if (readiness === "ready") void loadBalances();
-  }), [service, readiness, loadBalances]);
-
-  // 硬切换 001：订阅 service 的 settings 变化；service 内部已统一处理
-  // 同 tab 与跨 tab 通知。
-  useEffect(() => {
-    const off = service.onGlobalSettingsChange((s) => {
-      setIncludeTestnet(s.includeTestnet);
-    });
-    return off;
-  }, [service]);
-
-  useEffect(() => {
-    if (readiness !== "ready") {
-      setBalances({ bsv: null, bsvtest: null });
-      if (tokenRef.current) tokenRef.current.cancelled = true;
-      tokenRef.current = null;
-      return;
-    }
-    void loadBalances();
-  }, [loadBalances, readiness, active, includeTestnet]);
-
-  useEffect(() => {
-    return () => {
-      if (tokenRef.current) tokenRef.current.cancelled = true;
-      tokenRef.current = null;
-    };
-  }, []);
-
-  const stale = status === "failed" || status === "rate-limited" || lastError !== null;
+  const stale = status === "failed" || status === "rate-limited";
   const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.total) : "—");
-  const statusText = computeStatusText(readiness, status, lastError, t);
+  const statusText = computeStatusText(readiness, status, t);
 
   return (
     <div className={`home-widget home-widget--p2pkh-balance ${stale ? "is-stale" : ""}`}>
@@ -129,7 +62,7 @@ export function P2pkhBalanceWidget() {
           <p className="home-widget__amount">{showAmount(balances.bsv)}</p>
         </div>
       </section>
-      {includeTestnet ? (
+      {settings.includeTestnet ? (
         <section className="home-widget__row">
           <div>
             <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
@@ -147,33 +80,12 @@ export function P2pkhBalanceWidget() {
   );
 }
 
-function computeReadiness(
-  keyspace: KeyspaceService,
-  initializingOverride?: boolean
-): ReadinessState {
-  const initializing = initializingOverride ?? keyspace.isInitializing();
-  if (initializing) return "initializing";
-  // 硬切换 005 收尾：active key 模型收窄为"single 模式唯一一把 ready key"；
-  // `mode` 字段已删除，readiness 仅以 activePublicKeyHex 是否存在判断。
-  if (!keyspace.active().activePublicKeyHex) return "no-active-key";
-  return "ready";
-}
-
-function isSameActive(a: ActiveKeyState, b: ActiveKeyState): boolean {
-  return a.activePublicKeyHex === b.activePublicKeyHex;
-}
-
 function computeStatusText(
   readiness: ReadinessState,
   sync: string,
-  lastError: string | null,
   t: (key: string, values?: { defaultValue?: string; [k: string]: string | number | boolean | null | undefined }) => string
 ): string {
   if (readiness === "initializing") return t("p2pkh.balanceWidget.status.initializing", { defaultValue: "Key 正在初始化" });
   if (readiness === "no-active-key") return t("p2pkh.balanceWidget.status.noActiveKey", { defaultValue: "请选择一个 active key" });
-  if (readiness === "failed") return t("p2pkh.balanceWidget.status.loadFailed", { defaultValue: "读取失败" });
-  if (lastError) {
-    return t("p2pkh.balanceWidget.status.withError", { defaultValue: "{{sync}}（{{error}}）", sync: String(sync), error: lastError });
-  }
   return sync;
 }

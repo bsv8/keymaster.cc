@@ -20,9 +20,9 @@
 
 import { useEffect, useState, type ComponentType } from "react";
 import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
-import type { KeyIdentity, KeyspaceService, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
+import type { KeyIdentity, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
 import type { P2pkhAssetId, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
 import { assetIdToNetwork } from "../p2pkhContracts.js";
 import { publicKeyHexToP2pkhAddress } from "../p2pkhSigner.js";
@@ -49,17 +49,26 @@ function useCapabilityOrNull<T>(key: string): T | null {
 
 export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps) {
   const service = useCapability<P2pkhService>("p2pkh.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
   const ContactPicker = useCapabilityOrNull<ComponentType<ContactPickerProps>>("contacts.picker");
 
   const assetId: P2pkhAssetId = offer.assetId as P2pkhAssetId;
   const network = assetIdToNetwork(assetId);
 
-  const [activeKey, setActiveKey] = useState(() => keyspace.active());
-  const [resource, setResource] = useState<P2pkhKeyResource | undefined>(undefined);
+  const context = useResourceSelector<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, { activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }>(
+    host.resourceStore,
+    "p2pkh.transfer-context",
+    [assetId],
+    (s) => s.data ?? {},
+    (a, b) => a?.activePublicKeyHex === b?.activePublicKeyHex
+      && a?.identity?.publicKeyHex === b?.identity?.publicKeyHex
+      && a?.resource?.resourceId === b?.resource?.resourceId
+      && a?.resource?.generation === b?.resource?.generation
+  );
+  const activeKey = { activePublicKeyHex: context.activePublicKeyHex };
+  const activeIdentity = context.identity;
+  const resource = context.resource;
   const [form, setForm] = useState<FormState>({
     recipient: "",
     amount: "0",
@@ -77,68 +86,6 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
   // ——但正常业务流下不会进入 hasNoActiveKey 分支。
   const hasNoActiveKey = !activeKey.activePublicKeyHex;
-
-  // 硬切换 008 + 硬切换 003 收尾：通过 keyspace.getKey 拿当前 key 的展示
-  // 信息（label + 短公钥），不再在 UI 里渲染完整 publicKeyHex 或读取
-  // 已废弃的 fingerprint 字段。短公钥由 formatShortPublicKey(publicKeyHex)
-  // 现算。
-  const [activeIdentity, setActiveIdentity] = useState<KeyIdentity | undefined>(undefined);
-
-  useEffect(() => {
-    return keyspace.onActiveChange((s) => {
-      setActiveKey(s);
-      // active key 切换时清空 preview/result：必须重新准备。
-      setPreview(undefined);
-      setPreviewKey(undefined);
-      setResult(undefined);
-      setCompletion(undefined);
-      setError(null);
-      // 重新拉 identity。
-      if (s.activePublicKeyHex) {
-        keyspace
-          .getKey(s.activePublicKeyHex)
-          .then((id) => setActiveIdentity(id))
-          .catch(() => setActiveIdentity(undefined));
-      } else {
-        setActiveIdentity(undefined);
-      }
-    });
-  }, [keyspace]);
-
-  // 初始化时拉一次当前 active identity。
-  useEffect(() => {
-    if (hasNoActiveKey) {
-      setActiveIdentity(undefined);
-      return;
-    }
-    let cancelled = false;
-    keyspace
-      .getKey(activeKey.activePublicKeyHex!)
-      .then((id) => {
-        if (!cancelled) setActiveIdentity(id);
-      })
-      .catch(() => {
-        if (!cancelled) setActiveIdentity(undefined);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [keyspace, activeKey.activePublicKeyHex, hasNoActiveKey]);
-
-  useEffect(() => {
-    if (hasNoActiveKey) {
-      setResource(undefined);
-      return;
-    }
-    let cancelled = false;
-    service.listResources(assetId).then((list) => {
-      if (cancelled) return;
-      setResource(list[0]);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [service, assetId, hasNoActiveKey]);
 
   const networkAddress = resource?.address;
 

@@ -14,7 +14,9 @@ import type {
   MenuItem,
   MenuRegistry,
   PluginManifest,
-  RouteRegistry
+  RouteRegistry,
+  ResourceRegistry,
+  Contact
 } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { ContactDetailPage } from "./ContactDetailPage.js";
@@ -28,7 +30,7 @@ export const CONTACTS_CAPABILITY = "contacts.service";
 export const CONTACTS_PICKER = "contacts.picker";
 export const CONTACTS_EDITOR = "contacts.editor";
 
-const contactsResources: I18nPluginResources = {
+export const contactsResources: I18nPluginResources = {
   namespace: "contacts",
   resources: {
     en: {
@@ -162,6 +164,31 @@ export const contactsPlugin: PluginManifest = {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
     const service = createContactsService({ keyspace });
     ctx.provide<ContactsService>(CONTACTS_CAPABILITY, service);
+    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    resources.register<Contact[], readonly string[]>({
+      id: "contacts.list",
+      scope: "active-key",
+      key: (_args, context) => ["contacts.list", context.activePublicKeyHex ?? "none"],
+      load: async () => service.listContacts(),
+      subscribe: (_args, _context, invalidate) => {
+        const offChange = service.onChange(invalidate);
+        const offActive = keyspace.onActiveChange(invalidate);
+        return () => { offChange(); offActive(); };
+      },
+      invalidation: "immediate"
+    });
+    resources.register<Contact | undefined, readonly string[]>({
+      id: "contacts.detail",
+      scope: "active-key",
+      key: (args, context) => ["contacts.detail", context.activePublicKeyHex ?? "none", args[0] ?? ""],
+      load: async (args) => (await service.listContacts()).find((contact) => contact.id === args[0]),
+      subscribe: (_args, _context, invalidate) => {
+        const offChange = service.onChange(invalidate);
+        const offActive = keyspace.onActiveChange(invalidate);
+        return () => { offChange(); offActive(); };
+      },
+      invalidation: "immediate"
+    });
     ctx.provide<(props: { value?: string; onChange: (a: string) => void }) => JSX.Element>(
       CONTACTS_PICKER,
       ContactPicker

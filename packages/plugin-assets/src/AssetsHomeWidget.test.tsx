@@ -1,29 +1,47 @@
 // packages/plugin-assets/src/AssetsHomeWidget.test.tsx
-// 首页统一持仓 widget 并发保护测试：
-//   1. 渐进加载：一个 provider 挂起时，已完成 provider 先显示。
-//   2. 旧请求晚到不得覆盖新数据。
-//   3. 组件卸载后不再 setState。
+// 首页统一持仓 widget 集成测试：
+//   硬切换 003 后，并发保护职责已移至 Resource Store。
+//   本测试验证 widget 正确读取 Resource Store 快照并渲染。
 
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
-import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
+import { render, screen, waitFor } from "@testing-library/react";
+import {
+  getRenderCount,
+  PluginHostProvider,
+  resetRenderCounters,
+  createPluginHost
+} from "@keymaster/runtime";
 import type {
   AssetProvider,
   AssetRegistry,
+  I18nPluginResources,
   TokenProvider,
   TokenRegistry,
 } from "@keymaster/contracts";
+import {
+  RESOURCE_REGISTRY_CAPABILITY,
+  ASSET_DATA_NOTIFIER_CAPABILITY
+} from "@keymaster/contracts";
 import { AssetsHomeWidget } from "./AssetsHomeWidget.js";
+import { loadAllHoldings } from "./holdingsFlow.js";
 
-/** 创建可控的 deferred promise。 */
-function deferred<T>() {
-  let resolve!: (v: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
+const ASSETS_TEST_I18N: I18nPluginResources = {
+  namespace: "common",
+  resources: {
+    en: {
+      "assets.home.overview": "Assets",
+      "assets.homeWidget.empty": "No assets"
+    }
+  }
+};
+
+function createAssetsTestHost() {
+  return createPluginHost({
+    disableConfigPersistence: true,
+    initialI18nResources: [ASSETS_TEST_I18N]
   });
-  return { promise, resolve };
 }
 
 function makeTokenProvider(
@@ -31,7 +49,6 @@ function makeTokenProvider(
   name: string,
   listResult: () => Promise<unknown[]>
 ): TokenProvider {
-  const listeners = new Set<() => void>();
   return {
     id,
     name: { key: `${id}.name`, fallback: name },
@@ -39,14 +56,8 @@ function makeTokenProvider(
     listTokens: listResult as () => Promise<never[]>,
     getToken: () => Promise.resolve(undefined),
     listActivity: () => Promise.resolve([]),
-    onChange: (h: () => void) => {
-      listeners.add(h);
-      return () => listeners.delete(h);
-    },
-    _emit: () => {
-      for (const l of [...listeners]) l();
-    },
-  } as unknown as TokenProvider & { _emit: () => void };
+    onChange: (_h: () => void) => () => {},
+  } as unknown as TokenProvider;
 }
 
 function makeAssetProvider(
@@ -54,7 +65,6 @@ function makeAssetProvider(
   name: string,
   listResult: () => Promise<unknown[]>
 ): AssetProvider {
-  const listeners = new Set<() => void>();
   return {
     id,
     name: { key: `${id}.name`, fallback: name },
@@ -63,58 +73,60 @@ function makeAssetProvider(
     listAssets: listResult as () => Promise<never[]>,
     getAsset: () => Promise.resolve(undefined),
     listActivity: () => Promise.resolve([]),
-    onChange: (h: () => void) => {
-      listeners.add(h);
-      return () => listeners.delete(h);
+    onChange: (_h: () => void) => () => {},
+  } as unknown as AssetProvider;
+}
+
+/** 在 host 上注册 holdings 资源定义。 */
+function registerHoldingsResource(
+  host: ReturnType<typeof createPluginHost>,
+  assetReg: AssetRegistry,
+  tokenReg: TokenRegistry
+) {
+  const resourceRegistry = host.capabilities.get<any>(RESOURCE_REGISTRY_CAPABILITY);
+  const notifier = host.capabilities.get<any>(ASSET_DATA_NOTIFIER_CAPABILITY);
+  resourceRegistry.register({
+    id: "assets.holdings",
+    scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
+      ["assets.holdings", context.activePublicKeyHex ?? "none"],
+    load: async (_args: readonly string[], _context: unknown, _signal: AbortSignal) => {
+      return loadAllHoldings(assetReg, tokenReg);
     },
-    _emit: () => {
-      for (const l of [...listeners]) l();
+    subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => {
+      return notifier.subscribe(() => {
+        invalidate();
+      });
     },
-  } as unknown as AssetProvider & { _emit: () => void };
+    equals: (prev: unknown, next: unknown) => {
+      if (!prev || !next) return prev === next;
+      return JSON.stringify(prev) === JSON.stringify(next);
+    },
+    invalidation: "microtask"
+  });
 }
 
-function makeAssetRegistry(providers: AssetProvider[]): AssetRegistry {
-  return {
-    list: () => providers,
-    get: (id: string) => providers.find((p) => p.id === id),
-    register: () => {},
-    unregister: () => {},
-  } as unknown as AssetRegistry;
-}
-
-function makeTokenRegistry(providers: TokenProvider[]): TokenRegistry {
-  return {
-    list: () => providers,
-    get: (id: string) => providers.find((p) => p.id === id),
-    register: () => {},
-    unregister: () => {},
-  } as unknown as TokenRegistry;
-}
-
-describe("AssetsHomeWidget - 并发保护", () => {
+describe("AssetsHomeWidget - Resource Store 集成", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
-  it("渐进加载：一个 provider 挂起时，已完成 provider 先显示", async () => {
-    const hanging = deferred<never[]>();
-    const fastProvider = makeTokenProvider("fast", "Fast", () =>
+  it("渲染来自 Resource Store 的资产数据", async () => {
+    resetRenderCounters();
+    const host = createAssetsTestHost();
+    const tokenReg = host.tokens;
+    tokenReg.register(makeTokenProvider("tok1", "Tok1", () =>
       Promise.resolve([
         {
           tokenId: "tok1",
-          providerId: "fast",
-          symbol: "FAST",
-          label: "Fast Token",
+          providerId: "tok1",
+          symbol: "TK1",
+          label: "Test Token",
           status: "ready",
         },
       ])
-    );
-    const slowProvider = makeTokenProvider("slow", "Slow", () => hanging.promise);
-
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const tokenReg = host.tokens;
-    tokenReg.register(fastProvider);
-    tokenReg.register(slowProvider);
+    ));
+    registerHoldingsResource(host, host.assets, tokenReg);
 
     render(
       <PluginHostProvider host={host}>
@@ -122,39 +134,38 @@ describe("AssetsHomeWidget - 并发保护", () => {
       </PluginHostProvider>
     );
 
-    // fast provider 完成后应先显示
     await waitFor(() => {
-      expect(screen.getByText("Fast Token")).toBeTruthy();
+      expect(screen.getByText("Test Token")).toBeTruthy();
     });
-
-    // slow provider 仍在挂起，不应阻塞
-    expect(screen.queryByText("Slow")).toBeFalsy();
-
-    // 清理
-    hanging.resolve([]);
   });
 
-  it("旧请求晚到不得覆盖新数据", async () => {
-    const firstRequest = deferred<unknown[]>();
-    let callCount = 0;
-    const tokenProvider = makeTokenProvider("tok-p", "TokenP", () => {
-      callCount++;
-      if (callCount === 1) return firstRequest.promise;
-      // 第二次调用（onChange 触发）立即返回新数据
-      return Promise.resolve([
+  it("多个 provider 的数据正确聚合显示", async () => {
+    const host = createAssetsTestHost();
+    host.assets.register(makeAssetProvider("a1", "Coin1", () =>
+      Promise.resolve([
         {
-          tokenId: "new-tok",
-          providerId: "tok-p",
-          symbol: "NEW",
-          label: "New Token",
+          assetId: "coin1",
+          providerId: "a1",
+          kind: "coin",
+          label: "BSV",
           status: "ready",
+          balance: { amount: 100, unit: "sats" },
         },
-      ]);
-    });
-
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const tokenReg2 = host.tokens;
-    tokenReg2.register(tokenProvider);
+      ])
+    ));
+    host.tokens.register(makeTokenProvider("t1", "Token1", () =>
+      Promise.resolve([
+        {
+          tokenId: "tok1",
+          providerId: "t1",
+          symbol: "TK1",
+          label: "My Token",
+          status: "ready",
+          balance: { amount: 50, unit: "TK1" },
+        },
+      ])
+    ));
+    registerHoldingsResource(host, host.assets, host.tokens);
 
     render(
       <PluginHostProvider host={host}>
@@ -162,39 +173,24 @@ describe("AssetsHomeWidget - 并发保护", () => {
       </PluginHostProvider>
     );
 
-    // 等待初始加载开始
-    await vi.waitFor(() => {
-      expect(callCount).toBe(1);
-    });
-
-    // 触发 onChange → 第二次调用
-    const typedProvider = tokenProvider as unknown as { _emit: () => void };
-    await act(async () => {
-      typedProvider._emit();
-      await new Promise((r) => setTimeout(r, 50));
-    });
-
-    // 新数据应已显示
     await waitFor(() => {
-      expect(screen.getByText("New Token")).toBeTruthy();
+      expect(screen.getByText("BSV")).toBeTruthy();
+      expect(screen.getByText("My Token")).toBeTruthy();
     });
+  });
 
-    // 现在让第一次请求晚到
-    await act(async () => {
-      firstRequest.resolve([
-        {
-          tokenId: "old-tok",
-          providerId: "tok-p",
-          symbol: "OLD",
-          label: "Old Token",
-          status: "ready",
-        },
-      ]);
-      await new Promise((r) => setTimeout(r, 50));
+  it("无资产时显示空态", async () => {
+    const host = createAssetsTestHost();
+    registerHoldingsResource(host, host.assets, host.tokens);
+
+    render(
+      <PluginHostProvider host={host}>
+        <AssetsHomeWidget />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("No assets")).toBeTruthy();
     });
-
-    // 旧数据不应覆盖新数据
-    expect(screen.queryByText("Old Token")).toBeFalsy();
-    expect(screen.getByText("New Token")).toBeTruthy();
   });
 });

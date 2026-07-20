@@ -52,6 +52,8 @@ export interface PluginOwnership {
   collectibleTransferHandlers: string[];
   /** topbar item ids。 */
   topbarItems: string[];
+  /** resource definition ids 该 plugin 注册的。 */
+  resourceDefinitions: string[];
   /** 该 plugin 的 teardown。空实现 = 无资源。 */
   teardown: (() => void | Promise<void>) | undefined;
 }
@@ -72,6 +74,7 @@ export function emptyOwnership(): PluginOwnership {
     collectibleProviders: [],
     collectibleTransferHandlers: [],
     topbarItems: [],
+    resourceDefinitions: [],
     teardown: undefined
   };
 }

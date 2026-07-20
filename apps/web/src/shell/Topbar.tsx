@@ -25,7 +25,6 @@ export function Topbar({ mobileOpen, onToggleMobileNav }: TopbarProps) {
   const { vault } = useRuntimeStatus();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const items = useRegistry((h) => h.topbar.list());
 
   async function lock() {

@@ -43,6 +43,7 @@ import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
 import { keyImportPlugin } from "@keymaster/plugin-key-import";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
 import { pokerPlugin } from "@keymaster/plugin-poker";
+
 import { protocolPlugin } from "@keymaster/plugin-protocol";
 import { settingsPlugin } from "@keymaster/plugin-settings";
 import { bsv21TokenPlugin } from "@keymaster/plugin-token-bsv21";
@@ -52,6 +53,7 @@ import { vaultPlugin } from "@keymaster/plugin-vault";
 import { wocPlugin } from "@keymaster/plugin-woc";
 import { bsvPriceConfig } from "./pluginConfigs.js";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
+import { registerShellResources } from "./shell/shellResources.js";
 
 /**
  * 启动期每个插件注册的最长等待时间。
@@ -123,6 +125,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd
   });
+  registerShellResources(host.capabilities.get("resource.registry"));
 
   // 施工单 002：注入 Coordinator client
   // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
@@ -130,11 +133,16 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const coordinatorClient = createCoordinatorClient();
   await coordinatorClient.connect();
   host.provide("session-coordinator.client", coordinatorClient);
+
+  // 硬切换 003：直接转发 Coordinator event 给 runtime notifier
+  // 装配层只负责转发，合并语义由 runtime notifier 实现
   const dataNotifier = host.capabilities.get<AssetDataNotifier>(
     ASSET_DATA_NOTIFIER_CAPABILITY
   );
   coordinatorClient.onEvent("data-changed", (event) => {
-    if (event.type === "data-changed") dataNotifier.emit(event);
+    if (event.type === "data-changed") {
+      dataNotifier.emit(event);
+    }
   });
 
   // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序

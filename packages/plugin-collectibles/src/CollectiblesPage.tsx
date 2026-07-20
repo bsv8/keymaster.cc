@@ -8,9 +8,9 @@
 //   - 单 provider 失败不影响其他 provider：通用列表页必须仍能展示其它
 //     provider 的结果。
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { AppLink, useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { AppLink, useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import type {
   CollectibleProvider,
   CollectibleRegistry,
@@ -27,41 +27,10 @@ export function CollectiblesPage() {
   const registry = useCapability<CollectibleRegistry>("collectible.registry");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [results, setResults] = useState<ProviderLoadResult[] | null>(null);
   const [busy, setBusy] = useState(false);
-
-  async function refresh() {
-    setBusy(true);
-    try {
-      const providers = registry.list();
-      const loaded = await Promise.all(
-        providers.map(async (provider): Promise<ProviderLoadResult> => {
-          try {
-            const items = await provider.listCollectibles();
-            return { provider, items };
-          } catch (err) {
-            return {
-              provider,
-              items: [],
-              error: err instanceof Error ? err.message : String(err)
-            };
-          }
-        })
-      );
-      setResults(loaded);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    refresh();
-    const unsubs = registry.list().map((p) => p.onChange(() => refresh()));
-    return () => {
-      for (const off of unsubs) off();
-    };
-  }, [registry]);
+  const resource = useResource<ProviderLoadResult[]>(host.resourceStore, "collectibles.list", []);
+  const results = resource.data;
+  function refresh() { setBusy(true); host.resourceStore.invalidate("collectibles.list", []); setBusy(false); }
 
   if (!results) {
     return (

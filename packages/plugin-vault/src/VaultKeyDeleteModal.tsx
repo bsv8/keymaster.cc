@@ -62,7 +62,6 @@ export function VaultKeyDeleteModal({
 }: VaultKeyDeleteModalProps) {
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const [step, setStep] = useState<Step>("warning");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);

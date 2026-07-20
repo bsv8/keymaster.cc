@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useCurrentPath, useI18n, usePluginHost, router } from "@keymaster/runtime";
+import { countRender, useCapability, useCurrentPath, useI18n, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   InitialActivationNotice,
@@ -44,6 +44,7 @@ import { RouteRenderer } from "./RouteRenderer.js";
 import { Sidebar } from "./Sidebar.js";
 import { SiteFooter } from "./SiteFooter.js";
 import { Topbar } from "./Topbar.js";
+import type { ShellGuardResource } from "./shellResources.js";
 
 /** 已解锁壳层守卫的判定结果。 */
 export type ShellGuardState =
@@ -51,6 +52,25 @@ export type ShellGuardState =
   | { kind: "empty-vault-recovery" }
   | { kind: "needs-repair"; keys: KeyIdentity[] }
   | { kind: "diagnostic"; error: string };
+
+const EMPTY_NOTICE_RECORDS: NoticeRecord[] = [];
+
+/** Guard 状态按语义比较，避免重复通知创建新对象导致壳层重渲染。 */
+export function areShellGuardStatesEqual(a: ShellGuardState, b: ShellGuardState): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "diagnostic" && b.kind === "diagnostic") return a.error === b.error;
+  if (a.kind !== "needs-repair" || b.kind !== "needs-repair") return true;
+  if (a.keys.length !== b.keys.length) return false;
+  return a.keys.every((key, index) => {
+    const other = b.keys[index];
+    return other !== undefined &&
+      key.publicKeyHex === other.publicKeyHex &&
+      key.label === other.label &&
+      key.createdAt === other.createdAt &&
+      key.capabilities.length === other.capabilities.length &&
+      key.capabilities.every((capability, capabilityIndex) => capability === other.capabilities[capabilityIndex]);
+  });
+}
 
 const KEY_MANAGEMENT_PATH = "/settings/vault";
 const AUTO_LOCK_IDLE_MS = 5 * 60 * 1000;
@@ -120,41 +140,18 @@ export async function evaluateShellGuard(args: {
 }
 
 export function AppShell() {
+  countRender("apps/web/AppShell");
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [activationNotice, setActivationNotice] =
-    useState<InitialActivationNotice | null>(null);
-  const [notices, setNotices] = useState<NoticeRecord[]>([]);
-  const [guard, setGuard] = useState<ShellGuardState>({ kind: "normal" });
   const host = usePluginHost();
+  const activationNotice = useResourceSelector<InitialActivationNotice | null, InitialActivationNotice | null>(host.resourceStore, "shell.activation-notice", [], (s) => s.data ?? null);
+  const notices = useResourceSelector<NoticeRecord[], NoticeRecord[]>(host.resourceStore, "shell.notices", [], (s) => s.data ?? EMPTY_NOTICE_RECORDS);
+  const guardResource = useResourceSelector<ShellGuardResource, ShellGuardResource>(host.resourceStore, "shell.guard", [], (s) => s.data ?? { kind: "normal" }, areShellGuardStatesEqual);
+  const guard = guardResource as ShellGuardState;
   const vault = useCapability<VaultService>("vault.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const [vaultStatus, setVaultStatus] = useState<VaultStatus>(vault.status());
+  const vaultStatus = useResourceSelector<VaultStatus, VaultStatus>(host.resourceStore, "shell.vault-status", [], (s) => s.data ?? "uninitialized");
   const path = useCurrentPath();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
-
-  useEffect(() => {
-    // notice 变化与 host.version 无关，shell 需要直接订阅 notice registry，
-    // 才能保证挂载后新增 / 更新 notice 立即进入当前 React 树。
-    return host.notice.subscribe(setNotices);
-  }, [host]);
-
-  useEffect(() => {
-    if (!vault || typeof vault.onInitialActivationNoticeChange !== "function") {
-      return;
-    }
-    return vault.onInitialActivationNoticeChange((notice) => {
-      setActivationNotice(notice);
-    });
-  }, [vault]);
-
-  useEffect(() => {
-    setVaultStatus(vault.status());
-    return vault.onStatusChange((status) => {
-      setVaultStatus(status);
-    });
-  }, [vault]);
 
   // 施工单 002：自动锁定改为向 Coordinator 发送节流 activity。
   // 页面 hidden、blur、暂停不应立即 lock；无任意用户活动达到配置时长才全局 lock。
@@ -204,90 +201,22 @@ export function AppShell() {
   // 任何时候 status 切到非 unlocked 都让壳层降级到 normal，由 App 决定
   // 切回 LockedShell。
   useEffect(() => {
-    if (!vault || !keyspace) {
-      setGuard({ kind: "normal" });
-      return;
-    }
-    let cancelled = false;
-    async function evaluate() {
-      const result = await evaluateShellGuard({
-        vaultStatus: vault.status(),
-        active: keyspace.active(),
-        listKeys: () => keyspace.listKeys(),
-        onEmpty: async () => {
-          if (typeof vault.recoverEmptyVaultToUninitialized === "function") {
-            try {
-              await vault.recoverEmptyVaultToUninitialized();
-            } catch (err) {
-              console.error(
-                "AppShell guard: recoverEmptyVaultToUninitialized failed",
-                err
-              );
-              throw err;
-            }
-            return;
-          }
-          // 旧版 vault service 没有此方法时的兜底：仍走 lock 路径。
-          try {
-            const result = await vault.lock();
-            if (result.status !== "accepted" && result.status !== "ok") {
-              throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
-            }
-          } catch (err) {
-            console.error(
-              "AppShell guard: vault.lock during empty-vault-recovery fallback failed",
-              err
-            );
-            throw err;
-          }
-        }
-      });
-      if (cancelled) return;
-      setGuard(result.state);
-    }
-    void evaluate();
-    const offActive = keyspace.onActiveChange(() => {
-      void evaluate();
-    });
-    const offStatus = vault.onStatusChange(() => {
-      void evaluate();
-    });
-    return () => {
-      cancelled = true;
-      offActive();
-      offStatus();
-    };
-  }, [vault, keyspace]);
+    if (guard.kind !== "empty-vault-recovery") return;
+    void (typeof vault.recoverEmptyVaultToUninitialized === "function"
+      ? vault.recoverEmptyVaultToUninitialized()
+      : vault.lock());
+  }, [guard.kind, vault]);
 
   function dismissNotice() {
     if (vault && typeof vault.clearInitialActivationNotice === "function") {
       vault.clearInitialActivationNotice();
     }
-    setActivationNotice(null);
   }
 
   function retryGuardEvaluation() {
     // 诊断态下让用户能重试一次 listKeys——只重新触发守卫评估，
     // 不直接调用 listKeys（让守卫函数自己处理错误归类）。
-    if (!vault || !keyspace) return;
-    void (async () => {
-      const result = await evaluateShellGuard({
-        vaultStatus: vault.status(),
-        active: keyspace.active(),
-        listKeys: () => keyspace.listKeys(),
-        onEmpty: async () => {
-          if (typeof vault.recoverEmptyVaultToUninitialized === "function") {
-            await vault.recoverEmptyVaultToUninitialized();
-            return;
-          }
-          const result = await vault.lock();
-          if (result.status !== "accepted" && result.status !== "ok") {
-            throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
-          }
-        }
-      });
-      setGuard(result.state);
-    })();
+    host.resourceStore.invalidate("shell.guard", []);
   }
 
   // "诊断态"：listKeys 读失败。**不**触发空 Vault 收敛，暴露错误

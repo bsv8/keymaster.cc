@@ -42,7 +42,6 @@ export function ThemeToggle({ variant = "topbar" }: ThemeToggleProps) {
   const { mode, theme, setMode } = useTheme();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染：切语言后下拉项 label / hint 热更新。
-  useI18n().language();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
 

@@ -14,14 +14,15 @@
 import type {
   BroadcastCore,
   I18nPluginResources,
-  PluginManifest
+  PluginManifest,
+  ResourceRegistry
 } from "@keymaster/contracts";
-import { BROADCAST_CORE_CAPABILITY, type SettingsRegistry } from "@keymaster/contracts";
+import { BROADCAST_CORE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type SettingsRegistry } from "@keymaster/contracts";
 import {
   BSV_PRICE_CONFIG_KEY,
   BSV_PRICE_SETTINGS_PATH
 } from "./constants.js";
-import { createBsvPriceService } from "./bsvPriceService.js";
+import { createBsvPriceService, type BsvPriceService, type BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 import { BsvPricePage } from "./BsvPricePage.js";
 import { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
 
@@ -164,6 +165,10 @@ export const bsvPricePlugin: PluginManifest = {
     {
       capability: "settings.registry",
       reason: "注册 /settings/bsv-price 设置详情页"
+    },
+    {
+      capability: RESOURCE_REGISTRY_CAPABILITY,
+      reason: "注册 BSV Price 状态资源"
     }
   ],
   setup(ctx) {
@@ -188,6 +193,18 @@ export const bsvPricePlugin: PluginManifest = {
       seedPublisherPublicKeyHex: publisherHex
     });
     ctx.provide(BSV_PRICE_SERVICE_CAPABILITY, service);
+    const resources = ctx.has(RESOURCE_REGISTRY_CAPABILITY)
+      ? ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY)
+      : undefined;
+    resources?.register<BsvPriceServiceSnapshot, readonly string[]>({
+      id: "bsv-price.snapshot",
+      scope: "global",
+      key: () => ["bsv-price.snapshot"],
+      load: async (_args, context) => context.getCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY)!.snapshot(),
+      subscribe: (_args, context, invalidate) => context.getCapability<BsvPriceService>(BSV_PRICE_SERVICE_CAPABILITY)?.subscribe(invalidate) ?? (() => {}),
+      equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      invalidation: "immediate"
+    });
 
     const routes = ctx.get<{
       register(input: {

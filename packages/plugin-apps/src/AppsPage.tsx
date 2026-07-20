@@ -83,7 +83,6 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
 export function AppsPage() {
   const protocol = useCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
   const { t } = useI18n();
-  useI18n().language();
   const validation = loadCatalog();
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchEntry, setLaunchEntry] = useState<AppCatalogEntry | null>(null);

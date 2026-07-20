@@ -20,7 +20,7 @@
 //   - 删除确认的目标复核改成 `label + 短公钥`（或"身份不可用"）。
 //   - 不再读取、构造、回填 `KeyIdentity.fingerprint` 字段。
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import {
   Button,
   DataTable,
@@ -30,16 +30,16 @@ import {
   TextInput,
   type DataTableColumn
 } from "@keymaster/ui";
-import { router, useCapability, useI18n, useLocale } from "@keymaster/runtime";
+import { router, useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
   KeyIdentity,
   KeyRef,
   KeyspaceService,
-  MessageBus,
   VaultService
 } from "@keymaster/contracts";
+import type { VaultKeyResourceState } from "./manifest.js";
 import { VaultKeyCreateModal } from "./VaultKeyCreateModal.js";
 import { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
 import { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
@@ -50,12 +50,13 @@ import { KeyPersistedButActivationFailedError } from "./vaultService.js";
 export function VaultSettingsPage() {
   const vault = useCapability<VaultService>("vault.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const messageBus = useCapability<MessageBus>("runtime.messageBus");
+  const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染 + 取当前 locale 用于日期格式化。
   const locale = useLocale();
-  const [keys, setKeys] = useState<KeyIdentity[]>([]);
-  const [active, setActive] = useState<ActiveKeyState>(keyspace.active());
+  const keyState = useResourceSelector<VaultKeyResourceState, VaultKeyResourceState>(host.resourceStore, "vault.key-state", [], (s) => s.data ?? { keys: [], active: { activePublicKeyHex: undefined }, initializing: false, notice: null }, (a, b) => JSON.stringify(a) === JSON.stringify(b));
+  const keys = keyState.keys;
+  const active = keyState.active;
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
@@ -77,58 +78,13 @@ export function VaultSettingsPage() {
     [locale]
   );
 
-  const refresh = useCallback(async () => {
-    try {
-      const list = await keyspace.listKeys();
-      setKeys(list);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : t("vault.settings.err.load", { defaultValue: "Failed to load keys" })
-      );
-    }
-  }, [keyspace, t]);
-
-  useEffect(() => {
-    refresh();
-    const off = keyspace.onActiveChange((s) => setActive(s));
-    return () => off();
-  }, [refresh, keyspace]);
-
-  useEffect(() => {
-    if (!messageBus) return;
-    const trigger = () => {
-      void refresh();
-    };
-    const offs: Array<() => void> = [];
-    offs.push(messageBus.subscribe("key.created", trigger));
-    offs.push(messageBus.subscribe("key.identity.ready", trigger));
-    offs.push(messageBus.subscribe("key.identity.failed", trigger));
-    return () => {
-      for (const off of offs) off();
-    };
-  }, [messageBus, refresh]);
-
-  // 硬切换 009 收尾：订阅 vault 的
-  // `onInitialActivationNoticeChange`，把"首 Key 已落库但未自动
-  // active"的 notice 同步到页面顶部，让用户能明确看到提示。
-  useEffect(() => {
-    if (typeof vault.onInitialActivationNoticeChange !== "function") return;
-    return vault.onInitialActivationNoticeChange((notice) => {
-      if (notice) {
-        setNotice(
-          t("vault.settings.notice.persisted", {
-            defaultValue: "Key 已保存，但未能自动设为 active。请在列表中手动切换。"
-          }) + ` (${notice.label})`
-        );
-      } else {
-        // vault 内部已自动清掉 notice（用户切 active / lock /
-        // 显式 clear），这里同步清掉页面本地 notice，避免双份展示。
-        setNotice(null);
-      }
-    });
-  }, [vault, t]);
+  const refresh = useCallback(() => {
+    host.resourceStore.invalidate("vault.key-state", []);
+  }, [host]);
+  const resourceNotice = keyState.notice
+    ? t("vault.settings.notice.persisted", { defaultValue: "Key 已保存，但未能自动设为 active。请在列表中手动切换。" }) + ` (${keyState.notice.label})`
+    : null;
+  const displayedNotice = notice ?? resourceNotice;
 
   async function lock() {
     const result = await vault.lock();
@@ -290,7 +246,6 @@ export function VaultSettingsPage() {
       let persisted: KeyIdentity | undefined;
       try {
         const fresh = await keyspace.listKeys();
-        setKeys(fresh);
         persisted = findPersistedIdentity(err, label, fresh);
       } catch {
         // 静默
@@ -608,7 +563,7 @@ export function VaultSettingsPage() {
         actions={headerActions}
       />
       {error ? <p className="vault-page__error">{error}</p> : null}
-      {notice ? <p className="vault-page__notice">{notice}</p> : null}
+      {displayedNotice ? <p className="vault-page__notice">{displayedNotice}</p> : null}
       {copyNotice ? <p className="vault-page__notice">{copyNotice}</p> : null}
       {keys.length === 0 ? (
         <EmptyState

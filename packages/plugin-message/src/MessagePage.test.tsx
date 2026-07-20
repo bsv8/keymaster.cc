@@ -89,6 +89,100 @@ function makeFakeHost(service: MessageService | null) {
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY] = service;
   }
+
+  // 创建资源注册表和资源存储
+  const resourceDefinitions = new Map<string, any>();
+  const resourceRegistry = {
+    register: (def: any) => resourceDefinitions.set(def.id, def),
+    unregister: (id: string) => resourceDefinitions.delete(id),
+    get: (id: string) => resourceDefinitions.get(id),
+    _ids: () => Array.from(resourceDefinitions.keys())
+  };
+
+  // 注册 message.conversations 资源定义
+  const keyspace = providers[KEYSPACE_SERVICE_CAPABILITY] as KeyspaceService;
+  resourceRegistry.register({
+    id: "message.conversations",
+    scope: "active-key",
+    key: (_args: readonly string[], context: { activePublicKeyHex?: string }) =>
+      ["message.conversations", context.activePublicKeyHex ?? "none"],
+    load: async () => {
+      const messages = service ? await service.listMessages({ limit: 10_000 }) : [];
+      return { messages, contactsByPeer: {} };
+    },
+    subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => {
+      if (!service) return () => {};
+      return service.subscribeMessages(invalidate);
+    },
+    equals: (prev: any, next: any) => {
+      if (!prev || !next) return prev === next;
+      if (prev.messages.length !== next.messages.length) return false;
+      return true;
+    },
+    invalidation: "microtask"
+  });
+
+  // 创建简单的 resourceStore
+  const records = new Map<string, any>();
+  const resourceStore = {
+    ensure: <T,>(definitionId: string, args: readonly string[]) => {
+      const def = resourceDefinitions.get(definitionId);
+      if (!def) throw new Error(`Resource definition "${definitionId}" not found`);
+      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const key = def.key(args, context);
+      const rk = `${definitionId}::${key.join("::")}`;
+      let record = records.get(rk);
+      if (!record) {
+        record = {
+          snapshot: { key, status: "pending", data: undefined, revision: 0 },
+          inFlight: null,
+          subscribers: new Set()
+        };
+        records.set(rk, record);
+        // 开始加载
+        record.inFlight = def.load(args, context, new AbortController().signal);
+        record.inFlight.then((data: any) => {
+          record.snapshot = { key, status: "ready", data, revision: 1 };
+          record.inFlight = null;
+          for (const sub of record.subscribers) sub();
+        }).catch(() => {
+          record.snapshot = { key, status: "error", data: undefined, revision: 1 };
+          record.inFlight = null;
+          for (const sub of record.subscribers) sub();
+        });
+      }
+      return record.snapshot as T;
+    },
+    subscribe: (definitionId: string, args: readonly string[], callback: () => void) => {
+      const def = resourceDefinitions.get(definitionId);
+      if (!def) return () => {};
+      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const key = def.key(args, context);
+      const rk = `${definitionId}::${key.join("::")}`;
+      let record = records.get(rk);
+      if (!record) {
+        record = {
+          snapshot: { key, status: "pending", data: undefined, revision: 0 },
+          inFlight: null,
+          subscribers: new Set()
+        };
+        records.set(rk, record);
+      }
+      record.subscribers.add(callback);
+      return () => record.subscribers.delete(callback);
+    },
+    read: <T,>(definitionId: string, args: readonly string[]) => {
+      const def = resourceDefinitions.get(definitionId);
+      if (!def) return undefined;
+      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const key = def.key(args, context);
+      const rk = `${definitionId}::${key.join("::")}`;
+      return records.get(rk)?.snapshot as T | undefined;
+    },
+    invalidate: () => {},
+    disposeOwner: () => {}
+  };
+
   const capabilities = {
     keys: () => Object.keys(providers),
     get: <T,>(key: string): T => {
@@ -128,6 +222,7 @@ function makeFakeHost(service: MessageService | null) {
     i18n: makeFakeI18n(),
     log: {} as never,
     configStore: {} as never,
+    resourceStore,
     installed: () => [],
     manifests: () => [],
     state: () => ({ id: "fake", kind: "enabled" }),

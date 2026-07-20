@@ -56,7 +56,6 @@ export function ImportPage() {
   const messageBus = useCapability<MessageBus>("runtime.messageBus");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
 
   // 硬切换 010：本页面只服务已解锁态导入更多 key。
   // - uninitialized：本应走 LockedShell 里的首启导入向导；如果意外

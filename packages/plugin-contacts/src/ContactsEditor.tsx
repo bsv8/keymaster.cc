@@ -35,13 +35,13 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
   const service = useCapability<ContactsService>("contacts.service");
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const { t } = useI18n();
-  useI18n().language();
   const [draft, setDraft] = useState<DraftState>(EMPTY_DRAFT);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [current, setCurrent] = useState<Contact | null>(null);
   const [boundActivePublicKeyHex, setBoundActivePublicKeyHex] = useState<string | null>(null);
 
+  // @resource-boundary allow: active-key-editor-safety
   useEffect(() => {
     if (!props.open) {
       setDraft(EMPTY_DRAFT);

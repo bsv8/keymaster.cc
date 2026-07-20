@@ -6,10 +6,9 @@
 //   - 详情页保留给 contacts 域内部查看与 breadcrumb 解析；
 //   - 联系人身份以 publicKeyHex 为准。
 
-import { useEffect, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { formatShortPublicKey, type Contact, type ContactsService, type KeyspaceService } from "@keymaster/contracts";
+import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
 
 // 不引入 react-router；直接用 location.pathname 解析。
 // 路径形态：/contacts/:id
@@ -17,43 +16,15 @@ import { formatShortPublicKey, type Contact, type ContactsService, type Keyspace
 export function ContactDetailPage() {
   const path = typeof window !== "undefined" ? window.location.pathname : "";
   const id = path.split("/").filter(Boolean).pop() ?? "";
-  const service = useCapability<ContactsService>("contacts.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [contact, setContact] = useState<Contact | undefined>(undefined);
-  const [noActiveKey, setNoActiveKey] = useState(false);
-
-  useEffect(() => {
-    let mounted = true;
-    const refresh = async () => {
-      if (!keyspace.active().activePublicKeyHex) {
-        if (mounted) {
-          setContact(undefined);
-          setNoActiveKey(true);
-        }
-        return;
-      }
-      if (mounted) setNoActiveKey(false);
-      try {
-        const list = await service.listContacts();
-        if (!mounted) return;
-        setContact(list.find((c) => c.id === id));
-      } catch {
-        if (!mounted) return;
-        setContact(undefined);
-        setNoActiveKey(true);
-      }
-    };
-    void refresh();
-    const off = keyspace.onActiveChange(() => {
-      void refresh();
-    });
-    return () => {
-      mounted = false;
-      off();
-    };
-  }, [service, keyspace, id]);
+  const state = useResourceSelector<Contact | undefined, { contact?: Contact; active: boolean }>(
+    host.resourceStore, "contacts.detail", [id],
+    (snapshot) => ({ contact: snapshot.data, active: snapshot.key[2] !== "none" }),
+    (a, b) => a.contact === b.contact && a.active === b.active
+  );
+  const contact = state.contact;
+  const noActiveKey = !state.active;
 
   if (!contact) {
     return (

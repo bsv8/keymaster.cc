@@ -7,12 +7,16 @@
 //   - 新增 / 编辑联系人通过 contacts.editor capability 打开，message
 //     页面不复制联系人表单；
 //   - 会话详情主入口是 /message/:publicKeyHex，/messages/:publicKeyHex 仅作兼容别名；
+//
+// 硬切换 003：使用 Resource Store 读取消息和联系人数据。
+// 跨标签同步、请求去重、失效批处理由 resource 处理。
 
-import { useEffect, useMemo, useState, type ComponentType } from "react";
-import { useCapability, useI18n, router } from "@keymaster/runtime";
-import type { AppMsgMessage, Contact, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import { useMemo, useState, type ComponentType } from "react";
+import { useCapability, useI18n, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
+import type { Contact, KeyspaceService } from "@keymaster/contracts";
 import { Button, EmptyState, Modal, PageHeader, TextInput } from "@keymaster/ui";
 import type { MessageService } from "./messageService.js";
+import type { MessageConversationsData } from "./manifest.js";
 import { buildConversationSummaries, shortPublicKeyHex } from "./messageConversation.js";
 
 interface ContactsEditorProps {
@@ -24,15 +28,13 @@ interface ContactsEditorProps {
   onSaved: (contact: Contact) => void;
 }
 
-const MESSAGE_SERVICE_CAPABILITY = "message.service";
-const CONTACTS_SERVICE_CAPABILITY = "contacts.service";
 const CONTACTS_EDITOR_CAPABILITY = "contacts.editor";
-const MESSAGE_READ_WINDOW = 10_000;
 const PUBLIC_KEY_HEX_PATTERN = /^[0-9a-f]{66}$/;
+const EMPTY_CONVERSATIONS_DATA: MessageConversationsData = { messages: [], contactsByPeer: {} };
 
 export function MessagePage(): JSX.Element {
   const i18n = useI18n();
-  const service = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
+  const service = useCapabilityOrNull<MessageService>("message.service");
   if (!service) {
     return (
       <section className="km-message-page km-message-page--missing" data-message-page="missing-service">
@@ -41,7 +43,7 @@ export function MessagePage(): JSX.Element {
       </section>
     );
   }
-  return <MessagePageInner service={service} />;
+  return <MessagePageInner />;
 }
 
 function useCapabilityOrNull<T>(key: string): T | null {
@@ -52,14 +54,34 @@ function useCapabilityOrNull<T>(key: string): T | null {
   }
 }
 
-function MessagePageInner({ service }: { service: MessageService }): JSX.Element {
+function MessagePageInner(): JSX.Element {
   const i18n = useI18n();
+  const host = usePluginHost();
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const contacts = useCapabilityOrNull<ContactsService>(CONTACTS_SERVICE_CAPABILITY);
   const ContactsEditor = useCapabilityOrNull<ComponentType<ContactsEditorProps>>(CONTACTS_EDITOR_CAPABILITY);
-  const [ownerPublicKeyHex, setOwnerPublicKeyHex] = useState<string | null>(keyspace.active().activePublicKeyHex ?? null);
-  const [messages, setMessages] = useState<AppMsgMessage[]>([]);
-  const [contactsByHex, setContactsByHex] = useState<Record<string, Contact>>({});
+  const store = host.resourceStore;
+  const ownerPublicKeyHex = keyspace.active().activePublicKeyHex ?? null;
+
+  // 使用 Resource Store 读取消息和联系人数据
+  const conversationsData = useResourceSelector<MessageConversationsData, MessageConversationsData>(
+    store,
+    "message.conversations",
+    [],
+    (snapshot) => snapshot.data ?? EMPTY_CONVERSATIONS_DATA,
+    (a, b) => {
+      if (a.messages.length !== b.messages.length) return false;
+      if (Object.keys(a.contactsByPeer).length !== Object.keys(b.contactsByPeer).length) return false;
+      return true;
+    }
+  );
+
+  // 从消息派生会话摘要
+  const conversations = useMemo(() => {
+    if (!ownerPublicKeyHex) return [];
+    return buildConversationSummaries(conversationsData.messages, ownerPublicKeyHex);
+  }, [conversationsData.messages, ownerPublicKeyHex]);
+
+  // 本地交互 state
   const [editorState, setEditorState] = useState<{
     open: boolean;
     mode: "create" | "edit";
@@ -69,71 +91,6 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
   const [newChatOpen, setNewChatOpen] = useState(false);
   const [newChatPublicKeyHex, setNewChatPublicKeyHex] = useState("");
   const [newChatError, setNewChatError] = useState<string | null>(null);
-
-  useEffect(() => {
-    return keyspace.onActiveChange((state) => {
-      setOwnerPublicKeyHex(state.activePublicKeyHex ?? null);
-    });
-  }, [keyspace]);
-
-  useEffect(() => {
-    let cancelled = false;
-    const refresh = async () => {
-      if (!ownerPublicKeyHex || !service.isReady()) {
-        if (!cancelled) setMessages([]);
-        return;
-      }
-      try {
-        const items = await service.listMessages({ limit: MESSAGE_READ_WINDOW });
-        if (!cancelled) setMessages(items);
-      } catch {
-        if (!cancelled) setMessages([]);
-      }
-    };
-    void refresh();
-    const off = service.subscribeMessages(() => {
-      void refresh();
-    });
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [ownerPublicKeyHex, service]);
-
-  const conversations = useMemo(() => {
-    if (!ownerPublicKeyHex) return [];
-    return buildConversationSummaries(messages, ownerPublicKeyHex);
-  }, [messages, ownerPublicKeyHex]);
-
-  const peerListKey = useMemo(
-    () => conversations.map((c) => c.peerPublicKeyHex).join("|"),
-    [conversations]
-  );
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!contacts || !peerListKey) {
-      setContactsByHex({});
-      return;
-    }
-    const refreshContacts = async () => {
-      try {
-        const list = await contacts.findByPublicKeyHexes(conversations.map((c) => c.peerPublicKeyHex));
-        if (cancelled) return;
-        const next: Record<string, Contact> = {};
-        for (const c of list) next[c.publicKeyHex] = c;
-        setContactsByHex(next);
-      } catch {
-        if (!cancelled) setContactsByHex({});
-      }
-    };
-    void refreshContacts();
-    const off = contacts.onChange(refreshContacts);
-    return () => {
-      cancelled = true;
-      off();
-    };
-  }, [contacts, conversations, peerListKey]);
 
   if (!ownerPublicKeyHex) {
     return (
@@ -217,7 +174,7 @@ function MessagePageInner({ service }: { service: MessageService }): JSX.Element
       ) : (
         <div className="km-message-page__conversations">
           {conversations.map((conversation) => {
-            const contact = contactsByHex[conversation.peerPublicKeyHex];
+            const contact = conversationsData.contactsByPeer[conversation.peerPublicKeyHex];
             const contactName = contact?.name?.trim() ?? "";
             const title = contactName || shortPublicKeyHex(conversation.peerPublicKeyHex);
             return (

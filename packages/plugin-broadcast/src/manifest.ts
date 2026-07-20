@@ -18,10 +18,12 @@
 import type {
   BroadcastCore,
   BroadcastCoreSnapshot,
+  BroadcastProvider,
   BroadcastProviderRegistry,
   I18nPluginResources,
   KeyspaceService,
   PluginManifest,
+  ResourceRegistry,
   VaultService
 } from "@keymaster/contracts";
 import {
@@ -37,6 +39,7 @@ import {
 import { createReconnectCoordinator } from "./reconnectCoordinator.js";
 import { BroadcastPage } from "./BroadcastPage.js";
 import { createBroadcastService } from "./broadcastService.js";
+import type { BroadcastService } from "./broadcastService.js";
 
 function bytesToHex(bytes: Uint8Array): string {
   let s = "";
@@ -322,6 +325,15 @@ export const broadcastPlatformPlugin: PluginManifest = {
      */
     const service = createBroadcastService(core);
     ctx.provide("broadcast.service", service);
+    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    resources.register<{ snapshot: BroadcastCoreSnapshot; providers: readonly BroadcastProvider[] }, readonly string[]>({
+      id: "broadcast.state",
+      scope: "global",
+      key: () => ["broadcast.state"],
+      load: async (_args, context) => { const s = context.getCapability<BroadcastService>("broadcast.service")!; return { snapshot: s.snapshot(), providers: s.providers() }; },
+      subscribe: (_args, context, invalidate) => context.getCapability<BroadcastService>("broadcast.service")?.onChange(invalidate) ?? (() => {}),
+      invalidation: "immediate"
+    });
 
     /**
      * 注册管理页路由 + 菜单 + 面包屑。

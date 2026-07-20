@@ -13,67 +13,22 @@
 //     组件，layout 走 poker-lobby* 专属 CSS（不再依赖 apps/web 全局
 //     样式）。
 
-import React, { useEffect, useState } from "react";
-import { useTranslation } from "react-i18next";
+import React from "react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { router, useCapability } from "@keymaster/runtime";
+import { router, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import {
   formatShortPublicKey,
-  POKER_SERVICE_CAPABILITY,
-  type PokerService,
   type PokerPresence,
   type PokerSessionKeyState,
   type PokerTable
 } from "@keymaster/contracts";
 
 export function PokerLobby(): React.ReactElement {
-  const { t } = useTranslation("poker");
-  const service = useCapability<PokerService>(POKER_SERVICE_CAPABILITY);
-  const [presences, setPresences] = useState<PokerPresence[]>(() =>
-    service ? service.listPresences() : []
-  );
-  const [tables, setTables] = useState<PokerTable[]>(() => (service ? service.listTables() : []));
-  const [session, setSession] = useState<PokerSessionKeyState>(() =>
-    service ? service.getActivePokerKey() : { kind: "vaultLocked" }
-  );
-
-  useEffect(() => {
-    if (!service) return;
-    const offP = service.onPresenceChange(() => setPresences(service.listPresences()));
-    const offT = service.onTablesChange((next) => setTables(next));
-    const offS = service.onActivePokerKeyChange((next) => {
-      setSession(next);
-      // 切 key 时 service 已清空内存 cache；这里再读一次以保证 UI 与
-      // service 完全一致（哪怕 service 未来在某些路径只通知不清理）。
-      setPresences(service.listPresences());
-      setTables(service.listTables());
-    });
-    return () => {
-      offP();
-      offT();
-      offS();
-    };
-  }, [service]);
-
-  if (!service) {
-    return (
-      <div className="poker-lobby poker-lobby--empty">
-        <PageHeader
-          title={t("poker.lobby.title", { defaultValue: "Poker lobby" })}
-          description={t("poker.lobby.description", {
-            defaultValue:
-              "Tables and online players observed by the local poker-proxy connection."
-          })}
-        />
-        <EmptyState
-          title={t("poker.home.empty", { defaultValue: "Not connected" })}
-          description={t("poker.home.connectHint", {
-            defaultValue: "Open Poker settings to configure the proxy endpoint."
-          })}
-        />
-      </div>
-    );
-  }
+  const { t } = useI18n();
+  const host = usePluginHost();
+  const presences = useResourceSelector<PokerPresence[], PokerPresence[]>(host.resourceStore, "poker.presences", [], (s) => s.data ?? []);
+  const tables = useResourceSelector<PokerTable[], PokerTable[]>(host.resourceStore, "poker.tables", [], (s) => s.data ?? []);
+  const session = useResourceSelector<PokerSessionKeyState, PokerSessionKeyState>(host.resourceStore, "poker.session", [], (s) => s.data ?? ({ kind: "vaultLocked" } as PokerSessionKeyState));
 
   // session 不可用 → 显示降级提示（不展示旧桌局数据）。
   if (session.kind !== "ready") {

@@ -16,7 +16,7 @@
 //     是稳定枚举（`WebrtcBlockReason`），UI 直接 `t(key)` 拿展示文案。
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import { PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
@@ -79,7 +79,9 @@ const ERROR_KEY: Record<WebrtcBlockReason, string> = {
 
 function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement {
   const { t } = useI18n();
-  const [snap, setSnap] = useState<WebrtcSessionSnapshot>(() => service.snapshot());
+  const host = usePluginHost();
+  const sessionResource = useResource<WebrtcSessionSnapshot>(host.resourceStore, "webrtc.session", []);
+  const resourceSnap = sessionResource.data ?? service.snapshot();
   const [target, setTarget] = useState("");
   const [errorKey, setErrorKey] = useState<WebrtcBlockReason | null>(null);
   const [busy, setBusy] = useState(false);
@@ -87,11 +89,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  // 订阅 service snapshot。
-  useEffect(() => {
-    const off = service.subscribe((s) => setSnap(s));
-    return () => off();
-  }, [service]);
+  const snap = resourceSnap;
 
   /**
    * 媒体绑定：本地 / 远端 video 元素分别绑到 service 暴露的真值。

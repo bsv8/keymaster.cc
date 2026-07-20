@@ -4,7 +4,7 @@
 // 硬切换 006：双栏布局真值是 widget.slot，不再有 size / 横向栅格。
 
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
+import { countRender, useCapability, useI18n } from "@keymaster/runtime";
 import type { HomeRegistry, HomeWidget } from "@keymaster/contracts";
 
 /**
@@ -26,10 +26,10 @@ export function partitionHomeWidgets(widgets: readonly HomeWidget[]): {
 }
 
 export function HomePage() {
+  countRender("plugin-home/HomePage");
   const registry = useCapability<HomeRegistry>("home.registry");
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const widgets = registry.list();
 
   if (widgets.length === 0) {

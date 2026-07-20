@@ -4,6 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
+import { useSyncExternalStore } from "react";
 import type { BsvPriceService, BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 
 interface ActiveTestService {
@@ -21,6 +22,12 @@ vi.mock("@keymaster/runtime", async () => {
     ...actual,
     useCapability: <T,>(_key: string): T =>
       activeTestService.service as unknown as T,
+    usePluginHost: () => ({ resourceStore: {} }),
+    useResource: () => {
+      const service = activeTestService.service;
+      const snapshot = useSyncExternalStore(service.subscribe, service.snapshot, service.snapshot);
+      return { data: snapshot };
+    },
     useI18n: () => ({
       t: (_key: string, opts?: { defaultValue?: string }) =>
         opts?.defaultValue ?? _key,

@@ -5,19 +5,34 @@
 
 import type {
   AppRoute,
+  AssetDataNotifier,
   AssetRegistry,
+  KeyspaceService,
+  KeyIdentity,
   HomeRegistry,
   HomeWidget,
   I18nPluginResources,
   MenuItem,
   MenuRegistry,
   PluginManifest,
+  ResourceRegistry,
   RouteRegistry,
   TokenRegistry
 } from "@keymaster/contracts";
+import {
+  ASSET_DATA_NOTIFIER_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY
+} from "@keymaster/contracts";
 import { AssetsPage } from "./AssetsPage.js";
 import { AssetDetailRedirect } from "./AssetDetailRedirect.js";
+import { AssetDetailPage, type HoldingResolution } from "./AssetDetailPage.js";
 import { AssetsHomeWidget } from "./AssetsHomeWidget.js";
+import {
+  loadAllHoldings,
+  toHoldingRows,
+  type HoldingRow,
+  type HoldingsLoadResult
+} from "./holdingsFlow.js";
 
 /** 资产 i18n 资源：覆盖 route / menu / home widget 展示以及通用资产页公共文案。 */
 const assetsResources: I18nPluginResources = {
@@ -124,6 +139,7 @@ export const assetsPlugin: PluginManifest = {
   dependencies: [
     { capability: "asset.registry", reason: "需要资产注册表来聚合 coin provider" },
     { capability: "token.registry", reason: "需要 token 注册表来聚合 fungible token provider" },
+    { capability: "keyspace.service", reason: "读取 active key 上下文" },
     { capability: "route.registry", reason: "注册资产列表与详情页" },
     { capability: "menu.registry", reason: "注册资产菜单入口" },
     { capability: "home.registry", reason: "注册资产首页 widget" }
@@ -131,6 +147,97 @@ export const assetsPlugin: PluginManifest = {
   setup(ctx) {
     const assets = ctx.get<AssetRegistry>("asset.registry");
     const tokens = ctx.get<TokenRegistry>("token.registry");
+    const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    const notifier = ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY);
+
+    //注册 holdings 资源
+    //设计缘由：holdings 是资产页面的核心数据依赖，使用resource 实现：
+    // - 请求去重（StrictMode双挂载）
+    // - 失效批处理（microtask合并）
+    // - 语义相等判断
+    // - active key切换时自动隔离
+    resources.register<HoldingsLoadResult, readonly string[]>({
+      id: "assets.holdings",
+      scope: "active-key",
+      key: (_args, context) => ["assets.holdings", context.activePublicKeyHex ?? "none"],
+      load: async (_args, _context, _signal) => {
+        return loadAllHoldings(assets, tokens);
+      },
+      subscribe: (_args, _context, invalidate) => {
+        return notifier.subscribe(() => {
+          invalidate();
+        });
+      },
+      equals: (prev, next) => {
+        // 语义相等：比较 provider 级别的结果
+        if (!prev || !next) return prev === next;
+        if (prev.assets.length !== next.assets.length) return false;
+        if (prev.tokens.length !== next.tokens.length) return false;
+        // 简化比较：检查每个 provider的结果是否相同
+        for (let i = 0; i < prev.assets.length; i++) {
+          const a = prev.assets[i];
+          const b = next.assets[i];
+          if (!a || !b) return a === b;
+          if (a.provider.id !== b.provider.id) return false;
+          if (a.assets.length !== b.assets.length) return false;
+          if (a.error !== b.error) return false;
+        }
+        for (let i = 0; i < prev.tokens.length; i++) {
+          const a = prev.tokens[i];
+          const b = next.tokens[i];
+          if (!a || !b) return a === b;
+          if (a.provider.id !== b.provider.id) return false;
+          if (a.tokens.length !== b.tokens.length) return false;
+          if (a.error !== b.error) return false;
+        }
+        return true;
+      },
+      invalidation: "microtask"
+    });
+
+    resources.register<KeyIdentity | null, readonly string[]>({
+      id: "assets.active-context",
+      scope: "active-key",
+      key: (_args, context) => ["assets.active-context", context.activePublicKeyHex ?? "none"],
+      load: async (_args, context) => {
+        const keyspace = context.getCapability<KeyspaceService>("keyspace.service");
+        if (!context.activePublicKeyHex || !keyspace) return null;
+        return (await keyspace.getKey(context.activePublicKeyHex)) ?? null;
+      },
+      subscribe: (_args, context, invalidate) =>
+        context.getCapability<KeyspaceService>("keyspace.service")?.onActiveChange(invalidate) ?? (() => {}),
+      equals: (a, b) => a?.publicKeyHex === b?.publicKeyHex && a?.label === b?.label,
+      invalidation: "immediate"
+    });
+
+    resources.register<HoldingResolution, readonly string[]>({
+      id: "assets.detail",
+      scope: "global",
+      key: (args) => ["assets.detail", args[0] ?? "", args[1] ?? ""],
+      load: async (args) => {
+        const providerId = args[0] ?? "";
+        const assetId = args[1] ?? "";
+        const assetProvider = assets.get(providerId);
+        if (assetProvider) {
+          const detail = await assetProvider.getAsset(assetId);
+          if (!detail) throw new Error(`Asset "${assetId}" not found in provider "${providerId}"`);
+          return { kind: "asset", provider: { id: assetProvider.id, name: assetProvider.name }, detail: detail as unknown as HoldingResolution["detail"], detailRoute: detail.summary.detailRoute };
+        }
+        const tokenProvider = tokens.get(providerId);
+        if (tokenProvider) {
+          const detail = await tokenProvider.getToken(assetId);
+          if (!detail) throw new Error(`Token "${assetId}" not found in provider "${providerId}"`);
+          return { kind: "token", provider: { id: tokenProvider.id, name: tokenProvider.name }, detail: detail as unknown as HoldingResolution["detail"], detailRoute: detail.summary.detailRoute };
+        }
+        throw new Error(`Unknown holding provider "${providerId}"`);
+      },
+      subscribe: (args, _context, invalidate) => {
+        const providerId = args[0] ?? "";
+        const provider = assets.get(providerId) ?? tokens.get(providerId);
+        return provider?.onChange(invalidate) ?? (() => {});
+      },
+      invalidation: "immediate"
+    });
 
     const routes = ctx.get<RouteRegistry>("route.registry");
     const listRoute: AppRoute = {

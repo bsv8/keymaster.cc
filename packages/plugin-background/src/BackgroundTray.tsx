@@ -3,47 +3,70 @@
 // 设计缘由：托盘只显示通用任务信息，不出现 P2PKH 专属字段。
 // 施工单 001：只渲染"立即同步一次"或"取消本次同步"，
 // 没有暂停、继续、重试。失败不是稳态，显示为"上次同步失败"。
+//
+// 硬切换 003：使用 Resource Store 读取任务快照，跨标签同步由 resource subscribe 处理。
+// pendingRunIds 是本地交互 state，基于 resource 数据变化更新。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, AlertCircle, CheckCircle2, Square, X, Zap } from "lucide-react";
-import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
+import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { BackgroundService, BackgroundTaskSnapshot, BackgroundTaskState } from "@keymaster/contracts";
+
+const EMPTY_SNAPSHOTS: BackgroundTaskSnapshot[] = [];
 
 export function BackgroundTray() {
   const service = useCapability<BackgroundService>("background.service");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
   const locale = useLocale();
+  const store = host.resourceStore;
   const timeFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { timeStyle: "medium" }),
     [locale]
   );
   const [open, setOpen] = useState(false);
-  const [snapshots, setSnapshots] = useState<BackgroundTaskSnapshot[]>(service.listSnapshots());
+
+  // 使用 Resource Store 读取任务快照（跨标签同步由 resource subscribe 处理）
+  const snapshots = useResourceSelector<BackgroundTaskSnapshot[], BackgroundTaskSnapshot[]>(
+    store,
+    "background.taskSnapshots",
+    [],
+    (snapshot) => snapshot.data ?? EMPTY_SNAPSHOTS,
+    (a, b) => {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        const sa = a[i];
+        const sb = b[i];
+        if (!sa || !sb) return sa === sb;
+        if (sa.id !== sb.id || sa.state !== sb.state) return false;
+      }
+      return true;
+    }
+  );
+
+  // 本地交互 state：pendingRunIds 跟踪用户发起的 runNow 请求
   // runNow 跨 tab 会先转发给 leader；在收到新快照前给出明确反馈，避免
   // 用户把一次已经送出的点击误认为没有生效而重复点击。
   const pendingStartedAt = useRef(new Map<string, number>());
   const [pendingRunIds, setPendingRunIds] = useState<Set<string>>(() => new Set());
   const [commandError, setCommandError] = useState<string | null>(null);
 
+  // 当 resource 快照变化时，更新 pendingRunIds（清除已完成的 pending 请求）
   useEffect(() => {
-    return service.onChange((s) => {
-      setSnapshots(s);
-      setPendingRunIds((previous) => {
-        const next = new Set(previous);
-        for (const id of previous) {
-          const snapshot = s.find((item) => item.id === id);
-          const requestedAt = pendingStartedAt.current.get(id);
-          const attemptedAt = snapshot?.lastAttemptAt ? new Date(snapshot.lastAttemptAt).getTime() : 0;
-          if (!snapshot || snapshot.state === "queued" || snapshot.state === "running" || snapshot.state === "blocked" || (requestedAt && attemptedAt >= requestedAt)) {
-            next.delete(id);
-            pendingStartedAt.current.delete(id);
-          }
+    setPendingRunIds((previous) => {
+      const next = new Set(previous);
+      for (const id of previous) {
+        const snapshot = snapshots.find((item) => item.id === id);
+        const requestedAt = pendingStartedAt.current.get(id);
+        const attemptedAt = snapshot?.lastAttemptAt ? new Date(snapshot.lastAttemptAt).getTime() : 0;
+        if (!snapshot || snapshot.state === "queued" || snapshot.state === "running" || snapshot.state === "blocked" || (requestedAt && attemptedAt >= requestedAt)) {
+          next.delete(id);
+          pendingStartedAt.current.delete(id);
         }
-        return next;
-      });
+      }
+      return next;
     });
-  }, [service]);
+  }, [snapshots]);
 
   const requestRunNow = (id: string) => {
     pendingStartedAt.current.set(id, Date.now());

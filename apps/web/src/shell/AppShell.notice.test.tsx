@@ -17,6 +17,7 @@ import type {
   VaultStatus
 } from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
+import { registerShellResources } from "./shellResources.js";
 import { AppShell } from "./AppShell.js";
 
 const OWNER = "02".padEnd(66, "a");
@@ -69,6 +70,7 @@ function createHost() {
     disableConfigPersistence: true,
     initialI18nResources: [SHELL_RESOURCES]
   });
+  registerShellResources(host.capabilities.get("resource.registry"));
   host.capabilities.provide<VaultService>("vault.service", makeVault());
   host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
   host.capabilities.provide("session-coordinator.client", {

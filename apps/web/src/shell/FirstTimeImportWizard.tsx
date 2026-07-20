@@ -129,7 +129,6 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
 
   // 硬切换 012 验收修复：所有 wizard 状态机收敛到 reducer；
   // 组件本身只负责发起 async parse + 调用 vault.createVaultWithImportedKey。

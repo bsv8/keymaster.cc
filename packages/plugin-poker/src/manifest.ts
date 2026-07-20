@@ -27,7 +27,13 @@ import type {
   PluginManifest,
   RouteRegistry,
   SettingsRegistry,
-  VaultService
+  VaultService,
+  ResourceRegistry,
+  PokerConnectionStatus,
+  PokerPresence,
+  PokerSessionKeyState,
+  PokerTable
+  ,PokerSettings
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY, POKER_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { createPokerService } from "./pokerService.js";
@@ -275,6 +281,40 @@ export const pokerPlugin: PluginManifest = {
 
     const service = createPokerService({ vault, keyspace, messageBus });
     ctx.provide(POKER_SERVICE_CAPABILITY, service);
+    const resources = ctx.get<ResourceRegistry>("resource.registry");
+    resources.register<PokerConnectionStatus, readonly string[]>({
+      id: "poker.connection", scope: "global", key: () => ["poker.connection"],
+      load: async () => service.status(),
+      subscribe: (_args, _ctx, invalidate) => service.onStatusChange(invalidate),
+      invalidation: "immediate"
+    });
+    resources.register<PokerSettings, readonly string[]>({
+      id: "poker.settings", scope: "global", key: () => ["poker.settings"],
+      load: async () => service.getSettings(),
+      subscribe: (_args, _ctx, invalidate) => service.onSettingsChange(invalidate),
+      invalidation: "immediate"
+    });
+    resources.register<PokerSessionKeyState, readonly string[]>({
+      id: "poker.session", scope: "active-key",
+      key: (_args, context) => ["poker.session", context.activePublicKeyHex ?? "none"],
+      load: async () => service.getActivePokerKey(),
+      subscribe: (_args, _ctx, invalidate) => service.onActivePokerKeyChange(invalidate),
+      invalidation: "immediate"
+    });
+    resources.register<PokerPresence[], readonly string[]>({
+      id: "poker.presences", scope: "active-key",
+      key: (_args, context) => ["poker.presences", context.activePublicKeyHex ?? "none"],
+      load: async () => service.listPresences(),
+      subscribe: (_args, _ctx, invalidate) => service.onPresenceChange(invalidate),
+      invalidation: "immediate"
+    });
+    resources.register<PokerTable[], readonly string[]>({
+      id: "poker.tables", scope: "active-key",
+      key: (_args, context) => ["poker.tables", context.activePublicKeyHex ?? "none"],
+      load: async () => service.listTables(),
+      subscribe: (_args, _ctx, invalidate) => service.onTablesChange(() => invalidate()),
+      invalidation: "immediate"
+    });
 
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({

@@ -28,7 +28,6 @@ export interface OnboardingHeaderProps {
 export function OnboardingHeader({ hideSecurityNote = false }: OnboardingHeaderProps) {
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
 
   return (
     <header className="onboarding-header" role="banner">

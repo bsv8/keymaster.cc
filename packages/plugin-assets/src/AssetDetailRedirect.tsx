@@ -15,7 +15,6 @@ function readQuery(name: string): string {
  */
 export function AssetDetailRedirect() {
   const { t } = useI18n();
-  useI18n().language();
   const providerId = readQuery("providerId");
   const assetId = readQuery("assetId");
   if (!providerId || !assetId) {

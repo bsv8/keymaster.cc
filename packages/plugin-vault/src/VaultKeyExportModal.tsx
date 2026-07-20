@@ -50,7 +50,6 @@ export function VaultKeyExportModal({
 }: VaultKeyExportModalProps) {
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
-  useI18n().language();
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 

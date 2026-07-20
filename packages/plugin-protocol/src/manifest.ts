@@ -34,9 +34,14 @@ import type {
   KeyspaceService,
   PluginContext,
   PluginManifest,
-  VaultService
+  VaultService,
+  ResourceRegistry,
+  VaultStatus,
+  ProtocolSessionSnapshot,
+  ProtocolCommandFeedState,
+  ProtocolService
 } from "@keymaster/contracts";
-import { APPMESSAGE_CORE_CAPABILITY, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { APPMESSAGE_CORE_CAPABILITY, PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
@@ -531,6 +536,42 @@ export const protocolPlugin: PluginManifest = {
         }
       });
       ctx.provide(PROTOCOL_SERVICE_CAPABILITY, service);
+      const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+      resources.register<{ snapshot: ProtocolSessionSnapshot; feed: ProtocolCommandFeedState }, readonly string[]>({
+        id: "protocol.state",
+        scope: "global",
+        key: () => ["protocol.state"],
+        load: async (_args, context) => {
+          const current = context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)!;
+          return { snapshot: current.snapshot(), feed: current.feedSnapshot() };
+        },
+        subscribe: (_args, context, invalidate) => {
+          const current = context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY);
+          const a = current?.subscribe(() => invalidate()) ?? (() => {});
+          const b = current?.subscribeFeed(() => invalidate()) ?? (() => {});
+          return () => { a(); b(); };
+        },
+        invalidation: "immediate"
+      });
+      resources.register<VaultStatus, readonly string[]>({
+        id: "protocol.vault-status",
+        scope: "global",
+        key: () => ["protocol.vault-status"],
+        load: async (_args, context) => context.getCapability<VaultService>("vault.service")?.status() ?? "locked",
+        subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onStatusChange(invalidate) ?? (() => {}),
+        invalidation: "immediate"
+      });
+      resources.register<{ waiting: boolean; timedOut: boolean }, readonly string[]>({
+        id: "protocol.app-bootstrap",
+        scope: "global",
+        key: () => ["protocol.app-bootstrap"],
+        load: async (_args, context) => {
+          const current = context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)!;
+          return { waiting: current.appClientWaitingForReady(), timedOut: current.appClientConnectTimedOut() };
+        },
+        subscribe: (_args, context, invalidate) => context.getCapability<ProtocolService>(PROTOCOL_SERVICE_CAPABILITY)?.subscribe(() => invalidate()) ?? (() => {}),
+        invalidation: "immediate"
+      });
 
       // 注意：协议页**不**注册到 `route.registry`。
       // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径

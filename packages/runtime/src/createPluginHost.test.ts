@@ -115,6 +115,32 @@ function makeC(dependsOn: string[] = []): PluginManifest {
   };
 }
 
+describe("createPluginHost - runtime resource binding", () => {
+  it("refreshes Resource Store when a plugin provides keyspace", async () => {
+    const activeListeners = new Set<() => void>();
+    const keyspace = {
+      active: () => ({ activePublicKeyHex: "pk1" }),
+      onActiveChange: (handler: () => void) => {
+        activeListeners.add(handler);
+        return () => activeListeners.delete(handler);
+      }
+    };
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register({
+      id: "late-keyspace",
+      name: "Late keyspace",
+      description: "test",
+      meta: { kind: "platform", defaultEnabled: true, canDisable: true },
+      setup(ctx) {
+        ctx.provide("keyspace.service", keyspace);
+      }
+    });
+    expect(activeListeners.size).toBe(1);
+    await host.disable("late-keyspace");
+    expect(activeListeners.size).toBe(0);
+  });
+});
+
 beforeEach(() => {
   if (typeof localStorage !== "undefined") {
     localStorage.clear();

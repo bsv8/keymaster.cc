@@ -6,37 +6,19 @@
 //   - active key 缺失时直接清空，不做 all-mode 回退；
 //   - 作为首页侧栏只提供快速识别，不承载编辑逻辑。
 
-import { useEffect, useState } from "react";
 import { EmptyState } from "@keymaster/ui";
-import { useCapability, useI18n } from "@keymaster/runtime";
-import { formatShortPublicKey, type Contact, type ContactsService, type KeyspaceService } from "@keymaster/contracts";
+import { countRender, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
 
 export function RecentContactsWidget() {
-  const service = useCapability<ContactsService>("contacts.service");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
+  countRender("plugin-contacts/RecentContactsWidget");
+  const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
-  const [rows, setRows] = useState<Contact[]>([]);
-
-  useEffect(() => {
-    let mounted = true;
-    const refresh = async () => {
-      if (!keyspace.active().activePublicKeyHex) {
-        if (mounted) setRows([]);
-        return;
-      }
-      try {
-        const list = await service.listContacts();
-        if (!mounted) return;
-        list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-        setRows(list.slice(0, 5));
-      } catch {
-        if (mounted) setRows([]);
-      }
-    };
-    void refresh();
-    return keyspace.onActiveChange(refresh);
-  }, [service, keyspace]);
+  const rows = useResourceSelector<Contact[], Contact[]>(
+    host.resourceStore, "contacts.list", [],
+    (snapshot) => [...(snapshot.data ?? [])].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0, 5),
+    (a, b) => a === b
+  );
 
   return (
     <div className="home-widget home-widget--contacts-recent">

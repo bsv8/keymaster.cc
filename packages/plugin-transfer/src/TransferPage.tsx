@@ -9,70 +9,71 @@
 // active key 时由壳层 AppShell 阻断，本页面不再显示"all mode 请选择 key"，
 // 只保留"无 provider"空态与正常业务流。
 //
-// 硬切换 003：所有展示文案走 i18n；TransferOffer.label 走 host.i18n.text() 解析。
+// 硬切换 003：使用 Resource Store 读取 Transfer Offer 列表。
+// 跨标签同步、请求去重、失效批处理由 resource 处理。
 
 import { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale, usePluginHost } from "@keymaster/runtime";
-import type { KeyspaceService, TransferCompletion, TransferOffer, TransferProvider, TransferRegistry } from "@keymaster/contracts";
+import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import type { ActiveKeyState, TransferCompletion, TransferOffer, TransferProvider, TransferRegistry } from "@keymaster/contracts";
 import { TransferOfferPicker } from "./TransferOfferPicker.js";
+
+const EMPTY_OFFERS: TransferOffer[] = [];
+const EMPTY_ACTIVE_KEY: ActiveKeyState = { activePublicKeyHex: undefined };
 
 export function TransferPage() {
   const registry = useCapability<TransferRegistry>("transfer.registry");
-  const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const host = usePluginHost();
   const { t } = useI18n();
-  useI18n().language();
   const locale = useLocale();
+  const store = host.resourceStore;
   const dateFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
     [locale]
   );
   const providers = useMemo(() => registry.list(), [registry]);
-  const [allOffers, setAllOffers] = useState<TransferOffer[]>([]);
+
+  // 使用 Resource Store 读取 Transfer Offer 列表
+  const allOffers = useResourceSelector<TransferOffer[], TransferOffer[]>(
+    store,
+    "transfer.offers",
+    [],
+    (snapshot) => snapshot.data ?? EMPTY_OFFERS,
+    (a, b) => {
+      if (a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) {
+        const oa = a[i];
+        const ob = b[i];
+        if (!oa || !ob) return oa === ob;
+        if (oa.id !== ob.id) return false;
+      }
+      return true;
+    }
+  );
+  const activeState = useResourceSelector<ActiveKeyState, ActiveKeyState>(
+    store,
+    "transfer.active-key",
+    [],
+    (snapshot) => snapshot.data ?? EMPTY_ACTIVE_KEY,
+    (a, b) => a.activePublicKeyHex === b.activePublicKeyHex
+  );
+
+  // 本地交互 state
   const [selected, setSelected] = useState<TransferOffer | undefined>(undefined);
   const [completion, setCompletion] = useState<TransferCompletion | undefined>(undefined);
-  const [version, setVersion] = useState(0);
-  const [activeState, setActiveState] = useState(() => keyspace.active());
 
-  useEffect(() => {
-    const off: Array<() => void> = [];
-    let cancelled = false;
-    async function load() {
-      const out: TransferOffer[] = [];
-      for (const p of providers) {
-        try {
-          const list = await p.listOffers();
-          for (const o of list) out.push(o);
-        } catch {
-          // 单 provider 失败不影响其他
-        }
-      }
-      if (!cancelled) setAllOffers(out);
-    }
-    void load();
-    for (const p of providers) {
-      off.push(p.onChange(() => setVersion((v) => v + 1)));
-    }
-    return () => {
-      cancelled = true;
-      for (const f of off) f();
-    };
-  }, [providers, version]);
-
+  // 当 offers 变化时，清除已不存在的 selected
   useEffect(() => {
     if (selected && !allOffers.find((o) => o.id === selected.id)) {
       setSelected(undefined);
     }
   }, [allOffers, selected]);
 
+  // active key 变化时清空仅属于当前 key 的本地交互状态。
   useEffect(() => {
-    return keyspace.onActiveChange((s) => {
-      setActiveState(s);
-      setSelected(undefined);
-      setCompletion(undefined);
-    });
-  }, [keyspace]);
+    setSelected(undefined);
+    setCompletion(undefined);
+  }, [activeState.activePublicKeyHex]);
 
   const selectedProvider: TransferProvider | undefined = useMemo(
     () => (selected ? providers.find((p) => p.id === selected.providerId) : undefined),

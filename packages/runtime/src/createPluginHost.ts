@@ -37,6 +37,7 @@ import type {
   PluginState,
   PluginStateKind,
   NoticeRegistry,
+  ResourceRegistry,
   TopbarRegistry,
   VaultService
 } from "@keymaster/contracts";
@@ -45,6 +46,7 @@ import {
   I18N_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT,
   isValidPluginEndpointIdShape
 } from "@keymaster/contracts";
@@ -71,6 +73,8 @@ import { createPluginConfigStore } from "./pluginConfigStore.js";
 import type { PluginConfigStore } from "./pluginConfigStoreContract.js";
 import { buildPluginGraph, reverseDependentsOf } from "./pluginGraph.js";
 import { emptyOwnership, type PluginOwnership } from "./pluginOwnership.js";
+import { createResourceRegistry, registerOwnedResource } from "./resources/resourceRegistry.js";
+import { createResourceStore, type ResourceStoreApi } from "./resources/resourceStore.js";
 
 const RUNTIME_MESSAGE_BUS = RUNTIME_MESSAGE_BUS_CONTRACT;
 const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
@@ -103,6 +107,8 @@ export interface PluginHost {
   log: LogService;
   /** 启停全局配置（localStorage 持久化 + storage 事件广播）。 */
   configStore: PluginConfigStore;
+  /** 硬切换 003：资源存储（React 读业务数据、订阅业务数据变更的唯一框架入口）。 */
+  resourceStore: ResourceStoreApi;
 
   // ===== 查询 / 旧兼容 =====
   installed(): string[];
@@ -165,6 +171,7 @@ function buildOwnershipSnapshot(
     collectibleTransfer: { _ids: () => string[] };
     topbar: { _ids: () => string[] };
     capabilities: { keys: () => string[] };
+    resourceRegistry: { _ids: () => string[] };
   }
 ) {
   return {
@@ -181,7 +188,8 @@ function buildOwnershipSnapshot(
     collectibleProviders: registries.collectibles._ids(),
     collectibleTransferHandlers: registries.collectibleTransfer._ids(),
     topbarItems: registries.topbar._ids(),
-    capabilities: registries.capabilities.keys()
+    capabilities: registries.capabilities.keys(),
+    resourceDefinitions: registries.resourceRegistry._ids()
   };
 }
 
@@ -204,6 +212,7 @@ function ownershipDiff(
   | "collectibleTransferHandlers"
   | "topbarItems"
   | "capabilities"
+  | "resourceDefinitions"
 > {
   return {
     routes: diffIds(before.routes, after.routes),
@@ -219,7 +228,8 @@ function ownershipDiff(
     collectibleProviders: diffIds(before.collectibleProviders, after.collectibleProviders),
     collectibleTransferHandlers: diffIds(before.collectibleTransferHandlers, after.collectibleTransferHandlers),
     topbarItems: diffIds(before.topbarItems, after.topbarItems),
-    capabilities: diffIds(before.capabilities, after.capabilities)
+    capabilities: diffIds(before.capabilities, after.capabilities),
+    resourceDefinitions: diffIds(before.resourceDefinitions, after.resourceDefinitions)
   };
 }
 
@@ -251,8 +261,36 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
    * 资产数据变更通知器。
    * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
    * 后台任务原子提交 provider DB 后发布此事件，页面收到后只重读本地 DB。
+   *
+   * 合并语义（硬切换 003）：
+   * - 同一 `providerId + publicKeyHex` 的同一 microtask 内事件合并
+   * - `kinds` 求并集
+   * - `revision` 取最新事件
    */
   const assetDataNotifier = createAssetDataNotifier();
+
+  /**
+   * 资源注册表和资源存储。
+   * 设计缘由（硬切换 003）：Resource Store 是 React 读业务数据、
+   * 订阅业务数据变更的唯一框架入口。
+   */
+  const resourceRegistry = createResourceRegistry();
+
+  const resourceStore = createResourceStore(
+    resourceRegistry,
+    <T>(id: string) => capabilities.has(id) ? capabilities.get<T>(id) : undefined,
+    // activePublicKeyHex 从 keyspace service 动态获取（延迟绑定，因为
+    // keyspace service 由 plugin-vault 在 setup 阶段注入，晚于 createPluginHost）
+    () => {
+      if (!capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) return undefined;
+      try {
+        const ks = capabilities.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
+        return ks.active().activePublicKeyHex ?? undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  );
 
   // 把内置 registry + messageBus + i18n + log + assetDataNotifier 暴露成 capability。
   capabilities.provide<RouteRegistry>("route.registry", routes);
@@ -276,6 +314,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<I18nService>(I18N_SERVICE_CAPABILITY, i18n);
   capabilities.provide<LogService>(LOG_SERVICE_CAPABILITY, logService);
   capabilities.provide<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY, assetDataNotifier);
+  capabilities.provide<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY, resourceRegistry);
 
   // route.registry path 探测，避免 settings.registry 与 route.registry 双渲染。
   settings.setRoutePathProbe((path) => routes.byPath(path) !== undefined);
@@ -318,12 +357,27 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     return { id, kind: r.state, error: r.error };
   }
 
+  function provideCapability<T>(key: string, value: T): void {
+    capabilities.provide(key, value);
+    resourceStore.refreshRuntimeBindings();
+  }
+
   function buildContext(record: PluginRecord): PluginContext {
+    const ownerResourceRegistry: ResourceRegistry = {
+      register: (definition) => registerOwnedResource(resourceRegistry, record.manifest.id, definition),
+      unregister: (id) => resourceRegistry.unregister(id),
+      get: (id) => resourceRegistry.get(id),
+      _ids: () => resourceRegistry._ids(),
+    };
     return {
-      provide: (k, v) => capabilities.provide(k, v),
-      get: (k) => capabilities.get(k),
+      provide: (k, v) => provideCapability(k, v),
+      get: (k) => k === RESOURCE_REGISTRY_CAPABILITY
+        ? ownerResourceRegistry as any
+        : capabilities.get(k),
       has: (k) => capabilities.has(k),
-      require: (k) => capabilities.require(k),
+      require: (k) => k === RESOURCE_REGISTRY_CAPABILITY
+        ? ownerResourceRegistry as any
+        : capabilities.require(k),
       messageBus,
       logger: logService.forPlugin(record.manifest.id),
       // 2026-07-08 001 硬切换：plugin 作者通过 `manifest.config` 注入的
@@ -347,7 +401,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       collectibles,
       collectibleTransfer,
       topbar,
-      capabilities
+      capabilities,
+      resourceRegistry
     });
   }
 
@@ -445,7 +500,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     window.dispatchEvent(new PopStateEvent("popstate"));
   }
 
-  function purgeOwnership(ownership: PluginOwnership): void {
+  function purgeOwnership(ownership: PluginOwnership, pluginId?: string): void {
     const errors: unknown[] = [];
     function safe(fn: () => void, name: string) {
       try {
@@ -453,6 +508,11 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       } catch (err) {
         errors.push({ name, err });
       }
+    }
+    // Dispose records first: callbacks must not observe a definition that is
+    // about to be removed and schedule new work through it.
+    if (pluginId) {
+      safe(() => resourceStore.disposeOwner(pluginId), `resourceOwner:${pluginId}`);
     }
     for (const id of ownership.topbarItems) safe(() => topbar.unregister(id), `topbar:${id}`);
     for (const id of ownership.routes) safe(() => routes.unregister(id), `route:${id}`);
@@ -474,6 +534,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const id of ownership.collectibleTransferHandlers)
       safe(() => collectibleTransfer.unregister(id), `collectibleTransfer:${id}`);
     for (const cap of ownership.capabilities) safe(() => capabilities.revoke(cap), `capability:${cap}`);
+    resourceStore.refreshRuntimeBindings();
+    // 注销 resource definition 并清理该 plugin 拥有的所有 resource records
+    for (const id of ownership.resourceDefinitions)
+      safe(() => resourceRegistry.unregister(id), `resource:${id}`);
     if (errors.length > 0) {
       // eslint-disable-next-line no-console
       console.error("[pluginHost] purgeOwnership errors", errors);
@@ -515,6 +579,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     i18n,
     log: logService,
     configStore,
+    resourceStore,
 
     installed() {
       return [...enabledSet];
@@ -546,7 +611,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     },
 
     provide(key, value) {
-      capabilities.provide(key, value);
+      provideCapability(key, value);
       // 硬切换 2026-07-04 001：不再因 vault / keyspace 注入触发
       // scoped client 刷新——runtime 已不持有消息业务生命周期。
     },
@@ -656,7 +721,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       } catch (err) {
         enabledSet.delete(pluginId);
         const ownership = record.ownership;
-        purgeOwnership(ownership);
+        purgeOwnership(ownership, pluginId);
         purgePluginNotices(record.manifest.id);
         i18n.unregisterResources(record.manifest.id);
         record.ownership = emptyOwnership();
@@ -692,7 +757,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       }
       safeNavigateAway(pluginId);
       const teardownErr = await runTeardown(record.ownership);
-      purgeOwnership(record.ownership);
+      purgeOwnership(record.ownership, pluginId);
       purgePluginNotices(pluginId);
       i18n.unregisterResources(record.manifest.id);
       if (record.manifest.appMessageEndpoint) {
@@ -781,6 +846,11 @@ void (null as unknown as KeyspaceService);
  * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
  * 后台任务原子提交 provider DB 后发布此事件，页面收到后只重读本地 DB。
  *
+ * 合并语义（硬切换 003）：
+ * - 同一 `providerId + publicKeyHex` 的同一 microtask 内事件合并
+ * - `kinds` 求并集
+ * - `revision` 取最新事件
+ *
  * 跨标签页同步：
  *   - 本 tab emit 时同时通过 BroadcastChannel 广播
  *   - 其他 tab 收到广播后在本 tab 内 emit，触发本地订阅者
@@ -788,16 +858,53 @@ void (null as unknown as KeyspaceService);
  */
 function createAssetDataNotifier(): AssetDataNotifier {
   const listeners = new Set<(event: AssetDataChangedEvent) => void>();
+  const pendingEvents = new Map<string, AssetDataChangedEvent>();
+  let microtaskScheduled = false;
 
-  return {
-    emit(event: AssetDataChangedEvent) {
-      // 本 tab 通知
+  /** 生成事件键（用于合并同一 provider + key 的事件） */
+  function eventKey(event: AssetDataChangedEvent): string {
+    return `${event.providerId}::${event.publicKeyHex ?? "none"}`;
+  }
+
+  /** 刷新微任务队列 */
+  function flushMicrotaskQueue(): void {
+    const events = Array.from(pendingEvents.values());
+    pendingEvents.clear();
+    microtaskScheduled = false;
+
+    for (const event of events) {
       for (const l of listeners) {
         try {
           l(event);
         } catch (err) {
           console.error("[assetDataNotifier] listener threw", err);
         }
+      }
+    }
+  }
+
+  return {
+    emit(event: AssetDataChangedEvent) {
+      const key = eventKey(event);
+      const existing = pendingEvents.get(key);
+
+      if (existing) {
+        // 合并事件：kinds 求并集，revision 取最新
+        const mergedKinds = Array.from(new Set([...existing.kinds, ...event.kinds]));
+        const mergedRevision = Math.max(existing.revision, event.revision);
+        pendingEvents.set(key, {
+          ...existing,
+          kinds: mergedKinds,
+          revision: mergedRevision
+        });
+      } else {
+        pendingEvents.set(key, event);
+      }
+
+      // 调度微任务
+      if (!microtaskScheduled) {
+        microtaskScheduled = true;
+        queueMicrotask(flushMicrotaskQueue);
       }
     },
     subscribe(handler: (event: AssetDataChangedEvent) => void) {
