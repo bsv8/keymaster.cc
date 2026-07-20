@@ -107,6 +107,47 @@ describe("vaultCoordinator", () => {
     ).resolves.toEqual(material);
   });
 
+  it("recognizes the pre-AAD v1 verifier and replaces it with the v2 verifier", async () => {
+    const password = "vault-password";
+    const passwordSalt = crypto.getRandomValues(new Uint8Array(16));
+    const key = await deriveKey(password, passwordSalt);
+    // This is the exact verifier format written before the crypto-v2 upgrade:
+    // AES-GCM without AAD and plaintext `vault:v1`.
+    const legacyVerifier = await encryptBytes(key, new TextEncoder().encode("vault:v1"));
+    const legacyMeta: VaultMetaRecord = {
+      id: "singleton",
+      saltB64: bytesToHex(passwordSalt),
+      verifierSaltB64: bytesToHex(legacyVerifier.salt),
+      verifierIvB64: bytesToHex(legacyVerifier.iv),
+      verifierCipherB64: bytesToHex(legacyVerifier.ciphertext),
+      createdAt: "2026-06-10T00:00:00.000Z",
+      cryptoVersion: "v1"
+    };
+
+    const resolved = await resolveVaultPasswordKey(password, legacyMeta);
+    expect(resolved).toMatchObject({ encoding: "hex", verifierVersion: "v1" });
+
+    const putMeta = vi.fn(async (_meta: VaultMetaRecord) => undefined);
+    await migrateVaultKeysToV2Aad({
+      meta: legacyMeta,
+      records: [],
+      decryptRecord: vi.fn(),
+      encryptRecord: vi.fn(),
+      putMeta,
+      putMetaAndKeys: vi.fn(),
+      forceReencrypt: true,
+      sourceEncoding: resolved.encoding,
+      sourceVerifierVersion: resolved.verifierVersion,
+      replacementVerifier: await encryptVerifier(key)
+    });
+
+    const migratedMeta = putMeta.mock.calls[0]?.[0] as VaultMetaRecord;
+    await expect(resolveVaultPasswordKey(password, migratedMeta)).resolves.toMatchObject({
+      encoding: "hex",
+      verifierVersion: "v2"
+    });
+  });
+
   it("migrateVaultKeysToV2Aad upgrades legacy v1 records to v2 AAD", async () => {
     const passwordSalt = crypto.getRandomValues(new Uint8Array(16));
     const { key: passwordKey, meta: baseMeta } = await makeMeta("vault-password", passwordSalt);

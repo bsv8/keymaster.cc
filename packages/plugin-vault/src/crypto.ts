@@ -86,6 +86,9 @@ export function vaultKeyAad(publicKeyHex: string): string {
 /** Vault v2 固定 verifier AAD。 */
 export const VAULT_VERIFIER_AAD = "keymaster:v2|vault-verifier";
 
+/** v2 引入 AAD 之前，Vault verifier 使用的固定明文标记。 */
+export const LEGACY_VAULT_VERIFIER_MARKER = "vault:v1";
+
 /** Vault v2 固定 key AAD 前缀。 */
 export const VAULT_KEY_AAD_PREFIX = "keymaster:v2|vault-key|";
 
@@ -188,6 +191,21 @@ export async function verifyVerifier(key: CryptoKey, blob: EncryptedBlob): Promi
   try {
     const plain = await decryptBytesWithAad(key, blob, VAULT_VERIFIER_AAD);
     return new TextDecoder().decode(plain) === VAULT_VERIFIER_AAD;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 校验 v1 Vault verifier。
+ *
+ * v1 没有 additionalData，且明文标记是 `vault:v1`；不能用 v2 verifier
+ * 的 AAD 路径读取。仅用于解锁时迁移，任何新写入始终使用 encryptVerifier。
+ */
+export async function verifyLegacyVerifier(key: CryptoKey, blob: EncryptedBlob): Promise<boolean> {
+  try {
+    const plain = await decryptBytes(key, blob);
+    return new TextDecoder().decode(plain) === LEGACY_VAULT_VERIFIER_MARKER;
   } catch {
     return false;
   }

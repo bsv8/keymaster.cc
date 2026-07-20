@@ -19,6 +19,7 @@ import {
   hexToBytes,
   PBKDF2_PARAMS,
   vaultKeyAad,
+  verifyLegacyVerifier,
   verifyVerifier
 } from "./crypto.js";
 import { deriveKeyIdentity } from "./keyIdentity.js";
@@ -38,10 +39,13 @@ export interface VaultMetaInput {
 
 /** 持久化二进制字段的历史编码。新格式固定 hex；旧版为实际 base64。 */
 export type VaultBinaryEncoding = "hex" | "base64";
+/** verifier 的加密语义；v1 没有 AAD，v2 绑定了固定 AAD。 */
+export type VaultVerifierVersion = "v1" | "v2";
 
 export interface VerifiedVaultPasswordKey {
   key: CryptoKey;
   encoding: VaultBinaryEncoding;
+  verifierVersion: VaultVerifierVersion;
 }
 
 function decodeVaultBytes(value: string, encoding: VaultBinaryEncoding): Uint8Array {
@@ -68,7 +72,7 @@ export async function deriveVaultPasswordKey(password: string, salt: Uint8Array)
 }
 
 /**
- * 通过 verifier 探测历史二进制编码。
+ * 通过 verifier 探测历史二进制编码与 verifier 加密版本。
  *
  * 不根据字符串外观猜测编码：Base64 完全可能只包含 hex 字符。每种候选
  * 都必须用密码派生出的 key 成功解开 verifier，才能被接受。
@@ -84,12 +88,15 @@ export async function resolveVaultPasswordKey(
       // malformed alternate representation from reaching PBKDF2.
       if (salt.byteLength !== 16) continue;
       const key = await deriveVaultPasswordKey(password, salt);
-      const ok = await verifyVerifier(key, {
+      const verifier = {
         salt: decodeVaultBytes(meta.verifierSaltB64, encoding),
         iv: decodeVaultBytes(meta.verifierIvB64, encoding),
         ciphertext: decodeVaultBytes(meta.verifierCipherB64, encoding)
-      });
-      if (ok) return { key, encoding };
+      };
+      if (await verifyVerifier(key, verifier)) return { key, encoding, verifierVersion: "v2" };
+      if (await verifyLegacyVerifier(key, verifier)) {
+        return { key, encoding, verifierVersion: "v1" };
+      }
     } catch {
       // Try the other historic representation. The verifier remains the sole
       // authority: malformed data and a wrong password both fail closed below.
@@ -161,6 +168,9 @@ export async function migrateVaultKeysToV2Aad(input: {
   forceReencrypt?: boolean;
   /** 把旧 meta 的 base64 二进制字段一并改写为当前 hex 格式。 */
   sourceEncoding?: VaultBinaryEncoding;
+  /** v1 verifier 成功解锁后，必须替换为带 AAD 的当前 verifier。 */
+  sourceVerifierVersion?: VaultVerifierVersion;
+  replacementVerifier?: Awaited<ReturnType<typeof encryptVerifier>>;
 }): Promise<void> {
   if (input.meta.cryptoVersion === "v2" && !input.forceReencrypt) {
     return;
@@ -188,17 +198,27 @@ export async function migrateVaultKeysToV2Aad(input: {
     iterations: PBKDF2_PARAMS.iterations,
     keyLengthBits: 256
   };
+  if (input.sourceVerifierVersion === "v1") {
+    if (!input.replacementVerifier) {
+      throw new Error("Legacy verifier migration requires a replacement verifier");
+    }
+    nextMeta.verifierSaltB64 = bytesToHex(input.replacementVerifier.salt);
+    nextMeta.verifierIvB64 = bytesToHex(input.replacementVerifier.iv);
+    nextMeta.verifierCipherB64 = bytesToHex(input.replacementVerifier.ciphertext);
+  }
   if (input.sourceEncoding === "base64") {
     nextMeta.saltB64 = bytesToHex(decodeVaultBytes(input.meta.saltB64, input.sourceEncoding));
-    nextMeta.verifierSaltB64 = bytesToHex(
-      decodeVaultBytes(input.meta.verifierSaltB64, input.sourceEncoding)
-    );
-    nextMeta.verifierIvB64 = bytesToHex(
-      decodeVaultBytes(input.meta.verifierIvB64, input.sourceEncoding)
-    );
-    nextMeta.verifierCipherB64 = bytesToHex(
-      decodeVaultBytes(input.meta.verifierCipherB64, input.sourceEncoding)
-    );
+    if (input.sourceVerifierVersion !== "v1") {
+      nextMeta.verifierSaltB64 = bytesToHex(
+        decodeVaultBytes(input.meta.verifierSaltB64, input.sourceEncoding)
+      );
+      nextMeta.verifierIvB64 = bytesToHex(
+        decodeVaultBytes(input.meta.verifierIvB64, input.sourceEncoding)
+      );
+      nextMeta.verifierCipherB64 = bytesToHex(
+        decodeVaultBytes(input.meta.verifierCipherB64, input.sourceEncoding)
+      );
+    }
   }
   if (!needsWrite) {
     await input.putMeta(nextMeta);

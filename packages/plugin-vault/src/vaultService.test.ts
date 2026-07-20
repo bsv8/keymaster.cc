@@ -165,7 +165,10 @@ async function seedLegacyV1Vault(input: {
       : bytesToHex(bytes);
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveKey(input.password, salt);
-  const verifier = await encryptVerifier(key);
+  // Historical v1 vaults used no AAD and the `vault:v1` marker. Keep this
+  // helper faithful to on-disk data so compatibility tests exercise both the
+  // verifier and key-record migration paths.
+  const verifier = await encryptBytes(key, new TextEncoder().encode("vault:v1"));
   const meta = {
     id: "singleton" as const,
     saltB64: encode(salt),
@@ -760,6 +763,11 @@ describe("VaultService.unlock AAD migration (硬切换 4.3)", () => {
     expect(migrated?.cipherB64).toBeDefined();
     const crypto = await vault.createActiveKeyCrypto(legacyPublicKeyHex);
     expect(crypto.getIdentity().publicKeyHex).toBe(legacyPublicKeyHex);
+    // Migration must also replace the old verifier; otherwise the next lock
+    // screen would reject the same password even though this unlock succeeded.
+    await vault.lock();
+    await vault.unlock("test-pw");
+    expect(vault.status()).toBe("unlocked");
   });
 
   it("unlocks legacy base64 vault data and rewrites it to the current hex representation", async () => {
@@ -785,6 +793,9 @@ describe("VaultService.unlock AAD migration (硬切换 4.3)", () => {
     expect((await vault.createActiveKeyCrypto(legacyPublicKeyHex)).getIdentity().publicKeyHex).toBe(
       legacyPublicKeyHex
     );
+    await vault.lock();
+    await vault.unlock("test-pw");
+    expect(vault.status()).toBe("unlocked");
   });
 });
 

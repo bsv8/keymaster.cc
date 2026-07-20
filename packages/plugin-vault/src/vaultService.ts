@@ -1075,7 +1075,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     async unlock(password) {
       const meta = await vaultDb.getMeta();
       if (!meta) throw new Error("Vault not initialized");
-      const { key, encoding } = await coordinatorResolveVaultPasswordKey(password, meta);
+      const { key, encoding, verifierVersion } = await coordinatorResolveVaultPasswordKey(password, meta);
       startVaultSession();
       try {
         await coordinatorMigrateVaultKeysToV2Aad({
@@ -1086,8 +1086,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material),
           putMeta: (nextMeta) => vaultDb.putMeta(nextMeta),
           putMetaAndKeys: (nextMeta, records) => vaultDb.putMetaAndKeys(nextMeta, records),
-          forceReencrypt: encoding === "base64",
-          sourceEncoding: encoding
+          forceReencrypt: encoding === "base64" || verifierVersion === "v1",
+          sourceEncoding: encoding,
+          sourceVerifierVersion: verifierVersion,
+          replacementVerifier: verifierVersion === "v1" ? await encryptVerifier(key) : undefined
         });
         // 硬切换 005 收尾：unlock 收尾前若 vault_keys 已空，按"meta 残留"
         // 路径收敛到 uninitialized——直接清空内存会话、删 meta，不再走
