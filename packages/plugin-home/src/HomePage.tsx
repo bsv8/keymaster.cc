@@ -35,7 +35,6 @@ export function HomePage() {
   if (widgets.length === 0) {
     return (
       <div className="home-page">
-        <BusinessHomePage />
         <PageHeader
           title={t("home.page.title", { defaultValue: "首页" })}
           description={t("home.page.description", { defaultValue: "按插件注册的资源面板。" })}
@@ -44,6 +43,7 @@ export function HomePage() {
           title={t("home.page.empty.title", { defaultValue: "还没有 widget" })}
           description={t("home.page.empty.description", { defaultValue: "安装业务插件后这里会显示资源面板。" })}
         />
+        <BusinessHomePage />
       </div>
     );
   }
@@ -52,7 +52,6 @@ export function HomePage() {
 
   return (
     <div className="home-page">
-      <BusinessHomePage />
       <PageHeader
         title={t("home.page.title", { defaultValue: "首页" })}
         description={t("home.page.description", { defaultValue: "按插件注册的资源面板。" })}
@@ -73,6 +72,7 @@ export function HomePage() {
           ))}
         </div>
       </div>
+      <BusinessHomePage />
     </div>
   );
 }
