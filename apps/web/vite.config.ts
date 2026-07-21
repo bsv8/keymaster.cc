@@ -2,8 +2,9 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  // 构建产物的 HTML、JS、CSS 资源均按入口文件使用相对 URL。
-  base: "./",
+  // 应用使用 history 路由。资源必须从站点根路径加载；相对 URL 会在
+  // `/settings/system-status` 等深层路由被解析为 `/settings/_static/*`。
+  base: "/",
   plugins: [react()],
   build: {
     // 设计缘由：
