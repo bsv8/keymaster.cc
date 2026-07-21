@@ -389,6 +389,12 @@ export type BroadcastCoreState =
   /** 远端断开；core 正在按固定延迟等待重试。 */
   | "closed";
 
+export interface BroadcastConnectionIdentity {
+  sessionEpoch: string;
+  activePublicKeyHex: string;
+  keyspaceGeneration: number;
+}
+
 /**
  * Broadcast core 快照（不发起任何 IO）。
  *
@@ -402,7 +408,7 @@ export interface BroadcastCoreSnapshot {
   state: BroadcastCoreState;
   providerId: string | null;
   /** 当前 owner 公钥 hex；非 unlocked 状态为 null。 */
-  ownerPublicKeyHex: string | null;
+  desiredConnectionOwnerPublicKeyHex: string | null;
   /** 最近一次错误 message；无错误时为 null。 */
   lastError: string | null;
   /** 当前有效订阅 exact channel 列表。 */
@@ -411,7 +417,7 @@ export interface BroadcastCoreSnapshot {
 }
 
 /**
- * `connectForOwner` 的结果分类（与 AppMsgConnectOutcome 同构风格）。
+ * `reconcileOwnerConnection` 的结果分类（与 AppMsgConnectOutcome 同构风格）。
  *
  * 设计缘由：core 在重连循环里需要"成功 / 结构性不可连接 / 可重试
  * 失败 / 过期"四种状态的真值，**不**只写 `lastError` 不抛错。
@@ -452,15 +458,15 @@ export interface BroadcastCore {
   /**
    * bind 当前 owner（rebind 当前 active provider）。
    *
-   * 失败语义与 `AppMsgCore.connectForOwner` 对齐：
+   * 失败语义与 Broadcast connection lifecycle 对齐：
    *   - 直接返回 `BroadcastConnectOutcome`；
    *   - `structurallyOffline.reason` 包含 `no_active_provider` /
    *     `no_signer` 两种真值；
    *   - `stale` 来自 core 内部 `connectEpoch` 自增（被同实例另一次
-   *     `connectForOwner` 抢占）。
+   *     `reconcileOwnerConnection` 抢占）。
    */
-  connectForOwner(
-    ownerPublicKeyHex: string,
+  reconcileOwnerConnection(
+    identity: BroadcastConnectionIdentity,
     callerEpoch?: number
   ): Promise<BroadcastConnectOutcome>;
   /** 关闭连接；幂等。 */
@@ -533,7 +539,7 @@ export interface BroadcastCore {
    *
    * 返回取消订阅函数。
    */
-  onStateChange(handler: () => void): BroadcastUnsubscribe;
+  onConnectionStateChanged(handler: () => void): BroadcastUnsubscribe;
 
   /* ====== platform internal：当前 handle（仅 core 内部用） ====== */
 

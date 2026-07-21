@@ -139,8 +139,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const dataNotifier = host.capabilities.get<AssetDataNotifier>(
     ASSET_DATA_NOTIFIER_CAPABILITY
   );
-  coordinatorClient.onEvent("data-changed", (event) => {
-    if (event.type === "data-changed") {
+  coordinatorClient.subscribeTopic("asset.data-changed", (event) => {
+    if (event.type === "asset.data-changed") {
       dataNotifier.emit(event);
     }
   });

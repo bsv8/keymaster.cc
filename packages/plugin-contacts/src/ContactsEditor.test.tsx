@@ -36,7 +36,7 @@ function makeFakeKeyspace(): KeyspaceService {
       capabilities: [],
       createdAt: "2024-01-01T00:00:00.000Z"
     }),
-    onActiveChange: (handler) => {
+    onActiveKeyChanged: (handler) => {
       listeners.add(handler);
       return () => listeners.delete(handler);
     },

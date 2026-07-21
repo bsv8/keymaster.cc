@@ -211,8 +211,8 @@ import type { ProtocolServiceImpl } from "./protocolService.js";
 function makeFakeVaultService(): VaultService {
   return {
     status: () => "locked",
-    onStatusChange: () => () => undefined,
-    getSessionState: () => null,
+    onLifecycleChange: () => () => undefined,
+    getLifecycleSnapshot: () => ({ status: "locked", sessionEpoch: "test", vaultLifecycleRevision: 0 }),
     getInitialActivationNotice: () => null,
     clearInitialActivationNotice: () => undefined,
     onInitialActivationNoticeChange: () => () => undefined,
@@ -716,8 +716,8 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
   ): VaultService {
     return {
       status: () => "locked",
-      onStatusChange: () => () => undefined,
-      getSessionState: () => null,
+      onLifecycleChange: () => () => undefined,
+      getLifecycleSnapshot: () => ({ status: "locked", sessionEpoch: "test", vaultLifecycleRevision: 0 }),
       getInitialActivationNotice: () => null,
       clearInitialActivationNotice: () => undefined,
       onInitialActivationNoticeChange: () => () => undefined,

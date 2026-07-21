@@ -18,10 +18,10 @@ export {
   type StorageLike
 } from "./broadcastCore.js";
 export {
-  createReconnectCoordinator,
-  type ReconnectLogger,
-  type CreateReconnectCoordinatorInput
-} from "./reconnectCoordinator.js";
+  createBroadcastConnectionLifecycle,
+  type BroadcastConnectionLifecycleLogger,
+  type CreateBroadcastConnectionLifecycleInput
+} from "./broadcastConnectionLifecycle.js";
 export {
   createBroadcastService,
   type BroadcastService

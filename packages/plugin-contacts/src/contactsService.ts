@@ -61,7 +61,7 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     return handle;
   }
 
-  deps.keyspace.onActiveChange((state) => {
+  deps.keyspace.onActiveKeyChanged((state) => {
     if (handle && state.activePublicKeyHex === handleFor) {
       return;
     }

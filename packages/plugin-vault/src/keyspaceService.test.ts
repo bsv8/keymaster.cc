@@ -82,8 +82,8 @@ function makeFakeBackground(
         throw new Error("simulated cancelByKey failure");
       }
     },
-    listSnapshots: () => [],
-    onChange: () => () => undefined,
+    listTaskSnapshots: () => [],
+    onTaskSnapshotsChanged: () => () => undefined,
     trigger: () => undefined,
     cancel: async () => ({ status: "accepted" as const }),
     runNow: async () => ({ status: "accepted" as const }),

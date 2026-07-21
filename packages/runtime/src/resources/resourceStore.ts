@@ -123,9 +123,9 @@ export function createResourceStore(
     if (activeKeyUnsubscribe) activeKeyUnsubscribe();
     activeKeyUnsubscribe = null;
     boundKeyspace = keyspace ?? null;
-    if (!keyspace?.onActiveChange) return;
+    if (!keyspace?.onActiveKeyChanged) return;
     bindingReconcilePending = true;
-    activeKeyUnsubscribe = keyspace.onActiveChange(() => {
+    activeKeyUnsubscribe = keyspace.onActiveKeyChanged(() => {
       bindingReconcilePending = false;
       handleActiveKeyChange();
     });

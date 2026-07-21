@@ -21,6 +21,8 @@ import {
   TOPBAR_REGISTRY_CAPABILITY
 } from "@keymaster/contracts";
 import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinator.js";
+
+export const BACKGROUND_TASK_SNAPSHOTS_RESOURCE_ID = "background.taskSnapshots";
 import type { CoordinatorClientLike } from "./backgroundServiceCoordinator.js";
 import { BackgroundTray } from "./BackgroundTray.js";
 import { BackgroundSettingsPage } from "./BackgroundSettingsPage.js";
@@ -125,7 +127,7 @@ export const backgroundPlugin: PluginManifest = {
       scope: "global",
       key: () => ["background.scheduleSettings"],
       load: async () => service.getScheduleSettings(),
-      subscribe: (_args, _ctx, invalidate) => service.onChange(invalidate),
+      subscribe: (_args, _ctx, invalidate) => service.onTaskSnapshotsChanged(invalidate),
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
         return prev.assetHoldingsIntervalMs === next.assetHoldingsIntervalMs;
@@ -135,11 +137,11 @@ export const backgroundPlugin: PluginManifest = {
 
     // background.taskSnapshots：后台任务快照列表
     resources.register<BackgroundTaskSnapshot[], readonly string[]>({
-      id: "background.taskSnapshots",
+      id: BACKGROUND_TASK_SNAPSHOTS_RESOURCE_ID,
       scope: "global",
-      key: () => ["background.taskSnapshots"],
-      load: async () => service.listSnapshots(),
-      subscribe: (_args, _ctx, invalidate) => service.onChange(invalidate),
+      key: () => [BACKGROUND_TASK_SNAPSHOTS_RESOURCE_ID],
+      load: async () => service.listTaskSnapshots(),
+      subscribe: (_args, _ctx, invalidate) => service.onTaskSnapshotsChanged(invalidate),
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
         if (prev.length !== next.length) return false;

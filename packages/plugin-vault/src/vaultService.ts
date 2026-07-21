@@ -38,6 +38,7 @@ import {
   type ProviderSealedMessageRecord,
   type VaultService,
   type VaultStatus,
+  type VaultLifecycleSnapshot,
   type CoordinatorCommandResult
 } from "@keymaster/contracts";
 import type { VaultSessionState } from "@keymaster/contracts";
@@ -201,8 +202,10 @@ export interface VaultServiceDeps {
 }
 
 export function createVaultService(deps: VaultServiceDeps): VaultService {
-  const statusListeners = new Set<(s: VaultStatus) => void>();
+  const lifecycleListeners = new Set<(snapshot: VaultLifecycleSnapshot) => void>();
   let status: VaultStatus = "booting";
+  let sessionEpoch = "boot";
+  let vaultLifecycleRevision = 0;
   type SessionCryptoEngine = Awaited<ReturnType<typeof createSessionCryptoEngine>>;
   interface VaultSessionStateInternal extends VaultSessionState {
     activeCrypto: SessionCryptoEngine | null;
@@ -459,7 +462,10 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
     }
     status = next;
-    for (const l of statusListeners) l(next);
+    sessionEpoch = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    vaultLifecycleRevision += 1;
+    const snapshot: VaultLifecycleSnapshot = { status, sessionEpoch, vaultLifecycleRevision };
+    for (const l of lifecycleListeners) l(snapshot);
   }
 
   async function bootstrap() {
@@ -720,18 +726,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     status() {
       return status;
     },
-    onStatusChange(handler) {
-      statusListeners.add(handler);
-      return () => statusListeners.delete(handler);
+    onLifecycleChange(handler) {
+      lifecycleListeners.add(handler);
+      handler({ status, activePublicKeyHex: vaultSession?.publicKeyHex, sessionEpoch, vaultLifecycleRevision });
+      return () => lifecycleListeners.delete(handler);
     },
-    getSessionState() {
-      if (!vaultSession) return null;
-      return {
-        sessionId: vaultSession.sessionId,
-        kind: vaultSession.kind,
-        publicKeyHex: vaultSession.publicKeyHex,
-        revoked: vaultSession.revoked
-      };
+    getLifecycleSnapshot() {
+      return { status, activePublicKeyHex: vaultSession?.publicKeyHex, sessionEpoch, vaultLifecycleRevision };
     },
 
     /**
@@ -1291,7 +1292,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         activeChangeUnsub();
         activeChangeUnsub = null;
       }
-      statusListeners.clear();
+      lifecycleListeners.clear();
       noticeListeners.clear();
     },
 

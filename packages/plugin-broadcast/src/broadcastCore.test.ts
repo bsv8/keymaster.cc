@@ -30,7 +30,8 @@ import type {
   VaultService
 } from "@keymaster/contracts";
 import { BroadcastCoreImpl, type BroadcastCoreConfig } from "./broadcastCore.js";
-import { verifyBroadcastEnvelope } from "./signer.js";
+import { signBroadcastEnvelope, verifyBroadcastEnvelope } from "./signer.js";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 class FakeProvider implements BroadcastProvider {
   readonly id: string;
@@ -201,6 +202,21 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
+describe("provider signer contract", () => {
+  it("hashes an arbitrary challenge before invoking the digest signer", async () => {
+    const challenge = new TextEncoder().encode("hubcast bind challenge is not 32 bytes");
+    let receivedDigest: Uint8Array | undefined;
+
+    const signatureHex = await signBroadcastEnvelope(challenge, async (digest) => {
+      receivedDigest = digest;
+      return new Uint8Array(64).fill(0x42);
+    });
+
+    expect(receivedDigest).toEqual(sha256(challenge));
+    expect(signatureHex).toBe("42".repeat(64));
+  });
+});
+
 interface CoreHarness {
   core: BroadcastCore;
   provider: FakeProvider;
@@ -223,7 +239,7 @@ async function makeCore(input?: { activeProvider?: boolean }): Promise<CoreHarne
   core.providers().register(provider);
   if (input?.activeProvider ?? true) {
     await core.providers().setActive("hubcast");
-    const result = await core.connectForOwner(PUB_HEX);
+    const result = await core.reconcileOwnerConnection({ sessionEpoch: "test", activePublicKeyHex: PUB_HEX, keyspaceGeneration: 0 });
     expect(result.kind).toBe("connected");
   }
   return {
@@ -481,7 +497,7 @@ describe("BroadcastCoreImpl", () => {
     harness.core.markStructurallyOffline();
     const snap = harness.core.inspect();
     expect(snap.state).toBe("idle");
-    expect(snap.ownerPublicKeyHex).toBeNull();
+    expect(snap.desiredConnectionOwnerPublicKeyHex).toBeNull();
     expect(snap.lastError).toBeNull();
     expect(snap.nextReconnectAtMs).toBeNull();
   });
@@ -507,7 +523,7 @@ describe("BroadcastCoreImpl", () => {
     const core = BroadcastCoreImpl.create(cfg);
     core.providers().register(new FakeProvider("hubcast"));
     await core.providers().setActive("hubcast");
-    const out: BroadcastConnectOutcome = await core.connectForOwner(PUB_HEX);
+    const out: BroadcastConnectOutcome = await core.reconcileOwnerConnection({ sessionEpoch: "test", activePublicKeyHex: PUB_HEX, keyspaceGeneration: 0 });
     expect(out.kind).toBe("structurallyOffline");
     if (out.kind === "structurallyOffline") {
       expect(out.reason).toBe("no_signer");
@@ -527,7 +543,7 @@ describe("BroadcastCoreImpl", () => {
       reconnectDelayMs: 5_000
     };
     const core = BroadcastCoreImpl.create(cfg);
-    const out: BroadcastConnectOutcome = await core.connectForOwner(PUB_HEX);
+    const out: BroadcastConnectOutcome = await core.reconcileOwnerConnection({ sessionEpoch: "test", activePublicKeyHex: PUB_HEX, keyspaceGeneration: 0 });
     expect(out.kind).toBe("structurallyOffline");
     if (out.kind === "structurallyOffline") {
       expect(out.reason).toBe("no_active_provider");

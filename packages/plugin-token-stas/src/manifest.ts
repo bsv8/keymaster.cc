@@ -98,7 +98,7 @@ export const stasTokenPlugin: PluginManifest = {
     }
 
     // 监听 active key 变化（保留订阅用于状态管理，不触发网络任务）
-    const offActiveChange = keyspace.onActiveChange(() => {
+    const offActiveChange = keyspace.onActiveKeyChanged(() => {
       // 不触发 sync：由 P2PKH resource-ready 统一驱动。
     });
 

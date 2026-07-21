@@ -448,7 +448,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   // 实例仍会响应 active-key 事件，破坏热卸载语义。
   const keyspaceUnsubs: Array<() => void> = [];
   function trackKeyspaceSubscribe(handler: () => void) {
-    const off = deps.keyspace.onActiveChange(handler);
+    const off = deps.keyspace.onActiveKeyChanged(handler);
     keyspaceUnsubs.push(off);
     return off;
   }

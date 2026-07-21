@@ -69,7 +69,7 @@ function makeFakeKeyspace(activePublicKeyHex?: string) {
   return {
     keyspace: {
       active: () => ({ activePublicKeyHex: activePublicKeyHex ?? ACTIVE_PK }),
-      onActiveChange: (h: (s: ActiveKeyState) => void) => {
+      onActiveKeyChanged: (h: (s: ActiveKeyState) => void) => {
         activeListeners.add(h);
         return () => activeListeners.delete(h);
       },

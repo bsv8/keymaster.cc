@@ -58,8 +58,7 @@ export interface VaultKeyResourceState {
 interface CoordinatorClientLike {
   getIsConnected(): boolean;
   getState(): { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string; keyspaceGeneration: number };
-  onStateChange(handler: (state: { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string }) => void): () => void;
-  onEvent(eventType: string, handler: (event: { type: string; status?: CoordinatorVaultStatus; activePublicKeyHex?: string }) => void): () => void;
+  subscribeTopic(topic: string, handler: (event: any) => void): () => void;
   unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
   lock(): Promise<CoordinatorCommandResult>;
   activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
@@ -404,7 +403,7 @@ export const vaultPlugin: PluginManifest = {
         const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
         const bus = context.getCapability<MessageBus>("runtime.messageBus");
         const offs = [
-          keyspace?.onActiveChange(invalidate),
+          keyspace?.onActiveKeyChanged(invalidate),
           keyspace?.onInitializationChange(invalidate),
           vault?.onInitialActivationNoticeChange?.(invalidate),
           bus?.subscribe("key.created", invalidate),

@@ -61,8 +61,14 @@ function makeVaultStub(publicKeyHex: string): VaultService {
   // 读到的 vault.status 与真实一致。
   const state = { locked: false };
   const listeners = new Set<(s: "locked" | "unlocked") => void>();
+  const lifecycleListeners = new Set<(snapshot: { status: "locked" | "unlocked" }) => void>();
   return {
     status: () => (state.locked ? "locked" : "unlocked"),
+    getLifecycleSnapshot: () => ({ status: state.locked ? "locked" as const : "unlocked" as const, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
+    onLifecycleChange: (h: (snapshot: { status: "locked" | "unlocked" }) => void) => {
+      lifecycleListeners.add(h);
+      return () => lifecycleListeners.delete(h);
+    },
     onStatusChange: (h: (s: "locked" | "unlocked") => void) => {
       listeners.add(h);
       return () => listeners.delete(h);
@@ -151,11 +157,13 @@ function makeVaultStub(publicKeyHex: string): VaultService {
     unlock: async () => {
       state.locked = false;
       for (const l of listeners) l("unlocked");
+      for (const l of lifecycleListeners) l({ status: "unlocked" });
       return { status: "accepted" as const };
     },
     lock: async () => {
       state.locked = true;
       for (const l of listeners) l("locked");
+      for (const l of lifecycleListeners) l({ status: "locked" });
       return { status: "accepted" as const };
     },
     verifyPassword: async () => undefined,
@@ -3691,14 +3699,14 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
     let currentStatus: VaultStatus = "locked";
     vaultLocked.status = () => currentStatus;
-    const unlockListeners: Array<(s: VaultStatus) => void> = [];
-    vaultLocked.onStatusChange = (h: (s: VaultStatus) => void) => {
+    const unlockListeners: Array<(s: any) => void> = [];
+    vaultLocked.onLifecycleChange = (h: (s: any) => void) => {
       unlockListeners.push(h);
       return () => undefined;
     };
     vaultLocked.unlock = async (_password: string) => {
       currentStatus = "unlocked";
-      for (const l of unlockListeners) l("unlocked");
+      for (const l of unlockListeners) l({ status: "unlocked", sessionEpoch: "test", vaultLifecycleRevision: 1 });
       return { status: "accepted" as const };
     };
     const { service, opener, storageDb } = makeService(TEST_PUB_HEX, undefined, {
@@ -4234,8 +4242,8 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 2026-06-30 003 后 setVaultLockState 通过 computeLockState() 重算，
     // 需要 vault.status() 反映真实状态——这里走 fake vault 自带的 lock()
     // + onStatusChange 通路。
-    deps.vault.onStatusChange((s) => {
-      if (s === "locked") {
+    deps.vault.onLifecycleChange((snapshot) => {
+      if (snapshot.status === "locked") {
         lockCalls++;
         service.setVaultLockState(true);
       }
@@ -7432,8 +7440,8 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
     // 默认 vault unlocked
     expect(service.lockState()).toBe("unlocked");
     // vault lock：listener 路径走 setVaultLockState(true)
-    deps.vault.onStatusChange((s) => {
-      if (s === "locked") service.setVaultLockState(true);
+    deps.vault.onLifecycleChange((snapshot) => {
+      if (snapshot.status === "locked") service.setVaultLockState(true);
       else service.setVaultLockState(false);
     });
     // 调用 fake vault 的 lock 触发监听
@@ -7462,8 +7470,8 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       revokedAt: null
     });
     // vault listener：模拟真实链路翻转 service 端 lockState。
-    deps.vault.onStatusChange((s) => {
-      if (s === "locked") service.setVaultLockState(true);
+    deps.vault.onLifecycleChange((snapshot) => {
+      if (snapshot.status === "locked") service.setVaultLockState(true);
       else service.setVaultLockState(false);
     });
     // 初始 vault unlocked，service 端应已 unlocked。

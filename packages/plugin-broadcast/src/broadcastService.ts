@@ -45,7 +45,7 @@ export interface BroadcastService {
    * 每次核心 state / active provider / union 变化都触发；UI 据此调
    * `snapshot()` 刷新。
    */
-  onChange(handler: () => void): () => void;
+  onBroadcastConnectionStateChanged(handler: () => void): () => void;
 }
 
 export function createBroadcastService(core: BroadcastCore): BroadcastService {
@@ -58,6 +58,6 @@ export function createBroadcastService(core: BroadcastCore): BroadcastService {
     snapshot: () => core.inspect(),
     providers: () => core.providers().list(),
     setActiveProvider: (id) => coreWithOps.setActiveProviderId(id),
-    onChange: (handler) => core.onStateChange(handler)
+    onBroadcastConnectionStateChanged: (handler) => core.onConnectionStateChanged(handler)
   };
 }

@@ -11,8 +11,8 @@ import type {
   CoordinatorVaultStatus,
   CoordinatorClientRequest,
   CoordinatorResponse,
-  CoordinatorEvent,
-  CoordinatorSnapshot,
+  CoordinatorTopicEvent,
+  CoordinatorBootstrapSnapshot,
   CoordinatorTopic,
   CoordinatorCommandResult,
   CoordinatorValueResult,
@@ -22,6 +22,7 @@ import type {
   CoordinatorBackgroundSyncSettings,
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
+  CoordinatorSubscribeTopicsResult,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -34,15 +35,6 @@ export interface CoordinatorClientOptions {
   clientId?: string;
   requestTimeoutMs?: number;
   reconnectIntervalMs?: number;
-}
-
-export interface CoordinatorClientState {
-  sessionEpoch: SessionEpoch;
-  vaultStatus: CoordinatorVaultStatus;
-  activePublicKeyHex?: string;
-  keyspaceGeneration: number;
-  taskSnapshots: CoordinatorTaskSnapshot[];
-  scheduleSettings: CoordinatorBackgroundSyncSettings;
 }
 
 export interface RecoverableCoordinatorDiagnostic {
@@ -67,7 +59,7 @@ export class KeymasterSessionCoordinatorClient {
   private requestTimeoutMs: number;
   private reconnectIntervalMs: number;
 
-  private state: CoordinatorClientState = {
+  private bootstrapSnapshotCache: CoordinatorBootstrapSnapshot = {
     sessionEpoch: "boot",
     vaultStatus: "booting",
     keyspaceGeneration: 0,
@@ -84,8 +76,13 @@ export class KeymasterSessionCoordinatorClient {
     }
   >();
 
-  private eventListeners = new Map<string, Set<EventListener<CoordinatorEvent>>>();
-  private stateListeners = new Set<EventListener<CoordinatorClientState>>();
+  private eventListeners = new Map<string, Set<EventListener<CoordinatorTopicEvent>>>();
+  private topicCaches = new Map<CoordinatorTopic, CoordinatorTopicEvent>();
+  private vaultLifecycleRevisionCache = -1;
+  private activeKeyRevisionCache = -1;
+  private backgroundSnapshotRevisionCache = -1;
+  private assetDataRevisionCache = -1;
+  private topicEpochs = new Map<CoordinatorTopic, SessionEpoch>();
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -130,7 +127,7 @@ export class KeymasterSessionCoordinatorClient {
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribe(["vault", "keyspace", "background", "data-changed"]);
+      await this.subscribeTopicsAndReadBaselines(["vault.lifecycle", "keyspace.active-key", "background.snapshot", "asset.data-changed"]);
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -186,7 +183,8 @@ export class KeymasterSessionCoordinatorClient {
     // Coordinator 事件不依赖 requestId；先按 type 分流，兼容早期 Worker
     // 曾错误附加 requestId 的状态事件，避免它们被当成 RPC 响应丢弃。
     if (data && typeof data === "object" && "type" in data) {
-      const event = data as CoordinatorEvent;
+      if (!("topic" in data)) return;
+      const event = data as CoordinatorTopicEvent;
       this.handleEvent(event);
       return;
     }
@@ -205,37 +203,16 @@ export class KeymasterSessionCoordinatorClient {
     clearTimeout(pending.timeout);
     this.pendingRequests.delete(response.requestId);
 
-    this.state.sessionEpoch = response.sessionEpoch;
+    this.bootstrapSnapshotCache.sessionEpoch = response.sessionEpoch;
     if (response.operationResult && typeof response.operationResult === "object" && "vaultStatus" in response.operationResult) {
-      const snapshot = response.operationResult as CoordinatorSnapshot;
-      this.state = { ...this.state, ...snapshot, taskSnapshots: [...snapshot.taskSnapshots] };
-      this.notifyStateListeners();
+      const snapshot = response.operationResult as CoordinatorBootstrapSnapshot;
+      this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, ...snapshot, taskSnapshots: [...snapshot.taskSnapshots] };
     }
     pending.resolve(response);
   }
 
-  private handleEvent(event: CoordinatorEvent): void {
-    switch (event.type) {
-      case "vault.status-changed":
-        this.state.vaultStatus = event.status;
-        this.state.activePublicKeyHex = event.activePublicKeyHex;
-        this.state.sessionEpoch = event.sessionEpoch;
-        break;
-
-      case "keyspace.active-changed":
-        this.state.activePublicKeyHex = event.publicKeyHex ?? undefined;
-        this.state.keyspaceGeneration = event.generation;
-        this.state.sessionEpoch = event.sessionEpoch;
-        break;
-
-      case "background.snapshot-updated":
-        this.state.taskSnapshots = event.snapshots;
-        this.state.sessionEpoch = event.sessionEpoch;
-        break;
-    }
-
-    this.notifyStateListeners();
-    this.notifyEventListeners(event);
+  private handleEvent(event: CoordinatorTopicEvent): void {
+    this.applyTopicEvent(event);
   }
 
   private handleMessageError(): void {
@@ -254,8 +231,13 @@ export class KeymasterSessionCoordinatorClient {
   }
 
   private resetDisconnectedState(): void {
-    this.state = { sessionEpoch: "boot", vaultStatus: "booting", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
-    this.notifyStateListeners();
+    this.bootstrapSnapshotCache = { sessionEpoch: "boot", vaultStatus: "booting", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
+    this.topicCaches.clear();
+    this.vaultLifecycleRevisionCache = -1;
+    this.activeKeyRevisionCache = -1;
+    this.backgroundSnapshotRevisionCache = -1;
+    this.assetDataRevisionCache = -1;
+    this.topicEpochs.clear();
   }
 
   // ============================================================
@@ -268,17 +250,23 @@ export class KeymasterSessionCoordinatorClient {
       clientId: this.clientId,
       requestId: this.generateRequestId(),
     };
-    await this.sendRequest(request);
+    const response = await this.sendRequest(request);
+    const result = response.operationResult as CoordinatorSubscribeTopicsResult | undefined;
+    for (const baseline of result?.baselines ?? []) this.applyTopicEvent(baseline.snapshot);
   }
 
-  private async subscribe(topics: CoordinatorTopic[]): Promise<void> {
+  private async subscribeTopicsAndReadBaselines(topics: CoordinatorTopic[]): Promise<void> {
     const request: CoordinatorClientRequest = {
       kind: "subscribe",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       topics,
     };
-    await this.sendRequest(request);
+    const response = await this.sendRequest(request);
+    const result = response.operationResult as CoordinatorSubscribeTopicsResult | undefined;
+    for (const baseline of result?.baselines ?? []) {
+      this.applyTopicEvent(baseline.snapshot);
+    }
   }
 
   async unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult> {
@@ -288,7 +276,7 @@ export class KeymasterSessionCoordinatorClient {
       requestId: this.generateRequestId(),
       password,
       publicKeyHex,
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
   }
@@ -298,7 +286,7 @@ export class KeymasterSessionCoordinatorClient {
       kind: "lock",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
   }
@@ -310,14 +298,14 @@ export class KeymasterSessionCoordinatorClient {
       requestId: this.generateRequestId(),
       password,
       publicKeyHex,
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
   }
 
   async vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>> {
     const normalized = typeof operation === "string" ? ({ type: operation, ...(input as object ?? {}) } as unknown as CoordinatorVaultOperation) : operation;
-    const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation: normalized, expectedSessionEpoch: this.state.sessionEpoch };
+    const request = { kind: "vault.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation: normalized, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
       if (response.ack.status !== "ok") return response.ack;
@@ -336,7 +324,7 @@ export class KeymasterSessionCoordinatorClient {
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       operation,
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     try {
       const response = await this.sendRequest(request);
@@ -353,13 +341,13 @@ export class KeymasterSessionCoordinatorClient {
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       taskId,
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
   }
 
   async backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "background.trigger", clientId: this.clientId, requestId: this.generateRequestId(), taskId, reason, expectedSessionEpoch: this.state.sessionEpoch });
+    return this.requestCommand({ kind: "background.trigger", clientId: this.clientId, requestId: this.generateRequestId(), taskId, reason, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   async backgroundCancel(taskId: string): Promise<CoordinatorCommandResult> {
@@ -368,13 +356,13 @@ export class KeymasterSessionCoordinatorClient {
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       taskId,
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
   }
 
   async backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.state.sessionEpoch });
+    return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
   async backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult> {
@@ -383,7 +371,7 @@ export class KeymasterSessionCoordinatorClient {
       clientId: this.clientId,
       requestId: this.generateRequestId(),
       settings,
-      expectedSessionEpoch: this.state.sessionEpoch,
+      expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     return this.requestCommand(request);
   }
@@ -417,7 +405,7 @@ export class KeymasterSessionCoordinatorClient {
 
   reportRecoverableCoordinatorFailure(kind: string, cause: unknown): void {
     const message = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "Coordinator command failed";
-    this.recoverableDiagnostics.push({ kind, status: "recoverable", message: message.slice(0, 200), sessionEpoch: this.state.sessionEpoch, connected: this.isConnected });
+    this.recoverableDiagnostics.push({ kind, status: "recoverable", message: message.slice(0, 200), sessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, connected: this.isConnected });
     if (this.recoverableDiagnostics.length > 50) this.recoverableDiagnostics.shift();
   }
 
@@ -467,32 +455,32 @@ export class KeymasterSessionCoordinatorClient {
   // 7. State Access
   // ============================================================
 
-  getState(): CoordinatorClientState {
-    return { ...this.state };
+  getBootstrapSnapshot(): CoordinatorBootstrapSnapshot {
+    return { ...this.bootstrapSnapshotCache };
   }
 
   getSessionEpoch(): SessionEpoch {
-    return this.state.sessionEpoch;
+    return this.bootstrapSnapshotCache.sessionEpoch;
   }
 
   getVaultStatus(): CoordinatorVaultStatus {
-    return this.state.vaultStatus;
+    return this.bootstrapSnapshotCache.vaultStatus;
   }
 
   getActivePublicKeyHex(): string | undefined {
-    return this.state.activePublicKeyHex;
+    return this.bootstrapSnapshotCache.activePublicKeyHex;
   }
 
   getKeyspaceGeneration(): number {
-    return this.state.keyspaceGeneration;
+    return this.bootstrapSnapshotCache.keyspaceGeneration;
   }
 
   getTaskSnapshots(): CoordinatorTaskSnapshot[] {
-    return [...this.state.taskSnapshots];
+    return [...this.bootstrapSnapshotCache.taskSnapshots];
   }
 
   getScheduleSettings(): CoordinatorBackgroundSyncSettings {
-    return { ...this.state.scheduleSettings };
+    return { ...this.bootstrapSnapshotCache.scheduleSettings };
   }
 
   getIsConnected(): boolean {
@@ -503,45 +491,73 @@ export class KeymasterSessionCoordinatorClient {
   // 8. Event Listeners
   // ============================================================
 
-  onStateChange(listener: EventListener<CoordinatorClientState>): () => void {
-    this.stateListeners.add(listener);
-    listener(this.getState());
-    return () => { this.stateListeners.delete(listener); };
-  }
-
-  onEvent(eventType: CoordinatorEvent["type"], listener: EventListener<CoordinatorEvent>): () => void {
-    if (!this.eventListeners.has(eventType)) {
-      this.eventListeners.set(eventType, new Set());
+  subscribeTopic(topic: CoordinatorTopic, listener: (event: any) => void): () => void {
+    const key = topic as string;
+    if (!this.eventListeners.has(key)) this.eventListeners.set(key, new Set());
+    const listeners = this.eventListeners.get(key)!;
+    const typedListener = listener as EventListener<CoordinatorTopicEvent>;
+    listeners.add(typedListener);
+    const baseline = this.topicCaches.get(topic);
+    if (baseline) {
+      try { typedListener(baseline); } catch { /* noop */ }
     }
-    this.eventListeners.get(eventType)!.add(listener);
-    return () => { this.eventListeners.get(eventType)?.delete(listener); };
+    return () => { listeners.delete(typedListener); };
   }
 
-  onAnyEvent(listener: EventListener<CoordinatorEvent>): () => void {
-    return this.onEvent("*" as CoordinatorEvent["type"], listener);
-  }
-
-  private notifyStateListeners(): void {
-    const state = this.getState();
-    for (const listener of this.stateListeners) {
-      try { listener(state); } catch { /* noop */ }
+  private applyTopicEvent(event: CoordinatorTopicEvent): void {
+    const previousEpoch = this.topicEpochs.get(event.topic);
+    if (previousEpoch && previousEpoch !== event.sessionEpoch && event.sessionEpoch !== this.bootstrapSnapshotCache.sessionEpoch) return;
+    const incomingRevision = this.getEventRevision(event);
+    if (incomingRevision === undefined) return;
+    const previousRevision = previousEpoch === event.sessionEpoch ? this.getCachedTopicRevision(event.topic) : -1;
+    if (incomingRevision <= previousRevision) return;
+    this.topicEpochs.set(event.topic, event.sessionEpoch);
+    this.setTopicRevision(event);
+    this.topicCaches.set(event.topic, event);
+    switch (event.type) {
+      case "vault.lifecycle.changed":
+        this.bootstrapSnapshotCache.vaultStatus = event.status;
+        this.bootstrapSnapshotCache.activePublicKeyHex = event.activePublicKeyHex;
+        this.bootstrapSnapshotCache.sessionEpoch = event.sessionEpoch;
+        break;
+      case "keyspace.active-key.changed":
+        this.bootstrapSnapshotCache.activePublicKeyHex = event.publicKeyHex ?? undefined;
+        this.bootstrapSnapshotCache.keyspaceGeneration = event.generation;
+        this.bootstrapSnapshotCache.sessionEpoch = event.sessionEpoch;
+        break;
+      case "background.snapshot.changed":
+        this.bootstrapSnapshotCache.taskSnapshots = [...event.snapshots];
+        this.bootstrapSnapshotCache.sessionEpoch = event.sessionEpoch;
+        break;
     }
-  }
-
-  private notifyEventListeners(event: CoordinatorEvent): void {
-    const listeners = this.eventListeners.get(event.type);
+    const listeners = this.eventListeners.get(event.topic);
     if (listeners) {
       for (const listener of listeners) {
         try { listener(event); } catch { /* noop */ }
       }
     }
 
-    const wildcardListeners = this.eventListeners.get("*" as CoordinatorEvent["type"]);
-    if (wildcardListeners) {
-      for (const listener of wildcardListeners) {
-        try { listener(event); } catch { /* noop */ }
-      }
-    }
+  }
+
+  private getCachedTopicRevision(topic: CoordinatorTopic): number {
+    if (topic === "vault.lifecycle") return this.vaultLifecycleRevisionCache;
+    if (topic === "keyspace.active-key") return this.activeKeyRevisionCache;
+    if (topic === "background.snapshot") return this.backgroundSnapshotRevisionCache;
+    return this.assetDataRevisionCache;
+  }
+
+  private getEventRevision(event: CoordinatorTopicEvent): number | undefined {
+    if (event.topic === "vault.lifecycle") return event.vaultLifecycleRevision;
+    if (event.topic === "keyspace.active-key") return event.activeKeyRevision;
+    if (event.topic === "background.snapshot") return event.backgroundSnapshotRevision;
+    return event.assetDataRevision;
+  }
+
+  private setTopicRevision(event: CoordinatorTopicEvent): void {
+    if (event.topic === "vault.lifecycle") this.vaultLifecycleRevisionCache = event.vaultLifecycleRevision;
+    else if (event.topic === "keyspace.active-key") this.activeKeyRevisionCache = event.activeKeyRevision;
+    else if (event.topic === "background.snapshot") this.backgroundSnapshotRevisionCache = event.backgroundSnapshotRevision;
+    else this.assetDataRevisionCache = event.assetDataRevision;
   }
 
   // ============================================================

@@ -461,7 +461,7 @@ export const p2pkhPlugin: PluginManifest = {
         ? "initializing"
         : (keyspace.active().activePublicKeyHex ? "ready" : "no-active-key"),
       subscribe: (_args, _ctx, invalidate) => {
-        const offActive = keyspace.onActiveChange(invalidate);
+        const offActive = keyspace.onActiveKeyChanged(invalidate);
         const offInit = keyspace.onInitializationChange(invalidate);
         return () => { offActive(); offInit(); };
       },
@@ -493,7 +493,7 @@ export const p2pkhPlugin: PluginManifest = {
         return { rows, backfills, recent, balance };
       },
       subscribe: (_args, _ctx, invalidate) => {
-        const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), service.onRecentSyncStatusChange(invalidate), service.onBackfillStatusChange(invalidate), keyspace.onActiveChange(invalidate)];
+        const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), service.onRecentSyncStatusChange(invalidate), service.onBackfillStatusChange(invalidate), keyspace.onActiveKeyChanged(invalidate)];
         return () => offs.forEach((off) => off());
       },
       invalidation: "microtask"
@@ -509,7 +509,7 @@ export const p2pkhPlugin: PluginManifest = {
         const asset = args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined;
         return { rows: await service.listHistory(asset ? { assetId: asset } : undefined), backfills: await service.listBackfillStates() };
       },
-      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveChange(invalidate)]; return () => offs.forEach((off) => off()); },
+      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveKeyChanged(invalidate)]; return () => offs.forEach((off) => off()); },
       invalidation: "microtask"
     });
     resources.register<{ utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[] }, readonly string[]>({
@@ -523,7 +523,7 @@ export const p2pkhPlugin: PluginManifest = {
         const asset = args[0] === "bsv" || args[0] === "bsvtest" ? args[0] as P2pkhAssetId : undefined;
         return { utxos: await service.listUtxos(asset ? { assetId: asset } : undefined), claims: await service.listLocalInputClaims() };
       },
-      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveChange(invalidate)]; return () => offs.forEach((off) => off()); },
+      subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveKeyChanged(invalidate)]; return () => offs.forEach((off) => off()); },
       invalidation: "microtask"
     });
     resources.register<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, readonly string[]>({
@@ -540,7 +540,7 @@ export const p2pkhPlugin: PluginManifest = {
         return { activePublicKeyHex: publicKeyHex, identity, resource: resourcesForKey[0] };
       },
       subscribe: (_args, _ctx, invalidate) => {
-        const off = keyspace.onActiveChange(invalidate);
+        const off = keyspace.onActiveKeyChanged(invalidate);
         const offData = service.onDataChanged(invalidate);
         return () => { off(); offData(); };
       },

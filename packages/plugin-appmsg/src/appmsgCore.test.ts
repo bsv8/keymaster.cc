@@ -66,7 +66,7 @@ function makeFakeKeyspace(): KeyspaceService & {
 
   return {
     active: () => ({ activePublicKeyHex: activeHex ?? undefined }),
-    onActiveChange: (h: (s: { activePublicKeyHex?: string }) => void) => {
+    onActiveKeyChanged: (h: (s: { activePublicKeyHex?: string }) => void) => {
       activeHandlers.add(h);
       return () => {
         activeHandlers.delete(h);

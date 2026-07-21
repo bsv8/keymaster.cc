@@ -860,8 +860,8 @@ export function createReconnectCoordinator(
     }
   };
 
-  const unsubActive = keyspace.onActiveChange(() => onStructuralChange("keyspace"));
-  const unsubVault = vault.onStatusChange(() => onStructuralChange("vault"));
+  const unsubActive = keyspace.onActiveKeyChanged(() => onStructuralChange("keyspace"));
+  const unsubVault = vault.onLifecycleChange(() => onStructuralChange("vault"));
   const unsubProviderActive = core.providers().onActiveChange(() =>
     onStructuralChange("provider")
   );

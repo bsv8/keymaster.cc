@@ -22,7 +22,7 @@ export function useRuntimeStatus(): RuntimeStatus {
       return;
     }
     setStatus(vault.status());
-    return vault.onStatusChange(setStatus);
+    return vault.onLifecycleChange((snapshot) => setStatus(snapshot.status));
   }, [vault]);
 
   return {

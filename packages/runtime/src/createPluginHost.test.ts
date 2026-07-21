@@ -120,7 +120,7 @@ describe("createPluginHost - runtime resource binding", () => {
     const activeListeners = new Set<() => void>();
     const keyspace = {
       active: () => ({ activePublicKeyHex: "pk1" }),
-      onActiveChange: (handler: () => void) => {
+      onActiveKeyChanged: (handler: () => void) => {
         activeListeners.add(handler);
         return () => activeListeners.delete(handler);
       }

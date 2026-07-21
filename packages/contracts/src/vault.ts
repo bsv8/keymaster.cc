@@ -92,6 +92,13 @@ interface VaultKeyMaterial {
  */
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
 
+export interface VaultLifecycleSnapshot {
+  status: VaultStatus;
+  activePublicKeyHex?: string;
+  sessionEpoch: string;
+  vaultLifecycleRevision: number;
+}
+
 /**
  * 私钥导出 envelope（bsv8 key envelope）。
  * 设计缘由：导出必须由 Vault 完成，因为只有 Vault 能接触到明文私钥。
@@ -171,9 +178,9 @@ export interface VaultService {
   /** 当前状态。 */
   status(): VaultStatus;
   /** 订阅状态变化，返回取消订阅函数。 */
-  onStatusChange(handler: (status: VaultStatus) => void): () => void;
+  onLifecycleChange(handler: (snapshot: VaultLifecycleSnapshot) => void): () => void;
   /** 当前 session 快照；无 session 时返回 null。 */
-  getSessionState(): VaultSessionState | null;
+  getLifecycleSnapshot(): VaultLifecycleSnapshot;
 
   /**
    * "首 Key 已落库但未自动 active"待展示 notice。

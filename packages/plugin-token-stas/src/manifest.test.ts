@@ -100,7 +100,7 @@ function createMockCtx() {
   const capabilities = new Map<string, unknown>([
     ["p2pkh.service", { onGlobalSettingsChange }],
     ["woc.stas.service", {}],
-    ["keyspace.service", { onActiveChange, active: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openKeyStorage: vi.fn() }],
+    ["keyspace.service", { onActiveKeyChanged: onActiveChange, active: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openKeyStorage: vi.fn() }],
     ["token.registry", { register: tokenRegister }],
     ["background.registry", { register }],
     ["runtime.messageBus", mockMessageBus],

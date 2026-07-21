@@ -54,7 +54,7 @@ function makeFakeKeyspace(): KeyspaceService {
       for (const listener of listeners) listener(active);
     },
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "fake", capabilities: [], createdAt: "" }),
-    onActiveChange: (handler) => {
+    onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
       listeners.add(handler);
       return () => listeners.delete(handler);
     },

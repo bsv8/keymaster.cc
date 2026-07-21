@@ -157,7 +157,7 @@ function makeMultiOwnerKeyspace(): KeyspaceService & {
     withActiveKey: async () => {
       throw new Error("not used in this test");
     },
-    onActiveChange: () => () => undefined,
+    onActiveKeyChanged: () => () => undefined,
     async openKeyStorage(input: {
       publicKeyHex: string;
       pluginId: string;

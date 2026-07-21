@@ -645,7 +645,7 @@ describe("p2pkhService task run() 取消语义", () => {
         db: {} as IDBDatabase,
         logger: undefined
       })),
-      onActiveChange: vi.fn(() => () => {})
+      onActiveKeyChanged: vi.fn(() => () => {})
     } as unknown as import("@keymaster/contracts").KeyspaceService;
 
     const messageBus = makeMessageBus();

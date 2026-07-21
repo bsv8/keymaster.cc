@@ -51,7 +51,7 @@ class FakeBroadcastCore implements BroadcastCore {
   providers(): never {
     throw new Error("not used");
   }
-  async connectForOwner(): Promise<never> {
+  async reconcileOwnerConnection(): Promise<never> {
     throw new Error("not used");
   }
   async disconnect(): Promise<void> {}
@@ -80,13 +80,13 @@ class FakeBroadcastCore implements BroadcastCore {
     return {
       state: this.snapshotState,
       providerId: this.activeProviderId,
-      ownerPublicKeyHex: "02".padEnd(66, "a"),
+      desiredConnectionOwnerPublicKeyHex: "02".padEnd(66, "a"),
       lastError: this.lastError,
       subscribedChannels: this.listSubscribedChannels(),
       nextReconnectAtMs: null
     };
   }
-  onStateChange(handler: () => void): BroadcastUnsubscribe {
+  onConnectionStateChanged(handler: () => void): BroadcastUnsubscribe {
     this.stateHandlers.add(handler);
     return () => {
       this.stateHandlers.delete(handler);

@@ -49,8 +49,14 @@ interface FakeVault {
 function makeFakeVault(): FakeVault {
   let statusValue: VaultStatus = "unlocked";
   const statusHandlers = new Set<(s: VaultStatus) => void>();
+  const lifecycleHandlers = new Set<() => void>();
   const v: VaultService = {
     status: () => statusValue,
+    getLifecycleSnapshot: () => ({ status: statusValue, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
+    onLifecycleChange: (h: () => void) => {
+      lifecycleHandlers.add(h);
+      return () => lifecycleHandlers.delete(h);
+    },
     onStatusChange: (h: (s: VaultStatus) => void) => {
       statusHandlers.add(h);
       return () => {
@@ -63,6 +69,7 @@ function makeFakeVault(): FakeVault {
     setStatus(s) {
       statusValue = s;
       for (const h of statusHandlers) h(s);
+      for (const h of lifecycleHandlers) h();
     }
   };
 }
@@ -76,7 +83,7 @@ function makeFakeKeyspace(): FakeKeyspace {
   const activeHandlers = new Set<(s: { activePublicKeyHex?: string }) => void>();
   return {
     active: () => ({ activePublicKeyHex: activeHex ?? undefined }),
-    onActiveChange: (h: (s: { activePublicKeyHex?: string }) => void) => {
+    onActiveKeyChanged: (h: (s: { activePublicKeyHex?: string }) => void) => {
       activeHandlers.add(h);
       return () => {
         activeHandlers.delete(h);

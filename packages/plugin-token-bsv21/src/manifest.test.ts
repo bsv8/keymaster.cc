@@ -93,7 +93,7 @@ async function setupManifest() {
         case "keyspace.service":
           return {
             active: () => ({ activePublicKeyHex: "pk1" }),
-            onActiveChange: onActiveChangeFn,
+            onActiveKeyChanged: onActiveChangeFn,
             isInitializing: () => false,
             openKeyStorage: vi.fn(),
           };

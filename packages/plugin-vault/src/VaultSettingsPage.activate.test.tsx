@@ -72,7 +72,7 @@ function makeKeyspace() {
   });
   return {
     active: () => active,
-    onActiveChange: (handler: (state: ActiveKeyState) => void) => {
+    onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
       listeners.add(handler);
       return () => listeners.delete(handler);
     },
@@ -107,7 +107,7 @@ function registerVaultKeyState(host: ReturnType<typeof createPluginHost>, keyspa
     id: "vault.key-state", scope: "global", key: () => ["vault.key-state"],
     load: async () => ({ keys: await keyspace.listKeys(), active: keyspace.active(), initializing: keyspace.isInitializing(), notice: vault.getInitialActivationNotice?.() ?? null }),
     subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => {
-      const off = keyspace.onActiveChange(invalidate);
+      const off = keyspace.onActiveKeyChanged(invalidate);
       const init = keyspace.onInitializationChange(invalidate);
       return () => { off(); init(); };
     }, invalidation: "immediate"

@@ -12,6 +12,7 @@ import type {
   BackgroundTaskSnapshot,
   BackgroundCommandResult,
   CoordinatorCommandResult,
+  BackgroundSnapshotEvent,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -22,8 +23,7 @@ import type {
 export interface CoordinatorClientLike {
   getIsConnected(): boolean;
   getState(): { taskSnapshots: CoordinatorTaskSnapshotLike[]; scheduleSettings: BackgroundSyncSettings };
-  onStateChange(handler: (state: { taskSnapshots: CoordinatorTaskSnapshotLike[]; scheduleSettings: BackgroundSyncSettings }) => void): () => void;
-  onEvent(eventType: string, handler: (event: { type: string; snapshots?: CoordinatorTaskSnapshotLike[] }) => void): () => void;
+  subscribeTopic(topic: string, handler: (event: any) => void): () => void;
   backgroundRunNow(taskId: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
   backgroundTrigger(taskId: string, reason: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
   backgroundCancel(taskId: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
@@ -37,12 +37,13 @@ interface CoordinatorTaskSnapshotLike {
   pluginId: string;
   label: string;
   state: string;
+  progress?: BackgroundTaskSnapshot["progress"];
   lastStartedAt?: string;
   lastCompletedAt?: string;
   lastAttemptAt?: string;
   nextRunAt?: string;
   error?: string;
-  blockedReason?: { key: string; fallback: string };
+  blockedReason?: BackgroundTaskSnapshot["blockedReason"];
   keyScope?: { publicKeyHex: string; label?: string };
 }
 
@@ -66,19 +67,20 @@ export function createBackgroundServiceCoordinator(
   const { coordinatorClient } = deps;
 
   // 只读 cache
-  let cachedSnapshots: BackgroundTaskSnapshot[] = [];
+  let taskSnapshotsCache: BackgroundTaskSnapshot[] = [];
   let cachedSettings: BackgroundSyncSettings = { assetHoldingsIntervalMs: 900_000 };
 
   // 状态变化监听器
-  const changeHandlers = new Set<(snapshots: BackgroundTaskSnapshot[]) => void>();
+  const taskSnapshotsChangedHandlers = new Set<(snapshots: BackgroundTaskSnapshot[]) => void>();
 
   // 订阅 Coordinator 状态变化
-  const unsubscribeState = coordinatorClient.onStateChange((state: { taskSnapshots: CoordinatorTaskSnapshotLike[]; scheduleSettings: BackgroundSyncSettings }) => {
-    cachedSnapshots = state.taskSnapshots.map((s: CoordinatorTaskSnapshotLike) => ({
+  const unsubscribeTopic = coordinatorClient.subscribeTopic("background.snapshot", (event: BackgroundSnapshotEvent) => {
+    taskSnapshotsCache = event.snapshots.map((s) => ({
       id: s.id,
       pluginId: s.pluginId,
       label: s.label,
       state: s.state as BackgroundTaskSnapshot["state"],
+      progress: s.progress,
       lastStartedAt: s.lastStartedAt,
       lastCompletedAt: s.lastCompletedAt,
       lastAttemptAt: s.lastAttemptAt,
@@ -87,50 +89,31 @@ export function createBackgroundServiceCoordinator(
       blockedReason: s.blockedReason,
       keyScope: s.keyScope,
     }));
-    cachedSettings = state.scheduleSettings;
-    notifyChange();
+    if (event.scheduleSettings) cachedSettings = { ...event.scheduleSettings };
+    emitTaskSnapshotsChanged();
   });
 
-  const unsubscribeEvent = coordinatorClient.onEvent("background.snapshot-updated", (event: { type: string; snapshots?: CoordinatorTaskSnapshotLike[] }) => {
-    if (event.type === "background.snapshot-updated" && event.snapshots) {
-      cachedSnapshots = event.snapshots.map((s: CoordinatorTaskSnapshotLike) => ({
-        id: s.id,
-        pluginId: s.pluginId,
-        label: s.label,
-        state: s.state as BackgroundTaskSnapshot["state"],
-        lastStartedAt: s.lastStartedAt,
-        lastCompletedAt: s.lastCompletedAt,
-        lastAttemptAt: s.lastAttemptAt,
-        nextRunAt: s.nextRunAt,
-        error: s.error,
-        blockedReason: s.blockedReason,
-        keyScope: s.keyScope,
-      }));
-      notifyChange();
-    }
-  });
-
-  function notifyChange() {
-    const snapshots = [...cachedSnapshots];
-    for (const handler of changeHandlers) {
+  function emitTaskSnapshotsChanged() {
+    const snapshots = [...taskSnapshotsCache];
+    for (const handler of taskSnapshotsChangedHandlers) {
       try { handler(snapshots); } catch { /* noop */ }
     }
   }
 
   return {
-    listSnapshots(): BackgroundTaskSnapshot[] {
-      return [...cachedSnapshots];
+    listTaskSnapshots(): BackgroundTaskSnapshot[] {
+      return [...taskSnapshotsCache];
     },
 
-    onChange(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void {
-      changeHandlers.add(handler);
-      handler([...cachedSnapshots]);
-      return () => { changeHandlers.delete(handler); };
+    onTaskSnapshotsChanged(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void {
+      taskSnapshotsChangedHandlers.add(handler);
+      handler([...taskSnapshotsCache]);
+      return () => { taskSnapshotsChangedHandlers.delete(handler); };
     },
 
     async runNow(taskId: string): Promise<BackgroundCommandResult> {
       const result = await coordinatorClient.backgroundRunNow(taskId);
-      notifyChange();
+      emitTaskSnapshotsChanged();
       return toBackgroundResult(result);
     },
 
@@ -164,10 +147,10 @@ export function createBackgroundServiceCoordinator(
 
     async updateScheduleSettings(settings: BackgroundSyncSettings): Promise<BackgroundCommandResult> {
       const result = toBackgroundResult(await coordinatorClient.backgroundSettingsUpdate(settings));
-      notifyChange();
+      emitTaskSnapshotsChanged();
       return result;
     },
-    dispose: () => { unsubscribeState(); unsubscribeEvent(); changeHandlers.clear(); },
+    dispose: () => { unsubscribeTopic(); taskSnapshotsChangedHandlers.clear(); },
   };
 }
 

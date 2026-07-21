@@ -114,7 +114,7 @@ function BroadcastPageInner({
       <div className="km-broadcast-page__row">
         <div className="km-broadcast-page__label">{i18n.t("broadcast.page.owner")}</div>
         <div className="km-broadcast-page__value km-broadcast-page__mono">
-          {snap.ownerPublicKeyHex ?? (
+          {snap.desiredConnectionOwnerPublicKeyHex ?? (
             <span className="km-broadcast-page__muted">{i18n.t("broadcast.page.owner.none")}</span>
           )}
         </div>

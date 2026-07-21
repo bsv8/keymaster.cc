@@ -79,7 +79,7 @@ describe("BackgroundService basics", () => {
     expect(exited).toBe(true);
     await new Promise((r) => setTimeout(r, 30));
     expect(runs).toBe(1);
-    const snap = service.listSnapshots().find((s) => s.id === "t2")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "t2")!;
     expect(snap.state).toBe("idle");
     service.dispose();
   });
@@ -97,7 +97,7 @@ describe("BackgroundService basics", () => {
     });
     service.runNow("t3");
     await new Promise((r) => setTimeout(r, 5));
-    const snap = service.listSnapshots().find((s) => s.id === "t3")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "t3")!;
     expect(snap.state).toBe("blocked");
     expect(snap.blockedReason).toEqual({ key: "test.blocked", fallback: "Test blocked" });
     service.dispose();
@@ -118,7 +118,7 @@ describe("BackgroundService basics", () => {
     service.runNow("t4");
     await new Promise((r) => setTimeout(r, 10));
     expect(runs).toBe(1);
-    const snap = service.listSnapshots().find((s) => s.id === "t4")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "t4")!;
     // 施工单 001：失败不是稳态，自动回到 idle
     expect(snap.state).toBe("idle");
     expect(snap.error).toBe("boom");
@@ -174,7 +174,7 @@ describe("BackgroundService basics", () => {
     await new Promise((r) => setTimeout(r, 150));
     // 只运行了一次
     expect(runs).toBe(1);
-    const snap = service.listSnapshots().find((s) => s.id === "t6")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "t6")!;
     expect(snap.state).toBe("idle");
     service.dispose();
   });
@@ -200,14 +200,14 @@ describe("BackgroundService cancel semantics", () => {
     service.runNow("t-cancel-resolve");
     await new Promise((r) => setTimeout(r, 5));
     // 任务正在运行中
-    const snapRunning = service.listSnapshots().find((s) => s.id === "t-cancel-resolve")!;
+    const snapRunning = service.listTaskSnapshots().find((s) => s.id === "t-cancel-resolve")!;
     expect(snapRunning.state).toBe("running");
     const startedAt = snapRunning.lastStartedAt;
 
     // 取消：abort signal，但 run() 内部 abort listener 会 resolve（不抛错）
     await service.cancel("t-cancel-resolve");
 
-    const snapAfter = service.listSnapshots().find((s) => s.id === "t-cancel-resolve")!;
+    const snapAfter = service.listTaskSnapshots().find((s) => s.id === "t-cancel-resolve")!;
     // 关键断言：状态应为 idle，不是 failed
     expect(snapAfter.state).toBe("idle");
     // 关键断言：lastCompletedAt 不应被更新——取消不是"完成"
@@ -237,7 +237,7 @@ describe("BackgroundService cancel semantics", () => {
     // cancel 触发 abort → run() 抛出 AbortError
     await service.cancel("t-cancel-throw");
 
-    const snap = service.listSnapshots().find((s) => s.id === "t-cancel-throw")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "t-cancel-throw")!;
     // 走取消分支，不是 failed
     expect(snap.state).toBe("idle");
     expect(snap.error).toBeUndefined();
@@ -260,7 +260,7 @@ describe("BackgroundService migration", () => {
       label: "task1",
       async run() {}
     });
-    const snap = service.listSnapshots().find((s) => s.id === "task1")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "task1")!;
     expect(snap.state).toBe("idle");
     service.dispose();
   });
@@ -351,12 +351,12 @@ describe("BackgroundService blocked task recheck", () => {
     service.runNow("t-blocked-recheck");
     await vi.advanceTimersByTimeAsync(10);
     expect(runs).toBe(0);
-    const snap1 = service.listSnapshots().find((s) => s.id === "t-blocked-recheck")!;
+    const snap1 = service.listTaskSnapshots().find((s) => s.id === "t-blocked-recheck")!;
     expect(snap1.state).toBe("blocked");
 
     // 1 分钟后：仍在 blocked
     await vi.advanceTimersByTimeAsync(60_000);
-    const snap2 = service.listSnapshots().find((s) => s.id === "t-blocked-recheck")!;
+    const snap2 = service.listTaskSnapshots().find((s) => s.id === "t-blocked-recheck")!;
     expect(snap2.state).toBe("blocked");
 
     // 修改 canRun 为 ready
@@ -365,7 +365,7 @@ describe("BackgroundService blocked task recheck", () => {
     // 再过 1 分钟（总计 2 分钟）：应重新检查并运行
     await vi.advanceTimersByTimeAsync(60_000);
     expect(runs).toBe(1);
-    const snap3 = service.listSnapshots().find((s) => s.id === "t-blocked-recheck")!;
+    const snap3 = service.listTaskSnapshots().find((s) => s.id === "t-blocked-recheck")!;
     expect(snap3.state).toBe("idle");
 
     service.dispose();
@@ -398,7 +398,7 @@ describe("BackgroundService cancel reschedules", () => {
     await vi.advanceTimersByTimeAsync(30_000);
     await service.cancel("t-cancel-reschedule");
 
-    const snap = service.listSnapshots().find((s) => s.id === "t-cancel-reschedule")!;
+    const snap = service.listTaskSnapshots().find((s) => s.id === "t-cancel-reschedule")!;
     // nextRunAt 应该从取消时刻开始计算（60 秒后）
     const nextRun = new Date(snap.nextRunAt!).getTime();
     const now = Date.now();

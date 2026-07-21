@@ -512,7 +512,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         createdAt: ""
       };
     },
-    onActiveChange(handler) {
+    onActiveKeyChanged(handler) {
       activeListeners.add(handler);
       handler(active);
       return () => activeListeners.delete(handler);

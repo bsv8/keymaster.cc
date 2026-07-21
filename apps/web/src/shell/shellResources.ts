@@ -16,7 +16,7 @@ export function registerShellResources(registry: ResourceRegistry): void {
   registry.register<VaultStatus, readonly string[]>({
     id: "shell.vault-status", scope: "global", key: () => ["shell.vault-status"],
     load: async (_args, context) => context.getCapability<VaultService>("vault.service")?.status() ?? "uninitialized",
-    subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onStatusChange(() => invalidate()) ?? (() => {}),
+    subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onLifecycleChange(() => invalidate()) ?? (() => {}),
     invalidation: "immediate"
   });
   registry.register<unknown, readonly string[]>({
@@ -43,8 +43,8 @@ export function registerShellResources(registry: ResourceRegistry): void {
     subscribe: (_args, context, invalidate) => {
       const vault = context.getCapability<VaultService>("vault.service");
       const keyspace = context.getCapability<KeyspaceService>("keyspace.service");
-      const a = vault?.onStatusChange(() => invalidate()) ?? (() => {});
-      const b = keyspace?.onActiveChange(() => invalidate()) ?? (() => {});
+      const a = vault?.onLifecycleChange(() => invalidate()) ?? (() => {});
+      const b = keyspace?.onActiveKeyChanged(() => invalidate()) ?? (() => {});
       return () => { a(); b(); };
     },
     invalidation: "immediate"

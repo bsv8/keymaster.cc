@@ -29,6 +29,7 @@ import type {
   BroadcastCoreOps,
   BroadcastCoreSnapshot,
   BroadcastCoreState,
+  BroadcastConnectionIdentity,
   BroadcastMessage,
   BroadcastProvider,
   BroadcastProviderHandle,
@@ -293,7 +294,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   private readonly cfg: BroadcastCoreConfig;
   private readonly registry = new BroadcastProviderRegistryImpl();
   /** 当前 bound session。null = 未连接。 */
-  private currentBound: BoundSession | null = null;
+  private boundConnection: BoundSession | null = null;
   /** 本地订阅 union。key = exact channelId；value = Set<SubscribeHandle>。 */
   private readonly subsByChannel = new Map<string, Set<SubscribeHandle>>();
   /** 本地订阅顺序信息（handle → 自身 channelIds 集合）。 */
@@ -303,13 +304,14 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   /** 最近一次错误 message。 */
   private lastErrorValue: string | null = null;
   /** 当前 owner publicKeyHex（structural 视角）。null = 未就绪。 */
-  private currentOwnerPublicKeyHex: string | null = null;
+  private desiredConnectionOwnerPublicKeyHex: string | null = null;
+  private desiredConnectionIdentity: BroadcastConnectionIdentity | null = null;
   /** 当前 core 状态。 */
   private stateValue: BroadcastCoreState = "idle";
   /** 下一次自动重连截止时间戳。null = 不等待。 */
   private nextReconnectAtMsValue: number | null = null;
-  /** connectForOwner 内部 epoch；自增代表"被同实例另一次 connectForOwner 抢占"。 */
-  private connectEpochValue = 0;
+  /** connection lifecycle 内部 epoch；自增代表被同实例另一轮 reconcile 抢占。 */
+  private connectionAttemptEpoch = 0;
   /**
    * 用户主动清空信号（true = 显式 setActive(null) 已发生）。
    *
@@ -459,20 +461,25 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
 
   /* ============== 连接管理 ============== */
 
-  async connectForOwner(
-    ownerPublicKeyHex: string,
+  async reconcileOwnerConnection(
+    identity: BroadcastConnectionIdentity,
     callerEpoch?: number
   ): Promise<BroadcastConnectOutcome> {
-    const myEpoch = ++this.connectEpochValue;
+    if (this.desiredConnectionIdentity && JSON.stringify(this.desiredConnectionIdentity) === JSON.stringify(identity) && this.stateValue === "bound") {
+      return { kind: "connected" };
+    }
+    const myEpoch = ++this.connectionAttemptEpoch;
     void callerEpoch; // caller 端用来做"await 后自检"；core 内部不读不校验
-    this.currentOwnerPublicKeyHex = ownerPublicKeyHex;
+    const ownerPublicKeyHex = identity.activePublicKeyHex;
+    this.desiredConnectionIdentity = { ...identity };
+    this.desiredConnectionOwnerPublicKeyHex = ownerPublicKeyHex;
     const ctx = await this.cfg.signerProvider();
     if (!ctx) {
       this.lastErrorValue = "no_signer";
       this.markStructurallyOffline();
       return { kind: "structurallyOffline", reason: "no_signer" };
     }
-    if (this.connectEpochValue !== myEpoch) {
+    if (this.connectionAttemptEpoch !== myEpoch) {
       return { kind: "stale" };
     }
     const active = this.registry.active();
@@ -481,7 +488,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       this.markStructurallyOffline();
       return { kind: "structurallyOffline", reason: "no_active_provider" };
     }
-    if (this.connectEpochValue !== myEpoch) {
+    if (this.connectionAttemptEpoch !== myEpoch) {
       return { kind: "stale" };
     }
     this.stateValue = "connecting";
@@ -490,7 +497,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       const handle = (await active.bind({
         signer: this.makeProviderSigner(ctx)
       })) as BroadcastProviderOperations;
-      if (this.connectEpochValue !== myEpoch) {
+      if (this.connectionAttemptEpoch !== myEpoch) {
         try {
           handle.close();
         } catch {
@@ -502,7 +509,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       await this.disposeCurrentSession();
       const offReceive = handle.subscribeBroadcasts((ev) => this.onProviderBroadcast(ev));
       const offClose = handle.onClose(() => this.onProviderClose());
-      this.currentBound = {
+      this.boundConnection = {
         ownerPublicKeyHex,
         handle,
         signChallenge: ctx.signChallenge,
@@ -535,22 +542,24 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   }
 
   async disconnect(): Promise<void> {
-    ++this.connectEpochValue;
+    ++this.connectionAttemptEpoch;
     await this.disposeCurrentSession();
     this.stateValue = "idle";
     this.lastErrorValue = null;
     this.nextReconnectAtMsValue = null;
-    this.currentOwnerPublicKeyHex = null;
+    this.desiredConnectionOwnerPublicKeyHex = null;
+    this.desiredConnectionIdentity = null;
     this.fireStateChange();
   }
 
   markStructurallyOffline(): void {
-    ++this.connectEpochValue;
+    ++this.connectionAttemptEpoch;
     void this.disposeCurrentSession();
     this.stateValue = "idle";
     this.lastErrorValue = null;
     this.nextReconnectAtMsValue = null;
-    this.currentOwnerPublicKeyHex = null;
+    this.desiredConnectionOwnerPublicKeyHex = null;
+    this.desiredConnectionIdentity = null;
     this.fireStateChange();
   }
 
@@ -566,11 +575,11 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   /* ============== 业务 facade ============== */
 
   isReady(): boolean {
-    return this.stateValue === "bound" && this.currentBound !== null;
+    return this.stateValue === "bound" && this.boundConnection !== null;
   }
 
   async publish(input: BroadcastPublishInput): Promise<BroadcastMessage> {
-    if (!this.isReady() || !this.currentBound) {
+    if (!this.isReady() || !this.boundConnection) {
       throw new Error("broadcast.core: not_ready");
     }
     if (!(input.bodyBytes instanceof Uint8Array)) {
@@ -578,7 +587,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     }
     const envelope: HubCastEnvelopeV1 = {
       envelopeVersion: HUBCAST_ENVELOPE_VERSION_V1,
-      publisherPublicKeyBytes: hexToBytes(this.currentBound.ownerPublicKeyHex),
+      publisherPublicKeyBytes: hexToBytes(this.boundConnection.ownerPublicKeyHex),
       channelId: input.channelId,
       protocolId: input.protocolId,
       clientMessageId: input.clientMessageId,
@@ -598,7 +607,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       envelope.createdAtMs,
       envelope.bodyBytes
     ]);
-    const signatureHex = await this.currentBound.signChallenge({ challenge: envelopeBytes });
+    const signatureHex = await this.boundConnection.signChallenge({ challenge: envelopeBytes });
     const signatureBytes = hexToBytes(signatureHex);
     emitLog(this.cfg.logger, "info", "broadcast.core.publish.begin", {
       channelId: input.channelId,
@@ -608,7 +617,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       signatureBytes: signatureBytes.length
     });
     // v1 服务端 success 路径返回空数组——`resolve` 即视为服务端已接受。
-    await this.currentBound.handle.publish({
+    await this.boundConnection.handle.publish({
       envelopeBytes,
       signatureBytes
     });
@@ -618,7 +627,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
       clientMessageId: input.clientMessageId,
       createdAtMs: input.createdAtMs,
       bodyBytes: input.bodyBytes,
-      publisherPublicKeyHex: this.currentBound.ownerPublicKeyHex
+      publisherPublicKeyHex: this.boundConnection.ownerPublicKeyHex
     };
   }
 
@@ -666,14 +675,14 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     return {
       state: this.stateValue,
       providerId: this.registry.activeSnapshot().providerId,
-      ownerPublicKeyHex: this.currentOwnerPublicKeyHex,
+      desiredConnectionOwnerPublicKeyHex: this.desiredConnectionOwnerPublicKeyHex,
       lastError: this.lastErrorValue,
       subscribedChannels: this.computeUnionList().slice(),
       nextReconnectAtMs: this.nextReconnectAtMsValue
     };
   }
 
-  onStateChange(handler: () => void): BroadcastUnsubscribe {
+  onConnectionStateChanged(handler: () => void): BroadcastUnsubscribe {
     this.stateChangeHandlers.add(handler);
     return () => {
       this.stateChangeHandlers.delete(handler);
@@ -681,7 +690,7 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   }
 
   currentHandle(): BroadcastProviderOperations | null {
-    return this.currentBound?.handle ?? null;
+    return this.boundConnection?.handle ?? null;
   }
 
   /* ============== 私有方法 ============== */
@@ -691,11 +700,11 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   }
 
   private async pushCurrentUnion(): Promise<void> {
-    if (!this.isReady() || !this.currentBound) return;
+    if (!this.isReady() || !this.boundConnection) return;
     const list = this.computeUnionList();
     try {
       const input: ProviderReplaceSubscriptionsInput = { channelIds: list };
-      await this.currentBound.handle.replaceSubscriptions(input);
+      await this.boundConnection.handle.replaceSubscriptions(input);
       // v1 服务端 success 不回包——resolve 即视为服务端已接受本次提交。
       this.fireStateChange();
     } catch (err) {
@@ -717,13 +726,14 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
   }
 
   private async rebindForCurrentOwner(): Promise<void> {
-    if (!this.currentOwnerPublicKeyHex) return;
-    // setActive 触发的重连：owner 已在 setup 阶段被订阅过；当前
-    await this.connectForOwner(this.currentOwnerPublicKeyHex);
+    if (!this.desiredConnectionOwnerPublicKeyHex) return;
+    if (!this.desiredConnectionIdentity) return;
+    // provider 变化只重绑当前已确认的连接 identity。
+    await this.reconcileOwnerConnection(this.desiredConnectionIdentity);
   }
 
   private onProviderBroadcast(ev: ProviderBroadcastEvent): void {
-    if (!this.currentBound) return;
+    if (!this.boundConnection) return;
     try {
       const decoded = decodeEnvelope(ev.envelopeBytes);
       if (!decoded) {
@@ -787,15 +797,15 @@ export class BroadcastCoreImpl implements BroadcastCore, BroadcastCoreOps {
     this.stateValue = "closed";
     this.fireStateChange();
     // 固定延迟重连：写入 nextReconnectAtMs；协调器（或 host）按这个
-    // 时间戳触发 connectForOwner。
+    // 时间戳触发 owner connection reconcile。
     const delay = this.cfg.reconnectDelayMs ?? BROADCAST_DEFAULT_RECONNECT_DELAY_MS;
     this.nextReconnectAtMsValue = Date.now() + delay;
     this.fireStateChange();
   }
 
   private async disposeCurrentSession(): Promise<void> {
-    const s = this.currentBound;
-    this.currentBound = null;
+    const s = this.boundConnection;
+    this.boundConnection = null;
     if (!s) return;
     try {
       s.offReceive?.();

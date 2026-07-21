@@ -189,7 +189,7 @@ describe("ResourceStore", () => {
       activeRegistry,
       (<T>(id: string) => id === "keyspace.service" ? {
         active: () => ({ activePublicKeyHex: active }),
-        onActiveChange: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); }
+        onActiveKeyChanged: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener); }
       } as T : undefined),
       () => active
     );
@@ -223,7 +223,7 @@ describe("ResourceStore", () => {
 
   it("组件先挂载、随后注入 keyspace 后会自动绑定并切换 record", async () => {
     let active = "key-a";
-    let keyspace: { active: () => { activePublicKeyHex: string }; onActiveChange: (handler: () => void) => () => void } | undefined;
+    let keyspace: { active: () => { activePublicKeyHex: string }; onActiveKeyChanged: (handler: () => void) => () => void } | undefined;
     const listeners = new Set<() => void>();
     const pending = new Map<string, (value: string) => void>();
     const lateRegistry = createResourceRegistry();
@@ -246,7 +246,7 @@ describe("ResourceStore", () => {
 
     keyspace = {
       active: () => ({ activePublicKeyHex: active }),
-      onActiveChange: (handler) => { listeners.add(handler); return () => listeners.delete(handler); }
+      onActiveKeyChanged: (handler) => { listeners.add(handler); return () => listeners.delete(handler); }
     };
     lateStore.refreshRuntimeBindings();
     await new Promise((resolve) => setTimeout(resolve, 0));

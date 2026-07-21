@@ -114,7 +114,7 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
     if (!props.open) {
       return;
     }
-    return keyspace.onActiveChange((state) => {
+    return keyspace.onActiveKeyChanged((state) => {
       const nextActivePublicKeyHex = state.activePublicKeyHex ?? null;
       if (boundActivePublicKeyHex && nextActivePublicKeyHex !== boundActivePublicKeyHex) {
         // active key 变化后，编辑器必须立即收口，不能继续暴露旧草稿。

@@ -17,8 +17,8 @@ import type {
   CoordinatorVaultStatus,
   CoordinatorClientRequest,
   CoordinatorResponse,
-  CoordinatorEvent,
-  CoordinatorSnapshot,
+  CoordinatorTopicEvent,
+  CoordinatorBootstrapSnapshot,
   CoordinatorTopic,
   CoordinatorCommandAck,
   CoordinatorCryptoOperation,
@@ -26,7 +26,8 @@ import type {
   CoordinatorBackgroundSyncSettings,
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
-  AssetDataChangedEvent,
+  CoordinatorSubscribeTopicsResult,
+  AssetDataInvalidationEvent,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
@@ -94,8 +95,8 @@ async function persistCoordinatorMeta(): Promise<void> {
   });
 }
 const persistActiveMeta = persistCoordinatorMeta;
-function broadcastVault(): void { broadcastToSubscribers("vault", { type: "vault.status-changed", sessionEpoch: coordinatorState.sessionEpoch, status: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }); }
-function broadcastKeyspace(): void { broadcastToSubscribers("keyspace", { type: "keyspace.active-changed", sessionEpoch: coordinatorState.sessionEpoch, publicKeyHex: coordinatorState.activePublicKeyHex ?? null, generation: coordinatorState.keyspaceGeneration }); }
+function publishVaultLifecycleEvent(): void { publishTopicEvent("vault.lifecycle", { type: "vault.lifecycle.changed", sessionEpoch: coordinatorState.sessionEpoch, status: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }); }
+function publishActiveKeyEvent(): void { publishTopicEvent("keyspace.active-key", { type: "keyspace.active-key.changed", sessionEpoch: coordinatorState.sessionEpoch, publicKeyHex: coordinatorState.activePublicKeyHex ?? null, generation: coordinatorState.keyspaceGeneration }); }
 
 // ============================================================
 // 1. Coordinator State
@@ -156,7 +157,10 @@ const coordinatorState: CoordinatorState = {
 };
 
 const connectedPorts = new Map<string, ConnectedPort>();
-let dataRevision = 0;
+let vaultLifecycleRevision = 0;
+let activeKeyRevision = 0;
+let backgroundSnapshotRevision = 0;
+let assetDataRevision = 0;
 function resolveKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined { return typeof runtime.keyScope === "function" ? runtime.keyScope() : runtime.keyScope; }
 function scheduleRuntime(runtime: TaskRuntime): void { if (!runtime.intervalMs) return; if (runtime.timer) clearTimeout(runtime.timer); runtime.nextRunAt = new Date(Date.now() + runtime.intervalMs).toISOString(); runtime.timer = setTimeout(() => { runtime.timer = undefined; void executeTask(runtime.id, "interval"); }, runtime.intervalMs); }
 function assertTaskFresh(taskId: string): void {
@@ -195,25 +199,26 @@ async function enterUnlockedState(
   }
 
   // 广播事件
-  broadcastToSubscribers("vault", {
-    type: "vault.status-changed",
+  publishTopicEvent("vault.lifecycle", {
+    type: "vault.lifecycle.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     status: coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.activePublicKeyHex,
   });
 
   if (coordinatorState.activePublicKeyHex) {
-    broadcastToSubscribers("keyspace", {
-      type: "keyspace.active-changed",
+    publishTopicEvent("keyspace.active-key", {
+      type: "keyspace.active-key.changed",
       sessionEpoch: coordinatorState.sessionEpoch,
       publicKeyHex: coordinatorState.activePublicKeyHex,
       generation: coordinatorState.keyspaceGeneration,
     });
+
   }
 
   // 广播任务快照
-  broadcastToSubscribers("background", {
-    type: "background.snapshot-updated",
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     snapshots: getTaskSnapshots(),
   });
@@ -231,7 +236,7 @@ function createWorkerKeyspace(): KeyspaceService {
     active,
     setActive: async (publicKeyHex) => { await executeVaultOperation({ type: "setActive", publicKeyHex }); },
     requireActiveKey: () => { if (!coordinatorState.activePublicKeyHex) throw new Error("No active key"); return { publicKeyHex: coordinatorState.activePublicKeyHex, label: "", capabilities: ["p2pkh"], createdAt: "" }; },
-    onActiveChange: () => () => undefined,
+    onActiveKeyChanged: () => () => undefined,
     openKeyStorage: async (input) => { const name = storageName(input.publicKeyHex, input.pluginId, input.storageId); const db = await new Promise<IDBDatabase>((resolve, reject) => { const req = indexedDB.open(name, input.version); req.onupgradeneeded = () => input.upgrade(req.result, req.transaction?.db.version ?? 0, input.version); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); return { db, name, close: () => db.close() }; },
     registerPluginStorage: () => undefined,
     listPluginStorages: () => [],
@@ -246,7 +251,7 @@ async function registerCoordinatorTasks(): Promise<void> {
   const keyspace = createWorkerKeyspace();
   const messageBus = createMessageBus();
   const woc = createWocService({ messageBus });
-  const emitDataChanged = (providerId: string, kinds: AssetDataChangedEvent["kinds"]) => broadcastToSubscribers("data-changed", { type: "data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", revision: ++dataRevision, kinds });
+  const emitDataChanged = (providerId: string, kinds: AssetDataInvalidationEvent["kinds"]) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds });
   const p2pkh = createP2pkhCoordinatorTasks({ keyspace, woc, messageBus, assertSessionFresh: (kind) => assertTaskFresh(kind === "recent" ? "p2pkh.recent-sync" : "p2pkh.history-backfill") });
   // 使用恢复后的配置，而非固定值
   const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
@@ -254,12 +259,12 @@ async function registerCoordinatorTasks(): Promise<void> {
   coordinatorState.taskRuntimes.set("p2pkh.history-backfill", { id: "p2pkh.history-backfill", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.backfill(signal); assertSessionFresh(); if (result.committed && !result.cancelled) emitDataChanged("p2pkh", ["history"]); } });
   const p2pkhProvider = { listResources: async (assetId: "bsv" | "bsvtest") => { if (!coordinatorState.activePublicKeyHex) return []; const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: coordinatorState.activePublicKeyHex })); return (await db.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest")); }, getGlobalSettings: () => ({ includeTestnet: false }) };
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
-  const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), vault, notifier: { emit: (event) => broadcastToSubscribers("data-changed", { type: "data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", revision: ++dataRevision, kinds: event.kinds }), subscribe: () => () => undefined } });
-  const stasTask = createStasCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => broadcastToSubscribers("data-changed", { type: "data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", revision: ++dataRevision, kinds: event.kinds }), subscribe: () => () => undefined } });
+  const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const stasTask = createStasCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   coordinatorState.taskRuntimes.set(bsv21Task.id, { id: bsv21Task.id, pluginId: bsv21Task.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   coordinatorState.taskRuntimes.set(stasTask.id, { id: stasTask.id, pluginId: stasTask.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   for (const runtime of coordinatorState.taskRuntimes.values()) scheduleRuntime(runtime);
-  broadcastToSubscribers("background", { type: "background.snapshot-updated", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
+  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
 }
 
 // ============================================================
@@ -373,12 +378,6 @@ function handleHello(
     ack: { status: "ok" },
     operationResult: buildSnapshot()
   });
-  sendToPort(connectedPort.port, {
-    type: "vault.status-changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    status: coordinatorState.vaultStatus,
-    activePublicKeyHex: coordinatorState.activePublicKeyHex,
-  });
 }
 
 function handleSubscribe(
@@ -393,10 +392,22 @@ function handleSubscribe(
     connectedPort.subscriptions.add(topic);
   }
 
+  const baselines = request.topics.flatMap((topic) => {
+    if (topic === "asset.data-changed") return [];
+    const baselineRevision = topic === "vault.lifecycle" ? vaultLifecycleRevision : topic === "keyspace.active-key" ? activeKeyRevision : backgroundSnapshotRevision;
+    const snapshot = topic === "vault.lifecycle"
+      ? { topic, type: "vault.lifecycle.changed" as const, vaultLifecycleRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, status: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }
+      : topic === "keyspace.active-key"
+        ? { topic, type: "keyspace.active-key.changed" as const, activeKeyRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, publicKeyHex: coordinatorState.activePublicKeyHex ?? null, generation: coordinatorState.keyspaceGeneration }
+        : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings };
+    return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
+  });
+
   sendToPort(connectedPort.port, {
     requestId: request.requestId,
     sessionEpoch: coordinatorState.sessionEpoch,
     ack: { status: "ok" },
+    operationResult: { topics: request.topics, baselines } satisfies CoordinatorSubscribeTopicsResult,
   });
 }
 
@@ -543,8 +554,8 @@ async function handleUnlock(
     coordinatorState.activePrivateKeyBytes = undefined;
     coordinatorState.passwordKey = undefined;
 
-    broadcastToSubscribers("vault", {
-      type: "vault.status-changed",
+    publishTopicEvent("vault.lifecycle", {
+      type: "vault.lifecycle.changed",
       sessionEpoch: coordinatorState.sessionEpoch,
       status: coordinatorState.vaultStatus,
     });
@@ -577,7 +588,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== operation.publicKeyHex) {
         await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
       }
-      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); await persistActiveMeta(); broadcastKeyspace(); return true;
+      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); await persistActiveMeta(); publishActiveKeyEvent(); return true;
     }
     case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true;
     case "deleteKey": { const meta = await getVaultMeta(); if (!meta || !(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true; }
@@ -655,7 +666,7 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   coordinatorState.vaultStatus = "locked";
   coordinatorState.sessionEpoch = generateEpoch();
   // 广播 locked 状态
-  broadcastVault();
+  publishVaultLifecycleEvent();
   return true;
 }
 async function addKeyRpc(password: string, input: { label: string; capabilities?: string[]; material: { hex: string; wif?: string }; format: string; source?: string }): Promise<unknown> {
@@ -724,15 +735,22 @@ async function performGlobalLock(reason: string): Promise<void> {
   coordinatorState.vaultStatus = "locked";
 
   // 广播 locked
-  broadcastToSubscribers("vault", {
-    type: "vault.status-changed",
+  publishTopicEvent("vault.lifecycle", {
+    type: "vault.lifecycle.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     status: coordinatorState.vaultStatus,
   });
 
+  publishTopicEvent("keyspace.active-key", {
+    type: "keyspace.active-key.changed",
+    sessionEpoch: coordinatorState.sessionEpoch,
+    publicKeyHex: null,
+    generation: ++coordinatorState.keyspaceGeneration,
+  });
+
   // 广播任务快照，让 UI 立即显示 blocked 状态
-  broadcastToSubscribers("background", {
-    type: "background.snapshot-updated",
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     snapshots: getTaskSnapshots(),
   });
@@ -773,11 +791,18 @@ async function handleActivateKey(
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
     await persistCoordinatorMeta();
 
-    broadcastToSubscribers("keyspace", {
-      type: "keyspace.active-changed",
+    publishTopicEvent("keyspace.active-key", {
+      type: "keyspace.active-key.changed",
       sessionEpoch: coordinatorState.sessionEpoch,
       publicKeyHex: coordinatorState.activePublicKeyHex,
       generation: coordinatorState.keyspaceGeneration,
+    });
+
+    publishTopicEvent("vault.lifecycle", {
+      type: "vault.lifecycle.changed",
+      sessionEpoch: coordinatorState.sessionEpoch,
+      status: coordinatorState.vaultStatus,
+      activePublicKeyHex: coordinatorState.activePublicKeyHex,
     });
 
     return {
@@ -913,7 +938,7 @@ async function handleBackgroundTrigger(requestId: string, request: { kind: "back
 
 async function handleBackgroundCancelByKey(requestId: string, request: { kind: "background.cancel-by-key"; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }): Promise<CoordinatorResponse> {
   const cancelled = await cancelTaskRuntimesByKey(request.publicKeyHex);
-  broadcastToSubscribers("background", { type: "background.snapshot-updated", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
+  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
   return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: cancelled ? { status: "accepted" } : { status: "ok" } };
 }
 
@@ -953,8 +978,8 @@ async function handleBackgroundCancel(
     if (completion) await completion;
     runtime.controller = undefined;
 
-    broadcastToSubscribers("background", {
-      type: "background.snapshot-updated",
+    publishTopicEvent("background.snapshot", {
+      type: "background.snapshot.changed",
       sessionEpoch: coordinatorState.sessionEpoch,
       snapshots: getTaskSnapshots(),
     });
@@ -986,8 +1011,8 @@ async function handleBackgroundSettingsUpdate(
   await persistCoordinatorMeta();
   for (const runtime of coordinatorState.taskRuntimes.values()) { runtime.intervalMs = request.settings.assetHoldingsIntervalMs; scheduleRuntime(runtime); }
 
-  broadcastToSubscribers("background", {
-    type: "background.snapshot-updated",
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     snapshots: getTaskSnapshots(),
   });
@@ -1024,8 +1049,8 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
   runtime.lastStartedAt = new Date().toISOString();
   runtime.lastAttemptAt = runtime.lastStartedAt;
 
-  broadcastToSubscribers("background", {
-    type: "background.snapshot-updated",
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
     sessionEpoch: coordinatorState.sessionEpoch,
     snapshots: getTaskSnapshots(),
   });
@@ -1062,8 +1087,8 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
       scheduleRuntime(runtime);
     }
 
-    broadcastToSubscribers("background", {
-      type: "background.snapshot-updated",
+    publishTopicEvent("background.snapshot", {
+      type: "background.snapshot.changed",
       sessionEpoch: coordinatorState.sessionEpoch,
       snapshots: getTaskSnapshots(),
     });
@@ -1078,7 +1103,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
 // 11. Snapshot & Broadcasting
 // ============================================================
 
-function buildSnapshot(): CoordinatorSnapshot {
+function buildSnapshot(): CoordinatorBootstrapSnapshot {
   return {
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
@@ -1111,10 +1136,17 @@ function getTaskSnapshots(): CoordinatorTaskSnapshot[] {
   return snapshots;
 }
 
-function broadcastToSubscribers(topic: CoordinatorTopic, event: CoordinatorEvent): void {
+function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
+  const normalized = {
+    ...event,
+    topic,
+    ...(topic === "vault.lifecycle" ? { vaultLifecycleRevision: ++vaultLifecycleRevision } : topic === "keyspace.active-key" ? { activeKeyRevision: ++activeKeyRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : { assetDataRevision: ++assetDataRevision }),
+    sessionEpoch: coordinatorState.sessionEpoch,
+    ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
+  } as CoordinatorTopicEvent;
   for (const [, connectedPort] of connectedPorts) {
     if (connectedPort.subscriptions.has(topic)) {
-      sendToPort(connectedPort.port, event);
+      sendToPort(connectedPort.port, normalized);
     }
   }
 }
@@ -1182,7 +1214,7 @@ async function initializeCoordinator(): Promise<void> {
   } finally {
     // hello 可能先于异步 IndexedDB 初始化抵达。无论初始化成功或失败，
     // 都必须广播最终状态，否则首个页面会永久停留在 booting。
-    broadcastVault();
+    publishVaultLifecycleEvent();
   }
 }
 
@@ -1192,7 +1224,7 @@ void initializeCoordinator();
 // 14. Test Exports
 // ============================================================
 
-export function __testGetSnapshot(): CoordinatorSnapshot {
+export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
   return buildSnapshot();
 }
 

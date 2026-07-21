@@ -38,7 +38,23 @@ export function BackgroundTray() {
         const sa = a[i];
         const sb = b[i];
         if (!sa || !sb) return sa === sb;
-        if (sa.id !== sb.id || sa.state !== sb.state) return false;
+        // 不能只比较 id/state：快速失败的任务会从 idle → running → idle，
+        // 最终 state 仍是 idle，但 error/lastAttemptAt 已变化。若在这里
+        // 判等，托盘会吞掉“上次同步失败”的反馈，看起来像点击一闪而过。
+        if (
+          sa.id !== sb.id ||
+          sa.pluginId !== sb.pluginId ||
+          sa.label !== sb.label ||
+          sa.state !== sb.state ||
+          sa.lastStartedAt !== sb.lastStartedAt ||
+          sa.lastCompletedAt !== sb.lastCompletedAt ||
+          sa.lastAttemptAt !== sb.lastAttemptAt ||
+          sa.nextRunAt !== sb.nextRunAt ||
+          sa.error !== sb.error ||
+          JSON.stringify(sa.progress) !== JSON.stringify(sb.progress) ||
+          JSON.stringify(sa.blockedReason) !== JSON.stringify(sb.blockedReason) ||
+          JSON.stringify(sa.keyScope) !== JSON.stringify(sb.keyScope)
+        ) return false;
       }
       return true;
     }

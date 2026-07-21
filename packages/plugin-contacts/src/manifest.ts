@@ -172,7 +172,7 @@ export const contactsPlugin: PluginManifest = {
       load: async () => service.listContacts(),
       subscribe: (_args, _context, invalidate) => {
         const offChange = service.onChange(invalidate);
-        const offActive = keyspace.onActiveChange(invalidate);
+        const offActive = keyspace.onActiveKeyChanged(invalidate);
         return () => { offChange(); offActive(); };
       },
       invalidation: "immediate"
@@ -184,7 +184,7 @@ export const contactsPlugin: PluginManifest = {
       load: async (args) => (await service.listContacts()).find((contact) => contact.id === args[0]),
       subscribe: (_args, _context, invalidate) => {
         const offChange = service.onChange(invalidate);
-        const offActive = keyspace.onActiveChange(invalidate);
+        const offActive = keyspace.onActiveKeyChanged(invalidate);
         return () => { offChange(); offActive(); };
       },
       invalidation: "immediate"

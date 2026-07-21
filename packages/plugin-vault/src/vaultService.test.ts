@@ -1140,32 +1140,19 @@ describe("VaultService.createActiveKeyCrypto", () => {
   });
 });
 
-describe("VaultService.getSessionState", () => {
+describe("VaultService.getLifecycleSnapshot", () => {
   it("exposes the live session during unlock and clears it on lock", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
 
-    const session = vault.getSessionState();
-    expect(session).toEqual(
-      expect.objectContaining({
-        kind: "keymaster",
-        revoked: false
-      })
-    );
-    expect(session).toEqual(
-      expect.not.objectContaining({
-        activeCrypto: expect.anything(),
-        encryptVaultKeyMaterial: expect.anything(),
-        createActiveCrypto: expect.anything()
-      })
-    );
-    expect(session?.sessionId).toMatch(/^[0-9a-f-]{36}$/i);
-    expect(session?.publicKeyHex).toBeUndefined();
+    const session = vault.getLifecycleSnapshot();
+    expect(session.status).toBe("unlocked");
+    expect(session.vaultLifecycleRevision).toBeGreaterThan(0);
 
     await vault.lock();
-    expect(vault.getSessionState()).toBeNull();
+    expect(vault.getLifecycleSnapshot().status).toBe("locked");
   });
 });
 
@@ -1921,11 +1908,11 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     await waitForStatus(vault, "uninitialized");
 
     // 订阅 status 变化记录整条时间线。
-    vault.onStatusChange((s) => {
+    vault.onLifecycleChange((snapshot) => {
       // 注意：onStatusChange 也会在 notifyKeyCreated 之前因为 keyspace
       // 还没切就触发？不需要——这里只关心事件顺序的最终形态。
-      if (statusTimeline[statusTimeline.length - 1] !== s) {
-        statusTimeline.push(s);
+      if (statusTimeline[statusTimeline.length - 1] !== snapshot.status) {
+        statusTimeline.push(snapshot.status);
       }
     });
 

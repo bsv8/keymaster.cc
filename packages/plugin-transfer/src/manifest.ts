@@ -142,7 +142,7 @@ export const transferPlugin: PluginManifest = {
       load: async (_args, context) =>
         context.getCapability<KeyspaceService>("keyspace.service")?.active() ?? { activePublicKeyHex: undefined },
       subscribe: (_args, context, invalidate) =>
-        context.getCapability<KeyspaceService>("keyspace.service")?.onActiveChange(invalidate) ?? (() => {}),
+        context.getCapability<KeyspaceService>("keyspace.service")?.onActiveKeyChanged(invalidate) ?? (() => {}),
       equals: (a, b) => a?.activePublicKeyHex === b?.activePublicKeyHex,
       invalidation: "immediate"
     });

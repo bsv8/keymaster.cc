@@ -62,6 +62,7 @@ export interface ActiveKeyState {
    * 缺省 = "无 active key"。没有 all mode 这一真值。
    */
   activePublicKeyHex?: string;
+  generation?: number;
 }
 
 /** key-scoped storage 打开参数。 */
@@ -103,7 +104,7 @@ export interface KeyspaceService {
    */
   requireActiveKey(): KeyIdentity;
   /** 订阅 active key 变化,返回取消订阅函数。 */
-  onActiveChange(handler: (state: ActiveKeyState) => void): () => void;
+  onActiveKeyChanged(handler: (state: ActiveKeyState) => void): () => void;
 
   /**
    * 打开 key-scoped IndexedDB。DB name 形如

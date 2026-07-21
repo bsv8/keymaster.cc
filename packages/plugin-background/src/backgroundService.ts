@@ -446,11 +446,11 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     return { status: "accepted" };
   }
 
-  function listSnapshots(): BackgroundTaskSnapshot[] {
+  function listTaskSnapshots(): BackgroundTaskSnapshot[] {
     return snapshotList();
   }
 
-  function onChange(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void {
+  function onTaskSnapshotsChanged(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void {
     listeners.add(handler);
     handler(snapshotList());
     return () => { listeners.delete(handler); };
@@ -553,8 +553,8 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   }
 
   return {
-    listSnapshots,
-    onChange,
+    listTaskSnapshots,
+    onTaskSnapshotsChanged,
     runNow,
     trigger,
     cancel,

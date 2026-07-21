@@ -58,7 +58,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
   unsubs.push(deps.service.onDataChanged(() => notify()));
   trackSubscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
-  unsubs.push(deps.keyspace.onActiveChange(() => notify()));
+  unsubs.push(deps.keyspace.onActiveKeyChanged(() => notify()));
   // 硬切换 008 收尾：额外订阅初始化变化——keyspace 初始化结束后资产平台
   // 必须重拉，否则"未就绪"期间返回的空列表会一直显示。
   unsubs.push(deps.keyspace.onInitializationChange(() => notify()));

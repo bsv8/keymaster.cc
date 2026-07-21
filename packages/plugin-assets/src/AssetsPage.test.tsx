@@ -91,7 +91,7 @@ function makeAssetProvider(
 function makeKeyspace(publicKeyHex?: string): KeyspaceService {
   return {
     active: () => ({ activePublicKeyHex: publicKeyHex ?? "pk1" }),
-    onActiveChange: () => () => {},
+    onActiveKeyChanged: () => () => {},
     isInitializing: () => false,
     onInitializationChange: () => () => {},
     getKey: async () => ({
@@ -152,7 +152,7 @@ function registerHoldingsResource(
       const active = keyspace.active().activePublicKeyHex;
       return active ? (await keyspace.getKey(active)) ?? null : null;
     },
-    subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => host.capabilities.get<KeyspaceService>("keyspace.service").onActiveChange(invalidate),
+    subscribe: (_args: readonly string[], _context: unknown, invalidate: () => void) => host.capabilities.get<KeyspaceService>("keyspace.service").onActiveKeyChanged(invalidate),
     invalidation: "immediate"
   });
 }

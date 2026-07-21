@@ -120,7 +120,7 @@ export interface AssetRegistry {
  * 设计缘由：后台任务原子提交 provider DB 后发布此事件，通知页面重读。
  * payload 不携带金额、UTXO、token 数据，只表达"哪个 provider 的哪类数据已变更"。
  */
-export interface AssetDataChangedEvent {
+export interface AssetDataInvalidationEvent {
   /** 发生变更的 provider id。 */
   providerId: string;
   /** 变更归属的 key namespace（可选）。 */
@@ -143,9 +143,9 @@ export interface AssetDataChangedEvent {
  */
 export interface AssetDataNotifier {
   /** 发布数据变更事件。只能在 provider DB write transaction 成功 resolve 后调用。 */
-  emit(event: AssetDataChangedEvent): void;
+  emit(event: AssetDataInvalidationEvent): void;
   /** 订阅数据变更事件。返回取消订阅函数。 */
-  subscribe(handler: (event: AssetDataChangedEvent) => void): () => void;
+  subscribe(handler: (event: AssetDataInvalidationEvent) => void): () => void;
 }
 
 /** AssetDataNotifier capability key。 */

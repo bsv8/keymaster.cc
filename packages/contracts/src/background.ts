@@ -179,8 +179,8 @@ export interface BackgroundRegistry {
 export interface BackgroundService {
   /** 释放 Coordinator 订阅；页面卸载/热重载时调用。 */
   dispose?(): void;
-  listSnapshots(): BackgroundTaskSnapshot[];
-  onChange(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void;
+  listTaskSnapshots(): BackgroundTaskSnapshot[];
+  onTaskSnapshotsChanged(handler: (snapshots: BackgroundTaskSnapshot[]) => void): () => void;
 
   /**
    * 立即同步一次（UI 手动 API）。

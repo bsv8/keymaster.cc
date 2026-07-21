@@ -10,7 +10,7 @@
 //   - **plugin-broadcast 不再 import plugin-appmsg / plugin-hubmsg 的
 //     任何类型**——与 appmsg 系统硬隔离；
 //   - 在 setup 阶段依赖 `vault.service` / `keyspace.service`，订阅
-//     vault status + keyspace active key 变化，由内部 reconnect 协调
+//     vault status + keyspace active key 变化，由内部 connection lifecycle 协调
 //     器驱动绑定；
 //   - 依赖顺序：`plugin-broadcast` 必须在 `plugin-hubcast` 之前装载。
 //   - **不**依赖 `plugin-appmsg`、**不**与 `plugin-appmsg` 互相 import。
@@ -36,18 +36,11 @@ import {
   type BroadcastSignerContext,
   type StorageLike
 } from "./broadcastCore.js";
-import { createReconnectCoordinator } from "./reconnectCoordinator.js";
+import { createBroadcastConnectionLifecycle } from "./broadcastConnectionLifecycle.js";
 import { BroadcastPage } from "./BroadcastPage.js";
 import { createBroadcastService } from "./broadcastService.js";
 import type { BroadcastService } from "./broadcastService.js";
-
-function bytesToHex(bytes: Uint8Array): string {
-  let s = "";
-  for (let i = 0; i < bytes.length; i++) {
-    s += (bytes[i] ?? 0).toString(16).padStart(2, "0");
-  }
-  return s;
-}
+import { signBroadcastEnvelope } from "./signer.js";
 
 /**
  * 内存 storage 兜底（SSR / Node 测试用）。
@@ -235,18 +228,23 @@ export const broadcastPlatformPlugin: PluginManifest = {
         return {
           publicKeyHex: pubHex,
           signChallenge: async (args: { challenge: Uint8Array }): Promise<string> => {
-            const sig = await activeCrypto.signDigest({
-              publicKeyHex: pubHex,
-              digest: new Uint8Array(args.challenge).buffer,
-              format: "compact"
+            // ActiveKeyCrypto.signDigest 是“已哈希 32 字节摘要”接口；
+            // provider signer 则承诺签 SHA-256(challenge)。不能把任意长度的
+            // bind 原文直接透传，否则 vault 会 fail-closed 拒绝该请求。
+            return signBroadcastEnvelope(args.challenge, async (digest) => {
+              const sig = await activeCrypto.signDigest({
+                publicKeyHex: pubHex,
+                digest: digest.buffer as ArrayBuffer,
+                format: "compact"
+              });
+              // P1: 校验回包 format 为 compact
+              if (sig.format !== "compact") {
+                throw new Error(
+                  `broadcast.signChallenge format mismatch: requested "compact", got "${sig.format}"`
+                );
+              }
+              return new Uint8Array(sig.signature);
             });
-            // P1: 校验回包 format 为 compact
-            if (sig.format !== "compact") {
-              throw new Error(
-                `broadcast.signChallenge format mismatch: requested "compact", got "${sig.format}"`
-              );
-            }
-            return bytesToHex(new Uint8Array(sig.signature));
           }
         } satisfies BroadcastSignerContext;
       } catch (err) {
@@ -306,10 +304,10 @@ export const broadcastPlatformPlugin: PluginManifest = {
     /**
      * 单一重连协调器（施工单 §6.3 + 反馈"必改"第二轮）。
      *
-     * 实际逻辑落在 `reconnectCoordinator.ts`；本处只做依赖装配与
+     * 实际逻辑落在 `broadcastConnectionLifecycle.ts`；本处只做依赖装配与
      * teardown 转发。
      */
-    const coordinator = createReconnectCoordinator({
+    const coordinator = createBroadcastConnectionLifecycle({
       core,
       vault,
       keyspace,
@@ -331,7 +329,7 @@ export const broadcastPlatformPlugin: PluginManifest = {
       scope: "global",
       key: () => ["broadcast.state"],
       load: async (_args, context) => { const s = context.getCapability<BroadcastService>("broadcast.service")!; return { snapshot: s.snapshot(), providers: s.providers() }; },
-      subscribe: (_args, context, invalidate) => context.getCapability<BroadcastService>("broadcast.service")?.onChange(invalidate) ?? (() => {}),
+      subscribe: (_args, context, invalidate) => context.getCapability<BroadcastService>("broadcast.service")?.onBroadcastConnectionStateChanged(invalidate) ?? (() => {}),
       invalidation: "immediate"
     });
 

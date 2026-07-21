@@ -205,7 +205,7 @@ export const assetsPlugin: PluginManifest = {
         return (await keyspace.getKey(context.activePublicKeyHex)) ?? null;
       },
       subscribe: (_args, context, invalidate) =>
-        context.getCapability<KeyspaceService>("keyspace.service")?.onActiveChange(invalidate) ?? (() => {}),
+        context.getCapability<KeyspaceService>("keyspace.service")?.onActiveKeyChanged(invalidate) ?? (() => {}),
       equals: (a, b) => a?.publicKeyHex === b?.publicKeyHex && a?.label === b?.label,
       invalidation: "immediate"
     });

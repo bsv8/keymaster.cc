@@ -558,7 +558,7 @@ export const protocolPlugin: PluginManifest = {
         scope: "global",
         key: () => ["protocol.vault-status"],
         load: async (_args, context) => context.getCapability<VaultService>("vault.service")?.status() ?? "locked",
-        subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onStatusChange(invalidate) ?? (() => {}),
+        subscribe: (_args, context, invalidate) => context.getCapability<VaultService>("vault.service")?.onLifecycleChange(() => invalidate()) ?? (() => {}),
         invalidation: "immediate"
       });
       resources.register<{ waiting: boolean; timedOut: boolean }, readonly string[]>({

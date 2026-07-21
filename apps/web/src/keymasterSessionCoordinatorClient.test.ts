@@ -52,18 +52,79 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const a = createCoordinatorClient({ clientId: "a" });
       const b = createCoordinatorClient({ clientId: "b" });
       await Promise.all([a.connect(), b.connect()]);
-      expect(a.getState().vaultStatus).toBe("locked");
-      expect(b.getState().sessionEpoch).toBe("shared-epoch");
+      expect(a.getBootstrapSnapshot().vaultStatus).toBe("locked");
+      expect(b.getBootstrapSnapshot().sessionEpoch).toBe("shared-epoch");
       const observed: string[] = [];
-      b.onStateChange((state) => observed.push(state.vaultStatus));
-      hub.broadcast({ requestId: "legacy-vault-event", type: "vault.status-changed", sessionEpoch: "unlocked-epoch", status: "unlocked", activePublicKeyHex: "a".repeat(64) });
-      expect(b.getState().vaultStatus).toBe("unlocked");
+      b.subscribeTopic("vault.lifecycle", (event: any) => observed.push(event.status));
+      hub.broadcast({ topic: "vault.lifecycle", vaultLifecycleRevision: 1, type: "vault.lifecycle.changed", sessionEpoch: "unlocked-epoch", status: "unlocked", activePublicKeyHex: "a".repeat(64) });
+      expect(b.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
       expect(observed).toContain("unlocked");
       a.disconnect();
       expect(b.getIsConnected()).toBe(true);
     } finally {
       globalThis.SharedWorker = original;
     }
+  });
+
+  it("routes background.snapshot only to the background topic listener", async () => {
+    const hub = new Hub();
+    const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = Constructor;
+    try {
+      const client = createCoordinatorClient({ clientId: "domain-isolation" });
+      await client.connect();
+      const vaultEvents: unknown[] = [];
+      const backgroundEvents: unknown[] = [];
+      client.subscribeTopic("vault.lifecycle", (event) => vaultEvents.push(event));
+      client.subscribeTopic("background.snapshot", (event) => backgroundEvents.push(event));
+
+      hub.broadcast({
+        topic: "background.snapshot",
+        type: "background.snapshot.changed",
+        backgroundSnapshotRevision: 1,
+        sessionEpoch: "shared-epoch",
+        snapshots: []
+      });
+
+      expect(backgroundEvents).toHaveLength(1);
+      expect(vaultEvents).toHaveLength(0);
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
+  it("applies topic baselines returned by subscribe before exposing the client", async () => {
+    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    port.postMessage.mockImplementation((message: unknown) => {
+      const request = message as { requestId: string; kind: string };
+      const operationResult = request.kind === "subscribe"
+        ? {
+            topics: ["vault.lifecycle"],
+            baselines: [{
+              topic: "vault.lifecycle",
+              baselineRevision: 7,
+              sessionEpoch: "baseline-epoch",
+              snapshot: {
+                topic: "vault.lifecycle",
+                type: "vault.lifecycle.changed",
+                vaultLifecycleRevision: 7,
+                sessionEpoch: "baseline-epoch",
+                status: "unlocked",
+                activePublicKeyHex: "b".repeat(64)
+              }
+            }]
+          }
+        : { sessionEpoch: "boot-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } };
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "baseline-epoch", ack: { status: "ok" }, operationResult } } as MessageEvent));
+    });
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient();
+      await client.connect();
+      expect(client.getBootstrapSnapshot()).toMatchObject({ vaultStatus: "unlocked", activePublicKeyHex: "b".repeat(64), sessionEpoch: "baseline-epoch" });
+    } finally { globalThis.SharedWorker = original; }
   });
 
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
@@ -74,10 +135,10 @@ describe("KeymasterSessionCoordinatorClient", () => {
     try {
       const client = createCoordinatorClient({ requestTimeoutMs: 5, reconnectIntervalMs: 1000 });
       await client.connect();
-      expect(client.getState().vaultStatus).toBe("unlocked");
+      expect(client.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
       port.onmessage = null;
       await expect(client.backgroundRunNow("missing")).resolves.toMatchObject({ status: "transport-error", retryable: true });
-      expect(client.getState().vaultStatus).toBe("booting");
+      expect(client.getBootstrapSnapshot().vaultStatus).toBe("booting");
     } finally { globalThis.SharedWorker = original; }
   });
 

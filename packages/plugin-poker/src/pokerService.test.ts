@@ -88,18 +88,27 @@ const KEY_B = {
 class FakeVault {
   private statusV: "unlocked" | "locked" = "unlocked";
   private statusHandlers = new Set<(s: any) => void>();
+  private lifecycleHandlers = new Set<(snapshot: { status: "unlocked" | "locked" }) => void>();
   status() {
     return this.statusV;
   }
   setStatus(s: "unlocked" | "locked") {
     this.statusV = s;
     for (const h of this.statusHandlers) h(s);
+    for (const h of this.lifecycleHandlers) h({ status: s });
   }
   onStatusChange(h: (s: any) => void) {
     this.statusHandlers.add(h);
     return () => {
       this.statusHandlers.delete(h);
     };
+  }
+  getLifecycleSnapshot() {
+    return { status: this.statusV, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 };
+  }
+  onLifecycleChange(h: (snapshot: { status: "unlocked" | "locked" }) => void) {
+    this.lifecycleHandlers.add(h);
+    return () => this.lifecycleHandlers.delete(h);
   }
   getInitialActivationNotice() {
     return null;
@@ -213,9 +222,9 @@ class FakeKeyspace {
   requireActiveKey() {
     return KEY_A as any;
   }
-  onActiveChange(h: (s: any) => void) {
+  onActiveKeyChanged(h: (s: any) => void) {
     this.activeHandlers.add(h);
-    // 真实 keyspaceService.onActiveChange 订阅时立刻推一次（见
+    // 真实 keyspaceService.onActiveKeyChanged 订阅时立刻推一次（见
     // packages/plugin-vault/src/keyspaceService.ts）。模拟该行为，否则
     // 构造阶段的双重 hydrate / 双重 rebind 路径测试覆盖不到。
     h(this.state);

@@ -22,7 +22,7 @@
 //     capability 通用装配、endpoint shape 校验 + 唯一性校验。
 
 import type {
-  AssetDataChangedEvent,
+  AssetDataInvalidationEvent,
   AssetDataNotifier,
   HostListener,
   I18nPluginResources,
@@ -857,12 +857,12 @@ void (null as unknown as KeyspaceService);
  *   - payload 不携带余额、UTXO、token 数据，只表达"哪个 provider 的哪类数据已变更"
  */
 function createAssetDataNotifier(): AssetDataNotifier {
-  const listeners = new Set<(event: AssetDataChangedEvent) => void>();
-  const pendingEvents = new Map<string, AssetDataChangedEvent>();
+  const listeners = new Set<(event: AssetDataInvalidationEvent) => void>();
+  const pendingEvents = new Map<string, AssetDataInvalidationEvent>();
   let microtaskScheduled = false;
 
   /** 生成事件键（用于合并同一 provider + key 的事件） */
-  function eventKey(event: AssetDataChangedEvent): string {
+  function eventKey(event: AssetDataInvalidationEvent): string {
     return `${event.providerId}::${event.publicKeyHex ?? "none"}`;
   }
 
@@ -884,7 +884,7 @@ function createAssetDataNotifier(): AssetDataNotifier {
   }
 
   return {
-    emit(event: AssetDataChangedEvent) {
+    emit(event: AssetDataInvalidationEvent) {
       const key = eventKey(event);
       const existing = pendingEvents.get(key);
 
@@ -907,7 +907,7 @@ function createAssetDataNotifier(): AssetDataNotifier {
         queueMicrotask(flushMicrotaskQueue);
       }
     },
-    subscribe(handler: (event: AssetDataChangedEvent) => void) {
+    subscribe(handler: (event: AssetDataInvalidationEvent) => void) {
       listeners.add(handler);
       return () => listeners.delete(handler);
     }

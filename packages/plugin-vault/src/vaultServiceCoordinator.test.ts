@@ -5,8 +5,9 @@ import { createVaultServiceCoordinator, type CoordinatorClientLike } from "./vau
 const PUBLIC_KEY = "02".padEnd(66, "a");
 const KEY: KeyRef = { publicKeyHex: PUBLIC_KEY, label: "primary", address: "addr-1", capabilities: ["p2pkh"], createdAt: "now" } as KeyRef;
 
-function makeClient(): CoordinatorClientLike {
+function makeClient(): CoordinatorClientLike & { publish(topic: string, event: unknown): void } {
   const state = { vaultStatus: "unlocked" as const, activePublicKeyHex: PUBLIC_KEY };
+  const topicHandlers = new Map<string, Set<(value: any) => void>>();
   const vaultOperation = vi.fn(async (operation: string, input?: unknown) => {
     const value = operation === "listKeys" ? [KEY]
       : operation === "getKey" ? ((input as { publicKeyHex: string }).publicKeyHex === PUBLIC_KEY ? KEY : undefined)
@@ -23,17 +24,43 @@ function makeClient(): CoordinatorClientLike {
   return {
     getIsConnected: () => true,
     getState: () => state,
-    onStateChange: (handler: (value: typeof state) => void) => { handler(state); return () => undefined; },
-    onEvent: () => () => undefined,
+    subscribeTopic: (topic: string, handler: (value: any) => void) => {
+      const handlers = topicHandlers.get(topic) ?? new Set<(value: any) => void>();
+      handlers.add(handler);
+      topicHandlers.set(topic, handlers);
+      if (topic === "vault.lifecycle") handler({ topic, vaultLifecycleRevision: 1, type: "vault.lifecycle.changed", sessionEpoch: "test-epoch", status: state.vaultStatus, activePublicKeyHex: state.activePublicKeyHex });
+      return () => handlers.delete(handler);
+    },
     unlock: async () => ({ status: "accepted" as const }),
     lock: async () => ({ status: "accepted" as const }),
     activateKey: async () => ({ status: "accepted" as const }),
     vaultOperation,
-    crypto
+    crypto,
+    publish: (topic, event) => {
+      for (const handler of topicHandlers.get(topic) ?? []) handler(event);
+    }
   };
 }
 
 describe("VaultServiceCoordinator", () => {
+  it("does not report a Vault change for an unrelated Coordinator state update", () => {
+    const client = makeClient();
+    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const onStatus = vi.fn();
+    vault.onLifecycleChange((snapshot) => onStatus(snapshot.status));
+
+    client.publish("background.snapshot", {
+      topic: "background.snapshot",
+      type: "background.snapshot.changed",
+      backgroundSnapshotRevision: 1,
+      sessionEpoch: "test-epoch",
+      snapshots: []
+    });
+
+    expect(onStatus).toHaveBeenCalledTimes(1); // onStatusChange 注册时的当前值
+    expect(onStatus).toHaveBeenLastCalledWith("unlocked");
+  });
+
   it("exposes unlock/lock/activate failures as command results", async () => {
     const client = makeClient();
     client.unlock = vi.fn(async () => ({ status: "blocked" as const, reason: { key: "vault.locked", fallback: "Vault is locked" } }));

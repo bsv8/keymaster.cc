@@ -40,7 +40,7 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
       capabilities: ["p2pkh"],
       createdAt: "2024-01-01T00:00:00.000Z"
     }),
-    onActiveChange: () => () => undefined,
+    onActiveKeyChanged: () => () => undefined,
     openKeyStorage: async (input) => {
       if (input.publicKeyHex !== publicKeyHex) {
         throw new Error("Key storage is not ready");

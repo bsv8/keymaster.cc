@@ -83,15 +83,15 @@ describe("Session Coordinator worker", () => {
     onconnect?.({ ports: [b] } as unknown as MessageEvent);
     a.send({ kind: "hello", clientId: "a", requestId: "hello-a" });
     b.send({ kind: "hello", clientId: "b", requestId: "hello-b" });
-    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["vault"] });
-    b.send({ kind: "subscribe", clientId: "b", requestId: "sub-b", topics: ["vault"] });
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["vault.lifecycle"] });
+    b.send({ kind: "subscribe", clientId: "b", requestId: "sub-b", topics: ["vault.lifecycle"] });
     await flush();
     a.close();
     expect(__testGetSnapshot().vaultStatus).toBe("unlocked");
     b.send({ kind: "lock", clientId: "b", requestId: "lock", expectedSessionEpoch: __testGetSnapshot().sessionEpoch });
     await flush();
     expect(__testGetSnapshot().vaultStatus).toBe("locked");
-    expect(b.messages.some((message) => (message as { type?: string; status?: string }).type === "vault.status-changed" && (message as { status?: string }).status === "locked")).toBe(true);
+    expect(b.messages.some((message) => (message as { type?: string; status?: string }).type === "vault.lifecycle.changed" && (message as { status?: string }).status === "locked")).toBe(true);
   });
 
   it("returns immediate accepted/already-running acknowledgements for concurrent runNow", async () => {
@@ -169,13 +169,13 @@ describe("Session Coordinator worker", () => {
     const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
     onconnect?.({ ports: [a] } as unknown as MessageEvent);
     a.send({ kind: "hello", clientId: "a", requestId: "hello-a" });
-    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["background"] });
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["background.snapshot"] });
     await flush();
     a.messages.length = 0;
     // 锁定
     a.send({ kind: "lock", clientId: "a", requestId: "lock", expectedSessionEpoch: __testGetSnapshot().sessionEpoch });
     await flush();
-    const backgroundEvents = a.messages.filter((m) => (m as { type?: string }).type === "background.snapshot-updated");
+    const backgroundEvents = a.messages.filter((m) => (m as { type?: string }).type === "background.snapshot.changed");
     expect(backgroundEvents.length).toBeGreaterThan(0);
   });
 
@@ -344,8 +344,8 @@ describe("Session Coordinator backup import", () => {
     onconnect?.({ ports: [b] } as unknown as MessageEvent);
     a.send({ kind: "hello", clientId: "import-a", requestId: "hello-a" });
     b.send({ kind: "hello", clientId: "import-b", requestId: "hello-b" });
-    a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["keyspace"] });
-    b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["keyspace"] });
+    a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["keyspace.active-key"] });
+    b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["keyspace.active-key"] });
     await flush();
     a.messages.length = 0;
     b.messages.length = 0;
@@ -354,7 +354,7 @@ describe("Session Coordinator backup import", () => {
     expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
     for (const port of [a, b]) {
       expect(port.messages).toContainEqual(expect.objectContaining({
-        type: "keyspace.active-changed",
+        type: "keyspace.active-key.changed",
         publicKeyHex: imported.publicKeyHex,
       }));
     }

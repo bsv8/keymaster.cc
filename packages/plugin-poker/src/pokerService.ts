@@ -272,7 +272,7 @@ class PokerServiceImpl implements PokerService {
     // ---------------------------------------------------------------------
 
     // active key 切换：硬切换 004 的最终会话重建入口。
-    this.keyspaceActiveUnsub = deps.keyspace.onActiveChange(() => {
+    this.keyspaceActiveUnsub = deps.keyspace.onActiveKeyChanged(() => {
       this.scheduleRebindToActiveKey("activeKey.changed");
     });
 
@@ -326,8 +326,8 @@ class PokerServiceImpl implements PokerService {
     // 设计缘由：vault 锁定是系统终止当前会话，不算用户主动取消；
     // 但解锁后通常需要重新走一遍"显式 connect"，所以这里清掉
     // userWantsConnection。如果用户解锁后还想连，应该重新点 Connect。
-    this.vaultUnsub = deps.vault.onStatusChange((s) => {
-      if (s !== "unlocked") {
+    this.vaultUnsub = deps.vault.onLifecycleChange((snapshot) => {
+      if (snapshot.status !== "unlocked") {
         this.userWantsConnection = false;
         this.disconnect();
         this.clearSessionInMemory();

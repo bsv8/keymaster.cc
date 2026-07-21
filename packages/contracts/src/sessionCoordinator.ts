@@ -9,9 +9,10 @@
 //
 // 施工单 001：signDigest 操作必须携带 format 字段
 
-import type { AssetDataChangedEvent } from "./assets.js";
+import type { AssetDataInvalidationEvent } from "./assets.js";
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 import type { I18nText } from "./i18n.js";
+import type { BackgroundTaskProgress } from "./background.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -49,7 +50,7 @@ export type CoordinatorClientRequest =
   | { kind: "activity"; clientId: string };
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "vault" | "keyspace" | "background" | "data-changed";
+export type CoordinatorTopic = "vault.lifecycle" | "keyspace.active-key" | "background.snapshot" | "asset.data-changed";
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
@@ -137,38 +138,60 @@ export type CoordinatorCryptoResult =
 // ============================================================
 
 /** Coordinator 推送事件联合类型。 */
-export type CoordinatorEvent =
-  | CoordinatorVaultEvent
-  | CoordinatorKeyspaceEvent
-  | CoordinatorBackgroundEvent
-  | CoordinatorDataChangedEvent;
+export type CoordinatorTopicEvent =
+  | VaultLifecycleEvent
+  | KeyspaceActiveKeyEvent
+  | BackgroundSnapshotEvent
+  | AssetDataChangedEvent;
 
-export interface CoordinatorVaultEvent {
-  type: "vault.status-changed";
+export interface VaultLifecycleEvent {
+  topic: "vault.lifecycle";
+  type: "vault.lifecycle.changed";
   sessionEpoch: SessionEpoch;
+  vaultLifecycleRevision: number;
   status: CoordinatorVaultStatus;
   activePublicKeyHex?: string;
 }
 
-export interface CoordinatorKeyspaceEvent {
-  type: "keyspace.active-changed";
+export interface KeyspaceActiveKeyEvent {
+  topic: "keyspace.active-key";
+  type: "keyspace.active-key.changed";
   sessionEpoch: SessionEpoch;
+  activeKeyRevision: number;
   publicKeyHex: string | null;
   generation: number;
 }
 
-export interface CoordinatorBackgroundEvent {
-  type: "background.snapshot-updated";
+export interface BackgroundSnapshotEvent {
+  topic: "background.snapshot";
+  type: "background.snapshot.changed";
   sessionEpoch: SessionEpoch;
+  backgroundSnapshotRevision: number;
   snapshots: CoordinatorTaskSnapshot[];
+  scheduleSettings?: CoordinatorBackgroundSyncSettings;
 }
 
-export interface CoordinatorDataChangedEvent {
-  type: "data-changed";
+export interface AssetDataChangedEvent {
+  topic: "asset.data-changed";
+  type: "asset.data-changed";
+  sessionEpoch: SessionEpoch;
   providerId: string;
   publicKeyHex: string;
-  revision: number;
-  kinds: AssetDataChangedEvent["kinds"];
+  assetDataRevision: number;
+  kinds: AssetDataInvalidationEvent["kinds"];
+}
+
+/** subscribe 的原子 baseline。每个 topic 的 revision 独立递增。 */
+export interface CoordinatorTopicBaseline {
+  topic: CoordinatorTopic;
+  baselineRevision: number;
+  sessionEpoch: SessionEpoch;
+  snapshot: VaultLifecycleEvent | KeyspaceActiveKeyEvent | BackgroundSnapshotEvent | AssetDataChangedEvent;
+}
+
+export interface CoordinatorSubscribeTopicsResult {
+  topics: CoordinatorTopic[];
+  baselines: CoordinatorTopicBaseline[];
 }
 
 // ============================================================
@@ -176,7 +199,7 @@ export interface CoordinatorDataChangedEvent {
 // ============================================================
 
 /** Coordinator 公开状态快照。 */
-export interface CoordinatorSnapshot {
+export interface CoordinatorBootstrapSnapshot {
   sessionEpoch: SessionEpoch;
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex?: string;
@@ -191,6 +214,7 @@ export interface CoordinatorTaskSnapshot {
   pluginId: string;
   label: string;
   state: "idle" | "queued" | "running" | "blocked";
+  progress?: BackgroundTaskProgress;
   lastStartedAt?: string;
   lastCompletedAt?: string;
   lastAttemptAt?: string;

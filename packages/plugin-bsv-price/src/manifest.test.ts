@@ -36,7 +36,7 @@ class FakeBroadcastCore implements BroadcastCore {
   providers(): never {
     throw new Error("not used");
   }
-  async connectForOwner(): Promise<never> {
+  async reconcileOwnerConnection(): Promise<never> {
     throw new Error("not used");
   }
   async disconnect(): Promise<void> {}
@@ -64,13 +64,13 @@ class FakeBroadcastCore implements BroadcastCore {
     return {
       state: this.state,
       providerId: "fake",
-      ownerPublicKeyHex: "02",
+      desiredConnectionOwnerPublicKeyHex: "02",
       lastError: null,
       subscribedChannels: [],
       nextReconnectAtMs: null
     };
   }
-  onStateChange(): BroadcastUnsubscribe {
+  onConnectionStateChanged(): BroadcastUnsubscribe {
     return () => {
       // no-op
     };

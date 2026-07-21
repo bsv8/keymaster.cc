@@ -1,5 +1,5 @@
-// packages/plugin-broadcast/src/reconnectCoordinator.ts
-// 广播系统的固定延迟重连协调器（施工单 §6.3）。
+// packages/plugin-broadcast/src/broadcastConnectionLifecycle.ts
+// 广播连接生命周期协调器（施工单 §6.3）。
 //
 // 设计缘由：
 //   - 远端断开后采用**固定延迟重连**策略，**不**做指数退避；
@@ -9,20 +9,20 @@
 //   - 不做 replay / resubscribe journal：本地 union 由 core 持有，
 //     重连成功后 core 内部会下推 union。
 
-import type { BroadcastCore, KeyspaceService, VaultService } from "@keymaster/contracts";
+import type { BroadcastConnectionIdentity, BroadcastCore, KeyspaceService, VaultService } from "@keymaster/contracts";
 
-export interface ReconnectLogger {
+export interface BroadcastConnectionLifecycleLogger {
   info(input: unknown): void;
   warn(input: unknown): void;
 }
 
-export interface CreateReconnectCoordinatorInput {
+export interface CreateBroadcastConnectionLifecycleInput {
   core: BroadcastCore;
   vault: VaultService;
   keyspace: KeyspaceService;
   /** 固定重连延迟（ms）；缺省 5000。 */
   reconnectDelayMs?: number;
-  logger?: ReconnectLogger;
+  logger?: BroadcastConnectionLifecycleLogger;
 }
 
 /**
@@ -32,11 +32,11 @@ export interface CreateReconnectCoordinatorInput {
  *   - 订阅 vault status 变化：locked → 解锁时立即重试一次；
  *   - 订阅 keyspace active key 变化：立即重试一次；
  *   - 订阅 core state 变化：state === "closed" 且 nextReconnectAtMs
- *     已设时按时间戳定时触发 connectForOwner；
+ *     已设时按时间戳定时触发 owner connection reconcile；
  *   - 当前 owner 解锁 → 自动重连；locked → 自动断开（保持 idle）。
  */
-export function createReconnectCoordinator(
-  cfg: CreateReconnectCoordinatorInput
+export function createBroadcastConnectionLifecycle(
+  cfg: CreateBroadcastConnectionLifecycleInput
 ): {
   dispose(): void;
 } {
@@ -60,6 +60,7 @@ export function createReconnectCoordinator(
 
   let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
+  let lastReconciledConnectionIdentity: BroadcastConnectionIdentity | null = null;
 
   const cancelTimer = (): void => {
     if (timer) {
@@ -68,10 +69,10 @@ export function createReconnectCoordinator(
     }
   };
 
-  const tryConnect = async (): Promise<void> => {
+  const reconcileBroadcastConnection = async (): Promise<void> => {
     if (disposed) return;
-    const vaultStatus = cfg.vault.status();
-    if (vaultStatus !== "unlocked") {
+    const vaultLifecycle = cfg.vault.getLifecycleSnapshot();
+    if (vaultLifecycle.status !== "unlocked") {
       cfg.core.markStructurallyOffline();
       return;
     }
@@ -81,42 +82,51 @@ export function createReconnectCoordinator(
       return;
     }
     try {
-      await cfg.core.connectForOwner(owner);
+      const identity = {
+        sessionEpoch: vaultLifecycle.sessionEpoch,
+        activePublicKeyHex: owner,
+        keyspaceGeneration: cfg.keyspace.active().generation ?? 0
+      };
+      if (JSON.stringify(identity) === JSON.stringify(lastReconciledConnectionIdentity) && cfg.core.inspect().state === "bound") return;
+      await cfg.core.reconcileOwnerConnection(identity);
+      if (cfg.core.inspect().state === "bound") lastReconciledConnectionIdentity = identity;
     } catch (err) {
       safeWarn({
         scope: "broadcast.core",
-        event: "broadcast.reconnect.failed",
+        event: "broadcast.connection.lifecycle.reconcile.failed",
         message: "",
         data: { err: err instanceof Error ? err.message : String(err) }
       });
     }
   };
 
-  const onVaultStatusChange = (status: string): void => {
+  const onVaultLifecycleChanged = (snapshot: { status: string }): void => {
     safeInfo({
       scope: "broadcast.core",
       event: "broadcast.vault.status.changed",
       message: "",
-      data: { status }
+      data: { status: snapshot.status }
     });
-    if (status === "unlocked") {
-      void tryConnect();
+    if (snapshot.status === "unlocked") {
+      void reconcileBroadcastConnection();
     } else {
+      lastReconciledConnectionIdentity = null;
       cancelTimer();
       cfg.core.markStructurallyOffline();
     }
   };
 
-  const onKeyspaceChange = (): void => {
+  const onActiveKeyChanged = (): void => {
     safeInfo({
       scope: "broadcast.core",
       event: "broadcast.keyspace.changed",
       message: ""
     });
-    void tryConnect();
+    lastReconciledConnectionIdentity = null;
+    void reconcileBroadcastConnection();
   };
 
-  const onCoreStateChange = (): void => {
+  const onBroadcastConnectionStateChanged = (): void => {
     if (disposed) return;
     const snap = cfg.core.inspect();
     if (snap.state === "closed" && snap.nextReconnectAtMs !== null) {
@@ -124,20 +134,20 @@ export function createReconnectCoordinator(
       cancelTimer();
       timer = setTimeout(() => {
         timer = null;
-        void tryConnect();
+        void reconcileBroadcastConnection();
       }, wait);
     } else {
       cancelTimer();
     }
   };
 
-  const offVault = cfg.vault.onStatusChange(onVaultStatusChange);
-  const offKeyspace = cfg.keyspace.onActiveChange(onKeyspaceChange);
-  const offCore = cfg.core.onStateChange(onCoreStateChange);
+  const offVault = cfg.vault.onLifecycleChange(onVaultLifecycleChanged);
+  const offKeyspace = cfg.keyspace.onActiveKeyChanged(onActiveKeyChanged);
+  const offCore = cfg.core.onConnectionStateChanged(onBroadcastConnectionStateChanged);
 
   // 启动期：vault 已解锁 + 有 active key 时主动重连一次。
-  if (cfg.vault.status() === "unlocked") {
-    void tryConnect();
+  if (cfg.vault.getLifecycleSnapshot().status === "unlocked") {
+    void reconcileBroadcastConnection();
   }
 
   return {

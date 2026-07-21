@@ -42,8 +42,11 @@ beforeEach(() => {
 
 function makeVault(): VaultService {
   const statusHandlers = new Set<(status: VaultStatus) => void>();
+  const lifecycleHandlers = new Set<(snapshot: { status: VaultStatus }) => void>();
   return {
     status: () => "unlocked",
+    getLifecycleSnapshot: () => ({ status: "unlocked" as const, sessionEpoch: "test-epoch", vaultLifecycleRevision: 1 }),
+    onLifecycleChange: (handler: (snapshot: { status: VaultStatus }) => void) => { lifecycleHandlers.add(handler); return () => lifecycleHandlers.delete(handler); },
     onStatusChange: (handler: (status: VaultStatus) => void) => {
       statusHandlers.add(handler);
       return () => statusHandlers.delete(handler);
@@ -60,7 +63,7 @@ function makeVault(): VaultService {
 function makeKeyspace(): KeyspaceService {
   return {
     active: () => ({ activePublicKeyHex: OWNER } satisfies ActiveKeyState),
-    onActiveChange: (_handler: (state: ActiveKeyState) => void) => () => undefined,
+    onActiveKeyChanged: (_handler: (state: ActiveKeyState) => void) => () => undefined,
     listKeys: async () => []
   } as unknown as KeyspaceService;
 }

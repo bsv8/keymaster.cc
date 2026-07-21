@@ -91,7 +91,7 @@ export function createBsvPriceService(
   );
   const subscribers = new Set<() => void>();
   let offMessage: BroadcastUnsubscribe | null = null;
-  let offCoreState: BroadcastUnsubscribe | null = core.onStateChange(() => {
+  let offCoreState: BroadcastUnsubscribe | null = core.onConnectionStateChanged(() => {
     updateCoreState();
     emit();
   });
