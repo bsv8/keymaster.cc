@@ -5,8 +5,7 @@
 //   - 本插件是**第一个**真实广播业务插件；
 //   - 直接消费 `BroadcastCore`，**不**经 `appmsg` 中转；
 //   - 注册能力：`bsv-price.service` capability；
-//   - 注册路由：`/bsv-price` 单页面（业务页），**不**注册首页 widget
-//     （施工单 §7.4.4 收口成单页面，避免多表面状态分叉）；
+//   - 注册路由：`/bsv-price` 单页面（业务页），并在首页右侧栏提供紧凑行情 widget；
 //   - `pricePublisherPublicKeyHex` 由装配层通过 `manifest.config`
 //     注入，只作为首次 seed；运行时编辑器走「设置 → 应用设置」；
 //   - **不**接触 provider handle / wire。
@@ -15,6 +14,7 @@ import type {
   ApplicationSettingsRegistry,
   BroadcastCore,
   BusinessFeatureRegistry,
+  HomeRegistry,
   I18nPluginResources,
   PluginManifest,
   ResourceRegistry
@@ -27,6 +27,7 @@ import {
 import { createBsvPriceService, type BsvPriceService, type BsvPriceServiceSnapshot } from "./bsvPriceService.js";
 import { BsvPricePage } from "./BsvPricePage.js";
 import { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
+import { BsvPriceHomeWidget } from "./BsvPriceHomeWidget.js";
 
 /** plugin-bsv-price 插件 id。 */
 export const BSV_PRICE_PLUGIN_ID = "bsv-price";
@@ -54,6 +55,13 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.page.table.price": "Price (USDT)",
       "bsv-price.page.empty": "(waiting for next snapshot)",
       "bsv-price.page.error.lastParse": "Last parse error:",
+      "bsv-price.home.title": "BSV Price",
+      "bsv-price.home.empty": "Waiting for a BSV price snapshot",
+      "bsv-price.home.status.ready": "Live",
+      "bsv-price.home.status.idle": "Idle",
+      "bsv-price.home.status.offline": "Offline",
+      "bsv-price.home.status.no_publisher_key": "No feed",
+      "bsv-price.home.status.not_configured": "Not configured",
       "bsv-price.settings.title": "BSV Price settings",
       "bsv-price.settings.desc":
         "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription.",
@@ -91,6 +99,13 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.page.table.price": "价格 (USDT)",
       "bsv-price.page.empty": "（等待下一次快照）",
       "bsv-price.page.error.lastParse": "最近一次解析错误：",
+      "bsv-price.home.title": "BSV 价格",
+      "bsv-price.home.empty": "等待 BSV 价格快照",
+      "bsv-price.home.status.ready": "实时",
+      "bsv-price.home.status.idle": "空闲",
+      "bsv-price.home.status.offline": "已断开",
+      "bsv-price.home.status.no_publisher_key": "无行情源",
+      "bsv-price.home.status.not_configured": "未配置",
       "bsv-price.settings.title": "BSV Price 设置",
       "bsv-price.settings.desc":
         "编辑 PriceCast 订阅方公钥。保存为空值会清空配置并停止订阅。",
@@ -122,7 +137,7 @@ const bsvPriceResources: I18nPluginResources = {
  *   - 本插件**只**消费 `BroadcastCore` 不依赖 `appmsg.core`；
  *   - 提供能力：`bsv-price.service`；
  *   - 注册路由：`/bsv-price`；
- *   - 不注册任何首页 widget；
+ *   - 首页 widget 只展示 service 的实时快照，不维护第二份行情状态；
  *   - 不接触 provider handle / wire 细节。
  *
  * 配置面（施工单 2026-07-08 001）：
@@ -172,6 +187,7 @@ export const bsvPricePlugin: PluginManifest = {
       capability: "business.registry",
       reason: "将行情页挂入首页业务域"
     },
+    { capability: "home.registry", reason: "将 BSV 价格快照显示在首页右侧栏" },
     {
       capability: RESOURCE_REGISTRY_CAPABILITY,
       reason: "注册 BSV Price 状态资源"
@@ -230,6 +246,7 @@ export const bsvPricePlugin: PluginManifest = {
     }>("breadcrumb.registry");
     const applicationSettings = ctx.get<ApplicationSettingsRegistry>("application-settings.registry");
     const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    const home = ctx.get<HomeRegistry>("home.registry");
 
     routes.register({
       id: "bsv-price.page",
@@ -252,6 +269,15 @@ export const bsvPricePlugin: PluginManifest = {
       order: 10,
       icon: "LineChart",
       entry: { path: "/bsv-price", routeId: "bsv-price.page" }
+    });
+
+    home.register({
+      id: "bsv-price.snapshot",
+      title: { key: "bsv-price.home.title", fallback: "BSV Price" },
+      component: BsvPriceHomeWidget,
+      order: 40,
+      slot: "aside",
+      refreshHint: "realtime"
     });
 
     breadcrumbs.register({

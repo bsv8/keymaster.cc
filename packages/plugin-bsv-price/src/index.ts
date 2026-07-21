@@ -36,3 +36,4 @@ export {
 } from "./constants.js";
 export { BsvPricePage } from "./BsvPricePage.js";
 export { BsvPriceSettingsPage } from "./BsvPriceSettingsPage.js";
+export { BsvPriceHomeWidget } from "./BsvPriceHomeWidget.js";

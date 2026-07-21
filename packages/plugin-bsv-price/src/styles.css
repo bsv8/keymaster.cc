@@ -8,6 +8,29 @@
   margin: 0 auto;
 }
 
+.bsv-price-home-widget__status {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.bsv-price-home-widget__status--ready {
+  color: var(--primary);
+}
+
+.bsv-price-home-widget__status--offline,
+.bsv-price-home-widget__status--no_publisher_key {
+  color: var(--danger);
+}
+
+.bsv-price-home-widget__list li {
+  gap: 12px;
+}
+
+.bsv-price-home-widget__price {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
 .km-bsv-price-page__title {
   font-size: 1.4rem;
   font-weight: 600;

@@ -99,6 +99,7 @@ function makeContext(core: BroadcastCore, config: Record<string, unknown>): Plug
   const routeCalls: unknown[] = [];
   const businessFeatureCalls: unknown[] = [];
   const registries: Record<string, FakeRegistry> = {
+    "home.registry": { register: () => undefined },
     "route.registry": { register: (input: unknown) => routeCalls.push(input) },
     "breadcrumb.registry": { register: () => undefined },
     "application-settings.registry": {
