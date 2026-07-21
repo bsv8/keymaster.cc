@@ -423,23 +423,11 @@ export const protocolPlugin: PluginManifest = {
     const vaultService = ctx.get<VaultService>("vault.service");
     const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
 
-    // 命令流 IndexedDB：best-effort 打开；失败时 service 走"historyAvailable=false"
-    // 降级，主协议流程不受影响（p2pkh 仍可用 manual confirm；feepool fail-closed）。
-    // `setup` 允许返回 Promise；这里 await 让 service 在拿到 DB 引用后才被构造，
-    // 避免 late-binding 复杂度。
-    return (async () => {
-      let storageDb: Awaited<ReturnType<typeof openProtocolStorageDb>> | undefined;
-      try {
-        storageDb = await openProtocolStorageDb();
-      } catch (err) {
-        ctx.logger.error({
-          scope: "protocol.lifecycle",
-          event: "storageDb.open.failed",
-          message: "storageDb failed to open",
-          data: { err: err instanceof Error ? err.message : String(err) }
-        });
-      }
-
+    // IndexedDB 是历史 / 每站点配置的可选持久化层，绝不能阻塞插件注册。
+    // 某些浏览器在存储服务异常时会让 indexedDB.open() 永久 pending，既不触发
+    // error 也不触发 blocked。先以 historyAvailable=false 创建 service，后台
+    // 打开成功后再 attach，确保钱包主路径始终可用。
+    {
       // p2pkh service 是 optional 能力：**不**放进 manifest.dependencies，
       // 否则 host.enable() 会在 protocolPlugin 早于 plugin-p2pkh 装载时直接
       // 把本插件打成 blocked，导致 `protocol.service` capability 根本
@@ -506,7 +494,6 @@ export const protocolPlugin: PluginManifest = {
       const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
-        storageDb,
         p2pkhService: p2pkhService as never,
         appMsgCore,
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
@@ -574,6 +561,19 @@ export const protocolPlugin: PluginManifest = {
         invalidation: "immediate"
       });
 
+      void openProtocolStorageDb()
+        .then((storageDb) => {
+          service.attachStorageDb(storageDb);
+        })
+        .catch((err) => {
+          ctx.logger.error({
+            scope: "protocol.lifecycle",
+            event: "storageDb.open.failed",
+            message: "storageDb failed to open",
+            data: { err: err instanceof Error ? err.message : String(err) }
+          });
+        });
+
       // 注意：协议页**不**注册到 `route.registry`。
       // 设计缘由：施工单 001 收口反馈——页面"单一 owner"意味着入口路径
       // 也只有一条。`apps/web/src/App.tsx` 已经把
@@ -595,6 +595,6 @@ export const protocolPlugin: PluginManifest = {
           // ignore
         }
       };
-    })();
+    }
   }
 };

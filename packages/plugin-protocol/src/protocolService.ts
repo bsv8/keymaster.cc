@@ -739,6 +739,36 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
+   * 在服务已经启动后接入可选的协议存储。
+   *
+   * IndexedDB 只承载历史、站点配置和 session 持久化，不能成为协议页
+   * 首屏可用性的前置条件。manifest 因而会先创建本 service，再在后台
+   * 成功打开 DB 后调用本方法；若浏览器的 open 永久 pending，service 保持
+   * historyAvailable=false 的安全降级状态，主应用和手动确认流程仍可使用。
+   */
+  attachStorageDb(storageDb: ProtocolStorageDb): void {
+    if (this.deps.storageDb) return;
+    this.deps.storageDb = storageDb;
+    this.historyAvailableFlag = true;
+
+    // DB 尚未就绪期间完成的终态记录仍在内存中；接入后补写，避免一次短暂
+    // 初始化延迟导致本次会话的历史永久丢失。
+    for (const request of this.requestsByRecordId.values()) {
+      if (this.isTerminalPhase(request.phase)) {
+        this.persistRecord(this.makeCommandRecord(request));
+      }
+    }
+
+    // 当前站点已存在时立即回补历史和站点配置；没有当前站点则只刷新
+    // historyAvailable 投影，等第一条请求到达后再按 origin 加载。
+    if (this.currentOriginValue) {
+      void this.loadHistoryForOrigin(this.currentOriginValue);
+    } else {
+      this.emitFeed();
+    }
+  }
+
+  /**
    * 内部稳定 id 生成器。
    */
   private nextRecordId(): string {

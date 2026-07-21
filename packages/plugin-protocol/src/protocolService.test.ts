@@ -583,6 +583,15 @@ beforeEach(() => {
 });
 
 describe("ProtocolServiceImpl", () => {
+  it("can attach IndexedDB after startup without making the protocol unavailable", () => {
+    const { service } = makeService(TEST_PUB_HEX, null as unknown as ProtocolStorageDb);
+    expect(service.feedSnapshot().historyAvailable).toBe(false);
+
+    service.attachStorageDb(makeFakeStorageDb());
+
+    expect(service.feedSnapshot().historyAvailable).toBe(true);
+  });
+
   it("posts ready on startSession", async () => {
     const { service, posted } = makeService();
     service.startSession();
