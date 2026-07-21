@@ -3,7 +3,7 @@
 // 设计缘由：plugin 通过 capability 拿到这些 registry；类型契约放在 contracts，
 // 实现放在 runtime。这避免 plugin 直接依赖 runtime 内部模块。
 
-import type { AppRoute, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, MenuItem, SettingsRoute, TransferRegistry as ITransferRegistry } from "./index.js";
+import type { AppRoute, ApplicationSettingsItem, AssetRegistry as IAssetRegistry, BreadcrumbProvider, HomeWidget, ImporterRegistry as IImporterRegistry, SettingsRoute, SystemSettingsItem, SystemStatusModule, TransferRegistry as ITransferRegistry, VaultSettingsSection } from "./index.js";
 import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
 import type { NoticeRecord } from "./notice.js";
@@ -17,11 +17,6 @@ export interface RouteRegistry {
   byId(id: string): AppRoute | undefined;
 }
 
-export interface MenuRegistry {
-  register(item: MenuItem): void;
-  list(): MenuItem[];
-}
-
 export interface BreadcrumbRegistry {
   register(provider: BreadcrumbProvider): void;
   list(): BreadcrumbProvider[];
@@ -33,8 +28,7 @@ export interface BreadcrumbRegistry {
  *
  * - 插件只能注册"独立设置详情页"（SettingsRoute）；
  * - 不再支持 registerField / listFields / 聚合 page.component 拼装；
- * - 同一路由只能由 settings.registry 一处真值，不能再同时进
- *   route.registry / menu.registry。
+ * - 同一路由只能由 settings.registry 一处真值，不能再同时进 route.registry。
  */
 export interface SettingsRegistry {
   /** 注册一个设置详情页。id 重复时抛错。 */
@@ -47,6 +41,43 @@ export interface SettingsRegistry {
   byId(id: string): SettingsRoute | undefined;
   /** 按 path 取详情页（path 必须以 "/" 开头）。 */
   byPath(path: string): SettingsRoute | undefined;
+}
+
+/**
+ * `/settings/system` 的设置钩子注册表。
+ *
+ * 每个插件项目携带自己的 group 和 order；registry 保证 id 唯一以及同一
+ * group 的定义一致。页面读取 list() 后按 group/order 渲染即可。
+ */
+export interface SystemSettingsRegistry {
+  register(item: SystemSettingsItem): void;
+  unregister(id: string): void;
+  list(): SystemSettingsItem[];
+  _ids(): string[];
+}
+
+/** 常驻系统模块向「设置 → 系统状态」注入实时状态视图。 */
+export interface SystemStatusRegistry {
+  register(module: SystemStatusModule): void;
+  unregister(id: string): void;
+  list(): SystemStatusModule[];
+  _ids(): string[];
+}
+
+/** 可选插件向「设置 → Key 管理」注入内嵌工作区。 */
+export interface VaultSettingsRegistry {
+  register(section: VaultSettingsSection): void;
+  unregister(id: string): void;
+  list(): VaultSettingsSection[];
+  _ids(): string[];
+}
+
+/** 应用插件向「设置 → 应用设置」注册自己的二级入口。 */
+export interface ApplicationSettingsRegistry {
+  register(item: ApplicationSettingsItem): void;
+  unregister(id: string): void;
+  list(): ApplicationSettingsItem[];
+  _ids(): string[];
 }
 
 /**
@@ -63,6 +94,9 @@ export interface HomeRegistry {
 
 export interface BusinessFeatureRegistry {
   register(ownerPluginId: string, domain: BusinessDomain): void;
+  /** 向已存在（或稍后注册）的业务域追加一个由其它插件拥有的入口。 */
+  registerFeature(ownerPluginId: string, domainId: string, feature: BusinessFeature): void;
+  unregisterFeature(featureId: string): void;
   unregisterDomain(domainId: string): void;
   listDomains(): BusinessDomain[];
   listFeatures(): Array<BusinessFeature & { domainId: string; ownerPluginId: string }>;

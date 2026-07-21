@@ -63,7 +63,7 @@ export function AssetsHomeWidget() {
   return (
     <div className={`home-widget home-widget--assets ${stale ? "is-stale" : ""}`}>
       <header className="home-widget__head">
-        <h3>{t("assets.home.overview", { defaultValue: "资产" })}</h3>
+        <h3>{t("assets.home.overview", { defaultValue: "Asset overview" })}</h3>
       </header>
       {rows.length === 0 ? (
         <p className="home-widget__empty">

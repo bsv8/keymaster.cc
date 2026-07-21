@@ -15,7 +15,7 @@
 // @vitest-environment jsdom
 import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
 import type { KeyspaceService, ActiveKeyState } from "@keymaster/contracts";
 import type {
@@ -190,6 +190,7 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
   beforeEach(() => {
     // localStorage in jsdom is fine, but reset settings between tests.
     localStorage.clear();
+    window.history.pushState({}, "", "/p2pkh");
   });
 
   afterEach(() => {
@@ -301,5 +302,33 @@ describe("P2pkhOverviewPage - 硬切换 003 真刷新", () => {
     const afterCalls = (fake.service.listBackfillStates as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
     // 至少比 beforeCalls 多 2（recent reload + backfill reload）。
     expect(afterCalls).toBeGreaterThanOrEqual(beforeCalls + 2);
+  });
+
+  it("provides History and UTXO entry points while preserving the selected asset", async () => {
+    const fake = makeFakeService();
+    const keyspace = makeFakeKeyspace();
+    const host = createPluginHost({
+      disableConfigPersistence: true,
+      initialI18nResources: [p2pkhResources]
+    });
+    host.provide<P2pkhService>("p2pkh.service", fake.service);
+    host.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerOverviewResources(host, fake.service, keyspace);
+
+    const view = render(
+      <PluginHostProvider host={host}>
+        <P2pkhOverviewPage />
+      </PluginHostProvider>
+    );
+    const page = within(view.container);
+    await page.findByText("test-key");
+
+    fireEvent.click(page.getByRole("button", { name: /BSV \/ main/ }));
+    fireEvent.click(page.getByRole("button", { name: /P2PKH 历史|P2PKH history/ }));
+    expect(window.location.pathname + window.location.search).toBe("/p2pkh/history?assetId=bsv");
+
+    window.history.pushState({}, "", "/p2pkh");
+    fireEvent.click(page.getByRole("button", { name: /P2PKH UTXO|P2PKH UTXOs/ }));
+    expect(window.location.pathname).toBe("/p2pkh/utxos");
   });
 });

@@ -41,7 +41,6 @@ export function BackgroundSettingsPage() {
 
   // 本地交互 state：表单值
   const [intervalMs, setIntervalMs] = useState(settings.assetHoldingsIntervalMs);
-  const [saved, setSaved] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
 
@@ -50,56 +49,51 @@ export function BackgroundSettingsPage() {
     setIntervalMs(settings.assetHoldingsIntervalMs);
   }, [settings.assetHoldingsIntervalMs]);
 
-  function handleSave() {
-    const settings: BackgroundSyncSettings = {
-      assetHoldingsIntervalMs: intervalMs
-    };
+  function applyInterval(nextIntervalMs: number) {
+    const nextSettings: BackgroundSyncSettings = { assetHoldingsIntervalMs: nextIntervalMs };
+    setIntervalMs(nextIntervalMs);
     setSaving(true);
     setSaveError(null);
-    void backgroundService.updateScheduleSettings(settings).then((result) => {
+    void backgroundService.updateScheduleSettings(nextSettings).then((result) => {
       setSaving(false);
       if (result.status !== "accepted") {
         setSaveError("message" in result ? result.message : t("background.settings.saveFailed", { defaultValue: "保存失败，请稍后重试。" }));
+        setIntervalMs(backgroundService.getScheduleSettings().assetHoldingsIntervalMs);
         return;
       }
       const effective = backgroundService.getScheduleSettings();
       setIntervalMs(effective.assetHoldingsIntervalMs);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+    }).catch((error: unknown) => {
+      setSaving(false);
+      setIntervalMs(backgroundService.getScheduleSettings().assetHoldingsIntervalMs);
+      setSaveError(error instanceof Error ? error.message : String(error));
     });
   }
 
   return (
     <div className="background-settings">
-      <h2>{t("background.settings.title", { defaultValue: "后台同步设置" })}</h2>
-      <p className="background-settings__description">
-        {t("background.settings.description", {
-          defaultValue: "后台同步始终由系统维持。您可以调整同步频率，或在托盘中点击「立即同步一次」手动触发一轮同步。"
-        })}
-      </p>
       <div className="background-settings__field">
-        <label>
+        <span className="background-settings__label">
           {t("background.settings.assetHoldingsInterval", { defaultValue: "资产余额同步频率" })}
-          <select
-            value={intervalMs}
-            onChange={(e) => setIntervalMs(Number(e.target.value))}
-          >
-            {INTERVAL_OPTIONS.map((opt) => (
-              <option key={opt.value} value={opt.value}>
+        </span>
+        <div className="background-settings__intervals" role="group" aria-label={t("background.settings.assetHoldingsInterval", { defaultValue: "资产余额同步频率" })}>
+          {INTERVAL_OPTIONS.map((opt) => {
+            const active = intervalMs === opt.value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                className={`background-settings__interval ${active ? "is-active" : ""}`}
+                aria-pressed={active}
+                disabled={saving}
+                onClick={() => applyInterval(opt.value)}
+              >
                 {t(opt.label, { defaultValue: opt.label })}
-              </option>
-            ))}
-          </select>
-        </label>
+              </button>
+            );
+          })}
+        </div>
       </div>
-      <button onClick={handleSave} disabled={saving}>
-        {t("background.settings.save", { defaultValue: "保存" })}
-      </button>
-      {saved ? (
-        <p className="background-settings__feedback">
-          {t("background.settings.saved", { defaultValue: "已保存" })}
-        </p>
-      ) : null}
       {saveError ? <p className="background-settings__error">{saveError}</p> : null}
     </div>
   );

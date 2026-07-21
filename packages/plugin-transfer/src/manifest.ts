@@ -6,11 +6,10 @@
 // 硬切换 003：route / menu / breadcrumb 走 I18nText。
 
 import type {
+  BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
   PluginManifest,
   ResourceRegistry,
   RouteRegistry,
@@ -101,23 +100,9 @@ export const transferPlugin: PluginManifest = {
     { capability: "keyspace.service", reason: "读取 active key 资源" },
     { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册资源定义" },
     { capability: "route.registry", reason: "注册 Transfer 页面" },
-    { capability: "menu.registry", reason: "注册 Transfer 菜单入口" },
+    { capability: "business.registry", reason: "接入资产业务导航" },
     { capability: "breadcrumb.registry", reason: "注册 Transfer 面包屑" }
   ],
-  business: {
-    domains: [{
-      id: "transfer",
-      label: { key: "transfer.domain.label", fallback: "Assets" },
-      order: 200,
-      features: [{
-        id: "transfer.send",
-        label: { key: "transfer.menu.title", fallback: "Transfer" },
-        order: 30,
-        icon: "Send",
-        entry: { path: "/transfer", routeId: "transfer.page" }
-      }]
-    }]
-  },
   setup(ctx) {
     ctx.provide("feature.transfer", createTransferFeatureCapability());
     const registry = ctx.get<TransferRegistry>("transfer.registry");
@@ -178,24 +163,21 @@ export const transferPlugin: PluginManifest = {
       id: "transfer.page",
       path: "/transfer",
       label: { key: "transfer.route.title", fallback: "Transfer" },
-      component: TransferPage,
-      inMenu: true,
-      menuGroup: "wallets",
-      order: 30,
-      icon: "Send"
+      component: TransferPage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.transfer",
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("transfer", "assets", {
+      id: "assets.transfer",
       label: { key: "transfer.menu.title", fallback: "Transfer" },
-      routeId: "transfer.page",
-      group: "wallets",
-      order: 30,
+      order: 20,
       icon: "Send",
-      visibleWhen: ({ unlocked }) => unlocked
-    };
-    menus.register(item);
+      entry: {
+        path: "/transfer",
+        routeId: "transfer.page",
+        visibleWhen: ({ unlocked }) => unlocked
+      }
+    });
 
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
     const crumbProvider: BreadcrumbProvider = {

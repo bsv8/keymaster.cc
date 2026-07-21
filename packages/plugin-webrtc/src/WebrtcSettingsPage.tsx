@@ -11,7 +11,6 @@
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useCapability, useI18n } from "@keymaster/runtime";
-import { PageHeader } from "@keymaster/ui";
 import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
 import {
   validateStunUrl,
@@ -37,12 +36,7 @@ export function WebrtcSettingsPage(): React.ReactElement {
         className="km-webrtc-page"
         data-webrtc-settings="missing-service"
       >
-        <PageHeader
-          title={t("webrtc.page.settings.title", { defaultValue: "WebRTC settings" })}
-          description={t("webrtc.page.settings.desc", {
-            defaultValue: "webrtc service is not available"
-          })}
-        />
+        <p>{t("webrtc.page.settings.desc", { defaultValue: "webrtc service is not available" })}</p>
       </section>
     );
   }
@@ -224,12 +218,6 @@ function WebrtcSettingsInner({ service }: WebrtcSettingsInnerProps): React.React
 
   return (
     <section className="km-webrtc-page" data-webrtc-settings="main">
-      <PageHeader
-        title={t("webrtc.page.settings.title", { defaultValue: "WebRTC settings" })}
-        description={t("webrtc.page.settings.desc", {
-          defaultValue: "STUN-only config; no TURN."
-        })}
-      />
       <div>
         <h2 style={{ margin: "0 0 8px 0", fontSize: 16 }}>
           {t("webrtc.page.settings.field.stun.label", { defaultValue: "STUN servers" })}

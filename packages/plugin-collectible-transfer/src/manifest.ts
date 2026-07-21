@@ -73,8 +73,7 @@ export const collectibleTransferPlugin: PluginManifest = {
       id: "collectibles.transfer",
       path: "/collectibles/transfer",
       label: { key: "collectibleTransfer.route.transfer", fallback: "Transfer collectible" },
-      component: CollectibleTransferPage,
-      inMenu: false
+      component: CollectibleTransferPage
     };
     routes.register(route);
 

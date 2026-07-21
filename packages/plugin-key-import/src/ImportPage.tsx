@@ -50,7 +50,7 @@ import {
   type JsonImportState
 } from "./jsonImportStateMachine.js";
 
-export function ImportPage() {
+export function ImportPage({ embedded = false }: { embedded?: boolean }) {
   const registry = useCapability<ImporterRegistry>("importer.registry");
   const vault = useCapability<VaultService>("vault.service");
   const messageBus = useCapability<MessageBus>("runtime.messageBus");
@@ -87,13 +87,13 @@ export function ImportPage() {
   if (vaultStatus !== "unlocked") {
     return (
       <div className="import-page">
-        <PageHeader
-          title={t("keyImport.page.title", { defaultValue: "导入私钥" })}
-          description={t("keyImport.page.lockedHint", {
-            defaultValue:
-              "此页面仅用于在已解锁的钱包中导入更多 key。请先解锁 Vault，或返回欢迎页通过首启导入向导新建钱包并导入第一把 key。"
-          })}
-        />
+      {!embedded ? <PageHeader
+        title={t("keyImport.page.title", { defaultValue: "导入私钥" })}
+        description={t("keyImport.page.lockedHint", {
+          defaultValue:
+            "此页面仅用于在已解锁的钱包中导入更多 key。请先解锁 Vault，或返回欢迎页通过首启导入向导新建钱包并导入第一把 key。"
+        })}
+      /> : null}
       </div>
     );
   }
@@ -208,12 +208,12 @@ export function ImportPage() {
 
   return (
     <div className="import-page">
-      <PageHeader
+      {!embedded ? <PageHeader
         title={t("keyImport.page.title", { defaultValue: "导入私钥" })}
         description={t("keyImport.page.desc", {
           defaultValue: "选择导入方式，平台不会直接读取你的私钥；私钥始终只通过 Vault 加密保存。"
         })}
-      />
+      /> : null}
       <section className="import-page__pickers">
         <h3>{t("keyImport.page.step.picker", { defaultValue: "1. 选择导入方式" })}</h3>
         <ImporterPicker
@@ -300,6 +300,11 @@ export function ImportPage() {
       )}
     </div>
   );
+}
+
+/** 供 Key 管理页的扩展钩子使用，避免在内嵌工作区重复渲染页面标题。 */
+export function KeyImportSection() {
+  return <ImportPage embedded />;
 }
 
 /** JSON importer 专属输入区：mode 切换 + file / text 分支。 */

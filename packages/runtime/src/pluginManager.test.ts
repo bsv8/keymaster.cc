@@ -13,8 +13,9 @@
 //      破坏热卸载语义。
 //
 // 硬切换 003：plugin-settings 不再注册 /settings 聚合页；它通过
-// settings.registry 注册 /settings/language 与 /settings/plugins 两个
-// 详情页；不再需要 menu.registry 的"设置"分组入口。
+// settings.registry 注册 /settings/plugins 等独立详情页；系统设置项目走
+// system-settings.registry。
+// 详情页；侧栏仅消费 business.registry 的新设置入口。
 
 import { describe, expect, it } from "vitest";
 import { createPluginHost, type PluginHost } from "./createPluginHost.js";

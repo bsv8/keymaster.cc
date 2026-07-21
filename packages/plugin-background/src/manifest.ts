@@ -9,7 +9,7 @@ import type {
   I18nPluginResources,
   PluginManifest,
   ResourceRegistry,
-  SettingsRegistry,
+  SystemSettingsRegistry,
   TopbarRegistry
 } from "@keymaster/contracts";
 import {
@@ -100,7 +100,7 @@ export const backgroundPlugin: PluginManifest = {
   i18n: backgroundResources,
   dependencies: [
     { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" },
-    { capability: "settings.registry", reason: "注册后台同步设置页" }
+    { capability: "system-settings.registry", reason: "注册后台同步系统设置" }
   ],
   setup(ctx) {
     // 施工单 002：优先使用 Coordinator facade
@@ -172,14 +172,20 @@ export const backgroundPlugin: PluginManifest = {
       order: 100
     });
 
-    // 注册后台同步设置页
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.register({
-      id: "background.settings",
-      path: "/settings/background",
-      label: { key: "background.settings.title", fallback: "后台同步设置" },
+    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    systemSettings.register({
+      id: "background.system-settings.schedule",
+      group: {
+        id: "background-sync",
+        label: { key: "background.settings.title", fallback: "Background sync" },
+        order: 20
+      },
+      label: { key: "background.settings.assetHoldingsInterval", fallback: "Asset balance sync interval" },
+      description: { key: "background.settings.description", fallback: "Adjust the asset balance sync interval." },
       component: BackgroundSettingsPage,
-      order: 50
+      order: 10,
+      replacesSettingsRouteId: "background.settings",
+      visibleWhen: ({ unlocked }) => unlocked
     });
 
     return () => {

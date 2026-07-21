@@ -33,10 +33,11 @@ const assetsResources: I18nPluginResources = {
   namespace: "assets",
   resources: {
     en: {
-      "assets.route.list": "Assets",
+      "assets.domain.label": "Wallet",
+      "assets.route.list": "Asset overview",
       "assets.route.detail": "Asset detail",
-      "assets.menu.list": "Assets",
-      "assets.home.overview": "Assets",
+      "assets.menu.list": "Asset overview",
+      "assets.home.overview": "Asset overview",
       "assets.page.title": "Assets",
       "assets.page.description": "Cross-provider aggregation.",
       "assets.page.descriptionPrefix": "Cross-provider aggregation · ",
@@ -75,10 +76,11 @@ const assetsResources: I18nPluginResources = {
       "assets.redirect.missing": "Missing providerId/assetId parameter."
     },
     "zh-CN": {
-      "assets.route.list": "资产",
+      "assets.domain.label": "钱包",
+      "assets.route.list": "资产总览",
       "assets.route.detail": "资产详情",
-      "assets.menu.list": "资产",
-      "assets.home.overview": "资产",
+      "assets.menu.list": "资产总览",
+      "assets.home.overview": "资产总览",
       "assets.page.title": "资产",
       "assets.page.description": "跨 provider 聚合展示。",
       "assets.page.descriptionPrefix": "跨 provider 聚合展示 · ",
@@ -137,12 +139,12 @@ export const assetsPlugin: PluginManifest = {
     { capability: "keyspace.service", reason: "读取 active key 上下文" },
   ],
   business: {
-    domains: [{ id: "assets", label: { key: "assets.domain.label", fallback: "Assets" }, order: 200, features: [
+    domains: [{ id: "assets", label: { key: "assets.domain.label", fallback: "Wallet" }, order: 200, features: [
       {
         id: "assets.holdings",
-        label: { key: "assets.route.list", fallback: "Assets" },
+        label: { key: "assets.route.list", fallback: "Asset overview" },
         order: 5, icon: "Layers", views: [{ id: "assets.detail", path: "/assets/detail", label: { key: "assets.route.detail", fallback: "Asset detail" }, component: AssetDetailRedirect }], entry: { path: "/assets", component: AssetsPage, visibleWhen: ({ unlocked }) => unlocked },
-        home: [{ id: "assets.overview", space: { id: "assets.portfolio", label: { key: "assets.domain.label", fallback: "Assets" }, order: 200 }, order: 5, component: AssetsHomeWidget }]
+        home: [{ id: "assets.overview", space: { id: "assets.portfolio", label: { key: "assets.domain.label", fallback: "Wallet" }, order: 200 }, order: 5, component: AssetsHomeWidget }]
       }
     ], }]
   },

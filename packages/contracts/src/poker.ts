@@ -39,8 +39,8 @@ export const POKER_REQUIRED_CAPABILITIES = [
   "runtime.messageBus",
   "i18n.service",
   "route.registry",
-  "menu.registry",
-  "settings.registry",
+  "business.registry",
+  "application-settings.registry",
   "home.registry",
   "breadcrumb.registry"
 ] as const;
@@ -218,7 +218,7 @@ export type PokerConnectionStatus =
 
 /** Poker 服务全局网络设置（与具体 key 无关）。 */
 export interface PokerSettings {
-  /** proxy WSS endpoint，缺省值由 plugin-poker 在 /settings/poker 详情页写入。 */
+  /** proxy WSS endpoint，缺省值由 plugin-poker 在 /settings/apps/poker 详情页写入。 */
   proxyEndpoint: string;
   /**
    * 公告里对外暴露的 `P2PNode` 入口地址（host:port），可空。

@@ -20,12 +20,10 @@ import {
 } from "./createPluginHost.js";
 import type { PluginContext, PluginManifest } from "@keymaster/contracts";
 import type { RouteRegistry } from "./registries/routeRegistry.js";
-import type { MenuRegistry } from "./registries/menuRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 
 interface RegistryViews {
   routes: { ids: string[] };
-  menus: { ids: string[] };
   settingsRoutes: { ids: string[] };
   capabilities: { keys: string[] };
 }
@@ -33,7 +31,6 @@ interface RegistryViews {
 function view(host: PluginHost): RegistryViews {
   return {
     routes: { ids: host.routes._ids() },
-    menus: { ids: host.menus._ids() },
     settingsRoutes: { ids: host.settings._ids() },
     capabilities: { keys: host.capabilities.keys() }
   };
@@ -59,13 +56,6 @@ function makeA(): PluginManifest {
         path: "/a",
         label: "A",
         component: () => null
-      });
-      const m = ctx.get<MenuRegistry>("menu.registry");
-      m.register({
-        id: "menu.a",
-        label: "A",
-        group: "g",
-        order: 1
       });
       ctx.provide(CAP_A, { value: "a" });
     }
@@ -182,7 +172,6 @@ describe("createPluginHost - lifecycle", () => {
     });
 
     expect(host.routes.byId("business-surface.feature")?.path).toBe("/business-surface");
-    expect(host.menus.list()).toEqual([]);
     expect(host.home.list()).toEqual([]);
     expect(host.business.listDomains().map((domain) => domain.id)).toEqual(["business-surface.domain"]);
     expect(host.business.listHomeProjections().map((projection) => projection.id)).toEqual(["business-surface.projection"]);
@@ -229,6 +218,27 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.configStore.read().c).toBe(true);
   });
 
+  it("always enables optional immutable plugins despite stale persisted config", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    const immutableOptional: PluginManifest = {
+      ...makeC(),
+      id: "immutable-optional",
+      meta: {
+        kind: "core",
+        startup: "optional",
+        defaultEnabled: true,
+        canDisable: false,
+        providesCapabilities: [CAP_C]
+      }
+    };
+    host.configStore.setEnabled("immutable-optional", false);
+
+    await host.register(immutableOptional);
+
+    expect(host.state("immutable-optional").kind).toBe("enabled");
+    expect(host.configStore.read()["immutable-optional"]).toBe(true);
+  });
+
   it("does not let config updates disable plugins marked canDisable=false", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.register(makeC());
@@ -254,7 +264,6 @@ describe("createPluginHost - lifecycle", () => {
 
     const after = view(host);
     expect(after.routes.ids).not.toContain(ROUTE_A);
-    expect(after.menus.ids).not.toContain("menu.a");
     expect(after.capabilities.keys).not.toContain(CAP_A);
   });
 

@@ -12,8 +12,8 @@
 
 export const PRICECAST_PROTOCOL_ID = "pricecast.bsv_price.v1";
 export const PRICECAST_CHANNEL_SUFFIX = ".pricecast.bsvusdt";
-/** BSV Price 设置页路径。 */
-export const BSV_PRICE_SETTINGS_PATH = "/settings/bsv-price";
+/** BSV Price 在「设置 → 应用设置」下的详情页路径。 */
+export const BSV_PRICE_SETTINGS_PATH = "/settings/apps/bsv-price";
 
 /** 由 publisher 公钥 hex 拼出订阅频道名。 */
 export function buildPriceChannelId(publisherPublicKeyHex: string): string {

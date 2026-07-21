@@ -5,3 +5,5 @@ export { PluginDependencyPanel } from "./PluginDependencyPanel.js";
 export { LanguageSettingsPage } from "./LanguageSettingsPage.js";
 export { LanguageSection } from "./LanguageSection.js";
 export { LogSettingsPage } from "./LogSettingsPage.js";
+export { SystemSettingsPage } from "./SystemSettingsPage.js";
+export { SystemStatusPage } from "./SystemStatusPage.js";

@@ -20,7 +20,7 @@
 //   - 删除确认的目标复核改成 `label + 短公钥`（或"身份不可用"）。
 //   - 不再读取、构造、回填 `KeyIdentity.fingerprint` 字段。
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Button,
   DataTable,
@@ -30,7 +30,7 @@ import {
   TextInput,
   type DataTableColumn
 } from "@keymaster/ui";
-import { router, useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useI18n, useLocale, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
@@ -55,6 +55,7 @@ export function VaultSettingsPage() {
   // 触发 languageChanged 重渲染 + 取当前 locale 用于日期格式化。
   const locale = useLocale();
   const keyState = useResourceSelector<VaultKeyResourceState, VaultKeyResourceState>(host.resourceStore, "vault.key-state", [], (s) => s.data ?? { keys: [], active: { activePublicKeyHex: undefined }, initializing: false, notice: null }, (a, b) => JSON.stringify(a) === JSON.stringify(b));
+  const pluginSections = useRegistry((h) => h.vaultSettings.list());
   const keys = keyState.keys;
   const active = keyState.active;
   const [error, setError] = useState<string | null>(null);
@@ -66,6 +67,7 @@ export function VaultSettingsPage() {
   const [creating, setCreating] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [importingBackup, setImportingBackup] = useState(false);
+  const [importingSectionId, setImportingSectionId] = useState<string | null>(null);
   const [activating, setActivating] = useState<KeyIdentity | null>(null);
   const [activatePassword, setActivatePassword] = useState("");
   const [activateError, setActivateError] = useState<string | null>(null);
@@ -85,16 +87,17 @@ export function VaultSettingsPage() {
     ? t("vault.settings.notice.persisted", { defaultValue: "Key 已保存，但未能自动设为 active。请在列表中手动切换。" }) + ` (${keyState.notice.label})`
     : null;
   const displayedNotice = notice ?? resourceNotice;
+  const importingSection = pluginSections.find((section) => section.id === importingSectionId);
+
+  useEffect(() => {
+    if (importingSectionId && !importingSection) setImportingSectionId(null);
+  }, [importingSection, importingSectionId]);
 
   async function lock() {
     const result = await vault.lock();
     if (result.status !== "accepted" && result.status !== "ok") {
       setError("message" in result ? result.message : `Lock failed: ${result.status}`);
     }
-  }
-
-  async function goImport() {
-    router.push("/import");
   }
 
   function openChangePassword() {
@@ -544,9 +547,11 @@ export function VaultSettingsPage() {
       <Button variant="secondary" onClick={() => setImportingBackup(true)}>
         {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
       </Button>
-      <Button variant="secondary" onClick={goImport}>
-        {t("vault.settings.action.import", { defaultValue: "导入 Key" })}
-      </Button>
+      {pluginSections.map((section) => (
+        <Button key={section.id} variant="secondary" onClick={() => setImportingSectionId(section.id)}>
+          {host.i18n.text(section.label)}
+        </Button>
+      ))}
       <Button variant="ghost" onClick={lock}>
         {t("vault.settings.action.lock", { defaultValue: "锁定钱包" })}
       </Button>
@@ -582,9 +587,11 @@ export function VaultSettingsPage() {
               <Button variant="secondary" onClick={() => setImportingBackup(true)}>
                 {t("vault.settings.action.importBackup", { defaultValue: "导入备份" })}
               </Button>
-              <Button variant="secondary" onClick={goImport}>
-                {t("vault.settings.action.import", { defaultValue: "导入 Key" })}
-              </Button>
+              {pluginSections.map((section) => (
+                <Button key={section.id} variant="secondary" onClick={() => setImportingSectionId(section.id)}>
+                  {host.i18n.text(section.label)}
+                </Button>
+              ))}
             </>
           }
         />
@@ -596,7 +603,6 @@ export function VaultSettingsPage() {
           <div className="vault-page__mobile">{mobileList}</div>
         </>
       )}
-
       {exporting ? (
         <VaultKeyExportModal
           open={Boolean(exporting)}
@@ -649,6 +655,20 @@ export function VaultSettingsPage() {
           onClose={() => setImportingBackup(false)}
         />
       ) : null}
+
+      {importingSection ? (() => {
+        const ImportSection = importingSection.component;
+        return (
+          <Modal
+            open
+            title={host.i18n.text(importingSection.label)}
+            onClose={() => setImportingSectionId(null)}
+            data-testid="vault-key-import-modal"
+          >
+            <ImportSection />
+          </Modal>
+        );
+      })() : null}
 
       <Modal
         open={activating !== null}

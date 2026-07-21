@@ -121,7 +121,7 @@ export interface PluginManifest {
   /**
    * 插件面向用户的页面、菜单和首页卡片声明。
    * runtime 自动注册并在 disable / uninstall 时统一回收；插件 setup 不必
-   * 接触 route.registry、menu.registry 或 home.registry。
+   * 接触 route.registry 或 home.registry。
    */
   business?: PluginBusinessContribution;
   /** 显式声明依赖的 capability（PluginHost 会做依赖检查）。 */

@@ -10,7 +10,7 @@
 //   - **不**直接持有 `BroadcastCore` 引用；走 capability 注入。
 //   - **不**展示 envelope / signature 等 wire 细节。
 
-import React, { useCallback, useMemo } from "react";
+import React, { useMemo } from "react";
 import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import type {
   BroadcastCoreSnapshot,
@@ -66,7 +66,6 @@ function BroadcastPageInner({
   const state = useResource<{ snapshot: BroadcastCoreSnapshot; providers: readonly BroadcastProvider[] }>(host.resourceStore, "broadcast.state", []);
   const snap = state.data?.snapshot ?? service.snapshot();
   const providers = state.data?.providers ?? service.providers();
-  const refresh = useCallback(() => host.resourceStore.invalidate("broadcast.state", []), [host]);
 
   const connectionLabel = useMemo(() => {
     switch (snap.state) {
@@ -81,13 +80,6 @@ function BroadcastPageInner({
         return i18n.t("broadcast.page.connection.idle");
     }
   }, [snap.state, i18n]);
-
-  const handleSetActive = (id: string) => {
-    void service.setActiveProvider(id).then(refresh);
-  };
-  const handleClearActive = () => {
-    void service.setActiveProvider(null).then(refresh);
-  };
 
   return (
     <section
@@ -177,30 +169,12 @@ function BroadcastPageInner({
                   <div className="km-broadcast-page__provider-id km-broadcast-page__mono">
                     {p.id}
                   </div>
-                  <button
-                    type="button"
-                    className="km-broadcast-page__action"
-                    onClick={() => handleSetActive(p.id)}
-                    disabled={isActive}
-                  >
-                    {i18n.t("broadcast.page.action.setActive")}
-                  </button>
+                  {isActive ? <span className="km-broadcast-page__muted">{i18n.t("broadcast.page.activeProvider")}</span> : null}
                 </li>
               );
             })}
           </ul>
         )}
-      </div>
-
-      <div className="km-broadcast-page__actions">
-        <button
-          type="button"
-          className="km-broadcast-page__action km-broadcast-page__action--danger"
-          onClick={handleClearActive}
-          disabled={snap.providerId === null}
-        >
-          {i18n.t("broadcast.page.action.clearActive")}
-        </button>
       </div>
 
       <p className="km-broadcast-page__note">{i18n.t("broadcast.page.note.keyProvider")}</p>

@@ -13,6 +13,7 @@ const homeResources: I18nPluginResources = {
   namespace: "home",
   resources: {
     en: {
+      "home.domain.label": "Overview",
       "home.route.label": "Home",
       "home.menu.label": "Home",
       "home.page.title": "Home",
@@ -21,6 +22,7 @@ const homeResources: I18nPluginResources = {
       "home.page.empty.description": "After installing a business plugin, its panels will appear here."
     },
     "zh-CN": {
+      "home.domain.label": "概览",
       "home.route.label": "首页",
       "home.menu.label": "首页",
       "home.page.title": "首页",

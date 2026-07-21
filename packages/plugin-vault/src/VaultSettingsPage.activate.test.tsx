@@ -83,13 +83,21 @@ function makeKeyspace() {
   } as unknown as KeyspaceService & { setActive: typeof setActive };
 }
 
-function mount() {
+function mount(includeImportSection = false) {
   const host = createPluginHost({ disableConfigPersistence: true });
   const vault = makeVault();
   const keyspace = makeKeyspace();
   host.capabilities.provide<VaultService>("vault.service", vault);
   host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
   registerVaultKeyState(host, keyspace, vault);
+  if (includeImportSection) {
+    host.vaultSettings.register({
+      id: "key-import.import",
+      label: { key: "keyImport.page.title", fallback: "Import a key" },
+      component: () => <p>Import workflow</p>,
+      order: 10
+    });
+  }
   return {
     vault,
     keyspace,
@@ -119,6 +127,15 @@ afterEach(() => {
 });
 
 describe("VaultSettingsPage active switching", () => {
+  it("opens an injected import workflow in a modal", async () => {
+    mount(true);
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: /导入私钥|Import a key/ }));
+    expect(screen.getByTestId("vault-key-import-modal")).toBeTruthy();
+    expect(screen.getByText("Import workflow")).toBeTruthy();
+  });
+
   it("asks for password before switching active key", async () => {
     const { keyspace, vault } = mount();
     const user = userEvent.setup();

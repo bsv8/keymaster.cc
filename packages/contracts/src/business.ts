@@ -3,8 +3,8 @@ import type { I18nText } from "./i18n.js";
 
 /** Business declarations are owned by a plugin; runtime must not know their vocabulary. */
 export type FeatureEntry =
-  | { path: string; component: ComponentType; routeId?: never; visibleWhen?: (ctx: { unlocked: boolean }) => boolean }
-  | { path: string; routeId: string; component?: never; visibleWhen?: (ctx: { unlocked: boolean }) => boolean };
+  | { path: string; component: ComponentType; routeId?: never; visibleWhen?: (ctx: { unlocked: boolean }) => boolean; activeWhen?: (path: string) => boolean }
+  | { path: string; routeId: string; component?: never; visibleWhen?: (ctx: { unlocked: boolean }) => boolean; activeWhen?: (path: string) => boolean };
 export interface FeatureView {
   id: string;
   path: string;

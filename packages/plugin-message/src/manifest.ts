@@ -27,13 +27,15 @@ import type {
   AppMsgEndpointService,
   AppMsgEndpointServiceRegistry,
   AppMsgMessage,
+  BusinessFeatureRegistry,
   Contact,
   ContactsService,
   I18nPluginResources,
   KeyspaceService,
   PluginContext,
   PluginManifest,
-  ResourceRegistry
+  ResourceRegistry,
+  RouteRegistry
 } from "@keymaster/contracts";
 import {
   APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
@@ -299,7 +301,7 @@ export const messagePlatformPlugin: PluginManifest = {
     { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
     { capability: "webrtc.service", reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
     { capability: "route.registry", reason: "注册 /message 与 /messages 详情路由" },
-    { capability: "menu.registry", reason: "注册「消息」菜单项" },
+    { capability: "business.registry", reason: "接入首页业务导航" },
     {
       capability: "breadcrumb.registry",
       reason: "为 /message 与 /messages 详情路由提供面包屑"
@@ -398,28 +400,7 @@ export const messagePlatformPlugin: PluginManifest = {
       invalidation: "microtask"
     });
 
-    const routes = ctx.get<{
-      register(input: {
-        id: string;
-        path: string;
-        component: unknown;
-        inMenu?: boolean;
-        menuGroup?: string;
-        order?: number;
-        icon?: string;
-        label: { key: string; fallback: string };
-      }): void;
-    }>("route.registry");
-    const menus = ctx.get<{
-      register(input: {
-        id: string;
-        path: string;
-        group: string;
-        order?: number;
-        icon?: string;
-        label: { key: string; fallback: string };
-      }): void;
-    }>("menu.registry");
+    const routes = ctx.get<RouteRegistry>("route.registry");
     const breadcrumbs = ctx.get<{
       register(input: {
         id: string;
@@ -433,33 +414,31 @@ export const messagePlatformPlugin: PluginManifest = {
       id: "message.page",
       path: "/messages",
       label: { key: "message.page.title", fallback: "Messages" },
-      component: MessagePage,
-      inMenu: true,
-      menuGroup: "platform",
-      order: 5,
-      icon: "Mail"
+      component: MessagePage
     });
     routes.register({
       id: "message.detail",
       path: "/message/:publicKeyHex",
       label: { key: "message.page.detail.title", fallback: "Conversation" },
-      component: MessageDetailPage,
-      inMenu: false
+      component: MessageDetailPage
     });
     routes.register({
       id: "message.detail.alias",
       path: "/messages/:publicKeyHex",
       label: { key: "message.page.detail.title", fallback: "Conversation" },
-      component: MessageDetailPage,
-      inMenu: false
+      component: MessageDetailPage
     });
-    menus.register({
-      id: "message.page.menu",
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature(MESSAGE_PLUGIN_ID, "home", {
+      id: "home.messages",
       label: { key: "message.menu", fallback: "Messages" },
-      path: "/messages",
-      group: "platform",
-      order: 5,
-      icon: "Mail"
+      order: 70,
+      icon: "Mail",
+      entry: {
+        path: "/messages",
+        routeId: "message.page",
+        activeWhen: (path) => path.startsWith("/message/") || path.startsWith("/messages/")
+      }
     });
     breadcrumbs.register({
       id: "message.page.crumbs",

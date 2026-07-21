@@ -39,7 +39,7 @@ export function createRouteRegistry(): RouteRegistry {
       byPath.delete(r.path);
     },
     list() {
-      return [...byId.values()].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+      return [...byId.values()];
     },
     byPath(path) {
       return byPath.get(path);

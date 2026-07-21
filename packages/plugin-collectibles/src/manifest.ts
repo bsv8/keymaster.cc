@@ -12,15 +12,13 @@
 //     handler 时显示，否则不渲染该按钮，避免诱导用户进入空态页面。
 
 import type {
-  AppRoute,
+  BusinessFeatureRegistry,
   CollectibleRegistry,
   CollectibleProvider,
   CollectibleSummary,
   ResourceRegistry,
   CollectibleTransferRegistry,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
   PluginManifest,
   RouteRegistry
 } from "@keymaster/contracts";
@@ -97,7 +95,7 @@ export const collectiblesPlugin: PluginManifest = {
     { capability: "collectible.registry", reason: "聚合 collectible provider 列表" },
     { capability: "collectible-transfer.registry", reason: "在详情页判断转移入口是否可用" },
     { capability: "route.registry", reason: "注册 collectible 列表与详情页" },
-    { capability: "menu.registry", reason: "注册 collectible 菜单入口" }
+    { capability: "business.registry", reason: "接入资产业务导航" }
   ],
   setup(ctx) {
     const collectibles = ctx.get<CollectibleRegistry>("collectible.registry");
@@ -124,35 +122,33 @@ export const collectiblesPlugin: PluginManifest = {
       id: "collectibles.list",
       path: "/collectibles",
       label: { key: "collectibles.route.list", fallback: "Collectibles" },
-      component: CollectiblesPage,
-      inMenu: true,
-      menuGroup: "wallets",
-      order: 6,
-      icon: "Package"
+      component: CollectiblesPage
     });
     routes.register({
       id: "collectibles.detail",
       path: "/collectibles/detail",
       label: { key: "collectibles.route.detail", fallback: "Collectible detail" },
-      component: CollectibleDetailPage,
-      inMenu: false
+      component: CollectibleDetailPage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    menus.register({
-      id: "menu.collectibles",
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("collectibles", "assets", {
+      id: "assets.collectibles",
       label: { key: "collectibles.menu.list", fallback: "Collectibles" },
-      routeId: "collectibles.list",
-      group: "wallets",
-      order: 6,
+      order: 10,
       icon: "Package",
-      visibleWhen: ({ unlocked }) => unlocked
+      entry: {
+        path: "/collectibles",
+        routeId: "collectibles.list",
+        visibleWhen: ({ unlocked }) => unlocked,
+        activeWhen: (path) => path.startsWith("/collectibles/")
+      }
     });
 
     void collectibles;
     void transferRegistry;
     return () => {
-      // no-op：route / menu 由 host 回收。
+      // no-op：route / business feature 由 host 回收。
     };
   }
 };

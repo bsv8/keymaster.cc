@@ -12,7 +12,7 @@
 //     切换由 keyspace 维护，shell 与业务插件只读不写。
 //
 // 硬切换 003：
-//   - /settings/vault 不再向 route.registry + menu.registry 双注册；
+//   - /settings/vault 不再走旧菜单注册；
 //     改为通过 settings.registry.register() 注册单一真值。
 //   - breadcrumb 第一段改为不可点击"设置"分类节点（不带 path）。
 //
@@ -21,6 +21,7 @@
 
 import type {
   BreadcrumbRegistry,
+  BusinessFeatureRegistry,
   CommandRegistry,
   I18nPluginResources,
   MessageBus,
@@ -418,18 +419,16 @@ export const vaultPlugin: PluginManifest = {
       id: "vault.unlock",
       path: "/vault/unlock",
       label: { key: "vault.route.unlock", fallback: "Unlock wallet" },
-      component: VaultUnlockPage,
-      inMenu: false
+      component: VaultUnlockPage
     });
     routes.register({
       id: "vault.create",
       path: "/vault/create",
       label: { key: "vault.route.create", fallback: "New wallet" },
-      component: VaultCreatePage,
-      inMenu: false
+      component: VaultCreatePage
     });
 
-    // 硬切换 003：/settings/vault 不再注册到 route.registry / menu.registry。
+    // 硬切换 003：/settings/vault 不再注册到旧菜单体系。
     // 改为 settings.registry.register() 一处真值；shell 走 settings 分组渲染。
     const settings = ctx.get<SettingsRegistry>("settings.registry");
     settings.register({
@@ -444,6 +443,22 @@ export const vaultPlugin: PluginManifest = {
       order: 0,
       icon: "KeyRound",
       visibleWhen: ({ unlocked }) => unlocked
+    });
+
+    // 密钥管理沿用 settings.registry 作为页面路由真值，同时作为一个 feature
+    // 挂入新的「设置」业务域。vault 在 settings 之前启动，因此 registry 支持
+    // 先注册入口、等待 settings 域出现后再投影到业务导航。
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("vault", "settings", {
+      id: "settings.vault",
+      label: { key: "vault.route.settings", fallback: "Key management" },
+      description: {
+        key: "vault.settings.description",
+        fallback: "Manage local Vault keys, the active identity, and encrypted backups."
+      },
+      order: 15,
+      icon: "KeyRound",
+      entry: { path: "/settings/vault", component: VaultSettingsPage }
     });
 
     // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。

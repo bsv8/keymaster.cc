@@ -9,9 +9,8 @@
 //     backfill。同 tab 不依赖 storage 事件。
 
 import { useEffect, useState } from "react";
-import { Button, PageHeader, Select } from "@keymaster/ui";
-import { AppLink, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import type { PluginManifest } from "@keymaster/contracts";
+import { Select } from "@keymaster/ui";
+import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhService } from "../p2pkhContracts.js";
 
 export function P2pkhSettingsPage() {
@@ -26,29 +25,29 @@ export function P2pkhSettingsPage() {
     (a, b) => a.includeTestnet === b.includeTestnet
   );
   const [settings, setSettings] = useState<P2pkhGlobalSettings>(resourceSettings);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!saved) return;
-    const timer = setTimeout(() => setSaved(false), 1500);
-    return () => clearTimeout(timer);
-  }, [saved]);
+    setSettings(resourceSettings);
+  }, [resourceSettings]);
 
-  const wocPlugin = host.capabilities.has("woc.service");
-  void wocPlugin;
-  void ([] as PluginManifest[]);
+  async function applySettings(next: P2pkhGlobalSettings) {
+    setSettings(next);
+    setError(null);
+    try {
+      await service.applyGlobalSettings(next);
+    } catch (err) {
+      setSettings(service.getGlobalSettings());
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
 
   return (
     <div className="p2pkh-settings">
-      <PageHeader
-        title={t("p2pkh.settings.title", { defaultValue: "P2PKH 设置" })}
-        description={t("p2pkh.settings.desc", { defaultValue: "P2PKH 资产策略。WOC endpoint、限流、广播在 WOC 设置页配置。" })}
-      />
       <Select
         label={t("p2pkh.settings.includeTestnet", { defaultValue: "包含 testnet 货币" })}
         value={settings.includeTestnet ? "yes" : "no"}
-        onChange={(e) => setSettings({ ...settings, includeTestnet: e.currentTarget.value === "yes" })}
+        onChange={(e) => void applySettings({ ...settings, includeTestnet: e.currentTarget.value === "yes" })}
         options={[
           {
             label: { key: "p2pkh.settings.includeTestnet.no", fallback: "否（推荐）" },
@@ -65,25 +64,6 @@ export function P2pkhSettingsPage() {
           defaultValue: "关闭后 testnet 资产、转账入口、首页余额行与后台同步都会停止；再次打开会重新触发 testnet rehydrate + recent-sync。"
         })}
       </p>
-      <p className="p2pkh-settings__hint">
-        {t("p2pkh.settings.wocHint", { defaultValue: "WOC endpoint、限流与队列状态请到 " })}
-        <AppLink to="/settings/woc">{t("p2pkh.settings.wocLink", { defaultValue: "WOC 设置" })}</AppLink>
-        。
-      </p>
-      <Button
-        onClick={async () => {
-          setError(null);
-          try {
-            await service.applyGlobalSettings(settings);
-            setSaved(true);
-          } catch (err) {
-            setError(err instanceof Error ? err.message : String(err));
-          }
-        }}
-      >
-        {t("p2pkh.action.save", { defaultValue: "保存" })}
-      </Button>
-      {saved ? <span className="p2pkh-settings__saved">{t("p2pkh.action.saved", { defaultValue: "已保存" })}</span> : null}
       {error ? <p className="p2pkh-settings__error">{error}</p> : null}
     </div>
   );

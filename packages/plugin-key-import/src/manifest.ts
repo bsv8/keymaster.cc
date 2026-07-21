@@ -1,25 +1,16 @@
 // packages/plugin-key-import/src/manifest.ts
-// key-import 是导入平台：注册 /import 页面、菜单、面包屑。
+// key-import 是导入平台：把导入工作区钩入 Key 管理页。
 // 具体格式由 importer-* 插件通过 importer.registry 接入。
 //
 // 硬切换 003：route / menu / breadcrumb 走 I18nText。
 //
-// 硬切换 010：/import 页面**只**服务"已解锁态导入更多 key"，不再承担
+// 硬切换 010：导入工作区**只**服务"已解锁态导入更多 key"，不再承担
 // 首启导入第一把 key 的入口职责。首启导入走 LockedShell 里的首启导入
 // 向导，调 `vault.createVaultWithImportedKey` 一次性建 Vault + 落首 Key
-// + 切 active。因此 menu 的 visibleWhen 必须是 `({ unlocked }) => unlocked`
-// （已具备）；不允许任何路径在 uninitialized 状态下 push 到 /import。
+// + 切 active。不允许在 uninitialized 状态下进入此工作区。
 
-import type {
-  BreadcrumbProvider,
-  BreadcrumbRegistry,
-  I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
-  PluginManifest,
-  RouteRegistry
-} from "@keymaster/contracts";
-import { ImportPage } from "./ImportPage.js";
+import type { I18nPluginResources, PluginManifest, VaultSettingsRegistry } from "@keymaster/contracts";
+import { KeyImportSection } from "./ImportPage.js";
 
 export const KEY_IMPORT_CAPABILITY = "key-import.platform";
 
@@ -143,46 +134,23 @@ export const keyImportPlugin: PluginManifest = {
   i18n: keyImportResources,
   dependencies: [
     { capability: "vault.service", reason: "导入私钥需要 vault 提供加解密" },
-    { capability: "importer.registry", reason: "依赖 importer 注册表枚举导入器" }
+    { capability: "importer.registry", reason: "依赖 importer 注册表枚举导入器" },
+    { capability: "vault-settings.registry", reason: "将导入工作区嵌入 Key 管理页" }
   ],
   setup(ctx) {
     ctx.provide(KEY_IMPORT_CAPABILITY, { version: 1 });
 
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    routes.register({
-      id: "key-import.page",
-      path: "/import",
-      label: { key: "keyImport.route.title", fallback: "Import a key" },
-      component: ImportPage,
-      inMenu: true,
-      menuGroup: "wallets",
-      order: 10,
-      icon: "Download"
+    const vaultSettings = ctx.get<VaultSettingsRegistry>("vault-settings.registry");
+    vaultSettings.register({
+      id: "key-import.import",
+      label: { key: "keyImport.page.title", fallback: "Import a key" },
+      description: {
+        key: "keyImport.page.desc",
+        fallback: "Pick an import format; keys are always stored encrypted by the Vault."
+      },
+      component: KeyImportSection,
+      order: 10
     });
-
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.key-import",
-      label: { key: "keyImport.menu.title", fallback: "Import" },
-      routeId: "key-import.page",
-      group: "wallets",
-      order: 10,
-      icon: "Download",
-      visibleWhen: ({ unlocked }) => unlocked
-    };
-    menus.register(item);
-
-    const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
-    const provider: BreadcrumbProvider = {
-      id: "key-import.crumbs",
-      order: 100,
-      match: (path) => path === "/import",
-      resolve: () => [
-        { label: { key: "keyImport.crumb.wallet", fallback: "Wallets" }, path: "/" },
-        { label: { key: "keyImport.crumb.title", fallback: "Import a key" } }
-      ]
-    };
-    breadcrumbs.register(provider);
     return () => {
       // no-op
     };

@@ -2,22 +2,23 @@
 // plugin-apps 插件：Keymaster 内部 app launcher。
 //
 // 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
-//   - 注册 `/apps` 页面 + 菜单入口 + 首页 widget；
+//   - 注册 `/apps` 页面，并接入新业务导航的首页域与首页 widget；
 //   - 点击 `Open App` 时调用 `protocol.service.launchAppView(...)`；
 //   - 插件自身**不**直接 import `protocolStorageDb` /
 //     `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` /
 //     `window.open` popup URL——这些细节全部收口在 service 内部。
-//   - 依赖 `route.registry` / `menu.registry` / `home.registry` /
-//     `protocol.service`。
-//   - 元数据走 `business`：plugin-apps 是面向用户的 launcher 入口，**不**是
-//     core 平台能力；缺省启用、可被禁用。
+//   - 依赖 `route.registry` / `business.registry` / `protocol.service`。
+//   - plugin-apps 是面向用户的 launcher 入口，**不**是 core 平台能力；
+//     缺省启用、可被禁用。
 //   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；
 //     当前激活错误码 `export_owner_runtime_failed` 表示 launcher 端
 //     生成 appView owner runtime capability 失败。
 
 import type {
+  BusinessFeatureRegistry,
   I18nPluginResources,
-  PluginManifest
+  PluginManifest,
+  RouteRegistry
 } from "@keymaster/contracts";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { AppsPage } from "./AppsPage.js";
@@ -115,14 +116,27 @@ export const appsPlugin: PluginManifest = {
   },
   i18n: appsResources,
   dependencies: [
-    { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" }
+    { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" },
+    { capability: "route.registry", reason: "注册应用列表页面" },
+    { capability: "business.registry", reason: "接入首页业务导航" }
   ],
-  business: {
-    domains: [{ id: "apps", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400, features: [{
-      id: "apps.launcher", label: { key: "apps.menu.label", fallback: "Apps" }, order: 50, icon: "Apps",
-      entry: { path: "/apps", component: AppsPage },
+  setup(ctx) {
+    const routes = ctx.get<RouteRegistry>("route.registry");
+    routes.register({
+      id: "apps.launcher",
+      path: "/apps",
+      label: { key: "apps.route.label", fallback: "Apps" },
+      component: AppsPage
+    });
+
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("apps", "home", {
+      id: "home.apps",
+      label: { key: "apps.menu.label", fallback: "Apps" },
+      order: 50,
+      icon: "Apps",
+      entry: { path: "/apps", routeId: "apps.launcher" },
       home: [{ id: "apps.home", space: { id: "apps.applications", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400 }, order: 60, component: AppsHomeWidget }]
-    }] }]
-  },
-  setup() {}
+    });
+  }
 };

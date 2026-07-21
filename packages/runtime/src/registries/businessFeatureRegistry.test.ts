@@ -29,4 +29,60 @@ describe("business feature registry", () => {
     expect(registry.listFeatures()).toEqual([]);
     expect(registry.listHomeProjections()).toEqual([]);
   });
+
+  it("lets another plugin append an entry before the target domain is registered", () => {
+    const registry = createBusinessFeatureRegistry();
+    registry.registerFeature("vault", "settings", {
+      id: "settings.vault",
+      label: { key: "vault.settings", fallback: "Key management" },
+      order: 15,
+      entry: { path: "/settings/vault", component }
+    });
+
+    // 未加载 settings 域前，入口不应被导航读取到。
+    expect(registry.listFeatures()).toEqual([]);
+
+    registry.register("settings", domain("settings", 900, "settings"));
+    expect(registry.listDomains().find((item) => item.id === "settings")?.features.map((item) => item.id))
+      .toEqual(["settings.feature", "settings.vault"]);
+
+    registry.unregisterFeature("settings.vault");
+    expect(registry.listFeatures().map((item) => item.id)).toEqual(["settings.feature"]);
+  });
+
+  it("keeps appended entries pending when their domain unloads", () => {
+    const registry = createBusinessFeatureRegistry();
+    registry.register("settings", domain("settings", 900, "settings"));
+    registry.registerFeature("vault", "settings", {
+      id: "settings.vault",
+      label: { key: "vault.settings", fallback: "Key management" },
+      order: 15,
+      entry: { path: "/settings/vault", component }
+    });
+
+    registry.unregisterDomain("settings");
+    expect(registry.listFeatures()).toEqual([]);
+    registry.register("settings", domain("settings", 900, "settings"));
+    expect(registry.listFeatures().map((item) => item.id)).toEqual(["settings.feature", "settings.vault"]);
+  });
+
+  it("shows appended home entries once the home domain loads, in their declared order", () => {
+    const registry = createBusinessFeatureRegistry();
+    registry.registerFeature("message", "home", {
+      id: "home.messages", label: { key: "message.menu", fallback: "Messages" }, order: 70,
+      entry: { path: "/messages", component }
+    });
+    registry.registerFeature("contacts", "home", {
+      id: "home.contacts", label: { key: "contacts.menu", fallback: "Contacts" }, order: 60,
+      entry: { path: "/contacts", component }
+    });
+    registry.registerFeature("apps", "home", {
+      id: "home.apps", label: { key: "apps.menu", fallback: "Apps" }, order: 50,
+      entry: { path: "/apps", component }
+    });
+    registry.register("home", domain("home", 0, "home"));
+
+    expect(registry.listDomains()[0]?.features.map((feature) => feature.id))
+      .toEqual(["home.feature", "home.apps", "home.contacts", "home.messages"]);
+  });
 });

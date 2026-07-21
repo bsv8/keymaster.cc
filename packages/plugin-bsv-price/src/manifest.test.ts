@@ -26,7 +26,8 @@ import {
 import type { BsvPriceService } from "./bsvPriceService.js";
 
 interface FakeRegistry {
-  register: (input: unknown) => void;
+  register?: (input: unknown) => void;
+  registerFeature?: (ownerPluginId: string, domainId: string, feature: unknown) => void;
 }
 
 class FakeBroadcastCore implements BroadcastCore {
@@ -89,18 +90,25 @@ class FakeBroadcastCore implements BroadcastCore {
 function makeContext(core: BroadcastCore, config: Record<string, unknown>): PluginContext & {
   provided: Map<string, unknown>;
   registries: Record<string, FakeRegistry>;
-  settingsCalls: unknown[];
+  applicationSettingsCalls: unknown[];
+  routeCalls: unknown[];
+  businessFeatureCalls: unknown[];
 } {
   const provided = new Map<string, unknown>();
-  const settingsCalls: unknown[] = [];
+  const applicationSettingsCalls: unknown[] = [];
+  const routeCalls: unknown[] = [];
+  const businessFeatureCalls: unknown[] = [];
   const registries: Record<string, FakeRegistry> = {
-    "route.registry": { register: () => undefined },
-    "menu.registry": { register: () => undefined },
+    "route.registry": { register: (input: unknown) => routeCalls.push(input) },
     "breadcrumb.registry": { register: () => undefined },
-    "settings.registry": {
+    "application-settings.registry": {
       register: (input: unknown) => {
-        settingsCalls.push(input);
+        applicationSettingsCalls.push(input);
       }
+    },
+    "business.registry": {
+      registerFeature: (_ownerPluginId, domainId, feature) =>
+        businessFeatureCalls.push({ ...(feature as object), domainId })
     }
   };
   const logger: {
@@ -119,8 +127,11 @@ function makeContext(core: BroadcastCore, config: Record<string, unknown>): Plug
   return {
     provided,
     registries,
-    settingsCalls,
+    applicationSettingsCalls,
+    routeCalls,
+    businessFeatureCalls,
     config,
+    onDispose: () => undefined,
     provide(key: string, value: unknown) {
       provided.set(key, value);
     },
@@ -194,16 +205,23 @@ describe("plugin-bsv-price manifest config boundary", () => {
     });
   });
 
-  it("registers /settings/bsv-price as a settings detail page", () => {
+  it("registers the application settings entry and moves the price page under Home", () => {
     const core = new FakeBroadcastCore();
     const ctx = makeContext(core, {});
 
     bsvPricePlugin.setup(ctx);
 
-    expect(ctx.settingsCalls).toHaveLength(1);
-    expect(ctx.settingsCalls[0]).toMatchObject({
+    expect(ctx.applicationSettingsCalls).toHaveLength(1);
+    expect(ctx.applicationSettingsCalls[0]).toMatchObject({
       id: "bsv-price.settings",
-      path: "/settings/bsv-price"
+      path: "/settings/apps/bsv-price"
     });
+    expect(ctx.routeCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "bsv-price.page", path: "/bsv-price" }),
+      expect.objectContaining({ id: "bsv-price.settings", path: "/settings/apps/bsv-price" })
+    ]));
+    expect(ctx.businessFeatureCalls).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "home.bsv-price", domainId: "home" })
+    ]));
   });
 });

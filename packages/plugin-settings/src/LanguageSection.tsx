@@ -41,10 +41,6 @@ export function LanguageSection() {
 
   return (
     <section className="settings-language">
-      <h2>{t("settings.language.title", { defaultValue: "Language" })}</h2>
-      <p className="settings-language__desc">
-        {t("settings.language.description", { defaultValue: "Choose display language. Switch is instant." })}
-      </p>
       <Select
         label={t("settings.language.title", { defaultValue: "Language" })}
         value={value}
