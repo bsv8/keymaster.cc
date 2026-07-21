@@ -4,54 +4,32 @@
 //   - 平台不再拥有地址/金额/矿工费/UTXO 控件；Widget 内部负责输入、校验、预览、签名、广播。
 //   - 不再有"来源 key"选择：active key 由平台决定，
 //     签名由 transfer service 按 owner publicKeyHex 借私钥完成；Widget 不直接持有 key 身份。
-//   - 不再有 all 模式：缺 activePublicKeyHex 时属于 noActiveKey，
-//     Widget 顶部明确提示先选择 key。
+//   - 不再有来源 key 选择；缺 activePublicKeyHex 时只保留 guard。
 //   - active key 切换时清空 preview（activeKey.changed 事件）。
 //   - 成功后保留 widget 实例展示结果；用户关闭后才 onCompleted。
 //
 // 硬切换 003：所有展示文案走 i18n。
 //
-// 硬切换 003 收尾：
-//   - 当前 key 上下文统一显示 `label + 短公钥`。
-//   - 短公钥由 `formatShortPublicKey(activeIdentity.publicKeyHex)` 现算；
-//     不再读取 `KeyIdentity.fingerprint` 字段。
-//   - class 命名从 `p2pkh-transfer-widget__fingerprint` 改为
-//     `p2pkh-transfer-widget__pubkey`，避免名称漂移。
-
-import { useEffect, useState, type ComponentType } from "react";
-import { Button, PageHeader, TextInput } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import { formatShortPublicKey } from "@keymaster/contracts";
+import { useEffect, useState } from "react";
+import { Button, TextInput } from "@keymaster/ui";
+import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { KeyIdentity, TransferCompletion, TransferOffer, TransferWidgetProps } from "@keymaster/contracts";
-import type { P2pkhAssetId, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
-import { assetIdToNetwork } from "../p2pkhContracts.js";
+import type { P2pkhAssetId, P2pkhFeeRateTier, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhService, P2pkhTransferPreview, P2pkhTransferResult } from "../p2pkhContracts.js";
+import { assetIdToNetwork, resolveP2pkhFeeRateSatoshisPerKb } from "../p2pkhContracts.js";
 import { publicKeyHexToP2pkhAddress } from "../p2pkhSigner.js";
-
-interface ContactPickerProps {
-  value?: string;
-  onChange: (publicKeyHex: string) => void;
-  placeholder?: string;
-}
 
 interface FormState {
   recipient: string;
   amount: string;
-  feeRate: string;
+  feeTier: P2pkhFeeRateTier;
 }
 
-function useCapabilityOrNull<T>(key: string): T | null {
-  try {
-    return useCapability<T>(key);
-  } catch {
-    return null;
-  }
-}
-
-export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps) {
+export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex }: TransferWidgetProps) {
   const service = useCapability<P2pkhService>("p2pkh.service");
   const host = usePluginHost();
   const { t } = useI18n();
-  const ContactPicker = useCapabilityOrNull<ComponentType<ContactPickerProps>>("contacts.picker");
+  const locale = useLocale();
+  const formatNumber = (value: number) => new Intl.NumberFormat(locale).format(value);
 
   const assetId: P2pkhAssetId = offer.assetId as P2pkhAssetId;
   const network = assetIdToNetwork(assetId);
@@ -69,10 +47,19 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   const activeKey = { activePublicKeyHex: context.activePublicKeyHex };
   const activeIdentity = context.identity;
   const resource = context.resource;
+  const globalSettings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
+    host.resourceStore,
+    "p2pkh.settings",
+    [],
+    (snapshot) => snapshot.data ?? { includeTestnet: false },
+    (a, b) => a.includeTestnet === b.includeTestnet
+      && JSON.stringify(a.feeRateSatoshisPerKb ?? {}) === JSON.stringify(b.feeRateSatoshisPerKb ?? {})
+  );
+  const feeRates = resolveP2pkhFeeRateSatoshisPerKb(globalSettings);
   const [form, setForm] = useState<FormState>({
     recipient: "",
     amount: "0",
-    feeRate: "1000"
+    feeTier: "medium"
   });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -81,6 +68,15 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
   const [previewKey, setPreviewKey] = useState<string | undefined>(undefined);
   const [result, setResult] = useState<P2pkhTransferResult | undefined>(undefined);
   const [completion, setCompletion] = useState<TransferCompletion | undefined>(undefined);
+  useEffect(() => {
+    const validTarget = Boolean(recipientPublicKeyHex && /^(02|03)[0-9a-f]{64}$/.test(recipientPublicKeyHex));
+    setForm((current) => ({ ...current, recipient: validTarget ? publicKeyHexToP2pkhAddress(recipientPublicKeyHex!, network) : "" }));
+    setPreview(undefined);
+    setPreviewKey(undefined);
+    setResult(undefined);
+    setCompletion(undefined);
+    setError(null);
+  }, [network, recipientPublicKeyHex]);
 
   // 硬切换 005 收尾：active key 不再有 `mode` 字段。"all 模式"被壳层守卫
   // 拦截，本 widget 顶多在 active 缺失的瞬时态出现，作为 fail-closed 防御
@@ -99,30 +95,23 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     setHexCopied(false);
   }
 
-  function fillFromContact(publicKeyHex: string) {
-    update("recipient", publicKeyHexToP2pkhAddress(publicKeyHex, network));
-  }
-
   function buildInput() {
     if (!form.recipient) {
       setError(t("p2pkh.transfer.err.recipient", { defaultValue: "请输入接收方地址" }));
       return null;
     }
+    const sendAll = /^(all|全部)$/i.test(form.amount.trim());
     const amount = Number(form.amount);
-    if (!Number.isFinite(amount) || !Number.isInteger(amount) || amount <= 0) {
+    if (!sendAll && (!Number.isFinite(amount) || !Number.isInteger(amount) || amount <= 0)) {
       setError(t("p2pkh.transfer.err.amount", { defaultValue: "金额必须为正整数" }));
-      return null;
-    }
-    const feeRate = Number(form.feeRate);
-    if (!Number.isFinite(feeRate) || !Number.isInteger(feeRate) || feeRate < 1) {
-      setError(t("p2pkh.transfer.err.feeMin", { defaultValue: "矿工费费率必须至少为 1 sats/kB" }));
       return null;
     }
     return {
       assetId,
       recipientAddress: form.recipient,
-      amountSatoshis: amount,
-      feeRateSatoshisPerKb: feeRate,
+      amountSatoshis: sendAll ? 0 : amount,
+      sendAll,
+      feeRateSatoshisPerKb: feeRates[form.feeTier],
       ownerPublicKeyHex: activeIdentity?.publicKeyHex ?? ""
     };
   }
@@ -204,45 +193,11 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
     }
   }
 
-  const unnamed = t("p2pkh.transfer.unnamed", { defaultValue: "未命名" });
-  const identityMissing = t("p2pkh.transfer.identityMissing", { defaultValue: "身份不可用" });
-
   return (
     <div className="p2pkh-transfer-widget">
-      <PageHeader
-        title={`${host.i18n.text(offer.label)}${t("p2pkh.transfer.titleSuffix", { defaultValue: " 转账" })}`}
-        description={t("p2pkh.transfer.networkDesc", { defaultValue: "网络：{{network}}（{{assetId}}）", network, assetId })}
-      />
-      <section className="p2pkh-transfer-widget__key-context">
-        <p>
-          {t("p2pkh.transfer.currentKey", { defaultValue: "当前 key：" })}
-          {hasNoActiveKey ? (
-            <strong>{t("p2pkh.transfer.noActiveKey", { defaultValue: " 无 active key：壳层守卫已阻断，请到 Key 管理处理" })}</strong>
-          ) : activeIdentity ? (
-            <>
-              <strong>{activeIdentity.label || unnamed}</strong>
-              {activeIdentity.publicKeyHex ? (
-                <code className="p2pkh-transfer-widget__pubkey">
-                  {formatShortPublicKey(activeIdentity.publicKeyHex)}
-                </code>
-              ) : (
-                <code className="p2pkh-transfer-widget__pubkey">{identityMissing}</code>
-              )}
-            </>
-          ) : activeKey.activePublicKeyHex ? (
-            <code>{t("p2pkh.transfer.loading", { defaultValue: "加载中…" })}</code>
-          ) : null}
-        </p>
-        {networkAddress ? (
-          <p>
-            {t("p2pkh.transfer.changeAddress", { defaultValue: "当前找零地址：" })}
-            <code>{networkAddress}</code>
-          </p>
-        ) : null}
-      </section>
       {result ? (
-        <section className="p2pkh-transfer-widget__result">
-          <h4>{t("p2pkh.transfer.result.title", { defaultValue: "广播结果" })}</h4>
+        <section className="p2pkh-transfer-widget__step-card p2pkh-transfer-widget__result">
+          <div className="p2pkh-transfer-widget__step-heading"><span>5</span><div><h4>{t("p2pkh.transfer.result.title", { defaultValue: "广播结果" })}</h4><p>{t("p2pkh.transfer.result.stepHint", { defaultValue: "最终交易已提交到广播服务。" })}</p></div></div>
           <p>
             {t("p2pkh.transfer.result.status", { defaultValue: "状态：" })}
             {result.status}
@@ -281,57 +236,63 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
         </section>
       ) : (
         <>
-          <TextInput
-            label={t("p2pkh.transfer.form.recipient", { defaultValue: "接收方地址" })}
-            value={form.recipient}
-            onChange={(e) => update("recipient", e.currentTarget.value)}
-          />
-          {ContactPicker ? (
-            <ContactPicker
-              value=""
-              onChange={(publicKeyHex) => fillFromContact(publicKeyHex)}
-              placeholder={t("p2pkh.transfer.form.contactPlaceholder", { defaultValue: "未选择" })}
+          <section className="p2pkh-transfer-widget__step-card" aria-labelledby="p2pkh-transfer-step-3">
+            <div className="p2pkh-transfer-widget__step-heading"><span>3</span><div><h4 id="p2pkh-transfer-step-3">{t("p2pkh.transfer.step.addressAmount", { defaultValue: "核对地址与填写金额" })}</h4><p>{t("p2pkh.transfer.step.addressAmountHint", { defaultValue: "找零地址由当前 key 决定，不能修改；请重点核对收款地址。" })}</p></div></div>
+            <TextInput
+              label={recipientPublicKeyHex
+                ? t("p2pkh.transfer.form.recipientDerived", { defaultValue: "派生的接收方地址（请核对）" })
+                : t("p2pkh.transfer.form.recipient", { defaultValue: "接收方地址（请核对）" })}
+              value={form.recipient}
+              readOnly={Boolean(recipientPublicKeyHex)}
+              onChange={(e) => update("recipient", e.currentTarget.value)}
             />
-          ) : null}
-          <TextInput
-            label={t("p2pkh.transfer.form.amount", { defaultValue: "金额 (sats)" })}
-            type="number"
-            value={form.amount}
-            onChange={(e) => update("amount", e.currentTarget.value)}
-          />
-          <TextInput
-            label={t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费 (sats/kB)" })}
-            type="number"
-            value={form.feeRate}
-            onChange={(e) => update("feeRate", e.currentTarget.value)}
-          />
-          {error ? <p className="p2pkh-transfer-widget__error">{error}</p> : null}
-          <div className="p2pkh-transfer-widget__actions">
-            <Button onClick={doPrepare} loading={busy} disabled={!form.recipient || !form.amount}>
-              {t("p2pkh.transfer.form.prepare", { defaultValue: "生成最终交易" })}
-            </Button>
-            {preview ? (
-              <Button onClick={doSubmit} loading={busy} variant="primary" disabled={!preview}>
-                {t("p2pkh.transfer.form.sign", { defaultValue: "广播交易" })}
+            {recipientPublicKeyHex ? <p className="p2pkh-transfer-widget__recipient-proof">{t("p2pkh.transfer.form.recipientTarget", { defaultValue: "此地址由收款人公钥派生，已锁定；如需更换，请返回第 1 步。" })}</p> : null}
+            <div className="p2pkh-transfer-widget__readonly-address">
+              <span>{t("p2pkh.transfer.changeAddress", { defaultValue: "找零地址（不可修改）" })}</span>
+              <code>{networkAddress ?? t("p2pkh.transfer.loading", { defaultValue: "加载中…" })}</code>
+            </div>
+            <div className="p2pkh-transfer-widget__amount-row">
+              <TextInput
+                className="p2pkh-transfer-widget__amount-input"
+                label={t("p2pkh.transfer.form.amount", { defaultValue: "金额 (sats)" })}
+                inputMode="numeric"
+                placeholder={t("p2pkh.transfer.form.amountPlaceholder", { defaultValue: "输入 sats，或选择全部" })}
+                value={form.amount}
+                onChange={(e) => update("amount", e.currentTarget.value)}
+              />
+              <Button className="p2pkh-transfer-widget__send-all" size="sm" variant={/^(all|全部)$/i.test(form.amount.trim()) ? "primary" : "secondary"} onClick={() => update("amount", "全部")}>
+                {t("p2pkh.transfer.form.sendAll", { defaultValue: "全部" })}
               </Button>
-            ) : null}
-          </div>
+            </div>
+            {/^(all|全部)$/i.test(form.amount.trim()) ? <p className="p2pkh-transfer-widget__amount-hint">{t("p2pkh.transfer.form.sendAllHint", { defaultValue: "最终到账额会自动扣除实际矿工费。" })}</p> : null}
+            <div className="p2pkh-transfer-widget__fee-tier" role="group" aria-label={t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}>
+              <span>{t("p2pkh.transfer.form.feeRate", { defaultValue: "矿工费率" })}</span>
+              {(["low", "medium", "high"] as const).map((tier) => <Button key={tier} size="sm" variant={form.feeTier === tier ? "primary" : "secondary"} onClick={() => update("feeTier", tier)}>{t(`p2pkh.transfer.form.feeTier.${tier}`, { defaultValue: tier === "low" ? "低" : tier === "medium" ? "中" : "高" })} · {feeRates[tier]} sats/kB</Button>)}
+            </div>
+            {error ? <p className="p2pkh-transfer-widget__error">{error}</p> : null}
+            <div className="p2pkh-transfer-widget__actions">
+              <Button onClick={doPrepare} loading={busy} disabled={!form.recipient || !form.amount}>
+                {t("p2pkh.transfer.form.prepare", { defaultValue: "生成最终交易" })}
+              </Button>
+            </div>
+          </section>
           {preview ? (
-            <section className="p2pkh-transfer-widget__preview">
-              <h4>{t("p2pkh.transfer.preview.title", { defaultValue: "最终交易预览" })}</h4>
-              <p>
-                {t("p2pkh.transfer.preview.inputs", { defaultValue: "输入数量：{{count}} 个", count: preview.allocation.selected.length })}
-                {t("p2pkh.transfer.preview.totalSats", { defaultValue: "，输入总额 " })}{preview.allocation.totalInputSatoshis} sats
-              </p>
-              <p>
-                {t("p2pkh.transfer.preview.recipient", { defaultValue: "收款输出：" })}
-                <code>{preview.recipientAddress}</code> {preview.amountSatoshis} sats
+            <section className="p2pkh-transfer-widget__step-card p2pkh-transfer-widget__preview">
+              <div className="p2pkh-transfer-widget__step-heading"><span>4</span><div><h4>{t("p2pkh.transfer.preview.title", { defaultValue: "最终交易预览" })}</h4><p>{t("p2pkh.transfer.preview.stepHint", { defaultValue: "请核对收款地址、到账金额、找零与矿工费，再广播。" })}</p></div></div>
+              <div className="p2pkh-transfer-widget__recipient-output">
+                <span>{t("p2pkh.transfer.preview.recipientVerify", { defaultValue: "收款输出（请重点核对）" })}</span>
+                <code>{preview.recipientAddress}</code>
+                <strong>{formatNumber(preview.amountSatoshis)} sats</strong>
+              </div>
+              <p className="p2pkh-transfer-widget__input-summary">
+                {t("p2pkh.transfer.preview.inputs", { defaultValue: "输入数量：{{count}} 个", count: formatNumber(preview.allocation.selected.length) })}
+                {t("p2pkh.transfer.preview.totalSats", { defaultValue: "，输入总额 " })}{formatNumber(preview.allocation.totalInputSatoshis)} sats
               </p>
               <p>
                 {t("p2pkh.transfer.preview.change", { defaultValue: "找零输出：" })}
                 {preview.allocation.changeSatoshis > 0 ? (
                   <>
-                    <code>{preview.changeAddress}</code> {preview.allocation.changeSatoshis} sats
+                    <code>{preview.changeAddress}</code> {formatNumber(preview.allocation.changeSatoshis)} sats
                   </>
                 ) : (
                   <span>{t("p2pkh.transfer.preview.noChange", { defaultValue: "无" })}</span>
@@ -339,17 +300,20 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
               </p>
               <p>
                 {t("p2pkh.transfer.preview.fee", { defaultValue: "最终矿工费：" })}
-                {preview.estimatedFeeSatoshis} sats
+                {formatNumber(preview.estimatedFeeSatoshis)} sats
               </p>
               <p>
                 {t("p2pkh.transfer.preview.size", { defaultValue: "序列化大小：" })}
-                {preview.serializedSizeBytes} bytes
+                {formatNumber(preview.serializedSizeBytes)} bytes
               </p>
               <p>
                 {t("p2pkh.transfer.preview.txid", { defaultValue: "最终 txid：" })}
                 <code>{preview.txid}</code>
               </p>
               <div className="p2pkh-transfer-widget__actions">
+                <Button onClick={doSubmit} loading={busy} variant="primary" disabled={!preview}>
+                  {t("p2pkh.transfer.form.sign", { defaultValue: "确认并广播交易" })}
+                </Button>
                 <Button variant="ghost" onClick={copyRawTxHex}>
                   {t("p2pkh.transfer.preview.copyHex", { defaultValue: "复制 rawTxHex" })}
                 </Button>
@@ -364,7 +328,7 @@ export function P2pkhTransferWidget({ offer, onCompleted }: TransferWidgetProps)
               <ul>
                 {preview.outputs.map((o) => (
                   <li key={`${o.address}:${o.value}`}>
-                    <code>{o.address}</code> : {o.value} sats
+                    <code>{o.address}</code> : {formatNumber(o.value)} sats
                   </li>
                 ))}
               </ul>

@@ -12,22 +12,38 @@
 // 硬切换 003：使用 Resource Store 读取 Transfer Offer 列表。
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
-import { Component, type ErrorInfo, type ReactNode, useEffect, useMemo, useState } from "react";
+import { Component, type ComponentType, type ErrorInfo, type ReactNode, useEffect, useMemo, useState } from "react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import type { ActiveKeyState, TransferCompletion, TransferOffer, TransferProvider, TransferRegistry } from "@keymaster/contracts";
+import { router, useCapability, useCurrentPath, useI18n, useLocale, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
+import type { ActiveKeyState, CollectibleRegistry, CollectibleTransferRegistry, CollectibleSummary, TransferCompletion, TransferOffer, TransferProvider, TransferRegistry } from "@keymaster/contracts";
 import { TransferOfferPicker } from "./TransferOfferPicker.js";
 import type { TransferFeatureCapability, TransferRequest } from "./transferFeature.js";
 
 const EMPTY_OFFERS: TransferOffer[] = [];
 const EMPTY_ACTIVE_KEY: ActiveKeyState = { activePublicKeyHex: undefined };
+const EMPTY_COLLECTIBLES: Array<{ providerId: string; items: CollectibleSummary[]; error?: string }> = [];
+
+interface ContactPickerProps {
+  value?: string;
+  onChange: (publicKeyHex: string) => void;
+  placeholder?: string;
+}
 
 export function TransferPage() {
   const registry = useCapability<TransferRegistry>("transfer.registry");
+  const collectibleRegistry = useCapability<CollectibleRegistry>("collectible.registry");
+  const collectibleTransferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
+  const collectibleHandlerIds = useRegistry((h) => h.collectibleTransfer._ids().join("\u0000"));
   const host = usePluginHost();
   const { t } = useI18n();
+  const ContactPicker = useCapabilityOrNull<ComponentType<ContactPickerProps>>("contacts.picker");
   const feature = useTransferFeature();
   const locale = useLocale();
+  useCurrentPath();
+  const recipientPublicKeyHex = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("recipientPublicKeyHex") ?? undefined : undefined;
+  const normalizedRecipientTarget = recipientPublicKeyHex?.trim().toLowerCase();
+  const recipientTarget = normalizedRecipientTarget && /^(02|03)[0-9a-f]{64}$/.test(normalizedRecipientTarget) ? normalizedRecipientTarget : undefined;
+  const invalidRecipientTarget = recipientPublicKeyHex !== undefined && !recipientTarget;
   const store = host.resourceStore;
   const dateFmt = useMemo(
     () => new Intl.DateTimeFormat(locale, { dateStyle: "short", timeStyle: "short" }),
@@ -56,6 +72,9 @@ export function TransferPage() {
       return true;
     }
   );
+  const visibleOffers = useMemo(() => recipientTarget
+    ? allOffers.filter((offer) => providers.find((p) => p.id === offer.providerId)?.supportsRecipientPublicKeyHex?.(recipientTarget) === true)
+    : allOffers, [allOffers, providers, recipientTarget]);
   const activeState = useResourceSelector<ActiveKeyState, ActiveKeyState>(
     store,
     "transfer.active-key",
@@ -63,6 +82,22 @@ export function TransferPage() {
     (snapshot) => snapshot.data ?? EMPTY_ACTIVE_KEY,
     (a, b) => a.activePublicKeyHex === b.activePublicKeyHex
   );
+  const recipientCollectibles = useResourceSelector<typeof EMPTY_COLLECTIBLES, typeof EMPTY_COLLECTIBLES>(
+    host.resourceStore,
+    "transfer.recipient-collectibles",
+    [],
+    (snapshot) => snapshot.data ?? EMPTY_COLLECTIBLES,
+    (a, b) => a === b
+  );
+  const visibleRecipientCollectibles = useMemo(() => recipientTarget
+    ? recipientCollectibles.flatMap((group) => group.items.filter((item) => collectibleTransferRegistry.listSupporting({ providerId: group.providerId, collectibleId: item.collectibleId }).some((handler) => {
+      try { return handler.supportsRecipientPublicKeyHex(recipientTarget); } catch { return false; }
+    })).map((item) => ({ ...item, providerId: group.providerId })))
+    : [], [collectibleRegistry, collectibleHandlerIds, collectibleTransferRegistry, recipientCollectibles, recipientTarget]);
+
+  useEffect(() => {
+    host.resourceStore.invalidate("transfer.recipient-collectibles", []);
+  }, [collectibleHandlerIds, host.resourceStore]);
 
   // 本地交互 state
   const [selected, setSelected] = useState<TransferOffer | undefined>(undefined);
@@ -75,11 +110,11 @@ export function TransferPage() {
 
   // 当 offers 变化时，清除已不存在的 selected
   useEffect(() => {
-    if (selected && !allOffers.find((o) => o.id === selected.id)) {
+    if (selected && !visibleOffers.find((o) => o.id === selected.id)) {
       setSelected(undefined);
     }
     if (!selected) { setSourceId(undefined); setQuote(undefined); setSubmission(undefined); }
-  }, [allOffers, selected]);
+  }, [visibleOffers, selected]);
 
   useEffect(() => {
     setSourceId(undefined);
@@ -97,6 +132,15 @@ export function TransferPage() {
     setSubmission(undefined);
   }, [activeState.activePublicKeyHex]);
 
+  useEffect(() => {
+    setSelected(undefined);
+    setCompletion(undefined);
+    setSourceId(undefined);
+    setQuote(undefined);
+    setSubmission(undefined);
+    setHookError(undefined);
+  }, [recipientTarget]);
+
   const selectedProvider: TransferProvider | undefined = useMemo(
     () => (selected ? providers.find((p) => p.id === selected.providerId) : undefined),
     [selected, providers]
@@ -105,6 +149,12 @@ export function TransferPage() {
   function handleCompleted(result: TransferCompletion) {
     setCompletion(result);
     setSelected(undefined);
+  }
+
+  function selectRecipient(publicKeyHex: string) {
+    const canonical = publicKeyHex.trim().toLowerCase();
+    if (!/^(02|03)[0-9a-f]{64}$/.test(canonical)) return;
+    router.push(`/transfer?recipientPublicKeyHex=${encodeURIComponent(canonical)}`);
   }
 
   const compatibleSources = selected
@@ -148,7 +198,10 @@ export function TransferPage() {
     );
   }
 
-  if (providers.length === 0) {
+  if (invalidRecipientTarget) return <div className="transfer-page"><PageHeader title={t("transfer.route.title", { defaultValue: "转账" })} /><EmptyState title={t("transfer.page.invalidRecipient", { defaultValue: "联系人转账目标无效" })} /></div>;
+  if (recipientTarget && visibleOffers.length === 0 && visibleRecipientCollectibles.length === 0) return <div className="transfer-page"><PageHeader title={t("transfer.route.title", { defaultValue: "转账" })} /><EmptyState title={t("transfer.page.noRecipientProvider", { defaultValue: "当前没有可向该联系人公钥转账的资产" })} description={recipientTarget.slice(0, 10) + "…"} /><button type="button" onClick={() => router.push("/transfer")}>{t("transfer.page.clearRecipient", { defaultValue: "清除目标，浏览全部资产" })}</button></div>;
+
+  if (providers.length === 0 && !recipientTarget) {
     return (
       <div className="transfer-page">
         <PageHeader
@@ -163,20 +216,35 @@ export function TransferPage() {
     );
   }
 
+
   return (
     <div className="transfer-page">
       <PageHeader
         title={t("transfer.route.title", { defaultValue: "转账" })}
-        description={t("transfer.page.desc.default", { defaultValue: "选择资产 Offer，然后由 provider 提供的 Widget 完成输入、预览与提交。" })}
+        description={t("transfer.page.desc.default", { defaultValue: "先确认收款人，再选择资产类型；资产插件负责展示并核对实际收款形式。" })}
       />
-      <section data-transfer-source-count={featureSources.length} data-transfer-quote-count={quoteProviders.length} data-transfer-submit-count={submitHandlers.length}>
-        <h3>{t("transfer.page.assets", { defaultValue: "资产" })}</h3>
-        <TransferOfferPicker
-          offers={allOffers}
-          value={selected?.id}
-          onChange={setSelected}
-        />
+      <section className="transfer-page__step-card transfer-page__recipient" aria-labelledby="transfer-recipient-title">
+        <div className="transfer-page__step-heading">
+          <span>1</span>
+          <div><h3 id="transfer-recipient-title">{t("transfer.page.recipient.title", { defaultValue: "收款人" })}</h3><p>{t("transfer.page.recipient.hint", { defaultValue: "联系人传递的是公钥；资产类型会将其投影为可核对的收款地址或其它收款形式。" })}</p></div>
+        </div>
+        {recipientTarget ? (
+          <div className="transfer-page__recipient-summary" data-testid="recipient-target" data-recipient-public-key-hex={recipientTarget}>
+            <div><span>{t("transfer.page.recipient.publicKey", { defaultValue: "收款人公钥" })}</span><code>{recipientTarget}</code></div>
+            <button type="button" onClick={() => router.push("/transfer")}>{t("transfer.page.recipient.change", { defaultValue: "更换收款人" })}</button>
+          </div>
+        ) : ContactPicker ? (
+          <div className="transfer-page__recipient-picker">
+            <ContactPicker value="" onChange={selectRecipient} placeholder={t("transfer.page.recipient.placeholder", { defaultValue: "选择联系人" })} />
+            <p>{t("transfer.page.recipient.manualAddress", { defaultValue: "若资产只接受地址，可直接在选择资产后填写并核对地址。" })}</p>
+          </div>
+        ) : <p className="transfer-page__recipient-unavailable">{t("transfer.page.recipient.manualAddress", { defaultValue: "若资产只接受地址，可直接在选择资产后填写并核对地址。" })}</p>}
       </section>
+      <section className="transfer-page__step-card transfer-page__asset-stage" data-transfer-source-count={featureSources.length} data-transfer-quote-count={quoteProviders.length} data-transfer-submit-count={submitHandlers.length}>
+        <div className="transfer-page__step-heading"><span>2</span><div><h3>{t("transfer.page.assetType.title", { defaultValue: "资产类型" })}</h3><p>{recipientTarget ? t("transfer.page.assetType.targetHint", { defaultValue: "仅显示支持该收款人公钥的资产。" }) : t("transfer.page.assetType.manualHint", { defaultValue: "选择资产后，按该资产的收款地址或公钥规则完成核对。" })}</p></div></div>
+        <div className="transfer-page__asset-grid"><TransferOfferPicker offers={visibleOffers} value={selected?.id} onChange={setSelected} /></div>
+      </section>
+      {recipientTarget && visibleRecipientCollectibles.length > 0 ? <section className="transfer-page__collectibles" data-transfer-section="collectibles"><h3>{t("transfer.section.collectibles", { defaultValue: "收藏品" })}</h3>{visibleRecipientCollectibles.map((item) => <button key={`${item.providerId}:${item.collectibleId}`} type="button" onClick={() => router.push(`/collectibles/transfer?providerId=${encodeURIComponent(item.providerId)}&collectibleId=${encodeURIComponent(item.collectibleId)}&recipientPublicKeyHex=${encodeURIComponent(recipientTarget)}`)}>{host.i18n.text(item.name)}</button>)}</section> : null}
       {selected && (compatibleSources.length > 0 || quoteProviders.length > 0 || submitHandlers.length > 0) ? (
         <section className="transfer-page__feature-flow">
           {compatibleSources.length > 0 ? <label>
@@ -193,14 +261,13 @@ export function TransferPage() {
         </section>
       ) : null}
       {selected && selectedProvider ? (
-        <section>
-          <h3>{host.i18n.text(selected.label)}</h3>
+        <section className="transfer-page__provider-widget">
           <ProviderErrorBoundary
             providerId={selectedProvider.id}
             onReset={() => setSelected(undefined)}
             t={t}
           >
-            <selectedProvider.component offer={selected} onCompleted={handleCompleted} />
+            <selectedProvider.component offer={selected} onCompleted={handleCompleted} recipientPublicKeyHex={recipientTarget} />
           </ProviderErrorBoundary>
         </section>
       ) : null}
@@ -240,6 +307,14 @@ function useTransferFeature(): TransferFeatureCapability {
   const [, refresh] = useState(0);
   useEffect(() => capability.subscribe(() => refresh((value) => value + 1)), [capability]);
   return capability;
+}
+
+function useCapabilityOrNull<T>(key: string): T | null {
+  try {
+    return useCapability<T>(key);
+  } catch {
+    return null;
+  }
 }
 
 interface ProviderErrorBoundaryProps {

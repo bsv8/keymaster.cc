@@ -80,14 +80,15 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
   return {
     async addContact(input) {
       const db = await getDbForActiveKey();
-      if (!input.publicKeyHex) throw new Error("publicKeyHex is required");
+      const publicKeyHex = input.publicKeyHex.trim().toLowerCase();
+      if (!publicKeyHex) throw new Error("publicKeyHex is required");
       if (!input.name.trim()) throw new Error("Name is required");
-      const existing = await db.findByPublicKeyHex(input.publicKeyHex);
-      if (existing) throw new ContactsDuplicateError(input.publicKeyHex);
+      const existing = await db.findByPublicKeyHex(publicKeyHex);
+      if (existing) throw new ContactsDuplicateError(publicKeyHex);
       const now = new Date().toISOString();
       const contact: Contact = {
         id: crypto.randomUUID(),
-        publicKeyHex: input.publicKeyHex,
+        publicKeyHex,
         name: input.name.trim(),
         note: input.note,
         tags: input.tags ?? [],
@@ -102,18 +103,19 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
       const db = await getDbForActiveKey();
       const existing = await db.get(id);
       if (!existing) throw new Error(`Contact ${id} not found`);
-      if (!input.publicKeyHex) throw new Error("publicKeyHex is required");
+      const publicKeyHex = input.publicKeyHex.trim().toLowerCase();
+      if (!publicKeyHex) throw new Error("publicKeyHex is required");
       if (!input.name.trim()) throw new Error("Name is required");
-      const sameIdentity = existing.publicKeyHex === input.publicKeyHex;
+      const sameIdentity = existing.publicKeyHex === publicKeyHex;
       if (!sameIdentity) {
-        const duplicate = await db.findByPublicKeyHex(input.publicKeyHex);
+        const duplicate = await db.findByPublicKeyHex(publicKeyHex);
         if (duplicate && duplicate.id !== id) {
-          throw new ContactsDuplicateError(input.publicKeyHex);
+          throw new ContactsDuplicateError(publicKeyHex);
         }
       }
       const updated: Contact = {
         ...existing,
-        publicKeyHex: input.publicKeyHex,
+        publicKeyHex,
         name: input.name.trim(),
         note: input.note,
         tags: input.tags ?? existing.tags,
@@ -134,11 +136,11 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     },
     async findByPublicKeyHex(publicKeyHex) {
       const db = await getDbForActiveKey();
-      return db.findByPublicKeyHex(publicKeyHex);
+      return db.findByPublicKeyHex(publicKeyHex.trim().toLowerCase());
     },
     async findByPublicKeyHexes(publicKeyHexes) {
       const db = await getDbForActiveKey();
-      return db.findByPublicKeyHexes(publicKeyHexes);
+      return db.findByPublicKeyHexes(publicKeyHexes.map((key) => key.trim().toLowerCase()));
     },
     onChange(handler) {
       listeners.add(handler);

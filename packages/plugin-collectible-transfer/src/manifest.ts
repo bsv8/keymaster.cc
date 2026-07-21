@@ -20,7 +20,9 @@ import type {
 import { CollectibleTransferPage } from "./CollectibleTransferPage.js";
 
 const collectibleTransferResources: I18nPluginResources = {
-  namespace: "collectible-transfer",
+  // 页面使用 collectibleTransfer.* key；namespace 必须与首段一致，否则
+  // i18n 会把它误判为 common namespace，导致目标空态退回默认中文文案。
+  namespace: "collectibleTransfer",
   resources: {
     en: {
       "collectibleTransfer.route.transfer": "Transfer collectible",
@@ -32,6 +34,8 @@ const collectibleTransferResources: I18nPluginResources = {
       "collectibleTransfer.page.invalid.desc": "Missing providerId/collectibleId parameter.",
       "collectibleTransfer.page.notFound.title": "Collectible not found",
       "collectibleTransfer.page.notFound.desc": "The requested collectible could not be loaded."
+      ,"collectibleTransfer.page.invalidRecipient": "Invalid contact transfer target"
+      ,"collectibleTransfer.page.unsupportedRecipient": "This collectible does not support transfer to a contact public key"
     },
     "zh-CN": {
       "collectibleTransfer.route.transfer": "转移藏品",
@@ -43,6 +47,8 @@ const collectibleTransferResources: I18nPluginResources = {
       "collectibleTransfer.page.invalid.desc": "缺少 providerId/collectibleId 参数。",
       "collectibleTransfer.page.notFound.title": "藏品未找到",
       "collectibleTransfer.page.notFound.desc": "无法加载请求的藏品。"
+      ,"collectibleTransfer.page.invalidRecipient": "联系人转账目标无效"
+      ,"collectibleTransfer.page.unsupportedRecipient": "该藏品不支持按联系人公钥转移"
     }
   }
 };

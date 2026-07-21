@@ -29,11 +29,16 @@ export interface CollectibleTransferCapability {
   supports(ref: CollectibleRef): boolean;
 }
 
-/** Widget 入参：平台传 detail + ref + 完成回调。 */
+/** Widget 入参：平台传 detail + collectibleRef + 完成回调。 */
 export interface CollectibleTransferWidgetProps {
-  ref: CollectibleRef;
+  /**
+   * 不能命名为 `ref`：React 会把该 JSX 保留 prop 从函数组件入参中移除，
+   * 造成 protocol handler 丢失实际要转移的藏品引用。
+   */
+  collectibleRef: CollectibleRef;
   detail: CollectibleDetail;
   onCompleted(result: CollectibleTransferCompletion): void;
+  readonly recipientPublicKeyHex?: string;
 }
 
 /** 完成回调入参。 */
@@ -54,6 +59,7 @@ export interface CollectibleTransferHandler extends CollectibleTransferCapabilit
   order?: number;
   /** 挂载的 Widget 组件。 */
   component: ComponentType<CollectibleTransferWidgetProps>;
+  supportsRecipientPublicKeyHex(publicKeyHex: string): boolean;
 }
 
 /** collectible transfer 注册表。 */

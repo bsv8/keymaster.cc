@@ -9,9 +9,11 @@
 //     backfill。同 tab 不依赖 storage 事件。
 
 import { useEffect, useState } from "react";
-import { Select } from "@keymaster/ui";
+import { Select, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import type { P2pkhGlobalSettings, P2pkhService } from "../p2pkhContracts.js";
+import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
+
+const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 
 export function P2pkhSettingsPage() {
   const host = usePluginHost();
@@ -21,14 +23,21 @@ export function P2pkhSettingsPage() {
     host.resourceStore,
     "p2pkh.settings",
     [],
-    (snapshot) => snapshot.data ?? { includeTestnet: false },
+    (snapshot) => snapshot.data ?? DEFAULT_SETTINGS,
     (a, b) => a.includeTestnet === b.includeTestnet
+      && JSON.stringify(a.feeRateSatoshisPerKb ?? {}) === JSON.stringify(b.feeRateSatoshisPerKb ?? {})
   );
   const [settings, setSettings] = useState<P2pkhGlobalSettings>(resourceSettings);
+  const [feeRates, setFeeRates] = useState(() => Object.fromEntries(
+    Object.entries(resolveP2pkhFeeRateSatoshisPerKb(resourceSettings)).map(([tier, rate]) => [tier, String(rate)])
+  ) as Record<P2pkhFeeRateTier, string>);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setSettings(resourceSettings);
+    setFeeRates(Object.fromEntries(
+      Object.entries(resolveP2pkhFeeRateSatoshisPerKb(resourceSettings)).map(([tier, rate]) => [tier, String(rate)])
+    ) as Record<P2pkhFeeRateTier, string>);
   }, [resourceSettings]);
 
   async function applySettings(next: P2pkhGlobalSettings) {
@@ -40,6 +49,19 @@ export function P2pkhSettingsPage() {
       setSettings(service.getGlobalSettings());
       setError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  async function saveFeeRate(tier: P2pkhFeeRateTier) {
+    const value = Number(feeRates[tier]);
+    if (!Number.isInteger(value) || value < 1) {
+      setError(t("p2pkh.settings.feeRateInvalid", { defaultValue: "费率必须是大于 0 的整数（sats/kB）。" }));
+      setFeeRates((current) => ({ ...current, [tier]: String(resolveP2pkhFeeRateSatoshisPerKb(settings)[tier]) }));
+      return;
+    }
+    await applySettings({
+      ...settings,
+      feeRateSatoshisPerKb: { ...resolveP2pkhFeeRateSatoshisPerKb(settings), [tier]: value }
+    });
   }
 
   return (
@@ -64,6 +86,22 @@ export function P2pkhSettingsPage() {
           defaultValue: "关闭后 testnet 资产、转账入口、首页余额行与后台同步都会停止；再次打开会重新触发 testnet rehydrate + recent-sync。"
         })}
       </p>
+      <section className="p2pkh-settings__fee-rates" aria-labelledby="p2pkh-fee-rates-title">
+        <h3 id="p2pkh-fee-rates-title">{t("p2pkh.settings.feeRates", { defaultValue: "BSV 矿工费率" })}</h3>
+        <p>{t("p2pkh.settings.feeRatesHint", { defaultValue: "按 sats/kB 配置。转账页默认使用“中”；修改后立即应用到新建的交易预览。" })}</p>
+        {(["low", "medium", "high"] as const).map((tier) => (
+          <TextInput
+            key={tier}
+            label={t(`p2pkh.settings.feeRate.${tier}`, { defaultValue: tier === "low" ? "低" : tier === "medium" ? "中（默认）" : "高" })}
+            type="number"
+            min="1"
+            value={feeRates[tier]}
+            onChange={(event) => setFeeRates((current) => ({ ...current, [tier]: event.currentTarget.value }))}
+            onBlur={() => void saveFeeRate(tier)}
+            hint="sats/kB"
+          />
+        ))}
+      </section>
       {error ? <p className="p2pkh-settings__error">{error}</p> : null}
     </div>
   );

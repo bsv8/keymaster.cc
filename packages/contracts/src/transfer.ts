@@ -12,6 +12,7 @@ import type { I18nText } from "./i18n.js";
 
 /** 转账资产状态。 */
 export type TransferOfferStatus = "ready" | "syncing" | "stale" | "failed" | "unsupported";
+export type TransferRecipientTargetSection = "mainnet" | "testnet" | "other-assets";
 
 /** 转账余额（按 provider 语义；coin 类型通常是 satoshis）。 */
 export interface TransferOfferBalance {
@@ -46,12 +47,15 @@ export interface TransferOffer {
   status: TransferOfferStatus;
   /** 平台排序：越小越靠前。 */
   order?: number;
+  /** Provider 声明该 Offer 在联系人目标综合页所属的稳定分区。 */
+  recipientTargetSection: TransferRecipientTargetSection;
 }
 
 /** Transfer Widget props：平台选中 offer 后挂载的组件入参。 */
 export interface TransferWidgetProps {
   offer: TransferOffer;
   onCompleted(result: TransferCompletion): void;
+  readonly recipientPublicKeyHex?: string;
 }
 
 /** 提交后结果。 */
@@ -79,6 +83,7 @@ export interface TransferProvider {
   order?: number;
   /** 渲染 provider 的完整转移 Widget。 */
   component: ComponentType<TransferWidgetProps>;
+  supportsRecipientPublicKeyHex?(publicKeyHex: string): boolean;
   /** 列出 provider 当前可转移的 Offer。 */
   listOffers(): Promise<TransferOffer[]>;
   /** 余额/状态变化时通知平台刷新。 */

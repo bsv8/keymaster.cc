@@ -9,6 +9,7 @@
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey, type Contact } from "@keymaster/contracts";
+import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
 // 不引入 react-router；直接用 location.pathname 解析。
 // 路径形态：/contacts/:id
@@ -51,6 +52,7 @@ export function ContactDetailPage() {
       <PageHeader
         title={contact.name}
         description={contact.publicKeyHex}
+        actions={<ContactPublicKeyActions contact={contact} />}
       />
       <p>
         <strong>publicKeyHex: </strong>

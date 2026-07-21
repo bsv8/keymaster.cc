@@ -53,6 +53,7 @@ export const contactsResources: I18nPluginResources = {
       "contacts.page.col.actions": "Actions",
       "contacts.page.action.edit": "Edit",
       "contacts.page.action.delete": "Delete",
+      "contacts.page.actionFailed": "Action failed",
       "contacts.page.action.new": "New",
       "contacts.modal.title.new": "New contact",
       "contacts.modal.title.edit": "Edit contact",
@@ -106,6 +107,7 @@ export const contactsResources: I18nPluginResources = {
       "contacts.page.col.actions": "操作",
       "contacts.page.action.edit": "编辑",
       "contacts.page.action.delete": "删除",
+      "contacts.page.actionFailed": "操作失败",
       "contacts.page.action.new": "新增",
       "contacts.modal.title.new": "新增联系人",
       "contacts.modal.title.edit": "编辑联系人",
@@ -160,6 +162,7 @@ export const contactsPlugin: PluginManifest = {
     { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
     { capability: "route.registry", reason: "注册联系人页面" },
     { capability: "business.registry", reason: "接入首页业务导航" }
+    ,{ capability: "contacts.public-key-action.registry", reason: "显示联系人公钥操作" }
   ],
   setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);

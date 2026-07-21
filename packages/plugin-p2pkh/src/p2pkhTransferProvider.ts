@@ -107,6 +107,7 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
       },
       status: mapStatus(deps.service.syncStatus()),
       order: assetId === "bsv" ? 10 : 11
+      ,recipientTargetSection: assetId === "bsv" ? "mainnet" : "testnet"
     };
   }
 
@@ -116,6 +117,9 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
     description: { key: "p2pkh.provider.description", fallback: "BSV P2PKH 转移：bsv / bsvtest 两个网络。" },
     order: 10,
     component: P2pkhTransferWidget,
+    supportsRecipientPublicKeyHex(publicKeyHex) {
+      return /^(02|03)[0-9a-f]{64}$/.test(publicKeyHex);
+    },
     async listOffers() {
       if (!isTransferable()) {
         return [];

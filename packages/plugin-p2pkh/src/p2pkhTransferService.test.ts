@@ -125,6 +125,91 @@ function makeVault() {
 }
 
 describe("createP2pkhTransferService", () => {
+  it("sends all available inputs minus the final fee without creating a change output", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      label: "active", address: ACTIVE.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0
+    };
+    const service = createP2pkhTransferService({
+      vault: makeVault(),
+      woc: { broadcast: vi.fn() } as never,
+      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
+      getDb: async () => makeDb([makeUtxo(3_000)], resource) as never,
+      getActiveKey: () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, label: "active", capabilities: [], createdAt: "now" }),
+      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
+    });
+
+    const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      assetId: "bsv",
+      recipientAddress: RECEIVER.address,
+      amountSatoshis: 0,
+      sendAll: true,
+      feeRateSatoshisPerKb: 1_000
+    });
+
+    expect(preview.allocation.selected).toHaveLength(1);
+    expect(preview.allocation.changeSatoshis).toBe(0);
+    expect(preview.outputs).toEqual([{ address: RECEIVER.address, value: preview.amountSatoshis }]);
+    expect(preview.amountSatoshis + preview.estimatedFeeSatoshis).toBe(3_000);
+    expect(preview.amountSatoshis).toBeGreaterThan(0);
+  });
+
+  it("deducts the fee from a fixed amount only when the available balance covers the amount but not amount plus fee", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      label: "active", address: ACTIVE.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0
+    };
+    const service = createP2pkhTransferService({
+      vault: makeVault(),
+      woc: { broadcast: vi.fn() } as never,
+      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
+      getDb: async () => makeDb([makeUtxo(1_000)], resource) as never,
+      getActiveKey: () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, label: "active", capabilities: [], createdAt: "now" }),
+      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
+    });
+
+    const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      assetId: "bsv",
+      recipientAddress: RECEIVER.address,
+      amountSatoshis: 1_000,
+      feeRateSatoshisPerKb: 1_000
+    });
+
+    expect(preview.allocation.changeSatoshis).toBe(0);
+    expect(preview.amountSatoshis + preview.estimatedFeeSatoshis).toBe(1_000);
+    expect(preview.amountSatoshis).toBeLessThan(1_000);
+  });
+
+  it("treats a fixed amount above the available balance as an all-output transfer", async () => {
+    const resource: P2pkhKeyResource = {
+      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      label: "active", address: ACTIVE.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0
+    };
+    const service = createP2pkhTransferService({
+      vault: makeVault(),
+      woc: { broadcast: vi.fn() } as never,
+      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
+      getDb: async () => makeDb([makeUtxo(900)], resource) as never,
+      getActiveKey: () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, label: "active", capabilities: [], createdAt: "now" }),
+      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
+    });
+
+    const preview = await service.prepare({
+      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
+      assetId: "bsv",
+      recipientAddress: RECEIVER.address,
+      amountSatoshis: 1_000,
+      feeRateSatoshisPerKb: 1_000
+    });
+
+    expect(preview.allocation.totalInputSatoshis).toBe(900);
+    expect(preview.allocation.changeSatoshis).toBe(0);
+    expect(preview.amountSatoshis + preview.estimatedFeeSatoshis).toBe(900);
+    expect(preview.amountSatoshis).toBeLessThan(900);
+  });
+
   it("prepares a final signed preview and submit only broadcasts the preview hex", async () => {
     const resource: P2pkhKeyResource = {
       resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,

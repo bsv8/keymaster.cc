@@ -54,6 +54,7 @@ import {
   makeResourceId,
   P2PKH_ASSETS,
   requireReadyKey,
+  resolveP2pkhFeeRateSatoshisPerKb,
   type ReadyKeyIdentity
 } from "./p2pkhContracts.js";
 import { createP2pkhDb, disposeP2pkhDb, openP2pkhDb, P2PKH_DB_VERSION, type P2pkhDbBundle, type P2pkhDbHandle } from "./p2pkhDb.js";
@@ -83,11 +84,30 @@ function readGlobalSettingsFromStorage(): P2pkhGlobalSettings {
   try {
     const raw = localStorage.getItem(P2PKH_GLOBAL_SETTINGS_KEY);
     if (!raw) return { includeTestnet: false };
-    const obj = JSON.parse(raw) as { includeTestnet?: unknown };
-    return { includeTestnet: obj.includeTestnet === true };
+    const obj = JSON.parse(raw) as { includeTestnet?: unknown; feeRateSatoshisPerKb?: unknown };
+    const feeRateSatoshisPerKb = normalizeFeeRates(obj.feeRateSatoshisPerKb);
+    return { includeTestnet: obj.includeTestnet === true, ...(feeRateSatoshisPerKb ? { feeRateSatoshisPerKb } : {}) };
   } catch {
     return { includeTestnet: false };
   }
+}
+
+function normalizeFeeRates(value: unknown): P2pkhGlobalSettings["feeRateSatoshisPerKb"] | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const input = value as Record<string, unknown>;
+  const rates: Partial<Record<"low" | "medium" | "high", number>> = {};
+  for (const tier of ["low", "medium", "high"] as const) {
+    const rate = input[tier];
+    if (typeof rate === "number" && Number.isInteger(rate) && rate > 0) rates[tier] = rate;
+  }
+  return Object.keys(rates).length > 0 ? rates : undefined;
+}
+
+function sameGlobalSettings(left: P2pkhGlobalSettings, right: P2pkhGlobalSettings): boolean {
+  if (left.includeTestnet !== right.includeTestnet) return false;
+  const a = resolveP2pkhFeeRateSatoshisPerKb(left);
+  const b = resolveP2pkhFeeRateSatoshisPerKb(right);
+  return a.low === b.low && a.medium === b.medium && a.high === b.high;
 }
 
 function writeGlobalSettingsToStorage(s: P2pkhGlobalSettings): void {
@@ -138,7 +158,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    * 调用方需先判断 s 与当前缓存是否相等——不相等才更新，避免重复 trigger。
    */
   function setCachedSettingsAndEmit(next: P2pkhGlobalSettings): void {
-    if (cachedSettings.includeTestnet === next.includeTestnet) return;
+    if (sameGlobalSettings(cachedSettings, next)) return;
     cachedSettings = next;
     deps.messageBus.publish(P2PKH_MSG.SETTINGS_CHANGED, next);
     for (const l of [...settingsListeners]) l(next);
@@ -247,7 +267,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       if (ev.key !== P2PKH_GLOBAL_SETTINGS_KEY) return;
       const next = readGlobalSettingsFromStorage();
       const prev = cachedSettings;
-      if (prev.includeTestnet === next.includeTestnet) return;
+      if (sameGlobalSettings(prev, next)) return;
       setCachedSettingsAndEmit(next);
       if (!prev.includeTestnet && next.includeTestnet) {
         deps.logger?.info({

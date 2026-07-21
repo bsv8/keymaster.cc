@@ -11,6 +11,7 @@ import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from 
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey, type Contact, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
+import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
 export function ContactsPage() {
   const service = useCapability<ContactsService>("contacts.service");
@@ -60,6 +61,7 @@ export function ContactsPage() {
       header: t("contacts.page.col.actions", { defaultValue: "Actions" }),
       render: (r) => (
         <div className="row-actions">
+          <ContactPublicKeyActions contact={r} />
           <Button size="sm" variant="ghost" onClick={() => startEdit(r)}>
             {t("contacts.page.action.edit", { defaultValue: "Edit" })}
           </Button>

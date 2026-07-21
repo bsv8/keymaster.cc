@@ -7,6 +7,30 @@
 //   - 联系人归属由 key-scoped DB 表达，不再在联系人行内存 owner 字段；
 //   - 不做旧 address -> publicKeyHex 猜测迁移。
 
+import type { I18nText } from "./i18n.js";
+
+export const CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY = "contacts.public-key-action.registry";
+
+export interface ContactPublicKeyActionInput {
+  readonly publicKeyHex: string;
+}
+
+export interface ContactPublicKeyAction {
+  readonly id: string;
+  readonly label: I18nText;
+  readonly icon?: string;
+  readonly order: number;
+  readonly run: (input: ContactPublicKeyActionInput) => void | Promise<void>;
+}
+
+export interface ContactPublicKeyActionRegistry {
+  register(action: ContactPublicKeyAction): void;
+  unregister(id: string): void;
+  list(): ContactPublicKeyAction[];
+  get(id: string): ContactPublicKeyAction | undefined;
+  _ids(): string[];
+}
+
 /** 联系人。 */
 export interface Contact {
   id: string;

@@ -50,6 +50,7 @@ export interface PluginOwnership {
   importers: string[];
   /** transfer provider ids。 */
   transferProviders: string[];
+  contactPublicKeyActions: string[];
   /** asset provider ids。 */
   assetProviders: string[];
   /** token provider ids。 */
@@ -83,6 +84,7 @@ export function emptyOwnership(): PluginOwnership {
     commands: [],
     importers: [],
     transferProviders: [],
+    contactPublicKeyActions: [],
     assetProviders: [],
     tokenProviders: [],
     collectibleProviders: [],

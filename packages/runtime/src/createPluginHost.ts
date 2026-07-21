@@ -53,6 +53,7 @@ import {
   RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT,
   isValidPluginEndpointIdShape
 } from "@keymaster/contracts";
+import type { ContactPublicKeyActionRegistry } from "@keymaster/contracts";
 
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
 import { createMessageBus } from "./messageBus.js";
@@ -74,6 +75,7 @@ import { createVaultSettingsRegistry, type VaultSettingsRegistry } from "./regis
 import { createTokenRegistry, type TokenRegistry } from "./registries/tokenRegistry.js";
 import { createTopbarRegistry } from "./registries/topbarRegistry.js";
 import { createTransferRegistry, type TransferRegistry } from "./registries/transferRegistry.js";
+import { createContactPublicKeyActionRegistry } from "./registries/contactPublicKeyActionRegistry.js";
 import { createI18nService } from "./i18n/createI18nService.js";
 import { createLogService, type LogServiceHandle } from "./log/logService.js";
 import { createPluginConfigStore } from "./pluginConfigStore.js";
@@ -107,6 +109,7 @@ export interface PluginHost {
   commands: CommandRegistry;
   importers: ImporterRegistry;
   transfers: TransferRegistry;
+  contactPublicKeyActions: ContactPublicKeyActionRegistry;
   assets: AssetRegistry;
   tokens: TokenRegistry;
   collectibles: CollectibleRegistry;
@@ -200,6 +203,7 @@ function buildOwnershipSnapshot(
     commands: { _ids: () => string[] };
     importers: { _ids: () => string[] };
     transfers: { _ids: () => string[] };
+    contactPublicKeyActions: { _ids: () => string[] };
     assets: { _ids: () => string[] };
     tokens: { _ids: () => string[] };
     collectibles: { _ids: () => string[] };
@@ -222,6 +226,7 @@ function buildOwnershipSnapshot(
     commands: registries.commands._ids(),
     importers: registries.importers._ids(),
     transferProviders: registries.transfers._ids(),
+    contactPublicKeyActions: registries.contactPublicKeyActions._ids(),
     assetProviders: registries.assets._ids(),
     tokenProviders: registries.tokens._ids(),
     collectibleProviders: registries.collectibles._ids(),
@@ -254,6 +259,7 @@ function ownershipDiff(
   | "commands"
   | "importers"
   | "transferProviders"
+  | "contactPublicKeyActions"
   | "assetProviders"
   | "tokenProviders"
   | "collectibleProviders"
@@ -277,6 +283,7 @@ function ownershipDiff(
     commands: diffIds(before.commands, after.commands),
     importers: diffIds(before.importers, after.importers),
     transferProviders: diffIds(before.transferProviders, after.transferProviders),
+    contactPublicKeyActions: diffIds(before.contactPublicKeyActions, after.contactPublicKeyActions),
     assetProviders: diffIds(before.assetProviders, after.assetProviders),
     tokenProviders: diffIds(before.tokenProviders, after.tokenProviders),
     collectibleProviders: diffIds(before.collectibleProviders, after.collectibleProviders),
@@ -302,6 +309,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const commands = createCommandRegistry();
   const importers = createImporterRegistry();
   const transfers = createTransferRegistry();
+  const contactPublicKeyActions = createContactPublicKeyActionRegistry();
   const assets = createAssetRegistry();
   const tokens = createTokenRegistry();
   const collectibles = createCollectibleRegistry();
@@ -363,6 +371,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<CommandRegistry>("command.registry", commands);
   capabilities.provide<ImporterRegistry>("importer.registry", importers);
   capabilities.provide<TransferRegistry>("transfer.registry", transfers);
+  capabilities.provide<ContactPublicKeyActionRegistry>("contacts.public-key-action.registry", contactPublicKeyActions);
   capabilities.provide<AssetRegistry>("asset.registry", assets);
   capabilities.provide<TokenRegistry>("token.registry", tokens);
   capabilities.provide<CollectibleRegistry>("collectible.registry", collectibles);
@@ -462,6 +471,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       commands,
       importers,
       transfers,
+      contactPublicKeyActions,
       assets,
       tokens,
       collectibles,
@@ -649,6 +659,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     for (const id of ownership.importers) safe(() => importers.unregister(id), `importer:${id}`);
     for (const id of ownership.transferProviders)
       safe(() => transfers.unregister(id), `transfer:${id}`);
+    for (const id of ownership.contactPublicKeyActions)
+      safe(() => contactPublicKeyActions.unregister(id), `contactPublicKeyAction:${id}`);
     for (const id of ownership.assetProviders)
       safe(() => assets.unregister(id), `asset:${id}`);
     for (const id of ownership.tokenProviders) safe(() => tokens.unregister(id), `token:${id}`);
@@ -706,6 +718,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     commands,
     importers,
     transfers,
+    contactPublicKeyActions,
     assets,
     tokens,
     collectibles,

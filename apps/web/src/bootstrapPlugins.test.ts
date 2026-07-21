@@ -7,13 +7,15 @@
 //   3. 正常注册不会被误判成超时。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { PluginManifest } from "@keymaster/contracts";
+import type { PluginManifest, SessionCoordinatorClient } from "@keymaster/contracts";
 import { createPluginHost, StartupCapabilityError, StartupPluginError, type PluginHost } from "@keymaster/runtime";
 import {
   describeBootstrapStep,
   registerPluginWithTimeout
 } from "./bootstrapPlugins.js";
 import { assertWebStartupContract, WEB_STARTUP_REQUIRED_CAPABILITIES } from "./bootstrapPlugins.js";
+import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
+import { SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -71,6 +73,25 @@ describe("bootstrapPlugins hang detection", () => {
 });
 
 describe("web startup capability contract", () => {
+  it("loads the real web catalog with the message contact action", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    host.provide(SESSION_COORDINATOR_CLIENT_CAPABILITY, {
+      connect: async () => undefined,
+      getIsConnected: () => true,
+      getBootstrapSnapshot: () => ({ keys: [], activePublicKeyHex: undefined }),
+      subscribeTopic: () => () => undefined,
+      unlock: async () => ({ ok: false }), lock: async () => ({ ok: false }),
+      activateKey: async () => ({ ok: false }), vaultOperation: async () => ({ ok: false }),
+      crypto: async () => ({ ack: { ok: false } }), backgroundCancelByKey: async () => ({ ok: false })
+    } as unknown as SessionCoordinatorClient);
+    await host.registerAll([...WEB_PLUGIN_CATALOG]);
+    expect(host.state("message").kind).toBe("enabled");
+    expect(host.contactPublicKeyActions.get("message.to-contact")).toBeDefined();
+    if (host.state("message").kind !== "enabled") {
+      expect(host.state("message").error).toBeTruthy();
+    }
+  }, 30_000);
+
   function vaultFixture(setup: PluginManifest["setup"] = (ctx) => {
     ctx.provide("vault.service", {});
     ctx.provide("keyspace.service", {});

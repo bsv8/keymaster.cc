@@ -140,12 +140,15 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         );
 
       let bestError: AllocationFailureInfo | undefined;
-      for (let count = 1; count <= sorted.length; count++) {
-        const selected = sorted.slice(0, count);
+      const selections = validated.sendAll
+        ? [sorted]
+        : Array.from({ length: sorted.length }, (_, index) => sorted.slice(0, index + 1));
+      for (const selected of selections) {
         const solution = await solveForSelectedInputs({
           assetId: validated.assetId,
           selected,
           amountSatoshis: validated.amountSatoshis,
+          sendAll: validated.sendAll,
           feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
           recipientAddress: validated.recipientAddress,
           changeAddress,
@@ -162,6 +165,28 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           };
         }
         bestError = solution.error;
+      }
+
+      // 固定金额优先保证“收款额 + fee”。若最终计算发现可用余额不够
+      // `金额 + fee`，它与用户选择“全部”是同一笔语义：使用全部可用
+      // 输入，最终收款输出 = inputs - actual fee，且不产生找零。这个
+      // 分支也覆盖余额低于手填金额本身的情形；仅余额连 fee 都不够时，
+      // all-fee 求解会明确失败。
+      if (!validated.sendAll) {
+        const feeFromAmount = await solveForSelectedInputs({
+          assetId: validated.assetId,
+          selected: sorted,
+          amountSatoshis: validated.amountSatoshis,
+          sendAll: true,
+          feeRateSatoshisPerKb: validated.feeRateSatoshisPerKb,
+          recipientAddress: validated.recipientAddress,
+          changeAddress,
+          signRawTx
+        });
+        if (feeFromAmount.ok) {
+          return { ...feeFromAmount.preview, ownerPublicKeyHex: owner.publicKeyHex };
+        }
+        bestError = feeFromAmount.error;
       }
 
       throw buildAllocationError(
@@ -439,6 +464,7 @@ async function solveForSelectedInputs(params: {
   assetId: P2pkhAssetId;
   selected: P2pkhUtxo[];
   amountSatoshis: number;
+  sendAll: boolean;
   feeRateSatoshisPerKb: number;
   recipientAddress: string;
   changeAddress: string;
@@ -448,21 +474,27 @@ async function solveForSelectedInputs(params: {
   let feeSatoshis = 1;
 
   for (let round = 0; round < 12; round++) {
-    const changeSatoshis = totalInputSatoshis - params.amountSatoshis - feeSatoshis;
-    if (changeSatoshis < 0) {
+    // “全部”不是把一个预先填入的数字送出去；它使用全部可用输入，并让
+    // 最终收款输出等于 inputs - final fee。因此构建/签名后的实际 fee
+    // 始终从收款额扣除，不会因没有额外找零来支付 fee 而失败。
+    const recipientSatoshis = params.sendAll
+      ? totalInputSatoshis - feeSatoshis
+      : params.amountSatoshis;
+    const changeSatoshis = params.sendAll ? 0 : totalInputSatoshis - recipientSatoshis - feeSatoshis;
+    if (recipientSatoshis <= 0 || changeSatoshis < 0) {
       return {
         ok: false,
         error: {
           available: totalInputSatoshis,
-          amountSatoshis: params.amountSatoshis,
+          amountSatoshis: recipientSatoshis,
           feeSatoshis,
-          required: params.amountSatoshis + feeSatoshis,
+          required: params.sendAll ? feeSatoshis + 1 : recipientSatoshis + feeSatoshis,
           reason: "insufficient"
         }
       };
     }
     const allocation = {
-      requestedSatoshis: params.amountSatoshis,
+      requestedSatoshis: recipientSatoshis,
       feeReserveSatoshis: feeSatoshis,
       selected: params.selected,
       totalInputSatoshis,
@@ -476,9 +508,13 @@ async function solveForSelectedInputs(params: {
     const rawTxHex = await params.signRawTx(unsigned, params.selected);
     const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
     const nextFeeSatoshis = Math.max(1, Math.ceil((serializedSizeBytes * params.feeRateSatoshisPerKb) / 1000));
-    if (nextFeeSatoshis === feeSatoshis) {
+    // DER 签名长度会随待签名内容变动 1 byte；“全部”在两种金额之间
+    // 迭代时可能因此出现相邻 fee 来回跳。只要本轮预留 fee 不低于
+    // 重新估算值，就接受这一轮（多出的 1 sat 仍归矿工），避免假性
+    // insufficient 错误。
+    if (nextFeeSatoshis === feeSatoshis || (params.sendAll && nextFeeSatoshis <= feeSatoshis)) {
       const outputs = [
-        { address: params.recipientAddress, value: params.amountSatoshis },
+        { address: params.recipientAddress, value: recipientSatoshis },
         ...(changeSatoshis > 0 ? [{ address: params.changeAddress, value: changeSatoshis }] : [])
       ];
       return {
@@ -488,7 +524,7 @@ async function solveForSelectedInputs(params: {
           assetId: params.assetId,
           network: assetIdToNetworkMap[params.assetId],
           recipientAddress: params.recipientAddress,
-          amountSatoshis: params.amountSatoshis,
+          amountSatoshis: recipientSatoshis,
           feeRateSatoshisPerKb: params.feeRateSatoshisPerKb,
           allocation,
           changeAddress: params.changeAddress,
@@ -503,21 +539,22 @@ async function solveForSelectedInputs(params: {
     feeSatoshis = nextFeeSatoshis;
   }
 
-  const stableChangeSatoshis = totalInputSatoshis - params.amountSatoshis - feeSatoshis;
-  if (stableChangeSatoshis < 0) {
+  const stableRecipientSatoshis = params.sendAll ? totalInputSatoshis - feeSatoshis : params.amountSatoshis;
+  const stableChangeSatoshis = params.sendAll ? 0 : totalInputSatoshis - stableRecipientSatoshis - feeSatoshis;
+  if (stableRecipientSatoshis <= 0 || stableChangeSatoshis < 0) {
     return {
       ok: false,
       error: {
         available: totalInputSatoshis,
-        amountSatoshis: params.amountSatoshis,
+        amountSatoshis: stableRecipientSatoshis,
         feeSatoshis,
-        required: params.amountSatoshis + feeSatoshis,
+        required: params.sendAll ? feeSatoshis + 1 : stableRecipientSatoshis + feeSatoshis,
         reason: "insufficient"
       }
     };
   }
   const stableAllocation = {
-    requestedSatoshis: params.amountSatoshis,
+    requestedSatoshis: stableRecipientSatoshis,
     feeReserveSatoshis: feeSatoshis,
     selected: params.selected,
     totalInputSatoshis,
@@ -536,15 +573,15 @@ async function solveForSelectedInputs(params: {
       ok: false,
       error: {
         available: totalInputSatoshis,
-        amountSatoshis: params.amountSatoshis,
+        amountSatoshis: stableRecipientSatoshis,
         feeSatoshis: estimatedFeeSatoshis,
-        required: params.amountSatoshis + estimatedFeeSatoshis,
+        required: params.sendAll ? estimatedFeeSatoshis + 1 : stableRecipientSatoshis + estimatedFeeSatoshis,
         reason: "insufficient"
       }
     };
   }
   const outputs = [
-    { address: params.recipientAddress, value: params.amountSatoshis },
+    { address: params.recipientAddress, value: stableRecipientSatoshis },
     ...(stableChangeSatoshis > 0 ? [{ address: params.changeAddress, value: stableChangeSatoshis }] : [])
   ];
   return {
@@ -554,7 +591,7 @@ async function solveForSelectedInputs(params: {
       assetId: params.assetId,
       network: assetIdToNetworkMap[params.assetId],
       recipientAddress: params.recipientAddress,
-      amountSatoshis: params.amountSatoshis,
+      amountSatoshis: stableRecipientSatoshis,
       feeRateSatoshisPerKb: params.feeRateSatoshisPerKb,
       allocation: stableAllocation,
       changeAddress: params.changeAddress,
@@ -603,12 +640,14 @@ function validateTransferInput(input: P2pkhTransferInput): {
   assetId: P2pkhAssetId;
   recipientAddress: string;
   amountSatoshis: number;
+  sendAll: boolean;
   feeRateSatoshisPerKb: number;
 } {
   if (!input.assetId || !(input.assetId in assetIdToNetworkMap)) {
     throw new Error("P2PKH provider requires an assetId");
   }
-  const amountSatoshis = normalizePositiveInteger(input.amountSatoshis, "Amount");
+  const sendAll = input.sendAll === true;
+  const amountSatoshis = sendAll ? 0 : normalizePositiveInteger(input.amountSatoshis, "Amount");
   const feeRateSatoshisPerKb = normalizePositiveInteger(input.feeRateSatoshisPerKb ?? 0, "Fee rate");
   if (feeRateSatoshisPerKb < 1) {
     throw new Error("Fee rate must be at least 1 sats/kB");
@@ -620,6 +659,7 @@ function validateTransferInput(input: P2pkhTransferInput): {
     assetId: input.assetId,
     recipientAddress: input.recipientAddress,
     amountSatoshis,
+    sendAll,
     feeRateSatoshisPerKb
   };
 }

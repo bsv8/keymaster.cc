@@ -139,7 +139,7 @@ export function ContactsEditor(props: ContactsEditorProps): JSX.Element | null {
         return;
       }
       const input: ContactInput = {
-        publicKeyHex: draft.publicKeyHex.trim(),
+        publicKeyHex: draft.publicKeyHex.trim().toLowerCase(),
         name: draft.name.trim(),
         note: draft.note?.trim() || undefined,
         tags: draft.tags ?? []

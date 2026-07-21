@@ -81,11 +81,30 @@ export interface P2pkhBalance {
 /**
  * P2PKH 全局产品设置（硬切换 001）。
  * 设计缘由：这是产品级显示与同步范围配置，不是某一把 key 的链上状态，
- * 放在全局 localStorage 而不是 key-scoped DB。当前唯一字段是
- * `includeTestnet`：缺省 false。
+ * 放在全局 localStorage 而不是 key-scoped DB。
  */
+export type P2pkhFeeRateTier = "low" | "medium" | "high";
+
+/** BSV 交易费率按 sats/kB 计。中档是产品默认值；三档均可在系统设置调整。 */
+export const P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB: Record<P2pkhFeeRateTier, number> = {
+  low: 500,
+  medium: 1000,
+  high: 2000
+};
+
 export interface P2pkhGlobalSettings {
   includeTestnet: boolean;
+  /** 省略时兼容旧 localStorage，并回退到 `P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB`。 */
+  feeRateSatoshisPerKb?: Partial<Record<P2pkhFeeRateTier, number>>;
+}
+
+export function resolveP2pkhFeeRateSatoshisPerKb(settings?: P2pkhGlobalSettings): Record<P2pkhFeeRateTier, number> {
+  const configured = settings?.feeRateSatoshisPerKb;
+  const valueFor = (tier: P2pkhFeeRateTier) => {
+    const value = configured?.[tier];
+    return Number.isInteger(value) && value! > 0 ? value! : P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB[tier];
+  };
+  return { low: valueFor("low"), medium: valueFor("medium"), high: valueFor("high") };
 }
 
 /** P2PKH UTXO。
@@ -303,6 +322,8 @@ export interface P2pkhTransferInput {
   ownerPublicKeyHex: string;
   recipientAddress: string;
   amountSatoshis: number;
+  /** 使用所有可用输入；最终收款额在签名后按实际 fee 自动扣减。 */
+  sendAll?: boolean;
   feeRateSatoshisPerKb?: number;
 }
 

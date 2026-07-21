@@ -15,7 +15,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost } from "@keymaster/runtime";
+import { useCapability, useCurrentPath, useI18n, usePluginHost, useRegistry } from "@keymaster/runtime";
 import type {
   CollectibleDetail,
   CollectibleProvider,
@@ -33,8 +33,12 @@ function readQuery(name: string): string {
 
 export function CollectibleTransferPage() {
   const { t } = useI18n();
+  useCurrentPath();
   const providerId = readQuery("providerId");
   const collectibleId = readQuery("collectibleId");
+  const rawRecipientPublicKeyHex = readQuery("recipientPublicKeyHex");
+  const recipientPublicKeyHex = rawRecipientPublicKeyHex ? rawRecipientPublicKeyHex.trim().toLowerCase() : undefined;
+  const invalidRecipient = Boolean(rawRecipientPublicKeyHex) && !/^(02|03)[0-9a-f]{64}$/.test(recipientPublicKeyHex ?? "");
 
   if (!providerId || !collectibleId) {
     return (
@@ -49,19 +53,24 @@ export function CollectibleTransferPage() {
       </div>
     );
   }
+  if (invalidRecipient) {
+    return <div className="collectible-transfer-page"><PageHeader title={t("collectibleTransfer.page.title", { defaultValue: "转移藏品" })} /><EmptyState title={t("collectibleTransfer.page.invalidRecipient", { defaultValue: "联系人转账目标无效" })} /></div>;
+  }
 
-  return <CollectibleTransferBody providerId={providerId} collectibleId={collectibleId} />;
+  return <CollectibleTransferBody providerId={providerId} collectibleId={collectibleId} recipientPublicKeyHex={recipientPublicKeyHex} />;
 }
 
 interface BodyProps {
   providerId: string;
   collectibleId: string;
+  recipientPublicKeyHex?: string;
 }
 
-function CollectibleTransferBody({ providerId, collectibleId }: BodyProps) {
+function CollectibleTransferBody({ providerId, collectibleId, recipientPublicKeyHex }: BodyProps) {
   const ref: CollectibleRef = { providerId, collectibleId };
   const collectibles = useCapability<CollectibleRegistry>("collectible.registry");
   const transferRegistry = useCapability<CollectibleTransferRegistry>("collectible-transfer.registry");
+  const handlerIds = useRegistry((h) => h.collectibleTransfer._ids().join("\u0000"));
   const host = usePluginHost();
   const { t } = useI18n();
 
@@ -87,7 +96,10 @@ function CollectibleTransferBody({ providerId, collectibleId }: BodyProps) {
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [collectibles, providerId, collectibleId]);
 
-  const handlers = useMemo(() => transferRegistry.listSupporting(ref), [transferRegistry, providerId, collectibleId]);
+  const handlers = useMemo(() => transferRegistry.listSupporting(ref).filter((handler) => {
+    if (!recipientPublicKeyHex) return true;
+    try { return handler.supportsRecipientPublicKeyHex(recipientPublicKeyHex); } catch { return false; }
+  }), [handlerIds, transferRegistry, providerId, collectibleId, recipientPublicKeyHex]);
 
   if (error) {
     return (
@@ -117,8 +129,10 @@ function CollectibleTransferBody({ providerId, collectibleId }: BodyProps) {
       <div className="collectible-transfer-page">
         <PageHeader title={t("collectibleTransfer.page.title", { defaultValue: "转移藏品" })} />
         <EmptyState
-          title={t("collectibleTransfer.page.empty.title", { defaultValue: "暂无可用转移处理器" })}
-          description={t("collectibleTransfer.page.empty.desc", {
+          title={recipientPublicKeyHex
+            ? t("collectibleTransfer.page.unsupportedRecipient", { defaultValue: "该藏品不支持按联系人公钥转移" })
+            : t("collectibleTransfer.page.empty.title", { defaultValue: "暂无可用转移处理器" })}
+          description={recipientPublicKeyHex ? undefined : t("collectibleTransfer.page.empty.desc", {
             defaultValue: "当前藏品没有可用的转移处理器；请安装对应协议的转移 handler 插件。"
           })}
         />
@@ -137,8 +151,9 @@ function CollectibleTransferBody({ providerId, collectibleId }: BodyProps) {
         description={host.i18n.text(chosen.name)}
       />
       <Widget
-        ref={ref}
+        collectibleRef={ref}
         detail={detail}
+        recipientPublicKeyHex={recipientPublicKeyHex}
         onCompleted={(result) => {
           host.log.forPlugin("collectible-transfer").info({
             scope: "plugin-collectible-transfer",

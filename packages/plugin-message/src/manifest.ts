@@ -29,6 +29,7 @@ import type {
   AppMsgMessage,
   BusinessFeatureRegistry,
   Contact,
+  ContactPublicKeyActionRegistry,
   ContactsService,
   I18nPluginResources,
   KeyspaceService,
@@ -37,6 +38,7 @@ import type {
   ResourceRegistry,
   RouteRegistry
 } from "@keymaster/contracts";
+import { router } from "@keymaster/runtime";
 import {
   APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
   KEYMASTER_MESSAGE_APP_ID,
@@ -65,6 +67,7 @@ const messageResources: I18nPluginResources = {
   namespace: "message",
   resources: {
     en: {
+      "message.action.toContact": "Message",
       "message.menu": "Messages",
       "message.breadcrumb": "Messages",
       "message.breadcrumb.detail": "Detail",
@@ -160,6 +163,7 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.unknown": "Operation failed."
     },
     "zh-CN": {
+      "message.action.toContact": "发消息",
       "message.menu": "消息",
       "message.breadcrumb": "消息",
       "message.breadcrumb.detail": "详情",
@@ -305,9 +309,18 @@ export const messagePlatformPlugin: PluginManifest = {
     {
       capability: "breadcrumb.registry",
       reason: "为 /message 与 /messages 详情路由提供面包屑"
-    }
+    },
+    { capability: "contacts.public-key-action.registry", reason: "注册联系人发消息操作" }
   ],
   setup(ctx) {
+    const contactActions = ctx.get<ContactPublicKeyActionRegistry>("contacts.public-key-action.registry");
+    contactActions.register({
+      id: "message.to-contact",
+      label: { key: "message.action.toContact", fallback: "发消息" },
+      icon: "MessageCircle",
+      order: 20,
+      run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`)
+    });
     // 从 plugin-appmsg 的 endpoint registry 拿稳定长寿的 endpoint service。
     // service 内部自动处理 owner 真值 / active provider 变化；
     // plugin-message **不需要**监听 keyspace / vault / provider 任何事件。
