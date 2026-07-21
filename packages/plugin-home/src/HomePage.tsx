@@ -2,10 +2,11 @@
 // 首页：从 home.registry 读取 widget，按 runtime 已解析的 slot 分组为 main / aside 双栏。
 // 插件只声明业务 space，空间到布局的映射属于 runtime 产品规则。
 
-import { EmptyState, PageHeader } from "@keymaster/ui";
+import { PageHeader } from "@keymaster/ui";
 import { countRender, useCapability, useI18n } from "@keymaster/runtime";
 import type { HomeRegistry, HomeWidget } from "@keymaster/contracts";
 import { BusinessHomePage } from "./BusinessHomePage.js";
+import { HomeActions } from "./HomeActions.js";
 
 /**
  * 把 widget 列表按 runtime 解析后的 slot 分组。
@@ -29,47 +30,21 @@ export function HomePage() {
   countRender("plugin-home/HomePage");
   const registry = useCapability<HomeRegistry>("home.registry");
   const { t } = useI18n();
-  // 触发 languageChanged 重渲染。
-  const widgets = registry.list();
-
-  if (widgets.length === 0) {
-    return (
-      <div className="home-page">
-        <PageHeader
-          title={t("home.page.title", { defaultValue: "首页" })}
-          description={t("home.page.description", { defaultValue: "按插件注册的资源面板。" })}
-        />
-        <EmptyState
-          title={t("home.page.empty.title", { defaultValue: "还没有 widget" })}
-          description={t("home.page.empty.description", { defaultValue: "安装业务插件后这里会显示资源面板。" })}
-        />
-        <BusinessHomePage />
-      </div>
-    );
-  }
-
-  const { main, aside } = partitionHomeWidgets(widgets);
+  const { main, aside } = partitionHomeWidgets(registry.list());
 
   return (
     <div className="home-page">
       <PageHeader
         title={t("home.page.title", { defaultValue: "首页" })}
-        description={t("home.page.description", { defaultValue: "按插件注册的资源面板。" })}
+        description={t("home.page.description", { defaultValue: "常用操作" })}
       />
       <div className="home-layout">
         <div className="home-layout__main">
-          {main.map((w) => (
-            <div key={w.id} className="home-layout__cell">
-              <w.component />
-            </div>
-          ))}
+          <div className="home-layout__cell"><HomeActions /></div>
+          {main.map((widget) => <div key={widget.id} className="home-layout__cell"><widget.component /></div>)}
         </div>
         <div className="home-layout__aside">
-          {aside.map((w) => (
-            <div key={w.id} className="home-layout__cell">
-              <w.component />
-            </div>
-          ))}
+          {aside.map((widget) => <div key={widget.id} className="home-layout__cell"><widget.component /></div>)}
         </div>
       </div>
       <BusinessHomePage />

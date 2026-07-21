@@ -8,8 +8,11 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@bsv/sdk": "^2.1.7",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "@keymaster/ui": "*"
+    "@keymaster/ui": "*",
+    "@zxing/browser": "^0.2.1",
+    "qrcode.react": "^4.2.0"
   }
 }

@@ -717,6 +717,50 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .home-widget__list li:last-child { border-bottom: 0; }
 .home-widget__list .addr { color: var(--text-dim); }
 
+/* ---------- Home quick actions ---------- */
+.home-actions { max-width: 560px; }
+.home-actions__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 132px)); gap: 18px; }
+.home-actions__shortcut {
+  appearance: none; border: 0; background: transparent; color: var(--text); cursor: pointer;
+  display: flex; flex-direction: column; align-items: center; gap: 9px; font: inherit; font-size: 14px;
+}
+.home-actions__icon {
+  width: 68px; height: 68px; display: grid; place-items: center; border-radius: 22px;
+  background: color-mix(in srgb, var(--primary) 16%, var(--surface)); color: var(--primary);
+  border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border)); transition: transform .15s ease, background .15s ease;
+}
+.home-actions__icon--info { background: color-mix(in srgb, #5b8def 16%, var(--surface)); color: #5b8def; border-color: color-mix(in srgb, #5b8def 28%, var(--border)); }
+.home-actions__shortcut:hover .home-actions__icon, .home-actions__shortcut:focus-visible .home-actions__icon { transform: translateY(-2px); background: color-mix(in srgb, var(--primary) 24%, var(--surface)); }
+.home-actions__shortcut:focus-visible { outline: 2px solid var(--primary); outline-offset: 4px; border-radius: 24px; }
+.home-actions__identity { align-items: center; display: flex; flex-direction: column; gap: 14px; }
+.home-actions__qr { background: #fff; border-radius: 14px; display: grid; padding: 10px; }
+.home-actions__identity-row { align-items: center; display: grid; gap: 8px; grid-template-columns: 44px minmax(0, 1fr) auto; width: 100%; }
+.home-actions__identity-row code, .home-actions__scanned-key code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-actions__identity-label, .home-actions__scanned-key span { color: var(--text-dim); font-size: 12px; }
+.home-actions__copy { gap: 4px; padding-inline: 7px; }
+.home-actions__scan { display: flex; flex-direction: column; gap: 12px; }
+.ui-modal[data-testid="home-scan-modal"] .ui-modal__panel { box-sizing: border-box; max-height: 90dvh; overflow-y: auto; width: min(520px, 92vw); }
+.ui-modal[data-testid="home-scan-modal"] .ui-modal__body, .home-actions__scan { min-width: 0; }
+.home-actions__camera-wrap { aspect-ratio: 4 / 3; background: #101318; border-radius: 12px; max-height: min(46dvh, 360px); overflow: hidden; position: relative; width: 100%; }
+.home-actions__camera { display: block; height: 100%; max-width: 100%; object-fit: cover; width: 100%; }
+.home-actions__scan-frame { border: 2px solid var(--primary); border-radius: 14px; inset: 13%; pointer-events: none; position: absolute; }
+.home-actions__hint { align-items: center; color: var(--text-dim); display: flex; font-size: 13px; gap: 6px; margin: 0; }
+.home-actions__error { color: var(--danger); font-size: 13px; margin: 0; }
+.home-actions__manual { align-items: end; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }
+.home-actions__manual .ui-field { margin-bottom: 0; }
+.home-actions__scanned { border-top: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; padding-top: 12px; }
+.home-actions__scanned-key { align-items: center; display: flex; gap: 8px; justify-content: space-between; }
+.home-actions__contact { align-items: center; display: flex; font-weight: 600; gap: 6px; margin: 0; }
+.home-actions__contact-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.home-actions__create { align-items: end; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }
+.home-actions__create .ui-field { margin-bottom: 0; }
+@media (max-width: 480px) {
+  .home-actions__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .home-actions__identity-row { grid-template-columns: 40px minmax(0, 1fr); }
+  .home-actions__identity-row .home-actions__copy { grid-column: 2; justify-self: start; }
+  .home-actions__manual, .home-actions__create { grid-template-columns: 1fr; }
+}
+
 /* ---------- misc ---------- */
 .importer-picker, .transfer-picker { display: flex; flex-direction: column; gap: 8px; }
 .importer-picker__item, .transfer-picker__item {
