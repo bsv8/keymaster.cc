@@ -24,6 +24,7 @@ export function useResourceSelector<T, TSelected>(
 ): TSelected {
   const selectedRef = useRef<TSelected>();
   const hasSelectedRef = useRef(false);
+  const sourceSnapshotRef = useRef<ResourceSnapshot<T>>();
   const selectorRef = useRef(selector);
   const equalityRef = useRef(equality);
 
@@ -40,6 +41,15 @@ export function useResourceSelector<T, TSelected>(
 
   const getSnapshot = useCallback((): TSelected => {
     const snapshot = store.ensure<T>(definitionId, args);
+
+    // React's useSyncExternalStore requires referentially stable results when
+    // the backing store did not change. A selector may legitimately allocate
+    // (for example `rows.slice().sort(...)`), so equality alone cannot uphold
+    // that requirement when callers use reference equality.
+    if (hasSelectedRef.current && sourceSnapshotRef.current === snapshot) {
+      return selectedRef.current as TSelected;
+    }
+
     const selected = selectorRef.current(snapshot);
 
     // 检查是否变化
@@ -47,11 +57,13 @@ export function useResourceSelector<T, TSelected>(
       hasSelectedRef.current &&
       equalityRef.current(selectedRef.current as TSelected, selected)
     ) {
+      sourceSnapshotRef.current = snapshot;
       return selectedRef.current as TSelected;
     }
 
     selectedRef.current = selected as TSelected;
     hasSelectedRef.current = true;
+    sourceSnapshotRef.current = snapshot;
     return selected;
   }, [store, definitionId, ...args]);
 

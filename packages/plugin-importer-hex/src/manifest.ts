@@ -27,6 +27,7 @@ export const hexImporterPlugin: PluginManifest = {
   description: "支持 32 字节 hex 私钥导入。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "import"

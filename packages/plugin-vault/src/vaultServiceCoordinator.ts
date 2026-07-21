@@ -19,6 +19,7 @@ import type {
   CoordinatorValueResult,
   VaultLifecycleEvent,
   VaultLifecycleSnapshot,
+  SessionCoordinatorClient,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -30,17 +31,11 @@ interface VaultKeyMaterial {
   wif?: string;
 }
 
-/** Coordinator client 最小接口（避免跨包导入）。 */
-export interface CoordinatorClientLike {
-  getIsConnected(): boolean;
-  getState(): { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string };
-  subscribeTopic(topic: string, handler: (event: any) => void): () => void;
-  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
-  lock(): Promise<CoordinatorCommandResult>;
-  activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
-  vaultOperation(operation: string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
-  crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
-}
+/** Vault facade 所需的 Coordinator contract 子集。 */
+export type CoordinatorClientLike = Pick<
+  SessionCoordinatorClient,
+  "getIsConnected" | "getBootstrapSnapshot" | "subscribeTopic" | "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto"
+>;
 
 export interface VaultServiceCoordinatorDeps {
   coordinatorClient: CoordinatorClientLike;

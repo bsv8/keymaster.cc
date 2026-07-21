@@ -87,6 +87,7 @@ export const collectiblesPlugin: PluginManifest = {
   description: "collectible 平台：聚合 CollectibleProvider，提供 /collectibles 列表与通用详情页；collectible transfer 由 plugin-collectible-transfer 单独承接。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "platform"

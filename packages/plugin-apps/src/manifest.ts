@@ -113,6 +113,7 @@ export const appsPlugin: PluginManifest = {
   description: "Keymaster 内部 app launcher：从本地 JSON 清单展示 app，并在当前 Keymaster 窗口作为 launcher 启动 appView。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business"

@@ -140,6 +140,7 @@ export const bsvPricePlugin: PluginManifest = {
   i18n: bsvPriceResources,
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [BSV_PRICE_SERVICE_CAPABILITY],

@@ -58,6 +58,7 @@ export const bsv21TokenPlugin: PluginManifest = {
   description: "BSV-21 fungible token provider：通过 snapshot DB 读取当前 active key 的 BSV-21 持仓，注入 token.registry。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business"

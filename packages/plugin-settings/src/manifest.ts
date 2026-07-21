@@ -201,6 +201,7 @@ export const settingsPlugin: PluginManifest = {
   description: "系统级设置页：语言、插件管理。",
   meta: {
     kind: "core",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false,
     displayGroup: "core"

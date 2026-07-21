@@ -353,7 +353,9 @@ async function handleClientMessage(
     return;
   }
 
-  if ("expectedSessionEpoch" in request && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
+  // lock 是收敛型的安全操作：即使发起页面持有旧 epoch，也必须能够锁定
+  // 当前全局会话。其余命令仍由 epoch 栅栏拒绝，避免旧页面操作新会话。
+  if (request.kind !== "lock" && "expectedSessionEpoch" in request && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
     sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } });
     return;
   }
@@ -425,7 +427,7 @@ async function processRequest(
 ): Promise<CoordinatorResponse> {
   const requestId = "requestId" in request ? request.requestId : generateRequestId();
 
-  if ("expectedSessionEpoch" in request) {
+  if (request.kind !== "lock" && "expectedSessionEpoch" in request) {
     if (
       request.expectedSessionEpoch !== coordinatorState.sessionEpoch &&
       request.expectedSessionEpoch !== "boot" &&

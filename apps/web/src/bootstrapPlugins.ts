@@ -19,7 +19,8 @@
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   type PluginManifest,
-  type AssetDataNotifier
+  type AssetDataNotifier,
+  type SessionCoordinatorClient
 } from "@keymaster/contracts";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { appsPlugin } from "@keymaster/plugin-apps";
@@ -67,6 +68,15 @@ import { registerShellResources } from "./shell/shellResources.js";
  *     web 首屏"多久算崩溃"；装配层最适合定义这个阈值。
  */
 export const BOOTSTRAP_PLUGIN_TIMEOUT_MS = 15_000;
+
+export const WEB_STARTUP_REQUIRED_CAPABILITIES = [
+  "vault.service",
+  "keyspace.service"
+] as const;
+
+export function assertWebStartupContract(host: PluginHost): void {
+  host.assertCapabilities(WEB_STARTUP_REQUIRED_CAPABILITIES, { phase: "web-bootstrap" });
+}
 
 /** protocol 插件当前已知的高风险启动步骤提示。 */
 function bootstrapStepHint(pluginId: string): string | undefined {
@@ -130,7 +140,7 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // 施工单 002：注入 Coordinator client
   // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
   const { createCoordinatorClient } = await import("./keymasterSessionCoordinatorClient.js");
-  const coordinatorClient = createCoordinatorClient();
+  const coordinatorClient: SessionCoordinatorClient = createCoordinatorClient();
   await coordinatorClient.connect();
   host.provide("session-coordinator.client", coordinatorClient);
 
@@ -237,9 +247,15 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     return p;
   });
 
+  host.validateManifestSet(orderedWithConfig);
+  host.configStore.setRequiredPluginIds(
+    orderedWithConfig.filter((plugin) => plugin.meta.startup === "required").map((plugin) => plugin.id)
+  );
   for (const plugin of orderedWithConfig) {
     await registerPluginWithTimeout(host, plugin);
   }
+
+  assertWebStartupContract(host);
 
   // 施工单 2026-07-08 001：plugin-broadcast 在 hubcast 注册之后由
   // registry.register hook 自动激活默认 active provider；此处不需要

@@ -40,6 +40,7 @@ export const homePlugin: PluginManifest = {
   description: "首页容器。",
   meta: {
     kind: "core",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false,
     displayGroup: "core"

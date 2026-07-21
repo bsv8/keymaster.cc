@@ -23,6 +23,7 @@ import type {
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
   CoordinatorSubscribeTopicsResult,
+  SessionCoordinatorClient,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -51,7 +52,7 @@ type EventListener<T> = (event: T) => void;
 // 2. Coordinator Client
 // ============================================================
 
-export class KeymasterSessionCoordinatorClient {
+export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClient {
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
   private clientId: string;
@@ -506,7 +507,20 @@ export class KeymasterSessionCoordinatorClient {
 
   private applyTopicEvent(event: CoordinatorTopicEvent): void {
     const previousEpoch = this.topicEpochs.get(event.topic);
-    if (previousEpoch && previousEpoch !== event.sessionEpoch && event.sessionEpoch !== this.bootstrapSnapshotCache.sessionEpoch) return;
+    // vault.lifecycle 是 session epoch 的权威来源。SharedWorker 会在同一
+    // MessagePort 上先发送它、再发送同一 epoch 的其它 topic，因此这里必须
+    // 接纳新的 lifecycle epoch。此前把它当作过期事件丢弃，会使页面一直保留
+    // 旧的 unlocked epoch，随后任何带 expectedSessionEpoch 的操作都会收到
+    // stale-epoch。
+    //
+    // 其它 topic 不能单独把客户端推进到未知 epoch，仍等待对应的 lifecycle
+    // 事件，避免乱序的旧 topic 覆盖当前快照。
+    if (
+      event.topic !== "vault.lifecycle"
+      && previousEpoch
+      && previousEpoch !== event.sessionEpoch
+      && event.sessionEpoch !== this.bootstrapSnapshotCache.sessionEpoch
+    ) return;
     const incomingRevision = this.getEventRevision(event);
     if (incomingRevision === undefined) return;
     const previousRevision = previousEpoch === event.sessionEpoch ? this.getCachedTopicRevision(event.topic) : -1;

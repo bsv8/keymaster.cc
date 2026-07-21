@@ -224,6 +224,25 @@ export interface CoordinatorTaskSnapshot {
   keyScope?: { publicKeyHex: string; label?: string };
 }
 
+/**
+ * 页面侧 Coordinator client 的跨包契约。
+ *
+ * 插件必须依赖本接口，不得各自手写 client 的结构类型；这样 client 删除或改名
+ * 方法时，会在装配层和真实 client 的编译检查中立即失败。
+ */
+export interface SessionCoordinatorClient {
+  connect(): Promise<void>;
+  getIsConnected(): boolean;
+  getBootstrapSnapshot(): CoordinatorBootstrapSnapshot;
+  subscribeTopic(topic: CoordinatorTopic, listener: (event: any) => void): () => void;
+  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
+  lock(): Promise<CoordinatorCommandResult>;
+  activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
+  crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
+  backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
+}
+
 // ============================================================
 // 6. Capability Keys
 // ============================================================

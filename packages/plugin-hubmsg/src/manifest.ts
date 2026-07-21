@@ -43,6 +43,7 @@ export const hubmsgPlatformPlugin: PluginManifest = {
     "HubMsg 消息服务 provider 适配层：WSS 连接 + bind + send/list/get/online + message.received 推送，标准化输出 AppMsgMessage。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false
   },

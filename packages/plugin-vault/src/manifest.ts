@@ -37,6 +37,7 @@ import type {
   , CoordinatorCryptoOperation
   , CoordinatorCryptoResult
   , CoordinatorVaultStatus
+  , SessionCoordinatorClient
 } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
@@ -54,17 +55,11 @@ export interface VaultKeyResourceState {
   notice: { label: string } | null;
 }
 
-/** Coordinator client 接口（通过 capability 获取） */
-interface CoordinatorClientLike {
-  getIsConnected(): boolean;
-  getState(): { vaultStatus: CoordinatorVaultStatus; activePublicKeyHex?: string; keyspaceGeneration: number };
-  subscribeTopic(topic: string, handler: (event: any) => void): () => void;
-  unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
-  lock(): Promise<CoordinatorCommandResult>;
-  activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
-  vaultOperation(operation: string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
-  crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
-}
+/** Vault setup 所需的 Coordinator contract 子集。 */
+type CoordinatorClientLike = Pick<
+  SessionCoordinatorClient,
+  "getIsConnected" | "getBootstrapSnapshot" | "subscribeTopic" | "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto" | "backgroundCancelByKey"
+>;
 
 export const VAULT_CAPABILITY = "vault.service";
 
@@ -352,6 +347,7 @@ export const vaultPlugin: PluginManifest = {
   description: "本地密码 Vault，管理私钥加解密、内存会话与 active key 状态。",
   meta: {
     kind: "core",
+    startup: "required",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: [VAULT_CAPABILITY, "keyspace.service"],
@@ -468,7 +464,10 @@ export const vaultPlugin: PluginManifest = {
       label: { key: "vault.command.lock", fallback: "Lock wallet" },
       run: async () => {
         const result = await service.lock();
-        if (result.status !== "accepted" && result.status !== "ok") {
+        // 锁定事件本身会把所有页面收敛到最新 lifecycle snapshot。若另一
+        // 页面恰好先完成了同一轮锁定，stale-epoch 是可恢复的竞态结果，不能
+        // 抛到浏览器的 global.unhandledrejection 并把整个应用判为致命错误。
+        if (result.status !== "accepted" && result.status !== "ok" && result.status !== "stale-epoch") {
           throw new Error("message" in result ? result.message : `Lock failed: ${result.status}`);
         }
       }

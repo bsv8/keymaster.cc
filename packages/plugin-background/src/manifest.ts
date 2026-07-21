@@ -91,6 +91,7 @@ export const backgroundPlugin: PluginManifest = {
   description: "通用后台任务平台：注册、调度、去重、Topbar 托盘。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY],

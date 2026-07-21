@@ -63,6 +63,24 @@ export interface PluginDependency {
  */
 export type PluginKind = "core" | "platform" | "business";
 
+/** 首屏是否允许在该插件缺失时挂载 entrypoint。 */
+export type PluginStartupMode = "required" | "optional";
+
+export interface StartupCapabilityErrorDetails {
+  capability: string;
+  providerPluginId?: string;
+  providerState?: PluginStateKind;
+  providerError?: string;
+  configuredEnabled?: boolean;
+}
+
+export interface StartupPluginErrorDetails {
+  pluginId: string;
+  capabilities: string[];
+  state: PluginStateKind;
+  error?: string;
+}
+
 /** 插件展示分组（仅 UI 用）。 */
 export type PluginDisplayGroup = "core" | "platform" | "business" | "import" | "experimental";
 
@@ -78,6 +96,8 @@ export interface PluginMeta {
   defaultEnabled: boolean;
   /** 是否允许用户在系统级 UI 禁用。core 必为 false。 */
   canDisable: boolean;
+  /** 必须显式选择；required 插件必须 defaultEnabled=true、canDisable=false 且提供能力。 */
+  startup: PluginStartupMode;
   /** 该插件提供哪些 capability（供反向依赖查询使用）。 */
   providesCapabilities?: string[];
   /** UI 分组（仅展示），不传则按 kind 兜底。 */
@@ -99,9 +119,9 @@ export interface PluginManifest {
   dependencies?: PluginDependency[];
   /**
    * 硬切换 001：插件元数据（分类、默认启用、是否可禁用、提供 capability）。
-   * 旧插件没有 meta 字段时，runtime bootstrap 视为"业务插件、可禁用"。
+   * meta 与 startup 都是必填，runtime 不进行默认/兼容推断。
    */
-  meta?: PluginMeta;
+  meta: PluginMeta;
   /**
    * 声明插件拥有的 key-scoped storage。
    * 装载时由 runtime 自动调用 keyspace.registerPluginStorage，让 keyspace

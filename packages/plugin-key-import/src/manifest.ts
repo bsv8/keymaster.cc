@@ -134,6 +134,7 @@ export const keyImportPlugin: PluginManifest = {
   description: "统一导入平台：选择 importer、解析、调用 vault。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [KEY_IMPORT_CAPABILITY],

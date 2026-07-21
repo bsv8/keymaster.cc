@@ -272,6 +272,7 @@ export const messagePlatformPlugin: PluginManifest = {
   description: "keymaster.message business page: send / list / view scoped messages.",
   meta: {
     kind: "core",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: ["message.service"],

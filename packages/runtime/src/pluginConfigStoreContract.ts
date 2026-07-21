@@ -2,11 +2,16 @@
 // 插件全局启停配置的契约。
 
 export interface PluginConfigSnapshot {
-  /** pluginId -> 用户显式设置的启用值。 */
+  /** pluginId -> 规范化后的启用值；不暴露持久化格式。 */
   [pluginId: string]: boolean;
 }
 
 export type PluginConfigStoreListener = (snapshot: PluginConfigSnapshot) => void;
+
+export interface PluginConfigDiagnostic {
+  kind: "invalid-json" | "unknown-version" | "migrated-v1" | "write-failed";
+  message: string;
+}
 
 export interface PluginConfigStore {
   read(): PluginConfigSnapshot;
@@ -21,4 +26,11 @@ export interface PluginConfigStore {
     knownPluginIds: string[],
     defaultEnabled: (id: string) => boolean
   ): { enabled: Set<string>; ignored: string[] };
+  /** 按 manifest 语义规范化并持久化配置。 */
+  normalize(requiredPluginIds: string[]): PluginConfigSnapshot;
+  /** 设置 manifest 驱动的 required 集合，storage 事件也据此规范化。 */
+  setRequiredPluginIds(pluginIds: string[]): void;
+  /** 只读诊断：当前持久化 schema 版本。 */
+  schemaVersion(): number;
+  diagnostics(): readonly PluginConfigDiagnostic[];
 }

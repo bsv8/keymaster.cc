@@ -361,6 +361,7 @@ export const p2pkhPlugin: PluginManifest = {
   description: "BSV P2PKH 资产实现：通过 woc.service 读取链上真值；通过 background 调度 recent-sync 与 history-backfill。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [P2PKH_CAPABILITY],

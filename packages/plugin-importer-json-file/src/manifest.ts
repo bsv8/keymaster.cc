@@ -34,6 +34,7 @@ export const jsonFileImporterPlugin: PluginManifest = {
   description: "从钱包 JSON 导出文件 / JSON 文本中提取私钥。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "import"

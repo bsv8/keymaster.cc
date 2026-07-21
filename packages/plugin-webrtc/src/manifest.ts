@@ -197,6 +197,7 @@ export const webrtcPlugin: PluginManifest = {
     "Keymaster WebRTC business plugin: STUN-only audio/video calls over AppMsg signalling, online-gated dialing, single-session state machine.",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [WEBRTC_SERVICE_CAPABILITY],

@@ -325,14 +325,42 @@ end note
 @enduml
 ```
 
-## 5. 阅读方式
+## 5. 启动关键能力契约
+
+> 状态：实现中。浏览器迁移、跨标签、localStorage 禁用和 setup 故障场景仍需在目标
+> 浏览器 profile 中完成发布前验收。
+
+插件 manifest 的 `meta.startup` 显式区分运行期不可关闭与首屏启动前提。只有
+`startup: "required"` 的受信任内建插件才可成为 entrypoint 的启动依赖，并必须同时
+满足 `defaultEnabled: true`、`canDisable: false` 和非空 capability 声明；Vault 当前
+是唯一 required 插件。
+
+启停配置存储为 `{ version: 2, enabled }`。旧裸对象只迁移一次，required 插件的值
+始终由 manifest 优先规范化为 `true`，包括 storage 跨标签同步。runtime host 在
+`register` / `enable` 阶段校验 manifest、setup ownership 和声明 capability；required
+失败抛出结构化启动错误并回滚，optional 失败仍隔离为 `error-disabled`。
+
+required 插件的依赖 provider 必须在完整 manifest 图上验证，而不是依赖当前注册顺序；
+因此 Web bootstrap 会先预扫描全部 manifest，再开始逐个注册。
+
+Web 的边界是：
+
+```text
+manifest 注册 -> host.assertCapabilities(WEB_STARTUP_REQUIRED_CAPABILITIES)
+              -> 成功后 root.render(React)
+              -> 缺失/失败进入 pre-bootstrap.plugins fatal page
+```
+
+React 组件不再负责推断或兜底启动依赖。
+
+## 6. 阅读方式
 
 - 先看“运行时组件关系”，理解系统为什么是插件宿主架构。
 - 再看“核心数据模型”，理解系统以什么对象作为真值。
 - 再看“平台状态机”，理解什么时候系统能安全工作。
 - 最后看“Unlock 主流程”，理解这些对象和状态是如何串起来的。
 
-## 6. 后续可拆分的专题
+## 7. 后续可拆分的专题
 
 这份文档故意没有继续展开以下专题：
 

@@ -6,7 +6,14 @@ const PUBLIC_KEY = "02".padEnd(66, "a");
 const KEY: KeyRef = { publicKeyHex: PUBLIC_KEY, label: "primary", address: "addr-1", capabilities: ["p2pkh"], createdAt: "now" } as KeyRef;
 
 function makeClient(): CoordinatorClientLike & { publish(topic: string, event: unknown): void } {
-  const state = { vaultStatus: "unlocked" as const, activePublicKeyHex: PUBLIC_KEY };
+  const state = {
+    sessionEpoch: "test-epoch",
+    vaultStatus: "unlocked" as const,
+    activePublicKeyHex: PUBLIC_KEY,
+    keyspaceGeneration: 1,
+    taskSnapshots: [],
+    scheduleSettings: { assetHoldingsIntervalMs: 900_000 }
+  };
   const topicHandlers = new Map<string, Set<(value: any) => void>>();
   const vaultOperation = vi.fn(async (operation: string, input?: unknown) => {
     const value = operation === "listKeys" ? [KEY]
@@ -23,7 +30,7 @@ function makeClient(): CoordinatorClientLike & { publish(topic: string, event: u
   });
   return {
     getIsConnected: () => true,
-    getState: () => state,
+    getBootstrapSnapshot: () => state,
     subscribeTopic: (topic: string, handler: (value: any) => void) => {
       const handlers = topicHandlers.get(topic) ?? new Set<(value: any) => void>();
       handlers.add(handler);

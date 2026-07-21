@@ -131,6 +131,7 @@ export const assetsPlugin: PluginManifest = {
   description: "统一持仓平台：聚合 AssetProvider（coin）与 TokenProvider（fungible token），提供 /assets 持仓列表与首页 widget。collectible 由 plugin-collectibles 单独承接。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "platform"

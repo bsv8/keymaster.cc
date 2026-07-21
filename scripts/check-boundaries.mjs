@@ -145,6 +145,25 @@ for (const file of walk(shellDir)) {
   }
 }
 
+/** 硬切换 002：启动关键能力属于 entrypoint 契约，不允许 Shell 做局部降级。 */
+for (const file of walk(shellDir)) {
+  const text = readFileSync(file, "utf8");
+  if (/useHasCapability\s*\(\s*["']vault\.service["']\s*\)/.test(text)) {
+    recordViolation(file, 'Shell must not downgrade startup capability "vault.service"');
+  }
+}
+
+/** 硬切换 002：manifest setup 不得绕过 runtime 直接读取启停配置存储。 */
+for (const file of pluginNames.flatMap((plugin) => {
+  const manifest = join(packagesDir, plugin, "src", "manifest.ts");
+  return statSync(manifest).isFile() ? [manifest] : [];
+})) {
+  const text = readFileSync(file, "utf8");
+  if (/keymaster\.plugins\.runtime|pluginConfigStore|PluginConfigStore/.test(text)) {
+    recordViolation(file, "manifest setup must not access plugin config storage directly");
+  }
+}
+
 /**
  * plugin-poker 硬边界（硬切换 001 修订版的"可失败"规则）。
  *

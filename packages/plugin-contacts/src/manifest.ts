@@ -148,6 +148,7 @@ export const contactsPlugin: PluginManifest = {
   description: "联系人管理（按 key namespace 隔离，身份字段为 publicKeyHex）。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR],

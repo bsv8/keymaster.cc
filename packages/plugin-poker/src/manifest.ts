@@ -254,6 +254,7 @@ export const pokerPlugin: PluginManifest = {
   description: "Browser-native peer poker over bsv-poker protocol, served by an external poker-proxy.",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: false,
     canDisable: true,
     providesCapabilities: [POKER_SERVICE_CAPABILITY],

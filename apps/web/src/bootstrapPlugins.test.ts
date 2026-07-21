@@ -6,16 +6,21 @@
 //   2. 普通插件描述保持通用文案；
 //   3. 正常注册不会被误判成超时。
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginManifest } from "@keymaster/contracts";
-import type { PluginHost } from "@keymaster/runtime";
+import { createPluginHost, StartupCapabilityError, StartupPluginError, type PluginHost } from "@keymaster/runtime";
 import {
   describeBootstrapStep,
   registerPluginWithTimeout
 } from "./bootstrapPlugins.js";
+import { assertWebStartupContract, WEB_STARTUP_REQUIRED_CAPABILITIES } from "./bootstrapPlugins.js";
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+beforeEach(() => {
+  localStorage.clear();
 });
 
 function makePlugin(id: string): PluginManifest {
@@ -62,5 +67,74 @@ describe("bootstrapPlugins hang detection", () => {
     const promise = registerPluginWithTimeout(host, makePlugin("settings"), 1_500);
     await vi.advanceTimersByTimeAsync(200);
     await expect(promise).resolves.toBeUndefined();
+  });
+});
+
+describe("web startup capability contract", () => {
+  function vaultFixture(setup: PluginManifest["setup"] = (ctx) => {
+    ctx.provide("vault.service", {});
+    ctx.provide("keyspace.service", {});
+  }): PluginManifest {
+    return {
+      id: "vault",
+      name: "Vault",
+      meta: {
+        kind: "core",
+        startup: "required",
+        defaultEnabled: true,
+        canDisable: false,
+        providesCapabilities: ["vault.service", "keyspace.service"]
+      },
+      setup
+    };
+  }
+
+  it.each([
+    { version: 1, value: { vault: false } },
+    { version: 2, value: { version: 2, enabled: { vault: false } } }
+  ])("keeps Vault enabled with legacy/configured false", async ({ value }) => {
+    localStorage.setItem("keymaster.plugins.runtime", JSON.stringify(value));
+    const host = createPluginHost();
+    await host.register(vaultFixture());
+    assertWebStartupContract(host);
+    expect(host.capabilities.has("vault.service")).toBe(true);
+    expect(host.configStore.read().vault).toBe(true);
+    expect(JSON.parse(localStorage.getItem("keymaster.plugins.runtime")!).version).toBe(2);
+  });
+
+  it("rejects required setup failures before startup preflight", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await expect(host.register(vaultFixture(() => { throw new Error("sensitive setup detail"); })))
+      .rejects.toBeInstanceOf(StartupPluginError);
+    expect(() => assertWebStartupContract(host)).toThrow(StartupCapabilityError);
+  });
+
+  it("reports missing provider/capability and does not enter React", () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    expect(() => assertWebStartupContract(host)).toThrow(/vault\.service/);
+    try {
+      assertWebStartupContract(host);
+    } catch (error) {
+      const details = (error as StartupCapabilityError).details;
+      expect(details[0]).toMatchObject({
+        capability: "vault.service",
+        providerPluginId: undefined,
+        providerState: undefined
+      });
+    }
+    expect(WEB_STARTUP_REQUIRED_CAPABILITIES).toEqual(["vault.service", "keyspace.service"]);
+  });
+
+  it("keeps optional failures isolated while required preflight succeeds", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register({
+      id: "optional",
+      name: "Optional",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      setup() { throw new Error("optional failure"); }
+    });
+    await host.register(vaultFixture());
+    assertWebStartupContract(host);
+    expect(host.state("optional").kind).toBe("error-disabled");
   });
 });

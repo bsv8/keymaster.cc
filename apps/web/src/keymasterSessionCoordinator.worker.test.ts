@@ -88,7 +88,8 @@ describe("Session Coordinator worker", () => {
     await flush();
     a.close();
     expect(__testGetSnapshot().vaultStatus).toBe("unlocked");
-    b.send({ kind: "lock", clientId: "b", requestId: "lock", expectedSessionEpoch: __testGetSnapshot().sessionEpoch });
+    // 锁定是收敛型安全操作：旧页面也必须能锁定新 epoch 的全局会话。
+    b.send({ kind: "lock", clientId: "b", requestId: "lock", expectedSessionEpoch: "stale-page-epoch" });
     await flush();
     expect(__testGetSnapshot().vaultStatus).toBe("locked");
     expect(b.messages.some((message) => (message as { type?: string; status?: string }).type === "vault.lifecycle.changed" && (message as { status?: string }).status === "locked")).toBe(true);

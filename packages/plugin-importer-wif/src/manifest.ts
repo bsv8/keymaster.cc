@@ -32,6 +32,7 @@ export const wifImporterPlugin: PluginManifest = {
   description: "支持 WIF 文本私钥导入。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "import"

@@ -12,7 +12,12 @@
 //     **不**再监听 keyspace / vault owner 变化去重建消息 client。
 
 import { describe, expect, it, beforeEach } from "vitest";
-import { createPluginHost, type PluginHost } from "./createPluginHost.js";
+import {
+  createPluginHost,
+  StartupCapabilityError,
+  StartupPluginError,
+  type PluginHost
+} from "./createPluginHost.js";
 import type { PluginContext, PluginManifest } from "@keymaster/contracts";
 import type { RouteRegistry } from "./registries/routeRegistry.js";
 import type { MenuRegistry } from "./registries/menuRegistry.js";
@@ -46,7 +51,7 @@ function makeA(): PluginManifest {
     id: "a",
     name: "A",
     description: "plugin A",
-    meta: { kind: "platform", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_A] },
+    meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_A] },
     setup(ctx: PluginContext) {
       const r = ctx.get<RouteRegistry>("route.registry");
       r.register({
@@ -72,7 +77,7 @@ function makeB(dependsOn: string[] = [CAP_A]): PluginManifest {
     id: "b",
     name: "B",
     description: "plugin B",
-    meta: { kind: "business", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_B] },
+    meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_B] },
     dependencies: dependsOn.map((c) => ({ capability: c })),
     setup(ctx: PluginContext) {
       const r = ctx.get<RouteRegistry>("route.registry");
@@ -100,7 +105,7 @@ function makeC(dependsOn: string[] = []): PluginManifest {
     id: "c",
     name: "C",
     description: "plugin C - core",
-    meta: { kind: "core", defaultEnabled: true, canDisable: false, providesCapabilities: [CAP_C] },
+    meta: { kind: "core", startup: "required", defaultEnabled: true, canDisable: false, providesCapabilities: [CAP_C] },
     dependencies: dependsOn.map((c) => ({ capability: c })),
     setup(ctx: PluginContext) {
       const r = ctx.get<RouteRegistry>("route.registry");
@@ -130,7 +135,7 @@ describe("createPluginHost - runtime resource binding", () => {
       id: "late-keyspace",
       name: "Late keyspace",
       description: "test",
-      meta: { kind: "platform", defaultEnabled: true, canDisable: true },
+      meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx) {
         ctx.provide("keyspace.service", keyspace);
       }
@@ -164,11 +169,35 @@ describe("createPluginHost - lifecycle", () => {
     const a = makeA();
     const off: PluginManifest = {
       ...makeB([CAP_A]),
-      meta: { kind: "business", defaultEnabled: false, canDisable: true, providesCapabilities: [CAP_B] }
+      meta: { kind: "business", startup: "optional", defaultEnabled: false, canDisable: true, providesCapabilities: [CAP_B] }
     };
     await host.registerAll([a, off]);
     expect(host.installed()).toEqual(expect.arrayContaining(["a"]));
     expect(host.installed()).not.toContain("b");
+  });
+
+  it("always enables plugins marked canDisable=false despite stale persisted config", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    // This models a browser that retained a setting written before the plugin
+    // became mandatory.
+    host.configStore.setEnabled("c", false);
+
+    await host.register(makeC());
+
+    expect(host.state("c").kind).toBe("enabled");
+    expect(host.capabilities.has(CAP_C)).toBe(true);
+    expect(host.configStore.read().c).toBe(true);
+  });
+
+  it("does not let config updates disable plugins marked canDisable=false", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(makeC());
+
+    host.configStore.setEnabled("c", false);
+
+    expect(host.state("c").kind).toBe("enabled");
+    expect(host.capabilities.has(CAP_C)).toBe(true);
+    expect(host.configStore.read().c).toBe(true);
   });
 
   it("disable removes owner resources and revokes capabilities", async () => {
@@ -241,7 +270,7 @@ describe("createPluginHost - lifecycle", () => {
     const plugin: PluginManifest = {
       id: "td",
       name: "TD",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup() {
         return teardown;
       }
@@ -258,7 +287,7 @@ describe("createPluginHost - lifecycle", () => {
     const plugin: PluginManifest = {
       id: "bad",
       name: "Bad",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
         const r = ctx.get<RouteRegistry>("route.registry");
         r.register({ id: "bad.route", path: "/bad", label: "Bad", component: () => null });
@@ -289,6 +318,104 @@ describe("createPluginHost - lifecycle", () => {
   });
 });
 
+describe("createPluginHost - startup contract", () => {
+  function required(overrides: Partial<PluginManifest> = {}): PluginManifest {
+    return {
+      id: "required",
+      name: "Required",
+      meta: {
+        kind: "core",
+        startup: "required",
+        defaultEnabled: true,
+        canDisable: false,
+        providesCapabilities: ["required.service"]
+      },
+      setup(ctx) {
+        ctx.provide("required.service", { ok: true });
+      },
+      ...overrides
+    };
+  }
+
+  it.each([
+    ["defaultEnabled", { defaultEnabled: false }],
+    ["canDisable", { canDisable: true }],
+    ["providesCapabilities", { providesCapabilities: [] }]
+  ])("rejects required manifests with invalid %s", async (_, meta) => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await expect(host.register(required({ meta: { ...required().meta, ...meta } }))).rejects.toThrow(/Required plugin/);
+  });
+
+  it("validates required dependencies against the complete manifest set", () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    const optionalProvider = {
+      id: "optional-provider",
+      name: "Optional provider",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: ["optional.service"] },
+      setup() {}
+    } satisfies PluginManifest;
+    expect(() => host.validateManifestSet([
+      required({ dependencies: [{ capability: "optional.service" }] }),
+      optionalProvider
+    ])).toThrow(/optional capability provider/);
+  });
+
+  it("wraps required setup failures and rolls back owned resources", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    const plugin = required({
+      setup(ctx) {
+        ctx.get<RouteRegistry>("route.registry").register({
+          id: "required.route",
+          path: "/required",
+          label: "required",
+          component: () => null
+        });
+        throw new Error("secret underlying failure");
+      }
+    });
+    await expect(host.register(plugin)).rejects.toBeInstanceOf(StartupPluginError);
+    expect(host.routes.byId("required.route")).toBeUndefined();
+    expect(host.capabilities.has("required.service")).toBe(false);
+    expect(host.state("required").kind).toBe("error-disabled");
+  });
+
+  it("rejects a required provider that fails to provide its declaration", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await expect(host.register(required({ setup() {} }))).rejects.toBeInstanceOf(StartupPluginError);
+    expect(host.capabilities.has("required.service")).toBe(false);
+  });
+
+  it("keeps required capability and config on disable, unregister, and false config", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(required());
+    expect(await host.disable("required")).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });
+    await expect(host.unregister("required")).rejects.toThrow(/startup-required/);
+    host.configStore.setEnabled("required", false);
+    expect(host.capabilities.has("required.service")).toBe(true);
+    expect(host.configStore.read().required).toBe(true);
+  });
+
+  it("asserts provider, state, error, and configured value without exposing stack", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    const provider = required({ setup() { throw new Error("private stack detail"); } });
+    await expect(host.register(provider)).rejects.toBeInstanceOf(StartupPluginError);
+    try {
+      host.assertCapabilities(["required.service"], { phase: "test" });
+      throw new Error("expected assertion to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(StartupCapabilityError);
+      const details = (error as StartupCapabilityError).details[0]!;
+      expect(details).toMatchObject({
+        capability: "required.service",
+        providerPluginId: "required",
+        providerState: "error-disabled"
+      });
+      expect(details.configuredEnabled).toBe(true);
+      expect(details.providerError).toContain("private stack detail");
+    }
+  });
+});
+
 /* ============== 2026-07-04 001：manifest.appMessageEndpoint 仅做校验 ============== */
 
 describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () => {
@@ -298,7 +425,7 @@ describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () 
       id: "bad-shape",
       name: "Bad",
       description: "bad shape",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       appMessageEndpoint: { endpointId: "Keymaster.Message" }, // 大写、不符合 shape
       setup() {
         // 不会跑到这里（enable 阶段就 fail-closed）
@@ -316,7 +443,7 @@ describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () 
       id: "p1",
       name: "p1",
       description: "declares appMessageEndpoint",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       appMessageEndpoint: { endpointId: "keymaster.message" },
       setup() {
         // 不主动 get scoped client。
@@ -332,7 +459,7 @@ describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () 
     const p1: PluginManifest = {
       id: "p1",
       name: "p1",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       appMessageEndpoint: { endpointId: "keymaster.message" },
       setup() {
         // no-op
@@ -350,7 +477,7 @@ describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () 
     const p2: PluginManifest = {
       id: "p2",
       name: "p2",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       appMessageEndpoint: { endpointId: "keymaster.message" },
       setup() {
         // no-op
@@ -366,7 +493,7 @@ describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () 
     const p1: PluginManifest = {
       id: "p1",
       name: "p1",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       appMessageEndpoint: { endpointId: "keymaster.dup" },
       setup() {
         // no-op
@@ -375,7 +502,7 @@ describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () 
     const p2: PluginManifest = {
       id: "p2",
       name: "p2",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       appMessageEndpoint: { endpointId: "keymaster.dup" },
       setup() {
         // no-op

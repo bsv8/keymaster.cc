@@ -12,13 +12,15 @@ import type {
   KeyspaceService,
   LanguageMode,
   SupportedLanguage,
-  SupportedLanguageDescriptor
+  SupportedLanguageDescriptor,
+  WebrtcHistoryItem,
+  WebrtcMessageService,
+  WebrtcSessionSnapshot
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { PluginHostProvider } from "@keymaster/runtime";
 import type { PluginHost } from "@keymaster/runtime";
 import type { MessageService } from "./messageService.js";
-import type { WebrtcService, WebrtcHistoryItem } from "@keymaster/plugin-webrtc";
 
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
@@ -87,13 +89,13 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (
 }
 
 function makeFakeWebrtcService(opts?: {
-  snapshot?: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot;
-  startCallSnapshot?: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot | ((input: { targetPublicKeyHex: string; mode: "audio" | "video" }) => import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot);
+  snapshot?: WebrtcSessionSnapshot;
+  startCallSnapshot?: WebrtcSessionSnapshot | ((input: { targetPublicKeyHex: string; mode: "audio" | "video" }) => WebrtcSessionSnapshot);
   history?: WebrtcHistoryItem[];
   sendImage?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
   sendFile?: (input: { targetPublicKeyHex: string; file: Blob | File }) => Promise<void>;
   attachToVideo?: (direction: "local" | "remote", videoEl: HTMLVideoElement) => void;
-}): WebrtcService {
+}): WebrtcMessageService {
   const history = opts?.history ?? [];
   let currentSnapshot = opts?.snapshot ?? {
     phase: "idle",
@@ -106,7 +108,7 @@ function makeFakeWebrtcService(opts?: {
     serviceReady: true,
     lastError: null
   };
-  const subscribers = new Set<(snapshot: import("@keymaster/plugin-webrtc").WebrtcSessionSnapshot) => void>();
+  const subscribers = new Set<(snapshot: WebrtcSessionSnapshot) => void>();
   return {
     snapshot: () => currentSnapshot,
     subscribe: (handler) => {
@@ -114,7 +116,6 @@ function makeFakeWebrtcService(opts?: {
       handler(currentSnapshot);
       return () => subscribers.delete(handler);
     },
-    isReady: () => true,
     checkPeerOnline: async () => "online",
     listHistoryForPeer: async () => history,
     getTransferBlob: async () => null,
@@ -124,9 +125,7 @@ function makeFakeWebrtcService(opts?: {
         typeof opts.startCallSnapshot === "function"
           ? opts.startCallSnapshot(input)
           : opts.startCallSnapshot;
-      for (const handler of subscribers) {
-        handler(currentSnapshot);
-      }
+      for (const handler of subscribers) handler(currentSnapshot);
       return undefined;
     },
     sendImage: opts?.sendImage ?? (async () => undefined),
@@ -134,19 +133,14 @@ function makeFakeWebrtcService(opts?: {
     acceptIncoming: async () => undefined,
     rejectIncoming: async () => undefined,
     hangup: async () => undefined,
-    consumeRemoteNotice: () => undefined,
     attachToVideo: (direction, videoEl) => {
       opts?.attachToVideo?.(direction, videoEl);
       return () => undefined;
     },
-    runStunDiagnostics: async () => [],
-    getStunServers: () => [],
-    applyStunServers: async () => undefined,
-    dispose: () => undefined
   };
 }
 
-function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcService | null): PluginHost {
+function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMessageService | null): PluginHost {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY]: makeFakeI18n(),
     [KEYSPACE_SERVICE_CAPABILITY]: makeFakeKeyspace()

@@ -42,6 +42,7 @@ export const hubcastPlatformPlugin: PluginManifest = {
     "HubCast 广播服务 provider 适配层：WSS 连接 + bind + publish / subscription.set / subscription.list + broadcast.received 推送，标准化输出 BroadcastMessage。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false
   },

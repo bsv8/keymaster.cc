@@ -12,15 +12,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCapability, useCurrentPath, useI18n, usePluginHost, useResource, useResourceSelector, router } from "@keymaster/runtime";
 import { EmptyState, TextArea } from "@keymaster/ui";
-import type { KeyspaceService } from "@keymaster/contracts";
+import { WEBRTC_SERVICE_CAPABILITY, type KeyspaceService, type WebrtcHistoryItem, type WebrtcMessageService, type WebrtcSessionSnapshot } from "@keymaster/contracts";
 import type { MessageService } from "./messageService.js";
 import type { MessageDetailData } from "./manifest.js";
 import { buildMessageTimeline, type MessageTimelineItem } from "./messageTimeline.js";
 import { shortPublicKeyHex } from "./messageConversation.js";
-import type { WebrtcHistoryItem, WebrtcService, WebrtcSessionSnapshot } from "@keymaster/plugin-webrtc";
 
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
-const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
 const MESSAGE_READ_WINDOW = 10_000;
 const DEFAULT_VISIBLE_MESSAGE_COUNT = 20;
 const MESSAGE_ERROR_KEYS: Record<string, string> = {
@@ -55,7 +53,7 @@ export function MessageDetailPage(): JSX.Element {
   const normalizedPeerPublicKeyHex = normalizePublicKeyHexForMatch(peerPublicKeyHex);
   const messageService = useCapabilityOrNull<MessageService>(MESSAGE_SERVICE_CAPABILITY);
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
-  const webrtc = useCapabilityOrNull<WebrtcService>(WEBRTC_SERVICE_CAPABILITY);
+  const webrtc = useCapabilityOrNull<WebrtcMessageService>(WEBRTC_SERVICE_CAPABILITY);
   const host = usePluginHost();
   const store = host.resourceStore;
   const ownerPublicKeyHex = keyspace.active().activePublicKeyHex ?? null;

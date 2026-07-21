@@ -474,7 +474,7 @@ describe("createLogService - in host", () => {
     const plugin: PluginManifest = {
       id: "probe",
       name: "Probe",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
         captured = ctx.get<LogServiceHandle>(LOG_SERVICE_CAPABILITY);
         // 写一条 info 验证 logger 注入。
@@ -505,7 +505,7 @@ describe("createLogService - in host", () => {
     const plugin: PluginManifest = {
       id: "alpha",
       name: "Alpha",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup() {
         // no-op
       }
@@ -526,7 +526,7 @@ describe("createLogService - in host", () => {
     const plugin: PluginManifest = {
       id: "alpha",
       name: "Alpha",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup() {
         return () => {
           throw new Error("teardown boom");
@@ -547,7 +547,7 @@ describe("createLogService - in host", () => {
     const plugin: PluginManifest = {
       id: "alpha",
       name: "Alpha",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup() {
         return () => undefined;
       }
@@ -567,7 +567,7 @@ describe("createLogService - in host", () => {
     const plugin: PluginManifest = {
       id: "bad",
       name: "Bad",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup() {
         throw new Error("setup boom");
       }

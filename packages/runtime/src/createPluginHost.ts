@@ -33,6 +33,8 @@ import type {
   PluginContext,
   PluginGraph,
   PluginManifest,
+  StartupCapabilityErrorDetails,
+  StartupPluginErrorDetails,
   PluginReverseDep,
   PluginState,
   PluginStateKind,
@@ -123,6 +125,7 @@ export interface PluginHost {
   // ===== 旧 register 流程 =====
   register(plugin: PluginManifest): Promise<void>;
   registerAll(plugins: PluginManifest[]): Promise<void>;
+  validateManifestSet(plugins: readonly PluginManifest[]): void;
   /** 注册一个 builtin capability（语义上等同于 plugin provide）。 */
   provide<T>(key: string, value: T): void;
 
@@ -130,6 +133,25 @@ export interface PluginHost {
   enable(pluginId: string): Promise<void>;
   disable(pluginId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   unregister(pluginId: string): Promise<void>;
+  assertCapabilities(capabilities: readonly string[], options?: { phase?: string }): void;
+}
+
+export class StartupCapabilityError extends Error {
+  readonly details: StartupCapabilityErrorDetails[];
+  constructor(details: StartupCapabilityErrorDetails[], phase = "startup") {
+    super(`Startup prerequisite unavailable: ${details.map((d) => d.capability).join(", ")} (${phase})`);
+    this.name = "StartupCapabilityError";
+    this.details = details;
+  }
+}
+
+export class StartupPluginError extends Error {
+  readonly details: StartupPluginErrorDetails;
+  constructor(details: StartupPluginErrorDetails) {
+    super(`Startup plugin failed: ${details.pluginId}`);
+    this.name = "StartupPluginError";
+    this.details = details;
+  }
 }
 
 export interface CreatePluginHostOptions {
@@ -147,7 +169,7 @@ interface PluginRecord {
 }
 
 function defaultStateFor(manifest: PluginManifest): PluginStateKind {
-  return manifest.meta?.defaultEnabled ? "registered" : "registered";
+  return "registered";
 }
 
 function diffIds(before: readonly string[], after: readonly string[]): string[] {
@@ -414,6 +436,25 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
+  function isStartupRequired(manifest: PluginManifest): boolean {
+    return manifest.meta.startup === "required";
+  }
+
+  function validateManifest(plugin: PluginManifest, manifestSet?: readonly PluginManifest[]): void {
+    const meta = plugin.meta;
+    if (meta.startup === "required") {
+      if (!meta.defaultEnabled) throw new Error(`Required plugin "${plugin.id}" must have defaultEnabled=true`);
+      if (meta.canDisable) throw new Error(`Required plugin "${plugin.id}" must have canDisable=false`);
+      if (!meta.providesCapabilities?.length) throw new Error(`Required plugin "${plugin.id}" must provide capabilities`);
+      for (const dep of plugin.dependencies ?? []) {
+        const provider = (manifestSet ?? [...knownManifests.values()]).find((m) => m.meta.providesCapabilities?.includes(dep.capability));
+        if (provider?.meta.startup === "optional") {
+          throw new Error(`Required plugin "${plugin.id}" cannot depend on optional capability provider "${provider.id}"`);
+        }
+      }
+    }
+  }
+
   async function runSetup(record: PluginRecord): Promise<void> {
     const before = snapshotOwnership();
     let teardownFn: (() => void | Promise<void>) | undefined;
@@ -581,6 +622,23 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     configStore,
     resourceStore,
 
+    assertCapabilities(requiredCapabilities, options = {}) {
+      const missing: StartupCapabilityErrorDetails[] = [];
+      for (const capability of requiredCapabilities) {
+        if (capabilities.has(capability)) continue;
+        const provider = [...knownManifests.values()].find((m) => m.meta.providesCapabilities?.includes(capability));
+        const state = provider ? recordState(provider.id) : undefined;
+        missing.push({
+          capability,
+          providerPluginId: provider?.id,
+          providerState: state?.kind,
+          providerError: state?.error,
+          configuredEnabled: provider ? configStore.read()[provider.id] : undefined
+        });
+      }
+      if (missing.length) throw new StartupCapabilityError(missing, options.phase);
+    },
+
     installed() {
       return [...enabledSet];
     },
@@ -616,7 +674,17 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       // scoped client 刷新——runtime 已不持有消息业务生命周期。
     },
 
+    validateManifestSet(plugins) {
+      const ids = new Set<string>();
+      for (const plugin of plugins) {
+        if (ids.has(plugin.id)) throw new Error(`Duplicate plugin id "${plugin.id}"`);
+        ids.add(plugin.id);
+      }
+      for (const plugin of plugins) validateManifest(plugin, plugins);
+    },
+
     async register(plugin) {
+      validateManifest(plugin);
       if (knownManifests.has(plugin.id)) {
         knownManifests.set(plugin.id, plugin);
         return;
@@ -627,13 +695,16 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         state: defaultStateFor(plugin),
         ownership: emptyOwnership()
       });
+      const required = isStartupRequired(plugin);
+      configStore.setRequiredPluginIds(
+        [...knownManifests.values()].filter((m) => isStartupRequired(m)).map((m) => m.id)
+      );
       const snapshot = configStore.read();
-      let shouldEnable: boolean;
-      if (plugin.id in snapshot) {
-        shouldEnable = Boolean(snapshot[plugin.id]);
-      } else {
-        shouldEnable = plugin.meta?.defaultEnabled ?? false;
-      }
+      const shouldEnable = required
+        ? true
+        : plugin.id in snapshot
+          ? Boolean(snapshot[plugin.id])
+          : plugin.meta.defaultEnabled;
       if (shouldEnable) {
         try {
           await host.enable(plugin.id);
@@ -642,15 +713,27 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           if (r) {
             const msg = err instanceof Error ? err.message : String(err);
             r.error = msg;
-            if (r.state !== "blocked") {
+            if (r.state !== "blocked" && !required) {
               r.state = "error-disabled";
             }
+          }
+          if (required) {
+            throw new StartupPluginError({
+              pluginId: plugin.id,
+              capabilities: plugin.meta.providesCapabilities ?? [],
+              state: r?.state ?? "error-disabled",
+              error: r?.error
+            });
           }
         }
       }
     },
 
     async registerAll(plugins) {
+      host.validateManifestSet(plugins);
+      configStore.setRequiredPluginIds(
+        plugins.filter((plugin) => isStartupRequired(plugin)).map((plugin) => plugin.id)
+      );
       for (const plugin of plugins) {
         await host.register(plugin);
       }
@@ -695,6 +778,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       registerCapabilitiesFor(record);
       try {
         await runSetup(record);
+        const declared = record.manifest.meta.providesCapabilities ?? [];
+        const owned = new Set(record.ownership.capabilities);
+        const missing = declared.filter((cap) => !owned.has(cap));
+        if (missing.length) throw new Error(`Plugin "${pluginId}" did not provide declared capabilities: ${missing.join(", ")}`);
         if (record.manifest.keyScopedStorages && record.manifest.keyScopedStorages.length > 0) {
           if (capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) {
             const keyspace = capabilities.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
@@ -730,7 +817,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         }
         record.state = "error-disabled";
         record.error = err instanceof Error ? err.message : String(err);
-        configStore.setEnabled(pluginId, false);
+        if (!isStartupRequired(record.manifest)) configStore.setEnabled(pluginId, false);
         bumpVersion();
         throw err;
       }
@@ -741,12 +828,15 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       if (!record) {
         return { ok: false, reason: `Plugin "${pluginId}" is not registered` };
       }
+      if (isStartupRequired(record.manifest)) {
+        return { ok: false, reason: "Plugin is marked canDisable=false" };
+      }
+      if (record.manifest.meta.canDisable === false) {
+        return { ok: false, reason: "Plugin is marked canDisable=false" };
+      }
       if (record.state !== "enabled") {
         configStore.setEnabled(pluginId, false);
         return { ok: true };
-      }
-      if (record.manifest.meta?.canDisable === false) {
-        return { ok: false, reason: "Plugin is marked canDisable=false" };
       }
       const rev = host.reverseDeps(pluginId);
       if (rev.length > 0) {
@@ -800,6 +890,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     async unregister(pluginId) {
       const record = records.get(pluginId);
       if (!record) return;
+      if (isStartupRequired(record.manifest)) {
+        throw new Error(`Cannot unregister startup-required plugin "${pluginId}"`);
+      }
       if (record.state === "enabled") {
         const r = await host.disable(pluginId);
         if (!r.ok) {
@@ -821,8 +914,18 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   // 订阅 config store 变化（多标签页同步）。
   configStore.subscribe((snap) => {
     for (const [id, record] of records) {
-      const want = snap[id] ?? record.manifest.meta?.defaultEnabled ?? false;
       const isEnabled = record.state === "enabled";
+      // Ignore stale or cross-tab attempts to disable immutable core plugins.
+      // Rewriting the value also repairs the persisted configuration for the
+      // next page load. Do not retry a plugin already in an error state here:
+      // its next normal bootstrap remains the recovery boundary.
+      if (isStartupRequired(record.manifest) && !snap[id]) {
+        configStore.setEnabled(id, true);
+        continue;
+      }
+      const want = isStartupRequired(record.manifest)
+        ? true
+        : snap[id] ?? record.manifest.meta.defaultEnabled;
       if (want && !isEnabled) {
         void host.enable(id).catch(() => {
           /* ignore: 留给 UI 显示错误 */

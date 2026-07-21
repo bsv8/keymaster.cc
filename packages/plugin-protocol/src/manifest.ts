@@ -404,6 +404,7 @@ export const protocolPlugin: PluginManifest = {
   description: "对外协议 V1：identity.get / intent.sign / cipher.encrypt / cipher.decrypt + p2pkh.transfer + feepool.prepare / feepool.commit。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: [PROTOCOL_SERVICE_CAPABILITY],

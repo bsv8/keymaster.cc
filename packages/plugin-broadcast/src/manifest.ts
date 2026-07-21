@@ -180,6 +180,7 @@ export const broadcastPlatformPlugin: PluginManifest = {
   i18n: broadcastResources,
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: [

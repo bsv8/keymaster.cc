@@ -53,6 +53,7 @@ export const collectibleTransferPlugin: PluginManifest = {
   description: "collectible transfer 平台壳：路由 /collectibles/transfer，按 collectible-transfer.registry 选择 handler 并挂载 widget；不做 outpoint / raw tx 解释。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "platform"

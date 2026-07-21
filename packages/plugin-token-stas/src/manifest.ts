@@ -48,6 +48,7 @@ export const stasTokenPlugin: PluginManifest = {
   description: "STAS fungible token provider：通过 snapshot DB 读取当前 active key 主网地址的 STAS 持仓，注入 token.registry。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business"

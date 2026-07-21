@@ -80,6 +80,7 @@ export const transferPlugin: PluginManifest = {
   description: "转账平台：聚合 Transfer Offer 并挂载 provider Widget。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "platform"

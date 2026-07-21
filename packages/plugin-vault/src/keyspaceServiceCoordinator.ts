@@ -1,11 +1,9 @@
-import type { KeyIdentity, KeyScopedStorageHandle, KeyScopedStorageOpenInput, KeyspaceService, CoordinatorCommandResult, CoordinatorValueResult, KeyspaceActiveKeyEvent } from "@keymaster/contracts";
+import type { KeyIdentity, KeyScopedStorageHandle, KeyScopedStorageOpenInput, KeyspaceService, CoordinatorCommandResult, CoordinatorValueResult, KeyspaceActiveKeyEvent, SessionCoordinatorClient } from "@keymaster/contracts";
 
-interface CoordinatorClientLike {
-  getState(): { vaultStatus: string; activePublicKeyHex?: string; keyspaceGeneration: number };
-  subscribeTopic<T extends { topic: string }>(topic: T["topic"], handler: (event: T) => void): () => void;
-  backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
-  vaultOperation(operation: string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
-}
+type CoordinatorClientLike = Pick<
+  SessionCoordinatorClient,
+  "getBootstrapSnapshot" | "subscribeTopic" | "backgroundCancelByKey" | "vaultOperation"
+>;
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): T {
   if (result.status === "ok") return result.value as T;
@@ -18,11 +16,11 @@ function unwrap<T>(result: CoordinatorValueResult<unknown>, operation: string): 
 }
 
 export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike): KeyspaceService {
-  let state = client.getState();
+  let state = client.getBootstrapSnapshot();
   const handlers = new Set<(value: { activePublicKeyHex?: string; generation?: number }) => void>();
   const storages: Array<{ pluginId: string; storageId: string }> = [];
   const openHandles = new Map<string, Set<IDBDatabase>>();
-  client.subscribeTopic<KeyspaceActiveKeyEvent>("keyspace.active-key", (event) => { const previous = state.activePublicKeyHex; const previousGeneration = state.keyspaceGeneration; state = { ...state, activePublicKeyHex: event.publicKeyHex ?? undefined, keyspaceGeneration: event.generation, vaultStatus: state.vaultStatus }; if (previous !== state.activePublicKeyHex || previousGeneration !== event.generation) for (const h of handlers) h({ activePublicKeyHex: state.activePublicKeyHex, generation: event.generation }); });
+  client.subscribeTopic("keyspace.active-key", (event: KeyspaceActiveKeyEvent) => { const previous = state.activePublicKeyHex; const previousGeneration = state.keyspaceGeneration; state = { ...state, activePublicKeyHex: event.publicKeyHex ?? undefined, keyspaceGeneration: event.generation, vaultStatus: state.vaultStatus }; if (previous !== state.activePublicKeyHex || previousGeneration !== event.generation) for (const h of handlers) h({ activePublicKeyHex: state.activePublicKeyHex, generation: event.generation }); });
   const requireReady = () => { if (state.vaultStatus !== "unlocked" || !state.activePublicKeyHex) throw new Error("Active key is unavailable"); return state.activePublicKeyHex; };
   return {
     async listKeys() { return unwrap<KeyIdentity[]>(await client.vaultOperation("listKeys"), "listKeys"); },

@@ -88,6 +88,7 @@ export const wocPlugin: PluginManifest = {
   description: "WhatsOnChain API 代理：唯一 WOC 入口、全局限流、优先级队列、429 backoff、多标签页协调。",
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [

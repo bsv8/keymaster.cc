@@ -5,8 +5,7 @@
 //   - WebRTC 历史单独来自 webrtc service；
 //   - UI 只消费统一时间线项，不关心底层真值源。
 
-import type { AppMsgMessage } from "@keymaster/contracts";
-import type { WebrtcHistoryItem } from "@keymaster/plugin-webrtc";
+import type { AppMsgMessage, WebrtcHistoryItem } from "@keymaster/contracts";
 
 export type MessageTimelineItem =
   | {

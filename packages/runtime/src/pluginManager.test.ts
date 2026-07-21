@@ -31,7 +31,7 @@ function makeBadSettings(): PluginManifest {
   return {
     id: "settings",
     name: "Settings",
-    meta: { kind: "core", defaultEnabled: true, canDisable: false },
+    meta: { kind: "core", startup: "optional", defaultEnabled: true, canDisable: false },
     // 注意：故意漏掉 route / settings registry —— 这就是"测试空白"被
     // 制造出来的版本。下面的 `makeGoodSettings` 才是"真值正确"的版本。
     dependencies: [{ capability: "settings.registry" }],
@@ -57,7 +57,7 @@ function makeGoodSettings(): PluginManifest {
   return {
     id: "settings",
     name: "Settings",
-    meta: { kind: "core", defaultEnabled: true, canDisable: false },
+    meta: { kind: "core", startup: "optional", defaultEnabled: true, canDisable: false },
     dependencies: [
       { capability: "settings.registry" },
       { capability: "route.registry" }
@@ -85,7 +85,7 @@ function makeBiz(): PluginManifest {
   return {
     id: "biz",
     name: "Biz",
-    meta: { kind: "business", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_BIZ] },
+    meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [CAP_BIZ] },
     dependencies: [
       { capability: "settings.registry" },
       { capability: "route.registry" }
@@ -187,7 +187,7 @@ describe("plugin teardown 句柄必须被 host 记录", () => {
     const plugin: PluginManifest = {
       id: "td",
       name: "TD",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup() {
         return () => {
           teardownCount += 1;
@@ -208,7 +208,7 @@ describe("plugin teardown 句柄必须被 host 记录", () => {
     const plugin: PluginManifest = {
       id: "meta",
       name: "M",
-      meta: { kind: "business", defaultEnabled: true, canDisable: false, providesCapabilities: ["x"] },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: false, providesCapabilities: ["x"] },
       setup() {
         // no-op
       }
@@ -226,7 +226,7 @@ describe("settings registry 与 owner 回收", () => {
     const plugin: PluginManifest = {
       id: "p",
       name: "P",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
         ctx.get<SettingsRegistry>("settings.registry").register({
           id: "p.settings",
@@ -254,7 +254,7 @@ describe("settings registry 与 owner 回收", () => {
     const plugin: PluginManifest = {
       id: "p",
       name: "P",
-      meta: { kind: "business", defaultEnabled: true, canDisable: true },
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
       setup(ctx: PluginContext) {
         ctx.get<RouteRegistry>("route.registry").register({
           id: "p.route",
@@ -330,7 +330,7 @@ describe("settings registry 与 owner 回收", () => {
       const plugin: PluginManifest = {
         id: "p",
         name: "P",
-        meta: { kind: "business", defaultEnabled: true, canDisable: true },
+        meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
         setup(ctx: PluginContext) {
           ctx.get<SettingsRegistry>("settings.registry").register({
             id: "p.settings",

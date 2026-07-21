@@ -42,6 +42,7 @@ export const oneSatOrdinalsCollectiblePlugin: PluginManifest = {
   description: "1Sat Ordinals collectible provider：通过当前 active key 的 P2PKH 未花费 UTXO 反查 WOC 1Sat endpoint，把命中的 outpoint 注入 collectible.registry。",
   meta: {
     kind: "business",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business"

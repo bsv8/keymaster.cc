@@ -34,6 +34,7 @@ import { App } from "./App.js";
 import { AppCrashBoundary } from "./AppCrashBoundary.js";
 import { bootstrapPlugins } from "./bootstrapPlugins.js";
 import { renderFatalCrashPage } from "./fatalCrashPage.js";
+import { formatStartupErrorSummary } from "./startupErrorSummary.js";
 import { installGlobalFatalHandlers } from "./installGlobalFatalHandlers.js";
 import { normalizeLegacyHashRoute } from "./shell/legacyHashRoute.js";
 import { applyInitialTheme } from "./theme/themeStore.js";
@@ -139,7 +140,7 @@ async function start() {
     );
   } catch (err) {
     // 不再调旧 renderFatalError；统一走 fatal 通道。
-    const message = err instanceof Error ? err.stack ?? err.message : String(err);
+    const message = formatStartupErrorSummary(err);
     reportFatalError({
       phase: "pre-bootstrap.plugins",
       scope: "app-root",

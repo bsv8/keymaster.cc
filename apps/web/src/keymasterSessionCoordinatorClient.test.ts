@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { vaultPlugin, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
+import { createPluginHost } from "@keymaster/runtime";
 import { createCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
 
 class HubPort {
@@ -24,6 +27,29 @@ class Hub {
 }
 
 describe("KeymasterSessionCoordinatorClient", () => {
+  it("directly assembles the real Coordinator client with the Vault plugin", async () => {
+    const hub = new Hub();
+    const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = Constructor;
+    try {
+      // This assignment is intentional: a client API rename/removal must fail
+      // typechecking before Vault's independently compiled facade can drift.
+      const client: SessionCoordinatorClient = createCoordinatorClient({ clientId: "vault-assembly" });
+      await client.connect();
+
+      const host = createPluginHost({ disableConfigPersistence: true });
+      host.provide(SESSION_COORDINATOR_CLIENT_CAPABILITY, client);
+      await host.register(vaultPlugin);
+
+      expect(host.state("vault").kind).toBe("enabled");
+      expect(host.capabilities.has(VAULT_CAPABILITY)).toBe(true);
+      expect(host.capabilities.has("keyspace.service")).toBe(true);
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
   it("fails closed when SharedWorker is unavailable", async () => {
     const original = globalThis.SharedWorker;
     // @ts-expect-error test shim
@@ -61,6 +87,40 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(observed).toContain("unlocked");
       a.disconnect();
       expect(b.getIsConnected()).toBe(true);
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
+  it("adopts a later vault lifecycle epoch so subsequent commands do not use a stale epoch", async () => {
+    const hub = new Hub();
+    const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = Constructor;
+    try {
+      const client = createCoordinatorClient({ clientId: "epoch-transition" });
+      await client.connect();
+
+      hub.broadcast({
+        topic: "vault.lifecycle",
+        type: "vault.lifecycle.changed",
+        vaultLifecycleRevision: 1,
+        sessionEpoch: "unlocked-epoch",
+        status: "unlocked",
+        activePublicKeyHex: "a".repeat(64)
+      });
+      hub.broadcast({
+        topic: "vault.lifecycle",
+        type: "vault.lifecycle.changed",
+        vaultLifecycleRevision: 2,
+        sessionEpoch: "locked-epoch",
+        status: "locked"
+      });
+
+      expect(client.getBootstrapSnapshot()).toMatchObject({
+        sessionEpoch: "locked-epoch",
+        vaultStatus: "locked"
+      });
     } finally {
       globalThis.SharedWorker = original;
     }

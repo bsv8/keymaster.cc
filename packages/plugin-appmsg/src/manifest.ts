@@ -200,6 +200,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
   i18n: appmsgResources,
   meta: {
     kind: "platform",
+    startup: "optional",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: [
