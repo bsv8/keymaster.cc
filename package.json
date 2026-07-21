@@ -12,6 +12,7 @@
     "dev": "npm run dev -w @keymaster/web",
     "build": "npm run build -w @keymaster/web",
     "typecheck": "tsc -b",
+    "keys:balance": "node scripts/check-key-balances.mjs",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
     "test": "pnpm lint:react-boundaries && vitest run"
