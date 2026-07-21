@@ -3,10 +3,7 @@
 
 import type {
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
-  PluginManifest,
-  RouteRegistry
+  PluginManifest
 } from "@keymaster/contracts";
 import { HomePage } from "./HomePage.js";
 
@@ -47,37 +44,22 @@ export const homePlugin: PluginManifest = {
   },
   i18n: homeResources,
   dependencies: [
-    { capability: "home.registry", reason: "需要从注册表读取 widget" },
-    { capability: "route.registry", reason: "注册首页路由" },
-    { capability: "menu.registry", reason: "注册首页菜单入口" }
+    { capability: "home.registry", reason: "需要读取 legacy 首页卡片" },
+    { capability: "business.registry", reason: "需要读取业务首页投影" }
   ],
-  setup(ctx) {
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    routes.register({
-      id: "home.page",
-      path: "/",
-      label: { key: "home.route.label", fallback: "Home" },
-      component: HomePage,
-      inMenu: true,
-      menuGroup: "home",
+  business: {
+    domains: [{
+      id: "home",
+      label: { key: "home.domain.label", fallback: "Overview" },
       order: 0,
-      icon: "Home"
-    });
-
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.home",
-      label: { key: "home.menu.label", fallback: "Home" },
-      routeId: "home.page",
-      group: "home",
-      order: 0,
-      icon: "Home"
-    };
-    menus.register(item);
-
-    // 硬切换 001：home 是 core 插件；teardown 走空实现（route/menu 由 host owner 回收）。
-    return () => {
-      // no-op
-    };
-  }
+      features: [{
+        id: "home.overview",
+        label: { key: "home.menu.label", fallback: "Home" },
+        order: 0,
+        icon: "Home",
+        entry: { path: "/", component: HomePage }
+      }]
+    }]
+  },
+  setup() {}
 };

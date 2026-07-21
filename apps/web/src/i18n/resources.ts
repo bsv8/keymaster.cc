@@ -10,6 +10,8 @@ export const SHELL_RESOURCES: I18nPluginResources = {
   namespace: "shell",
   resources: {
     en: {
+      "shell.businessNavigation": "Business navigation",
+      "shell.legacyNavigation": "Existing entries (migration)",
       "shell.topbar.openMenu": "Open menu",
       "shell.topbar.statusLabel": "Status: ",
       "shell.topbar.language.label": "Switch language",
@@ -126,6 +128,8 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "common.action.next": "Next"
     },
     "zh-CN": {
+      "shell.businessNavigation": "业务导航",
+      "shell.legacyNavigation": "现有入口（迁移中）",
       "shell.topbar.openMenu": "打开菜单",
       "shell.topbar.statusLabel": "状态：",
       "shell.topbar.language.label": "切换语言",

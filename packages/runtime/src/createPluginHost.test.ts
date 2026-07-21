@@ -153,6 +153,46 @@ beforeEach(() => {
 });
 
 describe("createPluginHost - lifecycle", () => {
+  it("registers business declarations independently and rolls them back", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register({
+      id: "business-surface",
+      name: "Business surface",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      business: {
+        domains: [{
+          id: "business-surface.domain",
+          label: { key: "test.business.domain", fallback: "Business" },
+          order: 10,
+          features: [{
+            id: "business-surface.feature",
+            label: { key: "test.business.page", fallback: "Business page" },
+            order: 12,
+            entry: { path: "/business-surface", component: () => null },
+            home: [{
+              id: "business-surface.projection",
+              space: { id: "business-surface.summary", label: { key: "test.business.space", fallback: "Summary" }, order: 10 },
+              order: 3,
+              component: () => null
+            }]
+          }]
+        }]
+      },
+      setup() {}
+    });
+
+    expect(host.routes.byId("business-surface.feature")?.path).toBe("/business-surface");
+    expect(host.menus.list()).toEqual([]);
+    expect(host.home.list()).toEqual([]);
+    expect(host.business.listDomains().map((domain) => domain.id)).toEqual(["business-surface.domain"]);
+    expect(host.business.listHomeProjections().map((projection) => projection.id)).toEqual(["business-surface.projection"]);
+
+    await host.disable("business-surface");
+    expect(host.routes.byId("business-surface.feature")).toBeUndefined();
+    expect(host.business.listDomains()).toEqual([]);
+    expect(host.business.listHomeProjections()).toEqual([]);
+  });
+
   it("registers plugins and reads graph", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.registerAll([makeA(), makeB([CAP_A]), makeC()]);
@@ -281,6 +321,25 @@ describe("createPluginHost - lifecycle", () => {
     await host.disable("td");
     // 仅断言状态；teardown 已调起。
     expect(host.state("td").kind).toBe("disabled");
+  });
+
+  it("runs onDispose callbacks before teardown and registry ownership recovery", async () => {
+    const events: string[] = [];
+    const plugin: PluginManifest = {
+      id: "dispose-hook",
+      name: "Dispose hook",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      setup(ctx) {
+        const routes = ctx.get<RouteRegistry>("route.registry");
+        routes.register({ id: "dispose.route", path: "/dispose", label: "Dispose", component: () => null });
+        ctx.onDispose(() => { events.push(routes.byId("dispose.route") ? "dispose:before-purge" : "dispose:after-purge"); });
+        return () => { events.push(routes.byId("dispose.route") ? "teardown:before-purge" : "teardown:after-purge"); };
+      }
+    };
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(plugin);
+    await host.disable(plugin.id);
+    expect(events).toEqual(["dispose:before-purge", "teardown:before-purge"]);
   });
 
   it("setup throwing causes error-disabled state and removes owner", async () => {

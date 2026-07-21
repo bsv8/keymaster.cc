@@ -17,6 +17,7 @@ export * from "./registries/menuRegistry.js";
 export * from "./registries/breadcrumbRegistry.js";
 export * from "./registries/settingsRegistry.js";
 export * from "./registries/homeRegistry.js";
+export * from "./registries/businessFeatureRegistry.js";
 export * from "./registries/commandRegistry.js";
 export * from "./registries/importerRegistry.js";
 export * from "./registries/transferRegistry.js";

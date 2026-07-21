@@ -4,8 +4,7 @@
 // 窄屏下作为抽屉式 overlay：AppShell 持有开关状态，
 // 路由切换后通过 props.onClose 收起，避免抽屉遮住新页面。
 //
-// 硬切换 003：菜单项 label 是 I18nText；渲染时调用 host.i18n.text() 解析。
-// group 当前仅作分类键，不直接展示。
+// Legacy 菜单按旧 group/order 展示；业务 Domain/Feature 由 BusinessNavigation 独立负责。
 //
 // settings 分组（硬切换 003）：直接由 host.settings.list() 渲染。
 // 不再依赖 menu.registry 里的"settings"分组，避免与插件双注册产生的重复
@@ -28,6 +27,7 @@ import {
 } from "@keymaster/runtime";
 import type { MenuItem, SettingsRoute } from "@keymaster/contracts";
 import { router } from "./RouteRenderer.js";
+import { BusinessNavigation } from "./BusinessNavigation.js";
 
 export interface SidebarProps {
   mobileOpen: boolean;
@@ -93,17 +93,18 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
     .filter((m: MenuItem) => (m.visibleWhen ? m.visibleWhen({ unlocked }) : true));
   const settingsRoutes = useRegistry((h) => h.settings.list());
 
-  // 普通菜单 + settings 详情页合并：
-  //   - 普通菜单来源：menu.registry，但需要剔除任何带 group="settings" 的菜单
+  // Legacy 菜单 + settings 详情页合并；业务菜单由 BusinessNavigation 独立渲染。
+  //   - 普通菜单来源：menu.registry，但需要剔除任何 legacy group="settings" 的菜单
   //     项——settings 分组由 settings.registry 单独渲染，避免双注册。
   //   - settings 分组：直接由 host.settings.list() 渲染。
   const regularItems = menuItems.filter((m) => m.group !== SETTINGS_GROUP);
   const settingsEntries = buildSettingsEntries(settingsRoutes, unlocked);
 
-  // 按 group 分组：普通菜单按各自 group；settings 分组固定 group。
+  // 按 legacy group 分组；settings 分组固定。
   const groups = new Map<string, Array<{ key: string; label: MenuItem["label"]; path?: string; icon?: string; order: number }>>();
   for (const item of regularItems) {
-    const arr = groups.get(item.group) ?? [];
+    const section = item.group ?? "legacy";
+    const arr = groups.get(section) ?? [];
     arr.push({
       key: `menu:${item.id}`,
       label: item.label,
@@ -111,7 +112,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
       icon: item.icon,
       order: item.order
     });
-    groups.set(item.group, arr);
+    groups.set(section, arr);
   }
   if (settingsEntries.length > 0) {
     groups.set(
@@ -136,11 +137,11 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
       // 渲染为原生 <aside inert=""> / <aside>。
       {...(shouldInert ? { inert: "" as unknown as boolean } : {})}
     >
+      <BusinessNavigation onClose={onClose} />
+      <div className="app-sidebar__legacy" aria-label={host.i18n.text({ key: "shell.legacyNavigation", fallback: "现有入口（迁移中）" })}>
+      <h4>{host.i18n.text({ key: "shell.legacyNavigation", fallback: "现有入口（迁移中）" })}</h4>
       {[...groups.entries()].map(([group, list]) => (
         <div key={group} className="app-sidebar__group">
-          {/* 硬切换 003 + 施工单 2026-07-02 001：group 当前仅作分类键，
-              展示文案走 i18n key `shell.menu.group.<id>`；未注册的
-              group 退回原 id（fallback），保持向前兼容。 */}
           <h4>{host.i18n.text({ key: `shell.menu.group.${group}`, fallback: group })}</h4>
           <ul>
             {list.map((entry) => {
@@ -164,6 +165,7 @@ export function Sidebar({ mobileOpen, onClose }: SidebarProps) {
           </ul>
         </div>
       ))}
+      </div>
     </aside>
   );
 }

@@ -33,6 +33,7 @@ import type {
   PluginContext,
   PluginGraph,
   PluginManifest,
+  PluginBusinessContribution,
   StartupCapabilityErrorDetails,
   StartupPluginErrorDetails,
   PluginReverseDep,
@@ -61,6 +62,7 @@ import { createCollectibleRegistry, type CollectibleRegistry } from "./registrie
 import { createCollectibleTransferRegistry, type CollectibleTransferRegistry } from "./registries/collectibleTransferRegistry.js";
 import { createCommandRegistry, type CommandRegistry } from "./registries/commandRegistry.js";
 import { createHomeRegistry, type HomeRegistry } from "./registries/homeRegistry.js";
+import { createBusinessFeatureRegistry, type BusinessFeatureRegistry } from "./registries/businessFeatureRegistry.js";
 import { createImporterRegistry, type ImporterRegistry } from "./registries/importerRegistry.js";
 import { createMenuRegistry, type MenuRegistry } from "./registries/menuRegistry.js";
 import { createNoticeRegistry } from "./registries/noticeRegistry.js";
@@ -95,6 +97,7 @@ export interface PluginHost {
   breadcrumbs: BreadcrumbRegistry;
   settings: SettingsRegistry;
   home: HomeRegistry;
+  business: BusinessFeatureRegistry;
   commands: CommandRegistry;
   importers: ImporterRegistry;
   transfers: TransferRegistry;
@@ -166,6 +169,7 @@ interface PluginRecord {
   state: PluginStateKind;
   error?: string;
   ownership: PluginOwnership;
+  disposeCallbacks: Array<() => void | Promise<void>>;
 }
 
 function defaultStateFor(manifest: PluginManifest): PluginStateKind {
@@ -194,6 +198,7 @@ function buildOwnershipSnapshot(
     topbar: { _ids: () => string[] };
     capabilities: { keys: () => string[] };
     resourceRegistry: { _ids: () => string[] };
+    business: { _ids: () => { domains: string[]; features: string[]; projections: string[] } };
   }
 ) {
   return {
@@ -211,7 +216,10 @@ function buildOwnershipSnapshot(
     collectibleTransferHandlers: registries.collectibleTransfer._ids(),
     topbarItems: registries.topbar._ids(),
     capabilities: registries.capabilities.keys(),
-    resourceDefinitions: registries.resourceRegistry._ids()
+    resourceDefinitions: registries.resourceRegistry._ids(),
+    businessDomains: registries.business._ids().domains,
+    businessFeatures: registries.business._ids().features,
+    businessHomeProjections: registries.business._ids().projections
   };
 }
 
@@ -221,6 +229,9 @@ function ownershipDiff(
 ): Pick<
   PluginOwnership,
   | "routes"
+  | "businessDomains"
+  | "businessFeatures"
+  | "businessHomeProjections"
   | "menus"
   | "breadcrumbs"
   | "settingsRoutes"
@@ -238,6 +249,9 @@ function ownershipDiff(
 > {
   return {
     routes: diffIds(before.routes, after.routes),
+    businessDomains: diffIds(before.businessDomains, after.businessDomains),
+    businessFeatures: diffIds(before.businessFeatures, after.businessFeatures),
+    businessHomeProjections: diffIds(before.businessHomeProjections, after.businessHomeProjections),
     menus: diffIds(before.menus, after.menus),
     breadcrumbs: diffIds(before.breadcrumbs, after.breadcrumbs),
     settingsRoutes: diffIds(before.settingsRoutes, after.settingsRoutes),
@@ -263,6 +277,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const breadcrumbs = createBreadcrumbRegistry();
   const settings = createSettingsRegistry();
   const home = createHomeRegistry();
+  const business = createBusinessFeatureRegistry();
   const commands = createCommandRegistry();
   const importers = createImporterRegistry();
   const transfers = createTransferRegistry();
@@ -320,6 +335,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   capabilities.provide<BreadcrumbRegistry>("breadcrumb.registry", breadcrumbs);
   capabilities.provide<SettingsRegistry>("settings.registry", settings);
   capabilities.provide<HomeRegistry>("home.registry", home);
+  capabilities.provide<BusinessFeatureRegistry>("business.registry", business);
   capabilities.provide<CommandRegistry>("command.registry", commands);
   capabilities.provide<ImporterRegistry>("importer.registry", importers);
   capabilities.provide<TransferRegistry>("transfer.registry", transfers);
@@ -392,6 +408,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       _ids: () => resourceRegistry._ids(),
     };
     return {
+      onDispose: (cleanup) => { record.disposeCallbacks.push(cleanup); },
       provide: (k, v) => provideCapability(k, v),
       get: (k) => k === RESOURCE_REGISTRY_CAPABILITY
         ? ownerResourceRegistry as any
@@ -424,7 +441,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       collectibleTransfer,
       topbar,
       capabilities,
-      resourceRegistry
+      resourceRegistry,
+      business
     });
   }
 
@@ -455,6 +473,33 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
+  /**
+   * 将 manifest 的业务声明投影到内部技术 registry。
+   *
+   * 这是唯一允许业务配置接触 route/menu/home 的位置：插件只需维护自己的
+   * manifest；disable/unregister 时仍由既有 ownership diff 自动回收。
+   */
+  function registerBusinessContribution(ownerPluginId: string, contribution: PluginBusinessContribution | undefined): void {
+    if (!contribution) return;
+    for (const domain of contribution.domains) {
+      for (const feature of domain.features) {
+        const route = feature.entry.routeId ? routes.byId(feature.entry.routeId) : routes.byPath(feature.entry.path);
+        if (feature.entry.routeId && !route) throw new Error(`Business feature "${feature.id}" references missing route "${feature.entry.routeId}"`);
+        if (route && route.path !== feature.entry.path) throw new Error(`Business feature "${feature.id}" route path conflicts with its reference`);
+        if (route && !feature.entry.routeId) throw new Error(`Business feature "${feature.id}" must explicitly declare routeId for existing route "${feature.entry.path}"`);
+        if (!route) {
+          if (!feature.entry.component) throw new Error(`Business feature "${feature.id}" must provide component for a new route`);
+          routes.register({ id: feature.id, path: feature.entry.path, label: feature.label, component: feature.entry.component, inMenu: false });
+        }
+        for (const view of feature.views ?? []) {
+          if (routes.byPath(view.path)) throw new Error(`Business feature view "${view.id}" path "${view.path}" conflicts with an existing route`);
+          routes.register({ id: view.id, path: view.path, label: view.label, component: view.component, inMenu: false });
+        }
+      }
+      business.register(ownerPluginId, domain);
+    }
+  }
+
   async function runSetup(record: PluginRecord): Promise<void> {
     const before = snapshotOwnership();
     let teardownFn: (() => void | Promise<void>) | undefined;
@@ -463,6 +508,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       teardownFn = (await Promise.resolve(result)) as
         | (() => void | Promise<void>)
         | undefined;
+      registerBusinessContribution(record.manifest.id, record.manifest.business);
     } catch (err) {
       const after = snapshotOwnership();
       const diff = ownershipDiff(before, after);
@@ -556,6 +602,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       safe(() => resourceStore.disposeOwner(pluginId), `resourceOwner:${pluginId}`);
     }
     for (const id of ownership.topbarItems) safe(() => topbar.unregister(id), `topbar:${id}`);
+    for (const id of ownership.businessDomains) safe(() => business.unregisterDomain(id), `businessDomain:${id}`);
     for (const id of ownership.routes) safe(() => routes.unregister(id), `route:${id}`);
     for (const id of ownership.menus) safe(() => menus.unregister(id), `menu:${id}`);
     for (const id of ownership.homeWidgets) safe(() => home.unregister(id), `home:${id}`);
@@ -600,6 +647,15 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
+  async function runDisposeCallbacks(record: PluginRecord): Promise<unknown> {
+    const callbacks = record.disposeCallbacks.splice(0).reverse();
+    let firstError: unknown;
+    for (const cleanup of callbacks) {
+      try { await cleanup(); } catch (err) { firstError ??= err; }
+    }
+    return firstError;
+  }
+
   const host: PluginHost = {
     capabilities,
     messageBus,
@@ -608,6 +664,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     breadcrumbs,
     settings,
     home,
+    business,
     commands,
     importers,
     transfers,
@@ -693,7 +750,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       records.set(plugin.id, {
         manifest: plugin,
         state: defaultStateFor(plugin),
-        ownership: emptyOwnership()
+        ownership: emptyOwnership(),
+        disposeCallbacks: []
       });
       const required = isStartupRequired(plugin);
       configStore.setRequiredPluginIds(
@@ -807,6 +865,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         bumpVersion();
       } catch (err) {
         enabledSet.delete(pluginId);
+        await runDisposeCallbacks(record);
         const ownership = record.ownership;
         purgeOwnership(ownership, pluginId);
         purgePluginNotices(record.manifest.id);
@@ -846,6 +905,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         };
       }
       safeNavigateAway(pluginId);
+      const disposeErr = await runDisposeCallbacks(record);
       const teardownErr = await runTeardown(record.ownership);
       purgeOwnership(record.ownership, pluginId);
       purgePluginNotices(pluginId);
@@ -854,9 +914,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         appMessageEndpointIds.delete(record.manifest.appMessageEndpoint.endpointId);
       }
       enabledSet.delete(pluginId);
-      if (teardownErr) {
+      if (teardownErr || disposeErr) {
         record.state = "error-disabled";
-        record.error = teardownErr instanceof Error ? teardownErr.message : String(teardownErr);
+        const lifecycleErr = disposeErr ?? teardownErr;
+        record.error = lifecycleErr instanceof Error ? lifecycleErr.message : String(lifecycleErr);
         logService.append({
           level: "error",
           pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
@@ -865,8 +926,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           message: `Plugin teardown failed: ${pluginId}`,
           data: { pluginId },
           error: {
-            name: teardownErr instanceof Error ? teardownErr.name : "Error",
-            message: teardownErr instanceof Error ? teardownErr.message : String(teardownErr)
+            name: lifecycleErr instanceof Error ? lifecycleErr.name : "Error",
+            message: lifecycleErr instanceof Error ? lifecycleErr.message : String(lifecycleErr)
           }
         });
       } else {

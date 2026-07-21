@@ -24,6 +24,9 @@ import type {
 } from "@keymaster/contracts";
 
 export interface PluginOwnership {
+  businessDomains: string[];
+  businessFeatures: string[];
+  businessHomeProjections: string[];
   /** capability keys 该 plugin 提供的。 */
   capabilities: string[];
   /** route ids 该 plugin 注册的。 */
@@ -60,6 +63,9 @@ export interface PluginOwnership {
 
 export function emptyOwnership(): PluginOwnership {
   return {
+    businessDomains: [],
+    businessFeatures: [],
+    businessHomeProjections: [],
     capabilities: [],
     routes: [],
     menus: [],

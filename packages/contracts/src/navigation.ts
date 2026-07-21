@@ -21,7 +21,7 @@ export interface AppRoute {
   component: ComponentType;
   /** 是否出现在菜单中（默认 true）。 */
   inMenu?: boolean;
-  /** 菜单分组 id。 */
+  /** @deprecated 页面不应自行决定菜单。 */
   menuGroup?: string;
   /** 在菜单中的排序，越小越靠前。 */
   order?: number;
@@ -42,12 +42,8 @@ export interface MenuItem {
   routeId?: string;
   /** 直接给出 path。 */
   path?: string;
-  /**
-   * 菜单分组 id。
-   * 设计缘由：group 当前不直接作为展示文案，仅做排序分类键；
-   * 未来若要把 group 名也展示出来，必须走 I18nText 而不是 string。
-   */
-  group: string;
+  /** Legacy technical group. */
+  group?: string;
   /** 排序，越小越靠前。 */
   order: number;
   /** 图标名（lucide-react icon name）。 */

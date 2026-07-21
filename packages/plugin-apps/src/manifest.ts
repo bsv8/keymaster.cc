@@ -16,13 +16,8 @@
 //     生成 appView owner runtime capability 失败。
 
 import type {
-  HomeRegistry,
-  HomeWidget,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
-  PluginManifest,
-  RouteRegistry
+  PluginManifest
 } from "@keymaster/contracts";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { AppsPage } from "./AppsPage.js";
@@ -120,49 +115,14 @@ export const appsPlugin: PluginManifest = {
   },
   i18n: appsResources,
   dependencies: [
-    { capability: "route.registry", reason: "注册 /apps 页面" },
-    { capability: "menu.registry", reason: "注册 Apps 菜单入口" },
-    { capability: "home.registry", reason: "注册首页 Apps widget" },
     { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" }
   ],
-  setup(ctx) {
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    routes.register({
-      id: "apps.page",
-      path: "/apps",
-      label: { key: "apps.route.label", fallback: "Apps" },
-      component: AppsPage,
-      inMenu: true,
-      menuGroup: "apps",
-      order: 50,
-      icon: "Apps"
-    });
-
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.apps",
-      label: { key: "apps.menu.label", fallback: "Apps" },
-      routeId: "apps.page",
-      group: "apps",
-      order: 50,
-      icon: "Apps"
-    };
-    menus.register(item);
-
-    const home = ctx.get<HomeRegistry>("home.registry");
-    const widget: HomeWidget = {
-      id: "apps.home",
-      title: { key: "apps.widget.title", fallback: "Apps" },
-      component: AppsHomeWidget,
-      order: 60,
-      slot: "main",
-      refreshHint: "manual"
-    };
-    home.register(widget);
-
-    return () => {
-      // host teardown 时清空 route / menu / home；具体 unregister 接口由
-      // host 提供（plugin-apps 不持有反向引用）。teardown 走空实现。
-    };
-  }
+  business: {
+    domains: [{ id: "apps", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400, features: [{
+      id: "apps.launcher", label: { key: "apps.menu.label", fallback: "Apps" }, order: 50, icon: "Apps",
+      entry: { path: "/apps", component: AppsPage },
+      home: [{ id: "apps.home", space: { id: "apps.applications", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400 }, order: 60, component: AppsHomeWidget }]
+    }] }]
+  },
+  setup() {}
 };

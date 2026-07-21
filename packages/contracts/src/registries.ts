@@ -8,6 +8,7 @@ import type { TopbarRegistry as ITopbarRegistry } from "./topbar.js";
 import type { BackgroundRegistry as IBackgroundRegistry, BackgroundService as IBackgroundService } from "./background.js";
 import type { NoticeRecord } from "./notice.js";
 import type { I18nText } from "./i18n.js";
+import type { BusinessDomain, BusinessFeature, FeatureHomeProjection } from "./business.js";
 
 export interface RouteRegistry {
   register(route: AppRoute): void;
@@ -51,13 +52,24 @@ export interface SettingsRegistry {
 /**
  * 首页 widget 注册表（硬切换 006）。
  *
- * - 插件只能通过 `slot: "main" | "aside"` 显式声明首页栏目归属；
- * - registry 不再承载 `size` 维度，也不再提供栏目分组 API；
- * - 栏目分组属于页面渲染职责（plugin-home / HomePage），不属于注册表职责。
+ * - 新插件通过 manifest 的 `business.home.space` 声明业务空间；runtime 统一决定栏目归属；
+ * - `slot` 只保留给旧 registry hook 兼容；
+ * - registry 不承载 `size` 维度，也不提供栏目分组 API。
  */
 export interface HomeRegistry {
   register(widget: HomeWidget): void;
   list(): HomeWidget[];
+}
+
+export interface BusinessFeatureRegistry {
+  register(ownerPluginId: string, domain: BusinessDomain): void;
+  unregisterDomain(domainId: string): void;
+  listDomains(): BusinessDomain[];
+  listFeatures(): Array<BusinessFeature & { domainId: string; ownerPluginId: string }>;
+  listHomeProjections(): Array<FeatureHomeProjection & { featureId: string; ownerPluginId: string }>;
+  byOwnerPluginId(pluginId: string): BusinessDomain[];
+  subscribe(handler: () => void): () => void;
+  _ids(): { domains: string[]; features: string[]; projections: string[] };
 }
 
 export interface CommandDescriptor {

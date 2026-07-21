@@ -21,6 +21,7 @@ import type {
 } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { TransferPage } from "./TransferPage.js";
+import { createTransferFeatureCapability } from "./transferFeature.js";
 
 const transferResources: I18nPluginResources = {
   namespace: "transfer",
@@ -36,6 +37,10 @@ const transferResources: I18nPluginResources = {
       "transfer.page.desc.default": "Pick an asset offer, then let the provider's widget handle input, preview and submission.",
       "transfer.page.assets": "Assets",
       "transfer.page.completed": "Completed",
+      "transfer.feature.source": "Source",
+      "transfer.feature.getQuote": "Get quote",
+      "transfer.feature.submitting": "Submitting…",
+      "transfer.feature.submit": "Submit transfer",
       "transfer.page.empty.allMode.title": "Pick a key",
       "transfer.page.empty.allMode.desc": "Pick a specific key in the topbar to start a transfer.",
       "transfer.page.empty.noKey.title": "No key yet",
@@ -59,6 +64,10 @@ const transferResources: I18nPluginResources = {
       "transfer.page.desc.default": "选择资产 Offer，然后由 provider 提供的 Widget 完成输入、预览与提交。",
       "transfer.page.assets": "资产",
       "transfer.page.completed": "已完成",
+      "transfer.feature.source": "来源",
+      "transfer.feature.getQuote": "获取报价",
+      "transfer.feature.submitting": "提交中…",
+      "transfer.feature.submit": "提交转账",
       "transfer.page.empty.allMode.title": "请选择一个 key",
       "transfer.page.empty.allMode.desc": "到顶栏选择一把具体的 key 后再开始转账。",
       "transfer.page.empty.noKey.title": "还没有 key",
@@ -83,7 +92,8 @@ export const transferPlugin: PluginManifest = {
     startup: "optional",
     defaultEnabled: true,
     canDisable: true,
-    displayGroup: "platform"
+    displayGroup: "platform",
+    providesCapabilities: ["feature.transfer"]
   },
   i18n: transferResources,
   dependencies: [
@@ -94,7 +104,22 @@ export const transferPlugin: PluginManifest = {
     { capability: "menu.registry", reason: "注册 Transfer 菜单入口" },
     { capability: "breadcrumb.registry", reason: "注册 Transfer 面包屑" }
   ],
+  business: {
+    domains: [{
+      id: "transfer",
+      label: { key: "transfer.domain.label", fallback: "Assets" },
+      order: 200,
+      features: [{
+        id: "transfer.send",
+        label: { key: "transfer.menu.title", fallback: "Transfer" },
+        order: 30,
+        icon: "Send",
+        entry: { path: "/transfer", routeId: "transfer.page" }
+      }]
+    }]
+  },
   setup(ctx) {
+    ctx.provide("feature.transfer", createTransferFeatureCapability());
     const registry = ctx.get<TransferRegistry>("transfer.registry");
     const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
 
