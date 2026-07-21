@@ -6,11 +6,10 @@
 // 硬切换 003：route / menu / breadcrumb 走 I18nText。
 
 import type {
+  BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
   PluginManifest,
   ResourceRegistry,
   RouteRegistry,
@@ -21,6 +20,7 @@ import type {
 } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { TransferPage } from "./TransferPage.js";
+import { createTransferFeatureCapability } from "./transferFeature.js";
 
 const transferResources: I18nPluginResources = {
   namespace: "transfer",
@@ -36,6 +36,10 @@ const transferResources: I18nPluginResources = {
       "transfer.page.desc.default": "Pick an asset offer, then let the provider's widget handle input, preview and submission.",
       "transfer.page.assets": "Assets",
       "transfer.page.completed": "Completed",
+      "transfer.feature.source": "Source",
+      "transfer.feature.getQuote": "Get quote",
+      "transfer.feature.submitting": "Submitting…",
+      "transfer.feature.submit": "Submit transfer",
       "transfer.page.empty.allMode.title": "Pick a key",
       "transfer.page.empty.allMode.desc": "Pick a specific key in the topbar to start a transfer.",
       "transfer.page.empty.noKey.title": "No key yet",
@@ -59,6 +63,10 @@ const transferResources: I18nPluginResources = {
       "transfer.page.desc.default": "选择资产 Offer，然后由 provider 提供的 Widget 完成输入、预览与提交。",
       "transfer.page.assets": "资产",
       "transfer.page.completed": "已完成",
+      "transfer.feature.source": "来源",
+      "transfer.feature.getQuote": "获取报价",
+      "transfer.feature.submitting": "提交中…",
+      "transfer.feature.submit": "提交转账",
       "transfer.page.empty.allMode.title": "请选择一个 key",
       "transfer.page.empty.allMode.desc": "到顶栏选择一把具体的 key 后再开始转账。",
       "transfer.page.empty.noKey.title": "还没有 key",
@@ -83,7 +91,8 @@ export const transferPlugin: PluginManifest = {
     startup: "optional",
     defaultEnabled: true,
     canDisable: true,
-    displayGroup: "platform"
+    displayGroup: "platform",
+    providesCapabilities: ["feature.transfer"]
   },
   i18n: transferResources,
   dependencies: [
@@ -91,10 +100,11 @@ export const transferPlugin: PluginManifest = {
     { capability: "keyspace.service", reason: "读取 active key 资源" },
     { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册资源定义" },
     { capability: "route.registry", reason: "注册 Transfer 页面" },
-    { capability: "menu.registry", reason: "注册 Transfer 菜单入口" },
+    { capability: "business.registry", reason: "接入资产业务导航" },
     { capability: "breadcrumb.registry", reason: "注册 Transfer 面包屑" }
   ],
   setup(ctx) {
+    ctx.provide("feature.transfer", createTransferFeatureCapability());
     const registry = ctx.get<TransferRegistry>("transfer.registry");
     const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
 
@@ -153,24 +163,21 @@ export const transferPlugin: PluginManifest = {
       id: "transfer.page",
       path: "/transfer",
       label: { key: "transfer.route.title", fallback: "Transfer" },
-      component: TransferPage,
-      inMenu: true,
-      menuGroup: "wallets",
-      order: 30,
-      icon: "Send"
+      component: TransferPage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.transfer",
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("transfer", "assets", {
+      id: "assets.transfer",
       label: { key: "transfer.menu.title", fallback: "Transfer" },
-      routeId: "transfer.page",
-      group: "wallets",
-      order: 30,
+      order: 20,
       icon: "Send",
-      visibleWhen: ({ unlocked }) => unlocked
-    };
-    menus.register(item);
+      entry: {
+        path: "/transfer",
+        routeId: "transfer.page",
+        visibleWhen: ({ unlocked }) => unlocked
+      }
+    });
 
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
     const crumbProvider: BreadcrumbProvider = {

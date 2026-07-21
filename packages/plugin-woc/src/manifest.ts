@@ -6,8 +6,8 @@
 //   - 因此本插件显式声明对 RUNTIME_MESSAGE_BUS capability 的依赖。
 //   - 业务插件仍只依赖 wocService，不再接触 messageBus。
 //
-// 硬切换 003：所有展示文案走 i18n；/settings/woc 改为通过
-// settings.registry 注册，不再向 route.registry / menu.registry 重复注册。
+// 硬切换 003：所有展示文案走 i18n；WOC 通过 system-settings.registry
+// 注入「设置 → 系统」，不再提供旧菜单入口。
 
 import type {
   BreadcrumbProvider,
@@ -15,7 +15,7 @@ import type {
   I18nPluginResources,
   MessageBus,
   PluginManifest,
-  SettingsRegistry,
+  SystemSettingsRegistry,
   Woc1SatOrdinalsService,
   WocBsv21Service,
   WocService,
@@ -102,7 +102,7 @@ export const wocPlugin: PluginManifest = {
   i18n: wocResources,
   dependencies: [
     { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
-    { capability: "settings.registry", reason: "注册 WOC 设置详情页" },
+    { capability: "system-settings.registry", reason: "注册 WOC 系统设置" },
     { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" }
   ],
   setup(ctx) {
@@ -121,16 +121,19 @@ export const wocPlugin: PluginManifest = {
     const oneSatService = createWoc1SatOrdinalsService({ messageBus, logger: ctx.logger });
     ctx.provide<Woc1SatOrdinalsService>(WOC_1SAT_ORDINALS_CAPABILITY, oneSatService);
 
-    // 硬切换 003：settings.registry 单一真值；同时承担"菜单入口 + 路由匹配"。
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.register({
-      id: "woc.settings",
-      path: "/settings/woc",
-      label: { key: "woc.crumb.woc", fallback: "WOC" },
+    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    systemSettings.register({
+      id: "woc.system-settings.connection",
+      group: {
+        id: "woc",
+        label: { key: "woc.crumb.woc", fallback: "WOC" },
+        order: 40
+      },
+      label: { key: "woc.page.title", fallback: "WOC settings" },
       description: { key: "woc.page.desc", fallback: "WhatsOnChain API endpoint, rate limit, and queue status." },
       component: WocSettingsPage,
-      order: 120,
-      icon: "Cloud",
+      order: 10,
+      replacesSettingsRouteId: "woc.settings",
       visibleWhen: ({ unlocked }) => unlocked
     });
 

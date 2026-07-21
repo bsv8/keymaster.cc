@@ -17,6 +17,7 @@ import { EmptyState, PageHeader } from "@keymaster/ui";
 import { useCapability, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { ActiveKeyState, TransferCompletion, TransferOffer, TransferProvider, TransferRegistry } from "@keymaster/contracts";
 import { TransferOfferPicker } from "./TransferOfferPicker.js";
+import type { TransferFeatureCapability, TransferRequest } from "./transferFeature.js";
 
 const EMPTY_OFFERS: TransferOffer[] = [];
 const EMPTY_ACTIVE_KEY: ActiveKeyState = { activePublicKeyHex: undefined };
@@ -25,6 +26,7 @@ export function TransferPage() {
   const registry = useCapability<TransferRegistry>("transfer.registry");
   const host = usePluginHost();
   const { t } = useI18n();
+  const feature = useTransferFeature();
   const locale = useLocale();
   const store = host.resourceStore;
   const dateFmt = useMemo(
@@ -32,6 +34,10 @@ export function TransferPage() {
     [locale]
   );
   const providers = useMemo(() => registry.list(), [registry]);
+  const featureSources = feature.listSources();
+  const quoteProviders = feature.listQuoteProviders();
+  const reviewSections = feature.listReviewSections();
+  const submitHandlers = feature.listSubmitHandlers();
 
   // 使用 Resource Store 读取 Transfer Offer 列表
   const allOffers = useResourceSelector<TransferOffer[], TransferOffer[]>(
@@ -61,18 +67,34 @@ export function TransferPage() {
   // 本地交互 state
   const [selected, setSelected] = useState<TransferOffer | undefined>(undefined);
   const [completion, setCompletion] = useState<TransferCompletion | undefined>(undefined);
+  const [sourceId, setSourceId] = useState<string | undefined>(undefined);
+  const [quote, setQuote] = useState<unknown>(undefined);
+  const [submission, setSubmission] = useState<unknown>(undefined);
+  const [hookError, setHookError] = useState<string | undefined>(undefined);
+  const [submitting, setSubmitting] = useState(false);
 
   // 当 offers 变化时，清除已不存在的 selected
   useEffect(() => {
     if (selected && !allOffers.find((o) => o.id === selected.id)) {
       setSelected(undefined);
     }
+    if (!selected) { setSourceId(undefined); setQuote(undefined); setSubmission(undefined); }
   }, [allOffers, selected]);
+
+  useEffect(() => {
+    setSourceId(undefined);
+    setQuote(undefined);
+    setSubmission(undefined);
+    setHookError(undefined);
+  }, [selected?.id]);
 
   // active key 变化时清空仅属于当前 key 的本地交互状态。
   useEffect(() => {
     setSelected(undefined);
     setCompletion(undefined);
+    setSourceId(undefined);
+    setQuote(undefined);
+    setSubmission(undefined);
   }, [activeState.activePublicKeyHex]);
 
   const selectedProvider: TransferProvider | undefined = useMemo(
@@ -83,6 +105,32 @@ export function TransferPage() {
   function handleCompleted(result: TransferCompletion) {
     setCompletion(result);
     setSelected(undefined);
+  }
+
+  const compatibleSources = selected
+    ? featureSources.filter((source) => source.supports ? source.supports(selected) : true)
+    : [];
+  const selectedSource = compatibleSources.find((source) => source.id === sourceId) ?? compatibleSources[0];
+  const requestFor = (): TransferRequest | undefined => selected && selectedSource ? {
+    offer: selected,
+    sourceId: selectedSource.id,
+    draft: selectedSource.createDraft?.(selected),
+    quote
+  } : undefined;
+  async function requestQuote() {
+    const request = requestFor();
+    const provider = quoteProviders[0];
+    if (!request || !provider) return;
+    setHookError(undefined);
+    try { setQuote(await provider.quote(request)); } catch (error) { setHookError(error instanceof Error ? error.message : String(error)); }
+  }
+  async function submitTransfer() {
+    const request = requestFor();
+    const handler = submitHandlers[0];
+    if (!request || !handler) return;
+    setSubmitting(true); setHookError(undefined);
+    try { setSubmission(await handler.submit(request)); } catch (error) { setHookError(error instanceof Error ? error.message : String(error)); }
+    finally { setSubmitting(false); }
   }
 
   if (!activeState.activePublicKeyHex) {
@@ -121,7 +169,7 @@ export function TransferPage() {
         title={t("transfer.route.title", { defaultValue: "转账" })}
         description={t("transfer.page.desc.default", { defaultValue: "选择资产 Offer，然后由 provider 提供的 Widget 完成输入、预览与提交。" })}
       />
-      <section>
+      <section data-transfer-source-count={featureSources.length} data-transfer-quote-count={quoteProviders.length} data-transfer-submit-count={submitHandlers.length}>
         <h3>{t("transfer.page.assets", { defaultValue: "资产" })}</h3>
         <TransferOfferPicker
           offers={allOffers}
@@ -129,6 +177,21 @@ export function TransferPage() {
           onChange={setSelected}
         />
       </section>
+      {selected && (compatibleSources.length > 0 || quoteProviders.length > 0 || submitHandlers.length > 0) ? (
+        <section className="transfer-page__feature-flow">
+          {compatibleSources.length > 0 ? <label>
+            {t("transfer.feature.source", { defaultValue: "Source" })}
+            <select value={selectedSource?.id ?? ""} onChange={(event) => { setSourceId(event.target.value); setQuote(undefined); setSubmission(undefined); }}>
+              {compatibleSources.map((source) => <option key={source.id} value={source.id}>{source.label}</option>)}
+            </select>
+          </label> : null}
+          {quoteProviders.length > 0 ? <button type="button" disabled={!selectedSource} onClick={() => void requestQuote()}>{t("transfer.feature.getQuote", { defaultValue: "Get quote" })}</button> : null}
+          {quote !== undefined ? <pre>{formatHookResult(quote)}</pre> : null}
+          {submitHandlers.length > 0 ? <button type="button" disabled={!selectedSource || submitting || (quoteProviders.length > 0 && quote === undefined)} onClick={() => void submitTransfer()}>{submitting ? t("transfer.feature.submitting", { defaultValue: "Submitting…" }) : t("transfer.feature.submit", { defaultValue: "Submit transfer" })}</button> : null}
+          {submission !== undefined ? <pre>{formatHookResult(submission)}</pre> : null}
+          {hookError ? <p className="transfer-page__error">{hookError}</p> : null}
+        </section>
+      ) : null}
       {selected && selectedProvider ? (
         <section>
           <h3>{host.i18n.text(selected.label)}</h3>
@@ -141,6 +204,7 @@ export function TransferPage() {
           </ProviderErrorBoundary>
         </section>
       ) : null}
+      {selected ? reviewSections.map((section) => <section key={section.id} className="transfer-page__review"><section.component /></section>) : null}
       {selected && !selectedProvider ? (
         <p className="transfer-page__error">
           {t("transfer.page.err.providerGone", { defaultValue: "该 Offer 对应的 provider 不再可用。" })}
@@ -164,6 +228,18 @@ export function TransferPage() {
       ) : null}
     </div>
   );
+}
+
+function formatHookResult(value: unknown): string {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value, null, 2); } catch { return String(value); }
+}
+
+function useTransferFeature(): TransferFeatureCapability {
+  const capability = useCapability<TransferFeatureCapability>("feature.transfer");
+  const [, refresh] = useState(0);
+  useEffect(() => capability.subscribe(() => refresh((value) => value + 1)), [capability]);
+  return capability;
 }
 
 interface ProviderErrorBoundaryProps {

@@ -10,12 +10,12 @@
 //     协议 URL、跨站路径一律不动。
 //   - 使用 history.replaceState 不新增浏览器历史记录、不触发重载。
 //
-// 硬切换 003：旧 hash "#/settings"（无后续段）映射到 "/settings/language"。
+// 硬切换 003：旧 hash "#/settings"（无后续段）映射到 "/settings/system"。
 // 这是因为 /settings 聚合页已经删除，但应用启动时可能仍有旧入口残留在
 // URL 或书签中；迁移目标必须是真实存在、稳定、不可被业务插件卸载的
-// 系统级设置页。语言设置页正是这种真值。
+// 系统级设置页。系统设置页正是这种真值。
 
-const LEGACY_SETTINGS_REDIRECT = "/settings/language";
+const LEGACY_SETTINGS_REDIRECT = "/settings/system";
 
 /**
  * 纯解析：把 pathname + hash 解析为可用的 pathname。

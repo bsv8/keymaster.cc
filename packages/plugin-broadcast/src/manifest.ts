@@ -24,6 +24,7 @@ import type {
   KeyspaceService,
   PluginManifest,
   ResourceRegistry,
+  SystemStatusRegistry,
   VaultService
 } from "@keymaster/contracts";
 import {
@@ -126,7 +127,7 @@ const broadcastResources: I18nPluginResources = {
       "broadcast.page.action.setActive": "Activate",
       "broadcast.page.action.clearActive": "Clear active",
       "broadcast.page.action.refresh": "Refresh",
-      "broadcast.page.note.keyProvider": "Active provider id is persisted in localStorage. Clearing it stops auto-activation until you pick one."
+      "broadcast.page.note.keyProvider": "The system maintains the active provider and reconnects automatically when needed."
     },
     "zh-CN": {
       "broadcast.menu": "广播",
@@ -152,7 +153,7 @@ const broadcastResources: I18nPluginResources = {
       "broadcast.page.action.setActive": "激活",
       "broadcast.page.action.clearActive": "取消激活",
       "broadcast.page.action.refresh": "刷新",
-      "broadcast.page.note.keyProvider": "active provider id 持久化在 localStorage 中。取消激活后将停止自动激活，直至你手动选择。"
+      "broadcast.page.note.keyProvider": "系统维护当前 provider，并在需要时自动重连。"
     }
   }
 };
@@ -197,7 +198,7 @@ export const broadcastPlatformPlugin: PluginManifest = {
       reason: "解析 owner publicKeyHex / 监听 active key 变化"
     },
     { capability: "route.registry", reason: "注册 /system/broadcast 路由" },
-    { capability: "menu.registry", reason: "注册「广播」菜单项" },
+    { capability: "system-status.registry", reason: "注入广播系统状态模块" },
     {
       capability: "breadcrumb.registry",
       reason: "为 /system/broadcast 提供面包屑"
@@ -335,11 +336,11 @@ export const broadcastPlatformPlugin: PluginManifest = {
     });
 
     /**
-     * 注册管理页路由 + 菜单 + 面包屑。
+     * 注册管理页路由 + 面包屑。
      *
      * 设计缘由（施工单 §7.2.2 + §8.四）：
      *   - 路由固定 `/system/broadcast`；
-     *   - 菜单挂在 "system" 组；
+     *   - 由系统状态模块投影到新设置导航；
      *   - 面包屑就一个层级：Broadcast。
      */
     const routes = ctx.get<{
@@ -347,23 +348,9 @@ export const broadcastPlatformPlugin: PluginManifest = {
         id: string;
         path: string;
         component: unknown;
-        inMenu?: boolean;
-        menuGroup?: string;
-        order?: number;
-        icon?: string;
         label: { key: string; fallback: string };
       }): void;
     }>("route.registry");
-    const menus = ctx.get<{
-      register(input: {
-        id: string;
-        path: string;
-        group: string;
-        order?: number;
-        icon?: string;
-        label: { key: string; fallback: string };
-      }): void;
-    }>("menu.registry");
     const breadcrumbs = ctx.get<{
       register(input: {
         id: string;
@@ -377,20 +364,17 @@ export const broadcastPlatformPlugin: PluginManifest = {
       id: "broadcast.system",
       path: "/system/broadcast",
       label: { key: "broadcast.menu", fallback: "Broadcast" },
-      component: BroadcastPage,
-      inMenu: true,
-      menuGroup: "system",
-      order: 30,
-      icon: "Radio"
+      component: BroadcastPage
     });
 
-    menus.register({
-      id: "broadcast.system",
+    const systemStatus = ctx.get<SystemStatusRegistry>("system-status.registry");
+    systemStatus.register({
+      id: "broadcast.system-status",
       path: "/system/broadcast",
-      group: "system",
-      order: 30,
-      icon: "Radio",
-      label: { key: "broadcast.menu", fallback: "Broadcast" }
+      label: { key: "broadcast.menu", fallback: "Broadcast" },
+      description: { key: "broadcast.page.title", fallback: "Broadcast system" },
+      component: BroadcastPage,
+      order: 10
     });
 
     breadcrumbs.register({

@@ -4,19 +4,13 @@
 // 具体资产（plugin-p2pkh 等）通过 asset.registry 注入 AssetProvider。
 
 import type {
-  AppRoute,
   AssetDataNotifier,
   AssetRegistry,
   KeyspaceService,
   KeyIdentity,
-  HomeRegistry,
-  HomeWidget,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
   PluginManifest,
   ResourceRegistry,
-  RouteRegistry,
   TokenRegistry
 } from "@keymaster/contracts";
 import {
@@ -39,10 +33,11 @@ const assetsResources: I18nPluginResources = {
   namespace: "assets",
   resources: {
     en: {
-      "assets.route.list": "Assets",
+      "assets.domain.label": "Wallet",
+      "assets.route.list": "Asset overview",
       "assets.route.detail": "Asset detail",
-      "assets.menu.list": "Assets",
-      "assets.home.overview": "Assets",
+      "assets.menu.list": "Asset overview",
+      "assets.home.overview": "Asset overview",
       "assets.page.title": "Assets",
       "assets.page.description": "Cross-provider aggregation.",
       "assets.page.descriptionPrefix": "Cross-provider aggregation · ",
@@ -81,10 +76,11 @@ const assetsResources: I18nPluginResources = {
       "assets.redirect.missing": "Missing providerId/assetId parameter."
     },
     "zh-CN": {
-      "assets.route.list": "资产",
+      "assets.domain.label": "钱包",
+      "assets.route.list": "资产总览",
       "assets.route.detail": "资产详情",
-      "assets.menu.list": "资产",
-      "assets.home.overview": "资产",
+      "assets.menu.list": "资产总览",
+      "assets.home.overview": "资产总览",
       "assets.page.title": "资产",
       "assets.page.description": "跨 provider 聚合展示。",
       "assets.page.descriptionPrefix": "跨 provider 聚合展示 · ",
@@ -141,10 +137,17 @@ export const assetsPlugin: PluginManifest = {
     { capability: "asset.registry", reason: "需要资产注册表来聚合 coin provider" },
     { capability: "token.registry", reason: "需要 token 注册表来聚合 fungible token provider" },
     { capability: "keyspace.service", reason: "读取 active key 上下文" },
-    { capability: "route.registry", reason: "注册资产列表与详情页" },
-    { capability: "menu.registry", reason: "注册资产菜单入口" },
-    { capability: "home.registry", reason: "注册资产首页 widget" }
   ],
+  business: {
+    domains: [{ id: "assets", label: { key: "assets.domain.label", fallback: "Wallet" }, order: 200, features: [
+      {
+        id: "assets.holdings",
+        label: { key: "assets.route.list", fallback: "Asset overview" },
+        order: 5, icon: "Layers", views: [{ id: "assets.detail", path: "/assets/detail", label: { key: "assets.route.detail", fallback: "Asset detail" }, component: AssetDetailRedirect }], entry: { path: "/assets", component: AssetsPage, visibleWhen: ({ unlocked }) => unlocked },
+        home: [{ id: "assets.overview", space: { id: "assets.portfolio", label: { key: "assets.domain.label", fallback: "Wallet" }, order: 200 }, order: 5, component: AssetsHomeWidget }]
+      }
+    ], }]
+  },
   setup(ctx) {
     const assets = ctx.get<AssetRegistry>("asset.registry");
     const tokens = ctx.get<TokenRegistry>("token.registry");
@@ -239,49 +242,6 @@ export const assetsPlugin: PluginManifest = {
       },
       invalidation: "immediate"
     });
-
-    const routes = ctx.get<RouteRegistry>("route.registry");
-    const listRoute: AppRoute = {
-      id: "assets.list",
-      path: "/assets",
-      label: { key: "assets.route.list", fallback: "Assets" },
-      component: AssetsPage,
-      inMenu: true,
-      menuGroup: "wallets",
-      order: 5,
-      icon: "Layers"
-    };
-    routes.register(listRoute);
-    routes.register({
-      id: "assets.detail",
-      path: "/assets/detail",
-      label: { key: "assets.route.detail", fallback: "Asset detail" },
-      component: AssetDetailRedirect,
-      inMenu: false
-    });
-
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.assets",
-      label: { key: "assets.menu.list", fallback: "Assets" },
-      routeId: "assets.list",
-      group: "wallets",
-      order: 5,
-      icon: "Layers",
-      visibleWhen: ({ unlocked }) => unlocked
-    };
-    menus.register(item);
-
-    const home = ctx.get<HomeRegistry>("home.registry");
-    const widget: HomeWidget = {
-      id: "assets.overview",
-      title: { key: "assets.home.overview", fallback: "Assets" },
-      component: AssetsHomeWidget,
-      order: 5,
-      slot: "main",
-      refreshHint: "realtime"
-    };
-    home.register(widget);
 
     void assets;
     void tokens;

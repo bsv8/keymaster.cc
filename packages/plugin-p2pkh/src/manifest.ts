@@ -6,26 +6,25 @@
 //   - 不再自己创建 interval；不再自己向 Topbar 写组件。
 //   - 监听 vault 事件自动同步。
 //
-// 硬切换 003：route / menu / home widget / settings / breadcrumb 全部走 I18nText。
+// 硬切换 003：route / business navigation / home widget / settings / breadcrumb 全部走 I18nText。
 
 import type {
   AssetDataNotifier,
   AssetRegistry,
   BackgroundRegistry,
   BackgroundService,
+  BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
   HomeRegistry,
   I18nPluginResources,
   KeyspaceService,
   KeyIdentity,
-  MenuItem,
-  MenuRegistry,
   MessageBus,
   PluginManifest,
   ResourceRegistry,
   RouteRegistry,
-  SettingsRegistry,
+  SystemSettingsRegistry,
   VaultService,
   WocService
 } from "@keymaster/contracts";
@@ -380,8 +379,8 @@ export const p2pkhPlugin: PluginManifest = {
     { capability: "asset.registry", reason: "注册 P2PKH AssetProvider" },
     { capability: "transfer.registry", reason: "注册 P2PKH TransferProvider" },
     { capability: "route.registry", reason: "注册 P2PKH 页面" },
-    { capability: "menu.registry", reason: "注册 P2PKH 菜单" },
-    { capability: "settings.registry", reason: "注册 P2PKH 设置" },
+    { capability: "business.registry", reason: "接入资产业务导航" },
+    { capability: "system-settings.registry", reason: "注册 Testnet 系统设置" },
     { capability: "home.registry", reason: "注册 P2PKH 首页 widget" },
     { capability: "breadcrumb.registry", reason: "注册 P2PKH 面包屑" }
   ],
@@ -565,45 +564,48 @@ export const p2pkhPlugin: PluginManifest = {
       id: "p2pkh.overview",
       path: "/p2pkh",
       label: { key: "p2pkh.route.overview", fallback: "P2PKH overview" },
-      component: P2pkhOverviewPage,
-      inMenu: true,
-      menuGroup: "wallets",
-      order: 25,
-      icon: "Wallet"
+      component: P2pkhOverviewPage
     });
     routes.register({
       id: "p2pkh.history",
       path: "/p2pkh/history",
       label: { key: "p2pkh.route.history", fallback: "P2PKH history" },
-      component: P2pkhHistoryPage,
-      inMenu: false
+      component: P2pkhHistoryPage
     });
     routes.register({
       id: "p2pkh.utxos",
       path: "/p2pkh/utxos",
       label: { key: "p2pkh.route.utxos", fallback: "P2PKH UTXOs" },
-      component: P2pkhUtxosPage,
-      inMenu: false
+      component: P2pkhUtxosPage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const items: MenuItem[] = [
-      { id: "menu.p2pkh.overview", label: { key: "p2pkh.menu.overview", fallback: "P2PKH" }, routeId: "p2pkh.overview", group: "wallets", order: 25, icon: "Wallet", visibleWhen: ({ unlocked }) => unlocked },
-      { id: "menu.p2pkh.history", label: { key: "p2pkh.menu.history", fallback: "P2PKH history" }, routeId: "p2pkh.history", group: "wallets", order: 26, visibleWhen: ({ unlocked }) => unlocked },
-      { id: "menu.p2pkh.utxos", label: { key: "p2pkh.menu.utxos", fallback: "P2PKH UTXOs" }, routeId: "p2pkh.utxos", group: "wallets", order: 27, visibleWhen: ({ unlocked }) => unlocked }
-    ];
-    for (const item of items) menus.register(item);
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("p2pkh", "assets", {
+      id: "assets.p2pkh",
+      label: { key: "p2pkh.menu.overview", fallback: "P2PKH" },
+      order: 15,
+      icon: "Wallet",
+      entry: {
+        path: "/p2pkh",
+        routeId: "p2pkh.overview",
+        visibleWhen: ({ unlocked }) => unlocked,
+        activeWhen: (path) => path.startsWith("/p2pkh/")
+      }
+    });
 
-    // 硬切换 003：/settings/p2pkh 由 settings.registry 单一真值提供。
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.register({
-      id: "p2pkh.settings",
-      path: "/settings/p2pkh",
-      label: { key: "p2pkh.settings.label", fallback: "P2PKH" },
-      description: { key: "p2pkh.settings.description", fallback: "P2PKH asset policies." },
+    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    systemSettings.register({
+      id: "p2pkh.system-settings.testnet",
+      group: {
+        id: "testnet",
+        label: { key: "p2pkh.settings.includeTestnet", fallback: "Include testnet assets" },
+        order: 30
+      },
+      label: { key: "p2pkh.settings.includeTestnet", fallback: "Include testnet assets" },
+      description: { key: "p2pkh.settings.includeTestnetHint", fallback: "Choose whether testnet assets are included." },
       component: P2pkhSettingsPage,
-      order: 110,
-      icon: "Cog",
+      order: 10,
+      replacesSettingsRouteId: "p2pkh.settings",
       visibleWhen: ({ unlocked }) => unlocked
     });
 

@@ -5,17 +5,15 @@
 // 硬切换 003：route / menu / home widget / breadcrumb 全部走 I18nText。
 
 import type {
+  BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
   ContactsService,
-  HomeRegistry,
   I18nPluginResources,
   KeyspaceService,
-  MenuItem,
-  MenuRegistry,
   PluginManifest,
-  RouteRegistry,
   ResourceRegistry,
+  RouteRegistry,
   Contact
 } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
@@ -159,7 +157,9 @@ export const contactsPlugin: PluginManifest = {
     { storageId: "book", description: "当前 key 的联系人" }
   ],
   dependencies: [
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" }
+    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
+    { capability: "route.registry", reason: "注册联系人页面" },
+    { capability: "business.registry", reason: "接入首页业务导航" }
   ],
   setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
@@ -201,40 +201,28 @@ export const contactsPlugin: PluginManifest = {
       id: "contacts.list",
       path: "/contacts",
       label: { key: "contacts.route.list", fallback: "Contacts" },
-      component: ContactsPage,
-      inMenu: true,
-      menuGroup: "tools",
-      order: 50,
-      icon: "Users"
+      component: ContactsPage
     });
     routes.register({
       id: "contacts.detail",
       path: "/contacts/:id",
       label: { key: "contacts.route.detail", fallback: "Contact detail" },
-      component: ContactDetailPage,
-      inMenu: false
+      component: ContactDetailPage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.contacts",
-      label: { key: "contacts.menu.list", fallback: "Contacts" },
-      routeId: "contacts.list",
-      group: "tools",
-      order: 50,
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("contacts", "home", {
+      id: "home.contacts",
+      label: { key: "contacts.route.list", fallback: "Contacts" },
+      order: 60,
       icon: "Users",
-      visibleWhen: ({ unlocked }) => unlocked
-    };
-    menus.register(item);
-
-    const home = ctx.get<HomeRegistry>("home.registry");
-    home.register({
-      id: "contacts.recent",
-      title: { key: "contacts.home.recent", fallback: "Recent contacts" },
-      component: RecentContactsWidget,
-      order: 30,
-      slot: "aside",
-      refreshHint: "realtime"
+      entry: {
+        path: "/contacts",
+        routeId: "contacts.list",
+        visibleWhen: ({ unlocked }) => unlocked,
+        activeWhen: (path) => path.startsWith("/contacts/")
+      },
+      home: [{ id: "contacts.recent", space: { id: "contacts.shortcuts", label: { key: "contacts.domain.label", fallback: "Contacts" }, order: 500 }, order: 30, component: RecentContactsWidget }]
     });
 
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");

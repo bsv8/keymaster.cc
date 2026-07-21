@@ -6,9 +6,12 @@
 import type { MessageBus } from "./messageBus.js";
 import type { I18nPluginResources } from "./i18n.js";
 import type { PluginLogger } from "./log.js";
+import type { PluginBusinessContribution } from "./business.js";
 
 /** 插件运行时上下文，由 plugin host 创建并传入 setup。 */
 export interface PluginContext {
+  /** Register cleanup that runs before teardown and registry ownership recovery. */
+  onDispose(cleanup: PluginTeardown): void;
   /** 注册 capability，重复注册会抛错。 */
   provide<T>(key: string, value: T): void;
   /** 读取 capability，缺失会抛错。 */
@@ -115,6 +118,12 @@ export interface PluginManifest {
   name: string;
   /** 描述。 */
   description?: string;
+  /**
+   * 插件面向用户的页面、菜单和首页卡片声明。
+   * runtime 自动注册并在 disable / uninstall 时统一回收；插件 setup 不必
+   * 接触 route.registry 或 home.registry。
+   */
+  business?: PluginBusinessContribution;
   /** 显式声明依赖的 capability（PluginHost 会做依赖检查）。 */
   dependencies?: PluginDependency[];
   /**

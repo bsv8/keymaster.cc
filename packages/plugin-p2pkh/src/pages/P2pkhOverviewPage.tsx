@@ -19,7 +19,7 @@
 
 import { useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
-import { useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { router, useI18n, useLocale, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
@@ -45,6 +45,10 @@ function clampAssetIdBySettings(
 ): P2pkhAssetId | undefined {
   if (!includeTestnet && id === "bsvtest") return undefined;
   return id;
+}
+
+function pathForP2pkhPage(path: "/p2pkh/history" | "/p2pkh/utxos", assetId: P2pkhAssetId | undefined): string {
+  return assetId ? `${path}?assetId=${encodeURIComponent(assetId)}` : path;
 }
 
 type PageReadiness = "initializing" | "no-active-key" | "ready" | "failed";
@@ -144,6 +148,12 @@ export function P2pkhOverviewPage() {
         description={description}
         actions={
           <>
+            <Button variant="ghost" onClick={() => router.push(pathForP2pkhPage("/p2pkh/history", assetId))}>
+              {t("p2pkh.menu.history", { defaultValue: "P2PKH 历史" })}
+            </Button>
+            <Button variant="ghost" onClick={() => router.push(pathForP2pkhPage("/p2pkh/utxos", assetId))}>
+              {t("p2pkh.menu.utxos", { defaultValue: "P2PKH UTXO" })}
+            </Button>
             <Button variant={assetId === "bsv" ? "primary" : "ghost"} onClick={() => setAssetId("bsv")}>
               {t("p2pkh.asset.bsvMain", { defaultValue: "BSV / main" })}
             </Button>

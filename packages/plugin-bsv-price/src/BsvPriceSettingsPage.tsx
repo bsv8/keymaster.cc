@@ -113,16 +113,10 @@ function BsvPriceSettingsPageInner({
       <PageHeader
         title={t("bsv-price.settings.title", { defaultValue: "BSV Price settings" })}
         description={t("bsv-price.settings.desc", {
-          defaultValue:
-            "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription."
+          defaultValue: "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription."
         })}
-        actions={
-          <Button onClick={onSave} loading={saving}>
-            {t("bsv-price.settings.save", { defaultValue: "保存" })}
-          </Button>
-        }
+        actions={<Button onClick={onSave} loading={saving}>{t("bsv-price.settings.save", { defaultValue: "保存" })}</Button>}
       />
-
       <div className="km-bsv-price-settings-page__card">
         <TextInput
           label={t("bsv-price.settings.field.publisher.label", {

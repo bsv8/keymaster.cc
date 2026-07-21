@@ -33,6 +33,7 @@ import type {
   PluginContext,
   PluginGraph,
   PluginManifest,
+  PluginBusinessContribution,
   StartupCapabilityErrorDetails,
   StartupPluginErrorDetails,
   PluginReverseDep,
@@ -56,16 +57,20 @@ import {
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
 import { createMessageBus } from "./messageBus.js";
 import { createAssetRegistry, type AssetRegistry } from "./registries/assetRegistry.js";
+import { createApplicationSettingsRegistry, type ApplicationSettingsRegistry } from "./registries/applicationSettingsRegistry.js";
 import { createBreadcrumbRegistry, type BreadcrumbRegistry } from "./registries/breadcrumbRegistry.js";
 import { createCollectibleRegistry, type CollectibleRegistry } from "./registries/collectibleRegistry.js";
 import { createCollectibleTransferRegistry, type CollectibleTransferRegistry } from "./registries/collectibleTransferRegistry.js";
 import { createCommandRegistry, type CommandRegistry } from "./registries/commandRegistry.js";
 import { createHomeRegistry, type HomeRegistry } from "./registries/homeRegistry.js";
+import { createBusinessFeatureRegistry, type BusinessFeatureRegistry } from "./registries/businessFeatureRegistry.js";
 import { createImporterRegistry, type ImporterRegistry } from "./registries/importerRegistry.js";
-import { createMenuRegistry, type MenuRegistry } from "./registries/menuRegistry.js";
 import { createNoticeRegistry } from "./registries/noticeRegistry.js";
 import { createRouteRegistry, type RouteRegistry } from "./registries/routeRegistry.js";
 import { createSettingsRegistry, type SettingsRegistry } from "./registries/settingsRegistry.js";
+import { createSystemSettingsRegistry, type SystemSettingsRegistry } from "./registries/systemSettingsRegistry.js";
+import { createSystemStatusRegistry, type SystemStatusRegistry } from "./registries/systemStatusRegistry.js";
+import { createVaultSettingsRegistry, type VaultSettingsRegistry } from "./registries/vaultSettingsRegistry.js";
 import { createTokenRegistry, type TokenRegistry } from "./registries/tokenRegistry.js";
 import { createTopbarRegistry } from "./registries/topbarRegistry.js";
 import { createTransferRegistry, type TransferRegistry } from "./registries/transferRegistry.js";
@@ -91,10 +96,14 @@ export interface PluginHost {
   capabilities: CapabilityRegistry;
   messageBus: MessageBus;
   routes: RouteRegistry;
-  menus: MenuRegistry;
   breadcrumbs: BreadcrumbRegistry;
   settings: SettingsRegistry;
+  systemSettings: SystemSettingsRegistry;
+  systemStatus: SystemStatusRegistry;
+  vaultSettings: VaultSettingsRegistry;
+  applicationSettings: ApplicationSettingsRegistry;
   home: HomeRegistry;
+  business: BusinessFeatureRegistry;
   commands: CommandRegistry;
   importers: ImporterRegistry;
   transfers: TransferRegistry;
@@ -166,6 +175,7 @@ interface PluginRecord {
   state: PluginStateKind;
   error?: string;
   ownership: PluginOwnership;
+  disposeCallbacks: Array<() => void | Promise<void>>;
 }
 
 function defaultStateFor(manifest: PluginManifest): PluginStateKind {
@@ -180,9 +190,12 @@ function diffIds(before: readonly string[], after: readonly string[]): string[] 
 function buildOwnershipSnapshot(
   registries: {
     routes: { _ids: () => string[] };
-    menus: { _ids: () => string[] };
     breadcrumbs: { _ids: () => string[] };
     settings: { _ids: () => string[] };
+    systemSettings: { _ids: () => string[] };
+    systemStatus: { _ids: () => string[] };
+    vaultSettings: { _ids: () => string[] };
+    applicationSettings: { _ids: () => string[] };
     home: { _ids: () => string[] };
     commands: { _ids: () => string[] };
     importers: { _ids: () => string[] };
@@ -194,13 +207,17 @@ function buildOwnershipSnapshot(
     topbar: { _ids: () => string[] };
     capabilities: { keys: () => string[] };
     resourceRegistry: { _ids: () => string[] };
+    business: { _ids: () => { domains: string[]; features: string[]; projections: string[] } };
   }
 ) {
   return {
     routes: registries.routes._ids(),
-    menus: registries.menus._ids(),
     breadcrumbs: registries.breadcrumbs._ids(),
     settingsRoutes: registries.settings._ids(),
+    systemSettingsItems: registries.systemSettings._ids(),
+    systemStatusModules: registries.systemStatus._ids(),
+    vaultSettingsSections: registries.vaultSettings._ids(),
+    applicationSettingsItems: registries.applicationSettings._ids(),
     homeWidgets: registries.home._ids(),
     commands: registries.commands._ids(),
     importers: registries.importers._ids(),
@@ -211,7 +228,10 @@ function buildOwnershipSnapshot(
     collectibleTransferHandlers: registries.collectibleTransfer._ids(),
     topbarItems: registries.topbar._ids(),
     capabilities: registries.capabilities.keys(),
-    resourceDefinitions: registries.resourceRegistry._ids()
+    resourceDefinitions: registries.resourceRegistry._ids(),
+    businessDomains: registries.business._ids().domains,
+    businessFeatures: registries.business._ids().features,
+    businessHomeProjections: registries.business._ids().projections
   };
 }
 
@@ -221,9 +241,15 @@ function ownershipDiff(
 ): Pick<
   PluginOwnership,
   | "routes"
-  | "menus"
+  | "businessDomains"
+  | "businessFeatures"
+  | "businessHomeProjections"
   | "breadcrumbs"
   | "settingsRoutes"
+  | "systemSettingsItems"
+  | "systemStatusModules"
+  | "vaultSettingsSections"
+  | "applicationSettingsItems"
   | "homeWidgets"
   | "commands"
   | "importers"
@@ -238,9 +264,15 @@ function ownershipDiff(
 > {
   return {
     routes: diffIds(before.routes, after.routes),
-    menus: diffIds(before.menus, after.menus),
+    businessDomains: diffIds(before.businessDomains, after.businessDomains),
+    businessFeatures: diffIds(before.businessFeatures, after.businessFeatures),
+    businessHomeProjections: diffIds(before.businessHomeProjections, after.businessHomeProjections),
     breadcrumbs: diffIds(before.breadcrumbs, after.breadcrumbs),
     settingsRoutes: diffIds(before.settingsRoutes, after.settingsRoutes),
+    systemSettingsItems: diffIds(before.systemSettingsItems, after.systemSettingsItems),
+    systemStatusModules: diffIds(before.systemStatusModules, after.systemStatusModules),
+    vaultSettingsSections: diffIds(before.vaultSettingsSections, after.vaultSettingsSections),
+    applicationSettingsItems: diffIds(before.applicationSettingsItems, after.applicationSettingsItems),
     homeWidgets: diffIds(before.homeWidgets, after.homeWidgets),
     commands: diffIds(before.commands, after.commands),
     importers: diffIds(before.importers, after.importers),
@@ -259,10 +291,14 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const capabilities = createCapabilityRegistry();
   const messageBus = createMessageBus();
   const routes = createRouteRegistry();
-  const menus = createMenuRegistry();
   const breadcrumbs = createBreadcrumbRegistry();
   const settings = createSettingsRegistry();
+  const systemSettings = createSystemSettingsRegistry();
+  const systemStatus = createSystemStatusRegistry();
+  const vaultSettings = createVaultSettingsRegistry();
+  const applicationSettings = createApplicationSettingsRegistry();
   const home = createHomeRegistry();
+  const business = createBusinessFeatureRegistry();
   const commands = createCommandRegistry();
   const importers = createImporterRegistry();
   const transfers = createTransferRegistry();
@@ -316,10 +352,14 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
 
   // 把内置 registry + messageBus + i18n + log + assetDataNotifier 暴露成 capability。
   capabilities.provide<RouteRegistry>("route.registry", routes);
-  capabilities.provide<MenuRegistry>("menu.registry", menus);
   capabilities.provide<BreadcrumbRegistry>("breadcrumb.registry", breadcrumbs);
   capabilities.provide<SettingsRegistry>("settings.registry", settings);
+  capabilities.provide<SystemSettingsRegistry>("system-settings.registry", systemSettings);
+  capabilities.provide<SystemStatusRegistry>("system-status.registry", systemStatus);
+  capabilities.provide<VaultSettingsRegistry>("vault-settings.registry", vaultSettings);
+  capabilities.provide<ApplicationSettingsRegistry>("application-settings.registry", applicationSettings);
   capabilities.provide<HomeRegistry>("home.registry", home);
+  capabilities.provide<BusinessFeatureRegistry>("business.registry", business);
   capabilities.provide<CommandRegistry>("command.registry", commands);
   capabilities.provide<ImporterRegistry>("importer.registry", importers);
   capabilities.provide<TransferRegistry>("transfer.registry", transfers);
@@ -392,6 +432,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       _ids: () => resourceRegistry._ids(),
     };
     return {
+      onDispose: (cleanup) => { record.disposeCallbacks.push(cleanup); },
       provide: (k, v) => provideCapability(k, v),
       get: (k) => k === RESOURCE_REGISTRY_CAPABILITY
         ? ownerResourceRegistry as any
@@ -411,9 +452,12 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   function snapshotOwnership() {
     return buildOwnershipSnapshot({
       routes,
-      menus,
       breadcrumbs,
       settings,
+      systemSettings,
+      systemStatus,
+      vaultSettings,
+      applicationSettings,
       home,
       commands,
       importers,
@@ -424,7 +468,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       collectibleTransfer,
       topbar,
       capabilities,
-      resourceRegistry
+      resourceRegistry,
+      business
     });
   }
 
@@ -455,6 +500,33 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
+  /**
+   * 将 manifest 的业务声明投影到内部技术 registry。
+   *
+   * 这是唯一允许业务配置接触 route/menu/home 的位置：插件只需维护自己的
+   * manifest；disable/unregister 时仍由既有 ownership diff 自动回收。
+   */
+  function registerBusinessContribution(ownerPluginId: string, contribution: PluginBusinessContribution | undefined): void {
+    if (!contribution) return;
+    for (const domain of contribution.domains) {
+      for (const feature of domain.features) {
+        const route = feature.entry.routeId ? routes.byId(feature.entry.routeId) : routes.byPath(feature.entry.path);
+        if (feature.entry.routeId && !route) throw new Error(`Business feature "${feature.id}" references missing route "${feature.entry.routeId}"`);
+        if (route && route.path !== feature.entry.path) throw new Error(`Business feature "${feature.id}" route path conflicts with its reference`);
+        if (route && !feature.entry.routeId) throw new Error(`Business feature "${feature.id}" must explicitly declare routeId for existing route "${feature.entry.path}"`);
+        if (!route) {
+          if (!feature.entry.component) throw new Error(`Business feature "${feature.id}" must provide component for a new route`);
+          routes.register({ id: feature.id, path: feature.entry.path, label: feature.label, component: feature.entry.component });
+        }
+        for (const view of feature.views ?? []) {
+          if (routes.byPath(view.path)) throw new Error(`Business feature view "${view.id}" path "${view.path}" conflicts with an existing route`);
+          routes.register({ id: view.id, path: view.path, label: view.label, component: view.component });
+        }
+      }
+      business.register(ownerPluginId, domain);
+    }
+  }
+
   async function runSetup(record: PluginRecord): Promise<void> {
     const before = snapshotOwnership();
     let teardownFn: (() => void | Promise<void>) | undefined;
@@ -463,6 +535,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       teardownFn = (await Promise.resolve(result)) as
         | (() => void | Promise<void>)
         | undefined;
+      registerBusinessContribution(record.manifest.id, record.manifest.business);
     } catch (err) {
       const after = snapshotOwnership();
       const diff = ownershipDiff(before, after);
@@ -556,11 +629,20 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       safe(() => resourceStore.disposeOwner(pluginId), `resourceOwner:${pluginId}`);
     }
     for (const id of ownership.topbarItems) safe(() => topbar.unregister(id), `topbar:${id}`);
+    for (const id of ownership.businessFeatures) safe(() => business.unregisterFeature(id), `businessFeature:${id}`);
+    for (const id of ownership.businessDomains) safe(() => business.unregisterDomain(id), `businessDomain:${id}`);
     for (const id of ownership.routes) safe(() => routes.unregister(id), `route:${id}`);
-    for (const id of ownership.menus) safe(() => menus.unregister(id), `menu:${id}`);
     for (const id of ownership.homeWidgets) safe(() => home.unregister(id), `home:${id}`);
     for (const id of ownership.settingsRoutes)
       safe(() => settings.unregister(id), `settingsRoute:${id}`);
+    for (const id of ownership.systemSettingsItems)
+      safe(() => systemSettings.unregister(id), `systemSettingsItem:${id}`);
+    for (const id of ownership.systemStatusModules)
+      safe(() => systemStatus.unregister(id), `systemStatusModule:${id}`);
+    for (const id of ownership.vaultSettingsSections)
+      safe(() => vaultSettings.unregister(id), `vaultSettingsSection:${id}`);
+    for (const id of ownership.applicationSettingsItems)
+      safe(() => applicationSettings.unregister(id), `applicationSettingsItem:${id}`);
     for (const id of ownership.breadcrumbs)
       safe(() => breadcrumbs.unregister(id), `breadcrumb:${id}`);
     for (const id of ownership.commands) safe(() => commands.unregister(id), `command:${id}`);
@@ -600,14 +682,27 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
+  async function runDisposeCallbacks(record: PluginRecord): Promise<unknown> {
+    const callbacks = record.disposeCallbacks.splice(0).reverse();
+    let firstError: unknown;
+    for (const cleanup of callbacks) {
+      try { await cleanup(); } catch (err) { firstError ??= err; }
+    }
+    return firstError;
+  }
+
   const host: PluginHost = {
     capabilities,
     messageBus,
     routes,
-    menus,
     breadcrumbs,
     settings,
+    systemSettings,
+    systemStatus,
+    vaultSettings,
+    applicationSettings,
     home,
+    business,
     commands,
     importers,
     transfers,
@@ -693,14 +788,19 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       records.set(plugin.id, {
         manifest: plugin,
         state: defaultStateFor(plugin),
-        ownership: emptyOwnership()
+        ownership: emptyOwnership(),
+        disposeCallbacks: []
       });
       const required = isStartupRequired(plugin);
       configStore.setRequiredPluginIds(
         [...knownManifests.values()].filter((m) => isStartupRequired(m)).map((m) => m.id)
       );
       const snapshot = configStore.read();
-      const shouldEnable = required
+      // `canDisable=false` is also an always-on contract. A stale persisted
+      // false value must not turn a system plugin into a silently missing
+      // route/capability on the next boot.
+      const immutable = plugin.meta.canDisable === false;
+      const shouldEnable = required || immutable
         ? true
         : plugin.id in snapshot
           ? Boolean(snapshot[plugin.id])
@@ -807,6 +907,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         bumpVersion();
       } catch (err) {
         enabledSet.delete(pluginId);
+        await runDisposeCallbacks(record);
         const ownership = record.ownership;
         purgeOwnership(ownership, pluginId);
         purgePluginNotices(record.manifest.id);
@@ -846,6 +947,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         };
       }
       safeNavigateAway(pluginId);
+      const disposeErr = await runDisposeCallbacks(record);
       const teardownErr = await runTeardown(record.ownership);
       purgeOwnership(record.ownership, pluginId);
       purgePluginNotices(pluginId);
@@ -854,9 +956,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         appMessageEndpointIds.delete(record.manifest.appMessageEndpoint.endpointId);
       }
       enabledSet.delete(pluginId);
-      if (teardownErr) {
+      if (teardownErr || disposeErr) {
         record.state = "error-disabled";
-        record.error = teardownErr instanceof Error ? teardownErr.message : String(teardownErr);
+        const lifecycleErr = disposeErr ?? teardownErr;
+        record.error = lifecycleErr instanceof Error ? lifecycleErr.message : String(lifecycleErr);
         logService.append({
           level: "error",
           pluginId: RUNTIME_SYSTEM_PLUGIN_ID,
@@ -865,8 +968,8 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           message: `Plugin teardown failed: ${pluginId}`,
           data: { pluginId },
           error: {
-            name: teardownErr instanceof Error ? teardownErr.name : "Error",
-            message: teardownErr instanceof Error ? teardownErr.message : String(teardownErr)
+            name: lifecycleErr instanceof Error ? lifecycleErr.name : "Error",
+            message: lifecycleErr instanceof Error ? lifecycleErr.message : String(lifecycleErr)
           }
         });
       } else {
@@ -919,11 +1022,12 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       // Rewriting the value also repairs the persisted configuration for the
       // next page load. Do not retry a plugin already in an error state here:
       // its next normal bootstrap remains the recovery boundary.
-      if (isStartupRequired(record.manifest) && !snap[id]) {
+      const immutable = record.manifest.meta.canDisable === false;
+      if ((isStartupRequired(record.manifest) || immutable) && !snap[id]) {
         configStore.setEnabled(id, true);
         continue;
       }
-      const want = isStartupRequired(record.manifest)
+      const want = isStartupRequired(record.manifest) || immutable
         ? true
         : snap[id] ?? record.manifest.meta.defaultEnabled;
       if (want && !isEnabled) {

@@ -67,9 +67,6 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   const [onlineHex, setOnlineHex] = useState("");
   const [onlineQuery, setOnlineQuery] = useState<AppMsgOnlineQueryState>({ phase: "idle" });
   const [syncMsg, setSyncMsg] = useState<{ kind: "ok" | "fail"; text: string } | null>(null);
-  const [providerMsg, setProviderMsg] = useState<{ kind: "ok" | "fail"; text: string } | null>(
-    null
-  );
   // UI 专用 tick：用于驱动倒计时文案逐秒刷新。**不**触发业务侧任何
   // 重连——所有重连生命周期都由 plugin-appmsg 内的协调器持有。
   const [tick, setTick] = useState(0);
@@ -308,7 +305,7 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
         )}
       </div>
 
-      {/* ===== 区块 2：provider 列表 + 切换 ===== */}
+      {/* ===== 区块 2：provider 列表（由系统自动选择） ===== */}
       <div className="appmsg-system-page__card appmsg-system-page__card--providers">
         <h2 className="appmsg-system-page__section-title">
           {i18n.t("appmsg.page.providers.title")}
@@ -324,7 +321,7 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
                 <tr>
                   <th>id</th>
                   <th>{i18n.t("appmsg.page.providers.name")}</th>
-                  <th>{i18n.t("appmsg.page.providers.actions")}</th>
+                  <th>{i18n.t("appmsg.page.providers.active")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -334,37 +331,7 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
                     <tr key={p.id} className="appmsg-system-page__table-row">
                       <td><code>{p.id}</code></td>
                       <td>{p.displayName}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="appmsg-system-page__button"
-                          disabled={isActive}
-                          onClick={() => {
-                            setProviderMsg(null);
-                            void service
-                              .setActiveProvider(p.id)
-                              .then(async () => {
-                                setProviderMsg({
-                                  kind: "ok",
-                                  text: `${i18n.t("appmsg.page.providers.switched")}: ${p.id}`
-                                });
-                                await refresh();
-                              })
-                              .catch((err: unknown) => {
-                                const text =
-                                  err instanceof Error ? err.message : String(err);
-                                setProviderMsg({
-                                  kind: "fail",
-                                  text: `${i18n.t("appmsg.page.providers.switch.fail")}: ${text}`
-                                });
-                              });
-                          }}
-                        >
-                          {isActive
-                            ? i18n.t("appmsg.page.providers.active")
-                            : i18n.t("appmsg.page.providers.activate")}
-                        </button>
-                      </td>
+                      <td>{isActive ? i18n.t("appmsg.page.providers.active") : "—"}</td>
                     </tr>
                   );
                 })}
@@ -372,14 +339,6 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
             </table>
           </div>
         )}
-        {providerMsg ? (
-          <span
-            className={`appmsg-system-page__sync-msg appmsg-system-page__sync-msg--${providerMsg.kind}`}
-            data-appmsg-provider-switch={providerMsg.kind}
-          >
-            {providerMsg.text}
-          </span>
-        ) : null}
       </div>
 
       {/* ===== 区块 3：连接态 ===== */}

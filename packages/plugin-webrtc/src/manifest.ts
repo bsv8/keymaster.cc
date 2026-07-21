@@ -24,7 +24,7 @@ import type {
   KeyspaceService,
   PluginManifest,
   NoticeRegistry,
-  SettingsRegistry
+  SystemSettingsRegistry
   ,ResourceRegistry
 } from "@keymaster/contracts";
 import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
@@ -216,7 +216,7 @@ export const webrtcPlugin: PluginManifest = {
     },
     { capability: "keyspace.service", reason: "打开 key-scoped 历史库" },
     { capability: "notice.registry", reason: "投递全局紧急 notice" },
-    { capability: "settings.registry", reason: "注册 /settings/webrtc 设置详情页" }
+    { capability: "system-settings.registry", reason: "注册 WebRTC 系统设置" }
   ],
   setup(ctx) {
     const registry = ctx.get<AppMsgEndpointServiceRegistry>(
@@ -309,19 +309,22 @@ export const webrtcPlugin: PluginManifest = {
       ]
     });
 
-    // settings
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.register({
-      id: "webrtc.settings",
-      path: WEBRTC_SETTINGS_PATH,
-      label: { key: "webrtc.page.settings.title", fallback: "WebRTC settings" },
+    const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
+    systemSettings.register({
+      id: "webrtc.system-settings.stun",
+      group: {
+        id: "webrtc",
+        label: { key: "webrtc.page.settings.title", fallback: "WebRTC" },
+        order: 50
+      },
+      label: { key: "webrtc.page.settings.field.stun.label", fallback: "STUN servers" },
       description: {
         key: "webrtc.page.settings.desc",
         fallback: "STUN-only config; no TURN."
       },
       component: WebrtcSettingsPage,
-      order: 130,
-      icon: "Radio",
+      order: 10,
+      replacesSettingsRouteId: "webrtc.settings",
       visibleWhen: ({ unlocked }) => unlocked
     });
 

@@ -1,5 +1,5 @@
 // packages/plugin-poker/src/manifest.ts
-// Poker 插件 manifest：注册 capability / route / menu / settings / breadcrumb。
+// Poker 插件 manifest：注册 capability / route / business navigation / settings / breadcrumb。
 //
 // 设计缘由：
 //   - 硬切换文档要求 "plugin-poker 必须作为独立业务插件接入，不允许把扑
@@ -9,33 +9,32 @@
 //   - 暴露 POKER_SERVICE_CAPABILITY 与 POKER_CAPABILITY（同值）两个常量名，
 //     兼容旧调用方；plugin-poker 的能力 key 与 contracts/poker.ts 集中维护。
 //
-// 硬切换 003：
-//   - /settings/poker 改为通过 settings.registry 注册单一真值；
-//   - 不再向 route.registry / menu.registry 重复注册同一设置页；
-//   - 删除 PokerSettingsEntry，不再向 /settings 聚合页注册入口 section；
-//   - breadcrumb 第一段改为不可点击"设置"分类节点。
+// 新导航迁移：
+//   - 扑克大厅通过 business.registry 挂到「首页」；
+//   - 设置页通过 application-settings.registry 挂到「设置 → 应用设置」；
+//   - 不再保留旧 Poker 设置入口。
 
 import type {
+  ApplicationSettingsRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
+  BusinessFeatureRegistry,
   HomeRegistry,
   I18nPluginResources,
   KeyspaceService,
-  MenuItem,
-  MenuRegistry,
   MessageBus,
   PluginManifest,
   RouteRegistry,
-  SettingsRegistry,
-  VaultService,
   ResourceRegistry,
   PokerConnectionStatus,
   PokerPresence,
   PokerSessionKeyState,
-  PokerTable
-  ,PokerSettings
+  PokerSettings,
+  PokerTable,
+  VaultService
 } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY, POKER_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { POKER_SETTINGS_PATH } from "./constants.js";
 import { createPokerService } from "./pokerService.js";
 import { PokerLobby } from "./PokerLobby.js";
 import { PokerTable as PokerTablePage } from "./PokerTable.js";
@@ -270,8 +269,8 @@ export const pokerPlugin: PluginManifest = {
     { capability: "runtime.messageBus", reason: "event subscription + publish" },
     { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
     { capability: "route.registry", reason: "register poker pages" },
-    { capability: "menu.registry", reason: "register poker menu" },
-    { capability: "settings.registry", reason: "register poker settings detail page" },
+    { capability: "business.registry", reason: "register poker lobby in the Home business navigation" },
+    { capability: "application-settings.registry", reason: "register poker application settings entry" },
     { capability: "home.registry", reason: "register poker home widget" },
     { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" }
   ],
@@ -322,46 +321,45 @@ export const pokerPlugin: PluginManifest = {
       id: "poker.lobby",
       path: "/poker",
       label: { key: "poker.route.lobby", fallback: "Poker lobby" },
-      component: PokerLobby,
-      inMenu: true,
-      menuGroup: "apps",
-      order: 30,
-      icon: "Spade"
+      component: PokerLobby
     });
     routes.register({
       id: "poker.table",
       path: "/poker/table/:tableId",
       label: { key: "poker.route.table", fallback: "Poker table" },
-      component: PokerTablePage,
-      inMenu: false
+      component: PokerTablePage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const items: MenuItem[] = [
-      {
-        id: "menu.poker.lobby",
-        label: { key: "poker.route.lobby", fallback: "Poker lobby" },
-        routeId: "poker.lobby",
-        group: "apps",
-        order: 30,
-        icon: "Spade",
-        visibleWhen: ({ unlocked }) => unlocked
-      }
-    ];
-    for (const item of items) menus.register(item);
-
-    // 硬切换 003：/settings/poker 由 settings.registry 单一真值提供。
-    // 不再保留 PokerSettingsEntry，不再向 /settings 聚合页注册入口 section。
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
-    settings.register({
+    routes.register({
       id: "poker.settings",
-      path: "/settings/poker",
+      path: POKER_SETTINGS_PATH,
+      label: { key: "poker.crumb.poker", fallback: "Poker" },
+      component: PokerSettingsPage
+    });
+
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("poker", "home", {
+      id: "home.poker",
+      label: { key: "poker.route.lobby", fallback: "Poker lobby" },
+      description: { key: "poker.provider.description", fallback: "Multi-tenant peer poker." },
+      order: 30,
+      icon: "Spade",
+      entry: {
+        path: "/poker",
+        routeId: "poker.lobby",
+        visibleWhen: ({ unlocked }) => unlocked,
+        activeWhen: (path) => path.startsWith("/poker/")
+      }
+    });
+
+    const applicationSettings = ctx.get<ApplicationSettingsRegistry>("application-settings.registry");
+    applicationSettings.register({
+      id: "poker.settings",
+      path: POKER_SETTINGS_PATH,
       label: { key: "poker.crumb.poker", fallback: "Poker" },
       description: { key: "poker.provider.description", fallback: "Multi-tenant peer poker." },
-      component: PokerSettingsPage,
-      order: 130,
-      icon: "Cog",
-      visibleWhen: ({ unlocked }) => unlocked
+      order: 140,
+      icon: "Spade"
     });
 
     const home = ctx.get<HomeRegistry>("home.registry");
@@ -378,11 +376,12 @@ export const pokerPlugin: PluginManifest = {
     const provider: BreadcrumbProvider = {
       id: "poker.crumbs",
       order: 220,
-      match: (path) => path.startsWith("/poker") || path.startsWith("/settings/poker"),
+      match: (path) => path.startsWith("/poker") || path === POKER_SETTINGS_PATH,
       resolve: (path) => {
-        if (path.startsWith("/settings/poker")) {
+        if (path === POKER_SETTINGS_PATH) {
           return [
             { label: { key: "poker.crumb.settings", fallback: "Settings" } },
+            { label: { key: "settings.applicationSettings.title", fallback: "Application settings" } },
             { label: { key: "poker.crumb.poker", fallback: "Poker" } }
           ];
         }
@@ -392,7 +391,10 @@ export const pokerPlugin: PluginManifest = {
             { label: { key: "poker.crumb.table", fallback: "Table" } }
           ];
         }
-        return [{ label: { key: "poker.crumb.poker", fallback: "Poker" } }];
+        return [
+          { label: { key: "home.menu.label", fallback: "Home" } },
+          { label: { key: "poker.crumb.poker", fallback: "Poker" } }
+        ];
       }
     };
     breadcrumbs.register(provider);

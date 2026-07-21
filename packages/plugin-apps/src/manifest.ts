@@ -2,25 +2,21 @@
 // plugin-apps 插件：Keymaster 内部 app launcher。
 //
 // 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
-//   - 注册 `/apps` 页面 + 菜单入口 + 首页 widget；
+//   - 注册 `/apps` 页面，并接入新业务导航的首页域与首页 widget；
 //   - 点击 `Open App` 时调用 `protocol.service.launchAppView(...)`；
 //   - 插件自身**不**直接 import `protocolStorageDb` /
 //     `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` /
 //     `window.open` popup URL——这些细节全部收口在 service 内部。
-//   - 依赖 `route.registry` / `menu.registry` / `home.registry` /
-//     `protocol.service`。
-//   - 元数据走 `business`：plugin-apps 是面向用户的 launcher 入口，**不**是
-//     core 平台能力；缺省启用、可被禁用。
+//   - 依赖 `route.registry` / `business.registry` / `protocol.service`。
+//   - plugin-apps 是面向用户的 launcher 入口，**不**是 core 平台能力；
+//     缺省启用、可被禁用。
 //   - 启动失败的 user-facing 文案（与 LaunchAppViewError.code 一一对应）；
 //     当前激活错误码 `export_owner_runtime_failed` 表示 launcher 端
 //     生成 appView owner runtime capability 失败。
 
 import type {
-  HomeRegistry,
-  HomeWidget,
+  BusinessFeatureRegistry,
   I18nPluginResources,
-  MenuItem,
-  MenuRegistry,
   PluginManifest,
   RouteRegistry
 } from "@keymaster/contracts";
@@ -120,49 +116,27 @@ export const appsPlugin: PluginManifest = {
   },
   i18n: appsResources,
   dependencies: [
-    { capability: "route.registry", reason: "注册 /apps 页面" },
-    { capability: "menu.registry", reason: "注册 Apps 菜单入口" },
-    { capability: "home.registry", reason: "注册首页 Apps widget" },
-    { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" }
+    { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" },
+    { capability: "route.registry", reason: "注册应用列表页面" },
+    { capability: "business.registry", reason: "接入首页业务导航" }
   ],
   setup(ctx) {
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({
-      id: "apps.page",
+      id: "apps.launcher",
       path: "/apps",
       label: { key: "apps.route.label", fallback: "Apps" },
-      component: AppsPage,
-      inMenu: true,
-      menuGroup: "apps",
-      order: 50,
-      icon: "Apps"
+      component: AppsPage
     });
 
-    const menus = ctx.get<MenuRegistry>("menu.registry");
-    const item: MenuItem = {
-      id: "menu.apps",
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature("apps", "home", {
+      id: "home.apps",
       label: { key: "apps.menu.label", fallback: "Apps" },
-      routeId: "apps.page",
-      group: "apps",
       order: 50,
-      icon: "Apps"
-    };
-    menus.register(item);
-
-    const home = ctx.get<HomeRegistry>("home.registry");
-    const widget: HomeWidget = {
-      id: "apps.home",
-      title: { key: "apps.widget.title", fallback: "Apps" },
-      component: AppsHomeWidget,
-      order: 60,
-      slot: "main",
-      refreshHint: "manual"
-    };
-    home.register(widget);
-
-    return () => {
-      // host teardown 时清空 route / menu / home；具体 unregister 接口由
-      // host 提供（plugin-apps 不持有反向引用）。teardown 走空实现。
-    };
+      icon: "Apps",
+      entry: { path: "/apps", routeId: "apps.launcher" },
+      home: [{ id: "apps.home", space: { id: "apps.applications", label: { key: "apps.domain.label", fallback: "Applications" }, order: 400 }, order: 60, component: AppsHomeWidget }]
+    });
   }
 };

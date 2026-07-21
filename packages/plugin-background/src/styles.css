@@ -1,0 +1,49 @@
+.background-settings__field {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.background-settings__label {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.background-settings__intervals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.background-settings__interval {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+.background-settings__interval:hover:not(:disabled) {
+  border-color: var(--primary);
+}
+
+.background-settings__interval.is-active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--primary-text);
+}
+
+.background-settings__interval:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.background-settings__interval:disabled { cursor: wait; opacity: 0.6; }
+.background-settings__error { margin: 10px 0 0; color: var(--danger); font-size: 13px; }

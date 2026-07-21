@@ -8,16 +8,18 @@
 //   - 注册路由：`/bsv-price` 单页面（业务页），**不**注册首页 widget
 //     （施工单 §7.4.4 收口成单页面，避免多表面状态分叉）；
 //   - `pricePublisherPublicKeyHex` 由装配层通过 `manifest.config`
-//     注入，只作为首次 seed；运行时编辑器走 `/settings/bsv-price`；
+//     注入，只作为首次 seed；运行时编辑器走「设置 → 应用设置」；
 //   - **不**接触 provider handle / wire。
 
 import type {
+  ApplicationSettingsRegistry,
   BroadcastCore,
+  BusinessFeatureRegistry,
   I18nPluginResources,
   PluginManifest,
   ResourceRegistry
 } from "@keymaster/contracts";
-import { BROADCAST_CORE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type SettingsRegistry } from "@keymaster/contracts";
+import { BROADCAST_CORE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import {
   BSV_PRICE_CONFIG_KEY,
   BSV_PRICE_SETTINGS_PATH
@@ -157,15 +159,18 @@ export const bsvPricePlugin: PluginManifest = {
       reason:
         "plugin-broadcast 在 setup 阶段 provide broadcast.core；本插件直接消费"
     },
-    { capability: "route.registry", reason: "注册 /bsv-price 业务页" },
-    { capability: "menu.registry", reason: "注册「BSV 价格」菜单项" },
+    { capability: "route.registry", reason: "注册行情页与应用设置详情页" },
     {
       capability: "breadcrumb.registry",
-      reason: "为 /bsv-price 与 /settings/bsv-price 提供面包屑"
+      reason: "为行情页与应用设置详情页提供面包屑"
     },
     {
-      capability: "settings.registry",
-      reason: "注册 /settings/bsv-price 设置详情页"
+      capability: "application-settings.registry",
+      reason: "注册应用设置目录入口"
+    },
+    {
+      capability: "business.registry",
+      reason: "将行情页挂入首页业务域"
     },
     {
       capability: RESOURCE_REGISTRY_CAPABILITY,
@@ -212,23 +217,9 @@ export const bsvPricePlugin: PluginManifest = {
         id: string;
         path: string;
         component: unknown;
-        inMenu?: boolean;
-        menuGroup?: string;
-        order?: number;
-        icon?: string;
         label: { key: string; fallback: string };
       }): void;
     }>("route.registry");
-    const menus = ctx.get<{
-      register(input: {
-        id: string;
-        path: string;
-        group: string;
-        order?: number;
-        icon?: string;
-        label: { key: string; fallback: string };
-      }): void;
-    }>("menu.registry");
     const breadcrumbs = ctx.get<{
       register(input: {
         id: string;
@@ -237,26 +228,30 @@ export const bsvPricePlugin: PluginManifest = {
         resolve: () => Array<{ label: { key: string; fallback: string } }>;
       }): void;
     }>("breadcrumb.registry");
-    const settings = ctx.get<SettingsRegistry>("settings.registry");
+    const applicationSettings = ctx.get<ApplicationSettingsRegistry>("application-settings.registry");
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
 
     routes.register({
       id: "bsv-price.page",
       path: "/bsv-price",
       label: { key: "bsv-price.menu", fallback: "BSV Price" },
-      component: BsvPricePage,
-      inMenu: true,
-      menuGroup: "tools",
-      order: 10,
-      icon: "LineChart"
+      component: BsvPricePage
     });
 
-    menus.register({
-      id: "bsv-price.page",
-      path: "/bsv-price",
-      group: "tools",
+    routes.register({
+      id: "bsv-price.settings",
+      path: BSV_PRICE_SETTINGS_PATH,
+      label: { key: "bsv-price.settings.title", fallback: "BSV Price settings" },
+      component: BsvPriceSettingsPage
+    });
+
+    business.registerFeature(BSV_PRICE_PLUGIN_ID, "home", {
+      id: "home.bsv-price",
+      label: { key: "bsv-price.menu", fallback: "BSV Price" },
+      description: { key: "bsv-price.page.title", fallback: "BSV / USDT prices" },
       order: 10,
       icon: "LineChart",
-      label: { key: "bsv-price.menu", fallback: "BSV Price" }
+      entry: { path: "/bsv-price", routeId: "bsv-price.page" }
     });
 
     breadcrumbs.register({
@@ -264,6 +259,7 @@ export const bsvPricePlugin: PluginManifest = {
       order: 10,
       match: (path: string) => path === "/bsv-price",
       resolve: () => [
+        { label: { key: "home.menu.label", fallback: "Home" } },
         { label: { key: "bsv-price.breadcrumb", fallback: "BSV Price" } }
       ]
     });
@@ -272,31 +268,23 @@ export const bsvPricePlugin: PluginManifest = {
       order: 10,
       match: (path: string) => path === BSV_PRICE_SETTINGS_PATH,
       resolve: () => [
-        {
-          label: {
-            key: "bsv-price.settings.title",
-            fallback: "BSV Price settings"
-          }
-        }
+        { label: { key: "settings.crumb.settings", fallback: "Settings" } },
+        { label: { key: "settings.applicationSettings.title", fallback: "Application settings" } },
+        { label: { key: "bsv-price.settings.title", fallback: "BSV Price settings" } }
       ]
     });
 
-    settings.register({
+    applicationSettings.register({
       id: "bsv-price.settings",
       path: BSV_PRICE_SETTINGS_PATH,
-      label: {
-        key: "bsv-price.settings.title",
-        fallback: "BSV Price settings"
-      },
+      // 目录层展示应用名；进入详情页后才展示“BSV Price 设置”。
+      label: { key: "bsv-price.menu", fallback: "BSV Price" },
       description: {
         key: "bsv-price.settings.desc",
-        fallback:
-          "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription."
+        fallback: "Edit the PriceCast publisher public key. Saving an empty value clears the configuration and stops subscription."
       },
-      component: BsvPriceSettingsPage,
       order: 130,
-      icon: "LineChart",
-      visibleWhen: ({ unlocked }) => unlocked
+      icon: "LineChart"
     });
 
     return () => {

@@ -20,12 +20,10 @@ import {
 } from "./createPluginHost.js";
 import type { PluginContext, PluginManifest } from "@keymaster/contracts";
 import type { RouteRegistry } from "./registries/routeRegistry.js";
-import type { MenuRegistry } from "./registries/menuRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 
 interface RegistryViews {
   routes: { ids: string[] };
-  menus: { ids: string[] };
   settingsRoutes: { ids: string[] };
   capabilities: { keys: string[] };
 }
@@ -33,7 +31,6 @@ interface RegistryViews {
 function view(host: PluginHost): RegistryViews {
   return {
     routes: { ids: host.routes._ids() },
-    menus: { ids: host.menus._ids() },
     settingsRoutes: { ids: host.settings._ids() },
     capabilities: { keys: host.capabilities.keys() }
   };
@@ -59,13 +56,6 @@ function makeA(): PluginManifest {
         path: "/a",
         label: "A",
         component: () => null
-      });
-      const m = ctx.get<MenuRegistry>("menu.registry");
-      m.register({
-        id: "menu.a",
-        label: "A",
-        group: "g",
-        order: 1
       });
       ctx.provide(CAP_A, { value: "a" });
     }
@@ -153,6 +143,45 @@ beforeEach(() => {
 });
 
 describe("createPluginHost - lifecycle", () => {
+  it("registers business declarations independently and rolls them back", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register({
+      id: "business-surface",
+      name: "Business surface",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      business: {
+        domains: [{
+          id: "business-surface.domain",
+          label: { key: "test.business.domain", fallback: "Business" },
+          order: 10,
+          features: [{
+            id: "business-surface.feature",
+            label: { key: "test.business.page", fallback: "Business page" },
+            order: 12,
+            entry: { path: "/business-surface", component: () => null },
+            home: [{
+              id: "business-surface.projection",
+              space: { id: "business-surface.summary", label: { key: "test.business.space", fallback: "Summary" }, order: 10 },
+              order: 3,
+              component: () => null
+            }]
+          }]
+        }]
+      },
+      setup() {}
+    });
+
+    expect(host.routes.byId("business-surface.feature")?.path).toBe("/business-surface");
+    expect(host.home.list()).toEqual([]);
+    expect(host.business.listDomains().map((domain) => domain.id)).toEqual(["business-surface.domain"]);
+    expect(host.business.listHomeProjections().map((projection) => projection.id)).toEqual(["business-surface.projection"]);
+
+    await host.disable("business-surface");
+    expect(host.routes.byId("business-surface.feature")).toBeUndefined();
+    expect(host.business.listDomains()).toEqual([]);
+    expect(host.business.listHomeProjections()).toEqual([]);
+  });
+
   it("registers plugins and reads graph", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.registerAll([makeA(), makeB([CAP_A]), makeC()]);
@@ -189,6 +218,27 @@ describe("createPluginHost - lifecycle", () => {
     expect(host.configStore.read().c).toBe(true);
   });
 
+  it("always enables optional immutable plugins despite stale persisted config", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true });
+    const immutableOptional: PluginManifest = {
+      ...makeC(),
+      id: "immutable-optional",
+      meta: {
+        kind: "core",
+        startup: "optional",
+        defaultEnabled: true,
+        canDisable: false,
+        providesCapabilities: [CAP_C]
+      }
+    };
+    host.configStore.setEnabled("immutable-optional", false);
+
+    await host.register(immutableOptional);
+
+    expect(host.state("immutable-optional").kind).toBe("enabled");
+    expect(host.configStore.read()["immutable-optional"]).toBe(true);
+  });
+
   it("does not let config updates disable plugins marked canDisable=false", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.register(makeC());
@@ -214,7 +264,6 @@ describe("createPluginHost - lifecycle", () => {
 
     const after = view(host);
     expect(after.routes.ids).not.toContain(ROUTE_A);
-    expect(after.menus.ids).not.toContain("menu.a");
     expect(after.capabilities.keys).not.toContain(CAP_A);
   });
 
@@ -281,6 +330,25 @@ describe("createPluginHost - lifecycle", () => {
     await host.disable("td");
     // 仅断言状态；teardown 已调起。
     expect(host.state("td").kind).toBe("disabled");
+  });
+
+  it("runs onDispose callbacks before teardown and registry ownership recovery", async () => {
+    const events: string[] = [];
+    const plugin: PluginManifest = {
+      id: "dispose-hook",
+      name: "Dispose hook",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      setup(ctx) {
+        const routes = ctx.get<RouteRegistry>("route.registry");
+        routes.register({ id: "dispose.route", path: "/dispose", label: "Dispose", component: () => null });
+        ctx.onDispose(() => { events.push(routes.byId("dispose.route") ? "dispose:before-purge" : "dispose:after-purge"); });
+        return () => { events.push(routes.byId("dispose.route") ? "teardown:before-purge" : "teardown:after-purge"); };
+      }
+    };
+    const host = createPluginHost({ disableConfigPersistence: true });
+    await host.register(plugin);
+    await host.disable(plugin.id);
+    expect(events).toEqual(["dispose:before-purge", "teardown:before-purge"]);
   });
 
   it("setup throwing causes error-disabled state and removes owner", async () => {

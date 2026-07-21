@@ -59,15 +59,85 @@ function summaryFor(entry: LogEntry): string | null {
   return null;
 }
 
+/** 系统页中的日志配置设置；每项变更均立即写入统一日志服务。 */
+export function LogConfigurationSettings() {
+  const { t } = useI18n();
+  const log = useCapability<LogService>(LOG_SERVICE_CAPABILITY);
+  const [config, setConfig] = useState<LogConfig>(() => log.getConfig());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => log.onConfigChange(setConfig), [log]);
+
+  function applyConfig(patch: Partial<LogConfig>) {
+    const next = {
+      ...config,
+      ...patch,
+      retentionDays: Math.max(1, Math.floor((patch.retentionDays ?? config.retentionDays)))
+    };
+    setConfig(next);
+    setBusy(true);
+    setError(null);
+    void log.updateConfig(next).then(setConfig).catch((err: unknown) => {
+      setConfig(log.getConfig());
+      setError(err instanceof Error ? err.message : String(err));
+    }).finally(() => setBusy(false));
+  }
+
+  function pruneNow() {
+    setBusy(true);
+    setError(null);
+    void log.pruneExpired().catch((err: unknown) => {
+      setError(err instanceof Error ? err.message : String(err));
+    }).finally(() => setBusy(false));
+  }
+
+  return (
+    <div className="log-settings-config">
+      <p className="log-settings-card__hint">
+        {t("logSettings.config.retentionHint", {
+          defaultValue: "Retention applies to all entries. Decreasing the value prunes the oldest entries immediately (best-effort)."
+        })}
+      </p>
+      <label className="log-settings-toggle">
+        <input
+          type="checkbox"
+          checked={config.debugEnabled}
+          disabled={busy}
+          onChange={(e) => applyConfig({ debugEnabled: e.target.checked })}
+        />
+        <span>{t("logSettings.config.debug", { defaultValue: "Enable debug logs" })}</span>
+      </label>
+      <p className="log-settings-card__hint">
+        {t("logSettings.config.debugHint", {
+          defaultValue: "Debug is off by default. When off, logger.debug() does not write to storage."
+        })}
+      </p>
+      <TextInput
+        type="number"
+        min={1}
+        step={1}
+        value={String(config.retentionDays)}
+        disabled={busy}
+        label={t("logSettings.config.retention", { defaultValue: "Retention (days)" })}
+        onChange={(e) => {
+          const value = Number(e.currentTarget.value);
+          if (Number.isFinite(value) && value > 0) applyConfig({ retentionDays: value });
+        }}
+      />
+      <div className="log-settings-actions">
+        <Button size="sm" variant="ghost" onClick={pruneNow} disabled={busy}>
+          {t("logSettings.config.pruneNow", { defaultValue: "Prune now" })}
+        </Button>
+      </div>
+      {error ? <p className="log-settings-card__error">{error}</p> : null}
+    </div>
+  );
+}
+
 export function LogSettingsPage() {
   const { t } = useI18n();
   const log = useCapability<LogService>(LOG_SERVICE_CAPABILITY);
-
-  // 配置：本地草稿；保存后写入 service。
-  const [configDraft, setConfigDraft] = useState<LogConfig>(() => log.getConfig());
-  const [savedConfig, setSavedConfig] = useState<LogConfig>(() => log.getConfig());
-  const [configDirty, setConfigDirty] = useState(false);
-  const [configError, setConfigError] = useState<string | null>(null);
 
   // 过滤条件
   const [filterPluginId, setFilterPluginId] = useState("");
@@ -83,16 +153,6 @@ export function LogSettingsPage() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [clearedHint, setClearedHint] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  // 订阅 config 变化：其它标签页 / 自身保存后刷新。
-  useEffect(() => {
-    const off = log.onConfigChange((c) => {
-      setConfigDraft(c);
-      setSavedConfig(c);
-      setConfigDirty(false);
-    });
-    return off;
-  }, [log]);
 
   const query = useMemo<LogQuery>(() => {
     const q: LogQuery = { limit: 200 };
@@ -115,33 +175,10 @@ export function LogSettingsPage() {
     }
   }, [log, query]);
 
-  // query 变化自动 refresh；config 变化也 refresh（debug toggle 后已存在的列表是 stale）。
+  // query 变化自动 refresh。
   useEffect(() => {
     void refresh();
-  }, [refresh, savedConfig]);
-
-  function updateConfigDraft(patch: Partial<LogConfig>) {
-    setConfigDraft((prev) => ({ ...prev, ...patch }));
-    setConfigDirty(true);
-  }
-
-  async function saveConfig() {
-    setBusy(true);
-    setConfigError(null);
-    try {
-      const next = await log.updateConfig({
-        retentionDays: Math.max(1, Math.floor(configDraft.retentionDays)),
-        debugEnabled: configDraft.debugEnabled
-      });
-      setSavedConfig(next);
-      setConfigDraft(next);
-      setConfigDirty(false);
-    } catch (err) {
-      setConfigError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
+  }, [refresh]);
 
   async function clearWith(predicate: { pluginId?: string; level?: LogLevel }) {
     setBusy(true);
@@ -179,23 +216,6 @@ export function LogSettingsPage() {
     }
   }
 
-  async function pruneNow() {
-    setBusy(true);
-    setClearedHint(null);
-    try {
-      const removed = await log.pruneExpired();
-      setClearedHint(
-        t("logSettings.pruned", {
-          defaultValue: `Pruned ${removed} expired entries`
-        }).replace("${removed}", String(removed))
-      );
-      await refresh();
-    } catch (err) {
-      setLoadError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setBusy(false);
-    }
-  }
 
   const filterPredicate = useMemo(
     () => ({
@@ -214,63 +234,6 @@ export function LogSettingsPage() {
             "Inspect and configure the unified system log. Plugins record their activity via ctx.logger; entries are stored in a single global IndexedDB."
         })}
       />
-
-      <section className="log-settings-card">
-        <h2 className="log-settings-card__title">
-          {t("logSettings.config.title", { defaultValue: "Configuration" })}
-        </h2>
-        <p className="log-settings-card__hint">
-          {t("logSettings.config.retentionHint", {
-            defaultValue:
-              "Retention applies to all entries. Decreasing the value prunes the oldest entries immediately (best-effort)."
-          })}
-        </p>
-        <div className="log-settings-config">
-          <label className="log-settings-toggle">
-            <input
-              type="checkbox"
-              checked={configDraft.debugEnabled}
-              onChange={(e) => updateConfigDraft({ debugEnabled: e.target.checked })}
-            />
-            <span>
-              {t("logSettings.config.debug", { defaultValue: "Enable debug logs" })}
-            </span>
-          </label>
-          <p className="log-settings-card__hint">
-            {t("logSettings.config.debugHint", {
-              defaultValue:
-                "Debug is off by default. When off, logger.debug() does not write to storage. Turning it on affects future entries only — past debug entries are not back-filled."
-            })}
-          </p>
-          <TextInput
-            type="number"
-            min={1}
-            step={1}
-            value={String(configDraft.retentionDays)}
-            label={t("logSettings.config.retention", { defaultValue: "Retention (days)" })}
-            onChange={(e) => {
-              const v = Number(e.currentTarget.value);
-              if (Number.isFinite(v) && v > 0) {
-                updateConfigDraft({ retentionDays: Math.floor(v) });
-              }
-            }}
-          />
-          <div className="log-settings-actions">
-            <Button
-              size="sm"
-              onClick={saveConfig}
-              disabled={busy || !configDirty}
-              loading={busy && configDirty}
-            >
-              {t("logSettings.config.save", { defaultValue: "Save" })}
-            </Button>
-            <Button size="sm" variant="ghost" onClick={pruneNow} disabled={busy}>
-              {t("logSettings.config.pruneNow", { defaultValue: "Prune now" })}
-            </Button>
-          </div>
-          {configError ? <p className="log-settings-card__error">{configError}</p> : null}
-        </div>
-      </section>
 
       <section className="log-settings-card">
         <h2 className="log-settings-card__title">

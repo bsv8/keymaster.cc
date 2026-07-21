@@ -1,9 +1,9 @@
 // packages/contracts/src/home.ts
-// 首页契约：插件通过 homeRegistry 注册首页 widget。
-// 硬切换 006：首页栏目归属真值。
+// Legacy 首页契约：插件通过 homeRegistry 注册首页 widget。
+// 该契约与 business.ts 的新业务首页投影完全独立。
 //   - main: 首页主业务栏，宽度自适应撑满；
 //   - aside: 首页辅助栏，固定窄宽（CSS 320px）。
-//   - 首页挂载插件必须显式声明栏目归属，registry 不再承载 size 维度。
+//   - legacy 首页挂载插件必须显式声明栏目归属，registry 不再承载 size 维度。
 //   - 旧 HomeWidgetSize 已被删除，size 不再是首页布局真值。
 
 import type { ComponentType } from "react";
@@ -24,11 +24,7 @@ export interface HomeWidget {
   component: ComponentType;
   /** 栏目内排序，越小越靠前。 */
   order: number;
-  /**
-   * 栏目归属：main 为主业务栏，aside 为辅助栏。
-   * 渲染层按 slot 分组后再按 order 升序排列。
-   * 必填：插件作者必须显式声明，不允许宿主推断。
-   */
+  /** Legacy registry column. */
   slot: HomeWidgetSlot;
   /** 刷新策略提示（用于 UI 提示 stale）。 */
   refreshHint?: "realtime" | "manual";

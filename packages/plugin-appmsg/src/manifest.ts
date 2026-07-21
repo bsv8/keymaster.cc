@@ -33,6 +33,7 @@ import type {
   ProviderSealedMessageRecord,
   PluginContext,
   PluginManifest,
+  SystemStatusRegistry,
   VaultService
 } from "@keymaster/contracts";
 import {
@@ -218,7 +219,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
       reason: "解析 owner publicKeyHex / 打开 key-scoped 本地 DB"
     },
     { capability: "route.registry", reason: "注册 /system/appmsg 路由" },
-    { capability: "menu.registry", reason: "注册 system 分组菜单项 AppMsg" },
+    { capability: "system-status.registry", reason: "注入 AppMsg 系统状态模块" },
     {
       capability: "breadcrumb.registry",
       reason: "为 /system/appmsg 提供面包屑"
@@ -506,7 +507,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
     });
 
     /**
-     * AppMsg 管理面：路由 / 菜单 / 面包屑。
+     * AppMsg 管理面：路由 / 面包屑。
      *
      * 本页是平台管理的"真值"——它直接消费 `appmsg.core` 的全库 / 状态
      * 能力，**不**再被任何 plugin facade 包装。`plugin-message` 是普通
@@ -517,23 +518,9 @@ export const appmsgPlatformPlugin: PluginManifest = {
         id: string;
         path: string;
         component: unknown;
-        inMenu?: boolean;
-        menuGroup?: string;
-        order?: number;
-        icon?: string;
         label: { key: string; fallback: string };
       }): void;
     }>("route.registry");
-    const menus = ctx.get<{
-      register(input: {
-        id: string;
-        path: string;
-        group: string;
-        order?: number;
-        icon?: string;
-        label: { key: string; fallback: string };
-      }): void;
-    }>("menu.registry");
     const breadcrumbs = ctx.get<{
       register(input: {
         id: string;
@@ -547,16 +534,16 @@ export const appmsgPlatformPlugin: PluginManifest = {
       id: "appmsg.system",
       path: APPMSG_ROUTE_PATH,
       label: { key: "appmsg.page.title", fallback: "AppMsg" },
-      component: AppMsgPage,
-      inMenu: false
+      component: AppMsgPage
     });
-    menus.register({
-      id: "appmsg.system.menu",
-      label: { key: "appmsg.menu", fallback: "AppMsg" },
+    const systemStatus = ctx.get<SystemStatusRegistry>("system-status.registry");
+    systemStatus.register({
+      id: "appmsg.system-status",
       path: APPMSG_ROUTE_PATH,
-      group: "system",
-      order: 10,
-      icon: "Radio"
+      label: { key: "appmsg.menu", fallback: "AppMsg" },
+      description: { key: "appmsg.page.title", fallback: "AppMsg" },
+      component: AppMsgPage,
+      order: 20
     });
     breadcrumbs.register({
       id: "appmsg.system.crumbs",

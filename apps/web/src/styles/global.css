@@ -846,6 +846,15 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 }
 .vault-page__table { display: block; }
 .vault-page__mobile { display: none; }
+.ui-modal[data-testid="vault-key-import-modal"] .ui-modal__panel {
+  max-height: calc(100dvh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+.ui-modal[data-testid="vault-key-import-modal"] .ui-modal__body {
+  overflow-y: auto;
+  padding-right: 4px;
+}
 
 .vault-key-status {
   display: inline-block;

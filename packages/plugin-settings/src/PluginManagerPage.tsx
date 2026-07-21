@@ -57,6 +57,7 @@ export function PluginManagerPage() {
     return [...ids]
       .map((id) => runtime.getManifest(id))
       .filter((m): m is PluginManifest => Boolean(m))
+      .filter((m) => m.meta?.canDisable === true)
       .sort((a, b) => {
         const ga = a.meta?.displayGroup ?? a.meta?.kind ?? "business";
         const gb = b.meta?.displayGroup ?? b.meta?.kind ?? "business";
@@ -96,7 +97,7 @@ export function PluginManagerPage() {
         title={t("pluginManager.title", { defaultValue: "Plugins" })}
         description={t("pluginManager.description", {
           defaultValue:
-            "System-level plugin management. Changes take effect immediately. Disabled plugins are unloaded from the host."
+            "Manage enabled optional plugins. System modules are always available and are not listed here."
         })}
       />
       {error ? <div className="plugin-manager__error">{error}</div> : null}

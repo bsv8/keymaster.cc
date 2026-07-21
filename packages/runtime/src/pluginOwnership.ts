@@ -1,7 +1,7 @@
 // packages/runtime/src/pluginOwnership.ts
 // 插件 ownership 记录：每个 plugin 在 setup 期间向 host 注册的"owner 资源"。
 // 设计缘由（硬切换 001）：
-//   - 不要求旧插件手写"我注册了哪些 route / menu / capability"。
+//   - 不要求旧插件手写"我注册了哪些 route / capability"。
 //   - host 在 setup 前后对全部 registry 做快照 diff，把新增资源归属到当前 plugin。
 //   - disable 时按 ownership record 反向注销。
 //   - 这条设计保证对旧插件零侵入。
@@ -16,7 +16,6 @@ import type {
   CommandDescriptor,
   HomeWidget,
   KeyImporter,
-  MenuItem,
   SettingsRoute,
   TokenProvider,
   TopbarItem,
@@ -24,16 +23,25 @@ import type {
 } from "@keymaster/contracts";
 
 export interface PluginOwnership {
+  businessDomains: string[];
+  businessFeatures: string[];
+  businessHomeProjections: string[];
   /** capability keys 该 plugin 提供的。 */
   capabilities: string[];
   /** route ids 该 plugin 注册的。 */
   routes: string[];
-  /** menu ids。 */
-  menus: string[];
   /** breadcrumb provider ids。 */
   breadcrumbs: string[];
   /** settings detail page ids（硬切换 003：单一 settings 资源）。 */
   settingsRoutes: string[];
+  /** `/settings/system` 中由插件注入的设置项目。 */
+  systemSettingsItems: string[];
+  /** 「设置 → 系统状态」中由系统模块注入的状态视图。 */
+  systemStatusModules: string[];
+  /** 「设置 → Key 管理」中由插件注入的内嵌工作区。 */
+  vaultSettingsSections: string[];
+  /** 「设置 → 应用设置」中由应用插件注入的入口。 */
+  applicationSettingsItems: string[];
   /** home widget ids。 */
   homeWidgets: string[];
   /** command ids。 */
@@ -60,11 +68,17 @@ export interface PluginOwnership {
 
 export function emptyOwnership(): PluginOwnership {
   return {
+    businessDomains: [],
+    businessFeatures: [],
+    businessHomeProjections: [],
     capabilities: [],
     routes: [],
-    menus: [],
     breadcrumbs: [],
     settingsRoutes: [],
+    systemSettingsItems: [],
+    systemStatusModules: [],
+    vaultSettingsSections: [],
+    applicationSettingsItems: [],
     homeWidgets: [],
     commands: [],
     importers: [],
@@ -88,7 +102,6 @@ export type {
   CommandDescriptor,
   HomeWidget,
   KeyImporter,
-  MenuItem,
   SettingsRoute,
   TokenProvider,
   TopbarItem,
