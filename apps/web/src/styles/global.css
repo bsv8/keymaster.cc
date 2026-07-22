@@ -111,6 +111,11 @@ button { font-family: inherit; }
   min-width: 360px; max-width: 520px; padding: 16px;
 }
 .ui-modal__header { font-weight: 700; font-size: 16px; margin-bottom: 12px; }
+.ui-modal__close { align-items: center; appearance: none; background: color-mix(in srgb, var(--text) 9%, transparent); border: 0; border-radius: 999px; color: var(--text-dim); cursor: pointer; display: flex; font: inherit; font-size: 22px; height: 30px; justify-content: center; line-height: 1; padding: 0 0 2px; position: absolute; right: 10px; top: 10px; transition: background .15s ease, color .15s ease, transform .15s ease; width: 38px; }
+.ui-modal__close + .ui-modal__header { padding-right: 42px; }
+.ui-modal__close:hover { background: color-mix(in srgb, var(--text) 15%, transparent); color: var(--text); }
+.ui-modal__close:active { transform: scale(.94); }
+.ui-modal__close:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .ui-modal__body { display: flex; flex-direction: column; gap: 8px; }
 .ui-modal__footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
@@ -741,9 +746,17 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .home-actions__scan { display: flex; flex-direction: column; gap: 12px; }
 .ui-modal[data-testid="home-scan-modal"] .ui-modal__panel { box-sizing: border-box; max-height: 90dvh; overflow-y: auto; width: min(520px, 92vw); }
 .ui-modal[data-testid="home-scan-modal"] .ui-modal__body, .home-actions__scan { min-width: 0; }
+.home-actions__scan-modes { background: color-mix(in srgb, var(--surface) 70%, var(--border)); border-radius: 10px; display: grid; gap: 3px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 3px; }
+.home-actions__scan-modes button { align-items: center; background: transparent; border: 0; border-radius: 8px; color: var(--text-dim); cursor: pointer; display: flex; font: inherit; font-size: 13px; gap: 6px; justify-content: center; min-height: 34px; padding: 6px 10px; }
+.home-actions__scan-modes button.is-active { background: var(--surface); box-shadow: 0 1px 2px color-mix(in srgb, #000 16%, transparent); color: var(--text); }
 .home-actions__camera-wrap { aspect-ratio: 4 / 3; background: #101318; border-radius: 12px; max-height: min(46dvh, 360px); overflow: hidden; position: relative; width: 100%; }
 .home-actions__camera { display: block; height: 100%; max-width: 100%; object-fit: cover; width: 100%; }
 .home-actions__scan-frame { border: 2px solid var(--primary); border-radius: 14px; inset: 13%; pointer-events: none; position: absolute; }
+.home-actions__image-picker { align-items: center; background: color-mix(in srgb, var(--surface) 78%, var(--border)); border: 1px dashed var(--border); border-radius: 12px; display: flex; gap: 14px; min-height: 120px; padding: 14px; }
+.home-actions__image-picker > svg { color: var(--text-dim); flex: 0 0 auto; margin-inline: 12px; }
+.home-actions__image-picker img { border-radius: 8px; height: 88px; object-fit: cover; width: 88px; }
+.home-actions__image-picker > div { display: flex; flex: 1; flex-direction: column; gap: 8px; min-width: 0; }
+.home-actions__image-input { display: none; }
 .home-actions__hint { align-items: center; color: var(--text-dim); display: flex; font-size: 13px; gap: 6px; margin: 0; }
 .home-actions__error { color: var(--danger); font-size: 13px; margin: 0; }
 .home-actions__manual { align-items: end; display: grid; gap: 8px; grid-template-columns: minmax(0, 1fr) auto; }

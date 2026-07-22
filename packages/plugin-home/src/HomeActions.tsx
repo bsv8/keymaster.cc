@@ -2,7 +2,7 @@ import { PublicKey } from "@bsv/sdk";
 import { BrowserQRCodeReader } from "@zxing/browser";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-import { Camera, Check, Copy, ScanLine, UserRound, UserPlus } from "lucide-react";
+import { Camera, Check, Copy, Image, ScanLine, UserRound, UserPlus } from "lucide-react";
 import { Button, Modal, TextInput } from "@keymaster/ui";
 import { useCapability, useHasCapability, useI18n, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
 import {
@@ -16,6 +16,16 @@ import {
 } from "@keymaster/contracts";
 
 const COMPRESSED_PUBLIC_KEY = /^(02|03)[0-9a-f]{64}$/i;
+type ScanMode = "camera" | "image";
+
+function loadImage(url: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Image could not be loaded."));
+    image.src = url;
+  });
+}
 
 function publicKeyFromQr(value: string): string | null {
   const trimmed = value.trim();
@@ -73,7 +83,7 @@ function MyInfoModal({ open, onClose, publicKeyHex, hasP2pkh }: { open: boolean;
   const address = useMemo(() => p2pkhAddress(publicKeyHex, "mainnet"), [publicKeyHex]);
 
   return (
-    <Modal open={open} onClose={onClose} title={t("home.info.title", { defaultValue: "我的信息" })} data-testid="home-my-info-modal">
+    <Modal open={open} onClose={onClose} title={t("home.info.title", { defaultValue: "我的信息" })} closeButtonLabel={t("home.info.close", { defaultValue: "关闭我的信息" })} data-testid="home-my-info-modal">
       {!publicKeyHex ? (
         <p className="home-actions__hint">{t("home.info.noKey", { defaultValue: "请选择一个可用的密钥后再查看信息。" })}</p>
       ) : (
@@ -123,7 +133,10 @@ export function HomeActions() {
   const [activePublicKeyHex, setActivePublicKeyHex] = useState(() => keyspace.active().activePublicKeyHex);
   const [infoOpen, setInfoOpen] = useState(false);
   const [scanOpen, setScanOpen] = useState(false);
+  const [scanMode, setScanMode] = useState<ScanMode>("camera");
   const [scannerActive, setScannerActive] = useState(false);
+  const [imageScanning, setImageScanning] = useState(false);
+  const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
   const [scannedPublicKeyHex, setScannedPublicKeyHex] = useState<string | null>(null);
   const [contact, setContact] = useState<Contact | null>(null);
@@ -135,6 +148,8 @@ export function HomeActions() {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
+  const imageRecognitionId = useRef(0);
 
   useEffect(() => keyspace.onActiveKeyChanged((state) => setActivePublicKeyHex(state.activePublicKeyHex)), [keyspace]);
 
@@ -150,7 +165,7 @@ export function HomeActions() {
   }, [t]);
 
   useEffect(() => {
-    if (!scanOpen || !scannerActive) return;
+    if (!scanOpen || scanMode !== "camera" || !scannerActive) return;
     if (!navigator.mediaDevices?.getUserMedia || !videoRef.current) {
       setScanError(t("home.scan.unsupported", { defaultValue: "当前浏览器不支持二维码扫描，请手动输入公钥。" }));
       setScannerActive(false);
@@ -185,7 +200,11 @@ export function HomeActions() {
       cancelled = true;
       stop?.();
     };
-  }, [acceptQrValue, scanOpen, scannerActive, t]);
+  }, [acceptQrValue, scanMode, scanOpen, scannerActive, t]);
+
+  useEffect(() => () => {
+    if (imagePreviewUrl) URL.revokeObjectURL(imagePreviewUrl);
+  }, [imagePreviewUrl]);
 
   useEffect(() => {
     if (!scannedPublicKeyHex) {
@@ -209,13 +228,55 @@ export function HomeActions() {
     setCreateOpen(false);
     setCreateError(null);
     setContactName("");
+    setScanMode("camera");
     setScannerActive(true);
     setScanOpen(true);
   }
 
   function closeScanner() {
+    imageRecognitionId.current += 1;
+    setImageScanning(false);
     setScannerActive(false);
     setScanOpen(false);
+  }
+
+  function selectScanMode(mode: ScanMode) {
+    imageRecognitionId.current += 1;
+    setImageScanning(false);
+    setScanError(null);
+    setScanMode(mode);
+    setScannerActive(mode === "camera");
+  }
+
+  async function recognizeImage(file: File | undefined) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setScanError(t("home.scan.imageTypeError", { defaultValue: "请选择一张图片文件。" }));
+      return;
+    }
+
+    const previewUrl = URL.createObjectURL(file);
+    const recognitionId = imageRecognitionId.current + 1;
+    imageRecognitionId.current = recognitionId;
+    setImagePreviewUrl((previousUrl) => {
+      if (previousUrl) URL.revokeObjectURL(previousUrl);
+      return previewUrl;
+    });
+    setScanError(null);
+    setImageScanning(true);
+    try {
+      const image = await loadImage(previewUrl);
+      const result = await new BrowserQRCodeReader().decodeFromImageElement(image);
+      if (recognitionId !== imageRecognitionId.current) return;
+      acceptQrValue(result.getText());
+    } catch {
+      if (recognitionId === imageRecognitionId.current) {
+        setScanError(t("home.scan.imageNotFound", { defaultValue: "未能在这张图片中识别出二维码。" }));
+      }
+    } finally {
+      if (recognitionId === imageRecognitionId.current) setImageScanning(false);
+      if (imageInputRef.current) imageInputRef.current.value = "";
+    }
   }
 
   async function runAction(action: ContactPublicKeyAction) {
@@ -261,15 +322,33 @@ export function HomeActions() {
       </div>
 
       <MyInfoModal open={infoOpen} onClose={() => setInfoOpen(false)} publicKeyHex={activePublicKeyHex} hasP2pkh={hasP2pkh} />
-      <Modal open={scanOpen} onClose={closeScanner} title={t("home.scan.title", { defaultValue: "扫描公钥二维码" })} data-testid="home-scan-modal">
+      <Modal open={scanOpen} onClose={closeScanner} title={t("home.scan.title", { defaultValue: "扫描公钥二维码" })} closeButtonLabel={t("home.scan.close", { defaultValue: "关闭扫描" })} data-testid="home-scan-modal">
         <div className="home-actions__scan">
-          {scannerActive ? (
+          {!scannedPublicKeyHex ? <div className="home-actions__scan-modes" role="tablist" aria-label={t("home.scan.modeLabel", { defaultValue: "识别方式" })}>
+            <button type="button" role="tab" aria-selected={scanMode === "camera"} className={scanMode === "camera" ? "is-active" : ""} onClick={() => selectScanMode("camera")}>
+              <Camera size={16} />{t("home.scan.cameraMode", { defaultValue: "扫描" })}
+            </button>
+            <button type="button" role="tab" aria-selected={scanMode === "image"} className={scanMode === "image" ? "is-active" : ""} onClick={() => selectScanMode("image")}>
+              <Image size={16} />{t("home.scan.imageMode", { defaultValue: "图片识别" })}
+            </button>
+          </div> : null}
+          {scanMode === "camera" && scannerActive ? (
             <div className="home-actions__camera-wrap">
               <video ref={videoRef} className="home-actions__camera" muted playsInline aria-label={t("home.scan.camera", { defaultValue: "二维码扫描画面" })} />
               <span className="home-actions__scan-frame" aria-hidden="true" />
             </div>
           ) : null}
-          {!scannedPublicKeyHex ? <p className="home-actions__hint"><Camera size={16} />{t("home.scan.hint", { defaultValue: "将对方的公钥二维码置于取景框内。" })}</p> : null}
+          {!scannedPublicKeyHex && scanMode === "camera" ? <p className="home-actions__hint"><Camera size={16} />{t("home.scan.hint", { defaultValue: "将对方的公钥二维码置于取景框内。" })}</p> : null}
+          {!scannedPublicKeyHex && scanMode === "image" ? <div className="home-actions__image-picker">
+            {imagePreviewUrl ? <img src={imagePreviewUrl} alt={t("home.scan.imagePreview", { defaultValue: "待识别图片预览" })} /> : <Image size={32} strokeWidth={1.5} aria-hidden="true" />}
+            <div>
+              <Button variant="secondary" loading={imageScanning} onClick={() => imageInputRef.current?.click()}>
+                {t("home.scan.chooseImage", { defaultValue: "选择图片" })}
+              </Button>
+              <p className="home-actions__hint">{t("home.scan.imageHint", { defaultValue: "图片仅在此设备本地识别，不会上传。" })}</p>
+            </div>
+            <input ref={imageInputRef} className="home-actions__image-input" type="file" accept="image/*" onChange={(event) => void recognizeImage(event.currentTarget.files?.[0])} />
+          </div> : null}
           {scanError ? <p className="home-actions__error" role="alert">{scanError}</p> : null}
           {!scannedPublicKeyHex ? <ManualPublicKeyInput onSubmit={acceptQrValue} /> : null}
           {scannedPublicKeyHex ? <ScannedContact

@@ -9,10 +9,11 @@ export interface ModalProps {
   onClose?: () => void;
   children: ReactNode;
   footer?: ReactNode;
+  closeButtonLabel?: string;
   "data-testid"?: string;
 }
 
-export function Modal({ open, title, onClose, children, footer, "data-testid": testId }: ModalProps) {
+export function Modal({ open, title, onClose, children, footer, closeButtonLabel, "data-testid": testId }: ModalProps) {
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
@@ -27,6 +28,7 @@ export function Modal({ open, title, onClose, children, footer, "data-testid": t
     <div className="ui-modal" role="dialog" aria-modal="true" data-testid={testId}>
       <div className="ui-modal__backdrop" onClick={onClose} />
       <div className="ui-modal__panel">
+        {closeButtonLabel && onClose ? <button type="button" className="ui-modal__close" onClick={onClose} aria-label={closeButtonLabel}>×</button> : null}
         {title ? <header className="ui-modal__header">{title}</header> : null}
         <div className="ui-modal__body">{children}</div>
         {footer ? <footer className="ui-modal__footer">{footer}</footer> : null}
