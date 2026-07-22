@@ -439,7 +439,7 @@ describe("AppMsgCoreImpl - provider registry", () => {
     expect(persisted).toBe("hubmsg");
   });
 
-  it("persisted id matches registered provider: keeps it active", () => {
+  it("persisted id matches a provider registered after startup: notifies listeners", () => {
     const storage = new Map<string, string>([["appmsg.activeProviderId", "hubmsg"]]);
     const keyspace = makeFakeKeyspace();
     const log = makeLogSink();
@@ -461,10 +461,17 @@ describe("AppMsgCoreImpl - provider registry", () => {
       logger: log
     };
     const core = new AppMsgCoreImpl(cfg);
+    const seen: ActiveMessageProviderSnapshot[] = [];
+    core.providers().onActiveChange((snapshot) => seen.push(snapshot));
     const handle = makeMockProviderOps();
     const p = makeMockProvider("hubmsg", "HubMsg", handle);
     core.providers().register(p);
     expect(core.providers().active()?.id).toBe("hubmsg");
+    // 刷新后的 coordinator 已在 provider 注册前订阅；注册完成必须通知它
+    // 重试 bind，不能让 core 永久停在 idle。
+    expect(seen).toEqual([
+      expect.objectContaining({ providerId: "hubmsg", displayName: "HubMsg" })
+    ]);
   });
 
   it("persisted id not registered: stays null (no auto fallback)", () => {

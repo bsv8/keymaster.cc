@@ -272,12 +272,17 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
       persistedProviderId: this.persistedProviderId
     });
 
-    // 触发 1：持久化的 id 命中 provider 注册进来 → 激活。
+    // 触发 1：持久化的 id 命中 provider 注册进来。
+    //
+    // 构造期已把 `activeProviderId` 设为持久化值；因此刷新后的新标签
+    // 在 provider 尚未注册时，`active()` 会暂时返回 null，但
+    // `activeProviderId` 仍是该 provider id。provider 注册完成后必须发出
+    // 一次变更通知，才能让重连协调器从“无可用 provider”的启动态重新
+    // 评估并建立连接。
     if (
       this.persistedProviderId === provider.id &&
-      this.activeProviderId === null
+      this.activeProviderId === provider.id
     ) {
-      this.activeProviderId = provider.id;
       this.bootstrapDefaultConsumed = true;
       this.fireChange();
       return;
