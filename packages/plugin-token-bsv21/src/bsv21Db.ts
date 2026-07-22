@@ -6,7 +6,7 @@
 //   - 使用 IndexedDB 事务保证原子性：删除旧数据 + 写入新数据在同一事务中。
 //   - 跨标签页共享同一份持久化数据。
 //   - 每个 active key 拥有独立的 IndexedDB（通过 keyspace.openKeyStorage），
-//     主键为 [network, address, origin]，不需要 publicKeyHex 维度。
+//     主键为 [network, address, origin, outpoint]，不需要 publicKeyHex 维度。
 //   - 不做 handle 缓存：每次 DB 操作都通过 keyspace.openKeyStorage() 取 handle；
 //     由 keyspace 负责 namespace 连接缓存、关闭和删除。避免 A→B→A 切换时
 //     复用 keyspace 已关闭的连接导致 InvalidStateError。
@@ -17,12 +17,14 @@ import type { BsvNetwork, KeyspaceService } from "@keymaster/contracts";
 export interface Bsv21TokenSnapshot {
   /** token origin（即 tokenId）。 */
   origin: string;
+  /** WOC unspent 真值里的当前 outpoint。 */
+  outpoint: string;
   /** 网络。 */
   network: BsvNetwork;
   /** 持有此 token 的地址。 */
   address: string;
-  /** 余额。 */
-  balance: { confirmed: number; unconfirmed: number };
+  /** 当前 unspent token 金额，十进制字符串。 */
+  amount: string;
   /** token 元数据。 */
   meta: {
     origin: string;
@@ -50,20 +52,45 @@ export interface Bsv21Db {
 }
 
 const STORAGE_ID = "snapshots";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = "snapshots";
 
 /**
  * 打开 IndexedDB upgrade 回调。
- * 主键 [network, address, origin]，不需要 publicKeyHex（已由 namespace 隔离）。
+ * 主键 [network, address, origin, outpoint]，不需要 publicKeyHex（已由 namespace 隔离）。
  */
 function upgrade(db: IDBDatabase, oldVersion: number): void {
-  if (db.objectStoreNames.contains(STORE_NAME)) {
-    db.deleteObjectStore(STORE_NAME);
+  if (oldVersion < 3) {
+    if (db.objectStoreNames.contains(STORE_NAME)) {
+      db.deleteObjectStore(STORE_NAME);
+    }
+    const store = db.createObjectStore(STORE_NAME, { keyPath: ["network", "address", "origin", "outpoint"] });
+    // 保留 network index 用于按网络过滤
+    store.createIndex("network", "network", { unique: false });
+    return;
   }
-  const store = db.createObjectStore(STORE_NAME, { keyPath: ["network", "address", "origin"] });
-  // 保留 network index 用于按网络过滤
-  store.createIndex("network", "network", { unique: false });
+  if (!db.objectStoreNames.contains(STORE_NAME)) {
+    const store = db.createObjectStore(STORE_NAME, { keyPath: ["network", "address", "origin", "outpoint"] });
+    store.createIndex("network", "network", { unique: false });
+  }
+}
+
+function assertSnapshot(snapshot: Bsv21TokenSnapshot): void {
+  if (!snapshot.amount || !/^[0-9]+$/.test(snapshot.amount)) {
+    throw new Error("BSV-21 snapshot amount must be a decimal string");
+  }
+  if (!snapshot.network) {
+    throw new Error("BSV-21 snapshot network is required");
+  }
+  if (!snapshot.address) {
+    throw new Error("BSV-21 snapshot address is required");
+  }
+  if (!snapshot.origin) {
+    throw new Error("BSV-21 snapshot origin is required");
+  }
+  if (!snapshot.outpoint) {
+    throw new Error("BSV-21 snapshot outpoint is required");
+  }
 }
 
 /**
@@ -94,6 +121,7 @@ export function createBsv21Db(keyspace: KeyspaceService): Bsv21Db {
 
   return {
     async put(snapshot) {
+      assertSnapshot(snapshot);
       const { db } = await getHandle();
       return new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
@@ -105,6 +133,9 @@ export function createBsv21Db(keyspace: KeyspaceService): Bsv21Db {
     },
 
     async replaceAll(snapshots) {
+      for (const snapshot of snapshots) {
+        assertSnapshot(snapshot);
+      }
       const { db } = await getHandle();
       return new Promise<void>((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");

@@ -55,6 +55,36 @@ export interface WocBsv21BalanceResponse {
   unconfirmed: number;
 }
 
+/** BSV-21 unspent token 的当前链上状态。 */
+export interface WocBsv21UnspentToken {
+  network: BsvNetwork;
+  outpoint: string;
+  tokenId: string;
+  amount: string;
+  ownerAddress: string;
+  current: {
+    txid: string;
+    txIndex: number;
+    blockHeight?: number;
+    blockTime?: number;
+  };
+  meta?: WocBsv21TokenMeta;
+}
+
+/** BSV-21 token 详情响应。 */
+export interface WocBsv21TokenDetail {
+  token: {
+    outpoint: string;
+    current?: {
+      txid: string;
+      txIndex: number;
+      blockHeight?: number;
+      blockTime?: number;
+    };
+    [key: string]: unknown;
+  };
+}
+
 /** BSV-21 service。 */
 export interface WocBsv21Service {
   /**
@@ -67,6 +97,12 @@ export interface WocBsv21Service {
     address: string,
     options?: WocRequestOptions
   ): Promise<WocBsv21TokenMeta[]>;
+  /** 列出某地址持有的全部 BSV-21 unspent UTXO。 */
+  listAddressUnspentTokens(
+    network: BsvNetwork,
+    address: string,
+    options?: WocRequestOptions
+  ): Promise<WocBsv21UnspentToken[]>;
   /** 查询单个 token 在某地址的余额。 */
   getAddressTokenBalance(
     network: BsvNetwork,
@@ -74,6 +110,12 @@ export interface WocBsv21Service {
     origin: string,
     options?: WocRequestOptions
   ): Promise<WocBsv21BalanceResponse>;
+  /** 查询 token id 对应的当前 UTXO 详情。 */
+  getTokenById(
+    network: BsvNetwork,
+    tokenId: string,
+    options?: WocRequestOptions
+  ): Promise<WocBsv21TokenDetail | null>;
 }
 
 /** STAS token entry。 */
@@ -109,6 +151,12 @@ export interface Woc1SatOrdinalsInscription {
   owner?: string;
 }
 
+/** 1Sat Ordinals 内容响应。 */
+export interface Woc1SatOrdinalsContent {
+  contentType?: string;
+  data: Uint8Array;
+}
+
 /** 1Sat Ordinals service。 */
 export interface Woc1SatOrdinalsService {
   /**
@@ -128,4 +176,25 @@ export interface Woc1SatOrdinalsService {
     outpoint: string,
     options?: WocRequestOptions
   ): Promise<Woc1SatOrdinalsInscription | null>;
+  /**
+   * 按 outpoint 取 token 的原始 content。
+   * - 命中：返回 content bytes；
+   * - 404 / not-found：返回 null；
+   * - 其它错误：抛错。
+   */
+  getOutpointContent(
+    network: BsvNetwork,
+    outpoint: string,
+    options?: WocRequestOptions
+  ): Promise<Woc1SatOrdinalsContent | null>;
+  /**
+   * 按 txid / vout 读取原始输出脚本。
+   * 调用方负责把 hex 解码并做脚本级校验。
+   */
+  getTransactionOutputScript(
+    network: BsvNetwork,
+    txid: string,
+    vout: number,
+    options?: WocRequestOptions
+  ): Promise<Uint8Array>;
 }

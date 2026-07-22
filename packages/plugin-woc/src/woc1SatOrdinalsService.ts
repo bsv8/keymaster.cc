@@ -12,12 +12,13 @@ import type {
   BsvNetwork,
   MessageBus,
   PluginLogger,
+  Woc1SatOrdinalsContent,
   Woc1SatOrdinalsInscription,
   Woc1SatOrdinalsService,
   WocRequestOptions
 } from "@keymaster/contracts";
 import { WOC_PRIORITY } from "@keymaster/contracts";
-import { WOC_MSG, type Woc1SatOutpointPayload } from "./wocMessages.js";
+import { WOC_MSG, type Woc1SatContentPayload, type Woc1SatOutpointPayload, type WocTxOutputScriptPayload } from "./wocMessages.js";
 
 export interface Woc1SatOrdinalsServiceHandle extends Woc1SatOrdinalsService {
   dispose(): void;
@@ -64,6 +65,38 @@ export function createWoc1SatOrdinalsService(
         timeoutMs: opts?.timeoutMs
       };
       return messageBus.request(WOC_MSG.ONE_SAT_OUTPOINT, payload, dispatchOptions(opts));
+    },
+
+    async getOutpointContent(
+      network: BsvNetwork,
+      outpoint: string,
+      opts?: WocRequestOptions
+    ): Promise<Woc1SatOrdinalsContent | null> {
+      const payload: Woc1SatContentPayload = {
+        network,
+        outpoint,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs
+      };
+      return messageBus.request(WOC_MSG.ONE_SAT_CONTENT, payload, dispatchOptions(opts));
+    },
+
+    async getTransactionOutputScript(
+      network: BsvNetwork,
+      txid: string,
+      vout: number,
+      opts?: WocRequestOptions
+    ): Promise<Uint8Array> {
+      const payload: WocTxOutputScriptPayload = {
+        network,
+        txid,
+        vout,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs
+      };
+      return messageBus.request(WOC_MSG.TX_OUTPUT_SCRIPT, payload, dispatchOptions(opts));
     },
 
     dispose() {

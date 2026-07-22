@@ -12,6 +12,7 @@ import { describe, it, expect, afterEach } from "vitest";
 import { IDBFactory } from "fake-indexeddb";
 import { createBsv21Db } from "./bsv21Db";
 import type { Bsv21Db, Bsv21TokenSnapshot } from "./bsv21Db";
+import { createBsv21SyncTask } from "./bsv21Sync";
 import type { KeyspaceService, KeyScopedStorageHandle, KeyScopedStorageOpenInput } from "@keymaster/contracts";
 
 const PK1 = "pk1111111111111111111111111111111111111111111111111111111111111111";
@@ -25,7 +26,8 @@ function makeSnapshot(
     origin: overrides.origin,
     network: overrides.network ?? "main",
     address: overrides.address ?? "addr1",
-    balance: overrides.balance ?? { confirmed: 100, unconfirmed: 10 },
+    outpoint: overrides.outpoint ?? `${overrides.origin}_0`,
+    amount: overrides.amount ?? "110",
     meta: overrides.meta ?? { origin: overrides.origin, symbol: "TOK" },
     syncedAt: overrides.syncedAt ?? "2026-01-01T00:00:00Z",
   };
@@ -38,18 +40,21 @@ function makeSnapshot(
 function makeMockKeyspace(initialHex?: string) {
   let activeHex = initialHex;
   const handles = new Map<string, KeyScopedStorageHandle>();
+  const versions = new Map<string, number>();
 
   const keyspace: KeyspaceService = {
     active: () => ({ activePublicKeyHex: activeHex }),
     openKeyStorage: async (input: KeyScopedStorageOpenInput) => {
       // 模拟真实 keyspace：每个 publicKeyHex 一个独立 IndexedDB
       const name = `keymaster.key.${input.publicKeyHex}.plugin.plugin-token-bsv21.snapshots`;
+      const oldVersion = versions.get(name) ?? 0;
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const req = indexedDB.open(name, input.version);
-        req.onupgradeneeded = () => input.upgrade(req.result, 0, input.version);
+        req.onupgradeneeded = () => input.upgrade(req.result, oldVersion, input.version);
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });
+      versions.set(name, input.version);
       const handle: KeyScopedStorageHandle = {
         db,
         name,
@@ -65,7 +70,33 @@ function makeMockKeyspace(initialHex?: string) {
     activeHex = hex;
   }
 
-  return { keyspace, setActive };
+  return { keyspace, setActive, versions };
+}
+
+async function openLegacyV2Db(name: string, snapshots: Bsv21TokenSnapshot[], versions?: Map<string, number>): Promise<void> {
+  const db = await new Promise<IDBDatabase>((resolve, reject) => {
+    const req = indexedDB.open(name, 2);
+    req.onupgradeneeded = () => {
+      const legacy = req.result;
+      if (legacy.objectStoreNames.contains("snapshots")) {
+        legacy.deleteObjectStore("snapshots");
+      }
+      legacy.createObjectStore("snapshots", { keyPath: ["network", "address", "origin"] });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction("snapshots", "readwrite");
+    const store = tx.objectStore("snapshots");
+    for (const snapshot of snapshots) {
+      store.put(snapshot as never);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  versions?.set(name, 2);
+  db.close();
 }
 
 /**
@@ -171,14 +202,14 @@ describe("bsv21Db", () => {
     });
   });
 
-  // 场景 4：同 origin 不同 address 可以共存
-  describe("同 origin 不同 address 可以共存", () => {
-    it("put 两个同 origin 不同 address 的 snapshot，list 返回两者", async () => {
+  // 场景 4：同 tokenId 多 outpoint 可以共存
+  describe("同 tokenId 多 outpoint 可以共存", () => {
+    it("put 两个同 tokenId 不同 outpoint 的 snapshot，list 返回两者", async () => {
       const { keyspace } = makeMockKeyspace(PK1);
       const db = createBsv21Db(keyspace);
 
-      const s1 = makeSnapshot({ origin: "tok1", address: "addrA" });
-      const s2 = makeSnapshot({ origin: "tok1", address: "addrB" });
+      const s1 = makeSnapshot({ origin: "tok1", address: "addrA", outpoint: "tok1_0" });
+      const s2 = makeSnapshot({ origin: "tok1", address: "addrA", outpoint: "tok1_1" });
 
       await db.put(s1);
       await db.put(s2);
@@ -186,8 +217,65 @@ describe("bsv21Db", () => {
       const list = await db.list();
       expect(list).toHaveLength(2);
 
-      const addresses = list.map((s) => s.address).sort();
-      expect(addresses).toEqual(["addrA", "addrB"]);
+      const outpoints = list.map((s) => s.outpoint).sort();
+      expect(outpoints).toEqual(["tok1_0", "tok1_1"]);
+    });
+  });
+
+  // 场景 5：amount 校验
+  describe("amount 必须是十进制字符串", () => {
+    it("拒绝非十进制字符串 amount", async () => {
+      const { keyspace } = makeMockKeyspace(PK1);
+      const db = createBsv21Db(keyspace);
+
+      await expect(db.put(makeSnapshot({ origin: "tok-bad", amount: "11.0" }))).rejects.toThrow(/decimal string/);
+    });
+  });
+
+  // 场景 6：v2 -> v3 升级
+  describe("从 v2 打开到 v3", () => {
+    it("会清空旧 store 并在 sync 后重建真值 snapshot", async () => {
+      const { keyspace, versions } = makeMockKeyspace(PK1);
+      const dbName = `keymaster.key.${PK1}.plugin.plugin-token-bsv21.snapshots`;
+
+      await openLegacyV2Db(dbName, [
+        makeSnapshot({ origin: "tok-old", address: "addr-old", outpoint: "tok-old_0" }),
+        makeSnapshot({ origin: "tok-old", address: "addr-old", outpoint: "tok-old_1" }),
+      ], versions);
+
+      const db = createBsv21Db(keyspace);
+      const afterOpen = await db.list();
+      expect(afterOpen).toHaveLength(0);
+
+      const syncTask = createBsv21SyncTask({
+        db,
+        service: {
+          listActiveKeyTokens: async () => [{
+            meta: { origin: "tok-new", symbol: "TOK" },
+            balance: { confirmed: "0", unconfirmed: "0", amount: "7", display: "7" },
+            outpoint: "tx-new_0",
+            address: "addr-new",
+            network: "main" as const
+          }],
+          listActiveKeyUnspentTokens: async () => [],
+          getToken: async () => null
+        } as never,
+        keyspace,
+        vault: { status: () => "unlocked" } as never
+      });
+
+      await syncTask.run({
+        signal: new AbortController().signal,
+        assertSessionFresh: () => {}
+      } as never);
+
+      const afterSync = await db.list();
+      expect(afterSync).toHaveLength(1);
+      expect(afterSync[0]).toMatchObject({
+        origin: "tok-new",
+        outpoint: "tx-new_0",
+        amount: "7"
+      });
     });
   });
 

@@ -19,8 +19,9 @@
 import type {
   BsvNetwork,
   KeyspaceService,
-  WocBsv21BalanceResponse,
   WocBsv21Service,
+  WocBsv21TokenDetail,
+  WocBsv21UnspentToken,
   WocBsv21TokenMeta
 } from "@keymaster/contracts";
 import type { Bsv21Db } from "./bsv21Db.js";
@@ -43,6 +44,10 @@ export interface P2pkhKeyResourceForBsv21 {
 export interface P2pkhServiceForBsv21 {
   listResources(assetId: P2pkhAssetIdForBsv21): Promise<P2pkhKeyResourceForBsv21[]>;
   getGlobalSettings(): { includeTestnet: boolean };
+  listUtxos?(filter?: {
+    assetId?: P2pkhAssetIdForBsv21;
+    ownerPublicKeyHex?: string;
+  }): Promise<Array<{ txid: string; vout: number; value: number; address: string }>>;
 }
 
 const BSV_MAIN_NETWORK: BsvNetwork = "main";
@@ -50,16 +55,28 @@ const BSV_TEST_NETWORK: BsvNetwork = "test";
 
 /** BSV-21 service 句柄。 */
 export interface Bsv21ServiceHandle {
+  /** 列出当前 active key 的全部 BSV-21 unspent UTXO。 */
+  listActiveKeyUnspentTokens(signal?: AbortSignal): Promise<WocBsv21UnspentToken[]>;
   /** 列出当前 active key 全部 BSV 地址上的 token 余额（已合并）。 */
   listActiveKeyTokens(signal?: AbortSignal): Promise<TokenWithMeta[]>;
   /** 取单个 token 详情。 */
-  getToken(tokenId: string, signal?: AbortSignal): Promise<{ meta: WocBsv21TokenMeta; balance: WocBsv21BalanceResponse } | null>;
+  getToken(tokenId: string, signal?: AbortSignal): Promise<{ meta: WocBsv21TokenMeta; balance: Bsv21TokenBalance; outpoint?: string } | null>;
+}
+
+export interface Bsv21TokenBalance {
+  confirmed: string;
+  unconfirmed: string;
+  amount: string;
+  display: string;
 }
 
 /** token + meta + 当前余额；origin 即 tokenId。 */
 export interface TokenWithMeta {
   meta: WocBsv21TokenMeta;
-  balance: WocBsv21BalanceResponse;
+  balance: Bsv21TokenBalance;
+  /** 当前 token UTXO（若 WOC 已返回）。 */
+  outpoint?: string;
+  unspent?: WocBsv21UnspentToken[];
   /** 当前 active key 持有此 token 的地址之一（任一）；详情页可继续引用。 */
   address: string;
   network: BsvNetwork;
@@ -107,23 +124,56 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
     return list;
   }
 
+  async function activeKeyUnspentTokens(signal?: AbortSignal): Promise<WocBsv21UnspentToken[]> {
+    const resources = await activeKeyResources();
+    const out: WocBsv21UnspentToken[] = [];
+    for (const r of resources) {
+      if (signal?.aborted) break;
+      const items = await wocBsv21.listAddressUnspentTokens(r.network, r.address, { signal });
+      out.push(...items);
+    }
+    return out;
+  }
+
   return {
+    async listActiveKeyUnspentTokens(signal?: AbortSignal) {
+      return activeKeyUnspentTokens(signal);
+    },
     async listActiveKeyTokens(signal?: AbortSignal) {
-      const resources = await activeKeyResources();
-      const out: TokenWithMeta[] = [];
-      for (const r of resources) {
-        // 检查取消信号
-        if (signal?.aborted) break;
-        // 不并发：phase 1 资源量小，避免对 WOC 触发突发流量。
-        // 真正并发可以让 BSV-21 协议层暴露 batch endpoint 后再做。
-        const opts = { signal };
-        const metas = await wocBsv21.listAddressTokens(r.network, r.address, opts);
-        for (const meta of metas) {
-          if (signal?.aborted) break;
-          const balance = await wocBsv21.getAddressTokenBalance(r.network, r.address, meta.origin, opts);
-          out.push({ meta, balance, address: r.address, network: r.network });
+      const unspent = await activeKeyUnspentTokens(signal);
+      const grouped = new Map<string, {
+        entry: WocBsv21UnspentToken[];
+        balance: bigint;
+        first: WocBsv21UnspentToken;
+      }>();
+      for (const u of unspent) {
+        const existing = grouped.get(u.tokenId);
+        const amount = parseTokenAmount(u.amount);
+        if (existing) {
+          existing.entry.push(u);
+          existing.balance += amount;
+        } else {
+          grouped.set(u.tokenId, {
+            entry: [u],
+            balance: amount,
+            first: u
+          });
         }
       }
+      const out: TokenWithMeta[] = [];
+      for (const entry of grouped.values()) {
+        const first = entry.first;
+        const balance = bigintsToTokenBalance(entry.balance, first.meta?.symbol);
+        out.push({
+          meta: first.meta ?? { origin: first.tokenId },
+          balance,
+          outpoint: first.outpoint,
+          unspent: entry.entry,
+          address: first.ownerAddress,
+          network: first.network
+        });
+      }
+      out.sort((a, b) => a.meta.origin.localeCompare(b.meta.origin));
       return out;
     },
     async getToken(tokenId, signal?: AbortSignal) {
@@ -131,10 +181,30 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
       const all = await this.listActiveKeyTokens(signal);
       const hit = all.find((t) => t.meta.origin === tokenId);
       if (!hit) return null;
-      return { meta: hit.meta, balance: hit.balance };
+      return { meta: hit.meta, balance: hit.balance, outpoint: hit.outpoint };
     }
   };
 }
 
 /** capability key；plugin-token-bsv21 manifest 依赖。 */
 // P2PKH_CAPABILITY 在文件顶部声明。
+
+function parseTokenAmount(amount: string): bigint {
+  if (!/^[0-9]+$/.test(amount)) {
+    throw new Error("BSV-21 amount must be a decimal string");
+  }
+  return BigInt(amount);
+}
+
+function bigintsToTokenBalance(value: bigint, symbol?: string): Bsv21TokenBalance {
+  if (value < 0n) {
+    throw new Error("BSV-21 balance cannot be negative");
+  }
+  const amount = value.toString();
+  return {
+    confirmed: amount,
+    unconfirmed: "0",
+    amount,
+    display: `${amount} ${symbol ?? "TOK"}`
+  };
+}

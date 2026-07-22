@@ -28,6 +28,8 @@ export * from "./wocTokens.js";
 export * from "./tokens.js";
 export * from "./collectibles.js";
 export * from "./collectibleTransfer.js";
+export * from "./spendProtection.js";
+export * from "./protocolSpend.js";
 export * from "./i18n.js";
 export * from "./keyDisplay.js";
 export * from "./poker.js";

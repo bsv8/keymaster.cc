@@ -25,7 +25,7 @@ import {
   type PluginManifest
 } from "@keymaster/contracts";
 import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
-import { LogSettingsPage } from "./LogSettingsPage.js";
+import { LogConfigurationSettings, LogSettingsPage } from "./LogSettingsPage.js";
 
 const LOG_DB_NAME = "keymaster.logs";
 
@@ -84,7 +84,10 @@ describe("LogSettingsPage", () => {
     await act(async () => {
       render(
         <PluginHostProvider host={host}>
-          <LogSettingsPage />
+          <>
+            <LogConfigurationSettings />
+            <LogSettingsPage />
+          </>
         </PluginHostProvider>
       );
     });
@@ -103,8 +106,6 @@ describe("LogSettingsPage", () => {
     expect((toggle as HTMLInputElement).checked).toBe(false);
     const user = userEvent.setup();
     await user.click(toggle);
-    const saveBtn = screen.getByRole("button", { name: /Save/ });
-    await user.click(saveBtn);
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50));
     });
@@ -115,7 +116,6 @@ describe("LogSettingsPage", () => {
     const retentionInput = screen.getByLabelText(/Retention/) as HTMLInputElement;
     // fireEvent.change 一步到位，避免 typing 时与受控 value 互相干扰。
     fireEvent.change(retentionInput, { target: { value: "7" } });
-    await user.click(saveBtn);
     await act(async () => {
       await new Promise((r) => setTimeout(r, 50));
     });
@@ -172,7 +172,7 @@ describe("settings plugin registers /settings/logs", () => {
     const { settingsPlugin } = await import("./manifest.js");
     const host = createPluginHost({ disableConfigPersistence: true });
     await host.register(settingsPlugin);
-    const entry = host.settings.byPath("/settings/logs");
+    const entry = host.business.listFeatures().find((feature) => feature.entry.path === "/settings/logs");
     expect(entry).toBeDefined();
     expect(entry?.id).toBe("settings.logs");
     expect(entry?.label).toEqual({ key: "settings.route.logs", fallback: "System logs" });

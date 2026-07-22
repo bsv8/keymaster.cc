@@ -14,6 +14,8 @@ import type {
   MessageBus,
   PluginLogger,
   WocBsv21BalanceResponse,
+  WocBsv21TokenDetail,
+  WocBsv21UnspentToken,
   WocBsv21Service,
   WocBsv21TokenMeta,
   WocRequestOptions
@@ -21,7 +23,9 @@ import type {
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import {
   WOC_MSG,
+  type WocBsv21AddressUnspentPayload,
   type WocBsv21ListTokensPayload,
+  type WocBsv21TokenByIdPayload,
   type WocBsv21TokenBalancePayload
 } from "./wocMessages.js";
 
@@ -71,6 +75,21 @@ export function createWocBsv21Service(options: CreateWocBsv21ServiceOptions): Wo
       return messageBus.request(WOC_MSG.BSV21_LIST_TOKENS, payload, dispatchOptions(opts));
     },
 
+    async listAddressUnspentTokens(
+      network: BsvNetwork,
+      address: string,
+      opts?: WocRequestOptions
+    ): Promise<WocBsv21UnspentToken[]> {
+      const payload: WocBsv21AddressUnspentPayload = {
+        network,
+        address,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs
+      };
+      return messageBus.request(WOC_MSG.BSV21_ADDRESS_UNSPENT, payload, dispatchOptions(opts));
+    },
+
     async getAddressTokenBalance(
       network: BsvNetwork,
       address: string,
@@ -86,6 +105,21 @@ export function createWocBsv21Service(options: CreateWocBsv21ServiceOptions): Wo
         timeoutMs: opts?.timeoutMs
       };
       return messageBus.request(WOC_MSG.BSV21_TOKEN_BALANCE, payload, dispatchOptions(opts));
+    },
+
+    async getTokenById(
+      network: BsvNetwork,
+      tokenId: string,
+      opts?: WocRequestOptions
+    ): Promise<WocBsv21TokenDetail | null> {
+      const payload: WocBsv21TokenByIdPayload = {
+        network,
+        tokenId,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs
+      };
+      return messageBus.request(WOC_MSG.BSV21_TOKEN_BY_ID, payload, dispatchOptions(opts));
     },
 
     dispose() {

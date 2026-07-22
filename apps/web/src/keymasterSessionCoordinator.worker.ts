@@ -34,10 +34,11 @@ import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVe
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { createMessageBus } from "@keymaster/runtime/messageBus";
-import { createWocService, createWocBsv21Service, createWocStasService } from "@keymaster/plugin-woc/coordinator";
+import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService } from "@keymaster/plugin-woc/coordinator";
 import { createP2pkhCoordinatorTasks, openP2pkhDb, createP2pkhDb } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
+import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import type { KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
 
 // Vault DB 操作（Worker 内可直接访问 IndexedDB）
@@ -260,12 +261,31 @@ async function registerCoordinatorTasks(): Promise<void> {
   const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
   coordinatorState.taskRuntimes.set("p2pkh.recent-sync", { id: "p2pkh.recent-sync", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.recent(signal); assertSessionFresh(); if (result.committed && !result.cancelled) emitDataChanged("p2pkh", ["resource", "utxo", "history"]); } });
   coordinatorState.taskRuntimes.set("p2pkh.history-backfill", { id: "p2pkh.history-backfill", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.backfill(signal); assertSessionFresh(); if (result.committed && !result.cancelled) emitDataChanged("p2pkh", ["history"]); } });
-  const p2pkhProvider = { listResources: async (assetId: "bsv" | "bsvtest") => { if (!coordinatorState.activePublicKeyHex) return []; const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: coordinatorState.activePublicKeyHex })); return (await db.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest")); }, getGlobalSettings: () => ({ includeTestnet: false }) };
+  const p2pkhProvider = {
+    listResources: async (assetId: "bsv" | "bsvtest") => {
+      if (!coordinatorState.activePublicKeyHex) return [];
+      const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: coordinatorState.activePublicKeyHex }));
+      return (await db.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest"));
+    },
+    listUtxos: async (filter?: { assetId?: "bsv" | "bsvtest"; ownerPublicKeyHex?: string }) => {
+      const ownerPublicKeyHex = filter?.ownerPublicKeyHex ?? coordinatorState.activePublicKeyHex;
+      if (!ownerPublicKeyHex) return [];
+      const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: ownerPublicKeyHex }));
+      const utxos = await db.listUtxos();
+      return utxos.filter((utxo) => {
+        if (filter?.assetId && filter.assetId !== (utxo.network === "main" ? "bsv" : "bsvtest")) return false;
+        return true;
+      });
+    },
+    getGlobalSettings: () => ({ includeTestnet: false })
+  };
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
   const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const stasTask = createStasCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   coordinatorState.taskRuntimes.set(bsv21Task.id, { id: bsv21Task.id, pluginId: bsv21Task.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   coordinatorState.taskRuntimes.set(stasTask.id, { id: stasTask.id, pluginId: stasTask.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
+  coordinatorState.taskRuntimes.set(oneSatTask.id, { id: oneSatTask.id, pluginId: oneSatTask.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   for (const runtime of coordinatorState.taskRuntimes.values()) scheduleRuntime(runtime);
   publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots() });
 }

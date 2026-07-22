@@ -40,13 +40,25 @@ function fakeP2pkh(
   };
 }
 
-/** 每个地址固定返回一个 token，余额随地址变化，便于断言聚合。 */
+/** 每个地址固定返回一个 token UTXO，便于断言聚合。 */
 function fakeWoc(tokensByAddress: Record<string, string[]>): WocBsv21Service {
   return {
     listAddressTokens: (_network, address) =>
       Promise.resolve((tokensByAddress[address] ?? []).map((origin) => ({ origin, symbol: origin.toUpperCase() }))),
+    listAddressUnspentTokens: (_network, address) =>
+      Promise.resolve((tokensByAddress[address] ?? []).map((tokenId, index) => ({
+        network: "main",
+        outpoint: `${tokenId}_${index}`,
+        tokenId,
+        amount: String(tokenId.length),
+        ownerAddress: address,
+        current: { txid: tokenId, txIndex: index }
+      }))),
     getAddressTokenBalance: (_network, _address, origin) =>
-      Promise.resolve({ confirmed: origin.length, unconfirmed: 0 })
+      Promise.resolve({ confirmed: origin.length, unconfirmed: 0 }),
+    getTokenById: async (_network, tokenId) => ({
+      token: { outpoint: `${tokenId}_0`, current: { txid: tokenId, txIndex: 0 } }
+    })
   };
 }
 
@@ -77,7 +89,10 @@ describe("createBsv21Service", () => {
     // 只应包含 active key 的 addr-A，不含 addr-B 的 tokX。
     expect(out.map((t) => t.meta.origin)).toEqual(["tok1"]);
     expect(out[0]!.address).toBe("addr-A");
-    expect(out[0]!.balance.confirmed).toBe("tok1".length);
+    expect(out[0]!.balance.confirmed).toBe(String("tok1".length));
+    expect(out[0]!.balance.display).toBe("4 TOK");
+    expect(out[0]!.outpoint).toBe("tok1_0");
+    expect(out[0]!.unspent).toHaveLength(1);
   });
 
   it("includeTestnet=false 时不查询 bsvtest", async () => {

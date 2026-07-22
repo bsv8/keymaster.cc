@@ -23,6 +23,7 @@
 import type {
   BsvNetwork,
   KeyspaceService,
+  Woc1SatOrdinalsContent,
   Woc1SatOrdinalsInscription,
   Woc1SatOrdinalsService
 } from "@keymaster/contracts";
@@ -35,6 +36,7 @@ export const P2PKH_CAPABILITY = "p2pkh.service";
 export interface P2pkhUtxoFor1Sat {
   txid: string;
   vout: number;
+  value: number;
   address: string;
 }
 
@@ -47,6 +49,10 @@ export interface P2pkhUtxoFilterFor1Sat {
 /** consumer-side P2PKH service。 */
 export interface P2pkhServiceFor1Sat {
   listUtxos(filter?: P2pkhUtxoFilterFor1Sat): Promise<P2pkhUtxoFor1Sat[]>;
+  listUtxosRaw?(filter?: P2pkhUtxoFilterFor1Sat): Promise<P2pkhUtxoFor1Sat[]>;
+  getGlobalSettings?(): { includeTestnet: boolean };
+  onDataChanged?(handler: () => void): () => void;
+  onGlobalSettingsChange?(handler: (settings: { includeTestnet: boolean }) => void): () => void;
 }
 
 export interface OrdinalsOutpointHit {
@@ -64,9 +70,18 @@ export interface OrdinalsServiceHandle {
    * - 404 / not-found（inscription = null）：静默跳过。
    * - 其它错误：抛给上游；provider 在 listCollectibles 内部捕获后报告 provider 失败。
    */
-  listActiveKeyCollectibles(): Promise<OrdinalsOutpointHit[]>;
+  listActiveKeyCollectibles(signal?: AbortSignal): Promise<OrdinalsOutpointHit[]>;
   /** 取单个 outpoint 的 inscription。 */
-  getOutpoint(outpoint: string): Promise<OrdinalsOutpointHit | null>;
+  getOutpoint(outpoint: string, signal?: AbortSignal): Promise<OrdinalsOutpointHit | null>;
+  /** 取单个 outpoint 的原始 content。 */
+  getOutpointContent(outpoint: string, signal?: AbortSignal): Promise<Woc1SatOrdinalsContent | null>;
+  /** 取单个 outpoint 的原始 locking script。 */
+  getTransactionOutputScript(outpoint: string, signal?: AbortSignal): Promise<Uint8Array>;
+  /** 主动复扫当前 active key 的 1Sat collectibles，并通知订阅者刷新。 */
+  sync(signal?: AbortSignal): Promise<void>;
+  /** 监听当前 active key / P2PKH 数据变更，供 collectible provider 触发重拉。 */
+  onChange(handler: () => void): () => void;
+  dispose(): void;
 }
 
 export interface CreateOrdinalsServiceOptions {
@@ -82,48 +97,158 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
   const keyspace = options.keyspace;
   const p2pkh = options.p2pkh;
   const wocOneSat = options.wocOneSat;
+  const unsubs: Array<() => void> = [];
+  const listeners = new Set<() => void>();
 
-  async function activeKeyUtxos(assetId: "bsv" | "bsvtest"): Promise<P2pkhUtxoFor1Sat[]> {
-    const state = keyspace.active();
-    if (!state.activePublicKeyHex) return [];
-    return p2pkh.listUtxos({ assetId, ownerPublicKeyHex: state.activePublicKeyHex });
+  function notify() {
+    for (const listener of [...listeners]) listener();
+  }
+
+  if (p2pkh.onDataChanged) unsubs.push(p2pkh.onDataChanged(() => notify()));
+  if (p2pkh.onGlobalSettingsChange) unsubs.push(p2pkh.onGlobalSettingsChange(() => notify()));
+
+  function includeTestnet(): boolean {
+    try {
+      return p2pkh.getGlobalSettings?.().includeTestnet ?? false;
+    } catch {
+      return false;
+    }
+  }
+
+  async function activeKeyUtxos(assetId: "bsv" | "bsvtest", publicKeyHex: string): Promise<P2pkhUtxoFor1Sat[]> {
+    try {
+      if (p2pkh.listUtxosRaw) {
+        return await p2pkh.listUtxosRaw({ assetId, ownerPublicKeyHex: publicKeyHex });
+      }
+      return await p2pkh.listUtxos({ assetId, ownerPublicKeyHex: publicKeyHex });
+    } catch {
+      return [];
+    }
+  }
+
+  async function listActiveKeyCollectibles(signal?: AbortSignal): Promise<OrdinalsOutpointHit[]> {
+    const startedKeyHex = keyspace.active().activePublicKeyHex;
+    if (!startedKeyHex) return [];
+    const includeTest = includeTestnet();
+    const networks: Array<{ assetId: "bsv" | "bsvtest"; network: BsvNetwork }> = includeTest
+      ? [
+          { assetId: "bsv", network: "main" },
+          { assetId: "bsvtest", network: "test" }
+        ]
+      : [{ assetId: "bsv", network: "main" }];
+    const out: OrdinalsOutpointHit[] = [];
+    for (const { assetId, network } of networks) {
+      if (signal?.aborted) return out;
+      const utxos = await activeKeyUtxos(assetId, startedKeyHex);
+      for (const u of utxos) {
+        if (signal?.aborted) return out;
+        // 用户可见 collectibleId 用 "txid:vout"（更可读）；
+        // 1Sat endpoint 期望的 outpoint 字符串是 "txid_vout"（下划线）。
+        const displayOutpoint = `${u.txid}:${u.vout}`;
+        const wocOutpoint = toWocOutpoint(u.txid, u.vout);
+        const inscription = await wocOneSat.getOutpointInscription(network, wocOutpoint, { signal });
+        if (!inscription) continue;
+        out.push({ outpoint: displayOutpoint, inscription, address: u.address, network });
+      }
+    }
+    return out;
+  }
+
+  async function getOutpoint(outpoint: string, signal?: AbortSignal): Promise<OrdinalsOutpointHit | null> {
+    const [txid, voutStr] = outpoint.split(":");
+    if (!txid || !voutStr) return null;
+    const vout = Number(voutStr);
+    if (!Number.isFinite(vout)) return null;
+    const wocOutpoint = toWocOutpoint(txid, vout);
+    const networks = includeTestnet() ? (["main", "test"] as const) : (["main"] as const);
+    let lastError: unknown;
+    for (const network of networks) {
+      let inscription: Woc1SatOrdinalsInscription | null;
+      try {
+        inscription = await wocOneSat.getOutpointInscription(network, wocOutpoint, { signal });
+      } catch (err) {
+        lastError = err;
+        continue;
+      }
+      if (!inscription) continue;
+      return { outpoint, inscription, address: inscription.owner ?? "", network };
+    }
+    if (lastError) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+    return null;
+  }
+
+  async function getOutpointContent(outpoint: string, signal?: AbortSignal): Promise<Woc1SatOrdinalsContent | null> {
+    const [txid, voutStr] = outpoint.split(":");
+    if (!txid || !voutStr) return null;
+    const vout = Number(voutStr);
+    if (!Number.isFinite(vout)) return null;
+    const wocOutpoint = toWocOutpoint(txid, vout);
+    const networks = includeTestnet() ? (["main", "test"] as const) : (["main"] as const);
+    let lastError: unknown;
+    for (const network of networks) {
+      try {
+        const content = await wocOneSat.getOutpointContent(network, wocOutpoint, { signal });
+        if (content) return content;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (lastError) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+    return null;
+  }
+
+  async function getTransactionOutputScript(outpoint: string, signal?: AbortSignal): Promise<Uint8Array> {
+    const [txid, voutStr] = outpoint.split(":");
+    if (!txid || !voutStr) return Promise.reject(new Error("Ordinal collectible outpoint is invalid"));
+    const vout = Number(voutStr);
+    if (!Number.isFinite(vout)) return Promise.reject(new Error("Ordinal collectible outpoint is invalid"));
+    const networks = includeTestnet() ? (["main", "test"] as const) : (["main"] as const);
+    let lastError: unknown;
+    for (const network of networks) {
+      try {
+        return await wocOneSat.getTransactionOutputScript(network, txid, vout, { signal });
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (lastError) {
+      throw lastError instanceof Error ? lastError : new Error(String(lastError));
+    }
+    throw new Error("Ordinal collectible output script is unavailable");
+  }
+
+  async function sync(signal?: AbortSignal): Promise<void> {
+    const startedKeyHex = keyspace.active().activePublicKeyHex;
+    if (!startedKeyHex) return;
+    await listActiveKeyCollectibles(signal);
+    if (signal?.aborted) return;
+    if (keyspace.active().activePublicKeyHex !== startedKeyHex) return;
+    notify();
   }
 
   return {
-    async listActiveKeyCollectibles() {
-      // phase 1：1Sat Ordinals 只覆盖 BSV 主网；testnet 不进入 collectible 列表。
-      const networks: Array<{ assetId: "bsv" | "bsvtest"; network: BsvNetwork }> = [
-        { assetId: "bsv", network: "main" }
-      ];
-      const out: OrdinalsOutpointHit[] = [];
-      for (const { assetId, network } of networks) {
-        const utxos = await activeKeyUtxos(assetId);
-        for (const u of utxos) {
-          // 用户可见 collectibleId 用 "txid:vout"（更可读）；
-          // 1Sat endpoint 期望的 outpoint 字符串是 "txid_vout"（下划线）。
-          const displayOutpoint = `${u.txid}:${u.vout}`;
-          const wocOutpoint = toWocOutpoint(u.txid, u.vout);
-          // wocOneSat.getOutpointInscription 内部 404 -> null；
-          // 其它错误向上抛，provider 内部捕获后报告 provider 失败。
-          const inscription = await wocOneSat.getOutpointInscription(network, wocOutpoint);
-          if (!inscription) continue;
-          out.push({ outpoint: displayOutpoint, inscription, address: u.address, network });
+    listActiveKeyCollectibles,
+    getOutpoint,
+    getOutpointContent,
+    getTransactionOutputScript,
+    sync,
+    onChange(handler) {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    },
+    dispose() {
+      for (const off of unsubs) {
+        try {
+          off();
+        } catch {
+          // swallow
         }
       }
-      return out;
-    },
-    async getOutpoint(outpoint) {
-      // outpoint 形参是 "txid:vout"（plugin 内部 collectibleId 格式）；
-      // 翻译为 WOC "txid_vout" 字符串再调 1Sat endpoint。
-      const [txid, voutStr] = outpoint.split(":");
-      if (!txid || !voutStr) return null;
-      const vout = Number(voutStr);
-      if (!Number.isFinite(vout)) return null;
-      const wocOutpoint = toWocOutpoint(txid, vout);
-      const network: BsvNetwork = "main";
-      const inscription = await wocOneSat.getOutpointInscription(network, wocOutpoint);
-      if (!inscription) return null;
-      return { outpoint, inscription, address: inscription.owner ?? "", network };
+      listeners.clear();
     }
   };
 }

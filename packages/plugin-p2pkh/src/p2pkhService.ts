@@ -22,6 +22,7 @@ import type {
   BackgroundRegistry,
   BackgroundRunEligibility,
   BackgroundService,
+  ProtectedOutpointRegistry,
   KeyIdentity,
   KeyspaceService,
   MessageBus,
@@ -126,6 +127,7 @@ export interface P2pkhServiceDeps {
   backgroundRegistry: BackgroundRegistry;
   backgroundService: BackgroundService;
   keyspace: KeyspaceService;
+  protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
   /**
    * 硬切换 002：业务插件注入的 logger。
@@ -1011,6 +1013,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const withoutTestnet = settings.includeTestnet
         ? all
         : all.filter((u) => u.network === "main");
+      const filtered = filterUtxos(withoutTestnet, filter);
+      return excludeProtectedUtxos(filtered, deps.protectedOutpoints, filter?.ownerPublicKeyHex);
+    },
+    async listUtxosRaw(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const all = await db.listUtxos();
+      const settings = getCurrentSettings();
+      const withoutTestnet = settings.includeTestnet
+        ? all
+        : all.filter((u) => u.network === "main");
       return filterUtxos(withoutTestnet, filter);
     },
     async listHistory(filter) {
@@ -1085,7 +1098,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const reserved = new Set(
         reservations.filter((r) => r.state === "claimed").map((r) => `${r.txid}:${r.vout}`)
       );
-      const candidates = filtered.filter((u) => !reserved.has(`${u.txid}:${u.vout}`));
+      const protectedFiltered = excludeProtectedUtxos(filtered, deps.protectedOutpoints);
+      const candidates = protectedFiltered.filter((u) => !reserved.has(`${u.txid}:${u.vout}`));
       const result = allocateUtxos(candidates, request);
       if (result.ok) return result.allocation;
       throw new P2pkhAllocationError(result.error);
@@ -1300,6 +1314,15 @@ function filterUtxos<T extends { network: "main" | "test"; publicKeyHex: string;
     if (filter.resourceId && r.resourceId !== filter.resourceId) return false;
     return true;
   });
+}
+
+function excludeProtectedUtxos<T extends { network: "main" | "test"; publicKeyHex: string; txid: string; vout: number }>(
+  rows: T[],
+  registry: ProtectedOutpointRegistry | undefined,
+  publicKeyHex?: string
+): T[] {
+  if (!registry) return rows;
+  return rows.filter((row) => !registry.isProtected({ txid: row.txid, vout: row.vout, network: row.network, publicKeyHex }));
 }
 
 void (null as unknown as P2pkhTransferService);

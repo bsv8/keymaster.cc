@@ -21,7 +21,8 @@ function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string 
     origin: overrides.origin,
     network: "main",
     address: overrides.address ?? "addr1",
-    balance: overrides.balance ?? { confirmed: 100, unconfirmed: 10 },
+    outpoint: overrides.outpoint ?? `${overrides.origin}_0`,
+    amount: overrides.amount ?? "110",
     meta: overrides.meta ?? { origin: overrides.origin, symbol: "TOK" },
     syncedAt: "2026-01-01T00:00:00Z",
   };
@@ -40,9 +41,9 @@ describe("bsv21TokenProvider", () => {
   describe("listTokens", () => {
     it("聚合多地址同 origin 的余额", async () => {
       const snapshots = [
-        makeSnapshot({ origin: "tok1", address: "addr1", balance: { confirmed: 100, unconfirmed: 10 } }),
-        makeSnapshot({ origin: "tok1", address: "addr2", balance: { confirmed: 200, unconfirmed: 20 } }),
-        makeSnapshot({ origin: "tok2", address: "addr1", balance: { confirmed: 50, unconfirmed: 5 } }),
+        makeSnapshot({ origin: "tok1", address: "addr1", amount: "110" }),
+        makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1" }),
+        makeSnapshot({ origin: "tok2", address: "addr1", amount: "55" }),
       ];
       const provider = createBsv21TokenProvider({
         db: fakeDb(snapshots),
@@ -55,6 +56,7 @@ describe("bsv21TokenProvider", () => {
       const tok1 = tokens.find((t) => t.tokenId === "tok1");
       if (!tok1) throw new Error("tok1 not found");
       expect(tok1.balance!.amount).toBe(330); // 100+10 + 200+20
+      expect(tok1.balance!.display).toBe("330 TOK");
 
       const tok2 = tokens.find((t) => t.tokenId === "tok2");
       if (!tok2) throw new Error("tok2 not found");
@@ -73,8 +75,8 @@ describe("bsv21TokenProvider", () => {
   describe("getToken", () => {
     it("聚合多地址的详情余额，extras 包含地址明细", async () => {
       const snapshots = [
-        makeSnapshot({ origin: "tok1", address: "addr1", balance: { confirmed: 100, unconfirmed: 10 } }),
-        makeSnapshot({ origin: "tok1", address: "addr2", balance: { confirmed: 200, unconfirmed: 20 } }),
+        makeSnapshot({ origin: "tok1", address: "addr1", amount: "110" }),
+        makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1" }),
       ];
       const provider = createBsv21TokenProvider({
         db: fakeDb(snapshots),
@@ -84,8 +86,8 @@ describe("bsv21TokenProvider", () => {
       const detail = await provider.getToken("tok1");
       if (!detail) throw new Error("detail not found");
       expect(detail.summary.balance!.amount).toBe(330);
-      expect(detail.extras!.confirmed).toBe(300);
-      expect(detail.extras!.unconfirmed).toBe(30);
+      expect(detail.summary.balance!.display).toBe("330 TOK");
+      expect(detail.extras!.amount).toBe("330");
       expect(detail.extras!.addresses).toHaveLength(2);
     });
 

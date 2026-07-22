@@ -13,6 +13,7 @@
     "build": "npm run build -w @keymaster/web",
     "typecheck": "tsc -b",
     "keys:balance": "node scripts/check-key-balances.mjs",
+    "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
     "test": "pnpm lint:react-boundaries && vitest run"

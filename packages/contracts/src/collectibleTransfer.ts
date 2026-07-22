@@ -16,6 +16,7 @@
 import type { ComponentType } from "react";
 import type { I18nText } from "./i18n.js";
 import type { CollectibleDetail } from "./collectibles.js";
+import type { BsvNetwork } from "./vault.js";
 
 /** 平台引用一个 collectible 的最小定位信息。 */
 export interface CollectibleRef {
@@ -46,6 +47,9 @@ export interface CollectibleTransferCompletion {
   ref: CollectibleRef;
   /** provider-specific reference：例如 txid / new outpoint。 */
   reference?: string;
+  /** 可观测完成引用，例如 WOC outpoint。 */
+  observedReference?: string;
+  network?: BsvNetwork;
   completedAt: string;
   /** 诊断/展示用；平台不解释内容。 */
   details?: Record<string, unknown>;
@@ -59,7 +63,7 @@ export interface CollectibleTransferHandler extends CollectibleTransferCapabilit
   order?: number;
   /** 挂载的 Widget 组件。 */
   component: ComponentType<CollectibleTransferWidgetProps>;
-  supportsRecipientPublicKeyHex(publicKeyHex: string): boolean;
+  supportsRecipientPublicKeyHex?(publicKeyHex: string): boolean;
 }
 
 /** collectible transfer 注册表。 */

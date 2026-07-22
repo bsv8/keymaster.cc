@@ -128,7 +128,7 @@ export interface AssetDataInvalidationEvent {
   /** 变更版本号；用于微任务合并重读。 */
   revision: number;
   /** 变更的数据类别。 */
-  kinds: Array<"resource" | "utxo" | "history" | "holding" | "claim" | "submission" | "settings">;
+  kinds: Array<"resource" | "utxo" | "history" | "holding" | "claim" | "submission" | "settings" | "protocol-snapshot">;
 }
 
 /**

@@ -9,6 +9,7 @@
 
 import type { ComponentType } from "react";
 import type { I18nText } from "./i18n.js";
+import type { BsvNetwork } from "./vault.js";
 
 /** 转账资产状态。 */
 export type TransferOfferStatus = "ready" | "syncing" | "stale" | "failed" | "unsupported";
@@ -45,6 +46,8 @@ export interface TransferOffer {
   balance?: TransferOfferBalance;
   /** 状态。 */
   status: TransferOfferStatus;
+  /** 归属网络。 */
+  network?: BsvNetwork;
   /** 平台排序：越小越靠前。 */
   order?: number;
   /** Provider 声明该 Offer 在联系人目标综合页所属的稳定分区。 */
@@ -66,6 +69,9 @@ export interface TransferCompletion {
   assetId: string;
   /** 可选引用：例如 txid；平台不假设所有资产都有。 */
   reference?: string;
+  /** 可观测完成引用，例如 WOC observed outpoint / txid。 */
+  observedReference?: string;
+  network?: BsvNetwork;
   completedAt: string;
   /** 诊断/展示用，平台不解释内容。 */
   details?: Record<string, unknown>;

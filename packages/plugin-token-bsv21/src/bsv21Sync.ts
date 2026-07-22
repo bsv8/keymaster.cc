@@ -84,19 +84,37 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       if (ctx.signal.aborted) return;
       ctx.assertSessionFresh?.();
 
-      const snapshots = tokens.map((t) => ({
-        origin: t.meta.origin,
-        network: t.network,
-        address: t.address,
-        balance: t.balance,
-        meta: {
-          origin: t.meta.origin,
-          symbol: t.meta.symbol,
-          issuer: t.meta.issuer,
-          decimals: t.meta.decimals,
-        },
-        syncedAt: new Date().toISOString(),
-      }));
+      const snapshots = [];
+      for (const t of tokens) {
+        const items = t.unspent && t.unspent.length > 0
+          ? t.unspent
+          : t.outpoint
+            ? [{
+                network: t.network,
+                outpoint: t.outpoint,
+                tokenId: t.meta.origin,
+                amount: t.balance.amount,
+                ownerAddress: t.address,
+                current: { txid: t.outpoint.split("_")[0] ?? t.meta.origin, txIndex: Number(t.outpoint.split("_")[1] ?? 0) }
+              }]
+            : [];
+        for (const u of items) {
+          snapshots.push({
+            origin: t.meta.origin,
+            outpoint: u.outpoint,
+            network: u.network,
+            address: u.ownerAddress,
+            amount: u.amount,
+            meta: {
+              origin: t.meta.origin,
+              symbol: t.meta.symbol,
+              issuer: t.meta.issuer,
+              decimals: t.meta.decimals,
+            },
+            syncedAt: new Date().toISOString(),
+          });
+        }
+      }
 
       // 原子替换：在同一事务中删除旧数据并写入新数据
       // DB 操作隐式使用当前 active key 的 namespace

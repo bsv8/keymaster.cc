@@ -30,6 +30,25 @@ describe("business feature registry", () => {
     expect(registry.listHomeProjections()).toEqual([]);
   });
 
+  it("keeps appended features visible when the target domain is registered first", () => {
+    const registry = createBusinessFeatureRegistry();
+    registry.register("assets", {
+      id: "assets",
+      label: { key: "assets.label", fallback: "Wallet" },
+      order: 20,
+      features: []
+    });
+    registry.registerFeature("token-bsv21", "assets", {
+      id: "assets.bsv21",
+      label: { key: "bsv21.menu.mint", fallback: "Create BSV-21" },
+      order: 25,
+      entry: { path: "/assets/bsv21/create", component }
+    });
+
+    expect(registry.listDomains().find((item) => item.id === "assets")?.features.map((item) => item.id))
+      .toEqual(["assets.bsv21"]);
+  });
+
   it("lets another plugin append an entry before the target domain is registered", () => {
     const registry = createBusinessFeatureRegistry();
     registry.registerFeature("vault", "settings", {

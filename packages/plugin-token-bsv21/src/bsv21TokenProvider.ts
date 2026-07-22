@@ -30,6 +30,7 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
   }
   const { db, keyspace, assetDataNotifier } = options;
   const listeners = new Set<() => void>();
+  let offNotifier: (() => void) | undefined;
 
   function notify() {
     for (const l of [...listeners]) {
@@ -39,7 +40,7 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
 
   // 订阅 assetDataNotifier：收到 bsv21 provider 的 data-changed 后通知本地订阅者。
   if (assetDataNotifier) {
-    assetDataNotifier.subscribe((event) => {
+    offNotifier = assetDataNotifier.subscribe((event) => {
       if (event.providerId === "bsv21") {
         notify();
       }
@@ -48,8 +49,9 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
 
   function summaryOf(
     s: Bsv21TokenSnapshot,
-    aggregated: { confirmed: number; unconfirmed: number }
+    aggregated: bigint
   ): TokenSummary {
+    const amount = aggregated.toString();
     return {
       tokenId: s.origin,
       providerId: "bsv21",
@@ -57,9 +59,9 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
       label: s.meta.symbol ? s.meta.symbol : `BSV-21 ${s.origin.slice(0, 8)}…`,
       network: s.network,
       balance: {
-        amount: aggregated.confirmed + aggregated.unconfirmed,
+        amount: toSafeNumber(aggregated),
         unit: s.meta.symbol ?? "TOK",
-        display: `${aggregated.confirmed + aggregated.unconfirmed} ${s.meta.symbol ?? "TOK"}`
+        display: `${amount} ${s.meta.symbol ?? "TOK"}`
       },
       status: "ready",
       issuer: s.meta.issuer,
@@ -81,33 +83,27 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
       // DB 操作隐式使用当前 active key 的 namespace
       const snapshots = await db.list();
 
-      // 按 origin 聚合多地址的 confirmed/unconfirmed 余额
+      // 按 origin 聚合多地址的 unspent 金额
       const aggregated = new Map<string, {
         snapshot: Bsv21TokenSnapshot;
-        confirmed: number;
-        unconfirmed: number;
+        amount: bigint;
       }>();
       for (const s of snapshots) {
         const existing = aggregated.get(s.origin);
+        const amount = parseAmount(s.amount);
         if (existing) {
-          existing.confirmed += s.balance.confirmed;
-          existing.unconfirmed += s.balance.unconfirmed;
+          existing.amount += amount;
         } else {
           aggregated.set(s.origin, {
             snapshot: s,
-            confirmed: s.balance.confirmed,
-            unconfirmed: s.balance.unconfirmed,
+            amount,
           });
         }
       }
 
       const out: TokenSummary[] = [];
-      for (const [origin, entry] of aggregated) {
-        void origin;
-        out.push(summaryOf(entry.snapshot, {
-          confirmed: entry.confirmed,
-          unconfirmed: entry.unconfirmed,
-        }));
+      for (const entry of aggregated.values()) {
+        out.push(summaryOf(entry.snapshot, entry.amount));
       }
       out.sort((a, b) => a.tokenId.localeCompare(b.tokenId));
       return out;
@@ -125,17 +121,16 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
       const first = matching[0];
       if (!first) return undefined;
 
-      // 聚合多地址的 confirmed/unconfirmed 余额
-      const aggregated = { confirmed: 0, unconfirmed: 0 };
-      const addresses: Array<{ address: string; network: string; confirmed: number; unconfirmed: number }> = [];
+      // 聚合多地址的 unspent 余额
+      let aggregated = 0n;
+      const addresses: Array<{ address: string; network: string; amount: string }> = [];
       for (const s of matching) {
-        aggregated.confirmed += s.balance.confirmed;
-        aggregated.unconfirmed += s.balance.unconfirmed;
+        const amount = parseAmount(s.amount);
+        aggregated += amount;
         addresses.push({
           address: s.address,
           network: s.network,
-          confirmed: s.balance.confirmed,
-          unconfirmed: s.balance.unconfirmed,
+          amount: s.amount,
         });
       }
 
@@ -144,8 +139,7 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
         activities: [],
         extras: {
           origin: tokenId,
-          confirmed: aggregated.confirmed,
-          unconfirmed: aggregated.unconfirmed,
+          amount: aggregated.toString(),
           addresses,
         }
       };
@@ -159,6 +153,25 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
     onChange(handler) {
       listeners.add(handler);
       return () => listeners.delete(handler);
+    },
+
+    dispose() {
+      offNotifier?.();
+      offNotifier = undefined;
     }
   };
+}
+
+function parseAmount(amount: string): bigint {
+  if (!/^[0-9]+$/.test(amount)) {
+    throw new Error("BSV-21 amount must be a decimal string");
+  }
+  return BigInt(amount);
+}
+
+function toSafeNumber(value: bigint): number {
+  if (value <= BigInt(Number.MAX_SAFE_INTEGER)) {
+    return Number(value);
+  }
+  return Number.MAX_SAFE_INTEGER;
 }

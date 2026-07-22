@@ -42,9 +42,13 @@ export const WOC_MSG = {
   // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
   // priority queue / 限流 / 429 backoff / 多标签页协调。
   BSV21_LIST_TOKENS: "woc.bsv21.listTokens",
+  BSV21_ADDRESS_UNSPENT: "woc.bsv21.addressUnspent",
   BSV21_TOKEN_BALANCE: "woc.bsv21.tokenBalance",
+  BSV21_TOKEN_BY_ID: "woc.bsv21.tokenById",
   STAS_LIST_TOKENS: "woc.stas.listTokens",
-  ONE_SAT_OUTPOINT: "woc.1satordinals.outpoint"
+  ONE_SAT_OUTPOINT: "woc.1satordinals.outpoint",
+  ONE_SAT_CONTENT: "woc.1satordinals.content",
+  TX_OUTPUT_SCRIPT: "woc.tx.outputScript"
 } as const;
 
 export type WocMessageType = (typeof WOC_MSG)[keyof typeof WOC_MSG];
@@ -88,6 +92,16 @@ export interface WocBsv21TokenBalancePayload extends WocActorPayload {
   origin: string;
 }
 
+/** BSV-21：查某地址的 unspent token UTXO。 */
+export interface WocBsv21AddressUnspentPayload extends WocActorPayload {
+  address: string;
+}
+
+/** BSV-21：查 token id 的当前 UTXO 详情。 */
+export interface WocBsv21TokenByIdPayload extends WocActorPayload {
+  tokenId: string;
+}
+
 /** STAS：列地址持有的 token。 */
 export interface WocStasListTokensPayload extends WocActorPayload {
   address: string;
@@ -96,4 +110,15 @@ export interface WocStasListTokensPayload extends WocActorPayload {
 /** 1Sat Ordinals：按 outpoint 查 inscription。 */
 export interface Woc1SatOutpointPayload extends WocActorPayload {
   outpoint: string;
+}
+
+/** 1Sat Ordinals：按 outpoint 取原始 content。 */
+export interface Woc1SatContentPayload extends WocActorPayload {
+  outpoint: string;
+}
+
+/** 1Sat Ordinals：按 txid / vout 取原始输出脚本。 */
+export interface WocTxOutputScriptPayload extends WocActorPayload {
+  txid: string;
+  vout: number;
 }

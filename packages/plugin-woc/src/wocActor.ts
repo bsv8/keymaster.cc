@@ -29,7 +29,8 @@ import type {
   WocQueueSnapshot,
   WocRequestPriority,
   WocUnconfirmedHistory,
-  WocUtxoResponse
+  WocUtxoResponse,
+  WocBsv21TokenDetail
 } from "@keymaster/contracts";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import { loadWocConfig, saveWocConfig } from "./wocSettings.js";
@@ -39,16 +40,22 @@ import {
   WOC_MSG,
   type WocBalancePayload,
   type WocBsv21ListTokensPayload,
+  type WocBsv21AddressUnspentPayload,
+  type WocBsv21TokenByIdPayload,
   type WocBsv21TokenBalancePayload,
   type WocBroadcastPayload,
   type WocHistoryPayload,
+  type Woc1SatContentPayload,
   type WocStasListTokensPayload,
   type WocUtxosPayload,
-  type Woc1SatOutpointPayload
+  type Woc1SatOutpointPayload,
+  type WocTxOutputScriptPayload
 } from "./wocMessages.js";
 import type {
   Woc1SatOrdinalsInscription,
+  Woc1SatOrdinalsContent,
   WocBsv21BalanceResponse,
+  WocBsv21UnspentToken,
   WocBsv21TokenMeta,
   WocStasTokenEntry
 } from "@keymaster/contracts";
@@ -427,6 +434,55 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     }
   }
 
+  async function fetchBytes(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number): Promise<{ contentType?: string; data: Uint8Array }> {
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort(signal.reason);
+    if (signal.aborted) ctl.abort(signal.reason);
+    else signal.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => ctl.abort(new Error("timeout")), timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    try {
+      const res = await fetch(fullUrl(network, path), { ...init, signal: ctl.signal });
+      if (res.status === 429) {
+        const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
+        applyBackoff(retryAfter, "429 Too Many Requests");
+        throw new Error(`WOC 429`);
+      }
+      if (!res.ok) {
+        throw new Error(`WOC ${res.status} ${res.statusText}`);
+      }
+      return {
+        contentType: res.headers.get("content-type") ?? undefined,
+        data: new Uint8Array(await res.arrayBuffer())
+      };
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  async function fetchText(network: BsvNetwork, path: string, init: RequestInit, signal: AbortSignal, timeoutMs?: number): Promise<string> {
+    const ctl = new AbortController();
+    const onAbort = () => ctl.abort(signal.reason);
+    if (signal.aborted) ctl.abort(signal.reason);
+    else signal.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => ctl.abort(new Error("timeout")), timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    try {
+      const res = await fetch(fullUrl(network, path), { ...init, signal: ctl.signal });
+      if (res.status === 429) {
+        const retryAfter = parseRetryAfter(res.headers.get("retry-after"));
+        applyBackoff(retryAfter, "429 Too Many Requests");
+        throw new Error(`WOC 429`);
+      }
+      if (!res.ok) {
+        throw new Error(`WOC ${res.status} ${res.statusText}`);
+      }
+      return await res.text();
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
   function parseRetryAfter(value: string | null): number | undefined {
     if (!value) return undefined;
     const n = Number(value);
@@ -773,10 +829,11 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       signal: opts.signal,
       label: WOC_MSG.BSV21_LIST_TOKENS,
       fn: async (signal) => {
-        let raw: { result?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }> };
+        let raw: { result?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }>; tokens?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }> };
         try {
           raw = await fetchJson<{
             result?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }>;
+            tokens?: Array<{ origin: string; symbol?: string; decimals?: number; issuer?: string }>;
           }>(
             network,
             `/token/bsv21/${encodeURIComponent(address)}/balance`,
@@ -788,13 +845,71 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           if (isWocNotFoundError(err)) return [];
           throw err;
         }
-        const list = raw.result ?? [];
+        const list = raw.tokens ?? raw.result ?? [];
         return list.map((t) => ({
           origin: t.origin,
           symbol: t.symbol,
           decimals: t.decimals,
           issuer: t.issuer
         }));
+      }
+    });
+  }
+
+  function bsv21AddressUnspent(network: BsvNetwork, address: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocBsv21UnspentToken[]> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.BSV21_ADDRESS_UNSPENT,
+      fn: async (signal) => {
+        let raw: { tokens?: Array<{
+          outpoint?: string;
+          scriptHash?: string;
+          ownerAddress?: string;
+          data?: {
+            bsv20?: { amt?: string | number; id?: string; op?: string; protocol?: string; symbol?: string };
+            insc?: { json?: { amt?: string; id?: string; op?: string; p?: string; sym?: string } };
+          };
+          current?: { txid?: string; txIndex?: number; blockHeight?: number; blockTime?: number };
+        }>; result?: Array<unknown> };
+        try {
+          raw = await fetchJson<typeof raw>(
+            network,
+            `/token/bsv21/${encodeURIComponent(address)}/unspent`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+        } catch (err) {
+          if (isWocNotFoundError(err)) return [];
+          throw err;
+        }
+        const tokens = raw.tokens ?? [];
+        return tokens.flatMap((t) => {
+          const tokenId = t.data?.bsv20?.id;
+          const amount = t.data?.insc?.json?.amt;
+          const current = t.current;
+          const txid = current?.txid;
+          const txIndex = current?.txIndex;
+          if (!tokenId || !txid || typeof txIndex !== "number") return [];
+          const amountText = typeof amount === "string" ? amount : undefined;
+          if (!amountText || !/^[0-9]+$/.test(amountText)) {
+            throw new Error("BSV-21 unspent response is missing decimal string amt");
+          }
+          return [{
+            network,
+            outpoint: `${txid}_${txIndex}`,
+            tokenId,
+            amount: amountText,
+            ownerAddress: t.ownerAddress ?? address,
+            current: {
+              txid,
+              txIndex,
+              blockHeight: current?.blockHeight,
+              blockTime: current?.blockTime
+            }
+          }];
+        });
       }
     });
   }
@@ -845,6 +960,32 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
+  function bsv21TokenById(network: BsvNetwork, tokenId: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<WocBsv21TokenDetail | null> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.BSV21_TOKEN_BY_ID,
+      fn: async (signal) => {
+        try {
+          const raw = await fetchJson<WocBsv21TokenDetail>(
+            network,
+            `/token/bsv21/id/${encodeURIComponent(tokenId)}`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+          if (!raw || !raw.token || !raw.token.outpoint) {
+            return null;
+          }
+          return raw;
+        } catch (err) {
+          if (isWocNotFoundError(err)) return null;
+          throw err;
+        }
+      }
+    });
+  }
+
   function oneSatOutpoint(network: BsvNetwork, outpoint: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<Woc1SatOrdinalsInscription | null> {
     return enqueue({
       priority: priorityOf(opts.priority ?? "background"),
@@ -885,6 +1026,53 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           if (isWocNotFoundError(err)) return null;
           throw err;
         }
+      }
+    });
+  }
+
+  function oneSatContent(network: BsvNetwork, outpoint: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<Woc1SatOrdinalsContent | null> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.ONE_SAT_CONTENT,
+      fn: async (signal) => {
+        if (!outpoint.includes("_")) return null;
+        try {
+          const raw = await fetchBytes(network, `/token/1satordinals/${encodeURIComponent(outpoint)}/content`, { method: "GET" }, signal, opts.timeoutMs);
+          return { contentType: raw.contentType, data: raw.data };
+        } catch (err) {
+          if (isWocNotFoundError(err)) return null;
+          throw err;
+        }
+      }
+    });
+  }
+
+  function txOutputScript(network: BsvNetwork, txid: string, vout: number, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<Uint8Array> {
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.TX_OUTPUT_SCRIPT,
+      fn: async (signal) => {
+        const text = await fetchText(
+          network,
+          `/tx/${encodeURIComponent(txid)}/out/${encodeURIComponent(String(vout))}/hex`,
+          { method: "GET" },
+          signal,
+          opts.timeoutMs
+        );
+        const hex = text.trim();
+        if (hex.length === 0) {
+          throw new Error("WOC output script is empty");
+        }
+        if (hex.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(hex)) {
+          throw new Error("WOC output script is not valid hex");
+        }
+        const bytes = hexToBytes(hex);
+        if (bytes.length === 0) {
+          throw new Error("WOC output script is empty");
+        }
+        return bytes;
       }
     });
   }
@@ -938,9 +1126,17 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocBsv21ListTokensPayload;
         return bsv21ListTokens(p.network, p.address, opts);
       }
+      case WOC_MSG.BSV21_ADDRESS_UNSPENT: {
+        const p = payload as WocBsv21AddressUnspentPayload;
+        return bsv21AddressUnspent(p.network, p.address, opts);
+      }
       case WOC_MSG.BSV21_TOKEN_BALANCE: {
         const p = payload as WocBsv21TokenBalancePayload;
         return bsv21TokenBalance(p.network, p.address, p.origin, opts);
+      }
+      case WOC_MSG.BSV21_TOKEN_BY_ID: {
+        const p = payload as WocBsv21TokenByIdPayload;
+        return bsv21TokenById(p.network, p.tokenId, opts);
       }
       case WOC_MSG.STAS_LIST_TOKENS: {
         const p = payload as WocStasListTokensPayload;
@@ -949,6 +1145,14 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       case WOC_MSG.ONE_SAT_OUTPOINT: {
         const p = payload as Woc1SatOutpointPayload;
         return oneSatOutpoint(p.network, p.outpoint, opts);
+      }
+      case WOC_MSG.ONE_SAT_CONTENT: {
+        const p = payload as Woc1SatContentPayload;
+        return oneSatContent(p.network, p.outpoint, opts);
+      }
+      case WOC_MSG.TX_OUTPUT_SCRIPT: {
+        const p = payload as WocTxOutputScriptPayload;
+        return txOutputScript(p.network, p.txid, p.vout, opts);
       }
       default:
         throw new Error(`Unknown WOC message type: ${type}`);
@@ -971,9 +1175,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.HISTORY_UNCONFIRMED,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.BSV21_LIST_TOKENS,
+      WOC_MSG.BSV21_ADDRESS_UNSPENT,
       WOC_MSG.BSV21_TOKEN_BALANCE,
+      WOC_MSG.BSV21_TOKEN_BY_ID,
       WOC_MSG.STAS_LIST_TOKENS,
-      WOC_MSG.ONE_SAT_OUTPOINT
+      WOC_MSG.ONE_SAT_OUTPOINT,
+      WOC_MSG.ONE_SAT_CONTENT,
+      WOC_MSG.TX_OUTPUT_SCRIPT
     ]) {
       const off = bus.handle(type, (message) => dispatch(type, message), {
         target: WOC_ACTOR_TARGET,

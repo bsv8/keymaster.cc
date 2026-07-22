@@ -4,11 +4,12 @@
 // 关键不变量（施工单 004）：
 //   1. BSV-21 list 端点：GET /token/bsv21/<address>/balance
 //   2. BSV-21 单 token 余额：GET /token/bsv21/<address>/balance/<origin>
-//   3. STAS list 端点：GET /token/stas/<address>/balance
-//   4. 1Sat outpoint 端点：GET /token/1satordinals/<txid>_<vout>
+//   3. BSV-21 token 详情：GET /token/bsv21/id/<id>
+//   4. STAS list 端点：GET /token/stas/<address>/balance
+//   5. 1Sat outpoint 端点：GET /token/1satordinals/<txid>_<vout>
 //      关键：outpoint 字符串是 "txid_vout"（下划线），不是 "txid:vout"。
-//   5. 1Sat 404 / not-found 翻译为 null；其它错误向上抛。
-//   6. 业务侧 outpoint 格式错误（不含 "_"）直接返回 null，不抛错。
+//   6. 1Sat 404 / not-found 翻译为 null；其它错误向上抛。
+//   7. 业务侧 outpoint 格式错误（不含 "_"）直接返回 null，不抛错。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMessageBus } from "@keymaster/runtime";
@@ -98,6 +99,80 @@ describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
     const out = await svc.getAddressTokenBalance(MAIN, "1Addr", "txid_orig");
     expect(out).toEqual({ confirmed: 100, unconfirmed: 5 });
     expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/token\/bsv21\/1Addr\/balance\/txid_orig$/);
+    actor.dispose();
+  });
+
+  it("BSV-21 getTokenById → /token/bsv21/id/<id>", async () => {
+    installFetchMock((url) => {
+      fetchLog.push(url);
+      return new Response(
+        JSON.stringify({
+          token: {
+            outpoint: "abc_0",
+            current: { txid: "abc", txIndex: 10 }
+          }
+        }),
+        { status: 200 }
+      );
+    });
+    const bus = createMessageBus();
+    const actor = createWocActor();
+    actor.attach(bus);
+    const svc = createWocBsv21Service({ messageBus: bus });
+    const out = await svc.getTokenById(MAIN, "abc_0");
+    expect(out?.token.outpoint).toBe("abc_0");
+    expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/token\/bsv21\/id\/abc_0$/);
+    actor.dispose();
+  });
+
+  it("BSV-21 listAddressUnspentTokens → /token/bsv21/<address>/unspent", async () => {
+    installFetchMock((url) => {
+      fetchLog.push(url);
+      return new Response(
+        JSON.stringify({
+          tokens: [
+            {
+              outpoint: "tx0_0",
+              data: {
+                insc: {
+                  json: {
+                    amt: "999000",
+                    id: "tx0_0",
+                    op: "transfer",
+                    p: "bsv-20"
+                  }
+                },
+                bsv20: {
+                  amt: 999000,
+                  id: "tx0_0",
+                  op: "transfer",
+                  protocol: "bsv-20"
+                }
+              },
+              current: { txid: "tx0", txIndex: 0 },
+              ownerAddress: "1Addr"
+            }
+          ]
+        }),
+        { status: 200 }
+      );
+    });
+    const bus = createMessageBus();
+    const actor = createWocActor();
+    actor.attach(bus);
+    const svc = createWocBsv21Service({ messageBus: bus });
+    const out = await svc.listAddressUnspentTokens(MAIN, "1Addr");
+    expect(out).toEqual([
+      {
+        network: "main",
+        outpoint: "tx0_0",
+        tokenId: "tx0_0",
+        amount: "999000",
+        ownerAddress: "1Addr",
+        current: { txid: "tx0", txIndex: 0, blockHeight: undefined, blockTime: undefined }
+      }
+    ]);
+    expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/token\/bsv21\/1Addr\/unspent$/);
     actor.dispose();
   });
 

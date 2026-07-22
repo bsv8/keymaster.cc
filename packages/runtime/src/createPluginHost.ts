@@ -84,6 +84,7 @@ import { buildPluginGraph, reverseDependentsOf } from "./pluginGraph.js";
 import { emptyOwnership, type PluginOwnership } from "./pluginOwnership.js";
 import { createResourceRegistry, registerOwnedResource } from "./resources/resourceRegistry.js";
 import { createResourceStore, type ResourceStoreApi } from "./resources/resourceStore.js";
+import { createProtectedOutpointRegistry, type ProtectedOutpointRegistry } from "./registries/protectedOutpointRegistry.js";
 
 const RUNTIME_MESSAGE_BUS = RUNTIME_MESSAGE_BUS_CONTRACT;
 const TOPBAR_REGISTRY_CAPABILITY = "topbar.registry";
@@ -114,6 +115,7 @@ export interface PluginHost {
   tokens: TokenRegistry;
   collectibles: CollectibleRegistry;
   collectibleTransfer: CollectibleTransferRegistry;
+  protectedOutpoints: ProtectedOutpointRegistry;
   topbar: TopbarRegistry;
   notice: NoticeRegistry;
   i18n: I18nService;
@@ -208,6 +210,7 @@ function buildOwnershipSnapshot(
     tokens: { _ids: () => string[] };
     collectibles: { _ids: () => string[] };
     collectibleTransfer: { _ids: () => string[] };
+    protectedOutpoints: { _ids: () => string[] };
     topbar: { _ids: () => string[] };
     capabilities: { keys: () => string[] };
     resourceRegistry: { _ids: () => string[] };
@@ -231,6 +234,7 @@ function buildOwnershipSnapshot(
     tokenProviders: registries.tokens._ids(),
     collectibleProviders: registries.collectibles._ids(),
     collectibleTransferHandlers: registries.collectibleTransfer._ids(),
+    protectedOutpointProviders: registries.protectedOutpoints._ids(),
     topbarItems: registries.topbar._ids(),
     capabilities: registries.capabilities.keys(),
     resourceDefinitions: registries.resourceRegistry._ids(),
@@ -314,6 +318,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const tokens = createTokenRegistry();
   const collectibles = createCollectibleRegistry();
   const collectibleTransfer = createCollectibleTransferRegistry();
+  const protectedOutpoints = createProtectedOutpointRegistry();
   const topbar = createTopbarRegistry();
   const notice = createNoticeRegistry();
   const i18n = createI18nService({
@@ -379,6 +384,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     "collectible-transfer.registry",
     collectibleTransfer
   );
+  capabilities.provide<ProtectedOutpointRegistry>("protected-outpoint.registry", protectedOutpoints);
   capabilities.provide<TopbarRegistry>(TOPBAR_REGISTRY_CAPABILITY, topbar);
   capabilities.provide<NoticeRegistry>("notice.registry", notice);
   capabilities.provide<MessageBus>(RUNTIME_MESSAGE_BUS, messageBus);
@@ -476,6 +482,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       tokens,
       collectibles,
       collectibleTransfer,
+      protectedOutpoints,
       topbar,
       capabilities,
       resourceRegistry,
@@ -668,6 +675,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       safe(() => collectibles.unregister(id), `collectible:${id}`);
     for (const id of ownership.collectibleTransferHandlers)
       safe(() => collectibleTransfer.unregister(id), `collectibleTransfer:${id}`);
+    if (pluginId && capabilities.has("protected-outpoint.registry")) {
+      safe(() => capabilities.get<ProtectedOutpointRegistry>("protected-outpoint.registry").unregisterByOwner(pluginId), `protectedOutpoints:${pluginId}`);
+    }
     for (const cap of ownership.capabilities) safe(() => capabilities.revoke(cap), `capability:${cap}`);
     resourceStore.refreshRuntimeBindings();
     // 注销 resource definition 并清理该 plugin 拥有的所有 resource records
@@ -723,6 +733,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     tokens,
     collectibles,
     collectibleTransfer,
+    protectedOutpoints,
     topbar,
     notice,
     i18n,

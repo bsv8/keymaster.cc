@@ -30,6 +30,7 @@ export function createOrdinalsCollectibleProvider(
   }
   const service = options.service;
   const listeners = new Set<() => void>();
+  service.onChange(() => emit());
 
   function emit() {
     for (const l of listeners) l();
@@ -51,6 +52,7 @@ export function createOrdinalsCollectibleProvider(
       collection: "1Sat Ordinals",
       ownerRef: hit.inscription.owner ?? hit.address,
       preview: previewOf(hit),
+      network: hit.network,
       status: "ready",
       tags: ["1satordinals", hit.network]
     };
@@ -98,7 +100,7 @@ export function createOrdinalsCollectibleProvider(
     },
 
     async sync(): Promise<void> {
-      emit();
+      await service.sync();
     },
 
     onChange(handler) {

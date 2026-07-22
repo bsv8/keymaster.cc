@@ -27,7 +27,18 @@ function clampAssetIdBySettings(
 
 interface UtxoRow extends P2pkhUtxo {
   inputClaim?: P2pkhLocalInputClaim;
+  protectedOutpoint?: ProtectedOutpointRow;
   spendable: boolean;
+}
+
+interface ProtectedOutpointRow {
+  txid: string;
+  vout: number;
+  network: "main" | "test";
+  ownerPluginId: string;
+  reason?: string;
+  kind?: string;
+  publicKeyHex?: string;
 }
 
 export function P2pkhUtxosPage() {
@@ -36,22 +47,30 @@ export function P2pkhUtxosPage() {
   const [assetId, setAssetId] = useState<P2pkhAssetId | undefined>(() => readAssetIdFromLocation());
   const includeTestnet = useResourceSelector<P2pkhGlobalSettings, boolean>(host.resourceStore, "p2pkh.settings", [], (s) => s.data?.includeTestnet ?? false);
   const bundle = useResourceSelector<{ utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[] }, { utxos: P2pkhUtxo[]; claims: P2pkhLocalInputClaim[] }>(host.resourceStore, "p2pkh.utxos", [assetId ?? "all"], (s) => s.data ?? { utxos: [], claims: [] }, (a, b) => a === b);
+  const protectedBundle = useResourceSelector<{ outpoints: ProtectedOutpointRow[] }, { outpoints: ProtectedOutpointRow[] }>(host.resourceStore, "p2pkh.protected-outpoints", [assetId ?? "all"], (s) => s.data ?? { outpoints: [] }, (a, b) => a === b);
   const { utxos, claims: inputClaims } = bundle;
+  const protectedOutpoints = protectedBundle.outpoints;
 
   const rows: UtxoRow[] = useMemo(() => {
     const byOutpoint = new Map<string, P2pkhLocalInputClaim>();
+    const byProtectedOutpoint = new Map<string, ProtectedOutpointRow>();
     for (const r of inputClaims) {
       byOutpoint.set(`${r.txid}:${r.vout}`, r);
     }
+    for (const r of protectedOutpoints) {
+      byProtectedOutpoint.set(`${r.txid}:${r.vout}`, r);
+    }
     return utxos.map((u) => {
       const r = byOutpoint.get(`${u.txid}:${u.vout}`);
+      const protectedRow = byProtectedOutpoint.get(`${u.txid}:${u.vout}`);
       return {
         ...u,
         inputClaim: r,
+        protectedOutpoint: protectedRow,
         spendable: !r || r.state !== "claimed"
       };
     });
-  }, [utxos, inputClaims]);
+  }, [utxos, inputClaims, protectedOutpoints]);
 
   const columns: DataTableColumn<UtxoRow>[] = [
     { key: "txid", header: t("p2pkh.col.txidVout", { defaultValue: "txid:vout" }), render: (r) => <code>{r.txid}:{r.vout}</code> },
@@ -66,6 +85,14 @@ export function P2pkhUtxosPage() {
         r.inputClaim
           ? `${r.inputClaim.state}${t("p2pkh.col.inputClaim.submission", { defaultValue: " (submission " })}${r.inputClaim.submissionId.slice(0, 8)}${t("p2pkh.col.inputClaim.ellipsis", { defaultValue: "…)" })}`
           : t("p2pkh.col.inputClaim.empty", { defaultValue: "无" })
+    },
+    {
+      key: "protectedOutpoint",
+      header: t("p2pkh.col.protected", { defaultValue: "协议保护" }),
+      render: (r) =>
+        r.protectedOutpoint
+          ? `${r.protectedOutpoint.kind ?? "protected"}${r.protectedOutpoint.reason ? ` · ${r.protectedOutpoint.reason}` : ""}`
+          : t("p2pkh.col.protected.empty", { defaultValue: "无" })
     },
     {
       key: "spendable",
@@ -97,6 +124,10 @@ export function P2pkhUtxosPage() {
           </>
         }
       />
+      <div className="p2pkh-utxos__summary">
+        <span>{t("p2pkh.utxos.summary.claimed", { defaultValue: "本地 claimed" })}: {inputClaims.filter((c) => c.state === "claimed").length}</span>
+        <span>{t("p2pkh.utxos.summary.protected", { defaultValue: "协议保护" })}: {protectedOutpoints.length}</span>
+      </div>
       {rows.length === 0 ? (
         <EmptyState title={t("p2pkh.empty.noUtxo", { defaultValue: "暂无 UTXO" })} />
       ) : (

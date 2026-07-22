@@ -31,8 +31,10 @@ vi.mock("./bsv21Service.js", async () => {
   return {
     ...actual,
     createBsv21Service: vi.fn(() => ({
+      listActiveKeyUnspentTokens: vi.fn().mockResolvedValue([]),
       listActiveKeyTokens: vi.fn().mockResolvedValue([]),
       getToken: vi.fn().mockResolvedValue(null),
+      getTokenById: vi.fn().mockResolvedValue(null),
     })),
   };
 });
@@ -70,8 +72,16 @@ async function setupManifest() {
   const triggerFn = vi.fn();
   const registerToken = vi.fn();
   const registerBackground = vi.fn();
+  const registerProtected = vi.fn();
+  const registerRoute = vi.fn();
+  const registerFeature = vi.fn();
+  const registerTransfer = vi.fn();
   const onActiveChangeFn = vi.fn(() => () => {});
   const onGlobalSettingsChangeFn = vi.fn(() => () => {});
+  const protocolSpend = {
+    prepare: vi.fn(),
+    submit: vi.fn()
+  };
 
   // messageBus 需要真正存储 handler，以便测试中手动 emit
   const messageBusListeners = new Map<string, Array<(payload: unknown) => void>>();
@@ -80,6 +90,7 @@ async function setupManifest() {
   const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void> = [];
 
   const ctx = {
+    provide: vi.fn(),
     get: vi.fn((cap: string) => {
       switch (cap) {
         case "p2pkh.service":
@@ -89,7 +100,7 @@ async function setupManifest() {
             onGlobalSettingsChange: onGlobalSettingsChangeFn,
           };
         case "woc.bsv21.service":
-          return { listAddressTokens: vi.fn(), getAddressTokenBalance: vi.fn() };
+          return { listAddressTokens: vi.fn(), listAddressUnspentTokens: vi.fn(), getAddressTokenBalance: vi.fn(), getTokenById: vi.fn() };
         case "keyspace.service":
           return {
             active: () => ({ activePublicKeyHex: "pk1" }),
@@ -128,6 +139,40 @@ async function setupManifest() {
                 if (idx >= 0) dataNotifierListeners.splice(idx, 1);
               };
             }),
+          };
+        case "protected-outpoint.registry":
+          return {
+            register: registerProtected,
+            unregister: vi.fn(),
+            list: vi.fn(() => []),
+            isProtected: vi.fn(() => false),
+            unregisterByOwner: vi.fn(),
+            _ids: vi.fn(() => []),
+          };
+        case "p2pkh.protocol-spend":
+          return protocolSpend;
+        case "route.registry":
+          return { register: registerRoute, list: vi.fn(() => []), byPath: vi.fn(), byId: vi.fn() };
+        case "business.registry":
+          return {
+            register: vi.fn(),
+            registerFeature,
+            unregisterFeature: vi.fn(),
+            unregisterDomain: vi.fn(),
+            listDomains: vi.fn(() => []),
+            listFeatures: vi.fn(() => []),
+            listHomeProjections: vi.fn(() => []),
+            byOwnerPluginId: vi.fn(() => []),
+            subscribe: vi.fn(() => () => {}),
+            _ids: vi.fn(() => ({ domains: [], features: [], projections: [] })),
+          };
+        case "transfer.registry":
+          return {
+            register: registerTransfer,
+            unregister: vi.fn(),
+            list: vi.fn(() => []),
+            get: vi.fn(() => undefined),
+            _ids: vi.fn(() => []),
           };
         default:
           throw new Error(`unexpected capability: ${cap}`);

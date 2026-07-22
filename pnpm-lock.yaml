@@ -84,9 +84,6 @@ importers:
       '@keymaster/plugin-apps':
         specifier: '*'
         version: link:../../packages/plugin-apps
-      '@keymaster/plugin-assets':
-        specifier: '*'
-        version: link:../../packages/plugin-assets
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:../../packages/plugin-background
@@ -99,12 +96,6 @@ importers:
       '@keymaster/plugin-collectible-1satordinals':
         specifier: '*'
         version: link:../../packages/plugin-collectible-1satordinals
-      '@keymaster/plugin-collectible-transfer':
-        specifier: '*'
-        version: link:../../packages/plugin-collectible-transfer
-      '@keymaster/plugin-collectibles':
-        specifier: '*'
-        version: link:../../packages/plugin-collectibles
       '@keymaster/plugin-contacts':
         specifier: '*'
         version: link:../../packages/plugin-contacts
@@ -150,9 +141,6 @@ importers:
       '@keymaster/plugin-token-stas':
         specifier: '*'
         version: link:../../packages/plugin-token-stas
-      '@keymaster/plugin-transfer':
-        specifier: '*'
-        version: link:../../packages/plugin-transfer
       '@keymaster/plugin-vault':
         specifier: '*'
         version: link:../../packages/plugin-vault
@@ -217,21 +205,6 @@ importers:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
 
-  packages/plugin-assets:
-    dependencies:
-      '@bsv/sdk':
-        specifier: ^2.1.7
-        version: 2.1.7
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-
   packages/plugin-background:
     dependencies:
       '@keymaster/contracts':
@@ -285,30 +258,6 @@ importers:
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
-
-  packages/plugin-collectible-transfer:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-
-  packages/plugin-collectibles:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
 
   packages/plugin-contacts:
     dependencies:
@@ -519,18 +468,6 @@ importers:
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
-
-  packages/plugin-transfer:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
 
   packages/plugin-vault:
     dependencies:

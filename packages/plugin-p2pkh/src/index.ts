@@ -6,3 +6,4 @@ export { createP2pkhHistoryBackfill } from "./p2pkhHistoryBackfill.js";
 export { openP2pkhDb, createP2pkhDb } from "./p2pkhDb.js";
 export { createP2pkhSyncCoordinator } from "./p2pkhSyncCoordinator.js";
 export { createP2pkhCoordinatorTasks } from "./p2pkhCoordinatorTasks.js";
+export { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";

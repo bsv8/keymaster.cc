@@ -27,6 +27,7 @@ import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
 import { registerShellResources } from "./shell/shellResources.js";
+import { registerAssetWorkspace } from "./system/registerAssetWorkspace.js";
 
 /**
  * 启动期每个插件注册的最长等待时间。
@@ -194,6 +195,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   for (const plugin of orderedWithConfig) {
     await registerPluginWithTimeout(host, plugin);
   }
+
+  await registerAssetWorkspace(host);
 
   assertWebStartupContract(host);
 

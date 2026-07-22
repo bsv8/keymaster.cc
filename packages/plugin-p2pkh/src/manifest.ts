@@ -16,6 +16,7 @@ import type {
   BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
+  BsvNetwork,
   I18nPluginResources,
   KeyspaceService,
   KeyIdentity,
@@ -23,6 +24,7 @@ import type {
   PluginManifest,
   ResourceRegistry,
   RouteRegistry,
+  ProtectedOutpointRegistry,
   SystemSettingsRegistry,
   VaultService,
   WocService
@@ -32,6 +34,7 @@ import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
+  P2PKH_PROTOCOL_SPEND_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   WOC_CAPABILITY
 } from "@keymaster/contracts";
@@ -40,8 +43,10 @@ import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResour
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
 import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
+import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
+import { createP2pkhDb, openP2pkhDb } from "./p2pkhDb.js";
 import { P2pkhOverviewPage } from "./pages/P2pkhOverviewPage.js";
 import { P2pkhHistoryPage } from "./pages/P2pkhHistoryPage.js";
 import { P2pkhUtxosPage } from "./pages/P2pkhUtxosPage.js";
@@ -399,7 +404,7 @@ export const p2pkhPlugin: PluginManifest = {
     startup: "optional",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [P2PKH_CAPABILITY],
+    providesCapabilities: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY],
     displayGroup: "business"
   },
   i18n: p2pkhResources,
@@ -412,6 +417,7 @@ export const p2pkhPlugin: PluginManifest = {
     { capability: WOC_CAPABILITY, reason: "通过 woc.service 读取链上数据" },
     { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册 P2PKH 后台任务" },
     { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "调度 P2PKH 后台任务" },
+    { capability: "protected-outpoint.registry", reason: "排除协议受保护 outpoint" },
     { capability: "asset.registry", reason: "注册 P2PKH AssetProvider" },
     { capability: "transfer.registry", reason: "注册 P2PKH TransferProvider" },
     { capability: "route.registry", reason: "注册 P2PKH 页面" },
@@ -427,6 +433,7 @@ export const p2pkhPlugin: PluginManifest = {
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
     const backgroundRegistry = ctx.get<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY);
     const backgroundService = ctx.get<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY);
+    const protectedOutpoints = ctx.get<ProtectedOutpointRegistry>("protected-outpoint.registry");
     const assetDataNotifier = ctx.has(ASSET_DATA_NOTIFIER_CAPABILITY)
       ? ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY)
       : undefined;
@@ -438,10 +445,33 @@ export const p2pkhPlugin: PluginManifest = {
       backgroundRegistry,
       backgroundService,
       keyspace,
+      protectedOutpoints,
       assetDataNotifier,
       logger: ctx.logger
     });
     ctx.provide(P2PKH_CAPABILITY, service);
+    ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
+      vault,
+      woc,
+      claimStore: {
+        async tryClaimInputs(input) {
+          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: input.publicKeyHex });
+          return createP2pkhDb(bundle).tryClaimInputs(input);
+        },
+        async releaseLocalInputClaims(input) {
+          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: input.publicKeyHex });
+          return createP2pkhDb(bundle).releaseLocalInputClaims(input.claimIds);
+        }
+      },
+      protectedOutpoints,
+      getKeyForOwner: async (ownerPublicKeyHex: string) => {
+        const key = await keyspace.getKey(ownerPublicKeyHex);
+        if (!key || !key.publicKeyHex) {
+          throw new Error(`P2PKH owner key not ready: ${ownerPublicKeyHex}`);
+        }
+        return { publicKeyHex: key.publicKeyHex };
+      }
+    }));
 
     // 注册资源定义（硬切换 003）
     const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
@@ -561,6 +591,28 @@ export const p2pkhPlugin: PluginManifest = {
         return { utxos: await service.listUtxos(asset ? { assetId: asset } : undefined), claims: await service.listLocalInputClaims() };
       },
       subscribe: (_args, _ctx, invalidate) => { const offs = [service.onDataChanged(invalidate), service.onGlobalSettingsChange(invalidate), keyspace.onActiveKeyChanged(invalidate)]; return () => offs.forEach((off) => off()); },
+      invalidation: "microtask"
+    });
+    resources.register<{ outpoints: Array<{ txid: string; vout: number; network: BsvNetwork; ownerPluginId: string; reason?: string; kind?: string; publicKeyHex?: string }> }, readonly string[]>({
+      id: "p2pkh.protected-outpoints",
+      scope: "active-key",
+      key: (args, context) => ["p2pkh.protected-outpoints", context.activePublicKeyHex ?? "none", args[0] ?? "all"],
+      load: async (args, context) => {
+        if (!context.activePublicKeyHex) {
+          return { outpoints: [] };
+        }
+        const network = args[0] === "bsv" || args[0] === "bsvtest" ? (args[0] === "bsv" ? "main" : "test") : undefined;
+        const outpoints = protectedOutpoints.list({
+          publicKeyHex: context.activePublicKeyHex,
+          ...(network ? { network } : {})
+        });
+        return { outpoints };
+      },
+      subscribe: (_args, _ctx, invalidate) => {
+        const off = protectedOutpoints.onChange(invalidate);
+        const offKey = keyspace.onActiveKeyChanged(invalidate);
+        return () => { off(); offKey(); };
+      },
       invalidation: "microtask"
     });
     resources.register<{ activePublicKeyHex?: string; identity?: KeyIdentity; resource?: P2pkhKeyResource }, readonly string[]>({

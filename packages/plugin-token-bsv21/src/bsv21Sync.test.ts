@@ -28,9 +28,31 @@ function fakeDb(): Bsv21Db & { replaceAll: ReturnType<typeof vi.fn> } {
   return { replaceAll: vi.fn(async () => {}) } as unknown as Bsv21Db & { replaceAll: ReturnType<typeof vi.fn> };
 }
 
-function fakeService(tokens: Array<{ meta: { origin: string; symbol: string; issuer: string; decimals: number }; balance: { confirmed: number; unconfirmed: number }; address: string; network: "main" | "test" }>): Bsv21ServiceHandle {
+function fakeService(tokens: Array<{ meta: { origin: string; symbol: string; issuer: string; decimals: number }; balance: { confirmed: string; unconfirmed: string; amount: string; display: string }; address: string; network: "main" | "test"; outpoint: string }>): Bsv21ServiceHandle {
   return {
-    listActiveKeyTokens: vi.fn(async () => tokens),
+    listActiveKeyUnspentTokens: vi.fn(async () => tokens.map((t) => ({
+      network: t.network,
+      outpoint: t.outpoint,
+      tokenId: t.meta.origin,
+      amount: t.balance.amount,
+      ownerAddress: t.address,
+      current: { txid: t.meta.origin, txIndex: 0 }
+    }))),
+    listActiveKeyTokens: vi.fn(async () => tokens.map((t) => ({
+      meta: t.meta,
+      balance: t.balance,
+      outpoint: t.outpoint,
+      unspent: [{
+        network: t.network,
+        outpoint: t.outpoint,
+        tokenId: t.meta.origin,
+        amount: t.balance.amount,
+        ownerAddress: t.address,
+        current: { txid: t.meta.origin, txIndex: 0 }
+      }],
+      address: t.address,
+      network: t.network
+    }))),
     getToken: vi.fn(async () => null)
   };
 }
@@ -43,10 +65,11 @@ function fakeNotifier(): AssetDataNotifier & { emit: ReturnType<typeof vi.fn>; s
 }
 
 const SAMPLE_TOKENS = [{
-  meta: { origin: "tok1", symbol: "T1", issuer: "", decimals: 0 },
-  balance: { confirmed: 100, unconfirmed: 0 },
+  meta: { origin: "tok1_0", symbol: "T1", issuer: "", decimals: 0 },
+  balance: { confirmed: "100", unconfirmed: "0", amount: "100", display: "100 T1" },
+  outpoint: "tok1_0",
   address: "addr1",
-  network: "main" as const
+      network: "main" as const
 }];
 
 describe("createBsv21SyncTask", () => {
@@ -66,6 +89,7 @@ describe("createBsv21SyncTask", () => {
     expect(db.replaceAll).toHaveBeenCalledTimes(1);
     expect(notifier.emit).toHaveBeenCalledTimes(1);
     expect(notifier.emit.mock.calls[0]![0].publicKeyHex).toBe("pk1");
+    expect((db.replaceAll as ReturnType<typeof vi.fn>).mock.calls[0]![0][0].outpoint).toBe("tok1_0");
   });
 
   it("signal 在 listActiveKeyTokens 前 aborted：不 replaceAll、不 emit", async () => {

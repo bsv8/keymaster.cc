@@ -12,6 +12,7 @@
 //     因此平台需要的字段都集中在 CollectibleDetail 的固定字段上。
 
 import type { I18nText } from "./i18n.js";
+import type { BsvNetwork } from "./vault.js";
 
 /** collectible 状态。 */
 export type CollectibleStatus = "ready" | "syncing" | "stale" | "failed" | "unsupported";
@@ -40,6 +41,8 @@ export interface CollectibleSummary {
   ownerRef?: string;
   /** 预览。 */
   preview?: CollectiblePreview;
+  /** 所属网络。 */
+  network?: BsvNetwork;
   /** 状态。 */
   status: CollectibleStatus;
   /** provider 声明的详情入口；缺省时由平台通用详情页接管。 */
@@ -68,6 +71,8 @@ export interface CollectibleActivity {
 /** collectible 详情。 */
 export interface CollectibleDetail {
   summary: CollectibleSummary;
+  /** 明确 network，详情页无需从外部 provider 推导。 */
+  network?: BsvNetwork;
   /** 详情页预览。 */
   preview?: CollectiblePreview;
   /** 属性表（链上 attributes / 链下 metadata）。 */

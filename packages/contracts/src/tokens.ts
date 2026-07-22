@@ -107,6 +107,8 @@ export interface TokenProvider {
   listActivity(tokenId: string): Promise<TokenActivity[]>;
   /** 订阅 token 变化。 */
   onChange(handler: () => void): () => void;
+  /** 可选资源释放；用于清理内部订阅。 */
+  dispose?(): void;
 }
 
 /** Token provider 注册表。 */

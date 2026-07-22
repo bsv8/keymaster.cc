@@ -13,10 +13,7 @@ import { hubcastPlatformPlugin } from "@keymaster/plugin-hubcast";
 import { hubmsgPlatformPlugin } from "@keymaster/plugin-hubmsg";
 import { messagePlatformPlugin } from "@keymaster/plugin-message";
 import { webrtcPlugin } from "@keymaster/plugin-webrtc";
-import { assetsPlugin } from "@keymaster/plugin-assets";
 import { backgroundPlugin } from "@keymaster/plugin-background";
-import { collectiblesPlugin } from "@keymaster/plugin-collectibles";
-import { collectibleTransferPlugin } from "@keymaster/plugin-collectible-transfer";
 import { oneSatOrdinalsCollectiblePlugin } from "@keymaster/plugin-collectible-1satordinals";
 import { contactsPlugin } from "@keymaster/plugin-contacts";
 import { homePlugin } from "@keymaster/plugin-home";
@@ -30,7 +27,6 @@ import { protocolPlugin } from "@keymaster/plugin-protocol";
 import { settingsPlugin } from "@keymaster/plugin-settings";
 import { bsv21TokenPlugin } from "@keymaster/plugin-token-bsv21";
 import { stasTokenPlugin } from "@keymaster/plugin-token-stas";
-import { transferPlugin } from "@keymaster/plugin-transfer";
 import { vaultPlugin } from "@keymaster/plugin-vault";
 import { wocPlugin } from "@keymaster/plugin-woc";
 
@@ -44,11 +40,7 @@ export const WEB_PLUGIN_CATALOG: readonly PluginManifest[] = [
   webrtcPlugin,
   messagePlatformPlugin,
   settingsPlugin,
-  assetsPlugin,
-  collectiblesPlugin,
-  collectibleTransferPlugin,
   keyImportPlugin,
-  transferPlugin,
   contactsPlugin,
   homePlugin,
   wocPlugin,

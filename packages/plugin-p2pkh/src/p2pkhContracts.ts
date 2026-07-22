@@ -419,6 +419,8 @@ export interface P2pkhService {
 
   listResources(assetId?: P2pkhAssetId): Promise<P2pkhKeyResource[]>;
   listUtxos(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
+  /** 不排除 protected outpoint 的原始 UTXO 读口，仅供协议级内部使用。 */
+  listUtxosRaw?(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
   listHistory(filter?: P2pkhUtxoFilter): Promise<P2pkhHistoryItem[]>;
   listBackfillStates(): Promise<P2pkhBackfillState[]>;
   /**

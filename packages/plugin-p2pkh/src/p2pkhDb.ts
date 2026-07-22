@@ -68,6 +68,11 @@ interface P2pkhDbBundle {
 
 export type { P2pkhDbBundle };
 
+export interface P2pkhInputOutpoint {
+  txid: string;
+  vout: number;
+}
+
 interface OpenHandle {
   publicKeyHex: string;
   close(): void;
@@ -766,6 +771,48 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
           return { claimIds };
         }
       );
+    },
+    /**
+     * 协议 spend / 其它内部预览阶段专用：原子地写入一组 local input claim，
+     * 不落 local submission。与 transfer 的 claim 语义一致：同一
+     * (resourceId, txid, vout) 在同一时间只能被一个 submissionId 占用。
+     */
+    async tryClaimInputs(input: {
+      submissionId: string;
+      resourceId: string;
+      publicKeyHex: string;
+      network: BsvNetwork;
+      inputs: P2pkhInputOutpoint[];
+    }): Promise<{ claimIds: string[] }> {
+      return tx(handle, "p2pkh_local_input_claims", "readwrite", async (t) => {
+        const claimStore = t.objectStore("p2pkh_local_input_claims");
+        const now = new Date().toISOString();
+        const claimIds: string[] = [];
+        for (const u of input.inputs) {
+          const id = localInputClaimIdFor(input.resourceId, u.txid, u.vout);
+          const existing = await reqAsPromise<P2pkhLocalInputClaim | undefined>(claimStore.get(id));
+          if (existing && existing.state === "claimed" && existing.submissionId !== input.submissionId) {
+            throw new Error(
+              `P2PKH input already claimed by another submission: ${u.txid}:${u.vout} (submissionId=${existing.submissionId})`
+            );
+          }
+          const claim: P2pkhLocalInputClaim = {
+            id,
+            submissionId: input.submissionId,
+            resourceId: input.resourceId,
+            publicKeyHex: input.publicKeyHex,
+            network: input.network,
+            txid: u.txid,
+            vout: u.vout,
+            state: "claimed",
+            createdAt: now,
+            updatedAt: now
+          };
+          await reqAsPromise(claimStore.put(claim));
+          claimIds.push(id);
+        }
+        return { claimIds };
+      });
     },
     /**
      * 释放一组 claim 行。transfer 在 `definitive rejection` 路径上

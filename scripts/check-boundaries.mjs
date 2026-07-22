@@ -7,7 +7,7 @@
 // 硬切换文档（001）里要求的边界都在这里写成 process.exit(1) 路径，避免
 // 实施时被"先放着，后面再补"绕过。
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, sep } from "node:path";
 
 const root = process.cwd();
@@ -50,22 +50,26 @@ for (const plugin of pluginNames) {
 
 /** 检查 plugin-assets 禁止 import 任何具体资产插件。 */
 const assetsSrc = join(packagesDir, "plugin-assets", "src");
-for (const file of walk(assetsSrc)) {
-  const text = readFileSync(file, "utf8");
-  if (/@keymaster\/plugin-p2pkh\b/.test(text)) {
-    recordViolation(file, "plugin-assets must not import @keymaster/plugin-p2pkh");
+if (existsSync(assetsSrc)) {
+  for (const file of walk(assetsSrc)) {
+    const text = readFileSync(file, "utf8");
+    if (/@keymaster\/plugin-p2pkh\b/.test(text)) {
+      recordViolation(file, "plugin-assets must not import @keymaster/plugin-p2pkh");
+    }
   }
 }
 
 /** 检查 plugin-transfer 禁止 import 任何具体资产插件、vault、contacts。 */
 const transferSrc = join(packagesDir, "plugin-transfer", "src");
-for (const file of walk(transferSrc)) {
-  const text = readFileSync(file, "utf8");
-  for (const p of pluginNames) {
-    if (p === "plugin-transfer" || p === "plugin-assets" || p === "plugin-woc" || p === "plugin-background") continue;
-    const pkg = `@keymaster/${p}`;
-    if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
-      recordViolation(file, `plugin-transfer must not import ${pkg}`);
+if (existsSync(transferSrc)) {
+  for (const file of walk(transferSrc)) {
+    const text = readFileSync(file, "utf8");
+    for (const p of pluginNames) {
+      if (p === "plugin-transfer" || p === "plugin-assets" || p === "plugin-woc" || p === "plugin-background") continue;
+      const pkg = `@keymaster/${p}`;
+      if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
+        recordViolation(file, `plugin-transfer must not import ${pkg}`);
+      }
     }
   }
 }
@@ -87,21 +91,25 @@ for (const file of walk(p2pkhSrc)) {
 
 /** 检查 plugin-woc 禁止 import plugin-p2pkh。 */
 const wocSrc = join(packagesDir, "plugin-woc", "src");
-for (const file of walk(wocSrc)) {
-  const text = readFileSync(file, "utf8");
-  if (/@keymaster\/plugin-p2pkh\b/.test(text)) {
-    recordViolation(file, "plugin-woc must not import @keymaster/plugin-p2pkh");
+if (existsSync(wocSrc)) {
+  for (const file of walk(wocSrc)) {
+    const text = readFileSync(file, "utf8");
+    if (/@keymaster\/plugin-p2pkh\b/.test(text)) {
+      recordViolation(file, "plugin-woc must not import @keymaster/plugin-p2pkh");
+    }
   }
 }
 
 /** 检查 plugin-background 禁止 import plugin-p2pkh 或 plugin-woc。 */
 const bgSrc = join(packagesDir, "plugin-background", "src");
-for (const file of walk(bgSrc)) {
-  const text = readFileSync(file, "utf8");
-  for (const other of ["plugin-p2pkh", "plugin-woc"]) {
-    const pkg = `@keymaster/${other}`;
-    if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
-      recordViolation(file, `plugin-background must not import ${pkg}`);
+if (existsSync(bgSrc)) {
+  for (const file of walk(bgSrc)) {
+    const text = readFileSync(file, "utf8");
+    for (const other of ["plugin-p2pkh", "plugin-woc"]) {
+      const pkg = `@keymaster/${other}`;
+      if (new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`).test(text)) {
+        recordViolation(file, `plugin-background must not import ${pkg}`);
+      }
     }
   }
 }
@@ -156,7 +164,7 @@ for (const file of walk(shellDir)) {
 /** 硬切换 002：manifest setup 不得绕过 runtime 直接读取启停配置存储。 */
 for (const file of pluginNames.flatMap((plugin) => {
   const manifest = join(packagesDir, plugin, "src", "manifest.ts");
-  return statSync(manifest).isFile() ? [manifest] : [];
+  return existsSync(manifest) && statSync(manifest).isFile() ? [manifest] : [];
 })) {
   const text = readFileSync(file, "utf8");
   if (/keymaster\.plugins\.runtime|pluginConfigStore|PluginConfigStore/.test(text)) {
@@ -456,7 +464,7 @@ for (const rootDir of navScanRoots) {
       }
     }
     {
-      const re = /\blocation\.replace\s*\(\s*(?![`'"]https?:\/\/)/g;
+      const re = /(?<!popup\.)\blocation\.replace\s*\(\s*(?![`'"]https?:\/\/)/g;
       if (re.test(stripped)) {
         recordViolation(file, "location.replace(<non-external-literal>) is forbidden; use router.push");
       }
