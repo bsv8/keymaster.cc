@@ -721,6 +721,35 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
 .home-widget__list li { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .home-widget__list li:last-child { border-bottom: 0; }
 .home-widget__list .addr { color: var(--text-dim); }
+.home-widget--assets { overflow: hidden; padding: 0; }
+.assets-home__header { align-items: center; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; padding: 15px 16px 13px; }
+.assets-home__header h3 { font-size: 15px; letter-spacing: -0.01em; margin: 0; }
+.assets-home__count { background: color-mix(in srgb, var(--primary) 12%, var(--surface)); border-radius: 999px; color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; padding: 3px 8px; }
+.assets-home__accounts { background: color-mix(in srgb, var(--surface-2) 58%, var(--surface)); display: grid; gap: 10px; padding: 12px 16px 16px; }
+.assets-home__account { background: var(--surface); border: 1px solid color-mix(in srgb, var(--primary) 20%, var(--border)); border-radius: 12px; min-width: 0; overflow: hidden; }
+.assets-home__account.is-testnet { border-color: color-mix(in srgb, #5b8def 34%, var(--border)); }
+.assets-home__account-head { align-items: center; display: flex; justify-content: space-between; padding: 10px 10px 8px; }
+.assets-home__network { background: color-mix(in srgb, var(--primary) 13%, var(--surface)); border-radius: 999px; color: var(--primary); font-size: 10px; font-weight: 700; letter-spacing: 0.02em; padding: 2px 6px; }
+.assets-home__account.is-testnet .assets-home__network { background: color-mix(in srgb, #5b8def 13%, var(--surface)); color: #5b8def; }
+.assets-home__account-count { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+.assets-home__account-address { align-items: center; display: grid; gap: 8px; grid-template-columns: auto minmax(0, 1fr) auto; padding: 0 10px 10px; }
+.assets-home__account-address > span { color: var(--text-dim); font-size: 11px; }
+.assets-home__account-address code { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assets-home__copy { gap: 4px; padding-inline: 7px; }
+.assets-home__account-holdings { border-top: 1px solid var(--border); padding: 8px 10px 0; }
+.assets-home__holdings-head { color: var(--text-dim); font-size: 10px; letter-spacing: 0.04em; margin-bottom: 2px; text-transform: uppercase; }
+.assets-home__list { list-style: none; margin: 0; padding: 0; }
+.assets-home__item { align-items: center; border-top: 1px solid var(--border); display: grid; gap: 10px; grid-template-columns: 30px minmax(0, 1fr) auto; min-height: 56px; transition: background .15s ease, transform .15s ease; }
+.assets-home__item:first-child { border-top: 0; }
+.assets-home__item:hover { background: color-mix(in srgb, var(--primary) 5%, transparent); transform: translateX(2px); }
+.assets-home__mark { align-items: center; background: color-mix(in srgb, var(--primary) 14%, var(--surface)); border-radius: 9px; color: var(--primary); display: flex; font-size: 12px; font-weight: 700; height: 30px; justify-content: center; text-transform: uppercase; width: 30px; }
+.assets-home__mark--token { background: color-mix(in srgb, #8a68d8 14%, var(--surface)); color: #8a68d8; }
+.assets-home__account.is-testnet .assets-home__mark { background: color-mix(in srgb, #5b8def 14%, var(--surface)); color: #5b8def; }
+.assets-home__asset { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.assets-home__asset-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assets-home__asset-meta { color: var(--text-dim); font-size: 11px; }
+.assets-home__balance { font-size: 13px; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.assets-home__empty { color: var(--text-dim); font-size: 12px; margin: 0; padding: 16px 0; text-align: center; }
 
 /* ---------- Home quick actions ---------- */
 .home-actions { max-width: 560px; }
@@ -771,6 +800,8 @@ button.step-progress__node:not(:disabled):hover .step-progress__label { color: v
   .home-actions__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .home-actions__identity-row { grid-template-columns: 40px minmax(0, 1fr); }
   .home-actions__identity-row .home-actions__copy { grid-column: 2; justify-self: start; }
+  .assets-home__account-address { align-items: start; grid-template-columns: auto minmax(0, 1fr); }
+  .assets-home__copy { justify-self: start; }
   .home-actions__manual, .home-actions__create { grid-template-columns: 1fr; }
 }
 

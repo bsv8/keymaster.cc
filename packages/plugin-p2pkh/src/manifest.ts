@@ -16,7 +16,6 @@ import type {
   BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
-  HomeRegistry,
   I18nPluginResources,
   KeyspaceService,
   KeyIdentity,
@@ -47,7 +46,6 @@ import { P2pkhOverviewPage } from "./pages/P2pkhOverviewPage.js";
 import { P2pkhHistoryPage } from "./pages/P2pkhHistoryPage.js";
 import { P2pkhUtxosPage } from "./pages/P2pkhUtxosPage.js";
 import { P2pkhSettingsPage } from "./pages/P2pkhSettingsPage.js";
-import { P2pkhBalanceWidget } from "./widgets/P2pkhBalanceWidget.js";
 
 export { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 
@@ -646,16 +644,6 @@ export const p2pkhPlugin: PluginManifest = {
       order: 10,
       replacesSettingsRouteId: "p2pkh.settings",
       visibleWhen: ({ unlocked }) => unlocked
-    });
-
-    const home = ctx.get<HomeRegistry>("home.registry");
-    home.register({
-      id: "p2pkh.balance",
-      title: { key: "p2pkh.home.balance", fallback: "P2PKH balance" },
-      component: P2pkhBalanceWidget,
-      order: 20,
-      slot: "main",
-      refreshHint: "realtime"
     });
 
     const transferReg = ctx.get<import("@keymaster/contracts").TransferRegistry>("transfer.registry");

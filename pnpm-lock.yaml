@@ -219,6 +219,9 @@ importers:
 
   packages/plugin-assets:
     dependencies:
+      '@bsv/sdk':
+        specifier: ^2.1.7
+        version: 2.1.7
       '@keymaster/contracts':
         specifier: '*'
         version: link:../contracts

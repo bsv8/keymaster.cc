@@ -42,12 +42,12 @@ export function HomePage() {
         <div className="home-layout__main">
           <div className="home-layout__cell"><HomeActions /></div>
           {main.map((widget) => <div key={widget.id} className="home-layout__cell"><widget.component /></div>)}
+          <BusinessHomePage />
         </div>
         <div className="home-layout__aside">
           {aside.map((widget) => <div key={widget.id} className="home-layout__cell"><widget.component /></div>)}
         </div>
       </div>
-      <BusinessHomePage />
     </div>
   );
 }

@@ -8,6 +8,7 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@bsv/sdk": "^2.1.7",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*"
