@@ -96,7 +96,13 @@ export function P2pkhSettingsPage() {
             type="number"
             min="1"
             value={feeRates[tier]}
-            onChange={(event) => setFeeRates((current) => ({ ...current, [tier]: event.currentTarget.value }))}
+            onChange={(event) => {
+              // React may evaluate a functional state updater after the event handler
+              // returns, when `currentTarget` has already been cleared. Read the
+              // input value while the event is still active instead.
+              const value = event.currentTarget.value;
+              setFeeRates((current) => ({ ...current, [tier]: value }));
+            }}
             onBlur={() => void saveFeeRate(tier)}
             hint="sats/kB"
           />
