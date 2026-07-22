@@ -43,6 +43,89 @@
   padding: 14px 16px;
 }
 
+.appmsg-system-page__card--connection {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+}
+
+.appmsg-system-page__card--connection > .appmsg-system-page__row {
+  box-sizing: border-box;
+  width: 50%;
+  border-right: 1px solid var(--border);
+}
+
+.appmsg-system-page__card--connection > .appmsg-system-page__row:nth-of-type(even) {
+  border-right: 0;
+}
+
+.appmsg-system-page__card--connection > .appmsg-system-page__row--assessment,
+.appmsg-system-page__card--connection > .appmsg-system-page__diagnostic-table {
+  width: 100%;
+  border-right: 0;
+}
+
+.appmsg-system-page__section-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.appmsg-system-page__section-heading .appmsg-system-page__button:first-of-type {
+  margin-left: auto;
+}
+
+.appmsg-system-page__diagnostic-msg {
+  width: 100%;
+  margin: 0;
+  padding: 8px 16px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.appmsg-system-page__diagnostic-msg--ok {
+  color: var(--primary);
+}
+
+.appmsg-system-page__diagnostic-msg--fail {
+  color: var(--danger);
+}
+
+.appmsg-system-page__assessment {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.appmsg-system-page__assessment.is-ok {
+  color: var(--primary);
+}
+
+.appmsg-system-page__assessment.is-failed {
+  color: var(--danger);
+}
+
+.appmsg-system-page__diagnostic-table {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 14px 16px 0;
+}
+
+.appmsg-system-page__diagnostic-table .appmsg-system-page__table-wrap {
+  width: 100%;
+  margin-top: 2px;
+}
+
+.appmsg-system-page__diagnostic-count {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 .appmsg-system-page__section-title {
   font-size: 13px;
   font-weight: 600;
@@ -284,6 +367,15 @@
 }
 
 @media (max-width: 768px) {
+  .appmsg-system-page__card--connection > .appmsg-system-page__row {
+    width: 100%;
+    border-right: 0;
+  }
+
+  .appmsg-system-page__section-heading .appmsg-system-page__button:first-of-type {
+    margin-left: 0;
+  }
+
   .appmsg-system-page__card > .appmsg-system-page__row {
     grid-template-columns: minmax(0, 1fr);
   }

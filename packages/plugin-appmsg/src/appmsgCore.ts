@@ -356,7 +356,8 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
         providerId: null,
         displayName: null,
         isHealthy: false,
-        lastError: null
+        lastError: null,
+        lastConnectedAtMs: 0
       };
     }
     let h: MessageProviderHealth;
@@ -369,7 +370,8 @@ class MessageProviderRegistryImpl implements MessageProviderRegistry {
       providerId: p.id,
       displayName: p.displayName,
       isHealthy: h.isHealthy,
-      lastError: h.lastError
+      lastError: h.lastError,
+      lastConnectedAtMs: h.lastConnectedAtMs
     };
   }
 
@@ -1450,6 +1452,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
     return {
       state,
       ownerPublicKeyHex: this.currentBoundOwner,
+      boundProviderId: this.currentProviderId,
       lastInsertedAtMs: this.lastInsertedAtMsValue,
       lastError: this.lastErrorMessageValue,
       nextReconnectAtMs: isOpen ? null : this.nextReconnectAtMsValue

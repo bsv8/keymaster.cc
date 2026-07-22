@@ -352,6 +352,8 @@ export interface ActiveMessageProviderSnapshot {
   displayName: string | null;
   isHealthy: boolean;
   lastError: string | null;
+  /** 最近一次成功连接时间（unix ms；0 = 从未）。旧 provider 可省略。 */
+  lastConnectedAtMs?: number;
 }
 
 /* ============== 注册表 ============== */

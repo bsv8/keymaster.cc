@@ -290,6 +290,8 @@ export interface AppMsgTargetSyncState {
 export interface AppMsgLocalDbSnapshot {
   state: "idle" | "open" | "closed";
   ownerPublicKeyHex: string | null;
+  /** Core 当前实际绑定的 provider；尚未完成 bind 时为 null。 */
+  boundProviderId?: string | null;
   lastInsertedAtMs: number;
   lastError: string | null;
   nextReconnectAtMs: number | null;

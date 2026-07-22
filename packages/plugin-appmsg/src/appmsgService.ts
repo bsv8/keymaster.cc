@@ -25,8 +25,25 @@ import type {
   AppMsgOnlineResult,
   AppMsgTargetSyncState,
   MessageProvider,
+  MessageProviderHealth,
   MessageProviderRegistry
 } from "@keymaster/contracts";
+
+/**
+ * 管理页专用的 provider 原始健康快照。
+ *
+ * 这份数据不参与连接决策，只让排障页可以并排比较 core 的绑定状态和
+ * provider 自己报告的连接状态。
+ */
+export interface AppMsgProviderDiagnostic {
+  id: string;
+  displayName: string;
+  isActive: boolean;
+  isHealthy: boolean;
+  lastError: string | null;
+  lastConnectedAtMs: number;
+  healthProbeError: string | null;
+}
 
 /**
  * AppMsg 管理页 service：组织连接态 / 同步态 / 全库 / 在线查询 / 当前
@@ -37,6 +54,8 @@ export interface AppMsgService {
   activeProviderSnapshot(): ActiveMessageProviderSnapshot;
   /** 已注册 provider 列表。 */
   listProviders(): readonly MessageProvider[];
+  /** 读取每个已注册 provider 的原始健康快照；不发起网络请求。 */
+  providerDiagnostics(): readonly AppMsgProviderDiagnostic[];
   /** 切换 active provider（用户主动选择）。 */
   setActiveProvider(providerId: string | null): Promise<void>;
   /** 拉取当前连接快照（来自 `appmsg.core.inspectLocalDb()`）。 */
@@ -69,6 +88,32 @@ export function createAppMsgService(core: AppMsgCore): AppMsgService {
   return {
     activeProviderSnapshot: () => core.activeProviderSnapshot(),
     listProviders: () => providers().list(),
+    providerDiagnostics: () => {
+      const activeId = providers().active()?.id ?? null;
+      return providers().list().map((provider) => {
+        let health: MessageProviderHealth;
+        let healthProbeError: string | null = null;
+        try {
+          health = provider.health();
+        } catch (err) {
+          healthProbeError = err instanceof Error ? err.message : String(err);
+          health = {
+            isHealthy: false,
+            lastError: "health probe failed",
+            lastConnectedAtMs: 0
+          };
+        }
+        return {
+          id: provider.id,
+          displayName: provider.displayName,
+          isActive: provider.id === activeId,
+          isHealthy: health.isHealthy,
+          lastError: health.lastError,
+          lastConnectedAtMs: health.lastConnectedAtMs,
+          healthProbeError
+        };
+      });
+    },
     setActiveProvider: async (id) => {
       await providers().setActive(id);
     },

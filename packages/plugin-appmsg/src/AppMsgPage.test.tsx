@@ -100,7 +100,11 @@ function makeFakeCore(opts?: {
   targets?: AppMsgTargetSyncState[];
   triggerSyncImpl?: () => Promise<void>;
   setActiveProviderImpl?: (id: string | null) => Promise<void>;
-  listProviders?: Array<{ id: string; displayName: string }>;
+  listProviders?: Array<{
+    id: string;
+    displayName: string;
+    health?: () => { isHealthy: boolean; lastError: string | null; lastConnectedAtMs: number };
+  }>;
   checkOnlineImpl?: (input: string[]) => Promise<AppMsgOnlineResult>;
   providers?: () => unknown;
   onStateChangeImpl?: (handler: () => void) => () => void;
@@ -125,7 +129,18 @@ function makeFakeCore(opts?: {
     opts?.triggerSyncImpl ?? (async () => undefined);
   const setActiveProviderImpl =
     opts?.setActiveProviderImpl ?? (async () => undefined);
-  const listProviders = opts?.listProviders ?? [{ id: "hubmsg", displayName: "HubMsg" }];
+  const listProviders = (opts?.listProviders ?? [{ id: "hubmsg", displayName: "HubMsg" }]).map(
+    (provider) => ({
+      ...provider,
+      health:
+        provider.health ??
+        (() => ({
+          isHealthy: activeProvider.isHealthy,
+          lastError: activeProvider.lastError,
+          lastConnectedAtMs: activeProvider.lastConnectedAtMs ?? 0
+        }))
+    })
+  );
 
   const core = {
     inspectLocalDb: () => ({ ...snapshot }),
@@ -689,6 +704,114 @@ describe("AppMsgPage - reconnect countdown display", () => {
       const row = document.querySelector("[data-appmsg-reconnect-row]");
       expect(row).toBeTruthy();
     });
+  });
+
+  it("refreshes provider health diagnostics on a core state change", async () => {
+    const listeners: Array<() => void> = [];
+    const health: {
+      isHealthy: boolean;
+      lastError: string | null;
+      lastConnectedAtMs: number;
+    } = {
+      isHealthy: false,
+      lastError: "initial provider snapshot",
+      lastConnectedAtMs: 0
+    };
+    const h = makeFakeCore({
+      snapshot: {
+        state: "open",
+        ownerPublicKeyHex: OWNER,
+        lastInsertedAtMs: 1,
+        lastError: null,
+        nextReconnectAtMs: null
+      },
+      activeProvider: {
+        providerId: "hubmsg",
+        displayName: "HubMsg",
+        isHealthy: false,
+        lastError: health.lastError
+      },
+      listProviders: [
+        {
+          id: "hubmsg",
+          displayName: "HubMsg",
+          health: () => health
+        }
+      ],
+      onStateChangeImpl: (handler) => {
+        listeners.push(handler);
+        return () => undefined;
+      }
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-appmsg-provider-health="unhealthy"]')
+      ).toBeTruthy();
+    });
+    health.isHealthy = true;
+    health.lastError = null;
+    health.lastConnectedAtMs = 123;
+    h.activeProvider.isHealthy = true;
+    h.activeProvider.lastError = null;
+    for (const listener of listeners) listener();
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-appmsg-provider-health="healthy"]')
+      ).toBeTruthy();
+      expect(
+        document.querySelector('[data-appmsg-connection-assessment="ok"]')
+      ).toBeTruthy();
+    });
+  });
+
+  it("shows a mismatch explicitly when core is connected but the provider is unhealthy", async () => {
+    const h = makeFakeCore({
+      snapshot: {
+        state: "open",
+        ownerPublicKeyHex: OWNER,
+        lastInsertedAtMs: 0,
+        lastError: null,
+        nextReconnectAtMs: null
+      },
+      activeProvider: {
+        providerId: "hubmsg",
+        displayName: "HubMsg",
+        isHealthy: false,
+        lastError: "provider closed"
+      },
+      listProviders: [
+        {
+          id: "hubmsg",
+          displayName: "HubMsg",
+          health: () => ({
+            isHealthy: false,
+            lastError: "provider closed",
+            lastConnectedAtMs: 0
+          })
+        }
+      ]
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(
+        document.querySelector(
+          '[data-appmsg-connection-assessment="coreOpenProviderUnhealthy"]'
+        )
+      ).toBeTruthy();
+    });
+    expect(screen.getByText("appmsg.page.connection.providers")).toBeTruthy();
+    expect(screen.getAllByText("provider closed").length).toBeGreaterThan(0);
   });
 
   it("state=idle + lastError 残留时不显示倒计时", async () => {

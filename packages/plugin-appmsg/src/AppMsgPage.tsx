@@ -32,6 +32,7 @@ import type {
 } from "@keymaster/contracts";
 import { APPMESSAGE_CORE_CAPABILITY, formatShortPublicKey } from "@keymaster/contracts";
 import { createAppMsgService } from "./appmsgService.js";
+import type { AppMsgProviderDiagnostic } from "./appmsgService.js";
 
 type AppMsgOnlineQueryState =
   | { phase: "idle" }
@@ -60,6 +61,10 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   const [activeProvider, setActiveProvider] = useState<ActiveMessageProviderSnapshot>(() =>
     service.activeProviderSnapshot()
   );
+  const [providerDiagnostics, setProviderDiagnostics] = useState<
+    readonly AppMsgProviderDiagnostic[]
+  >(() => service.providerDiagnostics());
+  const [diagnosticsCapturedAtMs, setDiagnosticsCapturedAtMs] = useState(() => Date.now());
   const [messages, setMessages] = useState<AppMsgMessage[]>([]);
   const [targets, setTargets] = useState<AppMsgTargetSyncState[]>([]);
   const [search, setSearch] = useState("");
@@ -67,17 +72,27 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   const [onlineHex, setOnlineHex] = useState("");
   const [onlineQuery, setOnlineQuery] = useState<AppMsgOnlineQueryState>({ phase: "idle" });
   const [syncMsg, setSyncMsg] = useState<{ kind: "ok" | "fail"; text: string } | null>(null);
+  const [diagnosticMsg, setDiagnosticMsg] = useState<{
+    kind: "ok" | "fail";
+    text: string;
+  } | null>(null);
   // UI 专用 tick：用于驱动倒计时文案逐秒刷新。**不**触发业务侧任何
   // 重连——所有重连生命周期都由 plugin-appmsg 内的协调器持有。
   const [tick, setTick] = useState(0);
 
-  const refresh = useCallback(async () => {
+  const refreshConnectionDiagnostics = useCallback(() => {
     setSnapshot(service.inspectLocalDb());
     setActiveProvider(service.activeProviderSnapshot());
+    setProviderDiagnostics(service.providerDiagnostics());
+    setDiagnosticsCapturedAtMs(Date.now());
+  }, [service]);
+
+  const refresh = useCallback(async () => {
+    refreshConnectionDiagnostics();
     const items = await service.listAllLocalMessages({ limit: 500 });
     setMessages(items);
     setTargets(await service.listTargetSyncStates());
-  }, [service]);
+  }, [refreshConnectionDiagnostics, service]);
 
   useEffect(() => {
     void refresh();
@@ -87,12 +102,12 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   // 不依赖收到 push 才更新连接态。
   useEffect(() => {
     const off = core.onStateChange(() => {
-      setSnapshot(service.inspectLocalDb());
+      refreshConnectionDiagnostics();
     });
     return () => {
       off();
     };
-  }, [core, service]);
+  }, [core, refreshConnectionDiagnostics]);
 
   // 订阅 unfiltered 推送：让统计 / 浏览能随推送增量更新。
   useEffect(() => {
@@ -161,6 +176,41 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   }, [messages]);
 
   const providers = service.listProviders();
+  const activeProviderDiagnostic = useMemo(
+    () =>
+      providerDiagnostics.find((provider) => provider.id === activeProvider.providerId) ??
+      null,
+    [activeProvider.providerId, providerDiagnostics]
+  );
+  const connectionProviderDiagnostic = useMemo(
+    () =>
+      (snapshot.boundProviderId
+        ? providerDiagnostics.find((provider) => provider.id === snapshot.boundProviderId)
+        : null) ?? activeProviderDiagnostic,
+    [activeProviderDiagnostic, providerDiagnostics, snapshot.boundProviderId]
+  );
+  const connectionAssessment = useMemo(() => {
+    const providerHealthy = connectionProviderDiagnostic?.isHealthy ?? false;
+    if (snapshot.state === "open" && providerHealthy) return "ok" as const;
+    if (snapshot.state === "open") return "coreOpenProviderUnhealthy" as const;
+    if (providerHealthy) return "providerHealthyCoreOffline" as const;
+    return "offline" as const;
+  }, [connectionProviderDiagnostic?.isHealthy, snapshot.state]);
+
+  const diagnosticReport = useMemo(
+    () =>
+      JSON.stringify(
+        {
+          capturedAtMs: diagnosticsCapturedAtMs,
+          core: snapshot,
+          activeProvider,
+          providers: providerDiagnostics
+        },
+        null,
+        2
+      ),
+    [activeProvider, diagnosticsCapturedAtMs, providerDiagnostics, snapshot]
+  );
 
   const onlineFeedback = useMemo(() => {
     if (onlineQuery.phase === "idle") return null;
@@ -342,10 +392,61 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
       </div>
 
       {/* ===== 区块 3：连接态 ===== */}
-      <div className="appmsg-system-page__card">
-        <h2 className="appmsg-system-page__section-title">
-          {i18n.t("appmsg.page.connection")}
-        </h2>
+      <div className="appmsg-system-page__card appmsg-system-page__card--connection">
+        <div className="appmsg-system-page__section-heading">
+          <h2 className="appmsg-system-page__section-title">
+            {i18n.t("appmsg.page.connection")}
+          </h2>
+          <button
+            type="button"
+            className="appmsg-system-page__button"
+            onClick={() => {
+              setDiagnosticMsg(null);
+              refreshConnectionDiagnostics();
+            }}
+          >
+            {i18n.t("appmsg.page.connection.refresh")}
+          </button>
+          <button
+            type="button"
+            className="appmsg-system-page__button"
+            onClick={() => {
+              setDiagnosticMsg(null);
+              const clipboard = navigator.clipboard;
+              if (!clipboard) {
+                setDiagnosticMsg({
+                  kind: "fail",
+                  text: i18n.t("appmsg.page.connection.copy.fail")
+                });
+                return;
+              }
+              void clipboard
+                .writeText(diagnosticReport)
+                .then(() => {
+                  setDiagnosticMsg({
+                    kind: "ok",
+                    text: i18n.t("appmsg.page.connection.copy.done")
+                  });
+                })
+                .catch(() => {
+                  setDiagnosticMsg({
+                    kind: "fail",
+                    text: i18n.t("appmsg.page.connection.copy.fail")
+                  });
+                });
+            }}
+          >
+            {i18n.t("appmsg.page.connection.copy")}
+          </button>
+        </div>
+        {diagnosticMsg ? (
+          <p
+            className={`appmsg-system-page__diagnostic-msg appmsg-system-page__diagnostic-msg--${diagnosticMsg.kind}`}
+            role="status"
+          >
+            {diagnosticMsg.text}
+          </p>
+        ) : null}
         <div className="appmsg-system-page__row">
           <span className="appmsg-system-page__label">
             {i18n.t("appmsg.page.connection.state")}
@@ -358,7 +459,35 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
               ? i18n.t("appmsg.page.connection.state.open")
               : snapshot.state === "closed"
                 ? i18n.t("appmsg.page.connection.state.closed")
-                : i18n.t("appmsg.page.connection.state.idle")}
+              : i18n.t("appmsg.page.connection.state.idle")}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.providerHealth")}
+          </span>
+          <span
+            className={`appmsg-system-page__value appmsg-system-page__status ${
+              connectionProviderDiagnostic?.isHealthy ? "is-ok" : "is-failed"
+            }`}
+            data-appmsg-provider-health={connectionProviderDiagnostic?.isHealthy ? "healthy" : "unhealthy"}
+          >
+            {connectionProviderDiagnostic?.isHealthy
+              ? i18n.t("appmsg.page.provider.health.ok")
+              : i18n.t("appmsg.page.provider.health.fail")}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row appmsg-system-page__row--assessment">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.assessment")}
+          </span>
+          <span
+            className={`appmsg-system-page__value appmsg-system-page__assessment ${
+              connectionAssessment === "ok" ? "is-ok" : "is-failed"
+            }`}
+            data-appmsg-connection-assessment={connectionAssessment}
+          >
+            {i18n.t(`appmsg.page.connection.assessment.${connectionAssessment}`)}
           </span>
         </div>
         <div className="appmsg-system-page__row">
@@ -371,10 +500,60 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
         </div>
         <div className="appmsg-system-page__row">
           <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.boundProvider")}
+          </span>
+          <span className="appmsg-system-page__value appmsg-system-page__value--mono">
+            {snapshot.boundProviderId ?? "(none)"}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
             {i18n.t("appmsg.page.connection.lastError")}
           </span>
           <span className="appmsg-system-page__value appmsg-system-page__value--mono">
             {snapshot.lastError ?? i18n.t("appmsg.page.connection.lastError.none")}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.providerLastError")}
+          </span>
+          <span className="appmsg-system-page__value appmsg-system-page__value--mono">
+            {connectionProviderDiagnostic?.lastError ?? i18n.t("appmsg.page.connection.lastError.none")}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.providerLastConnected")}
+          </span>
+          <span className="appmsg-system-page__value appmsg-system-page__value--mono">
+            {formatDiagnosticTime(connectionProviderDiagnostic?.lastConnectedAtMs ?? 0, i18n)}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.localDbLastWrite")}
+          </span>
+          <span className="appmsg-system-page__value appmsg-system-page__value--mono">
+            {formatDiagnosticTime(snapshot.lastInsertedAtMs, i18n)}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.capturedAt")}
+          </span>
+          <span className="appmsg-system-page__value appmsg-system-page__value--mono">
+            {formatDiagnosticTime(diagnosticsCapturedAtMs, i18n)}
+          </span>
+        </div>
+        <div className="appmsg-system-page__row">
+          <span className="appmsg-system-page__label">
+            {i18n.t("appmsg.page.connection.nextReconnect")}
+          </span>
+          <span className="appmsg-system-page__value appmsg-system-page__value--mono">
+            {snapshot.nextReconnectAtMs === null
+              ? i18n.t("appmsg.page.connection.notScheduled")
+              : formatDiagnosticTime(snapshot.nextReconnectAtMs, i18n)}
           </span>
         </div>
         {snapshot.state === "closed" && reconnectRemainingSec !== null ? (
@@ -392,6 +571,42 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
             </span>
           </div>
         ) : null}
+        <div className="appmsg-system-page__diagnostic-table">
+          <h3 className="appmsg-system-page__sub-title">
+            {i18n.t("appmsg.page.connection.providers")}
+          </h3>
+          <span className="appmsg-system-page__diagnostic-count">
+            {i18n.t("appmsg.page.connection.providers.count")}: {providerDiagnostics.length}
+          </span>
+          <div className="appmsg-system-page__table-wrap">
+            <table className="appmsg-system-page__table">
+              <thead>
+                <tr>
+                  <th>id</th>
+                  <th>{i18n.t("appmsg.page.providers.name")}</th>
+                  <th>{i18n.t("appmsg.page.connection.providers.active")}</th>
+                  <th>{i18n.t("appmsg.page.provider.health")}</th>
+                  <th>{i18n.t("appmsg.page.connection.providerLastConnected")}</th>
+                  <th>{i18n.t("appmsg.page.connection.providerLastError")}</th>
+                  <th>{i18n.t("appmsg.page.connection.providers.probeError")}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {providerDiagnostics.map((provider) => (
+                  <tr key={provider.id}>
+                    <td><code>{provider.id}</code></td>
+                    <td>{provider.displayName}</td>
+                    <td>{provider.isActive ? i18n.t("appmsg.page.providers.active") : "—"}</td>
+                    <td>{provider.isHealthy ? i18n.t("appmsg.page.provider.health.ok") : i18n.t("appmsg.page.provider.health.fail")}</td>
+                    <td className="appmsg-system-page__value--mono">{formatDiagnosticTime(provider.lastConnectedAtMs, i18n)}</td>
+                    <td className="appmsg-system-page__value--mono">{provider.lastError ?? i18n.t("appmsg.page.connection.lastError.none")}</td>
+                    <td className="appmsg-system-page__value--mono">{provider.healthProbeError ?? i18n.t("appmsg.page.connection.lastError.none")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       {/* ===== 区块 4：同步态 ===== */}
@@ -681,4 +896,11 @@ export function connectionStatusClass(
 
 function shortHex(h: string): string {
   return formatShortPublicKey(h);
+}
+
+function formatDiagnosticTime(value: number, i18n: ReturnType<typeof useI18n>): string {
+  if (!Number.isFinite(value) || value <= 0) {
+    return i18n.t("appmsg.page.connection.never");
+  }
+  return `${new Date(value).toISOString()} (${value})`;
 }
