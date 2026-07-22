@@ -6240,6 +6240,16 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   function setupWindow(extra: { openReturns?: Window | null } = {}) {
     const win = installWindowShim();
     const openCalls: Array<{ url: string; target: string; features: string }> = [];
+    const navigationCalls: string[] = [];
+    const reservedPopup = {
+      closed: false,
+      close: () => undefined,
+      location: {
+        replace: (url: string | URL) => {
+          navigationCalls.push(String(url));
+        }
+      }
+    } as unknown as Window;
     const originalOpen = win.open;
     const originalLocation = win.location;
     // 强制 location.origin 为一个稳定值。
@@ -6254,7 +6264,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
         features: String(features ?? "")
       });
       return extra.openReturns === undefined
-        ? ({} as Window)
+        ? reservedPopup
         : extra.openReturns;
     }) as typeof win.open;
     // 启动时清掉之前测试可能挂的 registry。
@@ -6267,6 +6277,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
     return {
       openCalls,
+      navigationCalls,
       restore() {
         try {
           win.open = originalOpen;
@@ -6310,19 +6321,23 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
         "__keymaster_session_window_bootstrap__"
       ] as { acquire: (t: string) => Promise<unknown> };
       expect(typeof reg?.acquire).toBe("function");
-      // 3) Session Window 已被 window.open 打开。
+      // 3) Session Window 在同步调用栈里先以 about:blank 预开，随后
+      //    等 bootstrap registry 就绪后再导航到协议页，避免 iOS Safari
+      //    因 async 边界拦截弹窗。
       expect(env.openCalls.length).toBe(1);
       expect(env.openCalls[0]?.target).toBe("_blank");
-      expect(env.openCalls[0]?.url).toContain("boot=appView");
-      expect(env.openCalls[0]?.url).toContain("bootstrapToken=");
+      expect(env.openCalls[0]?.url).toBe("about:blank");
       expect(env.openCalls[0]?.features).toContain("popup=yes");
       expect(env.openCalls[0]?.features).toContain("width=460");
       expect(env.openCalls[0]?.features).toContain("height=820");
+      expect(env.navigationCalls.length).toBe(1);
+      expect(env.navigationCalls[0]).toContain("boot=appView");
+      expect(env.navigationCalls[0]).toContain("bootstrapToken=");
       // 4) 同一 launcher 窗口内连续两次 Open App 不会互相覆盖：
       //    registry 持久挂在 window 上，第二次 launchAppView 不会重新挂
       //    registry（避免把第一次的 token 覆盖掉）。两次产生的 token 都
       //    可以从 registry acquire 拿到。
-      const firstToken = env.openCalls[0]?.url.match(/bootstrapToken=([^&]+)/)?.[1];
+      const firstToken = env.navigationCalls[0]?.match(/bootstrapToken=([^&]+)/)?.[1];
       expect(firstToken).toBeTruthy();
       const second = await service.launchAppView(JUSTNOTE);
       const secondToken = `bt-${second.launchToken}`;
@@ -6335,8 +6350,42 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       // 二次消费后再次 acquire 应为 null（一次性）。
       expect(await reg.acquire(firstToken!)).toBeNull();
       expect(await reg.acquire(secondToken)).toBeNull();
-      // 两次都开了 Session Window。
+      // 两次都预开并导航了 Session Window。
       expect(env.openCalls.length).toBe(2);
+      expect(env.navigationCalls.length).toBe(2);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("在第一个 async 边界前预开窗口，避免 iOS Safari 丢失用户手势", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
+      let resolveKey!: (value: unknown) => void;
+      (keyspace as unknown as { getKey: () => Promise<unknown> }).getKey = () =>
+        new Promise((resolve) => {
+          resolveKey = resolve;
+        });
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace,
+        storageDb
+      });
+
+      const launch = service.launchAppView(JUSTNOTE);
+      expect(env.openCalls).toHaveLength(1);
+      expect(env.openCalls[0]?.url).toBe("about:blank");
+      expect(env.navigationCalls).toHaveLength(0);
+
+      resolveKey({
+        publicKeyHex: TEST_PUB_HEX,
+        label: "Key A",
+        capabilities: []
+      });
+      await launch;
+      expect(env.navigationCalls).toHaveLength(1);
     } finally {
       env.restore();
     }
@@ -6442,8 +6491,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       }
       expect(caught).toBeInstanceOf(LaunchAppViewError);
       expect((caught as LaunchAppViewError).code).toBe("open_session_window_blocked");
-      // 失败语义：session 已经被预建（fail-closed 也会落库，但 UI 提示失败）。
-      // 这里只验证"不会再次成功打开窗口"。
+      // 开窗失败时不会进入异步启动阶段，因此没有预建 session。
       expect(env.openCalls.length).toBe(1);
     } finally {
       env.restore();
@@ -6494,7 +6542,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       }
       expect(caught).toBeInstanceOf(LaunchAppViewError);
       expect((caught as LaunchAppViewError).code).toBe("no_active_key");
-      expect(env.openCalls.length).toBe(0);
+      expect(env.openCalls.length).toBe(1);
     } finally {
       env.restore();
     }
@@ -6522,7 +6570,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       }
       expect(caught).toBeInstanceOf(LaunchAppViewError);
       expect((caught as LaunchAppViewError).code).toBe("export_owner_runtime_failed");
-      expect(env.openCalls.length).toBe(0);
+      expect(env.openCalls.length).toBe(1);
     } finally {
       env.restore();
     }

@@ -1771,8 +1771,10 @@ export class ProtocolServiceImpl implements ProtocolService {
    *       7. 生成新 `launchToken`（`crypto.randomUUID()`）；
    *       8. 组装 `AppBootstrapPayload`（含 `sessionRuntimeBootstrap`）；
    *       9. 在 launcher `window` 上挂一次性 bootstrap registry；
-   *       10. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")`；
-   *       11. `window.open` 失败 → throw "open_session_window_*"。
+   *       10. 在用户点击的同步调用栈中预开一个空白 Session Window；
+   *       11. bootstrap 准备完成后，将该窗口导航到
+   *           `/protocol/v1/popup?boot=appView&bootstrapToken=...`；
+   *       12. 开窗或导航失败 → throw "open_session_window_*"。
    *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
    *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
    *     只消费 `launchToken`、不创建 session。
@@ -1797,17 +1799,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (this.deps.vault.status() !== "unlocked") {
       throw new LaunchAppViewError("vault_locked", "launchAppView: vault not unlocked");
     }
-    // 3) 校验目标 key ready。
-    const key = this.deps.keyspace
-      ? await this.deps.keyspace.getKey(input.publicKeyHex)
-      : undefined;
-    if (!key || !key.publicKeyHex) {
-      throw new LaunchAppViewError(
-        "no_active_key",
-        "launchAppView: selected key not found"
-      );
-    }
-    // 4) 校验 app 配置合法：appOrigin 是合法 origin，且 new URL(appUrl).origin === appOrigin。
+    // 3) 校验 app 配置合法：appOrigin 是合法 origin，且 new URL(appUrl).origin === appOrigin。
     let parsedAppUrl: URL;
     try {
       parsedAppUrl = new URL(input.appUrl);
@@ -1835,11 +1827,48 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: session storage unavailable"
       );
     }
-    // 5) 解析 claims 快照（与 connect.login 同语义）。
+    // 4) 必须在用户点击的同步调用栈中预开窗口。iOS Safari 会在任意
+    //    async 边界后清掉 user activation；等密码派生、会话落库完成后才
+    //    调 window.open 会被当作脚本弹窗拦截。先开 about:blank，待
+    //    bootstrap 就绪后再导航，opener 关系仍可保持不变。
+    let popup: Window | null = null;
+    try {
+      popup = window.open("about:blank", "_blank", SESSION_WINDOW_OPEN_FEATURES);
+    } catch (err) {
+      this.deps.logger?.error?.({
+        scope: "protocol.launcher",
+        event: "openSessionWindow.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw new LaunchAppViewError(
+        "open_session_window_failed",
+        "launchAppView: window.open popup failed"
+      );
+    }
+    if (!popup) {
+      throw new LaunchAppViewError(
+        "open_session_window_blocked",
+        "launchAppView: window.open returned null"
+      );
+    }
+
+    let sessionWindowNavigated = false;
+    try {
+    // 5) 校验目标 key ready。
+    const key = this.deps.keyspace
+      ? await this.deps.keyspace.getKey(input.publicKeyHex)
+      : undefined;
+    if (!key || !key.publicKeyHex) {
+      throw new LaunchAppViewError(
+        "no_active_key",
+        "launchAppView: selected key not found"
+      );
+    }
+    // 6) 解析 claims 快照（与 connect.login 同语义）。
     const resolvedClaims = resolveClaims(input.claims ?? [], (name) =>
       resolveBuiltinClaim(name, { activeKeyLabel: key.label })
     );
-    // 6) 创建新 connect session：原子落库 + 吊销同 origin 旧 session。
+    // 7) 创建新 connect session：原子落库 + 吊销同 origin 旧 session。
     //    施工单 2026-06-30 002 硬切换：session 真值收口为三元组
     //    （sessionId + origin + ownerPublicKeyHex），不再写
     //    `runtimeBinding`——执行路径不允许靠"当前 bootMode"临时猜测，
@@ -1858,7 +1887,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       revokedAt: null
     };
     await this.deps.storageDb.putConnectSessionAndRevokeOriginPeers(sessionRecord);
-    // 7) 用受控 appView session capability 组装 `SessionRuntimeBootstrap`。
+    // 8) 用受控 appView session capability 组装 `SessionRuntimeBootstrap`。
     let sessionRuntimeBootstrap: SessionRuntimeBootstrap;
     try {
       const crypto = await this.deps.vault.createAppViewSession({
@@ -1885,11 +1914,11 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: failed to export owner runtime bootstrap"
       );
     }
-    // 8) 生成新 launchToken。
+    // 9) 生成新 launchToken。
     const launchToken = this.deps.generateId
       ? `launch-${this.deps.generateId()}`
       : `launch-${crypto.randomUUID()}`;
-    // 9) 拼 client app URL：把 launchToken 拼到 appUrl 的 query 上。
+    // 10) 拼 client app URL：把 launchToken 拼到 appUrl 的 query 上。
     const appUrlWithLaunchToken = (() => {
       try {
         const u = new URL(input.appUrl);
@@ -1899,7 +1928,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         return input.appUrl;
       }
     })();
-    // 10) 组装 AppBootstrapPayload（含 `sessionRuntimeBootstrap`，不含 `runtimeBinding`）。
+    // 11) 组装 AppBootstrapPayload（含 `sessionRuntimeBootstrap`，不含 `runtimeBinding`）。
     const bootstrap = buildAppBootstrapPayload({
       appId: input.appId,
       appOrigin: input.appOrigin,
@@ -1912,7 +1941,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       expiresAt: now + 24 * 60 * 60 * 1000,
       sessionRuntimeBootstrap
     });
-    // 11) 在 launcher window 上挂一次性 bootstrap registry。
+    // 12) 在 launcher window 上挂一次性 bootstrap registry。
     //     设计缘由（issue #1）：同一 launcher 窗口里多次点 `Open App` 时
     //     不能互相覆盖。这里用 service 实例字段 `launcherBootstrapEntries`
     //     + 一次性 install；后续 `launchAppView()` 只往 entries Map 加新
@@ -1931,30 +1960,26 @@ export class ProtocolServiceImpl implements ProtocolService {
       installLauncherBootstrapRegistry(window, registry);
       this.launcherBootstrapRegistryInstalled = true;
     }
-    // 12) 打开 Session Window。
-    //     显式请求 popup features，提高浏览器把它作为独立窗口打开的概率；
-    //     launcher 自身不跳转、不被中断。
+    // 13) bootstrap 已就绪，才导航预开的 Session Window。这里不能再调
+    //     window.open，否则 iOS Safari 已丢失 user activation。
     const popupUrl = `/protocol/v1/popup?boot=appView&bootstrapToken=${encodeURIComponent(token)}`;
-    let popup: Window | null = null;
     try {
-      popup = window.open(popupUrl, "_blank", SESSION_WINDOW_OPEN_FEATURES);
+      if (popup.closed) {
+        throw new Error("reserved Session Window was closed before navigation");
+      }
+      popup.location.replace(popupUrl);
     } catch (err) {
       this.deps.logger?.error?.({
         scope: "protocol.launcher",
-        event: "openSessionWindow.failed",
+        event: "openSessionWindow.navigate_failed",
         err: err instanceof Error ? err.message : String(err)
       });
       throw new LaunchAppViewError(
         "open_session_window_failed",
-        "launchAppView: window.open popup failed"
+        "launchAppView: failed to navigate reserved Session Window"
       );
     }
-    if (!popup) {
-      throw new LaunchAppViewError(
-        "open_session_window_blocked",
-        "launchAppView: window.open returned null"
-      );
-    }
+    sessionWindowNavigated = true;
     this.deps.logger?.info?.({
       scope: "protocol.launcher",
       event: "launchAppView.ok",
@@ -1969,6 +1994,15 @@ export class ProtocolServiceImpl implements ProtocolService {
       launchToken,
       appUrl: appUrlWithLaunchToken
     };
+    } finally {
+      if (!sessionWindowNavigated) {
+        try {
+          popup.close();
+        } catch {
+          // The browser may already have closed the reserved window.
+        }
+      }
+    }
   }
 
   /**
