@@ -47,6 +47,7 @@ import { VaultUnlockPage } from "./VaultUnlockPage.js";
 import { createKeyspaceService, type KeyspaceHandle } from "./keyspaceService.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
+import { SessionStateMirror } from "./sessionStateMirror.js";
 import { KeySwitchWidget } from "./KeySwitchWidget.js";
 
 export interface VaultKeyResourceState {
@@ -369,9 +370,10 @@ export const vaultPlugin: PluginManifest = {
     let coordinatorClient: CoordinatorClientLike | undefined;
     coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
     if (coordinatorClient.getIsConnected()) {
-      // 使用 Coordinator facade
-      service = createVaultServiceCoordinator({ coordinatorClient });
-      keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient as unknown as Parameters<typeof createKeyspaceServiceCoordinator>[0]) as unknown as KeyspaceHandle;
+      // Both facades derive from one already-committed session mirror.
+      const sessionStateMirror = new SessionStateMirror(coordinatorClient);
+      service = createVaultServiceCoordinator({ coordinatorClient, sessionStateMirror });
+      keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient as unknown as Parameters<typeof createKeyspaceServiceCoordinator>[0], sessionStateMirror) as unknown as KeyspaceHandle;
     }
 
     ctx.provide(VAULT_CAPABILITY, service);

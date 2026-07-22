@@ -17,10 +17,10 @@ import type {
   CoordinatorCryptoResult,
   CoordinatorCommandResult,
   CoordinatorValueResult,
-  VaultLifecycleEvent,
   VaultLifecycleSnapshot,
   SessionCoordinatorClient,
 } from "@keymaster/contracts";
+import type { SessionStateMirror } from "./sessionStateMirror.js";
 
 // ============================================================
 // 1. Types
@@ -34,11 +34,12 @@ interface VaultKeyMaterial {
 /** Vault facade 所需的 Coordinator contract 子集。 */
 export type CoordinatorClientLike = Pick<
   SessionCoordinatorClient,
-  "getIsConnected" | "getBootstrapSnapshot" | "subscribeTopic" | "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto"
+  "getIsConnected" | "getBootstrapSnapshot" | "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto"
 >;
 
 export interface VaultServiceCoordinatorDeps {
   coordinatorClient: CoordinatorClientLike;
+  sessionStateMirror: SessionStateMirror;
 }
 
 function commandResultMessage(result: CoordinatorCommandResult, fallback: string): string {
@@ -64,8 +65,6 @@ export class VaultServiceCoordinator implements VaultService {
   private cachedKeys: KeyRef[] = [];
   private appViewRevocations = new Map<string, () => void>();
   private initialActivationNotice: InitialActivationNotice | null = null;
-  private lastVaultRevision = -1;
-  private lastVaultEpoch: string | null = null;
 
   private lifecycleChangeHandlers = new Set<(snapshot: VaultLifecycleSnapshot) => void>();
   private lifecycleSnapshot: VaultLifecycleSnapshot = { status: "booting", sessionEpoch: "boot", vaultLifecycleRevision: 0 };
@@ -74,30 +73,26 @@ export class VaultServiceCoordinator implements VaultService {
   constructor(deps: VaultServiceCoordinatorDeps) {
     this.coordinatorClient = deps.coordinatorClient;
 
-    this.coordinatorClient.subscribeTopic("vault.lifecycle", (event: VaultLifecycleEvent) => {
-      if (event.type !== "vault.lifecycle.changed" || typeof event.vaultLifecycleRevision !== "number" || typeof event.sessionEpoch !== "string") return;
-      if (event.sessionEpoch === this.lastVaultEpoch && event.vaultLifecycleRevision <= this.lastVaultRevision) return;
-      this.lastVaultEpoch = event.sessionEpoch;
-      this.lastVaultRevision = event.vaultLifecycleRevision;
-      if (this.applyCoordinatorState(event.status, event.activePublicKeyHex, event.sessionEpoch, event.vaultLifecycleRevision)) this.emitLifecycleChanged();
+    deps.sessionStateMirror.subscribe((snapshot) => {
+      if (this.applyCoordinatorState(snapshot.vaultStatus, snapshot.activePublicKeyHex, snapshot.sessionEpoch, snapshot.sessionRevision)) this.emitLifecycleChanged();
     });
   }
 
   /** 同步 Coordinator 的 Vault 真值；返回是否有观察者应获知的变化。 */
-  private applyCoordinatorState(status: CoordinatorVaultStatus, activePublicKeyHex: string | undefined, sessionEpoch: string, vaultLifecycleRevision: number): boolean {
+  private applyCoordinatorState(status: CoordinatorVaultStatus, activePublicKeyHex: string | undefined, sessionEpoch: string, sessionRevision: number): boolean {
     const nextStatus = this.mapVaultStatus(status);
     const nextPublicKeyHex = status === "unlocked" ? activePublicKeyHex : undefined;
     const previousPublicKeyHex = this.cachedSessionState?.publicKeyHex;
     const changed = this.cachedStatus !== nextStatus
       || previousPublicKeyHex !== nextPublicKeyHex
       || this.lifecycleSnapshot.sessionEpoch !== sessionEpoch
-      || this.lifecycleSnapshot.vaultLifecycleRevision !== vaultLifecycleRevision;
+      || this.lifecycleSnapshot.vaultLifecycleRevision !== sessionRevision;
 
     this.cachedStatus = nextStatus;
     this.cachedSessionState = nextPublicKeyHex
       ? { publicKeyHex: nextPublicKeyHex } as VaultSessionState
       : null;
-    this.lifecycleSnapshot = { status: nextStatus, activePublicKeyHex: nextPublicKeyHex, sessionEpoch, vaultLifecycleRevision };
+    this.lifecycleSnapshot = { status: nextStatus, activePublicKeyHex: nextPublicKeyHex, sessionEpoch, vaultLifecycleRevision: sessionRevision };
     return changed;
   }
 

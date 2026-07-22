@@ -1,5 +1,14 @@
 # 001 Coordinator 分域事件、UI 快照与广播副作用隔离硬切换一次性迭代施工单
 
+> **已被 `2026-07-21/004-coordinator-session-state-single-event-hard-switch.md` 部分替代。**
+> 本单中关于 `vault.lifecycle`、`keyspace.active-key` 两条 Coordinator transport
+> topic、各自 revision/baseline 和 facade 直接订阅它们的内容均不再有效；Vault 与
+> Keyspace 现共同由唯一的 `session.state` 完整快照在页面本地派生。Background 与
+> `asset.data-changed` 的领域隔离要求继续有效。
+>
+> 以下正文保留为历史实施记录；凡涉及上述旧 Session transport 模型的段落均不再是
+> 当前设计真值，应以 2026-07-21/004 为准。
+
 ## 0. 决策、范围与硬切原则
 
 本单将 SharedWorker Coordinator 的页面侧观察模型硬切换为**分域事件**：Vault、

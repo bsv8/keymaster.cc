@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, KeyRef } from "@keymaster/contracts";
+import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, KeyRef, SessionCoordinatorClient } from "@keymaster/contracts";
 import { createVaultServiceCoordinator, type CoordinatorClientLike } from "./vaultServiceCoordinator.js";
+import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
+import { SessionStateMirror } from "./sessionStateMirror.js";
 
 const PUBLIC_KEY = "02".padEnd(66, "a");
 const KEY: KeyRef = { publicKeyHex: PUBLIC_KEY, label: "primary", address: "addr-1", capabilities: ["p2pkh"], createdAt: "now" } as KeyRef;
 
-function makeClient(): CoordinatorClientLike & { publish(topic: string, event: unknown): void } {
+function makeClient(): CoordinatorClientLike & Pick<SessionCoordinatorClient, "getBootstrapSnapshot" | "subscribeTopic" | "backgroundCancelByKey"> & { publish(topic: string, event: unknown): void } {
   const state = {
     sessionEpoch: "test-epoch",
     vaultStatus: "unlocked" as const,
@@ -35,7 +37,7 @@ function makeClient(): CoordinatorClientLike & { publish(topic: string, event: u
       const handlers = topicHandlers.get(topic) ?? new Set<(value: any) => void>();
       handlers.add(handler);
       topicHandlers.set(topic, handlers);
-      if (topic === "vault.lifecycle") handler({ topic, vaultLifecycleRevision: 1, type: "vault.lifecycle.changed", sessionEpoch: "test-epoch", status: state.vaultStatus, activePublicKeyHex: state.activePublicKeyHex });
+      if (topic === "session.state") handler({ topic, sessionRevision: 1, type: "session.state.changed", cause: "bootstrap", sessionEpoch: "test-epoch", vaultStatus: state.vaultStatus, activePublicKeyHex: state.activePublicKeyHex, keyspaceGeneration: state.keyspaceGeneration });
       return () => handlers.delete(handler);
     },
     unlock: async () => ({ status: "accepted" as const }),
@@ -43,16 +45,48 @@ function makeClient(): CoordinatorClientLike & { publish(topic: string, event: u
     activateKey: async () => ({ status: "accepted" as const }),
     vaultOperation,
     crypto,
+    backgroundCancelByKey: async () => ({ status: "accepted" as const }),
     publish: (topic, event) => {
       for (const handler of topicHandlers.get(topic) ?? []) handler(event);
     }
   };
 }
 
+function makeVault(client: ReturnType<typeof makeClient>) {
+  return createVaultServiceCoordinator({ coordinatorClient: client, sessionStateMirror: new SessionStateMirror(client) });
+}
+
 describe("VaultServiceCoordinator", () => {
+  it("exposes the new Keyspace snapshot during an earlier Vault listener in the same mirror turn", () => {
+    const client = makeClient();
+    const mirror = new SessionStateMirror(client);
+    const vault = createVaultServiceCoordinator({ coordinatorClient: client, sessionStateMirror: mirror });
+    const keyspace = createKeyspaceServiceCoordinator(client, mirror);
+    const nextKey = "03".padEnd(66, "b");
+    const observed: string[] = [];
+
+    vault.onLifecycleChange((snapshot) => {
+      if (snapshot.vaultLifecycleRevision === 2) {
+        observed.push(keyspace.active().activePublicKeyHex ?? "");
+      }
+    });
+    client.publish("session.state", {
+      topic: "session.state",
+      type: "session.state.changed",
+      sessionRevision: 2,
+      sessionEpoch: "next-epoch",
+      cause: "activate-key",
+      vaultStatus: "unlocked",
+      activePublicKeyHex: nextKey,
+      keyspaceGeneration: 2,
+    });
+
+    expect(observed).toEqual([nextKey]);
+  });
+
   it("does not report a Vault change for an unrelated Coordinator state update", () => {
     const client = makeClient();
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     const onStatus = vi.fn();
     vault.onLifecycleChange((snapshot) => onStatus(snapshot.status));
 
@@ -73,7 +107,7 @@ describe("VaultServiceCoordinator", () => {
     client.unlock = vi.fn(async () => ({ status: "blocked" as const, reason: { key: "vault.locked", fallback: "Vault is locked" } }));
     client.lock = vi.fn(async () => ({ status: "transport-error" as const, message: "Coordinator connection lost", retryable: true }));
     client.activateKey = vi.fn(async () => ({ status: "validation-error" as const, message: "Invalid key" }));
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     await expect(vault.unlock("pw")).resolves.toMatchObject({ status: "blocked" });
     await expect(vault.lock()).resolves.toMatchObject({ status: "transport-error" });
     await expect(vault.activateKey({ publicKeyHex: PUBLIC_KEY, password: "pw" })).resolves.toMatchObject({ status: "validation-error" });
@@ -81,7 +115,7 @@ describe("VaultServiceCoordinator", () => {
 
   it("routes AppMsg seal/open through Coordinator crypto RPC", async () => {
     const client = makeClient();
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     const capability = await vault.createActiveKeyCrypto(PUBLIC_KEY);
     const sealed = await capability.sealSendInput({ sender: { senderPublicKeyHex: PUBLIC_KEY, senderAppId: "app" }, recipient: { recipientPublicKeyHex: PUBLIC_KEY, recipientAppId: "peer" }, contentType: "text/plain", body: "hello", clientMessageId: "c-1", createdAtMs: 1 });
     expect("record" in sealed && sealed.record.envelope.envelopeBytes).toEqual(new Uint8Array([1, 2]));
@@ -93,7 +127,7 @@ describe("VaultServiceCoordinator", () => {
 
   it("reads public keys through Vault RPC and revokes AppView sessions", async () => {
     const client = makeClient();
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     expect(await vault.listKeys()).toEqual([KEY]);
     expect(await vault.getKey(PUBLIC_KEY)).toEqual(KEY);
     expect(await vault.findByAddress?.("addr-1")).toEqual(KEY);
@@ -105,7 +139,7 @@ describe("VaultServiceCoordinator", () => {
 
   it("uses the Worker exportKeyBackup operation name", async () => {
     const client = makeClient();
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     const capability = await vault.createActiveKeyCrypto(PUBLIC_KEY);
     await capability.exportEncryptedKeyBackup({ publicKeyHex: PUBLIC_KEY });
     expect(client.vaultOperation).toHaveBeenCalledWith("exportKeyBackup", { publicKeyHex: PUBLIC_KEY });
@@ -113,7 +147,7 @@ describe("VaultServiceCoordinator", () => {
 
   it("revokes the previous capability when an AppView session id is reused", async () => {
     const client = makeClient();
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     const first = await vault.createAppViewSession({ sessionId: "reused", publicKeyHex: PUBLIC_KEY, password: "pw" });
     const second = await vault.createAppViewSession({ sessionId: "reused", publicKeyHex: PUBLIC_KEY, password: "pw" });
     expect(() => first.getIdentity()).toThrow(/revoked/i);
@@ -122,7 +156,7 @@ describe("VaultServiceCoordinator", () => {
 
   it("removeKey throws without sending RPC", async () => {
     const client = makeClient();
-    const vault = createVaultServiceCoordinator({ coordinatorClient: client });
+    const vault = makeVault(client);
     await expect(vault.removeKey(PUBLIC_KEY)).rejects.toThrow("Use keyspace.deleteKey instead");
     expect(client.vaultOperation).not.toHaveBeenCalledWith("removeKey", expect.anything());
   });

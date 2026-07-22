@@ -28,6 +28,7 @@ import type {
   CoordinatorVaultOperation,
   CoordinatorSubscribeTopicsResult,
   AssetDataInvalidationEvent,
+  SessionStateEvent,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
@@ -90,13 +91,31 @@ async function loadCoordinatorMeta(): Promise<void> {
 async function persistCoordinatorMeta(): Promise<void> {
   await new Promise<void>((resolve) => {
     const req = indexedDB.open("keymaster.session-coordinator", 1);
-    req.onsuccess = () => { const db = req.result; const tx = db.transaction("meta", "readwrite"); tx.objectStore("meta").put(coordinatorMeta); tx.oncomplete = () => resolve(); tx.onerror = () => resolve(); };
+    req.onupgradeneeded = () => {
+      if (!req.result.objectStoreNames.contains("meta")) req.result.createObjectStore("meta", { keyPath: "id" });
+    };
+    req.onsuccess = () => {
+      try {
+        const db = req.result;
+        const tx = db.transaction("meta", "readwrite");
+        tx.objectStore("meta").put(coordinatorMeta);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+      } catch { resolve(); }
+    };
     req.onerror = () => resolve();
   });
 }
 const persistActiveMeta = persistCoordinatorMeta;
-function publishVaultLifecycleEvent(): void { publishTopicEvent("vault.lifecycle", { type: "vault.lifecycle.changed", sessionEpoch: coordinatorState.sessionEpoch, status: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }); }
-function publishActiveKeyEvent(): void { publishTopicEvent("keyspace.active-key", { type: "keyspace.active-key.changed", sessionEpoch: coordinatorState.sessionEpoch, publicKeyHex: coordinatorState.activePublicKeyHex ?? null, generation: coordinatorState.keyspaceGeneration }); }
+function publishSessionState(cause: SessionStateEvent["cause"]): void {
+  publishTopicEvent("session.state", {
+    type: "session.state.changed",
+    cause,
+    vaultStatus: coordinatorState.vaultStatus,
+    activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
+    keyspaceGeneration: coordinatorState.keyspaceGeneration,
+  });
+}
 
 // ============================================================
 // 1. Coordinator State
@@ -157,8 +176,7 @@ const coordinatorState: CoordinatorState = {
 };
 
 const connectedPorts = new Map<string, ConnectedPort>();
-let vaultLifecycleRevision = 0;
-let activeKeyRevision = 0;
+let sessionRevision = 0;
 let backgroundSnapshotRevision = 0;
 let assetDataRevision = 0;
 function resolveKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined { return typeof runtime.keyScope === "function" ? runtime.keyScope() : runtime.keyScope; }
@@ -177,7 +195,8 @@ function assertTaskFresh(taskId: string): void {
 async function enterUnlockedState(
   passwordKey: CryptoKey,
   activePublicKeyHex: string,
-  activePrivateKeyBytes: Uint8Array
+  activePrivateKeyBytes: Uint8Array,
+  cause: SessionStateEvent["cause"]
 ): Promise<void> {
   // 更新状态
   coordinatorState.vaultStatus = "unlocked";
@@ -198,23 +217,7 @@ async function enterUnlockedState(
     }
   }
 
-  // 广播事件
-  publishTopicEvent("vault.lifecycle", {
-    type: "vault.lifecycle.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    status: coordinatorState.vaultStatus,
-    activePublicKeyHex: coordinatorState.activePublicKeyHex,
-  });
-
-  if (coordinatorState.activePublicKeyHex) {
-    publishTopicEvent("keyspace.active-key", {
-      type: "keyspace.active-key.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      publicKeyHex: coordinatorState.activePublicKeyHex,
-      generation: coordinatorState.keyspaceGeneration,
-    });
-
-  }
+  publishSessionState(cause);
 
   // 广播任务快照
   publishTopicEvent("background.snapshot", {
@@ -396,11 +399,9 @@ function handleSubscribe(
 
   const baselines = request.topics.flatMap((topic) => {
     if (topic === "asset.data-changed") return [];
-    const baselineRevision = topic === "vault.lifecycle" ? vaultLifecycleRevision : topic === "keyspace.active-key" ? activeKeyRevision : backgroundSnapshotRevision;
-    const snapshot = topic === "vault.lifecycle"
-      ? { topic, type: "vault.lifecycle.changed" as const, vaultLifecycleRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, status: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.activePublicKeyHex }
-      : topic === "keyspace.active-key"
-        ? { topic, type: "keyspace.active-key.changed" as const, activeKeyRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, publicKeyHex: coordinatorState.activePublicKeyHex ?? null, generation: coordinatorState.keyspaceGeneration }
+    const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
+    const snapshot = topic === "session.state"
+      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, keyspaceGeneration: coordinatorState.keyspaceGeneration }
         : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
@@ -542,7 +543,7 @@ async function handleUnlock(
     const privateKey = await decryptPrivateKey(passwordKey, activeKey);
 
     // 4. 统一进入 unlocked 状态
-    await enterUnlockedState(passwordKey, activeKey.publicKeyHex, privateKey);
+    await enterUnlockedState(passwordKey, activeKey.publicKeyHex, privateKey, "unlock");
 
     return {
       requestId,
@@ -555,12 +556,6 @@ async function handleUnlock(
     coordinatorState.activePublicKeyHex = undefined;
     coordinatorState.activePrivateKeyBytes = undefined;
     coordinatorState.passwordKey = undefined;
-
-    publishTopicEvent("vault.lifecycle", {
-      type: "vault.lifecycle.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      status: coordinatorState.vaultStatus,
-    });
 
     return {
       requestId,
@@ -590,7 +585,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== operation.publicKeyHex) {
         await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
       }
-      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); await persistActiveMeta(); publishActiveKeyEvent(); return true;
+      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); coordinatorMeta.activePublicKeyHex = key.publicKeyHex; coordinatorMeta.generation = coordinatorState.keyspaceGeneration; await persistActiveMeta(); publishSessionState("activate-key"); return true;
     }
     case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true;
     case "deleteKey": { const meta = await getVaultMeta(); if (!meta || !(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true; }
@@ -661,17 +656,20 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   await vaultDb.putMeta(meta);
   if (key) {
     // 有 key 时调用 addKeyRpc，它会设置 unlocked 状态
-    return addKeyRpc(password, { ...key, material: keyMaterial, label: key.label ?? "Key", capabilities: key.capabilities ?? ["p2pkh"], format: key.format ?? "imported", source: key.source });
+    return addKeyRpc(password, { ...key, material: keyMaterial, label: key.label ?? "Key", capabilities: key.capabilities ?? ["p2pkh"], format: key.format ?? "imported", source: key.source }, key.format === "imported" ? "import-initial-key" : "create-initial-key");
   }
   // 空 Vault 创建后保持 locked 状态，清空内存中的 passwordKey
   coordinatorState.passwordKey = undefined;
   coordinatorState.vaultStatus = "locked";
   coordinatorState.sessionEpoch = generateEpoch();
+  coordinatorMeta.activePublicKeyHex = undefined;
+  coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+  await persistCoordinatorMeta();
   // 广播 locked 状态
-  publishVaultLifecycleEvent();
+  publishSessionState("create-vault");
   return true;
 }
-async function addKeyRpc(password: string, input: { label: string; capabilities?: string[]; material: { hex: string; wif?: string }; format: string; source?: string }): Promise<unknown> {
+async function addKeyRpc(password: string, input: { label: string; capabilities?: string[]; material: { hex: string; wif?: string }; format: string; source?: string }, initialCause: Extract<SessionStateEvent["cause"], "create-initial-key" | "import-initial-key"> = "create-initial-key"): Promise<unknown> {
   const meta = await getVaultMeta();
   if (!meta) throw new Error("Vault not initialized");
   const passwordKey = coordinatorState.passwordKey ?? await (async () => {
@@ -684,10 +682,15 @@ async function addKeyRpc(password: string, input: { label: string; capabilities?
   const encrypted = await (await import("@keymaster/plugin-vault/coordinator")).encryptVaultKeyMaterial(passwordKey, pub, input.material);
   const record = { publicKeyHex: pub, label: input.label, address: deriveP2pkhAddress(pub, "main"), network: "main" as const, format: input.format, capabilities: input.capabilities ?? ["p2pkh"], createdAt: new Date().toISOString(), source: input.source, ...encrypted };
   await vaultDb.putKey(record);
+  const wasUnlocked = coordinatorState.vaultStatus === "unlocked";
+  if (wasUnlocked && coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== pub) {
+    await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
+  }
+  coordinatorState.activePrivateKeyBytes?.fill(0);
   // keyspaceGeneration 递增
   coordinatorState.keyspaceGeneration++;
   // 统一进入 unlocked 状态
-  await enterUnlockedState(passwordKey, pub, priv);
+  await enterUnlockedState(passwordKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
   return { publicKeyHex: pub, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source };
 }
 async function changePasswordRpc(oldPassword: string, newPassword: string): Promise<boolean> { const meta = await getVaultMeta(); if (!meta) throw new Error("Vault not initialized"); const oldKey = await (await import("@keymaster/plugin-vault/coordinator")).resolveVaultPasswordKey(oldPassword, meta); const newSalt = crypto.getRandomValues(new Uint8Array(16)); const newKey = await deriveKey(newPassword, newSalt); const verifier = await (await import("@keymaster/plugin-vault/coordinator")).encryptVerifier(newKey); const records = await vaultDb.listKeys(); const migrated = []; for (const record of records) { const material = await (await import("@keymaster/plugin-vault/coordinator")).decryptVaultKeyMaterialForMigration(oldKey.key, record); migrated.push({ ...record, ...(await (await import("@keymaster/plugin-vault/coordinator")).encryptVaultKeyMaterial(newKey, record.publicKeyHex, material)) }); } await vaultDb.putMetaAndKeys((await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt: newSalt, verifier }), migrated); await performGlobalLock("password-change"); return true; }
@@ -734,21 +737,13 @@ async function performGlobalLock(reason: string): Promise<void> {
 
   // 递增 epoch
   coordinatorState.sessionEpoch = generateEpoch();
-  coordinatorState.vaultStatus = "locked";
+  coordinatorState.vaultStatus = reason === "recover-empty" ? "uninitialized" : "locked";
 
-  // 广播 locked
-  publishTopicEvent("vault.lifecycle", {
-    type: "vault.lifecycle.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    status: coordinatorState.vaultStatus,
-  });
-
-  publishTopicEvent("keyspace.active-key", {
-    type: "keyspace.active-key.changed",
-    sessionEpoch: coordinatorState.sessionEpoch,
-    publicKeyHex: null,
-    generation: ++coordinatorState.keyspaceGeneration,
-  });
+  coordinatorState.keyspaceGeneration++;
+  coordinatorMeta.activePublicKeyHex = undefined;
+  coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+  await persistCoordinatorMeta();
+  publishSessionState(reason === "key-deleted" || reason === "empty-vault" ? "delete-active-key" : reason === "recover-empty" ? "recover-empty-vault" : "lock");
 
   // 广播任务快照，让 UI 立即显示 blocked 状态
   publishTopicEvent("background.snapshot", {
@@ -793,19 +788,7 @@ async function handleActivateKey(
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
     await persistCoordinatorMeta();
 
-    publishTopicEvent("keyspace.active-key", {
-      type: "keyspace.active-key.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      publicKeyHex: coordinatorState.activePublicKeyHex,
-      generation: coordinatorState.keyspaceGeneration,
-    });
-
-    publishTopicEvent("vault.lifecycle", {
-      type: "vault.lifecycle.changed",
-      sessionEpoch: coordinatorState.sessionEpoch,
-      status: coordinatorState.vaultStatus,
-      activePublicKeyHex: coordinatorState.activePublicKeyHex,
-    });
+    publishSessionState("activate-key");
 
     return {
       requestId,
@@ -1142,7 +1125,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
   const normalized = {
     ...event,
     topic,
-    ...(topic === "vault.lifecycle" ? { vaultLifecycleRevision: ++vaultLifecycleRevision } : topic === "keyspace.active-key" ? { activeKeyRevision: ++activeKeyRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -1216,7 +1199,7 @@ async function initializeCoordinator(): Promise<void> {
   } finally {
     // hello 可能先于异步 IndexedDB 初始化抵达。无论初始化成功或失败，
     // 都必须广播最终状态，否则首个页面会永久停留在 booting。
-    publishVaultLifecycleEvent();
+    publishSessionState("bootstrap");
   }
 }
 

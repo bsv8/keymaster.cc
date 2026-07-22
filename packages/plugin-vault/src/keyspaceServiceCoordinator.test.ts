@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
+import { SessionStateMirror } from "./sessionStateMirror.js";
 
 describe("createKeyspaceServiceCoordinator", () => {
   it("initializes from the Coordinator bootstrap snapshot", () => {
@@ -17,7 +18,7 @@ describe("createKeyspaceServiceCoordinator", () => {
       vaultOperation: async () => ({ status: "ok" as const, value: undefined, sessionEpoch: "test" })
     };
 
-    const keyspace = createKeyspaceServiceCoordinator(coordinatorClient);
+    const keyspace = createKeyspaceServiceCoordinator(coordinatorClient, new SessionStateMirror(coordinatorClient));
 
     expect(keyspace.active()).toEqual({ activePublicKeyHex: "02".padEnd(66, "a") });
     expect(keyspace.requireActiveKey().publicKeyHex).toBe("02".padEnd(66, "a"));

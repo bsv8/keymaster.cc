@@ -50,7 +50,7 @@ export type CoordinatorClientRequest =
   | { kind: "activity"; clientId: string };
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "vault.lifecycle" | "keyspace.active-key" | "background.snapshot" | "asset.data-changed";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed";
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
@@ -139,27 +139,29 @@ export type CoordinatorCryptoResult =
 
 /** Coordinator 推送事件联合类型。 */
 export type CoordinatorTopicEvent =
-  | VaultLifecycleEvent
-  | KeyspaceActiveKeyEvent
+  | SessionStateEvent
   | BackgroundSnapshotEvent
   | AssetDataChangedEvent;
 
-export interface VaultLifecycleEvent {
-  topic: "vault.lifecycle";
-  type: "vault.lifecycle.changed";
+/** The complete public session snapshot. This is the sole cross-tab session event. */
+export interface SessionStateEvent {
+  topic: "session.state";
+  type: "session.state.changed";
+  sessionRevision: number;
   sessionEpoch: SessionEpoch;
-  vaultLifecycleRevision: number;
-  status: CoordinatorVaultStatus;
-  activePublicKeyHex?: string;
-}
-
-export interface KeyspaceActiveKeyEvent {
-  topic: "keyspace.active-key";
-  type: "keyspace.active-key.changed";
-  sessionEpoch: SessionEpoch;
-  activeKeyRevision: number;
-  publicKeyHex: string | null;
-  generation: number;
+  cause:
+    | "bootstrap"
+    | "unlock"
+    | "lock"
+    | "activate-key"
+    | "create-vault"
+    | "create-initial-key"
+    | "import-initial-key"
+    | "delete-active-key"
+    | "recover-empty-vault";
+  vaultStatus: CoordinatorVaultStatus;
+  activePublicKeyHex: string | null;
+  keyspaceGeneration: number;
 }
 
 export interface BackgroundSnapshotEvent {
@@ -181,12 +183,12 @@ export interface AssetDataChangedEvent {
   kinds: AssetDataInvalidationEvent["kinds"];
 }
 
-/** subscribe 的原子 baseline。每个 topic 的 revision 独立递增。 */
+/** subscribe 的原子 baseline。session.state 的 revision 全局严格递增。 */
 export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: VaultLifecycleEvent | KeyspaceActiveKeyEvent | BackgroundSnapshotEvent | AssetDataChangedEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {

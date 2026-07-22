@@ -79,11 +79,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private eventListeners = new Map<string, Set<EventListener<CoordinatorTopicEvent>>>();
   private topicCaches = new Map<CoordinatorTopic, CoordinatorTopicEvent>();
-  private vaultLifecycleRevisionCache = -1;
-  private activeKeyRevisionCache = -1;
+  private sessionRevisionCache = -1;
   private backgroundSnapshotRevisionCache = -1;
   private assetDataRevisionCache = -1;
-  private topicEpochs = new Map<CoordinatorTopic, SessionEpoch>();
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -128,7 +126,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["vault.lifecycle", "keyspace.active-key", "background.snapshot", "asset.data-changed"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed"]);
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -234,11 +232,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private resetDisconnectedState(): void {
     this.bootstrapSnapshotCache = { sessionEpoch: "boot", vaultStatus: "booting", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
     this.topicCaches.clear();
-    this.vaultLifecycleRevisionCache = -1;
-    this.activeKeyRevisionCache = -1;
+    this.sessionRevisionCache = -1;
     this.backgroundSnapshotRevisionCache = -1;
     this.assetDataRevisionCache = -1;
-    this.topicEpochs.clear();
   }
 
   // ============================================================
@@ -506,43 +502,33 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private applyTopicEvent(event: CoordinatorTopicEvent): void {
-    const previousEpoch = this.topicEpochs.get(event.topic);
-    // vault.lifecycle 是 session epoch 的权威来源。SharedWorker 会在同一
-    // MessagePort 上先发送它、再发送同一 epoch 的其它 topic，因此这里必须
-    // 接纳新的 lifecycle epoch。此前把它当作过期事件丢弃，会使页面一直保留
-    // 旧的 unlocked epoch，随后任何带 expectedSessionEpoch 的操作都会收到
-    // stale-epoch。
-    //
-    // 其它 topic 不能单独把客户端推进到未知 epoch，仍等待对应的 lifecycle
-    // 事件，避免乱序的旧 topic 覆盖当前快照。
-    if (
-      event.topic !== "vault.lifecycle"
-      && previousEpoch
-      && previousEpoch !== event.sessionEpoch
-      && event.sessionEpoch !== this.bootstrapSnapshotCache.sessionEpoch
-    ) return;
+    if (!this.isValidTopicEvent(event)) {
+      if (event.topic === "session.state") this.resetDisconnectedState();
+      this.reportRecoverableCoordinatorFailure("invalid-topic-event", new Error("Invalid Coordinator topic payload"));
+      return;
+    }
     const incomingRevision = this.getEventRevision(event);
     if (incomingRevision === undefined) return;
-    const previousRevision = previousEpoch === event.sessionEpoch ? this.getCachedTopicRevision(event.topic) : -1;
-    if (incomingRevision <= previousRevision) return;
-    this.topicEpochs.set(event.topic, event.sessionEpoch);
+    if (incomingRevision <= this.getCachedTopicRevision(event.topic)) {
+      if (event.topic === "session.state") {
+        this.reportRecoverableCoordinatorFailure("stale-session-state", new Error("Discarded non-increasing session revision"));
+      }
+      return;
+    }
     this.setTopicRevision(event);
     this.topicCaches.set(event.topic, event);
-    switch (event.type) {
-      case "vault.lifecycle.changed":
-        this.bootstrapSnapshotCache.vaultStatus = event.status;
-        this.bootstrapSnapshotCache.activePublicKeyHex = event.activePublicKeyHex;
-        this.bootstrapSnapshotCache.sessionEpoch = event.sessionEpoch;
-        break;
-      case "keyspace.active-key.changed":
-        this.bootstrapSnapshotCache.activePublicKeyHex = event.publicKeyHex ?? undefined;
-        this.bootstrapSnapshotCache.keyspaceGeneration = event.generation;
-        this.bootstrapSnapshotCache.sessionEpoch = event.sessionEpoch;
-        break;
-      case "background.snapshot.changed":
-        this.bootstrapSnapshotCache.taskSnapshots = [...event.snapshots];
-        this.bootstrapSnapshotCache.sessionEpoch = event.sessionEpoch;
-        break;
+    if (event.type === "session.state.changed") {
+      // Session fields are committed as one replacement before any listener observes them.
+      this.bootstrapSnapshotCache = {
+        ...this.bootstrapSnapshotCache,
+        sessionEpoch: event.sessionEpoch,
+        vaultStatus: event.vaultStatus,
+        activePublicKeyHex: event.activePublicKeyHex ?? undefined,
+        keyspaceGeneration: event.keyspaceGeneration,
+      };
+    } else if (event.type === "background.snapshot.changed") {
+      // Background is a separate domain and must not advance Session identity.
+      this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, taskSnapshots: [...event.snapshots] };
     }
     const listeners = this.eventListeners.get(event.topic);
     if (listeners) {
@@ -554,24 +540,38 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   private getCachedTopicRevision(topic: CoordinatorTopic): number {
-    if (topic === "vault.lifecycle") return this.vaultLifecycleRevisionCache;
-    if (topic === "keyspace.active-key") return this.activeKeyRevisionCache;
+    if (topic === "session.state") return this.sessionRevisionCache;
     if (topic === "background.snapshot") return this.backgroundSnapshotRevisionCache;
     return this.assetDataRevisionCache;
   }
 
   private getEventRevision(event: CoordinatorTopicEvent): number | undefined {
-    if (event.topic === "vault.lifecycle") return event.vaultLifecycleRevision;
-    if (event.topic === "keyspace.active-key") return event.activeKeyRevision;
+    if (event.topic === "session.state") return event.sessionRevision;
     if (event.topic === "background.snapshot") return event.backgroundSnapshotRevision;
     return event.assetDataRevision;
   }
 
   private setTopicRevision(event: CoordinatorTopicEvent): void {
-    if (event.topic === "vault.lifecycle") this.vaultLifecycleRevisionCache = event.vaultLifecycleRevision;
-    else if (event.topic === "keyspace.active-key") this.activeKeyRevisionCache = event.activeKeyRevision;
+    if (event.topic === "session.state") this.sessionRevisionCache = event.sessionRevision;
     else if (event.topic === "background.snapshot") this.backgroundSnapshotRevisionCache = event.backgroundSnapshotRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
+  }
+
+  private isValidTopicEvent(event: CoordinatorTopicEvent): boolean {
+    if (!event || typeof event !== "object" || typeof event.topic !== "string" || typeof event.type !== "string" || typeof event.sessionEpoch !== "string") return false;
+    if (event.topic === "session.state") {
+      return event.type === "session.state.changed"
+        && Number.isSafeInteger(event.sessionRevision)
+        && event.sessionRevision >= 0
+        && typeof event.cause === "string"
+        && typeof event.vaultStatus === "string"
+        && (typeof event.activePublicKeyHex === "string" || event.activePublicKeyHex === null)
+        && Number.isSafeInteger(event.keyspaceGeneration)
+        && event.keyspaceGeneration >= 0
+        && (event.vaultStatus === "unlocked" || event.activePublicKeyHex === null);
+    }
+    if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
+    return event.type === "asset.data-changed" && Number.isSafeInteger(event.assetDataRevision);
   }
 
   // ============================================================

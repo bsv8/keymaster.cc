@@ -437,13 +437,13 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (next === "locked" || next === "uninitialized") {
       clearVaultSession("vault status changed");
       deps.logger?.info({
-        scope: "vault.lifecycle",
+        scope: "vault.session",
         event: "vault.locked",
         message: "Vault locked"
       });
     } else if (next === "unlocked") {
       deps.logger?.info({
-        scope: "vault.lifecycle",
+        scope: "vault.session",
         event: "vault.unlocked",
         message: "Vault unlocked"
       });

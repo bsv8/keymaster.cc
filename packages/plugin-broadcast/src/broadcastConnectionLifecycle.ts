@@ -61,6 +61,10 @@ export function createBroadcastConnectionLifecycle(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
   let lastReconciledConnectionIdentity: BroadcastConnectionIdentity | null = null;
+  let inFlightReconcile: { key: string; promise: Promise<void> } | null = null;
+
+  const identityKey = (identity: BroadcastConnectionIdentity): string =>
+    `${identity.sessionEpoch}:${identity.activePublicKeyHex}:${identity.keyspaceGeneration}`;
 
   const cancelTimer = (): void => {
     if (timer) {
@@ -69,35 +73,47 @@ export function createBroadcastConnectionLifecycle(
     }
   };
 
-  const reconcileBroadcastConnection = async (): Promise<void> => {
-    if (disposed) return;
+  const reconcileBroadcastConnection = (): Promise<void> => {
+    if (disposed) return Promise.resolve();
     const vaultLifecycle = cfg.vault.getLifecycleSnapshot();
     if (vaultLifecycle.status !== "unlocked") {
       cfg.core.markStructurallyOffline();
-      return;
+      return Promise.resolve();
     }
     const owner = cfg.keyspace.active().activePublicKeyHex ?? null;
     if (!owner) {
       cfg.core.markStructurallyOffline();
-      return;
+      return Promise.resolve();
     }
-    try {
-      const identity = {
-        sessionEpoch: vaultLifecycle.sessionEpoch,
-        activePublicKeyHex: owner,
-        keyspaceGeneration: cfg.keyspace.active().generation ?? 0
-      };
-      if (JSON.stringify(identity) === JSON.stringify(lastReconciledConnectionIdentity) && cfg.core.inspect().state === "bound") return;
+    const identity = {
+      sessionEpoch: vaultLifecycle.sessionEpoch,
+      activePublicKeyHex: owner,
+      keyspaceGeneration: cfg.keyspace.active().generation ?? 0
+    };
+    const key = identityKey(identity);
+    if (key === (lastReconciledConnectionIdentity && identityKey(lastReconciledConnectionIdentity)) && cfg.core.inspect().state === "bound") {
+      return Promise.resolve();
+    }
+    if (inFlightReconcile?.key === key) return inFlightReconcile.promise;
+
+    const promise = (async (): Promise<void> => {
+      try {
       await cfg.core.reconcileOwnerConnection(identity);
       if (cfg.core.inspect().state === "bound") lastReconciledConnectionIdentity = identity;
-    } catch (err) {
-      safeWarn({
-        scope: "broadcast.core",
-        event: "broadcast.connection.lifecycle.reconcile.failed",
-        message: "",
-        data: { err: err instanceof Error ? err.message : String(err) }
-      });
-    }
+      } catch (err) {
+        safeWarn({
+          scope: "broadcast.core",
+          event: "broadcast.connection.lifecycle.reconcile.failed",
+          message: "",
+          data: { err: err instanceof Error ? err.message : String(err) }
+        });
+      }
+    })();
+    inFlightReconcile = { key, promise };
+    void promise.finally(() => {
+      if (inFlightReconcile?.promise === promise) inFlightReconcile = null;
+    });
+    return promise;
   };
 
   const onVaultLifecycleChanged = (snapshot: { status: string }): void => {
@@ -122,7 +138,6 @@ export function createBroadcastConnectionLifecycle(
       event: "broadcast.keyspace.changed",
       message: ""
     });
-    lastReconciledConnectionIdentity = null;
     void reconcileBroadcastConnection();
   };
 

@@ -81,8 +81,8 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(a.getBootstrapSnapshot().vaultStatus).toBe("locked");
       expect(b.getBootstrapSnapshot().sessionEpoch).toBe("shared-epoch");
       const observed: string[] = [];
-      b.subscribeTopic("vault.lifecycle", (event: any) => observed.push(event.status));
-      hub.broadcast({ topic: "vault.lifecycle", vaultLifecycleRevision: 1, type: "vault.lifecycle.changed", sessionEpoch: "unlocked-epoch", status: "unlocked", activePublicKeyHex: "a".repeat(64) });
+      b.subscribeTopic("session.state", (event: any) => observed.push(event.vaultStatus));
+      hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1 });
       expect(b.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
       expect(observed).toContain("unlocked");
       a.disconnect();
@@ -92,7 +92,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
     }
   });
 
-  it("adopts a later vault lifecycle epoch so subsequent commands do not use a stale epoch", async () => {
+  it("adopts a later session epoch so subsequent commands do not use a stale epoch", async () => {
     const hub = new Hub();
     const Constructor = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
     const original = globalThis.SharedWorker;
@@ -102,25 +102,60 @@ describe("KeymasterSessionCoordinatorClient", () => {
       await client.connect();
 
       hub.broadcast({
-        topic: "vault.lifecycle",
-        type: "vault.lifecycle.changed",
-        vaultLifecycleRevision: 1,
+        topic: "session.state",
+        type: "session.state.changed",
+        sessionRevision: 1,
+        cause: "unlock",
         sessionEpoch: "unlocked-epoch",
-        status: "unlocked",
-        activePublicKeyHex: "a".repeat(64)
+        vaultStatus: "unlocked",
+        activePublicKeyHex: "a".repeat(64),
+        keyspaceGeneration: 1
       });
       hub.broadcast({
-        topic: "vault.lifecycle",
-        type: "vault.lifecycle.changed",
-        vaultLifecycleRevision: 2,
+        topic: "session.state",
+        type: "session.state.changed",
+        sessionRevision: 2,
+        cause: "lock",
         sessionEpoch: "locked-epoch",
-        status: "locked"
+        vaultStatus: "locked",
+        activePublicKeyHex: null,
+        keyspaceGeneration: 2
       });
 
       expect(client.getBootstrapSnapshot()).toMatchObject({
         sessionEpoch: "locked-epoch",
         vaultStatus: "locked"
       });
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
+  it("does not notify session listeners for duplicate or stale session revisions", async () => {
+    const hub = new Hub();
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "session-revision-gate" });
+      await client.connect();
+      const events: unknown[] = [];
+      client.subscribeTopic("session.state", (event) => events.push(event));
+      const accepted = {
+        topic: "session.state" as const,
+        type: "session.state.changed" as const,
+        sessionRevision: 2,
+        sessionEpoch: "epoch-2",
+        cause: "activate-key" as const,
+        vaultStatus: "unlocked" as const,
+        activePublicKeyHex: "c".repeat(64),
+        keyspaceGeneration: 2,
+      };
+      hub.broadcast(accepted);
+      hub.broadcast(accepted);
+      hub.broadcast({ ...accepted, sessionRevision: 1, sessionEpoch: "stale-epoch", activePublicKeyHex: "d".repeat(64) });
+
+      expect(events).toEqual([accepted]);
+      expect(client.getBootstrapSnapshot()).toMatchObject({ sessionEpoch: "epoch-2", activePublicKeyHex: "c".repeat(64), keyspaceGeneration: 2 });
     } finally {
       globalThis.SharedWorker = original;
     }
@@ -136,7 +171,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       await client.connect();
       const vaultEvents: unknown[] = [];
       const backgroundEvents: unknown[] = [];
-      client.subscribeTopic("vault.lifecycle", (event) => vaultEvents.push(event));
+      client.subscribeTopic("session.state", (event) => vaultEvents.push(event));
       client.subscribeTopic("background.snapshot", (event) => backgroundEvents.push(event));
 
       hub.broadcast({
@@ -160,18 +195,20 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const request = message as { requestId: string; kind: string };
       const operationResult = request.kind === "subscribe"
         ? {
-            topics: ["vault.lifecycle"],
+            topics: ["session.state"],
             baselines: [{
-              topic: "vault.lifecycle",
+              topic: "session.state",
               baselineRevision: 7,
               sessionEpoch: "baseline-epoch",
               snapshot: {
-                topic: "vault.lifecycle",
-                type: "vault.lifecycle.changed",
-                vaultLifecycleRevision: 7,
+                topic: "session.state",
+                type: "session.state.changed",
+                sessionRevision: 7,
+                cause: "bootstrap",
                 sessionEpoch: "baseline-epoch",
-                status: "unlocked",
-                activePublicKeyHex: "b".repeat(64)
+                vaultStatus: "unlocked",
+                activePublicKeyHex: "b".repeat(64),
+                keyspaceGeneration: 1
               }
             }]
           }

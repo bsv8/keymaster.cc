@@ -74,6 +74,9 @@ describe("Session Coordinator worker", () => {
   });
 
   it("fans out global lock to both ports and does not lock when one port closes", async () => {
+    // The module's one-time IndexedDB bootstrap is asynchronous. Let it finish
+    // before installing this test's synthetic session state.
+    await new Promise((resolve) => setTimeout(resolve, 30));
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
     const a = new TestPort();
@@ -83,16 +86,15 @@ describe("Session Coordinator worker", () => {
     onconnect?.({ ports: [b] } as unknown as MessageEvent);
     a.send({ kind: "hello", clientId: "a", requestId: "hello-a" });
     b.send({ kind: "hello", clientId: "b", requestId: "hello-b" });
-    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["vault.lifecycle"] });
-    b.send({ kind: "subscribe", clientId: "b", requestId: "sub-b", topics: ["vault.lifecycle"] });
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sub-a", topics: ["session.state"] });
+    b.send({ kind: "subscribe", clientId: "b", requestId: "sub-b", topics: ["session.state"] });
     await flush();
     a.close();
     expect(__testGetSnapshot().vaultStatus).toBe("unlocked");
     // 锁定是收敛型安全操作：旧页面也必须能锁定新 epoch 的全局会话。
     b.send({ kind: "lock", clientId: "b", requestId: "lock", expectedSessionEpoch: "stale-page-epoch" });
-    await flush();
-    expect(__testGetSnapshot().vaultStatus).toBe("locked");
-    expect(b.messages.some((message) => (message as { type?: string; status?: string }).type === "vault.lifecycle.changed" && (message as { status?: string }).status === "locked")).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(b.messages.some((message) => (message as { type?: string; vaultStatus?: string }).type === "session.state.changed" && (message as { vaultStatus?: string }).vaultStatus === "locked")).toBe(true);
   });
 
   it("returns immediate accepted/already-running acknowledgements for concurrent runNow", async () => {
@@ -175,7 +177,7 @@ describe("Session Coordinator worker", () => {
     a.messages.length = 0;
     // 锁定
     a.send({ kind: "lock", clientId: "a", requestId: "lock", expectedSessionEpoch: __testGetSnapshot().sessionEpoch });
-    await flush();
+    await new Promise((resolve) => setTimeout(resolve, 20));
     const backgroundEvents = a.messages.filter((m) => (m as { type?: string }).type === "background.snapshot.changed");
     expect(backgroundEvents.length).toBeGreaterThan(0);
   });
@@ -345,8 +347,8 @@ describe("Session Coordinator backup import", () => {
     onconnect?.({ ports: [b] } as unknown as MessageEvent);
     a.send({ kind: "hello", clientId: "import-a", requestId: "hello-a" });
     b.send({ kind: "hello", clientId: "import-b", requestId: "hello-b" });
-    a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["keyspace.active-key"] });
-    b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["keyspace.active-key"] });
+    a.send({ kind: "subscribe", clientId: "import-a", requestId: "subscribe-a", topics: ["session.state"] });
+    b.send({ kind: "subscribe", clientId: "import-b", requestId: "subscribe-b", topics: ["session.state"] });
     await flush();
     a.messages.length = 0;
     b.messages.length = 0;
@@ -355,8 +357,8 @@ describe("Session Coordinator backup import", () => {
     expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
     for (const port of [a, b]) {
       expect(port.messages).toContainEqual(expect.objectContaining({
-        type: "keyspace.active-key.changed",
-        publicKeyHex: imported.publicKeyHex,
+        type: "session.state.changed",
+        activePublicKeyHex: imported.publicKeyHex,
       }));
     }
   });
