@@ -24,6 +24,7 @@ import type {
   RouteRegistry,
   CollectibleTransferRegistry,
   VaultService,
+  WocService,
   Woc1SatOrdinalsService
 } from "@keymaster/contracts";
 import {
@@ -35,6 +36,7 @@ import {
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
+  WOC_CAPABILITY,
   WOC_1SAT_ORDINALS_CAPABILITY
 } from "@keymaster/contracts";
 import {
@@ -105,6 +107,7 @@ export const oneSatOrdinalsCollectiblePlugin: PluginManifest = {
   setup(ctx) {
     const p2pkh = ctx.get<P2pkhServiceFor1Sat>(P2PKH_CAPABILITY);
     const wocOneSat = ctx.get<Woc1SatOrdinalsService>(WOC_1SAT_ORDINALS_CAPABILITY);
+    const woc = ctx.get<WocService>(WOC_CAPABILITY);
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
     const collectibleRegistry = ctx.get<CollectibleRegistry>("collectible.registry");
     const backgroundRegistry = ctx.get<BackgroundRegistry>(BACKGROUND_REGISTRY_CAPABILITY);
@@ -121,8 +124,8 @@ export const oneSatOrdinalsCollectiblePlugin: PluginManifest = {
     const service = createOrdinalsService({ keyspace, p2pkh, wocOneSat });
     const provider = createOrdinalsCollectibleProvider({ service });
     const spendProtection = createOrdinalsSpendProtectionProvider({ service });
-    const syncTask = createOrdinalsSyncTask({ service, keyspace, vault, assetDataNotifier });
     const historyDb = createOrdinalMintHistoryDb(keyspace);
+    const syncTask = createOrdinalsSyncTask({ service, woc, historyDb, keyspace, vault, assetDataNotifier });
     const mintService = createOrdinalMintService({
       p2pkh,
       protocolSpend,

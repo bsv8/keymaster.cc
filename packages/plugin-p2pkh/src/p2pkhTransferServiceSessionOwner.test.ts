@@ -550,7 +550,7 @@ describe("p2pkh.transfer concurrent submit atomic claim", () => {
 
     // 关键断言：broadcast 只调一次（第二个没有 broadcast）。
     expect(broadcastCallCount).toBe(1);
-    expect(r1.status).toBe("broadcast");
+    expect(r1.status).toBe("broadcast-pending-woc");
 
     // DB 状态：第一个 submission 行 + 它的 claim 行；没有第二个
     // submission（事务 abort，submission 也不写）。
@@ -614,11 +614,11 @@ describe("p2pkh.transfer definitive rejection releases claim", () => {
     expect(result.status).toBe("rejected");
     expect(result.localInputClaimIds).toEqual([]);
 
-    // 关键断言：claim 已被释放（DB 里 0 行），submission 保留为 failed。
+    // 关键断言：claim 已被释放（DB 里 0 行），submission 保留为 rejected。
     const submissions = await handle.listLocalSubmissions();
     const claims = await handle.listLocalInputClaims();
     expect(claims).toHaveLength(0);
     expect(submissions).toHaveLength(1);
-    expect(submissions[0]!.status).toBe("failed");
+    expect(submissions[0]!.status).toBe("rejected");
   });
 });

@@ -25,6 +25,29 @@ function networkLabel(network: Network, t: (key: string, values?: { defaultValue
     : t("assets.network.test", { defaultValue: "Testnet" });
 }
 
+export function observationLabel(observation: "unconfirmed" | "confirmed" | undefined, t: (key: string, values?: { defaultValue?: string }) => string): string | undefined {
+  if (observation === "unconfirmed") return t("assets.observation.unconfirmed", { defaultValue: "WOC 已观察（未确认）" });
+  if (observation === "confirmed") return t("assets.observation.confirmed", { defaultValue: "WOC 已确认" });
+  return undefined;
+}
+
+export function statusLabel(status: string, t: (key: string, values?: { defaultValue?: string }) => string): string {
+  switch (status) {
+    case "ready":
+      return t("assets.status.ready", { defaultValue: "就绪" });
+    case "syncing":
+      return t("assets.status.syncing", { defaultValue: "同步中" });
+    case "stale":
+      return t("assets.status.stale", { defaultValue: "过期" });
+    case "failed":
+      return t("assets.status.failed", { defaultValue: "失败" });
+    case "unsupported":
+      return t("assets.status.unsupported", { defaultValue: "不支持" });
+    default:
+      return status;
+  }
+}
+
 function visibleNetworks(includeTestnet: boolean): Network[] {
   return includeTestnet ? NETWORK_ORDER : ["main"];
 }
@@ -151,7 +174,7 @@ export function AssetsPage() {
                             <span>{asset.assetId}</span>
                           </div>
                           <div className="asset-workspace-row__meta">
-                                <span className={`asset-workspace-pill is-${asset.status}`}>{asset.status}</span>
+                                <span className={`asset-workspace-pill is-${asset.status}`}>{statusLabel(asset.status, t)}</span>
                                 <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
                                 {asset.balance ? <strong>{asset.balance.display ?? `${asset.balance.amount} ${asset.balance.unit}`}</strong> : null}
                               </div>
@@ -206,9 +229,11 @@ export function AssetsPage() {
                             <span>{token.tokenId}</span>
                           </div>
                           <div className="asset-workspace-row__meta">
-                                <span className={`asset-workspace-pill is-${token.status}`}>{token.status}</span>
+                                <span className={`asset-workspace-pill is-${token.status}`}>{statusLabel(token.status, t)}</span>
                                 <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
+                                {token.observation ? <span className={`asset-workspace-pill is-${token.observation}`}>{observationLabel(token.observation, t)}</span> : null}
                                 {token.balance ? <strong>{token.balance.display ?? `${token.balance.amount} ${token.balance.unit}`}</strong> : null}
+                                {token.canonicalTxid ? <span>{token.canonicalTxid.slice(0, 12)}…</span> : null}
                               </div>
                         </div>
                           </li>

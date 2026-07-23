@@ -32,6 +32,8 @@ export function createCollectibleRegistry(): ICollectibleRegistry {
       if (!providers.has(id)) {
         throw new Error(`Collectible provider id "${id}" is not registered`);
       }
+      const provider = providers.get(id);
+      provider?.dispose?.();
       providers.delete(id);
     },
     list() {

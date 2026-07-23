@@ -75,6 +75,8 @@ export interface TransferCompletion {
   completedAt: string;
   /** 诊断/展示用，平台不解释内容。 */
   details?: Record<string, unknown>;
+  /** WOC 观察状态。 */
+  observation?: "unconfirmed" | "confirmed";
 }
 
 /** Transfer Provider 契约。 */

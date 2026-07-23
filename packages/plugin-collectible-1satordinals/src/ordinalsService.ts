@@ -61,6 +61,8 @@ export interface OrdinalsOutpointHit {
   inscription: Woc1SatOrdinalsInscription;
   address: string;
   network: BsvNetwork;
+  observation?: "unconfirmed" | "confirmed";
+  canonicalTxid?: string;
 }
 
 export interface OrdinalsServiceHandle {
@@ -148,7 +150,14 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
         const wocOutpoint = toWocOutpoint(u.txid, u.vout);
         const inscription = await wocOneSat.getOutpointInscription(network, wocOutpoint, { signal });
         if (!inscription) continue;
-        out.push({ outpoint: displayOutpoint, inscription, address: u.address, network });
+        out.push({
+          outpoint: displayOutpoint,
+          inscription,
+          address: u.address,
+          network,
+          observation: inscription.observation,
+          canonicalTxid: inscription.canonicalTxid
+        });
       }
     }
     return out;
@@ -171,7 +180,14 @@ export function createOrdinalsService(options: CreateOrdinalsServiceOptions): Or
         continue;
       }
       if (!inscription) continue;
-      return { outpoint, inscription, address: inscription.owner ?? "", network };
+      return {
+        outpoint,
+        inscription,
+        address: inscription.owner ?? "",
+        network,
+        observation: inscription.observation,
+        canonicalTxid: inscription.canonicalTxid
+      };
     }
     if (lastError) {
       throw lastError instanceof Error ? lastError : new Error(String(lastError));

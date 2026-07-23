@@ -103,12 +103,16 @@ export interface AssetProvider {
   listActivity(assetId: string): Promise<AssetActivity[]>;
   /** 订阅资产变化，返回取消订阅函数。 */
   onChange(handler: () => void): () => void;
+  /** 可选资源释放；用于清理内部订阅。 */
+  dispose?(): void;
 }
 
 /** 资产 provider 注册表接口。 */
 export interface AssetRegistry {
   /** 注册 provider；id 重复抛错。 */
   register(provider: AssetProvider): void;
+  /** 注销 provider。id 不存在时抛错。 */
+  unregister(id: string): void;
   /** 列出全部 provider，按 order/name 排序。 */
   list(): AssetProvider[];
   /** 按 id 取 provider。 */

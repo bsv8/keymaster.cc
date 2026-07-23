@@ -21,6 +21,10 @@ export interface Bsv21TokenSnapshot {
   outpoint: string;
   /** 网络。 */
   network: BsvNetwork;
+  /** WOC 观察状态。 */
+  observation?: "unconfirmed" | "confirmed";
+  /** WOC 观察到的 canonical txid。 */
+  canonicalTxid?: string;
   /** 持有此 token 的地址。 */
   address: string;
   /** 当前 unspent token 金额，十进制字符串。 */

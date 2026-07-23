@@ -12,6 +12,7 @@ import type {
   WocService,
   VaultService
 } from "@keymaster/contracts";
+import type { P2pkhProtocolSubmission } from "./p2pkhContracts.js";
 import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
 import { resourceIdFor } from "./p2pkhDb.js";
 
@@ -24,8 +25,15 @@ export interface P2pkhProtocolSpendClaimStore {
     publicKeyHex: string;
     network: BsvNetwork;
     inputs: P2pkhInputOutpoint[];
+    expectedCanonicalTxid?: string;
+    observation?: "unconfirmed" | "confirmed";
   }): Promise<{ claimIds: string[] }>;
   releaseLocalInputClaims(input: { publicKeyHex: string; claimIds: string[] }): Promise<void>;
+}
+
+export interface P2pkhProtocolSpendSubmissionStore {
+  getProtocolSubmission(input: { publicKeyHex: string; id: string }): Promise<P2pkhProtocolSubmission | undefined>;
+  putProtocolSubmission(record: P2pkhProtocolSubmission): Promise<void>;
 }
 
 export interface P2pkhProtocolSpendDeps {
@@ -33,6 +41,7 @@ export interface P2pkhProtocolSpendDeps {
   woc: WocService;
   getKeyForOwner: (ownerPublicKeyHex: string) => Promise<{ publicKeyHex: string }>;
   claimStore: P2pkhProtocolSpendClaimStore;
+  submissionStore?: P2pkhProtocolSpendSubmissionStore;
   protectedOutpoints?: ProtectedOutpointRegistry;
 }
 
@@ -166,6 +175,39 @@ function isDefinitivelyRejectedError(msg: string): boolean {
   return lower.includes("rejected") || lower.includes("invalid transaction") || lower.includes("bad-txns");
 }
 
+function buildProtocolSubmissionRecord(input: {
+  submissionId: string;
+  resourceId: string;
+  publicKeyHex: string;
+  network: BsvNetwork;
+  canonicalTxid: string;
+  inputs: Array<{ txid: string; vout: number }>;
+  protectedClaimIds: string[];
+  localInputClaimIds: string[];
+  status: P2pkhProtocolSubmission["status"];
+  observation?: "unconfirmed" | "confirmed";
+  droppedReason?: string;
+  createdAt?: string;
+}): P2pkhProtocolSubmission {
+  const now = new Date().toISOString();
+  return {
+    id: input.submissionId,
+    resourceId: input.resourceId,
+    publicKeyHex: input.publicKeyHex,
+    network: input.network,
+    submissionId: input.submissionId,
+    canonicalTxid: input.canonicalTxid,
+    inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+    protectedClaimIds: [...input.protectedClaimIds],
+    localInputClaimIds: [...input.localInputClaimIds],
+    status: input.status,
+    observation: input.observation,
+    droppedReason: input.droppedReason,
+    createdAt: input.createdAt ?? now,
+    updatedAt: now
+  };
+}
+
 export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): ProtocolSpendService {
   return {
     async prepare(input: ProtocolSpendPrepareInput): Promise<ProtocolSpendPreview> {
@@ -212,13 +254,6 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           scriptHex: o.scriptHex,
           label: o.label
         }));
-        inputClaimIds = (await deps.claimStore.tryClaimInputs({
-          submissionId,
-          resourceId: resourceIdFor(input.network),
-          publicKeyHex: resolvedOwner.publicKeyHex,
-          network: input.network,
-          inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout }))
-        })).claimIds;
         const totalInput = inputs.reduce((sum, u) => sum + u.value, 0);
         const fixedOutput = outputs.reduce((sum, o) => sum + o.value, 0);
         let feeSatoshis = 1;
@@ -251,6 +286,27 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
           const serializedSizeBytes = rawTxHexByteLength(rawTxHex);
           const nextFee = Math.max(1, Math.ceil((serializedSizeBytes * input.feeRateSatoshisPerKb) / 1000));
           if (nextFee === feeSatoshis || (nextFee <= feeSatoshis && !input.changeAddress)) {
+            inputClaimIds = (await deps.claimStore.tryClaimInputs({
+              submissionId,
+              resourceId: resourceIdFor(input.network),
+              publicKeyHex: resolvedOwner.publicKeyHex,
+              network: input.network,
+              inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+              expectedCanonicalTxid: calcTxidFromRawTxHex(rawTxHex)
+            })).claimIds;
+            if (deps.submissionStore) {
+              await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
+                submissionId,
+                resourceId: resourceIdFor(input.network),
+                publicKeyHex: resolvedOwner.publicKeyHex,
+                network: input.network,
+                canonicalTxid: calcTxidFromRawTxHex(rawTxHex),
+                inputs: input.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+                protectedClaimIds,
+                localInputClaimIds: inputClaimIds,
+                status: "prepared"
+              }));
+            }
             return {
               ownerPublicKeyHex: resolvedOwner.publicKeyHex,
               requestingPluginId: input.requestingPluginId,
@@ -288,8 +344,27 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
     async submit(preview): Promise<ProtocolSpendResult> {
       try {
         const broadcastRes = await deps.woc.broadcast(preview.network, preview.rawTxHex, { timeoutMs: 30_000 });
+        if (deps.submissionStore && preview.submissionId) {
+          const existing = await deps.submissionStore.getProtocolSubmission({
+            publicKeyHex: preview.ownerPublicKeyHex,
+            id: preview.submissionId
+          });
+          await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
+            submissionId: preview.submissionId,
+            resourceId: resourceIdFor(preview.network),
+            publicKeyHex: preview.ownerPublicKeyHex,
+            network: preview.network,
+            canonicalTxid: broadcastRes.canonicalTxid,
+            inputs: preview.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+            protectedClaimIds: preview.protectedClaimIds ?? existing?.protectedClaimIds ?? [],
+            localInputClaimIds: preview.inputClaimIds ?? existing?.localInputClaimIds ?? [],
+            status: broadcastRes.txidIntegrity === "mismatch" ? "provider-inconsistent" : "broadcast-pending-woc",
+            observation: existing?.observation,
+            createdAt: existing?.createdAt
+          }));
+        }
         return {
-          status: broadcastRes.txidIntegrity === "mismatch" ? "provider-inconsistent" : "broadcast",
+          status: broadcastRes.txidIntegrity === "mismatch" ? "provider-inconsistent" : "broadcast-pending-woc",
           txid: preview.txid,
           rawTxHex: preview.rawTxHex,
           inputClaimIds: preview.inputClaimIds,
@@ -309,6 +384,26 @@ export function createP2pkhProtocolSpendService(deps: P2pkhProtocolSpendDeps): P
             publicKeyHex: preview.ownerPublicKeyHex,
             claimIds: preview.inputClaimIds
           });
+        }
+        if (deps.submissionStore && preview.submissionId) {
+          const existing = await deps.submissionStore.getProtocolSubmission({
+            publicKeyHex: preview.ownerPublicKeyHex,
+            id: preview.submissionId
+          });
+          await deps.submissionStore.putProtocolSubmission(buildProtocolSubmissionRecord({
+            submissionId: preview.submissionId,
+            resourceId: resourceIdFor(preview.network),
+            publicKeyHex: preview.ownerPublicKeyHex,
+            network: preview.network,
+            canonicalTxid: preview.txid,
+            inputs: preview.inputs.map((u) => ({ txid: u.txid, vout: u.vout })),
+            protectedClaimIds: preview.protectedClaimIds ?? existing?.protectedClaimIds ?? [],
+            localInputClaimIds: preview.inputClaimIds ?? existing?.localInputClaimIds ?? [],
+            status: isDefinitivelyRejectedError(msg) ? "rejected" : "unknown",
+            droppedReason: isDefinitivelyRejectedError(msg) ? msg : undefined,
+            observation: existing?.observation,
+            createdAt: existing?.createdAt
+          }));
         }
         if (isDefinitivelyRejectedError(msg)) {
           return {

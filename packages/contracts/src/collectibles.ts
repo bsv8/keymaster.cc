@@ -13,6 +13,7 @@
 
 import type { I18nText } from "./i18n.js";
 import type { BsvNetwork } from "./vault.js";
+import type { WocObservation } from "./woc.js";
 
 /** collectible 状态。 */
 export type CollectibleStatus = "ready" | "syncing" | "stale" | "failed" | "unsupported";
@@ -43,6 +44,10 @@ export interface CollectibleSummary {
   preview?: CollectiblePreview;
   /** 所属网络。 */
   network?: BsvNetwork;
+  /** WOC 观察状态。 */
+  observation?: WocObservation;
+  /** WOC 观察到的 canonical txid。 */
+  canonicalTxid?: string;
   /** 状态。 */
   status: CollectibleStatus;
   /** provider 声明的详情入口；缺省时由平台通用详情页接管。 */
@@ -73,6 +78,8 @@ export interface CollectibleDetail {
   summary: CollectibleSummary;
   /** 明确 network，详情页无需从外部 provider 推导。 */
   network?: BsvNetwork;
+  /** WOC 观察状态。 */
+  observation?: WocObservation;
   /** 详情页预览。 */
   preview?: CollectiblePreview;
   /** 属性表（链上 attributes / 链下 metadata）。 */
@@ -96,6 +103,8 @@ export interface CollectibleProvider {
   listActivity(collectibleId: string): Promise<CollectibleActivity[]>;
   sync(collectibleId?: string): Promise<void>;
   onChange(handler: () => void): () => void;
+  /** 可选资源释放；用于清理内部订阅。 */
+  dispose?(): void;
 }
 
 /** collectible provider 注册表。 */

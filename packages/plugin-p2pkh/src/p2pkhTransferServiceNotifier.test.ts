@@ -169,7 +169,7 @@ describe("p2pkhTransferService assetDataNotifier", () => {
     }));
 
     const result = await prepareAndSubmit(service);
-    expect(result.status).toBe("broadcast");
+    expect(result.status).toBe("broadcast-pending-woc");
     expect(assetDataNotifier.emit).toHaveBeenCalledTimes(1);
     expect(assetDataNotifier.emit).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -5,6 +5,9 @@
 
 import type { BsvNetwork } from "./vault.js";
 
+/** WOC 观察状态。 */
+export type WocObservation = "unconfirmed" | "confirmed";
+
 /** WOC 请求优先级：值越大越优先。 */
 export const WOC_PRIORITY = {
   broadcast: 100,
@@ -74,17 +77,36 @@ export interface WocUtxoResponse {
   height: number;
   script?: string;
   isSpentInMempoolTx?: boolean;
+  observation?: WocObservation;
+  canonicalTxid?: string;
+  network?: BsvNetwork;
 }
 
 /** 历史分页响应。 */
 export interface WocHistoryPage {
-  items: Array<{ txid: string; height: number; fee?: number }>;
+  items: Array<{ txid: string; height: number; fee?: number; observation?: WocObservation; canonicalTxid?: string; network?: BsvNetwork }>;
   nextPageToken?: string;
 }
 
 /** 未确认历史响应。 */
 export interface WocUnconfirmedHistory {
-  items: Array<{ txid: string; fee?: number }>;
+  items: Array<{ txid: string; fee?: number; observation?: WocObservation; canonicalTxid?: string; network?: BsvNetwork }>;
+}
+
+/**
+ * 交易级观察结果。
+ *
+ * 语义：
+ *   - `observation === "confirmed"`：WOC 已返回 confirmed transaction 真值；
+ *   - `observation === "unconfirmed"`：confirmed 真值不存在，但 propagation
+ *     / mempool 真值存在；
+ *   - `observation === undefined`：confirmed / unconfirmed 真值都不存在。
+ *
+ * 这不是 holdings snapshot。消费方不得据当前持仓推断此值。
+ */
+export interface WocTransactionObservation {
+  canonicalTxid: string;
+  observation?: WocObservation;
 }
 
 /**
@@ -196,6 +218,13 @@ export interface WocService {
     page: { limit?: number; page?: number; nextPageToken?: string } | undefined,
     options?: WocRequestOptions
   ): Promise<WocHistoryPage>;
+
+  /** 交易级 observation：按 network + canonicalTxid 查询 confirmed / unconfirmed / undefined。 */
+  getTransactionObservation(
+    network: BsvNetwork,
+    canonicalTxid: string,
+    options?: WocRequestOptions
+  ): Promise<WocTransactionObservation>;
 
   /** 广播：内部强制 broadcast 优先级，调用方不能降级。 */
   broadcast(

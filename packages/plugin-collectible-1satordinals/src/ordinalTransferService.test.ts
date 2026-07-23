@@ -95,7 +95,7 @@ function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeo
       return preview;
     }),
     submit: vi.fn(async (preview) => ({
-      status: "broadcast" as const,
+      status: "broadcast-pending-woc" as const,
       txid: preview.txid,
       rawTxHex: preview.rawTxHex
     }))

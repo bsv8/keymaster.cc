@@ -46,7 +46,7 @@ function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeo
       return preview;
     }),
     submit: vi.fn(async (preview) => ({
-      status: "broadcast" as const,
+      status: "broadcast-pending-woc" as const,
       txid: preview.txid,
       rawTxHex: preview.rawTxHex,
       canonicalTxid: "canonical-txid",
@@ -123,7 +123,7 @@ describe("createBsv21MintService", () => {
     const result = await service.submit(preview);
     const submitted = (await historyDb.list())[0]!;
     expect(result.tokenId).toBe("canonical-txid_0");
-    expect(submitted.status).toBe("broadcast");
+    expect(submitted.status).toBe("broadcast-pending-woc");
     expect(submitted.submit?.tokenId).toBe("canonical-txid_0");
     expect(submitted.submit?.spend.canonicalTxid).toBe("canonical-txid");
     expect(submitted.request.amount).toBe("1");

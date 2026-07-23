@@ -463,6 +463,16 @@ export const p2pkhPlugin: PluginManifest = {
           return createP2pkhDb(bundle).releaseLocalInputClaims(input.claimIds);
         }
       },
+      submissionStore: {
+        async getProtocolSubmission(input) {
+          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: input.publicKeyHex });
+          return createP2pkhDb(bundle).getProtocolSubmission(input.id);
+        },
+        async putProtocolSubmission(record) {
+          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: record.publicKeyHex });
+          return createP2pkhDb(bundle).putProtocolSubmission(record);
+        }
+      },
       protectedOutpoints,
       getKeyForOwner: async (ownerPublicKeyHex: string) => {
         const key = await keyspace.getKey(ownerPublicKeyHex);

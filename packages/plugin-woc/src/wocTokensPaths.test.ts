@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createMessageBus } from "@keymaster/runtime";
 import type { BsvNetwork } from "@keymaster/contracts";
 import { createWocActor } from "./wocActor.js";
+import { createWocService } from "./wocService.js";
 import { createWocBsv21Service } from "./wocBsv21Service.js";
 import { createWocStasService } from "./wocStasService.js";
 import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
@@ -56,7 +57,7 @@ describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
     actor.attach(bus);
     const svc = createWocBsv21Service({ messageBus: bus });
     const out = await svc.listAddressTokens(MAIN, "1Address");
-    expect(out).toEqual([{ origin: "abc", symbol: "X", decimals: 8, issuer: "me" }]);
+    expect(out).toEqual([{ origin: "abc", symbol: "X", decimals: 8, issuer: "me", network: "main" }]);
     expect(fetchLog).toHaveLength(1);
     expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/token\/bsv21\/1Address\/balance$/);
     actor.dispose();
@@ -169,6 +170,8 @@ describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
         tokenId: "tx0_0",
         amount: "999000",
         ownerAddress: "1Addr",
+        observation: "unconfirmed",
+        canonicalTxid: "tx0",
         current: { txid: "tx0", txIndex: 0, blockHeight: undefined, blockTime: undefined }
       }
     ]);
@@ -259,5 +262,49 @@ describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
     const svc = createWoc1SatOrdinalsService({ messageBus: bus });
     await expect(svc.getOutpointInscription(MAIN, "txid_0")).rejects.toThrow(/WOC 500/);
     actor.dispose();
+  });
+
+  it("transaction observation 先查 confirmed，再查 propagation；confirmed 命中返回 confirmed", async () => {
+    installFetchMock((url) => {
+      fetchLog.push(url);
+      if (url.includes("/tx/hash/tx-confirmed")) {
+        return new Response(JSON.stringify({ txid: "tx-confirmed" }), { status: 200 });
+      }
+      throw new Error(`unhandled URL in mock: ${url}`);
+    });
+    const bus = createMessageBus();
+    const woc = createWocService({ messageBus: bus });
+    const obs = await woc.getTransactionObservation(MAIN, "tx-confirmed");
+    expect(obs).toEqual({ canonicalTxid: "tx-confirmed", observation: "confirmed" });
+    expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/tx\/hash\/tx-confirmed$/);
+    expect(fetchLog).toHaveLength(1);
+    woc.dispose();
+  });
+
+  it("transaction observation confirmed 不存在时回退到 propagation；两边都无则 undefined", async () => {
+    installFetchMock((url) => {
+      fetchLog.push(url);
+      if (url.includes("/tx/hash/tx-unconfirmed")) {
+        if (url.endsWith("/propagation")) {
+          return new Response(JSON.stringify({ propagated: true }), { status: 200 });
+        }
+        return new Response("not found", { status: 404 });
+      }
+      if (url.includes("/tx/hash/tx-missing")) {
+        return new Response("not found", { status: 404 });
+      }
+      throw new Error(`unhandled URL in mock: ${url}`);
+    });
+    const bus = createMessageBus();
+    const woc = createWocService({ messageBus: bus });
+    const unconfirmed = await woc.getTransactionObservation(MAIN, "tx-unconfirmed");
+    expect(unconfirmed).toEqual({ canonicalTxid: "tx-unconfirmed", observation: "unconfirmed" });
+    const missing = await woc.getTransactionObservation(TEST, "tx-missing");
+    expect(missing).toEqual({ canonicalTxid: "tx-missing", observation: undefined });
+    expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/tx\/hash\/tx-unconfirmed$/);
+    expect(fetchLog[1]).toMatch(/\/v1\/bsv\/main\/tx\/hash\/tx-unconfirmed\/propagation$/);
+    expect(fetchLog[2]).toMatch(/\/v1\/bsv\/test\/tx\/hash\/tx-missing$/);
+    expect(fetchLog[3]).toMatch(/\/v1\/bsv\/test\/tx\/hash\/tx-missing\/propagation$/);
+    woc.dispose();
   });
 });

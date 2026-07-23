@@ -33,6 +33,8 @@ export function createTokenRegistry(): ITokenRegistry {
       if (!providers.has(id)) {
         throw new Error(`Token provider id "${id}" is not registered`);
       }
+      const provider = providers.get(id);
+      provider?.dispose?.();
       providers.delete(id);
     },
     list() {

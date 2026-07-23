@@ -54,6 +54,10 @@ export function createBsv21TransferProvider(input: { tokenRegistry: TokenRegistr
   };
 }
 
+export function protocolSpendReference(result: { canonicalTxid?: string; txid: string }): string {
+  return result.canonicalTxid ?? result.txid;
+}
+
 interface FormState {
   tokenId: string;
   recipientAddress: string;
@@ -125,12 +129,13 @@ function Bsv21TransferWidget({ offer, onCompleted, recipientPublicKeyHex }: impo
     try {
       const r = await service.submit(preview);
       setResult(r);
+      const reference = protocolSpendReference(r.spend);
       onCompleted({
         offerId: offer.id,
         providerId: offer.providerId,
         assetProviderId: offer.assetProviderId,
         assetId: offer.assetId,
-        reference: r.spend.txid,
+        reference,
         completedAt: new Date().toISOString(),
         details: { tokenId: r.tokenId }
       });
@@ -153,7 +158,12 @@ function Bsv21TransferWidget({ offer, onCompleted, recipientPublicKeyHex }: impo
       <TextInput label={t("bsv21.transfer.form.feeRate", { defaultValue: "Fee rate" })} value={form.feeRate} onChange={(e) => setForm((s) => ({ ...s, feeRate: e.currentTarget.value }))} />
       {error ? <p>{error}</p> : null}
       {preview ? <pre>{preview.spend.rawTxHex.slice(0, 120)}…</pre> : null}
-      {result ? <p>{result.spend.status}</p> : null}
+      {result ? (
+        <p>
+          {statusLabel(result.spend.status, t)}
+          {result.spend.canonicalTxid ? ` · ${result.spend.canonicalTxid}` : ` · ${result.spend.txid}`}
+        </p>
+      ) : null}
       <div>
         <Button onClick={() => void prepare()} disabled={busy}>{t("bsv21.transfer.form.prepare", { defaultValue: "Preview" })}</Button>
         <Button onClick={() => void submit()} disabled={!preview || busy}>{t("bsv21.transfer.form.submit", { defaultValue: "Submit" })}</Button>
@@ -218,3 +228,24 @@ function base58Encode(bytes: Uint8Array): string {
 }
 
 const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+function statusLabel(status: string, t: (key: string, values?: { defaultValue?: string }) => string): string {
+  switch (status) {
+    case "broadcast-pending-woc":
+      return t("bsv21.transfer.status.broadcastPendingWoc", { defaultValue: "广播成功，等待 WOC" });
+    case "woc-observed-unconfirmed":
+      return t("bsv21.transfer.status.observedUnconfirmed", { defaultValue: "WOC 已观察（未确认）" });
+    case "woc-confirmed":
+      return t("bsv21.transfer.status.confirmed", { defaultValue: "WOC 已确认" });
+    case "woc-dropped":
+      return t("bsv21.transfer.status.dropped", { defaultValue: "WOC 已放弃" });
+    case "provider-inconsistent":
+      return t("bsv21.transfer.status.providerInconsistent", { defaultValue: "提供方不一致" });
+    case "rejected":
+      return t("bsv21.transfer.status.rejected", { defaultValue: "已拒绝" });
+    case "unknown":
+      return t("bsv21.transfer.status.unknown", { defaultValue: "未知" });
+    default:
+      return status;
+  }
+}

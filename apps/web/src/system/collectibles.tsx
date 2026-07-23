@@ -21,6 +21,29 @@ function networkLabel(network: Network, t: (key: string, values?: { defaultValue
     : t("collectibles.network.test", { defaultValue: "Testnet" });
 }
 
+export function observationLabel(observation: "unconfirmed" | "confirmed" | undefined, t: (key: string, values?: { defaultValue?: string }) => string): string | undefined {
+  if (observation === "unconfirmed") return t("collectibles.observation.unconfirmed", { defaultValue: "WOC 已观察（未确认）" });
+  if (observation === "confirmed") return t("collectibles.observation.confirmed", { defaultValue: "WOC 已确认" });
+  return undefined;
+}
+
+export function statusLabel(status: string, t: (key: string, values?: { defaultValue?: string }) => string): string {
+  switch (status) {
+    case "ready":
+      return t("collectibles.status.ready", { defaultValue: "就绪" });
+    case "syncing":
+      return t("collectibles.status.syncing", { defaultValue: "同步中" });
+    case "stale":
+      return t("collectibles.status.stale", { defaultValue: "过期" });
+    case "failed":
+      return t("collectibles.status.failed", { defaultValue: "失败" });
+    case "unsupported":
+      return t("collectibles.status.unsupported", { defaultValue: "不支持" });
+    default:
+      return status;
+  }
+}
+
 function visibleNetworks(includeTestnet: boolean): Network[] {
   return includeTestnet ? NETWORK_ORDER : ["main"];
 }
@@ -145,9 +168,11 @@ export function CollectiblesPage() {
                                 <span>{item.collectibleId}</span>
                               </div>
                               <div className="asset-workspace-row__meta">
-                                <span className={`asset-workspace-pill is-${item.status}`}>{item.status}</span>
+                                <span className={`asset-workspace-pill is-${item.status}`}>{statusLabel(item.status, t)}</span>
                                 <span className={`asset-workspace-pill is-${group.network}`}>{networkLabel(group.network, t)}</span>
+                                {item.observation ? <span className={`asset-workspace-pill is-${item.observation}`}>{observationLabel(item.observation, t)}</span> : null}
                                 {item.preview?.contentType ? <strong>{item.preview.contentType}</strong> : null}
+                                {item.canonicalTxid ? <span>{item.canonicalTxid.slice(0, 12)}…</span> : null}
                               </div>
                             </button>
                           </li>

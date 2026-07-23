@@ -28,6 +28,7 @@ import type {
   VaultService,
   RouteRegistry,
   TransferRegistry,
+  WocService,
   WocBsv21Service
 } from "@keymaster/contracts";
 import {
@@ -39,6 +40,7 @@ import {
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
+  WOC_CAPABILITY,
   WOC_BSV21_CAPABILITY
 } from "@keymaster/contracts";
 import {
@@ -117,6 +119,7 @@ export const bsv21TokenPlugin: PluginManifest = {
     const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
     const assetDataNotifier = ctx.get<AssetDataNotifier>(ASSET_DATA_NOTIFIER_CAPABILITY);
     const protectedOutpoints = ctx.get<ProtectedOutpointRegistry>(PROTECTED_OUTPOINT_REGISTRY_CAPABILITY);
+    const woc = ctx.get<WocService>(WOC_CAPABILITY);
     const protocolSpend = ctx.get<import("@keymaster/contracts").ProtocolSpendService>(P2PKH_PROTOCOL_SPEND_CAPABILITY);
     const routes = ctx.get<RouteRegistry>("route.registry");
     const business = ctx.get<BusinessFeatureRegistry>("business.registry");
@@ -139,7 +142,7 @@ export const bsv21TokenPlugin: PluginManifest = {
     const transferProvider = createBsv21TransferProvider({ tokenRegistry, p2pkh });
 
     // 注册后台同步任务
-    const syncTask = createBsv21SyncTask({ db, service, keyspace, vault, assetDataNotifier });
+    const syncTask = createBsv21SyncTask({ db, service, woc, historyDb, keyspace, vault, assetDataNotifier });
     backgroundRegistry.register(syncTask);
 
     tokenRegistry.register(provider);

@@ -141,7 +141,7 @@ export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex 
     try {
       const r = await service.submitTransfer(preview);
       setResult(r);
-      if (r.status === "broadcast" || r.status === "confirmed") {
+      if (r.status !== "rejected" && r.status !== "unknown") {
         const c: TransferCompletion = {
           offerId: offer.id,
           providerId: offer.providerId,
@@ -218,8 +218,17 @@ export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex 
           {result.status === "provider-inconsistent" ? (
             <p>{t("p2pkh.transfer.result.providerInconsistent", { defaultValue: "广播回执与本地 canonical txid 不一致，已标记为 provider-inconsistent。" })}</p>
           ) : null}
-          {result.status === "broadcast" || result.status === "confirmed" ? (
-            <p>{t("p2pkh.transfer.result.broadcast", { defaultValue: "已广播最终预览交易，并写入本地输入占用。" })}</p>
+          {result.status === "broadcast-pending-woc" ? (
+            <p>{t("p2pkh.transfer.result.broadcastPending", { defaultValue: "交易已广播，正等待 WOC 观察。" })}</p>
+          ) : null}
+          {result.status === "woc-observed-unconfirmed" ? (
+            <p>{t("p2pkh.transfer.result.observedUnconfirmed", { defaultValue: "WOC 已观察到未确认交易，旧输入已转为已消费。" })}</p>
+          ) : null}
+          {result.status === "woc-confirmed" ? (
+            <p>{t("p2pkh.transfer.result.confirmed", { defaultValue: "WOC 已确认该交易，状态已升级为最终真值。" })}</p>
+          ) : null}
+          {result.status === "woc-dropped" ? (
+            <p>{t("p2pkh.transfer.result.dropped", { defaultValue: "WOC 最终未采纳该交易，已按最终状态恢复。" })}</p>
           ) : null}
           <div className="p2pkh-transfer-widget__actions">
             <Button onClick={dismissResult} variant="primary">

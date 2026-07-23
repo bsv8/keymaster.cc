@@ -36,6 +36,8 @@ export function createAssetRegistry(): IAssetRegistry & {
       if (!providers.has(id)) {
         throw new Error(`Asset provider id "${id}" is not registered`);
       }
+      const provider = providers.get(id);
+      provider?.dispose?.();
       providers.delete(id);
     },
     list() {

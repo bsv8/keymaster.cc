@@ -269,15 +269,16 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     expect(vaultCalls).toBe(vaultCallsAfterPrepare);
     expect(broadcast).toHaveBeenCalledTimes(1);
     expect(broadcast).toHaveBeenCalledWith("main", preview.rawTxHex, { timeoutMs: 30_000 });
-    expect(result.status).toBe("broadcast");
+    expect(result.status).toBe("broadcast-pending-woc");
     expect(result.rawTxHex).toBe(preview.rawTxHex);
     expect(result.txid).toBe(preview.txid);
     expect(result.submissionId).toBeTypeOf("string");
     expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
     expect(db.inputClaims).toHaveLength(preview.allocation.selected.length);
     expect(db.submissions).toHaveLength(2);
-    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("broadcast");
+    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("broadcast-pending-woc");
     expect((db.submissions.at(-1) as { canonicalTxid?: string } | undefined)?.canonicalTxid).toBe(preview.txid);
+    expect((db.submissions.at(-1) as { observation?: string } | undefined)?.observation).toBeUndefined();
   });
 
   it("accepts reversed provider txid as broadcast", async () => {
@@ -328,7 +329,7 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     });
     const result = await service.submit(preview);
 
-    expect(result.status).toBe("broadcast");
+    expect(result.status).toBe("broadcast-pending-woc");
     expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
   });
 
@@ -440,7 +441,7 @@ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
     expect(result.rawTxHex).toBe(preview.rawTxHex);
     expect(db.inputClaims).toHaveLength(0);
     expect(db.submissions).toHaveLength(2);
-    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("failed");
+    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("rejected");
   });
 
   it("rejects signing when runtime returns mismatched format (requested der, got compact)", async () => {

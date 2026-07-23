@@ -26,7 +26,7 @@
 //     发起查询时由 provider 内部翻译为 "txid_vout"。
 
 import type { BsvNetwork } from "./vault.js";
-import type { WocRequestOptions } from "./woc.js";
+import type { WocObservation, WocRequestOptions } from "./woc.js";
 
 /** BSV-21 capability key。 */
 export const WOC_BSV21_CAPABILITY = "woc.bsv21.service";
@@ -47,6 +47,9 @@ export interface WocBsv21TokenMeta {
   symbol?: string;
   decimals?: number;
   issuer?: string;
+  network?: BsvNetwork;
+  observation?: WocObservation;
+  canonicalTxid?: string;
 }
 
 /** BSV-21 余额响应。 */
@@ -62,6 +65,8 @@ export interface WocBsv21UnspentToken {
   tokenId: string;
   amount: string;
   ownerAddress: string;
+  observation?: WocObservation;
+  canonicalTxid?: string;
   current: {
     txid: string;
     txIndex: number;
@@ -75,6 +80,9 @@ export interface WocBsv21UnspentToken {
 export interface WocBsv21TokenDetail {
   token: {
     outpoint: string;
+    network?: BsvNetwork;
+    observation?: WocObservation;
+    canonicalTxid?: string;
     current?: {
       txid: string;
       txIndex: number;
@@ -141,6 +149,9 @@ export interface Woc1SatOrdinalsInscription {
   inscriptionId: string;
   /** 1Sat endpoint 使用的 outpoint 字符串格式："txid_vout"。 */
   outpoint: string;
+  network?: BsvNetwork;
+  observation?: WocObservation;
+  canonicalTxid?: string;
   /** 内容 origin（URL / text preview）。 */
   origin?: string;
   /** 内容 mime。 */

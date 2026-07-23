@@ -8,6 +8,12 @@ function labelOf(value: string | I18nText): string {
   return typeof value === "string" ? value : value.fallback;
 }
 
+function observationLabel(observation: "unconfirmed" | "confirmed" | undefined, t: (key: string, values?: { defaultValue?: string }) => string): string | undefined {
+  if (observation === "unconfirmed") return t("transfer.observation.unconfirmed", { defaultValue: "WOC 已观察（未确认）" });
+  if (observation === "confirmed") return t("transfer.observation.confirmed", { defaultValue: "WOC 已确认" });
+  return undefined;
+}
+
 export function TransferPage() {
   useCurrentPath();
   const { t } = useI18n();
@@ -80,6 +86,7 @@ export function TransferPage() {
           {recipientCollectibles.flatMap((group) => group.items.map((item) => (
             <button key={`${group.providerId}:${item.collectibleId}`} type="button" onClick={() => router.push(`/collectibles/transfer?providerId=${encodeURIComponent(group.providerId)}&collectibleId=${encodeURIComponent(item.collectibleId)}${validRecipient ? `&recipientPublicKeyHex=${encodeURIComponent(validRecipient)}` : ""}`)}>
               {labelOf(item.name as never)}
+              {item.observation ? <span>{observationLabel(item.observation, t)}</span> : null}
             </button>
           )))}
         </section>

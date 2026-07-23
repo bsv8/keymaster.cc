@@ -20,6 +20,29 @@ const CONTENT_TYPE_OPTIONS = [
   { label: "application/json", value: "application/json" }
 ];
 
+function statusLabel(status: string, t: (key: string, values?: { defaultValue?: string }) => string): string {
+  switch (status) {
+    case "prepared":
+      return t("oneSat.mint.status.prepared", { defaultValue: "已准备" });
+    case "broadcast-pending-woc":
+      return t("oneSat.mint.status.broadcastPendingWoc", { defaultValue: "广播成功，等待 WOC" });
+    case "woc-observed-unconfirmed":
+      return t("oneSat.mint.status.observedUnconfirmed", { defaultValue: "WOC 已观察（未确认）" });
+    case "woc-confirmed":
+      return t("oneSat.mint.status.confirmed", { defaultValue: "WOC 已确认" });
+    case "woc-dropped":
+      return t("oneSat.mint.status.dropped", { defaultValue: "WOC 已放弃" });
+    case "provider-inconsistent":
+      return t("oneSat.mint.status.providerInconsistent", { defaultValue: "提供方不一致" });
+    case "rejected":
+      return t("oneSat.mint.status.rejected", { defaultValue: "已拒绝" });
+    case "unknown":
+      return t("oneSat.mint.status.unknown", { defaultValue: "未知" });
+    default:
+      return status;
+  }
+}
+
 export function OrdinalMintPage() {
   const { t } = useI18n();
   const service = useCapability<OrdinalMintService>(ORDINAL_MINT_SERVICE_CAPABILITY);
@@ -37,11 +60,22 @@ export function OrdinalMintPage() {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<OrdinalMintPreview | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  const [history, setHistory] = useState<Awaited<ReturnType<OrdinalMintService["listHistory"]>>>([]);
 
   useEffect(() => {
     setPreview(null);
     setResult(null);
   }, [network]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setHistory(await service.listHistory());
+      } catch {
+        setHistory([]);
+      }
+    })();
+  }, [service]);
 
   async function onPickFile(file: File | null) {
     if (!file) {
@@ -91,6 +125,7 @@ export function OrdinalMintPage() {
     try {
       const r = await service.submit(preview);
       setResult(r.inscriptionId);
+      setHistory(await service.listHistory());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -120,6 +155,20 @@ export function OrdinalMintPage() {
         {error ? <p>{error}</p> : null}
         {preview ? <pre>{preview.spend.rawTxHex.slice(0, 120)}…</pre> : null}
         {result ? <p>{result}</p> : null}
+        {history.length > 0 ? (
+          <section className="ordinal-mint-page__history">
+            <h3>{t("oneSat.mint.history", { defaultValue: "Recent history" })}</h3>
+            <ul>
+              {history.slice(0, 5).map((item) => (
+                <li key={item.id}>
+                  <strong>{statusLabel(item.status, t)}</strong>
+                  <span>{item.preview.inscriptionId}</span>
+                  {item.submit?.spend.canonicalTxid ? <code>{item.submit.spend.canonicalTxid}</code> : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
         <div>
           <Button onClick={() => void prepare()} disabled={busy}>{t("oneSat.mint.prepare", { defaultValue: "Preview" })}</Button>
           <Button onClick={() => void submit()} disabled={!preview || busy}>{t("oneSat.mint.submit", { defaultValue: "Submit" })}</Button>

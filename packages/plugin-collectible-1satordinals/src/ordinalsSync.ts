@@ -14,19 +14,23 @@ import type {
   BackgroundTaskContext,
   BackgroundTaskDefinition,
   KeyspaceService,
+  WocService,
   VaultService
 } from "@keymaster/contracts";
+import type { OrdinalMintHistoryDb } from "./ordinalMintHistoryDb.js";
 import type { OrdinalsServiceHandle } from "./ordinalsService.js";
 
 export interface CreateOrdinalsSyncTaskOptions {
   service: OrdinalsServiceHandle;
+  woc: WocService;
+  historyDb?: OrdinalMintHistoryDb;
   keyspace: KeyspaceService;
   vault: VaultService;
   assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): BackgroundTaskDefinition {
-  const { service, keyspace, vault, assetDataNotifier } = options;
+  const { service, woc, historyDb, keyspace, vault, assetDataNotifier } = options;
 
   return {
     id: "collectible-1satordinals.sync",
@@ -61,6 +65,7 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
       const startedKeyHex = state.activePublicKeyHex;
 
       await service.sync(ctx.signal);
+      await reconcileHistory(historyDb, woc);
       if (ctx.signal.aborted) return;
       ctx.assertSessionFresh?.();
 
@@ -74,4 +79,54 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
       });
     }
   };
+}
+
+async function reconcileHistory(historyDb: OrdinalMintHistoryDb | undefined, woc: WocService): Promise<void> {
+  if (!historyDb) return;
+  const current = await historyDb.list().catch(() => []);
+  if (current.length === 0) return;
+  for (const record of current) {
+    const canonicalTxid = record.submit?.spend.canonicalTxid;
+    if (!canonicalTxid) continue;
+    const hit = await woc.getTransactionObservation(record.request.network, canonicalTxid).catch(() => undefined);
+    const observation = hit?.observation;
+    if (observation) {
+      const nextStatus = observationToStatus(observation);
+      if (record.status === nextStatus && record.submit?.spend.observation === observation) continue;
+      await historyDb.put({
+        ...record,
+        updatedAt: new Date().toISOString(),
+        status: nextStatus,
+        submit: {
+          ...record.submit!,
+          spend: {
+            ...record.submit!.spend,
+            observation,
+            droppedReason: undefined
+          }
+        }
+      });
+      continue;
+    }
+    const wasObservedUnconfirmed = record.status === "woc-observed-unconfirmed" || record.submit?.spend.observation === "unconfirmed";
+    if (wasObservedUnconfirmed) {
+      await historyDb.put({
+        ...record,
+        updatedAt: new Date().toISOString(),
+        status: "woc-dropped",
+        submit: {
+          ...record.submit!,
+          spend: {
+            ...record.submit!.spend,
+            observation: undefined,
+            droppedReason: "woc-dropped"
+          }
+        }
+      });
+    }
+  }
+}
+
+function observationToStatus(observation: "unconfirmed" | "confirmed"): "woc-observed-unconfirmed" | "woc-confirmed" {
+  return observation === "confirmed" ? "woc-confirmed" : "woc-observed-unconfirmed";
 }

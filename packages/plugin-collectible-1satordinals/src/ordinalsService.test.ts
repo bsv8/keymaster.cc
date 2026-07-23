@@ -32,8 +32,8 @@ function fakeP2pkh(utxos: P2pkhUtxoFor1Sat[], includeTestnet = false): P2pkhServ
   };
 }
 
-function inscription(outpoint: string): Woc1SatOrdinalsInscription {
-  return { inscriptionId: `insc-${outpoint}`, outpoint };
+function inscription(outpoint: string, overrides?: Partial<Woc1SatOrdinalsInscription>): Woc1SatOrdinalsInscription {
+  return { inscriptionId: `insc-${outpoint}`, outpoint, observation: overrides?.observation, canonicalTxid: overrides?.canonicalTxid, ...overrides };
 }
 
 /**
@@ -95,6 +95,25 @@ describe("createOrdinalsService", () => {
       { network: "test", outpoint: "deadbeef_2" }
     ]);
     expect(out.map((h) => h.outpoint)).toEqual(["deadbeef:2"]);
+  });
+
+  it("返回的 hit 会携带 observation / canonicalTxid", async () => {
+    const queried: Array<{ network: string; outpoint: string }> = [];
+    const svc = createOrdinalsService({
+      keyspace: fakeKeyspace(ACTIVE_PK),
+      p2pkh: fakeP2pkh([{ txid: "c0ffee", vout: 1, value: 1000, address: "addr-A" }]),
+      wocOneSat: {
+        getOutpointInscription: (network, outpoint) => {
+          queried.push({ network, outpoint });
+          return Promise.resolve(network === "main" ? inscription(outpoint, { observation: "unconfirmed", canonicalTxid: "c0ffee" }) : null);
+        },
+        getOutpointContent: async (): Promise<Woc1SatOrdinalsContent | null> => null,
+        getTransactionOutputScript: async (): Promise<Uint8Array> => new Uint8Array([0x76, 0xa9, 0x14, ...new Uint8Array(20), 0x88, 0xac])
+      }
+    });
+    const hit = await svc.getOutpoint("c0ffee:1");
+    expect(hit?.observation).toBe("unconfirmed");
+    expect(hit?.canonicalTxid).toBe("c0ffee");
   });
 
   it("getOutpointInscription 返回 null（404）的 UTXO 被跳过", async () => {

@@ -25,7 +25,9 @@ export function createOrdinalsSpendProtectionProvider(options: OrdinalsSpendProt
     throw new Error("createOrdinalsSpendProtectionProvider: service is required");
   }
   const listeners = new Set<() => void>();
-  options.service;
+  const offServiceChange = options.service.onChange(() => {
+    for (const listener of listeners) listener();
+  });
   return {
     id: "1satordinals",
     ownerPluginId: "collectible-1satordinals",
@@ -52,6 +54,10 @@ export function createOrdinalsSpendProtectionProvider(options: OrdinalsSpendProt
       return () => {
         listeners.delete(handler);
       };
+    },
+    dispose() {
+      offServiceChange();
+      listeners.clear();
     }
   };
 }

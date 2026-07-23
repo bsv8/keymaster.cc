@@ -25,6 +25,7 @@ import type {
   WocQueueSnapshot,
   WocRequestOptions,
   WocService,
+  WocTransactionObservation,
   WocUnconfirmedHistory,
   WocUtxoResponse
 } from "@keymaster/contracts";
@@ -35,6 +36,7 @@ import {
   type WocBalancePayload,
   type WocBroadcastPayload,
   type WocHistoryPayload,
+  type WocTransactionObservationPayload,
   type WocUtxosPayload
 } from "./wocMessages.js";
 
@@ -247,6 +249,25 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
       const tokens = results.map((r) => (r.status === "fulfilled" ? r.value.nextPageToken : undefined));
       const nextPageToken = tokens.find((t): t is string => typeof t === "string" && t.length > 0);
       return { items, nextPageToken };
+    },
+
+    async getTransactionObservation(
+      network: BsvNetwork,
+      canonicalTxid: string,
+      opts?: WocRequestOptions
+    ): Promise<WocTransactionObservation> {
+      const payload: WocTransactionObservationPayload = {
+        network,
+        canonicalTxid,
+        priority: opts?.priority ?? "background",
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs
+      };
+      return messageBus.request<WocTransactionObservationPayload, WocTransactionObservation>(
+        WOC_MSG.TX_OBSERVATION,
+        payload,
+        dispatchOptions(opts)
+      );
     },
 
     async broadcast(

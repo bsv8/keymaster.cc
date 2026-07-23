@@ -13,14 +13,14 @@
 //     (`db.reused`)，不重新打开 namespace DB。
 //
 // 硬切换 005（2026-06-19）：P2PKH DB 版本硬切换 6 -> 7（history）。
-// 硬切换 002（2026-07-02）：P2PKH DB 版本硬切换 7 -> 8（key 域彻底收尾）。
+// 硬切换 002（2026-07-02）：P2PKH DB 版本硬切换 7 -> 9（key 域彻底收尾）。
 //   - 打开语义收口为单一规则：版本不匹配即整库 rebuild。
-//     - `oldVersion < 8`：进入 onupgradeneeded 事务，删光当前 DB 内所有
-//       p2pkh_* stores，按 v8 完整重建。
-//     - `oldVersion === 8`：直接使用，不做额外 schema 扫描。
-//     - `oldVersion > 8`：keyspace.openKeyStorage 会抛 VersionError，
+//     - `oldVersion < 9`：进入 onupgradeneeded 事务，删光当前 DB 内所有
+//       p2pkh_* stores，按 v9 完整重建。
+//     - `oldVersion === 9`：直接使用，不做额外 schema 扫描。
+//     - `oldVersion > 9`：keyspace.openKeyStorage 会抛 VersionError，
 //       p2pkh 在 openP2pkhDb 捕获后执行
-//       `close cached handle -> deleteDatabase -> reopen(name, 8)`。
+//       `close cached handle -> deleteDatabase -> reopen(name, 9)`。
 //   - `deleteDatabase` blocked / 失败必须冒泡，**不允许**"假装已经 rebuild"。
 //   - 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`，
 //     不与其它 plugin 共库；整库删除不会误伤别的业务。
@@ -41,6 +41,7 @@ import type {
   P2pkhKeyResource,
   P2pkhLocalInputClaim,
   P2pkhLocalSubmission,
+  P2pkhProtocolSubmission,
   P2pkhRecentSyncState,
   P2pkhUtxo,
 } from "./p2pkhContracts.js";
@@ -55,7 +56,7 @@ const P2PKH_STORAGE_ID = "state";
  * 导出以供 service 层日志 / 验收脚本使用——所有需要报告
  * "P2PKH 当前目标版本"的位置都应从这里取真值，不要再硬编码数字。
  */
-export const P2PKH_DB_VERSION = 8;
+export const P2PKH_DB_VERSION = 9;
 
 interface P2pkhDbBundle {
   /** 关闭当前 namespace db handle。 */
@@ -93,9 +94,9 @@ const openHandles: Map<string, OpenHandle> = new Map();
  * 硬切换 002 收尾 + 硬切换 005：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
  * 自动修复当前 key 的 namespace DB。upgrade 回调能拿到 oldVersion：
  *   - oldVersion === 0：DB 第一次被创建；
- *   - 0 < oldVersion < 8：旧版本被升级（**不迁移旧数据，删光 p2pkh stores 重建 v8**）；
- *   - oldVersion === 8：普通打开，不动 schema。
- *   - oldVersion > 8：不会进入 upgrade；浏览器层抛 VersionError，
+ *   - 0 < oldVersion < 9：旧版本被升级（**不迁移旧数据，删光 p2pkh stores 重建 v9**）；
+ *   - oldVersion === 9：普通打开，不动 schema。
+ *   - oldVersion > 9：不会进入 upgrade；浏览器层抛 VersionError，
  *     本函数在下方 try/catch 命中后走 `close -> deleteDatabase -> reopen`。
  * 配合传入的 logger 即可在日志上区分这几种情况。
  */
@@ -138,11 +139,11 @@ function auditV8Stores(db: IDBDatabase): Record<string, boolean> {
  *   - 同 owner 二次 open 走 cache hit（`db.reused`），不重开 IDB。
  *
  * 硬切换 002 收尾：版本不匹配即整库 rebuild——收口在 `openP2pkhDb()` 一处。
- *   - `oldVersion < 8`：onupgradeneeded 事务内删光旧 p2pkh_* stores，重建 v8。
- *   - `oldVersion > 8`：keyspace 内部 `indexedDB.open(name, 8)` 抛 VersionError，
+ *   - `oldVersion < 9`：onupgradeneeded 事务内删光旧 p2pkh_* stores，重建 v9。
+ *   - `oldVersion > 9`：keyspace 内部 `indexedDB.open(name, 9)` 抛 VersionError，
  *     本函数捕获后只关掉「本 owner 的」cached handle（避免 deleteDatabase
  *     被自己的连接阻塞），再 `deleteDatabase -> reopen`。
- *   - `oldVersion === 8`：普通打开。
+ *   - `oldVersion === 9`：普通打开。
  *   - `deleteDatabase` 被 blocked / 失败必须冒泡，**不允许**假装 rebuild 成功。
  *
  * 硬切换 003：调用方可通过 `logger` 让本函数在 upgrade 阶段补全"新建 /
@@ -189,9 +190,9 @@ export async function openP2pkhDb(input: {
       storageId: P2PKH_STORAGE_ID,
       version: P2PKH_DB_VERSION,
       upgrade: (db, oldVersion, newVersion) => {
-        // 硬切换 002 收尾：oldVersion < 8 进入 upgrade 是"删光旧 stores 重建 v8"，
+        // 硬切换 002 收尾：oldVersion < 9 进入 upgrade 是"删光旧 stores 重建 v9"，
         // **不是**数据迁移。oldVersion === 0（首次创建）和
-        // 0 < oldVersion < 8（旧版本）都统一落到 createV8Stores——
+        // 0 < oldVersion < 9（旧版本）都统一落到 createV8Stores——
         // 区别仅在日志分类 kind 上。
         // newVersion 在 contract 里允许 null（DB 被删除的特殊场景）；本路径
         // 下若为 null 也按 created 处理——这只是日志分类，不需要阻断。
@@ -219,7 +220,7 @@ export async function openP2pkhDb(input: {
       }
     });
   } catch (err) {
-    // 硬切换 005：oldVersion > 8 走"close -> deleteDatabase -> reopen"重建。
+    // 硬切换 005：oldVersion > 9 走"close -> deleteDatabase -> reopen"重建。
     // 非 VersionError 直接冒泡，**不**在 p2pkh 层吞错。
     if (!isVersionError(err)) throw err;
     // 防御性：关掉本 owner 的 cached handle（若上次半路残留），
@@ -353,7 +354,7 @@ function closeCachedHandle(publicKeyHex?: string): void {
 }
 
 /**
- * 硬切换 005：把 `oldVersion > 8` 时的浏览器抛错识别为 VersionError。
+ * 硬切换 005：把 `oldVersion > 9` 时的浏览器抛错识别为 VersionError。
  * 浏览器原生是 `DOMException` 且 `name === "VersionError"`；
  * fake-indexeddb 同样以 DOMException 模拟。
  */
@@ -455,6 +456,13 @@ function createV8Stores(db: IDBDatabase) {
     s.createIndex("resourceId", "resourceId", { unique: false });
     s.createIndex("submissionId", "submissionId", { unique: false });
     s.createIndex("state", "state", { unique: false });
+    s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
+  }
+  if (!db.objectStoreNames.contains("p2pkh_protocol_submissions")) {
+    const s = db.createObjectStore("p2pkh_protocol_submissions", { keyPath: "id" });
+    s.createIndex("resourceId", "resourceId", { unique: false });
+    s.createIndex("submissionId", "submissionId", { unique: false });
+    s.createIndex("status", "status", { unique: false });
     s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
   }
 }
@@ -707,6 +715,32 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
         reqAsPromise(store.objectStore("p2pkh_local_input_claims").delete(id))
       );
     },
+    // ---------- protocol submissions ----------
+    async putProtocolSubmission(record: P2pkhProtocolSubmission): Promise<void> {
+      await tx(handle, "p2pkh_protocol_submissions", "readwrite", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").put(record))
+      );
+    },
+    async getProtocolSubmission(id: string): Promise<P2pkhProtocolSubmission | undefined> {
+      return tx(handle, "p2pkh_protocol_submissions", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").get(id))
+      );
+    },
+    async listProtocolSubmissions(): Promise<P2pkhProtocolSubmission[]> {
+      return tx(handle, "p2pkh_protocol_submissions", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").getAll())
+      );
+    },
+    async listProtocolSubmissionsByResource(resourceId: string): Promise<P2pkhProtocolSubmission[]> {
+      return tx(handle, "p2pkh_protocol_submissions", "readonly", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").index("resourceId").getAll(resourceId))
+      );
+    },
+    async removeProtocolSubmission(id: string): Promise<void> {
+      await tx(handle, "p2pkh_protocol_submissions", "readwrite", (store) =>
+        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").delete(id))
+      );
+    },
     /**
      * 硬切换 002 收尾：原子地写「submission + 所有 input claim」——
      * 单一 readwrite 事务，冲突时整笔 abort，submission 行和 claim
@@ -730,6 +764,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
     async tryClaimSubmissionWithInputs(input: {
       submission: P2pkhLocalSubmission;
       inputs: P2pkhUtxo[];
+      expectedCanonicalTxid?: string;
+      observation?: "unconfirmed" | "confirmed";
     }): Promise<{ claimIds: string[] }> {
       return tx(
         handle,
@@ -758,6 +794,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
               network: input.submission.network,
               txid: u.txid,
               vout: u.vout,
+              canonicalTxid: input.expectedCanonicalTxid ?? input.submission.canonicalTxid,
+              observation: input.observation,
               state: "claimed",
               createdAt: now,
               updatedAt: now
@@ -783,6 +821,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
       publicKeyHex: string;
       network: BsvNetwork;
       inputs: P2pkhInputOutpoint[];
+      expectedCanonicalTxid?: string;
+      observation?: "unconfirmed" | "confirmed";
     }): Promise<{ claimIds: string[] }> {
       return tx(handle, "p2pkh_local_input_claims", "readwrite", async (t) => {
         const claimStore = t.objectStore("p2pkh_local_input_claims");
@@ -804,6 +844,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
             network: input.network,
             txid: u.txid,
             vout: u.vout,
+            canonicalTxid: input.expectedCanonicalTxid,
+            observation: input.observation,
             state: "claimed",
             createdAt: now,
             updatedAt: now
@@ -949,6 +991,7 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
                 height: h.height,
                 status: h.status,
                 source: h.source,
+                observation: h.observation ?? "confirmed",
                 syncedAt: prev?.syncedAt && prev?.syncedAt > h.syncedAt ? prev.syncedAt : h.syncedAt
               };
               await reqAsPromise(histStore.put(merged));
@@ -956,33 +999,6 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
           }
           if (commit.unconfirmedHistory) {
             const histStore = t.objectStore("p2pkh_history");
-            const presentIds = new Set(
-              commit.unconfirmedHistory.map((h) => newHistoryId(commit.resourceId, h.txid))
-            );
-            const allForResource = await reqAsPromise<IDBValidKey[]>(
-              histStore.index("resourceId").getAllKeys(commit.resourceId)
-            );
-            const MISSING_THRESHOLD = 3;
-            for (const key of allForResource) {
-              const id = String(key);
-              const prev = await reqAsPromise<P2pkhHistoryItem | undefined>(histStore.get(id));
-              if (!prev) continue;
-              if (prev.status === "confirmed") continue;
-              if (presentIds.has(id)) {
-                if (prev.missingObservationCount) {
-                  await reqAsPromise(histStore.put({ ...prev, missingObservationCount: 0, syncedAt: now }));
-                }
-                continue;
-              }
-              const count = (prev.missingObservationCount ?? 0) + 1;
-              if (count >= MISSING_THRESHOLD) {
-                if (prev.status !== "dropped") {
-                  await reqAsPromise(histStore.put({ ...prev, status: "dropped", missingObservationCount: count, syncedAt: now }));
-                }
-              } else if (count !== prev.missingObservationCount) {
-                await reqAsPromise(histStore.put({ ...prev, missingObservationCount: count, syncedAt: now }));
-              }
-            }
             for (const h of commit.unconfirmedHistory) {
               const id = newHistoryId(commit.resourceId, h.txid);
               const prev = await reqAsPromise<P2pkhHistoryItem | undefined>(histStore.get(id));
@@ -993,7 +1009,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
                 resourceId: commit.resourceId,
                 publicKeyHex: effectiveResource.publicKeyHex,
                 network: effectiveResource.network,
-                address: effectiveResource.address
+                address: effectiveResource.address,
+                observation: h.observation ?? "unconfirmed"
               }));
             }
           }
@@ -1011,11 +1028,21 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
           }
           if (commit.localInputClaims) {
             const store = t.objectStore("p2pkh_local_input_claims");
-            for (const r of commit.localInputClaims) await reqAsPromise(store.put(r));
+            for (const r of commit.localInputClaims) {
+              if (r.state === "released") {
+                await reqAsPromise(store.delete(r.id));
+                continue;
+              }
+              await reqAsPromise(store.put(r));
+            }
           }
           if (commit.localSubmissions) {
             const store = t.objectStore("p2pkh_local_submissions");
             for (const p of commit.localSubmissions) await reqAsPromise(store.put(p));
+          }
+          if (commit.protocolSubmissions) {
+            const store = t.objectStore("p2pkh_protocol_submissions");
+            for (const p of commit.protocolSubmissions) await reqAsPromise(store.put(p));
           }
         }
       );
@@ -1034,6 +1061,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
         await this.clearBackfillState(r.resourceId);
         const submissions = await this.listLocalSubmissionsByResource(r.resourceId);
         for (const p of submissions) await this.removeLocalSubmission(p.id);
+        const protocolSubmissions = await this.listProtocolSubmissionsByResource(r.resourceId);
+        for (const p of protocolSubmissions) await this.removeProtocolSubmission(p.id);
         const claims = await this.listLocalInputClaimsByResource(r.resourceId);
         for (const rs of claims) await this.removeLocalInputClaim(rs.id);
       }

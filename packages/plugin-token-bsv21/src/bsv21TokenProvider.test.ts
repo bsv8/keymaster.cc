@@ -23,6 +23,8 @@ function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string 
     address: overrides.address ?? "addr1",
     outpoint: overrides.outpoint ?? `${overrides.origin}_0`,
     amount: overrides.amount ?? "110",
+    observation: overrides.observation,
+    canonicalTxid: overrides.canonicalTxid,
     meta: overrides.meta ?? { origin: overrides.origin, symbol: "TOK" },
     syncedAt: "2026-01-01T00:00:00Z",
   };
@@ -41,8 +43,8 @@ describe("bsv21TokenProvider", () => {
   describe("listTokens", () => {
     it("聚合多地址同 origin 的余额", async () => {
       const snapshots = [
-        makeSnapshot({ origin: "tok1", address: "addr1", amount: "110" }),
-        makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1" }),
+        makeSnapshot({ origin: "tok1", address: "addr1", amount: "110", observation: "unconfirmed", canonicalTxid: "tx1" }),
+        makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1", observation: "confirmed", canonicalTxid: "tx2" }),
         makeSnapshot({ origin: "tok2", address: "addr1", amount: "55" }),
       ];
       const provider = createBsv21TokenProvider({
@@ -57,6 +59,8 @@ describe("bsv21TokenProvider", () => {
       if (!tok1) throw new Error("tok1 not found");
       expect(tok1.balance!.amount).toBe(330); // 100+10 + 200+20
       expect(tok1.balance!.display).toBe("330 TOK");
+      expect(tok1.observation).toBe("unconfirmed");
+      expect(tok1.canonicalTxid).toBe("tx1");
 
       const tok2 = tokens.find((t) => t.tokenId === "tok2");
       if (!tok2) throw new Error("tok2 not found");
@@ -75,8 +79,8 @@ describe("bsv21TokenProvider", () => {
   describe("getToken", () => {
     it("聚合多地址的详情余额，extras 包含地址明细", async () => {
       const snapshots = [
-        makeSnapshot({ origin: "tok1", address: "addr1", amount: "110" }),
-        makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1" }),
+        makeSnapshot({ origin: "tok1", address: "addr1", amount: "110", observation: "unconfirmed", canonicalTxid: "tx1" }),
+        makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1", observation: "confirmed", canonicalTxid: "tx2" }),
       ];
       const provider = createBsv21TokenProvider({
         db: fakeDb(snapshots),
@@ -87,8 +91,11 @@ describe("bsv21TokenProvider", () => {
       if (!detail) throw new Error("detail not found");
       expect(detail.summary.balance!.amount).toBe(330);
       expect(detail.summary.balance!.display).toBe("330 TOK");
+      expect(detail.summary.observation).toBe("unconfirmed");
+      expect(detail.summary.canonicalTxid).toBe("tx1");
       expect(detail.extras!.amount).toBe("330");
       expect(detail.extras!.addresses).toHaveLength(2);
+      expect(detail.extras!.observation).toBe("unconfirmed");
     });
 
     it("不存在的 token 返回 undefined", async () => {

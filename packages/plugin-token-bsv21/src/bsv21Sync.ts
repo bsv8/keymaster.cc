@@ -14,14 +14,18 @@ import type {
   BackgroundTaskContext,
   BackgroundTaskDefinition,
   KeyspaceService,
+  WocService,
   VaultService
 } from "@keymaster/contracts";
 import type { Bsv21Db } from "./bsv21Db.js";
+import type { Bsv21MintHistoryDb } from "./bsv21MintHistoryDb.js";
 import type { Bsv21ServiceHandle } from "./bsv21Service.js";
 
 export interface CreateBsv21SyncTaskOptions {
   db: Bsv21Db;
   service: Bsv21ServiceHandle;
+  woc: WocService;
+  historyDb?: Bsv21MintHistoryDb;
   keyspace: KeyspaceService;
   vault: VaultService;
   assetDataNotifier?: AssetDataNotifier;
@@ -37,7 +41,7 @@ export interface CreateBsv21SyncTaskOptions {
  *   - 取消后不提交 DB、不发 data-changed。
  */
 export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): BackgroundTaskDefinition {
-  const { db, service, keyspace, vault, assetDataNotifier } = options;
+  const { db, service, woc, historyDb, keyspace, vault, assetDataNotifier } = options;
 
   return {
     id: "token-bsv21.sync",
@@ -103,6 +107,8 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
             origin: t.meta.origin,
             outpoint: u.outpoint,
             network: u.network,
+            observation: u.observation,
+            canonicalTxid: u.canonicalTxid,
             address: u.ownerAddress,
             amount: u.amount,
             meta: {
@@ -119,6 +125,7 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       // 原子替换：在同一事务中删除旧数据并写入新数据
       // DB 操作隐式使用当前 active key 的 namespace
       await db.replaceAll(snapshots);
+      await reconcileHistory(historyDb, woc);
       ctx.assertSessionFresh?.();
 
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
@@ -136,4 +143,54 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       });
     },
   };
+}
+
+async function reconcileHistory(historyDb: Bsv21MintHistoryDb | undefined, woc: WocService): Promise<void> {
+  if (!historyDb) return;
+  const current = await historyDb.list().catch(() => []);
+  if (current.length === 0) return;
+  for (const record of current) {
+    const canonicalTxid = record.submit?.spend.canonicalTxid;
+    if (!canonicalTxid) continue;
+    const hit = await woc.getTransactionObservation(record.request.network, canonicalTxid).catch(() => undefined);
+    const observation = hit?.observation;
+    if (observation) {
+      const nextStatus = observationToStatus(observation);
+      if (record.status === nextStatus && record.submit?.spend.observation === observation) continue;
+      await historyDb.put({
+        ...record,
+        updatedAt: new Date().toISOString(),
+        status: nextStatus,
+        submit: {
+          ...record.submit!,
+          spend: {
+            ...record.submit!.spend,
+            observation,
+            droppedReason: undefined
+          }
+        }
+      });
+      continue;
+    }
+    const wasObservedUnconfirmed = record.status === "woc-observed-unconfirmed" || record.submit?.spend.observation === "unconfirmed";
+    if (wasObservedUnconfirmed) {
+      await historyDb.put({
+        ...record,
+        updatedAt: new Date().toISOString(),
+        status: "woc-dropped",
+        submit: {
+          ...record.submit!,
+          spend: {
+            ...record.submit!.spend,
+            observation: undefined,
+            droppedReason: "woc-dropped"
+          }
+        }
+      });
+    }
+  }
+}
+
+function observationToStatus(observation: "unconfirmed" | "confirmed"): "woc-observed-unconfirmed" | "woc-confirmed" {
+  return observation === "confirmed" ? "woc-confirmed" : "woc-observed-unconfirmed";
 }

@@ -11,8 +11,8 @@ function sameOutpoint(a: ProtectedOutpoint, b: { txid: string; vout: number; net
   return a.txid === b.txid && a.vout === b.vout && a.network === b.network && (a.publicKeyHex === undefined || b.publicKeyHex === undefined || a.publicKeyHex === b.publicKeyHex);
 }
 
-function claimKey(input: { txid: string; vout: number; network: BsvNetwork }, ownerPluginId: string, publicKeyHex?: string): string {
-  return `${input.network}:${input.txid}:${input.vout}:${ownerPluginId}:${publicKeyHex ?? "*"}`;
+function claimKey(input: { txid: string; vout: number; network: BsvNetwork }, ownerPluginId: string): string {
+  return `${input.network}:${input.txid}:${input.vout}:${ownerPluginId}`;
 }
 
 export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
@@ -22,17 +22,48 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
   const claims = new Map<string, ProtectedOutpoint & { claimedByPluginId: string; claimedByPublicKeyHex?: string; claimedAt: number }>();
   const listeners = new Set<() => void>();
 
-  async function refresh(provider: ProtectedOutpointProvider): Promise<void> {
-    const list = await Promise.resolve(provider.listProtectedOutpoints());
-    cache.set(provider.id, list.slice());
+  function emitChange(): void {
     for (const listener of listeners) {
       listener();
     }
   }
 
+  async function refresh(provider: ProtectedOutpointProvider): Promise<void> {
+    const list = await Promise.resolve(provider.listProtectedOutpoints());
+    cache.set(provider.id, list.slice());
+    pruneClaims(provider, list);
+    emitChange();
+  }
+
+  function pruneClaims(provider: ProtectedOutpointProvider, nextList: ProtectedOutpoint[]): boolean {
+    const ownerPluginId = provider.ownerPluginId ?? provider.id;
+    let changed = false;
+    for (const [key, claim] of claims.entries()) {
+      if (claim.claimedByPluginId !== ownerPluginId) continue;
+      if (nextList.some((item) => item.ownerPluginId === ownerPluginId && sameOutpoint(item, claim))) continue;
+      claims.delete(key);
+      changed = true;
+    }
+    return changed;
+  }
+
+  function clearClaimsForOwner(ownerPluginId: string): boolean {
+    let changed = false;
+    for (const [key, claim] of claims.entries()) {
+      if (claim.claimedByPluginId === ownerPluginId) {
+        claims.delete(key);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   function disposeProvider(provider: ProtectedOutpointProvider): void {
     offChange.get(provider.id)?.();
     offChange.delete(provider.id);
+    if (clearClaimsForOwner(provider.ownerPluginId ?? provider.id)) {
+      emitChange();
+    }
     provider.dispose?.();
   }
 
@@ -110,7 +141,7 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
       }
       const unique = new Map<string, ProtectedOutpoint>();
       for (const entry of entries) {
-        unique.set(claimKey(entry, input.ownerPluginId, input.publicKeyHex), entry);
+        unique.set(claimKey(entry, input.ownerPluginId), entry);
       }
       for (const [key, entry] of unique) {
         if (claims.has(key)) {
@@ -124,9 +155,7 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
         });
         claimIds.push(key);
       }
-      for (const listener of listeners) {
-        listener();
-      }
+      emitChange();
       return { claimIds };
     },
     async releaseClaims(claimIds) {
@@ -134,9 +163,7 @@ export function createProtectedOutpointRegistry(): IProtectedOutpointRegistry {
         claims.delete(id);
       }
       if (claimIds.length > 0) {
-        for (const listener of listeners) {
-          listener();
-        }
+        emitChange();
       }
     },
     _ids() {

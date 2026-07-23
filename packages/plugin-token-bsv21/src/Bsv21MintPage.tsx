@@ -10,6 +10,29 @@ const NETWORK_OPTIONS: Array<{ label: string; value: BsvNetwork }> = [
   { label: "testnet", value: "test" }
 ];
 
+function statusLabel(status: string, t: (key: string, values?: { defaultValue?: string }) => string): string {
+  switch (status) {
+    case "prepared":
+      return t("bsv21.mint.status.prepared", { defaultValue: "已准备" });
+    case "broadcast-pending-woc":
+      return t("bsv21.mint.status.broadcastPendingWoc", { defaultValue: "广播成功，等待 WOC" });
+    case "woc-observed-unconfirmed":
+      return t("bsv21.mint.status.observedUnconfirmed", { defaultValue: "WOC 已观察（未确认）" });
+    case "woc-confirmed":
+      return t("bsv21.mint.status.confirmed", { defaultValue: "WOC 已确认" });
+    case "woc-dropped":
+      return t("bsv21.mint.status.dropped", { defaultValue: "WOC 已放弃" });
+    case "provider-inconsistent":
+      return t("bsv21.mint.status.providerInconsistent", { defaultValue: "提供方不一致" });
+    case "rejected":
+      return t("bsv21.mint.status.rejected", { defaultValue: "已拒绝" });
+    case "unknown":
+      return t("bsv21.mint.status.unknown", { defaultValue: "未知" });
+    default:
+      return status;
+  }
+}
+
 export function Bsv21MintPage() {
   const { t } = useI18n();
   const service = useCapability<Bsv21MintService>(BSV21_MINT_SERVICE_CAPABILITY);
@@ -23,11 +46,22 @@ export function Bsv21MintPage() {
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<Bsv21MintPreview | null>(null);
   const [result, setResult] = useState<string | null>(null);
+  const [history, setHistory] = useState<Awaited<ReturnType<Bsv21MintService["listHistory"]>>>([]);
 
   useEffect(() => {
     setPreview(null);
     setResult(null);
   }, [network]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        setHistory(await service.listHistory());
+      } catch {
+        setHistory([]);
+      }
+    })();
+  }, [service]);
 
   async function prepare() {
     setBusy(true);
@@ -57,6 +91,7 @@ export function Bsv21MintPage() {
     try {
       const r = await service.submit(preview);
       setResult(r.tokenId);
+      setHistory(await service.listHistory());
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -81,6 +116,20 @@ export function Bsv21MintPage() {
         {preview ? <pre>{preview.spend.rawTxHex.slice(0, 120)}…</pre> : null}
         {result ? <p>{result}</p> : null}
         {result === null ? null : <EmptyState title={t("bsv21.mint.completed", { defaultValue: "Token created" })} description={result} />}
+        {history.length > 0 ? (
+          <section className="bsv21-mint-page__history">
+            <h3>{t("bsv21.mint.history", { defaultValue: "Recent history" })}</h3>
+            <ul>
+              {history.slice(0, 5).map((item) => (
+                <li key={item.id}>
+                  <strong>{statusLabel(item.status, t)}</strong>
+                  <span>{item.preview.tokenId}</span>
+                  {item.submit?.spend.canonicalTxid ? <code>{item.submit.spend.canonicalTxid}</code> : null}
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
         <div>
           <Button onClick={() => void prepare()} disabled={busy}>{t("bsv21.mint.prepare", { defaultValue: "Preview" })}</Button>
           <Button onClick={() => void submit()} disabled={!preview || busy}>{t("bsv21.mint.submit", { defaultValue: "Submit" })}</Button>

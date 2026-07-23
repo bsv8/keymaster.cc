@@ -16,6 +16,7 @@
 
 import type { BsvNetwork } from "./vault.js";
 import type { I18nText } from "./i18n.js";
+import type { WocObservation } from "./woc.js";
 
 /** Token 状态：与 AssetStatus 同形，由 provider 同步/可用性驱动。 */
 export type TokenStatus = "ready" | "syncing" | "stale" | "failed" | "unsupported";
@@ -47,6 +48,10 @@ export interface TokenSummary {
   label: string | I18nText;
   /** 所属网络（可选；当前阶段 1 实际都是 BSV main）。 */
   network?: BsvNetwork;
+  /** WOC 观察状态。 */
+  observation?: WocObservation;
+  /** WOC 观察到的 canonical txid。 */
+  canonicalTxid?: string;
   /** 当前余额。 */
   balance?: TokenBalance;
   /** 状态。 */
@@ -89,6 +94,8 @@ export interface TokenDetail {
   activities?: TokenActivity[];
   /** provider 自由扩展：例如 BSV-21 origin / STAS script hash 等。 */
   extras?: Record<string, unknown>;
+  /** 详情态的 WOC 观察状态，可与 summary 保持一致。 */
+  observation?: WocObservation;
 }
 
 /** Token provider 契约。 */

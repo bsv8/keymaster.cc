@@ -141,13 +141,10 @@ export interface P2pkhHistoryItem {
   status: "confirmed" | "unconfirmed" | "pending" | "dropped";
   /** 历史来源：本地提交、WOC 未确认、WOC 确认。 */
   source: "local-submission" | "woc-unconfirmed" | "woc-confirmed";
+  observation?: "unconfirmed" | "confirmed";
   syncedAt: string;
-  /**
-   * 未观察到的 recent-sync 轮次；用于确认被 dropped 前必须连续多次 missing。
-   * 设计缘由：单次 missing 可能是 WOC 短暂不一致；多次 missing 才表示交易真正
-   * 从 mempool 消失。
-   */
-  missingObservationCount?: number;
+  /** 最终对账落空时的原因。 */
+  droppedReason?: string;
 }
 
 /**
@@ -231,7 +228,19 @@ export interface P2pkhRecentSyncState {
 }
 
 /** Pending transfer。 */
-export type P2pkhLocalSubmissionStatus = "submitting" | "broadcast" | "confirmed" | "failed" | "unknown" | "provider-inconsistent";
+export type P2pkhLocalSubmissionStatus =
+  | "draft"
+  | "submitting"
+  | "broadcast"
+  | "confirmed"
+  | "failed"
+  | "unknown"
+  | "provider-inconsistent"
+  | "broadcast-pending-woc"
+  | "woc-observed-unconfirmed"
+  | "woc-confirmed"
+  | "woc-dropped"
+  | "rejected";
 
 export interface P2pkhLocalSubmission {
   id: string;
@@ -240,6 +249,8 @@ export interface P2pkhLocalSubmission {
   network: BsvNetwork;
   assetId: P2pkhAssetId;
   canonicalTxid: string;
+  expectedCanonicalTxid?: string;
+  observation?: "unconfirmed" | "confirmed";
   rawTxHex: string;
   providerReturnedTxidRaw?: string;
   providerReturnedTxidNormalized?: string;
@@ -267,10 +278,39 @@ export interface P2pkhLocalInputClaim {
   txid: string;
   vout: number;
   canonicalTxid?: string;
+  observation?: "unconfirmed" | "confirmed";
+  droppedReason?: string;
   state: P2pkhLocalInputClaimState;
   createdAt: string;
   updatedAt: string;
-  missingObservationCount?: number;
+}
+
+/** 协议 spend 持久化提交。 */
+export type P2pkhProtocolSubmissionStatus =
+  | "prepared"
+  | "broadcast-pending-woc"
+  | "woc-observed-unconfirmed"
+  | "woc-confirmed"
+  | "woc-dropped"
+  | "rejected"
+  | "unknown"
+  | "provider-inconsistent";
+
+export interface P2pkhProtocolSubmission {
+  id: string;
+  resourceId: string;
+  publicKeyHex: string;
+  network: BsvNetwork;
+  submissionId: string;
+  canonicalTxid: string;
+  inputs: Array<{ txid: string; vout: number }>;
+  protectedClaimIds: string[];
+  localInputClaimIds: string[];
+  status: P2pkhProtocolSubmissionStatus;
+  observation?: "unconfirmed" | "confirmed";
+  droppedReason?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** 同步协调器提交所需参数。 */
@@ -307,6 +347,8 @@ export interface P2pkhRecentCommit {
   localInputClaims?: P2pkhLocalInputClaim[];
   /** 本地提交观察对账结果。 */
   localSubmissions?: P2pkhLocalSubmission[];
+  /** 协议 spend 提交对账结果。 */
+  protocolSubmissions?: P2pkhProtocolSubmission[];
   /** lastSyncedAt 时间戳。 */
   lastSyncedAt?: string;
 }
@@ -350,7 +392,16 @@ export interface P2pkhTransferPreview {
 }
 
 /** 转移结果。 */
-export type P2pkhTransferResultStatus = "broadcast" | "confirmed" | "rejected" | "unknown" | "provider-inconsistent";
+export type P2pkhTransferResultStatus =
+  | "broadcast-pending-woc"
+  | "woc-observed-unconfirmed"
+  | "woc-confirmed"
+  | "woc-dropped"
+  | "rejected"
+  | "unknown"
+  | "provider-inconsistent"
+  | "broadcast"
+  | "confirmed";
 
 export interface P2pkhTransferResult {
   status: P2pkhTransferResultStatus;

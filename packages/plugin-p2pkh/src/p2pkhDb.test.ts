@@ -204,8 +204,8 @@ describe("p2pkhDb v8 stores", () => {
     expect(raw.objectStoreNames.contains("p2pkh_utxo_reservations")).toBe(false);
     // 硬切换 001：余额不再落库。
     expect(raw.objectStoreNames.contains("p2pkh_balances")).toBe(false);
-    // 硬切换 005：DB 版本必须固定为 7。
-    expect(raw.version).toBe(8);
+    // 硬切换 005：DB 版本必须固定为 9。
+    expect(raw.version).toBe(9);
     raw.close();
   });
 });
@@ -224,7 +224,7 @@ describe("p2pkhDb namespaceDbName (硬切换 005 name source)", () => {
 });
 
 describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
-  it("v7 -> v8 enters onupgradeneeded, drops old p2pkh stores, rebuilds v7 (no migration)", async () => {
+  it("v7 -> v9 enters onupgradeneeded, drops old p2pkh stores, rebuilds v9 (no migration)", async () => {
     // 前置：DB 已存在 v6（v6 schema stores），并保留一条旧记录——
     // 验证硬切换 005 不会把这条记录搬到 v7。
     const seeded = await preOpenAtVersion(6, [
@@ -262,7 +262,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
-    expect(raw.version).toBe(8);
+    expect(raw.version).toBe(9);
     for (const name of [
       "p2pkh_addresses",
       "p2pkh_utxos",
@@ -281,7 +281,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     expect(rows.find((r) => r.resourceId === "stale:row")).toBeUndefined();
   });
 
-  it("v7 -> v8 cleans up stray p2pkh_orphan stores that are not in the v6 known list", async () => {
+  it("v7 -> v9 cleans up stray p2pkh_orphan stores that are not in the v6 known list", async () => {
     // 硬切换 005 收尾验证：不能用"硬编码 store 名列表"实现 delete。
     // 这里故意在 v6 库内塞一个 `p2pkh_orphan`——它**不在**任何已知
     // schema 列表里，模拟"未来某次迭代加了一个 p2pkh_xxx store，后来
@@ -302,7 +302,7 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
-    expect(raw.version).toBe(8);
+    expect(raw.version).toBe(9);
     // 任何 p2pkh_ 前缀的 store 都不能残留——包括 v6 已知表之外的 stray。
     for (const stray of [...raw.objectStoreNames]) {
       expect(stray.startsWith("p2pkh_"), `unexpected non-p2pkh store: ${stray}`).toBe(true);
@@ -315,10 +315,10 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     createP2pkhDb(nsHandle).listAddresses();
   });
 
-  it("v9 -> v8 triggers VersionError; close->deleteDatabase->reopen converges to v8", async () => {
-    // 前置：DB 已存在 v9（mock 一个比目标 v8 高的 version）。
-    // v9 stores 故意和 v8 不一样，验证整库删除而不是逐表迁移。
-    const seeded = await preOpenAtVersion(9, [
+  it("v10 -> v9 triggers VersionError; close->deleteDatabase->reopen converges to v9", async () => {
+    // 前置：DB 已存在 v10（mock 一个比目标 v9 高的 version）。
+    // v10 stores 故意和 v9 不一样，验证整库删除而不是逐表迁移。
+    const seeded = await preOpenAtVersion(10, [
       "p2pkh_addresses",
       "p2pkh_future_legacy_table",
       "p2pkh_orphan"
@@ -333,8 +333,8 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
       r.onsuccess = () => resolve(r.result);
       r.onerror = () => reject(r.error);
     });
-    expect(raw.version).toBe(8);
-    // v9 残留 stores 不应被保留（整库删除后重建）。
+    expect(raw.version).toBe(9);
+    // v10 残留 stores 不应被保留（整库删除后重建）。
     expect(raw.objectStoreNames.contains("p2pkh_future_legacy_table")).toBe(false);
     expect(raw.objectStoreNames.contains("p2pkh_orphan")).toBe(false);
     for (const name of [

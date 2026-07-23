@@ -172,6 +172,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     coordinator,
     getResources: () => listAllResources(),
     getDb: () => ensureDb(),
+    protectedOutpoints: deps.protectedOutpoints,
     logger: deps.logger
   });
   const backfill = createP2pkhHistoryBackfill({

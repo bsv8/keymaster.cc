@@ -30,7 +30,7 @@ export function createOrdinalsCollectibleProvider(
   }
   const service = options.service;
   const listeners = new Set<() => void>();
-  service.onChange(() => emit());
+  const offServiceChange = service.onChange(() => emit());
 
   function emit() {
     for (const l of listeners) l();
@@ -53,6 +53,8 @@ export function createOrdinalsCollectibleProvider(
       ownerRef: hit.inscription.owner ?? hit.address,
       preview: previewOf(hit),
       network: hit.network,
+      observation: hit.observation,
+      canonicalTxid: hit.canonicalTxid ?? hit.inscription.canonicalTxid,
       status: "ready",
       tags: ["1satordinals", hit.network]
     };
@@ -90,7 +92,9 @@ export function createOrdinalsCollectibleProvider(
         preview: previewOf(hit),
         attributes: attributesOf(hit),
         activities: [],
-        extras: { inscription: hit.inscription }
+        observation: hit.observation,
+        network: hit.network,
+        extras: { inscription: hit.inscription, canonicalTxid: hit.canonicalTxid ?? hit.inscription.canonicalTxid }
       };
     },
 
@@ -106,6 +110,10 @@ export function createOrdinalsCollectibleProvider(
     onChange(handler) {
       listeners.add(handler);
       return () => listeners.delete(handler);
+    },
+    dispose() {
+      offServiceChange();
+      listeners.clear();
     }
   };
 }

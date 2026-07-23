@@ -15,11 +15,13 @@ import type {
   P2pkhAssetId,
   P2pkhHistoryItem,
   P2pkhKeyResource,
+  P2pkhProtocolSubmission,
   P2pkhRecentCommit,
   P2pkhRecentSyncState
 } from "./p2pkhContracts.js";
 import type { P2pkhDbHandle } from "./p2pkhDb.js";
 import type { SyncCoordinator } from "./p2pkhSyncCoordinator.js";
+import type { ProtectedOutpointRegistry } from "@keymaster/contracts";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 
 export interface P2pkhRecentSyncDeps {
@@ -28,6 +30,7 @@ export interface P2pkhRecentSyncDeps {
   coordinator: SyncCoordinator;
   getResources(): Promise<P2pkhKeyResource[]>;
   getDb(): Promise<P2pkhDbHandle>;
+  protectedOutpoints?: ProtectedOutpointRegistry;
   /** 硬切换 002：业务插件注入的 logger。 */
   logger?: PluginLogger;
   assertSessionFresh?: () => void;
@@ -156,11 +159,13 @@ async function syncOne(
   ]);
 
   const now = new Date().toISOString();
+  const confirmedUtxoRows = utxos.map((u) => utxoFromWoc(u, resource, "confirmed", now));
+  const unconfirmedUtxoRows = unconfirmedUtxos
+    .filter((u) => !utxos.find((c) => c.txid === u.txid && c.vout === u.vout))
+    .map((u) => utxoFromWoc(u, resource, "unconfirmed", now));
   const utxoRows = [
-    ...utxos.map((u) => utxoFromWoc(u, resource, "confirmed", now)),
-    ...unconfirmedUtxos
-      .filter((u) => !utxos.find((c) => c.txid === u.txid && c.vout === u.vout))
-      .map((u) => utxoFromWoc(u, resource, "unconfirmed", now))
+    ...confirmedUtxoRows,
+    ...unconfirmedUtxoRows
   ];
 
   // 读取 recent watermark；扫描新交易时遇到已知 txid 停止。
@@ -218,6 +223,7 @@ async function syncOne(
     height: h.height,
     status: h.status,
     source: h.source,
+    observation: "confirmed",
     syncedAt: now
   }));
   const unconfirmedRows: P2pkhHistoryItem[] = unconfirmedHistory.items.map((h) => ({
@@ -230,6 +236,7 @@ async function syncOne(
     height: undefined,
     status: "unconfirmed",
     source: "woc-unconfirmed",
+    observation: "unconfirmed",
     syncedAt: now
   }));
 
@@ -237,45 +244,129 @@ async function syncOne(
   const newTxids = recentItems.map((h) => h.txid);
   const recentConfirmedTxids = Array.from(new Set([...newTxids, ...(recentState?.recentConfirmedTxids ?? [])])).slice(0, HISTORY_PAGE_LIMIT * RECENT_HISTORY_PAGES);
 
-  // 本地输入占用对账：必须连续多次 missing 才允许把 claim 标 observed-consumed。
-  // 关键修复：单次 missing 不能直接标 observed-consumed；WOC 短暂不一致
-  // 时下一次 recent-sync 仍可能看到该输入。分配逻辑只排除 "claimed"，
-  // 提前 release 会让该输入重新可花费，造成双花。
   const existingReservations = await db.listLocalInputClaimsByResource(resource.resourceId);
-  const wocOutpoints = new Set(utxoRows.map((u) => `${u.txid}:${u.vout}`));
-  const MISSING_THRESHOLD = 3;
-  const localInputClaims = existingReservations.map((r) => {
-    if (r.state !== "claimed") return r;
-    if (!wocOutpoints.has(`${r.txid}:${r.vout}`)) {
-      const count = (r.missingObservationCount ?? 0) + 1;
-      if (count >= MISSING_THRESHOLD) {
-        return { ...r, state: "observed-consumed" as const, missingObservationCount: count, updatedAt: now };
-      }
-      return { ...r, missingObservationCount: count, updatedAt: now };
+  const localSubmissions = await db.listLocalSubmissionsByResource(resource.resourceId);
+  const protocolSubmissions = await db.listProtocolSubmissionsByResource(resource.resourceId);
+  const confirmedTxidSet = new Set(recentItems.map((h) => h.txid));
+  const unconfirmedTxidSet = new Set(unconfirmedHistory.items.map((h) => h.txid));
+  const confirmedOutpoints = new Set(confirmedUtxoRows.map((u) => `${u.txid}:${u.vout}`));
+  const submissionById = new Map<string, (typeof localSubmissions)[number] | (typeof protocolSubmissions)[number]>();
+  for (const submission of localSubmissions) submissionById.set(submission.id, submission);
+  for (const submission of protocolSubmissions) submissionById.set(submission.id, submission);
+
+  const txidSet = new Set<string>();
+  for (const submission of [...localSubmissions, ...protocolSubmissions]) {
+    if (submission.canonicalTxid) txidSet.add(submission.canonicalTxid);
+  }
+  for (const claim of existingReservations) {
+    if (claim.canonicalTxid) txidSet.add(claim.canonicalTxid);
+  }
+  const observationByTxid = new Map<string, "unconfirmed" | "confirmed" | undefined>();
+  await Promise.all([...txidSet].map(async (canonicalTxid) => {
+    const observation = (await deps.woc.getTransactionObservation(network, canonicalTxid, { priority: "foreground", signal })).observation;
+    observationByTxid.set(canonicalTxid, observation);
+  }));
+
+  const protocolClaimsToRelease = new Set<string>();
+
+  const submissionUpdated = localSubmissions.map((p) => {
+    const observation = p.canonicalTxid ? observationByTxid.get(p.canonicalTxid) : undefined;
+    if (observation === "confirmed") {
+      return { ...p, status: "woc-confirmed" as const, observation, updatedAt: now };
     }
-    // 已观察到：重置计数。
-    if (r.missingObservationCount) {
-      return { ...r, missingObservationCount: 0, updatedAt: now };
+    if (observation === "unconfirmed") {
+      return { ...p, status: "woc-observed-unconfirmed" as const, observation, updatedAt: now };
     }
-    return r;
+    const wasObservedUnconfirmed = p.status === "woc-observed-unconfirmed" || p.observation === "unconfirmed";
+    const allInputsConfirmedNow =
+      p.inputOutpoints.length > 0 &&
+      p.inputOutpoints.every((input) => confirmedOutpoints.has(`${input.txid}:${input.vout}`));
+    if (wasObservedUnconfirmed && allInputsConfirmedNow) {
+      return {
+        ...p,
+        status: "woc-dropped" as const,
+        error: "WOC confirmed snapshot dropped pending tx",
+        updatedAt: now
+      };
+    }
+    return p;
   });
 
-  // 本地提交对账：必须看到 submission.txid 出现在 confirmed history 才标 confirmed。
-  // 仅"输入已不在 UTXO"不足以确认，可能只是被替换/重组/RBF。
-  const localSubmissions = await db.listLocalSubmissionsByResource(resource.resourceId);
-  const confirmedTxidSet = new Set(recentItems.map((h) => h.txid));
-  // 也合并未确认历史里已知的本地提交 canonicalTxid（broadcast 转 unconfirmed）。
-  const unconfirmedTxidSet = new Set(unconfirmedHistory.items.map((h) => h.txid));
-  const submissionUpdated = localSubmissions.map((p) => {
-    if (p.status === "confirmed" || p.status === "failed") return p;
-    if (p.canonicalTxid && confirmedTxidSet.has(p.canonicalTxid)) {
-      return { ...p, status: "confirmed" as const, updatedAt: now };
+  const protocolSubmissionUpdated = protocolSubmissions.map((p) => {
+    const observation = p.canonicalTxid ? observationByTxid.get(p.canonicalTxid) : undefined;
+    if (observation === "confirmed") {
+      return { ...p, status: "woc-confirmed" as const, observation, updatedAt: now };
     }
-    if (p.canonicalTxid && unconfirmedTxidSet.has(p.canonicalTxid)) {
-      return { ...p, status: "broadcast" as const, updatedAt: now };
+    if (observation === "unconfirmed") {
+      return { ...p, status: "woc-observed-unconfirmed" as const, observation, updatedAt: now };
     }
-    // 输入已花费但 txid 还没出现：保持 unknown，等待下次观察。
+    const wasObservedUnconfirmed = p.status === "woc-observed-unconfirmed" || p.observation === "unconfirmed";
+    const allInputsConfirmedNow =
+      p.inputs.length > 0 &&
+      p.inputs.every((input) => confirmedOutpoints.has(`${input.txid}:${input.vout}`));
+    if (wasObservedUnconfirmed && allInputsConfirmedNow) {
+      for (const claimId of p.protectedClaimIds) {
+        protocolClaimsToRelease.add(claimId);
+      }
+      return {
+        ...p,
+        status: "woc-dropped" as const,
+        droppedReason: "woc-dropped",
+        updatedAt: now
+      };
+    }
     return p;
+  });
+
+  function submissionInputs(
+    submission: (typeof localSubmissions)[number] | (typeof protocolSubmissions)[number] | undefined
+  ): Array<{ txid: string; vout: number }> | undefined {
+    if (!submission) return undefined;
+    if ("inputOutpoints" in submission) return submission.inputOutpoints;
+    if ("inputs" in submission) return submission.inputs;
+    return undefined;
+  }
+
+  const claimsBySubmissionId = new Map<string, typeof existingReservations>();
+  for (const claim of existingReservations) {
+    const group = claimsBySubmissionId.get(claim.submissionId);
+    if (group) {
+      group.push(claim);
+    } else {
+      claimsBySubmissionId.set(claim.submissionId, [claim]);
+    }
+  }
+
+  const localInputClaims = [...claimsBySubmissionId.values()].flatMap((groupClaims) => {
+    const submission = submissionById.get(groupClaims[0]!.submissionId);
+    const canonicalTxid = submission?.canonicalTxid ?? groupClaims[0]?.canonicalTxid;
+    const observation = canonicalTxid ? observationByTxid.get(canonicalTxid) : undefined;
+    if (observation) {
+      return groupClaims.map((r) => ({
+        ...r,
+        state: "observed-consumed" as const,
+        canonicalTxid: canonicalTxid ?? r.canonicalTxid,
+        observation,
+        updatedAt: now
+      }));
+    }
+
+    const wasObservedPreviously = groupClaims.some((r) => r.state === "observed-consumed") || submission?.status === "woc-observed-unconfirmed" || submission?.status === "woc-confirmed";
+    const inputs = submissionInputs(submission);
+    const allInputsConfirmedNow = inputs
+      ? inputs.length > 0 && inputs.every((input) => confirmedOutpoints.has(`${input.txid}:${input.vout}`))
+      : groupClaims.length > 0 && groupClaims.every((r) => confirmedOutpoints.has(`${r.txid}:${r.vout}`));
+    if (wasObservedPreviously && allInputsConfirmedNow) {
+      return groupClaims.map((r) => ({
+        ...r,
+        state: "released" as const,
+        canonicalTxid: canonicalTxid ?? r.canonicalTxid,
+        droppedReason: "woc-dropped",
+        updatedAt: now
+      }));
+    }
+
+    return groupClaims;
   });
 
   // 硬切换 001：commit 不再携带 balance——余额由 service 现算。
@@ -288,6 +379,7 @@ async function syncOne(
     recentConfirmedTxids,
     localInputClaims,
     localSubmissions: submissionUpdated,
+    protocolSubmissions: protocolSubmissionUpdated,
     lastSyncedAt: now
   };
 
@@ -295,6 +387,9 @@ async function syncOne(
   if (signal.aborted) return { utxoCount: 0, recentConfirmedCount: 0, committed: false, cancelled: true };
   deps.assertSessionFresh?.();
   await deps.coordinator.runRecent(resource.resourceId, resource.generation, async () => { deps.assertSessionFresh?.(); return commit; });
+  if (protocolClaimsToRelease.size > 0 && deps.protectedOutpoints) {
+    await deps.protectedOutpoints.releaseClaims([...protocolClaimsToRelease]);
+  }
   // 关键修复：提交后、写 state 前再检查一次——避免取消后仍更新 watermark。
   if (signal.aborted) return { utxoCount: utxoRows.length, recentConfirmedCount: recentItems.length, committed: true, cancelled: true };
   // 关键修复：不再通过 putAddress 重写 resource。

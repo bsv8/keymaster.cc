@@ -28,6 +28,7 @@ function makeClaimStore() {
     txid: string;
     vout: number;
     state: ClaimState;
+    observation?: "unconfirmed" | "confirmed";
   }>();
 
   return {
@@ -223,12 +224,15 @@ describe("createP2pkhProtocolSpendService", () => {
     expect(preview.inputClaimIds).toHaveLength(1);
     expect(preview.submissionId).toMatch(/[0-9a-f-]{36}/);
     expect(claimStore.list()).toHaveLength(1);
+    expect(claimStore.list()[0]?.state).toBe("claimed");
+    expect(claimStore.list()[0]?.observation).toBeUndefined();
 
     const result = await service.submit(preview);
-    expect(result.status).toBe("broadcast");
+    expect(result.status).toBe("broadcast-pending-woc");
     expect(result.txid).toBe(preview.txid);
     expect(result.inputClaimIds).toEqual(preview.inputClaimIds);
     expect(result.submissionId).toBe(preview.submissionId);
+    expect(result.observation).toBeUndefined();
   });
 
   it("claims inputs under resourceIdFor(network)", async () => {

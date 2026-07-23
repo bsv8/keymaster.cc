@@ -60,7 +60,7 @@ export interface Bsv21ServiceHandle {
   /** 列出当前 active key 全部 BSV 地址上的 token 余额（已合并）。 */
   listActiveKeyTokens(signal?: AbortSignal): Promise<TokenWithMeta[]>;
   /** 取单个 token 详情。 */
-  getToken(tokenId: string, signal?: AbortSignal): Promise<{ meta: WocBsv21TokenMeta; balance: Bsv21TokenBalance; outpoint?: string } | null>;
+  getToken(tokenId: string, signal?: AbortSignal): Promise<{ meta: WocBsv21TokenMeta; balance: Bsv21TokenBalance; outpoint?: string; observation?: "unconfirmed" | "confirmed"; canonicalTxid?: string } | null>;
 }
 
 export interface Bsv21TokenBalance {
@@ -76,6 +76,8 @@ export interface TokenWithMeta {
   balance: Bsv21TokenBalance;
   /** 当前 token UTXO（若 WOC 已返回）。 */
   outpoint?: string;
+  observation?: "unconfirmed" | "confirmed";
+  canonicalTxid?: string;
   unspent?: WocBsv21UnspentToken[];
   /** 当前 active key 持有此 token 的地址之一（任一）；详情页可继续引用。 */
   address: string;
@@ -135,6 +137,12 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
     return out;
   }
 
+  function observationOf(items: WocBsv21UnspentToken[]): "unconfirmed" | "confirmed" | undefined {
+    if (items.some((item) => item.observation === "unconfirmed")) return "unconfirmed";
+    if (items.some((item) => item.observation === "confirmed")) return "confirmed";
+    return undefined;
+  }
+
   return {
     async listActiveKeyUnspentTokens(signal?: AbortSignal) {
       return activeKeyUnspentTokens(signal);
@@ -164,10 +172,14 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
       for (const entry of grouped.values()) {
         const first = entry.first;
         const balance = bigintsToTokenBalance(entry.balance, first.meta?.symbol);
+        const observation = observationOf(entry.entry);
+        const canonicalTxid = entry.entry.find((item) => item.canonicalTxid)?.canonicalTxid ?? first.canonicalTxid;
         out.push({
           meta: first.meta ?? { origin: first.tokenId },
           balance,
           outpoint: first.outpoint,
+          observation,
+          canonicalTxid,
           unspent: entry.entry,
           address: first.ownerAddress,
           network: first.network
@@ -181,7 +193,7 @@ export function createBsv21Service(options: CreateBsv21ServiceOptions): Bsv21Ser
       const all = await this.listActiveKeyTokens(signal);
       const hit = all.find((t) => t.meta.origin === tokenId);
       if (!hit) return null;
-      return { meta: hit.meta, balance: hit.balance, outpoint: hit.outpoint };
+      return { meta: hit.meta, balance: hit.balance, outpoint: hit.outpoint, observation: hit.observation, canonicalTxid: hit.canonicalTxid };
     }
   };
 }

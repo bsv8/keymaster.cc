@@ -63,6 +63,8 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
         unit: s.meta.symbol ?? "TOK",
         display: `${amount} ${s.meta.symbol ?? "TOK"}`
       },
+      observation: s.observation,
+      canonicalTxid: s.canonicalTxid,
       status: "ready",
       issuer: s.meta.issuer,
       decimals: s.meta.decimals,
@@ -141,6 +143,8 @@ export function createBsv21TokenProvider(options: Bsv21TokenProviderOptions): To
           origin: tokenId,
           amount: aggregated.toString(),
           addresses,
+          observation: first.observation,
+          canonicalTxid: first.canonicalTxid,
         }
       };
     },

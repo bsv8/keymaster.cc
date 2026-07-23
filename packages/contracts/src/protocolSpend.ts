@@ -41,7 +41,14 @@ export interface ProtocolSpendPreview {
 }
 
 export interface ProtocolSpendResult {
-  status: "broadcast" | "rejected" | "unknown" | "provider-inconsistent";
+  status:
+    | "broadcast-pending-woc"
+    | "woc-observed-unconfirmed"
+    | "woc-confirmed"
+    | "woc-dropped"
+    | "rejected"
+    | "unknown"
+    | "provider-inconsistent";
   txid: string;
   rawTxHex: string;
   inputClaimIds?: string[];
@@ -50,6 +57,8 @@ export interface ProtocolSpendResult {
   providerReturnedTxidRaw?: string;
   providerReturnedTxidNormalized?: string;
   txidIntegrity?: "exact" | "reversed" | "mismatch" | "missing";
+  observation?: "unconfirmed" | "confirmed";
+  droppedReason?: string;
   error?: string;
 }
 

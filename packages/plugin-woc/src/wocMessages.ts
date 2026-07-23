@@ -38,6 +38,7 @@ export const WOC_MSG = {
   UTXOS_UNCONFIRMED: "woc.utxos.unconfirmed",
   HISTORY_CONFIRMED: "woc.history.confirmed",
   HISTORY_UNCONFIRMED: "woc.history.unconfirmed",
+  TX_OBSERVATION: "woc.tx.observation",
   TX_BROADCAST: "woc.tx.broadcast",
   // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
   // priority queue / 限流 / 429 backoff / 多标签页协调。
@@ -79,6 +80,11 @@ export interface WocBroadcastPayload {
   /** broadcast 内部强制 broadcast 优先级，调用方不可降级。 */
   signal?: AbortSignal;
   timeoutMs?: number;
+}
+
+/** WOC 交易级观察：按 canonical txid 查询 confirmed / unconfirmed / undefined。 */
+export interface WocTransactionObservationPayload extends WocActorPayload {
+  canonicalTxid: string;
 }
 
 /** BSV-21：列地址持有的 token。 */

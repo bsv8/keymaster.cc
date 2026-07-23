@@ -28,6 +28,7 @@ import type {
   WocHistoryPage,
   WocQueueSnapshot,
   WocRequestPriority,
+  WocTransactionObservation,
   WocUnconfirmedHistory,
   WocUtxoResponse,
   WocBsv21TokenDetail
@@ -45,6 +46,7 @@ import {
   type WocBsv21TokenBalancePayload,
   type WocBroadcastPayload,
   type WocHistoryPayload,
+  type WocTransactionObservationPayload,
   type Woc1SatContentPayload,
   type WocStasListTokensPayload,
   type WocUtxosPayload,
@@ -691,7 +693,10 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           value: u.value,
           height: u.height,
           script: u.script,
-          isSpentInMempoolTx: false
+          isSpentInMempoolTx: false,
+          observation: "confirmed" as const,
+          canonicalTxid: u.tx_hash,
+          network
         }));
       }
     });
@@ -723,7 +728,10 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           value: u.value,
           height: 0,
           script: u.script,
-          isSpentInMempoolTx: u.isSpentInMempoolTx ?? false
+          isSpentInMempoolTx: u.isSpentInMempoolTx ?? false,
+          observation: "unconfirmed" as const,
+          canonicalTxid: u.tx_hash,
+          network
         }));
       }
     });
@@ -750,7 +758,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           throw err;
         }
         return {
-          items: raw.result.map((r) => ({ txid: r.tx_hash, height: r.height, fee: r.fee })),
+          items: raw.result.map((r) => ({ txid: r.tx_hash, height: r.height, fee: r.fee, observation: "confirmed" as const, canonicalTxid: r.tx_hash, network })),
           nextPageToken: raw.nextPageToken
         };
       }
@@ -772,10 +780,55 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           if (isWocNotFoundError(err)) return { items: [] };
           throw err;
         }
-        return { items: raw.result.map((r) => ({ txid: r.tx_hash, fee: r.fee })) };
+        return { items: raw.result.map((r) => ({ txid: r.tx_hash, fee: r.fee, observation: "unconfirmed" as const, canonicalTxid: r.tx_hash, network })) };
       }
     });
   }
+
+  function getTransactionObservation(
+    network: BsvNetwork,
+    canonicalTxid: string,
+    opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }
+  ): Promise<WocTransactionObservation> {
+    const txid = normalizeTxidHex(canonicalTxid);
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"),
+      signal: opts.signal,
+      label: WOC_MSG.TX_OBSERVATION,
+      fn: async (signal) => {
+        try {
+          await fetchJson(
+            network,
+            `/tx/hash/${encodeURIComponent(txid)}`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+          return { canonicalTxid: txid, observation: "confirmed" as const };
+        } catch (err) {
+          if (!isWocNotFoundError(err)) {
+            throw err;
+          }
+        }
+        try {
+          await fetchJson(
+            network,
+            `/tx/hash/${encodeURIComponent(txid)}/propagation`,
+            { method: "GET" },
+            signal,
+            opts.timeoutMs
+          );
+          return { canonicalTxid: txid, observation: "unconfirmed" as const };
+        } catch (err) {
+          if (isWocNotFoundError(err)) {
+            return { canonicalTxid: txid, observation: undefined };
+          }
+          throw err;
+        }
+      }
+    });
+  }
+
   function broadcast(network: BsvNetwork, rawTxHex: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<WocBroadcastResult> {
     return enqueue({
       priority: WOC_PRIORITY.broadcast,
@@ -850,7 +903,8 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           origin: t.origin,
           symbol: t.symbol,
           decimals: t.decimals,
-          issuer: t.issuer
+          issuer: t.issuer,
+          network
         }));
       }
     });
@@ -902,6 +956,8 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
             tokenId,
             amount: amountText,
             ownerAddress: t.ownerAddress ?? address,
+            observation: current?.blockHeight !== undefined ? "confirmed" as const : "unconfirmed" as const,
+            canonicalTxid: txid,
             current: {
               txid,
               txIndex,
@@ -977,6 +1033,9 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           if (!raw || !raw.token || !raw.token.outpoint) {
             return null;
           }
+          raw.token.network = network;
+          raw.token.observation = raw.token.current?.blockHeight !== undefined ? "confirmed" : "unconfirmed";
+          raw.token.canonicalTxid = raw.token.current?.txid;
           return raw;
         } catch (err) {
           if (isWocNotFoundError(err)) return null;
@@ -1015,6 +1074,9 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
           return {
             inscriptionId: raw.inscriptionId,
             outpoint: raw.outpoint ?? outpoint,
+            network,
+            observation: "unconfirmed" as const,
+            canonicalTxid: (raw.outpoint ?? outpoint).split("_")[0] ?? outpoint,
             origin: raw.origin,
             contentType: raw.contentType,
             preview: raw.preview,
@@ -1118,6 +1180,10 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocHistoryPayload;
         return listAddressUnconfirmedHistory(p.network, p.address, opts);
       }
+      case WOC_MSG.TX_OBSERVATION: {
+        const p = payload as WocTransactionObservationPayload;
+        return getTransactionObservation(p.network, p.canonicalTxid, opts);
+      }
       case WOC_MSG.TX_BROADCAST: {
         const p = payload as WocBroadcastPayload;
         return broadcast(p.network, p.rawTxHex, { signal, timeoutMs: opts.timeoutMs });
@@ -1173,6 +1239,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.UTXOS_UNCONFIRMED,
       WOC_MSG.HISTORY_CONFIRMED,
       WOC_MSG.HISTORY_UNCONFIRMED,
+      WOC_MSG.TX_OBSERVATION,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.BSV21_LIST_TOKENS,
       WOC_MSG.BSV21_ADDRESS_UNSPENT,

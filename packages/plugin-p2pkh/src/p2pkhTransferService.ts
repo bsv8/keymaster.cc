@@ -228,10 +228,11 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         network,
         assetId: preview.assetId,
         canonicalTxid: preview.txid,
+        expectedCanonicalTxid: preview.txid,
         rawTxHex: preview.rawTxHex,
         recipientAddress: preview.recipientAddress,
         amountSatoshis: preview.amountSatoshis,
-        status: "submitting",
+        status: "broadcast-pending-woc",
         txidIntegrity: "missing",
         inputOutpoints: preview.allocation.selected.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
         createdAt: now,
@@ -245,7 +246,8 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       // 不进 broadcast。
       const { claimIds: localInputClaimIds } = await db.tryClaimSubmissionWithInputs({
         submission: submissionBase,
-        inputs: preview.allocation.selected
+        inputs: preview.allocation.selected,
+        expectedCanonicalTxid: preview.txid
       });
 
       let broadcastRes:
@@ -270,7 +272,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
           await db.releaseLocalInputClaims(localInputClaimIds);
           await db.putLocalSubmission({
             ...submissionBase,
-            status: "failed",
+            status: "rejected",
             error: msg,
             updatedAt: new Date().toISOString()
           });
@@ -305,7 +307,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         // 这与 rejection 不同——UTXO 可能已经花掉，释放会留双花窗口。
         await db.putLocalSubmission({
           ...submissionBase,
-          status: "unknown",
+          status: "broadcast-pending-woc",
           error: msg,
           updatedAt: new Date().toISOString()
         });
@@ -349,7 +351,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const nextStatus: P2pkhTransferResult["status"] =
         broadcastRes.txidIntegrity === "mismatch"
           ? "provider-inconsistent"
-          : "broadcast";
+          : "broadcast-pending-woc";
       await db.putLocalSubmission({
         ...submissionBase,
         status: nextStatus,

@@ -260,6 +260,9 @@ describe("bsv21Db", () => {
           listActiveKeyUnspentTokens: async () => [],
           getToken: async () => null
         } as never,
+        woc: {
+          getTransactionObservation: async (_network: "main" | "test", canonicalTxid: string) => ({ canonicalTxid, observation: undefined })
+        } as never,
         keyspace,
         vault: { status: () => "unlocked" } as never
       });
