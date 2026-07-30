@@ -471,6 +471,12 @@ importers:
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/hashes':
+        specifier: ^1.8.0
+        version: 1.8.0
 
   packages/plugin-token-stas:
     dependencies:
@@ -532,7 +538,11 @@ importers:
         specifier: '*'
         version: link:../contracts
 
-  packages/ui: {}
+  packages/ui:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
 
 packages:
 
