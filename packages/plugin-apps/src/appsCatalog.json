@@ -16,5 +16,14 @@
     "appUrl": "https://demo.apps.bsv8.com/",
     "claims": [],
     "icon": "/app-icons/demo.svg"
+  },
+  {
+    "id": "s3disk",
+    "name": "S3Disk",
+    "summary": "Multi-storage cloud disk powered by Keymaster.",
+    "appOrigin": "https://s3disk.apps.bsv8.com",
+    "appUrl": "https://s3disk.apps.bsv8.com/",
+    "claims": [],
+    "icon": "/app-icons/s3disk.svg"
   }
 ]

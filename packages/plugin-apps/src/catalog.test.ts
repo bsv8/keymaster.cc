@@ -171,7 +171,7 @@ describe("validateCatalog", () => {
 });
 
 describe("loadCatalog (实际 JSON)", () => {
-  it("至少包含 justnote，且配置合法", () => {
+  it("包含已登记应用，且配置合法", () => {
     const out = loadCatalog();
     expect(out.ok.length).toBeGreaterThanOrEqual(1);
     const justnote = out.ok.find((e) => e.id === "justnote");
@@ -180,5 +180,12 @@ describe("loadCatalog (实际 JSON)", () => {
     expect(justnote?.appUrl).toBe("https://justnote.apps.bsv8.com/");
     // 真实约束：appOrigin === new URL(appUrl).origin
     expect(new URL(justnote!.appUrl).origin).toBe(justnote!.appOrigin);
+
+    const s3disk = out.ok.find((e) => e.id === "s3disk");
+    expect(s3disk).toBeTruthy();
+    expect(s3disk?.appOrigin).toBe("https://s3disk.apps.bsv8.com");
+    expect(s3disk?.appUrl).toBe("https://s3disk.apps.bsv8.com/");
+    expect(s3disk?.icon).toBe("/app-icons/s3disk.svg");
+    expect(new URL(s3disk!.appUrl).origin).toBe(s3disk!.appOrigin);
   });
 });
