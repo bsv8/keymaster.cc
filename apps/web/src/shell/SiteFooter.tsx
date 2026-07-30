@@ -28,6 +28,26 @@ export function SiteFooter({ variant = "app" }: SiteFooterProps) {
         <a className="site-footer__link" href="mailto:spycat55@keymaster.cc">
           spycat55@keymaster.cc
         </a>
+        <span className="site-footer__separator" aria-hidden="true">
+          /
+        </span>
+        <span>git {__KEYMASTER_GIT_BRANCH__}</span>
+        <span className="site-footer__separator" aria-hidden="true">
+          /
+        </span>
+        {__KEYMASTER_GIT_COMMIT_URL__ ? (
+          <a
+            className="site-footer__link"
+            href={__KEYMASTER_GIT_COMMIT_URL__}
+            target="_blank"
+            rel="noreferrer"
+            aria-label={`Open commit ${__KEYMASTER_GIT_REVISION__} on GitHub`}
+          >
+            {__KEYMASTER_GIT_REVISION__}
+          </a>
+        ) : (
+          <span>{__KEYMASTER_GIT_REVISION__}</span>
+        )}
       </div>
     </footer>
   );
