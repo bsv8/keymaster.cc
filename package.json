@@ -16,9 +16,12 @@
     "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
-    "test": "pnpm lint:react-boundaries && vitest run"
+    "test": "pnpm lint:react-boundaries && vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright show-report"
   },
   "devDependencies": {
+    "@playwright/test": "^1.61.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
