@@ -82,7 +82,12 @@ export type CoordinatorVaultOperation =
   | { type: "generateKey"; password: string; label: string; capabilities?: string[] }
   | { type: "importPrivateKey"; password: string; label: string; material: { hex: string; wif?: string }; format: string; capabilities: string[]; source?: string }
   | { type: "exportKeyBackup"; publicKeyHex: string }
-  | { type: "importKeyBackup"; backup: string; sourcePassword: string; targetPassword: string };
+  | { type: "importKeyBackup"; backup: string; sourcePassword: string; targetPassword: string }
+  | { type: "listPasskeys"; publicKeyHex: string }
+  | { type: "getPasskeyChallenge"; publicKeyHex: string; passkeyId: string }
+  | { type: "addPasskeyProtection"; publicKeyHex: string; label: string; password: string; credentialIdB64: string; prfSaltB64: string; prfOutputHex: string; rpId: string; transports?: string[] }
+  | { type: "removePasskeyProtection"; publicKeyHex: string; passkeyId: string; password: string }
+  | { type: "activateKeyWithPasskey"; publicKeyHex: string; passkeyId: string; prfOutputHex: string };
 
 // ============================================================
 // 3. Coordinator -> Client Response

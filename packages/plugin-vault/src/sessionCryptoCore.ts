@@ -155,7 +155,7 @@ export async function decryptSessionPrivateKeyBytes(input: {
       ? await decryptBytesWithAad(
           input.passwordKey,
           blob,
-          vaultKeyAad(input.encryptedPrivateKey.publicKeyHex)
+          input.encryptedPrivateKey.aad ?? vaultKeyAad(input.encryptedPrivateKey.publicKeyHex)
         )
       : await decryptBytes(input.passwordKey, blob);
   const decoded = new TextDecoder().decode(plain);

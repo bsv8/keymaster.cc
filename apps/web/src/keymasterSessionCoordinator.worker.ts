@@ -30,7 +30,7 @@ import type {
   AssetDataInvalidationEvent,
   SessionStateEvent,
 } from "@keymaster/contracts";
-import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes } from "@keymaster/plugin-vault/coordinator";
+import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes, buildKeyBackupEnvelope, passwordBackupView, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { createMessageBus } from "@keymaster/runtime/messageBus";
@@ -597,7 +597,7 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
 async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
   switch (operation.type) {
     case "listKeys": return (await vaultDb.listKeys()).map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
-    case "getKey": { const key = await vaultDb.getKey(operation.publicKeyHex); if (!key) return undefined; const { cipherSaltB64: _s, cipherIvB64: _i, cipherB64: _c, ...publicKey } = key; return publicKey; }
+    case "getKey": { const key = await vaultDb.getKey(operation.publicKeyHex); if (!key) return undefined; const { cipherSaltB64: _s, cipherIvB64: _i, cipherB64: _c, passkeyProtections: _p, ...publicKey } = key; return publicKey; }
     case "verifyPassword": { const meta = await getVaultMeta(); if (!meta) throw new Error("Vault not initialized"); if (!(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); return true; }
     case "setActive": {
       if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.passwordKey) throw new Error("Vault is locked");
@@ -614,6 +614,95 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     case "createVaultWithImportedKey": return await createVaultRpc(operation.vaultPassword, operation.key);
     case "generateKey": return await addKeyRpc(operation.password, { label: operation.label, capabilities: operation.capabilities, material: { hex: generatePrivateKeyHex() }, format: "generated", source: "vault-generated" });
     case "importPrivateKey": return await addKeyRpc(operation.password, operation);
+    case "listPasskeys": {
+      const key = await vaultDb.getKey(operation.publicKeyHex);
+      if (!key) throw new Error("Key not found");
+      return (key.passkeyProtections ?? []).map(toPasskeySummary);
+    }
+    case "getPasskeyChallenge": {
+      const key = await vaultDb.getKey(operation.publicKeyHex);
+      const protection = key?.passkeyProtections?.find((item) => item.id === operation.passkeyId);
+      if (!protection) throw new Error("Passkey protection not found");
+      return {
+        credentialIdB64: protection.credentialIdB64,
+        prfSaltB64: protection.prfSaltB64,
+        rpId: protection.rpId,
+        transports: protection.transports
+      };
+    }
+    case "addPasskeyProtection": {
+      const meta = await getVaultMeta();
+      if (!meta) throw new Error("Vault not initialized");
+      const source = await resolveVaultPasswordKey(operation.password, meta);
+      const key = await vaultDb.getKey(operation.publicKeyHex);
+      if (!key) throw new Error("Key not found");
+      const label = operation.label.trim();
+      if (!label) throw new Error("Passkey name is required");
+      if ((key.passkeyProtections ?? []).some((item) => item.label === label)) {
+        throw new Error("Passkey name already exists for this key");
+      }
+      if ((key.passkeyProtections ?? []).some((item) => item.id === operation.credentialIdB64)) {
+        throw new Error("Passkey already exists for this key");
+      }
+      const material = await decryptVaultKeyMaterialForMigration(source.key, key, source.encoding);
+      const encrypted = await encryptMaterialWithPasskey({
+        prfOutput: cryptoHexToBytes(operation.prfOutputHex),
+        publicKeyHex: key.publicKeyHex,
+        credentialIdB64: operation.credentialIdB64,
+        material
+      });
+      const protection = {
+        id: operation.credentialIdB64,
+        label,
+        credentialIdB64: operation.credentialIdB64,
+        prfSaltB64: operation.prfSaltB64,
+        rpId: operation.rpId,
+        createdAt: new Date().toISOString(),
+        transports: operation.transports,
+        ...encrypted
+      };
+      await vaultDb.putKey({
+        ...key,
+        passkeyProtections: [...(key.passkeyProtections ?? []), protection]
+      });
+      return toPasskeySummary(protection);
+    }
+    case "removePasskeyProtection": {
+      const meta = await getVaultMeta();
+      if (!meta || !(await verifyPassword(operation.password, meta))) throw new Error("Invalid password");
+      const key = await vaultDb.getKey(operation.publicKeyHex);
+      if (!key) throw new Error("Key not found");
+      const next = (key.passkeyProtections ?? []).filter((item) => item.id !== operation.passkeyId);
+      if (next.length === (key.passkeyProtections ?? []).length) throw new Error("Passkey protection not found");
+      await vaultDb.putKey({ ...key, passkeyProtections: next });
+      return true;
+    }
+    case "activateKeyWithPasskey": {
+      if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
+      const key = await vaultDb.getKey(operation.publicKeyHex);
+      const protection = key?.passkeyProtections?.find((item) => item.id === operation.passkeyId);
+      if (!key || !protection) throw new Error("Passkey protection not found");
+      const material = await decryptMaterialWithPasskey({
+        prfOutput: cryptoHexToBytes(operation.prfOutputHex),
+        publicKeyHex: key.publicKeyHex,
+        protection
+      });
+      const privateKey = cryptoHexToBytes(material.hex);
+      verifySessionKeyPair({ publicKeyHex: key.publicKeyHex, privateKeyBytes: privateKey });
+      if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== key.publicKeyHex) {
+        await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
+      }
+      coordinatorState.activePrivateKeyBytes?.fill(0);
+      coordinatorState.activePrivateKeyBytes = privateKey;
+      coordinatorState.activePublicKeyHex = key.publicKeyHex;
+      coordinatorState.keyspaceGeneration++;
+      coordinatorState.sessionEpoch = generateEpoch();
+      coordinatorMeta.activePublicKeyHex = key.publicKeyHex;
+      coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+      await persistActiveMeta();
+      publishSessionState("activate-key");
+      return true;
+    }
     case "changePassword": return await changePasswordRpc(operation.oldPassword, operation.newPassword);
     case "finalizeEmptyVaultAfterLastKeyDeletion": if ((await vaultDb.listKeys()).length === 0) { await vaultDb.deleteMeta(); await performGlobalLock("empty-vault"); } return true;
     case "recoverEmptyVaultToUninitialized": await vaultDb.deleteMeta(); await performGlobalLock("recover-empty"); return true;
@@ -623,14 +712,14 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       const meta = await getVaultMeta();
       if (!meta) throw new Error("Vault not initialized");
       const { encodeKeyBackup } = await import("@keymaster/plugin-vault/coordinator");
-      return encodeKeyBackup({ backupVersion: 1, sourceVaultMeta: meta, keyRecord: key });
+      return encodeKeyBackup(buildKeyBackupEnvelope(meta, key));
     }
     case "importKeyBackup": {
       const currentMeta = await getVaultMeta();
       if (!currentMeta) throw new Error("Vault not initialized");
       const { decodeKeyBackup, resolveVaultPasswordKey: resolveKey, decryptVaultKeyMaterialForMigration: decryptMigrate, encryptVaultKeyMaterial: encryptMaterial } = await import("@keymaster/plugin-vault/coordinator");
       // 解码备份
-      const backup = decodeKeyBackup(operation.backup);
+      const backup = passwordBackupView(decodeKeyBackup(operation.backup));
       // 用备份里的 source meta 验证 source password
       const sourceKey = await resolveKey(operation.sourcePassword, backup.sourceVaultMeta);
       // 用当前 vault meta 验证 target password
@@ -1355,6 +1444,26 @@ export async function __testExportKeyBackup(publicKeyHex: string): Promise<strin
 export async function __testImportKeyBackup(backup: string, sourcePassword: string, targetPassword: string): Promise<{ publicKeyHex: string }> {
   const result = await executeVaultOperation({ type: "importKeyBackup", backup, sourcePassword, targetPassword });
   return result as { publicKeyHex: string };
+}
+
+export async function __testAddPasskeyProtection(input: {
+  publicKeyHex: string;
+  label: string;
+  password: string;
+  credentialIdB64: string;
+  prfSaltB64: string;
+  prfOutputHex: string;
+  rpId: string;
+}): Promise<unknown> {
+  return executeVaultOperation({ type: "addPasskeyProtection", ...input });
+}
+
+export async function __testActivateKeyWithPasskey(input: {
+  publicKeyHex: string;
+  passkeyId: string;
+  prfOutputHex: string;
+}): Promise<void> {
+  await executeVaultOperation({ type: "activateKeyWithPasskey", ...input });
 }
 
 /** 解锁 Vault。 */

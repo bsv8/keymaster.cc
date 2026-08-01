@@ -16,6 +16,8 @@ export interface SessionCryptoEncryptedKeyMaterial {
   cipherSaltB64: string;
   cipherIvB64: string;
   cipherB64: string;
+  /** 非密码保护器可提供自己的版本化 AAD。 */
+  aad?: string;
 }
 
 export interface SessionCryptoBootstrapInput {

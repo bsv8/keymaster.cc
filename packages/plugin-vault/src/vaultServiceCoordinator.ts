@@ -19,8 +19,11 @@ import type {
   CoordinatorValueResult,
   VaultLifecycleSnapshot,
   SessionCoordinatorClient,
+  PasskeyProtection,
 } from "@keymaster/contracts";
 import type { SessionStateMirror } from "./sessionStateMirror.js";
+import { createPasskeyPrf, requestPasskeyPrf } from "./webauthnPrf.js";
+import { bytesToHex } from "./crypto.js";
 
 // ============================================================
 // 1. Types
@@ -310,6 +313,60 @@ export class VaultServiceCoordinator implements VaultService {
     targetPassword: string;
   }): Promise<KeyRef> {
     return await this.call<KeyRef>("importKeyBackup", input);
+  }
+
+  async listPasskeys(publicKeyHex: string): Promise<PasskeyProtection[]> {
+    return await this.call<PasskeyProtection[]>("listPasskeys", { publicKeyHex });
+  }
+
+  async addPasskey(input: {
+    publicKeyHex: string;
+    label: string;
+    password: string;
+  }): Promise<PasskeyProtection> {
+    // 先验证密码，避免输错密码后仍在认证器里留下不可用 credential。
+    await this.verifyPassword(input.password);
+    const created = await createPasskeyPrf({
+      label: input.label,
+      publicKeyHex: input.publicKeyHex
+    });
+    return await this.call<PasskeyProtection>("addPasskeyProtection", {
+      ...input,
+      credentialIdB64: created.credentialIdB64,
+      prfSaltB64: created.prfSaltB64,
+      prfOutputHex: bytesToHex(created.prfOutput),
+      rpId: created.rpId,
+      transports: created.transports
+    });
+  }
+
+  async removePasskey(input: {
+    publicKeyHex: string;
+    passkeyId: string;
+    password: string;
+  }): Promise<void> {
+    await this.call("removePasskeyProtection", input);
+  }
+
+  async activateKeyWithPasskey(input: {
+    publicKeyHex: string;
+    passkeyId: string;
+  }): Promise<CoordinatorCommandResult> {
+    const passkeys = await this.listPasskeys(input.publicKeyHex);
+    const selected = passkeys.find((item) => item.id === input.passkeyId);
+    if (!selected) throw new Error("Passkey protection not found");
+    const details = await this.call<{
+      credentialIdB64: string;
+      prfSaltB64: string;
+      rpId: string;
+      transports?: string[];
+    }>("getPasskeyChallenge", input);
+    const prfOutput = await requestPasskeyPrf(details);
+    await this.call("activateKeyWithPasskey", {
+      ...input,
+      prfOutputHex: bytesToHex(prfOutput)
+    });
+    return { status: "accepted" };
   }
 
   // ============================================================

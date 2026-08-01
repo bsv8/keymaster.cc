@@ -30,7 +30,7 @@ import { ChevronDown, KeyRound, Check } from "lucide-react";
 import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import { Button, Modal, TextInput } from "@keymaster/ui";
-import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
+import type { KeyIdentity, KeyspaceService, PasskeyProtection, VaultService } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
 
 export function KeySwitchWidget() {
@@ -49,6 +49,7 @@ export function KeySwitchWidget() {
   const [switchPassword, setSwitchPassword] = useState("");
   const [switchError, setSwitchError] = useState<string | null>(null);
   const [switchBusy, setSwitchBusy] = useState(false);
+  const [switchPasskeys, setSwitchPasskeys] = useState<PasskeyProtection[]>([]);
 
 
   const current = active.activePublicKeyHex
@@ -60,6 +61,7 @@ export function KeySwitchWidget() {
     setPendingSwitch(null);
     setSwitchPassword("");
     setSwitchError(null);
+    setSwitchPasskeys([]);
   }
 
   async function pick(key: KeyIdentity) {
@@ -71,6 +73,10 @@ export function KeySwitchWidget() {
     setPendingSwitch(key);
     setSwitchPassword("");
     setSwitchError(null);
+    setSwitchPasskeys([]);
+    if (typeof vault.listPasskeys === "function") {
+      void vault.listPasskeys(key.publicKeyHex).then(setSwitchPasskeys).catch(() => undefined);
+    }
   }
 
   async function submitSwitch() {
@@ -96,6 +102,29 @@ export function KeySwitchWidget() {
           ? err.message
           : t("vault.keySwitch.err.failed", { defaultValue: "Failed to switch key" })
       );
+    } finally {
+      setSwitchBusy(false);
+    }
+  }
+
+  async function submitPasskeySwitch(passkeyId: string) {
+    if (!pendingSwitch?.publicKeyHex || switchBusy) return;
+    setSwitchBusy(true);
+    setSwitchError(null);
+    try {
+      const result = await vault.activateKeyWithPasskey({
+        publicKeyHex: pendingSwitch.publicKeyHex,
+        passkeyId
+      });
+      if (result.status !== "accepted") {
+        setSwitchError("message" in result ? result.message : `Failed to switch key: ${result.status}`);
+        return;
+      }
+      setPendingSwitch(null);
+      setSwitchPasskeys([]);
+      setOpen(false);
+    } catch (err) {
+      setSwitchError(err instanceof Error ? err.message : "Passkey verification failed");
     } finally {
       setSwitchBusy(false);
     }
@@ -202,6 +231,21 @@ export function KeySwitchWidget() {
           error={switchError ?? undefined}
           autoFocus
         />
+        {switchPasskeys.length ? (
+          <div className="vault-activate-passkeys">
+            <span>{t("vault.keySwitch.orPasskey", { defaultValue: "Or use a passkey" })}</span>
+            {switchPasskeys.map((item) => (
+              <Button
+                key={item.id}
+                variant="secondary"
+                onClick={() => void submitPasskeySwitch(item.id)}
+                disabled={switchBusy}
+              >
+                {item.label}
+              </Button>
+            ))}
+          </div>
+        ) : null}
       </Modal>
     </div>
   );

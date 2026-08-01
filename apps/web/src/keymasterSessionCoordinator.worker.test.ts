@@ -5,11 +5,15 @@ import {
   encryptVaultKeyMaterial,
   hexToBytes,
   resolveVaultPasswordKey,
+  decodeKeyBackup,
+  passwordBackupView,
   vaultDb,
 } from "@keymaster/plugin-vault/coordinator";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testBackgroundRunNow,
+  __testAddPasskeyProtection,
+  __testActivateKeyWithPasskey,
   __testCancelByKey,
   __testCreateVault,
   __testCreateEmptyVault,
@@ -19,6 +23,7 @@ import {
   __testGetSnapshot,
   __testGetVaultStatus,
   __testImportKeyBackup,
+  __testImportPrivateKey,
   __testInvalidateSession,
   __testLock,
   __testRegisterTask,
@@ -226,7 +231,7 @@ describe("Session Coordinator backup import", () => {
   it("cross-vault import succeeds with different passwords", async () => {
     const sourceResult = await __testCreateVault("source-pw", { label: "source-key" });
     const backup = await __testExportKeyBackup(sourceResult.publicKeyHex!);
-    const sourceRecord = JSON.parse(backup).keyRecord;
+    const sourceRecord = passwordBackupView(decodeKeyBackup(backup)).keyRecord;
 
     // A second Vault must be a fresh persistent store, rather than merely a
     // reset Worker session over the source Vault's IndexedDB records.
@@ -282,10 +287,13 @@ describe("Session Coordinator backup import", () => {
     const source = await __testCreateVault("source-pw");
     const backup = await __testExportKeyBackup(source.publicKeyHex!);
     const parsed = JSON.parse(backup);
-    const sourceKey = await resolveVaultPasswordKey("source-pw", parsed.sourceVaultMeta);
-    const material = await decryptVaultKeyMaterialForMigration(sourceKey.key, parsed.keyRecord, sourceKey.encoding);
-    parsed.keyRecord.publicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
-    Object.assign(parsed.keyRecord, await encryptVaultKeyMaterial(sourceKey.key, parsed.keyRecord.publicKeyHex, material));
+    const view = passwordBackupView(decodeKeyBackup(backup));
+    const sourceKey = await resolveVaultPasswordKey("source-pw", view.sourceVaultMeta);
+    const material = await decryptVaultKeyMaterialForMigration(sourceKey.key, view.keyRecord, sourceKey.encoding);
+    const tamperedPublicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
+    parsed.publicKeyHex = tamperedPublicKeyHex;
+    const tamperedCipher = await encryptVaultKeyMaterial(sourceKey.key, tamperedPublicKeyHex, material);
+    Object.assign(parsed.protectors.password, tamperedCipher);
     const tamperedBackup = JSON.stringify(parsed);
 
     await __testDeleteVault();
@@ -361,5 +369,49 @@ describe("Session Coordinator backup import", () => {
         activePublicKeyHex: imported.publicKeyHex,
       }));
     }
+  });
+});
+
+describe("Session Coordinator WebAuthn PRF protection", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  it("stores a passkey alongside password and switches with its PRF output", async () => {
+    const first = await __testCreateVault("vault-password", { label: "first" });
+    const prfOutputHex = "ab".repeat(32);
+    await __testAddPasskeyProtection({
+      publicKeyHex: first.publicKeyHex!,
+      label: "passkey01",
+      password: "vault-password",
+      credentialIdB64: "credential-one",
+      prfSaltB64: "salt-one",
+      prfOutputHex,
+      rpId: "keymaster.cc"
+    });
+    const backup = decodeKeyBackup(await __testExportKeyBackup(first.publicKeyHex!));
+    expect(backup.backupVersion).toBe(2);
+    if (backup.backupVersion !== 2) throw new Error("expected v2 backup");
+    expect(Object.keys(backup.protectors)).toEqual(["password", "passkey01"]);
+
+    const second = await __testImportPrivateKey("vault-password", {
+      label: "second",
+      material: { hex: TEST_PRIV_2 },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    expect(__testGetActivePublicKeyHex()).toBe(second.publicKeyHex);
+    await __testActivateKeyWithPasskey({
+      publicKeyHex: first.publicKeyHex!,
+      passkeyId: "credential-one",
+      prfOutputHex
+    });
+    expect(__testGetActivePublicKeyHex()).toBe(first.publicKeyHex);
   });
 });

@@ -32,6 +32,8 @@ export interface VaultKeyCreateModalProps {
   onCreate(label: string, password: string): Promise<KeyRef>;
   /** 创建成功后父组件如何打开导出 Modal。 */
   onExport(key: KeyRef): void;
+  /** 创建成功后立即配置 WebAuthn PRF passkey。 */
+  onPasskeys?(key: KeyRef): void;
   onClose(): void;
 }
 
@@ -50,6 +52,7 @@ export function VaultKeyCreateModal({
   open,
   onCreate,
   onExport,
+  onPasskeys,
   onClose
 }: VaultKeyCreateModalProps) {
   const { t } = useI18n();
@@ -148,6 +151,18 @@ export function VaultKeyCreateModal({
             <Button variant="ghost" onClick={close} disabled={busy}>
               {t("vault.keyCreate.later", { defaultValue: "稍后" })}
             </Button>
+            {onPasskeys ? (
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  if (created) onPasskeys(created);
+                  onClose();
+                }}
+                disabled={!created || busy}
+              >
+                {t("vault.keyCreate.addPasskey", { defaultValue: "添加 passkey" })}
+              </Button>
+            ) : null}
             <Button
               onClick={() => {
                 if (created) onExport(created);

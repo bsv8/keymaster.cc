@@ -107,7 +107,7 @@ export function VaultKeyExportModal({
       <p className="vault-export-modal__hint">
         {t("vault.keyExport.hint", {
           defaultValue:
-            "备份文件直接复制本机 Vault 的加密记录。请妥善保存文件；恢复时仍需要对应 Vault 密码。"
+            "JSON 备份包含密码保护器和全部 passkey 保护器；任一可用保护器都能恢复同一把私钥。"
         })}
       </p>
       {error ? <p className="vault-export-modal__error">{error}</p> : null}

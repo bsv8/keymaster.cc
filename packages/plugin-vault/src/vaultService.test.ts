@@ -337,13 +337,14 @@ describe("VaultService.exportKeyBackup", () => {
     });
     await vault.lock();
     await waitForStatus(vault, "locked");
-    const { decodeKeyBackup } = await import("./keyBackup.js");
+    const { decodeKeyBackup, passwordBackupView } = await import("./keyBackup.js");
     const payload = await vault.exportKeyBackup(ref.publicKeyHex);
     const decoded = decodeKeyBackup(payload);
-    expect(decoded.backupVersion).toBe(1);
-    expect(decoded.sourceVaultMeta.id).toBe("singleton");
-    expect(decoded.keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
-    expect(decoded.keyRecord.label).toBe("k");
+    const password = passwordBackupView(decoded);
+    expect(decoded.backupVersion).toBe(2);
+    expect(password.sourceVaultMeta.id).toBe("singleton");
+    expect(password.keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(password.keyRecord.label).toBe("k");
   });
 });
 
@@ -1429,10 +1430,10 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const exported = await crypto.exportEncryptedKeyBackup({
       publicKeyHex: ref.publicKeyHex
     });
-    const { decodeKeyBackup } = await import("./keyBackup.js");
+    const { decodeKeyBackup, passwordBackupView } = await import("./keyBackup.js");
     const decoded = decodeKeyBackup(new TextDecoder().decode(exported.backup));
     expect(exported.publicKeyHex).toBe(ref.publicKeyHex);
-    expect(decoded.keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(passwordBackupView(decoded).keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
     await vault.lock();
     await expect(
       crypto.exportEncryptedKeyBackup({ publicKeyHex: ref.publicKeyHex })

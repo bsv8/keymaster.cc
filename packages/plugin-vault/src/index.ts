@@ -10,6 +10,7 @@ export { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
 export { KeySwitchWidget } from "./KeySwitchWidget.js";
 export { vaultDb } from "./vaultDb.js";
 export type { VaultMetaRecord, VaultKeyRecord } from "./vaultDb.js";
+export { isWebAuthnPrfAvailable } from "./webauthnPrf.js";
 export * from "./crypto.js";
 export { deriveP2pkhAddress, signEcdsaDigest, decryptSessionPrivateKeyBytes, verifySessionKeyPair, bytesToHex, hexToBytes } from "./sessionCryptoCore.js";
 export { sealAppMessageLocalBytes, openAppMessageLocalBytes } from "./sessionCryptoCore.js";

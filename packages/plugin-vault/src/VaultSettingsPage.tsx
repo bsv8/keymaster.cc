@@ -37,6 +37,7 @@ import type {
   KeyIdentity,
   KeyRef,
   KeyspaceService,
+  PasskeyProtection,
   VaultService
 } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
@@ -46,6 +47,7 @@ import { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
 import { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
 import { VaultKeyExportModal } from "./VaultKeyExportModal.js";
 import { KeyPersistedButActivationFailedError } from "./vaultService.js";
+import { VaultPasskeyModal } from "./VaultPasskeyModal.js";
 
 export function VaultSettingsPage() {
   const vault = useCapability<VaultService>("vault.service");
@@ -69,6 +71,8 @@ export function VaultSettingsPage() {
   const [importingBackup, setImportingBackup] = useState(false);
   const [importingSectionId, setImportingSectionId] = useState<string | null>(null);
   const [activating, setActivating] = useState<KeyIdentity | null>(null);
+  const [activatePasskeys, setActivatePasskeys] = useState<PasskeyProtection[]>([]);
+  const [managingPasskeys, setManagingPasskeys] = useState<KeyIdentity | null>(null);
   const [activatePassword, setActivatePassword] = useState("");
   const [activateError, setActivateError] = useState<string | null>(null);
   const [activateBusy, setActivateBusy] = useState(false);
@@ -152,6 +156,10 @@ export function VaultSettingsPage() {
     setActivateError(null);
     setActivatePassword("");
     setActivating(k);
+    setActivatePasskeys([]);
+    if (typeof vault.listPasskeys === "function") {
+      void vault.listPasskeys(k.publicKeyHex).then(setActivatePasskeys).catch(() => undefined);
+    }
   }
 
   function closeActivate() {
@@ -192,6 +200,28 @@ export function VaultSettingsPage() {
           ? err.message
           : t("vault.settings.activate.err.failed", { defaultValue: "Failed to switch key" })
       );
+    } finally {
+      setActivateBusy(false);
+    }
+  }
+
+  async function confirmActivateWithPasskey(passkeyId: string) {
+    if (!activating?.publicKeyHex || activateBusy) return;
+    setActivateBusy(true);
+    setActivateError(null);
+    try {
+      const result = await vault.activateKeyWithPasskey({
+        publicKeyHex: activating.publicKeyHex,
+        passkeyId
+      });
+      if (result.status !== "accepted") {
+        setActivateError("message" in result ? result.message : `Activate key failed: ${result.status}`);
+        return;
+      }
+      setActivating(null);
+      setActivatePasskeys([]);
+    } catch (err) {
+      setActivateError(err instanceof Error ? err.message : "Passkey verification failed");
     } finally {
       setActivateBusy(false);
     }
@@ -418,6 +448,13 @@ export function VaultSettingsPage() {
             <Button
               variant="secondary"
               size="sm"
+              onClick={() => setManagingPasskeys(r)}
+            >
+              {t("vault.settings.action.passkeys", { defaultValue: "Passkeys" })}
+            </Button>
+            <Button
+              variant="secondary"
+              size="sm"
               onClick={() => {
                 setError(null);
                 setExporting(r);
@@ -508,6 +545,13 @@ export function VaultSettingsPage() {
                 {isActive
                   ? t("vault.settings.action.current", { defaultValue: "当前 key" })
                   : t("vault.settings.action.setActive", { defaultValue: "设为 active" })}
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => setManagingPasskeys(r)}
+              >
+                {t("vault.settings.action.passkeys", { defaultValue: "Passkeys" })}
               </Button>
               <Button
                 variant="secondary"
@@ -635,6 +679,14 @@ export function VaultSettingsPage() {
           open={creating}
           onCreate={handleCreate}
           onExport={handleCreateExport}
+          onPasskeys={(key) => {
+            setManagingPasskeys({
+              publicKeyHex: key.publicKeyHex,
+              label: key.label,
+              capabilities: key.capabilities,
+              createdAt: key.createdAt
+            });
+          }}
           onClose={() => setCreating(false)}
         />
       ) : null}
@@ -644,6 +696,15 @@ export function VaultSettingsPage() {
           open={changingPassword}
           vault={vault}
           onClose={() => setChangingPassword(false)}
+        />
+      ) : null}
+
+      {managingPasskeys ? (
+        <VaultPasskeyModal
+          open
+          keyIdentity={managingPasskeys}
+          vault={vault}
+          onClose={() => setManagingPasskeys(null)}
         />
       ) : null}
 
@@ -704,6 +765,21 @@ export function VaultSettingsPage() {
           error={activateError ?? undefined}
           autoFocus
         />
+        {activatePasskeys.length ? (
+          <div className="vault-activate-passkeys">
+            <span>{t("vault.settings.activate.orPasskey", { defaultValue: "或使用 passkey" })}</span>
+            {activatePasskeys.map((item) => (
+              <Button
+                key={item.id}
+                variant="secondary"
+                onClick={() => void confirmActivateWithPasskey(item.id)}
+                disabled={activateBusy}
+              >
+                {item.label}
+              </Button>
+            ))}
+          </div>
+        ) : null}
       </Modal>
     </div>
   );

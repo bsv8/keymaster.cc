@@ -74,6 +74,21 @@ export interface VaultKeyRecord {
   cipherSaltB64: string;
   cipherIvB64: string;
   cipherB64: string;
+  /** 可选的 WebAuthn PRF 独立保护器。密码密文始终保留。 */
+  passkeyProtections?: VaultPasskeyProtectionRecord[];
+}
+
+export interface VaultPasskeyProtectionRecord {
+  id: string;
+  label: string;
+  credentialIdB64: string;
+  prfSaltB64: string;
+  rpId: string;
+  createdAt: string;
+  transports?: string[];
+  cipherVersion: "webauthn-prf-v1";
+  cipherIvB64: string;
+  cipherB64: string;
 }
 
 let dbPromise: Promise<IDBDatabase> | undefined;
@@ -206,7 +221,8 @@ function runUpgrade(
       source: r.source,
       cipherSaltB64: r.cipherSaltB64,
       cipherIvB64: r.cipherIvB64,
-      cipherB64: r.cipherB64
+      cipherB64: r.cipherB64,
+      passkeyProtections: r.passkeyProtections
     };
     if (whitelist.publicKeyHex) {
       pendingCanonical.push(whitelist);

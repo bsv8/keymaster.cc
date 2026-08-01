@@ -125,6 +125,18 @@ export interface KeyExportEnvelope {
   created_at_unix: number;
 }
 
+/** 一把业务私钥上的 WebAuthn PRF 保护器公开信息。 */
+export interface PasskeyProtection {
+  /** 本地保护器标识；当前等于 credential id 的 base64url 编码。 */
+  id: string;
+  /** 用户可读名称，例如“MacBook Touch ID”。 */
+  label: string;
+  /** WebAuthn relying party id。 */
+  rpId: string;
+  /** 创建时间 ISO 字符串。 */
+  createdAt: string;
+}
+
 /**
  * "Key 已落库但未能自动设为 active"专用错误。
  *
@@ -210,6 +222,28 @@ export interface VaultService {
    * 造成两条真值来源。
    */
   activateKey(input: { publicKeyHex: string; password: string }): Promise<CoordinatorCommandResult>;
+  /** 使用指定 WebAuthn PRF 保护器解密并切换 active key。 */
+  activateKeyWithPasskey(input: {
+    publicKeyHex: string;
+    passkeyId: string;
+  }): Promise<CoordinatorCommandResult>;
+  /** 列出某把业务私钥的 passkey 保护器；不返回密文或 PRF 参数。 */
+  listPasskeys(publicKeyHex: string): Promise<PasskeyProtection[]>;
+  /**
+   * 为同一把业务私钥添加一个独立的 WebAuthn PRF 保护器。
+   * password 用于重新授权和读取现有密码密文；PRF 交互由实现内部完成。
+   */
+  addPasskey(input: {
+    publicKeyHex: string;
+    label: string;
+    password: string;
+  }): Promise<PasskeyProtection>;
+  /** 移除一个 passkey 保护器；密码保护器始终保留，不能由此接口删除。 */
+  removePasskey(input: {
+    publicKeyHex: string;
+    passkeyId: string;
+    password: string;
+  }): Promise<void>;
   /**
    * 订阅 notice 变化（设置 / 清除）。返回取消订阅函数。
    * 订阅时会立即把当前 notice 值喂给 handler，避免新挂载的 UI 漏掉
@@ -456,8 +490,8 @@ export interface VaultService {
 
   /**
    * 导出单 Key Backup。
-   * 设计缘由：备份只复制当前 Vault 的 `vault_meta + selected vault_keys`
-   * 记录，不要求再次输入密码，也不接触明文私钥。
+   * v2 备份把密码与所有 WebAuthn PRF passkey 作为独立 protectors 导出；
+   * 任一仍可用的 protector 都对应同一把业务私钥。导出不接触明文私钥。
    * 返回值是可直接下载的 JSON 字符串。
    */
   exportKeyBackup(publicKeyHex: string): Promise<string>;
