@@ -27,17 +27,15 @@ import {
   EmptyState,
   Modal,
   PageHeader,
-  TextInput,
   type DataTableColumn
 } from "@keymaster/ui";
-import { useCapability, useI18n, useLocale, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
+import { router, useCapability, useI18n, useLocale, usePluginHost, useRegistry, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
 import type {
   ActiveKeyState,
   KeyIdentity,
   KeyRef,
   KeyspaceService,
-  PasskeyProtection,
   VaultService
 } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
@@ -45,9 +43,8 @@ import { VaultKeyCreateModal } from "./VaultKeyCreateModal.js";
 import { VaultChangePasswordModal } from "./VaultChangePasswordModal.js";
 import { VaultKeyBackupImportModal } from "./VaultKeyBackupImportModal.js";
 import { VaultKeyDeleteModal } from "./VaultKeyDeleteModal.js";
-import { VaultKeyExportModal } from "./VaultKeyExportModal.js";
 import { KeyPersistedButActivationFailedError } from "./vaultService.js";
-import { VaultPasskeyModal } from "./VaultPasskeyModal.js";
+import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
 
 export function VaultSettingsPage() {
   const vault = useCapability<VaultService>("vault.service");
@@ -64,18 +61,12 @@ export function VaultSettingsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [copyNotice, setCopyNotice] = useState<string | null>(null);
 
-  const [exporting, setExporting] = useState<KeyIdentity | null>(null);
   const [deleting, setDeleting] = useState<KeyIdentity | null>(null);
   const [creating, setCreating] = useState(false);
   const [changingPassword, setChangingPassword] = useState(false);
   const [importingBackup, setImportingBackup] = useState(false);
   const [importingSectionId, setImportingSectionId] = useState<string | null>(null);
   const [activating, setActivating] = useState<KeyIdentity | null>(null);
-  const [activatePasskeys, setActivatePasskeys] = useState<PasskeyProtection[]>([]);
-  const [managingPasskeys, setManagingPasskeys] = useState<KeyIdentity | null>(null);
-  const [activatePassword, setActivatePassword] = useState("");
-  const [activateError, setActivateError] = useState<string | null>(null);
-  const [activateBusy, setActivateBusy] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   // 日期格式化器随 locale 重建；避免每次渲染都构造 Intl 实例。
@@ -120,12 +111,6 @@ export function VaultSettingsPage() {
     await refresh();
   }
 
-  async function handleExport(): Promise<string> {
-    if (!exporting) throw new Error("No key selected");
-    // 单 Key Backup：直接导出本机加密记录，不再要求输入密码。
-    return vault.exportKeyBackup(exporting.publicKeyHex);
-  }
-
   async function handleDelete(password: string) {
     if (!deleting) return;
     try {
@@ -153,78 +138,15 @@ export function VaultSettingsPage() {
     if (!k.publicKeyHex) return;
     if (k.publicKeyHex === active.activePublicKeyHex) return;
     setError(null);
-    setActivateError(null);
-    setActivatePassword("");
     setActivating(k);
-    setActivatePasskeys([]);
-    if (typeof vault.listPasskeys === "function") {
-      void vault.listPasskeys(k.publicKeyHex).then(setActivatePasskeys).catch(() => undefined);
-    }
   }
 
-  function closeActivate() {
-    if (activateBusy) return;
+  function handleActivated() {
+    const initialNotice = vault.getInitialActivationNotice();
+    if (initialNotice && initialNotice.publicKeyHex === activating?.publicKeyHex) {
+      vault.clearInitialActivationNotice();
+    }
     setActivating(null);
-    setActivatePassword("");
-    setActivateError(null);
-  }
-
-  async function confirmActivate() {
-    if (!activating?.publicKeyHex || activateBusy) return;
-    setActivateBusy(true);
-    setActivateError(null);
-    try {
-      const result = await vault.activateKey({
-        publicKeyHex: activating.publicKeyHex,
-        password: activatePassword
-      });
-      if (result.status !== "accepted") {
-        setActivateError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Activate key failed: ${result.status}`);
-        return;
-      }
-      // 硬切换 009 收尾：如果 vault 还有"首 Key 未自动 active"
-      // notice，且这把 key 正好就是 notice 里的 key，清掉它。
-      const notice =
-        typeof vault.getInitialActivationNotice === "function"
-          ? vault.getInitialActivationNotice()
-          : null;
-      if (notice && notice.publicKeyHex === activating.publicKeyHex) {
-        vault.clearInitialActivationNotice();
-      }
-      setActivating(null);
-      setActivatePassword("");
-      setActivateError(null);
-    } catch (err) {
-      setActivateError(
-        err instanceof Error
-          ? err.message
-          : t("vault.settings.activate.err.failed", { defaultValue: "Failed to switch key" })
-      );
-    } finally {
-      setActivateBusy(false);
-    }
-  }
-
-  async function confirmActivateWithPasskey(passkeyId: string) {
-    if (!activating?.publicKeyHex || activateBusy) return;
-    setActivateBusy(true);
-    setActivateError(null);
-    try {
-      const result = await vault.activateKeyWithPasskey({
-        publicKeyHex: activating.publicKeyHex,
-        passkeyId
-      });
-      if (result.status !== "accepted") {
-        setActivateError("message" in result ? result.message : `Activate key failed: ${result.status}`);
-        return;
-      }
-      setActivating(null);
-      setActivatePasskeys([]);
-    } catch (err) {
-      setActivateError(err instanceof Error ? err.message : "Passkey verification failed");
-    } finally {
-      setActivateBusy(false);
-    }
   }
 
   // 复制完整公钥到剪贴板。硬切换 003 收尾：复制永远是完整 publicKeyHex，
@@ -334,14 +256,8 @@ export function VaultSettingsPage() {
   }
 
   function handleCreateExport(key: KeyRef) {
-    // 硬切换 002 收尾：KeyRef 不再持有 `id`；`publicKeyHex` 唯一真值。
-    const identity: KeyIdentity = {
-      publicKeyHex: key.publicKeyHex ?? "",
-      label: key.label,
-      capabilities: key.capabilities,
-      createdAt: key.createdAt
-    };
-    setExporting(identity);
+    void key;
+    router.push("/settings/current-key");
   }
 
   const unnamedText = t("vault.settings.empty.label", { defaultValue: "未命名" });
@@ -446,23 +362,6 @@ export function VaultSettingsPage() {
                 : t("vault.settings.action.setActive", { defaultValue: "设为 active" })}
             </Button>
             <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => setManagingPasskeys(r)}
-            >
-              {t("vault.settings.action.passkeys", { defaultValue: "Passkeys" })}
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => {
-                setError(null);
-                setExporting(r);
-              }}
-            >
-              {t("vault.settings.action.export", { defaultValue: "导出" })}
-            </Button>
-            <Button
               variant="danger"
               size="sm"
               onClick={() => {
@@ -545,23 +444,6 @@ export function VaultSettingsPage() {
                 {isActive
                   ? t("vault.settings.action.current", { defaultValue: "当前 key" })
                   : t("vault.settings.action.setActive", { defaultValue: "设为 active" })}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => setManagingPasskeys(r)}
-              >
-                {t("vault.settings.action.passkeys", { defaultValue: "Passkeys" })}
-              </Button>
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={() => {
-                  setError(null);
-                  setExporting(r);
-                }}
-              >
-                {t("vault.settings.action.export", { defaultValue: "导出" })}
               </Button>
               <Button
                 variant="danger"
@@ -647,28 +529,12 @@ export function VaultSettingsPage() {
           <div className="vault-page__mobile">{mobileList}</div>
         </>
       )}
-      {exporting ? (
-        <VaultKeyExportModal
-          open={Boolean(exporting)}
-          publicKeyHex={exporting.publicKeyHex}
-          keyLabel={exporting.label}
-          onExport={handleExport}
-          onClose={() => setExporting(null)}
-        />
-      ) : null}
-
       {deleting ? (
         <VaultKeyDeleteModal
           open={Boolean(deleting)}
           keyLabel={deleting.label}
           // 硬切换 003 收尾：传完整公钥，modal 内部按需现算短公钥。
           publicKeyHex={deleting.publicKeyHex}
-          onExportBackup={
-            () => {
-              setExporting(deleting);
-              setDeleting(null);
-            }
-          }
           onConfirmDelete={handleDelete}
           onClose={() => setDeleting(null)}
         />
@@ -680,12 +546,8 @@ export function VaultSettingsPage() {
           onCreate={handleCreate}
           onExport={handleCreateExport}
           onPasskeys={(key) => {
-            setManagingPasskeys({
-              publicKeyHex: key.publicKeyHex,
-              label: key.label,
-              capabilities: key.capabilities,
-              createdAt: key.createdAt
-            });
+            void key;
+            router.push("/settings/current-key");
           }}
           onClose={() => setCreating(false)}
         />
@@ -696,15 +558,6 @@ export function VaultSettingsPage() {
           open={changingPassword}
           vault={vault}
           onClose={() => setChangingPassword(false)}
-        />
-      ) : null}
-
-      {managingPasskeys ? (
-        <VaultPasskeyModal
-          open
-          keyIdentity={managingPasskeys}
-          vault={vault}
-          onClose={() => setManagingPasskeys(null)}
         />
       ) : null}
 
@@ -731,56 +584,12 @@ export function VaultSettingsPage() {
         );
       })() : null}
 
-      <Modal
-        open={activating !== null}
-        title={t("vault.settings.activate.title", { defaultValue: "Confirm switch" })}
-        onClose={closeActivate}
-        footer={
-          <>
-            <Button variant="ghost" onClick={closeActivate} disabled={activateBusy}>
-              {t("common.action.cancel", { defaultValue: "Cancel" })}
-            </Button>
-            <Button onClick={confirmActivate} loading={activateBusy} disabled={!activatePassword}>
-              {t("vault.settings.activate.submit", { defaultValue: "Confirm" })}
-            </Button>
-          </>
-        }
-      >
-        <p className="vault-settings-activate__hint">
-          {t("vault.settings.activate.hint", {
-            defaultValue: "Enter the Vault password to switch the active key."
-          })}
-        </p>
-        {activating ? (
-          <p className="vault-settings-activate__target">
-            {activating.label || unnamedText} <code>{formatShortPublicKey(activating.publicKeyHex)}</code>
-          </p>
-        ) : null}
-        <TextInput
-          label={t("vault.settings.activate.password", { defaultValue: "Password" })}
-          type="password"
-          autoComplete="current-password"
-          value={activatePassword}
-          onChange={(e) => setActivatePassword(e.currentTarget.value)}
-          error={activateError ?? undefined}
-          autoFocus
-        />
-        {activatePasskeys.length ? (
-          <div className="vault-activate-passkeys">
-            <span>{t("vault.settings.activate.orPasskey", { defaultValue: "或使用 passkey" })}</span>
-            {activatePasskeys.map((item) => (
-              <Button
-                key={item.id}
-                variant="secondary"
-                onClick={() => void confirmActivateWithPasskey(item.id)}
-                disabled={activateBusy}
-              >
-                {item.label}
-              </Button>
-            ))}
-          </div>
-        ) : null}
-      </Modal>
+      <VaultKeySwitchModal
+        target={activating}
+        vault={vault}
+        onClose={() => setActivating(null)}
+        onActivated={handleActivated}
+      />
     </div>
   );
 }

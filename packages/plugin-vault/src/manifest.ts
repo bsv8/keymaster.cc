@@ -43,6 +43,7 @@ import type {
 import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
+import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
 import { createKeyspaceService, type KeyspaceHandle } from "./keyspaceService.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
@@ -74,8 +75,10 @@ const vaultResources: I18nPluginResources = {
       "vault.route.unlock": "Unlock wallet",
       "vault.route.create": "New wallet",
       "vault.route.settings": "Key management",
+      "vault.route.currentKey": "Current private key",
       "vault.crumb.settings": "Settings",
       "vault.crumb.keys": "Key management",
+      "vault.crumb.currentKey": "Current private key",
       "vault.command.lock": "Lock wallet",
       "vault.topbar.keySwitch": "Switch key",
       "vault.unlock.title": "Unlock wallet",
@@ -105,6 +108,14 @@ const vaultResources: I18nPluginResources = {
       "vault.keySwitch.confirmHint": "Enter the Vault password to unlock the selected key.",
       "vault.keySwitch.password": "Password",
       "vault.keySwitch.orPasskey": "Or use a passkey",
+      "vault.keySwitch.usePassword": "Use password",
+      "vault.keySwitch.passwordHint": "Enter the Vault password to unlock and switch to this private key.",
+      "vault.keySwitch.passwordSubmit": "Unlock with password",
+      "vault.keySwitch.or": "or",
+      "vault.keySwitch.usePasskey": "Use Passkey",
+      "vault.keySwitch.passkeyHint": "Choose a Passkey configured for this private key.",
+      "vault.keySwitch.noPasskeys": "This private key has no Passkeys yet.",
+      "vault.keySwitch.passkeyFailed": "Passkey verification failed",
       "vault.keySwitch.err.failed": "Failed to switch key",
       "vault.settings.title": "Key management",
       "vault.settings.description": "Manage local Vault keys, the active identity, and encrypted backups.",
@@ -219,14 +230,30 @@ const vaultResources: I18nPluginResources = {
       "vault.passkey.remove": "Remove",
       "vault.passkey.unsupported": "This browser or context does not support WebAuthn PRF. Use HTTPS and a compatible passkey device.",
       "vault.passkey.err.add": "Failed to add passkey",
-      "vault.passkey.err.remove": "Failed to remove passkey"
+      "vault.passkey.err.singleStepRequired": "This Passkey creation did not return PRF directly. This does not mean Chrome lacks PRF support. KeyMaster did not add it in strict single-step mode; your Passkey manager may still contain the newly created credential.",
+      "vault.passkey.err.remove": "Failed to remove passkey",
+      "vault.currentKey.title": "Current private key",
+      "vault.currentKey.description": "Manage protection methods and encrypted backups for the active private key.",
+      "vault.currentKey.empty.title": "No current private key",
+      "vault.currentKey.empty.description": "Create, import, or activate a key in Key management first.",
+      "vault.currentKey.empty.action": "Open Key management",
+      "vault.currentKey.identity.active": "Current active private key",
+      "vault.currentKey.protection.title": "Private key protection",
+      "vault.currentKey.protection.description": "Each protection method can independently recover the same private key.",
+      "vault.currentKey.protection.available": "Available",
+      "vault.currentKey.passkeys.added": "Passkey added to the current private key.",
+      "vault.currentKey.passkeys.removed": "Passkey removed.",
+      "vault.currentKey.backup.title": "Encrypted backup",
+      "vault.currentKey.backup.action": "Export current key backup"
     },
     "zh-CN": {
       "vault.route.unlock": "解锁钱包",
       "vault.route.create": "创建钱包",
       "vault.route.settings": "Key 管理",
+      "vault.route.currentKey": "当前私钥",
       "vault.crumb.settings": "设置",
       "vault.crumb.keys": "Key 管理",
+      "vault.crumb.currentKey": "当前私钥",
       "vault.command.lock": "锁定钱包",
       "vault.topbar.keySwitch": "切换 Key",
       "vault.unlock.title": "解锁钱包",
@@ -256,6 +283,14 @@ const vaultResources: I18nPluginResources = {
       "vault.keySwitch.confirmHint": "请输入 Vault 密码以解锁所选 key。",
       "vault.keySwitch.password": "密码",
       "vault.keySwitch.orPasskey": "或使用 passkey",
+      "vault.keySwitch.usePassword": "使用密码",
+      "vault.keySwitch.passwordHint": "输入 Vault 密码解锁并切换到这把私钥。",
+      "vault.keySwitch.passwordSubmit": "使用密码解锁",
+      "vault.keySwitch.or": "或",
+      "vault.keySwitch.usePasskey": "使用 Passkey",
+      "vault.keySwitch.passkeyHint": "选择这把私钥已经配置的 Passkey。",
+      "vault.keySwitch.noPasskeys": "这把私钥尚未配置 Passkey。",
+      "vault.keySwitch.passkeyFailed": "Passkey 验证失败",
       "vault.keySwitch.err.failed": "切换 key 失败",
       "vault.settings.title": "Key 管理",
       "vault.settings.description": "管理本地 Vault 中的 Key、active 身份和加密备份。",
@@ -370,7 +405,21 @@ const vaultResources: I18nPluginResources = {
       "vault.passkey.remove": "移除",
       "vault.passkey.unsupported": "当前浏览器或上下文不支持 WebAuthn PRF；请使用 HTTPS 和兼容的 passkey 设备。",
       "vault.passkey.err.add": "添加 passkey 失败",
-      "vault.passkey.err.remove": "移除 passkey 失败"
+      "vault.passkey.err.singleStepRequired": "本次 Passkey 创建没有直接返回 PRF（不代表 Chrome 不支持 PRF），严格单次模式下 KeyMaster 未添加它；Passkey 管理器中可能仍保留刚创建的凭证。",
+      "vault.passkey.err.remove": "移除 passkey 失败",
+      "vault.currentKey.title": "当前私钥管理",
+      "vault.currentKey.description": "管理当前 active 私钥的保护方式与加密备份。",
+      "vault.currentKey.empty.title": "当前没有可管理的私钥",
+      "vault.currentKey.empty.description": "请先到 Key 管理中创建、导入或激活一把 Key。",
+      "vault.currentKey.empty.action": "前往 Key 管理",
+      "vault.currentKey.identity.active": "当前 active 私钥",
+      "vault.currentKey.protection.title": "私钥保护",
+      "vault.currentKey.protection.description": "每种保护方式都能独立恢复同一把私钥。",
+      "vault.currentKey.protection.available": "可用",
+      "vault.currentKey.passkeys.added": "Passkey 已添加到当前私钥。",
+      "vault.currentKey.passkeys.removed": "Passkey 已移除。",
+      "vault.currentKey.backup.title": "加密备份",
+      "vault.currentKey.backup.action": "导出当前私钥备份"
     }
   }
 };
@@ -466,6 +515,19 @@ export const vaultPlugin: PluginManifest = {
     // 改为 settings.registry.register() 一处真值；shell 走 settings 分组渲染。
     const settings = ctx.get<SettingsRegistry>("settings.registry");
     settings.register({
+      id: "vault.current-key",
+      path: "/settings/current-key",
+      label: { key: "vault.route.currentKey", fallback: "Current private key" },
+      description: {
+        key: "vault.currentKey.description",
+        fallback: "Manage protection methods and encrypted backups for the active private key."
+      },
+      component: CurrentKeySettingsPage,
+      order: 0,
+      icon: "ShieldCheck",
+      visibleWhen: ({ unlocked }) => unlocked
+    });
+    settings.register({
       id: "vault.settings",
       path: "/settings/vault",
       label: { key: "vault.route.settings", fallback: "Key management" },
@@ -484,6 +546,17 @@ export const vaultPlugin: PluginManifest = {
     // 先注册入口、等待 settings 域出现后再投影到业务导航。
     const business = ctx.get<BusinessFeatureRegistry>("business.registry");
     business.registerFeature("vault", "settings", {
+      id: "settings.current-key",
+      label: { key: "vault.route.currentKey", fallback: "Current private key" },
+      description: {
+        key: "vault.currentKey.description",
+        fallback: "Manage protection methods and encrypted backups for the active private key."
+      },
+      order: 12,
+      icon: "ShieldCheck",
+      entry: { path: "/settings/current-key", component: CurrentKeySettingsPage }
+    });
+    business.registerFeature("vault", "settings", {
       id: "settings.vault",
       label: { key: "vault.route.settings", fallback: "Key management" },
       description: {
@@ -497,6 +570,15 @@ export const vaultPlugin: PluginManifest = {
 
     // 硬切换 003：面包屑第一段固定为不可点击的"设置"分类节点。
     const breadcrumbs = ctx.get<BreadcrumbRegistry>("breadcrumb.registry");
+    breadcrumbs.register({
+      id: "breadcrumb.vault.current-key",
+      order: 0,
+      match: (path) => path === "/settings/current-key",
+      resolve: () => [
+        { label: { key: "vault.crumb.settings", fallback: "Settings" } },
+        { label: { key: "vault.crumb.currentKey", fallback: "Current private key" } }
+      ]
+    });
     breadcrumbs.register({
       id: "breadcrumb.vault.keys",
       order: 0,

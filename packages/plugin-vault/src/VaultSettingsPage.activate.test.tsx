@@ -43,6 +43,8 @@ function makeVault(activateKey = vi.fn(async () => ({ status: "accepted" as cons
     changePassword: async () => undefined,
     dispose: () => undefined,
     activateKey,
+    activateKeyWithPasskey: async () => ({ status: "accepted" as const }),
+    listPasskeysForKey: async () => [],
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
     recoverEmptyVaultToUninitialized: async () => undefined,
     listKeys: async () => [],
@@ -178,8 +180,8 @@ describe("VaultSettingsPage active switching", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeTruthy();
     });
-    await user.type(screen.getByLabelText(/密码|Password/), "correct-horse-battery-staple");
-    await user.click(screen.getByRole("button", { name: /确认|Confirm/ }));
+    await user.type(screen.getByLabelText(/Vault 密码|Vault password/i), "correct-horse-battery-staple");
+    await user.click(screen.getByRole("button", { name: /使用密码解锁|Unlock with password/ }));
 
     await waitFor(() => {
       expect(activateKey).toHaveBeenCalledWith({

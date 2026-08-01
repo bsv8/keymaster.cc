@@ -177,6 +177,23 @@ const coordinatorState: CoordinatorState = {
 };
 
 const connectedPorts = new Map<string, ConnectedPort>();
+const PASSKEY_ADD_INTENT_TTL_MS = 120_000;
+const passkeyAddIntents = new Map<string, {
+  publicKeyHex: string;
+  sessionEpoch: SessionEpoch;
+  label: string;
+  expiresAt: number;
+}>();
+function prunePasskeyAddIntents(now = Date.now()): void {
+  for (const [intentId, intent] of passkeyAddIntents) {
+    if (intent.expiresAt <= now) passkeyAddIntents.delete(intentId);
+  }
+  while (passkeyAddIntents.size >= 32) {
+    const oldestIntentId = passkeyAddIntents.keys().next().value as string | undefined;
+    if (!oldestIntentId) break;
+    passkeyAddIntents.delete(oldestIntentId);
+  }
+}
 let sessionRevision = 0;
 let backgroundSnapshotRevision = 0;
 let assetDataRevision = 0;
@@ -202,6 +219,7 @@ async function enterUnlockedState(
   // 更新状态
   coordinatorState.vaultStatus = "unlocked";
   coordinatorState.sessionEpoch = generateEpoch();
+  passkeyAddIntents.clear();
   coordinatorState.activePublicKeyHex = activePublicKeyHex;
   coordinatorState.passwordKey = passwordKey;
   coordinatorState.activePrivateKeyBytes = activePrivateKeyBytes;
@@ -605,7 +623,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== operation.publicKeyHex) {
         await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
       }
-      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); coordinatorMeta.activePublicKeyHex = key.publicKeyHex; coordinatorMeta.generation = coordinatorState.keyspaceGeneration; await persistActiveMeta(); publishSessionState("activate-key"); return true;
+      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); passkeyAddIntents.clear(); coordinatorMeta.activePublicKeyHex = key.publicKeyHex; coordinatorMeta.generation = coordinatorState.keyspaceGeneration; await persistActiveMeta(); publishSessionState("activate-key"); return true;
     }
     case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true;
     case "deleteKey": { const meta = await getVaultMeta(); if (!meta || !(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true; }
@@ -614,15 +632,22 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     case "createVaultWithImportedKey": return await createVaultRpc(operation.vaultPassword, operation.key);
     case "generateKey": return await addKeyRpc(operation.password, { label: operation.label, capabilities: operation.capabilities, material: { hex: generatePrivateKeyHex() }, format: "generated", source: "vault-generated" });
     case "importPrivateKey": return await addKeyRpc(operation.password, operation);
-    case "listPasskeys": {
+    case "exportCurrentKeyBackup": {
+      const key = await requireCurrentKeyRecord();
+      const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(key.publicKeyHex);
+      return (await import("@keymaster/plugin-vault/coordinator")).encodeKeyBackup(buildKeyBackupEnvelope(sourceVaultMeta, keyRecord));
+    }
+    case "listCurrentKeyPasskeys": {
+      const key = await requireCurrentKeyRecord();
+      return (key.passkeyProtections ?? []).map(toPasskeySummary);
+    }
+    case "listPasskeysForKey": {
       const key = await vaultDb.getKey(operation.publicKeyHex);
       if (!key) throw new Error("Key not found");
       return (key.passkeyProtections ?? []).map(toPasskeySummary);
     }
     case "getPasskeyChallenge": {
-      const key = await vaultDb.getKey(operation.publicKeyHex);
-      const protection = key?.passkeyProtections?.find((item) => item.id === operation.passkeyId);
-      if (!protection) throw new Error("Passkey protection not found");
+      const { protection } = await findKeyByPasskeyId(operation.passkeyId);
       return {
         credentialIdB64: protection.credentialIdB64,
         prfSaltB64: protection.prfSaltB64,
@@ -630,30 +655,51 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         transports: protection.transports
       };
     }
-    case "addPasskeyProtection": {
-      const meta = await getVaultMeta();
-      if (!meta) throw new Error("Vault not initialized");
-      const source = await resolveVaultPasswordKey(operation.password, meta);
-      const key = await vaultDb.getKey(operation.publicKeyHex);
-      if (!key) throw new Error("Key not found");
+    case "prepareAddPasskeyToCurrentKey": {
+      const key = await requireCurrentKeyRecord();
       const label = operation.label.trim();
       if (!label) throw new Error("Passkey name is required");
       if ((key.passkeyProtections ?? []).some((item) => item.label === label)) {
         throw new Error("Passkey name already exists for this key");
       }
-      if ((key.passkeyProtections ?? []).some((item) => item.id === operation.credentialIdB64)) {
-        throw new Error("Passkey already exists for this key");
-      }
-      const material = await decryptVaultKeyMaterialForMigration(source.key, key, source.encoding);
-      const encrypted = await encryptMaterialWithPasskey({
-        prfOutput: cryptoHexToBytes(operation.prfOutputHex),
+      prunePasskeyAddIntents();
+      const intentId = crypto.randomUUID();
+      passkeyAddIntents.set(intentId, {
         publicKeyHex: key.publicKeyHex,
-        credentialIdB64: operation.credentialIdB64,
-        material
+        sessionEpoch: coordinatorState.sessionEpoch,
+        label,
+        expiresAt: Date.now() + PASSKEY_ADD_INTENT_TTL_MS
       });
+      return { intentId, publicKeyHex: key.publicKeyHex };
+    }
+    case "addPasskeyToCurrentKey": {
+      const intent = passkeyAddIntents.get(operation.intentId);
+      passkeyAddIntents.delete(operation.intentId);
+      if (!intent || intent.expiresAt < Date.now()) throw new Error("Passkey setup expired; try again");
+      const key = await requireCurrentKeyRecord();
+      if (intent.sessionEpoch !== coordinatorState.sessionEpoch || intent.publicKeyHex !== key.publicKeyHex) {
+        throw new Error("Current key changed during passkey setup");
+      }
+      const allKeys = await vaultDb.listKeys();
+      if (allKeys.some((record) => (record.passkeyProtections ?? []).some((item) => item.id === operation.credentialIdB64))) {
+        throw new Error("Passkey already exists in this Vault");
+      }
+      const prfOutput = cryptoHexToBytes(operation.prfOutputHex);
+      const material = { hex: bytesToHex(coordinatorState.activePrivateKeyBytes!) };
+      let encrypted: Awaited<ReturnType<typeof encryptMaterialWithPasskey>>;
+      try {
+        encrypted = await encryptMaterialWithPasskey({
+          prfOutput,
+          publicKeyHex: key.publicKeyHex,
+          credentialIdB64: operation.credentialIdB64,
+          material
+        });
+      } finally {
+        prfOutput.fill(0);
+      }
       const protection = {
         id: operation.credentialIdB64,
-        label,
+        label: intent.label,
         credentialIdB64: operation.credentialIdB64,
         prfSaltB64: operation.prfSaltB64,
         rpId: operation.rpId,
@@ -667,9 +713,8 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       });
       return toPasskeySummary(protection);
     }
-    case "removePasskeyProtection": {
-      const key = await vaultDb.getKey(operation.publicKeyHex);
-      if (!key) throw new Error("Key not found");
+    case "removePasskeyFromCurrentKey": {
+      const key = await requireCurrentKeyRecord();
       const next = (key.passkeyProtections ?? []).filter((item) => item.id !== operation.passkeyId);
       if (next.length === (key.passkeyProtections ?? []).length) throw new Error("Passkey protection not found");
       await vaultDb.putKey({ ...key, passkeyProtections: next });
@@ -677,14 +722,18 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     }
     case "activateKeyWithPasskey": {
       if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
-      const key = await vaultDb.getKey(operation.publicKeyHex);
-      const protection = key?.passkeyProtections?.find((item) => item.id === operation.passkeyId);
-      if (!key || !protection) throw new Error("Passkey protection not found");
-      const material = await decryptMaterialWithPasskey({
-        prfOutput: cryptoHexToBytes(operation.prfOutputHex),
-        publicKeyHex: key.publicKeyHex,
-        protection
-      });
+      const { key, protection } = await findKeyByPasskeyId(operation.passkeyId);
+      const prfOutput = cryptoHexToBytes(operation.prfOutputHex);
+      let material: Awaited<ReturnType<typeof decryptMaterialWithPasskey>>;
+      try {
+        material = await decryptMaterialWithPasskey({
+          prfOutput,
+          publicKeyHex: key.publicKeyHex,
+          protection
+        });
+      } finally {
+        prfOutput.fill(0);
+      }
       const privateKey = cryptoHexToBytes(material.hex);
       verifySessionKeyPair({ publicKeyHex: key.publicKeyHex, privateKeyBytes: privateKey });
       if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== key.publicKeyHex) {
@@ -695,6 +744,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       coordinatorState.activePublicKeyHex = key.publicKeyHex;
       coordinatorState.keyspaceGeneration++;
       coordinatorState.sessionEpoch = generateEpoch();
+      passkeyAddIntents.clear();
       coordinatorMeta.activePublicKeyHex = key.publicKeyHex;
       coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
       await persistActiveMeta();
@@ -752,6 +802,36 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
   }
 }
 
+async function requireCurrentKeyRecord(): Promise<VaultKeyRecord> {
+  if (
+    coordinatorState.vaultStatus !== "unlocked" ||
+    !coordinatorState.activePublicKeyHex ||
+    !coordinatorState.activePrivateKeyBytes
+  ) {
+    throw new Error("No active private key");
+  }
+  const key = await vaultDb.getKey(coordinatorState.activePublicKeyHex);
+  if (!key) throw new Error("Active key not found");
+  verifySessionKeyPair({
+    publicKeyHex: key.publicKeyHex,
+    privateKeyBytes: coordinatorState.activePrivateKeyBytes
+  });
+  return key;
+}
+
+async function findKeyByPasskeyId(passkeyId: string): Promise<{
+  key: VaultKeyRecord;
+  protection: NonNullable<VaultKeyRecord["passkeyProtections"]>[number];
+}> {
+  const matches = (await vaultDb.listKeys()).flatMap((key) => {
+    const protection = key.passkeyProtections?.find((item) => item.id === passkeyId);
+    return protection ? [{ key, protection }] : [];
+  });
+  if (matches.length === 0) throw new Error("Passkey protection not found");
+  if (matches.length > 1) throw new Error("Passkey protection id is not unique");
+  return matches[0]!;
+}
+
 function generatePrivateKeyHex(): string { const bytes = crypto.getRandomValues(new Uint8Array(32)); return bytesToHex(bytes); }
 async function createVaultRpc(password: string, key?: { label?: string; capabilities?: string[]; material?: { hex: string; wif?: string }; format?: string; source?: string }): Promise<unknown> {
   if (await getVaultMeta()) throw new Error("Vault already exists");
@@ -767,6 +847,7 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   }
   // 空 Vault 创建后保持 locked 状态，清空内存中的 passwordKey
   coordinatorState.passwordKey = undefined;
+  passkeyAddIntents.clear();
   coordinatorState.vaultStatus = "locked";
   coordinatorState.sessionEpoch = generateEpoch();
   coordinatorMeta.activePublicKeyHex = undefined;
@@ -841,6 +922,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   coordinatorState.activePublicKeyHex = undefined;
   coordinatorState.activePrivateKeyBytes = undefined;
   coordinatorState.passwordKey = undefined;
+  passkeyAddIntents.clear();
 
   // 递增 epoch
   coordinatorState.sessionEpoch = generateEpoch();
@@ -1335,6 +1417,7 @@ export function __testResetState(): void {
   coordinatorState.autoLockDeadline = undefined;
   coordinatorState.lastActivityAt = Date.now();
   connectedPorts.clear();
+  passkeyAddIntents.clear();
 }
 
 export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePublicKeyHex?: string): void {
@@ -1444,27 +1527,34 @@ export async function __testImportKeyBackup(backup: string, sourcePassword: stri
   return result as { publicKeyHex: string };
 }
 
-export async function __testAddPasskeyProtection(input: {
-  publicKeyHex: string;
+export async function __testAddPasskeyToCurrentKey(input: {
   label: string;
-  password: string;
   credentialIdB64: string;
   prfSaltB64: string;
   prfOutputHex: string;
   rpId: string;
 }): Promise<unknown> {
-  return executeVaultOperation({ type: "addPasskeyProtection", ...input });
+  const prepared = await executeVaultOperation({
+    type: "prepareAddPasskeyToCurrentKey",
+    label: input.label
+  }) as { intentId: string };
+  return executeVaultOperation({
+    type: "addPasskeyToCurrentKey",
+    intentId: prepared.intentId,
+    credentialIdB64: input.credentialIdB64,
+    prfSaltB64: input.prfSaltB64,
+    prfOutputHex: input.prfOutputHex,
+    rpId: input.rpId
+  });
 }
 
-export async function __testRemovePasskeyProtection(input: {
-  publicKeyHex: string;
+export async function __testRemovePasskeyFromCurrentKey(input: {
   passkeyId: string;
 }): Promise<void> {
-  await executeVaultOperation({ type: "removePasskeyProtection", ...input });
+  await executeVaultOperation({ type: "removePasskeyFromCurrentKey", ...input });
 }
 
 export async function __testActivateKeyWithPasskey(input: {
-  publicKeyHex: string;
   passkeyId: string;
   prfOutputHex: string;
 }): Promise<void> {

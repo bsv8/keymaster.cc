@@ -224,26 +224,24 @@ export interface VaultService {
   activateKey(input: { publicKeyHex: string; password: string }): Promise<CoordinatorCommandResult>;
   /** 使用指定 WebAuthn PRF 保护器解密并切换 active key。 */
   activateKeyWithPasskey(input: {
-    publicKeyHex: string;
     passkeyId: string;
   }): Promise<CoordinatorCommandResult>;
-  /** 列出某把业务私钥的 passkey 保护器；不返回密文或 PRF 参数。 */
-  listPasskeys(publicKeyHex: string): Promise<PasskeyProtection[]>;
+  /** 列出目标私钥的 passkey，供切换私钥界面渲染独立按钮。 */
+  listPasskeysForKey(publicKeyHex: string): Promise<PasskeyProtection[]>;
+  /** 列出当前 active 私钥的 passkey；不接收公钥，避免双重目标真值。 */
+  listCurrentKeyPasskeys(): Promise<PasskeyProtection[]>;
   /**
-   * 为同一把业务私钥添加一个独立的 WebAuthn PRF 保护器。
-   * password 用于重新授权和读取现有密码密文；PRF 交互由实现内部完成。
+   * 为当前 active 私钥添加 WebAuthn PRF 保护器。
+   * 当前 session 的内存私钥是唯一材料来源，不接收公钥或 Vault 密码。
    */
-  addPasskey(input: {
-    publicKeyHex: string;
+  addPasskeyToCurrentKey(input: {
     label: string;
-    password: string;
   }): Promise<PasskeyProtection>;
   /**
    * 移除一个 passkey 保护器；无需密码，因为这只删除一个冗余解密器，
    * 不会解密或导出私钥。密码保护器始终保留，不能由此接口删除。
    */
-  removePasskey(input: {
-    publicKeyHex: string;
+  removePasskeyFromCurrentKey(input: {
     passkeyId: string;
   }): Promise<void>;
   /**
@@ -497,6 +495,8 @@ export interface VaultService {
    * 返回值是可直接下载的 JSON 字符串。
    */
   exportKeyBackup(publicKeyHex: string): Promise<string>;
+  /** 导出当前 active 私钥的加密备份；不接收公钥。 */
+  exportCurrentKeyBackup(): Promise<string>;
   /**
    * 导入单 Key Backup。
    * 设计缘由：恢复需要来源 Vault 密码和目标 Vault 密码，导入侧不接触

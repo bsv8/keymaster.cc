@@ -83,11 +83,14 @@ export type CoordinatorVaultOperation =
   | { type: "importPrivateKey"; password: string; label: string; material: { hex: string; wif?: string }; format: string; capabilities: string[]; source?: string }
   | { type: "exportKeyBackup"; publicKeyHex: string }
   | { type: "importKeyBackup"; backup: string; sourcePassword: string; targetPassword: string }
-  | { type: "listPasskeys"; publicKeyHex: string }
-  | { type: "getPasskeyChallenge"; publicKeyHex: string; passkeyId: string }
-  | { type: "addPasskeyProtection"; publicKeyHex: string; label: string; password: string; credentialIdB64: string; prfSaltB64: string; prfOutputHex: string; rpId: string; transports?: string[] }
-  | { type: "removePasskeyProtection"; publicKeyHex: string; passkeyId: string }
-  | { type: "activateKeyWithPasskey"; publicKeyHex: string; passkeyId: string; prfOutputHex: string };
+  | { type: "exportCurrentKeyBackup" }
+  | { type: "listCurrentKeyPasskeys" }
+  | { type: "listPasskeysForKey"; publicKeyHex: string }
+  | { type: "prepareAddPasskeyToCurrentKey"; label: string }
+  | { type: "addPasskeyToCurrentKey"; intentId: string; credentialIdB64: string; prfSaltB64: string; prfOutputHex: string; rpId: string; transports?: string[] }
+  | { type: "removePasskeyFromCurrentKey"; passkeyId: string }
+  | { type: "getPasskeyChallenge"; passkeyId: string }
+  | { type: "activateKeyWithPasskey"; passkeyId: string; prfOutputHex: string };
 
 // ============================================================
 // 3. Coordinator -> Client Response

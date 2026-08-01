@@ -235,6 +235,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
   type SessionCryptoEngine = Awaited<ReturnType<typeof createSessionCryptoEngine>>;
   interface VaultSessionStateInternal extends VaultSessionState {
     activeCrypto: SessionCryptoEngine | null;
+    passwordKey: CryptoKey;
   }
   let vaultSession: VaultSessionStateInternal | null = null;
   /** 当前 key 列表的内存缓存（identity 字段已就绪），避免每次都 await IndexedDB。 */
@@ -341,14 +342,15 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     await createAndInstallSessionActiveCrypto(record, passwordKey);
   }
 
-  function startVaultSession(): void {
+  function startVaultSession(passwordKey: CryptoKey): void {
     const activePublicKeyHex = deps.keyspace?.active().activePublicKeyHex;
     vaultSession = {
       sessionId: crypto.randomUUID(),
       kind: "keymaster",
       publicKeyHex: activePublicKeyHex,
       revoked: false,
-      activeCrypto: null
+      activeCrypto: null,
+      passwordKey
     };
   }
 
@@ -844,7 +846,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const verifier = await encryptVerifier(key);
       const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultDb.putMeta(meta);
-      startVaultSession();
+      startVaultSession(key);
       try {
         // 与 unlock 一致：先把 keyspace 推到 ready 状态，再宣布 unlocked。
         if (deps.keyspace) {
@@ -918,7 +920,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const verifier = await encryptVerifier(key);
       const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultDb.putMeta(meta);
-      startVaultSession();
+      startVaultSession(key);
       // 2) keyspace ready 边界（与 createVault / unlock 一致）。
       try {
         if (deps.keyspace) {
@@ -1045,7 +1047,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const verifier = await encryptVerifier(key);
       const meta = coordinatorBuildVaultMeta({ salt, verifier });
       await vaultDb.putMeta(meta);
-      startVaultSession();
+      startVaultSession(key);
       // 2) keyspace ready 边界（与 createVault / unlock 一致）。
       try {
         if (deps.keyspace) {
@@ -1135,7 +1137,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const meta = await vaultDb.getMeta();
       if (!meta) throw new Error("Vault not initialized");
       const { key, encoding, verifierVersion } = await coordinatorResolveVaultPasswordKey(password, meta);
-      startVaultSession();
+      startVaultSession(key);
       try {
         await coordinatorMigrateVaultKeysToV2Aad({
           meta,
@@ -1429,58 +1431,78 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return { status: "accepted" } satisfies CoordinatorCommandResult;
     },
 
-    async listPasskeys(publicKeyHex: string) {
+    async listPasskeysForKey(publicKeyHex: string) {
       const record = await vaultDb.getKey(publicKeyHex);
       if (!record) throw new Error(`Unknown key ${publicKeyHex}`);
       return (record.passkeyProtections ?? []).map(toPasskeySummary);
     },
 
-    async addPasskey(input: { publicKeyHex: string; label: string; password: string }) {
-      if (status !== "unlocked") throw new Error("Vault must be unlocked");
+    async listCurrentKeyPasskeys() {
+      if (status !== "unlocked" || !vaultSession?.publicKeyHex) {
+        throw new Error("No active private key");
+      }
+      const record = await vaultDb.getKey(vaultSession.publicKeyHex);
+      if (!record) throw new Error("Active key not found");
+      return (record.passkeyProtections ?? []).map(toPasskeySummary);
+    },
+
+    async addPasskeyToCurrentKey(input: { label: string }) {
+      if (status !== "unlocked" || !vaultSession?.publicKeyHex) throw new Error("No active private key");
       const label = input.label.trim();
       if (!label) throw new Error("Passkey name is required");
       if (label.length > LABEL_MAX_LENGTH) {
         throw new Error(`Passkey name must be at most ${LABEL_MAX_LENGTH} characters`);
       }
-      const meta = await vaultDb.getMeta();
-      if (!meta) throw new Error("Vault not initialized");
-      const passwordKey = await coordinatorVerifyVaultPasswordKey(input.password, meta);
-      const record = await vaultDb.getKey(input.publicKeyHex);
-      if (!record) throw new Error(`Unknown key ${input.publicKeyHex}`);
+      const publicKeyHex = vaultSession.publicKeyHex;
+      const passwordKey = vaultSession.passwordKey;
+      const record = await vaultDb.getKey(publicKeyHex);
+      if (!record) throw new Error("Active key not found");
       if ((record.passkeyProtections ?? []).some((item) => item.label === label)) {
         throw new Error("Passkey name already exists for this key");
       }
       const material = await coordinatorDecryptVaultKeyMaterialForMigration(passwordKey, record);
       const created = await createPasskeyPrf({ label, publicKeyHex: record.publicKeyHex });
-      if ((record.passkeyProtections ?? []).some((item) => item.id === created.credentialIdB64)) {
-        throw new Error("Passkey already exists for this key");
+      try {
+        if (status !== "unlocked" || vaultSession?.publicKeyHex !== publicKeyHex) {
+          throw new Error("Current key changed during passkey setup");
+        }
+        if ((await vaultDb.listKeys()).some((key) =>
+          (key.passkeyProtections ?? []).some((item) => item.id === created.credentialIdB64)
+        )) {
+          throw new Error("Passkey already exists in this Vault");
+        }
+        const encrypted = await encryptMaterialWithPasskey({
+          prfOutput: created.prfOutput,
+          publicKeyHex: record.publicKeyHex,
+          credentialIdB64: created.credentialIdB64,
+          material
+        });
+        const protection = {
+          id: created.credentialIdB64,
+          label,
+          credentialIdB64: created.credentialIdB64,
+          prfSaltB64: created.prfSaltB64,
+          rpId: created.rpId,
+          createdAt: new Date().toISOString(),
+          transports: created.transports,
+          ...encrypted
+        };
+        await vaultDb.putKey({
+          ...record,
+          passkeyProtections: [...(record.passkeyProtections ?? []), protection]
+        });
+        return toPasskeySummary(protection);
+      } finally {
+        created.prfOutput.fill(0);
       }
-      const encrypted = await encryptMaterialWithPasskey({
-        prfOutput: created.prfOutput,
-        publicKeyHex: record.publicKeyHex,
-        credentialIdB64: created.credentialIdB64,
-        material
-      });
-      const protection = {
-        id: created.credentialIdB64,
-        label,
-        credentialIdB64: created.credentialIdB64,
-        prfSaltB64: created.prfSaltB64,
-        rpId: created.rpId,
-        createdAt: new Date().toISOString(),
-        transports: created.transports,
-        ...encrypted
-      };
-      await vaultDb.putKey({
-        ...record,
-        passkeyProtections: [...(record.passkeyProtections ?? []), protection]
-      });
-      return toPasskeySummary(protection);
     },
 
-    async removePasskey(input: { publicKeyHex: string; passkeyId: string }) {
-      const record = await vaultDb.getKey(input.publicKeyHex);
-      if (!record) throw new Error(`Unknown key ${input.publicKeyHex}`);
+    async removePasskeyFromCurrentKey(input: { passkeyId: string }) {
+      if (status !== "unlocked" || !vaultSession?.publicKeyHex) {
+        throw new Error("No active private key");
+      }
+      const record = await vaultDb.getKey(vaultSession.publicKeyHex);
+      if (!record) throw new Error("Active key not found");
       const next = (record.passkeyProtections ?? []).filter((item) => item.id !== input.passkeyId);
       if (next.length === (record.passkeyProtections ?? []).length) {
         throw new Error("Passkey protection not found");
@@ -1488,28 +1510,35 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       await vaultDb.putKey({ ...record, passkeyProtections: next });
     },
 
-    async activateKeyWithPasskey(input: { publicKeyHex: string; passkeyId: string }) {
+    async activateKeyWithPasskey(input: { passkeyId: string }) {
       if (status !== "unlocked" || !vaultSession) throw new Error("Vault must be unlocked");
-      const record = await vaultDb.getKey(input.publicKeyHex);
-      if (!record) throw new Error(`Unknown key ${input.publicKeyHex}`);
-      const protection = record.passkeyProtections?.find((item) => item.id === input.passkeyId);
-      if (!protection) throw new Error("Passkey protection not found");
-      const prfOutput = await requestPasskeyPrf(protection);
-      const material = await decryptMaterialWithPasskey({
-        prfOutput,
-        publicKeyHex: record.publicKeyHex,
-        protection
+      const matches = (await vaultDb.listKeys()).flatMap((record) => {
+        const protection = record.passkeyProtections?.find((item) => item.id === input.passkeyId);
+        return protection ? [{ record, protection }] : [];
       });
-      const identity = deriveKeyIdentity(hexToBytes(material.hex));
-      if (identity.publicKeyHex !== record.publicKeyHex) throw new Error("Passkey key identity mismatch");
-      const nextCrypto = await createActiveCryptoForPasskey(record, input.passkeyId, prfOutput);
-      const previousActive = deps.keyspace?.active().activePublicKeyHex;
-      if (deps.keyspace && previousActive !== input.publicKeyHex) {
-        await deps.keyspace.setActive(input.publicKeyHex);
+      if (matches.length === 0) throw new Error("Passkey protection not found");
+      if (matches.length > 1) throw new Error("Passkey protection id is not unique");
+      const { record, protection } = matches[0]!;
+      const prfOutput = await requestPasskeyPrf(protection);
+      try {
+        const material = await decryptMaterialWithPasskey({
+          prfOutput,
+          publicKeyHex: record.publicKeyHex,
+          protection
+        });
+        const identity = deriveKeyIdentity(hexToBytes(material.hex));
+        if (identity.publicKeyHex !== record.publicKeyHex) throw new Error("Passkey key identity mismatch");
+        const nextCrypto = await createActiveCryptoForPasskey(record, input.passkeyId, prfOutput);
+        const previousActive = deps.keyspace?.active().activePublicKeyHex;
+        if (deps.keyspace && previousActive !== record.publicKeyHex) {
+          await deps.keyspace.setActive(record.publicKeyHex);
+        }
+        setSessionActiveCrypto(record.publicKeyHex, nextCrypto);
+        revokeActiveKeyCryptoLeases(previousActive, "active key changed");
+        return { status: "accepted" } satisfies CoordinatorCommandResult;
+      } finally {
+        prfOutput.fill(0);
       }
-      setSessionActiveCrypto(record.publicKeyHex, nextCrypto);
-      revokeActiveKeyCryptoLeases(previousActive, "active key changed");
-      return { status: "accepted" } satisfies CoordinatorCommandResult;
     },
 
     /**
@@ -1726,6 +1755,14 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
 
     async exportKeyBackup(publicKeyHex: string): Promise<string> {
       const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(publicKeyHex);
+      return encodeKeyBackup(buildKeyBackupEnvelope(sourceVaultMeta, keyRecord));
+    },
+
+    async exportCurrentKeyBackup(): Promise<string> {
+      if (status !== "unlocked" || !vaultSession?.publicKeyHex) {
+        throw new Error("No active private key");
+      }
+      const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(vaultSession.publicKeyHex);
       return encodeKeyBackup(buildKeyBackupEnvelope(sourceVaultMeta, keyRecord));
     },
 

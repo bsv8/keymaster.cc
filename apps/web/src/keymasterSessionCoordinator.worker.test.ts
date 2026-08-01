@@ -12,7 +12,7 @@ import {
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testBackgroundRunNow,
-  __testAddPasskeyProtection,
+  __testAddPasskeyToCurrentKey,
   __testActivateKeyWithPasskey,
   __testCancelByKey,
   __testCreateVault,
@@ -27,7 +27,7 @@ import {
   __testInvalidateSession,
   __testLock,
   __testRegisterTask,
-  __testRemovePasskeyProtection,
+  __testRemovePasskeyFromCurrentKey,
   __testResetState,
   __testRestartWorker,
   __testRunTask,
@@ -183,7 +183,10 @@ describe("Session Coordinator worker", () => {
     a.messages.length = 0;
     // 锁定
     a.send({ kind: "lock", clientId: "a", requestId: "lock", expectedSessionEpoch: __testGetSnapshot().sessionEpoch });
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    for (let attempt = 0; attempt < 50; attempt++) {
+      if (a.messages.some((message) => (message as { type?: string }).type === "background.snapshot.changed")) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     const backgroundEvents = a.messages.filter((m) => (m as { type?: string }).type === "background.snapshot.changed");
     expect(backgroundEvents.length).toBeGreaterThan(0);
   });
@@ -387,10 +390,8 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
   it("stores a passkey alongside password and switches with its PRF output", async () => {
     const first = await __testCreateVault("vault-password", { label: "first" });
     const prfOutputHex = "ab".repeat(32);
-    await __testAddPasskeyProtection({
-      publicKeyHex: first.publicKeyHex!,
+    await __testAddPasskeyToCurrentKey({
       label: "passkey01",
-      password: "vault-password",
       credentialIdB64: "credential-one",
       prfSaltB64: "salt-one",
       prfOutputHex,
@@ -409,7 +410,6 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
     });
     expect(__testGetActivePublicKeyHex()).toBe(second.publicKeyHex);
     await __testActivateKeyWithPasskey({
-      publicKeyHex: first.publicKeyHex!,
       passkeyId: "credential-one",
       prfOutputHex
     });
@@ -418,18 +418,15 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
 
   it("removes a passkey protector without asking for the Vault password", async () => {
     const key = await __testCreateVault("vault-password", { label: "first" });
-    await __testAddPasskeyProtection({
-      publicKeyHex: key.publicKeyHex!,
+    await __testAddPasskeyToCurrentKey({
       label: "passkey01",
-      password: "vault-password",
       credentialIdB64: "credential-one",
       prfSaltB64: "salt-one",
       prfOutputHex: "ab".repeat(32),
       rpId: "keymaster.cc"
     });
 
-    await __testRemovePasskeyProtection({
-      publicKeyHex: key.publicKeyHex!,
+    await __testRemovePasskeyFromCurrentKey({
       passkeyId: "credential-one"
     });
 

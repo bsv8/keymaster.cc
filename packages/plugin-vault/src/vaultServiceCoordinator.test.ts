@@ -22,6 +22,9 @@ function makeClient(): CoordinatorClientLike & Pick<SessionCoordinatorClient, "g
       : operation === "getKey" ? ((input as { publicKeyHex: string }).publicKeyHex === PUBLIC_KEY ? KEY : undefined)
       : operation === "verifyPassword" ? true
       : operation === "exportKeyBackup" ? "backup"
+      : operation === "exportCurrentKeyBackup" ? "current-backup"
+      : operation === "listCurrentKeyPasskeys" ? []
+      : operation === "listPasskeysForKey" ? []
       : (() => { throw new Error(`unexpected operation ${operation}`); })();
     return { status: "ok" as const, value, sessionEpoch: "test-epoch" };
   });
@@ -143,6 +146,17 @@ describe("VaultServiceCoordinator", () => {
     const capability = await vault.createActiveKeyCrypto(PUBLIC_KEY);
     await capability.exportEncryptedKeyBackup({ publicKeyHex: PUBLIC_KEY });
     expect(client.vaultOperation).toHaveBeenCalledWith("exportKeyBackup", { publicKeyHex: PUBLIC_KEY });
+  });
+
+  it("uses current-key RPCs without adding a public-key argument", async () => {
+    const client = makeClient();
+    const vault = makeVault(client);
+
+    await expect(vault.exportCurrentKeyBackup()).resolves.toBe("current-backup");
+    await expect(vault.listCurrentKeyPasskeys()).resolves.toEqual([]);
+
+    expect(client.vaultOperation).toHaveBeenCalledWith("exportCurrentKeyBackup", undefined);
+    expect(client.vaultOperation).toHaveBeenCalledWith("listCurrentKeyPasskeys", undefined);
   });
 
   it("revokes the previous capability when an AppView session id is reused", async () => {

@@ -307,6 +307,10 @@ export class VaultServiceCoordinator implements VaultService {
     return await this.call<string>("exportKeyBackup", { publicKeyHex });
   }
 
+  async exportCurrentKeyBackup(): Promise<string> {
+    return await this.call<string>("exportCurrentKeyBackup");
+  }
+
   async importKeyBackup?(input: {
     backup: string;
     sourcePassword: string;
@@ -315,45 +319,48 @@ export class VaultServiceCoordinator implements VaultService {
     return await this.call<KeyRef>("importKeyBackup", input);
   }
 
-  async listPasskeys(publicKeyHex: string): Promise<PasskeyProtection[]> {
-    return await this.call<PasskeyProtection[]>("listPasskeys", { publicKeyHex });
+  async listPasskeysForKey(publicKeyHex: string): Promise<PasskeyProtection[]> {
+    return await this.call<PasskeyProtection[]>("listPasskeysForKey", { publicKeyHex });
   }
 
-  async addPasskey(input: {
-    publicKeyHex: string;
+  async listCurrentKeyPasskeys(): Promise<PasskeyProtection[]> {
+    return await this.call<PasskeyProtection[]>("listCurrentKeyPasskeys");
+  }
+
+  async addPasskeyToCurrentKey(input: {
     label: string;
-    password: string;
   }): Promise<PasskeyProtection> {
-    // 先验证密码，避免输错密码后仍在认证器里留下不可用 credential。
-    await this.verifyPassword(input.password);
+    const prepared = await this.call<{ intentId: string; publicKeyHex: string }>(
+      "prepareAddPasskeyToCurrentKey",
+      input
+    );
     const created = await createPasskeyPrf({
       label: input.label,
-      publicKeyHex: input.publicKeyHex
+      publicKeyHex: prepared.publicKeyHex
     });
-    return await this.call<PasskeyProtection>("addPasskeyProtection", {
-      ...input,
-      credentialIdB64: created.credentialIdB64,
-      prfSaltB64: created.prfSaltB64,
-      prfOutputHex: bytesToHex(created.prfOutput),
-      rpId: created.rpId,
-      transports: created.transports
-    });
+    try {
+      return await this.call<PasskeyProtection>("addPasskeyToCurrentKey", {
+        intentId: prepared.intentId,
+        credentialIdB64: created.credentialIdB64,
+        prfSaltB64: created.prfSaltB64,
+        prfOutputHex: bytesToHex(created.prfOutput),
+        rpId: created.rpId,
+        transports: created.transports
+      });
+    } finally {
+      created.prfOutput.fill(0);
+    }
   }
 
-  async removePasskey(input: {
-    publicKeyHex: string;
+  async removePasskeyFromCurrentKey(input: {
     passkeyId: string;
   }): Promise<void> {
-    await this.call("removePasskeyProtection", input);
+    await this.call("removePasskeyFromCurrentKey", input);
   }
 
   async activateKeyWithPasskey(input: {
-    publicKeyHex: string;
     passkeyId: string;
   }): Promise<CoordinatorCommandResult> {
-    const passkeys = await this.listPasskeys(input.publicKeyHex);
-    const selected = passkeys.find((item) => item.id === input.passkeyId);
-    if (!selected) throw new Error("Passkey protection not found");
     const details = await this.call<{
       credentialIdB64: string;
       prfSaltB64: string;
@@ -361,10 +368,14 @@ export class VaultServiceCoordinator implements VaultService {
       transports?: string[];
     }>("getPasskeyChallenge", input);
     const prfOutput = await requestPasskeyPrf(details);
-    await this.call("activateKeyWithPasskey", {
-      ...input,
-      prfOutputHex: bytesToHex(prfOutput)
-    });
+    try {
+      await this.call("activateKeyWithPasskey", {
+        passkeyId: input.passkeyId,
+        prfOutputHex: bytesToHex(prfOutput)
+      });
+    } finally {
+      prfOutput.fill(0);
+    }
     return { status: "accepted" };
   }
 

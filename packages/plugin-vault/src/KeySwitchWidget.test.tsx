@@ -75,6 +75,8 @@ function makeVault(activateKey = vi.fn(async () => ({ status: "accepted" as cons
     changePassword: async () => undefined,
     dispose: () => undefined,
     activateKey,
+    activateKeyWithPasskey: async () => ({ status: "accepted" as const }),
+    listPasskeysForKey: async () => [],
     finalizeEmptyVaultAfterLastKeyDeletion: async () => undefined,
     recoverEmptyVaultToUninitialized: async () => undefined,
     listKeys: async () => [],
@@ -193,8 +195,8 @@ describe("KeySwitchWidget", () => {
     await waitFor(() => {
       expect(screen.getByRole("dialog")).toBeTruthy();
     });
-    await user.type(screen.getByLabelText(/Password|密码/), "correct-horse-battery-staple");
-    await user.click(screen.getByRole("button", { name: /Confirm|确认/ }));
+    await user.type(screen.getByLabelText(/Vault password|Vault 密码/i), "correct-horse-battery-staple");
+    await user.click(screen.getByRole("button", { name: /Unlock with password|使用密码解锁/ }));
 
     await waitFor(() => {
       expect(activateKey).toHaveBeenCalledWith({
@@ -207,5 +209,45 @@ describe("KeySwitchWidget", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
+  });
+
+  it("lets the user choose one of multiple passkeys by id", async () => {
+    const keyspace = makeKeyspace();
+    const vault = makeVault();
+    const activateKeyWithPasskey = vi.fn(async () => ({ status: "accepted" as const }));
+    vault.listPasskeysForKey = async () => [
+      {
+        id: "passkey-phone",
+        label: "iPhone",
+        rpId: "keymaster.cc",
+        createdAt: "2026-07-17T00:00:00.000Z"
+      },
+      {
+        id: "passkey-laptop",
+        label: "MacBook Touch ID",
+        rpId: "keymaster.cc",
+        createdAt: "2026-07-18T00:00:00.000Z"
+      }
+    ];
+    vault.activateKeyWithPasskey = activateKeyWithPasskey;
+    const host = createPluginHost({ disableConfigPersistence: true });
+    host.capabilities.provide<VaultService>("vault.service", vault);
+    host.capabilities.provide<KeyspaceService>("keyspace.service", keyspace);
+    registerVaultKeyState(host, keyspace, vault);
+
+    const user = (await import("@testing-library/user-event")).default.setup();
+    render(
+      <PluginHostProvider host={host}>
+        <KeySwitchWidget />
+      </PluginHostProvider>
+    );
+
+    await user.click(screen.getByRole("button", { name: /切换 key|Switch key/ }));
+    await user.click(screen.getByRole("button", { name: /Beta/ }));
+    await user.click(await screen.findByRole("button", { name: "MacBook Touch ID" }));
+
+    expect(activateKeyWithPasskey).toHaveBeenCalledTimes(1);
+    expect(activateKeyWithPasskey).toHaveBeenCalledWith({ passkeyId: "passkey-laptop" });
+    expect(vault.activateKey).not.toHaveBeenCalled();
   });
 });

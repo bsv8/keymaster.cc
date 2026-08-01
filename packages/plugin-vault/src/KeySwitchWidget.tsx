@@ -29,9 +29,9 @@ import { useState } from "react";
 import { ChevronDown, KeyRound, Check } from "lucide-react";
 import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey } from "@keymaster/contracts";
-import { Button, Modal, TextInput } from "@keymaster/ui";
-import type { KeyIdentity, KeyspaceService, PasskeyProtection, VaultService } from "@keymaster/contracts";
+import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
 import type { VaultKeyResourceState } from "./manifest.js";
+import { VaultKeySwitchModal } from "./VaultKeySwitchModal.js";
 
 export function KeySwitchWidget() {
   const keyspace = useCapability<KeyspaceService>("keyspace.service");
@@ -44,12 +44,7 @@ export function KeySwitchWidget() {
   const active = keyState.active;
   const [open, setOpen] = useState(false);
   const initializing = keyState.initializing;
-  const [busy, setBusy] = useState(false);
   const [pendingSwitch, setPendingSwitch] = useState<KeyIdentity | null>(null);
-  const [switchPassword, setSwitchPassword] = useState("");
-  const [switchError, setSwitchError] = useState<string | null>(null);
-  const [switchBusy, setSwitchBusy] = useState(false);
-  const [switchPasskeys, setSwitchPasskeys] = useState<PasskeyProtection[]>([]);
 
 
   const current = active.activePublicKeyHex
@@ -57,77 +52,15 @@ export function KeySwitchWidget() {
     : undefined;
 
   function closeSwitchDialog() {
-    if (switchBusy) return;
     setPendingSwitch(null);
-    setSwitchPassword("");
-    setSwitchError(null);
-    setSwitchPasskeys([]);
   }
 
-  async function pick(key: KeyIdentity) {
-    if (busy || switchBusy) return;
+  function pick(key: KeyIdentity) {
     if (!key.publicKeyHex || key.publicKeyHex === active.activePublicKeyHex) {
       setOpen(false);
       return;
     }
     setPendingSwitch(key);
-    setSwitchPassword("");
-    setSwitchError(null);
-    setSwitchPasskeys([]);
-    if (typeof vault.listPasskeys === "function") {
-      void vault.listPasskeys(key.publicKeyHex).then(setSwitchPasskeys).catch(() => undefined);
-    }
-  }
-
-  async function submitSwitch() {
-    if (!pendingSwitch?.publicKeyHex || switchBusy) return;
-    setSwitchBusy(true);
-    setSwitchError(null);
-    try {
-      const result = await vault.activateKey({
-        publicKeyHex: pendingSwitch.publicKeyHex,
-        password: switchPassword
-      });
-      if (result.status !== "accepted") {
-        setSwitchError("message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : `Failed to switch key: ${result.status}`);
-        return;
-      }
-      setPendingSwitch(null);
-      setSwitchPassword("");
-      setSwitchError(null);
-      setOpen(false);
-    } catch (err) {
-      setSwitchError(
-        err instanceof Error
-          ? err.message
-          : t("vault.keySwitch.err.failed", { defaultValue: "Failed to switch key" })
-      );
-    } finally {
-      setSwitchBusy(false);
-    }
-  }
-
-  async function submitPasskeySwitch(passkeyId: string) {
-    if (!pendingSwitch?.publicKeyHex || switchBusy) return;
-    setSwitchBusy(true);
-    setSwitchError(null);
-    try {
-      const result = await vault.activateKeyWithPasskey({
-        publicKeyHex: pendingSwitch.publicKeyHex,
-        passkeyId
-      });
-      if (result.status !== "accepted") {
-        setSwitchError("message" in result ? result.message : `Failed to switch key: ${result.status}`);
-        return;
-      }
-      setPendingSwitch(null);
-      setSwitchPasskeys([]);
-      setOpen(false);
-    } catch (err) {
-      setSwitchError(err instanceof Error ? err.message : "Passkey verification failed");
-    } finally {
-      setSwitchBusy(false);
-    }
   }
 
   const unnamed = t("vault.keySwitch.unnamed", { defaultValue: "未命名" });
@@ -142,7 +75,6 @@ export function KeySwitchWidget() {
         title={t("vault.keySwitch.label", { defaultValue: "切换 key" })}
         aria-haspopup="menu"
         aria-expanded={open}
-        disabled={busy}
       >
         <KeyRound size={16} />
         {initializing ? (
@@ -165,7 +97,7 @@ export function KeySwitchWidget() {
               key={k.publicKeyHex}
               className={`key-switch__item ${active.activePublicKeyHex === k.publicKeyHex ? "key-switch__active" : ""}`}
               onClick={() => pick(k)}
-              disabled={busy || !k.publicKeyHex}
+              disabled={!k.publicKeyHex}
             >
               <span className="key-switch__item-label">
                 <span>{k.label || unnamed}</span>
@@ -193,60 +125,15 @@ export function KeySwitchWidget() {
           </button>
         </div>
       ) : null}
-      <Modal
-        open={pendingSwitch !== null}
-        title={t("vault.keySwitch.confirmTitle", { defaultValue: "Confirm switch" })}
+      <VaultKeySwitchModal
+        target={pendingSwitch}
+        vault={vault}
         onClose={closeSwitchDialog}
-        footer={
-          <>
-            <Button variant="ghost" onClick={closeSwitchDialog} disabled={switchBusy}>
-              {t("common.action.cancel", { defaultValue: "Cancel" })}
-            </Button>
-            <Button onClick={submitSwitch} loading={switchBusy} disabled={!switchPassword}>
-              {t("vault.keySwitch.confirm", { defaultValue: "Confirm" })}
-            </Button>
-          </>
-        }
-      >
-        <p className="key-switch__confirm-hint">
-          {t("vault.keySwitch.confirmHint", {
-            defaultValue: "Enter the Vault password to unlock the selected key."
-          })}
-        </p>
-        {pendingSwitch ? (
-          <p className="key-switch__confirm-target">
-            {pendingSwitch.label || unnamed}
-            {" "}
-            {pendingSwitch.publicKeyHex ? (
-              <code>{formatShortPublicKey(pendingSwitch.publicKeyHex)}</code>
-            ) : null}
-          </p>
-        ) : null}
-        <TextInput
-          label={t("vault.keySwitch.password", { defaultValue: "Password" })}
-          type="password"
-          autoComplete="current-password"
-          value={switchPassword}
-          onChange={(e) => setSwitchPassword(e.currentTarget.value)}
-          error={switchError ?? undefined}
-          autoFocus
-        />
-        {switchPasskeys.length ? (
-          <div className="vault-activate-passkeys">
-            <span>{t("vault.keySwitch.orPasskey", { defaultValue: "Or use a passkey" })}</span>
-            {switchPasskeys.map((item) => (
-              <Button
-                key={item.id}
-                variant="secondary"
-                onClick={() => void submitPasskeySwitch(item.id)}
-                disabled={switchBusy}
-              >
-                {item.label}
-              </Button>
-            ))}
-          </div>
-        ) : null}
-      </Modal>
+        onActivated={() => {
+          setPendingSwitch(null);
+          setOpen(false);
+        }}
+      />
     </div>
   );
 }
