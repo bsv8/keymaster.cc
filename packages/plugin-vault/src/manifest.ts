@@ -214,11 +214,10 @@ const vaultResources: I18nPluginResources = {
       "vault.passkey.recovery": "Recovery method · always retained",
       "vault.passkey.name": "Passkey name",
       "vault.passkey.namePlaceholder": "e.g. MacBook Touch ID",
-      "vault.passkey.passwordConfirm": "Vault password (confirm add or removal)",
+      "vault.passkey.passwordConfirm": "Vault password (required only when adding)",
       "vault.passkey.add": "Add passkey",
       "vault.passkey.remove": "Remove",
       "vault.passkey.unsupported": "This browser or context does not support WebAuthn PRF. Use HTTPS and a compatible passkey device.",
-      "vault.passkey.err.password": "Enter the Vault password before removing",
       "vault.passkey.err.add": "Failed to add passkey",
       "vault.passkey.err.remove": "Failed to remove passkey"
     },
@@ -366,11 +365,10 @@ const vaultResources: I18nPluginResources = {
       "vault.passkey.recovery": "恢复方式 · 始终保留",
       "vault.passkey.name": "Passkey 名称",
       "vault.passkey.namePlaceholder": "例如：MacBook Touch ID",
-      "vault.passkey.passwordConfirm": "Vault 密码（添加或移除时确认）",
+      "vault.passkey.passwordConfirm": "Vault 密码（仅添加时需要）",
       "vault.passkey.add": "添加 passkey",
       "vault.passkey.remove": "移除",
       "vault.passkey.unsupported": "当前浏览器或上下文不支持 WebAuthn PRF；请使用 HTTPS 和兼容的 passkey 设备。",
-      "vault.passkey.err.password": "请输入 Vault 密码后再移除",
       "vault.passkey.err.add": "添加 passkey 失败",
       "vault.passkey.err.remove": "移除 passkey 失败"
     }

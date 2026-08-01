@@ -668,8 +668,6 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       return toPasskeySummary(protection);
     }
     case "removePasskeyProtection": {
-      const meta = await getVaultMeta();
-      if (!meta || !(await verifyPassword(operation.password, meta))) throw new Error("Invalid password");
       const key = await vaultDb.getKey(operation.publicKeyHex);
       if (!key) throw new Error("Key not found");
       const next = (key.passkeyProtections ?? []).filter((item) => item.id !== operation.passkeyId);
@@ -1456,6 +1454,13 @@ export async function __testAddPasskeyProtection(input: {
   rpId: string;
 }): Promise<unknown> {
   return executeVaultOperation({ type: "addPasskeyProtection", ...input });
+}
+
+export async function __testRemovePasskeyProtection(input: {
+  publicKeyHex: string;
+  passkeyId: string;
+}): Promise<void> {
+  await executeVaultOperation({ type: "removePasskeyProtection", ...input });
 }
 
 export async function __testActivateKeyWithPasskey(input: {

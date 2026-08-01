@@ -1478,8 +1478,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       return toPasskeySummary(protection);
     },
 
-    async removePasskey(input: { publicKeyHex: string; passkeyId: string; password: string }) {
-      await this.verifyPassword(input.password);
+    async removePasskey(input: { publicKeyHex: string; passkeyId: string }) {
       const record = await vaultDb.getKey(input.publicKeyHex);
       if (!record) throw new Error(`Unknown key ${input.publicKeyHex}`);
       const next = (record.passkeyProtections ?? []).filter((item) => item.id !== input.passkeyId);

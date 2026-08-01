@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginManifest, SessionCoordinatorClient } from "@keymaster/contracts";
 import { createPluginHost, StartupCapabilityError, StartupPluginError, type PluginHost } from "@keymaster/runtime";
 import {
+  connectCoordinatorWithStartupRetry,
   describeBootstrapStep,
   registerPluginWithTimeout
 } from "./bootstrapPlugins.js";
@@ -69,6 +70,40 @@ describe("bootstrapPlugins hang detection", () => {
     const promise = registerPluginWithTimeout(host, makePlugin("settings"), 1_500);
     await vi.advanceTimersByTimeAsync(200);
     await expect(promise).resolves.toBeUndefined();
+  });
+});
+
+describe("Coordinator startup recovery", () => {
+  it("disconnects a failed first attempt and retries once", async () => {
+    vi.useFakeTimers();
+    const connect = vi.fn()
+      .mockRejectedValueOnce(new Error("worker load failed"))
+      .mockResolvedValueOnce(undefined);
+    const disconnect = vi.fn();
+
+    const pending = connectCoordinatorWithStartupRetry({ connect, disconnect }, 200);
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(pending).resolves.toBeUndefined();
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the second failure for the fatal startup path", async () => {
+    vi.useFakeTimers();
+    const finalError = new Error("worker still unavailable");
+    const connect = vi.fn()
+      .mockRejectedValueOnce(new Error("worker load failed"))
+      .mockRejectedValueOnce(finalError);
+    const disconnect = vi.fn();
+
+    const pending = connectCoordinatorWithStartupRetry({ connect, disconnect }, 200);
+    const assertion = expect(pending).rejects.toBe(finalError);
+    await vi.advanceTimersByTimeAsync(200);
+    await assertion;
+
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(disconnect).toHaveBeenCalledTimes(1);
   });
 });
 

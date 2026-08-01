@@ -238,11 +238,13 @@ export interface VaultService {
     label: string;
     password: string;
   }): Promise<PasskeyProtection>;
-  /** 移除一个 passkey 保护器；密码保护器始终保留，不能由此接口删除。 */
+  /**
+   * 移除一个 passkey 保护器；无需密码，因为这只删除一个冗余解密器，
+   * 不会解密或导出私钥。密码保护器始终保留，不能由此接口删除。
+   */
   removePasskey(input: {
     publicKeyHex: string;
     passkeyId: string;
-    password: string;
   }): Promise<void>;
   /**
    * 订阅 notice 变化（设置 / 清除）。返回取消订阅函数。

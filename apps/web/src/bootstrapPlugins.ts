@@ -42,6 +42,9 @@ import { registerAssetWorkspace } from "./system/registerAssetWorkspace.js";
  */
 export const BOOTSTRAP_PLUGIN_TIMEOUT_MS = 15_000;
 
+/** Worker 发布切换或缓存重新验证时的一次性恢复等待。 */
+export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 200;
+
 export const WEB_STARTUP_REQUIRED_CAPABILITIES = [
   "vault.service",
   "keyspace.service"
@@ -97,6 +100,30 @@ export async function registerPluginWithTimeout(
   }
 }
 
+/**
+ * Coordinator 启动连接的一次性有界恢复。
+ *
+ * 仅重试初始连接；业务期断线仍由 client 自身的 reconnect 机制负责。
+ */
+export async function connectCoordinatorWithStartupRetry(
+  coordinatorClient: {
+    connect(): Promise<void>;
+    disconnect(): void;
+  },
+  retryDelayMs = COORDINATOR_STARTUP_RETRY_DELAY_MS
+): Promise<void> {
+  try {
+    await coordinatorClient.connect();
+  } catch {
+    // 首次模块 Worker 加载可能恰逢静态资源发布/缓存重新验证。先彻底
+    // 关闭失败端口与其自动重连 timer，再进行一次有界重试；第二次仍
+    // 失败则保留原有 fail-fast，由 main fatal 页面展示增强后的诊断。
+    coordinatorClient.disconnect();
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    await coordinatorClient.connect();
+  }
+}
+
 export async function bootstrapPlugins(): Promise<PluginHost> {
   // 装配层把缺 key warning 打开：开发期方便排查未翻译文案。
   // import.meta.env 是 Vite 注入的；通过 typeof 守卫避免 TS 在 node 环境下报错。
@@ -113,8 +140,8 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // 施工单 002：注入 Coordinator client
   // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
   const { createCoordinatorClient } = await import("./keymasterSessionCoordinatorClient.js");
-  const coordinatorClient: SessionCoordinatorClient = createCoordinatorClient();
-  await coordinatorClient.connect();
+  const coordinatorClient = createCoordinatorClient();
+  await connectCoordinatorWithStartupRetry(coordinatorClient);
   host.provide("session-coordinator.client", coordinatorClient);
 
   // 硬切换 003：直接转发 Coordinator event 给 runtime notifier

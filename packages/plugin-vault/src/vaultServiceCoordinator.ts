@@ -343,7 +343,6 @@ export class VaultServiceCoordinator implements VaultService {
   async removePasskey(input: {
     publicKeyHex: string;
     passkeyId: string;
-    password: string;
   }): Promise<void> {
     await this.call("removePasskeyProtection", input);
   }

@@ -27,6 +27,7 @@ import {
   __testInvalidateSession,
   __testLock,
   __testRegisterTask,
+  __testRemovePasskeyProtection,
   __testResetState,
   __testRestartWorker,
   __testRunTask,
@@ -413,5 +414,28 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
       prfOutputHex
     });
     expect(__testGetActivePublicKeyHex()).toBe(first.publicKeyHex);
+  });
+
+  it("removes a passkey protector without asking for the Vault password", async () => {
+    const key = await __testCreateVault("vault-password", { label: "first" });
+    await __testAddPasskeyProtection({
+      publicKeyHex: key.publicKeyHex!,
+      label: "passkey01",
+      password: "vault-password",
+      credentialIdB64: "credential-one",
+      prfSaltB64: "salt-one",
+      prfOutputHex: "ab".repeat(32),
+      rpId: "keymaster.cc"
+    });
+
+    await __testRemovePasskeyProtection({
+      publicKeyHex: key.publicKeyHex!,
+      passkeyId: "credential-one"
+    });
+
+    const backup = decodeKeyBackup(await __testExportKeyBackup(key.publicKeyHex!));
+    expect(backup.backupVersion).toBe(2);
+    if (backup.backupVersion !== 2) throw new Error("expected v2 backup");
+    expect(Object.keys(backup.protectors)).toEqual(["password"]);
   });
 });

@@ -48,19 +48,14 @@ export function VaultPasskeyModal(props: {
   }
 
   async function remove(item: PasskeyProtection) {
-    if (!password || busy) {
-      setError(t("vault.passkey.err.password", { defaultValue: "请输入 Vault 密码后再移除" }));
-      return;
-    }
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
       await props.vault.removePasskey({
         publicKeyHex: props.keyIdentity.publicKeyHex,
-        passkeyId: item.id,
-        password
+        passkeyId: item.id
       });
-      setPassword("");
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : t("vault.passkey.err.remove", { defaultValue: "移除 passkey 失败" }));
@@ -115,7 +110,7 @@ export function VaultPasskeyModal(props: {
           disabled={!supported || busy}
         />
         <TextInput
-          label={t("vault.passkey.passwordConfirm", { defaultValue: "Vault 密码（添加或移除时确认）" })}
+          label={t("vault.passkey.passwordConfirm", { defaultValue: "Vault 密码（仅添加时需要）" })}
           type="password"
           autoComplete="current-password"
           value={password}

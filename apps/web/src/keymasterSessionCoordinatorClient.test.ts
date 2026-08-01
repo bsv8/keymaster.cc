@@ -65,8 +65,33 @@ describe("KeymasterSessionCoordinatorClient", () => {
     const Constructor = vi.fn(() => worker);
     const original = globalThis.SharedWorker;
     globalThis.SharedWorker = Constructor;
-    try { const client = createCoordinatorClient(); await client.connect(); expect(Constructor).toHaveBeenCalledWith(expect.any(URL), expect.objectContaining({ type: "module" })); }
+    try {
+      const client = createCoordinatorClient();
+      await client.connect();
+      expect(Constructor).toHaveBeenCalledWith(expect.any(URL), { type: "module" });
+    }
     finally { globalThis.SharedWorker = original; }
+  });
+
+  it("only uses a fixed SharedWorker name when the host explicitly requests one", async () => {
+    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    port.postMessage.mockImplementation((message: unknown) => {
+      const request = message as { requestId: string };
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent));
+    });
+    const Constructor = vi.fn(() => ({ port }) as unknown as SharedWorker);
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = Constructor;
+    try {
+      const client = createCoordinatorClient({ workerName: "custom-worker" });
+      await client.connect();
+      expect(Constructor).toHaveBeenCalledWith(expect.any(URL), {
+        name: "custom-worker",
+        type: "module"
+      });
+    } finally {
+      globalThis.SharedWorker = original;
+    }
   });
 
   it("connects two clients to one Worker hub and fans out state events", async () => {

@@ -86,7 +86,7 @@ export type CoordinatorVaultOperation =
   | { type: "listPasskeys"; publicKeyHex: string }
   | { type: "getPasskeyChallenge"; publicKeyHex: string; passkeyId: string }
   | { type: "addPasskeyProtection"; publicKeyHex: string; label: string; password: string; credentialIdB64: string; prfSaltB64: string; prfOutputHex: string; rpId: string; transports?: string[] }
-  | { type: "removePasskeyProtection"; publicKeyHex: string; passkeyId: string; password: string }
+  | { type: "removePasskeyProtection"; publicKeyHex: string; passkeyId: string }
   | { type: "activateKeyWithPasskey"; publicKeyHex: string; passkeyId: string; prfOutputHex: string };
 
 // ============================================================

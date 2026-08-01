@@ -2,7 +2,7 @@
 // Keymaster Session Coordinator Client Transport
 //
 // 设计缘由（施工单 002）：
-//   - 固定名称与 URL、port 生命周期、hello 重连
+//   - 版本化 URL、port 生命周期、hello 重连
 //   - requestId pending map、epoch cache、subscription event 分发
 //   - port 断开仅拒绝本 tab pending request，不发全局 lock
 
@@ -56,7 +56,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
   private clientId: string;
-  private workerName: string;
+  private workerName?: string;
+  private workerUrl?: string;
   private requestTimeoutMs: number;
   private reconnectIntervalMs: number;
 
@@ -88,7 +89,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private recoverableDiagnostics: RecoverableCoordinatorDiagnostic[] = [];
 
   constructor(options: CoordinatorClientOptions = {}) {
-    this.workerName = options.workerName ?? "keymaster.session-coordinator.v1";
+    // 默认使用 unnamed SharedWorker：浏览器以最终构建后的 hashed URL
+    // 作为共享身份，同一发布的多个 tab 仍共享；新发布 URL 变化后不会
+    // 错连仍存活的旧协议 Worker。显式 workerName 仅供测试/定制宿主。
+    this.workerName = options.workerName;
+    this.workerUrl = options.workerUrl;
     this.clientId = options.clientId ?? this.generateClientId();
     this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000;
     this.reconnectIntervalMs = options.reconnectIntervalMs ?? 5_000;
@@ -105,17 +110,48 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (typeof SharedWorker === "undefined") {
         throw new Error("Session Coordinator requires SharedWorker support");
       }
-      this.worker = new SharedWorker(new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url), {
-        name: this.workerName,
-        type: "module",
-      });
+      let workerLocationLabel = "bundled versioned module URL";
+      if (this.workerUrl) {
+        const customWorkerUrl = new URL(
+          this.workerUrl,
+          typeof globalThis.location?.href === "string"
+            ? globalThis.location.href
+            : import.meta.url
+        );
+        workerLocationLabel = customWorkerUrl.pathname;
+        this.worker = new SharedWorker(customWorkerUrl, {
+          ...(this.workerName ? { name: this.workerName } : {}),
+          type: "module"
+        });
+      } else if (this.workerName) {
+        // Vite 要求 new URL(...) 直接出现在 Worker 构造器中，才能把
+        // TypeScript worker 编译成带 hash 的 JavaScript 产物。
+        this.worker = new SharedWorker(
+          new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
+          { name: this.workerName, type: "module" }
+        );
+      } else {
+        this.worker = new SharedWorker(
+          new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
+          { type: "module" }
+        );
+      }
       this.worker.onerror = (event) => {
-        const workerMessage = "message" in event && typeof event.message === "string"
-          ? event.message
-          : undefined;
-        const message = workerMessage
-          ? `Coordinator worker error: ${workerMessage}`
-          : "Coordinator worker error";
+        const details: string[] = [];
+        if ("message" in event && typeof event.message === "string" && event.message) {
+          details.push(event.message);
+        }
+        if ("filename" in event && typeof event.filename === "string" && event.filename) {
+          const line = "lineno" in event && typeof event.lineno === "number" ? event.lineno : 0;
+          const column = "colno" in event && typeof event.colno === "number" ? event.colno : 0;
+          details.push(`${event.filename}:${line}:${column}`);
+        }
+        if ("error" in event && event.error instanceof Error && event.error.stack) {
+          details.push(event.error.stack);
+        }
+        const message = details.length
+          ? `Coordinator worker error: ${details.join(" | ")}`
+          : `Coordinator worker error while loading ${workerLocationLabel}`;
         this.handleWorkerError(message);
       };
 
