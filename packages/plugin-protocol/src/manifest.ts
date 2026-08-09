@@ -225,7 +225,15 @@ const protocolResources: I18nPluginResources = {
       "protocol.sessionWindow.appView.openingClientApp": "Opening the app…",
       "protocol.connect.launch.title": "App sign-in",
       "protocol.connect.launch.desc":
-        "The app is asking Keymaster to confirm this session. You can close this window after the app loads."
+        "The app is asking Keymaster to confirm this session. You can close this window after the app loads.",
+      "protocol.auth.login.eyebrow": "Sign in",
+      "protocol.auth.resume.eyebrow": "Resume session",
+      "protocol.feed.decision.rejected.superseded_by_resume": "Superseded by session resume",
+      "protocol.feed.section.history": "History",
+      "protocol.feed.section.live": "Live request",
+      "protocol.sessionWindow.appView.connectTimeout.soft": "The app is taking longer than expected to connect.",
+      "protocol.sessionWindow.appView.openApp": "Open app",
+      "protocol.sessionWindow.appView.ready": "Session ready"
     },
     "zh-CN": {
       "protocol.route.popup": "协议页",
@@ -393,7 +401,15 @@ const protocolResources: I18nPluginResources = {
       "protocol.sessionWindow.appView.openingClientApp": "正在打开 app…",
       "protocol.connect.launch.title": "App 登录",
       "protocol.connect.launch.desc":
-        "App 正在请求 Keymaster 确认本次会话。App 加载完成后即可关闭此窗口。"
+        "App 正在请求 Keymaster 确认本次会话。App 加载完成后即可关闭此窗口。",
+      "protocol.auth.login.eyebrow": "登录",
+      "protocol.auth.resume.eyebrow": "恢复会话",
+      "protocol.feed.decision.rejected.superseded_by_resume": "已由会话恢复取代",
+      "protocol.feed.section.history": "历史",
+      "protocol.feed.section.live": "实时请求",
+      "protocol.sessionWindow.appView.connectTimeout.soft": "应用连接时间较长，请稍候。",
+      "protocol.sessionWindow.appView.openApp": "打开应用",
+      "protocol.sessionWindow.appView.ready": "会话已就绪"
     }
   }
 };

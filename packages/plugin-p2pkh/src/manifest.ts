@@ -223,7 +223,15 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.err.keyChanged": "Active key switched. Please prepare the preview again",
       "p2pkh.transfer.err.copyHex": "Failed to copy rawTxHex",
       "p2pkh.transfer.description.bsv": "Final signed BSV mainnet transfer preview. Broadcast uses the exact rawTxHex shown here.",
-      "p2pkh.transfer.description.bsvtest": "Final signed BSV testnet transfer preview. Broadcast uses the exact rawTxHex shown here."
+      "p2pkh.transfer.description.bsvtest": "Final signed BSV testnet transfer preview. Broadcast uses the exact rawTxHex shown here.",
+      "p2pkh.col.protected": "Protected",
+      "p2pkh.col.protected.empty": "Not protected",
+      "p2pkh.utxos.summary.claimed": "Claimed",
+      "p2pkh.utxos.summary.protected": "Protected",
+      "p2pkh.transfer.result.broadcastPending": "Broadcast pending",
+      "p2pkh.transfer.result.confirmed": "Confirmed",
+      "p2pkh.transfer.result.dropped": "Dropped",
+      "p2pkh.transfer.result.observedUnconfirmed": "Observed unconfirmed"
     },
     "zh-CN": {
       "p2pkh.provider.name": "P2PKH",
@@ -390,7 +398,15 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.err.keyChanged": "当前 key 已切换，请重新准备预览",
       "p2pkh.transfer.err.copyHex": "复制 rawTxHex 失败",
       "p2pkh.transfer.description.bsv": "最终已签名的 BSV 主网转账预览。广播时直接使用这里展示的 rawTxHex。",
-      "p2pkh.transfer.description.bsvtest": "最终已签名的 BSV Testnet 转账预览。广播时直接使用这里展示的 rawTxHex。"
+      "p2pkh.transfer.description.bsvtest": "最终已签名的 BSV Testnet 转账预览。广播时直接使用这里展示的 rawTxHex。",
+      "p2pkh.col.protected": "已保护",
+      "p2pkh.col.protected.empty": "未保护",
+      "p2pkh.utxos.summary.claimed": "已占用",
+      "p2pkh.utxos.summary.protected": "已保护",
+      "p2pkh.transfer.result.broadcastPending": "等待广播",
+      "p2pkh.transfer.result.confirmed": "已确认",
+      "p2pkh.transfer.result.dropped": "已丢弃",
+      "p2pkh.transfer.result.observedUnconfirmed": "已观察到未确认状态"
     }
   }
 };

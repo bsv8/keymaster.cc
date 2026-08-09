@@ -116,7 +116,8 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.settings.diag.timeout": "timeout",
       "webrtc.page.settings.diag.error": "error",
       "webrtc.page.settings.diag.note":
-        "this only verifies STUN availability locally; it does not guarantee an audio/video path between arbitrary peers"
+        "this only verifies STUN availability locally; it does not guarantee an audio/video path between arbitrary peers",
+      "webrtc.page.settings.invalid": "Invalid STUN server configuration"
     },
     "zh-CN": {
       "webrtc.menu": "WebRTC",
@@ -176,7 +177,8 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.page.settings.diag.timeout": "超时",
       "webrtc.page.settings.diag.error": "错误",
       "webrtc.page.settings.diag.note":
-        "此测试只在本地验证 STUN 可用性，不保证任意两端一定能建立音视频通话"
+        "此测试只在本地验证 STUN 可用性，不保证任意两端一定能建立音视频通话",
+      "webrtc.page.settings.invalid": "STUN 服务器配置无效"
     }
   }
 };

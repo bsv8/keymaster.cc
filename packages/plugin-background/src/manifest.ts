@@ -54,7 +54,15 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.option.5min": "5 minutes",
       "background.settings.option.15min": "15 minutes (default)",
       "background.settings.option.30min": "30 minutes",
-      "background.settings.option.60min": "1 hour"
+      "background.settings.option.60min": "1 hour",
+      "background.settings.saveFailed": "Save failed. Please try again later.",
+      "background.tray.requestFailed": "Request failed. Please try again later.",
+      "background.tray.cancelFailed": "Cancel failed. Please try again later.",
+      "background.blocked.canRunError": "Unable to check whether this task can run.",
+      "background.blocked.unlock": "Vault is locked",
+      "background.blocked.keyReady": "Initializing key space",
+      "background.blocked.noActiveKey": "No active key",
+      "background.blocked.task": "Task is blocked"
     },
     "zh-CN": {
       "background.topbar.label": "后台任务",
@@ -80,7 +88,15 @@ const backgroundResources: I18nPluginResources = {
       "background.settings.option.5min": "5 分钟",
       "background.settings.option.15min": "15 分钟（缺省）",
       "background.settings.option.30min": "30 分钟",
-      "background.settings.option.60min": "1 小时"
+      "background.settings.option.60min": "1 小时",
+      "background.settings.saveFailed": "保存失败，请稍后重试。",
+      "background.tray.requestFailed": "请求失败，请稍后重试。",
+      "background.tray.cancelFailed": "取消失败，请稍后重试。",
+      "background.blocked.canRunError": "无法检查任务是否可以运行。",
+      "background.blocked.unlock": "保险箱已锁定",
+      "background.blocked.keyReady": "密钥空间初始化中",
+      "background.blocked.noActiveKey": "没有活跃密钥",
+      "background.blocked.task": "任务已阻塞"
     }
   }
 };

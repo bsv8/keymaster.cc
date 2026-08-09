@@ -29,6 +29,7 @@ const appsResources: I18nPluginResources = {
     en: {
       "apps.route.label": "Apps",
       "apps.menu.label": "Apps",
+      "apps.domain.label": "Applications",
       "apps.page.title": "Apps",
       "apps.page.description": "Open an app to start a Keymaster Session Window.",
       "apps.page.backToHome": "Back to home",
@@ -71,6 +72,7 @@ const appsResources: I18nPluginResources = {
     "zh-CN": {
       "apps.route.label": "应用",
       "apps.menu.label": "应用",
+      "apps.domain.label": "应用",
       "apps.page.title": "应用",
       "apps.page.description": "打开应用以启动 Keymaster Session Window。",
       "apps.page.backToHome": "返回首页",

@@ -37,8 +37,16 @@ import { createStasSyncTask } from "./stasSync.js";
 const stasResources: I18nPluginResources = {
   namespace: "stas",
   resources: {
-    en: { "stas.provider.name": "STAS" },
-    "zh-CN": { "stas.provider.name": "STAS" }
+    en: {
+      "stas.provider.name": "STAS",
+      "stas.task.sync": "STAS sync",
+      "stas.task.sync.description": "Sync STAS token holdings."
+    },
+    "zh-CN": {
+      "stas.provider.name": "STAS",
+      "stas.task.sync": "STAS 同步",
+      "stas.task.sync.description": "同步 STAS 代币持仓快照。"
+    }
   }
 };
 
