@@ -58,6 +58,28 @@ describe("KeymasterSessionCoordinatorClient", () => {
     finally { globalThis.SharedWorker = original; }
   });
 
+  it("passes Storage binary payloads through postMessage transferables", async () => {
+    let receivedLength = -1;
+    const postMessage = vi.fn((message: any, transfer: ArrayBuffer[] = []) => {
+      if (message.kind === "storage.data") {
+        const cloned = structuredClone(message, { transfer });
+        receivedLength = cloned.data.input.content.bytes.byteLength;
+      }
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: message.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: {} } } as MessageEvent));
+    });
+    const port = { start: vi.fn(), postMessage, close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    const worker = { port } as unknown as SharedWorker;
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => worker);
+    try {
+      const client = createCoordinatorClient(); await client.connect();
+      const bytes = new Uint8Array([1, 2, 3]).buffer;
+      await client.storageData({ type: "put", grantId: "g", input: { path: "x", content: { $type: "binary", bytes } } }, [bytes]);
+      expect(receivedLength).toBe(3);
+      expect(bytes.byteLength).toBe(0);
+    } finally { globalThis.SharedWorker = original; }
+  });
+
   it("uses the module URL constructor", async () => {
     const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
     port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });

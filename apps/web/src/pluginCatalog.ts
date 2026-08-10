@@ -24,6 +24,7 @@ import { keyImportPlugin } from "@keymaster/plugin-key-import";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
 import { pokerPlugin } from "@keymaster/plugin-poker";
 import { protocolPlugin } from "@keymaster/plugin-protocol";
+import { storagePlugin } from "@keymaster/plugin-storage";
 import { settingsPlugin } from "@keymaster/plugin-settings";
 import { bsv21TokenPlugin } from "@keymaster/plugin-token-bsv21";
 import { stasTokenPlugin } from "@keymaster/plugin-token-stas";
@@ -32,6 +33,7 @@ import { wocPlugin } from "@keymaster/plugin-woc";
 
 export const WEB_PLUGIN_CATALOG: readonly PluginManifest[] = [
   vaultPlugin,
+  storagePlugin,
   broadcastPlatformPlugin,
   hubcastPlatformPlugin,
   appmsgPlatformPlugin,

@@ -28,6 +28,7 @@
     "@keymaster/plugin-p2pkh": "*",
     "@keymaster/plugin-poker": "*",
     "@keymaster/plugin-protocol": "*",
+    "@keymaster/plugin-storage": "*",
     "@keymaster/plugin-settings": "*",
     "@keymaster/plugin-token-bsv21": "*",
     "@keymaster/plugin-token-stas": "*",

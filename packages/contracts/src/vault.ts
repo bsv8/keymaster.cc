@@ -100,6 +100,24 @@ export interface VaultLifecycleSnapshot {
 }
 
 /**
+ * Versioned ciphertext envelope for plugin-owned local secrets.
+ * The fields are intentionally opaque to consumers; plaintext never belongs
+ * in the public Vault or protocol contracts.
+ */
+export interface VaultSealedSecret {
+  version: 1 | 2;
+  saltHex: string;
+  nonceHex: string;
+  ciphertextHex: string;
+}
+
+/** Minimal capability for sealing plugin secrets with the Vault password key. */
+export interface VaultLocalSecretService {
+  seal(scope: string, plaintext: Uint8Array): Promise<VaultSealedSecret>;
+  open(scope: string, sealed: VaultSealedSecret): Promise<Uint8Array>;
+}
+
+/**
  * 私钥导出 envelope（bsv8 key envelope）。
  * 设计缘由：导出必须由 Vault 完成，因为只有 Vault 能接触到明文私钥。
  * importer 插件不能接触明文，因此不能实现导出。

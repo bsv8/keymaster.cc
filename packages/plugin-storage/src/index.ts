@@ -1,0 +1,15 @@
+export { storagePlugin, STORAGE_PLUGIN_ID } from "./manifest.js";
+export { StorageSettings } from "./StorageSettings.js";
+export { StorageServiceImpl, createStorageService, STORAGE_SECRET_SCOPE } from "./storageService.js";
+export type { StorageResourceSnapshot } from "./storageService.js";
+export { openStorageDb, STORAGE_DB_NAME, STORAGE_DB_VERSION } from "./storageDb.js";
+export type { StorageDb, StoredMultipartUploadRecord, StoredProviderConfigRecord } from "./storageDb.js";
+export { createS3ObjectStore, createS3ObjectStoreCapabilityState, setS3ObjectStoreCapabilityMode, commitAutomaticS3ObjectStoreCapability } from "./s3ObjectStore.js";
+export type { S3ObjectStore, S3ListOutput, S3GetOutput, S3ObjectStoreCapabilityState, S3ConditionalCapability, S3ConditionalWriteMode, S3ConditionalCapabilitySource } from "./s3ObjectStore.js";
+export * from "./storagePath.js";
+export * from "./storageNamespace.js";
+export * from "./providerConfig.js";
+export { StorageServiceError } from "./storageErrors.js";
+export { StorageServiceProxy } from "./storageServiceProxy.js";
+export { createConnectObjectStoreFixture } from "./s3DiskObjectStoreFixture.js";
+export type { ConnectObjectStoreFixture, ConnectObjectStoreFixtureInput, ConnectDirectoryListing, ConnectObjectReadStream } from "./s3DiskObjectStoreFixture.js";

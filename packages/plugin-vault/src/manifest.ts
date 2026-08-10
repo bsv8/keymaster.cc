@@ -40,7 +40,7 @@ import type {
   , CoordinatorVaultStatus
   , SessionCoordinatorClient
 } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, type VaultLocalSecretService } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
@@ -50,6 +50,7 @@ import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
 import { KeySwitchWidget } from "./KeySwitchWidget.js";
+import { createVaultLocalSecretService } from "./localSecretService.js";
 
 export interface VaultKeyResourceState {
   keys: KeyIdentity[];
@@ -439,7 +440,7 @@ export const vaultPlugin: PluginManifest = {
     startup: "required",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [VAULT_CAPABILITY, "keyspace.service"],
+    providesCapabilities: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY],
     displayGroup: "core"
   },
   i18n: vaultResources,
@@ -464,6 +465,7 @@ export const vaultPlugin: PluginManifest = {
     }
 
     ctx.provide(VAULT_CAPABILITY, service);
+    ctx.provide<VaultLocalSecretService>(VAULT_LOCAL_SECRET_CAPABILITY, createVaultLocalSecretService(coordinatorClient));
 
     // 创建 keyspace：依赖 vault.service。
     if (!keyspaceHandle) throw new Error("Session Coordinator is unavailable");

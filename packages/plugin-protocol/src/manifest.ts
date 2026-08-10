@@ -20,9 +20,8 @@
 //     runtime 交接包。plugin-protocol 的能力依赖描述从"协议需要
 //     active key 与受控 capability"改成"connect mode 需要 vault；
 //     appView mode 可走 owner runtime bootstrap"。
-//   - 施工单 2026-07-01 001 硬切换：彻底移除 `storage.*` / S3 provider
-//     配置能力；现行协议族 = identity.* / intent.sign / cipher.* /
-//     p2pkh.transfer / feepool.* / connect.*（含 connect.launch）。
+//   - Connect Storage 施工单：`storage.*` 通过可选 `storage.service` capability
+//     接入；缺少 Storage 插件时，Protocol 仍正常提供其它方法。
 //   - 施工单 2026-07-01 002 硬切换：新增 `appmsg.*` 三个 method（origin
 //     endpoint）；plugin-protocol 自身**不**持有 HubMsg 连接真值；
 //     service 通过 capability `appmsg.core` 反向消费 plugin-appmsg
@@ -39,7 +38,8 @@ import type {
   VaultStatus,
   ProtocolSessionSnapshot,
   ProtocolCommandFeedState,
-  ProtocolService
+  ProtocolService,
+  StorageService
 } from "@keymaster/contracts";
 import { APPMESSAGE_CORE_CAPABILITY, PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
@@ -99,6 +99,15 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_request": "Invalid request.",
       "protocol.error.invalid_origin": "The request origin does not match the declared aud.",
       "protocol.error.decrypt_failed": "Decryption failed.",
+      "protocol.error.storage_unavailable": "Storage is unavailable.",
+      "protocol.error.storage_identity_required": "This session has no verified app identity for storage.",
+      "protocol.error.storage_invalid_path": "The storage path is invalid.",
+      "protocol.error.storage_invalid_upload": "The storage upload is invalid or expired.",
+      "protocol.error.storage_limit_exceeded": "The storage request exceeds its limit.",
+      "protocol.error.storage_forbidden": "The storage provider denied the request.",
+      "protocol.error.storage_not_found": "The storage object was not found.",
+      "protocol.error.storage_conflict": "The storage object changed or already exists.",
+      "protocol.error.storage_provider_error": "The storage provider returned an error.",
       "protocol.error.internal_error": "Internal error.",
       "protocol.feed.empty":
         "No command history for this site yet. The first request will appear here after it completes.",
@@ -278,6 +287,15 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_request": "请求格式不合法。",
       "protocol.error.invalid_origin": "请求来源与声明的 aud 不一致。",
       "protocol.error.decrypt_failed": "解密失败。",
+      "protocol.error.storage_unavailable": "Storage 当前不可用。",
+      "protocol.error.storage_identity_required": "当前会话没有经过验证的 App Identity，不能使用 Storage。",
+      "protocol.error.storage_invalid_path": "Storage 路径不合法。",
+      "protocol.error.storage_invalid_upload": "Storage 上传无效或已过期。",
+      "protocol.error.storage_limit_exceeded": "Storage 请求超过限制。",
+      "protocol.error.storage_forbidden": "Provider 拒绝了 Storage 请求。",
+      "protocol.error.storage_not_found": "Storage 对象不存在。",
+      "protocol.error.storage_conflict": "Storage 对象已变化或已存在。",
+      "protocol.error.storage_provider_error": "Provider 返回了 Storage 错误。",
       "protocol.error.internal_error": "内部错误。",
       "protocol.feed.empty": "当前站点尚无命令历史。第一条请求完成后会出现在这里。",
       "protocol.feed.empty.waitingOrigin": "等待来自外部站点的第一条请求。命令历史会按该站点的 origin 归档。",
@@ -438,6 +456,14 @@ export const protocolPlugin: PluginManifest = {
     // 取依赖（plugin-vault 必须先装载）。
     const vaultService = ctx.get<VaultService>("vault.service");
     const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
+    let storageService: StorageService | undefined;
+    try {
+      storageService = ctx.get<StorageService>("storage.service");
+    } catch {
+      // Storage is an optional platform plugin.  The protocol service still
+      // starts, while storage.* requests fail closed with a stable error.
+      storageService = undefined;
+    }
 
     // IndexedDB 是历史 / 每站点配置的可选持久化层，绝不能阻塞插件注册。
     // 某些浏览器在存储服务异常时会让 indexedDB.open() 永久 pending，既不触发
@@ -510,6 +536,14 @@ export const protocolPlugin: PluginManifest = {
       const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
+        storageService,
+        getStorageService: () => {
+          try {
+            return ctx.get<StorageService>("storage.service");
+          } catch {
+            return undefined;
+          }
+        },
         p2pkhService: p2pkhService as never,
         appMsgCore,
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。

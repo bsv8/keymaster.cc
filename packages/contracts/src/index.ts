@@ -39,6 +39,8 @@ export * from "./appmsg.js";
 export * from "./messageProvider.js";
 export * from "./appmsgBind.js";
 export * from "./broadcast.js";
+export * from "./appIdentity.js";
+export * from "./storage.js";
 export * from "./cbor.js";
 export * from "./vaultSession.js";
 export * from "./sessionCoordinator.js";

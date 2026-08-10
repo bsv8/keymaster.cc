@@ -21,6 +21,7 @@
 
 import type {
   BinaryField,
+  AppIdentityProofV1,
   CipherDecryptParams,
   CipherEncryptParams,
   ConnectLaunchParams,
@@ -35,9 +36,26 @@ import type {
   P2pkhTransferParams,
   ProtocolErrorCode,
   ProtocolMethod,
-  ProtocolRequestMessage
+  ProtocolRequestMessage,
+  StorageDeleteParams,
+  StorageDirectoryParams,
+  StorageGetParams,
+  StorageListParams,
+  StoragePutParams,
+  StorageUploadAbortParams,
+  StorageUploadBeginParams,
+  StorageUploadCompleteParams,
+  StorageUploadPartParams
 } from "@keymaster/contracts";
-import { PROTOCOL_METHODS, PROTOCOL_VERSION } from "@keymaster/contracts";
+import {
+  PROTOCOL_METHODS,
+  PROTOCOL_VERSION,
+  STORAGE_DEFAULT_LIST_LIMIT,
+  STORAGE_MAX_LIST_LIMIT,
+  STORAGE_MAX_PARTS,
+  STORAGE_MAX_PAYLOAD_BYTES
+} from "@keymaster/contracts";
+import { AppIdentityValidationError, verifyAppIdentityProof } from "./appIdentity.js";
 
 /** 校验失败：抛出的对象。service 会捕获并组装 ProtocolError。 */
 export class ProtocolValidationError extends Error {
@@ -106,6 +124,26 @@ function validateParams(
       return validateConnectLogoutParams(raw);
     case "connect.launch":
       return validateConnectLaunchParams(raw);
+    case "storage.list":
+      return validateStorageListParams(raw);
+    case "storage.directory.create":
+      return validateStorageDirectoryParams(raw, "storage.directory.create", true);
+    case "storage.directory.delete":
+      return validateStorageDirectoryParams(raw, "storage.directory.delete", false);
+    case "storage.put":
+      return validateStoragePutParams(raw);
+    case "storage.get":
+      return validateStorageGetParams(raw);
+    case "storage.delete":
+      return validateStorageDeleteParams(raw);
+    case "storage.upload.begin":
+      return validateStorageUploadBeginParams(raw);
+    case "storage.upload.part":
+      return validateStorageUploadPartParams(raw);
+    case "storage.upload.complete":
+      return validateStorageUploadCompleteParams(raw);
+    case "storage.upload.abort":
+      return validateStorageUploadAbortParams(raw);
   }
   throw new ProtocolValidationError("invalid_request", "Unknown method");
 }
@@ -270,7 +308,19 @@ function validateConnectLoginParams(raw: unknown): ConnectLoginParams {
     }
     claims = obj.claims.filter((c): c is string => typeof c === "string");
   }
-  return { text, claims };
+  let appIdentity: AppIdentityProofV1 | undefined;
+  if (obj.appIdentity !== undefined) {
+    try {
+      verifyAppIdentityProof(obj.appIdentity);
+    } catch (error) {
+      throw new ProtocolValidationError(
+        "invalid_request",
+        error instanceof AppIdentityValidationError ? error.message : "Invalid appIdentity"
+      );
+    }
+    appIdentity = obj.appIdentity as AppIdentityProofV1;
+  }
+  return { text, claims, appIdentity };
 }
 
 /**
@@ -300,6 +350,145 @@ function validateConnectLaunchParams(raw: unknown): ConnectLaunchParams {
   const obj = expectObject(raw, "connect.launch params");
   const launchToken = expectNonEmptyString(obj.launchToken, "launchToken");
   return { launchToken };
+}
+
+/* ============== storage.* validation ============== */
+
+const STORAGE_FORBIDDEN_FIELDS = [
+  "publisherPublicKeyHex",
+  "publisherPublicKey",
+  "appId",
+  "appName",
+  "appIdentity",
+  "namespaceRoot",
+  "bucket",
+  "endpoint",
+  "providerId",
+  "s3Key",
+  "s3UploadId",
+  "accessKeyId",
+  "secretAccessKey"
+] as const;
+
+function storageObject(raw: unknown, name: string): Record<string, unknown> {
+  const obj = expectObject(raw, name);
+  for (const field of STORAGE_FORBIDDEN_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(obj, field)) throw new ProtocolValidationError("invalid_request", `${name} contains a forbidden field`);
+  }
+  return obj;
+}
+
+function storagePath(value: unknown, field: string, allowEmpty = false): string {
+  const path = expectString(value, field);
+  if (!allowEmpty && path.length === 0) throw new ProtocolValidationError("invalid_request", `${field} must not be empty`);
+  const withoutTrailingSlash = path.endsWith("/") ? path.slice(0, -1) : path;
+  if (path.length > 1024 || path.startsWith("/") || path.includes("\\") || path.includes("\0") || /[\u0000-\u001f\u007f]/u.test(path) || /[\u2044\u2215\u29f8\uff0f]/u.test(path)) {
+    throw new ProtocolValidationError("invalid_request", `${field} is not a valid relative path`);
+  }
+  const segments = withoutTrailingSlash.split("/");
+  if ((!withoutTrailingSlash && !allowEmpty) || (withoutTrailingSlash && segments.some((segment) => !segment || segment === "." || segment === ".." || segment.length > 255))) {
+    throw new ProtocolValidationError("invalid_request", `${field} is not a valid relative path`);
+  }
+  return path;
+}
+
+function storageSession(obj: Record<string, unknown>, name: string): string {
+  return expectNonEmptyString(obj.connectSessionId, `${name}.connectSessionId`);
+}
+
+function storageBinary(value: unknown, field: string): BinaryField {
+  const binary = parseBinaryField(value, field);
+  if (binary.bytes.byteLength > STORAGE_MAX_PAYLOAD_BYTES) {
+    throw new ProtocolValidationError("storage_limit_exceeded", `${field} exceeds the maximum payload size`);
+  }
+  return binary;
+}
+
+function validateStorageListParams(raw: unknown): StorageListParams {
+  const obj = storageObject(raw, "storage.list params");
+  const connectSessionId = storageSession(obj, "storage.list");
+  const prefix = obj.prefix === undefined ? "" : storagePath(obj.prefix, "prefix", true);
+  const cursor = obj.cursor === undefined ? undefined : expectNonEmptyString(obj.cursor, "cursor");
+  const limit = obj.limit === undefined ? STORAGE_DEFAULT_LIST_LIMIT : obj.limit;
+  if (typeof limit !== "number" || !Number.isInteger(limit) || limit < 1 || limit > STORAGE_MAX_LIST_LIMIT) {
+    throw new ProtocolValidationError("invalid_request", "limit must be between 1 and 1000");
+  }
+  return { connectSessionId, prefix, cursor, limit };
+}
+
+function validateStorageDirectoryParams(raw: unknown, name: string, allowOverwrite: boolean): StorageDirectoryParams {
+  const obj = storageObject(raw, `${name} params`);
+  const connectSessionId = storageSession(obj, name);
+  const path = storagePath(obj.path, "path");
+  const overwrite = obj.overwrite === undefined ? undefined : obj.overwrite;
+  if (overwrite !== undefined && typeof overwrite !== "boolean") throw new ProtocolValidationError("invalid_request", "overwrite must be boolean");
+  return allowOverwrite ? { connectSessionId, path, overwrite } : { connectSessionId, path };
+}
+
+function validateStoragePutParams(raw: unknown): StoragePutParams {
+  const obj = storageObject(raw, "storage.put params");
+  const connectSessionId = storageSession(obj, "storage.put");
+  const path = storagePath(obj.path, "path");
+  if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
+  const content = storageBinary(obj.content, "content");
+  const contentType = obj.contentType === undefined ? undefined : expectString(obj.contentType, "contentType");
+  const overwrite = obj.overwrite === undefined ? undefined : obj.overwrite;
+  if (overwrite !== undefined && typeof overwrite !== "boolean") throw new ProtocolValidationError("invalid_request", "overwrite must be boolean");
+  return { connectSessionId, path, content, contentType, overwrite };
+}
+
+function validateStorageGetParams(raw: unknown): StorageGetParams {
+  const obj = storageObject(raw, "storage.get params");
+  const connectSessionId = storageSession(obj, "storage.get");
+  const path = storagePath(obj.path, "path");
+  if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
+  const offset = obj.offset === undefined ? 0 : obj.offset;
+  const length = obj.length === undefined ? STORAGE_MAX_PAYLOAD_BYTES : obj.length;
+  if (typeof offset !== "number" || !Number.isSafeInteger(offset) || offset < 0) throw new ProtocolValidationError("invalid_request", "offset must be a non-negative safe integer");
+  if (typeof length !== "number" || !Number.isSafeInteger(length) || length < 1 || length > STORAGE_MAX_PAYLOAD_BYTES) throw new ProtocolValidationError("storage_limit_exceeded", "length exceeds the maximum payload size");
+  if (offset > Number.MAX_SAFE_INTEGER - (length - 1)) throw new ProtocolValidationError("storage_limit_exceeded", "requested range exceeds safe integer bounds");
+  const ifMatch = obj.ifMatch === undefined ? undefined : expectString(obj.ifMatch, "ifMatch");
+  return { connectSessionId, path, offset, length, ifMatch };
+}
+
+function validateStorageDeleteParams(raw: unknown): StorageDeleteParams {
+  const obj = storageObject(raw, "storage.delete params");
+  const connectSessionId = storageSession(obj, "storage.delete");
+  const path = storagePath(obj.path, "path");
+  if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
+  return { connectSessionId, path };
+}
+
+function validateStorageUploadBeginParams(raw: unknown): StorageUploadBeginParams {
+  const obj = storageObject(raw, "storage.upload.begin params");
+  const connectSessionId = storageSession(obj, "storage.upload.begin");
+  const path = storagePath(obj.path, "path");
+  if (path.endsWith("/")) throw new ProtocolValidationError("invalid_request", "object path must not end with '/'");
+  const size = obj.size;
+  if (typeof size !== "number" || !Number.isSafeInteger(size) || size < 0) throw new ProtocolValidationError("invalid_request", "size must be a non-negative safe integer");
+  const contentType = obj.contentType === undefined ? undefined : expectString(obj.contentType, "contentType");
+  const overwrite = obj.overwrite === undefined ? undefined : obj.overwrite;
+  if (overwrite !== undefined && typeof overwrite !== "boolean") throw new ProtocolValidationError("invalid_request", "overwrite must be boolean");
+  return { connectSessionId, path, size, contentType, overwrite };
+}
+
+function validateStorageUploadPartParams(raw: unknown): StorageUploadPartParams {
+  const obj = storageObject(raw, "storage.upload.part params");
+  const connectSessionId = storageSession(obj, "storage.upload.part");
+  const uploadId = expectNonEmptyString(obj.uploadId, "uploadId");
+  const partNumber = obj.partNumber;
+  if (typeof partNumber !== "number" || !Number.isInteger(partNumber) || partNumber < 1 || partNumber > STORAGE_MAX_PARTS) throw new ProtocolValidationError("invalid_request", "partNumber must be between 1 and 10000");
+  return { connectSessionId, uploadId, partNumber, content: storageBinary(obj.content, "content") };
+}
+
+function validateStorageUploadCompleteParams(raw: unknown): StorageUploadCompleteParams {
+  const obj = storageObject(raw, "storage.upload.complete params");
+  return { connectSessionId: storageSession(obj, "storage.upload.complete"), uploadId: expectNonEmptyString(obj.uploadId, "uploadId") };
+}
+
+function validateStorageUploadAbortParams(raw: unknown): StorageUploadAbortParams {
+  const obj = storageObject(raw, "storage.upload.abort params");
+  return { connectSessionId: storageSession(obj, "storage.upload.abort"), uploadId: expectNonEmptyString(obj.uploadId, "uploadId") };
 }
 
 /* ============== helpers ============== */

@@ -147,3 +147,9 @@ playwright-report/
 test-results/
 .claude/settings.json
 .david/
+
+# Local credentials for opt-in real-provider Storage smoke tests. Keep every
+# local file private; only the documentation and redacted template are tracked.
+.storage-smoke/*
+!.storage-smoke/.env.example
+!.storage-smoke/README.md

@@ -13,6 +13,25 @@ import type { AssetDataInvalidationEvent } from "./assets.js";
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
+import type { VaultSealedSecret } from "./vault.js";
+import type {
+  StorageAppContext,
+  StorageProviderConfigDraft,
+  StorageListResult,
+  StorageDirectoryResult,
+  StoragePutResult,
+  StorageGetResult,
+  StorageDeleteResult,
+  StorageUploadBeginResult,
+  StorageUploadPartResult,
+  StorageUploadAbortResult,
+  StorageConditionalCapabilityProbeResult,
+  StorageProbeResult,
+  StorageProviderSummary,
+  StorageProviderConnectionView,
+  StorageConditionalCapabilitiesView,
+  StorageServiceStatus,
+} from "./storage.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -33,24 +52,56 @@ export type CoordinatorVaultStatus =
 // 2. Client -> Coordinator RPC
 // ============================================================
 
-/** 客户端请求联合类型。 */
+export type CoordinatorStorageControl =
+  | { type: "status" }
+  | { type: "summary" }
+  | { type: "connection" }
+  | { type: "probe"; config: StorageProviderConfigDraft }
+  | { type: "activate"; config: StorageProviderConfigDraft; expectedProviderGeneration: number | null }
+  | { type: "clear"; expectedProviderGeneration: number | null }
+  | { type: "reset"; expectedProviderGeneration: number | null }
+  | { type: "cancel-probe" }
+  | { type: "capabilities" }
+  | { type: "probe-capabilities" };
+
+export type CoordinatorStorageData =
+  | { type: "list"; grantId: string; input: { prefix?: string; cursor?: string; limit?: number } }
+  | { type: "create-directory"; grantId: string; input: { path: string; overwrite?: boolean } }
+  | { type: "delete-directory"; grantId: string; input: { path: string } }
+  | { type: "put"; grantId: string; input: { path: string; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string }; contentType?: string; overwrite?: boolean } }
+  | { type: "get-range"; grantId: string; input: { path: string; offset?: number; length?: number; ifMatch?: string } }
+  | { type: "delete"; grantId: string; input: { path: string } }
+  | { type: "begin-upload"; grantId: string; input: { path: string; contentType?: string; size: number; overwrite?: boolean } }
+  | { type: "upload-part"; grantId: string; input: { uploadId: string; partNumber: number; content: { $type: "binary"; bytes: ArrayBuffer; mime?: string } } }
+  | { type: "complete-upload"; grantId: string; input: { uploadId: string } }
+  | { type: "abort-upload"; grantId: string; input: { uploadId: string } };
+
+export type CoordinatorClientRequestWithStorage =
+  | { kind: "storage.grant"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.control"; clientId: string; requestId: string; control: CoordinatorStorageControl; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.data"; clientId: string; requestId: string; data: CoordinatorStorageData; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
+  | { kind: "disconnect"; clientId: string; requestId: string }
+  | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
+
 export type CoordinatorClientRequest =
-  | { kind: "hello"; clientId: string; requestId: string }
-  | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
-  | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "activate-key"; clientId: string; requestId: string; password: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "vault.operation"; clientId: string; requestId: string; operation: CoordinatorVaultOperation; expectedSessionEpoch: SessionEpoch }
-  | { kind: "crypto"; clientId: string; requestId: string; operation: CoordinatorCryptoOperation; expectedSessionEpoch: SessionEpoch }
-  | { kind: "background.run-now"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "background.trigger"; clientId: string; requestId: string; taskId: string; reason: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "background.cancel"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
-  | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
-  | { kind: "activity"; clientId: string };
+  | CoordinatorClientRequestWithStorage
+  | ({ kind: "hello"; clientId: string; requestId: string }
+    | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
+    | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "activate-key"; clientId: string; requestId: string; password: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "vault.operation"; clientId: string; requestId: string; operation: CoordinatorVaultOperation; expectedSessionEpoch: SessionEpoch }
+    | { kind: "crypto"; clientId: string; requestId: string; operation: CoordinatorCryptoOperation; expectedSessionEpoch: SessionEpoch }
+    | { kind: "background.run-now"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "background.trigger"; clientId: string; requestId: string; taskId: string; reason: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "background.cancel"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
+    | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state";
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
@@ -90,7 +141,9 @@ export type CoordinatorVaultOperation =
   | { type: "addPasskeyToCurrentKey"; intentId: string; credentialIdB64: string; prfSaltB64: string; prfOutputHex: string; rpId: string; transports?: string[] }
   | { type: "removePasskeyFromCurrentKey"; passkeyId: string }
   | { type: "getPasskeyChallenge"; passkeyId: string }
-  | { type: "activateKeyWithPasskey"; passkeyId: string; prfOutputHex: string };
+  | { type: "activateKeyWithPasskey"; passkeyId: string; prfOutputHex: string }
+  | { type: "sealLocalSecret"; scope: string; plaintext: Uint8Array }
+  | { type: "openLocalSecret"; scope: string; sealed: VaultSealedSecret };
 
 // ============================================================
 // 3. Coordinator -> Client Response
@@ -108,7 +161,7 @@ export type CoordinatorCommandAck =
   | { status: "not-ready" }
   | { status: "validation-error"; message: string }
   | { status: "ok" }
-  | { status: "error"; message: string };
+  | { status: "error"; message: string; code?: import("./storage.js").StorageErrorCode };
 
 /** RPC 响应。 */
 export interface CoordinatorResponse {
@@ -149,7 +202,19 @@ export type CoordinatorCryptoResult =
 export type CoordinatorTopicEvent =
   | SessionStateEvent
   | BackgroundSnapshotEvent
-  | AssetDataChangedEvent;
+  | AssetDataChangedEvent
+  | CoordinatorStorageStateEvent;
+
+export interface CoordinatorStorageStateEvent {
+  topic: "storage.state";
+  type: "storage.state.changed";
+  storageRevision: number;
+  sessionEpoch: SessionEpoch;
+  providerGeneration: number | null;
+  status: StorageServiceStatus;
+  summary: StorageProviderSummary | null;
+  capabilities: StorageConditionalCapabilitiesView | null;
+}
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
 export interface SessionStateEvent {
@@ -196,7 +261,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -251,6 +316,11 @@ export interface SessionCoordinatorClient {
   vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
   crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
   backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
+  storageGrant(context: StorageAppContext): Promise<CoordinatorValueResult<string>>;
+  storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
+  storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
+  storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
 }
 
 // ============================================================

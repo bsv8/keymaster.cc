@@ -95,7 +95,9 @@ Keymaster 内部 `plugin-apps` 是 `appView` mode 的**唯一**业务调用方�
 
 - `docs/protocol/keymaster-connect-v1-draft.md`：connect.* + connect.launch；
 
-> 现行真值（施工单 2026-07-01 001 硬切换）：Keymaster 已彻底移除 `storage.*` 协议族与 S3 provider 配置能力；上文中"更细节的 storage / connect.*"为历史描述，本文档不构成现行能力承诺。
+> Connect Storage 现作为独立平台能力实现：`storage.*` 由 `plugin-protocol` 适配到
+> 可选的 `storage.service`，Provider 配置由 `plugin-storage` 写入独立的
+> `keymaster.storage` DB；缺少 Storage 插件时其它 Protocol 方法不受影响。
 
 ## 三层会话语义（施工单 2026-06-28 001 硬切换）
 
@@ -1025,11 +1027,10 @@ sessionId + origin + ownerPublicKeyHex
 - 把 `bootstrap_owner` / `vault_unlock` 来源的差异泄漏到 session
   schema / 业务分支 / 协议文档。
 
-> 现行真值（施工单 2026-07-01 001 硬切换）：上述关于"`storage.*` 的内容
-> key 派生"的描述为历史草案——Keymaster **不再**实现 `storage.*` 协议族。
-> 签名 / 加解密 / p2pkh / feepool 走同一条 owner 解析真值这条不变量
-> 仍成立；`storage.*` 部分已不构成现行能力承诺。
+> Connect Storage 的 namespace 由 verified App Identity 的 publisher 公钥与 app id
+> 决定；caller 不能在 method params 中覆盖 namespace、Provider 或凭据字段。
 
-`protocolStorageDb` 现行 version 9：v8 → v9 物理删除
-`storageProviderConfig` store（施工单 2026-07-01 001 硬切换）；commands
-/ origins / feePools / connectSessions / launchTokens 沿用旧 schema 不动。
+`protocolStorageDb` 现行 version 9：v8 → v9 物理删除历史
+`storageProviderConfig` store；新的 Provider 配置只在独立 `keymaster.storage`
+DB 中保存密文 envelope。commands / origins / feePools / connectSessions /
+launchTokens 沿用旧 schema 不动。

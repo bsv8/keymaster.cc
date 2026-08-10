@@ -8,9 +8,8 @@
 //   - owner runtime bootstrap 校验（hex 派生公钥 === ownerPublicKeyHex）；
 //   - vault 不再提供 export/importUnlockRuntime*。
 //
-// 施工单 2026-07-01 001 硬切换补充：
-//   - storage.* / storageObjectService / normalizeStoragePath 已彻底移除；
-//     本文件不再验证 storage 相关行为。
+// Connect Storage 施工单补充：Storage 行为由独立 plugin-storage 单测覆盖；
+// 本文件只验证 Session Window bootstrap。
 
 // priv=0x...01 对应 secp256k1 压缩公钥（来自 noble secp256k1.getPublicKey 派生）。
 // 用真实配对让 applyLauncherBootstrap 的"私钥 → 公钥"校验通过。
@@ -293,7 +292,7 @@ function makeFakeVaultService(): VaultService {
       }),
       dispose: () => undefined
     }),
-  };
+  } as unknown as VaultService;
 }
 
 function makeFakeKeyspace(): ConstructorParameters<typeof ProtocolServiceImpl>[0]["keyspace"] {
@@ -801,7 +800,7 @@ describe("ProtocolService.awaitLauncherBootstrap 端到端 (direct consume)", ()
       }),
       dispose: () => undefined
     })
-  };
+  } as unknown as VaultService;
 }
 
   it("happy path：URL token 命中 launcher → appViewContext 写入 + bootstrapFailed=false", async () => {

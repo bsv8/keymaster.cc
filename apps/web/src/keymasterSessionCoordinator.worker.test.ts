@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
   decryptVaultKeyMaterialForMigration,
@@ -17,9 +17,31 @@ import {
   __testCancelByKey,
   __testCreateVault,
   __testCreateEmptyVault,
+  __testChangePassword,
   __testDeleteVault,
   __testExportKeyBackup,
   __testGetActivePublicKeyHex,
+  __testGetConnectedPortCount,
+  __testDispatchStorageGrant,
+  __testDispatchStorageData,
+  __testDispatchStorageControl,
+  __testDispatchStorageCancel,
+  __testDispatchStorageAbort,
+  __testResolveStorageGrant,
+  __testSeedStorageRequest,
+  __testSetStorageRuntime,
+  __testSetStorageStartupFailure,
+  __testReleaseStorageRuntime,
+  __testStorageMutationBarrierProbe,
+  __testStorageQueueAdmission,
+  __testStorageQueueSnapshot,
+  __testStorageSlotErrorCodes,
+  __testStorageFairDispatch,
+  __testPublishStorageState,
+  __testStorageTransfer,
+  __testAttachPort,
+  __testDispatchStorageMessage,
+  __testSetStorageSessionResolver,
   __testGetSnapshot,
   __testGetVaultStatus,
   __testImportKeyBackup,
@@ -32,6 +54,7 @@ import {
   __testRestartWorker,
   __testRunTask,
   __testSetVaultStatus,
+  __testSealLocalSecret,
   __testUnlock,
   __testUpdateScheduleSettings
 } from "./keymasterSessionCoordinator.worker.js";
@@ -49,6 +72,217 @@ class TestPort {
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
 
 describe("Session Coordinator worker", () => {
+  it("rejects forged client ownership and revoked/changed Storage grants", async () => {
+    __testResetState();
+    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "11".repeat(32), appId: "app", appName: "App", identityDigestHex: "aa".repeat(32) };
+    let revoked = false;
+    __testSetStorageSessionResolver(async (id) => revoked ? null : { sessionId: id, origin: "https://app.example", appIdentity: identity, revokedAt: null });
+    const granted = await __testDispatchStorageGrant("session-a", "port-a", "forged-client");
+    expect(granted.ack.status).toBe("ok");
+    const grantId = granted.operationResult as string;
+    __testSetStorageRuntime({ list: async () => ({ prefix: "", parentPrefix: "", directories: [], files: [] }), abortSession: async () => undefined });
+    expect((await __testDispatchStorageData({ grantId, actualPortId: "forged-client", requestClientId: "port-a" })).ack.status).toBe("error");
+    revoked = true;
+    expect((await __testDispatchStorageGrant("session-a", "port-a")).ack.status).toBe("error");
+    await expect(__testResolveStorageGrant(grantId, "port-a")).rejects.toThrow();
+    __testSetStorageRuntime(undefined);
+    __testSetStorageSessionResolver(undefined);
+  });
+
+  it("rejects unknown and identity-less sessions and binds grants to unchanged origin/identity", async () => {
+    __testResetState();
+    __testSetStorageSessionResolver(async () => null);
+    expect((await __testDispatchStorageGrant("missing", "port-a")).ack.status).toBe("error");
+    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "22".repeat(32), appId: "app", appName: "App", identityDigestHex: "bb".repeat(32) };
+    let origin = "https://one.example";
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, appIdentity: identity, revokedAt: null }));
+    const granted = await __testDispatchStorageGrant("session-b", "port-a");
+    expect(granted.ack.status).toBe("ok");
+    origin = "https://two.example";
+    await expect(__testResolveStorageGrant(granted.operationResult as string, "port-a")).rejects.toThrow();
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, appIdentity: { ...identity, publisherPublicKeyHex: "22".repeat(32) }, revokedAt: null }));
+    expect((await __testDispatchStorageGrant("short-key", "port-a")).ack.status).toBe("error");
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, appIdentity: undefined as never, revokedAt: null }));
+    expect((await __testDispatchStorageGrant("no-identity", "port-a")).ack.status).toBe("error");
+    __testSetStorageSessionResolver(undefined);
+  });
+
+  it("enforces cancel owner and aborts only the selected session", async () => {
+    __testResetState();
+    __testSetStorageRuntime({ abortSession: async () => undefined });
+    const a = __testSeedStorageRequest("a", "port-a", "session-a");
+    const b = __testSeedStorageRequest("b", "port-b", "session-b");
+    const collisionA = __testSeedStorageRequest("same", "port-a", "session-a");
+    const collisionB = __testSeedStorageRequest("same", "port-b", "session-b");
+    await __testDispatchStorageCancel("a", "port-b");
+    expect(a.aborted).toBe(false);
+    await __testDispatchStorageCancel("a", "port-a");
+    expect(a.aborted).toBe(true);
+    await __testDispatchStorageCancel("same", "port-a");
+    expect(collisionA.aborted).toBe(true);
+    expect(collisionB.aborted).toBe(false);
+    await __testDispatchStorageAbort("session-b", "port-b");
+    expect(b.aborted).toBe(true);
+    __testSetStorageRuntime(undefined);
+  });
+
+  it("uses transferables without mutating the receiver payload", () => {
+    const result = __testStorageTransfer(new Uint8Array([1, 2, 3]).buffer);
+    expect(result.transferCount).toBe(1);
+    expect(result.inputDetachedByteLength).toBe(0);
+    expect(result.detachedByteLength).toBe(0);
+    expect(result.receivedByteLength).toBe(3);
+  });
+
+  it("aborts a slow Storage data lane when the global lock preempts it", async () => {
+    __testResetState();
+    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "33".repeat(32), appId: "app", appName: "App", identityDigestHex: "cc".repeat(32) };
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slow.example", appIdentity: identity, revokedAt: null }));
+    __testSetStorageRuntime({ list: async (_ctx, input) => await new Promise((_, reject) => { input.signal?.addEventListener("abort", () => { reject(new Error("storage_unavailable")); }); }), abortSession: async () => undefined });
+    const grant = await __testDispatchStorageGrant("slow-session", "port-a");
+    const pending = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await __testReleaseStorageRuntime();
+    expect((await pending).ack.status).toBe("error");
+    __testSetStorageSessionResolver(undefined);
+    __testSetStorageRuntime(undefined);
+  });
+
+  it("reclaims all four hanging data slots on lock and serves new runtime data", async () => {
+    __testResetState();
+    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "66".repeat(32), appId: "app", appName: "App", identityDigestHex: "ff".repeat(32) };
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slots.example", appIdentity: identity, revokedAt: null }));
+    __testSetStorageRuntime({ list: async () => await new Promise<never>(() => undefined), abortSession: async () => undefined });
+    const grant = await __testDispatchStorageGrant("slots-session", "port-a");
+    const pending = Array.from({ length: 4 }, () => __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" }));
+    await new Promise((resolve) => setTimeout(resolve, 20)); await __testReleaseStorageRuntime();
+    expect((await Promise.all(pending)).every((response) => response.ack.status === "error")).toBe(true);
+    expect(__testStorageQueueSnapshot().globalActive).toBe(0);
+    __testSetStorageRuntime({ list: async () => ({ prefix: "", parentPrefix: "", directories: [], files: [] }), abortSession: async () => undefined });
+    const nextGrant = await __testDispatchStorageGrant("slots-session", "port-a");
+    expect((await __testDispatchStorageData({ grantId: nextGrant.operationResult as string, actualPortId: "port-a" })).ack.status).toBe("ok");
+    __testSetStorageSessionResolver(undefined); __testSetStorageRuntime(undefined);
+  });
+
+  it("rejects a late provider success after session epoch or generation changes", async () => {
+    __testResetState();
+    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "44".repeat(32), appId: "app", appName: "App", identityDigestHex: "dd".repeat(32) };
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", appIdentity: identity, revokedAt: null }));
+    let release!: () => void;
+    const delayed = new Promise<void>((resolve) => { release = resolve; });
+    let generation = 1;
+    __testSetStorageRuntime({ getProviderSummary: async () => ({ generation, providerId: "aws-s3", bucketHint: "b", prefix: "", accessKeyHint: "k", secretConfigured: true, publicSummary: { bucketHint: "b", prefix: "", accessKeyHint: "k" }, updatedAt: 1 }), list: async () => { await delayed; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
+    const grant = await __testDispatchStorageGrant("late-session", "port-a");
+    const pending = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    generation = 2;
+    release();
+    expect((await pending).ack).toMatchObject({ status: "error", code: "storage_unavailable" });
+    __testResetState();
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", appIdentity: identity, revokedAt: null }));
+    let releaseEpoch!: () => void;
+    const delayedEpoch = new Promise<void>((resolve) => { releaseEpoch = resolve; });
+    __testSetStorageRuntime({ getProviderSummary: async () => ({ generation: 1, providerId: "aws-s3", bucketHint: "b", prefix: "", accessKeyHint: "k", secretConfigured: true, publicSummary: { bucketHint: "b", prefix: "", accessKeyHint: "k" }, updatedAt: 1 }), list: async () => { await delayedEpoch; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
+    const epochGrant = await __testDispatchStorageGrant("late-epoch", "port-a");
+    const epochPending = __testDispatchStorageData({ grantId: epochGrant.operationResult as string, actualPortId: "port-a" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    __testInvalidateSession(); releaseEpoch();
+    expect((await epochPending).ack).toMatchObject({ status: "error", code: "storage_unavailable" });
+    __testSetStorageSessionResolver(undefined); __testSetStorageRuntime(undefined);
+  });
+
+  it("serializes password-rotation mutation with Storage controls", async () => {
+    __testResetState();
+    __testSetStorageRuntime({ status: () => "unconfigured", getProviderSummary: async () => null });
+    const result = await __testStorageMutationBarrierProbe();
+    expect(result).toEqual({ blockedBeforeRelease: true, completedAfterRelease: true });
+    __testSetStorageRuntime(undefined);
+  });
+
+  it("keeps Storage startup failures isolated from Vault state", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    const messages: unknown[] = [];
+    __testAttachPort("startup-port", (message) => messages.push(message));
+    await __testDispatchStorageMessage("startup-port", { kind: "subscribe", clientId: "spoof", requestId: "sub-startup", topics: ["storage.state"] });
+    __testSetStorageStartupFailure(true);
+    const response = await __testDispatchStorageControl({ type: "status" });
+    expect(response.ack).toMatchObject({ status: "error", code: "storage_unavailable" });
+    expect(__testGetVaultStatus()).toBe("unlocked");
+    expect(messages.some((message) => (message as { status?: string }).status === "degraded")).toBe(true);
+    __testSetStorageStartupFailure(false);
+  });
+
+  it("keeps per-port queue admission fair and bounded", () => {
+    __testResetState();
+    const result = __testStorageQueueAdmission("port-a");
+    expect(result.firstPortAccepted).toBe(16);
+    expect(result.firstPortRejected).toBe(true);
+    expect(result.secondPortAccepted).toBe(true);
+    expect(result.remaining).toEqual({});
+  });
+
+  it("keeps storage queue and cancellation errors typed", async () => {
+    const result = await __testStorageSlotErrorCodes();
+    expect(result).toEqual({ queueFull: "storage_limit_exceeded", queuedAbort: "storage_unavailable", activeAbort: "storage_unavailable" });
+  });
+
+  it("schedules a competing port ahead of a saturated port's waiters", async () => {
+    const order = await __testStorageFairDispatch();
+    expect(order.slice(0, 4)).toEqual(["a1", "a2", "a3", "b1"]);
+  });
+
+  it("releases a port explicitly before close", async () => {
+    __testResetState();
+    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "55".repeat(32), appId: "app", appName: "App", identityDigestHex: "ee".repeat(32) };
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://disconnect.example", appIdentity: identity, revokedAt: null }));
+    const pending = __testSeedStorageRequest("active", "port-z", "disconnect-session");
+    const granted = await __testDispatchStorageGrant("disconnect-session", "port-z");
+    __testAttachPort("port-z", () => undefined);
+    await __testDispatchStorageMessage("port-z", { kind: "disconnect", clientId: "spoof", requestId: "release" });
+    expect(pending.aborted).toBe(true);
+    await expect(__testResolveStorageGrant(granted.operationResult as string, "port-z")).rejects.toThrow();
+    __testSetStorageSessionResolver(undefined);
+    const port = new TestPort();
+    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
+    onconnect?.({ ports: [port] } as unknown as MessageEvent);
+    port.send({ kind: "disconnect", clientId: "spoof", requestId: "release" });
+    await flush();
+    expect(__testGetConnectedPortCount()).toBe(0);
+  });
+
+  it("returns matching storage.state baselines to two ports", async () => {
+    __testResetState();
+    const a = new TestPort(); const b = new TestPort();
+    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
+    onconnect?.({ ports: [a] } as unknown as MessageEvent); onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sa", topics: ["storage.state"] });
+    b.send({ kind: "subscribe", clientId: "b", requestId: "sb", topics: ["storage.state"] });
+    await flush();
+    const baseline = (port: TestPort, id: string) => (port.messages.find((m) => (m as { requestId?: string }).requestId === id) as { operationResult?: { baselines?: Array<{ baselineRevision: number; snapshot: { storageRevision?: number } }> } } | undefined)?.operationResult?.baselines?.[0];
+    const ba = baseline(a, "sa"); const bb = baseline(b, "sb");
+    expect(ba?.baselineRevision).toBe(ba?.snapshot.storageRevision);
+    expect(bb?.baselineRevision).toBe(bb?.snapshot.storageRevision);
+    expect(ba?.baselineRevision).toBe(bb?.baselineRevision);
+    a.send({ kind: "disconnect", clientId: "a", requestId: "da" }); b.send({ kind: "disconnect", clientId: "b", requestId: "db" });
+  });
+
+  it("publishes one strictly increasing storage revision to every subscribed port", async () => {
+    __testResetState();
+    const a = new TestPort(); const b = new TestPort();
+    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
+    onconnect?.({ ports: [a] } as unknown as MessageEvent); onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sa2", topics: ["storage.state"] });
+    b.send({ kind: "subscribe", clientId: "b", requestId: "sb2", topics: ["storage.state"] });
+    await flush();
+    a.messages.length = 0; b.messages.length = 0;
+    await __testPublishStorageState(); await __testPublishStorageState();
+    const revisions = (port: TestPort) => port.messages.filter((m) => (m as { topic?: string; type?: string }).topic === "storage.state" && (m as { type?: string }).type === "storage.state.changed").map((m) => (m as { storageRevision: number }).storageRevision);
+    const ra = revisions(a); const rb = revisions(b);
+    expect(ra.length).toBeGreaterThanOrEqual(2); expect(rb).toEqual(ra);
+    expect(ra[1]).toBeGreaterThan(ra[0]!);
+  });
+
   it("cancels only the matching key and waits for the handler completion", async () => {
     __testResetState();
     __testSetVaultStatus("unlocked", "a".repeat(64));
@@ -221,6 +455,83 @@ describe("Session Coordinator worker", () => {
 
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
 
+const STORAGE_DB_NAME = "keymaster.storage";
+const STORAGE_PROVIDER_SCOPE = "keymaster.storage.provider-config.v1";
+
+type StorageTestState = {
+  provider?: { sealedConfig: unknown };
+  journal?: unknown;
+};
+
+function seedCorruptStorageUpload(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(STORAGE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("providerConfig")) db.createObjectStore("providerConfig", { keyPath: "key" });
+      if (!db.objectStoreNames.contains("multipartUploads")) db.createObjectStore("multipartUploads", { keyPath: "internalUploadId" });
+    };
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("multipartUploads", "readwrite");
+      tx.objectStore("multipartUploads").put({ internalUploadId: "corrupt-upload", sealedS3UploadId: { version: 2, saltHex: "00", nonceHex: "00", ciphertextHex: "00" } });
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function seedStorageProvider(sealedConfig: unknown): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(STORAGE_DB_NAME, 1);
+    request.onupgradeneeded = () => {
+      const db = request.result;
+      if (!db.objectStoreNames.contains("providerConfig")) db.createObjectStore("providerConfig", { keyPath: "key" });
+      if (!db.objectStoreNames.contains("multipartUploads")) db.createObjectStore("multipartUploads", { keyPath: "internalUploadId" });
+    };
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("providerConfig", "readwrite");
+      tx.objectStore("providerConfig").put({
+        key: "active",
+        providerId: "aws-s3",
+        publicSummary: { bucketHint: "bucket", prefix: "", accessKeyHint: "key" },
+        sealedConfig,
+        generation: 1,
+        updatedAt: Date.now()
+      });
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function readStorageTestState(): Promise<StorageTestState> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(STORAGE_DB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      const tx = db.transaction("providerConfig", "readonly");
+      const provider = tx.objectStore("providerConfig").get("active");
+      const journal = tx.objectStore("providerConfig").get("rotation");
+      tx.oncomplete = () => { db.close(); resolve({ provider: provider.result, journal: journal.result }); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    };
+  });
+}
+
+function deleteStorageDb(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.deleteDatabase(STORAGE_DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+    request.onblocked = () => reject(new Error("Storage database deletion was blocked"));
+  });
+}
+
 describe("Session Coordinator backup import", () => {
   beforeEach(async () => {
     await __testDeleteVault();
@@ -373,6 +684,126 @@ describe("Session Coordinator backup import", () => {
         activePublicKeyHex: imported.publicKeyHex,
       }));
     }
+  });
+});
+
+describe("Session Coordinator Storage rotation recovery", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    await deleteStorageDb();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testDeleteVault();
+    await deleteStorageDb();
+    __testResetState();
+  });
+
+  it("clears the Storage barrier when a ciphertext is corrupt and keeps Vault unlockable", async () => {
+    const key = await __testCreateVault("old-password", { label: "rotation-test" });
+    await seedCorruptStorageUpload();
+
+    await expect(__testChangePassword("old-password", "new-password")).rejects.toBeTruthy();
+    expect(__testGetVaultStatus()).toBe("unlocked");
+
+    await __testLock();
+    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+
+    const request = indexedDB.open(STORAGE_DB_NAME, 1);
+    const journal = await new Promise<unknown>((resolve, reject) => {
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction("providerConfig", "readonly");
+        const get = tx.objectStore("providerConfig").get("rotation");
+        tx.oncomplete = () => { db.close(); resolve(get.result); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+    });
+    expect(journal).toBeUndefined();
+  });
+
+  it("completes a normal Storage/Vault password rotation and retires its journal", async () => {
+    const key = await __testCreateVault("old-password", { label: "rotation-test" });
+    const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
+    await seedStorageProvider(oldSealed);
+
+    await expect(__testChangePassword("old-password", "new-password")).resolves.toBe(true);
+    expect(__testGetVaultStatus()).toBe("locked");
+    const rotated = await readStorageTestState();
+    expect(rotated.provider?.sealedConfig).not.toEqual(oldSealed);
+    expect(rotated.journal).toBeDefined();
+
+    await expect(__testUnlock("new-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+    expect((await readStorageTestState()).journal).toBeUndefined();
+  });
+
+  it("restores the original snapshot directly when the Vault commit fails", async () => {
+    const key = await __testCreateVault("old-password", { label: "rotation-test" });
+    const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
+    await seedStorageProvider(oldSealed);
+    const commit = vi.spyOn(vaultDb, "putMetaAndKeys").mockRejectedValueOnce(new Error("injected Vault commit failure"));
+    try {
+      await expect(__testChangePassword("old-password", "new-password")).rejects.toThrow("injected Vault commit failure");
+    } finally {
+      commit.mockRestore();
+    }
+
+    const restored = await readStorageTestState();
+    expect(restored.provider?.sealedConfig).toEqual(oldSealed);
+    expect(restored.journal).toBeUndefined();
+    await __testLock();
+    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+  });
+
+  it("keeps the journal when rollback or a later recovery write fails", async () => {
+    const key = await __testCreateVault("old-password", { label: "rotation-test" });
+    const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
+    await seedStorageProvider(oldSealed);
+    const commit = vi.spyOn(vaultDb, "putMetaAndKeys").mockRejectedValueOnce(new Error("injected Vault commit failure"));
+    const rollback = vi.spyOn(IDBObjectStore.prototype, "clear").mockImplementationOnce(() => { throw new Error("injected rollback failure"); });
+    try {
+      await expect(__testChangePassword("old-password", "new-password")).rejects.toThrow("Password rotation rollback failed");
+    } finally {
+      commit.mockRestore();
+      rollback.mockRestore();
+    }
+    expect((await readStorageTestState()).journal).toBeDefined();
+
+    await __testLock();
+    const recovery = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementationOnce(() => { throw new Error("injected recovery write failure"); });
+    try {
+      await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+    } finally {
+      recovery.mockRestore();
+    }
+    expect((await readStorageTestState()).journal).toBeDefined();
+
+    await __testLock();
+    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+    expect((await readStorageTestState()).journal).toBeUndefined();
+  });
+
+  it("keeps a corrupt journal as recovery evidence without blocking Vault unlock", async () => {
+    const key = await __testCreateVault("old-password", { label: "rotation-test" });
+    const sealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
+    await seedStorageProvider(sealed);
+    const request = indexedDB.open(STORAGE_DB_NAME, 1);
+    await new Promise<void>((resolve, reject) => {
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction("providerConfig", "readwrite");
+        tx.objectStore("providerConfig").put({ key: "rotation", phase: "prepared", old: { corrupted: true } });
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { db.close(); reject(tx.error); };
+      };
+    });
+
+    await __testLock();
+    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
+    expect((await readStorageTestState()).journal).toEqual({ key: "rotation", phase: "prepared", old: { corrupted: true } });
   });
 });
 

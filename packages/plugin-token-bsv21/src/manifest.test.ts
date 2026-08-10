@@ -101,6 +101,8 @@ async function setupManifest() {
           };
         case "woc.bsv21.service":
           return { listAddressTokens: vi.fn(), listAddressUnspentTokens: vi.fn(), getAddressTokenBalance: vi.fn(), getTokenById: vi.fn() };
+        case "woc.service":
+          return {};
         case "keyspace.service":
           return {
             active: () => ({ activePublicKeyHex: "pk1" }),

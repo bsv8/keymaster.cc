@@ -10,6 +10,7 @@
 //   - 校验逻辑走纯函数，方便 node 单测直接验证。
 
 import rawCatalog from "./appsCatalog.json";
+import type { AppIdentityProofV1 } from "@keymaster/contracts";
 
 /** 单条 app 清单。 */
 export interface AppCatalogEntry {
@@ -19,6 +20,8 @@ export interface AppCatalogEntry {
   appOrigin: string;
   appUrl: string;
   claims: string[];
+  /** Optional signed identity used by Storage-capable app launchers. */
+  appIdentity?: AppIdentityProofV1;
   /** lucide-react 图标名称，如 "StickyNote"、"Play"。缺省不显示图标。 */
   icon?: string;
 }
@@ -62,6 +65,7 @@ export function validateAppEntry(raw: unknown): AppCatalogRow {
     ? r.claims.filter((c): c is string => typeof c === "string")
     : [];
   const icon = typeof r.icon === "string" && r.icon.length > 0 ? r.icon : undefined;
+  const appIdentity = r.appIdentity && typeof r.appIdentity === "object" ? r.appIdentity as AppIdentityProofV1 : undefined;
 
   if (!id) {
     return { kind: "invalid", entry: { raw, reason: "missing id", id: null } };
@@ -98,9 +102,12 @@ export function validateAppEntry(raw: unknown): AppCatalogRow {
       entry: { raw, reason: "appOrigin does not match appUrl.origin", id }
     };
   }
+  if (appIdentity && (!appIdentity.app || typeof appIdentity.app !== "object" || appIdentity.app.id !== id)) {
+    return { kind: "invalid", entry: { raw, reason: "appIdentity.app.id does not match catalog id", id } };
+  }
   return {
     kind: "ok",
-    entry: { id, name, summary, appOrigin, appUrl, claims, icon }
+    entry: { id, name, summary, appOrigin, appUrl, claims, icon, ...(appIdentity ? { appIdentity } : {}) }
   };
 }
 

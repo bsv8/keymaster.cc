@@ -117,6 +117,17 @@ describe("validateAppEntry", () => {
     }
   });
 
+  it("目录 appId 与 Identity proof 不一致时 invalid", () => {
+    const row = validateAppEntry({
+      id: "catalog-app",
+      name: "Catalog App",
+      appOrigin: "https://x.com",
+      appUrl: "https://x.com/",
+      appIdentity: { version: 1, publisherPublicKey: "02" + "11".repeat(32), app: { id: "signed-app", name: "Signed App" }, signature: "0".repeat(128) }
+    });
+    expect(row).toMatchObject({ kind: "invalid", entry: { reason: "appIdentity.app.id does not match catalog id" } });
+  });
+
   it("顶层不是对象 → invalid", () => {
     const row = validateAppEntry("not-an-object");
     expect(row.kind).toBe("invalid");

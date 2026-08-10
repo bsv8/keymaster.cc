@@ -97,6 +97,7 @@ export function AppsHomeWidget() {
         appOrigin: launchEntry.appOrigin,
         appUrl: launchEntry.appUrl,
         claims: launchEntry.claims,
+        ...(launchEntry.appIdentity ? { appIdentity: launchEntry.appIdentity } : {}),
         publicKeyHex: input.publicKeyHex,
         password: input.password
       });

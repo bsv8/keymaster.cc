@@ -6,11 +6,19 @@
 //   - 这类信息变更频率低，但影响范围跨两套 shell；
 //   - 提取成共享组件后，后续只需改一个地方。
 
+import { AppLink } from "@keymaster/runtime";
+
 export interface SiteFooterProps {
   variant?: "onboarding" | "app";
 }
 
 export function SiteFooter({ variant = "app" }: SiteFooterProps) {
+  // Vite replaces these constants in production builds. Unit tests import the
+  // component directly, so keep the footer renderable when that replacement is
+  // intentionally absent.
+  const gitBranch = typeof __KEYMASTER_GIT_BRANCH__ === "string" ? __KEYMASTER_GIT_BRANCH__ : "unknown";
+  const gitRevision = typeof __KEYMASTER_GIT_REVISION__ === "string" ? __KEYMASTER_GIT_REVISION__ : "unknown";
+  const gitCommitUrl = typeof __KEYMASTER_GIT_COMMIT_URL__ === "string" ? __KEYMASTER_GIT_COMMIT_URL__ : "";
   return (
     <footer className={`site-footer site-footer--${variant}`}>
       <div className="site-footer__content">
@@ -31,22 +39,22 @@ export function SiteFooter({ variant = "app" }: SiteFooterProps) {
         <span className="site-footer__separator" aria-hidden="true">
           /
         </span>
-        <span>git {__KEYMASTER_GIT_BRANCH__}</span>
+        <span>git {gitBranch}</span>
         <span className="site-footer__separator" aria-hidden="true">
           /
         </span>
-        {__KEYMASTER_GIT_COMMIT_URL__ ? (
-          <a
+        {gitCommitUrl ? (
+          <AppLink
             className="site-footer__link"
-            href={__KEYMASTER_GIT_COMMIT_URL__}
+            to={gitCommitUrl}
             target="_blank"
             rel="noreferrer"
-            aria-label={`Open commit ${__KEYMASTER_GIT_REVISION__} on GitHub`}
+            aria-label={`Open commit ${gitRevision} on GitHub`}
           >
-            {__KEYMASTER_GIT_REVISION__}
-          </a>
+            {gitRevision}
+          </AppLink>
         ) : (
-          <span>{__KEYMASTER_GIT_REVISION__}</span>
+          <span>{gitRevision}</span>
         )}
       </div>
     </footer>

@@ -169,6 +169,7 @@ export const bsv21TokenPlugin: PluginManifest = {
   dependencies: [
     { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
     { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
+    { capability: WOC_CAPABILITY, reason: "读取交易与费率等通用 WOC 数据" },
     { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped DB" },
     { capability: "token.registry", reason: "注册 BSV-21 TokenProvider" },
     { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },

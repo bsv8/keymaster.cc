@@ -13,7 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createP2pkhRecentSync } from "./p2pkhRecentSync.js";
 import { createP2pkhHistoryBackfill } from "./p2pkhHistoryBackfill.js";
-import type { P2pkhKeyResource, P2pkhRecentSyncState, P2pkhBackfillState, P2pkhLocalInputClaim, P2pkhLocalSubmission, P2pkhHistoryItem, P2pkhUtxo } from "./p2pkhContracts.js";
+import type { P2pkhKeyResource, P2pkhRecentSyncState, P2pkhBackfillState, P2pkhLocalInputClaim, P2pkhLocalSubmission, P2pkhProtocolSubmission, P2pkhHistoryItem, P2pkhUtxo } from "./p2pkhContracts.js";
 
 // ---- 日志 spy 工具 ----
 
@@ -113,6 +113,9 @@ function makeFakeDb(opts: FakeDbOptions = {}) {
       return [];
     },
     async listLocalSubmissionsByResource(): Promise<P2pkhLocalSubmission[]> {
+      return [];
+    },
+    async listProtocolSubmissionsByResource(): Promise<P2pkhProtocolSubmission[]> {
       return [];
     },
     async listBackfillStates(): Promise<P2pkhBackfillState[]> {

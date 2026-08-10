@@ -40,7 +40,7 @@
 //         `vault_runtime` 接手；appView mode 不允许在 bootstrap 缺失时
 //         自动回退。
 
-import type { AppBootstrapPayload, SessionRuntimeBootstrap } from "@keymaster/contracts";
+import type { AppBootstrapPayload, AppIdentitySnapshot, SessionRuntimeBootstrap } from "@keymaster/contracts";
 
 /* ============== boot mode 解析 ============== */
 
@@ -272,6 +272,7 @@ export interface LauncherHandoffInput {
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, unknown>;
   resolvedAt: number;
+  appIdentity?: AppIdentitySnapshot;
   launchToken: string;
   /** launchToken 过期时间（unix milliseconds）。Session Window 刷新后失效。 */
   expiresAt: number;
@@ -318,6 +319,7 @@ export function buildAppBootstrapPayload(input: LauncherHandoffInput): AppBootst
     ownerPublicKeyHex: input.ownerPublicKeyHex,
     resolvedClaims: input.resolvedClaims as AppBootstrapPayload["resolvedClaims"],
     resolvedAt: input.resolvedAt,
+    ...(input.appIdentity ? { appIdentity: input.appIdentity } : {}),
     launchToken: input.launchToken,
     sessionRuntimeBootstrap: input.sessionRuntimeBootstrap
   };

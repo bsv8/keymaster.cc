@@ -24,6 +24,8 @@ import type {
   CoordinatorVaultOperation,
   CoordinatorSubscribeTopicsResult,
   SessionCoordinatorClient,
+  CoordinatorStorageControl,
+  CoordinatorStorageData,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -83,6 +85,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private sessionRevisionCache = -1;
   private backgroundSnapshotRevisionCache = -1;
   private assetDataRevisionCache = -1;
+  private storageRevisionCache = -1;
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -162,7 +165,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state"]);
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -177,6 +180,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   disconnect(): void {
     if (this.port) {
+      try { this.port.postMessage({ kind: "disconnect", clientId: this.clientId, requestId: this.generateRequestId() }); } catch { /* messageerror/close fallback */ }
       this.port.close();
       this.port = null;
     }
@@ -271,6 +275,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.sessionRevisionCache = -1;
     this.backgroundSnapshotRevisionCache = -1;
     this.assetDataRevisionCache = -1;
+    this.storageRevisionCache = -1;
   }
 
   // ============================================================
@@ -398,6 +403,47 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "background.cancel-by-key", clientId: this.clientId, requestId: this.generateRequestId(), publicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
+  async storageControl(control: CoordinatorStorageControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "storage.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async storageGrant(context: import("@keymaster/contracts").StorageAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
+    const request = { kind: "storage.grant" as const, clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId: context.connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult as string, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async storageData(data: CoordinatorStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "storage.data" as const, clientId: this.clientId, requestId: this.generateRequestId(), data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    let onAbort: (() => void) | undefined;
+    try {
+      if (signal?.aborted) return { status: "transport-error", message: "Storage request cancelled", retryable: false };
+      onAbort = () => { void this.storageCancel(request.requestId); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const response = await this.sendRequest(request, transfer);
+      if (signal?.aborted) return { status: "transport-error", message: "Storage request cancelled", retryable: false };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
+  async storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "storage.cancel", clientId: this.clientId, requestId: this.generateRequestId(), targetRequestId });
+  }
+
+  async storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  }
+
   async backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "background.settings.update",
@@ -456,7 +502,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     }
   }
 
-  private async sendRequest(request: CoordinatorClientRequest): Promise<CoordinatorResponse> {
+  private async sendRequest(request: CoordinatorClientRequest, transfer: ArrayBuffer[] = []): Promise<CoordinatorResponse> {
     if (!this.isConnected || !this.port) {
       throw new Error("Not connected to Coordinator");
     }
@@ -475,7 +521,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.pendingRequests.set(requestId, { resolve, reject, timeout });
 
       try {
-        this.port!.postMessage(request);
+        this.port!.postMessage(request, transfer);
       } catch (err) {
         clearTimeout(timeout);
         this.pendingRequests.delete(requestId);
@@ -578,18 +624,21 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private getCachedTopicRevision(topic: CoordinatorTopic): number {
     if (topic === "session.state") return this.sessionRevisionCache;
     if (topic === "background.snapshot") return this.backgroundSnapshotRevisionCache;
+    if (topic === "storage.state") return this.storageRevisionCache;
     return this.assetDataRevisionCache;
   }
 
   private getEventRevision(event: CoordinatorTopicEvent): number | undefined {
     if (event.topic === "session.state") return event.sessionRevision;
     if (event.topic === "background.snapshot") return event.backgroundSnapshotRevision;
+    if (event.topic === "storage.state") return event.storageRevision;
     return event.assetDataRevision;
   }
 
   private setTopicRevision(event: CoordinatorTopicEvent): void {
     if (event.topic === "session.state") this.sessionRevisionCache = event.sessionRevision;
     else if (event.topic === "background.snapshot") this.backgroundSnapshotRevisionCache = event.backgroundSnapshotRevision;
+    else if (event.topic === "storage.state") this.storageRevisionCache = event.storageRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
 
@@ -607,6 +656,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && (event.vaultStatus === "unlocked" || event.activePublicKeyHex === null);
     }
     if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
+    if (event.topic === "storage.state") return event.type === "storage.state.changed" && Number.isSafeInteger(event.storageRevision) && event.storageRevision >= 0 && (event.providerGeneration === null || Number.isSafeInteger(event.providerGeneration));
     return event.type === "asset.data-changed" && Number.isSafeInteger(event.assetDataRevision);
   }
 

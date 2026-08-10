@@ -128,7 +128,10 @@ plugin-apps（apps 页面 / 首页 widget）
 - `connect.launch` **不**创建 session；session 已经在 launcher 预建阶段落库。
 - `connect.launch` 失败时**不**回退到 `connect.login`；用户回到 `plugin-apps` 重新点 `Open App` 即可。
 - session 真值 = `connectSessionId` + `ownerPublicKeyHex` + `app.appOrigin` + `resolvedClaims`；这套三元组是后续 `cipher.*` 等业务方法的 namespace 真值（与 `appViewContext` 字段无关，appViewContext 仅用于 UI / 启动决策）。
-- 现行真值（施工单 2026-07-01 001 硬切换）：Keymaster **不再**实现 `storage.*` 协议族 / S3 provider 配置能力；上述表述中的 `storage.*` 描述为历史草案，本文档不构成现行能力承诺。
+- Connect Storage 已作为独立能力接入：带 verified App Identity 的 Connect Session
+  可调用 `storage.*`；Provider 配置由 `plugin-storage` 通过独立
+  `keymaster.storage` DB 管理。没有 App Identity 的旧 session 仍可使用原有
+  Connect 方法，但不能使用 Storage。
 
 ### `connect.login`
 

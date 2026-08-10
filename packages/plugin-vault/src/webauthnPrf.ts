@@ -2,8 +2,6 @@ import type { PasskeyProtection } from "@keymaster/contracts";
 import {
   aesGcmKeyFromRawBits,
   bytesToHex,
-  decryptBytesWithAad,
-  encryptBytesWithAad,
   hexToBytes
 } from "./crypto.js";
 import type { VaultKeyMaterial } from "./vaultCoordinator.js";
@@ -306,15 +304,25 @@ export async function encryptMaterialWithPasskey(input: {
 }): Promise<Pick<VaultPasskeyProtectionRecord, "cipherVersion" | "cipherIvB64" | "cipherB64">> {
   const key = await aesGcmKeyFromRawBits(input.prfOutput);
   const plaintext = new TextEncoder().encode(JSON.stringify(input.material));
-  const encrypted = await encryptBytesWithAad(
+  // A WebAuthn PRF output is already the full-strength key material. This
+  // envelope intentionally has no KDF salt field, so it must not use the
+  // Vault/local-secret helper whose random salt is authenticated and persisted
+  // separately. Bind only the stable passkey AAD and retain the existing record
+  // format for previously stored passkeys.
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+    {
+      name: "AES-GCM",
+      iv: iv as BufferSource,
+      additionalData: new TextEncoder().encode(passkeyAad(input.publicKeyHex, input.credentialIdB64)) as BufferSource
+    },
     key,
-    plaintext,
-    passkeyAad(input.publicKeyHex, input.credentialIdB64)
-  );
+    plaintext as BufferSource
+  ));
   return {
     cipherVersion: "webauthn-prf-v1",
-    cipherIvB64: bytesToHex(encrypted.iv),
-    cipherB64: bytesToHex(encrypted.ciphertext)
+    cipherIvB64: bytesToHex(iv),
+    cipherB64: bytesToHex(ciphertext)
   };
 }
 
@@ -324,15 +332,15 @@ export async function decryptMaterialWithPasskey(input: {
   protection: VaultPasskeyProtectionRecord;
 }): Promise<VaultKeyMaterial> {
   const key = await aesGcmKeyFromRawBits(input.prfOutput);
-  const plaintext = await decryptBytesWithAad(
-    key,
+  const plaintext = new Uint8Array(await crypto.subtle.decrypt(
     {
-      salt: new Uint8Array(),
-      iv: hexToBytes(input.protection.cipherIvB64),
-      ciphertext: hexToBytes(input.protection.cipherB64)
+      name: "AES-GCM",
+      iv: hexToBytes(input.protection.cipherIvB64) as BufferSource,
+      additionalData: new TextEncoder().encode(passkeyAad(input.publicKeyHex, input.protection.credentialIdB64)) as BufferSource
     },
-    passkeyAad(input.publicKeyHex, input.protection.credentialIdB64)
-  );
+    key,
+    hexToBytes(input.protection.cipherB64) as BufferSource
+  ));
   const parsed = JSON.parse(new TextDecoder().decode(plaintext)) as VaultKeyMaterial;
   if (typeof parsed.hex !== "string") throw new Error("Invalid passkey key material");
   return parsed;

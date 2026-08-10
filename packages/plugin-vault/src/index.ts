@@ -15,3 +15,4 @@ export * from "./crypto.js";
 export { deriveP2pkhAddress, signEcdsaDigest, decryptSessionPrivateKeyBytes, verifySessionKeyPair, bytesToHex, hexToBytes } from "./sessionCryptoCore.js";
 export { sealAppMessageLocalBytes, openAppMessageLocalBytes } from "./sessionCryptoCore.js";
 export * from "./vaultCoordinator.js";
+export { createVaultLocalSecretService } from "./localSecretService.js";

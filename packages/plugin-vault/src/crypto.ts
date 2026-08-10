@@ -105,6 +105,9 @@ export async function encryptBytesWithAad(
 ): Promise<EncryptedBlob> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
+  // Historical v1/v2 envelopes authenticate only the explicit AAD. Keep this
+  // generic entry point byte-for-byte compatible; salt-bound envelopes use the
+  // dedicated helpers below.
   const additionalData = aad ? new TextEncoder().encode(aad) : undefined;
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt(
@@ -131,17 +134,75 @@ export async function decryptBytesWithAad(
   blob: EncryptedBlob,
   aad: string | undefined
 ): Promise<Uint8Array> {
-  const additionalData = aad ? new TextEncoder().encode(aad) : undefined;
-  const plain = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: blob.iv as BufferSource,
-      additionalData: additionalData as BufferSource | undefined
-    },
+  try {
+    const plain = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: blob.iv as BufferSource,
+        additionalData: aad ? new TextEncoder().encode(aad) as BufferSource : undefined
+      },
+      key,
+      blob.ciphertext as BufferSource
+    );
+    return new Uint8Array(plain);
+  } catch (error) {
+    // Also accept the salt-bound variant emitted by the dedicated local-secret
+    // helper, so records written during the transitional implementation remain
+    // readable.
+    const legacyAdditionalData = saltBoundAdditionalData(aad, blob.salt);
+    const plain = await crypto.subtle.decrypt(
+      {
+        name: "AES-GCM",
+        iv: blob.iv as BufferSource,
+        additionalData: legacyAdditionalData as BufferSource
+      },
+      key,
+      blob.ciphertext as BufferSource
+    ).catch(() => { throw error; });
+    return new Uint8Array(plain);
+  }
+}
+
+/**
+ * Local-secret envelope variant whose random salt is authenticated as part of
+ * the encryption input. It uses an explicit entry point so plugin-owned
+ * secrets can opt into the versioned local-secret AAD contract.
+ */
+function saltBoundAdditionalData(aad: string | undefined, salt: Uint8Array): Uint8Array {
+  const prefix = aad ? new TextEncoder().encode(aad) : new Uint8Array(0);
+  const output = new Uint8Array(prefix.length + 1 + salt.length);
+  output.set(prefix);
+  output[prefix.length] = 0;
+  output.set(salt, prefix.length + 1);
+  return output;
+}
+
+export async function encryptBytesWithSaltBoundAad(
+  key: CryptoKey,
+  plaintext: Uint8Array,
+  aad: string | undefined
+): Promise<EncryptedBlob> {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = new Uint8Array(await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv as BufferSource, additionalData: saltBoundAdditionalData(aad, salt) as BufferSource },
+    key,
+    plaintext as BufferSource
+  ));
+  return { salt, iv, ciphertext, version: "v2" };
+}
+
+export async function decryptBytesWithSaltBoundAad(
+  key: CryptoKey,
+  blob: EncryptedBlob,
+  aad: string | undefined
+): Promise<Uint8Array> {
+  const plaintext = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: blob.iv as BufferSource, additionalData: saltBoundAdditionalData(aad, blob.salt) as BufferSource },
     key,
     blob.ciphertext as BufferSource
   );
-  return new Uint8Array(plain);
+  return new Uint8Array(plaintext);
 }
 
 /** 便捷：hex 字符串 <-> bytes。 */

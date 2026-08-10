@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
     "./styles.css": "./src/styles.css"
   },
   "types": "./src/index.ts",

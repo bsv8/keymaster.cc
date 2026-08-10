@@ -213,11 +213,9 @@ export async function openProtocolStorageDb(): Promise<ProtocolStorageDb> {
         const tokenStore = db.createObjectStore(STORE_LAUNCH_TOKENS, { keyPath: "token" });
         tokenStore.createIndex("connectSessionId", "connectSessionId", { unique: false });
       }
-      // V9 迁移（施工单 2026-07-01 001 硬切换）：物理删除
-      // `storageProviderConfig` store。本次 storage.* / S3 provider 能力
-      // 硬切换真删除——旧本地配置随升级自动消失，**不**做导出、不做
-      // 迁移、不做远端清理。commands / origins / feePools /
-      // connectSessions / launchTokens 不动。
+      // V9 迁移：物理删除历史 `storageProviderConfig` store。旧 plaintext
+      // 配置随升级自动消失，**不**做导出、不做迁移、不做远端清理；新的
+      // Storage 配置只存在独立的 `keymaster.storage` DB 中。
       if (oldVersion < 9) {
         if (db.objectStoreNames.contains("storageProviderConfig")) {
           db.deleteObjectStore("storageProviderConfig");

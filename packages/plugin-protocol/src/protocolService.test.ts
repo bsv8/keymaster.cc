@@ -33,6 +33,7 @@ import { cborDecode, cborEncode } from "./protocolCbor.js";
 import { aesGcmDecrypt, deriveSiteKey, verifyCompactSecp256k1, signCompactSecp256k1 } from "./protocolCrypto.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { identityDigestBytes } from "./appIdentity.js";
 
 const TEST_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
@@ -6439,6 +6440,32 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       }
       expect(caught).toBeInstanceOf(LaunchAppViewError);
       expect((caught as LaunchAppViewError).code).toBe("invalid_app_config");
+      expect(env.openCalls.length).toBe(0);
+    } finally {
+      env.restore();
+    }
+  });
+
+  it("拒绝签名 Identity 与目录 appId 不一致的 launcher 请求", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const proof = {
+        version: 1 as const,
+        publisherPublicKey: TEST_PUB_HEX,
+        app: { id: "signed-app", name: "Signed App" },
+        signature: ""
+      };
+      proof.signature = Array.from(
+        secp256k1.sign(identityDigestBytes(proof), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" }),
+        (byte) => byte.toString(16).padStart(2, "0")
+      ).join("");
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageDb
+      });
+      await expect(service.launchAppView({ ...JUSTNOTE, appIdentity: proof })).rejects.toMatchObject({ code: "invalid_app_config" });
       expect(env.openCalls.length).toBe(0);
     } finally {
       env.restore();

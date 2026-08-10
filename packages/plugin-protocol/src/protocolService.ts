@@ -4,7 +4,7 @@
 // p2pkh.transfer / feepool.prepare / feepool.commit 执行。
 //
 // 设计缘由（施工单 2026-06-27 001 硬切换 + 施工单 2026-06-28 002 硬切换 +
-// 2026-07-01 001 硬切换：移除 S3 / storage.*）：
+// Connect Storage 施工单）：
 //   - 会话锁状态 (`ProtocolPopupLockState`) 与请求状态 (`ProtocolCommandPhase`)
 //     分层；不再共享一个中心 phase。
 //   - 内部数据：
@@ -23,7 +23,8 @@
 //       * unlocked + manual → `confirming`（启动 timeout）
 //       * unlocked + auto → `queued`
 //   - **所有外部业务方法**（identity.get / intent.sign / cipher.encrypt /
-//     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit）
+//     cipher.decrypt / p2pkh.transfer / feepool.prepare / feepool.commit /
+//     storage.*）
 //     强制要求 `connectSessionId` 入参（施工单 2026-06-28 002 硬切换）。
 //     accept 阶段同步预校验 session 真值（fail-fast）：
 //       - session 不存在 / 已 revoke / origin 不匹配 / owner key 不 ready
@@ -79,6 +80,7 @@ import {
   type AppMsgContentType,
   type AppViewContext,
   type BinaryField,
+  type AppIdentitySnapshot,
   type BroadcastCore,
   type BroadcastMessage,
   type BroadcastMessagePublicView,
@@ -140,9 +142,20 @@ import {
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
   type ProtocolStorageDb,
+  type StorageService,
+  type StorageAppContext,
+  type StorageListResult,
+  type StorageDirectoryResult,
+  type StoragePutResult,
+  type StorageGetResult,
+  type StorageDeleteResult,
+  type StorageUploadBeginResult,
+  type StorageUploadPartResult,
+  type StorageUploadAbortResult,
   type VaultService
 } from "@keymaster/contracts";
 import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
+import { verifyAppIdentityProof } from "./appIdentity.js";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -265,6 +278,10 @@ export interface ProtocolServiceDeps {
    * fail-closed（与 `p2pkh.service` 缺时 `p2pkh.transfer` 的降级对称）。
    */
   appMsgCore?: AppMsgCore;
+  /** Optional Storage platform capability; absence only disables storage.*. */
+  storageService?: StorageService;
+  /** Resolve the current Storage capability at request/lifecycle time. */
+  getStorageService?: () => StorageService | undefined;
   /**
    * 可选 broadcast.core 平台能力（施工单 2026-07-08 001 硬切换）。
    *
@@ -342,6 +359,7 @@ interface RequestRecord {
    * record 生命周期内**不**可漂移；不允许"旧请求漂进新 session"。
    */
   connectSessionId: string;
+  payloadSize?: number;
   /**
    * record 在创建时快照的 owner public key hex（施工单 2026-06-28 002
    * 硬切换：owner 唯一真值）。
@@ -368,6 +386,9 @@ interface RequestRecord {
   errorCode: string;
   /** 错误 message；英文。 */
   errorMessage: string;
+  /** AbortController owned by the request while provider I/O is running. */
+  abortController?: AbortController;
+  cancelRequested?: boolean;
   /** 本地终态原因（写本地）；隐私敏感场景与对外解耦。 */
   failureReason?: ProtocolFailureReason;
   /* ============== 施工单 2026-06-28 001：connect.* 字段 ============== */
@@ -505,6 +526,8 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /** 当前正在执行的 recordId；同一时刻最多 1。 */
   private executingRecordId: string | null = null;
+  /** Prevent concurrent drain calls from racing before executingRecordId is set. */
+  private drainingExecutionQueue = false;
 
   /** 每条 confirming request 独立的 timeout 状态。 */
   private timersByRecordId: Map<string, ConfirmTimeoutState> = new Map();
@@ -738,6 +761,18 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
   }
 
+  /** Resolve the current Storage capability after an independent plugin restart. */
+  private currentStorageService(): StorageService | undefined {
+    if (this.deps.getStorageService) {
+      try {
+        return this.deps.getStorageService();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.deps.storageService;
+  }
+
   /**
    * 在服务已经启动后接入可选的协议存储。
    *
@@ -856,6 +891,16 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不发 `closing`（closing 由 pageUnloading 路径负责）。
    */
   endSession(): void {
+    const sessionIds = new Set<string>();
+    for (const rec of this.requestsByRecordId.values()) {
+      if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
+      if (rec.phase === "executing" && rec.method.startsWith("storage.")) {
+        rec.cancelRequested = true;
+        rec.abortController?.abort();
+      }
+    }
+    const storageService = this.currentStorageService();
+    for (const sessionId of sessionIds) void storageService?.abortSession(sessionId);
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
     for (const [, rec] of this.requestsByRecordId) {
       if (rec.phase === "approved" || rec.phase === "rejected" || rec.phase === "failed" || rec.phase === "timed_out") {
@@ -1261,6 +1306,16 @@ export class ProtocolServiceImpl implements ProtocolService {
    * ProtocolPopupPage 调用。
    */
   pageUnloading(): void {
+    const sessionIds = new Set<string>();
+    for (const rec of this.requestsByRecordId.values()) {
+      if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
+      if (rec.phase === "executing" && rec.method.startsWith("storage.")) {
+        rec.cancelRequested = true;
+        rec.abortController?.abort();
+      }
+    }
+    const storageService = this.currentStorageService();
+    for (const sessionId of sessionIds) void storageService?.abortSession(sessionId);
     this.sendClosingBestEffort();
   }
 
@@ -1815,6 +1870,24 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: appOrigin does not match appUrl.origin"
       );
     }
+    let appIdentity: AppIdentitySnapshot | undefined;
+    if (input.appIdentity) {
+      try {
+        appIdentity = verifyAppIdentityProof(input.appIdentity);
+      } catch {
+        throw new LaunchAppViewError("invalid_app_config", "launchAppView: invalid app identity proof");
+      }
+      // The launcher catalog entry is the authority for which app is being
+      // opened. A valid publisher signature alone is not sufficient: without
+      // this binding an app-b catalog entry could carry app-a's proof and be
+      // placed in app-a's storage namespace.
+      if (appIdentity.appId !== input.appId) {
+        throw new LaunchAppViewError(
+          "invalid_app_config",
+          "launchAppView: app identity does not match appId"
+        );
+      }
+    }
     if (typeof window === "undefined") {
       throw new LaunchAppViewError(
         "window_unavailable",
@@ -1882,6 +1955,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
+      ...(appIdentity ? { appIdentity } : {}),
       createdAt: now,
       lastUsedAt: now,
       revokedAt: null
@@ -1937,6 +2011,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims as Record<string, unknown>,
       resolvedAt: now,
+      ...(appIdentity ? { appIdentity } : {}),
       launchToken,
       expiresAt: now + 24 * 60 * 60 * 1000,
       sessionRuntimeBootstrap
@@ -2059,7 +2134,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       connectSessionId: payload.connectSessionId,
       ownerPublicKeyHex: payload.ownerPublicKeyHex,
       resolvedClaims: claimsSnapshot,
-      resolvedAt: payload.resolvedAt
+      resolvedAt: payload.resolvedAt,
+      ...(payload.appIdentity ? { appIdentity: payload.appIdentity } : {})
     };
     this.launchTokensByToken.set(payload.launchToken, {
       appId: payload.app.appId,
@@ -2640,6 +2716,10 @@ export class ProtocolServiceImpl implements ProtocolService {
       } else {
         rec.connectSessionId = sessionId;
         rec.ownerPublicKeyHex = session.ownerPublicKeyHex;
+        if (method.startsWith("storage.") && !session.appIdentity) {
+          this.scheduleFailFastRequest(recordId, "storage_identity_required", "storage_error");
+          return;
+        }
       }
       if (method === "cipher.encrypt" || method === "cipher.decrypt") {
         // cipher.* session 有效：locked → waiting_unlock_manual；
@@ -2707,6 +2787,28 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.emit();
       this.emitFeed();
       void this.drainExecutionQueue();
+      return;
+    }
+
+    // storage.* is an auto-execute session capability. It never opens a
+    // confirmation card, but a locked Vault still queues it until unlock so
+    // the Storage plugin can open its sealed provider config.
+    if (parsed.method.startsWith("storage.")) {
+      rec.autoApproved = true;
+      rec.autoExecuteAfterUnlock = true;
+      if (this.lockStateValue === "locked") {
+        this.setRecordPhase(recordId, "waiting_unlock_auto");
+        rec.enteredPhaseAt = Date.now();
+        this.emit();
+        this.emitFeed();
+      } else {
+        this.setRecordPhase(recordId, "queued");
+        rec.enteredPhaseAt = Date.now();
+        this.executionQueue.push(recordId);
+        this.emit();
+        this.emitFeed();
+        void this.drainExecutionQueue();
+      }
       return;
     }
 
@@ -3349,7 +3451,19 @@ export class ProtocolServiceImpl implements ProtocolService {
   ): Promise<void> {
     const rec = this.requestsByRecordId.get(recordId);
     if (!rec) return;
-    if (rec.phase === "executing") return;
+    if (rec.phase === "executing") {
+      rec.cancelRequested = true;
+      rec.abortController?.abort();
+      // Request cancellation must stay request-scoped. In particular a
+      // cancelled list/get must not tear down every multipart upload owned by
+      // the same Connect session. Multipart operations may retire only the
+      // upload id explicitly carried by that request.
+      if (rec.method === "storage.upload.part" || rec.method === "storage.upload.complete" || rec.method === "storage.upload.abort") {
+        const params = rec.params as { connectSessionId?: string; uploadId?: string };
+        if (params.connectSessionId && params.uploadId) void this.abortCancelledUpload(rec, params.connectSessionId, params.uploadId);
+      }
+      return;
+    }
     // queued：从执行队列里移除。
     if (rec.phase === "queued") {
       this.executionQueue = this.executionQueue.filter((id) => id !== recordId);
@@ -3390,69 +3504,75 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async drainExecutionQueue(): Promise<void> {
     if (this.executingRecordId !== null) return; // 已有正在执行的；当前条跑完后由 `runRequest` 内的 finally 触发下一次 drain。
     if (this.executionQueue.length === 0) return;
-    while (this.executionQueue.length > 0 && this.executingRecordId === null) {
-      const recordId = this.executionQueue[0];
-      if (typeof recordId !== "string") {
-        // 防御性：executionQueue 在代码内只 push 字符串，但 TS 推导
-        // 出 `string | undefined`（数组下标）；非字符串时直接 shift。
-        this.executionQueue.shift();
-        continue;
-      }
-      const rec = this.requestsByRecordId.get(recordId);
-      if (!rec) {
-        this.executionQueue.shift();
-        continue;
-      }
-      if (rec.phase !== "queued") {
-        this.executionQueue.shift();
-        continue;
-      }
+    if (this.drainingExecutionQueue) return;
+    this.drainingExecutionQueue = true;
+    try {
+      while (this.executionQueue.length > 0 && this.executingRecordId === null) {
+        const recordId = this.executionQueue[0];
+        if (typeof recordId !== "string") {
+          // 防御性：executionQueue 在代码内只 push 字符串，但 TS 推导
+          // 出 `string | undefined`（数组下标）；非字符串时直接 shift。
+          this.executionQueue.shift();
+          continue;
+        }
+        const rec = this.requestsByRecordId.get(recordId);
+        if (!rec) {
+          this.executionQueue.shift();
+          continue;
+        }
+        if (rec.phase !== "queued") {
+          this.executionQueue.shift();
+          continue;
+        }
       // 按当前 record 自己判定能否执行——不再用全局 lockState 卡。
-      const decision = await this.probeExecutionCondition(rec);
-      if (decision.kind === "block_unlock") {
+        const decision = await this.probeExecutionCondition(rec);
+        if (decision.kind === "block_unlock") {
         // 等 vault 解锁；保持队首，等待 `setVaultLockState(false)` 后
         // 由它触发的 drainExecutionQueue 再走一遍。
-        this.setRecordPhase(rec.recordId, decision.targetPhase);
-        rec.enteredPhaseAt = Date.now();
-        this.executionQueue.shift();
-        this.emit();
-        this.emitFeed();
-        continue;
-      }
-      if (decision.kind === "fail") {
+          this.setRecordPhase(rec.recordId, decision.targetPhase);
+          rec.enteredPhaseAt = Date.now();
+          this.executionQueue.shift();
+          this.emit();
+          this.emitFeed();
+          continue;
+        }
+        if (decision.kind === "fail") {
         // runtime 真拿不到（bootstrap lost 且 vault 也不能重建）——
         // 立即 fail-fast，写本地 reason = `runtime_missing`，对外
         // `user_rejected`。
+          this.executionQueue.shift();
+          rec.phase = "failed";
+          rec.errorCode = "user_rejected";
+          rec.errorMessage = "User rejected";
+          rec.failureReason = "runtime_missing";
+          rec.finishedAt = Date.now();
+          rec.updatedAt = rec.finishedAt;
+          this.writeFeedCommandFor(rec);
+          await this.replyErrorToRec(rec, "user_rejected", "User rejected");
+          this.emitFeed();
+          this.emit();
+          continue;
+        }
+        // decision.kind === "execute"：取出队首并执行。
         this.executionQueue.shift();
-        rec.phase = "failed";
-        rec.errorCode = "user_rejected";
-        rec.errorMessage = "User rejected";
-        rec.failureReason = "runtime_missing";
-        rec.finishedAt = Date.now();
-        rec.updatedAt = rec.finishedAt;
-        this.writeFeedCommandFor(rec);
-        await this.replyErrorToRec(rec, "user_rejected", "User rejected");
-        this.emitFeed();
-        this.emit();
-        continue;
+        this.executingRecordId = recordId;
+        this.setRecordPhase(recordId, "executing");
+        rec.enteredPhaseAt = Date.now();
+        try {
+          await this.runRequest(rec);
+        } catch (err) {
+          this.deps.logger?.error?.({
+            scope: "protocol.exec",
+            event: "runRequest.unexpected",
+            recordId,
+            err: err instanceof Error ? err.message : String(err)
+          });
+        } finally {
+          this.executingRecordId = null;
+        }
       }
-      // decision.kind === "execute"：取出队首并执行。
-      this.executionQueue.shift();
-      this.executingRecordId = recordId;
-      this.setRecordPhase(recordId, "executing");
-      rec.enteredPhaseAt = Date.now();
-      try {
-        await this.runRequest(rec);
-      } catch (err) {
-        this.deps.logger?.error?.({
-          scope: "protocol.exec",
-          event: "runRequest.unexpected",
-          recordId,
-          err: err instanceof Error ? err.message : String(err)
-        });
-      } finally {
-        this.executingRecordId = null;
-      }
+    } finally {
+      this.drainingExecutionQueue = false;
     }
   }
 
@@ -3568,16 +3688,30 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 执行单条 request。收尾：成功 → approved；失败 → failed。
    */
   private async runRequest(rec: RequestRecord): Promise<void> {
-    const result = await this.dispatch(rec);
-    if (result) {
-      rec.phase = "approved";
-      rec.finishedAt = Date.now();
-      rec.updatedAt = rec.finishedAt;
-      this.writeFeedCommandFor(rec);
-      await this.replyResultToRec(rec, result);
+    rec.abortController = new AbortController();
+    try {
+      const result = await this.dispatch(rec);
+      if (rec.cancelRequested && rec.method.startsWith("storage.") && rec.phase !== "rejected" && rec.phase !== "failed") {
+        rec.phase = "rejected";
+        rec.errorCode = "user_rejected";
+        rec.errorMessage = "User rejected";
+        rec.failureReason = "client_canceled";
+        rec.finishedAt = Date.now();
+        rec.updatedAt = rec.finishedAt;
+        this.writeFeedCommandFor(rec);
+        await this.replyErrorToRec(rec, "user_rejected", "User rejected");
+      } else if (result) {
+        rec.phase = "approved";
+        rec.finishedAt = Date.now();
+        rec.updatedAt = rec.finishedAt;
+        this.writeFeedCommandFor(rec);
+        await this.replyResultToRec(rec, result);
+      }
+      this.emitFeed();
+      this.emit();
+    } finally {
+      rec.abortController = undefined;
     }
-    this.emitFeed();
-    this.emit();
   }
 
   private async dispatch(rec: RequestRecord): Promise<MethodResult | null> {
@@ -3620,6 +3754,26 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeBroadcastSubscriptionSet(rec);
         case "broadcast.subscription_list":
           return await this.executeBroadcastSubscriptionList(rec);
+        case "storage.list":
+          return await this.executeStorageList(rec);
+        case "storage.directory.create":
+          return await this.executeStorageDirectoryCreate(rec);
+        case "storage.directory.delete":
+          return await this.executeStorageDirectoryDelete(rec);
+        case "storage.put":
+          return await this.executeStoragePut(rec);
+        case "storage.get":
+          return await this.executeStorageGet(rec);
+        case "storage.delete":
+          return await this.executeStorageDelete(rec);
+        case "storage.upload.begin":
+          return await this.executeStorageUploadBegin(rec);
+        case "storage.upload.part":
+          return await this.executeStorageUploadPart(rec);
+        case "storage.upload.complete":
+          return await this.executeStorageUploadComplete(rec);
+        case "storage.upload.abort":
+          return await this.executeStorageUploadAbort(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -3627,7 +3781,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       let errCode: ProtocolErrorCode;
       let errMessage: string;
       let localReason: ProtocolFailureReason | undefined;
-      if (err && typeof err === "object" && "localReason" in err) {
+      if (rec.cancelRequested) {
+        errCode = "user_rejected";
+        errMessage = "User rejected";
+        localReason = "client_canceled";
+        rec.phase = "rejected";
+      } else if (err && typeof err === "object" && "localReason" in err) {
         localReason = (err as { localReason?: unknown }).localReason as
           | ProtocolFailureReason
           | undefined;
@@ -3638,7 +3797,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         errCode = protoErr.code;
         errMessage = protoErr.message;
       }
-      rec.phase = "failed";
+      if (!rec.cancelRequested) rec.phase = "failed";
       rec.errorCode = errCode;
       rec.errorMessage = errMessage;
       rec.failureReason = localReason;
@@ -3649,6 +3808,94 @@ export class ProtocolServiceImpl implements ProtocolService {
       return null;
     }
     return null;
+  }
+
+  private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<{ service: StorageService; context: StorageAppContext }> {
+    const service = this.currentStorageService();
+    if (!service) throw protocolError("storage_unavailable", "Storage service is unavailable");
+    const session = await this.requireConnectSession(rec, connectSessionId);
+    if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity");
+    return {
+      service,
+      context: { connectSessionId: session.sessionId, transportOrigin: rec.origin, appIdentity: session.appIdentity }
+    };
+  }
+
+  private async abortCancelledUpload(rec: RequestRecord, connectSessionId: string, uploadId: string): Promise<void> {
+    const service = this.currentStorageService();
+    if (!service) return;
+    try {
+      const session = await this.requireConnectSession(rec, connectSessionId);
+      if (!session.appIdentity) return;
+      await service.abortUpload(
+        { connectSessionId, transportOrigin: rec.origin, appIdentity: session.appIdentity },
+        { uploadId }
+      );
+    } catch (error) {
+      this.deps.logger?.warn?.({ scope: "protocol.storage", event: "cancel_upload_abort.failed", code: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  private async executeStorageList(rec: RequestRecord): Promise<StorageListResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageListParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.list(context, { prefix: params.prefix, cursor: params.cursor, limit: params.limit, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageDirectoryCreate(rec: RequestRecord): Promise<StorageDirectoryResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.createDirectory(context, { path: params.path, overwrite: params.overwrite, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageDirectoryDelete(rec: RequestRecord): Promise<StorageDirectoryResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageDirectoryParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.deleteDirectory(context, { path: params.path, signal: rec.abortController?.signal });
+  }
+
+  private async executeStoragePut(rec: RequestRecord): Promise<StoragePutResult> {
+    const params = rec.params as import("@keymaster/contracts").StoragePutParams;
+    rec.payloadSize = params.content.bytes.byteLength;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.put(context, { path: params.path, content: params.content, contentType: params.contentType, overwrite: params.overwrite, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageGet(rec: RequestRecord): Promise<StorageGetResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageGetParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.getRange(context, { path: params.path, offset: params.offset, length: params.length, ifMatch: params.ifMatch, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageDelete(rec: RequestRecord): Promise<StorageDeleteResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageDeleteParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.delete(context, { path: params.path, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageUploadBegin(rec: RequestRecord): Promise<StorageUploadBeginResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageUploadBeginParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.beginUpload(context, { path: params.path, contentType: params.contentType, size: params.size, overwrite: params.overwrite, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageUploadPart(rec: RequestRecord): Promise<StorageUploadPartResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageUploadPartParams;
+    rec.payloadSize = params.content.bytes.byteLength;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.uploadPart(context, { uploadId: params.uploadId, partNumber: params.partNumber, content: params.content, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageUploadComplete(rec: RequestRecord): Promise<StoragePutResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageUploadCompleteParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.completeUpload(context, { uploadId: params.uploadId, signal: rec.abortController?.signal });
+  }
+
+  private async executeStorageUploadAbort(rec: RequestRecord): Promise<StorageUploadAbortResult> {
+    const params = rec.params as import("@keymaster/contracts").StorageUploadAbortParams;
+    const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
+    return service.abortUpload(context, { uploadId: params.uploadId, signal: rec.abortController?.signal });
   }
 
   /* ============== 执行身份 / 签名 / 加解密 ============== */
@@ -4104,6 +4351,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const resolvedClaims = resolveClaims(params.claims, (name) =>
       resolveBuiltinClaim(name, { activeKeyLabel: key.label })
     );
+    const appIdentity = params.appIdentity ? verifyAppIdentityProof(params.appIdentity) : undefined;
     const now = Date.now();
     const sessionId = this.nextRecordId();
     const record: ConnectSessionRecord = {
@@ -4112,6 +4360,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
+      ...(appIdentity ? { appIdentity } : {}),
       // 施工单 2026-06-30 002 硬切换：session 真值收口为三元组
       // （sessionId + origin + ownerPublicKeyHex），**不**写
       // `runtimeBinding`——执行路径走统一 owner runtime resolver，
@@ -4125,7 +4374,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       connectSessionId: sessionId,
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims,
-      resolvedAt: now
+      resolvedAt: now,
+      ...(appIdentity ? { appIdentity } : {})
     };
   }
 
@@ -4167,7 +4417,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       connectSessionId: session.sessionId,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
-      resolvedAt: now
+      resolvedAt: now,
+      ...(session.appIdentity ? { appIdentity: session.appIdentity } : {})
     };
   }
 
@@ -4230,6 +4481,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这一步不依赖 vault.lock 成功与否：session 一旦 logout，旧 owner
     // capability 就不应继续常驻内存。
     this.clearSessionRuntimeBootstrap(result.connectSessionId, "logout");
+    await this.currentStorageService()?.abortSession(result.connectSessionId);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
     // 任意一步失败即视为 logout 不完整；fire-and-forget 会让 caller 在
@@ -4359,7 +4611,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       connectSessionId: session.sessionId,
       ownerPublicKeyHex: session.ownerPublicKeyHex,
       resolvedClaims: session.claimsSnapshot,
-      resolvedAt: now
+      resolvedAt: now,
+      ...(session.appIdentity ? { appIdentity: session.appIdentity } : {})
     };
   }
 
@@ -5824,7 +6077,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       textSummary: this.summarizeText(rec.params),
       claimsSummary: this.summarizeClaims(rec.params),
       contentType: this.summarizeContentType(rec.params),
-      payloadSize: this.summarizePayloadSize(rec.params),
+      payloadSize: rec.payloadSize ?? this.summarizePayloadSize(rec.params),
       connectSessionId: rec.connectSessionId,
       ownerPublicKeyHex: rec.ownerPublicKeyHex,
       createdAt: rec.createdAt,
@@ -6081,7 +6334,8 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.phase === "waiting_unlock_manual" ||
       rec.phase === "waiting_unlock_auto" ||
       rec.phase === "confirming" ||
-      rec.phase === "queued"
+      rec.phase === "queued" ||
+      (rec.phase === "executing" && rec.method.startsWith("storage."))
     );
   }
 
@@ -6159,6 +6413,9 @@ function toProtocolError(err: unknown): ProtocolError {
   if (err && typeof err === "object" && "code" in err && "message" in err) {
     const e = err as { code?: unknown; message?: unknown };
     if (typeof e.code === "string" && typeof e.message === "string") {
+      if (e.code.startsWith("storage_")) {
+        return { code: e.code as ProtocolErrorCode, message: e.code };
+      }
       return { code: e.code as ProtocolErrorCode, message: e.message };
     }
   }

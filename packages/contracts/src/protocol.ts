@@ -2,7 +2,7 @@
 // Keymaster 对外协议 V1 公共契约。
 //
 // 设计缘由（施工单 001 + 002 + 2026-06-27 002 硬切换 + 2026-06-28 002 硬切换 +
-// 2026-07-01 001 硬切换：移除 S3 / storage.*）：
+// Connect Storage 施工单）：
 //   - 协议方法集：identity.get / intent.sign / cipher.encrypt / cipher.decrypt
 //     （签名 + 加解密），p2pkh.transfer（受控转账），feepool.prepare /
 //     feepool.commit（双端费用池两步方法族）。所有方法走同一套 transport +
@@ -25,6 +25,26 @@
 //     不持久化；popup 刷新 / 关闭后 operation 失效。
 
 import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
+import type { AppIdentityProofV1, AppIdentitySnapshot } from "./appIdentity.js";
+import type {
+  StorageDeleteParams,
+  StorageDeleteResult,
+  StorageDirectoryParams,
+  StorageDirectoryResult,
+  StorageGetParams,
+  StorageGetResult,
+  StorageListParams,
+  StorageListResult,
+  StoragePutParams,
+  StoragePutResult,
+  StorageUploadAbortParams,
+  StorageUploadAbortResult,
+  StorageUploadBeginParams,
+  StorageUploadBeginResult,
+  StorageUploadCompleteParams,
+  StorageUploadPartParams,
+  StorageUploadPartResult
+} from "./storage.js";
 //   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
 //       `ProtocolCommandFeedState.commands` **不**再承诺
 //       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
@@ -80,15 +100,9 @@ import type { ActiveKeyCrypto } from "./activeKeyCrypto.js";
 //       - 新增 `connect.launch`：appView mode 下 client app 首登入口；
 //         入参 `{ launchToken }`，成功结果形状与 `connect.login` 对齐；
 //         launchToken 一次性消费；不允许 fallback 到 `connect.login`。
-//   - 施工单 2026-07-01 001 硬切换：彻底移除 storage.* / S3 provider：
-//       - 协议方法集里**不再**存在 `storage.put` / `storage.get` /
-//         `storage.list` / `storage.listAll` / `storage.delete`；
-//       - `StorageProviderConfig` / storage params/result 类型
-//         全部从 contracts 抹去；
-//       - `ProtocolStorageDb` 不再提供 storage provider config CRUD；
-//       - `ProtocolService` 不再持有 storage config 读写接口；
-//       - DB schema 中 `storageProviderConfig` store 在升级时
-//         物理删除，旧配置随升级消失。
+//   - Connect Storage 施工单：`storage.*` 使用独立 `storage.service` capability
+//     与 `keymaster.storage` DB；旧 protocol DB 中的 plaintext
+//     `storageProviderConfig` 只在历史迁移中物理删除，绝不恢复或读取。
 //   - 统一 owner execution runtime：`OwnerExecutionRuntime` 承载同一份
 //     session capability；connect mode 下 runtime 允许两路来源——
 //     `bootstrap_runtime`（launcher 一次性注入的 session capability）与
@@ -159,7 +173,17 @@ export const PROTOCOL_METHODS = [
   // 的订阅集合，per-caller 隔离。
   "broadcast.publish",
   "broadcast.subscription_set",
-  "broadcast.subscription_list"
+  "broadcast.subscription_list",
+  "storage.list",
+  "storage.directory.create",
+  "storage.directory.delete",
+  "storage.put",
+  "storage.get",
+  "storage.delete",
+  "storage.upload.begin",
+  "storage.upload.part",
+  "storage.upload.complete",
+  "storage.upload.abort"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -195,6 +219,16 @@ export type ProtocolErrorCode =
   | "user_rejected"
   | "active_key_unavailable"
   | "decrypt_failed"
+  | "storage_not_configured"
+  | "storage_unavailable"
+  | "storage_invalid_path"
+  | "storage_not_found"
+  | "storage_conflict"
+  | "storage_forbidden"
+  | "storage_limit_exceeded"
+  | "storage_invalid_upload"
+  | "storage_provider_error"
+  | "storage_identity_required"
   | "internal_error";
 
 /** 协议错误对象。 */
@@ -923,6 +957,7 @@ export type ProtocolFailureReason =
    * 处置：对外 `user_rejected`；本地 reason = `session_owner_mismatch`。
    */
   | "session_owner_mismatch"
+  | "storage_error"
   | "internal_error";
 
 /**
@@ -1010,6 +1045,8 @@ export interface ConnectSessionRecord {
   lastUsedAt: number;
   /** 吊销时间；null = 未吊销。 */
   revokedAt: number | null;
+  /** Optional immutable publisher/app identity snapshot. Old sessions omit it. */
+  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1035,6 +1072,8 @@ export interface ConnectLoginParams {
    * 缺省 = `[]`，不返回任何 claim；通常 caller 想获取 profile.* 时必须显式列出。
    */
   claims?: string[];
+  /** Signed publisher/app identity. Omission preserves legacy non-Storage Connect. */
+  appIdentity?: AppIdentityProofV1;
 }
 
 /**
@@ -1057,6 +1096,7 @@ export interface ConnectLoginResult {
   resolvedClaims: Record<string, ResolvedClaimValue>;
   /** 本次解析时间（unix milliseconds）。 */
   resolvedAt: number;
+  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1092,6 +1132,7 @@ export interface ConnectResumeResult {
    * 给 caller 用来做"是否要重新登录"的客户端超时策略。
    */
   resolvedAt: number;
+  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1183,6 +1224,7 @@ export interface ConnectLaunchResult {
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
+  appIdentity?: AppIdentitySnapshot;
 }
 
 /* ============== appmsg.*（施工单 2026-07-03 001 硬切换：应用消息总线对外方法族） ============== */
@@ -1402,6 +1444,8 @@ export interface LaunchAppViewInput {
    * 同语义。V1 不传时取空数组。
    */
   claims?: string[];
+  /** Optional signed identity forwarded by the app launcher. */
+  appIdentity?: AppIdentityProofV1;
 }
 
 /**
@@ -1499,6 +1543,7 @@ export interface AppViewContext {
   resolvedClaims: Record<string, ResolvedClaimValue>;
   /** bootstrap 时间（unix milliseconds）。 */
   resolvedAt: number;
+  appIdentity?: AppIdentitySnapshot;
 }
 
 /**
@@ -1582,6 +1627,7 @@ export interface AppBootstrapPayload {
   ownerPublicKeyHex: string;
   resolvedClaims: Record<string, ResolvedClaimValue>;
   resolvedAt: number;
+  appIdentity?: AppIdentitySnapshot;
   /** launcher 给 client app 的 launchToken；Session Window 收 bootstrap 时缓存、消费在 connect.launch。 */
   launchToken: string;
   /**
@@ -1812,6 +1858,16 @@ export interface MethodParamsMap {
   "broadcast.publish": BroadcastPublishParams;
   "broadcast.subscription_set": BroadcastSubscriptionSetParams;
   "broadcast.subscription_list": BroadcastSubscriptionListParams;
+  "storage.list": StorageListParams;
+  "storage.directory.create": StorageDirectoryParams;
+  "storage.directory.delete": StorageDirectoryParams;
+  "storage.put": StoragePutParams;
+  "storage.get": StorageGetParams;
+  "storage.delete": StorageDeleteParams;
+  "storage.upload.begin": StorageUploadBeginParams;
+  "storage.upload.part": StorageUploadPartParams;
+  "storage.upload.complete": StorageUploadCompleteParams;
+  "storage.upload.abort": StorageUploadAbortParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -1836,6 +1892,16 @@ export interface MethodResultMap {
   "broadcast.publish": BroadcastPublishResult;
   "broadcast.subscription_set": BroadcastSubscriptionSetResult;
   "broadcast.subscription_list": BroadcastSubscriptionListResult;
+  "storage.list": StorageListResult;
+  "storage.directory.create": StorageDirectoryResult;
+  "storage.directory.delete": StorageDirectoryResult;
+  "storage.put": StoragePutResult;
+  "storage.get": StorageGetResult;
+  "storage.delete": StorageDeleteResult;
+  "storage.upload.begin": StorageUploadBeginResult;
+  "storage.upload.part": StorageUploadPartResult;
+  "storage.upload.complete": StoragePutResult;
+  "storage.upload.abort": StorageUploadAbortResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap

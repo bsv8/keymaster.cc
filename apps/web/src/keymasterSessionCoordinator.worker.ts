@@ -27,10 +27,12 @@ import type {
   CoordinatorTaskSnapshot,
   CoordinatorVaultOperation,
   CoordinatorSubscribeTopicsResult,
+  CoordinatorTopicBaseline,
   AssetDataInvalidationEvent,
   SessionStateEvent,
+  VaultSealedSecret,
 } from "@keymaster/contracts";
-import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes, buildKeyBackupEnvelope, passwordBackupView, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
+import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes, buildKeyBackupEnvelope, passwordBackupView, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { createMessageBus } from "@keymaster/runtime/messageBus";
@@ -40,6 +42,9 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import type { KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
+import type { StorageService, StorageServiceStatus, CoordinatorStorageControl, CoordinatorStorageData, CoordinatorStorageStateEvent } from "@keymaster/contracts";
+import { createStorageService, openStorageDb, STORAGE_SECRET_SCOPE } from "@keymaster/plugin-storage/coordinator";
+import { getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
 
 // Vault DB 操作（Worker 内可直接访问 IndexedDB）
 async function getVaultMeta(): Promise<VaultMetaRecord | undefined> {
@@ -107,6 +112,344 @@ async function persistCoordinatorMeta(): Promise<void> {
     req.onerror = () => resolve();
   });
 }
+
+const STORAGE_DB_NAME = "keymaster.storage";
+const STORAGE_DB_VERSION = 1;
+const STORAGE_PROVIDER_SCOPE = "keymaster.storage.provider-config.v1";
+const STORAGE_UPLOAD_SCOPE = "keymaster.storage.upload.v1/";
+const STORAGE_SECRET_DERIVATION_DOMAIN = "keymaster.storage.local-secret.v2";
+
+type StorageEnvelopeRecord = VaultSealedSecret;
+type StorageProviderRecord = { key: "active"; sealedConfig: StorageEnvelopeRecord };
+type StorageUploadRecord = { internalUploadId: string; sealedS3UploadId: StorageEnvelopeRecord };
+type StorageRotationSnapshot = { provider?: StorageProviderRecord; uploads: StorageUploadRecord[] };
+type StorageRotationJournal = { key: "rotation"; phase: "prepared" | "storage-committed"; old: StorageRotationSnapshot; next?: StorageRotationSnapshot };
+let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null>) | undefined;
+
+function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").StorageAppContext["appIdentity"] {
+  return isVerifiedAppIdentitySnapshot(identity);
+}
+
+async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null> {
+  if (testStorageSessionResolver) {
+    const resolved = await testStorageSessionResolver(sessionId);
+    return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity) ? resolved : null;
+  }
+  if (!sessionId || typeof indexedDB === "undefined") return null;
+  const record = await getAuthoritativeConnectSession(sessionId);
+  return record && isValidStorageIdentity(record.appIdentity)
+    ? { sessionId: record.sessionId, origin: record.origin, appIdentity: record.appIdentity, revokedAt: null }
+    : null;
+}
+
+function isStorageEnvelope(value: unknown): value is StorageEnvelopeRecord {
+  if (!value || typeof value !== "object") return false;
+  const envelope = value as Partial<StorageEnvelopeRecord>;
+  return (envelope.version === 1 || envelope.version === 2)
+    && typeof envelope.saltHex === "string"
+    && typeof envelope.nonceHex === "string"
+    && typeof envelope.ciphertextHex === "string";
+}
+
+function isStorageRotationSnapshot(value: unknown): value is StorageRotationSnapshot {
+  if (!value || typeof value !== "object") return false;
+  const snapshot = value as Partial<StorageRotationSnapshot>;
+  const provider = snapshot.provider;
+  const validProvider = provider === undefined
+    || (typeof provider === "object" && provider !== null && provider.key === "active" && isStorageEnvelope(provider.sealedConfig));
+  const uploads = snapshot.uploads;
+  return validProvider
+    && Array.isArray(uploads)
+    && uploads.every((record) => Boolean(record)
+      && typeof record === "object"
+      && typeof (record as Partial<StorageUploadRecord>).internalUploadId === "string"
+      && isStorageEnvelope((record as Partial<StorageUploadRecord>).sealedS3UploadId));
+}
+
+function isStorageRotationJournal(value: unknown): value is StorageRotationJournal {
+  if (!value || typeof value !== "object") return false;
+  const journal = value as Partial<StorageRotationJournal>;
+  return journal.key === "rotation"
+    && (journal.phase === "prepared" || journal.phase === "storage-committed")
+    && isStorageRotationSnapshot(journal.old)
+    && (journal.next === undefined || isStorageRotationSnapshot(journal.next));
+}
+
+function openExistingStorageDb(): Promise<IDBDatabase | undefined> {
+  return new Promise((resolve) => {
+    const request = indexedDB.open(STORAGE_DB_NAME, STORAGE_DB_VERSION);
+    let created = false;
+    request.onupgradeneeded = (event) => {
+      created = (event as IDBVersionChangeEvent).oldVersion === 0;
+      if (created) request.transaction?.abort();
+    };
+    request.onsuccess = () => {
+      if (created) { request.result.close(); resolve(undefined); return; }
+      resolve(request.result);
+    };
+    request.onerror = () => resolve(undefined);
+  });
+}
+
+function localSecretAad(version: 1 | 2, scope: string): string {
+  return `keymaster:local-secret:v${version}|${scope}`;
+}
+
+async function deriveStorageSecretKey(password: string, vaultSalt: Uint8Array): Promise<CryptoKey> {
+  // A separately domain-separated PBKDF2 invocation prevents local Storage
+  // envelopes from becoming another direct use of the Vault key, while the
+  // Vault salt still gives this derivation the same password-rotation anchor.
+  return deriveKey(`${STORAGE_SECRET_DERIVATION_DOMAIN}\0${password}`, vaultSalt);
+}
+
+async function decryptStoredLocalSecret(key: CryptoKey, scope: string, sealed: StorageEnvelopeRecord, legacyKey?: CryptoKey): Promise<Uint8Array> {
+  const blob = { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) };
+  try {
+    return sealed.version === 2
+      ? await decryptBytesWithSaltBoundAad(key, blob, localSecretAad(2, scope))
+      : await decryptBytesWithAad(key, blob, localSecretAad(1, scope));
+  } catch (error) {
+    // v1/v2 records written before the domain key was introduced used the
+    // Vault password key. Keep a one-time migration path for those records.
+    if (!legacyKey) throw error;
+    return sealed.version === 2
+      ? decryptBytesWithSaltBoundAad(legacyKey, blob, localSecretAad(2, scope))
+      : decryptBytesWithAad(legacyKey, blob, localSecretAad(1, scope));
+  }
+}
+
+async function encryptStoredLocalSecret(key: CryptoKey, scope: string, plaintext: Uint8Array): Promise<StorageEnvelopeRecord> {
+  const blob = await encryptBytesWithSaltBoundAad(key, plaintext, localSecretAad(2, scope));
+  return { version: 2, saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
+}
+
+async function storageSnapshotCanOpen(snapshot: StorageRotationSnapshot, key: CryptoKey, legacyKey?: CryptoKey): Promise<boolean> {
+  try {
+    if (snapshot.provider?.sealedConfig) {
+      const bytes = await decryptStoredLocalSecret(key, STORAGE_PROVIDER_SCOPE, snapshot.provider.sealedConfig, legacyKey);
+      bytes.fill(0);
+    }
+    for (const record of snapshot.uploads) {
+      const bytes = await decryptStoredLocalSecret(key, `${STORAGE_UPLOAD_SCOPE}${record.internalUploadId}`, record.sealedS3UploadId, legacyKey);
+      bytes.fill(0);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function storageDbTransaction(db: IDBDatabase, mode: IDBTransactionMode, callback: (stores: { provider: IDBObjectStore; uploads: IDBObjectStore }) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let transaction: IDBTransaction | undefined;
+    try {
+      transaction = db.transaction(["providerConfig", "multipartUploads"], mode);
+      callback({ provider: transaction.objectStore("providerConfig"), uploads: transaction.objectStore("multipartUploads") });
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction?.error ?? new Error("Storage transaction failed"));
+      transaction.onabort = () => reject(transaction?.error ?? new Error("Storage transaction aborted"));
+    } catch (error) {
+      try { transaction?.abort(); } catch { /* preserve the original callback error */ }
+      reject(error);
+    }
+  });
+}
+
+function clearStorageRotationJournal(db: IDBDatabase): Promise<void> {
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction("providerConfig", "readwrite");
+      tx.objectStore("providerConfig").delete("rotation");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error ?? new Error("Storage rotation journal cleanup failed"));
+      tx.onabort = () => reject(tx.error ?? new Error("Storage rotation journal cleanup aborted"));
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function recoverStorageRotation(storageKey: CryptoKey, legacyVaultKey: CryptoKey): Promise<void> {
+  const db = await openExistingStorageDb();
+  if (!db) return;
+  try {
+    const rawJournal = await new Promise<unknown>((resolve, reject) => {
+      const tx = db.transaction("providerConfig", "readonly");
+      const request = tx.objectStore("providerConfig").get("rotation");
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error);
+    });
+    if (!rawJournal) return;
+    if (!isStorageRotationJournal(rawJournal)) throw new Error("Storage rotation journal is corrupt");
+    const journal = rawJournal;
+    const current = await new Promise<StorageRotationSnapshot>((resolve, reject) => {
+      const tx = db.transaction(["providerConfig", "multipartUploads"], "readonly");
+      const provider = tx.objectStore("providerConfig").get("active");
+      const uploads = tx.objectStore("multipartUploads").getAll();
+      tx.oncomplete = () => resolve({ provider: provider.result as StorageProviderRecord | undefined, uploads: (uploads.result as StorageUploadRecord[]) ?? [] });
+      tx.onerror = () => reject(tx.error);
+    });
+    if (await storageSnapshotCanOpen(current, storageKey, legacyVaultKey)) {
+      // The Vault commit either did not happen (prepared journal) or this is
+      // the new password after a completed Vault commit. Current ciphertext is
+      // therefore already consistent; only the journal needs retiring.
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction("providerConfig", "readwrite");
+        tx.objectStore("providerConfig").delete("rotation");
+        tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
+      });
+      return;
+    }
+    if (!(await storageSnapshotCanOpen(journal.old, storageKey, legacyVaultKey))) {
+      // Storage is optional, so an unreadable snapshot must not block Vault
+      // unlock. Keep the journal, however: it is still the only evidence that
+      // may make a later retry/recovery possible after a transient key/session
+      // mismatch or a repaired record.
+      return;
+    }
+    await storageDbTransaction(db, "readwrite", ({ provider, uploads }) => {
+      provider.delete("active");
+      if (journal.old.provider) provider.put(journal.old.provider);
+      for (const record of current.uploads) uploads.delete(record.internalUploadId);
+      for (const record of journal.old.uploads) uploads.put(record);
+      provider.delete("rotation");
+    });
+  } catch {
+    // Recovery is compensating Storage maintenance, not part of Vault
+    // authentication. A malformed/corrupt optional record must never make a
+    // valid Vault password fail to unlock. Preserve the journal on every
+    // read/write failure; deleting it would destroy the only rollback proof.
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Restore the snapshot captured by the first migration attempt. This is a
+ * compensating transaction, not another migration: it must never call
+ * prepareStorageRotation() or replace the journal's original `old` snapshot.
+ */
+async function rollbackStorageRotation(): Promise<void> {
+  const db = await openExistingStorageDb();
+  if (!db) return;
+  try {
+    const rawJournal = await new Promise<unknown>((resolve, reject) => {
+      const tx = db.transaction("providerConfig", "readonly");
+      const request = tx.objectStore("providerConfig").get("rotation");
+      tx.oncomplete = () => resolve(request.result);
+      tx.onerror = () => reject(tx.error);
+    });
+    if (!rawJournal) throw new Error("Storage rotation journal is missing");
+    if (!isStorageRotationJournal(rawJournal)) throw new Error("Storage rotation journal is corrupt");
+    const journal = rawJournal;
+    await storageDbTransaction(db, "readwrite", ({ provider, uploads }) => {
+      provider.delete("active");
+      if (journal.old.provider) provider.put(journal.old.provider);
+      uploads.clear();
+      for (const record of journal.old.uploads) uploads.put(record);
+      provider.delete("rotation");
+    });
+  } finally {
+    db.close();
+  }
+}
+
+/**
+ * Take the Storage snapshot and publish the rotation barrier in one
+ * IndexedDB transaction. StorageDb write transactions use the same object
+ * stores and reject once this barrier exists, so a caller that sealed with
+ * the old key cannot commit a late record after the snapshot.
+ */
+async function prepareStorageRotation(db: IDBDatabase): Promise<StorageRotationSnapshot> {
+  return new Promise((resolve, reject) => {
+    try {
+      const tx = db.transaction(["providerConfig", "multipartUploads"], "readwrite");
+      const providerStore = tx.objectStore("providerConfig");
+      const provider = providerStore.get("active");
+      const existingRotation = providerStore.get("rotation");
+      const uploads = tx.objectStore("multipartUploads").getAll();
+      let providerDone = false;
+      let uploadsDone = false;
+      let rotationDone = false;
+      let preparationError: Error | undefined;
+      let snapshot: StorageRotationSnapshot | undefined;
+      const publishBarrier = () => {
+        if (!providerDone || !uploadsDone || !rotationDone || snapshot || preparationError) return;
+        snapshot = {
+          provider: provider.result as StorageProviderRecord | undefined,
+          uploads: (uploads.result as StorageUploadRecord[]) ?? []
+        };
+        providerStore.put({ key: "rotation", phase: "prepared", old: snapshot });
+      };
+      provider.onsuccess = () => { providerDone = true; publishBarrier(); };
+      uploads.onsuccess = () => { uploadsDone = true; publishBarrier(); };
+      existingRotation.onsuccess = () => {
+        if (existingRotation.result) {
+          preparationError = new Error("Storage password rotation is already in progress");
+          tx.abort();
+          return;
+        }
+        rotationDone = true;
+        publishBarrier();
+      };
+      tx.oncomplete = () => {
+        if (snapshot) resolve(snapshot);
+        else reject(preparationError ?? new Error("Storage rotation snapshot was not prepared"));
+      };
+      tx.onerror = () => reject(tx.error ?? new Error("Storage rotation snapshot failed"));
+      tx.onabort = () => reject(preparationError ?? tx.error ?? new Error("Storage rotation snapshot aborted"));
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+/** Re-wrap every Storage-owned sealed value before changing the Vault password. */
+async function migrateStorageSecrets(oldStorageKey: CryptoKey, newStorageKey: CryptoKey, legacyVaultKey?: CryptoKey): Promise<void> {
+  const db = await openExistingStorageDb();
+  if (!db) return;
+  let barrierPrepared = false;
+  try {
+    const oldSnapshot = await prepareStorageRotation(db);
+    barrierPrepared = true;
+    const records = oldSnapshot;
+    let providerSealed: StorageEnvelopeRecord | undefined;
+    if (records.provider?.sealedConfig) {
+      const bytes = await decryptStoredLocalSecret(oldStorageKey, STORAGE_PROVIDER_SCOPE, records.provider.sealedConfig, legacyVaultKey);
+      try { providerSealed = await encryptStoredLocalSecret(newStorageKey, STORAGE_PROVIDER_SCOPE, bytes); } finally { bytes.fill(0); }
+    }
+    const uploadSealed = new Map<string, StorageEnvelopeRecord>();
+    for (const record of records.uploads) {
+      const bytes = await decryptStoredLocalSecret(oldStorageKey, `${STORAGE_UPLOAD_SCOPE}${record.internalUploadId}`, record.sealedS3UploadId, legacyVaultKey);
+      try { uploadSealed.set(record.internalUploadId, await encryptStoredLocalSecret(newStorageKey, `${STORAGE_UPLOAD_SCOPE}${record.internalUploadId}`, bytes)); } finally { bytes.fill(0); }
+    }
+    const nextSnapshot: StorageRotationSnapshot = {
+      provider: providerSealed && records.provider ? { ...records.provider, sealedConfig: providerSealed } : records.provider,
+      uploads: records.uploads.map((record) => ({ ...record, sealedS3UploadId: uploadSealed.get(record.internalUploadId) ?? record.sealedS3UploadId }))
+    };
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(["providerConfig", "multipartUploads"], "readwrite");
+      if (providerSealed && records.provider) tx.objectStore("providerConfig").put({ ...records.provider, sealedConfig: providerSealed });
+      for (const record of records.uploads) {
+        const sealed = uploadSealed.get(record.internalUploadId);
+        if (sealed) tx.objectStore("multipartUploads").put({ ...record, sealedS3UploadId: sealed });
+      }
+      tx.objectStore("providerConfig").put({ key: "rotation", phase: "storage-committed", old: oldSnapshot, next: nextSnapshot } satisfies StorageRotationJournal);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+      tx.onabort = () => reject(tx.error);
+    });
+  } catch (error) {
+    // All ciphertext rewrites are prepared in memory and committed in one
+    // IndexedDB transaction. If decryption or the commit fails, retain the
+    // old records and remove the barrier immediately; otherwise the next
+    // unlock would attempt recovery and could lock out the whole Vault.
+    if (barrierPrepared) await clearStorageRotationJournal(db).catch(() => undefined);
+    throw error;
+  } finally {
+    db.close();
+  }
+}
 const persistActiveMeta = persistCoordinatorMeta;
 function publishSessionState(cause: SessionStateEvent["cause"]): void {
   publishTopicEvent("session.state", {
@@ -128,11 +471,193 @@ interface CoordinatorState {
   activePublicKeyHex?: string;
   activePrivateKeyBytes?: Uint8Array;
   passwordKey?: CryptoKey;
+  storageSecretKey?: CryptoKey;
   keyspaceGeneration: number;
   taskRuntimes: Map<string, TaskRuntime>;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   autoLockDeadline?: number;
   lastActivityAt: number;
+}
+
+let storageRuntime: StorageService | undefined;
+let storageDb: Awaited<ReturnType<typeof openStorageDb>> | undefined;
+// Test-only seams keep worker ownership/dispatch tests independent from S3 and IDB.
+let testStorageRuntimeOverride: StorageService | undefined;
+let testStorageStartupFailure = false;
+let storageStartupFailure = false;
+const storageLifecycleListeners = new Set<(snapshot: { status: "unlocked" | "locked" | "uninitialized" }) => void>();
+let storageRevision = 0;
+let lastStorageState: CoordinatorStorageStateEvent | undefined;
+let storageStateTail: Promise<void> = Promise.resolve();
+const storageRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
+const storageRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
+const storagePortCounts = new Map<string, number>();
+const storageGrants = new Map<string, { context: import("@keymaster/contracts").StorageAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
+let storageMutationTail: Promise<void> = Promise.resolve();
+let storageDataActive = 0;
+type StorageDataWaiter = { resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; active: boolean; clientId: string };
+const storageDataWaiters: StorageDataWaiter[] = [];
+const STORAGE_DATA_CONCURRENCY = 4;
+const STORAGE_DATA_MAX_QUEUE = 64;
+const STORAGE_DATA_MAX_PER_PORT = 16;
+const STORAGE_DATA_MAX_ACTIVE_PER_PORT = STORAGE_DATA_CONCURRENCY - 1;
+const storageDataActiveByPort = new Map<string, number>();
+
+function storageCoordinatorError(code: "storage_limit_exceeded" | "storage_unavailable"): Error & { code: typeof code } {
+  const error = new Error(code) as Error & { code: typeof code };
+  error.code = code;
+  return error;
+}
+
+function reserveStoragePortSlot(clientId: string): boolean {
+  const count = storagePortCounts.get(clientId) ?? 0;
+  if (count >= STORAGE_DATA_MAX_PER_PORT) return false;
+  storagePortCounts.set(clientId, count + 1);
+  return true;
+}
+
+function releaseStoragePortSlot(clientId: string): void {
+  const next = Math.max(0, (storagePortCounts.get(clientId) ?? 1) - 1);
+  if (next) storagePortCounts.set(clientId, next); else storagePortCounts.delete(clientId);
+}
+
+function emitStorageState(): void {
+  storageStateTail = storageStateTail.then(async () => {
+    const summary = await (storageRuntime?.getProviderSummary().catch(() => null) ?? Promise.resolve(null));
+    const revision = storageRevision + 1;
+    const state: CoordinatorStorageStateEvent = {
+      topic: "storage.state", type: "storage.state.changed", storageRevision: revision,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      providerGeneration: summary?.generation ?? null,
+      status: storageStartupFailure ? "degraded" : storageRuntime?.status() ?? (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "locked"),
+      summary,
+      capabilities: storageRuntime?.getConditionalCapabilities() ?? null,
+    };
+    lastStorageState = state;
+    storageRevision = revision;
+    publishTopicEvent("storage.state", state);
+  }, () => undefined);
+}
+
+function notifyStorageLifecycle(status: "unlocked" | "locked" | "uninitialized"): void {
+  for (const listener of storageLifecycleListeners) listener({ status });
+}
+
+function pumpStorageDataWaiters(): void {
+  while (storageDataActive < STORAGE_DATA_CONCURRENCY && storageDataWaiters.length) {
+    let index = storageDataWaiters.findIndex((waiter) => (storageDataActiveByPort.get(waiter.clientId) ?? 0) < STORAGE_DATA_MAX_ACTIVE_PER_PORT);
+    if (index < 0) index = 0; // no competing port: do not strand a single client
+    const waiter = storageDataWaiters.splice(index, 1)[0]!;
+    if (!waiter.active || waiter.signal?.aborted) continue;
+    waiter.active = false;
+    storageDataActive += 1;
+    storageDataActiveByPort.set(waiter.clientId, (storageDataActiveByPort.get(waiter.clientId) ?? 0) + 1);
+    waiter.resolve();
+  }
+}
+
+async function withStorageDataSlot<T>(clientId: string, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (storageDataActive >= STORAGE_DATA_CONCURRENCY || (storageDataActiveByPort.get(clientId) ?? 0) >= STORAGE_DATA_MAX_ACTIVE_PER_PORT) {
+    if (storageDataWaiters.length >= STORAGE_DATA_MAX_QUEUE) throw storageCoordinatorError("storage_limit_exceeded");
+    await new Promise<void>((resolve, reject) => {
+      const waiter: StorageDataWaiter = { resolve, reject, signal, active: true, clientId };
+      const abort = () => {
+        if (!waiter.active) return;
+        waiter.active = false;
+        const index = storageDataWaiters.indexOf(waiter);
+        if (index >= 0) storageDataWaiters.splice(index, 1);
+        reject(storageCoordinatorError("storage_unavailable"));
+      };
+      if (signal?.aborted) { abort(); return; }
+      signal?.addEventListener("abort", abort, { once: true });
+      storageDataWaiters.push(waiter);
+    });
+  } else {
+    storageDataActive += 1;
+    storageDataActiveByPort.set(clientId, (storageDataActiveByPort.get(clientId) ?? 0) + 1);
+  }
+  const operation = run();
+  operation.catch(() => undefined);
+  let onAbort: (() => void) | undefined;
+  try {
+    if (!signal) return await operation;
+    const cancelled = new Promise<never>((_, reject) => {
+      onAbort = () => reject(storageCoordinatorError("storage_unavailable"));
+      if (signal.aborted) onAbort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    });
+    return await Promise.race([operation, cancelled]);
+  } finally {
+    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+    storageDataActive -= 1;
+    const nextPort = Math.max(0, (storageDataActiveByPort.get(clientId) ?? 1) - 1);
+    if (nextPort) storageDataActiveByPort.set(clientId, nextPort); else storageDataActiveByPort.delete(clientId);
+    pumpStorageDataWaiters();
+  }
+}
+
+async function ensureStorageRuntime(): Promise<StorageService> {
+  if (storageRuntime) return storageRuntime;
+  if (testStorageRuntimeOverride) { storageRuntime = testStorageRuntimeOverride; return storageRuntime; }
+  if (testStorageStartupFailure) { storageStartupFailure = true; emitStorageState(); throw storageCoordinatorError("storage_unavailable"); }
+  const startupError = (error: unknown): never => {
+    storageStartupFailure = true;
+    emitStorageState();
+    const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+    if (typeof code === "string" && code.startsWith("storage_")) throw error;
+    throw storageCoordinatorError("storage_unavailable");
+  };
+  try { storageDb ??= await openStorageDb(); } catch (error) { startupError(error); }
+  const db = storageDb;
+  if (!db) return startupError(new Error("Storage database is unavailable"));
+  const vaultAdapter = {
+    status: () => (coordinatorState.vaultStatus === "fatal" ? "locked" : coordinatorState.vaultStatus),
+    onLifecycleChange(listener: (snapshot: any) => void) {
+      const wrapped = (snapshot: { status: "unlocked" | "locked" | "uninitialized" }) => listener(snapshot);
+      storageLifecycleListeners.add(wrapped); return () => { storageLifecycleListeners.delete(wrapped); };
+    }
+  };
+  const secret = {
+    async seal(scope: string, plaintext: Uint8Array): Promise<VaultSealedSecret> {
+      const key = coordinatorState.storageSecretKey; if (!key) throw new Error("Vault is locked");
+      const blob = await encryptBytesWithSaltBoundAad(key, plaintext, localSecretAad(2, scope));
+      return { version: 2, saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
+    },
+    async open(scope: string, sealed: VaultSealedSecret): Promise<Uint8Array> {
+      const key = coordinatorState.storageSecretKey; if (!key) throw new Error("Vault is locked");
+      return sealed.version === 2
+        ? decryptBytesWithSaltBoundAad(key, { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) }, localSecretAad(2, scope))
+        : decryptBytesWithAad(key, { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) }, localSecretAad(1, scope));
+    }
+  };
+  let runtime: StorageService;
+  try {
+    runtime = await createStorageService({ db, secret, vault: vaultAdapter, logger: { warn: (event) => undefined } });
+  } catch (error) {
+    startupError(error);
+  }
+  storageRuntime = runtime!;
+  storageStartupFailure = false;
+  storageRuntime.subscribe(emitStorageState);
+  emitStorageState();
+  return storageRuntime;
+}
+
+function abortStorageRequests(): void {
+  for (const request of storageRequests.values()) request.controller.abort();
+  storageRequests.clear();
+}
+
+async function releaseStorageRuntime(reason: string): Promise<void> {
+  abortStorageRequests();
+  storageGrants.clear();
+  // StorageServiceImpl's dispose aborts its request controller and destroys the
+  // S3 client without waiting for remote multipart cleanup.
+  (storageRuntime as (StorageService & { dispose?: () => void }) | undefined)?.dispose?.();
+  storageRuntime = undefined;
+  storageDb = undefined;
+  notifyStorageLifecycle(coordinatorState.vaultStatus === "uninitialized" ? "uninitialized" : "locked");
+  void reason;
 }
 
 interface TaskRuntime {
@@ -212,6 +737,7 @@ function assertTaskFresh(taskId: string): void {
  */
 async function enterUnlockedState(
   passwordKey: CryptoKey,
+  storageSecretKey: CryptoKey,
   activePublicKeyHex: string,
   activePrivateKeyBytes: Uint8Array,
   cause: SessionStateEvent["cause"]
@@ -222,10 +748,13 @@ async function enterUnlockedState(
   passkeyAddIntents.clear();
   coordinatorState.activePublicKeyHex = activePublicKeyHex;
   coordinatorState.passwordKey = passwordKey;
+  coordinatorState.storageSecretKey = storageSecretKey;
   coordinatorState.activePrivateKeyBytes = activePrivateKeyBytes;
   coordinatorMeta.activePublicKeyHex = activePublicKeyHex;
   coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
   await persistCoordinatorMeta();
+  notifyStorageLifecycle("unlocked");
+  emitStorageState();
 
   // 恢复所有 blocked 任务为 idle 并重新调度
   for (const runtime of coordinatorState.taskRuntimes.values()) {
@@ -298,9 +827,9 @@ async function registerCoordinatorTasks(): Promise<void> {
     getGlobalSettings: () => ({ includeTestnet: false })
   };
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
-  const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const stasTask = createStasCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   coordinatorState.taskRuntimes.set(bsv21Task.id, { id: bsv21Task.id, pluginId: bsv21Task.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   coordinatorState.taskRuntimes.set(stasTask.id, { id: stasTask.id, pluginId: stasTask.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   coordinatorState.taskRuntimes.set(oneSatTask.id, { id: oneSatTask.id, pluginId: oneSatTask.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await oneSatTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
@@ -361,6 +890,11 @@ function handlePortConnect(event: MessageEvent): void {
 }
 
 function handlePortDisconnect(clientId: string): void {
+  for (const [requestId, request] of storageRequests) {
+    if (request.clientId === clientId) { request.controller.abort(); storageRequests.delete(requestId); }
+  }
+  for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
+  storagePortCounts.delete(clientId);
   connectedPorts.delete(clientId);
   // 最后一个 port 断开时，Worker 生命周期结束即内存消失
   // 不主动锁定，等待浏览器回收或重启
@@ -385,12 +919,16 @@ async function handleClientMessage(
   }
 
   if (request.kind === "subscribe") {
-    handleSubscribe(clientId, request);
+    await handleSubscribe(clientId, request);
     return;
   }
 
   if (request.kind === "activity") {
     handleActivity(clientId);
+    return;
+  }
+  if (request.kind === "disconnect") {
+    handlePortDisconnect(clientId);
     return;
   }
 
@@ -401,8 +939,11 @@ async function handleClientMessage(
     return;
   }
 
-  const response = await processRequest(request);
-  sendToPort(connectedPort.port, response);
+  const response = await processRequest(request, clientId);
+  const transfers: ArrayBuffer[] = [];
+  const body = (response.operationResult as { content?: { bytes?: ArrayBuffer } } | undefined)?.content?.bytes;
+  if (body instanceof ArrayBuffer) transfers.push(body);
+  sendToPort(connectedPort.port, response, transfers);
 }
 
 function handleHello(
@@ -423,20 +964,35 @@ function handleHello(
   });
 }
 
-function handleSubscribe(
+async function handleSubscribe(
   clientId: string,
   request: { kind: "subscribe"; topics: CoordinatorTopic[]; requestId: string }
-): void {
+): Promise<void> {
   const connectedPort = connectedPorts.get(clientId);
   if (!connectedPort) return;
+  await storageStateTail;
 
   connectedPort.subscriptions.clear();
   for (const topic of request.topics) {
     connectedPort.subscriptions.add(topic);
   }
 
-  const baselines = request.topics.flatMap((topic) => {
+  const baselines: CoordinatorTopicBaseline[] = request.topics.flatMap((topic): CoordinatorTopicBaseline[] => {
     if (topic === "asset.data-changed") return [];
+    if (topic === "storage.state") {
+      const baselineRevision = storageRevision;
+      const summary = storageRuntime?.getProviderSummary().catch(() => null);
+      // Subscription response must be atomic; use the last published state
+      // when available, otherwise a locked/unconfigured baseline.
+      const cached = lastStorageState ?? {
+        topic: "storage.state" as const, type: "storage.state.changed" as const,
+        storageRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch,
+        providerGeneration: null, status: coordinatorState.vaultStatus === "unlocked" ? "unconfigured" as const : "locked" as const,
+        summary: null, capabilities: null,
+      };
+      void summary;
+      return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
+    }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
       ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, keyspaceGeneration: coordinatorState.keyspaceGeneration }
@@ -461,7 +1017,144 @@ function handleActivity(clientId: string): void {
 // 6. Request Processing
 // ============================================================
 
-async function processRequest(
+/**
+ * All coordinator RPCs share one FIFO. In particular, password rotation must
+ * not overlap a Storage seal/open or another Vault operation: those operations
+ * read and write the same keymaster.storage snapshots and otherwise could
+ * escape the rotation journal.
+ */
+let coordinatorRequestTail: Promise<void> = Promise.resolve();
+
+function isStorageRequest(request: CoordinatorClientRequest): boolean {
+  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort";
+}
+
+async function executeStorageControl(request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>): Promise<CoordinatorResponse> {
+  const service = await ensureStorageRuntime();
+  const control = request.control;
+  if (control.type === "status") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: service.status() };
+  if (control.type === "summary") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderSummary() };
+  if (control.type === "connection") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderConnection() };
+  if (control.type === "capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: service.getConditionalCapabilities() };
+  if (control.type === "cancel-probe") { service.cancelProbe(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
+  if (control.type === "probe") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.probeProvider(control.config) };
+  const current = (await service.getProviderSummary())?.generation ?? null;
+  if (control.type === "activate" && control.expectedProviderGeneration !== current) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Storage provider generation changed" } };
+  if ((control.type === "clear" || control.type === "reset") && control.expectedProviderGeneration !== current) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Storage provider generation changed" } };
+  if (control.type === "activate") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.activateProvider(control.config) };
+  if (control.type === "clear") { await service.clearProviderConfig(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
+  if (control.type === "reset") { await service.resetStorage(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
+  if (control.type === "probe-capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.probeConditionalCapabilities() };
+  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown storage control" } };
+}
+
+async function executeStorageData(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
+  const capturedSessionEpoch = coordinatorState.sessionEpoch;
+  const service = await ensureStorageRuntime();
+  const data = request.data;
+  const ctx = (await resolveStorageGrant(data.grantId, actualClientId)).context;
+  const initialSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
+  const capturedProviderGeneration = initialSummary?.generation ?? null;
+  const signal = controller.signal;
+  let value: unknown;
+  switch (data.type) {
+    case "list": value = await service.list(ctx, { ...data.input, signal }); break;
+    case "create-directory": value = await service.createDirectory(ctx, { ...data.input, signal }); break;
+    case "delete-directory": value = await service.deleteDirectory(ctx, { ...data.input, signal }); break;
+    case "put": value = await service.put(ctx, { ...data.input, signal }); break;
+    case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
+    case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
+    case "begin-upload": value = await service.beginUpload(ctx, { ...data.input, signal }); break;
+    case "upload-part": value = await service.uploadPart(ctx, { ...data.input, signal }); break;
+    case "complete-upload": value = await service.completeUpload(ctx, { ...data.input, signal }); break;
+    case "abort-upload": value = await service.abortUpload(ctx, { ...data.input, signal }); break;
+  }
+  // A provider may ignore AbortSignal and resolve after lock/replacement. The
+  // result is never committed or returned across a session/generation fence.
+  if (controller.signal.aborted || capturedSessionEpoch !== coordinatorState.sessionEpoch) {
+    const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
+  }
+  const finalSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
+  if ((finalSummary?.generation ?? null) !== capturedProviderGeneration) {
+    const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
+  }
+  await resolveStorageGrant(data.grantId, actualClientId);
+  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+}
+
+async function resolveStorageGrant(grantId: string, actualClientId: string): Promise<{ context: import("@keymaster/contracts").StorageAppContext; connectSessionId: string }> {
+  const grant = storageGrants.get(grantId);
+  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) {
+    const error = new Error("Storage grant is invalid") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
+  }
+  const authoritative = await readProtocolConnectSession(grant.context.connectSessionId);
+  if (!authoritative || authoritative.origin !== grant.context.transportOrigin || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity)) {
+    const error = new Error("Storage session is invalid or revoked") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
+  }
+  return { context: grant.context, connectSessionId: grant.context.connectSessionId };
+}
+
+async function abortStorageSession(connectSessionId: string): Promise<void> {
+  for (const [requestId, pending] of storageRequests) {
+    if (pending.connectSessionId === connectSessionId) { pending.controller.abort(); storageRequests.delete(requestId); }
+  }
+  for (const [grantId, grant] of storageGrants) if (grant.context.connectSessionId === connectSessionId) storageGrants.delete(grantId);
+  const service = await ensureStorageRuntime();
+  await service.abortSession(connectSessionId);
+}
+
+async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" }>, actualClientId: string): Promise<CoordinatorResponse> {
+  if (request.kind === "storage.grant") {
+    const session = await readProtocolConnectSession(request.connectSessionId);
+    if (!session) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage session is invalid or revoked", code: "storage_identity_required" } };
+    const grantId = `grant-${crypto.randomUUID()}`;
+    storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity }, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
+  }
+  if (request.kind === "storage.cancel") {
+    const target = storageRequests.get(storageRequestKey(actualClientId, request.targetRequestId));
+    if (target?.clientId === actualClientId) target.controller.abort();
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+  }
+  if (request.kind === "storage.session.abort") {
+    await abortStorageSession(request.connectSessionId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+  }
+  const controller = new AbortController();
+  if (request.kind === "storage.data") {
+    if (!reserveStoragePortSlot(actualClientId)) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "storage_limit_exceeded", code: "storage_limit_exceeded" } };
+  }
+  storageRequests.set(storageRequestKey(actualClientId, request.requestId), { controller, clientId: actualClientId, connectSessionId: request.kind === "storage.data" ? storageGrants.get(request.data.grantId)?.context.connectSessionId : undefined });
+  try {
+    if (request.kind === "storage.control") {
+      let result!: CoordinatorResponse;
+      const run = storageMutationTail.then(() => executeStorageControl(request), () => executeStorageControl(request));
+      storageMutationTail = run.then(() => undefined, () => undefined);
+      result = await run;
+      return result;
+    }
+    return await withStorageDataSlot(actualClientId, () => executeStorageData(request, controller, actualClientId), controller.signal);
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: err instanceof Error ? err.message : String(err), ...(typeof code === "string" ? { code: code as never } : {}) } };
+  } finally {
+    storageRequests.delete(storageRequestKey(actualClientId, request.requestId));
+    if (request.kind === "storage.data") {
+      releaseStoragePortSlot(actualClientId);
+    }
+  }
+}
+
+function enqueueCoordinatorRequest(request: CoordinatorClientRequest): Promise<CoordinatorResponse> {
+  const run = coordinatorRequestTail.then(
+    () => executeProcessRequest(request),
+    () => executeProcessRequest(request)
+  );
+  coordinatorRequestTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function executeProcessRequest(
   request: CoordinatorClientRequest
 ): Promise<CoordinatorResponse> {
   const requestId = "requestId" in request ? request.requestId : generateRequestId();
@@ -521,6 +1214,11 @@ async function processRequest(
   }
 }
 
+async function processRequest(request: CoordinatorClientRequest, actualClientId = (request as { clientId?: string }).clientId ?? "unknown"): Promise<CoordinatorResponse> {
+  if (isStorageRequest(request)) return executeStorageRequest(request as never, actualClientId);
+  return enqueueCoordinatorRequest(request);
+}
+
 // ============================================================
 // 7. Vault Operations
 // ============================================================
@@ -575,13 +1273,16 @@ async function handleUnlock(
       };
     }
 
+    const storageSecretKey = await deriveStorageSecretKey(request.password, decodePersisted(meta.saltB64));
+    await recoverStorageRotation(storageSecretKey, passwordKey);
+
     // 3. 获取 active key
     const activeKey = request.publicKeyHex ? await vaultDb.getKey(request.publicKeyHex) : await getActiveKey();
     if (!activeKey) throw new Error("No active key");
     const privateKey = await decryptPrivateKey(passwordKey, activeKey);
 
     // 4. 统一进入 unlocked 状态
-    await enterUnlockedState(passwordKey, activeKey.publicKeyHex, privateKey, "unlock");
+    await enterUnlockedState(passwordKey, storageSecretKey, activeKey.publicKeyHex, privateKey, "unlock");
 
     return {
       requestId,
@@ -594,6 +1295,7 @@ async function handleUnlock(
     coordinatorState.activePublicKeyHex = undefined;
     coordinatorState.activePrivateKeyBytes = undefined;
     coordinatorState.passwordKey = undefined;
+    coordinatorState.storageSecretKey = undefined;
 
     return {
       requestId,
@@ -751,6 +1453,36 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       publishSessionState("activate-key");
       return true;
     }
+    case "sealLocalSecret": {
+      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.storageSecretKey) throw new Error("Vault is locked");
+      if (!operation.scope || operation.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(operation.scope)) throw new Error("Invalid secret scope");
+      try {
+        const blob = await encryptBytesWithSaltBoundAad(coordinatorState.storageSecretKey, operation.plaintext, localSecretAad(2, operation.scope));
+        return { version: 2, saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
+      } finally {
+        operation.plaintext.fill(0);
+      }
+    }
+    case "openLocalSecret": {
+      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.storageSecretKey || !coordinatorState.passwordKey) throw new Error("Vault is locked");
+      if (!operation.scope || operation.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(operation.scope)) throw new Error("Invalid secret scope");
+      const sealed = operation.sealed;
+      if (sealed.version !== 1 && sealed.version !== 2) throw new Error("Invalid sealed secret");
+      const blob = { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) };
+      let plaintext: Uint8Array;
+      try {
+        plaintext = sealed.version === 2
+          ? await decryptBytesWithSaltBoundAad(coordinatorState.storageSecretKey, blob, localSecretAad(2, operation.scope))
+          : await decryptBytesWithAad(coordinatorState.storageSecretKey, blob, localSecretAad(1, operation.scope));
+      } catch (error) {
+        // Read legacy Storage envelopes once; newly sealed values always use
+        // the independent domain key above.
+        plaintext = sealed.version === 2
+          ? await decryptBytesWithSaltBoundAad(coordinatorState.passwordKey, blob, localSecretAad(2, operation.scope))
+          : await decryptBytesWithAad(coordinatorState.passwordKey, blob, localSecretAad(1, operation.scope));
+      }
+      return plaintext;
+    }
     case "changePassword": return await changePasswordRpc(operation.oldPassword, operation.newPassword);
     case "finalizeEmptyVaultAfterLastKeyDeletion": if ((await vaultDb.listKeys()).length === 0) { await vaultDb.deleteMeta(); await performGlobalLock("empty-vault"); } return true;
     case "recoverEmptyVaultToUninitialized": await vaultDb.deleteMeta(); await performGlobalLock("recover-empty"); return true;
@@ -847,6 +1579,7 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   }
   // 空 Vault 创建后保持 locked 状态，清空内存中的 passwordKey
   coordinatorState.passwordKey = undefined;
+  coordinatorState.storageSecretKey = undefined;
   passkeyAddIntents.clear();
   coordinatorState.vaultStatus = "locked";
   coordinatorState.sessionEpoch = generateEpoch();
@@ -878,10 +1611,66 @@ async function addKeyRpc(password: string, input: { label: string; capabilities?
   // keyspaceGeneration 递增
   coordinatorState.keyspaceGeneration++;
   // 统一进入 unlocked 状态
-  await enterUnlockedState(passwordKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
+  const storageSecretKey = await deriveStorageSecretKey(password, decodePersisted(meta.saltB64));
+  await enterUnlockedState(passwordKey, storageSecretKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
   return { publicKeyHex: pub, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source };
 }
-async function changePasswordRpc(oldPassword: string, newPassword: string): Promise<boolean> { const meta = await getVaultMeta(); if (!meta) throw new Error("Vault not initialized"); const oldKey = await (await import("@keymaster/plugin-vault/coordinator")).resolveVaultPasswordKey(oldPassword, meta); const newSalt = crypto.getRandomValues(new Uint8Array(16)); const newKey = await deriveKey(newPassword, newSalt); const verifier = await (await import("@keymaster/plugin-vault/coordinator")).encryptVerifier(newKey); const records = await vaultDb.listKeys(); const migrated = []; for (const record of records) { const material = await (await import("@keymaster/plugin-vault/coordinator")).decryptVaultKeyMaterialForMigration(oldKey.key, record); migrated.push({ ...record, ...(await (await import("@keymaster/plugin-vault/coordinator")).encryptVaultKeyMaterial(newKey, record.publicKeyHex, material)) }); } await vaultDb.putMetaAndKeys((await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt: newSalt, verifier }), migrated); await performGlobalLock("password-change"); return true; }
+async function changePasswordRpc(oldPassword: string, newPassword: string): Promise<boolean> {
+  // Acquire the same mutation lane before even reading key material. This
+  // prevents activate/clear/reset from starting while rotation is preparing.
+  let releaseStorageMutation!: () => void;
+  const previousStorageMutation = storageMutationTail;
+  storageMutationTail = storageMutationTail.then(() => new Promise<void>((resolve) => { releaseStorageMutation = resolve; }));
+  await previousStorageMutation;
+  try {
+    const meta = await getVaultMeta();
+    if (!meta) throw new Error("Vault not initialized");
+  const oldKey = await (await import("@keymaster/plugin-vault/coordinator")).resolveVaultPasswordKey(oldPassword, meta);
+  const newSalt = crypto.getRandomValues(new Uint8Array(16));
+  const newKey = await deriveKey(newPassword, newSalt);
+  const oldStorageKey = await deriveStorageSecretKey(oldPassword, decodePersisted(meta.saltB64));
+  const newStorageKey = await deriveStorageSecretKey(newPassword, newSalt);
+  const verifier = await (await import("@keymaster/plugin-vault/coordinator")).encryptVerifier(newKey);
+  const records = await vaultDb.listKeys();
+  const migrated = [];
+  for (const record of records) {
+    const material = await (await import("@keymaster/plugin-vault/coordinator")).decryptVaultKeyMaterialForMigration(oldKey.key, record);
+    migrated.push({ ...record, ...(await (await import("@keymaster/plugin-vault/coordinator")).encryptVaultKeyMaterial(newKey, record.publicKeyHex, material)) });
+  }
+  // Re-wrap Storage-owned local secrets behind the same Worker-owned gate.
+  // Slow S3 requests are aborted/drained before the journal migration starts.
+  const storageWithRotation = storageRuntime as (StorageService & { beginPasswordRotation?: () => Promise<void>; finishPasswordRotation?: (degraded?: boolean) => void }) | undefined;
+  let storageRotationDegraded = false;
+  try {
+    await storageWithRotation?.beginPasswordRotation?.();
+    await migrateStorageSecrets(oldStorageKey, newStorageKey, oldKey.key);
+    try {
+      await vaultDb.putMetaAndKeys((await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt: newSalt, verifier }), migrated);
+    } catch (error) {
+      // IndexedDB has no cross-database transaction. Roll Storage back if the
+      // Vault atomic commit fails, preserving the pre-rotation password. If the
+      // compensating write itself fails, surface that fact; the durable journal
+      // remains for recovery on the next unlock instead of being silently lost.
+      try {
+        await rollbackStorageRotation();
+      } catch (rollbackError) {
+        storageRotationDegraded = true;
+        storageWithRotation?.finishPasswordRotation?.(true);
+        throw new Error(`Password rotation rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+      throw error;
+    }
+    await performGlobalLock("password-change");
+    return true;
+  } finally {
+    if (coordinatorState.vaultStatus === "unlocked") storageWithRotation?.finishPasswordRotation?.(storageRotationDegraded);
+    releaseStorageMutation?.();
+  }
+  } catch (error) {
+    releaseStorageMutation?.();
+    throw error;
+  }
+}
 
 async function handleLock(
   requestId: string,
@@ -896,6 +1685,9 @@ async function handleLock(
 }
 
 async function performGlobalLock(reason: string): Promise<void> {
+  // Storage is preempted before Vault keys are cleared; no S3 network cleanup
+  // is allowed to delay destruction of the client or credential material.
+  await releaseStorageRuntime(reason);
   // abort 所有 session-bound task，并在清空运行句柄前保留 completion，确保
   // handler 已经退出；否则迟到的 DB commit 可能越过锁定栅栏。
   const completions: Promise<void>[] = [];
@@ -922,6 +1714,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   coordinatorState.activePublicKeyHex = undefined;
   coordinatorState.activePrivateKeyBytes = undefined;
   coordinatorState.passwordKey = undefined;
+  coordinatorState.storageSecretKey = undefined;
   passkeyAddIntents.clear();
 
   // 递增 epoch
@@ -933,6 +1726,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
   await persistCoordinatorMeta();
   publishSessionState(reason === "key-deleted" || reason === "empty-vault" ? "delete-active-key" : reason === "recover-empty" ? "recover-empty-vault" : "lock");
+  emitStorageState();
 
   // 广播任务快照，让 UI 立即显示 blocked 状态
   publishTopicEvent("background.snapshot", {
@@ -1314,7 +2108,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -1325,9 +2119,9 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
   }
 }
 
-function sendToPort(port: MessagePort, message: unknown): void {
+function sendToPort(port: MessagePort, message: unknown, transfer: ArrayBuffer[] = []): void {
   try {
-    port.postMessage(message);
+    port.postMessage(message, transfer);
   } catch {
     // 端口可能已关闭
   }
@@ -1375,6 +2169,8 @@ async function initializeCoordinator(): Promise<void> {
     } else {
       coordinatorState.vaultStatus = "uninitialized";
     }
+    try { await ensureStorageRuntime(); }
+    catch { storageRuntime = undefined; storageDb = undefined; emitStorageState(); }
     await registerCoordinatorTasks();
     // 启动时如果 vault 是 locked 状态，将所有任务标记为 blocked
     if (coordinatorState.vaultStatus === "locked") {
@@ -1412,12 +2208,23 @@ export function __testResetState(): void {
   coordinatorState.activePublicKeyHex = undefined;
   coordinatorState.activePrivateKeyBytes = undefined;
   coordinatorState.passwordKey = undefined;
+  coordinatorState.storageSecretKey = undefined;
   coordinatorState.keyspaceGeneration = 0;
   coordinatorState.taskRuntimes.clear();
   coordinatorState.autoLockDeadline = undefined;
   coordinatorState.lastActivityAt = Date.now();
   connectedPorts.clear();
+  storageRequests.clear();
+  storageGrants.clear();
+  storagePortCounts.clear();
+  storageDataActive = 0;
+  storageDataActiveByPort.clear();
+  storageDataWaiters.length = 0;
+  storageStateTail = Promise.resolve();
+  storageMutationTail = Promise.resolve();
+  storageRuntime = testStorageRuntimeOverride;
   passkeyAddIntents.clear();
+  coordinatorRequestTail = Promise.resolve();
 }
 
 export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePublicKeyHex?: string): void {
@@ -1427,6 +2234,154 @@ export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePubli
 
 export function __testGetConnectedPortCount(): number {
   return connectedPorts.size;
+}
+
+export function __testSetStorageSessionResolver(resolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null>) | undefined): void {
+  testStorageSessionResolver = resolver;
+}
+
+/** Minimal worker seams used by direct ownership/transport regression tests. */
+export function __testSetStorageRuntime(runtime: Partial<StorageService> | undefined): void {
+  testStorageRuntimeOverride = runtime as StorageService | undefined;
+  storageRuntime = testStorageRuntimeOverride;
+}
+
+export function __testSetStorageStartupFailure(enabled: boolean): void {
+  testStorageStartupFailure = enabled;
+  if (!enabled) storageStartupFailure = false;
+  if (enabled) { storageRuntime = undefined; storageDb = undefined; }
+}
+
+export async function __testReleaseStorageRuntime(): Promise<void> {
+  await releaseStorageRuntime("test-lock");
+}
+
+export async function __testStorageMutationBarrierProbe(): Promise<{ blockedBeforeRelease: boolean; completedAfterRelease: boolean }> {
+  let release!: () => void;
+  const previous = storageMutationTail;
+  storageMutationTail = storageMutationTail.then(() => new Promise<void>((resolve) => { release = resolve; }));
+  await previous;
+  let completed = false;
+  const run = executeStorageControl({ kind: "storage.control", clientId: "test", requestId: crypto.randomUUID(), control: { type: "status" }, expectedSessionEpoch: coordinatorState.sessionEpoch }).then(() => { completed = true; });
+  await Promise.resolve();
+  const blockedBeforeRelease = !completed;
+  release();
+  await run;
+  storageMutationTail = Promise.resolve();
+  return { blockedBeforeRelease, completedAfterRelease: completed };
+}
+
+export async function __testDispatchStorageGrant(connectSessionId: string, actualPortId: string, requestClientId = actualPortId): Promise<CoordinatorResponse> {
+  return executeStorageRequest({ kind: "storage.grant", clientId: requestClientId, requestId: crypto.randomUUID(), connectSessionId, expectedSessionEpoch: coordinatorState.sessionEpoch }, actualPortId);
+}
+
+export async function __testResolveStorageGrant(grantId: string, actualPortId: string): Promise<import("@keymaster/contracts").StorageAppContext> {
+  return (await resolveStorageGrant(grantId, actualPortId)).context;
+}
+
+export async function __testDispatchStorageData(input: { grantId: string; actualPortId: string; requestClientId?: string; connectSessionId?: string }): Promise<CoordinatorResponse> {
+  const requestId = crypto.randomUUID();
+  return executeStorageRequest({ kind: "storage.data", clientId: input.requestClientId ?? input.actualPortId, requestId, data: { type: "list", grantId: input.grantId, input: {} }, expectedSessionEpoch: coordinatorState.sessionEpoch }, input.actualPortId);
+}
+
+export async function __testDispatchStorageControl(control: Extract<CoordinatorStorageControl, { type: "status" }>): Promise<CoordinatorResponse> {
+  return executeStorageRequest({ kind: "storage.control", clientId: "test", requestId: crypto.randomUUID(), control, expectedSessionEpoch: coordinatorState.sessionEpoch }, "test");
+}
+
+export function __testSeedStorageRequest(requestId: string, actualPortId: string, connectSessionId?: string): AbortSignal {
+  const controller = new AbortController();
+  storageRequests.set(storageRequestKey(actualPortId, requestId), { controller, clientId: actualPortId, connectSessionId });
+  return controller.signal;
+}
+
+export async function __testDispatchStorageCancel(targetRequestId: string, actualPortId: string): Promise<CoordinatorResponse> {
+  return executeStorageRequest({ kind: "storage.cancel", clientId: actualPortId, requestId: crypto.randomUUID(), targetRequestId }, actualPortId);
+}
+
+export async function __testDispatchStorageAbort(connectSessionId: string, actualPortId: string): Promise<CoordinatorResponse> {
+  return executeStorageRequest({ kind: "storage.session.abort", clientId: actualPortId, requestId: crypto.randomUUID(), connectSessionId, expectedSessionEpoch: coordinatorState.sessionEpoch }, actualPortId);
+}
+
+export function __testStorageQueueAdmission(portId: string): { firstPortAccepted: number; firstPortRejected: boolean; secondPortAccepted: boolean; remaining: Record<string, number> } {
+  let firstPortAccepted = 0;
+  while (reserveStoragePortSlot(portId)) firstPortAccepted++;
+  const firstPortRejected = !reserveStoragePortSlot(portId);
+  const secondPortAccepted = reserveStoragePortSlot(`${portId}-other`);
+  for (let i = 0; i < firstPortAccepted; i++) releaseStoragePortSlot(portId);
+  if (secondPortAccepted) releaseStoragePortSlot(`${portId}-other`);
+  return { firstPortAccepted, firstPortRejected, secondPortAccepted, remaining: Object.fromEntries(storagePortCounts) };
+}
+
+export async function __testPublishStorageState(): Promise<void> {
+  emitStorageState();
+  await storageStateTail;
+}
+
+export async function __testStorageFairDispatch(): Promise<string[]> {
+  const order: string[] = [];
+  const releases = new Map<string, () => void>();
+  const run = (portId: string, label: string) => withStorageDataSlot(portId, () => new Promise<void>((resolve) => { order.push(label); releases.set(label, resolve); }));
+  const active = [run("port-a", "a1"), run("port-a", "a2"), run("port-a", "a3")];
+  const queuedA = run("port-a", "a4");
+  const queuedB = run("port-b", "b1");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  releases.get("a1")?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  releases.get("b1")?.(); releases.get("a2")?.(); releases.get("a3")?.(); releases.get("a4")?.();
+  await Promise.all([...active, queuedA, queuedB]);
+  return order;
+}
+
+export function __testStorageTransfer(bytes: ArrayBuffer): { inputDetachedByteLength: number; detachedByteLength: number; receivedByteLength: number; transferCount: number } {
+  const inputClone = structuredClone({ data: { content: { bytes } } }, { transfer: [bytes] });
+  const inputDetachedByteLength = bytes.byteLength;
+  let receivedByteLength = -1;
+  let transferCount = 0;
+  const port = { postMessage(message: unknown, transfer: ArrayBuffer[] = []) {
+    transferCount = transfer.length;
+    const cloned = structuredClone(message, { transfer });
+    receivedByteLength = ((cloned as { operationResult?: { content?: { bytes?: ArrayBuffer } } }).operationResult?.content?.bytes)?.byteLength ?? -1;
+  } } as unknown as MessagePort;
+  const responseBytes = (inputClone.data as { content: { bytes: ArrayBuffer } }).content.bytes;
+  sendToPort(port, { operationResult: { content: { bytes: responseBytes } } }, [responseBytes]);
+  return { inputDetachedByteLength, detachedByteLength: responseBytes.byteLength, receivedByteLength, transferCount };
+}
+
+export function __testAttachPort(clientId: string, postMessage: (message: unknown, transfer?: ArrayBuffer[]) => void): void {
+  const port = { postMessage, start() {}, close() {}, onmessage: null, onmessageerror: null } as unknown as MessagePort;
+  connectedPorts.set(clientId, { port, clientId, subscriptions: new Set(), lastSeenAt: Date.now() });
+}
+
+export async function __testDispatchStorageMessage(clientId: string, request: CoordinatorClientRequest): Promise<void> {
+  await handleClientMessage(clientId, request);
+}
+
+export function __testStorageQueueSnapshot(): { globalActive: number; queued: number; perPort: Record<string, number> } {
+  return { globalActive: storageDataActive, queued: storageDataWaiters.length, perPort: Object.fromEntries(storagePortCounts) };
+}
+
+/** Deterministically exercise queue-full and both cancellation paths. */
+export async function __testStorageSlotErrorCodes(): Promise<{ queueFull: string; queuedAbort: string; activeAbort: string }> {
+  __testResetState();
+  const releases: Array<() => void> = [];
+  const active = [0, 1, 2].map(() => withStorageDataSlot("slot-test", () => new Promise<void>((resolve) => releases.push(resolve))));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const queuedController = new AbortController();
+  const queued = withStorageDataSlot("slot-test", async () => undefined, queuedController.signal).then(() => "missing", (error) => (error as { code?: string }).code ?? "missing");
+  queuedController.abort();
+  const waiting = Array.from({ length: STORAGE_DATA_MAX_QUEUE }, () => withStorageDataSlot("slot-test", async () => undefined));
+  const queueFull = await withStorageDataSlot("slot-test", async () => undefined).then(() => "missing", (error) => (error as { code?: string }).code ?? "missing");
+  const queuedAbort = await queued;
+  releases.forEach((release) => release());
+  await Promise.all([...active, ...waiting]);
+  const activeController = new AbortController();
+  let releaseActive!: () => void;
+  const running = withStorageDataSlot("slot-active", () => new Promise<void>((resolve) => { releaseActive = resolve; }), activeController.signal).then(() => "missing", (error) => (error as { code?: string }).code ?? "missing");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  activeController.abort();
+  const activeAbort = await running;
+  releaseActive?.();
+  return { queueFull, queuedAbort, activeAbort };
 }
 
 export function __testRegisterTask(input: {
@@ -1471,6 +2426,7 @@ export async function __testRestartWorker(): Promise<void> {
   coordinatorState.activePublicKeyHex = undefined;
   coordinatorState.activePrivateKeyBytes = undefined;
   coordinatorState.passwordKey = undefined;
+  coordinatorState.storageSecretKey = undefined;
 }
 
 // ============================================================
@@ -1495,6 +2451,7 @@ export async function __testDeleteVault(): Promise<void> {
   coordinatorState.activePublicKeyHex = undefined;
   coordinatorState.activePrivateKeyBytes = undefined;
   coordinatorState.passwordKey = undefined;
+  coordinatorState.storageSecretKey = undefined;
   coordinatorState.keyspaceGeneration = 0;
 }
 
@@ -1507,6 +2464,12 @@ export async function __testCreateVault(password: string, options?: { label?: st
 /** 创建没有 key 的 locked Vault。 */
 export async function __testCreateEmptyVault(password: string): Promise<void> {
   await executeVaultOperation({ type: "createVault", password });
+}
+
+/** 为 Storage rotation 测试生成当前 Vault 可解开的 local secret。 */
+export async function __testSealLocalSecret(scope: string, plaintext: string): Promise<VaultSealedSecret> {
+  const bytes = new TextEncoder().encode(plaintext);
+  return await executeVaultOperation({ type: "sealLocalSecret", scope, plaintext: bytes }) as VaultSealedSecret;
 }
 
 /** 导入私钥。 */
@@ -1564,6 +2527,11 @@ export async function __testActivateKeyWithPasskey(input: {
 /** 解锁 Vault。 */
 export async function __testUnlock(password: string, publicKeyHex?: string): Promise<CoordinatorResponse> {
   return processRequest({ kind: "unlock", password, publicKeyHex, requestId: `test-unlock-${Date.now()}`, clientId: "test", expectedSessionEpoch: coordinatorState.sessionEpoch });
+}
+
+/** 修改 Vault 密码。 */
+export async function __testChangePassword(oldPassword: string, newPassword: string): Promise<unknown> {
+  return executeVaultOperation({ type: "changePassword", oldPassword, newPassword });
 }
 
 /** 锁定 Vault。 */

@@ -6,6 +6,7 @@
     { "path": "./packages/runtime" },
     { "path": "./packages/ui" },
     { "path": "./packages/plugin-vault" },
+    { "path": "./packages/plugin-storage" },
     { "path": "./packages/plugin-key-import" },
     { "path": "./packages/plugin-importer-wif" },
     { "path": "./packages/plugin-importer-hex" },
