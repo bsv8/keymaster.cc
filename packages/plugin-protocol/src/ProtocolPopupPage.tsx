@@ -41,18 +41,19 @@ import { useCapability } from "@keymaster/runtime";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
 import { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
 
-/** 钱包首页 URL：硬编码，"进入钱包"按钮的固定目标。 */
-const WALLET_HOMEPAGE_URL = "https://keymaster.cc";
-
 /**
  * 顶栏"进入钱包"按钮的 onClick handler。
+ *
+ * 钱包首页与当前 Session Window 使用同一个部署 origin；只把协议页 path
+ * 归一化回 `/`。这样自部署实例不会跳到 keymaster.cc 或其他部署。
  *
  * best-effort：window.open 失败不报错、不弹提示。
  * 失败就让用户点不到，不影响 popup 主流程。
  */
 function openWalletHomepage(): void {
   try {
-    window.open(WALLET_HOMEPAGE_URL, "_blank", "noopener,noreferrer");
+    const walletHomepageUrl = new URL("/", window.location.href).href;
+    window.open(walletHomepageUrl, "_blank", "noopener,noreferrer");
   } catch (err) {
     console.warn("[protocol-popup] openWalletHomepage failed", err);
   }

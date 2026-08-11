@@ -1446,9 +1446,11 @@ describe("ProtocolPopupPage confirm-in-feed (003)", () => {
 /* ============== 施工单 001：顶栏"进入钱包"按钮 ============== */
 
 describe("ProtocolPopupPage topbar wallet entry", () => {
-  it("renders the 'enter wallet' button and opens keymaster.cc in a new tab on click", () => {
+  it("opens the current wallet deployment homepage in a new tab", () => {
     const openSpy = vi.spyOn(window, "open").mockImplementation(() => null);
+    const originalUrl = window.location.href;
     try {
+      window.history.replaceState(null, "", "/protocol/v1/popup?source=test");
       const service = makeFakeService();
       currentService = service;
       render(<ProtocolPopupPage />);
@@ -1460,11 +1462,12 @@ describe("ProtocolPopupPage topbar wallet entry", () => {
         (btn as HTMLButtonElement).click();
       });
       expect(openSpy).toHaveBeenCalledWith(
-        "https://keymaster.cc",
+        `${window.location.origin}/`,
         "_blank",
         "noopener,noreferrer"
       );
     } finally {
+      window.history.replaceState(null, "", originalUrl);
       openSpy.mockRestore();
     }
   });

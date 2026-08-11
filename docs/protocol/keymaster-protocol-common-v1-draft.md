@@ -23,7 +23,9 @@
 
 通信方式固定为：
 
-1. 第三方站点 `window.open("https://keymaster.cc/...")` 打开 Keymaster popup。
+1. 第三方站点使用当前 Keymaster 部署地址
+   `window.open("<keymaster-deployment-origin>/protocol/v1/popup")` 打开 popup；
+   协议不绑定 `keymaster.cc` 或任何固定部署域名。
 2. Keymaster popup 初始化完成后，通过 `postMessage` 回发一条 `ready`。
 3. 第三方站点收到 `ready` 后，再发送正式 `request`。
 4. Keymaster 完成后回发 `result`。
@@ -483,6 +485,10 @@ V1 popup 的"当前 origin 视图"由**两个语义独立的区块**组成。
   默认只读 / 折叠；用户可手动展开看详情
   不出现确认 / 取消按钮
 ```
+
+“进入钱包”必须在新窗口打开当前 Session Window 的部署 origin 首页
+（运行时由 `window.location` 获取），不能写死 `keymaster.cc`，也不能使用
+当前外部调用方 origin。
 
 ### 活请求区
 
