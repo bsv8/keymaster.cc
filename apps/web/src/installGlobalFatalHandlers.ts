@@ -8,6 +8,8 @@
 //     或本应用 bundle 时升级为 fatal；opaque rejection 不默认升级。
 //   - 扩展脚本 / 第三方脚本 / analytics：只 console.warn,绝不接管页面。
 //     设计缘由：宁可漏接第三方噪音,也不能让坏扩展把整站误打进崩溃页。
+//   - 浏览器 fetch 的网络传输失败是可恢复的 provider / 网络状态，即使调用
+//     栈来自应用 bundle，也不能升级成 fatal；业务任务会自行记录失败状态。
 //   - 主题 / 语言 / localStorage 最佳努力读写失败：业务自身吞,根本不
 //     会冒泡到 window.error / unhandledrejection,无需在本文件处理。
 //   - 业务页 provider 错误：被局部 ErrorBoundary 拦截,不应冒泡到
@@ -29,6 +31,18 @@ let installed: InstalledHandle | null = null;
 interface WindowWithDebugFlag extends Window {
   /** 调试用：把本应用 bundle 的 origin 记录下来,便于同源判断。 */
   __keymasterOrigin?: string;
+}
+
+/**
+ * 浏览器 fetch 在 DNS、TLS、CORS、离线或连接中断时以 TypeError rejection
+ * 报告，且不会附带 HTTP 状态。它描述的是外部传输状态，不是应用运行时
+ * 不变量损坏。这里只匹配浏览器已知的精确消息，避免把普通 TypeError
+ *（例如读取 undefined 属性）误吞掉。
+ */
+function isRecoverableFetchRejection(reason: unknown): boolean {
+  if (!(reason instanceof TypeError)) return false;
+  return reason.message === "Failed to fetch" ||
+    reason.message === "NetworkError when attempting to fetch resource.";
 }
 
 /**
@@ -128,6 +142,14 @@ export function installGlobalFatalHandlers(): void {
   const rejectionHandler = (event: PromiseRejectionEvent) => {
     try {
       const reason = event.reason;
+      if (isRecoverableFetchRejection(reason)) {
+        // 外部 provider 暂时不可达：保留控制台诊断，但不退出正常运行路径。
+        // eslint-disable-next-line no-console
+        console.warn("[installGlobalFatalHandlers] recoverable fetch rejection ignored", {
+          reason: reason.message
+        });
+        return;
+      }
       const stack = reason instanceof Error ? reason.stack : undefined;
       const filename =
         reason && typeof reason === "object" && "filename" in reason

@@ -338,6 +338,48 @@ describe("WocService basics", () => {
     }
     s.dispose();
   });
+
+  it("broadcast() accepts WOC's top-level txid string response", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    const rawTxHex = "deadbeef";
+    const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () =>
+      new Response(JSON.stringify(canonicalTxid), { status: 200 })
+    ) as unknown as typeof fetch;
+
+    const res = await s.broadcast("main", rawTxHex);
+
+    expect(res).toEqual({
+      accepted: true,
+      canonicalTxid,
+      providerReturnedTxidRaw: canonicalTxid,
+      providerReturnedTxidNormalized: canonicalTxid,
+      txidIntegrity: "exact"
+    });
+    s.dispose();
+  });
+
+  it("broadcast() keeps a 2xx response without txid accepted and marks its receipt missing", async () => {
+    const s = createWocService({ messageBus: createMessageBus() });
+    s.updateConfig({ baseUrl: "https://mock.test" });
+    const rawTxHex = "cafebabe";
+    const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
+    (globalThis as { fetch: typeof fetch }).fetch = vi.fn(async () =>
+      new Response(JSON.stringify({}), { status: 200 })
+    ) as unknown as typeof fetch;
+
+    const res = await s.broadcast("main", rawTxHex);
+
+    expect(res).toEqual({
+      accepted: true,
+      canonicalTxid,
+      providerReturnedTxidRaw: undefined,
+      providerReturnedTxidNormalized: undefined,
+      txidIntegrity: "missing"
+    });
+    s.dispose();
+  });
 });
 
 describe("WocService coordinated flag", () => {

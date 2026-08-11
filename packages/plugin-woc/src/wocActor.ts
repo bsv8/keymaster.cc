@@ -152,13 +152,16 @@ async function calcCanonicalTxidFromRawTxHex(rawTxHex: string): Promise<string> 
  *   条件分支引入新的优先级副作用（例如不小心在 fetch 之前 await）。
  */
 function interpretProviderTxidReceipt(input: {
-  providerTxid: string;
+  providerTxid?: string;
   canonicalTxid: string;
 }): {
-  providerReturnedTxidRaw: string;
-  providerReturnedTxidNormalized: string;
+  providerReturnedTxidRaw?: string;
+  providerReturnedTxidNormalized?: string;
   txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
 } {
+  if (input.providerTxid === undefined) {
+    return { txidIntegrity: "missing" };
+  }
   const providerReturnedTxidRaw = input.providerTxid;
   const providerReturnedTxidNormalized = normalizeTxidHex(providerReturnedTxidRaw);
   const reversedProviderTxid = reverseHexBytes(providerReturnedTxidRaw);
@@ -175,6 +178,19 @@ function interpretProviderTxidReceipt(input: {
     providerReturnedTxidNormalized,
     txidIntegrity
   };
+}
+
+/**
+ * WOC 的成功回执在公开 API 中是顶层 JSON 字符串；历史 mock / 代理也可能
+ * 返回 `{ txid }`。网络层只以 HTTP 2xx 判断请求已被 provider 接受，本
+ * helper 仅提取可选的诊断 txid，不能因为字段缺失而把已提交的广播降级为
+ * 异常结果。
+ */
+function extractProviderTxid(receipt: unknown): string | undefined {
+  if (typeof receipt === "string") return receipt;
+  if (typeof receipt !== "object" || receipt === null) return undefined;
+  const txid = (receipt as { txid?: unknown }).txid;
+  return typeof txid === "string" ? txid : undefined;
 }
 
 function getLocker(): Locker | undefined {
@@ -840,7 +856,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         // 任务在 fetchJson 之前先让出执行权；pump 继续 while 循环时趁机拉起
         // background 任务的 fetch，破坏 broadcast 优先级（order[1] 变成
         // background 而不是 /tx/raw）。
-        const res = await fetchJson<{ txid: string }>(network, "/tx/raw", {
+        const receipt = await fetchJson<unknown>(network, "/tx/raw", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ txhex: rawTxHex })
@@ -848,7 +864,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         resetBackoff();
         const canonicalTxid = await calcCanonicalTxidFromRawTxHex(rawTxHex);
         const interpreted = interpretProviderTxidReceipt({
-          providerTxid: res.txid,
+          providerTxid: extractProviderTxid(receipt),
           canonicalTxid
         });
         return {

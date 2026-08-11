@@ -5,7 +5,8 @@
 //   1. 同源本应用错误（filename 与 window.location.origin 同源）-> 升 fatal。
 //   2. 第三方脚本错误（chrome-extension:// / 跨域）-> 不升 fatal。
 //   3. opaque unhandledrejection（无 stack 无 filename）-> 不升 fatal。
-//   4. handler 抛错时不能递归调 reportFatalError。
+//   4. fetch 网络传输失败（即使 stack 来自应用）-> 不升 fatal。
+//   5. handler 抛错时不能递归调 reportFatalError。
 //
 // 测试环境：jsdom。
 
@@ -100,6 +101,25 @@ describe("installGlobalFatalHandlers", () => {
     expect(fatal).not.toBeNull();
     expect(fatal?.phase).toBe("global.unhandledrejection");
     expect(fatal?.message).toBe("rejection boom");
+  });
+
+  it("keeps a browser fetch transport failure with app-origin stack non-fatal", () => {
+    installGlobalFatalHandlers();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const reason = new TypeError("Failed to fetch");
+    reason.stack = [
+      "TypeError: Failed to fetch",
+      "    at fetchJson (http://localhost:5173/packages/plugin-woc/src/wocActor.ts:416:25)"
+    ].join("\n");
+
+    fireRejection(reason);
+
+    expect(getFatalError()).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      "[installGlobalFatalHandlers] recoverable fetch rejection ignored",
+      { reason: "Failed to fetch" }
+    );
+    warn.mockRestore();
   });
 
   it("keeps consumed command results outside the fatal boundary", async () => {
