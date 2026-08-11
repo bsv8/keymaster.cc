@@ -7,7 +7,7 @@ export const STORAGE_DB_VERSION = 1;
 export interface StoredProviderConfigRecord {
   key: "active";
   providerId: string;
-  publicSummary: { bucketHint: string; endpointHint?: string; prefix: string; accessKeyHint: string };
+  publicSummary: { bucketHint: string; endpointHint?: string; accessKeyHint: string };
   sealedConfig: VaultSealedSecret;
   generation: number;
   updatedAt: number;

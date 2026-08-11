@@ -17,9 +17,9 @@ CI override values from this file.
 
 Use a dedicated test bucket and a least-privilege key restricted to object
 list/read/write/delete and multipart operations in that bucket. Do not use an
-account-management token. The test creates a unique
-`keymaster-smoke/{runId}/.../` subtree and attempts to remove every object it
-creates in a `finally` block.
+account-management token. The test creates a unique App namespace directly at
+the Bucket root and attempts to remove every object it creates in a `finally`
+block.
 
 ## Run
 

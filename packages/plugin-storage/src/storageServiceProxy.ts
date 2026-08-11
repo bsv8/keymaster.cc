@@ -25,9 +25,14 @@ type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: Storag
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
   if (result.status === "ok") return Promise.resolve(result.value as T);
-  if (result.status === "transport-error") throw new StorageServiceError("storage_unavailable", "Storage Coordinator request cancelled");
+  if (result.status === "transport-error") throw new StorageServiceError("storage_unavailable", result.message || "Storage Coordinator request cancelled");
   const code = "code" in result && typeof result.code === "string" ? result.code as import("@keymaster/contracts").StorageErrorCode : undefined;
-  throw new StorageServiceError(code ?? (result.status === "stale-epoch" || result.status === "locked" ? "storage_unavailable" : "storage_provider_error"), "Storage Coordinator request failed");
+  const message = "message" in result && typeof result.message === "string"
+    ? result.message
+    : result.status === "blocked"
+      ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
+      : "Storage Coordinator request failed";
+  throw new StorageServiceError(code ?? (result.status === "stale-epoch" || result.status === "locked" ? "storage_unavailable" : "storage_provider_error"), message);
 }
 
 /** Page-side facade. It owns no provider config, client, cursor, or S3 I/O. */

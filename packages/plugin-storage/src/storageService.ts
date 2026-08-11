@@ -111,7 +111,8 @@ function assertLimit(value: number, name: string): void {
 }
 
 function rootForUploadRecord(config: NormalizedStorageProviderConfig, record: StoredMultipartUploadRecord): string {
-  return buildNamespaceRoot((config.connection as { prefix: string }).prefix, {
+  void config;
+  return buildNamespaceRoot({
     version: 1,
     publisherPublicKeyHex: record.publisherPublicKeyHex,
     appId: record.appId,
@@ -288,7 +289,7 @@ export class StorageServiceImpl implements StorageServiceContract {
         const capabilityState = this.activeCapabilityState ?? createS3ObjectStoreCapabilityState();
         const store = this.makeStore(config, capabilityState);
         try {
-          await this.boundedProvider(() => store.probe((config.connection as { prefix: string }).prefix, this.rotationAbortController.signal), this.rotationAbortController);
+          await this.boundedProvider(() => store.probe("", this.rotationAbortController.signal), this.rotationAbortController);
           this.assertRequestActive(this.rotationAbortController.signal);
           if (this.disposed || this.deps.vault.status() !== "unlocked") {
             throw new StorageServiceError("storage_unavailable", "Vault is locked");
@@ -345,8 +346,8 @@ export class StorageServiceImpl implements StorageServiceContract {
   }
 
   private contextRoot(ctx: StorageAppContext): string {
-    const { config } = this.requireReady();
-    return buildNamespaceRoot((config.connection as { prefix: string }).prefix, ctx.appIdentity);
+    this.requireReady();
+    return buildNamespaceRoot(ctx.appIdentity);
   }
 
   private assertContext(ctx: StorageAppContext): string {
@@ -372,7 +373,9 @@ export class StorageServiceImpl implements StorageServiceContract {
   async getProviderSummary(): Promise<StorageProviderSummary | null> {
     return this.activeRecord?.publicSummary ? {
       providerId: this.activeRecord.providerId as StorageProviderSummary["providerId"],
-      ...this.activeRecord.publicSummary,
+      bucketHint: this.activeRecord.publicSummary.bucketHint,
+      endpointHint: this.activeRecord.publicSummary.endpointHint,
+      accessKeyHint: this.activeRecord.publicSummary.accessKeyHint,
       secretConfigured: true,
       generation: this.activeRecord.generation,
       updatedAt: this.activeRecord.updatedAt
@@ -420,7 +423,7 @@ export class StorageServiceImpl implements StorageServiceContract {
         const config = normalizeProviderConfig(draft, existing ?? undefined);
         const candidate = this.makeStore(config);
         try {
-          await this.boundedProvider(() => candidate.probe((config.connection as { prefix: string }).prefix, signal), controller);
+          await this.boundedProvider(() => candidate.probe("", signal), controller);
           this.assertRequestActive(signal);
           if (this.deps.vault.status() !== "unlocked") throw new StorageServiceError("storage_unavailable", "Vault is locked");
         } finally { candidate.dispose(); }
@@ -494,8 +497,7 @@ export class StorageServiceImpl implements StorageServiceContract {
       if (!record || !config || !state || this.currentStatus !== "ready" || this.deps.vault.status() !== "unlocked" || this.rotationActive) throw new StorageServiceError("storage_unavailable", "Storage is not ready");
       const generation = record.generation;
       const stateIdentity = state;
-      const prefix = (config.connection as { prefix: string }).prefix;
-      const root = `${prefix}.keymaster-system/capability-probe/${crypto.randomUUID()}/`;
+      const root = `.keymaster-system/capability-probe/${crypto.randomUUID()}/`;
       const probeState = createS3ObjectStoreCapabilityState();
       const store = this.makeStore(config, probeState);
       const keys = { put: `${root}put.bin`, complete: `${root}complete.bin` };
@@ -562,7 +564,7 @@ export class StorageServiceImpl implements StorageServiceContract {
         const capabilityState = createS3ObjectStoreCapabilityState();
         candidate = this.makeStore(config, capabilityState);
         const signal = this.rotationAbortController.signal;
-        await this.boundedProvider(() => candidate!.probe((config.connection as { prefix: string }).prefix, signal), this.rotationAbortController);
+        await this.boundedProvider(() => candidate!.probe("", signal), this.rotationAbortController);
         if (signal.aborted) throw new StorageServiceError("storage_unavailable", "Storage operation was cancelled");
         if (this.deps.vault.status() !== "unlocked") throw new StorageServiceError("storage_unavailable", "Vault is locked");
         const configBytes = configToBytes(config);
@@ -572,7 +574,7 @@ export class StorageServiceImpl implements StorageServiceContract {
         const generation = (this.activeRecord?.generation ?? 0) + 1;
         const updatedAt = now(this.deps);
         const summary = summaryForConfig(config, generation, updatedAt);
-        const record: StoredProviderConfigRecord = { key: "active", providerId: config.providerId, publicSummary: { bucketHint: summary.bucketHint, endpointHint: summary.endpointHint, prefix: summary.prefix, accessKeyHint: summary.accessKeyHint }, sealedConfig, generation, updatedAt };
+        const record: StoredProviderConfigRecord = { key: "active", providerId: config.providerId, publicSummary: { bucketHint: summary.bucketHint, endpointHint: summary.endpointHint, accessKeyHint: summary.accessKeyHint }, sealedConfig, generation, updatedAt };
         const oldStore = this.activeStore;
         const oldConfig = this.activeConfig;
         const oldGeneration = this.activeRecord?.generation;

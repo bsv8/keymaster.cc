@@ -171,8 +171,8 @@ async function createAbortService(mode: "success" | "reject" | "timeout" | "nost
     db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
     objectStoreFactory: () => store
   });
-  await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
-  await db.putMultipart({ internalUploadId: `internal-${mode}`, connectSessionId: "session-a", transportOrigin: "https://app.example", publisherPublicKeyHex: identityA.publisherPublicKeyHex, appId: identityA.appId, relativePath: "file.bin", physicalKey: "tenant/file.bin", sealedS3UploadId: { version: 1, saltHex: "", nonceHex: "", ciphertextHex: bytesToHex(new TextEncoder().encode("remote-upload")) }, providerGeneration: mode === "old-generation" ? 999 : 1, expectedSize: 0, overwrite: false, parts: [], expiresAt: Date.now() + 60_000, createdAt: Date.now() });
+  await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+  await db.putMultipart({ internalUploadId: `internal-${mode}`, connectSessionId: "session-a", transportOrigin: "https://app.example", publisherPublicKeyHex: identityA.publisherPublicKeyHex, appId: identityA.appId, relativePath: "file.bin", physicalKey: `${identityA.publisherPublicKeyHex}/${identityA.appId}/file.bin`, sealedS3UploadId: { version: 1, saltHex: "", nonceHex: "", ciphertextHex: bytesToHex(new TextEncoder().encode("remote-upload")) }, providerGeneration: mode === "old-generation" ? 999 : 1, expectedSize: 0, overwrite: false, parts: [], expiresAt: Date.now() + 60_000, createdAt: Date.now() });
   if (mode === "nostore") service.dispose();
   return { service, db };
 }
@@ -183,7 +183,7 @@ async function createCapabilityService(behavior: { put: CapabilityBehavior; comp
     db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
     objectStoreFactory: (_config, state) => { states.push(state!); return makeCapabilityStore(state!, behavior, options); }
   });
-  await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+  await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
   return { service, states };
 }
 
@@ -191,7 +191,7 @@ describe("StorageServiceImpl", () => {
   it("cancels a never-resolving probe so the mutation lane recovers immediately", async () => {
     let hanging = true; const base = makeStore({ listPrefixes: [] });
     const service = await createStorageService({ db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined }, objectStoreFactory: () => ({ ...base, async probe() { if (hanging) await new Promise<void>(() => undefined); } }) });
-    const draft = { providerId: "aws-s3" as const, connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace" as const, accessKeyId: "key", secretAccessKey: "secret" } };
+    const draft = { providerId: "aws-s3" as const, connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace" as const, accessKeyId: "key", secretAccessKey: "secret" } };
     const pending = service.probeProvider(draft); await new Promise((resolve) => setTimeout(resolve, 10)); service.cancelProbe();
     await expect(pending).resolves.toMatchObject({ ok: false });
     hanging = false; await expect(service.probeProvider(draft)).resolves.toMatchObject({ ok: true }); service.dispose();
@@ -200,7 +200,7 @@ describe("StorageServiceImpl", () => {
   it("completes clear while a provider data request never settles", async () => {
     const base = makeStore({ listPrefixes: [] });
     const service = await createStorageService({ db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined }, objectStoreFactory: () => ({ ...base, async list() { return await new Promise<never>(() => undefined); } }) });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     void service.list(context(), {}); await new Promise((resolve) => setTimeout(resolve, 10));
     const started = Date.now(); await service.clearProviderConfig();
     expect(Date.now() - started).toBeLessThan(800); service.dispose();
@@ -210,7 +210,7 @@ describe("StorageServiceImpl", () => {
     const db = makeDb(); const calls = { listPrefixes: [] as string[], abortedUploads: [] as string[] }; const base = makeStore(calls); let release!: () => void;
     const store: S3ObjectStore = { ...base, async uploadPart() { await new Promise<void>((resolve) => { release = resolve; }); return "late-etag"; } };
     const service = await createStorageService({ db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined }, objectStoreFactory: () => store });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const upload = await service.beginUpload(context(), { path: "late.bin", size: 1 });
     const part = service.uploadPart(context(), { uploadId: upload.uploadId, partNumber: 1, content: { $type: "binary", bytes: new Uint8Array([7]).buffer } });
     await new Promise((resolve) => setTimeout(resolve, 10)); const clear = service.clearProviderConfig(); await new Promise((resolve) => setTimeout(resolve, 260)); release();
@@ -222,7 +222,7 @@ describe("StorageServiceImpl", () => {
   it("serializes concurrent parts so neither durable part update is lost", async () => {
     const db = makeDb();
     const service = await createStorageService({ db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined }, objectStoreFactory: () => makeStore({ listPrefixes: [] }) });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const begin = await service.beginUpload(context(), { path: "concurrent.bin", size: STORAGE_PART_SIZE_BYTES * 2 });
     const first = service.uploadPart(context(), { uploadId: begin.uploadId, partNumber: 1, content: { $type: "binary", bytes: new ArrayBuffer(STORAGE_PART_SIZE_BYTES) } });
     const second = service.uploadPart(context(), { uploadId: begin.uploadId, partNumber: 2, content: { $type: "binary", bytes: new ArrayBuffer(STORAGE_PART_SIZE_BYTES) } });
@@ -239,7 +239,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => ({ ...base, async list() { return await new Promise<never>(() => undefined); } })
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     void service.list(context(), {});
     await new Promise((resolve) => setTimeout(resolve, 10));
     const started = Date.now();
@@ -319,7 +319,7 @@ describe("StorageServiceImpl", () => {
     const roots = new Set(calls.map((call) => call.namespaceRoot));
     expect(roots.size).toBe(1);
     const [root] = [...roots];
-    expect(root).toMatch(/^tenant\/\.keymaster-system\/capability-probe\/[0-9a-f-]+\/$/u);
+    expect(root).toMatch(/^\.keymaster-system\/capability-probe\/[0-9a-f-]+\/$/u);
     for (const call of calls) {
       expect(call.namespaceRoot).toBe(root);
       expect(call.key.startsWith(root!)).toBe(true);
@@ -361,10 +361,10 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: (_config, state) => { states.push(state!); return makeCapabilityStore(state!, { put: "native", complete: "native" }, { gate }); }
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "before", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "before" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const pending = service.probeConditionalCapabilities();
     await Promise.resolve();
-    const replacement = service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "after", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    const replacement = service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "after" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await replacement;
     release();
     await expect(pending).rejects.toMatchObject({ code: "storage_unavailable" });
@@ -391,13 +391,13 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore(calls), now: () => 1000, generateId: () => "fixed"
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await expect(service.getProviderConnection()).resolves.toEqual({
       providerId: "aws-s3",
-      connection: { region: "us-east-1", bucket: "bucket-name", prefix: "tenant/" }
+      connection: { region: "us-east-1", bucket: "bucket-name" }
     });
     const first = await service.list(context(), {});
-    expect(calls.listPrefixes[0]).toBe(`tenant/${identityA.publisherPublicKeyHex}/app-a/`);
+    expect(calls.listPrefixes[0]).toBe(`${identityA.publisherPublicKeyHex}/app-a/`);
     expect(first.nextCursor).toBe("cursor-fixed");
     await expect(service.list(context(identityB), { cursor: first.nextCursor })).rejects.toMatchObject({ code: "storage_invalid_upload" });
     const nested = await service.list(context(), { prefix: "nested/child" });
@@ -411,7 +411,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore({ listPrefixes: [] }), generateId: (() => { let n = 0; return () => String(++n); })()
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const first = await service.list(context(), { limit: 1 });
     for (let i = 0; i < 600; i++) await service.list(context(), { limit: 1 });
     const cursors = (service as unknown as { cursors: Map<string, { connectSessionId: string }> }).cursors;
@@ -432,7 +432,7 @@ describe("StorageServiceImpl", () => {
       },
       objectStoreFactory: (_config, state) => { if (!state) throw new Error("missing capability state"); states.push(state); return makeStore({ listPrefixes: [] }); }
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "generation-a", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "generation-a" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     expect(states).toHaveLength(1);
     const firstGenerationState = states[0];
     let updates = 0;
@@ -451,7 +451,7 @@ describe("StorageServiceImpl", () => {
     expect(states).toHaveLength(2);
     expect(states[1]).toBe(firstGenerationState);
 
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "generation-b", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "generation-b" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     expect(states).toHaveLength(3);
     expect(states[2]).not.toBe(firstGenerationState);
     service.dispose();
@@ -475,7 +475,7 @@ describe("StorageServiceImpl", () => {
         return { ...base, async put(input) { if (input.ifNoneMatch && !capabilityRequest) { capabilityRequest = true; await gate; } return base.put(input); } };
       }
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "tenant/" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const probe = service.probeConditionalCapabilities();
     await Promise.resolve();
     vaultStatus = "locked";
@@ -491,7 +491,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore({ listPrefixes: [] }), generateId: () => "internal", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const begin = await service.beginUpload(context(), { path: "file.bin", size: 3 });
     expect(begin.uploadId).toBe("upload-internal");
     expect(begin.uploadId).not.toContain("s3-upload");
@@ -506,7 +506,7 @@ describe("StorageServiceImpl", () => {
     const base = makeStore({ listPrefixes: [] });
     let response: { bytes: Uint8Array; offset?: number; totalSize?: number } = { bytes: new Uint8Array([1]), offset: 0, totalSize: 1 };
     const service = await createStorageService({ db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined }, objectStoreFactory: () => ({ ...base, async get() { return response; } }) });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await expect(service.getRange(context(), { path: "file", offset: Number.MAX_SAFE_INTEGER, length: 2 })).rejects.toMatchObject({ code: "storage_limit_exceeded" });
     response = { bytes: new Uint8Array([1]), offset: Number.MAX_SAFE_INTEGER + 1, totalSize: 1 };
     await expect(service.getRange(context(), { path: "file" })).rejects.toMatchObject({ code: "storage_provider_error" });
@@ -519,7 +519,7 @@ describe("StorageServiceImpl", () => {
 
   it("maps oversized path segments to storage_invalid_path", async () => {
     const service = await createStorageService({ db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined }, objectStoreFactory: () => makeStore({ listPrefixes: [] }) });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await expect(service.put(context(), { path: "x".repeat(256), content: { $type: "binary", bytes: new ArrayBuffer(0) } })).rejects.toMatchObject({ code: "storage_invalid_path" });
     service.dispose();
   });
@@ -529,7 +529,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore({ listPrefixes: [] }), generateId: () => "overwrite", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await service.put(context(), { path: "existing.bin", content: { $type: "binary", bytes: new Uint8Array([1]).buffer } });
     await expect(service.beginUpload(context(), { path: "existing.bin", size: 1, overwrite: false })).rejects.toMatchObject({ code: "storage_conflict" });
     service.dispose();
@@ -542,7 +542,7 @@ describe("StorageServiceImpl", () => {
       db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore(calls), generateId: () => "clear", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await service.beginUpload(context(), { path: "pending.bin", size: 1 });
 
     await service.clearProviderConfig();
@@ -562,7 +562,7 @@ describe("StorageServiceImpl", () => {
       db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore(calls), generateId: () => "clear-failure", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await service.beginUpload(context(), { path: "pending.bin", size: 1 });
     db.clearProviderConfig = async () => { throw new Error("fixture clear failure"); };
 
@@ -584,7 +584,7 @@ describe("StorageServiceImpl", () => {
       db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore(calls), generateId: () => "reset", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await service.beginUpload(context(), { path: "pending.bin", size: 1 });
 
     await service.resetStorage();
@@ -603,7 +603,7 @@ describe("StorageServiceImpl", () => {
       db, secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore(calls), generateId: () => "reset-failure", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await service.beginUpload(context(), { path: "pending.bin", size: 1 });
     db.resetStorage = async () => { throw new Error("fixture reset failure"); };
 
@@ -624,7 +624,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => store, generateId: () => "range", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     await expect(service.getRange(context(), { path: "large.bin", offset: 0, length: STORAGE_MAX_PAYLOAD_BYTES })).rejects.toMatchObject({ code: "storage_limit_exceeded" });
     service.dispose();
   });
@@ -652,7 +652,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: (listener: any) => { lifecycle = listener; return () => undefined; } },
       objectStoreFactory: () => store, generateId: () => "rotation", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const request = service.put(context(), { path: "file.bin", content: { $type: "binary", bytes: new Uint8Array([1]).buffer } });
     const requestResult = expect(request).rejects.toMatchObject({ code: "storage_unavailable" });
     await startedPromise;
@@ -670,7 +670,7 @@ describe("StorageServiceImpl", () => {
       db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
       objectStoreFactory: () => makeStore(calls), generateId: () => "fixture", now: () => 1000
     });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name", prefix: "" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
+    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
     const facade = createConnectObjectStoreFixture({ service, context: context() });
     await facade.createDirectory("", "docs");
     await expect(facade.deleteDirectoryMarker("docs/")).resolves.toBeUndefined();

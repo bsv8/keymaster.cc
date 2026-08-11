@@ -1,19 +1,69 @@
 import { describe, expect, it } from "vitest";
 import { STORAGE_MAX_PAYLOAD_BYTES } from "@keymaster/contracts";
 import type { NormalizedStorageProviderConfig } from "@keymaster/contracts";
-import { createS3ObjectStore, createS3ObjectStoreCapabilityState, mapS3Error, parseContentRange, readBody, s3FetchRequestInit, setS3ObjectStoreCapabilityMode, type S3ClientAdapter } from "./s3ObjectStore.js";
+import { createS3ObjectStore, createS3ObjectStoreCapabilityState, ensureS3XmlRuntime, mapS3Error, parseContentRange, readBody, s3FetchRequestInit, setS3ObjectStoreCapabilityMode, type S3ClientAdapter } from "./s3ObjectStore.js";
 import { StoragePathError } from "./storagePath.js";
 
 const config: NormalizedStorageProviderConfig = {
   version: 1,
   providerId: "aws-s3",
-  connection: { region: "us-east-1", bucket: "bucket-name", prefix: "tenant/" },
+  connection: { region: "us-east-1", bucket: "bucket-name" },
   credentials: { kind: "access-key", accessKeyId: "key", secretAccessKey: "secret" }
 };
 
 describe("S3ObjectStore namespace guard", () => {
   it("rejects provider redirects at the fetch boundary", () => {
     expect(s3FetchRequestInit()).toEqual({ redirect: "error" });
+  });
+
+  it("installs the XML DOM surface required by S3 inside a SharedWorker", () => {
+    const runtime = globalThis as unknown as { DOMParser?: typeof DOMParser; Node?: typeof Node };
+    const previousParser = runtime.DOMParser;
+    const previousNode = runtime.Node;
+    try {
+      delete runtime.DOMParser;
+      delete runtime.Node;
+      ensureS3XmlRuntime();
+      const document = new runtime.DOMParser!().parseFromString("<ListBucketResult><Name>bucket</Name></ListBucketResult>", "application/xml");
+      expect(document.documentElement.nodeName).toBe("ListBucketResult");
+      expect(document.getElementsByTagName("Name")[0]?.textContent).toBe("bucket");
+      expect(typeof runtime.Node).toBe("function");
+      expect(runtime.Node?.ELEMENT_NODE).toBe(1);
+      expect(runtime.Node?.TEXT_NODE).toBe(3);
+    } finally {
+      if (previousParser) runtime.DOMParser = previousParser; else delete runtime.DOMParser;
+      if (previousNode) runtime.Node = previousNode; else delete runtime.Node;
+    }
+  });
+
+  it("deserializes an S3 XML success response without native Worker DOM globals", async () => {
+    const runtime = globalThis as unknown as { DOMParser?: typeof DOMParser; Node?: typeof Node; fetch: typeof fetch };
+    const previousParser = runtime.DOMParser;
+    const previousNode = runtime.Node;
+    const previousFetch = runtime.fetch;
+    let requested = false;
+    try {
+      delete runtime.DOMParser;
+      delete runtime.Node;
+      runtime.fetch = async () => {
+        requested = true;
+        return new Response('<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>bucket-name</Name><IsTruncated>false</IsTruncated><MaxKeys>1</MaxKeys><KeyCount>0</KeyCount></ListBucketResult>', {
+          status: 200,
+          headers: { "content-type": "application/xml", "x-amz-request-id": "request-id" }
+        });
+      };
+      const store = createS3ObjectStore(config);
+      try {
+        await expect(store.probe("")).resolves.toBeUndefined();
+        expect(requested).toBe(true);
+      } finally {
+        store.dispose();
+      }
+    } finally {
+      runtime.fetch = previousFetch;
+      if (previousParser) runtime.DOMParser = previousParser; else delete runtime.DOMParser;
+      if (previousNode) runtime.Node = previousNode; else delete runtime.Node;
+    }
   });
 
   it("rejects a sibling key before sending a provider request", async () => {
@@ -57,6 +107,10 @@ describe("S3ObjectStore namespace guard", () => {
     expect(mapS3Error({ $metadata: { httpStatusCode: 401 } })).toMatchObject({ code: "storage_forbidden", diagnostic: "authentication" });
     expect(mapS3Error({ name: "ConditionalRequestConflict" })).toMatchObject({ code: "storage_conflict", diagnostic: "provider" });
     expect(mapS3Error(new TypeError("network failed"))).toMatchObject({ code: "storage_unavailable", diagnostic: "network" });
+    expect(mapS3Error({ name: "TypeError", message: "Failed to fetch" })).toMatchObject({ code: "storage_unavailable", diagnostic: "network" });
+    expect(mapS3Error({ name: "Error", message: "request failed", cause: { name: "TypeError", message: "Load failed" } })).toMatchObject({ code: "storage_unavailable", diagnostic: "network" });
+    expect(mapS3Error({ name: "UnexpectedProviderError", message: "request abcdefghijklmnopqrstuvwxyz012345 failed at https://secret.example/path", $metadata: { httpStatusCode: 418 } }).message)
+      .toBe("Storage provider operation failed (HTTP 418; error UnexpectedProviderError; request [redacted] failed at [url])");
   });
 
   it("captures multipart commands and diagnoses an unexposed ETag", async () => {

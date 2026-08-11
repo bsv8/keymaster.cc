@@ -33,15 +33,6 @@ function splitPath(value: string, field: string, allowEmpty: boolean): string[] 
   return segments;
 }
 
-/** Normalize only the provider-owned prefix; never repairs malformed input. */
-export function normalizeProviderPrefix(value: string): string {
-  if (typeof value !== "string") throw new StoragePathError("prefix must be a string");
-  if (value.startsWith("/")) throw new StoragePathError("prefix must be relative");
-  const withoutTrailingSlash = value.endsWith("/") ? value.slice(0, -1) : value;
-  const segments = splitPath(withoutTrailingSlash, "prefix", true);
-  return segments.length === 0 ? "" : `${segments.join("/")}/`;
-}
-
 export function normalizeObjectPath(value: string): string {
   const segments = splitPath(value, "path", false);
   return segments.join("/");

@@ -24,20 +24,17 @@ export interface StorageR2Connection {
   accountId: string;
   endpointVariant: "default" | "eu" | "fedramp";
   bucket: string;
-  prefix: string;
 }
 
 export interface StorageAwsConnection {
   region: string;
   bucket: string;
-  prefix: string;
 }
 
 export interface StorageCompatibleConnection {
   endpoint: string;
   region: string;
   bucket: string;
-  prefix: string;
   forcePathStyle: boolean;
 }
 
@@ -69,7 +66,6 @@ export interface StorageProviderSummary {
   providerId: StorageProviderId;
   bucketHint: string;
   endpointHint?: string;
-  prefix: string;
   accessKeyHint: string;
   secretConfigured: true;
   generation: number;

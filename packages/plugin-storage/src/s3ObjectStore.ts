@@ -11,6 +11,7 @@ import {
   UploadPartCommand
 } from "@aws-sdk/client-s3";
 import { FetchHttpHandler } from "@smithy/fetch-http-handler";
+import { DOMParser as XmlDomParser } from "@xmldom/xmldom";
 import { STORAGE_MAX_PAYLOAD_BYTES } from "@keymaster/contracts";
 import type { NormalizedStorageProviderConfig } from "@keymaster/contracts";
 import { providerEndpoint } from "./providerConfig.js";
@@ -125,6 +126,27 @@ export function s3FetchRequestInit(): RequestInit {
   return { redirect: "error" };
 }
 
+/**
+ * AWS SDK v3's browser XML protocol uses DOMParser and Node constants. Those
+ * globals exist in Window but not in SharedWorkerGlobalScope, even though
+ * fetch/Response are available there. Install the smallest required XML DOM
+ * surface before the first S3 response is deserialized.
+ */
+export function ensureS3XmlRuntime(): void {
+  const runtime = globalThis as unknown as {
+    DOMParser?: typeof DOMParser;
+    Node?: typeof Node;
+  };
+  if (typeof runtime.DOMParser !== "function") runtime.DOMParser = XmlDomParser as unknown as typeof DOMParser;
+  if (typeof runtime.Node === "undefined") {
+    class WorkerXmlNode {
+      static readonly ELEMENT_NODE = 1;
+      static readonly TEXT_NODE = 3;
+    }
+    runtime.Node = WorkerXmlNode as unknown as typeof Node;
+  }
+}
+
 function connectionDetails(config: NormalizedStorageProviderConfig): { region: string; endpoint?: string; forcePathStyle?: boolean; bucket: string; accessKeyId: string; secretAccessKey: string } {
   const connection = config.connection as { bucket: string; region?: string; forcePathStyle?: boolean };
   return {
@@ -138,22 +160,40 @@ function connectionDetails(config: NormalizedStorageProviderConfig): { region: s
 }
 
 export function mapS3Error(error: unknown): StorageServiceError {
-  const value = error as { $metadata?: { httpStatusCode?: number }; name?: string; Code?: string } | undefined;
+  if (error instanceof StorageServiceError) return error;
+  const value = error as { $metadata?: { httpStatusCode?: number }; name?: string; Code?: string; message?: string; cause?: unknown } | undefined;
   const status = value?.$metadata?.httpStatusCode;
   const name = value?.name ?? value?.Code;
+  const cause = value?.cause as { name?: string; message?: string } | undefined;
+  const networkText = `${value?.message ?? ""} ${cause?.message ?? ""}`.toLowerCase();
   if (status === 401 || name === "InvalidAccessKeyId" || name === "SignatureDoesNotMatch" || name === "InvalidToken") return new StorageServiceError("storage_forbidden", "Storage provider authentication failed", "authentication");
   if (status === 403 || name === "AccessDenied") return new StorageServiceError("storage_forbidden", "Storage provider denied the operation", "forbidden");
   if (status === 404 || name === "NoSuchKey" || name === "NoSuchBucket") return new StorageServiceError("storage_not_found", "Storage object was not found");
   if (status === 409 || name === "ConditionalRequestConflict") return new StorageServiceError("storage_conflict", "Storage object changed during a conditional operation", "provider");
   if (status === 412 || name === "PreconditionFailed") return new StorageServiceError("storage_conflict", "Storage object already exists or changed", "provider");
   if (name === "AbortError" || (typeof DOMException !== "undefined" && error instanceof DOMException && error.name === "AbortError")) return new StorageServiceError("storage_unavailable", "Storage operation was cancelled");
-  if (error instanceof TypeError) {
-    const message = error.message.toLowerCase();
-    return message.includes("cors")
+  // Smithy may copy a browser fetch TypeError into an Error-shaped object,
+  // which loses the native prototype across its retry/deserialization path.
+  // Check both the name/message and a nested cause instead of relying only on
+  // instanceof, otherwise an R2 CORS preflight failure becomes an opaque
+  // "provider operation failed" message.
+  if (error instanceof TypeError || name === "TypeError" || cause?.name === "TypeError" || /failed to fetch|fetch failed|network(?:error| error| request| failed)|load failed|\bcors\b/iu.test(networkText)) {
+    return networkText.includes("cors")
       ? new StorageServiceError("storage_unavailable", "Storage provider CORS request failed", "cors")
-      : new StorageServiceError("storage_unavailable", "Storage provider network request failed", "network");
+      : new StorageServiceError("storage_unavailable", "Storage provider network or CORS request failed", "network");
   }
-  return new StorageServiceError("storage_provider_error", "Storage provider operation failed");
+  const safeName = typeof name === "string" && /^[a-z][a-z0-9_.-]{0,63}$/iu.test(name) ? name : undefined;
+  const safeCauseName = typeof cause?.name === "string" && /^[a-z][a-z0-9_.-]{0,63}$/iu.test(cause.name) ? cause.name : undefined;
+  const safeReason = typeof value?.message === "string"
+    ? value.message
+      .replace(/https?:\/\/\S+/giu, "[url]")
+      .replace(/\b[a-z0-9_+/=-]{16,}\b/giu, "[redacted]")
+      .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+      .trim()
+      .slice(0, 180)
+    : "";
+  const details = [status ? `HTTP ${status}` : "", safeName ? `error ${safeName}` : "", safeCauseName && safeCauseName !== safeName ? `cause ${safeCauseName}` : "", safeReason && safeReason !== safeName ? safeReason : ""].filter(Boolean);
+  return new StorageServiceError("storage_provider_error", details.length ? `Storage provider operation failed (${details.join("; ")})` : "Storage provider operation failed", "provider");
 }
 
 /**
@@ -269,6 +309,7 @@ function missingExposedHeaderError(header: string): StorageServiceError {
 }
 
 export function createS3ObjectStore(config: NormalizedStorageProviderConfig, options?: { client?: S3ClientAdapter; capabilityState?: S3ObjectStoreCapabilityState }): S3ObjectStore {
+  ensureS3XmlRuntime();
   const details = connectionDetails(config);
   const client: S3ClientAdapter = options?.client ?? new S3Client({
     region: details.region,

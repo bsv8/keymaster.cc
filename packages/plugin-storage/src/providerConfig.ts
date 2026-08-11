@@ -7,7 +7,6 @@ import type {
   StorageProviderSummary,
   StorageR2Connection
 } from "@keymaster/contracts";
-import { normalizeProviderPrefix } from "./storagePath.js";
 import { StorageServiceError } from "./storageErrors.js";
 
 function text(value: unknown, field: string, max = 256): string {
@@ -52,21 +51,20 @@ function credentials(draft: StorageProviderConfigDraft, existing?: NormalizedSto
 function connection(providerId: StorageProviderId, value: StorageProviderConfigDraft["connection"]): NormalizedStorageProviderConfig["connection"] {
   if (providerId === "aws-s3") {
     const input = value as StorageAwsConnection;
-    return { region: text(input.region, "region", 64), bucket: bucket(input.bucket), prefix: normalizeProviderPrefix(input.prefix) };
+    return { region: text(input.region, "region", 64), bucket: bucket(input.bucket) };
   }
   if (providerId === "cloudflare-r2") {
     const input = value as StorageR2Connection;
     const accountId = text(input.accountId, "accountId", 64);
     if (!/^[a-f0-9]{32}$/iu.test(accountId)) throw new StorageServiceError("storage_provider_error", "accountId is invalid");
     if (!["default", "eu", "fedramp"].includes(input.endpointVariant)) throw new StorageServiceError("storage_provider_error", "endpointVariant is invalid");
-    return { accountId: accountId.toLowerCase(), endpointVariant: input.endpointVariant, bucket: bucket(input.bucket), prefix: normalizeProviderPrefix(input.prefix) };
+    return { accountId: accountId.toLowerCase(), endpointVariant: input.endpointVariant, bucket: bucket(input.bucket) };
   }
   const input = value as StorageCompatibleConnection;
   return {
     endpoint: endpoint(input.endpoint),
     region: text(input.region, "region", 64),
     bucket: bucket(input.bucket),
-    prefix: normalizeProviderPrefix(input.prefix),
     forcePathStyle: input.forcePathStyle === true
   };
 }
@@ -91,7 +89,6 @@ export function summaryForConfig(config: NormalizedStorageProviderConfig, genera
     providerId: config.providerId,
     bucketHint: bucketValue.length <= 6 ? "••••" : `${bucketValue.slice(0, 2)}••••${bucketValue.slice(-2)}`,
     endpointHint: providerEndpoint(config),
-    prefix: (config.connection as { prefix: string }).prefix,
     accessKeyHint: key.length <= 4 ? "••••" : `••••${key.slice(-4)}`,
     secretConfigured: true,
     generation,

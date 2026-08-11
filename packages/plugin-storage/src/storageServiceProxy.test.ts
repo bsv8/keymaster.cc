@@ -20,6 +20,19 @@ function coordinator() {
 }
 
 describe("StorageServiceProxy grant boundary", () => {
+  it("preserves the Coordinator provider diagnostic for the settings UI", async () => {
+    const client = coordinator();
+    vi.spyOn(client, "storageControl").mockResolvedValue({ status: "error", code: "storage_unavailable", message: "Storage provider CORS request failed" });
+    const proxy = new StorageServiceProxy(client);
+
+    await expect(proxy.probeProvider({
+      providerId: "cloudflare-r2",
+      connection: { accountId: "ab".repeat(16), endpointVariant: "default", bucket: "bucket" },
+      credentials: { mode: "replace", accessKeyId: "access", secretAccessKey: "secret" }
+    })).rejects.toThrow("Storage provider CORS request failed");
+    proxy.dispose();
+  });
+
   it("registers an opaque grant and never sends StorageAppContext on data RPC", async () => {
     const client = coordinator();
     const proxy = new StorageServiceProxy(client);

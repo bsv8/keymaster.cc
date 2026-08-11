@@ -174,7 +174,7 @@ describe("Session Coordinator worker", () => {
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => { release = resolve; });
     let generation = 1;
-    __testSetStorageRuntime({ getProviderSummary: async () => ({ generation, providerId: "aws-s3", bucketHint: "b", prefix: "", accessKeyHint: "k", secretConfigured: true, publicSummary: { bucketHint: "b", prefix: "", accessKeyHint: "k" }, updatedAt: 1 }), list: async () => { await delayed; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
+    __testSetStorageRuntime({ getProviderSummary: async () => ({ generation, providerId: "aws-s3", bucketHint: "b", accessKeyHint: "k", secretConfigured: true, updatedAt: 1 }), list: async () => { await delayed; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
     const grant = await __testDispatchStorageGrant("late-session", "port-a");
     const pending = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" });
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -185,7 +185,7 @@ describe("Session Coordinator worker", () => {
     __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", appIdentity: identity, revokedAt: null }));
     let releaseEpoch!: () => void;
     const delayedEpoch = new Promise<void>((resolve) => { releaseEpoch = resolve; });
-    __testSetStorageRuntime({ getProviderSummary: async () => ({ generation: 1, providerId: "aws-s3", bucketHint: "b", prefix: "", accessKeyHint: "k", secretConfigured: true, publicSummary: { bucketHint: "b", prefix: "", accessKeyHint: "k" }, updatedAt: 1 }), list: async () => { await delayedEpoch; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
+    __testSetStorageRuntime({ getProviderSummary: async () => ({ generation: 1, providerId: "aws-s3", bucketHint: "b", accessKeyHint: "k", secretConfigured: true, updatedAt: 1 }), list: async () => { await delayedEpoch; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
     const epochGrant = await __testDispatchStorageGrant("late-epoch", "port-a");
     const epochPending = __testDispatchStorageData({ grantId: epochGrant.operationResult as string, actualPortId: "port-a" });
     await new Promise((resolve) => setTimeout(resolve, 10));
@@ -500,7 +500,7 @@ function seedStorageProvider(sealedConfig: unknown): Promise<void> {
       tx.objectStore("providerConfig").put({
         key: "active",
         providerId: "aws-s3",
-        publicSummary: { bucketHint: "bucket", prefix: "", accessKeyHint: "key" },
+        publicSummary: { bucketHint: "bucket", accessKeyHint: "key" },
         sealedConfig,
         generation: 1,
         updatedAt: Date.now()

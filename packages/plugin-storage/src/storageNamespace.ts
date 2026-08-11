@@ -1,5 +1,5 @@
 import type { StorageAppContext, VerifiedAppIdentity } from "@keymaster/contracts";
-import { StoragePathError, buildObjectKey, normalizeProviderPrefix, normalizeRoot } from "./storagePath.js";
+import { StoragePathError, buildObjectKey, normalizeRoot } from "./storagePath.js";
 
 export interface StorageNamespaceIdentity {
   publisherPublicKeyHex: string;
@@ -12,10 +12,9 @@ export function validateStorageIdentity(identity: VerifiedAppIdentity): StorageN
   return { publisherPublicKeyHex: identity.publisherPublicKeyHex.toLowerCase(), appId: identity.appId };
 }
 
-export function buildNamespaceRoot(providerPrefix: string, identity: VerifiedAppIdentity): string {
-  const prefix = normalizeProviderPrefix(providerPrefix);
+export function buildNamespaceRoot(identity: VerifiedAppIdentity): string {
   const validated = validateStorageIdentity(identity);
-  return normalizeRoot(`${prefix}${validated.publisherPublicKeyHex}/${validated.appId}/`);
+  return normalizeRoot(`${validated.publisherPublicKeyHex}/${validated.appId}/`);
 }
 
 export function buildStorageContext(input: {

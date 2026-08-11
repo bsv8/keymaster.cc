@@ -3,7 +3,6 @@ import type { NormalizedStorageProviderConfig } from "@keymaster/contracts";
 import { STORAGE_PART_SIZE_BYTES } from "@keymaster/contracts";
 import { createS3ObjectStore, type S3ObjectStore } from "./s3ObjectStore.js";
 import { buildNamespaceRoot } from "./storageNamespace.js";
-import { normalizeProviderPrefix } from "./storagePath.js";
 
 interface SmokeFixture {
   label: string;
@@ -11,16 +10,14 @@ interface SmokeFixture {
 }
 
 const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-const basePrefix = normalizeProviderPrefix(process.env.KEYMASTER_STORAGE_SMOKE_BASE_PREFIX?.trim() ?? "");
-const smokePrefix = `${basePrefix}keymaster-smoke/${runId}/`;
 const smokeIdentity = {
   version: 1 as const,
   publisherPublicKeyHex: `02${"ab".repeat(32)}`,
-  appId: "smoke-fixture",
+  appId: `smoke-${runId}`,
   appName: "Keymaster Storage Smoke",
   identityDigestHex: "00".repeat(32)
 };
-const namespaceRoot = buildNamespaceRoot(smokePrefix, smokeIdentity);
+const namespaceRoot = buildNamespaceRoot(smokeIdentity);
 const providerSelection = (process.env.KEYMASTER_STORAGE_SMOKE_PROVIDER ?? "all").trim().toLowerCase();
 const fixtures = buildFixtures(providerSelection);
 
@@ -34,7 +31,7 @@ describe("Keymaster Storage real provider smoke", () => {
       let abortedUploadId: string | undefined;
       let testError: unknown = null;
       try {
-        await store.probe(smokePrefix);
+        await store.probe("");
 
         const directoryKey = `${namespaceRoot}directory/`;
         await store.put({ namespaceRoot, key: directoryKey, bytes: new Uint8Array(0), contentType: "application/x-directory", ifNoneMatch: "*" });
@@ -107,7 +104,7 @@ function buildFixtures(selection: string): SmokeFixture[] {
       config: {
         version: 1,
         providerId: "aws-s3",
-        connection: { region: required("KEYMASTER_STORAGE_SMOKE_AWS_REGION"), bucket: required("KEYMASTER_STORAGE_SMOKE_AWS_BUCKET"), prefix: smokePrefix },
+        connection: { region: required("KEYMASTER_STORAGE_SMOKE_AWS_REGION"), bucket: required("KEYMASTER_STORAGE_SMOKE_AWS_BUCKET") },
         credentials: { kind: "access-key", accessKeyId: required("KEYMASTER_STORAGE_SMOKE_AWS_ACCESS_KEY_ID"), secretAccessKey: required("KEYMASTER_STORAGE_SMOKE_AWS_SECRET_ACCESS_KEY") }
       }
     });
@@ -118,7 +115,7 @@ function buildFixtures(selection: string): SmokeFixture[] {
       config: {
         version: 1,
         providerId: "cloudflare-r2",
-        connection: { accountId: required("KEYMASTER_STORAGE_SMOKE_R2_ACCOUNT_ID"), endpointVariant: optional("KEYMASTER_STORAGE_SMOKE_R2_ENDPOINT_VARIANT", "default") as "default" | "eu" | "fedramp", bucket: required("KEYMASTER_STORAGE_SMOKE_R2_BUCKET"), prefix: smokePrefix },
+        connection: { accountId: required("KEYMASTER_STORAGE_SMOKE_R2_ACCOUNT_ID"), endpointVariant: optional("KEYMASTER_STORAGE_SMOKE_R2_ENDPOINT_VARIANT", "default") as "default" | "eu" | "fedramp", bucket: required("KEYMASTER_STORAGE_SMOKE_R2_BUCKET") },
         credentials: { kind: "access-key", accessKeyId: required("KEYMASTER_STORAGE_SMOKE_R2_ACCESS_KEY_ID"), secretAccessKey: required("KEYMASTER_STORAGE_SMOKE_R2_SECRET_ACCESS_KEY") }
       }
     });
@@ -129,7 +126,7 @@ function buildFixtures(selection: string): SmokeFixture[] {
       config: {
         version: 1,
         providerId: "s3-compatible",
-        connection: { endpoint: required("KEYMASTER_STORAGE_SMOKE_COMPAT_ENDPOINT"), region: required("KEYMASTER_STORAGE_SMOKE_COMPAT_REGION"), bucket: required("KEYMASTER_STORAGE_SMOKE_COMPAT_BUCKET"), prefix: smokePrefix, forcePathStyle: optional("KEYMASTER_STORAGE_SMOKE_COMPAT_FORCE_PATH_STYLE", "false") === "true" },
+        connection: { endpoint: required("KEYMASTER_STORAGE_SMOKE_COMPAT_ENDPOINT"), region: required("KEYMASTER_STORAGE_SMOKE_COMPAT_REGION"), bucket: required("KEYMASTER_STORAGE_SMOKE_COMPAT_BUCKET"), forcePathStyle: optional("KEYMASTER_STORAGE_SMOKE_COMPAT_FORCE_PATH_STYLE", "false") === "true" },
         credentials: { kind: "access-key", accessKeyId: required("KEYMASTER_STORAGE_SMOKE_COMPAT_ACCESS_KEY_ID"), secretAccessKey: required("KEYMASTER_STORAGE_SMOKE_COMPAT_SECRET_ACCESS_KEY") }
       }
     });
