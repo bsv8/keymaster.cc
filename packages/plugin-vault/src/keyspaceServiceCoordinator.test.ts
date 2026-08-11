@@ -84,7 +84,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     expect(operations).toEqual(["listKeys"]);
   });
 
-  it("retains key material when namespace deletion is blocked", async () => {
+  it("waits for a blocked namespace request to reach success before deleting material", async () => {
     const key = "02".padEnd(66, "a");
     const operations: string[] = [];
     const client = {
@@ -105,8 +105,18 @@ describe("createKeyspaceServiceCoordinator", () => {
       return blockedRequest;
     });
     try {
-      await expect(keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" })).rejects.toThrow("Namespace delete blocked");
+      const deleting = keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
       expect(operations).toEqual(["listKeys", "cancel"]);
+      // The delete promise is still waiting; material deletion cannot begin
+      // while IndexedDB reports only onblocked.
+      let settled = false;
+      void deleting.then(() => { settled = true; });
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+      blockedRequest.onsuccess?.(new Event("success") as Event);
+      await deleting;
+      expect(operations).toEqual(["listKeys", "cancel", "deleteKeyMaterial", "listKeys"]);
     } finally {
       deleteDatabase.mockRestore();
     }

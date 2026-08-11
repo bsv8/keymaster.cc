@@ -23,6 +23,7 @@ import type {
   AppMsgEndpointId,
   AppMsgMessage,
   KeyspaceService,
+  MessageBus,
   MessageProvider,
   MessageProviderHandle,
   MessageProviderOperations,
@@ -66,6 +67,7 @@ function makeFakeKeyspace(): KeyspaceService & {
 
   return {
     active: () => ({ activePublicKeyHex: activeHex ?? undefined }),
+    selected: () => activeHex ?? undefined,
     onActiveKeyChanged: (h: (s: { activePublicKeyHex?: string }) => void) => {
       activeHandlers.add(h);
       return () => {
@@ -316,10 +318,20 @@ function makeCore(opts?: {
   keyspace: ReturnType<typeof makeFakeKeyspace>;
   log: ReturnType<typeof makeLogSink>;
   storage: Map<string, string>;
+  deletingHandlers: Set<(payload: { publicKeyHex: string }) => void>;
 } {
   const keyspace = makeFakeKeyspace();
   const log = makeLogSink();
   const storage = new Map<string, string>();
+  const deletingHandlers = new Set<(payload: { publicKeyHex: string }) => void>();
+  const messageBus: Pick<MessageBus, "subscribe"> = {
+    subscribe<TPayload>(type: string, handler: (payload: TPayload) => void) {
+      if (type !== "key.deleting") return () => undefined;
+      const typed = handler as (payload: { publicKeyHex: string }) => void;
+      deletingHandlers.add(typed);
+      return () => deletingHandlers.delete(typed);
+    }
+  };
   // 默认有可用 signer——给 OWNER 一个真实 ECDH / envelope 签名能力。
   // 注意：测试场景下 mock 的 provider.sendMessage / list / subscribe
   // 不会真正使用 signer；signChallenge 仅在 provider.bind 阶段可能调。
@@ -406,7 +418,8 @@ function makeCore(opts?: {
         return storage.size;
       }
     } as unknown as Storage,
-    logger: log
+    logger: log,
+    messageBus
   };
   const core = new AppMsgCoreImpl(cfg);
   // 注入 provider（如果在 opts 里给）。
@@ -415,8 +428,30 @@ function makeCore(opts?: {
       core.providers().register(p);
     }
   }
-  return { core, keyspace, log, storage };
+  return { core, keyspace, log, storage, deletingHandlers };
 }
+
+describe("AppMsgCoreImpl - key.deleting local DB cleanup", () => {
+  it("closes the matching owner handle synchronously before namespace deletion", async () => {
+    const { core, deletingHandlers } = makeCore();
+    const opened = await core.openLocalDb({ publicKeyHex: OWNER });
+    expect(opened).not.toBeNull();
+    for (const handler of deletingHandlers) handler({ publicKeyHex: OWNER });
+    expect(() => opened!.db.transaction("messages", "readonly")).toThrow();
+    const reopened = await core.openLocalDb({ publicKeyHex: OWNER });
+    core.dispose();
+    expect(() => reopened!.db.transaction("messages", "readonly")).toThrow();
+  });
+
+  it("does not close a non-target owner handle", async () => {
+    const { core, deletingHandlers } = makeCore();
+    const opened = await core.openLocalDb({ publicKeyHex: OWNER_B });
+    expect(opened).not.toBeNull();
+    for (const handler of deletingHandlers) handler({ publicKeyHex: OWNER });
+    expect(() => opened!.db.transaction("messages", "readonly")).not.toThrow();
+    core.dispose();
+  });
+});
 
 describe("AppMsgCoreImpl - provider registry", () => {
   it("empty registry: active is null", () => {

@@ -142,6 +142,7 @@ function makeIntegrationKeyspace(publicKeyHex: string): KeyspaceService {
     listKeys: async () => [],
     getKey: async () => undefined,
     active: () => ({ activePublicKeyHex: publicKeyHex }),
+    selected: () => publicKeyHex,
     setActive: async () => undefined,
     requireActiveKey: () => ({
       publicKeyHex,

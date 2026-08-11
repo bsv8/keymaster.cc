@@ -32,6 +32,7 @@ function makeKeyspace(publicKeyHex: string): KeyspaceService {
     listKeys: async () => [],
     getKey: async () => undefined,
     active: () => ({ activePublicKeyHex: publicKeyHex }),
+    selected: () => publicKeyHex,
     setActive: async () => undefined,
     requireActiveKey: () => ({
       publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",
@@ -353,6 +354,13 @@ describe("p2pkhDb version mismatch rebuild (硬切换 005)", () => {
     const db = createP2pkhDb(nsHandle);
     const rows = await db.listAddresses();
     expect(rows).toEqual([]);
+  });
+
+  it("closes and evicts the cached owner handle on an external versionchange", async () => {
+    const bundle = await openDb();
+    const upgraded = await preOpenAtVersion(10, ["p2pkh_addresses"]);
+    expect(() => bundle.getDb().transaction("p2pkh_addresses", "readonly")).toThrow();
+    upgraded.close();
   });
 
   it("non-VersionError is propagated, not swallowed as rebuild", async () => {

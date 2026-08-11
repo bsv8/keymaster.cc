@@ -554,16 +554,36 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         req.onerror = () => reject(req.error);
         req.onblocked = () => reject(new Error("Key storage open blocked"));
       });
-      const handle: KeyScopedStorageHandle = {
+      let closed = false;
+      let handle: KeyScopedStorageHandle;
+      const removeTracking = () => {
+        const tracked = openDbs.get(cacheKey);
+        if (tracked?.handle === handle) openDbs.delete(cacheKey);
+      };
+      const onVersionChange = () => {
+        if (closed) return;
+        closed = true;
+        removeTracking();
+        try {
+          db.close();
+        } catch {
+          // 静默
+        }
+      };
+      db.addEventListener("versionchange", onVersionChange);
+      handle = {
         db,
         name,
         close() {
+          if (closed) return;
+          closed = true;
+          db.removeEventListener("versionchange", onVersionChange);
           try {
             db.close();
           } catch {
             // 静默
           }
-          openDbs.delete(cacheKey);
+          removeTracking();
         }
       };
       openDbs.set(cacheKey, { handle, refCount: 1 });
@@ -717,15 +737,14 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
 
 /**
  * indexedDB.deleteDatabase 在被其他标签页/同标签页打开的 db 持有时会进入 onblocked。
- * 这里用超时 + onblocked 转 reject 的方式保证不让 deleteKey 永久卡住。
+ * onblocked 不是失败：请求仍会在连接关闭后继续并最终发出 success/error。
+ * 因此这里始终等待终态，超时只做诊断，不能提前 reject 后让私钥删除继续。
  */
 function deleteDatabaseWithTimeout(name: string, timeoutMs: number): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      reject(new Error(`Delete database "${name}" timed out`));
+      if (!settled) console.warn(`[keyspace] deleteDatabase still blocked after ${timeoutMs}ms`, name);
     }, timeoutMs);
     const req = indexedDB.deleteDatabase(name);
     req.onsuccess = () => {
@@ -741,10 +760,8 @@ function deleteDatabaseWithTimeout(name: string, timeoutMs: number): Promise<voi
       reject(req.error ?? new Error("deleteDatabase failed"));
     };
     req.onblocked = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(new Error(`Delete database "${name}" is blocked by another connection`));
+      // Keep waiting. IDB has no abort for deleteDatabase; rejecting here would
+      // let callers delete key material while this request may still succeed.
     };
   });
 }

@@ -13,6 +13,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createP2pkhRecentSync } from "./p2pkhRecentSync.js";
 import { createP2pkhHistoryBackfill } from "./p2pkhHistoryBackfill.js";
+import { createMessageBus } from "@keymaster/runtime";
 import type { P2pkhKeyResource, P2pkhRecentSyncState, P2pkhBackfillState, P2pkhLocalInputClaim, P2pkhLocalSubmission, P2pkhProtocolSubmission, P2pkhHistoryItem, P2pkhUtxo } from "./p2pkhContracts.js";
 
 // ---- 日志 spy 工具 ----
@@ -651,7 +652,7 @@ describe("p2pkhService task run() 取消语义", () => {
       onActiveKeyChanged: vi.fn(() => () => {})
     } as unknown as import("@keymaster/contracts").KeyspaceService;
 
-    const messageBus = makeMessageBus();
+    const messageBus = createMessageBus();
     const registry = {
       register(def: import("@keymaster/contracts").BackgroundTaskDefinition) {
         taskDefs[def.id] = def;
@@ -683,8 +684,18 @@ describe("p2pkhService task run() 取消语义", () => {
     service.onRecentSyncStatusChange((s) => statusHistory.push(`recent:${s}`));
     service.onBackfillStatusChange((s) => statusHistory.push(`backfill:${s}`));
 
-    return { service, taskDefs, statusHistory, notifierCalls };
+    return { service, taskDefs, statusHistory, notifierCalls, messageBus };
   }
+
+  it("disposes the target owner cache synchronously on key.deleting", async () => {
+    const { messageBus } = makeServiceUnderTest();
+    const dispose = vi.mocked((await import("./p2pkhDb.js")).disposeP2pkhDb);
+    messageBus.publish("key.deleting", { publicKeyHex: "pk-test" });
+    expect(dispose).toHaveBeenCalledWith("pk-test");
+    messageBus.publish("key.deleted", { publicKeyHex: "pk-test" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(dispose).toHaveBeenCalledTimes(2);
+  });
 
   it("recent task：signal 已 aborted 时 run() 状态为 idle、不发 notifier", async () => {
     const { taskDefs, statusHistory, notifierCalls } = makeServiceUnderTest();

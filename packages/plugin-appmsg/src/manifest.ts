@@ -30,6 +30,7 @@ import type {
   I18nPluginResources,
   KeyspaceService,
   MessageProviderRegistry,
+  MessageBus,
   ProviderSealedMessageRecord,
   PluginContext,
   PluginManifest,
@@ -278,6 +279,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
   setup(ctx) {
     const vault = ctx.get<VaultService>("vault.service");
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const messageBus = ctx.get<MessageBus>("runtime.messageBus");
     const isRecord = (value: unknown): value is Record<string, unknown> =>
       typeof value === "object" && value !== null;
     const forwardAppmsgLog = (
@@ -504,6 +506,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
       keyspace,
       pluginId: APPMSG_PLUGIN_ID,
       storageId: "messages_v3",
+      messageBus,
       // localStorage 仅在浏览器环境可用；非浏览器（测试）走 null，registry
       // 会跳过持久化但仍按 in-memory 状态运行。
       localStorage:
@@ -604,6 +607,7 @@ export const appmsgPlatformPlugin: PluginManifest = {
 
 	    return () => {
 	      offProviderSnapshot();
+	      core.dispose();
 	      coordinator.dispose();
 	      void core.disconnect();
 	    };

@@ -287,9 +287,21 @@ export async function openP2pkhDb(input: {
       }
     });
   }
-  const next: OpenHandle = {
+  let closed = false;
+  let next: OpenHandle;
+  const onVersionChange = () => {
+    if (closed) return;
+    closed = true;
+    try { handle.close(); } catch { /* noop */ }
+    if (openHandles.get(input.publicKeyHex) === next) openHandles.delete(input.publicKeyHex);
+  };
+  handle.db.addEventListener("versionchange", onVersionChange);
+  next = {
     publicKeyHex: input.publicKeyHex,
     close: () => {
+      if (closed) return;
+      closed = true;
+      handle.db.removeEventListener("versionchange", onVersionChange);
       try {
         handle.close();
       } catch {
@@ -380,15 +392,20 @@ export function namespaceDbName(publicKeyHex: string): string {
  * 硬切换 005：删整份 namespace DB。
  * - onsuccess：删除完成，库文件已被浏览器清掉。
  * - onerror：删除失败（例如权限 / 引擎异常），直接 fail-closed。
- * - onblocked：还有连接没关干净（同名 DB 仍被别处 open）。**绝不能**继续
- *   假装重建——本路径必须抛错让上层显式处理。
+ * - onblocked：还有连接没关干净（同名 DB 仍被别处 open）。请求仍会在
+ *   连接关闭后继续，必须等待 success/error 终态；超时只记诊断，不能
+ *   提前 reject 后让请求在后台继续。
  */
 function deleteDatabaseOrThrow(name: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) console.warn(`[p2pkh] deleteDatabase still blocked`, name);
+    }, 5000);
     const req = indexedDB.deleteDatabase(name);
-    req.onsuccess = () => resolve();
-    req.onerror = () => reject(req.error ?? new Error(`P2PKH deleteDatabase failed: ${name}`));
-    req.onblocked = () => reject(new Error(`P2PKH deleteDatabase blocked: ${name}`));
+    req.onsuccess = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+    req.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(req.error ?? new Error(`P2PKH deleteDatabase failed: ${name}`)); } };
+    req.onblocked = () => { /* wait for terminal success/error */ };
   });
 }
 

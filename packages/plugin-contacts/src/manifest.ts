@@ -11,6 +11,7 @@ import type {
   ContactsService,
   I18nPluginResources,
   KeyspaceService,
+  MessageBus,
   PluginManifest,
   ResourceRegistry,
   RouteRegistry,
@@ -168,7 +169,8 @@ export const contactsPlugin: PluginManifest = {
   ],
   setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-    const service = createContactsService({ keyspace });
+    const messageBus = ctx.get<MessageBus>("runtime.messageBus");
+    const service = createContactsService({ keyspace, messageBus });
     ctx.provide<ContactsService>(CONTACTS_CAPABILITY, service);
     const resources = ctx.get<ResourceRegistry>("resource.registry");
     resources.register<Contact[], readonly string[]>({

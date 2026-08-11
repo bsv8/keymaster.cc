@@ -35,7 +35,44 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
     async setActive() { throw new Error("Active key changes must go through vault.activateKey with password"); },
     requireActiveKey: () => { const publicKeyHex = requireReady(); return { publicKeyHex, label: "", capabilities: [], createdAt: "" }; },
     onActiveKeyChanged(handler) { const snapshot = current(); handlers.add(handler); handler({ activePublicKeyHex: snapshot.activePublicKeyHex, generation: snapshot.keyspaceGeneration }); return () => handlers.delete(handler); },
-    async openKeyStorage(input: KeyScopedStorageOpenInput): Promise<KeyScopedStorageHandle> { const key = input.publicKeyHex || requireReady(); const name = `keymaster.key.${key}.plugin.${input.pluginId}.${input.storageId}`; const db = await new Promise<IDBDatabase>((resolve, reject) => { const req = indexedDB.open(name, input.version); req.onupgradeneeded = () => input.upgrade(req.result, req.transaction?.db.version ?? 0, input.version); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); const set = openHandles.get(key) ?? new Set<IDBDatabase>(); set.add(db); openHandles.set(key, set); return { db, name, close: () => { db.close(); set.delete(db); } }; },
+    async openKeyStorage(input: KeyScopedStorageOpenInput): Promise<KeyScopedStorageHandle> {
+      const key = input.publicKeyHex || requireReady();
+      const name = `keymaster.key.${key}.plugin.${input.pluginId}.${input.storageId}`;
+      const db = await new Promise<IDBDatabase>((resolve, reject) => {
+        const req = indexedDB.open(name, input.version);
+        req.onupgradeneeded = () => input.upgrade(req.result, req.transaction?.db.version ?? 0, input.version);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const set = openHandles.get(key) ?? new Set<IDBDatabase>();
+      openHandles.set(key, set);
+      let closed = false;
+      let handle: KeyScopedStorageHandle;
+      const removeTracking = () => {
+        set.delete(db);
+        if (set.size === 0 && openHandles.get(key) === set) openHandles.delete(key);
+      };
+      const onVersionChange = () => {
+        if (closed) return;
+        closed = true;
+        removeTracking();
+        try { db.close(); } catch { /* noop */ }
+      };
+      db.addEventListener("versionchange", onVersionChange);
+      set.add(db);
+      handle = {
+        db,
+        name,
+        close() {
+          if (closed) return;
+          closed = true;
+          db.removeEventListener("versionchange", onVersionChange);
+          try { db.close(); } catch { /* noop */ }
+          removeTracking();
+        }
+      };
+      return handle;
+    },
     registerPluginStorage(input) { if (!storages.some((s) => s.pluginId === input.pluginId && s.storageId === input.storageId)) storages.push(input); },
     listPluginStorages: () => [...storages],
     async prepareDeleteKey(publicKeyHex) { await prepareDeleteKeyInternal(publicKeyHex); },
@@ -48,13 +85,7 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
       await prepareDeleteKeyInternal(input.publicKeyHex);
       for (const storage of storages) {
         const name = `keymaster.key.${input.publicKeyHex}.plugin.${storage.pluginId}.${storage.storageId}`;
-        await new Promise<void>((resolve, reject) => {
-          const req = indexedDB.deleteDatabase(name);
-          const timer = setTimeout(() => reject(new Error("Namespace delete timed out")), 5000);
-          req.onsuccess = () => { clearTimeout(timer); resolve(); };
-          req.onerror = () => { clearTimeout(timer); reject(req.error ?? new Error("Namespace delete failed")); };
-          req.onblocked = () => { clearTimeout(timer); reject(new Error("Namespace delete blocked")); };
-        });
+        await deleteNamespaceDatabase(name);
       }
       unwrap<void>(await client.vaultOperation("deleteKeyMaterial", { publicKeyHex: input.publicKeyHex }), "deleteKeyMaterial");
       messageBus.publish("key.deleted", { publicKeyHex: input.publicKeyHex });
@@ -74,4 +105,19 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
     openHandles.delete(publicKeyHex);
     messageBus.publish("key.deleting", { publicKeyHex });
   }
+}
+
+/** Wait for IndexedDB deleteDatabase's real terminal event. onblocked is
+ * informational: the request remains live and may succeed once handles close. */
+function deleteNamespaceDatabase(name: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (!settled) console.warn(`[keyspace-coordinator] deleteDatabase still blocked`, name);
+    }, 5000);
+    const req = indexedDB.deleteDatabase(name);
+    req.onsuccess = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
+    req.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(req.error ?? new Error("Namespace delete failed")); } };
+    req.onblocked = () => { /* wait for success/error; IDB has no abort */ };
+  });
 }

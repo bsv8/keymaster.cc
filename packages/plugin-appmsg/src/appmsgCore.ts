@@ -69,6 +69,7 @@ import type {
   MessageProviderHealth,
   MessageProviderOperations,
   MessageProviderRegistry,
+  MessageBus,
   ProviderListInput,
   ProviderListResult,
   ProviderOnlineInput,
@@ -104,6 +105,8 @@ export interface AppMsgCoreConfig {
   keyspace: KeyspaceService;
   pluginId: string;
   storageId: string;
+  /** platform message bus; used to release namespace handles before deletion. */
+  messageBus?: Pick<MessageBus, "subscribe">;
   /** localStorage 接口（默认 = globalThis.localStorage）。测试可注入 fake。 */
   localStorage?: Storage | null;
   logger?: {
@@ -789,6 +792,8 @@ export class AppMsgCoreImpl implements AppMsgCore {
   private currentProviderId: string | null = null;
   /** 本地 DB handle。 */
   private localHandle: KeyScopedStorageHandle | null = null;
+  /** owner associated with localHandle; independent of current connection state. */
+  private localHandleOwner: string | null = null;
   /** 当前 owner 的本地 DB ops 句柄。 */
   private localOps: AppMsgLocalDbOps | null = null;
   /** unfiltered 订阅者（管理页 / 协议层专用）。 */
@@ -817,6 +822,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
   private nextReconnectAtMsValue: number | null = null;
   /** 防止同时多次 triggerSync 并发。 */
   private syncInFlight: Promise<void> | null = null;
+  private keyDeletingOff: (() => void) | null = null;
   /** keyspace 引用（platform internal）。 */
   readonly keyspace: KeyspaceService;
 
@@ -829,6 +835,30 @@ export class AppMsgCoreImpl implements AppMsgCore {
       logger: cfg.logger
     });
     this.endpointRegistryInstance = new AppMsgEndpointServiceRegistryImpl(this);
+    if (cfg.messageBus) {
+      this.keyDeletingOff = cfg.messageBus.subscribe<{ publicKeyHex: string }>("key.deleting", ({ publicKeyHex }) => {
+        if (this.localHandleOwner !== publicKeyHex || !this.localHandle) return;
+        try { this.localHandle.close(); } catch { /* noop */ }
+        disposeAppMsgLocalDb();
+        this.localHandle = null;
+        this.localOps = null;
+        this.localHandleOwner = null;
+        this.fireStateChange();
+      });
+    }
+  }
+
+  /** Release platform subscriptions owned by this core instance. */
+  dispose(): void {
+    this.keyDeletingOff?.();
+    this.keyDeletingOff = null;
+    if (this.localHandle) {
+      try { this.localHandle.close(); } catch { /* noop */ }
+    }
+    disposeAppMsgLocalDb();
+    this.localHandle = null;
+    this.localOps = null;
+    this.localHandleOwner = null;
   }
 
   /* ====== Provider registry ====== */
@@ -1240,6 +1270,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.localHandle = null;
       this.localOps = null;
+      this.localHandleOwner = null;
     }
     if (this.currentUnfilteredOff) {
       try {
@@ -1373,6 +1404,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.localHandle = null;
       this.localOps = null;
+      this.localHandleOwner = null;
     }
     this.fireStateChange();
   }
@@ -1403,6 +1435,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       return null;
     }
     this.localHandle = opened.handle;
+    this.localHandleOwner = opened.publicKeyHex;
     this.localOps = createAppMsgLocalDbOps(opened.handle);
     emitLog(this.cfg.logger, "info", "appmsg.local_db.open.done", {
       publicKeyHex: input.publicKeyHex,
@@ -1424,6 +1457,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       }
       this.localHandle = null;
       this.localOps = null;
+      this.localHandleOwner = null;
     }
     const opened = await openAppMsgLocalDb({
       keyspace: this.cfg.keyspace,
@@ -1438,6 +1472,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
       return;
     }
     this.localHandle = opened.handle;
+    this.localHandleOwner = opened.publicKeyHex;
     this.localOps = createAppMsgLocalDbOps(opened.handle);
     emitLog(this.cfg.logger, "info", "appmsg.local_db.owner_open.done", {
       publicKeyHex,

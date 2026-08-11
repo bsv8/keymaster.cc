@@ -162,6 +162,7 @@ function makeFakeKeyspace(): KeyspaceService {
     listKeys: async () => [],
     getKey: async () => undefined,
     active: () => active,
+    selected: () => ACTIVE_PUBLIC_KEY_HEX,
     setActive: async () => undefined,
     requireActiveKey: () => ({
       publicKeyHex: "02a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718",

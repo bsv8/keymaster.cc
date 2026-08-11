@@ -504,14 +504,15 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     })();
   });
 
-  // 硬切换 008：实际取消由 keyspace.deleteKey -> background.cancelByKey
-  // 统一驱动；本 handler 只做日志/保险，不再调用 cancel。
+  // 硬切换 016：keyspace 在随后删除 namespace DB 前会等待本 handler 返回；
+  // 必须同步丢弃本模块 owner cache，不能等 key.deleted（那时 deleteDatabase
+  // 已经可能因 cached handle 进入 blocked）。key.deleted 仍保留幂等兜底。
   trackSubscribe<{ publicKeyHex: string }>("key.deleting", (payload) => {
-    // 设计缘由：active key 切换不影响本 key 任务的收尾；只有当被删的 key
-    // 是 active 时我们才需要清理本地的协调器 lane 与 db handle 缓存。
-    // background 已经收到 cancelByKey 并在 await 旧实例退出；本服务接下来
-    // 收到的 key.deleted 事件再彻底清掉本地资源。
-    void payload;
+    try {
+      disposeP2pkhDb(payload.publicKeyHex);
+    } catch {
+      // key.deleted handler below remains an idempotent safety net.
+    }
   });
   trackSubscribe<{ publicKeyHex: string }>("key.deleted", async (payload) => {
     try {

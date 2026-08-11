@@ -7,7 +7,7 @@
 //   - 不保留 address / publicKeyHex 双语义，不做猜测式迁移；
 //   - service 只负责联系人读写，不承担消息 / p2pkh 的投影逻辑。
 
-import type { Contact, ContactInput, ContactsService, KeyspaceService } from "@keymaster/contracts";
+import type { Contact, ContactInput, ContactsService, KeyspaceService, MessageBus } from "@keymaster/contracts";
 import { createContactsDb, openContactsDb, type ContactsDbHandle } from "./contactsDb.js";
 
 export class ContactsDuplicateError extends Error {
@@ -24,6 +24,7 @@ export class ContactsNoActiveKeyError extends Error {
 
 export interface ContactsServiceDeps {
   keyspace: KeyspaceService;
+  messageBus?: MessageBus;
 }
 
 export function createContactsService(deps: ContactsServiceDeps): ContactsService {
@@ -34,6 +35,14 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
   function notify() {
     for (const l of listeners) l();
   }
+
+  const keyDeletingOff = deps.messageBus?.subscribe<{ publicKeyHex: string }>("key.deleting", ({ publicKeyHex }) => {
+    if (!handle || handleFor !== publicKeyHex) return;
+    try { handle.close(); } catch { /* noop */ }
+    handle = undefined;
+    handleFor = undefined;
+    notify();
+  });
 
   async function getDbForActiveKey(): Promise<ContactsDbHandle> {
     const state = deps.keyspace.active();
@@ -145,6 +154,14 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     onChange(handler) {
       listeners.add(handler);
       return () => listeners.delete(handler);
+    },
+    dispose() {
+      keyDeletingOff?.();
+      if (handle) {
+        try { handle.close(); } catch { /* noop */ }
+        handle = undefined;
+        handleFor = undefined;
+      }
     }
   };
 }

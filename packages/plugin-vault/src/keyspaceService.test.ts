@@ -345,9 +345,9 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     expect(records.some((r) => r.type === "vault.locked")).toBe(true);
   });
 
-  it("namespace DB blocked: keeps private key AND does NOT finalize Vault", async () => {
-    // 施工单 §情况 2：namespace DB 删除 blocked / timeout 时，label 正确
-    // 也不能继续删私钥；同样必须不 finalize Vault。
+  it("waits for a blocked namespace delete until the external handle closes", async () => {
+    // onblocked 不是终态；模拟另一连接收到 versionchange 后关闭，
+    // deleteDatabase 随后 success，keyspace 才能继续删材料。
     //
     // 实现：registerPluginStorage 注册一个名字，再手动打开一个同名
     // IndexedDB 让 deleteDatabase 进入 onblocked。
@@ -360,7 +360,7 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     keyspace.registerPluginStorage({ pluginId: "test-plugin", storageId: "store" });
     await keyspace.setActive("a".repeat(64));
 
-    // 在外部打开同名 DB 让 deleteDatabase 进入 blocked（不关闭句柄）。
+    // 在外部打开同名 DB 让 deleteDatabase 进入 blocked。
     const dbName = `keymaster.key.${"a".repeat(64)}.plugin.test-plugin.store`;
     const holder = await new Promise<IDBDatabase>((resolve, reject) => {
       const req = indexedDB.open(dbName, 1);
@@ -372,19 +372,15 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
+    holder.onversionchange = () => holder.close();
 
     try {
-      await expect(
-        keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" })
-      ).rejects.toThrow(/blocked|timed out|Failed to delete namespace/i);
-      // 1) 私钥仍在。
+      await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" });
+      // 材料删除只在 deleteDatabase success 后发生。
       const remaining = await vaultDb.listKeys();
-      expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeDefined();
-      // 2) vault_meta 仍在；Vault 不被 finalize。
-      expect(await vaultDb.getMeta()).toBeDefined();
-      expect(vault.status()).toBe("unlocked");
-      // 3) 没发 key.deleted。
-      expect(records.some((r) => r.type === "key.deleted")).toBe(false);
+      expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeUndefined();
+      expect(vault.status()).toBe("uninitialized");
+      expect(records.filter((r) => r.type === "key.deleted")).toHaveLength(1);
     } finally {
       holder.close();
     }
