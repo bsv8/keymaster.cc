@@ -182,10 +182,25 @@ const transferResources: I18nPluginResources = {
       "transfer.action.toContact": "Transfer",
       "transfer.observation.confirmed": "WOC confirmed",
       "transfer.observation.unconfirmed": "WOC observed (unconfirmed)",
+      "transfer.page.desc.default": "Confirm the recipient first, then choose an asset type and verify the receiving details before submitting.",
       "transfer.page.assets": "Assets",
+      "transfer.page.recipient.title": "Recipient",
+      "transfer.page.recipient.hint": "Choose a contact, or enter a recipient address after selecting an asset.",
+      "transfer.page.recipient.publicKey": "Recipient public key",
+      "transfer.page.recipient.change": "Change recipient",
+      "transfer.page.recipient.placeholder": "Select a contact",
+      "transfer.page.recipient.manualAddress": "You can skip the contact and enter and verify a recipient address after selecting an asset.",
+      "transfer.page.assetType.title": "Asset type",
+      "transfer.page.assetType.targetHint": "Only assets that support this recipient public key are shown.",
+      "transfer.page.assetType.manualHint": "Choose an asset, then enter the recipient address and amount.",
       "transfer.section.collectibles": "Collectibles",
       "transfer.page.empty.noKey.title": "No key yet",
-      "transfer.page.empty.noProvider.title": "No provider"
+      "transfer.page.empty.noKey.desc": "Import or create a key before starting a transfer.",
+      "transfer.page.empty.noProvider.title": "No provider",
+      "transfer.page.empty.picker": "No transfer assets are currently available.",
+      "transfer.page.invalidRecipient": "Invalid contact transfer target",
+      "transfer.page.noRecipientProvider": "No asset can transfer to this contact public key",
+      "transfer.page.clearRecipient": "Clear target and browse all assets"
     },
     "zh-CN": {
       "transfer.route.title": "转账",
@@ -195,10 +210,25 @@ const transferResources: I18nPluginResources = {
       "transfer.action.toContact": "转账",
       "transfer.observation.confirmed": "WOC 已确认",
       "transfer.observation.unconfirmed": "WOC 已观察（未确认）",
+      "transfer.page.desc.default": "先确认收款人，再选择资产类型，并在提交前核对收款信息。",
       "transfer.page.assets": "资产",
+      "transfer.page.recipient.title": "收款人",
+      "transfer.page.recipient.hint": "可以选择联系人，也可在选择资产后直接填写收款地址。",
+      "transfer.page.recipient.publicKey": "收款人公钥",
+      "transfer.page.recipient.change": "更换收款人",
+      "transfer.page.recipient.placeholder": "选择联系人",
+      "transfer.page.recipient.manualAddress": "也可跳过联系人，选择资产后直接填写并核对收款地址。",
+      "transfer.page.assetType.title": "资产类型",
+      "transfer.page.assetType.targetHint": "仅显示支持该收款人公钥的资产。",
+      "transfer.page.assetType.manualHint": "选择资产后，继续填写收款地址和金额。",
       "transfer.section.collectibles": "藏品",
       "transfer.page.empty.noKey.title": "还没有 key",
-      "transfer.page.empty.noProvider.title": "没有 provider"
+      "transfer.page.empty.noKey.desc": "导入或创建一个 key 后再开始转账。",
+      "transfer.page.empty.noProvider.title": "没有 provider",
+      "transfer.page.empty.picker": "当前没有可用的转账资产。",
+      "transfer.page.invalidRecipient": "联系人转账目标无效",
+      "transfer.page.noRecipientProvider": "当前没有可向该联系人公钥转账的资产",
+      "transfer.page.clearRecipient": "清除目标，浏览全部资产"
     }
   }
 };
