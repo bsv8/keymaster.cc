@@ -1,6 +1,6 @@
 // packages/plugin-key-import/src/importFileSniff.ts
 // 文件 / 文本内容快速嗅探工具。
-// 设计缘由：导入页面需要在用户选完文件或粘贴文本后立即判断"是不是加密的 bsv8 envelope"，
+// 设计缘由：导入页面需要在用户选完文件或粘贴文本后立即判断"是不是加密的密钥文档"，
 // 以决定是否显示密码输入框。嗅探必须使用真正的 JSON.parse + 形状判断，
 // 不能用字符串精确匹配（pretty JSON、换行、空格都会破坏匹配）。
 //
@@ -19,6 +19,36 @@ export function isBsv8KeyEnvelopeShape(obj: unknown): boolean {
   if (typeof o["nonce_hex"] !== "string") return false;
   if (typeof o["ciphertext_hex"] !== "string") return false;
   return true;
+}
+
+/** KeyHold v2 文档形状判断：只识别导入器的加密文档分支。 */
+export function isKeyHoldDocumentShape(obj: unknown): boolean {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    o["format"] === "keymaster" &&
+    o["version"] === 2 &&
+    typeof o["publicKeyHex"] === "string" &&
+    Boolean(o["keyDerivation"]) &&
+    typeof o["keyDerivation"] === "object" &&
+    Boolean(o["cipher"]) &&
+    typeof o["cipher"] === "object"
+  );
+}
+
+/** 判断 JSON 文本是否为当前支持的加密密钥文档。 */
+export function peekEncryptedKeyDocumentText(text: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return isBsv8KeyEnvelopeShape(parsed) || isKeyHoldDocumentShape(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/** 文件 bytes 版加密密钥文档嗅探。 */
+export function peekEncryptedKeyDocumentBytes(bytes: Uint8Array): boolean {
+  return peekEncryptedKeyDocumentText(new TextDecoder().decode(bytes));
 }
 
 /**

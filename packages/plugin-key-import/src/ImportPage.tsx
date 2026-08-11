@@ -38,8 +38,8 @@ import type {
 import { ImporterPicker } from "./ImporterPicker.js";
 import { persistImport } from "./importFlow.js";
 import {
-  peekBsv8EnvelopeBytes,
-  peekBsv8EnvelopeText
+  peekEncryptedKeyDocumentBytes,
+  peekEncryptedKeyDocumentText
 } from "./importFileSniff.js";
 import {
   buildImportInput,
@@ -106,7 +106,7 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
       type: "set-file",
       name: f.name,
       bytes,
-      needsPassword: peekBsv8EnvelopeBytes(bytes)
+      needsPassword: peekEncryptedKeyDocumentBytes(bytes)
     });
   }
 
@@ -114,13 +114,9 @@ export function ImportPage({ embedded = false }: { embedded?: boolean }) {
     dispatch({ type: "clear-file" });
   }
 
-  /**
-   * 文本输入时也用文本 sniff 决定是否升起密码框。
-   * 设计缘由：JSON 文本模式与文件模式必须共用同一套"是否像 envelope"的
-   * 嗅探逻辑。
-   */
+  /** JSON 文本与文件模式共用加密密钥文档嗅探逻辑。 */
   function onTextChange(value: string) {
-    const sniff = isJsonImporter(importer) ? peekBsv8EnvelopeText(value) : false;
+    const sniff = isJsonImporter(importer) ? peekEncryptedKeyDocumentText(value) : false;
     dispatch({ type: "set-text", text: value, needsPassword: sniff });
   }
 

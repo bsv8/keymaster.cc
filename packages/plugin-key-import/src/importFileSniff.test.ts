@@ -8,9 +8,12 @@
 import { describe, expect, it } from "vitest";
 import {
   isBsv8KeyEnvelopeShape,
+  isKeyHoldDocumentShape,
   peekBsv8Envelope,
   peekBsv8EnvelopeBytes,
-  peekBsv8EnvelopeText
+  peekBsv8EnvelopeText,
+  peekEncryptedKeyDocumentBytes,
+  peekEncryptedKeyDocumentText
 } from "./importFileSniff.js";
 
 const ENVELOPE = {
@@ -27,6 +30,27 @@ const ENVELOPE = {
   nonce_hex: "00".repeat(24),
   ciphertext_hex: "00".repeat(96),
   aad: "bitfs-keyring|client|default"
+};
+
+const KEYHOLD_DOCUMENT = {
+  format: "keymaster",
+  version: 2,
+  label: "Primary key",
+  publicKeyHex: `02${"11".repeat(32)}`,
+  keyDerivation: {
+    algorithm: "pbkdf2-hmac-sha-256",
+    passwordEncoding: "utf-8",
+    iterations: 600_000,
+    outputLengthBits: 256,
+    saltB64Url: "AAAAAAAAAAAAAAAAAAAAAA"
+  },
+  cipher: {
+    algorithm: "aes-gcm",
+    keyLengthBits: 256,
+    ivB64Url: "AAAAAAAAAAAAAAAA",
+    tagLengthBits: 128,
+    ciphertextAndTagB64Url: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  }
 };
 
 function encode(s: string): Uint8Array {
@@ -48,6 +72,29 @@ describe("isBsv8KeyEnvelopeShape", () => {
   it("rejects envelope missing required fields", () => {
     const missingCipher = { ...ENVELOPE, cipher: "aes-gcm" };
     expect(isBsv8KeyEnvelopeShape(missingCipher)).toBe(false);
+  });
+});
+
+describe("KeyHold v2 encrypted document sniff", () => {
+  it("recognizes the canonical KeyHold v2 shape", () => {
+    expect(isKeyHoldDocumentShape(KEYHOLD_DOCUMENT)).toBe(true);
+  });
+
+  it("rejects lookalikes missing required top-level fields", () => {
+    expect(isKeyHoldDocumentShape({ format: "keymaster", version: 2 })).toBe(false);
+    expect(isKeyHoldDocumentShape({ ...KEYHOLD_DOCUMENT, version: 1 })).toBe(false);
+  });
+
+  it("raises the generic encrypted-document sniff for file and text inputs", () => {
+    const text = JSON.stringify(KEYHOLD_DOCUMENT, null, 2);
+    expect(peekEncryptedKeyDocumentText(text)).toBe(true);
+    expect(peekEncryptedKeyDocumentBytes(encode(text))).toBe(true);
+  });
+
+  it("keeps plain wallet JSON classified as unencrypted", () => {
+    const plain = JSON.stringify({ wallet: "handcash", privateKey: "5Hwgr3..." });
+    expect(peekEncryptedKeyDocumentText(plain)).toBe(false);
+    expect(peekEncryptedKeyDocumentBytes(encode(plain))).toBe(false);
   });
 });
 

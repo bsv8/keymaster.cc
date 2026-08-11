@@ -140,6 +140,43 @@ describe("FirstTimeImportWizard - JSON importer 输入方式切换", () => {
     expect(screen.getByText(/文件|File/)).toBeTruthy();
   });
 
+  it("选择 KeyHold v2 文件后显示导入源密码框", async () => {
+    const user = userEvent.setup();
+    mount();
+    await gotoInputStep(user);
+
+    const keyHoldJson = JSON.stringify({
+      format: "keymaster",
+      version: 2,
+      label: "Primary key",
+      publicKeyHex: `02${"11".repeat(32)}`,
+      keyDerivation: { algorithm: "pbkdf2-hmac-sha-256" },
+      cipher: { algorithm: "aes-gcm" }
+    });
+    const bytes = new TextEncoder().encode(keyHoldJson);
+    const file = {
+      name: "keyhold.json",
+      arrayBuffer: async () => bytes.buffer
+    } as File;
+    fireEvent.change(screen.getByLabelText(/文件|File/), {
+      target: { files: [file] }
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Import-source password|导入源密码/)).toBeTruthy();
+    });
+    expect(
+      (screen.getByRole("button", { name: /解析|Parse/ }) as HTMLButtonElement).disabled
+    ).toBe(true);
+    await user.type(
+      screen.getByLabelText(/Import-source password|导入源密码/),
+      "source-password"
+    );
+    expect(
+      (screen.getByRole("button", { name: /解析|Parse/ }) as HTMLButtonElement).disabled
+    ).toBe(false);
+  });
+
   it("切到 JSON 文本模式显示 TextArea", async () => {
     const user = userEvent.setup();
     mount();

@@ -72,8 +72,8 @@ import {
 } from "@keymaster/contracts";
 import { ImporterPicker } from "@keymaster/plugin-key-import/ImporterPicker";
 import {
-  peekBsv8EnvelopeBytes,
-  peekBsv8EnvelopeText
+  peekEncryptedKeyDocumentBytes,
+  peekEncryptedKeyDocumentText
 } from "@keymaster/plugin-key-import/importFileSniff";
 import {
   buildImportInput,
@@ -91,9 +91,6 @@ import {
   StepProgress,
   type StepDefinition
 } from "./StepProgress.js";
-
-/** Importer parse 抛出的密码缺失错误——和 ImportPage 保持一致。 */
-const PASSWORD_REQUIRED_MSG = "Password is required for encrypted key file";
 
 /** 与 wizard 状态机的 step 顺序一一对应的 label 定义。 */
 const STEP_DEFINITIONS: ReadonlyArray<StepDefinition> = [
@@ -158,7 +155,7 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
         type: "set-file",
         name: f.name,
         bytes,
-        needsPassword: peekBsv8EnvelopeBytes(bytes)
+        needsPassword: peekEncryptedKeyDocumentBytes(bytes)
       }
     });
   }
@@ -167,12 +164,9 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
     dispatch({ type: "import", action: { type: "clear-file" } });
   }
 
-  /**
-   * 硬切换 012：文本输入实时嗅探 envelope，命中即升起密码框。
-   * 与文件模式共用同一套"是否像 envelope"的嗅探逻辑。
-   */
+  /** 文本输入实时嗅探加密密钥文档，与文件模式共用同一套逻辑。 */
   function onTextChange(value: string) {
-    const sniff = isJsonImporter(importer) ? peekBsv8EnvelopeText(value) : false;
+    const sniff = isJsonImporter(importer) ? peekEncryptedKeyDocumentText(value) : false;
     dispatch({ type: "import", action: { type: "set-text", text: value, needsPassword: sniff } });
   }
 
@@ -343,9 +337,13 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
   const canParse = (() => {
     if (!importer) return false;
     if (isJsonImporter(importer)) {
-      if (jsonInputMode === "text") return state.importState.text.trim().length > 0;
-      return Boolean(state.importState.fileBytes);
+      if (jsonInputMode === "text") {
+        if (state.importState.text.trim().length === 0) return false;
+      } else if (!state.importState.fileBytes) {
+        return false;
+      }
     }
+    if (state.importState.needsPassword && !importPasswordDraft) return false;
     return true;
   })();
 
@@ -749,4 +747,3 @@ export function FirstTimeImportWizard({ onCancel }: FirstTimeImportWizardProps) 
 // 抑制未用变量警告 — `WizardState` 类型在签名中已使用，TS 编译期不报错；
 // 但保留类型导出供调用方 / 测试使用。
 export type { WizardState };
-void PASSWORD_REQUIRED_MSG;

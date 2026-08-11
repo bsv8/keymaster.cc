@@ -29,6 +29,15 @@ import type {
 
 /** 与 ImportPage / 向导保持一致的 bsv8 密码缺失错误。 */
 export const PASSWORD_REQUIRED_MSG = "Password is required for encrypted key file";
+export const KEYHOLD_PASSWORD_REQUIRED_MSG = "Password is required for KeyHold file";
+
+/** importer 用明确的业务错误通知 UI 补充导入源密码。 */
+export function isPasswordRequiredError(message: string): boolean {
+  return (
+    message === PASSWORD_REQUIRED_MSG ||
+    message === KEYHOLD_PASSWORD_REQUIRED_MSG
+  );
+}
 
 /** JSON importer 的输入方式。 */
 export type JsonInputMode = "file" | "text";
@@ -238,7 +247,7 @@ export function reduceJsonImport(
     case "parse-failure": {
       // fail-open：若错误是密码缺失，立即把 needsPassword 升起来，
       // 让用户补密码后再次解析。这条规则对 file 与 text 来源都生效。
-      const isPasswordRequired = action.error === PASSWORD_REQUIRED_MSG;
+      const isPasswordRequired = isPasswordRequiredError(action.error);
       return {
         ...state,
         busy: false,

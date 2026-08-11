@@ -70,9 +70,9 @@ export interface KeyImporter {
    * 单一形态，破坏 fail-open 的解析体验。
    *
    * 正确做法：
-   *   - UI 端：先调用 parse()；如果 importer 抛 `Password is required
-   *     for encrypted key file`（业务约定的密码缺失错误），再追问用户。
-   *     已加密文件可借助 `peekBsv8Envelope` 提前嗅探以优化体验。
+   *   - UI 端：先调用 parse()；如果 importer 抛出明确的密码缺失
+   *     错误（例如 bsv8 / KeyHold 文档），再追问用户。已加密文件可
+   *     借助输入形状嗅探提前显示密码框，但 parse 失败仍须 fail-open。
    *   - 平台端：本契约**不**包含"是否需要密码"这种 importer 级声明。
    *     任何试图把它加回来的改动都会被拒，参见硬切换 010 收尾笔记。
    */

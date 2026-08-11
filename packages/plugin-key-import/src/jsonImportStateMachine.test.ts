@@ -18,6 +18,7 @@ import {
   buildImportInput,
   initialJsonImportState,
   isJsonImporter,
+  KEYHOLD_PASSWORD_REQUIRED_MSG,
   PASSWORD_REQUIRED_MSG,
   reduceJsonImport,
   type JsonImportState
@@ -274,6 +275,24 @@ describe("reduceJsonImport - parse lifecycle", () => {
     });
     expect(next.needsPassword).toBe(true);
     expect(next.error).toBe(PASSWORD_REQUIRED_MSG);
+    expect(next.busy).toBe(false);
+  });
+
+  it("parse-failure with the KeyHold password error raises needsPassword", () => {
+    const state: JsonImportState = {
+      ...initialJsonImportState,
+      importer: jsonImporter,
+      jsonInputMode: "file",
+      fileName: "keyhold.json",
+      fileBytes: new Uint8Array([1]),
+      needsPassword: false
+    };
+    const next = reduceJsonImport(state, {
+      type: "parse-failure",
+      error: KEYHOLD_PASSWORD_REQUIRED_MSG
+    });
+    expect(next.needsPassword).toBe(true);
+    expect(next.error).toBe(KEYHOLD_PASSWORD_REQUIRED_MSG);
     expect(next.busy).toBe(false);
   });
 
