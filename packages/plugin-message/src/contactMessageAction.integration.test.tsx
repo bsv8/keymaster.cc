@@ -73,7 +73,8 @@ describe("contact message action integration", () => {
         sent.push(input);
         return { messageId: "message-1", createdAtMs: 0 };
       },
-      subscribeMessages: () => () => undefined
+      subscribeMessages: () => () => undefined,
+      subscribeLocalChanges: () => () => undefined
     };
     const endpoints: AppMsgEndpointServiceRegistry = {
       forEndpoint: () => endpoint,

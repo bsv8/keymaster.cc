@@ -60,6 +60,37 @@ export interface MessageDetailData {
   contact: Contact | null;
 }
 
+function messagesEqual(previous: readonly AppMsgMessage[], next: readonly AppMsgMessage[]): boolean {
+  if (previous.length !== next.length) return false;
+  return previous.every((message, index) => {
+    const candidate = next[index];
+    return candidate !== undefined
+      && message.messageId === candidate.messageId
+      && message.senderPublicKeyHex === candidate.senderPublicKeyHex
+      && message.recipientPublicKeyHex === candidate.recipientPublicKeyHex
+      && message.body === candidate.body
+      && message.insertedAtMs === candidate.insertedAtMs;
+  });
+}
+
+function contactsEqual(previous: Contact | null | undefined, next: Contact | null | undefined): boolean {
+  if (!previous || !next) return previous === next;
+  return previous.id === next.id
+    && previous.publicKeyHex === next.publicKeyHex
+    && previous.name === next.name
+    && previous.updatedAt === next.updatedAt;
+}
+
+function contactsByPeerEqual(
+  previous: Record<string, Contact>,
+  next: Record<string, Contact>
+): boolean {
+  const previousKeys = Object.keys(previous);
+  const nextKeys = Object.keys(next);
+  if (previousKeys.length !== nextKeys.length) return false;
+  return previousKeys.every((key) => contactsEqual(previous[key], next[key]));
+}
+
 /** 插件 id（与 keymaster.message 不一致；plugin manifest 仍唯一）。 */
 export const MESSAGE_PLUGIN_ID = "message";
 
@@ -143,11 +174,19 @@ const messageResources: I18nPluginResources = {
       "message.page.noClient": "appmsg.endpoint service is not available.",
       "message.page.back": "Back",
       "message.page.send.submit": "Send",
+      "message.page.send.sending": "Sending…",
       "message.page.send.empty": "Body is empty",
       "message.page.detail.error.target_offline": "Peer is offline.",
       "message.page.detail.error.target_unknown": "Peer online status is unknown.",
-      "message.page.detail.error.service_not_ready": "WebRTC service is not ready.",
+      "message.page.detail.error.service_not_ready": "Messaging service is not ready. Please try again.",
       "message.page.detail.error.invalid_target": "Target publicKeyHex is invalid.",
+      "message.page.detail.error.send_timeout": "Sending timed out. Check the connection and try again.",
+      "message.page.detail.error.signature_failed": "Message signing failed. Reconnect the active key and try again.",
+      "message.page.detail.error.duplicate_message": "This message conflicts with an earlier send. Please send it again.",
+      "message.page.detail.error.seal_failed": "Message encryption failed. Reconnect the active key and try again.",
+      "message.page.detail.error.server_unavailable": "The messaging server is temporarily unavailable.",
+      "message.page.detail.error.send_rejected": "The messaging server rejected this message.",
+      "message.page.detail.error.send_unknown": "Message sending failed. Check the AppMsg connection status and try again.",
       "message.page.detail.error.device_unavailable": "Local device is unavailable.",
       "message.page.detail.error.send_invite_failed": "Failed to send call invite.",
       "message.page.detail.error.create_offer_failed": "Failed to create offer.",
@@ -239,11 +278,19 @@ const messageResources: I18nPluginResources = {
       "message.page.noClient": "appmsg.endpoint service 不可用。",
       "message.page.back": "返回",
       "message.page.send.submit": "发送",
+      "message.page.send.sending": "发送中…",
       "message.page.send.empty": "正文不能为空",
       "message.page.detail.error.target_offline": "对方当前离线。",
       "message.page.detail.error.target_unknown": "无法确认对方在线状态。",
-      "message.page.detail.error.service_not_ready": "WebRTC 服务未就绪。",
+      "message.page.detail.error.service_not_ready": "消息服务未就绪，请稍后重试。",
       "message.page.detail.error.invalid_target": "目标 publicKeyHex 非法。",
+      "message.page.detail.error.send_timeout": "发送超时，请检查网络后重试。",
+      "message.page.detail.error.signature_failed": "消息签名失败，请重新连接当前密钥后重试。",
+      "message.page.detail.error.duplicate_message": "本条消息与先前发送记录冲突，请重新发送。",
+      "message.page.detail.error.seal_failed": "消息加密失败，请重新连接当前密钥后重试。",
+      "message.page.detail.error.server_unavailable": "消息服务器暂时不可用，请稍后重试。",
+      "message.page.detail.error.send_rejected": "消息服务器拒绝了本条消息。",
+      "message.page.detail.error.send_unknown": "消息发送失败，请检查系统中的 AppMsg 连接状态后重试。",
       "message.page.detail.error.device_unavailable": "本地设备不可用。",
       "message.page.detail.error.send_invite_failed": "发送通话邀请失败。",
       "message.page.detail.error.create_offer_failed": "创建 offer 失败。",
@@ -334,25 +381,27 @@ export const messagePlatformPlugin: PluginManifest = {
     // 注册资源定义（硬切换 003）
     const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");
-    const contacts = ctx.has("contacts.service")
-      ? ctx.get<ContactsService>("contacts.service")
-      : null;
 
     // message.conversations：消息列表 + 联系人（MessagePage 用）
     resources.register<MessageConversationsData, readonly string[]>({
       id: "message.conversations",
       scope: "active-key",
       key: (_args, context) => ["message.conversations", context.activePublicKeyHex ?? "none"],
-      load: async (_args, _context, _signal) => {
+      load: async (_args, context, _signal) => {
         const messages = await service.listMessages({ limit: 10_000 });
+        // contacts 是可选插件，可能晚于 message 完成 setup；不能在 setup
+        // 阶段把缺失状态永久缓存为 null，必须在每次资源加载时动态解析。
+        const contacts = context.getCapability<ContactsService>("contacts.service");
         // 从消息中提取 peer publicKeyHex 列表
-        const ownerHex = keyspace.active().activePublicKeyHex;
+        const ownerHex = keyspace.active().activePublicKeyHex?.trim().toLowerCase();
         const peerSet = new Set<string>();
         for (const msg of messages) {
-          const peer = msg.senderPublicKeyHex === ownerHex
+          const senderHex = msg.senderPublicKeyHex.trim().toLowerCase();
+          const peer = senderHex === ownerHex
             ? msg.recipientPublicKeyHex
             : msg.senderPublicKeyHex;
-          if (peer) peerSet.add(peer);
+          const normalizedPeer = peer?.trim().toLowerCase();
+          if (normalizedPeer) peerSet.add(normalizedPeer);
         }
         const peerList = Array.from(peerSet);
         // 查找联系人
@@ -360,23 +409,25 @@ export const messagePlatformPlugin: PluginManifest = {
         if (contacts && peerList.length > 0) {
           try {
             const found = await contacts.findByPublicKeyHexes(peerList);
-            for (const c of found) contactsByPeer[c.publicKeyHex] = c;
+            for (const c of found) {
+              contactsByPeer[c.publicKeyHex.trim().toLowerCase()] = c;
+            }
           } catch {
             // 联系人查找失败不影响消息列表
           }
         }
         return { messages, contactsByPeer };
       },
-      subscribe: (_args, _ctx, invalidate) => {
-        const offMessages = service.subscribeMessages(invalidate);
+      subscribe: (_args, context, invalidate) => {
+        const contacts = context.getCapability<ContactsService>("contacts.service");
+        const offMessages = service.subscribeChanges(invalidate);
         const offContacts = contacts?.onChange(invalidate) ?? (() => {});
         return () => { offMessages(); offContacts(); };
       },
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
-        if (prev.messages.length !== next.messages.length) return false;
-        if (Object.keys(prev.contactsByPeer).length !== Object.keys(next.contactsByPeer).length) return false;
-        return true;
+        return messagesEqual(prev.messages, next.messages)
+          && contactsByPeerEqual(prev.contactsByPeer, next.contactsByPeer);
       },
       invalidation: "microtask"
     });
@@ -386,9 +437,10 @@ export const messagePlatformPlugin: PluginManifest = {
       id: "message.detail",
       scope: "active-key",
       key: (args, context) => ["message.detail", context.activePublicKeyHex ?? "none", args[0] ?? "none"],
-      load: async (args, _context, _signal) => {
+      load: async (args, context, _signal) => {
         const peerHex = args[0];
         const messages = await service.listMessages({ limit: 10_000 });
+        const contacts = context.getCapability<ContactsService>("contacts.service");
         let contact: Contact | null = null;
         if (contacts && peerHex) {
           try {
@@ -399,16 +451,16 @@ export const messagePlatformPlugin: PluginManifest = {
         }
         return { messages, contact };
       },
-      subscribe: (args, _ctx, invalidate) => {
-        const offMessages = service.subscribeMessages(invalidate);
+      subscribe: (args, context, invalidate) => {
+        const contacts = context.getCapability<ContactsService>("contacts.service");
+        const offMessages = service.subscribeChanges(invalidate);
         const offContacts = contacts?.onChange(invalidate) ?? (() => {});
         return () => { offMessages(); offContacts(); };
       },
       equals: (prev, next) => {
         if (!prev || !next) return prev === next;
-        if (prev.messages.length !== next.messages.length) return false;
-        if (prev.contact?.id !== next.contact?.id) return false;
-        return true;
+        return messagesEqual(prev.messages, next.messages)
+          && contactsEqual(prev.contact, next.contact);
       },
       invalidation: "microtask"
     });

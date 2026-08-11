@@ -6,6 +6,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import type {
   ActiveKeyState,
   AppMsgMessage,
+  Contact,
   I18nService,
   I18nText,
   I18nValues,
@@ -75,20 +76,30 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService 
   const messages = opts?.messages ?? [];
   return {
     isReady: () => true,
-    listMessages: async () => messages,
+    listMessages: async () => messages.slice(),
     getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
     sendTextMessage: async () => undefined,
-    subscribeMessages: () => () => undefined
+    subscribeMessages: () => () => undefined,
+    subscribeChanges: () => () => undefined
   };
 }
 
-function makeFakeHost(service: MessageService | null) {
+function makeFakeHost(
+  service: MessageService | null,
+  opts?: {
+    contactsByPeer?: Record<string, Contact>;
+    withContactsEditor?: boolean;
+  }
+) {
   const providers: Record<string, unknown> = {
     [I18N_SERVICE_CAPABILITY]: makeFakeI18n(),
     [KEYSPACE_SERVICE_CAPABILITY]: makeFakeKeyspace()
   };
   if (service) {
     providers[MESSAGE_SERVICE_CAPABILITY] = service;
+  }
+  if (opts?.withContactsEditor) {
+    providers["contacts.editor"] = () => null;
   }
 
   // 创建资源注册表和资源存储
@@ -109,11 +120,11 @@ function makeFakeHost(service: MessageService | null) {
       ["message.conversations", context.activePublicKeyHex ?? "none"],
     load: async () => {
       const messages = service ? await service.listMessages({ limit: 10_000 }) : [];
-      return { messages, contactsByPeer: {} };
+      return { messages, contactsByPeer: opts?.contactsByPeer ?? {} };
     },
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => {
       if (!service) return () => {};
-      return service.subscribeMessages(invalidate);
+      return service.subscribeChanges(invalidate);
     },
     equals: (prev: any, next: any) => {
       if (!prev || !next) return prev === next;
@@ -180,7 +191,40 @@ function makeFakeHost(service: MessageService | null) {
       const rk = `${definitionId}::${key.join("::")}`;
       return records.get(rk)?.snapshot as T | undefined;
     },
-    invalidate: () => {},
+    invalidate: (definitionId: string, args: readonly string[]) => {
+      const def = resourceDefinitions.get(definitionId);
+      if (!def) return;
+      const context = { activePublicKeyHex: keyspace.active().activePublicKeyHex };
+      const key = def.key(args, context);
+      const rk = `${definitionId}::${key.join("::")}`;
+      const record = records.get(rk);
+      if (!record) return;
+      record.snapshot = {
+        ...record.snapshot,
+        status: "stale",
+        revision: record.snapshot.revision + 1
+      };
+      for (const sub of record.subscribers) sub();
+      record.inFlight = def.load(args, context, new AbortController().signal);
+      record.inFlight.then((data: any) => {
+        record.snapshot = {
+          key,
+          status: "ready",
+          data,
+          revision: record.snapshot.revision + 1
+        };
+        record.inFlight = null;
+        for (const sub of record.subscribers) sub();
+      }).catch(() => {
+        record.snapshot = {
+          ...record.snapshot,
+          status: "error",
+          revision: record.snapshot.revision + 1
+        };
+        record.inFlight = null;
+        for (const sub of record.subscribers) sub();
+      });
+    },
     disposeOwner: () => {}
   };
 
@@ -293,6 +337,94 @@ describe("MessagePage in PluginHostProvider", () => {
       expect(screen.getByText("02aa...aaaa")).toBeTruthy();
     });
     expect(screen.queryByText("message.page.send.label")).toBeNull();
+  });
+
+  it("shows a known contact name and opens the contact info page", async () => {
+    const peer = "03dddd".padEnd(66, "d");
+    const contact: Contact = {
+      id: "contact-alice",
+      publicKeyHex: peer,
+      name: "Alice",
+      tags: [],
+      createdAt: "2026-08-10T00:00:00.000Z",
+      updatedAt: "2026-08-10T00:00:00.000Z"
+    };
+    const service = makeFakeService({
+      messages: [{
+        messageId: "message-from-alice",
+        clientMessageId: "client-from-alice",
+        senderPublicKeyHex: peer,
+        senderAppId: "keymaster.message",
+        recipientPublicKeyHex: OWNER,
+        recipientAppId: "keymaster.message",
+        contentType: "text/plain",
+        body: "hello from Alice",
+        createdAtMs: 3,
+        insertedAtMs: 3
+      }]
+    });
+    const { host } = makeFakeHost(service, {
+      contactsByPeer: { [peer]: contact },
+      withContactsEditor: true
+    });
+    const { MessagePage } = await import("./MessagePage.js");
+    window.history.pushState({}, "", "/messages");
+    render(
+      <PluginHostProvider host={host}>
+        <MessagePage />
+      </PluginHostProvider>
+    );
+
+    const contactLink = await screen.findByRole("button", { name: "Alice" });
+    expect(screen.queryByText("message.page.conversation.addContact")).toBeNull();
+    expect(screen.queryByText("message.page.conversation.editContact")).toBeNull();
+    expect(screen.queryByText("03dd...dddd")).toBeNull();
+
+    fireEvent.click(contactLink);
+    await waitFor(() => {
+      expect(window.location.pathname).toBe("/contacts/contact-alice");
+    });
+  });
+
+  it("revalidates a cached empty conversation list when the page is reopened", async () => {
+    const messages: AppMsgMessage[] = [];
+    const service = makeFakeService({ messages });
+    const { host } = makeFakeHost(service);
+    const { MessagePage } = await import("./MessagePage.js");
+
+    const firstRender = render(
+      <PluginHostProvider host={host}>
+        <MessagePage />
+      </PluginHostProvider>
+    );
+    await waitFor(() => {
+      expect(screen.getByText("message.page.empty")).toBeTruthy();
+    });
+    firstRender.unmount();
+
+    messages.push({
+      messageId: "message-after-empty-cache",
+      clientMessageId: "client-after-empty-cache",
+      senderPublicKeyHex: "03cccc".padEnd(66, "c"),
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: "keymaster.message",
+      contentType: "text/plain",
+      body: "history loaded after reopening messages",
+      createdAtMs: 2,
+      insertedAtMs: 2
+    });
+
+    render(
+      <PluginHostProvider host={host}>
+        <MessagePage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("history loaded after reopening messages")).toBeTruthy();
+    });
+    expect(screen.queryByText("message.page.empty")).toBeNull();
   });
 
   it("does NOT render sync / connection / online UI", async () => {

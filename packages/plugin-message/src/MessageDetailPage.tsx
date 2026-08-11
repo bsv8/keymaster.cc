@@ -78,6 +78,7 @@ export function MessageDetailPage(): JSX.Element {
   const history = historyResource.data ?? [];
   const [sendBody, setSendBody] = useState("");
   const [sendError, setSendError] = useState<string | null>(null);
+  const [sendBusy, setSendBusy] = useState(false);
   const webrtcResource = useResource<WebrtcSessionSnapshot>(host.resourceStore, "webrtc.session", []);
   const webrtcSnapshot = webrtcResource.data ?? (webrtc?.snapshot() ?? null);
   const [callActionBusy, setCallActionBusy] = useState(false);
@@ -90,6 +91,7 @@ export function MessageDetailPage(): JSX.Element {
   const callPanelRef = useRef<HTMLElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const sendInFlightRef = useRef(false);
   const service = messageService;
 
   useEffect(() => {
@@ -237,18 +239,26 @@ export function MessageDetailPage(): JSX.Element {
   const dialButtonsDisabled = actionsDisabled || hasAnyActiveWebrtcSession;
 
   async function sendText() {
+    if (sendInFlightRef.current) return;
     setSendError(null);
     const body = sendBody.trim();
     if (!body) {
       setSendError(i18n.t("message.page.send.empty"));
       return;
     }
+    sendInFlightRef.current = true;
+    setSendBusy(true);
     try {
       await service!.sendTextMessage({ recipientPublicKeyHex: normalizedPeerPublicKeyHex, body });
       setSendBody("");
-      // 消息发送后，service.subscribeMessages 会触发 resource 失效，自动刷新列表
+      // mutation 主动失效，避免页面刷新依赖 provider 是否回推发送侧消息。
+      store.invalidate("message.detail", [normalizedPeerPublicKeyHex]);
+      store.invalidate("message.conversations", []);
     } catch (err) {
-      setSendError(formatMessageDetailError(i18n, err));
+      setSendError(formatMessageDetailError(i18n, err, "message.page.detail.error.send_unknown"));
+    } finally {
+      sendInFlightRef.current = false;
+      setSendBusy(false);
     }
   }
 
@@ -539,8 +549,16 @@ export function MessageDetailPage(): JSX.Element {
           rows={4}
         />
         <div className="km-message-detail__composer-row">
-          <button className="km-message-detail__send" type="button" onClick={() => void sendText()}>
-            {i18n.t("message.page.send.submit")}
+          <button
+            className="km-message-detail__send"
+            type="button"
+            disabled={sendBusy}
+            aria-busy={sendBusy}
+            onClick={() => void sendText()}
+          >
+            {sendBusy
+              ? i18n.t("message.page.send.sending")
+              : i18n.t("message.page.send.submit")}
           </button>
           <span className="km-message-detail__divider" aria-hidden="true">|</span>
           <button
@@ -575,7 +593,11 @@ export function MessageDetailPage(): JSX.Element {
           >
             {i18n.t("message.page.detail.file")}
           </button>
-          {sendError ? <span className="km-message-detail__error">{sendError}</span> : null}
+          {sendError ? (
+            <span className="km-message-detail__error" role="alert">
+              {sendError}
+            </span>
+          ) : null}
         </div>
         <input
           ref={imageInputRef}
@@ -879,17 +901,64 @@ function formatBytes(bytes: number): string {
 
 function formatMessageDetailError(
   i18n: ReturnType<typeof useI18n>,
-  err: unknown
+  err: unknown,
+  fallbackKey = "message.page.detail.error.unknown"
 ): string {
   const raw = err instanceof Error ? err.message : String(err);
   const key = resolveMessageDetailErrorKey(raw);
-  return i18n.t(key ?? "message.page.detail.error.unknown");
+  return i18n.t(key ?? fallbackKey);
 }
 
 /**
  * 将内部错误字符串收口成稳定 i18n key，避免把英文实现细节直接露给用户。
  */
 function resolveMessageDetailErrorKey(raw: string): string | null {
+  const normalized = raw.toLowerCase();
+  if (
+    normalized.includes("not_ready") ||
+    normalized.includes("not bound") ||
+    normalized.includes("socket closed") ||
+    normalized.includes("session_key_mismatch") ||
+    normalized.includes("session has been revoked") ||
+    normalized.includes("coordinator crypto rpc unavailable") ||
+    normalized.includes("invalid_sender")
+  ) {
+    return "message.page.detail.error.service_not_ready";
+  }
+  if (
+    normalized.includes("invalid_target") ||
+    normalized.includes("invalid_recipient") ||
+    normalized.includes("invalid hex") ||
+    normalized.includes("bad point") ||
+    normalized.includes("point is not on curve") ||
+    normalized.includes("public key must be 33 bytes")
+  ) {
+    return "message.page.detail.error.invalid_target";
+  }
+  if (normalized.includes("request timeout") || normalized.includes("timed out")) {
+    return "message.page.detail.error.send_timeout";
+  }
+  if (normalized.includes("invalid_signature")) {
+    return "message.page.detail.error.signature_failed";
+  }
+  if (normalized.includes("idempotency_clash")) {
+    return "message.page.detail.error.duplicate_message";
+  }
+  if (normalized.includes("seal failed") || normalized.includes("unexpected result type")) {
+    return "message.page.detail.error.seal_failed";
+  }
+  if (normalized.startsWith("internal:") || normalized.includes("store:")) {
+    return "message.page.detail.error.server_unavailable";
+  }
+  if (
+    normalized.includes("bad_request") ||
+    normalized.includes("invalid_endpoint") ||
+    normalized.includes("unsupported_envelope") ||
+    normalized.includes("unsupported_seal") ||
+    normalized.includes("malformed message.send")
+  ) {
+    return "message.page.detail.error.send_rejected";
+  }
   const direct = MESSAGE_ERROR_KEYS[raw];
   if (direct) return direct;
   if (raw.startsWith("transfer_reject:")) {

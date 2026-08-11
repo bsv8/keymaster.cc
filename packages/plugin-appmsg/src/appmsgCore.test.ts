@@ -938,6 +938,8 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
       kind: "plugin",
       id: KEYMASTER_MESSAGE_APP_ID
     });
+    let localChangeCount = 0;
+    const off = svc.subscribeLocalChanges!(() => { localChangeCount += 1; });
     const r = await svc.sendMessage({
       recipientPublicKeyHex: OWNER_B,
       recipientAppId: KEYMASTER_MESSAGE_APP_ID,
@@ -960,6 +962,72 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
     expect(sent.record.envelope.envelopeBytes.length).toBeGreaterThan(0);
     const listed = await svc.listMessages({ limit: 10 });
     expect(listed.items.map((item) => item.messageId)).toContain("m1");
+    expect(localChangeCount).toBeGreaterThan(0);
+    off();
+  });
+
+  it("rejects a send while the active owner is waiting for its provider rebind", async () => {
+    const ctx = makeConnectedCore();
+    await ctx.core.connectForOwner(OWNER);
+    const svc = ctx.core.endpointRegistry().forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+
+    ctx.keyspace.setActiveHex(OWNER_B);
+    expect(svc.isReady()).toBe(false);
+    await expect(svc.sendMessage({
+      recipientPublicKeyHex: OWNER,
+      recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+      contentType: "text/plain",
+      body: "must wait for rebind",
+      clientMessageId: "c-owner-race",
+      createdAtMs: 2
+    })).rejects.toThrow(/not_ready.*rebind/i);
+    expect(ctx.sentMessages).toHaveLength(0);
+  });
+
+  it("persists provider pushes even when no endpoint or platform consumer is mounted", async () => {
+    const ctx = makeConnectedCore();
+    await ctx.core.connectForOwner(OWNER);
+    expect(ctx.subscribeCalls).toHaveLength(1);
+
+    ctx.subscribeCalls[0]!(makeSealedRecord({
+      messageId: "push-unmounted",
+      senderPrivateKeyHex: OWNER_B_PRIV,
+      senderPublicKeyHex: OWNER_B,
+      recipientPublicKeyHex: OWNER,
+      clientMessageId: "c-push-unmounted",
+      createdAtMs: 3,
+      insertedAtMs: 4,
+      contentType: "text/plain",
+      body: "arrived while page was closed"
+    }));
+
+    const svc = ctx.core.endpointRegistry().forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    await vi.waitFor(async () => {
+      const listed = await svc.listMessages({ limit: 10 });
+      expect(listed.items.some((item) => item.messageId === "push-unmounted")).toBe(true);
+    });
+  });
+
+  it("dispatches messages discovered by reconnect sync to existing endpoint subscribers", async () => {
+    const ctx = makeConnectedCore();
+    const svc = ctx.core.endpointRegistry().forEndpoint({
+      kind: "plugin",
+      id: KEYMASTER_MESSAGE_APP_ID
+    });
+    let localChangeCount = 0;
+    const off = svc.subscribeLocalChanges!(() => { localChangeCount += 1; });
+
+    await ctx.core.connectForOwner(OWNER);
+    await vi.waitFor(() => {
+      expect(localChangeCount).toBeGreaterThan(0);
+    });
+    off();
   });
 
   it("listMessages reads scoped local db truth", async () => {
@@ -1021,8 +1089,7 @@ describe("AppMsgCoreImpl - endpoint service with handle", () => {
       contentType: "text/plain",
       body: "pushed"
     });
-    const handler = ctx.subscribeCalls[0]!;
-    handler(pushed);
+    for (const handler of ctx.subscribeCalls) handler(pushed);
     await vi.waitFor(() => {
       expect(received.length).toBe(1);
     });

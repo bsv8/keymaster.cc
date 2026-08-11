@@ -110,6 +110,8 @@ export async function syncOneScope(input: {
    * 表示该条 sealed record 验签或解密失败——按 fail-closed 跳过。
    */
   openSealed: (rec: ProviderSealedMessageRecord) => Promise<AppMsgMessage | null>;
+  /** 每条新消息成功写入本地库后通知上层刷新其 scoped 资源。 */
+  onMessageStored?: (message: AppMsgMessage) => void;
   logger?: AppMsgSyncLogger;
 }): Promise<AppMsgSyncOutcome> {
   const startedAt = Date.now();
@@ -275,6 +277,13 @@ export async function syncOneScope(input: {
   let written = 0;
   try {
     written = await input.ops.putMessages(input.providerId, filtered);
+    for (const message of filtered) {
+      try {
+        input.onMessageStored?.(message);
+      } catch {
+        // 数据已落库；刷新监听器失败不能反向破坏同步结果。
+      }
+    }
     emitSyncLog(input.logger, "info", "appmsg.sync.scope.write.done", {
       providerId: input.providerId,
       targetKey: input.targetKey,
@@ -392,6 +401,7 @@ export async function syncAllScopes(input: {
   resolveTargetKey: (ep: { kind: "origin" | "plugin"; id: string }) => string;
   loadCursor: (targetKey: string) => Promise<string>;
   openSealed: (rec: ProviderSealedMessageRecord) => Promise<AppMsgMessage | null>;
+  onMessageStored?: (message: AppMsgMessage) => void;
   logger?: AppMsgSyncLogger;
 }): Promise<AppMsgSyncOutcome[]> {
   const startedAt = Date.now();
@@ -424,6 +434,7 @@ export async function syncAllScopes(input: {
         cursorMessageId: cursor,
         pageLimit: input.pageLimit,
         openSealed: input.openSealed,
+        onMessageStored: input.onMessageStored,
         logger: input.logger
       })
     );

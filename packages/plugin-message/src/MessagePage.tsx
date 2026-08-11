@@ -11,7 +11,7 @@
 // 硬切换 003：使用 Resource Store 读取消息和联系人数据。
 // 跨标签同步、请求去重、失效批处理由 resource 处理。
 
-import { useMemo, useState, type ComponentType } from "react";
+import { useEffect, useMemo, useState, type ComponentType } from "react";
 import { useCapability, useI18n, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
 import type { Contact, KeyspaceService } from "@keymaster/contracts";
 import { Button, EmptyState, Modal, PageHeader, TextInput } from "@keymaster/ui";
@@ -67,13 +67,17 @@ function MessagePageInner(): JSX.Element {
     store,
     "message.conversations",
     [],
-    (snapshot) => snapshot.data ?? EMPTY_CONVERSATIONS_DATA,
-    (a, b) => {
-      if (a.messages.length !== b.messages.length) return false;
-      if (Object.keys(a.contactsByPeer).length !== Object.keys(b.contactsByPeer).length) return false;
-      return true;
-    }
+    (snapshot) => snapshot.data ?? EMPTY_CONVERSATIONS_DATA
   );
+
+  // Resource Store 会跨页面保留已加载的快照。重新进入消息首页时主动校验一次，
+  // 避免复用此前的空列表，而详情页已经能从本地存储读到消息。
+  useEffect(() => {
+    if (!ownerPublicKeyHex) return;
+    const snapshot = store.read<MessageConversationsData>("message.conversations", []);
+    if (!snapshot || snapshot.status === "pending") return;
+    store.invalidate("message.conversations", []);
+  }, [ContactsEditor, ownerPublicKeyHex, store]);
 
   // 从消息派生会话摘要
   const conversations = useMemo(() => {
@@ -109,15 +113,6 @@ function MessagePageInner(): JSX.Element {
       open: true,
       mode: "create",
       publicKeyHex: peerPublicKeyHex
-    });
-  };
-
-  const openEditContact = (contact: Contact) => {
-    setEditorState({
-      open: true,
-      mode: "edit",
-      contactId: contact.id,
-      publicKeyHex: contact.publicKeyHex
     });
   };
 
@@ -174,7 +169,9 @@ function MessagePageInner(): JSX.Element {
       ) : (
         <div className="km-message-page__conversations">
           {conversations.map((conversation) => {
-            const contact = conversationsData.contactsByPeer[conversation.peerPublicKeyHex];
+            const contact = conversationsData.contactsByPeer[
+              conversation.peerPublicKeyHex.trim().toLowerCase()
+            ];
             const contactName = contact?.name?.trim() ?? "";
             const title = contactName || shortPublicKeyHex(conversation.peerPublicKeyHex);
             return (
@@ -186,12 +183,20 @@ function MessagePageInner(): JSX.Element {
               >
                 <header className="km-message-page__conversation-header">
                   <div className="km-message-page__conversation-title-group">
-                    <h2 className="km-message-page__conversation-title">{title}</h2>
-                    {contactName ? (
-                      <code className="km-message-page__conversation-key">
-                        {shortPublicKeyHex(conversation.peerPublicKeyHex)}
-                      </code>
-                    ) : null}
+                    <h2 className="km-message-page__conversation-title">
+                      {contact && contactName ? (
+                        <button
+                          type="button"
+                          className="km-message-page__contact-link"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            router.push(`/contacts/${encodeURIComponent(contact.id)}`);
+                          }}
+                        >
+                          {contactName}
+                        </button>
+                      ) : title}
+                    </h2>
                   </div>
                   <span className="km-message-page__conversation-time">
                     {formatTime(conversation.latestInsertedAtMs)}
@@ -204,30 +209,17 @@ function MessagePageInner(): JSX.Element {
                   <span className="km-message-page__conversation-count">
                     {i18n.t("message.page.conversation.count", { defaultValue: "{{count}} messages", count: conversation.messageCount })}
                   </span>
-                  {ContactsEditor ? (
-                    contact ? (
-                      <button
-                        type="button"
-                        className="km-message-page__conversation-action"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openEditContact(contact);
-                        }}
-                      >
-                        {i18n.t("message.page.conversation.editContact", { defaultValue: "Edit contact" })}
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="km-message-page__conversation-action"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openCreateContact(conversation.peerPublicKeyHex);
-                        }}
-                      >
-                        {i18n.t("message.page.conversation.addContact", { defaultValue: "Add contact" })}
-                      </button>
-                    )
+                  {ContactsEditor && !contact ? (
+                    <button
+                      type="button"
+                      className="km-message-page__conversation-action"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openCreateContact(conversation.peerPublicKeyHex);
+                      }}
+                    >
+                      {i18n.t("message.page.conversation.addContact", { defaultValue: "Add contact" })}
+                    </button>
                   ) : null}
                 </footer>
               </article>

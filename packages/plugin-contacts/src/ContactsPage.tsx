@@ -8,7 +8,7 @@
 
 import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { AppLink, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey, type Contact, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
@@ -49,7 +49,15 @@ export function ContactsPage() {
   }
 
   const columns: DataTableColumn<Contact>[] = [
-    { key: "name", header: t("contacts.page.col.name", { defaultValue: "Name" }), render: (r) => r.name },
+    {
+      key: "name",
+      header: t("contacts.page.col.name", { defaultValue: "Name" }),
+      render: (r) => (
+        <AppLink to={`/contacts/${encodeURIComponent(r.id)}`}>
+          {r.name}
+        </AppLink>
+      )
+    },
     {
       key: "publicKeyHex",
       header: t("contacts.page.col.publicKeyHex", { defaultValue: "publicKeyHex" }),

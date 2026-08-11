@@ -65,6 +65,22 @@
   color: var(--text);
 }
 
+.km-message-page__contact-link {
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.km-message-page__contact-link:hover {
+  color: var(--primary, currentColor);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .km-message-page__conversation-key,
 .km-message-detail__key,
 .km-message-page__conversation-preview,

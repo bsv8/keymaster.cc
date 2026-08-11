@@ -338,6 +338,11 @@ export interface AppMsgEndpointService {
    * 订阅——上层 React effect **不需要**根据 owner 变化重新订阅。
    */
   subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
+  /**
+   * 订阅当前 endpoint 的本地消息投影变化（发送落库、在线推送、重连补拉）。
+   * 该事件只表示缓存需要重读，不把历史补拉伪装成实时入站消息。
+   */
+  subscribeLocalChanges?(handler: () => void): () => void;
   /** 批量在线查询。 */
   checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult>;
 }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   ActiveKeyState,
   Contact,
@@ -41,7 +41,27 @@ function contacts(): ContactsService {
 }
 
 describe("ContactsPage public-key actions", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("opens the contact detail page when the contact name is clicked", async () => {
+    const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [contactsResources] });
+    host.provide("keyspace.service", keyspace());
+    host.provide("contacts.service", contacts());
+    const resources = host.capabilities.get<ResourceRegistry>("resource.registry");
+    resources.register({
+      id: "contacts.list", scope: "active-key", key: (_args: readonly string[], context) => ["contacts.list", context.activePublicKeyHex ?? "none"],
+      load: async () => [CONTACT], subscribe: () => () => undefined, invalidation: "immediate"
+    });
+    window.history.pushState({}, "", "/contacts");
+
+    render(<PluginHostProvider host={host}><ContactsPage /></PluginHostProvider>);
+    fireEvent.click(await screen.findByRole("link", { name: "Bob" }));
+
+    await waitFor(() => expect(window.location.pathname).toBe("/contacts/contact-1"));
+  });
 
   it("shows Message only while message is enabled, while Transfer remains after its owner is removed", async () => {
     const host = createPluginHost({ disableConfigPersistence: true, initialI18nResources: [contactsResources] });

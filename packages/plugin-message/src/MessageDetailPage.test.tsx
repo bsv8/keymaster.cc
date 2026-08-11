@@ -75,7 +75,11 @@ function makeFakeKeyspace(): KeyspaceService {
   };
 }
 
-function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (input?: { limit?: number; afterMessageId?: string }) => void }): MessageService {
+function makeFakeService(opts?: {
+  messages?: AppMsgMessage[];
+  onListMessages?: (input?: { limit?: number; afterMessageId?: string }) => void;
+  sendTextMessage?: MessageService["sendTextMessage"];
+}): MessageService {
   const messages = opts?.messages ?? [];
   return {
     isReady: () => true,
@@ -84,8 +88,9 @@ function makeFakeService(opts?: { messages?: AppMsgMessage[]; onListMessages?: (
       return messages;
     },
     getMessage: async (id: string) => messages.find((m) => m.messageId === id) ?? null,
-    sendTextMessage: async () => undefined,
-    subscribeMessages: () => () => undefined
+    sendTextMessage: opts?.sendTextMessage ?? (async () => undefined),
+    subscribeMessages: () => () => undefined,
+    subscribeChanges: () => () => undefined
   };
 }
 
@@ -175,7 +180,7 @@ function makeFakeHost(service: MessageService | null, webrtcService?: WebrtcMess
     },
     subscribe: (_args: readonly string[], _ctx: unknown, invalidate: () => void) => {
       if (!service) return () => {};
-      return service.subscribeMessages(invalidate);
+      return service.subscribeChanges(invalidate);
     },
     equals: (prev: any, next: any) => {
       if (!prev || !next) return prev === next;
@@ -364,6 +369,40 @@ describe("MessageDetailPage in PluginHostProvider", () => {
     await waitFor(() => {
       expect(screen.getAllByText("02aa...aaaa").length).toBeGreaterThan(0);
     });
+  });
+
+  it("shows sending progress and a localized error when the message transport is unavailable", async () => {
+    const peer = "02abab".padEnd(66, "a");
+    let rejectSend!: (reason: unknown) => void;
+    const service = makeFakeService({
+      messages: [],
+      sendTextMessage: () => new Promise<void>((_resolve, reject) => {
+        rejectSend = reject;
+      })
+    });
+    const host = makeFakeHost(service);
+    const { MessageDetailPage } = await import("./MessageDetailPage.js");
+    window.history.pushState({}, "", `/message/${peer}`);
+    render(
+      <PluginHostProvider host={host}>
+        <MessageDetailPage />
+      </PluginHostProvider>
+    );
+
+    const input = await screen.findByLabelText("message.page.detail.body");
+    fireEvent.change(input, { target: { value: "keep this draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "message.page.send.submit" }));
+
+    await waitFor(() => {
+      const sending = screen.getByRole("button", { name: "message.page.send.sending" });
+      expect((sending as HTMLButtonElement).disabled).toBe(true);
+    });
+
+    rejectSend(new Error("appmsg.endpoint: not_ready (no active provider handle)"));
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe("message.page.detail.error.service_not_ready");
+    });
+    expect((input as HTMLTextAreaElement).value).toBe("keep this draft");
   });
 
   it("accepts the singular /message/:publicKeyHex route", async () => {

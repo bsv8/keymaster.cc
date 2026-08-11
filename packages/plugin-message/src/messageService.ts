@@ -25,13 +25,14 @@ import { KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
 /**
  * 消息业务插件对外 service。
  *
- * 最小职责：4 个方法，全部走稳定长寿 endpoint service。
+ * 最小职责：消息读写、实时消息订阅与本地历史变化订阅，全部走稳定长寿 endpoint service。
  *   - `listMessages`：列自己 scope 内的本地消息；
  *   - `getMessage`：读单条；scope 外返回 null；
  *   - `sendTextMessage`：发一条文本消息到 `recipientAppId =
  *     keymaster.message` 的对方；
  *   - `subscribeMessages`：订阅自己 scope 内的事件；endpoint service
  *     内部已自动迁移订阅——上层 React effect **不需要**重新订阅；
+ *   - `subscribeChanges`：覆盖发送落库、在线推送与离线补拉，供资源层失效重读；
  *   - `isReady`：当前 endpoint service 是否可用。
  *
  * 搜索**不**作为 service 暴露——UI 在拿到 list 后做本地字符串过滤。
@@ -56,6 +57,8 @@ export interface MessageService {
   }): Promise<void>;
   /** 订阅自己 scope 内的完整消息事件。返回取消订阅函数。 */
   subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
+  /** 订阅本地历史变化（含发送落库和离线补拉），供资源层失效重读。 */
+  subscribeChanges(handler: () => void): () => void;
 }
 
 /**
@@ -86,8 +89,12 @@ export function createMessageService(
       return endpointService.getMessage({ messageId });
     },
     sendTextMessage: async (input) => {
+      const recipientPublicKeyHex = input.recipientPublicKeyHex.trim().toLowerCase();
+      if (!/^(02|03)[0-9a-f]{64}$/.test(recipientPublicKeyHex)) {
+        throw new Error("invalid_target");
+      }
       await endpointService.sendMessage({
-        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        recipientPublicKeyHex,
         recipientAppId: KEYMASTER_MESSAGE_APP_ID,
         contentType: input.contentType ?? "text/plain",
         body: input.body,
@@ -97,6 +104,9 @@ export function createMessageService(
     },
     subscribeMessages: (handler) => {
       return endpointService.subscribeMessages(handler);
+    },
+    subscribeChanges: (handler) => {
+      return endpointService.subscribeLocalChanges?.(handler) ?? endpointService.subscribeMessages(handler);
     }
   };
 }

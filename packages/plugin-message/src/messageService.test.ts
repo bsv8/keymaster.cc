@@ -60,6 +60,13 @@ function makeFakeEndpointService(): {
       });
       return () => undefined;
     }),
+    subscribeLocalChanges: vi.fn((handler) => {
+      calls.push({
+        method: "subscribeLocalChanges",
+        args: { handlerPresent: typeof handler === "function" }
+      });
+      return () => undefined;
+    }),
     checkOnline: vi.fn(async (hexes): Promise<AppMsgOnlineResult> => {
       const out: AppMsgOnlineResult = {};
       for (const h of hexes) out[h] = "online";
@@ -125,6 +132,16 @@ describe("createMessageService (stable endpoint service)", () => {
     expect(args.body).toBe("hello");
   });
 
+  it("rejects an invalid contact public key before invoking the provider", async () => {
+    const { service, calls } = makeFakeEndpointService();
+    const ms = createMessageService(service);
+    await expect(ms.sendTextMessage({
+      recipientPublicKeyHex: "not-a-compressed-public-key",
+      body: "hello"
+    })).rejects.toThrow("invalid_target");
+    expect(calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
   it("sendTextMessage propagates not_ready error from endpoint service", async () => {
     const service: AppMsgEndpointService = {
       endpoint: { kind: "plugin", id: "keymaster.message" },
@@ -150,6 +167,14 @@ describe("createMessageService (stable endpoint service)", () => {
     const off = ms.subscribeMessages(handler);
     expect(typeof off).toBe("function");
     expect(calls.some((c) => c.method === "subscribeMessages")).toBe(true);
+  });
+
+  it("subscribeChanges uses local projection changes instead of replaying sync as live messages", () => {
+    const { service, calls } = makeFakeEndpointService();
+    const ms = createMessageService(service);
+    const off = ms.subscribeChanges(vi.fn());
+    expect(typeof off).toBe("function");
+    expect(calls.some((c) => c.method === "subscribeLocalChanges")).toBe(true);
   });
 
   // endpoint service 内部已自动迁移订阅；本 service **不**暴露

@@ -467,15 +467,17 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
 
   isReady(): boolean {
     const owner = this.core.resolveCurrentOwner();
+    const boundOwner = this.core.currentBoundOwnerSnapshot();
     const handle = this.core.currentHandle();
-    return Boolean(owner && handle);
+    return Boolean(owner && boundOwner === owner && handle?.state() === "bound");
   }
 
   async sendMessage(input: AppMsgSendInput): Promise<AppMsgSendResult> {
     const handle = this.core.currentHandle();
     const owner = this.core.resolveCurrentOwner();
+    const boundOwner = this.core.currentBoundOwnerSnapshot();
     const providerId = this.core.currentProviderIdSnapshot();
-    if (!handle) {
+    if (!handle || handle.state() !== "bound") {
       this.core.emitInternalLog("warn", "appmsg.endpoint.send.rejected_not_ready", {
         endpointKind: this.endpoint.kind,
         endpointId: this.endpoint.id,
@@ -496,6 +498,18 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
         recipientPublicKeyHex: input.recipientPublicKeyHex
       });
       throw new Error("appmsg.endpoint: not_ready (no current owner)");
+    }
+    if (boundOwner !== owner) {
+      this.core.emitInternalLog("warn", "appmsg.endpoint.send.rejected_not_ready", {
+        endpointKind: this.endpoint.kind,
+        endpointId: this.endpoint.id,
+        providerId,
+        ownerPublicKeyHex: owner,
+        boundOwnerPublicKeyHex: boundOwner,
+        reason: "owner_rebind_in_progress",
+        recipientPublicKeyHex: input.recipientPublicKeyHex
+      });
+      throw new Error("appmsg.endpoint: not_ready (owner rebind in progress)");
     }
     this.core.emitInternalLog("info", "appmsg.endpoint.send.begin", {
       endpointKind: this.endpoint.kind,
@@ -614,6 +628,15 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
     };
   }
 
+  subscribeLocalChanges(handler: () => void): () => void {
+    return this.core.subscribeStoredMessages((message) => {
+      const endpointMatches = this.endpoint.kind === "plugin"
+        ? message.senderAppId === this.endpoint.id || message.recipientAppId === this.endpoint.id
+        : message.senderOrigin === this.endpoint.id || message.recipientOrigin === this.endpoint.id;
+      if (endpointMatches) handler();
+    });
+  }
+
   async checkOnline(input: AppMsgOnlineInput): Promise<AppMsgOnlineResult> {
     const handle = this.core.currentHandle();
     const owner = this.core.resolveCurrentOwner();
@@ -690,39 +713,15 @@ class AppMsgEndpointServiceImpl implements AppMsgEndpointService {
   }
 
   private bindOne(handler: (msg: AppMsgMessage) => void): void {
-    const handle = this.core.currentHandle();
-    if (!handle) {
-      // handle 不可用时 handler 暂不绑；等下次 onStateChange。
-      return;
-    }
     const scopeMatch = this.scopeMatch();
-    const filteredHandler = (rec: ProviderSealedMessageRecord) => {
-      void (async () => {
-        const m = await this.core.openSealedToMessage(rec);
-        if (!m) return;
-        if (!scopeMatch(m)) return;
-        await this.core.persistLocalMessageProjection(m).catch((err) => {
-          this.core.emitInternalLog("warn", "appmsg.endpoint.subscribe.local_put_failed", {
-            endpointKind: this.endpoint.kind,
-            endpointId: this.endpoint.id,
-            messageId: m.messageId,
-            err: err instanceof Error ? err.message : String(err)
-          });
-        });
-        try {
-          handler(m);
-        } catch {
-          // ignore
-        }
-      })().catch((err) => {
-        this.core.emitInternalLog("warn", "appmsg.endpoint.subscribe.open_failed", {
-          endpointKind: this.endpoint.kind,
-          endpointId: this.endpoint.id,
-          err: err instanceof Error ? err.message : String(err)
-        });
-      });
-    };
-    const off = handle.subscribeMessages(filteredHandler);
+    const off = this.core.subscribeIncomingMessages((message) => {
+      if (!scopeMatch(message)) return;
+      try {
+        handler(message);
+      } catch {
+        // ignore
+      }
+    });
     this.currentSubsByHandler.set(handler, off);
   }
 
@@ -798,8 +797,12 @@ export class AppMsgCoreImpl implements AppMsgCore {
   private localOps: AppMsgLocalDbOps | null = null;
   /** unfiltered 订阅者（管理页 / 协议层专用）。 */
   private readonly unfilteredSubs = new Set<(msg: AppMsgMessage) => void>();
-  /** 当前 unfiltered 订阅的 provider off 句柄。 */
-  private currentUnfilteredOff: (() => void) | null = null;
+  /** 已验签解密的实时入站消息；endpoint service 在这里做 scope fan-out。 */
+  private readonly incomingMessageSubs = new Set<(msg: AppMsgMessage) => void>();
+  /** 所有成功落入本地库的消息事件；endpoint service 据此刷新 scoped 资源。 */
+  private readonly storedMessageSubs = new Set<(msg: AppMsgMessage) => void>();
+  /** 当前 provider 入站收集器的 off 句柄。 */
+  private currentInboundOff: (() => void) | null = null;
   /** state change 订阅者（endpoint service 内部使用）。 */
   private readonly stateChangeListeners = new Set<() => void>();
   /** 最近一次本地库写入时间戳。 */
@@ -902,6 +905,10 @@ export class AppMsgCoreImpl implements AppMsgCore {
     return this.currentProviderId;
   }
 
+  currentBoundOwnerSnapshot(): string | null {
+    return this.currentBoundOwner;
+  }
+
   emitInternalLog(
     level: "info" | "warn" | "error",
     event: string,
@@ -917,7 +924,43 @@ export class AppMsgCoreImpl implements AppMsgCore {
     return this.localOps.putMessage(this.currentProviderId, message).then(() => {
       this.lastInsertedAtMsValue = Date.now();
       this.recordTargetLastReceived(message);
+      this.emitStoredMessage(message);
     });
+  }
+
+  /** endpoint service 共用的本地落库事件，不直接暴露为 platform capability。 */
+  subscribeStoredMessages(handler: (msg: AppMsgMessage) => void): () => void {
+    this.storedMessageSubs.add(handler);
+    return () => {
+      this.storedMessageSubs.delete(handler);
+    };
+  }
+
+  subscribeIncomingMessages(handler: (msg: AppMsgMessage) => void): () => void {
+    this.incomingMessageSubs.add(handler);
+    return () => {
+      this.incomingMessageSubs.delete(handler);
+    };
+  }
+
+  private emitStoredMessage(message: AppMsgMessage): void {
+    for (const handler of this.storedMessageSubs) {
+      try {
+        handler(message);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private emitIncomingMessage(message: AppMsgMessage): void {
+    for (const handler of this.incomingMessageSubs) {
+      try {
+        handler(message);
+      } catch {
+        // ignore
+      }
+    }
   }
 
   async listLocalMessagesForScope(input: {
@@ -1221,7 +1264,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
     });
 
     this.attachHandleCloseHook(this.boundHandle);
-    this.reattachUnfilteredSubscriptions();
+    this.reattachInboundSubscription();
 
     void this.triggerSync("background").catch(() => undefined);
     this.fireStateChange();
@@ -1272,13 +1315,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.localOps = null;
       this.localHandleOwner = null;
     }
-    if (this.currentUnfilteredOff) {
+    if (this.currentInboundOff) {
       try {
-        this.currentUnfilteredOff();
+        this.currentInboundOff();
       } catch {
         // ignore
       }
-      this.currentUnfilteredOff = null;
+      this.currentInboundOff = null;
     }
     emitLog(this.cfg.logger, "info", "appmsg.connect.structurally_offline.done", {
       currentConnectEpoch: this.connectEpoch
@@ -1388,13 +1431,13 @@ export class AppMsgCoreImpl implements AppMsgCore {
     this.currentBoundOwner = null;
     this.currentBoundSigner = null;
     this.nextReconnectAtMsValue = null;
-    if (this.currentUnfilteredOff) {
+    if (this.currentInboundOff) {
       try {
-        this.currentUnfilteredOff();
+        this.currentInboundOff();
       } catch {
         // ignore
       }
-      this.currentUnfilteredOff = null;
+      this.currentInboundOff = null;
     }
     if (this.localHandle) {
       try {
@@ -1651,7 +1694,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
     // 也只是同 messageId 幂等覆盖，不会放大复杂度。
     if (this.localOps && this.currentProviderId) {
       try {
-        await this.localOps.putMessage(this.currentProviderId, {
+        const sentMessage: AppMsgMessage = {
           messageId: res.messageId,
           clientMessageId: input.clientMessageId,
           senderPublicKeyHex: sender.senderPublicKeyHex,
@@ -1664,22 +1707,11 @@ export class AppMsgCoreImpl implements AppMsgCore {
           body: input.body,
           createdAtMs: input.createdAtMs,
           insertedAtMs: res.insertedAtMs
-        });
+        };
+        await this.localOps.putMessage(this.currentProviderId, sentMessage);
         this.lastInsertedAtMsValue = Date.now();
-        this.recordTargetLastReceived({
-          messageId: res.messageId,
-          clientMessageId: input.clientMessageId,
-          senderPublicKeyHex: sender.senderPublicKeyHex,
-          senderOrigin: hasSenderOrigin ? sender.senderOrigin : undefined,
-          senderAppId: hasSenderAppId ? sender.senderAppId : undefined,
-          recipientPublicKeyHex: input.recipientPublicKeyHex,
-          recipientOrigin: hasRecipientOrigin ? input.recipientOrigin : undefined,
-          recipientAppId: hasRecipientAppId ? input.recipientAppId : undefined,
-          contentType: input.contentType,
-          body: input.body,
-          createdAtMs: input.createdAtMs,
-          insertedAtMs: res.insertedAtMs
-        });
+        this.recordTargetLastReceived(sentMessage);
+        this.emitStoredMessage(sentMessage);
       } catch (err) {
         this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
       }
@@ -1765,49 +1797,41 @@ export class AppMsgCoreImpl implements AppMsgCore {
   subscribeUnfilteredMessages(handler: (msg: AppMsgMessage) => void): () => void {
     this.unfilteredSubs.add(handler);
     if (this.boundHandle) {
-      this.reattachUnfilteredSubscriptions();
+      this.reattachInboundSubscription();
     }
     return () => {
       this.unfilteredSubs.delete(handler);
-      if (this.unfilteredSubs.size === 0 && this.currentUnfilteredOff) {
-        try {
-          this.currentUnfilteredOff();
-        } catch {
-          // ignore
-        }
-        this.currentUnfilteredOff = null;
-      }
     };
   }
 
-  private reattachUnfilteredSubscriptions(): void {
-    if (this.currentUnfilteredOff) {
+  /**
+   * provider 入站收集器始终随连接存在，不能依赖某个页面或协议 caller
+   * 是否恰好订阅；否则页面未挂载时到达的消息会永久漏掉。
+   */
+  private reattachInboundSubscription(): void {
+    if (this.currentInboundOff) {
       try {
-        this.currentUnfilteredOff();
+        this.currentInboundOff();
       } catch {
         // ignore
       }
-      this.currentUnfilteredOff = null;
+      this.currentInboundOff = null;
     }
-    if (this.unfilteredSubs.size === 0 || !this.boundHandle) return;
-    this.currentUnfilteredOff = this.boundHandle.subscribeMessages((rec) => {
+    if (!this.boundHandle) return;
+    this.currentInboundOff = this.boundHandle.subscribeMessages((rec) => {
       void (async () => {
         const m = await this.openSealedToMessage(rec);
         if (!m) return;
-        if (this.localOps && this.currentProviderId) {
-          try {
-            await this.localOps.putMessage(this.currentProviderId, m);
-            this.lastInsertedAtMsValue = Date.now();
-            this.recordTargetLastReceived(m);
-          } catch (err) {
-            this.lastErrorMessageValue =
-              err instanceof Error ? err.message : String(err);
-            emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
-              err: this.lastErrorMessageValue,
-              messageId: m.messageId
-            });
-          }
+        try {
+          await this.persistLocalMessageProjection(m);
+        } catch (err) {
+          this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
+          emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
+            err: this.lastErrorMessageValue,
+            messageId: m.messageId
+          });
         }
+        this.emitIncomingMessage(m);
         for (const h of this.unfilteredSubs) {
           try {
             h(m);
@@ -1959,6 +1983,7 @@ export class AppMsgCoreImpl implements AppMsgCore {
           return st?.lastSyncedMessageId ?? "";
         },
         openSealed: (rec) => this.openSealedToMessage(rec),
+        onMessageStored: (message) => this.emitStoredMessage(message),
         logger: this.cfg.logger
       });
       const okCount = outcomes.filter((item) => item.ok).length;
