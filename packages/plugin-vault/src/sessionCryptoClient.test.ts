@@ -1,30 +1,15 @@
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { bytesToHex, deriveKey, encryptBytesWithAad, hexToBytes, vaultKeyAad } from "./crypto.js";
+import { bytesToHex, deriveKey, hexToBytes } from "./crypto.js";
 import { createSessionCryptoEngine } from "./sessionCryptoClient.js";
 import { __testHandleSessionCryptoRequest } from "./sessionCryptoWorker.js";
-import type { SessionCryptoEncryptedKeyMaterial } from "./sessionCryptoProtocol.js";
 
-async function makeEncryptedPrivateKey(
+async function makePrivateKey(
   privateKeyBytes: Uint8Array
 ): Promise<{
-  passwordKey: CryptoKey;
-  encryptedPrivateKey: SessionCryptoEncryptedKeyMaterial;
+  privateKeyBytes: Uint8Array;
 }> {
-  const passwordKey = await deriveKey("test-password", crypto.getRandomValues(new Uint8Array(16)));
-  const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-  const payload = new TextEncoder().encode(JSON.stringify({ hex: bytesToHex(privateKeyBytes) }));
-  const blob = await encryptBytesWithAad(passwordKey, payload, vaultKeyAad(publicKeyHex));
-  return {
-    passwordKey,
-    encryptedPrivateKey: {
-      publicKeyHex,
-      cipherVersion: blob.version ?? "v2",
-      cipherSaltB64: bytesToHex(blob.salt),
-      cipherIvB64: bytesToHex(blob.iv),
-      cipherB64: bytesToHex(blob.ciphertext)
-    }
-  };
+  return { privateKeyBytes };
 }
 
 class FailingWorker {
@@ -138,13 +123,12 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       await expect(
         createSessionCryptoEngine({
           sessionId: "session-a",
           publicKeyHex,
-          passwordKey,
-          encryptedPrivateKey,
+          privateKeyBytes: rawPrivateKeyBytes,
           label: "Key A",
           capabilities: ["p2pkh"],
           createdAt: new Date().toISOString()
@@ -163,12 +147,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-b",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key B",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -192,13 +175,12 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       await expect(
         createSessionCryptoEngine({
           sessionId: "session-c",
           publicKeyHex,
-          passwordKey,
-          encryptedPrivateKey,
+          privateKeyBytes: rawPrivateKeyBytes,
           label: "Key C",
           capabilities: ["p2pkh"],
           createdAt: new Date().toISOString()
@@ -219,12 +201,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-worker",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key W",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -262,12 +243,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-compact",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key Compact",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -296,12 +276,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-der",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key DER",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -330,12 +309,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-local-compact",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key Local Compact",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -363,12 +341,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-mismatch",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key Mismatch",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()
@@ -397,12 +374,11 @@ describe("sessionCryptoClient", () => {
         "0000000000000000000000000000000000000000000000000000000000000001"
       );
       const publicKeyHex = bytesToHex(secp256k1.getPublicKey(privateKeyBytes, true));
-      const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey(privateKeyBytes);
+      const { privateKeyBytes: rawPrivateKeyBytes } = await makePrivateKey(privateKeyBytes);
       const engine = await createSessionCryptoEngine({
         sessionId: "session-mismatch-der",
         publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey,
+        privateKeyBytes: rawPrivateKeyBytes,
         label: "Key Mismatch DER",
         capabilities: ["p2pkh"],
         createdAt: new Date().toISOString()

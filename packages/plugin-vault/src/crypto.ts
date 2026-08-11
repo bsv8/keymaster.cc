@@ -78,11 +78,6 @@ export interface EncryptedBlob {
   version?: "v1" | "v2";
 }
 
-/** Vault v2 固定 key AAD。 */
-export function vaultKeyAad(publicKeyHex: string): string {
-  return `${VAULT_KEY_AAD_PREFIX}${publicKeyHex}`;
-}
-
 /** Vault v2 固定 verifier AAD。 */
 export const VAULT_VERIFIER_AAD = "keymaster:v2|vault-verifier";
 
@@ -90,7 +85,6 @@ export const VAULT_VERIFIER_AAD = "keymaster:v2|vault-verifier";
 export const LEGACY_VAULT_VERIFIER_MARKER = "vault:v1";
 
 /** Vault v2 固定 key AAD 前缀。 */
-export const VAULT_KEY_AAD_PREFIX = "keymaster:v2|vault-key|";
 
 /** 加密任意 bytes。 */
 export async function encryptBytes(key: CryptoKey, plaintext: Uint8Array): Promise<EncryptedBlob> {

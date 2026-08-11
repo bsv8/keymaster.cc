@@ -39,13 +39,13 @@ import type {
   , CoordinatorCryptoResult
   , CoordinatorVaultStatus
   , SessionCoordinatorClient
+  , KeyspaceService
 } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, type VaultLocalSecretService } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
 import { VaultUnlockPage } from "./VaultUnlockPage.js";
-import { createKeyspaceService, type KeyspaceHandle } from "./keyspaceService.js";
 import { createVaultServiceCoordinator } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
@@ -181,24 +181,16 @@ const vaultResources: I18nPluginResources = {
       "vault.keyCreate.err.password": "Enter the Vault password",
       "vault.keyCreate.password": "Vault password",
       "vault.keyDelete.title.warn": "Delete key",
-      "vault.keyDelete.title.final": "Confirm again",
-      "vault.keyDelete.cancel": "Cancel",
       "vault.keyDelete.exportBackup": "Export backup",
-      "vault.keyDelete.next": "Next: delete",
-      "vault.keyDelete.back": "Back",
       "vault.keyDelete.confirm": "Confirm delete",
       "vault.keyDelete.danger": "Deleting will remove the key's private key and every plugin's local namespace data (asset cache, history, contacts, etc.). Without a backup or copy in another wallet, related assets will be permanently inaccessible.",
       "vault.keyDelete.target": "Target: ",
-      "vault.keyDelete.confirmPrompt1": "Really delete ",
-      "vault.keyDelete.confirmPrompt2": "? This action is irreversible.",
-      "vault.keyDelete.typedPrompt1": "Type ",
-      "vault.keyDelete.typedPrompt2": " to confirm:",
       "vault.keyDelete.err.failed": "Delete failed",
-      "vault.keyDelete.passwordPrompt": "Enter your Vault password to continue",
+      "vault.keyDelete.labelPrompt": "Type the target label to confirm:",
       "vault.keyExport.title": "Export backup",
       "vault.keyExport.cancel": "Cancel",
       "vault.keyExport.submit": "Download backup file",
-      "vault.keyExport.hint": "The JSON backup contains a password protector and every configured passkey protector. Any available protector can recover the same private key.",
+      "vault.keyExport.hint": "Exports the canonical KeyHold v2 document. WebAuthn passkeys remain local to this device and are never included.",
       "vault.keyExport.err.failed": "Export failed",
       "vault.keyImportBackup.title": "Import backup",
       "vault.keyImportBackup.submit": "Restore backup",
@@ -359,24 +351,16 @@ const vaultResources: I18nPluginResources = {
       "vault.keyCreate.err.password": "请输入 Vault 密码",
       "vault.keyCreate.password": "Vault 密码",
       "vault.keyDelete.title.warn": "删除 key",
-      "vault.keyDelete.title.final": "再次确认",
-      "vault.keyDelete.cancel": "取消",
       "vault.keyDelete.exportBackup": "导出备份",
-      "vault.keyDelete.next": "下一步删除",
-      "vault.keyDelete.back": "返回",
       "vault.keyDelete.confirm": "确认删除",
       "vault.keyDelete.danger": "删除会同时移除该 key 的私钥以及所有插件在本地的命名空间数据（资产缓存、历史、联系人等）。没有备份或在其他钱包中有副本时，相关资产将永久无法使用。",
       "vault.keyDelete.target": "目标：",
-      "vault.keyDelete.confirmPrompt1": "真的要删除 ",
-      "vault.keyDelete.confirmPrompt2": " 吗？此操作不可撤销。",
-      "vault.keyDelete.typedPrompt1": "请输入 ",
-      "vault.keyDelete.typedPrompt2": " 以确认：",
       "vault.keyDelete.err.failed": "删除失败",
-      "vault.keyDelete.passwordPrompt": "请输入 Vault 密码以继续",
+      "vault.keyDelete.labelPrompt": "请输入目标标签以确认：",
       "vault.keyExport.title": "导出备份",
       "vault.keyExport.cancel": "取消",
       "vault.keyExport.submit": "下载备份文件",
-      "vault.keyExport.hint": "JSON 备份包含密码保护器和已配置的全部 passkey 保护器；任一可用保护器都能恢复同一把私钥。",
+      "vault.keyExport.hint": "导出 canonical KeyHold v2 文档；WebAuthn passkey 仅保留在本机，不会写入导出文件。",
       "vault.keyExport.err.failed": "导出失败",
       "vault.keyImportBackup.title": "导入备份",
       "vault.keyImportBackup.submit": "恢复备份",
@@ -452,7 +436,7 @@ export const vaultPlugin: PluginManifest = {
 
     // 施工单 002：优先使用 Coordinator facade
     let service!: VaultService;
-    let keyspaceHandle: KeyspaceHandle | undefined = undefined;
+    let keyspaceHandle: KeyspaceService | undefined = undefined;
 
     // 尝试获取 Coordinator client（通过 capability）
     let coordinatorClient: CoordinatorClientLike | undefined;
@@ -461,7 +445,7 @@ export const vaultPlugin: PluginManifest = {
       // Both facades derive from one already-committed session mirror.
       const sessionStateMirror = new SessionStateMirror(coordinatorClient);
       service = createVaultServiceCoordinator({ coordinatorClient, sessionStateMirror });
-      keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient as unknown as Parameters<typeof createKeyspaceServiceCoordinator>[0], sessionStateMirror) as unknown as KeyspaceHandle;
+      keyspaceHandle = createKeyspaceServiceCoordinator(coordinatorClient, sessionStateMirror, messageBus);
     }
 
     ctx.provide(VAULT_CAPABILITY, service);
@@ -476,7 +460,7 @@ export const vaultPlugin: PluginManifest = {
       scope: "global",
       key: () => ["vault.key-state"],
       load: async (_args, context) => {
-        const keyspace = context.getCapability<KeyspaceHandle>(KEYSPACE_SERVICE_CAPABILITY);
+        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
         const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
         const keys = keyspace ? await keyspace.listKeys() : [];
         return {
@@ -487,7 +471,7 @@ export const vaultPlugin: PluginManifest = {
         };
       },
       subscribe: (_args, context, invalidate) => {
-        const keyspace = context.getCapability<KeyspaceHandle>(KEYSPACE_SERVICE_CAPABILITY);
+        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
         const vault = context.getCapability<VaultService>(VAULT_CAPABILITY);
         const bus = context.getCapability<MessageBus>("runtime.messageBus");
         const offs = [

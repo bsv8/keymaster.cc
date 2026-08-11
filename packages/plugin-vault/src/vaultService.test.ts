@@ -145,12 +145,19 @@ function hexToBytes(hex: string): Uint8Array {
 async function resetDb(): Promise<void> {
   // 关键：先关闭 db 连接，否则 delete 会被阻塞。
   disposeVaultDb();
-  await new Promise<void>((resolve) => {
-    const req = indexedDB.deleteDatabase("vault");
-    req.onsuccess = () => resolve();
-    req.onerror = () => resolve();
-    req.onblocked = () => resolve();
-  });
+  // `disposeVaultDb()` closes the cached connection in a promise microtask;
+  // resolving immediately from `onblocked` races the next test's open and can
+  // leave stale key records visible. Retry after the close settles instead.
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const deleted = await new Promise<boolean>((resolve) => {
+      const req = indexedDB.deleteDatabase("vault");
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => resolve(true);
+      req.onblocked = () => resolve(false);
+    });
+    if (deleted) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 async function seedLegacyV1Vault(input: {
@@ -218,6 +225,28 @@ afterEach(async () => {
 });
 
 describe("VaultService.importPrivateKey", () => {
+  it("does not retain private material when vaultDb.putKey fails", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    const publicKeyHex = deriveKeyIdentity(hexToBytes(TEST_PRIV_2)).publicKeyHex;
+    const putKey = vi.spyOn(vaultDb, "putKey").mockRejectedValueOnce(new Error("injected put failure"));
+    try {
+      await expect(vault.importPrivateKey({
+        password: "test-pw",
+        label: "put-fails",
+        material: { hex: TEST_PRIV_2 },
+        format: "hex",
+        capabilities: ["p2pkh"]
+      })).rejects.toThrow("injected put failure");
+      expect(await vaultDb.getKey(publicKeyHex)).toBeUndefined();
+      await expect(vault.createActiveKeyCrypto(publicKeyHex)).rejects.toThrow(/Unknown key/i);
+    } finally {
+      putKey.mockRestore();
+    }
+  });
+
   it("allows importing multiple keys into the same vault", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
@@ -240,8 +269,8 @@ describe("VaultService.importPrivateKey", () => {
     expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
     const list = await vault.listKeys();
     expect(list.map((k) => k.label).sort()).toEqual(["first", "second"]);
-    expect((await vaultDb.getKey(a.publicKeyHex))?.cipherVersion).toBe("v2");
-    expect((await vaultDb.getKey(b.publicKeyHex))?.cipherVersion).toBe("v2");
+    expect((await vaultDb.getKey(a.publicKeyHex))?.storageVersion).toBe("keyhold-v2");
+    expect((await vaultDb.getKey(b.publicKeyHex))?.storageVersion).toBe("keyhold-v2");
   });
 
   it("emits key.created AFTER keyspace switches active key (硬切换 008 收尾)", async () => {
@@ -266,6 +295,7 @@ describe("VaultService.importPrivateKey", () => {
     const activeRef: { activePublicKeyHex?: string } = {};
     const keyspaceFake = {
       active: () => activeRef,
+      selected: () => activeRef.activePublicKeyHex,
       notifyKeyCreated: async (id: { publicKeyHex: string }) => {
         // 模拟真实 keyspace：切到新 key。
         activeRef.activePublicKeyHex = id.publicKeyHex;
@@ -337,14 +367,11 @@ describe("VaultService.exportKeyBackup", () => {
     });
     await vault.lock();
     await waitForStatus(vault, "locked");
-    const { decodeKeyBackup, passwordBackupView } = await import("./keyBackup.js");
     const payload = await vault.exportKeyBackup(ref.publicKeyHex);
-    const decoded = decodeKeyBackup(payload);
-    const password = passwordBackupView(decoded);
-    expect(decoded.backupVersion).toBe(2);
-    expect(password.sourceVaultMeta.id).toBe("singleton");
-    expect(password.keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
-    expect(password.keyRecord.label).toBe("k");
+    const decoded = JSON.parse(payload) as { format: string; publicKeyHex: string; label: string };
+    expect(decoded.format).toBe("keymaster");
+    expect(decoded.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(decoded.label).toBe("k");
   });
 });
 
@@ -471,12 +498,12 @@ describe("VaultService.importKeyBackup", () => {
   });
 });
 
-describe("VaultService.verifyPassword (硬切换 002 删除授权)", () => {
+describe("VaultService.verifyPassword (密码校验契约)", () => {
   // 关键不变量：
   //   - 密码正确 resolve；不修改 status / session key / 内存会话 / 不发事件。
   //   - 密码错误抛 Invalid password；同样不副作用。
   //   - uninitialized / booting 状态没有 verifier，必须 fail closed。
-  //   - locked 与 unlocked 状态都允许调用（删除前重新鉴权）。
+  //   - locked 与 unlocked 状态都允许调用，不改变生命周期状态。
   it("resolves on correct password and does NOT change status / emit events", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
@@ -504,7 +531,7 @@ describe("VaultService.verifyPassword (硬切换 002 删除授权)", () => {
     expect(records.length).toBe(before);
   });
 
-  it("works in locked state (used for delete authorization on re-entry)", async () => {
+  it("works in locked state without changing lifecycle", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
@@ -740,63 +767,17 @@ describe("VaultService.createAppViewSession (Worker 生命周期)", () => {
   });
 });
 
-describe("VaultService.unlock AAD migration (硬切换 4.3)", () => {
-  it("re-encrypts legacy v1 key records to v2 AAD and updates vault_meta", async () => {
-    const legacyPublicKeyHex = await seedLegacyV1Vault({
-      password: "test-pw",
-      privateKeyHex: TEST_PRIV,
-      label: "legacy"
-    });
+describe("VaultService legacy records (KeyHold hard switch)", () => {
+  it("keeps legacy records opaque and rejects unlock/crypto", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
-    await waitForStatus(vault, "locked");
-
-    await vault.unlock("test-pw");
-
-    expect(vault.status()).toBe("unlocked");
-    const meta = await vaultDb.getMeta();
-    expect(meta?.cryptoVersion).toBe("v2");
-    expect(meta?.kdf).toBe("pbkdf2-sha256");
-    expect(meta?.iterations).toBe(200_000);
-    expect(meta?.keyLengthBits).toBe(256);
-    const migrated = await vaultDb.getKey(legacyPublicKeyHex);
-    expect(migrated?.cipherVersion).toBe("v2");
-    expect(migrated?.cipherB64).toBeDefined();
-    const crypto = await vault.createActiveKeyCrypto(legacyPublicKeyHex);
-    expect(crypto.getIdentity().publicKeyHex).toBe(legacyPublicKeyHex);
-    // Migration must also replace the old verifier; otherwise the next lock
-    // screen would reject the same password even though this unlock succeeded.
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    const publicKeyHex = deriveKeyIdentity(hexToBytes(TEST_PRIV)).publicKeyHex;
+    await vaultDb.putKey({ publicKeyHex, label: "legacy", address: "", network: "main", format: "legacy", capabilities: [], createdAt: new Date().toISOString(), cipherSaltB64: "00", cipherIvB64: "00", cipherB64: "00" });
     await vault.lock();
-    await vault.unlock("test-pw");
-    expect(vault.status()).toBe("unlocked");
-  });
-
-  it("unlocks legacy base64 vault data and rewrites it to the current hex representation", async () => {
-    const legacyPublicKeyHex = await seedLegacyV1Vault({
-      password: "test-pw",
-      privateKeyHex: TEST_PRIV,
-      label: "legacy base64",
-      binaryEncoding: "base64"
-    });
-    const { messageBus: events } = makeMessageBus();
-    const vault = createVaultService({ messageBus: events });
-    await waitForStatus(vault, "locked");
-
-    await vault.unlock("test-pw");
-
-    expect(vault.status()).toBe("unlocked");
-    const meta = await vaultDb.getMeta();
-    const migrated = await vaultDb.getKey(legacyPublicKeyHex);
-    expect(meta?.saltB64).toMatch(/^[0-9a-f]{32}$/);
-    expect(meta?.verifierSaltB64).toMatch(/^[0-9a-f]{32}$/);
-    expect(migrated?.cipherSaltB64).toMatch(/^[0-9a-f]{32}$/);
-    expect(migrated?.cipherVersion).toBe("v2");
-    expect((await vault.createActiveKeyCrypto(legacyPublicKeyHex)).getIdentity().publicKeyHex).toBe(
-      legacyPublicKeyHex
-    );
-    await vault.lock();
-    await vault.unlock("test-pw");
-    expect(vault.status()).toBe("unlocked");
+    await expect(vault.unlock("test-pw")).rejects.toThrow("Unsupported key storage version");
+    await expect(vault.exportKeyBackup(publicKeyHex)).rejects.toThrow("Unsupported key storage version");
   });
 });
 
@@ -833,6 +814,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     let onVaultLockedCount = 0;
     const keyspaceFake = {
       active: () => ({}),
+      selected: () => undefined,
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: async () => {
@@ -971,6 +953,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     const { messageBus: events, records } = makeMessageBus();
     const keyspaceFake = {
       active: () => ({}),
+      selected: () => undefined,
       setInitializing: () => undefined,
       onVaultUnlocked: async () => undefined,
       onVaultLocked: async () => {
@@ -1207,6 +1190,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     const callOrder: string[] = [];
     const keyspaceFake = {
       active: () => ({}),
+      selected: () => undefined,
       setInitializing: (v: boolean) => {
         callOrder.push(`keyspace.setInitializing(${v})`);
       },
@@ -1275,6 +1259,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
 
     const keyspaceFake = {
       active: () => ({}),
+      selected: () => undefined,
       setInitializing: () => undefined,
       onVaultUnlocked: async () => {
         throw new Error("simulated keyspace failure");
@@ -1420,6 +1405,21 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     expect(new Uint8Array(sig.signature).length).toBeGreaterThan(0);
   });
 
+  it("engine disposal clears only its clone; cached material remains usable until lock", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("test-pw");
+    const ref = await vault.generateKey({ password: "test-pw", label: "ownership" });
+    const first = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    first.dispose("test clone disposal");
+    const second = await vault.createActiveKeyCrypto(ref.publicKeyHex);
+    const sig = await second.signDigest({ publicKeyHex: ref.publicKeyHex, digest: new Uint8Array(32).buffer, format: "der" });
+    expect(sig.publicKeyHex).toBe(ref.publicKeyHex);
+    await vault.lock();
+    await expect(vault.createActiveKeyCrypto(ref.publicKeyHex)).rejects.toThrow(/locked/i);
+  });
+
   it("exportEncryptedKeyBackup returns canonical backup JSON and is revoked on lock", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
@@ -1430,10 +1430,10 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const exported = await crypto.exportEncryptedKeyBackup({
       publicKeyHex: ref.publicKeyHex
     });
-    const { decodeKeyBackup, passwordBackupView } = await import("./keyBackup.js");
-    const decoded = decodeKeyBackup(new TextDecoder().decode(exported.backup));
+    const decoded = JSON.parse(new TextDecoder().decode(exported.backup)) as { format: string; publicKeyHex: string };
     expect(exported.publicKeyHex).toBe(ref.publicKeyHex);
-    expect(passwordBackupView(decoded).keyRecord.publicKeyHex).toBe(ref.publicKeyHex);
+    expect(decoded.format).toBe("keymaster");
+    expect(decoded.publicKeyHex).toBe(ref.publicKeyHex);
     await vault.lock();
     await expect(
       crypto.exportEncryptedKeyBackup({ publicKeyHex: ref.publicKeyHex })
@@ -1464,6 +1464,7 @@ describe("VaultService.generateKey (硬切换 002)", () => {
     const callOrder: string[] = [];
     const keyspaceFake = {
       active: () => ({}),
+      selected: () => undefined,
       notifyKeyCreated: async () => {
         callOrder.push("notifyKeyCreated");
       },

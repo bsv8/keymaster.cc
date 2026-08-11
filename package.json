@@ -16,7 +16,7 @@
     "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
-    "test": "pnpm lint:react-boundaries && vitest run",
+    "test": "pnpm lint:react-boundaries && node scripts/run-vitest-batches.mjs",
     "test:storage:smoke": "vitest run --config vitest.storage-smoke.config.ts",
     "test:e2e": "playwright test",
     "test:e2e:report": "playwright show-report"

@@ -26,6 +26,7 @@
 //     忽略，回写时也不再续命。
 
 import type { MessageBus } from "@keymaster/runtime";
+import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, serialize as keyholdSerialize, unlock as keyholdUnlock, recommendedParameters as keyholdRecommendedParameters, type Document as KeyHoldDocument } from "keyhold";
 import { reportFatalError } from "@keymaster/runtime";
 import {
   EVENT_ACTIVE_KEY_CHANGED,
@@ -51,14 +52,10 @@ import {
   hexToBytes
 } from "./crypto.js";
 import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
-import { buildKeyBackupEnvelope, encodeKeyBackup, decodeKeyBackup, passwordBackupView } from "./keyBackup.js";
 import { deriveKeyIdentity, generatePrivateKeyHex } from "./keyIdentity.js";
 import {
   buildVaultMeta as coordinatorBuildVaultMeta,
-  decryptVaultKeyMaterialForMigration as coordinatorDecryptVaultKeyMaterialForMigration,
-  encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial,
   deriveVaultPasswordKey as coordinatorDeriveVaultPasswordKey,
-  migrateVaultKeysToV2Aad as coordinatorMigrateVaultKeysToV2Aad,
   resolveVaultPasswordKey as coordinatorResolveVaultPasswordKey,
   verifyVaultPasswordKey as coordinatorVerifyVaultPasswordKey
 } from "./vaultCoordinator.js";
@@ -66,7 +63,7 @@ import {
   createSessionCryptoEngine,
   type SessionCryptoClientOptions
 } from "./sessionCryptoClient.js";
-import { vaultDb, type VaultKeyRecord, type VaultMetaRecord } from "./vaultDb.js";
+import { vaultDb, type VaultKeyRecord, type VaultMetaRecord, type VaultPasskeyProtectionRecord } from "./vaultDb.js";
 import type { KeyspaceHandle } from "./keyspaceService.js";
 import type { ActiveKeyCrypto } from "@keymaster/contracts";
 import {
@@ -81,6 +78,9 @@ import {
 interface VaultKeyMaterial {
   hex: string;
   wif?: string;
+}
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 // 透传 contracts 中的 KeyPersistedButActivationFailedError：
@@ -169,6 +169,7 @@ function validateKeyShape(record: unknown): string | null {
   if (typeof r.publicKeyHex !== "string" || r.publicKeyHex.length === 0) {
     return "key.publicKeyHex missing or empty";
   }
+  if (r.storageVersion !== "keyhold-v2") return null;
   if (typeof r.label !== "string" || r.label.length === 0) {
     return `key(${String(r.publicKeyHex)}).label missing or empty`;
   }
@@ -184,33 +185,10 @@ function validateKeyShape(record: unknown): string | null {
   if (typeof r.createdAt !== "string" || r.createdAt.length === 0) {
     return `key(${String(r.publicKeyHex)}).createdAt missing or empty`;
   }
-  if (typeof r.cipherSaltB64 !== "string" || r.cipherSaltB64.length === 0) {
-    return `key(${String(r.publicKeyHex)}).cipherSaltB64 missing or empty`;
-  }
-  if (typeof r.cipherIvB64 !== "string" || r.cipherIvB64.length === 0) {
-    return `key(${String(r.publicKeyHex)}).cipherIvB64 missing or empty`;
-  }
-  if (typeof r.cipherB64 !== "string" || r.cipherB64.length === 0) {
-    return `key(${String(r.publicKeyHex)}).cipherB64 missing or empty`;
-  }
-  if (r.passkeyProtections !== undefined) {
-    if (!Array.isArray(r.passkeyProtections)) {
-      return `key(${String(r.publicKeyHex)}).passkeyProtections must be an array`;
-    }
-    for (const [index, value] of r.passkeyProtections.entries()) {
-      if (!value || typeof value !== "object") {
-        return `key(${String(r.publicKeyHex)}).passkeyProtections[${index}] invalid`;
-      }
-      const p = value as Record<string, unknown>;
-      for (const field of ["id", "label", "credentialIdB64", "prfSaltB64", "rpId", "createdAt", "cipherIvB64", "cipherB64"]) {
-        if (typeof p[field] !== "string" || !p[field]) {
-          return `key(${String(r.publicKeyHex)}).passkeyProtections[${index}].${field} missing`;
-        }
-      }
-      if (p.cipherVersion !== "webauthn-prf-v1") {
-        return `key(${String(r.publicKeyHex)}).passkeyProtections[${index}].cipherVersion invalid`;
-      }
-    }
+  // Legacy records are intentionally retained as opaque bytes. They are
+  // unsupported for unlock/export but must never crash bootstrap.
+  if (r.storageVersion === "keyhold-v2" && (!r.keyholdDocument || typeof r.keyholdDocument !== "object")) {
+    return `key(${String(r.publicKeyHex)}).keyholdDocument missing`;
   }
   return null;
 }
@@ -238,6 +216,17 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     passwordKey: CryptoKey;
   }
   let vaultSession: VaultSessionStateInternal | null = null;
+  const sessionPrivateKeys = new Map<string, Uint8Array>();
+  function replaceSessionPrivateKey(publicKeyHex: string, privateKeyBytes: Uint8Array): void {
+    const previous = sessionPrivateKeys.get(publicKeyHex);
+    if (previous && previous !== privateKeyBytes) previous.fill(0);
+    sessionPrivateKeys.set(publicKeyHex, privateKeyBytes);
+  }
+  function dropSessionPrivateKey(publicKeyHex: string): void {
+    const existing = sessionPrivateKeys.get(publicKeyHex);
+    if (existing) existing.fill(0);
+    sessionPrivateKeys.delete(publicKeyHex);
+  }
   /** 当前 key 列表的内存缓存（identity 字段已就绪），避免每次都 await IndexedDB。 */
   let keyCache: KeyRef[] | null = null;
   /**
@@ -365,6 +354,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
     }
     keyCache = null;
+    for (const bytes of sessionPrivateKeys.values()) bytes.fill(0);
+    sessionPrivateKeys.clear();
     setPendingActivationNotice(null);
     if (activeChangeUnsub) {
       activeChangeUnsub();
@@ -379,62 +370,59 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     sessionId?: string
   ): Promise<SessionCryptoEngine> {
     const identity = await recordToIdentity(record);
-    return createSessionCryptoEngine(
-      {
-        sessionId: sessionId ?? crypto.randomUUID(),
-        publicKeyHex: record.publicKeyHex,
-        passwordKey,
-        encryptedPrivateKey: {
+    const privateKey = sessionPrivateKeys.get(record.publicKeyHex);
+    if (!privateKey) throw new Error("Unsupported key storage version");
+    const enginePrivateKey = privateKey.slice();
+    try {
+      return await createSessionCryptoEngine(
+        {
+          sessionId: sessionId ?? crypto.randomUUID(),
           publicKeyHex: record.publicKeyHex,
-          cipherVersion: record.cipherVersion ?? "v1",
-          cipherSaltB64: record.cipherSaltB64,
-          cipherIvB64: record.cipherIvB64,
-          cipherB64: record.cipherB64
+          privateKeyBytes: enginePrivateKey,
+          label: identity.label,
+          capabilities: identity.capabilities,
+          createdAt: identity.createdAt
         },
-        label: identity.label,
-        capabilities: identity.capabilities,
-        createdAt: identity.createdAt
-      },
-      deps.sessionCryptoEngineOptions ?? {
-        allowLocalEngineForTests: Boolean(
-          (globalThis as { process?: { env?: { VITEST?: string } } }).process?.env?.VITEST
-        )
-      }
-    );
+        deps.sessionCryptoEngineOptions ?? {
+          allowLocalEngineForTests: Boolean(
+            (globalThis as { process?: { env?: { VITEST?: string } } }).process?.env?.VITEST
+          )
+        }
+      );
+    } catch (err) {
+      enginePrivateKey.fill(0);
+      throw err;
+    }
   }
 
   async function createActiveCryptoForPasskey(
     record: VaultKeyRecord,
     passkeyId: string,
-    prfOutput: Uint8Array
+    prfOutput: Uint8Array,
+    privateKeyBytes: Uint8Array
   ): Promise<SessionCryptoEngine> {
-    const protection = record.passkeyProtections?.find((item) => item.id === passkeyId);
-    if (!protection) throw new Error("Passkey protection not found");
     const identity = await recordToIdentity(record);
-    const prfKey = await aesGcmKeyFromRawBits(prfOutput);
-    return createSessionCryptoEngine(
-      {
-        sessionId: crypto.randomUUID(),
-        publicKeyHex: record.publicKeyHex,
-        passwordKey: prfKey,
-        encryptedPrivateKey: {
+    const enginePrivateKey = privateKeyBytes.slice();
+    try {
+      return await createSessionCryptoEngine(
+        {
+          sessionId: crypto.randomUUID(),
           publicKeyHex: record.publicKeyHex,
-          cipherVersion: "v2",
-          cipherSaltB64: "",
-          cipherIvB64: protection.cipherIvB64,
-          cipherB64: protection.cipherB64,
-          aad: passkeyAad(record.publicKeyHex, protection.credentialIdB64)
+          privateKeyBytes: enginePrivateKey,
+          label: identity.label,
+          capabilities: identity.capabilities,
+          createdAt: identity.createdAt
         },
-        label: identity.label,
-        capabilities: identity.capabilities,
-        createdAt: identity.createdAt
-      },
-      deps.sessionCryptoEngineOptions ?? {
-        allowLocalEngineForTests: Boolean(
-          (globalThis as { process?: { env?: { VITEST?: string } } }).process?.env?.VITEST
-        )
-      }
-    );
+        deps.sessionCryptoEngineOptions ?? {
+          allowLocalEngineForTests: Boolean(
+            (globalThis as { process?: { env?: { VITEST?: string } } }).process?.env?.VITEST
+          )
+        }
+      );
+    } catch (err) {
+      enginePrivateKey.fill(0);
+      throw err;
+    }
   }
 
   function wrapActiveKeyCrypto(
@@ -462,9 +450,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         if (input.publicKeyHex !== record.publicKeyHex) {
           throw new Error("session_key_mismatch");
         }
-        const backup = encodeKeyBackup(
-          buildKeyBackupEnvelope((await vaultDb.getMeta())!, record)
-        );
+        if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) throw new Error("Unsupported key storage version");
+        const backup = keyholdSerialize(record.keyholdDocument);
         return {
           publicKeyHex: record.publicKeyHex,
           backup: new TextEncoder().encode(backup).buffer
@@ -676,6 +663,19 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     keyCache = records.map(recordToRef);
   }
 
+  async function unlockKeyHoldRecord(record: VaultKeyRecord, password: string): Promise<Uint8Array> {
+    if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) {
+      throw new Error("Unsupported key storage version");
+    }
+    const parsed = keyholdParse(keyholdSerialize(record.keyholdDocument));
+    const result = await keyholdUnlock(parsed, password);
+    if (result.publicKeyHex !== record.publicKeyHex) {
+      result.privateKey.fill(0);
+      throw new Error("KeyHold public key mismatch");
+    }
+    return result.privateKey;
+  }
+
   /**
    * 硬切换 002：从 importPrivateKey 抽出的统一私钥持久化内部函数。
    * 负责：trim 标签 / 校验长度 / 派生公钥身份 / 重复检查 / 加密私钥 /
@@ -697,12 +697,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     capabilities: string[];
     source?: string;
     passwordKey: CryptoKey;
-    encryptVaultKeyMaterial: (publicKeyHex: string, material: VaultKeyMaterial) => Promise<{
-      cipherVersion: "v2";
-      cipherSaltB64: string;
-      cipherIvB64: string;
-      cipherB64: string;
-    }>;
+    password: string;
   }): Promise<KeyRef> {
     // 1) 锁定守卫：locked 状态 fail closed，避免在外层调用方
     //    看不到错误就泄漏。
@@ -713,73 +708,92 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
     if (label.length > LABEL_MAX_LENGTH) {
       throw new Error(`Label must be at most ${LABEL_MAX_LENGTH} characters`);
     }
-    // 3) 派生公钥身份并按 publicKeyHex 重复检查。
-    const identity = deriveKeyIdentity(hexToBytes(input.material.hex));
-    const existing = await vaultDb.getKey(identity.publicKeyHex);
-    if (existing) {
-      throw new Error("Key already exists");
-    }
-    // 4) 加密私钥材料。原始 hex/WIF 不会落盘，也不会出现在 KeyRef。
-    const encrypted = await input.encryptVaultKeyMaterial(identity.publicKeyHex, input.material);
-    // 硬切换 002 收尾：`address` / `network` 写空 + main 仅作兼容
-    // 字段保留——它们不是 owner 真值、不是 key 根身份；新代码禁
-    // 止依赖这两字段做身份 / 地址 / 资产判断。
-    const record: VaultKeyRecord = {
-      publicKeyHex: identity.publicKeyHex,
-      label,
-      address: "",
-      network: "main",
-      format: input.format,
-      capabilities: input.capabilities,
-      createdAt: new Date().toISOString(),
-      source: input.source,
-      ...encrypted
-    };
-    // 5) DB 写入必须发生在 notify / emit 之前——失败时 keyspace
-    //    不会误把不存在的 key 选为 active，订阅者也不会收到
-    //    "key.created" 但 DB 里没有的虚假事件。
-    await vaultDb.putKey(record);
-    const ref = recordToRef(record);
-    keyCache = null;
-    // 6) 先通知 keyspace（内部把新 key 注册为 active），再 emit key.created；
-    //    订阅者看到的 active 已切好。
-    //
-    // 硬切换 002 收尾：如果 keyspace 通知失败，DB 已经有这把 key，但 active
-    // 没切。抛 `KeyPersistedButActivationFailedError` 让 UI 进入"已保存但
-    // 未 active"的成功/警告态，**不**发 "key.created"——否则订阅者从
-    // 事件 handler 读 keyspace.active() 会看到与 payload publicKeyHex
-    // 不一致的状态（payload 是新 key，active 是旧 key）。
-    //
-    // 硬切换 004 收尾：必须 await notifyKeyCreated。keyspace 内部会
-    // 先 await quiesceNamespace(prev.active) 把旧 key 的后台任务停稳，
-    // 然后才切 active；同步不 await 等于把旧 key 的 history-backfill
-    // 留在内存里继续跑，新 active 的 namespace DB 一旦被业务插件打开，
-    // 旧 task 仍可能撞 `database connection is closing`——和手动
-    // setActive 的同类竞态。
-    if (deps.keyspace) {
-      try {
-        await deps.keyspace.notifyKeyCreated(await recordToIdentity(record));
-      } catch (notifyErr) {
-        throw new KeyPersistedButActivationFailedError({
-          key: ref,
-          cause: notifyErr
-        });
+    // 3) 私钥材料是本函数唯一的明文 owner。身份派生、KeyHold 导出和
+    //    后续 session 缓存都复用同一个 Uint8Array；在 DB 成功前绝不
+    //    把它放入 session map，任何未转移的异常路径都必须清零。
+    const privateKeyBytes = hexToBytes(input.material.hex);
+    let sessionOwnershipTransferred = false;
+    let identity: ReturnType<typeof deriveKeyIdentity> | undefined;
+    try {
+      const derivedIdentity = deriveKeyIdentity(privateKeyBytes);
+      identity = derivedIdentity;
+      const existing = await vaultDb.getKey(derivedIdentity.publicKeyHex);
+      if (existing) {
+        throw new Error("Key already exists");
       }
+      // 4) 加密私钥材料。原始 hex/WIF 不会落盘，也不会出现在 KeyRef。
+      const keyholdDocument = keyholdParse(await keyholdExportPrivateKey({
+        privateKey: privateKeyBytes,
+        password: input.password,
+        label,
+        parameters: keyholdRecommendedParameters()
+      })) as KeyHoldDocument;
+      // 硬切换 002 收尾：`address` / `network` 写空 + main 仅作兼容
+      // 字段保留——它们不是 owner 真值、不是 key 根身份；新代码禁
+      // 止依赖这两字段做身份 / 地址 / 资产判断。
+      const record: VaultKeyRecord = {
+        publicKeyHex: derivedIdentity.publicKeyHex,
+        label,
+        address: "",
+        network: "main",
+        format: input.format,
+        capabilities: input.capabilities,
+        createdAt: new Date().toISOString(),
+        source: input.source,
+        storageVersion: "keyhold-v2",
+        keyholdDocument
+      };
+      // 5) DB 写入必须发生在 notify / emit 之前——失败时 keyspace
+      //    不会误把不存在的 key 选为 active，订阅者也不会收到
+      //    "key.created" 但 DB 里没有的虚假事件。
+      await vaultDb.putKey(record);
+      // DB 成功后才将明文所有权转移给 session cache。若后续激活失败，
+      // 显式 drop 会清零这份 owner；持久化记录仍按既有语义保留。
+      if (vaultSession) {
+        replaceSessionPrivateKey(derivedIdentity.publicKeyHex, privateKeyBytes);
+        sessionOwnershipTransferred = true;
+      }
+      const ref = recordToRef(record);
+      keyCache = null;
+      // 6) 先通知 keyspace（内部把新 key 注册为 active），再 emit key.created；
+      //    订阅者看到的 active 已切好。
+      if (deps.keyspace) {
+        try {
+          await deps.keyspace.notifyKeyCreated(await recordToIdentity(record));
+        } catch (notifyErr) {
+          if (sessionOwnershipTransferred) {
+            dropSessionPrivateKey(derivedIdentity.publicKeyHex);
+            sessionOwnershipTransferred = false;
+          }
+          throw new KeyPersistedButActivationFailedError({
+            key: ref,
+            cause: notifyErr
+          });
+        }
+      }
+      // 7) 仅在 active 切换成功后才发 key.created。
+      await createAndInstallSessionActiveCrypto(record, input.passwordKey);
+      deps.messageBus.publish("key.created", {
+        publicKeyHex: derivedIdentity.publicKeyHex,
+        label
+      });
+      deps.logger?.info({
+        scope: "vault.key",
+        event: "key.created",
+        message: "Vault key created",
+        data: { publicKeyHex: identity.publicKeyHex, label },
+        keyScope: { publicKeyHex: derivedIdentity.publicKeyHex }
+      });
+      return ref;
+    } catch (error) {
+      if (sessionOwnershipTransferred && identity) {
+        dropSessionPrivateKey(identity.publicKeyHex);
+        sessionOwnershipTransferred = false;
+      }
+      throw error;
+    } finally {
+      if (!sessionOwnershipTransferred) privateKeyBytes.fill(0);
     }
-    // 7) 仅在 active 切换成功后才发 key.created。
-    await createAndInstallSessionActiveCrypto(record, input.passwordKey);
-    deps.messageBus.publish("key.created", {
-      publicKeyHex: identity.publicKeyHex,
-      label
-    });
-    deps.logger?.info({
-      scope: "vault.key",
-      event: "key.created",
-      message: "Vault key created",
-      data: { publicKeyHex: identity.publicKeyHex, label },
-      keyScope: { publicKeyHex: identity.publicKeyHex }
-    });
-    return ref;
   }
 
   return {
@@ -952,8 +966,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
           source: GENERATED_SOURCE,
           passwordKey: key,
-          encryptVaultKeyMaterial: (publicKeyHex, material) =>
-            coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material)
+          password: input.password
         });
       } catch (err) {
         if (err instanceof KeyPersistedButActivationFailedError) {
@@ -1079,8 +1092,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           capabilities: input.key.capabilities,
           source: input.key.source,
           passwordKey: key,
-          encryptVaultKeyMaterial: (publicKeyHex, material) =>
-            coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material)
+        password: input.vaultPassword
         });
       } catch (err) {
         if (err instanceof KeyPersistedButActivationFailedError) {
@@ -1139,19 +1151,12 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const { key, encoding, verifierVersion } = await coordinatorResolveVaultPasswordKey(password, meta);
       startVaultSession(key);
       try {
-        await coordinatorMigrateVaultKeysToV2Aad({
-          meta,
-          records: await vaultDb.listKeys(),
-          decryptRecord: (record) => coordinatorDecryptVaultKeyMaterialForMigration(key, record, encoding),
-          encryptRecord: (publicKeyHex, material) =>
-            coordinatorEncryptVaultKeyMaterial(key, publicKeyHex, material),
-          putMeta: (nextMeta) => vaultDb.putMeta(nextMeta),
-          putMetaAndKeys: (nextMeta, records) => vaultDb.putMetaAndKeys(nextMeta, records),
-          forceReencrypt: encoding === "base64" || verifierVersion === "v1",
-          sourceEncoding: encoding,
-          sourceVerifierVersion: verifierVersion,
-          replacementVerifier: verifierVersion === "v1" ? await encryptVerifier(key) : undefined
-        });
+        const records = await vaultDb.listKeys();
+        // Hard switch: legacy records remain opaque and are never migrated.
+        // The selected record is validated by KeyHold only when actually unlocked.
+        const selectedHex = deps.keyspace?.selected();
+        const selected = (selectedHex ? await vaultDb.getKey(selectedHex) : undefined) ?? records[0];
+        if (selected) replaceSessionPrivateKey(selected.publicKeyHex, await unlockKeyHoldRecord(selected, password));
         // 硬切换 005 收尾：unlock 收尾前若 vault_keys 已空，按"meta 残留"
         // 路径收敛到 uninitialized——直接清空内存会话、删 meta，不再走
         // keyspace.onVaultUnlocked / setStatus("unlocked")。
@@ -1254,25 +1259,26 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const targetKey = await coordinatorDeriveVaultPasswordKey(newPassword, targetSalt);
       const targetVerifier = await encryptVerifier(targetKey);
       const records = await vaultDb.listKeys();
-      const rotatedRecords: VaultKeyRecord[] = [];
-      for (const record of records) {
-        const material = await coordinatorDecryptVaultKeyMaterialForMigration(oldKey, record);
-        const identity = deriveKeyIdentity(hexToBytes(material.hex));
-        if (identity.publicKeyHex !== record.publicKeyHex) {
-          throw new Error(
-            `vault key ${record.publicKeyHex} failed identity verification during password rotation`
-          );
+      // Preflight and re-encrypt all canonical documents before the atomic
+      // metadata/key commit.  The independent KeyHold KDFs can run in
+      // parallel, keeping password rotation responsive without weakening the
+      // all-or-nothing write boundary.
+      const rotatedRecords = await Promise.all(records.map(async (record): Promise<VaultKeyRecord> => {
+        if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) {
+          throw new Error("Unsupported key storage version");
         }
-      const encrypted = await coordinatorEncryptVaultKeyMaterial(
-        targetKey,
-        record.publicKeyHex,
-        material
-      );
-        rotatedRecords.push({
-          ...record,
-          ...encrypted
-        });
-      }
+        const unlocked = await keyholdUnlock(keyholdParse(keyholdSerialize(record.keyholdDocument)), oldPassword);
+        try {
+          if (unlocked.publicKeyHex !== record.publicKeyHex) {
+            unlocked.privateKey.fill(0);
+            throw new Error("KeyHold public key mismatch");
+          }
+          const nextDoc = keyholdParse(await keyholdExportPrivateKey({ privateKey: unlocked.privateKey, password: newPassword, label: record.label, parameters: keyholdRecommendedParameters() }));
+          return { ...record, keyholdDocument: nextDoc };
+        } finally {
+          unlocked.privateKey.fill(0);
+        }
+      }));
       const nextMeta = coordinatorBuildVaultMeta({
         salt: targetSalt,
         verifier: targetVerifier,
@@ -1408,33 +1414,51 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!record) {
         throw new Error(`Unknown key ${input.publicKeyHex}`);
       }
-      const material = await coordinatorDecryptVaultKeyMaterialForMigration(passwordKey, record);
-      const identity = deriveKeyIdentity(hexToBytes(material.hex));
-      if (identity.publicKeyHex !== record.publicKeyHex) {
-        throw new Error(
-          `vault key ${record.publicKeyHex} failed identity verification during active switch`
-        );
-      }
+      const privateKey = await unlockKeyHoldRecord(record, input.password);
       const previousActive = deps.keyspace?.active().activePublicKeyHex;
-      if (deps.keyspace) {
-        if (!previousActive) {
-          throw new Error("Vault is locked");
-        }
-        if (previousActive === input.publicKeyHex) {
-          await createAndInstallSessionActiveCrypto(record, passwordKey);
-          return { status: "accepted" } satisfies CoordinatorCommandResult;
-        }
-        await deps.keyspace.setActive(input.publicKeyHex);
+      if (deps.keyspace && !previousActive) {
+        privateKey.fill(0);
+        throw new Error("Vault is locked");
       }
-      await createAndInstallSessionActiveCrypto(record, passwordKey);
-      revokeActiveKeyCryptoLeases(previousActive, "active key changed");
-      return { status: "accepted" } satisfies CoordinatorCommandResult;
+      const previousTargetBytes = sessionPrivateKeys.get(record.publicKeyHex)?.slice();
+      let transferred = false;
+      try {
+        replaceSessionPrivateKey(record.publicKeyHex, privateKey);
+        transferred = true;
+        if (deps.keyspace && previousActive !== input.publicKeyHex) {
+          await deps.keyspace.setActive(input.publicKeyHex);
+        }
+        await createAndInstallSessionActiveCrypto(record, passwordKey);
+        revokeActiveKeyCryptoLeases(previousActive, "active key changed");
+        if (previousTargetBytes) previousTargetBytes.fill(0);
+        return { status: "accepted" } satisfies CoordinatorCommandResult;
+      } catch (error) {
+        if (transferred) {
+          dropSessionPrivateKey(record.publicKeyHex);
+          transferred = false;
+        }
+        if (previousTargetBytes) replaceSessionPrivateKey(record.publicKeyHex, previousTargetBytes);
+        if (deps.keyspace && previousActive && previousActive !== input.publicKeyHex) {
+          try {
+            if (deps.keyspace.active().activePublicKeyHex !== previousActive) {
+              await deps.keyspace.setActive(previousActive);
+            }
+          } catch {
+            // The durable key remains intact; surface the original activation
+            // error while keeping the session cache internally consistent.
+          }
+        }
+        throw error;
+      } finally {
+        if (!transferred) privateKey.fill(0);
+      }
     },
 
     async listPasskeysForKey(publicKeyHex: string) {
       const record = await vaultDb.getKey(publicKeyHex);
       if (!record) throw new Error(`Unknown key ${publicKeyHex}`);
-      return (record.passkeyProtections ?? []).map(toPasskeySummary);
+      const sidecars = await vaultDb.listSidecars(publicKeyHex);
+      return sidecars.map(toPasskeySummary);
     },
 
     async listCurrentKeyPasskeys() {
@@ -1443,7 +1467,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
       const record = await vaultDb.getKey(vaultSession.publicKeyHex);
       if (!record) throw new Error("Active key not found");
-      return (record.passkeyProtections ?? []).map(toPasskeySummary);
+      const sidecars = await vaultDb.listSidecars(vaultSession.publicKeyHex);
+      return sidecars.map(toPasskeySummary);
     },
 
     async addPasskeyToCurrentKey(input: { label: string }) {
@@ -1457,25 +1482,25 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       const passwordKey = vaultSession.passwordKey;
       const record = await vaultDb.getKey(publicKeyHex);
       if (!record) throw new Error("Active key not found");
-      if ((record.passkeyProtections ?? []).some((item) => item.label === label)) {
+      const existingSidecars = await vaultDb.listSidecars(publicKeyHex);
+      if (existingSidecars.some((item) => item.label === label)) {
         throw new Error("Passkey name already exists for this key");
       }
-      const material = await coordinatorDecryptVaultKeyMaterialForMigration(passwordKey, record);
+      const privateKey = sessionPrivateKeys.get(publicKeyHex);
+      if (!privateKey) throw new Error("Unsupported key storage version");
       const created = await createPasskeyPrf({ label, publicKeyHex: record.publicKeyHex });
       try {
         if (status !== "unlocked" || vaultSession?.publicKeyHex !== publicKeyHex) {
           throw new Error("Current key changed during passkey setup");
         }
-        if ((await vaultDb.listKeys()).some((key) =>
-          (key.passkeyProtections ?? []).some((item) => item.id === created.credentialIdB64)
-        )) {
+        if ((await Promise.all((await vaultDb.listKeys()).map((key) => vaultDb.listSidecars(key.publicKeyHex)))).some((items) => items.some((item) => item.id === created.credentialIdB64))) {
           throw new Error("Passkey already exists in this Vault");
         }
         const encrypted = await encryptMaterialWithPasskey({
           prfOutput: created.prfOutput,
           publicKeyHex: record.publicKeyHex,
           credentialIdB64: created.credentialIdB64,
-          material
+          privateKeyBytes: privateKey
         });
         const protection = {
           id: created.credentialIdB64,
@@ -1487,10 +1512,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           transports: created.transports,
           ...encrypted
         };
-        await vaultDb.putKey({
-          ...record,
-          passkeyProtections: [...(record.passkeyProtections ?? []), protection]
-        });
+        await vaultDb.putSidecar({ publicKeyHex: record.publicKeyHex, ...protection });
         return toPasskeySummary(protection);
       } finally {
         created.prfOutput.fill(0);
@@ -1503,39 +1525,73 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       }
       const record = await vaultDb.getKey(vaultSession.publicKeyHex);
       if (!record) throw new Error("Active key not found");
-      const next = (record.passkeyProtections ?? []).filter((item) => item.id !== input.passkeyId);
-      if (next.length === (record.passkeyProtections ?? []).length) {
+      const sidecars = await vaultDb.listSidecars(vaultSession.publicKeyHex);
+      const target = sidecars.find((item) => item.id === input.passkeyId);
+      if (!target) {
         throw new Error("Passkey protection not found");
       }
-      await vaultDb.putKey({ ...record, passkeyProtections: next });
+      await vaultDb.deleteSidecar(vaultSession.publicKeyHex, input.passkeyId);
     },
 
     async activateKeyWithPasskey(input: { passkeyId: string }) {
       if (status !== "unlocked" || !vaultSession) throw new Error("Vault must be unlocked");
-      const matches = (await vaultDb.listKeys()).flatMap((record) => {
-        const protection = record.passkeyProtections?.find((item) => item.id === input.passkeyId);
-        return protection ? [{ record, protection }] : [];
-      });
+      const matches: Array<{ record: VaultKeyRecord; protection: VaultPasskeyProtectionRecord }> = [];
+      for (const record of await vaultDb.listKeys()) {
+        const sidecar = (await vaultDb.listSidecars(record.publicKeyHex)).find((item) => item.id === input.passkeyId);
+        const protection = sidecar;
+        if (protection) matches.push({ record, protection });
+      }
       if (matches.length === 0) throw new Error("Passkey protection not found");
       if (matches.length > 1) throw new Error("Passkey protection id is not unique");
       const { record, protection } = matches[0]!;
       const prfOutput = await requestPasskeyPrf(protection);
       try {
-        const material = await decryptMaterialWithPasskey({
+        const privateKeyBytes = await decryptMaterialWithPasskey({
           prfOutput,
           publicKeyHex: record.publicKeyHex,
           protection
         });
-        const identity = deriveKeyIdentity(hexToBytes(material.hex));
-        if (identity.publicKeyHex !== record.publicKeyHex) throw new Error("Passkey key identity mismatch");
-        const nextCrypto = await createActiveCryptoForPasskey(record, input.passkeyId, prfOutput);
         const previousActive = deps.keyspace?.active().activePublicKeyHex;
-        if (deps.keyspace && previousActive !== record.publicKeyHex) {
-          await deps.keyspace.setActive(record.publicKeyHex);
+        const previousTargetBytes = sessionPrivateKeys.get(record.publicKeyHex)?.slice();
+        let nextCrypto: SessionCryptoEngine | undefined;
+        let cryptoInstalled = false;
+        let transferred = false;
+        try {
+          const identity = deriveKeyIdentity(privateKeyBytes);
+          if (identity.publicKeyHex !== record.publicKeyHex) {
+            throw new Error("Passkey key identity mismatch");
+          }
+          // The worker receives a structured clone; local test engines retain
+          // this same owned buffer and clear it from dispose().
+          nextCrypto = await createActiveCryptoForPasskey(record, input.passkeyId, prfOutput, privateKeyBytes);
+          replaceSessionPrivateKey(record.publicKeyHex, privateKeyBytes);
+          transferred = true;
+          if (deps.keyspace && previousActive !== record.publicKeyHex) {
+            await deps.keyspace.setActive(record.publicKeyHex);
+          }
+          setSessionActiveCrypto(record.publicKeyHex, nextCrypto);
+          cryptoInstalled = true;
+          revokeActiveKeyCryptoLeases(previousActive, "active key changed");
+          if (previousTargetBytes) previousTargetBytes.fill(0);
+          return { status: "accepted" } satisfies CoordinatorCommandResult;
+        } catch (err) {
+          if (nextCrypto && !cryptoInstalled) {
+            try { nextCrypto.dispose("passkey activation failed"); } catch { /* noop */ }
+          }
+          if (transferred) {
+            dropSessionPrivateKey(record.publicKeyHex);
+            transferred = false;
+          }
+          if (previousTargetBytes) replaceSessionPrivateKey(record.publicKeyHex, previousTargetBytes);
+          if (deps.keyspace && previousActive && previousActive !== record.publicKeyHex) {
+            try {
+              if (deps.keyspace.active().activePublicKeyHex !== previousActive) await deps.keyspace.setActive(previousActive);
+            } catch { /* preserve original activation error */ }
+          }
+          throw err;
+        } finally {
+          if (!transferred) privateKeyBytes.fill(0);
         }
-        setSessionActiveCrypto(record.publicKeyHex, nextCrypto);
-        revokeActiveKeyCryptoLeases(previousActive, "active key changed");
-        return { status: "accepted" } satisfies CoordinatorCommandResult;
       } finally {
         prfOutput.fill(0);
       }
@@ -1689,8 +1745,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         capabilities: input.capabilities,
         source: input.source,
         passwordKey,
-        encryptVaultKeyMaterial: (publicKeyHex, material) =>
-          coordinatorEncryptVaultKeyMaterial(passwordKey, publicKeyHex, material)
+        password: input.password
       });
     },
 
@@ -1725,8 +1780,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         capabilities: input.capabilities ?? DEFAULT_CAPABILITIES,
         source: GENERATED_SOURCE,
         passwordKey,
-        encryptVaultKeyMaterial: (publicKeyHex, material) =>
-          coordinatorEncryptVaultKeyMaterial(passwordKey, publicKeyHex, material)
+        password: input.password
       });
     },
 
@@ -1749,21 +1803,26 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           disposeAppViewSession(sessionId, "appView owner key deleted");
         }
       }
-      await vaultDb.deleteKey(publicKeyHex);
+      await vaultDb.deleteKeyAndSidecars(publicKeyHex);
+      dropSessionPrivateKey(publicKeyHex);
       keyCache = null;
     },
 
     async exportKeyBackup(publicKeyHex: string): Promise<string> {
-      const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(publicKeyHex);
-      return encodeKeyBackup(buildKeyBackupEnvelope(sourceVaultMeta, keyRecord));
+      const keyRecord = await vaultDb.getKey(publicKeyHex);
+      if (!keyRecord) throw new Error("Key not found");
+      if (keyRecord.storageVersion !== "keyhold-v2" || !keyRecord.keyholdDocument) {
+        throw new Error("Unsupported key storage version");
+      }
+      return keyholdSerialize(keyholdParse(keyholdSerialize(keyRecord.keyholdDocument)));
     },
 
     async exportCurrentKeyBackup(): Promise<string> {
-      if (status !== "unlocked" || !vaultSession?.publicKeyHex) {
-        throw new Error("No active private key");
-      }
-      const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(vaultSession.publicKeyHex);
-      return encodeKeyBackup(buildKeyBackupEnvelope(sourceVaultMeta, keyRecord));
+      const target = vaultSession?.publicKeyHex ?? deps.keyspace?.selected();
+      if (!target) throw new Error("No selected private key");
+      const record = await vaultDb.getKey(target);
+      if (!record || record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) throw new Error("Unsupported key storage version");
+      return keyholdSerialize(keyholdParse(keyholdSerialize(record.keyholdDocument)));
     },
 
     async importKeyBackup(input: {
@@ -1771,55 +1830,24 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       sourcePassword: string;
       targetPassword: string;
     }): Promise<KeyRef> {
-      const decoded = decodeKeyBackup(input.backup);
-      const backup = passwordBackupView(decoded);
-      let source: Awaited<ReturnType<typeof coordinatorResolveVaultPasswordKey>>;
       try {
-        source = await coordinatorResolveVaultPasswordKey(input.sourcePassword, backup.sourceVaultMeta);
-      } catch {
-        throw new Error("Invalid source password");
+        const doc = keyholdParse(input.backup);
+        const sourceUnlocked = await keyholdUnlock(doc, input.sourcePassword);
+        try {
+          const targetMeta = await vaultDb.getMeta();
+          if (!targetMeta) throw new Error("Vault not initialized");
+          await coordinatorVerifyVaultPasswordKey(input.targetPassword, targetMeta);
+          const existing = await vaultDb.getKey(sourceUnlocked.publicKeyHex);
+          if (existing) throw new Error("Key already exists");
+          const targetDoc = keyholdParse(await keyholdExportPrivateKey({ privateKey: sourceUnlocked.privateKey, password: input.targetPassword, label: doc.label, parameters: keyholdRecommendedParameters() }));
+          const record: VaultKeyRecord = { publicKeyHex: sourceUnlocked.publicKeyHex, label: doc.label, address: "", network: "main", format: "keyhold-v2", capabilities: ["p2pkh"], createdAt: new Date().toISOString(), storageVersion: "keyhold-v2", keyholdDocument: targetDoc };
+          await vaultDb.putKey(record); keyCache = null; return recordToRef(record);
+        } finally { sourceUnlocked.privateKey.fill(0); }
+      } catch (error) {
+        if (error instanceof Error && (error.message === "Invalid password" || error.message === "Key already exists" || error.message === "Vault not initialized")) throw error;
+        if (error instanceof Error && /unlock|KeyHold|invalid/i.test(error.message)) throw new Error("Invalid source password");
       }
-      if (backup.keyRecord.cipherVersion !== "v2") {
-        throw new Error("Key backup must be v2");
-      }
-      const material = await coordinatorDecryptVaultKeyMaterialForMigration(
-        source.key,
-        backup.keyRecord,
-        source.encoding
-      );
-      const identity = deriveKeyIdentity(hexToBytes(material.hex));
-      if (identity.publicKeyHex !== backup.keyRecord.publicKeyHex) {
-        throw new Error("Key backup public key mismatch");
-      }
-      const targetMeta = await vaultDb.getMeta();
-      if (!targetMeta) {
-        throw new Error("Vault not initialized");
-      }
-      const targetKey = await coordinatorVerifyVaultPasswordKey(input.targetPassword, targetMeta);
-      const existing = await vaultDb.getKey(identity.publicKeyHex);
-      if (existing) {
-        throw new Error("Key already exists");
-      }
-      const encrypted = await coordinatorEncryptVaultKeyMaterial(
-        targetKey,
-        identity.publicKeyHex,
-        material
-      );
-      const record: VaultKeyRecord = {
-        publicKeyHex: identity.publicKeyHex,
-        label: backup.keyRecord.label,
-        address: backup.keyRecord.address,
-        network: backup.keyRecord.network,
-        format: backup.keyRecord.format,
-        capabilities: backup.keyRecord.capabilities,
-        createdAt: backup.keyRecord.createdAt,
-        source: backup.keyRecord.source,
-        passkeyProtections: backup.keyRecord.passkeyProtections,
-        ...encrypted
-      };
-      await vaultDb.putKey(record);
-      keyCache = null;
-      return recordToRef(record);
+      throw new Error("Unsupported key storage version");
     },
 
     async createAppViewSession(input: {
@@ -1848,13 +1876,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       if (!record) {
         throw new Error(`Unknown key ${input.publicKeyHex}`);
       }
-      const material = await coordinatorDecryptVaultKeyMaterialForMigration(passwordKey, record);
-      const identity = deriveKeyIdentity(hexToBytes(material.hex));
-      if (identity.publicKeyHex !== record.publicKeyHex) {
-        throw new Error(
-          `vault key ${record.publicKeyHex} failed identity verification during appView session export`
-        );
-      }
+      const privateKey = await unlockKeyHoldRecord(record, input.password);
+      replaceSessionPrivateKey(record.publicKeyHex, privateKey);
       disposeAppViewSession(input.sessionId, "appView session replaced");
       const engine = await createActiveCryptoForRecord(record, passwordKey, input.sessionId);
       const crypto = wrapActiveKeyCrypto(record, engine, () => {
@@ -1937,9 +1960,8 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
           if (input.publicKeyHex !== publicKeyHex) {
             throw new Error("session_key_mismatch");
           }
-          const backup = encodeKeyBackup(
-            buildKeyBackupEnvelope((await vaultDb.getMeta())!, record)
-          );
+          if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) throw new Error("Unsupported key storage version");
+          const backup = keyholdSerialize(record.keyholdDocument);
           return {
             publicKeyHex,
             backup: new TextEncoder().encode(backup).buffer

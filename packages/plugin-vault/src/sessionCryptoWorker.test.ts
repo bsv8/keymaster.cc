@@ -7,7 +7,7 @@
 //   - worker 不返回 raw 私钥，只返回显式 operation 结果。
 
 import { afterEach, describe, expect, it } from "vitest";
-import { bytesToHex, deriveKey, encryptBytesWithAad, hexToBytes, vaultKeyAad } from "./crypto.js";
+import { bytesToHex, deriveKey, hexToBytes } from "./crypto.js";
 import { __testHandleSessionCryptoRequest } from "./sessionCryptoWorker.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import type { SessionCryptoRequestMessage } from "./sessionCryptoProtocol.js";
@@ -16,20 +16,8 @@ const TEST_PRIV_HEX = "000000000000000000000000000000000000000000000000000000000
 const TEST_PRIV_BYTES = hexToBytes(TEST_PRIV_HEX);
 const TEST_PUB_HEX = bytesToHex(secp256k1.getPublicKey(TEST_PRIV_BYTES, true));
 
-async function makeEncryptedPrivateKey() {
-  const passwordKey = await deriveKey("worker-password", crypto.getRandomValues(new Uint8Array(16)));
-  const payload = new TextEncoder().encode(JSON.stringify({ hex: TEST_PRIV_HEX }));
-  const blob = await encryptBytesWithAad(passwordKey, payload, vaultKeyAad(TEST_PUB_HEX));
-  return {
-    passwordKey,
-    encryptedPrivateKey: {
-      publicKeyHex: TEST_PUB_HEX,
-      cipherVersion: blob.version ?? "v2",
-      cipherSaltB64: bytesToHex(blob.salt),
-      cipherIvB64: bytesToHex(blob.iv),
-      cipherB64: bytesToHex(blob.ciphertext)
-    }
-  };
+async function makePrivateKey() {
+  return { privateKeyBytes: new Uint8Array(TEST_PRIV_BYTES) };
 }
 
 async function send(msg: SessionCryptoRequestMessage) {
@@ -42,15 +30,14 @@ describe("sessionCryptoWorker", () => {
   });
 
   it("init/signDigest/dispose/revoke behaves as a single-session capability", async () => {
-    const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey();
+    const { privateKeyBytes } = await makePrivateKey();
 
     const initRes = await send({
       kind: "init",
       requestId: "req-init",
       sessionId: "sess-1",
       publicKeyHex: TEST_PUB_HEX,
-      passwordKey,
-      encryptedPrivateKey,
+      privateKeyBytes,
       label: "Key A",
       capabilities: ["p2pkh"],
       createdAt: "2026-07-17T00:00:00.000Z"
@@ -117,15 +104,14 @@ describe("sessionCryptoWorker", () => {
   });
 
   it("rejects repeated init while a live session exists", async () => {
-    const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey();
+    const { privateKeyBytes } = await makePrivateKey();
 
     const first = await send({
       kind: "init",
       requestId: "req-init-1",
       sessionId: "sess-1",
       publicKeyHex: TEST_PUB_HEX,
-      passwordKey,
-      encryptedPrivateKey,
+      privateKeyBytes,
       label: "Key A",
       capabilities: ["p2pkh"],
       createdAt: "2026-07-17T00:00:00.000Z"
@@ -142,8 +128,7 @@ describe("sessionCryptoWorker", () => {
       requestId: "req-init-2",
       sessionId: "sess-2",
       publicKeyHex: TEST_PUB_HEX,
-      passwordKey,
-      encryptedPrivateKey,
+      privateKeyBytes,
       label: "Key B",
       capabilities: ["p2pkh"],
       createdAt: "2026-07-17T00:00:00.000Z"
@@ -164,15 +149,14 @@ describe("sessionCryptoWorker", () => {
   });
 
   it("signDigest with format=der returns DER signature with correct format field", async () => {
-    const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey();
+    const { privateKeyBytes } = await makePrivateKey();
 
     await send({
       kind: "init",
       requestId: "req-init-der",
       sessionId: "sess-der",
       publicKeyHex: TEST_PUB_HEX,
-      passwordKey,
-      encryptedPrivateKey,
+      privateKeyBytes,
       label: "Key DER",
       capabilities: ["p2pkh"],
       createdAt: "2026-07-19T00:00:00.000Z"
@@ -203,15 +187,14 @@ describe("sessionCryptoWorker", () => {
   });
 
   it("signDigest with format=compact returns 64-byte compact signature", async () => {
-    const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey();
+    const { privateKeyBytes } = await makePrivateKey();
 
     await send({
       kind: "init",
       requestId: "req-init-compact",
       sessionId: "sess-compact",
       publicKeyHex: TEST_PUB_HEX,
-      passwordKey,
-      encryptedPrivateKey,
+      privateKeyBytes,
       label: "Key Compact",
       capabilities: ["p2pkh"],
       createdAt: "2026-07-19T00:00:00.000Z"
@@ -241,15 +224,14 @@ describe("sessionCryptoWorker", () => {
   });
 
   it("signDigest rejects non-32-byte digest", async () => {
-    const { passwordKey, encryptedPrivateKey } = await makeEncryptedPrivateKey();
+    const { privateKeyBytes } = await makePrivateKey();
 
     await send({
       kind: "init",
       requestId: "req-init-bad-digest",
       sessionId: "sess-bad-digest",
       publicKeyHex: TEST_PUB_HEX,
-      passwordKey,
-      encryptedPrivateKey,
+      privateKeyBytes,
       label: "Key BadDigest",
       capabilities: ["p2pkh"],
       createdAt: "2026-07-19T00:00:00.000Z"

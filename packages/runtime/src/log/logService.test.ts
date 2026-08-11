@@ -51,6 +51,12 @@ afterEach(async () => {
 });
 
 describe("createLogService - basics", () => {
+  it("disabled persistence skips storage initialization and makes append/flush no-ops", async () => {
+    const svc = createLogService({ disablePersistence: true });
+    await svc.append({ level: "info", pluginId: "test", scope: "test", event: "disabled", message: "noop" });
+    await svc.flush();
+    svc.dispose();
+  });
   it("returns default config and writes/reads entries", async () => {
     const svc = createLogService();
     expect(svc.getConfig()).toEqual<LogConfig>({

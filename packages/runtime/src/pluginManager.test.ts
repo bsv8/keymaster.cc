@@ -39,7 +39,7 @@ function makeBadSettings(): PluginManifest {
     setup(ctx: PluginContext) {
       ctx.get<RouteRegistry>("route.registry").register({
         id: ROUTE_S,
-        path: "/settings/plugins",
+        path: "/settings/plugins-route",
         label: "Plugins",
         component: () => null
       });
@@ -66,7 +66,7 @@ function makeGoodSettings(): PluginManifest {
     setup(ctx: PluginContext) {
       ctx.get<RouteRegistry>("route.registry").register({
         id: ROUTE_S,
-        path: "/settings/plugins",
+        path: "/settings/plugins-route",
         label: "Plugins",
         component: () => null
       });
@@ -103,9 +103,10 @@ function makeBiz(): PluginManifest {
   };
 }
 
-function newHost(): PluginHost {
-  return createPluginHost({ disableConfigPersistence: true });
+function newHost(options: { safePath?: string } = {}): PluginHost {
+  return createPluginHost({ disableConfigPersistence: true, disableLogPersistence: true, ...options });
 }
+
 
 describe("plugin graph 依赖真值", () => {
   it("settings manifest 漏掉 route / settings registry 依赖时，graph 真值缺失", async () => {
@@ -210,8 +211,9 @@ describe("plugin teardown 句柄必须被 host 记录", () => {
       id: "meta",
       name: "M",
       meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: false, providesCapabilities: ["x"] },
-      setup() {
-        // no-op
+      setup(ctx: PluginContext) {
+        // Match the declared capability so the test exercises metadata on a healthy plugin.
+        ctx.provide("x", {});
       }
     };
     await host.registerAll([plugin]);
@@ -289,6 +291,7 @@ describe("settings registry 与 owner 回收", () => {
     const safePath = "/__safe__";
     const originalWindow = (globalThis as Record<string, unknown>).window;
     const originalPopStateEvent = (globalThis as Record<string, unknown>).PopStateEvent;
+    const host = newHost({ safePath });
     const pushCalls: string[] = [];
     (globalThis as Record<string, unknown>).window = {
       location: {
@@ -327,7 +330,6 @@ describe("settings registry 与 owner 回收", () => {
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         constructor(_type: string, _init?: EventInit) {}
       };
-      const host = createPluginHost({ disableConfigPersistence: true, safePath });
       const plugin: PluginManifest = {
         id: "p",
         name: "P",
@@ -348,8 +350,10 @@ describe("settings registry 与 owner 回收", () => {
       // 验证：safeNavigateAway 调用了 history.pushState，把路径换到 safePath。
       expect(pushCalls).toContain(safePath);
     } finally {
-      (globalThis as Record<string, unknown>).window = originalWindow;
-      (globalThis as Record<string, unknown>).PopStateEvent = originalPopStateEvent;
+      if (originalWindow === undefined) delete (globalThis as { window?: unknown }).window;
+      else (globalThis as Record<string, unknown>).window = originalWindow;
+      if (originalPopStateEvent === undefined) delete (globalThis as { PopStateEvent?: unknown }).PopStateEvent;
+      else (globalThis as Record<string, unknown>).PopStateEvent = originalPopStateEvent;
     }
   });
 });

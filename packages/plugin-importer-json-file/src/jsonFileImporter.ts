@@ -13,6 +13,7 @@
 // 共享同一套解析路径；`password` 是输入的属性，文本与文件都可能携带。
 
 import type { KeyImporter, KeyImportInput, KeyImportResult } from "@keymaster/contracts";
+import { parse as parseKeyHold, unlock as unlockKeyHold } from "keyhold";
 import { decryptBsv8KeyEnvelope, isBsv8KeyEnvelope, type Bsv8EnvelopeShape } from "./bsv8KeyEnvelope.js";
 
 interface JsonCandidate {
@@ -93,6 +94,18 @@ export const jsonFileImporter: KeyImporter = {
       parsed = JSON.parse(readInputText(input));
     } catch (err) {
       throw new Error(`Invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // KeyHold documents are detected strictly and never recursively scanned.
+    if (parsed && typeof parsed === "object" && ((parsed as { format?: unknown }).format === "keymaster" || ((parsed as { publicKeyHex?: unknown }).publicKeyHex !== undefined && (parsed as { keyDerivation?: unknown }).keyDerivation !== undefined))) {
+      const document = parseKeyHold(readInputText(input));
+      if (!input.password) throw new Error("Password is required for KeyHold file");
+      const unlocked = await unlockKeyHold(document, input.password);
+      try {
+        const hex = Array.from(unlocked.privateKey, (b) => b.toString(16).padStart(2, "0")).join("");
+        return [{ material: { hex }, address: "", network: "main", detectedFormat: "keyhold-v2", summary: { key: "importerJsonFile.summary.keyhold", fallback: "KeyHold v2 document" } }];
+      } finally {
+        unlocked.privateKey.fill(0);
+      }
     }
     // bsv8 envelope 必须走专用解密逻辑；不能用普通递归扫描去找 hex。
     if (isBsv8KeyEnvelope(parsed)) {

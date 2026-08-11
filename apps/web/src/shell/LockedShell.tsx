@@ -39,17 +39,20 @@
 import { useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import type { KeyspaceService } from "@keymaster/contracts";
 import {
   KeyPersistedButActivationFailedError,
   type VaultService
 } from "@keymaster/contracts";
 import { FirstTimeImportWizard } from "./FirstTimeImportWizard.js";
 import { OnboardingShell } from "./OnboardingShell.js";
+import { VaultKeyDeleteModal } from "@keymaster/plugin-vault";
 
 type Mode = "welcome" | "new-wallet-form" | "first-time-import" | "unlock-form";
 
 export function LockedShell() {
   const vault = useCapability<VaultService>("vault.service");
+  const keyspace = useCapability<KeyspaceService>("keyspace.service");
   const host = usePluginHost();
   const { t } = useI18n();
   // 触发 languageChanged 重渲染。
@@ -59,6 +62,51 @@ export function LockedShell() {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [selectedKey, setSelectedKey] = useState<{ publicKeyHex: string; label: string } | null>(null);
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
+  useEffect(() => {
+    if (status !== "locked") return;
+    const selected = keyspace.selected();
+    if (!selected) { setSelectedKey(null); return; }
+    void vault.getKey(selected).then((key) => setSelectedKey(key ? { publicKeyHex: key.publicKeyHex, label: key.label } : null)).catch(() => setSelectedKey(null));
+  }, [status, keyspace, vault]);
+
+  async function exportSelected() {
+    if (!selectedKey) return;
+    try {
+      const json = await vault.exportKeyBackup(selectedKey.publicKeyHex);
+      const url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${(selectedKey.label || "key").replace(/[^a-zA-Z0-9._-]+/g, "_")}.keyhold.json`;
+      anchor.style.display = "none";
+      document.body.appendChild(anchor);
+      anchor.click();
+      window.setTimeout(() => {
+        anchor.remove();
+        URL.revokeObjectURL(url);
+      }, 1000);
+    } catch (err) { setError(err instanceof Error ? err.message : "Export failed"); }
+  }
+
+  async function deleteSelected(confirmationLabel: string) {
+    if (!selectedKey) return;
+    setBusy(true); setError(null);
+    try {
+      await keyspace.deleteKey({ publicKeyHex: selectedKey.publicKeyHex, confirmationLabel });
+      setDeleteOpen(false);
+      const nextHex = keyspace.selected();
+      if (nextHex) {
+        const next = await vault.getKey(nextHex);
+        setSelectedKey(next ? { publicKeyHex: next.publicKeyHex, label: next.label } : null);
+      } else setSelectedKey(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Delete failed");
+      throw err;
+    }
+    finally { setBusy(false); }
+  }
 
   // uninitialized -> 始终显示欢迎页；
   // locked -> 跳到 unlock 模式。
@@ -279,6 +327,22 @@ export function LockedShell() {
             {t("common.action.unlock", { defaultValue: "解锁" })}
           </Button>
         </div>
+        {selectedKey ? <section aria-label={t("shell.locked.selected.title", { defaultValue: "当前选择的私钥" })}>
+          <h2>{t("shell.locked.selected.title", { defaultValue: "当前选择的私钥" })}</h2>
+          <p>{selectedKey.label} · <code>{selectedKey.publicKeyHex.slice(0, 10)}…{selectedKey.publicKeyHex.slice(-8)}</code></p>
+          <Button variant="ghost" onClick={() => void exportSelected()}>{t("shell.locked.selected.export", { defaultValue: "导出私钥" })}</Button>
+          <Button variant="danger" onClick={() => setDeleteOpen(true)}>{t("shell.locked.selected.delete", { defaultValue: "删除私钥" })}</Button>
+        </section> : null}
+        {selectedKey ? (
+          <VaultKeyDeleteModal
+            open={deleteOpen}
+            keyLabel={selectedKey.label}
+            publicKeyHex={selectedKey.publicKeyHex}
+            onExportBackup={() => void exportSelected()}
+            onConfirmDelete={deleteSelected}
+            onClose={() => setDeleteOpen(false)}
+          />
+        ) : null}
       </div>
     </OnboardingShell>
   );

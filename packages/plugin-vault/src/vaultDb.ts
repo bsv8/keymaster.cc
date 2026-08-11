@@ -23,6 +23,7 @@
 // 改 keyPath"，那样 IndexedDB 会直接报 DataError。
 
 import type { BsvNetwork } from "@keymaster/contracts";
+import type { Document as KeyHoldDocument } from "keyhold";
 
 const DB_NAME = "vault";
 /**
@@ -31,7 +32,7 @@ const DB_NAME = "vault";
  *   - v7：仅保留 canonical store；不再保留任何 staging / unlock-time
  *     migration 路径。
  */
-const DB_VERSION = 7;
+const DB_VERSION = 8;
 
 export interface VaultMetaRecord {
   id: "singleton";
@@ -56,11 +57,9 @@ export interface VaultMetaRecord {
  * canonical key record。主键是 `publicKeyHex` —— 落库前必须派生得到,
  * 不允许先随机生成、再回填身份。
  */
-export interface VaultKeyRecord {
+interface VaultKeyRecordBase {
   /** 主键：压缩公钥 hex；落库前必须派生。 */
   publicKeyHex: string;
-  /** 密文版本。 */
-  cipherVersion?: "v1" | "v2";
   label: string;
   /** 兼容展示字段：派生出来的 BSV 地址。已不再是 key 根身份。 */
   address: string;
@@ -70,13 +69,31 @@ export interface VaultKeyRecord {
   capabilities: string[];
   createdAt: string;
   source?: string;
-  /** 加密后的私钥材料。 */
-  cipherSaltB64: string;
-  cipherIvB64: string;
-  cipherB64: string;
-  /** 可选的 WebAuthn PRF 独立保护器。密码密文始终保留。 */
+}
+
+/** New records contain only the canonical KeyHold document. */
+export interface KeyHoldVaultKeyRecord extends VaultKeyRecordBase {
+  storageVersion: "keyhold-v2";
+  keyholdDocument: KeyHoldDocument;
+  cipherVersion?: never;
+  cipherSaltB64?: never;
+  cipherIvB64?: never;
+  cipherB64?: never;
+  passkeyProtections?: never;
+}
+
+/** Opaque records from pre-KeyHold storage. They are never unlocked/migrated. */
+export interface LegacyVaultKeyRecord extends VaultKeyRecordBase {
+  storageVersion?: undefined;
+  keyholdDocument?: undefined;
+  cipherVersion?: "v1" | "v2";
+  cipherSaltB64?: string;
+  cipherIvB64?: string;
+  cipherB64?: string;
   passkeyProtections?: VaultPasskeyProtectionRecord[];
 }
+
+export type VaultKeyRecord = KeyHoldVaultKeyRecord | LegacyVaultKeyRecord;
 
 export interface VaultPasskeyProtectionRecord {
   id: string;
@@ -84,6 +101,20 @@ export interface VaultPasskeyProtectionRecord {
   credentialIdB64: string;
   prfSaltB64: string;
   rpId: string;
+  createdAt: string;
+  transports?: string[];
+  cipherVersion: "webauthn-prf-v1";
+  cipherIvB64: string;
+  cipherB64: string;
+}
+
+export interface WebAuthnSidecarRecord {
+  publicKeyHex: string;
+  id: string;
+  label: string;
+  credentialIdB64: string;
+  rpId: string;
+  prfSaltB64: string;
   createdAt: string;
   transports?: string[];
   cipherVersion: "webauthn-prf-v1";
@@ -132,6 +163,9 @@ function createFreshSchema(db: IDBDatabase) {
     const store = db.createObjectStore("vault_keys", { keyPath: "publicKeyHex" });
     store.createIndex("address", "address", { unique: false });
   }
+  if (!db.objectStoreNames.contains("webauthn_sidecars")) {
+    db.createObjectStore("webauthn_sidecars", { keyPath: ["publicKeyHex", "id"] });
+  }
 }
 
 /**
@@ -156,6 +190,9 @@ function runUpgrade(
     // 这里不做任何运行时读取或迁移回填，只在 schema upgrade 里收口。
     if (db.objectStoreNames.contains("vault_keys_legacy_staging")) {
       db.deleteObjectStore("vault_keys_legacy_staging");
+    }
+    if (!db.objectStoreNames.contains("webauthn_sidecars")) {
+      db.createObjectStore("webauthn_sidecars", { keyPath: ["publicKeyHex", "id"] });
     }
     return;
   }
@@ -196,6 +233,12 @@ function runUpgrade(
       if (!db.objectStoreNames.contains("vault_meta")) {
         db.createObjectStore("vault_meta", { keyPath: "id" });
       }
+      // v1-v4 upgrades intentionally keep legacy key records opaque, but the
+      // sidecar store is part of the v8 schema and must exist before any
+      // passkey operation is attempted after restart.
+      if (!db.objectStoreNames.contains("webauthn_sidecars")) {
+        db.createObjectStore("webauthn_sidecars", { keyPath: ["publicKeyHex", "id"] });
+      }
       // 6) 回写（继续用同一个 transaction，cursor 阶段已经收集完数据）。
       for (const rec of pendingCanonical) {
         canonical.put(rec);
@@ -210,7 +253,7 @@ function runUpgrade(
       identityStatus?: string;
       identityError?: string;
     };
-    const whitelist: VaultKeyRecord = {
+    const whitelist: LegacyVaultKeyRecord = {
       publicKeyHex: r.publicKeyHex ?? "",
       label: r.label,
       address: r.address,
@@ -219,11 +262,11 @@ function runUpgrade(
       capabilities: r.capabilities,
       createdAt: r.createdAt,
       source: r.source,
-      cipherSaltB64: r.cipherSaltB64,
-      cipherIvB64: r.cipherIvB64,
-      cipherB64: r.cipherB64,
-      passkeyProtections: r.passkeyProtections
     };
+    if (typeof r.cipherSaltB64 === "string") whitelist.cipherSaltB64 = r.cipherSaltB64;
+    if (typeof r.cipherIvB64 === "string") whitelist.cipherIvB64 = r.cipherIvB64;
+    if (typeof r.cipherB64 === "string") whitelist.cipherB64 = r.cipherB64;
+    if (Array.isArray(r.passkeyProtections)) whitelist.passkeyProtections = r.passkeyProtections;
     if (whitelist.publicKeyHex) {
       pendingCanonical.push(whitelist);
     }
@@ -351,26 +394,36 @@ export const vaultDb = {
       }
     });
   },
-  /** 按 publicKeyHex 删除 canonical store 中的记录。 */
-  async deleteKey(publicKeyHex: string): Promise<void> {
-    await tx("vault_keys", "readwrite", (t) =>
-      reqAsPromise(t.objectStore("vault_keys").delete(publicKeyHex))
+  async deleteKeyAndSidecars(publicKeyHex: string): Promise<void> {
+    await tx(["vault_keys", "webauthn_sidecars"], "readwrite", (t) => {
+      t.objectStore("vault_keys").delete(publicKeyHex);
+      const sidecars = t.objectStore("webauthn_sidecars");
+      const req = sidecars.openCursor();
+      req.onsuccess = () => { const cursor = req.result; if (!cursor) return; if ((cursor.value as WebAuthnSidecarRecord).publicKeyHex === publicKeyHex) cursor.delete(); cursor.continue(); };
+    });
+  },
+  async deleteSidecar(publicKeyHex: string, id: string): Promise<void> {
+    await tx("webauthn_sidecars", "readwrite", (t) => reqAsPromise(t.objectStore("webauthn_sidecars").delete([publicKeyHex, id])));
+  },
+  async listSidecars(publicKeyHex: string): Promise<WebAuthnSidecarRecord[]> {
+    return tx("webauthn_sidecars", "readonly", (t) =>
+      new Promise<WebAuthnSidecarRecord[]>((resolve, reject) => {
+        const req = t.objectStore("webauthn_sidecars").openCursor();
+        const out: WebAuthnSidecarRecord[] = [];
+        req.onsuccess = () => {
+          const cursor = req.result;
+          if (!cursor) { resolve(out); return; }
+          const value = cursor.value as WebAuthnSidecarRecord;
+          if (value.publicKeyHex === publicKeyHex) out.push(value);
+          cursor.continue();
+        };
+        req.onerror = () => reject(req.error);
+      })
     );
   },
-  async readKeyBackupRecord(publicKeyHex: string): Promise<{
-    sourceVaultMeta: VaultMetaRecord;
-    keyRecord: VaultKeyRecord;
-  }> {
-    const [sourceVaultMeta, keyRecord] = await Promise.all([
-      this.getMeta(),
-      this.getKey(publicKeyHex)
-    ]);
-    if (!sourceVaultMeta) {
-      throw new Error("vault meta is missing");
-    }
-    if (!keyRecord) {
-      throw new Error("Unknown key");
-    }
-    return { sourceVaultMeta, keyRecord };
+  async putSidecar(sidecar: WebAuthnSidecarRecord): Promise<void> {
+    await tx("webauthn_sidecars", "readwrite", (t) =>
+      reqAsPromise(t.objectStore("webauthn_sidecars").put(sidecar))
+    );
   },
 };

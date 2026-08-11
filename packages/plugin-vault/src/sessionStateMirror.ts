@@ -8,6 +8,7 @@ export interface SessionStateSnapshot {
   sessionEpoch: string;
   vaultStatus: CoordinatorBootstrapSnapshot["vaultStatus"];
   activePublicKeyHex?: string;
+  selectedPublicKeyHex?: string;
   keyspaceGeneration: number;
   sessionRevision: number;
 }
@@ -31,6 +32,7 @@ export class SessionStateMirror {
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
+        selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
         keyspaceGeneration: event.keyspaceGeneration,
         sessionRevision: event.sessionRevision,
       });
@@ -53,6 +55,7 @@ export class SessionStateMirror {
       sessionEpoch: snapshot.sessionEpoch,
       vaultStatus: snapshot.vaultStatus,
       activePublicKeyHex: snapshot.activePublicKeyHex,
+      selectedPublicKeyHex: snapshot.selectedPublicKeyHex,
       keyspaceGeneration: snapshot.keyspaceGeneration,
       sessionRevision: 0,
     });

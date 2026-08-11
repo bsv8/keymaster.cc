@@ -19,20 +19,21 @@ afterEach(() => {
 describe("WebAuthn PRF key protection", () => {
   it("lets independent PRF outputs protect the same private key", async () => {
     const publicKeyHex = "02".padEnd(66, "1");
-    const material = { hex: "01".padStart(64, "0") };
+    const privateKeyBytes = new Uint8Array(32);
+    privateKeyBytes[31] = 1;
     const firstSecret = crypto.getRandomValues(new Uint8Array(32));
     const secondSecret = crypto.getRandomValues(new Uint8Array(32));
     const first = await encryptMaterialWithPasskey({
       prfOutput: firstSecret,
       publicKeyHex,
       credentialIdB64: "credential-one",
-      material
+      privateKeyBytes
     });
     const second = await encryptMaterialWithPasskey({
       prfOutput: secondSecret,
       publicKeyHex,
       credentialIdB64: "credential-two",
-      material
+      privateKeyBytes
     });
 
     await expect(decryptMaterialWithPasskey({
@@ -47,7 +48,7 @@ describe("WebAuthn PRF key protection", () => {
         createdAt: new Date(0).toISOString(),
         ...first
       }
-    })).resolves.toEqual(material);
+    })).resolves.toEqual(privateKeyBytes);
     expect(first.cipherB64).not.toBe(second.cipherB64);
   });
 
@@ -57,7 +58,7 @@ describe("WebAuthn PRF key protection", () => {
       prfOutput: new Uint8Array(32).fill(1),
       publicKeyHex,
       credentialIdB64: "credential",
-      material: { hex: "01".padStart(64, "0") }
+      privateKeyBytes: new Uint8Array(32).fill(1)
     });
     await expect(decryptMaterialWithPasskey({
       prfOutput: new Uint8Array(32).fill(2),

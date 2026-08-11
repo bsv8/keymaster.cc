@@ -172,6 +172,8 @@ export interface CreatePluginHostOptions {
   initialI18nResources?: I18nPluginResources[];
   i18nDebug?: boolean;
   disableConfigPersistence?: boolean;
+  /** Tests: disable runtime log persistence/startup and drop append writes. */
+  disableLogPersistence?: boolean;
   safePath?: string;
 }
 
@@ -326,7 +328,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     debug: options.i18nDebug
   });
 
-  const logService: LogServiceHandle = createLogService();
+  const logService: LogServiceHandle = createLogService({ disablePersistence: options.disableLogPersistence });
 
   /**
    * 资产数据变更通知器。

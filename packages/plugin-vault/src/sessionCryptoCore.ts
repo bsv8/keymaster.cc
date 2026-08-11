@@ -17,8 +17,6 @@ import { sha256 } from "@noble/hashes/sha2.js";
 import { signAsync } from "@noble/secp256k1";
 import type { AppMsgMessage, AppMsgPlaintextV1, EcdsaSignatureFormat, ProviderSealedMessageRecord } from "@keymaster/contracts";
 import { APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN, APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN, APPMSG_ENVELOPE_VERSION_V1, APPMSG_PLAINTEXT_VERSION_V1, APPMSG_SEAL_SUITE_ID_V1, APPMSG_SEAL_V1_HKDF_INFO, cborDecode, cborEncode, type AppMsgContentType } from "@keymaster/contracts";
-import { decryptBytes, decryptBytesWithAad, vaultKeyAad } from "./crypto.js";
-import type { SessionCryptoEncryptedKeyMaterial } from "./sessionCryptoProtocol.js";
 import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
 
 export interface SessionCryptoInit {
@@ -139,28 +137,6 @@ export async function signEcdsaDigest(params: {
   // P1: 输出断言 — DER 必须能被 strict DER parser 解析（0x30 开头 + 合法长度）
   assertStrictDERSignature(derBytes);
   return derBytes;
-}
-
-export async function decryptSessionPrivateKeyBytes(input: {
-  passwordKey: CryptoKey;
-  encryptedPrivateKey: SessionCryptoEncryptedKeyMaterial;
-}): Promise<Uint8Array> {
-  const blob = {
-    salt: hexToBytes(input.encryptedPrivateKey.cipherSaltB64),
-    iv: hexToBytes(input.encryptedPrivateKey.cipherIvB64),
-    ciphertext: hexToBytes(input.encryptedPrivateKey.cipherB64)
-  };
-  const plain =
-    input.encryptedPrivateKey.cipherVersion === "v2"
-      ? await decryptBytesWithAad(
-          input.passwordKey,
-          blob,
-          input.encryptedPrivateKey.aad ?? vaultKeyAad(input.encryptedPrivateKey.publicKeyHex)
-        )
-      : await decryptBytes(input.passwordKey, blob);
-  const decoded = new TextDecoder().decode(plain);
-  const parsed = JSON.parse(decoded) as { hex: string };
-  return hexToBytes(parsed.hex);
 }
 
 function assertCompressedSecp256k1PubKey(bytes: Uint8Array, where: string): void {

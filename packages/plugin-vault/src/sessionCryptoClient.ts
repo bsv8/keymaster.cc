@@ -29,13 +29,11 @@ import type {
 import {
   deriveP2pkhAddress,
   hexToBytes,
-  decryptSessionPrivateKeyBytes,
   openAppMessageLocalBytes,
   sealAppMessageLocalBytes,
   signEcdsaDigest,
   verifySessionKeyPair
 } from "./sessionCryptoCore.js";
-import { encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial } from "./vaultCoordinator.js";
 import type {
   SessionCryptoBootstrapInput,
   SessionCryptoResponseMessage
@@ -59,15 +57,6 @@ interface SessionCryptoEngine {
     createdAtMs: number;
   }): Promise<ActiveKeyCryptoSealSendInputResult | { error: string }> | ActiveKeyCryptoSealSendInputResult | { error: string };
   openSealed(rec: ProviderSealedMessageRecord): Promise<AppMsgMessage | null>;
-  encryptVaultKeyMaterial(input: {
-    publicKeyHex: string;
-    material: { hex: string; wif?: string };
-  }): Promise<{
-    cipherVersion: "v2";
-    cipherSaltB64: string;
-    cipherIvB64: string;
-    cipherB64: string;
-  }>;
   dispose(reason?: string): void;
 }
 
@@ -236,8 +225,7 @@ async function createWorkerBackedEngine(
       {
         sessionId: input.sessionId,
         publicKeyHex: input.publicKeyHex,
-        passwordKey: input.passwordKey,
-        encryptedPrivateKey: input.encryptedPrivateKey,
+        privateKeyBytes: input.privateKeyBytes,
         label: input.label,
         capabilities: input.capabilities,
         createdAt: input.createdAt
@@ -301,21 +289,6 @@ async function createWorkerBackedEngine(
       } catch {
         return null;
       }
-    },
-    async encryptVaultKeyMaterial(encryptInput) {
-      guard();
-      const encrypted = (await request<{
-        cipherVersion: "v2";
-        cipherSaltB64: string;
-        cipherIvB64: string;
-        cipherB64: string;
-      }>("encryptVaultKeyMaterial", encryptInput)) as {
-        cipherVersion: "v2";
-        cipherSaltB64: string;
-        cipherIvB64: string;
-        cipherB64: string;
-      };
-      return encrypted;
     },
     dispose(reason = "dispose") {
       if (disposed) return;
@@ -417,19 +390,6 @@ async function createCoordinatorBackedEngine(
         return null;
       }
     },
-    async encryptVaultKeyMaterial(encryptInput) {
-      const result = await cryptoRequest({
-        type: "encryptVaultKeyMaterial",
-        plaintext: new TextEncoder().encode(JSON.stringify(encryptInput.material))
-      });
-      if (result.type !== "encryptVaultKeyMaterial") throw new Error("Unexpected result type");
-      return {
-        cipherVersion: "v2",
-        cipherSaltB64: "",
-        cipherIvB64: "",
-        cipherB64: new TextDecoder().decode(result.ciphertext)
-      };
-    },
     dispose(reason = "dispose") {
       if (disposed) return;
       disposed = true;
@@ -444,10 +404,7 @@ async function createCoordinatorBackedEngine(
  * 施工单 002：生产代码不得使用此路径。
  */
 async function createLocalEngine(input: SessionCryptoEngineInput): Promise<SessionCryptoEngine> {
-  const privateKeyBytes = await decryptSessionPrivateKeyBytes({
-    passwordKey: input.passwordKey,
-    encryptedPrivateKey: input.encryptedPrivateKey
-  });
+  const privateKeyBytes = input.privateKeyBytes;
   verifySessionKeyPair({ publicKeyHex: input.publicKeyHex, privateKeyBytes });
   let revoked = false;
   const identity: ActiveKeyCryptoIdentity = {
@@ -568,14 +525,6 @@ async function createLocalEngine(input: SessionCryptoEngineInput): Promise<Sessi
       } catch {
         return null;
       }
-    },
-    async encryptVaultKeyMaterial(encryptInput) {
-      guard();
-      return coordinatorEncryptVaultKeyMaterial(
-        input.passwordKey,
-        encryptInput.publicKeyHex,
-        encryptInput.material
-      );
     },
     dispose() {
       privateKeyBytes.fill(0);

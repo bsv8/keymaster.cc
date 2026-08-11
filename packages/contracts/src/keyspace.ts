@@ -32,7 +32,7 @@
  *   - 系统中**不再**保留 `identityStatus = uninitialized | failed` 的稳态：
  *     新建 / 导入时 publicKeyHex 必须先派生再落库，unlock 后不再跑逐把
  *     key backfill；老历史 key 缺 identity 字段视为需要一次性迁移状态，
- *     迁移态由 vault migration 内部处理。
+ *     旧记录保持 opaque，由 Vault 在需要解锁时报告版本错误。
  *   - 短公钥属于 UI 显示格式，**不**作为 KeyIdentity 字段持有。展示时
  *     调 `formatShortPublicKey(publicKeyHex)` 现算。
  */
@@ -83,6 +83,8 @@ export interface KeyScopedStorageHandle {
 
 /** Keyspace 服务。 */
 export interface KeyspaceService {
+  /** Persisted selection survives lock; active() is runtime-only. */
+  selected(): string | undefined;
   /** 列出平台全部 KeyIdentity（不含私钥）。 */
   listKeys(): Promise<KeyIdentity[]>;
   /** 按 publicKeyHex 取单条 KeyIdentity。 */
@@ -131,9 +133,10 @@ export interface KeyspaceService {
   /**
    * 删除 ready key（按 publicKeyHex）。
    *
-   * 硬切换 002：删除第一步必须是 `vault.verifyPassword(password)`,
+   * 硬切换 015：删除第一步必须从 Vault canonical list/record 读取目标
+   * label，并要求调用方提供 case-sensitive 严格相等的 confirmationLabel，
    * 通过后再执行清理主流程：
-   *   verifyPassword -> prepareDeleteKey（cancelByKey + 关闭 handle +
+   *   authoritative label check -> prepareDeleteKey（cancelByKey + 关闭 handle +
    *   emit key.deleting）-> 按 plugin 注册的 storage 列表逐个
    *   deleteDatabase 全部成功 -> vault.deleteKeyMaterial（仅删私钥
    *   材料,不发事件）-> emit key.deleted -> 剩余 0 把 key 时调用
@@ -141,19 +144,19 @@ export interface KeyspaceService {
    *   回 `uninitialized`,否则按 active fallback 选下一把。
    *
    * 设计缘由：
-   *   - 密码作为平台删除 API 的一部分,而不是某个页面的私有约定；
+   *   - label confirmation 是平台删除 API 的一部分，而不是某个页面的私有约定；
    *     这样命令面板 / 快捷操作 / 批处理等未来入口都会被同一套
    *     删除授权语义约束住。
-   *   - 密码错误时必须**完全不开始**——不调 prepareDeleteKey、不
+   *   - label 不匹配时必须**完全不开始**——不调 prepareDeleteKey、不
    *     emit `key.deleting`、不取消 background 任务、不动 namespace
-   *     DB / 私钥材料。错误信息使用英文（`Invalid password`）。
+   *     DB / 私钥材料。错误信息使用英文（`Key label mismatch`）。
    *   - namespace DB 删除失败或 blocked 时拒绝继续删除 Vault 私钥,
-   *     否则会留下归属丢失的业务数据；密码正确也不破例。
+   *     否则会留下归属丢失的业务数据；label 正确也不破例。
    *
    * 约束：仅允许仍处于 ready 状态的 key 通过；找不到 hex 或 key 不
    * 存在时抛 "Key not found"。
    */
-  deleteKey(input: { publicKeyHex: string; password: string }): Promise<void>;
+  deleteKey(input: { publicKeyHex: string; confirmationLabel: string }): Promise<void>;
 
   /**
    * 由 background 插件在装载时调用：把 background service 注入 keyspace,
@@ -182,7 +185,7 @@ export const EVENT_KEY_DELETING = "key.deleting";
 export const EVENT_KEY_DELETED = "key.deleted";
 /** 事件：active key 切换。payload 是新的 ActiveKeyState。 */
 export const EVENT_ACTIVE_KEY_CHANGED = "activeKey.changed";
-/** 事件：identity backfill 状态变化（硬切换 002 收尾后只在一次性 legacy migration 阶段短暂触发）。payload: { initializing: boolean }。 */
+/** 事件：identity backfill 状态变化（仅保留接口兼容，不执行旧私钥迁移）。payload: { initializing: boolean }。 */
 export const EVENT_KEYSPACE_INITIALIZATION = "keyspace.initialization";
 
 /** keyspace 事件 payload 类型。 */

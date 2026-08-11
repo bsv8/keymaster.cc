@@ -9,7 +9,7 @@
 // @vitest-environment jsdom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import type {
@@ -40,6 +40,7 @@ function makeVault(activateKey = vi.fn(async () => ({ status: "accepted" as cons
     createVaultWithImportedKey: async () => ({ publicKeyHex: KEY_A, label: "A", format: "hex", capabilities: ["p2pkh"], createdAt: new Date().toISOString() }),
     unlock: async () => ({ status: "accepted" as const }),
     lock: async () => ({ status: "accepted" as const }),
+    verifyPassword: vi.fn(async () => undefined),
     changePassword: async () => undefined,
     dispose: () => undefined,
     activateKey,
@@ -72,6 +73,7 @@ function makeKeyspace() {
     active = { activePublicKeyHex: publicKeyHex };
     for (const handler of [...listeners]) handler(active);
   });
+  const deleteKey = vi.fn(async (_input: { publicKeyHex: string; confirmationLabel: string }) => undefined);
   return {
     active: () => active,
     onActiveKeyChanged: (handler: (state: ActiveKeyState) => void) => {
@@ -81,8 +83,12 @@ function makeKeyspace() {
     onInitializationChange: () => () => undefined,
     isInitializing: () => false,
     listKeys: async () => identities,
-    setActive
-  } as unknown as KeyspaceService & { setActive: typeof setActive };
+    setActive,
+    deleteKey
+  } as unknown as KeyspaceService & {
+    setActive: typeof setActive;
+    deleteKey: typeof deleteKey;
+  };
 }
 
 function mount(includeImportSection = false) {
@@ -194,5 +200,48 @@ describe("VaultSettingsPage active switching", () => {
     await waitFor(() => {
       expect(screen.queryByRole("dialog")).toBeNull();
     });
+  });
+});
+
+describe("VaultSettingsPage label-confirmed deletion", () => {
+  it("keeps confirmation disabled for a mismatch and deletes with the exact label without password verification", async () => {
+    const { keyspace, vault } = mount();
+    const user = userEvent.setup();
+
+    const deleteButtons = await screen.findAllByRole("button", { name: /删除|Delete/ });
+    await user.click(deleteButtons[0]!);
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("textbox");
+    const confirm = within(dialog).getByRole("button", { name: /确认删除|Confirm delete/ });
+
+    await user.type(input, "alpha");
+    expect((confirm as HTMLButtonElement).disabled).toBe(true);
+    expect((keyspace.deleteKey as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(0);
+
+    await user.clear(input);
+    await user.type(input, "Alpha");
+    await user.click(confirm);
+    await waitFor(() => {
+      expect(keyspace.deleteKey).toHaveBeenCalledWith({
+        publicKeyHex: KEY_A,
+        confirmationLabel: "Alpha"
+      });
+    });
+    expect(vault.verifyPassword).not.toHaveBeenCalled();
+  });
+
+  it("keeps the modal open when the deletion service rejects", async () => {
+    const { keyspace } = mount();
+    (keyspace.deleteKey as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("Key label mismatch"));
+    const user = userEvent.setup();
+
+    await user.click((await screen.findAllByRole("button", { name: /删除|Delete/ }))[0]!);
+    const dialog = await screen.findByRole("dialog");
+    const input = within(dialog).getByRole("textbox");
+    await user.type(input, "Alpha");
+    await user.click(within(dialog).getByRole("button", { name: /确认删除|Confirm delete/ }));
+
+    await waitFor(() => expect(within(dialog).getByText("Key label mismatch")).toBeTruthy());
+    expect(screen.getByRole("dialog")).toBeTruthy();
   });
 });

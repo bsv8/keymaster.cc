@@ -12,7 +12,7 @@ export { vaultDb } from "./vaultDb.js";
 export type { VaultMetaRecord, VaultKeyRecord } from "./vaultDb.js";
 export { isWebAuthnPrfAvailable } from "./webauthnPrf.js";
 export * from "./crypto.js";
-export { deriveP2pkhAddress, signEcdsaDigest, decryptSessionPrivateKeyBytes, verifySessionKeyPair, bytesToHex, hexToBytes } from "./sessionCryptoCore.js";
+export { deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, bytesToHex, hexToBytes } from "./sessionCryptoCore.js";
 export { sealAppMessageLocalBytes, openAppMessageLocalBytes } from "./sessionCryptoCore.js";
 export * from "./vaultCoordinator.js";
 export { createVaultLocalSecretService } from "./localSecretService.js";

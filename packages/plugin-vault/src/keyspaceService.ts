@@ -27,7 +27,7 @@
 //     走。旧 `publicKeyHash` 平台身份字段已从 contract / service 删
 //     除；不再保留兼容 alias。
 //   - 硬切换 002 收尾：平台里**不再**存在任何 key 域 surrogate id：
-//     * 唯一删除入口是 publicKeyHex 主键上的 `deleteKey({ publicKeyHex, password })`；
+//     * 唯一删除入口是 publicKeyHex 主键上的 `deleteKey({ publicKeyHex, confirmationLabel })`；
 //     * 事件 payload (`key.created` / `key.deleting` / `key.deleted`)
 //   - 系统中**不再**存在 "identityStatus = uninitialized | failed" 的
 //     稳态。新建 / 导入 key 必须在落库前派生 publicKeyHex；unlock 后
@@ -52,6 +52,7 @@ import type { VaultService } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
 
 const ACTIVE_KEY_STORAGE_KEY = "keyspace.activePublicKeyHex";
+const SELECTED_KEY_STORAGE_KEY = "keyspace.selectedPublicKeyHex";
 /**
  * 旧 localStorage 键（activePublicKeyHash）——硬切换 001 收口后不再
  * 读取,只允许在 unlock / bootstrap 阶段 best-effort 清理一次,避免
@@ -190,12 +191,18 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       if (typeof localStorage === "undefined") return;
       if (state.activePublicKeyHex) {
         localStorage.setItem(ACTIVE_KEY_STORAGE_KEY, state.activePublicKeyHex);
+        localStorage.setItem(SELECTED_KEY_STORAGE_KEY, state.activePublicKeyHex);
       } else {
         localStorage.removeItem(ACTIVE_KEY_STORAGE_KEY);
       }
     } catch {
       // localStorage 不可用时静默退化。
     }
+  }
+
+  function readSelectedKeyHex(): string | undefined {
+    try { return typeof localStorage === "undefined" ? undefined : (localStorage.getItem(SELECTED_KEY_STORAGE_KEY) ?? undefined); }
+    catch { return undefined; }
   }
 
   function readPersistedActiveHex(): string | undefined {
@@ -379,7 +386,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    * 内部删除路径：单一实现 deleteKey 的 namespace 清理。
    *
    * 硬切换 002：
-   *     本函数现在唯一入口是 `deleteKey({ publicKeyHex, password })`。
+   *     本函数现在唯一入口是 `deleteKey({ publicKeyHex, confirmationLabel })`。
    *     因为不存在 "公共 KeyIdentity 没 publicKeyHex" 的稳态。
    *   - active fallback：删的是 active key 时切到下一把 ready key；没有
    *     ready key 时 active 清空（`{}`），由壳层判断 listKeys().length > 0
@@ -441,8 +448,16 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     //     调用方知道。
     const remainingAll = await deps.vault.listKeys();
     if (remainingAll.length === 0) {
+      try { localStorage.removeItem(SELECTED_KEY_STORAGE_KEY); } catch { /* noop */ }
       await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
       return;
+    }
+    const persistedSelected = readSelectedKeyHex();
+    if (persistedSelected === publicKeyHex || !remainingAll.some((key) => key.publicKeyHex === persistedSelected)) {
+      const nextSelected = remainingAll[0]?.publicKeyHex;
+      try {
+        if (nextSelected) localStorage.setItem(SELECTED_KEY_STORAGE_KEY, nextSelected);
+      } catch { /* noop */ }
     }
     if (active.activePublicKeyHex === publicKeyHex) {
       const next = await autoPickActive();
@@ -456,6 +471,9 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   const service: KeyspaceHandle = {
+    selected() {
+      return readSelectedKeyHex();
+    },
     async listKeys() {
       return listManageableKeys();
     },
@@ -586,19 +604,21 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     },
     async deleteKey(input) {
       assertValidPublicKeyHex(input.publicKeyHex, "deleteKey");
-      // 硬切换 002：删除主流程**第一步**必须是 vault.verifyPassword。
-      // 密码错误时直接抛 Invalid password，**完全不开始**删除——不调
-      // prepareDeleteKey、不取消 background、不动 namespace DB / 私钥。
-      await deps.vault.verifyPassword(input.password);
       const ready = await listActiveCandidates();
       const target = ready.find((k) => k.publicKeyHex === input.publicKeyHex);
       if (!target) {
         throw new Error("Key not found");
       }
+      if (!target.label) {
+        throw new Error("Key label is unavailable");
+      }
+      if (input.confirmationLabel !== target.label) {
+        throw new Error("Key label mismatch");
+      }
       // 委托给 deleteKeyRecord：单一删除路径，避免重复实现。
       return deleteKeyRecord(input.publicKeyHex);
     },
-    // 全部走 `deleteKey({ publicKeyHex, password })`，由 publicKeyHex 主键
+    // 全部走 `deleteKey({ publicKeyHex, confirmationLabel })`，由 publicKeyHex 主键
     // 完成定位。
     isInitializing() {
       return initializing;
@@ -619,7 +639,8 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         setActiveInternal({});
         return;
       }
-      const next = await autoPickActive();
+      const selected = readSelectedKeyHex();
+      const next = selected ? (ready.find((key) => key.publicKeyHex === selected) ?? await autoPickActive()) : await autoPickActive();
       if (next) {
         setActiveInternal({ activePublicKeyHex: next.publicKeyHex }, next);
       } else {

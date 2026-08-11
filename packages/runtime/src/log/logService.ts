@@ -198,6 +198,8 @@ function matchesClear(entry: LogEntry, q: LogClearQuery): boolean {
 }
 
 export interface CreateLogServiceOptions {
+  /** Tests: disable log persistence/startup and drop append writes. */
+  disablePersistence?: boolean;
   /**
    * 初始配置；缺省使用 DEFAULT_LOG_CONFIG。
    * service 第一次 getConfig 时会尝试从 DB 读；DB 还不存在时使用 init。
@@ -223,6 +225,7 @@ export interface LogServiceHandle extends LogService {
 }
 
 export function createLogService(options: CreateLogServiceOptions = {}): LogServiceHandle {
+  const persistenceDisabled = options.disablePersistence === true;
   let config: LogConfig = { ...(options.init ?? DEFAULT_LOG_CONFIG) };
   const listeners = new Set<(c: LogConfig) => void>();
   const onWriteError = options.onWriteError ?? ((err: unknown) => {
@@ -306,6 +309,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   }
 
   async function appendInternal(input: LogAppendInput): Promise<void> {
+    if (persistenceDisabled) return;
     const task = async (): Promise<void> => {
       await ensureInit();
       // debug 关闭时直接 no-op；不写库、不排队。
@@ -327,6 +331,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   }
 
   async function flushPendingWrites(options?: { timeoutMs?: number }): Promise<void> {
+    if (persistenceDisabled) return;
     await ensureInit();
     const pending = writeTail;
     const timeoutMs =
@@ -552,7 +557,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   // 顺序：先 ensureInit 让 DB 真值与内存对齐；再 prune。
   // skipStartupPrune 仅跳过 prune；ensureInit 仍然要跑，否则内存 config
   // 一直是 init 值，订阅者也收不到 DB 真值。
-  void (async () => {
+  if (!persistenceDisabled) void (async () => {
     await ensureInit();
     if (options.skipStartupPrune) return;
     try {

@@ -108,9 +108,7 @@ export type CoordinatorCryptoOperation =
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; network: "main" | "test" }
   | { type: "sealSendInput"; input: { sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string }; recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string }; contentType: "text/plain" | "text/markdown"; body: string; clientMessageId: string; createdAtMs: number } }
-  | { type: "openSealed"; record: unknown }
-  | { type: "encryptVaultKeyMaterial"; plaintext: Uint8Array }
-  | { type: "decryptVaultKeyMaterial"; ciphertext: Uint8Array };
+  | { type: "openSealed"; record: unknown };
 
 /** 后台同步设置。 */
 export interface CoordinatorBackgroundSyncSettings {
@@ -124,7 +122,6 @@ export type CoordinatorVaultOperation =
   | { type: "listKeys" }
   | { type: "getKey"; publicKeyHex: string }
   | { type: "setActive"; publicKeyHex: string }
-  | { type: "deleteKey"; publicKeyHex: string; password: string }
   | { type: "deleteKeyMaterial"; publicKeyHex: string }
   | { type: "verifyPassword"; password: string }
   | { type: "changePassword"; oldPassword: string; newPassword: string }
@@ -190,9 +187,7 @@ export type CoordinatorCryptoResult =
   | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; address: string }
   | { type: "sealSendInput"; envelope: Uint8Array; signature: Uint8Array }
-  | { type: "openSealed"; plaintext: Uint8Array }
-  | { type: "encryptVaultKeyMaterial"; ciphertext: Uint8Array }
-  | { type: "decryptVaultKeyMaterial"; plaintext: Uint8Array };
+  | { type: "openSealed"; plaintext: Uint8Array };
 
 // ============================================================
 // 4. Coordinator -> Client Events
@@ -234,6 +229,7 @@ export interface SessionStateEvent {
     | "recover-empty-vault";
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex: string | null;
+  selectedPublicKeyHex?: string | null;
   keyspaceGeneration: number;
 }
 
@@ -278,6 +274,7 @@ export interface CoordinatorBootstrapSnapshot {
   sessionEpoch: SessionEpoch;
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex?: string;
+  selectedPublicKeyHex?: string;
   keyspaceGeneration: number;
   taskSnapshots: CoordinatorTaskSnapshot[];
   scheduleSettings: CoordinatorBackgroundSyncSettings;

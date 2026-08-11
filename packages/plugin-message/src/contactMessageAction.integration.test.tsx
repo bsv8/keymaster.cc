@@ -24,7 +24,7 @@ const RECIPIENT = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 function keyspace(): KeyspaceService {
   const state: ActiveKeyState = { activePublicKeyHex: OWNER };
   return {
-    listKeys: async () => [], getKey: async () => undefined, active: () => state,
+    listKeys: async () => [], getKey: async () => undefined, active: () => state, selected: () => state.activePublicKeyHex,
     setActive: async () => undefined,
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
     onActiveKeyChanged: () => () => undefined, openKeyStorage: async () => { throw new Error("unused"); },

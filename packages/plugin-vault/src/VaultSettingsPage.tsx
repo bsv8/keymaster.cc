@@ -4,7 +4,7 @@
 //   - 页面是唯一正式 Key 管理入口：查看 / 设为 active / 导出 / 删除 / 新建。
 //   - "新建 Key" 调用 vault.generateKey，私钥生成完全在 Vault 内部完成；
 //     本页面不接触私钥材料、不调用 crypto / noble。
-//   - 删除仍走 keyspace.deleteKey({ publicKeyHex, password })；不在页面直接调 vault.deleteKeyMaterial。
+//   - 删除仍走 keyspace.deleteKey({ publicKeyHex, confirmationLabel })；不在页面直接调 vault.deleteKeyMaterial。
 //   - 桌面端用 DataTable 紧凑展示；移动端改成纵向 Key 条目，状态 / 标签 /
 //     短公钥 / 能力 / 时间 / 操作折叠成单条记录，避免横向滚动。
 //   - 失败 / uninitialized / 无 publicKeyHex 等边界沿用硬切换 008 防御。
@@ -111,16 +111,14 @@ export function VaultSettingsPage() {
     await refresh();
   }
 
-  async function handleDelete(password: string) {
+  async function handleDelete(confirmationLabel: string) {
     if (!deleting) return;
     try {
-      // 硬切换 002 收尾：删除入口必须带锁屏密码 + publicKeyHex；
-      // service 层负责校验真伪、决定是否触发"空 Vault 收尾"。
-      // 页面只透传 modal 收集的密码，**不**在这里多调一次
-      // vault.verifyPassword（会让授权语义出现两个真值来源），
+      // 删除入口只传目标标签 + publicKeyHex；service 层从 authoritative
+      // vault record 读取标签并做严格匹配。
       // 也**不**在这里判断"删完是否要跳欢迎页"——真正的状态源
       // 是 vault.status()，由 App 自然切回 LockedShell。
-      await keyspace.deleteKey({ publicKeyHex: deleting.publicKeyHex, password });
+      await keyspace.deleteKey({ publicKeyHex: deleting.publicKeyHex, confirmationLabel });
       await refresh();
     } catch (err) {
       setError(

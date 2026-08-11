@@ -3,6 +3,7 @@ import type { CoordinatorCryptoOperation, CoordinatorCryptoResult, KeyRef, Sessi
 import { createVaultServiceCoordinator, type CoordinatorClientLike } from "./vaultServiceCoordinator.js";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
+import { createMessageBus } from "@keymaster/runtime";
 
 const PUBLIC_KEY = "02".padEnd(66, "a");
 const KEY: KeyRef = { publicKeyHex: PUBLIC_KEY, label: "primary", address: "addr-1", capabilities: ["p2pkh"], createdAt: "now" } as KeyRef;
@@ -64,7 +65,7 @@ describe("VaultServiceCoordinator", () => {
     const client = makeClient();
     const mirror = new SessionStateMirror(client);
     const vault = createVaultServiceCoordinator({ coordinatorClient: client, sessionStateMirror: mirror });
-    const keyspace = createKeyspaceServiceCoordinator(client, mirror);
+    const keyspace = createKeyspaceServiceCoordinator(client, mirror, createMessageBus());
     const nextKey = "03".padEnd(66, "b");
     const observed: string[] = [];
 

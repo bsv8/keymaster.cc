@@ -49,6 +49,7 @@ function makeFakeKeyspace(): KeyspaceService {
     listKeys: async () => [],
     getKey: async () => undefined,
     active: () => active,
+    selected: () => active.activePublicKeyHex,
     setActive: async (publicKeyHex: string) => {
       active = { activePublicKeyHex: publicKeyHex };
       for (const listener of listeners) listener(active);

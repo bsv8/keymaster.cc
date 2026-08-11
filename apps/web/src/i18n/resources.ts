@@ -47,6 +47,9 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       // 硬切换 010：locked 状态说明，明确"需要先解锁才能导入或管理私钥"。
       "shell.locked.lockedDesc":
         "Unlock the local Vault first. After unlocking you can import more keys or manage them.",
+      "shell.locked.selected.title": "Selected private key",
+      "shell.locked.selected.export": "Export private key",
+      "shell.locked.selected.delete": "Delete private key",
       "shell.locked.create": "Create",
       "shell.locked.menuItem": "Menu",
       "shell.unlocked.notice.activationPending":
@@ -156,6 +159,9 @@ export const SHELL_RESOURCES: I18nPluginResources = {
       "shell.locked.newWalletDesc": "设置一个本地密码。Vault 接下来会立即生成你的第一把 Key 并自动设为 active。该密码仅保存在本机，用于加密你的私钥。",
       "shell.locked.lockedTitle": "钱包已锁定",
       "shell.locked.lockedDesc": "需要先解锁本地 Vault，解锁后才能导入或管理私钥。",
+      "shell.locked.selected.title": "当前选择的私钥",
+      "shell.locked.selected.export": "导出私钥",
+      "shell.locked.selected.delete": "删除私钥",
       "shell.locked.create": "创建",
       "shell.locked.menuItem": "菜单",
       "shell.unlocked.notice.activationPending": "首把 Key 已保存，但未能自动设为 active。请在 Key 管理中手动切换。",

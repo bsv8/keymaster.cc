@@ -32,7 +32,8 @@ import type {
   SessionStateEvent,
   VaultSealedSecret,
 } from "@keymaster/contracts";
-import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, vaultKeyAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptVaultKeyMaterial, resolveVaultPasswordKey, decryptVaultKeyMaterialForMigration, encryptBytes, decryptBytes, buildKeyBackupEnvelope, passwordBackupView, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
+import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
+import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { createMessageBus } from "@keymaster/runtime/messageBus";
@@ -52,10 +53,20 @@ async function getVaultMeta(): Promise<VaultMetaRecord | undefined> {
 }
 
 async function getActiveKey(): Promise<VaultKeyRecord | undefined> {
-  const activePublicKeyHex = coordinatorMeta.activePublicKeyHex;
-  if (activePublicKeyHex) return vaultDb.getKey(activePublicKeyHex);
+  const selectedPublicKeyHex = coordinatorMeta.selectedPublicKeyHex;
+  if (selectedPublicKeyHex) {
+    const selected = await vaultDb.getKey(selectedPublicKeyHex);
+    if (selected) return selected;
+  }
   const keys = await vaultDb.listKeys();
-  return keys[0];
+  const first = keys[0];
+  if (first) { coordinatorMeta.selectedPublicKeyHex = first.publicKeyHex; await persistCoordinatorMeta(); }
+  return first;
+}
+
+/** Reconcile persisted selection from public key listings only. */
+async function reconcileSelectedPublicKey(): Promise<void> {
+  await getActiveKey();
 }
 
 // 密码验证逻辑（简化版，实际需要导入 crypto 模块）
@@ -70,22 +81,23 @@ async function verifyPassword(password: string, meta: VaultMetaRecord): Promise<
   });
 }
 
-async function decryptPrivateKey(passwordKey: CryptoKey, record: VaultKeyRecord): Promise<Uint8Array> {
-  const bytes = await decryptBytesWithAad(passwordKey, {
-    salt: decodePersisted(record.cipherSaltB64), iv: decodePersisted(record.cipherIvB64), ciphertext: decodePersisted(record.cipherB64)
-  }, record.cipherVersion === "v2" ? vaultKeyAad(record.publicKeyHex) : undefined);
-  const parsed = JSON.parse(new TextDecoder().decode(bytes)) as { hex: string };
-  const privateKey = cryptoHexToBytes(parsed.hex);
-  verifySessionKeyPair({ publicKeyHex: record.publicKeyHex, privateKeyBytes: privateKey });
-  return privateKey;
+async function decryptPrivateKey(password: string, record: VaultKeyRecord): Promise<Uint8Array> {
+  if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) throw new Error("Unsupported key storage version");
+  const unlocked = await (await import("keyhold")).unlock((await import("keyhold")).parse((await import("keyhold")).serialize(record.keyholdDocument)), password);
+  if (unlocked.publicKeyHex !== record.publicKeyHex) {
+    unlocked.privateKey.fill(0);
+    throw new Error("KeyHold public key mismatch");
+  }
+  return unlocked.privateKey;
 }
 
 function decodePersisted(value: string): Uint8Array {
   try { return cryptoHexToBytes(value); } catch { return base64ToBytes(value); }
 }
 
-interface CoordinatorMetaRecord { id: "singleton"; activePublicKeyHex?: string; generation: number; scheduleSettings?: CoordinatorBackgroundSyncSettings; }
+interface CoordinatorMetaRecord { id: "singleton"; selectedPublicKeyHex?: string; generation: number; scheduleSettings?: CoordinatorBackgroundSyncSettings; }
 const coordinatorMeta: CoordinatorMetaRecord = { id: "singleton", generation: 0, scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
+let testPersistCoordinatorMetaFailure = false;
 async function loadCoordinatorMeta(): Promise<void> {
   await new Promise<void>((resolve) => {
     const req = indexedDB.open("keymaster.session-coordinator", 1);
@@ -95,6 +107,10 @@ async function loadCoordinatorMeta(): Promise<void> {
   });
 }
 async function persistCoordinatorMeta(): Promise<void> {
+  if (testPersistCoordinatorMetaFailure) {
+    testPersistCoordinatorMetaFailure = false;
+    throw new Error("injected coordinator meta persist failure");
+  }
   await new Promise<void>((resolve) => {
     const req = indexedDB.open("keymaster.session-coordinator", 1);
     req.onupgradeneeded = () => {
@@ -457,6 +473,7 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     cause,
     vaultStatus: coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null,
+    selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null,
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
   });
 }
@@ -471,6 +488,7 @@ interface CoordinatorState {
   activePublicKeyHex?: string;
   activePrivateKeyBytes?: Uint8Array;
   passwordKey?: CryptoKey;
+  password?: string;
   storageSecretKey?: CryptoKey;
   keyspaceGeneration: number;
   taskRuntimes: Map<string, TaskRuntime>;
@@ -701,6 +719,18 @@ const coordinatorState: CoordinatorState = {
   lastActivityAt: Date.now(),
 };
 
+/** Transfer ownership of the worker's active private-key buffer. */
+function replaceActivePrivateKey(next: Uint8Array | undefined): void {
+  const previous = coordinatorState.activePrivateKeyBytes;
+  if (previous && previous !== next) previous.fill(0);
+  coordinatorState.activePrivateKeyBytes = next;
+}
+
+/** Drop the worker-owned active private-key buffer. */
+function dropActivePrivateKey(): void {
+  replaceActivePrivateKey(undefined);
+}
+
 const connectedPorts = new Map<string, ConnectedPort>();
 const PASSKEY_ADD_INTENT_TTL_MS = 120_000;
 const passkeyAddIntents = new Map<string, {
@@ -742,17 +772,44 @@ async function enterUnlockedState(
   activePrivateKeyBytes: Uint8Array,
   cause: SessionStateEvent["cause"]
 ): Promise<void> {
-  // 更新状态
-  coordinatorState.vaultStatus = "unlocked";
-  coordinatorState.sessionEpoch = generateEpoch();
-  passkeyAddIntents.clear();
-  coordinatorState.activePublicKeyHex = activePublicKeyHex;
-  coordinatorState.passwordKey = passwordKey;
-  coordinatorState.storageSecretKey = storageSecretKey;
-  coordinatorState.activePrivateKeyBytes = activePrivateKeyBytes;
-  coordinatorMeta.activePublicKeyHex = activePublicKeyHex;
-  coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
-  await persistCoordinatorMeta();
+  const previous = {
+    vaultStatus: coordinatorState.vaultStatus,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    activePublicKeyHex: coordinatorState.activePublicKeyHex,
+    activePrivateKeyBytes: coordinatorState.activePrivateKeyBytes,
+    passwordKey: coordinatorState.passwordKey,
+    password: coordinatorState.password,
+    storageSecretKey: coordinatorState.storageSecretKey,
+    selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
+    generation: coordinatorMeta.generation
+  };
+  try {
+    // Update durable/session metadata before transferring ownership of the new
+    // private-key buffer. A failed metadata write therefore leaves the old
+    // active session untouched and the caller still owns `activePrivateKeyBytes`.
+    coordinatorState.vaultStatus = "unlocked";
+    coordinatorState.sessionEpoch = generateEpoch();
+    passkeyAddIntents.clear();
+    coordinatorState.activePublicKeyHex = activePublicKeyHex;
+    coordinatorState.passwordKey = passwordKey;
+    coordinatorState.password = coordinatorState.password ?? "";
+    coordinatorState.storageSecretKey = storageSecretKey;
+    coordinatorMeta.selectedPublicKeyHex = activePublicKeyHex;
+    coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+    await persistCoordinatorMeta();
+    replaceActivePrivateKey(activePrivateKeyBytes);
+  } catch (error) {
+    coordinatorState.vaultStatus = previous.vaultStatus;
+    coordinatorState.sessionEpoch = previous.sessionEpoch;
+    coordinatorState.activePublicKeyHex = previous.activePublicKeyHex;
+    coordinatorState.activePrivateKeyBytes = previous.activePrivateKeyBytes;
+    coordinatorState.passwordKey = previous.passwordKey;
+    coordinatorState.password = previous.password;
+    coordinatorState.storageSecretKey = previous.storageSecretKey;
+    coordinatorMeta.selectedPublicKeyHex = previous.selectedPublicKeyHex;
+    coordinatorMeta.generation = previous.generation;
+    throw error;
+  }
   notifyStorageLifecycle("unlocked");
   emitStorageState();
 
@@ -785,6 +842,7 @@ function createWorkerKeyspace(): KeyspaceService {
     listKeys: async () => (await vaultDb.listKeys()).map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt })),
     getKey: async (publicKeyHex) => { const key = await vaultDb.getKey(publicKeyHex); return key ? { publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt } : undefined; },
     active,
+    selected: () => coordinatorMeta.selectedPublicKeyHex,
     setActive: async (publicKeyHex) => { await executeVaultOperation({ type: "setActive", publicKeyHex }); },
     requireActiveKey: () => { if (!coordinatorState.activePublicKeyHex) throw new Error("No active key"); return { publicKeyHex: coordinatorState.activePublicKeyHex, label: "", capabilities: ["p2pkh"], createdAt: "" }; },
     onActiveKeyChanged: () => () => undefined,
@@ -792,7 +850,9 @@ function createWorkerKeyspace(): KeyspaceService {
     registerPluginStorage: () => undefined,
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
-    deleteKey: async (input) => { await executeVaultOperation({ type: "deleteKey", ...input }); },
+    // Deletion is coordinated by the application keyspace facade so that
+    // namespace cleanup and password verification cannot be bypassed.
+    deleteKey: async () => { throw new Error("Use the coordinator keyspace deletion flow"); },
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   };
@@ -995,7 +1055,7 @@ async function handleSubscribe(
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
-      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, keyspaceGeneration: coordinatorState.keyspaceGeneration }
+      ? { topic, type: "session.state.changed" as const, sessionRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, cause: "bootstrap" as const, vaultStatus: coordinatorState.vaultStatus, activePublicKeyHex: coordinatorState.vaultStatus === "unlocked" ? coordinatorState.activePublicKeyHex ?? null : null, selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null, keyspaceGeneration: coordinatorState.keyspaceGeneration }
         : { topic, type: "background.snapshot.changed" as const, backgroundSnapshotRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshots: getTaskSnapshots(), scheduleSettings: coordinatorState.scheduleSettings };
     return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot }];
   });
@@ -1251,6 +1311,8 @@ async function handleUnlock(
     };
   }
 
+  let privateKey: Uint8Array | undefined;
+  let privateKeyTransferred = false;
   try {
     // 1. 从 DB 读取 vault_meta
     const meta = await getVaultMeta();
@@ -1279,10 +1341,12 @@ async function handleUnlock(
     // 3. 获取 active key
     const activeKey = request.publicKeyHex ? await vaultDb.getKey(request.publicKeyHex) : await getActiveKey();
     if (!activeKey) throw new Error("No active key");
-    const privateKey = await decryptPrivateKey(passwordKey, activeKey);
+    privateKey = await decryptPrivateKey(request.password, activeKey);
 
     // 4. 统一进入 unlocked 状态
+    coordinatorState.password = request.password;
     await enterUnlockedState(passwordKey, storageSecretKey, activeKey.publicKeyHex, privateKey, "unlock");
+    privateKeyTransferred = true;
 
     return {
       requestId,
@@ -1293,8 +1357,10 @@ async function handleUnlock(
     // unlock 失败，回到 locked
     coordinatorState.vaultStatus = "locked";
     coordinatorState.activePublicKeyHex = undefined;
-    coordinatorState.activePrivateKeyBytes = undefined;
+    dropActivePrivateKey();
+    privateKeyTransferred = false;
     coordinatorState.passwordKey = undefined;
+    coordinatorState.password = undefined;
     coordinatorState.storageSecretKey = undefined;
 
     return {
@@ -1302,6 +1368,8 @@ async function handleUnlock(
       sessionEpoch: coordinatorState.sessionEpoch,
       ack: { status: "error", message: err instanceof Error ? err.message : String(err) },
     };
+  } finally {
+    if (privateKey && !privateKeyTransferred) privateKey.fill(0);
   }
 }
 
@@ -1317,36 +1385,70 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
 async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
   switch (operation.type) {
     case "listKeys": return (await vaultDb.listKeys()).map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
-    case "getKey": { const key = await vaultDb.getKey(operation.publicKeyHex); if (!key) return undefined; const { cipherSaltB64: _s, cipherIvB64: _i, cipherB64: _c, passkeyProtections: _p, ...publicKey } = key; return publicKey; }
+    case "getKey": {
+      const key = await vaultDb.getKey(operation.publicKeyHex);
+      if (!key) return undefined;
+      const { publicKeyHex, label, capabilities, createdAt, address, network, format, source } = key;
+      return { publicKeyHex, label, capabilities, createdAt, address, network, format, source };
+    }
     case "verifyPassword": { const meta = await getVaultMeta(); if (!meta) throw new Error("Vault not initialized"); if (!(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); return true; }
     case "setActive": {
       if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.passwordKey) throw new Error("Vault is locked");
       const key = await vaultDb.getKey(operation.publicKeyHex); if (!key) throw new Error("Key not found");
-      if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== operation.publicKeyHex) {
-        await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
+      const bytes = await decryptPrivateKey(coordinatorState.password ?? "", key);
+      const previousActive = coordinatorState.activePublicKeyHex;
+      const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
+      const previousGeneration = coordinatorState.keyspaceGeneration;
+      const previousEpoch = coordinatorState.sessionEpoch;
+      const previousSelected = coordinatorMeta.selectedPublicKeyHex;
+      replaceActivePrivateKey(bytes);
+      coordinatorState.activePublicKeyHex = key.publicKeyHex;
+      coordinatorState.keyspaceGeneration++;
+      coordinatorState.sessionEpoch = generateEpoch();
+      passkeyAddIntents.clear();
+      coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
+      coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+      try {
+        if (previousActive && previousActive !== operation.publicKeyHex) {
+          await cancelTaskRuntimesByKey(previousActive);
+        }
+        await persistActiveMeta();
+      } catch (error) {
+        dropActivePrivateKey();
+        if (previousBytes) replaceActivePrivateKey(previousBytes);
+        coordinatorState.activePublicKeyHex = previousActive;
+        coordinatorState.keyspaceGeneration = previousGeneration;
+        coordinatorState.sessionEpoch = previousEpoch;
+        coordinatorMeta.selectedPublicKeyHex = previousSelected;
+        coordinatorMeta.generation = previousGeneration;
+        throw error;
+      } finally {
+        if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
       }
-      const bytes = await decryptPrivateKey(coordinatorState.passwordKey, key); coordinatorState.activePrivateKeyBytes?.fill(0); coordinatorState.activePrivateKeyBytes = bytes; coordinatorState.activePublicKeyHex = key.publicKeyHex; coordinatorState.keyspaceGeneration++; coordinatorState.sessionEpoch = generateEpoch(); passkeyAddIntents.clear(); coordinatorMeta.activePublicKeyHex = key.publicKeyHex; coordinatorMeta.generation = coordinatorState.keyspaceGeneration; await persistActiveMeta(); publishSessionState("activate-key"); return true;
+      publishSessionState("activate-key"); return true;
     }
-    case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true;
-    case "deleteKey": { const meta = await getVaultMeta(); if (!meta || !(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKey(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) await performGlobalLock("key-deleted"); return true; }
+    case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKeyAndSidecars(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) { dropActivePrivateKey(); coordinatorState.activePublicKeyHex = undefined; } await repairSelectedAfterDelete(operation.publicKeyHex); return true;
     case "createVault": return await createVaultRpc(operation.password);
     case "createVaultWithInitialKey": return await createVaultRpc(operation.password, { label: operation.label, capabilities: operation.capabilities });
     case "createVaultWithImportedKey": return await createVaultRpc(operation.vaultPassword, operation.key);
     case "generateKey": return await addKeyRpc(operation.password, { label: operation.label, capabilities: operation.capabilities, material: { hex: generatePrivateKeyHex() }, format: "generated", source: "vault-generated" });
     case "importPrivateKey": return await addKeyRpc(operation.password, operation);
     case "exportCurrentKeyBackup": {
-      const key = await requireCurrentKeyRecord();
-      const { sourceVaultMeta, keyRecord } = await vaultDb.readKeyBackupRecord(key.publicKeyHex);
-      return (await import("@keymaster/plugin-vault/coordinator")).encodeKeyBackup(buildKeyBackupEnvelope(sourceVaultMeta, keyRecord));
+      const selectedHex = coordinatorMeta.selectedPublicKeyHex;
+      if (!selectedHex) throw new Error("No selected private key");
+      const key = await vaultDb.getKey(selectedHex);
+      if (!key) throw new Error("Key not found");
+      if (key.storageVersion !== "keyhold-v2" || !key.keyholdDocument) throw new Error("Unsupported key storage version");
+      return (await import("keyhold")).serialize((await import("keyhold")).parse((await import("keyhold")).serialize(key.keyholdDocument)));
     }
     case "listCurrentKeyPasskeys": {
       const key = await requireCurrentKeyRecord();
-      return (key.passkeyProtections ?? []).map(toPasskeySummary);
+      return (await vaultDb.listSidecars(key.publicKeyHex)).map(toPasskeySummary);
     }
     case "listPasskeysForKey": {
       const key = await vaultDb.getKey(operation.publicKeyHex);
       if (!key) throw new Error("Key not found");
-      return (key.passkeyProtections ?? []).map(toPasskeySummary);
+      return (await vaultDb.listSidecars(key.publicKeyHex)).map(toPasskeySummary);
     }
     case "getPasskeyChallenge": {
       const { protection } = await findKeyByPasskeyId(operation.passkeyId);
@@ -1361,7 +1463,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       const key = await requireCurrentKeyRecord();
       const label = operation.label.trim();
       if (!label) throw new Error("Passkey name is required");
-      if ((key.passkeyProtections ?? []).some((item) => item.label === label)) {
+      if ((await vaultDb.listSidecars(key.publicKeyHex)).some((item) => item.label === label)) {
         throw new Error("Passkey name already exists for this key");
       }
       prunePasskeyAddIntents();
@@ -1383,18 +1485,17 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         throw new Error("Current key changed during passkey setup");
       }
       const allKeys = await vaultDb.listKeys();
-      if (allKeys.some((record) => (record.passkeyProtections ?? []).some((item) => item.id === operation.credentialIdB64))) {
+      if ((await Promise.all(allKeys.map((record) => vaultDb.listSidecars(record.publicKeyHex)))).some((items) => items.some((item) => item.id === operation.credentialIdB64))) {
         throw new Error("Passkey already exists in this Vault");
       }
       const prfOutput = cryptoHexToBytes(operation.prfOutputHex);
-      const material = { hex: bytesToHex(coordinatorState.activePrivateKeyBytes!) };
       let encrypted: Awaited<ReturnType<typeof encryptMaterialWithPasskey>>;
       try {
         encrypted = await encryptMaterialWithPasskey({
           prfOutput,
           publicKeyHex: key.publicKeyHex,
           credentialIdB64: operation.credentialIdB64,
-          material
+          privateKeyBytes: coordinatorState.activePrivateKeyBytes!
         });
       } finally {
         prfOutput.fill(0);
@@ -1409,26 +1510,23 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         transports: operation.transports,
         ...encrypted
       };
-      await vaultDb.putKey({
-        ...key,
-        passkeyProtections: [...(key.passkeyProtections ?? []), protection]
-      });
+      await vaultDb.putSidecar({ publicKeyHex: key.publicKeyHex, ...protection });
       return toPasskeySummary(protection);
     }
     case "removePasskeyFromCurrentKey": {
       const key = await requireCurrentKeyRecord();
-      const next = (key.passkeyProtections ?? []).filter((item) => item.id !== operation.passkeyId);
-      if (next.length === (key.passkeyProtections ?? []).length) throw new Error("Passkey protection not found");
-      await vaultDb.putKey({ ...key, passkeyProtections: next });
+      const sidecar = (await vaultDb.listSidecars(key.publicKeyHex)).find((item) => item.id === operation.passkeyId);
+      if (!sidecar) throw new Error("Passkey protection not found");
+      await vaultDb.deleteSidecar(key.publicKeyHex, operation.passkeyId);
       return true;
     }
     case "activateKeyWithPasskey": {
       if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
       const { key, protection } = await findKeyByPasskeyId(operation.passkeyId);
       const prfOutput = cryptoHexToBytes(operation.prfOutputHex);
-      let material: Awaited<ReturnType<typeof decryptMaterialWithPasskey>>;
+      let privateKey: Uint8Array;
       try {
-        material = await decryptMaterialWithPasskey({
+        privateKey = await decryptMaterialWithPasskey({
           prfOutput,
           publicKeyHex: key.publicKeyHex,
           protection
@@ -1436,22 +1534,44 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       } finally {
         prfOutput.fill(0);
       }
-      const privateKey = cryptoHexToBytes(material.hex);
-      verifySessionKeyPair({ publicKeyHex: key.publicKeyHex, privateKeyBytes: privateKey });
-      if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== key.publicKeyHex) {
-        await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
+      let privateKeyTransferred = false;
+      try {
+        verifySessionKeyPair({ publicKeyHex: key.publicKeyHex, privateKeyBytes: privateKey });
+        const previousPublicKeyHex = coordinatorState.activePublicKeyHex;
+        const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
+        const previousGeneration = coordinatorState.keyspaceGeneration;
+        const previousEpoch = coordinatorState.sessionEpoch;
+        const previousSelected = coordinatorMeta.selectedPublicKeyHex;
+        if (previousPublicKeyHex && previousPublicKeyHex !== key.publicKeyHex) {
+          await cancelTaskRuntimesByKey(previousPublicKeyHex);
+        }
+        replaceActivePrivateKey(privateKey);
+        privateKeyTransferred = true;
+        coordinatorState.activePublicKeyHex = key.publicKeyHex;
+        coordinatorState.keyspaceGeneration++;
+        coordinatorState.sessionEpoch = generateEpoch();
+        passkeyAddIntents.clear();
+        coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
+        coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+        try {
+          await persistActiveMeta();
+        } catch (error) {
+          dropActivePrivateKey();
+          if (previousBytes) replaceActivePrivateKey(previousBytes);
+          coordinatorState.activePublicKeyHex = previousPublicKeyHex;
+          coordinatorState.keyspaceGeneration = previousGeneration;
+          coordinatorState.sessionEpoch = previousEpoch;
+          coordinatorMeta.selectedPublicKeyHex = previousSelected;
+          coordinatorMeta.generation = previousGeneration;
+          privateKeyTransferred = false;
+          throw error;
+        }
+        if (previousBytes) previousBytes.fill(0);
+        publishSessionState("activate-key");
+        return true;
+      } finally {
+        if (!privateKeyTransferred) privateKey.fill(0);
       }
-      coordinatorState.activePrivateKeyBytes?.fill(0);
-      coordinatorState.activePrivateKeyBytes = privateKey;
-      coordinatorState.activePublicKeyHex = key.publicKeyHex;
-      coordinatorState.keyspaceGeneration++;
-      coordinatorState.sessionEpoch = generateEpoch();
-      passkeyAddIntents.clear();
-      coordinatorMeta.activePublicKeyHex = key.publicKeyHex;
-      coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
-      await persistActiveMeta();
-      publishSessionState("activate-key");
-      return true;
     }
     case "sealLocalSecret": {
       if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.storageSecretKey) throw new Error("Vault is locked");
@@ -1484,42 +1604,35 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       return plaintext;
     }
     case "changePassword": return await changePasswordRpc(operation.oldPassword, operation.newPassword);
-    case "finalizeEmptyVaultAfterLastKeyDeletion": if ((await vaultDb.listKeys()).length === 0) { await vaultDb.deleteMeta(); await performGlobalLock("empty-vault"); } return true;
+    case "finalizeEmptyVaultAfterLastKeyDeletion": {
+      if ((await vaultDb.listKeys()).length !== 0) throw new Error("Vault still has keys");
+      await vaultDb.deleteMeta();
+      await performGlobalLock("empty-vault");
+      return true;
+    }
     case "recoverEmptyVaultToUninitialized": await vaultDb.deleteMeta(); await performGlobalLock("recover-empty"); return true;
     case "exportKeyBackup": {
       const key = await vaultDb.getKey(operation.publicKeyHex);
       if (!key) throw new Error("Key not found");
-      const meta = await getVaultMeta();
-      if (!meta) throw new Error("Vault not initialized");
-      const { encodeKeyBackup } = await import("@keymaster/plugin-vault/coordinator");
-      return encodeKeyBackup(buildKeyBackupEnvelope(meta, key));
+      if (key.storageVersion !== "keyhold-v2" || !key.keyholdDocument) throw new Error("Unsupported key storage version");
+      return (await import("keyhold")).serialize((await import("keyhold")).parse((await import("keyhold")).serialize(key.keyholdDocument)));
     }
     case "importKeyBackup": {
       const currentMeta = await getVaultMeta();
       if (!currentMeta) throw new Error("Vault not initialized");
-      const { decodeKeyBackup, resolveVaultPasswordKey: resolveKey, decryptVaultKeyMaterialForMigration: decryptMigrate, encryptVaultKeyMaterial: encryptMaterial } = await import("@keymaster/plugin-vault/coordinator");
-      // 解码备份
-      const backup = passwordBackupView(decodeKeyBackup(operation.backup));
-      // 用备份里的 source meta 验证 source password
-      const sourceKey = await resolveKey(operation.sourcePassword, backup.sourceVaultMeta);
-      // 用当前 vault meta 验证 target password
-      const targetKey = await resolveKey(operation.targetPassword, currentMeta);
-      // 验证 backup key 的 public key 与解密后的 material 一致
-      const material = await decryptMigrate(sourceKey.key, backup.keyRecord, sourceKey.encoding);
-      const { bytesToHex: toHex, hexToBytes: fromHex } = await import("@keymaster/plugin-vault/coordinator");
-      const { secp256k1 } = await import("@noble/curves/secp256k1.js");
-      const derivedPub = toHex(secp256k1.getPublicKey(fromHex(material.hex), true));
-      if (derivedPub !== backup.keyRecord.publicKeyHex) {
-        throw new Error("Backup key public key mismatch");
+      const keyhold = await import("keyhold");
+      const sourceDoc = keyhold.parse(operation.backup);
+      const source = await keyhold.unlock(sourceDoc, operation.sourcePassword);
+      if (!(await verifyPassword(operation.targetPassword, currentMeta))) throw new Error("Invalid password");
+      const existingKey = await vaultDb.getKey(source.publicKeyHex);
+      if (existingKey) throw new Error("Key already exists");
+      let targetDocument: import("keyhold").Document;
+      try {
+        targetDocument = keyhold.parse(await keyhold.exportPrivateKey({ privateKey: source.privateKey, password: operation.targetPassword, label: sourceDoc.label, parameters: keyhold.recommendedParameters() }));
+      } finally {
+        source.privateKey.fill(0);
       }
-      // 检查重复 key
-      const existingKey = await vaultDb.getKey(backup.keyRecord.publicKeyHex);
-      if (existingKey) {
-        throw new Error("Key already exists");
-      }
-      // 重加密并落库
-      const encrypted = await encryptMaterial(targetKey.key, backup.keyRecord.publicKeyHex, material);
-      const record: VaultKeyRecord = { ...backup.keyRecord, ...encrypted };
+      const record: VaultKeyRecord = { publicKeyHex: source.publicKeyHex, label: sourceDoc.label, address: "", network: "main", format: "keyhold-v2", capabilities: ["p2pkh"], createdAt: new Date().toISOString(), storageVersion: "keyhold-v2", keyholdDocument: targetDocument };
       await vaultDb.putKey(record);
       // 仅当 Vault 已 unlocked 且是第一个 key 时，设置为 active
       if (coordinatorState.vaultStatus === "unlocked") {
@@ -1551,14 +1664,30 @@ async function requireCurrentKeyRecord(): Promise<VaultKeyRecord> {
   return key;
 }
 
+async function repairSelectedAfterDelete(deleted: string): Promise<void> {
+  const remaining = await vaultDb.listKeys();
+  if (remaining.length === 0) {
+    coordinatorMeta.selectedPublicKeyHex = undefined;
+    await persistCoordinatorMeta();
+    return;
+  }
+  if (coordinatorMeta.selectedPublicKeyHex === deleted || !await vaultDb.getKey(coordinatorMeta.selectedPublicKeyHex ?? "")) {
+    coordinatorMeta.selectedPublicKeyHex = remaining[0]!.publicKeyHex;
+    coordinatorMeta.generation = ++coordinatorState.keyspaceGeneration;
+    await persistCoordinatorMeta();
+    publishSessionState("delete-active-key");
+  }
+}
+
 async function findKeyByPasskeyId(passkeyId: string): Promise<{
   key: VaultKeyRecord;
-  protection: NonNullable<VaultKeyRecord["passkeyProtections"]>[number];
+  protection: import("@keymaster/plugin-vault/coordinator").WebAuthnSidecarRecord;
 }> {
-  const matches = (await vaultDb.listKeys()).flatMap((key) => {
-    const protection = key.passkeyProtections?.find((item) => item.id === passkeyId);
-    return protection ? [{ key, protection }] : [];
-  });
+  const matches: Array<{ key: VaultKeyRecord; protection: import("@keymaster/plugin-vault/coordinator").WebAuthnSidecarRecord }> = [];
+  for (const key of await vaultDb.listKeys()) {
+    const protection = (await vaultDb.listSidecars(key.publicKeyHex)).find((item) => item.id === passkeyId);
+    if (protection) matches.push({ key, protection });
+  }
   if (matches.length === 0) throw new Error("Passkey protection not found");
   if (matches.length > 1) throw new Error("Passkey protection id is not unique");
   return matches[0]!;
@@ -1579,11 +1708,12 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   }
   // 空 Vault 创建后保持 locked 状态，清空内存中的 passwordKey
   coordinatorState.passwordKey = undefined;
+  coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
   passkeyAddIntents.clear();
   coordinatorState.vaultStatus = "locked";
   coordinatorState.sessionEpoch = generateEpoch();
-  coordinatorMeta.activePublicKeyHex = undefined;
+  coordinatorMeta.selectedPublicKeyHex = undefined;
   coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
   await persistCoordinatorMeta();
   // 广播 locked 状态
@@ -1599,21 +1729,33 @@ async function addKeyRpc(password: string, input: { label: string; capabilities?
     return k;
   })();
   const priv = cryptoHexToBytes(input.material.hex);
-  const pub = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(priv, true));
-  const encrypted = await (await import("@keymaster/plugin-vault/coordinator")).encryptVaultKeyMaterial(passwordKey, pub, input.material);
-  const record = { publicKeyHex: pub, label: input.label, address: deriveP2pkhAddress(pub, "main"), network: "main" as const, format: input.format, capabilities: input.capabilities ?? ["p2pkh"], createdAt: new Date().toISOString(), source: input.source, ...encrypted };
-  await vaultDb.putKey(record);
-  const wasUnlocked = coordinatorState.vaultStatus === "unlocked";
-  if (wasUnlocked && coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== pub) {
-    await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
+  let privateKeyTransferred = false;
+  try {
+    const pub = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(priv, true));
+    const document = keyholdParse(await keyholdExportPrivateKey({ privateKey: priv, password, label: input.label, parameters: keyholdRecommendedParameters() }));
+    const record: VaultKeyRecord = { publicKeyHex: pub, label: input.label, address: deriveP2pkhAddress(pub, "main"), network: "main" as const, format: input.format, capabilities: input.capabilities ?? ["p2pkh"], createdAt: new Date().toISOString(), source: input.source, storageVersion: "keyhold-v2", keyholdDocument: document };
+    await vaultDb.putKey(record);
+    const wasUnlocked = coordinatorState.vaultStatus === "unlocked";
+    // keyspaceGeneration 递增；只有 enter 成功后 worker state 才接管 priv。
+    const previousGeneration = coordinatorState.keyspaceGeneration;
+    const previousPassword = coordinatorState.password;
+    const previousStatus = coordinatorState.vaultStatus;
+    coordinatorState.keyspaceGeneration++;
+    coordinatorState.password = password;
+    const storageSecretKey = await deriveStorageSecretKey(password, decodePersisted(meta.saltB64));
+    try {
+      await enterUnlockedState(passwordKey, storageSecretKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
+    } catch (error) {
+      coordinatorState.keyspaceGeneration = previousGeneration;
+      coordinatorState.password = previousPassword;
+      coordinatorState.vaultStatus = previousStatus;
+      throw error;
+    }
+    privateKeyTransferred = true;
+    return { publicKeyHex: pub, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source };
+  } finally {
+    if (!privateKeyTransferred) priv.fill(0);
   }
-  coordinatorState.activePrivateKeyBytes?.fill(0);
-  // keyspaceGeneration 递增
-  coordinatorState.keyspaceGeneration++;
-  // 统一进入 unlocked 状态
-  const storageSecretKey = await deriveStorageSecretKey(password, decodePersisted(meta.saltB64));
-  await enterUnlockedState(passwordKey, storageSecretKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
-  return { publicKeyHex: pub, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source };
 }
 async function changePasswordRpc(oldPassword: string, newPassword: string): Promise<boolean> {
   // Acquire the same mutation lane before even reading key material. This
@@ -1625,17 +1767,26 @@ async function changePasswordRpc(oldPassword: string, newPassword: string): Prom
   try {
     const meta = await getVaultMeta();
     if (!meta) throw new Error("Vault not initialized");
-  const oldKey = await (await import("@keymaster/plugin-vault/coordinator")).resolveVaultPasswordKey(oldPassword, meta);
+    if (!(await verifyPassword(oldPassword, meta))) throw new Error("Invalid password");
   const newSalt = crypto.getRandomValues(new Uint8Array(16));
   const newKey = await deriveKey(newPassword, newSalt);
   const oldStorageKey = await deriveStorageSecretKey(oldPassword, decodePersisted(meta.saltB64));
+  const oldPasswordKey = await deriveKey(oldPassword, decodePersisted(meta.saltB64));
   const newStorageKey = await deriveStorageSecretKey(newPassword, newSalt);
   const verifier = await (await import("@keymaster/plugin-vault/coordinator")).encryptVerifier(newKey);
   const records = await vaultDb.listKeys();
-  const migrated = [];
+  for (const record of records) if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) throw new Error("Unsupported key storage version");
+  const migrated: KeyHoldVaultKeyRecord[] = [];
   for (const record of records) {
-    const material = await (await import("@keymaster/plugin-vault/coordinator")).decryptVaultKeyMaterialForMigration(oldKey.key, record);
-    migrated.push({ ...record, ...(await (await import("@keymaster/plugin-vault/coordinator")).encryptVaultKeyMaterial(newKey, record.publicKeyHex, material)) });
+    const unlocked = await (await import("keyhold")).unlock((await import("keyhold")).parse((await import("keyhold")).serialize(record.keyholdDocument!)), oldPassword);
+    try {
+      if (unlocked.publicKeyHex !== record.publicKeyHex) {
+        unlocked.privateKey.fill(0);
+        throw new Error("KeyHold public key mismatch");
+      }
+      const nextDoc = (await import("keyhold")).parse(await (await import("keyhold")).exportPrivateKey({ privateKey: unlocked.privateKey, password: newPassword, label: record.keyholdDocument!.label, parameters: (await import("keyhold")).recommendedParameters() }));
+      migrated.push({ publicKeyHex: record.publicKeyHex, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source, storageVersion: "keyhold-v2", keyholdDocument: nextDoc });
+    } finally { unlocked.privateKey.fill(0); }
   }
   // Re-wrap Storage-owned local secrets behind the same Worker-owned gate.
   // Slow S3 requests are aborted/drained before the journal migration starts.
@@ -1643,7 +1794,7 @@ async function changePasswordRpc(oldPassword: string, newPassword: string): Prom
   let storageRotationDegraded = false;
   try {
     await storageWithRotation?.beginPasswordRotation?.();
-    await migrateStorageSecrets(oldStorageKey, newStorageKey, oldKey.key);
+    await migrateStorageSecrets(oldStorageKey, newStorageKey, oldPasswordKey);
     try {
       await vaultDb.putMetaAndKeys((await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt: newSalt, verifier }), migrated);
     } catch (error) {
@@ -1712,17 +1863,18 @@ async function performGlobalLock(reason: string): Promise<void> {
 
   // 撤销 capability、清空 active key
   coordinatorState.activePublicKeyHex = undefined;
-  coordinatorState.activePrivateKeyBytes = undefined;
+    dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
+  coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
   passkeyAddIntents.clear();
 
   // 递增 epoch
   coordinatorState.sessionEpoch = generateEpoch();
-  coordinatorState.vaultStatus = reason === "recover-empty" ? "uninitialized" : "locked";
+  coordinatorState.vaultStatus = reason === "recover-empty" || reason === "empty-vault" ? "uninitialized" : "locked";
 
   coordinatorState.keyspaceGeneration++;
-  coordinatorMeta.activePublicKeyHex = undefined;
+  if (reason === "empty-vault" || reason === "recover-empty") coordinatorMeta.selectedPublicKeyHex = undefined;
   coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
   await persistCoordinatorMeta();
   publishSessionState(reason === "key-deleted" || reason === "empty-vault" ? "delete-active-key" : reason === "recover-empty" ? "recover-empty-vault" : "lock");
@@ -1758,18 +1910,35 @@ async function handleActivateKey(
     if (!meta || !(await verifyPassword(request.password, meta))) throw new Error("Invalid password");
     const key = await vaultDb.getKey(request.publicKeyHex);
     if (!key || !coordinatorState.passwordKey) throw new Error("Key not found");
-    if (coordinatorState.activePublicKeyHex && coordinatorState.activePublicKeyHex !== request.publicKeyHex) {
-      await cancelTaskRuntimesByKey(coordinatorState.activePublicKeyHex);
-    }
-    const privateKey = await decryptPrivateKey(coordinatorState.passwordKey, key);
-    coordinatorState.activePrivateKeyBytes?.fill(0);
-    coordinatorState.activePrivateKeyBytes = privateKey;
+    const privateKey = await decryptPrivateKey(coordinatorState.password ?? "", key);
+    const previousActive = coordinatorState.activePublicKeyHex;
+    const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
+    const previousGeneration = coordinatorState.keyspaceGeneration;
+    const previousEpoch = coordinatorState.sessionEpoch;
+    const previousSelected = coordinatorMeta.selectedPublicKeyHex;
+    replaceActivePrivateKey(privateKey);
     coordinatorState.activePublicKeyHex = request.publicKeyHex;
     coordinatorState.keyspaceGeneration++;
     coordinatorState.sessionEpoch = generateEpoch();
-    coordinatorMeta.activePublicKeyHex = request.publicKeyHex;
+    coordinatorMeta.selectedPublicKeyHex = request.publicKeyHex;
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
-    await persistCoordinatorMeta();
+    try {
+      if (previousActive && previousActive !== request.publicKeyHex) {
+        await cancelTaskRuntimesByKey(previousActive);
+      }
+      await persistCoordinatorMeta();
+    } catch (error) {
+      dropActivePrivateKey();
+      if (previousBytes) replaceActivePrivateKey(previousBytes);
+      coordinatorState.activePublicKeyHex = previousActive;
+      coordinatorState.keyspaceGeneration = previousGeneration;
+      coordinatorState.sessionEpoch = previousEpoch;
+      coordinatorMeta.selectedPublicKeyHex = previousSelected;
+      coordinatorMeta.generation = previousGeneration;
+      throw error;
+    } finally {
+      if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
+    }
 
     publishSessionState("activate-key");
 
@@ -1848,8 +2017,6 @@ async function executeCryptoOperation(
     case "deriveP2pkhAddress": return { type: "deriveP2pkhAddress", address: deriveP2pkhAddress(coordinatorState.activePublicKeyHex!, operation.network) };
     case "sealSendInput": { const i = operation.input; const sealed = sealAppMessageLocalBytes({ senderPrivateKeyBytes: privateKeyBytes, senderPublicKeyBytes: cryptoHexToBytes(coordinatorState.activePublicKeyHex!), recipientPublicKeyBytes: cryptoHexToBytes(i.recipient.recipientPublicKeyHex), senderEndpoint: i.sender.senderOrigin ? { kind: "origin", id: i.sender.senderOrigin } : { kind: "plugin", id: i.sender.senderAppId ?? "" }, recipientEndpoint: i.recipient.recipientOrigin ? { kind: "origin", id: i.recipient.recipientOrigin } : { kind: "plugin", id: i.recipient.recipientAppId ?? "" }, contentType: i.contentType, body: i.body, clientMessageId: i.clientMessageId, createdAtMs: i.createdAtMs }); return { type: "sealSendInput", envelope: sealed.envelope, signature: sealed.signatureBytes }; }
     case "openSealed": { const r = operation.record as { envelope: { envelopeBytes: ArrayBuffer; signatureBytes: ArrayBuffer }; recipientPublicKeyHex: string }; const opened = openAppMessageLocalBytes({ signed: { envelopeBytes: new Uint8Array(r.envelope.envelopeBytes), signatureBytes: new Uint8Array(r.envelope.signatureBytes) }, recipientPrivateKeyBytes: privateKeyBytes, recipientPublicKeyBytes: cryptoHexToBytes(r.recipientPublicKeyHex) }); return { type: "openSealed", plaintext: new TextEncoder().encode(JSON.stringify(opened)) }; }
-    case "encryptVaultKeyMaterial": { if (!coordinatorState.passwordKey) throw new Error("Password key unavailable"); const blob = await (await import("@keymaster/plugin-vault/coordinator")).encryptBytes(coordinatorState.passwordKey, operation.plaintext); return { type: "encryptVaultKeyMaterial", ciphertext: new TextEncoder().encode(JSON.stringify({ salt: bytesToHex(blob.salt), iv: bytesToHex(blob.iv), ciphertext: bytesToHex(blob.ciphertext) })) }; }
-    case "decryptVaultKeyMaterial": { if (!coordinatorState.passwordKey) throw new Error("Password key unavailable"); const r = JSON.parse(new TextDecoder().decode(operation.ciphertext)) as { salt: string; iv: string; ciphertext: string }; const plain = await (await import("@keymaster/plugin-vault/coordinator")).decryptBytes(coordinatorState.passwordKey, { salt: cryptoHexToBytes(r.salt), iv: cryptoHexToBytes(r.iv), ciphertext: cryptoHexToBytes(r.ciphertext) }); return { type: "decryptVaultKeyMaterial", plaintext: plain }; }
     default: throw new Error("Unsupported coordinator crypto operation");
   }
 }
@@ -2076,6 +2243,7 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     sessionEpoch: coordinatorState.sessionEpoch,
     vaultStatus: coordinatorState.vaultStatus,
     activePublicKeyHex: coordinatorState.activePublicKeyHex,
+    selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
     taskSnapshots: getTaskSnapshots(),
     scheduleSettings: coordinatorState.scheduleSettings,
@@ -2166,6 +2334,10 @@ async function initializeCoordinator(): Promise<void> {
       coordinatorState.vaultStatus = "locked";
       coordinatorState.activePublicKeyHex = undefined;
       coordinatorState.keyspaceGeneration = coordinatorMeta.generation;
+      // Reconcile only the persisted public selection.  This deliberately
+      // uses list/get and never parses or unlocks a key document, so opaque
+      // legacy records remain visible for locked recovery/delete flows.
+      await reconcileSelectedPublicKey();
     } else {
       coordinatorState.vaultStatus = "uninitialized";
     }
@@ -2199,6 +2371,7 @@ export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
 }
 
 export function __testResetState(): void {
+  testPersistCoordinatorMetaFailure = false;
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     runtime.controller?.abort();
     if (runtime.timer) clearTimeout(runtime.timer);
@@ -2206,8 +2379,9 @@ export function __testResetState(): void {
   coordinatorState.sessionEpoch = generateEpoch();
   coordinatorState.vaultStatus = "booting";
   coordinatorState.activePublicKeyHex = undefined;
-  coordinatorState.activePrivateKeyBytes = undefined;
+  dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
+  coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
   coordinatorState.keyspaceGeneration = 0;
   coordinatorState.taskRuntimes.clear();
@@ -2230,6 +2404,10 @@ export function __testResetState(): void {
 export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePublicKeyHex?: string): void {
   coordinatorState.vaultStatus = status;
   coordinatorState.activePublicKeyHex = activePublicKeyHex;
+}
+
+export function __testFailNextCoordinatorMetaPersist(): void {
+  testPersistCoordinatorMetaFailure = true;
 }
 
 export function __testGetConnectedPortCount(): number {
@@ -2422,11 +2600,14 @@ export async function __testUpdateScheduleSettings(settings: CoordinatorBackgrou
 export async function __testRestartWorker(): Promise<void> {
   __testResetState();
   await loadCoordinatorMeta();
-  coordinatorState.vaultStatus = (await getVaultMeta()) ? "locked" : "uninitialized";
+  const meta = await getVaultMeta();
+  coordinatorState.vaultStatus = meta ? "locked" : "uninitialized";
   coordinatorState.activePublicKeyHex = undefined;
-  coordinatorState.activePrivateKeyBytes = undefined;
+  dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
+  coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
+  if (meta) await reconcileSelectedPublicKey();
 }
 
 // ============================================================
@@ -2439,7 +2620,7 @@ export async function __testDeleteVault(): Promise<void> {
     // 删除所有 keys
     const keys = await vaultDb.listKeys();
     for (const key of keys) {
-      await vaultDb.deleteKey(key.publicKeyHex);
+      await vaultDb.deleteKeyAndSidecars(key.publicKeyHex);
     }
     // 删除 meta
     await vaultDb.deleteMeta();
@@ -2449,8 +2630,9 @@ export async function __testDeleteVault(): Promise<void> {
   // 重置内存状态
   coordinatorState.vaultStatus = "uninitialized";
   coordinatorState.activePublicKeyHex = undefined;
-  coordinatorState.activePrivateKeyBytes = undefined;
+  dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
+  coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
   coordinatorState.keyspaceGeneration = 0;
 }
@@ -2478,10 +2660,30 @@ export async function __testImportPrivateKey(password: string, input: { label: s
   return result as { publicKeyHex: string };
 }
 
+export async function __testSetActive(publicKeyHex: string): Promise<void> {
+  await executeVaultOperation({ type: "setActive", publicKeyHex });
+}
+
 /** 导出备份。 */
 export async function __testExportKeyBackup(publicKeyHex: string): Promise<string> {
   const result = await executeVaultOperation({ type: "exportKeyBackup", publicKeyHex });
   return result as string;
+}
+
+/** Locked-state cold export through the persisted selected record. */
+export async function __testExportCurrentKeyBackup(): Promise<string> {
+  const result = await executeVaultOperation({ type: "exportCurrentKeyBackup" });
+  return result as string;
+}
+
+/** Test-only facade for the worker's atomic key+sidecar deletion primitive. */
+export async function __testDeleteKeyMaterial(publicKeyHex: string): Promise<void> {
+  await executeVaultOperation({ type: "deleteKeyMaterial", publicKeyHex });
+}
+
+/** Test-only invocation of the single empty-vault finalization operation. */
+export async function __testFinalizeEmptyVaultAfterLastKeyDeletion(): Promise<void> {
+  await executeVaultOperation({ type: "finalizeEmptyVaultAfterLastKeyDeletion" });
 }
 
 /** 导入备份。 */
@@ -2522,6 +2724,11 @@ export async function __testActivateKeyWithPasskey(input: {
   prfOutputHex: string;
 }): Promise<void> {
   await executeVaultOperation({ type: "activateKeyWithPasskey", ...input });
+}
+
+export async function __testListPasskeysForKey(publicKeyHex: string): Promise<unknown[]> {
+  const result = await executeVaultOperation({ type: "listPasskeysForKey", publicKeyHex });
+  return result as unknown[];
 }
 
 /** 解锁 Vault。 */

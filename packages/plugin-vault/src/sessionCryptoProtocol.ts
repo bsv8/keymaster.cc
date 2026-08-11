@@ -10,21 +10,11 @@
 
 import type { EcdsaSignatureFormat, ProviderSealedMessageRecord } from "@keymaster/contracts";
 
-export interface SessionCryptoEncryptedKeyMaterial {
-  publicKeyHex: string;
-  cipherVersion: "v1" | "v2";
-  cipherSaltB64: string;
-  cipherIvB64: string;
-  cipherB64: string;
-  /** 非密码保护器可提供自己的版本化 AAD。 */
-  aad?: string;
-}
-
 export interface SessionCryptoBootstrapInput {
   sessionId: string;
   publicKeyHex: string;
-  passwordKey: CryptoKey;
-  encryptedPrivateKey: SessionCryptoEncryptedKeyMaterial;
+  /** Canonical KeyHold-unlocked raw key; transferred only to the worker. */
+  privateKeyBytes: Uint8Array;
   label: string;
   capabilities: string[];
   createdAt: string;
@@ -69,15 +59,6 @@ export interface SessionCryptoOpenSealedMessage {
   rec: ProviderSealedMessageRecord;
 }
 
-export interface SessionCryptoEncryptVaultKeyMaterialMessage {
-  kind: "encryptVaultKeyMaterial";
-  requestId: string;
-  publicKeyHex: string;
-  material: {
-    hex: string;
-    wif?: string;
-  };
-}
 
 export interface SessionCryptoDisposeMessage {
   kind: "dispose";
@@ -91,7 +72,6 @@ export type SessionCryptoRequestMessage =
   | SessionCryptoDeriveAddressMessage
   | SessionCryptoSealSendInputMessage
   | SessionCryptoOpenSealedMessage
-  | SessionCryptoEncryptVaultKeyMaterialMessage
   | SessionCryptoDisposeMessage;
 
 export type SessionCryptoResponseMessage<T = unknown> =

@@ -2,7 +2,7 @@
 // KeyspaceService 删除流程集成测试（硬切换 008 + 硬切换 002 收尾）。
 // 关键不变量：
 //   - keyspace.deleteKey 入口**第一步**必须是
-//     vault.verifyPassword(password)；密码错误 fail closed：不发
+//     authoritative label mismatch fail closed：不发
 //     `key.deleting / key.deleted`、不取消 background、不删 namespace DB
 //     与私钥（硬切换 002）。
 //   - 走"prepareDeleteKey（cancelByKey + close handles）-> 删除 namespace
@@ -123,10 +123,8 @@ async function waitForStatus(
 }
 
 /**
- * 硬切换 002 测试基础：建一把真正的空 Vault 并 unlock，让
- * `vault.verifyPassword(TEST_PASSWORD)` 能通过。所有 keyspace.delete*
- * 测试都需要在此之后再 seed key——直接 putKey 不动 meta，verifier
- * 仍由 createVault 写入的真实密码维持。
+ * 测试基础：建一把真正的空 Vault 并 unlock。所有 keyspace.delete*
+ * 测试都需要在此之后再 seed key——直接 putKey 不动 canonical key list。
  */
 async function seedVault(
   vault: ReturnType<typeof createVaultService>
@@ -160,7 +158,7 @@ async function seedReadyKey(input: { publicKeyHex: string;
  * 构造 `identityStatus=failed` 或 no-hash 记录。
  */
 
-describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
+describe("keyspaceService.deleteKey (硬切换 008 + 015 标签确认)", () => {
   it("emits key.deleted exactly once and calls background.cancelByKey", async () => {
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events, sessionCryptoEngineOptions: { allowLocalEngineForTests: true, mode: "appview" } });
@@ -176,7 +174,7 @@ describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
     const deletedBefore = records.filter((r) => r.type === "key.deleted").length;
     expect(deletedBefore).toBe(0);
 
-    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD });
+    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "test" });
 
     // 1) cancelByKey 被调。
     expect(fakeBackground.cancelByKeyCalls).toEqual(["a".repeat(64)]);
@@ -205,14 +203,14 @@ describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
     const keyspace = createKeyspaceService({ messageBus: events, vault });
 
     await keyspace.setActive("a".repeat(64));
-    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD });
+    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "test" });
 
     const deleted = records.filter((r) => r.type === "key.deleted");
     expect(deleted).toHaveLength(1);
   });
 
-  it("rejects with Invalid password and does NOT start the delete pipeline", async () => {
-    // 硬切换 002：密码错时**完全不开始**——不发 key.deleting / key.deleted、
+  it("rejects with label mismatch and does NOT start the delete pipeline", async () => {
+    // 标签不匹配时**完全不开始**——不发 key.deleting / key.deleted、
     // 不取消 background、不删 namespace DB、不删私钥。
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
@@ -223,8 +221,8 @@ describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
     await keyspace.setActive("a".repeat(64));
 
     await expect(
-      keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: "wrong-pw" })
-    ).rejects.toThrow(/Invalid password/);
+      keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "wrong" })
+    ).rejects.toThrow(/label mismatch/i);
 
     // 1) cancelByKey 未被调。
     expect(fakeBackground.cancelByKeyCalls).toEqual([]);
@@ -236,6 +234,22 @@ describe("keyspaceService.deleteKey (硬切换 008 + 002 密码鉴权)", () => {
     expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeDefined();
     // 4) Vault 状态不变。
     expect(vault.status()).toBe("unlocked");
+  });
+
+  it("requires an exact case-sensitive label and rejects unknown keys before cleanup", async () => {
+    const { messageBus: events, records } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await seedVault(vault);
+    await seedReadyKey({ label: "Exact Label", publicKeyHex: "a".repeat(64) });
+    const background = makeFakeBackground();
+    const keyspace = createKeyspaceService({ messageBus: events, vault, background });
+    await keyspace.setActive("a".repeat(64));
+    await expect(keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "exact label" })).rejects.toThrow("Key label mismatch");
+    await expect(keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: " Exact Label" })).rejects.toThrow("Key label mismatch");
+    await expect(keyspace.deleteKey({ publicKeyHex: "f".repeat(64), confirmationLabel: "Exact Label" })).rejects.toThrow("Key not found");
+    expect(background.cancelByKeyCalls).toEqual([]);
+    expect(records.some((record) => record.type === "key.deleting")).toBe(false);
+    expect(await vaultDb.getKey("a".repeat(64))).toBeDefined();
   });
 });
 
@@ -251,7 +265,7 @@ describe("keyspaceService.prepareDeleteKey fail-closed (硬切换 008 收尾)", 
 
     // cancelByKey 抛错 → deleteKey 必须 reject，namespace DB 与 Vault 私钥都保留。
     await expect(
-      keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD })
+      keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "test" })
     ).rejects.toThrow(/simulated cancelByKey failure/);
 
     // 1) cancelByKey 被调过。
@@ -295,7 +309,7 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     const keyspace = createKeyspaceService({ messageBus: events, vault });
     await keyspace.setActive("a".repeat(64));
 
-    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD });
+    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "a" });
 
     // Vault 仍 unlocked。
     expect(vault.status()).toBe("unlocked");
@@ -316,7 +330,7 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     const keyspace = createKeyspaceService({ messageBus: events, vault });
     await keyspace.setActive("a".repeat(64));
 
-    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD });
+    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" });
 
     // 1) key.deleted 仍恰好发一次（先删 key 材料 + emit，再 finalize）。
     const deleted = records.filter((r) => r.type === "key.deleted");
@@ -332,7 +346,7 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
   });
 
   it("namespace DB blocked: keeps private key AND does NOT finalize Vault", async () => {
-    // 施工单 §情况 2：namespace DB 删除 blocked / timeout 时，密码正确
+    // 施工单 §情况 2：namespace DB 删除 blocked / timeout 时，label 正确
     // 也不能继续删私钥；同样必须不 finalize Vault。
     //
     // 实现：registerPluginStorage 注册一个名字，再手动打开一个同名
@@ -361,7 +375,7 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
 
     try {
       await expect(
-        keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD })
+        keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" })
       ).rejects.toThrow(/blocked|timed out|Failed to delete namespace/i);
       // 1) 私钥仍在。
       const remaining = await vaultDb.listKeys();
@@ -399,7 +413,7 @@ describe("keyspaceService delete-last-key -> uninitialized (硬切换 010)", () 
     await keyspace.setActive("a".repeat(64));
 
     // 删除唯一一把 key。
-    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), password: TEST_PASSWORD });
+    await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" });
     expect(vault.status()).toBe("uninitialized");
     expect(await vaultDb.getMeta()).toBeUndefined();
 

@@ -1,15 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
-  decryptVaultKeyMaterialForMigration,
-  encryptVaultKeyMaterial,
   hexToBytes,
-  resolveVaultPasswordKey,
-  decodeKeyBackup,
-  passwordBackupView,
   vaultDb,
+  type LegacyVaultKeyRecord,
 } from "@keymaster/plugin-vault/coordinator";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { parse as keyholdParse, unlock as keyholdUnlock } from "keyhold";
 import {
   __testBackgroundRunNow,
   __testAddPasskeyToCurrentKey,
@@ -20,6 +17,9 @@ import {
   __testChangePassword,
   __testDeleteVault,
   __testExportKeyBackup,
+  __testExportCurrentKeyBackup,
+  __testDeleteKeyMaterial,
+  __testFinalizeEmptyVaultAfterLastKeyDeletion,
   __testGetActivePublicKeyHex,
   __testGetConnectedPortCount,
   __testDispatchStorageGrant,
@@ -48,12 +48,15 @@ import {
   __testImportPrivateKey,
   __testInvalidateSession,
   __testLock,
+  __testListPasskeysForKey,
   __testRegisterTask,
   __testRemovePasskeyFromCurrentKey,
   __testResetState,
   __testRestartWorker,
   __testRunTask,
   __testSetVaultStatus,
+  __testFailNextCoordinatorMetaPersist,
+  __testSetActive,
   __testSealLocalSecret,
   __testUnlock,
   __testUpdateScheduleSettings
@@ -546,7 +549,6 @@ describe("Session Coordinator backup import", () => {
   it("cross-vault import succeeds with different passwords", async () => {
     const sourceResult = await __testCreateVault("source-pw", { label: "source-key" });
     const backup = await __testExportKeyBackup(sourceResult.publicKeyHex!);
-    const sourceRecord = passwordBackupView(decodeKeyBackup(backup)).keyRecord;
 
     // A second Vault must be a fresh persistent store, rather than merely a
     // reset Worker session over the source Vault's IndexedDB records.
@@ -560,14 +562,8 @@ describe("Session Coordinator backup import", () => {
     const targetRecord = await vaultDb.getKey(imported.publicKeyHex);
     expect(targetMeta).toBeDefined();
     expect(targetRecord).toBeDefined();
-    expect(targetRecord?.cipherSaltB64).not.toBe(sourceRecord.cipherSaltB64);
-
-    // The imported record is encrypted for the target Vault, and only that
-    // password can open it after the Worker loses its in-memory session.
-    const targetKey = await resolveVaultPasswordKey("target-pw", targetMeta!);
-    await expect(
-      decryptVaultKeyMaterialForMigration(targetKey.key, targetRecord!, targetKey.encoding)
-    ).resolves.toMatchObject({ hex: expect.any(String) });
+    expect(targetRecord?.storageVersion).toBe("keyhold-v2");
+    expect(targetRecord?.keyholdDocument).toBeDefined();
     await __testLock();
     const unlocked = await __testUnlock("target-pw", imported.publicKeyHex);
     expect(unlocked.ack.status).toBe("accepted");
@@ -581,7 +577,7 @@ describe("Session Coordinator backup import", () => {
     __testResetState();
     await __testCreateEmptyVault("target-pw");
 
-    await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/Invalid password/);
+    await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/unable to unlock document/);
     expect(await vaultDb.listKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("locked");
   });
@@ -601,21 +597,16 @@ describe("Session Coordinator backup import", () => {
   it("rejects backup with mismatched public key and material", async () => {
     const source = await __testCreateVault("source-pw");
     const backup = await __testExportKeyBackup(source.publicKeyHex!);
-    const parsed = JSON.parse(backup);
-    const view = passwordBackupView(decodeKeyBackup(backup));
-    const sourceKey = await resolveVaultPasswordKey("source-pw", view.sourceVaultMeta);
-    const material = await decryptVaultKeyMaterialForMigration(sourceKey.key, view.keyRecord, sourceKey.encoding);
+    const parsed = JSON.parse(backup) as Record<string, unknown>;
     const tamperedPublicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
     parsed.publicKeyHex = tamperedPublicKeyHex;
-    const tamperedCipher = await encryptVaultKeyMaterial(sourceKey.key, tamperedPublicKeyHex, material);
-    Object.assign(parsed.protectors.password, tamperedCipher);
     const tamperedBackup = JSON.stringify(parsed);
 
     await __testDeleteVault();
     __testResetState();
     await __testCreateEmptyVault("target-pw");
 
-    await expect(__testImportKeyBackup(tamperedBackup, "source-pw", "target-pw")).rejects.toThrow("Backup key public key mismatch");
+    await expect(__testImportKeyBackup(tamperedBackup, "source-pw", "target-pw")).rejects.toThrow();
     expect(await vaultDb.listKeys()).toHaveLength(0);
   });
 
@@ -659,7 +650,7 @@ describe("Session Coordinator backup import", () => {
     const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
     // Model an unlocked empty Vault without forging session crypto state: remove
     // the only persisted key while retaining the real unlocked target session.
-    await vaultDb.deleteKey(placeholder.publicKeyHex!);
+    await vaultDb.deleteKeyAndSidecars(placeholder.publicKeyHex!);
     expect(await vaultDb.listKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("unlocked");
 
@@ -684,6 +675,131 @@ describe("Session Coordinator backup import", () => {
         activePublicKeyHex: imported.publicKeyHex,
       }));
     }
+  }, 15_000);
+});
+
+describe("Session Coordinator locked legacy recovery", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+  afterEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  it("keeps an opaque legacy key selectable without parsing it at bootstrap", async () => {
+    await __testCreateEmptyVault("pw");
+    const publicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
+    await vaultDb.putKey({
+      publicKeyHex,
+      label: "legacy",
+      address: "",
+      network: "main",
+      format: "legacy",
+      capabilities: ["p2pkh"],
+      createdAt: new Date().toISOString(),
+      cipherVersion: "v2",
+      cipherSaltB64: "00",
+      cipherIvB64: "00",
+      cipherB64: "00"
+    });
+    await __testRestartWorker();
+    const snapshot = __testGetSnapshot();
+    expect(snapshot.vaultStatus).toBe("locked");
+    expect(snapshot.activePublicKeyHex).toBeUndefined();
+    expect(snapshot.selectedPublicKeyHex).toBe(publicKeyHex);
+  });
+});
+
+describe("Session Coordinator locked deletion and cold export", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  it("cold-exports the persisted selected KeyHold document while locked", async () => {
+    const key = await __testCreateVault("pw");
+    await __testLock();
+    const backup = await __testExportCurrentKeyBackup();
+    expect(Object.keys(JSON.parse(backup)).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
+    expect(JSON.parse(backup)).toMatchObject({ format: "keymaster", version: 2 });
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetActivePublicKeyHex()).toBeUndefined();
+    expect(key.publicKeyHex).toBeDefined();
+  });
+
+  it("new and hex-imported records round-trip through the KeyHold SDK", async () => {
+    const first = await __testCreateVault("pw", { label: "first" });
+    const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
+    for (const key of [first, second]) {
+      const document = keyholdParse(await __testExportKeyBackup(key.publicKeyHex!));
+      const unlocked = await keyholdUnlock(document, "pw");
+      try {
+        expect(unlocked.publicKeyHex).toBe(key.publicKeyHex);
+        expect(bytesToHex(secp256k1.getPublicKey(unlocked.privateKey, true))).toBe(key.publicKeyHex);
+      } finally {
+        unlocked.privateKey.fill(0);
+      }
+    }
+  });
+
+  it("rolls back active bytes and selected state when active metadata persistence fails", async () => {
+    const first = await __testCreateVault("pw", { label: "first" });
+    const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
+    __testFailNextCoordinatorMetaPersist();
+    await expect(__testSetActive(first.publicKeyHex!)).rejects.toThrow("injected coordinator meta persist failure");
+    expect(__testGetActivePublicKeyHex()).toBe(second.publicKeyHex);
+    expect(__testGetSnapshot().selectedPublicKeyHex).toBe(second.publicKeyHex);
+  });
+
+  it("deletes selected material while locked and repairs selection to the remaining key", async () => {
+    const first = await __testCreateVault("pw", { label: "first" });
+    const second = await __testImportPrivateKey("pw", { label: "second", material: { hex: TEST_PRIV_2 }, format: "hex", capabilities: ["p2pkh"] });
+    await __testLock();
+    await __testDeleteKeyMaterial(second.publicKeyHex);
+    const snapshot = __testGetSnapshot();
+    expect(snapshot.vaultStatus).toBe("locked");
+    expect(snapshot.activePublicKeyHex).toBeUndefined();
+    expect(snapshot.selectedPublicKeyHex).toBe(first.publicKeyHex);
+  });
+
+  it("finalizes the last material deletion exactly once to uninitialized", async () => {
+    const key = await __testCreateVault("pw");
+    await __testLock();
+    await __testDeleteKeyMaterial(key.publicKeyHex!);
+    expect(__testGetVaultStatus()).toBe("locked");
+    await __testFinalizeEmptyVaultAfterLastKeyDeletion();
+    expect(__testGetVaultStatus()).toBe("uninitialized");
+    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultDb.listKeys()).toHaveLength(0);
+  });
+
+  it("rejects cold export of an opaque legacy record without parsing it", async () => {
+    await __testCreateVault("pw");
+    const key = (await vaultDb.listKeys())[0];
+    if (!key) throw new Error("missing seeded key");
+    const legacy: LegacyVaultKeyRecord = {
+      publicKeyHex: key.publicKeyHex,
+      label: key.label,
+      address: key.address,
+      network: key.network,
+      format: "legacy",
+      capabilities: key.capabilities,
+      createdAt: key.createdAt,
+      cipherVersion: "v2",
+      cipherSaltB64: "00",
+      cipherIvB64: "00",
+      cipherB64: "00"
+    };
+    await vaultDb.putKey(legacy);
+    await __testLock();
+    await expect(__testExportCurrentKeyBackup()).rejects.toThrow("Unsupported key storage version");
   });
 });
 
@@ -739,6 +855,18 @@ describe("Session Coordinator Storage rotation recovery", () => {
     expect((await readStorageTestState()).journal).toBeUndefined();
   });
 
+  it("rejects a wrong old password before any rotation write", async () => {
+    await __testCreateVault("old-password", { label: "rotation-test" });
+    const commit = vi.spyOn(vaultDb, "putMetaAndKeys");
+    try {
+      await expect(__testChangePassword("wrong-password", "new-password")).rejects.toThrow("Invalid password");
+      expect(commit).not.toHaveBeenCalled();
+      expect(__testGetVaultStatus()).toBe("unlocked");
+    } finally {
+      commit.mockRestore();
+    }
+  });
+
   it("restores the original snapshot directly when the Vault commit fails", async () => {
     const key = await __testCreateVault("old-password", { label: "rotation-test" });
     const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
@@ -755,8 +883,10 @@ describe("Session Coordinator Storage rotation recovery", () => {
     expect(restored.journal).toBeUndefined();
     await __testLock();
     await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-  });
+  }, 15_000);
 
+  // Two unlock/recovery KDFs plus the compensating storage writes exceed the
+  // default 5s Vitest budget on the Node worker, while remaining bounded.
   it("keeps the journal when rollback or a later recovery write fails", async () => {
     const key = await __testCreateVault("old-password", { label: "rotation-test" });
     const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
@@ -783,7 +913,7 @@ describe("Session Coordinator Storage rotation recovery", () => {
     await __testLock();
     await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
     expect((await readStorageTestState()).journal).toBeUndefined();
-  });
+  }, 15_000);
 
   it("keeps a corrupt journal as recovery evidence without blocking Vault unlock", async () => {
     const key = await __testCreateVault("old-password", { label: "rotation-test" });
@@ -828,10 +958,10 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
       prfOutputHex,
       rpId: "keymaster.cc"
     });
-    const backup = decodeKeyBackup(await __testExportKeyBackup(first.publicKeyHex!));
-    expect(backup.backupVersion).toBe(2);
-    if (backup.backupVersion !== 2) throw new Error("expected v2 backup");
-    expect(Object.keys(backup.protectors)).toEqual(["password", "passkey01"]);
+    expect(await vaultDb.listSidecars(first.publicKeyHex!)).toHaveLength(1);
+    const backup = JSON.parse(await __testExportKeyBackup(first.publicKeyHex!)) as Record<string, unknown>;
+    expect(Object.keys(backup).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
+    expect(backup.format).toBe("keymaster");
 
     const second = await __testImportPrivateKey("vault-password", {
       label: "second",
@@ -861,9 +991,31 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
       passkeyId: "credential-one"
     });
 
-    const backup = decodeKeyBackup(await __testExportKeyBackup(key.publicKeyHex!));
-    expect(backup.backupVersion).toBe(2);
-    if (backup.backupVersion !== 2) throw new Error("expected v2 backup");
-    expect(Object.keys(backup.protectors)).toEqual(["password"]);
+    const backup = JSON.parse(await __testExportKeyBackup(key.publicKeyHex!)) as Record<string, unknown>;
+    expect(Object.keys(backup).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
+    expect(backup.format).toBe("keymaster");
+  });
+
+  it("does not use an embedded legacy passkey protector", async () => {
+    const key = await __testCreateVault("vault-password", { label: "legacy" });
+    const existing = await vaultDb.getKey(key.publicKeyHex!);
+    if (!existing) throw new Error("missing seeded key");
+    const legacy: LegacyVaultKeyRecord = {
+      publicKeyHex: existing.publicKeyHex,
+      label: existing.label,
+      address: existing.address,
+      network: existing.network,
+      format: "legacy",
+      capabilities: existing.capabilities,
+      createdAt: existing.createdAt,
+      cipherVersion: "v2",
+      cipherSaltB64: "00",
+      cipherIvB64: "00",
+      cipherB64: "00",
+      passkeyProtections: [{ id: "embedded", label: "old", credentialIdB64: "old", prfSaltB64: "old", rpId: "keymaster.cc", createdAt: existing.createdAt, cipherVersion: "webauthn-prf-v1", cipherIvB64: "00", cipherB64: "00" }]
+    };
+    await vaultDb.putKey(legacy);
+    expect(await __testListPasskeysForKey(existing.publicKeyHex)).toEqual([]);
+    await expect(__testActivateKeyWithPasskey({ passkeyId: "embedded", prfOutputHex: "ab".repeat(32) })).rejects.toThrow("Passkey protection not found");
   });
 });

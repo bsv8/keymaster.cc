@@ -10,13 +10,11 @@
 import {
   deriveP2pkhAddress,
   hexToBytes,
-  decryptSessionPrivateKeyBytes,
   openAppMessageLocalBytes,
   sealAppMessageLocalBytes,
   signEcdsaDigest,
   verifySessionKeyPair
 } from "./sessionCryptoCore.js";
-import { encryptVaultKeyMaterial as coordinatorEncryptVaultKeyMaterial } from "./vaultCoordinator.js";
 import type {
   SessionCryptoRequestMessage,
   SessionCryptoResponseMessage
@@ -25,7 +23,6 @@ import type {
 interface WorkerState {
   sessionId: string;
   publicKeyHex: string;
-  passwordKey: CryptoKey;
   privateKeyBytes: Uint8Array;
   label: string;
   capabilities: string[];
@@ -82,10 +79,7 @@ function createSessionCryptoRequestHandler(stateRef: WorkerStateRef) {
         if (stateRef.current && !stateRef.current.revoked) {
           throw new Error("Session crypto worker is already initialized");
         }
-        const privateKeyBytes = await decryptSessionPrivateKeyBytes({
-          passwordKey: message.passwordKey,
-          encryptedPrivateKey: message.encryptedPrivateKey
-        });
+        const privateKeyBytes = message.privateKeyBytes;
         verifySessionKeyPair({
           publicKeyHex: message.publicKeyHex,
           privateKeyBytes
@@ -93,7 +87,6 @@ function createSessionCryptoRequestHandler(stateRef: WorkerStateRef) {
         stateRef.current = {
           sessionId: message.sessionId,
           publicKeyHex: message.publicKeyHex,
-          passwordKey: message.passwordKey,
           privateKeyBytes,
           label: message.label,
           capabilities: message.capabilities,
@@ -248,20 +241,6 @@ function createSessionCryptoRequestHandler(stateRef: WorkerStateRef) {
             result: null
           });
         }
-        return;
-      }
-      case "encryptVaultKeyMaterial": {
-        const s = ensureState(stateRef);
-        const encrypted = await coordinatorEncryptVaultKeyMaterial(
-          s.passwordKey,
-          message.publicKeyHex,
-          message.material
-        );
-        post({
-          requestId: message.requestId,
-          ok: true,
-          result: encrypted
-        });
         return;
       }
       case "dispose": {

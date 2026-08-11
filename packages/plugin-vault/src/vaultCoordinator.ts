@@ -1,29 +1,24 @@
 // packages/plugin-vault/src/vaultCoordinator.ts
-// Vault 协调层：把密码派生、verifier 校验、正式记录 AAD 升级与密码轮换
+// Vault 协调层：把密码派生、verifier 校验与密码轮换
 // 中的纯协调逻辑收口到一个地方。
 //
 // 设计缘由：
 //   - vaultService 需要保留状态机和 keyspace / messageBus 交互；
-//   - 密码校验、meta 组装、AAD 迁移和轮换是可复用的协调逻辑，应该独立
+//   - 密码校验、meta 组装和轮换是可复用的协调逻辑，应该独立
 //     出来，便于解锁 / 改密码 / 首启流程共用同一条语义；
 //   - 这不是新的持久化持有者，不保存密码根或私钥。
 
 import {
-  decryptBytes,
-  decryptBytesWithAad,
   deriveKey,
-  encryptBytesWithAad,
   encryptVerifier,
   base64ToBytes,
   bytesToHex,
   hexToBytes,
   PBKDF2_PARAMS,
-  vaultKeyAad,
   verifyLegacyVerifier,
   verifyVerifier
 } from "./crypto.js";
-import { deriveKeyIdentity } from "./keyIdentity.js";
-import type { VaultKeyRecord, VaultMetaRecord } from "./vaultDb.js";
+import type { VaultMetaRecord } from "./vaultDb.js";
 
 export interface VaultKeyMaterial {
   hex: string;
@@ -39,7 +34,7 @@ export interface VaultMetaInput {
 
 /** 持久化二进制字段的历史编码。新格式固定 hex；旧版为实际 base64。 */
 export type VaultBinaryEncoding = "hex" | "base64";
-/** verifier 的加密语义；v1 没有 AAD，v2 绑定了固定 AAD。 */
+/** verifier 的加密语义版本。 */
 export type VaultVerifierVersion = "v1" | "v2";
 
 export interface VerifiedVaultPasswordKey {
@@ -111,118 +106,4 @@ export async function verifyVaultPasswordKey(
   meta: VaultMetaRecord
 ): Promise<CryptoKey> {
   return (await resolveVaultPasswordKey(password, meta)).key;
-}
-
-export async function encryptVaultKeyMaterial(
-  key: CryptoKey,
-  publicKeyHex: string,
-  material: VaultKeyMaterial
-): Promise<{
-  cipherVersion: "v2";
-  cipherSaltB64: string;
-  cipherIvB64: string;
-  cipherB64: string;
-}> {
-  const payload = new TextEncoder().encode(JSON.stringify({ hex: material.hex, wif: material.wif }));
-  const blob = await encryptBytesWithAad(key, payload, vaultKeyAad(publicKeyHex));
-  return {
-    cipherVersion: "v2",
-    cipherSaltB64: bytesToHex(blob.salt),
-    cipherIvB64: bytesToHex(blob.iv),
-    cipherB64: bytesToHex(blob.ciphertext)
-  };
-}
-
-export async function decryptVaultKeyMaterialForMigration(
-  key: CryptoKey,
-  record: VaultKeyRecord,
-  encoding: VaultBinaryEncoding = "hex"
-): Promise<VaultKeyMaterial> {
-  const blob = {
-    salt: decodeVaultBytes(record.cipherSaltB64, encoding),
-    iv: decodeVaultBytes(record.cipherIvB64, encoding),
-    ciphertext: decodeVaultBytes(record.cipherB64, encoding)
-  };
-  const plain =
-    record.cipherVersion === "v2"
-      ? await decryptBytesWithAad(key, blob, vaultKeyAad(record.publicKeyHex))
-      : await decryptBytes(key, blob);
-  const decoded = new TextDecoder().decode(plain);
-  const parsed = JSON.parse(decoded) as { hex: string; wif?: string };
-  return { hex: parsed.hex, wif: parsed.wif };
-}
-
-export async function migrateVaultKeysToV2Aad(input: {
-  meta: VaultMetaRecord;
-  records: VaultKeyRecord[];
-  decryptRecord(record: VaultKeyRecord): Promise<VaultKeyMaterial>;
-  encryptRecord(publicKeyHex: string, material: VaultKeyMaterial): Promise<{
-    cipherVersion: "v2";
-    cipherSaltB64: string;
-    cipherIvB64: string;
-    cipherB64: string;
-  }>;
-  putMeta(meta: VaultMetaRecord): Promise<void>;
-  putMetaAndKeys(meta: VaultMetaRecord, records: VaultKeyRecord[]): Promise<void>;
-  /** 旧 base64 编码即使已经是 v2，也必须重加密为当前 hex 格式。 */
-  forceReencrypt?: boolean;
-  /** 把旧 meta 的 base64 二进制字段一并改写为当前 hex 格式。 */
-  sourceEncoding?: VaultBinaryEncoding;
-  /** v1 verifier 成功解锁后，必须替换为带 AAD 的当前 verifier。 */
-  sourceVerifierVersion?: VaultVerifierVersion;
-  replacementVerifier?: Awaited<ReturnType<typeof encryptVerifier>>;
-}): Promise<void> {
-  if (input.meta.cryptoVersion === "v2" && !input.forceReencrypt) {
-    return;
-  }
-  const migratedRecords: VaultKeyRecord[] = [];
-  let needsWrite = false;
-  for (const record of input.records) {
-    const material = await input.decryptRecord(record);
-    const identity = deriveKeyIdentity(hexToBytes(material.hex));
-    if (identity.publicKeyHex !== record.publicKeyHex) {
-      throw new Error(
-        `vault key ${record.publicKeyHex} failed identity verification during v2 migration`
-      );
-    }
-    const encoded = await input.encryptRecord(record.publicKeyHex, material);
-    migratedRecords.push({ ...record, ...encoded });
-    if (record.cipherVersion !== "v2" || input.forceReencrypt) {
-      needsWrite = true;
-    }
-  }
-  const nextMeta: VaultMetaRecord = {
-    ...input.meta,
-    cryptoVersion: "v2",
-    kdf: "pbkdf2-sha256",
-    iterations: PBKDF2_PARAMS.iterations,
-    keyLengthBits: 256
-  };
-  if (input.sourceVerifierVersion === "v1") {
-    if (!input.replacementVerifier) {
-      throw new Error("Legacy verifier migration requires a replacement verifier");
-    }
-    nextMeta.verifierSaltB64 = bytesToHex(input.replacementVerifier.salt);
-    nextMeta.verifierIvB64 = bytesToHex(input.replacementVerifier.iv);
-    nextMeta.verifierCipherB64 = bytesToHex(input.replacementVerifier.ciphertext);
-  }
-  if (input.sourceEncoding === "base64") {
-    nextMeta.saltB64 = bytesToHex(decodeVaultBytes(input.meta.saltB64, input.sourceEncoding));
-    if (input.sourceVerifierVersion !== "v1") {
-      nextMeta.verifierSaltB64 = bytesToHex(
-        decodeVaultBytes(input.meta.verifierSaltB64, input.sourceEncoding)
-      );
-      nextMeta.verifierIvB64 = bytesToHex(
-        decodeVaultBytes(input.meta.verifierIvB64, input.sourceEncoding)
-      );
-      nextMeta.verifierCipherB64 = bytesToHex(
-        decodeVaultBytes(input.meta.verifierCipherB64, input.sourceEncoding)
-      );
-    }
-  }
-  if (!needsWrite) {
-    await input.putMeta(nextMeta);
-    return;
-  }
-  await input.putMetaAndKeys(nextMeta, migratedRecords);
 }

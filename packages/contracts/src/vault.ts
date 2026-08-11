@@ -77,7 +77,7 @@ interface VaultKeyMaterial {
  * - 旧语义：一份常驻的全局解锁材料放在内存里。
  * - 新语义：表示 Vault 会话**和** keyspace ready 边界都已完成——
  *   1) 当前 session 的解锁材料已在内存；
- *   2) vault migration（一次性 pre-v7 记录 AAD 升级 + 派生 / 校验
+ *   2) KeyHold v2 record validation（旧记录保持 opaque，不执行私钥迁移）
  *      publicKeyHex）已完成；
  *   3) keyspace.onVaultUnlocked() 已 await 完成（即 keyspace 处于
  *      一致状态，active key 已选定）。
@@ -87,7 +87,7 @@ interface VaultKeyMaterial {
  * "Key storage is not ready"，属于根因泄漏到 UI 的错误。
  *
  * 实现保证：unlock() 的完成顺序必须为
- *   migrateVaultKeysToV2Aad -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit
+ *   KeyHold v2 validation -> keyspace.onVaultUnlocked -> setStatus("unlocked") + emit
  * 失败时回退到 "locked" 并清空内存会话（fail-closed）。
  */
 export type VaultStatus = "booting" | "uninitialized" | "locked" | "unlocked";
@@ -362,7 +362,7 @@ export interface VaultService {
       source?: string;
     };
   }): Promise<KeyRef>;
-  /** 用密码解锁，解密所有 key 索引（不解密私钥本身），并完成 pre-v7 记录的 AAD 升级。 */
+  /** 用密码解锁选中的 KeyHold v2 记录；旧记录返回 Unsupported。 */
   unlock(password: string): Promise<CoordinatorCommandResult>;
   /** 锁定，丢弃内存中的明文。 */
   lock(): Promise<CoordinatorCommandResult>;
@@ -380,15 +380,15 @@ export interface VaultService {
   dispose?(): void;
 
   /**
-   * 仅校验锁屏密码是否正确，不改变 Vault 状态（硬切换 002 删除授权）。
+   * 仅校验锁屏密码是否正确，不改变 Vault 状态；仅供解锁、密码变更等
+   * 仍需密码的流程。私钥删除由 KeyspaceService 的 label confirmation
+   * 授权，不使用此方法。
    *
    * 设计缘由：
-   *   - 删除 Key 这类危险操作必须要求用户**重新**输入锁屏密码，不能把
-   *     "之前已经 unlock"视为永久授权；本方法是收敛密码真值校验的
-   *     平台入口，由 Vault 自己拿 verifier 比对，不能让业务插件复制
-   *     一套密码校验逻辑。
+   *   - 业务插件不能复制一套密码校验逻辑；需要密码的流程统一由
+   *     Vault 自己拿 verifier 比对。
    *   - 与 `unlock(password)` 严格区分：
-   *       * `unlock` 会派生当前 session 材料、跑一次性 pre-v7 记录 AAD 升级、
+   *       * `unlock` 会派生当前 session 材料并验证 KeyHold v2 文档、
    *         通知 keyspace、emit `vault.unlocked`，创建一段新会话；
    *       * `verifyPassword` **只**比对 verifier，不会改变 session 材料
    *         / `keyCache` / `status`，不会触发 migration，

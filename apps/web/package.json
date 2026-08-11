@@ -12,9 +12,9 @@
     "@keymaster/contracts": "*",
     "@keymaster/plugin-appmsg": "*",
     "@keymaster/plugin-apps": "*",
+    "@keymaster/plugin-background": "*",
     "@keymaster/plugin-broadcast": "*",
     "@keymaster/plugin-bsv-price": "*",
-    "@keymaster/plugin-background": "*",
     "@keymaster/plugin-collectible-1satordinals": "*",
     "@keymaster/plugin-contacts": "*",
     "@keymaster/plugin-home": "*",
@@ -28,8 +28,8 @@
     "@keymaster/plugin-p2pkh": "*",
     "@keymaster/plugin-poker": "*",
     "@keymaster/plugin-protocol": "*",
-    "@keymaster/plugin-storage": "*",
     "@keymaster/plugin-settings": "*",
+    "@keymaster/plugin-storage": "*",
     "@keymaster/plugin-token-bsv21": "*",
     "@keymaster/plugin-token-stas": "*",
     "@keymaster/plugin-vault": "*",
@@ -38,6 +38,7 @@
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
     "@noble/hashes": "^1.8.0",
-    "buffer": "^6.0.3"
+    "buffer": "^6.0.3",
+    "keyhold": "2.0.0"
   }
 }

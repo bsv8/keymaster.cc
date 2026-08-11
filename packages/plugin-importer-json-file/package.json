@@ -8,10 +8,11 @@
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
     "@noble/ciphers": "^2.2.0",
     "@noble/hashes": "^1.8.0",
     "@noble/secp256k1": "^2.2.0",
-    "@keymaster/contracts": "*",
-    "@keymaster/runtime": "*"
+    "keyhold": "2.0.0"
   }
 }
