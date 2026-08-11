@@ -301,6 +301,75 @@ describe("sessionCryptoClient", () => {
     }
   });
 
+  it("worker-backed engines preserve sender and recipient app IDs across two-party messaging", async () => {
+    const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
+    RecordingWorker.instances = [];
+    (globalThis as { Worker?: typeof Worker }).Worker =
+      RecordingWorker as unknown as typeof Worker;
+    let sender: Awaited<ReturnType<typeof createSessionCryptoEngine>> | undefined;
+    let recipient: Awaited<ReturnType<typeof createSessionCryptoEngine>> | undefined;
+    try {
+      const senderPrivateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000001"
+      );
+      const recipientPrivateKeyBytes = hexToBytes(
+        "0000000000000000000000000000000000000000000000000000000000000002"
+      );
+      const senderPublicKeyHex = bytesToHex(secp256k1.getPublicKey(senderPrivateKeyBytes, true));
+      const recipientPublicKeyHex = bytesToHex(secp256k1.getPublicKey(recipientPrivateKeyBytes, true));
+      sender = await createSessionCryptoEngine({
+        sessionId: "session-message-sender",
+        publicKeyHex: senderPublicKeyHex,
+        privateKeyBytes: senderPrivateKeyBytes,
+        label: "Sender",
+        capabilities: [],
+        createdAt: new Date().toISOString()
+      }, { mode: "appview" });
+      const sealed = await sender.sealSendInput({
+        sender: { senderPublicKeyHex, senderAppId: "keymaster.message" },
+        recipient: { recipientPublicKeyHex, recipientAppId: "keymaster.message" },
+        contentType: "text/plain",
+        body: "received body",
+        clientMessageId: "client-received",
+        createdAtMs: 200
+      });
+      expect("record" in sealed).toBe(true);
+      if (!("record" in sealed)) throw new Error(sealed.error);
+      // 测试 Worker 夹具复用单例状态；先释放发送方，再初始化接收方。
+      sender.dispose("sender-finished");
+      sender = undefined;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      recipient = await createSessionCryptoEngine({
+        sessionId: "session-message-recipient",
+        publicKeyHex: recipientPublicKeyHex,
+        privateKeyBytes: recipientPrivateKeyBytes,
+        label: "Recipient",
+        capabilities: [],
+        createdAt: new Date().toISOString()
+      }, { mode: "appview" });
+      const opened = await recipient.openSealed({
+        ...sealed.record,
+        messageId: "message-received",
+        insertedAtMs: 201
+      });
+
+      expect(opened).toMatchObject({
+        messageId: "message-received",
+        senderPublicKeyHex,
+        senderAppId: "keymaster.message",
+        recipientPublicKeyHex,
+        recipientAppId: "keymaster.message",
+        body: "received body"
+      });
+    } finally {
+      recipient?.dispose("test");
+      sender?.dispose("test");
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      (globalThis as { Worker?: typeof Worker }).Worker = originalWorker;
+    }
+  });
+
   it("local engine: compact signing returns format=compact and 64-byte signature", async () => {
     const originalWorker = (globalThis as { Worker?: typeof Worker }).Worker;
     (globalThis as { Worker?: typeof Worker }).Worker = undefined;

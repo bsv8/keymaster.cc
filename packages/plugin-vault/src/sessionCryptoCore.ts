@@ -355,11 +355,7 @@ export function sealAppMessageLocalBytes(input: {
   return { envelope: envelopeBytes, signatureBytes: signEnvelopeBytes(senderPrivBytes, envelopeBytes) };
 }
 
-export function openAppMessageLocalBytes(input: {
-  signed: { envelopeBytes: Uint8Array; signatureBytes: Uint8Array };
-  recipientPrivateKeyBytes: Uint8Array;
-  recipientPublicKeyBytes: Uint8Array;
-}): {
+export interface OpenedAppMessageLocal {
   contentType: AppMsgContentType;
   bodyUtf8: Uint8Array;
   clientMessageId: string;
@@ -370,7 +366,13 @@ export function openAppMessageLocalBytes(input: {
   recipientPublicKeyHex: string;
   recipientEndpointId: string;
   recipientEndpointKind: "origin" | "plugin";
-} {
+}
+
+export function openAppMessageLocalBytes(input: {
+  signed: { envelopeBytes: Uint8Array; signatureBytes: Uint8Array };
+  recipientPrivateKeyBytes: Uint8Array;
+  recipientPublicKeyBytes: Uint8Array;
+}): OpenedAppMessageLocal {
   const envelope = decodeEnvelope(input.signed.envelopeBytes);
   if (
     !verifyEnvelopeBytes(
@@ -382,7 +384,14 @@ export function openAppMessageLocalBytes(input: {
     throw new Error("envelope signature verification failed");
   }
   const recipientPrivBytes = input.recipientPrivateKeyBytes;
-  const sharedSecret = ecdhSharedSecret(recipientPrivBytes, envelope.senderPublicKeyBytes);
+  // 正常收件用 recipient.priv + sender.pub；发送方回放服务端历史时，
+  // 则用 sender.priv + recipient.pub。两者都必须派生出发送时的同一密钥。
+  const callerIsSender = bytesToHex(input.recipientPublicKeyBytes)
+    === bytesToHex(envelope.senderPublicKeyBytes);
+  const peerPublicKeyBytes = callerIsSender
+    ? envelope.recipientPublicKeyBytes
+    : envelope.senderPublicKeyBytes;
+  const sharedSecret = ecdhSharedSecret(recipientPrivBytes, peerPublicKeyBytes);
   const messageKey = deriveMessageKey(sharedSecret);
   const cipher = gcm(messageKey, envelope.nonceBytes);
   const plaintextBytes = cipher.decrypt(envelope.ciphertext);
@@ -395,10 +404,42 @@ export function openAppMessageLocalBytes(input: {
     senderPublicKeyHex: bytesToHex(envelope.senderPublicKeyBytes),
     senderEndpointId: envelope.senderEndpointId,
     senderEndpointKind: envelope.senderEndpointKind === APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN ? "origin" : "plugin",
-    recipientPublicKeyHex: bytesToHex(input.recipientPublicKeyBytes),
+    recipientPublicKeyHex: bytesToHex(envelope.recipientPublicKeyBytes),
     recipientEndpointId: envelope.recipientEndpointId,
     recipientEndpointKind: envelope.recipientEndpointKind === APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN ? "origin" : "plugin"
   };
+}
+
+/**
+ * 把验证、解密后的中间结果还原成业务层消息。
+ * sender 与 recipient endpoint 必须同时投影；只保留一侧会导致接收消息
+ * 无法命中 endpoint scope，从会话历史中消失。
+ */
+export function buildOpenedAppMsgMessage(
+  rec: ProviderSealedMessageRecord,
+  opened: OpenedAppMessageLocal
+): AppMsgMessage {
+  const message: AppMsgMessage = {
+    messageId: rec.messageId,
+    clientMessageId: opened.clientMessageId,
+    senderPublicKeyHex: opened.senderPublicKeyHex,
+    recipientPublicKeyHex: opened.recipientPublicKeyHex,
+    contentType: opened.contentType,
+    body: new TextDecoder("utf-8", { fatal: true }).decode(opened.bodyUtf8),
+    createdAtMs: opened.createdAtMs,
+    insertedAtMs: rec.insertedAtMs
+  };
+  if (opened.senderEndpointKind === "origin") {
+    message.senderOrigin = opened.senderEndpointId;
+  } else {
+    message.senderAppId = opened.senderEndpointId;
+  }
+  if (opened.recipientEndpointKind === "origin") {
+    message.recipientOrigin = opened.recipientEndpointId;
+  } else {
+    message.recipientAppId = opened.recipientEndpointId;
+  }
+  return message;
 }
 
 export function deriveP2pkhAddress(publicKeyHex: string, network: "main" | "test"): string {

@@ -10,7 +10,14 @@
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { describe, expect, it } from "vitest";
-import { signEcdsaDigest, hexToBytes, bytesToHex } from "./sessionCryptoCore.js";
+import {
+  buildOpenedAppMsgMessage,
+  signEcdsaDigest,
+  hexToBytes,
+  bytesToHex,
+  openAppMessageLocalBytes,
+  sealAppMessageLocalBytes
+} from "./sessionCryptoCore.js";
 
 // 测试私钥（n=1，仅测试用）
 const TEST_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
@@ -136,5 +143,62 @@ describe("signEcdsaDigest", () => {
 
     // 不同 digest 应产生不同签名
     expect(bytesToHex(sig1)).not.toBe(bytesToHex(sig2));
+  });
+});
+
+describe("AppMsg message projection", () => {
+  it("preserves both plugin endpoints for recipient receive and sender replay", () => {
+    const recipientPrivateKeyBytes = hexToBytes(
+      "0000000000000000000000000000000000000000000000000000000000000002"
+    );
+    const recipientPublicKeyBytes = secp256k1.getPublicKey(recipientPrivateKeyBytes, true);
+    const sealed = sealAppMessageLocalBytes({
+      senderPrivateKeyBytes: TEST_PRIV_BYTES,
+      senderPublicKeyBytes: hexToBytes(TEST_PUB_HEX),
+      recipientPublicKeyBytes,
+      senderEndpoint: { kind: "plugin", id: "keymaster.message" },
+      recipientEndpoint: { kind: "plugin", id: "keymaster.message" },
+      contentType: "text/plain",
+      body: "hello recipient",
+      clientMessageId: "client-two-party",
+      createdAtMs: 100
+    });
+    const record = {
+      messageId: "message-two-party",
+      senderPublicKeyHex: TEST_PUB_HEX,
+      senderEndpointKind: "plugin" as const,
+      senderEndpointId: "keymaster.message",
+      recipientPublicKeyHex: bytesToHex(recipientPublicKeyBytes),
+      recipientEndpointKind: "plugin" as const,
+      recipientEndpointId: "keymaster.message",
+      clientMessageId: "client-two-party",
+      createdAtMs: 100,
+      insertedAtMs: 101,
+      envelope: {
+        envelopeBytes: sealed.envelope,
+        signatureBytes: sealed.signatureBytes
+      }
+    };
+
+    const recipientOpened = openAppMessageLocalBytes({
+      signed: record.envelope,
+      recipientPrivateKeyBytes,
+      recipientPublicKeyBytes
+    });
+    const recipientMessage = buildOpenedAppMsgMessage(record, recipientOpened);
+    expect(recipientMessage).toMatchObject({
+      senderPublicKeyHex: TEST_PUB_HEX,
+      senderAppId: "keymaster.message",
+      recipientPublicKeyHex: bytesToHex(recipientPublicKeyBytes),
+      recipientAppId: "keymaster.message",
+      body: "hello recipient"
+    });
+
+    const senderOpened = openAppMessageLocalBytes({
+      signed: record.envelope,
+      recipientPrivateKeyBytes: TEST_PRIV_BYTES,
+      recipientPublicKeyBytes: hexToBytes(TEST_PUB_HEX)
+    });
+    expect(buildOpenedAppMsgMessage(record, senderOpened)).toEqual(recipientMessage);
   });
 });

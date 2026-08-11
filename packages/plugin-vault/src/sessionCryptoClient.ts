@@ -27,6 +27,7 @@ import type {
   SessionEpoch
 } from "@keymaster/contracts";
 import {
+  buildOpenedAppMsgMessage,
   deriveP2pkhAddress,
   hexToBytes,
   openAppMessageLocalBytes,
@@ -498,30 +499,7 @@ async function createLocalEngine(input: SessionCryptoEngineInput): Promise<Sessi
           recipientPrivateKeyBytes: privateKeyBytes,
           recipientPublicKeyBytes: hexToBytes(input.publicKeyHex)
         });
-        const bodyStr = new TextDecoder("utf-8", { fatal: true }).decode(opened.bodyUtf8);
-        const out: AppMsgMessage = {
-          messageId: rec.messageId,
-          clientMessageId: opened.clientMessageId,
-          senderPublicKeyHex: opened.senderPublicKeyHex,
-          recipientPublicKeyHex: opened.recipientPublicKeyHex,
-          contentType: opened.contentType,
-          body: bodyStr,
-          createdAtMs: opened.createdAtMs,
-          insertedAtMs: rec.insertedAtMs
-        };
-        if (opened.senderEndpointKind === "origin") {
-          return { ...out, senderOrigin: opened.senderEndpointId };
-        }
-        if (opened.senderEndpointKind === "plugin") {
-          return { ...out, senderAppId: opened.senderEndpointId };
-        }
-        if (opened.recipientEndpointKind === "origin") {
-          return { ...out, recipientOrigin: opened.recipientEndpointId };
-        }
-        if (opened.recipientEndpointKind === "plugin") {
-          return { ...out, recipientAppId: opened.recipientEndpointId };
-        }
-        return out;
+        return buildOpenedAppMsgMessage(rec, opened);
       } catch {
         return null;
       }

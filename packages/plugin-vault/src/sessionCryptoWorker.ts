@@ -9,6 +9,7 @@
 
 import {
   deriveP2pkhAddress,
+  buildOpenedAppMsgMessage,
   hexToBytes,
   openAppMessageLocalBytes,
   sealAppMessageLocalBytes,
@@ -213,26 +214,12 @@ function createSessionCryptoRequestHandler(stateRef: WorkerStateRef) {
           const opened = openAppMessageLocalBytes({
             signed: message.rec.envelope,
             recipientPrivateKeyBytes: s.privateKeyBytes,
-            recipientPublicKeyBytes: hexToBytes(message.rec.recipientPublicKeyHex)
+            recipientPublicKeyBytes: hexToBytes(s.publicKeyHex)
           });
-          const bodyStr = new TextDecoder("utf-8", { fatal: true }).decode(opened.bodyUtf8);
           post({
             requestId: message.requestId,
             ok: true,
-            result: {
-              messageId: message.rec.messageId,
-              clientMessageId: opened.clientMessageId,
-              senderPublicKeyHex: opened.senderPublicKeyHex,
-              recipientPublicKeyHex: opened.recipientPublicKeyHex,
-              contentType: opened.contentType,
-              body: bodyStr,
-              createdAtMs: opened.createdAtMs,
-              insertedAtMs: message.rec.insertedAtMs,
-              senderEndpointKind: opened.senderEndpointKind,
-              senderEndpointId: opened.senderEndpointId,
-              recipientEndpointKind: opened.recipientEndpointKind,
-              recipientEndpointId: opened.recipientEndpointId
-            }
+            result: buildOpenedAppMsgMessage(message.rec, opened)
           });
         } catch {
           post({

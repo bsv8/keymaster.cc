@@ -14,6 +14,7 @@ import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
 import type { VaultSealedSecret } from "./vault.js";
+import type { ProviderSealedMessageRecord } from "./messageProvider.js";
 import type {
   StorageAppContext,
   StorageProviderConfigDraft,
@@ -108,7 +109,7 @@ export type CoordinatorCryptoOperation =
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; network: "main" | "test" }
   | { type: "sealSendInput"; input: { sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string }; recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string }; contentType: "text/plain" | "text/markdown"; body: string; clientMessageId: string; createdAtMs: number } }
-  | { type: "openSealed"; record: unknown };
+  | { type: "openSealed"; record: ProviderSealedMessageRecord };
 
 /** 后台同步设置。 */
 export interface CoordinatorBackgroundSyncSettings {

@@ -3,4 +3,4 @@ export { deriveKey, verifyVerifier, encryptVerifier, encryptBytes, decryptBytes,
 export { encryptBytesWithSaltBoundAad, decryptBytesWithSaltBoundAad } from "./crypto.js";
 export * from "./vaultCoordinator.js";
 export { encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "./webauthnPrf.js";
-export { deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes } from "./sessionCryptoCore.js";
+export { buildOpenedAppMsgMessage, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes } from "./sessionCryptoCore.js";
