@@ -72,12 +72,22 @@ class TestPort {
   send(message: unknown): void { this.onmessage?.({ data: message } as MessageEvent); }
 }
 
+// metadata snapshot validator 会校验 secp256k1 曲线点；测试 fixture 使用
+// 确定性私钥派生真实压缩公钥，只有显式 malformed case 才使用无效值。
+function validPublisherKey(seed: number): string {
+  const privateKey = new Uint8Array(32);
+  privateKey[31] = seed;
+  return bytesToHex(secp256k1.getPublicKey(privateKey, true));
+}
+
+const VALID_PUBLISHER_KEYS = [1, 2, 3, 4, 5, 6].map(validPublisherKey);
+
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
 
 describe("Session Coordinator worker", () => {
   it("rejects forged client ownership and revoked/changed Storage grants", async () => {
     __testResetState();
-    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "11".repeat(32), appId: "app", appName: "App", identityDigestHex: "aa".repeat(32) };
+    const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[0]!, appId: "app", appName: "App", identityDigestHex: "aa".repeat(32) };
     let revoked = false;
     __testSetStorageSessionResolver(async (id) => revoked ? null : { sessionId: id, origin: "https://app.example", appIdentity: identity, revokedAt: null });
     const granted = await __testDispatchStorageGrant("session-a", "port-a", "forged-client");
@@ -96,7 +106,7 @@ describe("Session Coordinator worker", () => {
     __testResetState();
     __testSetStorageSessionResolver(async () => null);
     expect((await __testDispatchStorageGrant("missing", "port-a")).ack.status).toBe("error");
-    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "22".repeat(32), appId: "app", appName: "App", identityDigestHex: "bb".repeat(32) };
+    const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[1]!, appId: "app", appName: "App", identityDigestHex: "bb".repeat(32) };
     let origin = "https://one.example";
     __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, appIdentity: identity, revokedAt: null }));
     const granted = await __testDispatchStorageGrant("session-b", "port-a");
@@ -139,7 +149,7 @@ describe("Session Coordinator worker", () => {
 
   it("aborts a slow Storage data lane when the global lock preempts it", async () => {
     __testResetState();
-    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "33".repeat(32), appId: "app", appName: "App", identityDigestHex: "cc".repeat(32) };
+    const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appId: "app", appName: "App", identityDigestHex: "cc".repeat(32) };
     __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slow.example", appIdentity: identity, revokedAt: null }));
     __testSetStorageRuntime({ list: async (_ctx, input) => await new Promise((_, reject) => { input.signal?.addEventListener("abort", () => { reject(new Error("storage_unavailable")); }); }), abortSession: async () => undefined });
     const grant = await __testDispatchStorageGrant("slow-session", "port-a");
@@ -153,7 +163,7 @@ describe("Session Coordinator worker", () => {
 
   it("reclaims all four hanging data slots on lock and serves new runtime data", async () => {
     __testResetState();
-    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "66".repeat(32), appId: "app", appName: "App", identityDigestHex: "ff".repeat(32) };
+    const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appId: "app", appName: "App", identityDigestHex: "ff".repeat(32) };
     __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slots.example", appIdentity: identity, revokedAt: null }));
     __testSetStorageRuntime({ list: async () => await new Promise<never>(() => undefined), abortSession: async () => undefined });
     const grant = await __testDispatchStorageGrant("slots-session", "port-a");
@@ -169,7 +179,7 @@ describe("Session Coordinator worker", () => {
 
   it("rejects a late provider success after session epoch or generation changes", async () => {
     __testResetState();
-    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "44".repeat(32), appId: "app", appName: "App", identityDigestHex: "dd".repeat(32) };
+    const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appId: "app", appName: "App", identityDigestHex: "dd".repeat(32) };
     __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", appIdentity: identity, revokedAt: null }));
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => { release = resolve; });
@@ -237,7 +247,7 @@ describe("Session Coordinator worker", () => {
 
   it("releases a port explicitly before close", async () => {
     __testResetState();
-    const identity = { version: 1 as const, publisherPublicKeyHex: "02" + "55".repeat(32), appId: "app", appName: "App", identityDigestHex: "ee".repeat(32) };
+    const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[5]!, appId: "app", appName: "App", identityDigestHex: "ee".repeat(32) };
     __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://disconnect.example", appIdentity: identity, revokedAt: null }));
     const pending = __testSeedStorageRequest("active", "port-z", "disconnect-session");
     const granted = await __testDispatchStorageGrant("disconnect-session", "port-z");

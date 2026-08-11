@@ -21,7 +21,6 @@
 
 import type {
   BinaryField,
-  AppIdentityProofV1,
   CipherDecryptParams,
   CipherEncryptParams,
   ConnectLaunchParams,
@@ -300,27 +299,24 @@ function validateFeepoolCommitParams(raw: unknown): FeepoolCommitParams {
  */
 function validateConnectLoginParams(raw: unknown): ConnectLoginParams {
   const obj = expectObject(raw, "connect.login params");
+  // app identity/metadata 由 Keymaster 根据 caller origin 查本地 catalog；
+  // 任何自报字段都硬拒绝，避免绕过本地信任根。
+  for (const key of Object.keys(obj)) if (key !== "text" && key !== "claims" && key !== "appIdentity") throw new ProtocolValidationError("invalid_request", "connect.login contains an unsupported field");
   const text = expectString(obj.text, "text");
   let claims: string[] | undefined;
   if (obj.claims !== undefined) {
     if (!Array.isArray(obj.claims)) {
       throw new ProtocolValidationError("invalid_request", "claims must be an array of strings");
     }
-    claims = obj.claims.filter((c): c is string => typeof c === "string");
+    if (obj.claims.some((c) => typeof c !== "string")) throw new ProtocolValidationError("invalid_request", "claims entries must be strings");
+    claims = [...obj.claims] as string[];
   }
-  let appIdentity: AppIdentityProofV1 | undefined;
+  let appIdentity: ConnectLoginParams["appIdentity"];
   if (obj.appIdentity !== undefined) {
-    try {
-      verifyAppIdentityProof(obj.appIdentity);
-    } catch (error) {
-      throw new ProtocolValidationError(
-        "invalid_request",
-        error instanceof AppIdentityValidationError ? error.message : "Invalid appIdentity"
-      );
-    }
-    appIdentity = obj.appIdentity as AppIdentityProofV1;
+    try { verifyAppIdentityProof(obj.appIdentity); appIdentity = obj.appIdentity as ConnectLoginParams["appIdentity"]; }
+    catch (error) { throw new ProtocolValidationError("invalid_request", error instanceof AppIdentityValidationError ? error.message : "appIdentity is invalid"); }
   }
-  return { text, claims, appIdentity };
+  return { text, claims, ...(appIdentity ? { appIdentity } : {}) };
 }
 
 /**
@@ -348,8 +344,15 @@ function validateConnectLogoutParams(raw: unknown): ConnectLogoutParams {
 
 function validateConnectLaunchParams(raw: unknown): ConnectLaunchParams {
   const obj = expectObject(raw, "connect.launch params");
+  if (Object.keys(obj).some((key) => key !== "launchToken" && key !== "appIdentity")) {
+    throw new ProtocolValidationError("invalid_request", "connect.launch contains an unsupported field");
+  }
   const launchToken = expectNonEmptyString(obj.launchToken, "launchToken");
-  return { launchToken };
+  if (obj.appIdentity === undefined) throw new ProtocolValidationError("invalid_request", "appIdentity is required");
+  let appIdentity: ConnectLaunchParams["appIdentity"];
+  try { verifyAppIdentityProof(obj.appIdentity); appIdentity = obj.appIdentity as ConnectLaunchParams["appIdentity"]; }
+    catch (error) { throw new ProtocolValidationError("invalid_request", error instanceof AppIdentityValidationError ? error.message : "appIdentity is invalid"); }
+  return { launchToken, appIdentity };
 }
 
 /* ============== storage.* validation ============== */

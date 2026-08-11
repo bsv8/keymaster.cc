@@ -15,7 +15,8 @@
     "appOrigin": "https://demo.apps.bsv8.com",
     "appUrl": "https://demo.apps.bsv8.com/",
     "claims": [],
-    "icon": "/app-icons/demo.svg"
+    "icon": "/app-icons/demo.svg",
+    "appIdentity": {"app":{"description":"Keymaster Connect V1 外部调用方 demo，验证 identity.get、intent.sign、cipher.encrypt、cipher.decrypt。","id":"keymaster-connect-demo","name":"Keymaster Connect Demo"},"publisherPublicKey":"032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30","requirements":["private-key","storage"],"signature":"ac1d19a29d0ce1039f3f4ef4c3c8f6a2175c346a41e81837fa0f5b57e77880dc0d8198635bdbc137250c254cbe35486b2a859620273c5df4e839760a08736981","version":1}
   },
   {
     "id": "s3disk",

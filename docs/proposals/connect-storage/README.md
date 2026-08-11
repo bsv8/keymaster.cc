@@ -1,5 +1,10 @@
 # Connect Storage 提案
 
+> 本目录保留早期 proof 字段与 Storage 方案的历史设计，不再是当前身份契约。
+> 当前实现使用入口 HTML 中的固定签名 proof；`keymaster.app.json` 只把同一 proof
+> 人工导入 launcher catalog。Direct login 与 appView launch 都提交并验签 proof，
+> 见 [App Identity Proof V1](../../app-metadata-v1.md)。
+
 本目录记录 Keymaster Connect S3 Storage 能力及其施工验收。当前仓库已落地可编译、
 可构建、可运行的原型代码，AWS S3、Cloudflare R2 和 Backblaze B2 真实 Provider
 smoke 已通过；安全审计和 S3Disk 正式迁移契约尚未完成，不得把本目录当作已上线 API。
@@ -41,6 +46,6 @@ KMS3-012A 已完成实现与 69 项 `plugin-storage` 回归测试，并在三类
 
 关联项目：
 
-- `KeymasterAppPackCore`：App Identity、内容寻址 Vite 构建、Manifest 与签名工具。
+- `KeymasterAppPackCore`：App metadata 派生、内容寻址 Vite 构建、Manifest 与 bundle 签名工具。
 - `MasterSeed`：Seed V1 Hash SDK。
 - `S3Disk`：已验证的 AWS S3/R2/S3-compatible 行为参考，未来迁移消费者。

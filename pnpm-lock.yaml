@@ -213,6 +213,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@noble/curves':
+        specifier: ^2.2.0
+        version: 2.2.0
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)

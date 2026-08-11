@@ -66,6 +66,7 @@ appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 boot
 ```ts
 {
   launchToken: string;
+  appIdentity: AppIdentityProofV1;
 }
 ```
 
@@ -83,11 +84,13 @@ appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 boot
 #### 关键约束
 
 1. 仅在 Session Window 处于 `appView` mode 时启用；其它 mode 一律 fail-closed。
-2. launchToken 一次性消费；成功后立即标记 `consumed = true`。
-3. caller `event.origin` 必须与 bootstrap 期记录的 `app.appOrigin` 一致；不一致 → `invalid_origin`。
-4. 失败时按 fail-closed 返回 `user_rejected` / `invalid_origin` / `internal_error`；**不**自动 fallback 到 `connect.login`。
-5. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*`。
-6. 后续业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` / `feepool.*`）必须走 `resolveOwnerRuntime(session)`，由当前窗口能拿到的来源执行；
+2. 先验证 `appIdentity` 签名，并确认其 digest 等于 launcher 预建 session
+   绑定的 proof digest；任一校验失败都不得消费 launchToken。
+3. launchToken 只在全部校验成功后一次性消费并标记 `consumed = true`。
+4. caller `event.origin` 必须与 bootstrap 期记录的 `app.appOrigin` 一致；不一致 → `invalid_origin`。
+5. 失败时按 fail-closed 返回 `user_rejected` / `invalid_origin` / `internal_error`；**不**自动 fallback 到 `connect.login`。
+6. 成功结果形状与 `connect.login` 对齐；client app 拿到 sessionId 后持久化本地，后续走同一套 `connect.resume` / `cipher.*`。
+7. 后续业务方法（`identity.*` / `intent.sign` / `cipher.*` / `p2pkh.transfer` / `feepool.*`）必须走 `resolveOwnerRuntime(session)`，由当前窗口能拿到的来源执行；
    Session Window 刷新后 bootstrap runtime 丢失，session 仍存在；
    本窗口后续用户 unlock 后可按同 owner 从 vault 重建 runtime
    （`vault_unlock` 来源）；如果两个来源都拿不到 → fail-fast
@@ -96,7 +99,7 @@ appView mode 下 client app 的**唯一**首登入口。消费 launcher 在 boot
 
 ### `connect.launch` 与 launcher 预建 session 的关系（施工单 2026-06-29 002 硬切换 + 2026-06-30 002 硬切换）
 
-施工单 2026-06-29 001 硬切换已经定义：launcher 拉起 Session Window 时，session **先在 launcher 一侧**建好（与 `app.appOrigin` + 当前 owner key 绑定），launchToken 由 launcher 生成并交给 Session Window。`connect.launch` **不**创建 session，它只消费 launchToken 并把"已存在的 session"接上已开好的 Session Window。
+施工单 2026-06-29 001 硬切换已经定义：launcher 拉起 Session Window 时，session **先在 launcher 一侧**建好（与 `app.appOrigin`、当前 owner key 和 catalog proof digest 绑定），launchToken 由 launcher 生成并交给 Session Window。`connect.launch` **不**创建 session；它验证 App 提交的 proof 与绑定 digest 后，才消费 launchToken 并把"已存在的 session"接上已开好的 Session Window。
 
 launcher 预建 session 的入口收口在 `protocol.service.launchAppView(...)`：
 
@@ -105,9 +108,9 @@ plugin-apps（apps 页面 / 首页 widget）
   ──点击 Open App──> protocol.service.launchAppView(app)
                        │
                        ├── 1. 校验 vault 已解锁 + active key ready + owner 有 vault keyId
-                       ├── 2. 校验 app 配置合法
-                       ├── 3. 解析 claims 快照
-                       ├── 4. 创建新 connectSessionId（session 真值三元组，无 runtimeBinding，落 IndexedDB）
+                       ├── 2. 验证本地 catalog 的 AppIdentityProof 与 requirements
+                       ├── 3. 解析 claims 与 proof digest 快照
+                       ├── 4. 创建新 connectSessionId（绑定 origin、owner 与 proof digest，落 IndexedDB）
                        ├── 5. 调 vault.withPrivateKey(keyId, fn) 借 owner 私钥 hex，组装 OwnerRuntimeBootstrap
                        ├── 6. 生成新 launchToken
                        ├── 7. 装 AppBootstrapPayload + bootstrap registry
@@ -128,9 +131,9 @@ plugin-apps（apps 页面 / 首页 widget）
 - `connect.launch` **不**创建 session；session 已经在 launcher 预建阶段落库。
 - `connect.launch` 失败时**不**回退到 `connect.login`；用户回到 `plugin-apps` 重新点 `Open App` 即可。
 - session 真值 = `connectSessionId` + `ownerPublicKeyHex` + `app.appOrigin` + `resolvedClaims`；这套三元组是后续 `cipher.*` 等业务方法的 namespace 真值（与 `appViewContext` 字段无关，appViewContext 仅用于 UI / 启动决策）。
-- Connect Storage 已作为独立能力接入：带 verified App Identity 的 Connect Session
+- Connect Storage 已作为独立能力接入：带已验证 identity proof 快照的 Connect Session
   可调用 `storage.*`；Provider 配置由 `plugin-storage` 通过独立
-  `keymaster.storage` DB 管理。没有 App Identity 的旧 session 仍可使用原有
+  `keymaster.storage` DB 管理。没有已验证 proof 快照的 session 仍可使用原有
   Connect 方法，但不能使用 Storage。
 
 ### `connect.login`
@@ -141,8 +144,13 @@ plugin-apps（apps 页面 / 首页 widget）
 {
   text: string;                // 人类可读确认文案
   claims?: string[];           // 可选；要返回的 claim 名列表
+  appIdentity?: AppIdentityProofV1; // 可选；App 从自身 HTML meta 读取
 }
 ```
+
+不带 `appIdentity` 时建立普通 session，且不会查询 Keymaster catalog。带 proof 时
+Keymaster 必须先验签并检查 requirements；例如声明 `storage` 而本地 Storage 尚未
+就绪时，登录必须失败且不得写入新 session。
 
 **关键（硬切换修复）：** `ownerPublicKeyHex` **不**在 params 里。owner
 是用户在 popup UI 上**明确**选定的；service 不能替 caller 决定。

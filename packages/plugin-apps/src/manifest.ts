@@ -22,6 +22,7 @@ import type {
 } from "@keymaster/contracts";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { AppsPage } from "./AppsPage.js";
+import { createCatalogResolver } from "./catalog.js";
 
 const appsResources: I18nPluginResources = {
   namespace: "apps",
@@ -47,6 +48,8 @@ const appsResources: I18nPluginResources = {
         "No ready owner key is available. Please create or import one first.",
       "apps.open.error.invalidAppConfig":
         "This app's configuration is invalid. Please contact the app provider.",
+      "apps.open.error.requirementUnavailable":
+        "This app requirement is not ready. Please configure Storage first.",
       "apps.open.error.windowUnavailable":
         "This browser environment cannot open the app.",
       "apps.open.error.sessionStorageUnavailable":
@@ -86,6 +89,7 @@ const appsResources: I18nPluginResources = {
       "apps.open.error.vaultLocked": "请先解锁 Keymaster，然后再试一次。",
       "apps.open.error.noActiveKey": "没有可用的 owner key。请先创建或导入一把。",
       "apps.open.error.invalidAppConfig": "该应用配置非法，请联系应用提供方。",
+      "apps.open.error.requirementUnavailable": "该应用所需能力尚未就绪，请先配置 Storage。",
       "apps.open.error.windowUnavailable": "当前浏览器环境无法打开该应用。",
       "apps.open.error.sessionStorageUnavailable": "Keymaster 本地存储不可用，请稍后再试。",
       "apps.open.error.exportOwnerRuntimeFailed": "app owner runtime 准备失败，请稍后再试。",
@@ -114,7 +118,8 @@ export const appsPlugin: PluginManifest = {
     startup: "optional",
     defaultEnabled: true,
     canDisable: true,
-    displayGroup: "business"
+    displayGroup: "business",
+    providesCapabilities: ["app.catalog"]
   },
   i18n: appsResources,
   dependencies: [
@@ -123,6 +128,8 @@ export const appsPlugin: PluginManifest = {
     { capability: "business.registry", reason: "接入首页业务导航" }
   ],
   setup(ctx) {
+    // 暴露只读本地 resolver；协议层通过依赖注入消费，绝不反向 import 本插件。
+    ctx.provide("app.catalog", createCatalogResolver());
     const routes = ctx.get<RouteRegistry>("route.registry");
     routes.register({
       id: "apps.launcher",

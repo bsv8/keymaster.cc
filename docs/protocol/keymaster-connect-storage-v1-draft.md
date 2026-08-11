@@ -1,9 +1,11 @@
 # Keymaster Connect Storage V1
 
-Connect Storage 是可选的 Protocol 平台能力。第三方应用必须在
-`connect.login` 或 launcher bootstrap 中提供由 publisher 签名的 App Identity；
-session 会持久化 verified snapshot。没有 Identity 的历史 Connect Session 仍可
-使用既有业务方法，但不能使用 `storage.*`。
+Connect Storage 是可选的 Protocol 平台能力。App 主动登录时提交从自身 HTML meta
+读取的 App Identity Proof；Keymaster launcher 拉起时则使用本地 catalog 中人工导入的
+proof 预建 session，并要求 App 在 `connect.launch` 提交相同 proof。session 会持久化
+已验证 proof 的 digest 快照。没有该快照的 Connect Session 仍可使用既有业务方法，
+但不能使用 `storage.*`。完整信任边界见
+[App Metadata V1](../app-metadata-v1.md)。
 
 ## Methods
 

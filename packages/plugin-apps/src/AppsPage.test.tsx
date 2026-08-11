@@ -30,6 +30,34 @@ import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { AppsPage } from "./AppsPage.js";
 import { appsPlugin } from "./manifest.js";
 
+// 页面交互测试使用与协议测试同源的签名 fixture；生产内嵌 catalog 仍保持
+// Justnote/S3Disk/Demo 占位条目 invalid，由 catalog.test 覆盖 fail-closed UI 数据。
+vi.mock("./catalog.js", async () => {
+  const actual = await vi.importActual<typeof import("./catalog.js")>("./catalog.js");
+  return {
+    ...actual,
+    loadCatalog: () => ({
+      ok: [{
+        id: "justnote",
+        name: "Justnote",
+        summary: "Encrypted notes powered by Keymaster.",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/",
+        claims: [],
+        appIdentity: {
+          version: 1 as const,
+          publisherPublicKey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          app: { id: "justnote", name: "Justnote", description: "Encrypted notes." },
+          requirements: [] as ("private-key" | "storage")[],
+          signature: "607c8f550f7242c6a6d27e5cfdcc7d11791c49a9ac8067defd2b68dc3bd92ab7139bcff3a1b1afe9441dd4b12822a8a600a2e463084b076fc79027bacced1019"
+        }
+      }],
+      invalid: [],
+      duplicates: []
+    })
+  };
+});
+
 afterEach(() => {
   cleanup();
   document.body.innerHTML = "";
@@ -144,6 +172,7 @@ describe("AppsPage - 点击启动", () => {
     expect(handle.service.launchAppViewCalls.length).toBe(1);
     expect(handle.service.launchAppViewCalls[0]).toEqual({
       appId: "justnote",
+      appIdentity: expect.any(Object),
       appOrigin: "https://justnote.apps.bsv8.com",
       appUrl: "https://justnote.apps.bsv8.com/",
       claims: [],

@@ -31,13 +31,27 @@ import { ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService
 import type { LaunchTokenRecord, ResolvedClaimValue } from "@keymaster/contracts";
 import { cborDecode, cborEncode } from "./protocolCbor.js";
 import { aesGcmDecrypt, deriveSiteKey, verifyCompactSecp256k1, signCompactSecp256k1 } from "./protocolCrypto.js";
+import { verifyAppIdentityProof } from "./appIdentity.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { identityDigestBytes } from "./appIdentity.js";
 
 const TEST_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PUB_HEX = "0279BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798";
 const ORIGIN = "https://abc.com";
+const VALID_PROOF = {
+  version: 1 as const,
+  publisherPublicKey: TEST_PUB_HEX.toLowerCase(),
+  app: { id: "justnote", name: "Justnote", description: "Encrypted notes." },
+  requirements: [] as ("private-key" | "storage")[],
+  signature: "607c8f550f7242c6a6d27e5cfdcc7d11791c49a9ac8067defd2b68dc3bd92ab7139bcff3a1b1afe9441dd4b12822a8a600a2e463084b076fc79027bacced1019"
+};
+const STORAGE_PROOF = {
+  version: 1 as const,
+  publisherPublicKey: TEST_PUB_HEX.toLowerCase(),
+  app: { id: "vite-fixture", name: "Vite Fixture", description: "Fixture" },
+  requirements: ["storage"] as ("private-key" | "storage")[],
+  signature: "217a8c1761de074dc3c1e6e90f31f00b09f54ecb87d9ba2b1e157570033777c4373fc0281c76466ab20d04bc231b61a52ae3681c08e11f021ae6955718c1cb17"
+};
 
 interface FakeWindow {
   postMessage: (msg: unknown, origin: string) => void;
@@ -450,6 +464,9 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
     postClosing: (_t, msg) => {
       posted.closing.push(msg);
     },
+    // 旧协议 harness 明确注入一个无 metadata 的本地 catalog row；生产环境
+    // 由 plugin-apps 的惰性 capability getter 提供真实 resolver。
+    appCatalogResolver: { resolve: () => ({ kind: "known-valid" as const, proof: VALID_PROOF }) },
     ...extra
   };
   if (storageDb) {
@@ -3940,6 +3957,38 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
 /* ============== 施工单 2026-06-28 001：connect.* 行为单测 ============== */
 
 describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", () => {
+  it("direct login 无 appIdentity 时不查 catalog，仍建立普通非 storage session", async () => {
+    for (const resolver of [
+      undefined,
+      { resolve: () => ({ kind: "known-invalid" as const, reason: "placeholder publisher key" }) }
+    ]) {
+      const storageDb = makeFakeStorageDb();
+      const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageDb, { appCatalogResolver: resolver });
+      service.startSession();
+      await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-gate", method: "connect.login", params: { text: "login" } }, ORIGIN, opener));
+      const view = service.connectLoginRecord();
+      expect(view).not.toBeNull();
+      await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
+      await new Promise((r) => setTimeout(r, 30));
+      expect(getResult()?.ok).toBe(true);
+    }
+  });
+
+  it("direct login storage requirement 未 ready 时返回 storage_unavailable 且不写 session", async () => {
+    const storageDb = makeFakeStorageDb();
+    const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageDb, {
+      appCatalogResolver: { resolve: () => ({ kind: "known-valid" as const, proof: STORAGE_PROOF }) },
+      storageService: { status: () => "unconfigured" } as never
+    });
+    service.startSession();
+    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-storage-gate", method: "connect.login", params: { text: "login", appIdentity: STORAGE_PROOF } }, ORIGIN, opener));
+    const view = service.connectLoginRecord();
+    await service.confirmConnectLogin(view!.recordId, TEST_PUB_HEX, "pw");
+    await new Promise((r) => setTimeout(r, 30));
+    expect(getResult()?.ok).toBe(false);
+  });
+
+
   it("connect.login：caller 不传 ownerPublicKeyHex；用户在 popup UI 选 key 后落 session 真值", async () => {
     // 关键修复（反例反馈）：caller 不携带 ownerPublicKeyHex——owner 是
     // 用户在 popup UI 上选定的；service 不能替 caller 决定。
@@ -6234,8 +6283,17 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     appOrigin: "https://justnote.apps.bsv8.com",
     appUrl: "https://justnote.apps.bsv8.com/",
     publicKeyHex: TEST_PUB_HEX,
-    password: "vault-password"
+    password: "vault-password",
+    appIdentity: VALID_PROOF
   };
+
+  const LOCAL_METADATA = {
+    version: 1 as const,
+    publisherPublicKey: TEST_PUB_HEX.toLowerCase(),
+    app: { id: "justnote", name: "Justnote", description: "Encrypted notes." },
+    requirements: []
+  };
+  const TEST_CATALOG_RESOLVER = { resolve: () => ({ kind: "known-valid" as const, proof: VALID_PROOF }) };
 
   /** 给测试构造可观察的 window.open 替换 + bootstrap registry 装/卸。 */
   function setupWindow(extra: { openReturns?: Window | null } = {}) {
@@ -6293,6 +6351,49 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     };
   }
 
+  it("resolver 缺失或已知 invalid 在开窗前 fail closed", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({ vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb });
+      await expect(service.launchAppView(JUSTNOTE)).rejects.toMatchObject({ code: "invalid_app_config" });
+      expect(env.openCalls).toHaveLength(0);
+      const blocked = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb,
+        appCatalogResolver: { resolve: () => ({ kind: "known-invalid", reason: "placeholder publisher key" }) }
+      });
+      await expect(blocked.launchAppView(JUSTNOTE)).rejects.toMatchObject({ code: "invalid_app_config" });
+      expect(env.openCalls).toHaveLength(0);
+    } finally { env.restore(); }
+  });
+
+  it("只使用 resolver proof 生成稳定 snapshot，不信任 caller 插入顺序", async () => {
+    const env = setupWindow();
+    try {
+      const storageDb = makeFakeStorageDb();
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb,
+        appCatalogResolver: { resolve: () => ({ kind: "known-valid", proof: VALID_PROOF }) },
+        generateId: (() => { let n = 0; return () => `metadata-${++n}`; })()
+      });
+      const out = await service.launchAppView({ ...JUSTNOTE });
+      const session = await storageDb.getConnectSession(out.connectSessionId);
+      expect(session?.appIdentity).toMatchObject({ appId: "justnote", appName: "Justnote" });
+    } finally { env.restore(); }
+  });
+
+  it("storage requirement 未 ready 时在开窗前拒绝", async () => {
+    const env = setupWindow();
+    try {
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb: makeFakeStorageDb(),
+        appCatalogResolver: { resolve: () => ({ kind: "known-valid", proof: STORAGE_PROOF }) }
+      });
+      await expect(service.launchAppView({ ...JUSTNOTE, appIdentity: STORAGE_PROOF })).rejects.toMatchObject({ code: "requirement_unavailable" });
+      expect(env.openCalls).toHaveLength(0);
+    } finally { env.restore(); }
+  });
+
   it("成功路径：预建 session + 借 owner 私钥拼 sessionRuntimeBootstrap + 装 bootstrap registry + 打开 Session Window（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
@@ -6304,7 +6405,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
         generateId: (() => {
           let n = 0;
           return () => `id-${++n}`;
-        })()
+        })(),
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       const out = await service.launchAppView(JUSTNOTE);
       expect(out.sessionWindowOpened).toBe(true);
@@ -6372,10 +6474,12 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace,
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
 
       const launch = service.launchAppView(JUSTNOTE);
+      // private-key ready 查询在预开后进行，以保留浏览器 user activation。
       expect(env.openCalls).toHaveLength(1);
       expect(env.openCalls[0]?.url).toBe("about:blank");
       expect(env.navigationCalls).toHaveLength(0);
@@ -6399,7 +6503,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const vault = makeVaultStub(TEST_PUB_HEX);
       // 强制 status 返回 locked。
       (vault as unknown as { status: () => string }).status = () => "locked";
-      const service = new ProtocolServiceImpl({ vault, keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb });
+      const service = new ProtocolServiceImpl({ vault, keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb, appCatalogResolver: TEST_CATALOG_RESOLVER });
       let caught: unknown = null;
       try {
         await service.launchAppView(JUSTNOTE);
@@ -6424,7 +6528,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
       try {
@@ -6433,39 +6538,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
           appOrigin: "https://justnote.apps.bsv8.com",
           appUrl: "https://evil.example/",
           publicKeyHex: TEST_PUB_HEX,
-          password: "vault-password"
+          password: "vault-password",
+          appIdentity: VALID_PROOF
         });
       } catch (err) {
         caught = err;
       }
       expect(caught).toBeInstanceOf(LaunchAppViewError);
       expect((caught as LaunchAppViewError).code).toBe("invalid_app_config");
-      expect(env.openCalls.length).toBe(0);
-    } finally {
-      env.restore();
-    }
-  });
-
-  it("拒绝签名 Identity 与目录 appId 不一致的 launcher 请求", async () => {
-    const env = setupWindow();
-    try {
-      const storageDb = makeFakeStorageDb();
-      const proof = {
-        version: 1 as const,
-        publisherPublicKey: TEST_PUB_HEX,
-        app: { id: "signed-app", name: "Signed App" },
-        signature: ""
-      };
-      proof.signature = Array.from(
-        secp256k1.sign(identityDigestBytes(proof), hexToBytes(TEST_PRIV_HEX), { prehash: false, format: "compact" }),
-        (byte) => byte.toString(16).padStart(2, "0")
-      ).join("");
-      const service = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb
-      });
-      await expect(service.launchAppView({ ...JUSTNOTE, appIdentity: proof })).rejects.toMatchObject({ code: "invalid_app_config" });
       expect(env.openCalls.length).toBe(0);
     } finally {
       env.restore();
@@ -6479,7 +6559,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
       try {
@@ -6488,7 +6569,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
           appOrigin: "https://justnote.apps.bsv8.com",
           appUrl: "not-a-url",
           publicKeyHex: TEST_PUB_HEX,
-          password: "vault-password"
+          password: "vault-password",
+          appIdentity: VALID_PROOF
         });
       } catch (err) {
         caught = err;
@@ -6508,7 +6590,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
       try {
@@ -6530,7 +6613,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
-        keyspace: makeKeyspaceStub(TEST_PUB_HEX)
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        appCatalogResolver: TEST_CATALOG_RESOLVER
         // 故意不传 storageDb
       });
       let caught: unknown = null;
@@ -6559,7 +6643,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace,
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
       try {
@@ -6587,7 +6672,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
       try {
@@ -6610,7 +6696,8 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb
+        storageDb,
+        appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       const out = await service.launchAppView(JUSTNOTE);
       expect(out.sessionWindowOpened).toBe(true);
@@ -6630,6 +6717,47 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
 });
 
 describe("ProtocolServiceImpl appView transport source binding", () => {
+  it("connect.launch 缺失/身份不匹配时拒绝且不消费 launchToken", async () => {
+    const storageDb = makeFakeStorageDb();
+    const { service, getResult } = makeService(TEST_PUB_HEX, storageDb, { bootMode: "appView" });
+    service.startSession();
+    const now = Date.now();
+    const sessionId = "sess-launch-gate";
+    await storageDb.putConnectSession({
+      sessionId,
+      origin: "https://justnote.apps.bsv8.com",
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      appIdentity: verifyAppIdentityProof(VALID_PROOF),
+      createdAt: now,
+      lastUsedAt: now,
+      revokedAt: null
+    });
+    const internals = service as unknown as {
+      currentAppViewContext: { appId: string; appOrigin: string; appUrl: string } | null;
+      launchTokensByToken: Map<string, { appId: string; appOrigin: string; appUrl: string; connectSessionId: string; ownerPublicKeyHex: string; resolvedClaims: Record<string, never>; resolvedAt: number; consumed: boolean }>;
+    };
+    internals.currentAppViewContext = { appId: "justnote", appOrigin: "https://justnote.apps.bsv8.com", appUrl: "https://justnote.apps.bsv8.com/" };
+    internals.launchTokensByToken.set("launch-gate", {
+      appId: "justnote", appOrigin: "https://justnote.apps.bsv8.com", appUrl: "https://justnote.apps.bsv8.com/",
+      connectSessionId: sessionId, ownerPublicKeyHex: TEST_PUB_HEX, resolvedClaims: {}, resolvedAt: now, consumed: false
+    });
+    const source = {} as Window;
+    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-missing", method: "connect.launch", params: { launchToken: "missing", appIdentity: VALID_PROOF } }, "https://justnote.apps.bsv8.com", source));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getResult()?.ok).toBe(false);
+    expect(internals.launchTokensByToken.get("launch-gate")?.consumed).toBe(false);
+    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-no-proof", method: "connect.launch", params: { launchToken: "launch-gate" } }, "https://justnote.apps.bsv8.com", source));
+    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-bad-signature", method: "connect.launch", params: { launchToken: "launch-gate", appIdentity: { ...VALID_PROOF, signature: "00".repeat(64) } } }, "https://justnote.apps.bsv8.com", source));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(internals.launchTokensByToken.get("launch-gate")?.consumed).toBe(false);
+    await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "launch-mismatch", method: "connect.launch", params: { launchToken: "launch-gate", appIdentity: STORAGE_PROOF } }, "https://justnote.apps.bsv8.com", source));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(getResult()?.ok).toBe(false);
+    expect(internals.launchTokensByToken.get("launch-gate")?.consumed).toBe(false);
+  });
+
   it("appView 接受 child app source 的 connect.launch，而不是错误地只认 launcher opener", async () => {
     const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
       bootMode: "appView"
@@ -6642,6 +6770,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       ownerPublicKeyHex: TEST_PUB_HEX,
       ownerLabel: "Key A",
       claimsSnapshot: { "key.label": "Key A" },
+      appIdentity: verifyAppIdentityProof(VALID_PROOF),
       createdAt: now,
       lastUsedAt: now,
       revokedAt: null
@@ -6692,7 +6821,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
           type: "request",
           id: "connect-launch-1",
           method: "connect.launch",
-          params: { launchToken: "launch-diag" }
+          params: { launchToken: "launch-diag", appIdentity: VALID_PROOF }
         },
         "https://justnote.apps.bsv8.com",
         appSource
@@ -7094,6 +7223,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         ownerPublicKeyHex: TEST_PUB_HEX,
         ownerLabel: "Key A",
         claimsSnapshot: {},
+        appIdentity: verifyAppIdentityProof(VALID_PROOF),
         createdAt: now,
         lastUsedAt: now,
         revokedAt: null
@@ -7146,7 +7276,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
             type: "request",
             id: "connect-launch-stop",
             method: "connect.launch",
-            params: { launchToken: "launch-stop" }
+          params: { launchToken: "launch-stop", appIdentity: VALID_PROOF }
           },
           "https://justnote.apps.bsv8.com",
           childWindow
@@ -7192,6 +7322,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
         ownerPublicKeyHex: TEST_PUB_HEX,
         ownerLabel: "Key A",
         claimsSnapshot: {},
+        appIdentity: verifyAppIdentityProof(VALID_PROOF),
         createdAt: now,
         lastUsedAt: now,
         revokedAt: null
@@ -7244,7 +7375,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
             type: "request",
             id: "connect-launch-late",
             method: "connect.launch",
-            params: { launchToken: "launch-late" }
+            params: { launchToken: "launch-late", appIdentity: VALID_PROOF }
           },
           "https://justnote.apps.bsv8.com",
           childWindow
@@ -7780,6 +7911,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
         ownerPublicKeyHex: TEST_PUB_HEX,
         ownerLabel: "Key A",
         claimsSnapshot: {},
+        appIdentity: verifyAppIdentityProof(VALID_PROOF),
         createdAt: now,
         lastUsedAt: now,
         revokedAt: null
@@ -7829,7 +7961,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
             type: "request",
             id: "connect-launch-locked-ready",
             method: "connect.launch",
-            params: { launchToken: token }
+            params: { launchToken: token, appIdentity: VALID_PROOF }
           },
           "https://justnote.apps.bsv8.com",
           appSource

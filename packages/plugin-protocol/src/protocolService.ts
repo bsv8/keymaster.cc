@@ -81,6 +81,9 @@ import {
   type AppViewContext,
   type BinaryField,
   type AppIdentitySnapshot,
+  type AppIdentityProofV1,
+  type AppCatalogResolution,
+  type AppCatalogResolver,
   type BroadcastCore,
   type BroadcastMessage,
   type BroadcastMessagePublicView,
@@ -154,8 +157,8 @@ import {
   type StorageUploadAbortResult,
   type VaultService
 } from "@keymaster/contracts";
+import { AppIdentityValidationError, identityDigestBytes, verifyAppIdentityProof } from "./appIdentity.js";
 import { ProtocolValidationError, parseCancelMessage, parseRequestMessage } from "./protocolValidation.js";
-import { verifyAppIdentityProof } from "./appIdentity.js";
 import {
   aesGcmDecrypt,
   aesGcmEncrypt,
@@ -282,6 +285,10 @@ export interface ProtocolServiceDeps {
   storageService?: StorageService;
   /** Resolve the current Storage capability at request/lifecycle time. */
   getStorageService?: () => StorageService | undefined;
+  /** Keymaster 本地 catalog resolver；不得反向依赖 plugin-apps。 */
+  appCatalogResolver?: AppCatalogResolver;
+  /** 延迟读取 resolver，避免 protocol -> apps capability 初始化循环。 */
+  getAppCatalogResolver?: () => AppCatalogResolver | undefined;
   /**
    * 可选 broadcast.core 平台能力（施工单 2026-07-08 001 硬切换）。
    *
@@ -1832,12 +1839,106 @@ export class ProtocolServiceImpl implements ProtocolService {
    *       12. 开窗或导航失败 → throw "open_session_window_*"。
    *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
    *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
-   *     只消费 `launchToken`、不创建 session。
+   *     先验 signed proof 的 digest 与 session/catalog 一致，再一次性消费
+   *     `launchToken`，不创建 session。
    *   - 借 owner capability 失败时 throw `export_owner_runtime_failed`；
    *     旧的 unlock-runtime handoff 描述已删除；这里只剩 session runtime
    *     bootstrap capability。
    *     已删除，不再向 Session Window 交接整套 vault unlock runtime。
    */
+  private resolveAppCatalog(
+    origin: string,
+    supplied?: AppIdentityProofV1,
+    appId?: string
+  ): { proof?: AppIdentityProofV1; snapshot?: AppIdentitySnapshot } {
+    const resolver = this.deps.getAppCatalogResolver?.() ?? this.deps.appCatalogResolver;
+    const resolution: AppCatalogResolution = resolver?.resolve(origin) ?? {
+      kind: "known-invalid",
+      reason: "local catalog resolver unavailable"
+    };
+    if (resolution.kind === "known-invalid") {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        `launchAppView: catalog app identity invalid (${resolution.reason})`
+      );
+    }
+    if (resolution.kind === "unknown") {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        "launchAppView: origin is not registered in local catalog"
+      );
+    }
+    if (resolution.appId !== undefined && resolution.appId !== appId) {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        "launchAppView: app id does not match local catalog"
+      );
+    }
+    let proof: AppIdentityProofV1 | undefined;
+    if (resolution.proof) {
+      try { verifyAppIdentityProof(resolution.proof); proof = resolution.proof; }
+      catch { throw new LaunchAppViewError("invalid_app_config", "launchAppView: invalid local app identity proof"); }
+    }
+    if (supplied && !proof) {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        "launchAppView: caller app identity cannot upgrade an app without local proof"
+      );
+    }
+    if (proof && supplied) {
+      try { verifyAppIdentityProof(supplied); } catch { throw new LaunchAppViewError("invalid_app_config", "launchAppView: invalid caller app identity proof"); }
+      const expectedDigest = identityDigestBytes(proof);
+      const suppliedDigest = identityDigestBytes(supplied);
+      if (expectedDigest.some((byte, index) => byte !== suppliedDigest[index])) {
+      throw new LaunchAppViewError(
+        "invalid_app_config",
+        "launchAppView: caller app identity does not match local catalog"
+      );
+      }
+    }
+    if (!proof) return {};
+    const snapshot = verifyAppIdentityProof(proof);
+    return { proof, snapshot };
+  }
+
+  /** requirements 是启动前置条件，不是 capability permission。 */
+  private assertAppRequirements(proof: AppIdentityProofV1 | undefined, keyReady: boolean): void {
+    if (!proof) return;
+    if (proof.requirements.includes("private-key") && !keyReady) {
+      throw new LaunchAppViewError(
+        "no_active_key",
+        "launchAppView: private key requirement is not ready"
+      );
+    }
+    if (proof.requirements.includes("storage")) {
+      const storage = this.deps.getStorageService?.() ?? this.deps.storageService;
+      if (!storage || storage.status() !== "ready") {
+        throw new LaunchAppViewError(
+          "requirement_unavailable",
+          "launchAppView: storage requirement is not ready"
+        );
+      }
+    }
+  }
+
+  private assertLoginRequirements(proof: AppIdentityProofV1, keyReady: boolean): void {
+    if (proof.requirements.includes("private-key") && !keyReady) {
+      throw localFailure(
+        "internal_error",
+        "connect.login: private key requirement is not ready"
+      );
+    }
+    if (proof.requirements.includes("storage")) {
+      const storage = this.deps.getStorageService?.() ?? this.deps.storageService;
+      if (!storage || storage.status() !== "ready") {
+        throw protocolError(
+          "storage_unavailable",
+          "connect.login: storage requirement is not ready"
+        );
+      }
+    }
+  }
+
   async launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult> {
     // 1) 校验入参基本完整性。
     if (
@@ -1870,24 +1971,11 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: appOrigin does not match appUrl.origin"
       );
     }
-    let appIdentity: AppIdentitySnapshot | undefined;
-    if (input.appIdentity) {
-      try {
-        appIdentity = verifyAppIdentityProof(input.appIdentity);
-      } catch {
-        throw new LaunchAppViewError("invalid_app_config", "launchAppView: invalid app identity proof");
-      }
-      // The launcher catalog entry is the authority for which app is being
-      // opened. A valid publisher signature alone is not sufficient: without
-      // this binding an app-b catalog entry could carry app-a's proof and be
-      // placed in app-a's storage namespace.
-      if (appIdentity.appId !== input.appId) {
-        throw new LaunchAppViewError(
-          "invalid_app_config",
-          "launchAppView: app identity does not match appId"
-        );
-      }
-    }
+    const catalog = this.resolveAppCatalog(input.appOrigin, input.appIdentity, input.appId);
+    // storage/catalog 门禁必须在 window.open 前完成。private-key 只需先确认
+    // caller 已提供非空公钥；实际 keyspace ready 查询放到预开 popup 后，
+    // 以保留浏览器 user-activation，失败会在 finally 关闭空白窗口。
+    this.assertAppRequirements(catalog.proof, true);
     if (typeof window === "undefined") {
       throw new LaunchAppViewError(
         "window_unavailable",
@@ -1928,9 +2016,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     let sessionWindowNavigated = false;
     try {
     // 5) 校验目标 key ready。
-    const key = this.deps.keyspace
-      ? await this.deps.keyspace.getKey(input.publicKeyHex)
-      : undefined;
+    let key;
+    try {
+      key = this.deps.keyspace ? await this.deps.keyspace.getKey(input.publicKeyHex) : undefined;
+    } catch {
+      key = undefined;
+    }
     if (!key || !key.publicKeyHex) {
       throw new LaunchAppViewError(
         "no_active_key",
@@ -1955,7 +2046,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       ownerLabel: key.label,
       claimsSnapshot: resolvedClaims,
-      ...(appIdentity ? { appIdentity } : {}),
+      ...(catalog.snapshot ? { appIdentity: catalog.snapshot } : {}),
       createdAt: now,
       lastUsedAt: now,
       revokedAt: null
@@ -2011,7 +2102,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       ownerPublicKeyHex: key.publicKeyHex,
       resolvedClaims: resolvedClaims as Record<string, unknown>,
       resolvedAt: now,
-      ...(appIdentity ? { appIdentity } : {}),
+      ...(catalog.snapshot ? { appIdentity: catalog.snapshot } : {}),
       launchToken,
       expiresAt: now + 24 * 60 * 60 * 1000,
       sessionRuntimeBootstrap
@@ -3814,7 +3905,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const service = this.currentStorageService();
     if (!service) throw protocolError("storage_unavailable", "Storage service is unavailable");
     const session = await this.requireConnectSession(rec, connectSessionId);
-    if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity");
+    if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
     return {
       service,
       context: { connectSessionId: session.sessionId, transportOrigin: rec.origin, appIdentity: session.appIdentity }
@@ -4351,7 +4442,17 @@ export class ProtocolServiceImpl implements ProtocolService {
     const resolvedClaims = resolveClaims(params.claims, (name) =>
       resolveBuiltinClaim(name, { activeKeyLabel: key.label })
     );
-    const appIdentity = params.appIdentity ? verifyAppIdentityProof(params.appIdentity) : undefined;
+    let appIdentity: AppIdentitySnapshot | undefined;
+    if (params.appIdentity) {
+      try {
+        verifyAppIdentityProof(params.appIdentity);
+        this.assertLoginRequirements(params.appIdentity, Boolean(key.publicKeyHex));
+        appIdentity = verifyAppIdentityProof(params.appIdentity);
+      } catch (error) {
+        if (error instanceof AppIdentityValidationError) throw localFailure("internal_error", error.message);
+        throw error;
+      }
+    }
     const now = Date.now();
     const sessionId = this.nextRecordId();
     const record: ConnectSessionRecord = {
@@ -4533,6 +4634,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (!params.launchToken) {
       throw protocolError("invalid_request", "connect.launch: missing launchToken");
     }
+    if (!params.appIdentity) {
+      throw protocolError("invalid_request", "connect.launch: appIdentity is required");
+    }
+    let suppliedIdentity: AppIdentitySnapshot;
+    try { suppliedIdentity = verifyAppIdentityProof(params.appIdentity); }
+    catch (error) { throw protocolError("invalid_request", error instanceof Error ? error.message : "connect.launch: invalid appIdentity"); }
     const record = this.launchTokensByToken.get(params.launchToken);
     if (!record) {
       throw localFailure("internal_error", "connect.launch: unknown launchToken");
@@ -4581,6 +4688,9 @@ export class ProtocolServiceImpl implements ProtocolService {
         "invalid_origin",
         "connect.launch: session origin mismatch"
       );
+    }
+    if (!session.appIdentity || session.appIdentity.identityDigestHex !== suppliedIdentity.identityDigestHex) {
+      throw protocolError("invalid_request", "connect.launch: appIdentity does not match launcher proof");
     }
     // 施工单 2026-06-30 002 硬切换：session 真值上不再带 runtime 来源；
     // `connect.launch` 校验的不是 `runtimeBinding`，而是

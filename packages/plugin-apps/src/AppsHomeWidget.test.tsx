@@ -12,7 +12,7 @@
 
 // @vitest-environment jsdom
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import {
   LaunchAppViewError,
@@ -27,6 +27,34 @@ import {
 import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { appsPlugin } from "./manifest.js";
+
+// 交互测试使用固定 signed proof fixture；实际占位 catalog 的 invalid 态由
+// catalog.test 校验，避免测试为了点击路径而放宽生产信任根。
+vi.mock("./catalog.js", async () => {
+  const actual = await vi.importActual<typeof import("./catalog.js")>("./catalog.js");
+  return {
+    ...actual,
+    loadCatalog: () => ({
+      ok: [{
+        id: "justnote",
+        name: "Justnote",
+        summary: "Encrypted notes powered by Keymaster.",
+        appOrigin: "https://justnote.apps.bsv8.com",
+        appUrl: "https://justnote.apps.bsv8.com/",
+        claims: [],
+        appIdentity: {
+          version: 1 as const,
+          publisherPublicKey: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+          app: { id: "justnote", name: "Justnote", description: "Encrypted notes." },
+          requirements: [] as ("private-key" | "storage")[],
+          signature: "607c8f550f7242c6a6d27e5cfdcc7d11791c49a9ac8067defd2b68dc3bd92ab7139bcff3a1b1afe9441dd4b12822a8a600a2e463084b076fc79027bacced1019"
+        }
+      }],
+      invalid: [],
+      duplicates: []
+    })
+  };
+});
 
 afterEach(() => {
   cleanup();
@@ -130,6 +158,7 @@ describe("AppsHomeWidget - 点击启动", () => {
     expect(handle.service.launchAppViewCalls.length).toBe(1);
     expect(handle.service.launchAppViewCalls[0]).toEqual({
       appId: "justnote",
+      appIdentity: expect.any(Object),
       appOrigin: "https://justnote.apps.bsv8.com",
       appUrl: "https://justnote.apps.bsv8.com/",
       claims: [],

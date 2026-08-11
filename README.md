@@ -12,7 +12,7 @@ plugin-background   通用后台任务平台（注册、调度、去重、暂停
 plugin-p2pkh        P2PKH 资产实现（两类后台任务 recent-sync / history-backfill、reservation、Transfer Widget）
 plugin-transfer     Transfer 平台（列 Offer，挂载 provider Widget，不解释 P2PKH/UTXO/地址/金额）
 plugin-poker        浏览器原生扑克（与外部 poker-proxy 通信，本地签名 / 验签）
-plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 app，在当前 Keymaster 窗口作为 launcher 发起 appView Session Window（首个 app = https://justnote.apps.bsv8.com/）
+plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 app，以本地签名 App proof 做启动门禁并发起 appView Session Window
 ```
 
 ### 不变量
@@ -26,6 +26,13 @@ plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 
 - plugin-poker 不持有私钥 / 明文种子 / 长期签名材料；只通过 `vault.withPrivateKey` 闭包签名。
 - plugin-poker 不直接 import 其它 plugin-* 内部实现；只走 contracts capability。
 - poker-proxy 与 plugin-poker 的内部浏览器协议有版本号（`POKER_BROWSER_PROTOCOL_VERSION`）；不匹配时立即断连，不进入半可用状态。
+- App 发行信息与固定 proof 以入口 HTML meta 为唯一手写真值；
+  `keymaster.app.json` 只用于把同一 proof 人工导入 launcher catalog，Keymaster 不从
+  App 仓库或部署站点 fetch 它。
+- Direct `connect.login` 必须验签 App 从 HTML 提交的可选 `appIdentity`；无 proof
+  只能建立普通非 Storage session。`connect.launch` 必须同时提交 token 和 proof，且
+  proof 必须匹配 launcher catalog/session 绑定值。requirements 在 session 可用前
+  fail closed。详见 [App Identity Proof V1](docs/app-metadata-v1.md)。
 
 ### Key 身份与 namespace（硬切换 002 收尾）
 
@@ -124,4 +131,3 @@ npm run build
 - `plugin-poker` 不 import 任何其它 plugin-*；不 import apps/web shell；
   engine/ 与 tsstack/ 不接 runtime / ui；tsstack/ 不接任何其它 plugin-*；
   代码里不允许硬编码 `new WebSocket("wss://…")`（必须从 service.settings 读）。
-

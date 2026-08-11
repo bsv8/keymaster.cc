@@ -74,13 +74,14 @@ popup 在 V1 不再仅是"第三方站点拉起的窗口"，而是统一为 **Se
 
 Keymaster 内部 `plugin-apps` 是 `appView` mode 的**唯一**业务调用方。app 启动链路：
 
-- `plugin-apps` 读取本地 `appsCatalog.json`（包含 `justnote` 与 `demo` 两 app），在 `/apps` 页面与首页 widget 展示 app 卡片；
+- `plugin-apps` 读取本地 catalog。每个可启动条目必须带发行人手工导入的、已验签
+  `AppIdentityProofV1`；缺失或无效 proof 的条目只显示为禁用，不得启动；
 - 用户点击 `Open App` 时，`plugin-apps` **只**调 `protocol.service.launchAppView(input)`，自己**不**直接 import `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL；
 - `protocol.service.launchAppView(...)` 内部一次性收口整套 launcher 流程：
   1. 校验 vault 已解锁、active key ready、owner key 有 vault keyId；
-  2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
-  3. 解析 claims 快照；
-  4. **预建 connect session**（session 真值三元组，无 `runtimeBinding` 字段）；
+  2. 校验 app URL/origin，并验证 catalog identity proof 与 requirements；
+  3. 解析 claims 和 proof digest 快照；
+  4. **预建 connect session**（绑定 origin、owner 与 proof digest，无 `runtimeBinding` 字段）；
   5. 调 `vault.withPrivateKey(keyId, fn)` 借出 owner 私钥 hex，组装 `OwnerRuntimeBootstrap`；
   6. 生成新 `launchToken`；
   7. 组装 `AppBootstrapPayload`（含 `ownerRuntimeBootstrap`）；
@@ -88,7 +89,8 @@ Keymaster 内部 `plugin-apps` 是 `appView` mode 的**唯一**业务调用方�
   9. `window.open("/protocol/v1/popup?boot=appView&bootstrapToken=...")` 打开 Session Window。
 - 任何一道闸失败：抛错 `LaunchAppViewError.code`，**不**补偿、**不**回退、**不**做"半启动"。
 - `connect.launch` 与 `connect.login` / `connect.resume` 三者边界：
-  - `connect.launch` **只**消费 launchToken；它**不**创建 session。
+  - `connect.launch` 携带 App 从自身 HTML meta 读取的 identity proof；只有验签成功且
+    proof digest 与预建 session 完全一致后才消费 launchToken。它**不**创建 session。
   - 真正"创建 connect session"的时机是 launcher 点击 `Open App` 时（即 `protocol.service.launchAppView(...)` 内部），不是等 client app 发 `connect.launch`。
   - `plugin-apps` **不**自己直接 import / 调 `protocolStorageDb` / `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` / `window.open` popup URL——所有这些细节都收口在 `protocol.service.launchAppView(...)` 内部。
 - 借 owner 私钥 hex 失败抛 `export_owner_runtime_failed`（中间态 `export_session_signer_failed` 已撤销）。
@@ -1033,8 +1035,9 @@ sessionId + origin + ownerPublicKeyHex
 - 把 `bootstrap_owner` / `vault_unlock` 来源的差异泄漏到 session
   schema / 业务分支 / 协议文档。
 
-> Connect Storage 的 namespace 由 verified App Identity 的 publisher 公钥与 app id
-> 决定；caller 不能在 method params 中覆盖 namespace、Provider 或凭据字段。
+> Connect Storage 的 namespace 由 session 中已验证 App identity proof 快照的
+> publisher 公钥与 app id 决定；caller 不能在 method params 中覆盖
+> namespace、Provider 或凭据字段。
 
 `protocolStorageDb` 现行 version 9：v8 → v9 物理删除历史
 `storageProviderConfig` store；新的 Provider 配置只在独立 `keymaster.storage`

@@ -100,7 +100,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_origin": "The request origin does not match the declared aud.",
       "protocol.error.decrypt_failed": "Decryption failed.",
       "protocol.error.storage_unavailable": "Storage is unavailable.",
-      "protocol.error.storage_identity_required": "This session has no verified app identity for storage.",
+      "protocol.error.storage_identity_required": "This session has no local catalog metadata snapshot for storage.",
       "protocol.error.storage_invalid_path": "The storage path is invalid.",
       "protocol.error.storage_invalid_upload": "The storage upload is invalid or expired.",
       "protocol.error.storage_limit_exceeded": "The storage request exceeds its limit.",
@@ -288,7 +288,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.error.invalid_origin": "请求来源与声明的 aud 不一致。",
       "protocol.error.decrypt_failed": "解密失败。",
       "protocol.error.storage_unavailable": "Storage 当前不可用。",
-      "protocol.error.storage_identity_required": "当前会话没有经过验证的 App Identity，不能使用 Storage。",
+      "protocol.error.storage_identity_required": "当前会话没有已验证的 App identity proof snapshot，不能使用 Storage。",
       "protocol.error.storage_invalid_path": "Storage 路径不合法。",
       "protocol.error.storage_invalid_upload": "Storage 上传无效或已过期。",
       "protocol.error.storage_limit_exceeded": "Storage 请求超过限制。",
@@ -546,6 +546,13 @@ export const protocolPlugin: PluginManifest = {
         },
         p2pkhService: p2pkhService as never,
         appMsgCore,
+        getAppCatalogResolver: () => {
+          try {
+            return ctx.get<import("@keymaster/contracts").AppCatalogResolver>("app.catalog");
+          } catch {
+            return undefined;
+          }
+        },
         // 施工单 2026-06-29 001：从 URL `?boot=appView` 解析当前模式。
         // 仅在 popup 挂载时解析一次；session 启动后不再变动。
         bootMode: typeof window !== "undefined" ? parseBootMode(window.location.search) : "connect",

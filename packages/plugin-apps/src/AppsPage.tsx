@@ -64,6 +64,8 @@ function errorMessageKey(code: LaunchAppViewErrorCode | null): string {
       return "apps.open.error.noActiveKey";
     case "invalid_app_config":
       return "apps.open.error.invalidAppConfig";
+    case "requirement_unavailable":
+      return "apps.open.error.requirementUnavailable";
     case "window_unavailable":
       return "apps.open.error.windowUnavailable";
     case "session_storage_unavailable":
@@ -110,7 +112,7 @@ export function AppsPage() {
         appOrigin: launchEntry.appOrigin,
         appUrl: launchEntry.appUrl,
         claims: launchEntry.claims,
-        ...(launchEntry.appIdentity ? { appIdentity: launchEntry.appIdentity } : {}),
+        appIdentity: launchEntry.appIdentity,
         publicKeyHex: input.publicKeyHex,
         password: input.password
       });

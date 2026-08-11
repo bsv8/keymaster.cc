@@ -1045,7 +1045,7 @@ export interface ConnectSessionRecord {
   lastUsedAt: number;
   /** 吊销时间；null = 未吊销。 */
   revokedAt: number | null;
-  /** Optional immutable publisher/app identity snapshot. Old sessions omit it. */
+  /** Keymaster 本地 catalog metadata 信任快照；digest 是稳定指纹而非签名证明。 */
   appIdentity?: AppIdentitySnapshot;
 }
 
@@ -1072,7 +1072,7 @@ export interface ConnectLoginParams {
    * 缺省 = `[]`，不返回任何 claim；通常 caller 想获取 profile.* 时必须显式列出。
    */
   claims?: string[];
-  /** Signed publisher/app identity. Omission preserves legacy non-Storage Connect. */
+  /** 发布者签名的 caller identity proof；缺省时建立无 storage 的普通 session。 */
   appIdentity?: AppIdentityProofV1;
 }
 
@@ -1216,6 +1216,8 @@ export interface ProtocolConnectAuthSnapshot {
 export interface ConnectLaunchParams {
   /** 由 launcher 写入 client app 启动 URL 的 launchToken。一次性消费。 */
   launchToken: string;
+  /** 与 launcher 预建 session 绑定的完整签名 proof。 */
+  appIdentity: AppIdentityProofV1;
 }
 
 /** `connect.launch` 成功结果（与 `connect.login` 对齐）。 */
@@ -1444,8 +1446,8 @@ export interface LaunchAppViewInput {
    * 同语义。V1 不传时取空数组。
    */
   claims?: string[];
-  /** Optional signed identity forwarded by the app launcher. */
-  appIdentity?: AppIdentityProofV1;
+  /** launcher 从本地 catalog 绑定的签名 proof；调用方不能自报覆盖。 */
+  appIdentity: AppIdentityProofV1;
 }
 
 /**
@@ -1491,6 +1493,8 @@ export type LaunchAppViewErrorCode =
   | "no_active_key"
   /** app 配置非法（appUrl 非法 / appOrigin 与 appUrl 不一致）。 */
   | "invalid_app_config"
+  /** catalog metadata requirement 未满足（例如 Storage 尚未 ready）。 */
+  | "requirement_unavailable"
   /** 当前运行环境不支持 window / window 不可用。 */
   | "window_unavailable"
   /** connect session 存储不可用。 */
@@ -2789,7 +2793,8 @@ export interface ProtocolService {
    *   - 任何一道闸失败：throw，**不**补偿、**不**回退、**不**做"半启动"。
    *     `plugin-apps` 必须以"打开失败就失败"语义收口。
    *   - session 在 launcher 点击 `Open App` 时**预建**；`connect.launch`
-   *     只消费 `launchToken`、不创建 session。
+   *     先验 signed proof 的 digest 与 session/catalog 一致，再一次性消费
+   *     `launchToken`，不创建 session。
    */
   launchAppView(input: LaunchAppViewInput): Promise<LaunchAppViewResult>;
 

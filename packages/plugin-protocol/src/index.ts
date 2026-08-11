@@ -28,13 +28,6 @@ export {
   CIPHER_CONTEXT_V1
 } from "./protocolCrypto.js";
 export {
-  verifyAppIdentityProof,
-  canonicalizeJson,
-  identityDigestBytes,
-  AppIdentityValidationError,
-  APP_IDENTITY_DOMAIN_V1
-} from "./appIdentity.js";
-export {
   buildClaimProjection,
   buildClaimProjectionFromParams,
   resolveClaims,
@@ -44,4 +37,13 @@ export {
   type CborProjectionEntry
 } from "./protocolClaims.js";
 export { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
+export {
+  APP_IDENTITY_DOMAIN_V1,
+  AppIdentityValidationError,
+  canonicalizeJson,
+  identityDigestBytes,
+  identityPayload,
+  isVerifiedAppIdentitySnapshot,
+  verifyAppIdentityProof
+} from "./appIdentity.js";
 export type { FeepoolPendingOp } from "./feepoolOperations.js";
