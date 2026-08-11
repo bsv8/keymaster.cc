@@ -9,7 +9,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createP2pkhDb, disposeP2pkhDb, namespaceDbName, openP2pkhDb, type P2pkhDbHandle } from "./p2pkhDb.js";
-import type { P2pkhKeyResource } from "./p2pkhContracts.js";
+import type { P2pkhKeyResource, P2pkhProtocolSubmission } from "./p2pkhContracts.js";
 import type { KeyScopedStorageHandle, KeyspaceService } from "@keymaster/contracts";
 
 const ACTIVE_PUBLIC_KEY_HEX = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -196,7 +196,8 @@ describe("p2pkhDb v8 stores", () => {
       "p2pkh_history_backfill",
       "p2pkh_recent_sync",
       "p2pkh_local_submissions",
-      "p2pkh_local_input_claims"
+      "p2pkh_local_input_claims",
+      "p2pkh_protocol_submissions"
     ];
     for (const name of required) {
       expect(raw.objectStoreNames.contains(name), `missing store: ${name}`).toBe(true);
@@ -457,6 +458,35 @@ describe("p2pkhDb commitBackfillPage", () => {
 });
 
 describe("p2pkhDb commitRecentSnapshot", () => {
+  it("commits the protocol-submission reconciliation produced by every recent sync", async () => {
+    const db = await openDb();
+    const r = makeResource();
+    await db.putAddress(r);
+    const submission: P2pkhProtocolSubmission = {
+      id: "protocol-submission-1",
+      submissionId: "protocol-submission-1",
+      resourceId: r.resourceId,
+      publicKeyHex: r.publicKeyHex,
+      network: r.network,
+      canonicalTxid: "a".repeat(64),
+      inputs: [{ txid: "b".repeat(64), vout: 0 }],
+      protectedClaimIds: [],
+      localInputClaimIds: [],
+      status: "woc-observed-unconfirmed",
+      observation: "unconfirmed",
+      createdAt: "2024-01-01T00:00:00.000Z",
+      updatedAt: "2024-01-01T00:00:00.000Z"
+    };
+
+    await db.commitRecentSnapshot({
+      resourceId: r.resourceId,
+      resource: r,
+      protocolSubmissions: [submission]
+    });
+
+    await expect(db.listProtocolSubmissionsByResource(r.resourceId)).resolves.toEqual([submission]);
+  });
+
   it("replaces UTXOs per resource and uses correct network (no balance write)", async () => {
     const db = await openDb();
     const r = makeResource();

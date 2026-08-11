@@ -970,7 +970,8 @@ export function createP2pkhDb(handle: P2pkhDbBundle) {
           "p2pkh_history",
           "p2pkh_recent_sync",
           "p2pkh_local_input_claims",
-          "p2pkh_local_submissions"
+          "p2pkh_local_submissions",
+          "p2pkh_protocol_submissions"
         ],
         "readwrite",
         async (t) => {
