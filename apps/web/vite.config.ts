@@ -1,56 +1,26 @@
 import react from "@vitejs/plugin-react";
-import { execFileSync } from "node:child_process";
+import appPackage from "../../package.json";
 import { defineConfig } from "vite";
 
-function readGit(args: string[], fallback: string): string {
-  try {
-    return execFileSync("git", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim() || fallback;
-  } catch {
-    return fallback;
-  }
+const appVersion = appPackage.version;
+
+function injectAppVersionMeta(): { name: string; transformIndexHtml: (html: string) => string } {
+  return {
+    name: "keymaster-version-meta",
+    transformIndexHtml(html) {
+      return html.replace(
+        /(<meta name="keymaster:version" content=")[^"]*("\s*\/>)/,
+        `$1${appVersion}$2`
+      );
+    }
+  };
 }
-
-function githubCommitUrl(remote: string, revision: string): string {
-  const match = remote.match(/(?:github\.com[/:])([^/]+\/[^/.]+)(?:\.git)?$/);
-  return match && revision !== "unknown" ? `https://github.com/${match[1]}/commit/${revision}` : "";
-}
-
-function normalizeBranch(value: string): string {
-  return value.trim().replace(/^refs\/heads\//, "").replace(/^origin\//, "");
-}
-
-function readGitBranch(): string {
-  const ciBranch = process.env.GITHUB_HEAD_REF || process.env.GITHUB_REF_NAME || process.env.VERCEL_GIT_COMMIT_REF || process.env.CI_COMMIT_REF_NAME;
-  if (ciBranch) return normalizeBranch(ciBranch);
-
-  const checkedOutBranch = normalizeBranch(readGit(["branch", "--show-current"], ""));
-  if (checkedOutBranch) return checkedOutBranch;
-
-  // CI 常以 detached HEAD 构建；依次尝试 origin 默认分支与包含当前提交的远端分支。
-  const originHead = normalizeBranch(readGit(["symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"], ""));
-  if (originHead) return originHead;
-  const containingBranch = readGit(["branch", "-r", "--contains", "HEAD"], "")
-    .split("\n")
-    .map((branch) => normalizeBranch(branch.replace(/^\*\s*/, "")))
-    .find(Boolean);
-  return containingBranch || "main";
-}
-
-const gitBranch = readGitBranch();
-const gitRevision = readGit(["rev-parse", "--short", "HEAD"], "unknown");
-const gitRevisionFull = readGit(["rev-parse", "HEAD"], "unknown");
-const gitRemote = readGit(["remote", "get-url", "origin"], "");
 
 export default defineConfig({
   // 应用使用 history 路由。资源必须从站点根路径加载；相对 URL 会在
   // `/settings/system-status` 等深层路由被解析为 `/settings/_static/*`。
   base: "/",
-  plugins: [react()],
-  define: {
-    __KEYMASTER_GIT_BRANCH__: JSON.stringify(gitBranch),
-    __KEYMASTER_GIT_REVISION__: JSON.stringify(gitRevision),
-    __KEYMASTER_GIT_COMMIT_URL__: JSON.stringify(githubCommitUrl(gitRemote, gitRevisionFull))
-  },
+  plugins: [react(), injectAppVersionMeta()],
   build: {
     // 设计缘由：
     //   - 应用本身已经占用了业务路由 `/assets`（plugin-assets）。

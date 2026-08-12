@@ -6,19 +6,16 @@
 //   - 这类信息变更频率低，但影响范围跨两套 shell；
 //   - 提取成共享组件后，后续只需改一个地方。
 
-import { AppLink } from "@keymaster/runtime";
-
 export interface SiteFooterProps {
   variant?: "onboarding" | "app";
 }
 
 export function SiteFooter({ variant = "app" }: SiteFooterProps) {
-  // Vite replaces these constants in production builds. Unit tests import the
-  // component directly, so keep the footer renderable when that replacement is
-  // intentionally absent.
-  const gitBranch = typeof __KEYMASTER_GIT_BRANCH__ === "string" ? __KEYMASTER_GIT_BRANCH__ : "unknown";
-  const gitRevision = typeof __KEYMASTER_GIT_REVISION__ === "string" ? __KEYMASTER_GIT_REVISION__ : "unknown";
-  const gitCommitUrl = typeof __KEYMASTER_GIT_COMMIT_URL__ === "string" ? __KEYMASTER_GIT_COMMIT_URL__ : "";
+  // The app version is fixed in the entry HTML so it does not change the
+  // footer layout with branch or commit-name lengths.
+  const version = typeof document !== "undefined"
+    ? document.querySelector('meta[name="keymaster:version"]')?.getAttribute("content") || "unknown"
+    : "unknown";
   return (
     <footer className={`site-footer site-footer--${variant}`}>
       <div className="site-footer__content">
@@ -39,23 +36,7 @@ export function SiteFooter({ variant = "app" }: SiteFooterProps) {
         <span className="site-footer__separator" aria-hidden="true">
           /
         </span>
-        <span>git {gitBranch}</span>
-        <span className="site-footer__separator" aria-hidden="true">
-          /
-        </span>
-        {gitCommitUrl ? (
-          <AppLink
-            className="site-footer__link"
-            to={gitCommitUrl}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`Open commit ${gitRevision} on GitHub`}
-          >
-            {gitRevision}
-          </AppLink>
-        ) : (
-          <span>{gitRevision}</span>
-        )}
+        <span>v{version}</span>
       </div>
     </footer>
   );
