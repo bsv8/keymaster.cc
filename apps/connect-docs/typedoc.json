@@ -11,6 +11,7 @@
   "excludePrivate": true,
   "excludeProtected": true,
   "excludeInternal": true,
+  "disableSources": true,
   "includeVersion": true,
   "categorizeByGroup": true,
   "sort": ["source-order"],

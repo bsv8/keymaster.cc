@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { withBase } from "vitepress";
+
+const sourceUrl = __CONNECT_SOURCE_URL__;
+
 const capabilities = [
   ["Identity", "Authenticate users and issue signed claims", "identity.get"],
   ["Cryptography", "Sign intent and encrypt origin-bound data", "intent.sign · cipher.*"],
@@ -30,8 +34,8 @@ const capabilities = [
           storage, and payment capabilities from Keymaster.
         </p>
         <div class="hero-actions">
-          <a class="primary-action" href="/guide/getting-started">Start integrating <span>→</span></a>
-          <a class="secondary-action" href="/api/">Read the API</a>
+          <a class="primary-action" :href="withBase('/guide/getting-started')">Start integrating <span>→</span></a>
+          <a class="secondary-action" :href="withBase('/api/')">Read the API</a>
         </div>
         <div class="install-line" aria-label="Install package">
           <span class="prompt">$</span>
@@ -49,7 +53,7 @@ const capabilities = [
         <p>Every business request is bound to the identity and origin chosen for the Connect session.</p>
       </div>
       <div class="capability-list">
-        <a v-for="([title, detail, methods], index) in capabilities" :key="title" href="/guide/capabilities" class="capability-row">
+        <a v-for="([title, detail, methods], index) in capabilities" :key="title" :href="withBase('/guide/capabilities')" class="capability-row">
           <span class="row-number">0{{ index + 1 }}</span>
           <strong>{{ title }}</strong>
           <span class="row-detail">{{ detail }}</span>
@@ -88,8 +92,8 @@ const capabilities = [
       <h2>The API is the SDK.<br>No documentation adapter in between.</h2>
       <p>Every reference page is generated directly from the package exports developers install.</p>
       <div class="final-actions">
-        <a class="primary-action" href="/guide/getting-started">Open the guide <span>→</span></a>
-        <a class="secondary-action" href="https://github.com/bsv8/keymaster.cc/tree/main/packages/connect">View source</a>
+        <a class="primary-action" :href="withBase('/guide/getting-started')">Open the guide <span>→</span></a>
+        <a v-if="sourceUrl" class="secondary-action" :href="sourceUrl">View source</a>
       </div>
     </section>
   </main>

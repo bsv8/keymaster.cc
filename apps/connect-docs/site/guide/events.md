@@ -5,7 +5,7 @@ Session Window remains connected.
 
 ```ts
 const keymaster = new KeymasterConnectClient({
-  targetOrigin: "https://keymaster.cc",
+  targetOrigin: keymasterDeploymentOrigin,
   onEvent(event) {
     switch (event.event) {
       case "appmsg.message_received":

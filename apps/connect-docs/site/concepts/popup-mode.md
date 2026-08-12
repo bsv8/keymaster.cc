@@ -4,7 +4,7 @@ Popup mode is the default for independently hosted web applications.
 
 ```ts
 const keymaster = new KeymasterConnectClient({
-  targetOrigin: "https://keymaster.cc",
+  targetOrigin: keymasterDeploymentOrigin,
   mode: "popup"
 });
 ```

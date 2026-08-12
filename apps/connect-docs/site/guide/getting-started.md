@@ -18,13 +18,18 @@ not send private material to your application.
 ```ts
 import { KeymasterConnectClient } from "@keymaster/connect";
 
+// Supplied by this application's deployment configuration.
+const keymasterDeploymentOrigin = getRequiredConfig("KEYMASTER_ORIGIN");
+
 const keymaster = new KeymasterConnectClient({
-  targetOrigin: "https://keymaster.cc"
+  targetOrigin: keymasterDeploymentOrigin
 });
 ```
 
 `targetOrigin` is normalized once and then used for every `postMessage` target
-and origin check. Paths, query strings, and fragments are ignored.
+and origin check. Paths, query strings, and fragments are ignored. The SDK has
+no built-in Keymaster hostname: each deployment explicitly chooses the exact
+wallet origin it trusts.
 
 ## Log in
 

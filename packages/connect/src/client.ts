@@ -78,7 +78,7 @@ export interface KeymasterBrowserEnvironment {
 
 /** Configuration for {@link KeymasterConnectClient}. */
 export interface KeymasterConnectOptions {
-  /** Exact Keymaster deployment origin, for example `https://keymaster.cc`. */
+  /** Exact Keymaster deployment origin supplied by the host application. */
   targetOrigin: string;
   /** `popup` for direct integrations; `appView` for apps launched by Keymaster. */
   mode?: KeymasterConnectMode;
@@ -127,7 +127,7 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * @example Direct popup login
  * ```ts
  * const keymaster = new KeymasterConnectClient({
- *   targetOrigin: "https://keymaster.cc"
+ *   targetOrigin: keymasterDeploymentOrigin
  * });
  *
  * const session = await keymaster.login({

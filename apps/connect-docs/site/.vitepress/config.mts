@@ -1,10 +1,24 @@
 import { defineConfig } from "vitepress";
 import typedocSidebar from "../api/typedoc-sidebar.json";
 
+function normalizeBasePath(input: string | undefined): string {
+  const value = input?.trim().replace(/^\/+|\/+$/g, "") ?? "";
+  if (!value) return "/";
+  return `/${value}/`;
+}
+
+const base = normalizeBasePath(process.env.DOCS_BASE);
+const repositoryUrl = process.env.DOCS_REPOSITORY_URL?.trim().replace(/\/+$/, "") ?? "";
+const repositoryBranch = process.env.DOCS_REPOSITORY_BRANCH?.trim() || "main";
+const sourceUrl = repositoryUrl
+  ? `${repositoryUrl}/tree/${encodeURIComponent(repositoryBranch)}/packages/connect`
+  : "";
+
 export default defineConfig({
   lang: "en-US",
   title: "Keymaster Connect",
   description: "Type-safe browser capabilities for identity, cryptography, messaging, storage, and payments.",
+  base,
   appearance: "dark",
   cleanUrls: true,
   lastUpdated: true,
@@ -60,18 +74,23 @@ export default defineConfig({
         detailedView: true
       }
     },
-    socialLinks: [
-      { icon: "github", link: "https://github.com/bsv8/keymaster.cc" }
-    ],
-    editLink: {
-      pattern: "https://github.com/bsv8/keymaster.cc/edit/main/apps/connect-docs/site/:path",
-      text: "Edit this page on GitHub"
-    },
+    socialLinks: repositoryUrl ? [{ icon: "github", link: repositoryUrl }] : [],
+    ...(repositoryUrl ? {
+      editLink: {
+        pattern: `${repositoryUrl}/edit/${encodeURIComponent(repositoryBranch)}/apps/connect-docs/site/:path`,
+        text: "Edit this page on GitHub"
+      }
+    } : {}),
     outline: { level: [2, 3], label: "On this page" },
     docFooter: { prev: "Previous", next: "Next" },
     footer: {
       message: "Capability access without key custody.",
       copyright: "Keymaster Connect"
+    }
+  },
+  vite: {
+    define: {
+      __CONNECT_SOURCE_URL__: JSON.stringify(sourceUrl)
     }
   }
 });
