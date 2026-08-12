@@ -503,6 +503,11 @@ body {
 }
 
 @media (max-width: 700px) {
+  .capability-map-page .vp-doc table {
+    display: block;
+    overflow-x: auto;
+  }
+
   .hero-copy {
     width: calc(100% - 40px);
     margin: 0 20px;
