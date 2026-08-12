@@ -104,6 +104,9 @@ dist
 # vitepress cache directory
 **/.vitepress/cache
 
+# TypeDoc output consumed by the Connect VitePress site
+/apps/connect-docs/site/api/
+
 # Docusaurus cache and generated files
 .docusaurus
 

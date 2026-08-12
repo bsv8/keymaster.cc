@@ -1,0 +1,32 @@
+{
+  "name": "@keymaster/connect",
+  "version": "0.1.0",
+  "description": "Official browser SDK for the Keymaster Connect V1 protocol",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. packages/connect/src"
+  },
+  "devDependencies": {
+    "@keymaster/contracts": "workspace:*",
+    "tsup": "8.5.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

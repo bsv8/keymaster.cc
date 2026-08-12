@@ -19,7 +19,9 @@
     "test": "pnpm lint:react-boundaries && node scripts/run-vitest-batches.mjs",
     "test:storage:smoke": "vitest run --config vitest.storage-smoke.config.ts",
     "test:e2e": "playwright test",
-    "test:e2e:report": "playwright show-report"
+    "test:e2e:report": "playwright show-report",
+    "docs:connect:dev": "pnpm --filter @keymaster/connect-docs dev",
+    "docs:connect:build": "pnpm --filter @keymaster/connect-docs build"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",

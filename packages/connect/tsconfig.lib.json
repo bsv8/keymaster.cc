@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false
+  },
+  "include": [
+    "src/index.ts",
+    "src/client.ts",
+    "src/binary.ts"
+  ],
+  "exclude": ["src/**/*.test.ts"]
+}

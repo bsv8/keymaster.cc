@@ -3,6 +3,7 @@
   "references": [
     { "path": "./apps/web" },
     { "path": "./packages/contracts" },
+    { "path": "./packages/connect" },
     { "path": "./packages/runtime" },
     { "path": "./packages/ui" },
     { "path": "./packages/plugin-vault" },

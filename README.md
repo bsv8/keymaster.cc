@@ -54,6 +54,7 @@ plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 
 
 ```txt
 packages/
+  connect/          官方 Connect 浏览器 SDK
   contracts/        跨包协议（woc/background/topbar/transfer/poker/...）
   runtime/          plugin host + 内置 registry（含 topbar）
   ui/               原子组件
@@ -70,6 +71,7 @@ packages/
   plugin-woc/       WOC 基础设施
   plugin-background/  后台任务平台
 apps/web/           装配 + shell
+apps/connect-docs/  @keymaster/connect SDK 文档站（VitePress + TypeDoc）
 scripts/            check-boundaries.mjs
 ```
 
@@ -108,6 +110,7 @@ npm run typecheck
 npm run lint:boundaries
 npm run dev       # vite
 npm run build
+pnpm --filter @keymaster/connect-docs build
 ```
 
 ## 数据真值语义
