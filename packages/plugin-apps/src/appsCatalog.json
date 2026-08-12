@@ -19,12 +19,14 @@
     "appIdentity": {"app":{"description":"Keymaster Connect V1 外部调用方 demo，验证 identity.get、intent.sign、cipher.encrypt、cipher.decrypt。","id":"keymaster-connect-demo","name":"Keymaster Connect Demo"},"publisherPublicKey":"032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30","requirements":["private-key","storage"],"signature":"ac1d19a29d0ce1039f3f4ef4c3c8f6a2175c346a41e81837fa0f5b57e77880dc0d8198635bdbc137250c254cbe35486b2a859620273c5df4e839760a08736981","version":1}
   },
   {
-    "id": "s3disk",
-    "name": "S3Disk",
+    "id": "keymaster-connect-disk",
+    "name": "Keymaster Connect Disk",
     "summary": "Multi-storage cloud disk powered by Keymaster.",
     "appOrigin": "https://s3disk.apps.bsv8.com",
     "appUrl": "https://s3disk.apps.bsv8.com/",
     "claims": [],
-    "icon": "/app-icons/s3disk.svg"
+    "icon": "/app-icons/s3disk.svg",
+    "appIdentity": {"app":{"description":"A cloud disk powered by the Keymaster Connect SDK","id":"keymaster-connect-disk","name":"Keymaster Connect Disk"},"publisherPublicKey":"032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30","requirements":["private-key","storage"],"signature":"4e16a5d4c749bfa600909ae18be0ce282169260c5b1869adb2bc5ab880a5c804465886b6d0851742767744aed24e766e2cc0d9e9745e93e6f60591b633681dee","version":1}
+
   }
 ]
