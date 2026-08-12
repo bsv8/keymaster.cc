@@ -1,7 +1,9 @@
 # Call capabilities
 
-`request(method, params)` is the canonical SDK operation. Its generic mapping is
-derived from the same protocol contracts used by Keymaster.
+The client exposes a named method for every capability below. Each method's
+parameter and result types come from the same protocol contracts used by
+Keymaster. Use `request(method, params)` when the lower-level wire method name
+is more convenient.
 
 ## Identity and intent
 
@@ -68,5 +70,7 @@ buckets, and physical object keys are never exposed to the caller.
 Payment confirmation text and policy are controlled by Keymaster, not by the
 calling application.
 
-See the complete [method parameter map](/api/interfaces/MethodParamsMap) and
+See every named operation on
+[KeymasterConnectClient](/api/classes/KeymasterConnectClient), or inspect the
+lower-level [method parameter map](/api/interfaces/MethodParamsMap) and
 [result map](/api/interfaces/MethodResultMap).

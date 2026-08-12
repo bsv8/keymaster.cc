@@ -1,17 +1,62 @@
 import {
   PROTOCOL_VERSION,
+  type AppMsgGetParams,
+  type AppMsgGetResult,
+  type AppMsgListParams,
+  type AppMsgListResult,
+  type AppMsgMessageReceivedEventData,
+  type AppMsgSendParams,
+  type AppMsgSendResult,
+  type BroadcastMessageReceivedEventData,
+  type BroadcastPublishParams,
+  type BroadcastPublishResult,
+  type BroadcastSubscriptionListParams,
+  type BroadcastSubscriptionListResult,
+  type BroadcastSubscriptionSetParams,
+  type BroadcastSubscriptionSetResult,
+  type CipherDecryptParams,
+  type CipherDecryptResult,
+  type CipherEncryptParams,
+  type CipherEncryptResult,
   type ConnectLaunchParams,
   type ConnectLaunchResult,
   type ConnectLoginParams,
   type ConnectLoginResult,
   type ConnectLogoutResult,
   type ConnectResumeResult,
+  type FeepoolCommitParams,
+  type FeepoolCommitResult,
+  type FeepoolPrepareParams,
+  type FeepoolPrepareResult,
+  type IdentityGetParams,
+  type IdentityGetResult,
+  type IntentSignParams,
+  type IntentSignResult,
   type MethodParams,
   type MethodResult,
+  type P2pkhTransferParams,
+  type P2pkhTransferResult,
   type ProtocolErrorCode,
   type ProtocolEventMessage,
   type ProtocolMethod,
-  type ProtocolResultMessage
+  type ProtocolResultMessage,
+  type StorageDeleteParams,
+  type StorageDeleteResult,
+  type StorageDirectoryParams,
+  type StorageDirectoryResult,
+  type StorageGetParams,
+  type StorageGetResult,
+  type StorageListParams,
+  type StorageListResult,
+  type StoragePutParams,
+  type StoragePutResult,
+  type StorageUploadAbortParams,
+  type StorageUploadAbortResult,
+  type StorageUploadBeginParams,
+  type StorageUploadBeginResult,
+  type StorageUploadCompleteParams,
+  type StorageUploadPartParams,
+  type StorageUploadPartResult
 } from "@keymaster/contracts/connect-public";
 
 /** How the SDK obtains its Keymaster Session Window. */
@@ -94,7 +139,12 @@ export interface KeymasterConnectOptions {
   requestTimeoutMs?: number;
   /** Session Window close detection interval. Defaults to 500ms. */
   closePollMs?: number;
-  /** Receives app message and broadcast server-pushed events. */
+  /**
+   * Receives `appmsg.message_received` and `broadcast.message_received`
+   * server-pushed events. Their payloads are respectively
+   * {@link AppMsgMessageReceivedEventData} and
+   * {@link BroadcastMessageReceivedEventData}.
+   */
   onEvent?: (event: ProtocolEventMessage) => void;
   /** Receives transport lifecycle changes. */
   onStateChange?: (state: KeymasterConnectState) => void;
@@ -146,6 +196,32 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * await keymaster.connect();
  * const session = await keymaster.launch({ launchToken, appIdentity });
  * ```
+ *
+ * @groupDescription Connect
+ * Create, restore, revoke, or launch a persistent Connect session.
+ *
+ * @groupDescription Identity
+ * Read signed identity claims or sign an application intent.
+ *
+ * @groupDescription Cipher
+ * Encrypt and decrypt origin-bound application data.
+ *
+ * @groupDescription Transfer
+ * Transfer BSV or negotiate a fee-pool operation.
+ *
+ * @groupDescription AppMsg
+ * Send and query private application messages. Incoming messages arrive as
+ * `appmsg.message_received` through {@link KeymasterConnectOptions.onEvent}.
+ *
+ * @groupDescription Broadcast
+ * Publish broadcasts and manage subscriptions. Incoming broadcasts arrive as
+ * `broadcast.message_received` through {@link KeymasterConnectOptions.onEvent}.
+ *
+ * @groupDescription Storage
+ * Manage app-scoped directories, objects, and multipart uploads.
+ *
+ * @groupDescription Transport
+ * Manage the Session Window and send lower-level protocol requests.
  */
 export class KeymasterConnectClient {
   private readonly targetOrigin: string;
@@ -181,7 +257,11 @@ export class KeymasterConnectClient {
     this.environment = options.environment ?? createBrowserEnvironment();
   }
 
-  /** Current browser transport state. */
+  /**
+   * Current browser transport state.
+   *
+   * @group Transport
+   */
   get state(): KeymasterConnectState {
     return this.stateValue;
   }
@@ -192,6 +272,8 @@ export class KeymasterConnectClient {
    * Popup mode opens the Session Window and waits for `ready`. appView mode
    * adopts `window.opener`, installs the listener, and sends the child `ready`
    * message without ever opening a fallback popup.
+   *
+   * @group Transport
    */
   connect(): Promise<void> {
     return this.mode === "appView" ? this.connectAppView() : this.connectPopup();
@@ -200,6 +282,8 @@ export class KeymasterConnectClient {
   /**
    * Sends any public Connect method with compile-time parameter and result
    * inference.
+   *
+   * @group Transport
    */
   async request<M extends ProtocolMethod>(
     method: M,
@@ -256,12 +340,40 @@ export class KeymasterConnectClient {
     });
   }
 
-  /** Creates a new persistent Connect session. */
+  /**
+   * Calls `connect.login` to create a persistent Connect session.
+   *
+   * @group Connect
+   */
   login(params: ConnectLoginParams, options?: KeymasterRequestOptions): Promise<ConnectLoginResult> {
     return this.request("connect.login", params, options);
   }
 
-  /** Consumes the one-time launch token of an appView session. */
+  /**
+   * Calls `connect.resume` to restore the unlock runtime for a persistent
+   * session.
+   *
+   * @group Connect
+   */
+  resume(connectSessionId: string, options?: KeymasterRequestOptions): Promise<ConnectResumeResult> {
+    return this.request("connect.resume", { connectSessionId }, options);
+  }
+
+  /**
+   * Calls `connect.logout` to revoke a persistent Connect session.
+   *
+   * @group Connect
+   */
+  logout(connectSessionId: string, options?: KeymasterRequestOptions): Promise<ConnectLogoutResult> {
+    return this.request("connect.logout", { connectSessionId }, options);
+  }
+
+  /**
+   * Calls `connect.launch` to consume the one-time launch token of an appView
+   * session.
+   *
+   * @group Connect
+   */
   launch(params: ConnectLaunchParams, options?: KeymasterRequestOptions): Promise<ConnectLaunchResult> {
     if (this.mode !== "appView") {
       return Promise.reject(new TypeError("connect.launch requires mode: \"appView\""));
@@ -269,19 +381,249 @@ export class KeymasterConnectClient {
     return this.request("connect.launch", params, options);
   }
 
-  /** Restores the unlock runtime for an existing persistent session. */
-  resume(connectSessionId: string, options?: KeymasterRequestOptions): Promise<ConnectResumeResult> {
-    return this.request("connect.resume", { connectSessionId }, options);
+  /**
+   * Calls `identity.get` to return signed identity claims for the session
+   * owner.
+   *
+   * @group Identity
+   */
+  identityGet(params: IdentityGetParams, options?: KeymasterRequestOptions): Promise<IdentityGetResult> {
+    return this.request("identity.get", params, options);
   }
 
-  /** Revokes a persistent Connect session. */
-  logout(connectSessionId: string, options?: KeymasterRequestOptions): Promise<ConnectLogoutResult> {
-    return this.request("connect.logout", { connectSessionId }, options);
+  /**
+   * Calls `intent.sign` to sign caller-provided bytes with a human-readable
+   * intent.
+   *
+   * @group Identity
+   */
+  intentSign(params: IntentSignParams, options?: KeymasterRequestOptions): Promise<IntentSignResult> {
+    return this.request("intent.sign", params, options);
+  }
+
+  /**
+   * Calls `cipher.encrypt` to encrypt origin-bound application data.
+   *
+   * @group Cipher
+   */
+  cipherEncrypt(params: CipherEncryptParams, options?: KeymasterRequestOptions): Promise<CipherEncryptResult> {
+    return this.request("cipher.encrypt", params, options);
+  }
+
+  /**
+   * Calls `cipher.decrypt` to decrypt data previously returned by
+   * `cipher.encrypt`.
+   *
+   * @group Cipher
+   */
+  cipherDecrypt(params: CipherDecryptParams, options?: KeymasterRequestOptions): Promise<CipherDecryptResult> {
+    return this.request("cipher.decrypt", params, options);
+  }
+
+  /**
+   * Calls `p2pkh.transfer` to request a controlled mainnet BSV transfer.
+   *
+   * @group Transfer
+   */
+  p2pkhTransfer(params: P2pkhTransferParams, options?: KeymasterRequestOptions): Promise<P2pkhTransferResult> {
+    return this.request("p2pkh.transfer", params, options);
+  }
+
+  /**
+   * Calls `feepool.prepare` to prepare the next fee-pool operation.
+   *
+   * @group Transfer
+   */
+  feepoolPrepare(params: FeepoolPrepareParams, options?: KeymasterRequestOptions): Promise<FeepoolPrepareResult> {
+    return this.request("feepool.prepare", params, options);
+  }
+
+  /**
+   * Calls `feepool.commit` to verify counterparty signatures and commit a
+   * prepared fee-pool operation.
+   *
+   * @group Transfer
+   */
+  feepoolCommit(params: FeepoolCommitParams, options?: KeymasterRequestOptions): Promise<FeepoolCommitResult> {
+    return this.request("feepool.commit", params, options);
+  }
+
+  /**
+   * Calls `appmsg.send` to send an end-to-end sealed application message.
+   *
+   * @group AppMsg
+   */
+  appmsgSend(params: AppMsgSendParams, options?: KeymasterRequestOptions): Promise<AppMsgSendResult> {
+    return this.request("appmsg.send", params, options);
+  }
+
+  /**
+   * Calls `appmsg.list` to incrementally list messages visible to the session.
+   *
+   * @group AppMsg
+   */
+  appmsgList(params: AppMsgListParams, options?: KeymasterRequestOptions): Promise<AppMsgListResult> {
+    return this.request("appmsg.list", params, options);
+  }
+
+  /**
+   * Calls `appmsg.get` to fetch one message visible to the session.
+   *
+   * @group AppMsg
+   */
+  appmsgGet(params: AppMsgGetParams, options?: KeymasterRequestOptions): Promise<AppMsgGetResult> {
+    return this.request("appmsg.get", params, options);
+  }
+
+  /**
+   * Calls `broadcast.publish` to publish a message signed by the session owner.
+   *
+   * @group Broadcast
+   */
+  broadcastPublish(
+    params: BroadcastPublishParams,
+    options?: KeymasterRequestOptions
+  ): Promise<BroadcastPublishResult> {
+    return this.request("broadcast.publish", params, options);
+  }
+
+  /**
+   * Calls `broadcast.subscription_set` to replace the caller's channel set.
+   *
+   * @group Broadcast
+   */
+  broadcastSubscriptionSet(
+    params: BroadcastSubscriptionSetParams,
+    options?: KeymasterRequestOptions
+  ): Promise<BroadcastSubscriptionSetResult> {
+    return this.request("broadcast.subscription_set", params, options);
+  }
+
+  /**
+   * Calls `broadcast.subscription_list` to read the caller's channel set.
+   *
+   * @group Broadcast
+   */
+  broadcastSubscriptionList(
+    params: BroadcastSubscriptionListParams,
+    options?: KeymasterRequestOptions
+  ): Promise<BroadcastSubscriptionListResult> {
+    return this.request("broadcast.subscription_list", params, options);
+  }
+
+  /**
+   * Calls `storage.list` to list paths in the verified application's namespace.
+   *
+   * @group Storage
+   */
+  storageList(params: StorageListParams, options?: KeymasterRequestOptions): Promise<StorageListResult> {
+    return this.request("storage.list", params, options);
+  }
+
+  /**
+   * Calls `storage.directory.create` to create an app-scoped directory.
+   *
+   * @group Storage
+   */
+  storageDirectoryCreate(
+    params: StorageDirectoryParams,
+    options?: KeymasterRequestOptions
+  ): Promise<StorageDirectoryResult> {
+    return this.request("storage.directory.create", params, options);
+  }
+
+  /**
+   * Calls `storage.directory.delete` to delete an app-scoped directory.
+   *
+   * @group Storage
+   */
+  storageDirectoryDelete(
+    params: StorageDirectoryParams,
+    options?: KeymasterRequestOptions
+  ): Promise<StorageDirectoryResult> {
+    return this.request("storage.directory.delete", params, options);
+  }
+
+  /**
+   * Calls `storage.put` to write an app-scoped object.
+   *
+   * @group Storage
+   */
+  storagePut(params: StoragePutParams, options?: KeymasterRequestOptions): Promise<StoragePutResult> {
+    return this.request("storage.put", params, options);
+  }
+
+  /**
+   * Calls `storage.get` to read an app-scoped object.
+   *
+   * @group Storage
+   */
+  storageGet(params: StorageGetParams, options?: KeymasterRequestOptions): Promise<StorageGetResult> {
+    return this.request("storage.get", params, options);
+  }
+
+  /**
+   * Calls `storage.delete` to delete an app-scoped object.
+   *
+   * @group Storage
+   */
+  storageDelete(params: StorageDeleteParams, options?: KeymasterRequestOptions): Promise<StorageDeleteResult> {
+    return this.request("storage.delete", params, options);
+  }
+
+  /**
+   * Calls `storage.upload.begin` to start a multipart object upload.
+   *
+   * @group Storage
+   */
+  storageUploadBegin(
+    params: StorageUploadBeginParams,
+    options?: KeymasterRequestOptions
+  ): Promise<StorageUploadBeginResult> {
+    return this.request("storage.upload.begin", params, options);
+  }
+
+  /**
+   * Calls `storage.upload.part` to append one part to a multipart upload.
+   *
+   * @group Storage
+   */
+  storageUploadPart(
+    params: StorageUploadPartParams,
+    options?: KeymasterRequestOptions
+  ): Promise<StorageUploadPartResult> {
+    return this.request("storage.upload.part", params, options);
+  }
+
+  /**
+   * Calls `storage.upload.complete` to finalize a multipart upload.
+   *
+   * @group Storage
+   */
+  storageUploadComplete(
+    params: StorageUploadCompleteParams,
+    options?: KeymasterRequestOptions
+  ): Promise<StoragePutResult> {
+    return this.request("storage.upload.complete", params, options);
+  }
+
+  /**
+   * Calls `storage.upload.abort` to discard a multipart upload.
+   *
+   * @group Storage
+   */
+  storageUploadAbort(
+    params: StorageUploadAbortParams,
+    options?: KeymasterRequestOptions
+  ): Promise<StorageUploadAbortResult> {
+    return this.request("storage.upload.abort", params, options);
   }
 
   /**
    * Cancels a locally pending request. Keymaster only cancels work that has not
    * entered execution; cancellation is therefore best-effort remotely.
+   *
+   * @group Transport
    */
   cancel(requestId: string, reason: unknown = new DOMException("The operation was aborted", "AbortError")): boolean {
     const pending = this.pending.get(requestId);
@@ -295,6 +637,8 @@ export class KeymasterConnectClient {
   /**
    * Tears down the local transport. This does not revoke persistent Connect
    * sessions; call {@link logout} before closing when revocation is required.
+   *
+   * @group Transport
    */
   close(): void {
     const error = new KeymasterTransportError("client_closed", "Keymaster client was closed");

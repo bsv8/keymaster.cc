@@ -177,4 +177,38 @@ describe("KeymasterConnectClient", () => {
       }
     })).rejects.toThrow("requires mode");
   });
+
+  it.each([
+    ["identityGet", "identity.get"],
+    ["intentSign", "intent.sign"],
+    ["cipherEncrypt", "cipher.encrypt"],
+    ["cipherDecrypt", "cipher.decrypt"],
+    ["p2pkhTransfer", "p2pkh.transfer"],
+    ["feepoolPrepare", "feepool.prepare"],
+    ["feepoolCommit", "feepool.commit"],
+    ["appmsgSend", "appmsg.send"],
+    ["appmsgList", "appmsg.list"],
+    ["appmsgGet", "appmsg.get"],
+    ["broadcastPublish", "broadcast.publish"],
+    ["broadcastSubscriptionSet", "broadcast.subscription_set"],
+    ["broadcastSubscriptionList", "broadcast.subscription_list"],
+    ["storageList", "storage.list"],
+    ["storageDirectoryCreate", "storage.directory.create"],
+    ["storageDirectoryDelete", "storage.directory.delete"],
+    ["storagePut", "storage.put"],
+    ["storageGet", "storage.get"],
+    ["storageDelete", "storage.delete"],
+    ["storageUploadBegin", "storage.upload.begin"],
+    ["storageUploadPart", "storage.upload.part"],
+    ["storageUploadComplete", "storage.upload.complete"],
+    ["storageUploadAbort", "storage.upload.abort"]
+  ] as const)("forwards %s to %s", async (clientMethod, protocolMethod) => {
+    const ctx = createHarness();
+    const request = vi.spyOn(ctx.client, "request").mockResolvedValue(undefined as never);
+    const invoke = ctx.client[clientMethod] as unknown as (params: object) => Promise<unknown>;
+
+    await invoke.call(ctx.client, {});
+
+    expect(request).toHaveBeenCalledWith(protocolMethod, {}, undefined);
+  });
 });

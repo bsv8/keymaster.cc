@@ -14,6 +14,7 @@
   "disableSources": true,
   "includeVersion": true,
   "categorizeByGroup": true,
+  "groupOrder": ["Connect", "Identity", "Cipher", "Transfer", "AppMsg", "Broadcast", "Storage", "Transport", "*"],
   "sort": ["source-order"],
   "validation": {
     "notExported": true,
