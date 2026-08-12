@@ -503,7 +503,7 @@ body {
 }
 
 @media (max-width: 700px) {
-  .capability-map-page .vp-doc table {
+  .vp-doc table {
     display: block;
     overflow-x: auto;
   }
