@@ -405,6 +405,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      keyhold:
+        specifier: 2.0.0
+        version: 2.0.0
 
   packages/plugin-message:
     dependencies:

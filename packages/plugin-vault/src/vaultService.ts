@@ -1830,24 +1830,32 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       sourcePassword: string;
       targetPassword: string;
     }): Promise<KeyRef> {
+      let doc: KeyHoldDocument;
       try {
-        const doc = keyholdParse(input.backup);
-        const sourceUnlocked = await keyholdUnlock(doc, input.sourcePassword);
-        try {
-          const targetMeta = await vaultDb.getMeta();
-          if (!targetMeta) throw new Error("Vault not initialized");
-          await coordinatorVerifyVaultPasswordKey(input.targetPassword, targetMeta);
-          const existing = await vaultDb.getKey(sourceUnlocked.publicKeyHex);
-          if (existing) throw new Error("Key already exists");
-          const targetDoc = keyholdParse(await keyholdExportPrivateKey({ privateKey: sourceUnlocked.privateKey, password: input.targetPassword, label: doc.label, parameters: keyholdRecommendedParameters() }));
-          const record: VaultKeyRecord = { publicKeyHex: sourceUnlocked.publicKeyHex, label: doc.label, address: "", network: "main", format: "keyhold-v2", capabilities: ["p2pkh"], createdAt: new Date().toISOString(), storageVersion: "keyhold-v2", keyholdDocument: targetDoc };
-          await vaultDb.putKey(record); keyCache = null; return recordToRef(record);
-        } finally { sourceUnlocked.privateKey.fill(0); }
-      } catch (error) {
-        if (error instanceof Error && (error.message === "Invalid password" || error.message === "Key already exists" || error.message === "Vault not initialized")) throw error;
-        if (error instanceof Error && /unlock|KeyHold|invalid/i.test(error.message)) throw new Error("Invalid source password");
+        doc = keyholdParse(input.backup);
+      } catch {
+        throw new Error("Unrecognized key backup format");
       }
-      throw new Error("Unsupported key storage version");
+
+      let sourceUnlocked: Awaited<ReturnType<typeof keyholdUnlock>>;
+      try {
+        sourceUnlocked = await keyholdUnlock(doc, input.sourcePassword);
+      } catch {
+        throw new Error("Invalid source password");
+      }
+
+      try {
+        const targetMeta = await vaultDb.getMeta();
+        if (!targetMeta) throw new Error("Vault not initialized");
+        await coordinatorVerifyVaultPasswordKey(input.targetPassword, targetMeta);
+        const existing = await vaultDb.getKey(sourceUnlocked.publicKeyHex);
+        if (existing) throw new Error("Key already exists");
+        const targetDoc = keyholdParse(await keyholdExportPrivateKey({ privateKey: sourceUnlocked.privateKey, password: input.targetPassword, label: doc.label, parameters: keyholdRecommendedParameters() }));
+        const record: VaultKeyRecord = { publicKeyHex: sourceUnlocked.publicKeyHex, label: doc.label, address: "", network: "main", format: "keyhold-v2", capabilities: ["p2pkh"], createdAt: new Date().toISOString(), storageVersion: "keyhold-v2", keyholdDocument: targetDoc };
+        await vaultDb.putKey(record); keyCache = null; return recordToRef(record);
+      } finally {
+        sourceUnlocked.privateKey.fill(0);
+      }
     },
 
     async createAppViewSession(input: {

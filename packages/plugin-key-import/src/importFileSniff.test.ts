@@ -36,7 +36,7 @@ const KEYHOLD_DOCUMENT = {
   format: "keymaster",
   version: 2,
   label: "Primary key",
-  publicKeyHex: `02${"11".repeat(32)}`,
+  publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
   keyDerivation: {
     algorithm: "pbkdf2-hmac-sha-256",
     passwordEncoding: "utf-8",

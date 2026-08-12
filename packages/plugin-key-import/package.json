@@ -15,6 +15,7 @@
   "dependencies": {
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "@keymaster/ui": "*"
+    "@keymaster/ui": "*",
+    "keyhold": "2.0.0"
   }
 }

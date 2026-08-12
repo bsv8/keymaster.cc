@@ -376,6 +376,31 @@ describe("VaultService.exportKeyBackup", () => {
 });
 
 describe("VaultService.importKeyBackup", () => {
+  it("rejects a legacy whole-Vault backup before password handling", async () => {
+    const { messageBus: events } = makeMessageBus();
+    const vault = createVaultService({ messageBus: events });
+    await waitForStatus(vault, "uninitialized");
+    await vault.createVault("target-pw");
+
+    const legacyBackup = JSON.stringify({
+      backupVersion: 1,
+      sourceVaultMeta: { id: "singleton" },
+      keyRecord: {
+        publicKeyHex: "02a301cedb7a6cf4d6fc5ba5afe611ef4d13b0d48887ed2574fb186c69aa01058e",
+        cipherVersion: "v2",
+        cipherB64: "legacy-ciphertext"
+      }
+    });
+
+    await expect(
+      vault.importKeyBackup!({
+        backup: legacyBackup,
+        sourcePassword: "legacy-pw",
+        targetPassword: "target-pw"
+      })
+    ).rejects.toThrow("Unrecognized key backup format");
+  });
+
   it("restores a deleted key from canonical backup JSON", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });

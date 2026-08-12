@@ -149,9 +149,21 @@ describe("FirstTimeImportWizard - JSON importer 输入方式切换", () => {
       format: "keymaster",
       version: 2,
       label: "Primary key",
-      publicKeyHex: `02${"11".repeat(32)}`,
-      keyDerivation: { algorithm: "pbkdf2-hmac-sha-256" },
-      cipher: { algorithm: "aes-gcm" }
+      publicKeyHex: "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+      keyDerivation: {
+        algorithm: "pbkdf2-hmac-sha-256",
+        passwordEncoding: "utf-8",
+        iterations: 600_000,
+        outputLengthBits: 256,
+        saltB64Url: "AAAAAAAAAAAAAAAAAAAAAA"
+      },
+      cipher: {
+        algorithm: "aes-gcm",
+        keyLengthBits: 256,
+        ivB64Url: "AAAAAAAAAAAAAAAA",
+        tagLengthBits: 128,
+        ciphertextAndTagB64Url: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
     });
     const bytes = new TextEncoder().encode(keyHoldJson);
     const file = {

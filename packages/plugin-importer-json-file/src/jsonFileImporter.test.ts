@@ -15,7 +15,7 @@
 // 这个 importer 的能力窄化为单一形态。
 
 import { describe, expect, it } from "vitest";
-import { jsonFileImporter } from "./jsonFileImporter.js";
+import { jsonFileImporter, UNRECOGNIZED_JSON_FORMAT_ERROR } from "./jsonFileImporter.js";
 
 function encode(s: string): Uint8Array {
   return new TextEncoder().encode(s);
@@ -63,6 +63,64 @@ function buildRealEnvelope(password: string): string {
 }
 
 describe("jsonFileImporter (硬切换 010 收尾 + 012 扩面回归)", () => {
+  it("rejects the reported legacy Vault backup instead of treating label=Key as WIF", async () => {
+    const legacyBackup = JSON.stringify({
+      backupVersion: 1,
+      sourceVaultMeta: {
+        id: "singleton",
+        saltB64: "cc6ab8c384788b12dd72edd8fef5778b",
+        verifierSaltB64: "d109dd53c90a159bbafceba38fe7bf96",
+        verifierIvB64: "1b589a9501c5df0a88b0f8df",
+        verifierCipherB64: "b7a6d2b15939be0381c1bcb0e973882008ea1a5ed5d3034b476bfaecb5db3b0e40ab36f763c88b5581e22a",
+        createdAt: "2026-07-19T11:40:10.423Z",
+        cryptoVersion: "v2",
+        kdf: "pbkdf2-sha256",
+        iterations: 200000,
+        keyLengthBits: 256
+      },
+      keyRecord: {
+        publicKeyHex: "02a301cedb7a6cf4d6fc5ba5afe611ef4d13b0d48887ed2574fb186c69aa01058e",
+        label: "Key",
+        address: "1MBQaph8dndpM4PLdPJUnCNUAvwwH26PNq",
+        network: "main",
+        format: "imported",
+        capabilities: ["p2pkh"],
+        createdAt: "2026-07-19T11:40:10.462Z",
+        cipherVersion: "v2",
+        cipherSaltB64: "08b8efdc389c9d56aa0d0406fca3c2cb",
+        cipherIvB64: "b14f2d5083db2737ae8fbddf",
+        cipherB64: "2b2149cbdc002181e92557fc043f982775e5580bef216292bccc6b5708aceb940aafef2d6a1b0f2db97e82540e49dd5669b08dbfbccb01968e00cc0a1dbb7aaaf05591f51b327149d8d74bbfbea0bcef1e9fa32803308e9759c5"
+      }
+    });
+
+    await expect(
+      jsonFileImporter.parse({
+        kind: "text",
+        text: legacyBackup
+      })
+    ).rejects.toThrow(UNRECOGNIZED_JSON_FORMAT_ERROR);
+  });
+
+  it("rejects the legacy whole-Vault backup as an unrecognized JSON format", async () => {
+    const legacyBackup = JSON.stringify({
+      backupVersion: 1,
+      sourceVaultMeta: { id: "singleton" },
+      keyRecord: {
+        publicKeyHex: "02a301cedb7a6cf4d6fc5ba5afe611ef4d13b0d48887ed2574fb186c69aa01058e",
+        cipherVersion: "v2",
+        cipherB64: "legacy-ciphertext"
+      }
+    });
+
+    await expect(
+      jsonFileImporter.parse({
+        kind: "file",
+        name: "legacy-wallet.json",
+        content: encode(legacyBackup)
+      })
+    ).rejects.toThrow(UNRECOGNIZED_JSON_FORMAT_ERROR);
+  });
+
   it("parses a plain JSON wallet export WITHOUT a password (file input)", async () => {
     // 关键回归点：明文 JSON 必须能在不传 password 的前提下被 parse 出来。
     // 旧实现错误地把 json-file 标 requiresPassword: true 时会破坏这条

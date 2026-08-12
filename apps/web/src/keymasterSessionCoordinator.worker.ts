@@ -1640,13 +1640,18 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       const currentMeta = await getVaultMeta();
       if (!currentMeta) throw new Error("Vault not initialized");
       const keyhold = await import("keyhold");
-      const sourceDoc = keyhold.parse(operation.backup);
+      let sourceDoc: import("keyhold").Document;
+      try {
+        sourceDoc = keyhold.parse(operation.backup);
+      } catch {
+        throw new Error("Unrecognized key backup format");
+      }
       const source = await keyhold.unlock(sourceDoc, operation.sourcePassword);
-      if (!(await verifyPassword(operation.targetPassword, currentMeta))) throw new Error("Invalid password");
-      const existingKey = await vaultDb.getKey(source.publicKeyHex);
-      if (existingKey) throw new Error("Key already exists");
       let targetDocument: import("keyhold").Document;
       try {
+        if (!(await verifyPassword(operation.targetPassword, currentMeta))) throw new Error("Invalid password");
+        const existingKey = await vaultDb.getKey(source.publicKeyHex);
+        if (existingKey) throw new Error("Key already exists");
         targetDocument = keyhold.parse(await keyhold.exportPrivateKey({ privateKey: source.privateKey, password: operation.targetPassword, label: sourceDoc.label, parameters: keyhold.recommendedParameters() }));
       } finally {
         source.privateKey.fill(0);

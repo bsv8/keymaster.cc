@@ -26,6 +26,10 @@ interface JsonCandidate {
 }
 
 const HEX_RE = /^[0-9a-fA-F]{64}$/;
+// WIF 必须是完整的 Base58Check 字符串：未压缩 51 位，压缩 52 位。
+// 不能只检查首字符，否则普通文本（例如 label="Key"）会被误判为私钥。
+const WIF_RE = /^(?:5[1-9A-HJ-NP-Za-km-z]{50}|[KL][1-9A-HJ-NP-Za-km-z]{51})$/;
+export const UNRECOGNIZED_JSON_FORMAT_ERROR = "Unrecognized JSON format";
 
 // bsv8 envelope 不应被误判为私钥候选的字段名。
 // 这些字段内容是 hex 字符串，但语义是 KDF salt / AEAD nonce / ciphertext。
@@ -50,8 +54,8 @@ function dig(obj: unknown, path: string[] = []): JsonCandidate[] {
       const trimmed = v.trim();
       if (HEX_RE.test(trimmed)) {
         out.push({ path: here, hex: trimmed.toLowerCase() });
-      } else if (/^5[HJK][1-9A-HJ-NP-Za-km-z]{49}$/.test(trimmed) || trimmed.startsWith("L") || trimmed.startsWith("K")) {
-        // 启发式 WIF：以 5/K/L 开头且长度 51-52。
+      } else if (WIF_RE.test(trimmed)) {
+        // 启发式 WIF：先检查完整长度和 Base58 字符集；实际私钥校验由下游完成。
         out.push({ path: here, hex: "", wif: trimmed });
       }
     } else if (v && typeof v === "object") {
@@ -95,9 +99,17 @@ export const jsonFileImporter: KeyImporter = {
     } catch (err) {
       throw new Error(`Invalid JSON: ${err instanceof Error ? err.message : String(err)}`);
     }
-    // KeyHold documents are detected strictly and never recursively scanned.
-    if (parsed && typeof parsed === "object" && ((parsed as { format?: unknown }).format === "keymaster" || ((parsed as { publicKeyHex?: unknown }).publicKeyHex !== undefined && (parsed as { keyDerivation?: unknown }).keyDerivation !== undefined))) {
-      const document = parseKeyHold(readInputText(input));
+    // Let the KeyHold SDK recognize and validate its own document format. The
+    // generic wallet JSON fallback is used only when the SDK does not recognize
+    // the input as a KeyHold document.
+    const inputText = readInputText(input);
+    let document: ReturnType<typeof parseKeyHold> | undefined;
+    try {
+      document = parseKeyHold(inputText);
+    } catch {
+      document = undefined;
+    }
+    if (document) {
       if (!input.password) throw new Error("Password is required for KeyHold file");
       const unlocked = await unlockKeyHold(document, input.password);
       try {
@@ -129,7 +141,7 @@ export const jsonFileImporter: KeyImporter = {
     }
     const candidates = dig(parsed);
     if (candidates.length === 0) {
-      throw new Error("No private key candidates found in JSON");
+      throw new Error(UNRECOGNIZED_JSON_FORMAT_ERROR);
     }
     return candidates.map((c) => ({
       material: { hex: c.hex, wif: c.wif },

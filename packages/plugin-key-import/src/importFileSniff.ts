@@ -1,11 +1,13 @@
 // packages/plugin-key-import/src/importFileSniff.ts
 // 文件 / 文本内容快速嗅探工具。
 // 设计缘由：导入页面需要在用户选完文件或粘贴文本后立即判断"是不是加密的密钥文档"，
-// 以决定是否显示密码输入框。嗅探必须使用真正的 JSON.parse + 形状判断，
+// 以决定是否显示密码输入框。嗅探必须使用真正的 JSON.parse + KeyHold SDK 校验，
 // 不能用字符串精确匹配（pretty JSON、换行、空格都会破坏匹配）。
 //
 // 硬切换 012（施工单 001）：JSON 文件与 JSON 文本必须共用同一套"是否像 envelope"的
-// 嗅探逻辑；不再让文件和文本各自复制一份 JSON.parse + shape 判断。
+// 嗅探逻辑；不再让文件和文本各自复制一份 JSON.parse + SDK 校验。
+
+import { validate as validateKeyHold } from "keyhold";
 
 /** bsv8 envelope 形状判断：只判断必填字段类型，不依赖具体顺序或空格。 */
 export function isBsv8KeyEnvelopeShape(obj: unknown): boolean {
@@ -21,19 +23,18 @@ export function isBsv8KeyEnvelopeShape(obj: unknown): boolean {
   return true;
 }
 
-/** KeyHold v2 文档形状判断：只识别导入器的加密文档分支。 */
+/**
+ * KeyHold v2 文档判断委托给 KeyHold SDK。
+ *
+ * KeyHold 的 format/version/字段校验必须由 SDK 统一维护。
+ */
 export function isKeyHoldDocumentShape(obj: unknown): boolean {
-  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
-  const o = obj as Record<string, unknown>;
-  return (
-    o["format"] === "keymaster" &&
-    o["version"] === 2 &&
-    typeof o["publicKeyHex"] === "string" &&
-    Boolean(o["keyDerivation"]) &&
-    typeof o["keyDerivation"] === "object" &&
-    Boolean(o["cipher"]) &&
-    typeof o["cipher"] === "object"
-  );
+  try {
+    validateKeyHold(obj);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** 判断 JSON 文本是否为当前支持的加密密钥文档。 */

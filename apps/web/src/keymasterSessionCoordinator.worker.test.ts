@@ -556,6 +556,23 @@ describe("Session Coordinator backup import", () => {
     __testResetState();
   });
 
+  it("rejects a legacy whole-Vault backup as an unrecognized format", async () => {
+    await __testCreateEmptyVault("target-pw");
+    const legacyBackup = JSON.stringify({
+      backupVersion: 1,
+      sourceVaultMeta: { id: "singleton" },
+      keyRecord: {
+        publicKeyHex: "02a301cedb7a6cf4d6fc5ba5afe611ef4d13b0d48887ed2574fb186c69aa01058e",
+        cipherVersion: "v2",
+        cipherB64: "legacy-ciphertext"
+      }
+    });
+
+    await expect(__testImportKeyBackup(legacyBackup, "legacy-pw", "target-pw"))
+      .rejects.toThrow("Unrecognized key backup format");
+    expect(await vaultDb.listKeys()).toHaveLength(0);
+  });
+
   it("cross-vault import succeeds with different passwords", async () => {
     const sourceResult = await __testCreateVault("source-pw", { label: "source-key" });
     const backup = await __testExportKeyBackup(sourceResult.publicKeyHex!);

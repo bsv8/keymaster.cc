@@ -127,7 +127,7 @@ export function VaultKeyBackupImportModal({
         onChange={(e) => setBackup(e.currentTarget.value)}
         error={error ?? undefined}
         placeholder={t("vault.keyImportBackup.backupPlaceholder", {
-          defaultValue: '{"backupVersion":1,...}'
+          defaultValue: '{"format":"keymaster","version":2,...}'
         })}
         rows={10}
         autoFocus
