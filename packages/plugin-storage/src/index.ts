@@ -11,5 +11,3 @@ export * from "./storageNamespace.js";
 export * from "./providerConfig.js";
 export { StorageServiceError } from "./storageErrors.js";
 export { StorageServiceProxy } from "./storageServiceProxy.js";
-export { createConnectObjectStoreFixture } from "./s3DiskObjectStoreFixture.js";
-export type { ConnectObjectStoreFixture, ConnectObjectStoreFixtureInput, ConnectDirectoryListing, ConnectObjectReadStream } from "./s3DiskObjectStoreFixture.js";

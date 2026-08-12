@@ -27,9 +27,10 @@ describe("S3ObjectStore namespace guard", () => {
       const document = new runtime.DOMParser!().parseFromString("<ListBucketResult><Name>bucket</Name></ListBucketResult>", "application/xml");
       expect(document.documentElement.nodeName).toBe("ListBucketResult");
       expect(document.getElementsByTagName("Name")[0]?.textContent).toBe("bucket");
-      expect(typeof runtime.Node).toBe("function");
-      expect(runtime.Node?.ELEMENT_NODE).toBe(1);
-      expect(runtime.Node?.TEXT_NODE).toBe(3);
+      const installedNode = (runtime as unknown as { Node?: { ELEMENT_NODE: number; TEXT_NODE: number } }).Node;
+      expect(typeof installedNode).toBe("function");
+      expect(installedNode?.ELEMENT_NODE).toBe(1);
+      expect(installedNode?.TEXT_NODE).toBe(3);
     } finally {
       if (previousParser) runtime.DOMParser = previousParser; else delete runtime.DOMParser;
       if (previousNode) runtime.Node = previousNode; else delete runtime.Node;

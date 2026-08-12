@@ -3,7 +3,6 @@ import type { NormalizedStorageProviderConfig, StorageAppContext, VaultSealedSec
 import type { S3ObjectStore, S3ObjectStoreCapabilityState } from "./s3ObjectStore.js";
 import { createStorageService } from "./storageService.js";
 import { setS3ObjectStoreCapabilityMode } from "./s3ObjectStore.js";
-import { createConnectObjectStoreFixture } from "./s3DiskObjectStoreFixture.js";
 import type { StorageDb, StoredMultipartUploadRecord, StoredProviderConfigRecord } from "./storageDb.js";
 import { StorageServiceError } from "./storageErrors.js";
 import { STORAGE_MAX_PAYLOAD_BYTES, STORAGE_PART_SIZE_BYTES } from "@keymaster/contracts";
@@ -664,31 +663,4 @@ describe("StorageServiceImpl", () => {
     service.dispose();
   });
 
-  it("exposes an S3Disk-shaped facade without provider credentials", async () => {
-    const calls = { listPrefixes: [] as string[], abortedUploads: [] as string[] };
-    const service = await createStorageService({
-      db: makeDb(), secret: makeSecret(), vault: { status: () => "unlocked", onLifecycleChange: () => () => undefined },
-      objectStoreFactory: () => makeStore(calls), generateId: () => "fixture", now: () => 1000
-    });
-    await service.activateProvider({ providerId: "aws-s3", connection: { region: "us-east-1", bucket: "bucket-name" }, credentials: { mode: "replace", accessKeyId: "key", secretAccessKey: "secret" } });
-    const facade = createConnectObjectStoreFixture({ service, context: context() });
-    await facade.createDirectory("", "docs");
-    await expect(facade.deleteDirectoryMarker("docs/")).resolves.toBeUndefined();
-    const file = new File(["hello connect"], "hello.txt", { type: "text/plain" });
-    await facade.putObject("docs", file, { overwrite: false });
-    const listing = await facade.listDirectory("docs");
-    expect(listing.files.map((entry) => entry.key)).toContain("docs/hello.txt");
-    expect(await facade.getObjectBlob("docs/hello.txt").then((value) => value.text())).toBe("hello connect");
-    await facade.deleteObject("docs/hello.txt");
-
-    const abortController = new AbortController();
-    const large = new File([new Uint8Array(STORAGE_PART_SIZE_BYTES + 1)], "large.bin");
-    await expect(facade.putObject("", large, {
-      abortSignal: abortController.signal,
-      onProgress: ({ loaded }) => { if (loaded > 0) abortController.abort(new Error("fixture cancellation")); }
-    })).rejects.toThrow("fixture cancellation");
-    expect(calls.abortedUploads).toHaveLength(1);
-    facade.dispose();
-    service.dispose();
-  });
 });
