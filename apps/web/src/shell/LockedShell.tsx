@@ -36,7 +36,7 @@
 // 容器；OnboardingHeader 是锁屏态系统级能力，与 unlocked topbar /
 // sidebar 严格分离。
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button, EmptyState, PageHeader, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { KeyspaceService } from "@keymaster/contracts";
@@ -65,12 +65,39 @@ export function LockedShell() {
   const [selectedKey, setSelectedKey] = useState<{ publicKeyHex: string; label: string } | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
 
+  const loadSelectedKey = useCallback(async () => {
+    const selectedHex = keyspace.selected();
+    if (selectedHex) {
+      try {
+        const selected = await vault.getKey(selectedHex);
+        if (selected) return { publicKeyHex: selected.publicKeyHex, label: selected.label };
+      } catch {
+        // Fall back to the persisted key list below. A stale selected value
+        // must not hide the locked-state management actions.
+      }
+    }
+
+    // `activePublicKeyHex` is intentionally empty while locked. If the
+    // selected snapshot has not arrived yet (or points at a deleted key),
+    // use the first persisted key as the cold-management target. The
+    // Coordinator uses the same fallback when unlocking.
+    const first = (await keyspace.listKeys())[0];
+    return first ? { publicKeyHex: first.publicKeyHex, label: first.label } : null;
+  }, [keyspace, vault]);
+
   useEffect(() => {
     if (status !== "locked") return;
-    const selected = keyspace.selected();
-    if (!selected) { setSelectedKey(null); return; }
-    void vault.getKey(selected).then((key) => setSelectedKey(key ? { publicKeyHex: key.publicKeyHex, label: key.label } : null)).catch(() => setSelectedKey(null));
-  }, [status, keyspace, vault]);
+    let cancelled = false;
+    setSelectedKey(null);
+    void loadSelectedKey()
+      .then((key) => {
+        if (!cancelled) setSelectedKey(key);
+      })
+      .catch(() => {
+        if (!cancelled) setSelectedKey(null);
+      });
+    return () => { cancelled = true; };
+  }, [status, loadSelectedKey]);
 
   async function exportSelected() {
     if (!selectedKey) return;
@@ -96,11 +123,7 @@ export function LockedShell() {
     try {
       await keyspace.deleteKey({ publicKeyHex: selectedKey.publicKeyHex, confirmationLabel });
       setDeleteOpen(false);
-      const nextHex = keyspace.selected();
-      if (nextHex) {
-        const next = await vault.getKey(nextHex);
-        setSelectedKey(next ? { publicKeyHex: next.publicKeyHex, label: next.label } : null);
-      } else setSelectedKey(null);
+      setSelectedKey(await loadSelectedKey());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");
       throw err;

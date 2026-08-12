@@ -129,8 +129,9 @@ describe("KeymasterSessionCoordinatorClient", () => {
       expect(b.getBootstrapSnapshot().sessionEpoch).toBe("shared-epoch");
       const observed: string[] = [];
       b.subscribeTopic("session.state", (event: any) => observed.push(event.vaultStatus));
-      hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1 });
+      hub.broadcast({ topic: "session.state", sessionRevision: 1, type: "session.state.changed", cause: "unlock", sessionEpoch: "unlocked-epoch", vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), selectedPublicKeyHex: "a".repeat(64), keyspaceGeneration: 1 });
       expect(b.getBootstrapSnapshot().vaultStatus).toBe("unlocked");
+      expect(b.getBootstrapSnapshot().selectedPublicKeyHex).toBe("a".repeat(64));
       expect(observed).toContain("unlocked");
       a.disconnect();
       expect(b.getIsConnected()).toBe(true);

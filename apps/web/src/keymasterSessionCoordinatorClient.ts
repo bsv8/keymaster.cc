@@ -606,6 +606,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         sessionEpoch: event.sessionEpoch,
         vaultStatus: event.vaultStatus,
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
+        selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
         keyspaceGeneration: event.keyspaceGeneration,
       };
     } else if (event.type === "background.snapshot.changed") {

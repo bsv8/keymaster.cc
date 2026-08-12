@@ -65,8 +65,17 @@ async function getActiveKey(): Promise<VaultKeyRecord | undefined> {
 }
 
 /** Reconcile persisted selection from public key listings only. */
-async function reconcileSelectedPublicKey(): Promise<void> {
-  await getActiveKey();
+async function reconcileSelectedPublicKey(): Promise<boolean> {
+  const activeKey = await getActiveKey();
+  if (activeKey) return true;
+
+  // Legacy versions could leave behind a password meta record without any
+  // key material. That state can never produce an active session, so treat it
+  // as a fresh Vault instead of exposing a locked "No active key" dead end.
+  await vaultDb.deleteMeta();
+  coordinatorMeta.selectedPublicKeyHex = undefined;
+  await persistCoordinatorMeta();
+  return false;
 }
 
 // 密码验证逻辑（简化版，实际需要导入 crypto 模块）
@@ -1338,9 +1347,19 @@ async function handleUnlock(
     const storageSecretKey = await deriveStorageSecretKey(request.password, decodePersisted(meta.saltB64));
     await recoverStorageRotation(storageSecretKey, passwordKey);
 
-    // 3. 获取 active key
+    // 3. 获取 active key。旧版本允许创建“有密码但没有 key”的空 Vault；
+    //    这种 Vault 已经是初始化状态，应清掉孤立的密码元数据，
+    //    而不是把用户永久卡在 "No active key"。
     const activeKey = request.publicKeyHex ? await vaultDb.getKey(request.publicKeyHex) : await getActiveKey();
-    if (!activeKey) throw new Error("No active key");
+    if (!activeKey) {
+      await vaultDb.deleteMeta();
+      await performGlobalLock("recover-empty");
+      return {
+        requestId,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: { status: "accepted" },
+      };
+    }
     privateKey = await decryptPrivateKey(request.password, activeKey);
 
     // 4. 统一进入 unlocked 状态
@@ -2337,7 +2356,7 @@ async function initializeCoordinator(): Promise<void> {
       // Reconcile only the persisted public selection.  This deliberately
       // uses list/get and never parses or unlocks a key document, so opaque
       // legacy records remain visible for locked recovery/delete flows.
-      await reconcileSelectedPublicKey();
+      if (!await reconcileSelectedPublicKey()) coordinatorState.vaultStatus = "uninitialized";
     } else {
       coordinatorState.vaultStatus = "uninitialized";
     }
@@ -2607,7 +2626,7 @@ export async function __testRestartWorker(): Promise<void> {
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
-  if (meta) await reconcileSelectedPublicKey();
+  if (meta && !await reconcileSelectedPublicKey()) coordinatorState.vaultStatus = "uninitialized";
 }
 
 // ============================================================

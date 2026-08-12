@@ -733,6 +733,22 @@ describe("Session Coordinator locked deletion and cold export", () => {
     __testResetState();
   });
 
+  it("recovers a legacy empty Vault to the uninitialized state", async () => {
+    await __testCreateEmptyVault("pw");
+    const result = await __testUnlock("pw");
+    expect(result.ack.status).toBe("accepted");
+    expect(__testGetVaultStatus()).toBe("uninitialized");
+    expect(__testGetActivePublicKeyHex()).toBeUndefined();
+    expect(await vaultDb.getMeta()).toBeUndefined();
+  });
+
+  it("classifies a legacy empty Vault as uninitialized after a worker restart", async () => {
+    await __testCreateEmptyVault("pw");
+    await __testRestartWorker();
+    expect(__testGetVaultStatus()).toBe("uninitialized");
+    expect(await vaultDb.getMeta()).toBeUndefined();
+  });
+
   it("cold-exports the persisted selected KeyHold document while locked", async () => {
     const key = await __testCreateVault("pw");
     await __testLock();

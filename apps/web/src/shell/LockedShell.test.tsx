@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
-import type { KeyspaceService, VaultService } from "@keymaster/contracts";
+import type { KeyIdentity, KeyspaceService, VaultService } from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";
 import { LockedShell } from "./LockedShell.js";
@@ -12,11 +12,11 @@ const SELECTED = "02".padEnd(66, "a");
 
 afterEach(() => cleanup());
 
-function createLockedHost(input?: { selected?: string; deleteKey?: KeyspaceService["deleteKey"]; exportKeyBackup?: VaultService["exportKeyBackup"] }) {
+function createLockedHost(input?: { selected?: string; keys?: KeyIdentity[]; deleteKey?: KeyspaceService["deleteKey"]; exportKeyBackup?: VaultService["exportKeyBackup"] }) {
   const keyspace: KeyspaceService = {
     active: () => ({ activePublicKeyHex: undefined }),
     selected: () => input?.selected,
-    listKeys: async () => [],
+    listKeys: async () => input?.keys ?? [],
     getKey: async (publicKeyHex) => publicKeyHex === SELECTED ? { publicKeyHex, label: "Primary", capabilities: [], createdAt: "now" } : undefined,
     deleteKey: input?.deleteKey ?? (async () => undefined),
     setActive: async () => undefined,
@@ -103,6 +103,18 @@ describe("LockedShell selected key controls", () => {
     render(<PluginHostProvider host={host}><LockedShell /></PluginHostProvider>);
     await waitFor(() => expect(screen.queryByText("Selected private key")).toBeNull());
     expect(screen.queryByRole("button", { name: "Export private key" })).toBeNull();
+  });
+
+  it("falls back to the first persisted key when the selected snapshot is missing", async () => {
+    const { host, vault } = createLockedHost({
+      keys: [{ publicKeyHex: SELECTED, label: "Primary", capabilities: [], createdAt: "now" }]
+    });
+    render(<PluginHostProvider host={host}><LockedShell /></PluginHostProvider>);
+    await waitFor(() => expect(screen.getByText(/Primary/)).toBeTruthy());
+    expect(screen.getByRole("button", { name: "Export private key" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Delete private key" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Export private key" }));
+    await waitFor(() => expect(vault.exportKeyBackup).toHaveBeenCalledWith(SELECTED));
   });
 
   it("shows export errors while keeping selected delete controls usable", async () => {
