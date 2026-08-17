@@ -40,7 +40,7 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
       const name = `keymaster.key.${key}.plugin.${input.pluginId}.${input.storageId}`;
       const db = await new Promise<IDBDatabase>((resolve, reject) => {
         const req = indexedDB.open(name, input.version);
-        req.onupgradeneeded = () => input.upgrade(req.result, req.transaction?.db.version ?? 0, input.version);
+        req.onupgradeneeded = (event) => input.upgrade(req.result, (event as IDBVersionChangeEvent).oldVersion, input.version, req.transaction ?? undefined);
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       });

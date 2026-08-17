@@ -548,7 +548,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         const req = indexedDB.open(name, input.version);
         req.onupgradeneeded = (event) => {
           const ev = event as IDBVersionChangeEvent;
-          input.upgrade(req.result, ev.oldVersion, ev.newVersion ?? null);
+          input.upgrade(req.result, ev.oldVersion, ev.newVersion ?? null, req.transaction ?? undefined);
         };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);

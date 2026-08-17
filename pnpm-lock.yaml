@@ -138,6 +138,9 @@ importers:
       '@keymaster/plugin-importer-wif':
         specifier: '*'
         version: link:../../packages/plugin-importer-wif
+      '@keymaster/plugin-junglebus':
+        specifier: '*'
+        version: link:../../packages/plugin-junglebus
       '@keymaster/plugin-key-import':
         specifier: '*'
         version: link:../../packages/plugin-key-import
@@ -394,6 +397,21 @@ importers:
         specifier: '*'
         version: link:../runtime
 
+  packages/plugin-junglebus:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/hashes':
+        specifier: ^1.4.0
+        version: 1.8.0
+
   packages/plugin-key-import:
     dependencies:
       '@keymaster/contracts':
@@ -597,6 +615,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      '@noble/hashes':
+        specifier: ^1.4.0
+        version: 1.8.0
 
   packages/runtime:
     dependencies:
@@ -1717,6 +1738,7 @@ packages:
   '@xmldom/xmldom@0.9.10':
     resolution: {integrity: sha512-A9gOqLdi6cV4ibazAjcQufGj0B1y/vDqYrcuP6d/6x8P27gRS8643Dj9o1dEKtB6O7fwxb2FgBmJS2mX7gpvdw==}
     engines: {node: '>=14.6'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@zxing/browser@0.2.1':
     resolution: {integrity: sha512-92pVfVDUXbc15xu9vIEmhNyqIEASMEkDF92CwT6T+7sg2EHXJRktH9CQKoQSXe51UtbNsj+Fm09H/JBWHMs/Sw==}

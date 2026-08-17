@@ -47,6 +47,7 @@ import {
   type WocBroadcastPayload,
   type WocHistoryPayload,
   type WocTransactionObservationPayload,
+  type WocRawTransactionPayload,
   type Woc1SatContentPayload,
   type WocStasListTokensPayload,
   type WocUtxosPayload,
@@ -845,6 +846,23 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     });
   }
 
+  function getRawTransaction(network: BsvNetwork, txid: string, opts: { signal: AbortSignal; priority?: WocRequestPriority; timeoutMs?: number }): Promise<string> {
+    const normalized = normalizeTxidHex(txid);
+    return enqueue({
+      priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.TX_RAW,
+      fn: async (signal) => {
+        const raw = await fetchJson<unknown>(network, `/tx/hash/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs);
+        if (typeof raw === "string") return raw;
+        if (!raw || typeof raw !== "object") throw new Error("WOC raw transaction response is invalid");
+        const candidate = raw as Record<string, unknown>;
+        for (const key of ["hex", "tx_hex", "rawtx", "rawTxHex", "transaction"] as const) {
+          if (typeof candidate[key] === "string") return candidate[key] as string;
+        }
+        throw new Error("WOC raw transaction response has no hex");
+      }
+    });
+  }
+
   function broadcast(network: BsvNetwork, rawTxHex: string, opts: { signal: AbortSignal; timeoutMs?: number }): Promise<WocBroadcastResult> {
     return enqueue({
       priority: WOC_PRIORITY.broadcast,
@@ -1200,6 +1218,10 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
         const p = payload as WocTransactionObservationPayload;
         return getTransactionObservation(p.network, p.canonicalTxid, opts);
       }
+      case WOC_MSG.TX_RAW: {
+        const p = payload as WocRawTransactionPayload;
+        return getRawTransaction(p.network, p.txid, opts);
+      }
       case WOC_MSG.TX_BROADCAST: {
         const p = payload as WocBroadcastPayload;
         return broadcast(p.network, p.rawTxHex, { signal, timeoutMs: opts.timeoutMs });
@@ -1256,6 +1278,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       WOC_MSG.HISTORY_CONFIRMED,
       WOC_MSG.HISTORY_UNCONFIRMED,
       WOC_MSG.TX_OBSERVATION,
+      WOC_MSG.TX_RAW,
       WOC_MSG.TX_BROADCAST,
       WOC_MSG.BSV21_LIST_TOKENS,
       WOC_MSG.BSV21_ADDRESS_UNSPENT,

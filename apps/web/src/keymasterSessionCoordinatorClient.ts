@@ -26,6 +26,8 @@ import type {
   SessionCoordinatorClient,
   CoordinatorStorageControl,
   CoordinatorStorageData,
+  P2pkhProviderRegistrySnapshot,
+  P2pkhNetworkProviderSelection,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -50,6 +52,15 @@ export interface RecoverableCoordinatorDiagnostic {
 
 type EventListener<T> = (event: T) => void;
 
+type CoordinatorDispatchStatus = "not-dispatched" | "unknown";
+type CoordinatorSendError = Error & { dispatchStatus?: CoordinatorDispatchStatus };
+
+function coordinatorSendError(message: string, dispatchStatus: CoordinatorDispatchStatus): CoordinatorSendError {
+  const error = new Error(message) as CoordinatorSendError;
+  error.dispatchStatus = dispatchStatus;
+  return error;
+}
+
 // ============================================================
 // 2. Coordinator Client
 // ============================================================
@@ -69,6 +80,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     keyspaceGeneration: 0,
     taskSnapshots: [],
     scheduleSettings: { assetHoldingsIntervalMs: 900_000 },
+    p2pkhProviders: undefined,
   };
 
   private pendingRequests = new Map<
@@ -86,6 +98,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private backgroundSnapshotRevisionCache = -1;
   private assetDataRevisionCache = -1;
   private storageRevisionCache = -1;
+  private p2pkhProviderRevisionCache = -1;
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -165,7 +178,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers"]);
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -276,6 +289,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.backgroundSnapshotRevisionCache = -1;
     this.assetDataRevisionCache = -1;
     this.storageRevisionCache = -1;
+    this.p2pkhProviderRevisionCache = -1;
   }
 
   // ============================================================
@@ -444,6 +458,66 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
+  async p2pkhProvidersGet(): Promise<import("@keymaster/contracts").CoordinatorValueResult<P2pkhProviderRegistrySnapshot>> {
+    const request = { kind: "p2pkh.providers.get" as const, clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult as P2pkhProviderRegistrySnapshot, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "p2pkh.providers.update", clientId: this.clientId, requestId: this.generateRequestId(), network, selection, expectedGeneration, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  }
+
+  async p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "p2pkh.settings.update", clientId: this.clientId, requestId: this.generateRequestId(), settings, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  }
+
+  async p2pkhProviderConfigGet(providerId: string): Promise<import("@keymaster/contracts").CoordinatorValueResult<Record<string, unknown>>> {
+    const request = { kind: "p2pkh.provider-config.get" as const, clientId: this.clientId, requestId: this.generateRequestId(), providerId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: (response.operationResult ?? {}) as Record<string, unknown>, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async p2pkhProviderConfigUpdate(providerId: string, config: Record<string, unknown>): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "p2pkh.provider-config.update", clientId: this.clientId, requestId: this.generateRequestId(), providerId, config, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
+  }
+
+  async p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "p2pkh.broadcast" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status === "stale-epoch") return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: response.sessionEpoch };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) {
+      const failure = this.normalizeTransportFailure(request.kind, cause);
+      return failure.dispatchStatus === "not-dispatched"
+        ? { status: "ok", value: { status: "not-dispatched", reason: "coordinator-not-dispatched" }, sessionEpoch: this.bootstrapSnapshotCache.sessionEpoch }
+        : failure;
+    }
+  }
+
+  async p2pkhRebroadcastAncestors(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "p2pkh.rebroadcast-ancestors" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status === "stale-epoch") return { status: "ok", value: { status: "not-dispatched", reason: "stale-session-epoch" }, sessionEpoch: response.sessionEpoch };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) {
+      const failure = this.normalizeTransportFailure(request.kind, cause);
+      return failure.dispatchStatus === "not-dispatched"
+        ? { status: "ok", value: { status: "not-dispatched", reason: "coordinator-not-dispatched" }, sessionEpoch: this.bootstrapSnapshotCache.sessionEpoch }
+        : failure;
+    }
+  }
+
   async backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult> {
     const request: CoordinatorClientRequest = {
       kind: "background.settings.update",
@@ -479,7 +553,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.resetDisconnectedState();
     this.scheduleReconnect();
     this.reportRecoverableCoordinatorFailure(kind, cause);
-    return { status: "transport-error", message: "Coordinator connection lost", retryable: true };
+    const dispatchStatus = (cause as { dispatchStatus?: CoordinatorDispatchStatus } | undefined)?.dispatchStatus ?? "unknown";
+    return { status: "transport-error", message: "Coordinator connection lost", retryable: true, dispatchStatus };
   }
 
   reportRecoverableCoordinatorFailure(kind: string, cause: unknown): void {
@@ -504,7 +579,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private async sendRequest(request: CoordinatorClientRequest, transfer: ArrayBuffer[] = []): Promise<CoordinatorResponse> {
     if (!this.isConnected || !this.port) {
-      throw new Error("Not connected to Coordinator");
+      throw coordinatorSendError("Not connected to Coordinator", "not-dispatched");
     }
 
     const requestId = "requestId" in request ? request.requestId : this.generateRequestId();
@@ -515,7 +590,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.isConnected = false;
         this.resetDisconnectedState();
         this.scheduleReconnect();
-        reject(new Error("Request timeout"));
+        reject(coordinatorSendError("Request timeout", "unknown"));
       }, this.requestTimeoutMs);
 
       this.pendingRequests.set(requestId, { resolve, reject, timeout });
@@ -525,7 +600,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       } catch (err) {
         clearTimeout(timeout);
         this.pendingRequests.delete(requestId);
-        reject(err);
+        const failure = err instanceof Error ? err as CoordinatorSendError : coordinatorSendError(String(err), "not-dispatched");
+        failure.dispatchStatus ??= "not-dispatched";
+        reject(failure);
       }
     });
   }
@@ -612,6 +689,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } else if (event.type === "background.snapshot.changed") {
       // Background is a separate domain and must not advance Session identity.
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, taskSnapshots: [...event.snapshots] };
+    } else if (event.type === "p2pkh.providers.changed") {
+      this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, p2pkhProviders: event.snapshot };
     }
     const listeners = this.eventListeners.get(event.topic);
     if (listeners) {
@@ -626,6 +705,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (topic === "session.state") return this.sessionRevisionCache;
     if (topic === "background.snapshot") return this.backgroundSnapshotRevisionCache;
     if (topic === "storage.state") return this.storageRevisionCache;
+    if (topic === "p2pkh.providers") return this.p2pkhProviderRevisionCache;
     return this.assetDataRevisionCache;
   }
 
@@ -633,6 +713,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "session.state") return event.sessionRevision;
     if (event.topic === "background.snapshot") return event.backgroundSnapshotRevision;
     if (event.topic === "storage.state") return event.storageRevision;
+    if (event.topic === "p2pkh.providers") return event.providerRevision;
     return event.assetDataRevision;
   }
 
@@ -640,6 +721,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "session.state") this.sessionRevisionCache = event.sessionRevision;
     else if (event.topic === "background.snapshot") this.backgroundSnapshotRevisionCache = event.backgroundSnapshotRevision;
     else if (event.topic === "storage.state") this.storageRevisionCache = event.storageRevision;
+    else if (event.topic === "p2pkh.providers") this.p2pkhProviderRevisionCache = event.providerRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
 
@@ -658,6 +740,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     }
     if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
     if (event.topic === "storage.state") return event.type === "storage.state.changed" && Number.isSafeInteger(event.storageRevision) && event.storageRevision >= 0 && (event.providerGeneration === null || Number.isSafeInteger(event.providerGeneration));
+    if (event.topic === "p2pkh.providers") return event.type === "p2pkh.providers.changed" && Number.isSafeInteger(event.providerRevision) && event.providerRevision >= 0 && Boolean(event.snapshot);
     return event.type === "asset.data-changed" && Number.isSafeInteger(event.assetDataRevision);
   }
 

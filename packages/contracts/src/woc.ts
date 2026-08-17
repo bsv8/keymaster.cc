@@ -226,6 +226,13 @@ export interface WocService {
     options?: WocRequestOptions
   ): Promise<WocTransactionObservation>;
 
+  /** Confirmed raw transaction bytes for provider adapters. */
+  getRawTransaction?(
+    network: BsvNetwork,
+    txid: string,
+    options?: WocRequestOptions
+  ): Promise<string>;
+
   /** 广播：内部强制 broadcast 优先级，调用方不能降级。 */
   broadcast(
     network: BsvNetwork,

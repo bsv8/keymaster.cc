@@ -35,7 +35,7 @@ export function P2pkhBalanceWidget() {
     "p2pkh.balance",
     [],
     (snapshot) => snapshot.data ?? DEFAULT_BALANCES,
-    (a, b) => a.bsv?.total === b.bsv?.total && a.bsvtest?.total === b.bsvtest?.total
+    (a, b) => JSON.stringify(a) === JSON.stringify(b)
   );
 
   // 使用 Resource Store 读取设置
@@ -49,6 +49,7 @@ export function P2pkhBalanceWidget() {
 
   const stale = status === "failed" || status === "rate-limited";
   const showAmount = (b: P2pkhBalance | null) => (b ? formatSats(b.total) : "—");
+  const breakdown = (b: P2pkhBalance | null) => b?.breakdown ? <dl className="home-widget__breakdown"><dt>Block confirmed</dt><dd>{formatSats(b.breakdown.blockConfirmed)}</dd><dt>Isolated</dt><dd>{formatSats(b.breakdown.isolated)}</dd></dl> : null;
   const statusText = computeStatusText(readiness, status, t);
 
   return (
@@ -60,6 +61,7 @@ export function P2pkhBalanceWidget() {
         <div>
           <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvMain", { defaultValue: "BSV (main)" })}</p>
           <p className="home-widget__amount">{showAmount(balances.bsv)}</p>
+          {breakdown(balances.bsv)}
         </div>
       </section>
       {settings.includeTestnet ? (
@@ -67,14 +69,12 @@ export function P2pkhBalanceWidget() {
           <div>
             <p className="home-widget__label">{t("p2pkh.balanceWidget.bsvTest", { defaultValue: "BSV Testnet (test)" })}</p>
             <p className="home-widget__amount">{showAmount(balances.bsvtest)}</p>
+            {breakdown(balances.bsvtest)}
           </div>
         </section>
       ) : null}
       <p className="home-widget__status">
         {t("p2pkh.balanceWidget.statusLabel", { defaultValue: "状态：" })}{statusText}
-        {stale ? (
-          <span className="home-widget__stale">{t("p2pkh.balanceWidget.staleHint", { defaultValue: " (数据可能陈旧)" })}</span>
-        ) : null}
       </p>
     </div>
   );

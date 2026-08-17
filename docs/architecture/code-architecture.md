@@ -365,7 +365,22 @@ React 组件不再负责推断或兜底启动依赖。
 这份文档故意没有继续展开以下专题：
 
 - `plugin-protocol` 的 request / confirm / result 流程
-- `plugin-p2pkh` 的 recent-sync / history-backfill / transfer 结构
+- `plugin-p2pkh` 的转账预览与协议 spend 细节
 - `plugin-appmsg` 的 endpoint / owner / provider 迁移模型
+
+普通 BSV/P2PKH 的确认数据链路已统一为：
+
+```text
+Coordinator provider registry
+  -> p2pkh.transactions-sync（按网络过滤、可断点续传）
+  -> p2pkh_transactions（唯一确认事实）
+  -> p2pkh_owned_outpoints（可重建查询投影）
+  -> P2PKH service 的余额、Coins、Transactions 视图
+```
+
+页面不直接访问 WOC/JungleBus。Coordinator 持有 provider 选择、配置和
+`includeTestnet` 的 worker 侧真值；配置先持久化再切换内存状态。广播成功后
+由本地交易 DAG 提供 `local-confirmed` 找零，异常交易保持 `isolated`，链事实
+在确认、竞争花费或完整 reorg 核对后再收敛本地覆盖层。
 
 如果后面要继续写，我建议每个专题单独一页，不要继续往这份总览里堆。

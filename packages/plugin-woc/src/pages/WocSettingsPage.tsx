@@ -7,11 +7,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
-import type { WocConfig, WocQueueSnapshot, WocService } from "@keymaster/contracts";
+import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type SessionCoordinatorClient, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
 import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } from "../wocSettings.js";
 
 export function WocSettingsPage() {
   const service = useCapability<WocService>("woc.service");
+  const coordinator = useCapability<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
   const { t } = useI18n();
   const locale = useLocale();
   const timeFmt = useMemo(
@@ -27,6 +28,17 @@ export function WocSettingsPage() {
   }, [service]);
 
   useEffect(() => {
+    let alive = true;
+    void coordinator.p2pkhProviderConfigGet("woc").then((result) => {
+      if (!alive || result.status !== "ok") return;
+      const endpoint = typeof result.value.endpoint === "string" ? result.value.endpoint : service.getConfig().baseUrl;
+      const requestsPerSecond = typeof result.value.requestsPerSecond === "number" ? result.value.requestsPerSecond : service.getConfig().requestsPerSecond;
+      setDraft({ baseUrl: endpoint, requestsPerSecond });
+    });
+    return () => { alive = false; };
+  }, [coordinator, service]);
+
+  useEffect(() => {
     return service.onConfigChange((c) => setDraft(c));
   }, [service]);
 
@@ -34,7 +46,7 @@ export function WocSettingsPage() {
     return service.onQueueChange((s) => setSnapshot(s));
   }, [service]);
 
-  function apply(next: WocConfig) {
+  async function apply(next: WocConfig) {
     setDraft(next);
     setError(null);
     const urlCheck = validateWocBaseUrl(next.baseUrl);
@@ -47,15 +59,16 @@ export function WocSettingsPage() {
       setError(rateCheck.error);
       return;
     }
-    try {
-      service.updateConfig({ baseUrl: urlCheck.value, requestsPerSecond: rateCheck.value });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    const result = await coordinator.p2pkhProviderConfigUpdate("woc", { endpoint: urlCheck.value, requestsPerSecond: rateCheck.value });
+    if (result.status !== "accepted" && result.status !== "ok") {
+      setError("message" in result ? result.message : "Coordinator configuration update failed");
+      return;
     }
+    service.updateConfig({ baseUrl: urlCheck.value, requestsPerSecond: rateCheck.value });
   }
 
   function reset() {
-    apply({ ...DEFAULT_WOC_CONFIG });
+    void apply({ ...DEFAULT_WOC_CONFIG });
   }
 
   return (
@@ -64,14 +77,16 @@ export function WocSettingsPage() {
         label={t("woc.field.baseUrl", { defaultValue: "WOC base URL" })}
         description={t("woc.field.baseUrlDesc", { defaultValue: "网络路径之前的根 URL；缺省 https://api.whatsonchain.com/v1/bsv" })}
         value={draft.baseUrl}
-        onChange={(e) => apply({ ...draft, baseUrl: e.currentTarget.value })}
+        onChange={(e) => setDraft((current) => ({ ...current, baseUrl: e.currentTarget.value }))}
+        onBlur={() => void apply(draft)}
       />
       <TextInput
         label={t("woc.field.rps", { defaultValue: "每秒请求数" })}
         description={t("woc.field.rpsDesc", { defaultValue: "公共 API 建议默认 2；自定义代理可提高。" })}
         type="number"
         value={String(draft.requestsPerSecond)}
-        onChange={(e) => apply({ ...draft, requestsPerSecond: Number(e.currentTarget.value) })}
+        onChange={(e) => setDraft((current) => ({ ...current, requestsPerSecond: Number(e.currentTarget.value) }))}
+        onBlur={() => void apply(draft)}
       />
       {error ? <p className="woc-settings__error">{error}</p> : null}
       <div className="woc-settings__actions">

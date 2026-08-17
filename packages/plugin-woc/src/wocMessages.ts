@@ -39,6 +39,7 @@ export const WOC_MSG = {
   HISTORY_CONFIRMED: "woc.history.confirmed",
   HISTORY_UNCONFIRMED: "woc.history.unconfirmed",
   TX_OBSERVATION: "woc.tx.observation",
+  TX_RAW: "woc.tx.raw",
   TX_BROADCAST: "woc.tx.broadcast",
   // token / collectible 协议查询：与上面 coin 类 endpoint 共享 actor 的
   // priority queue / 限流 / 429 backoff / 多标签页协调。
@@ -85,6 +86,10 @@ export interface WocBroadcastPayload {
 /** WOC 交易级观察：按 canonical txid 查询 confirmed / unconfirmed / undefined。 */
 export interface WocTransactionObservationPayload extends WocActorPayload {
   canonicalTxid: string;
+}
+
+export interface WocRawTransactionPayload extends WocActorPayload {
+  txid: string;
 }
 
 /** BSV-21：列地址持有的 token。 */

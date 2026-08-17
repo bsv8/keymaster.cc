@@ -6,6 +6,7 @@
   "type": "module",
   "types": "./src/index.ts",
   "dependencies": {
+    "@noble/hashes": "^1.4.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*"

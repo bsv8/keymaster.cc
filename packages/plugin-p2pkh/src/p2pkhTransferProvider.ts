@@ -49,7 +49,6 @@ export function createP2pkhTransferProvider(deps: P2pkhTransferProviderDeps): P2
   unsubs.push(deps.service.onSyncStatusChange(() => notify()));
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());
   trackSubscribe(P2PKH_MSG.SYNC, () => notify());
-  trackSubscribe(P2PKH_MSG.BACKFILL_ERROR, () => notify());
   unsubs.push(deps.keyspace.onActiveKeyChanged(() => notify()));
   // 硬切换 008 收尾：初始化结束也触发重拉。
   unsubs.push(deps.keyspace.onInitializationChange(() => notify()));

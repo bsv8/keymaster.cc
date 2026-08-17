@@ -44,5 +44,6 @@ export * from "./storage.js";
 export * from "./cbor.js";
 export * from "./vaultSession.js";
 export * from "./sessionCoordinator.js";
+export * from "./bsvP2pkhProviders.js";
 export * from "./resource.js";
 export * from "./webrtc.js";

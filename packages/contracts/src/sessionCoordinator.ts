@@ -33,6 +33,11 @@ import type {
   StorageConditionalCapabilitiesView,
   StorageServiceStatus,
 } from "./storage.js";
+import type {
+  P2pkhProviderSettings,
+  P2pkhProviderRegistrySnapshot,
+  P2pkhNetworkProviderSelection,
+} from "./bsvP2pkhProviders.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -99,10 +104,17 @@ export type CoordinatorClientRequest =
     | { kind: "background.cancel"; clientId: string; requestId: string; taskId: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.cancel-by-key"; clientId: string; requestId: string; publicKeyHex: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "background.settings.update"; clientId: string; requestId: string; settings: CoordinatorBackgroundSyncSettings; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.providers.get"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.providers.update"; clientId: string; requestId: string; network: "main" | "test"; selection: P2pkhNetworkProviderSelection; expectedGeneration: number; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.settings.update"; clientId: string; requestId: string; settings: { includeTestnet: boolean }; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.provider-config.get"; clientId: string; requestId: string; providerId: string; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.provider-config.update"; clientId: string; requestId: string; providerId: string; config: Record<string, unknown>; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.broadcast"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch: SessionEpoch }
+    | { kind: "p2pkh.rebroadcast-ancestors"; clientId: string; requestId: string; ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch: SessionEpoch }
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers";
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
@@ -175,6 +187,8 @@ export type CoordinatorTransportFailure = {
   status: "transport-error";
   message: string;
   retryable: boolean;
+  /** Whether the request definitely crossed the Worker boundary. */
+  dispatchStatus?: "not-dispatched" | "unknown";
 };
 
 export type CoordinatorCommandResult = CoordinatorCommandAck | CoordinatorTransportFailure;
@@ -199,7 +213,16 @@ export type CoordinatorTopicEvent =
   | SessionStateEvent
   | BackgroundSnapshotEvent
   | AssetDataChangedEvent
-  | CoordinatorStorageStateEvent;
+  | CoordinatorStorageStateEvent
+  | P2pkhProvidersEvent;
+
+export interface P2pkhProvidersEvent {
+  topic: "p2pkh.providers";
+  type: "p2pkh.providers.changed";
+  sessionEpoch: SessionEpoch;
+  providerRevision: number;
+  snapshot: P2pkhProviderRegistrySnapshot;
+}
 
 export interface CoordinatorStorageStateEvent {
   topic: "storage.state";
@@ -258,7 +281,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -279,6 +302,7 @@ export interface CoordinatorBootstrapSnapshot {
   keyspaceGeneration: number;
   taskSnapshots: CoordinatorTaskSnapshot[];
   scheduleSettings: CoordinatorBackgroundSyncSettings;
+  p2pkhProviders?: P2pkhProviderRegistrySnapshot;
 }
 
 /** 任务快照。 */
@@ -319,6 +343,13 @@ export interface SessionCoordinatorClient {
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
+  p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
+  p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
+  p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;
+  p2pkhProviderConfigGet(providerId: string): Promise<CoordinatorValueResult<Record<string, unknown>>>;
+  p2pkhProviderConfigUpdate(providerId: string, config: Record<string, unknown>): Promise<CoordinatorCommandResult>;
+  p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
+  p2pkhRebroadcastAncestors(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
 }
 
 // ============================================================

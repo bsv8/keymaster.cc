@@ -31,13 +31,20 @@ import type {
   AssetDataInvalidationEvent,
   SessionStateEvent,
   VaultSealedSecret,
+  P2pkhProviderRegistrySnapshot,
+  P2pkhProviderSettings,
+  P2pkhNetworkProviderSelection,
+  P2pkhProviderRegistry,
+  P2pkhTransactionBroadcastProvider,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, buildOpenedAppMsgMessage, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { createMessageBus } from "@keymaster/runtime/messageBus";
-import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService } from "@keymaster/plugin-woc/coordinator";
+import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
+import { createJungleBusClient, registerJungleBusP2pkhProvider } from "@keymaster/plugin-junglebus/coordinator";
+import { createP2pkhProviderRegistry } from "@keymaster/plugin-p2pkh/coordinator";
 import { createP2pkhCoordinatorTasks, openP2pkhDb, createP2pkhDb } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
@@ -104,38 +111,50 @@ function decodePersisted(value: string): Uint8Array {
   try { return cryptoHexToBytes(value); } catch { return base64ToBytes(value); }
 }
 
-interface CoordinatorMetaRecord { id: "singleton"; selectedPublicKeyHex?: string; generation: number; scheduleSettings?: CoordinatorBackgroundSyncSettings; }
+interface CoordinatorMetaRecord { id: "singleton"; selectedPublicKeyHex?: string; generation: number; scheduleSettings?: CoordinatorBackgroundSyncSettings; p2pkhProviders?: P2pkhProviderSettings; p2pkhProviderConfigs?: Record<string, Record<string, unknown>>; p2pkhSettings?: { includeTestnet: boolean }; }
 const coordinatorMeta: CoordinatorMetaRecord = { id: "singleton", generation: 0, scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
+const defaultP2pkhProviders = (): P2pkhProviderSettings => ({ main: { syncProviderId: "woc", broadcastProviderId: "woc" }, test: { syncProviderId: "woc", broadcastProviderId: "woc" }, generation: 0 });
+let p2pkhRegistry: P2pkhProviderRegistry | undefined;
+let p2pkhWocService: WocService | undefined;
+let p2pkhJungleBusClient: ReturnType<typeof createJungleBusClient> | undefined;
+let p2pkhProviderRevision = 0;
+let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
 let testPersistCoordinatorMetaFailure = false;
 async function loadCoordinatorMeta(): Promise<void> {
   await new Promise<void>((resolve) => {
     const req = indexedDB.open("keymaster.session-coordinator", 1);
     req.onupgradeneeded = () => req.result.createObjectStore("meta", { keyPath: "id" });
-    req.onsuccess = () => { const db = req.result; const get = db.transaction("meta", "readonly").objectStore("meta").get("singleton"); get.onsuccess = () => { Object.assign(coordinatorMeta, get.result ?? {}); if (coordinatorMeta.scheduleSettings) coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings; resolve(); }; get.onerror = () => resolve(); };
+    req.onsuccess = () => { const db = req.result; const get = db.transaction("meta", "readonly").objectStore("meta").get("singleton"); get.onsuccess = () => { Object.assign(coordinatorMeta, get.result ?? {}); coordinatorMeta.p2pkhProviders ??= defaultP2pkhProviders(); coordinatorMeta.p2pkhSettings ??= { includeTestnet: false }; if (coordinatorMeta.scheduleSettings) coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings; resolve(); }; get.onerror = () => resolve(); };
     req.onerror = () => resolve();
   });
 }
-async function persistCoordinatorMeta(): Promise<void> {
+async function persistCoordinatorMetaValue(value: CoordinatorMetaRecord): Promise<void> {
   if (testPersistCoordinatorMetaFailure) {
     testPersistCoordinatorMetaFailure = false;
     throw new Error("injected coordinator meta persist failure");
   }
-  await new Promise<void>((resolve) => {
+  await new Promise<void>((resolve, reject) => {
     const req = indexedDB.open("keymaster.session-coordinator", 1);
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains("meta")) req.result.createObjectStore("meta", { keyPath: "id" });
     };
     req.onsuccess = () => {
+      let openedDb: IDBDatabase | undefined;
       try {
         const db = req.result;
+        openedDb = db;
         const tx = db.transaction("meta", "readwrite");
-        tx.objectStore("meta").put(coordinatorMeta);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-      } catch { resolve(); }
+        tx.objectStore("meta").put(value);
+        tx.oncomplete = () => { db.close(); resolve(); };
+        tx.onerror = () => { const error = tx.error ?? new Error("Coordinator metadata persistence failed"); db.close(); reject(error); };
+        tx.onabort = () => { const error = tx.error ?? new Error("Coordinator metadata persistence aborted"); db.close(); reject(error); };
+      } catch (error) { openedDb?.close(); reject(error); }
     };
-    req.onerror = () => resolve();
+    req.onerror = () => reject(req.error ?? new Error("Coordinator metadata database unavailable"));
   });
+}
+async function persistCoordinatorMeta(): Promise<void> {
+  await persistCoordinatorMetaValue(coordinatorMeta);
 }
 
 const STORAGE_DB_NAME = "keymaster.storage";
@@ -855,7 +874,7 @@ function createWorkerKeyspace(): KeyspaceService {
     setActive: async (publicKeyHex) => { await executeVaultOperation({ type: "setActive", publicKeyHex }); },
     requireActiveKey: () => { if (!coordinatorState.activePublicKeyHex) throw new Error("No active key"); return { publicKeyHex: coordinatorState.activePublicKeyHex, label: "", capabilities: ["p2pkh"], createdAt: "" }; },
     onActiveKeyChanged: () => () => undefined,
-    openKeyStorage: async (input) => { const name = storageName(input.publicKeyHex, input.pluginId, input.storageId); const db = await new Promise<IDBDatabase>((resolve, reject) => { const req = indexedDB.open(name, input.version); req.onupgradeneeded = () => input.upgrade(req.result, req.transaction?.db.version ?? 0, input.version); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); return { db, name, close: () => db.close() }; },
+    openKeyStorage: async (input) => { const name = storageName(input.publicKeyHex, input.pluginId, input.storageId); const db = await new Promise<IDBDatabase>((resolve, reject) => { const req = indexedDB.open(name, input.version); req.onupgradeneeded = (event) => input.upgrade(req.result, (event as IDBVersionChangeEvent).oldVersion, input.version, req.transaction ?? undefined); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); return { db, name, close: () => db.close() }; },
     registerPluginStorage: () => undefined,
     listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
@@ -871,12 +890,35 @@ async function registerCoordinatorTasks(): Promise<void> {
   const keyspace = createWorkerKeyspace();
   const messageBus = createMessageBus();
   const woc = createWocService({ messageBus });
+  p2pkhWocService = woc;
+  const persistedWocConfig = coordinatorMeta.p2pkhProviderConfigs?.woc;
+  if (persistedWocConfig) {
+    const next: Partial<import("@keymaster/contracts").WocConfig> = {};
+    if (typeof persistedWocConfig.endpoint === "string" && persistedWocConfig.endpoint.trim()) next.baseUrl = persistedWocConfig.endpoint.trim();
+    if (typeof persistedWocConfig.requestsPerSecond === "number") next.requestsPerSecond = persistedWocConfig.requestsPerSecond;
+    if (Object.keys(next).length) woc.updateConfig(next);
+  }
   const emitDataChanged = (providerId: string, kinds: AssetDataInvalidationEvent["kinds"]) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId, publicKeyHex: coordinatorState.activePublicKeyHex ?? "", kinds });
-  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, woc, messageBus, assertSessionFresh: (kind) => assertTaskFresh(kind === "recent" ? "p2pkh.recent-sync" : "p2pkh.history-backfill") });
-  // 使用恢复后的配置，而非固定值
+  p2pkhRegistry = createP2pkhProviderRegistry();
+  registerWocP2pkhProviders({ registry: p2pkhRegistry, woc });
+  const jungleBusConfig = coordinatorMeta.p2pkhProviderConfigs?.junglebus ?? {};
+  const jungleBus = createJungleBusClient({
+    ...(typeof jungleBusConfig.endpoint === "string" ? { baseUrl: jungleBusConfig.endpoint } : {}),
+    ...(typeof jungleBusConfig.mainEndpoint === "string" ? { mainBaseUrl: jungleBusConfig.mainEndpoint } : {}),
+    ...(typeof jungleBusConfig.testEndpoint === "string" ? { testBaseUrl: jungleBusConfig.testEndpoint } : {}),
+    ...(typeof jungleBusConfig.timeoutMs === "number" ? { timeoutMs: jungleBusConfig.timeoutMs } : {}),
+    ...(typeof jungleBusConfig.maxRetries === "number" ? { maxRetries: jungleBusConfig.maxRetries } : {}),
+    ...(typeof jungleBusConfig.requestsPerSecond === "number" ? { requestsPerSecond: jungleBusConfig.requestsPerSecond } : {})
+  });
+  p2pkhJungleBusClient = jungleBus;
+  if (jungleBusConfig.enabled !== false) {
+    registerJungleBusP2pkhProvider({ registry: p2pkhRegistry, client: jungleBus });
+  }
+  const providerSettings = () => coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
+  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, registry: p2pkhRegistry, getSelection: (network) => { const selection = providerSettings()[network]; return { syncProviderId: selection.syncProviderId, generation: providerSettings().generation }; }, isGenerationCurrent: (_network, generation) => generation === providerSettings().generation, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
+  // The ordinary BSV confirmed pipeline has exactly one task.
   const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
-  coordinatorState.taskRuntimes.set("p2pkh.recent-sync", { id: "p2pkh.recent-sync", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.recent(signal); assertSessionFresh(); if (result.committed && !result.cancelled) emitDataChanged("p2pkh", ["resource", "utxo", "history"]); } });
-  coordinatorState.taskRuntimes.set("p2pkh.history-backfill", { id: "p2pkh.history-backfill", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.backfill(signal); assertSessionFresh(); if (result.committed && !result.cancelled) emitDataChanged("p2pkh", ["history"]); } });
+  coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", { id: "p2pkh.transactions-sync", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.transactionsSync(signal); assertSessionFresh(); if (!result.cancelled) emitDataChanged("p2pkh", ["resource", "utxo", "history"]); } });
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
       if (!coordinatorState.activePublicKeyHex) return [];
@@ -893,7 +935,7 @@ async function registerCoordinatorTasks(): Promise<void> {
         return true;
       });
     },
-    getGlobalSettings: () => ({ includeTestnet: false })
+    getGlobalSettings: () => ({ includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true })
   };
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
   const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
@@ -969,6 +1011,29 @@ function handlePortDisconnect(clientId: string): void {
   // 不主动锁定，等待浏览器回收或重启
 }
 
+function isP2pkhBroadcastRequest(request: CoordinatorClientRequest): request is Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }> {
+  return request.kind === "p2pkh.broadcast" || request.kind === "p2pkh.rebroadcast-ancestors";
+}
+
+/** Remove a submission only when the Coordinator can prove no provider call was made. */
+async function abortNotDispatchedP2pkhSubmission(
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }>,
+  reason: string
+): Promise<void> {
+  // A rebroadcast may be the first request after an earlier Worker died
+  // after crossing the network boundary. An empty attempt list is therefore
+  // not evidence that this submission is safe to release.
+  if (request.kind !== "p2pkh.broadcast") return;
+  try {
+    const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: request.ownerPublicKeyHex }));
+    await db.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason, requestKind: "initial" });
+    publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
+  } catch {
+    // Cleanup is best-effort here. The response is still explicitly marked
+    // not-dispatched, while a later reconciliation can safely inspect the row.
+  }
+}
+
 // ============================================================
 // 5. Message Handling
 // ============================================================
@@ -1004,7 +1069,12 @@ async function handleClientMessage(
   // lock 是收敛型的安全操作：即使发起页面持有旧 epoch，也必须能够锁定
   // 当前全局会话。其余命令仍由 epoch 栅栏拒绝，避免旧页面操作新会话。
   if (request.kind !== "lock" && "expectedSessionEpoch" in request && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
-    sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } });
+    if (isP2pkhBroadcastRequest(request)) {
+      await abortNotDispatchedP2pkhSubmission(request, "stale-session-epoch");
+      sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "stale-session-epoch" } });
+    } else {
+      sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } });
+    }
     return;
   }
 
@@ -1061,6 +1131,9 @@ async function handleSubscribe(
       };
       void summary;
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
+    }
+    if (topic === "p2pkh.providers") {
+      return [{ topic, baselineRevision: p2pkhProviderRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: { topic, type: "p2pkh.providers.changed" as const, providerRevision: p2pkhProviderRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: getP2pkhProviderSnapshot() } }];
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
@@ -1234,6 +1307,15 @@ async function executeProcessRequest(
       request.expectedSessionEpoch !== "boot" &&
       request.expectedSessionEpoch !== "locked"
     ) {
+      if (isP2pkhBroadcastRequest(request)) {
+        await abortNotDispatchedP2pkhSubmission(request, "stale-session-epoch");
+        return {
+          requestId,
+          sessionEpoch: coordinatorState.sessionEpoch,
+          ack: { status: "ok" },
+          operationResult: { status: "not-dispatched", reason: "stale-session-epoch" },
+        };
+      }
       return {
         requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
@@ -1264,6 +1346,19 @@ async function executeProcessRequest(
         return await handleBackgroundCancelByKey(requestId, request);
       case "background.settings.update":
         return await handleBackgroundSettingsUpdate(requestId, request);
+      case "p2pkh.providers.get":
+        return await handleP2pkhProvidersGet(requestId);
+      case "p2pkh.settings.update":
+        return await handleP2pkhSettingsUpdate(requestId, request);
+      case "p2pkh.providers.update":
+        return await handleP2pkhProvidersUpdate(requestId, request);
+      case "p2pkh.provider-config.get":
+        return await handleP2pkhProviderConfigGet(requestId, request);
+      case "p2pkh.provider-config.update":
+        return await handleP2pkhProviderConfigUpdate(requestId, request);
+      case "p2pkh.broadcast":
+      case "p2pkh.rebroadcast-ancestors":
+        return await handleP2pkhBroadcast(requestId, request);
       default:
         return {
           requestId,
@@ -2184,7 +2279,253 @@ async function handleBackgroundSettingsUpdate(
 }
 
 // ============================================================
-// 10. Task Execution
+// 10. Ordinary P2PKH provider registry and broadcast RPC
+// ============================================================
+
+function p2pkhProviderSettings(): P2pkhProviderSettings {
+  return coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
+}
+
+function p2pkhSelection(network: "main" | "test"): P2pkhNetworkProviderSelection {
+  return p2pkhProviderSettings()[network];
+}
+
+function validateP2pkhSelection(network: "main" | "test", selection: P2pkhNetworkProviderSelection): string | undefined {
+  if (selection.syncProviderId && !p2pkhRegistry?.getConfirmedProvider(selection.syncProviderId, network)) return `Confirmed provider is unavailable for ${network}: ${selection.syncProviderId}`;
+  if (selection.broadcastProviderId && !p2pkhRegistry?.getBroadcastProvider(selection.broadcastProviderId, network)) return `Broadcast provider is unavailable for ${network}: ${selection.broadcastProviderId}`;
+  return undefined;
+}
+
+async function cancelP2pkhSyncForProviderChange(): Promise<void> {
+  const runtime = coordinatorState.taskRuntimes.get("p2pkh.transactions-sync");
+  runtime?.controller?.abort();
+  if (runtime?.timer) clearTimeout(runtime.timer);
+  runtime && (runtime.timer = undefined);
+  if (runtime?.completion) await runtime.completion.catch(() => undefined);
+  const publicKeyHex = coordinatorState.activePublicKeyHex;
+  if (!publicKeyHex) return;
+  const keyspace = createWorkerKeyspace();
+  try {
+    const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex }));
+    for (const resource of await db.listResourcesByKey()) await db.clearInProgressSyncState(resource.resourceId);
+  } catch {
+    // The generation fence still prevents late commits. A transient cleanup
+    // failure is surfaced by the next sync attempt instead of losing claims.
+  }
+  if (runtime && coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex) {
+    // Execute immediately; executeTask's finally block installs the next
+    // interval after this run. Scheduling here as well would leave a second
+    // timer alive and allow overlapping sync runs.
+    void executeTask(runtime.id, "provider-change");
+  }
+}
+
+async function handleP2pkhProvidersGet(requestId: string): Promise<CoordinatorResponse> {
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: getP2pkhProviderSnapshot() };
+}
+
+async function handleP2pkhSettingsUpdate(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.settings.update" }>
+): Promise<CoordinatorResponse> {
+  if (typeof request.settings.includeTestnet !== "boolean") {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Invalid P2PKH network settings" } };
+  }
+  const nextMeta: CoordinatorMetaRecord = { ...coordinatorMeta, p2pkhSettings: { includeTestnet: request.settings.includeTestnet } };
+  await persistCoordinatorMetaValue(nextMeta);
+  Object.assign(coordinatorMeta, nextMeta);
+  await cancelP2pkhSyncForProviderChange();
+  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", snapshots: getTaskSnapshots() });
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
+}
+
+async function handleP2pkhProvidersUpdate(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.providers.update" }>
+): Promise<CoordinatorResponse> {
+  const current = p2pkhProviderSettings();
+  if (request.expectedGeneration !== current.generation) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "P2PKH provider settings generation changed" } };
+  const validation = validateP2pkhSelection(request.network, request.selection);
+  if (validation) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: validation } };
+  const next: P2pkhProviderSettings = { ...current, main: { ...current.main }, test: { ...current.test }, [request.network]: { ...request.selection }, generation: current.generation + 1 };
+  const nextMeta: CoordinatorMetaRecord = { ...coordinatorMeta, p2pkhProviders: next };
+  await persistCoordinatorMetaValue(nextMeta);
+  Object.assign(coordinatorMeta, nextMeta);
+  await cancelP2pkhSyncForProviderChange();
+  publishTopicEvent("p2pkh.providers", { type: "p2pkh.providers.changed", snapshot: getP2pkhProviderSnapshot() });
+  publishTopicEvent("background.snapshot", { type: "background.snapshot.changed", snapshots: getTaskSnapshots() });
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" }, operationResult: getP2pkhProviderSnapshot() };
+}
+
+async function handleP2pkhProviderConfigGet(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.get" }>
+): Promise<CoordinatorResponse> {
+  const persisted = coordinatorMeta.p2pkhProviderConfigs?.[request.providerId];
+  if (persisted) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...persisted } };
+  if (request.providerId === "woc" && p2pkhWocService) {
+    const config = p2pkhWocService.getConfig();
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { endpoint: config.baseUrl, requestsPerSecond: config.requestsPerSecond } };
+  }
+  if (request.providerId === "junglebus" && p2pkhJungleBusClient?.getConfig) {
+    const config = p2pkhJungleBusClient.getConfig();
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { endpoint: config.baseUrl, mainEndpoint: config.mainBaseUrl, testEndpoint: config.testBaseUrl, timeoutMs: config.timeoutMs, maxRetries: config.maxRetries, requestsPerSecond: config.requestsPerSecond } };
+  }
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {} };
+}
+
+async function handleP2pkhProviderConfigUpdate(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.provider-config.update" }>
+): Promise<CoordinatorResponse> {
+  const knownDisabledConfirmedProvider = request.providerId === "junglebus" && Boolean(p2pkhJungleBusClient);
+  if (!knownDisabledConfirmedProvider
+    && !p2pkhRegistry?.listConfirmedProviders().some((provider) => provider.id === request.providerId)
+    && !p2pkhRegistry?.listBroadcastProviders().some((provider) => provider.id === request.providerId)) {
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Unknown P2PKH provider: ${request.providerId}` } };
+  }
+  const previousConfigs = coordinatorMeta.p2pkhProviderConfigs;
+  const previousConfig = previousConfigs?.[request.providerId];
+  const enabled = request.providerId === "junglebus" ? request.config.enabled !== false : true;
+  const nextConfig = { ...(previousConfig ?? {}), ...request.config };
+  const settings = p2pkhProviderSettings();
+  const disabling = request.providerId === "junglebus" && !enabled;
+  const nextSelection: P2pkhProviderSettings = {
+    ...settings,
+    // Keep the user's explicit provider id when the optional plugin is
+    // disabled. The registry absence is intentional and makes the sync task
+    // enter blocked; clearing to null would silently turn an explicit choice
+    // into an unconfigured/fallback-looking state.
+    main: { ...settings.main },
+    test: { ...settings.test },
+    generation: settings.generation + 1
+  };
+  const nextMeta: CoordinatorMetaRecord = {
+    ...coordinatorMeta,
+    p2pkhProviderConfigs: { ...(previousConfigs ?? {}), [request.providerId]: nextConfig },
+    p2pkhProviders: nextSelection
+  };
+  const wasJungleBusRegistered = Boolean(p2pkhRegistry?.getConfirmedProvider("junglebus", "main"));
+  const previousJungleBusClientConfig = p2pkhJungleBusClient?.getConfig?.();
+  const previousWocConfig = p2pkhWocService?.getConfig?.();
+  try {
+    // Persist the candidate before changing the in-memory selection or
+    // registry. A failed write must leave the running session untouched.
+    await persistCoordinatorMetaValue(nextMeta);
+    if (request.providerId === "junglebus" && enabled && p2pkhJungleBusClient && !wasJungleBusRegistered) {
+      registerJungleBusP2pkhProvider({ registry: p2pkhRegistry!, client: p2pkhJungleBusClient });
+    }
+    if (request.providerId === "junglebus" && disabling && wasJungleBusRegistered) {
+      p2pkhRegistry?.unregisterConfirmedProvider?.("junglebus");
+    }
+    if (request.providerId === "woc" && p2pkhWocService) {
+      const update: Partial<import("@keymaster/contracts").WocConfig> = {};
+      if (typeof request.config.endpoint === "string" && request.config.endpoint.trim()) update.baseUrl = request.config.endpoint.trim();
+      if (typeof request.config.requestsPerSecond === "number") update.requestsPerSecond = request.config.requestsPerSecond;
+      if (Object.keys(update).length) p2pkhWocService.updateConfig(update);
+    } else if (request.providerId === "junglebus" && p2pkhJungleBusClient?.updateConfig) {
+      p2pkhJungleBusClient.updateConfig({
+        ...(typeof request.config.endpoint === "string" ? { baseUrl: request.config.endpoint } : {}),
+        ...(typeof request.config.mainEndpoint === "string" ? { mainBaseUrl: request.config.mainEndpoint } : {}),
+        ...(typeof request.config.testEndpoint === "string" ? { testBaseUrl: request.config.testEndpoint } : {}),
+        ...(typeof request.config.timeoutMs === "number" ? { timeoutMs: request.config.timeoutMs } : {}),
+        ...(typeof request.config.maxRetries === "number" ? { maxRetries: request.config.maxRetries } : {}),
+        ...(typeof request.config.requestsPerSecond === "number" ? { requestsPerSecond: request.config.requestsPerSecond } : {})
+      });
+    }
+  } catch (error) {
+    if (request.providerId === "junglebus" && p2pkhJungleBusClient) {
+      const isRegistered = Boolean(p2pkhRegistry?.getConfirmedProvider("junglebus", "main"));
+      if (wasJungleBusRegistered && !isRegistered) registerJungleBusP2pkhProvider({ registry: p2pkhRegistry!, client: p2pkhJungleBusClient });
+      if (!wasJungleBusRegistered && isRegistered) p2pkhRegistry?.unregisterConfirmedProvider?.("junglebus");
+      if (previousJungleBusClientConfig) p2pkhJungleBusClient.updateConfig?.(previousJungleBusClientConfig);
+    }
+    if (request.providerId === "woc" && previousWocConfig) p2pkhWocService?.updateConfig?.(previousWocConfig);
+    await persistCoordinatorMetaValue(coordinatorMeta).catch(() => undefined);
+    throw error;
+  }
+  Object.assign(coordinatorMeta, nextMeta);
+  await cancelP2pkhSyncForProviderChange();
+  publishTopicEvent("p2pkh.providers", { type: "p2pkh.providers.changed", snapshot: getP2pkhProviderSnapshot() });
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "accepted" } };
+}
+
+async function handleP2pkhBroadcast(
+  requestId: string,
+  request: Extract<CoordinatorClientRequest, { kind: "p2pkh.broadcast" | "p2pkh.rebroadcast-ancestors" }>
+): Promise<CoordinatorResponse> {
+  const isRebroadcast = request.kind === "p2pkh.rebroadcast-ancestors";
+  const settings = p2pkhProviderSettings();
+  if (request.expectedProviderGeneration !== settings.generation) {
+    await abortNotDispatchedP2pkhSubmission(request, "stale-provider-generation");
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "stale-provider-generation" } };
+  }
+  const providerId = p2pkhSelection(request.network).broadcastProviderId;
+  const provider = testP2pkhBroadcastProvider ?? (providerId ? p2pkhRegistry?.getBroadcastProvider(providerId, request.network) : undefined);
+  if (!provider) {
+    await abortNotDispatchedP2pkhSubmission(request, "broadcast-provider-unavailable");
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "broadcast-provider-unavailable" } };
+  }
+
+  const keyspace = createWorkerKeyspace();
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: request.ownerPublicKeyHex }));
+  const localRows = (await db.listLocalTransactions()).filter((row) => row.network === request.network);
+  const local = localRows.find((row) => row.id === request.submissionId);
+  if (!local) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
+  if (!isRebroadcast && local.state !== "submitting") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in state ${local.state}` } };
+  const byTxid = new Map(localRows.map((row) => [row.txid, row]));
+  const ordered: typeof localRows = [];
+  const visited = new Set<string>();
+  const visit = (row: (typeof localRows)[number]) => {
+    if (visited.has(row.id)) return;
+    visited.add(row.id);
+    for (const parentTxid of row.parentTxids) {
+      const parent = byTxid.get(parentTxid);
+      if (parent) visit(parent);
+    }
+    ordered.push(row);
+  };
+  visit(local);
+  const dispatch = async (row: (typeof localRows)[number]) => {
+    const previousState = row.state;
+    const startedAt = new Date().toISOString();
+    try {
+      const result = await provider.broadcast({ network: request.network, canonicalTxid: row.txid, rawTxHex: row.rawTxHex });
+      if (result.canonicalTxid !== row.txid) throw new Error("Broadcast provider returned a different transaction id");
+      const finishedAt = new Date().toISOString();
+      await db.finishLocalSubmission({ submissionId: row.id, state: "local-confirmed", attempt: { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
+      return { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: row.txid } as const;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const finishedAt = new Date().toISOString();
+      const attempt = { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
+      if (previousState === "local-confirmed") {
+        // A failed rebroadcast cannot invalidate an earlier accepted or
+        // already-known result. Preserve outputs/claims and append the audit.
+        await db.finishLocalSubmission({ submissionId: row.id, state: "local-confirmed", attempt });
+      } else {
+        await db.finishLocalSubmission({ submissionId: row.id, state: "isolated", reason: message, attempt });
+      }
+      publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim"] });
+      return { status: previousState === "local-confirmed" ? "rebroadcast-failed" : "isolated", txid: row.txid, reason: message } as const;
+    }
+  };
+  if (isRebroadcast) {
+    for (const ancestor of ordered) {
+      if (ancestor.state === "chain-confirmed") continue;
+      if (ancestor.state === "conflicted") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: ancestor.txid, reason: "conflicted-ancestor" } };
+      const result = await dispatch(ancestor);
+      if (result.status === "isolated" || result.status === "rebroadcast-failed") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...result, providerId: provider.descriptor.id } };
+    }
+    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "local-confirmed", providerId: provider.descriptor.id, txid: local.txid } };
+  }
+  const result = await dispatch(local);
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...result, providerId: provider.descriptor.id } };
+}
+
+// ============================================================
+// 11. Task Execution
 // ============================================================
 
 async function executeTask(taskId: string, reason: string): Promise<void> {
@@ -2204,6 +2545,8 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
   runtime.startedEpoch = coordinatorState.sessionEpoch;
   runtime.startedGeneration = coordinatorState.keyspaceGeneration;
   runtime.startedPublicKeyHex = coordinatorState.activePublicKeyHex;
+  runtime.blockedReason = undefined;
+  runtime.error = undefined;
   runtime.state = "running";
   runtime.lastStartedAt = new Date().toISOString();
   runtime.lastAttemptAt = runtime.lastStartedAt;
@@ -2227,6 +2570,10 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
     if (controller.signal.aborted) {
       runtime.state = "idle";
       runtime.error = "Cancelled";
+    } else if (taskId === "p2pkh.transactions-sync" && typeof err === "object" && err !== null && "code" in err && (err as { code?: unknown }).code === "provider-unavailable") {
+      runtime.state = "blocked";
+      runtime.blockedReason = err instanceof Error ? err.message : "Confirmed provider unavailable";
+      runtime.error = runtime.blockedReason;
     } else {
       runtime.state = "idle";
       runtime.error = err instanceof Error ? err.message : String(err);
@@ -2241,7 +2588,7 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
         runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) {
       runtime.state = "blocked";
       runtime.blockedReason = "Vault is locked";
-    } else if (!controller.signal.aborted) {
+    } else if (!controller.signal.aborted && runtime.state !== "blocked") {
       // 仅当任务所属 session 仍有效且未 abort 时才恢复 idle/排程
       scheduleRuntime(runtime);
     }
@@ -2271,6 +2618,20 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
     taskSnapshots: getTaskSnapshots(),
     scheduleSettings: coordinatorState.scheduleSettings,
+    p2pkhProviders: getP2pkhProviderSnapshot(),
+  };
+}
+
+function getP2pkhProviderSnapshot(): P2pkhProviderRegistrySnapshot {
+  const settings = coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
+  return {
+    syncProviders: p2pkhRegistry?.listConfirmedProviders() ?? [],
+    broadcastProviders: p2pkhRegistry?.listBroadcastProviders() ?? [],
+    selection: {
+      main: { ...settings.main },
+      test: { ...settings.test },
+      generation: settings.generation,
+    },
   };
 }
 
@@ -2300,7 +2661,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -2423,6 +2784,7 @@ export function __testResetState(): void {
   storageRuntime = testStorageRuntimeOverride;
   passkeyAddIntents.clear();
   coordinatorRequestTail = Promise.resolve();
+  testP2pkhBroadcastProvider = undefined;
 }
 
 export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePublicKeyHex?: string): void {
@@ -2430,8 +2792,85 @@ export function __testSetVaultStatus(status: CoordinatorVaultStatus, activePubli
   coordinatorState.activePublicKeyHex = activePublicKeyHex;
 }
 
+export function __testSetP2pkhBroadcastProvider(provider: P2pkhTransactionBroadcastProvider | undefined): void {
+  testP2pkhBroadcastProvider = provider;
+}
+
 export function __testFailNextCoordinatorMetaPersist(): void {
   testPersistCoordinatorMetaFailure = true;
+}
+
+/** Test-only seams for the worker-owned P2PKH provider state machine. */
+async function ensureTestP2pkhProviders(): Promise<void> {
+  if (!p2pkhRegistry) await registerCoordinatorTasks();
+}
+
+export async function __testP2pkhProviderConfigUpdate(providerId: string, config: Record<string, unknown>): Promise<CoordinatorResponse> {
+  await ensureTestP2pkhProviders();
+  return handleP2pkhProviderConfigUpdate(`test-p2pkh-config-${Date.now()}`, {
+    kind: "p2pkh.provider-config.update",
+    clientId: "test",
+    requestId: `test-p2pkh-config-${Date.now()}`,
+    providerId,
+    config,
+    expectedSessionEpoch: coordinatorState.sessionEpoch
+  });
+}
+
+export async function __testP2pkhProviderConfigGet(providerId: string): Promise<Record<string, unknown>> {
+  await ensureTestP2pkhProviders();
+  const response = await handleP2pkhProviderConfigGet(`test-p2pkh-config-get-${Date.now()}`, {
+    kind: "p2pkh.provider-config.get",
+    clientId: "test",
+    requestId: `test-p2pkh-config-get-${Date.now()}`,
+    providerId,
+    expectedSessionEpoch: coordinatorState.sessionEpoch
+  });
+  return (response.operationResult ?? {}) as Record<string, unknown>;
+}
+
+export async function __testP2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection): Promise<CoordinatorResponse> {
+  await ensureTestP2pkhProviders();
+  const current = p2pkhProviderSettings();
+  return handleP2pkhProvidersUpdate(`test-p2pkh-selection-${Date.now()}`, {
+    kind: "p2pkh.providers.update",
+    clientId: "test",
+    requestId: `test-p2pkh-selection-${Date.now()}`,
+    network,
+    selection,
+    expectedGeneration: current.generation,
+    expectedSessionEpoch: coordinatorState.sessionEpoch
+  });
+}
+
+export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submission: unknown; claims?: unknown[]; localOutpoints?: unknown[] }): Promise<void> {
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
+  await db.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never, localOutpoints: (input.localOutpoints ?? []) as never });
+}
+
+export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submissionId: string; state: "local-confirmed" | "isolated" }): Promise<void> {
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
+  await db.finishLocalSubmission({ submissionId: input.submissionId, state: input.state });
+}
+
+export async function __testListP2pkhLocalTransactions(ownerPublicKeyHex: string): Promise<unknown[]> {
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
+  return db.listLocalTransactions();
+}
+
+export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch?: SessionEpoch; rebroadcast?: boolean }): Promise<CoordinatorResponse> {
+  await ensureTestP2pkhProviders();
+  const kind = input.rebroadcast ? "p2pkh.rebroadcast-ancestors" : "p2pkh.broadcast";
+  return handleP2pkhBroadcast(`test-p2pkh-broadcast-${Date.now()}`, {
+    kind,
+    clientId: "test",
+    requestId: `test-p2pkh-broadcast-${Date.now()}`,
+    ownerPublicKeyHex: input.ownerPublicKeyHex,
+    network: input.network,
+    submissionId: input.submissionId,
+    expectedProviderGeneration: input.expectedProviderGeneration,
+    expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch
+  });
 }
 
 export function __testGetConnectedPortCount(): number {

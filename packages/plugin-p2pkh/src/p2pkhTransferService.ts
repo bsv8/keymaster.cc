@@ -8,11 +8,13 @@
 //
 // 硬切换 002 收尾：所有签名 / 选币 / owner 真值走 `publicKeyHex`；
 
-import type { AssetDataNotifier, MessageBus, PluginLogger, VaultService, WocService } from "@keymaster/contracts";
+import type { AssetDataNotifier, CoordinatorValueResult, MessageBus, PluginLogger, ProtectedOutpointRegistry, VaultService } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
+  P2pkhKeyResource,
   P2pkhLocalInputClaim,
-  P2pkhLocalSubmission,
+  P2pkhLocalOutpoint,
+  P2pkhLocalTransaction,
   P2pkhTransferInput,
   P2pkhTransferPreview,
   P2pkhTransferResult,
@@ -30,10 +32,10 @@ import {
   type UnsignedTx
 } from "./p2pkhSigner.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
+import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
 
 export interface P2pkhTransferServiceDeps {
   vault: VaultService;
-  woc: WocService;
   messageBus: MessageBus;
   /** 资产数据变更通知器：转账成功后立即通知页面重读。 */
   assetDataNotifier?: AssetDataNotifier;
@@ -49,6 +51,11 @@ export interface P2pkhTransferServiceDeps {
    * 时刻等于 active key。
    */
   getDb: (publicKeyHex: string) => Promise<P2pkhDbHandle>;
+  /** Production ordinary transfers use the Coordinator-selected broadcaster. */
+  broadcastPreflight?: (input: { network: "main" | "test" }) => Promise<{ generation: number }>;
+  broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }) => Promise<CoordinatorValueResult<unknown>>;
+  /** Ordinary funding must never consume protocol-protected outpoints. */
+  protectedOutpoints?: ProtectedOutpointRegistry;
   /**
    * 当前 active key。p2pkhService.rebindActiveKey 内部用 requireReadyKey
    * 收窄；这里直接拿到的就是 ReadyKeyIdentity（publicKeyHex 必填）。
@@ -91,17 +98,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       }
       validateAddressForNetwork(validated.recipientAddress, network);
 
-      const reservations = await db.listLocalInputClaimsByResource(resource.resourceId);
-      const reserved = new Set(
-        reservations.filter((r) => r.state === "claimed").map((r) => `${r.txid}:${r.vout}`)
-      );
-      const allUtxos = await db.listUtxos();
-      const candidates = allUtxos.filter(
-        (u) =>
-          u.resourceId === resource.resourceId &&
-          u.publicKeyHex === owner.publicKeyHex &&
-          !reserved.has(`${u.txid}:${u.vout}`)
-      );
+      const candidates = await listTransferCandidates({ db, resource, ownerPublicKeyHex: owner.publicKeyHex, network, protectedOutpoints: deps.protectedOutpoints });
       if (candidates.length === 0) {
         throw buildAllocationError({
           available: 0,
@@ -219,189 +216,163 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         throw new Error("Preview amount is invalid");
       }
 
+      const candidates = await listTransferCandidates({ db, resource, ownerPublicKeyHex: owner.publicKeyHex, network, protectedOutpoints: deps.protectedOutpoints });
+      const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
+      const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress({ publicKeyHex: owner.publicKeyHex, network });
+      validateFinalTransferPreview(preview, { candidates, expectedChangeAddress });
+
+      // Provider availability and generation are checked before the atomic
+      // submission/claim write. A missing selected broadcaster is a local
+      // preflight error, not a broadcast attempt and not an isolated claim.
+      if (!deps.broadcastPreflight || !deps.broadcastWithCoordinator) {
+        throw new Error("Coordinator broadcast is required for ordinary P2PKH transfers");
+      }
+      const providerGeneration = (await deps.broadcastPreflight({ network })).generation;
+
       const submissionId = crypto.randomUUID();
       const now = new Date().toISOString();
-      const submissionBase: P2pkhLocalSubmission = {
-        id: submissionId,
-        resourceId: resource.resourceId,
-        publicKeyHex: owner.publicKeyHex,
-        network,
-        assetId: preview.assetId,
-        canonicalTxid: preview.txid,
-        expectedCanonicalTxid: preview.txid,
-        rawTxHex: preview.rawTxHex,
-        recipientAddress: preview.recipientAddress,
-        amountSatoshis: preview.amountSatoshis,
-        status: "broadcast-pending-woc",
-        txidIntegrity: "missing",
-        inputOutpoints: preview.allocation.selected.map((u) => ({ txid: u.txid, vout: u.vout, value: u.value })),
-        createdAt: now,
-        updatedAt: now
-      };
-      // 硬切换 002 收尾：原子地写 submission + 所有 input claim
-      // （tryClaimSubmissionWithInputs 内部走单一 readwrite 事务）。
+      // 原子地写 local transaction + 所有 input claim + local outputs。
       // 冲突时整事务 abort，submission / claims 都不写——这是
       // 并发防重的事务层保险。两个并发 submit 撞到同一对
       // (txid, vout) 时，第二个会抛「already claimed」，外层
       // 不进 broadcast。
-      const { claimIds: localInputClaimIds } = await db.tryClaimSubmissionWithInputs({
-        submission: submissionBase,
-        inputs: preview.allocation.selected,
-        expectedCanonicalTxid: preview.txid
-      });
+      const localInputClaimIds = preview.allocation.selected.map((input) => localInputClaimIdFor(resource.resourceId, input.txid, input.vout));
+      const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: preview.txid, rawTxHex: preview.rawTxHex, state: "submitting", inputOutpointKeys: preview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: preview.outputs.flatMap((output, vout) => output.address === preview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), parentTxids: [...new Set(preview.allocation.selected.map((input) => input.txid))], createdAt: now, updatedAt: now, attempts: [] };
+      const claims: P2pkhLocalInputClaim[] = preview.allocation.selected.map((input) => ({ id: localInputClaimIdFor(resource.resourceId, input.txid, input.vout), submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: input.txid, vout: input.vout, outpointKey: `${input.txid}:${input.vout}`, value: input.value, state: "active", createdAt: now, updatedAt: now }));
+      const localOutpoints: P2pkhLocalOutpoint[] = localSubmission.ownOutputs.map((output) => ({ id: `${resource.resourceId}:${preview.txid}:${output.vout}`, resourceId: resource.resourceId, txid: preview.txid, vout: output.vout, value: output.value, scriptHex: output.scriptHex, submissionId, state: "unavailable", createdAt: now, updatedAt: now }));
+      await db.prepareLocalSubmission({ submission: localSubmission, claims, localOutpoints });
 
-      let broadcastRes:
-        | {
-            accepted: true;
-            canonicalTxid: string;
-            providerReturnedTxidRaw?: string;
-            providerReturnedTxidNormalized?: string;
-            txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
-          }
-        | undefined;
-      try {
-        broadcastRes = await deps.woc.broadcast(network, preview.rawTxHex, { timeoutMs: 30_000 });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const isDefinitiveRejection = isDefinitivelyRejectedError(msg);
-        if (isDefinitiveRejection) {
-          // definitive rejection：value 没在链上花掉，释放本次 claim
-          // 让这些 outpoint 重新可被后续分配选到。审计信息保留在
-          // failed submission 行里。不引入 `released` 状态——直接
-          // delete 行，状态机保持单一。
-          await db.releaseLocalInputClaims(localInputClaimIds);
-          await db.putLocalSubmission({
-            ...submissionBase,
-            status: "rejected",
-            error: msg,
-            updatedAt: new Date().toISOString()
-          });
-          // 通知页面重读：claim 已释放、submission 已写入
-          if (deps.assetDataNotifier) {
-            deps.assetDataNotifier.emit({
-              providerId: "p2pkh",
-              publicKeyHex: owner.publicKeyHex,
-              revision: Date.now(),
-              kinds: ["utxo", "submission", "claim"],
-            });
-          }
-          deps.logger?.warn({
-            scope: "p2pkh.transfer",
-            event: "transfer.broadcast.rejected",
-            message: `P2PKH transfer broadcast rejected: ${preview.txid}`,
-            data: { resourceId: resource.resourceId, network, txid: preview.txid, releasedClaimCount: localInputClaimIds.length },
-            keyScope: { publicKeyHex: owner.publicKeyHex },
-            error: { name: err instanceof Error ? err.name : "Error", message: msg }
-          });
-          return {
-            status: "rejected",
-            txid: preview.txid,
-            rawTxHex: preview.rawTxHex,
-            error: msg,
-            submissionId,
-            localInputClaimIds: []
-          };
+      {
+        let result: CoordinatorValueResult<unknown>;
+        try {
+          // A rejected RPC can mean that the request crossed the Worker
+          // boundary but its response was lost. Treat it as possibly sent;
+          // never write a terminal state from the page.
+          result = await deps.broadcastWithCoordinator({ ownerPublicKeyHex: owner.publicKeyHex, network, submissionId, expectedProviderGeneration: providerGeneration });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          return { status: "isolated", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds };
         }
-
-        // ambiguous / network error：保留 claim，让 recent-sync 对账。
-        // 这与 rejection 不同——UTXO 可能已经花掉，释放会留双花窗口。
-        await db.putLocalSubmission({
-          ...submissionBase,
-          status: "broadcast-pending-woc",
-          error: msg,
-          updatedAt: new Date().toISOString()
-        });
-        // 通知页面重读：submission 已写入（claim 保留，由 recent-sync 对账）
-        if (deps.assetDataNotifier) {
-          deps.assetDataNotifier.emit({
-            providerId: "p2pkh",
-            publicKeyHex: owner.publicKeyHex,
-            revision: Date.now(),
-            kinds: ["utxo", "submission", "claim"],
-          });
+        if (result.status === "ok") {
+          const value = result.value as { status?: string; txid?: string } | undefined;
+          if (value?.status === "not-dispatched") {
+            await db.abortUnattemptedLocalSubmission?.({ submissionId, reason: String((value as { reason?: unknown }).reason ?? "not-dispatched"), requestKind: "initial" });
+            deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+            return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: String((value as { reason?: unknown }).reason ?? "not-dispatched"), submissionId, localInputClaimIds: [] };
+          }
+          const isolated = value?.status === "isolated";
+          const isolationReason = isolated ? ((value as { reason?: unknown } | undefined)?.reason as string | undefined ?? "broadcast-isolated") : undefined;
+          // The Coordinator is the sole writer of the broadcast terminal state.
+          // The page may receive a response after sync has already promoted the
+          // row to chain-confirmed, so it must never replay this transition.
+          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+          return { status: isolated ? "isolated" : value?.status === "already-known" ? "local-confirmed" : "local-confirmed", txid: preview.txid, rawTxHex: preview.rawTxHex, submissionId, localInputClaimIds };
         }
-        deps.logger?.error({
-          scope: "p2pkh.transfer",
-          event: "transfer.broadcast.unknown",
-          message: `P2PKH transfer broadcast unknown: ${preview.txid}`,
-          data: { resourceId: resource.resourceId, network, txid: preview.txid },
-          keyScope: { publicKeyHex: owner.publicKeyHex },
-          error: { name: err instanceof Error ? err.name : "Error", message: msg }
-        });
-        deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
-        return {
-          status: "unknown",
-          txid: preview.txid,
-          rawTxHex: preview.rawTxHex,
-          error: msg,
-          submissionId,
-          localInputClaimIds
-        };
+        const reason = "message" in result ? result.message : "Coordinator broadcast transport failed";
+        if (result.status === "transport-error" && result.dispatchStatus === "not-dispatched") {
+          await db.abortUnattemptedLocalSubmission?.({ submissionId, reason, requestKind: "initial" });
+          deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+          return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds: [] };
+        }
+        // A transport failure is ambiguous: the Worker may have broadcast and
+        // committed a final state even though the response was lost. Leave the
+        // row for the Coordinator/sync reconciliation instead of writing from
+        // the page and potentially downgrading chain-confirmed state.
+        return { status: "isolated", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds };
       }
-
-      if (!broadcastRes) {
-        throw new Error("Broadcast result is missing");
-      }
-
-      // 关键不变量（硬切换 003 收尾）：本判断依赖的是 plugin-woc 已归一化
-      // 后的 WocBroadcastResult.txidIntegrity（exact / reversed / mismatch /
-      // missing）。plugin-p2pkh 不再自行 reverse / normalize provider 原始
-      // txid，也不再做"provider 原值与 preview.txid 不一致"这类二次猜测；
-      // provider 字节序归一化是 plugin-woc 包的跨包契约职责。
-      const nextStatus: P2pkhTransferResult["status"] =
-        broadcastRes.txidIntegrity === "mismatch"
-          ? "provider-inconsistent"
-          : "broadcast-pending-woc";
-      await db.putLocalSubmission({
-        ...submissionBase,
-        status: nextStatus,
-        canonicalTxid: broadcastRes.canonicalTxid,
-        providerReturnedTxidRaw: broadcastRes.providerReturnedTxidRaw,
-        providerReturnedTxidNormalized: broadcastRes.providerReturnedTxidNormalized,
-        txidIntegrity: broadcastRes.txidIntegrity,
-        updatedAt: new Date().toISOString()
-      });
-      deps.logger?.info({
-        scope: "p2pkh.transfer",
-        event: "transfer.broadcast.accepted",
-        message: `P2PKH transfer broadcast accepted: ${broadcastRes.canonicalTxid}`,
-        data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid, txidIntegrity: broadcastRes.txidIntegrity },
-        keyScope: { publicKeyHex: owner.publicKeyHex }
-      });
-      if (broadcastRes.txidIntegrity === "mismatch") {
-        deps.logger?.warn({
-          scope: "p2pkh.transfer",
-          event: "transfer.broadcast.providerInconsistent",
-          message: `P2PKH transfer broadcast provider-inconsistent: ${broadcastRes.canonicalTxid}`,
-          data: { resourceId: resource.resourceId, network, txid: broadcastRes.canonicalTxid },
-          keyScope: { publicKeyHex: owner.publicKeyHex }
-        });
-      }
-
-      deps.messageBus.publish(P2PKH_MSG.TRANSFER_BROADCAST, { resourceId: resource.resourceId, txid: preview.txid });
-
-      // 立即通知页面重读：UTXO、submission 已变更。
-      // 设计缘由：仅靠 TRANSFER_BROADCAST 触发后台任务再发 assetDataNotifier
-      // 会导致页面延迟更新；这里在写库后立即通知，订阅 onDataChanged 的页面
-      //（如 UTXO 页、历史页）可即时刷新。
-      if (deps.assetDataNotifier) {
-        deps.assetDataNotifier.emit({
-          providerId: "p2pkh",
-          publicKeyHex: owner.publicKeyHex,
-          revision: Date.now(),
-          kinds: ["utxo", "submission", "claim"],
-        });
-      }
-
-      return {
-        status: nextStatus,
-        txid: preview.txid,
-        rawTxHex: preview.rawTxHex,
-        submissionId,
-        localInputClaimIds
-      };
     }
   };
+}
+
+async function listTransferCandidates(input: {
+  db: P2pkhDbHandle;
+  resource: P2pkhKeyResource;
+  ownerPublicKeyHex: string;
+  network: "main" | "test";
+  protectedOutpoints?: ProtectedOutpointRegistry;
+}): Promise<P2pkhUtxo[]> {
+  const reservations = await input.db.listLocalInputClaimsByResource(input.resource.resourceId);
+  const reserved = new Set(
+    reservations.filter((row) => row.state === "active" || row.state === "isolated").map((row) => `${row.txid}:${row.vout}`)
+  );
+  const allUtxos = await input.db.listUtxos();
+  const localTransactions = await input.db.listLocalTransactions(input.resource.resourceId);
+  const localTransactionIds = new Set(localTransactions.filter((row) => row.state === "local-confirmed").map((row) => row.id));
+  const localCandidates: P2pkhUtxo[] = (await input.db.listLocalOutpoints(input.resource.resourceId))
+    .filter((row) => row.state === "available" && localTransactionIds.has(row.submissionId))
+    .map((row) => ({
+      id: row.id,
+      resourceId: row.resourceId,
+      publicKeyHex: input.ownerPublicKeyHex,
+      network: input.network,
+      address: input.resource.address,
+      txid: row.txid,
+      vout: row.vout,
+      value: row.value,
+      script: row.scriptHex,
+      status: "confirmed",
+      isSpentInMempoolTx: false,
+      syncedAt: row.updatedAt
+    }));
+  return [...allUtxos, ...localCandidates].filter((utxo) =>
+    utxo.resourceId === input.resource.resourceId
+    && utxo.publicKeyHex === input.ownerPublicKeyHex
+    && !reserved.has(`${utxo.txid}:${utxo.vout}`)
+    && !input.protectedOutpoints?.isProtected({ txid: utxo.txid, vout: utxo.vout, network: input.network, publicKeyHex: input.ownerPublicKeyHex })
+  );
+}
+
+function validateFinalTransferPreview(
+  preview: P2pkhTransferPreview,
+  input: { candidates: P2pkhUtxo[]; expectedChangeAddress: string }
+): void {
+  const parsed = parseP2pkhTransaction(preview.rawTxHex, preview.txid);
+  if (rawTxHexByteLength(preview.rawTxHex) !== preview.serializedSizeBytes) {
+    throw new Error("Preview serialized size does not match raw transaction");
+  }
+  if (preview.changeAddress !== input.expectedChangeAddress) {
+    throw new Error("Preview change address does not belong to the transfer owner");
+  }
+  if (preview.outputs.length === 0 || preview.outputs.length > 2 || preview.outputs[0]?.address !== preview.recipientAddress) {
+    throw new Error("Preview outputs are invalid");
+  }
+  if (preview.outputs.length === 2 && preview.outputs[1]?.address !== preview.changeAddress) {
+    throw new Error("Preview contains an unexpected output");
+  }
+  if (parsed.outputs.length !== preview.outputs.length) throw new Error("Preview output count does not match raw transaction");
+  for (let index = 0; index < preview.outputs.length; index += 1) {
+    const expected = preview.outputs[index]!;
+    const actual = parsed.outputs[index]!;
+    if (actual.value !== expected.value || actual.scriptHex !== p2pkhAddressToScriptHex(expected.address, preview.network)) {
+      throw new Error(`Preview output ${index} does not match raw transaction`);
+    }
+  }
+  if (parsed.inputs.length !== preview.allocation.selected.length) throw new Error("Preview input count does not match raw transaction");
+  const candidateByOutpoint = new Map(input.candidates.map((utxo) => [`${utxo.txid}:${utxo.vout}`, utxo]));
+  const seen = new Set<string>();
+  let totalInputSatoshis = 0;
+  for (let index = 0; index < preview.allocation.selected.length; index += 1) {
+    const selected = preview.allocation.selected[index]!;
+    const key = `${selected.txid}:${selected.vout}`;
+    if (seen.has(key)) throw new Error("Preview contains a duplicate input");
+    seen.add(key);
+    const actualInput = parsed.inputs[index]!;
+    if (actualInput.outpointKey !== key) throw new Error(`Preview input ${index} does not match raw transaction`);
+    const current = candidateByOutpoint.get(key);
+    if (!current || current.value !== selected.value) throw new Error(`Preview input is no longer spendable: ${key}`);
+    totalInputSatoshis += current.value;
+  }
+  const requested = preview.outputs[0]!.value;
+  const change = preview.outputs[1]?.value ?? 0;
+  const actualFee = totalInputSatoshis - requested - change;
+  if (preview.allocation.totalInputSatoshis !== totalInputSatoshis
+    || preview.allocation.requestedSatoshis !== requested
+    || preview.allocation.changeSatoshis !== change
+    || preview.allocation.feeReserveSatoshis !== actualFee
+    || preview.estimatedFeeSatoshis !== actualFee
+    || actualFee < 0) {
+    throw new Error("Preview allocation does not match the final transaction");
+  }
 }
 
 async function resolveActiveKeyCrypto(vault: VaultService, publicKeyHex: string) {
@@ -606,38 +577,6 @@ async function solveForSelectedInputs(params: {
   };
 }
 
-async function claimInputs(
-  db: P2pkhDbHandle,
-  params: {
-    submissionId: string;
-    resourceId: string;
-    publicKeyHex: string;
-    network: "main" | "test";
-    inputs: P2pkhUtxo[];
-  }
-): Promise<string[]> {
-  const localInputClaimIds: string[] = [];
-  const now = new Date().toISOString();
-  for (const u of params.inputs) {
-    const id = localInputClaimIdFor(params.resourceId, u.txid, u.vout);
-    const claim: P2pkhLocalInputClaim = {
-      id,
-      submissionId: params.submissionId,
-      resourceId: params.resourceId,
-      publicKeyHex: params.publicKeyHex,
-      network: params.network,
-      txid: u.txid,
-      vout: u.vout,
-      state: "claimed",
-      createdAt: now,
-      updatedAt: now
-    };
-    await db.putLocalInputClaim(claim);
-    localInputClaimIds.push(id);
-  }
-  return localInputClaimIds;
-}
-
 function validateTransferInput(input: P2pkhTransferInput): {
   assetId: P2pkhAssetId;
   recipientAddress: string;
@@ -677,21 +616,6 @@ function buildAllocationError(input: AllocationFailureInfo): Error {
   return new Error(
     `P2PKH transfer failed: ${input.reason}. Available inputs ${input.available} sats, amount ${input.amountSatoshis} sats, final fee ${input.feeSatoshis} sats, total required ${input.required} sats.`
   );
-}
-
-function isDefinitivelyRejectedError(msg: string): boolean {
-  if (!msg) return false;
-  const lower = msg.toLowerCase();
-  if (lower.includes("timeout") || lower.includes("aborted") || lower.includes("network")) {
-    return false;
-  }
-  if (/\b4\d\d\b/.test(lower) && !/\b429\b/.test(lower)) {
-    return true;
-  }
-  if (lower.includes("rejected") || lower.includes("invalid transaction") || lower.includes("bad-txns")) {
-    return true;
-  }
-  return false;
 }
 
 /** 校验地址是否匹配目标网络。 */

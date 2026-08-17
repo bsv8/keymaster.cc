@@ -245,10 +245,11 @@ describe("validateCatalog", () => {
 });
 
 describe("loadCatalog (实际 JSON)", () => {
-  it("Demo 使用真实 proof，其它缺少 proof 的 app 明确 invalid", () => {
+  it("已签名的 Demo 和 Disk 可用，缺少 proof 的 app 明确 invalid", () => {
     const out = loadCatalog();
-    expect(out.ok.map((entry) => entry.id)).toEqual(["demo"]);
-    const demo = out.ok[0]!;
+    expect(out.ok.map((entry) => entry.id)).toEqual(["demo", "keymaster-connect-disk"]);
+    const demo = out.ok.find((entry) => entry.id === "demo")!;
+    const disk = out.ok.find((entry) => entry.id === "keymaster-connect-disk")!;
     expect(demo.appOrigin).toBe("https://demo.apps.bsv8.com");
     expect(demo.appIdentity).toMatchObject({
       version: 1,
@@ -261,14 +262,29 @@ describe("loadCatalog (实际 JSON)", () => {
       requirements: ["private-key", "storage"]
     });
     expect(demo.appIdentity.signature).toMatch(/^[0-9a-f]{128}$/u);
-    expect(out.invalid.map((entry) => entry.id)).toEqual(["justnote", "s3disk"]);
+    expect(disk.appOrigin).toBe("https://s3disk.apps.bsv8.com");
+    expect(disk.appIdentity).toMatchObject({
+      version: 1,
+      publisherPublicKey: "032558368095eb0a4cb07d0dd59a8a5bffdfd19c495a79de280db63b746e228b30",
+      app: {
+        id: "keymaster-connect-disk",
+        name: "Keymaster Connect Disk",
+        description: "A cloud disk powered by the Keymaster Connect SDK"
+      },
+      requirements: ["private-key", "storage"]
+    });
+    expect(disk.appIdentity.signature).toMatch(/^[0-9a-f]{128}$/u);
+    expect(out.invalid.map((entry) => entry.id)).toEqual(["justnote"]);
     expect(out.invalid.some((entry) => entry.id === "justnote" && entry.reason === "missing appIdentity proof")).toBe(true);
-    expect(out.invalid.some((entry) => entry.id === "s3disk" && entry.reason === "missing appIdentity proof")).toBe(true);
     expect(out.duplicates).toEqual([]);
     const resolver = createCatalogResolver(out);
     expect(resolver.resolve("https://demo.apps.bsv8.com")).toMatchObject({
       kind: "known-valid",
       appId: "demo"
+    });
+    expect(resolver.resolve("https://s3disk.apps.bsv8.com")).toMatchObject({
+      kind: "known-valid",
+      appId: "keymaster-connect-disk"
     });
     expect(resolver.resolve("https://unknown.example")).toEqual({ kind: "unknown" });
   });

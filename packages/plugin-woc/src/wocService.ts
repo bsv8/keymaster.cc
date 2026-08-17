@@ -37,6 +37,7 @@ import {
   type WocBroadcastPayload,
   type WocHistoryPayload,
   type WocTransactionObservationPayload,
+  type WocRawTransactionPayload,
   type WocUtxosPayload
 } from "./wocMessages.js";
 
@@ -268,6 +269,11 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
         payload,
         dispatchOptions(opts)
       );
+    },
+
+    async getRawTransaction(network: BsvNetwork, txid: string, opts?: WocRequestOptions): Promise<string> {
+      const payload: WocRawTransactionPayload = { network, txid, priority: opts?.priority ?? "background", signal: opts?.signal, timeoutMs: opts?.timeoutMs };
+      return messageBus.request<WocRawTransactionPayload, string>(WOC_MSG.TX_RAW, payload, dispatchOptions(opts));
     },
 
     async broadcast(

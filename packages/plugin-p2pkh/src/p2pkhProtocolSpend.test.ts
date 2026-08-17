@@ -5,7 +5,6 @@ import { secp256k1 } from "@noble/curves/secp256k1.js";
 import type { KeyScopedStorageHandle, KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createP2pkhDb, disposeP2pkhDb, openP2pkhDb, resourceIdFor } from "./p2pkhDb.js";
-import type { P2pkhLocalSubmission } from "./p2pkhContracts.js";
 import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
 
 function hexToBytes(hex: string): Uint8Array {
@@ -257,27 +256,7 @@ describe("createP2pkhProtocolSpendService", () => {
     const resourceId = resourceIdFor("main");
     const txid = "cd".repeat(32);
     const vout = 0;
-    const transferSubmission: P2pkhLocalSubmission = {
-      id: "transfer-submission-1",
-      resourceId,
-      publicKeyHex: INTEGRATION_OWNER.publicKeyHex,
-      network: "main",
-      assetId: "bsv",
-      canonicalTxid: txid,
-      rawTxHex: "0100000000",
-      txidIntegrity: "exact",
-      recipientAddress: INTEGRATION_OWNER.address,
-      amountSatoshis: 1_000,
-      status: "submitting",
-      inputOutpoints: [{ txid, vout, value: 10_000 }],
-      createdAt: "2024-01-01T00:00:00.000Z",
-      updatedAt: "2024-01-01T00:00:00.000Z"
-    };
-
-    await db.tryClaimSubmissionWithInputs({
-      submission: transferSubmission,
-      inputs: [{ txid, vout, value: 10_000, address: INTEGRATION_OWNER.address, id: "utxo-1", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", status: "confirmed", isSpentInMempoolTx: false, syncedAt: "2024-01-01T00:00:00.000Z" }]
-    });
+    await db.tryClaimInputs({ submissionId: "transfer-submission-1", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid, vout }] });
 
     const protocolSpendAfterTransfer = createP2pkhProtocolSpendService({
       vault: {
@@ -335,16 +314,7 @@ describe("createP2pkhProtocolSpendService", () => {
       changeAddress: INTEGRATION_OWNER.address
     });
 
-    await expect(db.tryClaimSubmissionWithInputs({
-      submission: {
-        ...transferSubmission,
-        id: "transfer-submission-2",
-        canonicalTxid: `${"ef".repeat(32)}`,
-        inputOutpoints: [{ txid: `${"ef".repeat(32)}`, vout: 0, value: 10_000 }],
-        updatedAt: "2024-01-01T00:00:00.000Z"
-      },
-      inputs: [{ txid: `${"ef".repeat(32)}`, vout: 0, value: 10_000, address: INTEGRATION_OWNER.address, id: "utxo-2", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", status: "confirmed", isSpentInMempoolTx: false, syncedAt: "2024-01-01T00:00:00.000Z" }]
-    })).rejects.toThrow(/already claimed/);
+    await expect(db.tryClaimInputs({ submissionId: "transfer-submission-2", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid: `${"ef".repeat(32)}`, vout: 0 }] })).rejects.toThrow(/already claimed/);
   });
 
   it("rejects the second concurrent prepare for the same funding UTXO", async () => {

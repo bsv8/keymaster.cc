@@ -141,7 +141,7 @@ export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex 
     try {
       const r = await service.submitTransfer(preview);
       setResult(r);
-      if (r.status !== "rejected" && r.status !== "unknown") {
+      if (r.status === "local-confirmed") {
         const c: TransferCompletion = {
           offerId: offer.id,
           providerId: offer.providerId,
@@ -197,7 +197,7 @@ export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex 
     <div className="p2pkh-transfer-widget">
       {result ? (
         <section className="p2pkh-transfer-widget__step-card p2pkh-transfer-widget__result">
-          <div className="p2pkh-transfer-widget__step-heading"><span>5</span><div><h4>{t("p2pkh.transfer.result.title", { defaultValue: "广播结果" })}</h4><p>{t("p2pkh.transfer.result.stepHint", { defaultValue: "最终交易已提交到广播服务。" })}</p></div></div>
+          <div className="p2pkh-transfer-widget__step-heading"><span>5</span><div><h4>{t("p2pkh.transfer.result.title", { defaultValue: "本地确认结果" })}</h4><p>{t("p2pkh.transfer.result.stepHint", { defaultValue: "广播供应商已返回结果，本地状态已安全落库。" })}</p></div></div>
           <p>
             {t("p2pkh.transfer.result.status", { defaultValue: "状态：" })}
             {result.status}
@@ -209,27 +209,9 @@ export function P2pkhTransferWidget({ offer, onCompleted, recipientPublicKeyHex 
             </p>
           ) : null}
           {result.error ? <p className="p2pkh-transfer-widget__error">{result.error}</p> : null}
-          {result.status === "rejected" ? (
-            <p>{t("p2pkh.transfer.result.rejected", { defaultValue: "广播被网络拒绝，未写入本地输入占用。" })}</p>
-          ) : null}
-          {result.status === "unknown" ? (
-            <p>{t("p2pkh.transfer.result.unknown", { defaultValue: "广播结果未知，已为本次输入写入本地输入占用。" })}</p>
-          ) : null}
-          {result.status === "provider-inconsistent" ? (
-            <p>{t("p2pkh.transfer.result.providerInconsistent", { defaultValue: "广播回执与本地 canonical txid 不一致，已标记为 provider-inconsistent。" })}</p>
-          ) : null}
-          {result.status === "broadcast-pending-woc" ? (
-            <p>{t("p2pkh.transfer.result.broadcastPending", { defaultValue: "交易已广播，正等待 WOC 观察。" })}</p>
-          ) : null}
-          {result.status === "woc-observed-unconfirmed" ? (
-            <p>{t("p2pkh.transfer.result.observedUnconfirmed", { defaultValue: "WOC 已观察到未确认交易，旧输入已转为已消费。" })}</p>
-          ) : null}
-          {result.status === "woc-confirmed" ? (
-            <p>{t("p2pkh.transfer.result.confirmed", { defaultValue: "WOC 已确认该交易，状态已升级为最终真值。" })}</p>
-          ) : null}
-          {result.status === "woc-dropped" ? (
-            <p>{t("p2pkh.transfer.result.dropped", { defaultValue: "WOC 最终未采纳该交易，已按最终状态恢复。" })}</p>
-          ) : null}
+          {result.status === "local-confirmed" ? <p>{t("p2pkh.transfer.result.localConfirmed", { defaultValue: "广播供应商明确接受，找零已在本地可花费余额中生效；等待确认事实最终裁决。" })}</p> : null}
+          {result.status === "isolated" || result.status === "conflicted" ? <p>{t("p2pkh.transfer.result.isolated", { defaultValue: "交易分支已隔离，输入占用不会自动释放；可在交易详情中重广播祖先链。" })}</p> : null}
+          {result.status === "not-dispatched" ? <p>{t("p2pkh.transfer.result.notDispatched", { defaultValue: "交易未离开客户端，提交与输入占用已安全撤销。" })}</p> : null}
           <div className="p2pkh-transfer-widget__actions">
             <Button onClick={dismissResult} variant="primary">
               {t("p2pkh.transfer.result.confirmClose", { defaultValue: "确认并关闭" })}

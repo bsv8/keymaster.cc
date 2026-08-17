@@ -7,7 +7,7 @@
 ```txt
 plugin-woc          WOC API 代理（唯一 WOC 入口、限流、优先级、429 backoff、多标签页协调）
 plugin-background   通用后台任务平台（注册、调度、去重、暂停、重试、Topbar 托盘）
-plugin-p2pkh        P2PKH 资产实现（两类后台任务 recent-sync / history-backfill、reservation、Transfer Widget）
+plugin-p2pkh        P2PKH 资产实现（Coordinator confirmed-sync、facts/projection、本地确认与 Transfer Widget）
 plugin-transfer     Transfer 平台（列 Offer，挂载 provider Widget，不解释 P2PKH/UTXO/地址/金额）
 plugin-poker        浏览器原生扑克（与外部 poker-proxy 通信，本地签名 / 验签）
 plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 app，以本地签名 App proof 做启动门禁并发起 appView Session Window
@@ -16,9 +16,10 @@ plugin-apps         Keymaster 内部 app launcher：从本地 JSON 清单展示 
 ### 不变量
 
 - 所有 WOC 请求必须经过 `woc.service`，不允许业务插件直接 fetch。
-- WOC 是余额、UTXO、确认历史与未确认历史的链上真值；本地 IndexedDB 是可重建缓存。
-- P2PKH 后台任务只有两类：`p2pkh.recent-sync` 与 `p2pkh.history-backfill`，通过 `P2pkhSyncCoordinator` 协调写入。
-- 历史回填尽头由 WOC 分页响应中 `nextPageToken` 缺失决定；不依赖余额/金额/UTXO 数量。
+- 普通 BSV/P2PKH 的 confirmed 真值来自用户当前选择的 WOC 或 JungleBus provider；transaction facts 是唯一确认事实，owned outpoints 是可重建投影。其它资产与旧协议 spend 仍可使用 WOC。
+- P2PKH 普通链上同步只有一个 Coordinator 任务：`p2pkh.transactions-sync`。它按选中的 confirmed provider 从最新到最旧分页，原子写入 transaction facts、owned projection 与 checkpoint，并在终止页做重组重叠核对。
+- P2PKH 的普通确认 provider 可选 WOC 或 JungleBus；JungleBus 仅提供 confirmed read，不提供广播、订阅或 WebSocket 能力。
+- 普通 BSV 广播收到明确 `accepted` / `already-known` 后进入 `local-confirmed`，找零可继续消费；timeout、拒绝、网络异常等不确定结果进入 `isolated`，不会自动释放输入或假设 mempool 已同步。
 - Transfer 平台不解释 P2PKH/UTXO/地址/金额/矿工费；选择 Offer 后挂载 provider 的完整 Widget。
 - Shell Topbar 只渲染 `topbar.registry` 注册项，不 import 任何业务插件。
 - plugin-poker 不持有私钥 / 明文种子 / 长期签名材料；只通过 `vault.withPrivateKey` 闭包签名。

@@ -30,8 +30,8 @@ import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { AppsPage } from "./AppsPage.js";
 import { appsPlugin } from "./manifest.js";
 
-// 页面交互测试使用与协议测试同源的签名 fixture；生产内嵌 catalog 仍保持
-// Justnote/S3Disk/Demo 占位条目 invalid，由 catalog.test 覆盖 fail-closed UI 数据。
+// 页面交互测试使用与协议测试同源的签名 fixture；生产内嵌 catalog 的
+// proof 真值由 catalog.test 覆盖，未签名占位条目必须 fail closed。
 vi.mock("./catalog.js", async () => {
   const actual = await vi.importActual<typeof import("./catalog.js")>("./catalog.js");
   return {

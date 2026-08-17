@@ -119,9 +119,18 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
 
   async function listNetworkHistory(assetId: P2pkhAssetId) {
     if (isNotReady()) return [];
-    const all = await deps.service.listHistory({ assetId });
     const network = assetIdToNetwork(assetId);
-    return all.filter((h) => h.network === network);
+    const [facts, locals] = await Promise.all([
+      deps.service.listTransactionFacts?.({ assetId }) ?? Promise.resolve([]),
+      deps.service.listLocalTransactions?.({ assetId }) ?? Promise.resolve([])
+    ]);
+    const factTxids = new Set(facts.map((fact) => fact.txid));
+    return [
+      ...facts.map((fact) => ({ id: fact.id, txid: fact.txid, status: "confirmed" as const, source: "chain" as const, syncedAt: fact.lastConfirmedAt })),
+      ...locals
+        .filter((local) => local.network === network && !factTxids.has(local.txid))
+        .map((local) => ({ id: local.id, txid: local.txid, status: local.state === "chain-confirmed" ? "confirmed" as const : "pending" as const, source: "local-submission" as const, syncedAt: local.updatedAt }))
+    ];
   }
 
   const handle: P2pkhAssetProviderHandle = {

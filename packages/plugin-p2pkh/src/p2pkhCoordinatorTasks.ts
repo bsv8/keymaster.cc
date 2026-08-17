@@ -1,17 +1,27 @@
-import type { KeyspaceService, MessageBus, WocService } from "@keymaster/contracts";
-import { createP2pkhHistoryBackfill } from "./p2pkhHistoryBackfill.js";
-import { createP2pkhRecentSync } from "./p2pkhRecentSync.js";
+import type { KeyspaceService, MessageBus, P2pkhProviderRegistry } from "@keymaster/contracts";
+import { createP2pkhTransactionSync } from "./p2pkhTransactionSync.js";
 import { createP2pkhDb, openP2pkhDb } from "./p2pkhDb.js";
-import { createP2pkhSyncCoordinator } from "./p2pkhSyncCoordinator.js";
 
-export function createP2pkhCoordinatorTasks(input: { keyspace: KeyspaceService; woc: WocService; messageBus: MessageBus; assertSessionFresh?: (kind: "recent" | "backfill") => void }) {
+export function createP2pkhCoordinatorTasks(input: {
+  keyspace: KeyspaceService;
+  registry: P2pkhProviderRegistry;
+  getSelection: (network: "main" | "test") => { syncProviderId: string | null; generation: number };
+  isGenerationCurrent?: (network: "main" | "test", generation: number) => boolean;
+  isNetworkEnabled?: (network: "main" | "test") => boolean;
+  messageBus?: MessageBus;
+}) {
   const getDb = async () => createP2pkhDb(await openP2pkhDb({ keyspace: input.keyspace, publicKeyHex: input.keyspace.requireActiveKey().publicKeyHex }));
-  const getResources = async () => (await getDb()).listResourcesByKey();
-  const coordinator = createP2pkhSyncCoordinator({ getDb });
-  const recent = createP2pkhRecentSync({ woc: input.woc, messageBus: input.messageBus, coordinator, getResources, getDb, assertSessionFresh: () => input.assertSessionFresh?.("recent") });
-  const backfill = createP2pkhHistoryBackfill({ woc: input.woc, messageBus: input.messageBus, coordinator, getResources, getDb, assertSessionFresh: () => input.assertSessionFresh?.("backfill") });
+  const sync = createP2pkhTransactionSync({
+    getDb,
+    getResources: async () => (await getDb()).listResourcesByKey().then((resources) => resources.filter((resource) => input.isNetworkEnabled?.(resource.network) ?? true)),
+    registry: input.registry,
+    getSelection: input.getSelection,
+    isGenerationCurrent: input.isGenerationCurrent,
+    isNetworkEnabled: input.isNetworkEnabled
+  });
   return {
-    recent: (signal: AbortSignal) => recent.runOnce(signal),
-    backfill: (signal: AbortSignal) => backfill.runOnce(signal)
+    id: "p2pkh.transactions-sync" as const,
+    transactionsSync: (signal: AbortSignal) => sync.runOnce(signal),
+    run: (signal: AbortSignal) => sync.runOnce(signal)
   };
 }

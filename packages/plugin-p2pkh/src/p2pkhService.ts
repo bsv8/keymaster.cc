@@ -9,37 +9,34 @@
 //     `session.owner === active` 由 protocol / caller 保证。
 //   - DB handle 缓存由 p2pkhDb module 的 per-owner map 负责；
 //     service 层不持有单一 handle / currentPublicKeyHash。
-//   - 同步入口：依赖 WocService + BackgroundService；不直接 fetch WOC。
-//   - 单一 SyncCoordinator 协调 recent-sync 与 history-backfill 写库。
-//   - recent-sync 由 BackgroundService 调度；history-backfill 单独注册。
-//   - key 导入后创建资源并触发 recent + backfill。
+//   - 确认同步由 Coordinator 的 p2pkh.transactions-sync 统一调度；本 service
+//     只负责 namespace、投影读取、选币和旧协议 spend。
 //   - key.deleting 时取消资源通道；删除由 keyspace.deleteKey 统一调度。
 //   - 硬切换 005：active key 不再有 `mode: "all"` 状态。本 service 所有
 //     守护检查只看 `activePublicKeyHex` 是否存在。
 
 import type {
   AssetDataNotifier,
-  BackgroundRegistry,
-  BackgroundRunEligibility,
-  BackgroundService,
   ProtectedOutpointRegistry,
   KeyIdentity,
   KeyspaceService,
   MessageBus,
   PluginLogger,
   VaultService,
-  WocService
+  SessionCoordinatorClient
 } from "@keymaster/contracts";
-import { ASSET_DATA_NOTIFIER_CAPABILITY, BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { ASSET_DATA_NOTIFIER_CAPABILITY } from "@keymaster/contracts";
 import type {
   P2pkhAssetId,
-  P2pkhBackfillState,
   P2pkhBalance,
+  P2pkhBalanceBreakdown,
   P2pkhGlobalSettings,
-  P2pkhHistoryItem,
   P2pkhKeyResource,
   P2pkhLocalInputClaim,
-  P2pkhLocalSubmission,
+  P2pkhTransactionFact,
+  P2pkhOwnedOutpointProjection,
+  P2pkhLocalTransaction,
+  P2pkhLocalOutpoint,
   P2pkhService as IP2pkhService,
   P2pkhSyncStatus,
   P2pkhTransferInput,
@@ -60,15 +57,11 @@ import {
 } from "./p2pkhContracts.js";
 import { createP2pkhDb, disposeP2pkhDb, openP2pkhDb, P2PKH_DB_VERSION, type P2pkhDbBundle, type P2pkhDbHandle } from "./p2pkhDb.js";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
-import { createP2pkhSyncCoordinator } from "./p2pkhSyncCoordinator.js";
-import { createP2pkhRecentSync } from "./p2pkhRecentSync.js";
-import { createP2pkhHistoryBackfill } from "./p2pkhHistoryBackfill.js";
 import { createP2pkhTransferService, type P2pkhTransferService } from "./p2pkhTransferService.js";
 import { allocateUtxos, P2pkhAllocationError } from "./utxoAllocator.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 
-export const P2PKH_TASK_RECENT = "p2pkh.recent-sync";
-export const P2PKH_TASK_BACKFILL = "p2pkh.history-backfill";
+export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
 
 /**
  * 硬切换 001：P2PKH 全局产品设置存储键名。
@@ -120,25 +113,78 @@ function writeGlobalSettingsToStorage(s: P2pkhGlobalSettings): void {
   }
 }
 
+export function calculateP2pkhBalanceBreakdown(input: {
+  chain: P2pkhOwnedOutpointProjection[];
+  locals: P2pkhLocalOutpoint[];
+  localTransactions: P2pkhLocalTransaction[];
+  claims: P2pkhLocalInputClaim[];
+  protectedOutpoints?: Set<string>;
+  network?: "main" | "test";
+}): P2pkhBalanceBreakdown {
+  const chain = input.chain.filter((row) => !input.network || row.network === input.network);
+  const localTransactions = new Map(input.localTransactions.map((row) => [row.id, row]));
+  const claims = input.claims.filter((row) => !input.network || row.network === input.network);
+  const chainValueByOutpoint = new Map(chain.map((row) => [row.outpointKey, row.value]));
+  const localSpendableRows = input.locals.filter((row) => row.state === "available" && localTransactions.get(row.submissionId)?.state === "local-confirmed" && (!input.network || localTransactions.get(row.submissionId)?.network === input.network));
+  const localValueByOutpoint = new Map(localSpendableRows.map((row) => [`${row.txid}:${row.vout}`, row.value]));
+  const claimAmount = (states: string[]) => {
+    const seen = new Set<string>();
+    return claims.filter((claim) => {
+      const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
+      if (!states.includes(claim.state) || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).reduce((sum, claim) => {
+      const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
+      return sum + (claim.value ?? chainValueByOutpoint.get(key) ?? localValueByOutpoint.get(key) ?? 0);
+    }, 0);
+  };
+  const activeClaims = claimAmount(["active"]);
+  const isolatedClaims = claimAmount(["isolated"]);
+  const protectedKeys = input.protectedOutpoints ?? new Set<string>();
+  const localConfirmedChange = localSpendableRows.reduce((sum, row) => sum + row.value, 0);
+  const claimStatesByOutpoint = new Map<string, Set<string>>();
+  for (const claim of claims) {
+    const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
+    const states = claimStatesByOutpoint.get(key) ?? new Set<string>();
+    states.add(claim.state);
+    claimStatesByOutpoint.set(key, states);
+  }
+  const isReserved = (key: string) => protectedKeys.has(key) || Boolean(claimStatesByOutpoint.get(key)?.has("active") || claimStatesByOutpoint.get(key)?.has("isolated"));
+  // A protocol spend can create both a protected registry entry and a local
+  // input claim for the same outpoint. Deduct the outpoint once, regardless of
+  // which protections currently describe it.
+  const reservedChain = chain.filter((row) => isReserved(row.outpointKey)).reduce((sum, row) => sum + row.value, 0);
+  const reservedLocal = localSpendableRows.filter((row) => isReserved(`${row.txid}:${row.vout}`)).reduce((sum, row) => sum + row.value, 0);
+  const blockConfirmed = chain.reduce((sum, row) => sum + row.value, 0);
+  return {
+    blockConfirmed,
+    // Claims over confirmed outpoints reduce the chain projection; claims
+    // over local change reduce the local projection. A chained local spend
+    // must not subtract its change from blockConfirmed a second time.
+    localSpendable: Math.max(0, blockConfirmed - reservedChain + localConfirmedChange - reservedLocal),
+    localConfirmedChange,
+    pendingInputClaims: activeClaims,
+    isolated: isolatedClaims
+  };
+}
+
 export interface P2pkhServiceDeps {
   vault: VaultService;
-  woc: WocService;
+  coordinator?: SessionCoordinatorClient;
   messageBus: MessageBus;
-  backgroundRegistry: BackgroundRegistry;
-  backgroundService: BackgroundService;
   keyspace: KeyspaceService;
   protectedOutpoints?: ProtectedOutpointRegistry;
   assetDataNotifier?: AssetDataNotifier;
   /**
    * 硬切换 002：业务插件注入的 logger。
-   * P2PKH 关键轨迹（recent sync、backfill、broadcast）走统一日志。
+   * P2PKH 关键轨迹（资源、自愈、broadcast）走统一日志。
    * 不传时不记日志。
    */
   logger?: PluginLogger;
 }
 
 export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
-  const coordinator = createP2pkhSyncCoordinator({ getDb: () => ensureDb() });
   // 硬切换 002 收尾 + 多 owner 支持：p2pkhDb module 自己用 per-owner
   // map 做缓存（openP2pkhDb / disposeP2pkhDb），service 层不再持有
   // 单一 handle / 单一 currentPublicKeyHash。所有 DB 入口走
@@ -166,26 +212,20 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     for (const l of [...settingsListeners]) l(next);
   }
 
-  const recent = createP2pkhRecentSync({
-    woc: deps.woc,
-    messageBus: deps.messageBus,
-    coordinator,
-    getResources: () => listAllResources(),
-    getDb: () => ensureDb(),
-    protectedOutpoints: deps.protectedOutpoints,
-    logger: deps.logger
-  });
-  const backfill = createP2pkhHistoryBackfill({
-    woc: deps.woc,
-    messageBus: deps.messageBus,
-    coordinator,
-    getResources: () => listAllResources(),
-    getDb: () => ensureDb(),
-    logger: deps.logger
-  });
   const transfer = createP2pkhTransferService({
     vault: deps.vault,
-    woc: deps.woc,
+    protectedOutpoints: deps.protectedOutpoints,
+    broadcastPreflight: deps.coordinator ? async ({ network }) => {
+      const snapshot = await deps.coordinator!.p2pkhProvidersGet();
+      if (snapshot.status !== "ok") throw new Error("P2PKH provider snapshot unavailable");
+      const selected = snapshot.value.selection[network].broadcastProviderId;
+      const descriptor = snapshot.value.broadcastProviders.find((provider) => provider.id === selected && provider.supportedNetworks.includes(network));
+      if (!selected || !descriptor) throw new Error(`No broadcast provider configured for ${network}`);
+      return { generation: snapshot.value.selection.generation };
+    } : undefined,
+    broadcastWithCoordinator: deps.coordinator ? async (input) => {
+      return deps.coordinator!.p2pkhBroadcast(input);
+    } : undefined,
     messageBus: deps.messageBus,
     assetDataNotifier: deps.assetDataNotifier,
     /**
@@ -241,17 +281,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   });
 
   const statusListeners = new Set<(s: P2pkhSyncStatus) => void>();
-  // 硬切换 003：per-task status。`syncStatus` 是聚合值（任一任务 syncing
-  // -> syncing，任一任务 failed -> failed，全 ok -> ok），两个任务并发
-  // 时聚合状态会在第一个任务完成时退出 syncing；订阅侧如果只看聚合状态，
-  // 第二个任务完成时聚合已经不是 syncing，刷新事件会被吞掉。
-  // 解决：service 同时维护 recentStatus / backfillStatus 两个独立状态；
-  // 订阅侧（总览页）订阅两个独立 onXxxStatusChange，每个任务各自进出
-  // syncing 都能被观测到。
-  const recentStatusListeners = new Set<(s: P2pkhSyncStatus) => void>();
-  const backfillStatusListeners = new Set<(s: P2pkhSyncStatus) => void>();
-  let recentTaskStatus: P2pkhSyncStatus = "idle";
-  let backfillTaskStatus: P2pkhSyncStatus = "idle";
   // 硬切换 001：messageBus 订阅的取消句柄收集器；dispose 时统一释放。
   const messageBusUnsubs: Array<() => void> = [];
   function trackSubscribe<TPayload>(type: string, handler: (p: TPayload) => void) {
@@ -272,6 +301,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const prev = cachedSettings;
       if (sameGlobalSettings(prev, next)) return;
       setCachedSettingsAndEmit(next);
+      void deps.coordinator?.p2pkhSettingsUpdate({ includeTestnet: next.includeTestnet });
       if (!prev.includeTestnet && next.includeTestnet) {
         deps.logger?.info({
           scope: "p2pkh.service",
@@ -284,19 +314,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
             deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
               error: err instanceof Error ? err.message : String(err)
             });
-          })
-          .finally(() => {
-            deps.backgroundService.trigger(P2PKH_TASK_RECENT, "settings.testnet.enabled");
-            deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, "settings.testnet.enabled");
           });
       } else if (prev.includeTestnet && !next.includeTestnet) {
         deps.logger?.info({
           scope: "p2pkh.service",
           event: "settings.testnet.disabled.crossTab",
-          message: "P2PKH includeTestnet disabled in another tab; triggering recent-sync refresh",
+          message: "P2PKH includeTestnet disabled in another tab; confirmed sync will skip testnet",
           data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
         });
-        deps.backgroundService.trigger(P2PKH_TASK_RECENT, "settings.testnet.disabled");
       }
     };
     window.addEventListener("storage", onStorage);
@@ -310,45 +335,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   }
 
   /**
-   * 硬切换 003：聚合两个任务的 status。
-   * - 任一 syncing -> syncing；
-   * - 否则任一 failed -> failed；
-   * - 否则任一 ok -> ok；
-   * - 全 idle -> idle。
-   * 设计缘由：聚合状态给 sync 托盘 / asset provider / transfer provider
-   * 这类只看"系统是否在做事"的消费者使用；总览页必须订阅 per-task 才
-   * 能避免并发完成时被吞掉刷新事件。
-   */
-  function aggregateStatus(): P2pkhSyncStatus {
-    if (recentTaskStatus === "syncing" || backfillTaskStatus === "syncing") return "syncing";
-    if (recentTaskStatus === "failed" || backfillTaskStatus === "failed") return "failed";
-    if (recentTaskStatus === "ok" || backfillTaskStatus === "ok") return "ok";
-    return "idle";
-  }
-
-  /**
-   * 硬切换 003：更新单任务 status，并刷新聚合 status。订阅 per-task 的
-   * 监听器（总览页等）只接收自己关心任务的状态变更；聚合 status 仍然
-   * 通过 `setStatus` 通知 sync 托盘 / provider。
-   */
-  function setRecentStatus(next: P2pkhSyncStatus) {
-    recentTaskStatus = next;
-    for (const l of recentStatusListeners) l(next);
-    deps.messageBus.publish(P2PKH_MSG.RECENT_TASK_STATE, { status: next });
-    setStatus(aggregateStatus());
-  }
-  function setBackfillStatus(next: P2pkhSyncStatus) {
-    backfillTaskStatus = next;
-    for (const l of backfillStatusListeners) l(next);
-    deps.messageBus.publish(P2PKH_MSG.BACKFILL_TASK_STATE, { status: next });
-    setStatus(aggregateStatus());
-  }
-
-  /**
    * 列出当前 active key 的资源。硬切换 001：受 includeTestnet 控制；
    * includeTestnet=false 时只返回 main 资源（即使 DB 中还有 test
-   * dormant cache），recent-sync / backfill / provider 因此自然不会
-   * 处理 testnet。
+   * dormant cache），Coordinator confirmed sync 因此自然不会处理 testnet。
    */
   /** 硬切换 001：所有 read 路径都必须经过这里拿当前设置。 */
   function getCurrentSettings(): P2pkhGlobalSettings {
@@ -388,7 +377,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    * 设计缘由：硬切换 002 收尾 + 多 owner 支持——
    *   - transfer 走 session owner；session owner 在硬门禁下必须
    *     等于 active key，否则 `keyspace.openKeyStorage` 会 fail-closed。
-   *   - recent-sync / backfill 走 active key namespace。
+   *   - Coordinator task 走 active key namespace。
    *   - 两种调用方都通过本函数传 owner，p2pkhDb 内部按 hex 复用。
    *
    * 硬切换 003：缺 DB / 缺表 / 版本旧都通过 `keyspace.openKeyStorage({ version, upgrade })`
@@ -424,7 +413,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   /**
    * Active key 的 namespace DB 入口。语义同
    * `ensureDbForOwner(active)`，但额外校验 active 必须就绪。
-   * recent-sync / backfill / 业务读路径走这里；transfer 走
+   * Coordinator task / 业务读路径走这里；transfer 走
    * `ensureDbForOwner(sessionOwner)`。
    */
   async function ensureDb(): Promise<P2pkhDbHandle> {
@@ -433,6 +422,14 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       throw new Error("Key storage is not ready");
     }
     return ensureDbForOwner(state.activePublicKeyHex);
+  }
+
+  async function calculateBalanceBreakdown(network?: "main" | "test"): Promise<P2pkhBalanceBreakdown> {
+    const db = await ensureDb();
+    const chain = await db.listOwnedOutpoints({ ...(network ? { network } : {}), chainState: "available" });
+    const locals = await db.listLocalOutpoints();
+    const protectedKeys = new Set((deps.protectedOutpoints?.list({ ...(network ? { network } : {}), publicKeyHex: getActiveKeyState().activePublicKeyHex ?? undefined }) ?? []).map((row) => `${row.txid}:${row.vout}`));
+    return calculateP2pkhBalanceBreakdown({ chain, locals, localTransactions: await db.listLocalTransactions(), claims: await db.listLocalInputClaims(), protectedOutpoints: protectedKeys, network });
   }
 
   /** 切换 active key 后的 hook：重建 identity 缓存。
@@ -465,7 +462,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   // 监听 keyspace 变化。
   // 硬切换 008 收尾：切 active key 走与 onVaultUnlocked 同构的完整序列——
-  // rebind + rehydrate + trigger recent/backfill——确保任何路径切到新 active
+  // rebind + rehydrate——确保任何路径切到新 active
   // 都不会漏建 P2PKH 资源。
   // 硬切换 001：必须保存取消句柄，dispose 时调用，否则 disable 后旧 service
   // 实例仍会响应 active-key 事件，破坏热卸载语义。
@@ -490,8 +487,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         });
         await rebindActiveKey();
         await rehydrateResources();
-        deps.backgroundService.trigger(P2PKH_TASK_RECENT, "active-key.changed");
-        deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, "active-key.changed");
       } catch (err) {
         deps.logger?.error({
           scope: "p2pkh.service",
@@ -517,7 +512,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
   trackSubscribe<{ publicKeyHex: string }>("key.deleted", async (payload) => {
     try {
       const resources = await listAllResources().catch(() => []);
-      for (const r of resources) coordinator.removeResource(r.resourceId);
+      void resources;
     } catch (err) {
       console.error("P2PKH key.deleted handler failed", err);
     }
@@ -587,153 +582,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     return resource;
   }
 
-  // ---- 注册 background tasks ----
-  /**
-   * 任务归属的 key namespace（硬切换 007 / 008）。
-   * 设计缘由：008 把 keyScope 改为函数形式以支持延迟求值——注册时只存函数
-   * 引用，backgroundService.snapshot() / cancelByKey() 在调用时通过
-   * resolveKeyScope 求值。这样 active key 切换不会让 task 仍指向旧 key hash。
-   *
-   * 硬切换 003 收尾：scope 不再携带 `fingerprint`；若有展示需要，按
-   * `BackgroundTaskKeyScope.publicKeyHex` 透传完整公钥，UI 侧再调
-   * `formatShortPublicKey()` 现算短公钥。
-   */
-  function p2pkhTaskKeyScope() {
-    const state = getActiveKeyState();
-    if (!state.activePublicKeyHex) {
-      return undefined;
-    }
-    const id = activeIdentity;
-    if (!id || id.publicKeyHex !== state.activePublicKeyHex) {
-      return { publicKeyHex: state.activePublicKeyHex };
-    }
-    return {
-      publicKeyHex: state.activePublicKeyHex,
-      label: id.label
-    };
-  }
-
-  deps.backgroundRegistry.register({
-    id: P2PKH_TASK_RECENT,
-    pluginId: "p2pkh",
-    label: { key: "p2pkh.task.recent.label", fallback: "P2PKH 近期同步" },
-    description: { key: "p2pkh.task.recent.description", fallback: "检查余额、UTXO、近期 history 与本地输入占用对账（按 active key namespace）。" },
-    schedule: {
-      group: "asset-holdings",
-      defaultIntervalMs: 900_000,
-      minIntervalMs: 300_000,
-    },
-    // 硬切换 001：删除 defaultEnabled，所有任务默认持续启用
-    // 硬切换 008：传函数本身，由 backgroundService 延迟求值。
-    keyScope: p2pkhTaskKeyScope,
-    // 硬切换 001：canRun 返回结构化 BackgroundRunEligibility。
-    // 设计缘由：让 UI 展示明确的阻塞原因，而不是静默返回 idle。
-    canRun: (): BackgroundRunEligibility => {
-      if (deps.vault.status() !== "unlocked") {
-        return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
-      }
-      if (deps.keyspace.isInitializing()) {
-        return { ready: false, reason: { key: "background.blocked.keyReady", fallback: "密钥空间初始化中" }, retryOn: "key-ready" };
-      }
-      if (!Boolean(getActiveKeyState().activePublicKeyHex)) {
-        return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
-      }
-      return { ready: true };
-    },
-    async run(ctx) {
-      setRecentStatus("syncing");
-      try {
-        const result = await recent.runOnce(ctx.signal);
-        // 关键修复：取消后不发布 data-changed、不设 ok 状态。
-        // backgroundService.runOne 会在 run() 返回后兜底再检查一次 abort，
-        // 但业务层必须先守住——避免已取消的任务发出数据变更事件。
-        if (ctx.signal.aborted || result.cancelled) {
-          setRecentStatus("idle");
-          return;
-        }
-        // 仅在实际提交了 DB 后才发布 data-changed 和设 ok 状态；
-        // abort / 0 resource 路径不发布，避免下游误触发刷新。
-        if (result.committed) {
-          setRecentStatus("ok");
-          const state = getActiveKeyState();
-          if (state.activePublicKeyHex && deps.assetDataNotifier) {
-            deps.assetDataNotifier.emit({
-              providerId: "p2pkh",
-              publicKeyHex: state.activePublicKeyHex,
-              revision: Date.now(),
-              kinds: ["utxo", "resource", "history"],
-            });
-          }
-        }
-      } catch (err) {
-        // 关键修复：WOC 请求因 abort 抛出 AbortError 时，走取消路径而非失败路径。
-        // 若不判断，P2PKH 状态被设为 failed，但 backgroundService 最终判定为
-        // canceled——页面/托盘状态与后台任务状态不一致。
-        if (ctx.signal.aborted) {
-          setRecentStatus("idle");
-          return;
-        }
-        setRecentStatus("failed");
-        throw err;
-      }
-    }
-  });
-
-  deps.backgroundRegistry.register({
-    id: P2PKH_TASK_BACKFILL,
-    pluginId: "p2pkh",
-    label: { key: "p2pkh.task.backfill.label", fallback: "P2PKH 历史回填" },
-    description: { key: "p2pkh.task.backfill.description", fallback: "分页同步完整确认历史（按 active key namespace）。" },
-    // 硬切换 001：删除 defaultEnabled，所有任务默认持续启用
-    // 硬切换 008：传函数本身。
-    keyScope: p2pkhTaskKeyScope,
-    // 硬切换 001：canRun 返回结构化 BackgroundRunEligibility。
-    canRun: (): BackgroundRunEligibility => {
-      if (deps.vault.status() !== "unlocked") {
-        return { ready: false, reason: { key: "background.blocked.unlock", fallback: "等待解锁" }, retryOn: "unlock" };
-      }
-      if (deps.keyspace.isInitializing()) {
-        return { ready: false, reason: { key: "background.blocked.keyReady", fallback: "密钥空间初始化中" }, retryOn: "key-ready" };
-      }
-      if (!Boolean(getActiveKeyState().activePublicKeyHex)) {
-        return { ready: false, reason: { key: "background.blocked.noActiveKey", fallback: "没有活跃密钥" }, retryOn: "key-ready" };
-      }
-      return { ready: true };
-    },
-    async run(ctx) {
-      setBackfillStatus("syncing");
-      try {
-        const result = await backfill.runOnce(ctx.signal);
-        // 关键修复：取消后不发布 data-changed、不设 ok 状态。
-        if (ctx.signal.aborted || result.cancelled) {
-          setBackfillStatus("idle");
-          return;
-        }
-        // 仅在实际提交了 DB 后才发布 data-changed 和设 ok 状态；
-        // abort / paused / 0 resource 路径不发布，避免下游误触发刷新。
-        if (result.committed) {
-          setBackfillStatus("ok");
-          const state = getActiveKeyState();
-          if (state.activePublicKeyHex && deps.assetDataNotifier) {
-            deps.assetDataNotifier.emit({
-              providerId: "p2pkh",
-              publicKeyHex: state.activePublicKeyHex,
-              revision: Date.now(),
-              kinds: ["history"],
-            });
-          }
-        }
-      } catch (err) {
-        // 关键修复：同 recent catch——abort 导致的异常走取消路径。
-        if (ctx.signal.aborted) {
-          setBackfillStatus("idle");
-          return;
-        }
-        setBackfillStatus("failed");
-        throw err;
-      }
-    }
-  });
+  // Confirmed synchronization is owned by the Coordinator's single
+  // `p2pkh.transactions-sync` task. This service deliberately registers no
+  // provider-specific background task and never calls a confirmed provider.
 
   // 监听 vault 锁定/解锁。
   trackSubscribe("vault.locked", () => {
@@ -776,8 +627,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     try {
       await rebindActiveKey();
       await rehydrateResources();
-      deps.backgroundService.trigger(P2PKH_TASK_RECENT, "vault.unlocked");
-      deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, "vault.unlocked");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       deps.messageBus.publish(P2PKH_MSG.REHYDRATE_ERROR, {
@@ -795,8 +644,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
 
   /**
    * 为当前 active key 补齐 main/test 资源（受 includeTestnet 控制）。
-   * 硬切换 001：includeTestnet=false 时不创建 test 资源；后续 recent-sync /
-   * backfill 也会因为 `listAllResources` 不返回 test 而自然不再处理 testnet。
+   * 硬切换 001：includeTestnet=false 时不创建 test 资源；Coordinator
+   * confirmed sync 也会因为 `listAllResources` 不返回 test 而自然跳过 testnet。
    * 重新开启 includeTestnet=true 时也会调用本方法（idempotent：已存在的
    * resource 不会被覆盖）。
    *
@@ -808,7 +657,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
    *   - 本次尝试补的网络；
    *   - 哪些 resource 已存在；
    *   - 哪些 resource 是本次新建。
-   * 这样"为什么 recent-sync 没有 resource"以及"为什么 sync 仍然 0
+   * 这样"为什么 confirmed sync 没有 resource"以及"为什么 sync 仍然 0
    * resource"在日志上能直接看出来。
    */
   async function rehydrateResources(): Promise<void> {
@@ -893,9 +742,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     }
   }
 
-  trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => {
-    deps.backgroundService.trigger(P2PKH_TASK_RECENT, "transfer.broadcast");
-  });
+  trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => undefined);
 
   // data-changed 订阅者集合。
   const dataChangedListeners = new Set<() => void>();
@@ -926,23 +773,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       return () => dataChangedListeners.delete(handler);
     },
 
-    // 硬切换 003：per-task 状态 / 订阅。两个并发任务各自独立进出
-    // syncing / ok / failed，互不掩盖对方的完成事件。
-    recentSyncStatus() {
-      return recentTaskStatus;
-    },
-    backfillStatus() {
-      return backfillTaskStatus;
-    },
-    onRecentSyncStatusChange(handler) {
-      recentStatusListeners.add(handler);
-      return () => recentStatusListeners.delete(handler);
-    },
-    onBackfillStatusChange(handler) {
-      backfillStatusListeners.add(handler);
-      return () => backfillStatusListeners.delete(handler);
-    },
-
     /**
      * 硬切换 001：余额每次从当前 UTXO 快照现算，不再读取任何余额缓存。
      * 不允许引入"为了性能保留最近一次余额"的内存缓存——余额实时性优先。
@@ -950,38 +780,23 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
      */
     async getAssetBalance(assetId) {
       const network = assetIdToNetwork(assetId);
-      const state = getActiveKeyState();
-      const db = await ensureDb();
       const settings = getCurrentSettings();
       if (!settings.includeTestnet && network === "test") {
-        return { total: 0 };
+        return { total: 0, breakdown: { blockConfirmed: 0, localSpendable: 0, localConfirmedChange: 0, pendingInputClaims: 0, isolated: 0 } };
       }
-      const all = await db.listUtxos();
-      let total = 0;
-      for (const u of all) {
-        if (u.network !== network) continue;
-        // ensureDb 已在 state.activePublicKeyHex 缺失时抛错；此处继续按
-        // activePublicKeyHex 过滤以防 db 里残留旧 key 的 UTXO 被计入。
-        if (u.publicKeyHex !== state.activePublicKeyHex) continue;
-        total += u.value;
-      }
-      return { total };
+      const breakdown = await calculateBalanceBreakdown(network);
+      return { total: breakdown.localSpendable, breakdown };
     },
     async getResourceBalance(resourceId) {
-      const db = await ensureDb();
       const settings = getCurrentSettings();
       // 硬切换 001：includeTestnet=false 时 testnet 资源视为不存在。
       // 通过 resourceId 前缀识别 testnet（resourceId = "p2pkh:test"）。
       if (!settings.includeTestnet && /:test$/.test(resourceId)) {
         return { total: 0 };
       }
-      const all = await db.listUtxos();
-      let total = 0;
-      for (const u of all) {
-        if (u.resourceId !== resourceId) continue;
-        total += u.value;
-      }
-      return { total };
+      const network = /:test$/.test(resourceId) ? "test" : "main";
+      const breakdown = await calculateBalanceBreakdown(network);
+      return { total: breakdown.localSpendable, breakdown };
     },
 
     /**
@@ -1028,50 +843,91 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         : all.filter((u) => u.network === "main");
       return filterUtxos(withoutTestnet, filter);
     },
-    async listHistory(filter) {
-      // 同 listUtxos：owner 感知读路径。filter 传 `ownerPublicKeyHex` 时
-      // 严格按该 owner 走 namespace DB；未传时仅作 UI 本地读路径兜底。
+    async listTransactionFacts(filter) {
       const ownerHex = filter?.ownerPublicKeyHex;
       const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
-      const all = await db.listHistory();
-      const settings = getCurrentSettings();
-      const withoutTestnet = settings.includeTestnet
-        ? all
-        : all.filter((h) => h.network === "main");
-      return filterUtxos(withoutTestnet, filter);
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      const rows = await db.listTransactionFacts({ network, resourceId: filter?.resourceId, limit: filter?.limit });
+      return getCurrentSettings().includeTestnet ? rows : rows.filter((row) => row.network === "main");
     },
-    async listBackfillStates() {
-      const db = await ensureDb();
-      const all = await db.listBackfillStates();
-      const settings = getCurrentSettings();
-      // backfill state 资源 id 也是 p2pkh:<network>；includeTestnet=false 时屏蔽。
-      return settings.includeTestnet
-        ? all
-        : all.filter((s) => /:main$/.test(s.resourceId));
+    async listOwnedOutpoints(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      const rows = await db.listOwnedOutpoints({ network, resourceId: filter?.resourceId, limit: filter?.limit });
+      return getCurrentSettings().includeTestnet ? rows : rows.filter((row) => row.network === "main");
     },
-    async listRecentSyncStates() {
-      const db = await ensureDb();
-      const all = await db.listRecentSyncStates();
-      const settings = getCurrentSettings();
-      return settings.includeTestnet
-        ? all
-        : all.filter((s) => /:main$/.test(s.resourceId));
+    async listTransactionFactsPage(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      const page = await db.listTransactionFactsPage({ network, resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
+      return { items: getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main"), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
     },
-    async listLocalSubmissions() {
-      const db = await ensureDb();
-      const all = await db.listLocalSubmissions();
-      const settings = getCurrentSettings();
-      return settings.includeTestnet
-        ? all
-        : all.filter((p) => p.network === "main");
+    async listOwnedOutpointsPage(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      const page = await db.listOwnedOutpointsPage({ network, resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
+      return { items: getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main"), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
     },
-    async listLocalInputClaims() {
+    async listOwnedOutpointValues(resourceId, outpointKeys) {
       const db = await ensureDb();
-      const all = await db.listLocalInputClaims();
+      return db.listOwnedOutpointValues(resourceId, outpointKeys);
+    },
+    async listLocalTransactions(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const rows = await db.listLocalTransactions(filter?.resourceId, filter?.limit);
+      return getCurrentSettings().includeTestnet ? rows.filter((row) => !filter?.assetId || row.network === assetIdToNetwork(filter.assetId)) : rows.filter((row) => row.network === "main");
+    },
+    async listLocalOutpoints(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const rows = await db.listLocalOutpoints(filter?.resourceId, filter?.limit);
+      return getCurrentSettings().includeTestnet ? rows : rows.filter((row) => row.id.includes(":main:"));
+    },
+    async abortUnattemptedLocalSubmission(input) {
+      const db = await ensureDbForOwner(input.ownerPublicKeyHex);
+      await db.abortUnattemptedLocalSubmission({ submissionId: input.submissionId, reason: input.reason, requestKind: "initial" });
+      deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: input.ownerPublicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
+    },
+    async listLocalTransactionsPage(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const page = await db.listLocalTransactionsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
+      const items = getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main");
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+    },
+    async listLocalOutpointsPage(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const page = await db.listLocalOutpointsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
+      const items = getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.id.includes(":main:"));
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      return { items: network ? items.filter((row) => row.resourceId === `p2pkh:${network}`) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+    },
+    async listLocalInputClaimsPage(filter) {
+      const ownerHex = filter?.ownerPublicKeyHex;
+      const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
+      const page = await db.listLocalInputClaimsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
+      const items = getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main");
+      const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
+      return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+    },
+    async getBalanceBreakdown(network) {
+      return calculateBalanceBreakdown(network);
+    },
+    async listLocalInputClaims(resourceId?: string, limit?: number) {
+      const db = await ensureDb();
+      const all = resourceId && typeof db.listLocalInputClaimsByResource === "function"
+        ? await db.listLocalInputClaimsByResource(resourceId, limit)
+        : await db.listLocalInputClaims(limit);
       const settings = getCurrentSettings();
       return settings.includeTestnet
-        ? all
-        : all.filter((r) => r.network === "main");
+        ? all.filter((r) => !resourceId || r.resourceId === resourceId)
+        : all.filter((r) => r.network === "main" && (!resourceId || r.resourceId === resourceId));
     },
 
     async allocateUtxos(request) {
@@ -1096,11 +952,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const filtered = filterUtxos(withoutTestnet, {
         assetId: request.assetId
       });
+      const resource = (await db.listAddresses()).find((row) => row.network === assetIdToNetwork(request.assetId));
+      const localTransactions = typeof db.listLocalTransactions === "function" ? await db.listLocalTransactions(resource?.resourceId) : [];
+      const localTransactionIds = new Set(localTransactions.filter((row) => row.state === "local-confirmed").map((row) => row.id));
+      const localCandidates: P2pkhUtxo[] = resource && typeof db.listLocalOutpoints === "function"
+        ? (await db.listLocalOutpoints(resource.resourceId)).filter((row) => row.state === "available" && localTransactionIds.has(row.submissionId)).map((row) => ({ id: row.id, resourceId: row.resourceId, publicKeyHex: resource.publicKeyHex, network: resource.network, address: resource.address, txid: row.txid, vout: row.vout, value: row.value, script: row.scriptHex, status: "unconfirmed", isSpentInMempoolTx: false, syncedAt: row.updatedAt }))
+        : [];
       const reservations = await db.listLocalInputClaims();
       const reserved = new Set(
-        reservations.filter((r) => r.state === "claimed").map((r) => `${r.txid}:${r.vout}`)
+        reservations.filter((r) => r.state === "active" || r.state === "isolated").map((r) => `${r.txid}:${r.vout}`)
       );
-      const protectedFiltered = excludeProtectedUtxos(filtered, deps.protectedOutpoints);
+      const protectedFiltered = [...excludeProtectedUtxos(filtered, deps.protectedOutpoints), ...excludeProtectedUtxos(localCandidates, deps.protectedOutpoints)];
       const candidates = protectedFiltered.filter((u) => !reserved.has(`${u.txid}:${u.vout}`));
       const result = allocateUtxos(candidates, request);
       if (result.ok) return result.allocation;
@@ -1161,13 +1023,17 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
      * 2. 刷新进程内缓存；
      * 3. 通知订阅者、广播 messageBus；
      * 4. includeTestnet 由 false → true 时立即触发 rehydrate + recent +
-     *    backfill，让 testnet 重新进入运行范围（由最新 WOC 覆盖旧缓存）。
+     *    confirmed sync，让 testnet 重新进入运行范围。
      * 5. includeTestnet 由 true → false 时不需要清理 dormant cache；
-     *    后续 recent-sync / backfill 通过 `listAllResources()` 自然不再
+     *    后续 Coordinator confirmed sync 通过 `listAllResources()` 自然不再
      *    处理 testnet，read 路径通过 service 过滤也不再暴露 testnet。
      */
     async applyGlobalSettings(settings) {
       const prev = cachedSettings;
+      if (deps.coordinator) {
+        const result = await deps.coordinator.p2pkhSettingsUpdate({ includeTestnet: settings.includeTestnet });
+        if (result.status !== "accepted" && result.status !== "ok") throw new Error("Coordinator rejected P2PKH network settings");
+      }
       writeGlobalSettingsToStorage(settings);
       // setCachedSettingsAndEmit 内部做相等比较，相等时不会 emit 也不会
       // 触发副作用。
@@ -1187,8 +1053,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
             error: err instanceof Error ? err.message : String(err)
           });
         }
-        deps.backgroundService.trigger(P2PKH_TASK_RECENT, "settings.testnet.enabled");
-        deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, "settings.testnet.enabled");
       } else if (prev.includeTestnet && !settings.includeTestnet) {
         // 关闭 testnet：取消可能正在跑的 recent（仅对 test 资源有效；
         // recent 自身的 resource list 由 listAllResources 提供，已经不会
@@ -1196,10 +1060,9 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         deps.logger?.info({
           scope: "p2pkh.service",
           event: "settings.testnet.disabled",
-          message: "P2PKH includeTestnet disabled; triggering recent-sync refresh",
+          message: "P2PKH includeTestnet disabled; confirmed sync will skip testnet",
           data: { publicKeyHex: getActiveKeyState().activePublicKeyHex ?? null }
         });
-        deps.backgroundService.trigger(P2PKH_TASK_RECENT, "settings.testnet.disabled");
       }
     },
 
@@ -1216,8 +1079,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       });
       try {
         await rehydrateResources();
-        deps.backgroundService.trigger(P2PKH_TASK_RECENT, "key.imported");
-        deps.backgroundService.trigger(P2PKH_TASK_BACKFILL, "key.imported");
       } catch (err) {
         deps.logger?.error({
           scope: "p2pkh.service",
@@ -1233,7 +1094,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       // 入参为被删 key 的 publicKeyHex；目前只用于日志与扩展点。
       try {
         const resources = await listAllResources().catch(() => []);
-        for (const r of resources) coordinator.removeResource(r.resourceId);
+        void resources;
       } catch (err) {
         console.error("P2PKH onKeyRemoved failed", err, publicKeyHex);
       }
@@ -1266,13 +1127,6 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
         }
       }
       keyspaceUnsubs.length = 0;
-      // 取消后台任务
-      try {
-        deps.backgroundService.cancel(P2PKH_TASK_RECENT);
-        deps.backgroundService.cancel(P2PKH_TASK_BACKFILL);
-      } catch {
-        // swallow
-      }
       // 释放 db handle
       try {
         disposeP2pkhDb();
@@ -1329,16 +1183,11 @@ function excludeProtectedUtxos<T extends { network: "main" | "test"; publicKeyHe
 
 void (null as unknown as P2pkhTransferService);
 void (null as unknown as P2pkhBalance);
-void (null as unknown as P2pkhHistoryItem);
 void (null as unknown as P2pkhUtxo);
 void (null as unknown as UtxoAllocation);
 void (null as unknown as UtxoAllocationRequest);
-void (null as unknown as P2pkhBackfillState);
-void (null as unknown as P2pkhLocalSubmission);
 void (null as unknown as P2pkhLocalInputClaim);
 void (null as unknown as P2pkhTransferInput);
 void (null as unknown as P2pkhTransferPreview);
 void (null as unknown as P2pkhTransferResult);
 void (null as unknown as P2pkhAssetId);
-void BACKGROUND_REGISTRY_CAPABILITY;
-void BACKGROUND_SERVICE_CAPABILITY;

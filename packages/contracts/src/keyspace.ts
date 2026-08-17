@@ -71,7 +71,8 @@ export interface KeyScopedStorageOpenInput {
   pluginId: string;
   storageId: string;
   version: number;
-  upgrade(db: IDBDatabase, oldVersion: number, newVersion: number | null): void;
+  /** The fourth argument is the active versionchange transaction when available. */
+  upgrade(db: IDBDatabase, oldVersion: number, newVersion: number | null, transaction?: IDBTransaction): void;
 }
 
 /** key-scoped storage 句柄。 */

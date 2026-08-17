@@ -31,6 +31,7 @@ folder "仓库根目录" as repo {
 
     folder "plugin 基础设施层" as pkg_infra {
       package "plugin-woc\n链上查询入口" as plugin_woc
+      package "plugin-junglebus\nP2PKH confirmed provider" as plugin_junglebus
       package "plugin-background\n后台任务平台" as plugin_background
       package "plugin-protocol\n协议入口与弹窗流程" as plugin_protocol
       package "plugin-hubmsg\nHub 消息接入" as plugin_hubmsg
@@ -76,6 +77,7 @@ pkg_runtime --> pkg_contracts : 依赖协议
 pkg_ui --> pkg_contracts : 共享类型
 
 plugin_woc --> pkg_contracts
+plugin_junglebus --> pkg_contracts
 plugin_background --> pkg_contracts
 plugin_protocol --> pkg_contracts
 plugin_hubmsg --> pkg_contracts
@@ -99,6 +101,7 @@ plugin_contacts --> pkg_contracts
 plugin_poker --> pkg_contracts
 
 plugin_woc --> pkg_runtime : 注册 capability
+plugin_junglebus --> pkg_runtime : 提供 confirmed provider factory
 plugin_background --> pkg_runtime
 plugin_protocol --> pkg_runtime
 plugin_hubmsg --> pkg_runtime
@@ -139,5 +142,7 @@ end note
 - `packages/contracts` 是跨包协议层，尽量让插件通过 contract 协作，而不是互相直连实现。
 - `packages/runtime` 是插件宿主，负责 registry、capability、路由和运行时装配。
 - `packages/ui` 是共享 UI 组件层。
+- `packages/plugin-woc` 和 `packages/plugin-junglebus` 是 provider 适配层；它们只在 adapter 边界处理各自的 wire API，普通 P2PKH 的 provider 选择与实例所有权在 `apps/web` Coordinator。
+- `plugin-junglebus` 只注册 confirmed read provider，不提供普通 BSV 广播、mempool、订阅或 WebSocket 能力。
 - `packages/plugin-*` 按“基础设施 / 平台 / 业务”三组整理，目的是先稳住边界，再承载具体功能。
 - `docs/protocol` 放协议草案，`docs/architecture` 放结构和架构文档，避免混放。

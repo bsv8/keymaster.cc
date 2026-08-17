@@ -23,6 +23,7 @@ import type {
 } from "@keymaster/contracts";
 import {
   RUNTIME_MESSAGE_BUS,
+  SESSION_COORDINATOR_CLIENT_CAPABILITY,
   WOC_1SAT_ORDINALS_CAPABILITY,
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
@@ -102,6 +103,7 @@ export const wocPlugin: PluginManifest = {
   i18n: wocResources,
   dependencies: [
     { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
+    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "通过 Coordinator 权威读写 provider 私有配置" },
     { capability: "system-settings.registry", reason: "注册 WOC 系统设置" },
     { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" }
   ],

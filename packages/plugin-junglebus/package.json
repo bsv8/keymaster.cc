@@ -1,0 +1,14 @@
+{
+  "name": "@keymaster/plugin-junglebus",
+  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts" },
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "@noble/hashes": "^1.4.0"
+  }
+}

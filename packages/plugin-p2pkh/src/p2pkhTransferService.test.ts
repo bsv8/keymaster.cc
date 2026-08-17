@@ -1,523 +1,189 @@
 import { describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { ripemd160 } from "@noble/hashes/ripemd160";
-import { sha256 } from "@noble/hashes/sha256";
-import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
+import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhTransferService } from "./p2pkhTransferService.js";
-import { makeResourceId, type P2pkhKeyResource, type P2pkhUtxo } from "./p2pkhContracts.js";
+import { makeResourceId, type P2pkhKeyResource, type P2pkhLocalInputClaim, type P2pkhLocalOutpoint, type P2pkhLocalTransaction, type P2pkhUtxo } from "./p2pkhContracts.js";
 
-const ACTIVE_PRIV_HEX = "0000000000000000000000000000000000000000000000000000000000000001";
-const ACTIVE = deriveP2pkhAddress(ACTIVE_PRIV_HEX, "main");
-// 硬切换 002 收尾：测试里所有"当前 owner"必须落到同一把真实公钥；
-// ACTIVE_PUBLIC_KEY_HEX 与 vault stub 借出的私钥严格对位。
-const ACTIVE_PUBLIC_KEY_HEX = ACTIVE.publicKeyHex;
-const RECEIVER = deriveP2pkhAddress("0000000000000000000000000000000000000000000000000000000000000002", "main");
-/** 链上 HASH160(compressed public key),用于 P2PKH 锁脚本。 */
-const ACTIVE_PUBKEY_HASH160_HEX = hash160(ACTIVE_PUBLIC_KEY_HEX);
+const PRIVATE_KEY = "0000000000000000000000000000000000000000000000000000000000000001";
+const OWNER = deriveP2pkhAddress(PRIVATE_KEY, "main");
+const RECIPIENT = deriveP2pkhAddress("0000000000000000000000000000000000000000000000000000000000000002", "main");
+const FUNDING_TXID = "09".repeat(32);
+function hexToBytes(value: string): Uint8Array { return Uint8Array.from({ length: value.length / 2 }, (_, index) => Number.parseInt(value.slice(index * 2, index * 2 + 2), 16)); }
 
-function makeUtxo(value: number): P2pkhUtxo {
-  return {
-    id: `u-${value}`,
-    publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-    resourceId: makeResourceId("main"),
-    
-    network: "main",
-    address: ACTIVE.address,
-    txid: "0000000000000000000000000000000000000000000000000000000000000009",
-    vout: 0,
-    value,
-    height: 1,
-    status: "confirmed",
-    isSpentInMempoolTx: false,
-    syncedAt: "2024-01-01T00:00:00.000Z"
-  };
-}
-
-function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
-  const submissions: unknown[] = [];
-  const inputClaims: unknown[] = [];
-  return {
-    submissions,
-    inputClaims,
-    async getResource(resourceId: string) {
-      return resource.resourceId === resourceId ? resource : undefined;
-    },
-    async listLocalInputClaimsByResource(resourceId: string) {
-      return resource.resourceId === resourceId ? inputClaims : [];
-    },
-    async listUtxos() {
-      return utxos;
-    },
-    async putLocalSubmission(value: unknown) {
-      submissions.push(value);
-    },
-    async putLocalInputClaim(value: unknown) {
-      inputClaims.push(value);
-    },
-    // 硬切换 002 收尾：mock 简化——直接 push submission 和 claims
-    // （保留原 `putLocalSubmission` 行为用于 post-broadcast 状态
-    // 更新）。真实实现走单 readwrite 事务 + 冲突检测；mock 不模
-    // 拟冲突，并发防重测试由专门的 test 覆盖。
-    async tryClaimSubmissionWithInputs(input: { submission: unknown; inputs: P2pkhUtxo[] }) {
-      submissions.push(input.submission);
-      const claimIds: string[] = [];
-      for (const u of input.inputs) {
-        const id = `${input.submission && (input.submission as { resourceId: string }).resourceId}:${u.txid}:${u.vout}`;
-        inputClaims.push({
-          id,
-          submissionId: (input.submission as { id: string }).id,
-          resourceId: (input.submission as { resourceId: string }).resourceId,
-          publicKeyHex: (input.submission as { publicKeyHex: string }).publicKeyHex,
-          network: u.network,
-          txid: u.txid,
-          vout: u.vout,
-          state: "claimed",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        });
-        claimIds.push(id);
-      }
-      return { claimIds };
-    },
-    async releaseLocalInputClaims(claimIds: string[]) {
-      const set = new Set(claimIds);
-      for (let i = inputClaims.length - 1; i >= 0; i--) {
-        const c = inputClaims[i] as { id: string };
-        if (set.has(c.id)) inputClaims.splice(i, 1);
-      }
-    }
-  };
+function makeUtxo(value = 3_000, txid = FUNDING_TXID, vout = 0): P2pkhUtxo {
+  return { id: `coin-${txid}-${vout}`, resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", address: OWNER.address, txid, vout, value, height: 1, status: "confirmed", isSpentInMempoolTx: false, syncedAt: "2024-01-01T00:00:00.000Z" };
 }
 
 function makeVault() {
   return {
     status: () => "unlocked",
-    createActiveKeyCrypto: async (_publicKeyHex: string) => ({
-      async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
-        if (input.publicKeyHex !== ACTIVE_PUBLIC_KEY_HEX) {
-          throw new Error("session_key_mismatch");
-        }
-        const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(ACTIVE_PRIV_HEX), {
-          lowS: true,
-          prehash: false,
-          format: input.format
-        });
-        return {
-          publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-          format: input.format,
-          signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
-        };
+    createActiveKeyCrypto: async () => ({
+      async deriveP2pkhAddress(input: { network: "main" | "test" }) {
+        const derived = deriveP2pkhAddress(PRIVATE_KEY, input.network);
+        return { publicKeyHex: derived.publicKeyHex, address: derived.address };
       },
-      async deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }) {
-        if (input.publicKeyHex !== ACTIVE_PUBLIC_KEY_HEX) {
-          throw new Error("session_key_mismatch");
-        }
-        const derived = deriveP2pkhAddress(ACTIVE_PRIV_HEX, input.network);
-        return {
-          publicKeyHex: derived.publicKeyHex,
-          address: derived.address
-        };
+      async signDigest(input: { digest: ArrayBuffer; format: "der" | "compact" }) {
+        const signature = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(PRIVATE_KEY), { lowS: true, prehash: false, format: input.format });
+        return { publicKeyHex: OWNER.publicKeyHex, format: input.format, signature: signature.buffer.slice(signature.byteOffset, signature.byteOffset + signature.byteLength) };
       }
-    }),
-    withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) =>
-      fn({ hex: ACTIVE_PRIV_HEX })
+    })
   } as never;
 }
 
-describe("createP2pkhTransferService", () => {
-  it("sends all available inputs minus the final fee without creating a change output", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      label: "active", address: ACTIVE.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0
+function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
+  const claims = new Map<string, P2pkhLocalInputClaim>();
+  const locals = new Map<string, P2pkhLocalTransaction>();
+  const outputs = new Map<string, P2pkhLocalOutpoint>();
+  return {
+    claims, locals, outputs,
+    async getResource(id: string) { return id === resource.resourceId ? resource : undefined; },
+    async listUtxos() { return utxos; },
+    async listLocalInputClaimsByResource(id: string) { return [...claims.values()].filter((row) => row.resourceId === id); },
+    async listLocalTransactions(id?: string) { return [...locals.values()].filter((row) => !id || row.resourceId === id); },
+    async listLocalOutpoints(id?: string) { return [...outputs.values()].filter((row) => !id || row.resourceId === id); },
+    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[]; localOutpoints: P2pkhLocalOutpoint[] }) {
+      for (const claim of input.claims) {
+        const existing = claims.get(claim.id);
+        if (existing && existing.submissionId !== claim.submissionId && !["released", "confirmed"].includes(existing.state)) throw new Error("P2PKH input already claimed");
+      }
+      locals.set(input.submission.id, { ...input.submission, state: "submitting" });
+      for (const claim of input.claims) claims.set(claim.id, { ...claim, state: "active" });
+      for (const output of input.localOutpoints) outputs.set(output.id, { ...output, state: "unavailable" });
+    },
+    async finishLocalSubmission(input: { submissionId: string; state: "local-confirmed" | "isolated" | "chain-confirmed" | "conflicted"; reason?: string }) {
+      const row = locals.get(input.submissionId)!;
+      locals.set(row.id, { ...row, state: input.state, isolationReason: input.reason, updatedAt: new Date().toISOString() });
+      for (const claim of claims.values()) if (claim.submissionId === input.submissionId) claims.set(claim.id, { ...claim, state: input.state === "local-confirmed" ? "active" : input.state === "isolated" || input.state === "conflicted" ? "isolated" : "confirmed" });
+      for (const output of outputs.values()) if (output.submissionId === input.submissionId) outputs.set(output.id, { ...output, state: input.state === "local-confirmed" ? "available" : input.state === "isolated" ? "isolated" : input.state === "conflicted" ? "invalidated" : "unavailable" });
+    },
+    async abortUnattemptedLocalSubmission(input: { submissionId: string }) {
+      const row = locals.get(input.submissionId);
+      if (!row || row.attempts.length) return;
+      locals.delete(input.submissionId);
+      for (const [id, claim] of claims) if (claim.submissionId === input.submissionId) claims.delete(id);
+      for (const [id, output] of outputs) if (output.submissionId === input.submissionId) outputs.delete(id);
+    }
+  };
+}
+
+function makeResource(): P2pkhKeyResource {
+  return { resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, label: "active", address: OWNER.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0 };
+}
+
+function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-dispatched" = "accepted", broadcastError?: Error, options?: { utxos?: P2pkhUtxo[]; protectedOutpoints?: { isProtected(input: { txid: string; vout: number; network: "main" | "test"; publicKeyHex?: string }): boolean } }) {
+  const db = makeDb(options?.utxos ?? [makeUtxo()], makeResource());
+  const broadcast = vi.fn(async ({ submissionId }: { submissionId: string }) => {
+    if (broadcastError) throw broadcastError;
+    if (outcome === "not-dispatched") return { status: "ok" as const, value: { status: "not-dispatched", reason: "coordinator-not-connected" }, sessionEpoch: "test-epoch" };
+    await db.finishLocalSubmission({ submissionId, state: outcome === "isolated" ? "isolated" : "local-confirmed" });
+    return { status: "ok" as const, value: { status: outcome }, sessionEpoch: "test-epoch" };
+  });
+  const service = createP2pkhTransferService({
+    vault: makeVault(),
+    messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
+    getDb: async () => db as never,
+    protectedOutpoints: options?.protectedOutpoints as never,
+    broadcastPreflight: async () => ({ generation: 7 }),
+    broadcastWithCoordinator: broadcast,
+    getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" }),
+    getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" })
+  });
+  return { service, db, broadcast };
+}
+
+async function prepare(service: ReturnType<typeof makeService>["service"]) {
+  return service.prepare({ ownerPublicKeyHex: OWNER.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 1_000, feeRateSatoshisPerKb: 1 });
+}
+
+describe("ordinary P2PKH Coordinator transfer", () => {
+  it("prepares a final transaction without any broadcast", async () => {
+    const { service, broadcast } = makeService();
+    const preview = await prepare(service);
+    expect(preview.txid).toMatch(/^[0-9a-f]{64}$/);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it.each(["accepted", "already-known"] as const)("promotes %s to local-confirmed", async (outcome) => {
+    const { service, db, broadcast } = makeService(outcome);
+    const preview = await prepare(service);
+    const result = await service.submit(preview);
+    expect(result.status).toBe("local-confirmed");
+    expect(result.localInputClaimIds).toHaveLength(1);
+    expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({ expectedProviderGeneration: 7 }));
+    expect([...db.locals.values()][0]?.state).toBe("local-confirmed");
+    expect([...db.claims.values()][0]?.state).toBe("active");
+    expect([...db.outputs.values()][0]?.state).toBe("available");
+  });
+
+  it("isolates provider failure and never releases the input claim", async () => {
+    const { service, db } = makeService("isolated");
+    const result = await service.submit(await prepare(service));
+    expect(result.status).toBe("isolated");
+    expect([...db.claims.values()][0]?.state).toBe("isolated");
+    expect([...db.locals.values()][0]?.state).toBe("isolated");
+  });
+
+  it("does not write a terminal state when the Coordinator RPC response is lost", async () => {
+    const { service, db } = makeService("accepted", new Error("Coordinator port closed"));
+    const result = await service.submit(await prepare(service));
+    expect(result.status).toBe("isolated");
+    expect(result.error).toBe("Coordinator port closed");
+    expect([...db.locals.values()][0]?.state).toBe("submitting");
+    expect([...db.locals.values()][0]?.isolationReason).toBeUndefined();
+    expect([...db.claims.values()][0]?.state).toBe("active");
+  });
+
+  it("revokes a submission when the Coordinator explicitly reports no dispatch", async () => {
+    const { service, db } = makeService("not-dispatched");
+    const result = await service.submit(await prepare(service));
+    expect(result.status).toBe("not-dispatched");
+    expect(db.locals.size).toBe(0);
+    expect(db.claims.size).toBe(0);
+    expect(db.outputs.size).toBe(0);
+  });
+
+  it("does not select an isolated input for a new preview", async () => {
+    const { service, db } = makeService();
+    db.claims.set("isolated", { id: "isolated", submissionId: "old", resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", txid: FUNDING_TXID, vout: 0, value: 3_000, outpointKey: `${FUNDING_TXID}:0`, state: "isolated", createdAt: "now", updatedAt: "now" });
+    await expect(prepare(service)).rejects.toThrow(/No P2PKH UTXOs|no-utxos|insufficient/i);
+  });
+
+  it("revalidates the raw inputs and preview allocation before writing claims", async () => {
+    const { service, db, broadcast } = makeService();
+    const preview = await prepare(service);
+    const tampered = {
+      ...preview,
+      allocation: {
+        ...preview.allocation,
+        selected: [{ ...preview.allocation.selected[0]!, txid: "cc".repeat(32) }]
+      }
     };
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast: vi.fn() } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => makeDb([makeUtxo(3_000)], resource) as never,
-      getActiveKey: () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, label: "active", capabilities: [], createdAt: "now" }),
+    await expect(service.submit(tampered)).rejects.toThrow(/input/i);
+    expect(db.locals.size).toBe(0);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  it("does not select a protocol-protected funding outpoint", async () => {
+    const protectedTxid = "aa".repeat(32);
+    const ordinaryTxid = "bb".repeat(32);
+    const protectedOutpoints = { isProtected: vi.fn(({ txid }: { txid: string }) => txid === protectedTxid) };
+    const { service } = makeService("accepted", undefined, { utxos: [makeUtxo(3_000, protectedTxid), makeUtxo(3_000, ordinaryTxid)], protectedOutpoints });
+    const preview = await prepare(service);
+    expect(preview.allocation.selected.map((input) => input.txid)).toEqual([ordinaryTxid]);
+    expect(protectedOutpoints.isProtected).toHaveBeenCalledWith(expect.objectContaining({ txid: protectedTxid, network: "main", publicKeyHex: OWNER.publicKeyHex }));
+  });
+
+  it("rejects before writing when the Coordinator preflight is unavailable", async () => {
+    const { service, db } = makeService();
+    const preview = await prepare(service);
+    const gated = createP2pkhTransferService({
+      vault: makeVault(), messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
+      getDb: async () => db as never,
+      getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
       getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
     });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 0,
-      sendAll: true,
-      feeRateSatoshisPerKb: 1_000
-    });
-
-    expect(preview.allocation.selected).toHaveLength(1);
-    expect(preview.allocation.changeSatoshis).toBe(0);
-    expect(preview.outputs).toEqual([{ address: RECEIVER.address, value: preview.amountSatoshis }]);
-    expect(preview.amountSatoshis + preview.estimatedFeeSatoshis).toBe(3_000);
-    expect(preview.amountSatoshis).toBeGreaterThan(0);
-  });
-
-  it("deducts the fee from a fixed amount only when the available balance covers the amount but not amount plus fee", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      label: "active", address: ACTIVE.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0
-    };
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast: vi.fn() } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => makeDb([makeUtxo(1_000)], resource) as never,
-      getActiveKey: () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, label: "active", capabilities: [], createdAt: "now" }),
-      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
-    });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 1_000,
-      feeRateSatoshisPerKb: 1_000
-    });
-
-    expect(preview.allocation.changeSatoshis).toBe(0);
-    expect(preview.amountSatoshis + preview.estimatedFeeSatoshis).toBe(1_000);
-    expect(preview.amountSatoshis).toBeLessThan(1_000);
-  });
-
-  it("treats a fixed amount above the available balance as an all-output transfer", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      label: "active", address: ACTIVE.address, network: "main", createdAt: "2024-01-01T00:00:00.000Z", generation: 0
-    };
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast: vi.fn() } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async () => makeDb([makeUtxo(900)], resource) as never,
-      getActiveKey: () => ({ publicKeyHex: ACTIVE_PUBLIC_KEY_HEX, label: "active", capabilities: [], createdAt: "now" }),
-      getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
-    });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 1_000,
-      feeRateSatoshisPerKb: 1_000
-    });
-
-    expect(preview.allocation.totalInputSatoshis).toBe(900);
-    expect(preview.allocation.changeSatoshis).toBe(0);
-    expect(preview.amountSatoshis + preview.estimatedFeeSatoshis).toBe(900);
-    expect(preview.amountSatoshis).toBeLessThan(900);
-  });
-
-  it("prepares a final signed preview and submit only broadcasts the preview hex", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      
-      label: "active",
-
-      address: ACTIVE.address,
-      network: "main",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      generation: 0
-    };
-    const db = makeDb([makeUtxo(3000)], resource);
-    let vaultCalls = 0;
-    const broadcast = vi.fn(async (_network: "main" | "test", rawTxHex: string) => {
-      const txid = calcTxidFromRawTxHex(rawTxHex);
-      return {
-        accepted: true,
-        canonicalTxid: txid,
-        providerReturnedTxidRaw: txid,
-        providerReturnedTxidNormalized: txid,
-        txidIntegrity: "exact" as const
-      };
-    });
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async (_publicKeyHex: string) => db as never,
-      getActiveKey: () => ({
-        
-publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-        label: "active",
-        capabilities: [],
-        createdAt: "2024-01-01T00:00:00.000Z"
-      }),
-      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
-    });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 1000,
-      feeRateSatoshisPerKb: 1
-    });
-
-    expect(preview.rawTxHex).toMatch(/^[0-9a-f]+$/);
-    expect(preview.txid).toBe(calcTxidFromRawTxHex(preview.rawTxHex));
-    expect(preview.serializedSizeBytes).toBe(preview.rawTxHex.length / 2);
-    expect(preview.outputs).toHaveLength(preview.allocation.changeSatoshis > 0 ? 2 : 1);
-    expect(db.inputClaims).toHaveLength(0);
-
-    const vaultCallsAfterPrepare = vaultCalls;
-    const result = await service.submit(preview);
-
-    expect(vaultCalls).toBe(vaultCallsAfterPrepare);
-    expect(broadcast).toHaveBeenCalledTimes(1);
-    expect(broadcast).toHaveBeenCalledWith("main", preview.rawTxHex, { timeoutMs: 30_000 });
-    expect(result.status).toBe("broadcast-pending-woc");
-    expect(result.rawTxHex).toBe(preview.rawTxHex);
-    expect(result.txid).toBe(preview.txid);
-    expect(result.submissionId).toBeTypeOf("string");
-    expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
-    expect(db.inputClaims).toHaveLength(preview.allocation.selected.length);
-    expect(db.submissions).toHaveLength(2);
-    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("broadcast-pending-woc");
-    expect((db.submissions.at(-1) as { canonicalTxid?: string } | undefined)?.canonicalTxid).toBe(preview.txid);
-    expect((db.submissions.at(-1) as { observation?: string } | undefined)?.observation).toBeUndefined();
-  });
-
-  it("accepts reversed provider txid as broadcast", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      
-      label: "active",
-
-      address: ACTIVE.address,
-      network: "main",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      generation: 0
-    };
-    const db = makeDb([makeUtxo(3000)], resource);
-    const broadcast = vi.fn(async (_network: "main" | "test", rawTxHex: string) => {
-      const txid = calcTxidFromRawTxHex(rawTxHex);
-      const reversed = txid.match(/../g)?.reverse().join("") ?? txid;
-      return {
-        accepted: true,
-        canonicalTxid: txid,
-        providerReturnedTxidRaw: reversed,
-        providerReturnedTxidNormalized: reversed,
-        txidIntegrity: "reversed" as const
-      };
-    });
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async (_publicKeyHex: string) => db as never,
-      getActiveKey: () => ({
-        
-publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-        label: "active",
-        capabilities: [],
-        createdAt: "2024-01-01T00:00:00.000Z"
-      }),
-      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
-    });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 1000,
-      feeRateSatoshisPerKb: 1
-    });
-    const result = await service.submit(preview);
-
-    expect(result.status).toBe("broadcast-pending-woc");
-    expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
-  });
-
-  it("marks provider-inconsistent when broadcast txid does not match canonical txid", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      
-      label: "active",
-
-      address: ACTIVE.address,
-      network: "main",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      generation: 0
-    };
-    const db = makeDb([makeUtxo(3000)], resource);
-    let vaultCalls = 0;
-    const previewTxid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-    const providerTxid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-    const reversedProviderTxid = providerTxid.match(/../g)?.reverse().join("") ?? providerTxid;
-    const broadcast = vi.fn(async () => ({
-      accepted: true,
-      canonicalTxid: previewTxid,
-      providerReturnedTxidRaw: reversedProviderTxid,
-      providerReturnedTxidNormalized: reversedProviderTxid,
-      txidIntegrity: "mismatch" as const
-    }));
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async (_publicKeyHex: string) => db as never,
-      getActiveKey: () => ({
-        
-publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-        label: "active",
-        capabilities: [],
-        createdAt: "2024-01-01T00:00:00.000Z"
-      }),
-      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
-    });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 1000,
-      feeRateSatoshisPerKb: 1
-    });
-    const vaultCallsAfterPrepare = vaultCalls;
-    const result = await service.submit(preview);
-
-    expect(vaultCalls).toBe(vaultCallsAfterPrepare);
-    expect(broadcast).toHaveBeenCalledTimes(1);
-    expect(result.status).toBe("provider-inconsistent");
-    expect(result.rawTxHex).toBe(preview.rawTxHex);
-    expect(result.localInputClaimIds).toHaveLength(preview.allocation.selected.length);
-    expect(db.inputClaims).toHaveLength(preview.allocation.selected.length);
-    expect(db.submissions).toHaveLength(2);
-    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("provider-inconsistent");
-    expect((db.submissions.at(-1) as { txidIntegrity?: string } | undefined)?.txidIntegrity).toBe("mismatch");
-  });
-
-  it("does not create local input claims when broadcast is rejected", async () => {
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      
-      label: "active",
-
-      address: ACTIVE.address,
-      network: "main",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      generation: 0
-    };
-    const db = makeDb([makeUtxo(3000)], resource);
-    let vaultCalls = 0;
-    const broadcast = vi.fn(async () => {
-      throw new Error("invalid transaction");
-    });
-    const service = createP2pkhTransferService({
-      vault: makeVault(),
-      woc: { broadcast } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async (_publicKeyHex: string) => db as never,
-      getActiveKey: () => ({
-        
-publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-        label: "active",
-        capabilities: [],
-        createdAt: "2024-01-01T00:00:00.000Z"
-      }),
-      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
-    });
-
-    const preview = await service.prepare({
-      ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      assetId: "bsv",
-      
-      recipientAddress: RECEIVER.address,
-      amountSatoshis: 1000,
-      feeRateSatoshisPerKb: 1
-    });
-    const vaultCallsAfterPrepare = vaultCalls;
-    const result = await service.submit(preview);
-
-    expect(vaultCalls).toBe(vaultCallsAfterPrepare);
-    expect(broadcast).toHaveBeenCalledTimes(1);
-    expect(result.status).toBe("rejected");
-    expect(result.rawTxHex).toBe(preview.rawTxHex);
-    expect(db.inputClaims).toHaveLength(0);
-    expect(db.submissions).toHaveLength(2);
-    expect((db.submissions.at(-1) as { status?: string } | undefined)?.status).toBe("rejected");
-  });
-
-  it("rejects signing when runtime returns mismatched format (requested der, got compact)", async () => {
-    // 构造一个返回错误 format 的 vault mock
-    const mismatchVault = {
-      status: () => "unlocked",
-      createActiveKeyCrypto: async (_publicKeyHex: string) => ({
-        async signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: "der" | "compact" }) {
-          const wrongFormat = input.format === "der" ? "compact" as const : "der" as const;
-          const sig = secp256k1.sign(new Uint8Array(input.digest), hexToBytes(ACTIVE_PRIV_HEX), {
-            lowS: true, prehash: false, format: wrongFormat
-          });
-          return {
-            publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-            format: wrongFormat,
-            signature: sig.buffer.slice(sig.byteOffset, sig.byteOffset + sig.byteLength)
-          };
-        },
-        async deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }) {
-          const derived = deriveP2pkhAddress(ACTIVE_PRIV_HEX, input.network);
-          return { publicKeyHex: derived.publicKeyHex, address: derived.address };
-        }
-      }),
-      withPrivateKey: async (_publicKeyHex: string, fn: (m: { hex: string }) => Promise<string> | string) =>
-        fn({ hex: ACTIVE_PRIV_HEX })
-    } as never;
-
-    const resource: P2pkhKeyResource = {
-      resourceId: makeResourceId("main"), publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-      label: "active",
-      address: ACTIVE.address,
-      network: "main",
-      createdAt: "2024-01-01T00:00:00.000Z",
-      generation: 0
-    };
-    const db = makeDb([makeUtxo(3000)], resource);
-    const service = createP2pkhTransferService({
-      vault: mismatchVault,
-      woc: { broadcast: vi.fn() } as never,
-      messageBus: { publish: vi.fn(), subscribe: vi.fn() } as never,
-      getDb: async (_publicKeyHex: string) => db as never,
-      getActiveKey: () => ({
-        publicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-        label: "active",
-        capabilities: [],
-        createdAt: "2024-01-01T00:00:00.000Z"
-      }),
-      getKeyForOwner: vi.fn(async (publicKeyHex: string) => ({ publicKeyHex, label: "test", capabilities: ["p2pkh"], createdAt: "2024-01-01T00:00:00.000Z" })),
-    });
-
-    await expect(
-      service.prepare({
-        ownerPublicKeyHex: ACTIVE_PUBLIC_KEY_HEX,
-        assetId: "bsv",
-        recipientAddress: RECEIVER.address,
-        amountSatoshis: 1000,
-        feeRateSatoshisPerKb: 1
-      })
-    ).rejects.toThrow("signDigest (p2pkh) format mismatch");
+    await expect(gated.submit(preview)).rejects.toThrow(/Coordinator broadcast/);
+    expect(db.locals.size).toBe(0);
+    expect(db.claims.size).toBe(0);
   });
 });
-
-function hash160(publicKeyHex: string): string {
-  const pub = hexToBytes(publicKeyHex);
-  return bytesToHex(ripemd160(sha256(pub)));
-}
-
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.replace(/^0x/, "");
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
-function bytesToHex(bytes: Uint8Array): string {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}

@@ -1,7 +1,7 @@
 // packages/plugin-p2pkh/src/p2pkhContracts.ts
 // P2PKH 专属类型与 P2pkhService 契约。
 // 设计缘由：硬切换后这些类型默认只在 plugin-p2pkh 内部使用，不进入全局 contracts。
-// 包含 WOC 硬切换后的扩展：recent sync、history backfill、本地提交、本地输入占用。
+// 包含 confirmed facts/projections、本地提交和本地输入占用。
 //
 // 硬切换 002 收尾（key 域彻底收尾）：
 //   - P2PKH 资源 / UTXO / history / submission / claim / transfer input /
@@ -11,7 +11,7 @@
 //     当前打开的 namespace DB 隐式表达（每个 key 的 namespace 独立 DB）。
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
-import type { BsvNetwork, KeyIdentity } from "@keymaster/contracts";
+import type { BsvNetwork, KeyIdentity, P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 
 /** P2PKH 资产 id。设计缘由：bsv 和 bsvtest 是同一类资产的不同网络，不是不同 provider。 */
 export type P2pkhAssetId = "bsv" | "bsvtest";
@@ -68,6 +68,149 @@ export interface P2pkhKeyResource {
   generation: number;
 }
 
+export interface P2pkhTransactionFact {
+  id: string;
+  resourceId: string;
+  publicKeyHex: string;
+  network: BsvNetwork;
+  address: string;
+  txid: string;
+  rawTxHex: string;
+  blockHeight?: number;
+  blockHash?: string;
+  blockTime?: number;
+  inputOutpointKeys: string[];
+  inputs: Array<{ txid: string; vout: number; outpointKey: string }>;
+  ownedOutpointKeys: string[];
+  ownedOutputs: Array<{ vout: number; value: number; scriptHex: string }>;
+  firstConfirmedAt: string;
+  lastConfirmedAt: string;
+}
+
+export type P2pkhOwnedOutpointChainState = "available" | "spent";
+
+export interface P2pkhOwnedOutpointProjection {
+  id: string;
+  resourceId: string;
+  publicKeyHex: string;
+  network: BsvNetwork;
+  address: string;
+  txid: string;
+  vout: number;
+  outpointKey: string;
+  value: number;
+  scriptHex: string;
+  chainState: P2pkhOwnedOutpointChainState;
+  spentByTxid?: string;
+  createdBlockHeight?: number;
+  spentBlockHeight?: number;
+  updatedAt: string;
+}
+
+export type P2pkhLocalTransactionState = "prepared" | "submitting" | "local-confirmed" | "isolated" | "chain-confirmed" | "conflicted";
+export type P2pkhLocalOutpointState = "unavailable" | "available" | "claimed" | "isolated" | "invalidated";
+
+export interface P2pkhBroadcastAttempt {
+  id: string;
+  submissionId: string;
+  providerId: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: "accepted" | "already-known" | "failed" | "isolated";
+  providerReference?: string;
+  providerCode?: string;
+  providerMessage?: string;
+}
+
+export interface P2pkhLocalTransaction {
+  id: string;
+  resourceId: string;
+  publicKeyHex: string;
+  network: BsvNetwork;
+  txid: string;
+  rawTxHex: string;
+  state: P2pkhLocalTransactionState;
+  inputOutpointKeys: string[];
+  ownOutputs: Array<{ vout: number; value: number; scriptHex: string }>;
+  parentTxids: string[];
+  createdAt: string;
+  updatedAt: string;
+  isolationReason?: string;
+  /** State to restore if this confirmed fact disappears during a reorg. */
+  chainConfirmationPreviousState?: P2pkhLocalTransactionState;
+  /** State and remote facts to restore when a competing branch disappears. */
+  conflictPreviousState?: P2pkhLocalTransactionState;
+  conflictSourceTxids?: string[];
+  attempts: P2pkhBroadcastAttempt[];
+}
+
+/** Durable record for legacy rows that could not be migrated completely. */
+export interface P2pkhMigrationAudit {
+  id: string;
+  source: "p2pkh_local_submissions";
+  legacyId?: string;
+  resourceId?: string;
+  reason: "missing-resource-id" | "missing-transaction-fields";
+  missingFields: string[];
+  createdAt: string;
+}
+
+export interface P2pkhLocalOutpoint {
+  id: string;
+  resourceId: string;
+  txid: string;
+  vout: number;
+  value: number;
+  scriptHex: string;
+  submissionId: string;
+  state: P2pkhLocalOutpointState;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type P2pkhLocalInputClaimV10State = "active" | "isolated" | "released" | "confirmed";
+
+export interface P2pkhLocalInputClaimV10 {
+  id: string;
+  submissionId: string;
+  resourceId: string;
+  publicKeyHex: string;
+  network: BsvNetwork;
+  txid: string;
+  vout: number;
+  outpointKey: string;
+  value?: number;
+  state: P2pkhLocalInputClaimV10State;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface P2pkhTransactionSyncState {
+  id: string;
+  resourceId: string;
+  completeHeadTxid?: string;
+  inProgressProviderId?: string;
+  inProgressProviderGeneration?: number;
+  inProgressCursor?: string;
+  runHeadTxid?: string;
+  /** Transaction ids observed by the current resumable run for reorg audit. */
+  runObservedTxids?: string[];
+  runId?: string;
+  pagesSynced: number;
+  transactionsSynced: number;
+  lastAttemptAt?: string;
+  lastSuccessAt?: string;
+  lastError?: string;
+}
+
+export interface P2pkhBalanceBreakdown {
+  blockConfirmed: number;
+  localSpendable: number;
+  localConfirmedChange: number;
+  pendingInputClaims: number;
+  isolated: number;
+}
+
 /**
  * P2PKH 余额（硬切换 009 / 001）。
  * 设计缘由：余额不再是表、不是持久化实体，只是 service 基于当前 UTXO 快照
@@ -76,6 +219,7 @@ export interface P2pkhKeyResource {
  */
 export interface P2pkhBalance {
   total: number;
+  breakdown?: P2pkhBalanceBreakdown;
 }
 
 /**
@@ -127,26 +271,6 @@ export interface P2pkhUtxo {
   syncedAt: string;
 }
 
-/** P2PKH 历史记录条目。
- *
- */
-export interface P2pkhHistoryItem {
-  id: string;
-  resourceId: string;
-  publicKeyHex: string;
-  network: BsvNetwork;
-  address: string;
-  txid: string;
-  height?: number;
-  status: "confirmed" | "unconfirmed" | "pending" | "dropped";
-  /** 历史来源：本地提交、WOC 未确认、WOC 确认。 */
-  source: "local-submission" | "woc-unconfirmed" | "woc-confirmed";
-  observation?: "unconfirmed" | "confirmed";
-  syncedAt: string;
-  /** 最终对账落空时的原因。 */
-  droppedReason?: string;
-}
-
 /**
  * UTXO 过滤条件（硬切换 002 收尾）。
  *
@@ -170,6 +294,18 @@ export interface P2pkhUtxoFilter {
    */
   ownerPublicKeyHex?: string;
   resourceId?: string;
+  /** Optional bounded page size for wallet/history projections. */
+  limit?: number;
+}
+
+/** Opaque cursor page used by the wallet's facts and coins views. */
+export interface P2pkhPage<T> {
+  items: T[];
+  nextCursor?: string;
+}
+
+export interface P2pkhPageFilter extends P2pkhUtxoFilter {
+  cursor?: string;
 }
 
 /**
@@ -200,74 +336,13 @@ export interface UtxoAllocationError {
 }
 
 /** 同步状态。 */
-export type P2pkhSyncStatus = "idle" | "syncing" | "ok" | "failed" | "rate-limited";
-
-/** Backfill 状态。 */
-export type P2pkhBackfillStatus = "pending" | "running" | "complete" | "failed" | "paused";
-
-/** Backfill state。 */
-export interface P2pkhBackfillState {
-  resourceId: string;
-  status: P2pkhBackfillStatus;
-  nextPageToken?: string;
-  anchorTxids: string[];
-  pagesSynced: number;
-  recordsSynced: number;
-  revision: number;
-  lastError?: string;
-  updatedAt: string;
-}
-
-/** Recent sync state。 */
-export interface P2pkhRecentSyncState {
-  resourceId: string;
-  recentConfirmedTxids: string[];
-  lastCheckedAt?: string;
-  lastSuccessAt?: string;
-  lastError?: string;
-}
+export type P2pkhSyncStatus = "idle" | "syncing" | "ok" | "failed" | "rate-limited" | "blocked";
 
 /** Pending transfer。 */
-export type P2pkhLocalSubmissionStatus =
-  | "draft"
-  | "submitting"
-  | "broadcast"
-  | "confirmed"
-  | "failed"
-  | "unknown"
-  | "provider-inconsistent"
-  | "broadcast-pending-woc"
-  | "woc-observed-unconfirmed"
-  | "woc-confirmed"
-  | "woc-dropped"
-  | "rejected";
-
-export interface P2pkhLocalSubmission {
-  id: string;
-  resourceId: string;
-  publicKeyHex: string;
-  network: BsvNetwork;
-  assetId: P2pkhAssetId;
-  canonicalTxid: string;
-  expectedCanonicalTxid?: string;
-  observation?: "unconfirmed" | "confirmed";
-  rawTxHex: string;
-  providerReturnedTxidRaw?: string;
-  providerReturnedTxidNormalized?: string;
-  txidIntegrity: "exact" | "reversed" | "mismatch" | "missing";
-  recipientAddress: string;
-  amountSatoshis: number;
-  status: P2pkhLocalSubmissionStatus;
-  inputOutpoints: Array<{ txid: string; vout: number; value: number }>;
-  createdAt: string;
-  updatedAt: string;
-  error?: string;
-}
-
 /** 本地输入占用。
  *
  */
-export type P2pkhLocalInputClaimState = "claimed" | "observed-consumed" | "released";
+export type P2pkhLocalInputClaimState = P2pkhLocalInputClaimV10State;
 
 export interface P2pkhLocalInputClaim {
   id: string;
@@ -277,9 +352,8 @@ export interface P2pkhLocalInputClaim {
   network: BsvNetwork;
   txid: string;
   vout: number;
-  canonicalTxid?: string;
-  observation?: "unconfirmed" | "confirmed";
-  droppedReason?: string;
+  outpointKey?: string;
+  value?: number;
   state: P2pkhLocalInputClaimState;
   createdAt: string;
   updatedAt: string;
@@ -311,46 +385,6 @@ export interface P2pkhProtocolSubmission {
   droppedReason?: string;
   createdAt: string;
   updatedAt: string;
-}
-
-/** 同步协调器提交所需参数。 */
-export interface P2pkhBackfillCommit {
-  resourceId: string;
-  expectedRevision: number;
-  /** 资源代际；与 store 当前 generation 不一致时丢弃响应。 */
-  expectedGeneration: number;
-  /** 资源元数据，用于在 history 记录中填入正确的 owner / network / address。 */
-  resource: P2pkhKeyResource;
-  /** 当前页 history；按 (resourceId, txid) upsert。 */
-  page: Array<{ txid: string; height: number; status: "confirmed"; source: "woc-confirmed" }>;
-  /** 下一页 token；缺失则视为 complete。 */
-  nextPageToken?: string;
-}
-
-/**
- * P2pkhRecentCommit（硬切换 001 + 硬切换 002 收尾）。
- */
-export interface P2pkhRecentCommit {
-  resourceId: string;
-  /** 资源代际；提交时与 store 当前 generation 不一致则拒绝写入。 */
-  expectedGeneration?: number;
-  /** 资源元数据，用于在 history 中填入正确的 owner hex / network / address。 */
-  resource?: P2pkhKeyResource;
-  /** resource 替换式 UTXO 快照。 */
-  utxos?: P2pkhUtxo[];
-  /** 近期确认与未确认 history。 */
-  recentHistory?: P2pkhHistoryItem[];
-  unconfirmedHistory?: P2pkhHistoryItem[];
-  /** 写入 recent watermark。 */
-  recentConfirmedTxids?: string[];
-  /** 本地输入占用对账结果。 */
-  localInputClaims?: P2pkhLocalInputClaim[];
-  /** 本地提交观察对账结果。 */
-  localSubmissions?: P2pkhLocalSubmission[];
-  /** 协议 spend 提交对账结果。 */
-  protocolSubmissions?: P2pkhProtocolSubmission[];
-  /** lastSyncedAt 时间戳。 */
-  lastSyncedAt?: string;
 }
 
 /**
@@ -393,15 +427,11 @@ export interface P2pkhTransferPreview {
 
 /** 转移结果。 */
 export type P2pkhTransferResultStatus =
-  | "broadcast-pending-woc"
-  | "woc-observed-unconfirmed"
-  | "woc-confirmed"
-  | "woc-dropped"
-  | "rejected"
-  | "unknown"
-  | "provider-inconsistent"
-  | "broadcast"
-  | "confirmed";
+  | "local-confirmed"
+  | "isolated"
+  | "conflicted"
+  | "chain-confirmed"
+  | "not-dispatched";
 
 export interface P2pkhTransferResult {
   status: P2pkhTransferResultStatus;
@@ -425,20 +455,6 @@ export interface P2pkhService {
   onDataChanged(handler: () => void): () => void;
 
   /**
-   * 硬切换 003：单个任务级别的状态。`syncStatus` 是 recent + backfill 的
-   * 聚合（任一 syncing -> syncing，任一 failed -> failed，全 ok -> ok），
-   * 两个任务并发运行时聚合状态会在第一个任务完成时就退出 syncing；
-   * 第二个任务结束时如果聚合状态已经不是 syncing，订阅侧就会错过
-   * "第二次完成"的刷新。订阅侧（总览页）应改用 per-task 订阅，
-   * 在任一任务进入完成态（ok / failed / idle）时都重新拉取真值。
-   */
-  recentSyncStatus(): P2pkhSyncStatus;
-  backfillStatus(): P2pkhSyncStatus;
-  onRecentSyncStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
-  onBackfillStatusChange(handler: (status: P2pkhSyncStatus) => void): () => void;
-
-
-  /**
    * 读取当前全局产品设置。始终返回最新同步值：
    * - 进程内缓存由 `applyGlobalSettings` 维护；
    * - 跨标签页变更通过 storage 事件被 service 接收并刷新缓存。
@@ -457,8 +473,7 @@ export interface P2pkhService {
   onGlobalSettingsChange(handler: (settings: P2pkhGlobalSettings) => void): () => void;
   /**
    * 应用新的全局设置：写 localStorage、更新进程内缓存、通知订阅者、
-   * 并在 includeTestnet 由 false → true 时立即触发 rehydrate +
-   * recent-sync + history-backfill，让 testnet 重新进入运行范围。
+   * 并在 includeTestnet 由 false → true 时立即补齐 testnet 资源。
    * 设计缘由：硬切换 001 要求"再次开启 testnet 时立即把 testnet
    * 纳入运行范围"，但 storage 事件不会在本标签页触发，必须由写入
    * 路径主动通知 service。
@@ -472,16 +487,21 @@ export interface P2pkhService {
   listUtxos(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
   /** 不排除 protected outpoint 的原始 UTXO 读口，仅供协议级内部使用。 */
   listUtxosRaw?(filter?: P2pkhUtxoFilter): Promise<P2pkhUtxo[]>;
-  listHistory(filter?: P2pkhUtxoFilter): Promise<P2pkhHistoryItem[]>;
-  listBackfillStates(): Promise<P2pkhBackfillState[]>;
-  /**
-   * 列出各资源的 recent-sync 状态：lastCheckedAt / lastSuccessAt 是
-   * "最近一次同步时间"的真实来源（recent-sync 不会回写 address store 的
-   * lastSyncedAt）。UI 应使用此接口展示"最近同步"。
-   */
-  listRecentSyncStates(): Promise<P2pkhRecentSyncState[]>;
-  listLocalSubmissions(): Promise<P2pkhLocalSubmission[]>;
-  listLocalInputClaims(): Promise<P2pkhLocalInputClaim[]>;
+  listLocalInputClaims(resourceId?: string, limit?: number): Promise<P2pkhLocalInputClaim[]>;
+
+  /** v10 fact/projection views. Optional keeps the public capability compatible with token consumers. */
+  listTransactionFacts?(filter?: P2pkhUtxoFilter): Promise<P2pkhTransactionFact[]>;
+  listOwnedOutpoints?(filter?: P2pkhUtxoFilter): Promise<P2pkhOwnedOutpointProjection[]>;
+  listTransactionFactsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhTransactionFact>>;
+  listOwnedOutpointsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhOwnedOutpointProjection>>;
+  listOwnedOutpointValues?(resourceId: string, outpointKeys: string[]): Promise<Record<string, number>>;
+  listLocalTransactions?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalTransaction[]>;
+  listLocalOutpoints?(filter?: P2pkhUtxoFilter): Promise<P2pkhLocalOutpoint[]>;
+  listLocalTransactionsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalTransaction>>;
+  listLocalOutpointsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalOutpoint>>;
+  listLocalInputClaimsPage?(filter?: P2pkhPageFilter): Promise<P2pkhPage<P2pkhLocalInputClaim>>;
+  getBalanceBreakdown?(network?: BsvNetwork): Promise<P2pkhBalanceBreakdown>;
+  getProviderSnapshot?(): P2pkhProviderRegistrySnapshot | undefined;
 
   allocateUtxos(request: UtxoAllocationRequest): Promise<UtxoAllocation>;
 
@@ -489,6 +509,8 @@ export interface P2pkhService {
   prepareTransfer(input: P2pkhTransferInput): Promise<P2pkhTransferPreview>;
   /** 转移：广播 preview 中已经生成好的最终交易。 */
   submitTransfer(preview: P2pkhTransferPreview): Promise<P2pkhTransferResult>;
+  /** Explicitly revoke an initial submission only when no provider attempt exists. */
+  abortUnattemptedLocalSubmission?(input: { ownerPublicKeyHex: string; submissionId: string; reason?: string }): Promise<void>;
 
   /**
    * 通知 P2PKH 新 key 已就绪（按 publicKeyHex 触发 rehydrate / background sync）。
@@ -502,7 +524,7 @@ export interface P2pkhService {
   onKeyRemoved(publicKeyHex: string): Promise<void>;
   /** Vault 锁定时调用：取消当前所有 P2PKH 后台运行。 */
   onVaultLocked(): void;
-  /** Vault 解锁时调用：触发一次 recent-sync。 */
+  /** Vault 解锁时调用：重新绑定当前 key 并补齐资源。 */
   onVaultUnlocked(): Promise<void>;
   /**
    * 关键修复：plugin 启动时调用，遍历 Vault 现有 key，补齐缺失的

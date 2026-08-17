@@ -36,7 +36,12 @@ export function loadWocConfig(): WocConfig {
 }
 
 export function saveWocConfig(config: WocConfig): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+  try {
+    if (typeof localStorage !== "undefined") localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
+  } catch {
+    // SharedWorker uses Coordinator-owned metadata as the durable source;
+    // browser localStorage is only a best-effort legacy UI cache.
+  }
 }
 
 /** 去除尾部斜杠。 */

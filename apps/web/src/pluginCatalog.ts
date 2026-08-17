@@ -22,6 +22,7 @@ import { jsonFileImporterPlugin } from "@keymaster/plugin-importer-json-file";
 import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
 import { keyImportPlugin } from "@keymaster/plugin-key-import";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
+import { jungleBusPlugin } from "@keymaster/plugin-junglebus";
 import { pokerPlugin } from "@keymaster/plugin-poker";
 import { protocolPlugin } from "@keymaster/plugin-protocol";
 import { storagePlugin } from "@keymaster/plugin-storage";
@@ -46,6 +47,7 @@ export const WEB_PLUGIN_CATALOG: readonly PluginManifest[] = [
   contactsPlugin,
   homePlugin,
   wocPlugin,
+  jungleBusPlugin,
   backgroundPlugin,
   p2pkhPlugin,
   bsv21TokenPlugin,

@@ -13,6 +13,7 @@
     { "path": "./packages/plugin-importer-hex" },
     { "path": "./packages/plugin-importer-json-file" },
     { "path": "./packages/plugin-p2pkh" },
+    { "path": "./packages/plugin-junglebus" },
     { "path": "./packages/plugin-contacts" },
     { "path": "./packages/plugin-home" },
     { "path": "./packages/plugin-settings" },

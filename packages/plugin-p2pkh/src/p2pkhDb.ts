@@ -1,1100 +1,779 @@
-// packages/plugin-p2pkh/src/p2pkhDb.ts
-// P2PKH 资源库（硬切换 005 + 硬切换 007 + 硬切换 001 + 硬切换 003 + 硬切换 002 收尾）。
-// 设计缘由：
-//   - 不再使用固定 DB_NAME = "p2pkh"；改为每个 owner publicKeyHex 一个
-//     namespace DB，通过 keyspace.openKeyStorage 打开。
-//   - DB name 形如 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`。
-//     `publicKeyHex` + 链上数据。UTXO / history 过滤完全按 hex。
-//   - module 内部用 `Map<publicKeyHex, OpenHandle>` 缓存「多 owner
-//     并存」的 handle：打开新 owner 的 DB **不会** 关闭其它 owner 的
-//     handle。每个 owner 的 IDBDatabase 独立持有、独立关闭。
-//   - 调用方按 owner 取 handle：transfer 走 session owner，recent /
-//     backfill 走 active key。同 owner 的二次 open 走 cache hit
-//     (`db.reused`)，不重新打开 namespace DB。
-//
-// 硬切换 005（2026-06-19）：P2PKH DB 版本硬切换 6 -> 7（history）。
-// 硬切换 002（2026-07-02）：P2PKH DB 版本硬切换 7 -> 9（key 域彻底收尾）。
-//   - 打开语义收口为单一规则：版本不匹配即整库 rebuild。
-//     - `oldVersion < 9`：进入 onupgradeneeded 事务，删光当前 DB 内所有
-//       p2pkh_* stores，按 v9 完整重建。
-//     - `oldVersion === 9`：直接使用，不做额外 schema 扫描。
-//     - `oldVersion > 9`：keyspace.openKeyStorage 会抛 VersionError，
-//       p2pkh 在 openP2pkhDb 捕获后执行
-//       `close cached handle -> deleteDatabase -> reopen(name, 9)`。
-//   - `deleteDatabase` blocked / 失败必须冒泡，**不允许**"假装已经 rebuild"。
-//   - 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`，
-//     不与其它 plugin 共库；整库删除不会误伤别的业务。
-//
-// 硬切换 003：
-//   - 旧全局 "p2pkh" DB 不再作为恢复路径，也不再接入任何启动路径。
-//   - 旧 `migrateLegacyP2pkhDb()` 已删除：硬切换 002 之后资源归属不再依赖
-//   - 老 key 即使残留旧全局 DB 也允许被放弃；恢复路径是
-//     `rehydrate + recent-sync + history-backfill`，从 WOC 链上真值重建。
-//   - 旧的"best-effort 一次性迁移"注释已经被本硬切换覆盖；新代码若需要把
-//     历史 v3 数据搬过来，也必须通过 active key 自己的 namespace DB
-//     升级路径，而不是再造一条与 active key 模型平行的迁移链。
-
-import type { BsvNetwork } from "@keymaster/contracts";
+import type { BsvNetwork, KeyspaceService, PluginLogger } from "@keymaster/contracts";
 import type {
-  P2pkhBackfillState,
-  P2pkhHistoryItem,
   P2pkhKeyResource,
-  P2pkhLocalInputClaim,
-  P2pkhLocalSubmission,
-  P2pkhProtocolSubmission,
-  P2pkhRecentSyncState,
-  P2pkhUtxo,
+  P2pkhLocalInputClaim, P2pkhLocalOutpoint,
+  P2pkhLocalTransaction, P2pkhMigrationAudit, P2pkhOwnedOutpointProjection, P2pkhProtocolSubmission,
+  P2pkhTransactionFact,
+  P2pkhTransactionSyncState, P2pkhUtxo,
 } from "./p2pkhContracts.js";
-import type { P2pkhBackfillCommit, P2pkhRecentCommit } from "./p2pkhContracts.js";
 import { makeResourceId } from "./p2pkhContracts.js";
+import { ownedP2pkhOutputs, parseP2pkhTransaction } from "./p2pkhTransactionParser.js";
 
+export const P2PKH_DB_VERSION = 15;
 const P2PKH_STORAGE_ID = "state";
-/**
- * 硬切换 002 收尾：P2PKH namespace DB schema 版本升级到 8。
- * 重建边界是整份 `keymaster.key.<publicKeyHex>.plugin.p2pkh.state`。
- *
- * 导出以供 service 层日志 / 验收脚本使用——所有需要报告
- * "P2PKH 当前目标版本"的位置都应从这里取真值，不要再硬编码数字。
- */
-export const P2PKH_DB_VERSION = 9;
+const STORE_PREFIX = "p2pkh_";
 
-interface P2pkhDbBundle {
-  /** 关闭当前 namespace db handle。 */
-  close(): void;
-  /** 用于 store 操作的 IDBDatabase。 */
-  getDb(): IDBDatabase;
-  /** 关联的 publicKeyHex。 */
-  publicKeyHex: string;
+export interface P2pkhDbBundle { close(): void; getDb(): IDBDatabase; publicKeyHex: string; }
+export interface P2pkhInputOutpoint { txid: string; vout: number; }
+const openHandles = new Map<string, P2pkhDbBundle>();
+
+function request<T>(req: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error ?? new Error("IndexedDB request failed")); });
 }
 
-export type { P2pkhDbBundle };
-
-export interface P2pkhInputOutpoint {
-  txid: string;
-  vout: number;
-}
-
-interface OpenHandle {
-  publicKeyHex: string;
-  close(): void;
-  getDb(): IDBDatabase;
-}
-
-/**
- * 硬切换 002 收尾 + 多 owner 支持：module-level handle 缓存改为
- * `Map<publicKeyHex, OpenHandle>`。旧实现是单变量，调用方 A 打开
- * ownerA 的 DB 后、B 打开 ownerB 的 DB 会把 A 的 handle 静默关掉
- * —— 任何「同时对两个 owner 持有 IDBDatabase」的路径都会拿到
- * 悬空句柄。Map 化后两个 owner 的 DB 各自持有自己的句柄，独立
- * 关闭。
- */
-const openHandles: Map<string, OpenHandle> = new Map();
-
-/**
- * 硬切换 002 收尾 + 硬切换 005：openP2pkhDb 内部通过 `keyspace.openKeyStorage({ version, upgrade })`
- * 自动修复当前 key 的 namespace DB。upgrade 回调能拿到 oldVersion：
- *   - oldVersion === 0：DB 第一次被创建；
- *   - 0 < oldVersion < 9：旧版本被升级（**不迁移旧数据，删光 p2pkh stores 重建 v9**）；
- *   - oldVersion === 9：普通打开，不动 schema。
- *   - oldVersion > 9：不会进入 upgrade；浏览器层抛 VersionError，
- *     本函数在下方 try/catch 命中后走 `close -> deleteDatabase -> reopen`。
- * 配合传入的 logger 即可在日志上区分这几种情况。
- */
-type OpenKind = "created" | "upgraded" | "opened";
-
-interface UpgradeAudit {
-  kind: OpenKind;
-  oldVersion: number;
-  newVersion: number;
-  /** 已存在的 stores；只记录关键 store 是否齐全。 */
-  storeSnapshot: Record<string, boolean>;
-}
-
-function auditV8Stores(db: IDBDatabase): Record<string, boolean> {
-  const required = [
-    "p2pkh_addresses",
-    "p2pkh_utxos",
-    "p2pkh_history",
-    "p2pkh_history_backfill",
-    "p2pkh_recent_sync",
-    "p2pkh_local_submissions",
-    "p2pkh_local_input_claims"
-  ];
-  const result: Record<string, boolean> = {};
-  for (const name of required) {
-    result[name] = db.objectStoreNames.contains(name);
-  }
-  return result;
-}
-
-/**
- * 打开 owner publicKeyHex 的 P2PKH namespace db（按 owner 缓存）。
- *
- * 设计缘由：硬切换 002 收尾 + 多 owner 支持——每个 owner 各自一个
- * 物理 IDB 数据库；module 内部 `openHandles: Map<publicKeyHex, OpenHandle>`
- * 让多 owner 的 handle **并存**，打开新 owner **不会** 关闭其它
- * owner 的 handle。调用方按 owner 取 handle：
- *   - transfer 走 session owner（protocol 强制 `session.owner === active`）。
- *   - recent-sync / backfill 走 active key。
- *   - 同 owner 二次 open 走 cache hit（`db.reused`），不重开 IDB。
- *
- * 硬切换 002 收尾：版本不匹配即整库 rebuild——收口在 `openP2pkhDb()` 一处。
- *   - `oldVersion < 9`：onupgradeneeded 事务内删光旧 p2pkh_* stores，重建 v9。
- *   - `oldVersion > 9`：keyspace 内部 `indexedDB.open(name, 9)` 抛 VersionError，
- *     本函数捕获后只关掉「本 owner 的」cached handle（避免 deleteDatabase
- *     被自己的连接阻塞），再 `deleteDatabase -> reopen`。
- *   - `oldVersion === 9`：普通打开。
- *   - `deleteDatabase` 被 blocked / 失败必须冒泡，**不允许**假装 rebuild 成功。
- *
- * 硬切换 003：调用方可通过 `logger` 让本函数在 upgrade 阶段补全"新建 /
- * 升级 / 普通打开"日志；不传时不记日志。
- */
-export async function openP2pkhDb(input: {
-  keyspace: import("@keymaster/contracts").KeyspaceService;
-  publicKeyHex: string;
-  logger?: import("@keymaster/contracts").PluginLogger;
-}): Promise<P2pkhDbBundle> {
-  // 命中缓存：同一 owner 的 DB 已开过，直接复用。
-  const cached = openHandles.get(input.publicKeyHex);
-  if (cached) {
-    // 硬切换 003 收尾：缓存命中也必须留痕（p2pkh service 层不再
-    // 持有 service-level cache，per-owner map 命中由 module 内部
-    // 记日志）；调用方后续不会看到 db.opening 事件。
-    input.logger?.info({
-      scope: "p2pkh.db",
-      event: "db.reused",
-      message: "P2PKH reusing cached namespace db handle",
-      data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION }
-    });
-    return cached as P2pkhDbBundle;
-  }
-  // 硬切换 002 收尾：把「意图开 / 开成功 / 失败」三类日志都搬
-  // 到 module 层——service 层只看 p2pkhDb 的 map，cache hit 时
-  // service 不再误报 db.opening / db.opened。
-  input.logger?.info({
-    scope: "p2pkh.db",
-    event: "db.opening",
-    message: "P2PKH opening namespace db for owner",
-    data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION }
+function runTransaction<T>(handle: P2pkhDbBundle, stores: string | string[], mode: IDBTransactionMode, body: (tx: IDBTransaction) => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let tx: IDBTransaction; let value: T; let bodyDone = false;
+    try {
+      tx = handle.getDb().transaction(stores, mode);
+      void body(tx).then((result) => { value = result; bodyDone = true; }, (error) => { try { tx.abort(); } catch { /* preserve error */ } reject(error); });
+      tx.oncomplete = () => { if (bodyDone) resolve(value!); };
+      tx.onerror = () => reject(tx.error ?? new Error("IndexedDB transaction failed"));
+      tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
+    } catch (error) { reject(error); }
   });
-  // 硬切换 002 收尾：多 owner 并存缓存下，主路径**不**主动关闭任
-  // 何 cached handle——其它 owner 的 IDBDatabase 必须保持存活。VersionError
-  // 重建路径会单独 `closeCachedHandle(input.publicKeyHex)`，只关
-  // 「本 owner 的」handle 避免 deleteDatabase 被自己阻塞。
-  let audit: UpgradeAudit | undefined;
-  let handle: import("@keymaster/contracts").KeyScopedStorageHandle;
-  try {
-    handle = await input.keyspace.openKeyStorage({
-      publicKeyHex: input.publicKeyHex,
-      pluginId: "p2pkh",
-      storageId: P2PKH_STORAGE_ID,
-      version: P2PKH_DB_VERSION,
-      upgrade: (db, oldVersion, newVersion) => {
-        // 硬切换 002 收尾：oldVersion < 9 进入 upgrade 是"删光旧 stores 重建 v9"，
-        // **不是**数据迁移。oldVersion === 0（首次创建）和
-        // 0 < oldVersion < 9（旧版本）都统一落到 createV8Stores——
-        // 区别仅在日志分类 kind 上。
-        // newVersion 在 contract 里允许 null（DB 被删除的特殊场景）；本路径
-        // 下若为 null 也按 created 处理——这只是日志分类，不需要阻断。
-        const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
-        const kind: OpenKind = oldVersion === 0 ? "created" : "upgraded";
-        createV8Stores(db);
-        audit = {
-          kind,
-          oldVersion,
-          newVersion: resolvedNewVersion,
-          storeSnapshot: auditV8Stores(db)
-        };
-        input.logger?.info({
-          scope: "p2pkh.db",
-          event: "schema.upgradeApplied",
-          message: `P2PKH schema ${kind}`,
-          data: {
-            kind,
-            oldVersion,
-            newVersion: resolvedNewVersion,
-            targetVersion: resolvedNewVersion,
-            storeSnapshot: audit.storeSnapshot
-          }
-        });
-      }
-    });
-  } catch (err) {
-    // 硬切换 005：oldVersion > 9 走"close -> deleteDatabase -> reopen"重建。
-    // 非 VersionError 直接冒泡，**不**在 p2pkh 层吞错。
-    if (!isVersionError(err)) throw err;
-    // 防御性：关掉本 owner 的 cached handle（若上次半路残留），
-    // 避免 deleteDatabase 被自己的连接阻塞。其它 owner 的 handle
-    // 不动。
-    closeCachedHandle(input.publicKeyHex);
-    const name = namespaceDbName(input.publicKeyHex);
-    input.logger?.warn({
-      scope: "p2pkh.db",
-      event: "schema.versionMismatch",
-      message: "P2PKH namespace db version higher than target; rebuilding",
-      data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION, name }
-    });
-    await deleteDatabaseOrThrow(name);
-    handle = await input.keyspace.openKeyStorage({
-      publicKeyHex: input.publicKeyHex,
-      pluginId: "p2pkh",
-      storageId: P2PKH_STORAGE_ID,
-      version: P2PKH_DB_VERSION,
-      upgrade: (db, oldVersion, newVersion) => {
-        // 重建路径：上一轮 DB 已被 deleteDatabase，oldVersion === 0。
-        const resolvedNewVersion = newVersion ?? P2PKH_DB_VERSION;
-        createV8Stores(db);
-        audit = {
-          kind: "created",
-          oldVersion,
-          newVersion: resolvedNewVersion,
-          storeSnapshot: auditV8Stores(db)
-        };
-        input.logger?.info({
-          scope: "p2pkh.db",
-          event: "schema.rebuilt",
-          message: "P2PKH namespace db rebuilt after deleteDatabase",
-          data: {
-            oldVersion,
-            newVersion: resolvedNewVersion,
-            targetVersion: resolvedNewVersion,
-            storeSnapshot: audit.storeSnapshot
-          }
-        });
-      }
-    });
-  }
-  // 浏览器层面 indexedDB.open 可能在 upgrade 之外直接成功（无版本变化
-  // 复用旧 db），audit 不会被赋值。这种情况下我们记一条 opened 日志，
-  // 覆盖"复用现有 schema / 未触发 upgrade"的语义。
-  if (!audit) {
-    audit = {
-      kind: "opened",
-      oldVersion: P2PKH_DB_VERSION,
-      newVersion: P2PKH_DB_VERSION,
-      storeSnapshot: auditV8Stores(handle.db)
+}
+
+function all<T>(store: IDBObjectStore | IDBIndex): Promise<T[]> { return request(store.getAll()) as Promise<T[]>; }
+function allByKey<T>(store: IDBObjectStore | IDBIndex, key: IDBValidKey | IDBKeyRange): Promise<T[]> { return request(store.getAll(key)) as Promise<T[]>; }
+function getById<T>(store: IDBObjectStore, id: IDBValidKey): Promise<T | undefined> { return request(store.get(id)) as Promise<T | undefined>; }
+function pageByCursor<T>(store: IDBObjectStore | IDBIndex, query: IDBValidKey | IDBKeyRange | null, direction: IDBCursorDirection, limit: number): Promise<T[]> {
+  return new Promise((resolve, reject) => {
+    const rows: T[] = [];
+    const cursorRequest = store.openCursor(query, direction);
+    cursorRequest.onsuccess = () => {
+      const cursor = cursorRequest.result;
+      if (!cursor || rows.length >= limit) { resolve(rows); return; }
+      rows.push(cursor.value as T);
+      cursor.continue();
     };
-    input.logger?.info({
-      scope: "p2pkh.db",
-      event: "schema.opened",
-      message: "P2PKH namespace db opened without schema upgrade",
-      data: {
-        kind: "opened",
-        oldVersion: P2PKH_DB_VERSION,
-        newVersion: P2PKH_DB_VERSION,
-        targetVersion: P2PKH_DB_VERSION,
-        storeSnapshot: audit.storeSnapshot
-      }
-    });
-  }
-  let closed = false;
-  let next: OpenHandle;
-  const onVersionChange = () => {
-    if (closed) return;
-    closed = true;
-    try { handle.close(); } catch { /* noop */ }
-    if (openHandles.get(input.publicKeyHex) === next) openHandles.delete(input.publicKeyHex);
-  };
-  handle.db.addEventListener("versionchange", onVersionChange);
-  next = {
-    publicKeyHex: input.publicKeyHex,
-    close: () => {
-      if (closed) return;
-      closed = true;
-      handle.db.removeEventListener("versionchange", onVersionChange);
-      try {
-        handle.close();
-      } catch {
-        // 静默
-      }
-      if (openHandles.get(input.publicKeyHex) === next) {
-        openHandles.delete(input.publicKeyHex);
-      }
-    },
-    getDb: () => handle.db
-  };
-  openHandles.set(input.publicKeyHex, next);
-  // 硬切换 002 收尾：与 db.opening 配对的 db.opened 日志也在 module
-  // 层发出，service 层不再有 service-level cache，也就不必再记。
-  input.logger?.info({
-    scope: "p2pkh.db",
-    event: "db.opened",
-    message: "P2PKH namespace db ready",
-    data: { publicKeyHex: input.publicKeyHex, targetVersion: P2PKH_DB_VERSION }
+    cursorRequest.onerror = () => reject(cursorRequest.error ?? new Error("IndexedDB cursor failed"));
   });
-  return next as P2pkhDbBundle;
+}
+function encodePageCursor(key: IDBValidKey): string { return encodeURIComponent(JSON.stringify(key)); }
+function decodePageCursor(cursor: string | undefined): IDBValidKey | undefined {
+  if (!cursor) return undefined;
+  try {
+    const value = JSON.parse(decodeURIComponent(cursor)) as unknown;
+    return Array.isArray(value) || typeof value === "string" || typeof value === "number" ? value as IDBValidKey : undefined;
+  } catch { return undefined; }
+}
+function pageByIndex<T>(index: IDBIndex, resourceId: string, cursor: string | undefined, limit: number): Promise<{ items: T[]; nextCursor?: string }> {
+  const after = decodePageCursor(cursor);
+  const lower = [resourceId, "", ""] as IDBValidKey;
+  const firstQuery = IDBKeyRange.bound(lower, [resourceId, "\uffff", "\uffff"]);
+  const query = after === undefined ? firstQuery : IDBKeyRange.bound(lower, after, false, true);
+  return new Promise((resolve, reject) => {
+    const rows: T[] = [];
+    let lastKey: IDBValidKey | undefined;
+    let checkingMore = false;
+    const cursorRequest = index.openCursor(query, "prev");
+    cursorRequest.onsuccess = () => {
+      const current = cursorRequest.result;
+    if (!current) { resolve({ items: rows }); return; }
+      if (checkingMore) { resolve({ items: rows, nextCursor: encodePageCursor(lastKey!) }); return; }
+      rows.push(current.value as T);
+      lastKey = current.key;
+      if (rows.length >= limit) checkingMore = true;
+      current.continue();
+    };
+    cursorRequest.onerror = () => reject(cursorRequest.error ?? new Error("IndexedDB cursor failed"));
+  });
+}
+function boundedLimit(value: number | undefined): number | undefined {
+  if (!Number.isFinite(value) || value === undefined) return undefined;
+  return Math.max(1, Math.min(1_000, Math.floor(value)));
 }
 
-/**
- * 关闭并清空缓存的 db handle（仅用于测试与 dispose）。
- * 不传 publicKeyHex：关闭所有 owner 的 cached handle。
- * 传入 publicKeyHex：只关掉该 owner 的 handle（其它 owner 不动）。
- */
-export function disposeP2pkhDb(publicKeyHex?: string): void {
-  if (publicKeyHex === undefined) {
-    closeCachedHandle();
-    return;
+function createFreshV10Stores(db: IDBDatabase): void {
+  for (const name of [...db.objectStoreNames].filter((name) => name.startsWith(STORE_PREFIX))) db.deleteObjectStore(name);
+  const address = db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
+  address.createIndex("publicKeyHex", "publicKeyHex"); address.createIndex("network", "network"); address.createIndex("address", "address", { unique: true });
+  const facts = db.createObjectStore("p2pkh_transactions", { keyPath: "id" });
+  facts.createIndex("resourceId", "resourceId"); facts.createIndex("resourceBlockHeight", ["resourceId", "blockHeight"]); facts.createIndex("resourceTxid", ["resourceId", "txid"]); facts.createIndex("resourceTimeline", ["resourceId", "lastConfirmedAt", "txid"]); facts.createIndex("inputOutpointKeys", "inputOutpointKeys", { multiEntry: true }); facts.createIndex("ownedOutpointKeys", "ownedOutpointKeys", { multiEntry: true }); facts.createIndex("txid", "txid");
+  const owned = db.createObjectStore("p2pkh_owned_outpoints", { keyPath: "id" });
+  owned.createIndex("resourceChainState", ["resourceId", "chainState"]); owned.createIndex("chainState", "chainState"); owned.createIndex("resourceTxid", ["resourceId", "txid"]); owned.createIndex("resourceTimeline", ["resourceId", "updatedAt", "outpointKey"]); owned.createIndex("resourceOutpointKey", ["resourceId", "outpointKey"]); owned.createIndex("outpointKey", "outpointKey"); owned.createIndex("spentByTxid", "spentByTxid"); owned.createIndex("resourceCreatedBlockHeight", ["resourceId", "createdBlockHeight"]);
+  const sync = db.createObjectStore("p2pkh_transaction_sync", { keyPath: "id" }); sync.createIndex("resourceId", "resourceId", { unique: true });
+  const local = db.createObjectStore("p2pkh_local_transactions", { keyPath: "id" });
+  local.createIndex("resourceId", "resourceId"); local.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]); local.createIndex("txid", "txid"); local.createIndex("inputOutpointKeys", "inputOutpointKeys", { multiEntry: true }); local.createIndex("parentTxids", "parentTxids", { multiEntry: true });
+  const localOut = db.createObjectStore("p2pkh_local_outpoints", { keyPath: "id" }); localOut.createIndex("resourceId", "resourceId"); localOut.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]); localOut.createIndex("submissionId", "submissionId"); localOut.createIndex("state", "state"); localOut.createIndex("outpointKey", ["txid", "vout"]);
+  const claims = db.createObjectStore("p2pkh_local_input_claims", { keyPath: "id" }); claims.createIndex("resourceId", "resourceId"); claims.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]); claims.createIndex("outpointKey", "outpointKey"); claims.createIndex("submissionId", "submissionId"); claims.createIndex("state", "state");
+  const protocol = db.createObjectStore("p2pkh_protocol_submissions", { keyPath: "id" }); protocol.createIndex("resourceId", "resourceId");
+  const audit = db.createObjectStore("p2pkh_migration_audits", { keyPath: "id" }); audit.createIndex("resourceId", "resourceId"); audit.createIndex("createdAt", "createdAt");
+}
+
+function ensureIndex(store: IDBObjectStore, name: string, keyPath: string | string[], options?: IDBIndexParameters): void {
+  if (!store.indexNames.contains(name)) store.createIndex(name, keyPath, options);
+}
+
+function createMigrationStores(db: IDBDatabase, transaction: IDBTransaction): void {
+  const address = db.objectStoreNames.contains("p2pkh_addresses") ? undefined : db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
+  if (address) { address.createIndex("publicKeyHex", "publicKeyHex"); address.createIndex("network", "network"); address.createIndex("address", "address", { unique: true }); }
+  if (db.objectStoreNames.contains("p2pkh_addresses")) {
+    const store = transaction.objectStore("p2pkh_addresses");
+    ensureIndex(store, "publicKeyHex", "publicKeyHex"); ensureIndex(store, "network", "network"); ensureIndex(store, "address", "address", { unique: true });
   }
-  closeCachedHandle(publicKeyHex);
+  const facts = db.createObjectStore("p2pkh_transactions", { keyPath: "id" }); facts.createIndex("resourceId", "resourceId"); facts.createIndex("resourceBlockHeight", ["resourceId", "blockHeight"]); facts.createIndex("resourceTxid", ["resourceId", "txid"]); facts.createIndex("resourceTimeline", ["resourceId", "lastConfirmedAt", "txid"]); facts.createIndex("inputOutpointKeys", "inputOutpointKeys", { multiEntry: true }); facts.createIndex("ownedOutpointKeys", "ownedOutpointKeys", { multiEntry: true }); facts.createIndex("txid", "txid");
+  const owned = db.createObjectStore("p2pkh_owned_outpoints", { keyPath: "id" }); owned.createIndex("resourceChainState", ["resourceId", "chainState"]); owned.createIndex("chainState", "chainState"); owned.createIndex("resourceTxid", ["resourceId", "txid"]); owned.createIndex("resourceTimeline", ["resourceId", "updatedAt", "outpointKey"]); owned.createIndex("resourceOutpointKey", ["resourceId", "outpointKey"]); owned.createIndex("outpointKey", "outpointKey"); owned.createIndex("spentByTxid", "spentByTxid"); owned.createIndex("resourceCreatedBlockHeight", ["resourceId", "createdBlockHeight"]);
+  const sync = db.createObjectStore("p2pkh_transaction_sync", { keyPath: "id" }); sync.createIndex("resourceId", "resourceId", { unique: true });
+  const local = db.createObjectStore("p2pkh_local_transactions", { keyPath: "id" }); local.createIndex("resourceId", "resourceId"); local.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]); local.createIndex("txid", "txid"); local.createIndex("inputOutpointKeys", "inputOutpointKeys", { multiEntry: true }); local.createIndex("parentTxids", "parentTxids", { multiEntry: true });
+  const localOut = db.createObjectStore("p2pkh_local_outpoints", { keyPath: "id" }); localOut.createIndex("resourceId", "resourceId"); localOut.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]); localOut.createIndex("submissionId", "submissionId"); localOut.createIndex("state", "state"); localOut.createIndex("outpointKey", ["txid", "vout"]);
+  if (!db.objectStoreNames.contains("p2pkh_local_input_claims")) { const claims = db.createObjectStore("p2pkh_local_input_claims", { keyPath: "id" }); claims.createIndex("resourceId", "resourceId"); claims.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]); claims.createIndex("outpointKey", "outpointKey"); claims.createIndex("submissionId", "submissionId"); claims.createIndex("state", "state"); }
+  else { const claims = transaction.objectStore("p2pkh_local_input_claims"); ensureIndex(claims, "resourceId", "resourceId"); ensureIndex(claims, "resourceTimeline", ["resourceId", "updatedAt", "id"]); ensureIndex(claims, "outpointKey", "outpointKey"); ensureIndex(claims, "submissionId", "submissionId"); ensureIndex(claims, "state", "state"); }
+  if (!db.objectStoreNames.contains("p2pkh_protocol_submissions")) { const protocol = db.createObjectStore("p2pkh_protocol_submissions", { keyPath: "id" }); protocol.createIndex("resourceId", "resourceId"); }
+  else ensureIndex(transaction.objectStore("p2pkh_protocol_submissions"), "resourceId", "resourceId");
+  if (!db.objectStoreNames.contains("p2pkh_migration_audits")) { const audit = db.createObjectStore("p2pkh_migration_audits", { keyPath: "id" }); audit.createIndex("resourceId", "resourceId"); audit.createIndex("createdAt", "createdAt"); }
+  else { const audit = transaction.objectStore("p2pkh_migration_audits"); ensureIndex(audit, "resourceId", "resourceId"); ensureIndex(audit, "createdAt", "createdAt"); }
 }
 
-/**
- * 内部：关掉 module-level cached handle（如果存在）。把这段逻辑抽到独立函数，
- * 避免在 openP2pkhDb 内被 TypeScript 跨 try-catch 的窄化分析吃成 `never`。
- * 不传 publicKeyHex：关掉所有 owner；传入：只关指定 owner。
- */
-function closeCachedHandle(publicKeyHex?: string): void {
-  if (publicKeyHex === undefined) {
-    for (const handle of [...openHandles.values()]) {
-      try {
-        handle.close();
-      } catch {
-        // 静默
+function migrateV9ToV10(db: IDBDatabase, transaction?: IDBTransaction): void {
+  if (!transaction) throw new Error("P2PKH v10 migration requires a versionchange transaction");
+  const oldNames = ["p2pkh_addresses", "p2pkh_local_submissions", "p2pkh_local_input_claims", "p2pkh_protocol_submissions"];
+  const snapshots: Record<string, unknown[]> = {};
+  const pending = oldNames.filter((name) => db.objectStoreNames.contains(name));
+  if (pending.length === 0) { createFreshV10Stores(db); return; }
+  createMigrationStores(db, transaction);
+  let remaining = pending.length;
+  const finish = () => {
+    if (remaining !== 0) return;
+    const address = transaction.objectStore("p2pkh_addresses"); for (const row of snapshots.p2pkh_addresses ?? []) address.put(row);
+    const claims = transaction.objectStore("p2pkh_local_input_claims"); for (const row of snapshots.p2pkh_local_input_claims ?? []) { const old = row as { txid?: unknown; vout?: unknown; state?: unknown }; const state = old.state === "claimed" ? "active" : old.state === "observed-consumed" ? "isolated" : ["active", "isolated", "released", "confirmed"].includes(String(old.state)) ? old.state : "isolated"; claims.put({ ...(row as object), state, outpointKey: `${String(old.txid ?? "")}:${Number(old.vout ?? 0)}` }); }
+    const protocol = transaction.objectStore("p2pkh_protocol_submissions"); for (const row of snapshots.p2pkh_protocol_submissions ?? []) protocol.put(row);
+    const local = transaction.objectStore("p2pkh_local_transactions");
+    const audits = transaction.objectStore("p2pkh_migration_audits");
+    for (const [index, raw] of (snapshots.p2pkh_local_submissions ?? []).entries()) {
+      const old = raw as { id?: string; resourceId?: string; publicKeyHex?: string; network?: BsvNetwork; canonicalTxid?: string; rawTxHex?: string; inputOutpoints?: Array<{ txid: string; vout: number }>; createdAt?: string; updatedAt?: string };
+      const missingFields = [
+        ...(!old.resourceId ? ["resourceId"] : []),
+        ...(!old.canonicalTxid ? ["txid"] : []),
+        ...(typeof old.rawTxHex !== "string" || !old.rawTxHex ? ["rawTxHex"] : []),
+        ...(!Array.isArray(old.inputOutpoints) ? ["inputOutpoints"] : [])
+      ];
+      if (missingFields.length > 0) audits.put({ id: `legacy-migration-audit:${old.id ?? index}`, source: "p2pkh_local_submissions", ...(old.id ? { legacyId: old.id } : {}), ...(old.resourceId ? { resourceId: old.resourceId } : {}), reason: !old.resourceId ? "missing-resource-id" : "missing-transaction-fields", missingFields, createdAt: new Date().toISOString() } satisfies P2pkhMigrationAudit);
+      if (!old.resourceId) continue;
+      const id = old.id ?? `legacy-migration-${index}`;
+      const canonicalTxid = old.canonicalTxid ?? id;
+      const rawTxHex = typeof old.rawTxHex === "string" ? old.rawTxHex : "";
+      const reason = old.canonicalTxid && rawTxHex ? "legacy-migration" : "legacy-migration-incomplete";
+      local.put({ id, resourceId: old.resourceId, publicKeyHex: old.publicKeyHex ?? "", network: old.network ?? "main", txid: canonicalTxid, rawTxHex, state: "isolated", inputOutpointKeys: (old.inputOutpoints ?? []).map((i) => `${i.txid}:${i.vout}`), ownOutputs: [], parentTxids: [], createdAt: old.createdAt ?? new Date(0).toISOString(), updatedAt: old.updatedAt ?? new Date().toISOString(), isolationReason: reason, attempts: [] } satisfies P2pkhLocalTransaction);
+    }
+    for (const name of ["p2pkh_utxos", "p2pkh_history", "p2pkh_history_backfill", "p2pkh_recent_sync", "p2pkh_local_submissions"]) if (db.objectStoreNames.contains(name)) db.deleteObjectStore(name);
+  };
+  for (const name of pending) {
+    const req = transaction.objectStore(name).getAll();
+    req.onsuccess = () => { snapshots[name] = (req.result as unknown[]) ?? []; remaining -= 1; finish(); };
+    req.onerror = () => transaction.abort();
+  }
+}
+
+function migrateV10ToV11(db: IDBDatabase, transaction?: IDBTransaction): void {
+  if (!transaction) throw new Error("P2PKH v11 migration requires a versionchange transaction");
+  if (!db.objectStoreNames.contains("p2pkh_owned_outpoints")) throw new Error("P2PKH v11 migration requires owned outpoints store");
+  ensureIndex(transaction.objectStore("p2pkh_owned_outpoints"), "chainState", "chainState");
+  if (db.objectStoreNames.contains("p2pkh_local_outpoints")) ensureIndex(transaction.objectStore("p2pkh_local_outpoints"), "submissionId", "submissionId");
+}
+
+function migrateV11ToV12(db: IDBDatabase, transaction?: IDBTransaction): void {
+  if (!transaction) throw new Error("P2PKH v12 migration requires a versionchange transaction");
+  if (!db.objectStoreNames.contains("p2pkh_transactions")) throw new Error("P2PKH v12 migration requires transactions store");
+  ensureIndex(transaction.objectStore("p2pkh_transactions"), "resourceTxid", ["resourceId", "txid"]);
+  if (db.objectStoreNames.contains("p2pkh_owned_outpoints")) ensureIndex(transaction.objectStore("p2pkh_owned_outpoints"), "resourceTxid", ["resourceId", "txid"]);
+}
+
+function migrateV12ToV13(db: IDBDatabase, transaction?: IDBTransaction): void {
+  if (!transaction) throw new Error("P2PKH v13 migration requires a versionchange transaction");
+  if (db.objectStoreNames.contains("p2pkh_transactions")) ensureIndex(transaction.objectStore("p2pkh_transactions"), "resourceTimeline", ["resourceId", "lastConfirmedAt", "txid"]);
+  if (db.objectStoreNames.contains("p2pkh_owned_outpoints")) ensureIndex(transaction.objectStore("p2pkh_owned_outpoints"), "resourceTimeline", ["resourceId", "updatedAt", "outpointKey"]);
+}
+
+function migrateV13ToV14(db: IDBDatabase, transaction?: IDBTransaction): void {
+  if (!transaction) throw new Error("P2PKH v14 migration requires a versionchange transaction");
+  if (db.objectStoreNames.contains("p2pkh_owned_outpoints")) ensureIndex(transaction.objectStore("p2pkh_owned_outpoints"), "resourceOutpointKey", ["resourceId", "outpointKey"]);
+  if (db.objectStoreNames.contains("p2pkh_local_transactions")) ensureIndex(transaction.objectStore("p2pkh_local_transactions"), "resourceTimeline", ["resourceId", "updatedAt", "id"]);
+  if (db.objectStoreNames.contains("p2pkh_local_outpoints")) ensureIndex(transaction.objectStore("p2pkh_local_outpoints"), "resourceTimeline", ["resourceId", "updatedAt", "id"]);
+  if (db.objectStoreNames.contains("p2pkh_local_input_claims")) ensureIndex(transaction.objectStore("p2pkh_local_input_claims"), "resourceTimeline", ["resourceId", "updatedAt", "id"]);
+}
+
+function migrateV14ToV15(db: IDBDatabase, transaction?: IDBTransaction): void {
+  if (!transaction) throw new Error("P2PKH v15 migration requires a versionchange transaction");
+  if (db.objectStoreNames.contains("p2pkh_migration_audits")) return;
+  const audit = db.createObjectStore("p2pkh_migration_audits", { keyPath: "id" });
+  audit.createIndex("resourceId", "resourceId");
+  audit.createIndex("createdAt", "createdAt");
+}
+
+export function namespaceDbName(publicKeyHex: string): string { return `keymaster.key.${publicKeyHex}.plugin.p2pkh.state`; }
+
+export async function openP2pkhDb(input: { keyspace: KeyspaceService; publicKeyHex: string; logger?: PluginLogger }): Promise<P2pkhDbBundle> {
+  const cached = openHandles.get(input.publicKeyHex); if (cached) return cached;
+  const handle = await input.keyspace.openKeyStorage({ publicKeyHex: input.publicKeyHex, pluginId: "p2pkh", storageId: P2PKH_STORAGE_ID, version: P2PKH_DB_VERSION, upgrade(db, oldVersion, _newVersion, transaction) {
+    if (oldVersion === 0) createFreshV10Stores(db);
+    else if (oldVersion <= 9) migrateV9ToV10(db, transaction);
+    else if (oldVersion === 10) {
+      // IndexedDB invokes one upgrade callback for a 10 -> 15 jump. Apply all
+      // intermediate schema steps in that same versionchange transaction.
+      migrateV10ToV11(db, transaction);
+      migrateV11ToV12(db, transaction);
+      migrateV12ToV13(db, transaction);
+      migrateV13ToV14(db, transaction);
+      migrateV14ToV15(db, transaction);
+    } else if (oldVersion === 11) {
+      migrateV11ToV12(db, transaction);
+      migrateV12ToV13(db, transaction);
+      migrateV13ToV14(db, transaction);
+      migrateV14ToV15(db, transaction);
+    }
+    else if (oldVersion === 12) { migrateV12ToV13(db, transaction); migrateV13ToV14(db, transaction); migrateV14ToV15(db, transaction); }
+    else if (oldVersion === 13) { migrateV13ToV14(db, transaction); migrateV14ToV15(db, transaction); }
+    else if (oldVersion === 14) migrateV14ToV15(db, transaction);
+    else throw new Error(`P2PKH database version ${oldVersion} is newer than supported version ${P2PKH_DB_VERSION}`);
+  } });
+  let closed = false; const bundle: P2pkhDbBundle = { publicKeyHex: input.publicKeyHex, getDb: () => handle.db, close: () => { if (closed) return; closed = true; handle.close(); if (openHandles.get(input.publicKeyHex) === bundle) openHandles.delete(input.publicKeyHex); } };
+  handle.db.addEventListener("versionchange", () => bundle.close()); openHandles.set(input.publicKeyHex, bundle); input.logger?.info({ scope: "p2pkh.db", event: "schema.ready", message: "P2PKH v15 namespace ready", data: { version: P2PKH_DB_VERSION } }); return bundle;
+}
+export function disposeP2pkhDb(publicKeyHex?: string): void { if (publicKeyHex) openHandles.get(publicKeyHex)?.close(); else for (const bundle of [...openHandles.values()]) bundle.close(); }
+
+function resourceKey(resourceId: string, txid: string): string { return `${resourceId}:${txid}`; }
+function outpointId(resourceId: string, txid: string, vout: number): string { return `${resourceId}:${txid}:${vout}`; }
+function claimId(resourceId: string, txid: string, vout: number): string { return `${resourceId}:${txid}:${vout}`; }
+
+async function rebuildOwnedProjectionInTransaction(
+  tx: IDBTransaction,
+  resourceId: string,
+  facts: P2pkhTransactionFact[],
+  now: string
+): Promise<void> {
+  const ownedStore = tx.objectStore("p2pkh_owned_outpoints");
+  const existingOwned = [
+    ...await allByKey<P2pkhOwnedOutpointProjection>(ownedStore.index("resourceChainState"), [resourceId, "available"]),
+    ...await allByKey<P2pkhOwnedOutpointProjection>(ownedStore.index("resourceChainState"), [resourceId, "spent"])
+  ];
+  for (const row of existingOwned) await request(ownedStore.delete(row.id));
+  const byOutpoint = new Map<string, P2pkhOwnedOutpointProjection>();
+  for (const fact of facts.filter((candidate) => candidate.resourceId === resourceId)) {
+    for (const output of fact.ownedOutputs) {
+      const key = `${fact.txid}:${output.vout}`;
+      byOutpoint.set(`${resourceId}:${key}`, {
+        id: outpointId(resourceId, fact.txid, output.vout),
+        resourceId,
+        publicKeyHex: fact.publicKeyHex,
+        network: fact.network,
+        address: fact.address,
+        txid: fact.txid,
+        vout: output.vout,
+        outpointKey: key,
+        value: output.value,
+        scriptHex: output.scriptHex,
+        chainState: "available",
+        createdBlockHeight: fact.blockHeight,
+        updatedAt: now
+      });
+    }
+  }
+  const factByTxid = new Map(facts.filter((candidate) => candidate.resourceId === resourceId).map((fact) => [fact.txid, fact]));
+  for (const fact of factByTxid.values()) {
+    for (const key of fact.inputOutpointKeys) {
+      const row = byOutpoint.get(`${resourceId}:${key}`);
+      if (!row || row.txid === fact.txid) continue;
+      const previousSpender = row.spentByTxid ? factByTxid.get(row.spentByTxid) : undefined;
+      if (!previousSpender || (fact.blockHeight ?? -1) >= (previousSpender.blockHeight ?? -1)) {
+        row.chainState = "spent";
+        row.spentByTxid = fact.txid;
+        row.spentBlockHeight = fact.blockHeight;
       }
     }
-    openHandles.clear();
-    return;
   }
-  const current = openHandles.get(publicKeyHex);
-  if (!current) return;
-  try {
-    current.close();
-  } catch {
-    // 静默
-  }
-  openHandles.delete(publicKeyHex);
+  for (const row of byOutpoint.values()) await request(ownedStore.put(row));
 }
 
-/**
- * 硬切换 005：把 `oldVersion > 9` 时的浏览器抛错识别为 VersionError。
- * 浏览器原生是 `DOMException` 且 `name === "VersionError"`；
- * fake-indexeddb 同样以 DOMException 模拟。
- */
-function isVersionError(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const name = (err as { name?: unknown }).name;
-  return name === "VersionError";
-}
-
-/**
- * 硬切换 005：当前 key 的 p2pkh namespace DB 名字。`plugin-p2pkh` 整库边界
- * 在这里——这把 key 的 p2pkh 数据物理上独立，不会和别的 plugin 共享。
- *
- * 导出是让单测可以直接断言这条命名约定：万一 keyspace 以后改了
- * `keymaster.key.<publicKeyHex>.plugin.<pluginId>.<storageId>` 这条
- * 规则，这里要跟着改并通过这条断言暴露。
- */
-export function namespaceDbName(publicKeyHex: string): string {
-  return `keymaster.key.${publicKeyHex}.plugin.p2pkh.state`;
-}
-
-/**
- * 硬切换 005：删整份 namespace DB。
- * - onsuccess：删除完成，库文件已被浏览器清掉。
- * - onerror：删除失败（例如权限 / 引擎异常），直接 fail-closed。
- * - onblocked：还有连接没关干净（同名 DB 仍被别处 open）。请求仍会在
- *   连接关闭后继续，必须等待 success/error 终态；超时只记诊断，不能
- *   提前 reject 后让请求在后台继续。
- */
-function deleteDatabaseOrThrow(name: string): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) console.warn(`[p2pkh] deleteDatabase still blocked`, name);
-    }, 5000);
-    const req = indexedDB.deleteDatabase(name);
-    req.onsuccess = () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } };
-    req.onerror = () => { if (!settled) { settled = true; clearTimeout(timer); reject(req.error ?? new Error(`P2PKH deleteDatabase failed: ${name}`)); } };
-    req.onblocked = () => { /* wait for terminal success/error */ };
-  });
-}
-
-/**
- * v8 schema（硬切换 002 收尾）：
- *   - 进入 upgrade 事务即删光当前 DB 内**所有** `p2pkh_` 前缀的 store
- *     （包括任何历史遗留 / 未来被废弃但忘了在硬编码列表里登记的 store），
- *     然后按 v8 schema 完整重建；**不迁移**任何旧数据。
- *     但 canonical record（`P2pkhKeyResource` / `P2pkhUtxo` 等）
- */
-const P2PKH_STORE_PREFIX = "p2pkh_";
-
-function createV8Stores(db: IDBDatabase) {
-  // v8：进入 onupgradeneeded 时**先**遍历 `db.objectStoreNames`，把所有
-  // `p2pkh_` 前缀的 store 全部删掉，再**无条件**按 v8 schema 重建——这是
-  // 硬切换 002 收尾的硬规则。
-  //
-  // 为什么不用硬编码的 store 名列表：硬编码列表是脆弱的——只要未来哪个
-  // 开发者加了一个新 `p2pkh_xxx` store 又被回退/弃用，硬编码列表里
-  // 没有这个 name 的话，upgrade 路径就会把它留在库里，硬切换语义就不完整。
-  // 用前缀扫描把"p2pkh 自己创建的 store"作为删表范围，规则只有一条。
-  // 唯一会漏掉的"非 p2pkh_ 命名的 store"——本插件永远不会创建这种 store，
-  // 万一有就是别人越界写进来的，那不在本次硬切换语义内，不动它。
-  // 索引 onupgradeneeded 期间对 `objectStoreNames` 的修改必须立刻可见；
-  // 复制一份再删，避免边遍历边修改。
-  const toDelete = [...db.objectStoreNames].filter((name) => name.startsWith(P2PKH_STORE_PREFIX));
-  for (const name of toDelete) {
-    db.deleteObjectStore(name);
-  }
-  if (!db.objectStoreNames.contains("p2pkh_addresses")) {
-    const store = db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
-    // publicKeyHex 是唯一 owner 维度；同 namespace 内不同 publicKeyHex 的
-    // 旧记录在 v8 不存在——upgrade 时整库重建，DB 内不会跨 owner 串行。
-    store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
-    store.createIndex("network", "network", { unique: false });
-    store.createIndex("address", "address", { unique: true });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_utxos")) {
-    const store = db.createObjectStore("p2pkh_utxos", { keyPath: "id" });
-    store.createIndex("resourceId", "resourceId", { unique: false });
-    store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
-    store.createIndex("network", "network", { unique: false });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_history")) {
-    const store = db.createObjectStore("p2pkh_history", { keyPath: "id" });
-    store.createIndex("resourceId", "resourceId", { unique: false });
-    store.createIndex("publicKeyHex", "publicKeyHex", { unique: false });
-    store.createIndex("network", "network", { unique: false });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_history_backfill")) {
-    db.createObjectStore("p2pkh_history_backfill", { keyPath: "resourceId" });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_recent_sync")) {
-    db.createObjectStore("p2pkh_recent_sync", { keyPath: "resourceId" });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_local_submissions")) {
-    const s = db.createObjectStore("p2pkh_local_submissions", { keyPath: "id" });
-    s.createIndex("resourceId", "resourceId", { unique: false });
-    s.createIndex("status", "status", { unique: false });
-    s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
-    s.createIndex("txidIntegrity", "txidIntegrity", { unique: false });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_local_input_claims")) {
-    const s = db.createObjectStore("p2pkh_local_input_claims", { keyPath: "id" });
-    s.createIndex("resourceId", "resourceId", { unique: false });
-    s.createIndex("submissionId", "submissionId", { unique: false });
-    s.createIndex("state", "state", { unique: false });
-    s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
-  }
-  if (!db.objectStoreNames.contains("p2pkh_protocol_submissions")) {
-    const s = db.createObjectStore("p2pkh_protocol_submissions", { keyPath: "id" });
-    s.createIndex("resourceId", "resourceId", { unique: false });
-    s.createIndex("submissionId", "submissionId", { unique: false });
-    s.createIndex("status", "status", { unique: false });
-    s.createIndex("canonicalTxid", "canonicalTxid", { unique: false });
-  }
-}
-
-function reqAsPromise<T>(req: IDBRequest<T>): Promise<T> {
-  return new Promise((resolve, reject) => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-function tx<T>(
-  handle: P2pkhDbBundle,
-  store: string | string[],
-  mode: IDBTransactionMode,
-  fn: (tx: IDBTransaction) => Promise<T> | T
-): Promise<T> {
-  const db = handle.getDb();
-  return new Promise<T>((resolve, reject) => {
-    const t = db.transaction(store, mode);
-    let result: T;
-    let settled = false;
-    t.oncomplete = () => {
-      if (!settled) {
-        settled = true;
-        resolve(result);
-      }
-    };
-    t.onerror = () => {
-      if (!settled) {
-        settled = true;
-        reject(t.error);
-      }
-    };
-    t.onabort = () => {
-      if (!settled) {
-        settled = true;
-        reject(t.error);
-      }
-    };
-    Promise.resolve(fn(t)).then(
-      (r) => {
-        result = r;
-      },
-      (e) => {
-        if (!settled) {
-          settled = true;
-          try {
-            t.abort();
-          } catch {
-            // 已被 abort。
-          }
-          reject(e);
-        }
-      }
-    );
-  });
-}
-
-/**
- * 硬切换 001：`P2pkhBalanceRow` 已删除。余额不再落库，由 service 每次
- * 基于当前 UTXO 快照现算。如果以后出现外部代码仍 import 此类型，
- * 会立即在编译期暴露（unknown 字段不能赋值）。
- */
-void (0 as unknown as BsvNetwork);
-
-function newHistoryId(resourceId: string, txid: string): string {
-  return `${resourceId}:${txid}`;
-}
-function newLocalInputClaimId(resourceId: string, txid: string, vout: number): string {
-  return `${resourceId}:${txid}:${vout}`;
-}
-
-/** 工厂：构造一个绑定到指定 handle 的 p2pkh db 操作集合。 */
 export function createP2pkhDb(handle: P2pkhDbBundle) {
   return {
-    /** 测试 / 资源管理：返回底层 IDBDatabase 引用，用于 deleteDatabase 前主动 close。 */
-    getDb(): IDBDatabase {
-      return handle.getDb();
-    },
-    /** 关闭当前 namespace db handle。 */
-    close(): void {
-      handle.close();
-    },
-    // ---------- address ----------
-    async putAddress(r: P2pkhKeyResource): Promise<void> {
-      await tx(handle, "p2pkh_addresses", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_addresses").put(r))
-      );
-    },
-    async removeResource(resourceId: string): Promise<void> {
-      await tx(handle, "p2pkh_addresses", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_addresses").delete(resourceId))
-      );
-    },
-    async listAddresses(): Promise<P2pkhKeyResource[]> {
-      return tx(handle, "p2pkh_addresses", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_addresses").getAll())
-      );
-    },
-    async getResource(resourceId: string): Promise<P2pkhKeyResource | undefined> {
-      return tx(handle, "p2pkh_addresses", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_addresses").get(resourceId))
-      );
-    },
-    /** 当前 namespace 内所有 resource（key scoped DB 已按 owner hex 隔离）。 */
-    async listResourcesByKey(): Promise<P2pkhKeyResource[]> {
-      return tx(handle, "p2pkh_addresses", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_addresses").getAll())
-      );
-    },
+    getDb: () => handle.getDb(), close: () => handle.close(),
+    putAddress: (row: P2pkhKeyResource) => runTransaction(handle, "p2pkh_addresses", "readwrite", async (tx) => { await request(tx.objectStore("p2pkh_addresses").put(row)); }),
+    removeResource: (id: string) => runTransaction(handle, "p2pkh_addresses", "readwrite", async (tx) => { await request(tx.objectStore("p2pkh_addresses").delete(id)); }),
+    listAddresses: () => runTransaction(handle, "p2pkh_addresses", "readonly", (tx) => all<P2pkhKeyResource>(tx.objectStore("p2pkh_addresses"))),
+    listResourcesByKey: () => runTransaction(handle, "p2pkh_addresses", "readonly", (tx) => all<P2pkhKeyResource>(tx.objectStore("p2pkh_addresses"))),
+    getResource: (id: string) => runTransaction(handle, "p2pkh_addresses", "readonly", (tx) => getById<P2pkhKeyResource>(tx.objectStore("p2pkh_addresses"), id)),
 
-    // ---------- utxos ----------
-    async putUtxos(rows: P2pkhUtxo[]): Promise<void> {
-      if (rows.length === 0) return;
-      await tx(handle, "p2pkh_utxos", "readwrite", (t) => {
-        const store = t.objectStore("p2pkh_utxos");
-        return Promise.all(rows.map((r) => reqAsPromise(store.put(r))));
+    async ingestConfirmedTransaction(input: { resource: P2pkhKeyResource; tx: { txid: string; rawTxHex: string; blockHeight?: number; blockHash?: string; blockTime?: number }; expectedGeneration?: number }): Promise<P2pkhTransactionFact> {
+      const parsed = parseP2pkhTransaction(input.tx.rawTxHex, input.tx.txid); const owned = ownedP2pkhOutputs(parsed, input.resource.address, input.resource.network); const now = new Date().toISOString();
+      const fact: P2pkhTransactionFact = { id: resourceKey(input.resource.resourceId, parsed.canonicalTxid), resourceId: input.resource.resourceId, publicKeyHex: input.resource.publicKeyHex, network: input.resource.network, address: input.resource.address, txid: parsed.canonicalTxid, rawTxHex: input.tx.rawTxHex.replace(/^0x/i, "").toLowerCase(), blockHeight: input.tx.blockHeight, blockHash: input.tx.blockHash, blockTime: input.tx.blockTime, inputOutpointKeys: parsed.inputs.map((i) => i.outpointKey), inputs: parsed.inputs.map((i) => ({ txid: i.prevTxid, vout: i.prevVout, outpointKey: i.outpointKey })), ownedOutpointKeys: owned.map((o) => `${parsed.canonicalTxid}:${o.vout}`), ownedOutputs: owned, firstConfirmedAt: now, lastConfirmedAt: now };
+      await runTransaction(handle, ["p2pkh_addresses", "p2pkh_transactions", "p2pkh_owned_outpoints", "p2pkh_transaction_sync"], "readwrite", async (tx) => {
+        const current = await getById<P2pkhKeyResource>(tx.objectStore("p2pkh_addresses"), input.resource.resourceId); if (!current || (input.expectedGeneration !== undefined && current.generation !== input.expectedGeneration)) throw new Error("P2PKH resource generation changed");
+        const facts = tx.objectStore("p2pkh_transactions"); const previous = await getById<P2pkhTransactionFact>(facts, fact.id); fact.firstConfirmedAt = previous?.firstConfirmedAt ?? now; fact.lastConfirmedAt = now; await request(facts.put(fact));
+        const ownedStore = tx.objectStore("p2pkh_owned_outpoints");
+        for (const output of owned) { const id = outpointId(fact.resourceId, fact.txid, output.vout); const existing = await getById<P2pkhOwnedOutpointProjection>(ownedStore, id); await request(ownedStore.put(existing ? { ...existing, value: output.value, scriptHex: output.scriptHex, updatedAt: now } : { id, resourceId: fact.resourceId, publicKeyHex: fact.publicKeyHex, network: fact.network, address: fact.address, txid: fact.txid, vout: output.vout, outpointKey: `${fact.txid}:${output.vout}`, value: output.value, scriptHex: output.scriptHex, chainState: "available", createdBlockHeight: fact.blockHeight, updatedAt: now } satisfies P2pkhOwnedOutpointProjection)); }
+        for (const key of fact.inputOutpointKeys) { const row = await request(ownedStore.index("resourceOutpointKey").get([fact.resourceId, key])) as P2pkhOwnedOutpointProjection | undefined; if (row && row.txid !== fact.txid) { row.chainState = "spent"; row.spentByTxid = fact.txid; row.spentBlockHeight = fact.blockHeight; row.updatedAt = now; await request(ownedStore.put(row)); } }
+        const allFacts = await all<P2pkhTransactionFact>(facts); for (const output of owned) { const key = `${fact.txid}:${output.vout}`; const spender = allFacts.find((candidate) => candidate.resourceId === fact.resourceId && candidate.txid !== fact.txid && candidate.inputOutpointKeys.includes(key)); if (spender) { const row = await getById<P2pkhOwnedOutpointProjection>(ownedStore, outpointId(fact.resourceId, fact.txid, output.vout)); if (row) { row.chainState = "spent"; row.spentByTxid = spender.txid; row.spentBlockHeight = spender.blockHeight; row.updatedAt = now; await request(ownedStore.put(row)); } } }
       });
+      return fact;
     },
-    async clearUtxosForResource(resourceId: string): Promise<void> {
-      await tx(handle, "p2pkh_utxos", "readwrite", async (t) => {
-        const idx = t.objectStore("p2pkh_utxos").index("resourceId");
-        const keys: IDBValidKey[] = await reqAsPromise(idx.getAllKeys(resourceId));
-        const store = t.objectStore("p2pkh_utxos");
-        return Promise.all(keys.map((k) => reqAsPromise(store.delete(k))));
-      });
-    },
-    async replaceUtxosForResource(resourceId: string, rows: P2pkhUtxo[]): Promise<void> {
-      await tx(handle, "p2pkh_utxos", "readwrite", async (t) => {
-        const store = t.objectStore("p2pkh_utxos");
-        const idx = store.index("resourceId");
-        const keys: IDBValidKey[] = await reqAsPromise(idx.getAllKeys(resourceId));
-        await Promise.all(keys.map((k) => reqAsPromise(store.delete(k))));
-        await Promise.all(rows.map((r) => reqAsPromise(store.put(r))));
-      });
-    },
-    async listUtxos(): Promise<P2pkhUtxo[]> {
-      return tx(handle, "p2pkh_utxos", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_utxos").getAll())
-      );
-    },
-
-    // ---------- history ----------
-    async putHistory(rows: P2pkhHistoryItem[]): Promise<void> {
-      if (rows.length === 0) return;
-      await tx(handle, "p2pkh_history", "readwrite", (t) => {
-        const store = t.objectStore("p2pkh_history");
-        return Promise.all(rows.map((r) => reqAsPromise(store.put(r))));
-      });
-    },
-    async listHistory(): Promise<P2pkhHistoryItem[]> {
-      return tx(handle, "p2pkh_history", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_history").getAll())
-      );
-    },
-    async clearHistoryForResource(resourceId: string): Promise<void> {
-      await tx(handle, "p2pkh_history", "readwrite", async (t) => {
-        const idx = t.objectStore("p2pkh_history").index("resourceId");
-        const keys: IDBValidKey[] = await reqAsPromise(idx.getAllKeys(resourceId));
-        const store = t.objectStore("p2pkh_history");
-        return Promise.all(keys.map((k) => reqAsPromise(store.delete(k))));
-      });
-    },
-    async getHistoryByTxid(resourceId: string, txid: string): Promise<P2pkhHistoryItem | undefined> {
-      return tx(handle, "p2pkh_history", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_history").get(newHistoryId(resourceId, txid)))
-      );
-    },
-
-    // ---------- backfill ----------
-    async getBackfillState(resourceId: string): Promise<P2pkhBackfillState | undefined> {
-      return tx(handle, "p2pkh_history_backfill", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_history_backfill").get(resourceId))
-      );
-    },
-    async putBackfillState(state: P2pkhBackfillState): Promise<void> {
-      await tx(handle, "p2pkh_history_backfill", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_history_backfill").put(state))
-      );
-    },
-    async listBackfillStates(): Promise<P2pkhBackfillState[]> {
-      return tx(handle, "p2pkh_history_backfill", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_history_backfill").getAll())
-      );
-    },
-    async clearBackfillState(resourceId: string): Promise<void> {
-      await tx(handle, "p2pkh_history_backfill", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_history_backfill").delete(resourceId))
-      );
-    },
-
-    // ---------- recent sync ----------
-    async getRecentSyncState(resourceId: string): Promise<P2pkhRecentSyncState | undefined> {
-      return tx(handle, "p2pkh_recent_sync", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_recent_sync").get(resourceId))
-      );
-    },
-    async putRecentSyncState(state: P2pkhRecentSyncState): Promise<void> {
-      await tx(handle, "p2pkh_recent_sync", "readwrite", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_recent_sync").put(state))
-      );
-    },
-    async listRecentSyncStates(): Promise<P2pkhRecentSyncState[]> {
-      return tx(handle, "p2pkh_recent_sync", "readonly", (t) =>
-        reqAsPromise(t.objectStore("p2pkh_recent_sync").getAll())
-      );
-    },
-
-    // ---------- local submissions ----------
-    async putLocalSubmission(t: P2pkhLocalSubmission): Promise<void> {
-      await tx(handle, "p2pkh_local_submissions", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_submissions").put(t))
-      );
-    },
-    async listLocalSubmissions(): Promise<P2pkhLocalSubmission[]> {
-      return tx(handle, "p2pkh_local_submissions", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_submissions").getAll())
-      );
-    },
-    async listLocalSubmissionsByResource(resourceId: string): Promise<P2pkhLocalSubmission[]> {
-      return tx(handle, "p2pkh_local_submissions", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_submissions").index("resourceId").getAll(resourceId))
-      );
-    },
-    async removeLocalSubmission(id: string): Promise<void> {
-      await tx(handle, "p2pkh_local_submissions", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_submissions").delete(id))
-      );
-    },
-
-    // ---------- local input claims ----------
-    async putLocalInputClaim(r: P2pkhLocalInputClaim): Promise<void> {
-      await tx(handle, "p2pkh_local_input_claims", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_input_claims").put(r))
-      );
-    },
-    async listLocalInputClaims(): Promise<P2pkhLocalInputClaim[]> {
-      return tx(handle, "p2pkh_local_input_claims", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_input_claims").getAll())
-      );
-    },
-    async listLocalInputClaimsByResource(resourceId: string): Promise<P2pkhLocalInputClaim[]> {
-      return tx(handle, "p2pkh_local_input_claims", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_input_claims").index("resourceId").getAll(resourceId))
-      );
-    },
-    async removeLocalInputClaim(id: string): Promise<void> {
-      await tx(handle, "p2pkh_local_input_claims", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_local_input_claims").delete(id))
-      );
-    },
-    // ---------- protocol submissions ----------
-    async putProtocolSubmission(record: P2pkhProtocolSubmission): Promise<void> {
-      await tx(handle, "p2pkh_protocol_submissions", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").put(record))
-      );
-    },
-    async getProtocolSubmission(id: string): Promise<P2pkhProtocolSubmission | undefined> {
-      return tx(handle, "p2pkh_protocol_submissions", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").get(id))
-      );
-    },
-    async listProtocolSubmissions(): Promise<P2pkhProtocolSubmission[]> {
-      return tx(handle, "p2pkh_protocol_submissions", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").getAll())
-      );
-    },
-    async listProtocolSubmissionsByResource(resourceId: string): Promise<P2pkhProtocolSubmission[]> {
-      return tx(handle, "p2pkh_protocol_submissions", "readonly", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").index("resourceId").getAll(resourceId))
-      );
-    },
-    async removeProtocolSubmission(id: string): Promise<void> {
-      await tx(handle, "p2pkh_protocol_submissions", "readwrite", (store) =>
-        reqAsPromise(store.objectStore("p2pkh_protocol_submissions").delete(id))
-      );
-    },
-    /**
-     * 硬切换 002 收尾：原子地写「submission + 所有 input claim」——
-     * 单一 readwrite 事务，冲突时整笔 abort，submission 行和 claim
-     * 行都不落库。这是 transfer 并发防重的事务层保险：两个并发
-     * `submit(preview)` 在 `put` 同一对 `(resourceId, txid, vout)`
-     * claim 时，第二个会撞到第一个的 `state: claimed` 行，整个事务
-     * 中止并抛出「input already claimed」——调用方（transfer.submit）
-     * 看到 throw 就不会调 woc.broadcast。
-     *
-     * 关键不变量：
-     *   - 任何 input 被另一笔 submission `claimed` → 整事务 abort
-     *     并抛错（fail-closed）。
-     *   - 同一 submission 的重复调用（idempotent replay）→ 已存在的
-     *     claim 视为可覆盖（state=claimed 且 submissionId 相同），不
-     *     视为冲突。
-     *   - `state=released` / `observed-consumed` 的 claim 视为已释放
-     *     / 已对账完成，新 submission 可重新占（覆盖语义）。
-     *   - submission 行在所有 claim 写完之后再写；任何一个 claim 失败
-     *     都会让 submission 也不落地。
-     */
-    async tryClaimSubmissionWithInputs(input: {
-      submission: P2pkhLocalSubmission;
-      inputs: P2pkhUtxo[];
-      expectedCanonicalTxid?: string;
-      observation?: "unconfirmed" | "confirmed";
-    }): Promise<{ claimIds: string[] }> {
-      return tx(
-        handle,
-        ["p2pkh_local_submissions", "p2pkh_local_input_claims"],
-        "readwrite",
-        async (t) => {
-          const subStore = t.objectStore("p2pkh_local_submissions");
-          const claimStore = t.objectStore("p2pkh_local_input_claims");
-          const now = new Date().toISOString();
-          const claimIds: string[] = [];
-          for (const u of input.inputs) {
-            const id = localInputClaimIdFor(input.submission.resourceId, u.txid, u.vout);
-            const existing = await reqAsPromise<P2pkhLocalInputClaim | undefined>(claimStore.get(id));
-            if (existing && existing.state === "claimed" && existing.submissionId !== input.submission.id) {
-              // 冲突：被另一笔 submission 占用。fn 抛错 → tx helper
-              // 调 t.abort() → 整事务回滚；submission / claims 都不写。
-              throw new Error(
-                `P2PKH input already claimed by another submission: ${u.txid}:${u.vout} (submissionId=${existing.submissionId})`
-              );
+    async ingestConfirmedTransactionPage(input: { resource: P2pkhKeyResource; transactions: Array<{ txid: string; rawTxHex: string; blockHeight?: number; blockHash?: string; blockTime?: number }>; syncState: P2pkhTransactionSyncState; reorgCheck?: { observedTxids: string[]; completeHistory: boolean; anchorTxid?: string } }): Promise<void> {
+      const now = new Date().toISOString();
+      await runTransaction(handle, ["p2pkh_addresses", "p2pkh_transactions", "p2pkh_owned_outpoints", "p2pkh_transaction_sync", "p2pkh_local_transactions", "p2pkh_local_input_claims", "p2pkh_local_outpoints"], "readwrite", async (tx) => {
+        const addressStore = tx.objectStore("p2pkh_addresses");
+        const current = await getById<P2pkhKeyResource>(addressStore, input.resource.resourceId);
+        if (!current || current.generation !== input.resource.generation) throw new Error("P2PKH resource generation changed");
+        const syncStore = tx.objectStore("p2pkh_transaction_sync");
+        const activeSync = await getById<P2pkhTransactionSyncState>(syncStore, input.resource.resourceId);
+        const sameRun = activeSync && input.syncState.runId && activeSync.runId === input.syncState.runId;
+        const sameProvider = activeSync && input.syncState.inProgressProviderId === undefined
+          ? activeSync.inProgressProviderId !== undefined
+          : activeSync?.inProgressProviderId === input.syncState.inProgressProviderId;
+        const sameProviderGeneration = activeSync && input.syncState.inProgressProviderGeneration === undefined
+          ? activeSync.inProgressProviderGeneration !== undefined
+          : activeSync?.inProgressProviderGeneration === input.syncState.inProgressProviderGeneration;
+        if (!activeSync || !sameRun || !sameProvider || !sameProviderGeneration) throw new Error("P2PKH sync generation changed");
+        const facts = tx.objectStore("p2pkh_transactions");
+        const ownedStore = tx.objectStore("p2pkh_owned_outpoints");
+        const localStore = tx.objectStore("p2pkh_local_transactions");
+        const claimStore = tx.objectStore("p2pkh_local_input_claims");
+        const localOutpointStore = tx.objectStore("p2pkh_local_outpoints");
+        // Both ordinary pages and reorg overlap only load local rows related
+        // to the facts being reconciled. The complete-history case may pass
+        // many stale facts, but it never performs an unbounded resource scan.
+        let localRows: P2pkhLocalTransaction[] = [];
+        let localClaims: P2pkhLocalInputClaim[] = [];
+        let localOutpoints: P2pkhLocalOutpoint[] = [];
+        let localByTxid = new Map<string, P2pkhLocalTransaction>();
+        let claimsBySubmission = new Map<string, P2pkhLocalInputClaim[]>();
+        let claimsByOutpoint = new Map<string, P2pkhLocalInputClaim[]>();
+        let localOutpointsBySubmission = new Map<string, P2pkhLocalOutpoint[]>();
+        let localValueByOutpoint = new Map<string, number>();
+        let localsByInputOutpoint = new Map<string, P2pkhLocalTransaction[]>();
+        let childrenByParent = new Map<string, P2pkhLocalTransaction[]>();
+        const indexLocalOverlay = (): void => {
+          localByTxid = new Map(localRows.map((row) => [row.txid, row]));
+          claimsBySubmission = new Map();
+          claimsByOutpoint = new Map();
+          for (const claim of localClaims) {
+            const bySubmission = claimsBySubmission.get(claim.submissionId) ?? [];
+            bySubmission.push(claim); claimsBySubmission.set(claim.submissionId, bySubmission);
+            const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
+            const byOutpoint = claimsByOutpoint.get(key) ?? [];
+            byOutpoint.push(claim); claimsByOutpoint.set(key, byOutpoint);
+          }
+          localOutpointsBySubmission = new Map();
+          localValueByOutpoint = new Map();
+          for (const output of localOutpoints) {
+            const values = localOutpointsBySubmission.get(output.submissionId) ?? [];
+            values.push(output); localOutpointsBySubmission.set(output.submissionId, values);
+            localValueByOutpoint.set(`${output.txid}:${output.vout}`, output.value);
+          }
+          localsByInputOutpoint = new Map();
+          childrenByParent = new Map();
+          for (const local of localRows) {
+            for (const key of local.inputOutpointKeys) {
+              const values = localsByInputOutpoint.get(key) ?? [];
+              values.push(local); localsByInputOutpoint.set(key, values);
             }
-            const claim: P2pkhLocalInputClaim = {
-              id,
-              submissionId: input.submission.id,
-              resourceId: input.submission.resourceId,
-              publicKeyHex: input.submission.publicKeyHex,
-              network: input.submission.network,
-              txid: u.txid,
-              vout: u.vout,
-              canonicalTxid: input.expectedCanonicalTxid ?? input.submission.canonicalTxid,
-              observation: input.observation,
-              state: "claimed",
-              createdAt: now,
-              updatedAt: now
-            };
-            await reqAsPromise(claimStore.put(claim));
-            claimIds.push(id);
+            for (const parent of local.parentTxids) {
+              const children = childrenByParent.get(parent) ?? [];
+              children.push(local); childrenByParent.set(parent, children);
+            }
           }
-          // 所有 claim 写完后再写 submission：任一 claim 失败
-          // → 上面 throw → 整事务 abort → submission 也不落地。
-          await reqAsPromise(subStore.put(input.submission));
-          return { claimIds };
-        }
-      );
-    },
-    /**
-     * 协议 spend / 其它内部预览阶段专用：原子地写入一组 local input claim，
-     * 不落 local submission。与 transfer 的 claim 语义一致：同一
-     * (resourceId, txid, vout) 在同一时间只能被一个 submissionId 占用。
-     */
-    async tryClaimInputs(input: {
-      submissionId: string;
-      resourceId: string;
-      publicKeyHex: string;
-      network: BsvNetwork;
-      inputs: P2pkhInputOutpoint[];
-      expectedCanonicalTxid?: string;
-      observation?: "unconfirmed" | "confirmed";
-    }): Promise<{ claimIds: string[] }> {
-      return tx(handle, "p2pkh_local_input_claims", "readwrite", async (t) => {
-        const claimStore = t.objectStore("p2pkh_local_input_claims");
-        const now = new Date().toISOString();
-        const claimIds: string[] = [];
-        for (const u of input.inputs) {
-          const id = localInputClaimIdFor(input.resourceId, u.txid, u.vout);
-          const existing = await reqAsPromise<P2pkhLocalInputClaim | undefined>(claimStore.get(id));
-          if (existing && existing.state === "claimed" && existing.submissionId !== input.submissionId) {
-            throw new Error(
-              `P2PKH input already claimed by another submission: ${u.txid}:${u.vout} (submissionId=${existing.submissionId})`
-            );
-          }
-          const claim: P2pkhLocalInputClaim = {
-            id,
-            submissionId: input.submissionId,
-            resourceId: input.resourceId,
-            publicKeyHex: input.publicKeyHex,
-            network: input.network,
-            txid: u.txid,
-            vout: u.vout,
-            canonicalTxid: input.expectedCanonicalTxid,
-            observation: input.observation,
-            state: "claimed",
-            createdAt: now,
-            updatedAt: now
+        };
+        indexLocalOverlay();
+        const localOutputState = (state: P2pkhLocalTransaction["state"]): P2pkhLocalOutpoint["state"] => state === "local-confirmed" ? "available" : state === "isolated" ? "isolated" : state === "conflicted" ? "invalidated" : "unavailable";
+        const localClaimState = (state: P2pkhLocalTransaction["state"]): P2pkhLocalInputClaim["state"] => state === "chain-confirmed" ? "confirmed" : state === "isolated" || state === "conflicted" ? "isolated" : "active";
+        const loadLocalOverlay = async (relatedFacts: P2pkhTransactionFact[]): Promise<void> => {
+          const rowsById = new Map<string, P2pkhLocalTransaction>();
+          const addRows = (rows: P2pkhLocalTransaction[]) => {
+            for (const row of rows) if (row.resourceId === input.resource.resourceId) rowsById.set(row.id, row);
           };
-          await reqAsPromise(claimStore.put(claim));
-          claimIds.push(id);
-        }
-        return { claimIds };
-      });
-    },
-    /**
-     * 释放一组 claim 行。transfer 在 `definitive rejection` 路径上
-     * 调用：广播被节点明确拒绝（duplicate / invalid 等），value 没
-     * 在链上花掉，claim 必须释放，避免后续分配一直排除这些
-     * 「本可重试」的 outpoint。审计信息保留在 `failed` submission
-     * 行里。
-     *
-     * 单事务整批 delete；中途出错会冒泡，调用方按 fail-closed 处理
-     * （这种失败极少发生，DB 层 delete 不通通常意味着存储已坏，
-     * 后续 unrecoverable）。
-     */
-    async releaseLocalInputClaims(claimIds: string[]): Promise<void> {
-      if (claimIds.length === 0) return;
-      await tx(handle, "p2pkh_local_input_claims", "readwrite", async (t) => {
-        const store = t.objectStore("p2pkh_local_input_claims");
-        await Promise.all(claimIds.map((id) => reqAsPromise(store.delete(id))));
-      });
-    },
-
-    // ---------- 原子提交 ----------
-    async commitBackfillPage(commit: P2pkhBackfillCommit): Promise<void> {
-      await tx(
-        handle,
-        ["p2pkh_addresses", "p2pkh_history", "p2pkh_history_backfill"],
-        "readwrite",
-        async (t) => {
-          const addressStore = t.objectStore("p2pkh_addresses");
-          const histStore = t.objectStore("p2pkh_history");
-          const backfillStore = t.objectStore("p2pkh_history_backfill");
-          const currentAddress = await reqAsPromise<P2pkhKeyResource | undefined>(addressStore.get(commit.resourceId));
-          if (!currentAddress) {
-            throw new Error("resource deleted");
+          const inputIndex = localStore.index("inputOutpointKeys");
+          const txidIndex = localStore.index("txid");
+          for (const fact of relatedFacts) {
+            addRows(await allByKey<P2pkhLocalTransaction>(txidIndex, fact.txid));
+            for (const key of fact.inputOutpointKeys) addRows(await allByKey<P2pkhLocalTransaction>(inputIndex, key));
           }
-          if (currentAddress.generation !== commit.expectedGeneration) {
-            throw new Error("generation mismatch");
-          }
-          const existing = await reqAsPromise<P2pkhBackfillState | undefined>(
-            backfillStore.get(commit.resourceId)
-          );
-          const currentRevision = existing?.revision ?? 0;
-          if (currentRevision !== commit.expectedRevision) {
-            throw new Error("revision mismatch");
-          }
-          const now = new Date().toISOString();
-          for (const item of commit.page) {
-            const id = newHistoryId(commit.resourceId, item.txid);
-            const prev = (await reqAsPromise<P2pkhHistoryItem | undefined>(histStore.get(id))) ?? null;
-            const merged: P2pkhHistoryItem = {
-              id,
-              resourceId: commit.resourceId,
-              publicKeyHex: currentAddress.publicKeyHex,
-              network: currentAddress.network,
-              address: currentAddress.address,
-              txid: item.txid,
-              height: item.height,
-              status: "confirmed",
-              source: "woc-confirmed",
-              syncedAt: prev?.syncedAt ?? now
-            };
-            if (prev) {
-              if (prev.status === "confirmed" || prev.status === "unconfirmed" || prev.status === "pending") {
-                merged.status = "confirmed";
-              }
-              if (prev.syncedAt) merged.syncedAt = prev.syncedAt;
-              if (prev.source && prev.source !== "woc-confirmed") merged.source = prev.source;
-              if (prev.publicKeyHex) merged.publicKeyHex = prev.publicKeyHex;
-              if (prev.network) merged.network = prev.network;
-              if (prev.address) merged.address = prev.address;
+          // A confirmed spender can invalidate its descendants even when a
+          // descendant does not directly consume a chain outpoint on this
+          // page. Follow the parent index only for discovered branches.
+          const parentIndex = localStore.index("parentTxids");
+          const expanded = new Set<string>();
+          while (true) {
+            const pending = [...rowsById.values()].filter((row) => !expanded.has(row.txid));
+            if (pending.length === 0) break;
+            for (const row of pending) {
+              expanded.add(row.txid);
+              addRows(await allByKey<P2pkhLocalTransaction>(parentIndex, row.txid));
             }
-            await reqAsPromise(histStore.put(merged));
           }
-          const next: P2pkhBackfillState = {
-            resourceId: commit.resourceId,
-            status: commit.nextPageToken ? "running" : "complete",
-            nextPageToken: commit.nextPageToken,
-            anchorTxids: existing?.anchorTxids ?? [],
-            pagesSynced: (existing?.pagesSynced ?? 0) + 1,
-            recordsSynced: (existing?.recordsSynced ?? 0) + commit.page.length,
-            revision: currentRevision + 1,
-            lastError: undefined,
-            updatedAt: now
+          localRows = [...rowsById.values()];
+          const claimsById = new Map<string, P2pkhLocalInputClaim>();
+          const addClaims = (claims: P2pkhLocalInputClaim[]) => {
+            for (const claim of claims) if (claim.resourceId === input.resource.resourceId) claimsById.set(claim.id, claim);
           };
-          await reqAsPromise(backfillStore.put(next));
-        }
-      );
-    },
-
-    async commitRecentSnapshot(commit: P2pkhRecentCommit): Promise<void> {
-      // 硬切换 001：事务范围不再包含 p2pkh_balances——余额不再落库。
-      await tx(
-        handle,
-        [
-          "p2pkh_addresses",
-          "p2pkh_utxos",
-          "p2pkh_history",
-          "p2pkh_recent_sync",
-          "p2pkh_local_input_claims",
-          "p2pkh_local_submissions",
-          "p2pkh_protocol_submissions"
-        ],
-        "readwrite",
-        async (t) => {
-          const addressStore = t.objectStore("p2pkh_addresses");
-          const now = new Date().toISOString();
-          const currentAddress = await reqAsPromise<P2pkhKeyResource | undefined>(addressStore.get(commit.resourceId));
-          if (!currentAddress) {
-            throw new Error("resource deleted");
-          }
-          if (commit.expectedGeneration !== undefined && currentAddress.generation !== commit.expectedGeneration) {
-            throw new Error("generation mismatch");
-          }
-          const effectiveResource = currentAddress;
-          if (commit.utxos) {
-            const utxoStore = t.objectStore("p2pkh_utxos");
-            const idx = utxoStore.index("resourceId");
-            const keys: IDBValidKey[] = await reqAsPromise(idx.getAllKeys(commit.resourceId));
-            for (const k of keys) await reqAsPromise(utxoStore.delete(k));
-            for (const u of commit.utxos) await reqAsPromise(utxoStore.put(u));
-          }
-          if (commit.recentHistory) {
-            const histStore = t.objectStore("p2pkh_history");
-            for (const h of commit.recentHistory) {
-              const id = newHistoryId(commit.resourceId, h.txid);
-              const prev = await reqAsPromise<P2pkhHistoryItem | undefined>(histStore.get(id));
-              if (prev?.status === "confirmed" && h.status !== "confirmed") continue;
-              // 硬切换 002 收尾：history 仅持有 publicKeyHex。
-              const merged: P2pkhHistoryItem = {
-                id,
-                resourceId: commit.resourceId,
-                publicKeyHex: effectiveResource.publicKeyHex,
-                network: effectiveResource.network,
-                address: effectiveResource.address,
-                txid: h.txid,
-                height: h.height,
-                status: h.status,
-                source: h.source,
-                observation: h.observation ?? "confirmed",
-                syncedAt: prev?.syncedAt && prev?.syncedAt > h.syncedAt ? prev.syncedAt : h.syncedAt
-              };
-              await reqAsPromise(histStore.put(merged));
+          const claimOutpointIndex = claimStore.index("outpointKey");
+          for (const fact of relatedFacts) for (const key of fact.inputOutpointKeys) addClaims(await allByKey<P2pkhLocalInputClaim>(claimOutpointIndex, key));
+          const submissionIndex = claimStore.index("submissionId");
+          for (const row of localRows) addClaims(await allByKey<P2pkhLocalInputClaim>(submissionIndex, row.id));
+          localClaims = [...claimsById.values()];
+          const outpointsById = new Map<string, P2pkhLocalOutpoint>();
+          const addOutpoints = (outpoints: P2pkhLocalOutpoint[]) => {
+            for (const outpoint of outpoints) if (outpoint.resourceId === input.resource.resourceId) outpointsById.set(outpoint.id, outpoint);
+          };
+          const outpointSubmissionIndex = localOutpointStore.index("submissionId");
+          for (const row of localRows) addOutpoints(await allByKey<P2pkhLocalOutpoint>(outpointSubmissionIndex, row.id));
+          localOutpoints = [...outpointsById.values()];
+          indexLocalOverlay();
+        };
+        // Confirmed values are needed only when a reorg restores a local
+        // overlay and has to recreate a missing claim. Do not materialize the
+        // complete owned projection for every ordinary provider page.
+        const confirmedValueForOutpoint = async (outpointKey: string): Promise<number | undefined> => {
+          const row = await request(ownedStore.index("resourceOutpointKey").get([input.resource.resourceId, outpointKey])) as P2pkhOwnedOutpointProjection | undefined;
+          return row?.resourceId === input.resource.resourceId ? row.value : undefined;
+        };
+        const restoreLocalOverlay = async (local: P2pkhLocalTransaction, state: P2pkhLocalTransaction["state"], fallbackOutputs: Array<{ vout: number; value: number; scriptHex: string }> = []): Promise<void> => {
+          local.state = state;
+          if (state === "local-confirmed") local.isolationReason = undefined;
+          else local.isolationReason ??= "chain-reorg";
+          local.updatedAt = now;
+          await request(localStore.put(local));
+          let outputs = localOutpointsBySubmission.get(local.id) ?? [];
+          if (outputs.length === 0 && state !== "chain-confirmed") {
+            const source = fallbackOutputs.length > 0 ? fallbackOutputs : local.ownOutputs;
+            outputs = source.map((output) => ({ id: `${local.resourceId}:${local.txid}:${output.vout}`, resourceId: local.resourceId, txid: local.txid, vout: output.vout, value: output.value, scriptHex: output.scriptHex, submissionId: local.id, state: localOutputState(state), createdAt: local.createdAt, updatedAt: now } satisfies P2pkhLocalOutpoint));
+            localOutpointsBySubmission.set(local.id, outputs);
+            localOutpoints.push(...outputs);
+            for (const output of outputs) { localValueByOutpoint.set(`${output.txid}:${output.vout}`, output.value); await request(localOutpointStore.put(output)); }
+          } else {
+            for (const output of outputs) {
+              output.state = localOutputState(state);
+              output.updatedAt = now;
+              await request(localOutpointStore.put(output));
             }
           }
-          if (commit.unconfirmedHistory) {
-            const histStore = t.objectStore("p2pkh_history");
-            for (const h of commit.unconfirmedHistory) {
-              const id = newHistoryId(commit.resourceId, h.txid);
-              const prev = await reqAsPromise<P2pkhHistoryItem | undefined>(histStore.get(id));
-              if (prev?.status === "confirmed") continue;
-              await reqAsPromise(histStore.put({
-                ...h,
-                id,
-                resourceId: commit.resourceId,
-                publicKeyHex: effectiveResource.publicKeyHex,
-                network: effectiveResource.network,
-                address: effectiveResource.address,
-                observation: h.observation ?? "unconfirmed"
-              }));
+          const claims = claimsBySubmission.get(local.id) ?? [];
+          for (const key of local.inputOutpointKeys) {
+            if (claims.some((claim) => (claim.outpointKey ?? `${claim.txid}:${claim.vout}`) === key)) continue;
+            const separator = key.lastIndexOf(":");
+            const txid = separator > 0 ? key.slice(0, separator) : key;
+            const vout = separator > 0 ? Number(key.slice(separator + 1)) : 0;
+            const value = await confirmedValueForOutpoint(key) ?? localValueByOutpoint.get(key);
+            const claim: P2pkhLocalInputClaim = { id: claimId(local.resourceId, txid, vout), submissionId: local.id, resourceId: local.resourceId, publicKeyHex: local.publicKeyHex, network: local.network, txid, vout, outpointKey: key, ...(value === undefined ? {} : { value }), state: localClaimState(state), createdAt: local.createdAt, updatedAt: now };
+            claims.push(claim);
+            const byOutpoint = claimsByOutpoint.get(key) ?? [];
+            byOutpoint.push(claim); claimsByOutpoint.set(key, byOutpoint);
+          }
+          claimsBySubmission.set(local.id, claims);
+          for (const claim of claims) {
+            claim.state = localClaimState(state);
+            claim.updatedAt = now;
+            await request(claimStore.put(claim));
+          }
+        };
+        const reconcileOwnedProjection = async (pageFacts: P2pkhTransactionFact[], removedFacts: P2pkhTransactionFact[] = []): Promise<void> => {
+          const changedFacts = [...pageFacts, ...removedFacts];
+          for (const fact of removedFacts) {
+            for (const row of await allByKey<P2pkhOwnedOutpointProjection>(ownedStore.index("resourceTxid"), [fact.resourceId, fact.txid])) await request(ownedStore.delete(row.id));
+          }
+          for (const fact of pageFacts) {
+            const expected = new Set(fact.ownedOutputs.map((output) => `${fact.txid}:${output.vout}`));
+            for (const row of await allByKey<P2pkhOwnedOutpointProjection>(ownedStore.index("resourceTxid"), [fact.resourceId, fact.txid])) {
+              if (!expected.has(row.outpointKey)) await request(ownedStore.delete(row.id));
             }
           }
-          if (commit.recentConfirmedTxids) {
-            const recentStore = t.objectStore("p2pkh_recent_sync");
-            const existing = await reqAsPromise<P2pkhRecentSyncState | undefined>(recentStore.get(commit.resourceId));
-            const next: P2pkhRecentSyncState = {
-              resourceId: commit.resourceId,
-              recentConfirmedTxids: commit.recentConfirmedTxids,
-              lastCheckedAt: now,
-              lastSuccessAt: now,
-              lastError: existing?.lastError
-            };
-            await reqAsPromise(recentStore.put(next));
+          const reconcileOutpoint = async (key: string): Promise<void> => {
+            const row = await request(ownedStore.index("resourceOutpointKey").get([input.resource.resourceId, key])) as P2pkhOwnedOutpointProjection | undefined;
+            if (!row || row.resourceId !== input.resource.resourceId) return;
+            const spenders = (await allByKey<P2pkhTransactionFact>(facts.index("inputOutpointKeys"), key)).filter((candidate) => candidate.resourceId === input.resource.resourceId && candidate.txid !== row.txid).sort((left, right) => (left.blockHeight ?? Number.MAX_SAFE_INTEGER) - (right.blockHeight ?? Number.MAX_SAFE_INTEGER));
+            const spender = spenders[0];
+            row.chainState = spender ? "spent" : "available";
+            row.spentByTxid = spender?.txid;
+            row.spentBlockHeight = spender?.blockHeight;
+            row.updatedAt = now;
+            await request(ownedStore.put(row));
+          };
+          for (const fact of changedFacts) {
+            for (const key of fact.inputOutpointKeys) await reconcileOutpoint(key);
+            for (const output of fact.ownedOutputs) await reconcileOutpoint(`${fact.txid}:${output.vout}`);
           }
-          if (commit.localInputClaims) {
-            const store = t.objectStore("p2pkh_local_input_claims");
-            for (const r of commit.localInputClaims) {
-              if (r.state === "released") {
-                await reqAsPromise(store.delete(r.id));
-                continue;
-              }
-              await reqAsPromise(store.put(r));
-            }
-          }
-          if (commit.localSubmissions) {
-            const store = t.objectStore("p2pkh_local_submissions");
-            for (const p of commit.localSubmissions) await reqAsPromise(store.put(p));
-          }
-          if (commit.protocolSubmissions) {
-            const store = t.objectStore("p2pkh_protocol_submissions");
-            for (const p of commit.protocolSubmissions) await reqAsPromise(store.put(p));
+        };
+        const reconcilePageProjection = async (pageFacts: P2pkhTransactionFact[]): Promise<void> => {
+          await loadLocalOverlay(pageFacts);
+          await reconcileOwnedProjection(pageFacts);
+        };
+        const pageFacts: P2pkhTransactionFact[] = [];
+        for (const transaction of input.transactions) {
+          const parsed = parseP2pkhTransaction(transaction.rawTxHex, transaction.txid);
+          const owned = ownedP2pkhOutputs(parsed, input.resource.address, input.resource.network);
+          const id = resourceKey(input.resource.resourceId, parsed.canonicalTxid);
+          const previous = await getById<P2pkhTransactionFact>(facts, id);
+          const fact: P2pkhTransactionFact = { id, resourceId: input.resource.resourceId, publicKeyHex: input.resource.publicKeyHex, network: input.resource.network, address: input.resource.address, txid: parsed.canonicalTxid, rawTxHex: transaction.rawTxHex.replace(/^0x/i, "").toLowerCase(), blockHeight: transaction.blockHeight, blockHash: transaction.blockHash, blockTime: transaction.blockTime, inputOutpointKeys: parsed.inputs.map((item) => item.outpointKey), inputs: parsed.inputs.map((item) => ({ txid: item.prevTxid, vout: item.prevVout, outpointKey: item.outpointKey })), ownedOutpointKeys: owned.map((item) => `${parsed.canonicalTxid}:${item.vout}`), ownedOutputs: owned, firstConfirmedAt: previous?.firstConfirmedAt ?? now, lastConfirmedAt: now };
+          pageFacts.push(fact);
+          await request(facts.put(fact));
+          for (const output of owned) {
+            const outpointIdValue = outpointId(fact.resourceId, fact.txid, output.vout);
+            const existing = await getById<P2pkhOwnedOutpointProjection>(ownedStore, outpointIdValue);
+            await request(ownedStore.put(existing ? { ...existing, value: output.value, scriptHex: output.scriptHex, updatedAt: now } : { id: outpointIdValue, resourceId: fact.resourceId, publicKeyHex: fact.publicKeyHex, network: fact.network, address: fact.address, txid: fact.txid, vout: output.vout, outpointKey: `${fact.txid}:${output.vout}`, value: output.value, scriptHex: output.scriptHex, chainState: "available", createdBlockHeight: fact.blockHeight, updatedAt: now } satisfies P2pkhOwnedOutpointProjection));
           }
         }
-      );
-    },
+        const reorgCheck = input.reorgCheck;
+        if (reorgCheck && (reorgCheck.completeHistory || reorgCheck.anchorTxid)) {
+          const anchor = reorgCheck.anchorTxid ? await request(facts.index("resourceTxid").get([input.resource.resourceId, reorgCheck.anchorTxid])) as P2pkhTransactionFact | undefined : undefined;
+          const existingFacts = reorgCheck.completeHistory
+            ? await allByKey<P2pkhTransactionFact>(facts.index("resourceId"), input.resource.resourceId)
+            : anchor?.blockHeight === undefined
+              ? []
+              : await allByKey<P2pkhTransactionFact>(facts.index("resourceBlockHeight"), IDBKeyRange.bound([input.resource.resourceId, anchor.blockHeight], [input.resource.resourceId, Number.MAX_SAFE_INTEGER]));
+          let allFacts = [...existingFacts.filter((row) => !pageFacts.some((pageFact) => pageFact.id === row.id)), ...pageFacts];
+          const observed = new Set(reorgCheck.observedTxids.map((txid) => txid.toLowerCase()));
+          const stale = allFacts.filter((fact) => fact.resourceId === input.resource.resourceId && !observed.has(fact.txid) && (reorgCheck.completeHistory || (anchor?.blockHeight !== undefined && fact.blockHeight !== undefined && fact.blockHeight >= anchor.blockHeight)));
+          await loadLocalOverlay([...pageFacts, ...stale]);
+          const staleIds = new Set(stale.map((fact) => fact.id));
+          for (const fact of stale) await request(facts.delete(fact.id));
+          allFacts = allFacts.filter((fact) => !staleIds.has(fact.id));
+          for (const fact of stale) {
+            const local = localByTxid.get(fact.txid);
+            if (!local) continue;
+            if (local.state === "chain-confirmed") {
+              const restoredState = local.chainConfirmationPreviousState === "local-confirmed" || local.chainConfirmationPreviousState === "isolated" || local.chainConfirmationPreviousState === "conflicted" ? local.chainConfirmationPreviousState : "isolated";
+              local.chainConfirmationPreviousState = undefined;
+              await restoreLocalOverlay(local, restoredState, fact.ownedOutputs);
+            }
+          }
+          const staleTxids = new Set(stale.map((fact) => fact.txid));
+          for (const local of localRows) {
+            const sources = local.conflictSourceTxids ?? [];
+            if (local.state !== "conflicted" || sources.length === 0) continue;
+            const remainingSources = sources.filter((source) => !staleTxids.has(source));
+            if (remainingSources.length === sources.length) continue;
+            local.conflictSourceTxids = remainingSources;
+            if (remainingSources.length === 0) {
+              const restoredState = local.conflictPreviousState === "local-confirmed" || local.conflictPreviousState === "isolated" || local.conflictPreviousState === "conflicted" ? local.conflictPreviousState : "isolated";
+              local.conflictPreviousState = undefined;
+              await restoreLocalOverlay(local, restoredState);
+            } else {
+              local.updatedAt = now;
+              await request(localStore.put(local));
+            }
+          }
+          if (reorgCheck.completeHistory) await rebuildOwnedProjectionInTransaction(tx, input.resource.resourceId, allFacts, now);
+          else await reconcileOwnedProjection(pageFacts, stale);
+        } else {
+          await reconcilePageProjection(pageFacts);
+        }
 
-    // ---------- 清理 ----------
-    /** 清理当前 namespace 内所有数据。设计缘由：删除 key 时 namespace DB 整体删除，
-     * 本方法用于手动重置或迁移失败回滚。硬切换 001：余额不再落库，
-     * clearAll 不再调用 clearBalance。 */
-    async clearAll(): Promise<void> {
-      const resources = await this.listResourcesByKey();
-      for (const r of resources) {
-        await this.removeResource(r.resourceId);
-        await this.clearUtxosForResource(r.resourceId);
-        await this.clearHistoryForResource(r.resourceId);
-        await this.clearBackfillState(r.resourceId);
-        const submissions = await this.listLocalSubmissionsByResource(r.resourceId);
-        for (const p of submissions) await this.removeLocalSubmission(p.id);
-        const protocolSubmissions = await this.listProtocolSubmissionsByResource(r.resourceId);
-        for (const p of protocolSubmissions) await this.removeProtocolSubmission(p.id);
-        const claims = await this.listLocalInputClaimsByResource(r.resourceId);
-        for (const rs of claims) await this.removeLocalInputClaim(rs.id);
+        // Reconcile the local overlay in the same transaction as facts and the
+        // owned projection. A confirmed copy of a local tx promotes that tx;
+        // a different confirmed spender conflicts it and invalidates its
+        // descendants. Claims are deliberately retained until this chain fact
+        // exists—there is no timeout-based unlock.
+        const descendants = (rootTxid: string): Set<string> => {
+          const result = new Set<string>([rootTxid]);
+          const queue = [rootTxid];
+          while (queue.length) {
+            const parent = queue.shift()!;
+            for (const child of childrenByParent.get(parent) ?? []) {
+              if (result.has(child.txid)) continue;
+              result.add(child.txid); queue.push(child.txid);
+            }
+          }
+          return result;
+        };
+        const invalidateBranch = async (rootTxid: string, reason: string): Promise<void> => {
+          const branch = descendants(rootTxid);
+          const sourceTxid = reason.startsWith("confirmed-spender:") ? reason.slice("confirmed-spender:".length) : reason;
+          for (const txid of branch) {
+            const local = localByTxid.get(txid);
+            if (!local) continue;
+            if (local.state !== "conflicted") local.conflictPreviousState = local.state === "chain-confirmed" ? local.chainConfirmationPreviousState ?? "isolated" : local.state;
+            local.conflictSourceTxids = [...new Set([...(local.conflictSourceTxids ?? []), sourceTxid])];
+            local.state = "conflicted";
+            local.isolationReason = reason;
+            local.updatedAt = now;
+            await request(localStore.put(local));
+            for (const output of localOutpointsBySubmission.get(local.id) ?? []) {
+              output.state = "invalidated";
+              output.updatedAt = now;
+              await request(localOutpointStore.put(output));
+            }
+            for (const claim of claimsBySubmission.get(local.id) ?? []) {
+              claim.state = "isolated";
+              claim.updatedAt = now;
+              await request(claimStore.put(claim));
+            }
+          }
+        };
+
+        for (const fact of pageFacts) {
+          const local = localByTxid.get(fact.txid);
+          if (local) {
+            const previousState = local.state === "conflicted" ? local.conflictPreviousState ?? "isolated" : local.state === "chain-confirmed" ? local.chainConfirmationPreviousState ?? "isolated" : local.state;
+            local.chainConfirmationPreviousState = previousState === "chain-confirmed" ? "isolated" : previousState;
+            local.state = "chain-confirmed";
+            local.updatedAt = now;
+            await request(localStore.put(local));
+            for (const output of localOutpointsBySubmission.get(local.id) ?? []) {
+              await request(localOutpointStore.delete(output.id));
+            }
+            localOutpointsBySubmission.delete(local.id);
+            for (let index = localOutpoints.length - 1; index >= 0; index -= 1) if (localOutpoints[index]?.submissionId === local.id) localOutpoints.splice(index, 1);
+            // A chain-confirmed local transaction no longer needs a temporary
+            // claim. Its prior local state is retained on the transaction so a
+            // later reorg can recreate the claim with a conservative value.
+            for (const claim of claimsBySubmission.get(local.id) ?? []) {
+              await request(claimStore.delete(claim.id));
+              const remaining = (claimsByOutpoint.get(claim.outpointKey ?? `${claim.txid}:${claim.vout}`) ?? []).filter((candidate) => candidate.id !== claim.id);
+              if (remaining.length > 0) claimsByOutpoint.set(claim.outpointKey ?? `${claim.txid}:${claim.vout}`, remaining);
+              else claimsByOutpoint.delete(claim.outpointKey ?? `${claim.txid}:${claim.vout}`);
+            }
+            claimsBySubmission.delete(local.id);
+          }
+          for (const key of fact.inputOutpointKeys) {
+            for (const claimant of localsByInputOutpoint.get(key) ?? []) {
+              if (claimant.txid === fact.txid) continue;
+              await invalidateBranch(claimant.txid, `confirmed-spender:${fact.txid}`);
+            }
+            for (const claim of claimsByOutpoint.get(key) ?? []) {
+              if (claim.submissionId === local?.id) continue;
+              claim.state = "isolated";
+              claim.updatedAt = now;
+              await request(claimStore.put(claim));
+            }
+          }
+        }
+        await request(syncStore.put({ ...input.syncState, id: input.resource.resourceId }));
+      });
+    },
+    listTransactionFactsPage: (filter?: { resourceId?: string; network?: BsvNetwork; cursor?: string; limit?: number }) => runTransaction(handle, "p2pkh_transactions", "readonly", async (tx) => {
+      const resourceId = filter?.resourceId;
+      if (!resourceId) return { items: [], nextCursor: undefined };
+      const page = await pageByIndex<P2pkhTransactionFact>(tx.objectStore("p2pkh_transactions").index("resourceTimeline"), resourceId, filter?.cursor, boundedLimit(filter?.limit) ?? 200);
+      return { items: page.items.filter((row) => !filter?.network || row.network === filter.network), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+    }),
+    listOwnedOutpointsPage: (filter?: { resourceId?: string; network?: BsvNetwork; chainState?: string; cursor?: string; limit?: number }) => runTransaction(handle, "p2pkh_owned_outpoints", "readonly", async (tx) => {
+      const resourceId = filter?.resourceId;
+      if (!resourceId) return { items: [], nextCursor: undefined };
+      const page = await pageByIndex<P2pkhOwnedOutpointProjection>(tx.objectStore("p2pkh_owned_outpoints").index("resourceTimeline"), resourceId, filter?.cursor, boundedLimit(filter?.limit) ?? 500);
+      return { items: page.items.filter((row) => (!filter?.network || row.network === filter.network) && (!filter?.chainState || row.chainState === filter.chainState)), ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
+    }),
+    listOwnedOutpointValues: (resourceId: string, outpointKeys: string[]) => runTransaction(handle, "p2pkh_owned_outpoints", "readonly", async (tx) => {
+      const index = tx.objectStore("p2pkh_owned_outpoints").index("resourceOutpointKey");
+      const values: Record<string, number> = {};
+      for (const key of [...new Set(outpointKeys)]) {
+        const row = await request(index.get([resourceId, key])) as P2pkhOwnedOutpointProjection | undefined;
+        if (row?.resourceId === resourceId) values[key] = row.value;
       }
-    }
+      return values;
+    }),
+    listTransactionFacts: (filter?: { resourceId?: string; network?: BsvNetwork; limit?: number }) => runTransaction(handle, "p2pkh_transactions", "readonly", async (tx) => {
+      const store = tx.objectStore("p2pkh_transactions");
+      const limit = boundedLimit(filter?.limit);
+      let rows: P2pkhTransactionFact[];
+      if (!filter?.resourceId) rows = limit ? await pageByCursor<P2pkhTransactionFact>(store, null, "prev", limit) : await all<P2pkhTransactionFact>(store);
+      else if (!limit) rows = await allByKey<P2pkhTransactionFact>(store.index("resourceId"), filter.resourceId);
+      else {
+        rows = (await pageByIndex<P2pkhTransactionFact>(store.index("resourceTimeline"), filter.resourceId, undefined, limit)).items;
+      }
+      return rows.filter((r) => !filter?.network || r.network === filter.network);
+    }),
+    listOwnedOutpoints: (filter?: { resourceId?: string; network?: BsvNetwork; chainState?: string; limit?: number }) => runTransaction(handle, "p2pkh_owned_outpoints", "readonly", async (tx) => {
+      const store = tx.objectStore("p2pkh_owned_outpoints");
+      const limit = boundedLimit(filter?.limit);
+      let rows: P2pkhOwnedOutpointProjection[];
+      if (!limit && filter?.resourceId && filter.chainState) rows = await allByKey<P2pkhOwnedOutpointProjection>(store.index("resourceChainState"), [filter.resourceId, filter.chainState]);
+      else if (!limit && filter?.resourceId) rows = [...await allByKey<P2pkhOwnedOutpointProjection>(store.index("resourceChainState"), [filter.resourceId, "available"]), ...await allByKey<P2pkhOwnedOutpointProjection>(store.index("resourceChainState"), [filter.resourceId, "spent"] )];
+      else if (!limit && filter?.chainState) rows = await allByKey<P2pkhOwnedOutpointProjection>(store.index("chainState"), filter.chainState);
+      else if (!limit) rows = await all<P2pkhOwnedOutpointProjection>(store);
+      else if (filter?.resourceId && filter.chainState) rows = await pageByCursor<P2pkhOwnedOutpointProjection>(store.index("resourceChainState"), [filter.resourceId, filter.chainState], "prev", limit);
+      else if (filter?.resourceId) {
+        rows = (await pageByIndex<P2pkhOwnedOutpointProjection>(store.index("resourceTimeline"), filter.resourceId, undefined, limit)).items;
+      } else rows = await pageByCursor<P2pkhOwnedOutpointProjection>(store, null, "prev", limit);
+      return rows.filter((r) => (!filter?.network || r.network === filter.network) && (!filter?.chainState || r.chainState === filter.chainState));
+    }),
+    listTransactionSyncStates: () => runTransaction(handle, "p2pkh_transaction_sync", "readonly", (tx) => all<P2pkhTransactionSyncState>(tx.objectStore("p2pkh_transaction_sync"))),
+    getTransactionSyncState: (id: string) => runTransaction(handle, "p2pkh_transaction_sync", "readonly", (tx) => getById<P2pkhTransactionSyncState>(tx.objectStore("p2pkh_transaction_sync"), id)),
+    putTransactionSyncState: (state: P2pkhTransactionSyncState) => runTransaction(handle, "p2pkh_transaction_sync", "readwrite", async (tx) => { await request(tx.objectStore("p2pkh_transaction_sync").put({ ...state, id: state.resourceId })); }),
+    clearInProgressSyncState: (id: string) => runTransaction(handle, "p2pkh_transaction_sync", "readwrite", async (tx) => { const store = tx.objectStore("p2pkh_transaction_sync"); const row = await getById<P2pkhTransactionSyncState>(store, id); if (row) await request(store.put({ ...row, id, inProgressProviderId: undefined, inProgressProviderGeneration: undefined, inProgressCursor: undefined, runId: undefined, runHeadTxid: undefined, runObservedTxids: undefined })); }),
+    async rebuildOwnedOutpoints(resourceId?: string): Promise<void> { await runTransaction(handle, ["p2pkh_transactions", "p2pkh_owned_outpoints"], "readwrite", async (tx) => { const factsStore = tx.objectStore("p2pkh_transactions"); const ownedStore = tx.objectStore("p2pkh_owned_outpoints"); const facts = (await all<P2pkhTransactionFact>(factsStore)).filter((r) => !resourceId || r.resourceId === resourceId); const existing = (await all<P2pkhOwnedOutpointProjection>(ownedStore)).filter((r) => !resourceId || r.resourceId === resourceId); for (const row of existing) await request(ownedStore.delete(row.id)); const map = new Map<string, P2pkhOwnedOutpointProjection>(); for (const fact of facts) for (const output of fact.ownedOutputs) map.set(`${fact.resourceId}:${fact.txid}:${output.vout}`, { id: outpointId(fact.resourceId, fact.txid, output.vout), resourceId: fact.resourceId, publicKeyHex: fact.publicKeyHex, network: fact.network, address: fact.address, txid: fact.txid, vout: output.vout, outpointKey: `${fact.txid}:${output.vout}`, value: output.value, scriptHex: output.scriptHex, chainState: "available", createdBlockHeight: fact.blockHeight, updatedAt: new Date().toISOString() }); const byOutpoint = new Map([...map.values()].map((row) => [`${row.resourceId}:${row.outpointKey}`, row])); for (const fact of facts) for (const key of fact.inputOutpointKeys) { const row = byOutpoint.get(`${fact.resourceId}:${key}`); if (row && row.txid !== fact.txid) { row.chainState = "spent"; row.spentByTxid = fact.txid; row.spentBlockHeight = fact.blockHeight; } } for (const row of map.values()) await request(ownedStore.put(row)); }); },
+
+    listLocalTransactions: (resourceId?: string, limit?: number) => runTransaction(handle, "p2pkh_local_transactions", "readonly", async (tx) => { const store = tx.objectStore("p2pkh_local_transactions"); const size = boundedLimit(limit); return resourceId ? (size ? pageByCursor<P2pkhLocalTransaction>(store.index("resourceId"), resourceId, "prev", size) : allByKey<P2pkhLocalTransaction>(store.index("resourceId"), resourceId)) : (size ? pageByCursor<P2pkhLocalTransaction>(store, null, "prev", size) : all<P2pkhLocalTransaction>(store)); }),
+    listLocalOutpoints: (resourceId?: string, limit?: number) => runTransaction(handle, "p2pkh_local_outpoints", "readonly", async (tx) => { const store = tx.objectStore("p2pkh_local_outpoints"); const size = boundedLimit(limit); return resourceId ? (size ? pageByCursor<P2pkhLocalOutpoint>(store.index("resourceId"), resourceId, "prev", size) : allByKey<P2pkhLocalOutpoint>(store.index("resourceId"), resourceId)) : (size ? pageByCursor<P2pkhLocalOutpoint>(store, null, "prev", size) : all<P2pkhLocalOutpoint>(store)); }),
+    listLocalTransactionsPage: (filter?: { resourceId?: string; cursor?: string; limit?: number }) => runTransaction(handle, "p2pkh_local_transactions", "readonly", async (tx) => { if (!filter?.resourceId) return { items: [], nextCursor: undefined }; const page = await pageByIndex<P2pkhLocalTransaction>(tx.objectStore("p2pkh_local_transactions").index("resourceTimeline"), filter.resourceId, filter.cursor, boundedLimit(filter.limit) ?? 500); return page; }),
+    listLocalOutpointsPage: (filter?: { resourceId?: string; cursor?: string; limit?: number }) => runTransaction(handle, "p2pkh_local_outpoints", "readonly", async (tx) => { if (!filter?.resourceId) return { items: [], nextCursor: undefined }; const page = await pageByIndex<P2pkhLocalOutpoint>(tx.objectStore("p2pkh_local_outpoints").index("resourceTimeline"), filter.resourceId, filter.cursor, boundedLimit(filter.limit) ?? 500); return page; }),
+    listLocalInputClaimsPage: (filter?: { resourceId?: string; cursor?: string; limit?: number }) => runTransaction(handle, "p2pkh_local_input_claims", "readonly", async (tx) => { if (!filter?.resourceId) return { items: [], nextCursor: undefined }; const page = await pageByIndex<P2pkhLocalInputClaim>(tx.objectStore("p2pkh_local_input_claims").index("resourceTimeline"), filter.resourceId, filter.cursor, boundedLimit(filter.limit) ?? 500); return page; }),
+    async prepareLocalSubmission(input: { submission: P2pkhLocalTransaction; claims: P2pkhLocalInputClaim[]; localOutpoints: P2pkhLocalOutpoint[] }): Promise<void> { await runTransaction(handle, ["p2pkh_local_transactions", "p2pkh_local_input_claims", "p2pkh_local_outpoints"], "readwrite", async (tx) => { const claims = tx.objectStore("p2pkh_local_input_claims"); const existingOutpoints = await all<P2pkhLocalOutpoint>(tx.objectStore("p2pkh_local_outpoints")); for (const claim of input.claims) { const id = claim.id || claimId(claim.resourceId, claim.txid, claim.vout); const existing = await getById<P2pkhLocalInputClaim>(claims, id); if (existing && existing.submissionId !== claim.submissionId && !["released", "confirmed"].includes(existing.state)) throw new Error(`P2PKH input already claimed: ${claim.txid}:${claim.vout}`); await request(claims.put({ ...claim, id, state: "active", outpointKey: `${claim.txid}:${claim.vout}`, createdAt: existing?.createdAt ?? claim.createdAt, updatedAt: new Date().toISOString() })); const parent = existingOutpoints.find((candidate) => candidate.resourceId === claim.resourceId && candidate.txid === claim.txid && candidate.vout === claim.vout); if (parent && parent.submissionId !== claim.submissionId && parent.state === "available") { parent.state = "claimed"; parent.updatedAt = new Date().toISOString(); await request(tx.objectStore("p2pkh_local_outpoints").put(parent)); } } await request(tx.objectStore("p2pkh_local_transactions").put({ ...input.submission, state: "submitting" })); const outputs = tx.objectStore("p2pkh_local_outpoints"); for (const output of input.localOutpoints) await request(outputs.put({ ...output, state: "unavailable" })); }); },
+    async finishLocalSubmission(input: { submissionId: string; state: "local-confirmed" | "isolated" | "chain-confirmed" | "conflicted"; reason?: string; attempt?: unknown }): Promise<void> {
+      await runTransaction(handle, ["p2pkh_local_transactions", "p2pkh_local_input_claims", "p2pkh_local_outpoints"], "readwrite", async (tx) => {
+        const local = tx.objectStore("p2pkh_local_transactions");
+        const row = await getById<P2pkhLocalTransaction>(local, input.submissionId);
+        if (!row) throw new Error("Local submission not found");
+
+        // Confirmed sync and broadcast completion share this transaction. Once
+        // sync has established a chain truth, a late provider response may
+        // append its attempt audit but can never downgrade the truth or touch
+        // claims/outputs that sync already reconciled.
+        const chainTruth = row.state === "chain-confirmed" || row.state === "conflicted";
+        const broadcastTerminal = input.state === "local-confirmed" || input.state === "isolated";
+        if (chainTruth && broadcastTerminal) {
+          if (input.attempt) {
+            row.attempts = [...row.attempts, input.attempt as P2pkhLocalTransaction["attempts"][number]];
+            row.updatedAt = new Date().toISOString();
+            await request(local.put(row));
+          }
+          return;
+        }
+
+        row.state = input.state;
+        row.updatedAt = new Date().toISOString();
+        row.isolationReason = input.reason ?? row.isolationReason;
+        if (input.attempt) row.attempts = [...row.attempts, input.attempt as P2pkhLocalTransaction["attempts"][number]];
+        await request(local.put(row));
+
+        const outputs = tx.objectStore("p2pkh_local_outpoints");
+        const localOutputs = await all<P2pkhLocalOutpoint>(outputs);
+        for (const output of localOutputs.filter((r) => r.submissionId === input.submissionId)) {
+          if (input.state === "chain-confirmed") await request(outputs.delete(output.id));
+          else {
+            output.state = input.state === "local-confirmed" ? "available" : input.state === "isolated" ? "isolated" : "invalidated";
+            output.updatedAt = new Date().toISOString();
+            await request(outputs.put(output));
+          }
+        }
+        const consumedParentState = input.state === "local-confirmed" ? "claimed" : input.state === "isolated" ? "isolated" : "invalidated";
+        for (const parent of localOutputs.filter((candidate) => row.inputOutpointKeys.includes(`${candidate.txid}:${candidate.vout}`) && candidate.submissionId !== row.id)) {
+          parent.state = consumedParentState;
+          parent.updatedAt = new Date().toISOString();
+          await request(outputs.put(parent));
+        }
+        const claims = tx.objectStore("p2pkh_local_input_claims");
+        for (const claim of (await all<P2pkhLocalInputClaim>(claims)).filter((r) => r.submissionId === input.submissionId)) {
+          if (input.state === "chain-confirmed") await request(claims.delete(claim.id));
+          else {
+            claim.state = input.state === "isolated" || input.state === "conflicted" ? "isolated" : "active";
+            claim.updatedAt = new Date().toISOString();
+            await request(claims.put(claim));
+          }
+        }
+      });
+    },
+    async abortUnattemptedLocalSubmission(input: { submissionId: string; reason?: string; requestKind: "initial" | "rebroadcast" }): Promise<void> { await runTransaction(handle, ["p2pkh_local_transactions", "p2pkh_local_input_claims", "p2pkh_local_outpoints"], "readwrite", async (tx) => { if (input.requestKind !== "initial") return; const local = tx.objectStore("p2pkh_local_transactions"); const row = await getById<P2pkhLocalTransaction>(local, input.submissionId); if (!row || row.attempts.length > 0 || (row.state !== "prepared" && row.state !== "submitting")) return; const outputs = tx.objectStore("p2pkh_local_outpoints"); const existingOutpoints = await all<P2pkhLocalOutpoint>(outputs); const parentKeys = new Set(row.inputOutpointKeys); for (const parent of existingOutpoints) { if (parent.submissionId === row.id || !parentKeys.has(`${parent.txid}:${parent.vout}`) || parent.state !== "claimed") continue; parent.state = "available"; parent.updatedAt = new Date().toISOString(); await request(outputs.put(parent)); } await request(local.delete(input.submissionId)); const claims = tx.objectStore("p2pkh_local_input_claims"); for (const claim of await all<P2pkhLocalInputClaim>(claims)) if (claim.submissionId === input.submissionId) await request(claims.delete(claim.id)); for (const output of existingOutpoints) if (output.submissionId === input.submissionId) await request(outputs.delete(output.id)); void input.reason; }); },
+
+    // Compatibility surface: protocol/token consumers read confirmed output projections.
+    listUtxos: () => runTransaction(handle, "p2pkh_owned_outpoints", "readonly", async (tx) => (await allByKey<P2pkhOwnedOutpointProjection>(tx.objectStore("p2pkh_owned_outpoints").index("chainState"), "available")).map((r) => ({ id: r.id, resourceId: r.resourceId, publicKeyHex: r.publicKeyHex, network: r.network, address: r.address, txid: r.txid, vout: r.vout, value: r.value, height: r.createdBlockHeight ?? 0, script: r.scriptHex, status: "confirmed", isSpentInMempoolTx: false, syncedAt: r.updatedAt } satisfies P2pkhUtxo))),
+    listUtxosByResource: (id: string) => runTransaction(handle, "p2pkh_owned_outpoints", "readonly", async (tx) => (await allByKey<P2pkhOwnedOutpointProjection>(tx.objectStore("p2pkh_owned_outpoints").index("resourceChainState"), [id, "available"])).map((r) => ({ id: r.id, resourceId: r.resourceId, publicKeyHex: r.publicKeyHex, network: r.network, address: r.address, txid: r.txid, vout: r.vout, value: r.value, height: r.createdBlockHeight ?? 0, script: r.scriptHex, status: "confirmed", isSpentInMempoolTx: false, syncedAt: r.updatedAt } satisfies P2pkhUtxo))),
+    listLocalInputClaims: (limit?: number) => runTransaction(handle, "p2pkh_local_input_claims", "readonly", (tx) => { const size = boundedLimit(limit); return size ? pageByCursor<P2pkhLocalInputClaim>(tx.objectStore("p2pkh_local_input_claims"), null, "prev", size) : all<P2pkhLocalInputClaim>(tx.objectStore("p2pkh_local_input_claims")); }),
+    listLocalInputClaimsByResource: (id: string, limit?: number) => runTransaction(handle, "p2pkh_local_input_claims", "readonly", (tx) => { const size = boundedLimit(limit); return size ? pageByCursor<P2pkhLocalInputClaim>(tx.objectStore("p2pkh_local_input_claims").index("resourceId"), id, "prev", size) : allByKey<P2pkhLocalInputClaim>(tx.objectStore("p2pkh_local_input_claims").index("resourceId"), id); }),
+    putProtocolSubmission: (row: P2pkhProtocolSubmission) => runTransaction(handle, "p2pkh_protocol_submissions", "readwrite", async (tx) => { await request(tx.objectStore("p2pkh_protocol_submissions").put(row)); }),
+    getProtocolSubmission: (id: string) => runTransaction(handle, "p2pkh_protocol_submissions", "readonly", (tx) => getById<P2pkhProtocolSubmission>(tx.objectStore("p2pkh_protocol_submissions"), id)),
+    listProtocolSubmissions: () => runTransaction(handle, "p2pkh_protocol_submissions", "readonly", (tx) => all<P2pkhProtocolSubmission>(tx.objectStore("p2pkh_protocol_submissions"))),
+    listProtocolSubmissionsByResource: (id: string) => runTransaction(handle, "p2pkh_protocol_submissions", "readonly", (tx) => allByKey<P2pkhProtocolSubmission>(tx.objectStore("p2pkh_protocol_submissions").index("resourceId"), id)),
+    listMigrationAudits: () => runTransaction(handle, "p2pkh_migration_audits", "readonly", (tx) => all<P2pkhMigrationAudit>(tx.objectStore("p2pkh_migration_audits"))),
+    removeProtocolSubmission: (id: string) => runTransaction(handle, "p2pkh_protocol_submissions", "readwrite", async (tx) => { await request(tx.objectStore("p2pkh_protocol_submissions").delete(id)); }),
+    async tryClaimInputs(input: { submissionId: string; resourceId: string; publicKeyHex: string; network: BsvNetwork; inputs: P2pkhInputOutpoint[]; expectedCanonicalTxid?: string; observation?: "unconfirmed" | "confirmed" }): Promise<{ claimIds: string[] }> { const ids: string[] = []; await runTransaction(handle, "p2pkh_local_input_claims", "readwrite", async (tx) => { const store = tx.objectStore("p2pkh_local_input_claims"); for (const value of input.inputs) { const id = claimId(input.resourceId, value.txid, value.vout); const existing = await getById<P2pkhLocalInputClaim>(store, id); if (existing && existing.submissionId !== input.submissionId && !["released", "confirmed"].includes(existing.state)) throw new Error(`P2PKH input already claimed: ${value.txid}:${value.vout}`); await request(store.put({ id, submissionId: input.submissionId, resourceId: input.resourceId, publicKeyHex: input.publicKeyHex, network: input.network, txid: value.txid, vout: value.vout, canonicalTxid: input.expectedCanonicalTxid, observation: input.observation, state: "active", createdAt: existing?.createdAt ?? new Date().toISOString(), updatedAt: new Date().toISOString(), outpointKey: `${value.txid}:${value.vout}` })); ids.push(id); } }); return { claimIds: ids }; },
+    releaseLocalInputClaims: (ids: string[]) => runTransaction(handle, "p2pkh_local_input_claims", "readwrite", async (tx) => { const store = tx.objectStore("p2pkh_local_input_claims"); for (const id of ids) { const row = await getById<P2pkhLocalInputClaim>(store, id); if (row) { row.state = "released"; row.updatedAt = new Date().toISOString(); await request(store.put(row)); } } }),
+
+    // Compatibility writes are projected into the owned-outpoint store;
+    // they never recreate the removed provider cache store.
+    clearUtxosForResource: async (id: string) => runTransaction(handle, "p2pkh_owned_outpoints", "readwrite", async (tx) => { const store = tx.objectStore("p2pkh_owned_outpoints"); const rows = [...await allByKey<P2pkhOwnedOutpointProjection>(store.index("resourceChainState"), [id, "available"]), ...await allByKey<P2pkhOwnedOutpointProjection>(store.index("resourceChainState"), [id, "spent"])]; for (const row of rows) await request(store.delete(row.id)); }),
+    clearAll: async () => { const names = [...handle.getDb().objectStoreNames].filter((name) => name.startsWith(STORE_PREFIX)); await runTransaction(handle, names, "readwrite", async (tx) => { for (const name of names) await request(tx.objectStore(name).clear()); }); }
   };
 }
 
 export type P2pkhDbHandle = ReturnType<typeof createP2pkhDb>;
-
-export function resourceIdFor(network: BsvNetwork): string {
-  return makeResourceId(network);
-}
-
-/** 工具：本地输入占用 id。 */
-export function localInputClaimIdFor(resourceId: string, txid: string, vout: number): string {
-  return newLocalInputClaimId(resourceId, txid, vout);
-}
+export function resourceIdFor(network: BsvNetwork): string { return makeResourceId(network); }
+export function localInputClaimIdFor(resourceId: string, txid: string, vout: number): string { return claimId(resourceId, txid, vout); }
