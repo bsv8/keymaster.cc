@@ -851,7 +851,10 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     return enqueue({
       priority: priorityOf(opts.priority ?? "background"), signal: opts.signal, label: WOC_MSG.TX_RAW,
       fn: async (signal) => {
-        const raw = await fetchJson<unknown>(network, `/tx/hash/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs);
+        // WOC's raw transaction endpoint is /tx/<txid>/hex.  The older
+        // /tx/hash/<txid>/hex route now returns 404 even though the regular
+        // transaction endpoint and address history still work.
+        const raw = await fetchJson<unknown>(network, `/tx/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs);
         if (typeof raw === "string") return raw;
         if (!raw || typeof raw !== "object") throw new Error("WOC raw transaction response is invalid");
         const candidate = raw as Record<string, unknown>;

@@ -1,6 +1,6 @@
 {
   "name": "@keymaster/plugin-p2pkh",
-  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts" },
+  "exports": { ".": "./src/index.ts", "./coordinator": "./src/coordinator.ts", "./styles.css": "./src/styles.css" },
   "private": true,
   "version": "0.1.0",
   "type": "module",

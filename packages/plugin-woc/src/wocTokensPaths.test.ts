@@ -44,6 +44,18 @@ afterEach(() => {
 });
 
 describe("BSV-21 / STAS / 1Sat WOC 路径映射", () => {
+  it("getRawTransaction 使用当前 WOC raw transaction 路径", async () => {
+    installFetchMock((url) => {
+      fetchLog.push(url);
+      return new Response(JSON.stringify({ hex: "00" }), { status: 200 });
+    });
+    const bus = createMessageBus();
+    const svc = createWocService({ messageBus: bus });
+    await expect(svc.getRawTransaction!(MAIN, "ab".repeat(32))).resolves.toBe("00");
+    expect(fetchLog[0]).toMatch(/\/v1\/bsv\/main\/tx\/(?:ab){32}\/hex$/);
+    svc.dispose();
+  });
+
   it("BSV-21 listAddressTokens → /token/bsv21/<address>/balance", async () => {
     installFetchMock((url) => {
       fetchLog.push(url);
