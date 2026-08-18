@@ -12,6 +12,8 @@ import type { BusinessDomain, BusinessFeature, FeatureHomeProjection } from "./b
 
 export interface RouteRegistry {
   register(route: AppRoute): void;
+  /** 注销已注册路由。路由不存在时抛错。 */
+  unregister(id: string): void;
   list(): AppRoute[];
   byPath(path: string): AppRoute | undefined;
   byId(id: string): AppRoute | undefined;

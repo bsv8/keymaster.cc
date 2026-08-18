@@ -112,7 +112,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
         display: `${balance.total} ${def.unit}`
       },
       status: mapStatus(deps.service.syncStatus()),
-      detailRoute: { id: "p2pkh.overview", path: `/p2pkh?assetId=${encodeURIComponent(assetId)}` },
+      detailRoute: { id: def.network === "main" ? "p2pkh.mainnet" : "p2pkh.testnet", path: `/p2pkh/${def.network === "main" ? "mainnet" : "testnet"}?assetId=${encodeURIComponent(assetId)}` },
       tags: def.tags
     };
   }

@@ -181,6 +181,181 @@
   font-size: 11px;
 }
 
+.p2pkh-wallet__pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.p2pkh-wallet__pagination span {
+  min-width: 72px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.p2pkh-tx-detail {
+  width: min(100%, 1180px);
+}
+
+.p2pkh-tx-detail__summary,
+.p2pkh-tx-detail__card,
+.p2pkh-tx-detail__local {
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.p2pkh-tx-detail__summary {
+  margin-bottom: 16px;
+  padding: 18px 20px;
+}
+
+.p2pkh-tx-detail__summary dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px 28px;
+  margin: 0;
+}
+
+.p2pkh-tx-detail__summary dt {
+  margin-bottom: 5px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.p2pkh-tx-detail__summary dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.p2pkh-tx-detail__summary code {
+  font-size: 11px;
+}
+
+.p2pkh-tx-detail__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.p2pkh-tx-detail__card {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.p2pkh-tx-detail__card header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.p2pkh-tx-detail__card h2,
+.p2pkh-tx-detail__local h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.p2pkh-tx-detail__card header > span {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: right;
+}
+
+.p2pkh-tx-detail__card header strong {
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+}
+
+.p2pkh-tx-detail__card ul,
+.p2pkh-tx-detail__local ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.p2pkh-tx-detail__card li {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.p2pkh-tx-detail__card li:last-child {
+  border-bottom: 0;
+}
+
+.p2pkh-tx-detail__row-index {
+  color: var(--primary);
+}
+
+.p2pkh-tx-detail__card li > code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.p2pkh-tx-detail__card li > strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.p2pkh-tx-detail__card .p2pkh-tx-detail__script {
+  grid-column: 2 / -1;
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.p2pkh-tx-detail__owned {
+  color: var(--success, #008a39);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.p2pkh-tx-detail__muted {
+  margin: 0;
+  padding: 0 18px 14px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.p2pkh-tx-detail__local {
+  margin-top: 16px;
+  padding: 16px 18px;
+}
+
+.p2pkh-tx-detail__local p {
+  margin: 10px 0 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.p2pkh-tx-detail__local li {
+  margin-top: 5px;
+  font-size: 12px;
+}
+
 .p2pkh-settings {
   max-width: 760px;
 }
@@ -298,11 +473,21 @@
   .p2pkh-settings__provider-network p {
     grid-column: auto;
   }
+
+  .p2pkh-tx-detail__summary dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .p2pkh-tx-detail__columns {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 560px) {
   .p2pkh-wallet__balances article,
   .p2pkh-wallet__sync,
+  .p2pkh-tx-detail__summary,
+  .p2pkh-tx-detail__local,
   .p2pkh-settings__fee-rates,
   .p2pkh-settings__providers,
   .p2pkh-transfer-widget__step-card {
@@ -319,6 +504,20 @@
   }
 
   .p2pkh-overview__balance { font-size: 12px; }
+
+  .p2pkh-tx-detail__summary dl {
+    grid-template-columns: 1fr;
+  }
+
+  .p2pkh-tx-detail__card header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .p2pkh-tx-detail__card header > span {
+    text-align: left;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
