@@ -90,7 +90,10 @@ describe("KeymasterSessionCoordinatorClient", () => {
     try {
       const client = createCoordinatorClient();
       await client.connect();
-      expect(Constructor).toHaveBeenCalledWith(expect.any(URL), { type: "module" });
+      expect(Constructor).toHaveBeenCalledWith(expect.any(URL), {
+        name: "keymaster-coordinator-dev-20260818-woc-raw-text",
+        type: "module"
+      });
     }
     finally { globalThis.SharedWorker = original; }
   });

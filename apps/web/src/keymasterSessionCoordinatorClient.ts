@@ -147,10 +147,22 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
           { name: this.workerName, type: "module" }
         );
       } else {
-        this.worker = new SharedWorker(
-          new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
-          { type: "module" }
-        );
+        // SharedWorker 的身份由最终 URL 决定。开发服务器下源码 URL 不会像
+        // 生产构建一样自动带 content hash，页面刷新可能继续连接仍驻留内存
+        // 的旧 worker。开发环境用带 revision 的名称切换实例；生产环境的
+        // unnamed worker 仍由最终构建的 hashed URL 做版本隔离。
+        const isDevelopment = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
+        if (isDevelopment) {
+          this.worker = new SharedWorker(
+            new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
+            { name: "keymaster-coordinator-dev-20260818-woc-raw-text", type: "module" }
+          );
+        } else {
+          this.worker = new SharedWorker(
+            new URL("./keymasterSessionCoordinator.worker.ts", import.meta.url),
+            { type: "module" }
+          );
+        }
       }
       this.worker.onerror = (event) => {
         const details: string[] = [];

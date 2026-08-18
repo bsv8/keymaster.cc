@@ -446,7 +446,12 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       if (!res.ok) {
         throw new Error(`WOC ${res.status} ${res.statusText}`);
       }
-      return (await res.json()) as T;
+      try {
+        return (await res.json()) as T;
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new Error(`WOC returned invalid JSON for ${path}: ${detail}`, { cause: error });
+      }
     } finally {
       clearTimeout(timer);
       signal.removeEventListener("abort", onAbort);
@@ -853,9 +858,18 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       fn: async (signal) => {
         // WOC's raw transaction endpoint is /tx/<txid>/hex.  The older
         // /tx/hash/<txid>/hex route now returns 404 even though the regular
-        // transaction endpoint and address history still work.
-        const raw = await fetchJson<unknown>(network, `/tx/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs);
-        if (typeof raw === "string") return raw;
+        // transaction endpoint and address history still work.  The live
+        // endpoint can return bare text such as `010000...` rather than a
+        // JSON string.  Reading it with Response.json() makes the browser
+        // parse the leading `01` as an invalid JSON number and fail at
+        // position 1, so read text first while retaining compatibility with
+        // the JSON object/string shapes used by older proxies.
+        const body = (await fetchText(network, `/tx/${encodeURIComponent(normalized)}/hex`, { method: "GET" }, signal, opts.timeoutMs)).trim();
+        let raw: unknown = body;
+        if (body.startsWith("{") || body.startsWith("[") || body.startsWith('"')) {
+          raw = JSON.parse(body) as unknown;
+        }
+        if (typeof raw === "string" && raw.length > 0) return raw;
         if (!raw || typeof raw !== "object") throw new Error("WOC raw transaction response is invalid");
         const candidate = raw as Record<string, unknown>;
         for (const key of ["hex", "tx_hex", "rawtx", "rawTxHex", "transaction"] as const) {
