@@ -2,7 +2,7 @@
 // P2PKH 业务包（硬切换后）：
 //   - 注入 woc.service / background.registry / background.service。
 //   - 注册 P2PKH AssetProvider、TransferProvider（Offer/Widget）。
-//   - 注册页面：总览、历史、UTXO、设置。
+//   - 注册页面：链上交易、本地交易、设置。
 //   - 不再自己创建 interval；不再自己向 Topbar 写组件。
 //   - 监听 vault 事件自动同步。
 //
@@ -29,7 +29,6 @@ import type {
   P2pkhProviderRegistrySnapshot
   , SessionCoordinatorClient
 } from "@keymaster/contracts";
-import { router } from "@keymaster/runtime";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
@@ -48,9 +47,9 @@ import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
 import { createP2pkhDb, openP2pkhDb } from "./p2pkhDb.js";
 import { P2pkhSettingsPage } from "./pages/P2pkhSettingsPage.js";
-import { P2pkhLegacyTransactionsRoute, P2pkhLegacyCoinsRoute } from "./pages/P2pkhLegacyRouteRedirect.js";
-import { P2pkhMainnetPage, P2pkhTestnetPage } from "./pages/P2pkhNetworkRoutes.js";
+import { registerP2pkhNavigation } from "./pages/P2pkhNavigation.js";
 import { P2pkhTransactionDetailRoute } from "./pages/P2pkhTransactionDetailPage.js";
+import { transactionSourceListPath } from "./pages/p2pkhTransactionView.js";
 
 export { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 
@@ -61,21 +60,17 @@ export const p2pkhResources: I18nPluginResources = {
     en: {
       "p2pkh.provider.name": "P2PKH",
       "p2pkh.provider.description": "BSV P2PKH transfers: bsv / bsvtest networks (testnet is gated by the includeTestnet setting).",
-      "p2pkh.route.overview": "P2PKH overview",
-      "p2pkh.route.mainnet": "P2PKH mainnet",
-      "p2pkh.route.testnet": "P2PKH testnet",
+      "p2pkh.route.transactions": "P2PKH on-chain transactions",
+      "p2pkh.route.localTransactions": "P2PKH local transactions",
       "p2pkh.route.transaction": "P2PKH transaction",
-      "p2pkh.route.history": "P2PKH history",
-      "p2pkh.route.utxos": "P2PKH UTXOs",
       "p2pkh.route.settings": "P2PKH settings",
-      "p2pkh.menu.overview": "P2PKH",
-      "p2pkh.menu.history": "P2PKH history",
-      "p2pkh.menu.utxos": "P2PKH UTXOs",
+      "p2pkh.menu.transactions": "On-chain transactions",
+      "p2pkh.menu.localTransactions": "Local transactions",
       "p2pkh.crumb.settings": "Settings",
       "p2pkh.crumb.wallet": "Wallets",
       "p2pkh.crumb.p2pkh": "P2PKH",
-      "p2pkh.crumb.history": "History",
-      "p2pkh.crumb.utxos": "UTXOs",
+      "p2pkh.crumb.transactions": "On-chain transactions",
+      "p2pkh.crumb.localTransactions": "Local transactions",
       "p2pkh.crumb.transaction": "Transaction",
       "p2pkh.settings.label": "P2PKH",
       "p2pkh.settings.description": "P2PKH product settings (includeTestnet, etc.). WOC settings are on the WOC page.",
@@ -150,14 +145,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.asset.bsvMain": "BSV / main",
       "p2pkh.asset.bsvTest": "BSV / test",
       "p2pkh.asset.all": "All",
-      "p2pkh.overview.titleWithAsset": "P2PKH / {{label}}",
-      "p2pkh.overview.descWithAsset": "BSV {{network}} ({{assetId}}) resources.",
-      "p2pkh.overview.descDefault": "BSV P2PKH resources overview.",
       "p2pkh.balance.line": "Balance: {{total}}",
-      "p2pkh.history.title": "P2PKH history",
-      "p2pkh.history.desc": "On-chain history aggregated by address. syncedAt is the time the entry was last observed locally, not the on-chain time.",
-      "p2pkh.utxos.title": "P2PKH UTXOs",
-      "p2pkh.utxos.desc": "Confirmed coin projection plus local input claims. Active claims are excluded from allocation.",
       "p2pkh.settings.title": "P2PKH settings",
       "p2pkh.settings.desc": "P2PKH product settings and confirmed/broadcast provider selection.",
       "p2pkh.settings.providers": "Confirmed sync and broadcast providers",
@@ -171,13 +159,12 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.settings.provider.retry": "Provider settings changed; reload and try again.",
       "p2pkh.settings.providerConfigHint": "Provider endpoint and rate-limit settings are managed in each provider's own settings page.",
       "p2pkh.settings.providersLoading": "Loading providers…",
-      "p2pkh.wallet.title": "BSV Wallet",
-      "p2pkh.wallet.description": "Confirmed transaction facts, local overlay state, and spendable coins.",
       "p2pkh.wallet.settings": "Provider settings",
-      "p2pkh.wallet.tab.transactions": "Transactions",
-      "p2pkh.wallet.tab.coins": "Coins",
       "p2pkh.wallet.loadFailed": "Wallet data unavailable",
-      "p2pkh.wallet.tabs": "P2PKH wallet tabs",
+      "p2pkh.wallet.transactions.title": "On-chain transactions",
+      "p2pkh.wallet.transactions.description": "Confirmed transaction facts and local transaction state.",
+      "p2pkh.wallet.localTransactions.title": "Local transactions",
+      "p2pkh.wallet.localTransactions.description": "Local transaction outputs and synchronization state.",
       "p2pkh.wallet.balances": "BSV balances",
       "p2pkh.wallet.syncStatus": "Confirmed synchronization status",
       "p2pkh.wallet.providers": "main — Confirmed: {{mainSync}} / Broadcast: {{mainBroadcast}} · test — Confirmed: {{testSync}} / Broadcast: {{testBroadcast}}",
@@ -327,8 +314,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.description.bsvtest": "Final signed BSV testnet transfer preview. Broadcast uses the exact rawTxHex shown here.",
       "p2pkh.col.protected": "Protected",
       "p2pkh.col.protected.empty": "Not protected",
-      "p2pkh.utxos.summary.claimed": "Claimed",
-      "p2pkh.utxos.summary.protected": "Protected",
       "p2pkh.transfer.result.broadcastPending": "Broadcast pending",
       "p2pkh.transfer.result.confirmed": "Confirmed",
       "p2pkh.transfer.result.dropped": "Dropped",
@@ -337,21 +322,17 @@ export const p2pkhResources: I18nPluginResources = {
     "zh-CN": {
       "p2pkh.provider.name": "P2PKH",
       "p2pkh.provider.description": "BSV P2PKH 转移：bsv / bsvtest 两个网络（testnet 受 includeTestnet 设置控制）。",
-      "p2pkh.route.overview": "P2PKH 总览",
-      "p2pkh.route.mainnet": "P2PKH 主网",
-      "p2pkh.route.testnet": "P2PKH 测试网",
+      "p2pkh.route.transactions": "P2PKH 链上交易",
+      "p2pkh.route.localTransactions": "P2PKH 本地交易",
       "p2pkh.route.transaction": "P2PKH 交易",
-      "p2pkh.route.history": "P2PKH 历史",
-      "p2pkh.route.utxos": "P2PKH UTXO",
       "p2pkh.route.settings": "P2PKH 设置",
-      "p2pkh.menu.overview": "P2PKH",
-      "p2pkh.menu.history": "P2PKH 历史",
-      "p2pkh.menu.utxos": "P2PKH UTXO",
+      "p2pkh.menu.transactions": "链上交易",
+      "p2pkh.menu.localTransactions": "本地交易",
       "p2pkh.crumb.settings": "设置",
       "p2pkh.crumb.wallet": "钱包",
       "p2pkh.crumb.p2pkh": "P2PKH",
-      "p2pkh.crumb.history": "历史",
-      "p2pkh.crumb.utxos": "UTXO",
+      "p2pkh.crumb.transactions": "链上交易",
+      "p2pkh.crumb.localTransactions": "本地交易",
       "p2pkh.crumb.transaction": "交易",
       "p2pkh.settings.label": "P2PKH",
       "p2pkh.settings.description": "P2PKH 产品设置（includeTestnet 等）。WOC 设置请到独立 WOC 设置页。",
@@ -426,14 +407,7 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.asset.bsvMain": "BSV / main",
       "p2pkh.asset.bsvTest": "BSV / test",
       "p2pkh.asset.all": "全部",
-      "p2pkh.overview.titleWithAsset": "P2PKH / {{label}}",
-      "p2pkh.overview.descWithAsset": "BSV {{network}} ({{assetId}}) 资源。",
-      "p2pkh.overview.descDefault": "BSV P2PKH 资源总览。",
       "p2pkh.balance.line": "余额：{{total}}",
-      "p2pkh.history.title": "P2PKH 历史",
-      "p2pkh.history.desc": "按地址汇总的链上交易记录。syncedAt 表示最近一次观察到该记录的时间，不是交易发生时间。",
-      "p2pkh.utxos.title": "P2PKH UTXO",
-      "p2pkh.utxos.desc": "确认 coin 投影与本地输入占用。active claim 不会参与选币。",
       "p2pkh.settings.title": "P2PKH 设置",
       "p2pkh.settings.desc": "P2PKH 产品设置与确认/广播供应商选择。",
       "p2pkh.settings.providers": "确认同步与广播供应商",
@@ -447,13 +421,12 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.settings.provider.retry": "供应商设置已变化，请刷新后重试。",
       "p2pkh.settings.providerConfigHint": "供应商 endpoint 与限流设置由各供应商自己的设置页管理。",
       "p2pkh.settings.providersLoading": "正在加载供应商…",
-      "p2pkh.wallet.title": "BSV 钱包",
-      "p2pkh.wallet.description": "确认交易事实、本地覆盖状态与可花费币。",
       "p2pkh.wallet.settings": "供应商设置",
-      "p2pkh.wallet.tab.transactions": "交易",
-      "p2pkh.wallet.tab.coins": "币",
       "p2pkh.wallet.loadFailed": "钱包数据不可用",
-      "p2pkh.wallet.tabs": "P2PKH 钱包标签页",
+      "p2pkh.wallet.transactions.title": "链上交易",
+      "p2pkh.wallet.transactions.description": "已确认的交易事实与本地交易状态。",
+      "p2pkh.wallet.localTransactions.title": "本地交易",
+      "p2pkh.wallet.localTransactions.description": "本地交易输出与同步状态。",
       "p2pkh.wallet.syncStatus": "确认交易同步状态",
       "p2pkh.wallet.balances": "BSV 余额",
       "p2pkh.wallet.providers": "main — 确认：{{mainSync}} / 广播：{{mainBroadcast}} · test — 确认：{{testSync}} / 广播：{{testBroadcast}}",
@@ -603,8 +576,6 @@ export const p2pkhResources: I18nPluginResources = {
       "p2pkh.transfer.description.bsvtest": "最终已签名的 BSV Testnet 转账预览。广播时直接使用这里展示的 rawTxHex。",
       "p2pkh.col.protected": "已保护",
       "p2pkh.col.protected.empty": "未保护",
-      "p2pkh.utxos.summary.claimed": "已占用",
-      "p2pkh.utxos.summary.protected": "已保护",
       "p2pkh.transfer.result.broadcastPending": "等待广播",
       "p2pkh.transfer.result.confirmed": "已确认",
       "p2pkh.transfer.result.dropped": "已丢弃",
@@ -927,61 +898,11 @@ export const p2pkhPlugin: PluginManifest = {
     assets.register(assetProvider);
 
     const routes = ctx.get<RouteRegistry>("route.registry");
-    const testnetRoute = {
-      id: "p2pkh.testnet",
-      path: "/p2pkh/testnet",
-      label: { key: "p2pkh.route.testnet", fallback: "P2PKH testnet" },
-      component: P2pkhTestnetPage
-    } as const;
-    const testnetRouteOwnedBySetup = service.getGlobalSettings().includeTestnet;
-    const syncTestnetRoute = (includeTestnet: boolean) => {
-      const registered = routes.byId(testnetRoute.id);
-      if (includeTestnet) {
-        if (!registered) routes.register(testnetRoute);
-        return;
-      }
-      if (registered) routes.unregister(testnetRoute.id);
-      if (router.currentPath() === testnetRoute.path) router.push("/p2pkh/mainnet");
-    };
-    routes.register({
-      id: "p2pkh.overview",
-      path: "/p2pkh",
-      label: { key: "p2pkh.route.overview", fallback: "P2PKH wallet" },
-      component: P2pkhMainnetPage
-    });
-    routes.register({
-      id: "p2pkh.mainnet",
-      path: "/p2pkh/mainnet",
-      label: { key: "p2pkh.route.mainnet", fallback: "P2PKH mainnet" },
-      component: P2pkhMainnetPage
-    });
-    syncTestnetRoute(testnetRouteOwnedBySetup);
-    const offTestnetRouteSettings = service.onGlobalSettingsChange((settings) => syncTestnetRoute(settings.includeTestnet));
-    ctx.onDispose(() => {
-      offTestnetRouteSettings();
-      // A route registered during setup is tracked by PluginHost ownership.
-      // If settings removed it before plugin teardown, restore that tracked
-      // entry so the normal ownership purge can reclaim it without noise.
-      if (testnetRouteOwnedBySetup && !routes.byId(testnetRoute.id)) routes.register(testnetRoute);
-      if (!testnetRouteOwnedBySetup && routes.byId(testnetRoute.id)) routes.unregister(testnetRoute.id);
-    });
     routes.register({
       id: "p2pkh.transaction",
       path: "/p2pkh/tx/:txid",
       label: { key: "p2pkh.route.transaction", fallback: "P2PKH transaction" },
       component: P2pkhTransactionDetailRoute
-    });
-    routes.register({
-      id: "p2pkh.history",
-      path: "/p2pkh/history",
-      label: { key: "p2pkh.route.history", fallback: "P2PKH history" },
-      component: P2pkhLegacyTransactionsRoute
-    });
-    routes.register({
-      id: "p2pkh.utxos",
-      path: "/p2pkh/utxos",
-      label: { key: "p2pkh.route.utxos", fallback: "P2PKH UTXOs" },
-      component: P2pkhLegacyCoinsRoute
     });
     routes.register({
       id: "p2pkh.settings",
@@ -991,18 +912,13 @@ export const p2pkhPlugin: PluginManifest = {
     });
 
     const business = ctx.get<BusinessFeatureRegistry>("business.registry");
-    business.registerFeature("p2pkh", "assets", {
-      id: "assets.p2pkh",
-      label: { key: "p2pkh.menu.overview", fallback: "P2PKH" },
-      order: 15,
-      icon: "Wallet",
-      entry: {
-        path: "/p2pkh/mainnet",
-        routeId: "p2pkh.overview",
-        visibleWhen: ({ unlocked }) => unlocked,
-        activeWhen: (path) => path === "/p2pkh" || path.startsWith("/p2pkh/")
-      }
+    const disposeNavigation = registerP2pkhNavigation({
+      routes,
+      business,
+      includeTestnet: service.getGlobalSettings().includeTestnet,
+      onIncludeTestnetChange: (handler) => service.onGlobalSettingsChange((settings) => handler(settings.includeTestnet))
     });
+    ctx.onDispose(disposeNavigation);
 
     const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
     systemSettings.register({
@@ -1036,30 +952,25 @@ export const p2pkhPlugin: PluginManifest = {
             { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" } }
           ];
         }
-        if (path === "/p2pkh/history") {
+        if (path === "/p2pkh/mainnet/transactions" || path === "/p2pkh/testnet/transactions") {
           return [
             { label: { key: "p2pkh.crumb.wallet", fallback: "Wallets" }, path: "/" },
-            { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" }, path: "/p2pkh/mainnet" },
-            { label: { key: "p2pkh.crumb.history", fallback: "History" } }
+            { label: { key: "p2pkh.crumb.transactions", fallback: "On-chain transactions" }, path }
           ];
         }
-        if (path === "/p2pkh/utxos") {
+        if (path === "/p2pkh/mainnet/local-transactions" || path === "/p2pkh/testnet/local-transactions") {
           return [
             { label: { key: "p2pkh.crumb.wallet", fallback: "Wallets" }, path: "/" },
-            { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" }, path: "/p2pkh/mainnet" },
-            { label: { key: "p2pkh.crumb.utxos", fallback: "UTXOs" } }
-          ];
-        }
-        if (path === "/p2pkh/mainnet" || path === "/p2pkh/testnet") {
-          return [
-            { label: { key: "p2pkh.crumb.wallet", fallback: "Wallets" }, path: "/" },
-            { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" }, path: path }
+            { label: { key: "p2pkh.crumb.localTransactions", fallback: "Local transactions" }, path }
           ];
         }
         if (path.startsWith("/p2pkh/tx/")) {
+          const search = typeof window !== "undefined" ? window.location.search : "";
+          const sourcePath = transactionSourceListPath(search);
+          const source = sourcePath.endsWith("/local-transactions") ? "local-transactions" : "transactions";
           return [
             { label: { key: "p2pkh.crumb.wallet", fallback: "Wallets" }, path: "/" },
-            { label: { key: "p2pkh.crumb.p2pkh", fallback: "P2PKH" }, path: "/p2pkh/mainnet" },
+            { label: { key: source === "local-transactions" ? "p2pkh.crumb.localTransactions" : "p2pkh.crumb.transactions", fallback: source === "local-transactions" ? "Local transactions" : "On-chain transactions" }, path: sourcePath },
             { label: { key: "p2pkh.crumb.transaction", fallback: "Transaction" } }
           ];
         }

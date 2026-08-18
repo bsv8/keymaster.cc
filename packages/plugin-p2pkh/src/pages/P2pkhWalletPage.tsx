@@ -3,9 +3,8 @@ import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableCo
 import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type P2pkhProviderRegistrySnapshot, type SessionCoordinatorClient } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhMigrationAudit, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhSyncStatus, P2pkhTransactionFact, P2pkhTransactionSyncState } from "../p2pkhContracts.js";
-import { balanceAtBlock, detailPath, inputAmount, listPath, parseStoredTransaction, readPage, type P2pkhNetwork } from "./p2pkhTransactionView.js";
+import { balanceAtBlock, detailPath, inputAmount, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
 
-export type WalletTab = "transactions" | "coins";
 export const TRANSACTION_PAGE_SIZE = 20;
 
 export type WalletSnapshot = {
@@ -47,20 +46,15 @@ export interface P2pkhTransactionListRow {
   local?: P2pkhLocalTransaction;
 }
 
-function readTab(): WalletTab {
-  return new URLSearchParams(window.location.search).get("tab") === "coins" ? "coins" : "transactions";
-}
-
 function amountLabel(value: number | undefined): string {
   return value === undefined ? "—" : formatSats(value);
 }
 
-export function P2pkhWalletPage({ initialTab, network = "main" }: { initialTab?: WalletTab; network?: P2pkhNetwork } = {}) {
+export function P2pkhWalletPage({ view = "transactions", network = "main" }: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
   const host = usePluginHost();
   const { t } = useI18n();
   const coordinator = useCapability<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
   const service = useCapability<P2pkhService>("p2pkh.service");
-  const [tab, setTab] = useState<WalletTab>(() => initialTab ?? readTab());
   const [page, setPage] = useState(() => readPage());
   const [rebroadcasting, setRebroadcasting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -104,14 +98,10 @@ export function P2pkhWalletPage({ initialTab, network = "main" }: { initialTab?:
     setOwnedLoadFailed(false);
   }, [wallet.facts, wallet.owned, wallet.locals, wallet.localOutpoints, wallet.claims, wallet.inputValuesByResource, wallet.factCursors, wallet.ownedCursors, wallet.localCursors, wallet.localOutpointCursors, wallet.claimCursors]);
 
-  const setCurrentTab = (next: WalletTab) => {
-    setTab(next);
-    router.push(listPath(network, page, next));
-  };
   const setCurrentPage = (next: number) => {
     if (next < 1) return;
     setPage(next);
-    router.push(listPath(network, next, tab));
+    router.push(listPath(network, next, view));
   };
   const networkEnabled = network === "main" || settings.includeTestnet;
   const networkBalance = networkEnabled ? wallet.balances[network]?.total : undefined;
@@ -327,13 +317,13 @@ export function P2pkhWalletPage({ initialTab, network = "main" }: { initialTab?:
     // Transaction balances depend on the complete local owned projection. Load
     // its remaining pages automatically so visiting Coins is not a prerequisite
     // for a truthful transaction-list balance.
-    if (tab !== "transactions" || loadingMore !== null) return;
+    if (view !== "transactions" || loadingMore !== null) return;
     if (hasMoreOwned && !ownedLoadFailed) {
       void loadMoreOwned();
       return;
     }
     if (visibleTxRows.length === 0 && hasMoreFacts && !factsLoadFailed) void loadMoreFacts();
-  }, [tab, visibleTxRows.length, hasMoreFacts, factsLoadFailed, hasMoreOwned, ownedLoadFailed, loadingMore]);
+  }, [view, visibleTxRows.length, hasMoreFacts, factsLoadFailed, hasMoreOwned, ownedLoadFailed, loadingMore]);
   const hasNextPage = txRows.length > page * TRANSACTION_PAGE_SIZE || hasMoreFacts;
   const txColumns: DataTableColumn<P2pkhTransactionListRow>[] = [
     { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (row) => <code>{row.txid}</code> },
@@ -343,19 +333,22 @@ export function P2pkhWalletPage({ initialTab, network = "main" }: { initialTab?:
     { key: "balanceAtBlock", header: t("p2pkh.col.balanceAtBlock", { defaultValue: "Balance at block" }), render: (row) => amountLabel(row.balanceAtBlock) },
     { key: "state", header: t("p2pkh.col.status", { defaultValue: "状态" }), render: (row) => t(`p2pkh.state.${row.state}`, { defaultValue: row.state }) },
     { key: "time", header: t("p2pkh.col.syncedAt", { defaultValue: "最近观察" }), render: (row) => row.time },
-    { key: "action", header: "", render: (row) => <span><Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button>{row.local && (row.local.state === "submitting" || row.local.state === "isolated" || row.local.state === "conflicted") ? <Button variant="ghost" disabled={rebroadcasting === row.local.id} onClick={() => void rebroadcast(row.local!)}>{rebroadcasting === row.local.id ? t("p2pkh.action.inProgress", { defaultValue: "Working…" }) : t("p2pkh.action.rebroadcast", { defaultValue: "Rebroadcast ancestors" })}</Button> : null}</span> }
+    { key: "action", header: "", render: (row) => <span><Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page, view))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button>{row.local && (row.local.state === "submitting" || row.local.state === "isolated" || row.local.state === "conflicted") ? <Button variant="ghost" disabled={rebroadcasting === row.local.id} onClick={() => void rebroadcast(row.local!)}>{rebroadcasting === row.local.id ? t("p2pkh.action.inProgress", { defaultValue: "Working…" }) : t("p2pkh.action.rebroadcast", { defaultValue: "Rebroadcast ancestors" })}</Button> : null}</span> }
   ];
   const networkTitle = network === "main" ? t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" }) : t("p2pkh.wallet.testnet", { defaultValue: "Testnet" });
+  const viewTitle = view === "transactions"
+    ? t("p2pkh.wallet.transactions.title", { defaultValue: "On-chain transactions" })
+    : t("p2pkh.wallet.localTransactions.title", { defaultValue: "Local transactions" });
+  const viewDescription = view === "transactions"
+    ? t("p2pkh.wallet.transactions.description", { defaultValue: "Confirmed transaction facts and local transaction state." })
+    : t("p2pkh.wallet.localTransactions.description", { defaultValue: "Local transaction outputs and synchronization state." });
   return (
     <div className="p2pkh-wallet">
       <PageHeader
-        title={`${t("p2pkh.wallet.title", { defaultValue: "BSV Wallet" })} · ${networkTitle}`}
-        description={t("p2pkh.wallet.description", { defaultValue: "Confirmed transaction facts, local overlay state, and spendable coins." })}
-        actions={<><Button variant={network === "main" ? "primary" : "ghost"} onClick={() => router.push(listPath("main", page, tab))}>{t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" })}</Button>{settings.includeTestnet ? <Button variant={network === "test" ? "primary" : "ghost"} onClick={() => router.push(listPath("test", page, tab))}>{t("p2pkh.wallet.testnet", { defaultValue: "Testnet" })}</Button> : null}</>}
+        title={`${viewTitle} · ${networkTitle}`}
+        description={viewDescription}
+        actions={<><Button variant={network === "main" ? "primary" : "ghost"} onClick={() => router.push(listPath("main", page, view))}>{t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" })}</Button>{settings.includeTestnet ? <Button variant={network === "test" ? "primary" : "ghost"} onClick={() => router.push(listPath("test", page, view))}>{t("p2pkh.wallet.testnet", { defaultValue: "Testnet" })}</Button> : null}</>}
       />
-      <nav aria-label={t("p2pkh.wallet.tabs", { defaultValue: "P2PKH wallet tabs" })}>
-        {(["transactions", "coins"] as const).map((value) => <Button key={value} variant={tab === value ? "primary" : "ghost"} onClick={() => setCurrentTab(value)}>{t(`p2pkh.wallet.tab.${value}`, { defaultValue: value === "transactions" ? "Transactions" : "Coins" })}</Button>)}
-      </nav>
       {wallet.error ? <EmptyState title={t("p2pkh.wallet.loadFailed", { defaultValue: "Wallet data unavailable" })} description={wallet.error} /> : null}
       {wallet.migrationAudits.length ? <p role="alert">{t("p2pkh.wallet.migrationAudit", { defaultValue: "Some legacy local submissions need review ({{count}}).", count: wallet.migrationAudits.length })}</p> : null}
       {networkEnabled ? <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
@@ -368,7 +361,7 @@ export function P2pkhWalletPage({ initialTab, network = "main" }: { initialTab?:
         {(wallet.syncError ?? sync?.lastError) ? <p role="alert">{t("p2pkh.wallet.syncError", { defaultValue: "Sync error: {{error}}", error: wallet.syncError ?? sync?.lastError })}</p> : null}
         {actionError ? <p role="alert">{actionError}</p> : null}
       </section>
-      {tab === "transactions" ? <>
+      {view === "transactions" ? <>
         <DataTable columns={txColumns} rows={visibleTxRows} rowKey={(row) => row.id} />
         <div className="p2pkh-wallet__pagination" aria-label={t("p2pkh.wallet.pagination", { defaultValue: "Transaction pages" })}>
           <Button variant="ghost" disabled={page <= 1} onClick={() => setCurrentPage(page - 1)}>{t("p2pkh.action.previousPage", { defaultValue: "Previous" })}</Button>

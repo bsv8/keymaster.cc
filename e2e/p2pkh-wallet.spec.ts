@@ -1,7 +1,7 @@
 import { createServer } from "node:http";
 import { expect, test } from "@playwright/test";
 
-test("P2PKH wallet exposes the unified views and redirects legacy coin routes", async ({ page }) => {
+test("P2PKH wallet exposes separate on-chain and local transaction routes", async ({ page }) => {
   // Keep this browser smoke deterministic and offline. Provider adapter and
   // Coordinator behavior are covered by the unit/integration suites; this
   // test verifies the assembled production shell and route contract.
@@ -15,16 +15,14 @@ test("P2PKH wallet exposes the unified views and redirects legacy coin routes", 
   await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByRole("button", { name: "Lock" })).toBeVisible({ timeout: 15_000 });
 
-  await page.getByRole("button", { name: "P2PKH", exact: true }).first().click();
-  await expect(page.getByRole("heading", { name: "BSV Wallet" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Transactions" })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Coins" })).toBeVisible();
+  await page.getByRole("button", { name: "On-chain transactions", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "On-chain transactions · Mainnet" })).toBeVisible();
 
-  await page.goto("/p2pkh/utxos");
+  await page.goto("/p2pkh/mainnet/local-transactions?page=1");
   await page.getByLabel("Password").fill("playwright-password");
   await page.getByRole("button", { name: "Unlock" }).click();
-  await expect(page).toHaveURL(/\/p2pkh\?tab=coins$/);
-  await expect(page.getByRole("button", { name: "Coins" })).toBeVisible();
+  await expect(page).toHaveURL(/\/p2pkh\/mainnet\/local-transactions\?page=1$/);
+  await expect(page.getByRole("heading", { name: "Local transactions · Mainnet" })).toBeVisible();
 });
 
 test("fake provider switch reconciles a local change chain after reorg", async ({ page }) => {
@@ -113,11 +111,10 @@ test("fake provider switch reconciles a local change chain after reorg", async (
     });
   }, { chainTxid: fixture.chainTxid }), { timeout: 15_000 }).toEqual({ state: "isolated", restored: true });
 
-  await page.getByRole("button", { name: "P2PKH", exact: true }).first().click();
-  await page.getByRole("button", { name: "Coins" }).click();
+  await page.getByRole("button", { name: "Local transactions", exact: true }).click();
   await expect(page.getByText(`${fixture.chainTxid}:0`, { exact: true })).toBeVisible();
   await expect(page.getByText(fixture.changeTxid, { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Transactions" }).click();
+  await page.getByRole("button", { name: "On-chain transactions", exact: true }).click();
   await expect(page.getByRole("button", { name: /Rebroadcast ancestors|重广播/ }).first()).toBeVisible();
 });
 

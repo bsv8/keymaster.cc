@@ -6,6 +6,7 @@ import type {
 import { parseP2pkhTransaction, type ParsedP2pkhTransaction } from "../p2pkhTransactionParser.js";
 
 export type P2pkhNetwork = "main" | "test";
+export type P2pkhWalletView = "transactions" | "local-transactions";
 
 export interface LocalTransactionRecord {
   id: string;
@@ -62,16 +63,14 @@ export function balanceAtBlock(
     .reduce((sum, row) => sum + row.value, 0);
 }
 
-export function listPath(network: P2pkhNetwork, page = 1, tab?: "transactions" | "coins"): string {
-  const pathname = `/p2pkh/${network === "main" ? "mainnet" : "testnet"}`;
-  const params = new URLSearchParams({ page: String(page) });
-  if (tab && tab !== "transactions") params.set("tab", tab);
-  const query = params.toString();
-  return query ? `${pathname}?${query}` : pathname;
+export function listPath(network: P2pkhNetwork, page = 1, view: P2pkhWalletView = "transactions"): string {
+  const networkPath = network === "main" ? "mainnet" : "testnet";
+  const pathname = `/p2pkh/${networkPath}/${view}`;
+  return `${pathname}?${new URLSearchParams({ page: String(page) }).toString()}`;
 }
 
-export function detailPath(txid: string, network: P2pkhNetwork, page: number): string {
-  const params = new URLSearchParams({ network, page: String(page) });
+export function detailPath(txid: string, network: P2pkhNetwork, page: number, source: P2pkhWalletView = "transactions"): string {
+  const params = new URLSearchParams({ network, page: String(page), source });
   return `/p2pkh/tx/${encodeURIComponent(txid)}?${params.toString()}`;
 }
 
@@ -82,6 +81,20 @@ export function readPage(search = window.location.search): number {
 
 export function readTransactionNetwork(search = window.location.search): P2pkhNetwork {
   return new URLSearchParams(search).get("network") === "test" ? "test" : "main";
+}
+
+/** The only accepted detail source is the formal local-transactions list. */
+export function parseTransactionSource(search: string): P2pkhWalletView {
+  return new URLSearchParams(search).get("source") === "local-transactions" ? "local-transactions" : "transactions";
+}
+
+export function readTransactionSource(search = window.location.search): P2pkhWalletView {
+  return parseTransactionSource(search);
+}
+
+export function transactionSourceListPath(search: string): string {
+  const network = new URLSearchParams(search).get("network") === "test" ? "testnet" : "mainnet";
+  return `/p2pkh/${network}/${parseTransactionSource(search)}`;
 }
 
 export function readTransactionId(pathname = window.location.pathname): string | undefined {

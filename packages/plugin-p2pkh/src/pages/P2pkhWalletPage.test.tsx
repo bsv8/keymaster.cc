@@ -39,7 +39,7 @@ afterEach(() => {
 
 describe("P2pkhWalletPage", () => {
   it("shows only the selected network and sends the current page to the detail route", async () => {
-    window.history.replaceState({}, "", "/p2pkh/mainnet?page=1");
+    window.history.replaceState({}, "", "/p2pkh/mainnet/transactions?page=1");
     const host = registerWallet(false);
     render(<PluginHostProvider host={host}><P2pkhWalletPage network="main" /></PluginHostProvider>);
     await waitFor(() => expect(screen.getByText(txid)).toBeTruthy());
@@ -51,7 +51,7 @@ describe("P2pkhWalletPage", () => {
     expect(screen.queryByRole("button", { name: "Provider settings" })).toBeNull();
     fireEvent.click(screen.getByText("Details"));
     expect(window.location.pathname).toBe(`/p2pkh/tx/${txid}`);
-    expect(window.location.search).toBe("?network=main&page=1");
+    expect(window.location.search).toBe("?network=main&page=1&source=transactions");
   });
 
   it("keeps identical transaction ids isolated by the network route", async () => {
@@ -59,12 +59,35 @@ describe("P2pkhWalletPage", () => {
     const host = registerWallet(true, [fact, testFact]);
     render(<PluginHostProvider host={host}><P2pkhWalletPage network="test" /></PluginHostProvider>);
     await waitFor(() => expect(screen.getAllByText(txid)).toHaveLength(1));
-    expect(screen.getByText("BSV Wallet · Testnet")).toBeTruthy();
+    expect(screen.getByText("On-chain transactions · Testnet")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Testnet" })).toBeTruthy();
   });
 
+  it("chooses the view from the route prop and ignores tab query parameters", async () => {
+    window.history.replaceState({}, "", "/p2pkh/mainnet/transactions?page=1&tab=coins");
+    const host = registerWallet(false);
+    render(<PluginHostProvider host={host}><P2pkhWalletPage network="main" view="transactions" /></PluginHostProvider>);
+    await screen.findByText(txid);
+    expect(screen.getByText("Input")).toBeTruthy();
+    expect(screen.queryByText("txid:vout")).toBeNull();
+  });
+
+  it("renders the existing Coins table on the local-transactions route", async () => {
+    const owned: P2pkhOwnedOutpointProjection = {
+      id: "owned-local-route", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", address: "1abc",
+      txid: "cc".repeat(32), vout: 0, outpointKey: `${"cc".repeat(32)}:0`, value: 100, scriptHex: "", chainState: "available", createdBlockHeight: 100, updatedAt: "now"
+    };
+    window.history.replaceState({}, "", "/p2pkh/mainnet/local-transactions?page=1");
+    const host = registerWallet(false, [], {}, { owned: [owned] });
+    render(<PluginHostProvider host={host}><P2pkhWalletPage network="main" view="local-transactions" /></PluginHostProvider>);
+    await screen.findByText(`${"cc".repeat(32)}:0`);
+    expect(screen.getByText("txid:vout")).toBeTruthy();
+    expect(screen.getByText("Status")).toBeTruthy();
+    expect(screen.queryByText("Input")).toBeNull();
+  });
+
   it("does not turn a disabled testnet into a zero balance", async () => {
-    window.history.replaceState({}, "", "/p2pkh/testnet");
+    window.history.replaceState({}, "", "/p2pkh/testnet/transactions");
     const host = registerWallet(false);
     render(<PluginHostProvider host={host}><P2pkhWalletPage network="test" /></PluginHostProvider>);
     expect(await screen.findByText("Testnet is disabled")).toBeTruthy();
@@ -81,7 +104,7 @@ describe("P2pkhWalletPage", () => {
   });
 
   it("does not advance the page when local pagination fails", async () => {
-    window.history.replaceState({}, "", "/p2pkh/mainnet?page=1");
+    window.history.replaceState({}, "", "/p2pkh/mainnet/transactions?page=1");
     const host = registerWallet(false, [fact], {
       listTransactionFactsPage: async () => { throw new Error("page failed"); }
     }, { factCursors: { "p2pkh:main": "next-fact" } });
@@ -121,8 +144,18 @@ describe("P2pkhTransactionDetailPage", () => {
     expect(screen.getByText("Total input")).toBeTruthy();
     expect(screen.getByText("Only wallet-owned outputs are available in the stored record.")).toBeTruthy();
     fireEvent.click(screen.getByText("Back to transactions"));
-    expect(window.location.pathname).toBe("/p2pkh/mainnet");
+    expect(window.location.pathname).toBe("/p2pkh/mainnet/transactions");
     expect(window.location.search).toBe("?page=4");
+  });
+
+  it("returns a detail opened from local transactions to that list and page", async () => {
+    window.history.replaceState({}, "", `/p2pkh/tx/${txid}?network=main&page=7&source=local-transactions`);
+    const host = registerWallet(false);
+    render(<PluginHostProvider host={host}><P2pkhTransactionDetailPage /></PluginHostProvider>);
+    await screen.findByText("Transaction details");
+    fireEvent.click(screen.getByText("Back to transactions"));
+    expect(window.location.pathname).toBe("/p2pkh/mainnet/local-transactions");
+    expect(window.location.search).toBe("?page=7");
   });
 
   it("reads a deep-page transaction from the local service", async () => {

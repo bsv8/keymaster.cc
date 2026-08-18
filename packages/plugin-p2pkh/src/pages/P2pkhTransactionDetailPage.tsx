@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader, formatSats } from "@keymaster/ui";
 import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import type { P2pkhGlobalSettings, P2pkhLocalTransaction, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
-import { formatLocalTime, inputAmount, listPath, parseStoredTransaction, readPage, readTransactionId, readTransactionNetwork } from "./p2pkhTransactionView.js";
+import { formatLocalTime, inputAmount, listPath, parseStoredTransaction, readPage, readTransactionId, readTransactionNetwork, readTransactionSource } from "./p2pkhTransactionView.js";
 import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
@@ -36,6 +36,7 @@ export function P2pkhTransactionDetailPage() {
   const service = useCapability<P2pkhService>("p2pkh.service");
   const network = readTransactionNetwork();
   const page = readPage();
+  const source = readTransactionSource();
   const txid = readTransactionId();
   const settings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,
@@ -120,7 +121,7 @@ export function P2pkhTransactionDetailPage() {
   const fee = inputTotal !== undefined && outputTotal !== undefined && inputTotal >= outputTotal ? inputTotal - outputTotal : undefined;
   const ownedKeys = new Set([...(fact?.ownedOutpointKeys ?? []), ...(fact?.ownedOutputs ?? []).map((output) => `${txid}:${output.vout}`), ...(local?.ownOutputs ?? []).map((output) => `${txid}:${output.vout}`)]);
   const timestamp = fact?.blockTime !== undefined ? formatLocalTime(fact.blockTime) : formatLocalTime(fact?.lastConfirmedAt ?? local?.updatedAt);
-  const back = () => router.push(listPath(network, page));
+  const back = () => router.push(listPath(network, page, source));
 
   if (!txid || !networkEnabled || (!fact && !local)) {
     const disabled = !networkEnabled;
