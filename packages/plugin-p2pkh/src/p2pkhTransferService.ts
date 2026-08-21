@@ -33,6 +33,7 @@ import {
 } from "./p2pkhSigner.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
 import { parseP2pkhTransaction, p2pkhAddressToScriptHex } from "./p2pkhTransactionParser.js";
+import { canonicalizeP2pkhUtxos, p2pkhOutpointKey } from "./p2pkhCanonical.js";
 
 export interface P2pkhTransferServiceDeps {
   vault: VaultService;
@@ -237,7 +238,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       // (txid, vout) 时，第二个会抛「already claimed」，外层
       // 不进 broadcast。
       const localInputClaimIds = preview.allocation.selected.map((input) => localInputClaimIdFor(resource.resourceId, input.txid, input.vout));
-      const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: preview.txid, rawTxHex: preview.rawTxHex, state: "submitting", inputOutpointKeys: preview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: preview.outputs.flatMap((output, vout) => output.address === preview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), parentTxids: [...new Set(preview.allocation.selected.map((input) => input.txid))], createdAt: now, updatedAt: now, attempts: [] };
+      const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: preview.txid, rawTxHex: preview.rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: preview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: preview.outputs.flatMap((output, vout) => output.address === preview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), parentTxids: [...new Set(preview.allocation.selected.map((input) => input.txid))], createdAt: now, updatedAt: now, attempts: [] };
       const claims: P2pkhLocalInputClaim[] = preview.allocation.selected.map((input) => ({ id: localInputClaimIdFor(resource.resourceId, input.txid, input.vout), submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: input.txid, vout: input.vout, outpointKey: `${input.txid}:${input.vout}`, value: input.value, state: "active", createdAt: now, updatedAt: now }));
       const localOutpoints: P2pkhLocalOutpoint[] = localSubmission.ownOutputs.map((output) => ({ id: `${resource.resourceId}:${preview.txid}:${output.vout}`, resourceId: resource.resourceId, txid: preview.txid, vout: output.vout, value: output.value, scriptHex: output.scriptHex, submissionId, state: "unavailable", createdAt: now, updatedAt: now }));
       await db.prepareLocalSubmission({ submission: localSubmission, claims, localOutpoints });
@@ -297,10 +298,12 @@ async function listTransferCandidates(input: {
   );
   const allUtxos = await input.db.listUtxos();
   const localTransactions = await input.db.listLocalTransactions(input.resource.resourceId);
-  const localTransactionIds = new Set(localTransactions.filter((row) => row.state === "local-confirmed").map((row) => row.id));
-  const localCandidates: P2pkhUtxo[] = (await input.db.listLocalOutpoints(input.resource.resourceId))
+  const localTransactionIds = new Set(localTransactions.filter((row) => row.localState === "local-confirmed" && row.chainResolution === "unresolved").map((row) => row.id));
+  const localCandidatesByOutpoint = new Map<string, P2pkhUtxo>();
+  for (const row of (await input.db.listLocalOutpoints(input.resource.resourceId))
     .filter((row) => row.state === "available" && localTransactionIds.has(row.submissionId))
-    .map((row) => ({
+  ) {
+    const candidate: P2pkhUtxo = {
       id: row.id,
       resourceId: row.resourceId,
       publicKeyHex: input.ownerPublicKeyHex,
@@ -310,11 +313,15 @@ async function listTransferCandidates(input: {
       vout: row.vout,
       value: row.value,
       script: row.scriptHex,
-      status: "confirmed",
+      status: "unconfirmed",
       isSpentInMempoolTx: false,
       syncedAt: row.updatedAt
-    }));
-  return [...allUtxos, ...localCandidates].filter((utxo) =>
+    };
+    const key = p2pkhOutpointKey(candidate);
+    const current = localCandidatesByOutpoint.get(key);
+    if (!current || candidate.id.localeCompare(current.id) < 0) localCandidatesByOutpoint.set(key, candidate);
+  }
+  return canonicalizeP2pkhUtxos([...allUtxos, ...localCandidatesByOutpoint.values()]).filter((utxo) =>
     utxo.resourceId === input.resource.resourceId
     && utxo.publicKeyHex === input.ownerPublicKeyHex
     && !reserved.has(`${utxo.txid}:${utxo.vout}`)

@@ -70,8 +70,9 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
   const [localCursors, setLocalCursors] = useState<Record<string, string | undefined>>(wallet.localCursors);
   const [localOutpointCursors, setLocalOutpointCursors] = useState<Record<string, string | undefined>>(wallet.localOutpointCursors);
   const [claimCursors, setClaimCursors] = useState<Record<string, string | undefined>>(wallet.claimCursors);
-  const [loadingMore, setLoadingMore] = useState<"facts" | "owned" | null>(null);
+  const [loadingMore, setLoadingMore] = useState<"facts" | "locals" | "owned" | null>(null);
   const [factsLoadFailed, setFactsLoadFailed] = useState(false);
+  const [localLoadFailed, setLocalLoadFailed] = useState(false);
   const [ownedLoadFailed, setOwnedLoadFailed] = useState(false);
 
   const settings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
@@ -95,6 +96,7 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
     setLocalOutpointCursors(wallet.localOutpointCursors);
     setClaimCursors(wallet.claimCursors);
     setFactsLoadFailed(false);
+    setLocalLoadFailed(false);
     setOwnedLoadFailed(false);
   }, [wallet.facts, wallet.owned, wallet.locals, wallet.localOutpoints, wallet.claims, wallet.inputValuesByResource, wallet.factCursors, wallet.ownedCursors, wallet.localCursors, wallet.localOutpointCursors, wallet.claimCursors]);
 
@@ -106,8 +108,6 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
   const networkEnabled = network === "main" || settings.includeTestnet;
   const networkBalance = networkEnabled ? wallet.balances[network]?.total : undefined;
   const sync = wallet.sync.find((row) => row.resourceId === `p2pkh:${network}`);
-  const factsByTxid = useMemo(() => new Map(loadedFacts.map((row) => [`${row.resourceId}:${row.txid}`, row])), [loadedFacts]);
-  const resourcesById = useMemo(() => new Map(wallet.resources.map((row) => [row.resourceId, row])), [wallet.resources]);
   const selectedResources = useMemo(() => networkEnabled ? wallet.resources.filter((resource) => resource.network === network) : [], [wallet.resources, network, networkEnabled]);
 
   const txRows = useMemo<P2pkhTransactionListRow[]>(() => {
@@ -117,13 +117,9 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
       for (const [key, value] of Object.entries(values)) valuesByOutpoint.set(`${resourceId}:${key}`, value);
     }
     for (const row of loadedOwned) valuesByOutpoint.set(`${row.resourceId}:${row.outpointKey}`, row.value);
-    for (const row of loadedLocalOutpoints) valuesByOutpoint.set(`${row.resourceId}:${row.txid}:${row.vout}`, row.value);
     const inputValuesForRows: Record<string, Record<string, number>> = Object.fromEntries(
       Object.entries(loadedInputValuesByResource).map(([resourceId, values]) => [resourceId, { ...values }])
     );
-    for (const row of loadedLocalOutpoints) {
-      (inputValuesForRows[row.resourceId] ??= {})[`${row.txid}:${row.vout}`] = row.value;
-    }
     const completeOwned = selectedResources.every((resource) => !ownedCursors[resource.resourceId]);
     const summarize = (resourceId: string, inputs: string[], received: number) => {
       const spent = inputs.reduce((sum, key) => sum + (valuesByOutpoint.get(`${resourceId}:${key}`) ?? 0), 0);
@@ -151,34 +147,6 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
         fact: row
       });
     }
-    for (const row of loadedLocals) {
-      if (row.network !== network) continue;
-      const existing = byTxid.get(`${row.resourceId}:${row.txid}`);
-      const parsed = parseStoredTransaction(row.rawTxHex, row.txid);
-      const received = row.ownOutputs.reduce((sum, output) => sum + output.value, 0);
-      const summary = summarize(row.resourceId, row.inputOutpointKeys, received);
-      const input = inputAmount(row.resourceId, row.inputOutpointKeys, inputValuesForRows);
-      byTxid.set(`${row.resourceId}:${row.txid}`, existing ? {
-        ...existing,
-        id: row.id,
-        state: row.state,
-        inputAmount: input.value ?? existing.inputAmount,
-        outputAmount: parsed ? parsed.outputs.reduce((sum, output) => sum + output.value, 0) : existing.outputAmount,
-        ...summary,
-        local: row
-      } : {
-        id: row.id,
-        txid: row.txid,
-        network: row.network,
-        height: "-",
-        state: row.state,
-        time: row.updatedAt,
-        inputAmount: input.value,
-        outputAmount: parsed ? parsed.outputs.reduce((sum, output) => sum + output.value, 0) : undefined,
-        ...summary,
-        local: row
-      });
-    }
     return [...byTxid.values()].sort((left, right) => {
       const leftTime = Date.parse(left.time);
       const rightTime = Date.parse(right.time);
@@ -187,40 +155,26 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
       if (Number.isNaN(rightTime)) return -1;
       return rightTime - leftTime || right.id.localeCompare(left.id);
     });
-  }, [loadedFacts, loadedLocals, loadedOwned, loadedLocalOutpoints, loadedInputValuesByResource, selectedResources, ownedCursors, network, networkEnabled]);
+  }, [loadedFacts, loadedOwned, loadedInputValuesByResource, selectedResources, ownedCursors, network, networkEnabled]);
 
   const visibleTxRows = useMemo(() => txRows.slice((page - 1) * TRANSACTION_PAGE_SIZE, page * TRANSACTION_PAGE_SIZE), [txRows, page]);
-  const coinRows = useMemo(() => {
-    if (!networkEnabled) return [];
-    const claimsByOutpoint = new Map(loadedClaims.map((claim) => [`${claim.resourceId}:${claim.outpointKey ?? `${claim.txid}:${claim.vout}`}`, claim]));
-    const protectedKeys = new Set(wallet.protectedOutpoints.map((row) => `${row.network}:${row.txid}:${row.vout}`));
-    return [
-      ...loadedOwned.filter((row) => row.network === network).map((row) => {
-        const key = `${row.resourceId}:${row.outpointKey}`;
-        const claim = claimsByOutpoint.get(key);
-        const protectedKey = `${row.network}:${row.outpointKey}`;
-        return { id: row.id, outpoint: row.outpointKey, network: row.network, value: row.value, state: protectedKeys.has(protectedKey) ? "protected" : claim?.state === "isolated" ? "isolated" : claim?.state === "active" ? "claimed" : row.chainState, source: "confirmed", submissionId: undefined, spentBy: row.spentByTxid };
-      }),
-      ...loadedLocalOutpoints.map((row) => {
-        const resource = resourcesById.get(row.resourceId);
-        const rowNetwork = resource?.network ?? factsByTxid.get(`${row.resourceId}:${row.txid}`)?.network ?? "main";
-        if (rowNetwork !== network) return null;
-        const key = `${row.txid}:${row.vout}`;
-        const protectedKey = `${rowNetwork}:${key}`;
-        const pendingSpender = loadedLocals.find((candidate) => candidate.resourceId === row.resourceId && candidate.txid !== row.txid && candidate.state !== "chain-confirmed" && candidate.inputOutpointKeys.includes(key));
-        return { id: row.id, outpoint: key, network: rowNetwork, value: row.value, state: protectedKeys.has(protectedKey) ? "protected" : row.state, source: "local-confirmed", submissionId: row.submissionId, spentBy: pendingSpender?.txid };
-      })
-    ].filter((row): row is NonNullable<typeof row> => row !== null);
-  }, [loadedOwned, loadedLocalOutpoints, loadedClaims, wallet.protectedOutpoints, factsByTxid, resourcesById, loadedLocals, network, networkEnabled]);
-
-  const coinColumns: DataTableColumn<(typeof coinRows)[number]>[] = [
-    { key: "outpoint", header: t("p2pkh.col.txidVout", { defaultValue: "txid:vout" }), render: (row) => <code>{row.outpoint}</code> },
-    { key: "value", header: t("p2pkh.col.value", { defaultValue: "金额" }), render: (row) => formatSats(row.value) },
-    { key: "state", header: t("p2pkh.col.status", { defaultValue: "状态" }), render: (row) => t(`p2pkh.state.${row.state}`, { defaultValue: row.state }) },
-    { key: "source", header: t("p2pkh.col.source", { defaultValue: "来源" }), render: (row) => t(`p2pkh.source.${row.source}`, { defaultValue: row.source }) },
-    { key: "submissionId", header: t("p2pkh.col.submission", { defaultValue: "Local submission" }), render: (row) => row.submissionId ? <code>{row.submissionId}</code> : t("p2pkh.wallet.none", { defaultValue: "None" }) },
-    { key: "spentBy", header: t("p2pkh.col.spentBy", { defaultValue: "Spent by" }), render: (row) => row.spentBy ? <code>{row.spentBy}</code> : t("p2pkh.wallet.none", { defaultValue: "None" }) }
-  ];
+  const localTxRows = useMemo<P2pkhTransactionListRow[]>(() => loadedLocals.filter((row) => networkEnabled && row.network === network && row.chainResolution !== "chain-confirmed").map((row) => {
+    const parsed = parseStoredTransaction(row.rawTxHex, row.txid);
+    const received = row.ownOutputs.reduce((sum, output) => sum + output.value, 0);
+    // Local outpoint projections may be stale; chain-sourced values (fetched
+    // input values, then owned projections) must win the same way they do on
+    // the chain transactions view.
+    const localValues: Record<string, number> = {};
+    for (const output of loadedLocalOutpoints) if (output.resourceId === row.resourceId) localValues[`${output.txid}:${output.vout}`] = output.value;
+    for (const candidate of loadedLocals) if (candidate.resourceId === row.resourceId) for (const output of candidate.ownOutputs) localValues[`${candidate.txid}:${output.vout}`] = output.value;
+    for (const [key, value] of Object.entries(loadedInputValuesByResource[row.resourceId] ?? {})) localValues[key] = value;
+    for (const projection of loadedOwned) if (projection.resourceId === row.resourceId) localValues[projection.outpointKey] = projection.value;
+    const values: Record<string, Record<string, number>> = { [row.resourceId]: localValues };
+    const input = inputAmount(row.resourceId, row.inputOutpointKeys, values);
+    const spent = row.inputOutpointKeys.reduce((sum, key) => sum + (values[row.resourceId]?.[key] ?? 0), 0);
+    return { id: row.id, txid: row.txid, network: row.network, height: "-", state: row.chainResolution === "conflicted" ? "conflicted" : row.localState, time: row.updatedAt, inputAmount: input.value, outputAmount: parsed ? parsed.outputs.reduce((sum, output) => sum + output.value, 0) : undefined, direction: received - spent > 0 ? "received" : received - spent < 0 ? "sent" : "self", netChange: received - spent, local: row };
+  }), [loadedLocals, loadedInputValuesByResource, loadedLocalOutpoints, loadedOwned, network, networkEnabled]);
+  const visibleLocalTxRows = useMemo(() => localTxRows.slice((page - 1) * TRANSACTION_PAGE_SIZE, page * TRANSACTION_PAGE_SIZE), [localTxRows, page]);
 
   async function rebroadcast(local: P2pkhLocalTransaction) {
     const selection = wallet.providers?.selection[local.network];
@@ -241,35 +195,79 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
     try {
       const resources = selectedResources;
       if (resources.some((resource) => factCursors[resource.resourceId]) && !service.listTransactionFactsPage) throw new Error(t("p2pkh.action.loadMoreUnsupported", { defaultValue: "Local transaction pagination is unavailable." }));
-      if (resources.some((resource) => localCursors[resource.resourceId]) && !service.listLocalTransactionsPage) throw new Error(t("p2pkh.action.loadMoreUnsupported", { defaultValue: "Local transaction pagination is unavailable." }));
       const facts = service.listTransactionFactsPage ? await Promise.all(resources.map(async (resource) => {
         if (!factCursors[resource.resourceId]) return [resource.resourceId, { items: [] as P2pkhTransactionFact[], nextCursor: undefined }] as const;
         return [resource.resourceId, await service.listTransactionFactsPage!({ resourceId: resource.resourceId, cursor: factCursors[resource.resourceId], limit: 200 })] as const;
       })) : [];
-      const locals = service.listLocalTransactionsPage ? await Promise.all(resources.map(async (resource) => {
-        if (!localCursors[resource.resourceId]) return [resource.resourceId, { items: [] as P2pkhLocalTransaction[], nextCursor: undefined }] as const;
-        return [resource.resourceId, await service.listLocalTransactionsPage!({ resourceId: resource.resourceId, cursor: localCursors[resource.resourceId], limit: 500 })] as const;
-      })) : [];
       const factAdditions = facts.flatMap(([, result]) => result.items);
-      const localAdditions = locals.flatMap(([, result]) => result.items);
-      const loadedAnything = factAdditions.length > 0 || localAdditions.length > 0;
+      const loadedAnything = factAdditions.length > 0;
       setLoadedFacts((current) => [...new Map([...current, ...factAdditions].map((row) => [row.id, row])).values()]);
-      setLoadedLocals((current) => [...new Map([...current, ...localAdditions].map((row) => [row.id, row])).values()]);
       const inputValuesByResource: Record<string, Record<string, number>> = {};
-      if (service.listOwnedOutpointValues) for (const [resourceId, result] of [...facts, ...locals]) Object.assign(inputValuesByResource[resourceId] ??= {}, await service.listOwnedOutpointValues(resourceId, result.items.flatMap((row) => row.inputOutpointKeys)));
+      if (service.listOwnedOutpointValues) for (const [resourceId, result] of facts) Object.assign(inputValuesByResource[resourceId] ??= {}, await service.listOwnedOutpointValues(resourceId, result.items.flatMap((row) => row.inputOutpointKeys)));
       setLoadedInputValuesByResource((current) => {
         const next = { ...current };
         for (const [resourceId, values] of Object.entries(inputValuesByResource)) next[resourceId] = { ...(current[resourceId] ?? {}), ...values };
         return next;
       });
       setFactCursors((current) => ({ ...current, ...Object.fromEntries(facts.map(([resourceId, result]) => [resourceId, result.nextCursor])) }));
-      setLocalCursors((current) => ({ ...current, ...Object.fromEntries(locals.map(([resourceId, result]) => [resourceId, result.nextCursor])) }));
-      const cursorRemains = facts.some(([, result]) => result.nextCursor) || locals.some(([, result]) => result.nextCursor);
+      const cursorRemains = facts.some(([, result]) => result.nextCursor);
       setFactsLoadFailed(!loadedAnything && cursorRemains);
       return loadedAnything;
     } catch (error) {
       setFactsLoadFailed(true);
       setActionError(error instanceof Error ? error.message : t("p2pkh.action.loadMoreFailed", { defaultValue: "Unable to load more wallet history." }));
+      return false;
+    } finally { setLoadingMore(null); }
+  }
+
+  async function loadMoreLocals(): Promise<boolean> {
+    if (loadingMore) return false;
+    setLoadingMore("locals");
+    try {
+      const resources = selectedResources;
+      if (resources.some((resource) => localCursors[resource.resourceId]) && !service.listLocalTransactionsPage) throw new Error(t("p2pkh.action.loadMoreUnsupported", { defaultValue: "Local transaction pagination is unavailable." }));
+      // Keep reading until the target page can be filled with visible (not yet
+      // promoted) records; stopping at the first visible record would let the
+      // next page start past the loaded window and render empty.
+      const neededVisible = (page + 1) * TRANSACTION_PAGE_SIZE - loadedLocals.filter((row) => row.network === network && row.chainResolution !== "chain-confirmed").length;
+      const collectedVisible = { count: 0 };
+      const locals = service.listLocalTransactionsPage ? await Promise.all(resources.map(async (resource) => {
+        let cursor = localCursors[resource.resourceId];
+        const visible: P2pkhLocalTransaction[] = [];
+        let nextCursor: string | undefined;
+        // A service page can contain only promoted audit rows. Continue from
+        // its cursor in the same user action, with a hard bound against a
+        // malformed provider cursor causing an infinite loop.
+        for (let attempt = 0; attempt < 100 && cursor && collectedVisible.count < neededVisible; attempt += 1) {
+          const result = await service.listLocalTransactionsPage!({ resourceId: resource.resourceId, cursor, limit: 100 });
+          visible.push(...result.items);
+          nextCursor = result.nextCursor;
+          collectedVisible.count += result.items.filter((row) => row.chainResolution !== "chain-confirmed").length;
+          if (!nextCursor || nextCursor === cursor) break;
+          cursor = nextCursor;
+        }
+        return [resource.resourceId, { items: visible, nextCursor }] as const;
+      })) : [];
+      const localAdditions = locals.flatMap(([, result]) => result.items);
+      const mergedRows = [...new Map([...loadedLocals, ...localAdditions].map((row) => [row.id, row])).values()];
+      setLoadedLocals(mergedRows);
+      const inputValuesByResource: Record<string, Record<string, number>> = {};
+      if (service.listOwnedOutpointValues) for (const [resourceId, result] of locals) Object.assign(inputValuesByResource[resourceId] ??= {}, await service.listOwnedOutpointValues(resourceId, result.items.flatMap((row) => row.inputOutpointKeys)));
+      setLoadedInputValuesByResource((current) => {
+        const next = { ...current };
+        for (const [resourceId, values] of Object.entries(inputValuesByResource)) next[resourceId] = { ...(current[resourceId] ?? {}), ...values };
+        return next;
+      });
+      setLocalCursors((current) => ({ ...current, ...Object.fromEntries(locals.map(([resourceId, result]) => [resourceId, result.nextCursor])) }));
+      const loadedAnything = localAdditions.some((row) => row.chainResolution !== "chain-confirmed");
+      const cursorRemains = locals.some(([, result]) => result.nextCursor);
+      setLocalLoadFailed(!loadedAnything && cursorRemains);
+      // Only advance when the merged visible rows actually cover the next page;
+      // otherwise the new page would slice an empty window.
+      return mergedRows.filter((row) => row.network === network && row.chainResolution !== "chain-confirmed").length > page * TRANSACTION_PAGE_SIZE;
+    } catch (error) {
+      setLocalLoadFailed(true);
+      setActionError(error instanceof Error ? error.message : t("p2pkh.action.loadMoreFailed", { defaultValue: "Unable to load more local transactions." }));
       return false;
     } finally { setLoadingMore(null); }
   }
@@ -311,19 +309,21 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
     } finally { setLoadingMore(null); }
   }
 
-  const hasMoreFacts = selectedResources.some((resource) => factCursors[resource.resourceId] || localCursors[resource.resourceId]);
+  const hasMoreFacts = selectedResources.some((resource) => factCursors[resource.resourceId]);
+  const hasMoreLocals = selectedResources.some((resource) => localCursors[resource.resourceId]);
   const hasMoreOwned = selectedResources.some((resource) => ownedCursors[resource.resourceId] || localOutpointCursors[resource.resourceId] || claimCursors[resource.resourceId]);
   useEffect(() => {
     // Transaction balances depend on the complete local owned projection. Load
     // its remaining pages automatically so visiting Coins is not a prerequisite
     // for a truthful transaction-list balance.
-    if (view !== "transactions" || loadingMore !== null) return;
-    if (hasMoreOwned && !ownedLoadFailed) {
+    if (loadingMore !== null) return;
+    if (view === "transactions" && hasMoreOwned && !ownedLoadFailed) {
       void loadMoreOwned();
       return;
     }
-    if (visibleTxRows.length === 0 && hasMoreFacts && !factsLoadFailed) void loadMoreFacts();
-  }, [view, visibleTxRows.length, hasMoreFacts, factsLoadFailed, hasMoreOwned, ownedLoadFailed, loadingMore]);
+    if (view === "transactions" && visibleTxRows.length === 0 && hasMoreFacts && !factsLoadFailed) void loadMoreFacts();
+    if (view === "local-transactions" && visibleLocalTxRows.length === 0 && hasMoreLocals && !localLoadFailed) void loadMoreLocals();
+  }, [view, visibleTxRows.length, visibleLocalTxRows.length, hasMoreFacts, hasMoreLocals, factsLoadFailed, localLoadFailed, hasMoreOwned, ownedLoadFailed, loadingMore]);
   const hasNextPage = txRows.length > page * TRANSACTION_PAGE_SIZE || hasMoreFacts;
   const txColumns: DataTableColumn<P2pkhTransactionListRow>[] = [
     { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (row) => <code>{row.txid}</code> },
@@ -333,15 +333,24 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
     { key: "balanceAtBlock", header: t("p2pkh.col.balanceAtBlock", { defaultValue: "Balance at block" }), render: (row) => amountLabel(row.balanceAtBlock) },
     { key: "state", header: t("p2pkh.col.status", { defaultValue: "状态" }), render: (row) => t(`p2pkh.state.${row.state}`, { defaultValue: row.state }) },
     { key: "time", header: t("p2pkh.col.syncedAt", { defaultValue: "最近观察" }), render: (row) => row.time },
-    { key: "action", header: "", render: (row) => <span><Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page, view))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button>{row.local && (row.local.state === "submitting" || row.local.state === "isolated" || row.local.state === "conflicted") ? <Button variant="ghost" disabled={rebroadcasting === row.local.id} onClick={() => void rebroadcast(row.local!)}>{rebroadcasting === row.local.id ? t("p2pkh.action.inProgress", { defaultValue: "Working…" }) : t("p2pkh.action.rebroadcast", { defaultValue: "Rebroadcast ancestors" })}</Button> : null}</span> }
+    { key: "action", header: "", render: (row) => <span><Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page, view))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button>{row.local && row.local.chainResolution === "unresolved" && (row.local.localState === "submitting" || row.local.localState === "isolated") ? <Button variant="ghost" disabled={rebroadcasting === row.local.id} onClick={() => void rebroadcast(row.local!)}>{rebroadcasting === row.local.id ? t("p2pkh.action.inProgress", { defaultValue: "Working…" }) : t("p2pkh.action.rebroadcast", { defaultValue: "Rebroadcast ancestors" })}</Button> : null}</span> }
+  ];
+  const localTxColumns: DataTableColumn<P2pkhTransactionListRow>[] = [
+    { key: "txid", header: t("p2pkh.col.txid", { defaultValue: "txid" }), render: (row) => <code>{row.txid}</code> },
+    { key: "inputAmount", header: t("p2pkh.col.inputAmount", { defaultValue: "Input" }), render: (row) => amountLabel(row.inputAmount) },
+    { key: "outputAmount", header: t("p2pkh.col.outputAmount", { defaultValue: "Output" }), render: (row) => amountLabel(row.outputAmount) },
+    { key: "localState", header: t("p2pkh.txDetail.state", { defaultValue: "Local state" }), render: (row) => t(`p2pkh.state.${row.local?.localState ?? row.state}`, { defaultValue: row.local?.localState ?? row.state }) },
+    { key: "chainResolution", header: t("p2pkh.txDetail.chainResolution", { defaultValue: "Chain resolution" }), render: (row) => t(`p2pkh.resolution.${row.local?.chainResolution ?? "unresolved"}`, { defaultValue: row.local?.chainResolution ?? "unresolved" }) },
+    { key: "time", header: t("p2pkh.col.syncedAt", { defaultValue: "最近观察" }), render: (row) => row.time },
+    { key: "action", header: "", render: (row) => <span><Button variant="ghost" onClick={() => router.push(detailPath(row.txid, network, page, "local-transactions", row.local?.id))}>{t("p2pkh.action.details", { defaultValue: "Details" })}</Button>{row.local && row.local.chainResolution === "unresolved" && (row.local.localState === "submitting" || row.local.localState === "isolated") ? <Button variant="ghost" disabled={rebroadcasting === row.local.id} onClick={() => void rebroadcast(row.local!)}>{rebroadcasting === row.local.id ? t("p2pkh.action.inProgress", { defaultValue: "Working…" }) : t("p2pkh.action.rebroadcast", { defaultValue: "Rebroadcast ancestors" })}</Button> : null}</span> }
   ];
   const networkTitle = network === "main" ? t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" }) : t("p2pkh.wallet.testnet", { defaultValue: "Testnet" });
   const viewTitle = view === "transactions"
     ? t("p2pkh.wallet.transactions.title", { defaultValue: "On-chain transactions" })
     : t("p2pkh.wallet.localTransactions.title", { defaultValue: "Local transactions" });
   const viewDescription = view === "transactions"
-    ? t("p2pkh.wallet.transactions.description", { defaultValue: "Confirmed transaction facts and local transaction state." })
-    : t("p2pkh.wallet.localTransactions.description", { defaultValue: "Local transaction outputs and synchronization state." });
+    ? t("p2pkh.wallet.transactions.description", { defaultValue: "Confirmed transaction facts from the active chain." })
+    : t("p2pkh.wallet.localTransactions.description", { defaultValue: "Local transaction lifecycle and chain resolution." });
   return (
     <div className="p2pkh-wallet">
       <PageHeader
@@ -369,8 +378,12 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
           <Button variant="ghost" disabled={!hasNextPage || loadingMore !== null} onClick={() => { setFactsLoadFailed(false); if (txRows.length > page * TRANSACTION_PAGE_SIZE) setCurrentPage(page + 1); else void loadMoreFacts().then((loaded) => { if (loaded) setCurrentPage(page + 1); }); }}>{loadingMore === "facts" ? t("p2pkh.action.loadingMore", { defaultValue: "Loading…" }) : t("p2pkh.action.nextPage", { defaultValue: "Next" })}</Button>
         </div>
       </> : <>
-        <DataTable columns={coinColumns} rows={coinRows} rowKey={(row) => row.id} />
-        {hasMoreOwned ? <Button variant="ghost" disabled={loadingMore !== null} onClick={() => { setOwnedLoadFailed(false); void loadMoreOwned(); }}>{loadingMore === "owned" ? t("p2pkh.action.loadingMore", { defaultValue: "Loading…" }) : t("p2pkh.action.loadMoreCoins", { defaultValue: "Load more coins" })}</Button> : null}
+        <DataTable columns={localTxColumns} rows={visibleLocalTxRows} rowKey={(row) => row.id} />
+        <div className="p2pkh-wallet__pagination" aria-label={t("p2pkh.wallet.pagination", { defaultValue: "Transaction pages" })}>
+          <Button variant="ghost" disabled={page <= 1} onClick={() => setCurrentPage(page - 1)}>{t("p2pkh.action.previousPage", { defaultValue: "Previous" })}</Button>
+          <span>{t("p2pkh.wallet.page", { defaultValue: "Page {{page}}", page })}</span>
+          <Button variant="ghost" disabled={!(localTxRows.length > page * TRANSACTION_PAGE_SIZE || hasMoreLocals) || loadingMore !== null} onClick={() => { setLocalLoadFailed(false); if (localTxRows.length > page * TRANSACTION_PAGE_SIZE) setCurrentPage(page + 1); else void loadMoreLocals().then((loaded) => { if (loaded) setCurrentPage(page + 1); }); }}>{loadingMore === "locals" ? t("p2pkh.action.loadingMore", { defaultValue: "Loading…" }) : t("p2pkh.action.nextPage", { defaultValue: "Next" })}</Button>
+        </div>
       </>}
     </div>
   );

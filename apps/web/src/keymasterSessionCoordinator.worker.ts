@@ -2472,49 +2472,68 @@ async function handleP2pkhBroadcast(
   const localRows = (await db.listLocalTransactions()).filter((row) => row.network === request.network);
   const local = localRows.find((row) => row.id === request.submissionId);
   if (!local) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
-  if (!isRebroadcast && local.state !== "submitting") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in state ${local.state}` } };
-  const byTxid = new Map(localRows.map((row) => [row.txid, row]));
-  const ordered: typeof localRows = [];
+  if (!isRebroadcast && (local.localState !== "submitting" || local.chainResolution !== "unresolved")) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
+  const rowsByTxid = new Map<string, typeof localRows>();
+  for (const row of localRows) {
+    const group = rowsByTxid.get(row.txid) ?? [];
+    group.push(row);
+    rowsByTxid.set(row.txid, group);
+  }
+  const compareCanonicalRows = (left: (typeof localRows)[number], right: (typeof localRows)[number]): number => left.rawTxHex.localeCompare(right.rawTxHex) || left.id.localeCompare(right.id);
+  const canonicalRowForTxid = (txid: string): (typeof localRows)[number] | undefined => [...(rowsByTxid.get(txid) ?? [])].sort(compareCanonicalRows)[0];
+  const orderedTxids: string[] = [];
   const visited = new Set<string>();
-  const visit = (row: (typeof localRows)[number]) => {
-    if (visited.has(row.id)) return;
-    visited.add(row.id);
-    for (const parentTxid of row.parentTxids) {
-      const parent = byTxid.get(parentTxid);
-      if (parent) visit(parent);
+  const visit = (txid: string) => {
+    if (visited.has(txid)) return;
+    visited.add(txid);
+    const group = rowsByTxid.get(txid) ?? [];
+    const parentTxids = [...new Set(group.flatMap((row) => row.parentTxids))].sort();
+    for (const parentTxid of parentTxids) {
+      if (rowsByTxid.has(parentTxid)) visit(parentTxid);
     }
-    ordered.push(row);
+    orderedTxids.push(txid);
   };
-  visit(local);
+  visit(local.txid);
   const dispatch = async (row: (typeof localRows)[number]) => {
-    const previousState = row.state;
+    const previousLocalState = row.localState;
     const startedAt = new Date().toISOString();
     try {
       const result = await provider.broadcast({ network: request.network, canonicalTxid: row.txid, rawTxHex: row.rawTxHex });
       if (result.canonicalTxid !== row.txid) throw new Error("Broadcast provider returned a different transaction id");
       const finishedAt = new Date().toISOString();
-      await db.finishLocalSubmission({ submissionId: row.id, state: "local-confirmed", attempt: { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
+      await db.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt: { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
       publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
       return { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: row.txid } as const;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const finishedAt = new Date().toISOString();
       const attempt = { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: "isolated" as const, providerMessage: message };
-      if (previousState === "local-confirmed") {
+      if (previousLocalState === "local-confirmed") {
         // A failed rebroadcast cannot invalidate an earlier accepted or
         // already-known result. Preserve outputs/claims and append the audit.
-        await db.finishLocalSubmission({ submissionId: row.id, state: "local-confirmed", attempt });
+        await db.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt });
       } else {
-        await db.finishLocalSubmission({ submissionId: row.id, state: "isolated", reason: message, attempt });
+        await db.finishLocalSubmission({ submissionId: row.id, localState: "isolated", reason: message, attempt });
       }
       publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim"] });
-      return { status: previousState === "local-confirmed" ? "rebroadcast-failed" : "isolated", txid: row.txid, reason: message } as const;
+      return { status: previousLocalState === "local-confirmed" ? "rebroadcast-failed" : "isolated", txid: row.txid, reason: message } as const;
     }
   };
   if (isRebroadcast) {
-    for (const ancestor of ordered) {
-      if (ancestor.state === "chain-confirmed") continue;
-      if (ancestor.state === "conflicted") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid: ancestor.txid, reason: "conflicted-ancestor" } };
+    for (const txid of orderedTxids) {
+      const group = rowsByTxid.get(txid) ?? [];
+      // A duplicate audit sibling is part of the same logical transaction.
+      // Conflict wins over chain confirmation so an unsafe fork can never be
+      // hidden by IndexedDB return order; chain confirmation then wins over a
+      // merely local lifecycle and skips the provider call.
+      if (group.some((row) => row.chainResolution === "conflicted")) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid, reason: "conflicted-ancestor" } };
+      if (group.some((row) => row.chainResolution === "chain-confirmed")) continue;
+      // Ancestor groups may use a deterministic representative, but the
+      // requested logical transaction must preserve the submission audit
+      // boundary: its attempt belongs to the exact submissionId supplied by
+      // the caller, even when another sibling sorts first.
+      const ancestor = txid === local.txid ? local : canonicalRowForTxid(txid);
+      if (!ancestor) continue;
       const result = await dispatch(ancestor);
       if (result.status === "isolated" || result.status === "rebroadcast-failed") return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ...result, providerId: provider.descriptor.id } };
     }
@@ -2848,14 +2867,38 @@ export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex:
   await db.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never, localOutpoints: (input.localOutpoints ?? []) as never });
 }
 
-export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submissionId: string; state: "local-confirmed" | "isolated" }): Promise<void> {
+export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submissionId: string; localState: "local-confirmed" | "isolated" }): Promise<void> {
   const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
-  await db.finishLocalSubmission({ submissionId: input.submissionId, state: input.state });
+  await db.finishLocalSubmission({ submissionId: input.submissionId, localState: input.localState });
+}
+
+export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: string; submissionId: string; chainResolution: "unresolved" | "chain-confirmed" | "conflicted"; conflictSourceTxids?: string[] }): Promise<void> {
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
+  const row = (await db.listLocalTransactions()).find((candidate) => candidate.id === input.submissionId);
+  if (!row) throw new Error(`P2PKH submission not found: ${input.submissionId}`);
+  const next = { ...row, chainResolution: input.chainResolution, ...(input.chainResolution === "conflicted" ? { conflictSourceTxids: input.conflictSourceTxids ?? ["test-conflict"] } : { conflictSourceTxids: undefined }), ...(input.chainResolution === "chain-confirmed" ? { confirmedFactId: `${row.resourceId}:${row.txid}` } : { confirmedFactId: undefined }) };
+  await new Promise<void>((resolve, reject) => {
+    const transaction = db.getDb().transaction("p2pkh_local_transactions", "readwrite");
+    transaction.objectStore("p2pkh_local_transactions").put(next);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
 }
 
 export async function __testListP2pkhLocalTransactions(ownerPublicKeyHex: string): Promise<unknown[]> {
   const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
   return db.listLocalTransactions();
+}
+
+export async function __testListP2pkhLocalOutpoints(ownerPublicKeyHex: string): Promise<unknown[]> {
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
+  return db.listLocalOutpoints();
+}
+
+export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string): Promise<unknown[]> {
+  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
+  return db.listLocalInputClaims();
 }
 
 export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch?: SessionEpoch; rebroadcast?: boolean }): Promise<CoordinatorResponse> {

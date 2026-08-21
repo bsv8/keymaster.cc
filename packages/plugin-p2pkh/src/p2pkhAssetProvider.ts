@@ -129,7 +129,15 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
       ...facts.map((fact) => ({ id: fact.id, txid: fact.txid, status: "confirmed" as const, source: "chain" as const, syncedAt: fact.lastConfirmedAt })),
       ...locals
         .filter((local) => local.network === network && !factTxids.has(local.txid))
-        .map((local) => ({ id: local.id, txid: local.txid, status: local.state === "chain-confirmed" ? "confirmed" as const : "pending" as const, source: "local-submission" as const, syncedAt: local.updatedAt }))
+        .map((local) => ({
+          id: local.id,
+          txid: local.txid,
+          // Conflicted records are terminal and cannot be replayed; they must
+          // not be presented as still awaiting confirmation.
+          status: local.chainResolution === "chain-confirmed" ? "confirmed" as const : local.chainResolution === "conflicted" ? "failed" as const : "pending" as const,
+          source: "local-submission" as const,
+          syncedAt: local.updatedAt
+        }))
     ];
   }
 
@@ -160,7 +168,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
         txid: h.txid,
         title: statusTitle(h.status, h.source),
         direction: "info",
-        status: h.status === "pending" ? "pending" : h.status === "confirmed" ? "confirmed" : "unconfirmed",
+        status: h.status === "pending" ? "pending" : h.status === "confirmed" ? "confirmed" : h.status === "failed" ? "failed" : "unconfirmed",
         occurredAt: h.syncedAt
       }));
       return {
@@ -180,7 +188,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
           txid: h.txid,
           title: statusTitle(h.status, h.source),
           direction: "info",
-          status: h.status === "pending" ? "pending" : h.status === "confirmed" ? "confirmed" : "unconfirmed",
+          status: h.status === "pending" ? "pending" : h.status === "confirmed" ? "confirmed" : h.status === "failed" ? "failed" : "unconfirmed",
           occurredAt: h.syncedAt
         }))
       );
@@ -214,6 +222,7 @@ function statusTitle(status: string, source: string): { key: string; fallback: s
   if (status === "pending") return source === "local-submission"
     ? { key: "p2pkh.activity.localSubmission", fallback: "本地提交" }
     : { key: "p2pkh.activity.unconfirmed", fallback: "未确认交易" };
+  if (status === "failed") return { key: "p2pkh.activity.failed", fallback: "已冲突交易" };
   if (status === "dropped") return { key: "p2pkh.activity.dropped", fallback: "已丢弃" };
   return { key: "p2pkh.activity.info", fallback: "链上事件" };
 }

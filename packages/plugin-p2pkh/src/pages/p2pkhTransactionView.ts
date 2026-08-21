@@ -69,8 +69,9 @@ export function listPath(network: P2pkhNetwork, page = 1, view: P2pkhWalletView 
   return `${pathname}?${new URLSearchParams({ page: String(page) }).toString()}`;
 }
 
-export function detailPath(txid: string, network: P2pkhNetwork, page: number, source: P2pkhWalletView = "transactions"): string {
+export function detailPath(txid: string, network: P2pkhNetwork, page: number, source: P2pkhWalletView = "transactions", submissionId?: string): string {
   const params = new URLSearchParams({ network, page: String(page), source });
+  if (source === "local-transactions" && submissionId) params.set("submissionId", submissionId);
   return `/p2pkh/tx/${encodeURIComponent(txid)}?${params.toString()}`;
 }
 
@@ -90,6 +91,11 @@ export function parseTransactionSource(search: string): P2pkhWalletView {
 
 export function readTransactionSource(search = window.location.search): P2pkhWalletView {
   return parseTransactionSource(search);
+}
+
+export function readTransactionSubmissionId(search = window.location.search): string | undefined {
+  const value = new URLSearchParams(search).get("submissionId");
+  return value || undefined;
 }
 
 export function transactionSourceListPath(search: string): string {

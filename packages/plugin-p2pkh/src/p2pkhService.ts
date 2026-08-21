@@ -60,6 +60,7 @@ import { deriveP2pkhAddress } from "./p2pkhSigner.js";
 import { createP2pkhTransferService, type P2pkhTransferService } from "./p2pkhTransferService.js";
 import { allocateUtxos, P2pkhAllocationError } from "./utxoAllocator.js";
 import { P2PKH_MSG } from "./p2pkhMessages.js";
+import { canonicalizeP2pkhUtxos, p2pkhOutpointKey, type P2pkhLogicalOutpointKey } from "./p2pkhCanonical.js";
 
 export const P2PKH_TASK_TRANSACTIONS_SYNC = "p2pkh.transactions-sync";
 
@@ -118,45 +119,67 @@ export function calculateP2pkhBalanceBreakdown(input: {
   locals: P2pkhLocalOutpoint[];
   localTransactions: P2pkhLocalTransaction[];
   claims: P2pkhLocalInputClaim[];
-  protectedOutpoints?: Set<string>;
+  protectedOutpoints?: ReadonlySet<P2pkhLogicalOutpointKey>;
   network?: "main" | "test";
 }): P2pkhBalanceBreakdown {
   const chain = input.chain.filter((row) => !input.network || row.network === input.network);
   const localTransactions = new Map(input.localTransactions.map((row) => [row.id, row]));
   const claims = input.claims.filter((row) => !input.network || row.network === input.network);
-  const chainValueByOutpoint = new Map(chain.map((row) => [row.outpointKey, row.value]));
-  const localSpendableRows = input.locals.filter((row) => row.state === "available" && localTransactions.get(row.submissionId)?.state === "local-confirmed" && (!input.network || localTransactions.get(row.submissionId)?.network === input.network));
-  const localValueByOutpoint = new Map(localSpendableRows.map((row) => [`${row.txid}:${row.vout}`, row.value]));
+  const logicalKey = p2pkhOutpointKey;
+  const chainByOutpoint = new Map<string, P2pkhOwnedOutpointProjection>();
+  for (const row of chain) {
+    const key = logicalKey(row);
+    const current = chainByOutpoint.get(key);
+    if (!current || row.id.localeCompare(current.id) < 0) chainByOutpoint.set(key, row);
+  }
+  const chainValueByOutpoint = new Map([...chainByOutpoint].map(([key, row]) => [key, row.value]));
+  const chainKeys = new Set(chainByOutpoint.keys());
+  const localSpendableByOutpoint = new Map<string, P2pkhLocalOutpoint>();
+  for (const row of input.locals) {
+    const local = localTransactions.get(row.submissionId);
+    if (row.state !== "available" || local?.resourceId !== row.resourceId || local.localState !== "local-confirmed" || local.chainResolution !== "unresolved" || (input.network && local.network !== input.network)) continue;
+    const key = logicalKey(row);
+    if (chainKeys.has(key)) continue;
+    const current = localSpendableByOutpoint.get(key);
+    if (!current || row.id.localeCompare(current.id) < 0) localSpendableByOutpoint.set(key, row);
+  }
+  const localSpendableRows = [...localSpendableByOutpoint.values()];
+  const localValueByOutpoint = new Map(localSpendableRows.map((row) => [logicalKey(row), row.value]));
   const claimAmount = (states: string[]) => {
     const seen = new Set<string>();
     return claims.filter((claim) => {
-      const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
+      const key = logicalKey(claim);
       if (!states.includes(claim.state) || seen.has(key)) return false;
       seen.add(key);
       return true;
     }).reduce((sum, claim) => {
-      const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
-      return sum + (claim.value ?? chainValueByOutpoint.get(key) ?? localValueByOutpoint.get(key) ?? 0);
+      const key = logicalKey(claim);
+      return sum + (chainValueByOutpoint.get(key) ?? claim.value ?? localValueByOutpoint.get(key) ?? 0);
     }, 0);
   };
   const activeClaims = claimAmount(["active"]);
   const isolatedClaims = claimAmount(["isolated"]);
-  const protectedKeys = input.protectedOutpoints ?? new Set<string>();
+  const protectedKeys = input.protectedOutpoints ?? new Set<P2pkhLogicalOutpointKey>();
   const localConfirmedChange = localSpendableRows.reduce((sum, row) => sum + row.value, 0);
   const claimStatesByOutpoint = new Map<string, Set<string>>();
   for (const claim of claims) {
-    const key = claim.outpointKey ?? `${claim.txid}:${claim.vout}`;
+    const key = logicalKey(claim);
     const states = claimStatesByOutpoint.get(key) ?? new Set<string>();
     states.add(claim.state);
     claimStatesByOutpoint.set(key, states);
   }
-  const isReserved = (key: string) => protectedKeys.has(key) || Boolean(claimStatesByOutpoint.get(key)?.has("active") || claimStatesByOutpoint.get(key)?.has("isolated"));
+  const isReserved = (resourceId: string, outpointKey: string) => {
+    const separator = outpointKey.lastIndexOf(":");
+    const logicalOutpoint = { resourceId, txid: separator > 0 ? outpointKey.slice(0, separator) : outpointKey, vout: separator > 0 ? Number(outpointKey.slice(separator + 1)) : 0 };
+    const key = logicalKey(logicalOutpoint);
+    return protectedKeys.has(key) || Boolean(claimStatesByOutpoint.get(key)?.has("active") || claimStatesByOutpoint.get(key)?.has("isolated"));
+  };
   // A protocol spend can create both a protected registry entry and a local
   // input claim for the same outpoint. Deduct the outpoint once, regardless of
   // which protections currently describe it.
-  const reservedChain = chain.filter((row) => isReserved(row.outpointKey)).reduce((sum, row) => sum + row.value, 0);
-  const reservedLocal = localSpendableRows.filter((row) => isReserved(`${row.txid}:${row.vout}`)).reduce((sum, row) => sum + row.value, 0);
-  const blockConfirmed = chain.reduce((sum, row) => sum + row.value, 0);
+  const reservedChain = [...chainByOutpoint.values()].filter((row) => row.chainState === "available" && isReserved(row.resourceId, row.outpointKey)).reduce((sum, row) => sum + row.value, 0);
+  const reservedLocal = localSpendableRows.filter((row) => isReserved(row.resourceId, `${row.txid}:${row.vout}`)).reduce((sum, row) => sum + row.value, 0);
+  const blockConfirmed = [...chainByOutpoint.values()].filter((row) => row.chainState === "available").reduce((sum, row) => sum + row.value, 0);
   return {
     blockConfirmed,
     // Claims over confirmed outpoints reduce the chain projection; claims
@@ -428,7 +451,7 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
     const db = await ensureDb();
     const chain = await db.listOwnedOutpoints({ ...(network ? { network } : {}), chainState: "available" });
     const locals = await db.listLocalOutpoints();
-    const protectedKeys = new Set((deps.protectedOutpoints?.list({ ...(network ? { network } : {}), publicKeyHex: getActiveKeyState().activePublicKeyHex ?? undefined }) ?? []).map((row) => `${row.txid}:${row.vout}`));
+    const protectedKeys = new Set((deps.protectedOutpoints?.list({ ...(network ? { network } : {}), publicKeyHex: getActiveKeyState().activePublicKeyHex ?? undefined }) ?? []).map((row) => p2pkhOutpointKey({ resourceId: makeResourceId(row.network), txid: row.txid, vout: row.vout })));
     return calculateP2pkhBalanceBreakdown({ chain, locals, localTransactions: await db.listLocalTransactions(), claims: await db.listLocalInputClaims(), protectedOutpoints: protectedKeys, network });
   }
 
@@ -879,7 +902,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const ownerHex = filter?.ownerPublicKeyHex;
       const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
       const rows = await db.listLocalTransactions(filter?.resourceId, filter?.limit);
-      return getCurrentSettings().includeTestnet ? rows.filter((row) => !filter?.assetId || row.network === assetIdToNetwork(filter.assetId)) : rows.filter((row) => row.network === "main");
+      const visible = filter?.includeResolvedLocalTransactions ? rows : rows.filter((row) => row.chainResolution !== "chain-confirmed");
+      return getCurrentSettings().includeTestnet ? visible.filter((row) => !filter?.assetId || row.network === assetIdToNetwork(filter.assetId)) : visible.filter((row) => row.network === "main");
     },
     async listLocalOutpoints(filter) {
       const ownerHex = filter?.ownerPublicKeyHex;
@@ -896,7 +920,8 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       const ownerHex = filter?.ownerPublicKeyHex;
       const db = ownerHex ? await ensureDbForOwner(ownerHex) : await ensureDb();
       const page = await db.listLocalTransactionsPage({ resourceId: filter?.resourceId, cursor: filter?.cursor, limit: filter?.limit });
-      const items = getCurrentSettings().includeTestnet ? page.items : page.items.filter((row) => row.network === "main");
+      const visible = filter?.includeResolvedLocalTransactions ? page.items : page.items.filter((row) => row.chainResolution !== "chain-confirmed");
+      const items = getCurrentSettings().includeTestnet ? visible : visible.filter((row) => row.network === "main");
       const network = filter?.assetId ? assetIdToNetwork(filter.assetId) : undefined;
       return { items: network ? items.filter((row) => row.network === network) : items, ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}) };
     },
@@ -954,16 +979,24 @@ export function createP2pkhService(deps: P2pkhServiceDeps): IP2pkhService {
       });
       const resource = (await db.listAddresses()).find((row) => row.network === assetIdToNetwork(request.assetId));
       const localTransactions = typeof db.listLocalTransactions === "function" ? await db.listLocalTransactions(resource?.resourceId) : [];
-      const localTransactionIds = new Set(localTransactions.filter((row) => row.state === "local-confirmed").map((row) => row.id));
-      const localCandidates: P2pkhUtxo[] = resource && typeof db.listLocalOutpoints === "function"
-        ? (await db.listLocalOutpoints(resource.resourceId)).filter((row) => row.state === "available" && localTransactionIds.has(row.submissionId)).map((row) => ({ id: row.id, resourceId: row.resourceId, publicKeyHex: resource.publicKeyHex, network: resource.network, address: resource.address, txid: row.txid, vout: row.vout, value: row.value, script: row.scriptHex, status: "unconfirmed", isSpentInMempoolTx: false, syncedAt: row.updatedAt }))
-        : [];
+      const localTransactionIds = new Set(localTransactions.filter((row) => row.localState === "local-confirmed" && row.chainResolution === "unresolved").map((row) => row.id));
+      const localCandidatesByOutpoint = new Map<string, P2pkhUtxo>();
+      if (resource && typeof db.listLocalOutpoints === "function") {
+        for (const row of await db.listLocalOutpoints(resource.resourceId)) {
+          if (row.state !== "available" || !localTransactionIds.has(row.submissionId)) continue;
+          const key = `${row.resourceId}:${row.txid}:${row.vout}`;
+          const candidate = { id: row.id, resourceId: row.resourceId, publicKeyHex: resource.publicKeyHex, network: resource.network, address: resource.address, txid: row.txid, vout: row.vout, value: row.value, script: row.scriptHex, status: "unconfirmed" as const, isSpentInMempoolTx: false, syncedAt: row.updatedAt } satisfies P2pkhUtxo;
+          const current = localCandidatesByOutpoint.get(key);
+          if (!current || candidate.id.localeCompare(current.id) < 0) localCandidatesByOutpoint.set(key, candidate);
+        }
+      }
+      const localCandidates = [...localCandidatesByOutpoint.values()];
       const reservations = await db.listLocalInputClaims();
       const reserved = new Set(
-        reservations.filter((r) => r.state === "active" || r.state === "isolated").map((r) => `${r.txid}:${r.vout}`)
+        reservations.filter((r) => r.state === "active" || r.state === "isolated").map((r) => `${r.resourceId}:${r.txid}:${r.vout}`)
       );
       const protectedFiltered = [...excludeProtectedUtxos(filtered, deps.protectedOutpoints), ...excludeProtectedUtxos(localCandidates, deps.protectedOutpoints)];
-      const candidates = protectedFiltered.filter((u) => !reserved.has(`${u.txid}:${u.vout}`));
+      const candidates = canonicalizeP2pkhUtxos(protectedFiltered).filter((u) => !reserved.has(p2pkhOutpointKey(u)));
       const result = allocateUtxos(candidates, request);
       if (result.ok) return result.allocation;
       throw new P2pkhAllocationError(result.error);

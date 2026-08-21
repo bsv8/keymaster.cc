@@ -107,7 +107,8 @@ export interface P2pkhOwnedOutpointProjection {
   updatedAt: string;
 }
 
-export type P2pkhLocalTransactionState = "prepared" | "submitting" | "local-confirmed" | "isolated" | "chain-confirmed" | "conflicted";
+export type P2pkhLocalLifecycleState = "prepared" | "submitting" | "local-confirmed" | "isolated";
+export type P2pkhLocalChainResolution = "unresolved" | "chain-confirmed" | "conflicted";
 export type P2pkhLocalOutpointState = "unavailable" | "available" | "claimed" | "isolated" | "invalidated";
 
 export interface P2pkhBroadcastAttempt {
@@ -129,17 +130,16 @@ export interface P2pkhLocalTransaction {
   network: BsvNetwork;
   txid: string;
   rawTxHex: string;
-  state: P2pkhLocalTransactionState;
+  localState: P2pkhLocalLifecycleState;
+  chainResolution: P2pkhLocalChainResolution;
   inputOutpointKeys: string[];
   ownOutputs: Array<{ vout: number; value: number; scriptHex: string }>;
   parentTxids: string[];
   createdAt: string;
   updatedAt: string;
   isolationReason?: string;
-  /** State to restore if this confirmed fact disappears during a reorg. */
-  chainConfirmationPreviousState?: P2pkhLocalTransactionState;
-  /** State and remote facts to restore when a competing branch disappears. */
-  conflictPreviousState?: P2pkhLocalTransactionState;
+  confirmedFactId?: string;
+  resolvedAt?: string;
   conflictSourceTxids?: string[];
   attempts: P2pkhBroadcastAttempt[];
 }
@@ -296,6 +296,8 @@ export interface P2pkhUtxoFilter {
   resourceId?: string;
   /** Optional bounded page size for wallet/history projections. */
   limit?: number;
+  /** Local audit read opt-in; UI history defaults to unresolved rows only. */
+  includeResolvedLocalTransactions?: boolean;
 }
 
 /** Opaque cursor page used by the wallet's facts and coins views. */

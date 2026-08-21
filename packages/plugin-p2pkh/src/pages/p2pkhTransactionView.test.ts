@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { detailPath, listPath, parseTransactionSource, readTransactionSource, transactionSourceListPath } from "./p2pkhTransactionView.js";
+import { detailPath, listPath, parseTransactionSource, readTransactionSource, readTransactionSubmissionId, transactionSourceListPath } from "./p2pkhTransactionView.js";
 
 describe("P2PKH transaction navigation paths", () => {
   it("builds each formal network/view list path with page only", () => {
@@ -12,6 +12,8 @@ describe("P2PKH transaction navigation paths", () => {
 
   it("records the source list for detail back navigation without tab compatibility", () => {
     expect(detailPath("abc", "test", 5, "local-transactions")).toBe("/p2pkh/tx/abc?network=test&page=5&source=local-transactions");
+    expect(detailPath("abc", "test", 5, "local-transactions", "submission-2")).toBe("/p2pkh/tx/abc?network=test&page=5&source=local-transactions&submissionId=submission-2");
+    expect(readTransactionSubmissionId("?network=test&source=local-transactions&submissionId=submission-2")).toBe("submission-2");
     expect(readTransactionSource("?network=test&page=5&source=local-transactions")).toBe("local-transactions");
     expect(readTransactionSource("?network=test&page=5&tab=coins")).toBe("transactions");
   });

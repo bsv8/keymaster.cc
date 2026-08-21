@@ -23,6 +23,61 @@ async function deleteDb(): Promise<void> {
 }
 
 describe("P2PKH v10 migration", () => {
+  it("migrates v15 local state to dual axes, preserves audit fields and adds local indexes", async () => {
+    await deleteDb().catch(() => undefined);
+    const confirmedTxid = "aa".repeat(32);
+    await new Promise<void>((resolve, reject) => {
+      const request = indexedDB.open(namespaceDbName(OWNER), 15);
+      request.onupgradeneeded = () => {
+        const db = request.result;
+        const addresses = db.createObjectStore("p2pkh_addresses", { keyPath: "resourceId" });
+        addresses.put(resource);
+        const facts = db.createObjectStore("p2pkh_transactions", { keyPath: "id" });
+        facts.createIndex("resourceId", "resourceId");
+        facts.createIndex("resourceTxid", ["resourceId", "txid"]);
+        facts.put({ id: `${resource.resourceId}:${confirmedTxid}`, resourceId: resource.resourceId, txid: confirmedTxid });
+        const conflictFactTxid = "bb".repeat(32);
+        facts.put({ id: `${resource.resourceId}:${conflictFactTxid}`, resourceId: resource.resourceId, txid: conflictFactTxid });
+        const locals = db.createObjectStore("p2pkh_local_transactions", { keyPath: "id" });
+        locals.createIndex("resourceId", "resourceId");
+        locals.createIndex("resourceTimeline", ["resourceId", "updatedAt", "id"]);
+        locals.createIndex("txid", "txid");
+        locals.createIndex("inputOutpointKeys", "inputOutpointKeys", { multiEntry: true });
+        locals.createIndex("parentTxids", "parentTxids", { multiEntry: true });
+        const base = { resourceId: resource.resourceId, publicKeyHex: OWNER, network: "main" as const, rawTxHex: "deadbeef", inputOutpointKeys: ["11".repeat(32) + ":0"], ownOutputs: [{ vout: 0, value: 9, scriptHex: "" }], parentTxids: ["parent"], attempts: [{ id: "attempt", submissionId: "legacy-local", providerId: "woc", startedAt: "now", status: "accepted" as const }], createdAt: "old", updatedAt: "new" };
+        locals.put({ ...base, id: "prepared", txid: "01".repeat(32), state: "prepared" });
+        locals.put({ ...base, id: "submitting", txid: "02".repeat(32), state: "submitting" });
+        locals.put({ ...base, id: "local-confirmed", txid: "03".repeat(32), state: "local-confirmed" });
+        locals.put({ ...base, id: "isolated", txid: "04".repeat(32), state: "isolated" });
+        locals.put({ ...base, id: "legacy-local", txid: confirmedTxid, state: "chain-confirmed", chainConfirmationPreviousState: "local-confirmed", conflictPreviousState: "prepared", conflictSourceTxids: ["remote"] });
+        locals.put({ ...base, id: "conflicted", txid: conflictFactTxid, state: "conflicted", conflictPreviousState: "chain-confirmed", chainConfirmationPreviousState: "submitting", conflictSourceTxids: ["remote"] });
+        locals.put({ ...base, id: "chain-invalid-previous", txid: "05".repeat(32), state: "chain-confirmed", chainConfirmationPreviousState: "conflicted", conflictPreviousState: "chain-confirmed" });
+        locals.put({ ...base, id: "conflicted-invalid-previous", txid: "06".repeat(32), state: "conflicted", conflictPreviousState: "chain-confirmed", chainConfirmationPreviousState: "conflicted" });
+      };
+      request.onsuccess = () => { request.result.close(); resolve(); };
+      request.onerror = () => reject(request.error);
+    });
+    const db = createP2pkhDb(await openP2pkhDb({ keyspace: keyspace(), publicKeyHex: OWNER }));
+    const localStore = db.getDb().transaction("p2pkh_local_transactions", "readonly").objectStore("p2pkh_local_transactions");
+    expect(localStore.indexNames).toContain("resourceChainResolution");
+    expect(localStore.indexNames).toContain("resourceTxid");
+    const migratedRows = await new Promise<Array<Record<string, unknown>>>((resolve, reject) => { const req = localStore.getAll(); req.onsuccess = () => resolve(req.result as Array<Record<string, unknown>>); req.onerror = () => reject(req.error); });
+    const rowsById = new Map(migratedRows.map((item) => [String(item.id), item]));
+    expect(rowsById.get("prepared")).toMatchObject({ localState: "prepared", chainResolution: "unresolved" });
+    expect(rowsById.get("submitting")).toMatchObject({ localState: "submitting", chainResolution: "unresolved" });
+    expect(rowsById.get("local-confirmed")).toMatchObject({ localState: "local-confirmed", chainResolution: "unresolved" });
+    expect(rowsById.get("isolated")).toMatchObject({ localState: "isolated", chainResolution: "unresolved" });
+    expect(rowsById.get("conflicted")).toMatchObject({ localState: "submitting", chainResolution: "conflicted", conflictSourceTxids: ["remote"] });
+    expect(rowsById.get("chain-invalid-previous")).toMatchObject({ localState: "isolated", chainResolution: "chain-confirmed" });
+    expect(rowsById.get("conflicted-invalid-previous")).toMatchObject({ localState: "isolated", chainResolution: "conflicted" });
+    const row = rowsById.get("legacy-local");
+    expect(row).toMatchObject({ localState: "local-confirmed", chainResolution: "chain-confirmed", confirmedFactId: `${resource.resourceId}:${confirmedTxid}`, rawTxHex: "deadbeef", ownOutputs: [{ vout: 0, value: 9, scriptHex: "" }], parentTxids: ["parent"], attempts: [{ id: "attempt" }], conflictSourceTxids: ["remote"], createdAt: "old", updatedAt: "new" });
+    expect(row).not.toHaveProperty("state");
+    expect(row).not.toHaveProperty("chainConfirmationPreviousState");
+    expect(row).not.toHaveProperty("conflictPreviousState");
+    await deleteDb();
+  });
+
   it("preserves claims, local submissions, protocol submissions and removes provider stores", async () => {
     await deleteDb().catch(() => undefined);
     await new Promise<void>((resolve, reject) => {
