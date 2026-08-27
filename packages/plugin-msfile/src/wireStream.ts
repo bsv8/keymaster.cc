@@ -72,14 +72,29 @@ export function startReceiveLoop(duplex: WireDuplex, callbacks: StreamCallbacks)
 /** 共享的发送队列：同一方向只允许一个 writer。 */
 export class FrameWriter {
   private tail: Promise<void> = Promise.resolve();
+  private pendingBytes = 0;
 
-  constructor(private readonly duplex: WireDuplex) {}
+  /**
+   * maxQueueBytes 是单条 stream 的写队列硬上限。默认值足够容纳若干
+   * 头部帧，但不会允许调用方因为远端背压而无限堆积请求。
+   */
+  constructor(private readonly duplex: WireDuplex, private readonly maxQueueBytes = 4 * 1024 * 1024) {}
 
   enqueue(bytes: Uint8Array): Promise<void> {
+    if (bytes.byteLength > this.maxQueueBytes || this.pendingBytes + bytes.byteLength > this.maxQueueBytes) {
+      return Promise.reject(new Error("msfile stream writer queue limit exceeded"));
+    }
+    this.pendingBytes += bytes.byteLength;
     const next = this.tail.then(() => this.duplex.write(bytes));
     // 队列自身不中断：失败通过返回值暴露给当前调用方，后续请求自行失败重试。
-    this.tail = next.catch(() => undefined);
+    this.tail = next.catch(() => undefined).finally(() => {
+      this.pendingBytes = Math.max(0, this.pendingBytes - bytes.byteLength);
+    });
     return next;
+  }
+
+  get queuedBytes(): number {
+    return this.pendingBytes;
   }
 }
 

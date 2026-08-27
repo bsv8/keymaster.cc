@@ -74,6 +74,7 @@ import {
   type MsFileServiceImpl,
   type MsFileServiceEventState,
 } from "@keymaster/plugin-msfile/coordinator";
+import { createMsFileExecutorTransport, type MsFileExecutorOperation } from "@keymaster/plugin-msfile/executor-transport";
 // 施工单 2026-08-26/001：identity/signing 的 payload 与 Peer Record 编码必须来自
 // bitcoin-libp2p；Worker 只持有 active private key 并做标准 DER 签名。
 import {
@@ -593,10 +594,18 @@ const msfileRequestKey = (clientId: string, requestId: string): string => `${cli
 const msfileExecutorIdentityRequests = new Map<string, { controller: AbortController; clientId: string; leaseId: string }>();
 const msfileExecutorIdentityRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const msfileGrants = new Map<string, { context: MsFileConnectAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
-// 有界并发（审查修复）：4 路与 Storage 数据面一致。
-  // 峰值内存上界 = 4 × 16 MiB Seed attachment（Gate 验收项，KMMF-004 复测）。
-const MSFILE_DATA_MAX_ACTIVE = 4;
+// 有界并发：Seed attachment 较大，固定 4 路；Block 较小，允许 8 路。
+// 读 attachment 的全局上限是 4 + 8；Stat 另留 4 个轻量槽位，确保大 Read
+// 期间 Stat 不会因 attachment 配额耗尽而被阻塞。
+const MSFILE_DATA_MAX_ACTIVE = 12;
+const MSFILE_STAT_MAX_ACTIVE = 4;
+const MSFILE_TOTAL_MAX_ACTIVE = MSFILE_DATA_MAX_ACTIVE + MSFILE_STAT_MAX_ACTIVE;
+const MSFILE_SEED_DATA_MAX_ACTIVE = 4;
+const MSFILE_BLOCK_DATA_MAX_ACTIVE = 8;
 let msfileDataActive = 0;
+let msfileStatActive = 0;
+let msfileSeedDataActive = 0;
+let msfileBlockDataActive = 0;
 
 function emitMsFileState(): void {
   msfileRevision += 1;
@@ -622,6 +631,7 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
   }
   if (msfileRuntime) return msfileRuntime;
   const service = createMsFileService({
+    transport: msfileExecutorTransport,
     notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
   });
   // 服务构造是同步的；DB 打开在内部异步完成，首个 control 调用会等待。
@@ -1106,7 +1116,10 @@ function handlePortDisconnect(clientId: string): void {
     if (request.clientId === clientId) { request.controller.abort(); msfileExecutorIdentityRequests.delete(requestId); }
   }
   for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
-  if (msfileExecutorLease !== undefined && msfileExecutorLease.clientId === clientId) clearMsFileExecutorLeaseLocked();
+  if (msfileExecutorLease !== undefined && msfileExecutorLease.clientId === clientId) {
+    clearMsFileExecutorLeaseLocked();
+    emitMsFileState();
+  }
   connectedPorts.delete(clientId);
   // 最后一个 port 断开时，Worker 生命周期结束即内存消失
   // 不主动锁定，等待浏览器回收或重启
@@ -1170,6 +1183,9 @@ async function handleClientMessage(
   // lock 是收敛型的安全操作：即使发起页面持有旧 epoch，也必须能够锁定
   // 当前全局会话。其余命令仍由 epoch 栅栏拒绝，避免旧页面操作新会话。
   if (request.kind !== "lock" && "expectedSessionEpoch" in request && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
+    if (request.kind === "msfile.executor.acquire") {
+      try { request.executorPort?.close(); } catch { /* already detached */ }
+    }
     if (isP2pkhBroadcastRequest(request)) {
       await abortNotDispatchedP2pkhSubmission(request, "stale-session-epoch");
       sendToPort(connectedPort.port, { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "not-dispatched", reason: "stale-session-epoch" } });
@@ -1428,8 +1444,22 @@ interface MsFileExecutorLeaseState extends MsFileExecutorLease {
   ownerPublicKeyHex: string;
   acquiredAt: number;
   lastPeerRecordSequence?: bigint;
+  /** 生产 Window executor 的专用数据面通道；Spike lease 没有此字段。 */
+  transportPort?: MessagePort;
+  transportReady: boolean;
 }
 let msfileExecutorLease: MsFileExecutorLeaseState | undefined;
+
+interface MsFileExecutorBridgePending {
+  resolve: (value: unknown) => void;
+  reject: (error: Error) => void;
+  leaseId: string;
+  cleanup?: () => void;
+  reservedBytes: number;
+}
+const msfileExecutorBridgePending = new Map<string, MsFileExecutorBridgePending>();
+const MSFILE_EXECUTOR_BRIDGE_MAX_IN_FLIGHT_BYTES = 4 * 16 * 1024 * 1024 + 8 * 256 * 1024;
+let msfileExecutorBridgeInFlightBytes = 0;
 
 const MSFILE_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
 // Spike RPC 的有界 pre-sign cancellation window：只影响尚未接入生产数据面的
@@ -1445,6 +1475,107 @@ let msfileExecutorTransferPendingItems = 0;
 let msfileExecutorTransferPendingBytes = 0;
 let msfileExecutorTransferPeakBytes = 0;
 
+function rejectMsfileExecutorBridgePending(error: Error): void {
+  for (const [requestId, pending] of msfileExecutorBridgePending) {
+    msfileExecutorBridgePending.delete(requestId);
+    msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+    pending.cleanup?.();
+    pending.reject(error);
+  }
+}
+
+function handleMsfileExecutorPortMessage(event: MessageEvent): void {
+  const data = event.data as { type?: string; leaseId?: string; requestId?: string; ok?: boolean; result?: unknown; errorMessage?: string } | undefined;
+  if (!data || data.type === undefined) return;
+  const lease = msfileExecutorLease;
+  if (!lease || data.leaseId !== lease.leaseId) return;
+  if (data.type === "ready") {
+    lease.transportReady = data.ok === true;
+    if (!lease.transportReady) {
+      clearMsFileExecutorLeaseLocked();
+    }
+    emitMsFileState();
+    return;
+  }
+  if (data.type !== "response" || typeof data.requestId !== "string") return;
+  const pending = msfileExecutorBridgePending.get(data.requestId);
+  if (!pending || pending.leaseId !== lease.leaseId) return;
+  msfileExecutorBridgePending.delete(data.requestId);
+  msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+  pending.cleanup?.();
+  if (data.ok === true) pending.resolve(data.result);
+  else pending.reject(new Error(typeof data.errorMessage === "string" ? data.errorMessage : "MSFile executor request failed"));
+}
+
+function attachMsfileExecutorPort(port: MessagePort, clientId: string, leaseId: string): void {
+  if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
+    throw new Error("invalid MSFile executor port");
+  }
+  const lease = msfileExecutorLease;
+  if (!lease || lease.clientId !== clientId || lease.leaseId !== leaseId) {
+    try { port.close(); } catch { /* already closed */ }
+    return;
+  }
+  lease.transportPort = port;
+  lease.transportReady = false;
+  port.onmessage = handleMsfileExecutorPortMessage;
+  port.onmessageerror = () => {
+    if (msfileExecutorLease?.leaseId === leaseId) clearMsFileExecutorLeaseLocked();
+  };
+  port.start();
+}
+
+function requestMsfileExecutorOperation(operation: MsFileExecutorOperation, signal?: AbortSignal): Promise<unknown> {
+  const lease = msfileExecutorLease;
+  if (!lease || !lease.transportPort || !lease.transportReady || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
+    return Promise.reject(msfileError("msfile_unavailable", "MSFile Window executor is unavailable"));
+  }
+  const requestId = `msfile-exec-data-${crypto.randomUUID()}`;
+  const request = { type: "request", leaseId: lease.leaseId, requestId, operation };
+  return new Promise<unknown>((resolve, reject) => {
+    const reservedBytes = operation.type === "read"
+      ? operation.kind === "block" ? 256 * 1024 : 16 * 1024 * 1024
+      : 0;
+    if (msfileExecutorBridgeInFlightBytes + reservedBytes > MSFILE_EXECUTOR_BRIDGE_MAX_IN_FLIGHT_BYTES) {
+      reject(msfileError("msfile_unavailable", "MSFile executor transfer limit exceeded"));
+      return;
+    }
+    msfileExecutorBridgeInFlightBytes += reservedBytes;
+    const pending: MsFileExecutorBridgePending = { resolve, reject, leaseId: lease.leaseId, reservedBytes };
+    msfileExecutorBridgePending.set(requestId, pending);
+    const onAbort = () => {
+      if (!msfileExecutorBridgePending.delete(requestId)) return;
+      msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+      try { lease.transportPort?.postMessage({ type: "cancel", leaseId: lease.leaseId, requestId }); } catch { /* executor may be gone */ }
+      reject(new DOMException("The operation was aborted", "AbortError"));
+    };
+    if (signal) {
+      if (signal.aborted) { onAbort(); return; }
+      signal.addEventListener("abort", onAbort, { once: true });
+      pending.cleanup = () => signal.removeEventListener("abort", onAbort);
+    }
+    try {
+      lease.transportPort!.postMessage(request);
+    } catch (error) {
+      if (msfileExecutorBridgePending.delete(requestId)) {
+        msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+        pending.cleanup?.();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  });
+}
+
+const msfileExecutorTransport = createMsFileExecutorTransport({
+  get available() {
+    return msfileExecutorLease?.transportReady === true
+      && msfileExecutorLease.sessionEpoch === coordinatorState.sessionEpoch
+      && coordinatorState.vaultStatus === "unlocked";
+  },
+  request: requestMsfileExecutorOperation,
+  dispose: () => undefined,
+});
+
 function clearMsFileExecutorLeaseTimer(): void {
   if (msfileExecutorLeaseTimer !== undefined) clearTimeout(msfileExecutorLeaseTimer);
   msfileExecutorLeaseTimer = undefined;
@@ -1457,6 +1588,7 @@ function scheduleMsFileExecutorLeaseExpiry(leaseId: string, acquiredAt: number):
     msfileExecutorLeaseTimer = undefined;
     if (msfileExecutorLease?.leaseId === leaseId && Date.now() - msfileExecutorLease.acquiredAt >= MSFILE_EXECUTOR_LEASE_TTL_MS) {
       clearMsFileExecutorLeaseLocked();
+      emitMsFileState();
     }
   }, remaining);
 }
@@ -1464,8 +1596,12 @@ function scheduleMsFileExecutorLeaseExpiry(leaseId: string, acquiredAt: number):
 function clearMsFileExecutorLeaseLocked(): void {
   clearMsFileExecutorLeaseTimer();
   if (msfileExecutorLease === undefined) return;
+  const oldLease = msfileExecutorLease;
+  rejectMsfileExecutorBridgePending(new Error("MSFile Window executor lease was revoked"));
+  try { oldLease.transportPort?.postMessage({ type: "revoked", leaseId: oldLease.leaseId }); } catch { /* executor may be gone */ }
+  try { oldLease.transportPort?.close(); } catch { /* already closed */ }
   for (const [requestId, pending] of msfileExecutorIdentityRequests) {
-    if (pending.leaseId === msfileExecutorLease.leaseId) {
+    if (pending.leaseId === oldLease.leaseId) {
       pending.controller.abort();
       msfileExecutorIdentityRequests.delete(requestId);
     }
@@ -1501,7 +1637,8 @@ function acquireMsFileExecutorLease(input: {
     ownerPublicKeyHex: input.ownerPublicKeyHex,
     sessionEpoch: coordinatorState.sessionEpoch,
     activePublicKeyHex: input.ownerPublicKeyHex,
-    acquiredAt: Date.now()
+    acquiredAt: Date.now(),
+    transportReady: false
   };
   scheduleMsFileExecutorLeaseExpiry(leaseId, msfileExecutorLease.acquiredAt);
   return { ok: true, lease: { leaseId, sessionEpoch: msfileExecutorLease.sessionEpoch, activePublicKeyHex: input.ownerPublicKeyHex } };
@@ -1737,10 +1874,18 @@ async function executeMsfileData(request: Extract<CoordinatorClientRequest, { ki
   const data: CoordinatorMsFileData = request.data;
   const signal = controller.signal;
   // 有界并发：超过上限直接失败（不静默排队无限请求）。
-  if (msfileDataActive >= MSFILE_DATA_MAX_ACTIVE) {
+  if (
+    msfileDataActive >= MSFILE_TOTAL_MAX_ACTIVE ||
+    (data.type === "stat" && msfileStatActive >= MSFILE_STAT_MAX_ACTIVE) ||
+    (data.type === "read-seed" && (msfileSeedDataActive >= MSFILE_SEED_DATA_MAX_ACTIVE || msfileDataActive - msfileStatActive >= MSFILE_DATA_MAX_ACTIVE)) ||
+    (data.type === "read-block" && (msfileBlockDataActive >= MSFILE_BLOCK_DATA_MAX_ACTIVE || msfileDataActive - msfileStatActive >= MSFILE_DATA_MAX_ACTIVE))
+  ) {
     throw msfileError("msfile_unavailable", "Too many concurrent MSFile requests");
   }
   msfileDataActive += 1;
+  if (data.type === "stat") msfileStatActive += 1;
+  if (data.type === "read-seed") msfileSeedDataActive += 1;
+  if (data.type === "read-block") msfileBlockDataActive += 1;
   try {
     // 真正调用 service 前的执行栅栏：排队 / 授权解析期间的取消与世代切换。
     if (requestEpoch !== coordinatorState.sessionEpoch || signal.aborted) {
@@ -1772,6 +1917,9 @@ async function executeMsfileData(request: Extract<CoordinatorClientRequest, { ki
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
   } finally {
     msfileDataActive = Math.max(0, msfileDataActive - 1);
+    if (data.type === "stat") msfileStatActive = Math.max(0, msfileStatActive - 1);
+    if (data.type === "read-seed") msfileSeedDataActive = Math.max(0, msfileSeedDataActive - 1);
+    if (data.type === "read-block") msfileBlockDataActive = Math.max(0, msfileBlockDataActive - 1);
   }
 }
 
@@ -1782,16 +1930,31 @@ async function executeMsfileExecutorRequest(request: MsFileExecutorSpikeRequest,
     if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
     }
+    if (request.executorPort && (typeof request.executorPort.postMessage !== "function" || typeof request.executorPort.start !== "function")) {
+      try { request.executorPort.close(); } catch { /* malformed transferred value */ }
+      return executorIdentityError(request.requestId, "invalid MSFile executor port", "validation-error");
+    }
     const result = acquireMsFileExecutorLease({ clientId: actualClientId, ownerPublicKeyHex: request.ownerPublicKeyHex });
     if (!result.ok) {
+      try { request.executorPort?.close(); } catch { /* already detached */ }
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `MSFile executor lease rejected: ${result.reason}`, code: "msfile_unavailable" } };
     }
+    if (request.executorPort) {
+      try {
+        attachMsfileExecutorPort(request.executorPort, actualClientId, result.lease.leaseId);
+      } catch (error) {
+        clearMsFileExecutorLeaseLocked();
+        return executorIdentityError(request.requestId, error instanceof Error ? error.message : "invalid MSFile executor port", "validation-error");
+      }
+    }
+    emitMsFileState();
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result.lease };
   }
   if (request.kind === "msfile.executor.release") {
     if (msfileExecutorLease !== undefined && msfileExecutorLease.leaseId === request.leaseId && msfileExecutorLease.clientId === actualClientId) {
       clearMsFileExecutorLeaseLocked();
     }
+    emitMsFileState();
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
   if (request.kind === "msfile.executor.spike.transfer") {
@@ -2169,11 +2332,14 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         coordinatorState.sessionEpoch = previousEpoch;
         coordinatorMeta.selectedPublicKeyHex = previousSelected;
         coordinatorMeta.generation = previousGeneration;
+        emitMsFileState();
         throw error;
       } finally {
         if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
       }
-      publishSessionState("activate-key"); return true;
+      publishSessionState("activate-key");
+      emitMsFileState();
+      return true;
     }
     case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKeyAndSidecars(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) { dropActivePrivateKey(); coordinatorState.activePublicKeyHex = undefined; } await repairSelectedAfterDelete(operation.publicKeyHex); return true;
     case "createVault": return await createVaultRpc(operation.password);
@@ -2634,6 +2800,7 @@ async function performGlobalLock(reason: string): Promise<void> {
   coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
   await persistCoordinatorMeta();
   publishSessionState(reason === "key-deleted" || reason === "empty-vault" ? "delete-active-key" : reason === "recover-empty" ? "recover-empty-vault" : "lock");
+  emitMsFileState();
   emitStorageState();
 
   // 广播任务快照，让 UI 立即显示 blocked 状态
@@ -2672,6 +2839,10 @@ async function handleActivateKey(
     const previousGeneration = coordinatorState.keyspaceGeneration;
     const previousEpoch = coordinatorState.sessionEpoch;
     const previousSelected = coordinatorMeta.selectedPublicKeyHex;
+    // Active key change invalidates the MSFile identity, host and all old
+    // supplier connections before the new epoch becomes observable.
+    releaseMsfileRuntime("activate-key");
+    clearMsFileExecutorLeaseLocked();
     replaceActivePrivateKey(privateKey);
     coordinatorState.activePublicKeyHex = request.publicKeyHex;
     coordinatorState.keyspaceGeneration++;
@@ -2691,12 +2862,14 @@ async function handleActivateKey(
       coordinatorState.sessionEpoch = previousEpoch;
       coordinatorMeta.selectedPublicKeyHex = previousSelected;
       coordinatorMeta.generation = previousGeneration;
+      emitMsFileState();
       throw error;
     } finally {
       if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
     }
 
     publishSessionState("activate-key");
+    emitMsFileState();
 
     return {
       requestId,
@@ -3438,11 +3611,15 @@ export function __testResetState(): void {
   msfileRequests.clear();
   msfileGrants.clear();
   msfileDataActive = 0;
+  msfileStatActive = 0;
+  msfileSeedDataActive = 0;
+  msfileBlockDataActive = 0;
+  rejectMsfileExecutorBridgePending(new Error("MSFile Coordinator runtime restarted"));
+  msfileExecutorBridgeInFlightBytes = 0;
   msfileRuntime = undefined;
   lastMsFileState = undefined;
   msfileMutationTail = Promise.resolve();
-  msfileExecutorLease = undefined;
-  clearMsFileExecutorLeaseTimer();
+  clearMsFileExecutorLeaseLocked();
   msfileExecutorIdentityTail = Promise.resolve();
   msfileMutationTail = Promise.resolve();
   storageStateTail = Promise.resolve();

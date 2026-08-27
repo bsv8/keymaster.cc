@@ -122,6 +122,18 @@ export const msfilePlugin: PluginManifest = {
   setup(ctx: PluginContext) {
     const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
     const service = new MsFileServiceProxy(coordinator);
+    // Window executor 与插件生命周期绑定：禁用插件时立即释放 host/lease。
+    // 采用动态 import，避免把 WebRTC/WSS 依赖带入 SharedWorker 或设置模块图。
+    let executorCleanup: (() => void) | undefined;
+    let setupActive = true;
+    const spikeMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).has("msfileSpike");
+    if (!spikeMode) {
+      void import("./windowExecutor.js")
+        .then(({ installMsFileWindowExecutor }) => {
+          if (setupActive) executorCleanup = installMsFileWindowExecutor(coordinator);
+        })
+        .catch(() => undefined);
+    }
     ctx.provide<import("@keymaster/contracts").MsFileService>(MSFILE_SERVICE_CAPABILITY, service);
 
     const resources_ = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
@@ -162,6 +174,9 @@ export const msfilePlugin: PluginManifest = {
     });
 
     return () => {
+      setupActive = false;
+      executorCleanup?.();
+      executorCleanup = undefined;
       try {
         settings.unregister(settingsId);
       } catch {

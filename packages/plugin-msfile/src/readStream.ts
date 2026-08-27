@@ -9,6 +9,7 @@ export const WIRE_PRICE_LIMIT_EXCEEDED = "price_limit_exceeded";
 
 export type ReadOutcome =
   | { type: "ok"; contentHashHex: string; content: Uint8Array }
+  | { type: "integrity-failed" }
   | { type: "price-limit-exceeded" }
   | { type: "cancelled"; replacedByRequestId: bigint }
   | { type: "supplier-error"; errorCode: string }
@@ -22,7 +23,11 @@ function toHex(bytes: Uint8Array): string {
 interface PendingEntry {
   contentHashHex: string;
   maxContentBytes: number;
+  /** 同 hash 的更大 request id 已覆盖本请求，等待取消或迟到 attachment。 */
+  supersededBy?: bigint;
   resolve(outcome: ReadOutcome): void;
+  /** 直接完成 Promise；调用方必须先 settle，避免重复结算。 */
+  rawResolve(outcome: ReadOutcome): void;
   reject(error: Error): void;
   settled: boolean;
   detachSignal?: () => void;
@@ -38,21 +43,30 @@ interface PendingEntry {
  */
 export class ReadStreamSession {
   private readonly pending = new Map<bigint, PendingEntry>();
+  private readonly latestByHash = new Map<string, bigint>();
   private readonly counter = createRequestIdCounter();
   private readonly writer: FrameWriter;
   private readonly stopLoop: () => void;
   private disposed = false;
+  private failed = false;
 
   constructor(private readonly duplex: WireDuplex) {
     this.writer = new FrameWriter(duplex);
     this.stopLoop = startReceiveLoop(duplex, {
       onMessage: (message) => this.handleMessage(message),
-      onFailure: () => this.failAllPending(),
+      onFailure: () => {
+        this.failed = true;
+        this.failAllPending();
+      },
     });
   }
 
   get pendingCount(): number {
     return this.pending.size;
+  }
+
+  get isUsable(): boolean {
+    return !this.disposed && !this.failed;
   }
 
   /**
@@ -83,18 +97,26 @@ export class ReadStreamSession {
         if (!this.settle(requestId)) return;
         resolveFn(outcome);
       },
+      rawResolve: resolveFn,
       reject: (error) => {
         if (!this.settle(requestId)) return;
         rejectFn(error);
       },
       settled: false,
     };
+    const previousRequestId = this.latestByHash.get(entry.contentHashHex);
+    if (previousRequestId !== undefined) {
+      const previous = this.pending.get(previousRequestId);
+      if (previous && !previous.settled) previous.supersededBy = requestId;
+    }
+    this.latestByHash.set(entry.contentHashHex, requestId);
     this.pending.set(requestId, entry);
 
     const onAbort = () => {
       if (entry.settled) return;
       if (this.pending.delete(requestId)) {
         entry.settled = true;
+        if (this.latestByHash.get(entry.contentHashHex) === requestId) this.latestByHash.delete(entry.contentHashHex);
         rejectFn(new DOMException("The operation was aborted", "AbortError"));
       }
     };
@@ -118,12 +140,14 @@ export class ReadStreamSession {
   }
 
   /** 返回是否发生了本次结算（用于幂等）。 */
-  private settle(requestId: bigint): boolean {
+  private settle(requestId: bigint, after?: () => void): boolean {
     const entry = this.pending.get(requestId);
     if (!entry || entry.settled) return false;
     this.pending.delete(requestId);
     entry.settled = true;
+    if (this.latestByHash.get(entry.contentHashHex) === requestId) this.latestByHash.delete(entry.contentHashHex);
     entry.detachSignal?.();
+    after?.();
     return true;
   }
 
@@ -132,12 +156,18 @@ export class ReadStreamSession {
       case "read-response": {
         const entry = this.pending.get(message.requestId);
         if (!entry || message.attachment === undefined) return true; // stale：读完即淘汰
+        if (entry.supersededBy !== undefined) {
+          this.settle(message.requestId, () => entry.rawResolve({ type: "cancelled", replacedByRequestId: entry.supersededBy! }));
+          return true;
+        }
         if (toHex(message.contentHash) !== entry.contentHashHex) {
-          entry.reject(new Error("supplier returned mismatched content_hash"));
+          this.settle(message.requestId, () => entry.rawResolve({ type: "integrity-failed" }));
+          this.poisonAfterResponse();
           return true;
         }
         if (message.attachment.length > entry.maxContentBytes) {
-          entry.reject(new Error("supplier returned oversized content"));
+          this.settle(message.requestId, () => entry.rawResolve({ type: "integrity-failed" }));
+          this.poisonAfterResponse();
           return true;
         }
         entry.resolve({ type: "ok", contentHashHex: entry.contentHashHex, content: message.attachment });
@@ -146,7 +176,7 @@ export class ReadStreamSession {
       case "read-cancelled": {
         const entry = this.pending.get(message.requestId);
         if (!entry) return true;
-        entry.resolve({ type: "cancelled", replacedByRequestId: message.replacedByRequestId });
+        entry.resolve({ type: "cancelled", replacedByRequestId: entry.supersededBy ?? message.replacedByRequestId });
         return true;
       }
       case "error-response": {
@@ -167,9 +197,16 @@ export class ReadStreamSession {
       if (entry.settled) continue;
       this.pending.delete(id);
       entry.settled = true;
+      if (this.latestByHash.get(entry.contentHashHex) === id) this.latestByHash.delete(entry.contentHashHex);
       entry.detachSignal?.();
-      entry.resolve({ type: "transport-failed" });
+      entry.rawResolve({ type: "transport-failed" });
     }
+  }
+
+  private poisonAfterResponse(): void {
+    this.failed = true;
+    this.failAllPending();
+    void this.duplex.close().catch(() => undefined);
   }
 
   dispose(): void {

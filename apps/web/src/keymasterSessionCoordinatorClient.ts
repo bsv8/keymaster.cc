@@ -516,10 +516,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   }
 
   /** 施工单 001：申请 Window executor lease（同一 epoch 仅一个）。 */
-  async msfileExecutorAcquire(ownerPublicKeyHex: string): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").MsFileExecutorLease>> {
-    const request = { kind: "msfile.executor.acquire" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+  async msfileExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").MsFileExecutorLease>> {
+    const request = { kind: "msfile.executor.acquire" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, ...(executorPort ? { executorPort } : {}) };
     try {
-      const response = await this.sendRequest(request);
+      const response = await this.sendRequest(request, executorPort ? [executorPort] : []);
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: response.operationResult as import("@keymaster/contracts").MsFileExecutorLease, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
@@ -691,7 +691,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     }
   }
 
-  private async sendRequest(request: CoordinatorClientRequest, transfer: ArrayBuffer[] = []): Promise<CoordinatorResponse> {
+  private async sendRequest(request: CoordinatorClientRequest, transfer: Transferable[] = []): Promise<CoordinatorResponse> {
     if (!this.isConnected || !this.port) {
       throw coordinatorSendError("Not connected to Coordinator", "not-dispatched");
     }

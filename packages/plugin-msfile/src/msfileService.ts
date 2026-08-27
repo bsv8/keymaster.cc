@@ -521,7 +521,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
             throw new MsFileServiceError("msfile_unavailable");
           }
           return await this.transport.stat({ supplier, seedHashHex: input.seedHashHex, supplierGeneration: generationAtStart, signal: input.signal });
-        } catch {
+        } catch (error) {
+          if (input.signal?.aborted) throw error;
           // 单个供应商失败不影响其他供应商结果；网络错误不得折叠成 absent。
           return { supplierPublicKeyHex: supplier.supplierPublicKeyHex, status: "network-error" };
         }
@@ -756,7 +757,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     supplierPublicKeyHex: string,
     kind: MsFileContentKind,
     hashHex: string,
-    outcome: { type: "ok"; content: Uint8Array } | { type: "price-limit-exceeded" } | { type: "supplier-error"; errorCode: string } | { type: "cancelled"; replacedByRequestId: bigint } | { type: "transport-failed" },
+    outcome: { type: "ok"; content: Uint8Array } | { type: "integrity-failed" } | { type: "price-limit-exceeded" } | { type: "supplier-error"; errorCode: string } | { type: "cancelled"; replacedByRequestId: bigint } | { type: "transport-failed" },
     supplierGenerationAtStart: number,
     supplierFenceAtStart: number
   ): Promise<MsFileReadResult> {
@@ -766,6 +767,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
           throw new MsFileServiceError("msfile_price_limit_exceeded");
         case "supplier-error":
           throw mapSupplierErrorCode(outcome.errorCode);
+        case "integrity-failed":
+          throw new MsFileServiceError("msfile_integrity_error");
         default:
           throw new MsFileServiceError("msfile_transport_error");
       }

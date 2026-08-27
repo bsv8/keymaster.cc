@@ -1,10 +1,8 @@
 // packages/plugin-msfile/src/msfileTransport.ts
 // Window executor 的传输接缝。
 //
-// 施工单 2026-08-26/001：remote signer / Window executor 架构 Spike PASS 前，
-// 正式 libp2p runtime 不得施工。本文件冻结 executor 必须实现的接口；默认实现
-// fail closed（msfile_unavailable）。Spike PASS 后按 002 施工真实 Window executor，
-// Safari、公共 WSS 和目标 NAS 只属于 003 发布门禁，不阻止 runtime 编码。
+// Worker 侧只依赖这份 transport 契约；生产实现由 Window executor bridge
+// 注入，默认 unavailable 实现仍用于 locked/disabled/启动失败场景。
 
 import type { MsFileContentKind, MsFileSupplierConfig, MsFileSupplierProbeResult, MsFileSupplierStat } from "@keymaster/contracts";
 
@@ -21,7 +19,11 @@ export interface MsFileTransportReadInput {
 
 export type MsFileTransportReadOutcome =
   | { type: "ok"; content: Uint8Array }
-  | { type: "price-limit-exceeded" };
+  | { type: "integrity-failed" }
+  | { type: "price-limit-exceeded" }
+  | { type: "supplier-error"; errorCode: string }
+  | { type: "cancelled"; replacedByRequestId: bigint }
+  | { type: "transport-failed" };
 
 export interface MsFileTransportStatInput {
   supplier: MsFileSupplierConfig;

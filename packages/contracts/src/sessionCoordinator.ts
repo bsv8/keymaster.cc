@@ -179,7 +179,7 @@ export interface MsFileExecutorTransferResult {
  * 请求绑定实际 MessagePort；lock/key switch/Worker 重启会清空 lease。
  */
 export type CoordinatorClientRequestWithMsfileExecutor =
-  | { kind: "msfile.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch }
+  | { kind: "msfile.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch; /** 生产 executor 的专用双工 RPC 端口。 */ executorPort?: MessagePort }
   | { kind: "msfile.executor.release"; clientId: string; requestId: string; leaseId: string }
   | { kind: "msfile.executor.spike.transfer"; clientId: string; requestId: string; leaseId: string; expectedSessionEpoch: SessionEpoch; bytes: ArrayBuffer }
   | ({ kind: "msfile.executor.identity.sign-noise"; clientId: string; requestId: string } & MsFileNoiseSignRequest)
@@ -458,7 +458,7 @@ export interface SessionCoordinatorClient {
   msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   msfileCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   msfileSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
-  msfileExecutorAcquire(ownerPublicKeyHex: string): Promise<CoordinatorValueResult<MsFileExecutorLease>>;
+  msfileExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<CoordinatorValueResult<MsFileExecutorLease>>;
   msfileExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult>;
   msfileExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<MsFileExecutorTransferResult>>;
   msfileExecutorSignNoiseStaticKey(request: Omit<MsFileNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<MsFileIdentitySignResult>>;

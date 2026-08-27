@@ -6,6 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./coordinator": "./src/coordinator.ts",
+    "./executor-transport": "./src/executorTransport.ts",
+    "./window-executor": "./src/windowExecutor.ts",
     "./executor-spike": "./src/executorSpike.ts",
     "./styles.css": "./src/styles.css"
   },
