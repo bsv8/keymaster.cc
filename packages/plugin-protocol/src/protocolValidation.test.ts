@@ -78,3 +78,64 @@ describe("connect.launch signed proof boundary", () => {
     })).toThrowError(/unsupported field/iu);
   });
 });
+
+describe("msfile protocol validation（施工单 docs/proposals/msfile KMMF-007）", () => {
+  const SUPPLIER = "035f3d296df6e017c017270bfc0293dc7d197ff9e04a25c096260420644d86d21a";
+  const HASH = "ab".repeat(32);
+
+  it("accepts the three canonical shapes", () => {
+    expect(parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "s1", method: "msfile.stat",
+      params: { connectSessionId: "session", seedHashHex: HASH }
+    }).params).toMatchObject({ connectSessionId: "session" });
+    expect(parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "s2", method: "msfile.seed.read",
+      params: { connectSessionId: "session", supplierPublicKeyHex: SUPPLIER, seedHashHex: HASH }
+    }).params).toMatchObject({ supplierPublicKeyHex: SUPPLIER });
+    expect(parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "s3", method: "msfile.block.read",
+      params: { connectSessionId: "session", supplierPublicKeyHex: SUPPLIER, blockHashHex: HASH }
+    }).params).toMatchObject({ supplierPublicKeyHex: SUPPLIER });
+  });
+
+  // SDK 传入 maxPriceSatoshis / fileId / blockIndex 等额外字段必须全部拒绝。
+  it.each([
+    "maxPriceSatoshis",
+    "contentKind",
+    "kind",
+    "fileId",
+    "accessId",
+    "seedAccessId",
+    "blockIndex",
+    "ownerPublicKeyHex",
+    "appIdentity"
+  ])("rejects forbidden field %s on msfile.seed.read", (field) => {
+    expect(() => parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.seed.read",
+      params: {
+        connectSessionId: "session",
+        supplierPublicKeyHex: SUPPLIER,
+        seedHashHex: HASH,
+        [field]: field === "blockIndex" ? 1 : field.includes("Satoshis") ? "10" : {}
+      }
+    })).toThrowError(/forbidden|invalid_request/i);
+  });
+
+  it("rejects non-canonical hashes and malformed supplier keys", () => {
+    expect(() => parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.stat",
+      params: { connectSessionId: "s", seedHashHex: "AB".repeat(32) }
+    })).toThrowError(/64 lower-case hex/iu);
+    expect(() => parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.block.read",
+      params: { connectSessionId: "s", supplierPublicKeyHex: "04" + "11".repeat(32), blockHashHex: HASH }
+    })).toThrowError(/compressed secp256k1/iu);
+  });
+
+  it("requires connectSessionId like every other business method family", () => {
+    expect(() => parseRequestMessage({
+      v: PROTOCOL_VERSION, type: "request", id: "x", method: "msfile.stat",
+      params: { seedHashHex: HASH }
+    })).toThrowError(/connectSessionId/iu);
+  });
+});

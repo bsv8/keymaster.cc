@@ -35,6 +35,8 @@ function recordViolation(file, detail) {
 /** 检查 plugin-* 包之间互相 import。 */
 for (const plugin of pluginNames) {
   const src = join(packagesDir, plugin, "src");
+  // 已删除但残留 node_modules 的包（如历史遗留目录）没有 src，直接跳过。
+  if (!existsSync(src)) continue;
   for (const file of walk(src)) {
     const text = readFileSync(file, "utf8");
     for (const other of pluginNames) {

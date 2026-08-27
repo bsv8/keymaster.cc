@@ -139,8 +139,10 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
 
   // 施工单 002：注入 Coordinator client
   // 在 bootstrap 阶段创建 Coordinator client 并注入到 PluginHost
-  const { createCoordinatorClient } = await import("./keymasterSessionCoordinatorClient.js");
-  const coordinatorClient = createCoordinatorClient();
+  const { getCoordinatorClient } = await import("./keymasterSessionCoordinatorClient.js");
+  // Spike hooks and plugin capabilities must share the same physical port;
+  // creating a second client here would bypass the real SharedWorker session.
+  const coordinatorClient = getCoordinatorClient();
   await connectCoordinatorWithStartupRetry(coordinatorClient);
   host.provide("session-coordinator.client", coordinatorClient);
 

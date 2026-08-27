@@ -24,7 +24,7 @@
 //   - 文案中文；错误 message 原样显示英文。
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useI18n, usePluginHost, useResource, useResourceSelector } from "@keymaster/runtime";
+import { useCapability, useHasCapability, useI18n, usePluginHost, useResource, useResourceSelector } from "@keymaster/runtime";
 import { formatShortPublicKey, PROTOCOL_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import type {
   ProtocolConnectAuthSnapshot,
@@ -37,7 +37,6 @@ import type {
   ProtocolSessionSnapshot,
   CoordinatorCommandResult
 } from "@keymaster/contracts";
-import { useCapability } from "@keymaster/runtime";
 import { ProtocolCommandFeed } from "./ProtocolCommandFeed.js";
 import { OriginSettingsTrayInline } from "./OriginSettingsTray.js";
 
@@ -304,6 +303,9 @@ export function ProtocolPopupPage() {
       ) : null}
       <div className="protocol-popup__content">
         {snap.phase === "error" ? <SessionErrorBanner t={t} /> : null}
+        {/* 施工单 docs/proposals/msfile：价格确认视图。渲染在 Keymaster
+            自己的 popup 内容区，Connect App HTML 无法覆盖或伪装它。 */}
+        <MsFileApprovalSection t={t} />
         <ProtocolCommandFeed
           t={t}
           feed={feed}
@@ -312,6 +314,130 @@ export function ProtocolPopupPage() {
           now={now}
         />
       </div>
+    </div>
+  );
+}
+
+/* ============== MSFile 价格确认（施工单 docs/proposals/msfile KMMF-006） ============== */
+
+type MsFileApprovalServiceLike = {
+  listPendingApprovals(): import("@keymaster/contracts").MsFilePendingApprovalView[];
+  subscribe(listener: () => void): () => void;
+  resolveApproval(approvalId: string, decision: import("@keymaster/contracts").MsFileApprovalDecision): Promise<void>;
+};
+
+function useVaultUnlocked(): boolean {
+  const vault = useCapability<{ status(): "unlocked" | "locked" | "uninitialized" | "uninitialized-empty" }>("vault.service");
+  try {
+    return vault.status() === "unlocked";
+  } catch {
+    return false;
+  }
+}
+
+function MsFileApprovalSection({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
+  const hasMsfile = useHasCapability("msfile.service");
+  if (!hasMsfile) return null;
+  return <MsFileApprovalSectionInner t={t} />;
+}
+
+function MsFileApprovalSectionInner({ t }: { t: (key: string, options?: { defaultValue?: string }) => string }) {
+  // 仅在 has("msfile.service") 为真时挂载，hook 顺序稳定。
+  const service = useCapability<MsFileApprovalServiceLike>("msfile.service");
+  const host = usePluginHost();
+  // 审批列表订阅走 Resource Store（plugin-msfile 注册的 msfile.status 资源）。
+  const statusResource = useResourceSelector<{ approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }, { approvals: import("@keymaster/contracts").MsFilePendingApprovalView[] }>(
+    host.resourceStore,
+    "msfile.status",
+    [],
+    (snapshot) => snapshot.data ?? { approvals: service.listPendingApprovals() },
+    (a, b) => JSON.stringify(a.approvals) === JSON.stringify(b.approvals)
+  );
+  const unlocked = useVaultUnlocked();
+  const approvals = statusResource.approvals;
+  const [amounts, setAmounts] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  if (approvals.length === 0) return null;
+
+  // 审查修复：确认操作失败必须反馈到 UI，不能静默吞掉。
+  async function decide(approvalId: string, decision: import("@keymaster/contracts").MsFileApprovalDecision) {
+    try {
+      await service.resolveApproval(approvalId, decision);
+      setError(null);
+      setAmounts((prev) => {
+        const next = { ...prev };
+        delete next[approvalId];
+        return next;
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  return (
+    <div className="protocol-popup__msfile-approvals" role="group" aria-label={t("msfile.approvals.title", { defaultValue: "Price increase requested" })}>
+      {approvals.map((approval) => (
+        <div key={approval.approvalId} className="protocol-msfile-approval-card">
+          <strong>{t("msfile.approvals.title", { defaultValue: "Price increase requested" })}</strong>
+          <p>{t("msfile.approvals.description", { defaultValue: "" })}</p>
+          <dl>
+            <dt>app</dt>
+            <dd>{approval.appName} ({approval.appId})</dd>
+            <dt>kind</dt>
+            <dd>{approval.kind}</dd>
+            <dt>current cap</dt>
+            <dd>{approval.effectiveMaxPriceSatoshis}</dd>
+            <dt>hash</dt>
+            <dd><code>{approval.contentHashHint}…</code></dd>
+          </dl>
+          {error ? <p className="protocol-msfile-approval-error">{error}</p> : null}
+          <input
+            type="text"
+            inputMode="numeric"
+            placeholder={t("msfile.approvals.newLimit", { defaultValue: "New maximum price (satoshis)" })}
+            value={amounts[approval.approvalId] ?? ""}
+            onChange={(event) => setAmounts((prev) => ({ ...prev, [approval.approvalId]: event.target.value.replace(/[^0-9]/g, "") }))}
+          />
+          <div className="protocol-msfile-approval-actions">
+            <button
+              type="button"
+              onClick={() => {
+                void decide(approval.approvalId, { action: "reject" });
+              }}
+              disabled={!unlocked}
+            >
+              {t("protocol.confirm.reject", { defaultValue: "拒绝" })}
+            </button>
+            <button
+              type="button"
+              disabled={!unlocked || !(amounts[approval.approvalId] ?? "").length}
+              onClick={() => {
+                void decide(approval.approvalId, {
+                  action: "allow",
+                  scope: "once",
+                  newMaxPriceSatoshis: amounts[approval.approvalId]!
+                });
+              }}
+            >
+              {t("msfile.approvals.allowOnce", { defaultValue: "Allow once" })}
+            </button>
+            <button
+              type="button"
+              disabled={!unlocked || !(amounts[approval.approvalId] ?? "").length}
+              onClick={() => {
+                void decide(approval.approvalId, {
+                  action: "allow",
+                  scope: "always",
+                  newMaxPriceSatoshis: amounts[approval.approvalId]!
+                });
+              }}
+            >
+              {t("msfile.approvals.allowAlways", { defaultValue: "Always allow up to this amount" })}
+            </button>
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

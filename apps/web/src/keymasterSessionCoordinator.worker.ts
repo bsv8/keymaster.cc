@@ -36,6 +36,10 @@ import type {
   P2pkhNetworkProviderSelection,
   P2pkhProviderRegistry,
   P2pkhTransactionBroadcastProvider,
+  MsFileExecutorLease,
+  MsFileNoiseSignRequest,
+  MsFilePeerRecordSignRequest,
+  MsFileIdentitySignResult,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, buildOpenedAppMsgMessage, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
@@ -50,8 +54,36 @@ import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordi
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
 import type { KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
-import type { StorageService, StorageServiceStatus, CoordinatorStorageControl, CoordinatorStorageData, CoordinatorStorageStateEvent } from "@keymaster/contracts";
+import type {
+  StorageService,
+  StorageServiceStatus,
+  CoordinatorStorageControl,
+  CoordinatorStorageData,
+  CoordinatorStorageStateEvent,
+  CoordinatorMsFileControl,
+  CoordinatorMsFileData,
+  CoordinatorMsFileStateEvent,
+  MsFileConnectAppContext,
+  MsFileErrorCode,
+} from "@keymaster/contracts";
 import { createStorageService, openStorageDb, STORAGE_SECRET_SCOPE } from "@keymaster/plugin-storage/coordinator";
+// 施工单 docs/proposals/msfile：MSFile runtime 真值在 Coordinator SharedWorker。
+// 001 架构 Spike 与 002 生产 Runtime 完成前 transport fail closed；之后由 Window executor 注入。
+import {
+  createMsFileService,
+  type MsFileServiceImpl,
+  type MsFileServiceEventState,
+} from "@keymaster/plugin-msfile/coordinator";
+// 施工单 2026-08-26/001：identity/signing 的 payload 与 Peer Record 编码必须来自
+// bitcoin-libp2p；Worker 只持有 active private key 并做标准 DER 签名。
+import {
+  noiseSigningPayload,
+  peerIdFromPublicKeyBytes,
+  parsePeerId,
+  peerRecordUnsigned,
+  sha256Bytes,
+  validatePublicKey,
+} from "bitcoin-libp2p/identity";
 import { getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
 
 // Vault DB 操作（Worker 内可直接访问 IndexedDB）
@@ -168,21 +200,23 @@ type StorageProviderRecord = { key: "active"; sealedConfig: StorageEnvelopeRecor
 type StorageUploadRecord = { internalUploadId: string; sealedS3UploadId: StorageEnvelopeRecord };
 type StorageRotationSnapshot = { provider?: StorageProviderRecord; uploads: StorageUploadRecord[] };
 type StorageRotationJournal = { key: "rotation"; phase: "prepared" | "storage-committed"; old: StorageRotationSnapshot; next?: StorageRotationSnapshot };
-let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null>) | undefined;
+let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null>) | undefined;
 
 function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").StorageAppContext["appIdentity"] {
   return isVerifiedAppIdentitySnapshot(identity);
 }
 
-async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null> {
+async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
     const resolved = await testStorageSessionResolver(sessionId);
-    return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity) ? resolved : null;
+    return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity)
+      ? { sessionId: resolved.sessionId, origin: resolved.origin, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", appIdentity: resolved.appIdentity, revokedAt: null }
+      : null;
   }
   if (!sessionId || typeof indexedDB === "undefined") return null;
   const record = await getAuthoritativeConnectSession(sessionId);
   return record && isValidStorageIdentity(record.appIdentity)
-    ? { sessionId: record.sessionId, origin: record.origin, appIdentity: record.appIdentity, revokedAt: null }
+    ? { sessionId: record.sessionId, origin: record.origin, ownerPublicKeyHex: record.ownerPublicKeyHex, appIdentity: record.appIdentity, revokedAt: null }
     : null;
 }
 
@@ -533,6 +567,7 @@ let testStorageStartupFailure = false;
 let storageStartupFailure = false;
 const storageLifecycleListeners = new Set<(snapshot: { status: "unlocked" | "locked" | "uninitialized" }) => void>();
 let storageRevision = 0;
+let msfileRevision = 0;
 let lastStorageState: CoordinatorStorageStateEvent | undefined;
 let storageStateTail: Promise<void> = Promise.resolve();
 const storageRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
@@ -548,6 +583,63 @@ const STORAGE_DATA_MAX_QUEUE = 64;
 const STORAGE_DATA_MAX_PER_PORT = 16;
 const STORAGE_DATA_MAX_ACTIVE_PER_PORT = STORAGE_DATA_CONCURRENCY - 1;
 const storageDataActiveByPort = new Map<string, number>();
+
+/* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
+let msfileRuntime: MsFileServiceImpl | undefined;
+let lastMsFileState: CoordinatorMsFileStateEvent | undefined;
+const msfileRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
+const msfileRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
+/** 两个 identity RPC 的取消句柄；不得与 MSFile 数据面混用。 */
+const msfileExecutorIdentityRequests = new Map<string, { controller: AbortController; clientId: string; leaseId: string }>();
+const msfileExecutorIdentityRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
+const msfileGrants = new Map<string, { context: MsFileConnectAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
+// 有界并发（审查修复）：4 路与 Storage 数据面一致。
+  // 峰值内存上界 = 4 × 16 MiB Seed attachment（Gate 验收项，KMMF-004 复测）。
+const MSFILE_DATA_MAX_ACTIVE = 4;
+let msfileDataActive = 0;
+
+function emitMsFileState(): void {
+  msfileRevision += 1;
+  const state = msfileRuntime?.describeState();
+  const event: CoordinatorMsFileStateEvent = {
+    topic: "msfile.state",
+    type: "msfile.state.changed",
+    msfileRevision,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    status: state?.status ?? (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "unavailable"),
+    supplierGeneration: state?.supplierGeneration ?? 0,
+    globalSettings: state?.globalSettings ?? null,
+    pendingApprovals: state?.pendingApprovals ?? []
+  };
+  lastMsFileState = event;
+  publishTopicEvent("msfile.state", event);
+}
+
+async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
+  // 审查修复：锁定 / 未初始化 / fatal 状态不得创建 MSFile runtime。
+  if (coordinatorState.vaultStatus !== "unlocked") {
+    throw msfileError("msfile_unavailable", "MSFile requires an unlocked Vault");
+  }
+  if (msfileRuntime) return msfileRuntime;
+  const service = createMsFileService({
+    notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
+  });
+  // 服务构造是同步的；DB 打开在内部异步完成，首个 control 调用会等待。
+  msfileRuntime = service;
+  emitMsFileState();
+  return msfileRuntime;
+}
+
+function releaseMsfileRuntime(_reason: string): void {
+  for (const pending of msfileRequests.values()) pending.controller.abort();
+  msfileRequests.clear();
+  for (const pending of msfileExecutorIdentityRequests.values()) pending.controller.abort();
+  msfileExecutorIdentityRequests.clear();
+  msfileGrants.clear();
+  (msfileRuntime as unknown as { dispose?: () => void } | undefined)?.dispose?.();
+  msfileRuntime = undefined;
+  lastMsFileState = undefined;
+}
 
 function storageCoordinatorError(code: "storage_limit_exceeded" | "storage_unavailable"): Error & { code: typeof code } {
   const error = new Error(code) as Error & { code: typeof code };
@@ -1006,6 +1098,15 @@ function handlePortDisconnect(clientId: string): void {
   }
   for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
   storagePortCounts.delete(clientId);
+  // MSFile：断开端口的未决请求与 grant 全部失效。
+  for (const [requestId, request] of msfileRequests) {
+    if (request.clientId === clientId) { request.controller.abort(); msfileRequests.delete(requestId); }
+  }
+  for (const [requestId, request] of msfileExecutorIdentityRequests) {
+    if (request.clientId === clientId) { request.controller.abort(); msfileExecutorIdentityRequests.delete(requestId); }
+  }
+  for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
+  if (msfileExecutorLease !== undefined && msfileExecutorLease.clientId === clientId) clearMsFileExecutorLeaseLocked();
   connectedPorts.delete(clientId);
   // 最后一个 port 断开时，Worker 生命周期结束即内存消失
   // 不主动锁定，等待浏览器回收或重启
@@ -1080,8 +1181,12 @@ async function handleClientMessage(
 
   const response = await processRequest(request, clientId);
   const transfers: ArrayBuffer[] = [];
-  const body = (response.operationResult as { content?: { bytes?: ArrayBuffer } } | undefined)?.content?.bytes;
+  const body = (response.operationResult as { content?: { bytes?: ArrayBuffer }; signatureDer?: ArrayBuffer; bytes?: ArrayBuffer } | undefined)?.content?.bytes;
+  const signatureDer = (response.operationResult as { signatureDer?: ArrayBuffer } | undefined)?.signatureDer;
+  const executorTransfer = (response.operationResult as { bytes?: ArrayBuffer } | undefined)?.bytes;
   if (body instanceof ArrayBuffer) transfers.push(body);
+  if (signatureDer instanceof ArrayBuffer) transfers.push(signatureDer);
+  if (executorTransfer instanceof ArrayBuffer) transfers.push(executorTransfer);
   sendToPort(connectedPort.port, response, transfers);
 }
 
@@ -1091,8 +1196,6 @@ function handleHello(
 ): void {
   const connectedPort = connectedPorts.get(clientId);
   if (!connectedPort) return;
-
-  connectedPort.clientId = request.clientId;
 
   // 发送完整快照
   sendToPort(connectedPort.port, {
@@ -1134,6 +1237,16 @@ async function handleSubscribe(
     }
     if (topic === "p2pkh.providers") {
       return [{ topic, baselineRevision: p2pkhProviderRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: { topic, type: "p2pkh.providers.changed" as const, providerRevision: p2pkhProviderRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: getP2pkhProviderSnapshot() } }];
+    }
+    if (topic === "msfile.state") {
+      const baselineRevision = msfileRevision;
+      const cached = lastMsFileState ?? {
+        topic: "msfile.state" as const, type: "msfile.state.changed" as const,
+        msfileRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch,
+        status: (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "unavailable") as import("@keymaster/contracts").MsFileServiceStatus,
+        supplierGeneration: 0, globalSettings: null, pendingApprovals: []
+      };
+      return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
@@ -1287,6 +1400,517 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   }
 }
 
+function isMsfileRequest(request: CoordinatorClientRequest): boolean {
+  return (
+    request.kind === "msfile.grant" ||
+    request.kind === "msfile.control" ||
+    request.kind === "msfile.data" ||
+    request.kind === "msfile.cancel" ||
+    request.kind === "msfile.session.abort" ||
+    request.kind === "msfile.executor.acquire" ||
+    request.kind === "msfile.executor.release" ||
+    request.kind === "msfile.executor.spike.transfer" ||
+    request.kind === "msfile.executor.identity.sign-noise" ||
+    request.kind === "msfile.executor.identity.sign-peer-record"
+  );
+}
+
+// 审查修复：控制面 mutation 必须串行。SharedWorker 的 onmessage 不等待前一个
+// 请求结束，多端口可并发进入 executeMsfileControl；不串行化时同世代检查与
+// “读取旧策略—合并—写回”都会互相覆盖。
+let msfileMutationTail: Promise<void> = Promise.resolve();
+
+/* ---------- MSFile executor lease（施工单 001 §3.2） ----------
+ * Coordinator 内存真值：同一 epoch+owner 同时最多一个 Window executor。
+ * lock / key switch / Worker 重启直接清空；port 断开立即回收。 */
+interface MsFileExecutorLeaseState extends MsFileExecutorLease {
+  clientId: string;
+  ownerPublicKeyHex: string;
+  acquiredAt: number;
+  lastPeerRecordSequence?: bigint;
+}
+let msfileExecutorLease: MsFileExecutorLeaseState | undefined;
+
+const MSFILE_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
+// Spike RPC 的有界 pre-sign cancellation window：只影响尚未接入生产数据面的
+// executor identity 通道，用于让跨 tab lifecycle 事件可靠越过二次栅栏。
+const MSFILE_EXECUTOR_PRE_SIGN_YIELD_MS = 25;
+const MSFILE_EXECUTOR_TRANSFER_MAX_ITEMS = 5;
+const MSFILE_EXECUTOR_TRANSFER_MAX_BYTES = 17 * 1024 * 1024;
+const MSFILE_EXECUTOR_TRANSFER_MAX_ITEM_BYTES = 16 * 1024 * 1024;
+const UINT64_MAX = (1n << 64n) - 1n;
+let msfileExecutorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
+let msfileExecutorIdentityTail: Promise<void> = Promise.resolve();
+let msfileExecutorTransferPendingItems = 0;
+let msfileExecutorTransferPendingBytes = 0;
+let msfileExecutorTransferPeakBytes = 0;
+
+function clearMsFileExecutorLeaseTimer(): void {
+  if (msfileExecutorLeaseTimer !== undefined) clearTimeout(msfileExecutorLeaseTimer);
+  msfileExecutorLeaseTimer = undefined;
+}
+
+function scheduleMsFileExecutorLeaseExpiry(leaseId: string, acquiredAt: number): void {
+  clearMsFileExecutorLeaseTimer();
+  const remaining = Math.max(0, MSFILE_EXECUTOR_LEASE_TTL_MS - (Date.now() - acquiredAt));
+  msfileExecutorLeaseTimer = setTimeout(() => {
+    msfileExecutorLeaseTimer = undefined;
+    if (msfileExecutorLease?.leaseId === leaseId && Date.now() - msfileExecutorLease.acquiredAt >= MSFILE_EXECUTOR_LEASE_TTL_MS) {
+      clearMsFileExecutorLeaseLocked();
+    }
+  }, remaining);
+}
+
+function clearMsFileExecutorLeaseLocked(): void {
+  clearMsFileExecutorLeaseTimer();
+  if (msfileExecutorLease === undefined) return;
+  for (const [requestId, pending] of msfileExecutorIdentityRequests) {
+    if (pending.leaseId === msfileExecutorLease.leaseId) {
+      pending.controller.abort();
+      msfileExecutorIdentityRequests.delete(requestId);
+    }
+  }
+  msfileExecutorLease = undefined;
+}
+
+function acquireMsFileExecutorLease(input: {
+  clientId: string;
+  ownerPublicKeyHex: string;
+}): { ok: true; lease: MsFileExecutorLease } | { ok: false; reason: "locked" | "stale-epoch" | "owner-mismatch" | "busy" } {
+  if (coordinatorState.vaultStatus !== "unlocked") return { ok: false, reason: "locked" };
+  if (!coordinatorState.activePublicKeyHex || input.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+    return { ok: false, reason: "owner-mismatch" };
+  }
+  if (msfileExecutorLease !== undefined) {
+    // 同 port 幂等续租；跨 port / 跨 owner 冲突一律拒绝。
+    if (msfileExecutorLease.clientId === input.clientId && msfileExecutorLease.ownerPublicKeyHex === input.ownerPublicKeyHex) {
+      msfileExecutorLease.acquiredAt = Date.now();
+      scheduleMsFileExecutorLeaseExpiry(msfileExecutorLease.leaseId, msfileExecutorLease.acquiredAt);
+      return { ok: true, lease: { leaseId: msfileExecutorLease.leaseId, sessionEpoch: msfileExecutorLease.sessionEpoch, activePublicKeyHex: msfileExecutorLease.ownerPublicKeyHex } };
+    }
+    // 有界 TTL：超过租期视为旧 executor 已死，允许接管。
+    if (Date.now() - msfileExecutorLease.acquiredAt < MSFILE_EXECUTOR_LEASE_TTL_MS) {
+      return { ok: false, reason: "busy" };
+    }
+    clearMsFileExecutorLeaseLocked();
+  }
+  const leaseId = `msfile-exec-lease-${crypto.randomUUID()}`;
+  msfileExecutorLease = {
+    leaseId,
+    clientId: input.clientId,
+    ownerPublicKeyHex: input.ownerPublicKeyHex,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    activePublicKeyHex: input.ownerPublicKeyHex,
+    acquiredAt: Date.now()
+  };
+  scheduleMsFileExecutorLeaseExpiry(leaseId, msfileExecutorLease.acquiredAt);
+  return { ok: true, lease: { leaseId, sessionEpoch: msfileExecutorLease.sessionEpoch, activePublicKeyHex: input.ownerPublicKeyHex } };
+}
+
+function executorIdentityError(requestId: string, message: string, status: "error" | "validation-error" = "error"): CoordinatorResponse {
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: status === "error" ? { status, message, code: "msfile_unavailable" } : { status, message } };
+}
+
+function parseUint64Decimal(value: string): bigint {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) throw new Error("Peer Record sequence must be canonical uint64 decimal");
+  const sequence = BigInt(value);
+  if (sequence > UINT64_MAX) throw new Error("Peer Record sequence exceeds uint64");
+  return sequence;
+}
+
+function currentExecutorPublicKey(): Uint8Array {
+  if (!coordinatorState.activePublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("MSFile executor active key is unavailable");
+  verifySessionKeyPair({ publicKeyHex: coordinatorState.activePublicKeyHex, privateKeyBytes: coordinatorState.activePrivateKeyBytes });
+  return validatePublicKey(cryptoHexToBytes(coordinatorState.activePublicKeyHex));
+}
+
+function executorLeaseIsCurrent(leaseId: string, actualClientId: string, expectedSessionEpoch: SessionEpoch): MsFileExecutorLeaseState {
+  const lease = msfileExecutorLease;
+  if (
+    lease === undefined ||
+    lease.leaseId !== leaseId ||
+    lease.clientId !== actualClientId ||
+    lease.sessionEpoch !== expectedSessionEpoch ||
+    lease.sessionEpoch !== coordinatorState.sessionEpoch ||
+    lease.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex ||
+    lease.activePublicKeyHex !== coordinatorState.activePublicKeyHex ||
+    coordinatorState.vaultStatus !== "unlocked"
+  ) throw new Error("MSFile executor lease is not valid");
+  if (Date.now() - lease.acquiredAt >= MSFILE_EXECUTOR_LEASE_TTL_MS) {
+    clearMsFileExecutorLeaseLocked();
+    throw new Error("MSFile executor lease expired");
+  }
+  return lease;
+}
+
+function assertExecutorIdentityStillCurrent(lease: MsFileExecutorLeaseState, actualClientId: string, expectedSessionEpoch: SessionEpoch, publicKeyHex: string): void {
+  const fresh = executorLeaseIsCurrent(lease.leaseId, actualClientId, expectedSessionEpoch);
+  if (fresh !== lease || fresh.ownerPublicKeyHex !== publicKeyHex || coordinatorState.activePublicKeyHex !== publicKeyHex) {
+    throw new Error("MSFile executor identity changed during signing");
+  }
+}
+
+async function executeMsfileExecutorIdentitySign(
+  request: Extract<CoordinatorClientRequest, { kind: "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>,
+  actualClientId: string,
+  signal: AbortSignal
+): Promise<CoordinatorResponse> {
+  const lease = executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
+  const publicKeyHex = coordinatorState.activePublicKeyHex!;
+  const publicKey = currentExecutorPublicKey();
+  if (signal.aborted) throw new Error("MSFile identity signing was cancelled");
+
+  let digest: Uint8Array;
+  let peerRecordSequence: bigint | undefined;
+  if (request.kind === "msfile.executor.identity.sign-noise") {
+    const staticKey = new Uint8Array(request.noiseStaticPublicKey);
+    if (staticKey.byteLength !== 32) throw new Error("Noise static public key must be exactly 32 bytes");
+    digest = sha256Bytes(noiseSigningPayload(staticKey));
+  } else {
+    if (!Array.isArray(request.addresses) || request.addresses.length !== 0) {
+      throw new Error("Signed Peer Record addresses must be empty in the MSFile executor spike");
+    }
+    const sequence = parseUint64Decimal(request.sequence);
+    const expectedPeerId = peerIdFromPublicKeyBytes(publicKey);
+    const peerId = parsePeerId(request.peerId);
+    if (peerId.toString() !== expectedPeerId.toString()) throw new Error("Peer Record PeerId does not match the active public key");
+    if (lease.lastPeerRecordSequence !== undefined && sequence < lease.lastPeerRecordSequence) {
+      throw new Error("Peer Record sequence must be monotonic per lease");
+    }
+    const unsigned = peerRecordUnsigned({ peerId, addresses: [], sequence }, expectedPeerId);
+    digest = sha256Bytes(unsigned);
+    // The sequence is reserved only after a successful, current-key signature.
+    peerRecordSequence = sequence;
+  }
+
+  // 给已经排队的 lock / key-switch / port-lifecycle 事件一次抢占机会。
+  // 本地 secp256k1 很快，若不跨 task，让步前后的二次 lease/epoch 栅栏
+  // 在真实浏览器中无法被触发，也就不能证明“等待中的签名”会 fail closed。
+  await new Promise<void>((resolve) => setTimeout(resolve, MSFILE_EXECUTOR_PRE_SIGN_YIELD_MS));
+  if (signal.aborted) throw new Error("MSFile identity signing was cancelled");
+  assertExecutorIdentityStillCurrent(lease, actualClientId, request.expectedSessionEpoch, publicKeyHex);
+
+  const signature = await signEcdsaDigest({ privateKeyBytes: coordinatorState.activePrivateKeyBytes!, digest, format: "der" });
+  assertExecutorIdentityStillCurrent(lease, actualClientId, request.expectedSessionEpoch, publicKeyHex);
+  if (signal.aborted) throw new Error("MSFile identity signing was cancelled");
+  if (request.kind === "msfile.executor.identity.sign-peer-record") {
+    if (peerRecordSequence === undefined) throw new Error("Peer Record sequence was not retained");
+    lease.lastPeerRecordSequence = peerRecordSequence;
+  }
+  lease.acquiredAt = Date.now();
+  scheduleMsFileExecutorLeaseExpiry(lease.leaseId, lease.acquiredAt);
+  return {
+    requestId: request.requestId,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    ack: { status: "ok" },
+    operationResult: { signatureDer: signature.slice().buffer as ArrayBuffer } satisfies MsFileIdentitySignResult
+  };
+}
+
+function enqueueMsfileExecutorIdentitySign(
+  request: Extract<CoordinatorClientRequest, { kind: "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>,
+  actualClientId: string,
+  signal: AbortSignal
+): Promise<CoordinatorResponse> {
+  const run = msfileExecutorIdentityTail.then(
+    () => executeMsfileExecutorIdentitySign(request, actualClientId, signal),
+    () => executeMsfileExecutorIdentitySign(request, actualClientId, signal)
+  );
+  msfileExecutorIdentityTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
+  "settings.global.update",
+  "supplier.upsert",
+  "supplier.delete",
+  "app-policy.update",
+  "app-policy.clear",
+  "approval.resolve"
+]);
+
+function isMsfileMutationControl(control: CoordinatorMsFileControl): boolean {
+  return MSFILE_MUTATION_CONTROLS.has(control.type);
+}
+
+async function executeMsfileControl(request: Extract<CoordinatorClientRequest, { kind: "msfile.control" }>): Promise<CoordinatorResponse> {
+  if (!isMsfileMutationControl(request.control)) {
+    return executeMsfileControlNow(request);
+  }
+  // mutation 进串行尾；前一个失败不阻塞后续。
+  const run = msfileMutationTail.then(() => executeMsfileControlNow(request), () => executeMsfileControlNow(request));
+  msfileMutationTail = run.then(() => undefined, () => undefined);
+  return run;
+}
+
+async function executeMsfileControlNow(request: Extract<CoordinatorClientRequest, { kind: "msfile.control" }>): Promise<CoordinatorResponse> {
+  // 审查修复：排队中的请求必须携带其入队时的 epoch；任务开始时与当前 epoch
+  // 比较——入队后发生 lock/unlock/key switch 都会推进 epoch，从而在此被拒。
+  const requestEpoch = request.expectedSessionEpoch;
+  if (coordinatorState.vaultStatus !== "unlocked") {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
+  }
+  if (requestEpoch !== coordinatorState.sessionEpoch) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  const service = await ensureMsfileRuntime();
+  const runtimeAtStart = service;
+  const control: CoordinatorMsFileControl = request.control;
+  // 同世代检查在串行任务内部执行，天然免受并发窗口影响。
+  const supplierGenerationNow = (): number => msfileRuntime === runtimeAtStart ? service.describeState().supplierGeneration : -1;
+  let value: unknown;
+  switch (control.type) {
+    case "settings.get": value = await service.getSettingsSnapshot(); break;
+    case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
+    case "supplier.upsert":
+      if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "MSFile supplier generation changed" } };
+      }
+      await service.upsertSupplier(control.supplier); value = null; break;
+    case "supplier.delete":
+      if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "MSFile supplier generation changed" } };
+      }
+      await service.deleteSupplier(control.supplierPublicKeyHex); value = null; break;
+    case "supplier.probe": value = await service.probeSupplier(control.supplierPublicKeyHex); break;
+    case "app-policy.update": await service.updateAppPriceOverride(control.input); value = null; break;
+    case "app-policy.clear": await service.clearAppPriceOverride(control.key); value = null; break;
+    case "app-authorizations.list": value = await service.listAppAuthorizations(); break;
+    case "approvals.pending": value = service.listPendingApprovals(); break;
+    case "approval.resolve": await service.resolveApproval(control.approvalId, control.decision); value = null; break;
+    default: return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown MSFile control" } };
+  }
+  // DB commit 后复核：请求 epoch、Vault、runtime 身份任一变化都报告为
+  // stale-epoch（写入已提交、不可撤销，与 Storage 数据面语义一致）。
+  if (
+    requestEpoch !== coordinatorState.sessionEpoch ||
+    coordinatorState.vaultStatus !== "unlocked" ||
+    msfileRuntime !== runtimeAtStart
+  ) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+}
+
+async function resolveMsfileGrant(
+  grantId: string,
+  actualClientId: string,
+  expectedSessionEpoch: SessionEpoch
+): Promise<{ context: MsFileConnectAppContext; connectSessionId: string }> {
+  // 前置检查（session 查询前）。
+  const grant = msfileGrants.get(grantId);
+  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) {
+    throw msfileError("msfile_identity_required", "MSFile grant is invalid");
+  }
+  const authoritative = await readProtocolConnectSession(grant.context.connectSessionId);
+  // 审查修复：await 返回后重新获取 grant 并复核全部前置条件——
+  // 挂起期间发生的 lock / session abort / key switch 都必须使本次请求失效。
+  const fresh = msfileGrants.get(grantId);
+  if (!fresh || fresh.clientId !== actualClientId || fresh.sessionEpoch !== coordinatorState.sessionEpoch) {
+    throw msfileError("msfile_identity_required", "MSFile grant was revoked during session lookup");
+  }
+  if (expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked") {
+    throw msfileError("msfile_identity_required", "MSFile session changed during lookup");
+  }
+  if (!authoritative || authoritative.origin !== fresh.context.transportOrigin || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(fresh.context.appIdentity)) {
+    throw msfileError("msfile_identity_required", "MSFile session is invalid or revoked");
+  }
+  if (authoritative.ownerPublicKeyHex !== fresh.context.ownerPublicKeyHex) {
+    throw msfileError("msfile_identity_required", "MSFile session owner changed during lookup");
+  }
+  if (!coordinatorState.activePublicKeyHex || authoritative.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+    throw msfileError("msfile_identity_required", "MSFile session owner does not match the active runtime owner");
+  }
+  return { context: fresh.context, connectSessionId: fresh.context.connectSessionId };
+}
+
+function msfileError(code: MsFileErrorCode, message: string): Error & { code: MsFileErrorCode } {
+  const error = new Error(message) as Error & { code: MsFileErrorCode };
+  error.code = code;
+  return error;
+}
+
+async function executeMsfileData(request: Extract<CoordinatorClientRequest, { kind: "msfile.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
+  // 审查修复：以请求自身的 epoch 为栅栏（执行时现取会得到恒真比较）。
+  const requestEpoch = request.expectedSessionEpoch;
+  const service = await ensureMsfileRuntime();
+  const data: CoordinatorMsFileData = request.data;
+  const signal = controller.signal;
+  // 有界并发：超过上限直接失败（不静默排队无限请求）。
+  if (msfileDataActive >= MSFILE_DATA_MAX_ACTIVE) {
+    throw msfileError("msfile_unavailable", "Too many concurrent MSFile requests");
+  }
+  msfileDataActive += 1;
+  try {
+    // 真正调用 service 前的执行栅栏：排队 / 授权解析期间的取消与世代切换。
+    if (requestEpoch !== coordinatorState.sessionEpoch || signal.aborted) {
+      throw msfileError("msfile_unavailable", "MSFile request was cancelled");
+    }
+    let value: unknown;
+    if (data.grantId === undefined) {
+      // 受信任内部插件路径：只使用全局额度；gateway 不参与。
+      switch (data.type) {
+        case "stat": value = await service.stat({ seedHashHex: data.seedHashHex, signal }); break;
+        case "read-seed": value = await service.readSeed({ supplierPublicKeyHex: data.supplierPublicKeyHex, seedHashHex: data.seedHashHex, signal }); break;
+        case "read-block": value = await service.readBlock({ supplierPublicKeyHex: data.supplierPublicKeyHex, blockHashHex: data.blockHashHex, signal }); break;
+      }
+    } else {
+      const { context } = await resolveMsfileGrant(data.grantId, actualClientId, requestEpoch);
+      // grant 解析是异步的：返回后再次确认未跨越会话栅栏。
+      if (requestEpoch !== coordinatorState.sessionEpoch || signal.aborted) {
+        throw msfileError("msfile_unavailable", "MSFile request was cancelled");
+      }
+      switch (data.type) {
+        case "stat": value = await service.connect.stat(context, { seedHashHex: data.seedHashHex, signal }); break;
+        case "read-seed": value = await service.connect.readSeed(context, { supplierPublicKeyHex: data.supplierPublicKeyHex, seedHashHex: data.seedHashHex, signal }); break;
+        case "read-block": value = await service.connect.readBlock(context, { supplierPublicKeyHex: data.supplierPublicKeyHex, blockHashHex: data.blockHashHex, signal }); break;
+      }
+    }
+    if (controller.signal.aborted || requestEpoch !== coordinatorState.sessionEpoch) {
+      throw msfileError("msfile_unavailable", "MSFile request was cancelled");
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+  } finally {
+    msfileDataActive = Math.max(0, msfileDataActive - 1);
+  }
+}
+
+type MsFileExecutorSpikeRequest = Extract<CoordinatorClientRequest, { kind: "msfile.executor.acquire" | "msfile.executor.release" | "msfile.executor.spike.transfer" | "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>;
+
+async function executeMsfileExecutorRequest(request: MsFileExecutorSpikeRequest, actualClientId: string): Promise<CoordinatorResponse> {
+  if (request.kind === "msfile.executor.acquire") {
+    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+    }
+    const result = acquireMsFileExecutorLease({ clientId: actualClientId, ownerPublicKeyHex: request.ownerPublicKeyHex });
+    if (!result.ok) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `MSFile executor lease rejected: ${result.reason}`, code: "msfile_unavailable" } };
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result.lease };
+  }
+  if (request.kind === "msfile.executor.release") {
+    if (msfileExecutorLease !== undefined && msfileExecutorLease.leaseId === request.leaseId && msfileExecutorLease.clientId === actualClientId) {
+      clearMsFileExecutorLeaseLocked();
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+  }
+  if (request.kind === "msfile.executor.spike.transfer") {
+    executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
+    if (!(request.bytes instanceof ArrayBuffer)) return executorIdentityError(request.requestId, "MSFile executor transfer requires an ArrayBuffer", "validation-error");
+    if (request.bytes.byteLength > MSFILE_EXECUTOR_TRANSFER_MAX_ITEM_BYTES) return executorIdentityError(request.requestId, "MSFile executor transfer item exceeds the byte limit", "validation-error");
+    if (msfileExecutorTransferPendingItems === 0) msfileExecutorTransferPeakBytes = 0;
+    if (msfileExecutorTransferPendingItems + 1 > MSFILE_EXECUTOR_TRANSFER_MAX_ITEMS) return executorIdentityError(request.requestId, "MSFile executor transfer queue reached the item limit", "validation-error");
+    if (msfileExecutorTransferPendingBytes + request.bytes.byteLength > MSFILE_EXECUTOR_TRANSFER_MAX_BYTES) return executorIdentityError(request.requestId, "MSFile executor transfer queue reached the byte limit", "validation-error");
+    msfileExecutorTransferPendingItems += 1;
+    msfileExecutorTransferPendingBytes += request.bytes.byteLength;
+    msfileExecutorTransferPeakBytes = Math.max(msfileExecutorTransferPeakBytes, msfileExecutorTransferPendingBytes);
+    const acceptedPendingBytes = msfileExecutorTransferPendingBytes;
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, MSFILE_EXECUTOR_PRE_SIGN_YIELD_MS));
+      executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
+      return {
+        requestId: request.requestId,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: { status: "ok" },
+        operationResult: { bytes: request.bytes, acceptedPendingBytes, peakPendingBytes: msfileExecutorTransferPeakBytes }
+      };
+    } finally {
+      msfileExecutorTransferPendingItems = Math.max(0, msfileExecutorTransferPendingItems - 1);
+      msfileExecutorTransferPendingBytes = Math.max(0, msfileExecutorTransferPendingBytes - request.bytes.byteLength);
+    }
+  }
+  const controller = new AbortController();
+  const key = msfileExecutorIdentityRequestKey(actualClientId, request.requestId);
+  msfileExecutorIdentityRequests.set(key, { controller, clientId: actualClientId, leaseId: request.leaseId });
+  try {
+    return await enqueueMsfileExecutorIdentitySign(request, actualClientId, controller.signal);
+  } catch (error) {
+    return executorIdentityError(request.requestId, error instanceof Error ? error.message : String(error));
+  } finally {
+    msfileExecutorIdentityRequests.delete(key);
+  }
+}
+
+async function executeMsfileRequest(
+  request: Extract<CoordinatorClientRequest, { kind: "msfile.grant" | "msfile.control" | "msfile.data" | "msfile.cancel" | "msfile.session.abort" }>,
+  actualClientId: string
+): Promise<CoordinatorResponse> {
+  // 审查修复：msfile 通道在通用 FIFO 的 epoch 栅栏之前分流，因此自带栅栏。
+  // session.abort / cancel 是纯本地清理，永远放行且不重建 runtime。
+  if (
+    request.kind !== "msfile.cancel" &&
+    request.kind !== "msfile.session.abort" &&
+    "expectedSessionEpoch" in request &&
+    request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+  ) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  if (request.kind === "msfile.session.abort") {
+    for (const [requestId, pending] of msfileRequests) {
+      if (pending.connectSessionId === request.connectSessionId) { pending.controller.abort(); msfileRequests.delete(requestId); }
+    }
+    for (const [requestId, pending] of msfileExecutorIdentityRequests) {
+      if (pending.clientId === actualClientId) { pending.controller.abort(); msfileExecutorIdentityRequests.delete(requestId); }
+    }
+    for (const [grantId, grant] of msfileGrants) {
+      if (grant.context.connectSessionId === request.connectSessionId) msfileGrants.delete(grantId);
+    }
+    // 仅当 runtime 已存在（解锁期创建）时才取消其内部未决确认；绝不重建。
+    if (coordinatorState.vaultStatus === "unlocked" && msfileRuntime) {
+      await msfileRuntime.abortSession(request.connectSessionId);
+      emitMsFileState();
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+  }
+  // grant/control/data 都要求 Vault unlocked + active key runtime 可用。
+  if (coordinatorState.vaultStatus !== "unlocked") {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
+  }
+  if (request.kind === "msfile.grant") {
+    const session = await readProtocolConnectSession(request.context.connectSessionId);
+    // 审查修复：session 查询是异步的——返回后复核请求 epoch 与 Vault 状态，
+    // 跨越 lock/unlock / key switch 的 grant 不得绑定到新会话。
+    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked") {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+    }
+    if (!session || session.origin !== request.context.transportOrigin || JSON.stringify(session.appIdentity) !== JSON.stringify(request.context.appIdentity)) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "MSFile session is invalid or revoked", code: "msfile_identity_required" } };
+    }
+    // grant 绑定前验证 session owner 与实际付款/签名 runtime 的 owner 一致：
+    // wire Read 以 active key 身份购买，owner 错位即身份错位。
+    if (!coordinatorState.activePublicKeyHex || session.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "MSFile session owner does not match the active runtime owner", code: "msfile_identity_required" } };
+    }
+    const grantId = `msfile-grant-${crypto.randomUUID()}`;
+    msfileGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, ownerPublicKeyHex: session.ownerPublicKeyHex, appIdentity: session.appIdentity }, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
+  }
+  if (request.kind === "msfile.cancel") {
+    const target = msfileRequests.get(msfileRequestKey(actualClientId, request.targetRequestId));
+    if (target?.clientId === actualClientId) target.controller.abort();
+    const identityTarget = msfileExecutorIdentityRequests.get(msfileExecutorIdentityRequestKey(actualClientId, request.targetRequestId));
+    if (identityTarget?.clientId === actualClientId) identityTarget.controller.abort();
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
+  }
+  const controller = new AbortController();
+  msfileRequests.set(msfileRequestKey(actualClientId, request.requestId), {
+    controller,
+    clientId: actualClientId,
+    connectSessionId: request.kind === "msfile.data" && request.data.grantId !== undefined
+      ? msfileGrants.get(request.data.grantId)?.context.connectSessionId
+      : undefined
+  });
+  try {
+    if (request.kind === "msfile.control") return await executeMsfileControl(request);
+    return await executeMsfileData(request, controller, actualClientId);
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: err instanceof Error ? err.message : String(err), ...(typeof code === "string" ? { code: code as never } : {}) } };
+  } finally {
+    msfileRequests.delete(msfileRequestKey(actualClientId, request.requestId));
+  }
+}
+
 function enqueueCoordinatorRequest(request: CoordinatorClientRequest): Promise<CoordinatorResponse> {
   const run = coordinatorRequestTail.then(
     () => executeProcessRequest(request),
@@ -1380,6 +2004,12 @@ async function executeProcessRequest(
 
 async function processRequest(request: CoordinatorClientRequest, actualClientId = (request as { clientId?: string }).clientId ?? "unknown"): Promise<CoordinatorResponse> {
   if (isStorageRequest(request)) return executeStorageRequest(request as never, actualClientId);
+  if (isMsfileRequest(request)) {
+    if (request.kind === "msfile.executor.acquire" || request.kind === "msfile.executor.release" || request.kind === "msfile.executor.spike.transfer" || request.kind === "msfile.executor.identity.sign-noise" || request.kind === "msfile.executor.identity.sign-peer-record") {
+      return executeMsfileExecutorRequest(request as MsFileExecutorSpikeRequest, actualClientId);
+    }
+    return executeMsfileRequest(request as never, actualClientId);
+  }
   return enqueueCoordinatorRequest(request);
 }
 
@@ -1520,6 +2150,10 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       coordinatorState.keyspaceGeneration++;
       coordinatorState.sessionEpoch = generateEpoch();
       passkeyAddIntents.clear();
+      // 施工单 docs/proposals/msfile：active key 切换立即销毁旧 MSFile runtime
+      // （wire 身份随 owner 公钥变化，旧 host/连接/授权不可继续使用）。
+      releaseMsfileRuntime("activate-key");
+      clearMsFileExecutorLeaseLocked();
       coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
       coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
       try {
@@ -1958,6 +2592,9 @@ async function performGlobalLock(reason: string): Promise<void> {
   // Storage is preempted before Vault keys are cleared; no S3 network cleanup
   // is allowed to delay destruction of the client or credential material.
   await releaseStorageRuntime(reason);
+  // 施工单 docs/proposals/msfile：lock 时销毁 MSFile runtime，未决请求与确认取消。
+  releaseMsfileRuntime(reason);
+  clearMsFileExecutorLeaseLocked();
   // abort 所有 session-bound task，并在清空运行句柄前保留 completion，确保
   // handler 已经退出；否则迟到的 DB commit 可能越过锁定栅栏。
   const completions: Promise<void>[] = [];
@@ -2680,7 +3317,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -2798,6 +3435,16 @@ export function __testResetState(): void {
   storageDataActive = 0;
   storageDataActiveByPort.clear();
   storageDataWaiters.length = 0;
+  msfileRequests.clear();
+  msfileGrants.clear();
+  msfileDataActive = 0;
+  msfileRuntime = undefined;
+  lastMsFileState = undefined;
+  msfileMutationTail = Promise.resolve();
+  msfileExecutorLease = undefined;
+  clearMsFileExecutorLeaseTimer();
+  msfileExecutorIdentityTail = Promise.resolve();
+  msfileMutationTail = Promise.resolve();
   storageStateTail = Promise.resolve();
   storageMutationTail = Promise.resolve();
   storageRuntime = testStorageRuntimeOverride;
@@ -2961,6 +3608,57 @@ export async function __testDispatchStorageGrant(connectSessionId: string, actua
 
 export async function __testResolveStorageGrant(grantId: string, actualPortId: string): Promise<import("@keymaster/contracts").StorageAppContext> {
   return (await resolveStorageGrant(grantId, actualPortId)).context;
+}
+
+/** MSFile 测试接缝：会话解析与 RPC 分发（施工单 docs/proposals/msfile）。 */
+export function __testSetMsfileRuntimeOverride(runtime: Partial<MsFileServiceImpl> | undefined): void {
+  msfileRuntime = runtime as MsFileServiceImpl | undefined;
+}
+
+export async function __testDispatchMsfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorResponse> {
+  return executeMsfileRequest({ kind: "msfile.control", clientId: "port-msfile", requestId: crypto.randomUUID(), control, expectedSessionEpoch: coordinatorState.sessionEpoch }, "port-msfile");
+}
+
+export async function __testDispatchMsfileGrant(
+  input: { connectSessionId: string; transportOrigin: string; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").AppIdentitySnapshot },
+  actualPortId = "port-msfile",
+  expectedSessionEpoch: SessionEpoch = coordinatorState.sessionEpoch
+): Promise<CoordinatorResponse> {
+  return executeMsfileRequest({ kind: "msfile.grant", clientId: actualPortId, requestId: crypto.randomUUID(), context: { connectSessionId: input.connectSessionId, transportOrigin: input.transportOrigin, ownerPublicKeyHex: input.ownerPublicKeyHex, appIdentity: input.appIdentity }, expectedSessionEpoch }, actualPortId);
+}
+
+export async function __testDispatchMsfileData(data: CoordinatorMsFileData, actualPortId = "port-msfile"): Promise<CoordinatorResponse> {
+  return executeMsfileRequest({ kind: "msfile.data", clientId: actualPortId, requestId: crypto.randomUUID(), data, expectedSessionEpoch: coordinatorState.sessionEpoch }, actualPortId);
+}
+
+export async function __testDispatchMsfileSessionAbort(connectSessionId: string, expectedSessionEpoch: SessionEpoch, actualPortId = "port-msfile"): Promise<CoordinatorResponse> {
+  return executeMsfileRequest({ kind: "msfile.session.abort", clientId: actualPortId, requestId: crypto.randomUUID(), connectSessionId, expectedSessionEpoch }, actualPortId);
+}
+
+export async function __testDispatchMsfileControlWithEpoch(control: CoordinatorMsFileControl, expectedSessionEpoch: SessionEpoch, actualPortId = "port-msfile"): Promise<CoordinatorResponse> {
+  return executeMsfileRequest({ kind: "msfile.control", clientId: actualPortId, requestId: crypto.randomUUID(), control, expectedSessionEpoch }, actualPortId);
+}
+
+export async function __testAcquireExecutorLease(ownerPublicKeyHex: string, clientId = "port-exec", expectedSessionEpoch: SessionEpoch = coordinatorState.sessionEpoch): Promise<CoordinatorResponse> {
+  return processRequest({ kind: "msfile.executor.acquire", clientId, requestId: crypto.randomUUID(), ownerPublicKeyHex, expectedSessionEpoch }, clientId);
+}
+
+export async function __testReleaseExecutorLease(leaseId: string, clientId = "port-exec"): Promise<CoordinatorResponse> {
+  return processRequest({ kind: "msfile.executor.release", clientId, requestId: crypto.randomUUID(), leaseId }, clientId);
+}
+
+export async function __testExecutorSignNoise(input: { leaseId: string; expectedSessionEpoch?: SessionEpoch; noiseStaticPublicKey: ArrayBuffer }, clientId = "port-exec"): Promise<CoordinatorResponse> {
+  const request = { kind: "msfile.executor.identity.sign-noise" as const, clientId, requestId: crypto.randomUUID(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch, noiseStaticPublicKey: input.noiseStaticPublicKey };
+  return executeMsfileExecutorRequest(request, clientId);
+}
+
+export async function __testExecutorSignPeerRecord(input: { leaseId: string; expectedSessionEpoch?: SessionEpoch; peerId: string; addresses: string[]; sequence: string }, clientId = "port-exec"): Promise<CoordinatorResponse> {
+  const request = { kind: "msfile.executor.identity.sign-peer-record" as const, clientId, requestId: crypto.randomUUID(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch, peerId: input.peerId, addresses: input.addresses, sequence: input.sequence };
+  return executeMsfileExecutorRequest(request, clientId);
+}
+
+export async function __testReleaseMsfileRuntime(): Promise<void> {
+  releaseMsfileRuntime("test");
 }
 
 export async function __testDispatchStorageData(input: { grantId: string; actualPortId: string; requestClientId?: string; connectSessionId?: string }): Promise<CoordinatorResponse> {

@@ -147,6 +147,10 @@ import {
   type ProtocolStorageDb,
   type StorageService,
   type StorageAppContext,
+  type MsFileService,
+  type MsFileConnectAppContext,
+  type MsFileStatResult,
+  type MsFileReadResult,
   type StorageListResult,
   type StorageDirectoryResult,
   type StoragePutResult,
@@ -285,6 +289,12 @@ export interface ProtocolServiceDeps {
   storageService?: StorageService;
   /** Resolve the current Storage capability at request/lifecycle time. */
   getStorageService?: () => StorageService | undefined;
+  /**
+   * Optional MSFile platform capability（施工单 docs/proposals/msfile）。
+   * 缺失时只让 `msfile.*` fail closed；不得影响其他方法族。
+   */
+  msfileService?: MsFileService;
+  getMsfileService?: () => MsFileService | undefined;
   /** Keymaster 本地 catalog resolver；不得反向依赖 plugin-apps。 */
   appCatalogResolver?: AppCatalogResolver;
   /** 延迟读取 resolver，避免 protocol -> apps capability 初始化循环。 */
@@ -780,6 +790,18 @@ export class ProtocolServiceImpl implements ProtocolService {
     return this.deps.storageService;
   }
 
+  /** MSFile capability 是可选依赖；缺失时 `msfile.*` fail closed。 */
+  private currentMsfileService(): MsFileService | undefined {
+    if (this.deps.getMsfileService) {
+      try {
+        return this.deps.getMsfileService();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.deps.msfileService;
+  }
+
   /**
    * 在服务已经启动后接入可选的协议存储。
    *
@@ -901,13 +923,20 @@ export class ProtocolServiceImpl implements ProtocolService {
     const sessionIds = new Set<string>();
     for (const rec of this.requestsByRecordId.values()) {
       if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
-      if (rec.phase === "executing" && rec.method.startsWith("storage.")) {
+      if (
+        rec.phase === "executing" &&
+        (rec.method.startsWith("storage.") || rec.method.startsWith("msfile."))
+      ) {
         rec.cancelRequested = true;
         rec.abortController?.abort();
       }
     }
     const storageService = this.currentStorageService();
-    for (const sessionId of sessionIds) void storageService?.abortSession(sessionId);
+    const msfileService = this.currentMsfileService();
+    for (const sessionId of sessionIds) {
+      void storageService?.abortSession(sessionId);
+      void msfileService?.abortSession(sessionId);
+    }
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
     for (const [, rec] of this.requestsByRecordId) {
       if (rec.phase === "approved" || rec.phase === "rejected" || rec.phase === "failed" || rec.phase === "timed_out") {
@@ -1316,13 +1345,20 @@ export class ProtocolServiceImpl implements ProtocolService {
     const sessionIds = new Set<string>();
     for (const rec of this.requestsByRecordId.values()) {
       if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
-      if (rec.phase === "executing" && rec.method.startsWith("storage.")) {
+      if (
+        rec.phase === "executing" &&
+        (rec.method.startsWith("storage.") || rec.method.startsWith("msfile."))
+      ) {
         rec.cancelRequested = true;
         rec.abortController?.abort();
       }
     }
     const storageService = this.currentStorageService();
-    for (const sessionId of sessionIds) void storageService?.abortSession(sessionId);
+    const msfileService = this.currentMsfileService();
+    for (const sessionId of sessionIds) {
+      void storageService?.abortSession(sessionId);
+      void msfileService?.abortSession(sessionId);
+    }
     this.sendClosingBestEffort();
   }
 
@@ -2807,8 +2843,12 @@ export class ProtocolServiceImpl implements ProtocolService {
       } else {
         rec.connectSessionId = sessionId;
         rec.ownerPublicKeyHex = session.ownerPublicKeyHex;
-        if (method.startsWith("storage.") && !session.appIdentity) {
-          this.scheduleFailFastRequest(recordId, "storage_identity_required", "storage_error");
+        if ((method.startsWith("storage.") || method.startsWith("msfile.")) && !session.appIdentity) {
+          // MSFile 与 Storage 一致：无 verified App Identity 的 session 不允许
+          // 进入执行；对外用稳定 code fail-fast。
+          const identityCode: ProtocolErrorCode =
+            method.startsWith("msfile.") ? "msfile_identity_required" : "storage_identity_required";
+          this.scheduleFailFastRequest(recordId, identityCode, "storage_error");
           return;
         }
       }
@@ -2884,7 +2924,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     // storage.* is an auto-execute session capability. It never opens a
     // confirmation card, but a locked Vault still queues it until unlock so
     // the Storage plugin can open its sealed provider config.
-    if (parsed.method.startsWith("storage.")) {
+    if (parsed.method.startsWith("storage.") || parsed.method.startsWith("msfile.")) {
+      // msfile.* 与 storage.* 同为 auto-execute session capability；价格确认
+      // 由 msfile.service gateway 内部处理，不占用 popup 命令流 confirm UI。
       rec.autoApproved = true;
       rec.autoExecuteAfterUnlock = true;
       if (this.lockStateValue === "locked") {
@@ -3782,7 +3824,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.abortController = new AbortController();
     try {
       const result = await this.dispatch(rec);
-      if (rec.cancelRequested && rec.method.startsWith("storage.") && rec.phase !== "rejected" && rec.phase !== "failed") {
+      if (
+      rec.cancelRequested &&
+      (rec.method.startsWith("storage.") || rec.method.startsWith("msfile.")) &&
+      rec.phase !== "rejected" &&
+      rec.phase !== "failed"
+    ) {
         rec.phase = "rejected";
         rec.errorCode = "user_rejected";
         rec.errorMessage = "User rejected";
@@ -3863,8 +3910,16 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeStorageUploadPart(rec);
         case "storage.upload.complete":
           return await this.executeStorageUploadComplete(rec);
-        case "storage.upload.abort":
-          return await this.executeStorageUploadAbort(rec);
+      case "storage.upload.abort":
+        return await this.executeStorageUploadAbort(rec);
+      // 施工单 docs/proposals/msfile：MSFile 走 connect gateway；
+      // App context 只由持久 session snapshot 与 MessageEvent.origin 构造。
+      case "msfile.stat":
+        return await this.executeMsfileStat(rec);
+      case "msfile.seed.read":
+        return await this.executeMsfileSeedRead(rec);
+      case "msfile.block.read":
+        return await this.executeMsfileBlockRead(rec);
       }
     } catch (err) {
       // 业务错误：本地 record 写 failed + 对外回真实 errCode（p2pkh /
@@ -3987,6 +4042,55 @@ export class ProtocolServiceImpl implements ProtocolService {
     const params = rec.params as import("@keymaster/contracts").StorageUploadAbortParams;
     const { service, context } = await this.requireStorageContext(rec, params.connectSessionId);
     return service.abortUpload(context, { uploadId: params.uploadId, signal: rec.abortController?.signal });
+  }
+
+  /* ============== MSFile 执行（施工单 docs/proposals/msfile KMMF-007） ============== */
+
+  private async requireMsfileContext(
+    rec: RequestRecord,
+    connectSessionId: string
+  ): Promise<{ service: MsFileService; context: MsFileConnectAppContext }> {
+    const service = this.currentMsfileService();
+    if (!service) throw protocolError("msfile_unavailable", "MSFile service is unavailable");
+    const session = await this.requireConnectSession(rec, connectSessionId);
+    if (!session.appIdentity) {
+      throw protocolError("msfile_identity_required", "MSFile requires a verified app identity proof snapshot");
+    }
+    return {
+      service,
+      context: {
+        connectSessionId: session.sessionId,
+        transportOrigin: rec.origin,
+        ownerPublicKeyHex: session.ownerPublicKeyHex,
+        appIdentity: session.appIdentity
+      }
+    };
+  }
+
+  private async executeMsfileStat(rec: RequestRecord): Promise<MsFileStatResult> {
+    const params = rec.params as import("@keymaster/contracts").MsFileStatParams;
+    const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
+    return service.connect.stat(context, { seedHashHex: params.seedHashHex, signal: rec.abortController?.signal });
+  }
+
+  private async executeMsfileSeedRead(rec: RequestRecord): Promise<MsFileReadResult> {
+    const params = rec.params as import("@keymaster/contracts").MsFileSeedReadParams;
+    const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
+    return service.connect.readSeed(context, {
+      supplierPublicKeyHex: params.supplierPublicKeyHex,
+      seedHashHex: params.seedHashHex,
+      signal: rec.abortController?.signal
+    });
+  }
+
+  private async executeMsfileBlockRead(rec: RequestRecord): Promise<MsFileReadResult> {
+    const params = rec.params as import("@keymaster/contracts").MsFileBlockReadParams;
+    const { service, context } = await this.requireMsfileContext(rec, params.connectSessionId);
+    return service.connect.readBlock(context, {
+      supplierPublicKeyHex: params.supplierPublicKeyHex,
+      blockHashHex: params.blockHashHex,
+      signal: rec.abortController?.signal
+    });
   }
 
   /* ============== 执行身份 / 签名 / 加解密 ============== */
@@ -4583,6 +4687,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // capability 就不应继续常驻内存。
     this.clearSessionRuntimeBootstrap(result.connectSessionId, "logout");
     await this.currentStorageService()?.abortSession(result.connectSessionId);
+    await this.currentMsfileService()?.abortSession(result.connectSessionId);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
     // 任意一步失败即视为 logout 不完整；fire-and-forget 会让 caller 在
@@ -6445,7 +6550,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       rec.phase === "waiting_unlock_auto" ||
       rec.phase === "confirming" ||
       rec.phase === "queued" ||
-      (rec.phase === "executing" && rec.method.startsWith("storage."))
+      (rec.phase === "executing" && (rec.method.startsWith("storage.") || rec.method.startsWith("msfile.")))
     );
   }
 
@@ -6523,7 +6628,7 @@ function toProtocolError(err: unknown): ProtocolError {
   if (err && typeof err === "object" && "code" in err && "message" in err) {
     const e = err as { code?: unknown; message?: unknown };
     if (typeof e.code === "string" && typeof e.message === "string") {
-      if (e.code.startsWith("storage_")) {
+      if (e.code.startsWith("storage_") || e.code.startsWith("msfile_")) {
         return { code: e.code as ProtocolErrorCode, message: e.code };
       }
       return { code: e.code as ProtocolErrorCode, message: e.message };

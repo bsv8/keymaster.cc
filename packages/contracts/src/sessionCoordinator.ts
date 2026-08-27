@@ -38,6 +38,18 @@ import type {
   P2pkhProviderRegistrySnapshot,
   P2pkhNetworkProviderSelection,
 } from "./bsvP2pkhProviders.js";
+import type {
+  MsFileApprovalDecision,
+  MsFileAppIdentityKey,
+  MsFileAppPriceOverrideUpdate,
+  MsFileConnectAppContext,
+  MsFileGlobalPriceSettings,
+  MsFilePendingApprovalView,
+  MsFileServiceStatus,
+  MsFileSettingsSnapshot,
+  MsFileSupplierConfig,
+  MsFileSupplierProbeResult,
+} from "./msfile.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -90,8 +102,93 @@ export type CoordinatorClientRequestWithStorage =
   | { kind: "disconnect"; clientId: string; requestId: string }
   | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
 
+/** MSFile 设置/App 策略真值在 Coordinator；页面只通过 control RPC 读写。 */
+export type CoordinatorMsFileControl =
+  | { type: "settings.get" }
+  | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
+  | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }
+  | { type: "supplier.delete"; supplierPublicKeyHex: string; expectedGeneration: number | null }
+  | { type: "supplier.probe"; supplierPublicKeyHex: string }
+  | { type: "app-policy.update"; input: MsFileAppPriceOverrideUpdate }
+  | { type: "app-policy.clear"; key: MsFileAppIdentityKey }
+  | { type: "app-authorizations.list" }
+  | { type: "approvals.pending" }
+  | { type: "approval.resolve"; approvalId: string; decision: MsFileApprovalDecision };
+
+/**
+ * MSFile 数据面。grantId 缺失表示受信任内部插件调用（只使用全局额度）；
+ * 带 grantId 的调用由 Connect gateway 按 App 级策略解析。
+ */
+export type CoordinatorMsFileData =
+  | { type: "stat"; grantId?: string; seedHashHex: string }
+  | { type: "read-seed"; grantId?: string; supplierPublicKeyHex: string; seedHashHex: string }
+  | { type: "read-block"; grantId?: string; supplierPublicKeyHex: string; blockHashHex: string };
+
+export type CoordinatorClientRequestWithMsfile =
+  | { kind: "msfile.grant"; clientId: string; requestId: string; context: MsFileConnectAppContext; expectedSessionEpoch: SessionEpoch }
+  | { kind: "msfile.control"; clientId: string; requestId: string; control: CoordinatorMsFileControl; expectedSessionEpoch: SessionEpoch }
+  | { kind: "msfile.data"; clientId: string; requestId: string; data: CoordinatorMsFileData; expectedSessionEpoch: SessionEpoch }
+  | { kind: "msfile.cancel"; clientId: string; requestId: string; targetRequestId: string }
+  | { kind: "disconnect"; clientId: string; requestId: string }
+  | { kind: "msfile.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
+
+/* ============== MSFile Window executor spike（施工单 2026-08-26/001） ============== */
+
+/** Window executor lease 的权威快照；私钥永远不在此结果中。 */
+export interface MsFileExecutorLease {
+  leaseId: string;
+  sessionEpoch: SessionEpoch;
+  activePublicKeyHex: string;
+}
+
+/** Noise 静态密钥签名请求。static key 必须是 32 字节。 */
+export interface MsFileNoiseSignRequest {
+  leaseId: string;
+  /** 发起请求时观察到的会话世代，用于 lock/key switch 栅栏。 */
+  expectedSessionEpoch: SessionEpoch;
+  noiseStaticPublicKey: ArrayBuffer;
+}
+
+/** Signed Peer Record 签名请求。地址在本 Spike 中必须为空。 */
+export interface MsFilePeerRecordSignRequest {
+  leaseId: string;
+  /** 发起请求时观察到的会话世代，用于 lock/key switch 栅栏。 */
+  expectedSessionEpoch: SessionEpoch;
+  peerId: string;
+  addresses: string[];
+  /** 合法 uint64 的十进制字符串，避免 JSON number 精度损失。 */
+  sequence: string;
+}
+
+/** 两类 typed signer RPC 的统一返回值；签名为标准 DER。 */
+export interface MsFileIdentitySignResult {
+  signatureDer: ArrayBuffer;
+}
+
+/** 仅供 001 Spike 验证 Coordinator ↔ Window 双向 transferable。 */
+export interface MsFileExecutorTransferResult {
+  bytes: ArrayBuffer;
+  /** Worker 接受该项后的在途总字节数。 */
+  acceptedPendingBytes: number;
+  /** 本轮 burst 在 Worker 中观测到的在途字节峰值。 */
+  peakPendingBytes: number;
+}
+
+/**
+ * Window executor lease 与两个独立 typed signer RPC。
+ * 请求绑定实际 MessagePort；lock/key switch/Worker 重启会清空 lease。
+ */
+export type CoordinatorClientRequestWithMsfileExecutor =
+  | { kind: "msfile.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch }
+  | { kind: "msfile.executor.release"; clientId: string; requestId: string; leaseId: string }
+  | { kind: "msfile.executor.spike.transfer"; clientId: string; requestId: string; leaseId: string; expectedSessionEpoch: SessionEpoch; bytes: ArrayBuffer }
+  | ({ kind: "msfile.executor.identity.sign-noise"; clientId: string; requestId: string } & MsFileNoiseSignRequest)
+  | ({ kind: "msfile.executor.identity.sign-peer-record"; clientId: string; requestId: string } & MsFilePeerRecordSignRequest);
+
 export type CoordinatorClientRequest =
   | CoordinatorClientRequestWithStorage
+  | CoordinatorClientRequestWithMsfile
+  | CoordinatorClientRequestWithMsfileExecutor
   | ({ kind: "hello"; clientId: string; requestId: string }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
@@ -114,7 +211,19 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state";
+
+/** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
+export interface CoordinatorMsFileStateEvent {
+  topic: "msfile.state";
+  type: "msfile.state.changed";
+  msfileRevision: number;
+  sessionEpoch: SessionEpoch;
+  status: MsFileServiceStatus;
+  supplierGeneration: number;
+  globalSettings: MsFileGlobalPriceSettings | null;
+  pendingApprovals: MsFilePendingApprovalView[];
+}
 
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
@@ -171,7 +280,7 @@ export type CoordinatorCommandAck =
   | { status: "not-ready" }
   | { status: "validation-error"; message: string }
   | { status: "ok" }
-  | { status: "error"; message: string; code?: import("./storage.js").StorageErrorCode };
+  | { status: "error"; message: string; code?: import("./storage.js").StorageErrorCode | import("./msfile.js").MsFileErrorCode };
 
 /** RPC 响应。 */
 export interface CoordinatorResponse {
@@ -214,7 +323,8 @@ export type CoordinatorTopicEvent =
   | BackgroundSnapshotEvent
   | AssetDataChangedEvent
   | CoordinatorStorageStateEvent
-  | P2pkhProvidersEvent;
+  | P2pkhProvidersEvent
+  | CoordinatorMsFileStateEvent;
 
 export interface P2pkhProvidersEvent {
   topic: "p2pkh.providers";
@@ -281,7 +391,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -343,6 +453,16 @@ export interface SessionCoordinatorClient {
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
+  msfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorValueResult<unknown>>;
+  msfileGrant(context: MsFileConnectAppContext): Promise<CoordinatorValueResult<string>>;
+  msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
+  msfileCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
+  msfileSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
+  msfileExecutorAcquire(ownerPublicKeyHex: string): Promise<CoordinatorValueResult<MsFileExecutorLease>>;
+  msfileExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult>;
+  msfileExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<MsFileExecutorTransferResult>>;
+  msfileExecutorSignNoiseStaticKey(request: Omit<MsFileNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<MsFileIdentitySignResult>>;
+  msfileExecutorSignPeerRecord(request: Omit<MsFilePeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<MsFileIdentitySignResult>>;
   p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
   p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;

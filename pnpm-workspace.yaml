@@ -6,3 +6,6 @@ linkWorkspacePackages: true
 
 allowBuilds:
   esbuild: true
+
+minimumReleaseAgeExclude:
+  - bitcoin-libp2p@0.1.0

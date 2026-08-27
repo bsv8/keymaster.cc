@@ -158,3 +158,4 @@ test-results/
 !.storage-smoke/README.md
 .codex-us-small-archive-nginx.conf
 .codex-us-small-inventory.md
+AGENTS.md

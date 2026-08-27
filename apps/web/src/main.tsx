@@ -149,6 +149,11 @@ async function start() {
       cause: err
     });
   }
+  // 施工单 施工单/2026-08-26/001：executor spike 钩子仅在显式查询参数下加载，
+  // 不接入生产数据面，也不影响默认开关。
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("msfileSpike")) {
+    void import("./msfileSpike/windowHooks.js").then((m) => m.installMsFileSpikeHooks()).catch(() => undefined);
+  }
 }
 
 start();

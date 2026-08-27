@@ -44,7 +44,10 @@ import type {
   StorageUploadAbortParams,
   StorageUploadBeginParams,
   StorageUploadCompleteParams,
-  StorageUploadPartParams
+  StorageUploadPartParams,
+  MsFileBlockReadParams,
+  MsFileSeedReadParams,
+  MsFileStatParams
 } from "@keymaster/contracts";
 import {
   PROTOCOL_METHODS,
@@ -143,6 +146,14 @@ function validateParams(
       return validateStorageUploadCompleteParams(raw);
     case "storage.upload.abort":
       return validateStorageUploadAbortParams(raw);
+    // 施工单 docs/proposals/msfile：MSFile 方法族。与 storage.* 同语义：
+    // session-bound + verified App Identity；金额与身份字段一律禁止注入。
+    case "msfile.stat":
+      return validateMsFileStatParams(raw);
+    case "msfile.seed.read":
+      return validateMsFileSeedReadParams(raw);
+    case "msfile.block.read":
+      return validateMsFileBlockReadParams(raw);
   }
   throw new ProtocolValidationError("invalid_request", "Unknown method");
 }
@@ -492,6 +503,78 @@ function validateStorageUploadCompleteParams(raw: unknown): StorageUploadComplet
 function validateStorageUploadAbortParams(raw: unknown): StorageUploadAbortParams {
   const obj = storageObject(raw, "storage.upload.abort params");
   return { connectSessionId: storageSession(obj, "storage.upload.abort"), uploadId: expectNonEmptyString(obj.uploadId, "uploadId") };
+}
+
+/* ============== msfile.* validation（施工单 docs/proposals/msfile） ============== */
+
+// App 不能通过 params 注入身份、路由或金额语义；出现下列任一字段一律
+// invalid_request。maxPriceSatoshis / blockIndex / fileId 等被明确禁止，
+// 避免 App 绕过 Keymaster 价格策略或重建文件级访问模型。
+const MSFILE_FORBIDDEN_FIELDS = [
+  "maxPriceSatoshis",
+  "contentKind",
+  "kind",
+  "fileId",
+  "accessId",
+  "seedAccessId",
+  "blockIndex",
+  "ownerPublicKeyHex",
+  "publisherPublicKeyHex",
+  "appId",
+  "appName",
+  "appIdentity",
+  "identityDigestHex"
+] as const;
+
+const MSFILE_HASH_HEX_PATTERN = /^[0-9a-f]{64}$/;
+
+function msfileObject(raw: unknown, name: string): Record<string, unknown> {
+  const obj = expectObject(raw, name);
+  for (const field of MSFILE_FORBIDDEN_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(obj, field)) {
+      throw new ProtocolValidationError("invalid_request", `${name} contains a forbidden field`);
+    }
+  }
+  return obj;
+}
+
+function msfileHash(value: unknown, field: string): string {
+  const hash = expectString(value, field);
+  if (!MSFILE_HASH_HEX_PATTERN.test(hash)) {
+    throw new ProtocolValidationError("msfile_invalid_hash", `${field} must be 64 lower-case hex chars`);
+  }
+  return hash;
+}
+
+function msfileSupplierKey(obj: Record<string, unknown>, name: string): string {
+  const key = expectString(obj.supplierPublicKeyHex, `${name}.supplierPublicKeyHex`);
+  if (!/^(02|03)[0-9a-f]{64}$/.test(key)) {
+    throw new ProtocolValidationError("invalid_request", "supplierPublicKeyHex must be a compressed secp256k1 public key");
+  }
+  return key;
+}
+
+function validateMsFileStatParams(raw: unknown): MsFileStatParams {
+  const obj = msfileObject(raw, "msfile.stat params");
+  return { connectSessionId: storageSession(obj, "msfile.stat"), seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex") };
+}
+
+function validateMsFileSeedReadParams(raw: unknown): MsFileSeedReadParams {
+  const obj = msfileObject(raw, "msfile.seed.read params");
+  return {
+    connectSessionId: storageSession(obj, "msfile.seed.read"),
+    supplierPublicKeyHex: msfileSupplierKey(obj, "msfile.seed.read"),
+    seedHashHex: msfileHash(obj.seedHashHex, "seedHashHex")
+  };
+}
+
+function validateMsFileBlockReadParams(raw: unknown): MsFileBlockReadParams {
+  const obj = msfileObject(raw, "msfile.block.read params");
+  return {
+    connectSessionId: storageSession(obj, "msfile.block.read"),
+    supplierPublicKeyHex: msfileSupplierKey(obj, "msfile.block.read"),
+    blockHashHex: msfileHash(obj.blockHashHex, "blockHashHex")
+  };
 }
 
 /* ============== helpers ============== */

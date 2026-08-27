@@ -1,0 +1,87 @@
+/* packages/plugin-msfile/src/styles.css —— MSFile 系统设置区域 */
+
+.msfile-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.msfile-settings h3 {
+  margin: 8px 0 0;
+}
+
+.msfile-settings__hint {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.85rem;
+  margin: 2px 0;
+}
+
+.msfile-settings__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: end;
+}
+
+.msfile-settings__row > label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msfile-settings__checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+}
+
+.msfile-settings__suppliers,
+.msfile-settings__apps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msfile-settings__suppliers li,
+.msfile-settings__apps li {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+
+.msfile-settings__supplier-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.msfile-settings__form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 560px;
+}
+
+.msfile-settings__form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.msfile-settings__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.msfile-settings__error {
+  color: var(--km-danger, #dc2626);
+}
+
+.msfile-settings__ok {
+  color: var(--km-success, #16a34a);
+}

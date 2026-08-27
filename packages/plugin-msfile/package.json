@@ -1,0 +1,23 @@
+{
+  "name": "@keymaster/plugin-msfile",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
+    "./executor-spike": "./src/executorSpike.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "@libp2p/webrtc": "6.0.30",
+    "@libp2p/websockets": "10.1.20",
+    "@multiformats/multiaddr": "13.0.3",
+    "bitcoin-libp2p": "0.1.0",
+    "uint8arrays": "^6.1.1"
+  }
+}

@@ -54,6 +54,8 @@ vi.mock("@keymaster/runtime", () => ({
     }
     return undefined;
   },
+  // MSFile 审批区默认关闭（无 msfile.service capability）。
+  useHasCapability: (key: string) => key !== "msfile.service",
   usePluginHost: () => ({ resourceStore: { invalidate: () => undefined } }),
   useResource: (_store: unknown, definitionId: string) => {
     const revision = useRef(0);

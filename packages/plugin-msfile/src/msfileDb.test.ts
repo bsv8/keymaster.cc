@@ -1,0 +1,89 @@
+// packages/plugin-msfile/src/msfileDb.test.ts
+// `keymaster.msfile` schema：全局设置 / 供应商 / App 策略 / App 使用摘要。
+
+import "fake-indexeddb/auto";
+import { afterEach, describe, expect, it } from "vitest";
+import { MSFILE_DB_NAME, openMsFileDb, sanitizeAppOverride } from "./msfileDb.js";
+import { OWNER_PUBKEY, SUPPLIER_PUBKEY } from "./supplierConfig.test.js";
+
+const PUBLISHER = OWNER_PUBKEY;
+
+async function freshDb() {
+  return openMsFileDb();
+}
+
+afterEach(async () => {
+  await new Promise<void>((resolve) => {
+    const request = indexedDB.deleteDatabase(MSFILE_DB_NAME);
+    request.onsuccess = () => resolve();
+    request.onerror = () => resolve();
+    request.onblocked = () => resolve();
+  });
+});
+
+describe("global settings", () => {
+  it("starts unconfigured and persists explicit saves", async () => {
+    const db = await freshDb();
+    expect(await db.getGlobalSettings()).toBeNull();
+    await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" }, 1234);
+    expect(await db.getGlobalSettings()).toEqual({
+      settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
+      updatedAt: 1234,
+    });
+    db.close();
+  });
+});
+
+describe("suppliers", () => {
+  it("roundtrips configs keyed by public key", async () => {
+    const db = await freshDb();
+    const config = { name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: ["/dns4/n/tcp/443/tls/ws/p2p/x"], enabled: true };
+    await db.upsertSupplier(config);
+    expect((await db.listSuppliers()).length).toBe(1);
+    expect(await db.getSupplier(SUPPLIER_PUBKEY)).toMatchObject({ name: "nas" });
+    await db.deleteSupplier(SUPPLIER_PUBKEY);
+    expect(await db.getSupplier(SUPPLIER_PUBKEY)).toBeNull();
+    db.close();
+  });
+});
+
+describe("app policies and usage", () => {
+  it("stores override rows per stable app key", async () => {
+    const db = await freshDb();
+    const key = { ownerPublicKeyHex: OWNER_PUBKEY, publisherPublicKeyHex: PUBLISHER, appId: "player.example" };
+    await db.putAppPolicy({
+      policyKey: `${OWNER_PUBKEY}|${PUBLISHER}|player.example`,
+      key,
+      override: { seedMaxPriceSatoshis: "100" },
+      updatedAt: 42,
+    });
+    const loaded = await db.getAppPolicy(key);
+    expect(loaded?.override).toEqual({ seedMaxPriceSatoshis: "100" });
+    expect((await db.listAppPolicies()).length).toBe(1);
+    await db.deleteAppPolicy(key);
+    expect(await db.getAppPolicy(key)).toBeNull();
+    db.close();
+  });
+
+  it("touchAppUsage preserves firstSeenAt and updates lastSeenAt", async () => {
+    const db = await freshDb();
+    const key = { ownerPublicKeyHex: OWNER_PUBKEY, publisherPublicKeyHex: PUBLISHER, appId: "app" };
+    await db.touchAppUsage(key, "App", 10);
+    await db.touchAppUsage(key, "App v2", 20);
+    const usages = await db.listAppUsages();
+    expect(usages).toHaveLength(1);
+    expect(usages[0]).toMatchObject({ appName: "App v2", firstSeenAt: 10, lastSeenAt: 20 });
+    db.close();
+  });
+});
+
+describe("sanitizeAppOverride", () => {
+  it("accepts canonical partial overrides only", () => {
+    expect(sanitizeAppOverride({ seedMaxPriceSatoshis: "0" })).toEqual({ seedMaxPriceSatoshis: "0" });
+    expect(sanitizeAppOverride({})).toBeUndefined();
+    expect(sanitizeAppOverride({ seedMaxPriceSatoshis: "" })).toBeUndefined();
+    expect(sanitizeAppOverride({ blockMaxPriceSatoshis: "01" })).toBeUndefined();
+    expect(sanitizeAppOverride({ blockMaxPriceSatoshis: "18446744073709551616" })).toBeUndefined();
+    expect(sanitizeAppOverride(null)).toBeUndefined();
+  });
+});

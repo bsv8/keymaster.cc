@@ -105,3 +105,29 @@ export type {
   StorageUploadPartParams,
   StorageUploadPartResult
 } from "./storage.js";
+
+export {
+  MSFILE_BLOCK_SIZE_BYTES,
+  MSFILE_DIGEST_SIZE_BYTES,
+  MSFILE_MAX_BLOCK_BYTES,
+  MSFILE_MAX_CONTENT_BYTES,
+  MSFILE_MAX_ERROR_MESSAGE_BYTES,
+  MSFILE_MAX_HEADER_BYTES,
+  MSFILE_MAX_SEED_BYTES,
+  MSFILE_PROTOCOL_ID
+} from "./msfile.js";
+
+export type {
+  MsFileBlockReadParams,
+  MsFileReadResult,
+  MsFileSeedReadParams,
+  MsFileSatoshiAmount,
+  MsFileStatAbsentEntry,
+  MsFileStatAvailableEntry,
+  MsFileStatDiscoveringEntry,
+  MsFileStatNetworkErrorEntry,
+  MsFileStatParams,
+  MsFileStatQuotedEntry,
+  MsFileStatResult,
+  MsFileSupplierStat
+} from "./msfile.js";

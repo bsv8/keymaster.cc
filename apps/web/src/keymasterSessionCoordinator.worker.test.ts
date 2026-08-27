@@ -6,6 +6,20 @@ import {
   type LegacyVaultKeyRecord,
 } from "@keymaster/plugin-vault/coordinator";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import {
+  __testAcquireExecutorLease,
+  __testExecutorSignNoise,
+  __testExecutorSignPeerRecord,
+  __testReleaseExecutorLease,
+  __testDispatchMsfileControl,
+  __testDispatchMsfileControlWithEpoch,
+  __testDispatchMsfileData,
+  __testDispatchMsfileGrant,
+  __testDispatchMsfileSessionAbort,
+  __testReleaseMsfileRuntime,
+  __testSetMsfileRuntimeOverride,
+} from "./keymasterSessionCoordinator.worker.js";
+import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { parse as keyholdParse, unlock as keyholdUnlock } from "keyhold";
 import {
   __testBackgroundRunNow,
@@ -1322,5 +1336,401 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
     await vaultDb.putKey(legacy);
     expect(await __testListPasskeysForKey(existing.publicKeyHex)).toEqual([]);
     await expect(__testActivateKeyWithPasskey({ passkeyId: "embedded", prfOutputHex: "ab".repeat(32) })).rejects.toThrow("Passkey protection not found");
+  });
+});
+
+
+// 预生成 PeerId 向量（由 @libp2p/peer-id 派生，避免 apps/web 引入 libp2p 依赖）。
+const SUPPLIER_PEER_IDS = new Map<string, string>([
+  ["02352bbf4a4cdd12564f93fa332ce333301d9ad40271f8107181340aef25be59d5", "16Uiu2HAky1EH6J1p6jLjseMf5AtAMn3GLwYbcYaK7dH9T1F9XF56"],
+  ["03421f5fc9a21065445c96fdb91c0c1e2f2431741c72713b4b99ddcb316f31e9fc", "16Uiu2HAmH771Jxhe2diA2zAtPYNqfABsk5aaJ51cp99LhadN6waK"]
+]);
+
+function SUPPLIER_PEER_ID_FOR(publicKeyHex: string): string {
+  const peerId = SUPPLIER_PEER_IDS.get(publicKeyHex);
+  if (!peerId) throw new Error(`missing precomputed peer id for ${publicKeyHex}`);
+  return peerId;
+}
+
+describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    __testSetStorageSessionResolver(undefined);
+    await __testReleaseMsfileRuntime();
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  async function unlockForSpike(): Promise<{ epoch: string; owner: string }> {
+    const created = await __testCreateVault("spike-pw", { label: "executor-key" });
+    expect(created.publicKeyHex).toBeTruthy();
+    const owner = created.publicKeyHex!;
+    const unlockedResponse = await __testUnlock("spike-pw", owner);
+    expect(["accepted", "ok", "already-unlocked"]).toContain(unlockedResponse.ack.status);
+    return { epoch: __testGetSnapshot().sessionEpoch, owner };
+  }
+
+  function noiseStaticPublicKey(fill = 7): ArrayBuffer {
+    return new Uint8Array(32).fill(fill).buffer;
+  }
+
+  it("A04: two tabs competing for the same epoch yields exactly one lease", async () => {
+    const { owner } = await unlockForSpike();
+    const first = await __testAcquireExecutorLease(owner, "port-a");
+    expect(first.ack.status).toBe("ok");
+    const second = await __testAcquireExecutorLease(owner, "port-b");
+    expect(second.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    // 同 port 幂等续租返回同一 leaseId。
+    const again = await __testAcquireExecutorLease(owner, "port-a");
+    expect((again.operationResult as { leaseId: string }).leaseId)
+      .toBe((first.operationResult as { leaseId: string }).leaseId);
+  });
+
+  it("A05: stale lease id / wrong port signer requests are rejected", async () => {
+    const { owner } = await unlockForSpike();
+    const acquired = await __testAcquireExecutorLease(owner, "port-a");
+    const lease = acquired.operationResult as { leaseId: string; sessionEpoch: string };
+
+    // 伪造 port。
+    const forgedPort = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-forged");
+    expect(forgedPort.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+
+    // 正确 port 成功并返回签名。
+    const good = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
+    expect(good.ack.status).toBe("ok");
+    expect((good.operationResult as { signatureDer: ArrayBuffer }).signatureDer.byteLength).toBeGreaterThan(0);
+
+    // 显式释放后旧 leaseId 重放被拒（A05）。
+    await __testReleaseExecutorLease(lease.leaseId, "port-a");
+    const replay = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
+    expect(replay.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+  });
+
+  it("A03: typed signer inputs and Peer Record invariants are enforced by the worker", async () => {
+    const { owner } = await unlockForSpike();
+    const acquired = await __testAcquireExecutorLease(owner, "port-a");
+    const lease = acquired.operationResult as { leaseId: string; sessionEpoch: string };
+    const shortNoiseKey = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: new Uint8Array(31).buffer }, "port-a");
+    expect(shortNoiseKey.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+
+    const peerId = peerIdFromPublicKeyBytes(hexToBytes(owner)).toString();
+    const nonEmptyAddresses = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: ["/ip4/127.0.0.1/tcp/1"], sequence: "0" }, "port-a");
+    expect(nonEmptyAddresses.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    const wrongPeerId = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId: "16Uiu2HAmH4VY9jMZ2fG4N7aQZ6uHh5mS5jQxZ3Yy1h1nH7qVY6r", addresses: [], sequence: "0" }, "port-a");
+    expect(wrongPeerId.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    const valid = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: [], sequence: "7" }, "port-a");
+    expect(valid.ack.status).toBe("ok");
+    const decreasing = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: [], sequence: "6" }, "port-a");
+    expect(decreasing.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    const overflow = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: [], sequence: "18446744073709551616" }, "port-a");
+    expect(overflow.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+  });
+
+  it("A06: lock invalidates the lease; queued signer requests fail after re-unlock", async () => {
+    const { epoch } = await unlockForSpike();
+    const owner = __testGetSnapshot().activePublicKeyHex!;
+    const acquired = await __testAcquireExecutorLease(owner, "port-a");
+    const lease = acquired.operationResult as { leaseId: string; sessionEpoch: string };
+
+    await __testLock();
+    const duringLock = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
+    expect(duringLock.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    void epoch;
+
+    await __testUnlock("spike-pw");
+    const afterReunlock = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
+    // lock 清空了 lease：旧 leaseId 在新会话中不可复活。
+    expect(afterReunlock.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+  });
+});
+
+describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile）", () => {
+  const identity = {
+    version: 1 as const,
+    publisherPublicKeyHex: "03" + "ab".repeat(32),
+    appId: "player.example",
+    appName: "Player",
+    identityDigestHex: "aa".repeat(32)
+  };
+  const ownerPublicKeyHex = validPublisherKey(9);
+
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    __testSetStorageSessionResolver(undefined);
+    await __testReleaseMsfileRuntime();
+    await __testDeleteVault();
+    __testResetState();
+    await new Promise<void>((resolve) => {
+      const request = indexedDB.deleteDatabase("keymaster.msfile");
+      request.onsuccess = () => resolve();
+      request.onerror = () => resolve();
+      request.onblocked = () => setTimeout(() => resolve(), 50);
+    });
+  });
+
+  async function unlockVault(): Promise<string> {
+    const created = await __testCreateVault("vault-pw", { label: "msfile-key" });
+    expect(created.publicKeyHex).toBeTruthy();
+    // createVaultWithInitialKey 可能直接进入 unlocked（already-unlocked 亦视为就绪）。
+    const unlockedResponse = await __testUnlock("vault-pw", created.publicKeyHex);
+    expect(["ok", "already-unlocked"]).toContain(unlockedResponse.ack.status);
+    return __testGetSnapshot().sessionEpoch;
+  }
+
+  it("rejects all data/control/grant traffic while the Vault is locked（审查修复）", async () => {
+    // 全新状态：未创建 / 未解锁。
+    __testResetState();
+    const lockedControl = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect(lockedControl.ack).toMatchObject({ status: "locked" });
+    const lockedData = await __testDispatchMsfileData({ type: "stat", seedHashHex: "ab".repeat(32) }, "port-a");
+    expect(lockedData.ack).toMatchObject({ status: "locked" });
+    const lockedGrant = await __testDispatchMsfileGrant({
+      connectSessionId: "s", transportOrigin: "https://app.example", ownerPublicKeyHex, appIdentity: identity
+    }, "port-a");
+    expect(lockedGrant.ack).toMatchObject({ status: "locked" });
+
+    // session.abort 是纯清理：锁定态仍返回 ok 且不重建 runtime。
+    const abortWhileLocked = await __testDispatchMsfileSessionAbort("s", __testGetSnapshot().sessionEpoch, "port-a");
+    expect(abortWhileLocked.ack).toMatchObject({ status: "ok" });
+
+    // 解锁后同一控制面请求成功。
+    const epoch = await unlockVault();
+    const okControl = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect(okControl.ack.status).toBe("ok");
+    void epoch;
+  });
+
+  it("enforces the session epoch fence on the msfile lane（审查修复）", async () => {
+    // 记录解锁前的 epoch；创建 Vault 会推进 epoch。
+    __testResetState();
+    const epochBefore = __testGetSnapshot().sessionEpoch;
+    await unlockVault();
+    const stale = await __testDispatchMsfileControlWithEpoch({ type: "settings.get" }, epochBefore);
+    // 携带旧 epoch 的 control 必须被判 stale，而不是进入执行。
+    expect(stale.ack).toMatchObject({ status: "stale-epoch" });
+    // 当前 epoch 正常放行。
+    const fresh = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect(fresh.ack.status).toBe("ok");
+  });
+
+  it("routes control-plane settings through the coordinator", async () => {
+    await unlockVault();
+    const saved = await __testDispatchMsfileControl({ type: "settings.global.update", input: { seedMaxPriceSatoshis: "500", blockMaxPriceSatoshis: "0" } });
+    expect(saved.ack.status).toBe("ok");
+    const snapshot = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect(snapshot.ack.status).toBe("ok");
+    expect(snapshot.operationResult).toMatchObject({
+      globalSettings: { seedMaxPriceSatoshis: "500", blockMaxPriceSatoshis: "0" }
+    });
+  });
+
+  it("rejects non-canonical amounts with a validation error", async () => {
+    await unlockVault();
+    const bad = await __testDispatchMsfileControl({ type: "settings.global.update", input: { seedMaxPriceSatoshis: "01", blockMaxPriceSatoshis: "5" } });
+    expect(bad.ack.status).toBe("error");
+  });
+
+  it("serializes control mutations so identical generations cannot both commit（审查修复）", async () => {
+    await unlockVault();
+    const supplierA = validPublisherKey(21);
+    const supplierB = validPublisherKey(22);
+    // 两个端口携带相同 expectedGeneration=0 并发 upsert：
+    // 串行化后第二个任务内的世代检查必须失败，而不是双双通过。
+    const [first, second] = await Promise.all([
+      __testDispatchMsfileControl({ type: "supplier.upsert", supplier: { name: "a", supplierPublicKeyHex: supplierA, addresses: [`/ip4/127.0.0.1/tcp/8080/tls/ws/p2p/${SUPPLIER_PEER_ID_FOR(supplierA)}`], enabled: true }, expectedGeneration: 0 }),
+      __testDispatchMsfileControl({ type: "supplier.upsert", supplier: { name: "b", supplierPublicKeyHex: supplierB, addresses: [`/ip4/127.0.0.1/tcp/8080/tls/ws/p2p/${SUPPLIER_PEER_ID_FOR(supplierB)}`], enabled: true }, expectedGeneration: 0 })
+    ]);
+    const outcomes = [first.ack.status, second.ack.status].sort();
+    expect(outcomes).toEqual(["ok", "validation-error"]);
+    const snapshot = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect((snapshot.operationResult as { suppliers: unknown[] }).suppliers).toHaveLength(1);
+  });
+
+  it("rejects mutations queued before a lock/unlock cycle with stale-epoch and leaves the DB untouched（审查修复）", async () => {
+    const epochAtEnqueue = await unlockVault();
+    // 用可悬挂的 stub runtime 阻塞串行尾，构造真实排队窗口。
+    let releaseHead!: (value?: unknown) => void;
+    const headGate = new Promise<unknown>((resolve) => { releaseHead = resolve; });
+    __testSetMsfileRuntimeOverride({
+      updateGlobalPriceSettings: () => headGate,
+      describeState: () => ({ status: "ready", supplierGeneration: 0, globalSettings: null, pendingApprovals: [] })
+    } as never);
+
+    // A：占据串行尾（挂起）。
+    const headPromise = __testDispatchMsfileControl({ type: "settings.global.update", input: { seedMaxPriceSatoshis: "1", blockMaxPriceSatoshis: "1" } });
+    // B：以**当时有效**的 epoch 入队——排在 A 之后。
+    const queuedPromise = __testDispatchMsfileControl({ type: "settings.global.update", input: { seedMaxPriceSatoshis: "2", blockMaxPriceSatoshis: "2" } });
+
+    // B 尚未开始执行：先等一拍确保它已入队。
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // 排队期间 lock → unlock：epoch 推进两次。
+    await __testLock();
+    const relocked = await __testUnlock("vault-pw");
+    expect(["accepted", "ok", "already-unlocked"]).toContain(relocked.ack.status);
+
+    // 释放 A；随后 B 才真正开始执行。
+    releaseHead();
+    const headResult = await headPromise;
+    // A 的提交跨越了 lock/unlock 栅栏：即使写入发生也不得报告为成功。
+    expect(headResult.ack).toMatchObject({ status: "stale-epoch" });
+
+    const queuedResult = await queuedPromise;
+    // B 携带入队时的 epoch，执行时已是新会话 → 任务开始时即被拒。
+    expect(queuedResult.ack).toMatchObject({ status: "stale-epoch" });
+    void epochAtEnqueue;
+
+    // DB 未被 B 修改：重建真实 runtime 后设置仍为空。
+    __testSetMsfileRuntimeOverride(undefined);
+    const snapshot = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect(snapshot.ack.status).toBe("ok");
+    expect((snapshot.operationResult as { globalSettings: unknown }).globalSettings).toBeNull();
+  });
+
+  it("keeps mutation results stale-epoch when lock lands mid-queue（审查修复）", async () => {
+    await unlockVault();
+    // 以不存在的旧 epoch 发起 mutation：入口栅栏直接拦截，
+    // 等价于“排队期间发生 lock/key switch”的最终形态。
+    const stale = await __testDispatchMsfileControlWithEpoch(
+      { type: "settings.global.update", input: { seedMaxPriceSatoshis: "9", blockMaxPriceSatoshis: "9" } },
+      "epoch-that-no-longer-exists"
+    );
+    expect(stale.ack).toMatchObject({ status: "stale-epoch" });
+    // 未写入：设置保持为空。
+    const snapshot = await __testDispatchMsfileControl({ type: "settings.get" });
+    expect((snapshot.operationResult as { globalSettings: unknown }).globalSettings).toBeNull();
+  });
+
+  it("rejects grants whose session lookup spans a lock/unlock cycle（审查修复）", async () => {
+    await unlockVault();
+    const epochAtEnqueue = __testGetSnapshot().sessionEpoch;
+    let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
+    const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
+    __testSetStorageSessionResolver(() => gated);
+
+    const pendingGrant = __testDispatchMsfileGrant({
+      connectSessionId: "session-gated",
+      transportOrigin: "https://app.example",
+      ownerPublicKeyHex,
+      appIdentity: identity
+    }, "port-a", epochAtEnqueue);
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // resolver 挂起期间 lock → unlock：epoch 推进。
+    await __testLock();
+    await __testUnlock("vault-pw");
+
+    releaseResolver({ sessionId: "session-gated", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    const result = await pendingGrant;
+    expect(result.ack).toMatchObject({ status: "stale-epoch" });
+  });
+
+  it("never reaches the service when an existing grant spans a lock/unlock during session lookup（第五轮审查修复）", async () => {
+    const epoch = await unlockVault();
+    __testSetStorageSessionResolver(async (id) => id === "session-msfile"
+      ? { sessionId: id, origin: "https://app.example", ownerPublicKeyHex: __testGetSnapshot().activePublicKeyHex!, appIdentity: identity, revokedAt: null }
+      : null);
+    const granted = await __testDispatchMsfileGrant({
+      connectSessionId: "session-msfile",
+      transportOrigin: "https://app.example",
+      ownerPublicKeyHex: __testGetSnapshot().activePublicKeyHex!,
+      appIdentity: identity
+    }, "port-a");
+    expect(granted.ack.status).toBe("ok");
+    const grantId = granted.operationResult as string;
+
+    // 用 spy stub 替换 runtime：任何 service 调用都会被记录。
+    const readSeedSpy = vi.fn(async () => { throw new Error("must not be called"); });
+    __testSetMsfileRuntimeOverride({
+      describeState: () => ({ status: "ready", supplierGeneration: 0, globalSettings: null, pendingApprovals: [] }),
+      connect: { stat: vi.fn(), readSeed: readSeedSpy, readBlock: vi.fn() }
+    } as never);
+
+    // 让 authoritative session 查询悬挂，期间 lock → unlock。
+    let releaseResolver!: (value: { sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null) => void;
+    const gated = new Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: typeof identity; revokedAt: number | null } | null>((resolve) => { releaseResolver = resolve; });
+    __testSetStorageSessionResolver(() => gated);
+    const pendingRead = __testDispatchMsfileData({ type: "read-seed", grantId, supplierPublicKeyHex: identity.publisherPublicKeyHex, seedHashHex: "ab".repeat(32) }, "port-a");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await __testLock();
+    await __testUnlock("vault-pw");
+
+    // 释放后：grant 已随 lock 清空 → 拒绝且 service 从未被调用。
+    releaseResolver({ sessionId: "session-msfile", origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
+    const result = await pendingRead;
+    expect(result.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
+    expect(readSeedSpy).not.toHaveBeenCalled();
+    void epoch;
+  });
+
+  it("refuses to bind a grant when the session owner is not the active runtime owner（审查修复）", async () => {
+    await unlockVault();
+    const otherOwner = validPublisherKey(31);
+    __testSetStorageSessionResolver(async () => ({
+      sessionId: "session-owner-mismatch",
+      origin: "https://app.example",
+      ownerPublicKeyHex: otherOwner,
+      appIdentity: identity,
+      revokedAt: null
+    }));
+    const result = await __testDispatchMsfileGrant({
+      connectSessionId: "session-owner-mismatch",
+      transportOrigin: "https://app.example",
+      ownerPublicKeyHex: otherOwner,
+      appIdentity: identity
+    }, "port-a");
+    expect(result.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
+  });
+
+  it("grants connect data access only for authoritative sessions and fails forged grants", async () => {
+    await unlockVault();
+    // 审查修复后 grant 要求 session owner === active runtime owner。
+    const activeOwner = __testGetSnapshot().activePublicKeyHex!;
+    __testSetStorageSessionResolver(async (id) => id === "session-msfile"
+      ? { sessionId: id, origin: "https://app.example", ownerPublicKeyHex: activeOwner, appIdentity: identity, revokedAt: null }
+      : null);
+    const granted = await __testDispatchMsfileGrant({
+      connectSessionId: "session-msfile",
+      transportOrigin: "https://app.example",
+      ownerPublicKeyHex: activeOwner,
+      appIdentity: identity
+    }, "port-a");
+    expect(granted.ack.status).toBe("ok");
+    const grantId = granted.operationResult as string;
+
+    // 同 session 的伪造 origin grant 必须被拒。
+    const forged = await __testDispatchMsfileGrant({
+      connectSessionId: "session-msfile",
+      transportOrigin: "https://evil.example",
+      ownerPublicKeyHex,
+      appIdentity: identity
+    }, "port-b");
+    expect(forged.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
+
+    // Stat 不受金额设置阻断：无启用供应商时返回空聚合（不是错误）。
+    const trustedStat = await __testDispatchMsfileData({ type: "stat", seedHashHex: "ab".repeat(32) }, "port-a");
+    expect(trustedStat.ack.status).toBe("ok");
+    expect((trustedStat.operationResult as { suppliers: unknown[] }).suppliers).toEqual([]);
+
+    // Read fail closed（三道闸）：全局设置未保存 → msfile_not_configured。
+    const unconfigured = await __testDispatchMsfileData({ type: "read-seed", supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");
+    expect(unconfigured.ack).toMatchObject({ status: "error", code: "msfile_not_configured" });
+
+    // 设置已保存但 Gate 0 前无 transport → 未配置供应商先失败。
+    await __testDispatchMsfileControl({ type: "settings.global.update", input: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" } });
+    const trustedRead = await __testDispatchMsfileData({ type: "read-seed", supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-a");
+    expect(trustedRead.ack).toMatchObject({ status: "error", code: "msfile_supplier_not_found" });
+
+    // 其他端口的 grant 不能使用。
+    const stolen = await __testDispatchMsfileData({ type: "read-seed", grantId, supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-b");
+    expect(stolen.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
   });
 });

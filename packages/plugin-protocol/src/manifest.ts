@@ -465,6 +465,15 @@ export const protocolPlugin: PluginManifest = {
       storageService = undefined;
     }
 
+    // MSFile 是可选平台能力（施工单 docs/proposals/msfile）：缺失时只让
+    // `msfile.*` 三个方法 fail closed（msfile_unavailable），不阻塞协议页。
+    let msfileService: import("@keymaster/contracts").MsFileService | undefined;
+    try {
+      msfileService = ctx.get<import("@keymaster/contracts").MsFileService>("msfile.service");
+    } catch {
+      msfileService = undefined;
+    }
+
     // IndexedDB 是历史 / 每站点配置的可选持久化层，绝不能阻塞插件注册。
     // 某些浏览器在存储服务异常时会让 indexedDB.open() 永久 pending，既不触发
     // error 也不触发 blocked。先以 historyAvailable=false 创建 service，后台
@@ -540,6 +549,14 @@ export const protocolPlugin: PluginManifest = {
         getStorageService: () => {
           try {
             return ctx.get<StorageService>("storage.service");
+          } catch {
+            return undefined;
+          }
+        },
+        msfileService,
+        getMsfileService: () => {
+          try {
+            return ctx.get<import("@keymaster/contracts").MsFileService>("msfile.service");
           } catch {
             return undefined;
           }

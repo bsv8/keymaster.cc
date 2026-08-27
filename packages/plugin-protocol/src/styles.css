@@ -930,3 +930,49 @@
   border: 1px dashed var(--border-card, #e4e4e7);
   border-radius: 6px;
 }
+
+/* MSFile 价格确认卡（施工单 docs/proposals/msfile KMMF-006） */
+.protocol-popup__msfile-approvals {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.protocol-msfile-approval-card {
+  border: 1px solid var(--km-warning, #f59e0b);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.protocol-msfile-approval-card dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.protocol-msfile-approval-card dt {
+  color: var(--km-text-muted, #6b7280);
+}
+
+.protocol-msfile-approval-card dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.protocol-msfile-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.protocol-msfile-approval-error {
+  color: var(--km-danger, #dc2626);
+  font-size: 0.85rem;
+  margin: 0;
+}

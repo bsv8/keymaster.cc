@@ -34,6 +34,11 @@ import {
   type IntentSignResult,
   type MethodParams,
   type MethodResult,
+  type MsFileBlockReadParams,
+  type MsFileReadResult,
+  type MsFileSeedReadParams,
+  type MsFileStatParams,
+  type MsFileStatResult,
   type P2pkhTransferParams,
   type P2pkhTransferResult,
   type ProtocolErrorCode,
@@ -617,6 +622,38 @@ export class KeymasterConnectClient {
     options?: KeymasterRequestOptions
   ): Promise<StorageUploadAbortResult> {
     return this.request("storage.upload.abort", params, options);
+  }
+
+  /**
+   * Calls `msfile.stat` to query every enabled MSFile supplier for a seed
+   * hash. The caller selects supplier/hash only; price policy stays inside
+   * Keymaster.
+   *
+   * @group MSFile
+   */
+  msfileStat(params: MsFileStatParams, options?: KeymasterRequestOptions): Promise<MsFileStatResult> {
+    return this.request("msfile.stat", params, options);
+  }
+
+  /**
+   * Calls `msfile.seed.read` to buy and read a MasterSeed by hash. There is no
+   * price parameter: Keymaster resolves the amount from its settings or asks
+   * the user for approval when needed.
+   *
+   * @group MSFile
+   */
+  msfileReadSeed(params: MsFileSeedReadParams, options?: KeymasterRequestOptions): Promise<MsFileReadResult> {
+    return this.request("msfile.seed.read", params, options);
+  }
+
+  /**
+   * Calls `msfile.block.read` to buy and read a single file block by hash.
+   * Like {@link msfileReadSeed}, no caller-supplied price is accepted.
+   *
+   * @group MSFile
+   */
+  msfileReadBlock(params: MsFileBlockReadParams, options?: KeymasterRequestOptions): Promise<MsFileReadResult> {
+    return this.request("msfile.block.read", params, options);
   }
 
   /**

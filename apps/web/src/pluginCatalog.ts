@@ -21,6 +21,7 @@ import { hexImporterPlugin } from "@keymaster/plugin-importer-hex";
 import { jsonFileImporterPlugin } from "@keymaster/plugin-importer-json-file";
 import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
 import { keyImportPlugin } from "@keymaster/plugin-key-import";
+import { msfilePlugin } from "@keymaster/plugin-msfile";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
 import { jungleBusPlugin } from "@keymaster/plugin-junglebus";
 import { pokerPlugin } from "@keymaster/plugin-poker";
@@ -35,6 +36,7 @@ import { wocPlugin } from "@keymaster/plugin-woc";
 export const WEB_PLUGIN_CATALOG: readonly PluginManifest[] = [
   vaultPlugin,
   storagePlugin,
+  msfilePlugin,
   broadcastPlatformPlugin,
   hubcastPlatformPlugin,
   appmsgPlatformPlugin,

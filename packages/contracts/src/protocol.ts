@@ -45,6 +45,13 @@ import type {
   StorageUploadPartParams,
   StorageUploadPartResult
 } from "./storage.js";
+import type {
+  MsFileBlockReadParams,
+  MsFileReadResult,
+  MsFileSeedReadParams,
+  MsFileStatParams,
+  MsFileStatResult
+} from "./msfile.js";
 //   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
 //       `ProtocolCommandFeedState.commands` **不**再承诺
 //       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
@@ -183,7 +190,13 @@ export const PROTOCOL_METHODS = [
   "storage.upload.begin",
   "storage.upload.part",
   "storage.upload.complete",
-  "storage.upload.abort"
+  "storage.upload.abort",
+  // 施工单 docs/proposals/msfile：MSFile 对外方法族。与 storage.* 同为
+  // session-bound 且强制要求 verified App Identity；Seed/Block 显式区分，
+  // Read 不接受 maxPriceSatoshis（金额只能来自 Keymaster 设置或用户确认）。
+  "msfile.stat",
+  "msfile.seed.read",
+  "msfile.block.read"
 ] as const;
 
 /** 协议方法名联合类型。 */
@@ -229,6 +242,21 @@ export type ProtocolErrorCode =
   | "storage_invalid_upload"
   | "storage_provider_error"
   | "storage_identity_required"
+  // MSFile 稳定公开错误码（施工单 §6）。supplier wire error code 保留为
+  // 内部诊断，不把任意远端字符串直接变成公开 code。
+  | "msfile_not_configured"
+  | "msfile_unavailable"
+  | "msfile_identity_required"
+  | "msfile_supplier_not_found"
+  | "msfile_supplier_disabled"
+  | "msfile_invalid_hash"
+  | "msfile_price_limit_exceeded"
+  | "msfile_integrity_error"
+  | "msfile_content_not_found"
+  | "msfile_rate_limited"
+  | "msfile_supplier_error"
+  | "msfile_transport_error"
+  | "msfile_protocol_error"
   | "internal_error";
 
 /** 协议错误对象。 */
@@ -1872,6 +1900,9 @@ export interface MethodParamsMap {
   "storage.upload.part": StorageUploadPartParams;
   "storage.upload.complete": StorageUploadCompleteParams;
   "storage.upload.abort": StorageUploadAbortParams;
+  "msfile.stat": MsFileStatParams;
+  "msfile.seed.read": MsFileSeedReadParams;
+  "msfile.block.read": MsFileBlockReadParams;
 }
 
 export type MethodParams<M extends ProtocolMethod> = M extends keyof MethodParamsMap
@@ -1906,6 +1937,9 @@ export interface MethodResultMap {
   "storage.upload.part": StorageUploadPartResult;
   "storage.upload.complete": StoragePutResult;
   "storage.upload.abort": StorageUploadAbortResult;
+  "msfile.stat": MsFileStatResult;
+  "msfile.seed.read": MsFileReadResult;
+  "msfile.block.read": MsFileReadResult;
 }
 
 export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends keyof MethodResultMap
