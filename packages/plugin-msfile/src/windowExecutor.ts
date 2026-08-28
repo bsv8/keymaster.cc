@@ -9,6 +9,11 @@ import { webSockets } from "@libp2p/websockets";
 import { multiaddr } from "@multiformats/multiaddr";
 import { authenticateConnection, createHost } from "bitcoin-libp2p/libp2p";
 import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
+import {
+  dialAuthenticatedWebRTCDirect,
+  parseWebRTCDirectEndpoint,
+  WebRTCDirectError,
+} from "bitcoin-libp2p/webrtc-direct";
 import type {
   MsFileSupplierConfig,
   MsFileSupplierProbeResult,
@@ -70,9 +75,17 @@ function errorText(error: unknown): string {
 }
 
 function publicProbeErrorCode(error: unknown): string {
-  const message = errorText(error).toLowerCase();
-  if (message.includes("tls") || message.includes("certificate") || message.includes("certhash") || message.includes("dtls")) return "tls_error";
-  if (message.includes("peer") || message.includes("public key") || message.includes("identity") || message.includes("pin")) return "identity_mismatch";
+  if (error instanceof WebRTCDirectError) {
+    // 公开给设置页的错误只能来自 SDK 稳定的 code/stage；不能依赖可变的
+    // 英文 message。WSS 的底层错误没有 Direct SDK 语义，统一归为 dial_failed。
+    if (error.stage === "authenticate" || error.code === "ERR_WEBRTC_DIRECT_PEER_ID" || error.code === "ERR_WEBRTC_DIRECT_AUTH") {
+      return "identity_mismatch";
+    }
+    if (error.code === "ERR_WEBRTC_DIRECT_CERTHASH") return "tls_error";
+    if (error.stage === "resolve" || error.code === "ERR_WEBRTC_DIRECT_RESOLVE") return "resolve_failed";
+    if (error.code === "ERR_WEBRTC_DIRECT_TIMEOUT") return "timeout";
+    if (error.stage === "validate" || error.code === "ERR_WEBRTC_DIRECT_ADDRESS") return "invalid_address";
+  }
   return "dial_failed";
 }
 
@@ -155,13 +168,7 @@ export class MsFileSupplierRuntime {
     for (const address of input.supplier.addresses) {
       if (input.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
       try {
-        const parsed = multiaddr(address);
-        const connection = await this.host.dial(parsed, { signal: input.signal });
-        const authenticated = authenticateConnection(connection, {
-          peerId,
-          publicKey: hexToBytes(input.supplier.supplierPublicKeyHex),
-        });
-        if (authenticated.peerId.toString() !== peerId) throw new Error("supplier PeerId pin mismatch");
+        const connection = await this.dialSupplierAddress(input.supplier, address, input.signal);
         connected = true;
         addresses.push({ address, ok: true });
         // Probe deliberately opens no MSFile stream and never performs a Read.
@@ -225,19 +232,12 @@ export class MsFileSupplierRuntime {
   }
 
   private async dialSupplier(supplier: MsFileSupplierConfig, generation: number, signal?: AbortSignal): Promise<SupplierConnection> {
-    const expectedPeerId = peerIdFromPublicKeyBytes(hexToBytes(supplier.supplierPublicKeyHex));
     const errors: string[] = [];
     for (const address of supplier.addresses) {
       if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
       let connection: Connection | undefined;
       try {
-        const parsed = multiaddr(address);
-        connection = await this.host.dial(parsed, { signal });
-        if (signal?.aborted) {
-          await connection.close().catch(() => undefined);
-          throw new DOMException("The operation was aborted", "AbortError");
-        }
-        authenticateConnection(connection, { peerId: expectedPeerId, publicKey: hexToBytes(supplier.supplierPublicKeyHex) });
+        connection = await this.dialSupplierAddress(supplier, address, signal);
         return await this.installConnection(supplier, generation, connection);
       } catch (error) {
         errors.push(errorText(error));
@@ -245,6 +245,44 @@ export class MsFileSupplierRuntime {
       }
     }
     throw new Error(`MSFile supplier dial failed: ${errors.join(" | ")}`);
+  }
+
+  /**
+   * Direct 与 WSS 共用一个 host，但拨号能力必须按地址类型分流：
+   * WebRTC Direct 由 0.2.0 SDK 完成 endpoint 校验、身份 pin、超时和取消；
+   * WSS 继续使用业务层已有的 host.dial + authenticateConnection。
+   */
+  private async dialSupplierAddress(
+    supplier: MsFileSupplierConfig,
+    address: string,
+    signal?: AbortSignal,
+  ): Promise<Connection> {
+    const publicKey = hexToBytes(supplier.supplierPublicKeyHex);
+    const parsed = multiaddr(address);
+    const isDirect = parsed.getComponents().some((component) => component.name === "webrtc-direct");
+    if (isDirect) {
+      const endpoint = parseWebRTCDirectEndpoint(parsed, { publicKey });
+      const result = await dialAuthenticatedWebRTCDirect(this.host, endpoint, {
+        publicKey,
+        signal,
+        timeoutMs: 15_000,
+      });
+      return result.connection;
+    }
+
+    const connection = await this.host.dial(parsed, { signal });
+    try {
+      authenticateConnection(connection, {
+        peerId: peerIdFromPublicKeyBytes(publicKey),
+        publicKey,
+      });
+      return connection;
+    } catch (error) {
+      // host.dial 已经建立了连接；身份 pin 失败时不能交给外层用
+      // `connection` 变量清理，因为这里会在返回前直接抛出。
+      await connection.close().catch(() => undefined);
+      throw error;
+    }
   }
 
   private async installConnection(supplier: MsFileSupplierConfig, generation: number, connection: Connection): Promise<SupplierConnection> {

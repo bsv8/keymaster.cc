@@ -199,8 +199,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       bitcoin-libp2p:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: 0.2.0
+        version: 0.2.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
@@ -478,11 +478,8 @@ importers:
         specifier: 13.0.3
         version: 13.0.3
       bitcoin-libp2p:
-        specifier: 0.1.0
-        version: 0.1.0
-      uint8arrays:
-        specifier: ^6.1.1
-        version: 6.1.1
+        specifier: 0.2.0
+        version: 0.2.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   packages/plugin-p2pkh:
     dependencies:
@@ -2178,8 +2175,8 @@ packages:
   birpc@2.9.0:
     resolution: {integrity: sha512-KrayHS5pBi69Xi9JmvoqrIgYGDkD6mcSe/i6YKi3w5kekCLzrX4+nawcXqrj2tIp50Kw/mT/s3p+GVK0A0sKxw==}
 
-  bitcoin-libp2p@0.1.0:
-    resolution: {integrity: sha512-0AINAVSvUFfBc+GShKDnZl9DR5YNc6OkCclT0Dh/hX65J9F4C4SmUSTy+S/lF2QhkIsmcPho9eqhwn/aG0IEqA==}
+  bitcoin-libp2p@0.2.0:
+    resolution: {integrity: sha512-mCF2RqQ1uAcPKXtHUvXUIklNXuDxGFa2KRgAUSG4ehsdlpMaVA2bEWEsVbCOTl0xEwGm1wgRO4HbyYPhUNezFA==}
 
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
@@ -5813,7 +5810,7 @@ snapshots:
 
   birpc@2.9.0: {}
 
-  bitcoin-libp2p@0.1.0:
+  bitcoin-libp2p@0.2.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -5823,13 +5820,17 @@ snapshots:
       '@libp2p/peer-id': 6.0.15
       '@libp2p/peer-id-factory': 4.2.4
       '@libp2p/peer-record': 9.0.16
+      '@libp2p/webrtc': 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       '@libp2p/websockets': 10.1.20
       '@multiformats/multiaddr': 13.0.3
       '@noble/curves': 2.0.1
       '@noble/hashes': 2.0.1
       libp2p: 3.3.9
+      multiformats: 14.0.5
     transitivePeerDependencies:
       - bufferutil
+      - react-native
+      - supports-color
       - utf-8-validate
 
   bowser@2.14.1: {}

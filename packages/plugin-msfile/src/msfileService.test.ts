@@ -31,7 +31,7 @@ async function waitForApprovals(service: MsFileServiceImpl, count = 1): Promise<
   throw new Error("approval did not open in time");
 }
 
-const SUPPLIER_ADDRESS = `/dns4/nas.example.com/udp/4001/webrtc-direct/certhash/uEiDu8SJ7IdK9W_PfRJfV0clhOP6mG0zNXcZQ8bBhC9ipwg/p2p/${SUPPLIER_PEER_ID}`;
+const SUPPLIER_ADDRESS = `/ip4/127.0.0.1/udp/4001/webrtc-direct/certhash/uEiDu8SJ7IdK9W_PfRJfV0clhOP6mG0zNXcZQ8bBhC9ipwg/p2p/${SUPPLIER_PEER_ID}`;
 
 interface RecordedRead {
   supplierPublicKeyHex: string;

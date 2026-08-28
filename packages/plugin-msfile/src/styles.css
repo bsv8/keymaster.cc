@@ -85,3 +85,256 @@
 .msfile-settings__ok {
   color: var(--km-success, #16a34a);
 }
+
+/* ---------- 首页 Seed 文件获取 ---------- */
+
+.msfile-home-file {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.msfile-home-file__header,
+.msfile-home-file__supplier-head,
+.msfile-home-file__selected-head,
+.msfile-home-file__input-row,
+.msfile-home-file__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.msfile-home-file__header {
+  justify-content: space-between;
+  align-items: flex-start;
+}
+
+.msfile-home-file__header h3,
+.msfile-home-file__header p,
+.msfile-home-file__suppliers h4 {
+  margin: 0;
+}
+
+.msfile-home-file__header p,
+.msfile-home-file__hint,
+.msfile-home-file__supplier-detail,
+.msfile-home-file__quote,
+.msfile-home-file__notice,
+.msfile-home-file__safe-notice {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.85rem;
+  margin: 3px 0 0;
+}
+
+.msfile-home-file__form {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.msfile-home-file__label {
+  font-weight: 600;
+}
+
+.msfile-home-file__input-row {
+  align-items: stretch;
+}
+
+.msfile-home-file__input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid var(--km-border, #d1d5db);
+  border-radius: 7px;
+  background: var(--km-surface, #fff);
+  color: var(--km-text, #111827);
+  font: inherit;
+  padding: 8px 10px;
+}
+
+.msfile-home-file__input:focus-visible {
+  outline: 2px solid var(--km-primary, #2563eb);
+  outline-offset: 1px;
+}
+
+.msfile-home-file__notice {
+  border-left: 3px solid var(--km-border, #d1d5db);
+  padding-left: 10px;
+}
+
+.msfile-home-file__notice p {
+  margin: 0 0 4px;
+}
+
+.msfile-home-file__error {
+  color: var(--km-danger, #dc2626);
+  margin: 0;
+}
+
+.msfile-home-file__diagnostic {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.8rem;
+}
+
+.msfile-home-file__suppliers {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.msfile-home-file__suppliers ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.msfile-home-file__suppliers li,
+.msfile-home-file__selected {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 9px;
+  padding: 10px 12px;
+}
+
+.msfile-home-file__suppliers li.is-candidate {
+  background: color-mix(in srgb, var(--km-primary, #2563eb) 5%, transparent);
+}
+
+.msfile-home-file__supplier-head {
+  flex-wrap: wrap;
+}
+
+.msfile-home-file__supplier-head code {
+  color: var(--km-text-muted, #6b7280);
+}
+
+.msfile-home-file__status {
+  border-radius: 999px;
+  font-size: 0.75rem;
+  margin-left: auto;
+  padding: 2px 8px;
+}
+
+.msfile-home-file__status--available,
+.msfile-home-file__status--quoted {
+  background: color-mix(in srgb, var(--km-success, #16a34a) 14%, transparent);
+  color: var(--km-success, #15803d);
+}
+
+.msfile-home-file__status--absent,
+.msfile-home-file__status--discovering {
+  background: color-mix(in srgb, var(--km-text-muted, #6b7280) 12%, transparent);
+  color: var(--km-text-muted, #6b7280);
+}
+
+.msfile-home-file__status--network-error {
+  background: color-mix(in srgb, var(--km-danger, #dc2626) 10%, transparent);
+  color: var(--km-danger, #dc2626);
+}
+
+.msfile-home-file__metadata {
+  display: grid;
+  gap: 5px 14px;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  margin: 9px 0 5px;
+}
+
+.msfile-home-file__metadata div {
+  min-width: 0;
+}
+
+.msfile-home-file__metadata dt {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.75rem;
+}
+
+.msfile-home-file__metadata dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.msfile-home-file__quote {
+  overflow-wrap: anywhere;
+}
+
+.msfile-home-file__selected {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.msfile-home-file__selected-head {
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.msfile-home-file__selected-head span {
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.85rem;
+}
+
+.msfile-home-file__progress {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.8rem;
+}
+
+.msfile-home-file__text-preview {
+  max-height: 360px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: color-mix(in srgb, var(--km-text, #111827) 5%, transparent);
+  border-radius: 7px;
+  margin: 0;
+  padding: 10px;
+}
+
+.msfile-home-file__image-preview {
+  display: block;
+  max-height: 360px;
+  max-width: 100%;
+  object-fit: contain;
+}
+
+.msfile-home-file__media-preview {
+  max-width: 100%;
+  width: 100%;
+}
+
+.msfile-home-file__html-preview,
+.msfile-home-file__pdf-preview {
+  min-height: 220px;
+}
+
+.msfile-home-file__html-preview iframe,
+.msfile-home-file__pdf-preview {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 7px;
+  display: block;
+  min-height: 320px;
+  width: 100%;
+}
+
+.msfile-home-file__safe-notice {
+  margin: 0 0 5px;
+}
+
+.msfile-home-file__actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 540px) {
+  .msfile-home-file__input-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .msfile-home-file__status {
+    margin-left: 0;
+  }
+}

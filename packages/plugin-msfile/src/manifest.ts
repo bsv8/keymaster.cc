@@ -2,8 +2,11 @@
 // MSFile 插件清单：提供 `msfile.service`（页面侧 proxy）与 /settings/system
 // 的 MSFile group。设置真值、DB 与网络都在 Coordinator SharedWorker。
 
-import type { I18nPluginResources, PluginManifest, PluginContext, ResourceRegistry } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginContext, ResourceRegistry, RouteRegistry } from "@keymaster/contracts";
 import {
+  type BusinessFeatureRegistry,
+  type KeyspaceService,
+  KEYSPACE_SERVICE_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   SESSION_COORDINATOR_CLIENT_CAPABILITY,
@@ -11,6 +14,7 @@ import {
   type SystemSettingsRegistry,
 } from "@keymaster/contracts";
 import { MsFileServiceProxy } from "./msfileServiceProxy.js";
+import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 
 export const MSFILE_PLUGIN_ID = "msfile";
@@ -55,7 +59,65 @@ const resources: I18nPluginResources = {
       "msfile.approvals.allowAlways": "Always allow up to this amount",
       "msfile.errors.msfile_not_configured": "MSFile price limits are not configured yet.",
       "msfile.errors.msfile_unavailable": "MSFile is unavailable right now.",
-      "msfile.errors.default": "MSFile request failed."
+      "msfile.errors.default": "MSFile request failed.",
+      "msfile.home.space": "MSFile files",
+      "msfile.home.title": "Get a file by Seed",
+      "msfile.home.description": "Enter a Seed Hash to query suppliers and safely preview or download the original file.",
+      "msfile.home.seedHash.label": "Seed Hash",
+      "msfile.home.seedHash.hint": "Only 64 lowercase hexadecimal characters are accepted; the input is not rewritten.",
+      "msfile.home.fetch": "Find file",
+      "msfile.home.querying": "Working…",
+      "msfile.home.cancel": "Cancel",
+      "msfile.home.settings": "Open MSFile settings",
+      "msfile.home.config.loading": "Reading MSFile configuration…",
+      "msfile.home.config.unavailable": "MSFile is unavailable right now. Try again later.",
+      "msfile.home.config.priceMissing": "Save the global Seed and Block price limits before fetching.",
+      "msfile.home.config.supplierMissing": "Enable at least one supplier before fetching.",
+      "msfile.home.suppliers": "Supplier results",
+      "msfile.home.status.available": "Available",
+      "msfile.home.status.quoted": "Quoted",
+      "msfile.home.status.absent": "No file",
+      "msfile.home.status.discovering": "Discovering",
+      "msfile.home.status.networkError": "Temporarily unavailable",
+      "msfile.home.absentDetail": "This supplier does not have the file.",
+      "msfile.home.discoveringDetail": "The supplier is discovering this Seed. Try again later.",
+      "msfile.home.discoveringRetry": "Retry status: available after {{ms}} ms.",
+      "msfile.home.networkDetail": "The supplier is temporarily unavailable; this is not an absent result.",
+      "msfile.home.chooseSupplier": "Choose a supplier. Seed and all Blocks will use the same supplier.",
+      "msfile.home.selectSupplier": "Use this supplier",
+      "msfile.home.fileName": "File name",
+      "msfile.home.fileSize": "File size",
+      "msfile.home.mediaType": "Media type",
+      "msfile.home.quote": "Quote",
+      "msfile.home.selectedFile": "Selected file",
+      "msfile.home.preview.tooLarge": "Files over 32 MiB are not automatically previewed. Click download.",
+      "msfile.home.preview.unsupported": "This file type is not automatically previewed. Click download to open it.",
+      "msfile.home.preview.unconfirmed": "The browser could not confirm a safe decode, so the file is available as a download.",
+      "msfile.home.preview.text": "Text preview",
+      "msfile.home.preview.htmlSafe": "Safe static preview: scripts, network access, forms, and navigation are disabled.",
+      "msfile.home.preview.htmlTitle": "HTML safe static preview",
+      "msfile.home.preview.pdfTitle": "PDF preview",
+      "msfile.home.download": "Download",
+      "msfile.home.download.tooLarge": "Files over 256 MiB need streaming download support in a later browser version; this file will not be read.",
+      "msfile.home.progress.blocks": "Verified Blocks: {{done}} / {{total}}",
+      "msfile.home.progress.bytes": "Verified bytes: {{done}} / {{total}}",
+      "msfile.home.diagnostic": "Diagnostic code",
+      "msfile.home.cancelled": "File fetching was cancelled.",
+      "msfile.home.retry": "Retry",
+      "msfile.home.errors.invalidHash": "Seed Hash must be 64 lowercase hexadecimal characters.",
+      "msfile.home.errors.notConfigured": "MSFile is not configured. Set global price limits and enable a supplier first.",
+      "msfile.home.errors.unavailable": "MSFile is unavailable right now. Try again later.",
+      "msfile.home.errors.supplierChanged": "The selected supplier changed. Query the Seed again.",
+      "msfile.home.errors.priceLimit": "The read exceeds the global price limit. Open MSFile settings to adjust it; this page will not raise it temporarily.",
+      "msfile.home.errors.integrity": "File integrity validation failed; all content was discarded.",
+      "msfile.home.errors.contentNotFound": "The supplier did not find the requested content.",
+      "msfile.home.errors.rateLimited": "The supplier is temporarily rate-limiting requests. Try again later.",
+      "msfile.home.errors.supplier": "The supplier could not complete the request. Try again later.",
+      "msfile.home.errors.protocol": "The supplier returned an invalid protocol response; the file was not used.",
+      "msfile.home.errors.transport": "The supplier is temporarily unavailable. Try again later.",
+      "msfile.home.errors.rejected": "The read request was not approved.",
+      "msfile.home.errors.download": "The browser could not create a download file.",
+      "msfile.home.errors.default": "File fetching failed. Try again."
     },
     "zh-CN": {
       "msfile.settings.group": "MSFile",
@@ -93,7 +155,65 @@ const resources: I18nPluginResources = {
       "msfile.approvals.allowAlways": "始终允许该 App 到此金额",
       "msfile.errors.msfile_not_configured": "MSFile 价格限制尚未配置。",
       "msfile.errors.msfile_unavailable": "MSFile 当前不可用。",
-      "msfile.errors.default": "MSFile 请求失败。"
+      "msfile.errors.default": "MSFile 请求失败。",
+      "msfile.home.space": "MSFile 文件",
+      "msfile.home.title": "通过 Seed 获取文件",
+      "msfile.home.description": "输入 Seed Hash，查询供应商并安全预览或下载原文件。",
+      "msfile.home.seedHash.label": "Seed Hash",
+      "msfile.home.seedHash.hint": "只接受 64 位小写十六进制字符，不会自动修改输入。",
+      "msfile.home.fetch": "查询文件",
+      "msfile.home.querying": "处理中…",
+      "msfile.home.cancel": "取消",
+      "msfile.home.settings": "打开 MSFile 设置",
+      "msfile.home.config.loading": "正在读取 MSFile 配置…",
+      "msfile.home.config.unavailable": "MSFile 当前不可用，请稍后重试。",
+      "msfile.home.config.priceMissing": "请先保存全局 Seed 和 Block 金额上限。",
+      "msfile.home.config.supplierMissing": "请先启用至少一个供应商。",
+      "msfile.home.suppliers": "供应商结果",
+      "msfile.home.status.available": "可获取",
+      "msfile.home.status.quoted": "有报价",
+      "msfile.home.status.absent": "没有文件",
+      "msfile.home.status.discovering": "发现中",
+      "msfile.home.status.networkError": "暂时不可用",
+      "msfile.home.absentDetail": "该供应商没有此文件。",
+      "msfile.home.discoveringDetail": "供应商正在发现该 Seed，可稍后重试。",
+      "msfile.home.discoveringRetry": "可重试状态：约 {{ms}} ms 后重试。",
+      "msfile.home.networkDetail": "供应商暂时不可用，这不是 absent 结果。",
+      "msfile.home.chooseSupplier": "请选择一个供应商；Seed 与所有 Block 将固定使用同一供应商。",
+      "msfile.home.selectSupplier": "选择此供应商",
+      "msfile.home.fileName": "文件名",
+      "msfile.home.fileSize": "文件大小",
+      "msfile.home.mediaType": "媒体类型",
+      "msfile.home.quote": "报价",
+      "msfile.home.selectedFile": "已选择文件",
+      "msfile.home.preview.tooLarge": "超过 32 MiB 的文件不会自动预览，请点击下载。",
+      "msfile.home.preview.unsupported": "该文件类型不会自动预览，请点击下载后使用。",
+      "msfile.home.preview.unconfirmed": "无法确认浏览器可安全解码该内容，已降级为下载。",
+      "msfile.home.preview.text": "文本预览",
+      "msfile.home.preview.htmlSafe": "安全静态预览：脚本、网络、表单和导航已禁用。",
+      "msfile.home.preview.htmlTitle": "HTML 安全静态预览",
+      "msfile.home.preview.pdfTitle": "PDF 预览",
+      "msfile.home.download": "下载",
+      "msfile.home.download.tooLarge": "超过 256 MiB 的文件需要后续流式下载支持，当前不会读取。",
+      "msfile.home.progress.blocks": "已验证 Block：{{done}} / {{total}}",
+      "msfile.home.progress.bytes": "已验证字节：{{done}} / {{total}}",
+      "msfile.home.diagnostic": "诊断代码",
+      "msfile.home.cancelled": "文件获取已取消。",
+      "msfile.home.retry": "重试",
+      "msfile.home.errors.invalidHash": "Seed Hash 必须是 64 位小写十六进制字符。",
+      "msfile.home.errors.notConfigured": "MSFile 尚未完成配置，请先设置全局金额上限并启用供应商。",
+      "msfile.home.errors.unavailable": "MSFile 当前不可用，请稍后重试。",
+      "msfile.home.errors.supplierChanged": "所选供应商已变化，请重新查询。",
+      "msfile.home.errors.priceLimit": "读取金额超过全局上限，请前往 MSFile 设置调整；首页不会临时提高额度。",
+      "msfile.home.errors.integrity": "文件完整性校验失败，已丢弃全部内容。",
+      "msfile.home.errors.contentNotFound": "供应商没有找到请求的内容。",
+      "msfile.home.errors.rateLimited": "供应商暂时限制了请求，请稍后重试。",
+      "msfile.home.errors.supplier": "供应商暂时无法完成请求，请稍后重试。",
+      "msfile.home.errors.protocol": "供应商协议响应无效，文件未被使用。",
+      "msfile.home.errors.transport": "供应商暂时不可用，请稍后重试。",
+      "msfile.home.errors.rejected": "读取请求未获批准。",
+      "msfile.home.errors.download": "浏览器无法创建下载文件。",
+      "msfile.home.errors.default": "文件获取失败，请重试。"
     }
   }
 };
@@ -107,16 +227,19 @@ export const msfilePlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
-    // 001/002 完成前数据面 fail closed；003 发布验收完成前不默认启用；
-    // 真实 transport 注入并留下互操作证据后再翻回 true。
-    defaultEnabled: false,
+    // 默认加载只负责让设置入口和首页模块稳定出现；未配置全局金额或
+    // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
+    defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [MSFILE_SERVICE_CAPABILITY],
     displayGroup: "platform"
   },
   dependencies: [
     { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "MSFile 设置真值与数据面都归 Coordinator SharedWorker" },
-    { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" }
+    { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" },
+    { capability: "business.registry", reason: "注册 MSFile 首页文件获取投影" },
+    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
+    { capability: "vault.service", reason: "首页文件读取只允许在 Vault unlocked 时进行" }
   ],
   i18n: resources,
   setup(ctx: PluginContext) {
@@ -142,6 +265,7 @@ export const msfilePlugin: PluginManifest = {
       {
         status: import("@keymaster/contracts").MsFileServiceStatus;
         globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
+        supplierGeneration: number;
         approvals: import("@keymaster/contracts").MsFilePendingApprovalView[];
       },
       readonly string[]
@@ -151,15 +275,71 @@ export const msfilePlugin: PluginManifest = {
       key: () => [resourceId],
       load: async () => {
         let globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null = null;
+        let supplierGeneration = 0;
         try {
-          globalSettings = (await service.getSettingsSnapshot()).globalSettings;
+          const snapshot = await service.getSettingsSnapshot();
+          globalSettings = snapshot.globalSettings;
+          supplierGeneration = snapshot.supplierGeneration;
         } catch {
           // Coordinator 未就绪时按 null 展示（fail closed）。
         }
-        return { status: service.status(), globalSettings, approvals: service.listPendingApprovals() };
+        return { status: service.status(), globalSettings, supplierGeneration, approvals: service.listPendingApprovals() };
       },
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
+    });
+
+    // active-key 资源只携带生命周期标识，不携带文件、Seed 或 Block 字节。
+    // Resource Store 会在 active key 切换时销毁旧记录并取消其加载。
+    const lifecycleResourceId = "msfile.home.lifecycle";
+    resources_.register<
+      { activePublicKeyHex?: string; generation?: number },
+      readonly string[]
+    >({
+      id: lifecycleResourceId,
+      scope: "active-key",
+      key: (_args, context) => [lifecycleResourceId, context.activePublicKeyHex ?? "none"],
+      load: async (_args, context) => {
+        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
+        const active = keyspace?.active();
+        return { activePublicKeyHex: active?.activePublicKeyHex, generation: active?.generation };
+      },
+      subscribe: (_args, context, invalidate) => {
+        const keyspace = context.getCapability<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
+        return keyspace?.onActiveKeyChanged(() => invalidate()) ?? (() => undefined);
+      },
+      invalidation: "immediate"
+    });
+
+    // business.registry 支持在 home 域尚未加载时追加入口；home 插件加载后
+    // 会自动显示这个投影。entry 同时是该业务特征的正式页面入口，便于
+    // 用户从侧栏或直接访问 /msfile/files；首页模块复用同一个组件和状态机。
+    const routes = ctx.get<RouteRegistry>("route.registry");
+    const entryRouteId = "msfile.home.file";
+    routes.register({
+      id: entryRouteId,
+      path: "/msfile/files",
+      label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
+      component: MsFileHomeFileWidget,
+    });
+    const business = ctx.get<BusinessFeatureRegistry>("business.registry");
+    business.registerFeature(MSFILE_PLUGIN_ID, "home", {
+      id: "home.msfile-file",
+      label: { key: "msfile.home.title", fallback: "Get a file by Seed" },
+      description: { key: "msfile.home.description", fallback: "Get a file by Seed" },
+      order: 600,
+      entry: {
+        path: "/msfile/files",
+        routeId: entryRouteId,
+        visibleWhen: ({ unlocked }) => unlocked
+      },
+      home: [{
+        id: "msfile.file-fetch",
+        space: { id: "msfile.files", label: { key: "msfile.home.space", fallback: "MSFile files" }, order: 600 },
+        order: 10,
+        component: MsFileHomeFileWidget,
+        visibleWhen: ({ unlocked }) => unlocked
+      }]
     });
 
     const settings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
@@ -177,12 +357,8 @@ export const msfilePlugin: PluginManifest = {
       setupActive = false;
       executorCleanup?.();
       executorCleanup = undefined;
-      try {
-        settings.unregister(settingsId);
-      } catch {
-        // host 可能已经回收
-      }
-      resources_.unregister(resourceId);
+      // Registry 与 resource definition 由 host 按 ownership 统一回收。
+      // teardown 只释放 setup 自己创建的运行时对象，避免 host 随后重复注销。
       service.dispose();
     };
   }

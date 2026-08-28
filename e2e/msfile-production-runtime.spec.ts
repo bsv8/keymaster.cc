@@ -4,9 +4,11 @@
 
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { createHash, X509Certificate } from "node:crypto";
+import { createSocket } from "node:dgram";
 import { promises as fs } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
+import { get as httpsGet } from "node:https";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -20,6 +22,10 @@ const GO_NAS_DIR = process.env.MSFILE_PROXY_PROTOCOL_DIR
 const FILE_BYTES = 2 * 1024 * 1024;
 const BLOCK_BYTES = 256 * 1024;
 const CONNECT_SESSION_ID = "msfile-e2e-connect-session";
+const HOME_TEXT_FILENAME = "fixture-home.txt";
+const HOME_HTML_FILENAME = "fixture-home.html";
+const HOME_BINARY_FILENAME = "fixture-download.bin";
+const HOME_OTHER_FILENAME = "fixture-other.bin";
 const OTHER_SUPPLIER_PUBLIC_KEY = "035f3d296df6e017c017270bfc0293dc7d197ff9e04a25c096260420644d86d21a";
 const OTHER_SUPPLIER_PEER_ID = "16Uiu2HAmK4mB2kfxPQBajorRZo6sEgp9UXteN9Voi27u2RxTzma9";
 
@@ -57,7 +63,6 @@ interface ProductionHooks {
 interface NasFixture {
   directory: string;
   process: ChildProcess;
-  adminOrigin: string;
   supplierPublicKeyHex: string;
   peerId: string;
   webRtcAddress: string;
@@ -65,6 +70,12 @@ interface NasFixture {
   certificateSpkiSha256Base64: string;
   seedHashes: string[];
   seedLengths: Map<string, number>;
+  fileSeedHashes: {
+    text: string;
+    html: string;
+    binary: string;
+    other: string;
+  };
   blockHashes: string[];
   stderr: string[];
 }
@@ -89,14 +100,30 @@ async function freePort(): Promise<number> {
   });
 }
 
+async function freeUdpPort(): Promise<number> {
+  return new Promise((resolvePort, reject) => {
+    const socket = createSocket("udp4");
+    socket.once("error", reject);
+    socket.bind(0, "127.0.0.1", () => {
+      const address = socket.address();
+      if (typeof address === "string" || !address) {
+        socket.close();
+        reject(new Error("failed to allocate a loopback UDP port"));
+        return;
+      }
+      socket.close((error) => error ? reject(error) : resolvePort(address.port));
+    });
+  });
+}
+
 async function waitForJson<T>(url: string, accept: (value: T) => boolean, timeoutMs = 60_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      const response = await fetch(url);
-      if (response.ok) {
-        const value = await response.json() as T;
+      const response = await requestJson<T>(url);
+      if (response.ok && response.value !== undefined) {
+        const value = response.value;
         if (accept(value)) return value;
       } else {
         lastError = new Error(`HTTP ${response.status}`);
@@ -107,6 +134,43 @@ async function waitForJson<T>(url: string, accept: (value: T) => boolean, timeou
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
   }
   throw new Error(`timed out waiting for ${url}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
+}
+
+interface JsonResponse<T> {
+  ok: boolean;
+  status: number;
+  value?: T;
+}
+
+async function requestJson<T>(url: string): Promise<JsonResponse<T>> {
+  const headers = { authorization: "Bearer msfile-e2e-admin-token" };
+  if (!url.startsWith("https://")) {
+    const response = await fetch(url, { headers });
+    return {
+      ok: response.ok,
+      status: response.status,
+      value: response.ok ? await response.json() as T : undefined,
+    };
+  }
+  return new Promise<JsonResponse<T>>((resolveResponse, reject) => {
+    const request = httpsGet(url, { rejectUnauthorized: false, headers }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.once("end", () => {
+        const status = response.statusCode ?? 0;
+        if (status < 200 || status >= 300) {
+          resolveResponse({ ok: false, status });
+          return;
+        }
+        try {
+          resolveResponse({ ok: true, status, value: JSON.parse(Buffer.concat(chunks).toString("utf8")) as T });
+        } catch (error) {
+          reject(error);
+        }
+      });
+    });
+    request.once("error", reject);
+  });
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {
@@ -124,6 +188,26 @@ async function stopChild(child: ChildProcess): Promise<void> {
   });
 }
 
+function fixtureBytes(fileIndex: number, filename: string): Buffer {
+  const bytes = Buffer.alloc(FILE_BYTES);
+  if (filename === HOME_TEXT_FILENAME) {
+    const line = Buffer.from("Keymaster MSFile home text fixture\n");
+    for (let offset = 0; offset < bytes.length; offset += line.length) {
+      line.copy(bytes, offset, 0, Math.min(line.length, bytes.length - offset));
+    }
+    return bytes;
+  }
+  if (filename === HOME_HTML_FILENAME) {
+    // 该 HTML 故意包含脚本、外链、表单和导航入口，首页只能展示清洗后的
+    // 静态内容；脚本还会尝试写入 parent/localStorage，供 Chromium 断言隔离。
+    const html = Buffer.from(`<!doctype html><html><head><meta http-equiv="refresh" content="0;url=https://example.invalid/refresh"><link rel="stylesheet" href="https://example.invalid/style.css"><style>.external{background:url(https://example.invalid/image.png)}</style></head><body><h1>Keymaster MSFile HTML fixture</h1><p class="external">Static HTML body.</p><script>window.__msfileHtmlScriptRan = true; window.parent.__msfileHtmlParentTouched = true; localStorage.setItem("__msfileHtmlStorageTouched", "1"); fetch("https://example.invalid/script");</script><img src="https://example.invalid/image.png"><a href="https://example.invalid/navigate" target="_blank">External link</a><form action="https://example.invalid/submit"><input name="probe"><button type="submit">Submit</button></form></body></html>`);
+    html.copy(bytes);
+    return bytes;
+  }
+  for (let offset = 0; offset < bytes.length; offset += 1) bytes[offset] = (offset + fileIndex * 53) % 251;
+  return bytes;
+}
+
 async function startNasFixture(): Promise<NasFixture> {
   const directory = await fs.mkdtemp(join(tmpdir(), "keymaster-msfile-production-"));
   const nasData = join(directory, "nas-data");
@@ -133,14 +217,15 @@ async function startNasFixture(): Promise<NasFixture> {
   const tlsKey = join(directory, "supplier-tls.key");
   const config = join(directory, "msfile-nas.yaml");
   const binary = join(directory, "msfile-nas");
-  const adminPort = await freePort();
+  const webRtcPort = await freeUdpPort();
+  const webPort = await freePort();
   await fs.mkdir(nasData, { recursive: true });
   await fs.mkdir(seedData, { recursive: true });
   await fs.writeFile(identityKey, `${"0".repeat(63)}1\n`, { mode: 0o600 });
-  for (let fileIndex = 0; fileIndex < 4; fileIndex += 1) {
-    const bytes = Buffer.allocUnsafe(FILE_BYTES);
-    for (let offset = 0; offset < bytes.length; offset += 1) bytes[offset] = (offset + fileIndex * 53) % 251;
-    await fs.writeFile(join(nasData, `fixture-${fileIndex}.bin`), bytes);
+  const filenames = [HOME_TEXT_FILENAME, HOME_HTML_FILENAME, HOME_BINARY_FILENAME, HOME_OTHER_FILENAME];
+  for (let fileIndex = 0; fileIndex < filenames.length; fileIndex += 1) {
+    const filename = filenames[fileIndex]!;
+    await fs.writeFile(join(nasData, filename), fixtureBytes(fileIndex, filename));
   }
   await execFileAsync("openssl", [
     "req", "-x509", "-newkey", "rsa:2048", "-nodes",
@@ -160,34 +245,50 @@ async function startNasFixture(): Promise<NasFixture> {
     "invalid_retention: 1h",
     "hash_workers: 2",
     "enable_file_watcher: false",
+    // Go NAS 要求该字段是公网公布的基础地址，loopback 会被拒绝；实际
+    // 本机拨号地址仍从 /api/status 的 listen_addresses 取得并使用 ip4。
+    `webrtc_direct_public_addresses: [${JSON.stringify(`/dns4/localhost/udp/${webRtcPort}/webrtc-direct`)}]`,
     "listen:",
-    "  - /ip4/127.0.0.1/udp/0/webrtc-direct",
-    "  - /ip4/127.0.0.1/tcp/0/tls/ws",
+    `  - /ip4/127.0.0.1/udp/${webRtcPort}/webrtc-direct`,
+    `  - /ip4/127.0.0.1/tcp/${webPort}/tls/ws`,
     `tls_cert_file: ${JSON.stringify(tlsCert)}`,
     `tls_key_file: ${JSON.stringify(tlsKey)}`,
-    `admin_listen: 127.0.0.1:${adminPort}`,
+    "admin_token: msfile-e2e-admin-token",
     "",
   ].join("\n"));
 
   const stderr: string[] = [];
   const child = spawn(binary, ["--config", config], { cwd: GO_NAS_DIR, stdio: ["ignore", "pipe", "pipe"] });
   child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
-  const adminOrigin = `http://127.0.0.1:${adminPort}`;
+  const adminOrigin = `https://127.0.0.1:${webPort}`;
   try {
     const status = await waitForJson<{
       peer_id: string;
       supplier_public_key: string;
       listen_addresses: string[];
     }>(`${adminOrigin}/api/status`, (value) => Array.isArray(value.listen_addresses) && value.listen_addresses.length >= 2);
-    const webRtcAddress = status.listen_addresses.find((value) => value.includes("/webrtc-direct/"));
-    const wssAddress = status.listen_addresses.find((value) => value.includes("/tls/ws/"));
+    const rawWebRtcAddress = status.listen_addresses.find((value) => value.includes("/webrtc-direct"));
+    const rawWssAddress = status.listen_addresses.find((value) => value.includes("/tls/ws"));
+    // /api/status 的 listen_addresses 是本机 listener 原值，不带 PeerId；
+    // 供应商配置和正式拨号地址必须使用完整的 /p2p/<PeerId> 形式。
+    const webRtcAddress = rawWebRtcAddress ? `${rawWebRtcAddress}/p2p/${status.peer_id}` : undefined;
+    const wssAddress = rawWssAddress ? `${rawWssAddress}/p2p/${status.peer_id}` : undefined;
     if (!webRtcAddress || !wssAddress) throw new Error(`supplier did not publish both transports: ${JSON.stringify(status.listen_addresses)}`);
-    const files = await waitForJson<{ items: Array<{ seed_hash: string; state: string }> }>(
+    const files = await waitForJson<{ items: Array<{ seed_hash: string; state: string; recommended_filename: string; media_type: string; size_bytes: number }> }>(
       `${adminOrigin}/api/files?state=ready&limit=20`,
       (value) => value.items.filter((item) => item.state === "ready").length >= 4,
       90_000,
     );
     const seedHashes = files.items.filter((item) => item.state === "ready").map((item) => item.seed_hash).sort().slice(0, 4);
+    const fileSeedHashes = {
+      text: files.items.find((item) => item.recommended_filename === HOME_TEXT_FILENAME)?.seed_hash,
+      html: files.items.find((item) => item.recommended_filename === HOME_HTML_FILENAME)?.seed_hash,
+      binary: files.items.find((item) => item.recommended_filename === HOME_BINARY_FILENAME)?.seed_hash,
+      other: files.items.find((item) => item.recommended_filename === HOME_OTHER_FILENAME)?.seed_hash,
+    };
+    if (!fileSeedHashes.text || !fileSeedHashes.html || !fileSeedHashes.binary || !fileSeedHashes.other) {
+      throw new Error(`supplier fixture did not index all home files: ${JSON.stringify(files.items)}`);
+    }
     const seedLengths = new Map<string, number>();
     const blockHashes: string[] = [];
     for (const seedHash of seedHashes) {
@@ -206,7 +307,6 @@ async function startNasFixture(): Promise<NasFixture> {
     return {
       directory,
       process: child,
-      adminOrigin,
       supplierPublicKeyHex: status.supplier_public_key,
       peerId: status.peer_id,
       webRtcAddress,
@@ -214,6 +314,7 @@ async function startNasFixture(): Promise<NasFixture> {
       certificateSpkiSha256Base64: createHash("sha256").update(spki).digest("base64"),
       seedHashes,
       seedLengths,
+      fileSeedHashes: fileSeedHashes as { text: string; html: string; binary: string; other: string },
       blockHashes,
       stderr,
     };
@@ -257,6 +358,15 @@ async function configure(page: Page, fixture: NasFixture, addresses: string[]): 
   }, { config: supplier(addresses, fixture) });
 }
 
+async function bootstrapProductionPage(page: Page): Promise<void> {
+  await page.goto("/?msfileE2E=1", { waitUntil: "load" });
+  await waitForHooks(page);
+  await page.evaluate(async () => {
+    const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
+    await api.bootstrap();
+  });
+}
+
 async function readSummary(page: Page, kind: "seed" | "block", fixture: NasFixture, hash: string): Promise<ReadSummary> {
   return page.evaluate(async ({ kind: contentKind, supplierPublicKeyHex, hashHex }) => {
     const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
@@ -291,9 +401,10 @@ test.describe("MSFile production runtime（施工单 002）", () => {
         `--ignore-certificate-errors-spki-list=${fixture.certificateSpkiSha256Base64}`,
       ],
     });
-    context = await browser.newContext({ baseURL: KEYMASTER_ORIGIN });
+    context = await browser.newContext({ baseURL: KEYMASTER_ORIGIN, locale: "en-US" });
     await context.addInitScript(() => {
-      localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: { msfile: true } }));
+      // 留空 enabled，验证 msfilePlugin.meta.defaultEnabled=true 的真实默认启动路径。
+      localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: {} }));
     });
     controlPage = await context.newPage();
     await controlPage.goto("/?msfileE2E=1", { waitUntil: "load" });
@@ -387,7 +498,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     const untrustedBrowser = await chromium.launch({ headless: true });
     const untrustedContext = await untrustedBrowser.newContext({ baseURL: KEYMASTER_ORIGIN });
     try {
-      await untrustedContext.addInitScript(() => localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: { msfile: true } })));
+      await untrustedContext.addInitScript(() => localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: {} })));
       const page = await untrustedContext.newPage();
       await page.goto("/?msfileE2E=1", { waitUntil: "load" });
       await waitForHooks(page);
@@ -480,6 +591,100 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     expect(evidence.completed).toBe(10_000);
     if (evidence.heapAfterBytes !== null) expect(evidence.heapAfterBytes).toBeLessThan(256 * 1024 * 1024);
     console.log(JSON.stringify({ event: "msfile_i09_headless", ...evidence }));
+  });
+
+  test("H01/H14/H16/H17/H19: the real home projection reads, previews and downloads a Go supplier text file", async () => {
+    test.setTimeout(180_000);
+    await configure(controlPage, fixture, [fixture.webRtcAddress]);
+    await bootstrapProductionPage(controlPage);
+
+    const spaces = controlPage.locator(".business-home__space");
+    const spaceLabels = await spaces.locator(":scope > h2").allTextContents();
+    expect(spaceLabels.indexOf("MSFile files")).toBeGreaterThan(spaceLabels.indexOf("Contacts"));
+    await expect(controlPage.getByRole("heading", { name: "Get a file by Seed", exact: true })).toBeVisible();
+    await expect(controlPage.getByRole("button", { name: "Get a file by Seed", exact: true })).toBeVisible();
+
+    // defaultEnabled=true 必须同时让正式设置入口可见；数据面仍由组件的
+    // 已配置检查 fail closed，而不是靠关闭插件隐藏配置。
+    await controlPage.goto("/settings/system?msfileE2E=1", { waitUntil: "load" });
+    await waitForHooks(controlPage);
+    await controlPage.evaluate(async () => {
+      const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
+      await api.bootstrap();
+    });
+    await expect(controlPage.getByRole("heading", { name: "MSFile", exact: true })).toBeVisible();
+    await bootstrapProductionPage(controlPage);
+
+    await controlPage.evaluate(() => {
+      const calls: string[] = [];
+      const original = URL.revokeObjectURL.bind(URL);
+      Object.defineProperty(window, "__msfileE2ERevokedObjectUrls", { configurable: true, value: calls });
+      Object.defineProperty(URL, "revokeObjectURL", {
+        configurable: true,
+        value: (url: string) => { calls.push(url); original(url); },
+      });
+    });
+    await controlPage.getByLabel("Seed Hash").fill(fixture.fileSeedHashes.text);
+    await controlPage.getByRole("button", { name: "Find file", exact: true }).click();
+    await expect(controlPage.getByText("Keymaster MSFile home text fixture", { exact: false })).toBeVisible({ timeout: 120_000 });
+    await expect(controlPage.getByText("Verified Blocks: 8 / 8", { exact: true })).toBeVisible();
+
+    const downloadPromise = controlPage.waitForEvent("download");
+    await controlPage.getByRole("button", { name: "Download", exact: true }).click();
+    const download = await downloadPromise;
+    expect(download.suggestedFilename()).toBe(HOME_TEXT_FILENAME);
+
+    // 从首页切到正式入口会卸载旧组件，验证成功下载后保留的 Blob URL
+    // 也在组件生命周期结束时 revoke。
+    await controlPage.getByRole("button", { name: "Get a file by Seed", exact: true }).click();
+    await expect(controlPage).toHaveURL(/\/msfile\/files(?:\?.*)?$/u);
+    await expect.poll(() => controlPage.evaluate(() => {
+      const value = (window as Window & { __msfileE2ERevokedObjectUrls?: string[] }).__msfileE2ERevokedObjectUrls;
+      return value?.length ?? 0;
+    })).toBeGreaterThan(0);
+  });
+
+  test("H13/H16/H19: the real home HTML preview is opaque, static and downloadable", async () => {
+    test.setTimeout(180_000);
+    await configure(controlPage, fixture, [fixture.webRtcAddress]);
+    await bootstrapProductionPage(controlPage);
+    const externalRequests: string[] = [];
+    const onRequest = (request: { url(): string }) => {
+      if (request.url().includes("example.invalid")) externalRequests.push(request.url());
+    };
+    controlPage.on("request", onRequest);
+    try {
+      await controlPage.getByLabel("Seed Hash").fill(fixture.fileSeedHashes.html);
+      await controlPage.getByRole("button", { name: "Find file", exact: true }).click();
+      const iframe = controlPage.locator('iframe[title="HTML safe static preview"]');
+      await expect(iframe).toBeVisible({ timeout: 120_000 });
+      await expect(iframe).toHaveAttribute("sandbox", "");
+      await expect(iframe).toHaveAttribute("src", /^blob:/u);
+
+      const frame = controlPage.frameLocator('iframe[title="HTML safe static preview"]');
+      await expect(frame.locator("h1")).toHaveText("Keymaster MSFile HTML fixture");
+      await expect(frame.locator("script")).toHaveCount(0);
+      await expect(frame.locator("form, input, button, iframe, a[href]")).toHaveCount(0);
+      await expect(frame.locator("[src^=\"https://\"]")).toHaveCount(0);
+      const csp = await frame.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+      expect(csp).toContain("script-src 'none'");
+      expect(csp).toContain("connect-src 'none'");
+      expect(csp).toContain("navigate-to 'none'");
+      expect(await controlPage.evaluate(() => ({
+        script: (window as Window & { __msfileHtmlScriptRan?: boolean }).__msfileHtmlScriptRan ?? null,
+        parent: (window as Window & { __msfileHtmlParentTouched?: boolean }).__msfileHtmlParentTouched ?? null,
+        storage: localStorage.getItem("__msfileHtmlStorageTouched"),
+        path: window.location.pathname,
+      }))).toEqual({ script: null, parent: null, storage: null, path: "/" });
+      expect(externalRequests).toEqual([]);
+
+      const downloadPromise = controlPage.waitForEvent("download");
+      await controlPage.getByRole("button", { name: "Download", exact: true }).click();
+      const download = await downloadPromise;
+      expect(download.suggestedFilename()).toBe(HOME_HTML_FILENAME);
+    } finally {
+      controlPage.off("request", onRequest);
+    }
   });
 
   test("B12/B13: trusted capability and real Connect SDK/session/App Identity read through WSS", async () => {

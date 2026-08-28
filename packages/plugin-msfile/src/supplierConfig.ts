@@ -4,16 +4,18 @@
 // 校验规则（审查修复后）：
 //   - 公钥必须是 33 字节压缩 secp256k1 公钥的 66 字符小写 hex；
 //   - 每个地址按**精确组件序列**匹配，禁止混合 transport：
-//       webrtc-direct : [dns|dns4|dns6|ip4|ip6 <host>] [/udp/<port>] webrtc-direct certhash/<mh> p2p/<peer>
+//       webrtc-direct : [ip4|ip6 <host>] /udp/<port>/webrtc-direct/certhash/<mh>/p2p/<peer>
 //       tls/ws (WSS)  : [dns|dns4|dns6|ip4|ip6 <host>] tcp/<port> tls ws p2p/<peer>
 //       loopback ws   : [ip4 127.0.0.1 | ip6 ::1] tcp/<port> ws p2p/<peer>   （仅开发策略）
-//   - certhash 必须完整 multibase(base64url) + multihash(sha256, 32 字节) 解码；
+//   - WebRTC Direct 的完整 endpoint、certhash、UDP 端口和 PeerId pin 由
+//     bitcoin-libp2p/webrtc-direct 统一校验；当前浏览器没有受信 DNS resolver，
+//     因此 Direct 只接受 ip4/ip6，dns* 仅保留给 WSS；
 //   - `/wss` 输入可接受（解析器等价 /tls/ws），持久化输出规范形态；
 //   - name 只是本地显示值；编辑时不允许原地更换供应商公钥。
 
 import { multiaddr } from "@multiformats/multiaddr";
-import { hexToBytes, peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
-import { fromString as bytesFromString } from "uint8arrays";
+import { hexToBytes, peerIdFromPublicKeyBytes, publicKeyFromPeerId } from "bitcoin-libp2p/identity";
+import { parseWebRTCDirectEndpoint, WebRTCDirectError } from "bitcoin-libp2p/webrtc-direct";
 import { isValidMsFileSupplierPublicKeyHex } from "@keymaster/contracts";
 import type { MsFileSupplierConfig } from "@keymaster/contracts";
 
@@ -68,43 +70,6 @@ function isLoopbackHost(proto: string | undefined, host: string | undefined): bo
   return false; // dns/dns4/dns6 名称不允许裸 ws
 }
 
-/** multibase base64url('u' 前缀) + multihash 完整解码；校验 sha256/32 字节。 */
-function decodeCerthash(value: string): { ok: true } | { ok: false; message: string } {
-  const fail = (message: string) => ({ ok: false as const, message });
-  if (!value.startsWith("u")) return fail("certhash must use base64url multibase ('u' prefix)");
-  let raw: Uint8Array;
-  try {
-    raw = bytesFromString(value.slice(1), "base64url");
-  } catch {
-    return fail("certhash is not valid base64url");
-  }
-  // multihash: <code: varint> <length: varint> <digest>
-  let offset = 0;
-  const readVarint = (): number => {
-    let result = 0;
-    let shift = 0;
-    for (;;) {
-      if (offset >= raw.length) throw new Error("truncated varint");
-      const byte = raw[offset]!;
-      offset += 1;
-      result |= (byte & 0x7f) << shift;
-      if ((byte & 0x80) === 0) return result >>> 0;
-      shift += 7;
-      if (shift > 28) throw new Error("varint too long");
-    }
-  };
-  try {
-    const code = readVarint();
-    const length = readVarint();
-    if (code !== 0x12) return fail("certhash multihash must be sha256 (0x12)");
-    if (length !== 32) return fail("certhash digest must be 32 bytes");
-    if (raw.length - offset !== length) return fail("certhash digest length mismatch");
-    return { ok: true };
-  } catch (error) {
-    return fail(error instanceof Error ? error.message : "malformed multihash");
-  }
-}
-
 function parsePort(value: string | undefined): boolean {
   // 审查修复：远端供应商端口限定 1..65535（0 为保留值，不接受）。
   if (value === undefined) return true;
@@ -139,23 +104,21 @@ export function normalizeSupplierAddress(
   }
   const body = components.slice(0, -1);
 
-  // WebRTC Direct: <host> [/udp/<port>] webrtc-direct certhash/<mh>
+  // WebRTC Direct 的 endpoint 规范、certhash、UDP 端口和身份 pin 统一交给
+  // SDK；本应用暂不提供受信 DNS resolver，所以 DNS Direct 明确拒绝。
   if (body.some((c) => c.name === "webrtc-direct")) {
-    const expected =
-      body.length === 3 || body.length === 4 ? null : "unexpected components around webrtc-direct";
-    const hostProto = body[0]?.name ?? "";
-    const hostValue = body[0]?.value ?? "";
-    const sequenceOk =
-      HOST_PROTOS.has(hostProto) &&
-      ((body.length === 4 && body[1]!.name === "udp" && body[2]!.name === "webrtc-direct" && body[3]!.name === "certhash" && parsePort(body[1]!.value)) ||
-        (body.length === 3 && body[1]!.name === "webrtc-direct" && body[2]!.name === "certhash"));
-    if (expected !== null || !sequenceOk) {
-      return { ok: false, message: "webrtc-direct address must be exactly [<host>/][udp/<port>/]webrtc-direct/certhash/<multihash>" };
+    try {
+      const endpoint = parseWebRTCDirectEndpoint(addr, { publicKey: publicKeyFromPeerId(expectedPeerId) });
+      if (endpoint.hostType !== "ip4" && endpoint.hostType !== "ip6") {
+        return { ok: false, message: "WebRTC Direct DNS addresses require a trusted resolver; use ip4/ip6 or configure WSS" };
+      }
+      return { ok: true, value: { normalized: endpoint.address.toString(), transport: "webrtc-direct" } };
+    } catch (error) {
+      if (error instanceof WebRTCDirectError) {
+        return { ok: false, message: `WebRTC Direct ${error.stage} failed (${error.code})` };
+      }
+      return { ok: false, message: "WebRTC Direct address validation failed" };
     }
-    const certhash = decodeCerthash(body[body.length - 1]!.value ?? "");
-    if (!certhash.ok) return { ok: false, message: certhash.message };
-    void hostValue;
-    return { ok: true, value: { normalized: addr.toString(), transport: "webrtc-direct" } };
   }
 
   // tls/ws (WSS): <host> tcp/<port> tls ws —— 精确四段。
