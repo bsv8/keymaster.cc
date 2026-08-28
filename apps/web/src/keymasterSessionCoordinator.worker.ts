@@ -618,6 +618,7 @@ function emitMsFileState(): void {
     status: state?.status ?? (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "unavailable"),
     supplierGeneration: state?.supplierGeneration ?? 0,
     globalSettings: state?.globalSettings ?? null,
+    mediaPlaybackPrefetchBlocks: state?.mediaPlaybackPrefetchBlocks,
     pendingApprovals: state?.pendingApprovals ?? []
   };
   lastMsFileState = event;
@@ -1770,6 +1771,7 @@ function enqueueMsfileExecutorIdentitySign(
 
 const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
   "settings.global.update",
+  "settings.media.update",
   "supplier.upsert",
   "supplier.delete",
   "app-policy.update",
@@ -1810,6 +1812,7 @@ async function executeMsfileControlNow(request: Extract<CoordinatorClientRequest
   switch (control.type) {
     case "settings.get": value = await service.getSettingsSnapshot(); break;
     case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
+    case "settings.media.update": await service.updateMediaPlaybackSettings(control.input); value = null; break;
     case "supplier.upsert":
       if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
         return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "MSFile supplier generation changed" } };

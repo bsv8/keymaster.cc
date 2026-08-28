@@ -28,8 +28,22 @@ describe("global settings", () => {
     await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" }, 1234);
     expect(await db.getGlobalSettings()).toEqual({
       settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
+      mediaPlaybackPrefetchBlocks: 5,
       updatedAt: 1234,
     });
+    db.close();
+  });
+
+  it("updates the media policy independently and preserves price settings", async () => {
+    const db = await freshDb();
+    await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" }, 10);
+    await db.putMediaPlaybackPrefetchBlocks!({ mediaPlaybackPrefetchBlocks: 64 }, 20);
+    expect(await db.getGlobalSettings()).toEqual({
+      settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
+      mediaPlaybackPrefetchBlocks: 64,
+      updatedAt: 20,
+    });
+    await expect(db.putMediaPlaybackPrefetchBlocks!({ mediaPlaybackPrefetchBlocks: 1 }, 30)).rejects.toThrow();
     db.close();
   });
 });

@@ -33,6 +33,29 @@ export interface MsFileGlobalPriceSettings {
   blockMaxPriceSatoshis: MsFileSatoshiAmount;
 }
 
+/**
+ * 内置媒体播放器的资源策略。
+ *
+ * 这里的 Block 指 MSFile 的 256 KiB 内容块，不是金额授权，也不改变
+ * Connect App 的付费模型。字段单独存在，避免把播放器预取策略伪装成价格设置。
+ */
+export interface MsFileMediaPlaybackSettings {
+  /** 媒体播放最多提前读取的 MSFile Block 数，合法范围 2–64。 */
+  mediaPlaybackPrefetchBlocks: number;
+}
+
+/** 媒体播放预取窗口默认值与边界（单位：256 KiB MSFile Block）。 */
+export const MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT = 5;
+export const MSFILE_MEDIA_PREFETCH_BLOCKS_MIN = 2;
+export const MSFILE_MEDIA_PREFETCH_BLOCKS_MAX = 64;
+
+/** 规范化播放器预取窗口；非法值返回 undefined，不把 0 解释成无限。 */
+export function normalizeMsFileMediaPrefetchBlocks(input: unknown): number | undefined {
+  if (typeof input !== "number" || !Number.isSafeInteger(input)) return undefined;
+  if (input < MSFILE_MEDIA_PREFETCH_BLOCKS_MIN || input > MSFILE_MEDIA_PREFETCH_BLOCKS_MAX) return undefined;
+  return input;
+}
+
 /** App 级覆盖。字段缺失表示继承全局设置；不使用 `0` 表达缺失。 */
 export interface MsFileAppPriceOverride {
   seedMaxPriceSatoshis?: MsFileSatoshiAmount;
@@ -209,6 +232,8 @@ export interface MsFileSupplierProbeResult {
 export interface MsFileSettingsSnapshot {
   /** 用户尚未显式保存全局设置时为 null；Read 此时 fail closed。 */
   globalSettings: MsFileGlobalPriceSettings | null;
+  /** 旧 DB 没有该字段时按默认 5 读取；可选以兼容旧 RPC 快照。 */
+  mediaPlaybackPrefetchBlocks?: number;
   suppliers: MsFileSupplierConfig[];
   /** 供应商配置世代；每次变更递增，使旧连接失效。 */
   supplierGeneration: number;
@@ -313,6 +338,8 @@ export interface MsFileService {
 
   getSettingsSnapshot(): Promise<MsFileSettingsSnapshot>;
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void>;
+  /** 独立更新播放器预取窗口，不改变 Seed/Block 金额。 */
+  updateMediaPlaybackSettings(input: MsFileMediaPlaybackSettings): Promise<void>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;
   deleteSupplier(supplierPublicKeyHex: string): Promise<void>;
   probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult>;
@@ -358,4 +385,14 @@ export type MsFileErrorCode =
   /** 供应商侧明确业务失败：price_already_committed / acquisition_failed / internal_error。 */
   | "msfile_supplier_error"
   | "msfile_transport_error"
-  | "msfile_protocol_error";
+  | "msfile_protocol_error"
+  /** 播放器公共错误码；不把远端原始异常暴露给页面。 */
+  | "msfile_media_configuration"
+  | "msfile_media_network"
+  | "msfile_media_amount"
+  | "msfile_media_integrity"
+  | "msfile_media_unsupported_container"
+  | "msfile_media_unsupported_codec"
+  | "msfile_media_browser_capability"
+  | "msfile_media_decode_failed"
+  | "msfile_media_cancelled";

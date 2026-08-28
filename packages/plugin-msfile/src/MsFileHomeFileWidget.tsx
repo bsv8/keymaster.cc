@@ -31,6 +31,7 @@ import {
   useRuntimeStatus,
 } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
+import { MsFileMediaPlayer } from "./MsFileMediaPlayer.js";
 import {
   assembleMsFileParts,
   extractMsFileReadBytes,
@@ -54,6 +55,7 @@ import {
 
 const HOME_STATUS_RESOURCE_ID = "msfile.status";
 const HOME_LIFECYCLE_RESOURCE_ID = "msfile.home.lifecycle";
+const MAX_BROWSER_MEDIA_FILE_SIZE = BigInt(Number.MAX_SAFE_INTEGER);
 
 type HomePhase =
   | "idle"
@@ -75,6 +77,8 @@ interface HomeStatusResource {
   status: MsFileServiceStatus;
   globalSettings: MsFileGlobalPriceSettings | null;
   supplierGeneration: number;
+  /** 设置页更新后让首页重新读取当前媒体窗口。 */
+  mediaPlaybackPrefetchBlocks?: number;
 }
 
 interface HomeLifecycleResource {
@@ -279,6 +283,13 @@ function messageForPreviewReason(
   selection: FileSelection,
   t: (key: string, values?: Record<string, string | number | boolean | null | undefined>) => string,
 ): string | undefined {
+  const isMedia = selection.previewDecision.kind === "audio" || selection.previewDecision.kind === "video";
+  if (isMedia && selection.fileSizeBytes > MAX_BROWSER_MEDIA_FILE_SIZE) {
+    return t("msfile.home.download.tooLarge", { defaultValue: "文件过大，当前浏览器不能安全建立流式 byte range，请使用后续流式保存能力。" });
+  }
+  if (isMedia) {
+    return t("msfile.home.media.notSupported", { defaultValue: "播放会按 Block 窗口读取，不会先组装完整 Blob。" });
+  }
   if (!selection.previewDecision.canBlobDownload) {
     return t("msfile.home.download.tooLarge", { defaultValue: "超过 256 MiB 的文件需要后续流式下载支持，当前不会读取。" });
   }
@@ -306,8 +317,10 @@ export function MsFileHomeFileWidget() {
       status: service.status(),
       globalSettings: null,
       supplierGeneration: 0,
+      mediaPlaybackPrefetchBlocks: 5,
     },
     (a, b) => a.status === b.status && a.supplierGeneration === b.supplierGeneration &&
+      a.mediaPlaybackPrefetchBlocks === b.mediaPlaybackPrefetchBlocks &&
       JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings),
   );
   const lifecycle = useResourceSelector<HomeLifecycleResource, HomeLifecycleResource>(
@@ -397,7 +410,7 @@ export function MsFileHomeFileWidget() {
         if (!cancelled) setSettingsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [service, statusResource.status, statusResource.supplierGeneration, vault]);
+  }, [service, statusResource.status, statusResource.supplierGeneration, statusResource.mediaPlaybackPrefetchBlocks, vault]);
 
   // active key / supplier generation / lock 是任务栅栏。effect 之外 isCurrent
   // 也同步检查 ref，覆盖 React effect 尚未运行的微小窗口。
@@ -596,6 +609,12 @@ export function MsFileHomeFileWidget() {
       error: undefined,
       notice: messageForPreviewReason(selection, t),
     }));
+    if (selection.previewDecision.kind === "audio" || selection.previewDecision.kind === "video") {
+      // 媒体播放是独立意图：点击播放按钮时才读取 Seed/Block，且不走完整
+      // parts[] -> Blob URL 路径。下载按钮仍由 handleDownload 单独处理。
+      if (isCurrent(task)) setState((previous) => ({ ...previous, phase: "ready-to-download" }));
+      return;
+    }
     if (!selection.previewDecision.canBlobDownload || !selection.previewDecision.canAutoPreview) {
       if (isCurrent(task)) setState((previous) => ({ ...previous, phase: "ready-to-download" }));
       return;
@@ -865,6 +884,24 @@ export function MsFileHomeFileWidget() {
             <strong>{state.selected.filename}</strong>
             <span>{state.selected.supplierName}</span>
           </div>
+          {(state.selected.previewDecision.kind === "audio" || state.selected.previewDecision.kind === "video") &&
+          state.selected.fileSizeBytes <= MAX_BROWSER_MEDIA_FILE_SIZE &&
+          state.phase !== "failed" && state.phase !== "cancelled" ? (
+            <MsFileMediaPlayer
+              key={`${state.hash}:${state.selected.supplierPublicKeyHex}`}
+              seedHashHex={state.hash}
+              supplierPublicKeyHex={state.selected.supplierPublicKeyHex}
+              fileSizeBytes={state.selected.fileSizeBytes}
+              declaredMediaType={state.selected.mediaType}
+              filename={state.selected.filename}
+              kind={state.selected.previewDecision.kind}
+              taskToken={String(taskRef.current?.id ?? state.hash)}
+              prefetchBlocks={settingsSnapshot?.mediaPlaybackPrefetchBlocks ?? 5}
+              canBlobDownload={state.selected.previewDecision.canBlobDownload}
+              onDownload={handleDownload}
+              t={t}
+            />
+          ) : null}
           {state.progress && (state.phase === "seed-reading" || state.phase === "block-reading" || state.phase === "assembling" || state.phase === "preview-ready" || state.phase === "download-ready") ? (
             <div className="msfile-home-file__progress" aria-live="polite">
               <span>{t("msfile.home.progress.blocks", { defaultValue: "已验证 Block：{{done}} / {{total}}", done: state.progress.verifiedBlocks, total: state.progress.totalBlocks })}</span>
@@ -905,7 +942,9 @@ export function MsFileHomeFileWidget() {
             <video className="msfile-home-file__media-preview" src={state.preview.url} controls onError={handlePreviewDecodeError} />
           ) : null}
 
-          {(state.phase === "ready-to-download" || state.phase === "download-ready" || state.phase === "preview-ready") ? (
+          {(state.phase === "ready-to-download" || state.phase === "download-ready" || state.phase === "preview-ready") &&
+          (state.selected.previewDecision.kind !== "audio" && state.selected.previewDecision.kind !== "video" ||
+            state.selected.fileSizeBytes > MAX_BROWSER_MEDIA_FILE_SIZE) ? (
             <div className="msfile-home-file__actions">
               {state.selected.previewDecision.canBlobDownload ? (
                 <Button onClick={handleDownload}>{t("msfile.home.download", { defaultValue: "下载" })}</Button>

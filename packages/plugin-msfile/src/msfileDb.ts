@@ -8,16 +8,24 @@ import type {
   MsFileAppIdentityKey,
   MsFileAppPriceOverride,
   MsFileGlobalPriceSettings,
+  MsFileMediaPlaybackSettings,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
-import { isValidMsFileSupplierPublicKeyHex, msFileAppPolicyKeyString } from "@keymaster/contracts";
+import {
+  isValidMsFileSupplierPublicKeyHex,
+  msFileAppPolicyKeyString,
+  MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+  normalizeMsFileMediaPrefetchBlocks,
+} from "@keymaster/contracts";
 
 export const MSFILE_DB_NAME = "keymaster.msfile";
-export const MSFILE_DB_VERSION = 1;
+export const MSFILE_DB_VERSION = 2;
 
 interface GlobalSettingsRow {
   key: "singleton";
   settings: MsFileGlobalPriceSettings | null;
+  /** V2 新增；V1 记录缺失时按默认值读取。 */
+  mediaPlaybackPrefetchBlocks?: number;
   updatedAt: number;
 }
 
@@ -65,7 +73,9 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 
 export interface MsFileDb {
   getGlobalSettings(): Promise<MsFileGlobalSettingsSnapshot | null>;
-  putGlobalSettings(settings: MsFileGlobalPriceSettings, updatedAt: number): Promise<void>;
+  putGlobalSettings(settings: MsFileGlobalPriceSettings, updatedAt: number, mediaPlaybackPrefetchBlocks?: number): Promise<void>;
+  /** 独立更新播放器设置；可选以兼容旧的测试/外部 DB seam。 */
+  putMediaPlaybackPrefetchBlocks?(settings: MsFileMediaPlaybackSettings, updatedAt: number): Promise<void>;
   listSuppliers(): Promise<MsFileSupplierConfig[]>;
   getSupplier(supplierPublicKeyHex: string): Promise<MsFileSupplierConfig | null>;
   upsertSupplier(config: MsFileSupplierConfig): Promise<void>;
@@ -82,6 +92,8 @@ export interface MsFileDb {
 /** 全局设置快照：settings 为 null 表示用户尚未显式保存（Read fail closed）。 */
 export interface MsFileGlobalSettingsSnapshot {
   settings: MsFileGlobalPriceSettings | null;
+  /** V1 行缺失时由 DB 读取层补成 5。 */
+  mediaPlaybackPrefetchBlocks?: number;
   updatedAt: number | null;
 }
 
@@ -111,14 +123,43 @@ export async function openMsFileDb(indexedDbFactory?: IDBFactory): Promise<MsFil
   return {
     async getGlobalSettings() {
       const row = await readStore<GlobalSettingsRow | undefined>("globalSettings", (store) => store.get("singleton"));
-      if (!row || !row.settings) return null;
-      const { seedMaxPriceSatoshis, blockMaxPriceSatoshis } = row.settings;
-      if (typeof seedMaxPriceSatoshis !== "string" || typeof blockMaxPriceSatoshis !== "string") return null;
-      return { settings: { seedMaxPriceSatoshis, blockMaxPriceSatoshis }, updatedAt: typeof row.updatedAt === "number" ? row.updatedAt : null };
+      if (!row) return null;
+      let settings: MsFileGlobalPriceSettings | null = null;
+      if (row.settings) {
+        const { seedMaxPriceSatoshis, blockMaxPriceSatoshis } = row.settings;
+        if (typeof seedMaxPriceSatoshis !== "string" || typeof blockMaxPriceSatoshis !== "string") return null;
+        settings = { seedMaxPriceSatoshis, blockMaxPriceSatoshis };
+      }
+      return {
+        settings,
+        mediaPlaybackPrefetchBlocks: normalizeMsFileMediaPrefetchBlocks(row.mediaPlaybackPrefetchBlocks)
+          ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+        updatedAt: typeof row.updatedAt === "number" ? row.updatedAt : null,
+      };
     },
-    async putGlobalSettings(settings, updatedAt) {
+    async putGlobalSettings(settings, updatedAt, mediaPlaybackPrefetchBlocks) {
       const transaction = db.transaction("globalSettings", "readwrite");
-      transaction.objectStore("globalSettings").put({ key: "singleton", settings, updatedAt } satisfies GlobalSettingsRow);
+      transaction.objectStore("globalSettings").put({
+        key: "singleton",
+        settings,
+        mediaPlaybackPrefetchBlocks: normalizeMsFileMediaPrefetchBlocks(mediaPlaybackPrefetchBlocks)
+          ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+        updatedAt,
+      } satisfies GlobalSettingsRow);
+      await transactionDone(transaction);
+    },
+    async putMediaPlaybackPrefetchBlocks(mediaSettings, updatedAt) {
+      const value = normalizeMsFileMediaPrefetchBlocks(mediaSettings.mediaPlaybackPrefetchBlocks);
+      if (value === undefined) throw new Error("mediaPlaybackPrefetchBlocks must be an integer in 2..64");
+      const transaction = db.transaction("globalSettings", "readwrite");
+      const store = transaction.objectStore("globalSettings");
+      const existing = await requestToPromise<GlobalSettingsRow | undefined>(store.get("singleton"));
+      store.put({
+        key: "singleton",
+        settings: existing?.settings ?? null,
+        mediaPlaybackPrefetchBlocks: value,
+        updatedAt,
+      } satisfies GlobalSettingsRow);
       await transactionDone(transaction);
     },
     async listSuppliers() {

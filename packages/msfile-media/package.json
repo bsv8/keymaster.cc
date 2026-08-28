@@ -1,0 +1,21 @@
+{
+  "name": "@keymaster/msfile-media",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./core": "./src/core/index.ts",
+    "./browser": "./src/browser/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --root ../.. packages/msfile-media/src"
+  },
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "mediabunny": "1.55.3"
+  }
+}

@@ -53,6 +53,7 @@ export function buildMsFileStateEvent(
     status: state.status,
     supplierGeneration: state.supplierGeneration,
     globalSettings: state.globalSettings,
+    mediaPlaybackPrefetchBlocks: state.mediaPlaybackPrefetchBlocks,
     pendingApprovals
   };
 }

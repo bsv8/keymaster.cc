@@ -17,6 +17,7 @@ import type {
   MsFileConnectAppContext,
   MsFileContentKind,
   MsFileGlobalPriceSettings,
+  MsFileMediaPlaybackSettings,
   MsFilePendingApproval,
   MsFileReadBlockInput,
   MsFileReadResult,
@@ -31,8 +32,10 @@ import type {
 import {
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
+  MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
   isValidMsFileHashHex,
   isValidMsFileSupplierPublicKeyHex,
+  normalizeMsFileMediaPrefetchBlocks,
   msFileSatoshiAmountToBigInt,
   msFileAppPolicyKeyString,
   type MsFileService,
@@ -57,6 +60,8 @@ export interface MsFileServiceEventState {
   status: MsFileServiceStatus;
   supplierGeneration: number;
   globalSettings: MsFileGlobalPriceSettings | null;
+  /** 播放器资源策略；旧 DB/旧调用方缺失时由服务补默认 5。 */
+  mediaPlaybackPrefetchBlocks?: number;
   pendingApprovals: MsFilePendingApprovalView[];
 }
 
@@ -151,6 +156,12 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     return "ready";
   }
 
+  /** 从缓存快照读取播放器窗口；旧 DB 行缺失时安全回退到默认 5。 */
+  private mediaPlaybackPrefetchBlocks(): number {
+    return normalizeMsFileMediaPrefetchBlocks(this.cachedSettings.mediaPlaybackPrefetchBlocks)
+      ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT;
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -177,6 +188,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
       status: this.status(),
       supplierGeneration: this.supplierGeneration,
       globalSettings: this.cachedSettings.settings,
+      mediaPlaybackPrefetchBlocks: this.mediaPlaybackPrefetchBlocks(),
       pendingApprovals: this.pendingApprovalViews(),
     };
   }
@@ -214,7 +226,13 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     const suppliers = await db.listSuppliers();
     this.cachedSettings = row ?? { settings: null };
     this.cachedSuppliers = suppliers;
-    return { globalSettings: row?.settings ?? null, suppliers, supplierGeneration: this.supplierGeneration };
+    return {
+      globalSettings: row?.settings ?? null,
+      mediaPlaybackPrefetchBlocks: normalizeMsFileMediaPrefetchBlocks(row?.mediaPlaybackPrefetchBlocks)
+        ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+      suppliers,
+      supplierGeneration: this.supplierGeneration,
+    };
   }
 
   async updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
@@ -224,9 +242,39 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     const db = await this.db;
     await db.putGlobalSettings(
       { seedMaxPriceSatoshis: input.seedMaxPriceSatoshis, blockMaxPriceSatoshis: input.blockMaxPriceSatoshis },
-      this.now()
+      this.now(),
+      this.mediaPlaybackPrefetchBlocks(),
     );
-    this.cachedSettings = { settings: { ...input }, updatedAt: this.now() };
+    this.cachedSettings = {
+      settings: { ...input },
+      mediaPlaybackPrefetchBlocks: this.mediaPlaybackPrefetchBlocks(),
+      updatedAt: this.now(),
+    };
+    this.emit();
+  }
+
+  async updateMediaPlaybackSettings(input: MsFileMediaPlaybackSettings): Promise<void> {
+    await this.ensureReady();
+    const value = normalizeMsFileMediaPrefetchBlocks(input?.mediaPlaybackPrefetchBlocks);
+    if (value === undefined) {
+      throw new Error("mediaPlaybackPrefetchBlocks must be an integer in 2..64");
+    }
+    const db = await this.db;
+    const putMediaPlayback = db.putMediaPlaybackPrefetchBlocks;
+    if (putMediaPlayback) {
+      await putMediaPlayback.call(db, { mediaPlaybackPrefetchBlocks: value }, this.now());
+    } else {
+      // 旧测试/嵌入式 DB seam 没有独立方法时仍保持字段独立：只把
+      // 当前价格和媒体值作为同一设置行写回，不改变价格内容。
+      const row = await db.getGlobalSettings();
+      if (!row?.settings) throw new MsFileServiceError("msfile_not_configured");
+      await db.putGlobalSettings(row.settings, this.now(), value);
+    }
+    this.cachedSettings = {
+      ...this.cachedSettings,
+      mediaPlaybackPrefetchBlocks: value,
+      updatedAt: this.now(),
+    };
     this.emit();
   }
 
@@ -801,7 +849,12 @@ function recordEffectiveCapOf(record: MsFilePendingApproval): string {
   return record.effectiveMaxPriceSatoshis;
 }
 
-type MsFileGlobalSettingsSnapshotLike = { settings: MsFileGlobalPriceSettings | null; updatedAt?: number | null };
+type MsFileGlobalSettingsSnapshotLike = {
+  settings: MsFileGlobalPriceSettings | null;
+  /** 独立媒体资源策略；旧 DB 行缺失时由读取层补默认 5。 */
+  mediaPlaybackPrefetchBlocks?: number;
+  updatedAt?: number | null;
+};
 type MsFileStatEntryUnion = import("@keymaster/contracts").MsFileSupplierStat;
 
 function assertAmount(value: unknown, field: string): void {

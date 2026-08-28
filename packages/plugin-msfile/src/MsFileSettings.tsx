@@ -15,12 +15,18 @@ import type {
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import { MSFILE_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { normalizeMsFileSatoshiAmount } from "@keymaster/contracts";
+import {
+  MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+  normalizeMsFileMediaPrefetchBlocks,
+  normalizeMsFileSatoshiAmount,
+} from "@keymaster/contracts";
 
 /** `msfile.status` 资源快照（由 plugin manifest 注册）。 */
 export interface MsFileStatusResourceSnapshot {
   status: string;
   globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
+  /** 媒体最多提前购买的 256 KiB Block 数。 */
+  mediaPlaybackPrefetchBlocks?: number;
   approvals: MsFilePendingApprovalView[];
 }
 
@@ -41,10 +47,11 @@ export function MsFileSettings() {
     "msfile.status",
     [],
     (snapshot) =>
-      snapshot.data ?? { status: service.status(), globalSettings: null, approvals: [] },
+      snapshot.data ?? { status: service.status(), globalSettings: null, mediaPlaybackPrefetchBlocks: MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT, approvals: [] },
     (a, b) =>
       a.status === b.status &&
       JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings) &&
+      a.mediaPlaybackPrefetchBlocks === b.mediaPlaybackPrefetchBlocks &&
       JSON.stringify(a.approvals) === JSON.stringify(b.approvals)
   );
   const [snapshot, setSnapshot] = useState<MsFileSettingsSnapshot | null>(null);
@@ -54,6 +61,8 @@ export function MsFileSettings() {
 
   const [seedDraft, setSeedDraft] = useState<AmountDraft>({ text: "", unlimited: false });
   const [blockDraft, setBlockDraft] = useState<AmountDraft>({ text: "", unlimited: false });
+  // 数字输入保留字符串，避免用户输入中间态时被 React 自动改写。
+  const [mediaPrefetchDraft, setMediaPrefetchDraft] = useState(String(MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT));
 
   const [nameDraft, setNameDraft] = useState("");
   const [keyDraft, setKeyDraft] = useState("");
@@ -83,6 +92,11 @@ export function MsFileSettings() {
     setSeedDraft(toDraft(snapshot.globalSettings.seedMaxPriceSatoshis));
     setBlockDraft(toDraft(snapshot.globalSettings.blockMaxPriceSatoshis));
   }, [snapshot?.globalSettings]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    setMediaPrefetchDraft(String(snapshot.mediaPlaybackPrefetchBlocks ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT));
+  }, [snapshot?.mediaPlaybackPrefetchBlocks, snapshot]);
 
   // 审查修复（chunk 体积）：multiaddr/libp2p 依赖只在预览 PeerId 时动态加载，
   // 不进入应用主 chunk。
@@ -126,6 +140,23 @@ export function MsFileSettings() {
     try {
       await service.updateGlobalPriceSettings({ seedMaxPriceSatoshis: seedValue!, blockMaxPriceSatoshis: blockValue! });
       setStatusMessage(t("msfile.settings.saved", { defaultValue: "Saved." }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function saveMediaPlaybackPolicy() {
+    setError(null);
+    setStatusMessage(null);
+    const value = normalizeMsFileMediaPrefetchBlocks(Number(mediaPrefetchDraft.trim()));
+    if (value === undefined) {
+      setError(t("msfile.settings.mediaPlayback.hint", { defaultValue: "预取 Block 数必须是 2–64 的整数。" }));
+      return;
+    }
+    try {
+      await service.updateMediaPlaybackSettings({ mediaPlaybackPrefetchBlocks: value });
+      setMediaPrefetchDraft(String(value));
+      setStatusMessage(t("msfile.settings.mediaPlayback.saved", { defaultValue: "媒体播放资源策略已保存。" }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -298,6 +329,27 @@ export function MsFileSettings() {
           </label>
         </label>
         <Button onClick={() => void savePriceLimits()}>{t("msfile.settings.save", { defaultValue: "Save" })}</Button>
+      </div>
+
+      <h3>{t("msfile.settings.mediaPlayback", { defaultValue: "媒体播放资源策略" })}</h3>
+      <p className="msfile-settings__hint">
+        {t("msfile.settings.mediaPlayback.hint", { defaultValue: "控制播放器最多提前购买和读取多少个 256 KiB MSFile Block；数值越大，流量和内存占用越高。" })}
+      </p>
+      <div className="msfile-settings__row">
+        <label>
+          <span>{t("msfile.settings.mediaPlayback.blocks", { defaultValue: "预取 Block 数（2–64）" })}</span>
+          <input
+            type="number"
+            min={2}
+            max={64}
+            step={1}
+            value={mediaPrefetchDraft}
+            onChange={(event) => setMediaPrefetchDraft(event.target.value)}
+          />
+        </label>
+        <Button onClick={() => void saveMediaPlaybackPolicy()}>
+          {t("msfile.settings.mediaPlayback.save", { defaultValue: "保存播放策略" })}
+        </Button>
       </div>
 
       <h3>{t("msfile.settings.suppliers", { defaultValue: "Suppliers" })}</h3>

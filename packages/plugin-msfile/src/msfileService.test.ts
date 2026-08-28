@@ -925,12 +925,25 @@ describe("settings control plane", () => {
     const service = await freshService();
     let snapshot = await service.getSettingsSnapshot();
     expect(snapshot.globalSettings).toBeNull();
+    expect(snapshot.mediaPlaybackPrefetchBlocks).toBe(5);
     expect(snapshot.supplierGeneration).toBe(0);
     await service.updateGlobalPriceSettings({ seedMaxPriceSatoshis: "5", blockMaxPriceSatoshis: "0" });
     snapshot = await service.getSettingsSnapshot();
     expect(snapshot.globalSettings).toEqual({ seedMaxPriceSatoshis: "5", blockMaxPriceSatoshis: "0" });
     await service.upsertSupplier({ name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true });
     expect((await service.getSettingsSnapshot()).supplierGeneration).toBeGreaterThan(0);
+  });
+
+  it("updates the media playback window without changing price limits", async () => {
+    const service = await freshService();
+    await configureGlobal(service, "123", "456");
+    await service.updateMediaPlaybackSettings({ mediaPlaybackPrefetchBlocks: 64 });
+    let snapshot = await service.getSettingsSnapshot();
+    expect(snapshot.globalSettings).toEqual({ seedMaxPriceSatoshis: "123", blockMaxPriceSatoshis: "456" });
+    expect(snapshot.mediaPlaybackPrefetchBlocks).toBe(64);
+    await expect(service.updateMediaPlaybackSettings({ mediaPlaybackPrefetchBlocks: 1 })).rejects.toThrow();
+    await expect(service.updateMediaPlaybackSettings({ mediaPlaybackPrefetchBlocks: 65 })).rejects.toThrow();
+    await expect(service.updateMediaPlaybackSettings({ mediaPlaybackPrefetchBlocks: 2.5 })).rejects.toThrow();
   });
 
   it("rejects non-canonical amounts", async () => {

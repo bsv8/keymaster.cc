@@ -44,6 +44,7 @@ vi.mock("@keymaster/runtime", () => ({
 function snapshot(overrides: Partial<MsFileSettingsSnapshot> = {}): MsFileSettingsSnapshot {
   return {
     globalSettings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
+    mediaPlaybackPrefetchBlocks: 5,
     suppliers: [
       {
         name: "nas",
@@ -63,6 +64,7 @@ function makeService(overrides: Partial<MsFileService> = {}): MsFileService {
     subscribe: vi.fn(() => () => undefined),
     getSettingsSnapshot: vi.fn(async () => snapshot()),
     updateGlobalPriceSettings: vi.fn(async () => undefined),
+    updateMediaPlaybackSettings: vi.fn(async () => undefined),
     upsertSupplier: vi.fn(async () => undefined),
     deleteSupplier: vi.fn(async () => undefined),
     probeSupplier: vi.fn(async () => ({
@@ -126,6 +128,22 @@ describe("MsFileSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
     await waitFor(() => expect(service.updateGlobalPriceSettings).toHaveBeenCalled());
     expect(vi.mocked(service.updateGlobalPriceSettings).mock.calls[0]?.[0]).toMatchObject({ seedMaxPriceSatoshis: "0" });
+  });
+
+  it("saves an independent 256 KiB Block prefetch policy", async () => {
+    const service = makeService();
+    state.service = service;
+    render(<MsFileSettings />);
+    await waitFor(() => expect(screen.getByRole("spinbutton")).toBeTruthy());
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "64" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存播放策略/ }));
+    await waitFor(() => expect(service.updateMediaPlaybackSettings).toHaveBeenCalled());
+    expect(vi.mocked(service.updateMediaPlaybackSettings).mock.calls[0]?.[0]).toEqual({ mediaPlaybackPrefetchBlocks: 64 });
+
+    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "1" } });
+    fireEvent.click(screen.getByRole("button", { name: /保存播放策略/ }));
+    await waitFor(() => expect(screen.getAllByText(/2–64/i).length).toBeGreaterThan(0));
+    expect(vi.mocked(service.updateMediaPlaybackSettings).mock.calls).toHaveLength(1);
   });
 
   it("submits supplier drafts and probes via the service", async () => {

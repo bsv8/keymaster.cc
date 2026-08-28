@@ -44,6 +44,7 @@ import type {
   MsFileAppPriceOverrideUpdate,
   MsFileConnectAppContext,
   MsFileGlobalPriceSettings,
+  MsFileMediaPlaybackSettings,
   MsFilePendingApprovalView,
   MsFileServiceStatus,
   MsFileSettingsSnapshot,
@@ -106,6 +107,7 @@ export type CoordinatorClientRequestWithStorage =
 export type CoordinatorMsFileControl =
   | { type: "settings.get" }
   | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
+  | { type: "settings.media.update"; input: MsFileMediaPlaybackSettings }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }
   | { type: "supplier.delete"; supplierPublicKeyHex: string; expectedGeneration: number | null }
   | { type: "supplier.probe"; supplierPublicKeyHex: string }
@@ -222,6 +224,8 @@ export interface CoordinatorMsFileStateEvent {
   status: MsFileServiceStatus;
   supplierGeneration: number;
   globalSettings: MsFileGlobalPriceSettings | null;
+  /** 旧 Worker 事件可缺失；页面缺失时使用默认 5。 */
+  mediaPlaybackPrefetchBlocks?: number;
   pendingApprovals: MsFilePendingApprovalView[];
 }
 

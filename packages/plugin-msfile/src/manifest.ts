@@ -16,6 +16,7 @@ import {
 import { MsFileServiceProxy } from "./msfileServiceProxy.js";
 import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
+import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
 
 export const MSFILE_PLUGIN_ID = "msfile";
 
@@ -32,6 +33,11 @@ const resources: I18nPluginResources = {
       "msfile.settings.unlimited": "Unlimited",
       "msfile.settings.save": "Save price limits",
       "msfile.settings.saved": "Saved. New reads use the new limits immediately.",
+      "msfile.settings.mediaPlayback": "Media playback resource policy",
+      "msfile.settings.mediaPlayback.hint": "Controls how many 256 KiB MSFile Blocks may be purchased ahead of playback; larger values use more traffic and memory.",
+      "msfile.settings.mediaPlayback.blocks": "Prefetch Blocks (2–64)",
+      "msfile.settings.mediaPlayback.save": "Save playback policy",
+      "msfile.settings.mediaPlayback.saved": "Playback resource policy saved.",
       "msfile.settings.suppliers": "Suppliers",
       "msfile.settings.supplier.name": "Display name",
       "msfile.settings.supplier.publicKey": "Supplier public key (66 hex chars)",
@@ -99,6 +105,21 @@ const resources: I18nPluginResources = {
       "msfile.home.preview.pdfTitle": "PDF preview",
       "msfile.home.download": "Download",
       "msfile.home.download.tooLarge": "Files over 256 MiB need streaming download support in a later browser version; this file will not be read.",
+      "msfile.home.media.play": "Play with streaming reader",
+      "msfile.home.media.playing": "Playing",
+      "msfile.home.media.pause": "Paused",
+      "msfile.home.media.readingSeed": "Reading Seed",
+      "msfile.home.media.parsing": "Parsing media header",
+      "msfile.home.media.buffering": "Buffering",
+      "msfile.home.media.ended": "Ended",
+      "msfile.home.media.cancelled": "Playback cancelled",
+      "msfile.home.media.stopped": "Playback stopped",
+      "msfile.home.media.idle": "Ready to play",
+      "msfile.home.media.failed": "Streaming playback failed; download remains available.",
+      "msfile.home.media.disposed": "Player released",
+      "msfile.home.media.buffered": "Buffered ahead: {{seconds}} s",
+      "msfile.home.media.window": "Block window: {{used}} / {{limit}}",
+      "msfile.home.media.notSupported": "This media combination is not supported by the browser; use download.",
       "msfile.home.progress.blocks": "Verified Blocks: {{done}} / {{total}}",
       "msfile.home.progress.bytes": "Verified bytes: {{done}} / {{total}}",
       "msfile.home.diagnostic": "Diagnostic code",
@@ -128,6 +149,11 @@ const resources: I18nPluginResources = {
       "msfile.settings.unlimited": "不限金额",
       "msfile.settings.save": "保存价格限制",
       "msfile.settings.saved": "已保存。之后的 Read 立即使用新限额。",
+      "msfile.settings.mediaPlayback": "媒体播放资源策略",
+      "msfile.settings.mediaPlayback.hint": "控制播放器最多提前购买和读取多少个 256 KiB MSFile Block；数值越大，流量和内存占用越高。",
+      "msfile.settings.mediaPlayback.blocks": "预取 Block 数（2–64）",
+      "msfile.settings.mediaPlayback.save": "保存播放策略",
+      "msfile.settings.mediaPlayback.saved": "媒体播放资源策略已保存。",
       "msfile.settings.suppliers": "供应商配置",
       "msfile.settings.supplier.name": "显示名称",
       "msfile.settings.supplier.publicKey": "供应商公钥（66 位 hex）",
@@ -195,6 +221,21 @@ const resources: I18nPluginResources = {
       "msfile.home.preview.pdfTitle": "PDF 预览",
       "msfile.home.download": "下载",
       "msfile.home.download.tooLarge": "超过 256 MiB 的文件需要后续流式下载支持，当前不会读取。",
+      "msfile.home.media.play": "使用流式读取播放",
+      "msfile.home.media.playing": "播放中",
+      "msfile.home.media.pause": "已暂停",
+      "msfile.home.media.readingSeed": "正在读取 Seed",
+      "msfile.home.media.parsing": "正在解析媒体头",
+      "msfile.home.media.buffering": "缓冲中",
+      "msfile.home.media.ended": "已结束",
+      "msfile.home.media.cancelled": "播放已取消",
+      "msfile.home.media.stopped": "播放已停止",
+      "msfile.home.media.idle": "等待播放",
+      "msfile.home.media.failed": "流式播放失败，仍可单独下载。",
+      "msfile.home.media.disposed": "播放器已释放",
+      "msfile.home.media.buffered": "前方已缓冲：{{seconds}} 秒",
+      "msfile.home.media.window": "Block 窗口：{{used}} / {{limit}}",
+      "msfile.home.media.notSupported": "当前浏览器不支持该媒体组合，请使用下载。",
       "msfile.home.progress.blocks": "已验证 Block：{{done}} / {{total}}",
       "msfile.home.progress.bytes": "已验证字节：{{done}} / {{total}}",
       "msfile.home.diagnostic": "诊断代码",
@@ -260,11 +301,13 @@ export const msfilePlugin: PluginManifest = {
     ctx.provide<import("@keymaster/contracts").MsFileService>(MSFILE_SERVICE_CAPABILITY, service);
 
     const resources_ = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
+    registerMsFileMediaResource(resources_, service);
     const resourceId = "msfile.status";
     resources_.register<
       {
         status: import("@keymaster/contracts").MsFileServiceStatus;
         globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
+        mediaPlaybackPrefetchBlocks?: number;
         supplierGeneration: number;
         approvals: import("@keymaster/contracts").MsFilePendingApprovalView[];
       },
@@ -275,15 +318,17 @@ export const msfilePlugin: PluginManifest = {
       key: () => [resourceId],
       load: async () => {
         let globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null = null;
+        let mediaPlaybackPrefetchBlocks = 5;
         let supplierGeneration = 0;
         try {
           const snapshot = await service.getSettingsSnapshot();
           globalSettings = snapshot.globalSettings;
+          mediaPlaybackPrefetchBlocks = snapshot.mediaPlaybackPrefetchBlocks ?? 5;
           supplierGeneration = snapshot.supplierGeneration;
         } catch {
           // Coordinator 未就绪时按 null 展示（fail closed）。
         }
-        return { status: service.status(), globalSettings, supplierGeneration, approvals: service.listPendingApprovals() };
+        return { status: service.status(), globalSettings, mediaPlaybackPrefetchBlocks, supplierGeneration, approvals: service.listPendingApprovals() };
       },
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
@@ -357,6 +402,7 @@ export const msfilePlugin: PluginManifest = {
       setupActive = false;
       executorCleanup?.();
       executorCleanup = undefined;
+      disposeAllMsFileMediaSessions();
       // Registry 与 resource definition 由 host 按 ownership 统一回收。
       // teardown 只释放 setup 自己创建的运行时对象，避免 host 随后重复注销。
       service.dispose();

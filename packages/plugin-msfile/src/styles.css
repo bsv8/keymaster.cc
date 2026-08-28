@@ -306,6 +306,21 @@
   width: 100%;
 }
 
+.msfile-home-file__streaming-player {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msfile-home-file__media-controls {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--km-text-muted, #6b7280);
+  font-size: 0.8rem;
+}
+
 .msfile-home-file__html-preview,
 .msfile-home-file__pdf-preview {
   min-height: 220px;
