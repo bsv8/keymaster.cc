@@ -25,4 +25,5 @@
 @import "@keymaster/plugin-broadcast/styles.css";
 @import "@keymaster/plugin-bsv-price/styles.css";
 @import "@keymaster/plugin-storage/styles.css";
+@import "@keymaster/plugin-msfile/styles.css";
 @import "@keymaster/plugin-p2pkh/styles.css";
