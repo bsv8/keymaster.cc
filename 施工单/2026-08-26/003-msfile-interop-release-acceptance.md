@@ -1,6 +1,8 @@
 # 003 MSFile 跨环境互操作与正式发布验收施工单
 
-> 状态：等待 002 生产 Runtime 完成。
+> 状态：⛔ BLOCKED-ENV（2026-08-27）。002 已 PASS；当前无头 Chromium
+> 预验收已完成，仍缺 Firefox、Safari、公共 CA/公网 UDP 与目标 NAS。见
+> [003 无头环境预验收报告](../../docs/proposals/msfile/003-headless-preflight-evidence.md)。
 >
 > 本单是发布门禁，不是 Runtime 编码前门禁。缺少 Safari、公共 CA WSS 或指定 NAS 环境时，只阻止本单完成及 `defaultEnabled: true`，不得把 001/002 回退成未施工。
 

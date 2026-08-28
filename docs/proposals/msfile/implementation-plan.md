@@ -1,6 +1,9 @@
 # Keymaster MSFile V1 硬切换施工单
 
-> 状态：KMMF-001/002/003/005/006/007 已实施（含审查修复）；架构 Spike、KMMF-004 与发布验收尚未实施，数据面经 `MsFileTransport` 接缝 fail closed。分项状态见 [README 状态矩阵](./README.md#实施状态矩阵)。
+> 状态：KMMF-000–007 已实施并通过本机自动化验收；KMMF-004 已接入真实
+> Chromium/Go supplier 数据面。KMMF-008 因缺少 Firefox/Safari、公共
+> CA/公网 UDP 与目标 NAS 保持 BLOCKED-ENV，插件仍默认关闭。分项状态见
+> [README 状态矩阵](./README.md#实施状态矩阵)。
 >
 > 本施工单只定义 Keymaster 客户端、插件 capability、Connect 方法、价格授权和设置页面；
 > 不修改 MSFile Proxy wire/network 协议，也不实现供应商/NAS 服务端。

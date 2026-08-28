@@ -1,6 +1,8 @@
 # MSFile 客户端能力提案
 
-> 状态：架构 Spike 与 KMMF-001/002/003/005/006/007 已实现并通过测试；KMMF-004（生产网络 runtime）与发布验收未实施，数据面 fail closed。本文不是已上线能力声明。
+> 状态：架构 Spike 与 KMMF-001–007 已实现并通过测试；KMMF-004 生产网络
+> Runtime 已完成真实 Chromium/Go supplier 验收。KMMF-008 因缺少外部发布
+> 环境保持 BLOCKED，插件仍默认关闭。本文不是已上线能力声明。
 
 ## 实施状态矩阵
 
@@ -10,13 +12,13 @@
 | KMMF-001 Contracts | ✅ 完成 | 类型/方法/错误码/规范化纯函数；含 SDK public exports |
 | KMMF-002 Frame codec | ✅ 完成 | uvarint/dCBOR/attachment decoder、乱序关联、hash+尺寸校验；增量 SHA-256 已就绪供 executor 流式使用 |
 | KMMF-003 DB/设置页 | ✅ 完成 | `keymaster.msfile`、供应商 PeerId pin、价格限制、App override UI |
-| KMMF-004 libp2p runtime | 🟡 可施工 | 架构 Spike 已 PASS；不以 Safari/公共 WSS/目标 NAS 为编码前置条件 |
+| KMMF-004 libp2p runtime | ✅ PASS | WebRTC Direct/WSS、trusted/Connect、并发、identity pin 与 lifecycle 已由正式 Go supplier E2E 取证；见 [002 证据](./002-production-runtime-evidence.md) |
 | KMMF-005 Trusted service | ✅ 完成 | trusted 只走全局额度；Seed 精确长度校验消费 Stat file size 缓存 |
 | KMMF-006 Connect gateway | ✅ 完成 | session/identity/grant 复核、一次/永久提额、脱敏审批事件、popup 确认视图 |
 | KMMF-007 Protocol + SDK | ✅ 完成 | strict 校验拒绝金额/身份注入字段；SDK 仅三个 MSFile 方法 |
-| KMMF-008 发布互操作 | ❌ 未实施 | 依赖 KMMF-004；只阻止正式启用与 `defaultEnabled: true` |
+| KMMF-008 发布互操作 | ⛔ BLOCKED-ENV | Chromium 无头预验收通过；缺 Firefox/Safari、公共 CA/公网 UDP、目标 NAS；见 [003 报告](./003-headless-preflight-evidence.md) |
 
-插件当前 `defaultEnabled: false`；生产 Runtime 和发布互操作全部通过后再默认启用。本提案把 MSFile Proxy Protocol V1 接入 Keymaster：内部插件直接消费
+插件当前 `defaultEnabled: false`；KMMF-008 发布互操作全部通过后再默认启用。本提案把 MSFile Proxy Protocol V1 接入 Keymaster：内部插件直接消费
 `msfile.service`，Connect App 通过 session、App Identity 和 Keymaster 管理的价格授权
 调用公开方法。Connect App 不取得 libp2p host、私钥、transport 或付款额度控制权。
 

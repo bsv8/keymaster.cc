@@ -2,7 +2,7 @@
 
 > 状态：✅ PASS（2026-08-27）。
 >
-> 验收证据：[001 Executor Spike 证据报告](../../docs/proposals/msfile/001-executor-spike-evidence.md)。002 生产 Runtime 编码门禁已解除；数据面仍保持 fail closed，默认开关未启用。
+> 验收证据：[001 Executor Spike 证据报告](../../docs/proposals/msfile/001-executor-spike-evidence.md)。002 生产 Runtime 已 PASS；003 发布验收仍受外部环境阻断，默认开关未启用。
 >
 > 本单是 MSFile 生产 Runtime 的唯一编码前门禁。它只裁决架构可行性，不承担完整网络 Runtime、跨浏览器发布验收或默认启用。
 

@@ -34,7 +34,9 @@ type Host = {
 };
 
 const MAX_STAT_PENDING_PER_SUPPLIER = 16;
-const MAX_READ_PENDING_PER_SUPPLIER = 8;
+// Coordinator 冻结的生产预算是同一 supplier 4 Seed + 8 Block。这里若仍为
+// 8，低负载会因小 Seed 提前结束而偶然通过，真实并发时后四路会被错误拒绝。
+const MAX_READ_PENDING_PER_SUPPLIER = 12;
 
 function asBytes(chunk: StreamChunk): Uint8Array {
   if (chunk instanceof Uint8Array) return chunk;
@@ -347,7 +349,17 @@ export class MsFileWindowExecutor {
   private bindChannel(): void {
     this.channel.port1.onmessage = (event: MessageEvent<ExecutorBridgeRequest | { type: "shutdown" } | { type: "revoked"; leaseId: string }>) => {
       if (event.data && event.data.type === "revoked") {
-        void this.stop();
+        // Worker 会先推进 epoch/session.state，再把旧 lease 的 revoked 投递到
+        // MessagePort。若只 stop，前面的 unlocked 事件可能已经误判 start()
+        // 成功，之后再没有事件触发重建，active-key switch 会永久 unavailable。
+        // 同时按 leaseId 过滤迟到 revoke，不能误杀已经重建的新 host。
+        if (this.lease?.leaseId !== event.data.leaseId) return;
+        void this.stop().then(() => {
+          const snapshot = this.coordinator.getBootstrapSnapshot();
+          if (!this.disposed && snapshot.vaultStatus === "unlocked" && snapshot.activePublicKeyHex) {
+            void this.start();
+          }
+        });
         return;
       }
       if (event.data && event.data.type === "request") void this.handleRequest(event.data);
@@ -393,6 +405,11 @@ export class MsFileWindowExecutor {
         signer: this.signer,
         transports: [webRTCDirect(), webSockets()],
         listenAddrs: [],
+        // Supplier 地址由受信任设置页保存并经过 public-key/PeerId/certhash
+        // 校验。MSFile 的主要部署形态包含 loopback/LAN NAS，因此不能沿用
+        // 浏览器 libp2p 对私网 multiaddr 的默认拒绝策略；身份安全仍由拨号后
+        // authenticateConnection 的 PeerId + 压缩公钥 pin 保证。
+        connectionGater: { denyDialMultiaddr: async () => false },
         start: true,
       });
       if (this.disposed || lifecycleToken !== this.lifecycleToken) {
@@ -441,6 +458,21 @@ export class MsFileWindowExecutor {
 
   get isDisposed(): boolean {
     return this.disposed;
+  }
+
+  /** 对齐 Worker session 真值；active key/epoch 改变时不能复用旧 lease。 */
+  async reconcileSession(snapshot = this.coordinator.getBootstrapSnapshot()): Promise<boolean> {
+    if (snapshot.vaultStatus !== "unlocked" || !snapshot.activePublicKeyHex) {
+      await this.stop();
+      return false;
+    }
+    if (this.lease && (
+      this.lease.sessionEpoch !== snapshot.sessionEpoch
+      || this.lease.activePublicKeyHex !== snapshot.activePublicKeyHex
+    )) {
+      await this.stop();
+    }
+    return this.start();
   }
 
   private async handleRequest(request: ExecutorBridgeRequest): Promise<void> {
@@ -494,14 +526,14 @@ export function installMsFileWindowExecutor(coordinator: SessionCoordinatorClien
   if (installedExecutor) return () => { void installedExecutor?.dispose(); };
   const executor = new MsFileWindowExecutor({ coordinator });
   installedExecutor = executor;
-  const attempt = (): void => {
+  const attempt = (snapshot?: import("@keymaster/contracts").CoordinatorBootstrapSnapshot): void => {
     if (executor.isDisposed) return;
-    void executor.start().then((started) => {
+    void executor.reconcileSession(snapshot).then((started) => {
       if (!started && !installRetryTimer) installRetryTimer = setTimeout(() => { installRetryTimer = undefined; attempt(); }, 2_000);
     }).catch(() => undefined);
   };
   installedUnsubscribe = coordinator.subscribeTopic("session.state", (event: { vaultStatus?: string }) => {
-    if (event.vaultStatus === "unlocked") attempt();
+    if (event.vaultStatus === "unlocked") attempt(event as import("@keymaster/contracts").CoordinatorBootstrapSnapshot);
     else if (event.vaultStatus === "locked" || event.vaultStatus === "fatal") void executor.stop();
   });
   const pagehideHandler = () => { void executor.dispose(); };

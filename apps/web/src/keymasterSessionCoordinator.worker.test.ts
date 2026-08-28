@@ -1446,6 +1446,31 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
     // lock 清空了 lease：旧 leaseId 在新会话中不可复活。
     expect(afterReunlock.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
   });
+
+  it("B11: importing a key into an unlocked Vault revokes the old MSFile lease immediately", async () => {
+    const { owner } = await unlockForSpike();
+    const acquired = await __testAcquireExecutorLease(owner, "port-a");
+    const oldLease = acquired.operationResult as { leaseId: string; sessionEpoch: string };
+
+    const imported = await __testImportPrivateKey("spike-pw", {
+      label: "switched-owner",
+      material: { hex: "2".padStart(64, "0") },
+      format: "hex",
+      capabilities: ["p2pkh"],
+      source: "test",
+    });
+    expect(imported.publicKeyHex).not.toBe(owner);
+    expect(__testGetSnapshot().activePublicKeyHex).toBe(imported.publicKeyHex);
+
+    const replay = await __testExecutorSignNoise({
+      leaseId: oldLease.leaseId,
+      expectedSessionEpoch: oldLease.sessionEpoch,
+      noiseStaticPublicKey: noiseStaticPublicKey(),
+    }, "port-a");
+    expect(replay.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    const replacement = await __testAcquireExecutorLease(imported.publicKeyHex, "port-a");
+    expect(replacement.ack.status).toBe("ok");
+  });
 });
 
 describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile）", () => {

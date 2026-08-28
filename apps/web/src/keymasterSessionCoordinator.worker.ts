@@ -913,6 +913,9 @@ async function enterUnlockedState(
     selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
     generation: coordinatorMeta.generation
   };
+  const changesUnlockedActiveKey = previous.vaultStatus === "unlocked"
+    && previous.activePublicKeyHex !== undefined
+    && previous.activePublicKeyHex !== activePublicKeyHex;
   try {
     // Update durable/session metadata before transferring ownership of the new
     // private-key buffer. A failed metadata write therefore leaves the old
@@ -927,6 +930,14 @@ async function enterUnlockedState(
     coordinatorMeta.selectedPublicKeyHex = activePublicKeyHex;
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
     await persistCoordinatorMeta();
+    // generateKey/importPrivateKey 在已解锁 Vault 中也会直接切换 active key。
+    // 这条入口过去遗漏了 MSFile lifecycle 收口：旧 lease 会占满 5 分钟，
+    // 新 epoch 的 transport 永久 unavailable。持久化成功后、发布新 session
+    // 之前同步撤销旧 runtime/lease，行为与 activateKey/setActive 一致。
+    if (changesUnlockedActiveKey) {
+      releaseMsfileRuntime("activate-key");
+      clearMsFileExecutorLeaseLocked();
+    }
     replaceActivePrivateKey(activePrivateKeyBytes);
   } catch (error) {
     coordinatorState.vaultStatus = previous.vaultStatus;

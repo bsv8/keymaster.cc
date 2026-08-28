@@ -138,6 +138,23 @@ async function start() {
         </AppCrashBoundary>
       </StrictMode>
     );
+    // 002/003 无头跨仓验收钩子只允许出现在显式 E2E 构建中。普通
+    // `pnpm build` 不设置 VITE_MSFILE_E2E；Vite 配置会把这里引用的
+    // virtual module 替换为空实现，使真实 hooks 不进入生产模块图，避免
+    // 页面通过 query 参数取得 session 写入或 capability 调试能力。
+    // 必须直接访问 import.meta.env 字段，保证普通构建中的条件是编译期常量。
+    const e2eBuild = import.meta.env.VITE_MSFILE_E2E === "1";
+    if (e2eBuild && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("msfileE2E")) {
+      void import("virtual:keymaster-msfile-e2e-hooks")
+        .then((module) => module.installMsFileProductionE2EHooks(host))
+        .catch((error) => reportFatalError({
+          phase: "custom",
+          scope: "app-root",
+          source: "app-bundle",
+          message: formatStartupErrorSummary(error),
+          cause: error
+        }));
+    }
   } catch (err) {
     // 不再调旧 renderFatalError；统一走 fatal 通道。
     const message = formatStartupErrorSummary(err);

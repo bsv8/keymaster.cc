@@ -1,6 +1,7 @@
 # 002 MSFile 生产 Runtime 与真实数据面施工单
 
-> 状态：001 架构 Spike 已 PASS，可开始实施；尚未施工。
+> 状态：✅ PASS（2026-08-27）。验收证据见
+> [002 生产 Runtime 证据报告](../../docs/proposals/msfile/002-production-runtime-evidence.md)。
 >
 > 本单实现 KMMF-004，并把现有 fail-closed 脚手架接入真实 WebRTC Direct/WSS 数据面。外部 Safari、公共 CA 和指定 NAS 环境不属于本单前置条件。
 
