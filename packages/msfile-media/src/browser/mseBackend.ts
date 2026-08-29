@@ -10,6 +10,7 @@ export const MEDIA_LOW_WATER_SECONDS = 5;
 export const MEDIA_TARGET_WATER_SECONDS = 15;
 export const MEDIA_HARD_FORWARD_SECONDS = 30;
 export const MEDIA_BACKWARD_SUGGESTION_SECONDS = 30;
+const MEDIA_SEEK_TOLERANCE_SECONDS = 0.25;
 
 export interface MsFileMseBackendOptions {
   /** 普通 MP4 需要先转成 fMP4；原生分段 MP4/MP3/WebM 仍可直接追加。 */
@@ -51,10 +52,12 @@ export class MsFileMseBackend {
   private appendedData = false;
   private internalAbort = new AbortController();
   private pumpPromise: Promise<void> | undefined;
-  private pauseTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly pauseTimers = new Set<ReturnType<typeof setTimeout>>();
   private started = false;
   private ended = false;
   private disposed = false;
+  private pendingSeekSeconds: number | undefined;
+  private pumpFailure: MsFileMediaError | undefined;
   private unlinkExternalAbort: (() => void) | undefined;
   private readonly onFailure: (error: MsFileMediaError) => void;
 
@@ -130,6 +133,7 @@ export class MsFileMseBackend {
     this.pumpPromise = this.pump(operationSignal).catch((error) => {
       if (this.disposed || this.internalAbort.signal.aborted) return;
       const normalized = error instanceof MsFileMediaError ? error : normalizeMediaError(error, signal);
+      this.pumpFailure = normalized;
       this.onFailure(normalized);
     });
   }
@@ -150,6 +154,41 @@ export class MsFileMseBackend {
     }
     await update;
     this.appendedData = true;
+    await this.trimOldBuffer(signal);
+  }
+
+  private isTimeBuffered(seconds: number): boolean {
+    const ranges = this.element.buffered;
+    for (let index = 0; index < ranges.length; index += 1) {
+      if (seconds + MEDIA_SEEK_TOLERANCE_SECONDS >= ranges.start(index) &&
+        seconds <= ranges.end(index) + MEDIA_SEEK_TOLERANCE_SECONDS) return true;
+    }
+    return false;
+  }
+
+  /**
+   * MSE 不会自动回收已播放数据。这里只保留当前位置之前 30 秒，避免长视频
+   * 一直 append 最终触发 QuotaExceededError。remove 与 append 共用同一串行链路。
+   */
+  private async trimOldBuffer(signal: AbortSignal): Promise<void> {
+    const buffer = this.sourceBuffer;
+    if (!buffer || buffer.updating) return;
+    const cutoff = this.currentTime() - MEDIA_BACKWARD_SUGGESTION_SECONDS;
+    if (cutoff <= 0) return;
+    const ranges = buffer.buffered;
+    for (let index = 0; index < ranges.length; index += 1) {
+      const start = ranges.start(index);
+      const end = Math.min(ranges.end(index), cutoff);
+      if (end <= start + MEDIA_SEEK_TOLERANCE_SECONDS) continue;
+      const update = waitForEvent(buffer, "updateend", signal);
+      try {
+        buffer.remove(start, end);
+      } catch {
+        // 浏览器可能正处于 readyState 切换；回收失败不应破坏当前可播放数据。
+        return;
+      }
+      await update;
+    }
   }
 
   private endOfStream(): void {
@@ -190,14 +229,21 @@ export class MsFileMseBackend {
   }
 
   private async waitWhilePaused(signal: AbortSignal): Promise<void> {
-    if (this.pauseTimer !== undefined) clearTimeout(this.pauseTimer);
     await new Promise<void>((resolve, reject) => {
       const onAbort = () => { cleanup(); reject(new MsFileMediaError("msfile_media_cancelled")); };
-      const cleanup = () => signal.removeEventListener("abort", onAbort);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = () => {
+        signal.removeEventListener("abort", onAbort);
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          this.pauseTimers.delete(timer);
+        }
+      };
       signal.addEventListener("abort", onAbort, { once: true });
-      this.pauseTimer = setTimeout(() => { cleanup(); resolve(); }, 250);
+      timer = setTimeout(() => { cleanup(); resolve(); }, 250);
+      this.pauseTimers.add(timer);
+      if (signal.aborted) onAbort();
     });
-    this.pauseTimer = undefined;
   }
 
   private async pump(signal: AbortSignal): Promise<void> {
@@ -205,19 +251,24 @@ export class MsFileMseBackend {
       for (;;) {
         throwIfMediaAborted(signal);
         if (this.ended) return;
-        if (!this.started || this.element.paused) {
+        const seekTarget = this.pendingSeekSeconds;
+        if (seekTarget !== undefined && this.isTimeBuffered(seekTarget)) {
+          await this.waitWhilePaused(signal);
+          continue;
+        }
+        if (seekTarget === undefined && (!this.started || this.element.paused)) {
           await this.waitWhilePaused(signal);
           continue;
         }
         const ahead = this.bufferedAhead();
-        if (ahead >= MEDIA_HARD_FORWARD_SECONDS || ahead >= MEDIA_TARGET_WATER_SECONDS) {
+        if (seekTarget === undefined && (ahead >= MEDIA_HARD_FORWARD_SECONDS || ahead >= MEDIA_TARGET_WATER_SECONDS)) {
           await this.waitWhilePaused(signal);
           continue;
         }
         const current = Number.isFinite(this.element.currentTime) ? this.element.currentTime : 0;
         const until = Math.max(
           this.transmuxUntilSeconds + MEDIA_TARGET_WATER_SECONDS,
-          current + MEDIA_TARGET_WATER_SECONDS,
+          (seekTarget ?? current) + MEDIA_TARGET_WATER_SECONDS,
           MEDIA_TARGET_WATER_SECONDS,
         );
         await this.requestTransmux(until, signal);
@@ -227,12 +278,17 @@ export class MsFileMseBackend {
     if (!reader) return;
     for (;;) {
       throwIfMediaAborted(signal);
-      if (!this.started || this.element.paused) {
+      const seekTarget = this.pendingSeekSeconds;
+      if (seekTarget !== undefined && this.isTimeBuffered(seekTarget)) {
+        await this.waitWhilePaused(signal);
+        continue;
+      }
+      if (seekTarget === undefined && (!this.started || this.element.paused)) {
         await this.waitWhilePaused(signal);
         continue;
       }
       const ahead = this.bufferedAhead();
-      if (ahead >= MEDIA_HARD_FORWARD_SECONDS || ahead >= MEDIA_TARGET_WATER_SECONDS) {
+      if (seekTarget === undefined && (ahead >= MEDIA_HARD_FORWARD_SECONDS || ahead >= MEDIA_TARGET_WATER_SECONDS)) {
         await this.waitWhilePaused(signal);
         continue;
       }
@@ -263,15 +319,30 @@ export class MsFileMseBackend {
   }
 
   async seek(seconds: number, signal: AbortSignal): Promise<void> {
-    if (!Number.isFinite(seconds) || seconds < 0) throw new MsFileMediaError("msfile_media_configuration");
-    throwIfMediaAborted(signal);
-    const ranges = this.element.buffered;
-    let buffered = false;
-    for (let index = 0; index < ranges.length; index += 1) {
-      if (seconds >= ranges.start(index) && seconds <= ranges.end(index)) buffered = true;
+    if (!Number.isFinite(seconds) || seconds < 0 ||
+      (this.durationSeconds !== undefined && seconds > this.durationSeconds + MEDIA_SEEK_TOLERANCE_SECONDS)) {
+      throw new MsFileMediaError("msfile_media_configuration");
     }
-    if (!buffered) throw new MsFileMediaError("msfile_media_browser_capability");
+    throwIfMediaAborted(signal);
     this.element.currentTime = seconds;
+    if (this.isTimeBuffered(seconds) ||
+      (this.durationSeconds !== undefined && seconds >= this.durationSeconds - MEDIA_SEEK_TOLERANCE_SECONDS)) return;
+
+    // 缓存外 seek 不是浏览器能力错误。把目标交给现有串行 pump，即使当前
+    // 处于暂停状态也继续有界读取，直到目标时间进入 SourceBuffer。
+    this.pendingSeekSeconds = seconds;
+    try {
+      for (;;) {
+        throwIfMediaAborted(signal);
+        throwIfMediaAborted(this.internalAbort.signal);
+        if (this.pumpFailure) throw this.pumpFailure;
+        if (this.isTimeBuffered(seconds)) return;
+        if (this.ended) throw new MsFileMediaError("msfile_media_decode_failed");
+        await this.waitWhilePaused(signal);
+      }
+    } finally {
+      if (this.pendingSeekSeconds === seconds) this.pendingSeekSeconds = undefined;
+    }
   }
 
   currentTime(): number { return Number.isFinite(this.element.currentTime) ? this.element.currentTime : 0; }
@@ -285,8 +356,8 @@ export class MsFileMseBackend {
     this.internalAbort.abort();
     this.unlinkExternalAbort?.();
     this.unlinkExternalAbort = undefined;
-    if (this.pauseTimer !== undefined) clearTimeout(this.pauseTimer);
-    this.pauseTimer = undefined;
+    for (const timer of this.pauseTimers) clearTimeout(timer);
+    this.pauseTimers.clear();
     this.element.pause();
     try { await this.streamReader?.cancel(); } catch { /* reader 已取消 */ }
     const transmuxer = this.transmuxer;

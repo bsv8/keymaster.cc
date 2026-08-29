@@ -111,6 +111,11 @@ export class MsFileVodSource {
   private blockSizes: number[] = [];
   private readonly entries = new Map<string, BlockEntry>();
   private readonly waiters = new Set<CapacityWaiter>();
+  /**
+   * 容量检查与新建缓存项必须串行。否则窗口剩一个槽位时，两个不同 Hash
+   * 的并发读取会同时观察到“尚未满”，随后各自插入并突破窗口上限。
+   */
+  private capacityGate: Promise<void> = Promise.resolve();
   private clock = 0;
   private activeReadCount = 0;
   private readCount = 0;
@@ -364,30 +369,37 @@ export class MsFileVodSource {
   }
 
   private async acquire(hash: string, expectedSizeBytes: number, signal?: AbortSignal): Promise<BlockEntry> {
-    this.rejectIfAborted(signal);
-    let entry = this.entries.get(hash);
-    if (entry && entry.expectedSizeBytes !== expectedSizeBytes) throw new MsFileMediaError("msfile_media_integrity");
-    if (!entry) {
-      await this.waitForCapacity(signal);
+    let releaseGate!: () => void;
+    const previousGate = this.capacityGate;
+    this.capacityGate = new Promise<void>((resolve) => { releaseGate = resolve; });
+    await previousGate;
+    try {
       this.rejectIfAborted(signal);
-      // 另一个并发调用可能刚刚等到同一个窗口槽位并创建了该 Hash；
-      // 必须在等待返回后再次查表，否则会把 in-flight 合并错误地变成两个 Read。
-      entry = this.entries.get(hash);
-      if (entry && entry.expectedSizeBytes !== expectedSizeBytes) {
-        throw new MsFileMediaError("msfile_media_integrity");
+      let entry = this.entries.get(hash);
+      if (entry && entry.expectedSizeBytes !== expectedSizeBytes) throw new MsFileMediaError("msfile_media_integrity");
+      if (!entry) {
+        await this.waitForCapacity(signal);
+        this.rejectIfAborted(signal);
+        // 前一个临界区可能刚刚创建了同一 Hash，等待容量后必须再查一次。
+        entry = this.entries.get(hash);
+        if (entry && entry.expectedSizeBytes !== expectedSizeBytes) {
+          throw new MsFileMediaError("msfile_media_integrity");
+        }
       }
+      if (!entry) {
+        entry = { hash, expectedSizeBytes, users: 0, lastUsed: ++this.clock };
+        this.entries.set(hash, entry);
+        entry.promise = this.loadEntry(entry).finally(() => {
+          entry!.promise = undefined;
+          this.notifyCapacity();
+        });
+      }
+      entry.users += 1;
+      entry.lastUsed = ++this.clock;
+      return entry;
+    } finally {
+      releaseGate();
     }
-    if (!entry) {
-      entry = { hash, expectedSizeBytes, users: 0, lastUsed: ++this.clock };
-      this.entries.set(hash, entry);
-      entry.promise = this.loadEntry(entry).finally(() => {
-        entry!.promise = undefined;
-        this.notifyCapacity();
-      });
-    }
-    entry.users += 1;
-    entry.lastUsed = ++this.clock;
-    return entry;
   }
 
   private release(entry: BlockEntry): void {

@@ -170,7 +170,9 @@ async function startTransmux(request: StartRequest): Promise<void> {
       return range(start, end);
     },
     dispose: () => undefined,
-    maxCacheSize: Math.min(request.maxSourceCacheBytes, 64 * BLOCK_BYTES),
+    // 已验证 Block 的唯一缓存由 Window 侧 MsFileVodSource 管理。这里若再保留
+    // 一份同等大小的字节缓存，会让实际媒体内存接近用户配置窗口的两倍。
+    maxCacheSize: 0,
     prefetchProfile: "none",
   });
   const mediaInput = new mediabunny.Input({ source: customSource, formats: [mediabunny.MP4] });

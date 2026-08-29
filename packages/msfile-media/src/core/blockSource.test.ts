@@ -136,6 +136,36 @@ describe("MsFileVodSource", () => {
     await source.dispose();
   });
 
+  it("窗口只剩一个槽位时，两个并发 Hash 不会突破缓存上限", async () => {
+    const blocks = await Promise.all([1, 2, 3].map(async (value) => {
+      const bytes = new Uint8Array(MSFILE_BLOCK_SIZE_BYTES);
+      bytes.fill(value);
+      return { bytes, hash: await hash(bytes) };
+    }));
+    const seed = seedFor(blocks.map((entry) => entry.hash));
+    const reader = new FakeMsFileReader({
+      seed,
+      blocks: new Map(blocks.map((entry) => [entry.hash, entry.bytes])),
+      delayMs: 5,
+    });
+    const source = new MsFileVodSource({
+      seedHashHex: await hash(seed),
+      supplierPublicKeyHex: `02${"88".repeat(32)}`,
+      fileSizeBytes: BigInt(MSFILE_BLOCK_SIZE_BYTES * blocks.length),
+      declaredMediaType: "video/mp4",
+      reader,
+    }, { prefetchBlocks: 2, parallelReads: 2 });
+    let peakOccupancy = 0;
+    source.subscribe(() => { peakOccupancy = Math.max(peakOccupancy, source.snapshot().blockWindowOccupancy); });
+
+    await source.readBlockAt(0);
+    await Promise.all([source.readBlockAt(1), source.readBlockAt(2)]);
+
+    expect(peakOccupancy).toBeLessThanOrEqual(2);
+    expect(source.snapshot().blockWindowOccupancy).toBeLessThanOrEqual(2);
+    await source.dispose();
+  });
+
   it("拒绝无法映射到浏览器 safe integer 的超大文件", () => {
     expect(() => new MsFileVodSource({
       seedHashHex: "aa".repeat(32),
