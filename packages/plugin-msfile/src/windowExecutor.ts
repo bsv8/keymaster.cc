@@ -21,7 +21,17 @@ import type {
 } from "@keymaster/contracts";
 import { MSFILE_PROTOCOL_ID } from "@keymaster/contracts";
 import type { SessionCoordinatorClient } from "@keymaster/contracts";
+import {
+  MSFILE_MAX_BLOCK_BYTES,
+  MSFILE_MAX_SEED_BYTES,
+  MSFILE_READ_CONCURRENCY_HARD_LIMITS,
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
+} from "@keymaster/contracts";
 import { KeymasterMsFileIdentitySigner } from "./executorIdentitySigner.js";
+import {
+  buildMsFileExecutorConcurrencyConfig,
+  type MsFileExecutorConcurrencyConfig,
+} from "./executorTransport.js";
 import { ReadStreamSession, type ReadOutcome } from "./readStream.js";
 import { StatStreamSession, type StatStreamOutcome } from "./statStream.js";
 
@@ -38,10 +48,18 @@ type Host = {
   stop(): void | Promise<void>;
 };
 
-const MAX_STAT_PENDING_PER_SUPPLIER = 16;
-// Coordinator 冻结的生产预算是同一 supplier 4 Seed + 8 Block。这里若仍为
-// 8，低负载会因小 Seed 提前结束而偶然通过，真实并发时后四路会被错误拒绝。
-const MAX_READ_PENDING_PER_SUPPLIER = 12;
+type SupplierGateWaiter = {
+  operation: () => Promise<unknown>;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onAbort: () => void;
+};
+
+interface SupplierGate {
+  active: number;
+  waiters: SupplierGateWaiter[];
+}
 
 function asBytes(chunk: StreamChunk): Uint8Array {
   if (chunk instanceof Uint8Array) return chunk;
@@ -116,11 +134,27 @@ interface SupplierConnection {
 export class MsFileSupplierRuntime {
   private readonly connections = new Map<string, SupplierConnection>();
   private readonly dialing = new Map<string, { promise: Promise<SupplierConnection>; controller: AbortController }>();
+  private readonly readGates = new Map<string, SupplierGate>();
+  private readonly statGates = new Map<string, SupplierGate>();
+  private concurrencyConfig: MsFileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(
+    MSFILE_READ_CONCURRENCY_RECOMMENDED,
+    0,
+  );
   private disposed = false;
 
   constructor(private readonly host: Host) {}
 
   async stat(input: { supplier: MsFileSupplierConfig; seedHashHex: string; supplierGeneration: number; signal?: AbortSignal }): Promise<MsFileSupplierStat> {
+    return this.withSupplierSlot(
+      this.statGates,
+      input.supplier.supplierPublicKeyHex,
+      () => this.concurrencyConfig.globalStatConcurrency,
+      input.signal,
+      () => this.statNow(input),
+    ) as Promise<MsFileSupplierStat>;
+  }
+
+  private async statNow(input: { supplier: MsFileSupplierConfig; seedHashHex: string; supplierGeneration: number; signal?: AbortSignal }): Promise<MsFileSupplierStat> {
     const hash = hexToBytes(input.seedHashHex);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const connection = await this.ensureConnection(input.supplier, input.supplierGeneration, input.signal);
@@ -143,8 +177,25 @@ export class MsFileSupplierRuntime {
     supplierGeneration: number;
     signal?: AbortSignal;
   }): Promise<ReadOutcome> {
+    return this.withSupplierSlot(
+      this.readGates,
+      input.supplier.supplierPublicKeyHex,
+      () => this.concurrencyConfig.supplierPendingReadLimit,
+      input.signal,
+      () => this.readNow(input),
+    ) as Promise<ReadOutcome>;
+  }
+
+  private async readNow(input: {
+    supplier: MsFileSupplierConfig;
+    kind: "seed" | "block";
+    hashHex: string;
+    maxPriceSatoshis: string;
+    supplierGeneration: number;
+    signal?: AbortSignal;
+  }): Promise<ReadOutcome> {
     const hash = hexToBytes(input.hashHex);
-    const maxContentBytes = input.kind === "seed" ? 16 * 1024 * 1024 : 256 * 1024;
+    const maxContentBytes = input.kind === "seed" ? MSFILE_MAX_SEED_BYTES : MSFILE_MAX_BLOCK_BYTES;
     const amount = canonicalAmount(input.maxPriceSatoshis);
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const connection = await this.ensureConnection(input.supplier, input.supplierGeneration, input.signal);
@@ -152,7 +203,6 @@ export class MsFileSupplierRuntime {
         await this.drop(input.supplier.supplierPublicKeyHex, connection);
         continue;
       }
-      if (connection.read.pendingCount >= MAX_READ_PENDING_PER_SUPPLIER) throw new Error("MSFile Read limit exceeded");
       let abortConnection: Promise<void> | undefined;
       const onAbort = () => {
         // 不等待 ReadStreamSession 的本地 Promise 先 reject；AbortSignal
@@ -220,6 +270,7 @@ export class MsFileSupplierRuntime {
 
   async invalidate(supplierPublicKeyHex: string | undefined): Promise<void> {
     if (supplierPublicKeyHex === undefined) {
+      this.rejectSupplierWaiters();
       const flights = [...this.dialing.values()];
       for (const flight of flights) flight.controller.abort();
       const all = [...this.connections.values()];
@@ -228,6 +279,7 @@ export class MsFileSupplierRuntime {
       await Promise.allSettled(flights.map((flight) => flight.promise));
       return;
     }
+    this.rejectSupplierWaiters(supplierPublicKeyHex);
     const flight = this.dialing.get(supplierPublicKeyHex);
     flight?.controller.abort();
     if (flight) await Promise.allSettled([flight.promise]);
@@ -241,6 +293,76 @@ export class MsFileSupplierRuntime {
     if (this.disposed) return;
     this.disposed = true;
     await this.invalidate(undefined);
+  }
+
+  setConcurrencyConfig(config: MsFileExecutorConcurrencyConfig): void {
+    if (config.version < this.concurrencyConfig.version) return;
+    this.concurrencyConfig = config;
+    for (const key of this.readGates.keys()) this.pumpSupplierGate(this.readGates, key, () => config.supplierPendingReadLimit);
+    for (const key of this.statGates.keys()) this.pumpSupplierGate(this.statGates, key, () => config.globalStatConcurrency);
+  }
+
+  private withSupplierSlot<T>(
+    gates: Map<string, SupplierGate>,
+    supplierPublicKeyHex: string,
+    limit: () => number,
+    signal: AbortSignal | undefined,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    if (this.disposed) return Promise.reject(new Error("MSFile executor is disposed"));
+    if (signal?.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+    const gate = gates.get(supplierPublicKeyHex) ?? { active: 0, waiters: [] };
+    gates.set(supplierPublicKeyHex, gate);
+    return new Promise<T>((resolve, reject) => {
+      const waiter: SupplierGateWaiter = {
+        operation: operation as () => Promise<unknown>,
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        signal,
+        onAbort: () => {
+          const index = gate.waiters.indexOf(waiter);
+          if (index >= 0) gate.waiters.splice(index, 1);
+          reject(new DOMException("The operation was aborted", "AbortError"));
+        },
+      };
+      signal?.addEventListener("abort", waiter.onAbort, { once: true });
+      gate.waiters.push(waiter);
+      this.pumpSupplierGate(gates, supplierPublicKeyHex, limit);
+    });
+  }
+
+  private pumpSupplierGate(gates: Map<string, SupplierGate>, supplierPublicKeyHex: string, limit: () => number): void {
+    const gate = gates.get(supplierPublicKeyHex);
+    if (!gate) return;
+    while (gate.active < limit() && gate.waiters.length > 0) {
+      const waiter = gate.waiters.shift()!;
+      waiter.signal?.removeEventListener("abort", waiter.onAbort);
+      if (waiter.signal?.aborted) {
+        waiter.reject(new DOMException("The operation was aborted", "AbortError"));
+        continue;
+      }
+      gate.active += 1;
+      void waiter.operation().then(waiter.resolve, waiter.reject).finally(() => {
+        gate.active = Math.max(0, gate.active - 1);
+        this.pumpSupplierGate(gates, supplierPublicKeyHex, limit);
+      });
+    }
+    if (gate.active === 0 && gate.waiters.length === 0) gates.delete(supplierPublicKeyHex);
+  }
+
+  private rejectSupplierWaiters(supplierPublicKeyHex?: string): void {
+    const groups = supplierPublicKeyHex === undefined
+      ? [...this.readGates.entries(), ...this.statGates.entries()]
+      : [
+        ...(this.readGates.has(supplierPublicKeyHex) ? [[supplierPublicKeyHex, this.readGates.get(supplierPublicKeyHex)!] as [string, SupplierGate]] : []),
+        ...(this.statGates.has(supplierPublicKeyHex) ? [[supplierPublicKeyHex, this.statGates.get(supplierPublicKeyHex)!] as [string, SupplierGate]] : []),
+      ];
+    for (const [, gate] of groups) {
+      for (const waiter of gate.waiters.splice(0)) {
+        waiter.signal?.removeEventListener("abort", waiter.onAbort);
+        waiter.reject(new Error("MSFile supplier request invalidated"));
+      }
+    }
   }
 
   private async ensureConnection(supplier: MsFileSupplierConfig, generation: number, signal?: AbortSignal): Promise<SupplierConnection> {
@@ -332,7 +454,7 @@ export class MsFileSupplierRuntime {
       connection,
       statStream,
       readStream,
-      stat: new StatStreamSession(toDuplex(statStream), MAX_STAT_PENDING_PER_SUPPLIER),
+      stat: new StatStreamSession(toDuplex(statStream), MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalStatConcurrency),
       read: new ReadStreamSession(toDuplex(readStream)),
     };
     const previous = this.connections.get(supplier.supplierPublicKeyHex);
@@ -385,6 +507,20 @@ interface ExecutorBridgeRequest {
   operation: import("./executorTransport.js").MsFileExecutorOperation;
 }
 
+interface ExecutorConfigMessage {
+  type: "config";
+  leaseId: string;
+  config: MsFileExecutorConcurrencyConfig;
+}
+
+interface ExecutorConfigAck {
+  type: "config-ack";
+  leaseId: string;
+  version: number;
+  ok: boolean;
+  errorMessage?: string;
+}
+
 interface ExecutorBridgeResponse {
   type: "response";
   leaseId: string;
@@ -422,7 +558,11 @@ export class MsFileWindowExecutor {
   }
 
   private bindChannel(): void {
-    this.channel.port1.onmessage = (event: MessageEvent<ExecutorBridgeRequest | { type: "shutdown" } | { type: "revoked"; leaseId: string }>) => {
+    this.channel.port1.onmessage = (event: MessageEvent<ExecutorBridgeRequest | ExecutorConfigMessage | { type: "shutdown" } | { type: "revoked"; leaseId: string }>) => {
+      if (event.data && event.data.type === "config") {
+        void this.handleConfig(event.data);
+        return;
+      }
       if (event.data && event.data.type === "revoked") {
         // Worker 会先推进 epoch/session.state，再把旧 lease 的 revoked 投递到
         // MessagePort。若只 stop，前面的 unlocked 事件可能已经误判 start()
@@ -579,6 +719,35 @@ export class MsFileWindowExecutor {
       this.postResponse(request, undefined, undefined, "msfile_transport_error", errorText(error));
     } finally {
       this.pending.delete(request.requestId);
+    }
+  }
+
+  private async handleConfig(message: ExecutorConfigMessage): Promise<void> {
+    const lease = this.lease;
+    const runtime = this.supplierRuntime;
+    if (!lease || lease.leaseId !== message.leaseId) return;
+    if (!runtime) {
+      this.channel.port1.postMessage({
+        type: "config-ack",
+        leaseId: lease.leaseId,
+        version: message.config.version,
+        ok: false,
+        errorMessage: "MSFile executor runtime is not ready",
+      } satisfies ExecutorConfigAck);
+      return;
+    }
+    try {
+      // Worker 与 Window 共用 builder 校验派生值；Window 只有在完整配置
+      // 生效后才回 ACK，Worker 随后才允许发送新请求。
+      const checked = buildMsFileExecutorConcurrencyConfig(message.config, message.config.version);
+      if (checked.supplierPendingReadLimit !== message.config.supplierPendingReadLimit ||
+        checked.bridgeMaxInFlightBytes !== message.config.bridgeMaxInFlightBytes) {
+        throw new Error("MSFile executor derived concurrency limits do not match");
+      }
+      runtime.setConcurrencyConfig(checked);
+      this.channel.port1.postMessage({ type: "config-ack", leaseId: lease.leaseId, version: checked.version, ok: true } satisfies ExecutorConfigAck);
+    } catch (error) {
+      this.channel.port1.postMessage({ type: "config-ack", leaseId: lease.leaseId, version: message.config.version, ok: false, errorMessage: errorText(error) } satisfies ExecutorConfigAck);
     }
   }
 

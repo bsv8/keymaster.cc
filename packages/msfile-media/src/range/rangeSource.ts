@@ -11,6 +11,8 @@ import {
   isValidMsFileSupplierPublicKeyHex,
   MSFILE_BLOCK_SIZE_BYTES,
   MSFILE_DIGEST_SIZE_BYTES,
+  MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_DEFAULT,
+  MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_MAX,
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
 } from "@keymaster/contracts";
@@ -33,7 +35,7 @@ import {
 const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 /** 保留给未来索引辅助读取的上限；当前原生播放路径不调用该接口。 */
 const MAX_AUXILIARY_RANGE_BYTES = 8 * MSFILE_BLOCK_SIZE_BYTES;
-const DEFAULT_MAX_CONCURRENT_READS = 2;
+const DEFAULT_MAX_CONCURRENT_READS = MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_DEFAULT;
 
 export type MsFileNativeMediaContainer =
   | "mp3"
@@ -53,6 +55,8 @@ export interface MsFileRangeSourceSnapshot {
   inFlightBlockCount: number;
   /** 当前实际进入 supplier reader 的并发数。 */
   activeReadCount: number;
+  /** 当前媒体 Session 固定采用的 Block Read 并发上限。 */
+  maxConcurrentReads: number;
   /** 从 supplier 发起过的 Block Read 总数；只用于当前 session 诊断。 */
   supplierReadCount: number;
   /** 已完成完整性校验的 Block 次数；只保留计数，不保留 Block 字节。 */
@@ -65,7 +69,7 @@ export interface MsFileRangeSourceSnapshot {
 }
 
 export interface MsFileRangeSourceOptions {
-  /** 运输层并发硬上限；首版最多允许 2。 */
+  /** 运输层并发上限；由创建媒体 Session 时的设置固定。 */
   maxConcurrentReads?: number;
   /** 默认开启的安全诊断回调；回调参数不得包含 Hash、媒体字节或凭据。 */
   onDebug?(action: string, details: Record<string, MsFileMediaDebugValue>): void;
@@ -208,7 +212,7 @@ export class MsFileRangeSource {
       throw new MsFileMediaError("msfile_media_configuration");
     }
     const requested = options.maxConcurrentReads ?? DEFAULT_MAX_CONCURRENT_READS;
-    if (!Number.isSafeInteger(requested) || requested < 1 || requested > DEFAULT_MAX_CONCURRENT_READS) {
+    if (!Number.isSafeInteger(requested) || requested < 1 || requested > MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_MAX) {
       throw new MsFileMediaError("msfile_media_configuration");
     }
     this.input = input;
@@ -222,6 +226,7 @@ export class MsFileRangeSource {
   get declaredMediaType(): string { return this.input.declaredMediaType; }
   get confirmedMediaType(): string | undefined { return this.mediaType; }
   get confirmedContainer(): MsFileNativeMediaContainer | undefined { return this.container; }
+  get maxConcurrentReadCount(): number { return this.maxConcurrentReads; }
 
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
@@ -235,6 +240,7 @@ export class MsFileRangeSource {
       activeRequestCount: this.activeRequestCount,
       inFlightBlockCount: this.flights.size,
       activeReadCount: this.activeReadCount,
+      maxConcurrentReads: this.maxConcurrentReads,
       supplierReadCount: this.supplierReadCount,
       verifiedBlockCount: this.verifiedBlockCount,
       mediaType: this.mediaType,

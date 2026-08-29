@@ -2,7 +2,8 @@
 // 受信任 `msfile.service` 实现（施工单 KMMF-005 / KMMF-006）。
 //
 // 边界：
-//   - trusted stat/readSeed/readBlock 只使用全局额度；trusted 超额直接失败，
+//   - trusted stat/readSeed/readBlock 只使用全局额度；全局额度由 Coordinator
+//     的有界公平队列执行，服务本身不把设置解释为金额预算；
 //     不进入确认流程；
 //   - connect gateway 按 (owner, publisher, appId) 解析 override ?? global；
 //   - 一次 Connect 调用最多进入一次确认；重新发送仍超额返回稳定错误；
@@ -17,6 +18,7 @@ import type {
   MsFileConnectAppContext,
   MsFileContentKind,
   MsFileGlobalPriceSettings,
+  MsFileReadConcurrencySettings,
   MsFilePendingApproval,
   MsFileReadBlockInput,
   MsFileReadResult,
@@ -29,12 +31,14 @@ import type {
   MsFileSupplierProbeResult,
 } from "@keymaster/contracts";
 import {
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
   isValidMsFileHashHex,
   isValidMsFileSupplierPublicKeyHex,
   msFileSatoshiAmountToBigInt,
   msFileAppPolicyKeyString,
+  normalizeMsFileReadConcurrencySettings,
   type MsFileService,
 } from "@keymaster/contracts";
 import { openMsFileDb, sanitizeAppOverride, type MsFileDb } from "./msfileDb.js";
@@ -57,6 +61,14 @@ export interface MsFileServiceEventState {
   status: MsFileServiceStatus;
   supplierGeneration: number;
   globalSettings: MsFileGlobalPriceSettings | null;
+  /** 单个媒体 Session 的 Block 读取并发数。 */
+  mediaBlockReadConcurrency: number;
+  /** 整个 Keymaster 的 Seed 读取并发数。 */
+  globalSeedReadConcurrency: number;
+  /** 整个 Keymaster 的 Block 读取并发数。 */
+  globalBlockReadConcurrency: number;
+  /** 整个 Keymaster 的 Stat 并发数。 */
+  globalStatConcurrency: number;
   pendingApprovals: MsFilePendingApprovalView[];
 }
 
@@ -107,7 +119,10 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
    * failed 标记，该供应商数据面持续禁用直到重新保存成功。
    */
   private readonly supplierBarriers = new Map<string, { failed: boolean }>();
-  private cachedSettings: MsFileGlobalSettingsSnapshotLike = { settings: null };
+  private cachedSettings: MsFileGlobalSettingsSnapshotLike = {
+    settings: null,
+    ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  };
   private cachedSuppliers: MsFileSupplierConfig[] = [];
   private disposed = false;
 
@@ -177,6 +192,10 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
       status: this.status(),
       supplierGeneration: this.supplierGeneration,
       globalSettings: this.cachedSettings.settings,
+      mediaBlockReadConcurrency: this.cachedSettings.mediaBlockReadConcurrency,
+      globalSeedReadConcurrency: this.cachedSettings.globalSeedReadConcurrency,
+      globalBlockReadConcurrency: this.cachedSettings.globalBlockReadConcurrency,
+      globalStatConcurrency: this.cachedSettings.globalStatConcurrency,
       pendingApprovals: this.pendingApprovalViews(),
     };
   }
@@ -195,7 +214,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
       // CAS 提交（审查修复）：等待期间若发生 mutation（世代已推进），
       // 本次迟到 refresh 不得覆盖 mutation 发布的新快照。
       if (this.supplierGeneration !== generationAtStart) return;
-      this.cachedSettings = settingsRow ?? { settings: null };
+      this.cachedSettings = settingsRow
+        ? canonicalSettingsRow(settingsRow)
+        : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
       this.supplierSnapshot = { generation: generationAtStart, suppliers };
       this.cachedSuppliers = suppliers;
       this.emit();
@@ -212,13 +233,49 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     const db = await this.db;
     const row = await db.getGlobalSettings();
     const suppliers = await db.listSuppliers();
-    this.cachedSettings = row ?? { settings: null };
+    this.cachedSettings = row
+      ? canonicalSettingsRow(row)
+      : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
     this.cachedSuppliers = suppliers;
     return {
       globalSettings: row?.settings ?? null,
+      ...readConcurrencyFromRow(row),
       suppliers,
       supplierGeneration: this.supplierGeneration,
     };
+  }
+
+  async getReadConcurrencySettings(): Promise<MsFileReadConcurrencySettings> {
+    await this.ensureReady();
+    const row = await (await this.db).getGlobalSettings();
+    const settings = readConcurrencyFromRow(row);
+    this.cachedSettings = {
+      ...(row ? canonicalSettingsRow(row) : this.cachedSettings),
+      ...settings,
+    };
+    return settings;
+  }
+
+  async updateReadConcurrencySettings(input: MsFileReadConcurrencySettings): Promise<void> {
+    await this.ensureReady();
+    const settings = normalizeMsFileReadConcurrencySettings(input);
+    if (!settings) assertReadConcurrencySettings(input);
+    const updatedAt = this.now();
+    await (await this.db).putReadConcurrencySettings(settings!, updatedAt);
+    this.cachedSettings = {
+      settings: this.cachedSettings.settings,
+      ...settings!,
+      updatedAt,
+    };
+    this.emit();
+  }
+
+  async resetReadConcurrencySettings(): Promise<void> {
+    await this.updateReadConcurrencySettings({ ...MSFILE_READ_CONCURRENCY_RECOMMENDED });
+  }
+
+  async getMediaBlockReadConcurrency(): Promise<number> {
+    return (await this.getReadConcurrencySettings()).mediaBlockReadConcurrency;
   }
 
   async updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
@@ -226,15 +283,25 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     assertAmount(input?.seedMaxPriceSatoshis, "seedMaxPriceSatoshis");
     assertAmount(input?.blockMaxPriceSatoshis, "blockMaxPriceSatoshis");
     const db = await this.db;
+    const updatedAt = this.now();
     await db.putGlobalSettings(
       { seedMaxPriceSatoshis: input.seedMaxPriceSatoshis, blockMaxPriceSatoshis: input.blockMaxPriceSatoshis },
-      this.now(),
+      updatedAt,
     );
     this.cachedSettings = {
       settings: { ...input },
-      updatedAt: this.now(),
+      mediaBlockReadConcurrency: this.cachedSettings.mediaBlockReadConcurrency,
+      globalSeedReadConcurrency: this.cachedSettings.globalSeedReadConcurrency,
+      globalBlockReadConcurrency: this.cachedSettings.globalBlockReadConcurrency,
+      globalStatConcurrency: this.cachedSettings.globalStatConcurrency,
+      updatedAt,
     };
     this.emit();
+  }
+
+  async updateMediaBlockReadConcurrency(value: number): Promise<void> {
+    const current = await this.getReadConcurrencySettings();
+    await this.updateReadConcurrencySettings({ ...current, mediaBlockReadConcurrency: value });
   }
 
   async upsertSupplier(input: unknown): Promise<void> {
@@ -810,14 +877,46 @@ function recordEffectiveCapOf(record: MsFilePendingApproval): string {
 
 type MsFileGlobalSettingsSnapshotLike = {
   settings: MsFileGlobalPriceSettings | null;
+  mediaBlockReadConcurrency: number;
+  globalSeedReadConcurrency: number;
+  globalBlockReadConcurrency: number;
+  globalStatConcurrency: number;
   updatedAt?: number | null;
 };
 type MsFileStatEntryUnion = import("@keymaster/contracts").MsFileSupplierStat;
+
+function readConcurrencyFromRow(row: {
+  mediaBlockReadConcurrency?: number;
+  globalSeedReadConcurrency?: number;
+  globalBlockReadConcurrency?: number;
+  globalStatConcurrency?: number;
+} | null): MsFileReadConcurrencySettings {
+  const candidate = {
+    mediaBlockReadConcurrency: row?.mediaBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency,
+    globalSeedReadConcurrency: row?.globalSeedReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalSeedReadConcurrency,
+    globalBlockReadConcurrency: row?.globalBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalBlockReadConcurrency,
+    globalStatConcurrency: row?.globalStatConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalStatConcurrency,
+  };
+  return normalizeMsFileReadConcurrencySettings(candidate) ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+}
+
+function canonicalSettingsRow(row: import("./msfileDb.js").MsFileGlobalSettingsSnapshot): MsFileGlobalSettingsSnapshotLike {
+  return {
+    settings: row.settings,
+    ...readConcurrencyFromRow(row),
+    updatedAt: row.updatedAt,
+  };
+}
 
 function assertAmount(value: unknown, field: string): void {
   if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value) || BigInt(value) > 0xffffffffffffffffn) {
     throw new Error(`${field} must be a canonical decimal amount in 0..2^64-1`);
   }
+}
+
+function assertReadConcurrencySettings(value: unknown): asserts value is MsFileReadConcurrencySettings {
+  void value;
+  throw new Error("MSFile read concurrency must be positive integers within the technical limits, with mediaBlockReadConcurrency <= globalBlockReadConcurrency");
 }
 
 function assertHash(value: unknown, field: string): void {

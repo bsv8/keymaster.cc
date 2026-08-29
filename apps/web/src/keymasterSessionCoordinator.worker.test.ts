@@ -17,6 +17,7 @@ import {
   __testDispatchMsfileGrant,
   __testDispatchMsfileSessionAbort,
   __testReleaseMsfileRuntime,
+  __testSetMsfileReadConcurrencySettings,
   __testSetMsfileRuntimeOverride,
 } from "./keymasterSessionCoordinator.worker.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
@@ -1555,6 +1556,62 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
     expect(snapshot.operationResult).toMatchObject({
       globalSettings: { seedMaxPriceSatoshis: "500", blockMaxPriceSatoshis: "0" }
     });
+  });
+
+  it("waits on full global slots and rotates clients fairly", async () => {
+    await unlockVault();
+    const started: string[] = [];
+    const releases = new Map<string, () => void>();
+    const active = { value: 0 };
+    __testSetMsfileReadConcurrencySettings({
+      mediaBlockReadConcurrency: 1,
+      globalSeedReadConcurrency: 1,
+      globalBlockReadConcurrency: 1,
+      globalStatConcurrency: 1,
+    });
+    __testSetMsfileRuntimeOverride({
+      stat: vi.fn(async ({ seedHashHex }: { seedHashHex: string }) => {
+        active.value += 1;
+        started.push(seedHashHex);
+        try {
+          await new Promise<void>((resolve) => releases.set(seedHashHex, resolve));
+          return { seedHashHex, suppliers: [] };
+        } finally {
+          active.value -= 1;
+        }
+      }),
+      describeState: () => ({
+        status: "ready",
+        supplierGeneration: 0,
+        globalSettings: null,
+        mediaBlockReadConcurrency: 1,
+        globalSeedReadConcurrency: 1,
+        globalBlockReadConcurrency: 1,
+        globalStatConcurrency: 1,
+        pendingApprovals: [],
+      }),
+    } as never);
+
+    const firstHash = "aa".repeat(32);
+    const playerQueuedHash = "bb".repeat(32);
+    const appQueuedHash = "cc".repeat(32);
+    const first = __testDispatchMsfileData({ type: "stat", seedHashHex: firstHash }, "player");
+    await vi.waitFor(() => expect(started).toEqual([firstHash]));
+    const playerQueued = __testDispatchMsfileData({ type: "stat", seedHashHex: playerQueuedHash }, "player");
+    const appQueued = __testDispatchMsfileData({ type: "stat", seedHashHex: appQueuedHash }, "connect-app");
+    await Promise.resolve();
+    expect(active.value).toBe(1);
+    expect(started).toEqual([firstHash]);
+
+    releases.get(firstHash)!();
+    await first;
+    await vi.waitFor(() => expect(started).toEqual([firstHash, appQueuedHash]));
+    expect(active.value).toBe(1);
+    releases.get(appQueuedHash)!();
+    await appQueued;
+    await vi.waitFor(() => expect(started).toEqual([firstHash, appQueuedHash, playerQueuedHash]));
+    releases.get(playerQueuedHash)!();
+    await playerQueued;
   });
 
   it("rejects non-canonical amounts with a validation error", async () => {

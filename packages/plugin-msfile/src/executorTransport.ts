@@ -5,9 +5,15 @@
 // 并把远端返回的 Uint8Array 交给 MsFileService 做最终 hash/尺寸校验。
 
 import type {
+  MsFileReadConcurrencySettings,
   MsFileSupplierConfig,
   MsFileSupplierProbeResult,
   MsFileSupplierStat,
+} from "@keymaster/contracts";
+import {
+  MSFILE_MAX_BLOCK_BYTES,
+  MSFILE_MAX_SEED_BYTES,
+  normalizeMsFileReadConcurrencySettings,
 } from "@keymaster/contracts";
 import type {
   MsFileTransport,
@@ -22,6 +28,34 @@ export type MsFileExecutorOperation =
   | { type: "read"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 内容种类：seed 或 block。 */ kind: MsFileTransportReadInput["kind"]; /** 内容的 64 位 hex 哈希。 */ hashHex: string; /** 十进制聪上限。 */ maxPriceSatoshis: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "probe"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "invalidate"; /** 要失效的供应商公钥；省略表示全部。 */ supplierPublicKeyHex?: string; /** 新的配置世代。 */ generation: number };
+
+/** Worker 与 Window executor 之间版本化同步的完整读取资源预算。 */
+export interface MsFileExecutorConcurrencyConfig extends MsFileReadConcurrencySettings {
+  /** 配置版本；只接受不小于当前版本的消息。 */
+  version: number;
+  /** 单个 supplier 的 Read pending 上限：Seed + Block。 */
+  supplierPendingReadLimit: number;
+  /** MessagePort bridge 的在途 attachment 字节预算。 */
+  bridgeMaxInFlightBytes: number;
+}
+
+/** 所有派生资源限制从同一份设置计算，避免 Worker/Window 各自维护常量。 */
+export function buildMsFileExecutorConcurrencyConfig(
+  settings: MsFileReadConcurrencySettings,
+  version: number,
+): MsFileExecutorConcurrencyConfig {
+  const normalized = normalizeMsFileReadConcurrencySettings(settings);
+  if (!normalized || !Number.isSafeInteger(version) || version < 0) {
+    throw new Error("invalid MSFile executor concurrency settings");
+  }
+  return {
+    ...normalized,
+    version,
+    supplierPendingReadLimit: normalized.globalSeedReadConcurrency + normalized.globalBlockReadConcurrency,
+    bridgeMaxInFlightBytes: normalized.globalSeedReadConcurrency * MSFILE_MAX_SEED_BYTES
+      + normalized.globalBlockReadConcurrency * MSFILE_MAX_BLOCK_BYTES,
+  };
+}
 
 export interface MsFileExecutorBridge {
   /** 当前 Window executor 是否已取得 lease 且 host 可用。 */

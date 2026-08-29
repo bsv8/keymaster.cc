@@ -12,6 +12,7 @@
     "dev": "npm run dev -w @keymaster/web",
     "build": "npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
     "smoke:msfile-media-sw": "node scripts/smoke-msfile-media-sw.mjs",
+    "verify:msfile-read-concurrency-pressure": "node scripts/msfile-read-concurrency-pressure.mjs",
     "typecheck": "tsc -b",
     "keys:balance": "node scripts/check-key-balances.mjs",
     "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",

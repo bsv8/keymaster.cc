@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   MsFileAppAuthorizationView,
   MsFilePendingApprovalView,
+  MsFileReadConcurrencySettings,
   MsFileSatoshiAmount,
   MsFileService,
   MsFileSettingsSnapshot,
@@ -15,16 +16,47 @@ import type {
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { Button } from "@keymaster/ui";
 import { MSFILE_SERVICE_CAPABILITY } from "@keymaster/contracts";
-import { normalizeMsFileSatoshiAmount } from "@keymaster/contracts";
+import {
+  MSFILE_MAX_BLOCK_BYTES,
+  MSFILE_MAX_SEED_BYTES,
+  MSFILE_READ_CONCURRENCY_HARD_LIMITS,
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  normalizeMsFileReadConcurrencySettings,
+  normalizeMsFileSatoshiAmount,
+} from "@keymaster/contracts";
 
 /** `msfile.status` 资源快照（由 plugin manifest 注册）。 */
 export interface MsFileStatusResourceSnapshot {
   status: string;
   globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
+  mediaBlockReadConcurrency: number;
+  globalSeedReadConcurrency: number;
+  globalBlockReadConcurrency: number;
+  globalStatConcurrency: number;
   approvals: MsFilePendingApprovalView[];
 }
 
 type AmountDraft = { text: string; unlimited: boolean };
+type ConcurrencyField = keyof MsFileReadConcurrencySettings;
+type ConcurrencyDraft = Record<ConcurrencyField, string>;
+
+function concurrencyDraft(settings: MsFileReadConcurrencySettings): ConcurrencyDraft {
+  return {
+    mediaBlockReadConcurrency: String(settings.mediaBlockReadConcurrency),
+    globalSeedReadConcurrency: String(settings.globalSeedReadConcurrency),
+    globalBlockReadConcurrency: String(settings.globalBlockReadConcurrency),
+    globalStatConcurrency: String(settings.globalStatConcurrency),
+  };
+}
+
+function estimateInFlightBytes(settings: MsFileReadConcurrencySettings): number {
+  return settings.globalSeedReadConcurrency * MSFILE_MAX_SEED_BYTES
+    + settings.globalBlockReadConcurrency * MSFILE_MAX_BLOCK_BYTES;
+}
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(bytes % (1024 * 1024) === 0 ? 0 : 1)} MiB`;
+}
 
 function toDraft(value: MsFileSatoshiAmount | undefined): AmountDraft {
   if (value === "0") return { text: "", unlimited: true };
@@ -41,10 +73,19 @@ export function MsFileSettings() {
     "msfile.status",
     [],
     (snapshot) =>
-      snapshot.data ?? { status: service.status(), globalSettings: null, approvals: [] },
+      snapshot.data ?? {
+        status: service.status(),
+        globalSettings: null,
+        ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
+        approvals: [],
+      },
     (a, b) =>
       a.status === b.status &&
       JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings) &&
+      a.mediaBlockReadConcurrency === b.mediaBlockReadConcurrency &&
+      a.globalSeedReadConcurrency === b.globalSeedReadConcurrency &&
+      a.globalBlockReadConcurrency === b.globalBlockReadConcurrency &&
+      a.globalStatConcurrency === b.globalStatConcurrency &&
       JSON.stringify(a.approvals) === JSON.stringify(b.approvals)
   );
   const [snapshot, setSnapshot] = useState<MsFileSettingsSnapshot | null>(null);
@@ -54,6 +95,7 @@ export function MsFileSettings() {
 
   const [seedDraft, setSeedDraft] = useState<AmountDraft>({ text: "", unlimited: false });
   const [blockDraft, setBlockDraft] = useState<AmountDraft>({ text: "", unlimited: false });
+  const [concurrencyDraftState, setConcurrencyDraftState] = useState<ConcurrencyDraft>(() => concurrencyDraft(MSFILE_READ_CONCURRENCY_RECOMMENDED));
   const [nameDraft, setNameDraft] = useState("");
   const [keyDraft, setKeyDraft] = useState("");
   const [addressesDraft, setAddressesDraft] = useState("");
@@ -82,6 +124,16 @@ export function MsFileSettings() {
     setSeedDraft(toDraft(snapshot.globalSettings.seedMaxPriceSatoshis));
     setBlockDraft(toDraft(snapshot.globalSettings.blockMaxPriceSatoshis));
   }, [snapshot?.globalSettings]);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    setConcurrencyDraftState(concurrencyDraft({
+      mediaBlockReadConcurrency: snapshot.mediaBlockReadConcurrency,
+      globalSeedReadConcurrency: snapshot.globalSeedReadConcurrency,
+      globalBlockReadConcurrency: snapshot.globalBlockReadConcurrency,
+      globalStatConcurrency: snapshot.globalStatConcurrency,
+    }));
+  }, [snapshot?.mediaBlockReadConcurrency, snapshot?.globalSeedReadConcurrency, snapshot?.globalBlockReadConcurrency, snapshot?.globalStatConcurrency]);
 
   // 审查修复（chunk 体积）：multiaddr/libp2p 依赖只在预览 PeerId 时动态加载，
   // 不进入应用主 chunk。
@@ -125,6 +177,45 @@ export function MsFileSettings() {
     try {
       await service.updateGlobalPriceSettings({ seedMaxPriceSatoshis: seedValue!, blockMaxPriceSatoshis: blockValue! });
       setStatusMessage(t("msfile.settings.saved", { defaultValue: "Saved." }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function saveConcurrencyField(_field: ConcurrencyField) {
+    setError(null);
+    setStatusMessage(null);
+    const candidate = normalizeMsFileReadConcurrencySettings({
+      mediaBlockReadConcurrency: Number(concurrencyDraftState.mediaBlockReadConcurrency),
+      globalSeedReadConcurrency: Number(concurrencyDraftState.globalSeedReadConcurrency),
+      globalBlockReadConcurrency: Number(concurrencyDraftState.globalBlockReadConcurrency),
+      globalStatConcurrency: Number(concurrencyDraftState.globalStatConcurrency),
+    });
+    if (!candidate) {
+      setError(t("msfile.settings.readConcurrency.validation", {
+        defaultValue: "请输入大于等于 1 的安全整数；媒体并发不能大于全局 Block 并发。",
+      }));
+      return;
+    }
+    try {
+      await service.updateReadConcurrencySettings(candidate);
+      setStatusMessage(t("msfile.settings.readConcurrency.saved", {
+        defaultValue: "并发设置已保存。新媒体 Session 使用媒体值；之后排队的读取使用全局值。",
+      }));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  }
+
+  async function restoreRecommendedConcurrency() {
+    setError(null);
+    setStatusMessage(null);
+    try {
+      await service.resetReadConcurrencySettings();
+      setConcurrencyDraftState(concurrencyDraft(MSFILE_READ_CONCURRENCY_RECOMMENDED));
+      setStatusMessage(t("msfile.settings.readConcurrency.saved", {
+        defaultValue: "并发设置已保存。新媒体 Session 使用媒体值；之后排队的读取使用全局值。",
+      }));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     }
@@ -299,6 +390,73 @@ export function MsFileSettings() {
         <Button onClick={() => void savePriceLimits()}>{t("msfile.settings.save", { defaultValue: "Save" })}</Button>
       </div>
 
+      <h3>{t("msfile.settings.readConcurrency", { defaultValue: "读取并发与资源" })}</h3>
+      <p className="msfile-settings__hint">
+        {t("msfile.settings.readConcurrency.hint", {
+          defaultValue: "这些字段是读取运输层并发上限，不是预取数或缓存数。调高可能提升高带宽设备的吞吐，但会增加网络、内存、Supplier 压力以及同时付款请求；调低会节约资源，但可能增加等待。",
+        })}
+      </p>
+      <div className="msfile-settings__form msfile-settings__concurrency">
+        <ConcurrencySettingRow
+          field="mediaBlockReadConcurrency"
+          value={concurrencyDraftState.mediaBlockReadConcurrency}
+          label={t("msfile.settings.readConcurrency.media", { defaultValue: "单个媒体 Session 的 Block 读取数" })}
+          max={MSFILE_READ_CONCURRENCY_HARD_LIMITS.mediaBlockReadConcurrency}
+          onChange={(value) => setConcurrencyDraftState((current) => ({ ...current, mediaBlockReadConcurrency: value }))}
+          onSave={() => void saveConcurrencyField("mediaBlockReadConcurrency")}
+          t={t}
+        />
+        <ConcurrencySettingRow
+          field="globalSeedReadConcurrency"
+          value={concurrencyDraftState.globalSeedReadConcurrency}
+          label={t("msfile.settings.readConcurrency.seed", { defaultValue: "全局 Seed 读取数" })}
+          max={MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalSeedReadConcurrency}
+          onChange={(value) => setConcurrencyDraftState((current) => ({ ...current, globalSeedReadConcurrency: value }))}
+          onSave={() => void saveConcurrencyField("globalSeedReadConcurrency")}
+          t={t}
+        />
+        <ConcurrencySettingRow
+          field="globalBlockReadConcurrency"
+          value={concurrencyDraftState.globalBlockReadConcurrency}
+          label={t("msfile.settings.readConcurrency.block", { defaultValue: "全局 Block 读取数" })}
+          max={MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalBlockReadConcurrency}
+          onChange={(value) => setConcurrencyDraftState((current) => ({ ...current, globalBlockReadConcurrency: value }))}
+          onSave={() => void saveConcurrencyField("globalBlockReadConcurrency")}
+          t={t}
+        />
+        <ConcurrencySettingRow
+          field="globalStatConcurrency"
+          value={concurrencyDraftState.globalStatConcurrency}
+          label={t("msfile.settings.readConcurrency.stat", { defaultValue: "全局 Stat 查询并发数" })}
+          hint={t("msfile.settings.readConcurrency.stat.hint", {
+            defaultValue: "Keymaster 同时处理的 Stat 查询任务数量。每个查询仍会询问所有已启用的 Supplier。",
+          })}
+          max={MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalStatConcurrency}
+          onChange={(value) => setConcurrencyDraftState((current) => ({ ...current, globalStatConcurrency: value }))}
+          onSave={() => void saveConcurrencyField("globalStatConcurrency")}
+          t={t}
+        />
+        {(() => {
+          const current = normalizeMsFileReadConcurrencySettings({
+            mediaBlockReadConcurrency: Number(concurrencyDraftState.mediaBlockReadConcurrency),
+            globalSeedReadConcurrency: Number(concurrencyDraftState.globalSeedReadConcurrency),
+            globalBlockReadConcurrency: Number(concurrencyDraftState.globalBlockReadConcurrency),
+            globalStatConcurrency: Number(concurrencyDraftState.globalStatConcurrency),
+          });
+          return current ? (
+            <p className="msfile-settings__hint">
+              {t("msfile.settings.readConcurrency.estimate", {
+                defaultValue: "媒体最坏在途字节估算：{{bytes}}（Seed 并发 × 16 MiB + Block 并发 × 256 KiB）。",
+                bytes: formatMiB(estimateInFlightBytes(current)),
+              })}
+            </p>
+          ) : null;
+        })()}
+        <Button variant="secondary" onClick={() => void restoreRecommendedConcurrency()}>
+          {t("msfile.settings.readConcurrency.reset", { defaultValue: "恢复建议值" })}
+        </Button>
+      </div>
+
       <h3>{t("msfile.settings.suppliers", { defaultValue: "Suppliers" })}</h3>
       <ul className="msfile-settings__suppliers">
         {(snapshot?.suppliers ?? []).map((supplier) => (
@@ -395,6 +553,39 @@ export function MsFileSettings() {
       {error ? <p className="msfile-settings__error">{error}</p> : null}
       {statusMessage ? <p className="msfile-settings__ok">{statusMessage}</p> : null}
     </section>
+  );
+}
+
+function ConcurrencySettingRow(props: {
+  field: ConcurrencyField;
+  value: string;
+  label: string;
+  hint?: string;
+  max: number;
+  onChange: (value: string) => void;
+  onSave: () => void;
+  t: (key: string, values?: Record<string, string | number | boolean | null | undefined>) => string;
+}) {
+  const { field, value, label, hint, max, onChange, onSave, t } = props;
+  const inputId = `msfile-${field}`;
+  return (
+    <div className="msfile-settings__row">
+      <label htmlFor={inputId}>
+        <span>{label}</span>
+        <input
+          id={inputId}
+          type="number"
+          min={1}
+          max={max}
+          step={1}
+          inputMode="numeric"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </label>
+      {hint ? <p className="msfile-settings__hint">{hint}</p> : null}
+      <Button onClick={onSave}>{t("msfile.settings.readConcurrency.save", { defaultValue: "保存并发设置" })}</Button>
+    </div>
   );
 }
 

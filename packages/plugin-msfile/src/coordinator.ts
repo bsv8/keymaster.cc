@@ -53,6 +53,10 @@ export function buildMsFileStateEvent(
     status: state.status,
     supplierGeneration: state.supplierGeneration,
     globalSettings: state.globalSettings,
+    mediaBlockReadConcurrency: state.mediaBlockReadConcurrency,
+    globalSeedReadConcurrency: state.globalSeedReadConcurrency,
+    globalBlockReadConcurrency: state.globalBlockReadConcurrency,
+    globalStatConcurrency: state.globalStatConcurrency,
     pendingApprovals
   };
 }

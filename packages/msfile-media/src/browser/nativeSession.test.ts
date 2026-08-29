@@ -99,6 +99,10 @@ describe("MsFileNativeMediaSession", () => {
       const session = createMsFileNativeMediaSession(input(), {
         ensureServiceWorker: async () => undefined,
         bindSession: async () => undefined,
+        mediaBlockReadConcurrency: 6,
+        globalSeedReadConcurrency: 7,
+        globalBlockReadConcurrency: 12,
+        globalStatConcurrency: 5,
       });
       const element = new FakeMediaElement();
       await session.attach(element);
@@ -111,6 +115,11 @@ describe("MsFileNativeMediaSession", () => {
         backend: "native-range",
         buildVersion: "test-build-003",
         serviceWorkerProtocolVersion: 1,
+        mediaBlockReadConcurrency: 6,
+        maxConcurrentReads: 6,
+        globalSeedReadConcurrency: 7,
+        globalBlockReadConcurrency: 12,
+        globalStatConcurrency: 5,
       });
       expect(created?.details.serviceWorkerScriptUrl).toMatch(/\/msfile-media-sw\.js$/u);
       expect(entries.some((entry) => entry.scope === "media.native" && entry.details.event === "timeupdate")).toBe(false);

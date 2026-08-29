@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@keymaster/ui";
+import { MSFILE_READ_CONCURRENCY_RECOMMENDED } from "@keymaster/contracts";
 import {
   type MsFileMediaSnapshot,
 } from "@keymaster/msfile-media/browser";
@@ -25,6 +26,11 @@ interface MsFileMediaPlayerProps {
   canBlobDownload: boolean;
   /** 当前首页获取任务的 token；改变即销毁旧媒体 session。 */
   taskToken: string;
+  /** 创建本媒体 Session 时固定的四项并发快照。 */
+  mediaBlockReadConcurrency: number;
+  globalSeedReadConcurrency: number;
+  globalBlockReadConcurrency: number;
+  globalStatConcurrency: number;
   onDownload(): void;
   t(key: string, values?: Record<string, string | number | boolean | null | undefined>): string;
 }
@@ -36,7 +42,7 @@ const INITIAL_MEDIA_SNAPSHOT: MsFileMediaSnapshot = {
   currentTimeSeconds: 0,
   bufferedSeconds: 0,
   blockWindowOccupancy: 0,
-  blockWindowLimit: 2,
+  blockWindowLimit: MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency,
   verifiedBlockCount: 0,
   readBlockCount: 0,
   debug: { enabled: true, entries: [] },
@@ -85,18 +91,35 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
     onDownload,
     t,
     taskToken,
+    mediaBlockReadConcurrency,
+    globalSeedReadConcurrency,
+    globalBlockReadConcurrency,
+    globalStatConcurrency,
   } = props;
   const host = usePluginHost();
   const elementRef = useRef<HTMLAudioElement | HTMLVideoElement>(null);
   const debugRef = useRef<HTMLPreElement>(null);
-  const mediaArgs = msFileMediaResourceArgs({ taskToken, seedHashHex, supplierPublicKeyHex, fileSizeBytes, declaredMediaType });
+  const mediaArgs = msFileMediaResourceArgs({
+    taskToken,
+    seedHashHex,
+    supplierPublicKeyHex,
+    fileSizeBytes,
+    declaredMediaType,
+    mediaBlockReadConcurrency,
+    globalSeedReadConcurrency,
+    globalBlockReadConcurrency,
+    globalStatConcurrency,
+  });
   const resourceSnapshot = useResourceSelector<MsFileMediaSnapshot, MsFileMediaSnapshot | undefined>(
     host.resourceStore,
     MSFILE_MEDIA_RESOURCE_ID,
     mediaArgs,
     (resource) => resource.data,
   );
-  const snapshot = resourceSnapshot ?? INITIAL_MEDIA_SNAPSHOT;
+  const snapshot = resourceSnapshot ?? {
+    ...INITIAL_MEDIA_SNAPSHOT,
+    blockWindowLimit: mediaBlockReadConcurrency,
+  };
   const session = getMsFileMediaSession(taskToken);
   const [startupError, setStartupError] = useState<string | null>(null);
   const [debugCopied, setDebugCopied] = useState(false);
@@ -168,7 +191,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
       <div className="msfile-home-file__media-controls" aria-live="polite">
         <span>{phaseLabel(snapshot.phase, t)}</span>
         <span>{t("msfile.home.media.buffered", { defaultValue: "前方已缓冲：{{seconds}} 秒", seconds: shortSeconds(snapshot.bufferedSeconds) })}</span>
-        <span>{t("msfile.home.media.window", { defaultValue: "进行中 Block：{{used}} / {{limit}}", used: snapshot.inFlightBlockCount ?? snapshot.blockWindowOccupancy, limit: snapshot.blockWindowLimit })}</span>
+        <span>{t("msfile.home.media.window", { defaultValue: "在途 Block：{{used}} / {{limit}}（本媒体并发）", used: snapshot.inFlightBlockCount ?? snapshot.blockWindowOccupancy, limit: snapshot.blockWindowLimit })}</span>
         <span>{t("msfile.home.media.readBlocks", { defaultValue: "已读取 Block：{{count}}", count: snapshot.readBlockCount })}</span>
       </div>
       {failed ? (

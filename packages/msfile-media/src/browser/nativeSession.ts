@@ -12,6 +12,10 @@ import {
   type MsFileRangeHost,
   type MsFileRangeSessionHandle,
 } from "../range/rangeHost.js";
+import {
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  normalizeMsFileReadConcurrencySettings,
+} from "@keymaster/contracts";
 import { MsFileMediaError, normalizeMediaError } from "../core/errors.js";
 import type {
   MsFileMediaDebugEntry,
@@ -44,10 +48,15 @@ export interface CreateMsFileNativeMediaSessionOptions {
   rangeHost?: MsFileRangeHost;
   /** 测试或宿主注入的 session 绑定握手；生产环境必须绑定真实 Client.id。 */
   bindSession?: () => Promise<void>;
+  /** 单个媒体 Session 的 Block Read 并发数；创建后固定，不随设置刷新重建。 */
+  mediaBlockReadConcurrency?: number;
+  /** 创建该媒体 Session 时采用的全局限制，仅写入 Debug 上下文。 */
+  globalSeedReadConcurrency?: number;
+  globalBlockReadConcurrency?: number;
+  globalStatConcurrency?: number;
 }
 
 const MAX_DEBUG_RECENT_ENTRIES = 300;
-const NATIVE_READ_CONCURRENCY = 2;
 
 function now(): number {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -138,8 +147,16 @@ export class MsFileNativeMediaSession implements MsFileMediaSession {
     this.debugEnabled = options.debug !== false;
     this.workerReadyOverride = options.ensureServiceWorker;
     this.bindSessionOverride = options.bindSession;
+    const concurrency = normalizeMsFileReadConcurrencySettings({
+      mediaBlockReadConcurrency: options.mediaBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency,
+      globalSeedReadConcurrency: options.globalSeedReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalSeedReadConcurrency,
+      globalBlockReadConcurrency: options.globalBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalBlockReadConcurrency,
+      globalStatConcurrency: options.globalStatConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalStatConcurrency,
+    });
+    if (!concurrency) throw new MsFileMediaError("msfile_media_configuration");
     const host = options.rangeHost ?? getMsFileRangeHost();
     this.rangeSession = host.createSession(input, {
+      mediaBlockReadConcurrency: concurrency.mediaBlockReadConcurrency,
       onDebug: (scope, action, details) => this.recordDebug(scope, action, details),
     });
     this.rangeSession.source.subscribe(() => {
@@ -158,7 +175,11 @@ export class MsFileNativeMediaSession implements MsFileMediaSession {
       debugEnabled: this.debugEnabled,
       fileSizeBytes: input.fileSizeBytes <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(input.fileSizeBytes) : null,
       declaredMediaType: input.declaredMediaType || "empty",
-      maxConcurrentReads: NATIVE_READ_CONCURRENCY,
+      mediaBlockReadConcurrency: concurrency.mediaBlockReadConcurrency,
+      maxConcurrentReads: concurrency.mediaBlockReadConcurrency,
+      globalSeedReadConcurrency: concurrency.globalSeedReadConcurrency,
+      globalBlockReadConcurrency: concurrency.globalBlockReadConcurrency,
+      globalStatConcurrency: concurrency.globalStatConcurrency,
     });
   }
 
@@ -176,7 +197,7 @@ export class MsFileNativeMediaSession implements MsFileMediaSession {
       currentTimeSeconds,
       bufferedSeconds: element ? bufferedAhead(element) : 0,
       blockWindowOccupancy: source.inFlightBlockCount,
-      blockWindowLimit: NATIVE_READ_CONCURRENCY,
+      blockWindowLimit: source.maxConcurrentReads,
       activeRequestCount: source.activeRequestCount,
       inFlightBlockCount: source.inFlightBlockCount,
       verifiedBlockCount: source.verifiedBlockCount,

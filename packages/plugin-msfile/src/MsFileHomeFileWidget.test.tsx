@@ -17,7 +17,15 @@ const SUPPLIER_B = `03${"22".repeat(32)}`;
 const state = vi.hoisted(() => ({
   service: undefined as unknown as MsFileService,
   vault: "unlocked" as "locked" | "unlocked",
-  status: { status: "ready", globalSettings: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" }, supplierGeneration: 1 },
+  status: {
+    status: "ready",
+    globalSettings: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" },
+    mediaBlockReadConcurrency: 2,
+    globalSeedReadConcurrency: 4,
+    globalBlockReadConcurrency: 8,
+    globalStatConcurrency: 4,
+    supplierGeneration: 1,
+  },
   lifecycle: { activePublicKeyHex: "02" + "33".repeat(32), generation: 1 },
 }));
 
@@ -49,6 +57,10 @@ function response(contentHashHex: string, bytes: Uint8Array): MsFileReadResult {
 function settingsSnapshot(): MsFileSettingsSnapshot {
   return {
     globalSettings: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" },
+    mediaBlockReadConcurrency: 2,
+    globalSeedReadConcurrency: 4,
+    globalBlockReadConcurrency: 8,
+    globalStatConcurrency: 4,
     suppliers: [
       { name: "Alpha", supplierPublicKeyHex: SUPPLIER_A, addresses: [], enabled: true },
       { name: "Beta", supplierPublicKeyHex: SUPPLIER_B, addresses: [], enabled: true },
@@ -63,6 +75,16 @@ function makeService(overrides: Partial<MsFileService> = {}): MsFileService {
     subscribe: vi.fn(() => () => undefined),
     getSettingsSnapshot: vi.fn(async () => settingsSnapshot()),
     updateGlobalPriceSettings: vi.fn(async () => undefined),
+    getReadConcurrencySettings: vi.fn(async () => ({
+      mediaBlockReadConcurrency: 2,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 4,
+    })),
+    updateReadConcurrencySettings: vi.fn(async () => undefined),
+    resetReadConcurrencySettings: vi.fn(async () => undefined),
+    getMediaBlockReadConcurrency: vi.fn(async () => 2),
+    updateMediaBlockReadConcurrency: vi.fn(async () => undefined),
     upsertSupplier: vi.fn(async () => undefined),
     deleteSupplier: vi.fn(async () => undefined),
     probeSupplier: vi.fn(),
@@ -98,7 +120,15 @@ afterEach(() => cleanup());
 
 beforeEach(() => {
   state.vault = "unlocked";
-  state.status = { status: "ready", globalSettings: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" }, supplierGeneration: 1 };
+  state.status = {
+    status: "ready",
+    globalSettings: { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" },
+    mediaBlockReadConcurrency: 2,
+    globalSeedReadConcurrency: 4,
+    globalBlockReadConcurrency: 8,
+    globalStatConcurrency: 4,
+    supplierGeneration: 1,
+  };
   state.lifecycle = { activePublicKeyHex: "02" + "33".repeat(32), generation: 1 };
 });
 

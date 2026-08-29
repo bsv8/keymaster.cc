@@ -450,7 +450,14 @@ interface FakeDbOverrides {
 }
 function makeFakeDb(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverrides = {}): import("./msfileDb.js").MsFileDb & {
   rows: Map<string, MsFileSupplierConfig>;
-  settingsRow: { settings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null; updatedAt: number | null };
+  settingsRow: {
+    settings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
+    mediaBlockReadConcurrency?: number;
+    globalSeedReadConcurrency?: number;
+    globalBlockReadConcurrency?: number;
+    globalStatConcurrency?: number;
+    updatedAt: number | null;
+  };
 } {
     const rows = new Map<string, MsFileSupplierConfig>(seed.map((entry) => [entry.supplierPublicKeyHex, entry]));
     let listCallCount = 0;
@@ -460,6 +467,14 @@ function makeFakeDb(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverride
       settingsRow,
       async getGlobalSettings() { return settingsRow.settings ? { ...settingsRow } : null; },
       async putGlobalSettings(settings) { settingsRow.settings = { ...settings }; settingsRow.updatedAt = Date.now(); },
+      async putReadConcurrencySettings(settings) {
+        Object.assign(settingsRow, settings);
+        settingsRow.updatedAt = Date.now();
+      },
+      async putMediaBlockReadConcurrency(settings) {
+        settingsRow.mediaBlockReadConcurrency = typeof settings === "number" ? settings : settings.mediaBlockReadConcurrency;
+        settingsRow.updatedAt = Date.now();
+      },
       async listSuppliers() {
         listCallCount += 1;
         // 第一次调用来自构造期 init（快速放行）；第二次起才是 mutation 路径。
@@ -931,6 +946,49 @@ describe("settings control plane", () => {
     expect(snapshot.globalSettings).toEqual({ seedMaxPriceSatoshis: "5", blockMaxPriceSatoshis: "0" });
     await service.upsertSupplier({ name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true });
     expect((await service.getSettingsSnapshot()).supplierGeneration).toBeGreaterThan(0);
+  });
+
+  it("uses recommended read concurrency defaults and atomically retains the last valid value", async () => {
+    const service = await freshService();
+    expect(await service.getReadConcurrencySettings()).toEqual({
+      mediaBlockReadConcurrency: 2,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 4,
+    });
+
+    await service.updateReadConcurrencySettings({
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 6,
+      globalBlockReadConcurrency: 12,
+      globalStatConcurrency: 7,
+    });
+    expect(await service.getReadConcurrencySettings()).toEqual({
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 6,
+      globalBlockReadConcurrency: 12,
+      globalStatConcurrency: 7,
+    });
+    await expect(service.updateReadConcurrencySettings({
+      mediaBlockReadConcurrency: 13,
+      globalSeedReadConcurrency: 1,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 1,
+    })).rejects.toThrow();
+    expect(await service.getReadConcurrencySettings()).toEqual({
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 6,
+      globalBlockReadConcurrency: 12,
+      globalStatConcurrency: 7,
+    });
+
+    await service.resetReadConcurrencySettings();
+    expect(await service.getSettingsSnapshot()).toMatchObject({
+      mediaBlockReadConcurrency: 2,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 4,
+    });
   });
 
   it("rejects non-canonical amounts", async () => {

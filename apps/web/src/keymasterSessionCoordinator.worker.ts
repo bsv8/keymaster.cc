@@ -40,6 +40,13 @@ import type {
   MsFileNoiseSignRequest,
   MsFilePeerRecordSignRequest,
   MsFileIdentitySignResult,
+  MsFileReadConcurrencySettings,
+} from "@keymaster/contracts";
+import {
+  MSFILE_MAX_BLOCK_BYTES,
+  MSFILE_MAX_SEED_BYTES,
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
+  normalizeMsFileReadConcurrencySettings,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, buildOpenedAppMsgMessage, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
@@ -74,7 +81,12 @@ import {
   type MsFileServiceImpl,
   type MsFileServiceEventState,
 } from "@keymaster/plugin-msfile/coordinator";
-import { createMsFileExecutorTransport, type MsFileExecutorOperation } from "@keymaster/plugin-msfile/executor-transport";
+import {
+  buildMsFileExecutorConcurrencyConfig,
+  createMsFileExecutorTransport,
+  type MsFileExecutorConcurrencyConfig,
+  type MsFileExecutorOperation,
+} from "@keymaster/plugin-msfile/executor-transport";
 // 施工单 2026-08-26/001：identity/signing 的 payload 与 Peer Record 编码必须来自
 // bitcoin-libp2p；Worker 只持有 active private key 并做标准 DER 签名。
 import {
@@ -594,18 +606,35 @@ const msfileRequestKey = (clientId: string, requestId: string): string => `${cli
 const msfileExecutorIdentityRequests = new Map<string, { controller: AbortController; clientId: string; leaseId: string }>();
 const msfileExecutorIdentityRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const msfileGrants = new Map<string, { context: MsFileConnectAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
-// 有界并发：Seed attachment 较大，固定 4 路；Block 较小，允许 8 路。
-// 读 attachment 的全局上限是 4 + 8；Stat 另留 4 个轻量槽位，确保大 Read
-// 期间 Stat 不会因 attachment 配额耗尽而被阻塞。
-const MSFILE_DATA_MAX_ACTIVE = 12;
-const MSFILE_STAT_MAX_ACTIVE = 4;
-const MSFILE_TOTAL_MAX_ACTIVE = MSFILE_DATA_MAX_ACTIVE + MSFILE_STAT_MAX_ACTIVE;
-const MSFILE_SEED_DATA_MAX_ACTIVE = 4;
-const MSFILE_BLOCK_DATA_MAX_ACTIVE = 8;
+/** 数据面队列有界，但具体并发由设置快照决定。 */
+const MSFILE_DATA_MAX_QUEUE = 256;
+type MsFileDataClass = "stat" | "seed" | "block";
+interface MsFileDataWaiter {
+  clientId: string;
+  dataClass: MsFileDataClass;
+  signal: AbortSignal;
+  run: () => Promise<CoordinatorResponse>;
+  resolve: (response: CoordinatorResponse) => void;
+  reject: (error: Error) => void;
+  active: boolean;
+  onAbort: () => void;
+}
+const msfileDataWaiters: MsFileDataWaiter[] = [];
+const msfileDataActiveByClient = new Map<string, number>();
+/** 每个 client 最近一次获得槽位的顺序；用于真正的轮转公平，而不是只靠 FIFO。 */
+const msfileDataClientLastServed = new Map<string, number>();
+let msfileDataDispatchSequence = 0;
 let msfileDataActive = 0;
 let msfileStatActive = 0;
 let msfileSeedDataActive = 0;
 let msfileBlockDataActive = 0;
+let msfileReadConcurrencySettings: MsFileReadConcurrencySettings = { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+let msfileExecutorConfigVersion = 0;
+let msfileExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
+let msfileExecutorConcurrencyConfig: MsFileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(
+  msfileReadConcurrencySettings,
+  msfileExecutorConfigVersion,
+);
 
 function emitMsFileState(): void {
   msfileRevision += 1;
@@ -618,10 +647,140 @@ function emitMsFileState(): void {
     status: state?.status ?? (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "unavailable"),
     supplierGeneration: state?.supplierGeneration ?? 0,
     globalSettings: state?.globalSettings ?? null,
+    mediaBlockReadConcurrency: state?.mediaBlockReadConcurrency ?? msfileReadConcurrencySettings.mediaBlockReadConcurrency,
+    globalSeedReadConcurrency: state?.globalSeedReadConcurrency ?? msfileReadConcurrencySettings.globalSeedReadConcurrency,
+    globalBlockReadConcurrency: state?.globalBlockReadConcurrency ?? msfileReadConcurrencySettings.globalBlockReadConcurrency,
+    globalStatConcurrency: state?.globalStatConcurrency ?? msfileReadConcurrencySettings.globalStatConcurrency,
     pendingApprovals: state?.pendingApprovals ?? []
   };
+  const nextConcurrency = normalizeMsFileReadConcurrencySettings(event) ?? msfileReadConcurrencySettings;
+  const nextSignature = JSON.stringify(nextConcurrency);
+  if (nextSignature !== msfileExecutorConfigSignature) {
+    msfileReadConcurrencySettings = nextConcurrency;
+    msfileExecutorConfigSignature = nextSignature;
+    msfileExecutorConfigVersion += 1;
+    msfileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(nextConcurrency, msfileExecutorConfigVersion);
+    void syncMsfileExecutorConfig().catch(() => undefined);
+    pumpMsfileDataWaiters();
+  }
   lastMsFileState = event;
   publishTopicEvent("msfile.state", event);
+}
+
+function msfileDataClass(data: CoordinatorMsFileData): MsFileDataClass {
+  switch (data.type) {
+    case "stat": return "stat";
+    case "read-seed": return "seed";
+    case "read-block": return "block";
+  }
+}
+
+function msfileDataClassHasCapacity(dataClass: MsFileDataClass): boolean {
+  switch (dataClass) {
+    case "stat": return msfileStatActive < msfileReadConcurrencySettings.globalStatConcurrency;
+    case "seed": return msfileSeedDataActive < msfileReadConcurrencySettings.globalSeedReadConcurrency;
+    case "block": return msfileBlockDataActive < msfileReadConcurrencySettings.globalBlockReadConcurrency;
+  }
+}
+
+function msfileDataClientActive(clientId: string): number {
+  return msfileDataActiveByClient.get(clientId) ?? 0;
+}
+
+function pumpMsfileDataWaiters(): void {
+  while (true) {
+    let selectedIndex = -1;
+    let selectedClientLastServed = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < msfileDataWaiters.length; index += 1) {
+      const waiter = msfileDataWaiters[index]!;
+      if (!waiter.active) continue;
+      if (waiter.signal.aborted) {
+        msfileDataWaiters.splice(index, 1);
+        index -= 1;
+        waiter.active = false;
+        waiter.signal.removeEventListener("abort", waiter.onAbort);
+        waiter.reject(msfileError("msfile_unavailable", "MSFile request was cancelled while waiting"));
+        continue;
+      }
+      if (!msfileDataClassHasCapacity(waiter.dataClass)) continue;
+      // 同一类资源满时跳过；有可用槽位时按 client 的最近服务顺序轮转。
+      // 仅按当前 active 数 + FIFO 会让持续入队的 player 永远压在后来
+      // 的 Connect App 前面，因此这里把“最近服务时间”作为主排序键。
+      const clientLastServed = msfileDataClientLastServed.get(waiter.clientId) ?? 0;
+      if (clientLastServed < selectedClientLastServed) {
+        selectedIndex = index;
+        selectedClientLastServed = clientLastServed;
+      }
+    }
+    if (selectedIndex < 0) break;
+    const waiter = msfileDataWaiters.splice(selectedIndex, 1)[0]!;
+    if (!waiter.active) continue;
+    waiter.active = false;
+    waiter.signal.removeEventListener("abort", waiter.onAbort);
+    msfileDataActive += 1;
+    if (waiter.dataClass === "stat") msfileStatActive += 1;
+    if (waiter.dataClass === "seed") msfileSeedDataActive += 1;
+    if (waiter.dataClass === "block") msfileBlockDataActive += 1;
+    msfileDataActiveByClient.set(waiter.clientId, msfileDataClientActive(waiter.clientId) + 1);
+    msfileDataDispatchSequence += 1;
+    msfileDataClientLastServed.set(waiter.clientId, msfileDataDispatchSequence);
+    void waiter.run().then(waiter.resolve, waiter.reject).finally(() => {
+      msfileDataActive = Math.max(0, msfileDataActive - 1);
+      if (waiter.dataClass === "stat") msfileStatActive = Math.max(0, msfileStatActive - 1);
+      if (waiter.dataClass === "seed") msfileSeedDataActive = Math.max(0, msfileSeedDataActive - 1);
+      if (waiter.dataClass === "block") msfileBlockDataActive = Math.max(0, msfileBlockDataActive - 1);
+      const nextClientActive = Math.max(0, msfileDataClientActive(waiter.clientId) - 1);
+      if (nextClientActive === 0) msfileDataActiveByClient.delete(waiter.clientId);
+      else msfileDataActiveByClient.set(waiter.clientId, nextClientActive);
+      if (nextClientActive === 0 && !msfileDataWaiters.some((pending) => pending.active && pending.clientId === waiter.clientId)) {
+        msfileDataClientLastServed.delete(waiter.clientId);
+      }
+      pumpMsfileDataWaiters();
+    });
+  }
+}
+
+function withMsfileDataSlot(
+  clientId: string,
+  data: CoordinatorMsFileData,
+  run: () => Promise<CoordinatorResponse>,
+  signal: AbortSignal,
+): Promise<CoordinatorResponse> {
+  if (signal.aborted) return Promise.reject(msfileError("msfile_unavailable", "MSFile request was cancelled"));
+  if (msfileDataWaiters.length >= MSFILE_DATA_MAX_QUEUE) {
+    return Promise.reject(msfileError("msfile_unavailable", "MSFile request queue is full"));
+  }
+  const dataClass = msfileDataClass(data);
+  return new Promise<CoordinatorResponse>((resolve, reject) => {
+    const waiter: MsFileDataWaiter = {
+      clientId,
+      dataClass,
+      signal,
+      run,
+      resolve,
+      reject,
+      active: true,
+      onAbort: () => {
+        const index = msfileDataWaiters.indexOf(waiter);
+        if (index < 0 || !waiter.active) return;
+        msfileDataWaiters.splice(index, 1);
+        waiter.active = false;
+        reject(msfileError("msfile_unavailable", "MSFile request was cancelled while waiting"));
+      },
+    };
+    signal.addEventListener("abort", waiter.onAbort, { once: true });
+    msfileDataWaiters.push(waiter);
+    pumpMsfileDataWaiters();
+  });
+}
+
+function rejectMsfileDataWaiters(error = msfileError("msfile_unavailable", "MSFile request queue was cancelled")): void {
+  for (const waiter of msfileDataWaiters.splice(0)) {
+    if (!waiter.active) continue;
+    waiter.active = false;
+    waiter.signal.removeEventListener("abort", waiter.onAbort);
+    waiter.reject(error);
+  }
 }
 
 async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
@@ -1271,7 +1430,9 @@ async function handleSubscribe(
         topic: "msfile.state" as const, type: "msfile.state.changed" as const,
         msfileRevision: baselineRevision, sessionEpoch: coordinatorState.sessionEpoch,
         status: (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "unavailable") as import("@keymaster/contracts").MsFileServiceStatus,
-        supplierGeneration: 0, globalSettings: null, pendingApprovals: []
+        supplierGeneration: 0, globalSettings: null,
+        ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
+        pendingApprovals: []
       };
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
     }
@@ -1458,6 +1619,8 @@ interface MsFileExecutorLeaseState extends MsFileExecutorLease {
   /** 生产 Window executor 的专用数据面通道；Spike lease 没有此字段。 */
   transportPort?: MessagePort;
   transportReady: boolean;
+  /** Window 已应用的读取配置版本；未 ACK 时为 -1。 */
+  transportConfigVersion: number;
 }
 let msfileExecutorLease: MsFileExecutorLeaseState | undefined;
 
@@ -1469,8 +1632,15 @@ interface MsFileExecutorBridgePending {
   reservedBytes: number;
 }
 const msfileExecutorBridgePending = new Map<string, MsFileExecutorBridgePending>();
-const MSFILE_EXECUTOR_BRIDGE_MAX_IN_FLIGHT_BYTES = 4 * 16 * 1024 * 1024 + 8 * 256 * 1024;
 let msfileExecutorBridgeInFlightBytes = 0;
+interface MsFileExecutorBridgeBudgetWaiter {
+  reservedBytes: number;
+  signal?: AbortSignal;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  onAbort: () => void;
+}
+const msfileExecutorBridgeBudgetWaiters: MsFileExecutorBridgeBudgetWaiter[] = [];
 
 const MSFILE_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
 // Spike RPC 的有界 pre-sign cancellation window：只影响尚未接入生产数据面的
@@ -1493,18 +1663,91 @@ function rejectMsfileExecutorBridgePending(error: Error): void {
     pending.cleanup?.();
     pending.reject(error);
   }
+  for (const waiter of msfileExecutorBridgeBudgetWaiters.splice(0)) {
+    waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    waiter.reject(error);
+  }
+}
+
+function pumpMsfileExecutorBridgeBudget(): void {
+  while (msfileExecutorBridgeBudgetWaiters.length > 0) {
+    const waiter = msfileExecutorBridgeBudgetWaiters[0]!;
+    if (waiter.signal?.aborted) {
+      msfileExecutorBridgeBudgetWaiters.shift();
+      waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.reject(new DOMException("The operation was aborted", "AbortError"));
+      continue;
+    }
+    if (msfileExecutorBridgeInFlightBytes + waiter.reservedBytes > msfileExecutorConcurrencyConfig.bridgeMaxInFlightBytes) break;
+    msfileExecutorBridgeBudgetWaiters.shift();
+    waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    msfileExecutorBridgeInFlightBytes += waiter.reservedBytes;
+    waiter.resolve();
+  }
+}
+
+function reserveMsfileExecutorBridgeBytes(reservedBytes: number, signal?: AbortSignal): Promise<void> {
+  if (reservedBytes === 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+  return new Promise<void>((resolve, reject) => {
+    const waiter: MsFileExecutorBridgeBudgetWaiter = {
+      reservedBytes,
+      signal,
+      resolve,
+      reject,
+      onAbort: () => {
+        const index = msfileExecutorBridgeBudgetWaiters.indexOf(waiter);
+        if (index < 0) return;
+        msfileExecutorBridgeBudgetWaiters.splice(index, 1);
+        reject(new DOMException("The operation was aborted", "AbortError"));
+      },
+    };
+    signal?.addEventListener("abort", waiter.onAbort, { once: true });
+    msfileExecutorBridgeBudgetWaiters.push(waiter);
+    pumpMsfileExecutorBridgeBudget();
+  });
+}
+
+function releaseMsfileExecutorBridgeBytes(reservedBytes: number): void {
+  msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - reservedBytes);
+  pumpMsfileExecutorBridgeBudget();
 }
 
 function handleMsfileExecutorPortMessage(event: MessageEvent): void {
-  const data = event.data as { type?: string; leaseId?: string; requestId?: string; ok?: boolean; result?: unknown; errorMessage?: string } | undefined;
+  const data = event.data as {
+    type?: string;
+    leaseId?: string;
+    requestId?: string;
+    ok?: boolean;
+    result?: unknown;
+    errorMessage?: string;
+    version?: number;
+  } | undefined;
   if (!data || data.type === undefined) return;
   const lease = msfileExecutorLease;
   if (!lease || data.leaseId !== lease.leaseId) return;
   if (data.type === "ready") {
     lease.transportReady = data.ok === true;
+    lease.transportConfigVersion = -1;
     if (!lease.transportReady) {
       clearMsFileExecutorLeaseLocked();
+    } else {
+      void syncMsfileExecutorConfig().catch(() => {
+        if (msfileExecutorLease?.leaseId === lease.leaseId) clearMsFileExecutorLeaseLocked();
+      });
     }
+    emitMsFileState();
+    return;
+  }
+  if (data.type === "config-ack" && typeof data.version === "number") {
+    if (!data.ok || data.version !== msfileExecutorConcurrencyConfig.version) {
+      if (!data.ok && msfileExecutorLease?.leaseId === lease.leaseId) clearMsFileExecutorLeaseLocked();
+      return;
+    }
+    lease.transportConfigVersion = data.version;
+    msfileExecutorConfigSync?.resolve();
+    msfileExecutorConfigSync = undefined;
+    pumpMsfileExecutorBridgeBudget();
     emitMsFileState();
     return;
   }
@@ -1512,7 +1755,7 @@ function handleMsfileExecutorPortMessage(event: MessageEvent): void {
   const pending = msfileExecutorBridgePending.get(data.requestId);
   if (!pending || pending.leaseId !== lease.leaseId) return;
   msfileExecutorBridgePending.delete(data.requestId);
-  msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+  releaseMsfileExecutorBridgeBytes(pending.reservedBytes);
   pending.cleanup?.();
   if (data.ok === true) pending.resolve(data.result);
   else pending.reject(new Error(typeof data.errorMessage === "string" ? data.errorMessage : "MSFile executor request failed"));
@@ -1529,6 +1772,7 @@ function attachMsfileExecutorPort(port: MessagePort, clientId: string, leaseId: 
   }
   lease.transportPort = port;
   lease.transportReady = false;
+  lease.transportConfigVersion = -1;
   port.onmessage = handleMsfileExecutorPortMessage;
   port.onmessageerror = () => {
     if (msfileExecutorLease?.leaseId === leaseId) clearMsFileExecutorLeaseLocked();
@@ -1536,28 +1780,84 @@ function attachMsfileExecutorPort(port: MessagePort, clientId: string, leaseId: 
   port.start();
 }
 
-function requestMsfileExecutorOperation(operation: MsFileExecutorOperation, signal?: AbortSignal): Promise<unknown> {
+let msfileExecutorConfigSync: {
+  leaseId: string;
+  version: number;
+  resolve: () => void;
+  reject: (error: Error) => void;
+  promise: Promise<void>;
+} | undefined;
+
+function syncMsfileExecutorConfig(): Promise<void> {
   const lease = msfileExecutorLease;
-  if (!lease || !lease.transportPort || !lease.transportReady || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
+  if (!lease?.transportPort || !lease.transportReady || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
     return Promise.reject(msfileError("msfile_unavailable", "MSFile Window executor is unavailable"));
   }
-  const requestId = `msfile-exec-data-${crypto.randomUUID()}`;
-  const request = { type: "request", leaseId: lease.leaseId, requestId, operation };
+  if (lease.transportConfigVersion === msfileExecutorConcurrencyConfig.version) return Promise.resolve();
+  if (msfileExecutorConfigSync?.leaseId === lease.leaseId && msfileExecutorConfigSync.version === msfileExecutorConcurrencyConfig.version) {
+    return msfileExecutorConfigSync.promise;
+  }
+  msfileExecutorConfigSync?.reject(new Error("MSFile executor concurrency config superseded"));
+  let resolveFn!: () => void;
+  let rejectFn!: (error: Error) => void;
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveFn = resolve;
+    rejectFn = reject;
+  });
+  msfileExecutorConfigSync = {
+    leaseId: lease.leaseId,
+    version: msfileExecutorConcurrencyConfig.version,
+    resolve: resolveFn,
+    reject: rejectFn,
+    promise,
+  };
+  try {
+    lease.transportPort.postMessage({ type: "config", leaseId: lease.leaseId, config: msfileExecutorConcurrencyConfig });
+  } catch (error) {
+    msfileExecutorConfigSync = undefined;
+    rejectFn(error instanceof Error ? error : new Error(String(error)));
+  }
+  return promise;
+}
+
+function awaitMsfileExecutorConfig(signal?: AbortSignal): Promise<void> {
+  const promise = syncMsfileExecutorConfig();
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("The operation was aborted", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
+}
+
+async function requestMsfileExecutorOperation(operation: MsFileExecutorOperation, signal?: AbortSignal): Promise<unknown> {
+  const lease = msfileExecutorLease;
+  if (!lease || !lease.transportPort || !lease.transportReady || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
+    throw msfileError("msfile_unavailable", "MSFile Window executor is unavailable");
+  }
+  await awaitMsfileExecutorConfig(signal);
+  const currentLease = msfileExecutorLease;
+  if (!currentLease || !currentLease.transportPort || !currentLease.transportReady || currentLease.sessionEpoch !== coordinatorState.sessionEpoch) {
+    throw msfileError("msfile_unavailable", "MSFile Window executor is unavailable");
+  }
+  const requestId = "msfile-exec-data-" + crypto.randomUUID();
+  const request = { type: "request", leaseId: currentLease.leaseId, requestId, operation };
+  const reservedBytes = operation.type === "read"
+    ? operation.kind === "block" ? MSFILE_MAX_BLOCK_BYTES : MSFILE_MAX_SEED_BYTES
+    : 0;
+  await reserveMsfileExecutorBridgeBytes(reservedBytes, signal);
+  if (signal?.aborted) {
+    releaseMsfileExecutorBridgeBytes(reservedBytes);
+    throw new DOMException("The operation was aborted", "AbortError");
+  }
   return new Promise<unknown>((resolve, reject) => {
-    const reservedBytes = operation.type === "read"
-      ? operation.kind === "block" ? 256 * 1024 : 16 * 1024 * 1024
-      : 0;
-    if (msfileExecutorBridgeInFlightBytes + reservedBytes > MSFILE_EXECUTOR_BRIDGE_MAX_IN_FLIGHT_BYTES) {
-      reject(msfileError("msfile_unavailable", "MSFile executor transfer limit exceeded"));
-      return;
-    }
-    msfileExecutorBridgeInFlightBytes += reservedBytes;
-    const pending: MsFileExecutorBridgePending = { resolve, reject, leaseId: lease.leaseId, reservedBytes };
+    const pending: MsFileExecutorBridgePending = { resolve, reject, leaseId: currentLease.leaseId, reservedBytes };
     msfileExecutorBridgePending.set(requestId, pending);
     const onAbort = () => {
       if (!msfileExecutorBridgePending.delete(requestId)) return;
-      msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
-      try { lease.transportPort?.postMessage({ type: "cancel", leaseId: lease.leaseId, requestId }); } catch { /* executor may be gone */ }
+      releaseMsfileExecutorBridgeBytes(pending.reservedBytes);
+      try { currentLease.transportPort?.postMessage({ type: "cancel", leaseId: currentLease.leaseId, requestId }); } catch { /* executor may be gone */ }
       reject(new DOMException("The operation was aborted", "AbortError"));
     };
     if (signal) {
@@ -1566,10 +1866,10 @@ function requestMsfileExecutorOperation(operation: MsFileExecutorOperation, sign
       pending.cleanup = () => signal.removeEventListener("abort", onAbort);
     }
     try {
-      lease.transportPort!.postMessage(request);
+      currentLease.transportPort!.postMessage(request);
     } catch (error) {
       if (msfileExecutorBridgePending.delete(requestId)) {
-        msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+        releaseMsfileExecutorBridgeBytes(pending.reservedBytes);
         pending.cleanup?.();
         reject(error instanceof Error ? error : new Error(String(error)));
       }
@@ -1608,6 +1908,8 @@ function clearMsFileExecutorLeaseLocked(): void {
   clearMsFileExecutorLeaseTimer();
   if (msfileExecutorLease === undefined) return;
   const oldLease = msfileExecutorLease;
+  msfileExecutorConfigSync?.reject(new Error("MSFile Window executor lease was revoked"));
+  msfileExecutorConfigSync = undefined;
   rejectMsfileExecutorBridgePending(new Error("MSFile Window executor lease was revoked"));
   try { oldLease.transportPort?.postMessage({ type: "revoked", leaseId: oldLease.leaseId }); } catch { /* executor may be gone */ }
   try { oldLease.transportPort?.close(); } catch { /* already closed */ }
@@ -1649,7 +1951,8 @@ function acquireMsFileExecutorLease(input: {
     sessionEpoch: coordinatorState.sessionEpoch,
     activePublicKeyHex: input.ownerPublicKeyHex,
     acquiredAt: Date.now(),
-    transportReady: false
+    transportReady: false,
+    transportConfigVersion: -1,
   };
   scheduleMsFileExecutorLeaseExpiry(leaseId, msfileExecutorLease.acquiredAt);
   return { ok: true, lease: { leaseId, sessionEpoch: msfileExecutorLease.sessionEpoch, activePublicKeyHex: input.ownerPublicKeyHex } };
@@ -1770,6 +2073,9 @@ function enqueueMsfileExecutorIdentitySign(
 
 const MSFILE_MUTATION_CONTROLS = new Set<CoordinatorMsFileControl["type"]>([
   "settings.global.update",
+  "settings.readConcurrency.update",
+  "settings.readConcurrency.reset",
+  "settings.mediaBlockReadConcurrency.update",
   "supplier.upsert",
   "supplier.delete",
   "app-policy.update",
@@ -1809,6 +2115,11 @@ async function executeMsfileControlNow(request: Extract<CoordinatorClientRequest
   let value: unknown;
   switch (control.type) {
     case "settings.get": value = await service.getSettingsSnapshot(); break;
+    case "settings.readConcurrency.get": value = await service.getReadConcurrencySettings(); break;
+    case "settings.readConcurrency.update": await service.updateReadConcurrencySettings(control.input); value = null; break;
+    case "settings.readConcurrency.reset": await service.resetReadConcurrencySettings(); value = null; break;
+    case "settings.mediaBlockReadConcurrency.get": value = await service.getMediaBlockReadConcurrency(); break;
+    case "settings.mediaBlockReadConcurrency.update": await service.updateMediaBlockReadConcurrency(control.mediaBlockReadConcurrency); value = null; break;
     case "settings.global.update": await service.updateGlobalPriceSettings(control.input); value = null; break;
     case "supplier.upsert":
       if (control.expectedGeneration !== null && control.expectedGeneration !== supplierGenerationNow()) {
@@ -1884,20 +2195,7 @@ async function executeMsfileData(request: Extract<CoordinatorClientRequest, { ki
   const service = await ensureMsfileRuntime();
   const data: CoordinatorMsFileData = request.data;
   const signal = controller.signal;
-  // 有界并发：超过上限直接失败（不静默排队无限请求）。
-  if (
-    msfileDataActive >= MSFILE_TOTAL_MAX_ACTIVE ||
-    (data.type === "stat" && msfileStatActive >= MSFILE_STAT_MAX_ACTIVE) ||
-    (data.type === "read-seed" && (msfileSeedDataActive >= MSFILE_SEED_DATA_MAX_ACTIVE || msfileDataActive - msfileStatActive >= MSFILE_DATA_MAX_ACTIVE)) ||
-    (data.type === "read-block" && (msfileBlockDataActive >= MSFILE_BLOCK_DATA_MAX_ACTIVE || msfileDataActive - msfileStatActive >= MSFILE_DATA_MAX_ACTIVE))
-  ) {
-    throw msfileError("msfile_unavailable", "Too many concurrent MSFile requests");
-  }
-  msfileDataActive += 1;
-  if (data.type === "stat") msfileStatActive += 1;
-  if (data.type === "read-seed") msfileSeedDataActive += 1;
-  if (data.type === "read-block") msfileBlockDataActive += 1;
-  try {
+  return withMsfileDataSlot(actualClientId, data, async () => {
     // 真正调用 service 前的执行栅栏：排队 / 授权解析期间的取消与世代切换。
     if (requestEpoch !== coordinatorState.sessionEpoch || signal.aborted) {
       throw msfileError("msfile_unavailable", "MSFile request was cancelled");
@@ -1926,12 +2224,7 @@ async function executeMsfileData(request: Extract<CoordinatorClientRequest, { ki
       throw msfileError("msfile_unavailable", "MSFile request was cancelled");
     }
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
-  } finally {
-    msfileDataActive = Math.max(0, msfileDataActive - 1);
-    if (data.type === "stat") msfileStatActive = Math.max(0, msfileStatActive - 1);
-    if (data.type === "read-seed") msfileSeedDataActive = Math.max(0, msfileSeedDataActive - 1);
-    if (data.type === "read-block") msfileBlockDataActive = Math.max(0, msfileBlockDataActive - 1);
-  }
+  }, signal);
 }
 
 type MsFileExecutorSpikeRequest = Extract<CoordinatorClientRequest, { kind: "msfile.executor.acquire" | "msfile.executor.release" | "msfile.executor.spike.transfer" | "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>;
@@ -3621,12 +3914,22 @@ export function __testResetState(): void {
   storageDataWaiters.length = 0;
   msfileRequests.clear();
   msfileGrants.clear();
+  rejectMsfileDataWaiters();
+  msfileDataActiveByClient.clear();
+  msfileDataClientLastServed.clear();
+  msfileDataDispatchSequence = 0;
   msfileDataActive = 0;
   msfileStatActive = 0;
   msfileSeedDataActive = 0;
   msfileBlockDataActive = 0;
   rejectMsfileExecutorBridgePending(new Error("MSFile Coordinator runtime restarted"));
   msfileExecutorBridgeInFlightBytes = 0;
+  msfileReadConcurrencySettings = { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+  msfileExecutorConfigVersion = 0;
+  msfileExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
+  msfileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(msfileReadConcurrencySettings, msfileExecutorConfigVersion);
+  msfileExecutorConfigSync?.reject(new Error("MSFile Coordinator runtime restarted"));
+  msfileExecutorConfigSync = undefined;
   msfileRuntime = undefined;
   lastMsFileState = undefined;
   msfileMutationTail = Promise.resolve();
@@ -3801,6 +4104,18 @@ export async function __testResolveStorageGrant(grantId: string, actualPortId: s
 /** MSFile 测试接缝：会话解析与 RPC 分发（施工单 docs/proposals/msfile）。 */
 export function __testSetMsfileRuntimeOverride(runtime: Partial<MsFileServiceImpl> | undefined): void {
   msfileRuntime = runtime as MsFileServiceImpl | undefined;
+}
+
+/** 测试专用：直接切换 Worker 数据面设置，验证队列不依赖真实 Window executor。 */
+export function __testSetMsfileReadConcurrencySettings(settings: MsFileReadConcurrencySettings): void {
+  const normalized = normalizeMsFileReadConcurrencySettings(settings);
+  if (!normalized) throw new Error("invalid MSFile read concurrency settings");
+  msfileReadConcurrencySettings = normalized;
+  msfileExecutorConfigSignature = JSON.stringify(normalized);
+  msfileExecutorConfigVersion += 1;
+  msfileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(normalized, msfileExecutorConfigVersion);
+  void syncMsfileExecutorConfig().catch(() => undefined);
+  pumpMsfileDataWaiters();
 }
 
 export async function __testDispatchMsfileControl(control: CoordinatorMsFileControl): Promise<CoordinatorResponse> {

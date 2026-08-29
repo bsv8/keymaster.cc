@@ -20,6 +20,7 @@ import type {
 import {
   isValidMsFileHashHex,
   isValidMsFileSupplierPublicKeyHex,
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
 } from "@keymaster/contracts";
 import {
@@ -78,6 +79,10 @@ interface HomeStatusResource {
   status: MsFileServiceStatus;
   globalSettings: MsFileGlobalPriceSettings | null;
   supplierGeneration: number;
+  mediaBlockReadConcurrency: number;
+  globalSeedReadConcurrency: number;
+  globalBlockReadConcurrency: number;
+  globalStatConcurrency: number;
 }
 
 interface HomeLifecycleResource {
@@ -317,9 +322,14 @@ export function MsFileHomeFileWidget() {
       status: service.status(),
       globalSettings: null,
       supplierGeneration: 0,
+      ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
     },
     (a, b) => a.status === b.status && a.supplierGeneration === b.supplierGeneration &&
-      JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings),
+      JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings) &&
+      a.mediaBlockReadConcurrency === b.mediaBlockReadConcurrency &&
+      a.globalSeedReadConcurrency === b.globalSeedReadConcurrency &&
+      a.globalBlockReadConcurrency === b.globalBlockReadConcurrency &&
+      a.globalStatConcurrency === b.globalStatConcurrency,
   );
   const lifecycle = useResourceSelector<HomeLifecycleResource, HomeLifecycleResource>(
     host.resourceStore,
@@ -418,7 +428,16 @@ export function MsFileHomeFileWidget() {
         if (!cancelled) setSettingsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [service, statusResource.status, statusResource.supplierGeneration, vault]);
+  }, [
+    service,
+    statusResource.status,
+    statusResource.supplierGeneration,
+    statusResource.mediaBlockReadConcurrency,
+    statusResource.globalSeedReadConcurrency,
+    statusResource.globalBlockReadConcurrency,
+    statusResource.globalStatConcurrency,
+    vault,
+  ]);
 
   // active key / supplier generation / lock 是任务栅栏。effect 之外 isCurrent
   // 也同步检查 ref，覆盖 React effect 尚未运行的微小窗口。
@@ -907,6 +926,10 @@ export function MsFileHomeFileWidget() {
               filename={state.selected.filename}
               kind={state.selected.previewDecision.kind}
               taskToken={mediaTaskToken}
+              mediaBlockReadConcurrency={settingsSnapshot?.mediaBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency}
+              globalSeedReadConcurrency={settingsSnapshot?.globalSeedReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalSeedReadConcurrency}
+              globalBlockReadConcurrency={settingsSnapshot?.globalBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalBlockReadConcurrency}
+              globalStatConcurrency={settingsSnapshot?.globalStatConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalStatConcurrency}
               canBlobDownload={state.selected.previewDecision.canBlobDownload}
               onDownload={handleDownload}
               t={t}

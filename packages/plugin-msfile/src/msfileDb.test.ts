@@ -29,6 +29,10 @@ describe("global settings", () => {
     expect(await db.getGlobalSettings()).toEqual({
       settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "0" },
       mediaPlaybackPrefetchBlocks: 5,
+      mediaBlockReadConcurrency: 2,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 4,
       updatedAt: 1234,
     });
     db.close();
@@ -41,9 +45,40 @@ describe("global settings", () => {
     expect(await db.getGlobalSettings()).toEqual({
       settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
       mediaPlaybackPrefetchBlocks: 64,
+      mediaBlockReadConcurrency: 2,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 4,
       updatedAt: 20,
     });
     await expect(db.putMediaPlaybackPrefetchBlocks!({ mediaPlaybackPrefetchBlocks: 1 }, 30)).rejects.toThrow();
+    db.close();
+  });
+
+  it("atomically persists the four read concurrency values and preserves prices", async () => {
+    const db = await freshDb();
+    await db.putGlobalSettings({ seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" }, 10);
+    await db.putReadConcurrencySettings({
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 6,
+      globalBlockReadConcurrency: 12,
+      globalStatConcurrency: 7,
+    }, 20);
+    expect(await db.getGlobalSettings()).toMatchObject({
+      settings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 6,
+      globalBlockReadConcurrency: 12,
+      globalStatConcurrency: 7,
+      updatedAt: 20,
+    });
+    await expect(db.putReadConcurrencySettings({
+      mediaBlockReadConcurrency: 13,
+      globalSeedReadConcurrency: 1,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 1,
+    }, 30)).rejects.toThrow();
+    expect((await db.getGlobalSettings())?.mediaBlockReadConcurrency).toBe(4);
     db.close();
   });
 });

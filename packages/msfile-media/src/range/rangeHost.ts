@@ -4,7 +4,7 @@
 // `msfile.service` 适配后的 RangeSource。每次 pull 只传输一块已经校验的
 // Uint8Array，并且使用 transfer，禁止把整个 requested range 拼在内存里。
 
-import { MSFILE_BLOCK_SIZE_BYTES } from "@keymaster/contracts";
+import { MSFILE_BLOCK_SIZE_BYTES, MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_DEFAULT } from "@keymaster/contracts";
 import { MsFileMediaError, normalizeMediaError } from "../core/errors.js";
 import type { MsFileMediaDebugValue, MsFileVodSourceInput } from "../core/types.js";
 import { MsFileRangeSource, type MsFileRangeResponse, type MsFileRangeSourceOptions, type MsFileRangeSourceSnapshot } from "./rangeSource.js";
@@ -594,14 +594,18 @@ export class MsFileRangeHost {
 
   createSession(
     input: MsFileVodSourceInput,
-    options: { onDebug?(scope: string, action: string, details: Record<string, MsFileMediaDebugValue>): void } = {},
+    options: {
+      /** 单个媒体 Session 的 Block Read 并发数；创建后不会动态改变。 */
+      mediaBlockReadConcurrency?: number;
+      onDebug?(scope: string, action: string, details: Record<string, MsFileMediaDebugValue>): void;
+    } = {},
   ): MsFileRangeSessionHandle {
     if (this.disposed) throw new MsFileMediaError("msfile_media_cancelled");
     let sessionId = randomSessionId();
     while (this.sessions.has(sessionId)) sessionId = randomSessionId();
     const sessionDebug = options.onDebug ?? ((scope, action, details) => this.debug(scope, action, details));
     const sourceOptions: MsFileRangeSourceOptions = {
-      maxConcurrentReads: 2,
+      maxConcurrentReads: options.mediaBlockReadConcurrency ?? MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_DEFAULT,
       onDebug: (action, details) => sessionDebug("range", action, details),
     };
     let session: RangeHostSession | undefined;

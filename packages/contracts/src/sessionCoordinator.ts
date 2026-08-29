@@ -44,6 +44,7 @@ import type {
   MsFileAppPriceOverrideUpdate,
   MsFileConnectAppContext,
   MsFileGlobalPriceSettings,
+  MsFileReadConcurrencySettings,
   MsFilePendingApprovalView,
   MsFileServiceStatus,
   MsFileSettingsSnapshot,
@@ -105,6 +106,12 @@ export type CoordinatorClientRequestWithStorage =
 /** MSFile 设置/App 策略真值在 Coordinator；页面只通过 control RPC 读写。 */
 export type CoordinatorMsFileControl =
   | { type: "settings.get" }
+  | { type: "settings.readConcurrency.get" }
+  | { type: "settings.readConcurrency.update"; input: MsFileReadConcurrencySettings }
+  | { type: "settings.readConcurrency.reset" }
+  /** 旧页面兼容入口；新页面使用 settings.readConcurrency.*。 */
+  | { type: "settings.mediaBlockReadConcurrency.get" }
+  | { type: "settings.mediaBlockReadConcurrency.update"; mediaBlockReadConcurrency: number }
   | { type: "settings.global.update"; input: MsFileGlobalPriceSettings }
   | { type: "supplier.upsert"; supplier: MsFileSupplierConfig; expectedGeneration: number | null }
   | { type: "supplier.delete"; supplierPublicKeyHex: string; expectedGeneration: number | null }
@@ -222,6 +229,14 @@ export interface CoordinatorMsFileStateEvent {
   status: MsFileServiceStatus;
   supplierGeneration: number;
   globalSettings: MsFileGlobalPriceSettings | null;
+  /** 单个媒体 Session 的 Block 读取并发数。 */
+  mediaBlockReadConcurrency: number;
+  /** 整个 Keymaster 的 Seed 读取并发数。 */
+  globalSeedReadConcurrency: number;
+  /** 整个 Keymaster 的 Block 读取并发数。 */
+  globalBlockReadConcurrency: number;
+  /** 整个 Keymaster 的 Stat 并发数。 */
+  globalStatConcurrency: number;
   pendingApprovals: MsFilePendingApprovalView[];
 }
 

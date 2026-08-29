@@ -20,6 +20,11 @@ export interface MsFileMediaResourceInput {
   supplierPublicKeyHex: string;
   fileSizeBytes: bigint;
   declaredMediaType: string;
+  /** 创建媒体 Session 时固定的并发快照；设置刷新不会重建既有 Session。 */
+  mediaBlockReadConcurrency: number;
+  globalSeedReadConcurrency: number;
+  globalBlockReadConcurrency: number;
+  globalStatConcurrency: number;
 }
 
 let configuredService: MsFileService | undefined;
@@ -57,7 +62,16 @@ function sessionFor(args: readonly string[]): MsFileMediaSession {
     void existing.session.dispose();
   }
   const { input } = sourceEntry;
-  const { seedHashHex, supplierPublicKeyHex, fileSizeBytes, declaredMediaType } = input;
+  const {
+    seedHashHex,
+    supplierPublicKeyHex,
+    fileSizeBytes,
+    declaredMediaType,
+    mediaBlockReadConcurrency,
+    globalSeedReadConcurrency,
+    globalBlockReadConcurrency,
+    globalStatConcurrency,
+  } = input;
   const service = configuredService;
   const session = createMsFileNativeMediaSession({
     seedHashHex,
@@ -68,6 +82,11 @@ function sessionFor(args: readonly string[]): MsFileMediaSession {
       readSeed: async ({ signal }) => extractMsFileReadBytes(await service.readSeed({ supplierPublicKeyHex, seedHashHex, signal }), seedHashHex),
       readBlock: async ({ blockHashHex, signal }) => extractMsFileReadBytes(await service.readBlock({ supplierPublicKeyHex, blockHashHex, signal }), blockHashHex),
     },
+  }, {
+    mediaBlockReadConcurrency,
+    globalSeedReadConcurrency,
+    globalBlockReadConcurrency,
+    globalStatConcurrency,
   });
   sessions.set(token, { version: sourceEntry.version, session });
   return session;
@@ -80,7 +99,9 @@ export function msFileMediaResourceArgs(input: MsFileMediaResourceInput): readon
     previous.input.fileSizeBytes === input.fileSizeBytes &&
     previous.input.declaredMediaType === input.declaredMediaType;
   const version = sameSource ? previous.version : (previous?.version ?? 0) + 1;
-  if (!sameSource) sourceInputs.set(input.taskToken, { version, input: { ...input } });
+  // 同一活动 Session 仍复用旧实例；但把最新配置保留在 sourceInputs，确保
+  // 该 Session 之后被释放、再次创建时采用最新设置，而不是第一次渲染的快照。
+  sourceInputs.set(input.taskToken, { version, input: { ...input } });
   return [input.taskToken, String(version)];
 }
 

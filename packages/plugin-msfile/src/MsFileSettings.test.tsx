@@ -44,6 +44,10 @@ vi.mock("@keymaster/runtime", () => ({
 function snapshot(overrides: Partial<MsFileSettingsSnapshot> = {}): MsFileSettingsSnapshot {
   return {
     globalSettings: { seedMaxPriceSatoshis: "5000", blockMaxPriceSatoshis: "1000" },
+    mediaBlockReadConcurrency: 2,
+    globalSeedReadConcurrency: 4,
+    globalBlockReadConcurrency: 8,
+    globalStatConcurrency: 4,
     suppliers: [
       {
         name: "nas",
@@ -63,6 +67,16 @@ function makeService(overrides: Partial<MsFileService> = {}): MsFileService {
     subscribe: vi.fn(() => () => undefined),
     getSettingsSnapshot: vi.fn(async () => snapshot()),
     updateGlobalPriceSettings: vi.fn(async () => undefined),
+    getReadConcurrencySettings: vi.fn(async () => ({
+      mediaBlockReadConcurrency: 2,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 8,
+      globalStatConcurrency: 4,
+    })),
+    updateReadConcurrencySettings: vi.fn(async () => undefined),
+    resetReadConcurrencySettings: vi.fn(async () => undefined),
+    getMediaBlockReadConcurrency: vi.fn(async () => 2),
+    updateMediaBlockReadConcurrency: vi.fn(async () => undefined),
     upsertSupplier: vi.fn(async () => undefined),
     deleteSupplier: vi.fn(async () => undefined),
     probeSupplier: vi.fn(async () => ({
@@ -128,13 +142,35 @@ describe("MsFileSettings", () => {
     expect(vi.mocked(service.updateGlobalPriceSettings).mock.calls[0]?.[0]).toMatchObject({ seedMaxPriceSatoshis: "0" });
   });
 
-  it("does not expose the removed media prefetch policy", async () => {
+  it("exposes read concurrency settings without the removed media prefetch policy", async () => {
     const service = makeService();
     state.service = service;
     render(<MsFileSettings />);
     await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
-    expect(screen.queryByRole("spinbutton")).toBeNull();
+    expect(screen.getAllByRole("spinbutton")).toHaveLength(4);
+    expect(screen.getByText("全局 Stat 查询并发数")).toBeTruthy();
+    expect(screen.getByText("Keymaster 同时处理的 Stat 查询任务数量。每个查询仍会询问所有已启用的 Supplier。")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保存播放策略/ })).toBeNull();
+  });
+
+  it("saves all four concurrency values atomically and restores the recommended set", async () => {
+    const service = makeService();
+    state.service = service;
+    render(<MsFileSettings />);
+    await waitFor(() => expect(screen.getByDisplayValue("5000")).toBeTruthy());
+
+    fireEvent.change(screen.getByDisplayValue("2"), { target: { value: "4" } });
+    fireEvent.change(screen.getByDisplayValue("8"), { target: { value: "12" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存并发设置" })[0]!);
+    await waitFor(() => expect(service.updateReadConcurrencySettings).toHaveBeenCalledWith({
+      mediaBlockReadConcurrency: 4,
+      globalSeedReadConcurrency: 4,
+      globalBlockReadConcurrency: 12,
+      globalStatConcurrency: 4,
+    }));
+
+    fireEvent.click(screen.getByRole("button", { name: "恢复建议值" }));
+    await waitFor(() => expect(service.resetReadConcurrencySettings).toHaveBeenCalledTimes(1));
   });
 
   it("submits supplier drafts and probes via the service", async () => {

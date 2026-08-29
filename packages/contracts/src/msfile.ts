@@ -35,6 +35,50 @@ export const MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT = 5;
 export const MSFILE_MEDIA_PREFETCH_BLOCKS_MIN = 2;
 export const MSFILE_MEDIA_PREFETCH_BLOCKS_MAX = 64;
 
+/**
+ * MSFile 读取并发建议值。
+ *
+ * 这些值是设置页的一键恢复值，不是技术硬上限。硬上限依据浏览器内存
+ * 压力预算单独定义，避免把推荐配置误当成所有设备都适用的固定值。
+ */
+export const MSFILE_READ_CONCURRENCY_RECOMMENDED: Readonly<MsFileReadConcurrencySettings> = Object.freeze({
+  mediaBlockReadConcurrency: 2,
+  globalSeedReadConcurrency: 4,
+  globalBlockReadConcurrency: 8,
+  globalStatConcurrency: 4,
+});
+
+/**
+ * 读取并发技术硬上限。
+ *
+ * 依据：见 docs/proposals/msfile/003-read-concurrency-pressure-evidence.md。
+ * 浏览器压力测试验证了 8 × 16 MiB + 32 × 256 KiB = 136 MiB 的最坏桥接
+ * attachment 分配与释放；它们与上面的建议值刻意不同，并为媒体解码、页面
+ * 和 Supplier 协议开销保留余量。媒体值还必须满足 media <= globalBlock。
+ */
+export const MSFILE_READ_CONCURRENCY_HARD_LIMITS: Readonly<MsFileReadConcurrencySettings> = Object.freeze({
+  mediaBlockReadConcurrency: 16,
+  globalSeedReadConcurrency: 8,
+  globalBlockReadConcurrency: 32,
+  globalStatConcurrency: 16,
+});
+
+/** 原生 Range 媒体 Session 创建时固定采用的 Block 并发默认值。 */
+export const MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_DEFAULT = MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency;
+export const MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_MIN = 1;
+export const MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_MAX = MSFILE_READ_CONCURRENCY_HARD_LIMITS.mediaBlockReadConcurrency;
+
+export interface MsFileReadConcurrencySettings {
+  /** 单个媒体 Session 同时进入 Supplier Read 的 Block 数。 */
+  mediaBlockReadConcurrency: number;
+  /** 整个 Keymaster 同时读取的 Seed 数。 */
+  globalSeedReadConcurrency: number;
+  /** 整个 Keymaster 同时读取的 Block 数。 */
+  globalBlockReadConcurrency: number;
+  /** 整个 Keymaster 同时执行的 Stat 数。 */
+  globalStatConcurrency: number;
+}
+
 /** 单个内容对象的最高金额。规范十进制字符串："0" 表示显式不限。 */
 export type MsFileSatoshiAmount = string;
 
@@ -71,6 +115,46 @@ export function msFileSatoshiAmountToBigInt(input: MsFileSatoshiAmount): bigint 
   const normalized = normalizeMsFileSatoshiAmount(input);
   if (normalized === undefined) return undefined;
   return BigInt(normalized);
+}
+
+/** 校验并规范化媒体 Block 读取并发数；非法值返回 undefined，由调用方拒绝保存。 */
+export function normalizeMsFileMediaBlockReadConcurrency(input: unknown): number | undefined {
+  if (!Number.isSafeInteger(input)) return undefined;
+  const value = input as number;
+  if (
+    value < MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_MIN ||
+    value > MSFILE_MEDIA_BLOCK_READ_CONCURRENCY_MAX
+  ) return undefined;
+  return value;
+}
+
+/** 校验完整读取并发设置；任一字段非法或关系不满足时整体拒绝。 */
+export function normalizeMsFileReadConcurrencySettings(input: unknown): MsFileReadConcurrencySettings | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const record = input as Record<string, unknown>;
+  const mediaBlockReadConcurrency = normalizeMsFileMediaBlockReadConcurrency(record.mediaBlockReadConcurrency);
+  const globalSeedReadConcurrency = normalizeMsFileConcurrencyValue(
+    record.globalSeedReadConcurrency,
+    MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalSeedReadConcurrency,
+  );
+  const globalBlockReadConcurrency = normalizeMsFileConcurrencyValue(
+    record.globalBlockReadConcurrency,
+    MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalBlockReadConcurrency,
+  );
+  const globalStatConcurrency = normalizeMsFileConcurrencyValue(
+    record.globalStatConcurrency,
+    MSFILE_READ_CONCURRENCY_HARD_LIMITS.globalStatConcurrency,
+  );
+  if (mediaBlockReadConcurrency === undefined || globalSeedReadConcurrency === undefined ||
+    globalBlockReadConcurrency === undefined || globalStatConcurrency === undefined ||
+    mediaBlockReadConcurrency > globalBlockReadConcurrency) return undefined;
+  return { mediaBlockReadConcurrency, globalSeedReadConcurrency, globalBlockReadConcurrency, globalStatConcurrency };
+}
+
+function normalizeMsFileConcurrencyValue(input: unknown, max: number): number | undefined {
+  if (!Number.isSafeInteger(input)) return undefined;
+  const value = input as number;
+  return value >= 1 && value <= max ? value : undefined;
 }
 
 /** 64 位小写 hex（32 字节内容哈希）。 */
@@ -219,6 +303,14 @@ export interface MsFileSupplierProbeResult {
 export interface MsFileSettingsSnapshot {
   /** 用户尚未显式保存全局设置时为 null；Read 此时 fail closed。 */
   globalSettings: MsFileGlobalPriceSettings | null;
+  /** 单个媒体 Session 的 Block 读取并发数。 */
+  mediaBlockReadConcurrency: number;
+  /** 整个 Keymaster 的 Seed 读取并发数。 */
+  globalSeedReadConcurrency: number;
+  /** 整个 Keymaster 的 Block 读取并发数。 */
+  globalBlockReadConcurrency: number;
+  /** 整个 Keymaster 的 Stat 并发数。 */
+  globalStatConcurrency: number;
   suppliers: MsFileSupplierConfig[];
   /** 供应商配置世代；每次变更递增，使旧连接失效。 */
   supplierGeneration: number;
@@ -322,7 +414,17 @@ export interface MsFileService {
   subscribe(listener: () => void): () => void;
 
   getSettingsSnapshot(): Promise<MsFileSettingsSnapshot>;
+  /** 读取四项并发设置；旧数据缺失字段时返回建议值。 */
+  getReadConcurrencySettings(): Promise<MsFileReadConcurrencySettings>;
+  /** 原子保存四项并发设置；非法输入不得产生部分写入。 */
+  updateReadConcurrencySettings(input: MsFileReadConcurrencySettings): Promise<void>;
+  /** 一键恢复施工单定义的建议值。 */
+  resetReadConcurrencySettings(): Promise<void>;
+  /** 兼容旧调用方的单字段读取入口。 */
+  getMediaBlockReadConcurrency(): Promise<number>;
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void>;
+  /** 兼容旧调用方的单字段保存入口；只影响之后新建的媒体 Session。 */
+  updateMediaBlockReadConcurrency(value: number): Promise<void>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;
   deleteSupplier(supplierPublicKeyHex: string): Promise<void>;
   probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult>;

@@ -2,6 +2,7 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveSupplierPeerId } from "./supplierConfig.js";
+import { buildMsFileExecutorConcurrencyConfig } from "./executorTransport.js";
 import { MsFileSupplierRuntime } from "./windowExecutor.js";
 
 const mocks = vi.hoisted(() => ({
@@ -174,6 +175,54 @@ describe("MsFileSupplierRuntime WSS lifecycle", () => {
     expect(supplierConnection.close).toHaveBeenCalledTimes(1);
     expect(statStream.close).toHaveBeenCalledTimes(1);
     expect(readStream.close).toHaveBeenCalledTimes(1);
+    await runtime.dispose();
+  });
+
+  it("降并发不会取消已开始的 Read，后续 Read 等待新的 Supplier 上限", async () => {
+    mocks.authenticateConnection.mockImplementation(() => undefined);
+    const statStream = pendingStream();
+    const readStream = pendingStream();
+    const supplierConnection = {
+      abort: vi.fn(),
+      close: vi.fn(async () => undefined),
+      newStream: vi.fn()
+        .mockResolvedValueOnce(statStream)
+        .mockResolvedValueOnce(readStream),
+    };
+    const host = hostFor([supplierConnection as unknown as TestConnection]);
+    const runtime = new MsFileSupplierRuntime(host as never);
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    const reads = controllers.map((controller, index) => runtime.read({
+      supplier: supplier([FALLBACK_WSS_ADDRESS]),
+      kind: "block",
+      hashHex: `${String(index + 1).padStart(2, "0")}${"ef".repeat(31)}`,
+      maxPriceSatoshis: "1",
+      supplierGeneration: 1,
+      signal: controller.signal,
+    }));
+    await vi.waitFor(() => expect(readStream.send).toHaveBeenCalledTimes(3));
+
+    runtime.setConcurrencyConfig(buildMsFileExecutorConcurrencyConfig({
+      mediaBlockReadConcurrency: 1,
+      globalSeedReadConcurrency: 1,
+      globalBlockReadConcurrency: 1,
+      globalStatConcurrency: 1,
+    }, 1));
+    const fourthController = new AbortController();
+    const fourth = runtime.read({
+      supplier: supplier([FALLBACK_WSS_ADDRESS]),
+      kind: "block",
+      hashHex: "ff".repeat(32),
+      maxPriceSatoshis: "1",
+      supplierGeneration: 1,
+      signal: fourthController.signal,
+    });
+    await Promise.resolve();
+    expect(readStream.send).toHaveBeenCalledTimes(3);
+
+    [...controllers, fourthController].forEach((controller) => controller.abort());
+    await Promise.allSettled([...reads, fourth]);
+    expect(readStream.send).toHaveBeenCalledTimes(3);
     await runtime.dispose();
   });
 });

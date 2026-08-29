@@ -7,6 +7,7 @@ import {
   type BusinessFeatureRegistry,
   type KeyspaceService,
   KEYSPACE_SERVICE_CAPABILITY,
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   SESSION_COORDINATOR_CLIENT_CAPABILITY,
@@ -29,6 +30,18 @@ const resources: I18nPluginResources = {
       "msfile.settings.priceLimits": "Price limits",
       "msfile.settings.priceLimits.hint":
         "Maximum satoshis per single content object — per Seed or per Block, not per file.",
+      "msfile.settings.readConcurrency": "Read concurrency and resources",
+      "msfile.settings.readConcurrency.hint": "These are transport concurrency limits, not prefetch or cache counts. Higher values may improve throughput on high-bandwidth devices, but increase network, memory, Supplier pressure, and simultaneous payment requests; lower values save resources but may increase waiting.",
+      "msfile.settings.readConcurrency.media": "Per-media-session Block reads",
+      "msfile.settings.readConcurrency.seed": "Global Seed reads",
+      "msfile.settings.readConcurrency.block": "Global Block reads",
+      "msfile.settings.readConcurrency.stat": "Global Stat query concurrency",
+      "msfile.settings.readConcurrency.stat.hint": "Number of Stat query tasks Keymaster processes at the same time. Each query still asks every enabled Supplier.",
+      "msfile.settings.readConcurrency.save": "Save concurrency",
+      "msfile.settings.readConcurrency.saved": "Concurrency saved. New media sessions use the media value; queued reads use the global values.",
+      "msfile.settings.readConcurrency.reset": "Restore recommended values",
+      "msfile.settings.readConcurrency.estimate": "Estimated worst-case media bytes in flight: {{bytes}} (Seed concurrency × 16 MiB + Block concurrency × 256 KiB).",
+      "msfile.settings.readConcurrency.validation": "Enter safe integer values ≥ 1; media concurrency cannot exceed global Block concurrency.",
       "msfile.settings.seedCap": "Seed max price (satoshis)",
       "msfile.settings.blockCap": "Block max price (satoshis)",
       "msfile.settings.unlimited": "Unlimited",
@@ -114,7 +127,7 @@ const resources: I18nPluginResources = {
       "msfile.home.media.failed": "Native Range playback failed; download remains available.",
       "msfile.home.media.disposed": "Player released",
       "msfile.home.media.buffered": "Buffered ahead: {{seconds}} s",
-      "msfile.home.media.window": "Block window: {{used}} / {{limit}}",
+      "msfile.home.media.window": "In-flight Blocks: {{used}} / {{limit}} (media concurrency)",
       "msfile.home.media.readBlocks": "Blocks read: {{count}}",
       "msfile.home.media.notSupported": "This media combination is not supported by the browser; use download.",
       "msfile.home.media.debug.title": "Media Debug (enabled by default)",
@@ -146,6 +159,18 @@ const resources: I18nPluginResources = {
       "msfile.settings.group": "MSFile",
       "msfile.settings.priceLimits": "价格限制",
       "msfile.settings.priceLimits.hint": "单个内容对象的最高金额——按每个 Seed 或每个 Block 计，不是整个文件。",
+      "msfile.settings.readConcurrency": "读取并发与资源",
+      "msfile.settings.readConcurrency.hint": "这些字段是读取运输层并发上限，不是预取数或缓存数。调高可能提升高带宽设备的吞吐，但会增加网络、内存、Supplier 压力以及同时付款请求；调低会节约资源，但可能增加等待。",
+      "msfile.settings.readConcurrency.media": "单个媒体 Session 的 Block 读取数",
+      "msfile.settings.readConcurrency.seed": "全局 Seed 读取数",
+      "msfile.settings.readConcurrency.block": "全局 Block 读取数",
+      "msfile.settings.readConcurrency.stat": "全局 Stat 查询并发数",
+      "msfile.settings.readConcurrency.stat.hint": "Keymaster 同时处理的 Stat 查询任务数量。每个查询仍会询问所有已启用的 Supplier。",
+      "msfile.settings.readConcurrency.save": "保存并发设置",
+      "msfile.settings.readConcurrency.saved": "并发设置已保存。新媒体 Session 使用媒体值；之后排队的读取使用全局值。",
+      "msfile.settings.readConcurrency.reset": "恢复建议值",
+      "msfile.settings.readConcurrency.estimate": "媒体最坏在途字节估算：{{bytes}}（Seed 并发 × 16 MiB + Block 并发 × 256 KiB）。",
+      "msfile.settings.readConcurrency.validation": "请输入大于等于 1 的安全整数；媒体并发不能大于全局 Block 并发。",
       "msfile.settings.seedCap": "Seed 单个最高金额（聪）",
       "msfile.settings.blockCap": "Block 单个最高金额（聪）",
       "msfile.settings.unlimited": "不限金额",
@@ -231,7 +256,7 @@ const resources: I18nPluginResources = {
       "msfile.home.media.failed": "原生 Range 播放失败，仍可单独下载。",
       "msfile.home.media.disposed": "播放器已释放",
       "msfile.home.media.buffered": "前方已缓冲：{{seconds}} 秒",
-      "msfile.home.media.window": "Block 窗口：{{used}} / {{limit}}",
+      "msfile.home.media.window": "在途 Block：{{used}} / {{limit}}（本媒体并发）",
       "msfile.home.media.readBlocks": "已读取 Block：{{count}}",
       "msfile.home.media.notSupported": "当前浏览器不支持该媒体组合，请使用下载。",
       "msfile.home.media.debug.title": "媒体 Debug（默认开启）",
@@ -311,6 +336,10 @@ export const msfilePlugin: PluginManifest = {
         status: import("@keymaster/contracts").MsFileServiceStatus;
         globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
         supplierGeneration: number;
+        mediaBlockReadConcurrency: number;
+        globalSeedReadConcurrency: number;
+        globalBlockReadConcurrency: number;
+        globalStatConcurrency: number;
         approvals: import("@keymaster/contracts").MsFilePendingApprovalView[];
       },
       readonly string[]
@@ -321,14 +350,31 @@ export const msfilePlugin: PluginManifest = {
       load: async () => {
         let globalSettings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null = null;
         let supplierGeneration = 0;
+        let mediaBlockReadConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency;
+        let globalSeedReadConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.globalSeedReadConcurrency;
+        let globalBlockReadConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.globalBlockReadConcurrency;
+        let globalStatConcurrency = MSFILE_READ_CONCURRENCY_RECOMMENDED.globalStatConcurrency;
         try {
           const snapshot = await service.getSettingsSnapshot();
           globalSettings = snapshot.globalSettings;
           supplierGeneration = snapshot.supplierGeneration;
+          mediaBlockReadConcurrency = snapshot.mediaBlockReadConcurrency;
+          globalSeedReadConcurrency = snapshot.globalSeedReadConcurrency;
+          globalBlockReadConcurrency = snapshot.globalBlockReadConcurrency;
+          globalStatConcurrency = snapshot.globalStatConcurrency;
         } catch {
           // Coordinator 未就绪时按 null 展示（fail closed）。
         }
-        return { status: service.status(), globalSettings, supplierGeneration, approvals: service.listPendingApprovals() };
+        return {
+          status: service.status(),
+          globalSettings,
+          supplierGeneration,
+          mediaBlockReadConcurrency,
+          globalSeedReadConcurrency,
+          globalBlockReadConcurrency,
+          globalStatConcurrency,
+          approvals: service.listPendingApprovals(),
+        };
       },
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"

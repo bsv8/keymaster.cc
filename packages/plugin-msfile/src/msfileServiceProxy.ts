@@ -13,6 +13,7 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
   MsFileGlobalPriceSettings,
+  MsFileReadConcurrencySettings,
   MsFilePendingApprovalView,
   MsFileReadBlockInput,
   MsFileReadResult,
@@ -25,6 +26,7 @@ import type {
   MsFileSupplierProbeResult,
   SessionCoordinatorClient,
 } from "@keymaster/contracts";
+import { MSFILE_READ_CONCURRENCY_RECOMMENDED, normalizeMsFileReadConcurrencySettings } from "@keymaster/contracts";
 import type { MsFileService } from "@keymaster/contracts";
 import { MsFileServiceError } from "./msfileErrors.js";
 
@@ -34,6 +36,10 @@ type StateEvent = {
   status: MsFileServiceStatus;
   supplierGeneration: number;
   globalSettings: MsFileGlobalPriceSettings | null;
+  mediaBlockReadConcurrency: number;
+  globalSeedReadConcurrency: number;
+  globalBlockReadConcurrency: number;
+  globalStatConcurrency: number;
   pendingApprovals: MsFilePendingApprovalView[];
 };
 
@@ -57,6 +63,7 @@ export class MsFileServiceProxy implements MsFileService {
     status: "unavailable",
     supplierGeneration: 0,
     globalSettings: null,
+    ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
     pendingApprovals: [],
   };
   private readonly listeners = new Set<() => void>();
@@ -66,7 +73,10 @@ export class MsFileServiceProxy implements MsFileService {
   constructor(private readonly coordinator: SessionCoordinatorClient) {
     this.unsubscribeState = coordinator.subscribeTopic("msfile.state", (event: StateEvent) => {
       if (event.sessionEpoch !== this.current.sessionEpoch) this.grants.clear();
-      this.current = event;
+      // 兼容旧 Worker 的 baseline：四项并发设置必须以完整快照进入页面。
+      const concurrency = normalizeMsFileReadConcurrencySettings(event)
+        ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+      this.current = { ...event, ...concurrency };
       for (const listener of this.listeners) listener();
     });
   }
@@ -124,8 +134,29 @@ export class MsFileServiceProxy implements MsFileService {
     return this.control<MsFileSettingsSnapshot>({ type: "settings.get" });
   }
 
+  getReadConcurrencySettings(): Promise<MsFileReadConcurrencySettings> {
+    return this.control<MsFileReadConcurrencySettings>({ type: "settings.readConcurrency.get" });
+  }
+
+  updateReadConcurrencySettings(input: MsFileReadConcurrencySettings): Promise<void> {
+    return this.control({ type: "settings.readConcurrency.update", input }).then(() => undefined);
+  }
+
+  resetReadConcurrencySettings(): Promise<void> {
+    return this.control({ type: "settings.readConcurrency.reset" }).then(() => undefined);
+  }
+
+  getMediaBlockReadConcurrency(): Promise<number> {
+    return this.getReadConcurrencySettings().then((settings) => settings.mediaBlockReadConcurrency);
+  }
+
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
     return this.control({ type: "settings.global.update", input }).then(() => undefined);
+  }
+
+  updateMediaBlockReadConcurrency(value: number): Promise<void> {
+    return this.getReadConcurrencySettings()
+      .then((settings) => this.updateReadConcurrencySettings({ ...settings, mediaBlockReadConcurrency: value }));
   }
 
   upsertSupplier(input: unknown): Promise<void> {

@@ -8,21 +8,32 @@ import type {
   MsFileAppIdentityKey,
   MsFileAppPriceOverride,
   MsFileGlobalPriceSettings,
+  MsFileReadConcurrencySettings,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
 import {
+  MSFILE_READ_CONCURRENCY_RECOMMENDED,
   isValidMsFileSupplierPublicKeyHex,
   msFileAppPolicyKeyString,
+  normalizeMsFileReadConcurrencySettings,
 } from "@keymaster/contracts";
 
 export const MSFILE_DB_NAME = "keymaster.msfile";
-export const MSFILE_DB_VERSION = 2;
+export const MSFILE_DB_VERSION = 3;
 
 interface GlobalSettingsRow {
   key: "singleton";
   settings: MsFileGlobalPriceSettings | null;
   /** 旧版媒体预取字段：仅保留数据库形状，现行服务不消费它。 */
   mediaPlaybackPrefetchBlocks?: number;
+  /** 原生媒体实际使用的 Supplier Block Read 并发上限。 */
+  mediaBlockReadConcurrency?: number;
+  /** 整个 Keymaster 的 Seed Read 并发上限。 */
+  globalSeedReadConcurrency?: number;
+  /** 整个 Keymaster 的 Block Read 并发上限。 */
+  globalBlockReadConcurrency?: number;
+  /** 整个 Keymaster 的 Stat 并发上限。 */
+  globalStatConcurrency?: number;
   updatedAt: number;
 }
 
@@ -83,6 +94,13 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 export interface MsFileDb {
   getGlobalSettings(): Promise<MsFileGlobalSettingsSnapshot | null>;
   putGlobalSettings(settings: MsFileGlobalPriceSettings, updatedAt: number, mediaPlaybackPrefetchBlocks?: number): Promise<void>;
+  /** 四项读取并发设置必须在同一个 IndexedDB transaction 中提交。 */
+  putReadConcurrencySettings(settings: MsFileReadConcurrencySettings, updatedAt: number): Promise<void>;
+  /** 独立保存媒体 Block 读取并发数；不改动价格设置或旧兼容字段。 */
+  putMediaBlockReadConcurrency(
+    settings: { mediaBlockReadConcurrency: number } | number,
+    updatedAt: number,
+  ): Promise<void>;
   /** 旧版独立媒体设置写入口，仅为回滚保留，现行服务不调用。 */
   putMediaPlaybackPrefetchBlocks?(settings: LegacyMediaPlaybackSettings, updatedAt: number): Promise<void>;
   listSuppliers(): Promise<MsFileSupplierConfig[]>;
@@ -103,7 +121,21 @@ export interface MsFileGlobalSettingsSnapshot {
   settings: MsFileGlobalPriceSettings | null;
   /** 旧版字段；现行服务忽略，仅保留兼容迁移/回滚能力。 */
   mediaPlaybackPrefetchBlocks?: number;
+  /** 新字段可能不存在于旧数据库行；服务层缺失时回退为建议值。 */
+  mediaBlockReadConcurrency?: number;
+  globalSeedReadConcurrency?: number;
+  globalBlockReadConcurrency?: number;
+  globalStatConcurrency?: number;
   updatedAt: number | null;
+}
+
+function readConcurrencyFromRow(row: Partial<GlobalSettingsRow> | undefined): MsFileReadConcurrencySettings {
+  return normalizeMsFileReadConcurrencySettings({
+    mediaBlockReadConcurrency: row?.mediaBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.mediaBlockReadConcurrency,
+    globalSeedReadConcurrency: row?.globalSeedReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalSeedReadConcurrency,
+    globalBlockReadConcurrency: row?.globalBlockReadConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalBlockReadConcurrency,
+    globalStatConcurrency: row?.globalStatConcurrency ?? MSFILE_READ_CONCURRENCY_RECOMMENDED.globalStatConcurrency,
+  }) ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
 }
 
 export async function openMsFileDb(indexedDbFactory?: IDBFactory): Promise<MsFileDb> {
@@ -139,10 +171,12 @@ export async function openMsFileDb(indexedDbFactory?: IDBFactory): Promise<MsFil
         if (typeof seedMaxPriceSatoshis !== "string" || typeof blockMaxPriceSatoshis !== "string") return null;
         settings = { seedMaxPriceSatoshis, blockMaxPriceSatoshis };
       }
+      const concurrency = readConcurrencyFromRow(row);
       return {
         settings,
         mediaPlaybackPrefetchBlocks: normalizeLegacyMediaPlaybackBlocks(row.mediaPlaybackPrefetchBlocks)
           ?? LEGACY_MEDIA_PLAYBACK_DEFAULT,
+        ...concurrency,
         updatedAt: typeof row.updatedAt === "number" ? row.updatedAt : null,
       };
     },
@@ -153,10 +187,52 @@ export async function openMsFileDb(indexedDbFactory?: IDBFactory): Promise<MsFil
       const legacyValue = normalizeLegacyMediaPlaybackBlocks(mediaPlaybackPrefetchBlocks)
         ?? normalizeLegacyMediaPlaybackBlocks(existing?.mediaPlaybackPrefetchBlocks)
         ?? LEGACY_MEDIA_PLAYBACK_DEFAULT;
+      const concurrency = readConcurrencyFromRow(existing);
       store.put({
         key: "singleton",
         settings,
         mediaPlaybackPrefetchBlocks: legacyValue,
+        ...concurrency,
+        updatedAt,
+      } satisfies GlobalSettingsRow);
+      await transactionDone(transaction);
+    },
+    async putReadConcurrencySettings(settings, updatedAt) {
+      const normalized = normalizeMsFileReadConcurrencySettings(settings);
+      if (!normalized) throw new Error("invalid MSFile read concurrency settings");
+      const transaction = db.transaction("globalSettings", "readwrite");
+      const store = transaction.objectStore("globalSettings");
+      const existing = await requestToPromise<GlobalSettingsRow | undefined>(store.get("singleton"));
+      const legacyValue = normalizeLegacyMediaPlaybackBlocks(existing?.mediaPlaybackPrefetchBlocks)
+        ?? LEGACY_MEDIA_PLAYBACK_DEFAULT;
+      store.put({
+        key: "singleton",
+        settings: existing?.settings ?? null,
+        mediaPlaybackPrefetchBlocks: legacyValue,
+        ...normalized,
+        updatedAt,
+      } satisfies GlobalSettingsRow);
+      await transactionDone(transaction);
+    },
+    async putMediaBlockReadConcurrency(mediaSettings, updatedAt) {
+      const requested = typeof mediaSettings === "number"
+        ? mediaSettings
+        : mediaSettings?.mediaBlockReadConcurrency;
+      const transaction = db.transaction("globalSettings", "readwrite");
+      const store = transaction.objectStore("globalSettings");
+      const existing = await requestToPromise<GlobalSettingsRow | undefined>(store.get("singleton"));
+      const value = normalizeMsFileReadConcurrencySettings({
+        ...readConcurrencyFromRow(existing),
+        mediaBlockReadConcurrency: requested,
+      });
+      if (!value) throw new Error("mediaBlockReadConcurrency must be a positive integer within the technical limit");
+      const legacyValue = normalizeLegacyMediaPlaybackBlocks(existing?.mediaPlaybackPrefetchBlocks)
+        ?? LEGACY_MEDIA_PLAYBACK_DEFAULT;
+      store.put({
+        key: "singleton",
+        settings: existing?.settings ?? null,
+        mediaPlaybackPrefetchBlocks: legacyValue,
+        ...value,
         updatedAt,
       } satisfies GlobalSettingsRow);
       await transactionDone(transaction);
@@ -167,10 +243,12 @@ export async function openMsFileDb(indexedDbFactory?: IDBFactory): Promise<MsFil
       const transaction = db.transaction("globalSettings", "readwrite");
       const store = transaction.objectStore("globalSettings");
       const existing = await requestToPromise<GlobalSettingsRow | undefined>(store.get("singleton"));
+      const concurrency = readConcurrencyFromRow(existing);
       store.put({
         key: "singleton",
         settings: existing?.settings ?? null,
         mediaPlaybackPrefetchBlocks: value,
+        ...concurrency,
         updatedAt,
       } satisfies GlobalSettingsRow);
       await transactionDone(transaction);

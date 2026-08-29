@@ -27,7 +27,7 @@ function concat(parts: readonly Uint8Array[]): Uint8Array {
   return result;
 }
 
-async function fixture(options: { delayMs?: number; invalidBlock?: boolean } = {}) {
+async function fixture(options: { delayMs?: number; invalidBlock?: boolean; maxConcurrentReads?: number } = {}) {
   const first = new Uint8Array(MSFILE_BLOCK_SIZE_BYTES);
   first.fill(0x11);
   // 测试正文使用 MP3 声明 MIME；容器和 Codec 由浏览器原生解析。
@@ -74,7 +74,7 @@ async function fixture(options: { delayMs?: number; invalidBlock?: boolean } = {
     fileSizeBytes: BigInt(MSFILE_BLOCK_SIZE_BYTES * 2),
     declaredMediaType: "audio/mpeg",
     reader,
-  });
+  }, { maxConcurrentReads: options.maxConcurrentReads });
   return { source, reader, first, second, firstHash, secondHash, blockReads, get peakReads() { return peakReads; }, get abortedReads() { return abortedReads; } };
 }
 
@@ -128,6 +128,16 @@ describe("MsFileRangeSource", () => {
     expect(blockReads.get(firstHash)).toBe(2);
     await again.cancel();
     await source.dispose();
+  });
+
+  it("使用创建时的媒体并发设置，并始终限制实际 supplier Read", async () => {
+    const fixtureData = await fixture({ delayMs: 20, maxConcurrentReads: 1 });
+    const first = readAll(fixtureData.source.readStream(0, 1));
+    const second = readAll(fixtureData.source.readStream(MSFILE_BLOCK_SIZE_BYTES, MSFILE_BLOCK_SIZE_BYTES + 1));
+    await Promise.all([first, second]);
+    expect(fixtureData.source.snapshot()).toMatchObject({ maxConcurrentReads: 1 });
+    expect(fixtureData.peakReads).toBeLessThanOrEqual(1);
+    await fixtureData.source.dispose();
   });
 
   it("Range 非法时不读取 supplier，Block 长度错误时不输出字节", async () => {
