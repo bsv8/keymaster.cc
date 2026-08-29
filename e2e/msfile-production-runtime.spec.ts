@@ -24,6 +24,7 @@ const BLOCK_BYTES = 256 * 1024;
 const CONNECT_SESSION_ID = "msfile-e2e-connect-session";
 const HOME_TEXT_FILENAME = "fixture-home.txt";
 const HOME_HTML_FILENAME = "fixture-home.html";
+const HOME_WAV_FILENAME = "fixture-home.wav";
 const HOME_BINARY_FILENAME = "fixture-download.bin";
 const HOME_OTHER_FILENAME = "fixture-other.bin";
 const OTHER_SUPPLIER_PUBLIC_KEY = "035f3d296df6e017c017270bfc0293dc7d197ff9e04a25c096260420644d86d21a";
@@ -73,6 +74,7 @@ interface NasFixture {
   fileSeedHashes: {
     text: string;
     html: string;
+    wav: string;
     binary: string;
     other: string;
   };
@@ -204,6 +206,29 @@ function fixtureBytes(fileIndex: number, filename: string): Buffer {
     html.copy(bytes);
     return bytes;
   }
+  if (filename === HOME_WAV_FILENAME) {
+    // 8 kHz、单声道、8-bit PCM；低采样率让 2 MiB 文件拥有约 262 秒
+    // 播放时长，首个 256 KiB Block 足以产生首播数据，但不会读完整文件。
+    const dataLength = FILE_BYTES - 44;
+    bytes.write("RIFF", 0, "ascii");
+    bytes.writeUInt32LE(FILE_BYTES - 8, 4);
+    bytes.write("WAVE", 8, "ascii");
+    bytes.write("fmt ", 12, "ascii");
+    bytes.writeUInt32LE(16, 16);
+    bytes.writeUInt16LE(1, 20); // PCM
+    bytes.writeUInt16LE(1, 22); // mono
+    bytes.writeUInt32LE(8000, 24);
+    bytes.writeUInt32LE(8000, 28);
+    bytes.writeUInt16LE(1, 32);
+    bytes.writeUInt16LE(8, 34);
+    bytes.write("data", 36, "ascii");
+    bytes.writeUInt32LE(dataLength, 40);
+    for (let offset = 44; offset < bytes.length; offset += 1) {
+      // 可重复的低幅正弦近似，避免夹具是完全静音而掩盖输出问题。
+      bytes[offset] = 128 + Math.round(48 * Math.sin((offset - 44) * Math.PI / 32));
+    }
+    return bytes;
+  }
   for (let offset = 0; offset < bytes.length; offset += 1) bytes[offset] = (offset + fileIndex * 53) % 251;
   return bytes;
 }
@@ -222,7 +247,7 @@ async function startNasFixture(): Promise<NasFixture> {
   await fs.mkdir(nasData, { recursive: true });
   await fs.mkdir(seedData, { recursive: true });
   await fs.writeFile(identityKey, `${"0".repeat(63)}1\n`, { mode: 0o600 });
-  const filenames = [HOME_TEXT_FILENAME, HOME_HTML_FILENAME, HOME_BINARY_FILENAME, HOME_OTHER_FILENAME];
+  const filenames = [HOME_TEXT_FILENAME, HOME_HTML_FILENAME, HOME_WAV_FILENAME, HOME_BINARY_FILENAME, HOME_OTHER_FILENAME];
   for (let fileIndex = 0; fileIndex < filenames.length; fileIndex += 1) {
     const filename = filenames[fileIndex]!;
     await fs.writeFile(join(nasData, filename), fixtureBytes(fileIndex, filename));
@@ -276,17 +301,18 @@ async function startNasFixture(): Promise<NasFixture> {
     if (!webRtcAddress || !wssAddress) throw new Error(`supplier did not publish both transports: ${JSON.stringify(status.listen_addresses)}`);
     const files = await waitForJson<{ items: Array<{ seed_hash: string; state: string; recommended_filename: string; media_type: string; size_bytes: number }> }>(
       `${adminOrigin}/api/files?state=ready&limit=20`,
-      (value) => value.items.filter((item) => item.state === "ready").length >= 4,
+      (value) => value.items.filter((item) => item.state === "ready").length >= filenames.length,
       90_000,
     );
     const seedHashes = files.items.filter((item) => item.state === "ready").map((item) => item.seed_hash).sort().slice(0, 4);
     const fileSeedHashes = {
       text: files.items.find((item) => item.recommended_filename === HOME_TEXT_FILENAME)?.seed_hash,
       html: files.items.find((item) => item.recommended_filename === HOME_HTML_FILENAME)?.seed_hash,
+      wav: files.items.find((item) => item.recommended_filename === HOME_WAV_FILENAME)?.seed_hash,
       binary: files.items.find((item) => item.recommended_filename === HOME_BINARY_FILENAME)?.seed_hash,
       other: files.items.find((item) => item.recommended_filename === HOME_OTHER_FILENAME)?.seed_hash,
     };
-    if (!fileSeedHashes.text || !fileSeedHashes.html || !fileSeedHashes.binary || !fileSeedHashes.other) {
+    if (!fileSeedHashes.text || !fileSeedHashes.html || !fileSeedHashes.wav || !fileSeedHashes.binary || !fileSeedHashes.other) {
       throw new Error(`supplier fixture did not index all home files: ${JSON.stringify(files.items)}`);
     }
     const seedLengths = new Map<string, number>();
@@ -314,7 +340,7 @@ async function startNasFixture(): Promise<NasFixture> {
       certificateSpkiSha256Base64: createHash("sha256").update(spki).digest("base64"),
       seedHashes,
       seedLengths,
-      fileSeedHashes: fileSeedHashes as { text: string; html: string; binary: string; other: string },
+      fileSeedHashes: fileSeedHashes as { text: string; html: string; wav: string; binary: string; other: string },
       blockHashes,
       stderr,
     };

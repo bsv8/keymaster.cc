@@ -1,6 +1,6 @@
 # 002 MSFile 媒体流播放器与内部 SDK 施工单
 
-> 状态：🟡 首版代码已落地；真实媒体夹具、Go supplier E2E 与长时验收待完成（2026-08-28）。
+> 状态：🟡 首版代码已落地；普通 MP4 转封装冒烟已通过，真实多格式夹具、Go supplier E2E 与长时验收待完成（2026-08-28）。
 >
 > 本单在 Keymaster 内部建立可复用的 MSFile 媒体播放 SDK，并让首页文件模块对
 > MP3、WAV、MP4、MKV 使用有界流式播放。目标是首批必要 Block 验证后开始播放，
@@ -404,8 +404,9 @@ Chromium 验收环境，不要求人工桌面点击，但播放动作必须以�
   2 路读取、2–64 Block 窗口、随机读取上限、Abort/释放和 VOD/Live-ready 假源；不依赖
   React、Coordinator、DB、transport、私钥或金额。
 - Mediabunny `1.55.3` 通过 DedicatedWorker 的受限 `CustomSource` 做容器/轨道探测，
-  关闭库内预取；Window 负责 MSE append，WAV 走增量 RIFF/PCM Audio API。原生
-  `audio/video controls` 是首版 UI 和零依赖回退。
+  关闭库内预取；fMP4 直接进入 MSE，普通 progressive MP4 在 DedicatedWorker 内以
+  `Conversion + Mp4OutputFormat(fastStart: "fragmented")` 转为 fMP4，再由 Window 串行
+  append；WAV 走增量 RIFF/PCM Audio API。原生 `audio/video controls` 是首版 UI 和零依赖回退。
 - 首页媒体不再走完整 Blob 预览；播放按钮才启动 Seed/Block 读取，下载仍是独立动作。
   不支持的 Codec、容器、浏览器能力、完整性错误和大于 safe integer 的文件会明确降级。
 - MSFile 设置页新增独立的媒体预取窗口字段，默认 5、范围 2–64；旧 DB 缺失字段时
@@ -415,6 +416,19 @@ Chromium 验收环境，不要求人工桌面点击，但播放动作必须以�
 `pnpm lint:react-boundaries`、媒体与 MSFile 设置/服务测试，以及 `pnpm build`。
 
 以下内容尚未在本地声称通过：正式 MP3/WAV/fMP4/尾部 `moov`/普通 MKV 多格式夹具、真实
-Go supplier 数据面 E2E、暂停/seek/dispose 长时 Chromium 验收。因此当前 progressive
-MP4（非 fMP4）和通用 Matroska/MKV 会安全降级下载；补齐这些证据后再更新 M13、M15–M17、
-M19–M23 的验收状态。
+Go supplier 数据面 E2E、暂停/seek/dispose 长时 Chromium 验收。当前普通 MP4 已有本地
+Chromium 的 H.264 progressive → fMP4 → MSE 冒烟证据；HEVC 等浏览器不支持的 Codec
+仍会安全降级下载。补齐正式素材和供应商计数器证据后再更新 M13、M15–M17、M19–M23
+的验收状态。
+
+### 17.1 progressive MP4 修复记录（2026-08-28）
+
+- 现象：普通 `sample-30s.mp4` 被探测为 `mp4` 但 `directMse=false`，旧逻辑直接抛出
+  `msfile_media_unsupported_container`，导致 UI 只能提示下载。
+- 修复：session 对 `mp4 + !directMse` 启用 `MsFileMp4Transmuxer`；Worker 的每次
+  `CustomSource` range 都回到 `MsFileVodSource`，输出 chunk 必须等 Window 的
+  `SourceBuffer.updateend` 后 ack，避免绕过 Block 校验或无界堆积。
+- 本地证据：Chromium 中生成的普通 H.264 MP4 已成功经历
+  `reading-seed → parsing-header → buffering → playing`；HEVC 素材返回稳定的
+  `msfile_media_unsupported_codec`。正式 `sample-30s.mp4` 和多 Block 供应商计数器
+  尚未纳入仓库夹具。

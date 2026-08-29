@@ -351,9 +351,11 @@ MPL-2.0、内部 cache/prefetch、真实音视频同步和边缘 MKV/MP4 稳定�
   解析准备和传输，`SourceBuffer` append 固定在 Window；能力不足时直接降级。
 - 已检查 Mediabunny `CustomSource`：支持 `getSize/read/dispose`、`maxCacheSize`
   与 `prefetchProfile: "none"`；其 `Input` 支持 MP4、Matroska、WebM、MP3、WAVE
-  等输入格式。当前仓库没有正式多格式媒体 fixture 和 Go supplier E2E，故尾部
-  `moov`、普通 MKV、WAV 长时播放和真实生产构建不能在本 Gate 声称通过，留在阶段 B
-  的验收矩阵中。
+  等输入格式。另以本机 Chromium 实测普通 H.264 MP4 的
+  `Conversion + Mp4OutputFormat(fastStart: "fragmented")` 转封装和 Window MSE
+  append，可成功播放；当前仓库仍没有正式多格式媒体 fixture 和 Go supplier E2E，
+  故尾部 `moov`、普通 MKV、WAV 长时播放和真实生产构建不能在本 Gate 声称通过，留在
+  阶段 B 的验收矩阵中。
 
 ### 9.2 组合裁决
 
@@ -377,12 +379,15 @@ LGPL 义务不适合热路径；MP4Box.js 只覆盖 MP4，不能单独承担全�
 许可证确认：Mediabunny 为 MPL-2.0，必须随发布物保留许可与修改说明；候选库的
 许可证不能因为动态 import 而省略。当前 UI 不引入第三方许可证。
 已知不支持格式/Codec：没有运行时能力或没有经过增量解析/释放验收的组合；普通
-MKV、WAV、尾部 moov MP4 与软件 Codec 不得猜测播放，统一给出明确原因并下载。
+MKV、软件 Codec 以及未能建立可信转封装输出的 MP4 不得猜测播放，统一给出明确原因
+并下载。普通 progressive MP4 已有 H.264 基线转 fMP4 路径，但尾部 moov 和其他
+Codec 仍需阶段 B 的正式素材证据。
 MSFile CustomSource/Block 窗口适配方式：先完整验证 Seed，再优先读取 Block 0；
 按 byte range 映射 Block Hash，最大并发 2、Hash 在途合并、窗口可动态调整；
 Mediabunny cache 设为不超过 SDK 窗口的字节预算，关闭其网络预取。
 依赖升级策略：只允许显式升级并重新跑 Gate 0、边界测试、真实 fixture 与构建
 体积检查；不接受浮动 major/minor 作为生产裁决。
 替换/退出策略：若 Mediabunny 在真实 fixture 上无法证明边界或释放，先以 MP4Box.js
-承担已验证 MP4 子集，其他格式继续下载；LibAV.js 只能作为单独评审的懒加载兜底。
+承担已验证 MP4 子集，其他格式继续下载；当前 MP4 转封装 Worker 也应保持为可替换
+适配层；LibAV.js 只能作为单独评审的懒加载兜底。
 ```

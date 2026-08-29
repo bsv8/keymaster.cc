@@ -4,11 +4,17 @@
 import { MsFileMediaError, normalizeMediaError, throwIfMediaAborted } from "../core/errors.js";
 import type { MsFileMediaElementLike } from "../core/types.js";
 import type { MsFileVodSource } from "../core/blockSource.js";
+import { MsFileMp4Transmuxer } from "./mediaTransmux.js";
 
 export const MEDIA_LOW_WATER_SECONDS = 5;
 export const MEDIA_TARGET_WATER_SECONDS = 15;
 export const MEDIA_HARD_FORWARD_SECONDS = 30;
 export const MEDIA_BACKWARD_SUGGESTION_SECONDS = 30;
+
+export interface MsFileMseBackendOptions {
+  /** 普通 MP4 需要先转成 fMP4；原生分段 MP4/MP3/WebM 仍可直接追加。 */
+  transmuxProgressiveMp4?: boolean;
+}
 
 function asMediaElement(element: MsFileMediaElementLike): HTMLMediaElement {
   return element as unknown as HTMLMediaElement;
@@ -37,6 +43,12 @@ export class MsFileMseBackend {
   private sourceBuffer: SourceBuffer | undefined;
   private objectUrl: string | undefined;
   private streamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  private transmuxer: MsFileMp4Transmuxer | undefined;
+  private readonly transmuxProgressiveMp4: boolean;
+  private transmuxPumpPromise: Promise<boolean> | undefined;
+  private transmuxUntilSeconds = 0;
+  private transmuxDone = false;
+  private appendedData = false;
   private internalAbort = new AbortController();
   private pumpPromise: Promise<void> | undefined;
   private pauseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -52,11 +64,13 @@ export class MsFileMseBackend {
     mimeType: string,
     durationSeconds?: number,
     onFailure: (error: MsFileMediaError) => void = () => undefined,
+    options: MsFileMseBackendOptions = {},
   ) {
     this.element = asMediaElement(element);
     this.source = source;
     this.mimeType = mimeType;
     this.durationSeconds = durationSeconds;
+    this.transmuxProgressiveMp4 = options.transmuxProgressiveMp4 === true;
     this.onFailure = onFailure;
   }
 
@@ -91,12 +105,28 @@ export class MsFileMseBackend {
     if (this.durationSeconds !== undefined && Number.isFinite(this.durationSeconds)) {
       try { mediaSource.duration = this.durationSeconds; } catch { /* duration 可在 EOF 时由浏览器计算 */ }
     }
-    this.streamReader = this.source.readStream(0, this.source.fileSizeNumber, operationSignal).getReader();
-    const first = await this.streamReader.read();
-    if (first.done || !first.value || first.value.byteLength === 0) {
-      throw new MsFileMediaError("msfile_media_decode_failed");
+    if (this.transmuxProgressiveMp4) {
+      const transmuxer = new MsFileMp4Transmuxer(this.source, {
+        append: (data, appendSignal) => this.append(data, appendSignal),
+      });
+      this.transmuxer = transmuxer;
+      await this.requestTransmux(MEDIA_TARGET_WATER_SECONDS, operationSignal);
+      // 极少数文件的第一个关键帧距离文件起点很远；允许再推进一次，
+      // 但仍以媒体时间而不是“读取完整文件”作为转封装水位。
+      if (this.element.buffered.length === 0 && !this.transmuxDone) {
+        await this.requestTransmux(MEDIA_HARD_FORWARD_SECONDS, operationSignal);
+      }
+      if (!this.appendedData || this.element.buffered.length === 0) {
+        throw new MsFileMediaError("msfile_media_decode_failed");
+      }
+    } else {
+      this.streamReader = this.source.readStream(0, this.source.fileSizeNumber, operationSignal).getReader();
+      const first = await this.streamReader.read();
+      if (first.done || !first.value || first.value.byteLength === 0) {
+        throw new MsFileMediaError("msfile_media_decode_failed");
+      }
+      await this.append(first.value, operationSignal);
     }
-    await this.append(first.value, operationSignal);
     this.pumpPromise = this.pump(operationSignal).catch((error) => {
       if (this.disposed || this.internalAbort.signal.aborted) return;
       const normalized = error instanceof MsFileMediaError ? error : normalizeMediaError(error, signal);
@@ -119,6 +149,33 @@ export class MsFileMseBackend {
       throw new MsFileMediaError("msfile_media_decode_failed");
     }
     await update;
+    this.appendedData = true;
+  }
+
+  private endOfStream(): void {
+    if (this.ended) return;
+    this.ended = true;
+    if (this.mediaSource?.readyState === "open") {
+      try { this.mediaSource.endOfStream(); } catch { /* 迟到的 endOfStream 不影响 dispose */ }
+    }
+  }
+
+  private async requestTransmux(untilSeconds: number, signal: AbortSignal): Promise<boolean> {
+    const transmuxer = this.transmuxer;
+    if (!transmuxer || this.transmuxPumpPromise) {
+      throw new MsFileMediaError("msfile_media_configuration");
+    }
+    const request = transmuxer.pump(untilSeconds, signal);
+    this.transmuxPumpPromise = request;
+    try {
+      const done = await request;
+      this.transmuxUntilSeconds = Math.max(this.transmuxUntilSeconds, untilSeconds);
+      this.transmuxDone = done;
+      if (done) this.endOfStream();
+      return done;
+    } finally {
+      if (this.transmuxPumpPromise === request) this.transmuxPumpPromise = undefined;
+    }
   }
 
   private bufferedAhead(): number {
@@ -144,6 +201,28 @@ export class MsFileMseBackend {
   }
 
   private async pump(signal: AbortSignal): Promise<void> {
+    if (this.transmuxer) {
+      for (;;) {
+        throwIfMediaAborted(signal);
+        if (this.ended) return;
+        if (!this.started || this.element.paused) {
+          await this.waitWhilePaused(signal);
+          continue;
+        }
+        const ahead = this.bufferedAhead();
+        if (ahead >= MEDIA_HARD_FORWARD_SECONDS || ahead >= MEDIA_TARGET_WATER_SECONDS) {
+          await this.waitWhilePaused(signal);
+          continue;
+        }
+        const current = Number.isFinite(this.element.currentTime) ? this.element.currentTime : 0;
+        const until = Math.max(
+          this.transmuxUntilSeconds + MEDIA_TARGET_WATER_SECONDS,
+          current + MEDIA_TARGET_WATER_SECONDS,
+          MEDIA_TARGET_WATER_SECONDS,
+        );
+        await this.requestTransmux(until, signal);
+      }
+    }
     const reader = this.streamReader;
     if (!reader) return;
     for (;;) {
@@ -159,10 +238,7 @@ export class MsFileMseBackend {
       }
       const next = await reader.read();
       if (next.done) {
-        this.ended = true;
-        if (this.mediaSource?.readyState === "open") {
-          try { this.mediaSource.endOfStream(); } catch { /* 迟到的 endOfStream 不影响 dispose */ }
-        }
+        this.endOfStream();
         return;
       }
       if (next.value.byteLength === 0) continue;
@@ -213,6 +289,9 @@ export class MsFileMseBackend {
     this.pauseTimer = undefined;
     this.element.pause();
     try { await this.streamReader?.cancel(); } catch { /* reader 已取消 */ }
+    const transmuxer = this.transmuxer;
+    this.transmuxer = undefined;
+    try { await transmuxer?.dispose(); } catch { /* Worker 已取消 */ }
     try { this.sourceBuffer && this.mediaSource?.readyState === "open" && this.mediaSource.removeSourceBuffer(this.sourceBuffer); } catch { /* browser 已关闭 */ }
     try { this.mediaSource?.readyState === "open" && this.mediaSource.endOfStream(); } catch { /* ignore */ }
     if (this.objectUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") URL.revokeObjectURL(this.objectUrl);

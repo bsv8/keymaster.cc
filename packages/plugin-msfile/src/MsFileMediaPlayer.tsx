@@ -153,7 +153,11 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   const isPlaying = snapshot.phase === "playing";
   const failed = snapshot.phase === "failed" || Boolean(startupError);
   return (
-    <div className="msfile-home-file__streaming-player">
+    <div
+      className="msfile-home-file__streaming-player"
+      data-msfile-media-phase={snapshot.phase}
+      data-msfile-media-read-blocks={snapshot.readBlockCount}
+    >
       {mediaElement}
       <div className="msfile-home-file__media-controls" aria-live="polite">
         <Button size="sm" onClick={isPlaying ? pause : play} disabled={snapshot.phase === "reading-seed" || snapshot.phase === "parsing-header"}>
@@ -164,6 +168,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
         <span>{phaseLabel(snapshot.phase, t)}</span>
         <span>{t("msfile.home.media.buffered", { defaultValue: "前方已缓冲：{{seconds}} 秒", seconds: shortSeconds(snapshot.bufferedSeconds) })}</span>
         <span>{t("msfile.home.media.window", { defaultValue: "Block 窗口：{{used}} / {{limit}}", used: snapshot.blockWindowOccupancy, limit: snapshot.blockWindowLimit })}</span>
+        <span>{t("msfile.home.media.readBlocks", { defaultValue: "已读取 Block：{{count}}", count: snapshot.readBlockCount })}</span>
       </div>
       {failed ? (
         <p className="msfile-home-file__hint">

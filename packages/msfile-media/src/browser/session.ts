@@ -168,6 +168,17 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     this.probe = await probeInDedicatedWorker(this.source, signal);
     if (this.probe.container === "wave") {
       this.backend = new MsFileWavBackend(this.element, this.source, (error) => this.backendFailure(error));
+    } else if (this.probe.container === "mp4") {
+      // 普通 MP4 的 moov/mdat 不是可直接 append 的 MSE 分段；在 Worker
+      // 内转成 fMP4。已经带 moof 的 MP4 继续走零拷贝直通路径。
+      this.backend = new MsFileMseBackend(
+        this.element,
+        this.source,
+        this.probe.mimeType,
+        this.probe.durationSeconds,
+        (error) => this.backendFailure(error),
+        { transmuxProgressiveMp4: !this.probe.directMse },
+      );
     } else {
       if (!this.probe.directMse) throw new MsFileMediaError("msfile_media_unsupported_container");
       this.backend = new MsFileMseBackend(this.element, this.source, this.probe.mimeType, this.probe.durationSeconds, (error) => this.backendFailure(error));
@@ -181,6 +192,9 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     this.error = { code: error.code, message: error.message };
     this.phase = "failed";
     this.source.abort();
+    // 后端异步 pump 失败时，不能只中止 BlockSource；MSE、Worker、定时器
+    // 仍可能持有资源。失败态同样执行一次幂等 dispose，阻断迟到回调。
+    void this.backend?.dispose().catch(() => undefined);
     this.emit();
   }
 
