@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { assertMsFileProxyProtocolCommit, MSFILE_GO_DIR } from "./fixtures/msfileProxyProtocol.js";
 
 const execFileAsync = promisify(execFile);
-const GO_LAB_DIR = "/home/david/Workspaces/MSFile-Proxy-Protocol/labs/webrtc-go";
+const GO_LAB_DIR = MSFILE_GO_DIR;
 const GO_KEY_FILE = join(GO_LAB_DIR, "nas-test.key");
 const GO_LISTEN_ADDR = "/ip4/127.0.0.1/udp/0/webrtc-direct";
 
@@ -103,6 +104,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
   let goLab: { directory: string; binary: string } | undefined;
 
   test.beforeAll(async () => {
+    await assertMsFileProxyProtocolCommit();
     goLab = await buildGoLab();
   });
 

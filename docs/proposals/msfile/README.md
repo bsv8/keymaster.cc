@@ -24,8 +24,8 @@
 
 协议真值来自相邻仓库：
 
-- `/home/david/Workspaces/MSFile-Proxy-Protocol/docs/protocol/wire-messages.zh.md`
-- `/home/david/Workspaces/MSFile-Proxy-Protocol/docs/protocol/network.zh.md`
+- `$MSFILE_PROXY_PROTOCOL_DIR/docs/protocol/wire-messages.zh.md`
+- `$MSFILE_PROXY_PROTOCOL_DIR/docs/protocol/network.zh.md`
 
 Keymaster 层已经确认的产品口径：
 

@@ -27,6 +27,7 @@
     "@keymaster/plugin-key-import": "*",
     "@keymaster/plugin-message": "*",
     "@keymaster/plugin-msfile": "*",
+    "@keymaster/msfile-media": "*",
     "@keymaster/plugin-p2pkh": "*",
     "@keymaster/plugin-poker": "*",
     "@keymaster/plugin-protocol": "*",

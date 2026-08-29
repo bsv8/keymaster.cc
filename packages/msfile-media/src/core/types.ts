@@ -43,25 +43,23 @@ export interface MsFileVodSourceInput {
   supplierPublicKeyHex: string;
   /** Stat 返回的精确文件字节数。 */
   fileSizeBytes: bigint;
-  /** 供应商声明的 MIME，只作提示，不能代替魔数和容器解析。 */
+  /** 供应商声明的 MIME；仅白名单类型进入原生播放，容器/Codec 由浏览器解析。 */
   declaredMediaType: string;
   /** 已由 plugin-msfile 绑定到金额和 transport 的 reader。 */
   reader: MsFileMediaBlockReader;
 }
 
+/** 旧 MSE 后端的兼容选项；当前原生 Range 路径不读取。 */
 export interface MsFileVodSourceOptions {
-  /** 同时驻留的已验证 Block 上限；用户设置范围为 2–64。 */
   prefetchBlocks?: number;
-  /** 同时 active 的远端 Block Read 数；默认 2。 */
   parallelReads?: number;
-  /** 媒体头部探测允许触及的最多 Block 数；默认 8。 */
   maxProbeBlocks?: number;
 }
 
+/** 旧 BlockSource 的兼容快照；当前 RangeSource 使用自己的快照。 */
 export interface MsFileVodSourceSnapshot {
   initialized: boolean;
   disposed: boolean;
-  /** 当前缓存/在途 Block 数，不是已播放 Block 数。 */
   blockWindowOccupancy: number;
   blockWindowLimit: number;
   activeReadCount: number;
@@ -73,13 +71,13 @@ export interface MsFileVodSourceSnapshot {
 /** Debug 记录中的安全标量；禁止放入媒体字节、Hash、凭据或付款原文。 */
 export type MsFileMediaDebugValue = string | number | boolean | null;
 
-/** 默认开启的播放器内存诊断记录，最多保留最近一段有界事件。 */
+/** 默认开启的播放器内存诊断记录；保留 session 上下文/失败事件和最近一段有界事件。 */
 export interface MsFileMediaDebugEntry {
   /** 当前 session 内单调递增的事件序号。 */
   sequence: number;
   /** 相对 session 创建时刻的毫秒数，便于判断卡顿发生在哪一步。 */
   elapsedMs: number;
-  /** 事件来源，例如 session、element、source、mse、transmux。 */
+  /** 事件来源，例如 session、sw、range、media.native。 */
   scope: string;
   /** 稳定动作名；用于搜索和比较两次复现。 */
   action: string;
@@ -102,6 +100,10 @@ export interface MsFileMediaSnapshot {
   /** 原始 MSFile Block 的驻留/在途数量。 */
   blockWindowOccupancy: number;
   blockWindowLimit: number;
+  /** 原生 Range 当前活动的 HTTP 请求数。 */
+  activeRequestCount?: number;
+  /** 原生 Range 当前正在共享的 Block Promise 数。 */
+  inFlightBlockCount?: number;
   /** 仅用于诊断显示，不能被误写成“已播放”。 */
   verifiedBlockCount: number;
   readBlockCount: number;
@@ -120,14 +122,14 @@ export interface MsFileMediaSession {
   play(): Promise<void>;
   pause(): void;
   seek(seconds: number): Promise<void>;
-  /** 更新当前 session 的 Block 窗口；调小时只等待旧占用自然释放。 */
-  setPrefetchBlocks(value: number): void;
+  /** 旧 MSE 后端兼容入口；新原生 Range session 不使用。 */
+  setPrefetchBlocks?(value: number): void;
   stop(): Promise<void>;
   dispose(): Promise<void>;
 }
 
 export interface MediaInitialization {
-  /** MSE/WebCodecs 使用的完整 MIME（含 codecs 参数）。 */
+  /** 扩展时间轴适配器使用的完整 MIME（含 codecs 参数）。 */
   mimeType: string;
   /** 初始化段；不是完整媒体文件。 */
   data?: Uint8Array;

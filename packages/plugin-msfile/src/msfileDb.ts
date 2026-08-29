@@ -8,14 +8,11 @@ import type {
   MsFileAppIdentityKey,
   MsFileAppPriceOverride,
   MsFileGlobalPriceSettings,
-  MsFileMediaPlaybackSettings,
   MsFileSupplierConfig,
 } from "@keymaster/contracts";
 import {
   isValidMsFileSupplierPublicKeyHex,
   msFileAppPolicyKeyString,
-  MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
-  normalizeMsFileMediaPrefetchBlocks,
 } from "@keymaster/contracts";
 
 export const MSFILE_DB_NAME = "keymaster.msfile";
@@ -24,9 +21,21 @@ export const MSFILE_DB_VERSION = 2;
 interface GlobalSettingsRow {
   key: "singleton";
   settings: MsFileGlobalPriceSettings | null;
-  /** V2 新增；V1 记录缺失时按默认值读取。 */
+  /** 旧版媒体预取字段：仅保留数据库形状，现行服务不消费它。 */
   mediaPlaybackPrefetchBlocks?: number;
   updatedAt: number;
+}
+
+// 兼容回滚的旧字段只在 IndexedDB 原语层保留；播放器、服务快照和 UI 不再读取/写入它。
+interface LegacyMediaPlaybackSettings {
+  mediaPlaybackPrefetchBlocks: number;
+}
+const LEGACY_MEDIA_PLAYBACK_DEFAULT = 5;
+const LEGACY_MEDIA_PLAYBACK_MIN = 2;
+const LEGACY_MEDIA_PLAYBACK_MAX = 64;
+function normalizeLegacyMediaPlaybackBlocks(input: unknown): number | undefined {
+  if (!Number.isSafeInteger(input) || (input as number) < LEGACY_MEDIA_PLAYBACK_MIN || (input as number) > LEGACY_MEDIA_PLAYBACK_MAX) return undefined;
+  return input as number;
 }
 
 export interface StoredAppPolicyRow {
@@ -74,8 +83,8 @@ function transactionDone(transaction: IDBTransaction): Promise<void> {
 export interface MsFileDb {
   getGlobalSettings(): Promise<MsFileGlobalSettingsSnapshot | null>;
   putGlobalSettings(settings: MsFileGlobalPriceSettings, updatedAt: number, mediaPlaybackPrefetchBlocks?: number): Promise<void>;
-  /** 独立更新播放器设置；可选以兼容旧的测试/外部 DB seam。 */
-  putMediaPlaybackPrefetchBlocks?(settings: MsFileMediaPlaybackSettings, updatedAt: number): Promise<void>;
+  /** 旧版独立媒体设置写入口，仅为回滚保留，现行服务不调用。 */
+  putMediaPlaybackPrefetchBlocks?(settings: LegacyMediaPlaybackSettings, updatedAt: number): Promise<void>;
   listSuppliers(): Promise<MsFileSupplierConfig[]>;
   getSupplier(supplierPublicKeyHex: string): Promise<MsFileSupplierConfig | null>;
   upsertSupplier(config: MsFileSupplierConfig): Promise<void>;
@@ -92,7 +101,7 @@ export interface MsFileDb {
 /** 全局设置快照：settings 为 null 表示用户尚未显式保存（Read fail closed）。 */
 export interface MsFileGlobalSettingsSnapshot {
   settings: MsFileGlobalPriceSettings | null;
-  /** V1 行缺失时由 DB 读取层补成 5。 */
+  /** 旧版字段；现行服务忽略，仅保留兼容迁移/回滚能力。 */
   mediaPlaybackPrefetchBlocks?: number;
   updatedAt: number | null;
 }
@@ -132,24 +141,28 @@ export async function openMsFileDb(indexedDbFactory?: IDBFactory): Promise<MsFil
       }
       return {
         settings,
-        mediaPlaybackPrefetchBlocks: normalizeMsFileMediaPrefetchBlocks(row.mediaPlaybackPrefetchBlocks)
-          ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+        mediaPlaybackPrefetchBlocks: normalizeLegacyMediaPlaybackBlocks(row.mediaPlaybackPrefetchBlocks)
+          ?? LEGACY_MEDIA_PLAYBACK_DEFAULT,
         updatedAt: typeof row.updatedAt === "number" ? row.updatedAt : null,
       };
     },
     async putGlobalSettings(settings, updatedAt, mediaPlaybackPrefetchBlocks) {
       const transaction = db.transaction("globalSettings", "readwrite");
-      transaction.objectStore("globalSettings").put({
+      const store = transaction.objectStore("globalSettings");
+      const existing = await requestToPromise<GlobalSettingsRow | undefined>(store.get("singleton"));
+      const legacyValue = normalizeLegacyMediaPlaybackBlocks(mediaPlaybackPrefetchBlocks)
+        ?? normalizeLegacyMediaPlaybackBlocks(existing?.mediaPlaybackPrefetchBlocks)
+        ?? LEGACY_MEDIA_PLAYBACK_DEFAULT;
+      store.put({
         key: "singleton",
         settings,
-        mediaPlaybackPrefetchBlocks: normalizeMsFileMediaPrefetchBlocks(mediaPlaybackPrefetchBlocks)
-          ?? MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT,
+        mediaPlaybackPrefetchBlocks: legacyValue,
         updatedAt,
       } satisfies GlobalSettingsRow);
       await transactionDone(transaction);
     },
     async putMediaPlaybackPrefetchBlocks(mediaSettings, updatedAt) {
-      const value = normalizeMsFileMediaPrefetchBlocks(mediaSettings.mediaPlaybackPrefetchBlocks);
+      const value = normalizeLegacyMediaPlaybackBlocks(mediaSettings.mediaPlaybackPrefetchBlocks);
       if (value === undefined) throw new Error("mediaPlaybackPrefetchBlocks must be an integer in 2..64");
       const transaction = db.transaction("globalSettings", "readwrite");
       const store = transaction.objectStore("globalSettings");

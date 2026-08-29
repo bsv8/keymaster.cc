@@ -19,11 +19,43 @@ import {
 } from "@keymaster/contracts";
 import { openProtocolStorageDb, verifyAppIdentityProof } from "@keymaster/plugin-protocol";
 import type { PluginHost } from "@keymaster/runtime";
+import {
+  configureMsFileMediaServiceWorker,
+  ensureMsFileMediaServiceWorker,
+} from "@keymaster/msfile-media/browser";
 
 const E2E_VAULT_PASSWORD = "msfile-production-e2e-password";
+const E2E_MISMATCH_SERVICE_WORKER = "/e2e-mismatch-sw.js";
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function delaySupplierResult<T>(pending: Promise<T>, signal: AbortSignal | undefined, milliseconds: number): Promise<T> {
+  if (milliseconds <= 0) return pending;
+  // 让真实 service.readBlock 先发起到 Go supplier 的请求，再延迟向 RangeSource
+  // 交付结果；seek/cancel 时传入的 AbortSignal 仍会先取消真实请求。
+  void pending.catch(() => undefined);
+  return new Promise<T>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException("E2E supplier read aborted", "AbortError"));
+    };
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+    timer = setTimeout(() => {
+      cleanup();
+      pending.then(resolve, reject);
+    }, milliseconds);
+  });
 }
 
 function bytesOf(result: MsFileReadResult): Uint8Array {
@@ -87,6 +119,10 @@ export interface MsFileProductionE2EHooks {
   stat(seedHashHex: string): ReturnType<MsFileService["stat"]>;
   readSeed(supplierPublicKeyHex: string, seedHashHex: string): ReturnType<typeof summarizeRead>;
   readBlock(supplierPublicKeyHex: string, blockHashHex: string): ReturnType<typeof summarizeRead>;
+  /** 仅 E2E 使用：控制真实 Read 结果交付延迟，验证 seek/cancel 时的在途请求。 */
+  setReadDelay(milliseconds: number): void;
+  /** 仅 E2E 使用：安装返回未知协议版本的 SW，验证页面安全终止。 */
+  installProtocolMismatchServiceWorker(): Promise<{ errorCode: string; controllerScriptUrl: string }>;
   readSeeds(supplierPublicKeyHex: string, seedHashHexes: string[]): Promise<Awaited<ReturnType<typeof summarizeRead>>[]>;
   readBlocks(supplierPublicKeyHex: string, blockHashHexes: string[]): Promise<Awaited<ReturnType<typeof summarizeRead>>[]>;
   seedConnectSession(input: { sessionId: string; origin: string; proof: AppIdentityProofV1 }): Promise<{ ownerPublicKeyHex: string; appKey: MsFileAppIdentityKey }>;
@@ -107,6 +143,9 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
   const service = host.capabilities.get<MsFileService>(MSFILE_SERVICE_CAPABILITY);
   if (!coordinator || !service) throw new Error("MSFile E2E requires enabled Coordinator and MSFile capabilities");
   let protocolDb: ProtocolStorageDb | undefined;
+  let readBlockDelayMs = 0;
+  const readBlock = service.readBlock.bind(service);
+  service.readBlock = (input) => delaySupplierResult(readBlock(input), input.signal, readBlockDelayMs);
 
   const hooks: MsFileProductionE2EHooks = {
     bootstrap: () => ensureUnlocked(coordinator),
@@ -121,6 +160,33 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
     stat: (seedHashHex) => service.stat({ seedHashHex }),
     readSeed: async (supplierPublicKeyHex, seedHashHex) => summarizeRead(await service.readSeed({ supplierPublicKeyHex, seedHashHex })),
     readBlock: async (supplierPublicKeyHex, blockHashHex) => summarizeRead(await service.readBlock({ supplierPublicKeyHex, blockHashHex })),
+    setReadDelay(milliseconds) {
+      if (!Number.isSafeInteger(milliseconds) || milliseconds < 0 || milliseconds > 30_000) {
+        throw new Error("MSFile E2E read delay must be an integer in 0..30000");
+      }
+      readBlockDelayMs = milliseconds;
+    },
+    async installProtocolMismatchServiceWorker() {
+      configureMsFileMediaServiceWorker({
+        scriptUrl: E2E_MISMATCH_SERVICE_WORKER,
+        scope: "/",
+        timeoutMs: 5000,
+      });
+      let errorCode = "none";
+      try {
+        await ensureMsFileMediaServiceWorker();
+      } catch (error) {
+        if (error && typeof error === "object" && "code" in error && typeof error.code === "string") {
+          errorCode = error.code;
+        } else {
+          errorCode = "unknown";
+        }
+      }
+      return {
+        errorCode,
+        controllerScriptUrl: navigator.serviceWorker.controller?.scriptURL ?? "",
+      };
+    },
     readSeeds: async (supplierPublicKeyHex, seedHashHexes) => Promise.all(seedHashHexes.map(async (seedHashHex) => summarizeRead(await service.readSeed({ supplierPublicKeyHex, seedHashHex })))),
     readBlocks: async (supplierPublicKeyHex, blockHashHexes) => Promise.all(blockHashHexes.map(async (blockHashHex) => summarizeRead(await service.readBlock({ supplierPublicKeyHex, blockHashHex })))),
     async seedConnectSession(input) {

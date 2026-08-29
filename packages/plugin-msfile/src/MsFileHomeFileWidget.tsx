@@ -5,7 +5,7 @@
 // Window executor。文件内容只保存在当前任务的内存引用中；新查询、取消、
 // active key / supplier generation 变化和卸载都会释放它以及所有 Blob URL。
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type {
   MsFileGlobalPriceSettings,
   MsFileReadResult,
@@ -52,6 +52,7 @@ import {
   type MsFileHomePreviewDecision,
   type MsFileHomePreviewKind,
 } from "./filePreviewPolicy.js";
+import { disposeMsFileMediaSessionNow } from "./msfileMediaResource.js";
 
 const HOME_STATUS_RESOURCE_ID = "msfile.status";
 const HOME_LIFECYCLE_RESOURCE_ID = "msfile.home.lifecycle";
@@ -77,8 +78,6 @@ interface HomeStatusResource {
   status: MsFileServiceStatus;
   globalSettings: MsFileGlobalPriceSettings | null;
   supplierGeneration: number;
-  /** 设置页更新后让首页重新读取当前媒体窗口。 */
-  mediaPlaybackPrefetchBlocks?: number;
 }
 
 interface HomeLifecycleResource {
@@ -285,10 +284,10 @@ function messageForPreviewReason(
 ): string | undefined {
   const isMedia = selection.previewDecision.kind === "audio" || selection.previewDecision.kind === "video";
   if (isMedia && selection.fileSizeBytes > MAX_BROWSER_MEDIA_FILE_SIZE) {
-    return t("msfile.home.download.tooLarge", { defaultValue: "文件过大，当前浏览器不能安全建立流式 byte range，请使用后续流式保存能力。" });
+    return t("msfile.home.download.tooLarge", { defaultValue: "文件过大，当前浏览器不能安全建立原生 byte range，请使用后续流式保存能力。" });
   }
   if (isMedia) {
-    return t("msfile.home.media.notSupported", { defaultValue: "播放会按 Block 窗口读取，不会先组装完整 Blob。" });
+    return t("msfile.home.media.notSupported", { defaultValue: "媒体由浏览器按需读取；回跳到已释放内容时可能重新读取对应文件块。" });
   }
   if (!selection.previewDecision.canBlobDownload) {
     return t("msfile.home.download.tooLarge", { defaultValue: "超过 256 MiB 的文件需要后续流式下载支持，当前不会读取。" });
@@ -307,6 +306,7 @@ export function MsFileHomeFileWidget() {
   const host = usePluginHost();
   const service = useCapability<MsFileService>(MSFILE_SERVICE_CAPABILITY);
   const { vault } = useRuntimeStatus();
+  const widgetInstanceId = useId();
 
   // 状态和配置通过 Resource Store 感知，避免组件直接订阅 service / keyspace。
   const statusResource = useResourceSelector<HomeStatusResource, HomeStatusResource>(
@@ -317,10 +317,8 @@ export function MsFileHomeFileWidget() {
       status: service.status(),
       globalSettings: null,
       supplierGeneration: 0,
-      mediaPlaybackPrefetchBlocks: 5,
     },
     (a, b) => a.status === b.status && a.supplierGeneration === b.supplierGeneration &&
-      a.mediaPlaybackPrefetchBlocks === b.mediaPlaybackPrefetchBlocks &&
       JSON.stringify(a.globalSettings) === JSON.stringify(b.globalSettings),
   );
   const lifecycle = useResourceSelector<HomeLifecycleResource, HomeLifecycleResource>(
@@ -370,12 +368,22 @@ export function MsFileHomeFileWidget() {
     task.readPromise = undefined;
   }, [revokeUrl]);
 
+  const disposeTaskMediaSession = useCallback((task: FetchTask) => {
+    // task 被 lock、active key/supplier 变化、新查询或卸载淘汰时，不能只
+    // 等 React 下一轮 unmount；旧虚拟 URL 必须立即从页面 session registry
+    // 删除，避免在这个窗口内返回 503 或继续触发 supplier Read。
+    disposeMsFileMediaSessionNow(`${widgetInstanceId}:${String(task.id)}`);
+  }, [widgetInstanceId]);
+
   const abandonTask = useCallback(() => {
     const task = taskRef.current;
-    if (task) releaseTask(task);
+    if (task) {
+      releaseTask(task);
+      disposeTaskMediaSession(task);
+    }
     taskRef.current = null;
     taskSequenceRef.current += 1;
-  }, [releaseTask]);
+  }, [disposeTaskMediaSession, releaseTask]);
 
   const isCurrent = useCallback((task: FetchTask): boolean => {
     return taskRef.current === task &&
@@ -410,7 +418,7 @@ export function MsFileHomeFileWidget() {
         if (!cancelled) setSettingsLoading(false);
       });
     return () => { cancelled = true; };
-  }, [service, statusResource.status, statusResource.supplierGeneration, statusResource.mediaPlaybackPrefetchBlocks, vault]);
+  }, [service, statusResource.status, statusResource.supplierGeneration, vault]);
 
   // active key / supplier generation / lock 是任务栅栏。effect 之外 isCurrent
   // 也同步检查 ref，覆盖 React effect 尚未运行的微小窗口。
@@ -471,9 +479,7 @@ export function MsFileHomeFileWidget() {
         const url = createBlobUrl(parts, selection.mediaType);
         return url ? { kind: "pdf", url } : undefined;
       }
-      case "image":
-      case "audio":
-      case "video": {
+      case "image": {
         const url = createBlobUrl(parts, selection.mediaType);
         return url ? { kind: selection.previewDecision.kind, url } : undefined;
       }
@@ -758,7 +764,8 @@ export function MsFileHomeFileWidget() {
   }, [isCurrent, revokeUrl, t]);
 
   const cancel = useCallback(() => {
-    const hash = taskRef.current?.hash ?? state.hash;
+    const task = taskRef.current;
+    const hash = task?.hash ?? state.hash;
     abandonTask();
     setState({ phase: "cancelled", hash, stats: [] });
   }, [abandonTask, state.hash]);
@@ -766,6 +773,8 @@ export function MsFileHomeFileWidget() {
   const hasEnabledSupplier = settingsSnapshot?.suppliers.some((supplier) => supplier.enabled) ?? false;
   const busy = isBusyPhase(state.phase);
   const canSubmit = vault === "unlocked" && Boolean(lifecycle.activePublicKeyHex);
+  const mediaTaskId = taskRef.current?.id;
+  const mediaTaskToken = mediaTaskId === undefined ? undefined : `${widgetInstanceId}:${String(mediaTaskId)}`;
   const hasTaskResult = Boolean(taskRef.current) && state.phase !== "failed" && state.phase !== "cancelled";
   const candidateCount = state.stats.filter((view) => Boolean(view.selection)).length;
   const hasRetryableStat = state.stats.some((view) => view.entry.status === "discovering" || view.entry.status === "network-error");
@@ -885,6 +894,8 @@ export function MsFileHomeFileWidget() {
             <span>{state.selected.supplierName}</span>
           </div>
           {(state.selected.previewDecision.kind === "audio" || state.selected.previewDecision.kind === "video") &&
+          mediaTaskToken !== undefined &&
+          state.selected.fileSizeBytes > 0n &&
           state.selected.fileSizeBytes <= MAX_BROWSER_MEDIA_FILE_SIZE &&
           state.phase !== "failed" && state.phase !== "cancelled" ? (
             <MsFileMediaPlayer
@@ -895,8 +906,7 @@ export function MsFileHomeFileWidget() {
               declaredMediaType={state.selected.mediaType}
               filename={state.selected.filename}
               kind={state.selected.previewDecision.kind}
-              taskToken={String(taskRef.current?.id ?? state.hash)}
-              prefetchBlocks={settingsSnapshot?.mediaPlaybackPrefetchBlocks ?? 5}
+              taskToken={mediaTaskToken}
               canBlobDownload={state.selected.previewDecision.canBlobDownload}
               onDownload={handleDownload}
               t={t}
@@ -935,13 +945,6 @@ export function MsFileHomeFileWidget() {
           {state.preview?.kind === "image" && state.preview.url ? (
             <img className="msfile-home-file__image-preview" src={state.preview.url} alt={state.selected.filename} onError={handlePreviewDecodeError} />
           ) : null}
-          {state.preview?.kind === "audio" && state.preview.url ? (
-            <audio className="msfile-home-file__media-preview" src={state.preview.url} controls onError={handlePreviewDecodeError} />
-          ) : null}
-          {state.preview?.kind === "video" && state.preview.url ? (
-            <video className="msfile-home-file__media-preview" src={state.preview.url} controls onError={handlePreviewDecodeError} />
-          ) : null}
-
           {(state.phase === "ready-to-download" || state.phase === "download-ready" || state.phase === "preview-ready") &&
           (state.selected.previewDecision.kind !== "audio" && state.selected.previewDecision.kind !== "video" ||
             state.selected.fileSizeBytes > MAX_BROWSER_MEDIA_FILE_SIZE) ? (

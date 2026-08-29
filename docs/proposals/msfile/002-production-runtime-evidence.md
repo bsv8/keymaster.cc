@@ -82,7 +82,8 @@ pnpm exec playwright test e2e/msfile-production-runtime.spec.ts --project=chromi
 pnpm build
 pnpm test
 
-cd /home/david/Workspaces/MSFile-Proxy-Protocol/labs/webrtc-go
+export MSFILE_PROXY_PROTOCOL_DIR="/path/to/MSFile-Proxy-Protocol"
+cd "$MSFILE_PROXY_PROTOCOL_DIR/labs/webrtc-go"
 go test ./...
 go test -race ./...
 go build ./cmd/msfile-nas

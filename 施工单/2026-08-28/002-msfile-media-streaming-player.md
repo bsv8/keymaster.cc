@@ -7,6 +7,11 @@
 > 不再等待完整文件下载；同时冻结可接入未来 Live 的播放器边界，但本单不实现
 > Live 服务端协议，也不发布独立公共 SDK。
 
+> **后续裁决：** 本单中的 `mediaPlaybackPrefetchBlocks`、MSE、自管缓存、转封装及
+> 未缓冲 seek 方案，已由
+> [003 MSFile 原生 Range 媒体播放器施工单](./003-msfile-media-native-range-player.md)
+> 替代。002 保留为首版实现记录；后续施工与验收以 003 为准。
+
 ## 1. 已冻结产品决定
 
 1. 媒体播放器先在 Keymaster monorepo 内完善，稳定且出现第二个真实调用方后再讨论独立发布；

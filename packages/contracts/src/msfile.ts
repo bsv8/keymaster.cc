@@ -25,35 +25,22 @@ export const MSFILE_MAX_ERROR_MESSAGE_BYTES = 1024;
 export const MSFILE_BLOCK_SIZE_BYTES = 256 * 1024;
 export const MSFILE_DIGEST_SIZE_BYTES = 32;
 
+/**
+ * 旧 MSE/转封装播放器的兼容常量。
+ *
+ * Gate 通过前暂时保留旧后端源码，供回滚分支继续编译；当前原生 Range
+ * 播放器、插件设置页和 Resource Store 均不读取这些字段。
+ */
+export const MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT = 5;
+export const MSFILE_MEDIA_PREFETCH_BLOCKS_MIN = 2;
+export const MSFILE_MEDIA_PREFETCH_BLOCKS_MAX = 64;
+
 /** 单个内容对象的最高金额。规范十进制字符串："0" 表示显式不限。 */
 export type MsFileSatoshiAmount = string;
 
 export interface MsFileGlobalPriceSettings {
   seedMaxPriceSatoshis: MsFileSatoshiAmount;
   blockMaxPriceSatoshis: MsFileSatoshiAmount;
-}
-
-/**
- * 内置媒体播放器的资源策略。
- *
- * 这里的 Block 指 MSFile 的 256 KiB 内容块，不是金额授权，也不改变
- * Connect App 的付费模型。字段单独存在，避免把播放器预取策略伪装成价格设置。
- */
-export interface MsFileMediaPlaybackSettings {
-  /** 媒体播放最多提前读取的 MSFile Block 数，合法范围 2–64。 */
-  mediaPlaybackPrefetchBlocks: number;
-}
-
-/** 媒体播放预取窗口默认值与边界（单位：256 KiB MSFile Block）。 */
-export const MSFILE_MEDIA_PREFETCH_BLOCKS_DEFAULT = 5;
-export const MSFILE_MEDIA_PREFETCH_BLOCKS_MIN = 2;
-export const MSFILE_MEDIA_PREFETCH_BLOCKS_MAX = 64;
-
-/** 规范化播放器预取窗口；非法值返回 undefined，不把 0 解释成无限。 */
-export function normalizeMsFileMediaPrefetchBlocks(input: unknown): number | undefined {
-  if (typeof input !== "number" || !Number.isSafeInteger(input)) return undefined;
-  if (input < MSFILE_MEDIA_PREFETCH_BLOCKS_MIN || input > MSFILE_MEDIA_PREFETCH_BLOCKS_MAX) return undefined;
-  return input;
 }
 
 /** App 级覆盖。字段缺失表示继承全局设置；不使用 `0` 表达缺失。 */
@@ -232,8 +219,6 @@ export interface MsFileSupplierProbeResult {
 export interface MsFileSettingsSnapshot {
   /** 用户尚未显式保存全局设置时为 null；Read 此时 fail closed。 */
   globalSettings: MsFileGlobalPriceSettings | null;
-  /** 旧 DB 没有该字段时按默认 5 读取；可选以兼容旧 RPC 快照。 */
-  mediaPlaybackPrefetchBlocks?: number;
   suppliers: MsFileSupplierConfig[];
   /** 供应商配置世代；每次变更递增，使旧连接失效。 */
   supplierGeneration: number;
@@ -338,8 +323,6 @@ export interface MsFileService {
 
   getSettingsSnapshot(): Promise<MsFileSettingsSnapshot>;
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void>;
-  /** 独立更新播放器预取窗口，不改变 Seed/Block 金额。 */
-  updateMediaPlaybackSettings(input: MsFileMediaPlaybackSettings): Promise<void>;
   upsertSupplier(input: MsFileSupplierConfig): Promise<void>;
   deleteSupplier(supplierPublicKeyHex: string): Promise<void>;
   probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult>;

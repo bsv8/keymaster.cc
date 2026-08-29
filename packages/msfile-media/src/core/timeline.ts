@@ -1,5 +1,5 @@
-// VOD/Live 共用时间轴的轻量实现。真正的 demux/SourceBuffer 在 browser 层，
-// 这里只提供不依赖固定 EOF 的有限/无限 segment 适配器。
+// VOD/Live 共用时间轴的轻量测试适配器。原生 Range 播放路径不使用它；
+// 这里只提供不依赖固定 EOF 的有限/无限 segment 数据源。
 
 import { MsFileMediaError, throwIfMediaAborted } from "./errors.js";
 import type {

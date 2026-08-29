@@ -13,7 +13,6 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
   MsFileGlobalPriceSettings,
-  MsFileMediaPlaybackSettings,
   MsFilePendingApprovalView,
   MsFileReadBlockInput,
   MsFileReadResult,
@@ -35,8 +34,6 @@ type StateEvent = {
   status: MsFileServiceStatus;
   supplierGeneration: number;
   globalSettings: MsFileGlobalPriceSettings | null;
-  /** 媒体播放器最多提前读取的 Block 数；旧事件缺失时由 UI 使用默认 5。 */
-  mediaPlaybackPrefetchBlocks?: number;
   pendingApprovals: MsFilePendingApprovalView[];
 };
 
@@ -60,7 +57,6 @@ export class MsFileServiceProxy implements MsFileService {
     status: "unavailable",
     supplierGeneration: 0,
     globalSettings: null,
-    mediaPlaybackPrefetchBlocks: 5,
     pendingApprovals: [],
   };
   private readonly listeners = new Set<() => void>();
@@ -130,10 +126,6 @@ export class MsFileServiceProxy implements MsFileService {
 
   updateGlobalPriceSettings(input: MsFileGlobalPriceSettings): Promise<void> {
     return this.control({ type: "settings.global.update", input }).then(() => undefined);
-  }
-
-  updateMediaPlaybackSettings(input: MsFileMediaPlaybackSettings): Promise<void> {
-    return this.control({ type: "settings.media.update", input }).then(() => undefined);
   }
 
   upsertSupplier(input: unknown): Promise<void> {

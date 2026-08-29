@@ -99,6 +99,9 @@ importers:
       '@keymaster/contracts':
         specifier: '*'
         version: link:../../packages/contracts
+      '@keymaster/msfile-media':
+        specifier: '*'
+        version: link:../../packages/msfile-media
       '@keymaster/plugin-appmsg':
         specifier: '*'
         version: link:../../packages/plugin-appmsg

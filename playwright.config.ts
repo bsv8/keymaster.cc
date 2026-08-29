@@ -16,7 +16,7 @@ export default defineConfig({
   webServer: {
     // 测试 Vite 的生产构建产物，避免仅验证开发服务器行为。
     command:
-      "VITE_MSFILE_E2E=1 pnpm build && pnpm --filter @keymaster/web exec vite preview --host 127.0.0.1 --port 4173",
+      "VITE_MSFILE_E2E=1 VITE_MSFILE_SPIKE=1 pnpm --filter @keymaster/web build && pnpm --filter @keymaster/web exec vite preview --host 127.0.0.1 --port 4173",
     url: "http://127.0.0.1:4173",
     reuseExistingServer: !process.env.CI
   },

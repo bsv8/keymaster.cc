@@ -10,15 +10,14 @@ import { createServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { get as httpsGet } from "node:https";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { assertMsFileProxyProtocolCommit, MSFILE_GO_DIR } from "./fixtures/msfileProxyProtocol.js";
 
 const execFileAsync = promisify(execFile);
 const KEYMASTER_ORIGIN = "http://127.0.0.1:4173";
-const GO_NAS_DIR = process.env.MSFILE_PROXY_PROTOCOL_DIR
-  ? resolve(process.env.MSFILE_PROXY_PROTOCOL_DIR, "labs/webrtc-go")
-  : "/home/david/Workspaces/MSFile-Proxy-Protocol/labs/webrtc-go";
+const GO_NAS_DIR = MSFILE_GO_DIR;
 const FILE_BYTES = 2 * 1024 * 1024;
 const BLOCK_BYTES = 256 * 1024;
 const CONNECT_SESSION_ID = "msfile-e2e-connect-session";
@@ -411,6 +410,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
 
   test.beforeAll(async () => {
     test.setTimeout(180_000);
+    await assertMsFileProxyProtocolCommit();
     fixture = await startNasFixture();
     appServer = await startAppServer();
     const sdkOutput = join(fixture.directory, "keymaster-connect-e2e.js");

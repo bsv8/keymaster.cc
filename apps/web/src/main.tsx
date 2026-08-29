@@ -36,6 +36,7 @@ import { bootstrapPlugins } from "./bootstrapPlugins.js";
 import { renderFatalCrashPage } from "./fatalCrashPage.js";
 import { formatStartupErrorSummary } from "./startupErrorSummary.js";
 import { installGlobalFatalHandlers } from "./installGlobalFatalHandlers.js";
+import { prepareMsFileMediaServiceWorker } from "./msfileMediaServiceWorkerClient.js";
 import { normalizeLegacyHashRoute } from "./shell/legacyHashRoute.js";
 import { applyInitialTheme } from "./theme/themeStore.js";
 import "./shims/buffer.js";
@@ -119,6 +120,9 @@ async function start() {
   }
 
   try {
+    // Service Worker 只提供媒体虚拟 URL 的根作用域 HTTP 外壳；注册失败不应
+    // 阻断钱包启动，媒体组件会把它明确降级为独立下载。
+    await prepareMsFileMediaServiceWorker().catch(() => undefined);
     const host = await bootstrapPlugins();
     // 二次确认：bootstrapPlugins 完成后若 fatal 已生效（plugin 自己
     // 上报了 fatal），就不必再 mount。
@@ -166,10 +170,13 @@ async function start() {
       cause: err
     });
   }
-  // 施工单 施工单/2026-08-26/001：executor spike 钩子仅在显式查询参数下加载，
-  // 不接入生产数据面，也不影响默认开关。
-  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).has("msfileSpike")) {
-    void import("./msfileSpike/windowHooks.js").then((m) => m.installMsFileSpikeHooks()).catch(() => undefined);
+  // 旧 executor 架构验证钩子只在显式 VITE_MSFILE_SPIKE=1 的隔离构建中存在。
+  // 普通生产构建由 Vite 在编译期删除这一分支和对应模块图。
+  const spikeBuild = import.meta.env.VITE_MSFILE_SPIKE === "1";
+  if (spikeBuild && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("msfileSpike")) {
+    void import("virtual:keymaster-msfile-spike-hooks")
+      .then((module) => module.installMsFileSpikeHooks())
+      .catch(() => undefined);
   }
 }
 

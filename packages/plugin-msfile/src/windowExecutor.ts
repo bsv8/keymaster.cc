@@ -153,7 +153,38 @@ export class MsFileSupplierRuntime {
         continue;
       }
       if (connection.read.pendingCount >= MAX_READ_PENDING_PER_SUPPLIER) throw new Error("MSFile Read limit exceeded");
-      const result = await connection.read.send({ contentHashBytes: hash, maxPriceSatoshis: amount, maxContentBytes, signal: input.signal });
+      let abortConnection: Promise<void> | undefined;
+      const onAbort = () => {
+        // 不等待 ReadStreamSession 的本地 Promise 先 reject；AbortSignal
+        // 一触发就 reset 远端 stream，缩短 supplier 看到取消的窗口。
+        abortConnection ??= this.drop(input.supplier.supplierPublicKeyHex, connection);
+      };
+      if (input.signal) {
+        if (input.signal.aborted) onAbort();
+        else input.signal.addEventListener("abort", onAbort, { once: true });
+      }
+      let result: ReadOutcome;
+      try {
+        result = await connection.read.send({ contentHashBytes: hash, maxPriceSatoshis: amount, maxContentBytes, signal: input.signal });
+      } catch (error) {
+        if (input.signal?.aborted) {
+          // wire v1 没有单独的 ReadCancel frame；关闭这条 Read stream 会让
+          // supplier 的 stream context 立即结束，从而真正中止 Go 端在途 Read。
+          // 该 supplier 的其它在途 Read 也会随连接一起失败，下一次请求会
+          // 通过 ensureConnection 建立新连接，不能让旧连接继续占用资源。
+          await (abortConnection ?? this.drop(input.supplier.supplierPublicKeyHex, connection));
+        }
+        throw error;
+      } finally {
+        input.signal?.removeEventListener("abort", onAbort);
+      }
+      if (input.signal?.aborted) {
+        // 取消回调可能先 dispose ReadStreamSession，使 send() 以
+        // transport-failed 结算；此时不能进入下面的重拨分支，否则会在
+        // 用户已经取消后重新建立 supplier connection。
+        await (abortConnection ?? this.drop(input.supplier.supplierPublicKeyHex, connection));
+        throw new DOMException("The operation was aborted", "AbortError");
+      }
       if (result.type !== "transport-failed") return result;
       await this.drop(input.supplier.supplierPublicKeyHex, connection);
     }
@@ -316,6 +347,12 @@ export class MsFileSupplierRuntime {
   }
 
   private async closeConnection(entry: SupplierConnection): Promise<void> {
+    // connection.close() 是优雅/半关闭，Yamux 远端仍可能保持可读端并
+    // 继续执行 handler；失效/取消路径必须使用 connection.abort，确保
+    // supplier 的所有 stream context 立即结束，避免已取消的 Read 继续
+    // 占用读取槽位。
+    const error = new Error("MSFile supplier connection invalidated");
+    try { entry.connection.abort(error); } catch { /* connection already closed */ }
     entry.stat.dispose();
     entry.read.dispose();
     await entry.connection.close().catch(() => undefined);
