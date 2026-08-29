@@ -4,8 +4,10 @@ if (!rawOrigin) {
 }
 
 const origin = new URL(rawOrigin);
-origin.pathname = origin.pathname.replace(/\/+$/u, "");
-const url = new URL(`${origin.pathname}/msfile-media-sw.js`, origin);
+origin.search = "";
+origin.hash = "";
+const basePath = origin.pathname.replace(/\/+$/u, "");
+const url = new URL(`${basePath}/msfile-media-sw.js`, origin.origin);
 const response = await fetch(url, { redirect: "manual" });
 const body = await response.text();
 const contentType = response.headers.get("content-type") ?? "";
