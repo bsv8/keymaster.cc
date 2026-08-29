@@ -197,11 +197,14 @@ describe("MsFileMseBackend", () => {
       },
     } as unknown as MsFileVodSource;
     const element = new FakeMediaElement();
+    const debugActions: string[] = [];
     const backend = new MsFileMseBackend(
       element as unknown as MsFileMediaElementLike,
       source,
       "video/mp4",
       60,
+      undefined,
+      { onDebug: (action) => debugActions.push(action) },
     );
     const controller = new AbortController();
 
@@ -216,6 +219,11 @@ describe("MsFileMseBackend", () => {
     expect(element.currentTime).toBe(10);
     expect(buffer.start(0)).toBe(0);
     expect(buffer.end(0)).toBeGreaterThanOrEqual(10);
+    expect(debugActions).toContain("seek.begin");
+    expect(debugActions).toContain("restart.begin");
+    expect(debugActions).toContain("clear.remove");
+    expect(debugActions).toContain("restart.done");
+    expect(debugActions).toContain("seek.done");
 
     await backend.dispose();
   });
@@ -235,13 +243,14 @@ describe("MsFileMseBackend", () => {
       readRange: async () => new Uint8Array([1, 2, 3, 4]),
     } as unknown as MsFileVodSource;
     const element = new FakeMediaElement();
+    const debugActions: string[] = [];
     const backend = new MsFileMseBackend(
       element as unknown as MsFileMediaElementLike,
       source,
       "video/mp4",
       60,
       undefined,
-      { transmuxProgressiveMp4: true },
+      { transmuxProgressiveMp4: true, onDebug: (action) => debugActions.push(action) },
     );
     const controller = new AbortController();
 
@@ -257,6 +266,9 @@ describe("MsFileMseBackend", () => {
     expect(FakeTransmuxWorker.instances).toHaveLength(2);
     expect(buffer.start(0)).toBe(0);
     expect(buffer.end(0)).toBeGreaterThanOrEqual(10);
+    expect(debugActions).toContain("transmux.worker.created");
+    expect(debugActions).toContain("restart.begin");
+    expect(debugActions).toContain("seek.done");
 
     await backend.dispose();
   });

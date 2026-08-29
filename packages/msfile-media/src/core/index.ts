@@ -9,6 +9,8 @@ export type {
   MediaSourceMode,
   MediaTimelineSource,
   MsFileMediaBlockReader,
+  MsFileMediaDebugEntry,
+  MsFileMediaDebugValue,
   MsFileMediaElementLike,
   MsFileMediaPhase,
   MsFileMediaSession,

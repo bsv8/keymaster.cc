@@ -40,6 +40,7 @@ const INITIAL_MEDIA_SNAPSHOT: MsFileMediaSnapshot = {
   blockWindowLimit: 5,
   verifiedBlockCount: 0,
   readBlockCount: 0,
+  debug: { enabled: true, entries: [] },
 };
 
 function phaseLabel(
@@ -66,6 +67,13 @@ function shortSeconds(value: number): string {
   return Number.isFinite(value) ? value.toFixed(1) : "0.0";
 }
 
+function debugText(snapshot: MsFileMediaSnapshot): string {
+  return snapshot.debug.entries.map((entry) => {
+    const details = Object.keys(entry.details).length > 0 ? ` ${JSON.stringify(entry.details)}` : "";
+    return `[${String(entry.sequence).padStart(3, "0")} +${String(entry.elapsedMs).padStart(6, " ")}ms] ${entry.scope}.${entry.action}${details}`;
+  }).join("\n");
+}
+
 export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   const {
     seedHashHex,
@@ -82,6 +90,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   } = props;
   const host = usePluginHost();
   const elementRef = useRef<HTMLAudioElement | HTMLVideoElement>(null);
+  const debugRef = useRef<HTMLPreElement>(null);
   const mediaArgs = msFileMediaResourceArgs({ taskToken, seedHashHex, supplierPublicKeyHex, fileSizeBytes, declaredMediaType, prefetchBlocks });
   const resourceSnapshot = useResourceSelector<MsFileMediaSnapshot, MsFileMediaSnapshot | undefined>(
     host.resourceStore,
@@ -92,6 +101,7 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   const snapshot = resourceSnapshot ?? INITIAL_MEDIA_SNAPSHOT;
   const session = getMsFileMediaSession(taskToken);
   const [startupError, setStartupError] = useState<string | null>(null);
+  const [debugCopied, setDebugCopied] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -120,6 +130,11 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
     session?.setPrefetchBlocks(prefetchBlocks);
   }, [prefetchBlocks, session]);
 
+  useEffect(() => {
+    const element = debugRef.current;
+    if (element) element.scrollTop = element.scrollHeight;
+  }, [snapshot.debug.entries.length]);
+
   const play = useCallback(() => {
     if (!session) return;
     setStartupError(null);
@@ -130,6 +145,15 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
   }, [session, t, taskToken]);
 
   const pause = useCallback(() => session?.pause(), [session]);
+
+  const copyDebug = useCallback(() => {
+    const text = debugText(snapshot);
+    if (!text || typeof navigator === "undefined" || !navigator.clipboard?.writeText) return;
+    void navigator.clipboard.writeText(text).then(() => {
+      setDebugCopied(true);
+      setTimeout(() => setDebugCopied(false), 1500);
+    }).catch(() => undefined);
+  }, [snapshot]);
 
   const mediaElement = kind === "audio" ? (
     <audio
@@ -180,6 +204,20 @@ export function MsFileMediaPlayer(props: MsFileMediaPlayerProps) {
         <p className="msfile-home-file__hint">
           {t("msfile.home.media.notSupported", { defaultValue: "播放会按 Block 窗口读取，不会先组装完整 Blob。" })}
         </p>
+      ) : null}
+      {snapshot.debug.enabled ? (
+        <details className="msfile-home-file__media-debug" open>
+          <summary>{t("msfile.home.media.debug.title", { defaultValue: "媒体 Debug（默认开启）" })}</summary>
+          <div className="msfile-home-file__media-debug-actions">
+            <span>{t("msfile.home.media.debug.count", { defaultValue: "最近 {{count}} 条事件", count: snapshot.debug.entries.length })}</span>
+            <Button size="sm" variant="secondary" onClick={copyDebug} disabled={snapshot.debug.entries.length === 0}>
+              {debugCopied
+                ? t("msfile.home.media.debug.copied", { defaultValue: "已复制" })
+                : t("msfile.home.media.debug.copy", { defaultValue: "复制 Debug 日志" })}
+            </Button>
+          </div>
+          <pre ref={debugRef}>{debugText(snapshot) || t("msfile.home.media.debug.empty", { defaultValue: "等待媒体动作…" })}</pre>
+        </details>
       ) : null}
       {canBlobDownload ? (
         <Button variant="secondary" onClick={onDownload}>{t("msfile.home.download", { defaultValue: "下载" })}</Button>

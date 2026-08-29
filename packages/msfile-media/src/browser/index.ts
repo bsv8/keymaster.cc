@@ -4,6 +4,8 @@ export { createMsFileMediaSession, MsFileMediaSessionImpl } from "./session.js";
 export type { CreateMsFileMediaSessionOptions } from "./session.js";
 export type {
   MsFileMediaElementLike,
+  MsFileMediaDebugEntry,
+  MsFileMediaDebugValue,
   MsFileMediaPhase,
   MsFileMediaSession,
   MsFileMediaSnapshot,

@@ -321,6 +321,42 @@
   font-size: 0.8rem;
 }
 
+.msfile-home-file__media-debug {
+  border: 1px solid var(--km-border, #e5e7eb);
+  border-radius: 7px;
+  padding: 8px 10px;
+}
+
+.msfile-home-file__media-debug summary {
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.msfile-home-file__media-debug-actions {
+  align-items: center;
+  color: var(--km-text-muted, #6b7280);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  gap: 8px;
+  justify-content: space-between;
+  margin: 8px 0;
+}
+
+.msfile-home-file__media-debug pre {
+  background: color-mix(in srgb, var(--km-text, #111827) 6%, transparent);
+  border-radius: 6px;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  margin: 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .msfile-home-file__html-preview,
 .msfile-home-file__pdf-preview {
   min-height: 220px;

@@ -70,6 +70,23 @@ export interface MsFileVodSourceSnapshot {
   fileSizeBytes?: bigint;
 }
 
+/** Debug 记录中的安全标量；禁止放入媒体字节、Hash、凭据或付款原文。 */
+export type MsFileMediaDebugValue = string | number | boolean | null;
+
+/** 默认开启的播放器内存诊断记录，最多保留最近一段有界事件。 */
+export interface MsFileMediaDebugEntry {
+  /** 当前 session 内单调递增的事件序号。 */
+  sequence: number;
+  /** 相对 session 创建时刻的毫秒数，便于判断卡顿发生在哪一步。 */
+  elapsedMs: number;
+  /** 事件来源，例如 session、element、source、mse、transmux。 */
+  scope: string;
+  /** 稳定动作名；用于搜索和比较两次复现。 */
+  action: string;
+  /** 已脱敏的动作状态，不包含媒体内容及身份/付款数据。 */
+  details: Readonly<Record<string, MsFileMediaDebugValue>>;
+}
+
 export interface MsFileMediaSnapshot {
   /** 当前播放器状态；UI 应显示该状态而不是自行推断。 */
   phase: MsFileMediaPhase;
@@ -89,6 +106,11 @@ export interface MsFileMediaSnapshot {
   verifiedBlockCount: number;
   readBlockCount: number;
   error?: { code: string; message: string };
+  /** 默认开启、容量有界的诊断轨迹；UI 可直接展示并复制。 */
+  debug: {
+    enabled: boolean;
+    entries: readonly MsFileMediaDebugEntry[];
+  };
 }
 
 export interface MsFileMediaSession {

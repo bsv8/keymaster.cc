@@ -9,6 +9,8 @@ import {
 import { MsFileVodSource } from "../core/blockSource.js";
 import type {
   MsFileMediaElementLike,
+  MsFileMediaDebugEntry,
+  MsFileMediaDebugValue,
   MsFileMediaPhase,
   MsFileMediaSession,
   MsFileMediaSnapshot,
@@ -57,6 +59,48 @@ function mediaErrorFromSnapshot(error: MsFileMediaSnapshot["error"]): MsFileMedi
 export interface CreateMsFileMediaSessionOptions extends MsFileVodSourceOptions {
   /** 只影响错误状态，不把原始异常写入 UI。 */
   mode?: "vod";
+  /** 是否记录有界诊断轨迹；当前默认开启，便于定位浏览器媒体问题。 */
+  debug?: boolean;
+}
+
+const MAX_DEBUG_ENTRIES = 300;
+
+function monotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+
+function safeNumber(value: number): number | null {
+  return Number.isFinite(value) ? Number(value.toFixed(3)) : null;
+}
+
+function mediaElementDetails(element: MsFileMediaElementLike | undefined): Record<string, MsFileMediaDebugValue> {
+  if (!element) return { attached: false };
+  const browserElement = element as unknown as {
+    buffered?: TimeRanges;
+    seeking?: boolean;
+    readyState?: number;
+    networkState?: number;
+    error?: { code?: number } | null;
+  };
+  const ranges = browserElement.buffered;
+  const parts: string[] = [];
+  if (ranges) {
+    for (let index = 0; index < ranges.length; index += 1) {
+      parts.push(`${ranges.start(index).toFixed(3)}-${ranges.end(index).toFixed(3)}`);
+    }
+  }
+  return {
+    attached: true,
+    currentTime: safeNumber(element.currentTime),
+    duration: safeNumber(element.duration),
+    paused: element.paused,
+    ended: element.ended,
+    seeking: browserElement.seeking ?? false,
+    readyState: browserElement.readyState ?? null,
+    networkState: browserElement.networkState ?? null,
+    mediaErrorCode: browserElement.error?.code ?? null,
+    bufferedRanges: parts.length > 0 ? parts.join(",") : "empty",
+  };
 }
 
 export class MsFileMediaSessionImpl implements MsFileMediaSession {
@@ -69,6 +113,11 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   private backend: MediaBackend | undefined;
   private phase: MsFileMediaPhase = "idle";
   private error: MsFileMediaSnapshot["error"];
+  private readonly debugEnabled: boolean;
+  private readonly debugStartedAt = monotonicNow();
+  private readonly debugEntries: MsFileMediaDebugEntry[] = [];
+  private debugSequence = 0;
+  private lastSourceDebugKey = "";
   private disposed = false;
   private opening: Promise<void> | undefined;
   private seeking = false;
@@ -76,8 +125,37 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   private activeSeekSeconds: number | undefined;
 
   constructor(input: MsFileVodSourceInput, options: CreateMsFileMediaSessionOptions = {}) {
+    this.debugEnabled = options.debug !== false;
     this.source = new MsFileVodSource(input, options);
-    this.source.subscribe(() => this.emit());
+    this.source.subscribe(() => {
+      const snapshot = this.source.snapshot();
+      const key = [snapshot.initialized, snapshot.disposed, snapshot.blockWindowOccupancy, snapshot.blockWindowLimit,
+        snapshot.activeReadCount, snapshot.readCount, snapshot.verifiedBlockCount].join(":");
+      if (key !== this.lastSourceDebugKey) {
+        this.lastSourceDebugKey = key;
+        this.recordDebug("source", "snapshot", {
+          initialized: snapshot.initialized,
+          disposed: snapshot.disposed,
+          occupancy: snapshot.blockWindowOccupancy,
+          limit: snapshot.blockWindowLimit,
+          activeReads: snapshot.activeReadCount,
+          readCount: snapshot.readCount,
+          verifiedCount: snapshot.verifiedBlockCount,
+        }, false);
+      }
+      this.emit();
+    });
+    this.recordDebug("session", "created", {
+      debugEnabled: this.debugEnabled,
+      fileSizeBytes: input.fileSizeBytes <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(input.fileSizeBytes) : "unsafe",
+      declaredMediaType: input.declaredMediaType || "empty",
+      prefetchBlocks: options.prefetchBlocks ?? 5,
+      userAgent: typeof navigator !== "undefined" ? navigator.userAgent.slice(0, 256) : "unavailable",
+      secureContext: typeof isSecureContext === "boolean" ? isSecureContext : false,
+      crossOriginIsolated: typeof globalThis.crossOriginIsolated === "boolean" ? globalThis.crossOriginIsolated : false,
+      mediaSourceAvailable: typeof MediaSource !== "undefined",
+      workerAvailable: typeof Worker !== "undefined",
+    }, false);
   }
 
   snapshot(): MsFileMediaSnapshot {
@@ -99,6 +177,10 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
       verifiedBlockCount: source.verifiedBlockCount,
       readBlockCount: source.readCount,
       error: this.error,
+      debug: {
+        enabled: this.debugEnabled,
+        entries: this.debugEntries.slice(),
+      },
     };
   }
 
@@ -111,12 +193,34 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     for (const listener of this.listeners) listener();
   }
 
+  private recordDebug(
+    scope: string,
+    action: string,
+    details: Record<string, MsFileMediaDebugValue> = {},
+    notify = true,
+  ): void {
+    if (!this.debugEnabled) return;
+    this.debugEntries.push({
+      sequence: ++this.debugSequence,
+      elapsedMs: Math.max(0, Math.round(monotonicNow() - this.debugStartedAt)),
+      scope,
+      action,
+      details: { ...details },
+    });
+    if (this.debugEntries.length > MAX_DEBUG_ENTRIES) {
+      this.debugEntries.splice(0, this.debugEntries.length - MAX_DEBUG_ENTRIES);
+    }
+    if (notify) this.emit();
+  }
+
   private setPhase(phase: MsFileMediaPhase): void {
+    if (this.phase !== phase) this.recordDebug("session", "phase", { from: this.phase, to: phase }, false);
     this.phase = phase;
     this.emit();
   }
 
   async attach(element: MsFileMediaElementLike): Promise<void> {
+    this.recordDebug("session", "attach.request", mediaElementDetails(element));
     if (this.disposed) throw new MsFileMediaError("msfile_media_cancelled");
     if (!isMediaElement(element)) throw new MsFileMediaError("msfile_media_configuration");
     if (this.backend && this.element !== element) {
@@ -129,6 +233,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     const eventTypes = ["timeupdate", "progress", "durationchange", "ended", "error", "play", "pause", "seeking"];
     for (const type of eventTypes) {
       const listener: EventListener = () => {
+        this.recordDebug("element", type, mediaElementDetails(this.element), false);
         if (type === "ended" && this.phase === "playing") this.phase = "ended";
         if (type === "play" && (this.phase === "idle" || this.phase === "paused")) {
           // 原生 controls 也是合法的用户 gesture 入口；第一次点击时由
@@ -153,6 +258,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
       this.elementListeners.push({ type, listener });
     }
     this.emit();
+    this.recordDebug("session", "attach.done", mediaElementDetails(element));
   }
 
   private detachElementListeners(): void {
@@ -162,6 +268,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   }
 
   private async open(signal: AbortSignal): Promise<void> {
+    this.recordDebug("session", "open.begin", mediaElementDetails(this.element));
     if (this.backend) return;
     if (!this.element) throw new MsFileMediaError("msfile_media_configuration");
     this.setPhase("reading-seed");
@@ -173,6 +280,13 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     throwIfMediaAborted(signal);
     this.setPhase("parsing-header");
     this.probe = await probeInDedicatedWorker(this.source, signal);
+    this.recordDebug("session", "probe.done", {
+      container: this.probe.container,
+      mimeType: this.probe.mimeType,
+      codecs: this.probe.codecs.join(",") || "none",
+      duration: this.probe.durationSeconds === undefined ? null : safeNumber(this.probe.durationSeconds),
+      directMse: this.probe.directMse,
+    });
     if (this.probe.container === "wave") {
       this.backend = new MsFileWavBackend(this.element, this.source, (error) => this.backendFailure(error));
     } else if (this.probe.container === "mp4") {
@@ -184,17 +298,29 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
         this.probe.mimeType,
         this.probe.durationSeconds,
         (error) => this.backendFailure(error),
-        { transmuxProgressiveMp4: !this.probe.directMse },
+        {
+          transmuxProgressiveMp4: !this.probe.directMse,
+          onDebug: (action, details) => this.recordDebug("mse", action, details),
+        },
       );
     } else {
       if (!this.probe.directMse) throw new MsFileMediaError("msfile_media_unsupported_container");
-      this.backend = new MsFileMseBackend(this.element, this.source, this.probe.mimeType, this.probe.durationSeconds, (error) => this.backendFailure(error));
+      this.backend = new MsFileMseBackend(
+        this.element,
+        this.source,
+        this.probe.mimeType,
+        this.probe.durationSeconds,
+        (error) => this.backendFailure(error),
+        { onDebug: (action, details) => this.recordDebug("mse", action, details) },
+      );
     }
     await this.backend.start(signal);
+    this.recordDebug("session", "open.backend_started", { container: this.probe.container });
     this.setPhase("buffering");
   }
 
   private backendFailure(error: MsFileMediaError): void {
+    this.recordDebug("session", "backend.failure", { code: error.code, message: error.message });
     if (this.disposed || this.phase === "failed" || this.phase === "stopped" || this.phase === "disposed") return;
     this.error = { code: error.code, message: error.message };
     this.phase = "failed";
@@ -206,6 +332,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   }
 
   async play(): Promise<void> {
+    this.recordDebug("session", "play.request", { phase: this.phase, ...mediaElementDetails(this.element) });
     if (this.disposed) throw new MsFileMediaError("msfile_media_cancelled");
     if (this.phase === "playing") return;
     if (this.phase === "ended") return;
@@ -225,8 +352,10 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
       if (this.phase === "paused") return;
       this.error = undefined;
       this.setPhase("playing");
+      this.recordDebug("session", "play.done", mediaElementDetails(this.element));
     } catch (error) {
       const normalized = normalizeMediaError(error, signal);
+      this.recordDebug("session", "play.error", { code: normalized.code, message: normalized.message });
       if (normalized.code === "msfile_media_cancelled" && this.disposed) {
         this.setPhase("disposed");
       } else if (normalized.code === "msfile_media_cancelled" && (this.phase as MsFileMediaPhase) === "stopped") {
@@ -245,6 +374,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   }
 
   pause(): void {
+    this.recordDebug("session", "pause.request", { phase: this.phase, ...mediaElementDetails(this.element) });
     if (this.disposed || !this.backend) return;
     if (this.phase === "playing" || this.phase === "buffering") this.setPhase("paused");
     this.backend.pause();
@@ -254,15 +384,32 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     if (this.disposed) throw new MsFileMediaError("msfile_media_cancelled");
     if (!this.backend) throw new MsFileMediaError("msfile_media_configuration");
     const revision = ++this.seekRevision;
+    this.recordDebug("session", "seek.request", {
+      revision,
+      target: safeNumber(seconds),
+      phase: this.phase,
+      ...mediaElementDetails(this.element),
+    });
     this.seeking = true;
     this.activeSeekSeconds = seconds;
     try {
       await this.backend.seek(seconds, this.controller.signal);
-      if (revision !== this.seekRevision) return;
+      if (revision !== this.seekRevision) {
+        this.recordDebug("session", "seek.superseded", { revision, latestRevision: this.seekRevision });
+        return;
+      }
+      this.recordDebug("session", "seek.done", { revision, target: safeNumber(seconds), ...mediaElementDetails(this.element) });
       this.emit();
     } catch (error) {
       if (revision !== this.seekRevision) return;
       const normalized = normalizeMediaError(error, this.controller.signal);
+      this.recordDebug("session", "seek.error", {
+        revision,
+        target: safeNumber(seconds),
+        code: normalized.code,
+        message: normalized.message,
+        ...mediaElementDetails(this.element),
+      });
       this.error = { code: normalized.code, message: normalized.message };
       this.setPhase(normalized.code === "msfile_media_cancelled" ? "cancelled" : "failed");
       throw normalized;
@@ -275,11 +422,13 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   }
 
   setPrefetchBlocks(value: number): void {
+    this.recordDebug("session", "prefetch.change", { value });
     if (this.disposed) return;
     this.source.setPrefetchBlocks(value);
   }
 
   async stop(): Promise<void> {
+    this.recordDebug("session", "stop.request");
     if (this.disposed) return;
     this.controller.abort();
     try { await this.backend?.dispose(); } catch { /* stop is idempotent */ }
@@ -289,6 +438,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   }
 
   async dispose(): Promise<void> {
+    this.recordDebug("session", "dispose.request", mediaElementDetails(this.element));
     if (this.disposed) return;
     this.disposed = true;
     this.controller.abort();
