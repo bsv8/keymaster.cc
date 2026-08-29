@@ -72,6 +72,8 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   private disposed = false;
   private opening: Promise<void> | undefined;
   private seeking = false;
+  private seekRevision = 0;
+  private activeSeekSeconds: number | undefined;
 
   constructor(input: MsFileVodSourceInput, options: CreateMsFileMediaSessionOptions = {}) {
     this.source = new MsFileVodSource(input, options);
@@ -136,9 +138,14 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
         if (type === "pause" && (this.phase === "playing" || this.phase === "buffering")) {
           this.pause();
         }
-        if (type === "seeking" && this.backend && !this.seeking &&
+        if (type === "seeking" && this.backend &&
           (this.phase === "playing" || this.phase === "paused" || this.phase === "buffering")) {
-          void this.seek(this.element?.currentTime ?? 0).catch(() => undefined);
+          const target = this.element?.currentTime ?? 0;
+          // backend 写入相同 currentTime 产生的 seeking 事件需要忽略；用户在
+          // 上一次 seek 尚未完成时继续拖动，则立即用新目标替换旧请求。
+          if (!this.seeking || this.activeSeekSeconds === undefined || Math.abs(target - this.activeSeekSeconds) > 0.01) {
+            void this.seek(target).catch(() => undefined);
+          }
         }
         this.emit();
       };
@@ -246,17 +253,24 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   async seek(seconds: number): Promise<void> {
     if (this.disposed) throw new MsFileMediaError("msfile_media_cancelled");
     if (!this.backend) throw new MsFileMediaError("msfile_media_configuration");
+    const revision = ++this.seekRevision;
     this.seeking = true;
+    this.activeSeekSeconds = seconds;
     try {
       await this.backend.seek(seconds, this.controller.signal);
+      if (revision !== this.seekRevision) return;
       this.emit();
     } catch (error) {
+      if (revision !== this.seekRevision) return;
       const normalized = normalizeMediaError(error, this.controller.signal);
       this.error = { code: normalized.code, message: normalized.message };
       this.setPhase(normalized.code === "msfile_media_cancelled" ? "cancelled" : "failed");
       throw normalized;
     } finally {
-      this.seeking = false;
+      if (revision === this.seekRevision) {
+        this.seeking = false;
+        this.activeSeekSeconds = undefined;
+      }
     }
   }
 

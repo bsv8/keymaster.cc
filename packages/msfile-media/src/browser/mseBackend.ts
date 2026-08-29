@@ -50,13 +50,17 @@ export class MsFileMseBackend {
   private transmuxUntilSeconds = 0;
   private transmuxDone = false;
   private appendedData = false;
+  private trimAnchorSeconds = 0;
   private internalAbort = new AbortController();
   private pumpPromise: Promise<void> | undefined;
+  private pumpRunning = false;
   private readonly pauseTimers = new Set<ReturnType<typeof setTimeout>>();
   private started = false;
   private ended = false;
   private disposed = false;
   private pendingSeekSeconds: number | undefined;
+  private restartForBackwardSeek = false;
+  private seekRevision = 0;
   private pumpFailure: MsFileMediaError | undefined;
   private unlinkExternalAbort: (() => void) | undefined;
   private readonly onFailure: (error: MsFileMediaError) => void;
@@ -130,12 +134,21 @@ export class MsFileMseBackend {
       }
       await this.append(first.value, operationSignal);
     }
-    this.pumpPromise = this.pump(operationSignal).catch((error) => {
+    this.launchPump(operationSignal);
+  }
+
+  private launchPump(signal: AbortSignal): void {
+    if (this.pumpRunning || this.disposed) return;
+    this.pumpRunning = true;
+    const running = this.pump(signal).catch((error) => {
       if (this.disposed || this.internalAbort.signal.aborted) return;
       const normalized = error instanceof MsFileMediaError ? error : normalizeMediaError(error, signal);
       this.pumpFailure = normalized;
       this.onFailure(normalized);
+    }).finally(() => {
+      if (this.pumpPromise === running) this.pumpRunning = false;
     });
+    this.pumpPromise = running;
   }
 
   private async append(data: Uint8Array, signal: AbortSignal): Promise<void> {
@@ -143,16 +156,27 @@ export class MsFileMseBackend {
     if (!buffer) throw new MsFileMediaError("msfile_media_browser_capability");
     throwIfMediaAborted(signal);
     if (buffer.updating) await waitForEvent(buffer, "updateend", signal);
-    const update = waitForEvent(buffer, "updateend", signal);
+    const appendOnce = async (): Promise<void> => {
+      try {
+        buffer.appendBuffer(data.slice().buffer);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "QuotaExceededError") throw error;
+        throw new MsFileMediaError("msfile_media_decode_failed");
+      }
+      await waitForEvent(buffer, "updateend", signal);
+    };
     try {
-      buffer.appendBuffer(data.slice().buffer);
+      await appendOnce();
     } catch (error) {
-      if (error instanceof DOMException && error.name === "QuotaExceededError") {
+      if (!(error instanceof DOMException) || error.name !== "QuotaExceededError") throw error;
+      // 某些高码率媒体的 30 秒数据已超过浏览器配额；先缩到 5 秒再重试一次。
+      await this.trimOldBuffer(signal, MEDIA_LOW_WATER_SECONDS);
+      try {
+        await appendOnce();
+      } catch {
         throw new MsFileMediaError("msfile_media_browser_capability");
       }
-      throw new MsFileMediaError("msfile_media_decode_failed");
     }
-    await update;
     this.appendedData = true;
     await this.trimOldBuffer(signal);
   }
@@ -166,28 +190,82 @@ export class MsFileMseBackend {
     return false;
   }
 
+  private earliestBufferedTime(): number | undefined {
+    const ranges = this.element.buffered;
+    if (ranges.length === 0) return undefined;
+    let earliest = ranges.start(0);
+    for (let index = 1; index < ranges.length; index += 1) earliest = Math.min(earliest, ranges.start(index));
+    return earliest;
+  }
+
+  private async clearBufferedData(signal: AbortSignal): Promise<void> {
+    const buffer = this.sourceBuffer;
+    if (!buffer) throw new MsFileMediaError("msfile_media_browser_capability");
+    if (buffer.updating) await waitForEvent(buffer, "updateend", signal);
+    while (buffer.buffered.length > 0) {
+      const start = buffer.buffered.start(0);
+      const end = buffer.buffered.end(buffer.buffered.length - 1);
+      if (end <= start) return;
+      try {
+        buffer.remove(start, end);
+      } catch {
+        throw new MsFileMediaError("msfile_media_decode_failed");
+      }
+      await waitForEvent(buffer, "updateend", signal);
+    }
+  }
+
+  /**
+   * SourceBuffer 已回收目标位置时，旧 reader/转封装器无法倒放。必须在 pump
+   * 自己的串行上下文里重建管线，避免旧 append 与新初始化段交错。
+   */
+  private async restartPipeline(signal: AbortSignal): Promise<void> {
+    if (!this.restartForBackwardSeek) return;
+    this.restartForBackwardSeek = false;
+    const oldReader = this.streamReader;
+    this.streamReader = undefined;
+    try { await oldReader?.cancel(); } catch { /* 旧 reader 已结束 */ }
+    const oldTransmuxer = this.transmuxer;
+    this.transmuxer = undefined;
+    try { await oldTransmuxer?.dispose(); } catch { /* 旧 Worker 已结束 */ }
+    await this.clearBufferedData(signal);
+    this.ended = false;
+    this.transmuxDone = false;
+    this.transmuxUntilSeconds = 0;
+    this.appendedData = false;
+    this.trimAnchorSeconds = this.currentTime();
+    this.pumpFailure = undefined;
+    if (this.transmuxProgressiveMp4) {
+      this.transmuxer = new MsFileMp4Transmuxer(this.source, {
+        append: (data, appendSignal) => this.append(data, appendSignal),
+      });
+    } else {
+      this.streamReader = this.source.readStream(0, this.source.fileSizeNumber, signal).getReader();
+    }
+  }
+
   /**
    * MSE 不会自动回收已播放数据。这里只保留当前位置之前 30 秒，避免长视频
    * 一直 append 最终触发 QuotaExceededError。remove 与 append 共用同一串行链路。
    */
-  private async trimOldBuffer(signal: AbortSignal): Promise<void> {
+  private async trimOldBuffer(signal: AbortSignal, keepBehindSeconds = MEDIA_BACKWARD_SUGGESTION_SECONDS): Promise<void> {
     const buffer = this.sourceBuffer;
     if (!buffer || buffer.updating) return;
-    const cutoff = this.currentTime() - MEDIA_BACKWARD_SUGGESTION_SECONDS;
+    this.trimAnchorSeconds = Math.max(this.trimAnchorSeconds, this.currentTime());
+    const cutoff = this.trimAnchorSeconds - keepBehindSeconds;
     if (cutoff <= 0) return;
     const ranges = buffer.buffered;
     for (let index = 0; index < ranges.length; index += 1) {
       const start = ranges.start(index);
       const end = Math.min(ranges.end(index), cutoff);
       if (end <= start + MEDIA_SEEK_TOLERANCE_SECONDS) continue;
-      const update = waitForEvent(buffer, "updateend", signal);
       try {
         buffer.remove(start, end);
       } catch {
         // 浏览器可能正处于 readyState 切换；回收失败不应破坏当前可播放数据。
         return;
       }
-      await update;
+      await waitForEvent(buffer, "updateend", signal);
     }
   }
 
@@ -250,6 +328,7 @@ export class MsFileMseBackend {
     if (this.transmuxer) {
       for (;;) {
         throwIfMediaAborted(signal);
+        await this.restartPipeline(signal);
         if (this.ended) return;
         const seekTarget = this.pendingSeekSeconds;
         if (seekTarget !== undefined && this.isTimeBuffered(seekTarget)) {
@@ -274,10 +353,11 @@ export class MsFileMseBackend {
         await this.requestTransmux(until, signal);
       }
     }
-    const reader = this.streamReader;
-    if (!reader) return;
     for (;;) {
       throwIfMediaAborted(signal);
+      await this.restartPipeline(signal);
+      const reader = this.streamReader;
+      if (!reader) return;
       const seekTarget = this.pendingSeekSeconds;
       if (seekTarget !== undefined && this.isTimeBuffered(seekTarget)) {
         await this.waitWhilePaused(signal);
@@ -324,24 +404,36 @@ export class MsFileMseBackend {
       throw new MsFileMediaError("msfile_media_configuration");
     }
     throwIfMediaAborted(signal);
+    const revision = ++this.seekRevision;
+    const earliestBuffered = this.earliestBufferedTime();
+    const needsRestart = earliestBuffered !== undefined &&
+      seconds < earliestBuffered - MEDIA_SEEK_TOLERANCE_SECONDS;
     this.element.currentTime = seconds;
     if (this.isTimeBuffered(seconds) ||
       (this.durationSeconds !== undefined && seconds >= this.durationSeconds - MEDIA_SEEK_TOLERANCE_SECONDS)) return;
 
-    // 缓存外 seek 不是浏览器能力错误。把目标交给现有串行 pump，即使当前
-    // 处于暂停状态也继续有界读取，直到目标时间进入 SourceBuffer。
+    // 缓存外前跳由现有 pump 继续读取；目标早于已保留窗口时重建管线，
+    // 从文件起点重新建立初始化段与媒体时间轴，不能让旧转封装器继续向前追加。
+    if (needsRestart) {
+      this.restartForBackwardSeek = true;
+      // EOF 后 pump 已退出；先撤销逻辑终态，新的 pump 会在 append/remove 时
+      // 让 MediaSource 从 ended 回到 open，并重建时间轴。
+      this.ended = false;
+    }
     this.pendingSeekSeconds = seconds;
+    this.launchPump(this.internalAbort.signal);
     try {
       for (;;) {
         throwIfMediaAborted(signal);
         throwIfMediaAborted(this.internalAbort.signal);
+        if (revision !== this.seekRevision) return;
         if (this.pumpFailure) throw this.pumpFailure;
         if (this.isTimeBuffered(seconds)) return;
         if (this.ended) throw new MsFileMediaError("msfile_media_decode_failed");
         await this.waitWhilePaused(signal);
       }
     } finally {
-      if (this.pendingSeekSeconds === seconds) this.pendingSeekSeconds = undefined;
+      if (revision === this.seekRevision) this.pendingSeekSeconds = undefined;
     }
   }
 
