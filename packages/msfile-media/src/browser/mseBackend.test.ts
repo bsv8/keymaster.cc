@@ -70,11 +70,21 @@ class FakeMediaSource extends EventTarget {
 }
 
 class FakeMediaElement extends EventTarget {
-  currentTime = 0;
+  private currentTimeValue = 0;
+  currentTimeWriteCount = 0;
   paused = true;
   ended = false;
   src = "";
   srcObject: MediaProvider | null = null;
+
+  get currentTime(): number { return this.currentTimeValue; }
+  set currentTime(value: number) {
+    this.currentTimeValue = value;
+    this.currentTimeWriteCount += 1;
+  }
+
+  /** 模拟浏览器原生进度条先更新 currentTime，不计作后端写入。 */
+  setNativeCurrentTime(value: number): void { this.currentTimeValue = value; }
 
   get buffered(): TimeRanges {
     return FakeMediaSource.instance?.buffer.buffered ?? new FakeTimeRanges();
@@ -140,6 +150,65 @@ afterEach(() => {
 });
 
 describe("MsFileMseBackend", () => {
+  it("原生进度条已更新时间时不重复写 currentTime", async () => {
+    vi.stubGlobal("MediaSource", FakeMediaSource);
+    vi.stubGlobal("URL", {
+      createObjectURL: () => "blob:msfile-test",
+      revokeObjectURL: () => undefined,
+    });
+    const source = {
+      fileSizeNumber: 1,
+      readStream: () => new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1]));
+          controller.close();
+        },
+      }),
+    } as unknown as MsFileVodSource;
+    const element = new FakeMediaElement();
+    const debugDetails: Array<Record<string, unknown>> = [];
+    const backend = new MsFileMseBackend(
+      element as unknown as MsFileMediaElementLike,
+      source,
+      "video/mp4",
+      60,
+      undefined,
+      { onDebug: (action, details) => { if (action === "seek.begin") debugDetails.push(details); } },
+    );
+    const controller = new AbortController();
+
+    await backend.start(controller.signal);
+    element.setNativeCurrentTime(10);
+    const writesBeforeSeek = element.currentTimeWriteCount;
+
+    await expect(backend.seek(10, controller.signal, { elementTimeAlreadySet: true })).resolves.toBeUndefined();
+    expect(element.currentTimeWriteCount).toBe(writesBeforeSeek);
+    expect(debugDetails.at(-1)).toMatchObject({
+      elementTimeAlreadySet: true,
+      assignedElementTime: false,
+    });
+
+    await backend.dispose();
+  });
+
+  it("play 被 pause 打断的 AbortError 不映射为浏览器能力错误", async () => {
+    const source = {} as MsFileVodSource;
+    const element = new FakeMediaElement();
+    element.play = async () => { throw new DOMException("play interrupted", "AbortError"); };
+    const debugActions: string[] = [];
+    const backend = new MsFileMseBackend(
+      element as unknown as MsFileMediaElementLike,
+      source,
+      "video/mp4",
+      60,
+      undefined,
+      { onDebug: (action) => debugActions.push(action) },
+    );
+
+    await expect(backend.play(new AbortController().signal)).resolves.toBeUndefined();
+    expect(debugActions).toContain("play.interrupted");
+  });
+
   it("暂停状态跳到未缓存时间时继续读取，且不再报 browser_capability", async () => {
     vi.stubGlobal("MediaSource", FakeMediaSource);
     vi.stubGlobal("URL", {

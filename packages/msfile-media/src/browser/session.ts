@@ -26,11 +26,16 @@ interface MediaBackend {
   start(signal: AbortSignal): Promise<void>;
   play(signal: AbortSignal): Promise<void>;
   pause(): void;
-  seek(seconds: number, signal: AbortSignal): Promise<void>;
+  seek(seconds: number, signal: AbortSignal, options?: MediaBackendSeekOptions): Promise<void>;
   currentTime(): number;
   bufferedSeconds(): number;
   isEnded(): boolean;
   dispose(): Promise<void>;
+}
+
+interface MediaBackendSeekOptions {
+  /** 原生进度条已经写入 currentTime；后端只能补缓存，不能再次写入触发 seeking。 */
+  elementTimeAlreadySet?: boolean;
 }
 
 function isMediaElement(value: unknown): value is MsFileMediaElementLike {
@@ -123,6 +128,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   private seeking = false;
   private seekRevision = 0;
   private activeSeekSeconds: number | undefined;
+  private nativeSeekSeconds: number | undefined;
 
   constructor(input: MsFileVodSourceInput, options: CreateMsFileMediaSessionOptions = {}) {
     this.debugEnabled = options.debug !== false;
@@ -230,7 +236,7 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
     }
     if (this.element && this.element !== element) this.detachElementListeners();
     this.element = element;
-    const eventTypes = ["timeupdate", "progress", "durationchange", "ended", "error", "play", "pause", "seeking"];
+    const eventTypes = ["timeupdate", "progress", "durationchange", "ended", "error", "play", "pause", "seeking", "seeked"];
     for (const type of eventTypes) {
       const listener: EventListener = () => {
         this.recordDebug("element", type, mediaElementDetails(this.element), false);
@@ -243,13 +249,19 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
         if (type === "pause" && (this.phase === "playing" || this.phase === "buffering")) {
           this.pause();
         }
+        if (type === "seeked") this.nativeSeekSeconds = undefined;
         if (type === "seeking" && this.backend &&
           (this.phase === "playing" || this.phase === "paused" || this.phase === "buffering")) {
           const target = this.element?.currentTime ?? 0;
-          // backend 写入相同 currentTime 产生的 seeking 事件需要忽略；用户在
-          // 上一次 seek 尚未完成时继续拖动，则立即用新目标替换旧请求。
-          if (!this.seeking || this.activeSeekSeconds === undefined || Math.abs(target - this.activeSeekSeconds) > 0.01) {
-            void this.seek(target).catch(() => undefined);
+          const duplicateNativeSeek = this.nativeSeekSeconds !== undefined &&
+            Math.abs(target - this.nativeSeekSeconds) <= 0.001;
+          if (!duplicateNativeSeek) {
+            this.nativeSeekSeconds = target;
+            // 原生 controls 已经把 currentTime 改成目标值。这里只通知后端补齐
+            // 缓存，禁止后端再写一次 currentTime，否则 Chromium 会递归触发 seeking。
+            if (!this.seeking || this.activeSeekSeconds === undefined || Math.abs(target - this.activeSeekSeconds) > 0.01) {
+              void this.performSeek(target, true).catch(() => undefined);
+            }
           }
         }
         this.emit();
@@ -381,19 +393,24 @@ export class MsFileMediaSessionImpl implements MsFileMediaSession {
   }
 
   async seek(seconds: number): Promise<void> {
+    return this.performSeek(seconds, false);
+  }
+
+  private async performSeek(seconds: number, elementTimeAlreadySet: boolean): Promise<void> {
     if (this.disposed) throw new MsFileMediaError("msfile_media_cancelled");
     if (!this.backend) throw new MsFileMediaError("msfile_media_configuration");
     const revision = ++this.seekRevision;
     this.recordDebug("session", "seek.request", {
       revision,
       target: safeNumber(seconds),
+      origin: elementTimeAlreadySet ? "native-element" : "session-api",
       phase: this.phase,
       ...mediaElementDetails(this.element),
     });
     this.seeking = true;
     this.activeSeekSeconds = seconds;
     try {
-      await this.backend.seek(seconds, this.controller.signal);
+      await this.backend.seek(seconds, this.controller.signal, { elementTimeAlreadySet });
       if (revision !== this.seekRevision) {
         this.recordDebug("session", "seek.superseded", { revision, latestRevision: this.seekRevision });
         return;

@@ -19,6 +19,11 @@ export interface MsFileMseBackendOptions {
   onDebug?(action: string, details: Record<string, MsFileMediaDebugValue>): void;
 }
 
+export interface MsFileMseSeekOptions {
+  /** 原生媒体元素已经写入目标时间；MSE 后端只负责保证目标已缓存。 */
+  elementTimeAlreadySet?: boolean;
+}
+
 function asMediaElement(element: MsFileMediaElementLike): HTMLMediaElement {
   return element as unknown as HTMLMediaElement;
 }
@@ -487,10 +492,17 @@ export class MsFileMseBackend {
     try {
       await this.element.play();
     } catch (error) {
+      const errorName = error instanceof DOMException ? error.name : error instanceof Error ? error.name : "unknown";
       this.debug("play.rejected", {
-        errorName: error instanceof DOMException ? error.name : error instanceof Error ? error.name : "unknown",
+        errorName,
         paused: this.element.paused,
       });
+      // play() 被紧随其后的 pause()/seek/load() 打断时，Chromium 返回 AbortError。
+      // 这是用户动作竞争，不是浏览器缺少 MSE 能力；暂停态由 session 保留。
+      if (errorName === "AbortError" && this.element.paused) {
+        this.debug("play.interrupted", { reason: "abort-while-paused" });
+        return;
+      }
       throw new MsFileMediaError("msfile_media_browser_capability");
     }
     this.debug("play.done", { paused: this.element.paused });
@@ -502,7 +514,7 @@ export class MsFileMseBackend {
     this.element.pause();
   }
 
-  async seek(seconds: number, signal: AbortSignal): Promise<void> {
+  async seek(seconds: number, signal: AbortSignal, options: MsFileMseSeekOptions = {}): Promise<void> {
     if (!Number.isFinite(seconds) || seconds < 0 ||
       (this.durationSeconds !== undefined && seconds > this.durationSeconds + MEDIA_SEEK_TOLERANCE_SECONDS)) {
       throw new MsFileMediaError("msfile_media_configuration");
@@ -512,6 +524,8 @@ export class MsFileMseBackend {
     const earliestBuffered = this.earliestBufferedTime();
     const needsRestart = earliestBuffered !== undefined &&
       seconds < earliestBuffered - MEDIA_SEEK_TOLERANCE_SECONDS;
+    const shouldSetElementTime = options.elementTimeAlreadySet !== true &&
+      Math.abs(this.currentTime() - seconds) > 0.001;
     this.debug("seek.begin", {
       target: Number(seconds.toFixed(3)),
       currentTime: Number(this.currentTime().toFixed(3)),
@@ -520,8 +534,10 @@ export class MsFileMseBackend {
       needsRestart,
       ended: this.ended,
       pumpRunning: this.pumpRunning,
+      elementTimeAlreadySet: options.elementTimeAlreadySet === true,
+      assignedElementTime: shouldSetElementTime,
     });
-    this.element.currentTime = seconds;
+    if (shouldSetElementTime) this.element.currentTime = seconds;
     if (this.isTimeBuffered(seconds) ||
       (this.durationSeconds !== undefined && seconds >= this.durationSeconds - MEDIA_SEEK_TOLERANCE_SECONDS)) {
       this.debug("seek.immediate", { target: Number(seconds.toFixed(3)), bufferedRanges: this.bufferedRanges() });
