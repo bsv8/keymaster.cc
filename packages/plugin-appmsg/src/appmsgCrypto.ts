@@ -653,6 +653,32 @@ export function readEnvelopeRoute(envelopeBytes: Uint8Array): {
   };
 }
 
+/**
+ * 读取 sealed envelope 的非正文元数据。
+ *
+ * SatSubscription provider 只需要把 sealed record 翻译成 provider 内部
+ * 记录，不能调用 AppMsg 解密；因此这里单独提供 route + 幂等键/时间的
+ * 只读解析，正文仍留在 `openAppMessage` 的唯一解密边界内。
+ */
+export function readEnvelopeMetadata(envelopeBytes: Uint8Array): {
+  senderPublicKeyHex: string;
+  senderEndpointKind: "origin" | "plugin";
+  senderEndpointId: string;
+  recipientPublicKeyHex: string;
+  recipientEndpointKind: "origin" | "plugin";
+  recipientEndpointId: string;
+  clientMessageId: string;
+  createdAtMs: number;
+} {
+  const env = decodeEnvelope(envelopeBytes);
+  const route = readEnvelopeRoute(envelopeBytes);
+  return {
+    ...route,
+    clientMessageId: env.clientMessageId,
+    createdAtMs: env.createdAtMs
+  };
+}
+
 /* ============== helper：sender 公钥 ↔ 私钥一致性 ============== */
 
 /**

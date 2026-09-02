@@ -1,4 +1,4 @@
-// 施工单 2026-08-26/001：Window 侧唯一的 TypedSigner bridge。
+// Window P2P 基础系统插件的 TypedSigner bridge。
 //
 // 这里不构造 Noise / Peer Record payload，也不接受通用 bytes 或 digest；
 // payload/digest 由 bitcoin-libp2p SDK 与 Coordinator Worker 共同完成。
@@ -7,23 +7,23 @@ import type { PeerRecordInput } from "bitcoin-libp2p/identity";
 import type { TypedSigner } from "bitcoin-libp2p/signer";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import type {
-  MsFileIdentitySignResult,
-  MsFileNoiseSignRequest,
-  MsFilePeerRecordSignRequest,
+  WindowP2pIdentitySignResult,
+  WindowP2pNoiseSignRequest,
+  WindowP2pPeerRecordSignRequest,
   SessionEpoch,
 } from "@keymaster/contracts";
 
 const UINT64_MAX = (1n << 64n) - 1n;
 
-export interface MsFileIdentitySignerRpc {
-  msfileExecutorSignNoiseStaticKey(
-    request: Omit<MsFileNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch },
+export interface WindowP2pIdentitySignerRpc {
+  windowP2pExecutorSignNoiseStaticKey(
+    request: Omit<WindowP2pNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch },
     signal?: AbortSignal
-  ): Promise<{ status: string; value?: MsFileIdentitySignResult; message?: string }>;
-  msfileExecutorSignPeerRecord(
-    request: Omit<MsFilePeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch },
+  ): Promise<{ status: string; value?: WindowP2pIdentitySignResult; message?: string }>;
+  windowP2pExecutorSignPeerRecord(
+    request: Omit<WindowP2pPeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch },
     signal?: AbortSignal
-  ): Promise<{ status: string; value?: MsFileIdentitySignResult; message?: string }>;
+  ): Promise<{ status: string; value?: WindowP2pIdentitySignResult; message?: string }>;
 }
 
 function assertUint64(sequence: bigint): string {
@@ -31,7 +31,7 @@ function assertUint64(sequence: bigint): string {
   return sequence.toString(10);
 }
 
-function signatureFromResult(result: { status: string; value?: MsFileIdentitySignResult; message?: string }, purpose: string): Uint8Array {
+function signatureFromResult(result: { status: string; value?: WindowP2pIdentitySignResult; message?: string }, purpose: string): Uint8Array {
   if (result.status !== "ok" || !result.value) {
     throw new Error(`${purpose} signer RPC failed${result.message ? `: ${result.message}` : ""}`);
   }
@@ -46,12 +46,12 @@ function signatureFromResult(result: { status: string; value?: MsFileIdentitySig
  * 该对象只保存 active public key、lease 与 RPC 引用。private key/raw 不在
  * Window 类型、字段或返回值中出现；真正签名只在 Coordinator SharedWorker。
  */
-export class KeymasterMsFileIdentitySigner implements TypedSigner {
+export class KeymasterWindowP2pIdentitySigner implements TypedSigner {
   private readonly activePublicKeyBytes: Uint8Array;
   private readonly activePublicKeyHex: string;
   private readonly leaseId: string;
   private readonly sessionEpoch: SessionEpoch;
-  private readonly rpc: MsFileIdentitySignerRpc;
+  private readonly rpc: WindowP2pIdentitySignerRpc;
   private closed = false;
   private pending = 0;
   private noiseSigns = 0;
@@ -61,7 +61,7 @@ export class KeymasterMsFileIdentitySigner implements TypedSigner {
     leaseId: string;
     sessionEpoch: SessionEpoch;
     activePublicKeyHex: string;
-    rpc: MsFileIdentitySignerRpc;
+    rpc: WindowP2pIdentitySignerRpc;
   }) {
     this.leaseId = input.leaseId;
     this.sessionEpoch = input.sessionEpoch;
@@ -112,12 +112,12 @@ export class KeymasterMsFileIdentitySigner implements TypedSigner {
     this.pending += 1;
     try {
       this.noiseSigns += 1;
-      const result = await this.rpc.msfileExecutorSignNoiseStaticKey({
+      const result = await this.rpc.windowP2pExecutorSignNoiseStaticKey({
         leaseId: this.leaseId,
         expectedSessionEpoch: this.sessionEpoch,
         noiseStaticPublicKey: staticKey32.slice().buffer
       }, signal);
-      if (this.closed) throw new Error("MSFile identity signer is closed");
+      if (this.closed) throw new Error("Window P2P identity signer is closed");
       return signatureFromResult(result, "Noise");
     } finally {
       this.pending = Math.max(0, this.pending - 1);
@@ -126,20 +126,20 @@ export class KeymasterMsFileIdentitySigner implements TypedSigner {
 
   async signPeerRecord(record: PeerRecordInput, signal?: AbortSignal): Promise<Uint8Array> {
     this.assertOpen();
-    if (record.addresses.length !== 0) throw new Error("MSFile Signed Peer Record addresses must be empty");
+    if (record.addresses.length !== 0) throw new Error("Window P2P Signed Peer Record addresses must be empty");
     if (record.peerId.toString() !== this.peerId.toString()) throw new Error("Peer Record PeerId does not match the active public key");
     const sequence = assertUint64(record.sequence);
     this.pending += 1;
     try {
       this.peerRecordSigns += 1;
-      const result = await this.rpc.msfileExecutorSignPeerRecord({
+      const result = await this.rpc.windowP2pExecutorSignPeerRecord({
         leaseId: this.leaseId,
         expectedSessionEpoch: this.sessionEpoch,
         peerId: record.peerId.toString(),
         addresses: [],
         sequence
       }, signal);
-      if (this.closed) throw new Error("MSFile identity signer is closed");
+      if (this.closed) throw new Error("Window P2P identity signer is closed");
       return signatureFromResult(result, "Peer Record");
     } finally {
       this.pending = Math.max(0, this.pending - 1);
@@ -147,6 +147,7 @@ export class KeymasterMsFileIdentitySigner implements TypedSigner {
   }
 
   private assertOpen(): void {
-    if (this.closed) throw new Error("MSFile identity signer is closed");
+    if (this.closed) throw new Error("Window P2P identity signer is closed");
   }
 }
+

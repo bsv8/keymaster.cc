@@ -461,7 +461,14 @@ function makeFakeDb(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverride
 } {
     const rows = new Map<string, MsFileSupplierConfig>(seed.map((entry) => [entry.supplierPublicKeyHex, entry]));
     let listCallCount = 0;
-    const settingsRow = { settings: null as MsFileGlobalPriceSettings | null, updatedAt: null as number | null };
+    const settingsRow: {
+      settings: MsFileGlobalPriceSettings | null;
+      mediaBlockReadConcurrency?: number;
+      globalSeedReadConcurrency?: number;
+      globalBlockReadConcurrency?: number;
+      globalStatConcurrency?: number;
+      updatedAt: number | null;
+    } = { settings: null, updatedAt: null };
     return {
       rows,
       settingsRow,

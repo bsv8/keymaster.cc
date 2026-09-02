@@ -2,8 +2,8 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deriveSupplierPeerId } from "./supplierConfig.js";
-import { buildMsFileExecutorConcurrencyConfig } from "./executorTransport.js";
-import { MsFileSupplierRuntime } from "./windowExecutor.js";
+import { buildWindowP2pConcurrencyConfig } from "./executorTransport.js";
+import { MsFileSupplierRuntime } from "./supplierRuntime.js";
 
 const mocks = vi.hoisted(() => ({
   authenticateConnection: vi.fn(),
@@ -202,7 +202,7 @@ describe("MsFileSupplierRuntime WSS lifecycle", () => {
     }));
     await vi.waitFor(() => expect(readStream.send).toHaveBeenCalledTimes(3));
 
-    runtime.setConcurrencyConfig(buildMsFileExecutorConcurrencyConfig({
+    runtime.setConcurrencyConfig(buildWindowP2pConcurrencyConfig({
       mediaBlockReadConcurrency: 1,
       globalSeedReadConcurrency: 1,
       globalBlockReadConcurrency: 1,

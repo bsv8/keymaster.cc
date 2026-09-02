@@ -28,7 +28,9 @@ import type {
   CoordinatorVaultOperation,
   CoordinatorSubscribeTopicsResult,
   CoordinatorTopicBaseline,
+  CoordinatorValueResult,
   AssetDataInvalidationEvent,
+  ActiveKeyCrypto,
   SessionStateEvent,
   VaultSealedSecret,
   P2pkhProviderRegistrySnapshot,
@@ -36,17 +38,30 @@ import type {
   P2pkhNetworkProviderSelection,
   P2pkhProviderRegistry,
   P2pkhTransactionBroadcastProvider,
-  MsFileExecutorLease,
-  MsFileNoiseSignRequest,
-  MsFilePeerRecordSignRequest,
-  MsFileIdentitySignResult,
+  WindowP2pExecutorLease,
+  WindowP2pNoiseSignRequest,
+  WindowP2pPeerRecordSignRequest,
+  WindowP2pIdentitySignResult,
   MsFileReadConcurrencySettings,
+  CoordinatorSatOperation,
+  CoordinatorSatStateEvent,
+  SatWindowLaneOperation,
+  SatWindowLaneSspRequestEvent,
+  SatSubscriptionAdminService,
+  SatSubscriptionService,
+  SatSubscriptionSpiService,
+  SatSubscriptionSettingsSnapshot,
+  ProviderDeliveryAckClaim,
+  ProviderSealedMessageRecord,
+  MessageProviderOperations,
+  WindowP2pExecutorError,
 } from "@keymaster/contracts";
 import {
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   normalizeMsFileReadConcurrencySettings,
+  SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
 import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, buildOpenedAppMsgMessage, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
@@ -55,7 +70,7 @@ import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, rec
 import { createMessageBus } from "@keymaster/runtime/messageBus";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
 import { createJungleBusClient, registerJungleBusP2pkhProvider } from "@keymaster/plugin-junglebus/coordinator";
-import { createP2pkhProviderRegistry } from "@keymaster/plugin-p2pkh/coordinator";
+import { createP2pkhProviderRegistry, createP2pkhService, type P2pkhService } from "@keymaster/plugin-p2pkh/coordinator";
 import { createP2pkhCoordinatorTasks, openP2pkhDb, createP2pkhDb } from "@keymaster/plugin-p2pkh/coordinator";
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
@@ -82,11 +97,13 @@ import {
   type MsFileServiceEventState,
 } from "@keymaster/plugin-msfile/coordinator";
 import {
-  buildMsFileExecutorConcurrencyConfig,
-  createMsFileExecutorTransport,
-  type MsFileExecutorConcurrencyConfig,
-  type MsFileExecutorOperation,
+  buildWindowP2pConcurrencyConfig,
+  createWindowP2pMsFileTransport,
 } from "@keymaster/plugin-msfile/executor-transport";
+import type {
+  WindowP2pExecutorConcurrencyConfig,
+  WindowP2pExecutorOperation,
+} from "@keymaster/plugin-window-p2p/executor-transport";
 // 施工单 2026-08-26/001：identity/signing 的 payload 与 Peer Record 编码必须来自
 // bitcoin-libp2p；Worker 只持有 active private key 并做标准 DER 签名。
 import {
@@ -97,7 +114,37 @@ import {
   sha256Bytes,
   validatePublicKey,
 } from "bitcoin-libp2p/identity";
+// Channel 密码学只在 SharedWorker 调用；Window executor 不会收到私钥、通用
+// ECDH 或通用签名入口。
+import {
+  APP_MESSAGE_PROTOCOL,
+  base64urlEncode,
+  canonicalizeValue,
+  decodePrivateChannel,
+  inboxChannel,
+  newMessageID,
+  parseMessageID,
+  parsePrivateKey,
+  parsePublicKey,
+  publicKeyFromPrivate,
+} from "bsv8-channel-protocol";
+import { marshalEnvelope, signAndSeal } from "bsv8-channel-protocol/inbox";
+import { newAck, newDeliver } from "bsv8-channel-protocol/app-message";
+import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
 import { getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
+import {
+  createSatSubscriptionProvider,
+  openSatSubscriptionDb,
+  createSatSubscriptionState,
+  createSatSpiService,
+  type SatSubscriptionProvider,
+  type SatSubscriptionStateStore,
+  type SatSubscriptionDb,
+  type SatSubscriptionTransport,
+  type SatSupplierConnection,
+  type SatChannelCrypto,
+  type SatP2pkhService,
+} from "@keymaster/plugin-sat-subscription/coordinator";
 
 // Vault DB 操作（Worker 内可直接访问 IndexedDB）
 async function getVaultMeta(): Promise<VaultMetaRecord | undefined> {
@@ -600,11 +647,46 @@ const storageDataActiveByPort = new Map<string, number>();
 /* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
 let msfileRuntime: MsFileServiceImpl | undefined;
 let lastMsFileState: CoordinatorMsFileStateEvent | undefined;
+
+/* ---------- SatSubscription runtime（唯一 owner：SharedWorker） ---------- */
+const SAT_WINDOW_LANE_ID = "sat-subscription";
+interface SatWorkerRuntimeState {
+  ownerPublicKeyHex: string;
+  ownerGeneration: number;
+  db: SatSubscriptionDb;
+  state: SatSubscriptionStateStore;
+  provider: SatSubscriptionProvider;
+  handle: MessageProviderOperations;
+  admin: SatSubscriptionAdminService;
+  service: SatSubscriptionService;
+  spi: SatSubscriptionSpiService;
+  offMessages: () => void;
+  offIncoming: () => void;
+}
+let satRuntime: SatWorkerRuntimeState | undefined;
+let satRuntimeStarting: Promise<SatWorkerRuntimeState> | undefined;
+let satRuntimeStartToken = 0;
+let satRuntimeStartingToken: number | undefined;
+let satRevision = 0;
+let lastSatState: CoordinatorSatStateEvent | undefined;
+/** 以 connectionId 隔离入站 handler；supplierId 不是连接实例键。 */
+const satIncomingHandlers = new Map<string, { supplierId: string; ownerSessionEpoch: string; supplierGeneration: number; handler: (wire: Uint8Array) => Promise<Uint8Array> }>();
+/** Sat 充值复用 Worker 内的 P2PKH service；只创建一次，不在页面/每个 Tab 创建。 */
+let satP2pkhService: P2pkhService | undefined;
+let satP2pkhServiceStarting: Promise<P2pkhService> | undefined;
+let satP2pkhServiceOwnerPublicKeyHex: string | undefined;
+let satP2pkhServiceStartToken = 0;
+let satP2pkhServiceStartingToken: number | undefined;
+let satP2pkhServiceStartingOwnerPublicKeyHex: string | undefined;
+
+interface SatWorkerConnection extends SatSupplierConnection {
+  readonly state: "online" | "degraded" | "closed";
+}
 const msfileRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
 const msfileRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 /** 两个 identity RPC 的取消句柄；不得与 MSFile 数据面混用。 */
-const msfileExecutorIdentityRequests = new Map<string, { controller: AbortController; clientId: string; leaseId: string }>();
-const msfileExecutorIdentityRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
+const windowP2pExecutorIdentityRequests = new Map<string, { controller: AbortController; clientId: string; leaseId: string }>();
+const windowP2pExecutorIdentityRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const msfileGrants = new Map<string, { context: MsFileConnectAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
 /** 数据面队列有界，但具体并发由设置快照决定。 */
 const MSFILE_DATA_MAX_QUEUE = 256;
@@ -629,11 +711,11 @@ let msfileStatActive = 0;
 let msfileSeedDataActive = 0;
 let msfileBlockDataActive = 0;
 let msfileReadConcurrencySettings: MsFileReadConcurrencySettings = { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
-let msfileExecutorConfigVersion = 0;
-let msfileExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
-let msfileExecutorConcurrencyConfig: MsFileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(
+let windowP2pExecutorConfigVersion = 0;
+let windowP2pExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
+let windowP2pExecutorConcurrencyConfig: WindowP2pExecutorConcurrencyConfig = buildWindowP2pConcurrencyConfig(
   msfileReadConcurrencySettings,
-  msfileExecutorConfigVersion,
+  windowP2pExecutorConfigVersion,
 );
 
 function emitMsFileState(): void {
@@ -655,12 +737,12 @@ function emitMsFileState(): void {
   };
   const nextConcurrency = normalizeMsFileReadConcurrencySettings(event) ?? msfileReadConcurrencySettings;
   const nextSignature = JSON.stringify(nextConcurrency);
-  if (nextSignature !== msfileExecutorConfigSignature) {
+  if (nextSignature !== windowP2pExecutorConfigSignature) {
     msfileReadConcurrencySettings = nextConcurrency;
-    msfileExecutorConfigSignature = nextSignature;
-    msfileExecutorConfigVersion += 1;
-    msfileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(nextConcurrency, msfileExecutorConfigVersion);
-    void syncMsfileExecutorConfig().catch(() => undefined);
+    windowP2pExecutorConfigSignature = nextSignature;
+    windowP2pExecutorConfigVersion += 1;
+    windowP2pExecutorConcurrencyConfig = buildWindowP2pConcurrencyConfig(nextConcurrency, windowP2pExecutorConfigVersion);
+    void syncWindowP2pExecutorConfig().catch(() => undefined);
     pumpMsfileDataWaiters();
   }
   lastMsFileState = event;
@@ -790,7 +872,7 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
   }
   if (msfileRuntime) return msfileRuntime;
   const service = createMsFileService({
-    transport: msfileExecutorTransport,
+    transport: windowP2pExecutorTransport,
     notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
   });
   // 服务构造是同步的；DB 打开在内部异步完成，首个 control 调用会等待。
@@ -799,11 +881,224 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
   return msfileRuntime;
 }
 
+function workerSatChannelCrypto(): SatChannelCrypto {
+  const privateKey = (): Uint8Array => {
+    if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes || !coordinatorState.activePublicKeyHex) {
+      throw new Error("Sat Channel crypto requires an unlocked active key");
+    }
+    return coordinatorState.activePrivateKeyBytes;
+  };
+  const call = async (operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> => executeCryptoOperation(operation, privateKey());
+  return {
+    async sealDeliver(input) {
+      const result = await call({ type: "channel.seal-deliver", ...input });
+      if (result.type !== "channel.seal") throw new Error("Coordinator returned an invalid Channel Deliver seal");
+      return {
+        channel: result.channel,
+        messageIdBase64Url: result.messageIdBase64Url,
+        envelopeJson: result.envelopeJson.slice(),
+        fromPublicKeyHex: result.fromPublicKeyHex,
+        expiresAtMs: result.expiresAtMs,
+      };
+    },
+    async sealAck(input) {
+      const result = await call({ type: "channel.seal-ack", ...input });
+      if (result.type !== "channel.seal") throw new Error("Coordinator returned an invalid Channel ACK seal");
+      return {
+        channel: result.channel,
+        messageIdBase64Url: result.messageIdBase64Url,
+        envelopeJson: result.envelopeJson.slice(),
+        fromPublicKeyHex: result.fromPublicKeyHex,
+        expiresAtMs: result.expiresAtMs,
+      };
+    },
+    async open(input) {
+      const result = await call({ type: "channel.open", ...input });
+      if (result.type !== "channel.open") throw new Error("Coordinator returned an invalid Channel open result");
+      return {
+        channel: result.channel,
+        messageIdBase64Url: result.messageIdBase64Url,
+        signedDigestHex: result.signedDigestHex,
+        fromPublicKeyHex: result.fromPublicKeyHex,
+        toPublicKeyHex: result.toPublicKeyHex,
+        protocol: result.protocol,
+        bodyType: result.bodyType,
+        ...(result.contentJson ? { contentJson: result.contentJson.slice() } : {}),
+        ...(result.acknowledgedMessageIdBase64Url ? { acknowledgedMessageIdBase64Url: result.acknowledgedMessageIdBase64Url } : {}),
+        issuedAtMs: result.issuedAtMs,
+        expiresAtMs: result.expiresAtMs,
+      };
+    },
+  };
+}
+
+function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent, health?: import("@keymaster/contracts").MessageProviderHealth): void {
+  satRevision += 1;
+  const next: CoordinatorSatStateEvent = {
+    topic: "sat.events",
+    type: "sat.events.changed",
+    satRevision,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    event,
+    ...(health ? { health } : {}),
+  };
+  lastSatState = next;
+  publishTopicEvent("sat.events", next);
+}
+
+function emitSatHealth(): void {
+  emitSatState({ type: "noop" }, satRuntime?.provider.health() ?? { isHealthy: false, lastError: null, lastConnectedAtMs: 0 });
+}
+
+async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+    throw new Error("SatSubscription requires an unlocked active key");
+  }
+  if (satRuntime) return satRuntime;
+  if (satRuntimeStarting) {
+    const pending = satRuntimeStarting;
+    if (satRuntimeStartingToken === satRuntimeStartToken) return pending;
+    // lock/key switch 已使旧启动失效；等待它完成清理后再创建新世代，
+    // 避免两个世代同时拥有 Supplier 连接。
+    await pending.catch(() => undefined);
+    if (satRuntime) return satRuntime;
+  }
+  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
+  const ownerGeneration = Math.max(1, coordinatorState.keyspaceGeneration);
+  const expectedSessionEpoch = coordinatorState.sessionEpoch;
+  const startToken = satRuntimeStartToken;
+  const start = (async (): Promise<SatWorkerRuntimeState> => {
+    const keyspace = createWorkerKeyspace();
+    const db = await openSatSubscriptionDb({ keyspace, publicKeyHex: ownerPublicKeyHex });
+    let provider: ReturnType<typeof createSatSubscriptionProvider> | undefined;
+    let handle: MessageProviderOperations | undefined;
+    try {
+      const loaded = await db.load();
+      const initial = {
+        ...loaded,
+        ownerSettings: loaded.ownerSettings ?? {
+          ownerPublicKeyHex,
+          defaultPublishSupplierId: null,
+          receiveSupplierIds: [],
+        },
+      };
+      const state = createSatSubscriptionState({ ownerPublicKeyHex, initial, persistence: db });
+      provider = createSatSubscriptionProvider({
+        stateForOwner: async (requestedOwner) => {
+          if (requestedOwner !== coordinatorState.activePublicKeyHex || requestedOwner !== ownerPublicKeyHex) throw new Error("SatSubscription owner changed");
+          return state;
+        },
+        channelCrypto: workerSatChannelCrypto(),
+        transport: satSubscriptionTransport,
+        ownerGeneration,
+        ownerSessionEpoch: expectedSessionEpoch,
+        logger: { warn: (event, data) => console.warn("[sat-subscription]", event, data) },
+      });
+      const privateKeyForSigner = (): Uint8Array => {
+        if (coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("Sat owner signer is unavailable");
+        return coordinatorState.activePrivateKeyBytes;
+      };
+      handle = await provider.bind({
+        signer: {
+          publicKeyHex: ownerPublicKeyHex,
+          signChallenge: async ({ challenge }) => bytesToHex(await signEcdsaDigest({ privateKeyBytes: privateKeyForSigner(), digest: sha256Bytes(challenge), format: "compact" })),
+        },
+      }) as MessageProviderOperations;
+      const boundProvider = provider;
+      const assertFresh = (): void => {
+        if (startToken !== satRuntimeStartToken || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== expectedSessionEpoch || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
+          throw new Error("SatSubscription runtime became stale while starting");
+        }
+      };
+      assertFresh();
+      const service = boundProvider.service();
+      const admin = boundProvider.adminService();
+      const p2pkh = await ensureSatP2pkhService();
+      assertFresh();
+      const spi = createSatSpiService({
+        getRuntime: () => boundProvider.spiRuntime(),
+        getOwnerPublicKeyHex: () => coordinatorState.activePublicKeyHex ?? null,
+        getOwnerGeneration: () => coordinatorState.activePublicKeyHex === ownerPublicKeyHex ? Math.max(1, coordinatorState.keyspaceGeneration) : null,
+        stateForOwner: async (requestedOwner) => {
+          if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed");
+          return state;
+        },
+        getP2pkh: () => p2pkh,
+        deriveMainAddress: async (requestedOwner) => {
+          if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed before address derivation");
+          const result = await executeCryptoOperation({ type: "deriveP2pkhAddress", network: "main" }, privateKeyForSigner());
+          if (result.type !== "deriveP2pkhAddress") throw new Error("Failed to derive the owner payment address");
+          return result.address;
+        },
+      });
+      if (!service || !admin) throw new Error("SatSubscription provider did not expose its trusted services");
+      const runtime: SatWorkerRuntimeState = {
+        ownerPublicKeyHex,
+        ownerGeneration,
+        db,
+        state,
+        provider: boundProvider,
+        handle,
+        admin,
+        service,
+        spi,
+        offMessages: handle.subscribeMessages((record) => emitSatState({ type: "message", record })),
+        offIncoming: service.subscribeEvents((event) => emitSatState({ type: "incoming", event })),
+      };
+      assertFresh();
+      satRuntime = runtime;
+      emitSatHealth();
+      return runtime;
+    } catch (error) {
+      try { handle?.close(); } catch { /* stale start cleanup */ }
+      await provider?.shutdown().catch(() => undefined);
+      db.close();
+      throw error;
+    }
+  })();
+  satRuntimeStarting = start;
+  satRuntimeStartingToken = startToken;
+  try {
+    return await start;
+  } finally {
+    if (satRuntimeStarting === start) {
+      satRuntimeStarting = undefined;
+      satRuntimeStartingToken = undefined;
+    }
+  }
+}
+
+function releaseSatRuntime(_reason: string): void {
+  satRuntimeStartToken += 1;
+  // 先取消仍在 handler 中等待的入站 Publish，再移除连接注册表。取消只
+  // 释放 bridge Wire，不提前释放 handler slot；slot 要等真实 Promise settle，
+  // 防止永不结束的旧 handler 在新 owner 中制造未受控并发。
+  cancelSatInboundHandlers(undefined, `Sat runtime was released: ${_reason}`);
+  satIncomingHandlers.clear();
+  satP2pkhServiceStartToken += 1;
+  const p2pkh = satP2pkhService;
+  satP2pkhService = undefined;
+  satP2pkhServiceOwnerPublicKeyHex = undefined;
+  try { p2pkh?.onVaultLocked(); } catch { /* locked cleanup is best effort */ }
+  try { p2pkh?.dispose?.(); } catch { /* locked cleanup is best effort */ }
+  const runtime = satRuntime;
+  satRuntime = undefined;
+  lastSatState = undefined;
+  if (runtime) {
+    try { runtime.offMessages(); } catch { /* ignore */ }
+    try { runtime.offIncoming(); } catch { /* ignore */ }
+    runtime.handle.close();
+    void runtime.provider.shutdown().catch(() => undefined);
+    runtime.db.close();
+  }
+  emitSatHealth();
+}
+
 function releaseMsfileRuntime(_reason: string): void {
   for (const pending of msfileRequests.values()) pending.controller.abort();
   msfileRequests.clear();
-  for (const pending of msfileExecutorIdentityRequests.values()) pending.controller.abort();
-  msfileExecutorIdentityRequests.clear();
+  for (const pending of windowP2pExecutorIdentityRequests.values()) pending.controller.abort();
+  windowP2pExecutorIdentityRequests.clear();
   msfileGrants.clear();
   (msfileRuntime as unknown as { dispose?: () => void } | undefined)?.dispose?.();
   msfileRuntime = undefined;
@@ -1090,12 +1385,13 @@ async function enterUnlockedState(
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
     await persistCoordinatorMeta();
     // generateKey/importPrivateKey 在已解锁 Vault 中也会直接切换 active key。
-    // 这条入口过去遗漏了 MSFile lifecycle 收口：旧 lease 会占满 5 分钟，
+    // 这条入口过去遗漏了 Window P2P lifecycle 收口：旧 lease 会占满 5 分钟，
     // 新 epoch 的 transport 永久 unavailable。持久化成功后、发布新 session
     // 之前同步撤销旧 runtime/lease，行为与 activateKey/setActive 一致。
     if (changesUnlockedActiveKey) {
       releaseMsfileRuntime("activate-key");
-      clearMsFileExecutorLeaseLocked();
+      releaseSatRuntime("activate-key");
+      clearWindowP2pExecutorLeaseLocked();
     }
     replaceActivePrivateKey(activePrivateKeyBytes);
   } catch (error) {
@@ -1123,6 +1419,9 @@ async function enterUnlockedState(
   }
 
   publishSessionState(cause);
+  // 锁定/解锁切换会清空 Sat runtime；及时刷新健康快照，避免页面继续
+  // 显示上一 owner 的“在线”状态，直到下一次 ensure 才被动纠正。
+  emitSatHealth();
 
   // 广播任务快照
   publishTopicEvent("background.snapshot", {
@@ -1156,6 +1455,155 @@ function createWorkerKeyspace(): KeyspaceService {
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   };
+}
+
+/**
+ * 为 P2PKH service 提供 Worker 内的 active-key capability。
+ *
+ * 这里没有把 private key 放进返回值；返回的 capability 只闭包引用
+ * Coordinator 当前的私钥缓冲，并且每次签名/派生前重新校验 owner 与
+ * session。这样 Sat top-up 复用 P2PKH 交易编排时仍然满足私钥不出 Worker。
+ */
+async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto> {
+  const record = await vaultDb.getKey(publicKeyHex);
+  if (!record) throw new Error(`Unknown key ${publicKeyHex}`);
+  const requirePrivateKey = (): Uint8Array => {
+    if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== publicKeyHex || !coordinatorState.activePrivateKeyBytes) {
+      throw new Error("Vault is locked or active key changed");
+    }
+    return coordinatorState.activePrivateKeyBytes;
+  };
+  const identity = {
+    publicKeyHex: record.publicKeyHex,
+    label: record.label,
+    capabilities: [...record.capabilities],
+    createdAt: record.createdAt,
+    sessionId: coordinatorState.sessionEpoch,
+  };
+  return {
+    getIdentity: () => ({ ...identity, capabilities: [...identity.capabilities] }),
+    async signDigest(input) {
+      if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
+      if (!(input.digest instanceof ArrayBuffer) || input.digest.byteLength !== 32) throw new Error("Digest must be exactly 32 bytes");
+      const signature = await signEcdsaDigest({
+        privateKeyBytes: requirePrivateKey(),
+        digest: new Uint8Array(input.digest),
+        format: input.format,
+      });
+      return { publicKeyHex, format: input.format, signature: signature.slice().buffer as ArrayBuffer };
+    },
+    async deriveP2pkhAddress(input) {
+      if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
+      requirePrivateKey();
+      return { publicKeyHex, address: deriveP2pkhAddress(publicKeyHex, input.network) };
+    },
+    sealSendInput: () => { throw new Error("P2PKH Worker capability does not expose AppMsg sealing"); },
+    openSealed: async () => { throw new Error("P2PKH Worker capability does not expose AppMsg opening"); },
+    exportEncryptedKeyBackup: async () => { throw new Error("P2PKH Worker capability does not expose key export"); },
+    dispose: () => undefined,
+  };
+}
+
+/**
+ * P2PKH service 仍由现有 Coordinator broadcast pipeline 负责广播；Sat
+ * 充值只注入一个内部 Coordinator facade，避免从 SharedWorker 再绕回页面。
+ */
+async function ensureSatP2pkhService(): Promise<P2pkhService> {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+    throw new Error("P2PKH top-up requires an unlocked active key");
+  }
+  const ownerPublicKeyHex = coordinatorState.activePublicKeyHex;
+  const ownerSessionEpoch = coordinatorState.sessionEpoch;
+  const existingService = satP2pkhService;
+  if (existingService && satP2pkhServiceOwnerPublicKeyHex === ownerPublicKeyHex) {
+    await existingService.onVaultUnlocked();
+    if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || coordinatorState.sessionEpoch !== ownerSessionEpoch || satP2pkhService !== existingService) {
+      throw new Error("P2PKH service became stale while rebinding");
+    }
+    return existingService;
+  }
+  if (satP2pkhService) {
+    // 防御异常的旧 owner 残留；正常 key switch 已由 releaseSatRuntime
+    // 清理，但这里仍不能把旧 owner 的 service 交给新 owner。
+    const stale = satP2pkhService;
+    satP2pkhService = undefined;
+    satP2pkhServiceOwnerPublicKeyHex = undefined;
+    try { stale.onVaultLocked(); } catch { /* best effort */ }
+    try { stale.dispose?.(); } catch { /* best effort */ }
+  }
+  if (satP2pkhServiceStarting) {
+    const pending = satP2pkhServiceStarting;
+    if (satP2pkhServiceStartingToken === satP2pkhServiceStartToken && satP2pkhServiceStartingOwnerPublicKeyHex === ownerPublicKeyHex) return pending;
+    // 等待旧 owner 的启动完成并完成自身清理，再开始新 owner 世代，
+    // 避免两个 P2PKH service 同时持有 DB/消息总线订阅。
+    await pending.catch(() => undefined);
+    if (satP2pkhService && satP2pkhServiceOwnerPublicKeyHex === ownerPublicKeyHex) return satP2pkhService;
+  }
+  const startToken = satP2pkhServiceStartToken;
+  const start = (async (): Promise<P2pkhService> => {
+    const keyspace = createWorkerKeyspace();
+    const messageBus = createMessageBus();
+    const vault = {
+      status: () => coordinatorState.vaultStatus,
+      createActiveKeyCrypto: (requestedOwner: string) => createWorkerActiveKeyCrypto(requestedOwner),
+    } as unknown as VaultService;
+    const internalCoordinator = {
+      p2pkhProvidersGet: async (): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>> => ({
+        status: "ok",
+        value: getP2pkhProviderSnapshot(),
+        sessionEpoch: coordinatorState.sessionEpoch,
+      }),
+      p2pkhBroadcast: async (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>> => {
+        if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== ownerSessionEpoch || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
+          return { status: "stale-epoch" };
+        }
+        const request = {
+          kind: "p2pkh.broadcast" as const,
+          clientId: "sat-subscription",
+          requestId: generateRequestId(),
+          ...input,
+          expectedSessionEpoch: coordinatorState.sessionEpoch,
+        };
+        const response = await handleP2pkhBroadcast(request.requestId, request);
+        if (response.ack.status !== "ok") return response.ack;
+        if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
+          return { status: "stale-epoch" };
+        }
+        return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+      },
+    } as unknown as import("@keymaster/contracts").SessionCoordinatorClient;
+    const service = createP2pkhService({ vault, coordinator: internalCoordinator, messageBus, keyspace });
+    try {
+      // 充值首次进入时确保 owner 的 main P2PKH resource 已存在；该调用只
+      // 在 Worker 中读取私钥并派生地址，不会把私钥/crypto capability发给页面。
+      await service.onVaultUnlocked();
+      if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
+        throw new Error("P2PKH service became stale while starting");
+      }
+      if (startToken !== satP2pkhServiceStartToken || coordinatorState.sessionEpoch !== ownerSessionEpoch) {
+        throw new Error("P2PKH service start was superseded");
+      }
+      satP2pkhService = service;
+      satP2pkhServiceOwnerPublicKeyHex = ownerPublicKeyHex;
+      return service;
+    } catch (error) {
+      try { service.onVaultLocked(); } catch { /* best effort */ }
+      try { service.dispose?.(); } catch { /* best effort */ }
+      throw error;
+    }
+  })();
+  satP2pkhServiceStarting = start;
+  satP2pkhServiceStartingToken = startToken;
+  satP2pkhServiceStartingOwnerPublicKeyHex = ownerPublicKeyHex;
+  try {
+    return await start;
+  } finally {
+    if (satP2pkhServiceStarting === start) satP2pkhServiceStarting = undefined;
+    if (satP2pkhServiceStarting === undefined) {
+      satP2pkhServiceStartingToken = undefined;
+      satP2pkhServiceStartingOwnerPublicKeyHex = undefined;
+    }
+  }
 }
 
 async function registerCoordinatorTasks(): Promise<void> {
@@ -1282,12 +1730,12 @@ function handlePortDisconnect(clientId: string): void {
   for (const [requestId, request] of msfileRequests) {
     if (request.clientId === clientId) { request.controller.abort(); msfileRequests.delete(requestId); }
   }
-  for (const [requestId, request] of msfileExecutorIdentityRequests) {
-    if (request.clientId === clientId) { request.controller.abort(); msfileExecutorIdentityRequests.delete(requestId); }
+  for (const [requestId, request] of windowP2pExecutorIdentityRequests) {
+    if (request.clientId === clientId) { request.controller.abort(); windowP2pExecutorIdentityRequests.delete(requestId); }
   }
   for (const [grantId, grant] of msfileGrants) if (grant.clientId === clientId) msfileGrants.delete(grantId);
-  if (msfileExecutorLease !== undefined && msfileExecutorLease.clientId === clientId) {
-    clearMsFileExecutorLeaseLocked();
+  if (windowP2pExecutorLease !== undefined && windowP2pExecutorLease.clientId === clientId) {
+    clearWindowP2pExecutorLeaseLocked();
     emitMsFileState();
   }
   connectedPorts.delete(clientId);
@@ -1353,7 +1801,7 @@ async function handleClientMessage(
   // lock 是收敛型的安全操作：即使发起页面持有旧 epoch，也必须能够锁定
   // 当前全局会话。其余命令仍由 epoch 栅栏拒绝，避免旧页面操作新会话。
   if (request.kind !== "lock" && "expectedSessionEpoch" in request && request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
-    if (request.kind === "msfile.executor.acquire") {
+    if (request.kind === "window-p2p.executor.acquire") {
       try { request.executorPort?.close(); } catch { /* already detached */ }
     }
     if (isP2pkhBroadcastRequest(request)) {
@@ -1370,9 +1818,14 @@ async function handleClientMessage(
   const body = (response.operationResult as { content?: { bytes?: ArrayBuffer }; signatureDer?: ArrayBuffer; bytes?: ArrayBuffer } | undefined)?.content?.bytes;
   const signatureDer = (response.operationResult as { signatureDer?: ArrayBuffer } | undefined)?.signatureDer;
   const executorTransfer = (response.operationResult as { bytes?: ArrayBuffer } | undefined)?.bytes;
+  const cryptoResult = response.cryptoResult as { envelope?: Uint8Array; signature?: Uint8Array; envelopeJson?: Uint8Array; contentJson?: Uint8Array } | undefined;
   if (body instanceof ArrayBuffer) transfers.push(body);
   if (signatureDer instanceof ArrayBuffer) transfers.push(signatureDer);
   if (executorTransfer instanceof ArrayBuffer) transfers.push(executorTransfer);
+  if (cryptoResult?.envelope?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.envelope.buffer);
+  if (cryptoResult?.signature?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.signature.buffer);
+  if (cryptoResult?.envelopeJson?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.envelopeJson.buffer);
+  if (cryptoResult?.contentJson?.buffer instanceof ArrayBuffer) transfers.push(cryptoResult.contentJson.buffer);
   sendToPort(connectedPort.port, response, transfers);
 }
 
@@ -1433,6 +1886,20 @@ async function handleSubscribe(
         supplierGeneration: 0, globalSettings: null,
         ...MSFILE_READ_CONCURRENCY_RECOMMENDED,
         pendingApprovals: []
+      };
+      return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
+    }
+    if (topic === "sat.events") {
+      const baselineRevision = satRevision;
+      // Sat message/inbound 事件是 edge-triggered，不能把最近一条真实消息
+      // 当作新 Tab 的 baseline 重放；baseline 只携带健康快照和 noop。
+      const cached = lastSatState?.event.type === "noop" ? lastSatState : {
+        topic: "sat.events" as const,
+        type: "sat.events.changed" as const,
+        satRevision: baselineRevision,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        event: { type: "noop" as const },
+        health: satRuntime?.provider.health() ?? { isHealthy: false, lastError: null, lastConnectedAtMs: 0 },
       };
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
     }
@@ -1588,6 +2055,75 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   }
 }
 
+/**
+ * Worker 侧再次裁剪 ACK 入参；即便调用方绕过页面 facade 直接构造 RPC，
+ * 也不能把 sender/messageId/envelope 等页面字段送入 Sat provider。
+ */
+function normalizeProviderDeliveryAckClaim(value: unknown): ProviderDeliveryAckClaim {
+  if (!value || typeof value !== "object") return { deliveryId: "", supplierId: "", ackClaimToken: "" };
+  const claim = value as Record<string, unknown>;
+  return {
+    deliveryId: typeof claim.deliveryId === "string" ? claim.deliveryId : "",
+    supplierId: typeof claim.supplierId === "string" ? claim.supplierId : "",
+    ackClaimToken: typeof claim.ackClaimToken === "string" ? claim.ackClaimToken : "",
+  };
+}
+
+async function executeSatRequest(
+  request: Extract<CoordinatorClientRequest, { kind: "sat.operation" }>,
+): Promise<CoordinatorResponse> {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
+  }
+  const runtime = await ensureSatRuntime();
+  const operation: CoordinatorSatOperation = request.operation;
+  let value: unknown;
+  switch (operation.type) {
+    case "ensure":
+    case "provider.health":
+      value = runtime.provider.health();
+      break;
+    case "provider.send":
+      value = await runtime.handle.sendMessage(operation.input);
+      break;
+    case "provider.ack":
+      if (typeof runtime.handle.ackMessage !== "function") throw new Error("Sat provider handle does not support ACK");
+      // 页面 RPC 只有 deliveryId/supplierId/claimToken；ACK 的 sender、messageId、
+      // dedupKey 和 generation 由 Worker 内存中的 claim 表提供。
+      await runtime.handle.ackMessage(normalizeProviderDeliveryAckClaim(operation.claim));
+      value = null;
+      break;
+    case "admin.getSettings":
+      value = await runtime.admin.getSettingsSnapshot();
+      break;
+    case "admin.upsertSupplier":
+      await runtime.admin.upsertSupplier(operation.config);
+      value = null;
+      break;
+    case "admin.deleteSupplier":
+      await runtime.admin.deleteSupplier(operation.supplierId);
+      value = null;
+      break;
+    case "admin.setOwnerSettings":
+      await runtime.admin.setOwnerSettings(operation.settings);
+      value = null;
+      break;
+    case "service.publish": value = await runtime.service.publish(operation.input); break;
+    case "service.setSubscription": value = await runtime.service.setSubscription(operation.input); break;
+    case "service.subscribe": value = await runtime.service.subscribe(operation.input); break;
+    case "service.unsubscribe": value = await runtime.service.unsubscribe(operation.input); break;
+    case "service.refreshSubscriptions": value = await runtime.service.refreshSubscriptions(operation.input); break;
+    case "spi.getInformation": value = await runtime.spi.getInformation(operation.input); break;
+    case "spi.prepareTopUp": value = await runtime.spi.prepareTopUp(operation.input); break;
+    case "spi.submitTopUp": value = await runtime.spi.submitTopUp(operation.preview); break;
+    case "spi.collectNew": value = await runtime.spi.collectNew(operation.input); break;
+    case "spi.retryCollect": value = await runtime.spi.retryCollect(operation.input); break;
+    case "spi.collect": value = await runtime.spi.collect(operation.input); break;
+  }
+  emitSatHealth();
+  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+}
+
 function isMsfileRequest(request: CoordinatorClientRequest): boolean {
   return (
     request.kind === "msfile.grant" ||
@@ -1595,11 +2131,11 @@ function isMsfileRequest(request: CoordinatorClientRequest): boolean {
     request.kind === "msfile.data" ||
     request.kind === "msfile.cancel" ||
     request.kind === "msfile.session.abort" ||
-    request.kind === "msfile.executor.acquire" ||
-    request.kind === "msfile.executor.release" ||
-    request.kind === "msfile.executor.spike.transfer" ||
-    request.kind === "msfile.executor.identity.sign-noise" ||
-    request.kind === "msfile.executor.identity.sign-peer-record"
+    request.kind === "window-p2p.executor.acquire" ||
+    request.kind === "window-p2p.executor.release" ||
+    request.kind === "window-p2p.executor.spike.transfer" ||
+    request.kind === "window-p2p.executor.identity.sign-noise" ||
+    request.kind === "window-p2p.executor.identity.sign-peer-record"
   );
 }
 
@@ -1608,10 +2144,10 @@ function isMsfileRequest(request: CoordinatorClientRequest): boolean {
 // “读取旧策略—合并—写回”都会互相覆盖。
 let msfileMutationTail: Promise<void> = Promise.resolve();
 
-/* ---------- MSFile executor lease（施工单 001 §3.2） ----------
+/* ---------- Window P2P executor lease（施工单 001 §3.2） ----------
  * Coordinator 内存真值：同一 epoch+owner 同时最多一个 Window executor。
  * lock / key switch / Worker 重启直接清空；port 断开立即回收。 */
-interface MsFileExecutorLeaseState extends MsFileExecutorLease {
+interface WindowP2pExecutorLeaseState extends WindowP2pExecutorLease {
   clientId: string;
   ownerPublicKeyHex: string;
   acquiredAt: number;
@@ -1622,150 +2158,400 @@ interface MsFileExecutorLeaseState extends MsFileExecutorLease {
   /** Window 已应用的读取配置版本；未 ACK 时为 -1。 */
   transportConfigVersion: number;
 }
-let msfileExecutorLease: MsFileExecutorLeaseState | undefined;
+let windowP2pExecutorLease: WindowP2pExecutorLeaseState | undefined;
 
-interface MsFileExecutorBridgePending {
+interface WindowP2pExecutorBridgePending {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   leaseId: string;
   cleanup?: () => void;
   reservedBytes: number;
+  /** bridge 在途操作项数；小 Wire 也必须占用一个 item 配额。 */
+  reservedItems: number;
 }
-const msfileExecutorBridgePending = new Map<string, MsFileExecutorBridgePending>();
-let msfileExecutorBridgeInFlightBytes = 0;
-interface MsFileExecutorBridgeBudgetWaiter {
+const windowP2pExecutorBridgePending = new Map<string, WindowP2pExecutorBridgePending>();
+let windowP2pExecutorBridgeInFlightBytes = 0;
+let windowP2pExecutorBridgeInFlightItems = 0;
+interface WindowP2pExecutorInboundBridgePending {
+  leaseId: string;
+  supplierId: string;
+  connectionId: string;
+  ownerSessionEpoch: string;
+  supplierGeneration: number;
+  eventId: string;
   reservedBytes: number;
+  reservedItems: number;
+}
+/** Window 已发送、Worker 尚未完成/拒绝的 SSP 入站 Wire。 */
+const windowP2pExecutorInboundBridgePending = new Map<string, WindowP2pExecutorInboundBridgePending>();
+/**
+ * Worker 已启动但尚未 settle 的 Sat 入站业务 handler；这是跨 lease/owner
+ * 仍然有效的资源真值。取消只能标记并 abort，不能提前删除 slot。
+ */
+interface ActiveSatInboundHandler {
+  /** Window executor 租约编号。 */
+  leaseId: string;
+  /** 本次入站事件编号。 */
+  eventId: string;
+  /** Supplier 配置编号。 */
+  supplierId: string;
+  /** 真实连接实例编号。 */
+  connectionId: string;
+  /** 当前 owner 会话代际。 */
+  ownerSessionEpoch: string;
+  /** Supplier 配置代际。 */
+  supplierGeneration: number;
+  /** 传给支持取消的内部操作。 */
+  controller: AbortController;
+  /** 是否已经收到 event-cancel 或 lease/owner revoke。 */
+  canceled: boolean;
+  /** 入站 Wire 的 bridge 字节是否已经释放。 */
+  bridgeBytesReleased: boolean;
+}
+const activeSatInboundHandlers = new Map<string, ActiveSatInboundHandler>();
+/** 测试接缝：验证迟到/取消结果不会调用 Window 回写，不参与生产状态。 */
+let testSatInboundResponseDispatcher: ((operation: SatWindowLaneOperation, signal: AbortSignal) => Promise<unknown>) | undefined;
+interface WindowP2pExecutorBridgeBudgetWaiter {
+  reservedBytes: number;
+  reservedItems: number;
   signal?: AbortSignal;
   resolve: () => void;
   reject: (error: Error) => void;
   onAbort: () => void;
 }
-const msfileExecutorBridgeBudgetWaiters: MsFileExecutorBridgeBudgetWaiter[] = [];
+const windowP2pExecutorBridgeBudgetWaiters: WindowP2pExecutorBridgeBudgetWaiter[] = [];
 
-const MSFILE_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
+const WINDOW_P2P_EXECUTOR_LEASE_TTL_MS = 5 * 60 * 1000;
 // Spike RPC 的有界 pre-sign cancellation window：只影响尚未接入生产数据面的
 // executor identity 通道，用于让跨 tab lifecycle 事件可靠越过二次栅栏。
-const MSFILE_EXECUTOR_PRE_SIGN_YIELD_MS = 25;
-const MSFILE_EXECUTOR_TRANSFER_MAX_ITEMS = 5;
-const MSFILE_EXECUTOR_TRANSFER_MAX_BYTES = 17 * 1024 * 1024;
-const MSFILE_EXECUTOR_TRANSFER_MAX_ITEM_BYTES = 16 * 1024 * 1024;
+const WINDOW_P2P_EXECUTOR_PRE_SIGN_YIELD_MS = 25;
+const WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEMS = 5;
+const WINDOW_P2P_EXECUTOR_TRANSFER_MAX_BYTES = 17 * 1024 * 1024;
+const WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEM_BYTES = 16 * 1024 * 1024;
 const UINT64_MAX = (1n << 64n) - 1n;
-let msfileExecutorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
-let msfileExecutorIdentityTail: Promise<void> = Promise.resolve();
-let msfileExecutorTransferPendingItems = 0;
-let msfileExecutorTransferPendingBytes = 0;
-let msfileExecutorTransferPeakBytes = 0;
+let windowP2pExecutorLeaseTimer: ReturnType<typeof setTimeout> | undefined;
+let windowP2pExecutorIdentityTail: Promise<void> = Promise.resolve();
+let windowP2pExecutorTransferPendingItems = 0;
+let windowP2pExecutorTransferPendingBytes = 0;
+let windowP2pExecutorTransferPeakBytes = 0;
 
-function rejectMsfileExecutorBridgePending(error: Error): void {
-  for (const [requestId, pending] of msfileExecutorBridgePending) {
-    msfileExecutorBridgePending.delete(requestId);
-    msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - pending.reservedBytes);
+function rejectWindowP2pExecutorBridgePending(error: Error): void {
+  for (const [requestId, pending] of windowP2pExecutorBridgePending) {
+    windowP2pExecutorBridgePending.delete(requestId);
+    windowP2pExecutorBridgeInFlightBytes = Math.max(0, windowP2pExecutorBridgeInFlightBytes - pending.reservedBytes);
+    windowP2pExecutorBridgeInFlightItems = Math.max(0, windowP2pExecutorBridgeInFlightItems - pending.reservedItems);
     pending.cleanup?.();
     pending.reject(error);
   }
-  for (const waiter of msfileExecutorBridgeBudgetWaiters.splice(0)) {
+  cancelSatInboundHandlers(undefined, error.message);
+  windowP2pExecutorInboundBridgePending.clear();
+  windowP2pExecutorBridgeInFlightBytes = 0;
+  windowP2pExecutorBridgeInFlightItems = 0;
+  for (const waiter of windowP2pExecutorBridgeBudgetWaiters.splice(0)) {
     waiter.signal?.removeEventListener("abort", waiter.onAbort);
     waiter.reject(error);
   }
 }
 
-function pumpMsfileExecutorBridgeBudget(): void {
-  while (msfileExecutorBridgeBudgetWaiters.length > 0) {
-    const waiter = msfileExecutorBridgeBudgetWaiters[0]!;
+function pumpWindowP2pExecutorBridgeBudget(): void {
+  const maxBytes = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxInFlightBytes, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes);
+  const maxItems = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
+  while (windowP2pExecutorBridgeBudgetWaiters.length > 0) {
+    const waiter = windowP2pExecutorBridgeBudgetWaiters[0]!;
     if (waiter.signal?.aborted) {
-      msfileExecutorBridgeBudgetWaiters.shift();
+      windowP2pExecutorBridgeBudgetWaiters.shift();
       waiter.signal.removeEventListener("abort", waiter.onAbort);
       waiter.reject(new DOMException("The operation was aborted", "AbortError"));
       continue;
     }
-    if (msfileExecutorBridgeInFlightBytes + waiter.reservedBytes > msfileExecutorConcurrencyConfig.bridgeMaxInFlightBytes) break;
-    msfileExecutorBridgeBudgetWaiters.shift();
+    if (windowP2pExecutorBridgeInFlightBytes + waiter.reservedBytes > maxBytes) break;
+    if (windowP2pExecutorBridgeInFlightItems + waiter.reservedItems > maxItems) break;
+    windowP2pExecutorBridgeBudgetWaiters.shift();
     waiter.signal?.removeEventListener("abort", waiter.onAbort);
-    msfileExecutorBridgeInFlightBytes += waiter.reservedBytes;
+    windowP2pExecutorBridgeInFlightBytes += waiter.reservedBytes;
+    windowP2pExecutorBridgeInFlightItems += waiter.reservedItems;
     waiter.resolve();
   }
 }
 
-function reserveMsfileExecutorBridgeBytes(reservedBytes: number, signal?: AbortSignal): Promise<void> {
-  if (reservedBytes === 0) return Promise.resolve();
+function reserveWindowP2pExecutorBridgeBytes(reservedBytes: number, signal?: AbortSignal): Promise<void> {
   if (signal?.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+  const maxBytes = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxInFlightBytes, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes);
+  const maxItems = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
+  if (!Number.isSafeInteger(reservedBytes) || reservedBytes < 0 || reservedBytes > maxBytes) {
+    return Promise.reject(windowP2pError("ERR_BRIDGE_BYTES_LIMIT", "Window P2P bridge byte limit cannot admit this operation"));
+  }
+  // inFlightItems 已包含 pending、入站 reservation 以及已经从 waiter
+  // 队列中准入但尚未落入 pending map 的项；再加上 waiter 才是完整在途数。
+  // 不能只看两个 Map，否则同一轮同步 burst 会在 continuation 执行前超额
+  // 接受一倍以上的请求。
+  if (windowP2pExecutorBridgeInFlightItems + windowP2pExecutorBridgeBudgetWaiters.length >= maxItems) {
+    return Promise.reject(windowP2pError("ERR_BRIDGE_PENDING_LIMIT", "Window P2P bridge pending item limit reached"));
+  }
   return new Promise<void>((resolve, reject) => {
-    const waiter: MsFileExecutorBridgeBudgetWaiter = {
+    const waiter: WindowP2pExecutorBridgeBudgetWaiter = {
       reservedBytes,
+      reservedItems: 1,
       signal,
       resolve,
       reject,
       onAbort: () => {
-        const index = msfileExecutorBridgeBudgetWaiters.indexOf(waiter);
+        const index = windowP2pExecutorBridgeBudgetWaiters.indexOf(waiter);
         if (index < 0) return;
-        msfileExecutorBridgeBudgetWaiters.splice(index, 1);
+        windowP2pExecutorBridgeBudgetWaiters.splice(index, 1);
         reject(new DOMException("The operation was aborted", "AbortError"));
+        pumpWindowP2pExecutorBridgeBudget();
       },
     };
     signal?.addEventListener("abort", waiter.onAbort, { once: true });
-    msfileExecutorBridgeBudgetWaiters.push(waiter);
-    pumpMsfileExecutorBridgeBudget();
+    windowP2pExecutorBridgeBudgetWaiters.push(waiter);
+    pumpWindowP2pExecutorBridgeBudget();
   });
 }
 
-function releaseMsfileExecutorBridgeBytes(reservedBytes: number): void {
-  msfileExecutorBridgeInFlightBytes = Math.max(0, msfileExecutorBridgeInFlightBytes - reservedBytes);
-  pumpMsfileExecutorBridgeBudget();
+function releaseWindowP2pExecutorBridgeBytes(reservedBytes: number, reservedItems = 1): void {
+  windowP2pExecutorBridgeInFlightBytes = Math.max(0, windowP2pExecutorBridgeInFlightBytes - reservedBytes);
+  windowP2pExecutorBridgeInFlightItems = Math.max(0, windowP2pExecutorBridgeInFlightItems - reservedItems);
+  pumpWindowP2pExecutorBridgeBudget();
 }
 
-function handleMsfileExecutorPortMessage(event: MessageEvent): void {
+function inboundBridgeEventKey(connectionId: string, eventId: string): string {
+  return connectionId + "\u0000" + eventId;
+}
+
+function reserveWindowP2pExecutorInboundEvent(event: SatWindowLaneSspRequestEvent, lease: WindowP2pExecutorLeaseState): boolean {
+  const reservedBytes = event.wire.byteLength;
+  const maxBytes = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxInFlightBytes, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes);
+  const maxItems = Math.min(windowP2pExecutorConcurrencyConfig.bridgeMaxPendingItems, SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems);
+  const key = inboundBridgeEventKey(event.connectionId, event.eventId);
+  if (reservedBytes < 1 || reservedBytes > maxBytes || windowP2pExecutorInboundBridgePending.has(key)) return false;
+  if (windowP2pExecutorBridgeInFlightBytes + reservedBytes > maxBytes
+    || windowP2pExecutorBridgeInFlightItems + 1 > maxItems) return false;
+  windowP2pExecutorInboundBridgePending.set(key, {
+    leaseId: lease.leaseId,
+    supplierId: event.supplierId,
+    connectionId: event.connectionId,
+    ownerSessionEpoch: event.ownerSessionEpoch,
+    supplierGeneration: event.supplierGeneration,
+    eventId: event.eventId,
+    reservedBytes,
+    reservedItems: 1,
+  });
+  windowP2pExecutorBridgeInFlightBytes += reservedBytes;
+  windowP2pExecutorBridgeInFlightItems += 1;
+  return true;
+}
+
+function releaseWindowP2pExecutorInboundEvent(event: Pick<SatWindowLaneSspRequestEvent, "connectionId" | "eventId">, leaseId: string): void {
+  const key = inboundBridgeEventKey(event.connectionId, event.eventId);
+  const pending = windowP2pExecutorInboundBridgePending.get(key);
+  if (!pending || pending.leaseId !== leaseId) return;
+  windowP2pExecutorInboundBridgePending.delete(key);
+  releaseWindowP2pExecutorBridgeBytes(pending.reservedBytes, pending.reservedItems);
+}
+
+function activeSatInboundHandlerKey(task: Pick<ActiveSatInboundHandler, "leaseId" | "connectionId" | "eventId">): string {
+  return task.leaseId + "\u0000" + task.connectionId + "\u0000" + task.eventId;
+}
+
+function releaseSatInboundHandlerBridge(task: ActiveSatInboundHandler): void {
+  if (task.bridgeBytesReleased) return;
+  task.bridgeBytesReleased = true;
+  releaseWindowP2pExecutorInboundEvent({ connectionId: task.connectionId, eventId: task.eventId }, task.leaseId);
+}
+
+function cancelSatInboundHandler(task: ActiveSatInboundHandler, reason = "Sat inbound handler was canceled"): void {
+  if (!task.canceled) {
+    task.canceled = true;
+    try { task.controller.abort(new DOMException(reason, "AbortError")); } catch { /* AbortController 已结束 */ }
+  }
+  // 取消可以立即释放 bridge 中的 Wire，但 active handler slot 要等真实
+  // Promise settle 后才由 finishSatInboundHandler 释放。
+  releaseSatInboundHandlerBridge(task);
+}
+
+function cancelSatInboundHandlers(leaseId?: string, reason = "Sat inbound handler was canceled"): void {
+  for (const task of activeSatInboundHandlers.values()) {
+    if (leaseId !== undefined && task.leaseId !== leaseId) continue;
+    cancelSatInboundHandler(task, reason);
+  }
+}
+
+function cancelSatInboundHandlersForConnection(connectionId: string, reason = "Sat connection was closed"): void {
+  for (const task of activeSatInboundHandlers.values()) {
+    if (task.connectionId === connectionId) cancelSatInboundHandler(task, reason);
+  }
+}
+
+function beginSatInboundHandler(event: SatWindowLaneSspRequestEvent, lease: WindowP2pExecutorLeaseState): ActiveSatInboundHandler | undefined {
+  if (activeSatInboundHandlers.size >= SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxActiveWorkerInboundHandlers) return undefined;
+  const task: ActiveSatInboundHandler = {
+    leaseId: lease.leaseId,
+    eventId: event.eventId,
+    supplierId: event.supplierId,
+    connectionId: event.connectionId,
+    ownerSessionEpoch: event.ownerSessionEpoch,
+    supplierGeneration: event.supplierGeneration,
+    controller: new AbortController(),
+    canceled: false,
+    bridgeBytesReleased: false,
+  };
+  const key = activeSatInboundHandlerKey(task);
+  if (activeSatInboundHandlers.has(key)) return undefined;
+  activeSatInboundHandlers.set(key, task);
+  return task;
+}
+
+function isCurrentSatInboundHandler(task: ActiveSatInboundHandler): boolean {
+  return activeSatInboundHandlers.get(activeSatInboundHandlerKey(task)) === task
+    && !task.canceled
+    && windowP2pExecutorLease?.leaseId === task.leaseId
+    && coordinatorState.sessionEpoch === task.ownerSessionEpoch
+    && coordinatorState.vaultStatus === "unlocked"
+    && satIncomingHandlers.get(task.connectionId)?.supplierId === task.supplierId
+    && satIncomingHandlers.get(task.connectionId)?.ownerSessionEpoch === task.ownerSessionEpoch
+    && satIncomingHandlers.get(task.connectionId)?.supplierGeneration === task.supplierGeneration;
+}
+
+function finishSatInboundHandler(task: ActiveSatInboundHandler): void {
+  const key = activeSatInboundHandlerKey(task);
+  if (activeSatInboundHandlers.get(key) !== task) return;
+  activeSatInboundHandlers.delete(key);
+  releaseSatInboundHandlerBridge(task);
+}
+
+function windowP2pError(code: string, message: string, sentBoundary?: "not-sent" | "unknown"): Error & WindowP2pExecutorError {
+  const error = new Error(message) as Error & WindowP2pExecutorError;
+  error.domain = "window-p2p";
+  error.code = code;
+  if (sentBoundary) error.sentBoundary = sentBoundary;
+  return error;
+}
+
+function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
   const data = event.data as {
     type?: string;
     leaseId?: string;
     requestId?: string;
     ok?: boolean;
     result?: unknown;
-    errorMessage?: string;
+    error?: WindowP2pExecutorError;
     version?: number;
+    event?: unknown;
+    laneId?: string;
+    eventId?: string;
+    connectionId?: string;
   } | undefined;
   if (!data || data.type === undefined) return;
-  const lease = msfileExecutorLease;
+  const lease = windowP2pExecutorLease;
   if (!lease || data.leaseId !== lease.leaseId) return;
   if (data.type === "ready") {
     lease.transportReady = data.ok === true;
     lease.transportConfigVersion = -1;
     if (!lease.transportReady) {
-      clearMsFileExecutorLeaseLocked();
+      clearWindowP2pExecutorLeaseLocked();
     } else {
-      void syncMsfileExecutorConfig().catch(() => {
-        if (msfileExecutorLease?.leaseId === lease.leaseId) clearMsFileExecutorLeaseLocked();
+      void syncWindowP2pExecutorConfig().catch(() => {
+        if (windowP2pExecutorLease?.leaseId === lease.leaseId) clearWindowP2pExecutorLeaseLocked();
       });
     }
     emitMsFileState();
     return;
   }
   if (data.type === "config-ack" && typeof data.version === "number") {
-    if (!data.ok || data.version !== msfileExecutorConcurrencyConfig.version) {
-      if (!data.ok && msfileExecutorLease?.leaseId === lease.leaseId) clearMsFileExecutorLeaseLocked();
+    if (!data.ok || data.version !== windowP2pExecutorConcurrencyConfig.version) {
+      if (!data.ok && windowP2pExecutorLease?.leaseId === lease.leaseId) clearWindowP2pExecutorLeaseLocked();
       return;
     }
     lease.transportConfigVersion = data.version;
-    msfileExecutorConfigSync?.resolve();
-    msfileExecutorConfigSync = undefined;
-    pumpMsfileExecutorBridgeBudget();
+    windowP2pExecutorConfigSync?.resolve();
+    windowP2pExecutorConfigSync = undefined;
+    pumpWindowP2pExecutorBridgeBudget();
     emitMsFileState();
     return;
   }
+  if (data.type === "event-cancel" && typeof data.eventId === "string" && data.eventId.length > 0) {
+    // event 与 cancel 使用同一 MessagePort，正常情况下 event 先到这里。
+    // 取消状态保存在权威 active handler 表；不能用独立 Set 代替任务 slot。
+    const task = [...activeSatInboundHandlers.values()].find((item) => item.leaseId === lease.leaseId
+      && item.eventId === data.eventId
+      && (data.connectionId === undefined || item.connectionId === data.connectionId));
+    if (task) {
+      cancelSatInboundHandler(task, "Sat inbound event was canceled by Window");
+      return;
+    }
+    // 极窄的 event 已准入但尚未创建业务 task 的窗口仍然释放 bridge；
+    // MessagePort 顺序保证它不会在取消后重新进入 handler。
+    const pending = [...windowP2pExecutorInboundBridgePending.values()].find((item) => item.leaseId === lease.leaseId
+      && item.eventId === data.eventId
+      && (data.connectionId === undefined || item.connectionId === data.connectionId));
+    if (pending) releaseWindowP2pExecutorInboundEvent({ connectionId: pending.connectionId, eventId: pending.eventId }, lease.leaseId);
+    return;
+  }
+  if (data.type === "event") {
+    const eventValue = data.event;
+    if (!eventValue || typeof eventValue !== "object" || (eventValue as { type?: unknown }).type !== "ssp.request") {
+      // Window 在发送前已经为每个 SSP eventId 预占额度；即使事件形状
+      // 损坏，也必须走 reject 闭环，不能让 Window reservation 永久泄漏。
+      sendSatWindowEventReject(lease, eventValue, windowP2pError("ERR_INVALID_INBOUND_EVENT", "Window P2P inbound SSP event is invalid", "not-sent"));
+      return;
+    }
+    const event = eventValue as SatWindowLaneSspRequestEvent;
+    if (typeof event.supplierId !== "string" || typeof event.connectionId !== "string"
+      || event.supplierId.length === 0 || event.connectionId.length === 0
+      || typeof event.ownerSessionEpoch !== "string" || event.ownerSessionEpoch.length === 0
+      || !Number.isSafeInteger(event.supplierGeneration) || event.supplierGeneration < 1
+      || typeof event.eventId !== "string" || event.eventId.length === 0 || !(event.wire instanceof Uint8Array)) {
+      sendSatWindowEventReject(lease, eventValue, windowP2pError("ERR_INVALID_INBOUND_EVENT", "Window P2P inbound SSP event is invalid", "not-sent"));
+      return;
+    }
+    // Window 已在发送前做过一次预占；Worker 仍必须重新核算，不能信任
+    // 任意 Tab 传来的 event size，且请求/响应/入站事件共用总预算。
+    if (!reserveWindowP2pExecutorInboundEvent(event, lease)) {
+      sendSatWindowEventReject(lease, event, windowP2pError("ERR_BRIDGE_BYTES_LIMIT", "Window P2P inbound SSP bridge budget is full", "not-sent"));
+      return;
+    }
+    const task = beginSatInboundHandler(event, lease);
+    if (!task) {
+      releaseWindowP2pExecutorInboundEvent(event, lease.leaseId);
+      sendSatWindowEventReject(lease, event, windowP2pError("ERR_INBOUND_HANDLER_LIMIT", "Sat inbound Worker handler limit reached", "not-sent"));
+      return;
+    }
+    void handleSatWindowEvent(event, lease, task);
+    return;
+  }
   if (data.type !== "response" || typeof data.requestId !== "string") return;
-  const pending = msfileExecutorBridgePending.get(data.requestId);
+  const pending = windowP2pExecutorBridgePending.get(data.requestId);
   if (!pending || pending.leaseId !== lease.leaseId) return;
-  msfileExecutorBridgePending.delete(data.requestId);
-  releaseMsfileExecutorBridgeBytes(pending.reservedBytes);
+  windowP2pExecutorBridgePending.delete(data.requestId);
+  releaseWindowP2pExecutorBridgeBytes(pending.reservedBytes, pending.reservedItems);
   pending.cleanup?.();
   if (data.ok === true) pending.resolve(data.result);
-  else pending.reject(new Error(typeof data.errorMessage === "string" ? data.errorMessage : "MSFile executor request failed"));
+  else pending.reject(restoreWindowP2pError(data.error));
 }
 
-function attachMsfileExecutorPort(port: MessagePort, clientId: string, leaseId: string): void {
-  if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
-    throw new Error("invalid MSFile executor port");
+/** 从 MessagePort 恢复白名单错误，拒绝普通 Error 文本驱动控制流。 */
+function restoreWindowP2pError(value: unknown): Error & WindowP2pExecutorError {
+  if (value && typeof value === "object") {
+    const item = value as Partial<WindowP2pExecutorError>;
+    if ((item.domain === "window-p2p" || item.domain === "sat-transport" || item.domain === "msfile-transport")
+      && typeof item.code === "string" && item.code.length > 0 && typeof item.message === "string"
+      && (item.sentBoundary === undefined || item.sentBoundary === "not-sent" || item.sentBoundary === "unknown")) {
+      const error = new Error(item.message) as Error & WindowP2pExecutorError;
+      error.domain = item.domain;
+      error.code = item.code;
+      if (item.sentBoundary) error.sentBoundary = item.sentBoundary;
+      return error;
+    }
   }
-  const lease = msfileExecutorLease;
+  return windowP2pError("ERR_BRIDGE_RESPONSE", "Window P2P bridge returned an invalid error");
+}
+
+function attachWindowP2pExecutorPort(port: MessagePort, clientId: string, leaseId: string): void {
+  if (!port || typeof port.postMessage !== "function" || typeof port.start !== "function") {
+    throw new Error("invalid Window P2P executor port");
+  }
+  const lease = windowP2pExecutorLease;
   if (!lease || lease.clientId !== clientId || lease.leaseId !== leaseId) {
     try { port.close(); } catch { /* already closed */ }
     return;
@@ -1773,14 +2559,14 @@ function attachMsfileExecutorPort(port: MessagePort, clientId: string, leaseId: 
   lease.transportPort = port;
   lease.transportReady = false;
   lease.transportConfigVersion = -1;
-  port.onmessage = handleMsfileExecutorPortMessage;
+  port.onmessage = handleWindowP2pExecutorPortMessage;
   port.onmessageerror = () => {
-    if (msfileExecutorLease?.leaseId === leaseId) clearMsFileExecutorLeaseLocked();
+    if (windowP2pExecutorLease?.leaseId === leaseId) clearWindowP2pExecutorLeaseLocked();
   };
   port.start();
 }
 
-let msfileExecutorConfigSync: {
+let windowP2pExecutorConfigSync: {
   leaseId: string;
   version: number;
   resolve: () => void;
@@ -1788,40 +2574,40 @@ let msfileExecutorConfigSync: {
   promise: Promise<void>;
 } | undefined;
 
-function syncMsfileExecutorConfig(): Promise<void> {
-  const lease = msfileExecutorLease;
+function syncWindowP2pExecutorConfig(): Promise<void> {
+  const lease = windowP2pExecutorLease;
   if (!lease?.transportPort || !lease.transportReady || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
-    return Promise.reject(msfileError("msfile_unavailable", "MSFile Window executor is unavailable"));
+    return Promise.reject(windowP2pError("ERR_EXECUTOR_UNAVAILABLE", "Window P2P executor is unavailable"));
   }
-  if (lease.transportConfigVersion === msfileExecutorConcurrencyConfig.version) return Promise.resolve();
-  if (msfileExecutorConfigSync?.leaseId === lease.leaseId && msfileExecutorConfigSync.version === msfileExecutorConcurrencyConfig.version) {
-    return msfileExecutorConfigSync.promise;
+  if (lease.transportConfigVersion === windowP2pExecutorConcurrencyConfig.version) return Promise.resolve();
+  if (windowP2pExecutorConfigSync?.leaseId === lease.leaseId && windowP2pExecutorConfigSync.version === windowP2pExecutorConcurrencyConfig.version) {
+    return windowP2pExecutorConfigSync.promise;
   }
-  msfileExecutorConfigSync?.reject(new Error("MSFile executor concurrency config superseded"));
+  windowP2pExecutorConfigSync?.reject(windowP2pError("ERR_CONFIG_SUPERSEDED", "Window P2P executor concurrency config was superseded"));
   let resolveFn!: () => void;
   let rejectFn!: (error: Error) => void;
   const promise = new Promise<void>((resolve, reject) => {
     resolveFn = resolve;
     rejectFn = reject;
   });
-  msfileExecutorConfigSync = {
+  windowP2pExecutorConfigSync = {
     leaseId: lease.leaseId,
-    version: msfileExecutorConcurrencyConfig.version,
+    version: windowP2pExecutorConcurrencyConfig.version,
     resolve: resolveFn,
     reject: rejectFn,
     promise,
   };
   try {
-    lease.transportPort.postMessage({ type: "config", leaseId: lease.leaseId, config: msfileExecutorConcurrencyConfig });
+    lease.transportPort.postMessage({ type: "config", leaseId: lease.leaseId, config: windowP2pExecutorConcurrencyConfig });
   } catch (error) {
-    msfileExecutorConfigSync = undefined;
-    rejectFn(error instanceof Error ? error : new Error(String(error)));
+    windowP2pExecutorConfigSync = undefined;
+    rejectFn(windowP2pError("ERR_BRIDGE_POST", "Window P2P executor config could not be sent", "not-sent"));
   }
   return promise;
 }
 
-function awaitMsfileExecutorConfig(signal?: AbortSignal): Promise<void> {
-  const promise = syncMsfileExecutorConfig();
+function awaitWindowP2pExecutorConfig(signal?: AbortSignal): Promise<void> {
+  const promise = syncWindowP2pExecutorConfig();
   if (!signal) return promise;
   if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
   return new Promise<void>((resolve, reject) => {
@@ -1831,32 +2617,41 @@ function awaitMsfileExecutorConfig(signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function requestMsfileExecutorOperation(operation: MsFileExecutorOperation, signal?: AbortSignal): Promise<unknown> {
-  const lease = msfileExecutorLease;
+async function requestWindowP2pExecutorOperation(operation: WindowP2pExecutorOperation, signal?: AbortSignal): Promise<unknown> {
+  const lease = windowP2pExecutorLease;
   if (!lease || !lease.transportPort || !lease.transportReady || lease.sessionEpoch !== coordinatorState.sessionEpoch) {
-    throw msfileError("msfile_unavailable", "MSFile Window executor is unavailable");
+    throw windowP2pError("ERR_EXECUTOR_UNAVAILABLE", "Window P2P executor is unavailable");
   }
-  await awaitMsfileExecutorConfig(signal);
-  const currentLease = msfileExecutorLease;
+  await awaitWindowP2pExecutorConfig(signal);
+  const currentLease = windowP2pExecutorLease;
   if (!currentLease || !currentLease.transportPort || !currentLease.transportReady || currentLease.sessionEpoch !== coordinatorState.sessionEpoch) {
-    throw msfileError("msfile_unavailable", "MSFile Window executor is unavailable");
+    throw windowP2pError("ERR_EXECUTOR_REVOKED", "Window P2P executor lease is no longer current");
   }
-  const requestId = "msfile-exec-data-" + crypto.randomUUID();
-  const request = { type: "request", leaseId: currentLease.leaseId, requestId, operation };
-  const reservedBytes = operation.type === "read"
-    ? operation.kind === "block" ? MSFILE_MAX_BLOCK_BYTES : MSFILE_MAX_SEED_BYTES
-    : 0;
-  await reserveMsfileExecutorBridgeBytes(reservedBytes, signal);
+  const dispatchOperation = cloneWindowP2pOperationWire(operation);
+  const requestId = "window-p2p-exec-data-" + crypto.randomUUID();
+  const request = { type: "request", leaseId: currentLease.leaseId, requestId, operation: dispatchOperation };
+  const laneOperation = dispatchOperation.type === "lane" && dispatchOperation.operation && typeof dispatchOperation.operation === "object"
+    ? dispatchOperation.operation as { type?: unknown; kind?: unknown; wire?: unknown }
+    : undefined;
+  const reservedBytes = windowP2pExecutorBridgeBytesForOperation(dispatchOperation);
+  await reserveWindowP2pExecutorBridgeBytes(reservedBytes, signal);
   if (signal?.aborted) {
-    releaseMsfileExecutorBridgeBytes(reservedBytes);
+    releaseWindowP2pExecutorBridgeBytes(reservedBytes);
     throw new DOMException("The operation was aborted", "AbortError");
   }
+  // reserve 会让出事件循环；期间可能发生 lock、key switch 或 takeover。
+  // 不能把已占用的 bridge 预算继续投递到旧 MessagePort。
+  const afterReserveLease = windowP2pExecutorLease;
+  if (afterReserveLease?.leaseId !== currentLease.leaseId || afterReserveLease.transportPort !== currentLease.transportPort || afterReserveLease.sessionEpoch !== coordinatorState.sessionEpoch) {
+    releaseWindowP2pExecutorBridgeBytes(reservedBytes);
+    throw windowP2pError("ERR_EXECUTOR_REVOKED", "Window P2P executor lease changed before dispatch");
+  }
   return new Promise<unknown>((resolve, reject) => {
-    const pending: MsFileExecutorBridgePending = { resolve, reject, leaseId: currentLease.leaseId, reservedBytes };
-    msfileExecutorBridgePending.set(requestId, pending);
+    const pending: WindowP2pExecutorBridgePending = { resolve, reject, leaseId: currentLease.leaseId, reservedBytes, reservedItems: 1 };
+    windowP2pExecutorBridgePending.set(requestId, pending);
     const onAbort = () => {
-      if (!msfileExecutorBridgePending.delete(requestId)) return;
-      releaseMsfileExecutorBridgeBytes(pending.reservedBytes);
+      if (!windowP2pExecutorBridgePending.delete(requestId)) return;
+      releaseWindowP2pExecutorBridgeBytes(pending.reservedBytes);
       try { currentLease.transportPort?.postMessage({ type: "cancel", leaseId: currentLease.leaseId, requestId }); } catch { /* executor may be gone */ }
       reject(new DOMException("The operation was aborted", "AbortError"));
     };
@@ -1866,85 +2661,297 @@ async function requestMsfileExecutorOperation(operation: MsFileExecutorOperation
       pending.cleanup = () => signal.removeEventListener("abort", onAbort);
     }
     try {
-      currentLease.transportPort!.postMessage(request);
+      const transfer: Transferable[] = laneOperation?.wire instanceof Uint8Array
+        ? [laneOperation.wire.buffer]
+        : [];
+      currentLease.transportPort!.postMessage(request, transfer);
     } catch (error) {
-      if (msfileExecutorBridgePending.delete(requestId)) {
-        releaseMsfileExecutorBridgeBytes(pending.reservedBytes);
+      if (windowP2pExecutorBridgePending.delete(requestId)) {
+        releaseWindowP2pExecutorBridgeBytes(pending.reservedBytes);
         pending.cleanup?.();
-        reject(error instanceof Error ? error : new Error(String(error)));
+        reject(windowP2pError("ERR_BRIDGE_POST", "Window P2P executor operation could not be sent", "not-sent"));
       }
     }
   });
 }
 
-const msfileExecutorTransport = createMsFileExecutorTransport({
+/** 只复制实际 Wire 字节；禁止窄 Uint8Array 把更大的底层 buffer 带过 bridge。 */
+function cloneWindowP2pOperationWire(operation: WindowP2pExecutorOperation): WindowP2pExecutorOperation {
+  if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return operation;
+  const laneOperation = operation.operation as { wire?: unknown };
+  if (!(laneOperation.wire instanceof Uint8Array)) return operation;
+  return {
+    ...operation,
+    operation: {
+      ...(operation.operation as Record<string, unknown>),
+      wire: laneOperation.wire.slice(),
+    },
+  };
+}
+
+/**
+ * 计算一次 Worker -> Window 操作的最坏 bridge 占用。
+ * SSP/SPI 请求必须同时为实际请求和最大响应预留，响应到达前不能释放。
+ */
+function windowP2pExecutorBridgeBytesForOperation(operation: WindowP2pExecutorOperation): number {
+  if (operation.type !== "lane" || !operation.operation || typeof operation.operation !== "object") return 0;
+  const laneOperation = operation.operation as { type?: unknown; kind?: unknown; wire?: unknown };
+  if ((laneOperation.type === "requestSsp" || laneOperation.type === "requestSpi") && laneOperation.wire instanceof Uint8Array) {
+    return laneOperation.wire.byteLength + MAX_WIRE_BYTES;
+  }
+  if (laneOperation.wire instanceof Uint8Array) return laneOperation.wire.byteLength;
+  if (laneOperation.type === "read") return laneOperation.kind === "block" ? MSFILE_MAX_BLOCK_BYTES : MSFILE_MAX_SEED_BYTES;
+  return 0;
+}
+
+function satWindowLaneOperation(operation: SatWindowLaneOperation, signal?: AbortSignal): Promise<unknown> {
+  return requestWindowP2pExecutorOperation({ type: "lane", laneId: SAT_WINDOW_LANE_ID, operation }, signal);
+}
+
+function asSatWire(value: unknown, label: string): Uint8Array {
+  if (!(value instanceof Uint8Array) || value.byteLength === 0) throw new Error(`${label} returned an invalid Wire`);
+  return value.slice();
+}
+
+function satWindowEventReference(rawEvent: unknown): Record<string, unknown> {
+  if (!rawEvent || typeof rawEvent !== "object") return { type: "ssp.request" };
+  const value = rawEvent as Partial<SatWindowLaneSspRequestEvent>;
+  return {
+    type: "ssp.request",
+    ...(typeof value.eventId === "string" ? { eventId: value.eventId } : {}),
+    ...(typeof value.supplierId === "string" ? { supplierId: value.supplierId } : {}),
+    ...(typeof value.connectionId === "string" ? { connectionId: value.connectionId } : {}),
+    ...(typeof value.ownerSessionEpoch === "string" ? { ownerSessionEpoch: value.ownerSessionEpoch } : {}),
+    ...(Number.isSafeInteger(value.supplierGeneration) ? { supplierGeneration: value.supplierGeneration } : {}),
+  };
+}
+
+function sendSatWindowEventReject(
+  lease: WindowP2pExecutorLeaseState,
+  rawEvent: unknown,
+  error: WindowP2pExecutorError,
+): void {
+  const reference = satWindowEventReference(rawEvent);
+  if (typeof reference.eventId !== "string") return;
+  try {
+    lease.transportPort?.postMessage({
+      type: "event-reject",
+      leaseId: lease.leaseId,
+      laneId: SAT_WINDOW_LANE_ID,
+      event: reference,
+      error,
+    });
+  } catch {
+    // Window 不可达时 lease revoke 会清理本地 pending 和 bridge 额度。
+  }
+}
+
+function sendSatWindowEventRelease(lease: WindowP2pExecutorLeaseState, event: SatWindowLaneSspRequestEvent): void {
+  try {
+    lease.transportPort?.postMessage({ type: "event-release", leaseId: lease.leaseId, eventId: event.eventId });
+  } catch {
+    // Window 不可达时本地 stop/revoke 会清理 reservation。
+  }
+}
+
+/**
+ * Window lane 的入站事件回到 Worker 后，使用 eventId 把 ActionResult 写回
+ * 原始 SSP Stream。这样 provider 业务处理仍在唯一 owner runtime，lane
+ * 只负责网络 writer。
+ */
+async function handleSatWindowEvent(
+  rawEvent: unknown,
+  lease: WindowP2pExecutorLeaseState,
+  task: ActiveSatInboundHandler,
+): Promise<void> {
+  const event = rawEvent as SatWindowLaneSspRequestEvent;
+  try {
+    if (!rawEvent || typeof rawEvent !== "object" || (rawEvent as { type?: unknown }).type !== "ssp.request"
+      || typeof event.supplierId !== "string" || typeof event.connectionId !== "string"
+      || typeof event.ownerSessionEpoch !== "string" || !Number.isSafeInteger(event.supplierGeneration)
+      || typeof event.eventId !== "string" || !(event.wire instanceof Uint8Array)) return;
+    if (task.canceled) return;
+    const registration = satIncomingHandlers.get(event.connectionId);
+    if (!registration || registration.supplierId !== event.supplierId || registration.ownerSessionEpoch !== event.ownerSessionEpoch || registration.supplierGeneration !== event.supplierGeneration) {
+      sendSatWindowEventReject(lease, event, windowP2pError("ERR_STALE_CONNECTION", "Sat inbound Publish belongs to a stale connection", "not-sent"));
+      return;
+    }
+    // 先移交唯一 Wire 引用，再把 event 对象中的引用清空。取消时即使
+    // handler 仍不支持 AbortSignal，Worker 也不会继续保留 bridge event buffer。
+    const handlerWire = event.wire;
+    event.wire = new Uint8Array();
+    let response: Uint8Array;
+    try {
+      response = await registration.handler(handlerWire);
+    } catch (error) {
+      // Provider 已在可解析 request_id 的异常路径返回 ActionResult；若连
+      // request_id 都无法取得，直接拒绝 lane pending，不能让 30 秒超时
+      // 长期占用 Window/Worker 双向额度。
+      if (!task.canceled && isCurrentSatInboundHandler(task)) {
+        sendSatWindowEventReject(lease, event, windowP2pError("ERR_INCOMING_HANDLER", error instanceof Error ? error.message : "Sat inbound handler failed", "not-sent"));
+      }
+      return;
+    }
+    if (!isCurrentSatInboundHandler(task)) return;
+    // 输入 Wire 已经被 handler 消费；先释放 Worker 入站额度，再为回写
+    // ActionResult 预占出站额度。否则 32MiB 入站预算被占满时，handler 都
+    // 会等待 response 额度，而 response 又只能在 handler finally 后释放，
+    // 形成自锁。Window 侧 reservation 仍保持到 lane 收到 response/reject。
+    releaseSatInboundHandlerBridge(task);
+    try {
+      const respond = testSatInboundResponseDispatcher ?? satWindowLaneOperation;
+      await respond({ type: "respondSsp", supplierId: task.supplierId, connectionId: task.connectionId, ownerSessionEpoch: task.ownerSessionEpoch, supplierGeneration: task.supplierGeneration, eventId: task.eventId, wire: asSatWire(response, "Sat inbound response") }, task.controller.signal);
+    } catch (error) {
+      if (!task.canceled) {
+        sendSatWindowEventReject(lease, event, windowP2pError("ERR_INCOMING_RESPONSE", error instanceof Error ? error.message : "Sat inbound response could not be written", "unknown"));
+      }
+    }
+  } finally {
+    finishSatInboundHandler(task);
+    if (rawEvent && typeof rawEvent === "object" && (rawEvent as { type?: unknown }).type === "ssp.request") {
+      sendSatWindowEventRelease(lease, event);
+    }
+  }
+}
+
+const satSubscriptionTransport: SatSubscriptionTransport = {
+  async connect(input): Promise<SatSupplierConnection> {
+    const connectionId = `sat-connection-${crypto.randomUUID()}`;
+    const fence = { supplierId: input.supplier.supplierId, connectionId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration } as const;
+    // 先把业务 handler 放入 connectionId 索引，再发起 Window connect；这样
+    // lane/adapter 在 connect 返回前收到的首条 Publish 也能回到当前 owner。
+    if (input.onSspRequest) {
+      satIncomingHandlers.set(connectionId, {
+        supplierId: fence.supplierId,
+        ownerSessionEpoch: fence.ownerSessionEpoch,
+        supplierGeneration: fence.supplierGeneration,
+        handler: input.onSspRequest,
+      });
+    }
+    let result: unknown;
+    try {
+      result = await satWindowLaneOperation({
+        type: "connect",
+        ...fence,
+        supplierPublicKeyHex: input.supplier.supplierPublicKeyHex,
+        multiaddrs: [...input.supplier.multiaddrs]
+      }, input.signal);
+    } catch (error) {
+      cancelSatInboundHandlersForConnection(connectionId, "Sat connection setup failed");
+      satIncomingHandlers.delete(connectionId);
+      throw error;
+    }
+    if (!result || typeof result !== "object" || typeof (result as { authenticatedPublicKeyHex?: unknown }).authenticatedPublicKeyHex !== "string"
+      || (result as Partial<typeof fence>).supplierId !== fence.supplierId
+      || (result as Partial<typeof fence>).connectionId !== fence.connectionId
+      || (result as Partial<typeof fence>).ownerSessionEpoch !== fence.ownerSessionEpoch
+      || (result as Partial<typeof fence>).supplierGeneration !== fence.supplierGeneration) {
+      cancelSatInboundHandlersForConnection(connectionId, "Sat connection returned an invalid fence");
+      satIncomingHandlers.delete(connectionId);
+      throw new Error("Sat Window lane returned an invalid authenticated connection");
+    }
+    let connectionState: "online" | "degraded" | "closed" = "online";
+    const connection: SatSupplierConnection = {
+      ...fence,
+      authenticatedPublicKeyHex: (result as { authenticatedPublicKeyHex: string }).authenticatedPublicKeyHex,
+      get state() { return connectionState; },
+      requestSsp: async (wire, signal) => {
+        if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
+        return asSatWire(await satWindowLaneOperation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal), "requestSsp");
+      },
+      requestSpi: async (wire, signal) => {
+        if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
+        return asSatWire(await satWindowLaneOperation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal), "requestSpi");
+      },
+      subscribeSspRequests: (handler) => {
+        satIncomingHandlers.set(connectionId, { supplierId: input.supplier.supplierId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration, handler });
+        return () => {
+          if (satIncomingHandlers.get(connectionId)?.handler === handler) {
+            cancelSatInboundHandlersForConnection(connectionId, "Sat SSP handler was unsubscribed");
+            satIncomingHandlers.delete(connectionId);
+          }
+        };
+      },
+      close: () => {
+        connectionState = "closed";
+        cancelSatInboundHandlersForConnection(connectionId, "Sat connection was closed");
+        satIncomingHandlers.delete(connectionId);
+        void satWindowLaneOperation({ type: "close", ...fence }).catch(() => undefined);
+      },
+    };
+    return connection;
+  },
+};
+
+const windowP2pExecutorTransport = createWindowP2pMsFileTransport({
   get available() {
-    return msfileExecutorLease?.transportReady === true
-      && msfileExecutorLease.sessionEpoch === coordinatorState.sessionEpoch
+    return windowP2pExecutorLease?.transportReady === true
+      && windowP2pExecutorLease.sessionEpoch === coordinatorState.sessionEpoch
       && coordinatorState.vaultStatus === "unlocked";
   },
-  request: requestMsfileExecutorOperation,
+  request: requestWindowP2pExecutorOperation,
   dispose: () => undefined,
 });
 
-function clearMsFileExecutorLeaseTimer(): void {
-  if (msfileExecutorLeaseTimer !== undefined) clearTimeout(msfileExecutorLeaseTimer);
-  msfileExecutorLeaseTimer = undefined;
+function clearWindowP2pExecutorLeaseTimer(): void {
+  if (windowP2pExecutorLeaseTimer !== undefined) clearTimeout(windowP2pExecutorLeaseTimer);
+  windowP2pExecutorLeaseTimer = undefined;
 }
 
-function scheduleMsFileExecutorLeaseExpiry(leaseId: string, acquiredAt: number): void {
-  clearMsFileExecutorLeaseTimer();
-  const remaining = Math.max(0, MSFILE_EXECUTOR_LEASE_TTL_MS - (Date.now() - acquiredAt));
-  msfileExecutorLeaseTimer = setTimeout(() => {
-    msfileExecutorLeaseTimer = undefined;
-    if (msfileExecutorLease?.leaseId === leaseId && Date.now() - msfileExecutorLease.acquiredAt >= MSFILE_EXECUTOR_LEASE_TTL_MS) {
-      clearMsFileExecutorLeaseLocked();
+function scheduleWindowP2pExecutorLeaseExpiry(leaseId: string, acquiredAt: number): void {
+  clearWindowP2pExecutorLeaseTimer();
+  const remaining = Math.max(0, WINDOW_P2P_EXECUTOR_LEASE_TTL_MS - (Date.now() - acquiredAt));
+  windowP2pExecutorLeaseTimer = setTimeout(() => {
+    windowP2pExecutorLeaseTimer = undefined;
+    if (windowP2pExecutorLease?.leaseId === leaseId && Date.now() - windowP2pExecutorLease.acquiredAt >= WINDOW_P2P_EXECUTOR_LEASE_TTL_MS) {
+      clearWindowP2pExecutorLeaseLocked();
       emitMsFileState();
     }
   }, remaining);
 }
 
-function clearMsFileExecutorLeaseLocked(): void {
-  clearMsFileExecutorLeaseTimer();
-  if (msfileExecutorLease === undefined) return;
-  const oldLease = msfileExecutorLease;
-  msfileExecutorConfigSync?.reject(new Error("MSFile Window executor lease was revoked"));
-  msfileExecutorConfigSync = undefined;
-  rejectMsfileExecutorBridgePending(new Error("MSFile Window executor lease was revoked"));
+function clearWindowP2pExecutorLeaseLocked(): void {
+  clearWindowP2pExecutorLeaseTimer();
+  if (windowP2pExecutorLease === undefined) return;
+  const oldLease = windowP2pExecutorLease;
+  const revokedError = windowP2pError("ERR_EXECUTOR_REVOKED", "Window P2P executor lease was revoked");
+  windowP2pExecutorConfigSync?.reject(revokedError);
+  windowP2pExecutorConfigSync = undefined;
+  rejectWindowP2pExecutorBridgePending(revokedError);
   try { oldLease.transportPort?.postMessage({ type: "revoked", leaseId: oldLease.leaseId }); } catch { /* executor may be gone */ }
   try { oldLease.transportPort?.close(); } catch { /* already closed */ }
-  for (const [requestId, pending] of msfileExecutorIdentityRequests) {
+  for (const [requestId, pending] of windowP2pExecutorIdentityRequests) {
     if (pending.leaseId === oldLease.leaseId) {
       pending.controller.abort();
-      msfileExecutorIdentityRequests.delete(requestId);
+      windowP2pExecutorIdentityRequests.delete(requestId);
     }
   }
-  msfileExecutorLease = undefined;
+  windowP2pExecutorLease = undefined;
 }
 
-function acquireMsFileExecutorLease(input: {
+function acquireWindowP2pExecutorLease(input: {
   clientId: string;
   ownerPublicKeyHex: string;
-}): { ok: true; lease: MsFileExecutorLease } | { ok: false; reason: "locked" | "stale-epoch" | "owner-mismatch" | "busy" } {
+}): { ok: true; lease: WindowP2pExecutorLease } | { ok: false; reason: "locked" | "stale-epoch" | "owner-mismatch" | "busy" } {
   if (coordinatorState.vaultStatus !== "unlocked") return { ok: false, reason: "locked" };
   if (!coordinatorState.activePublicKeyHex || input.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
     return { ok: false, reason: "owner-mismatch" };
   }
-  if (msfileExecutorLease !== undefined) {
+  if (windowP2pExecutorLease !== undefined) {
     // 同 port 幂等续租；跨 port / 跨 owner 冲突一律拒绝。
-    if (msfileExecutorLease.clientId === input.clientId && msfileExecutorLease.ownerPublicKeyHex === input.ownerPublicKeyHex) {
-      msfileExecutorLease.acquiredAt = Date.now();
-      scheduleMsFileExecutorLeaseExpiry(msfileExecutorLease.leaseId, msfileExecutorLease.acquiredAt);
-      return { ok: true, lease: { leaseId: msfileExecutorLease.leaseId, sessionEpoch: msfileExecutorLease.sessionEpoch, activePublicKeyHex: msfileExecutorLease.ownerPublicKeyHex } };
+    if (windowP2pExecutorLease.clientId === input.clientId && windowP2pExecutorLease.ownerPublicKeyHex === input.ownerPublicKeyHex) {
+      windowP2pExecutorLease.acquiredAt = Date.now();
+      scheduleWindowP2pExecutorLeaseExpiry(windowP2pExecutorLease.leaseId, windowP2pExecutorLease.acquiredAt);
+      return { ok: true, lease: { leaseId: windowP2pExecutorLease.leaseId, sessionEpoch: windowP2pExecutorLease.sessionEpoch, activePublicKeyHex: windowP2pExecutorLease.ownerPublicKeyHex } };
     }
     // 有界 TTL：超过租期视为旧 executor 已死，允许接管。
-    if (Date.now() - msfileExecutorLease.acquiredAt < MSFILE_EXECUTOR_LEASE_TTL_MS) {
+    if (Date.now() - windowP2pExecutorLease.acquiredAt < WINDOW_P2P_EXECUTOR_LEASE_TTL_MS) {
       return { ok: false, reason: "busy" };
     }
-    clearMsFileExecutorLeaseLocked();
+    clearWindowP2pExecutorLeaseLocked();
   }
-  const leaseId = `msfile-exec-lease-${crypto.randomUUID()}`;
-  msfileExecutorLease = {
+  const leaseId = `window-p2p-exec-lease-${crypto.randomUUID()}`;
+  windowP2pExecutorLease = {
     leaseId,
     clientId: input.clientId,
     ownerPublicKeyHex: input.ownerPublicKeyHex,
@@ -1954,12 +2961,12 @@ function acquireMsFileExecutorLease(input: {
     transportReady: false,
     transportConfigVersion: -1,
   };
-  scheduleMsFileExecutorLeaseExpiry(leaseId, msfileExecutorLease.acquiredAt);
-  return { ok: true, lease: { leaseId, sessionEpoch: msfileExecutorLease.sessionEpoch, activePublicKeyHex: input.ownerPublicKeyHex } };
+  scheduleWindowP2pExecutorLeaseExpiry(leaseId, windowP2pExecutorLease.acquiredAt);
+  return { ok: true, lease: { leaseId, sessionEpoch: windowP2pExecutorLease.sessionEpoch, activePublicKeyHex: input.ownerPublicKeyHex } };
 }
 
 function executorIdentityError(requestId: string, message: string, status: "error" | "validation-error" = "error"): CoordinatorResponse {
-  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: status === "error" ? { status, message, code: "msfile_unavailable" } : { status, message } };
+  return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: status === "error" ? { status, message, code: "window_p2p_unavailable" } : { status, message } };
 }
 
 function parseUint64Decimal(value: string): bigint {
@@ -1970,13 +2977,13 @@ function parseUint64Decimal(value: string): bigint {
 }
 
 function currentExecutorPublicKey(): Uint8Array {
-  if (!coordinatorState.activePublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("MSFile executor active key is unavailable");
+  if (!coordinatorState.activePublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("Window P2P executor active key is unavailable");
   verifySessionKeyPair({ publicKeyHex: coordinatorState.activePublicKeyHex, privateKeyBytes: coordinatorState.activePrivateKeyBytes });
   return validatePublicKey(cryptoHexToBytes(coordinatorState.activePublicKeyHex));
 }
 
-function executorLeaseIsCurrent(leaseId: string, actualClientId: string, expectedSessionEpoch: SessionEpoch): MsFileExecutorLeaseState {
-  const lease = msfileExecutorLease;
+function executorLeaseIsCurrent(leaseId: string, actualClientId: string, expectedSessionEpoch: SessionEpoch): WindowP2pExecutorLeaseState {
+  const lease = windowP2pExecutorLease;
   if (
     lease === undefined ||
     lease.leaseId !== leaseId ||
@@ -1986,40 +2993,40 @@ function executorLeaseIsCurrent(leaseId: string, actualClientId: string, expecte
     lease.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex ||
     lease.activePublicKeyHex !== coordinatorState.activePublicKeyHex ||
     coordinatorState.vaultStatus !== "unlocked"
-  ) throw new Error("MSFile executor lease is not valid");
-  if (Date.now() - lease.acquiredAt >= MSFILE_EXECUTOR_LEASE_TTL_MS) {
-    clearMsFileExecutorLeaseLocked();
-    throw new Error("MSFile executor lease expired");
+  ) throw new Error("Window P2P executor lease is not valid");
+  if (Date.now() - lease.acquiredAt >= WINDOW_P2P_EXECUTOR_LEASE_TTL_MS) {
+    clearWindowP2pExecutorLeaseLocked();
+    throw new Error("Window P2P executor lease expired");
   }
   return lease;
 }
 
-function assertExecutorIdentityStillCurrent(lease: MsFileExecutorLeaseState, actualClientId: string, expectedSessionEpoch: SessionEpoch, publicKeyHex: string): void {
+function assertExecutorIdentityStillCurrent(lease: WindowP2pExecutorLeaseState, actualClientId: string, expectedSessionEpoch: SessionEpoch, publicKeyHex: string): void {
   const fresh = executorLeaseIsCurrent(lease.leaseId, actualClientId, expectedSessionEpoch);
   if (fresh !== lease || fresh.ownerPublicKeyHex !== publicKeyHex || coordinatorState.activePublicKeyHex !== publicKeyHex) {
-    throw new Error("MSFile executor identity changed during signing");
+    throw new Error("Window P2P executor identity changed during signing");
   }
 }
 
-async function executeMsfileExecutorIdentitySign(
-  request: Extract<CoordinatorClientRequest, { kind: "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>,
+async function executeWindowP2pExecutorIdentitySign(
+  request: Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>,
   actualClientId: string,
   signal: AbortSignal
 ): Promise<CoordinatorResponse> {
   const lease = executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
   const publicKeyHex = coordinatorState.activePublicKeyHex!;
   const publicKey = currentExecutorPublicKey();
-  if (signal.aborted) throw new Error("MSFile identity signing was cancelled");
+  if (signal.aborted) throw new Error("Window P2P identity signing was cancelled");
 
   let digest: Uint8Array;
   let peerRecordSequence: bigint | undefined;
-  if (request.kind === "msfile.executor.identity.sign-noise") {
+  if (request.kind === "window-p2p.executor.identity.sign-noise") {
     const staticKey = new Uint8Array(request.noiseStaticPublicKey);
     if (staticKey.byteLength !== 32) throw new Error("Noise static public key must be exactly 32 bytes");
     digest = sha256Bytes(noiseSigningPayload(staticKey));
   } else {
     if (!Array.isArray(request.addresses) || request.addresses.length !== 0) {
-      throw new Error("Signed Peer Record addresses must be empty in the MSFile executor spike");
+      throw new Error("Signed Peer Record addresses must be empty in the Window P2P executor spike");
     }
     const sequence = parseUint64Decimal(request.sequence);
     const expectedPeerId = peerIdFromPublicKeyBytes(publicKey);
@@ -2037,37 +3044,37 @@ async function executeMsfileExecutorIdentitySign(
   // 给已经排队的 lock / key-switch / port-lifecycle 事件一次抢占机会。
   // 本地 secp256k1 很快，若不跨 task，让步前后的二次 lease/epoch 栅栏
   // 在真实浏览器中无法被触发，也就不能证明“等待中的签名”会 fail closed。
-  await new Promise<void>((resolve) => setTimeout(resolve, MSFILE_EXECUTOR_PRE_SIGN_YIELD_MS));
-  if (signal.aborted) throw new Error("MSFile identity signing was cancelled");
+  await new Promise<void>((resolve) => setTimeout(resolve, WINDOW_P2P_EXECUTOR_PRE_SIGN_YIELD_MS));
+  if (signal.aborted) throw new Error("Window P2P identity signing was cancelled");
   assertExecutorIdentityStillCurrent(lease, actualClientId, request.expectedSessionEpoch, publicKeyHex);
 
   const signature = await signEcdsaDigest({ privateKeyBytes: coordinatorState.activePrivateKeyBytes!, digest, format: "der" });
   assertExecutorIdentityStillCurrent(lease, actualClientId, request.expectedSessionEpoch, publicKeyHex);
-  if (signal.aborted) throw new Error("MSFile identity signing was cancelled");
-  if (request.kind === "msfile.executor.identity.sign-peer-record") {
+  if (signal.aborted) throw new Error("Window P2P identity signing was cancelled");
+  if (request.kind === "window-p2p.executor.identity.sign-peer-record") {
     if (peerRecordSequence === undefined) throw new Error("Peer Record sequence was not retained");
     lease.lastPeerRecordSequence = peerRecordSequence;
   }
   lease.acquiredAt = Date.now();
-  scheduleMsFileExecutorLeaseExpiry(lease.leaseId, lease.acquiredAt);
+  scheduleWindowP2pExecutorLeaseExpiry(lease.leaseId, lease.acquiredAt);
   return {
     requestId: request.requestId,
     sessionEpoch: coordinatorState.sessionEpoch,
     ack: { status: "ok" },
-    operationResult: { signatureDer: signature.slice().buffer as ArrayBuffer } satisfies MsFileIdentitySignResult
+    operationResult: { signatureDer: signature.slice().buffer as ArrayBuffer } satisfies WindowP2pIdentitySignResult
   };
 }
 
-function enqueueMsfileExecutorIdentitySign(
-  request: Extract<CoordinatorClientRequest, { kind: "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>,
+function enqueueWindowP2pExecutorIdentitySign(
+  request: Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>,
   actualClientId: string,
   signal: AbortSignal
 ): Promise<CoordinatorResponse> {
-  const run = msfileExecutorIdentityTail.then(
-    () => executeMsfileExecutorIdentitySign(request, actualClientId, signal),
-    () => executeMsfileExecutorIdentitySign(request, actualClientId, signal)
+  const run = windowP2pExecutorIdentityTail.then(
+    () => executeWindowP2pExecutorIdentitySign(request, actualClientId, signal),
+    () => executeWindowP2pExecutorIdentitySign(request, actualClientId, signal)
   );
-  msfileExecutorIdentityTail = run.then(() => undefined, () => undefined);
+  windowP2pExecutorIdentityTail = run.then(() => undefined, () => undefined);
   return run;
 }
 
@@ -2227,74 +3234,74 @@ async function executeMsfileData(request: Extract<CoordinatorClientRequest, { ki
   }, signal);
 }
 
-type MsFileExecutorSpikeRequest = Extract<CoordinatorClientRequest, { kind: "msfile.executor.acquire" | "msfile.executor.release" | "msfile.executor.spike.transfer" | "msfile.executor.identity.sign-noise" | "msfile.executor.identity.sign-peer-record" }>;
+type WindowP2pExecutorRequest = Extract<CoordinatorClientRequest, { kind: "window-p2p.executor.acquire" | "window-p2p.executor.release" | "window-p2p.executor.spike.transfer" | "window-p2p.executor.identity.sign-noise" | "window-p2p.executor.identity.sign-peer-record" }>;
 
-async function executeMsfileExecutorRequest(request: MsFileExecutorSpikeRequest, actualClientId: string): Promise<CoordinatorResponse> {
-  if (request.kind === "msfile.executor.acquire") {
+async function executeWindowP2pExecutorRequest(request: WindowP2pExecutorRequest, actualClientId: string): Promise<CoordinatorResponse> {
+  if (request.kind === "window-p2p.executor.acquire") {
     if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
       return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
     }
     if (request.executorPort && (typeof request.executorPort.postMessage !== "function" || typeof request.executorPort.start !== "function")) {
       try { request.executorPort.close(); } catch { /* malformed transferred value */ }
-      return executorIdentityError(request.requestId, "invalid MSFile executor port", "validation-error");
+      return executorIdentityError(request.requestId, "invalid Window P2P executor port", "validation-error");
     }
-    const result = acquireMsFileExecutorLease({ clientId: actualClientId, ownerPublicKeyHex: request.ownerPublicKeyHex });
+    const result = acquireWindowP2pExecutorLease({ clientId: actualClientId, ownerPublicKeyHex: request.ownerPublicKeyHex });
     if (!result.ok) {
       try { request.executorPort?.close(); } catch { /* already detached */ }
-      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `MSFile executor lease rejected: ${result.reason}`, code: "msfile_unavailable" } };
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: `Window P2P executor lease rejected: ${result.reason}`, code: "window_p2p_unavailable" } };
     }
     if (request.executorPort) {
       try {
-        attachMsfileExecutorPort(request.executorPort, actualClientId, result.lease.leaseId);
+        attachWindowP2pExecutorPort(request.executorPort, actualClientId, result.lease.leaseId);
       } catch (error) {
-        clearMsFileExecutorLeaseLocked();
-        return executorIdentityError(request.requestId, error instanceof Error ? error.message : "invalid MSFile executor port", "validation-error");
+        clearWindowP2pExecutorLeaseLocked();
+        return executorIdentityError(request.requestId, error instanceof Error ? error.message : "invalid Window P2P executor port", "validation-error");
       }
     }
     emitMsFileState();
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result.lease };
   }
-  if (request.kind === "msfile.executor.release") {
-    if (msfileExecutorLease !== undefined && msfileExecutorLease.leaseId === request.leaseId && msfileExecutorLease.clientId === actualClientId) {
-      clearMsFileExecutorLeaseLocked();
+  if (request.kind === "window-p2p.executor.release") {
+    if (windowP2pExecutorLease !== undefined && windowP2pExecutorLease.leaseId === request.leaseId && windowP2pExecutorLease.clientId === actualClientId) {
+      clearWindowP2pExecutorLeaseLocked();
     }
     emitMsFileState();
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
-  if (request.kind === "msfile.executor.spike.transfer") {
+  if (request.kind === "window-p2p.executor.spike.transfer") {
     executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
-    if (!(request.bytes instanceof ArrayBuffer)) return executorIdentityError(request.requestId, "MSFile executor transfer requires an ArrayBuffer", "validation-error");
-    if (request.bytes.byteLength > MSFILE_EXECUTOR_TRANSFER_MAX_ITEM_BYTES) return executorIdentityError(request.requestId, "MSFile executor transfer item exceeds the byte limit", "validation-error");
-    if (msfileExecutorTransferPendingItems === 0) msfileExecutorTransferPeakBytes = 0;
-    if (msfileExecutorTransferPendingItems + 1 > MSFILE_EXECUTOR_TRANSFER_MAX_ITEMS) return executorIdentityError(request.requestId, "MSFile executor transfer queue reached the item limit", "validation-error");
-    if (msfileExecutorTransferPendingBytes + request.bytes.byteLength > MSFILE_EXECUTOR_TRANSFER_MAX_BYTES) return executorIdentityError(request.requestId, "MSFile executor transfer queue reached the byte limit", "validation-error");
-    msfileExecutorTransferPendingItems += 1;
-    msfileExecutorTransferPendingBytes += request.bytes.byteLength;
-    msfileExecutorTransferPeakBytes = Math.max(msfileExecutorTransferPeakBytes, msfileExecutorTransferPendingBytes);
-    const acceptedPendingBytes = msfileExecutorTransferPendingBytes;
+    if (!(request.bytes instanceof ArrayBuffer)) return executorIdentityError(request.requestId, "Window P2P executor transfer requires an ArrayBuffer", "validation-error");
+    if (request.bytes.byteLength > WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEM_BYTES) return executorIdentityError(request.requestId, "Window P2P executor transfer item exceeds the byte limit", "validation-error");
+    if (windowP2pExecutorTransferPendingItems === 0) windowP2pExecutorTransferPeakBytes = 0;
+    if (windowP2pExecutorTransferPendingItems + 1 > WINDOW_P2P_EXECUTOR_TRANSFER_MAX_ITEMS) return executorIdentityError(request.requestId, "Window P2P executor transfer queue reached the item limit", "validation-error");
+    if (windowP2pExecutorTransferPendingBytes + request.bytes.byteLength > WINDOW_P2P_EXECUTOR_TRANSFER_MAX_BYTES) return executorIdentityError(request.requestId, "Window P2P executor transfer queue reached the byte limit", "validation-error");
+    windowP2pExecutorTransferPendingItems += 1;
+    windowP2pExecutorTransferPendingBytes += request.bytes.byteLength;
+    windowP2pExecutorTransferPeakBytes = Math.max(windowP2pExecutorTransferPeakBytes, windowP2pExecutorTransferPendingBytes);
+    const acceptedPendingBytes = windowP2pExecutorTransferPendingBytes;
     try {
-      await new Promise<void>((resolve) => setTimeout(resolve, MSFILE_EXECUTOR_PRE_SIGN_YIELD_MS));
+      await new Promise<void>((resolve) => setTimeout(resolve, WINDOW_P2P_EXECUTOR_PRE_SIGN_YIELD_MS));
       executorLeaseIsCurrent(request.leaseId, actualClientId, request.expectedSessionEpoch);
       return {
         requestId: request.requestId,
         sessionEpoch: coordinatorState.sessionEpoch,
         ack: { status: "ok" },
-        operationResult: { bytes: request.bytes, acceptedPendingBytes, peakPendingBytes: msfileExecutorTransferPeakBytes }
+        operationResult: { bytes: request.bytes, acceptedPendingBytes, peakPendingBytes: windowP2pExecutorTransferPeakBytes }
       };
     } finally {
-      msfileExecutorTransferPendingItems = Math.max(0, msfileExecutorTransferPendingItems - 1);
-      msfileExecutorTransferPendingBytes = Math.max(0, msfileExecutorTransferPendingBytes - request.bytes.byteLength);
+      windowP2pExecutorTransferPendingItems = Math.max(0, windowP2pExecutorTransferPendingItems - 1);
+      windowP2pExecutorTransferPendingBytes = Math.max(0, windowP2pExecutorTransferPendingBytes - request.bytes.byteLength);
     }
   }
   const controller = new AbortController();
-  const key = msfileExecutorIdentityRequestKey(actualClientId, request.requestId);
-  msfileExecutorIdentityRequests.set(key, { controller, clientId: actualClientId, leaseId: request.leaseId });
+  const key = windowP2pExecutorIdentityRequestKey(actualClientId, request.requestId);
+  windowP2pExecutorIdentityRequests.set(key, { controller, clientId: actualClientId, leaseId: request.leaseId });
   try {
-    return await enqueueMsfileExecutorIdentitySign(request, actualClientId, controller.signal);
+    return await enqueueWindowP2pExecutorIdentitySign(request, actualClientId, controller.signal);
   } catch (error) {
     return executorIdentityError(request.requestId, error instanceof Error ? error.message : String(error));
   } finally {
-    msfileExecutorIdentityRequests.delete(key);
+    windowP2pExecutorIdentityRequests.delete(key);
   }
 }
 
@@ -2316,8 +3323,8 @@ async function executeMsfileRequest(
     for (const [requestId, pending] of msfileRequests) {
       if (pending.connectSessionId === request.connectSessionId) { pending.controller.abort(); msfileRequests.delete(requestId); }
     }
-    for (const [requestId, pending] of msfileExecutorIdentityRequests) {
-      if (pending.clientId === actualClientId) { pending.controller.abort(); msfileExecutorIdentityRequests.delete(requestId); }
+    for (const [requestId, pending] of windowP2pExecutorIdentityRequests) {
+      if (pending.clientId === actualClientId) { pending.controller.abort(); windowP2pExecutorIdentityRequests.delete(requestId); }
     }
     for (const [grantId, grant] of msfileGrants) {
       if (grant.context.connectSessionId === request.connectSessionId) msfileGrants.delete(grantId);
@@ -2355,7 +3362,7 @@ async function executeMsfileRequest(
   if (request.kind === "msfile.cancel") {
     const target = msfileRequests.get(msfileRequestKey(actualClientId, request.targetRequestId));
     if (target?.clientId === actualClientId) target.controller.abort();
-    const identityTarget = msfileExecutorIdentityRequests.get(msfileExecutorIdentityRequestKey(actualClientId, request.targetRequestId));
+    const identityTarget = windowP2pExecutorIdentityRequests.get(windowP2pExecutorIdentityRequestKey(actualClientId, request.targetRequestId));
     if (identityTarget?.clientId === actualClientId) identityTarget.controller.abort();
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
@@ -2450,6 +3457,8 @@ async function executeProcessRequest(
       case "p2pkh.broadcast":
       case "p2pkh.rebroadcast-ancestors":
         return await handleP2pkhBroadcast(requestId, request);
+      case "sat.operation":
+        return await executeSatRequest(request);
       default:
         return {
           requestId,
@@ -2458,12 +3467,16 @@ async function executeProcessRequest(
         };
     }
   } catch (err) {
+    const code = err && typeof err === "object" && typeof (err as { code?: unknown }).code === "string"
+      ? (err as { code: string }).code
+      : undefined;
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
       ack: {
         status: "error",
         message: err instanceof Error ? err.message : String(err),
+        ...(code ? { code: code as never } : {}),
       },
     };
   }
@@ -2472,8 +3485,8 @@ async function executeProcessRequest(
 async function processRequest(request: CoordinatorClientRequest, actualClientId = (request as { clientId?: string }).clientId ?? "unknown"): Promise<CoordinatorResponse> {
   if (isStorageRequest(request)) return executeStorageRequest(request as never, actualClientId);
   if (isMsfileRequest(request)) {
-    if (request.kind === "msfile.executor.acquire" || request.kind === "msfile.executor.release" || request.kind === "msfile.executor.spike.transfer" || request.kind === "msfile.executor.identity.sign-noise" || request.kind === "msfile.executor.identity.sign-peer-record") {
-      return executeMsfileExecutorRequest(request as MsFileExecutorSpikeRequest, actualClientId);
+    if (request.kind === "window-p2p.executor.acquire" || request.kind === "window-p2p.executor.release" || request.kind === "window-p2p.executor.spike.transfer" || request.kind === "window-p2p.executor.identity.sign-noise" || request.kind === "window-p2p.executor.identity.sign-peer-record") {
+    return executeWindowP2pExecutorRequest(request as WindowP2pExecutorRequest, actualClientId);
     }
     return executeMsfileRequest(request as never, actualClientId);
   }
@@ -2620,7 +3633,8 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       // 施工单 docs/proposals/msfile：active key 切换立即销毁旧 MSFile runtime
       // （wire 身份随 owner 公钥变化，旧 host/连接/授权不可继续使用）。
       releaseMsfileRuntime("activate-key");
-      clearMsFileExecutorLeaseLocked();
+      releaseSatRuntime("activate-key");
+      clearWindowP2pExecutorLeaseLocked();
       coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
       coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
       try {
@@ -2642,6 +3656,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
       }
       publishSessionState("activate-key");
+      emitSatHealth();
       emitMsFileState();
       return true;
     }
@@ -3064,7 +4079,8 @@ async function performGlobalLock(reason: string): Promise<void> {
   await releaseStorageRuntime(reason);
   // 施工单 docs/proposals/msfile：lock 时销毁 MSFile runtime，未决请求与确认取消。
   releaseMsfileRuntime(reason);
-  clearMsFileExecutorLeaseLocked();
+  releaseSatRuntime(reason);
+  clearWindowP2pExecutorLeaseLocked();
   // abort 所有 session-bound task，并在清空运行句柄前保留 completion，确保
   // handler 已经退出；否则迟到的 DB commit 可能越过锁定栅栏。
   const completions: Promise<void>[] = [];
@@ -3146,7 +4162,8 @@ async function handleActivateKey(
     // Active key change invalidates the MSFile identity, host and all old
     // supplier connections before the new epoch becomes observable.
     releaseMsfileRuntime("activate-key");
-    clearMsFileExecutorLeaseLocked();
+    releaseSatRuntime("activate-key");
+    clearWindowP2pExecutorLeaseLocked();
     replaceActivePrivateKey(privateKey);
     coordinatorState.activePublicKeyHex = request.publicKeyHex;
     coordinatorState.keyspaceGeneration++;
@@ -3173,6 +4190,7 @@ async function handleActivateKey(
     }
 
     publishSessionState("activate-key");
+    emitSatHealth();
     emitMsFileState();
 
     return {
@@ -3205,6 +4223,17 @@ async function handleCrypto(
     };
   }
 
+  // Crypto RPC 同样属于 session-bound 操作。尤其 Channel seal/open 内部
+  // 会经过异步 SDK；如果 lock 或 active-key switch 在中途推进 epoch，旧
+  // 结果不能以新 owner 的身份返回。
+  if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
+    return {
+      requestId,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      ack: { status: "stale-epoch" },
+    };
+  }
+
   if (!coordinatorState.activePrivateKeyBytes) {
     return {
       requestId,
@@ -3218,6 +4247,14 @@ async function handleCrypto(
       request.operation,
       coordinatorState.activePrivateKeyBytes
     );
+
+    if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch || coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes) {
+      return {
+        requestId,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        ack: { status: "stale-epoch" },
+      };
+    }
 
     return {
       requestId,
@@ -3238,6 +4275,18 @@ async function executeCryptoOperation(
   operation: CoordinatorCryptoOperation,
   privateKeyBytes: Uint8Array
 ): Promise<CoordinatorCryptoResult> {
+  const assertChannelLifetime = (issuedAtMs: number, expiresAtMs: number): void => {
+    if (!Number.isSafeInteger(issuedAtMs) || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= issuedAtMs || expiresAtMs - issuedAtMs > 24 * 60 * 60 * 1000) {
+      throw new Error("Channel message lifetime is invalid");
+    }
+  };
+  const parseChannelContent = (contentJson: Uint8Array): import("bsv8-channel-protocol").JSONValue => {
+    let text: string;
+    try { text = new TextDecoder("utf-8", { fatal: true }).decode(contentJson); } catch { throw new Error("Channel content is not valid UTF-8"); }
+    try { return JSON.parse(text) as import("bsv8-channel-protocol").JSONValue; } catch { throw new Error("Channel content is not valid JSON"); }
+  };
+  const privateKey = parsePrivateKey(privateKeyBytes);
+  const ownerPublicKey = publicKeyFromPrivate(privateKey);
   switch (operation.type) {
     case "signDigest": {
       const sig = await signEcdsaDigest({
@@ -3250,6 +4299,87 @@ async function executeCryptoOperation(
     case "deriveP2pkhAddress": return { type: "deriveP2pkhAddress", address: deriveP2pkhAddress(coordinatorState.activePublicKeyHex!, operation.network) };
     case "sealSendInput": { const i = operation.input; const sealed = sealAppMessageLocalBytes({ senderPrivateKeyBytes: privateKeyBytes, senderPublicKeyBytes: cryptoHexToBytes(coordinatorState.activePublicKeyHex!), recipientPublicKeyBytes: cryptoHexToBytes(i.recipient.recipientPublicKeyHex), senderEndpoint: i.sender.senderOrigin ? { kind: "origin", id: i.sender.senderOrigin } : { kind: "plugin", id: i.sender.senderAppId ?? "" }, recipientEndpoint: i.recipient.recipientOrigin ? { kind: "origin", id: i.recipient.recipientOrigin } : { kind: "plugin", id: i.recipient.recipientAppId ?? "" }, contentType: i.contentType, body: i.body, clientMessageId: i.clientMessageId, createdAtMs: i.createdAtMs }); return { type: "sealSendInput", envelope: sealed.envelope, signature: sealed.signatureBytes }; }
     case "openSealed": { const r = operation.record; const opened = openAppMessageLocalBytes({ signed: { envelopeBytes: new Uint8Array(r.envelope.envelopeBytes), signatureBytes: new Uint8Array(r.envelope.signatureBytes) }, recipientPrivateKeyBytes: privateKeyBytes, recipientPublicKeyBytes: cryptoHexToBytes(coordinatorState.activePublicKeyHex!) }); return { type: "openSealed", plaintext: new TextEncoder().encode(JSON.stringify(buildOpenedAppMsgMessage(r, opened))) }; }
+    case "channel.seal-deliver": {
+      assertChannelLifetime(operation.issuedAtMs, operation.expiresAtMs);
+      const recipient = parsePublicKey(operation.recipientPublicKeyHex);
+      const channel = inboxChannel(recipient);
+      const messageId = newMessageID();
+      const message = {
+        channel,
+        from_public_key: ownerPublicKey,
+        message_id: messageId,
+        issued_at_ms: operation.issuedAtMs,
+        expires_at_ms: operation.expiresAtMs,
+        protocol: APP_MESSAGE_PROTOCOL,
+        body: newDeliver(parseChannelContent(operation.contentJson))
+      } as const;
+      const envelope = await signAndSeal(message, privateKey);
+      return {
+        type: "channel.seal",
+        channel,
+        messageIdBase64Url: messageId,
+        envelopeJson: marshalEnvelope(envelope),
+        fromPublicKeyHex: ownerPublicKey,
+        expiresAtMs: operation.expiresAtMs
+      };
+    }
+    case "channel.seal-ack": {
+      assertChannelLifetime(operation.issuedAtMs, operation.expiresAtMs);
+      const recipient = parsePublicKey(operation.recipientPublicKeyHex);
+      const channel = inboxChannel(recipient);
+      const messageId = newMessageID();
+      const message = {
+        channel,
+        from_public_key: ownerPublicKey,
+        message_id: messageId,
+        issued_at_ms: operation.issuedAtMs,
+        expires_at_ms: operation.expiresAtMs,
+        protocol: APP_MESSAGE_PROTOCOL,
+        body: newAck(parseMessageID(operation.acknowledgedMessageIdBase64Url))
+      } as const;
+      const envelope = await signAndSeal(message, privateKey);
+      return {
+        type: "channel.seal",
+        channel,
+        messageIdBase64Url: messageId,
+        envelopeJson: marshalEnvelope(envelope),
+        fromPublicKeyHex: ownerPublicKey,
+        expiresAtMs: operation.expiresAtMs
+      };
+    }
+    case "channel.open": {
+      if (!Number.isSafeInteger(operation.nowMs)) throw new Error("Channel nowMs is invalid");
+      const opened = await decodePrivateChannel(operation.channel, new Uint8Array(operation.envelopeJson), privateKey, operation.nowMs);
+      if (opened.protocol !== APP_MESSAGE_PROTOCOL) throw new Error("Unsupported Channel protocol");
+      if (opened.body.type === "deliver") {
+        return {
+          type: "channel.open",
+          channel: opened.channel,
+          messageIdBase64Url: opened.message_id,
+          signedDigestHex: opened.digest,
+          fromPublicKeyHex: opened.from_public_key,
+          toPublicKeyHex: opened.to_public_key,
+          protocol: opened.protocol,
+          bodyType: "deliver",
+          contentJson: canonicalizeValue(opened.body.content),
+          issuedAtMs: opened.issued_at_ms,
+          expiresAtMs: opened.expires_at_ms
+        };
+      }
+      return {
+        type: "channel.open",
+        channel: opened.channel,
+        messageIdBase64Url: opened.message_id,
+        signedDigestHex: opened.digest,
+        fromPublicKeyHex: opened.from_public_key,
+        toPublicKeyHex: opened.to_public_key,
+        protocol: opened.protocol,
+        bodyType: "ack",
+        acknowledgedMessageIdBase64Url: opened.body.acknowledged_message_id,
+        issuedAtMs: opened.issued_at_ms,
+        expiresAtMs: opened.expires_at_ms
+      };
+    }
     default: throw new Error("Unsupported coordinator crypto operation");
   }
 }
@@ -3794,7 +4924,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -3922,19 +5052,26 @@ export function __testResetState(): void {
   msfileStatActive = 0;
   msfileSeedDataActive = 0;
   msfileBlockDataActive = 0;
-  rejectMsfileExecutorBridgePending(new Error("MSFile Coordinator runtime restarted"));
-  msfileExecutorBridgeInFlightBytes = 0;
+  rejectWindowP2pExecutorBridgePending(windowP2pError("ERR_WORKER_RESTARTED", "Window P2P Coordinator runtime restarted"));
+  // 测试接缝模拟整个 Worker 被销毁；真实 Worker 重启不会保留旧 Promise。
+  activeSatInboundHandlers.clear();
+  windowP2pExecutorBridgeInFlightBytes = 0;
+  windowP2pExecutorBridgeInFlightItems = 0;
   msfileReadConcurrencySettings = { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
-  msfileExecutorConfigVersion = 0;
-  msfileExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
-  msfileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(msfileReadConcurrencySettings, msfileExecutorConfigVersion);
-  msfileExecutorConfigSync?.reject(new Error("MSFile Coordinator runtime restarted"));
-  msfileExecutorConfigSync = undefined;
+  windowP2pExecutorConfigVersion = 0;
+  windowP2pExecutorConfigSignature = JSON.stringify(msfileReadConcurrencySettings);
+  windowP2pExecutorConcurrencyConfig = buildWindowP2pConcurrencyConfig(msfileReadConcurrencySettings, windowP2pExecutorConfigVersion);
+  windowP2pExecutorConfigSync?.reject(windowP2pError("ERR_WORKER_RESTARTED", "Window P2P Coordinator runtime restarted"));
+  windowP2pExecutorConfigSync = undefined;
   msfileRuntime = undefined;
   lastMsFileState = undefined;
+  satIncomingHandlers.clear();
+  testSatInboundResponseDispatcher = undefined;
+  satRevision = 0;
+  lastSatState = undefined;
   msfileMutationTail = Promise.resolve();
-  clearMsFileExecutorLeaseLocked();
-  msfileExecutorIdentityTail = Promise.resolve();
+  clearWindowP2pExecutorLeaseLocked();
+  windowP2pExecutorIdentityTail = Promise.resolve();
   msfileMutationTail = Promise.resolve();
   storageStateTail = Promise.resolve();
   storageMutationTail = Promise.resolve();
@@ -4111,10 +5248,10 @@ export function __testSetMsfileReadConcurrencySettings(settings: MsFileReadConcu
   const normalized = normalizeMsFileReadConcurrencySettings(settings);
   if (!normalized) throw new Error("invalid MSFile read concurrency settings");
   msfileReadConcurrencySettings = normalized;
-  msfileExecutorConfigSignature = JSON.stringify(normalized);
-  msfileExecutorConfigVersion += 1;
-  msfileExecutorConcurrencyConfig = buildMsFileExecutorConcurrencyConfig(normalized, msfileExecutorConfigVersion);
-  void syncMsfileExecutorConfig().catch(() => undefined);
+  windowP2pExecutorConfigSignature = JSON.stringify(normalized);
+  windowP2pExecutorConfigVersion += 1;
+  windowP2pExecutorConcurrencyConfig = buildWindowP2pConcurrencyConfig(normalized, windowP2pExecutorConfigVersion);
+  void syncWindowP2pExecutorConfig().catch(() => undefined);
   pumpMsfileDataWaiters();
 }
 
@@ -4143,25 +5280,264 @@ export async function __testDispatchMsfileControlWithEpoch(control: CoordinatorM
 }
 
 export async function __testAcquireExecutorLease(ownerPublicKeyHex: string, clientId = "port-exec", expectedSessionEpoch: SessionEpoch = coordinatorState.sessionEpoch): Promise<CoordinatorResponse> {
-  return processRequest({ kind: "msfile.executor.acquire", clientId, requestId: crypto.randomUUID(), ownerPublicKeyHex, expectedSessionEpoch }, clientId);
+  return processRequest({ kind: "window-p2p.executor.acquire", clientId, requestId: crypto.randomUUID(), ownerPublicKeyHex, expectedSessionEpoch }, clientId);
+}
+
+/** 测试 Worker bridge 的入站 Wire 预算；不启动真实 Host 或网络。 */
+export function __testWindowP2pInboundBridgePressure(input: { attempts?: number; wireBytes?: number } = {}): {
+  attempts: number;
+  accepted: number;
+  rejected: number;
+  peakBytes: number;
+  peakItems: number;
+  releasedBytes: number;
+  releasedItems: number;
+} {
+  const attempts = input.attempts ?? 64;
+  const wireBytes = input.wireBytes ?? 1024 * 1024;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || !Number.isSafeInteger(wireBytes) || wireBytes < 1) {
+    throw new RangeError("bridge pressure input must be positive safe integers");
+  }
+  const lease = windowP2pExecutorLease ?? {
+    leaseId: "test-window-p2p-bridge-lease",
+    sessionEpoch: "test-window-p2p-bridge-epoch",
+    activePublicKeyHex: "02" + "11".repeat(32),
+    clientId: "test-window-p2p-bridge",
+    ownerPublicKeyHex: "02" + "11".repeat(32),
+    acquiredAt: Date.now(),
+    transportReady: true,
+    transportConfigVersion: windowP2pExecutorConcurrencyConfig.version,
+  } satisfies WindowP2pExecutorLeaseState;
+  const acceptedEventIds: string[] = [];
+  let accepted = 0;
+  for (let index = 0; index < attempts; index += 1) {
+    const eventId = `test-window-p2p-bridge-event-${index}`;
+    const event = {
+      type: "ssp.request" as const,
+      eventId,
+      wire: new Uint8Array(wireBytes),
+      supplierId: "test-supplier",
+      connectionId: "test-connection",
+      ownerSessionEpoch: lease.sessionEpoch,
+      supplierGeneration: 1,
+    } satisfies SatWindowLaneSspRequestEvent;
+    if (reserveWindowP2pExecutorInboundEvent(event, lease)) {
+      accepted += 1;
+      acceptedEventIds.push(eventId);
+    }
+  }
+  const peakBytes = windowP2pExecutorBridgeInFlightBytes;
+  const peakItems = windowP2pExecutorBridgeInFlightItems;
+  for (const eventId of acceptedEventIds) {
+    releaseWindowP2pExecutorInboundEvent({ connectionId: "test-connection", eventId }, lease.leaseId);
+  }
+  return {
+    attempts,
+    accepted,
+    rejected: attempts - accepted,
+    peakBytes,
+    peakItems,
+    releasedBytes: windowP2pExecutorBridgeInFlightBytes,
+    releasedItems: windowP2pExecutorBridgeInFlightItems,
+  };
+}
+
+/** 测试 SSP/SPI 小请求预留最大响应时，bridge 不会突破 32 MiB。 */
+export async function __testWindowP2pResponseBridgePressure(input: { attempts?: number; requestBytes?: number } = {}): Promise<{
+  attempts: number;
+  requestBytes: number;
+  accepted: number;
+  queued: number;
+  peakBytes: number;
+  peakItems: number;
+  releasedBytes: number;
+  releasedItems: number;
+}> {
+  const attempts = input.attempts ?? 256;
+  const requestBytes = input.requestBytes ?? 1;
+  if (!Number.isSafeInteger(attempts) || attempts < 1 || !Number.isSafeInteger(requestBytes) || requestBytes < 1 || requestBytes > MAX_WIRE_BYTES) {
+    throw new RangeError("response bridge pressure input must be positive safe integers");
+  }
+  const operation = {
+    type: "lane" as const,
+    laneId: SAT_WINDOW_LANE_ID,
+    operation: {
+      type: "requestSsp" as const,
+      supplierId: "test-supplier",
+      connectionId: "test-connection",
+      ownerSessionEpoch: "test-epoch",
+      supplierGeneration: 1,
+      wire: new Uint8Array(requestBytes),
+    },
+  } satisfies WindowP2pExecutorOperation;
+  const reservedBytes = windowP2pExecutorBridgeBytesForOperation(operation);
+  const controllers = Array.from({ length: attempts }, () => new AbortController());
+  const reservations = controllers.map((controller) => reserveWindowP2pExecutorBridgeBytes(reservedBytes, controller.signal).then(() => undefined, () => undefined));
+  await Promise.resolve();
+  const accepted = windowP2pExecutorBridgeInFlightItems;
+  const queued = windowP2pExecutorBridgeBudgetWaiters.length;
+  const peakBytes = windowP2pExecutorBridgeInFlightBytes;
+  const peakItems = accepted + queued;
+  // 取消尚未准入的 waiter，再释放已经准入的操作，避免测试 helper 留下
+  // 全局 bridge 状态或未处理 rejection 影响后续测试。
+  for (const controller of controllers) controller.abort();
+  for (let index = 0; index < accepted; index += 1) releaseWindowP2pExecutorBridgeBytes(reservedBytes);
+  await Promise.all(reservations);
+  return {
+    attempts,
+    requestBytes,
+    accepted,
+    queued,
+    peakBytes,
+    peakItems,
+    releasedBytes: windowP2pExecutorBridgeInFlightBytes,
+    releasedItems: windowP2pExecutorBridgeInFlightItems,
+  };
+}
+
+/**
+ * 创建一个不依赖真实网络的 Worker 入站 handler 任务。
+ * 这些测试接缝只用于验证取消、lease/generation 栅栏和资源上限；生产
+ * 入站事件仍然只能从 Window executor 的 MessagePort 进入。
+ */
+export function __testStartSatInboundHandler(input: {
+  leaseId?: string;
+  eventId?: string;
+  connectionId?: string;
+  supplierId?: string;
+  ownerSessionEpoch?: string;
+  supplierGeneration?: number;
+  wireBytes?: number;
+  makeCurrent?: boolean;
+  handler?: (wire: Uint8Array) => Promise<Uint8Array>;
+} = {}): {
+  accepted: boolean;
+  leaseId: string;
+  eventId: string;
+  connectionId: string;
+  signal?: AbortSignal;
+  completion?: Promise<void>;
+} {
+  const leaseId = input.leaseId ?? `test-sat-inbound-lease-${crypto.randomUUID()}`;
+  const eventId = input.eventId ?? `test-sat-inbound-event-${crypto.randomUUID()}`;
+  const connectionId = input.connectionId ?? `test-sat-inbound-connection-${crypto.randomUUID()}`;
+  const supplierId = input.supplierId ?? "test-sat-supplier";
+  const ownerSessionEpoch = input.ownerSessionEpoch ?? "test-sat-inbound-epoch";
+  const supplierGeneration = input.supplierGeneration ?? 1;
+  const wireBytes = input.wireBytes ?? 1;
+  if (!Number.isSafeInteger(supplierGeneration) || supplierGeneration < 1
+    || !Number.isSafeInteger(wireBytes) || wireBytes < 1 || wireBytes > SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgeInFlightBytes) {
+    throw new RangeError("invalid Sat inbound handler test input");
+  }
+  const lease = {
+    leaseId,
+    sessionEpoch: ownerSessionEpoch,
+    activePublicKeyHex: "02" + "11".repeat(32),
+    clientId: "test-sat-inbound",
+    ownerPublicKeyHex: "02" + "11".repeat(32),
+    acquiredAt: Date.now(),
+    transportReady: true,
+    transportConfigVersion: windowP2pExecutorConcurrencyConfig.version,
+  } satisfies WindowP2pExecutorLeaseState;
+  const event: SatWindowLaneSspRequestEvent = {
+    type: "ssp.request",
+    eventId,
+    supplierId,
+    connectionId,
+    ownerSessionEpoch,
+    supplierGeneration,
+    wire: new Uint8Array(wireBytes),
+  };
+  if (!reserveWindowP2pExecutorInboundEvent(event, lease)) {
+    return { accepted: false, leaseId, eventId, connectionId };
+  }
+  const task = beginSatInboundHandler(event, lease);
+  if (!task) {
+    releaseWindowP2pExecutorInboundEvent(event, lease.leaseId);
+    return { accepted: false, leaseId, eventId, connectionId };
+  }
+  const registration = {
+    supplierId,
+    ownerSessionEpoch,
+    supplierGeneration,
+    handler: input.handler ?? (() => new Promise<Uint8Array>(() => undefined)),
+  };
+  satIncomingHandlers.set(connectionId, registration);
+  if (input.makeCurrent) {
+    windowP2pExecutorLease = lease;
+    coordinatorState.sessionEpoch = ownerSessionEpoch;
+    coordinatorState.vaultStatus = "unlocked";
+    coordinatorState.activePublicKeyHex = lease.activePublicKeyHex;
+  }
+  const completion = handleSatWindowEvent(event, lease, task).finally(() => {
+    if (satIncomingHandlers.get(connectionId) === registration) satIncomingHandlers.delete(connectionId);
+  });
+  return { accepted: true, leaseId, eventId, connectionId, signal: task.controller.signal, completion };
+}
+
+/** 测试单个 eventId + connectionId 的取消路径。 */
+export function __testCancelSatInboundHandler(input: { leaseId: string; eventId: string; connectionId: string }): boolean {
+  const task = activeSatInboundHandlers.get(`${input.leaseId}\u0000${input.connectionId}\u0000${input.eventId}`);
+  if (!task) return false;
+  cancelSatInboundHandler(task, "test cancellation");
+  return true;
+}
+
+/** 测试 lease revoke；实际生产路径由 clearWindowP2pExecutorLeaseLocked 调用。 */
+export function __testRevokeWindowP2pExecutorLease(): void {
+  clearWindowP2pExecutorLeaseLocked();
+}
+
+/** 测试某个 Supplier generation 变更后的迟到结果栅栏。 */
+export function __testChangeSatInboundGeneration(connectionId: string, supplierGeneration: number): boolean {
+  const current = satIncomingHandlers.get(connectionId);
+  if (!current) return false;
+  satIncomingHandlers.set(connectionId, { ...current, supplierGeneration });
+  return true;
+}
+
+export function __testSatInboundHandlerSnapshot(): {
+  active: number;
+  canceled: number;
+  bridgeBytes: number;
+  bridgeItems: number;
+  maxActive: number;
+} {
+  return {
+    active: activeSatInboundHandlers.size,
+    canceled: [...activeSatInboundHandlers.values()].filter((task) => task.canceled).length,
+    bridgeBytes: windowP2pExecutorBridgeInFlightBytes,
+    bridgeItems: windowP2pExecutorBridgeInFlightItems,
+    maxActive: SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxActiveWorkerInboundHandlers,
+  };
+}
+
+export function __testSetSatInboundResponseDispatcher(dispatcher: ((operation: SatWindowLaneOperation, signal: AbortSignal) => Promise<unknown>) | undefined): void {
+  testSatInboundResponseDispatcher = dispatcher;
+}
+
+/** 测试 sat.events 是 SharedWorker 的单一广播源，而不是每个 Tab 自建 runtime。 */
+export function __testPublishSatState(event: import("@keymaster/contracts").CoordinatorSatEvent, health?: import("@keymaster/contracts").MessageProviderHealth): void {
+  emitSatState(event, health);
 }
 
 export async function __testReleaseExecutorLease(leaseId: string, clientId = "port-exec"): Promise<CoordinatorResponse> {
-  return processRequest({ kind: "msfile.executor.release", clientId, requestId: crypto.randomUUID(), leaseId }, clientId);
+  return processRequest({ kind: "window-p2p.executor.release", clientId, requestId: crypto.randomUUID(), leaseId }, clientId);
 }
 
 export async function __testExecutorSignNoise(input: { leaseId: string; expectedSessionEpoch?: SessionEpoch; noiseStaticPublicKey: ArrayBuffer }, clientId = "port-exec"): Promise<CoordinatorResponse> {
-  const request = { kind: "msfile.executor.identity.sign-noise" as const, clientId, requestId: crypto.randomUUID(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch, noiseStaticPublicKey: input.noiseStaticPublicKey };
-  return executeMsfileExecutorRequest(request, clientId);
+  const request = { kind: "window-p2p.executor.identity.sign-noise" as const, clientId, requestId: crypto.randomUUID(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch, noiseStaticPublicKey: input.noiseStaticPublicKey };
+  return executeWindowP2pExecutorRequest(request, clientId);
 }
 
 export async function __testExecutorSignPeerRecord(input: { leaseId: string; expectedSessionEpoch?: SessionEpoch; peerId: string; addresses: string[]; sequence: string }, clientId = "port-exec"): Promise<CoordinatorResponse> {
-  const request = { kind: "msfile.executor.identity.sign-peer-record" as const, clientId, requestId: crypto.randomUUID(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch, peerId: input.peerId, addresses: input.addresses, sequence: input.sequence };
-  return executeMsfileExecutorRequest(request, clientId);
+  const request = { kind: "window-p2p.executor.identity.sign-peer-record" as const, clientId, requestId: crypto.randomUUID(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? coordinatorState.sessionEpoch, peerId: input.peerId, addresses: input.addresses, sequence: input.sequence };
+  return executeWindowP2pExecutorRequest(request, clientId);
 }
 
 export async function __testReleaseMsfileRuntime(): Promise<void> {
   releaseMsfileRuntime("test");
+  releaseSatRuntime("test");
 }
 
 export async function __testDispatchStorageData(input: { grantId: string; actualPortId: string; requestClientId?: string; connectSessionId?: string }): Promise<CoordinatorResponse> {
@@ -4461,4 +5837,11 @@ export function __testGetVaultStatus(): CoordinatorVaultStatus {
 /** 获取 active key。 */
 export function __testGetActivePublicKeyHex(): string | undefined {
   return coordinatorState.activePublicKeyHex;
+}
+
+/** Test-only invocation of the Worker-owned Channel seal/open boundary. */
+export async function __testChannelCrypto(operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> {
+  const privateKeyBytes = coordinatorState.activePrivateKeyBytes;
+  if (coordinatorState.vaultStatus !== "unlocked" || !privateKeyBytes) throw new Error("Active Channel key is unavailable");
+  return executeCryptoOperation(operation, privateKeyBytes);
 }

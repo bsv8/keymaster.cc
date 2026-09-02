@@ -3,7 +3,7 @@ import { join, relative, resolve } from "node:path";
 
 const distDirectory = resolve("apps/web/dist");
 const forbiddenMarkers = [
-  "__msfileExecutorSpike",
+  "__windowP2pExecutorSpike",
   "msfile-spike-test-password",
   "msfileSpike",
 ];

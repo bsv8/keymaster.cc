@@ -1,8 +1,7 @@
-// Coordinator 侧的生产 transport proxy。
+// MSFile lane 的 Coordinator transport proxy。
 //
-// 该模块不导入 libp2p/WebRTC，因此可以安全地被 SharedWorker 加载。真正的
-// host 只存在于 Window executor；这里把受限 operation 转成专用 bridge RPC，
-// 并把远端返回的 Uint8Array 交给 MsFileService 做最终 hash/尺寸校验。
+// 这里不创建 libp2p Host；公共 Window Host、lease 和 bridge 属于
+// `plugin-window-p2p`。MSFile 只把业务操作封装为 `msfile` lane。
 
 import type {
   MsFileReadConcurrencySettings,
@@ -13,6 +12,7 @@ import type {
 import {
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
+  SAT_SUBSCRIPTION_RESOURCE_LIMITS,
   normalizeMsFileReadConcurrencySettings,
 } from "@keymaster/contracts";
 import type {
@@ -22,48 +22,46 @@ import type {
   MsFileTransportReadOutcome,
   MsFileTransportStatInput,
 } from "./msfileTransport.js";
+import type {
+  WindowP2pExecutorBridge,
+  WindowP2pExecutorConcurrencyConfig as WindowP2pBaseConcurrencyConfig,
+  WindowP2pExecutorOperation
+} from "@keymaster/plugin-window-p2p/executor-transport";
 
-export type MsFileExecutorOperation =
+/** MSFile lane 的受限操作；顶层公共 executor 只接受 lane operation。 */
+export type MsFileP2pLaneOperation =
   | { type: "stat"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** Seed 的 64 位 hex 哈希。 */ seedHashHex: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "read"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 内容种类：seed 或 block。 */ kind: MsFileTransportReadInput["kind"]; /** 内容的 64 位 hex 哈希。 */ hashHex: string; /** 十进制聪上限。 */ maxPriceSatoshis: string; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "probe"; /** 供应商配置。 */ supplier: MsFileSupplierConfig; /** 发起时的供应商配置世代。 */ supplierGeneration: number }
   | { type: "invalidate"; /** 要失效的供应商公钥；省略表示全部。 */ supplierPublicKeyHex?: string; /** 新的配置世代。 */ generation: number };
 
 /** Worker 与 Window executor 之间版本化同步的完整读取资源预算。 */
-export interface MsFileExecutorConcurrencyConfig extends MsFileReadConcurrencySettings {
+export interface WindowP2pExecutorConcurrencyConfig extends MsFileReadConcurrencySettings, WindowP2pBaseConcurrencyConfig {
   /** 配置版本；只接受不小于当前版本的消息。 */
   version: number;
   /** 单个 supplier 的 Read pending 上限：Seed + Block。 */
   supplierPendingReadLimit: number;
   /** MessagePort bridge 的在途 attachment 字节预算。 */
   bridgeMaxInFlightBytes: number;
+  /** MessagePort bridge 的 request/response/event 在途 item 预算。 */
+  bridgeMaxPendingItems: number;
 }
 
 /** 所有派生资源限制从同一份设置计算，避免 Worker/Window 各自维护常量。 */
-export function buildMsFileExecutorConcurrencyConfig(
+export function buildWindowP2pConcurrencyConfig(
   settings: MsFileReadConcurrencySettings,
   version: number,
-): MsFileExecutorConcurrencyConfig {
+): WindowP2pExecutorConcurrencyConfig {
   const normalized = normalizeMsFileReadConcurrencySettings(settings);
-  if (!normalized || !Number.isSafeInteger(version) || version < 0) {
-    throw new Error("invalid MSFile executor concurrency settings");
-  }
+  if (!normalized || !Number.isSafeInteger(version) || version < 0) throw new Error("invalid Window P2P concurrency settings");
   return {
     ...normalized,
     version,
     supplierPendingReadLimit: normalized.globalSeedReadConcurrency + normalized.globalBlockReadConcurrency,
     bridgeMaxInFlightBytes: normalized.globalSeedReadConcurrency * MSFILE_MAX_SEED_BYTES
       + normalized.globalBlockReadConcurrency * MSFILE_MAX_BLOCK_BYTES,
+    bridgeMaxPendingItems: SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxBridgePendingItems,
   };
-}
-
-export interface MsFileExecutorBridge {
-  /** 当前 Window executor 是否已取得 lease 且 host 可用。 */
-  readonly available: boolean;
-  /** 向 Window executor 发送一个受限数据面操作。 */
-  request(operation: MsFileExecutorOperation, signal?: AbortSignal): Promise<unknown>;
-  /** 释放 bridge 资源；调用可幂等。 */
-  dispose?(): void;
 }
 
 function asStat(value: unknown): MsFileSupplierStat {
@@ -72,15 +70,9 @@ function asStat(value: unknown): MsFileSupplierStat {
 }
 
 function asRead(value: unknown): MsFileTransportReadOutcome {
-  if (!value || typeof value !== "object" || !(["ok", "integrity-failed", "price-limit-exceeded", "supplier-error", "cancelled", "transport-failed"] as unknown[]).includes((value as { type?: unknown }).type)) {
-    throw new Error("executor returned an invalid Read result");
-  }
-  if ((value as { type: string }).type === "ok" && !((value as { content?: unknown }).content instanceof Uint8Array)) {
-    throw new Error("executor returned invalid Read content");
-  }
-  if ((value as { type: string }).type === "supplier-error" && !/^[a-z0-9_]{1,64}$/.test(String((value as { errorCode?: unknown }).errorCode ?? ""))) {
-    throw new Error("executor returned invalid supplier error code");
-  }
+  if (!value || typeof value !== "object" || !( ["ok", "integrity-failed", "price-limit-exceeded", "supplier-error", "cancelled", "transport-failed"] as unknown[]).includes((value as { type?: unknown }).type)) throw new Error("executor returned an invalid Read result");
+  if ((value as { type: string }).type === "ok" && !((value as { content?: unknown }).content instanceof Uint8Array)) throw new Error("executor returned invalid Read content");
+  if ((value as { type: string }).type === "supplier-error" && !/^[a-z0-9_]{1,64}$/.test(String((value as { errorCode?: unknown }).errorCode ?? ""))) throw new Error("executor returned invalid supplier error code");
   return value as MsFileTransportReadOutcome;
 }
 
@@ -89,41 +81,24 @@ function asProbe(value: unknown): MsFileSupplierProbeResult {
   return value as MsFileSupplierProbeResult;
 }
 
-/** 将 Window executor bridge 适配为既有 MsFileTransport 契约。 */
-export function createMsFileExecutorTransport(bridge: MsFileExecutorBridge): MsFileTransport {
+/** 将公共 Window P2P bridge 适配为既有 MsFileTransport 契约。 */
+export function createWindowP2pMsFileTransport(bridge: WindowP2pExecutorBridge): MsFileTransport {
+  const request = (operation: MsFileP2pLaneOperation, signal?: AbortSignal): Promise<unknown> => bridge.request({ type: "lane", laneId: "msfile", operation }, signal);
   return {
-    get available() {
-      return bridge.available;
-    },
+    get available() { return bridge.available; },
     async stat(input: MsFileTransportStatInput): Promise<MsFileSupplierStat> {
-      return asStat(await bridge.request({
-        type: "stat",
-        supplier: input.supplier,
-        seedHashHex: input.seedHashHex,
-        supplierGeneration: input.supplierGeneration,
-      }, input.signal));
+      return asStat(await request({ type: "stat", supplier: input.supplier, seedHashHex: input.seedHashHex, supplierGeneration: input.supplierGeneration }, input.signal));
     },
     async read(input: MsFileTransportReadInput): Promise<MsFileTransportReadOutcome> {
-      return asRead(await bridge.request({
-        type: "read",
-        supplier: input.supplier,
-        kind: input.kind,
-        hashHex: input.hashHex,
-        maxPriceSatoshis: input.maxPriceSatoshis.toString(10),
-        supplierGeneration: input.supplierGeneration,
-      }, input.signal));
+      return asRead(await request({ type: "read", supplier: input.supplier, kind: input.kind, hashHex: input.hashHex, maxPriceSatoshis: input.maxPriceSatoshis.toString(10), supplierGeneration: input.supplierGeneration }, input.signal));
     },
     async probe(input: MsFileTransportProbeInput): Promise<MsFileSupplierProbeResult> {
-      return asProbe(await bridge.request({
-        type: "probe",
-        supplier: input.supplier,
-        supplierGeneration: input.supplierGeneration,
-      }, input.signal));
+      return asProbe(await request({ type: "probe", supplier: input.supplier, supplierGeneration: input.supplierGeneration }, input.signal));
     },
     dispose: () => bridge.dispose?.(),
     invalidateSupplier: async (supplierPublicKeyHex, generation) => {
       if (!bridge.available) return;
-      await bridge.request({ type: "invalidate", supplierPublicKeyHex, generation });
+      await request({ type: "invalidate", supplierPublicKeyHex, generation });
     },
   };
 }

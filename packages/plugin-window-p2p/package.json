@@ -1,0 +1,21 @@
+{
+  "name": "@keymaster/plugin-window-p2p",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./lane-registry": "./src/laneRegistry.ts",
+    "./window-executor": "./src/windowExecutor.ts",
+    "./identity-signer": "./src/identitySigner.ts",
+    "./executor-transport": "./src/executorTransport.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@libp2p/webrtc": "6.0.30",
+    "@libp2p/websockets": "10.1.20",
+    "bitcoin-libp2p": "0.3.0"
+  }
+}

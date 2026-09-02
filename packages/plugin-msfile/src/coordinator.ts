@@ -22,7 +22,8 @@ export {
   type MsFileServiceEventState,
 } from "./msfileService.js";
 export { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
-export { createMsFileExecutorTransport, type MsFileExecutorBridge, type MsFileExecutorOperation } from "./executorTransport.js";
+export { createWindowP2pMsFileTransport, type MsFileP2pLaneOperation } from "./executorTransport.js";
+export type { WindowP2pExecutorBridge, WindowP2pExecutorOperation } from "@keymaster/plugin-window-p2p/executor-transport";
 // 注意：supplierConfig（multiaddr/libp2p 依赖）不在此静态导出，
 // 保持 Worker 初始模块图轻量；页面设置组件直接 import "./supplierConfig.js"。
 export { validateSeedContent, validateBlockContent, expectedSeedLength } from "./contentValidation.js";

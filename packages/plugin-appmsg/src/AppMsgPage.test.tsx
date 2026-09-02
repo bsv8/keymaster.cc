@@ -280,6 +280,27 @@ describe("AppMsgPage in PluginHostProvider", () => {
     expect(names.length).toBeGreaterThan(0);
   });
 
+  it("lets the user explicitly select the SatSubscription provider", async () => {
+    const setActiveProvider = vi.fn(async () => undefined);
+    const h = makeFakeCore({
+      setActiveProviderImpl: setActiveProvider,
+      listProviders: [
+        { id: "hubmsg", displayName: "HubMsg" },
+        { id: "sat-subscription", displayName: "SatSubscription" }
+      ]
+    });
+    const { AppMsgPage } = await import("./AppMsgPage.js");
+    render(
+      <PluginHostProvider host={h.host}>
+        <AppMsgPage />
+      </PluginHostProvider>
+    );
+
+    await waitFor(() => expect(screen.getAllByText("SatSubscription").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "appmsg.page.providers.activate" }));
+    await waitFor(() => expect(setActiveProvider).toHaveBeenCalledWith("sat-subscription"));
+  });
+
   it("renders 'no active provider' empty state when active is null", async () => {
     const h = makeFakeCore({
       activeProvider: {

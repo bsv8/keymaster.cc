@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  bitcoin-libp2p: 0.3.0
+
 importers:
 
   .:
@@ -162,6 +165,9 @@ importers:
       '@keymaster/plugin-protocol':
         specifier: '*'
         version: link:../../packages/plugin-protocol
+      '@keymaster/plugin-sat-subscription':
+        specifier: '*'
+        version: link:../../packages/plugin-sat-subscription
       '@keymaster/plugin-settings':
         specifier: '*'
         version: link:../../packages/plugin-settings
@@ -180,6 +186,9 @@ importers:
       '@keymaster/plugin-webrtc':
         specifier: '*'
         version: link:../../packages/plugin-webrtc
+      '@keymaster/plugin-window-p2p':
+        specifier: '*'
+        version: link:../../packages/plugin-window-p2p
       '@keymaster/plugin-woc':
         specifier: '*'
         version: link:../../packages/plugin-woc
@@ -202,14 +211,20 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       bitcoin-libp2p:
-        specifier: 0.2.0
-        version: 0.2.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.0
+        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      bsv8-channel-protocol:
+        specifier: 0.1.0
+        version: 0.1.0
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
       keyhold:
         specifier: 2.0.0
         version: 2.0.0
+      sat-subscription-protocol:
+        specifier: 0.1.0
+        version: 0.1.0
 
   packages/connect:
     devDependencies:
@@ -477,6 +492,9 @@ importers:
       '@keymaster/msfile-media':
         specifier: '*'
         version: link:../msfile-media
+      '@keymaster/plugin-window-p2p':
+        specifier: '*'
+        version: link:../plugin-window-p2p
       '@keymaster/runtime':
         specifier: '*'
         version: link:../runtime
@@ -493,8 +511,8 @@ importers:
         specifier: 13.0.3
         version: 13.0.3
       bitcoin-libp2p:
-        specifier: 0.2.0
-        version: 0.2.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+        specifier: 0.3.0
+        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   packages/plugin-p2pkh:
     dependencies:
@@ -564,6 +582,39 @@ importers:
       keymaster-multisig-pool:
         specifier: 1.5.0
         version: 1.5.0
+
+  packages/plugin-sat-subscription:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@libp2p/interface':
+        specifier: 3.3.0
+        version: 3.3.0
+      '@multiformats/multiaddr':
+        specifier: 13.0.3
+        version: 13.0.3
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
+      bitcoin-libp2p:
+        specifier: 0.3.0
+        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      bsv8-channel-protocol:
+        specifier: 0.1.0
+        version: 0.1.0
+      sat-subscription-protocol:
+        specifier: 0.1.0
+        version: 0.1.0
+      satoshi-payment-interface:
+        specifier: 0.1.0
+        version: 0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   packages/plugin-settings:
     dependencies:
@@ -657,6 +708,24 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+
+  packages/plugin-window-p2p:
+    dependencies:
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@libp2p/webrtc':
+        specifier: 6.0.30
+        version: 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      '@libp2p/websockets':
+        specifier: 10.1.20
+        version: 10.1.20
+      bitcoin-libp2p:
+        specifier: 0.3.0
+        version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
 
   packages/plugin-woc:
     dependencies:
@@ -1381,6 +1450,9 @@ packages:
   '@libp2p/interface-internal@3.1.12':
     resolution: {integrity: sha512-TIAUDopj73j0p5pfvCHKRwVBLx51UaNQ2zFk/Iskn89jcPjoQnpDnXjeqzvT9GZJSCwuqkE/eQ4sGiQ5xyXZNw==}
 
+  '@libp2p/interface-internal@3.1.13':
+    resolution: {integrity: sha512-+vjQzpQl+0uoWCyNwV5NDnv1RAK9LDeWGeMbx/Fl2ZWrndtuFUPa9LxwqHXrTly6YOhgUatSzVqZBWnrQ1PxGg==}
+
   '@libp2p/interface@1.7.0':
     resolution: {integrity: sha512-/zFyaIaIGW0aihhsH7/93vQdpWInUzFocxF11RO/029Y6h0SVjs24HHbils+DqaFDTqN+L7oNlBx2rM2MnmTjA==}
 
@@ -1398,6 +1470,9 @@ packages:
 
   '@libp2p/peer-collections@7.0.27':
     resolution: {integrity: sha512-+XrNXqzO9eHOf3YGgq+exsALrTzmoBw29Z1uzFovFjeXK/MBWJiIeDmuqSNXq+zxeaC+JeEgOwkX8+guR2T0wQ==}
+
+  '@libp2p/peer-collections@7.0.28':
+    resolution: {integrity: sha512-+evafZ5oSnGRfB7z+ycf09ehzNhCKoOZaiHgi6TpnDitpRQM5KQeN0H9Ep2uNJtzyW944HOG41BqcSaHbEHv7Q==}
 
   '@libp2p/peer-id-factory@4.2.4':
     resolution: {integrity: sha512-NDQ/qIWpcAG/6xQjyut6xCkrYYAoCaI/33Z+7yzo5qFODwLfNonLzSTasnA6jhuvHn33aHnD1qhdpFkmstxtNQ==}
@@ -1417,8 +1492,14 @@ packages:
   '@libp2p/utils@7.4.0':
     resolution: {integrity: sha512-9tHz8kWiFiCG0hVqVKYEduQnt5kMhla/6dsaGsDPckFjO7vYC0Yy24lp88wG3X5Ap3rde/Dj1ErU1xN6Jp3N9Q==}
 
+  '@libp2p/utils@7.4.1':
+    resolution: {integrity: sha512-e9cZeop+awI0rFczG4DvAwVeHqBhuCZfTyskvgONfKQrsT7L0BSlTlTTzZoFF8Dnb+QrzHsoIpnl0PrCr0h+Hg==}
+
   '@libp2p/webrtc@6.0.30':
     resolution: {integrity: sha512-SiWxhdOi6X2Nd0MUU5HNrgR/DZoJgYxIjWcM9NlMjZ3Yo3ZduZo/Jg45JNXufbHSamjDW/96yjbMRImX6HatGg==}
+
+  '@libp2p/webrtc@6.0.31':
+    resolution: {integrity: sha512-LUv8264U2TyKNrPBuFKg1euOJytUmpNuBWmJxLnNKbMGqB59i6bdmw8GzoblY6gf2XI0FghyZcH8Q0zxlOud0g==}
 
   '@libp2p/websockets@10.1.20':
     resolution: {integrity: sha512-OTBYcUPZNgK5ijqmp2y1PkNRrrCZ4DQ9tBU7Bkp5l99jKRgRlVdRqUppIprmF4yTeUxBRI5ew3yVHJr3CahdKg==}
@@ -2196,8 +2277,8 @@ packages:
   birpc@2.9.0:
     resolution: {integrity: sha512-KrayHS5pBi69Xi9JmvoqrIgYGDkD6mcSe/i6YKi3w5kekCLzrX4+nawcXqrj2tIp50Kw/mT/s3p+GVK0A0sKxw==}
 
-  bitcoin-libp2p@0.2.0:
-    resolution: {integrity: sha512-mCF2RqQ1uAcPKXtHUvXUIklNXuDxGFa2KRgAUSG4ehsdlpMaVA2bEWEsVbCOTl0xEwGm1wgRO4HbyYPhUNezFA==}
+  bitcoin-libp2p@0.3.0:
+    resolution: {integrity: sha512-Xn4HaDVgN2EKrITvWBC10PZ7nzUPIU0fRFRzqXNRKrXE/xtR4EFgX+Rs3e5xvV72NbU5nmhiwvUdYnM5qsix/Q==}
 
   bowser@2.14.1:
     resolution: {integrity: sha512-tzPjzCxygAKWFOJP011oxFHs57HzIhOEracIgAePE4pqB3LikALKnSzUyU4MGs9/iCEUuHlAJTjTc5M+u7YEGg==}
@@ -2220,6 +2301,10 @@ packages:
 
   bser@2.1.1:
     resolution: {integrity: sha512-gQxTNE/GAfIIrmHLUE3oJyp5FO6HRBfhjnw4/wMmA63ZGDJnWBmgY/lyQBpnDUkGmAhbSe39tx2d/iTOAfglwQ==}
+
+  bsv8-channel-protocol@0.1.0:
+    resolution: {integrity: sha512-0n/7KdktyP2v4J2AwQQ+nfXM9Fzu5orvvnrjve1v/tlj1bzEuuwZr32f4jy4ArnB7RhQYASVaQhoSt9KJr9yQw==}
+    engines: {node: '>=20'}
 
   buffer-from@1.1.2:
     resolution: {integrity: sha512-E+XQCRwSbaaiChtv6k6Dwgc+bx+Bs6vuKJHHl5kox/BaKbhiXzqQOwK4cO22yElGp2OCmjwVhT3HmxgyPGnJfQ==}
@@ -3486,6 +3571,13 @@ packages:
   sanitize-filename@1.6.4:
     resolution: {integrity: sha512-9ZyI08PsvdQl2r/bBIGubpVdR3RR9sY6RDiWFPreA21C/EFlQhmgo20UZlNjZMMZNubusLhAQozkA0Od5J21Eg==}
 
+  sat-subscription-protocol@0.1.0:
+    resolution: {integrity: sha512-B1+Izifq9T1x3y6gsyt967kZQ1ly+RqXUSMQyXZ2WTxhogk/g3Cuwru4WdwGVHjcHY8VbVo5ddJfwuogLojFYg==}
+    engines: {node: '>=18'}
+
+  satoshi-payment-interface@0.1.0:
+    resolution: {integrity: sha512-tLIR+pA2jvEdvqCbIcFFGKxXHfH2NaGAq3fu93kSVsVltWXKwPP30Fw/ZzBzD5uju+EoKlnBOa+7h+moPeFoRA==}
+
   saxes@6.0.0:
     resolution: {integrity: sha512-xAg7SOnEhrm5zI3puOOKyy1OMcMlIJZYNJY7xLBwSze0UjhPLnWfj2GF2EpT0jmzaJKIWKHLsaSSajf35bcYnA==}
     engines: {node: '>=v12.22.7'}
@@ -4504,7 +4596,7 @@ snapshots:
   '@chainsafe/libp2p-yamux@8.0.1':
     dependencies:
       '@libp2p/interface': 3.3.0
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       race-signal: 2.0.2
       uint8arraylist: 2.4.9
 
@@ -4803,10 +4895,10 @@ snapshots:
     dependencies:
       '@libp2p/crypto': 5.1.23
       '@libp2p/interface': 3.3.0
-      '@libp2p/interface-internal': 3.1.12
+      '@libp2p/interface-internal': 3.1.13
       '@libp2p/peer-id': 6.0.15
       '@libp2p/peer-record': 9.0.16
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       it-drain: 3.0.12
@@ -4820,6 +4912,13 @@ snapshots:
     dependencies:
       '@libp2p/interface': 3.3.0
       '@libp2p/peer-collections': 7.0.27
+      '@multiformats/multiaddr': 13.0.3
+      progress-events: 1.1.0
+
+  '@libp2p/interface-internal@3.1.13':
+    dependencies:
+      '@libp2p/interface': 3.3.0
+      '@libp2p/peer-collections': 7.0.28
       '@multiformats/multiaddr': 13.0.3
       progress-events: 1.1.0
 
@@ -4863,7 +4962,7 @@ snapshots:
   '@libp2p/multistream-select@7.0.27':
     dependencies:
       '@libp2p/interface': 3.3.0
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       it-length-prefixed: 11.0.1
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
@@ -4873,6 +4972,13 @@ snapshots:
       '@libp2p/interface': 3.3.0
       '@libp2p/peer-id': 6.0.15
       '@libp2p/utils': 7.4.0
+      multiformats: 14.0.5
+
+  '@libp2p/peer-collections@7.0.28':
+    dependencies:
+      '@libp2p/interface': 3.3.0
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/utils': 7.4.1
       multiformats: 14.0.5
 
   '@libp2p/peer-id-factory@4.2.4':
@@ -4913,7 +5019,7 @@ snapshots:
     dependencies:
       '@libp2p/crypto': 5.1.23
       '@libp2p/interface': 3.3.0
-      '@libp2p/peer-collections': 7.0.27
+      '@libp2p/peer-collections': 7.0.28
       '@libp2p/peer-id': 6.0.15
       '@libp2p/peer-record': 9.0.16
       '@multiformats/multiaddr': 13.0.3
@@ -4954,6 +5060,34 @@ snapshots:
       uint8arraylist: 3.0.2
       uint8arrays: 6.1.1
 
+  '@libp2p/utils@7.4.1':
+    dependencies:
+      '@chainsafe/is-ip': 2.1.0
+      '@chainsafe/netmask': 2.0.0
+      '@libp2p/interface': 3.3.0
+      '@libp2p/logger': 6.2.13
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      '@sindresorhus/fnv1a': 3.1.0
+      any-signal: 4.2.0
+      cborg: 6.1.1
+      delay: 7.0.0
+      is-loopback-addr: 2.1.0
+      it-length-prefixed: 11.0.1
+      it-pipe: 3.0.1
+      it-pushable: 3.2.4
+      it-stream-types: 2.0.4
+      main-event: 1.0.5
+      netmask: 2.1.1
+      p-defer: 4.0.1
+      p-event: 7.1.0
+      progress-events: 1.1.0
+      protons-runtime: 7.0.0
+      race-signal: 2.0.2
+      uint8-varint: 3.0.0
+      uint8arraylist: 3.0.2
+      uint8arrays: 6.1.1
+
   '@libp2p/webrtc@6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))':
     dependencies:
       '@chainsafe/is-ip': 2.1.0
@@ -4964,6 +5098,45 @@ snapshots:
       '@libp2p/keychain': 6.1.7
       '@libp2p/peer-id': 6.0.15
       '@libp2p/utils': 7.4.0
+      '@multiformats/multiaddr': 13.0.3
+      '@multiformats/multiaddr-matcher': 3.0.2
+      '@peculiar/webcrypto': 1.7.1
+      '@peculiar/x509': 2.0.0
+      get-port: 7.2.0
+      interface-datastore: 10.0.1
+      it-length-prefixed: 11.0.1
+      it-protobuf-stream: 3.0.1
+      it-pushable: 3.2.4
+      it-stream-types: 2.0.4
+      main-event: 1.0.5
+      multiformats: 14.0.5
+      node-datachannel: 0.33.1
+      p-defer: 4.0.1
+      p-event: 7.1.0
+      p-timeout: 7.0.1
+      p-wait-for: 6.0.0
+      progress-events: 1.1.0
+      protons-runtime: 7.0.0
+      race-signal: 2.0.2
+      react-native-webrtc: 124.0.8(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      reflect-metadata: 0.2.2
+      uint8-varint: 3.0.0
+      uint8arraylist: 3.0.2
+      uint8arrays: 6.1.1
+    transitivePeerDependencies:
+      - react-native
+      - supports-color
+
+  '@libp2p/webrtc@6.0.31(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))':
+    dependencies:
+      '@chainsafe/is-ip': 2.1.0
+      '@chainsafe/libp2p-noise': 17.0.0
+      '@libp2p/crypto': 5.1.23
+      '@libp2p/interface': 3.3.0
+      '@libp2p/interface-internal': 3.1.13
+      '@libp2p/keychain': 6.1.7
+      '@libp2p/peer-id': 6.0.15
+      '@libp2p/utils': 7.4.1
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
       '@peculiar/webcrypto': 1.7.1
@@ -5840,7 +6013,7 @@ snapshots:
 
   birpc@2.9.0: {}
 
-  bitcoin-libp2p@0.2.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+  bitcoin-libp2p@0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -5850,7 +6023,7 @@ snapshots:
       '@libp2p/peer-id': 6.0.15
       '@libp2p/peer-id-factory': 4.2.4
       '@libp2p/peer-record': 9.0.16
-      '@libp2p/webrtc': 6.0.30(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+      '@libp2p/webrtc': 6.0.31(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       '@libp2p/websockets': 10.1.20
       '@multiformats/multiaddr': 13.0.3
       '@noble/curves': 2.0.1
@@ -5888,6 +6061,12 @@ snapshots:
   bser@2.1.1:
     dependencies:
       node-int64: 0.4.0
+
+  bsv8-channel-protocol@0.1.0:
+    dependencies:
+      '@multiformats/multiaddr': 13.0.3
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
 
   buffer-from@1.1.2: {}
 
@@ -6634,13 +6813,13 @@ snapshots:
       '@chainsafe/netmask': 2.0.0
       '@libp2p/crypto': 5.1.23
       '@libp2p/interface': 3.3.0
-      '@libp2p/interface-internal': 3.1.12
+      '@libp2p/interface-internal': 3.1.13
       '@libp2p/logger': 6.2.13
       '@libp2p/multistream-select': 7.0.27
-      '@libp2p/peer-collections': 7.0.27
+      '@libp2p/peer-collections': 7.0.28
       '@libp2p/peer-id': 6.0.15
       '@libp2p/peer-store': 12.0.27
-      '@libp2p/utils': 7.4.0
+      '@libp2p/utils': 7.4.1
       '@multiformats/dns': 1.0.15
       '@multiformats/multiaddr': 13.0.3
       '@multiformats/multiaddr-matcher': 3.0.2
@@ -7367,6 +7546,20 @@ snapshots:
   sanitize-filename@1.6.4:
     dependencies:
       truncate-utf8-bytes: 1.0.2
+
+  sat-subscription-protocol@0.1.0: {}
+
+  satoshi-payment-interface@0.1.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1)):
+    dependencies:
+      '@libp2p/interface': 3.3.0
+      '@noble/curves': 2.0.1
+      '@noble/hashes': 2.0.1
+      bitcoin-libp2p: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
+    transitivePeerDependencies:
+      - bufferutil
+      - react-native
+      - supports-color
+      - utf-8-validate
 
   saxes@6.0.0:
     dependencies:

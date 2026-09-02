@@ -7,7 +7,7 @@ import { multiaddr } from "@multiformats/multiaddr";
 import { webRTCDirect } from "@libp2p/webrtc";
 import { webSockets } from "@libp2p/websockets";
 import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
-import { KeymasterMsFileIdentitySigner } from "@keymaster/plugin-msfile/executor-spike";
+import { KeymasterWindowP2pIdentitySigner } from "@keymaster/plugin-window-p2p/identity-signer";
 
 const SPIKE_PASSWORD = "msfile-spike-test-password";
 
@@ -59,7 +59,7 @@ export interface MsFileExecutorSpikeHooks {
 
 declare global {
   interface Window {
-    __msfileExecutorSpike?: MsFileExecutorSpikeHooks;
+    __windowP2pExecutorSpike?: MsFileExecutorSpikeHooks;
   }
 }
 
@@ -198,7 +198,7 @@ async function ensureUnlocked(coordinator: ReturnType<typeof getCoordinatorClien
 
 export function installMsFileSpikeHooks(): void {
   const coordinator = getCoordinatorClient();
-  let signer: KeymasterMsFileIdentitySigner | undefined;
+  let signer: KeymasterWindowP2pIdentitySigner | undefined;
   let host: Host | undefined;
   let lease: SpikeLease | undefined;
   let pendingLifecycleNoiseSign: Promise<string> | undefined;
@@ -224,10 +224,10 @@ export function installMsFileSpikeHooks(): void {
       try {
         const ready = await ensureUnlocked(coordinator);
         const owner = ready.ownerPublicKeyHex;
-        const result = await coordinator.msfileExecutorAcquire(owner);
+        const result = await coordinator.windowP2pExecutorAcquire(owner);
         if (result.status !== "ok") return { error: `${result.status}${"message" in result ? `: ${result.message}` : ""}` };
         lease = result.value;
-        signer = new KeymasterMsFileIdentitySigner({ ...result.value, rpc: coordinator });
+        signer = new KeymasterWindowP2pIdentitySigner({ ...result.value, rpc: coordinator });
         return result.value;
       } catch (error) {
         return { error: error instanceof Error ? error.message : String(error) };
@@ -238,7 +238,7 @@ export function installMsFileSpikeHooks(): void {
         await stopHost();
         lease = undefined;
       }
-      await coordinator.msfileExecutorRelease(leaseId);
+      await coordinator.windowP2pExecutorRelease(leaseId);
     },
     async signNoiseStaticKey(staticKey) {
       if (!signer) throw new Error("executor lease is not acquired");
@@ -391,12 +391,12 @@ export function installMsFileSpikeHooks(): void {
       };
       const seed = new ArrayBuffer(seedBytes);
       originals.push(seed);
-      const pending = [coordinator.msfileExecutorSpikeTransfer(lease.leaseId, lease.sessionEpoch, seed)];
+      const pending = [coordinator.windowP2pExecutorSpikeTransfer(lease.leaseId, lease.sessionEpoch, seed)];
       sampleHeap();
       for (let index = 0; index < blocks; index += 1) {
         const block = new ArrayBuffer(blockBytes);
         originals.push(block);
-        pending.push(coordinator.msfileExecutorSpikeTransfer(lease.leaseId, lease.sessionEpoch, block));
+        pending.push(coordinator.windowP2pExecutorSpikeTransfer(lease.leaseId, lease.sessionEpoch, block));
         sampleHeap();
       }
       const detachedOriginals = originals.every((buffer) => buffer.byteLength === 0);
@@ -417,7 +417,7 @@ export function installMsFileSpikeHooks(): void {
       };
     }
   };
-  window.__msfileExecutorSpike = hooks;
+  window.__windowP2pExecutorSpike = hooks;
   window.addEventListener("pagehide", () => {
     void stopHost();
     coordinator.disconnect();

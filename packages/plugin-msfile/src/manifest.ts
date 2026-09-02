@@ -2,7 +2,7 @@
 // MSFile 插件清单：提供 `msfile.service`（页面侧 proxy）与 /settings/system
 // 的 MSFile group。设置真值、DB 与网络都在 Coordinator SharedWorker。
 
-import type { I18nPluginResources, PluginManifest, PluginContext, ResourceRegistry, RouteRegistry } from "@keymaster/contracts";
+import type { I18nPluginResources, PluginManifest, PluginContext, ResourceRegistry, RouteRegistry, WindowP2pExecutorLaneRegistry } from "@keymaster/contracts";
 import {
   type BusinessFeatureRegistry,
   type KeyspaceService,
@@ -11,14 +11,15 @@ import {
   MSFILE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   SESSION_COORDINATOR_CLIENT_CAPABILITY,
+  WINDOW_P2P_EXECUTOR_CAPABILITY,
   type SessionCoordinatorClient,
   type SystemSettingsRegistry,
 } from "@keymaster/contracts";
 import { MsFileServiceProxy } from "./msfileServiceProxy.js";
-import { isLegacyExecutorHarnessMode } from "./spikeMode.js";
 import { MsFileHomeFileWidget } from "./MsFileHomeFileWidget.js";
 import { MsFileSettings } from "./MsFileSettings.js";
 import { disposeAllMsFileMediaSessions, registerMsFileMediaResource } from "./msfileMediaResource.js";
+import { MsFileP2pLane } from "./msfileLane.js";
 
 export const MSFILE_PLUGIN_ID = "msfile";
 
@@ -299,12 +300,13 @@ export const msfilePlugin: PluginManifest = {
     // 默认加载只负责让设置入口和首页模块稳定出现；未配置全局金额或
     // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
     defaultEnabled: true,
-    canDisable: true,
+    canDisable: false,
     providesCapabilities: [MSFILE_SERVICE_CAPABILITY],
     displayGroup: "platform"
   },
   dependencies: [
     { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "MSFile 设置真值与数据面都归 Coordinator SharedWorker" },
+    { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
     { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" },
     { capability: "business.registry", reason: "注册 MSFile 首页文件获取投影" },
     { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
@@ -313,19 +315,11 @@ export const msfilePlugin: PluginManifest = {
   i18n: resources,
   setup(ctx: PluginContext) {
     const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const laneRegistry = ctx.get<WindowP2pExecutorLaneRegistry>(WINDOW_P2P_EXECUTOR_CAPABILITY);
+    // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
+    // 系统插件拥有，避免两个插件各自建立网络实例。
+    const offLane = laneRegistry.register(new MsFileP2pLane());
     const service = new MsFileServiceProxy(coordinator);
-    // Window executor 与插件生命周期绑定：禁用插件时立即释放 host/lease。
-    // 采用动态 import，避免把 WebRTC/WSS 依赖带入 SharedWorker 或设置模块图。
-    let executorCleanup: (() => void) | undefined;
-    let setupActive = true;
-    const spikeMode = isLegacyExecutorHarnessMode();
-    if (!spikeMode) {
-      void import("./windowExecutor.js")
-        .then(({ installMsFileWindowExecutor }) => {
-          if (setupActive) executorCleanup = installMsFileWindowExecutor(coordinator);
-        })
-        .catch(() => undefined);
-    }
     ctx.provide<import("@keymaster/contracts").MsFileService>(MSFILE_SERVICE_CAPABILITY, service);
 
     const resources_ = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
@@ -445,10 +439,8 @@ export const msfilePlugin: PluginManifest = {
     });
 
     return () => {
-      setupActive = false;
-      executorCleanup?.();
-      executorCleanup = undefined;
       disposeAllMsFileMediaSessions();
+      offLane();
       // Registry 与 resource definition 由 host 按 ownership 统一回收。
       // teardown 只释放 setup 自己创建的运行时对象，避免 host 随后重复注销。
       service.dispose();

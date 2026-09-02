@@ -3,13 +3,9 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionCoordinatorClient } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
 import { createPluginHost } from "@keymaster/runtime";
 import { msfilePlugin } from "./manifest.js";
-
-vi.mock("./windowExecutor.js", () => ({
-  installMsFileWindowExecutor: vi.fn(() => () => undefined),
-}));
 
 function coordinator(): SessionCoordinatorClient {
   return {
@@ -23,13 +19,15 @@ describe("msfilePlugin manifest", () => {
     vi.clearAllMocks();
   });
 
-  it("is enabled by default while retaining the user disable switch", () => {
-    expect(msfilePlugin.meta).toMatchObject({ defaultEnabled: true, canDisable: true });
+  it("is enabled by default and cannot be disabled independently of the P2P owner", () => {
+    expect(msfilePlugin.meta).toMatchObject({ defaultEnabled: true, canDisable: false });
   });
 
   it("registers the formal file route and removes all owned surfaces on disable", async () => {
     const host = createPluginHost({ disableConfigPersistence: true });
     host.provide("session-coordinator.client", coordinator());
+    const laneRegistry = { register: vi.fn(() => () => undefined) };
+    host.provide(WINDOW_P2P_EXECUTOR_CAPABILITY, laneRegistry);
     host.provide(KEYSPACE_SERVICE_CAPABILITY, {
       active: () => ({ activePublicKeyHex: undefined, generation: undefined }),
       onActiveKeyChanged: () => () => undefined,
@@ -48,11 +46,12 @@ describe("msfilePlugin manifest", () => {
     expect(host.routes.byId("msfile.home.file")?.path).toBe("/msfile/files");
     expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.file-fetch");
     expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(true);
+    expect(laneRegistry.register).toHaveBeenCalledWith(expect.objectContaining({ laneId: "msfile" }));
 
-    await host.disable("msfile");
+    expect(await host.disable("msfile")).toEqual({ ok: false, reason: "Plugin is marked canDisable=false" });
 
-    expect(host.routes.byId("msfile.home.file")).toBeUndefined();
-    expect(host.business.listHomeProjections().map((projection) => projection.id)).not.toContain("msfile.file-fetch");
-    expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(false);
+    expect(host.routes.byId("msfile.home.file")?.path).toBe("/msfile/files");
+    expect(host.business.listHomeProjections().map((projection) => projection.id)).toContain("msfile.file-fetch");
+    expect(host.capabilities.has(MSFILE_SERVICE_CAPABILITY)).toBe(true);
   });
 });

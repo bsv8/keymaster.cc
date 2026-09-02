@@ -33,6 +33,12 @@ function recordViolation(file, detail) {
 }
 
 /** 检查 plugin-* 包之间互相 import。 */
+// P2P 网络基础插件是 MSFile/SatSubscription 的唯一公共宿主依赖；这条
+// 单向依赖正是返工单要求的边界，不能被通用的“插件互不 import”规则误报。
+const ALLOWED_PLUGIN_DEPENDENCIES = new Map([
+  ["plugin-msfile", new Set(["plugin-window-p2p"])],
+  ["plugin-sat-subscription", new Set(["plugin-window-p2p"])],
+]);
 for (const plugin of pluginNames) {
   const src = join(packagesDir, plugin, "src");
   // 已删除但残留 node_modules 的包（如历史遗留目录）没有 src，直接跳过。
@@ -41,6 +47,7 @@ for (const plugin of pluginNames) {
     const text = readFileSync(file, "utf8");
     for (const other of pluginNames) {
       if (other === plugin) continue;
+      if (ALLOWED_PLUGIN_DEPENDENCIES.get(plugin)?.has(other)) continue;
       const pkg = `@keymaster/${other}`;
       const re = new RegExp(`(from\\s+['"]${pkg}|require\\(['"]${pkg})`);
       if (re.test(text)) {

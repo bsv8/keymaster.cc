@@ -27,6 +27,7 @@ export {
 } from "./manifest.js";
 export { AppMsgCoreImpl, type AppMsgCoreConfig } from "./appmsgCore.js";
 export { AppMsgPage } from "./AppMsgPage.js";
+export { readEnvelopeMetadata, readEnvelopeRoute } from "./appmsgCrypto.js";
 export {
   createAppMsgService,
   type AppMsgService

@@ -28,6 +28,7 @@ import type {
   CoordinatorStorageData,
   P2pkhProviderRegistrySnapshot,
   P2pkhNetworkProviderSelection,
+  CoordinatorSatOperation,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -100,6 +101,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private storageRevisionCache = -1;
   private msfileRevisionCache = -1;
   private p2pkhProviderRevisionCache = -1;
+  private satRevisionCache = -1;
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -191,7 +193,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events"]);
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -304,6 +306,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.storageRevisionCache = -1;
     this.msfileRevisionCache = -1;
     this.p2pkhProviderRevisionCache = -1;
+    this.satRevisionCache = -1;
   }
 
   // ============================================================
@@ -393,7 +396,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch,
     };
     try {
-      const response = await this.sendRequest(request);
+      const transfer: Transferable[] = [];
+      if (operation.type === "channel.seal-deliver" && operation.contentJson.buffer instanceof ArrayBuffer) transfer.push(operation.contentJson.buffer);
+      if (operation.type === "channel.open" && operation.envelopeJson.buffer instanceof ArrayBuffer) transfer.push(operation.envelopeJson.buffer);
+      const response = await this.sendRequest(request, transfer);
       if (response.ack.status !== "ok" || !response.cryptoResult) return { ack: response.ack };
       return { ack: response.ack, result: response.cryptoResult };
     } catch (cause) {
@@ -481,6 +487,26 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
+  /** SatSubscription 所有页面调用都经过 Coordinator，避免每个 Tab 各自开 DB/连接。 */
+  async satOperation(operation: CoordinatorSatOperation, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "sat.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    let onAbort: (() => void) | undefined;
+    try {
+      if (signal?.aborted) return { status: "transport-error", message: "SatSubscription request cancelled", retryable: false };
+      // 这里不尝试把业务 Wire 作为 transfer 发送。Uint8Array 的 structured
+      // clone 会保留调用方 buffer，适合 retryCollect 的“原 Wire 不可变”语义。
+      // Sat SPI/SSP 请求本身由 Window adapter 管理超时；这里的 signal 只
+      // 防止调用方在回包后继续使用结果，不能用另一条 Sat RPC 冒充取消。
+      onAbort = () => undefined;
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const response = await this.sendRequest(request);
+      if (signal?.aborted) return { status: "transport-error", message: "SatSubscription request cancelled", retryable: false };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
   async msfileGrant(context: import("@keymaster/contracts").MsFileConnectAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
     // 审查修复：grant 与其他请求一样携带发起时的 epoch，供 worker 在
     // authoritative session 查询后复核（跨 lock/unlock/key switch 的请求被拒）。
@@ -515,34 +541,34 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "msfile.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
-  /** 施工单 001：申请 Window executor lease（同一 epoch 仅一个）。 */
-  async msfileExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").MsFileExecutorLease>> {
-    const request = { kind: "msfile.executor.acquire" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, ...(executorPort ? { executorPort } : {}) };
+  /** 申请公共 Window P2P executor lease（同一 epoch 仅一个）。 */
+  async windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pExecutorLease>> {
+    const request = { kind: "window-p2p.executor.acquire" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch, ...(executorPort ? { executorPort } : {}) };
     try {
       const response = await this.sendRequest(request, executorPort ? [executorPort] : []);
       if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").MsFileExecutorLease, sessionEpoch: response.sessionEpoch };
+      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").WindowP2pExecutorLease, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async msfileExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult> {
-    return this.requestCommand({ kind: "msfile.executor.release", clientId: this.clientId, requestId: this.generateRequestId(), leaseId });
+  async windowP2pExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult> {
+    return this.requestCommand({ kind: "window-p2p.executor.release", clientId: this.clientId, requestId: this.generateRequestId(), leaseId });
   }
 
-  /** 001 Spike：真实穿过 SharedWorker 的双向 transferable echo。 */
-  async msfileExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: import("@keymaster/contracts").SessionEpoch, bytes: ArrayBuffer): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").MsFileExecutorTransferResult>> {
-    const request = { kind: "msfile.executor.spike.transfer" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId, expectedSessionEpoch, bytes };
+  /** 公共 P2P bridge 的 transferable 资源测试入口。 */
+  async windowP2pExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: import("@keymaster/contracts").SessionEpoch, bytes: ArrayBuffer): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pExecutorTransferResult>> {
+    const request = { kind: "window-p2p.executor.spike.transfer" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId, expectedSessionEpoch, bytes };
     try {
       const response = await this.sendRequest(request, [bytes]);
       if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").MsFileExecutorTransferResult, sessionEpoch: response.sessionEpoch };
+      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").WindowP2pExecutorTransferResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
   /** Window bridge RPC 1：由 Coordinator 构造标准 Noise 签名负载。 */
-  async msfileExecutorSignNoiseStaticKey(input: Omit<import("@keymaster/contracts").MsFileNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: import("@keymaster/contracts").SessionEpoch }, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").MsFileIdentitySignResult>> {
+  async windowP2pExecutorSignNoiseStaticKey(input: Omit<import("@keymaster/contracts").WindowP2pNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: import("@keymaster/contracts").SessionEpoch }, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pIdentitySignResult>> {
     const noiseStaticPublicKey = input.noiseStaticPublicKey;
-    const request = { kind: "msfile.executor.identity.sign-noise" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? this.bootstrapSnapshotCache.sessionEpoch, noiseStaticPublicKey };
+    const request = { kind: "window-p2p.executor.identity.sign-noise" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? this.bootstrapSnapshotCache.sessionEpoch, noiseStaticPublicKey };
     let onAbort: (() => void) | undefined;
     try {
       if (signal?.aborted) return { status: "transport-error", message: "Noise signer request cancelled", retryable: false };
@@ -551,14 +577,14 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const response = await this.sendRequest(request, [noiseStaticPublicKey]);
       if (signal?.aborted) return { status: "transport-error", message: "Noise signer request cancelled", retryable: false };
       if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").MsFileIdentitySignResult, sessionEpoch: response.sessionEpoch };
+      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").WindowP2pIdentitySignResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
     finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
   }
 
   /** Window bridge RPC 2：由 Coordinator 构造标准 Signed Peer Record 负载。 */
-  async msfileExecutorSignPeerRecord(input: Omit<import("@keymaster/contracts").MsFilePeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: import("@keymaster/contracts").SessionEpoch }, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").MsFileIdentitySignResult>> {
-    const request = { kind: "msfile.executor.identity.sign-peer-record" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? this.bootstrapSnapshotCache.sessionEpoch, peerId: input.peerId, addresses: input.addresses, sequence: input.sequence };
+  async windowP2pExecutorSignPeerRecord(input: Omit<import("@keymaster/contracts").WindowP2pPeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: import("@keymaster/contracts").SessionEpoch }, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<import("@keymaster/contracts").WindowP2pIdentitySignResult>> {
+    const request = { kind: "window-p2p.executor.identity.sign-peer-record" as const, clientId: this.clientId, requestId: this.generateRequestId(), leaseId: input.leaseId, expectedSessionEpoch: input.expectedSessionEpoch ?? this.bootstrapSnapshotCache.sessionEpoch, peerId: input.peerId, addresses: input.addresses, sequence: input.sequence };
     let onAbort: (() => void) | undefined;
     try {
       if (signal?.aborted) return { status: "transport-error", message: "Peer Record signer request cancelled", retryable: false };
@@ -567,7 +593,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const response = await this.sendRequest(request);
       if (signal?.aborted) return { status: "transport-error", message: "Peer Record signer request cancelled", retryable: false };
       if (response.ack.status !== "ok") return response.ack;
-      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").MsFileIdentitySignResult, sessionEpoch: response.sessionEpoch };
+      return { status: "ok", value: response.operationResult as import("@keymaster/contracts").WindowP2pIdentitySignResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
     finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
   }
@@ -821,6 +847,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (topic === "storage.state") return this.storageRevisionCache;
     if (topic === "p2pkh.providers") return this.p2pkhProviderRevisionCache;
     if (topic === "msfile.state") return this.msfileRevisionCache;
+    if (topic === "sat.events") return this.satRevisionCache;
     return this.assetDataRevisionCache;
   }
 
@@ -830,6 +857,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "storage.state") return event.storageRevision;
     if (event.topic === "p2pkh.providers") return event.providerRevision;
     if (event.topic === "msfile.state") return event.msfileRevision;
+    if (event.topic === "sat.events") return event.satRevision;
     return event.assetDataRevision;
   }
 
@@ -839,6 +867,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     else if (event.topic === "storage.state") this.storageRevisionCache = event.storageRevision;
     else if (event.topic === "p2pkh.providers") this.p2pkhProviderRevisionCache = event.providerRevision;
     else if (event.topic === "msfile.state") this.msfileRevisionCache = event.msfileRevision;
+    else if (event.topic === "sat.events") this.satRevisionCache = event.satRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
 
@@ -864,6 +893,12 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && event.msfileRevision >= 0
         && Number.isSafeInteger(event.supplierGeneration)
         && Array.isArray(event.pendingApprovals);
+    }
+    if (event.topic === "sat.events") {
+      return event.type === "sat.events.changed"
+        && Number.isSafeInteger(event.satRevision)
+        && event.satRevision >= 0
+        && Boolean(event.event);
     }
     return event.type === "asset.data-changed" && Number.isSafeInteger(event.assetDataRevision);
   }

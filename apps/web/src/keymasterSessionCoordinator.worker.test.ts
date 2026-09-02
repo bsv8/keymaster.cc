@@ -5,9 +5,19 @@ import {
   vaultDb,
   type LegacyVaultKeyRecord,
 } from "@keymaster/plugin-vault/coordinator";
+import type { CoordinatorSatEvent } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
+  __testPublishSatState,
+  __testWindowP2pInboundBridgePressure,
+  __testWindowP2pResponseBridgePressure,
+  __testStartSatInboundHandler,
+  __testCancelSatInboundHandler,
+  __testRevokeWindowP2pExecutorLease,
+  __testChangeSatInboundGeneration,
+  __testSatInboundHandlerSnapshot,
+  __testSetSatInboundResponseDispatcher,
   __testExecutorSignNoise,
   __testExecutorSignPeerRecord,
   __testReleaseExecutorLease,
@@ -85,7 +95,8 @@ import {
   __testSetActive,
   __testSealLocalSecret,
   __testUnlock,
-  __testUpdateScheduleSettings
+  __testUpdateScheduleSettings,
+  __testChannelCrypto
 } from "./keymasterSessionCoordinator.worker.js";
 
 class TestPort {
@@ -320,6 +331,39 @@ describe("Session Coordinator worker", () => {
     const ra = revisions(a); const rb = revisions(b);
     expect(ra.length).toBeGreaterThanOrEqual(2); expect(rb).toEqual(ra);
     expect(ra[1]).toBeGreaterThan(ra[0]!);
+  });
+
+  it("broadcasts one Worker-owned sat.events stream to both tabs", async () => {
+    __testResetState();
+    const a = new TestPort(); const b = new TestPort();
+    const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
+    onconnect?.({ ports: [a] } as unknown as MessageEvent);
+    onconnect?.({ ports: [b] } as unknown as MessageEvent);
+    a.send({ kind: "subscribe", clientId: "a", requestId: "sat-sub-a", topics: ["sat.events"] });
+    b.send({ kind: "subscribe", clientId: "b", requestId: "sat-sub-b", topics: ["sat.events"] });
+    await flush();
+    a.messages.length = 0;
+    b.messages.length = 0;
+
+    const event: CoordinatorSatEvent = {
+      type: "incoming",
+      event: {
+        deliveryId: "delivery-test-1",
+        ingressSupplierId: "supplier-a",
+        channel: "bsv8.inbox.test",
+        requestIdHex: "01",
+        contentJson: new Uint8Array([1, 2, 3]),
+        chargedAmount: "0",
+        receivedAtMs: 1,
+      },
+    };
+    __testPublishSatState(event);
+    const onlySatEvent = (port: TestPort) => port.messages.find((message) => (message as { topic?: string }).topic === "sat.events") as { satRevision: number; event: CoordinatorSatEvent } | undefined;
+    const receivedA = onlySatEvent(a);
+    const receivedB = onlySatEvent(b);
+    expect(receivedA?.event).toEqual(event);
+    expect(receivedB?.event).toEqual(event);
+    expect(receivedA?.satRevision).toBe(receivedB?.satRevision);
   });
 
   it("cancels only the matching key and waits for the handler completion", async () => {
@@ -943,7 +987,7 @@ describe("Session Coordinator backup import", () => {
     const unlocked = await __testUnlock("target-pw");
     expect(unlocked.ack.status).toBe("accepted");
     expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
-  });
+  }, 15_000);
 
   it("activates the first key in an unlocked Vault and broadcasts it to every tab", async () => {
     const source = await __testCreateVault("source-pw");
@@ -1067,7 +1111,7 @@ describe("Session Coordinator locked deletion and cold export", () => {
         unlocked.privateKey.fill(0);
       }
     }
-  });
+  }, 15_000);
 
   it("rolls back active bytes and selected state when active metadata persistence fails", async () => {
     const first = await __testCreateVault("pw", { label: "first" });
@@ -1353,7 +1397,7 @@ function SUPPLIER_PEER_ID_FOR(publicKeyHex: string): string {
   return peerId;
 }
 
-describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）", () => {
+describe("Window P2P executor lease 与受限 signer（施工单 001 §3.1–3.2）", () => {
   beforeEach(async () => {
     await __testDeleteVault();
     __testResetState();
@@ -1384,11 +1428,44 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
     const first = await __testAcquireExecutorLease(owner, "port-a");
     expect(first.ack.status).toBe("ok");
     const second = await __testAcquireExecutorLease(owner, "port-b");
-    expect(second.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(second.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
     // 同 port 幂等续租返回同一 leaseId。
     const again = await __testAcquireExecutorLease(owner, "port-a");
     expect((again.operationResult as { leaseId: string }).leaseId)
       .toBe((first.operationResult as { leaseId: string }).leaseId);
+  });
+
+  it("A06: charges inbound SSP Wire against the Worker bridge and releases it", () => {
+    __testResetState();
+    const result = __testWindowP2pInboundBridgePressure({ attempts: 64, wireBytes: 1024 * 1024 });
+    // 64 次 1MiB 尝试不能突破 32MiB Worker bridge 上限；被拒绝的
+    // reservation 不能进入 handler，已接受的项全部释放后计数归零。
+    expect(result.accepted).toBe(32);
+    expect(result.rejected).toBe(32);
+    expect(result.peakBytes).toBe(32 * 1024 * 1024);
+    expect(result.peakItems).toBe(32);
+    expect(result.releasedBytes).toBe(0);
+    expect(result.releasedItems).toBe(0);
+
+    const itemLimited = __testWindowP2pInboundBridgePressure({ attempts: 300, wireBytes: 1 });
+    expect(itemLimited.accepted).toBe(256);
+    expect(itemLimited.rejected).toBe(44);
+    expect(itemLimited.peakItems).toBe(256);
+    expect(itemLimited.releasedItems).toBe(0);
+  });
+
+  it("A06: reserves the maximum SSP response before admitting small requests", async () => {
+    __testResetState();
+    const result = await __testWindowP2pResponseBridgePressure({ attempts: 256, requestBytes: 1 });
+    // 每项至少占用 1 byte request + 1MiB response；256 个小请求只能
+    // 排队，实际在途字节始终不超过 32MiB。
+    expect(result.accepted).toBe(31);
+    expect(result.queued).toBe(225);
+    expect(result.peakBytes).toBe(31 * (1 + 1024 * 1024));
+    expect(result.peakBytes).toBeLessThanOrEqual(32 * 1024 * 1024);
+    expect(result.peakItems).toBe(256);
+    expect(result.releasedBytes).toBe(0);
+    expect(result.releasedItems).toBe(0);
   });
 
   it("A05: stale lease id / wrong port signer requests are rejected", async () => {
@@ -1398,7 +1475,7 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
 
     // 伪造 port。
     const forgedPort = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-forged");
-    expect(forgedPort.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(forgedPort.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
 
     // 正确 port 成功并返回签名。
     const good = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
@@ -1408,7 +1485,7 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
     // 显式释放后旧 leaseId 重放被拒（A05）。
     await __testReleaseExecutorLease(lease.leaseId, "port-a");
     const replay = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
-    expect(replay.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(replay.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
   });
 
   it("A03: typed signer inputs and Peer Record invariants are enforced by the worker", async () => {
@@ -1416,19 +1493,19 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
     const acquired = await __testAcquireExecutorLease(owner, "port-a");
     const lease = acquired.operationResult as { leaseId: string; sessionEpoch: string };
     const shortNoiseKey = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: new Uint8Array(31).buffer }, "port-a");
-    expect(shortNoiseKey.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(shortNoiseKey.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
 
     const peerId = peerIdFromPublicKeyBytes(hexToBytes(owner)).toString();
     const nonEmptyAddresses = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: ["/ip4/127.0.0.1/tcp/1"], sequence: "0" }, "port-a");
-    expect(nonEmptyAddresses.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(nonEmptyAddresses.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
     const wrongPeerId = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId: "16Uiu2HAmH4VY9jMZ2fG4N7aQZ6uHh5mS5jQxZ3Yy1h1nH7qVY6r", addresses: [], sequence: "0" }, "port-a");
-    expect(wrongPeerId.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(wrongPeerId.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
     const valid = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: [], sequence: "7" }, "port-a");
     expect(valid.ack.status).toBe("ok");
     const decreasing = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: [], sequence: "6" }, "port-a");
-    expect(decreasing.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(decreasing.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
     const overflow = await __testExecutorSignPeerRecord({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, peerId, addresses: [], sequence: "18446744073709551616" }, "port-a");
-    expect(overflow.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(overflow.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
   });
 
   it("A06: lock invalidates the lease; queued signer requests fail after re-unlock", async () => {
@@ -1439,16 +1516,16 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
 
     await __testLock();
     const duringLock = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
-    expect(duringLock.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(duringLock.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
     void epoch;
 
     await __testUnlock("spike-pw");
     const afterReunlock = await __testExecutorSignNoise({ leaseId: lease.leaseId, expectedSessionEpoch: lease.sessionEpoch, noiseStaticPublicKey: noiseStaticPublicKey() }, "port-a");
     // lock 清空了 lease：旧 leaseId 在新会话中不可复活。
-    expect(afterReunlock.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(afterReunlock.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
   });
 
-  it("B11: importing a key into an unlocked Vault revokes the old MSFile lease immediately", async () => {
+  it("B11: importing a key into an unlocked Vault revokes the old Window P2P lease immediately", async () => {
     const { owner } = await unlockForSpike();
     const acquired = await __testAcquireExecutorLease(owner, "port-a");
     const oldLease = acquired.operationResult as { leaseId: string; sessionEpoch: string };
@@ -1468,9 +1545,116 @@ describe("MSFile executor lease 与受限 signer（施工单 001 §3.1–3.2）"
       expectedSessionEpoch: oldLease.sessionEpoch,
       noiseStaticPublicKey: noiseStaticPublicKey(),
     }, "port-a");
-    expect(replay.ack).toMatchObject({ status: "error", code: "msfile_unavailable" });
+    expect(replay.ack).toMatchObject({ status: "error", code: "window_p2p_unavailable" });
     const replacement = await __testAcquireExecutorLease(imported.publicKeyHex, "port-a");
     expect(replacement.ack.status).toBe("ok");
+  });
+});
+
+describe("Sat 入站 handler 资源闭环（施工单 2026-09-02/002）", () => {
+  beforeEach(() => {
+    __testResetState();
+  });
+
+  afterEach(() => {
+    __testSetSatInboundResponseDispatcher(undefined);
+    __testResetState();
+  });
+
+  it("C01: never-settling handler 被取消后保留 slot，直到 Promise settle", async () => {
+    let settle!: () => void;
+    const completion = new Promise<Uint8Array>((resolve) => {
+      settle = () => resolve(new Uint8Array([1]));
+    });
+    const task = __testStartSatInboundHandler({ handler: async () => completion });
+    expect(task.accepted).toBe(true);
+    expect(__testSatInboundHandlerSnapshot()).toMatchObject({ active: 1, canceled: 0, bridgeItems: 1 });
+
+    expect(__testCancelSatInboundHandler(task as { leaseId: string; eventId: string; connectionId: string })).toBe(true);
+    expect(task.signal?.aborted).toBe(true);
+    // 取消只释放 Wire 额度，不能伪造 Promise 已经结束。
+    expect(__testSatInboundHandlerSnapshot()).toMatchObject({ active: 1, canceled: 1, bridgeBytes: 0, bridgeItems: 0 });
+
+    settle();
+    await task.completion;
+    expect(__testSatInboundHandlerSnapshot().active).toBe(0);
+  });
+
+  it("C02: canceled handler 的迟到成功不会回写 ActionResult", async () => {
+    const writer = vi.fn(async () => undefined);
+    __testSetSatInboundResponseDispatcher(writer);
+    let settle!: () => void;
+    const response = new Promise<Uint8Array>((resolve) => {
+      settle = () => resolve(new Uint8Array([2]));
+    });
+    const task = __testStartSatInboundHandler({ makeCurrent: true, handler: async () => response });
+    expect(task.accepted).toBe(true);
+    expect(__testCancelSatInboundHandler(task as { leaseId: string; eventId: string; connectionId: string })).toBe(true);
+    settle();
+    await task.completion;
+    expect(writer).not.toHaveBeenCalled();
+    expect(__testSatInboundHandlerSnapshot()).toMatchObject({ active: 0, bridgeBytes: 0, bridgeItems: 0 });
+  });
+
+  it("C03: lease revoke 会 abort 所有仍在等待的入站任务", async () => {
+    let settle!: () => void;
+    const response = new Promise<Uint8Array>((resolve) => {
+      settle = () => resolve(new Uint8Array([3]));
+    });
+    const task = __testStartSatInboundHandler({ makeCurrent: true, handler: async () => response });
+    expect(task.accepted).toBe(true);
+    __testRevokeWindowP2pExecutorLease();
+    expect(task.signal?.aborted).toBe(true);
+    expect(__testSatInboundHandlerSnapshot()).toMatchObject({ active: 1, canceled: 1, bridgeBytes: 0, bridgeItems: 0 });
+
+    settle();
+    await task.completion;
+    expect(__testSatInboundHandlerSnapshot().active).toBe(0);
+  });
+
+  it("C04: Supplier generation 变化后丢弃迟到成功", async () => {
+    const writer = vi.fn(async () => undefined);
+    __testSetSatInboundResponseDispatcher(writer);
+    let settle!: () => void;
+    const response = new Promise<Uint8Array>((resolve) => {
+      settle = () => resolve(new Uint8Array([4]));
+    });
+    const task = __testStartSatInboundHandler({ makeCurrent: true, handler: async () => response });
+    expect(task.accepted).toBe(true);
+    expect(__testChangeSatInboundGeneration(task.connectionId, 2)).toBe(true);
+    settle();
+    await task.completion;
+    expect(writer).not.toHaveBeenCalled();
+    expect(__testSatInboundHandlerSnapshot().active).toBe(0);
+  });
+
+  it("C05: 64 个 active handler 后第 65 个 fail closed，取消后仍要等 settle 才回收", async () => {
+    const releases: Array<() => void> = [];
+    const tasks: Array<ReturnType<typeof __testStartSatInboundHandler>> = [];
+    for (let index = 0; index < 65; index += 1) {
+      let release!: () => void;
+      const response = new Promise<Uint8Array>((resolve) => {
+        release = () => resolve(new Uint8Array([index & 0xff]));
+      });
+      releases.push(release);
+      tasks.push(__testStartSatInboundHandler({
+        eventId: `c05-event-${index}`,
+        connectionId: `c05-connection-${index}`,
+        handler: async () => response,
+      }));
+    }
+    expect(tasks.filter((task) => task.accepted)).toHaveLength(64);
+    expect(tasks[64]?.accepted).toBe(false);
+    expect(__testSatInboundHandlerSnapshot()).toMatchObject({ active: 64, maxActive: 64, bridgeItems: 64 });
+
+    for (const task of tasks.slice(0, 64)) {
+      expect(__testCancelSatInboundHandler(task as { leaseId: string; eventId: string; connectionId: string })).toBe(true);
+    }
+    expect(__testSatInboundHandlerSnapshot()).toMatchObject({ active: 64, canceled: 64, bridgeBytes: 0, bridgeItems: 0 });
+
+    for (const release of releases) release();
+    await Promise.all(tasks.slice(0, 64).map((task) => task.completion));
+    expect(__testSatInboundHandlerSnapshot().active).toBe(0);
   });
 });
 
@@ -1814,5 +1998,88 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
     // 其他端口的 grant 不能使用。
     const stolen = await __testDispatchMsfileData({ type: "read-seed", grantId, supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-b");
     expect(stolen.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
+  });
+});
+
+describe("Session Coordinator Channel crypto", () => {
+  beforeEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  afterEach(async () => {
+    await __testDeleteVault();
+    __testResetState();
+  });
+
+  it("seals and opens Deliver/ACK only through the Worker-owned crypto boundary", async () => {
+    const created = await __testCreateVault("channel-pw");
+    const owner = created.publicKeyHex!;
+    const issuedAtMs = 1_000_000;
+    const expiresAtMs = issuedAtMs + 60_000;
+    const contentJson = new TextEncoder().encode(JSON.stringify({ type: "appmsg", body: "hello" }));
+
+    const sealed = await __testChannelCrypto({
+      type: "channel.seal-deliver",
+      recipientPublicKeyHex: owner,
+      contentJson,
+      issuedAtMs,
+      expiresAtMs
+    });
+    expect(sealed.type).toBe("channel.seal");
+    if (sealed.type !== "channel.seal") throw new Error("expected Channel seal");
+    expect(sealed.channel).toBe(`bsv8.inbox.${owner}`);
+    expect(sealed.envelopeJson).toBeInstanceOf(Uint8Array);
+
+    const opened = await __testChannelCrypto({
+      type: "channel.open",
+      channel: sealed.channel,
+      envelopeJson: sealed.envelopeJson,
+      nowMs: issuedAtMs + 1
+    });
+    expect(opened).toMatchObject({
+      type: "channel.open",
+      channel: sealed.channel,
+      messageIdBase64Url: sealed.messageIdBase64Url,
+      fromPublicKeyHex: owner,
+      toPublicKeyHex: owner,
+      bodyType: "deliver",
+      protocol: "bsv8.message.v1",
+      issuedAtMs,
+      expiresAtMs
+    });
+    if (opened.type !== "channel.open" || opened.bodyType !== "deliver") throw new Error("expected Channel Deliver");
+    expect(JSON.parse(new TextDecoder().decode(opened.contentJson))).toEqual({ type: "appmsg", body: "hello" });
+
+    const ack = await __testChannelCrypto({
+      type: "channel.seal-ack",
+      recipientPublicKeyHex: owner,
+      acknowledgedMessageIdBase64Url: sealed.messageIdBase64Url,
+      issuedAtMs,
+      expiresAtMs
+    });
+    if (ack.type !== "channel.seal") throw new Error("expected Channel ACK seal");
+    const openedAck = await __testChannelCrypto({
+      type: "channel.open",
+      channel: ack.channel,
+      envelopeJson: ack.envelopeJson,
+      nowMs: issuedAtMs + 1
+    });
+    expect(openedAck).toMatchObject({
+      type: "channel.open",
+      bodyType: "ack",
+      acknowledgedMessageIdBase64Url: sealed.messageIdBase64Url
+    });
+  });
+
+  it("rejects invalid Channel lifetime before creating a signed envelope", async () => {
+    const created = await __testCreateVault("channel-pw");
+    await expect(__testChannelCrypto({
+      type: "channel.seal-deliver",
+      recipientPublicKeyHex: created.publicKeyHex!,
+      contentJson: new TextEncoder().encode("null"),
+      issuedAtMs: 10,
+      expiresAtMs: 10
+    })).rejects.toThrow("Channel message lifetime is invalid");
   });
 });

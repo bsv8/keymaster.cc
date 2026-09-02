@@ -39,8 +39,8 @@ async function openSpikeContext(browser: Browser): Promise<OpenPages> {
     pageB.goto("/?msfileSpike=1", { waitUntil: "load" })
   ]);
   await Promise.all([
-    pageA.waitForFunction(() => window.__msfileExecutorSpike !== undefined, undefined, { timeout: 20_000 }),
-    pageB.waitForFunction(() => window.__msfileExecutorSpike !== undefined, undefined, { timeout: 20_000 })
+    pageA.waitForFunction(() => window.__windowP2pExecutorSpike !== undefined, undefined, { timeout: 20_000 }),
+    pageB.waitForFunction(() => window.__windowP2pExecutorSpike !== undefined, undefined, { timeout: 20_000 })
   ]);
   return { context, pageA, pageB };
 }
@@ -93,7 +93,7 @@ async function stopChild(child: import("node:child_process").ChildProcess): Prom
 }
 
 async function acquire(page: Page): Promise<Lease> {
-  const result = await evaluateWithRetry(page, async () => window.__msfileExecutorSpike!.acquire());
+  const result = await evaluateWithRetry(page, async () => window.__windowP2pExecutorSpike!.acquire());
   expect(result).toHaveProperty("leaseId");
   return result as Lease;
 }
@@ -121,7 +121,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
       supplier = await startGoSupplier(goLab!.binary, lease.activePublicKeyHex);
       let evidence;
       try {
-        evidence = await pageA.evaluate(async (address) => window.__msfileExecutorSpike!.connectAndInspect(address), supplier.address);
+        evidence = await pageA.evaluate(async (address) => window.__windowP2pExecutorSpike!.connectAndInspect(address), supplier.address);
       } catch (error) {
         throw new Error(`${error instanceof Error ? error.message : String(error)}; Go supplier stdout=${supplier.stdout.join("")}; stderr=${supplier.stderr.join("")}`);
       }
@@ -151,23 +151,23 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     try {
       await acquire(pageA);
       const shortNoise = await pageA.evaluate(async () => {
-        try { await window.__msfileExecutorSpike!.signNoiseStaticKey(new Uint8Array(31)); return "accepted"; }
+        try { await window.__windowP2pExecutorSpike!.signNoiseStaticKey(new Uint8Array(31)); return "accepted"; }
         catch (error) { return error instanceof Error ? error.message : String(error); }
       });
       expect(shortNoise).toMatch(/32 bytes/);
-      const validNoise = await pageA.evaluate(async () => window.__msfileExecutorSpike!.signNoiseStaticKey(new Uint8Array(32)));
+      const validNoise = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.signNoiseStaticKey(new Uint8Array(32)));
       expect(validNoise.signatureByteLength).toBeGreaterThan(0);
       const sequence = await pageA.evaluate(async () => {
-        await window.__msfileExecutorSpike!.signPeerRecord("7");
-        try { await window.__msfileExecutorSpike!.signPeerRecord("6"); return "accepted"; }
+        await window.__windowP2pExecutorSpike!.signPeerRecord("7");
+        try { await window.__windowP2pExecutorSpike!.signPeerRecord("6"); return "accepted"; }
         catch (error) { return error instanceof Error ? error.message : String(error); }
       });
       expect(sequence).toMatch(/monotonic|sequence/);
-      const forged = await pageA.evaluate(async () => window.__msfileExecutorSpike!.rejectForgedPeerRecords());
+      const forged = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.rejectForgedPeerRecords());
       expect(forged.wrongPeerId).toMatch(/does not match/);
       expect(forged.nonEmptyAddresses).toMatch(/must be empty/);
       expect(forged.overflowSequence).toMatch(/uint64/);
-      const aborted = await pageA.evaluate(async () => window.__msfileExecutorSpike!.abortNoiseSign());
+      const aborted = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.abortNoiseSign());
       expect(aborted.error).toBeTruthy();
       expect(aborted.pendingAfter).toBe(0);
     } finally {
@@ -179,12 +179,12 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     const { context, pageA, pageB } = await openSpikeContext(browser);
     try {
       await Promise.all([
-        pageA.evaluate(async () => window.__msfileExecutorSpike!.bootstrap()),
-        pageB.evaluate(async () => window.__msfileExecutorSpike!.bootstrap())
+        pageA.evaluate(async () => window.__windowP2pExecutorSpike!.bootstrap()),
+        pageB.evaluate(async () => window.__windowP2pExecutorSpike!.bootstrap())
       ]);
       const [resultA, resultB] = await Promise.all([
-        pageA.evaluate(async () => window.__msfileExecutorSpike!.acquire()),
-        pageB.evaluate(async () => window.__msfileExecutorSpike!.acquire())
+        pageA.evaluate(async () => window.__windowP2pExecutorSpike!.acquire()),
+        pageB.evaluate(async () => window.__windowP2pExecutorSpike!.acquire())
       ]);
       const leases = [resultA, resultB].filter((result): result is Lease => "leaseId" in result);
       expect(leases).toHaveLength(1);
@@ -192,12 +192,12 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
       if ("leaseId" in resultA) {
         await pageA.close();
         await pageB.waitForTimeout(250);
-        const takeover = await pageB.evaluate(async () => window.__msfileExecutorSpike!.acquire());
+        const takeover = await pageB.evaluate(async () => window.__windowP2pExecutorSpike!.acquire());
         expect(takeover).toHaveProperty("leaseId");
         expect((takeover as Lease).leaseId).not.toBe(winner.leaseId);
       } else {
         await pageB.close();
-        const takeover = await pageA.evaluate(async () => window.__msfileExecutorSpike!.acquire());
+        const takeover = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.acquire());
         expect(takeover).toHaveProperty("leaseId");
       }
     } finally {
@@ -215,12 +215,12 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
         state.__msfileSpikeLockPromise = new Promise((resolve) => {
           channel.addEventListener("message", () => {
             channel.close();
-            resolve(window.__msfileExecutorSpike!.lock());
+            resolve(window.__windowP2pExecutorSpike!.lock());
           }, { once: true });
         });
       });
       const started = await pageA.evaluate(() => {
-        const result = window.__msfileExecutorSpike!.beginNoiseSign();
+        const result = window.__windowP2pExecutorSpike!.beginNoiseSign();
         const channel = new BroadcastChannel("msfile-spike-lifecycle-lock");
         channel.postMessage("lock-now");
         channel.close();
@@ -232,7 +232,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
         return state.__msfileSpikeLockPromise;
       });
       expect(started.pendingAfterStart).toBe(1);
-      const result = await pageA.evaluate(async () => window.__msfileExecutorSpike!.finishNoiseSign());
+      const result = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.finishNoiseSign());
       expect(lock.status).toBe("accepted");
       expect(result.signResult).not.toBe("ok");
       expect(result.pendingAfter).toBe(0);
@@ -240,7 +240,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
       expect(newLease.leaseId).toBeTruthy();
       expect(newLease.sessionEpoch).toBeTruthy();
 
-      const replacement = await pageB.evaluate(async () => window.__msfileExecutorSpike!.generateReplacementKey());
+      const replacement = await pageB.evaluate(async () => window.__windowP2pExecutorSpike!.generateReplacementKey());
       expect(replacement.publicKeyHex).not.toBe(newLease.activePublicKeyHex);
       await pageB.evaluate((publicKeyHex) => {
         const state = window as Window & { __msfileSpikeSwitchPromise?: Promise<{ status: string }> };
@@ -248,12 +248,12 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
         state.__msfileSpikeSwitchPromise = new Promise((resolve) => {
           channel.addEventListener("message", () => {
             channel.close();
-            resolve(window.__msfileExecutorSpike!.setActive(publicKeyHex));
+            resolve(window.__windowP2pExecutorSpike!.setActive(publicKeyHex));
           }, { once: true });
         });
       }, replacement.publicKeyHex);
       await pageA.evaluate(() => {
-        window.__msfileExecutorSpike!.beginNoiseSign();
+        window.__windowP2pExecutorSpike!.beginNoiseSign();
         const channel = new BroadcastChannel("msfile-spike-lifecycle-switch");
         channel.postMessage("switch-now");
         channel.close();
@@ -263,7 +263,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
         if (!state.__msfileSpikeSwitchPromise) throw new Error("key switch listener is not armed");
         return state.__msfileSpikeSwitchPromise;
       });
-      const switchSign = await pageA.evaluate(async () => window.__msfileExecutorSpike!.finishNoiseSign());
+      const switchSign = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.finishNoiseSign());
       expect(switched.status).toBe("ok");
       expect(switchSign.signResult).not.toBe("ok");
       expect(switchSign.pendingAfter).toBe(0);
@@ -278,7 +278,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     const { context, pageA } = await openSpikeContext(browser);
     try {
       await acquire(pageA);
-      const result = await evaluateWithRetry(pageA, async () => window.__msfileExecutorSpike!.transferBurst(16 * 1024 * 1024, 256 * 1024, 4));
+      const result = await evaluateWithRetry(pageA, async () => window.__windowP2pExecutorSpike!.transferBurst(16 * 1024 * 1024, 256 * 1024, 4));
       expect(result.drained).toBe(5);
       expect(result.peakPendingByteLength).toBe(17 * 1024 * 1024);
       expect(result.peakPendingByteLength).toBeLessThanOrEqual(17 * 1024 * 1024);

@@ -76,6 +76,8 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
     kind: "ok" | "fail";
     text: string;
   } | null>(null);
+  const [providerSwitch, setProviderSwitch] = useState<string | null>(null);
+  const [providerSwitchError, setProviderSwitchError] = useState<string | null>(null);
   // UI 专用 tick：用于驱动倒计时文案逐秒刷新。**不**触发业务侧任何
   // 重连——所有重连生命周期都由 plugin-appmsg 内的协调器持有。
   const [tick, setTick] = useState(0);
@@ -176,6 +178,23 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
   }, [messages]);
 
   const providers = service.listProviders();
+  const activateProvider = useCallback(async (providerId: string) => {
+    const previousProviderId = activeProvider.providerId;
+    setProviderSwitch(providerId);
+    setProviderSwitchError(null);
+    try {
+      await service.setActiveProvider(providerId);
+      refreshConnectionDiagnostics();
+    } catch (cause) {
+      // registry 未来若在 bind/持久化阶段失败，恢复用户原来的选择，避免
+      // 页面显示的 active provider 与实际连接真值分离。
+      try { await service.setActiveProvider(previousProviderId); } catch { /* best effort rollback */ }
+      setProviderSwitchError(`${i18n.t("appmsg.page.providers.switch.fail")}: ${cause instanceof Error ? cause.message : String(cause)}`);
+      refreshConnectionDiagnostics();
+    } finally {
+      setProviderSwitch(null);
+    }
+  }, [activeProvider.providerId, i18n, refreshConnectionDiagnostics, service]);
   const activeProviderDiagnostic = useMemo(
     () =>
       providerDiagnostics.find((provider) => provider.id === activeProvider.providerId) ??
@@ -355,11 +374,12 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
         )}
       </div>
 
-      {/* ===== 区块 2：provider 列表（由系统自动选择） ===== */}
+      {/* ===== 区块 2：provider 列表（用户显式选择） ===== */}
       <div className="appmsg-system-page__card appmsg-system-page__card--providers">
         <h2 className="appmsg-system-page__section-title">
           {i18n.t("appmsg.page.providers.title")}
         </h2>
+        {providerSwitchError ? <p role="alert">{providerSwitchError}</p> : null}
         {providers.length === 0 ? (
           <p className="appmsg-system-page__empty">
             {i18n.t("appmsg.page.providers.empty")}
@@ -372,6 +392,7 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
                   <th>id</th>
                   <th>{i18n.t("appmsg.page.providers.name")}</th>
                   <th>{i18n.t("appmsg.page.providers.active")}</th>
+                  <th>{i18n.t("appmsg.page.providers.actions")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -382,6 +403,18 @@ function AppMsgPageInner({ core }: { core: AppMsgCore }): React.ReactElement {
                       <td><code>{p.id}</code></td>
                       <td>{p.displayName}</td>
                       <td>{isActive ? i18n.t("appmsg.page.providers.active") : "—"}</td>
+                      <td>
+                        {isActive ? i18n.t("appmsg.page.providers.active") : (
+                          <button
+                            type="button"
+                            className="appmsg-system-page__button"
+                            disabled={providerSwitch !== null}
+                            onClick={() => void activateProvider(p.id)}
+                          >
+                            {providerSwitch === p.id ? i18n.t("appmsg.page.providers.switching", { defaultValue: "切换中…" }) : i18n.t("appmsg.page.providers.activate")}
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   );
                 })}

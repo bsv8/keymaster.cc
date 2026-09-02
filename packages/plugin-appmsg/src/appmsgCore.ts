@@ -77,7 +77,7 @@ import type {
   ProviderSealedMessageRecord,
   ProviderSenderProjection
 } from "@keymaster/contracts";
-import { formatShortPublicKey, KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
+import { formatShortPublicKey, KEYMASTER_MESSAGE_APP_ID, messageProviderFeatures } from "@keymaster/contracts";
 import {
   createAppMsgLocalDbOps,
   disposeAppMsgLocalDb,
@@ -917,14 +917,14 @@ export class AppMsgCoreImpl implements AppMsgCore {
     emitLog(this.cfg.logger, level, event, data);
   }
 
-  persistLocalMessageProjection(message: AppMsgMessage): Promise<void> {
+  persistLocalMessageProjection(message: AppMsgMessage, options: { emitStored?: boolean } = {}): Promise<void> {
     if (!this.localOps || !this.currentProviderId) {
       return Promise.resolve();
     }
     return this.localOps.putMessage(this.currentProviderId, message).then(() => {
       this.lastInsertedAtMsValue = Date.now();
       this.recordTargetLastReceived(message);
-      this.emitStoredMessage(message);
+      if (options.emitStored !== false) this.emitStoredMessage(message);
     });
   }
 
@@ -1818,12 +1818,19 @@ export class AppMsgCoreImpl implements AppMsgCore {
       this.currentInboundOff = null;
     }
     if (!this.boundHandle) return;
-    this.currentInboundOff = this.boundHandle.subscribeMessages((rec) => {
+    const boundHandle = this.boundHandle;
+    this.currentInboundOff = boundHandle.subscribeMessages((rec) => {
       void (async () => {
         const m = await this.openSealedToMessage(rec);
         if (!m) return;
+        const isNewDelivery = rec.deliveryRelation !== "duplicate";
+        let persisted = false;
         try {
-          await this.persistLocalMessageProjection(m);
+          // 没有 provider 对应的本地 DB 时不能把“解密成功”当成“已持久化”，
+          // 否则 ACK 会在消息尚未可由 appmsg.list 取回时发出。
+          if (!this.localOps || !this.currentProviderId) return;
+          await this.persistLocalMessageProjection(m, { emitStored: isNewDelivery });
+          persisted = true;
         } catch (err) {
           this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
           emitLog(this.cfg.logger, "warn", "appmsg.local.put.failed", {
@@ -1831,20 +1838,36 @@ export class AppMsgCoreImpl implements AppMsgCore {
             messageId: m.messageId
           });
         }
-        this.emitIncomingMessage(m);
-        for (const h of this.unfilteredSubs) {
+        // SatSubscription 的 ACK 必须晚于 AppMsg 验签、解密和本地持久化。
+        // provider 可能已经在下一次 owner/provider 切换中失效，所以只对
+        // 收到该记录的原始 handle 发 ACK；ACK 失败只记录诊断，不自动重试。
+        if (persisted && boundHandle.ackMessage) {
           try {
-            h(m);
-          } catch {
-            // ignore
+            await boundHandle.ackMessage(rec);
+          } catch (err) {
+            emitLog(this.cfg.logger, "warn", "appmsg.receive.ack.failed", {
+              messageId: m.messageId,
+              err: err instanceof Error ? err.message : String(err)
+            });
           }
         }
-        void this.triggerSync("background").catch(() => undefined);
+        if (isNewDelivery) {
+          this.emitIncomingMessage(m);
+          for (const h of this.unfilteredSubs) {
+            try {
+              h(m);
+            } catch {
+              // ignore
+            }
+          }
+          void this.triggerSync("background").catch(() => undefined);
+        }
         emitLog(this.cfg.logger, "info", "appmsg.receive.pushed", {
           messageId: m.messageId,
           clientMessageId: m.clientMessageId,
           contentType: m.contentType,
-          bodyBytes: m.body.length
+          bodyBytes: m.body.length,
+          deliveryRelation: rec.deliveryRelation ?? "new"
         });
       })().catch((err) => {
         this.lastErrorMessageValue = err instanceof Error ? err.message : String(err);
@@ -1949,6 +1972,16 @@ export class AppMsgCoreImpl implements AppMsgCore {
         providerId: this.currentProviderId,
         hasHandle: this.boundHandle !== null,
         hasLocalDb: this.localOps !== null
+      });
+      return;
+    }
+    const provider = this.providerRegistryInstance.active();
+    if (!provider || !messageProviderFeatures(provider).remoteHistory) {
+      // SatSubscription V1 没有远端历史协议，AppMsg local DB 是 list/get
+      // 真值；不能调用 provider 的空 list/get 来伪造“同步成功”。
+      emitLog(this.cfg.logger, "info", "appmsg.sync.skipped_remote_history_unsupported", {
+        ownerPublicKeyHex: this.currentBoundOwner,
+        providerId: this.currentProviderId
       });
       return;
     }
@@ -2076,6 +2109,11 @@ export class AppMsgCoreImpl implements AppMsgCore {
         requestedCount: input.length,
         keyPreview: previewOnlineKeys(input)
       });
+      return out;
+    }
+    const provider = this.providerRegistryInstance.active();
+    if (!provider || !messageProviderFeatures(provider).onlineQuery) {
+      for (const h of input) out[h] = "unknown";
       return out;
     }
     emitLog(this.cfg.logger, "info", "appmsg.online.begin", {

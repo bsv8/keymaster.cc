@@ -87,6 +87,13 @@ message history.
 | `appmsg.list`<br>[`appmsgList()`](/api/classes/KeymasterConnectClient#appmsglist) | [`AppMsgListParams`](/api/interfaces/AppMsgListParams) → [`AppMsgListResult`](/api/interfaces/AppMsgListResult) | Incrementally list visible messages. |
 | `appmsg.get`<br>[`appmsgGet()`](/api/classes/KeymasterConnectClient#appmsgget) | [`AppMsgGetParams`](/api/interfaces/AppMsgGetParams) → [`AppMsgGetResult`](/api/interfaces/AppMsgGetResult) | Fetch one visible message. |
 
+AppMsg is provider-neutral. Keymaster may carry these operations through the
+default HubMsg provider or through the trusted SatSubscription provider selected
+by the user in Keymaster settings; the Connect App cannot select a provider or
+Supplier and never receives SSP/SPI operations or Supplier configuration.
+`appmsg.send` means that Keymaster accepted the local send operation. It is not
+a delivery, read, or business-completion receipt.
+
 ### AppMsg event
 
 | Event | Payload | Delivery |

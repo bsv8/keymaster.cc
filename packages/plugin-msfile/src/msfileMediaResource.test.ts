@@ -25,6 +25,7 @@ vi.mock("@keymaster/msfile-media/browser", () => ({
       blockWindowLimit: 2,
       verifiedBlockCount: 0,
       readBlockCount: 0,
+      codecs: [],
       debug: { enabled: true, entries: [] },
     });
     const session = {

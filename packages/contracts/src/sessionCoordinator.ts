@@ -51,6 +51,9 @@ import type {
   MsFileSupplierConfig,
   MsFileSupplierProbeResult,
 } from "./msfile.js";
+import type { CoordinatorSatOperation, CoordinatorSatStateEvent } from "./satSubscription.js";
+import type { SatErrorCode } from "./satSubscription.js";
+import type { WindowP2pExecutorError } from "./windowP2pExecutor.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -139,17 +142,17 @@ export type CoordinatorClientRequestWithMsfile =
   | { kind: "disconnect"; clientId: string; requestId: string }
   | { kind: "msfile.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
 
-/* ============== MSFile Window executor spike（施工单 2026-08-26/001） ============== */
+/* ============== Window P2P executor（公共网络基础能力） ============== */
 
 /** Window executor lease 的权威快照；私钥永远不在此结果中。 */
-export interface MsFileExecutorLease {
+export interface WindowP2pExecutorLease {
   leaseId: string;
   sessionEpoch: SessionEpoch;
   activePublicKeyHex: string;
 }
 
 /** Noise 静态密钥签名请求。static key 必须是 32 字节。 */
-export interface MsFileNoiseSignRequest {
+export interface WindowP2pNoiseSignRequest {
   leaseId: string;
   /** 发起请求时观察到的会话世代，用于 lock/key switch 栅栏。 */
   expectedSessionEpoch: SessionEpoch;
@@ -157,7 +160,7 @@ export interface MsFileNoiseSignRequest {
 }
 
 /** Signed Peer Record 签名请求。地址在本 Spike 中必须为空。 */
-export interface MsFilePeerRecordSignRequest {
+export interface WindowP2pPeerRecordSignRequest {
   leaseId: string;
   /** 发起请求时观察到的会话世代，用于 lock/key switch 栅栏。 */
   expectedSessionEpoch: SessionEpoch;
@@ -168,12 +171,12 @@ export interface MsFilePeerRecordSignRequest {
 }
 
 /** 两类 typed signer RPC 的统一返回值；签名为标准 DER。 */
-export interface MsFileIdentitySignResult {
+export interface WindowP2pIdentitySignResult {
   signatureDer: ArrayBuffer;
 }
 
 /** 仅供 001 Spike 验证 Coordinator ↔ Window 双向 transferable。 */
-export interface MsFileExecutorTransferResult {
+export interface WindowP2pExecutorTransferResult {
   bytes: ArrayBuffer;
   /** Worker 接受该项后的在途总字节数。 */
   acceptedPendingBytes: number;
@@ -185,17 +188,18 @@ export interface MsFileExecutorTransferResult {
  * Window executor lease 与两个独立 typed signer RPC。
  * 请求绑定实际 MessagePort；lock/key switch/Worker 重启会清空 lease。
  */
-export type CoordinatorClientRequestWithMsfileExecutor =
-  | { kind: "msfile.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch; /** 生产 executor 的专用双工 RPC 端口。 */ executorPort?: MessagePort }
-  | { kind: "msfile.executor.release"; clientId: string; requestId: string; leaseId: string }
-  | { kind: "msfile.executor.spike.transfer"; clientId: string; requestId: string; leaseId: string; expectedSessionEpoch: SessionEpoch; bytes: ArrayBuffer }
-  | ({ kind: "msfile.executor.identity.sign-noise"; clientId: string; requestId: string } & MsFileNoiseSignRequest)
-  | ({ kind: "msfile.executor.identity.sign-peer-record"; clientId: string; requestId: string } & MsFilePeerRecordSignRequest);
+export type CoordinatorClientRequestWithWindowP2pExecutor =
+  | { kind: "window-p2p.executor.acquire"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch; /** 生产 executor 的专用双工 RPC 端口。 */ executorPort?: MessagePort }
+  | { kind: "window-p2p.executor.release"; clientId: string; requestId: string; leaseId: string }
+  | { kind: "window-p2p.executor.spike.transfer"; clientId: string; requestId: string; leaseId: string; expectedSessionEpoch: SessionEpoch; bytes: ArrayBuffer }
+  | ({ kind: "window-p2p.executor.identity.sign-noise"; clientId: string; requestId: string } & WindowP2pNoiseSignRequest)
+  | ({ kind: "window-p2p.executor.identity.sign-peer-record"; clientId: string; requestId: string } & WindowP2pPeerRecordSignRequest);
 
 export type CoordinatorClientRequest =
   | CoordinatorClientRequestWithStorage
   | CoordinatorClientRequestWithMsfile
-  | CoordinatorClientRequestWithMsfileExecutor
+  | CoordinatorClientRequestWithWindowP2pExecutor
+  | { kind: "sat.operation"; clientId: string; requestId: string; operation: CoordinatorSatOperation; expectedSessionEpoch: SessionEpoch }
   | ({ kind: "hello"; clientId: string; requestId: string }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
@@ -218,7 +222,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state" | "sat.events";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -245,7 +249,13 @@ export type CoordinatorCryptoOperation =
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; network: "main" | "test" }
   | { type: "sealSendInput"; input: { sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string }; recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string }; contentType: "text/plain" | "text/markdown"; body: string; clientMessageId: string; createdAtMs: number } }
-  | { type: "openSealed"; record: ProviderSealedMessageRecord };
+  | { type: "openSealed"; record: ProviderSealedMessageRecord }
+  /** 在 SharedWorker 里创建 Channel bsv8.message.v1 Deliver。 */
+  | { type: "channel.seal-deliver"; recipientPublicKeyHex: string; contentJson: Uint8Array; issuedAtMs: number; expiresAtMs: number }
+  /** 在 SharedWorker 里创建 Channel ACK。 */
+  | { type: "channel.seal-ack"; recipientPublicKeyHex: string; acknowledgedMessageIdBase64Url: string; issuedAtMs: number; expiresAtMs: number }
+  /** 在 SharedWorker 里解密、验签、检查过期并分派 Channel 消息。 */
+  | { type: "channel.open"; channel: string; envelopeJson: Uint8Array; nowMs: number };
 
 /** 后台同步设置。 */
 export interface CoordinatorBackgroundSyncSettings {
@@ -295,7 +305,7 @@ export type CoordinatorCommandAck =
   | { status: "not-ready" }
   | { status: "validation-error"; message: string }
   | { status: "ok" }
-  | { status: "error"; message: string; code?: import("./storage.js").StorageErrorCode | import("./msfile.js").MsFileErrorCode };
+  | { status: "error"; message: string; code?: import("./storage.js").StorageErrorCode | import("./msfile.js").MsFileErrorCode | SatErrorCode | WindowP2pExecutorError["code"] };
 
 /** RPC 响应。 */
 export interface CoordinatorResponse {
@@ -326,7 +336,9 @@ export type CoordinatorCryptoResult =
   | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
   | { type: "deriveP2pkhAddress"; address: string }
   | { type: "sealSendInput"; envelope: Uint8Array; signature: Uint8Array }
-  | { type: "openSealed"; plaintext: Uint8Array };
+  | { type: "openSealed"; plaintext: Uint8Array }
+  | { type: "channel.seal"; channel: string; messageIdBase64Url: string; envelopeJson: Uint8Array; fromPublicKeyHex: string; expiresAtMs: number }
+  | { type: "channel.open"; channel: string; messageIdBase64Url: string; signedDigestHex: string; fromPublicKeyHex: string; toPublicKeyHex: string; protocol: string; bodyType: "deliver" | "ack"; contentJson?: Uint8Array; acknowledgedMessageIdBase64Url?: string; issuedAtMs: number; expiresAtMs: number };
 
 // ============================================================
 // 4. Coordinator -> Client Events
@@ -339,7 +351,8 @@ export type CoordinatorTopicEvent =
   | AssetDataChangedEvent
   | CoordinatorStorageStateEvent
   | P2pkhProvidersEvent
-  | CoordinatorMsFileStateEvent;
+  | CoordinatorMsFileStateEvent
+  | CoordinatorSatStateEvent;
 
 export interface P2pkhProvidersEvent {
   topic: "p2pkh.providers";
@@ -406,7 +419,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -473,11 +486,13 @@ export interface SessionCoordinatorClient {
   msfileData(data: CoordinatorMsFileData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   msfileCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   msfileSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
-  msfileExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<CoordinatorValueResult<MsFileExecutorLease>>;
-  msfileExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult>;
-  msfileExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<MsFileExecutorTransferResult>>;
-  msfileExecutorSignNoiseStaticKey(request: Omit<MsFileNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<MsFileIdentitySignResult>>;
-  msfileExecutorSignPeerRecord(request: Omit<MsFilePeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<MsFileIdentitySignResult>>;
+  windowP2pExecutorAcquire(ownerPublicKeyHex: string, executorPort?: MessagePort): Promise<CoordinatorValueResult<WindowP2pExecutorLease>>;
+  windowP2pExecutorRelease(leaseId: string): Promise<CoordinatorCommandResult>;
+  windowP2pExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<WindowP2pExecutorTransferResult>>;
+  windowP2pExecutorSignNoiseStaticKey(request: Omit<WindowP2pNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
+  windowP2pExecutorSignPeerRecord(request: Omit<WindowP2pPeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
+  /** 调用 SharedWorker 唯一 SatSubscription runtime；页面不直接持有 Sat DB/连接。 */
+  satOperation(operation: CoordinatorSatOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
   p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;

@@ -1,0 +1,26 @@
+{
+  "name": "@keymaster/plugin-sat-subscription",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
+    "./provider": "./src/satProvider.ts",
+    "./state": "./src/satState.ts",
+    "./db": "./src/satDb.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "@libp2p/interface": "3.3.0",
+    "@multiformats/multiaddr": "13.0.3",
+    "@noble/hashes": "1.8.0",
+    "bsv8-channel-protocol": "0.1.0",
+    "bitcoin-libp2p": "0.3.0",
+    "sat-subscription-protocol": "0.1.0",
+    "satoshi-payment-interface": "0.1.0"
+  }
+}

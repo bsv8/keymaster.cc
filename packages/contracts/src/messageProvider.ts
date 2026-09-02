@@ -122,6 +122,32 @@ export interface MessageProviderHealth {
   lastConnectedAtMs: number;
 }
 
+/**
+ * Provider 能力声明。
+ *
+ * 业务层必须根据能力选择行为，不能用“返回空数组”伪装成协议支持。
+ */
+export interface MessageProviderFeatures {
+  /** 是否支持向远端查询历史 list/get。 */
+  remoteHistory: boolean;
+  /** 是否支持远端在线状态查询。 */
+  onlineQuery: boolean;
+  /** 是否支持传输层可靠接收 ACK。 */
+  deliveryAck: boolean;
+}
+
+/** 旧 provider 未声明能力时使用的兼容默认值。 */
+export const DEFAULT_MESSAGE_PROVIDER_FEATURES: MessageProviderFeatures = {
+  remoteHistory: true,
+  onlineQuery: true,
+  deliveryAck: false
+};
+
+/** 读取 provider 能力；兼容施工单前的旧 provider 实现。 */
+export function messageProviderFeatures(provider: Pick<MessageProvider, "features">): MessageProviderFeatures {
+  return provider.features ?? DEFAULT_MESSAGE_PROVIDER_FEATURES;
+}
+
 /* ============== provider 主接口 ============== */
 
 /**
@@ -142,6 +168,8 @@ export interface MessageProvider {
   readonly id: string;
   /** 人类可读名字（管理页展示用）。 */
   readonly displayName: string;
+  /** 当前 provider 明确支持的协议能力。缺省时按旧 provider 兼容处理。 */
+  readonly features?: MessageProviderFeatures;
   /**
    * 借 owner signer 建立一条连接 + bind。
    *
@@ -216,6 +244,40 @@ export interface ProviderSealedMessageRecord {
   insertedAtMs: number;
   /** 永久消息真值字节 + sender 签名。 */
   envelope: SignedAppMsgEnvelopeV1;
+  /** 平台内部入站供应商；普通 App/Connect 不可见。 */
+  ingressSupplierId?: string;
+  /**
+   * 本次实际入站投递的唯一编号；同一逻辑消息从多个 Supplier 到达时，
+   * 每次 ingress 都有自己的 deliveryId。它不是 messageId，也不进入 AppMsg 明文。
+   */
+  deliveryId?: string;
+  /**
+   * Worker 为本次 delivery 生成的 ACK claim token；页面只能原样带回，
+   * 不能自行构造或跨 delivery 复用。
+   */
+  ackClaimToken?: string;
+  /**
+   * 平台内部本次 ingress 与逻辑消息的关系。
+   * `duplicate` 仍必须完成本地落库与原路 ACK，但不能再次触发 App
+   * 的 message_received；HubMsg 等没有多供应商去重语义的 provider 省略。
+   */
+  deliveryRelation?: "new" | "duplicate";
+}
+
+/**
+ * 入站消息 ACK 的最小 claim。
+ *
+ * 页面只允许把 Worker 发出的三个引用字段原样带回；sender 公钥、message
+ * 编号、去重键和 Supplier generation 必须由 Worker 根据 deliveryId 查真值，
+ * 不能由页面提交。
+ */
+export interface ProviderDeliveryAckClaim {
+  /** Worker 为每次实际 ingress 生成的投递编号。 */
+  deliveryId: string;
+  /** 该次 ingress 的原始 Supplier 编号。 */
+  supplierId: string;
+  /** Worker 为该 delivery 生成的一次性 claim token。 */
+  ackClaimToken: string;
 }
 
 /* ============== provider 业务层输入 / 输出形状（施工单 2026-07-04 004 硬切换：sealed） ============== */
@@ -331,6 +393,11 @@ export interface MessageProviderOperations extends MessageProviderHandle {
    * 返回取消订阅函数。
    */
   subscribeMessages(handler: (rec: ProviderSealedMessageRecord) => void): () => void;
+  /**
+   * 入站记录成功验签、解密并持久化后发送传输层 ACK。
+   * 旧 provider 没有 ACK 能力时可以不实现。
+   */
+  ackMessage?(input: ProviderSealedMessageRecord | ProviderDeliveryAckClaim): Promise<void>;
   /**
    * 批量在线查询。
    *

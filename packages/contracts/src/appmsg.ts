@@ -48,6 +48,7 @@
 //   - 不暴露 `kind = "all"` 的 scope 给业务页。
 
 import type { KeyScopedStorageHandle, KeyspaceService } from "./keyspace.js";
+import { cborDecode } from "./cbor.js";
 import type {
   ActiveMessageProviderSnapshot,
   MessageProviderOperations,
@@ -761,6 +762,125 @@ export interface AppMsgPlaintextV1 {
 export interface SignedAppMsgEnvelopeV1 {
   envelopeBytes: Uint8Array;
   signatureBytes: Uint8Array;
+}
+
+/**
+ * AppMsg sealed envelope 的路由元数据（不包含正文）。
+ *
+ * 这是 provider 等平台组件可以安全消费的中性解析结果；它只读取
+ * envelope 真值中的 sender / recipient / 幂等键 / 时间，不执行验签、解密，
+ * 也不暴露明文正文。
+ */
+export interface AppMsgEnvelopeMetadata {
+  senderPublicKeyHex: string;
+  senderEndpointKind: "origin" | "plugin";
+  senderEndpointId: string;
+  recipientPublicKeyHex: string;
+  recipientEndpointKind: "origin" | "plugin";
+  recipientEndpointId: string;
+  clientMessageId: string;
+  createdAtMs: number;
+}
+
+/**
+ * 读取 AppMsg envelope 的非正文元数据。
+ *
+ * 这里放在 contracts 是为了让不同 provider 只依赖平台契约，不反向依赖
+ * `plugin-appmsg` 实现插件。调用方仍必须在自己的安全边界执行完整验签 /
+ * 解密；本函数只负责 deterministic CBOR 结构和路由字段的 fail-closed 解析。
+ */
+export function readAppMsgEnvelopeMetadata(
+  envelopeBytes: Uint8Array
+): AppMsgEnvelopeMetadata {
+  const raw = cborDecode(envelopeBytes);
+  if (!Array.isArray(raw) || raw.length !== 12) {
+    throw new Error(
+      `AppMsg envelope must be a 12-element array, got ${Array.isArray(raw) ? raw.length : typeof raw}`
+    );
+  }
+  const [
+    envelopeVersion,
+    senderPublicKeyBytes,
+    senderEndpointKind,
+    senderEndpointId,
+    recipientPublicKeyBytes,
+    recipientEndpointKind,
+    recipientEndpointId,
+    clientMessageId,
+    createdAtMs,
+    sealSuiteId,
+    nonceBytes,
+    ciphertext
+  ] = raw;
+  if (
+    typeof envelopeVersion !== "number" ||
+    !(senderPublicKeyBytes instanceof Uint8Array) ||
+    typeof senderEndpointKind !== "number" ||
+    typeof senderEndpointId !== "string" ||
+    !(recipientPublicKeyBytes instanceof Uint8Array) ||
+    typeof recipientEndpointKind !== "number" ||
+    typeof recipientEndpointId !== "string" ||
+    typeof clientMessageId !== "string" ||
+    typeof createdAtMs !== "number" ||
+    typeof sealSuiteId !== "number" ||
+    !(nonceBytes instanceof Uint8Array) ||
+    !(ciphertext instanceof Uint8Array)
+  ) {
+    throw new Error("AppMsg envelope field type mismatch");
+  }
+  if (envelopeVersion !== APPMSG_ENVELOPE_VERSION_V1) {
+    throw new Error(
+      `AppMsg envelopeVersion must be ${APPMSG_ENVELOPE_VERSION_V1}, got ${envelopeVersion}`
+    );
+  }
+  if (sealSuiteId !== APPMSG_SEAL_SUITE_ID_V1) {
+    throw new Error(
+      `AppMsg sealSuiteId must be ${APPMSG_SEAL_SUITE_ID_V1}, got ${sealSuiteId}`
+    );
+  }
+  if (
+    (senderEndpointKind !== APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN &&
+      senderEndpointKind !== APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN) ||
+    (recipientEndpointKind !== APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN &&
+      recipientEndpointKind !== APPMSG_ENVELOPE_ENDPOINT_KIND_PLUGIN)
+  ) {
+    throw new Error("AppMsg envelope endpoint kind is invalid");
+  }
+  if (
+    !isCompressedPublicKeyBytes(senderPublicKeyBytes) ||
+    !isCompressedPublicKeyBytes(recipientPublicKeyBytes)
+  ) {
+    throw new Error("AppMsg envelope public key must be a compressed 33-byte key");
+  }
+  if (nonceBytes.length !== 12) {
+    throw new Error(`AppMsg envelope nonce must be 12 bytes, got ${nonceBytes.length}`);
+  }
+  return {
+    senderPublicKeyHex: bytesToHex(senderPublicKeyBytes),
+    senderEndpointKind:
+      senderEndpointKind === APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN
+        ? "origin"
+        : "plugin",
+    senderEndpointId,
+    recipientPublicKeyHex: bytesToHex(recipientPublicKeyBytes),
+    recipientEndpointKind:
+      recipientEndpointKind === APPMSG_ENVELOPE_ENDPOINT_KIND_ORIGIN
+        ? "origin"
+        : "plugin",
+    recipientEndpointId,
+    clientMessageId,
+    createdAtMs
+  };
+}
+
+function isCompressedPublicKeyBytes(bytes: Uint8Array): boolean {
+  return bytes.length === 33 && (bytes[0] === 0x02 || bytes[0] === 0x03);
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const byte of bytes) out += byte.toString(16).padStart(2, "0");
+  return out;
 }
 
 /**

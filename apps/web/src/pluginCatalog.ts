@@ -22,6 +22,8 @@ import { jsonFileImporterPlugin } from "@keymaster/plugin-importer-json-file";
 import { wifImporterPlugin } from "@keymaster/plugin-importer-wif";
 import { keyImportPlugin } from "@keymaster/plugin-key-import";
 import { msfilePlugin } from "@keymaster/plugin-msfile";
+import { satSubscriptionPlugin } from "@keymaster/plugin-sat-subscription";
+import { windowP2pPlugin } from "@keymaster/plugin-window-p2p";
 import { p2pkhPlugin } from "@keymaster/plugin-p2pkh";
 import { jungleBusPlugin } from "@keymaster/plugin-junglebus";
 import { pokerPlugin } from "@keymaster/plugin-poker";
@@ -36,10 +38,12 @@ import { wocPlugin } from "@keymaster/plugin-woc";
 export const WEB_PLUGIN_CATALOG: readonly PluginManifest[] = [
   vaultPlugin,
   storagePlugin,
+  windowP2pPlugin,
   msfilePlugin,
   broadcastPlatformPlugin,
   hubcastPlatformPlugin,
   appmsgPlatformPlugin,
+  satSubscriptionPlugin,
   hubmsgPlatformPlugin,
   protocolPlugin,
   webrtcPlugin,

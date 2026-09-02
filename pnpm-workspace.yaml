@@ -7,5 +7,9 @@ linkWorkspacePackages: true
 allowBuilds:
   esbuild: true
 
+overrides:
+  bitcoin-libp2p: 0.3.0
+
 minimumReleaseAgeExclude:
-  - bitcoin-libp2p@0.2.0
+  - bitcoin-libp2p@0.3.0
+  - bsv8-channel-protocol@0.1.0

@@ -63,6 +63,12 @@ export interface HubMsgProviderConfig {
 export class HubMsgProvider implements MessageProvider {
   readonly id: string = HUBMSG_PROVIDER_ID;
   readonly displayName: string = HUBMSG_PROVIDER_DISPLAY_NAME;
+  /** HubMsg 仍支持历史和在线查询，但没有 Channel ACK。 */
+  readonly features = {
+    remoteHistory: true,
+    onlineQuery: true,
+    deliveryAck: false
+  } as const;
 
   private readonly cfg: HubMsgProviderConfig;
   private currentConn: HubMsgConnection | null = null;

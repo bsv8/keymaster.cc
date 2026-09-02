@@ -27,6 +27,8 @@
     "@keymaster/plugin-key-import": "*",
     "@keymaster/plugin-message": "*",
     "@keymaster/plugin-msfile": "*",
+    "@keymaster/plugin-sat-subscription": "*",
+    "@keymaster/plugin-window-p2p": "*",
     "@keymaster/msfile-media": "*",
     "@keymaster/plugin-p2pkh": "*",
     "@keymaster/plugin-poker": "*",
@@ -44,8 +46,10 @@
     "@libp2p/websockets": "10.1.20",
     "@multiformats/multiaddr": "13.0.3",
     "@noble/hashes": "^1.8.0",
-    "bitcoin-libp2p": "0.2.0",
+    "bsv8-channel-protocol": "0.1.0",
+    "bitcoin-libp2p": "0.3.0",
     "buffer": "^6.0.3",
-    "keyhold": "2.0.0"
+    "keyhold": "2.0.0",
+    "sat-subscription-protocol": "0.1.0"
   }
 }
