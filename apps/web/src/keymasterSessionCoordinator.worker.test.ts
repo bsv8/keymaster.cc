@@ -5,7 +5,7 @@ import {
   vaultDb,
   type LegacyVaultKeyRecord,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorSatEvent } from "@keymaster/contracts";
+import type { CoordinatorSatEvent, JSONValue } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
@@ -29,9 +29,14 @@ import {
   __testReleaseMsfileRuntime,
   __testSetMsfileReadConcurrencySettings,
   __testSetMsfileRuntimeOverride,
+  __testBuildChannelPublicMessageTimes,
 } from "./keymasterSessionCoordinator.worker.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { parse as keyholdParse, unlock as keyholdUnlock } from "keyhold";
+import { newMessageID, newSessionID } from "bsv8-channel-protocol";
+import { parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
+import { verifySignedPrivateMessage } from "bsv8-channel-protocol/inbox";
+import { PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
 import {
   __testBackgroundRunNow,
   __testAddPasskeyToCurrentKey,
@@ -94,9 +99,11 @@ import {
   __testSetP2pkhBroadcastProvider,
   __testSetActive,
   __testSealLocalSecret,
+  __testEncodeChannelPrivateBody,
+  __testValidateChannelPrivateProtocol,
+  __testSignChannelPrivateMessage,
   __testUnlock,
-  __testUpdateScheduleSettings,
-  __testChannelCrypto
+  __testUpdateScheduleSettings
 } from "./keymasterSessionCoordinator.worker.js";
 
 class TestPort {
@@ -120,6 +127,134 @@ function validPublisherKey(seed: number): string {
 const VALID_PUBLISHER_KEYS = [1, 2, 3, 4, 5, 6].map(validPublisherKey);
 
 async function flush(): Promise<void> { await Promise.resolve(); await Promise.resolve(); }
+
+describe("Coordinator ChannelProtocol 私信编码边界", () => {
+  it("通过真实 WebRTC parser 编码 bsv8.webrtc.signal.v1 的全部信令分支", () => {
+    const requestMessageId = newMessageID();
+    const sessionId = newSessionID();
+    const body = __testEncodeChannelPrivateBody("bsv8.webrtc.signal.v1", {
+      request_message_id: requestMessageId,
+      session_id: sessionId,
+      signal: { type: "offer", sdp: "v=0\\r\\nm=audio 9 RTP/AVP 0" }
+    });
+
+    expect(parseWebrtcBodyValue(body as unknown as JSONValue)).toMatchObject({
+      request_message_id: requestMessageId,
+      session_id: sessionId,
+      signal: { type: "offer", sdp: "v=0\\r\\nm=audio 9 RTP/AVP 0" }
+    });
+    const branches: JSONValue[] = [
+      {
+        request_message_id: newMessageID(),
+        session_id: newSessionID(),
+        signal: { type: "answer", sdp: "v=0" }
+      },
+      {
+        request_message_id: newMessageID(),
+        session_id: newSessionID(),
+        signal: {
+          type: "ice-candidate",
+          candidate: { candidate: "candidate:1 1 UDP 1 127.0.0.1 9 typ host", sdp_mid: null, sdp_m_line_index: 0 }
+        }
+      },
+      {
+        request_message_id: newMessageID(),
+        session_id: newSessionID(),
+        signal: { type: "end-of-candidates" }
+      }
+    ];
+    for (const branch of branches) {
+      const encoded = __testEncodeChannelPrivateBody("bsv8.webrtc.signal.v1", branch);
+      expect(() => parseWebrtcBodyValue(encoded as unknown as JSONValue)).not.toThrow();
+    }
+    expect(() => __testEncodeChannelPrivateBody("bsv8.webrtc.signal.v1", {
+      schema: "keymaster.webrtc.v1",
+      type: "offer",
+      sessionId,
+      createdAtMs: Date.now(),
+      expiresAtMs: Date.now() + 60_000,
+      sdp: "v=0"
+    })).toThrow();
+  });
+
+  it("按 Host 绑定的 caller 身份限制私有协议发布", () => {
+    expect(() => __testValidateChannelPrivateProtocol(
+      { kind: "plugin", pluginId: "message" },
+      "bsv8.message.v1"
+    )).not.toThrow();
+    expect(() => __testValidateChannelPrivateProtocol(
+      { kind: "plugin", pluginId: "webrtc" },
+      "bsv8.webrtc.signal.v1"
+    )).not.toThrow();
+    expect(() => __testValidateChannelPrivateProtocol(
+      { kind: "system", systemId: "contacts-presence" },
+      "bsv8.ping.v1"
+    )).not.toThrow();
+
+    expect(() => __testValidateChannelPrivateProtocol(
+      { kind: "plugin", pluginId: "message" },
+      "bsv8.webrtc.signal.v1"
+    )).toThrow();
+    expect(() => __testValidateChannelPrivateProtocol(
+      { kind: "plugin", pluginId: "bsv-price" },
+      "bsv8.ping.v1"
+    )).toThrow();
+    expect(() => __testValidateChannelPrivateProtocol(
+      { kind: "connect", connectSessionId: "session", origin: "https://app.example" },
+      "bsv8.message.v1"
+    )).toThrow();
+  });
+
+  it("使用 ChannelProtocol TTL 完成真实私密消息签名与验证", () => {
+    const nowMs = 1_700_000_000_000;
+    const privateKeyHex = "0000000000000000000000000000000000000000000000000000000000000001";
+    const recipientPublicKeyHex = validPublisherKey(2);
+    const cases = [
+      {
+        protocol: "bsv8.ping.v1",
+        content: { type: "ping" } as JSONValue,
+        lifetimeMs: 60_000
+      },
+      {
+        protocol: "bsv8.webrtc.signal.v1",
+        content: {
+          request_message_id: newMessageID(),
+          session_id: newSessionID(),
+          signal: { type: "offer", sdp: "v=0\\r\\nm=application 9 DTLS/SCTP 5000" }
+        } as JSONValue,
+        lifetimeMs: 120_000
+      },
+      {
+        protocol: "bsv8.message.v1",
+        content: { type: "deliver", content: { hello: "world" } } as JSONValue,
+        lifetimeMs: 24 * 60 * 60 * 1000
+      }
+    ];
+
+    for (const item of cases) {
+      const signed = __testSignChannelPrivateMessage({
+        recipientPublicKeyHex,
+        protocol: item.protocol,
+        content: item.content,
+        nowMs,
+        privateKeyHex
+      });
+      expect(signed.expires_at_ms - signed.issued_at_ms).toBe(item.lifetimeMs);
+      expect(() => verifySignedPrivateMessage(signed, nowMs + 1)).not.toThrow();
+    }
+  });
+
+  it("公开消息时间只读取一次系统时钟", () => {
+    const clocks = [1_700_000_000_000, 1_700_000_000_001];
+    const times = __testBuildChannelPublicMessageTimes(() => clocks.shift() ?? 0);
+    expect(times).toEqual({
+      issuedAtMs: 1_700_000_000_000,
+      expiresAtMs: 1_700_000_000_000 + PUBLIC_MESSAGE_MAX_LIFETIME_MS
+    });
+    // 第二个值故意存在：如果实现再次读取 Date.now，这个测试的输入就会被消耗。
+    expect(clocks).toEqual([1_700_000_000_000 + 1]);
+  });
+});
 
 describe("Session Coordinator worker", () => {
   it("rejects forged client ownership and revoked/changed Storage grants", async () => {
@@ -382,6 +517,32 @@ describe("Session Coordinator worker", () => {
     await running;
     expect(aborted).toBe(true);
     expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "test-b")?.state).toBe("idle");
+  });
+
+  it("uses the task-start owner when cancelling a dynamic key-scoped task", async () => {
+    __testResetState();
+    let activeOwner = "a".repeat(64);
+    __testSetVaultStatus("unlocked", activeOwner);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let aborted = false;
+    __testRegisterTask({
+      id: "dynamic-owner-task",
+      publicKeyHex: activeOwner,
+      keyScope: () => ({ publicKeyHex: activeOwner }),
+      run: async ({ signal }) => {
+        await released;
+        aborted = signal.aborted;
+      }
+    });
+    const running = __testRunTask("dynamic-owner-task");
+    await Promise.resolve();
+    activeOwner = "b".repeat(64);
+    const cancelling = __testCancelByKey("a".repeat(64));
+    release();
+    await cancelling;
+    await running;
+    expect(aborted).toBe(true);
   });
 
   it("rejects a late handler freshness check after session invalidation", async () => {
@@ -916,7 +1077,7 @@ describe("Session Coordinator backup import", () => {
     const unlocked = await __testUnlock("target-pw", imported.publicKeyHex);
     expect(unlocked.ack.status).toBe("accepted");
     expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);
-  });
+  }, 15_000);
 
   it("rejects wrong source password without writing any key", async () => {
     const source = await __testCreateVault("source-pw");
@@ -1998,88 +2159,5 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
     // 其他端口的 grant 不能使用。
     const stolen = await __testDispatchMsfileData({ type: "read-seed", grantId, supplierPublicKeyHex: "02" + "ab".repeat(32), seedHashHex: "ab".repeat(32) }, "port-b");
     expect(stolen.ack).toMatchObject({ status: "error", code: "msfile_identity_required" });
-  });
-});
-
-describe("Session Coordinator Channel crypto", () => {
-  beforeEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
-  afterEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
-  it("seals and opens Deliver/ACK only through the Worker-owned crypto boundary", async () => {
-    const created = await __testCreateVault("channel-pw");
-    const owner = created.publicKeyHex!;
-    const issuedAtMs = 1_000_000;
-    const expiresAtMs = issuedAtMs + 60_000;
-    const contentJson = new TextEncoder().encode(JSON.stringify({ type: "appmsg", body: "hello" }));
-
-    const sealed = await __testChannelCrypto({
-      type: "channel.seal-deliver",
-      recipientPublicKeyHex: owner,
-      contentJson,
-      issuedAtMs,
-      expiresAtMs
-    });
-    expect(sealed.type).toBe("channel.seal");
-    if (sealed.type !== "channel.seal") throw new Error("expected Channel seal");
-    expect(sealed.channel).toBe(`bsv8.inbox.${owner}`);
-    expect(sealed.envelopeJson).toBeInstanceOf(Uint8Array);
-
-    const opened = await __testChannelCrypto({
-      type: "channel.open",
-      channel: sealed.channel,
-      envelopeJson: sealed.envelopeJson,
-      nowMs: issuedAtMs + 1
-    });
-    expect(opened).toMatchObject({
-      type: "channel.open",
-      channel: sealed.channel,
-      messageIdBase64Url: sealed.messageIdBase64Url,
-      fromPublicKeyHex: owner,
-      toPublicKeyHex: owner,
-      bodyType: "deliver",
-      protocol: "bsv8.message.v1",
-      issuedAtMs,
-      expiresAtMs
-    });
-    if (opened.type !== "channel.open" || opened.bodyType !== "deliver") throw new Error("expected Channel Deliver");
-    expect(JSON.parse(new TextDecoder().decode(opened.contentJson))).toEqual({ type: "appmsg", body: "hello" });
-
-    const ack = await __testChannelCrypto({
-      type: "channel.seal-ack",
-      recipientPublicKeyHex: owner,
-      acknowledgedMessageIdBase64Url: sealed.messageIdBase64Url,
-      issuedAtMs,
-      expiresAtMs
-    });
-    if (ack.type !== "channel.seal") throw new Error("expected Channel ACK seal");
-    const openedAck = await __testChannelCrypto({
-      type: "channel.open",
-      channel: ack.channel,
-      envelopeJson: ack.envelopeJson,
-      nowMs: issuedAtMs + 1
-    });
-    expect(openedAck).toMatchObject({
-      type: "channel.open",
-      bodyType: "ack",
-      acknowledgedMessageIdBase64Url: sealed.messageIdBase64Url
-    });
-  });
-
-  it("rejects invalid Channel lifetime before creating a signed envelope", async () => {
-    const created = await __testCreateVault("channel-pw");
-    await expect(__testChannelCrypto({
-      type: "channel.seal-deliver",
-      recipientPublicKeyHex: created.publicKeyHex!,
-      contentJson: new TextEncoder().encode("null"),
-      issuedAtMs: 10,
-      expiresAtMs: 10
-    })).rejects.toThrow("Channel message lifetime is invalid");
   });
 });

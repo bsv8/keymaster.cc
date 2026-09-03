@@ -1,19 +1,9 @@
 import {
   PROTOCOL_VERSION,
-  type AppMsgGetParams,
-  type AppMsgGetResult,
-  type AppMsgListParams,
-  type AppMsgListResult,
-  type AppMsgMessageReceivedEventData,
-  type AppMsgSendParams,
-  type AppMsgSendResult,
-  type BroadcastMessageReceivedEventData,
-  type BroadcastPublishParams,
-  type BroadcastPublishResult,
-  type BroadcastSubscriptionListParams,
-  type BroadcastSubscriptionListResult,
-  type BroadcastSubscriptionSetParams,
-  type BroadcastSubscriptionSetResult,
+  type ChannelPublishParams,
+  type ChannelPublishResult,
+  type ChannelSubscriptionSetParams,
+  type ChannelSubscriptionSetResult,
   type CipherDecryptParams,
   type CipherDecryptResult,
   type CipherEncryptParams,
@@ -144,12 +134,7 @@ export interface KeymasterConnectOptions {
   requestTimeoutMs?: number;
   /** Session Window close detection interval. Defaults to 500ms. */
   closePollMs?: number;
-  /**
-   * Receives `appmsg.message_received` and `broadcast.message_received`
-   * server-pushed events. Their payloads are respectively
-   * {@link AppMsgMessageReceivedEventData} and
-   * {@link BroadcastMessageReceivedEventData}.
-   */
+  /** 接收当前精确订阅频道上的已验签 Channel 事件。 */
   onEvent?: (event: ProtocolEventMessage) => void;
   /** Receives transport lifecycle changes. */
   onStateChange?: (state: KeymasterConnectState) => void;
@@ -214,13 +199,9 @@ const DEFAULT_CLOSE_POLL_MS = 500;
  * @groupDescription Transfer
  * Transfer BSV or negotiate a fee-pool operation.
  *
- * @groupDescription AppMsg
- * Send and query private application messages. Incoming messages arrive as
- * `appmsg.message_received` through {@link KeymasterConnectOptions.onEvent}.
- *
- * @groupDescription Broadcast
- * Publish broadcasts and manage subscriptions. Incoming broadcasts arrive as
- * `broadcast.message_received` through {@link KeymasterConnectOptions.onEvent}.
+ * @groupDescription Channel
+ * Publish JSON content and manage exact-channel subscriptions. Incoming
+ * messages arrive as `channel.message_received` events.
  *
  * @groupDescription Storage
  * Manage app-scoped directories, objects, and multipart uploads.
@@ -454,66 +435,27 @@ export class KeymasterConnectClient {
   }
 
   /**
-   * Calls `appmsg.send` to send an end-to-end sealed application message.
+   * 发布到任意精确频道；owner、公钥签名和消息编号由 Keymaster 生成。
    *
-   * @group AppMsg
+   * @group Channel
    */
-  appmsgSend(params: AppMsgSendParams, options?: KeymasterRequestOptions): Promise<AppMsgSendResult> {
-    return this.request("appmsg.send", params, options);
-  }
-
-  /**
-   * Calls `appmsg.list` to incrementally list messages visible to the session.
-   *
-   * @group AppMsg
-   */
-  appmsgList(params: AppMsgListParams, options?: KeymasterRequestOptions): Promise<AppMsgListResult> {
-    return this.request("appmsg.list", params, options);
-  }
-
-  /**
-   * Calls `appmsg.get` to fetch one message visible to the session.
-   *
-   * @group AppMsg
-   */
-  appmsgGet(params: AppMsgGetParams, options?: KeymasterRequestOptions): Promise<AppMsgGetResult> {
-    return this.request("appmsg.get", params, options);
-  }
-
-  /**
-   * Calls `broadcast.publish` to publish a message signed by the session owner.
-   *
-   * @group Broadcast
-   */
-  broadcastPublish(
-    params: BroadcastPublishParams,
+  channelPublish(
+    params: ChannelPublishParams,
     options?: KeymasterRequestOptions
-  ): Promise<BroadcastPublishResult> {
-    return this.request("broadcast.publish", params, options);
+  ): Promise<ChannelPublishResult> {
+    return this.request("channel.publish", params, options);
   }
 
   /**
-   * Calls `broadcast.subscription_set` to replace the caller's channel set.
+   * 替换当前 Connect caller 的精确频道订阅集合；传空数组表示释放。
    *
-   * @group Broadcast
+   * @group Channel
    */
-  broadcastSubscriptionSet(
-    params: BroadcastSubscriptionSetParams,
+  channelSubscriptionSet(
+    params: ChannelSubscriptionSetParams,
     options?: KeymasterRequestOptions
-  ): Promise<BroadcastSubscriptionSetResult> {
-    return this.request("broadcast.subscription_set", params, options);
-  }
-
-  /**
-   * Calls `broadcast.subscription_list` to read the caller's channel set.
-   *
-   * @group Broadcast
-   */
-  broadcastSubscriptionList(
-    params: BroadcastSubscriptionListParams,
-    options?: KeymasterRequestOptions
-  ): Promise<BroadcastSubscriptionListResult> {
-    return this.request("broadcast.subscription_list", params, options);
+  ): Promise<ChannelSubscriptionSetResult> {
+    return this.request("channel.subscription_set", params, options);
   }
 
   /**

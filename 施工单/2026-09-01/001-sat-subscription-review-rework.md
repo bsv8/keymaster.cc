@@ -417,13 +417,14 @@ R01 固定 bitcoin-libp2p 0.3.0 framing 真值
 ### 已验证
 
 - Keymaster：`pnpm typecheck`、`pnpm lint:boundaries`、`pnpm lint:react-boundaries`、`pnpm build`、`pnpm docs:connect:build` 通过。
-- Keymaster 全仓 `pnpm test`：210 个测试文件全部通过；返工后 Worker 定向测试 86 项通过；P2P/MSFile/Sat 定向测试 24 个文件、224 项通过；覆盖双标签页 `sat.events`、入站 ACK 单写者、claim 字段隔离与容量、无 subscriber 队列满载、请求/响应 bridge 预算、waiter timeout/cancel 和身份 pin 停止 fallback。
+- Keymaster 全仓 `pnpm test`：211 个测试文件全部通过；Worker 定向测试 91 项通过；内部 Sat transport 迁移测试 6 项、Sat lane/provider、C01–C05 handler 资源闭环和 bridge 定向测试通过；覆盖双标签页 `sat.events`、入站 ACK 单写者、claim 字段隔离与容量、无 subscriber 队列满载、请求/响应 bridge 预算、waiter timeout/cancel 和身份 pin 停止 fallback。
+- 删除外部目录前后均通过 `pnpm install --frozen-lockfile`、`pnpm typecheck`、`pnpm lint:react-boundaries`、`pnpm build`、`pnpm docs:connect:build` 和 `git diff --check`；
 - `bitcoin-libp2p`：Go `go test -race ./...`、TypeScript 63 项测试和 10 组 uvarint 跨语言向量通过。
 - SatSubscription：Go 全量及 `-race`、内部 transport 集成、Go↔TypeScript `/ssp/1.0.0` 长流互操作通过；内部 transport 迁移测试 6 项通过。
 
 ### 仍待完成
 
-- 独立 `SatSubscriptionLibp2p` 与本地 `file:` 依赖已移除；内部 transport 已迁入 Keymaster。Go Server 正式 release、干净安装和发布后验证尚未完成。
+- 独立 `SatSubscriptionLibp2p` 与本地 `file:` 依赖已移除，外部目录已删除；内部 transport 已迁入 Keymaster。Go Server 正式 release/commit 仍待完成。
 - 双 Supplier、双 Keymaster owner、双 Connect origin 的真实 E2E 尚未执行；S01–S22 真实供应商验收和证据归档尚未开始。
 
 ## 13. 完成定义

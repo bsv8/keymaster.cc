@@ -6,9 +6,9 @@
 //   - 详情页保留给 contacts 域内部查看与 breadcrumb 解析；
 //   - 联系人身份以 publicKeyHex 为准。
 
-import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
+import { useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
 import { EmptyState, PageHeader } from "@keymaster/ui";
-import type { Contact } from "@keymaster/contracts";
+import type { Contact, ContactPresenceMap } from "@keymaster/contracts";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
 // 不引入 react-router；直接用 location.pathname 解析。
@@ -27,6 +27,11 @@ export function ContactDetailPage() {
   );
   const contact = state.contact;
   const noActiveKey = !state.active;
+  const presenceByPublicKey = useResourceSelector<ContactPresenceMap, ContactPresenceMap>(
+    host.resourceStore, "contacts.presence", [],
+    (snapshot) => snapshot.data ?? {},
+    (a, b) => a === b
+  );
 
   if (!contact) {
     return (
@@ -50,6 +55,10 @@ export function ContactDetailPage() {
 
   const initials = getContactInitials(contact.name);
   const locale = i18n.language();
+  const presence = presenceByPublicKey[contact.publicKeyHex.trim().toLowerCase()] ?? {
+    publicKeyHex: contact.publicKeyHex.trim().toLowerCase(),
+    state: "offline" as const
+  };
 
   return (
     <div className="contact-detail contact-detail--ready">
@@ -70,6 +79,9 @@ export function ContactDetailPage() {
               {t("contacts.detail.publicKeyHex", { defaultValue: "Public key" })}
             </p>
             <code className="contact-detail__public-key">{contact.publicKeyHex}</code>
+            <span className="contact-detail__presence" data-contact-presence={presence.state}>
+              {t(`contacts.presence.${presence.state}`, { defaultValue: presence.state })}
+            </span>
           </div>
         </section>
 

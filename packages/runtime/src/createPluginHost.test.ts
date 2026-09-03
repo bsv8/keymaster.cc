@@ -7,18 +7,17 @@
 //   - version + subscribe
 //   - graph / state
 //   - bootstrap 路径：config store override + defaultEnabled 决定初始 enabled
-//   - 硬切换 2026-07-04 001：manifest.appMessageEndpoint 仅做形状 + 唯一性
-//     校验；runtime **不**再注入 `<pluginId>.appmsg.client` capability，
-//     **不**再监听 keyspace / vault owner 变化去重建消息 client。
+//   - Channel caller 由 Coordinator/Session Window 负责，runtime 不注入传输层
+//     client，也不维护消息传输状态。
 
-import { describe, expect, it, beforeEach } from "vitest";
+import { describe, expect, it, beforeEach, vi } from "vitest";
 import {
   createPluginHost,
   StartupCapabilityError,
   StartupPluginError,
   type PluginHost
 } from "./createPluginHost.js";
-import type { PluginContext, PluginManifest } from "@keymaster/contracts";
+import { CHANNEL_RUNTIME_CAPABILITY, type ChannelRuntime, type ChannelRuntimeFactory, type PluginContext, type PluginManifest } from "@keymaster/contracts";
 import type { RouteRegistry } from "./registries/routeRegistry.js";
 import type { SettingsRegistry } from "./registries/settingsRegistry.js";
 
@@ -133,6 +132,36 @@ describe("createPluginHost - runtime resource binding", () => {
     expect(activeListeners.size).toBe(1);
     await host.disable("late-keyspace");
     expect(activeListeners.size).toBe(0);
+  });
+
+  it("binds Channel plugin identity to the manifest and rejects system callers", async () => {
+    const runtime = {} as ChannelRuntime;
+    const rawFactory: ChannelRuntimeFactory = {
+      forPlugin: vi.fn(() => runtime),
+      forSystem: vi.fn(() => runtime)
+    };
+    const host = createPluginHost({ disableConfigPersistence: true });
+    host.provide(CHANNEL_RUNTIME_CAPABILITY, rawFactory);
+
+    let contextPluginId: string | undefined;
+    let factory: ChannelRuntimeFactory | undefined;
+    await host.register({
+      id: "bound-channel-plugin",
+      name: "Bound Channel plugin",
+      description: "test",
+      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
+      setup(ctx) {
+        contextPluginId = ctx.pluginId;
+        factory = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY);
+      }
+    });
+
+    expect(contextPluginId).toBe("bound-channel-plugin");
+    expect(factory).toBeDefined();
+    expect(factory!.forPlugin("forged-plugin")).toBe(runtime);
+    expect(rawFactory.forPlugin).toHaveBeenCalledWith("bound-channel-plugin");
+    expect(() => factory!.forSystem("owner-inbox")).toThrow("Plugin context cannot create a system Channel caller");
+    expect(rawFactory.forSystem).not.toHaveBeenCalled();
   });
 });
 
@@ -481,106 +510,5 @@ describe("createPluginHost - startup contract", () => {
       expect(details.configuredEnabled).toBe(true);
       expect(details.providerError).toContain("private stack detail");
     }
-  });
-});
-
-/* ============== 2026-07-04 001：manifest.appMessageEndpoint 仅做校验 ============== */
-
-describe("createPluginHost - manifest.appMessageEndpoint (validation only)", () => {
-  it("rejects endpointId with invalid shape", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const plugin: PluginManifest = {
-      id: "bad-shape",
-      name: "Bad",
-      description: "bad shape",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "Keymaster.Message" }, // 大写、不符合 shape
-      setup() {
-        // 不会跑到这里（enable 阶段就 fail-closed）
-      }
-    };
-    await host.register(plugin);
-    expect(["blocked", "error-disabled"]).toContain(host.state("bad-shape").kind);
-    expect(String(host.state("bad-shape").error ?? "")).toMatch(/appMessageEndpoint/);
-    expect(String(host.state("bad-shape").error ?? "")).toMatch(/pluginEndpointId|shape/);
-  });
-
-  it("does NOT inject <pluginId>.appmsg.client capability (runtime no longer owns it)", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const plugin: PluginManifest = {
-      id: "p1",
-      name: "p1",
-      description: "declares appMessageEndpoint",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "keymaster.message" },
-      setup() {
-        // 不主动 get scoped client。
-      }
-    };
-    await host.register(plugin);
-    // 关键断言：runtime 不再注入 scoped client capability。
-    expect(host.capabilities.has("p1.appmsg.client")).toBe(false);
-  });
-
-  it("releases endpointId on disable; another plugin can re-register it", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const p1: PluginManifest = {
-      id: "p1",
-      name: "p1",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "keymaster.message" },
-      setup() {
-        // no-op
-      }
-    };
-    await host.register(p1);
-    expect(host.state("p1").kind).toBe("enabled");
-    // 同样禁止注入 scoped client。
-    expect(host.capabilities.has("p1.appmsg.client")).toBe(false);
-
-    await host.disable("p1");
-    expect(host.state("p1").kind).toBe("disabled");
-
-    // 复用同一 endpointId 注册新插件：应该通过（endpointId 已释放）。
-    const p2: PluginManifest = {
-      id: "p2",
-      name: "p2",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "keymaster.message" },
-      setup() {
-        // no-op
-      }
-    };
-    await host.register(p2);
-    expect(host.state("p2").kind).toBe("enabled");
-    expect(host.capabilities.has("p2.appmsg.client")).toBe(false);
-  });
-
-  it("rejects when another plugin already uses the same endpointId (uniqueness)", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    const p1: PluginManifest = {
-      id: "p1",
-      name: "p1",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "keymaster.dup" },
-      setup() {
-        // no-op
-      }
-    };
-    const p2: PluginManifest = {
-      id: "p2",
-      name: "p2",
-      meta: { kind: "business", startup: "optional", defaultEnabled: true, canDisable: true },
-      appMessageEndpoint: { endpointId: "keymaster.dup" },
-      setup() {
-        // no-op
-      }
-    };
-    await host.register(p1);
-    expect(host.state("p1").kind).toBe("enabled");
-    await host.register(p2);
-    // p2 应该被 blocked（endpointId 已被 p1 占用）。
-    expect(["blocked", "error-disabled"]).toContain(host.state("p2").kind);
-    expect(String(host.state("p2").error ?? "")).toMatch(/already registered/);
   });
 });

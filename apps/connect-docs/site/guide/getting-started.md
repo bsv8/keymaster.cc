@@ -1,7 +1,7 @@
 # Getting started
 
 Keymaster Connect gives browser applications typed access to identity, signing,
-encryption, messaging, storage, broadcasts, and controlled BSV payments. Private
+encryption, Channel messaging, storage, and controlled BSV payments. Private
 keys stay inside Keymaster.
 
 ## Install

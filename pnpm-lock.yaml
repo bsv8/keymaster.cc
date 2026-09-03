@@ -105,18 +105,12 @@ importers:
       '@keymaster/msfile-media':
         specifier: '*'
         version: link:../../packages/msfile-media
-      '@keymaster/plugin-appmsg':
-        specifier: '*'
-        version: link:../../packages/plugin-appmsg
       '@keymaster/plugin-apps':
         specifier: '*'
         version: link:../../packages/plugin-apps
       '@keymaster/plugin-background':
         specifier: '*'
         version: link:../../packages/plugin-background
-      '@keymaster/plugin-broadcast':
-        specifier: '*'
-        version: link:../../packages/plugin-broadcast
       '@keymaster/plugin-bsv-price':
         specifier: '*'
         version: link:../../packages/plugin-bsv-price
@@ -129,12 +123,6 @@ importers:
       '@keymaster/plugin-home':
         specifier: '*'
         version: link:../../packages/plugin-home
-      '@keymaster/plugin-hubcast':
-        specifier: '*'
-        version: link:../../packages/plugin-hubcast
-      '@keymaster/plugin-hubmsg':
-        specifier: '*'
-        version: link:../../packages/plugin-hubmsg
       '@keymaster/plugin-importer-hex':
         specifier: '*'
         version: link:../../packages/plugin-importer-hex
@@ -214,8 +202,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: file:../../../ChannelProtocol/typescript
+        version: file:../ChannelProtocol/typescript
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
@@ -249,27 +237,6 @@ importers:
       mediabunny:
         specifier: 1.55.3
         version: 1.55.3
-
-  packages/plugin-appmsg:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@noble/ciphers':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/curves':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.2.0
-        version: 2.2.0
 
   packages/plugin-apps:
     dependencies:
@@ -306,24 +273,6 @@ importers:
       lucide-react:
         specifier: ^0.468.0
         version: 0.468.0(react@18.3.1)
-
-  packages/plugin-broadcast:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@noble/curves':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.2.0
-        version: 2.2.0
 
   packages/plugin-bsv-price:
     dependencies:
@@ -366,6 +315,9 @@ importers:
       '@noble/hashes':
         specifier: ^1.8.0
         version: 1.8.0
+      bsv8-channel-protocol:
+        specifier: file:../../../ChannelProtocol/typescript
+        version: file:../ChannelProtocol/typescript
 
   packages/plugin-home:
     dependencies:
@@ -387,18 +339,6 @@ importers:
       qrcode.react:
         specifier: ^4.2.0
         version: 4.2.0(react@18.3.1)
-
-  packages/plugin-hubcast:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-
-  packages/plugin-hubmsg:
-    dependencies:
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
 
   packages/plugin-importer-hex:
     dependencies:
@@ -607,8 +547,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
-        specifier: 0.1.0
-        version: 0.1.0
+        specifier: file:../../../ChannelProtocol/typescript
+        version: file:../ChannelProtocol/typescript
       sat-subscription-protocol:
         specifier: 0.1.0
         version: 0.1.0
@@ -708,6 +648,9 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
+      bsv8-channel-protocol:
+        specifier: file:../../../ChannelProtocol/typescript
+        version: file:../ChannelProtocol/typescript
 
   packages/plugin-window-p2p:
     dependencies:
@@ -2302,8 +2245,8 @@ packages:
   bser@2.1.1:
     resolution: {integrity: sha512-gQxTNE/GAfIIrmHLUE3oJyp5FO6HRBfhjnw4/wMmA63ZGDJnWBmgY/lyQBpnDUkGmAhbSe39tx2d/iTOAfglwQ==}
 
-  bsv8-channel-protocol@0.1.0:
-    resolution: {integrity: sha512-0n/7KdktyP2v4J2AwQQ+nfXM9Fzu5orvvnrjve1v/tlj1bzEuuwZr32f4jy4ArnB7RhQYASVaQhoSt9KJr9yQw==}
+  bsv8-channel-protocol@file:../ChannelProtocol/typescript:
+    resolution: {directory: ../ChannelProtocol/typescript, type: directory}
     engines: {node: '>=20'}
 
   buffer-from@1.1.2:
@@ -6062,7 +6005,7 @@ snapshots:
     dependencies:
       node-int64: 0.4.0
 
-  bsv8-channel-protocol@0.1.0:
+  bsv8-channel-protocol@file:../ChannelProtocol/typescript:
     dependencies:
       '@multiformats/multiaddr': 13.0.3
       '@noble/curves': 1.9.7

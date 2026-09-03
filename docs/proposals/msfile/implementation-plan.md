@@ -16,7 +16,7 @@
 
 ## 1. 施工目标
 
-在不破坏现有 Connect、Storage、AppMsg、Broadcast、P2PKH 和 Vault 行为的前提下，新增：
+在不破坏现有 Connect、Storage、Channel、P2PKH 和 Vault 行为的前提下，新增：
 
 ```text
 受信任内部插件

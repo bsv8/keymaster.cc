@@ -53,8 +53,8 @@ export interface SatSpiServiceConfig {
   getOwnerPublicKeyHex(): string | null;
   /** 打开指定 owner 的 key-scoped 状态。 */
   stateForOwner(ownerPublicKeyHex: string): Promise<SatSubscriptionStateStore>;
-  /** 当前 P2PKH capability；插件未启用时返回 null。 */
-  getP2pkh(): SatP2pkhService | null;
+  /** 当前 P2PKH capability；充值流程第一次使用时才懒加载，插件未启用时返回 null。 */
+  getP2pkh(): SatP2pkhService | null | Promise<SatP2pkhService | null>;
   /** 由 SharedWorker 派生当前 owner 的主网 P2PKH 地址。 */
   deriveMainAddress(ownerPublicKeyHex: string): Promise<string>;
   /** 当前 owner 会话世代；锁定/切换 key 后递增。 */
@@ -261,7 +261,7 @@ export class SatSpiService implements SatSubscriptionSpiService {
     const account = information.currencies.find((item) => item.currency === "BSV" && item.network === "main");
     if (!account) throw new SatSubscriptionError("balance", "Supplier has no BSV mainnet SPI account");
     assertSpiText(account.paymentAddress, "paymentAddress", 128);
-    const p2pkh = this.cfg.getP2pkh();
+    const p2pkh = await this.cfg.getP2pkh();
     if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
     const amountNumber = safeNumber(input.amountSatoshis, "amountSatoshis");
     const configuredFee = p2pkh.getGlobalSettings?.().feeRateSatoshisPerKb?.medium;
@@ -297,7 +297,7 @@ export class SatSpiService implements SatSubscriptionSpiService {
     const account = information.currencies.find((item) => item.currency === "BSV" && item.network === "main");
     if (!account || account.paymentAddress !== preview.paymentAddress) throw new SatSubscriptionError("conflict", "Top-up preview payment address is stale");
     validateP2pkhPreview({ preview: preview.p2pkhPreview, ownerPublicKeyHex: context.ownerPublicKeyHex, recipientAddress: preview.paymentAddress, amountSatoshis: preview.amountSatoshis });
-    const p2pkh = this.cfg.getP2pkh();
+    const p2pkh = await this.cfg.getP2pkh();
     if (!p2pkh) throw new SatSubscriptionError("unavailable", "P2PKH service is unavailable");
     let result: { status: string; txid?: string; error?: string; rawTxHex?: string };
     try {

@@ -29,6 +29,8 @@ import type {
   P2pkhProviderRegistrySnapshot,
   P2pkhNetworkProviderSelection,
   CoordinatorSatOperation,
+  CoordinatorChannelOperation,
+  ContactPresenceMap,
 } from "@keymaster/contracts";
 
 // ============================================================
@@ -102,6 +104,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private msfileRevisionCache = -1;
   private p2pkhProviderRevisionCache = -1;
   private satRevisionCache = -1;
+  private channelRevisionCache = -1;
+  private contactsPresenceRevisionCache = -1;
+  private contactsPresenceOwnerPublicKeyHex: string | null = null;
+  private contactsPresenceSnapshotCache: ContactPresenceMap = {};
 
   private isConnected = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -193,7 +199,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
       this.isConnected = true;
       await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events"]);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events", "channel.events", "contacts.presence"]);
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
@@ -307,6 +313,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.msfileRevisionCache = -1;
     this.p2pkhProviderRevisionCache = -1;
     this.satRevisionCache = -1;
+    this.channelRevisionCache = -1;
+    this.contactsPresenceRevisionCache = -1;
+    this.contactsPresenceOwnerPublicKeyHex = null;
+    this.contactsPresenceSnapshotCache = {};
   }
 
   // ============================================================
@@ -397,8 +407,6 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     };
     try {
       const transfer: Transferable[] = [];
-      if (operation.type === "channel.seal-deliver" && operation.contentJson.buffer instanceof ArrayBuffer) transfer.push(operation.contentJson.buffer);
-      if (operation.type === "channel.open" && operation.envelopeJson.buffer instanceof ArrayBuffer) transfer.push(operation.envelopeJson.buffer);
       const response = await this.sendRequest(request, transfer);
       if (response.ack.status !== "ok" || !response.cryptoResult) return { ack: response.ack };
       return { ack: response.ack, result: response.cryptoResult };
@@ -505,6 +513,32 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
     finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
+  /** 所有 Channel publish/订阅请求的唯一 Coordinator RPC。 */
+  async channelOperation(operation: CoordinatorChannelOperation, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "channel.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    let onAbort: (() => void) | undefined;
+    try {
+      if (signal?.aborted) return { status: "transport-error", message: "Channel request cancelled", retryable: false };
+      onAbort = () => undefined;
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const response = await this.sendRequest(request);
+      if (signal?.aborted) return { status: "transport-error", message: "Channel request cancelled", retryable: false };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
+  /** 联系人 presence 的读取面只查询 Coordinator 内存/本地 DB，不启动探测。 */
+  async contactsPresenceSnapshot(): Promise<import("@keymaster/contracts").CoordinatorValueResult<ContactPresenceMap>> {
+    const request = { kind: "contacts.presence.snapshot" as const, clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: (response.operationResult ?? {}) as ContactPresenceMap, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
   async msfileGrant(context: import("@keymaster/contracts").MsFileConnectAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
@@ -783,6 +817,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.isConnected;
   }
 
+  /** 返回当前客户端缓存的 presence 快照副本，调用方不能修改 Coordinator 状态。 */
+  getContactsPresenceSnapshot(): ContactPresenceMap {
+    return Object.fromEntries(Object.entries(this.contactsPresenceSnapshotCache).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
+  }
+
   // ============================================================
   // 8. Event Listeners
   // ============================================================
@@ -826,11 +865,19 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
         keyspaceGeneration: event.keyspaceGeneration,
       };
+      const nextOwner = event.vaultStatus === "unlocked" ? event.activePublicKeyHex : null;
+      if (nextOwner !== this.contactsPresenceOwnerPublicKeyHex) {
+        this.contactsPresenceOwnerPublicKeyHex = nextOwner;
+        this.contactsPresenceSnapshotCache = {};
+      }
     } else if (event.type === "background.snapshot.changed") {
       // Background is a separate domain and must not advance Session identity.
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, taskSnapshots: [...event.snapshots] };
     } else if (event.type === "p2pkh.providers.changed") {
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, p2pkhProviders: event.snapshot };
+    } else if (event.topic === "contacts.presence") {
+      this.contactsPresenceOwnerPublicKeyHex = event.activePublicKeyHex;
+      this.contactsPresenceSnapshotCache = Object.fromEntries(Object.entries(event.presence).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
     }
     const listeners = this.eventListeners.get(event.topic);
     if (listeners) {
@@ -848,6 +895,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (topic === "p2pkh.providers") return this.p2pkhProviderRevisionCache;
     if (topic === "msfile.state") return this.msfileRevisionCache;
     if (topic === "sat.events") return this.satRevisionCache;
+    if (topic === "channel.events") return this.channelRevisionCache;
+    if (topic === "contacts.presence") return this.contactsPresenceRevisionCache;
     return this.assetDataRevisionCache;
   }
 
@@ -858,6 +907,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "p2pkh.providers") return event.providerRevision;
     if (event.topic === "msfile.state") return event.msfileRevision;
     if (event.topic === "sat.events") return event.satRevision;
+    if (event.topic === "channel.events") return event.channelRevision;
+    if (event.topic === "contacts.presence") return event.presenceRevision;
     return event.assetDataRevision;
   }
 
@@ -868,6 +919,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     else if (event.topic === "p2pkh.providers") this.p2pkhProviderRevisionCache = event.providerRevision;
     else if (event.topic === "msfile.state") this.msfileRevisionCache = event.msfileRevision;
     else if (event.topic === "sat.events") this.satRevisionCache = event.satRevision;
+    else if (event.topic === "channel.events") this.channelRevisionCache = event.channelRevision;
+    else if (event.topic === "contacts.presence") this.contactsPresenceRevisionCache = event.presenceRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
 
@@ -899,6 +952,21 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && Number.isSafeInteger(event.satRevision)
         && event.satRevision >= 0
         && Boolean(event.event);
+    }
+    if (event.topic === "channel.events") {
+      return event.type === "channel.message.received"
+        && Number.isSafeInteger(event.channelRevision)
+        && event.channelRevision >= 0
+        && (!event.publicMessage || typeof event.publicMessage.channel === "string")
+        && (!event.privateMessage || typeof event.privateMessage.channel === "string");
+    }
+    if (event.topic === "contacts.presence") {
+      return event.type === "contacts.presence.changed"
+        && Number.isSafeInteger(event.presenceRevision)
+        && event.presenceRevision >= 0
+        && (typeof event.activePublicKeyHex === "string" || event.activePublicKeyHex === null)
+        && Boolean(event.presence)
+        && !Array.isArray(event.presence);
     }
     return event.type === "asset.data-changed" && Number.isSafeInteger(event.assetDataRevision);
   }

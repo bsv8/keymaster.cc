@@ -2,8 +2,7 @@
 // BSV 价格业务插件 manifest（施工单 2026-07-08 001）。
 //
 // 设计缘由：
-//   - 本插件是**第一个**真实广播业务插件；
-//   - 直接消费 `BroadcastCore`，**不**经 `appmsg` 中转；
+//   - 本插件直接消费 Coordinator Channel runtime；
 //   - 注册能力：`bsv-price.service` capability；
 //   - 注册路由：`/bsv-price` 单页面（业务页），并在首页右侧栏提供紧凑行情 widget；
 //   - `pricePublisherPublicKeyHex` 由装配层通过 `manifest.config`
@@ -12,14 +11,17 @@
 
 import type {
   ApplicationSettingsRegistry,
-  BroadcastCore,
+  ChannelRuntimeFactory,
   BusinessFeatureRegistry,
   HomeRegistry,
   I18nPluginResources,
   PluginManifest,
   ResourceRegistry
 } from "@keymaster/contracts";
-import { BROADCAST_CORE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import {
+  CHANNEL_RUNTIME_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY
+} from "@keymaster/contracts";
 import {
   BSV_PRICE_CONFIG_KEY,
   BSV_PRICE_SETTINGS_PATH
@@ -46,7 +48,7 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.page.connection.idle": "Idle",
       "bsv-price.page.connection.offline": "Disconnected",
       "bsv-price.page.connection.noPublisherKey":
-        "No active broadcast provider",
+        "No price publisher key configured",
       "bsv-price.page.connection.notConfigured":
         "Publisher public key not configured",
       "bsv-price.page.channel.label": "Subscribed channel",
@@ -77,7 +79,7 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.settings.status.ready": "Receiving",
       "bsv-price.settings.status.offline": "Disconnected",
       "bsv-price.settings.status.idle": "Idle",
-      "bsv-price.settings.status.noPublisherKey": "Broadcast provider unavailable",
+      "bsv-price.settings.status.noPublisherKey": "Price feed unavailable",
       "bsv-price.settings.status.notConfigured": "Not configured",
       "bsv-price.settings.clearHint":
         "Clearing the field will unsubscribe the current channel and put /bsv-price into not configured state.",
@@ -91,7 +93,7 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.page.connection.ready": "正在接收",
       "bsv-price.page.connection.idle": "空闲",
       "bsv-price.page.connection.offline": "已断开",
-      "bsv-price.page.connection.noPublisherKey": "未配置 active broadcast provider",
+      "bsv-price.page.connection.noPublisherKey": "未配置价格发布者公钥",
       "bsv-price.page.connection.notConfigured": "未配置 publisher 公钥",
       "bsv-price.page.channel.label": "当前订阅频道",
       "bsv-price.page.quotes.label": "报价",
@@ -121,7 +123,7 @@ const bsvPriceResources: I18nPluginResources = {
       "bsv-price.settings.status.ready": "正在接收",
       "bsv-price.settings.status.offline": "已断开",
       "bsv-price.settings.status.idle": "空闲",
-      "bsv-price.settings.status.noPublisherKey": "广播源不可用",
+      "bsv-price.settings.status.noPublisherKey": "行情源不可用",
       "bsv-price.settings.status.notConfigured": "未配置",
       "bsv-price.settings.clearHint":
         "清空输入框会取消当前频道订阅，并让 /bsv-price 进入未配置状态。",
@@ -133,8 +135,8 @@ const bsvPriceResources: I18nPluginResources = {
 /**
  * plugin-bsv-price manifest。
  *
- * 关键约束（施工单 §7.4 + §5.4）：
- *   - 本插件**只**消费 `BroadcastCore` 不依赖 `appmsg.core`；
+ * 关键约束：
+ *   - 本插件只消费 Channel runtime；
  *   - 提供能力：`bsv-price.service`；
  *   - 注册路由：`/bsv-price`；
  *   - 首页 widget 只展示 service 的实时快照，不维护第二份行情状态；
@@ -153,7 +155,7 @@ export const bsvPricePlugin: PluginManifest = {
   id: BSV_PRICE_PLUGIN_ID,
   name: "BSV Price",
   description:
-    "BSV 价格业务插件：消费 BroadcastCore，订阅 PriceCast publisher 公钥频道，展示交易所价格快照。",
+    "BSV 价格业务插件：消费 Coordinator Channel，订阅 PriceCast publisher 公钥频道，展示交易所价格快照。",
   i18n: bsvPriceResources,
   meta: {
     kind: "business",
@@ -170,9 +172,8 @@ export const bsvPricePlugin: PluginManifest = {
   },
   dependencies: [
     {
-      capability: BROADCAST_CORE_CAPABILITY,
-      reason:
-        "plugin-broadcast 在 setup 阶段 provide broadcast.core；本插件直接消费"
+      capability: CHANNEL_RUNTIME_CAPABILITY,
+      reason: "通过 Coordinator Channel runtime 订阅精确价格频道"
     },
     { capability: "route.registry", reason: "注册行情页与应用设置详情页" },
     {
@@ -210,8 +211,8 @@ export const bsvPricePlugin: PluginManifest = {
         ? (cfg[BSV_PRICE_CONFIG_KEY] as string)
         : "";
 
-    const core = ctx.get<BroadcastCore>(BROADCAST_CORE_CAPABILITY);
-    const service = createBsvPriceService(core, {
+    const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(BSV_PRICE_PLUGIN_ID);
+    const service = createBsvPriceService(channel, {
       seedPublisherPublicKeyHex: publisherHex
     });
     ctx.provide(BSV_PRICE_SERVICE_CAPABILITY, service);

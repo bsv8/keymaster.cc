@@ -3,8 +3,6 @@
 // plugin-message 只通过 `webrtc.service` 使用这些类型，不能 import
 // plugin-webrtc 的实现包；plugin-webrtc 可在内部拥有更宽的 service API。
 
-import type { AppMsgOnlineStatus } from "./appmsg.js";
-
 /** `webrtc.service` capability 的稳定 key。 */
 export const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
 
@@ -21,8 +19,6 @@ export type WebrtcSessionPhase =
 export type WebrtcBlockReason =
   | "service_not_ready"
   | "invalid_target"
-  | "target_offline"
-  | "target_unknown"
   | "device_unavailable"
   | "send_invite_failed"
   | "create_offer_failed"
@@ -82,7 +78,6 @@ export type WebrtcHistoryItem =
 export interface WebrtcMessageService {
   snapshot(): WebrtcSessionSnapshot;
   subscribe(handler: (snapshot: WebrtcSessionSnapshot) => void): () => void;
-  checkPeerOnline(publicKeyHex: string): Promise<AppMsgOnlineStatus>;
   listHistoryForPeer(peerPublicKeyHex: string): Promise<WebrtcHistoryItem[]>;
   getTransferBlob(blobKey: string): Promise<Blob | null>;
   startCall(input: { targetPublicKeyHex: string; mode: WebrtcMode }): Promise<void>;

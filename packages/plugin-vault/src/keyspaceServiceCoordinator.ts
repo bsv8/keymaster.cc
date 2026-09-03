@@ -30,7 +30,15 @@ export function createKeyspaceServiceCoordinator(client: CoordinatorClientLike, 
   return {
     async listKeys() { return unwrap<KeyIdentity[]>(await client.vaultOperation("listKeys"), "listKeys"); },
     async getKey(publicKeyHex) { return unwrap<KeyIdentity | undefined>(await client.vaultOperation("getKey", { publicKeyHex }), "getKey"); },
-    active: () => ({ activePublicKeyHex: current().activePublicKeyHex }),
+    // generation 也属于 active owner 的身份：同一把 key 在重新解锁后
+    // 不是同一个异步会话，旧任务不能仅凭 publicKeyHex 继续写入。
+    active: () => {
+      const snapshot = current();
+      return {
+        activePublicKeyHex: snapshot.activePublicKeyHex,
+        generation: snapshot.keyspaceGeneration
+      };
+    },
     selected: () => current().selectedPublicKeyHex,
     async setActive() { throw new Error("Active key changes must go through vault.activateKey with password"); },
     requireActiveKey: () => { const publicKeyHex = requireReady(); return { publicKeyHex, label: "", capabilities: [], createdAt: "" }; },

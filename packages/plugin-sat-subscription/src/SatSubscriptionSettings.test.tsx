@@ -81,15 +81,6 @@ function makeServices(): void {
     upsertSupplier: vi.fn(async () => undefined),
     deleteSupplier: vi.fn(async () => undefined),
     setOwnerSettings: vi.fn(async (_settings: SatOwnerSupplierSettingsV1) => undefined),
-    setSubscription: vi.fn(async (input) => ({
-      ok: true,
-      ...input,
-      requestIdHex: "aa".repeat(32),
-      chargedAmount: "1"
-    })),
-    publish: vi.fn(),
-    subscribe: vi.fn(),
-    unsubscribe: vi.fn(),
     refreshSubscriptions: vi.fn(async () => ({ channels: [], chargedAmount: "0" })),
     subscribeEvents: vi.fn(() => () => undefined)
   } as unknown as SatSubscriptionAdminService;
@@ -124,22 +115,18 @@ describe("SatSubscriptionSettings", () => {
     expect(state.invalidated).toBeGreaterThan(0);
   });
 
-  it("requires the remote Subscribe result before changing the local receive intent", async () => {
+  it("changes only the receive Supplier intent and lets Coordinator reconcile physical subscriptions", async () => {
     makeServices();
     render(<SatSubscriptionSettings />);
 
     await waitFor(() => expect(screen.getByText("Supplier A")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "启用接收（可能收费）" }));
 
-    await waitFor(() => expect(state.admin.setSubscription).toHaveBeenCalledWith({
-      supplierId: "supplier-a",
-      channel: `bsv8.inbox.${OWNER}`,
-      subscribed: true
-    }));
-    expect(state.admin.setOwnerSettings).toHaveBeenCalledWith(expect.objectContaining({
+    await waitFor(() => expect(state.admin.setOwnerSettings).toHaveBeenCalledWith(expect.objectContaining({
       ownerPublicKeyHex: OWNER,
       receiveSupplierIds: ["supplier-a"]
-    }));
+    })));
+    expect("setSubscription" in state.admin).toBe(false);
   });
 
   it("confirms deletion and does not imply automatic balance collection", async () => {

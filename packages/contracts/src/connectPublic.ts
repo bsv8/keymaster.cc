@@ -12,14 +12,6 @@ export {
 
 export type {
   BinaryField,
-  BroadcastMessagePublicView,
-  BroadcastMessageReceivedEventData,
-  BroadcastPublishParams,
-  BroadcastPublishResult,
-  BroadcastSubscriptionListParams,
-  BroadcastSubscriptionListResult,
-  BroadcastSubscriptionSetParams,
-  BroadcastSubscriptionSetResult,
   CipherDecryptParams,
   CipherDecryptResult,
   CipherEncryptParams,
@@ -54,13 +46,17 @@ export type {
   ProtocolFeePoolRecord,
   ProtocolMethod,
   ProtocolResultMessage,
-  ResolvedClaimValue,
-  AppMsgGetParams,
-  AppMsgGetResult,
-  AppMsgListParams,
-  AppMsgMessageReceivedEventData,
-  AppMsgSendParams
+  ResolvedClaimValue
 } from "./protocol.js";
+
+export type {
+  ChannelMessageReceivedEventData,
+  ChannelPublishParams,
+  ChannelPublishResult,
+  ChannelSubscriptionSetParams,
+  ChannelSubscriptionSetResult,
+  JSONValue
+} from "./channel.js";
 
 export type {
   AppIdentityProofV1,
@@ -68,14 +64,6 @@ export type {
   AppRequirement,
   VerifiedAppIdentity
 } from "./appIdentity.js";
-
-export type {
-  AppMsgContentType,
-  AppMsgListResult,
-  AppMsgMessage,
-  AppMsgRecipient,
-  AppMsgSendResult
-} from "./appmsg.js";
 
 export {
   STORAGE_DEFAULT_LIST_LIMIT,

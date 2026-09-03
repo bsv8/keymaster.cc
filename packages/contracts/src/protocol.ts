@@ -52,6 +52,13 @@ import type {
   MsFileStatParams,
   MsFileStatResult
 } from "./msfile.js";
+import type {
+  ChannelMessageReceivedEventData,
+  ChannelPublishParams,
+  ChannelPublishResult,
+  ChannelSubscriptionSetParams,
+  ChannelSubscriptionSetResult
+} from "./channel.js";
 //   - **命令流展示投影**（施工单 2026-06-27 002 硬切换）：
 //       `ProtocolCommandFeedState.commands` **不**再承诺
 //       "全局按 updatedAt desc"，而是 service 派生的"活请求区 +
@@ -167,20 +174,9 @@ export const PROTOCOL_METHODS = [
   "connect.resume",
   "connect.logout",
   "connect.launch",
-  // 施工单 2026-07-01 002 硬切换：应用消息总线对外方法族。
-  // 与 storage.* / cipher.* 同样属于 session-bound 外部业务方法；
-  // 强制要求 connectSessionId；sender 相关字段不进入对外 params。
-  "appmsg.send",
-  "appmsg.list",
-  "appmsg.get",
-  // 施工单 2026-07-08 001 硬切换：广播协议族。广播系统本身就是
-  // session-bound（与 cipher.* 一致）；强制要求 connectSessionId。
-  // publish 是"由当前 session owner 借用私钥签"，与 cipher.* 走同
-  // 一套签名原语；subscription_set / subscription_list 是 caller 自己
-  // 的订阅集合，per-caller 隔离。
-  "broadcast.publish",
-  "broadcast.subscription_set",
-  "broadcast.subscription_list",
+  // 施工单 2026-09-02：Channel 是唯一的公开频道 API。
+  "channel.publish",
+  "channel.subscription_set",
   "storage.list",
   "storage.directory.create",
   "storage.directory.delete",
@@ -312,72 +308,28 @@ export interface ProtocolCancelMessage {
   id: string;
 }
 
-/* ============== 顶层 event 报文（施工单 2026-07-03 001 硬切换 + 2026-07-08 001 广播） ============== */
+/* ============== 顶层 event 报文（施工单 2026-09-02 Channel） ============== */
 
 /**
  * 协议对外 event 名常量集合（server-pushed 事件）。
  *
- * 设计缘由：
- *   - V1 支持两种 event：`appmsg.message_received`（已存在）与
- *     `broadcast.message_received`（施工单 2026-07-08 001 新增）；
- *   - 命名空间统一用 `"<系统>.<事件>"` 形态；
- *   - 与 method 名同样保证稳定可判定。
+ * 设计缘由：Channel 只保留一个入站事件；事件内容是已验签的 JSON，
+ * 由具体 App 自己定义业务协议。
  */
-export type ProtocolEventName =
-  | "appmsg.message_received"
-  | "broadcast.message_received";
+export type ProtocolEventName = "channel.message_received";
 
 /**
  * 顶层 `event` 报文（server-pushed）。
  *
- * 设计缘由（施工单 2026-07-03 001 硬切换 + 2026-07-08 001）：
- *   - 接收广播推送时携带 `data: BroadcastMessageReceivedEventData`
- *     （标准化 BroadcastMessage，bodyBytes 走 base64）。
- *   - 接收 appmsg 推送时携带 `data: AppMsgMessageReceivedEventData`
- *     （完整 AppMsgMessage）。
- *   - 两种 event 都是单向推送，**不**回 result；
- *   - 对外含义不同：broadcast 是"当前订阅频道命中"，appmsg 是
- *     "endpoint 对应 inbox 命中"。
+ * 事件是单向推送，不回 result；只发送给当前 session 已精确订阅的频道。
  */
 export interface ProtocolEventMessage {
   v: typeof PROTOCOL_VERSION;
   type: "event";
   /** 事件名；按 `data` 形状区分。 */
   event: ProtocolEventName;
-  /** 事件真值；按 `event` 不同走不同 union。 */
-  data: AppMsgMessageReceivedEventData | BroadcastMessageReceivedEventData;
-}
-
-/**
- * 对外 `broadcast.message_received` event 数据类型。
- *
- * 关键约束（施工单 §4.4）：
- *   - data 是标准化 `BroadcastMessage`（与 plugin-broadcast 内部已
- *     verify 过的形状一致）；
- *   - `bodyBytes` 走 base64 表达（避免 postMessage 直接传 ArrayBuffer
- *     与 string 互转的歧义）；
- *   - 收方按需再调 `broadcast.subscription_list` 核对；event 自身已携
- *     带完整正文，**不**要求调用方再发请求。
- */
-export interface BroadcastMessageReceivedEventData {
-  message: BroadcastMessagePublicView;
-}
-
-/**
- * broadcast 消息的对外视图（与 `BroadcastMessage` 同构，bodyBytes
- * 由 Uint8Array 改成 base64 string）。
- *
- * 设计缘由：postMessage 序列化层把 Uint8Array 视为 structured clone
- * 友好，但跨 caller origin 时部分浏览器会把 buffer detach；
- * 走 base64 string 是不依赖 typed array 的稳定表达。
- */
-export interface BroadcastMessagePublicView {
-  channelId: string;
-  protocolId: string;
-  clientMessageId: string;
-  createdAtMs: number;
-  bodyBase64: string;
-  publisherPublicKeyHex: string;
+  /** 已验签的 Channel 事件数据。 */
+  data: ChannelMessageReceivedEventData;
 }
 
 /** 顶层 request 报文。 */
@@ -1257,191 +1209,15 @@ export interface ConnectLaunchResult {
   appIdentity?: AppIdentitySnapshot;
 }
 
-/* ============== appmsg.*（施工单 2026-07-03 001 硬切换：应用消息总线对外方法族） ============== */
+/* ============== channel.*（施工单 2026-09-02） ============== */
 
-/**
- * appmsg 对外方法族。
- *
- * 设计缘由（施工单 2026-07-03 001 硬切换）：
- *   - 与 `cipher.*` / `p2pkh.transfer` 一样属于 session-bound 外部业务方法；
- *     强制要求 `connectSessionId`；sender 真值由 protocolService 从
- *     `connectSession.ownerPublicKeyHex` + `event.origin`（exact origin）
- *     投影，**不**接受 caller 自报 sender owner / sender endpoint。
- *   - 调用方只能指定 `recipientPublicKeyHex` + `recipientOrigin` /
- *     `recipientAppId`；**不**再传 generic endpoint 字段。
- *   - 收件形态见 `appmsg.ts` 的 `AppMsgRecipient`；v1 只支持
- *     `text/plain` 与 `text/markdown`；不做未读计数、已读回执、群聊、
- *     附件、撤回、跨节点 session 恢复。
- *   - 对外实时提示仅 `appmsg.message_received`（完整消息 event）；
- *     **不**再用 `appmsg.inbox_dirty`（dirty hint 已删除）。
- *   - protocolService **不**持有 HubMsg 连接真值；HubMsg 连接 + 本地库 +
- *     推送分发收口到 `appmsg.core` 平台能力，protocolService 只做
- *     external protocol 适配。
- *
- * 关键边界：
- *   - params 中**不**允许出现 `senderOwnerPublicKeyHex` / `senderEndpoint`
- *     / `fromPublicKeyHex` / `fromOrigin` / `fromAppId` / `box` / `atMs`
- *     等任何"系统内部地址模型 / dirty 模型"字段；出现即 invalid_request。
- *   - session owner key 不 ready（vault locked 且 owner key 状态错）时
- *     走 fail-fast；与 cipher.* 同语义。
- *   - `appmsg.send` 必须恰好指定 `recipientOrigin` 或 `recipientAppId` 之一；
- *     都给或都不给都视为 invalid_request。
- */
+/** 发布到任意精确 SSP channel。owner、签名、消息编号和时间由系统生成。 */
+export type ChannelPublishParamsV1 = ChannelPublishParams;
+export type ChannelPublishResultV1 = ChannelPublishResult;
 
-import type {
-  AppMsgContentType,
-  AppMsgListInput,
-  AppMsgListResult,
-  AppMsgMessage,
-  AppMsgSendInput,
-  AppMsgSendResult
-} from "./appmsg.js";
-
-// 平台内部形状（无 connectSessionId 字段语义）由 appmsg.ts 定义；
-// 对外"业务方法结果"通过下面的 re-export 让外部 caller 继续用
-// `protocol.ts` 暴露的名字；这两组形状字段一致，避免重复定义。
-export type { AppMsgListResult, AppMsgSendResult };
-
-/**
- * 对外 `appmsg.message_received` event 数据类型。
- *
- * 关键约束：
- *   - v1 对外 event 直接携带完整消息正文（公开视图），**不**再携带
- *     dirty hint；
- *   - 接收方直接拿到完整 `AppMsgMessage`，**不**必须再调 `appmsg.list`
- *     / `appmsg.get`（但仍可调，例如用于 UI 兜底 / 增量合并）；
- *   - 推送给"当前 exact origin 对应 endpoint"的 caller；其它 endpoint
- *     收不到自己的事件（也不应该收）。
- */
-export type AppMsgMessageReceivedEventData = { message: AppMsgMessage };
-
-/** `appmsg.send` 请求参数。 */
-export interface AppMsgSendParams extends AppMsgSendInput {
-  /** 必填：当前 connectSessionId。 */
-  connectSessionId: string;
-}
-
-/** `appmsg.list` 请求参数。 */
-export interface AppMsgListParams extends AppMsgListInput {
-  /** 必填：当前 connectSessionId。 */
-  connectSessionId: string;
-}
-
-/** `appmsg.get` 请求参数。 */
-export interface AppMsgGetParams {
-  messageId: string;
-  /** 必填：当前 connectSessionId。 */
-  connectSessionId: string;
-}
-
-/** `appmsg.get` 成功结果。 */
-export interface AppMsgGetResult {
-  message: AppMsgMessage;
-}
-
-/* ============== broadcast.*（施工单 2026-07-08 001 硬切换） ============== */
-
-/**
- * 广播协议族对外方法（与 cipher.* / p2pkh.transfer / feepool.* 同样
- * 属于 session-bound 外部业务方法）。
- *
- * 设计缘由：
- *   - 强制要求 `connectSessionId`：publish 用 session owner 私钥签
- *     envelope；subscription_set / subscription_list 用 session owner
- *     标识 caller；
- *   - sender 真值由 protocolService 按 `connectSession.ownerPublicKeyHex`
- *     + `event.origin` 投影，不接受 caller 自报 sender owner；
- *   - 广播系统 core / provider handle **不**对外暴露：caller 不接触
- *     wire / 重连 / envelope 中间态。
- *
- * 三个方法的对外语义：
- *   - `broadcast.publish`：以当前 session owner 身份，借走当前 default
- *     active provider 的连接，发一条广播；core 内部完成 sign。
- *   - `broadcast.subscription_set`：替换当前 caller 的订阅集合（不是
- *     增量 add / remove）；空数组 = 清空。
- *   - `broadcast.subscription_list`：列出当前 caller 的订阅集合（**不**
- *     是服务端确认集合；按 caller 视角真值 = 本地期望 union 中由本
- *     caller 自己贡献的那部分）。
- */
-
-/**
- * `broadcast.publish` 请求参数。
- *
- * 关键约束：
- *   - `channelId` / `protocolId` / `clientMessageId` / `createdAtMs` 与
- *     `BroadcastPublishInput` 同语义：
- *     - `bodyBytes` 用 base64 表达（避免 postMessage 序列化偏差）；
- *     - `createdAtMs` 必须严格大于 0；
- *   - 与 broadcast 内部真值一致：caller **不**允许自报
- *     `publisherPublicKeyHex`（caller 的私钥由 protocolService 通过
- *     session 取到）。
- */
-export interface BroadcastPublishParams {
-  channelId: string;
-  protocolId: string;
-  clientMessageId: string;
-  createdAtMs: number;
-  /** 业务 body bytes（base64）；空字符串 = 0 字节。 */
-  bodyBase64: string;
-  /** 由 caller 自己持有的 sessionId；service 内部据此找 owner。 */
-  connectSessionId: string;
-}
-
-/**
- * `broadcast.publish` 成功结果。
- *
- * 与 `BroadcastMessage` 同构；返回给 caller 用来确认"已发出"。
- */
-export interface BroadcastPublishResult {
-  channelId: string;
-  protocolId: string;
-  clientMessageId: string;
-  createdAtMs: number;
-  /** 同入参 base64 字符串；service 不重写。 */
-  bodyBase64: string;
-  /** core 按 session owner 真值补齐的 publisher 公钥 hex。 */
-  publisherPublicKeyHex: string;
-}
-
-/**
- * `broadcast.subscription_set` 请求参数。
- *
- * 替换语义：本次传入的 channelIds 列表 = 当前 caller 的订阅集合；
- * 不在本列表内的频道被本 caller 不再订阅（从本地 union 移除）。
- * 空数组 = 清空当前 caller 的订阅。
- *
- * 关键约束：
- *   - channel 形式是 exact string；**不**允许 wildcard / prefix；
- *   - 单 caller 同一时刻持单一订阅集合（不是 list-of-sets）；
- *   - 多次调用按"replace"语义，最后一次 set 生效。
- */
-export interface BroadcastSubscriptionSetParams {
-  channelIds: string[];
-  /** 由 caller 自己持有的 sessionId。 */
-  connectSessionId: string;
-}
-
-/** `broadcast.subscription_set` 成功结果。 */
-export interface BroadcastSubscriptionSetResult {
-  channelIds: string[];
-}
-
-/**
- * `broadcast.subscription_list` 请求参数。
- */
-export interface BroadcastSubscriptionListParams {
-  connectSessionId: string;
-}
-
-/** `broadcast.subscription_list` 成功结果。 */
-export interface BroadcastSubscriptionListResult {
-  channelIds: string[];
-}
-
-/* 兼容性：保留旧的 type alias，但语义收口为"完整消息事件的数据"。
- * 旧 `AppMsgMessageReceivedEvent` 已从 contracts 抹去；这里 alias 是
- * 给 plugin-appmsg / plugin-protocol 之间用——本文件不再对外暴露
- * dirty 相关类型。 */
+/** 替换当前 Connect caller 的精确频道订阅集合。 */
+export type ChannelSubscriptionSetParamsV1 = ChannelSubscriptionSetParams;
+export type ChannelSubscriptionSetResultV1 = ChannelSubscriptionSetResult;
 
 
 /* ============== plugin-apps launcher 启动入口（施工单 2026-06-29 002 硬切换） ============== */
@@ -1884,12 +1660,8 @@ export interface MethodParamsMap {
   "connect.resume": ConnectResumeParams;
   "connect.logout": ConnectLogoutParams;
   "connect.launch": ConnectLaunchParams;
-  "appmsg.send": AppMsgSendParams;
-  "appmsg.list": AppMsgListParams;
-  "appmsg.get": AppMsgGetParams;
-  "broadcast.publish": BroadcastPublishParams;
-  "broadcast.subscription_set": BroadcastSubscriptionSetParams;
-  "broadcast.subscription_list": BroadcastSubscriptionListParams;
+  "channel.publish": ChannelPublishParams;
+  "channel.subscription_set": ChannelSubscriptionSetParams;
   "storage.list": StorageListParams;
   "storage.directory.create": StorageDirectoryParams;
   "storage.directory.delete": StorageDirectoryParams;
@@ -1921,12 +1693,8 @@ export interface MethodResultMap {
   "connect.resume": ConnectResumeResult;
   "connect.logout": ConnectLogoutResult;
   "connect.launch": ConnectLaunchResult;
-  "appmsg.send": AppMsgSendResult;
-  "appmsg.list": AppMsgListResult;
-  "appmsg.get": AppMsgGetResult;
-  "broadcast.publish": BroadcastPublishResult;
-  "broadcast.subscription_set": BroadcastSubscriptionSetResult;
-  "broadcast.subscription_list": BroadcastSubscriptionListResult;
+  "channel.publish": ChannelPublishResult;
+  "channel.subscription_set": ChannelSubscriptionSetResult;
   "storage.list": StorageListResult;
   "storage.directory.create": StorageDirectoryResult;
   "storage.directory.delete": StorageDirectoryResult;

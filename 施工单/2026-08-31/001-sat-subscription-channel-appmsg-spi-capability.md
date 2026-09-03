@@ -9,7 +9,7 @@
 > [SatSubscription 审查返工单](../2026-09-01/001-sat-subscription-review-rework.md)
 > 为优先真值。本单继续保留产品边界、原始业务设计和 S01–S22 验收矩阵；与返工单冲突处以返工单为准。
 >
-> 状态：核心代码已落地；KMSAT-000 正式发布/跨语言互操作与 KMSAT-009 真实验收待完成
+> 状态：核心代码已落地；内部 transport、Go/TS 跨语言互操作和基础自动化已通过；KMSAT-000 正式 release 与 KMSAT-009 真实验收待完成
 >
 > 目标：Keymaster 使用 `bitcoin-libp2p` 建立多 SSP 供应商、多个订阅、单一默认发布和 SPI 预付费资金管理；内部系统获得完整 SSP trusted capability，外部 Connect App 只继续使用受控的 `appmsg.*` 子消息能力。
 >

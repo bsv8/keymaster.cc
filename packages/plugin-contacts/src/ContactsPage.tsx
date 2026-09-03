@@ -9,7 +9,7 @@
 import { useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, type DataTableColumn } from "@keymaster/ui";
 import { AppLink, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import { formatShortPublicKey, type Contact, type ContactsService } from "@keymaster/contracts";
+import { formatShortPublicKey, type Contact, type ContactPresenceMap, type ContactsService } from "@keymaster/contracts";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPublicKeyActions } from "./ContactPublicKeyActions.js";
 
@@ -23,6 +23,11 @@ export function ContactsPage() {
     (a, b) => a.active === b.active && a.error === b.error && a.rows === b.rows
   );
   const { rows, active } = listState;
+  const presenceByPublicKey = useResourceSelector<ContactPresenceMap, ContactPresenceMap>(
+    host.resourceStore, "contacts.presence", [],
+    (snapshot) => snapshot.data ?? {},
+    (a, b) => a === b
+  );
   const [editing, setEditing] = useState<Contact | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
@@ -57,6 +62,15 @@ export function ContactsPage() {
           {r.name}
         </AppLink>
       )
+    },
+    {
+      key: "presence",
+      header: t("contacts.page.col.presence", { defaultValue: "Status" }),
+      render: (r) => {
+        const presence = presenceByPublicKey[r.publicKeyHex.trim().toLowerCase()];
+        const state = presence?.state ?? "offline";
+        return <span data-contact-presence={state}>{t(`contacts.presence.${state}`, { defaultValue: state })}</span>;
+      }
     },
     {
       key: "publicKeyHex",

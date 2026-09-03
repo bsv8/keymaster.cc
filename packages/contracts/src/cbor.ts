@@ -3,10 +3,8 @@
 //
 // 设计缘由（施工单 2026-07-04 004 硬切换）：
 //   - 本文件是 platform 共享原语，**不**再属于 plugin-protocol 私有；
-//   - 三个 plugin（protocol / appmsg / hubmsg）都需要 deterministic
-//     CBOR：identity envelope / signedEnvelope / cipher 内层结构 +
-//     `AppMsgEnvelopeV1` + `HubFrame` + `SignedAppMsgEnvelopeV1` 都依赖
-//     同一份编码真值；
+//   - protocol、vault 和其它平台模块共享 deterministic CBOR：identity
+//     envelope / signedEnvelope / cipher 内层结构依赖同一份编码真值；
 //   - **不再**继续演化为项目自维护 CBOR 实现（施工单 §8.4）——底层
 //     delegate 到成熟 `cborg` 库；
 //   - 编码策略固定为 RFC 8949 §4.2.1（core deterministic）：最短数值编码 +

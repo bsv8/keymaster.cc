@@ -1,55 +1,69 @@
-// packages/plugin-webrtc/src/webrtcService.test.ts
-// 单活会话状态机 + online 前置门禁 + 信令解析单测（施工单 2026-07-04 002）。
-//
-// 注入 fake WebrtcEnvironment 与 fake AppMsgEndpointService；fake env 必须
-// 按真实浏览器语义走：`new RTCPeerConnection` 不会触发 ICE gather，必须
-// 先 `createDataChannel` + `createOffer()` + `setLocalDescription()` 才会
-// 派 candidate。
+// WebRTC service 的 Channel 私信接线测试。
 
 import { describe, expect, it, vi } from "vitest";
-import { KEYMASTER_WEBRTC_APP_ID } from "./constants.js";
+import type { ChannelRuntime, KeyspaceService, NoticeRecord, NoticeRegistry } from "@keymaster/contracts";
+import { newMessageID, newSessionID } from "bsv8-channel-protocol";
+import { newOffer, parseBodyValue } from "bsv8-channel-protocol/webrtc-signal";
+import { createMemoryWebrtcConfigStore } from "./webrtcConfig.js";
 import {
   createWebrtcService,
-  type MediaStreamLike,
   type DataChannelLike,
-  type RTCPeerConnectionLike
+  type MediaStreamLike,
+  type RTCPeerConnectionLike,
+  type WebrtcEnvironment
 } from "./webrtcService.js";
-import { createMemoryWebrtcConfigStore } from "./webrtcConfig.js";
-import type { WebrtcHistoryService } from "./webrtcHistoryService.js";
-import {
-  parseSignalBody,
-  serializeSignal,
-  type WebrtcInviteSignal
-} from "./webrtcSignal.js";
-import type {
-  AppMsgEndpointService,
-  AppMsgMessage,
-  AppMsgOnlineInput,
-  AppMsgOnlineResult,
-  KeyspaceService,
-  NoticeRegistry
-} from "@keymaster/contracts";
 
-const OWNER = "02aaaa".padEnd(66, "a");
-const TARGET = "02bbbb".padEnd(66, "b");
+const OWNER = "02" + "a".repeat(64);
 
-/* ============== fakes ============== */
+const TARGET = "03" + "b".repeat(64);
 
-interface FakePc {
-  api: RTCPeerConnectionLike;
-  closed: boolean;
-  /** 是否调用过 `createOffer` + `setLocalDescription`。 */
-  gatheringStarted: boolean;
-  ice: ((c: RTCIceCandidateInit) => void) | null;
-  gather: ((s: string) => void) | null;
+const OTHER = "02" + "c".repeat(64);
+
+function makeKeyspace(ownerPublicKeyHex = OWNER): KeyspaceService {
+  return { active: () => ({ activePublicKeyHex: ownerPublicKeyHex }) } as unknown as KeyspaceService;
 }
 
-function installRTCPeerConnectionLike(pc: FakePc): RTCPeerConnectionLike {
-  const channel: DataChannelLike = {
-    label: "stub",
-    get readyState(): DataChannelLike["readyState"] {
-      return "open";
-    },
+function makeMutableKeyspace(initialOwner = OWNER): { keyspace: KeyspaceService; setOwner(ownerPublicKeyHex: string): void } {
+  type ActiveKeyChangedState = Parameters<KeyspaceService["onActiveKeyChanged"]>[0];
+  let ownerPublicKeyHex = initialOwner;
+  const listeners = new Set<(state: ActiveKeyChangedState) => void>();
+  const keyspace = {
+    active: () => ({ activePublicKeyHex: ownerPublicKeyHex }),
+    onActiveKeyChanged: (handler: (state: ActiveKeyChangedState) => void) => {
+      listeners.add(handler);
+      return () => listeners.delete(handler);
+    }
+  } as unknown as KeyspaceService;
+  return {
+    keyspace,
+    setOwner(nextOwnerPublicKeyHex) {
+      ownerPublicKeyHex = nextOwnerPublicKeyHex;
+      for (const listener of listeners) {
+        listener({ activePublicKeyHex: nextOwnerPublicKeyHex } as ActiveKeyChangedState);
+      }
+    }
+  };
+}
+
+function makeStream(): MediaStreamLike {
+  let live = true;
+  return {
+    stop: () => { live = false; },
+    isLive: () => live,
+    native: undefined
+  };
+}
+
+interface TestPeer {
+  api: RTCPeerConnectionLike;
+  remoteDescription: RTCSessionDescriptionInit | null;
+}
+
+function makePeer(): TestPeer {
+  const peer: TestPeer = { api: undefined as never, remoteDescription: null };
+  const dataChannel = {
+    label: "test",
+    readyState: "open" as const,
     send: () => undefined,
     close: () => undefined,
     onOpen: () => undefined,
@@ -57,1213 +71,701 @@ function installRTCPeerConnectionLike(pc: FakePc): RTCPeerConnectionLike {
     onClose: () => undefined,
     onError: () => undefined
   };
-  return {
-    get connectionState() {
-      return "new";
-    },
+  peer.api = {
+    connectionState: "new",
     setLocalDescription: async () => undefined,
-    setRemoteDescription: async () => undefined,
-    createOffer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: "v=0" }),
-    createAnswer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: "v=0" }),
+    setRemoteDescription: async (description) => { peer.remoteDescription = description; },
+    createOffer: async () => ({ type: "offer", sdp: "v=0\r\nm=audio 9 RTP/AVP 0" }),
+    createAnswer: async () => ({ type: "answer", sdp: "v=0\r\nm=audio 9 RTP/AVP 0" }),
     addIceCandidate: async () => undefined,
-    onIceCandidate: (cb) => {
-      pc.ice = cb;
-    },
-    onIceGatheringStateChange: (cb) => {
-      pc.gather = cb;
-    },
+    onIceCandidate: () => undefined,
+    onIceGatheringStateChange: () => undefined,
     onConnectionStateChange: () => undefined,
     onTrack: () => undefined,
     onDataChannel: () => undefined,
     replaceLocalStream: () => undefined,
-    createDataChannel: () => channel,
-    close: () => {
-      pc.closed = true;
-    }
+    createDataChannel: () => dataChannel,
+    close: () => undefined
   };
+  return peer;
 }
 
-function makeFakeEndpointService(input: {
-  online?: (xs: AppMsgOnlineInput) => Promise<AppMsgOnlineResult> | AppMsgOnlineResult;
-  sendMessage?: (
-    msg: import("@keymaster/contracts").AppMsgSendInput
-  ) => Promise<import("@keymaster/contracts").AppMsgSendResult>;
-}): {
-  service: AppMsgEndpointService;
-  sent: Array<{ recipientPublicKeyHex: string; body: string; clientMessageId?: string }>;
-  incomingSubs: Array<(msg: AppMsgMessage) => void>;
-} {
-  const sent: Array<{ recipientPublicKeyHex: string; body: string; clientMessageId?: string }> = [];
-  const incomingSubs: Array<(msg: AppMsgMessage) => void> = [];
-  const onlineFn = input.online ?? (async () => {
-    const r: AppMsgOnlineResult = {};
-    r[TARGET] = "online";
-    return r;
-  });
-  const sendFn = input.sendMessage;
-  const service: AppMsgEndpointService = {
-    endpoint: { kind: "plugin", id: KEYMASTER_WEBRTC_APP_ID },
-    isReady: () => true,
-    sendMessage: vi.fn(async (msg) => {
-      if (sendFn) {
-        const res = await sendFn(msg);
-        sent.push({
-          recipientPublicKeyHex: msg.recipientPublicKeyHex,
-          body: msg.body,
-          clientMessageId: msg.clientMessageId
-        });
-        return res;
-      }
-      sent.push({
-        recipientPublicKeyHex: msg.recipientPublicKeyHex,
-        body: msg.body,
-        clientMessageId: msg.clientMessageId
-      });
-      return { messageId: "m-sent-" + sent.length, createdAtMs: 1 };
-    }),
-    listMessages: async () => ({ items: [], hasMore: false }),
-    getMessage: async () => null,
-    subscribeMessages: (handler) => {
-      incomingSubs.push(handler);
-      return () => undefined;
+interface TransferTestDataChannel extends DataChannelLike {
+  readonly sent: string[];
+  emitOpen(): void;
+  emitMessage(data: string): void;
+  emitClose(): void;
+  forward?: (data: string) => void;
+}
+
+interface TransferTestPeer extends TestPeer {
+  dataChannel: TransferTestDataChannel;
+  emitRemoteDataChannel(): void;
+  closed: number;
+}
+
+function makeTransferPeer(): TransferTestPeer {
+  let state: TransferTestDataChannel["readyState"] = "connecting";
+  let openCb: (() => void) | undefined;
+  let messageCb: ((data: string | ArrayBuffer | ArrayBufferView) => void) | undefined;
+  let closeCb: (() => void) | undefined;
+  let errorCb: ((err: unknown) => void) | undefined;
+  let dataChannelCb: ((channel: DataChannelLike) => void) | undefined;
+  const sent: string[] = [];
+  const dataChannel: TransferTestDataChannel = {
+    label: "transfer",
+    get readyState() { return state; },
+    sent,
+    send(data) {
+      if (typeof data !== "string") throw new Error("test_only_string_wire");
+      sent.push(data);
+      dataChannel.forward?.(data);
     },
-    checkOnline: (xs) => Promise.resolve(onlineFn(xs))
-  };
-  return { service, sent, incomingSubs };
-}
-
-function makeFakeStream(): MediaStreamLike {
-  let stopped = false;
-  return {
-    stop: () => {
-      stopped = true;
+    close() {
+      if (state === "closed") return;
+      state = "closed";
+      closeCb?.();
     },
-    isLive: () => !stopped,
-    get native(): unknown {
-      return undefined;
-    }
+    onOpen(cb) { openCb = cb; },
+    onMessage(cb) { messageCb = cb; },
+    onClose(cb) { closeCb = cb; },
+    onError(cb) { errorCb = cb; },
+    emitOpen() {
+      state = "open";
+      openCb?.();
+    },
+    emitMessage(data) { messageCb?.(data); },
+    emitClose() { dataChannel.close(); },
+    forward: undefined
   };
-}
-
-function makeHistoryRecorder(): {
-  service: WebrtcHistoryService;
-  calls: Array<{ status: string; peerPublicKeyHex: string }>;
-  transfers: Array<{ status: string; peerPublicKeyHex: string; byteLength?: number; blobSize?: number | null }>;
-} {
-  const calls: Array<{ status: string; peerPublicKeyHex: string }> = [];
-  const transfers: Array<{ status: string; peerPublicKeyHex: string; byteLength?: number; blobSize?: number | null }> = [];
-  return {
-    calls,
-    transfers,
-    service: {
-      listForPeer: async () => [],
-      appendCall: async (row) => {
-        calls.push({ status: row.status, peerPublicKeyHex: row.peerPublicKeyHex });
-      },
-      appendTransfer: async (row, blob) => {
-        transfers.push({
-          status: row.status,
-          peerPublicKeyHex: row.peerPublicKeyHex,
-          byteLength: row.byteLength,
-          blobSize: blob ? blob.size : null
-        });
-      },
-      getBlob: async () => null
-    }
+  const peer: TransferTestPeer = {
+    api: undefined as never,
+    remoteDescription: null,
+    dataChannel,
+    closed: 0,
+    emitRemoteDataChannel() { dataChannelCb?.(dataChannel); }
   };
+  peer.api = {
+    connectionState: "new",
+    setLocalDescription: async () => undefined,
+    setRemoteDescription: async (description) => { peer.remoteDescription = description; },
+    createOffer: async () => ({ type: "offer", sdp: "v=0\r\nm=application 9 DTLS/SCTP 5000" }),
+    createAnswer: async () => ({ type: "answer", sdp: "v=0\r\nm=application 9 DTLS/SCTP 5000" }),
+    addIceCandidate: async () => undefined,
+    onIceCandidate: () => undefined,
+    onIceGatheringStateChange: () => undefined,
+    onConnectionStateChange: () => undefined,
+    onTrack: () => undefined,
+    onDataChannel: (cb) => { dataChannelCb = cb; },
+    replaceLocalStream: () => undefined,
+    createDataChannel: () => dataChannel,
+    close: () => { peer.closed += 1; dataChannel.close(); }
+  };
+  void errorCb;
+  return peer;
 }
 
-function makeKeyspaceService(): KeyspaceService {
-  return {
-    active: () => ({ activePublicKeyHex: OWNER }),
-    onActiveChange: () => () => undefined,
-    listKeys: async () => [],
-    openKeyStorage: async () => null
-  } as unknown as KeyspaceService;
+interface TestEnvironment extends WebrtcEnvironment {
+  mediaCalls: MediaStreamConstraints[];
 }
 
-function fakeEnv(opts: {
-  audioFails?: boolean;
-  videoFails?: boolean;
-  createOfferFails?: boolean;
-} = {}): import("./webrtcService.js").WebrtcEnvironment {
+function makeEnvironment(
+  peers: TestPeer[],
+  options: {
+    peerFactory?: () => TestPeer;
+    hashSha256?: (bytes: Uint8Array) => Promise<string>;
+    delay?: (ms: number) => Promise<void>;
+  } = {}
+): TestEnvironment {
+  const mediaCalls: MediaStreamConstraints[] = [];
   return {
     createPeerConnection: () => {
-      const pc: FakePc = {
-        api: undefined as never,
-        closed: false,
-        gatheringStarted: false,
-        ice: null,
-        gather: null
-      };
-      pc.api = installRTCPeerConnectionLike(pc);
-      return pc.api;
+      const peer = options.peerFactory?.() ?? makePeer();
+      peers.push(peer);
+      return peer.api;
     },
     getUserMedia: async (constraints) => {
-      if (opts.audioFails) {
-        throw new Error("not_found");
-      }
-      if (constraints.video && opts.videoFails) {
-        throw new Error("not_found");
-      }
-      return makeFakeStream();
+      mediaCalls.push(constraints);
+      return makeStream();
     },
-    generateSessionId: () => "sess-fake",
+    generateSessionId: () => newSessionID(),
+    hashSha256: options.hashSha256,
     now: () => Date.now(),
-    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-    stunDiagnosticTimeoutMs: 200
+    delay: options.delay ?? (async () => undefined),
+    mediaCalls
   };
 }
 
-function makeTransferIceRoutingEnv() {
-  const pcs: Array<{
-    addIceCandidate: ReturnType<typeof vi.fn>;
-  }> = [];
-  const env: import("./webrtcService.js").WebrtcEnvironment = {
-    createPeerConnection: () => {
-      const addIceCandidate = vi.fn(async (_candidate: RTCIceCandidateInit) => undefined);
-      const pc = {
-        connectionState: "new" as const,
-        setLocalDescription: async () => undefined,
-        setRemoteDescription: async () => undefined,
-        createOffer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: "v=0" }),
-        createAnswer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: "v=0" }),
-        addIceCandidate,
-        onIceCandidate: (_cb: (c: RTCIceCandidateInit) => void) => undefined,
-        onIceGatheringStateChange: (_cb: (s: string) => void) => undefined,
-        onConnectionStateChange: (_cb: (s: string) => void) => undefined,
-        onTrack: (_cb: (stream: MediaStreamLike) => void) => undefined,
-        onDataChannel: (_cb: (channel: DataChannelLike) => void) => undefined,
-        replaceLocalStream: (_stream: MediaStreamLike) => undefined,
-        createDataChannel: (_label: string): DataChannelLike => ({
-          label: _label,
-          get readyState(): DataChannelLike["readyState"] {
-            return "open";
-          },
-          send: () => undefined,
-          close: () => undefined,
-          onOpen: () => undefined,
-          onMessage: () => undefined,
-          onClose: () => undefined,
-          onError: () => undefined
-        }),
-        close: () => undefined
-      } satisfies RTCPeerConnectionLike;
-      pcs.push({ addIceCandidate: pc.addIceCandidate });
-      return pc;
-    },
-    getUserMedia: async () => makeFakeStream(),
-    generateSessionId: () => "sess-fake",
-    now: () => Date.now(),
-    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-    stunDiagnosticTimeoutMs: 200
-  };
-  return { pcs, env };
-}
-
-function makeTransferIceSignalEnv() {
-  return {
-    env: {
-      createPeerConnection: () => {
-        const pc: RTCPeerConnectionLike & { iceCb: ((c: RTCIceCandidateInit) => void) | null } = {
-          connectionState: "new",
-          iceCb: null,
-          setLocalDescription: async () => {
-            setTimeout(() => {
-              pc.iceCb?.({
-                candidate: "candidate:signal 1 udp 1 1.2.3.4 1234 typ host",
-                sdpMid: "0",
-                sdpMLineIndex: 0
-              });
-            }, 0);
-          },
-          setRemoteDescription: async () => undefined,
-          createOffer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: "v=0" }),
-          createAnswer: async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: "v=0" }),
-          addIceCandidate: async () => undefined,
-          onIceCandidate: (cb) => {
-            pc.iceCb = cb;
-          },
-          onIceGatheringStateChange: () => undefined,
-          onConnectionStateChange: () => undefined,
-          onTrack: () => undefined,
-          onDataChannel: () => undefined,
-          replaceLocalStream: () => undefined,
-          createDataChannel: () => ({
-            label: "signal",
-            get readyState(): DataChannelLike["readyState"] {
-              return "open";
-            },
-            send: () => undefined,
-            close: () => undefined,
-            onOpen: () => undefined,
-            onMessage: () => undefined,
-            onClose: () => undefined,
-            onError: () => undefined
-          }),
-          close: () => undefined
-        };
-        return pc;
-      },
-      getUserMedia: async () => makeFakeStream(),
-      generateSessionId: () => "sess-fake",
-      now: () => Date.now(),
-      delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-      stunDiagnosticTimeoutMs: 200
-    } satisfies import("./webrtcService.js").WebrtcEnvironment
-  };
-}
-
-function makeLoopbackBus() {
-  const subscribers: Array<{ ownerHex: string; handler: (msg: AppMsgMessage) => void }> = [];
-  const messages: Array<import("@keymaster/contracts").AppMsgSendInput> = [];
-  return {
-    messages,
-    createEndpoint(senderHex: string): AppMsgEndpointService {
-      return {
-        endpoint: { kind: "plugin", id: KEYMASTER_WEBRTC_APP_ID },
-        isReady: () => true,
-        sendMessage: vi.fn(async (msg: import("@keymaster/contracts").AppMsgSendInput) => {
-          messages.push(msg);
-          const out: AppMsgMessage = {
-            messageId: `m-${messages.length}`,
-            clientMessageId: msg.clientMessageId,
-            senderPublicKeyHex: senderHex,
-            recipientPublicKeyHex: msg.recipientPublicKeyHex,
-            contentType: msg.contentType,
-            body: msg.body,
-            createdAtMs: msg.createdAtMs,
-            insertedAtMs: msg.createdAtMs
-          };
-          for (const sub of subscribers) {
-            if (sub.ownerHex === msg.recipientPublicKeyHex) {
-              sub.handler(out);
-            }
-          }
-          return { messageId: out.messageId, createdAtMs: out.createdAtMs };
-        }),
-        listMessages: async () => ({ items: [], hasMore: false }),
-        getMessage: async () => null,
-        subscribeMessages: (handler: (msg: AppMsgMessage) => void) => {
-          subscribers.push({ ownerHex: senderHex, handler });
-          return () => undefined;
-        },
-        checkOnline: async (xs) => {
-          const out: AppMsgOnlineResult = {};
-          for (const key of xs as string[]) {
-            out[key] = "online";
-          }
-          return out;
-        }
-      };
-    },
-  };
-}
-
-function makeKeyspaceServiceFor(publicKeyHex: string): KeyspaceService {
-  return {
-    active: () => ({ activePublicKeyHex: publicKeyHex }),
-    onActiveChange: () => () => undefined,
-    listKeys: async () => [],
-    openKeyStorage: async () => null
-  } as unknown as KeyspaceService;
-}
-
-function makeNoticeRegistryRecorder(): {
-  registry: NoticeRegistry;
-  notices: Array<import("@keymaster/contracts").NoticeRecord>;
+function makeChannel(ready = true, ownerPublicKeyHex = OWNER): ChannelRuntime & {
+  published: Array<{ recipientPublicKeyHex: string; protocol: string; content: unknown }>;
+  hashRequests: Array<{ hash: string; locator: "webrtc-sdp" }>;
+  hashRequestMessages: Array<{ hash: string; locator: "webrtc-sdp"; messageId: string }>;
+  deliver: (content: unknown, publisherPublicKeyHex?: string, protocol?: string) => void;
+  deliverForOwner: (
+    ownerPublicKeyHex: string,
+    content: unknown,
+    publisherPublicKeyHex?: string,
+    protocol?: string
+  ) => void;
+  deliverHashRequest: (
+    content: { hash: string; locators: Array<{ kind: "webrtc-sdp" }> },
+    publisherPublicKeyHex?: string,
+    messageId?: string
+  ) => void;
 } {
-  const notices: Array<import("@keymaster/contracts").NoticeRecord> = [];
+  let privateHandler: ((event: Parameters<NonNullable<ChannelRuntime["subscribePrivate"]>>[0]) => void) | undefined;
+  let publicHandler: ((event: Parameters<NonNullable<ChannelRuntime["subscribe"]>>[0]) => void) | undefined;
+  const published: Array<{ recipientPublicKeyHex: string; protocol: string; content: unknown }> = [];
+  const hashRequests: Array<{ hash: string; locator: "webrtc-sdp" }> = [];
+  const hashRequestMessages: Array<{ hash: string; locator: "webrtc-sdp"; messageId: string }> = [];
+  const deliverForOwner = (
+    recipientOwnerPublicKeyHex: string,
+    content: unknown,
+    publisherPublicKeyHex = TARGET,
+    protocol = "bsv8.webrtc.signal.v1"
+  ): void => {
+    privateHandler?.({
+      channel: `bsv8.inbox.${recipientOwnerPublicKeyHex}`,
+      publisherPublicKeyHex,
+      messageId: "incoming-private-message",
+      protocol,
+      content: content as never
+    });
+  };
   return {
-    notices,
-    registry: {
-      upsert: (notice) => {
-        const idx = notices.findIndex((item) => item.id === notice.id);
-        if (idx >= 0) {
-          notices[idx] = notice;
-        } else {
-          notices.push(notice);
-        }
-      },
-      dismiss: () => undefined,
-      list: () => notices.slice(),
-      subscribe: () => () => undefined,
-      removeBySourcePluginId: () => undefined
-    } as NoticeRegistry
+    isReady: () => ready,
+    publish: vi.fn(async () => ({ messageId: "public-message" })),
+    publishHashRequest: vi.fn(async (input) => {
+      hashRequests.push(input);
+      const messageId = newMessageID();
+      hashRequestMessages.push({ ...input, messageId });
+      return { messageId };
+    }),
+    publishPrivate: vi.fn(async (input) => {
+      published.push(input);
+      return { messageId: "private-message" };
+    }),
+    subscriptionSet: vi.fn(async (channels: string[]) => ({ channels })),
+    subscribe: (handler) => {
+      publicHandler = handler;
+      return () => { publicHandler = undefined; };
+    },
+    subscribePrivate: (handler) => {
+      privateHandler = handler;
+      return () => { privateHandler = undefined; };
+    },
+    published,
+    hashRequests,
+    hashRequestMessages,
+    deliver: (content, publisherPublicKeyHex = TARGET, protocol = "bsv8.webrtc.signal.v1") => {
+      deliverForOwner(ownerPublicKeyHex, content, publisherPublicKeyHex, protocol);
+    },
+    deliverForOwner,
+    deliverHashRequest: (content, publisherPublicKeyHex = TARGET, messageId = newMessageID()) => publicHandler?.({
+      channel: "bsv8.hash.request.v1",
+      publisherPublicKeyHex,
+      messageId,
+      content
+    })
   };
 }
 
-function makeLoopbackTransferEnv() {
-  const pcs = new Map<string, LoopbackPc>();
-  let seq = 0;
-  class LoopbackChannel implements DataChannelLike {
-    private openCb: (() => void) | null = null;
-    private messageCb: ((data: string | ArrayBuffer | ArrayBufferView) => void) | null = null;
-    private closeCb: (() => void) | null = null;
-    private errorCb: ((err: unknown) => void) | null = null;
-    private peer: LoopbackChannel | null = null;
-    private state: "connecting" | "open" | "closing" | "closed" = "connecting";
-    constructor(readonly label: string) {}
-    get readyState(): DataChannelLike["readyState"] {
-      return this.state;
-    }
-    connect(peer: LoopbackChannel): void {
-      this.peer = peer;
-      this.state = "open";
-    }
-    send(data: string | ArrayBuffer | ArrayBufferView): void {
-      if (!this.peer) {
-        this.errorCb?.(new Error("loopback_peer_missing"));
-        return;
+function makeNoticeRegistry(): { registry: NoticeRegistry; records: Map<string, NoticeRecord> } {
+  const records = new Map<string, NoticeRecord>();
+  const registry: NoticeRegistry = {
+    upsert: vi.fn((record) => { records.set(record.id, record); }),
+    dismiss: vi.fn((id) => { records.delete(id); }),
+    list: vi.fn(() => [...records.values()]),
+    subscribe: vi.fn(() => () => undefined),
+    removeBySourcePluginId: vi.fn((sourcePluginId) => {
+      for (const [id, record] of records) {
+        if (record.sourcePluginId === sourcePluginId) records.delete(id);
       }
-      this.peer.messageCb?.(data);
-    }
-    close(): void {
-      if (this.state === "closed") return;
-      this.state = "closed";
-      this.closeCb?.();
-      if (this.peer && this.peer.state !== "closed") {
-        this.peer.state = "closed";
-        this.peer.closeCb?.();
-      }
-    }
-    onOpen(cb: () => void): void {
-      this.openCb = cb;
-      if (this.state === "open") cb();
-    }
-    onMessage(cb: (data: string | ArrayBuffer | ArrayBufferView) => void): void {
-      this.messageCb = cb;
-    }
-    onClose(cb: () => void): void {
-      this.closeCb = cb;
-    }
-    onError(cb: (err: unknown) => void): void {
-      this.errorCb = cb;
-    }
-    open(): void {
-      this.state = "open";
-      this.openCb?.();
-    }
-  }
-  class LoopbackPc implements RTCPeerConnectionLike {
-    readonly id = `pc-${++seq}`;
-    remoteId: string | null = null;
-    localChannel: LoopbackChannel | null = null;
-    remoteChannelHandler: ((channel: DataChannelLike) => void) | null = null;
-    iceCb: ((c: RTCIceCandidateInit) => void) | null = null;
-    stateCb: ((s: string) => void) | null = null;
-    closeCb: (() => void) | null = null;
-    constructor() {
-      pcs.set(this.id, this);
-    }
-    get connectionState() {
-      return "new";
-    }
-    setLocalDescription = async () => {
-      setTimeout(() => {
-        this.iceCb?.({
-          candidate: `candidate:loop-${this.id}`,
-          sdpMid: "0",
-          sdpMLineIndex: 0
-        });
-      }, 0);
-    };
-    setRemoteDescription = async (desc: RTCSessionDescriptionInit) => {
-      const parts = String(desc.sdp ?? "").split(":");
-      this.remoteId = parts[1] ?? null;
-      this.maybeLink();
-    };
-    createOffer = async (): Promise<RTCSessionDescriptionInit> => ({ type: "offer", sdp: `loop:${this.id}` });
-    createAnswer = async (): Promise<RTCSessionDescriptionInit> => ({ type: "answer", sdp: `loop:${this.id}` });
-    addIceCandidate = async () => undefined;
-    onIceCandidate = (cb: (c: RTCIceCandidateInit) => void) => {
-      this.iceCb = cb;
-    };
-    onIceGatheringStateChange = () => undefined;
-    onConnectionStateChange = (cb: (s: string) => void) => {
-      this.stateCb = cb;
-    };
-    onTrack = () => undefined;
-    onDataChannel = (cb: (channel: DataChannelLike) => void) => {
-      this.remoteChannelHandler = cb;
-      this.maybeLink();
-    };
-    replaceLocalStream = () => undefined;
-    createDataChannel = (label: string): DataChannelLike => {
-      const channel = new LoopbackChannel(label);
-      this.localChannel = channel;
-      this.maybeLink();
-      return channel;
-    };
-    close = () => {
-      pcs.delete(this.id);
-      this.localChannel?.close();
-      this.stateCb?.("closed");
-      this.closeCb?.();
-    };
-    private maybeLink(): void {
-      if (!this.localChannel || !this.remoteId) return;
-      const peer = pcs.get(this.remoteId);
-      if (!peer) return;
-      if (peer.remoteId !== this.id) return;
-      if (!peer.remoteChannelHandler) return;
-      const remote = new LoopbackChannel(this.localChannel.label);
-      this.localChannel.connect(remote);
-      remote.connect(this.localChannel);
-      peer.remoteChannelHandler(remote);
-      this.localChannel.open();
-      remote.open();
-    }
-  }
-  return {
-    createPeerConnection: () => new LoopbackPc(),
-    getUserMedia: async () => makeFakeStream(),
-    generateSessionId: () => `loop-${++seq}`,
-    now: () => Date.now(),
-    delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-    stunDiagnosticTimeoutMs: 200
-  } satisfies import("./webrtcService.js").WebrtcEnvironment;
-}
-
-/**
- * 与 §4 一致的 STUN fake：
- *   - 收到 `createOffer()` 后回到 stub sdp；
- *   - 收到 `setLocalDescription(...)` 后**才会**派生 srflx candidate；
- *   - 没人触发 `setLocalDescription` 就只走 timeout。
- *   - 不传 `createDataChannel` 时**也**不起 gather。
- */
-function stunEnv(opts: { okHost: string; failHost?: string }) {
-  const calls: Array<{ kind: string }> = [];
-  return {
-    calls,
-    env: {
-      createPeerConnection: (cfg: RTCConfiguration) => {
-        const url = (cfg.iceServers?.[0]?.urls?.[0] ?? "") as string;
-        const pc: FakePc = {
-          api: undefined as never,
-          closed: false,
-          gatheringStarted: false,
-          ice: null,
-          gather: null
-        };
-        let offerResolved = false;
-        let localDescSet = false;
-        let dataChannelCreated = false;
-        pc.api = {
-          get connectionState() {
-            return "new";
-          },
-          setLocalDescription: async () => {
-            calls.push({ kind: "setLocalDescription" });
-            localDescSet = true;
-            // gather 开始：派 srflx → ok；否则 timeout。
-            setTimeout(() => {
-              if (url === opts.okHost && pc.ice) {
-                pc.ice({
-                  candidate:
-                    "candidate:1 1 udp 1 1.2.3.4 1234 typ srflx raddr 5.6.7.8 rport 9999",
-                  sdpMid: "0",
-                  sdpMLineIndex: 0
-                });
-              }
-              if (pc.gather) pc.gather("complete");
-            }, 5);
-          },
-          setRemoteDescription: async () => undefined,
-          createOffer: async () => {
-            calls.push({ kind: "createOffer" });
-            offerResolved = true;
-            return { type: "offer", sdp: "v=0" };
-          },
-          createAnswer: async () => ({ type: "answer", sdp: "v=0" }),
-          addIceCandidate: async () => undefined,
-          onIceCandidate: (cb) => {
-            pc.ice = cb;
-          },
-          onIceGatheringStateChange: (cb) => {
-            pc.gather = cb;
-          },
-          onConnectionStateChange: () => undefined,
-          onTrack: () => undefined,
-          onDataChannel: () => undefined,
-          replaceLocalStream: () => undefined,
-          createDataChannel: (label): DataChannelLike => {
-            calls.push({ kind: "createDataChannel" });
-            dataChannelCreated = true;
-            return {
-              label,
-              get readyState(): DataChannelLike["readyState"] {
-                return "open";
-              },
-              send: () => undefined,
-              close: () => undefined,
-              onOpen: () => undefined,
-              onMessage: () => undefined,
-              onClose: () => undefined,
-              onError: () => undefined
-            };
-          },
-          close: () => {
-            pc.closed = true;
-            void offerResolved;
-            void localDescSet;
-            void dataChannelCreated;
-          }
-        };
-        return pc.api;
-      },
-      getUserMedia: async () => makeFakeStream(),
-      generateSessionId: () => "sess-fake",
-      now: () => Date.now(),
-      delay: (ms) => new Promise((r) => setTimeout(r, ms)),
-      stunDiagnosticTimeoutMs: 200
-    } as import("./webrtcService.js").WebrtcEnvironment
+    })
   };
+  return { registry, records };
 }
-
-function buildMessage(senderPublicKeyHex: string, body: string): AppMsgMessage {
-  return {
-    messageId: "m-x",
-    clientMessageId: "cm-x",
-    senderPublicKeyHex,
-    recipientPublicKeyHex: OWNER,
-    contentType: "text/plain",
-    body,
-    createdAtMs: 1,
-    insertedAtMs: 1
-  };
-}
-
-/* ============== cases ============== */
 
 describe("createWebrtcService", () => {
-  it("isReady reflects endpoint service", () => {
-    const { service: endpoint } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
+  it("uses Channel readiness as service readiness", () => {
+    const channel = makeChannel(true);
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore()
     });
-    expect(ws.isReady()).toBe(true);
+    expect(service.isReady()).toBe(true);
+    service.dispose();
   });
 
-  it("startCall: throws target_offline when peer is offline", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({
-      online: () => Promise.resolve({ [TARGET]: "offline" })
+  it("reports not ready while Channel is unavailable", () => {
+    const service = createWebrtcService({
+      channel: makeChannel(false),
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore()
     });
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await expect(
-      ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/target_offline/);
-    expect(sent).toHaveLength(0);
-    expect(ws.snapshot().phase).toBe("idle");
-    expect(ws.snapshot().lastError).toBe("target_offline");
+    expect(service.isReady()).toBe(false);
+    service.dispose();
   });
 
-  it("startCall: throws target_unknown when peer is unknown", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({
-      online: () => Promise.resolve({ [TARGET]: "unknown" })
-    });
-    const ws = createWebrtcService({
-      endpointService: endpoint,
+  it("blocks audio/video calls until a formal call rendezvous protocol exists", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
+      env: environment
     });
-    await expect(
-      ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/target_unknown/);
-    expect(sent).toHaveLength(0);
-    expect(ws.snapshot().lastError).toBe("target_unknown");
+
+    await expect(service.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })).rejects.toThrow("call_protocol_unavailable");
+    expect(environment.mediaCalls).toHaveLength(0);
+    expect(channel.published).toHaveLength(0);
+    expect(service.snapshot().lastError).toBe("call_protocol_unavailable");
+    service.dispose();
   });
 
-  it("startCall: throws service_not_ready when endpoint not ready", async () => {
-    const { service: endpoint } = makeFakeEndpointService({});
-    (endpoint as unknown as { isReady: () => boolean }).isReady = () => false;
-    const ws = createWebrtcService({
-      endpointService: endpoint,
+  it("ignores a direct media offer without a matching call rendezvous request", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
+      env: environment
     });
-    await expect(
-      ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/service_not_ready/);
+
+    channel.deliver(newOffer(newMessageID(), newSessionID(), "v=0\r\nm=audio 9 RTP/AVP 0"));
+    await Promise.resolve();
+    expect(service.snapshot().phase).toBe("idle");
+    expect(environment.mediaCalls).toHaveLength(0);
+    expect(peers).toHaveLength(0);
+    service.dispose();
   });
 
-  it("startCall: throws invalid_target for malformed hex", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
+  it("does not request media permission when a call request or offer is received", async () => {
+    const channel = makeChannel();
+    const peers: TestPeer[] = [];
+    const environment = makeEnvironment(peers);
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
+      env: environment
     });
-    await expect(
-      ws.startCall({ targetPublicKeyHex: "deadbeef", mode: "audio" })
-    ).rejects.toThrow(/invalid_target/);
-    expect(sent).toHaveLength(0);
-    expect(ws.snapshot().lastError).toBe("invalid_target");
+    const requestMessageId = newMessageID();
+    const sessionId = newSessionID();
+    channel.deliver({ type: "keymaster.webrtc.call.request", session_id: sessionId, mode: "audio" }, TARGET, "bsv8.message.v1");
+    channel.deliver(newOffer(requestMessageId, sessionId, "v=0\r\nm=audio 9 RTP/AVP 0"));
+    expect(environment.mediaCalls).toHaveLength(0);
+    expect(service.snapshot().phase).toBe("idle");
+    await expect(service.acceptIncoming()).rejects.toThrow("call_protocol_unavailable");
+    expect(environment.mediaCalls).toHaveLength(0);
+    service.dispose();
   });
 
-  it("startCall: throws device_unavailable when getUserMedia throws", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
+  it("requires contact admission and explicit confirmation before publishing Hash", async () => {
+    const channel = makeChannel();
+    let resolveHashRequest!: (value: { messageId: string }) => void;
+    const hashRequestResult = new Promise<{ messageId: string }>((resolve) => {
+      resolveHashRequest = resolve;
+    });
+    vi.mocked(channel.publishHashRequest).mockImplementation(async (input) => {
+      channel.hashRequests.push(input);
+      return hashRequestResult;
+    });
+    const peers: TestPeer[] = [];
+    const notices = makeNoticeRegistry();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv({ audioFails: true })
+      env: makeEnvironment(peers),
+      noticeRegistry: notices.registry,
+      isTransferSenderAllowed: async (publicKeyHex) => publicKeyHex === TARGET
     });
-    await expect(
-      ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/device_unavailable/);
-    expect(sent).toHaveLength(0);
-    expect(ws.snapshot().lastError).toBe("device_unavailable");
-  });
+    const sessionId = newSessionID();
+    const requestMessageId = newMessageID();
+    const hash = "c".repeat(64);
 
-  it("startCall: emits inviting phase and sends invite when everything ok", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
-    expect(sent).toHaveLength(1);
-    expect(sent[0]?.recipientPublicKeyHex).toBe(TARGET);
-    const parsed = parseSignalBody(sent[0]!.body);
-    expect(parsed.ok).toBe(true);
-    if (parsed.ok) expect(parsed.signal.type).toBe("invite");
-    expect(ws.snapshot().phase).toBe("inviting");
-    expect(ws.snapshot().direction).toBe("outgoing");
-    expect(ws.snapshot().mode).toBe("audio");
-    expect(ws.snapshot().hasLocalStream).toBe(true);
-  });
-
-  it("incoming notice points to /message/:publicKeyHex and keeps accept navigation on the same route", async () => {
-    const bus = makeLoopbackBus();
-    const receiverNotices = makeNoticeRegistryRecorder();
-    const sender = createWebrtcService({
-      endpointService: bus.createEndpoint(OWNER),
-      keyspace: makeKeyspaceServiceFor(OWNER),
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    const receiver = createWebrtcService({
-      endpointService: bus.createEndpoint(TARGET),
-      keyspace: makeKeyspaceServiceFor(TARGET),
-      noticeRegistry: receiverNotices.registry,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    void receiver;
-
-    await sender.startCall({ targetPublicKeyHex: TARGET, mode: "video" });
-    await new Promise((r) => setTimeout(r, 30));
-
-    const notice = receiverNotices.notices.find((item) => item.id.startsWith("webrtc-incoming-"));
-    expect(notice?.routeTo).toBe(`/message/${OWNER}`);
-    expect(notice?.actions.find((action) => action.id === "accept")?.navigateTo).toBe(`/message/${OWNER}`);
-  });
-
-  /* ----- 出站失败回滚（#5 / #12）----- */
-
-  it("startCall: createOffer failure rolls back to idle and emits", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({});
-    // 注入 createOffer 必失败的 fake pc：把所有 createOffer 替换成
-    // 抛错。其它字段保留正常骨架。
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: {
-        ...fakeEnv(),
-        createPeerConnection: ((_cfg: RTCConfiguration) => {
-          const pc: FakePc = {
-            api: undefined as never,
-            closed: false,
-            gatheringStarted: false,
-            ice: null,
-            gather: null
-          };
-          pc.api = {
-            ...installRTCPeerConnectionLike(pc),
-            createOffer: async () => {
-              throw new Error("crash");
-            }
-          };
-          return pc.api;
-        }) as never
-      }
-    });
-    const snapshotTrace: string[] = [];
-    const off = ws.subscribe((s) => snapshotTrace.push(s.phase));
-    await expect(
-      ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/create_offer_failed/);
-    await new Promise((r) => setTimeout(r, 20));
-    expect(sent).toHaveLength(0);
-    expect(ws.snapshot().phase).toBe("idle");
-    expect(ws.snapshot().lastError).toBe("create_offer_failed");
-    // 订阅至少看到 inviting → idle 的过渡。
-    off();
-    expect(snapshotTrace).toContain("inviting");
-    expect(snapshotTrace[snapshotTrace.length - 1]).toBe("idle");
-  });
-
-  it("startCall: send invite failure rolls back to idle and stays re-dialable", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({
-      sendMessage: async () => {
-        throw new Error("send_failed");
-      }
-    });
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await expect(
-      ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" })
-    ).rejects.toThrow(/send_invite_failed/);
-    expect(sent).toHaveLength(0); // 都被 endpoint 抛错吞掉，没真正到达。
-    expect(ws.snapshot().phase).toBe("idle");
-    expect(ws.snapshot().lastError).toBe("send_invite_failed");
-
-    // 切回 endpoint 正常，重新拨号必须成功——不能再卡 inviting。
-    const ep2 = makeFakeEndpointService({}).service;
-    // service 不可热替换。这里仅做状态验证：snapshot 已回 idle、新拨号
-    // 在另一个干净 service 上能正常发出 invite。
-    const ws2 = createWebrtcService({
-      endpointService: ep2,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await ws2.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
-    expect(ws2.snapshot().phase).toBe("inviting");
-  });
-
-  /* ----- 入站路径 ----- */
-
-  it("reply with busy when invite arrives during active session", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
-    const inviteBefore = sent.length;
-    expect(inviteBefore).toBe(1);
-    const inviterSession = "sess-other";
-    const inv: WebrtcInviteSignal = {
-      schema: "keymaster.webrtc.v1",
-      type: "invite",
-      sessionId: inviterSession,
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    };
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(inv)));
-    await new Promise((r) => setTimeout(r, 30));
-    const newSent = sent.slice(inviteBefore);
-    const busy = newSent.find((s) => {
-      const p = parseSignalBody(s.body);
-      return p.ok && p.signal.type === "busy";
-    });
-    expect(busy).toBeTruthy();
-  });
-
-  it("invite sent with video receives fallback_required when receiver lacks video", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const env = fakeEnv({ videoFails: true });
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env
-    });
-    const inv: WebrtcInviteSignal = {
-      schema: "keymaster.webrtc.v1",
-      type: "invite",
-      sessionId: "sess-1",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "video",
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    };
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(inv)));
-    await new Promise((r) => setTimeout(r, 30));
-    const fb = sent.find((s) => {
-      const p = parseSignalBody(s.body);
-      return p.ok && p.signal.type === "fallback_required";
-    });
-    expect(fb).toBeTruthy();
-  });
-
-  it("invite receives reject when receiver has no audio at all", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const env = fakeEnv({ audioFails: true });
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env
-    });
-    const inv: WebrtcInviteSignal = {
-      schema: "keymaster.webrtc.v1",
-      type: "invite",
-      sessionId: "sess-1",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    };
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(inv)));
-    await new Promise((r) => setTimeout(r, 30));
-    const rej = sent.find((s) => {
-      const p = parseSignalBody(s.body);
-      return p.ok && p.signal.type === "reject" && p.signal.reason === "audio_unavailable";
-    });
-    expect(rej).toBeTruthy();
-  });
-
-  it("ignores expired signals", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    const expired: WebrtcInviteSignal = {
-      schema: "keymaster.webrtc.v1",
-      type: "invite",
-      sessionId: "sess-1",
-      createdAtMs: 1,
-      expiresAtMs: 2,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    };
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(expired)));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(sent).toHaveLength(0);
-  });
-
-  it("ignores answer/ice/hangup for unknown sessionId", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    const unknown = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "ice",
-      sessionId: "nope",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      candidate: { candidate: "candidate:..." }
-    });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), unknown));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(sent).toHaveLength(0);
-  });
-
-  it("transfer ice routes to activeTransfer.addIceCandidate", async () => {
-    const { service: endpoint, incomingSubs } = makeFakeEndpointService({});
-    const { env, pcs } = makeTransferIceRoutingEnv();
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env
-    });
-    const invite = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "transfer_invite",
-      sessionId: "sess-transfer-ice",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
+    channel.deliver({
+      type: "keymaster.webrtc.transfer.request",
+      session_id: sessionId,
+      hash,
       kind: "file",
-      byteLength: 5,
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), invite));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(pcs).toHaveLength(1);
+      byte_length: 3,
+      file_name: "a.txt",
+      mime_type: "text/plain"
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true));
+    expect(channel.hashRequests).toHaveLength(0);
+    expect(peers).toHaveLength(0);
 
-    const ice = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "ice",
-      sessionId: "sess-transfer-ice",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      candidate: {
-        candidate: "candidate:1 1 udp 1 1.2.3.4 1234 typ host",
-        sdpMid: "0",
-        sdpMLineIndex: 0
+    channel.deliver(
+      newOffer(requestMessageId, sessionId, "v=0\r\nm=application 9 DTLS/SCTP 5000"),
+      TARGET,
+      "bsv8.webrtc.signal.v1"
+    );
+    await Promise.resolve();
+    expect(peers).toHaveLength(0);
+
+    const acceptPromise = service.acceptIncomingTransfer(sessionId);
+    await vi.waitFor(() => expect(channel.hashRequests).toHaveLength(1));
+    expect(peers).toHaveLength(0);
+    resolveHashRequest({ messageId: requestMessageId });
+    await acceptPromise;
+    await vi.waitFor(() => expect(peers).toHaveLength(1));
+    await vi.waitFor(() => expect(channel.published.some((item) => {
+      try { return parseBodyValue(item.content as never).signal.type === "answer"; } catch { return false; }
+    })).toBe(true));
+    service.dispose();
+  });
+
+  it.each(["success", "failure"] as const)(
+    "旧 owner 的 Hash %s 结果不得清除新 owner 的同 session 请求或接受占位",
+    async (outcome) => {
+      const mutable = makeMutableKeyspace(OWNER);
+      const channel = makeChannel(true, OWNER);
+      const notices = makeNoticeRegistry();
+      const hashResults: Array<{
+        resolve: (value: { messageId: string }) => void;
+        reject: (reason: Error) => void;
+      }> = [];
+      vi.mocked(channel.publishHashRequest).mockImplementation(async (input) => {
+        channel.hashRequests.push(input);
+        return new Promise<{ messageId: string }>((resolve, reject) => {
+          hashResults.push({ resolve, reject });
+        });
+      });
+      const service = createWebrtcService({
+        channel,
+        keyspace: mutable.keyspace,
+        configStore: createMemoryWebrtcConfigStore(),
+        env: makeEnvironment([]),
+        noticeRegistry: notices.registry,
+        isTransferSenderAllowed: () => true
+      });
+      const sessionId = newSessionID();
+      const oldHash = "a".repeat(64);
+      const newHash = "b".repeat(64);
+
+      channel.deliver({
+        type: "keymaster.webrtc.transfer.request",
+        session_id: sessionId,
+        hash: oldHash,
+        kind: "file",
+        byte_length: 1
+      }, TARGET, "bsv8.message.v1");
+      await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true));
+      const oldNotice = notices.records.get(`webrtc-transfer-${sessionId}`);
+      const staleAccept = oldNotice?.actions.find((action) => action.id === "accept-transfer");
+      const staleReject = oldNotice?.actions.find((action) => action.id === "reject-transfer");
+      expect(staleAccept).toBeDefined();
+      expect(staleReject).toBeDefined();
+
+      // 直接执行旧通知的接受动作，确保闭包捕获的是旧 request，而不是只捕获 sessionId。
+      const oldAcceptance = staleAccept!.run();
+      await vi.waitFor(() => expect(hashResults).toHaveLength(1));
+
+      mutable.setOwner(OTHER);
+      channel.deliverForOwner(OTHER, {
+        type: "keymaster.webrtc.transfer.request",
+        session_id: sessionId,
+        hash: newHash,
+        kind: "file",
+        byte_length: 1
+      }, TARGET, "bsv8.message.v1");
+      await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true));
+
+      // 旧 owner 的通知动作仍可能被 UI 异步执行，但只能作用于旧请求对象。
+      await staleReject!.run();
+      expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(true);
+
+      const newAcceptance = service.acceptIncomingTransfer(sessionId);
+      await vi.waitFor(() => expect(hashResults).toHaveLength(2));
+
+      if (outcome === "success") {
+        hashResults[0]!.resolve({ messageId: "old-hash-request" });
+      } else {
+        hashResults[0]!.reject(new Error("old_hash_publish_failed"));
+      }
+      if (outcome === "success") {
+        await expect(oldAcceptance).rejects.toThrow("transfer_owner_changed");
+      } else {
+        await expect(oldAcceptance).rejects.toThrow("old_hash_publish_failed");
+      }
+
+      // B 的接受占位仍在：旧回调不能清掉 B 的 token 让第三个请求抢占 Hash Publish。
+      const thirdSessionId = newSessionID();
+      channel.deliverForOwner(OTHER, {
+        type: "keymaster.webrtc.transfer.request",
+        session_id: thirdSessionId,
+        hash: "c".repeat(64),
+        kind: "file",
+        byte_length: 1
+      }, TARGET, "bsv8.message.v1");
+      await vi.waitFor(() => expect(notices.records.has(`webrtc-transfer-${thirdSessionId}`)).toBe(true));
+      await expect(service.acceptIncomingTransfer(thirdSessionId)).rejects.toThrow("busy_local");
+      expect(channel.hashRequests).toHaveLength(2);
+
+      hashResults[1]!.resolve({ messageId: "new-hash-request" });
+      await newAcceptance;
+      expect(notices.records.has(`webrtc-transfer-${sessionId}`)).toBe(false);
+      service.dispose();
+    }
+  );
+
+  it("完成双端文件传输：准入、确认、Hash、offer/answer、分片校验和完成确认", async () => {
+    const channelA = makeChannel(true, OWNER);
+    const channelB = makeChannel(true, TARGET);
+    const peersA: TransferTestPeer[] = [];
+    const peersB: TransferTestPeer[] = [];
+    const noNegotiationTimeout = async (ms: number): Promise<void> => {
+      if (ms !== 15_000) return;
+      await new Promise<void>(() => undefined);
+    };
+    const serviceA = createWebrtcService({
+      channel: channelA,
+      keyspace: makeKeyspace(OWNER),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: makeEnvironment(peersA, { peerFactory: makeTransferPeer, delay: noNegotiationTimeout }),
+      isTransferSenderAllowed: () => true
+    });
+    const noticesB = makeNoticeRegistry();
+    const serviceB = createWebrtcService({
+      channel: channelB,
+      keyspace: makeKeyspace(TARGET),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: makeEnvironment(peersB, { peerFactory: makeTransferPeer }),
+      noticeRegistry: noticesB.registry,
+      isTransferSenderAllowed: (publicKeyHex) => publicKeyHex === OWNER
+    });
+    const cursorA = { value: 0 };
+    const cursorB = { value: 0 };
+    const relayPrivate = (
+      from: ReturnType<typeof makeChannel>,
+      to: ReturnType<typeof makeChannel>,
+      publisherPublicKeyHex: string,
+      cursor: { value: number }
+    ): void => {
+      while (cursor.value < from.published.length) {
+        const item = from.published[cursor.value]!;
+        cursor.value += 1;
+        to.deliver(item.content, publisherPublicKeyHex, item.protocol);
+      }
+    };
+    const file = new Blob(["abc"], { type: "text/plain" });
+    const sendPromise = serviceA.sendFile({ targetPublicKeyHex: TARGET, file });
+    await vi.waitFor(() => expect(channelA.published).toHaveLength(1));
+    const request = channelA.published[0]!.content as {
+      type: string;
+      session_id: string;
+      hash: string;
+      kind: string;
+      byte_length: number;
+    };
+    expect(request).toMatchObject({
+      type: "keymaster.webrtc.transfer.request",
+      kind: "file",
+      byte_length: 3,
+      hash: "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    });
+    relayPrivate(channelA, channelB, OWNER, cursorA);
+    await vi.waitFor(() => expect(noticesB.records.has(`webrtc-transfer-${request.session_id}`)).toBe(true));
+    expect(channelB.hashRequests).toHaveLength(0);
+
+    const acceptPromise = serviceB.acceptIncomingTransfer(request.session_id);
+    await vi.waitFor(() => expect(channelB.hashRequestMessages).toHaveLength(1));
+    const hashRequest = channelB.hashRequestMessages[0]!;
+    channelA.deliverHashRequest(
+      { hash: hashRequest.hash, locators: [{ kind: "webrtc-sdp" }] },
+      TARGET,
+      hashRequest.messageId
+    );
+    await acceptPromise;
+    await vi.waitFor(() => expect(peersA).toHaveLength(1));
+    relayPrivate(channelA, channelB, OWNER, cursorA);
+    await vi.waitFor(() => expect(channelB.published).toHaveLength(1));
+    relayPrivate(channelB, channelA, TARGET, cursorB);
+    await vi.waitFor(() => expect(peersB).toHaveLength(1));
+
+    const senderChannel = peersA[0]!.dataChannel;
+    const receiverChannel = peersB[0]!.dataChannel;
+    senderChannel.forward = (data) => receiverChannel.emitMessage(data);
+    receiverChannel.forward = (data) => senderChannel.emitMessage(data);
+    peersB[0]!.emitRemoteDataChannel();
+    receiverChannel.emitOpen();
+    senderChannel.emitOpen();
+
+    await sendPromise;
+    expect(senderChannel.sent.map((item) => JSON.parse(item).type)).toEqual([
+      "transfer_begin",
+      "transfer_chunk",
+      "transfer_end"
+    ]);
+    expect(receiverChannel.sent.map((item) => JSON.parse(item).type)).toEqual(["transfer_complete"]);
+    expect(peersA[0]!.closed).toBeGreaterThan(0);
+    expect(peersB[0]!.closed).toBeGreaterThan(0);
+    serviceA.dispose();
+    serviceB.dispose();
+  });
+
+  it("在出站 Hash 前同步占用 transfer 槽，第二次发送立即失败", async () => {
+    let resolveHash!: (value: string) => void;
+    const hashGate = new Promise<string>((resolve) => { resolveHash = resolve; });
+    let hashCalls = 0;
+    const peers: TestPeer[] = [];
+    const channel = makeChannel();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      env: makeEnvironment(peers, {
+        hashSha256: async () => {
+          hashCalls += 1;
+          return hashGate;
+        }
+      })
+    });
+    const file = new Blob(["first"]);
+    const first = service.sendFile({ targetPublicKeyHex: TARGET, file });
+    await vi.waitFor(() => expect(hashCalls).toBe(1));
+    await expect(service.sendFile({ targetPublicKeyHex: TARGET, file: new Blob(["second"]) }))
+      .rejects.toThrow("busy_local");
+    expect(channel.published).toHaveLength(0);
+    service.dispose();
+    resolveHash("a".repeat(64));
+    await expect(first).rejects.toThrow("service_disposed");
+  });
+
+  it("出站 Hash 期间切换 owner 会使旧发送失效且不发布请求", async () => {
+    let resolveHash!: (value: string) => void;
+    const hashGate = new Promise<string>((resolve) => { resolveHash = resolve; });
+    let hashCalls = 0;
+    const mutable = makeMutableKeyspace();
+    const channel = makeChannel();
+    const service = createWebrtcService({
+      channel,
+      keyspace: mutable.keyspace,
+      configStore: createMemoryWebrtcConfigStore(),
+      env: makeEnvironment([], {
+        hashSha256: async () => {
+          hashCalls += 1;
+          return hashGate;
+        }
+      })
+    });
+    const sending = service.sendFile({ targetPublicKeyHex: TARGET, file: new Blob(["owner-fence"]) });
+    await vi.waitFor(() => expect(hashCalls).toBe(1));
+    mutable.setOwner(OTHER);
+    resolveHash("b".repeat(64));
+    await expect(sending).rejects.toThrow("transfer_owner_changed");
+    expect(channel.published).toHaveLength(0);
+    service.dispose();
+  });
+
+  it("通讯录准入查询完成后若 service 已 dispose，不得生成 notice 或 pending", async () => {
+    let resolveAdmission!: (allowed: boolean) => void;
+    let admissionCalls = 0;
+    let admissionSignal: AbortSignal | undefined;
+    const admissionGate = new Promise<boolean>((resolve) => { resolveAdmission = resolve; });
+    const notices = makeNoticeRegistry();
+    const channel = makeChannel();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
+      configStore: createMemoryWebrtcConfigStore(),
+      noticeRegistry: notices.registry,
+      isTransferSenderAllowed: async (_publicKeyHex, signal) => {
+        admissionCalls += 1;
+        admissionSignal = signal;
+        return admissionGate;
       }
     });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), ice));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(pcs[0]?.addIceCandidate).toHaveBeenCalledTimes(1);
-    expect(pcs[0]?.addIceCandidate).toHaveBeenCalledWith({
-      candidate: "candidate:1 1 udp 1 1.2.3.4 1234 typ host",
-      sdpMid: "0",
-      sdpMLineIndex: 0
-    });
-  });
-
-  it("transfer ice uses transfer-scoped clientMessageId", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const { env } = makeTransferIceSignalEnv();
-    createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env
-    });
-    const invite = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "transfer_invite",
-      sessionId: "sess-transfer-ice-id",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
+    channel.deliver({
+      type: "keymaster.webrtc.transfer.request",
+      session_id: newSessionID(),
+      hash: "d".repeat(64),
       kind: "file",
-      byteLength: 5,
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), invite));
-    await new Promise((r) => setTimeout(r, 30));
-    const ice = sent.find((msg) => {
-      const parsed = parseSignalBody(msg.body);
-      return parsed.ok && parsed.signal.type === "ice";
-    });
-    expect(ice?.clientMessageId).toContain("km-wrtc-ice-transfer-");
+      byte_length: 1
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(admissionCalls).toBe(1));
+    service.dispose();
+    expect(admissionSignal?.aborted).toBe(true);
+    resolveAdmission(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(notices.registry.upsert).not.toHaveBeenCalled();
+    expect(notices.records).toHaveLength(0);
   });
 
-  it("hangup transitions phase to ended briefly then back to idle", async () => {
-    const { service: endpoint, sent } = makeFakeEndpointService({});
-    const history = makeHistoryRecorder();
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      keyspace: makeKeyspaceService(),
+  it("通讯录准入查询完成后若 owner 已切换，不得生成 notice 或 pending", async () => {
+    let resolveAdmission!: (allowed: boolean) => void;
+    let admissionCalls = 0;
+    let admissionSignal: AbortSignal | undefined;
+    const admissionGate = new Promise<boolean>((resolve) => { resolveAdmission = resolve; });
+    const mutable = makeMutableKeyspace();
+    const notices = makeNoticeRegistry();
+    const channel = makeChannel();
+    const service = createWebrtcService({
+      channel,
+      keyspace: mutable.keyspace,
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv(),
-      historyService: history.service
+      noticeRegistry: notices.registry,
+      isTransferSenderAllowed: async (_publicKeyHex, signal) => {
+        admissionCalls += 1;
+        admissionSignal = signal;
+        return admissionGate;
+      }
     });
-    await ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
-    expect(ws.snapshot().phase).toBe("inviting");
-    const phases: string[] = [];
-    const off = ws.subscribe((s) => phases.push(s.phase));
-    await ws.hangup();
-    // 同步时：hangup 完成应至少看到 ended。
-    expect(ws.snapshot().phase).toBe("ended");
-    // 等 ttl（默认 1500ms）——测试环境下期间不能缩短为 ttl=10。
-    await new Promise((r) => setTimeout(r, ENDED_TTL_PROBE_MS));
-    expect(["idle", "ended"]).toContain(ws.snapshot().phase);
-    off();
-    expect(phases).toContain("ended");
-    expect(history.calls).toEqual([{ status: "failed", peerPublicKeyHex: TARGET }]);
-    void sent;
+    channel.deliver({
+      type: "keymaster.webrtc.transfer.request",
+      session_id: newSessionID(),
+      hash: "e".repeat(64),
+      kind: "file",
+      byte_length: 1
+    }, TARGET, "bsv8.message.v1");
+    await vi.waitFor(() => expect(admissionCalls).toBe(1));
+    mutable.setOwner(OTHER);
+    expect(admissionSignal?.aborted).toBe(true);
+    resolveAdmission(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(notices.registry.upsert).not.toHaveBeenCalled();
+    expect(notices.records).toHaveLength(0);
+    service.dispose();
   });
 
-  it("remote hangup before answer records missed on incoming calls", async () => {
-    const { service: endpoint, incomingSubs } = makeFakeEndpointService({});
-    const history = makeHistoryRecorder();
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      keyspace: makeKeyspaceService(),
+  it("限制不同发送者同时进行的通讯录准入查询数量", async () => {
+    const admissionGates: Array<(allowed: boolean) => void> = [];
+    const admissionCalls: string[] = [];
+    const notices = makeNoticeRegistry();
+    const channel = makeChannel();
+    const service = createWebrtcService({
+      channel,
+      keyspace: makeKeyspace(),
       configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv(),
-      historyService: history.service
+      noticeRegistry: notices.registry,
+      isTransferSenderAllowed: (publicKeyHex) => {
+        admissionCalls.push(publicKeyHex);
+        return new Promise<boolean>((resolve) => { admissionGates.push(resolve); });
+      }
     });
-    const inv: WebrtcInviteSignal = {
-      schema: "keymaster.webrtc.v1",
-      type: "invite",
-      sessionId: "sess-incoming-missed",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    };
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(inv)));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(ws.snapshot().phase).toBe("incoming");
-    const hangup = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "hangup",
-      sessionId: "sess-incoming-missed",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      reason: "hangup"
-    });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), hangup));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(history.calls).toEqual([{ status: "missed", peerPublicKeyHex: "02cccc".padEnd(66, "c") }]);
-  });
-
-  it("sendImage sends a loopback transfer and records histories on both sides", async () => {
-    const bus = makeLoopbackBus();
-    const env = makeLoopbackTransferEnv();
-    const senderHistory = makeHistoryRecorder();
-    const receiverHistory = makeHistoryRecorder();
-    const sender = createWebrtcService({
-      endpointService: bus.createEndpoint(OWNER),
-      keyspace: makeKeyspaceServiceFor(OWNER),
-      historyService: senderHistory.service,
-      configStore: createMemoryWebrtcConfigStore(),
-      env
-    });
-    const receiver = createWebrtcService({
-      endpointService: bus.createEndpoint(TARGET),
-      keyspace: makeKeyspaceServiceFor(TARGET),
-      historyService: receiverHistory.service,
-      configStore: createMemoryWebrtcConfigStore(),
-      env
-    });
-    void receiver;
-
-    const file = new Blob([new Uint8Array([1, 2, 3, 4, 5])], { type: "image/png" });
-    await sender.sendImage({ targetPublicKeyHex: TARGET, file });
-    await new Promise((r) => setTimeout(r, 25));
-
-    expect(senderHistory.transfers).toHaveLength(1);
-    expect(senderHistory.transfers[0]).toMatchObject({
-      status: "completed",
-      peerPublicKeyHex: TARGET,
-      byteLength: 5,
-      blobSize: 5
-    });
-    expect(receiverHistory.transfers).toHaveLength(1);
-    expect(receiverHistory.transfers[0]).toMatchObject({
-      status: "completed",
-      peerPublicKeyHex: OWNER,
-      byteLength: 5,
-      blobSize: 5
-    });
-    await expect(sender.sendFile({ targetPublicKeyHex: TARGET, file })).resolves.toBeUndefined();
-    await new Promise((r) => setTimeout(r, 25));
-    expect(senderHistory.transfers).toHaveLength(2);
-    expect(receiverHistory.transfers).toHaveLength(2);
-  });
-
-  /* ----- STUN 诊断：fake 必须依赖 createOffer + setLocalDescription 触发 gather ----- */
-
-  it("runStunDiagnostics: ok only when setLocalDescription fires; missing call yields timeout", async () => {
-    const { service: endpoint } = makeFakeEndpointService({});
-    const okEnv = stunEnv({ okHost: "stun:good.example.com:3478" });
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore({
-        stunServers: [
-          "stun:good.example.com:3478",
-          "stun:nonexistent-host.invalid:3478"
-        ]
-      }),
-      env: okEnv.env
-    });
-    const results = await ws.runStunDiagnostics();
-    expect(results).toHaveLength(2);
-    const good = results.find((r) => r.url === "stun:good.example.com:3478");
-    const bad = results.find((r) => r.url === "stun:nonexistent-host.invalid:3478");
-    expect(good?.status).toBe("ok");
-    expect(bad?.status).toBe("timeout");
-    // 关键断言：fake env 必须被 createOffer + setLocalDescription 触发。
-    expect(okEnv.calls).toContainEqual({ kind: "createOffer" });
-    expect(okEnv.calls).toContainEqual({ kind: "setLocalDescription" });
-    expect(okEnv.calls).toContainEqual({ kind: "createDataChannel" });
-  });
-
-  /* ----- phase: connecting 必须出现在主路径上 ----- */
-
-  it("outgoing: phase transitions inviting -> connecting after remote answer", async () => {
-    const { service: endpoint, incomingSubs } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
-    expect(ws.snapshot().phase).toBe("inviting");
-    const phaseTrace: string[] = [];
-    const off = ws.subscribe((s) => phaseTrace.push(s.phase));
-    // 模拟对端回 answer 信令
-    const ans = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "answer",
-      sessionId: ws.snapshot().direction ? "sess-fake" : "sess-fake",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "answer", sdp: "v=0" })
-    });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), ans));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(ws.snapshot().phase).toBe("connecting");
-    off();
-    expect(phaseTrace).toContain("inviting");
-    expect(phaseTrace).toContain("connecting");
-  });
-
-  it("incoming: phase transitions incoming -> connecting after acceptIncoming", async () => {
-    const { service: endpoint, sent, incomingSubs } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    const inv: WebrtcInviteSignal = {
-      schema: "keymaster.webrtc.v1",
-      type: "invite",
-      sessionId: "sess-incoming-1",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "offer", sdp: "v=0" })
-    };
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), serializeSignal(inv)));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(ws.snapshot().phase).toBe("incoming");
-    const phaseTrace: string[] = [];
-    const off = ws.subscribe((s) => phaseTrace.push(s.phase));
-    await ws.acceptIncoming();
-    expect(ws.snapshot().phase).toBe("connecting");
-    off();
-    expect(phaseTrace).toContain("incoming");
-    expect(phaseTrace).toContain("connecting");
-    // 接听端在 connecting 之后必须把 answer 信令发出去。
-    const ans = sent.find((s) => {
-      const p = parseSignalBody(s.body);
-      return p.ok && p.signal.type === "answer";
-    });
-    expect(ans).toBeTruthy();
-  });
-
-  it("phase transitions connecting -> connected once remoteStream arrives", async () => {
-    const { service: endpoint, incomingSubs } = makeFakeEndpointService({});
-    const ws = createWebrtcService({
-      endpointService: endpoint,
-      configStore: createMemoryWebrtcConfigStore(),
-      env: fakeEnv()
-    });
-    await ws.startCall({ targetPublicKeyHex: TARGET, mode: "audio" });
-    expect(ws.snapshot().phase).toBe("inviting");
-    // 模拟对端 answer → 进入 connecting
-    const ans = serializeSignal({
-      schema: "keymaster.webrtc.v1",
-      type: "answer",
-      sessionId: "sess-fake",
-      createdAtMs: Date.now(),
-      expiresAtMs: Date.now() + 60_000,
-      mode: "audio",
-      sdp: JSON.stringify({ type: "answer", sdp: "v=0" })
-    });
-    incomingSubs[0]?.(buildMessage("02cccc".padEnd(66, "c"), ans));
-    await new Promise((r) => setTimeout(r, 30));
-    expect(ws.snapshot().phase).toBe("connecting");
-    // 模拟远端流到达：直接 mutate 状态（生产中由 pc.onTrack 走）；通过
-    // 找出 pc.onTrack 回调调用方式——但 fake env 不暴露回调，所以这里走
-    // `dispose` 不动的兜底：仅断言 connecting 这条主线已生效，不强制走完。
-    // （完整 onTrack 流已在测试 #15 中由 `invite sent with video receives
-    //  fallback_required` 间接覆盖——那是另一条路径。）
-    expect(["connecting", "connected"]).toContain(ws.snapshot().phase);
+    for (let index = 0; index < 9; index += 1) {
+      const sender = `${index % 2 === 0 ? "02" : "03"}${index.toString(16).padStart(2, "0")}${"f".repeat(62)}`;
+      channel.deliver({
+        type: "keymaster.webrtc.transfer.request",
+        session_id: newSessionID(),
+        hash: index.toString(16).padStart(64, "0"),
+        kind: "file",
+        byte_length: 1
+      }, sender, "bsv8.message.v1");
+    }
+    await vi.waitFor(() => expect(admissionCalls).toHaveLength(8));
+    expect(new Set(admissionCalls).size).toBe(8);
+    for (const resolve of admissionGates) resolve(false);
+    service.dispose();
   });
 });
-
-const ENDED_TTL_PROBE_MS = 50; // 测试里默认 ENDED ttl 较长，探针只拿到 ended 即可。

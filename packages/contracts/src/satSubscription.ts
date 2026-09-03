@@ -1,14 +1,10 @@
 // SatSubscription / Channel / SPI 的平台内部契约。
 //
 // 重要边界：这些类型只给受信任的系统插件使用，不加入 Connect public
-// contracts。Connect App 仍然只通过 appmsg.* 使用 AppMsg。
-
-import type { MessageProviderHealth, ProviderDeliveryAckClaim, ProviderSealedMessageRecord, ProviderSendInput } from "./messageProvider.js";
+// contracts。Connect App 只看到 channel.* 的 JSON API。
 
 /** SatSubscription 平台插件 id。 */
 export const SAT_SUBSCRIPTION_PLUGIN_ID = "sat-subscription";
-/** SatSubscription 聚合 MessageProvider id。 */
-export const SAT_SUBSCRIPTION_PROVIDER_ID = "sat-subscription";
 /** SSP trusted capability。 */
 export const SAT_SUBSCRIPTION_SERVICE_CAPABILITY = "sat-subscription.service";
 /** SPI 管理 trusted capability。 */
@@ -138,6 +134,9 @@ export interface SatIncomingPublish {
   receivedAtMs: number;
 }
 
+/** Coordinator 处理入站 Publish 的异步回调；未知私密协议可通过拒绝错误回传 SSP。 */
+export type SatIncomingPublishHandler = (event: SatIncomingPublish) => void | Promise<void>;
+
 /** trusted SSP capability 的唯一调用入口。 */
 export interface SatSubscriptionService {
   /**
@@ -149,16 +148,8 @@ export interface SatSubscriptionService {
     /** 完整合法 JSON UTF-8 原始字节。 */
     contentJson: Uint8Array;
   }): Promise<{ requestIdHex: string; chargedAmount: string }>;
-  /** 设置指定供应商的订阅状态；页面命令不会把订阅事件当成 React 订阅。 */
-  setSubscription(input: { supplierId: string; channel: string; subscribed: boolean }): Promise<SatActionResult>;
-  /** 显式向指定供应商添加订阅，可能收费。 */
-  subscribe(input: { supplierId: string; channel: string }): Promise<SatActionResult>;
-  /** 显式从指定供应商移除订阅，可能收费。 */
-  unsubscribe(input: { supplierId: string; channel: string }): Promise<SatActionResult>;
-  /** 显式刷新指定供应商的远端订阅集合，可能收费。 */
-  refreshSubscriptions(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }>;
   /** 聚合所有 receive Supplier 的入站 Publish。 */
-  subscribeEvents(handler: (event: SatIncomingPublish) => void): () => void;
+  subscribeEvents(handler: SatIncomingPublishHandler): () => void;
 }
 
 /** 设置页读取的 owner-scoped SatSubscription 快照。 */
@@ -178,7 +169,7 @@ export interface SatSubscriptionSettingsSnapshot {
 }
 
 /** SatSubscription 设置页需要的额外受信任管理操作。 */
-export interface SatSubscriptionAdminService extends SatSubscriptionService {
+export interface SatSubscriptionAdminService {
   /** 读取当前 owner 的供应商/订阅/扣费摘要。 */
   getSettingsSnapshot(): Promise<SatSubscriptionSettingsSnapshot>;
   /** 新增或更新供应商配置。 */
@@ -187,6 +178,8 @@ export interface SatSubscriptionAdminService extends SatSubscriptionService {
   deleteSupplier(supplierId: string): Promise<void>;
   /** 修改当前 owner 的默认发布和接收选择。 */
   setOwnerSettings(settings: SatOwnerSupplierSettingsV1): Promise<void>;
+  /** 只读查询指定 Supplier 的远端订阅集合；不接受单频道收费变更。 */
+  refreshSubscriptions(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }>;
 }
 
 /** SPI Information 中单个 currency 的余额。 */
@@ -319,18 +312,12 @@ export interface SatSupplierRuntimeView {
  */
 export type CoordinatorSatOperation =
   | { type: "ensure" }
-  | { type: "provider.health" }
-  | { type: "provider.send"; input: ProviderSendInput }
-  | { type: "provider.ack"; claim: ProviderDeliveryAckClaim }
   | { type: "admin.getSettings" }
   | { type: "admin.upsertSupplier"; config: SatSupplierConfigV1 }
   | { type: "admin.deleteSupplier"; supplierId: string }
   | { type: "admin.setOwnerSettings"; settings: SatOwnerSupplierSettingsV1 }
   | { type: "service.publish"; input: Parameters<SatSubscriptionService["publish"]>[0] }
-  | { type: "service.setSubscription"; input: Parameters<SatSubscriptionService["setSubscription"]>[0] }
-  | { type: "service.subscribe"; input: Parameters<SatSubscriptionService["subscribe"]>[0] }
-  | { type: "service.unsubscribe"; input: Parameters<SatSubscriptionService["unsubscribe"]>[0] }
-  | { type: "service.refreshSubscriptions"; input: Parameters<SatSubscriptionService["refreshSubscriptions"]>[0] }
+  | { type: "admin.refreshSubscriptions"; input: Parameters<SatSubscriptionAdminService["refreshSubscriptions"]>[0] }
   | { type: "spi.getInformation"; input: Parameters<SatSubscriptionSpiService["getInformation"]>[0] }
   | { type: "spi.prepareTopUp"; input: Parameters<SatSubscriptionSpiService["prepareTopUp"]>[0] }
   | { type: "spi.submitTopUp"; preview: SatTopUpPreview }
@@ -338,9 +325,8 @@ export type CoordinatorSatOperation =
   | { type: "spi.retryCollect"; input: Parameters<SatSubscriptionSpiService["retryCollect"]>[0] }
   | { type: "spi.collect"; input: Parameters<SatSubscriptionSpiService["collect"]>[0] };
 
-/** Coordinator 推送给各页面的 Sat 事件。`noop` 只用于 baseline，不会投影到 AppMsg。 */
+/** Coordinator 推送给各页面的 Sat 事件。`noop` 只用于 baseline。 */
 export type CoordinatorSatEvent =
-  | { type: "message"; record: ProviderSealedMessageRecord }
   | { type: "incoming"; event: SatIncomingPublish }
   | { type: "noop" };
 
@@ -351,7 +337,6 @@ export interface CoordinatorSatStateEvent {
   satRevision: number;
   sessionEpoch: string;
   event: CoordinatorSatEvent;
-  health?: MessageProviderHealth;
 }
 
 /** Window P2P lane 的连接实例 fence；四个字段必须完全匹配。 */

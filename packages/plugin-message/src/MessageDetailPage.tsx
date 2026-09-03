@@ -4,10 +4,10 @@
 //   - 路由参数是对端 publicKeyHex；
 //   - 文本消息与 WebRTC 历史分开存储、合并展示；
 //   - 发送动作保留文本输入，并在正文区下方直接承载当前 peer 的通话面板；
-//   - 在线状态每 3 秒探测一次，离开页面立即停止。
+//   - 不在页面轮询对端在线状态；消息和 WebRTC 都直接执行，失败由协议结果反馈。
 //
 // 硬切换 003：消息和联系人数据使用 Resource Store。
-// WebRTC 会话快照和在线状态是实时状态，保留为本地订阅。
+// WebRTC 会话快照是实时状态，保留为本地订阅。
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useCapability, useCurrentPath, useI18n, usePluginHost, useResource, useResourceSelector, router } from "@keymaster/runtime";
@@ -24,8 +24,6 @@ const DEFAULT_VISIBLE_MESSAGE_COUNT = 20;
 const MESSAGE_ERROR_KEYS: Record<string, string> = {
   service_not_ready: "message.page.detail.error.service_not_ready",
   invalid_target: "message.page.detail.error.invalid_target",
-  target_offline: "message.page.detail.error.target_offline",
-  target_unknown: "message.page.detail.error.target_unknown",
   device_unavailable: "message.page.detail.error.device_unavailable",
   send_invite_failed: "message.page.detail.error.send_invite_failed",
   create_offer_failed: "message.page.detail.error.create_offer_failed",
@@ -85,7 +83,6 @@ export function MessageDetailPage(): JSX.Element {
   const [isLocalPrimary, setIsLocalPrimary] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [visibleCount, setVisibleCount] = useState(DEFAULT_VISIBLE_MESSAGE_COUNT);
-  const [onlineStatus, setOnlineStatus] = useState<"online" | "offline" | "unknown">("unknown");
   const imageInputRef = useRef<HTMLInputElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const callPanelRef = useRef<HTMLElement | null>(null);
@@ -93,26 +90,6 @@ export function MessageDetailPage(): JSX.Element {
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
   const sendInFlightRef = useRef(false);
   const service = messageService;
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!webrtc || !normalizedPeerPublicKeyHex) {
-      setOnlineStatus("unknown");
-      return;
-    }
-    const refresh = async () => {
-      const status = await webrtc.checkPeerOnline(normalizedPeerPublicKeyHex);
-      if (!cancelled) setOnlineStatus(status);
-    };
-    void refresh();
-    const timer = window.setInterval(() => {
-      void refresh();
-    }, 3000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-  }, [normalizedPeerPublicKeyHex, webrtc]);
 
   useEffect(() => {
     setVisibleCount(DEFAULT_VISIBLE_MESSAGE_COUNT);
@@ -235,7 +212,7 @@ export function MessageDetailPage(): JSX.Element {
   }
 
   const title = contact?.name?.trim() ? contact.name : shortPublicKeyHex(peerPublicKeyHex);
-  const actionsDisabled = onlineStatus !== "online";
+  const actionsDisabled = !webrtc;
   const dialButtonsDisabled = actionsDisabled || hasAnyActiveWebrtcSession;
 
   async function sendText() {
@@ -264,10 +241,6 @@ export function MessageDetailPage(): JSX.Element {
 
   async function startCall(mode: "audio" | "video") {
     if (!webrtc) return;
-    if (actionsDisabled) {
-      setSendError(i18n.t("message.page.detail.offline"));
-      return;
-    }
     if (hasAnyActiveWebrtcSession) {
       setSendError(i18n.t("message.page.detail.error.busy_local"));
       return;
@@ -281,10 +254,6 @@ export function MessageDetailPage(): JSX.Element {
 
   async function sendAttachment(kind: "image" | "file", file: File) {
     if (!webrtc) return;
-    if (actionsDisabled) {
-      setSendError(i18n.t("message.page.detail.offline"));
-      return;
-    }
     try {
       if (kind === "image") {
         await webrtc.sendImage({ targetPublicKeyHex: normalizedPeerPublicKeyHex, file });
@@ -342,13 +311,6 @@ export function MessageDetailPage(): JSX.Element {
           <h1 className="km-message-detail__title">{title}</h1>
           <span className="km-message-detail__key">
             {shortPublicKeyHex(peerPublicKeyHex)}
-          </span>
-          <span className="km-message-detail__status" data-online-status={onlineStatus}>
-            {onlineStatus === "online"
-              ? i18n.t("message.page.detail.online")
-              : onlineStatus === "offline"
-                ? i18n.t("message.page.detail.offline")
-                : i18n.t("message.page.detail.unknown")}
           </span>
         </div>
       </header>

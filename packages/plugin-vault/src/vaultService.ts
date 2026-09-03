@@ -36,14 +36,12 @@ import {
   type KeyIdentity,
   type KeyRef,
   type PluginLogger,
-  type ProviderSealedMessageRecord,
   type VaultService,
   type VaultStatus,
   type VaultLifecycleSnapshot,
   type CoordinatorCommandResult
 } from "@keymaster/contracts";
 import type { VaultSessionState } from "@keymaster/contracts";
-import { type AppMsgMessage } from "@keymaster/contracts";
 import {
   aesGcmKeyFromRawBits,
   assertWebCryptoAvailable,
@@ -439,12 +437,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
       },
       async deriveP2pkhAddress(input) {
         return engine.deriveP2pkhAddress(input);
-      },
-      sealSendInput(input) {
-        return engine.sealSendInput(input);
-      },
-      async openSealed(rec: ProviderSealedMessageRecord) {
-        return engine.openSealed(rec);
       },
       async exportEncryptedKeyBackup(input) {
         if (input.publicKeyHex !== record.publicKeyHex) {
@@ -1954,14 +1946,6 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
             throw new Error("session_key_mismatch");
           }
           return engine.deriveP2pkhAddress(input);
-        },
-        sealSendInput(input) {
-          ensureLive();
-          return engine.sealSendInput(input);
-        },
-        async openSealed(rec: ProviderSealedMessageRecord) {
-          ensureLive();
-          return engine.openSealed(rec);
         },
         async exportEncryptedKeyBackup(input) {
           ensureLive();

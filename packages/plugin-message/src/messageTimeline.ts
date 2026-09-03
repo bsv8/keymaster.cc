@@ -1,17 +1,17 @@
 // 会话时间线合并纯函数。
 //
 // 设计缘由：
-//   - 文本消息继续走 appmsg；
+//   - 文本消息通过 Channel 私信；
 //   - WebRTC 历史单独来自 webrtc service；
 //   - UI 只消费统一时间线项，不关心底层真值源。
 
-import type { AppMsgMessage, WebrtcHistoryItem } from "@keymaster/contracts";
+import type { MessageRecord, WebrtcHistoryItem } from "@keymaster/contracts";
 
 export type MessageTimelineItem =
   | {
       kind: "text_message";
       sortAtMs: number;
-      message: AppMsgMessage;
+      message: MessageRecord;
     }
   | {
       kind: "webrtc_call_record";
@@ -30,7 +30,7 @@ export type MessageTimelineItem =
     };
 
 export function buildMessageTimeline(input: {
-  messages: readonly AppMsgMessage[];
+  messages: readonly MessageRecord[];
   history: readonly WebrtcHistoryItem[];
   ownerPublicKeyHex: string;
   peerPublicKeyHex: string;

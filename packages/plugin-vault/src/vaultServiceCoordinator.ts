@@ -140,20 +140,6 @@ export class VaultServiceCoordinator implements VaultService {
         };
       },
       async deriveP2pkhAddress(input) { guard(); const r = await client.crypto!({ type: "deriveP2pkhAddress", network: input.network }); if (r.ack.status !== "ok" || !r.result) throw new Error(commandResultMessage(r.ack, "Derive failed")); return { publicKeyHex, address: (r.result as { address: string }).address }; },
-      async sealSendInput(sealInput) {
-        guard();
-        const r = await client.crypto({ type: "sealSendInput", input: sealInput });
-        if (r.ack.status !== "ok" || !r.result || r.result.type !== "sealSendInput") return { error: commandResultMessage(r.ack, "Seal failed") };
-        return { record: { messageId: "", senderPublicKeyHex: sealInput.sender.senderPublicKeyHex, senderEndpointId: sealInput.sender.senderOrigin ?? sealInput.sender.senderAppId ?? "", senderEndpointKind: sealInput.sender.senderOrigin ? "origin" : "plugin", recipientPublicKeyHex: sealInput.recipient.recipientPublicKeyHex, recipientEndpointId: sealInput.recipient.recipientOrigin ?? sealInput.recipient.recipientAppId ?? "", recipientEndpointKind: sealInput.recipient.recipientOrigin ? "origin" : "plugin", clientMessageId: sealInput.clientMessageId, createdAtMs: sealInput.createdAtMs, insertedAtMs: Date.now(), envelope: { envelopeBytes: r.result.envelope, signatureBytes: r.result.signature } } } as unknown as import("@keymaster/contracts").ActiveKeyCryptoSealSendInputResult;
-      },
-      async openSealed(rec) {
-        guard();
-        try {
-          const r = await client.crypto({ type: "openSealed", record: rec });
-          if (r.ack.status !== "ok" || !r.result || r.result.type !== "openSealed") return null;
-          return JSON.parse(new TextDecoder().decode(r.result.plaintext)) as import("@keymaster/contracts").AppMsgMessage;
-        } catch { return null; }
-      },
       exportEncryptedKeyBackup: async (input) => {
         if (input.publicKeyHex !== publicKeyHex) throw new Error("session_key_mismatch");
         const backup = await this.call<string>("exportKeyBackup", input);

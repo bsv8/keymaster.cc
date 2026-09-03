@@ -33,6 +33,8 @@ interface PendingIncoming extends SatWindowConnectionFence {
 interface ActiveConnection extends SatWindowConnectionFence {
   connection: SatLibp2pConnection;
   offIncoming: () => void;
+  /** 兼容旧版/测试 adapter；支持状态监听时才启用自动重连通知。 */
+  offState?: () => void;
 }
 
 function laneError(code: string, message: string): Error & WindowP2pExecutorError {
@@ -84,6 +86,7 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
     this.rejectPending(laneError("ERR_CONTEXT_REPLACED", "Sat Window lane context was replaced"));
     for (const active of this.connections.values()) {
       try { active.offIncoming(); } catch { /* 已注销 */ }
+      try { active.offState?.(); } catch { /* 已注销 */ }
       active.connection.close();
     }
     this.connections.clear();
@@ -96,6 +99,7 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
     this.rejectPending(laneError("ERR_LANE_STOPPED", "Sat Window lane stopped"));
     for (const active of this.connections.values()) {
       try { active.offIncoming(); } catch { /* 已注销 */ }
+      try { active.offState?.(); } catch { /* 已注销 */ }
       active.connection.close();
     }
     this.connections.clear();
@@ -168,14 +172,27 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
       connection.close();
       throw laneError("ERR_INVALID_CONNECTION", "Sat connectionId is required");
     }
-    const active: ActiveConnection = { ...fence, connection, offIncoming: () => undefined };
+    const active: ActiveConnection = { ...fence, connection, offIncoming: () => undefined, offState: () => undefined };
     // 必须先放入当前连接表，再让 adapter flush connect/start 阶段缓存的
     // Publish；否则 handler 同步启动时会把这条首消息误判为 stale。
     this.connections.set(operation.supplierId, active);
     try {
       active.offIncoming = connection.subscribeSspRequests((wire) => this.handleIncoming(active, wire));
+      if (typeof connection.onStateChange === "function") active.offState = connection.onStateChange((state) => {
+        const currentContext = this.context;
+        if (this.connections.get(active.supplierId) !== active || !currentContext) return;
+        void Promise.resolve(currentContext.emit({
+          type: "ssp.state",
+          supplierId: active.supplierId,
+          connectionId: active.connectionId,
+          ownerSessionEpoch: active.ownerSessionEpoch,
+          supplierGeneration: active.supplierGeneration,
+          state
+        })).catch(() => undefined);
+      });
     } catch (error) {
       this.connections.delete(operation.supplierId);
+      try { active.offState?.(); } catch { /* 已注销 */ }
       connection.close();
       throw error;
     }
@@ -238,6 +255,7 @@ export class SatWindowP2pLane implements WindowP2pExecutorLane {
     if (!active) return;
     this.connections.delete(supplierId);
     try { active.offIncoming(); } catch { /* 已注销 */ }
+    try { active.offState?.(); } catch { /* 已注销 */ }
     active.connection.close();
   }
 

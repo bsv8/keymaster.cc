@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   ActiveKeyState,
-  AppMsgMessage,
+  MessageRecord,
   Contact,
   I18nService,
   I18nText,
@@ -23,6 +23,11 @@ import type { MessageService } from "./messageService.js";
 const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
+
+type MessageFixture = MessageRecord & {
+  readonly senderAppId?: string;
+  readonly recipientAppId?: string;
+};
 
 function makeFakeI18n(): I18nService {
   return {
@@ -72,7 +77,7 @@ function makeFakeKeyspace(): KeyspaceService {
   };
 }
 
-function makeFakeService(opts?: { messages?: AppMsgMessage[] }): MessageService {
+function makeFakeService(opts?: { messages?: MessageFixture[] }): MessageService {
   const messages = opts?.messages ?? [];
   return {
     isReady: () => true,
@@ -308,7 +313,7 @@ describe("MessagePage in PluginHostProvider", () => {
   });
 
   it("renders conversation list and peer body", async () => {
-    const sampleMessage: AppMsgMessage = {
+    const sampleMessage: MessageFixture = {
       messageId: "real-id-1",
       clientMessageId: "c-1",
       senderPublicKeyHex: "02aaaa".padEnd(66, "a"),
@@ -387,7 +392,7 @@ describe("MessagePage in PluginHostProvider", () => {
   });
 
   it("revalidates a cached empty conversation list when the page is reopened", async () => {
-    const messages: AppMsgMessage[] = [];
+    const messages: MessageFixture[] = [];
     const service = makeFakeService({ messages });
     const { host } = makeFakeHost(service);
     const { MessagePage } = await import("./MessagePage.js");

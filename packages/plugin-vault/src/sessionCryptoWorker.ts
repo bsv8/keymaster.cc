@@ -1,18 +1,9 @@
-// packages/plugin-vault/src/sessionCryptoWorker.ts
-// Session Crypto Worker：持有单一 active private key 的最小受控执行环境。
-//
-// 设计缘由：
-//   - 私钥 hex 只进入 worker 全局闭包，不进入插件 service / React state。
-//   - worker 只接受显式 operation，不执行任意回调。
-//
-// 施工单 001：signDigest 操作现在必须传递 format 参数
+// appView Session Window 的专用密码学 Worker。
+// 私钥只存在 worker 状态中；Channel 消息格式由 Coordinator 使用 ChannelProtocol
+// 处理，本 Worker 不实现消息信封。
 
 import {
   deriveP2pkhAddress,
-  buildOpenedAppMsgMessage,
-  hexToBytes,
-  openAppMessageLocalBytes,
-  sealAppMessageLocalBytes,
   signEcdsaDigest,
   verifySessionKeyPair
 } from "./sessionCryptoCore.js";
@@ -28,280 +19,112 @@ interface WorkerState {
   label: string;
   capabilities: string[];
   createdAt: string;
-  revoked: boolean;
 }
 
-interface WorkerStateRef {
-  current: WorkerState | null;
-}
-
+interface WorkerStateRef { current: WorkerState | null; }
 const singletonStateRef: WorkerStateRef = { current: null };
-
 const workerScope = globalThis as unknown as {
-  addEventListener: (
-    type: "message",
-    listener: (event: MessageEvent<SessionCryptoRequestMessage>) => void
-  ) => void;
-  postMessage: (msg: SessionCryptoResponseMessage) => void;
+  addEventListener: (type: "message", listener: (event: MessageEvent<SessionCryptoRequestMessage>) => void) => void;
+  postMessage: (message: SessionCryptoResponseMessage) => void;
 };
 
-function ensureState(stateRef: WorkerStateRef): WorkerState {
-  if (!stateRef.current || stateRef.current.revoked) {
-    throw new Error("Active key session has been revoked");
-  }
-  return stateRef.current;
+function ensureState(ref: WorkerStateRef): WorkerState {
+  if (!ref.current) throw new Error("Active key session has been revoked");
+  return ref.current;
 }
 
-function reply(message: SessionCryptoResponseMessage): void {
-  workerScope.postMessage(message);
+function closeWorker(): void {
+  const close = (globalThis as { close?: () => void }).close;
+  try { close?.(); } catch { /* noop */ }
 }
 
-function closeWorkerScope(): void {
-  const maybeClose = (globalThis as unknown as { close?: () => void }).close;
-  if (typeof maybeClose === "function") {
-    try {
-      maybeClose.call(globalThis);
-    } catch {
-      /* noop */
-    }
-  }
-}
-
-function createSessionCryptoRequestHandler(stateRef: WorkerStateRef) {
-  return async function handleRequest(
+function createHandler(ref: WorkerStateRef) {
+  return async function handle(
     message: SessionCryptoRequestMessage,
-    scope: { postMessage: (msg: SessionCryptoResponseMessage) => void } = workerScope
+    scope: { postMessage: (message: SessionCryptoResponseMessage) => void } = workerScope
   ): Promise<void> {
-    const post = (msg: SessionCryptoResponseMessage): void => {
-      scope.postMessage(msg);
-    };
-    switch (message.kind) {
-      case "init": {
-        if (stateRef.current && !stateRef.current.revoked) {
-          throw new Error("Session crypto worker is already initialized");
-        }
-        const privateKeyBytes = message.privateKeyBytes;
-        verifySessionKeyPair({
-          publicKeyHex: message.publicKeyHex,
-          privateKeyBytes
-        });
-        stateRef.current = {
-          sessionId: message.sessionId,
-          publicKeyHex: message.publicKeyHex,
-          privateKeyBytes,
-          label: message.label,
-          capabilities: message.capabilities,
-          createdAt: message.createdAt,
-          revoked: false
-        };
-        post({
-          requestId: message.requestId,
-          ok: true,
-          result: {
+    const post = (response: SessionCryptoResponseMessage): void => scope.postMessage(response);
+    try {
+      switch (message.kind) {
+        case "init": {
+          if (ref.current) throw new Error("Session crypto worker is already initialized");
+          verifySessionKeyPair({ publicKeyHex: message.publicKeyHex, privateKeyBytes: message.privateKeyBytes });
+          ref.current = {
+            sessionId: message.sessionId,
+            publicKeyHex: message.publicKeyHex,
+            privateKeyBytes: message.privateKeyBytes,
+            label: message.label,
+            capabilities: [...message.capabilities],
+            createdAt: message.createdAt
+          };
+          post({ requestId: message.requestId, ok: true, result: {
             sessionId: message.sessionId,
             publicKeyHex: message.publicKeyHex,
             label: message.label,
-            capabilities: message.capabilities,
+            capabilities: [...message.capabilities],
             createdAt: message.createdAt
-          }
-        });
-        return;
-      }
-      case "signDigest": {
-        const s = ensureState(stateRef);
-        if (message.publicKeyHex !== s.publicKeyHex) {
-          throw new Error("session_key_mismatch");
-        }
-        const sig = await signEcdsaDigest({
-          privateKeyBytes: s.privateKeyBytes,
-          digest: new Uint8Array(message.digest),
-          format: message.format
-        });
-        post({
-          requestId: message.requestId,
-          ok: true,
-          result: {
-            publicKeyHex: s.publicKeyHex,
-            format: message.format,
-            signature: new Uint8Array(sig).buffer
-          }
-        });
-        return;
-      }
-      case "deriveP2pkhAddress": {
-        const s = ensureState(stateRef);
-        if (message.publicKeyHex !== s.publicKeyHex) {
-          throw new Error("session_key_mismatch");
-        }
-        post({
-          requestId: message.requestId,
-          ok: true,
-          result: {
-            publicKeyHex: s.publicKeyHex,
-            address: deriveP2pkhAddress(s.publicKeyHex, message.network)
-          }
-        });
-        return;
-      }
-      case "sealSendInput": {
-        const s = ensureState(stateRef);
-        if (message.input.sender.senderPublicKeyHex !== s.publicKeyHex) {
-          post({
-            requestId: message.requestId,
-            ok: true,
-            result: { error: "session_key_mismatch" }
-          });
+          } });
           return;
         }
-        try {
-          const sealed = sealAppMessageLocalBytes({
-            senderPrivateKeyBytes: s.privateKeyBytes,
-            senderPublicKeyBytes: hexToBytes(message.input.sender.senderPublicKeyHex),
-            recipientPublicKeyBytes: hexToBytes(message.input.recipient.recipientPublicKeyHex),
-            senderEndpoint: {
-              kind: message.input.sender.senderOrigin ? "origin" : "plugin",
-              id: message.input.sender.senderOrigin ?? message.input.sender.senderAppId ?? ""
-            },
-            recipientEndpoint: {
-              kind: message.input.recipient.recipientOrigin ? "origin" : "plugin",
-              id:
-                message.input.recipient.recipientOrigin ??
-                message.input.recipient.recipientAppId ??
-                ""
-            },
-            contentType: message.input.contentType,
-            body: message.input.body,
-            clientMessageId: message.input.clientMessageId,
-            createdAtMs: message.input.createdAtMs
+        case "signDigest": {
+          const state = ensureState(ref);
+          if (message.publicKeyHex !== state.publicKeyHex) throw new Error("session_key_mismatch");
+          const signature = await signEcdsaDigest({
+            privateKeyBytes: state.privateKeyBytes,
+            digest: new Uint8Array(message.digest),
+            format: message.format
           });
-          post({
-            requestId: message.requestId,
-            ok: true,
-            result: {
-              record: {
-                messageId: "",
-                senderPublicKeyHex: s.publicKeyHex,
-                senderEndpointId: message.input.sender.senderOrigin ?? message.input.sender.senderAppId ?? "",
-                senderEndpointKind: message.input.sender.senderOrigin ? "origin" : "plugin",
-                recipientPublicKeyHex: message.input.recipient.recipientPublicKeyHex,
-                recipientEndpointId:
-                  message.input.recipient.recipientOrigin ??
-                  message.input.recipient.recipientAppId ??
-                  "",
-                recipientEndpointKind: message.input.recipient.recipientOrigin ? "origin" : "plugin",
-                clientMessageId: message.input.clientMessageId,
-                createdAtMs: message.input.createdAtMs,
-                insertedAtMs: message.input.createdAtMs,
-                envelope: {
-                  envelopeBytes: sealed.envelope,
-                  signatureBytes: sealed.signatureBytes
-                }
-              }
-            }
-          });
-        } catch (err) {
-          post({
-            requestId: message.requestId,
-            ok: true,
-            result: { error: err instanceof Error ? err.message : String(err) }
-          });
+          post({ requestId: message.requestId, ok: true, result: {
+            publicKeyHex: state.publicKeyHex,
+            format: message.format,
+            signature: signature.buffer
+          } });
+          return;
         }
-        return;
-      }
-      case "openSealed": {
-        const s = ensureState(stateRef);
-        try {
-          const opened = openAppMessageLocalBytes({
-            signed: message.rec.envelope,
-            recipientPrivateKeyBytes: s.privateKeyBytes,
-            recipientPublicKeyBytes: hexToBytes(s.publicKeyHex)
-          });
-          post({
-            requestId: message.requestId,
-            ok: true,
-            result: buildOpenedAppMsgMessage(message.rec, opened)
-          });
-        } catch {
-          post({
-            requestId: message.requestId,
-            ok: true,
-            result: null
-          });
+        case "deriveP2pkhAddress": {
+          const state = ensureState(ref);
+          if (message.publicKeyHex !== state.publicKeyHex) throw new Error("session_key_mismatch");
+          post({ requestId: message.requestId, ok: true, result: {
+            publicKeyHex: state.publicKeyHex,
+            address: deriveP2pkhAddress(state.publicKeyHex, message.network)
+          } });
+          return;
         }
-        return;
+        case "dispose":
+          ref.current?.privateKeyBytes.fill(0);
+          ref.current = null;
+          post({ requestId: message.requestId, ok: true, result: null });
+          closeWorker();
+          return;
       }
-      case "dispose": {
-        if (stateRef.current) {
-          stateRef.current.privateKeyBytes.fill(0);
-          stateRef.current.revoked = true;
-        }
-        stateRef.current = null;
-        post({ requestId: message.requestId, ok: true, result: null });
-        closeWorkerScope();
-        return;
-      }
+    } catch (error) {
+      post({ requestId: message.requestId, ok: false, error: error instanceof Error ? error.message : String(error) });
     }
   };
 }
 
-const handleRequest = createSessionCryptoRequestHandler(singletonStateRef);
+const handleRequest = createHandler(singletonStateRef);
+if (typeof workerScope.addEventListener === "function") {
+  workerScope.addEventListener("message", (event) => { void handleRequest(event.data); });
+}
 
+/** 测试接缝：直接运行一次 Worker 请求并返回回包。 */
 export async function __testHandleSessionCryptoRequest(
   message: SessionCryptoRequestMessage
 ): Promise<SessionCryptoResponseMessage[]> {
   const posted: SessionCryptoResponseMessage[] = [];
-  try {
-    await handleRequest(message, {
-      postMessage(msg) {
-        posted.push(msg);
-      }
-    });
-  } catch (err) {
-    const requestId = (message as { requestId?: string } | undefined)?.requestId ?? "unknown";
-    posted.push({
-      requestId,
-      ok: false,
-      error: err instanceof Error ? err.message : String(err)
-    });
-  }
+  await handleRequest(message, { postMessage: (response) => posted.push(response) });
   return posted;
 }
 
-export function __testCreateSessionCryptoRequestHandler() {
-  const stateRef: WorkerStateRef = { current: null };
-  const handle = createSessionCryptoRequestHandler(stateRef);
-  return async function handleTestRequest(
-    message: Record<string, unknown>
-  ): Promise<SessionCryptoResponseMessage[]> {
-    const typedMessage = message as unknown as SessionCryptoRequestMessage;
+/** 测试接缝：创建隔离的 session crypto worker 状态，模拟多个 app session。 */
+export function __testCreateSessionCryptoRequestHandler():
+  (message: SessionCryptoRequestMessage) => Promise<SessionCryptoResponseMessage[]> {
+  const ref: WorkerStateRef = { current: null };
+  const isolatedHandle = createHandler(ref);
+  return async (message) => {
     const posted: SessionCryptoResponseMessage[] = [];
-    try {
-      await handle(typedMessage, {
-        postMessage(msg) {
-          posted.push(msg);
-        }
-      });
-    } catch (err) {
-      const requestId = (typedMessage as { requestId?: string } | undefined)?.requestId ?? "unknown";
-      posted.push({
-        requestId,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err)
-      });
-    }
+    await isolatedHandle(message, { postMessage: (response) => posted.push(response) });
     return posted;
   };
-}
-
-if (typeof workerScope.addEventListener === "function") {
-  workerScope.addEventListener("message", (event: MessageEvent<SessionCryptoRequestMessage>) => {
-    void handleRequest(event.data).catch((err) => {
-      const requestId = (event.data as { requestId?: string } | undefined)?.requestId ?? "unknown";
-      reply({
-        requestId,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err)
-      });
-    });
-  });
 }

@@ -76,52 +76,28 @@ Confirmation text and spending policy remain under Keymaster control.
 | `feepool.prepare`<br>[`feepoolPrepare()`](/api/classes/KeymasterConnectClient#feepoolprepare) | [`FeepoolPrepareParams`](/api/interfaces/FeepoolPrepareParams) → [`FeepoolPrepareResult`](/api/interfaces/FeepoolPrepareResult) | Prepare the next fee-pool draft operation. |
 | `feepool.commit`<br>[`feepoolCommit()`](/api/classes/KeymasterConnectClient#feepoolcommit) | [`FeepoolCommitParams`](/api/interfaces/FeepoolCommitParams) → [`FeepoolCommitResult`](/api/interfaces/FeepoolCommitResult) | Verify counterparty signatures and commit the prepared draft. |
 
-## AppMsg
+## Channel
 
-Send end-to-end sealed application messages and query the session-visible
-message history.
-
-| Operation | Type contract | Purpose |
-| --- | --- | --- |
-| `appmsg.send`<br>[`appmsgSend()`](/api/classes/KeymasterConnectClient#appmsgsend) | [`AppMsgSendParams`](/api/interfaces/AppMsgSendParams) → [`AppMsgSendResult`](/api/interfaces/AppMsgSendResult) | Send a sealed message to an owner and exact recipient endpoint. |
-| `appmsg.list`<br>[`appmsgList()`](/api/classes/KeymasterConnectClient#appmsglist) | [`AppMsgListParams`](/api/interfaces/AppMsgListParams) → [`AppMsgListResult`](/api/interfaces/AppMsgListResult) | Incrementally list visible messages. |
-| `appmsg.get`<br>[`appmsgGet()`](/api/classes/KeymasterConnectClient#appmsgget) | [`AppMsgGetParams`](/api/interfaces/AppMsgGetParams) → [`AppMsgGetResult`](/api/interfaces/AppMsgGetResult) | Fetch one visible message. |
-
-AppMsg is provider-neutral. Keymaster may carry these operations through the
-default HubMsg provider or through the trusted SatSubscription provider selected
-by the user in Keymaster settings; the Connect App cannot select a provider or
-Supplier and never receives SSP/SPI operations or Supplier configuration.
-`appmsg.send` means that Keymaster accepted the local send operation. It is not
-a delivery, read, or business-completion receipt.
-
-### AppMsg event
-
-| Event | Payload | Delivery |
-| --- | --- | --- |
-| `appmsg.message_received` | [`AppMsgMessageReceivedEventData`](/api/type-aliases/AppMsgMessageReceivedEventData) | [`KeymasterConnectOptions.onEvent`](/api/interfaces/KeymasterConnectOptions#onevent) |
-
-The event contains the complete message and does not occupy a request slot or
-produce a Result message.
-
-## Broadcast
-
-Publish owner-signed broadcasts and manage the exact channel set contributed by
-the current caller.
+Publish JSON content to an exact channel and manage the exact channel set
+contributed by the current Connect session.
 
 | Operation | Type contract | Purpose |
 | --- | --- | --- |
-| `broadcast.publish`<br>[`broadcastPublish()`](/api/classes/KeymasterConnectClient#broadcastpublish) | [`BroadcastPublishParams`](/api/interfaces/BroadcastPublishParams) → [`BroadcastPublishResult`](/api/interfaces/BroadcastPublishResult) | Publish a message signed by the session owner. |
-| `broadcast.subscription_set`<br>[`broadcastSubscriptionSet()`](/api/classes/KeymasterConnectClient#broadcastsubscriptionset) | [`BroadcastSubscriptionSetParams`](/api/interfaces/BroadcastSubscriptionSetParams) → [`BroadcastSubscriptionSetResult`](/api/interfaces/BroadcastSubscriptionSetResult) | Replace the caller's exact channel set. |
-| `broadcast.subscription_list`<br>[`broadcastSubscriptionList()`](/api/classes/KeymasterConnectClient#broadcastsubscriptionlist) | [`BroadcastSubscriptionListParams`](/api/interfaces/BroadcastSubscriptionListParams) → [`BroadcastSubscriptionListResult`](/api/interfaces/BroadcastSubscriptionListResult) | Read the caller's channel set. |
+| `channel.publish`<br>[`channelPublish()`](/api/classes/KeymasterConnectClient#channelpublish) | [`ChannelPublishParams`](/api/interfaces/ChannelPublishParams) → [`ChannelPublishResult`](/api/interfaces/ChannelPublishResult) | Publish JSON content signed by the session owner. |
+| `channel.subscription_set`<br>[`channelSubscriptionSet()`](/api/classes/KeymasterConnectClient#channelsubscriptionset) | [`ChannelSubscriptionSetParams`](/api/interfaces/ChannelSubscriptionSetParams) → [`ChannelSubscriptionSetResult`](/api/interfaces/ChannelSubscriptionSetResult) | Replace the caller's exact channel set; pass `[]` to release it. |
 
-### Broadcast event
+Channels are exact values: wildcards are not accepted. Physical Supplier
+selection and subscriptions are owned by Keymaster's Coordinator, and the app
+does not see SSP/SPI payloads or private inbox messages.
+
+### Channel event
 
 | Event | Payload | Delivery |
 | --- | --- | --- |
-| `broadcast.message_received` | [`BroadcastMessageReceivedEventData`](/api/interfaces/BroadcastMessageReceivedEventData) | [`KeymasterConnectOptions.onEvent`](/api/interfaces/KeymasterConnectOptions#onevent) |
+| `channel.message_received` | [`ChannelMessageReceivedEventData`](/api/interfaces/ChannelMessageReceivedEventData) | [`KeymasterConnectOptions.onEvent`](/api/interfaces/KeymasterConnectOptions#onevent) |
 
-The event contains the complete verified broadcast body. It does not require a
-follow-up request.
+The event contains verified JSON content for a channel currently subscribed by
+this Connect session. It does not require a follow-up request.
 
 ## Storage
 

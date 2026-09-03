@@ -2,7 +2,7 @@
 //
 // 设计缘由：
 //   - 每把 key 一个 namespace DB；
-//   - 这里只存 WebRTC 自己的历史，不碰 appmsg 真值；
+//   - 这里只存 WebRTC 自己的历史，不碰消息插件的真值；
 //   - schema 尽量简单，允许后续按需扩展。
 
 import type { KeyScopedStorageHandle, KeyspaceService } from "@keymaster/contracts";
@@ -80,4 +80,3 @@ export interface WebrtcTransferBlobRow {
   blobKey: string;
   blob: Blob;
 }
-

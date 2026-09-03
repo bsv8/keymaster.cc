@@ -1,12 +1,11 @@
 // SatSubscription 平台插件清单。
 //
-// 插件独立于 HubMsg：只有用户在 AppMsg 管理页显式选择
-// `sat-subscription` 后，AppMsg 才会绑定本 provider。默认仍由 registry
-// 选择 HubMsg，缺少 Sat transport 不会影响现有 AppMsg/Connect 能力。
+// SatSubscription 只提供 SSP/SPI 管理能力；Channel runtime 的唯一实例在
+// SharedWorker Coordinator 中，通过受控 capability 暴露给业务插件。
 
 import type {
+  ChannelRuntimeFactory,
   I18nPluginResources,
-  MessageProviderRegistry,
   PluginContext,
   PluginManifest,
   ResourceRegistry,
@@ -19,9 +18,8 @@ import type {
   WindowP2pExecutorLaneRegistry
 } from "@keymaster/contracts";
 import {
-  MESSAGE_PROVIDER_REGISTRY_CAPABILITY,
+  CHANNEL_RUNTIME_CAPABILITY,
   SAT_SUBSCRIPTION_PLUGIN_ID,
-  SAT_SUBSCRIPTION_PROVIDER_ID,
   SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
   SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
@@ -32,7 +30,7 @@ import {
 export { SAT_SUBSCRIPTION_PLUGIN_ID } from "@keymaster/contracts";
 import { SatSubscriptionSettings } from "./SatSubscriptionSettings.js";
 import { SatWindowP2pLane } from "./satWindowLane.js";
-import { createSatWorkerAdminService, createSatWorkerSpiService, SatSubscriptionWorkerProxyProvider } from "./satWorkerProxy.js";
+import { createSatWorkerAdminService, createSatWorkerChannelRuntime, createSatWorkerSpiService } from "./satWorkerProxy.js";
 
 export const SAT_SUBSCRIPTION_ROUTE_PATH = "/settings/system";
 
@@ -41,7 +39,7 @@ const resources: I18nPluginResources = {
   resources: {
     en: {
       "sat.settings.title": "SatSubscription",
-      "sat.settings.description": "Multi-supplier SSP subscriptions, Channel AppMsg delivery and SPI account management. Subscribe and automatic ACK may charge the supplier account.",
+      "sat.settings.description": "Multi-supplier SSP subscriptions and SPI account management.",
       "sat.settings.suppliers": "Suppliers",
       "sat.settings.identity": "Authenticated public key",
       "sat.settings.connection": "Connection",
@@ -85,7 +83,7 @@ const resources: I18nPluginResources = {
     },
     "zh-CN": {
       "sat.settings.title": "SatSubscription",
-      "sat.settings.description": "多供应商 SSP 订阅、Channel AppMsg 投递和 SPI 账户管理。Subscribe 与自动 ACK 可能消耗供应商余额。",
+      "sat.settings.description": "多供应商 SSP 订阅与 SPI 账户管理。",
       "sat.settings.suppliers": "供应商",
       "sat.settings.identity": "认证公钥",
       "sat.settings.connection": "连接状态",
@@ -133,7 +131,7 @@ const resources: I18nPluginResources = {
 export const satSubscriptionPlugin: PluginManifest = {
   id: SAT_SUBSCRIPTION_PLUGIN_ID,
   name: "SatSubscription",
-  description: "SSP multi-supplier subscriptions, Channel AppMsg transport and SPI management.",
+  description: "SSP multi-supplier subscriptions and SPI management.",
   i18n: resources,
   meta: {
     kind: "platform",
@@ -142,31 +140,32 @@ export const satSubscriptionPlugin: PluginManifest = {
     canDisable: false,
     providesCapabilities: [
       SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
-      SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY
+      SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
+      CHANNEL_RUNTIME_CAPABILITY
     ],
     displayGroup: "platform"
   },
   keyScopedStorages: [{ storageId: "sat_subscription_v1", description: "SatSubscription owner-scoped supplier, subscription, SPI and Channel state" }],
   dependencies: [
-    { capability: MESSAGE_PROVIDER_REGISTRY_CAPABILITY, reason: "注册聚合 sat-subscription provider" },
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "Channel 私钥操作只能进入 SharedWorker" },
+    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "Sat 连接和 Channel runtime 由 SharedWorker 协调" },
     { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
     { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
     { capability: "system-settings.registry", reason: "注册 SatSubscription 系统设置" },
     { capability: "system-status.registry", reason: "注册 SatSubscription 运行诊断" }
   ],
   setup(ctx: PluginContext) {
-    const registry = ctx.get<MessageProviderRegistry>(MESSAGE_PROVIDER_REGISTRY_CAPABILITY);
     const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
     const laneRegistry = ctx.get<WindowP2pExecutorLaneRegistry>(WINDOW_P2P_EXECUTOR_CAPABILITY);
     // Window 只注册网络 lane；DB、状态、Channel crypto 和 provider handle
     // 全部由 Coordinator SharedWorker 创建，避免多 Tab 重复连接/扣费。
     const offLane = laneRegistry.register(new SatWindowP2pLane());
-    const provider = new SatSubscriptionWorkerProxyProvider(coordinator);
-    registry.register(provider);
-
     const admin = createSatWorkerAdminService(coordinator);
     ctx.provide<SatSubscriptionAdminService>(SAT_SUBSCRIPTION_SERVICE_CAPABILITY, admin);
+    const channelRuntimeFactory: ChannelRuntimeFactory = {
+      forPlugin: (pluginId) => createSatWorkerChannelRuntime(coordinator, { kind: "plugin", pluginId }),
+      forSystem: (systemId) => createSatWorkerChannelRuntime(coordinator, { kind: "system", systemId })
+    };
+    ctx.provide<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY, channelRuntimeFactory);
 
     const resources = ctx.get<ResourceRegistry>(RESOURCE_REGISTRY_CAPABILITY);
     const emptySettingsSnapshot = (): SatSubscriptionSettingsSnapshot => ({
@@ -226,8 +225,6 @@ export const satSubscriptionPlugin: PluginManifest = {
       offLane();
       settings.unregister(settingId);
       status.unregister(statusId);
-      registry.unregister(SAT_SUBSCRIPTION_PROVIDER_ID);
-      await provider.shutdown();
     });
   }
 };

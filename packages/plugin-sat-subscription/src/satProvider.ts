@@ -1,25 +1,9 @@
-// SatSubscription 聚合 MessageProvider。
+// SatSubscription 的 SSP/SPI 传输实现。
 //
-// provider 只接收 AppMsg sealed envelope，不接触 App 明文或私钥。Channel
-// 的 seal/open 通过 `SatChannelCrypto` 注入；生产实现由 SharedWorker crypto
-// capability 提供。Supplier 连接由 transport 注入，便于把 libp2p host 限制
-// 在 Window executor，并且不在本文件复制 Noise/PeerId 实现。
+// 本模块只负责 Supplier 连接、SSP action 和原始入站 Publish。Channel
+// 的签名、加密、解密和固定 inbox 路由全部由 Coordinator runtime 负责。
 
 import type {
-  MessageProvider,
-  MessageProviderHandle,
-  MessageProviderOperations,
-  MessageProviderHealth,
-  ProviderOnlineInput,
-  ProviderOnlineResult,
-  ProviderDeliveryAckClaim,
-  ProviderSealedMessageRecord,
-  ProviderSendInput,
-  ProviderSendResult,
-  ProviderListInput,
-  ProviderListResult,
-  ProviderGetInput,
-  ProviderSigner,
   SatIncomingPublish,
   SatSubscriptionService,
   SatSubscriptionAdminService,
@@ -27,13 +11,10 @@ import type {
   SatActionResult,
   SatErrorCode,
   SatSupplierConfigV1,
+  SatIncomingPublishHandler
 } from "@keymaster/contracts";
 import {
-  BSV8_INBOX_CHANNEL_PREFIX,
-  BSV8_MESSAGE_PROTOCOL,
-  SAT_SUBSCRIPTION_RESOURCE_LIMITS,
-  SAT_SUBSCRIPTION_PROVIDER_ID,
-  readAppMsgEnvelopeMetadata
+  SAT_SUBSCRIPTION_RESOURCE_LIMITS
 } from "@keymaster/contracts";
 import {
   newPublish,
@@ -48,8 +29,6 @@ import {
 } from "sat-subscription-protocol/client";
 import { parseRequestEnvelope } from "sat-subscription-protocol/wire";
 import { MAX_WIRE_BYTES, validateAmount, validateRequestId } from "sat-subscription-protocol/protocol";
-import { base64urlEncode } from "bsv8-channel-protocol";
-import { sha256 } from "@noble/hashes/sha2.js";
 import {
   assertCanonicalAmount,
   assertCompressedPublicKeyHex,
@@ -57,74 +36,9 @@ import {
   copyValidatedJson,
   bytesToHex,
   equalBytes,
-  isCompressedPublicKeyHex,
   normalizeSupplierConfig
 } from "./satValidation.js";
 import type { SatSubscriptionStateStore } from "./satState.js";
-
-/** Channel seal/open 受控边界；实现不得把私钥放进 provider。 */
-export interface SatChannelCrypto {
-  /** 使用当前 owner 私钥创建新的 Channel Deliver。 */
-  sealDeliver(input: {
-    recipientPublicKeyHex: string;
-    contentJson: Uint8Array;
-    issuedAtMs: number;
-    expiresAtMs: number;
-  }): Promise<SatChannelSealResult>;
-  /** 使用当前 owner 私钥创建 ACK。 */
-  sealAck(input: {
-    recipientPublicKeyHex: string;
-    acknowledgedMessageIdBase64Url: string;
-    issuedAtMs: number;
-    expiresAtMs: number;
-  }): Promise<SatChannelSealResult>;
-  /** 在 SharedWorker 内解密、验签、检查有效期并严格分派。 */
-  open(input: {
-    channel: string;
-    envelopeJson: Uint8Array;
-    nowMs: number;
-  }): Promise<SatChannelOpenResult>;
-}
-
-/** Channel seal 结果；只包含可传输的密文 envelope。 */
-export interface SatChannelSealResult {
-  /** 目标 inbox channel。 */
-  channel: string;
-  /** 32-byte 随机 message_id 的 canonical base64url。 */
-  messageIdBase64Url: string;
-  /** Channel 加密 envelope JSON。 */
-  envelopeJson: Uint8Array;
-  /** 发送方 owner 公钥。 */
-  fromPublicKeyHex: string;
-  /** 过期时间。 */
-  expiresAtMs: number;
-}
-
-/** Channel open 结果；正文仍保持为 AppMsg sealed wrapper 字节。 */
-export interface SatChannelOpenResult {
-  /** 精确 ingress channel。 */
-  channel: string;
-  /** authenticated/Channel envelope sender 公钥。 */
-  fromPublicKeyHex: string;
-  /** inbox 后缀目标公钥。 */
-  toPublicKeyHex: string;
-  /** Channel message_id。 */
-  messageIdBase64Url: string;
-  /** Channel 已验签消息的逻辑摘要；重加密同一 Deliver 时保持不变。 */
-  signedDigestHex: string;
-  /** Channel protocol。 */
-  protocol: string;
-  /** deliver 或 ack；ack 不进入 AppMsg provider。 */
-  bodyType: "deliver" | "ack";
-  /** Deliver 的 content JSON；ACK 时省略。 */
-  contentJson?: Uint8Array;
-  /** ACK 关联的原始 Deliver message_id。 */
-  acknowledgedMessageIdBase64Url?: string;
-  /** Channel issued_at_ms。 */
-  issuedAtMs: number;
-  /** Channel expires_at_ms。 */
-  expiresAtMs: number;
-}
 
 /** 连接边界的错误；sentBoundary 用来禁止不安全自动重试。 */
 export class SatTransportError extends Error {
@@ -137,6 +51,13 @@ export class SatTransportError extends Error {
     this.sentBoundary = input.sentBoundary ?? "unknown";
   }
 }
+
+/** Supplier 断线重连的退避上限；重连本身不重放未知结果的收费动作。 */
+const RECONNECT_BASE_DELAY_MS = 250;
+const RECONNECT_MAX_DELAY_MS = 30_000;
+/** 订阅真值收敛的独立退避；不能复用连接重试状态。 */
+const SUBSCRIPTION_RECONCILE_BASE_DELAY_MS = 500;
+const SUBSCRIPTION_RECONCILE_MAX_DELAY_MS = 30_000;
 
 /** 已认证 Supplier 连接；实现不向 provider 暴露私钥。 */
 export interface SatSupplierConnection {
@@ -152,6 +73,8 @@ export interface SatSupplierConnection {
   readonly authenticatedPublicKeyHex: string;
   /** 当前连接是否可用。 */
   readonly state: "online" | "degraded" | "closed";
+  /** 连接/长 SSP stream 状态变化；用于无配置变化的自动重连。 */
+  onStateChange?(handler: (state: "online" | "degraded" | "closed") => void): () => void;
   /** 在一条 SSP 长 Stream 上发送一个 Wire request。 */
   requestSsp(wire: Uint8Array, signal?: AbortSignal): Promise<Uint8Array>;
   /** 在独立 SPI Stream 上发送一个 Wire request。 */
@@ -203,10 +126,10 @@ export type SatStateForOwner = (ownerPublicKeyHex: string) => Promise<SatSubscri
 export interface SatSubscriptionProviderConfig {
   /** 打开当前 owner 的 key-scoped 状态。 */
   stateForOwner: SatStateForOwner;
-  /** SharedWorker 提供的 Channel crypto boundary。 */
-  channelCrypto: SatChannelCrypto;
   /** Window executor/正式 SSP adapter。缺省时 provider 保持 unavailable。 */
   transport?: SatSubscriptionTransport;
+  /** 当前 owner Runtime 的启动取消信号；锁屏/切换 owner 时终止正在拨号的旧世代。 */
+  signal?: AbortSignal;
   /** Supplier catalog generation；配置改变时必须递增。 */
   supplierGeneration?: number;
   /** 当前 owner 会话世代；锁定、切换 key 后必须变化。 */
@@ -217,10 +140,6 @@ export interface SatSubscriptionProviderConfig {
   now?: () => number;
   /** 脱敏日志。 */
   logger?: { info?: (event: string, data?: Record<string, unknown>) => void; warn?: (event: string, data?: Record<string, unknown>) => void };
-}
-
-function unknownOnline(input: ProviderOnlineInput): ProviderOnlineResult {
-  return Object.fromEntries(input.publicKeyHexes.map((value) => [value, "unknown"]));
 }
 
 function isWindowP2pExecutorError(error: unknown): error is {
@@ -301,114 +220,6 @@ function actionErrorCode(errorCode: string): SatErrorCode {
   return "protocol";
 }
 
-function parseBase64Url(value: unknown, field: string): Uint8Array {
-  if (typeof value !== "string" || value.length === 0 || !/^[A-Za-z0-9_-]+$/.test(value)) throw new SatSubscriptionError("protocol", `${field} is not base64url`);
-  const padded = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - value.length % 4) % 4);
-  let binary: string;
-  try { binary = atob(padded); } catch { throw new SatSubscriptionError("protocol", `${field} cannot be decoded`); }
-  const out = new Uint8Array(binary.length);
-  for (let index = 0; index < binary.length; index += 1) out[index] = binary.charCodeAt(index);
-  if (base64urlEncode(out) !== value) throw new SatSubscriptionError("protocol", `${field} is not canonical base64url`);
-  return out;
-}
-
-function encodeKeymasterContent(record: ProviderSealedMessageRecord): Uint8Array {
-  return new TextEncoder().encode(JSON.stringify({
-    version: 1,
-    envelopeBase64Url: base64urlEncode(record.envelope.envelopeBytes),
-    signatureBase64Url: base64urlEncode(record.envelope.signatureBytes)
-  }));
-}
-
-function parseKeymasterContent(contentJson: Uint8Array): { envelopeBytes: Uint8Array; signatureBytes: Uint8Array } {
-  let value: unknown;
-  try { value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(contentJson)); } catch { throw new SatSubscriptionError("protocol", "Channel Deliver content is not valid JSON"); }
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new SatSubscriptionError("protocol", "Channel Deliver content must be an object");
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== 3 || record.version !== 1 || typeof record.envelopeBase64Url !== "string" || typeof record.signatureBase64Url !== "string") {
-    throw new SatSubscriptionError("protocol", "Channel Deliver content has an invalid shape");
-  }
-  const envelopeBytes = parseBase64Url(record.envelopeBase64Url, "envelopeBase64Url");
-  const signatureBytes = parseBase64Url(record.signatureBase64Url, "signatureBase64Url");
-  if (signatureBytes.byteLength !== 64) throw new SatSubscriptionError("protocol", "AppMsg signature must be 64 bytes");
-  return { envelopeBytes, signatureBytes };
-}
-
-function appMsgRecordFromChannel(input: {
-  opened: SatChannelOpenResult;
-  contentJson: Uint8Array;
-  ingressSupplierId: string;
-  insertedAtMs: number;
-}): ProviderSealedMessageRecord {
-  if (!isCompressedPublicKeyHex(input.opened.fromPublicKeyHex) || !isCompressedPublicKeyHex(input.opened.toPublicKeyHex)) throw new SatSubscriptionError("protocol", "Channel identity is not a compressed public key");
-  const content = parseKeymasterContent(input.contentJson);
-  const metadata = readAppMsgEnvelopeMetadata(content.envelopeBytes);
-  if (metadata.senderPublicKeyHex !== input.opened.fromPublicKeyHex) throw new SatSubscriptionError("identity", "Channel sender and AppMsg sender differ");
-  if (metadata.recipientPublicKeyHex !== input.opened.toPublicKeyHex) throw new SatSubscriptionError("identity", "Channel recipient and AppMsg recipient differ");
-  return {
-    messageId: input.opened.messageIdBase64Url,
-    senderPublicKeyHex: metadata.senderPublicKeyHex,
-    senderEndpointId: metadata.senderEndpointId,
-    senderEndpointKind: metadata.senderEndpointKind,
-    recipientPublicKeyHex: metadata.recipientPublicKeyHex,
-    recipientEndpointId: metadata.recipientEndpointId,
-    recipientEndpointKind: metadata.recipientEndpointKind,
-    clientMessageId: metadata.clientMessageId,
-    createdAtMs: metadata.createdAtMs,
-    insertedAtMs: input.insertedAtMs,
-    envelope: { envelopeBytes: content.envelopeBytes, signatureBytes: content.signatureBytes },
-    ingressSupplierId: input.ingressSupplierId
-  };
-}
-
-function dedupKey(protocol: string, fromPublicKeyHex: string, messageId: string): string {
-  return `${protocol}\u0000${fromPublicKeyHex}\u0000${messageId}`;
-}
-
-function deliveryAckKey(deliveryId: string, supplierId: string): string {
-  return deliveryId + "\u0000" + supplierId;
-}
-
-type DeliveryAckState = "pending" | "claimed" | "ack_sending" | "acknowledged" | "unknown";
-
-interface DeliveryAckEntry {
-  /** Worker 生成的实际入站投递编号。 */
-  supplierId: string;
-  claimToken: string;
-  /** 下面四项是 ACK 的唯一权威字段，不能从页面 record 读取。 */
-  senderPublicKeyHex: string;
-  messageId: string;
-  dedupKey: string;
-  supplierGeneration: number;
-  state: DeliveryAckState;
-  inFlight?: Promise<void>;
-}
-
-interface DeliveryAckTombstone {
-  claimToken: string;
-  state: "acknowledged" | "unknown";
-}
-
-function claimFromInput(input: ProviderSealedMessageRecord | ProviderDeliveryAckClaim): ProviderDeliveryAckClaim {
-  if (!input || typeof input !== "object") return { deliveryId: "", supplierId: "", ackClaimToken: "" };
-  const value = input as Partial<ProviderSealedMessageRecord & ProviderDeliveryAckClaim>;
-  return {
-    deliveryId: typeof value.deliveryId === "string" ? value.deliveryId : "",
-    supplierId: typeof value.supplierId === "string"
-      ? value.supplierId
-      : typeof value.ingressSupplierId === "string" ? value.ingressSupplierId : "",
-    ackClaimToken: typeof value.ackClaimToken === "string" ? value.ackClaimToken : "",
-  };
-}
-
-function isFullDeliveryRecord(input: ProviderSealedMessageRecord | ProviderDeliveryAckClaim): input is ProviderSealedMessageRecord {
-  return "messageId" in input || "senderPublicKeyHex" in input || "envelope" in input;
-}
-
-function digestHex(value: Uint8Array): string {
-  return bytesToHex(sha256(value));
-}
-
 /** Sat provider 自己的稳定错误类型。 */
 export class SatSubscriptionError extends Error {
   readonly code: SatErrorCode;
@@ -419,54 +230,65 @@ export class SatSubscriptionError extends Error {
   }
 }
 
-class SatSubscriptionHandle implements MessageProviderOperations {
+export class SatSubscriptionHandle {
   private currentState: "connecting" | "bound" | "closed" = "connecting";
   private readonly connections = new Map<string, SatSupplierConnection>();
   private readonly connectionErrors = new Map<string, string>();
   private readonly offPublish = new Map<string, () => void>();
-  private readonly subscribers = new Set<(record: ProviderSealedMessageRecord) => void>();
-  private readonly incomingSubscribers = new Set<(event: SatIncomingPublish) => void>();
-  /**
-   * 权威入站投递队列；一条 delivery 同时包含 AppMsg record 和 sat event，
-   * 不再用两个独立队列分别计数，避免一侧满而另一侧静默丢失。
-   */
-  private readonly pendingDeliveries: Array<{
-    record: ProviderSealedMessageRecord;
-    event: SatIncomingPublish;
-    recordDelivered: boolean;
-    eventDelivered: boolean;
-  }> = [];
-  /** 已进入 handleIncomingWire、但尚未完成投影的 delivery 也占用一个队列项。 */
-  private deliveryAdmissionReservations = 0;
-  /** 同一 deliveryId + supplierId 的 ACK 单写者状态；只保存有限数量的 active claim。 */
-  private readonly deliveryAcks = new Map<string, DeliveryAckEntry>();
-  /** 终态 tombstone 只保留有限数量，防止未知结果被自动重发。 */
-  private readonly deliveryAckTombstones = new Map<string, DeliveryAckTombstone>();
-  /** 并发入站在真正写入 claim 表前也要占用一个 active slot。 */
-  private deliveryAckAdmissionReservations = 0;
+  /** 连接状态监听注销函数；旧连接必须先注销再 close，避免旧回调复活。 */
+  private readonly offConnectionState = new Map<string, () => void>();
+  /** 同一 Supplier 只允许一个拨号流程；配置代际变化时顺序等待旧拨号结束。 */
+  private readonly connectingSuppliers = new Map<string, { generation: number; promise: Promise<void> }>();
+  /** 每个 Supplier 独立的重连 timer/尝试次数。 */
+  private readonly reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly reconnectAttempts = new Map<string, number>();
+  /** 连接已在线但订阅刷新/对账失败时的独立重试 timer/尝试次数。 */
+  private readonly subscriptionReconcileTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly subscriptionReconcileAttempts = new Map<string, number>();
+  private readonly subscriptionReconcileInFlight = new Set<string>();
+  private readonly incomingSubscribers = new Set<SatIncomingPublishHandler>();
+  /** Worker 订阅建立前到达的原始 Publish，超过上限直接拒绝。 */
+  private readonly pendingIncoming: SatIncomingPublish[] = [];
   private readonly ownerPublicKeyHex: string;
   private readonly stateStore: SatSubscriptionStateStore;
   /** Supplier catalog 代际；配置变更会使所有旧请求/连接失效。 */
   private generation: number;
-  /** 串行化 supplier 配置变更，避免两个设置操作交叉关闭/重连。 */
-  private configMutationTail: Promise<void> = Promise.resolve();
+  /** 当前 Coordinator 逻辑频道并集；不包含 owner，物理状态仍按 Supplier/频道持久化。 */
+  private readonly physicalDesiredChannels = new Set<string>();
+  /** 正在清理的逻辑频道；失败时保留，下一次 reconcile 继续对账。 */
+  private readonly physicalUnsubscribeChannels = new Set<string>();
+  /** Worker 重启前遗留的远端订阅证据；不能恢复成当前逻辑 desired。 */
+  private readonly historicalCleanupChannels = new Set<string>();
+  /** 当前连接代际内的远端订阅查询结果；旧 DB observed 不能直接当真值。 */
+  private readonly supplierRefreshStatus = new Map<string, { generation: number; ok: boolean }>();
+  /**
+   * 所有会改变物理订阅真值的动作共用一条队列。
+   *
+   * 不能只串行 Mux：设置页的 Supplier 变更和显式 service 调用也可能
+   * 与 Mux 同时进入 Provider；若各自读取同一个 observed 状态，会产生两
+   * 笔 Subscribe。这里把“查远端/收费动作/落库”作为一个原子顺序。
+   */
+  private mutationTail: Promise<void> = Promise.resolve();
   private readonly now: () => number;
   private readonly cfg: SatSubscriptionProviderConfig;
-  private readonly setProviderHealth: (healthy: boolean, error: string | null) => void;
+  private readonly setRuntimeHealth: (healthy: boolean, error: string | null) => void;
 
   constructor(input: {
     ownerPublicKeyHex: string;
     stateStore: SatSubscriptionStateStore;
     generation: number;
     cfg: SatSubscriptionProviderConfig;
-    setProviderHealth: (healthy: boolean, error: string | null) => void;
+    setRuntimeHealth: (healthy: boolean, error: string | null) => void;
   }) {
     this.ownerPublicKeyHex = input.ownerPublicKeyHex;
     this.stateStore = input.stateStore;
     this.generation = input.generation;
     this.cfg = input.cfg;
     this.now = input.cfg.now ?? Date.now;
-    this.setProviderHealth = input.setProviderHealth;
+    this.setRuntimeHealth = input.setRuntimeHealth;
+    for (const record of this.stateStore.listSubscriptions()) {
+      if (record.observed !== "unsubscribed") this.historicalCleanupChannels.add(record.channel);
+    }
   }
 
   state(): "idle" | "connecting" | "bound" | "closed" {
@@ -486,30 +308,65 @@ class SatSubscriptionHandle implements MessageProviderOperations {
   }
 
   async start(): Promise<void> {
+    if (this.cfg.signal?.aborted) {
+      this.close();
+      return;
+    }
     if (!this.cfg.transport) {
       if (this.currentState === "closed") return;
       this.currentState = "bound";
-      this.setProviderHealth(false, "SatSubscription transport is unavailable");
+      this.setRuntimeHealth(false, "SatSubscription transport is unavailable");
       return;
     }
     let observedGeneration = this.generation;
     // 配置可能在初次连接期间变更；只在当前 generation 的连接全部完成后
     // 才进入 bound，旧配置的连接结果会被 connectSupplier 丢弃。
     for (;;) {
+      if (this.cfg.signal?.aborted) {
+        this.close();
+        return;
+      }
       const suppliers = this.stateStore.listSuppliers().filter((item) => item.enabled);
       await Promise.all(suppliers.map((supplier) => this.connectSupplier(supplier, observedGeneration)));
       if (this.currentState === "closed") return;
       if (observedGeneration === this.generation) break;
       observedGeneration = this.generation;
     }
-    if (this.state() === "closed") return;
+    if (this.state() === "closed" || this.cfg.signal?.aborted) return;
     this.currentState = "bound";
-    if (this.connections.size > 0) this.setProviderHealth(true, null);
-    else this.setProviderHealth(false, this.connectionErrors.values().next().value ?? "No SatSubscription supplier is connected");
+    if (this.connections.size > 0) this.setRuntimeHealth(true, null);
+    else this.setRuntimeHealth(false, this.connectionErrors.values().next().value ?? "No SatSubscription supplier is connected");
+    // Worker 重启后旧 App 的 desired 只能作为清理证据；物理期望集合为空，
+    // 必须等当前 runtime 的第一个 Mux 集合到达后，才执行“当前 union + 旧证据”
+    // 的一次性对账。这里不主动恢复历史 App 频道。
+    for (const supplier of this.stateStore.listSuppliers().filter((item) => item.enabled)) {
+      if (!this.connections.has(supplier.supplierId)) this.scheduleReconnect(supplier.supplierId, this.generation);
+    }
   }
 
-  private async connectSupplier(supplier: SatSupplierConfigV1, generation = this.generation): Promise<void> {
-    if (!this.cfg.transport || !supplier.enabled || this.currentState === "closed") return;
+  private connectSupplier(supplier: SatSupplierConfigV1, generation = this.generation): Promise<void> {
+    const existing = this.connectingSuppliers.get(supplier.supplierId);
+    if (existing) {
+      if (existing.generation === generation) return existing.promise;
+      // 旧 generation 没有可安全复用的连接；等待其 finally 清理后再
+      // 拨打新世代，避免两个连接同时向同一 Supplier 建立收费会话。
+      return existing.promise.then(
+        () => this.connectSupplier(supplier, generation),
+        () => this.connectSupplier(supplier, generation)
+      );
+    }
+    const run = this.connectSupplierNow(supplier, generation);
+    const tracked = run.finally(() => {
+      if (this.connectingSuppliers.get(supplier.supplierId)?.promise === tracked) {
+        this.connectingSuppliers.delete(supplier.supplierId);
+      }
+    });
+    this.connectingSuppliers.set(supplier.supplierId, { generation, promise: tracked });
+    return tracked;
+  }
+
+  private async connectSupplierNow(supplier: SatSupplierConfigV1, generation: number): Promise<void> {
+    if (!this.cfg.transport || !supplier.enabled || this.currentState === "closed" || this.cfg.signal?.aborted) return;
     let connection: SatSupplierConnection | undefined;
     let connectionForHandler: SatSupplierConnection | undefined;
     let unsubscribe: (() => void) | undefined;
@@ -528,7 +385,7 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       return this.handleIncomingWire(supplier.supplierId, wire, generation);
     };
     try {
-      const activeConnection = await this.cfg.transport.connect({ supplier, ownerPublicKeyHex: this.ownerPublicKeyHex, ownerSessionEpoch, supplierGeneration: generation, onSspRequest: requestHandler });
+      const activeConnection = await this.cfg.transport.connect({ supplier, ownerPublicKeyHex: this.ownerPublicKeyHex, ownerSessionEpoch, supplierGeneration: generation, onSspRequest: requestHandler, signal: this.cfg.signal });
       connectionForHandler = activeConnection;
       connection = activeConnection;
       const currentSupplier = this.stateStore.getSupplier(supplier.supplierId);
@@ -554,8 +411,25 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       this.offPublish.get(supplier.supplierId)?.();
       unsubscribe = activeConnection.subscribeSspRequests(requestHandler);
       this.offPublish.set(supplier.supplierId, unsubscribe);
+      const offState = activeConnection.onStateChange?.((state) => {
+        this.handleConnectionState(supplier.supplierId, activeConnection!, state);
+      });
+      if (offState) {
+        this.offConnectionState.get(supplier.supplierId)?.();
+        this.offConnectionState.set(supplier.supplierId, offState);
+      }
+      // transport.connect 可能在注册监听器前已经发现 SSP 长流退化；
+      // 读取当前状态补发一次生命周期事件，避免把已失效连接当成在线而
+      // 永远不进入自动重连队列。
+      if (activeConnection.state !== "online") {
+        this.handleConnectionState(supplier.supplierId, activeConnection, activeConnection.state);
+        return;
+      }
+      this.reconnectAttempts.delete(supplier.supplierId);
       if (generation !== this.generation || this.state() === "closed") {
         unsubscribe();
+        this.offConnectionState.get(supplier.supplierId)?.();
+        this.offConnectionState.delete(supplier.supplierId);
         this.offPublish.delete(supplier.supplierId);
         if (this.connections.get(supplier.supplierId) === activeConnection) this.connections.delete(supplier.supplierId);
         activeConnection.close();
@@ -563,30 +437,145 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       }
     } catch (error) {
       try { unsubscribe?.(); } catch { /* subscribe 失败时无须再传播 */ }
+      this.offConnectionState.get(supplier.supplierId)?.();
+      this.offConnectionState.delete(supplier.supplierId);
       if (connection && this.connections.get(supplier.supplierId) === connection) {
         this.connections.delete(supplier.supplierId);
       }
       try { connection?.close(); } catch { /* connection 可能已关闭 */ }
-      if (generation !== this.generation || this.state() === "closed") return;
+      if (generation !== this.generation || this.state() === "closed" || this.cfg.signal?.aborted) return;
       this.connectionErrors.set(supplier.supplierId, error instanceof Error ? error.message : String(error));
+      this.scheduleReconnect(supplier.supplierId, generation);
     }
+  }
+
+  /** 连接/SSP 长流断开时，立即摘除旧实例并安排有界指数退避重连。 */
+  private handleConnectionState(
+    supplierId: string,
+    connection: SatSupplierConnection,
+    state: "online" | "degraded" | "closed"
+  ): void {
+    if (this.connections.get(supplierId) !== connection || this.currentState === "closed") return;
+    if (state === "online") {
+      this.connectionErrors.delete(supplierId);
+      this.updateRuntimeHealth();
+      return;
+    }
+    this.connectionErrors.set(supplierId, `Supplier connection ${state}`);
+    this.stopSupplier(supplierId, false);
+    this.scheduleReconnect(supplierId, this.generation);
+    this.updateRuntimeHealth();
+  }
+
+  private scheduleReconnect(supplierId: string, generation: number): void {
+    if (!this.cfg.transport || this.currentState === "closed" || generation !== this.generation || this.cfg.signal?.aborted) return;
+    const supplier = this.stateStore.getSupplier(supplierId);
+    if (!supplier?.enabled || this.connections.has(supplierId) || this.reconnectTimers.has(supplierId)) return;
+    const attempt = this.reconnectAttempts.get(supplierId) ?? 0;
+    const delay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * (2 ** Math.min(attempt, 7)));
+    this.reconnectAttempts.set(supplierId, attempt + 1);
+    const timer = setTimeout(() => {
+      this.reconnectTimers.delete(supplierId);
+      if (this.currentState === "closed" || generation !== this.generation) return;
+      const current = this.stateStore.getSupplier(supplierId);
+      if (!current?.enabled || this.connections.has(supplierId)) return;
+      void this.reconnectSupplier(current, generation);
+    }, delay);
+    this.reconnectTimers.set(supplierId, timer);
+  }
+
+  private async reconnectSupplier(supplier: SatSupplierConfigV1, generation: number): Promise<void> {
+    if (this.currentState === "closed" || generation !== this.generation || !this.cfg.transport || this.cfg.signal?.aborted) return;
+    await this.connectSupplier(supplier, generation);
+    if (this.connections.get(supplier.supplierId)) {
+      this.reconnectAttempts.delete(supplier.supplierId);
+      // 重连后的第一步必须刷新远端真值，再按当前 Mux union 对账；不能
+      // 依据旧 DB observed 直接补发收费 Subscribe/Unsubscribe。
+      void this.reconcileAfterReconnect(supplier.supplierId, generation);
+      this.updateRuntimeHealth();
+      return;
+    }
+    this.scheduleReconnect(supplier.supplierId, generation);
+  }
+
+  /**
+   * 在线连接与订阅收敛是两个独立状态机：连接成功不等于 owner inbox
+   * 已经在远端生效。刷新或物理对账失败时，只重试收敛，不重复拨号；
+   * 每次重试仍先查询远端列表，unknown_result 不会直接重放收费动作。
+   */
+  private async reconcileAfterReconnect(supplierId: string, generation: number): Promise<void> {
+    if (!this.isCurrentSupplierGeneration(supplierId, generation) || this.subscriptionReconcileInFlight.has(supplierId)) return;
+    this.subscriptionReconcileInFlight.add(supplierId);
+    let failure: unknown;
+    try {
+      await this.enqueueMutation(async () => {
+        if (!this.isCurrentSupplierGeneration(supplierId, generation)) return;
+        await this.refreshSubscriptionsNow({ supplierId });
+        await this.reconcilePhysicalSubscriptions(false);
+      });
+    } catch (error) {
+      failure = error;
+    } finally {
+      this.subscriptionReconcileInFlight.delete(supplierId);
+    }
+    if (!failure) {
+      this.subscriptionReconcileAttempts.delete(supplierId);
+      this.connectionErrors.delete(supplierId);
+      this.updateRuntimeHealth();
+      return;
+    }
+    this.connectionErrors.set(supplierId, failure instanceof Error ? failure.message : String(failure));
+    this.cfg.logger?.warn?.("sat.subscription.reconcile_after_reconnect_failed", {
+      supplierId,
+      error: failure instanceof Error ? failure.message : String(failure)
+    });
+    this.scheduleSubscriptionReconcile(supplierId, generation);
+  }
+
+  private scheduleSubscriptionReconcile(supplierId: string, generation: number): void {
+    if (!this.cfg.transport || this.currentState === "closed" || generation !== this.generation || this.cfg.signal?.aborted) return;
+    const supplier = this.stateStore.getSupplier(supplierId);
+    const connection = this.connections.get(supplierId);
+    if (!supplier?.enabled || !connection || connection.state !== "online") return;
+    if (this.subscriptionReconcileTimers.has(supplierId) || this.subscriptionReconcileInFlight.has(supplierId)) return;
+    const attempt = this.subscriptionReconcileAttempts.get(supplierId) ?? 0;
+    const delay = Math.min(SUBSCRIPTION_RECONCILE_MAX_DELAY_MS, SUBSCRIPTION_RECONCILE_BASE_DELAY_MS * (2 ** Math.min(attempt, 7)));
+    this.subscriptionReconcileAttempts.set(supplierId, attempt + 1);
+    const timer = setTimeout(() => {
+      this.subscriptionReconcileTimers.delete(supplierId);
+      if (!this.isCurrentSupplierGeneration(supplierId, generation)) return;
+      void this.reconcileAfterReconnect(supplierId, generation);
+    }, delay);
+    this.subscriptionReconcileTimers.set(supplierId, timer);
+  }
+
+  private cancelSubscriptionReconcile(supplierId: string): void {
+    const timer = this.subscriptionReconcileTimers.get(supplierId);
+    if (timer !== undefined) clearTimeout(timer);
+    this.subscriptionReconcileTimers.delete(supplierId);
+    this.subscriptionReconcileAttempts.delete(supplierId);
   }
 
   close(): void {
     if (this.currentState === "closed") return;
     this.generation += 1;
     this.currentState = "closed";
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
+    this.reconnectTimers.clear();
+    this.reconnectAttempts.clear();
+    for (const timer of this.subscriptionReconcileTimers.values()) clearTimeout(timer);
+    this.subscriptionReconcileTimers.clear();
+    this.subscriptionReconcileAttempts.clear();
+    this.subscriptionReconcileInFlight.clear();
+    this.connectingSuppliers.clear();
     for (const off of this.offPublish.values()) { try { off(); } catch { /* ignore */ } }
     this.offPublish.clear();
+    for (const off of this.offConnectionState.values()) { try { off(); } catch { /* ignore */ } }
+    this.offConnectionState.clear();
     for (const connection of this.connections.values()) { try { connection.close(); } catch { /* ignore */ } }
     this.connections.clear();
-    this.subscribers.clear();
     this.incomingSubscribers.clear();
-    this.pendingDeliveries.length = 0;
-    this.deliveryAdmissionReservations = 0;
-    this.deliveryAcks.clear();
-    this.deliveryAckTombstones.clear();
-    this.deliveryAckAdmissionReservations = 0;
+    this.pendingIncoming.length = 0;
   }
 
   private connectionFor(supplierId: string): SatSupplierConnection {
@@ -608,19 +597,114 @@ class SatSubscriptionHandle implements MessageProviderOperations {
     };
   }
 
-  private async requestAction(input: {
+  /** 已知远端真值时返回本地确认，绝不再发一笔 SSP 收费请求。 */
+  private observedActionResult(input: {
+    action: "subscribe" | "unsubscribe";
+    supplierId: string;
+    channel: string;
+  }): SatActionResult {
+    return {
+      ok: true,
+      supplierId: input.supplierId,
+      channel: input.channel,
+      requestIdHex: bytesToHex(newRequestId()),
+      chargedAmount: "0"
+    };
+  }
+
+  private async reconcileUnknownSubscription(input: {
+    action: "subscribe" | "unsubscribe";
+    supplierId: string;
+    channel: string;
+  }): Promise<SatActionResult | undefined> {
+    const target = input.action === "subscribe" ? "subscribed" : "unsubscribed";
+    let record = this.stateStore.listSubscriptions(input.supplierId).find((item) => item.channel === input.channel);
+    const refreshStatus = this.supplierRefreshStatus.get(input.supplierId);
+    if (record?.observed === target && refreshStatus?.generation === this.generation && refreshStatus.ok) {
+      return this.observedActionResult(input);
+    }
+    const targetInProgress = input.action === "subscribe"
+      ? record?.desired === "subscribing"
+      : record?.desired === "unsubscribing";
+    const needsRefresh = !refreshStatus
+      || refreshStatus.generation !== this.generation
+      || !refreshStatus.ok
+      // Worker 重启留下的 observed 只是旧远端证据，即使本轮其它频道的
+      // action 成功，也不能把它当成当前连接上的完整远端列表。
+      || this.historicalCleanupChannels.has(input.channel)
+      || record?.observed === target
+      || targetInProgress
+      || record?.observed === "unknown"
+      || record?.observed === "unknown_result"
+      || record?.observed === "subscribing"
+      || record?.observed === "unsubscribing";
+    if (!record || !needsRefresh) {
+      return undefined;
+    }
+
+    // unknown_result 表示请求可能已经收费；先查询远端列表，查询失败时保持
+    // unknown_result，禁止把一次不确定操作盲目变成第二次收费操作。后续
+    // 调用仍可再次查询远端；只有查询成功且明确缺失时才允许重新收费。
+    try {
+      await this.refreshSubscriptionsNow({ supplierId: input.supplierId });
+    } catch (error) {
+      const code = stableErrorCode(error);
+      return {
+        ok: false,
+        supplierId: input.supplierId,
+        channel: input.channel,
+        requestIdHex: bytesToHex(newRequestId()),
+        chargedAmount: "",
+        errorCode: code === "unknown_result" ? "unknown_result" : "conflict",
+        errorMessage: "远端订阅真值查询失败，已阻止重复收费请求"
+      };
+    }
+    record = this.stateStore.listSubscriptions(input.supplierId).find((item) => item.channel === input.channel);
+    if (record?.observed === target) {
+      // 查询已确认远端目标状态；同时把此前的 subscribing/unsubscribing
+      // 意图收敛为稳定目标，后续重试只读本地确认，不再重复收费。
+      await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: target, errorCode: null });
+      return this.observedActionResult(input);
+    }
+    if (record?.observed === "unknown" || record?.observed === "unknown_result" || record?.observed === "subscribing" || record?.observed === "unsubscribing") {
+      return {
+        ok: false,
+        supplierId: input.supplierId,
+        channel: input.channel,
+        requestIdHex: bytesToHex(newRequestId()),
+        chargedAmount: "",
+        errorCode: "unknown_result",
+        errorMessage: "远端订阅状态仍不确定，已阻止重复收费请求"
+      };
+    }
+    return undefined;
+  }
+
+  private requestAction(input: {
+    action: "subscribe" | "unsubscribe";
+    supplierId: string;
+    channel: string;
+  }): Promise<SatActionResult> {
+    return this.enqueueMutation(() => this.requestActionNow(input));
+  }
+
+  private async requestActionNow(input: {
     action: "subscribe" | "unsubscribe";
     supplierId: string;
     channel: string;
   }): Promise<SatActionResult> {
     this.assertOpen();
     this.assertChannel(input.channel, true);
+    const observedResult = await this.reconcileUnknownSubscription(input);
+    if (observedResult) return observedResult;
     const requestId = validateRequestId(newRequestId());
     let response: Uint8Array;
     let feeRecorded = false;
     let requestGeneration = this.generation;
+    let requestConnection: SatSupplierConnection | undefined;
     try {
       const connection = this.connectionFor(input.supplierId);
+      requestConnection = connection;
       requestGeneration = this.generation;
       await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: input.action === "subscribe" ? "subscribing" : "unsubscribing", errorCode: null });
       const wire = input.action === "subscribe" ? newSubscribe(requestId, input.channel) : newUnsubscribe(requestId, input.channel);
@@ -628,10 +712,22 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
       const code = stableErrorCode(error);
+      if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
+        && requestConnection?.state !== "online") {
+        this.stopSupplier(input.supplierId, false);
+        this.scheduleReconnect(input.supplierId, requestGeneration);
+      }
       const unknown = code === "unknown_result";
       if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)) {
         try {
-          await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: unknown ? "unknown_result" : "unknown", errorCode: code });
+          await this.stateStore.setDesiredSubscription({
+            supplierId: input.supplierId,
+            channel: input.channel,
+            // 保留用户/Coordinator 的目标方向；unknown_result 只表示
+            // 结果不确定，不能把下一次启动的物理意图抹掉。
+            state: input.action === "subscribe" ? "subscribing" : "unsubscribing",
+            errorCode: code
+          });
         } catch {
           // 配置不存在或本地状态不可写时，网络错误仍按稳定结果返回。
         }
@@ -648,7 +744,12 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       if (!result.success) {
         const code = actionErrorCode(result.errorCode);
         this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
-        await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: "unknown", errorCode: code });
+        await this.stateStore.setDesiredSubscription({
+          supplierId: input.supplierId,
+          channel: input.channel,
+          state: input.action === "subscribe" ? "subscribing" : "unsubscribing",
+          errorCode: code
+        });
         await this.stateStore.setObservedSubscription({ supplierId: input.supplierId, channel: input.channel, state: "unknown", source: "action", errorCode: code });
         await this.recordFee({ action: input.action, supplierId: input.supplierId, channel: input.channel, requestIdHex: bytesToHex(requestId), chargedAmount: result.chargedAmount, result: "error", errorCode: code });
         feeRecorded = true;
@@ -659,6 +760,7 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: next, errorCode: null });
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
       await this.stateStore.setObservedSubscription({ supplierId: input.supplierId, channel: input.channel, state: next, source: "action", errorCode: null });
+      this.supplierRefreshStatus.set(input.supplierId, { generation: requestGeneration, ok: true });
       await this.recordFee({ action: input.action, supplierId: input.supplierId, channel: input.channel, requestIdHex: bytesToHex(requestId), chargedAmount: result.chargedAmount, result: "ok" });
       feeRecorded = true;
       return { ok: true, supplierId: input.supplierId, channel: input.channel, requestIdHex: bytesToHex(requestId), chargedAmount: result.chargedAmount };
@@ -666,7 +768,12 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       const code = stableErrorCode(error);
       if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)) {
         try {
-          await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: "unknown_result", errorCode: code });
+          await this.stateStore.setDesiredSubscription({
+            supplierId: input.supplierId,
+            channel: input.channel,
+            state: input.action === "subscribe" ? "subscribing" : "unsubscribing",
+            errorCode: code
+          });
         } catch {
           // 配置已删除或本地状态不可写时，仍返回稳定结果。
         }
@@ -695,11 +802,18 @@ class SatSubscriptionHandle implements MessageProviderOperations {
     const requestId = validateRequestId(newRequestId());
     let response: Uint8Array;
     const requestGeneration = this.generation;
+    let requestConnection: SatSupplierConnection | undefined;
     try {
-      response = await this.connectionFor(input.supplierId).requestSsp(newPublish(requestId, input.channel, contentJson));
+      requestConnection = this.connectionFor(input.supplierId);
+      response = await requestConnection.requestSsp(newPublish(requestId, input.channel, contentJson));
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
       const code = stableErrorCode(error);
+      if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
+        && requestConnection?.state !== "online") {
+        this.stopSupplier(input.supplierId, false);
+        this.scheduleReconnect(input.supplierId, requestGeneration);
+      }
       await this.recordFee({ action: input.action, supplierId: input.supplierId, channel: input.channel, requestIdHex: bytesToHex(requestId), chargedAmount: "", result: code === "unknown_result" ? "unknown_result" : "error", errorCode: code });
       throw new SatSubscriptionError(code, error instanceof Error ? error.message : String(error));
     }
@@ -733,137 +847,15 @@ class SatSubscriptionHandle implements MessageProviderOperations {
     return id;
   }
 
-  async sendMessage(input: ProviderSendInput): Promise<ProviderSendResult> {
-    this.assertOpen();
-    if (this.currentState !== "bound") throw new SatSubscriptionError("connect", "SatSubscription provider is not bound");
-    const record = input.record;
-    assertCompressedPublicKeyHex(record.recipientPublicKeyHex, "recipientPublicKeyHex");
-    const route = readAppMsgEnvelopeMetadata(record.envelope.envelopeBytes);
-    if (route.senderPublicKeyHex !== this.ownerPublicKeyHex || route.recipientPublicKeyHex !== record.recipientPublicKeyHex) throw new SatSubscriptionError("identity", "AppMsg sealed route does not match the current owner/recipient");
-    const supplierId = this.defaultSupplierId();
-    const now = this.now();
-    const sealed = await this.cfg.channelCrypto.sealDeliver({
-      recipientPublicKeyHex: record.recipientPublicKeyHex,
-      contentJson: encodeKeymasterContent(record),
-      issuedAtMs: now,
-      expiresAtMs: now + 24 * 60 * 60 * 1000
-    });
-    if (sealed.channel !== `${BSV8_INBOX_CHANNEL_PREFIX}${record.recipientPublicKeyHex}`) throw new SatSubscriptionError("identity", "Channel seal returned an unexpected inbox");
-    if (sealed.fromPublicKeyHex !== this.ownerPublicKeyHex) throw new SatSubscriptionError("identity", "Channel seal returned an unexpected sender");
-    await this.publishRaw({ supplierId, channel: sealed.channel, contentJson: sealed.envelopeJson, action: "publish" });
-    await this.stateStore.rememberChannel({
-      dedupKey: dedupKey(BSV8_MESSAGE_PROTOCOL, this.ownerPublicKeyHex, sealed.messageIdBase64Url),
-      direction: "outbound",
-      contentDigestHex: digestHex(sealed.envelopeJson),
-      fromPublicKeyHex: this.ownerPublicKeyHex,
-      recipientPublicKeyHex: record.recipientPublicKeyHex,
-      messageIdBase64Url: sealed.messageIdBase64Url,
-      ingressSupplierId: supplierId
-    });
-    return { messageId: sealed.messageIdBase64Url, insertedAtMs: now };
-  }
-
-  async listMessages(_input: ProviderListInput): Promise<ProviderListResult> {
-    this.assertOpen();
-    throw new SatSubscriptionError("unavailable", "SatSubscription provider has no remote history");
-  }
-
-  async getMessage(_input: ProviderGetInput): Promise<ProviderSealedMessageRecord | null> {
-    this.assertOpen();
-    throw new SatSubscriptionError("unavailable", "SatSubscription provider has no remote history");
-  }
-
-  subscribeMessages(handler: (record: ProviderSealedMessageRecord) => void): () => void {
-    this.assertOpen();
-    this.subscribers.add(handler);
-    this.flushPendingDeliveries();
-    return () => this.subscribers.delete(handler);
-  }
-
-  subscribeIncoming(handler: (event: SatIncomingPublish) => void): () => void {
+  subscribeIncoming(handler: SatIncomingPublishHandler): () => void {
     this.assertOpen();
     this.incomingSubscribers.add(handler);
-    this.flushPendingDeliveries();
+    for (const event of this.pendingIncoming.splice(0)) {
+      void Promise.resolve()
+        .then(() => handler({ ...event, contentJson: event.contentJson.slice() }))
+        .catch((error) => this.cfg.logger?.warn?.("sat.incoming.handler_failed", { error: error instanceof Error ? error.message : String(error) }));
+    }
     return () => this.incomingSubscribers.delete(handler);
-  }
-
-  private reserveDeliveryAdmission(): void {
-    if (this.pendingDeliveries.length + this.deliveryAdmissionReservations >= SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxPendingIncomingPerLane) {
-      throw new SatSubscriptionError("unavailable", "Sat inbound delivery queue is full");
-    }
-    this.deliveryAdmissionReservations += 1;
-  }
-
-  private releaseDeliveryAdmission(): void {
-    this.deliveryAdmissionReservations = Math.max(0, this.deliveryAdmissionReservations - 1);
-  }
-
-  private reserveDeliveryAck(): void {
-    if (this.deliveryAcks.size + this.deliveryAckAdmissionReservations >= SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxActiveDeliveryAcks) {
-      throw new SatSubscriptionError("unavailable", "Sat delivery ACK claim table is full");
-    }
-    this.deliveryAckAdmissionReservations += 1;
-  }
-
-  private releaseDeliveryAckAdmission(): void {
-    this.deliveryAckAdmissionReservations = Math.max(0, this.deliveryAckAdmissionReservations - 1);
-  }
-
-  private rememberDeliveryAckTombstone(key: string, entry: DeliveryAckEntry, state: "acknowledged" | "unknown"): void {
-    this.deliveryAckTombstones.delete(key);
-    this.deliveryAckTombstones.set(key, { claimToken: entry.claimToken, state });
-    while (this.deliveryAckTombstones.size > SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxDeliveryAckTombstones) {
-      const oldest = this.deliveryAckTombstones.keys().next().value;
-      if (typeof oldest !== "string") break;
-      this.deliveryAckTombstones.delete(oldest);
-    }
-  }
-
-  private finalizeDeliveryAck(key: string, entry: DeliveryAckEntry, state: "acknowledged" | "unknown"): void {
-    if (this.deliveryAcks.get(key) !== entry) return;
-    this.deliveryAcks.delete(key);
-    this.rememberDeliveryAckTombstone(key, entry, state);
-  }
-
-  private dispatchDeliveryPart(delivery: {
-    record: ProviderSealedMessageRecord;
-    event: SatIncomingPublish;
-    recordDelivered: boolean;
-    eventDelivered: boolean;
-  }): void {
-    if (!delivery.recordDelivered && this.subscribers.size > 0) {
-      for (const handler of this.subscribers) {
-        try { handler(delivery.record); } catch { /* 单个 Tab handler 失败不能阻断其它 Tab。 */ }
-      }
-      delivery.recordDelivered = true;
-    }
-    if (!delivery.eventDelivered && this.incomingSubscribers.size > 0) {
-      for (const handler of this.incomingSubscribers) {
-        try { handler({ ...delivery.event, contentJson: delivery.event.contentJson.slice() }); } catch { /* ignore */ }
-      }
-      delivery.eventDelivered = true;
-    }
-  }
-
-  private flushPendingDeliveries(): void {
-    for (const delivery of [...this.pendingDeliveries]) {
-      this.dispatchDeliveryPart(delivery);
-      if (delivery.recordDelivered && delivery.eventDelivered) {
-        const index = this.pendingDeliveries.indexOf(delivery);
-        if (index >= 0) this.pendingDeliveries.splice(index, 1);
-      }
-    }
-  }
-
-  private emitDelivery(record: ProviderSealedMessageRecord, event: SatIncomingPublish): void {
-    const delivery = { record, event, recordDelivered: false, eventDelivered: false };
-    this.dispatchDeliveryPart(delivery);
-    if (!delivery.recordDelivered || !delivery.eventDelivered) this.pendingDeliveries.push(delivery);
-  }
-
-  async checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult> {
-    this.assertOpen();
-    return unknownOnline(input);
   }
 
   async setSubscription(input: { supplierId: string; channel: string; subscribed: boolean }): Promise<SatActionResult> {
@@ -878,16 +870,207 @@ class SatSubscriptionHandle implements MessageProviderOperations {
     return this.requestAction({ action: "unsubscribe", ...input });
   }
 
+  /**
+   * 按 owner 的 receiveSupplierIds × 逻辑频道并集逐个对账。
+   * 每个 Supplier/频道独立落库和处理；某个 Supplier 失败不会回滚已经成功
+   * 的其它 Supplier，也不会让下一次重试再次收费成功项。
+   */
+  private async reconcilePhysicalSubscriptions(requireReceiver = false): Promise<void> {
+    const settings = this.stateStore.getOwnerSettings();
+    // Disabled/removed Supplier 只保留在历史审计或已完成清理的记录里，
+    // 不能再进入本轮物理 reconcile；否则停用后会对一个已关闭连接再次
+    // 发起 unsubscribe，并把本来成功的配置变更错误地报告为失败。
+    const receiveSupplierIds = new Set(
+      (settings?.receiveSupplierIds ?? []).filter((supplierId) => Boolean(this.stateStore.getSupplier(supplierId)?.enabled))
+    );
+    const channels = new Set([
+      ...this.physicalDesiredChannels,
+      ...this.physicalUnsubscribeChannels,
+      ...this.historicalCleanupChannels
+    ]);
+    const failures: Array<{ supplierId: string; channel: string; result: SatActionResult }> = [];
+
+    for (const channel of channels) {
+      const records = this.stateStore.listSubscriptions().filter((item) =>
+        item.channel === channel && Boolean(this.stateStore.getSupplier(item.supplierId)?.enabled)
+      );
+      const supplierIds = new Set([
+        ...receiveSupplierIds,
+        ...records.map((item) => item.supplierId)
+      ]);
+      if (supplierIds.size === 0) {
+        // 初次由 Mux 请求物理订阅时没有 receive Supplier 必须报配置错误；
+        // 但 Supplier 删除/停用后，旧连接已经在上游清理完毕，不能因为
+        // “没有可操作 Supplier”把删除操作报告成失败。保留
+        // physicalDesiredChannels，未来新增接收 Supplier 时继续对账。
+        if (requireReceiver && !this.physicalUnsubscribeChannels.has(channel)) {
+          failures.push({
+            supplierId: "",
+            channel,
+            result: {
+              ok: false,
+              supplierId: "",
+              channel,
+              requestIdHex: bytesToHex(newRequestId()),
+              chargedAmount: "",
+              errorCode: "config",
+              errorMessage: "No receive Supplier is configured"
+            }
+          });
+        }
+        continue;
+      }
+
+      for (const supplierId of supplierIds) {
+        // historicalCleanupChannels 只代表 Worker 重启前的远端证据，不能
+        // 把旧 App 频道重新加入当前物理 desired。只有本次 runtime 收到的
+        // Mux 集合 physicalDesiredChannels 才允许发起 Subscribe。
+        const shouldSubscribe = this.physicalDesiredChannels.has(channel)
+          && receiveSupplierIds.has(supplierId)
+          && !this.physicalUnsubscribeChannels.has(channel);
+        const result = await this.requestActionNow({
+          action: shouldSubscribe ? "subscribe" : "unsubscribe",
+          supplierId,
+          channel
+        });
+        if (!result.ok) failures.push({ supplierId, channel, result });
+      }
+
+      if (this.physicalUnsubscribeChannels.has(channel) || this.historicalCleanupChannels.has(channel)) {
+        const current = this.stateStore.listSubscriptions().filter((item) => item.channel === channel);
+        const unresolved = current.some((item) => item.observed !== "unsubscribed");
+        if (!unresolved && failures.every((item) => item.channel !== channel)) {
+          if (this.physicalUnsubscribeChannels.has(channel)) {
+            this.physicalUnsubscribeChannels.delete(channel);
+            this.physicalDesiredChannels.delete(channel);
+          }
+          this.historicalCleanupChannels.delete(channel);
+        }
+      }
+    }
+
+    if (failures.length > 0) {
+      const first = failures[0]!;
+      throw new SatSubscriptionError(
+        first.result.errorCode ?? "protocol",
+        `Physical subscription reconcile failed for ${first.supplierId || "no-supplier"}/${first.channel}: ${first.result.errorMessage ?? "SSP action failed"}`
+      );
+    }
+  }
+
+  /** 禁用/删除 Supplier 前，在旧连接仍有效时清理其已观察订阅。 */
+  private async clearSupplierPhysicalSubscriptions(supplierId: string): Promise<void> {
+    const channels = new Set(
+      this.stateStore.listSubscriptions(supplierId)
+        // unknown/unknown_result/unsubscribing 也必须纳入清理：远端可能仍
+        // 保留订阅，不能因为本地 desired 已经转向 unsubscribe 就把它遗留。
+        .filter((item) => item.observed !== "unsubscribed")
+        .map((item) => item.channel)
+    );
+    const failures: SatActionResult[] = [];
+    for (const channel of channels) {
+      const result = await this.requestActionNow({ action: "unsubscribe", supplierId, channel });
+      if (!result.ok) failures.push(result);
+    }
+    const first = failures[0];
+    if (first) throw new SatSubscriptionError(first.errorCode ?? "unknown_result", first.errorMessage ?? "Supplier subscription cleanup failed");
+  }
+
+  /**
+   * Supplier catalog 代际变化会让所有旧连接的 fence 失效；必须整体重建
+   * 当前 owner 的 enabled Supplier 连接，不能只重连被编辑的那一个。
+   * 否则其它 Supplier 的入站 handler 仍带旧 generation，会被误判为迟到
+   * 连接，造成“能发不能收”的半失效状态。
+   */
+  private async reconnectEnabledSuppliers(): Promise<void> {
+    if (this.currentState !== "bound" || !this.cfg.transport) return;
+    for (const supplierId of new Set([...this.connections.keys(), ...this.offPublish.keys()])) {
+      this.stopSupplier(supplierId);
+    }
+    const suppliers = this.stateStore.listSuppliers().filter((item) => item.enabled);
+    await Promise.all(suppliers.map((supplier) => this.connectSupplier(supplier, this.generation)));
+    this.updateRuntimeHealth();
+  }
+
+  async subscribePhysical(channel: string): Promise<void> {
+    this.assertChannel(channel, false);
+    await this.enqueueMutation(async () => {
+      this.assertOpen();
+      // 第一个新 Mux 集合对该频道拥有新的逻辑生命周期；它可以复用
+      // 已知的 owner/Supplier 记录，但不能继承旧 App 的订阅意图。
+      this.historicalCleanupChannels.delete(channel);
+      this.physicalUnsubscribeChannels.delete(channel);
+      this.physicalDesiredChannels.add(channel);
+      await this.reconcilePhysicalSubscriptions(true);
+    });
+  }
+
+  async unsubscribePhysical(channel: string): Promise<void> {
+    this.assertChannel(channel, false);
+    await this.enqueueMutation(async () => {
+      this.assertOpen();
+      this.historicalCleanupChannels.delete(channel);
+      this.physicalDesiredChannels.add(channel);
+      this.physicalUnsubscribeChannels.add(channel);
+      await this.reconcilePhysicalSubscriptions(false);
+    });
+  }
+
+  /**
+   * 锁屏前把当前 owner 的全部物理清理意图先写入 owner DB。
+   * 网络动作随后可以超时/断开；下次解锁会按该证据先查询远端再继续退订。
+   */
+  async preparePhysicalCleanup(): Promise<void> {
+    this.assertOpen();
+    // 这是锁屏安全边界的一部分，不能排在可能永不返回的 SSP mutation
+    // 后面。先同步建立本地清理意图，再异步持久化；网络清理失败时下次
+    // 解锁仍能依据 owner-scoped DB 继续对账。
+    const records = this.stateStore.listSubscriptions();
+    const channels = new Set(records.map((item) => item.channel));
+    for (const channel of channels) {
+      this.physicalDesiredChannels.add(channel);
+      this.physicalUnsubscribeChannels.add(channel);
+      this.historicalCleanupChannels.delete(channel);
+    }
+    for (const record of records) {
+      await this.stateStore.setDesiredSubscription({
+        supplierId: record.supplierId,
+        channel: record.channel,
+        state: "unsubscribing",
+        errorCode: null
+      });
+    }
+  }
+
+  /**
+   * 查询远端订阅也必须和 Subscribe/Unsubscribe 共用同一条队列。
+   *
+   * 否则设置页的“刷新远端订阅”可能在 Mux 已读取旧 observed、但还没
+   * 落库的窗口内并发执行，导致两条操作都认为远端缺少频道并重复收费。
+   */
   async refreshSubscriptions(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }> {
+    this.assertOpen();
+    return this.enqueueMutation(() => this.refreshSubscriptionsNow(input));
+  }
+
+  private async refreshSubscriptionsNow(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }> {
     this.assertOpen();
     const requestId = validateRequestId(newRequestId());
     let response: Uint8Array;
     const requestGeneration = this.generation;
+    let requestConnection: SatSupplierConnection | undefined;
     try {
-      response = await this.connectionFor(input.supplierId).requestSsp(newSubscriptionsRequest(requestId));
+      requestConnection = this.connectionFor(input.supplierId);
+      response = await requestConnection.requestSsp(newSubscriptionsRequest(requestId));
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
       const code = stableErrorCode(error);
+      if (this.isCurrentSupplierGeneration(input.supplierId, requestGeneration)
+        && requestConnection?.state !== "online") {
+        this.stopSupplier(input.supplierId, false);
+        this.scheduleReconnect(input.supplierId, requestGeneration);
+      }
+      this.supplierRefreshStatus.set(input.supplierId, { generation: requestGeneration, ok: false });
       await this.recordFee({ action: "subscriptions", supplierId: input.supplierId, channel: "", requestIdHex: bytesToHex(requestId), chargedAmount: "", result: code === "unknown_result" ? "unknown_result" : "error", errorCode: code });
       throw new SatSubscriptionError(code, error instanceof Error ? error.message : String(error));
     }
@@ -898,110 +1081,29 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       validateAmount(result.chargedAmount);
       assertCanonicalAmount(result.chargedAmount);
       const channels = [...result.channels];
-      const previouslyObserved = new Set(
-        this.stateStore.listSubscriptions(input.supplierId)
-          .filter((item) => item.observed === "subscribed")
-          .map((item) => item.channel)
+      const knownChannels = new Set(
+        this.stateStore.listSubscriptions(input.supplierId).map((item) => item.channel)
       );
       for (const channel of channels) {
         this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
         assertExactChannel(channel, true);
-        previouslyObserved.delete(channel);
+        knownChannels.delete(channel);
         await this.stateStore.setObservedSubscription({ supplierId: input.supplierId, channel, state: "subscribed", source: "refresh" });
       }
-      for (const channel of previouslyObserved) {
+      for (const channel of knownChannels) {
         this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
         await this.stateStore.setObservedSubscription({ supplierId: input.supplierId, channel, state: "unsubscribed", source: "refresh" });
       }
+      this.supplierRefreshStatus.set(input.supplierId, { generation: requestGeneration, ok: true });
       await this.recordFee({ action: "subscriptions", supplierId: input.supplierId, channel: "", requestIdHex: bytesToHex(requestId), chargedAmount: result.chargedAmount, result: "ok" });
       feeRecorded = true;
       return { channels, chargedAmount: result.chargedAmount };
     } catch (error) {
       const code = stableErrorCode(error);
+      this.supplierRefreshStatus.set(input.supplierId, { generation: requestGeneration, ok: false });
       if (!feeRecorded) await this.recordFee({ action: "subscriptions", supplierId: input.supplierId, channel: "", requestIdHex: bytesToHex(requestId), chargedAmount: "", result: code === "unknown_result" ? "unknown_result" : "error", errorCode: code });
       if (error instanceof SatSubscriptionError) throw error;
       throw new SatSubscriptionError(code, error instanceof Error ? error.message : String(error));
-    }
-  }
-
-  async ackMessage(input: ProviderSealedMessageRecord | ProviderDeliveryAckClaim): Promise<void> {
-    this.assertOpen();
-    const claim = claimFromInput(input);
-    const deliveryId = claim.deliveryId;
-    const claimToken = claim.ackClaimToken;
-    const supplierId = claim.supplierId;
-    if (!deliveryId || !claimToken || !supplierId) {
-      // ACK 必须绑定到 Worker 为本次实际 ingress 生成的 claim；旧 record
-      // 或页面伪造的 record 不能回退到“最后一次 Supplier”。
-      throw new SatSubscriptionError("validation", "Sat delivery ACK claim is missing");
-    }
-    const key = deliveryAckKey(deliveryId, supplierId);
-    const delivery = this.deliveryAcks.get(key);
-    const tombstone = this.deliveryAckTombstones.get(key);
-    if (!delivery && tombstone?.claimToken === claimToken) {
-      if (tombstone.state === "acknowledged") return;
-      throw new SatSubscriptionError("unknown_result", "Sat delivery ACK result is unknown; automatic retry is disabled");
-    }
-    if (!delivery || delivery.claimToken !== claimToken) {
-      throw new SatSubscriptionError("conflict", "Sat delivery ACK claim is stale or invalid");
-    }
-    if (isFullDeliveryRecord(input) && (
-      input.ingressSupplierId !== delivery.supplierId
-      || input.senderPublicKeyHex !== delivery.senderPublicKeyHex
-      || input.messageId !== delivery.messageId
-    )) {
-      // 兼容 provider 内部直接调用旧 record 形状时也要检测篡改；生产页面
-      // RPC 已经只发送 claim 三元组，因此不会把这些可变字段送入 Worker。
-      throw new SatSubscriptionError("conflict", "Sat delivery ACK record does not match the Worker claim");
-    }
-    if (delivery.state === "acknowledged") return;
-    if (delivery.state === "unknown") {
-      // sentBoundary=unknown 时禁止另一个 Tab 自动重发，避免同一付费
-      // Deliver 因响应丢失而再次收费。
-      throw new SatSubscriptionError("unknown_result", "Sat delivery ACK result is unknown; automatic retry is disabled");
-    }
-    if (delivery.inFlight) return delivery.inFlight;
-    delivery.state = "claimed";
-    const send = this.sendDeliveryAck(key, delivery);
-    const wrapped = send.finally(() => {
-      if (delivery.inFlight === wrapped) delivery.inFlight = undefined;
-    });
-    delivery.inFlight = wrapped;
-    return delivery.inFlight;
-  }
-
-  private async sendDeliveryAck(
-    key: string,
-    delivery: DeliveryAckEntry,
-  ): Promise<void> {
-    const senderPublicKey = delivery.senderPublicKeyHex;
-    const now = this.now();
-    const requestGeneration = delivery.supplierGeneration;
-    try {
-      delivery.state = "ack_sending";
-      // sender/messageId 来自 Worker 保存的权威 claim；这里仍做格式断言，
-      // 让损坏的内部状态进入 unknown/审计闭环，而不是留下 claimed。
-      assertCompressedPublicKeyHex(senderPublicKey, "senderPublicKeyHex");
-      const sealed = await this.cfg.channelCrypto.sealAck({ recipientPublicKeyHex: senderPublicKey, acknowledgedMessageIdBase64Url: delivery.messageId, issuedAtMs: now, expiresAtMs: now + 24 * 60 * 60 * 1000 });
-      if (sealed.channel !== `${BSV8_INBOX_CHANNEL_PREFIX}${senderPublicKey}`) throw new SatSubscriptionError("identity", "Channel ACK returned an unexpected inbox");
-      this.assertCurrentSupplierGeneration(delivery.supplierId, requestGeneration);
-      await this.publishRaw({ supplierId: delivery.supplierId, channel: sealed.channel, contentJson: sealed.envelopeJson, action: "ack" });
-      this.assertCurrentSupplierGeneration(delivery.supplierId, requestGeneration);
-      await this.stateStore.updateChannelAck({ dedupKey: delivery.dedupKey, supplierId: delivery.supplierId, state: "acknowledged" });
-      delivery.state = "acknowledged";
-      this.finalizeDeliveryAck(key, delivery, "acknowledged");
-    } catch (error) {
-      const code = stableErrorCode(error);
-      // connect 表示 transport 明确证明 Wire 尚未发送，可保留 pending
-      // 供显式的后续调用重新 claim；其它结果一律锁为 unknown。
-      const terminal = code !== "connect";
-      delivery.state = terminal ? "unknown" : "pending";
-      try {
-        await this.stateStore.updateChannelAck({ dedupKey: delivery.dedupKey, supplierId: delivery.supplierId, state: "failed", errorCode: code });
-      } finally {
-        if (terminal) this.finalizeDeliveryAck(key, delivery, "unknown");
-      }
-      throw error;
     }
   }
 
@@ -1026,86 +1128,49 @@ class SatSubscriptionHandle implements MessageProviderOperations {
       // 该坏 frame。拿得到 request_id 时，下面统一返回 INVALID_REQUEST。
       throw new SatSubscriptionError("protocol", error instanceof Error ? error.message : "SSP request envelope is invalid");
     }
-    const deliveryId = "sat-delivery-" + crypto.randomUUID();
-    const ackClaimToken = "sat-ack-claim-" + crypto.randomUUID();
-    const event: SatIncomingPublish = { deliveryId, ingressSupplierId: supplierId, channel: "", requestIdHex: bytesToHex(requestId), contentJson: new Uint8Array(), chargedAmount: "0", receivedAtMs: this.now() };
-    let deliveryReserved = false;
-    let deliveryAckReserved = false;
+    const event: SatIncomingPublish = {
+      deliveryId: "sat-delivery-" + crypto.randomUUID(),
+      ingressSupplierId: supplierId,
+      channel: "",
+      requestIdHex: bytesToHex(requestId),
+      contentJson: new Uint8Array(),
+      chargedAmount: "0",
+      receivedAtMs: this.now()
+    };
     try {
       const publish = parsePublish(wire);
       event.channel = publish.channel;
       event.requestIdHex = bytesToHex(publish.requestId);
       event.contentJson = publish.contentJson.slice();
-      const ownerInbox = `${BSV8_INBOX_CHANNEL_PREFIX}${this.ownerPublicKeyHex}`;
-      if (publish.channel !== ownerInbox) throw new SatSubscriptionError("validation", "SSP Publish channel is not the current owner inbox");
+      this.assertChannel(publish.channel, false);
       if (!(this.stateStore.getOwnerSettings()?.receiveSupplierIds ?? []).includes(supplierId)) {
-        throw new SatSubscriptionError("config", "Ingress Supplier is not enabled for owner message reception");
+        throw new SatSubscriptionError("config", "Ingress Supplier is not enabled for owner reception");
       }
-      const opened = await this.cfg.channelCrypto.open({ channel: publish.channel, envelopeJson: publish.contentJson, nowMs: event.receivedAtMs });
-      if (!this.isCurrentSupplierGeneration(supplierId, generation)) throw new SatSubscriptionError("unknown_result", "Supplier configuration changed while handling inbound request");
-      if (opened.channel !== publish.channel || opened.toPublicKeyHex !== this.ownerPublicKeyHex) throw new SatSubscriptionError("identity", "Channel envelope target does not match the owner inbox");
-      if (opened.protocol !== BSV8_MESSAGE_PROTOCOL) {
-        // 其它 protocol 是 internal 事件，不能被错误地投影为 AppMsg。
-        return newActionResult({ requestId: publish.requestId, success: true, chargedAmount: "0", errorCode: "" });
+      if (this.pendingIncoming.length >= SAT_SUBSCRIPTION_RESOURCE_LIMITS.maxPendingIncomingPerLane && this.incomingSubscribers.size === 0) {
+        throw new SatSubscriptionError("unavailable", "Sat inbound channel queue is full");
       }
-      if (opened.bodyType === "ack") {
-        const acknowledgedMessageId = opened.acknowledgedMessageIdBase64Url;
-        if (!acknowledgedMessageId) throw new SatSubscriptionError("protocol", "Channel ACK is missing acknowledged_message_id");
-        const original = this.stateStore.getChannel(dedupKey(BSV8_MESSAGE_PROTOCOL, this.ownerPublicKeyHex, acknowledgedMessageId));
-        if (!original || original.direction !== "outbound" || original.recipientPublicKeyHex !== opened.fromPublicKeyHex) {
-          this.cfg.logger?.warn?.("sat.ack.rejected", { supplierId, code: "identity" });
-          return newActionResult({ requestId: publish.requestId, success: false, chargedAmount: "0", errorCode: "INVALID_REQUEST" });
+      if (this.incomingSubscribers.size > 0) {
+        for (const handler of this.incomingSubscribers) {
+          try {
+            await handler({ ...event, contentJson: event.contentJson.slice() });
+          } catch (error) {
+            if (isChannelInboundRejection(error)) {
+              throw new SatSubscriptionError("validation", error.code);
+            }
+            // 单个内部消费者的普通业务异常不影响其它消费者；Coordinator
+            // 会将它们记录为本地诊断，只有明确的协议拒绝会回传 SSP。
+            this.cfg.logger?.warn?.("sat.incoming.handler_failed", { error: error instanceof Error ? error.message : String(error) });
+          }
         }
-        await this.stateStore.updateChannelAck({ dedupKey: original.dedupKey, supplierId, state: "acknowledged" });
-        return newActionResult({ requestId: publish.requestId, success: true, chargedAmount: "0", errorCode: "" });
+      } else {
+        this.pendingIncoming.push(event);
       }
-      if (!opened.contentJson) throw new SatSubscriptionError("protocol", "Channel Deliver is missing content");
-      // 在任何 await 状态持久化前预占权威投递队列项；并发入站不会
-      // 共同看到“尚有空位”而最终把第 65 条静默丢弃。
-      this.reserveDeliveryAdmission();
-      deliveryReserved = true;
-      // claim 表与 pending 投递队列一样是硬上限；先预占再 await，避免
-      // 多个入站 handler 同时通过 active claim 数检查。
-      this.reserveDeliveryAck();
-      deliveryAckReserved = true;
-      const record = appMsgRecordFromChannel({ opened, contentJson: opened.contentJson, ingressSupplierId: supplierId, insertedAtMs: event.receivedAtMs });
-      record.deliveryId = deliveryId;
-      record.ackClaimToken = ackClaimToken;
-      const key = dedupKey(opened.protocol, record.senderPublicKeyHex, record.messageId);
-      // 去重摘要使用 Channel SDK 验签后返回的 signed digest，而不是外层
-      // 随机 salt/nonce 产生的密文摘要；同一 Deliver 重加密仍应被识别为重复，
-      // 但 message_id 相同而签名内容变化时会进入 conflict。
-      const relation = await this.stateStore.rememberChannel({ dedupKey: key, direction: "inbound", contentDigestHex: opened.signedDigestHex, fromPublicKeyHex: record.senderPublicKeyHex, recipientPublicKeyHex: record.recipientPublicKeyHex, messageIdBase64Url: record.messageId, ingressSupplierId: supplierId });
-      if (!this.isCurrentSupplierGeneration(supplierId, generation)) throw new SatSubscriptionError("unknown_result", "Supplier configuration changed while handling inbound request");
-      if (relation === "conflict") return newActionResult({ requestId: publish.requestId, success: false, chargedAmount: "0", errorCode: "INVALID_REQUEST" });
-      // AppMsg 的本地 put 与 Channel 去重关系都已可靠持久化后，沿用第一条
-      // 关系的时间；多 Supplier 重复投递不能覆盖 insertedAtMs。
-      record.insertedAtMs = this.stateStore.getChannel(key)?.firstPersistedAtMs ?? record.insertedAtMs;
-      // 这是 platform-internal delivery metadata：duplicate 仍需经过
-      // plugin-appmsg 的验签、解密、落库和 ACK，但不能再次触发业务事件。
-      record.deliveryRelation = relation;
-      // 每个实际 ingress 都必须经过 plugin-appmsg 的验签、解密、落库和
-      // ACK；多 Supplier 重复 ingress 由 deliveryRelation 标记，
-      // plugin-appmsg 只据此抑制第二次业务通知。
-      this.deliveryAcks.set(deliveryAckKey(deliveryId, supplierId), {
-        supplierId,
-        claimToken: ackClaimToken,
-        senderPublicKeyHex: record.senderPublicKeyHex,
-        messageId: record.messageId,
-        dedupKey: key,
-        supplierGeneration: generation,
-        state: "pending",
-      });
-      this.emitDelivery(record, event);
       return newActionResult({ requestId: publish.requestId, success: true, chargedAmount: "0", errorCode: "" });
     } catch (error) {
       this.connectionErrors.set(supplierId, error instanceof Error ? error.message : String(error));
       this.cfg.logger?.warn?.("sat.incoming.rejected", { supplierId, code: stableErrorCode(error) });
       const code = error instanceof SatSubscriptionError && error.code === "balance" ? "REJECTED" : "INVALID_REQUEST";
       return newActionResult({ requestId, success: false, chargedAmount: "0", errorCode: code });
-    } finally {
-      if (deliveryReserved) this.releaseDeliveryAdmission();
-      if (deliveryAckReserved) this.releaseDeliveryAckAdmission();
     }
   }
 
@@ -1139,57 +1204,92 @@ class SatSubscriptionHandle implements MessageProviderOperations {
 
   async upsertSupplier(config: SatSupplierConfigV1): Promise<void> {
     this.assertOpen();
-    return this.enqueueConfigMutation(async () => {
+    return this.enqueueMutation(async () => {
+      this.assertOpen();
       const normalized = normalizeSupplierConfig(config);
       const previous = this.stateStore.getSupplier(normalized.supplierId);
+      const identityChanged = previous?.enabled
+        && normalized.enabled
+        && previous.supplierPublicKeyHex !== normalized.supplierPublicKeyHex;
+      if (previous?.enabled && (!normalized.enabled || identityChanged)) {
+        // 必须在关闭旧连接前完成清理；否则切换后的 runtime 无法再以旧
+        // Supplier 身份退订，且不应把这笔未知状态交给新 owner。
+        await this.clearSupplierPhysicalSubscriptions(normalized.supplierId);
+      }
       this.generation += 1;
-      this.stopSupplier(normalized.supplierId);
+      this.supplierRefreshStatus.clear();
+      // generation 是当前 owner Supplier catalog 的统一 fence；即使只
+      // 修改一个 Supplier，也不能让其它连接继续使用旧 fence。
+      for (const supplierId of new Set([...this.connections.keys(), ...this.offPublish.keys()])) {
+        this.stopSupplier(supplierId);
+      }
       this.connectionErrors.delete(normalized.supplierId);
       try {
         await this.stateStore.upsertSupplier(normalized);
       } catch (error) {
-        if (previous?.enabled && this.currentState === "bound") await this.connectSupplier(previous, this.generation);
-        this.updateProviderHealth();
+        await this.reconnectEnabledSuppliers();
+        this.updateRuntimeHealth();
         throw error;
       }
-      if (normalized.enabled && this.currentState === "bound") await this.connectSupplier(normalized, this.generation);
-      this.updateProviderHealth();
+      if (!normalized.enabled) {
+        const settings = this.stateStore.getOwnerSettings();
+        if (settings?.receiveSupplierIds.includes(normalized.supplierId)) {
+          await this.stateStore.setOwnerSettings({
+            ...settings,
+            defaultPublishSupplierId: settings.defaultPublishSupplierId === normalized.supplierId ? null : settings.defaultPublishSupplierId,
+            receiveSupplierIds: settings.receiveSupplierIds.filter((id) => id !== normalized.supplierId)
+          });
+        }
+      }
+      await this.reconnectEnabledSuppliers();
+      await this.reconcilePhysicalSubscriptions(false);
+      this.updateRuntimeHealth();
     });
   }
 
   async deleteSupplier(supplierId: string): Promise<void> {
     this.assertOpen();
-    return this.enqueueConfigMutation(async () => {
+    return this.enqueueMutation(async () => {
+      this.assertOpen();
       const previous = this.stateStore.getSupplier(supplierId);
+      if (previous?.enabled) await this.clearSupplierPhysicalSubscriptions(supplierId);
       this.generation += 1;
-      this.stopSupplier(supplierId);
+      this.supplierRefreshStatus.clear();
+      for (const currentSupplierId of new Set([...this.connections.keys(), ...this.offPublish.keys()])) {
+        this.stopSupplier(currentSupplierId);
+      }
       this.connectionErrors.delete(supplierId);
       try {
         await this.stateStore.deleteSupplier(supplierId);
       } catch (error) {
-        if (previous?.enabled && this.currentState === "bound") await this.connectSupplier(previous, this.generation);
-        this.updateProviderHealth();
+        await this.reconnectEnabledSuppliers();
+        this.updateRuntimeHealth();
         throw error;
       }
-      this.updateProviderHealth();
+      await this.reconnectEnabledSuppliers();
+      await this.reconcilePhysicalSubscriptions(false);
+      this.updateRuntimeHealth();
     });
   }
 
-  private enqueueConfigMutation(operation: () => Promise<void>): Promise<void> {
-    const run = this.configMutationTail.then(operation);
-    this.configMutationTail = run.then(() => undefined, () => undefined);
-    return run;
-  }
-
-  private stopSupplier(supplierId: string): void {
+  private stopSupplier(supplierId: string, cancelReconnect = true): void {
+    this.cancelSubscriptionReconcile(supplierId);
+    if (cancelReconnect) {
+      const timer = this.reconnectTimers.get(supplierId);
+      if (timer !== undefined) clearTimeout(timer);
+      this.reconnectTimers.delete(supplierId);
+      this.reconnectAttempts.delete(supplierId);
+    }
+    this.offConnectionState.get(supplierId)?.();
+    this.offConnectionState.delete(supplierId);
     this.offPublish.get(supplierId)?.();
     this.offPublish.delete(supplierId);
     this.connections.get(supplierId)?.close();
     this.connections.delete(supplierId);
   }
 
-  private updateProviderHealth(): void {
-    this.setProviderHealth(this.connections.size > 0, this.connections.size > 0 ? null : (this.connectionErrors.values().next().value ?? "No SatSubscription supplier is connected"));
+  private updateRuntimeHealth(): void {
+    this.setRuntimeHealth(this.connections.size > 0, this.connections.size > 0 ? null : (this.connectionErrors.values().next().value ?? "No SatSubscription supplier is connected"));
   }
 
   private isCurrentSupplierGeneration(supplierId: string, generation: number): boolean {
@@ -1205,57 +1305,66 @@ class SatSubscriptionHandle implements MessageProviderOperations {
     this.assertOpen();
     if (settings.defaultPublishSupplierId && !this.stateStore.getSupplier(settings.defaultPublishSupplierId)?.enabled) throw new SatSubscriptionError("config", "Default publish Supplier is disabled");
     for (const supplierId of settings.receiveSupplierIds) if (!this.stateStore.getSupplier(supplierId)?.enabled) throw new SatSubscriptionError("config", "Receive Supplier is disabled");
-    await this.stateStore.setOwnerSettings(settings);
+    await this.enqueueMutation(async () => {
+      this.assertOpen();
+      await this.stateStore.setOwnerSettings(settings);
+      await this.reconcilePhysicalSubscriptions(false);
+    });
+  }
+
+  private enqueueMutation<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.mutationTail.then(operation, operation);
+    this.mutationTail = run.then(() => undefined, () => undefined);
+    return run;
   }
 }
 
-/** SatSubscription provider 工厂。 */
-export class SatSubscriptionProvider implements MessageProvider {
-  readonly id = SAT_SUBSCRIPTION_PROVIDER_ID;
-  readonly displayName = "SatSubscription";
-  readonly features = { remoteHistory: false, onlineQuery: false, deliveryAck: true } as const;
+/** 只允许 Coordinator 标记的固定协议拒绝穿过入站边界。 */
+function isChannelInboundRejection(error: unknown): error is { domain: "channel-inbound"; code: "UNSUPPORTED_PROTOCOL" } {
+  if (!error || typeof error !== "object") return false;
+  const value = error as { domain?: unknown; code?: unknown };
+  return value.domain === "channel-inbound" && value.code === "UNSUPPORTED_PROTOCOL";
+}
+
+/** SatSubscription owner runtime 工厂。 */
+export class SatSubscriptionProvider {
   private readonly cfg: SatSubscriptionProviderConfig;
   private currentHandle: SatSubscriptionHandle | null = null;
   private currentService: SatSubscriptionService | null = null;
   private currentAdmin: SatSubscriptionAdminService | null = null;
   private lastError: string | null = null;
-  private lastConnectedAtMs = 0;
 
   constructor(cfg: SatSubscriptionProviderConfig) { this.cfg = cfg; }
 
-  async bind(input: { signer: ProviderSigner }): Promise<MessageProviderHandle> {
+  async bind(input: { ownerPublicKeyHex: string }): Promise<SatSubscriptionHandle> {
     this.currentHandle?.close();
     this.currentHandle = null;
     this.currentService = null;
     this.currentAdmin = null;
-    assertCompressedPublicKeyHex(input.signer.publicKeyHex, "owner signer publicKeyHex");
-    const stateStore = await this.cfg.stateForOwner(input.signer.publicKeyHex);
+    assertCompressedPublicKeyHex(input.ownerPublicKeyHex, "owner publicKeyHex");
+    const stateStore = await this.cfg.stateForOwner(input.ownerPublicKeyHex);
     const handle = new SatSubscriptionHandle({
-      ownerPublicKeyHex: input.signer.publicKeyHex,
+      ownerPublicKeyHex: input.ownerPublicKeyHex,
       stateStore,
       generation: this.cfg.supplierGeneration ?? stateStore.supplierGeneration(),
       cfg: this.cfg,
-      setProviderHealth: (healthy, error) => {
+      setRuntimeHealth: (healthy, error) => {
         this.lastError = error;
-        if (healthy) this.lastConnectedAtMs = this.cfg.now?.() ?? Date.now();
+        if (!healthy && error) this.cfg.logger?.warn?.("sat.runtime.unhealthy", { error });
       }
     });
     this.currentHandle = handle;
     await handle.start();
     this.currentService = {
       publish: (value) => handle.publish(value),
-      setSubscription: (value) => handle.setSubscription(value),
-      subscribe: (value) => handle.subscribe(value),
-      unsubscribe: (value) => handle.unsubscribe(value),
-      refreshSubscriptions: (value) => handle.refreshSubscriptions(value),
       subscribeEvents: (handler) => handle.subscribeIncoming(handler)
     };
     this.currentAdmin = {
-      ...this.currentService,
       getSettingsSnapshot: () => handle.getSettingsSnapshot(),
       upsertSupplier: (config) => handle.upsertSupplier(config),
       deleteSupplier: (supplierId) => handle.deleteSupplier(supplierId),
-      setOwnerSettings: (settings) => handle.setOwnerSettings(settings)
+      setOwnerSettings: (settings) => handle.setOwnerSettings(settings),
+      refreshSubscriptions: (value) => handle.refreshSubscriptions(value)
     };
     return handle;
   }
@@ -1266,18 +1375,6 @@ export class SatSubscriptionProvider implements MessageProvider {
     this.currentService = null;
     this.currentAdmin = null;
     this.lastError = "shut down";
-  }
-
-  health(): MessageProviderHealth {
-    return {
-      isHealthy: this.currentHandle?.state() === "bound" && this.lastError === null && this.lastConnectedAtMs > 0,
-      lastError: this.lastError,
-      lastConnectedAtMs: this.lastConnectedAtMs
-    };
-  }
-
-  async checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult> {
-    return unknownOnline(input);
   }
 
   /** 当前 owner 的 trusted SSP service；未 bind 时返回 null。 */

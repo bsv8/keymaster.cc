@@ -2,7 +2,7 @@
 
 ## 1. 施工目标
 
-在不破坏现有 Connect、AppMsg、Broadcast、P2PKH 和 FeePool 行为的前提下，新增经过签名的 App Identity Session、独立 Storage 平台插件、Keymaster S3 设置和隔离的 `storage.*` 方法族。
+在不破坏现有 Connect、Channel、P2PKH 和 FeePool 行为的前提下，新增经过签名的 App Identity Session、独立 Storage 平台插件、Keymaster S3 设置和隔离的 `storage.*` 方法族。
 
 本施工单不修改 S3Disk；S3Disk 只作为 Provider 行为和未来 ObjectStore 迁移的参考。
 

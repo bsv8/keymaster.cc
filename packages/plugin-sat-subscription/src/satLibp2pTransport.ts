@@ -208,6 +208,8 @@ export class SatLibp2pConnection {
   private openingSsp: Promise<Stream> | undefined;
   private readerPromise: Promise<void> | undefined;
   private closed = false;
+  private connectionState: "online" | "degraded" | "closed" = "online";
+  private readonly stateListeners = new Set<(state: "online" | "degraded" | "closed") => void>();
 
   constructor(input: {
     connection: Connection;
@@ -227,6 +229,13 @@ export class SatLibp2pConnection {
   /** 预先打开 SSP 长 Stream，确保入站 Publish 在 provider 注册后可接收。 */
   async start(signal?: AbortSignal): Promise<void> {
     await this.ensureSspStream(signal);
+    this.setConnectionState("online");
+  }
+
+  /** 监听 SSP 长流/连接状态；Provider 用它触发无配置变化的重连。 */
+  onStateChange(handler: (state: "online" | "degraded" | "closed") => void): () => void {
+    this.stateListeners.add(handler);
+    return () => this.stateListeners.delete(handler);
   }
 
   async requestSsp(wire: Uint8Array, signal?: AbortSignal): Promise<Uint8Array> {
@@ -323,6 +332,7 @@ export class SatLibp2pConnection {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.setConnectionState("closed");
     const failure = new SatTransportError("SSP connection closed", { sentBoundary: "unknown" });
     for (const [requestId, pending] of this.pending) {
       pending.cleanup();
@@ -485,6 +495,7 @@ export class SatLibp2pConnection {
     const stream = this.sspStream;
     // 旧 reader/handler 的迟到错误不能 reset 已经建立的新 stream。
     if (expectedStream !== undefined && stream !== expectedStream) return;
+    if (!this.closed) this.setConnectionState("degraded");
     this.sspStream = undefined;
     this.queuedIncoming.length = 0;
     for (const [requestId, pending] of this.pending) {
@@ -496,6 +507,14 @@ export class SatLibp2pConnection {
     if (stream) {
       try { stream.abort(error); } catch { /* ignore */ }
       void stream.close().catch(() => undefined);
+    }
+  }
+
+  private setConnectionState(next: "online" | "degraded" | "closed"): void {
+    if (this.connectionState === next) return;
+    this.connectionState = next;
+    for (const listener of this.stateListeners) {
+      try { listener(next); } catch { /* 单个状态监听器不能打断连接清理。 */ }
     }
   }
 }

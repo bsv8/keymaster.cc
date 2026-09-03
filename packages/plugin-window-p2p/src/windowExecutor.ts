@@ -532,7 +532,13 @@ export function installWindowP2pExecutor(coordinator: SessionCoordinatorClient, 
   const attempt = (snapshot?: import("@keymaster/contracts").CoordinatorBootstrapSnapshot): void => {
     if (executor.isDisposed) return;
     void executor.reconcileSession(snapshot).then((started) => {
-      if (!started && !installRetryTimer) installRetryTimer = setTimeout(() => { installRetryTimer = undefined; attempt(); }, 2_000);
+      // 没有 unlocked owner 时等待下一条 session.state 即可；不要在锁定态
+      // 或无 active key 时建立永不结束的页面重试计时器。只有 Worker 已经
+      // 暴露出可执行 owner、但本次 lease/Host 竞争失败时才做轻量重试。
+      const current = coordinator.getBootstrapSnapshot();
+      if (!started && current.vaultStatus === "unlocked" && current.activePublicKeyHex && !installRetryTimer) {
+        installRetryTimer = setTimeout(() => { installRetryTimer = undefined; attempt(); }, 2_000);
+      }
     }).catch(() => undefined);
   };
   installedUnsubscribe = coordinator.subscribeTopic("session.state", (event: { vaultStatus?: string }) => {

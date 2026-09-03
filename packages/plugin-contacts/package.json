@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator.ts",
     "./styles.css": "./src/styles.css"
   },
   "types": "./src/index.ts",
@@ -12,6 +13,7 @@
     "@noble/hashes": "^1.8.0",
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
-    "@keymaster/ui": "*"
+    "@keymaster/ui": "*",
+    "bsv8-channel-protocol": "file:../../../ChannelProtocol/typescript"
   }
 }

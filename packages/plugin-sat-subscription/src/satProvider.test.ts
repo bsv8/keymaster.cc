@@ -1,32 +1,62 @@
 import { describe, expect, it, vi } from "vitest";
-import { newActionResult, newPublish, parseActionResult, newRequestId } from "sat-subscription-protocol/client";
-import { parseRequestEnvelope } from "sat-subscription-protocol/wire";
-import { cborEncode } from "@keymaster/contracts";
-import { base64urlEncode } from "bsv8-channel-protocol";
-import type { MessageProviderOperations, ProviderSealedMessageRecord } from "@keymaster/contracts";
+import {
+  newActionResult,
+  newPublish,
+  newRequestId,
+  newSubscriptionsResponse,
+  parseActionResult
+} from "sat-subscription-protocol/client";
+import { Kind } from "sat-subscription-protocol/protocol";
+import { decodeRequest, parseRequestEnvelope } from "sat-subscription-protocol/wire";
+import type { SatIncomingPublish } from "@keymaster/contracts";
 import { createSatSubscriptionState } from "./satState.js";
-import { createSatSubscriptionProvider, SatSubscriptionError, SatTransportError, type SatSupplierConnection } from "./satProvider.js";
+import {
+  createSatSubscriptionProvider,
+  SatSubscriptionError,
+  SatTransportError,
+  type SatSupplierConnection
+} from "./satProvider.js";
 
 const OWNER = "02" + "11".repeat(32);
 const SUPPLIER_A = "03" + "22".repeat(32);
 const SUPPLIER_B = "02" + "33".repeat(32);
 
-function connection(supplierId: string, publicKeyHex: string, requestSsp: SatSupplierConnection["requestSsp"]): SatSupplierConnection {
+function connection(
+  supplierId: string,
+  publicKeyHex: string,
+  requestSsp: SatSupplierConnection["requestSsp"],
+  onSubscribe: (handler: (wire: Uint8Array) => Promise<Uint8Array>) => void,
+  supplierGeneration = 1
+): SatSupplierConnection {
   return {
     supplierId,
     connectionId: `${supplierId}-connection`,
     ownerSessionEpoch: OWNER,
-    supplierGeneration: 1,
+    supplierGeneration,
     authenticatedPublicKeyHex: publicKeyHex,
     state: "online",
     requestSsp,
     requestSpi: async () => new Uint8Array(),
-    subscribeSspRequests: () => () => undefined,
+    subscribeSspRequests: (handler) => {
+      onSubscribe(handler);
+      return () => undefined;
+    },
     close: vi.fn()
   };
 }
 
-function makeStore() {
+function makeStore(
+  receiveSupplierIds: string[] = [],
+  subscriptions: Array<{
+    supplierId: string;
+    channel: string;
+    desired: "unknown" | "subscribing" | "subscribed" | "unsubscribing" | "unsubscribed" | "unknown_result";
+    observed: "unknown" | "subscribing" | "subscribed" | "unsubscribing" | "unsubscribed" | "unknown_result";
+    observedAtMs: number;
+    observedSource: "action" | "refresh" | "none";
+    errorCode: null;
+  }> = []
+): ReturnType<typeof createSatSubscriptionState> {
   return createSatSubscriptionState({
     ownerPublicKeyHex: OWNER,
     initial: {
@@ -34,278 +64,457 @@ function makeStore() {
         { supplierId: "primary", name: "Primary", supplierPublicKeyHex: SUPPLIER_A, multiaddrs: ["/ip4/127.0.0.1/tcp/9000"], enabled: true },
         { supplierId: "backup", name: "Backup", supplierPublicKeyHex: SUPPLIER_B, multiaddrs: ["/ip4/127.0.0.1/tcp/9001"], enabled: true }
       ],
-      ownerSettings: { ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: [] }
+      ownerSettings: {
+        ownerPublicKeyHex: OWNER,
+        defaultPublishSupplierId: "primary",
+        receiveSupplierIds
+      },
+      subscriptions
     }
   });
 }
 
 describe("SatSubscriptionProvider", () => {
-  it("declares no remote history/online query and publishes through only the default supplier", async () => {
+  it("publishes through the configured default Supplier", async () => {
     const store = makeStore();
-    const primary = vi.fn(async (wire: Uint8Array) => {
-      const requestId = parseRequestEnvelope(wire).requestId;
-      return newActionResult({ requestId, success: true, chargedAmount: "0.000000000000000001", errorCode: "" });
-    });
-    const backup = vi.fn(async (wire: Uint8Array) => {
-      const requestId = parseRequestEnvelope(wire).requestId;
-      return newActionResult({ requestId, success: true, chargedAmount: "0", errorCode: "" });
-    });
-    const provider = createSatSubscriptionProvider({
-      stateForOwner: async () => store,
-      channelCrypto: {} as never,
-      transport: { connect: async ({ supplier }) => connection(supplier.supplierId, supplier.supplierPublicKeyHex, supplier.supplierId === "primary" ? primary : backup) }
-    });
-    expect(provider.features).toEqual({ remoteHistory: false, onlineQuery: false, deliveryAck: true });
-    await provider.bind({ signer: { publicKeyHex: OWNER, signChallenge: async () => "" } });
-    const service = provider.service()!;
-    await expect(service.publish({ channel: "topic", contentJson: new TextEncoder().encode("{}") })).resolves.toMatchObject({ chargedAmount: "0.000000000000000001" });
-    expect(primary).toHaveBeenCalledTimes(1);
-    expect(backup).not.toHaveBeenCalled();
-    await expect(provider.checkOnline({ publicKeyHexes: [OWNER] })).resolves.toEqual({ [OWNER]: "unknown" });
-  });
-
-  it("fails closed on default transport uncertainty without switching suppliers", async () => {
-    const store = makeStore();
-    const primary = vi.fn(async () => { throw new SatTransportError("connection lost", { sentBoundary: "unknown" }); });
-    const backup = vi.fn(async (wire: Uint8Array) => {
-      const requestId = parseRequestEnvelope(wire).requestId;
-      return newActionResult({ requestId, success: true, chargedAmount: "0", errorCode: "" });
-    });
-    const provider = createSatSubscriptionProvider({
-      stateForOwner: async () => store,
-      channelCrypto: {} as never,
-      transport: { connect: async ({ supplier }) => connection(supplier.supplierId, supplier.supplierPublicKeyHex, supplier.supplierId === "primary" ? primary : backup) }
-    });
-    await provider.bind({ signer: { publicKeyHex: OWNER, signChallenge: async () => "" } });
-    await expect(provider.service()!.publish({ channel: "topic", contentJson: new TextEncoder().encode("{}") })).rejects.toMatchObject({ code: "unknown_result" });
-    expect(primary).toHaveBeenCalledTimes(1);
-    expect(backup).not.toHaveBeenCalled();
-    expect(store.listFeeAudit().at(-1)).toMatchObject({ result: "unknown_result", errorCode: "unknown_result" });
-  });
-
-  it("rejects an authenticated Supplier identity that does not match the pin", async () => {
-    const store = makeStore();
-    await store.deleteSupplier("backup");
-    const provider = createSatSubscriptionProvider({
-      stateForOwner: async () => store,
-      channelCrypto: {} as never,
-      transport: { connect: async ({ supplier }) => connection(supplier.supplierId, supplier.supplierId === "primary" ? SUPPLIER_B : supplier.supplierPublicKeyHex, async () => new Uint8Array()) }
-    });
-    await provider.bind({ signer: { publicKeyHex: OWNER, signChallenge: async () => "" } });
-    expect(provider.health().isHealthy).toBe(false);
-    expect(provider.health().lastError).toContain("pin");
-  });
-
-  it("keeps remote list/get unavailable instead of returning fake empty history", async () => {
-    const store = makeStore();
-    const provider = createSatSubscriptionProvider({ stateForOwner: async () => store, channelCrypto: {} as never, transport: { connect: async ({ supplier }) => connection(supplier.supplierId, supplier.supplierPublicKeyHex, async () => new Uint8Array()) } });
-    const handle = await provider.bind({ signer: { publicKeyHex: OWNER, signChallenge: async () => "" } });
-    await expect((handle as unknown as { listMessages(): Promise<unknown> }).listMessages()).rejects.toMatchObject({ code: "unavailable" });
-    await provider.shutdown();
-    await provider.shutdown();
-    expect(provider.health().isHealthy).toBe(false);
-  });
-
-  it("returns an ActionResult for inbound Publish and separates duplicate delivery from AppMsg events", async () => {
-    const store = makeStore();
-    await store.setOwnerSettings({ ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: ["primary", "backup"] });
-    const messageId = "A".repeat(43);
-    const envelopeBytes = cborEncode([
-      1,
-      hexToBytes(OWNER),
-      1,
-      "https://sender.example:443",
-      hexToBytes(OWNER),
-      1,
-      "https://recipient.example:443",
-      "client-1",
-      1,
-      1,
-      new Uint8Array(12),
-      new Uint8Array([1])
-    ]);
-    const appMsgContent = new TextEncoder().encode(JSON.stringify({
-      version: 1,
-      envelopeBase64Url: base64urlEncode(envelopeBytes),
-      signatureBase64Url: base64urlEncode(new Uint8Array(64))
+    const primary = vi.fn(async (wire: Uint8Array) => newActionResult({
+      requestId: parseRequestEnvelope(wire).requestId,
+      success: true,
+      chargedAmount: "0",
+      errorCode: ""
     }));
-    const opened = {
-      channel: `bsv8.inbox.${OWNER}`,
-      fromPublicKeyHex: OWNER,
-      toPublicKeyHex: OWNER,
-      messageIdBase64Url: messageId,
-      signedDigestHex: "aa".repeat(32),
-      protocol: "bsv8.message.v1",
-      bodyType: "deliver" as const,
-      contentJson: appMsgContent,
-      issuedAtMs: 1,
-      expiresAtMs: 2
-    };
-    const handlers = new Map<string, (wire: Uint8Array) => Promise<Uint8Array>>();
-    const ackRequests: Uint8Array[] = [];
-    const ackRequestsBySupplier = new Map<string, Uint8Array[]>();
-    let earlyResponse: Promise<Uint8Array> | undefined;
-    const channelCrypto = {
-      open: vi.fn(async () => opened),
-      sealAck: vi.fn(async () => ({
-        channel: "bsv8.inbox." + OWNER,
-        messageIdBase64Url: "B".repeat(43),
-        envelopeJson: new TextEncoder().encode("{}"),
-        fromPublicKeyHex: OWNER,
-        expiresAtMs: 3
-      }))
-    };
+    const backup = vi.fn(async () => new Uint8Array());
     const provider = createSatSubscriptionProvider({
       stateForOwner: async () => store,
-      channelCrypto: channelCrypto as never,
       transport: {
-        connect: async ({ supplier, ownerSessionEpoch, supplierGeneration, onSspRequest }) => {
-          // 模拟 adapter 在 connect 返回前已经收到并缓存了第一条 Publish。
-          if (supplier.supplierId === "primary") {
-            earlyResponse = onSspRequest?.(newPublish(newRequestId(), opened.channel, opened.contentJson));
-          }
-          return {
-          supplierId: supplier.supplierId,
-          connectionId: `${supplier.supplierId}-connection`,
-          ownerSessionEpoch,
-          supplierGeneration,
-          authenticatedPublicKeyHex: supplier.supplierPublicKeyHex,
-          state: "online" as const,
-          requestSsp: async (wire: Uint8Array) => {
-            ackRequests.push(wire.slice());
-            const requests = ackRequestsBySupplier.get(supplier.supplierId) ?? [];
-            requests.push(wire.slice());
-            ackRequestsBySupplier.set(supplier.supplierId, requests);
-            return newActionResult({ requestId: parseRequestEnvelope(wire).requestId, success: true, chargedAmount: "0", errorCode: "" });
-          },
-          requestSpi: async () => new Uint8Array(),
-          subscribeSspRequests: (handler: (wire: Uint8Array) => Promise<Uint8Array>) => {
-            handlers.set(supplier.supplierId, handler);
-            return () => handlers.delete(supplier.supplierId);
-          },
-          close: vi.fn()
-          };
-        }
+        connect: async ({ supplier, onSspRequest }) => connection(
+          supplier.supplierId,
+          supplier.supplierPublicKeyHex,
+          supplier.supplierId === "primary" ? primary : backup,
+          (handler) => { void onSspRequest; void handler; }
+        )
       }
     });
-    const handle = await provider.bind({ signer: { publicKeyHex: OWNER, signChallenge: async () => "" } }) as MessageProviderOperations;
-    const receivedRecords: ProviderSealedMessageRecord[] = [];
-    const records: Array<{ messageId: string; ingressSupplierId?: string; deliveryRelation?: string }> = [];
-    handle.subscribeMessages((record) => {
-      receivedRecords.push(record);
-      records.push({ messageId: record.messageId, ingressSupplierId: record.ingressSupplierId, deliveryRelation: record.deliveryRelation });
-    });
 
-    // 第一条请求在 bind 返回前到达，provider 必须缓存业务投影并仍返回 ActionResult。
-    const first = await earlyResponse!;
-    const duplicate = await handlers.get("backup")!(newPublish(newRequestId(), opened.channel, opened.contentJson));
-    expect(parseActionResult(first).success).toBe(true);
-    expect(parseActionResult(duplicate).success).toBe(true);
-    expect(records).toEqual([
-      { messageId, ingressSupplierId: "primary", deliveryRelation: "new" },
-      { messageId, ingressSupplierId: "backup", deliveryRelation: "duplicate" }
-    ]);
-    expect(store.getChannel(`bsv8.message.v1\u0000${OWNER}\u0000${messageId}`)?.ingressSupplierId).toBe("primary");
-    const firstRecord = receivedRecords[0]!;
-    await expect(handle.ackMessage!({ ...firstRecord, senderPublicKeyHex: SUPPLIER_B })).rejects.toMatchObject({ code: "conflict" });
-    await expect(handle.ackMessage!({ ...firstRecord, messageId: "Z".repeat(43) })).rejects.toMatchObject({ code: "conflict" });
-    const firstClaim = {
-      deliveryId: firstRecord.deliveryId!,
-      supplierId: firstRecord.ingressSupplierId!,
-      ackClaimToken: firstRecord.ackClaimToken!,
-    };
-    await Promise.all([
-      handle.ackMessage!(firstClaim),
-      handle.ackMessage!(firstClaim),
-    ]);
-    expect(ackRequests).toHaveLength(1);
-    // Duplicate ingress 仍要 ACK 原路；它携带自己的 deliveryId/claim，
-    // 不能读取第一条记录可变的 ingressSupplierId。
-    await handle.ackMessage!(receivedRecords[1]!);
-    expect(ackRequestsBySupplier.get("primary")).toHaveLength(1);
-    expect(ackRequestsBySupplier.get("backup")).toHaveLength(1);
+    await provider.bind({ ownerPublicKeyHex: OWNER });
+    const service = provider.service();
+    if (!service) throw new Error("expected Sat service");
+    await expect(service.publish({ channel: "topic", contentJson: new TextEncoder().encode("{}") }))
+      .resolves.toMatchObject({ chargedAmount: "0" });
+    expect(primary).toHaveBeenCalledTimes(1);
+    expect(backup).not.toHaveBeenCalled();
+    await provider.shutdown();
   });
 
-  it("rejects the 65th inbound delivery when no subscriber is attached", async () => {
-    const store = makeStore();
-    await store.setOwnerSettings({ ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: ["primary"] });
-    const messageId = "C".repeat(43);
-    const envelopeBytes = cborEncode([
-      1,
-      hexToBytes(OWNER),
-      1,
-      "https://sender.example:443",
-      hexToBytes(OWNER),
-      1,
-      "https://recipient.example:443",
-      "queue-test",
-      1,
-      1,
-      new Uint8Array(12),
-      new Uint8Array([1])
-    ]);
-    const contentJson = new TextEncoder().encode(JSON.stringify({
-      version: 1,
-      envelopeBase64Url: base64urlEncode(envelopeBytes),
-      signatureBase64Url: base64urlEncode(new Uint8Array(64))
-    }));
-    const opened = {
-      channel: "bsv8.inbox." + OWNER,
-      fromPublicKeyHex: OWNER,
-      toPublicKeyHex: OWNER,
-      messageIdBase64Url: messageId,
-      signedDigestHex: "bb".repeat(32),
-      protocol: "bsv8.message.v1",
-      bodyType: "deliver" as const,
-      contentJson,
-      issuedAtMs: 1,
-      expiresAtMs: 2
-    };
-    const channelCrypto = { open: vi.fn(async () => opened) };
-    let inboundHandler!: (wire: Uint8Array) => Promise<Uint8Array>;
+  it("maps the single physical Channel subscription to every configured receive Supplier", async () => {
+    const store = makeStore(["primary", "backup"]);
+    const requests = new Map<string, ReturnType<typeof vi.fn>>();
     const provider = createSatSubscriptionProvider({
       stateForOwner: async () => store,
-      channelCrypto: channelCrypto as never,
       transport: {
-        connect: async ({ supplier }) => {
-          const base = connection(supplier.supplierId, supplier.supplierPublicKeyHex, async (wire) => newActionResult({
+        connect: async ({ supplier, onSspRequest, supplierGeneration }) => {
+          const request = vi.fn(async (wire: Uint8Array) => newActionResult({
             requestId: parseRequestEnvelope(wire).requestId,
             success: true,
             chargedAmount: "0",
             errorCode: ""
           }));
-          if (supplier.supplierId !== "primary") return base;
+          requests.set(supplier.supplierId, request);
+          return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; }, supplierGeneration);
+        }
+      }
+    });
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    const service = provider.service();
+    if (!service) throw new Error("expected Sat service");
+    await handle.subscribePhysical(`bsv8.inbox.${OWNER}`);
+    await handle.unsubscribePhysical(`bsv8.inbox.${OWNER}`);
+    expect(requests.get("primary")).toHaveBeenCalledTimes(2);
+    expect(requests.get("backup")).toHaveBeenCalledTimes(2);
+    await provider.shutdown();
+  });
+
+  it("keeps successful Supplier/channel triples settled when another Supplier partially fails", async () => {
+    const store = makeStore(["primary", "backup"]);
+    const subscribeCalls = new Map<string, number>();
+    const refreshCalls = new Map<string, number>();
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest }) => {
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              refreshCalls.set(supplier.supplierId, (refreshCalls.get(supplier.supplierId) ?? 0) + 1);
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: [] });
+            }
+            if (envelope.message.kind === Kind.Subscribe) {
+              const count = (subscribeCalls.get(supplier.supplierId) ?? 0) + 1;
+              subscribeCalls.set(supplier.supplierId, count);
+              if (supplier.supplierId === "backup" && count === 1) {
+                throw new SatTransportError("backup request was not sent", { sentBoundary: "not-sent" });
+              }
+            }
+            return newActionResult({
+              requestId: envelope.requestId,
+              success: true,
+              chargedAmount: "1",
+              errorCode: ""
+            });
+          });
+          return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; });
+        }
+      }
+    });
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    const service = provider.service();
+    if (!service) throw new Error("expected Sat service");
+
+    await expect(handle.subscribePhysical("topic")).rejects.toBeInstanceOf(SatSubscriptionError);
+    await expect(handle.subscribePhysical("topic")).resolves.toBeUndefined();
+
+    expect(subscribeCalls.get("primary")).toBe(1);
+    expect(subscribeCalls.get("backup")).toBe(2);
+    expect(refreshCalls.get("backup")).toBe(1);
+    const chargedSubscriptions = store.listFeeAudit().filter((item) => item.action === "subscribe" && item.chargedAmount === "1");
+    expect(chargedSubscriptions.map((item) => item.supplierId).sort()).toEqual(["backup", "primary"]);
+    await provider.shutdown();
+  });
+
+  it("queries remote state before retrying an unknown subscription result", async () => {
+    const store = makeStore(["primary"]);
+    let subscribeCalls = 0;
+    let refreshCalls = 0;
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest }) => {
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            if (envelope.message.kind === Kind.Subscribe) {
+              subscribeCalls += 1;
+              if (subscribeCalls === 1) throw new SatTransportError("response lost", { sentBoundary: "unknown" });
+            }
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              refreshCalls += 1;
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: ["topic"] });
+            }
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "1", errorCode: "" });
+          });
+          return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; });
+        }
+      }
+    });
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    const service = provider.service();
+    if (!service) throw new Error("expected Sat service");
+
+    await expect(handle.subscribePhysical("topic")).rejects.toMatchObject({ code: "unknown_result" });
+    await expect(handle.subscribePhysical("topic")).resolves.toBeUndefined();
+
+    expect(subscribeCalls).toBe(1);
+    expect(refreshCalls).toBe(1);
+    expect(store.listFeeAudit().filter((item) => item.action === "subscribe")).toHaveLength(1);
+    expect(store.listSubscriptions("primary")[0]).toMatchObject({ desired: "subscribed", observed: "subscribed" });
+    await provider.shutdown();
+  });
+
+  it("reconnects a Supplier after a connection state failure without configuration changes", async () => {
+    const store = makeStore(["primary"]);
+    const backup = store.getSupplier("backup");
+    if (!backup) throw new Error("expected backup Supplier");
+    await store.upsertSupplier({ ...backup, enabled: false });
+    let connectionCount = 0;
+    let refreshCount = 0;
+    let notifyState: ((state: "online" | "degraded" | "closed") => void) | undefined;
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest, supplierGeneration }) => {
+          connectionCount += 1;
+          const connectionId = `${supplier.supplierId}-connection-${connectionCount}`;
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              refreshCount += 1;
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: [] });
+            }
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "0", errorCode: "" });
+          });
+          const active = connection(
+            supplier.supplierId,
+            supplier.supplierPublicKeyHex,
+            request,
+            (handler) => { void onSspRequest; void handler; },
+            supplierGeneration
+          );
           return {
-            ...base,
-            subscribeSspRequests: (handler: (wire: Uint8Array) => Promise<Uint8Array>) => {
-              inboundHandler = handler;
-              return () => undefined;
+            ...active,
+            connectionId,
+            onStateChange: (handler: (state: "online" | "degraded" | "closed") => void) => {
+              notifyState = handler;
+              return () => {
+                if (notifyState === handler) notifyState = undefined;
+              };
             }
           };
         }
       }
     });
-    const handle = await provider.bind({ signer: { publicKeyHex: OWNER, signChallenge: async () => "" } }) as MessageProviderOperations;
 
-    // 并发进入时也必须先原子预占 queue slot；不能让 65 个 handler
-    // 共同观察到“尚有空位”后再静默丢弃。
-    const responses = await Promise.all(
-      Array.from({ length: 65 }, () => inboundHandler(newPublish(newRequestId(), opened.channel, contentJson)))
-    );
-    expect(responses.slice(0, 64).every((wire) => parseActionResult(wire).success)).toBe(true);
-    expect(parseActionResult(responses[64]!).success).toBe(false);
-    expect(parseActionResult(responses[64]!).errorCode).toBe("INVALID_REQUEST");
+    await provider.bind({ ownerPublicKeyHex: OWNER });
+    expect(connectionCount).toBe(1);
+    notifyState?.("degraded");
 
-    // 解除 pending queue 后，未 ACK 的 active claim 仍必须受独立硬上限保护。
-    handle.subscribeMessages(() => undefined);
-    const claimTableFull = await inboundHandler(newPublish(newRequestId(), opened.channel, contentJson));
-    expect(parseActionResult(claimTableFull).success).toBe(false);
-    expect(parseActionResult(claimTableFull).errorCode).toBe("INVALID_REQUEST");
+    await vi.waitFor(() => expect(connectionCount).toBe(2), { timeout: 2_000 });
+    await vi.waitFor(() => expect(refreshCount).toBe(1), { timeout: 2_000 });
+    await provider.shutdown();
+  });
+
+  it("独立重试重连后的订阅刷新与物理收敛", async () => {
+    const store = makeStore(["primary"]);
+    const backup = store.getSupplier("backup");
+    if (!backup) throw new Error("expected backup Supplier");
+    await store.upsertSupplier({ ...backup, enabled: false });
+    let connectionCount = 0;
+    let refreshCount = 0;
+    let subscribeCount = 0;
+    let notifyState: ((state: "online" | "degraded" | "closed") => void) | undefined;
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest, supplierGeneration }) => {
+          connectionCount += 1;
+          const connectionId = `${supplier.supplierId}-reconcile-${connectionCount}`;
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              refreshCount += 1;
+              // 重连后的第一次 refresh 故意失败，验证“在线但未收敛”
+              // 会单独重试。
+              if (refreshCount === 1) throw new SatTransportError("refresh temporarily unavailable", { sentBoundary: "unknown" });
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: [] });
+            }
+            if (envelope.message.kind === Kind.Subscribe) subscribeCount += 1;
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "0", errorCode: "" });
+          });
+          const active = connection(
+            supplier.supplierId,
+            supplier.supplierPublicKeyHex,
+            request,
+            (handler) => { void onSspRequest; void handler; },
+            supplierGeneration
+          );
+          return {
+            ...active,
+            connectionId,
+            onStateChange: (handler: (state: "online" | "degraded" | "closed") => void) => {
+              notifyState = handler;
+              return () => {
+                if (notifyState === handler) notifyState = undefined;
+              };
+            }
+          };
+        }
+      }
+    });
+
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    await handle.subscribePhysical("topic");
+    expect(refreshCount).toBe(0);
+    expect(subscribeCount).toBe(1);
+    notifyState?.("degraded");
+
+    await vi.waitFor(() => expect(connectionCount).toBe(2), { timeout: 2_000 });
+    await vi.waitFor(() => expect(refreshCount).toBeGreaterThanOrEqual(2), { timeout: 4_000 });
+    await vi.waitFor(() => expect(subscribeCount).toBe(2), { timeout: 4_000 });
+    await provider.shutdown();
+  });
+
+  it("Worker 重启时不恢复旧 App 订阅，只在新 Mux 集合到达后清理历史证据", async () => {
+    const store = makeStore(["primary"], [{
+      supplierId: "primary",
+      channel: "old-app-topic",
+      desired: "subscribed",
+      observed: "subscribed",
+      observedAtMs: 1,
+      observedSource: "action",
+      errorCode: null
+    }]);
+    const requests: Array<{ kind: number; channel?: string }> = [];
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest, supplierGeneration }) => {
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            const document = decodeRequest(envelope);
+            const channel = document.subscribe?.channel ?? document.unsubscribe?.channel;
+            requests.push({ kind: envelope.message.kind, channel });
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: ["old-app-topic"] });
+            }
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "1", errorCode: "" });
+          });
+          return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; }, supplierGeneration);
+        }
+      }
+    });
+
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    expect(requests).toEqual([]);
+
+    await handle.subscribePhysical("new-app-topic");
+    expect(requests).toEqual([
+      { kind: Kind.Subscribe, channel: "new-app-topic" },
+      { kind: Kind.SubscriptionsRequest },
+      { kind: Kind.Unsubscribe, channel: "old-app-topic" }
+    ]);
+    expect(store.listFeeAudit().filter((item) => item.action === "subscribe")).toHaveLength(1);
+    expect(store.listFeeAudit().filter((item) => item.action === "unsubscribe")).toHaveLength(1);
+    await provider.shutdown();
+  });
+
+  it("reconciles supplier enable/disable changes without charging unrelated triples", async () => {
+    const store = makeStore(["primary"]);
+    const requests: Array<{ supplierId: string; kind: number }> = [];
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest }) => {
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            requests.push({ supplierId: supplier.supplierId, kind: envelope.message.kind });
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: ["topic"] });
+            }
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "1", errorCode: "" });
+          });
+          return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; });
+        }
+      }
+    });
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    const service = provider.service();
+    const admin = provider.adminService();
+    if (!service || !admin) throw new Error("expected Sat services");
+    await handle.subscribePhysical("topic");
+    await admin.setOwnerSettings({ ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: [] });
+    await admin.setOwnerSettings({ ownerPublicKeyHex: OWNER, defaultPublishSupplierId: "primary", receiveSupplierIds: ["primary"] });
+
+    expect(requests.map((item) => item.kind)).toEqual([Kind.Subscribe, Kind.Unsubscribe, Kind.Subscribe]);
+    expect(store.listFeeAudit().filter((item) => item.action === "subscribe" || item.action === "unsubscribe")).toHaveLength(3);
+    await provider.shutdown();
+  });
+
+  it("cleans a disabled Supplier with its own identity and leaves the other triple settled", async () => {
+    const store = makeStore(["primary", "backup"]);
+    const requests: Array<{ supplierId: string; kind: number }> = [];
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest, supplierGeneration }) => {
+          const request = vi.fn(async (wire: Uint8Array) => {
+            const envelope = parseRequestEnvelope(wire);
+            requests.push({ supplierId: supplier.supplierId, kind: envelope.message.kind });
+            if (envelope.message.kind === Kind.SubscriptionsRequest) {
+              return newSubscriptionsResponse({ requestId: envelope.requestId, chargedAmount: "0", channels: ["topic"] });
+            }
+            return newActionResult({ requestId: envelope.requestId, success: true, chargedAmount: "1", errorCode: "" });
+          });
+          return connection(supplier.supplierId, supplier.supplierPublicKeyHex, request, (handler) => { void onSspRequest; void handler; }, supplierGeneration);
+        }
+      }
+    });
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    const service = provider.service();
+    const admin = provider.adminService();
+    if (!service || !admin) throw new Error("expected Sat services");
+
+    await handle.subscribePhysical("topic");
+    await admin.upsertSupplier({
+      supplierId: "primary",
+      name: "Primary",
+      supplierPublicKeyHex: SUPPLIER_A,
+      multiaddrs: ["/ip4/127.0.0.1/tcp/9000"],
+      enabled: false
+    });
+
+    expect(requests).toEqual([
+      { supplierId: "primary", kind: Kind.Subscribe },
+      { supplierId: "backup", kind: Kind.Subscribe },
+      { supplierId: "primary", kind: Kind.Unsubscribe },
+      { supplierId: "backup", kind: Kind.SubscriptionsRequest }
+    ]);
+    expect(store.listFeeAudit().filter((item) => item.action === "subscribe" || item.action === "unsubscribe")).toHaveLength(3);
+    await provider.shutdown();
+  });
+
+  it("forwards only raw valid SSP Publish events to the Coordinator boundary", async () => {
+    const store = makeStore(["primary"]);
+    let inbound: ((wire: Uint8Array) => Promise<Uint8Array>) | undefined;
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest }) => connection(
+          supplier.supplierId,
+          supplier.supplierPublicKeyHex,
+          async (wire) => newActionResult({
+            requestId: parseRequestEnvelope(wire).requestId,
+            success: true,
+            chargedAmount: "0",
+            errorCode: ""
+          }),
+          (handler) => { if (supplier.supplierId === "primary") inbound = handler; void onSspRequest; }
+        )
+      }
+    });
+    await provider.bind({ ownerPublicKeyHex: OWNER });
+    const received: SatIncomingPublish[] = [];
+    provider.service()?.subscribeEvents((event) => { received.push(event); });
+    const response = await inbound!(newPublish(newRequestId(), "topic", new TextEncoder().encode("{\"ok\":true}")));
+    expect(parseActionResult(response).success).toBe(true);
+    expect(received).toHaveLength(1);
+    expect(received[0]).toMatchObject({ channel: "topic", ingressSupplierId: "primary" });
+    await provider.shutdown();
+  });
+
+  it("returns an SSP rejection when the Coordinator rejects an unknown private protocol", async () => {
+    const store = makeStore(["primary"]);
+    let inbound: ((wire: Uint8Array) => Promise<Uint8Array>) | undefined;
+    const provider = createSatSubscriptionProvider({
+      stateForOwner: async () => store,
+      transport: {
+        connect: async ({ supplier, onSspRequest }) => connection(
+          supplier.supplierId,
+          supplier.supplierPublicKeyHex,
+          async (wire) => newActionResult({
+            requestId: parseRequestEnvelope(wire).requestId,
+            success: true,
+            chargedAmount: "0",
+            errorCode: ""
+          }),
+          (handler) => { if (supplier.supplierId === "primary") inbound = handler; void onSspRequest; }
+        )
+      }
+    });
+    await provider.bind({ ownerPublicKeyHex: OWNER });
+    provider.service()?.subscribeEvents(async () => {
+      throw { domain: "channel-inbound", code: "UNSUPPORTED_PROTOCOL" };
+    });
+
+    const response = await inbound!(newPublish(newRequestId(), "bsv8.inbox.topic", new TextEncoder().encode("{}")));
+    const action = parseActionResult(response);
+    expect(action.success).toBe(false);
+    expect(action.errorCode).toBe("INVALID_REQUEST");
+    await provider.shutdown();
+  });
+
+  it("fails physical subscription closed when no receive Supplier is configured", async () => {
+    const store = makeStore();
+    const provider = createSatSubscriptionProvider({ stateForOwner: async () => store });
+    const handle = await provider.bind({ ownerPublicKeyHex: OWNER });
+    await expect(handle.subscribePhysical("topic")).rejects.toBeInstanceOf(SatSubscriptionError);
+    await provider.shutdown();
   });
 });
-
-function hexToBytes(value: string): Uint8Array {
-  const output = new Uint8Array(value.length / 2);
-  for (let index = 0; index < output.length; index += 1) output[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
-  return output;
-}

@@ -69,30 +69,19 @@ import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
   type AppBootstrapPayload,
-  type AppMsgCore,
-  type AppMsgGetParams,
-  type AppMsgGetResult,
-  type AppMsgListParams,
-  type AppMsgListResult,
-  type AppMsgSendParams,
-  type AppMsgSendResult,
-  type AppMsgMessage,
-  type AppMsgContentType,
+  type ConnectChannelRuntime,
+  type ChannelMessageReceivedEvent,
+  type ChannelMessageReceivedEventData,
+  type ChannelSubscriptionSetParams,
+  type ChannelSubscriptionSetResult,
+  type ChannelPublishParams,
+  type ChannelPublishResult,
   type AppViewContext,
   type BinaryField,
   type AppIdentitySnapshot,
   type AppIdentityProofV1,
   type AppCatalogResolution,
   type AppCatalogResolver,
-  type BroadcastCore,
-  type BroadcastMessage,
-  type BroadcastMessagePublicView,
-  type BroadcastPublishParams,
-  type BroadcastPublishResult,
-  type BroadcastSubscriptionListParams,
-  type BroadcastSubscriptionListResult,
-  type BroadcastSubscriptionSetParams,
-  type BroadcastSubscriptionSetResult,
   type CipherDecryptParams,
   type CipherDecryptResult,
   type CipherEncryptParams,
@@ -274,17 +263,8 @@ export interface ProtocolServiceDeps {
    * capability 取值注入；缺时 `p2pkh.transfer` 走 internal_error。
    */
   p2pkhService?: P2pkhProtocolAdapter;
-  /**
-   * 可选 appmsg.core 平台能力（施工单 2026-07-01 002 硬切换）。
-   *
-   * `protocolService` **不**直接持有 HubMsg 连接真值；HubMsg 连接 +
-   * 缓存 + 推送分发收口到 `appmsg.core`，protocolService 只是 external
-   * protocol 适配层（origin -> origin endpoint 投影 + dirty event 推送）。
-   *
-   * `undefined` 时 `appmsg.*` 三个 method 全部走 internal_error
-   * fail-closed（与 `p2pkh.service` 缺时 `p2pkh.transfer` 的降级对称）。
-   */
-  appMsgCore?: AppMsgCore;
+  /** Session Window 使用的已验证 Connect Channel facade。 */
+  connectChannelRuntime?: ConnectChannelRuntime;
   /** Optional Storage platform capability; absence only disables storage.*. */
   storageService?: StorageService;
   /** Resolve the current Storage capability at request/lifecycle time. */
@@ -299,19 +279,6 @@ export interface ProtocolServiceDeps {
   appCatalogResolver?: AppCatalogResolver;
   /** 延迟读取 resolver，避免 protocol -> apps capability 初始化循环。 */
   getAppCatalogResolver?: () => AppCatalogResolver | undefined;
-  /**
-   * 可选 broadcast.core 平台能力（施工单 2026-07-08 001 硬切换）。
-   *
-   * `protocolService` **不**直接持有 wire / provider handle；`broadcast.*`
-   * 三个 method 通过 `BroadcastCore` 公开 facade 调用：
-   *   - `broadcast.publish` → `core.publish(...)`；
-   *   - `broadcast.subscription_set` / `_list` → 由 service 内部维护 caller
-   *     维度的订阅集合，挂到 `core.subscribe(...)`。
-   *
-   * `undefined` 时 `broadcast.*` 全部走 internal_error fail-closed
-   * （与 `appmsg.core` 缺时 `appmsg.*` 的降级对称）。
-   */
-  broadcastCore?: BroadcastCore;
   /** 用于调试 / 日志的 logger（任意形状）。 */
   logger?: { info?: (input: unknown) => void; warn?: (input: unknown) => void; error?: (input: unknown) => void };
   /** 自定义 source window（默认取 `window.opener`）。 */
@@ -683,6 +650,21 @@ export class ProtocolServiceImpl implements ProtocolService {
     { runtime: SessionRuntimeBootstrap; createdAt: number }
   > = new Map();
 
+  /**
+   * 当前 transport 对端绑定的 Connect session。Channel 方法不再从 App
+   * params 读取 session id；这里是 Session Window 在成功 login/resume/
+   * launch 后建立的 transport 上下文真值。
+   */
+  private readonly channelSessionBySource: Map<
+    Window,
+    { origin: string; sessionId: string; ownerPublicKeyHex: string; epoch: number }
+  > = new Map();
+  /** 每个 Connect session 的虚拟精确频道集合。物理订阅由 Coordinator 统一复用。 */
+  private readonly channelSubscriptionsBySessionId: Map<string, string[]> = new Map();
+  private channelRuntimeUnsubscribe: (() => void) | undefined;
+  private readonly channelQuotaBySessionId: Map<string, { publishes: number[]; bytes: Array<{ at: number; size: number }>; inFlight: number }> = new Map();
+  private channelSessionEpoch = 0;
+
   private disposeSessionRuntimeBootstrap(
     runtime: SessionRuntimeBootstrap | undefined,
     reason: string
@@ -763,17 +745,11 @@ export class ProtocolServiceImpl implements ProtocolService {
   constructor(private readonly deps: ProtocolServiceDeps) {
     this.historyAvailableFlag = Boolean(deps.storageDb);
     this.bootModeValue = deps.bootMode ?? "connect";
-    // 施工单 2026-07-03 001 硬切换：订阅 `appmsg.core` 的完整消息推送
-    // （**不**再是 dirty hint），转发给当前 origin 对应 endpoint 的 caller
-    // （其它 origin 收不到）。事件路径：
-    //   `HubMsg -> appmsg.core -> protocolService -> 当前 caller`。
-    //   协议层在 popup main thread 上订阅全量事件；`appmsg.core` 内部
-    //   按 scope 派发，但协议层做的是"按 event.origin 找到当前 caller
-    //   source window"——所以这里走 unfiltered 订阅，必要时由
-    //   dispatch 内部再做 origin 过滤。
-    if (deps.appMsgCore) {
-      deps.appMsgCore.subscribeUnfilteredMessages((msg) => {
-        this.dispatchAppMsgMessageReceived(msg);
+    // Channel 事件已经在 Coordinator 完成验签、解密和固定协议分派。
+    // Session Window 只做当前 session + exact channel 的最后一层隔离。
+    if (deps.connectChannelRuntime) {
+      this.channelRuntimeUnsubscribe = deps.connectChannelRuntime.subscribe((event) => {
+        this.dispatchChannelMessageReceived(event);
       });
     }
   }
@@ -863,6 +839,11 @@ export class ProtocolServiceImpl implements ProtocolService {
    * origin 会残留到新会话里——违反 ProtocolService.startSession 接口契约。
    */
   startSession(): void {
+    this.releaseAllChannelSessions();
+    this.channelSessionBySource.clear();
+    this.channelSubscriptionsBySessionId.clear();
+    this.channelQuotaBySessionId.clear();
+    this.channelSessionEpoch++;
     // 1. 先 clearInterval 所有 timer，避免旧会话的 setInterval 继续跑回调。
     this.timersByRecordId.forEach((t) => clearInterval(t.tickHandle));
     this.timersByRecordId.clear();
@@ -920,6 +901,11 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 不发 `closing`（closing 由 pageUnloading 路径负责）。
    */
   endSession(): void {
+    this.releaseAllChannelSessions();
+    this.channelSessionBySource.clear();
+    this.channelSubscriptionsBySessionId.clear();
+    this.channelQuotaBySessionId.clear();
+    this.channelSessionEpoch++;
     const sessionIds = new Set<string>();
     for (const rec of this.requestsByRecordId.values()) {
       if (rec.connectSessionId) sessionIds.add(rec.connectSessionId);
@@ -983,11 +969,6 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     this.ownerRuntimesBySessionId.clear();
     this.lockStateValue = this.readVaultLockState();
-    // 施工单 2026-07-08 001 硬切换：endSession 清空所有 caller 的
-    // broadcast 订阅集合（不残留 union）。
-    for (const sid of this.callerSubscriptionsBySessionId.keys()) {
-      this.cleanupCallerBroadcastSubscriptions(sid);
-    }
     this.emit();
     this.emitFeed();
   }
@@ -2785,6 +2766,30 @@ export class ProtocolServiceImpl implements ProtocolService {
       this.emitFeed();
       void this.drainExecutionQueue();
       return;
+    } else if (method === "channel.publish" || method === "channel.subscription_set") {
+      // Channel 的 session id 属于 Session Window transport context，不属于
+      // App params。只能使用此前由同一 source + exact origin 建立的登录会话。
+      const channelSession = this.channelSessionBySource.get(source);
+      if (!channelSession || channelSession.origin !== origin) {
+        this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
+        return;
+      }
+      rec.connectSessionId = channelSession.sessionId;
+      rec.ownerPublicKeyHex = channelSession.ownerPublicKeyHex;
+      if (this.lockStateValue === "locked") {
+        // 锁定会话立即使 Channel 调用失效；不把 App 请求挂在解锁队列中。
+        this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
+        return;
+      }
+      rec.autoApproved = true;
+      rec.autoExecuteAfterUnlock = true;
+      this.setRecordPhase(recordId, "queued");
+      rec.enteredPhaseAt = Date.now();
+      this.executionQueue.push(recordId);
+      this.emit();
+      this.emitFeed();
+      void this.drainExecutionQueue();
+      return;
     } else {
       // 施工单 2026-06-28 002 硬切换：所有外部业务方法都属于某个
       // connectSessionId。统一预校验 session 真值，session 无效时
@@ -2875,49 +2880,6 @@ export class ProtocolServiceImpl implements ProtocolService {
         this.emit();
         this.emitFeed();
       }
-      return;
-    }
-
-    // 施工单 2026-07-01 002 硬切换：appmsg.* 不参与 popup 命令流 confirm UI，
-    // v1 走自动执行（unlocked → queued；locked → fail-fast）。
-    if (parsed.method === "appmsg.send" || parsed.method === "appmsg.list" || parsed.method === "appmsg.get") {
-      // appmsg.* 与 cipher.* / connect.resume / connect.logout 同语义：
-      //   - locked 时 fail-fast（session 预校验失败 → user_rejected）；
-      //   - unlocked 时直接 queued（不弹 confirm UI）。
-      if (this.lockStateValue === "locked") {
-        this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
-        return;
-      }
-      rec.autoExecuteAfterUnlock = true;
-      this.setRecordPhase(recordId, "queued");
-      rec.enteredPhaseAt = Date.now();
-      this.executionQueue.push(recordId);
-      this.emit();
-      this.emitFeed();
-      void this.drainExecutionQueue();
-      return;
-    }
-
-    // 施工单 2026-07-08 001 硬切换：broadcast.* 与 appmsg.* 同语义：
-    //   - 不参与 popup 命令流 confirm UI；
-    //   - locked 时 fail-fast；
-    //   - unlocked 时直接 queued（auto-execute）。
-    if (
-      parsed.method === "broadcast.publish" ||
-      parsed.method === "broadcast.subscription_set" ||
-      parsed.method === "broadcast.subscription_list"
-    ) {
-      if (this.lockStateValue === "locked") {
-        this.scheduleFailFastRequest(recordId, "user_rejected", "runtime_missing");
-        return;
-      }
-      rec.autoExecuteAfterUnlock = true;
-      this.setRecordPhase(recordId, "queued");
-      rec.enteredPhaseAt = Date.now();
-      this.executionQueue.push(recordId);
-      this.emit();
-      this.emitFeed();
-      void this.drainExecutionQueue();
       return;
     }
 
@@ -3362,6 +3324,15 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `authUnlockInProgress` 期间跳过批量推进（auth 页自己处理）。
    */
   setVaultLockState(_vaultLocked: boolean): void {
+    if (_vaultLocked) {
+      // Vault 锁定会立即撤销所有 Session Window Channel caller；后续 App
+      // 必须重新建立 session/订阅，不能复用锁前的授权上下文。
+      this.releaseAllChannelSessions();
+      this.channelSessionBySource.clear();
+      this.channelSubscriptionsBySessionId.clear();
+      this.channelQuotaBySessionId.clear();
+      this.channelSessionEpoch++;
+    }
     // 参数 `_vaultLocked` 仅保留兼容入口；最终态由 computeLockState 统一决定。
     const next = this.computeLockState();
     if (this.lockStateValue === next) return;
@@ -3754,6 +3725,8 @@ export class ProtocolServiceImpl implements ProtocolService {
         return { kind: "fail" };
       }
       sessionId = record.connectSessionId;
+    } else if (rec.method === "channel.publish" || rec.method === "channel.subscription_set") {
+      sessionId = rec.connectSessionId || undefined;
     } else {
       const params = rec.params as { connectSessionId?: string } | undefined;
       sessionId = params?.connectSessionId;
@@ -3824,6 +3797,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec.abortController = new AbortController();
     try {
       const result = await this.dispatch(rec);
+      this.rememberChannelSessionFromResult(rec, result);
       if (
       rec.cancelRequested &&
       (rec.method.startsWith("storage.") || rec.method.startsWith("msfile.")) &&
@@ -3880,18 +3854,10 @@ export class ProtocolServiceImpl implements ProtocolService {
           return await this.executeConnectLogout(rec);
         case "connect.launch":
           return await this.executeConnectLaunch(rec);
-        case "appmsg.send":
-          return await this.executeAppMsgSend(rec);
-        case "appmsg.list":
-          return await this.executeAppMsgList(rec);
-        case "appmsg.get":
-          return await this.executeAppMsgGet(rec);
-        case "broadcast.publish":
-          return await this.executeBroadcastPublish(rec);
-        case "broadcast.subscription_set":
-          return await this.executeBroadcastSubscriptionSet(rec);
-        case "broadcast.subscription_list":
-          return await this.executeBroadcastSubscriptionList(rec);
+        case "channel.publish":
+          return await this.executeChannelPublish(rec);
+        case "channel.subscription_set":
+          return await this.executeChannelSubscriptionSet(rec);
         case "storage.list":
           return await this.executeStorageList(rec);
         case "storage.directory.create":
@@ -4831,508 +4797,202 @@ export class ProtocolServiceImpl implements ProtocolService {
     };
   }
 
-  /* ============== appmsg.send / appmsg.list / appmsg.get ==============
-   *
-   * 设计缘由（施工单 2026-07-03 001 硬切换）：
-   *   - `protocolService` 是**外部 app** 的协议适配层，不持有 HubMsg 连接
-   *     真值；HubMsg 连接 + 本地 DB + 推送分发收口到 `appmsg.core`；
-   *   - 本组三个 method 走同一套 accept 预校验（session 真值 + origin
-   *     匹配 + owner key ready），执行阶段把当前 session 投影成 sender
-   *     `{ senderPublicKeyHex = session.ownerPublicKeyHex,
-   *       senderOrigin = event.origin }`，**不**接受 caller 自报 sender；
-   *   - 公开 params **不**含 `box` / `atMs` / `ownerPublicKeyHex` /
-   *     `endpoint` 字段；只允许 `recipientPublicKeyHex` +
-   *     `recipientOrigin` 或 `recipientAppId`；
-   *   - `appmsg.*` 不参与 popup 命令流 confirm UI（v1 走自动执行）；与
-   *     cipher / connect.* autoExecuteAfterUnlock 路径同语义。
-   *   - 对外推送 `appmsg.message_received` event（完整消息）；由 `appmsg.core`
-   *     内部 subscribe 接收后转成 ProtocolEventMessage 发给当前 origin
-   *     对应 endpoint 的 caller；其它 origin 收不到。
+  /* ============== channel.*（施工单 2026-09-02） ==============
+
+   * Connect App 的 Channel 请求只使用 Session Window 已验证的 transport
+   * context。owner、公钥签名、消息编号、时间和 SSP 投递全部由 Coordinator
+   * 完成；协议页不接触私钥、Supplier、Wire 或远端历史。
    */
 
-  /**
-   * 校验 appmsg.* 三个 method 的 sender 投影前置条件。
-   *
-   * 返回 true 表示校验通过；false 表示前置条件不满足（已对外
-   * 回 user_rejected）。
-   */
-  private async ensureAppMsgCoreReady(): Promise<boolean> {
-    if (!this.deps.appMsgCore) {
-      // 与 p2pkhService 缺时降级对称：走 internal_error。
-      return false;
-    }
-    return true;
-  }
-
-  /**
-   * 把当前 session 投影成对外 sender（公开消息视图）。
-   *
-   * 关键约束：
-   *   - `senderPublicKeyHex` 取自 session 真值，不读 caller params；
-   *   - `senderOrigin` 取 `event.origin`（exact origin，包含 port）；
-   *   - session 校验失败一律 fail-fast，与 cipher.* / connect.* 同语义。
-   *   - list / get 走的也是同一组 sender 投影——对外按 session.origin
-   *     收件维度返回数据。
-   */
-  private async projectAppMsgSender(rec: RequestRecord): Promise<{
-    senderPublicKeyHex: string;
-    senderOrigin: string;
-  }> {
-    const params = rec.params as { connectSessionId?: string };
-    const session = await this.requireConnectSession(rec, params.connectSessionId ?? "");
-    return {
-      senderPublicKeyHex: session.ownerPublicKeyHex,
-      senderOrigin: rec.origin
-    };
-  }
-
-  /**
-   * 校验 params 中**不**携带系统内部地址 / dirty 字段（防御性）：
-   *
-   * 关键约束（施工单 §4.4 / §6.2）：
-   *   - 任何 `senderOwnerPublicKeyHex` / `senderEndpoint` / `endpoint` /
-   *     `box` / `atMs` / `fromPublicKeyHex` / `fromOrigin` / `fromAppId`
-   *     风格的字段**都不允许**进入对外 params；
-   *   - 出现即 invalid_request；
-   *   - v1 简化：TypeScript 类型已经在协议层禁掉；这里做运行时兜底
-   *     防止 caller 用 `params: { ... } as AppMsgSendParams` 强转绕过。
-   */
-  private rejectForgedSenderFields(params: Record<string, unknown>): void {
-    const forbidden = [
-      "senderOwnerPublicKeyHex",
-      "senderEndpoint",
-      "senderAddress",
-      "endpoint",
-      "box",
-      "atMs",
-      "fromPublicKeyHex",
-      "fromOrigin",
-      "fromAppId"
-    ];
-    for (const k of forbidden) {
-      if (k in params) {
-        throw protocolError("invalid_request", `appmsg: forbidden field "${k}"`);
-      }
-    }
-  }
-
-  private async executeAppMsgSend(rec: RequestRecord): Promise<AppMsgSendResult> {
-    if (!(await this.ensureAppMsgCoreReady())) {
-      throw localFailure("internal_error", "appmsg.core not available");
-    }
-    const params = rec.params as AppMsgSendParams;
-    this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
-    if (
-      params.contentType !== "text/plain" &&
-      params.contentType !== "text/markdown"
-    ) {
-      throw protocolError("invalid_request", "appmsg.send: invalid contentType");
-    }
-    if (typeof params.body !== "string" || params.body.length === 0) {
-      throw protocolError("invalid_request", "appmsg.send: body must be non-empty string");
-    }
-    const hasOrigin = typeof params.recipientOrigin === "string" && params.recipientOrigin.length > 0;
-    const hasAppId = typeof params.recipientAppId === "string" && params.recipientAppId.length > 0;
-    if (hasOrigin === hasAppId) {
-      throw protocolError(
-        "invalid_request",
-        "appmsg.send: exactly one of recipientOrigin / recipientAppId required"
-      );
-    }
-    if (hasOrigin && !/^(https?):\/\/([^/:]+):(\d+)$/.test(params.recipientOrigin as string)) {
-      throw protocolError("invalid_request", "appmsg.send: invalid recipientOrigin");
-    }
-    if (hasAppId && !/^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(params.recipientAppId as string)) {
-      throw protocolError("invalid_request", "appmsg.send: invalid recipientAppId");
-    }
-    if (
-      !params.recipientPublicKeyHex ||
-      typeof params.recipientPublicKeyHex !== "string" ||
-      params.recipientPublicKeyHex.length !== 66
-    ) {
-      throw protocolError(
-        "invalid_request",
-        "appmsg.send: invalid recipientPublicKeyHex"
-      );
-    }
-    const projected = await this.projectAppMsgSender(rec);
-    const core = this.deps.appMsgCore as AppMsgCore;
-
-    // 硬切换 2026-07-04 001 高优 4：plugin-protocol 是**系统特殊方**，
-    // 通过 `appmsg.core` 的系统内部入口 `sendAsOrigin` 直接以 caller
-    // origin 身份发消息——**不**走 endpoint service（endpoint service
-    // 是给业务页用的稳定长寿抽象；popup 协议层每条 request 一次性的
-    // origin sender 投影**不**适合这种抽象）。
-    //
-    // send 路径与 subscribe 路径（`subscribeUnfilteredMessages`）
-    // 同属"系统特殊方特权"——保持口径一致。
-    const res = await core.sendAsOrigin({
-      origin: projected.senderOrigin ?? "",
-      sendInput: {
-        recipientPublicKeyHex: params.recipientPublicKeyHex,
-        recipientOrigin: hasOrigin ? (params.recipientOrigin as string) : undefined,
-        recipientAppId: hasAppId ? (params.recipientAppId as string) : undefined,
-        contentType: params.contentType as AppMsgContentType,
-        body: params.body,
-        clientMessageId: params.clientMessageId,
-        createdAtMs: params.createdAtMs
-      }
-    });
-    void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
-    return res;
-  }
-
-  private async executeAppMsgList(rec: RequestRecord): Promise<AppMsgListResult> {
-    if (!(await this.ensureAppMsgCoreReady())) {
-      throw localFailure("internal_error", "appmsg.core not available");
-    }
-    const params = rec.params as AppMsgListParams;
-    this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
-    const projected = await this.projectAppMsgSender(rec);
-    const core = this.deps.appMsgCore as AppMsgCore;
-    // 硬切换 2026-07-04 001 高优 4：与 send 路径口径一致——通过
-    // `appmsg.core.listAsOrigin` 系统内部入口。
-    const res = await core.listAsOrigin({
-      origin: projected.senderOrigin ?? "",
-      listInput: {
-        afterMessageId: params.afterMessageId,
-        limit: params.limit
-      }
-    });
-    void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
-    return res;
-  }
-
-  private async executeAppMsgGet(rec: RequestRecord): Promise<AppMsgGetResult> {
-    if (!(await this.ensureAppMsgCoreReady())) {
-      throw localFailure("internal_error", "appmsg.core not available");
-    }
-    const params = rec.params as AppMsgGetParams;
-    this.rejectForgedSenderFields(params as unknown as Record<string, unknown>);
-    if (typeof params.messageId !== "string" || params.messageId.length === 0) {
-      throw protocolError("invalid_request", "appmsg.get: messageId required");
-    }
-    const projected = await this.projectAppMsgSender(rec);
-    const core = this.deps.appMsgCore as AppMsgCore;
-    // 硬切换 2026-07-04 001 高优 4：与 send/list 路径口径一致——通过
-    // `appmsg.core.getAsOrigin` 系统内部入口。
-    const msg = await core.getAsOrigin({
-      origin: projected.senderOrigin ?? "",
-      getInput: { messageId: params.messageId }
-    });
-    if (!msg) {
-      throw localFailure("internal_error", "appmsg.get: message not found");
-    }
-    void this.touchConnectSessionByOwner(projected.senderPublicKeyHex);
-    return { message: msg };
-  }
-
-  /**
-   * 刷新 session 的 lastUsedAt。appmsg.* 与 cipher.* 同语义：执行成功
-   * 时记录使用时间，便于以后做"长期未用 session 自动 revoke"等策略。
-   */
-  private async touchConnectSessionByOwner(_ownerPublicKeyHex: string): Promise<void> {
-    // v1 简化：本单只保证 session 真值仍有效即可；后续如有 lastUsedAt
-    // 持久化策略可在此补。当前不持久化 lastUsedAt 也满足施工单要求。
-    return;
-  }
-
-  /* ============== broadcast.*（施工单 2026-07-08 001） ============== */
-
-  /**
-   * broadcast 协议族：直接消费 `BroadcastCore`，不接触 wire / handle。
-   *
-   * 关键约束（施工单 §4.4 + §5.2）：
-   *   - 每个 connectSessionId 对应一份"caller 订阅集合"；
-   *   - `subscription_set` 是 replace 语义，不是 add/remove；
-   *   - protocol 层**不**做重连、不持有 provider handle；
-   *   - 真值始终在 `BroadcastCore`；
-   *   - caller 销毁 / popup 关闭时清掉 caller 自己的订阅。
-   *
-   * 业务方订阅与本地 union 的关系：
-   *   - core.inspect().subscribedChannels = "由所有 caller / 业务插件"
-   *     共同贡献的 union；
-   *   - 每个 caller 自己只看到自己贡献的那部分（list 返回）。
-   */
-
-  /**
-   * 广播方法共享前同步校验：
-   *   - connectSessionId 非空；
-   *   - session 真实存在且未 revoke；
-   *   - core 已就绪（active provider + bound）。
-   */
-  /**
-   * 异步校验 broadcast.* 入参：拿 session 真值 + 当前 caller 订阅集合。
-   *
-   * 失败语义：
-   *   - broadcast core 不可用 → internal_error；
-   *   - sessionId 不存在 / 已 revoke → invalid_request；
-   *   - session origin !== 当前 caller origin → invalid_origin。
-   *
-   * session 真值解析复用现有 `fetchSessionForBinding`：与 cipher.* /
-   * appmsg.* / p2pkh 共用同一份 storage 真值。
-   */
-  private async requireBroadcastSession(
-    rec: RequestRecord,
-    params: { connectSessionId?: string }
-  ): Promise<{
-    session: ConnectSessionRecord;
+  private channelCallerFor(context: {
+    origin: string;
     sessionId: string;
-    channelIds: string[];
+    ownerPublicKeyHex: string;
+  }): import("@keymaster/contracts").ConnectChannelCaller {
+    return {
+      connectSessionId: context.sessionId,
+      origin: context.origin,
+      ownerPublicKeyHex: context.ownerPublicKeyHex
+    };
+  }
+
+  private rememberChannelSessionFromResult(
+    rec: RequestRecord,
+    result: MethodResult | null
+  ): void {
+    if (
+      rec.method !== "connect.login" &&
+      rec.method !== "connect.resume" &&
+      rec.method !== "connect.launch"
+    ) {
+      return;
+    }
+    if (!result || typeof result !== "object") return;
+    const value = result as {
+      connectSessionId?: unknown;
+      ownerPublicKeyHex?: unknown;
+    };
+    if (
+      typeof value.connectSessionId !== "string" ||
+      value.connectSessionId.length === 0 ||
+      typeof value.ownerPublicKeyHex !== "string" ||
+      value.ownerPublicKeyHex.length === 0
+    ) {
+      return;
+    }
+    const previous = this.channelSessionBySource.get(rec.source);
+    if (previous && previous.sessionId !== value.connectSessionId) {
+      this.deps.connectChannelRuntime?.release(this.channelCallerFor(previous));
+      this.channelSubscriptionsBySessionId.delete(previous.sessionId);
+      this.channelQuotaBySessionId.delete(previous.sessionId);
+    }
+    this.channelSessionBySource.set(rec.source, {
+      origin: rec.origin,
+      sessionId: value.connectSessionId,
+      ownerPublicKeyHex: value.ownerPublicKeyHex,
+      epoch: this.channelSessionEpoch
+    });
+  }
+
+  private releaseAllChannelSessions(): void {
+    for (const context of this.channelSessionBySource.values()) {
+      try {
+        this.deps.connectChannelRuntime?.release(this.channelCallerFor(context));
+      } catch (error) {
+        this.deps.logger?.warn?.({
+          scope: "protocol.channel",
+          event: "release.failed",
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    this.channelSubscriptionsBySessionId.clear();
+    this.channelQuotaBySessionId.clear();
+  }
+
+  private async requireChannelContext(rec: RequestRecord): Promise<{
+    sessionId: string;
+    origin: string;
+    ownerPublicKeyHex: string;
   }> {
-    if (!this.deps.broadcastCore) {
-      throw localFailure("internal_error", "broadcast.core not available");
+    const context = this.channelSessionBySource.get(rec.source);
+    if (
+      !context ||
+      context.epoch !== this.channelSessionEpoch ||
+      context.origin !== rec.origin ||
+      context.sessionId !== rec.connectSessionId ||
+      context.ownerPublicKeyHex !== rec.ownerPublicKeyHex
+    ) {
+      throw localFailure("runtime_missing", "Channel transport session is no longer valid");
     }
-    const sessionId = params.connectSessionId;
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
-      throw protocolError("invalid_request", "broadcast.*: connectSessionId required");
+    const session = await this.requireConnectSession(rec, context.sessionId);
+    if (
+      session.origin !== context.origin ||
+      session.ownerPublicKeyHex !== context.ownerPublicKeyHex ||
+      session.revokedAt !== null
+    ) {
+      throw localFailure("runtime_missing", "Channel Connect session is no longer valid");
     }
-    let session: ConnectSessionRecord | null = null;
+    return context;
+  }
+
+  private reserveChannelPublish(sessionId: string, content: ChannelPublishParams["content"]): () => void {
+    const now = Date.now();
+    const bucket = this.channelQuotaBySessionId.get(sessionId) ?? {
+      publishes: [],
+      bytes: [],
+      inFlight: 0
+    };
+    bucket.publishes = bucket.publishes.filter((at) => now - at < 10_000);
+    bucket.bytes = bucket.bytes.filter((entry) => now - entry.at < 10_000);
+    const encoded = JSON.stringify(content);
+    const size = new TextEncoder().encode(encoded ?? "null").byteLength;
+    if (bucket.publishes.length >= 32) {
+      throw protocolError("invalid_request", "channel.publish frequency limit exceeded");
+    }
+    if (bucket.bytes.reduce((total, entry) => total + entry.size, 0) + size > 512 * 1024) {
+      throw protocolError("invalid_request", "channel.publish byte limit exceeded");
+    }
+    if (bucket.inFlight >= 4) {
+      throw protocolError("invalid_request", "channel.publish concurrency limit exceeded");
+    }
+    bucket.publishes.push(now);
+    bucket.bytes.push({ at: now, size });
+    bucket.inFlight++;
+    this.channelQuotaBySessionId.set(sessionId, bucket);
+    return () => {
+      const current = this.channelQuotaBySessionId.get(sessionId);
+      if (current) current.inFlight = Math.max(0, current.inFlight - 1);
+    };
+  }
+
+  private async executeChannelPublish(rec: RequestRecord): Promise<ChannelPublishResult> {
+    const params = rec.params as ChannelPublishParams;
+    const context = await this.requireChannelContext(rec);
+    if (isReservedInboxChannel(params.channel)) {
+      throw protocolError("invalid_request", "bsv8.inbox.* is a reserved private channel");
+    }
+    const runtime = this.deps.connectChannelRuntime;
+    if (!runtime) throw localFailure("runtime_missing", "Channel runtime is unavailable");
+    const release = this.reserveChannelPublish(context.sessionId, params.content);
     try {
-      session = await this.fetchSessionForBinding(sessionId);
-    } catch (err) {
-      this.deps.logger?.warn?.({
-        scope: "protocol.broadcast",
-        event: "requireBroadcastSession.dbError",
-        sessionId,
-        err: err instanceof Error ? err.message : String(err)
+      return await runtime.publish(this.channelCallerFor(context), params);
+    } finally {
+      release();
+    }
+  }
+
+  private async executeChannelSubscriptionSet(
+    rec: RequestRecord
+  ): Promise<ChannelSubscriptionSetResult> {
+    const params = rec.params as ChannelSubscriptionSetParams;
+    const context = await this.requireChannelContext(rec);
+    if (params.channels.length > 64) {
+      throw protocolError("invalid_request", "channel.subscription_set exceeds 64 channels");
+    }
+    for (const channel of params.channels) {
+      validateExactChannelValue(channel);
+      if (isReservedInboxChannel(channel)) {
+        throw protocolError("invalid_request", "bsv8.inbox.* is a reserved private channel");
+      }
+    }
+    const runtime = this.deps.connectChannelRuntime;
+    if (!runtime) throw localFailure("runtime_missing", "Channel runtime is unavailable");
+    const result = await runtime.subscriptionSet(
+      this.channelCallerFor(context),
+      [...params.channels]
+    );
+    if (result.channels.length === 0) {
+      this.channelSubscriptionsBySessionId.delete(context.sessionId);
+    } else {
+      this.channelSubscriptionsBySessionId.set(context.sessionId, [...result.channels]);
+    }
+    return result;
+  }
+
+  private dispatchChannelMessageReceived(event: ChannelMessageReceivedEvent): void {
+    const message = event;
+    for (const [source, context] of this.channelSessionBySource) {
+      if (context.epoch !== this.channelSessionEpoch) continue;
+      if (!this.channelSubscriptionsBySessionId.get(context.sessionId)?.includes(message.channel)) {
+        continue;
+      }
+      const data: ChannelMessageReceivedEventData = {
+        channel: message.channel,
+        publisherPublicKeyHex: message.publisherPublicKeyHex,
+        messageId: message.messageId,
+        content: message.content
+      };
+      this.postEventMessage(source, context.origin, {
+        v: PROTOCOL_VERSION,
+        type: "event",
+        event: "channel.message_received",
+        data
       });
-      throw protocolError("invalid_request", "broadcast.*: session storage unavailable");
     }
-    if (!session) {
-      throw protocolError("invalid_request", "broadcast.*: unknown sessionId");
-    }
-    if (session.origin !== rec.origin) {
-      throw protocolError("invalid_origin", "broadcast.*: origin mismatch");
-    }
-    return {
-      session,
-      sessionId,
-      channelIds: this.callerSubscriptions(sessionId)
-    };
   }
 
-  private async executeBroadcastPublish(rec: RequestRecord): Promise<BroadcastPublishResult> {
-    const core = this.deps.broadcastCore as BroadcastCore;
-    const params = rec.params as BroadcastPublishParams;
-    // session 真值校验（与 cipher.* 一致：fail-fast）。
-    await this.requireBroadcastSession(rec, params);
-    // 1. 基本字段校验
-    if (typeof params.channelId !== "string" || params.channelId.length === 0) {
-      throw protocolError("invalid_request", "broadcast.publish: channelId required");
-    }
-    if (typeof params.protocolId !== "string" || params.protocolId.length === 0) {
-      throw protocolError("invalid_request", "broadcast.publish: protocolId required");
-    }
-    if (typeof params.clientMessageId !== "string" || params.clientMessageId.length === 0) {
-      throw protocolError("invalid_request", "broadcast.publish: clientMessageId required");
-    }
-    if (typeof params.createdAtMs !== "number" || params.createdAtMs <= 0) {
-      throw protocolError("invalid_request", "broadcast.publish: createdAtMs must be > 0");
-    }
-    if (typeof params.bodyBase64 !== "string") {
-      throw protocolError("invalid_request", "broadcast.publish: bodyBase64 must be string");
-    }
-    // 2. bodyBase64 → Uint8Array
-    let bodyBytes: Uint8Array;
-    try {
-      bodyBytes = base64ToBytes(params.bodyBase64);
-    } catch {
-      throw protocolError("invalid_request", "broadcast.publish: bodyBase64 invalid");
-    }
-    // 3. 当前 active provider 必须就绪（与 cipher.* 一致：fail-fast）。
-    if (!core.isReady()) {
-      throw localFailure("internal_error", "broadcast.publish: core not ready");
-    }
-    // 4. 调用 core.publish（core 内部按当前 owner 签名 envelope）。
-    const msg = await core.publish({
-      channelId: params.channelId,
-      protocolId: params.protocolId,
-      clientMessageId: params.clientMessageId,
-      createdAtMs: params.createdAtMs,
-      bodyBytes
-    });
-    return {
-      channelId: msg.channelId,
-      protocolId: msg.protocolId,
-      clientMessageId: msg.clientMessageId,
-      createdAtMs: msg.createdAtMs,
-      bodyBase64: bytesToBase64(msg.bodyBytes),
-      publisherPublicKeyHex: msg.publisherPublicKeyHex
-    };
-  }
-
-  private async executeBroadcastSubscriptionSet(
-    rec: RequestRecord
-  ): Promise<BroadcastSubscriptionSetResult> {
-    const core = this.deps.broadcastCore as BroadcastCore;
-    const params = rec.params as BroadcastSubscriptionSetParams;
-    const { session, sessionId } = await this.requireBroadcastSession(rec, params);
-    if (!Array.isArray(params.channelIds)) {
-      throw protocolError(
-        "invalid_request",
-        "broadcast.subscription_set: channelIds must be array"
-      );
-    }
-    for (const ch of params.channelIds) {
-      if (typeof ch !== "string" || ch.length === 0) {
-        throw protocolError("invalid_request", "broadcast.subscription_set: invalid channelId");
-      }
-    }
-    // 1. 替换 caller 维度的本地订阅集合。
-    this.setCallerSubscriptions(sessionId, params.channelIds);
-    // 2. 在 core 上挂一条 caller 自己的订阅；同一 caller 多次 set
-    // 走 replace：覆盖旧 handle、保留同一 unsubscribe 入口。
-    const handle = (msg: BroadcastMessage): void => {
-      if (!this.shouldDeliverToCaller(sessionId, msg.channelId)) return;
-      this.pushBroadcastMessageToCaller(sessionId, msg);
-    };
-    this.subscribeCallerChannelIds(sessionId, params.channelIds, handle);
-    // 3. 记 caller source（event 推送目标 window + origin）。
-    this.callerSourceAndOriginBySessionId.set(sessionId, {
-      source: rec.source,
-      origin: rec.origin
-    });
-    void core;
-    void session; // session 主要用于 origin 校验；set 后再次发 set 也按相同校验路径
-    return { channelIds: [...params.channelIds] };
-  }
-
-  private async executeBroadcastSubscriptionList(
-    rec: RequestRecord
-  ): Promise<BroadcastSubscriptionListResult> {
-    const params = rec.params as BroadcastSubscriptionListParams;
-    const { channelIds } = await this.requireBroadcastSession(rec, params);
-    return { channelIds: [...channelIds] };
-  }
-
-  /**
-   * 内部：以 caller 维度维护 subscription 集合。
-   *
-   * `callerSubscriptionsBySessionId` key = connectSessionId（即 caller 真值）。
-   * 同一 sessionId 多次 set → 覆盖；空数组 = 清空。
-   */
-  private callerSubscriptionsBySessionId: Map<string, string[]> = new Map();
-
-  /** 当前 caller 订阅的频道集合副本。 */
-  private callerSubscriptions(sessionId: string): string[] {
-    const list = this.callerSubscriptionsBySessionId.get(sessionId);
-    return list ? [...list] : [];
-  }
-
-  /** 替换当前 caller 订阅集合（**不**直接发 core.subscribe；由 caller dispose 后再走 core）。 */
-  private setCallerSubscriptions(sessionId: string, channelIds: string[]): void {
-    this.callerSubscriptionsBySessionId.set(sessionId, [...channelIds]);
-  }
-
-  /**
-   * 在 core 上挂一条 caller 自己维护的订阅订阅；
-   * caller 销毁时（endSession 路径）清理。
-   */
-  private callerCoreSubscriptions: Map<
-    string,
-    { unsubscribe: () => void; handle: (msg: BroadcastMessage) => void }
-  > = new Map();
-
-  /**
-   * caller source window 映射（origin-bound）：用 postMessage 推 event
-   * 时使用。
-   *
-   * 设计缘由：event / result / closing 通道一律按 caller 的 session.origin
-   * 发送，**不**走 "*"。把 origin 一起存进 map，省去每次查 session。
-   */
-  private callerSourceAndOriginBySessionId: Map<
-    string,
-    { source: Window; origin: string }
-  > = new Map();
-
-  private subscribeCallerChannelIds(
-    sessionId: string,
-    channelIds: string[],
-    handle: (msg: BroadcastMessage) => void
-  ): void {
-    const core = this.deps.broadcastCore as BroadcastCore;
-    if (!core) return;
-    const existing = this.callerCoreSubscriptions.get(sessionId);
-    if (existing) {
-      try {
-        existing.unsubscribe();
-      } catch {
-        // ignore
-      }
-      this.callerCoreSubscriptions.delete(sessionId);
-    }
-    if (channelIds.length === 0) return;
-    const unsubscribe = core.subscribe({
-      channelIds,
-      handler: handle
-    });
-    this.callerCoreSubscriptions.set(sessionId, { unsubscribe, handle });
-  }
-
-  /** 是否应把消息下推给当前 caller？按 exact channelId 在该 caller 订阅集合里判断。 */
-  private shouldDeliverToCaller(sessionId: string, channelId: string): boolean {
-    return this.callerSubscriptionsBySessionId.get(sessionId)?.includes(channelId) ?? false;
-  }
-
-  /**
-   * 把 core 推送的 BroadcastMessage 转成对外 event 推送给当前 caller。
-   *
-   * 设计缘由（施工单 §4.4 + §6.7）：
-   *   - 业务侧走 protocol 等价于走 Session Window transport；
-   *   - 必须复用既有 `postEventMessage(target, origin, msg)` 通道；
-   *     "result" / "event" / "closing" 通道都是 origin-bound；
-   *   - origin = session 绑定 origin（**不**用 "*"）；session window
-   *     跨 origin 后续导航后这条 session.source 在 popup 销毁时
-   *     会自然失效；
-   *   - `callerSourceBySessionId` 记录最近一次出现的 caller window。
-   */
-  private pushBroadcastMessageToCaller(
-    sessionId: string,
-    msg: BroadcastMessage
-  ): void {
-    const entry = this.callerSourceAndOriginBySessionId.get(sessionId);
-    if (!entry) return;
-    const event: ProtocolEventMessage = {
-      v: PROTOCOL_VERSION,
-      type: "event",
-      event: "broadcast.message_received",
-      data: {
-        message: this.bytesToBase64View(msg)
-      }
-    };
-    this.postEventMessage(entry.source, entry.origin, event);
-  }
-
-  private bytesToBase64View(msg: BroadcastMessage): BroadcastMessagePublicView {
-    return {
-      channelId: msg.channelId,
-      protocolId: msg.protocolId,
-      clientMessageId: msg.clientMessageId,
-      createdAtMs: msg.createdAtMs,
-      bodyBase64: bytesToBase64(msg.bodyBytes),
-      publisherPublicKeyHex: msg.publisherPublicKeyHex
-    };
-  }
-
-  /**
-   * 在 caller 销毁 / session revoke / connect.logout 路径上调用：
-   * 把 caller 自己的订阅从 core 摘掉。
-   */
-  private cleanupCallerBroadcastSubscriptions(sessionId: string): void {
-    const existing = this.callerCoreSubscriptions.get(sessionId);
-    if (existing) {
-      try {
-        existing.unsubscribe();
-      } catch {
-        // ignore
-      }
-      this.callerCoreSubscriptions.delete(sessionId);
-    }
-    this.callerSubscriptionsBySessionId.delete(sessionId);
-    this.callerSourceAndOriginBySessionId.delete(sessionId);
-  }
-
+  /* ============== p2pkh.transfer ============== */
   /* ============== p2pkh.transfer ============== */
 
   private async executeP2pkhTransferAndFinalize(rec: RequestRecord): Promise<void> {
@@ -5980,57 +5640,6 @@ export class ProtocolServiceImpl implements ProtocolService {
       error: { code, message: errorMessage }
     };
     this.postMessage(target, rec.origin, message);
-  }
-
-  /**
-   * 把 `appmsg.message_received` 事件推送给当前 origin 的 caller。
-   *
-   * 设计缘由（施工单 2026-07-03 001 硬切换）：
-   *   - event 是 server-pushed 方向（protocolService -> caller），与
-   *     `result`（caller -> protocolService）方向相反；
-   *   - 事件名 = `appmsg.message_received`；data 直接携带完整公开消息；
-   *   - 推送给"当前 origin 对应 endpoint"的 caller：按消息的
-   *     `senderOrigin` 找到对应 transport source；其它 origin 不收。
-   *   - 当前 session 没有活动 caller 时静默丢弃。
-   */
-  private dispatchAppMsgMessageReceived(msg: AppMsgMessage): void {
-    const senderOrigin = msg.senderOrigin;
-    if (!senderOrigin) return; // plugin 端推送不通过 protocolService
-    const recent = this.findRecentSourceForOrigin(senderOrigin);
-    if (!recent) return;
-    if (!this.canPostToTarget(recent)) return;
-    const message: ProtocolEventMessage = {
-      v: PROTOCOL_VERSION,
-      type: "event",
-      event: "appmsg.message_received",
-      data: { message: msg }
-    };
-    this.postEventMessage(recent, senderOrigin, message);
-  }
-
-  /** 兼容旧符号名的薄壳——保留类型对账兼容，不再被任何路径调用。 */
-  private dispatchAppMsgInboxDirty(_event: unknown): void {
-    void _event;
-  }
-
-  /**
-   * 按 exact origin 找最近一条 request 绑定的 source Window。
-   *
-   * 关键约束：
-   *   - 仅按"transport 维度"找最近 source；**不**校验 session 是否
-   *     仍有效（脏事件本身就是通知，正文拉取时再校验）；
-   *   - 若该 origin 上没有任何 request（popup 当前未服务该 origin），
-   *     返回 null：协议层**不**主动 push 任何窗口。
-   */
-  private findRecentSourceForOrigin(origin: string): Window | null {
-    let latest: RequestRecord | null = null;
-    for (const [, rec] of this.requestsByRecordId) {
-      if (rec.origin !== origin) continue;
-      if (!latest || rec.createdAt > latest.createdAt) {
-        latest = rec;
-      }
-    }
-    return latest?.source ?? null;
   }
 
   private postEventMessage(target: Window, origin: string, message: ProtocolEventMessage): void {
@@ -6761,11 +6370,11 @@ function looksLikeReady(v: unknown): boolean {
  * 顶层 `event` 报文形状判定（施工单 2026-07-03 001 硬切换）。
  *
  * 设计缘由：
- *   - v1 只引入一种 event：`appmsg.message_received`；
+ *   - v1 只引入一种 event：`channel.message_received`；
  *   - 由 protocolService 主动向当前 origin 的 caller 推送（不是 caller
  *     发来）；handleMessage 路径忽略 inbound event（只接受 outbound
  *     即 server-pushed 的方向；这里结构判定**仅**用于兼容 inbound 噪声）。
- *   - 旧 `appmsg.inbox_dirty` 已彻底删除（硬切换 2026-07-03/001）。
+ *   - event 只由 Session Window 服务端推送，caller 发来的 event 会被忽略。
  */
 function looksLikeEvent(v: unknown): boolean {
   if (!v || typeof v !== "object") return false;
@@ -6777,67 +6386,33 @@ function looksLikeEvent(v: unknown): boolean {
   );
 }
 
-/**
- * 校验 AppMsgEndpoint 形状。
- *
- * 设计缘由（施工单 2026-07-01 002 硬切换）：
- *   - `kind = "origin"` 时 `id` 必须是合法 exact origin（包含 port）；
- *   - `kind = "plugin"` 时 `id` 必须符合 `isValidPluginEndpointIdShape`；
- *   - 其它 kind / 空 id 一律 false。
- */
-function isValidAppMsgEndpoint(ep: unknown): boolean {
-  if (!ep || typeof ep !== "object") return false;
-  const o = ep as Record<string, unknown>;
-  const kind = o.kind;
-  const id = o.id;
-  if (typeof id !== "string" || id.length === 0) return false;
-  if (kind === "origin") {
-    return /^(https?):\/\/([^/:]+):(\d+)$/.test(id);
+/** Channel App/API 使用的精确频道校验；通配符和控制字符一律拒绝。 */
+function validateExactChannelValue(channel: string): void {
+  if (typeof channel !== "string" || channel.length === 0 || channel === "*") {
+    throw protocolError("invalid_request", "channel must be a non-empty exact string");
   }
-  if (kind === "plugin") {
-    return /^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$/.test(id);
+  if (new TextEncoder().encode(channel).byteLength > 256) {
+    throw protocolError("invalid_request", "channel exceeds 256 UTF-8 bytes");
   }
-  return false;
+  for (const codePoint of channel) {
+    if (codePoint < " " || codePoint === "\u007f") {
+      throw protocolError("invalid_request", "channel contains a control character");
+    }
+  }
 }
 
-function toBinaryField(bytes: Uint8Array, mime?: string) {
+/** Connect App 不能直接发布或订阅 owner inbox；仅 Coordinator 内部使用。 */
+function isReservedInboxChannel(channel: string): boolean {
+  return typeof channel === "string" && channel.startsWith("bsv8.inbox.");
+}
+
+function toBinaryField(bytes: Uint8Array, mime?: string): BinaryField {
   const ab = new ArrayBuffer(bytes.byteLength);
   new Uint8Array(ab).set(bytes);
   return mime
     ? { $type: "binary" as const, bytes: ab, mime }
     : { $type: "binary" as const, bytes: ab };
 }
-
-/* ============== base64 helpers（broadcast.* 协议族 2026-07-08 001） ============== */
-
-/**
- * base64 → Uint8Array。
- *
- * 失败语义：抛 Error（由 caller catch 并 translate 为 `invalid_request`）。
- */
-function base64ToBytes(b64: string): Uint8Array {
-  // 兼容浏览器 / Node：atob 在浏览器天然存在；Node 18+ 也自带 globalThis.atob；
-  // 这里走 atob + 手写 char-to-byte，避免依赖 Buffer。
-  if (typeof b64 !== "string") throw new Error("base64 input not string");
-  const cleaned = b64.replace(/[^A-Za-z0-9+/=]/g, "");
-  const bin = (globalThis as { atob?: (s: string) => string }).atob?.(cleaned ?? "");
-  if (typeof bin !== "string") throw new Error("atob unavailable");
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
-
-/**
- * Uint8Array → base64 string。
- */
-function bytesToBase64(bytes: Uint8Array): string {
-  if (!(bytes instanceof Uint8Array)) return "";
-  let bin = "";
-  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i] ?? 0);
-  const b64 = (globalThis as { btoa?: (s: string) => string }).btoa?.(bin ?? "");
-  return typeof b64 === "string" ? b64 : "";
-}
-
 function valToCbor(v: unknown): CborValue {
   if (v === null || v === undefined) return null;
   if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") return v;

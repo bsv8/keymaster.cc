@@ -11,10 +11,11 @@
 
 import type { AssetDataInvalidationEvent } from "./assets.js";
 import type { EcdsaSignatureFormat } from "./activeKeyCrypto.js";
+import type { JSONValue, ChannelPrivateMessageEvent, ChannelOperationCaller } from "./channel.js";
+import type { ContactPresenceMap } from "./contacts.js";
 import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
 import type { VaultSealedSecret } from "./vault.js";
-import type { ProviderSealedMessageRecord } from "./messageProvider.js";
 import type {
   StorageAppContext,
   StorageProviderConfigDraft,
@@ -200,6 +201,8 @@ export type CoordinatorClientRequest =
   | CoordinatorClientRequestWithMsfile
   | CoordinatorClientRequestWithWindowP2pExecutor
   | { kind: "sat.operation"; clientId: string; requestId: string; operation: CoordinatorSatOperation; expectedSessionEpoch: SessionEpoch }
+  | { kind: "channel.operation"; clientId: string; requestId: string; operation: CoordinatorChannelOperation; expectedSessionEpoch: SessionEpoch }
+  | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
   | ({ kind: "hello"; clientId: string; requestId: string }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
@@ -222,7 +225,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state" | "sat.events";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -247,15 +250,16 @@ export interface CoordinatorMsFileStateEvent {
 /** 受控 crypto 操作白名单。 */
 export type CoordinatorCryptoOperation =
   | { type: "signDigest"; digestHex: string; format: EcdsaSignatureFormat }
-  | { type: "deriveP2pkhAddress"; network: "main" | "test" }
-  | { type: "sealSendInput"; input: { sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string }; recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string }; contentType: "text/plain" | "text/markdown"; body: string; clientMessageId: string; createdAtMs: number } }
-  | { type: "openSealed"; record: ProviderSealedMessageRecord }
-  /** 在 SharedWorker 里创建 Channel bsv8.message.v1 Deliver。 */
-  | { type: "channel.seal-deliver"; recipientPublicKeyHex: string; contentJson: Uint8Array; issuedAtMs: number; expiresAtMs: number }
-  /** 在 SharedWorker 里创建 Channel ACK。 */
-  | { type: "channel.seal-ack"; recipientPublicKeyHex: string; acknowledgedMessageIdBase64Url: string; issuedAtMs: number; expiresAtMs: number }
-  /** 在 SharedWorker 里解密、验签、检查过期并分派 Channel 消息。 */
-  | { type: "channel.open"; channel: string; envelopeJson: Uint8Array; nowMs: number };
+  | { type: "deriveP2pkhAddress"; network: "main" | "test" };
+
+/** Channel 运行时调用；owner 由 Coordinator 当前解锁状态决定。 */
+export type CoordinatorChannelOperation =
+  | { type: "publish"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; channel: string; content: JSONValue }
+  /** 受信任 WebRTC 插件发布真实 Hash 请求；不能由 Connect App 伪造。 */
+  | { type: "hash-request-publish"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; hash: string; locator: "webrtc-sdp" }
+  | { type: "private-publish"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; recipientPublicKeyHex: string; protocol: string; content: JSONValue }
+  | { type: "subscription-set"; ownerPublicKeyHex: string; caller: ChannelOperationCaller; channels: string[] }
+  | { type: "release"; ownerPublicKeyHex: string; caller: ChannelOperationCaller };
 
 /** 后台同步设置。 */
 export interface CoordinatorBackgroundSyncSettings {
@@ -334,11 +338,7 @@ export type CoordinatorValueResult<T> =
 /** Crypto 操作结果。 */
 export type CoordinatorCryptoResult =
   | { type: "signDigest"; signatureHex: string; format: EcdsaSignatureFormat }
-  | { type: "deriveP2pkhAddress"; address: string }
-  | { type: "sealSendInput"; envelope: Uint8Array; signature: Uint8Array }
-  | { type: "openSealed"; plaintext: Uint8Array }
-  | { type: "channel.seal"; channel: string; messageIdBase64Url: string; envelopeJson: Uint8Array; fromPublicKeyHex: string; expiresAtMs: number }
-  | { type: "channel.open"; channel: string; messageIdBase64Url: string; signedDigestHex: string; fromPublicKeyHex: string; toPublicKeyHex: string; protocol: string; bodyType: "deliver" | "ack"; contentJson?: Uint8Array; acknowledgedMessageIdBase64Url?: string; issuedAtMs: number; expiresAtMs: number };
+  | { type: "deriveP2pkhAddress"; address: string };
 
 // ============================================================
 // 4. Coordinator -> Client Events
@@ -352,7 +352,37 @@ export type CoordinatorTopicEvent =
   | CoordinatorStorageStateEvent
   | P2pkhProvidersEvent
   | CoordinatorMsFileStateEvent
-  | CoordinatorSatStateEvent;
+  | CoordinatorSatStateEvent
+  | CoordinatorChannelStateEvent
+  | CoordinatorContactsPresenceEvent;
+
+/** Coordinator 已验签并完成固定 inbox 分派的 Channel 事件。 */
+export interface CoordinatorChannelStateEvent {
+  topic: "channel.events";
+  type: "channel.message.received";
+  /** 事件序号，用于跨 Tab 去重和乱序防护。 */
+  channelRevision: number;
+  sessionEpoch: SessionEpoch;
+  publicMessage?: {
+    channel: string;
+    publisherPublicKeyHex: string;
+    messageId: string;
+    content: JSONValue;
+  };
+  privateMessage?: ChannelPrivateMessageEvent;
+}
+
+/** Coordinator 唯一联系人在线状态快照；页面只消费该脱敏投影。 */
+export interface CoordinatorContactsPresenceEvent {
+  topic: "contacts.presence";
+  type: "contacts.presence.changed";
+  /** 事件序号，用于跨 Tab 去重和乱序防护。 */
+  presenceRevision: number;
+  sessionEpoch: SessionEpoch;
+  /** 快照所属的当前 owner；锁定或无 active key 时为 null。 */
+  activePublicKeyHex: string | null;
+  presence: ContactPresenceMap;
+}
 
 export interface P2pkhProvidersEvent {
   topic: "p2pkh.providers";
@@ -419,7 +449,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -469,6 +499,10 @@ export interface SessionCoordinatorClient {
   connect(): Promise<void>;
   getIsConnected(): boolean;
   getBootstrapSnapshot(): CoordinatorBootstrapSnapshot;
+  /** 返回当前会话代际；异步插件操作完成后用它判断结果是否仍属于原会话。 */
+  getSessionEpoch(): SessionEpoch;
+  /** 返回当前 active owner；异步插件操作完成后用它判断 owner 是否仍一致。 */
+  getActivePublicKeyHex(): string | undefined;
   subscribeTopic(topic: CoordinatorTopic, listener: (event: any) => void): () => void;
   unlock(password: string, publicKeyHex?: string): Promise<CoordinatorCommandResult>;
   lock(): Promise<CoordinatorCommandResult>;
@@ -493,6 +527,10 @@ export interface SessionCoordinatorClient {
   windowP2pExecutorSignPeerRecord(request: Omit<WindowP2pPeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
   /** 调用 SharedWorker 唯一 SatSubscription runtime；页面不直接持有 Sat DB/连接。 */
   satOperation(operation: CoordinatorSatOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
+  /** 调用 SharedWorker 唯一 Channel runtime；页面不直接持有 Sat DB/连接或私钥。 */
+  channelOperation(operation: CoordinatorChannelOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
+  /** 读取 Coordinator 内唯一联系人在线状态快照；不会触发新的网络探测。 */
+  contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
   p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
   p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;

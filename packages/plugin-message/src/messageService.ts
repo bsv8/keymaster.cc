@@ -1,117 +1,271 @@
-// packages/plugin-message/src/messageService.ts
-// 消息业务插件 service 层（施工单 2026-07-04 001 硬切换）。
+// 消息业务 service。
 //
-// 设计缘由：
-//   - `plugin-message` 是一个**极薄业务插件**，appId =
-//     `keymaster.message`；
-//   - service 直接消费由 plugin-appmsg 通过 `appmsg.endpoint.registry` 给
-//     出的稳定长寿 `AppMsgEndpointService`——它内部已经自动处理 owner
-//     真值 / active provider 切换；
-//   - **不**订阅 keyspace / vault / provider；
-//   - **不**暴露 `subscriptionSource()` 之类"subscription token"——
-//     endpoint service 内部自动迁移订阅；
-//   - 当前未就绪时（vault locked / 无 active key / 无 active provider）
-//     走降级：list/get 返回空态；send 抛 `not_ready`；subscribe 返回
-//     noop 取消函数；
-//   - 不接触 `appmsg.core` 全库接口；走 endpoint service 的稳定 5 方法。
+// 消息只通过 Channel 的固定 `bsv8.message.v1` 私信协议收发；历史记录只写入
+// 当前 owner 的本地 key-scoped DB。这里不查询远端历史、不查询在线状态，也不
+// 暴露 Supplier、SSP 或私钥字段。
 
 import type {
-  AppMsgContentType,
-  AppMsgEndpointService,
-  AppMsgMessage
+  ChannelPrivateMessageEvent,
+  ChannelRuntime,
+  JSONValue,
+  KeyspaceService,
+  MessageContentType,
+  MessageRecord
 } from "@keymaster/contracts";
-import { KEYMASTER_MESSAGE_APP_ID } from "@keymaster/contracts";
+import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
+import { createMessageDb, type MessageDbOwnerGuard } from "./messageDb.js";
 
-/**
- * 消息业务插件对外 service。
- *
- * 最小职责：消息读写、实时消息订阅与本地历史变化订阅，全部走稳定长寿 endpoint service。
- *   - `listMessages`：列自己 scope 内的本地消息；
- *   - `getMessage`：读单条；scope 外返回 null；
- *   - `sendTextMessage`：发一条文本消息到 `recipientAppId =
- *     keymaster.message` 的对方；
- *   - `subscribeMessages`：订阅自己 scope 内的事件；endpoint service
- *     内部已自动迁移订阅——上层 React effect **不需要**重新订阅；
- *   - `subscribeChanges`：覆盖发送落库、在线推送与离线补拉，供资源层失效重读；
- *   - `isReady`：当前 endpoint service 是否可用。
- *
- * 搜索**不**作为 service 暴露——UI 在拿到 list 后做本地字符串过滤。
- */
+/** 消息业务插件公开的 service。 */
 export interface MessageService {
-  /** endpoint service 是否可用。 */
+  /** 当前 owner 已解锁且 Channel runtime 可用。 */
   isReady(): boolean;
-  /** 列本地消息（scoped）。 */
-  listMessages(input?: { limit?: number; afterMessageId?: string }): Promise<AppMsgMessage[]>;
-  /** 单条取本地消息；scope 外返回 null。 */
-  getMessage(messageId: string): Promise<AppMsgMessage | null>;
-  /**
-   * 发一条 `recipientAppId = keymaster.message` 的文本消息。
-   * `recipientAppId` 固定为 `keymaster.message`——这是 `plugin-message`
-   * 的业务语义：对方也是这个 app 的用户。
-   */
+  /** 读取当前 owner 的本地消息历史。 */
+  listMessages(input?: { limit?: number; afterMessageId?: string }): Promise<MessageRecord[]>;
+  /** 读取当前 owner 的本地单条消息。 */
+  getMessage(messageId: string): Promise<MessageRecord | null>;
+  /** 发送一条文本私信，并在本地落库。 */
   sendTextMessage(input: {
     recipientPublicKeyHex: string;
     body: string;
-    contentType?: AppMsgContentType;
+    contentType?: MessageContentType;
     clientMessageId?: string;
   }): Promise<void>;
-  /** 订阅自己 scope 内的完整消息事件。返回取消订阅函数。 */
-  subscribeMessages(handler: (msg: AppMsgMessage) => void): () => void;
-  /** 订阅本地历史变化（含发送落库和离线补拉），供资源层失效重读。 */
+  /** 订阅收到或发送成功的本地消息。 */
+  subscribeMessages(handler: (message: MessageRecord) => void): () => void;
+  /** 订阅本地历史变化。 */
   subscribeChanges(handler: () => void): () => void;
+  /** 释放 Channel 订阅。 */
+  dispose?(): void;
 }
 
-/**
- * 构造消息业务 service。
- *
- * 入参 `endpointService`：plugin-appmsg 提供的稳定长寿 service。service
- * 内部已处理 owner / provider 切换，本层只读不写。
- *
- * 这样设计的好处：
- *   - vault 解锁 / 切 key / 切换 active provider 时，endpoint service
- *     **内部**自动迁移订阅 / 更新 sender 投影——本 service **不需要**
- *     重建也不需要重新构造；
- *   - 当前未就绪时所有方法静默走降级：list/get 返回空态；send 抛
- *     `not_ready`；subscribe 返回 noop 取消函数。
- *   - 业务页只关心 `isReady()` 返回值；owner / provider 切换完全由
- *     plugin-appmsg 透明处理。
- */
-export function createMessageService(
-  endpointService: AppMsgEndpointService
-): MessageService {
+interface MessageTextContent {
+  readonly [key: string]: JSONValue;
+  type: "text";
+  contentType: MessageContentType;
+  body: string;
+  clientMessageId: string;
+  createdAtMs: number;
+}
+
+interface MessageAckContent {
+  readonly [key: string]: JSONValue;
+  type: "ack";
+  acknowledged_message_id: string;
+}
+
+type MessagePrivateContent = MessageTextContent | MessageAckContent;
+
+export interface MessageServiceDeps {
+  channel: ChannelRuntime;
+  keyspace: KeyspaceService;
+}
+
+/** 构造消息 service。 */
+export function createMessageService(deps: MessageServiceDeps): MessageService {
+  const messageListeners = new Set<(message: MessageRecord) => void>();
+  const changeListeners = new Set<() => void>();
+  const db = createMessageDb(deps.keyspace);
+  let disposed = false;
+
+  function ownerPublicKeyHex(): string | undefined {
+    return deps.keyspace.active().activePublicKeyHex?.trim().toLowerCase();
+  }
+
+  interface OwnerOperation {
+    publicKeyHex: string;
+    /** keyspace generation 可选；没有该字段的测试实现仍按 owner 隔离。 */
+    generation?: number;
+  }
+
+  function captureOwner(): OwnerOperation | undefined {
+    const active = deps.keyspace.active();
+    const publicKeyHex = active.activePublicKeyHex?.trim().toLowerCase();
+    return publicKeyHex ? { publicKeyHex, generation: active.generation } : undefined;
+  }
+
+  function ownerGuard(owner: OwnerOperation): MessageDbOwnerGuard {
+    return () => {
+      if (disposed) return false;
+      const active = deps.keyspace.active();
+      return active.activePublicKeyHex?.trim().toLowerCase() === owner.publicKeyHex
+        && (owner.generation === undefined || active.generation === owner.generation);
+    };
+  }
+
+  function notify(message: MessageRecord): void {
+    for (const listener of messageListeners) {
+      try {
+        listener(message);
+      } catch {
+        // 单个页面 listener 异常不能打断消息真值。
+      }
+    }
+    for (const listener of changeListeners) {
+      try {
+        listener();
+      } catch {
+        // 单个资源 listener 异常不能打断消息真值。
+      }
+    }
+  }
+
+  function isMessageContent(value: JSONValue): value is MessagePrivateContent {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+    const record = value as Record<string, JSONValue>;
+    if (record.type === "ack") {
+      return typeof record.acknowledged_message_id === "string"
+        && record.acknowledged_message_id.length > 0;
+    }
+    return record.type === "text"
+      && (record.contentType === "text/plain" || record.contentType === "text/markdown")
+      && typeof record.body === "string"
+      && typeof record.clientMessageId === "string"
+      && record.clientMessageId.length > 0
+      && typeof record.createdAtMs === "number"
+      && Number.isFinite(record.createdAtMs);
+  }
+
+  async function acknowledge(event: ChannelPrivateMessageEvent, guard: MessageDbOwnerGuard): Promise<void> {
+    if (!guard()) return;
+    try {
+      await deps.channel.publishPrivate({
+        recipientPublicKeyHex: event.publisherPublicKeyHex,
+        protocol: MESSAGE_PRIVATE_PROTOCOL,
+        content: {
+          type: "ack",
+          acknowledged_message_id: event.messageId
+        }
+      });
+    } catch {
+      // ACK 是独立的最佳努力私信；失败不回滚已经落库的消息。
+    }
+  }
+
+  async function handlePrivateMessage(event: ChannelPrivateMessageEvent): Promise<void> {
+    if (disposed || event.protocol !== MESSAGE_PRIVATE_PROTOCOL) return;
+    const owner = captureOwner();
+    if (!owner || !isMessageContent(event.content)) return;
+    if (event.content.type === "ack") return;
+    const guard = ownerGuard(owner);
+
+    const record: MessageRecord = {
+      messageId: event.messageId,
+      clientMessageId: event.content.clientMessageId,
+      senderPublicKeyHex: event.publisherPublicKeyHex,
+      recipientPublicKeyHex: owner.publicKeyHex,
+      contentType: event.content.contentType,
+      body: event.content.body,
+      createdAtMs: event.content.createdAtMs,
+      insertedAtMs: Date.now()
+    };
+    try {
+      await db.put(owner.publicKeyHex, record, guard);
+      if (!guard()) return;
+      notify(record);
+      await acknowledge(event, guard);
+    } catch {
+      // 锁定、切 key 或本地 DB 关闭时，丢弃本次事件；不伪造成功通知。
+    }
+  }
+
+  const offChannel = deps.channel.subscribePrivate((event) => {
+    void handlePrivateMessage(event);
+  });
+  const subscribeOwnerInbox = (): void => {
+    const owner = ownerPublicKeyHex();
+    if (!owner) return;
+    void deps.channel.subscriptionSet([`bsv8.inbox.${owner}`]).catch(() => undefined);
+  };
+  subscribeOwnerInbox();
+  const offOwnerChanged = typeof deps.keyspace.onActiveKeyChanged === "function"
+    ? deps.keyspace.onActiveKeyChanged(() => subscribeOwnerInbox())
+    : undefined;
+
   return {
-    isReady: () => endpointService.isReady(),
-    listMessages: async (input) => {
-      const res = await endpointService.listMessages(input);
-      return res.items;
+    isReady: () => Boolean(!disposed && deps.channel.isReady() && ownerPublicKeyHex()),
+
+    async listMessages(input) {
+      const owner = captureOwner();
+      if (!owner) throw new Error("not_ready");
+      const rows = await db.list(owner.publicKeyHex, ownerGuard(owner));
+      rows.sort((a, b) => b.insertedAtMs - a.insertedAtMs || b.messageId.localeCompare(a.messageId));
+      const afterMessageId = input?.afterMessageId;
+      const foundAfter = afterMessageId ? rows.findIndex((row) => row.messageId === afterMessageId) : -1;
+      const start = foundAfter >= 0 ? foundAfter + 1 : 0;
+      const limit = Math.min(10_000, Math.max(0, Math.floor(input?.limit ?? 10_000)));
+      return rows.slice(start, start + limit);
     },
-    getMessage: async (messageId) => {
-      return endpointService.getMessage({ messageId });
+
+    async getMessage(messageId) {
+      const owner = captureOwner();
+      if (!owner) throw new Error("not_ready");
+      return (await db.get(owner.publicKeyHex, messageId, ownerGuard(owner))) ?? null;
     },
-    sendTextMessage: async (input) => {
+
+    async sendTextMessage(input) {
+      if (disposed || !deps.channel.isReady() || !ownerPublicKeyHex()) throw new Error("not_ready");
       const recipientPublicKeyHex = input.recipientPublicKeyHex.trim().toLowerCase();
       if (!/^(02|03)[0-9a-f]{64}$/.test(recipientPublicKeyHex)) {
         throw new Error("invalid_target");
       }
-      await endpointService.sendMessage({
-        recipientPublicKeyHex,
-        recipientAppId: KEYMASTER_MESSAGE_APP_ID,
+      if (typeof input.body !== "string" || input.body.length === 0) {
+        throw new Error("empty_message");
+      }
+      const sender = captureOwner();
+      if (!sender) throw new Error("not_ready");
+      const senderGuard = ownerGuard(sender);
+      const clientMessageId = input.clientMessageId ?? makeClientMessageId();
+      const createdAtMs = Date.now();
+      const content: MessageTextContent = {
+        type: "text",
         contentType: input.contentType ?? "text/plain",
         body: input.body,
-        clientMessageId: input.clientMessageId ?? makeClientMessageId(),
-        createdAtMs: Date.now()
+        clientMessageId,
+        createdAtMs
+      };
+      const result = await deps.channel.publishPrivate({
+        recipientPublicKeyHex,
+        protocol: MESSAGE_PRIVATE_PROTOCOL,
+        content: content as unknown as JSONValue
       });
+      if (!senderGuard()) throw new Error("owner_changed");
+      const record: MessageRecord = {
+        messageId: result.messageId,
+        clientMessageId,
+        senderPublicKeyHex: sender.publicKeyHex,
+        recipientPublicKeyHex,
+        contentType: content.contentType,
+        body: content.body,
+        createdAtMs,
+        insertedAtMs: Date.now()
+      };
+      await db.put(sender.publicKeyHex, record, senderGuard);
+      if (senderGuard()) notify(record);
     },
-    subscribeMessages: (handler) => {
-      return endpointService.subscribeMessages(handler);
+
+    subscribeMessages(handler) {
+      messageListeners.add(handler);
+      return () => messageListeners.delete(handler);
     },
-    subscribeChanges: (handler) => {
-      return endpointService.subscribeLocalChanges?.(handler) ?? endpointService.subscribeMessages(handler);
+
+    subscribeChanges(handler) {
+      changeListeners.add(handler);
+      return () => changeListeners.delete(handler);
+    },
+
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      offChannel();
+      offOwnerChanged?.();
+      void deps.channel.subscriptionSet([]).catch(() => undefined);
+      messageListeners.clear();
+      changeListeners.clear();
     }
   };
 }
 
-/** 生成客户端幂等键。 */
+/** 生成发送方业务幂等键。 */
 function makeClientMessageId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return `km-msg-${crypto.randomUUID()}`;

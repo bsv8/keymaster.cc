@@ -31,5 +31,5 @@ const text = binaryToText(result.content);
 `binary()` copies the source view. Later mutations to the caller's buffer do not
 change the request field.
 
-Broadcast bodies are the deliberate exception: their public representation is
-base64 text so messages remain stable across long-lived event delivery.
+Channel content is JSON. Applications that need binary data should encode it in
+their own application protocol before calling `channel.publish`.

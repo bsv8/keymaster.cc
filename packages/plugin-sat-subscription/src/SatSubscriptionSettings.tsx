@@ -114,32 +114,20 @@ export function SatSubscriptionSettings() {
 
   const toggleReceive = async (supplierId: string) => {
     if (!snapshot?.ownerSettings) return;
-    const inbox = `bsv8.inbox.${snapshot.ownerSettings.ownerPublicKeyHex}`;
     const receiving = snapshot.ownerSettings.receiveSupplierIds.includes(supplierId);
     setBusy(true);
     try {
-      // 先执行显式收费 Subscribe，再提交本地选择；关闭接收只更新本地意图
-      // 并由用户再次执行 Unsubscribe，避免页面把本地开关当成远端真值。
-      if (!receiving) {
-        const result = await service.setSubscription({ supplierId, channel: inbox, subscribed: true });
-        if (!result.ok) {
-          const cause = new Error(result.errorMessage ?? "Subscribe failed") as Error & { code?: string };
-          cause.code = result.errorCode;
-          throw cause;
-        }
-      } else {
-        const result = await service.setSubscription({ supplierId, channel: inbox, subscribed: false });
-        if (!result.ok) {
-          const cause = new Error(result.errorMessage ?? "Unsubscribe failed") as Error & { code?: string };
-          cause.code = result.errorCode;
-          throw cause;
-        }
-      }
+      // 设置页只修改 owner 的接收 Supplier 意图；实际 Supplier/频道三元组
+      // 的 Subscribe/Unsubscribe 由 Coordinator 统一对账，避免这里与 Mux
+      // 各发一次收费请求。
       const next: SatOwnerSupplierSettingsV1 = {
         ...snapshot.ownerSettings,
-        receiveSupplierIds: receiving ? snapshot.ownerSettings.receiveSupplierIds.filter((id) => id !== supplierId) : [...snapshot.ownerSettings.receiveSupplierIds, supplierId]
+        receiveSupplierIds: receiving
+          ? snapshot.ownerSettings.receiveSupplierIds.filter((id) => id !== supplierId)
+          : [...new Set([...snapshot.ownerSettings.receiveSupplierIds, supplierId])]
       };
       await service.setOwnerSettings(next);
+      setMessage(receiving ? "已关闭接收意图，Coordinator 将继续对账退订" : "已保存接收意图，Coordinator 将继续对账订阅");
       await reload();
     } catch (cause) { setError(satErrorMessage(cause)); }
     finally { setBusy(false); }
@@ -225,7 +213,7 @@ export function SatSubscriptionSettings() {
   return (
     <section className="settings-page sat-subscription-settings">
       <h1>{tr("sat.settings.title", "SatSubscription")}</h1>
-      <p>{tr("sat.settings.description", "多供应商 SSP 订阅、Channel AppMsg 和 SPI 账户管理。Subscribe 与自动 ACK 可能产生费用。")}</p>
+      <p>{tr("sat.settings.description", "多供应商 SSP 订阅、Channel 物理传输和 SPI 账户管理。Subscribe 与自动 ACK 可能产生费用。")}</p>
       {message ? <p role="status">{message}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
       <h2>{tr("sat.settings.suppliers", "供应商")}</h2>

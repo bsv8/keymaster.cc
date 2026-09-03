@@ -3,15 +3,12 @@
 //
 // 设计缘由：
 //   - 本页面**只**展示 `plugin-webrtc` 内部 service 的会话状态：
-//       * 输入对方 publicKeyHex → 选择 audio / video → 拨号（先通过
-//         online 前置门禁）；
+//       * 输入对方 publicKeyHex → 选择 audio / video → 直接拨号；
 //       * 入站来电卡片：accept / decline；
 //       * 当前会话状态 + 远端提示（fallback / reject / busy）；
 //       * 本地 / 远端媒体流区域（通过 `service.attachToVideo(...)` 绑流）。
-//   - **不**展示 HubMsg / AppMsg 连接态、provider 列表、统计；这些归
-//     `plugin-appmsg` 的 `/system/appmsg` 管理页；
-//   - 直接通过 `useCapability(WebrtcService)` 从 capability bus 拿 service；
-//     业务组件**不**接触 `appmsg.core` 全库接口。
+//   - 不展示 Channel 传输细节、Supplier 列表或协议统计；
+//   - 直接通过 capability bus 拿 service，不接触 Coordinator 内部接口。
 //   - 错误映射走 i18n key，不再硬编码英文；service 的 `lastError` 现在
 //     是稳定枚举（`WebrtcBlockReason`），UI 直接 `t(key)` 拿展示文案。
 
@@ -19,7 +16,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useCapability, useI18n, usePluginHost, useResource } from "@keymaster/runtime";
 import { PageHeader } from "@keymaster/ui";
 import { formatShortPublicKey } from "@keymaster/contracts";
-import { WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
+import { WEBRTC_CALLS_ENABLED, WEBRTC_SERVICE_CAPABILITY } from "./constants.js";
 import type {
   WebrtcRemoteNotice,
   WebrtcService,
@@ -68,8 +65,7 @@ interface WebrtcPageInnerProps {
 const ERROR_KEY: Record<WebrtcBlockReason, string> = {
   service_not_ready: "webrtc.page.workbench.block.service_not_ready",
   invalid_target: "webrtc.page.workbench.block.invalid_target",
-  target_offline: "webrtc.page.workbench.block.target_offline",
-  target_unknown: "webrtc.page.workbench.block.target_unknown",
+  call_protocol_unavailable: "webrtc.page.workbench.block.call_protocol_unavailable",
   busy_local: "webrtc.page.workbench.block.busy_local",
   device_unavailable: "webrtc.page.workbench.block.device_unavailable",
   send_invite_failed: "webrtc.page.workbench.block.send_invite_failed",
@@ -142,9 +138,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
           // 极端兜底：service 把错误抛出去了但没设置 lastError（不会发生在
           // 当前实现里，但保持 UI 不白屏）。
           const msg = err instanceof Error ? err.message : String(err);
-          if (msg.includes("target_offline")) setErrorKey("target_offline");
-          else if (msg.includes("target_unknown")) setErrorKey("target_unknown");
-          else if (msg.includes("busy_local")) setErrorKey("busy_local");
+          if (msg.includes("busy_local")) setErrorKey("busy_local");
           else if (msg.includes("service_not_ready")) setErrorKey("service_not_ready");
           else if (msg.startsWith("send_invite_failed")) setErrorKey("send_invite_failed");
           else if (msg.startsWith("create_offer_failed")) setErrorKey("create_offer_failed");
@@ -264,7 +258,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
           <button
             type="button"
             className="km-webrtc-page__button"
-            disabled={snap.direction !== null || busy || !snap.serviceReady}
+            disabled={!WEBRTC_CALLS_ENABLED || snap.direction !== null || busy || !snap.serviceReady}
             onClick={() => {
               void startCallGuarded("audio");
             }}
@@ -277,7 +271,7 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
           <button
             type="button"
             className="km-webrtc-page__button"
-            disabled={snap.direction !== null || busy || !snap.serviceReady}
+            disabled={!WEBRTC_CALLS_ENABLED || snap.direction !== null || busy || !snap.serviceReady}
             onClick={() => {
               void startCallGuarded("video");
             }}
@@ -288,6 +282,13 @@ function WebrtcPageInner({ service }: WebrtcPageInnerProps): React.ReactElement 
             })}
           </button>
         </div>
+        {!WEBRTC_CALLS_ENABLED ? (
+          <p className="km-webrtc-page__hint">
+            {t("webrtc.page.workbench.call_protocol_unavailable", {
+              defaultValue: "Audio/video calls are temporarily unavailable until the call rendezvous protocol is published."
+            })}
+          </p>
+        ) : null}
       </div>
 
       {snap.phase === "incoming" ? (

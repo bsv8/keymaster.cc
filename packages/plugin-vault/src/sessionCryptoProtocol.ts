@@ -8,7 +8,7 @@
 //
 // 施工单 001：signDigest 消息必须携带 format 字段
 
-import type { EcdsaSignatureFormat, ProviderSealedMessageRecord } from "@keymaster/contracts";
+import type { EcdsaSignatureFormat } from "@keymaster/contracts";
 
 export interface SessionCryptoBootstrapInput {
   sessionId: string;
@@ -40,26 +40,6 @@ export interface SessionCryptoDeriveAddressMessage {
   network: "main" | "test";
 }
 
-export interface SessionCryptoSealSendInputMessage {
-  kind: "sealSendInput";
-  requestId: string;
-  input: {
-    sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string };
-    recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string };
-    contentType: "text/plain" | "text/markdown";
-    body: string;
-    clientMessageId: string;
-    createdAtMs: number;
-  };
-}
-
-export interface SessionCryptoOpenSealedMessage {
-  kind: "openSealed";
-  requestId: string;
-  rec: ProviderSealedMessageRecord;
-}
-
-
 export interface SessionCryptoDisposeMessage {
   kind: "dispose";
   requestId: string;
@@ -70,8 +50,6 @@ export type SessionCryptoRequestMessage =
   | SessionCryptoInitMessage
   | SessionCryptoSignDigestMessage
   | SessionCryptoDeriveAddressMessage
-  | SessionCryptoSealSendInputMessage
-  | SessionCryptoOpenSealedMessage
   | SessionCryptoDisposeMessage;
 
 export type SessionCryptoResponseMessage<T = unknown> =

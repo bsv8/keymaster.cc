@@ -1,274 +1,121 @@
-// packages/plugin-bsv-price/src/bsvPriceService.test.ts
-// BSV Price service 动态订阅测试。
-//
-// 关键不变量：
-//   - 首次启动优先读 localStorage；
-//   - localStorage 为空时才用 seed；
-//   - 保存成功后立即切换到新频道；
-//   - 清空配置会取消订阅并回到 not_configured；
-//   - 旧频道消息不会在切换后继续污染当前快照。
+// BSV 价格服务的 Channel 精确订阅测试。
 
 import { beforeEach, describe, expect, it } from "vitest";
-import type {
-  BroadcastCore,
-  BroadcastMessage,
-  BroadcastSubscribeInput,
-  BroadcastUnsubscribe
-} from "@keymaster/contracts";
+import type { ChannelMessageReceivedEventData, ChannelRuntime } from "@keymaster/contracts";
 import { PRICECAST_PROTOCOL_ID, buildPriceChannelId } from "./constants.js";
 import { createBsvPriceService } from "./bsvPriceService.js";
 
 class FakeStorage implements Storage {
-  private map = new Map<string, string>();
-  get length(): number {
-    return this.map.size;
+  private readonly map = new Map<string, string>();
+  get length(): number { return this.map.size; }
+  key(index: number): string | null { return [...this.map.keys()][index] ?? null; }
+  getItem(key: string): string | null { return this.map.get(key) ?? null; }
+  setItem(key: string, value: string): void { this.map.set(key, value); }
+  removeItem(key: string): void { this.map.delete(key); }
+  clear(): void { this.map.clear(); }
+}
+
+class FakeChannel implements ChannelRuntime {
+  readonly subscriptionCalls: string[][] = [];
+  private readonly handlers = new Set<(event: ChannelMessageReceivedEventData) => void>();
+  isReady(): boolean { return true; }
+  async publish(): Promise<{ messageId: string }> { return { messageId: "unused" }; }
+  async publishPrivate(): Promise<{ messageId: string }> { return { messageId: "unused" }; }
+  async subscriptionSet(channels: string[]): Promise<{ channels: string[] }> {
+    this.subscriptionCalls.push([...channels]);
+    return { channels: [...channels] };
   }
-  key(index: number): string | null {
-    return [...this.map.keys()][index] ?? null;
+  subscribe(handler: (event: ChannelMessageReceivedEventData) => void): () => void {
+    this.handlers.add(handler);
+    return () => this.handlers.delete(handler);
   }
-  getItem(key: string): string | null {
-    return this.map.get(key) ?? null;
-  }
-  setItem(key: string, value: string): void {
-    this.map.set(key, value);
-  }
-  removeItem(key: string): void {
-    this.map.delete(key);
-  }
-  clear(): void {
-    this.map.clear();
+  subscribePrivate(): () => void { return () => undefined; }
+  emit(event: ChannelMessageReceivedEventData): void {
+    for (const handler of this.handlers) handler(event);
   }
 }
 
-class FakeBroadcastCore implements BroadcastCore {
-  subscribeCalls: BroadcastSubscribeInput[] = [];
-  private messageHandlers = new Set<(msg: BroadcastMessage) => void>();
-  private stateHandlers = new Set<() => void>();
-  private snapshotState: "idle" | "connecting" | "bound" | "closed" = "bound";
-  private lastError: string | null = null;
-  private activeProviderId: string | null = "fake-provider";
+const PUBLISHER_A = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const PUBLISHER_B = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 
-  providers(): never {
-    throw new Error("not used");
-  }
-  async reconcileOwnerConnection(): Promise<never> {
-    throw new Error("not used");
-  }
-  async disconnect(): Promise<void> {}
-  markStructurallyOffline(): void {}
-  setNextReconnectAtMs(): void {}
-  getNextReconnectAtMs(): null {
-    return null;
-  }
-  isReady(): boolean {
-    return true;
-  }
-  async publish(): Promise<BroadcastMessage> {
-    throw new Error("not used");
-  }
-  subscribe(input: BroadcastSubscribeInput): BroadcastUnsubscribe {
-    this.subscribeCalls.push(input);
-    this.messageHandlers.add(input.handler);
-    return () => {
-      this.messageHandlers.delete(input.handler);
-    };
-  }
-  listSubscribedChannels(): string[] {
-    return [...new Set(this.subscribeCalls.flatMap((x) => [...x.channelIds]))];
-  }
-  inspect() {
-    return {
-      state: this.snapshotState,
-      providerId: this.activeProviderId,
-      desiredConnectionOwnerPublicKeyHex: "02".padEnd(66, "a"),
-      lastError: this.lastError,
-      subscribedChannels: this.listSubscribedChannels(),
-      nextReconnectAtMs: null
-    };
-  }
-  onConnectionStateChanged(handler: () => void): BroadcastUnsubscribe {
-    this.stateHandlers.add(handler);
-    return () => {
-      this.stateHandlers.delete(handler);
-    };
-  }
-  currentHandle(): null {
-    return null;
-  }
-  setActiveProviderId(): Promise<void> {
-    return Promise.resolve();
-  }
-  getActiveProviderId(): string | null {
-    return this.activeProviderId;
-  }
-
-  emit(msg: BroadcastMessage): void {
-    for (const handler of this.messageHandlers) {
-      handler(msg);
-    }
-  }
-
-  setState(
-    state: "idle" | "connecting" | "bound" | "closed",
-    lastError: string | null = null
-  ): void {
-    this.snapshotState = state;
-    this.lastError = lastError;
-    for (const handler of this.stateHandlers) {
-      handler();
-    }
-  }
-}
-
-beforeEach(() => {
-  if (typeof localStorage !== "undefined") {
-    localStorage.clear();
-  }
-});
-
-function makeMessage(channelId: string, price = "100.00"): BroadcastMessage {
+function makeMessage(channel: string, price = "100.00"): ChannelMessageReceivedEventData {
   return {
-    channelId,
-    protocolId: PRICECAST_PROTOCOL_ID,
-    clientMessageId: "m1",
-    createdAtMs: 1000,
-    bodyBytes: new TextEncoder().encode(
-      JSON.stringify({ quotes: [{ exchange: "gate", price }] })
-    ),
-    publisherPublicKeyHex: "02".padEnd(66, "a")
+    channel,
+    publisherPublicKeyHex: PUBLISHER_A,
+    messageId: `message-${price}`,
+    content: {
+      protocolId: PRICECAST_PROTOCOL_ID,
+      quotes: [{ exchange: "gate", price }]
+    }
   };
 }
 
+beforeEach(() => {
+  localStorage.clear();
+});
+
 describe("createBsvPriceService", () => {
-  it("starts from stored config and subscribes exact channel", () => {
-    const ls = new FakeStorage();
-    ls.setItem(
-      "bsv-price.settings",
-      JSON.stringify({
-        pricePublisherPublicKeyHex:
-          "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        savedAtMs: 1
-      })
-    );
-    const core = new FakeBroadcastCore();
-    const service = createBsvPriceService(core, {
-      localStorage: ls,
-      seedPublisherPublicKeyHex:
-        "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    });
+  it("starts from stored config and subscribes to one exact Channel", () => {
+    const storage = new FakeStorage();
+    storage.setItem("bsv-price.settings", JSON.stringify({ pricePublisherPublicKeyHex: PUBLISHER_A, savedAtMs: 1 }));
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, { localStorage: storage });
 
     expect(service.configured()).toBe(true);
-    expect(service.getPublisherPublicKeyHex()).toBe(
-      "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
-    expect(core.subscribeCalls).toHaveLength(1);
-    expect(core.subscribeCalls[0]?.channelIds).toEqual([
-      buildPriceChannelId(
-        "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-      )
-    ]);
+    expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_A);
+    expect(channel.subscriptionCalls).toEqual([[buildPriceChannelId(PUBLISHER_A)]]);
+    service.dispose();
   });
 
-  it("seed is used when localStorage is empty and then persisted", () => {
-    const ls = new FakeStorage();
-    const core = new FakeBroadcastCore();
-    const service = createBsvPriceService(core, {
-      localStorage: ls,
-      seedPublisherPublicKeyHex:
-        "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  it("uses and persists the seed when no stored config exists", () => {
+    const storage = new FakeStorage();
+    const service = createBsvPriceService(new FakeChannel(), {
+      localStorage: storage,
+      seedPublisherPublicKeyHex: PUBLISHER_B
     });
-
-    expect(service.getPublisherPublicKeyHex()).toBe(
-      "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    );
-    expect(JSON.parse(ls.getItem("bsv-price.settings") ?? "{}")).toMatchObject({
-      pricePublisherPublicKeyHex:
-        "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-    });
+    expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_B);
+    expect(JSON.parse(storage.getItem("bsv-price.settings") ?? "{}")).toMatchObject({ pricePublisherPublicKeyHex: PUBLISHER_B });
+    service.dispose();
   });
 
-  it("save rebinds to the new channel and clears stale snapshot", () => {
-    const ls = new FakeStorage();
-    const core = new FakeBroadcastCore();
-    const service = createBsvPriceService(core, {
-      localStorage: ls,
-      seedPublisherPublicKeyHex:
-        "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    });
-
-    core.emit(
-      makeMessage(
-        buildPriceChannelId(
-          "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        ),
-        "100.01"
-      )
-    );
+  it("switches exact subscriptions and ignores messages from the old Channel", () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, { localStorage: new FakeStorage(), seedPublisherPublicKeyHex: PUBLISHER_A });
+    const oldChannel = buildPriceChannelId(PUBLISHER_A);
+    const newChannel = buildPriceChannelId(PUBLISHER_B);
+    channel.emit(makeMessage(oldChannel, "100.01"));
     expect(service.snapshot().snapshot?.quotes[0]?.price).toBe("100.01");
 
-    service.savePublisherPublicKeyHex(
-      "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    );
-
-    expect(service.getPublisherPublicKeyHex()).toBe(
-      "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-    );
+    service.savePublisherPublicKeyHex(PUBLISHER_B);
+    expect(channel.subscriptionCalls).toEqual([[oldChannel], [newChannel]]);
     expect(service.snapshot().snapshot).toBeNull();
-    expect(service.snapshot().lastError).toBeNull();
-    expect(core.subscribeCalls).toHaveLength(2);
-    expect(core.subscribeCalls[1]?.channelIds).toEqual([
-      buildPriceChannelId(
-        "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-      )
-    ]);
-
-    core.emit(
-      makeMessage(
-        buildPriceChannelId(
-          "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-        ),
-        "999.99"
-      )
-    );
+    channel.emit(makeMessage(oldChannel, "999.99"));
     expect(service.snapshot().snapshot).toBeNull();
-
-    core.emit(
-      makeMessage(
-        buildPriceChannelId(
-          "03cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-        ),
-        "101.23"
-      )
-    );
+    channel.emit({ ...makeMessage(newChannel, "101.23"), publisherPublicKeyHex: PUBLISHER_B });
     expect(service.snapshot().snapshot?.quotes[0]?.price).toBe("101.23");
+    service.dispose();
   });
 
-  it("saving empty string clears the subscription and enters not_configured", () => {
-    const core = new FakeBroadcastCore();
-    const service = createBsvPriceService(core, {
+  it("ignores a valid message from the wrong publisher on the configured Channel", () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, {
       localStorage: new FakeStorage(),
-      seedPublisherPublicKeyHex:
-        "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      seedPublisherPublicKeyHex: PUBLISHER_A
     });
+    channel.emit({
+      ...makeMessage(buildPriceChannelId(PUBLISHER_A), "999.99"),
+      publisherPublicKeyHex: PUBLISHER_B
+    });
+    expect(service.snapshot().snapshot).toBeNull();
+    service.dispose();
+  });
 
+  it("clears the configured Channel and rejects invalid publisher keys", () => {
+    const channel = new FakeChannel();
+    const service = createBsvPriceService(channel, { localStorage: new FakeStorage(), seedPublisherPublicKeyHex: PUBLISHER_A });
     service.savePublisherPublicKeyHex("");
-
-    expect(service.configured()).toBe(false);
-    expect(service.snapshot().status).toBe("not_configured");
-    expect(service.snapshot().channelId).toBe("(not configured)");
-    expect(core.subscribeCalls).toHaveLength(1);
-  });
-
-  it("invalid save throws and keeps current config", () => {
-    const core = new FakeBroadcastCore();
-    const service = createBsvPriceService(core, {
-      localStorage: new FakeStorage(),
-      seedPublisherPublicKeyHex:
-        "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    });
+    expect(service.snapshot()).toMatchObject({ status: "not_configured", configured: false, channelId: "(not configured)" });
     expect(() => service.savePublisherPublicKeyHex("bad")).toThrow("invalid_length");
-    expect(service.getPublisherPublicKeyHex()).toBe(
-      "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-    );
+    service.dispose();
   });
 });

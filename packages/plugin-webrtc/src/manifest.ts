@@ -2,35 +2,23 @@
 // WebRTC 业务插件 manifest（施工单 2026-07-04 002 硬切换）。
 //
 // 设计缘由：
-//   - plugin-webrtc 是**极薄业务插件**，appId = `keymaster.webrtc`，
-//     **不**再感知 owner / provider / 任何 provider 细节；
-//   - **不**订阅 keyspace.onActiveChange / vault.onStatusChange；
-//   - **不**直接订阅 `appmsg.core.subscribeUnfilteredMessages`；
-//   - 在自己的 `setup` 阶段：
-//       * `ctx.get<...>("appmsg.endpoint.registry").forEndpoint(...)` 拿到
-//         稳定长寿的 `AppMsgEndpointService`（endpoint = plugin endpoint
-//         `keymaster.webrtc`）；
-//       * service 内部自动处理 owner / provider 变化；本插件**不**关心；
-//       * 页面 = `/settings/webrtc`（STUN 设置）；
-//   - `/system/webrtc` 工作台已退出主流程，不再注册 route / menu / breadcrumb；
+//   - plugin-webrtc 是极薄业务插件，只通过 Coordinator Channel 私信收发信令；
+//   - 页面 = `/settings/webrtc`（STUN 设置）；
 //   - settings 走 `settings.registry` 单一真值。
 //   - i18n namespace：`webrtc`。
 
 import type {
-  AppMsgEndpointId,
-  AppMsgEndpointService,
-  AppMsgEndpointServiceRegistry,
   I18nPluginResources,
   KeyspaceService,
+  ContactsService,
+  ChannelRuntimeFactory,
   PluginManifest,
   NoticeRegistry,
   SystemSettingsRegistry
   ,ResourceRegistry
 } from "@keymaster/contracts";
-import { APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { CHANNEL_RUNTIME_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
 import {
-  KEYMASTER_WEBRTC_APP_ID,
-  WEBRTC_ENDPOINT_ID,
   WEBRTC_PLUGIN_ID,
   WEBRTC_SERVICE_CAPABILITY,
   WEBRTC_SETTINGS_PATH
@@ -54,20 +42,20 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.breadcrumb.settings": "WebRTC",
       "webrtc.page.workbench.title": "WebRTC",
       "webrtc.page.workbench.desc":
-        "Real-time audio / video chat over STUN-only WebRTC. Direct calls require the other party to be online.",
+        "File transfer over WebRTC data channels. Audio/video calls remain disabled until a formal call rendezvous protocol is published.",
       "webrtc.page.workbench.target.label": "Recipient publicKeyHex",
       "webrtc.page.workbench.target.placeholder":
         "02... (66 hex chars)",
       "webrtc.page.workbench.target.mode.audio": "Audio chat",
       "webrtc.page.workbench.target.mode.video": "Video chat",
       "webrtc.page.workbench.block.service_not_ready":
-        "webrtc service not ready (vault locked or no active provider)",
+        "webrtc service not ready (vault locked or no active key)",
       "webrtc.page.workbench.block.invalid_target":
         "recipient publicKeyHex must be 66 hex chars",
-      "webrtc.page.workbench.block.target_offline":
-        "peer is currently offline; dial is blocked",
-      "webrtc.page.workbench.block.target_unknown":
-        "cannot confirm peer online status; dial is blocked",
+      "webrtc.page.workbench.block.call_protocol_unavailable":
+        "audio/video calls are unavailable until the call rendezvous protocol is published",
+      "webrtc.page.workbench.call_protocol_unavailable":
+        "Audio/video calls are temporarily unavailable until the call rendezvous protocol is published.",
       "webrtc.page.workbench.block.busy_local":
         "there is already an active session",
       "webrtc.page.workbench.block.device_unavailable":
@@ -102,6 +90,10 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.notice.incoming.body": "A peer is calling you",
       "webrtc.notice.accept": "Accept",
       "webrtc.notice.reject": "Decline",
+      "webrtc.notice.transfer.title": "Incoming file transfer",
+      "webrtc.notice.transfer.body": "A contact wants to send you a file",
+      "webrtc.notice.transfer.accept": "Accept transfer",
+      "webrtc.notice.transfer.reject": "Reject transfer",
       "webrtc.page.settings.title": "WebRTC settings",
       "webrtc.page.settings.desc":
         "Configure STUN servers. STUN-only; no TURN. Changes auto-save on blur.",
@@ -125,17 +117,19 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.breadcrumb.settings": "WebRTC",
       "webrtc.page.workbench.title": "WebRTC",
       "webrtc.page.workbench.desc":
-        "实时音视频通话（仅 STUN，不含 TURN）。直接拨号需要对方当前在线。",
+        "通过 WebRTC 数据通道传输文件。正式呼叫会合协议发布前，音视频呼叫保持关闭。",
       "webrtc.page.workbench.target.label": "对方 publicKeyHex",
       "webrtc.page.workbench.target.placeholder": "02...（66 个 hex）",
       "webrtc.page.workbench.target.mode.audio": "音频聊天",
       "webrtc.page.workbench.target.mode.video": "视频聊天",
       "webrtc.page.workbench.block.service_not_ready":
-        "webrtc service 未就绪（vault 未解锁或未启用 provider）",
+        "webrtc service 未就绪（vault 未解锁或没有 active key）",
       "webrtc.page.workbench.block.invalid_target":
         "对方 publicKeyHex 必须为 66 个 hex 字符",
-      "webrtc.page.workbench.block.target_offline": "对方当前离线，已阻断拨号",
-      "webrtc.page.workbench.block.target_unknown": "无法确认对方在线，已阻断拨号",
+      "webrtc.page.workbench.block.call_protocol_unavailable":
+        "正式呼叫会合协议发布前，暂不支持音视频呼叫",
+      "webrtc.page.workbench.call_protocol_unavailable":
+        "正式呼叫会合协议发布前，暂不支持音视频呼叫",
       "webrtc.page.workbench.block.busy_local": "当前已有活动会话",
       "webrtc.page.workbench.block.device_unavailable": "本地设备不可用",
       "webrtc.page.workbench.block.send_invite_failed": "发送邀请失败",
@@ -163,6 +157,10 @@ const webrtcResources: I18nPluginResources = {
       "webrtc.notice.incoming.body": "有对端正在呼叫你",
       "webrtc.notice.accept": "接听",
       "webrtc.notice.reject": "拒接",
+      "webrtc.notice.transfer.title": "收到文件传输请求",
+      "webrtc.notice.transfer.body": "通讯录联系人请求向你发送文件",
+      "webrtc.notice.transfer.accept": "接受传输",
+      "webrtc.notice.transfer.reject": "拒绝传输",
       "webrtc.page.settings.title": "WebRTC 设置",
       "webrtc.page.settings.desc":
         "配置 STUN 服务器列表。仅 STUN，不含 TURN。字段失焦后自动保存。",
@@ -184,19 +182,13 @@ const webrtcResources: I18nPluginResources = {
 };
 
 /**
- * plugin-webrtc 的固定 endpoint。
- */
-const PLUGIN_WEBRTC_ENDPOINT: AppMsgEndpointId = WEBRTC_ENDPOINT_ID;
-void KEYMASTER_WEBRTC_APP_ID; // 文档引用：见 ./constants.ts
-
-/**
  * WebRTC 业务插件 manifest。
  */
 export const webrtcPlugin: PluginManifest = {
   id: WEBRTC_PLUGIN_ID,
   name: "WebRTC",
   description:
-    "Keymaster WebRTC business plugin: STUN-only audio/video calls over AppMsg signalling, online-gated dialing, single-session state machine.",
+    "Keymaster WebRTC business plugin: file transfer over Channel private signalling; audio/video calls are disabled until a formal rendezvous protocol is published.",
   meta: {
     kind: "business",
     startup: "optional",
@@ -207,27 +199,18 @@ export const webrtcPlugin: PluginManifest = {
   },
   i18n: webrtcResources,
   keyScopedStorages: [{ storageId: "history", description: "WebRTC 本地历史（通话 / 传输）" }],
-  appMessageEndpoint: {
-    endpointId: WEBRTC_ENDPOINT_ID.id,
-    description: "keymaster.webrtc business app"
-  },
   dependencies: [
-    {
-      capability: APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
-      reason: "拿 endpoint service（plugin-appmsg 提供）"
-    },
+    { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
     { capability: "keyspace.service", reason: "打开 key-scoped 历史库" },
+    { capability: "contacts.service", reason: "只允许当前 owner 通讯录中的发送者进入文件传输确认" },
     { capability: "notice.registry", reason: "投递全局紧急 notice" },
     { capability: "system-settings.registry", reason: "注册 WebRTC 系统设置" }
   ],
   setup(ctx) {
-    const registry = ctx.get<AppMsgEndpointServiceRegistry>(
-      APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY
-    );
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const contacts = ctx.get<ContactsService>("contacts.service");
     const noticeRegistry = ctx.get<NoticeRegistry>("notice.registry");
-    const endpointService: AppMsgEndpointService =
-      registry.forEndpoint(PLUGIN_WEBRTC_ENDPOINT);
+    const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
     const configStore = createLocalStorageWebrtcConfigStore(
       getDefaultWebrtcLocalStorage()
     );
@@ -236,12 +219,16 @@ export const webrtcPlugin: PluginManifest = {
       ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null
     });
     const service = createWebrtcService({
-      endpointId: PLUGIN_WEBRTC_ENDPOINT,
-      endpointService,
+      channel,
       keyspace,
       historyService,
       noticeRegistry,
       configStore,
+      isTransferSenderAllowed: async (publicKeyHex, signal) => {
+        if (signal?.aborted) return false;
+        const contact = await contacts.findByPublicKeyHex(publicKeyHex);
+        return !signal?.aborted && Boolean(contact);
+      },
       logger: {
         info: (scope, msg, data) => {
           ctx.logger.info({
@@ -332,7 +319,6 @@ export const webrtcPlugin: PluginManifest = {
 
     return () => {
       service.dispose();
-      registry.releaseEndpoint(PLUGIN_WEBRTC_ENDPOINT);
     };
   }
 };

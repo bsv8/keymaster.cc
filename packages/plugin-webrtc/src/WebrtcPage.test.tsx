@@ -106,7 +106,6 @@ function makeFakeService(): {
     }),
     rejectIncoming: vi.fn(async () => undefined),
     hangup: vi.fn(async () => undefined),
-    checkPeerOnline: vi.fn(async () => "online" as const),
     listHistoryForPeer: vi.fn(async () => []),
     getTransferBlob: vi.fn(async () => null),
     sendImage: vi.fn(async () => undefined),

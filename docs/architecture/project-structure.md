@@ -34,7 +34,7 @@ folder "仓库根目录" as repo {
       package "plugin-junglebus\nP2PKH confirmed provider" as plugin_junglebus
       package "plugin-background\n后台任务平台" as plugin_background
       package "plugin-protocol\n协议入口与弹窗流程" as plugin_protocol
-      package "plugin-hubmsg\nHub 消息接入" as plugin_hubmsg
+      package "plugin-sat-subscription\nSSP/SPI 传输与 Channel 物理订阅" as plugin_sat_subscription
       package "plugin-webrtc\nWebRTC 能力" as plugin_webrtc
     }
 
@@ -53,7 +53,6 @@ folder "仓库根目录" as repo {
       package "plugin-p2pkh\nP2PKH 资产实现" as plugin_p2pkh
       package "plugin-token-*\nToken 资产实现" as plugin_tokens
       package "plugin-collectible-*\nCollectible 资产实现" as plugin_collectibles
-      package "plugin-appmsg\nApp 消息" as plugin_appmsg
       package "plugin-message\n消息页" as plugin_message
       package "plugin-contacts\n联系人" as plugin_contacts
       package "plugin-poker\n扑克业务" as plugin_poker
@@ -80,7 +79,7 @@ plugin_woc --> pkg_contracts
 plugin_junglebus --> pkg_contracts
 plugin_background --> pkg_contracts
 plugin_protocol --> pkg_contracts
-plugin_hubmsg --> pkg_contracts
+plugin_sat_subscription --> pkg_contracts
 plugin_webrtc --> pkg_contracts
 
 plugin_vault --> pkg_contracts
@@ -95,7 +94,6 @@ plugin_apps --> pkg_contracts
 plugin_p2pkh --> pkg_contracts
 plugin_tokens --> pkg_contracts
 plugin_collectibles --> pkg_contracts
-plugin_appmsg --> pkg_contracts
 plugin_message --> pkg_contracts
 plugin_contacts --> pkg_contracts
 plugin_poker --> pkg_contracts
@@ -104,7 +102,7 @@ plugin_woc --> pkg_runtime : 注册 capability
 plugin_junglebus --> pkg_runtime : 提供 confirmed provider factory
 plugin_background --> pkg_runtime
 plugin_protocol --> pkg_runtime
-plugin_hubmsg --> pkg_runtime
+plugin_sat_subscription --> pkg_runtime
 plugin_webrtc --> pkg_runtime
 
 plugin_vault --> pkg_runtime
@@ -119,7 +117,6 @@ plugin_apps --> pkg_runtime
 plugin_p2pkh --> pkg_runtime
 plugin_tokens --> pkg_runtime
 plugin_collectibles --> pkg_runtime
-plugin_appmsg --> pkg_runtime
 plugin_message --> pkg_runtime
 plugin_contacts --> pkg_runtime
 plugin_poker --> pkg_runtime

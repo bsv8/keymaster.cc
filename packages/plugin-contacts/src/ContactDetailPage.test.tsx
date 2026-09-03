@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render, screen } from "@testing-library/react";
-import type { ActiveKeyState, Contact, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
+import type { ActiveKeyState, Contact, ContactPresenceMap, KeyspaceService, ResourceRegistry } from "@keymaster/contracts";
 import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
 import { ContactDetailPage } from "./ContactDetailPage.js";
 import { contactsResources } from "./manifest.js";
@@ -29,6 +29,17 @@ function keyspace(): KeyspaceService {
   };
 }
 
+function registerPresenceResource(resources: ResourceRegistry): void {
+  resources.register<ContactPresenceMap, readonly string[]>({
+    id: "contacts.presence",
+    scope: "active-key",
+    key: (_args, context) => ["contacts.presence", context.activePublicKeyHex ?? "none"],
+    load: async () => ({}),
+    subscribe: () => () => undefined,
+    invalidation: "immediate"
+  });
+}
+
 describe("ContactDetailPage", () => {
   afterEach(() => {
     cleanup();
@@ -47,6 +58,7 @@ describe("ContactDetailPage", () => {
       subscribe: () => () => undefined,
       invalidation: "immediate"
     });
+    registerPresenceResource(resources);
     window.history.pushState({}, "", "/contacts/contact-1");
 
     const { container } = render(

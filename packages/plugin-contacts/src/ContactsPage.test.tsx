@@ -5,6 +5,7 @@ import type {
   ActiveKeyState,
   Contact,
   ContactsService,
+  ContactPresenceMap,
   KeyspaceService,
   PluginManifest,
   ResourceRegistry
@@ -40,6 +41,17 @@ function contacts(): ContactsService {
   };
 }
 
+function registerPresenceResource(resources: ResourceRegistry): void {
+  resources.register<ContactPresenceMap, readonly string[]>({
+    id: "contacts.presence",
+    scope: "active-key",
+    key: (_args, context) => ["contacts.presence", context.activePublicKeyHex ?? "none"],
+    load: async () => ({}),
+    subscribe: () => () => undefined,
+    invalidation: "immediate"
+  });
+}
+
 describe("ContactsPage public-key actions", () => {
   afterEach(() => {
     cleanup();
@@ -55,6 +67,7 @@ describe("ContactsPage public-key actions", () => {
       id: "contacts.list", scope: "active-key", key: (_args: readonly string[], context) => ["contacts.list", context.activePublicKeyHex ?? "none"],
       load: async () => [CONTACT], subscribe: () => () => undefined, invalidation: "immediate"
     });
+    registerPresenceResource(resources);
     window.history.pushState({}, "", "/contacts");
 
     render(<PluginHostProvider host={host}><ContactsPage /></PluginHostProvider>);
@@ -84,6 +97,7 @@ describe("ContactsPage public-key actions", () => {
       id: "contacts.list", scope: "active-key", key: (_args: readonly string[], context) => ["contacts.list", context.activePublicKeyHex ?? "none"],
       load: async () => [CONTACT], subscribe: () => () => undefined, invalidation: "immediate"
     });
+    registerPresenceResource(resources);
 
     render(<PluginHostProvider host={host}><ContactsPage /></PluginHostProvider>);
     await waitFor(() => expect(screen.getByRole("button", { name: "Transfer" })).toBeTruthy());

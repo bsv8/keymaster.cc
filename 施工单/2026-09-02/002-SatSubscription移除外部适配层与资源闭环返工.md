@@ -1,6 +1,6 @@
 # SatSubscription 移除外部适配层与资源闭环返工单
 
-> 状态：施工中；内部 transport、Worker handler 资源闭环和 C01–C05 定向测试已落地；正式安装、真实多参与方 E2E、Go Server release 与外部目录删除待完成
+> 状态：施工中；内部 transport、Worker handler 资源闭环和 C01–C05 定向测试已落地；两次全仓测试、冻结锁文件安装、生产构建和 Go Server 本地 Gate 已通过；外部目录已删除并完成删除后复验；真实多参与方 E2E 与 Go Server release 待完成
 >
 > 优先级：P0
 >
@@ -57,6 +57,7 @@ bridge pending Map 或取消标记。
 
 以下 KeyHold 用例使用单测试 15 秒超时，不提高全局测试超时：
 
+- `cross-vault import succeeds with different passwords`；
 - `imports the first key into a locked empty Vault and activates it after unlock`
 - `new and hex-imported records round-trip through the KeyHold SDK`
 
@@ -246,7 +247,7 @@ make integration-typescript
 - timeout/cancel 释放 bridge Wire，但只在真实 Promise settle 后回收 handler slot；
 - lease revoke、runtime release、连接关闭和配置代际变化均有取消/迟到结果栅栏；
 - C01–C05 定向测试、6 项内部 transport 测试和原有 bridge 测试已加入；
-- 两个 KeyHold 慢测试已改为单测试 15 秒超时；
+- 三个 KeyHold 慢测试已改为单测试 15 秒超时；
 - 两份旧施工单已标记独立 adapter 方案废弃并指向本单。
 
 当前验证记录：
@@ -254,15 +255,18 @@ make integration-typescript
 - `pnpm typecheck`：通过；
 - Worker 定向测试：91 项通过；
 - 内部 Sat transport、Sat lane、Window executor、Sat provider 定向测试：20 项通过；
-- `pnpm install --offline --ignore-scripts`：通过；`file:` 依赖和 lockfile link 已移除。
+- `pnpm install --offline --ignore-scripts`、删除前后的 `pnpm install --frozen-lockfile`：通过；`file:` 依赖和 lockfile link 已移除；
+- `pnpm lint:react-boundaries`、`pnpm build`、`pnpm docs:connect:build`、`git diff --check`：通过；
+- `pnpm test` 连续两次：均通过，均为 211 个测试文件；
+- Go Server `GOWORK=off go test ./...`、`go test -race ./...`、`go vet ./...` 和 SSP 长流重复抑制集成测试：通过。
 
 以下事项尚未完成，不得声明 SatSubscription 能力完成：
 
 - 双 Supplier、双 owner、双 origin 真实 E2E；
 - S01–S22 真实供应商验收和证据归档；
 - Go SatSubscription Server 正式 commit/release；
-- `pnpm install --frozen-lockfile` 及删除外部目录后的最终复验；
-- `/home/david/Workspaces/SatSubscriptionLibp2p` 删除。
+- PostgreSQL-backed `make integration-typescript`（当前环境未设置 `SAT_SUBSCRIPTION_TEST_DSN`）；
+- 上述真实验收需要外部 Supplier、浏览器和 PostgreSQL 验收环境。
 
 ## 13. 完成定义
 
@@ -275,12 +279,13 @@ make integration-typescript
 - [x] timeout/cancel 不再造成 handler 和取消状态无限累积。
 - [x] ACK claim、bridge、writer、pending 上限继续通过。
 - [x] Connect App 仍只能访问 `appmsg.*`。
-- [ ] 全仓测试连续两次通过。
-- [ ] 干净安装和生产构建通过。
+- [x] 全仓测试连续两次通过。
+- [x] 冻结锁文件安装和生产构建通过。
+- [ ] PostgreSQL-backed `make integration-typescript` 通过。
 - [ ] 双 Supplier、双 owner、双 origin 真实 E2E 通过。
 - [ ] S01–S22 证据归档完成。
 - [ ] Go Server 有可定位的正式 commit/release。
-- [ ] `/home/david/Workspaces/SatSubscriptionLibp2p` 已删除。
-- [ ] 删除外部目录后重新安装、测试和构建仍通过。
+- [x] `/home/david/Workspaces/SatSubscriptionLibp2p` 已删除。
+- [x] 删除外部目录后重新安装、测试和构建仍通过。
 
 只有全部勾选后，才可以声明 SatSubscription 能力建立完成。

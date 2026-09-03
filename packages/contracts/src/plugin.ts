@@ -10,6 +10,8 @@ import type { PluginBusinessContribution } from "./business.js";
 
 /** 插件运行时上下文，由 plugin host 创建并传入 setup。 */
 export interface PluginContext {
+  /** Host 绑定的插件身份；插件不得从调用参数伪造其它 pluginId。 */
+  readonly pluginId: string;
   /** Register cleanup that runs before teardown and registry ownership recovery. */
   onDispose(cleanup: PluginTeardown): void;
   /** 注册 capability，重复注册会抛错。 */
@@ -166,42 +168,6 @@ export interface PluginManifest {
    * 需要运行时翻译的插件可以显式 get 它（不再要求每个 plugin 手写 registerResources）。
    */
   i18n?: I18nPluginResources;
-  /**
-   * 可选：声明本插件拥有"应用消息总线端点"。
-   *
-   * 设计缘由（施工单 2026-07-04 001 硬切换）：
-   *   - 声明后，runtime 在 enable 阶段对 `endpointId` 做形状校验
-   *     （`isValidPluginEndpointIdShape`）+ 全局唯一性校验，冲突即
-   *     fail-closed；
-   *   - **不再**由 runtime 注入 `<pluginId>.appmsg.client` capability。
-   *     业务插件需要时在自己的 `setup` 里通过
-   *     `appmsg.endpoint.registry` capability 拿一个 endpoint 对应的
-   *     稳定 `AppMsgEndpointService`；
-   *   - `endpointId` **不**等于 Vault key 域真值（`publicKeyHex`）；**不**
-   *     要求等于 manifest id；必须在同 Keymaster 安装内全局唯一；
-   *   - **不**声明 endpoint 的插件：runtime 不做任何注入，也不影响其
-   *     它 capability；
-   *   - 端点 service 内部自动处理 owner 真值 / provider 切换的迁移，
-   *     插件**不需要**自己监听 keyspace / vault / provider；
-   *   - endpoint service 的生命周期由 plugin-appmsg 内部持有——业务
-   *     插件在 teardown 时调用 `endpointRegistry.releaseEndpoint(...)`
-   *     释放即可。
-   *
-   * 字段命名约束：
-   *   - `endpointId` 形状见 `isValidPluginEndpointIdShape`（portable
-   *     subset）。
-   */
-  appMessageEndpoint?: {
-    /** 远端消息端点 id；全局唯一；不等于 vault key 域真值；不等于 manifest id。 */
-    endpointId: string;
-    /** 可选人类可读描述，便于诊断。 */
-    description?: string;
-  };
-  /**
-   * 插件的 setup 钩子，所有注册动作都发生在这里。
-   * 硬切换 001：可以返回 teardown 清理函数；host 在 disable / unregister 时
-   * 调用它。teardown 必须是幂等、可重复调用、可容忍部分资源已被清理。
-   */
   setup(ctx: PluginContext): void | Promise<void> | PluginTeardown | Promise<PluginTeardown>;
 }
 

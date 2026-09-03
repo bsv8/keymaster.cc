@@ -2,9 +2,11 @@
 // 装配插件：按依赖顺序注册。
 // 设计缘由：apps/web 是装配层，只 import manifest，不 import 内部服务。
 // 顺序（硬切换后）：
-//   runtime 内置 -> vault -> home -> settings -> assets -> key-import -> transfer -> contacts -> woc -> background -> p2pkh -> importers。
+//   runtime 内置 -> vault -> sat-subscription -> protocol -> contacts -> webrtc -> message
+//   -> settings -> key-import -> background -> home -> woc -> junglebus
+//   -> p2pkh -> importers。
 // plugin-woc 必须早于 plugin-p2pkh；plugin-background 必须早于 plugin-p2pkh；
-// plugin-transfer 必须早于 plugin-p2pkh（P2PKH 注册 Transfer Provider）。
+// Contacts 必须早于 WebRTC（WebRTC 使用当前 owner 通讯录做入站发送者准入）。
 //
 // 硬切换 003：把 shell 自身 i18n 资源（apps/web 装配层）通过 initialI18nResources
 // 注入；plugin 注册前可被 t() 命中。
@@ -160,41 +162,12 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // 硬切换 001 + 施工单 004 + 2026-06-29 002：按"依赖先后保证 capability 顺序"的顺序
   // 加入已知集合。host.register 内部会按 config store 决定是否自动 enable。
   //
-  // 关键顺序（施工单 2026-07-04 001 硬切换 + 2026-07-06 001 硬切换）：
-  //   vault
-  //   broadcast（先装，把 `broadcast.core` + `broadcast.provider.registry`
-  //     capability 挂到 capability bus；hubcast 之后 register 自身）
-  //   hubcast（在 broadcast 之后 register 自身；plugin-hubcast 依赖
-  //     `broadcast.provider.registry`，**不**依赖 `appmsg.core` / 任何
-  //     消息系统概念）
-  //   appmsg-platform（先装，把 `message.provider.registry` capability
-  //     挂到 capability bus；hubmsg 之后 register 自身）
-  //   hubmsg-platform（在 appmsg 之后 register 自身；plugin-hubmsg
-  //     自身不依赖 `appmsg.core`——它依赖 `message.provider.registry`）
-  //   protocol
-  //   webrtc（plugin-message / notice 需要它）
-  //   message（plugin-message 依赖 `appmsg.endpoint.registry` + `webrtc.service`）
-  //   home
-  //   settings
-  //   ...
-  //
-  // 设计缘由：
-  //   - 硬切换 2026-07-06 001：plugin-broadcast / plugin-hubcast 与
-  //     plugin-appmsg / plugin-hubmsg **互不依赖**；两套系统的 capability
-  //     真值独立，**不**互相 import；
-  //   - 硬切换 2026-07-06 001：plugin-hubcast **必须**在 plugin-broadcast
-  //     之后装载——hubcast 依赖 `broadcast.provider.registry`；
-  //   - 硬切换 2026-07-04 001：plugin-hubmsg **不**再依赖 `appmsg.core`；
-  //     它依赖 `message.provider.registry`，由 plugin-appmsg 在 setup
-  //     时 provide。plugin-hubmsg 装载顺序**必须**在 plugin-appmsg 之
-  //     后、其它业务插件之前；
-  //   - plugin-message 装载顺序**必须**在 plugin-appmsg 之后（拿
-  //     `appmsg.endpoint.registry`）；
-  //   - protocolPlugin 仍然在 appmsgPlatformPlugin 之后：plugin-protocol
-  //     在 setup 时通过 capability 总线取 `appmsg.core.subscribeUnfilteredMessages`
-  //     + `appmsg.core.sendAsOrigin` / `listAsOrigin` / `getAsOrigin`
-  //     （协议层系统特殊方，按 origin 路由完整消息是合理特权；不走
-  //     endpoint service，路径与 subscribe 同属"系统特殊方特权"）。
+  // 关键顺序：
+  //   vault -> sat-subscription -> protocol -> contacts -> webrtc -> message
+  //   -> settings -> key-import -> background -> home/woc/其它业务插件。
+  // SatSubscription 只提供 trusted admin 与 Coordinator Channel 传输能力；
+  // 消息、联系人和 WebRTC 通过 contract/capability 使用固定业务协议，
+  // 不再依赖第二套消息或广播平台。
   const ordered = WEB_PLUGIN_CATALOG;
 
   // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 显式注入
@@ -229,9 +202,5 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
 
   assertWebStartupContract(host);
 
-  // 施工单 2026-07-08 001：plugin-broadcast 在 hubcast 注册之后由
-  // registry.register hook 自动激活默认 active provider；此处不需要
-  // 显式调用。如果未来变更激活策略，改为在这里显式调
-  // `host.capabilities.get<BroadcastCore>(BROADCAST_CORE_CAPABILITY).bootstrapActiveProvider()`。
   return host;
 }

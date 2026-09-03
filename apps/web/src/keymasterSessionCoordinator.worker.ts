@@ -30,7 +30,6 @@ import type {
   CoordinatorTopicBaseline,
   CoordinatorValueResult,
   AssetDataInvalidationEvent,
-  ActiveKeyCrypto,
   SessionStateEvent,
   VaultSealedSecret,
   P2pkhProviderRegistrySnapshot,
@@ -45,16 +44,22 @@ import type {
   MsFileReadConcurrencySettings,
   CoordinatorSatOperation,
   CoordinatorSatStateEvent,
+  CoordinatorChannelOperation,
+  CoordinatorChannelStateEvent,
+  CoordinatorContactsPresenceEvent,
+  ChannelPrivateMessageEvent,
+  ChannelRuntime,
+  ContactsService,
   SatWindowLaneOperation,
   SatWindowLaneSspRequestEvent,
   SatSubscriptionAdminService,
   SatSubscriptionService,
   SatSubscriptionSpiService,
   SatSubscriptionSettingsSnapshot,
-  ProviderDeliveryAckClaim,
-  ProviderSealedMessageRecord,
-  MessageProviderOperations,
+  SatIncomingPublish,
+  ContactPresenceMap,
   WindowP2pExecutorError,
+  ActiveKeyCrypto,
 } from "@keymaster/contracts";
 import {
   MSFILE_MAX_BLOCK_BYTES,
@@ -63,7 +68,7 @@ import {
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
-import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, buildOpenedAppMsgMessage, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, sealAppMessageLocalBytes, openAppMessageLocalBytes, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
+import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
@@ -75,6 +80,7 @@ import { createP2pkhCoordinatorTasks, openP2pkhDb, createP2pkhDb } from "@keymas
 import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
 import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
+import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
 import type { KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
 import type {
   StorageService,
@@ -114,22 +120,26 @@ import {
   sha256Bytes,
   validatePublicKey,
 } from "bitcoin-libp2p/identity";
-// Channel 密码学只在 SharedWorker 调用；Window executor 不会收到私钥、通用
-// ECDH 或通用签名入口。
+// Channel 密码学和固定 inbox 路由只在 SharedWorker 调用；Window executor
+// 只看 SSP wire，不会收到私钥或明文。
 import {
-  APP_MESSAGE_PROTOCOL,
-  base64urlEncode,
-  canonicalizeValue,
-  decodePrivateChannel,
   inboxChannel,
   newMessageID,
+  parseInboxChannel,
   parseMessageID,
   parsePrivateKey,
   parsePublicKey,
+  parseSHA256Hash,
   publicKeyFromPrivate,
 } from "bsv8-channel-protocol";
-import { marshalEnvelope, signAndSeal } from "bsv8-channel-protocol/inbox";
-import { newAck, newDeliver } from "bsv8-channel-protocol/app-message";
+import { marshalEnvelope, signPrivateMessage, sealSigned, verifySignedPrivateMessage, open as openPrivateMessage, validatePongRelation, validateWebRTCRelation, reviewOfferForHashRequest, dedupKey as privateDedupKey, privateMessageMaxLifetimeMs, PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/inbox";
+import { APP_MESSAGE_PROTOCOL, newAck, newDeliver } from "bsv8-channel-protocol/app-message";
+import { PING_PROTOCOL, parseBodyValue as parsePingBodyValue, newPong } from "bsv8-channel-protocol/ping";
+import { WEBRTC_SIGNAL_PROTOCOL, parseBodyValue as parseWebrtcBodyValue } from "bsv8-channel-protocol/webrtc-signal";
+import { sign as signPublicMessage, marshal as marshalPublicMessage, parseAndVerify as parsePublicMessage, dedupKey as publicDedupKey, PUBLIC_MESSAGE_MAX_LIFETIME_MS } from "bsv8-channel-protocol/public-message";
+import { HASH_REQUEST_CHANNEL, newWebRTCSDPLocator, parseAndVerify as parseHashRequest, sign as signHashRequest, marshal as marshalHashRequest } from "bsv8-channel-protocol/hash-request";
+import { ChannelSubscriptionMux, validateExactChannel } from "./channelSubscriptionMux.js";
+import { PendingPingRegistry } from "./channelPendingPingRegistry.js";
 import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
 import { getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
 import {
@@ -142,7 +152,7 @@ import {
   type SatSubscriptionDb,
   type SatSubscriptionTransport,
   type SatSupplierConnection,
-  type SatChannelCrypto,
+  SatSubscriptionHandle,
   type SatP2pkhService,
 } from "@keymaster/plugin-sat-subscription/coordinator";
 
@@ -203,7 +213,15 @@ function decodePersisted(value: string): Uint8Array {
   try { return cryptoHexToBytes(value); } catch { return base64ToBytes(value); }
 }
 
-interface CoordinatorMetaRecord { id: "singleton"; selectedPublicKeyHex?: string; generation: number; scheduleSettings?: CoordinatorBackgroundSyncSettings; p2pkhProviders?: P2pkhProviderSettings; p2pkhProviderConfigs?: Record<string, Record<string, unknown>>; p2pkhSettings?: { includeTestnet: boolean }; }
+interface CoordinatorMetaRecord {
+  id: "singleton";
+  selectedPublicKeyHex?: string;
+  generation: number;
+  scheduleSettings?: CoordinatorBackgroundSyncSettings;
+  p2pkhProviders?: P2pkhProviderSettings;
+  p2pkhProviderConfigs?: Record<string, Record<string, unknown>>;
+  p2pkhSettings?: { includeTestnet: boolean };
+}
 const coordinatorMeta: CoordinatorMetaRecord = { id: "singleton", generation: 0, scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
 const defaultP2pkhProviders = (): P2pkhProviderSettings => ({ main: { syncProviderId: "woc", broadcastProviderId: "woc" }, test: { syncProviderId: "woc", broadcastProviderId: "woc" }, generation: 0 });
 let p2pkhRegistry: P2pkhProviderRegistry | undefined;
@@ -589,6 +607,41 @@ async function migrateStorageSecrets(oldStorageKey: CryptoKey, newStorageKey: Cr
   }
 }
 const persistActiveMeta = persistCoordinatorMeta;
+function normalizedCoordinatorOwner(): string | null {
+  return coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex
+    ? coordinatorState.activePublicKeyHex.trim().toLowerCase()
+    : null;
+}
+
+/** 将 Worker 内唯一 Contacts 在线真值投影为页面可订阅的快照事件。 */
+function publishCoordinatorContactsPresence(): void {
+  const service = coordinatorContactsService;
+  const ownerPublicKeyHex = normalizedCoordinatorOwner();
+  const sessionEpoch = coordinatorState.sessionEpoch;
+  const run = contactsPresencePublishTail.then(async () => {
+    let presence: ContactPresenceMap = {};
+    if (service && ownerPublicKeyHex) {
+      try {
+        presence = await service.getPresenceSnapshot?.() ?? {};
+      } catch {
+        // 本地联系人 DB 暂不可读时，安全降级为空快照（全部 offline）。
+        presence = {};
+      }
+    }
+    // 快照查询可能跨越 lock/key switch/service teardown；迟到结果不得污染新世代。
+    if (service !== coordinatorContactsService
+      || sessionEpoch !== coordinatorState.sessionEpoch
+      || ownerPublicKeyHex !== normalizedCoordinatorOwner()) return;
+    const event = publishTopicEvent("contacts.presence", {
+      type: "contacts.presence.changed",
+      activePublicKeyHex: ownerPublicKeyHex,
+      presence,
+    }) as CoordinatorContactsPresenceEvent;
+    lastContactsPresenceState = event;
+  }, () => undefined);
+  contactsPresencePublishTail = run.then(() => undefined, () => undefined);
+}
+
 function publishSessionState(cause: SessionStateEvent["cause"]): void {
   publishTopicEvent("session.state", {
     type: "session.state.changed",
@@ -598,6 +651,7 @@ function publishSessionState(cause: SessionStateEvent["cause"]): void {
     selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex ?? null,
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
   });
+  publishCoordinatorContactsPresence();
 }
 
 // ============================================================
@@ -656,21 +710,150 @@ interface SatWorkerRuntimeState {
   db: SatSubscriptionDb;
   state: SatSubscriptionStateStore;
   provider: SatSubscriptionProvider;
-  handle: MessageProviderOperations;
+  handle: SatSubscriptionHandle;
   admin: SatSubscriptionAdminService;
   service: SatSubscriptionService;
   spi: SatSubscriptionSpiService;
-  offMessages: () => void;
   offIncoming: () => void;
 }
 let satRuntime: SatWorkerRuntimeState | undefined;
 let satRuntimeStarting: Promise<SatWorkerRuntimeState> | undefined;
 let satRuntimeStartToken = 0;
 let satRuntimeStartingToken: number | undefined;
+/** 可中止正在拨号的旧 owner Runtime，避免 owner 切换后连接迟到复活。 */
+let satRuntimeStartAbortController: AbortController | undefined;
 let satRevision = 0;
 let lastSatState: CoordinatorSatStateEvent | undefined;
+/** Coordinator 内唯一的逻辑 caller -> SSP 物理订阅复用器。 */
+let channelSubscriptionMux: ChannelSubscriptionMux | undefined;
+let channelMuxOwnerPublicKeyHex: string | undefined;
+/** 旧 owner runtime 的异步清理；新 owner 必须等待它完成。 */
+let satRuntimeRelease: Promise<void> = Promise.resolve();
+/** 锁屏/切 owner 的远端 Sat 清理上限；安全边界不能依赖网络返回。 */
+const SAT_RUNTIME_CLEANUP_TIMEOUT_MS = 5_000;
+/** 防止首个 Channel caller 并发创建多个物理订阅协调器。 */
+let channelSubscriptionMuxStarting: Promise<ChannelSubscriptionMux> | undefined;
+let channelSubscriptionMuxStartOwner: string | undefined;
+let channelSubscriptionMuxGeneration = 0;
+let channelRevision = 0;
+/** Worker 内部 Contacts 任务接收已路由的私密消息；不向页面暴露额外总线。 */
+const channelPublicSubscribers = new Set<(event: { channel: string; publisherPublicKeyHex: string; messageId: string; content: import("@keymaster/contracts").JSONValue }) => void>();
+const channelPrivateSubscribers = new Set<(event: ChannelPrivateMessageEvent) => void>();
+let coordinatorContactsService: ContactsService | undefined;
+let coordinatorContactsPresenceOff: (() => void) | undefined;
+interface PendingChannelPing {
+  /** 创建 Ping 时绑定的 owner session epoch。 */
+  ownerSessionEpoch: SessionEpoch;
+  /** 创建 Ping 时绑定的 owner 公钥。 */
+  ownerPublicKeyHex: string;
+  /** Ping 的目标联系人公钥。 */
+  contactPublicKeyHex: string;
+  /** Ping 的 ChannelProtocol message_id。 */
+  messageId: string;
+  /** 本地单调时钟起点，仅用于 RTT 诊断。 */
+  startedAtMonotonicMs: number;
+  /** Ping 的本地过期时间。 */
+  expiresAtMs: number;
+  /** 本地已签名并验证的 Ping，用于 ChannelProtocol 关系校验。 */
+  pingMessage: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage;
+}
+const CHANNEL_PENDING_PING_TTL_MS = PING_PRIVATE_MESSAGE_MAX_LIFETIME_MS;
+const CHANNEL_PENDING_PING_MAX = 256;
+const channelPendingPings = new PendingPingRegistry<PendingChannelPing>(CHANNEL_PENDING_PING_MAX);
+let channelPendingPingCleanupTimer: ReturnType<typeof setTimeout> | undefined;
+const channelAutoPongBySender = new Map<string, { windowStartedAtMs: number; count: number }>();
+let channelAutoPongWindowStartedAtMs = 0;
+let channelAutoPongCount = 0;
+const CHANNEL_AUTO_PONG_WINDOW_MS = 60_000;
+const CHANNEL_AUTO_PONG_MAX_PER_SENDER = 8;
+const CHANNEL_AUTO_PONG_MAX_GLOBAL = 64;
+/** 入站消息去重只保留有限数量；锁屏、切换 key、重启都会清空。 */
+const channelSeenMessages = new Set<string>();
+const CHANNEL_SEEN_LIMIT = 4096;
+/** 已验签的公开 Hash 请求；只作为 WebRTC offer 关系审查证据。 */
+const channelHashRequests = new Map<string, import("bsv8-channel-protocol/hash-request").VerifiedHashRequest>();
+const CHANNEL_HASH_REQUEST_LIMIT = 1024;
+/** 已验签的 WebRTC offer；后续 answer/ICE 必须引用同一会话。 */
+const channelWebrtcOffers = new Map<string, import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage>();
+const CHANNEL_WEBRTC_OFFER_LIMIT = 512;
+
+function pruneChannelProtocolRelations(now = Date.now()): void {
+  for (const [key, request] of channelHashRequests) {
+    if (request.expires_at_ms <= now) channelHashRequests.delete(key);
+  }
+  for (const [key, offer] of channelWebrtcOffers) {
+    if (offer.expires_at_ms <= now) channelWebrtcOffers.delete(key);
+  }
+  while (channelHashRequests.size > CHANNEL_HASH_REQUEST_LIMIT) {
+    const first = channelHashRequests.keys().next().value as string | undefined;
+    if (first === undefined) break;
+    channelHashRequests.delete(first);
+  }
+  while (channelWebrtcOffers.size > CHANNEL_WEBRTC_OFFER_LIMIT) {
+    const first = channelWebrtcOffers.keys().next().value as string | undefined;
+    if (first === undefined) break;
+    channelWebrtcOffers.delete(first);
+  }
+}
+
+function channelHashRequestKey(messageId: string, publisherPublicKeyHex: string): string {
+  return `${publisherPublicKeyHex.trim().toLowerCase()}\u0000${messageId}`;
+}
+
+function channelHashRequestByMessageId(
+  messageId: string,
+  publisherPublicKeyHex: string
+): import("bsv8-channel-protocol/hash-request").VerifiedHashRequest | undefined {
+  pruneChannelProtocolRelations();
+  return channelHashRequests.get(channelHashRequestKey(messageId, publisherPublicKeyHex));
+}
+
+function channelWebrtcOfferKey(requestMessageId: string, offererPublicKeyHex: string, sessionId: string): string {
+  return `${requestMessageId}\u0000${offererPublicKeyHex}\u0000${sessionId}`;
+}
+
+function findChannelWebrtcOffer(
+  body: import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body,
+  message: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage
+): import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined {
+  pruneChannelProtocolRelations();
+  // answer 的 offerer 必须是 answer 的接收者；ICE 双向都可能发送，
+  // 但只能在双方公钥对应的完整三元组中找到唯一一条 offer。
+  const candidates = body.signal.type === "answer"
+    ? [message.to_public_key]
+    : [message.from_public_key, message.to_public_key];
+  const matches = new Map<string, import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage>();
+  for (const offerer of candidates) {
+    const key = channelWebrtcOfferKey(body.request_message_id, offerer, body.session_id);
+    const offer = channelWebrtcOffers.get(key);
+    if (offer) matches.set(key, offer);
+  }
+  return matches.size === 1 ? matches.values().next().value : undefined;
+}
+
+function pruneChannelPendingPings(now = Date.now()): void {
+  channelPendingPings.prune((pending) =>
+    pending.ownerSessionEpoch === coordinatorState.sessionEpoch
+      && pending.ownerPublicKeyHex === coordinatorState.activePublicKeyHex, now);
+}
+
+function scheduleChannelPendingPingCleanup(): void {
+  if (channelPendingPingCleanupTimer !== undefined) return;
+  channelPendingPingCleanupTimer = setTimeout(() => {
+    channelPendingPingCleanupTimer = undefined;
+    pruneChannelPendingPings();
+    if (channelPendingPings.size > 0) scheduleChannelPendingPingCleanup();
+  }, Math.min(CHANNEL_PENDING_PING_TTL_MS, 5_000));
+}
 /** 以 connectionId 隔离入站 handler；supplierId 不是连接实例键。 */
 const satIncomingHandlers = new Map<string, { supplierId: string; ownerSessionEpoch: string; supplierGeneration: number; handler: (wire: Uint8Array) => Promise<Uint8Array> }>();
+/** Window lane 的连接状态事件；按 connectionId 和完整 fence 路由到当前 owner。 */
+const satConnectionStateHandlers = new Map<string, {
+  supplierId: string;
+  ownerSessionEpoch: string;
+  supplierGeneration: number;
+  handler: (state: "online" | "degraded" | "closed") => void;
+}>();
 /** Sat 充值复用 Worker 内的 P2PKH service；只创建一次，不在页面/每个 Tab 创建。 */
 let satP2pkhService: P2pkhService | undefined;
 let satP2pkhServiceStarting: Promise<P2pkhService> | undefined;
@@ -881,58 +1064,7 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
   return msfileRuntime;
 }
 
-function workerSatChannelCrypto(): SatChannelCrypto {
-  const privateKey = (): Uint8Array => {
-    if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes || !coordinatorState.activePublicKeyHex) {
-      throw new Error("Sat Channel crypto requires an unlocked active key");
-    }
-    return coordinatorState.activePrivateKeyBytes;
-  };
-  const call = async (operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> => executeCryptoOperation(operation, privateKey());
-  return {
-    async sealDeliver(input) {
-      const result = await call({ type: "channel.seal-deliver", ...input });
-      if (result.type !== "channel.seal") throw new Error("Coordinator returned an invalid Channel Deliver seal");
-      return {
-        channel: result.channel,
-        messageIdBase64Url: result.messageIdBase64Url,
-        envelopeJson: result.envelopeJson.slice(),
-        fromPublicKeyHex: result.fromPublicKeyHex,
-        expiresAtMs: result.expiresAtMs,
-      };
-    },
-    async sealAck(input) {
-      const result = await call({ type: "channel.seal-ack", ...input });
-      if (result.type !== "channel.seal") throw new Error("Coordinator returned an invalid Channel ACK seal");
-      return {
-        channel: result.channel,
-        messageIdBase64Url: result.messageIdBase64Url,
-        envelopeJson: result.envelopeJson.slice(),
-        fromPublicKeyHex: result.fromPublicKeyHex,
-        expiresAtMs: result.expiresAtMs,
-      };
-    },
-    async open(input) {
-      const result = await call({ type: "channel.open", ...input });
-      if (result.type !== "channel.open") throw new Error("Coordinator returned an invalid Channel open result");
-      return {
-        channel: result.channel,
-        messageIdBase64Url: result.messageIdBase64Url,
-        signedDigestHex: result.signedDigestHex,
-        fromPublicKeyHex: result.fromPublicKeyHex,
-        toPublicKeyHex: result.toPublicKeyHex,
-        protocol: result.protocol,
-        bodyType: result.bodyType,
-        ...(result.contentJson ? { contentJson: result.contentJson.slice() } : {}),
-        ...(result.acknowledgedMessageIdBase64Url ? { acknowledgedMessageIdBase64Url: result.acknowledgedMessageIdBase64Url } : {}),
-        issuedAtMs: result.issuedAtMs,
-        expiresAtMs: result.expiresAtMs,
-      };
-    },
-  };
-}
-
-function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent, health?: import("@keymaster/contracts").MessageProviderHealth): void {
+function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent): void {
   satRevision += 1;
   const next: CoordinatorSatStateEvent = {
     topic: "sat.events",
@@ -940,19 +1072,20 @@ function emitSatState(event: import("@keymaster/contracts").CoordinatorSatEvent,
     satRevision,
     sessionEpoch: coordinatorState.sessionEpoch,
     event,
-    ...(health ? { health } : {}),
   };
   lastSatState = next;
   publishTopicEvent("sat.events", next);
 }
 
-function emitSatHealth(): void {
-  emitSatState({ type: "noop" }, satRuntime?.provider.health() ?? { isHealthy: false, lastError: null, lastConnectedAtMs: 0 });
-}
-
 async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
   if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
     throw new Error("SatSubscription requires an unlocked active key");
+  }
+  // owner 切换/锁定的退订和连接关闭必须完成后，才能把任何请求交给
+  // 新 runtime；否则旧 owner 的清理可能和新 owner 的收费请求并发。
+  await satRuntimeRelease.catch(() => undefined);
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+    throw new Error("SatSubscription owner is no longer unlocked");
   }
   if (satRuntime) return satRuntime;
   if (satRuntimeStarting) {
@@ -967,11 +1100,13 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
   const ownerGeneration = Math.max(1, coordinatorState.keyspaceGeneration);
   const expectedSessionEpoch = coordinatorState.sessionEpoch;
   const startToken = satRuntimeStartToken;
+  const startAbortController = new AbortController();
+  satRuntimeStartAbortController = startAbortController;
   const start = (async (): Promise<SatWorkerRuntimeState> => {
     const keyspace = createWorkerKeyspace();
     const db = await openSatSubscriptionDb({ keyspace, publicKeyHex: ownerPublicKeyHex });
     let provider: ReturnType<typeof createSatSubscriptionProvider> | undefined;
-    let handle: MessageProviderOperations | undefined;
+    let handle: SatSubscriptionHandle | undefined;
     try {
       const loaded = await db.load();
       const initial = {
@@ -988,8 +1123,8 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
           if (requestedOwner !== coordinatorState.activePublicKeyHex || requestedOwner !== ownerPublicKeyHex) throw new Error("SatSubscription owner changed");
           return state;
         },
-        channelCrypto: workerSatChannelCrypto(),
         transport: satSubscriptionTransport,
+        signal: startAbortController.signal,
         ownerGeneration,
         ownerSessionEpoch: expectedSessionEpoch,
         logger: { warn: (event, data) => console.warn("[sat-subscription]", event, data) },
@@ -998,12 +1133,7 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
         if (coordinatorState.activePublicKeyHex !== ownerPublicKeyHex || !coordinatorState.activePrivateKeyBytes) throw new Error("Sat owner signer is unavailable");
         return coordinatorState.activePrivateKeyBytes;
       };
-      handle = await provider.bind({
-        signer: {
-          publicKeyHex: ownerPublicKeyHex,
-          signChallenge: async ({ challenge }) => bytesToHex(await signEcdsaDigest({ privateKeyBytes: privateKeyForSigner(), digest: sha256Bytes(challenge), format: "compact" })),
-        },
-      }) as MessageProviderOperations;
+      handle = await provider.bind({ ownerPublicKeyHex });
       const boundProvider = provider;
       const assertFresh = (): void => {
         if (startToken !== satRuntimeStartToken || coordinatorState.vaultStatus !== "unlocked" || coordinatorState.sessionEpoch !== expectedSessionEpoch || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) {
@@ -1013,8 +1143,6 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
       assertFresh();
       const service = boundProvider.service();
       const admin = boundProvider.adminService();
-      const p2pkh = await ensureSatP2pkhService();
-      assertFresh();
       const spi = createSatSpiService({
         getRuntime: () => boundProvider.spiRuntime(),
         getOwnerPublicKeyHex: () => coordinatorState.activePublicKeyHex ?? null,
@@ -1023,7 +1151,9 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
           if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed");
           return state;
         },
-        getP2pkh: () => p2pkh,
+        // P2PKH 只服务 SPI 充值；不能因为充值插件启动/初始化失败而阻断
+        // 消息、通讯录、在线状态和 WebRTC。真正准备/提交充值时才懒加载。
+        getP2pkh: () => ensureSatP2pkhService(),
         deriveMainAddress: async (requestedOwner) => {
           if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed before address derivation");
           const result = await executeCryptoOperation({ type: "deriveP2pkhAddress", network: "main" }, privateKeyForSigner());
@@ -1042,12 +1172,10 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
         admin,
         service,
         spi,
-        offMessages: handle.subscribeMessages((record) => emitSatState({ type: "message", record })),
-        offIncoming: service.subscribeEvents((event) => emitSatState({ type: "incoming", event })),
+        offIncoming: service.subscribeEvents((event) => handleIncomingChannelPublish(event)),
       };
       assertFresh();
       satRuntime = runtime;
-      emitSatHealth();
       return runtime;
     } catch (error) {
       try { handle?.close(); } catch { /* stale start cleanup */ }
@@ -1065,33 +1193,86 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
       satRuntimeStarting = undefined;
       satRuntimeStartingToken = undefined;
     }
+    if (satRuntimeStartAbortController === startAbortController) satRuntimeStartAbortController = undefined;
   }
 }
 
-function releaseSatRuntime(_reason: string): void {
+async function releaseSatRuntime(reason: string): Promise<void> {
+  // 多次 lock/key-switch 可能同时到达；清理任务排队执行，后一个 owner
+  // 永远不会越过前一个 owner 的物理退订和连接关闭。
+  const previousRelease = satRuntimeRelease;
   satRuntimeStartToken += 1;
+  satRuntimeStartAbortController?.abort(new Error(`Sat runtime released: ${reason}`));
+  satRuntimeStartAbortController = undefined;
   // 先取消仍在 handler 中等待的入站 Publish，再移除连接注册表。取消只
   // 释放 bridge Wire，不提前释放 handler slot；slot 要等真实 Promise settle，
   // 防止永不结束的旧 handler 在新 owner 中制造未受控并发。
-  cancelSatInboundHandlers(undefined, `Sat runtime was released: ${_reason}`);
+  cancelSatInboundHandlers(undefined, `Sat runtime was released: ${reason}`);
   satIncomingHandlers.clear();
   satP2pkhServiceStartToken += 1;
   const p2pkh = satP2pkhService;
+  const p2pkhStarting = satP2pkhServiceStarting;
   satP2pkhService = undefined;
   satP2pkhServiceOwnerPublicKeyHex = undefined;
   try { p2pkh?.onVaultLocked(); } catch { /* locked cleanup is best effort */ }
   try { p2pkh?.dispose?.(); } catch { /* locked cleanup is best effort */ }
   const runtime = satRuntime;
+  const runtimeStarting = satRuntimeStarting;
   satRuntime = undefined;
+  satRuntimeStarting = undefined;
   lastSatState = undefined;
-  if (runtime) {
-    try { runtime.offMessages(); } catch { /* ignore */ }
-    try { runtime.offIncoming(); } catch { /* ignore */ }
-    runtime.handle.close();
-    void runtime.provider.shutdown().catch(() => undefined);
-    runtime.db.close();
+  const mux = channelSubscriptionMux;
+  const muxStarting = channelSubscriptionMuxStarting;
+  channelSubscriptionMux = undefined;
+  channelMuxOwnerPublicKeyHex = undefined;
+  channelSubscriptionMuxGeneration += 1;
+  // 不把旧 starting promise 丢掉；下面会等待它自然完成并自行清理。
+  channelSubscriptionMuxStarting = undefined;
+  channelSubscriptionMuxStartOwner = undefined;
+  channelSeenMessages.clear();
+  channelHashRequests.clear();
+  channelWebrtcOffers.clear();
+  channelPendingPings.clear();
+  if (channelPendingPingCleanupTimer !== undefined) {
+    clearTimeout(channelPendingPingCleanupTimer);
+    channelPendingPingCleanupTimer = undefined;
   }
-  emitSatHealth();
+  channelAutoPongBySender.clear();
+  channelAutoPongWindowStartedAtMs = 0;
+  channelAutoPongCount = 0;
+  coordinatorContactsService?.resetPresence?.();
+
+  const cleanup = previousRelease.then(async () => {
+    // 必须在 runtime.handle.close / provider.shutdown 前清理物理订阅。
+    // 每一步都有上限：远端 Supplier 永不返回时，清理转为 owner DB 中的
+    // 待退订证据，不能拖延锁屏或阻止后续 owner 建立会话。
+    const startedRuntime = runtime ?? await awaitSatCleanup(runtimeStarting ?? Promise.resolve(undefined), "stale runtime start");
+    if (startedRuntime) {
+      await awaitSatCleanup(startedRuntime.handle.preparePhysicalCleanup(), "persist physical cleanup intent");
+    }
+    const startedMux = await awaitSatCleanup(muxStarting ?? Promise.resolve(undefined), "stale mux start");
+    const muxToRelease = mux ?? startedMux;
+    if (muxToRelease) {
+      try {
+        await awaitSatCleanup(muxToRelease.clear(), "old owner physical cleanup");
+      } finally {
+        // clear 超时后也必须取消旧 Mux 的退避重试，避免它在新 owner
+        // Runtime 建立后继续调用旧连接。
+        muxToRelease.dispose();
+      }
+    }
+    await awaitSatCleanup(p2pkhStarting ?? Promise.resolve(undefined), "stale P2PKH start");
+    if (startedRuntime) {
+      try { startedRuntime.offIncoming(); } catch { /* ignore */ }
+      try { startedRuntime.handle.close(); } catch { /* ignore */ }
+      await awaitSatCleanup(startedRuntime.provider.shutdown(), "Sat provider shutdown");
+      startedRuntime.db.close();
+    }
+  });
+  satRuntimeRelease = cleanup.catch((error) => {
+    console.warn("[sat-subscription] runtime cleanup failed", error instanceof Error ? error.message : String(error));
+  });
+  await cleanup;
 }
 
 function releaseMsfileRuntime(_reason: string): void {
@@ -1262,6 +1443,23 @@ async function releaseStorageRuntime(reason: string): Promise<void> {
   void reason;
 }
 
+async function awaitSatCleanup<T>(operation: Promise<T>, label: string): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), SAT_RUNTIME_CLEANUP_TIMEOUT_MS);
+      })
+    ]);
+  } catch (error) {
+    console.warn(`[sat-subscription] ${label} failed`, error instanceof Error ? error.message : String(error));
+    return undefined;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 interface TaskRuntime {
   id: string;
   pluginId: string;
@@ -1336,6 +1534,9 @@ function prunePasskeyAddIntents(now = Date.now()): void {
 let sessionRevision = 0;
 let backgroundSnapshotRevision = 0;
 let assetDataRevision = 0;
+let contactsPresenceRevision = 0;
+let lastContactsPresenceState: CoordinatorContactsPresenceEvent | undefined;
+let contactsPresencePublishTail: Promise<void> = Promise.resolve();
 function resolveKeyScope(runtime: TaskRuntime): { publicKeyHex: string; label?: string } | undefined { return typeof runtime.keyScope === "function" ? runtime.keyScope() : runtime.keyScope; }
 function scheduleRuntime(runtime: TaskRuntime): void { if (!runtime.intervalMs) return; if (runtime.timer) clearTimeout(runtime.timer); runtime.nextRunAt = new Date(Date.now() + runtime.intervalMs).toISOString(); runtime.timer = setTimeout(() => { runtime.timer = undefined; void executeTask(runtime.id, "interval"); }, runtime.intervalMs); }
 function assertTaskFresh(taskId: string): void {
@@ -1371,9 +1572,15 @@ async function enterUnlockedState(
     && previous.activePublicKeyHex !== undefined
     && previous.activePublicKeyHex !== activePublicKeyHex;
   try {
-    // Update durable/session metadata before transferring ownership of the new
-    // private-key buffer. A failed metadata write therefore leaves the old
-    // active session untouched and the caller still owns `activePrivateKeyBytes`.
+    // 在 coordinatorState 暴露新 owner 之前完成旧 owner 的 runtime 清理，
+    // 这样旧 Supplier/私钥上下文不会被 B owner 的请求观察到。
+    if (changesUnlockedActiveKey) {
+      releaseMsfileRuntime("activate-key");
+      await releaseSatRuntime("activate-key");
+      clearWindowP2pExecutorLeaseLocked();
+    }
+    // 旧 owner runtime 已经在上面完成清理；现在才把新 owner 放入会话状态。
+    // metadata 写入失败时仍恢复旧会话状态，调用方继续拥有入参私钥 buffer。
     coordinatorState.vaultStatus = "unlocked";
     coordinatorState.sessionEpoch = generateEpoch();
     passkeyAddIntents.clear();
@@ -1384,15 +1591,6 @@ async function enterUnlockedState(
     coordinatorMeta.selectedPublicKeyHex = activePublicKeyHex;
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
     await persistCoordinatorMeta();
-    // generateKey/importPrivateKey 在已解锁 Vault 中也会直接切换 active key。
-    // 这条入口过去遗漏了 Window P2P lifecycle 收口：旧 lease 会占满 5 分钟，
-    // 新 epoch 的 transport 永久 unavailable。持久化成功后、发布新 session
-    // 之前同步撤销旧 runtime/lease，行为与 activateKey/setActive 一致。
-    if (changesUnlockedActiveKey) {
-      releaseMsfileRuntime("activate-key");
-      releaseSatRuntime("activate-key");
-      clearWindowP2pExecutorLeaseLocked();
-    }
     replaceActivePrivateKey(activePrivateKeyBytes);
   } catch (error) {
     coordinatorState.vaultStatus = previous.vaultStatus;
@@ -1419,10 +1617,12 @@ async function enterUnlockedState(
   }
 
   publishSessionState(cause);
-  // 锁定/解锁切换会清空 Sat runtime；及时刷新健康快照，避免页面继续
-  // 显示上一 owner 的“在线”状态，直到下一次 ensure 才被动纠正。
-  emitSatHealth();
-
+  // 解锁后立即建立 owner-scoped Sat runtime 和 owner inbox 的系统 caller。
+  // 连接/供应商暂不可用时只记录诊断；owner 的订阅意图仍留在 Sat DB/Mux，
+  // 后续重连或设置变更会继续对账。
+  void ensureSatRuntime()
+    .then((runtime) => ensureChannelSubscriptionMux(runtime))
+    .catch((error) => console.warn("[channel] owner runtime startup deferred", error instanceof Error ? error.message : String(error)));
   // 广播任务快照
   publishTopicEvent("background.snapshot", {
     type: "background.snapshot.changed",
@@ -1435,7 +1635,11 @@ async function enterUnlockedState(
 }
 
 function createWorkerKeyspace(): KeyspaceService {
-  const active = () => ({ activePublicKeyHex: coordinatorState.activePublicKeyHex });
+  const active = () => ({
+    activePublicKeyHex: coordinatorState.activePublicKeyHex,
+    // 让 Worker 内部的 owner-scoped service 也能捕获会话世代。
+    generation: coordinatorState.keyspaceGeneration
+  });
   const storageName = (key: string, pluginId: string, storageId: string) => `keymaster.key.${key}.plugin.${pluginId}.${storageId}`;
   return {
     listKeys: async () => (await vaultDb.listKeys()).map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt })),
@@ -1497,8 +1701,6 @@ async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<Active
       requirePrivateKey();
       return { publicKeyHex, address: deriveP2pkhAddress(publicKeyHex, input.network) };
     },
-    sealSendInput: () => { throw new Error("P2PKH Worker capability does not expose AppMsg sealing"); },
-    openSealed: async () => { throw new Error("P2PKH Worker capability does not expose AppMsg opening"); },
     exportEncryptedKeyBackup: async () => { throw new Error("P2PKH Worker capability does not expose key export"); },
     dispose: () => undefined,
   };
@@ -1609,6 +1811,41 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
 async function registerCoordinatorTasks(): Promise<void> {
   const keyspace = createWorkerKeyspace();
   const messageBus = createMessageBus();
+  coordinatorContactsPresenceOff?.();
+  coordinatorContactsPresenceOff = undefined;
+  coordinatorContactsService?.dispose?.();
+  const contactsService = createContactsService({
+    keyspace,
+    messageBus,
+    channel: createCoordinatorChannelRuntime()
+  });
+  coordinatorContactsService = contactsService;
+  const offContactsChange = contactsService.onChange(() => publishCoordinatorContactsPresence());
+  const offContactsPresence = contactsService.onPresenceChange?.(() => publishCoordinatorContactsPresence());
+  coordinatorContactsPresenceOff = () => {
+    offContactsChange();
+    offContactsPresence?.();
+  };
+  publishCoordinatorContactsPresence();
+  const contactsPresenceTask = createContactsPresenceTask({
+    service: contactsService,
+    keyspace,
+    vault: { status: () => coordinatorState.vaultStatus }
+  });
+  coordinatorState.taskRuntimes.set(contactsPresenceTask.id, {
+    id: contactsPresenceTask.id,
+    pluginId: contactsPresenceTask.pluginId,
+    state: "idle",
+    intervalMs: contactsPresenceTask.schedule?.defaultIntervalMs ?? 5 * 60 * 1000,
+    keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined,
+    run: async ({ signal, reason, assertSessionFresh }) => {
+      const gate = await contactsPresenceTask.canRun?.();
+      if (gate?.ready === false) {
+        throw new Error(typeof gate.reason === "string" ? gate.reason : gate.reason?.fallback ?? "联系人在线探测暂不可运行");
+      }
+      await contactsPresenceTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh });
+    }
+  });
   const woc = createWocService({ messageBus });
   p2pkhWocService = woc;
   const persistedWocConfig = coordinatorMeta.p2pkhProviderConfigs?.woc;
@@ -1899,9 +2136,42 @@ async function handleSubscribe(
         satRevision: baselineRevision,
         sessionEpoch: coordinatorState.sessionEpoch,
         event: { type: "noop" as const },
-        health: satRuntime?.provider.health() ?? { isHealthy: false, lastError: null, lastConnectedAtMs: 0 },
       };
       return [{ topic, baselineRevision, sessionEpoch: coordinatorState.sessionEpoch, snapshot: cached }];
+    }
+    if (topic === "channel.events") {
+      return [{
+        topic,
+        baselineRevision: channelRevision,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        snapshot: {
+          topic: "channel.events" as const,
+          type: "channel.message.received" as const,
+          channelRevision,
+          sessionEpoch: coordinatorState.sessionEpoch
+        }
+      }];
+    }
+    if (topic === "contacts.presence") {
+      const activePublicKeyHex = normalizedCoordinatorOwner();
+      const cached = lastContactsPresenceState
+        && lastContactsPresenceState.sessionEpoch === coordinatorState.sessionEpoch
+        && lastContactsPresenceState.activePublicKeyHex === activePublicKeyHex
+        ? lastContactsPresenceState
+        : {
+            topic: "contacts.presence" as const,
+            type: "contacts.presence.changed" as const,
+            presenceRevision: contactsPresenceRevision,
+            sessionEpoch: coordinatorState.sessionEpoch,
+            activePublicKeyHex,
+            presence: {}
+          };
+      return [{
+        topic,
+        baselineRevision: contactsPresenceRevision,
+        sessionEpoch: coordinatorState.sessionEpoch,
+        snapshot: cached
+      }];
     }
     const baselineRevision = topic === "session.state" ? sessionRevision : backgroundSnapshotRevision;
     const snapshot = topic === "session.state"
@@ -2055,20 +2325,6 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
   }
 }
 
-/**
- * Worker 侧再次裁剪 ACK 入参；即便调用方绕过页面 facade 直接构造 RPC，
- * 也不能把 sender/messageId/envelope 等页面字段送入 Sat provider。
- */
-function normalizeProviderDeliveryAckClaim(value: unknown): ProviderDeliveryAckClaim {
-  if (!value || typeof value !== "object") return { deliveryId: "", supplierId: "", ackClaimToken: "" };
-  const claim = value as Record<string, unknown>;
-  return {
-    deliveryId: typeof claim.deliveryId === "string" ? claim.deliveryId : "",
-    supplierId: typeof claim.supplierId === "string" ? claim.supplierId : "",
-    ackClaimToken: typeof claim.ackClaimToken === "string" ? claim.ackClaimToken : "",
-  };
-}
-
 async function executeSatRequest(
   request: Extract<CoordinatorClientRequest, { kind: "sat.operation" }>,
 ): Promise<CoordinatorResponse> {
@@ -2080,17 +2336,6 @@ async function executeSatRequest(
   let value: unknown;
   switch (operation.type) {
     case "ensure":
-    case "provider.health":
-      value = runtime.provider.health();
-      break;
-    case "provider.send":
-      value = await runtime.handle.sendMessage(operation.input);
-      break;
-    case "provider.ack":
-      if (typeof runtime.handle.ackMessage !== "function") throw new Error("Sat provider handle does not support ACK");
-      // 页面 RPC 只有 deliveryId/supplierId/claimToken；ACK 的 sender、messageId、
-      // dedupKey 和 generation 由 Worker 内存中的 claim 表提供。
-      await runtime.handle.ackMessage(normalizeProviderDeliveryAckClaim(operation.claim));
       value = null;
       break;
     case "admin.getSettings":
@@ -2106,13 +2351,20 @@ async function executeSatRequest(
       break;
     case "admin.setOwnerSettings":
       await runtime.admin.setOwnerSettings(operation.settings);
+      try {
+        const mux = await ensureChannelSubscriptionMux(runtime);
+        await mux.set(channelCallerId({ kind: "system", systemId: "owner-inbox" }), [inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex))]);
+      } catch (error) {
+        // 设置已落库；若当前 receive Supplier 尚不可用，保留系统 caller
+        // 的意图，下一次设置/Channel 操作会再次尝试物理订阅。
+        console.warn("[channel] owner inbox rebind unavailable", error instanceof Error ? error.message : String(error));
+      }
       value = null;
       break;
+    case "admin.refreshSubscriptions":
+      value = await runtime.handle.refreshSubscriptions(operation.input);
+      break;
     case "service.publish": value = await runtime.service.publish(operation.input); break;
-    case "service.setSubscription": value = await runtime.service.setSubscription(operation.input); break;
-    case "service.subscribe": value = await runtime.service.subscribe(operation.input); break;
-    case "service.unsubscribe": value = await runtime.service.unsubscribe(operation.input); break;
-    case "service.refreshSubscriptions": value = await runtime.service.refreshSubscriptions(operation.input); break;
     case "spi.getInformation": value = await runtime.spi.getInformation(operation.input); break;
     case "spi.prepareTopUp": value = await runtime.spi.prepareTopUp(operation.input); break;
     case "spi.submitTopUp": value = await runtime.spi.submitTopUp(operation.preview); break;
@@ -2120,8 +2372,752 @@ async function executeSatRequest(
     case "spi.retryCollect": value = await runtime.spi.retryCollect(operation.input); break;
     case "spi.collect": value = await runtime.spi.collect(operation.input); break;
   }
-  emitSatHealth();
   return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+}
+
+// ============================================================
+// Channel runtime / owner inbox
+// ============================================================
+
+const CHANNEL_MAX_SUBSCRIPTIONS_PER_CALLER = 64;
+const CHANNEL_PROTOCOLS = new Set([APP_MESSAGE_PROTOCOL, WEBRTC_SIGNAL_PROTOCOL, PING_PROTOCOL]);
+type ChannelPrivateProtocol = typeof APP_MESSAGE_PROTOCOL | typeof WEBRTC_SIGNAL_PROTOCOL | typeof PING_PROTOCOL;
+type ChannelCaller = Extract<CoordinatorChannelOperation, { type: "subscription-set" }>['caller'];
+type ChannelOperationCaller = Extract<CoordinatorChannelOperation, { type: "private-publish" }>['caller'];
+
+/** 生成公开消息时间对；同一次签名必须只读取一次系统时钟。 */
+function channelPublicMessageTimes(now: () => number = Date.now): { issuedAtMs: number; expiresAtMs: number } {
+  const issuedAtMs = now();
+  return { issuedAtMs, expiresAtMs: issuedAtMs + PUBLIC_MESSAGE_MAX_LIFETIME_MS };
+}
+
+/** 测试公开消息时间边界；字段含义：issuedAtMs=签发时间，expiresAtMs=过期时间。 */
+export function __testBuildChannelPublicMessageTimes(now: () => number = Date.now): { issuedAtMs: number; expiresAtMs: number } {
+  return channelPublicMessageTimes(now);
+}
+
+function currentOwnerPrivateKey(): ReturnType<typeof parsePrivateKey> {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePrivateKeyBytes || !coordinatorState.activePublicKeyHex) {
+    throw new Error("Channel runtime requires an unlocked active key");
+  }
+  const privateKey = parsePrivateKey(coordinatorState.activePrivateKeyBytes);
+  if (publicKeyFromPrivate(privateKey) !== coordinatorState.activePublicKeyHex) throw new Error("Active Channel owner key mismatch");
+  return privateKey;
+}
+
+function channelMonotonicNow(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function allowAutomaticPong(senderPublicKeyHex: string): boolean {
+  const now = Date.now();
+  if (channelAutoPongWindowStartedAtMs === 0 || now - channelAutoPongWindowStartedAtMs >= CHANNEL_AUTO_PONG_WINDOW_MS) {
+    channelAutoPongWindowStartedAtMs = now;
+    channelAutoPongCount = 0;
+    channelAutoPongBySender.clear();
+  }
+  if (channelAutoPongCount >= CHANNEL_AUTO_PONG_MAX_GLOBAL) return false;
+  const sender = channelAutoPongBySender.get(senderPublicKeyHex);
+  if (sender && now - sender.windowStartedAtMs < CHANNEL_AUTO_PONG_WINDOW_MS && sender.count >= CHANNEL_AUTO_PONG_MAX_PER_SENDER) return false;
+  if (!sender || now - sender.windowStartedAtMs >= CHANNEL_AUTO_PONG_WINDOW_MS) {
+    channelAutoPongBySender.set(senderPublicKeyHex, { windowStartedAtMs: now, count: 1 });
+  } else {
+    sender.count += 1;
+  }
+  channelAutoPongCount += 1;
+  return true;
+}
+
+// Coordinator 不接受任意 RPC 自报 caller；普通插件还会在 Host context 层被
+// 绑定 manifest.id，这里是 Worker 边界的第二道 fail-closed 校验。
+const TRUSTED_CHANNEL_PLUGIN_IDS = new Set(["bsv-price", "message", "webrtc"]);
+const TRUSTED_CHANNEL_SYSTEM_IDS = new Set(["owner-inbox", "contacts-presence"]);
+
+function channelCallerId(caller: ChannelCaller): string {
+  const epoch = coordinatorState.sessionEpoch;
+  if (caller.kind === "plugin") {
+    if (!caller.pluginId || caller.pluginId.length > 128 || !TRUSTED_CHANNEL_PLUGIN_IDS.has(caller.pluginId)) {
+      throw new Error("Channel plugin caller id is not trusted");
+    }
+    return `${epoch}:plugin:${caller.pluginId}`;
+  }
+  if (caller.kind === "system") {
+    if (!caller.systemId || caller.systemId.length > 128 || !TRUSTED_CHANNEL_SYSTEM_IDS.has(caller.systemId)) {
+      throw new Error("Channel system caller id is not trusted");
+    }
+    return `${epoch}:system:${caller.systemId}`;
+  }
+  if (!caller.connectSessionId || !caller.origin) throw new Error("Channel Connect caller is incomplete");
+  return `${epoch}:connect:${caller.connectSessionId}:${caller.origin}`;
+}
+
+async function ensureChannelSubscriptionMux(runtime: SatWorkerRuntimeState): Promise<ChannelSubscriptionMux> {
+  if (channelSubscriptionMux && channelMuxOwnerPublicKeyHex === runtime.ownerPublicKeyHex) return channelSubscriptionMux;
+  const existingStart = channelSubscriptionMuxStarting;
+  if (existingStart && channelSubscriptionMuxStartOwner === runtime.ownerPublicKeyHex) return existingStart;
+  if (existingStart) await existingStart.catch(() => undefined);
+
+  const startGeneration = channelSubscriptionMuxGeneration;
+  const start = (async (): Promise<ChannelSubscriptionMux> => {
+    if (startGeneration !== channelSubscriptionMuxGeneration
+      || coordinatorState.vaultStatus !== "unlocked"
+      || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
+      throw new Error("Channel subscription mux became stale before startup");
+    }
+    const mux = new ChannelSubscriptionMux({
+      driver: {
+        subscribe: (channel) => runtime.handle.subscribePhysical(channel),
+        unsubscribe: (channel) => runtime.handle.unsubscribePhysical(channel)
+      }
+    });
+    channelSubscriptionMux = mux;
+    channelMuxOwnerPublicKeyHex = runtime.ownerPublicKeyHex;
+    const ownerInbox = inboxChannel(parsePublicKey(runtime.ownerPublicKeyHex));
+    try {
+      await mux.set(`${coordinatorState.sessionEpoch}:system:owner-inbox`, [ownerInbox]);
+    } catch (error) {
+      // 未配置 receive Supplier 时只保留 caller 意图；后续设置或重连会重试。
+      console.warn("[channel] owner inbox subscription unavailable", error instanceof Error ? error.message : String(error));
+    }
+    if (startGeneration !== channelSubscriptionMuxGeneration
+      || coordinatorState.vaultStatus !== "unlocked"
+      || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex
+      || channelSubscriptionMux !== mux) {
+      try {
+        await mux.clear().catch(() => undefined);
+      } finally {
+        mux.dispose();
+      }
+      if (channelSubscriptionMux === mux) {
+        channelSubscriptionMux = undefined;
+        channelMuxOwnerPublicKeyHex = undefined;
+      }
+      throw new Error("Channel subscription mux became stale during startup");
+    }
+    return mux;
+  })();
+  channelSubscriptionMuxStarting = start;
+  channelSubscriptionMuxStartOwner = runtime.ownerPublicKeyHex;
+  try {
+    return await start;
+  } finally {
+    if (channelSubscriptionMuxStarting === start) {
+      channelSubscriptionMuxStarting = undefined;
+      channelSubscriptionMuxStartOwner = undefined;
+    }
+  }
+}
+
+function rememberChannelMessage(key: string): boolean {
+  if (channelSeenMessages.has(key)) return false;
+  channelSeenMessages.add(key);
+  while (channelSeenMessages.size > CHANNEL_SEEN_LIMIT) {
+    const first = channelSeenMessages.values().next().value as string | undefined;
+    if (first === undefined) break;
+    channelSeenMessages.delete(first);
+  }
+  return true;
+}
+
+/**
+ * 生成并发布完整的 bsv8.hash.request.v1。request_message_id 必须来自这
+ * 条真实公开消息，不能由 WebRTC 插件另行随机生成后冒充 Hash 请求。
+ */
+async function publishChannelHashRequest(
+  runtime: SatWorkerRuntimeState,
+  input: { hash: string; locator: "webrtc-sdp" }
+): Promise<{ messageId: string }> {
+  const hash = parseSHA256Hash(input.hash);
+  const ownerSessionEpoch = coordinatorState.sessionEpoch;
+  const privateKey = currentOwnerPrivateKey();
+  const issuedAtMs = Date.now();
+  const signed = signHashRequest({
+    from_public_key: publicKeyFromPrivate(privateKey),
+    message_id: newMessageID(),
+    issued_at_ms: issuedAtMs,
+    expires_at_ms: issuedAtMs + 10 * 60 * 1000,
+    body: { hash, locators: [newWebRTCSDPLocator()] }
+  }, privateKey);
+  const contentJson = marshalHashRequest(signed);
+  // Supplier 通常不会把本 owner 的 Publish 回送给自己；本地仍必须保存
+  // 这条 SDK 生成的 VerifiedHashRequest，才能审查远端随后发来的 offer。
+  const verified = parseHashRequest(HASH_REQUEST_CHANNEL, contentJson, issuedAtMs);
+  const relationKey = channelHashRequestKey(verified.message_id, verified.from_public_key);
+  channelHashRequests.set(relationKey, verified);
+  pruneChannelProtocolRelations();
+  try {
+    await runtime.service.publish({ channel: HASH_REQUEST_CHANNEL, contentJson });
+  } catch (error) {
+    const stillFresh = coordinatorState.vaultStatus === "unlocked"
+      && coordinatorState.sessionEpoch === ownerSessionEpoch
+      && coordinatorState.activePublicKeyHex === runtime.ownerPublicKeyHex;
+    // unknown_result 表示消息可能已经到达远端，保留关系等待过期；明确
+    // 失败或 owner 已切换时不能留下本地伪 Hash 请求证据。
+    if (!stillFresh || !isUnknownChannelPublishFailure(error)) channelHashRequests.delete(relationKey);
+    throw error;
+  }
+  if (coordinatorState.vaultStatus !== "unlocked"
+    || coordinatorState.sessionEpoch !== ownerSessionEpoch
+    || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
+    channelHashRequests.delete(relationKey);
+    throw new Error("Channel owner changed while publishing Hash request");
+  }
+  return { messageId: signed.message_id };
+}
+
+/** 在 Coordinator 内给固定业务服务使用的 Channel facade。 */
+function createCoordinatorChannelRuntime(): ChannelRuntime {
+  const contactsCaller = { kind: "system" as const, systemId: "contacts-presence" };
+  return {
+    isReady: () => coordinatorState.vaultStatus === "unlocked" && Boolean(coordinatorState.activePublicKeyHex),
+    async publish(input) {
+      validateExactChannel(input.channel);
+      if (input.channel === HASH_REQUEST_CHANNEL) {
+        throw new Error("Use the trusted WebRTC Hash request publisher for bsv8.hash.request.v1");
+      }
+      const runtime = await ensureSatRuntime();
+      const ownerSessionEpoch = coordinatorState.sessionEpoch;
+      const privateKey = currentOwnerPrivateKey();
+      const { issuedAtMs, expiresAtMs } = channelPublicMessageTimes();
+      const signed = signPublicMessage({
+        channel: input.channel,
+        from_public_key: publicKeyFromPrivate(privateKey),
+        message_id: newMessageID(),
+        issued_at_ms: issuedAtMs,
+        expires_at_ms: expiresAtMs,
+        content: input.content
+      }, privateKey);
+      await runtime.service.publish({ channel: input.channel, contentJson: marshalPublicMessage(signed) });
+      if (coordinatorState.vaultStatus !== "unlocked"
+        || coordinatorState.sessionEpoch !== ownerSessionEpoch
+        || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
+        throw new Error("Channel owner changed while publishing");
+      }
+      return { messageId: signed.message_id };
+    },
+    async publishPrivate(input) {
+      const runtime = await ensureSatRuntime();
+      const protocol = privateProtocol(input.protocol);
+      validatePrivateProtocolCaller(contactsCaller, protocol);
+      const messageId = await publishPrivateEnvelope({
+        runtime,
+        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        protocol,
+        body: privateBodyForPublish(protocol, input.content)
+      });
+      return { messageId };
+    },
+    async subscriptionSet(channels) {
+      const runtime = await ensureSatRuntime();
+      const ownerSessionEpoch = coordinatorState.sessionEpoch;
+      const mux = await ensureChannelSubscriptionMux(runtime);
+      const result = await mux.set(channelCallerId(contactsCaller), channels);
+      if (coordinatorState.vaultStatus !== "unlocked"
+        || coordinatorState.sessionEpoch !== ownerSessionEpoch
+        || coordinatorState.activePublicKeyHex !== runtime.ownerPublicKeyHex) {
+        throw new Error("Channel subscription became stale");
+      }
+      return { channels: [...result] };
+    },
+    subscribe(handler) {
+      const subscriber = (event: { channel: string; publisherPublicKeyHex: string; messageId: string; content: import("@keymaster/contracts").JSONValue }) => handler(event);
+      channelPublicSubscribers.add(subscriber);
+      return () => channelPublicSubscribers.delete(subscriber);
+    },
+    subscribePrivate(handler) {
+      channelPrivateSubscribers.add(handler);
+      return () => channelPrivateSubscribers.delete(handler);
+    }
+  };
+}
+
+function emitChannelPublicMessage(message: { channel: string; publisherPublicKeyHex: string; messageId: string; content: import("@keymaster/contracts").JSONValue }): void {
+  for (const subscriber of channelPublicSubscribers) {
+    try { subscriber(message); } catch { /* 单个内部消费者不能打断 Channel 路由。 */ }
+  }
+  publishTopicEvent("channel.events", {
+    type: "channel.message.received",
+    publicMessage: message
+  });
+}
+
+function emitChannelPrivateMessage(message: { channel: string; publisherPublicKeyHex: string; messageId: string; protocol: string; content: import("@keymaster/contracts").JSONValue }): void {
+  for (const subscriber of channelPrivateSubscribers) {
+    try { subscriber(message); } catch { /* 单个内部消费者不能打断 Channel 路由。 */ }
+  }
+  publishTopicEvent("channel.events", {
+    type: "channel.message.received",
+    privateMessage: message
+  });
+}
+
+async function publishPrivateEnvelope(input: {
+  runtime: SatWorkerRuntimeState;
+  recipientPublicKeyHex: string;
+  protocol: ChannelPrivateProtocol;
+  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"];
+}): Promise<string> {
+  if (!CHANNEL_PROTOCOLS.has(input.protocol)) throw new Error("Unsupported private Channel protocol");
+  const recipient = parsePublicKey(input.recipientPublicKeyHex);
+  const channel = inboxChannel(recipient);
+  const ownerSessionEpoch = coordinatorState.sessionEpoch;
+  if (input.runtime.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+    throw new Error("Channel owner changed before private publish");
+  }
+  const privateKey = currentOwnerPrivateKey();
+  const messageId = newMessageID();
+  const now = Date.now();
+  const startedAtMonotonicMs = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
+    ? channelMonotonicNow()
+    : undefined;
+  // 过期时间必须由 ChannelProtocol 的子协议上限决定：Ping 60 秒，
+  // WebRTC 120 秒，其它私密消息最多 24 小时。签名构造集中在同一个
+  // helper，测试可以直接走与 Coordinator 相同的真实签名入口。
+  const signed = signChannelPrivateMessage({
+    recipientPublicKeyHex: recipient,
+    protocol: input.protocol,
+    body: input.body,
+    messageId,
+    nowMs: now,
+    privateKey
+  });
+  let verifiedWebrtc: import("bsv8-channel-protocol/inbox").VerifiedPrivateMessage | undefined;
+  if (input.protocol === WEBRTC_SIGNAL_PROTOCOL) {
+    verifiedWebrtc = verifySignedPrivateMessage(signed, now);
+    const webrtcBody = verifiedWebrtc.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body;
+    if (webrtcBody.signal.type === "offer") {
+      const hashRequest = channelHashRequestByMessageId(webrtcBody.request_message_id, recipient);
+      if (!hashRequest) throw new Error("WebRTC offer must reference a live public Hash request");
+      reviewOfferForHashRequest(hashRequest, verifiedWebrtc, now);
+    } else {
+      const offer = findChannelWebrtcOffer(webrtcBody, verifiedWebrtc);
+      if (!offer) throw new Error("WebRTC signal has no verified offer relation");
+      validateWebRTCRelation(offer, verifiedWebrtc);
+    }
+  }
+  const pingMessage = input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)
+    ? verifySignedPrivateMessage(signed, now)
+    : undefined;
+  const verifiedWebrtcBody = verifiedWebrtc?.body as import("bsv8-channel-protocol/webrtc-signal").WebRTCSignalV1Body | undefined;
+  const webrtcOfferKey = verifiedWebrtc && verifiedWebrtcBody?.signal.type === "offer"
+    ? channelWebrtcOfferKey(
+      verifiedWebrtcBody.request_message_id,
+      verifiedWebrtc.from_public_key,
+      verifiedWebrtcBody.session_id
+    )
+    : undefined;
+  if (verifiedWebrtc && webrtcOfferKey) {
+    // Offer 关系必须在发送边界前登记。Publish 返回 unknown_result 时，
+    // 远端可能已经收到 offer 并立即回 answer；提前登记才能通过后续关系
+    // 审查。明确失败时下面会删除这条本地证据。
+    channelWebrtcOffers.set(webrtcOfferKey, verifiedWebrtc);
+    pruneChannelProtocolRelations();
+  }
+  let envelope: Awaited<ReturnType<typeof sealSigned>>;
+  try {
+    envelope = await sealSigned(signed, privateKey);
+  } catch (error) {
+    if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
+    throw error;
+  }
+  if (input.protocol === PING_PROTOCOL && isPingRequestBody(input.body)) {
+    pruneChannelPendingPings(now);
+    // 必须在网络 Publish 前登记；Pong 可能在 publish Promise settle 前
+    // 经另一个入站 handler 到达。unknown_result 时保留到 TTL，禁止重复发送。
+    channelPendingPings.set({
+      messageId,
+      ownerSessionEpoch,
+      ownerPublicKeyHex: input.runtime.ownerPublicKeyHex,
+      contactPublicKeyHex: recipient,
+      startedAtMonotonicMs: startedAtMonotonicMs!,
+      expiresAtMs: now + CHANNEL_PENDING_PING_TTL_MS,
+      pingMessage: pingMessage!
+    });
+    scheduleChannelPendingPingCleanup();
+  }
+  try {
+    await input.runtime.service.publish({ channel, contentJson: marshalEnvelope(envelope) });
+  } catch (error) {
+    const stillFresh = coordinatorState.vaultStatus === "unlocked"
+      && coordinatorState.sessionEpoch === ownerSessionEpoch
+      && coordinatorState.activePublicKeyHex === input.runtime.ownerPublicKeyHex;
+    if (!isUnknownChannelPublishFailure(error) || !stillFresh) {
+      channelPendingPings.delete(messageId);
+      if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
+    }
+    throw error;
+  }
+  if (coordinatorState.vaultStatus !== "unlocked"
+    || coordinatorState.sessionEpoch !== ownerSessionEpoch
+    || coordinatorState.activePublicKeyHex !== input.runtime.ownerPublicKeyHex) {
+    channelPendingPings.delete(messageId);
+    if (webrtcOfferKey) channelWebrtcOffers.delete(webrtcOfferKey);
+    throw new Error("Channel owner changed while publishing");
+  }
+  return messageId;
+}
+
+function signChannelPrivateMessage(input: {
+  recipientPublicKeyHex: string;
+  protocol: ChannelPrivateProtocol;
+  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"];
+  messageId: string;
+  nowMs: number;
+  privateKey: Uint8Array;
+}): import("bsv8-channel-protocol/inbox").SignedPrivateMessage {
+  const recipient = parsePublicKey(input.recipientPublicKeyHex);
+  const issuedAtMs = input.nowMs;
+  const message = {
+    channel: inboxChannel(recipient),
+    from_public_key: publicKeyFromPrivate(input.privateKey),
+    message_id: parseMessageID(input.messageId),
+    issued_at_ms: issuedAtMs,
+    expires_at_ms: issuedAtMs + privateMessageMaxLifetimeMs(input.protocol),
+    protocol: input.protocol,
+    body: input.body
+  } as import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage;
+  return signPrivateMessage(message, input.privateKey);
+}
+
+function isPingRequestBody(
+  body: import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"]
+): body is import("bsv8-channel-protocol/ping").PingBody {
+  return body !== null
+    && typeof body === "object"
+    && !Array.isArray(body)
+    && "type" in body
+    && body.type === "ping";
+}
+
+function privateProtocol(protocol: string): ChannelPrivateProtocol {
+  if (CHANNEL_PROTOCOLS.has(protocol as ChannelPrivateProtocol)) return protocol as ChannelPrivateProtocol;
+  throw new Error("Unsupported private Channel protocol");
+}
+
+function validatePrivateProtocolCaller(caller: ChannelOperationCaller, protocol: ChannelPrivateProtocol): void {
+  if (caller.kind === "connect") throw new Error("Connect caller cannot publish private inbox messages");
+  if (caller.kind === "plugin") {
+    if (caller.pluginId === "message" && protocol === APP_MESSAGE_PROTOCOL) return;
+    // WebRTC 的呼叫/文件请求先使用已注册的 message 子协议交换
+    // Hash 请求上下文；真正的 SDP/ICE 仍只能走 WEBRTC_SIGNAL_PROTOCOL。
+    if (caller.pluginId === "webrtc" && (protocol === WEBRTC_SIGNAL_PROTOCOL || protocol === APP_MESSAGE_PROTOCOL)) return;
+    throw new Error("Channel plugin is not allowed to publish this private protocol");
+  }
+  if (caller.systemId === "contacts-presence" && protocol === PING_PROTOCOL) return;
+  throw new Error("Channel system is not allowed to publish this private protocol");
+}
+
+function isActiveOwnerInboxChannel(channel: string): boolean {
+  const owner = coordinatorState.activePublicKeyHex;
+  if (!owner) return false;
+  try {
+    return channel === inboxChannel(parsePublicKey(owner));
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedOwnerInboxSubscription(caller: ChannelCaller, channel: string): boolean {
+  if (!isActiveOwnerInboxChannel(channel)) return false;
+  // owner-inbox / contacts-presence 是 Coordinator 内部系统路由；message /
+  // webrtc 是 Host 绑定身份的内部插件路由。Connect 和其他插件不能订阅
+  // 任意 bsv8.inbox.*，避免把私有收件箱暴露成公共事件流。
+  if (caller.kind === "system") {
+    return caller.systemId === "owner-inbox" || caller.systemId === "contacts-presence";
+  }
+  return caller.kind === "plugin" && (caller.pluginId === "message" || caller.pluginId === "webrtc");
+}
+
+function privateBodyForPublish(protocol: string, content: import("@keymaster/contracts").JSONValue): import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"] {
+  const supportedProtocol = privateProtocol(protocol);
+  if (supportedProtocol === APP_MESSAGE_PROTOCOL) {
+    if (content !== null && typeof content === "object" && !Array.isArray(content) && content.type === "ack") {
+      const acknowledged = content.acknowledged_message_id;
+      if (typeof acknowledged !== "string") throw new Error("Message ACK must contain acknowledged_message_id");
+      return newAck(parseMessageID(acknowledged));
+    }
+    return newDeliver(content as import("bsv8-channel-protocol").JSONValue);
+  }
+  if (supportedProtocol === WEBRTC_SIGNAL_PROTOCOL) return parseWebrtcBodyValue(content as import("bsv8-channel-protocol").JSONValue);
+  if (supportedProtocol === PING_PROTOCOL) return parsePingBodyValue(content as import("bsv8-channel-protocol").JSONValue);
+  throw new Error("Unsupported private Channel protocol");
+}
+
+async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<void> {
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) return;
+  pruneChannelPendingPings();
+  pruneChannelProtocolRelations();
+  try {
+    const owner = coordinatorState.activePublicKeyHex;
+    const ownerSessionEpoch = coordinatorState.sessionEpoch;
+    const ownerPrivateKey = currentOwnerPrivateKey();
+    const ownerInbox = inboxChannel(parsePublicKey(owner));
+    if (event.channel === ownerInbox) {
+      const opened = await openPrivateMessage(event.channel, event.contentJson, ownerPrivateKey, Date.now());
+      // 解密本身可能让出事件循环；锁定、切换 owner 或重建 session 后，
+      // 旧事件不得进入新 owner 的业务处理器。
+      if (coordinatorState.vaultStatus !== "unlocked"
+        || coordinatorState.sessionEpoch !== ownerSessionEpoch
+        || coordinatorState.activePublicKeyHex !== owner) {
+        return;
+      }
+      const dedup = privateDedupKey(opened);
+      const key = `${dedup.protocol}\u0000${dedup.from_public_key}\u0000${dedup.message_id}`;
+      if (!rememberChannelMessage(key)) return;
+      switch (opened.protocol) {
+        case PING_PROTOCOL: {
+          const pingBody = parsePingBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue);
+          if (pingBody.type === "ping") {
+            const runtime = satRuntime;
+            if (runtime && runtime.ownerPublicKeyHex === owner && allowAutomaticPong(opened.from_public_key)) {
+              try {
+                await publishPrivateEnvelope({ runtime, recipientPublicKeyHex: opened.from_public_key, protocol: PING_PROTOCOL, body: newPong(opened.message_id) });
+              } catch (error) {
+                console.warn("[channel] automatic Pong failed", error instanceof Error ? error.message : String(error));
+              }
+            }
+            return;
+          }
+          const pending = channelPendingPings.get(pingBody.ping_message_id);
+          if (!pending
+            || pending.ownerSessionEpoch !== coordinatorState.sessionEpoch
+            || pending.ownerPublicKeyHex !== owner
+            || pending.contactPublicKeyHex !== opened.from_public_key
+            || pending.expiresAtMs <= Date.now()) {
+            return;
+          }
+          try {
+            validatePongRelation(pending.pingMessage, opened);
+          } catch {
+            return;
+          }
+          channelPendingPings.delete(pingBody.ping_message_id);
+          // RTT 仅作为诊断值，不进入 Contact 实体或公开资源。
+          void Math.max(0, channelMonotonicNow() - pending.startedAtMonotonicMs);
+          coordinatorContactsService?.recordVerifiedPong?.({
+            contactPublicKeyHex: opened.from_public_key,
+            receivedAtMs: Date.now()
+          });
+          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: pingBody as unknown as import("@keymaster/contracts").JSONValue });
+          return;
+        }
+        case APP_MESSAGE_PROTOCOL: {
+          const appBody = opened.body as import("bsv8-channel-protocol/app-message").MessageV1Body;
+          const content: import("@keymaster/contracts").JSONValue = appBody.type === "deliver"
+            ? appBody.content as import("@keymaster/contracts").JSONValue
+            : { type: "ack", acknowledged_message_id: appBody.acknowledged_message_id };
+          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content });
+          return;
+        }
+        case WEBRTC_SIGNAL_PROTOCOL: {
+          const webrtcBody = parseWebrtcBodyValue(opened.body as unknown as import("bsv8-channel-protocol").JSONValue);
+          if (webrtcBody.signal.type === "offer") {
+            const hashRequest = channelHashRequestByMessageId(webrtcBody.request_message_id, owner);
+            if (!hashRequest) throw new Error("WebRTC offer references an unknown or expired Hash request");
+            const relation = reviewOfferForHashRequest(hashRequest, opened, Date.now());
+            channelWebrtcOffers.set(relation.key, opened);
+            pruneChannelProtocolRelations();
+          } else {
+            const offer = findChannelWebrtcOffer(webrtcBody, opened);
+            if (!offer) throw new Error("WebRTC signal has no verified offer relation");
+            validateWebRTCRelation(offer, opened);
+          }
+          emitChannelPrivateMessage({ channel: opened.channel, publisherPublicKeyHex: opened.from_public_key, messageId: opened.message_id, protocol: opened.protocol, content: webrtcBody as unknown as import("@keymaster/contracts").JSONValue });
+          return;
+        }
+        default:
+          throw new Error("UNSUPPORTED_PROTOCOL");
+      }
+    }
+    // bsv8.inbox.* is a private namespace. A message arriving at another
+    // owner's inbox is never reinterpreted as a public application message.
+    if (event.channel.startsWith("bsv8.inbox.")) {
+      try { parseInboxChannel(event.channel); } catch { /* malformed private namespace is rejected below */ }
+      return;
+    }
+    if (event.channel === HASH_REQUEST_CHANNEL) {
+      const hashRequest = parseHashRequest(event.channel, event.contentJson, Date.now());
+      const key = channelHashRequestKey(hashRequest.message_id, hashRequest.from_public_key);
+      if (!rememberChannelMessage(key)) return;
+      channelHashRequests.set(key, hashRequest);
+      pruneChannelProtocolRelations();
+      emitChannelPublicMessage({
+        channel: event.channel,
+        publisherPublicKeyHex: hashRequest.from_public_key,
+        messageId: hashRequest.message_id,
+        content: {
+          hash: hashRequest.body.hash,
+          locators: hashRequest.body.locators.map((locator) => locator.kind === "multiaddr"
+            ? { kind: locator.kind, address: locator.address }
+            : { kind: locator.kind })
+        } as unknown as import("@keymaster/contracts").JSONValue
+      });
+      return;
+    }
+    const publicMessage = parsePublicMessage(event.channel, event.contentJson, Date.now());
+    const publicDedup = publicDedupKey(publicMessage);
+    const key = `${publicDedup.from_public_key}\u0000${publicDedup.message_id}`;
+    if (!rememberChannelMessage(key)) return;
+    emitChannelPublicMessage({ channel: publicMessage.channel, publisherPublicKeyHex: publicMessage.from_public_key, messageId: publicMessage.message_id, content: publicMessage.content });
+  } catch (error) {
+    // 无效、过期、未知协议或非 owner inbox 的私密消息全部丢弃；不向 SSP
+    // 暴露本地 crypto 错误，也不猜测业务协议。
+    console.warn("[channel] inbound message rejected", error instanceof Error ? error.message : String(error));
+    if (channelErrorCode(error) === "UNSUPPORTED_PROTOCOL") {
+      const rejection = new Error("UNSUPPORTED_PROTOCOL") as Error & { domain?: string; code?: string };
+      rejection.domain = "channel-inbound";
+      rejection.code = "UNSUPPORTED_PROTOCOL";
+      throw rejection;
+    }
+  }
+}
+
+function channelErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== "object") return error instanceof Error && error.message === "UNSUPPORTED_PROTOCOL" ? error.message : undefined;
+  const code = (error as { code?: unknown }).code;
+  if (typeof code === "string") return code;
+  return error instanceof Error && error.message === "UNSUPPORTED_PROTOCOL" ? error.message : undefined;
+}
+
+function isUnknownChannelPublishFailure(error: unknown): boolean {
+  const code = channelErrorCode(error);
+  if (code === "unknown_result") return true;
+  return error instanceof Error && /unknown[_ ]result/i.test(error.message);
+}
+
+async function executeChannelRequest(
+  request: Extract<CoordinatorClientRequest, { kind: "channel.operation" }>
+): Promise<CoordinatorResponse> {
+  if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "locked" } };
+  }
+  const operation = request.operation;
+  if (operation.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  if (operation.caller.kind === "connect") {
+    const session = await getAuthoritativeConnectSession(operation.caller.connectSessionId);
+    if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Channel Connect session is invalid", code: "storage_identity_required" } };
+    }
+  }
+  try {
+    const runtime = await ensureSatRuntime();
+    const mux = await ensureChannelSubscriptionMux(runtime);
+    switch (operation.type) {
+      case "hash-request-publish": {
+        if (operation.caller.kind !== "plugin" || operation.caller.pluginId !== "webrtc") {
+          throw new Error("Only the trusted WebRTC plugin may publish Hash requests");
+        }
+        if (operation.locator !== "webrtc-sdp") throw new Error("Unsupported Hash request locator");
+        const published = await publishChannelHashRequest(runtime, operation);
+        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+          || coordinatorState.vaultStatus !== "unlocked"
+          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
+          throw new Error("Hash request publish became stale after network completion");
+        }
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: published };
+      }
+      case "publish": {
+        validateExactChannel(operation.channel);
+        if (operation.channel.startsWith("bsv8.inbox.")) {
+          throw new Error("bsv8.inbox.* is a reserved private channel");
+        }
+        if (operation.channel === HASH_REQUEST_CHANNEL) {
+          throw new Error("bsv8.hash.request.v1 is reserved for the trusted WebRTC Hash request publisher");
+        }
+        const privateKey = currentOwnerPrivateKey();
+        const from = publicKeyFromPrivate(privateKey);
+        const { issuedAtMs, expiresAtMs } = channelPublicMessageTimes();
+        const message = {
+          channel: operation.channel,
+          from_public_key: from,
+          message_id: newMessageID(),
+          issued_at_ms: issuedAtMs,
+          expires_at_ms: expiresAtMs,
+          content: operation.content
+        } as const;
+        const signed = signPublicMessage(message, privateKey);
+        await runtime.service.publish({ channel: operation.channel, contentJson: marshalPublicMessage(signed) });
+        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+          || coordinatorState.vaultStatus !== "unlocked"
+          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
+          throw new Error("Channel publish became stale after network completion");
+        }
+        if (operation.caller.kind === "connect") {
+          const session = await getAuthoritativeConnectSession(operation.caller.connectSessionId);
+          if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
+            throw new Error("Channel Connect session was revoked during publish");
+          }
+        }
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { messageId: signed.message_id } };
+      }
+      case "private-publish": {
+        const protocol = privateProtocol(operation.protocol);
+        validatePrivateProtocolCaller(operation.caller, protocol);
+        const messageId = await publishPrivateEnvelope({ runtime, recipientPublicKeyHex: operation.recipientPublicKeyHex, protocol, body: privateBodyForPublish(protocol, operation.content) });
+        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+          || coordinatorState.vaultStatus !== "unlocked"
+          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
+          throw new Error("Private Channel publish became stale after network completion");
+        }
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { messageId } };
+      }
+      case "subscription-set": {
+        if (operation.channels.length > CHANNEL_MAX_SUBSCRIPTIONS_PER_CALLER) throw new Error("Too many Channel subscriptions");
+        const callerId = channelCallerId(operation.caller);
+        for (const channel of operation.channels) {
+          validateExactChannel(channel);
+          if (channel.startsWith("bsv8.inbox.")) {
+            if (!isAllowedOwnerInboxSubscription(operation.caller, channel)) {
+              throw new Error("bsv8.inbox.* is reserved for the current owner inbox router");
+            }
+          }
+        }
+        const channels = await mux.set(callerId, operation.channels);
+        if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch
+          || coordinatorState.vaultStatus !== "unlocked"
+          || coordinatorState.activePublicKeyHex !== operation.ownerPublicKeyHex) {
+          throw new Error("Channel subscription became stale after reconciliation");
+        }
+        if (operation.caller.kind === "connect") {
+          const session = await getAuthoritativeConnectSession(operation.caller.connectSessionId);
+          if (!session || session.revokedAt !== null || session.origin !== operation.caller.origin || session.ownerPublicKeyHex !== operation.ownerPublicKeyHex) {
+            throw new Error("Channel Connect session was revoked during subscription reconciliation");
+          }
+        }
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { channels } };
+      }
+      case "release":
+        mux.release(channelCallerId(operation.caller));
+        return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: null };
+    }
+  } catch (error) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: error instanceof Error ? error.message : String(error) } };
+  }
+}
+
+/** 页面资源只读 Coordinator 的联系人在线快照，不拥有探测或传输能力。 */
+async function executeContactsPresenceSnapshot(
+  request: Extract<CoordinatorClientRequest, { kind: "contacts.presence.snapshot" }>
+): Promise<CoordinatorResponse> {
+  if (request.expectedSessionEpoch !== coordinatorState.sessionEpoch) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "stale-epoch" } };
+  }
+  if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.activePublicKeyHex) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: {} };
+  }
+  try {
+    const presence = await coordinatorContactsService?.getPresenceSnapshot?.() ?? {};
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: presence };
+  } catch (error) {
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: error instanceof Error ? error.message : String(error) } };
+  }
 }
 
 function isMsfileRequest(request: CoordinatorClientRequest): boolean {
@@ -2490,6 +3486,27 @@ function handleWindowP2pExecutorPortMessage(event: MessageEvent): void {
   }
   if (data.type === "event") {
     const eventValue = data.event;
+    if (eventValue && typeof eventValue === "object" && (eventValue as { type?: unknown }).type === "ssp.state") {
+      const stateEvent = eventValue as {
+        type: "ssp.state";
+        supplierId?: unknown;
+        connectionId?: unknown;
+        ownerSessionEpoch?: unknown;
+        supplierGeneration?: unknown;
+        state?: unknown;
+      };
+      const registration = typeof stateEvent.connectionId === "string"
+        ? satConnectionStateHandlers.get(stateEvent.connectionId)
+        : undefined;
+      if (registration
+        && registration.supplierId === stateEvent.supplierId
+        && registration.ownerSessionEpoch === stateEvent.ownerSessionEpoch
+        && registration.supplierGeneration === stateEvent.supplierGeneration
+        && (stateEvent.state === "online" || stateEvent.state === "degraded" || stateEvent.state === "closed")) {
+        registration.handler(stateEvent.state);
+      }
+      return;
+    }
     if (!eventValue || typeof eventValue !== "object" || (eventValue as { type?: unknown }).type !== "ssp.request") {
       // Window 在发送前已经为每个 SSP eventId 预占额度；即使事件形状
       // 损坏，也必须走 reject 闭环，不能让 Window reservation 永久泄漏。
@@ -2851,17 +3868,53 @@ const satSubscriptionTransport: SatSubscriptionTransport = {
       throw new Error("Sat Window lane returned an invalid authenticated connection");
     }
     let connectionState: "online" | "degraded" | "closed" = "online";
+    const stateListeners = new Set<(state: "online" | "degraded" | "closed") => void>();
+    const setConnectionState = (next: "online" | "degraded" | "closed"): void => {
+      if (connectionState === next) return;
+      connectionState = next;
+      for (const listener of stateListeners) {
+        try { listener(next); } catch { /* 单个状态监听器不能打断连接。 */ }
+      }
+    };
     const connection: SatSupplierConnection = {
       ...fence,
       authenticatedPublicKeyHex: (result as { authenticatedPublicKeyHex: string }).authenticatedPublicKeyHex,
       get state() { return connectionState; },
+      onStateChange: (handler) => {
+        stateListeners.add(handler);
+        handler(connectionState);
+        satConnectionStateHandlers.set(connectionId, {
+          supplierId: fence.supplierId,
+          ownerSessionEpoch: fence.ownerSessionEpoch,
+          supplierGeneration: fence.supplierGeneration,
+          handler
+        });
+        return () => {
+          stateListeners.delete(handler);
+          if (satConnectionStateHandlers.get(connectionId)?.handler === handler) satConnectionStateHandlers.delete(connectionId);
+        };
+      },
       requestSsp: async (wire, signal) => {
         if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
-        return asSatWire(await satWindowLaneOperation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal), "requestSsp");
+        try {
+          const response = asSatWire(await satWindowLaneOperation({ type: "requestSsp", ...fence, wire: wire.slice() }, signal), "requestSsp");
+          setConnectionState("online");
+          return response;
+        } catch (error) {
+          setConnectionState("degraded");
+          throw error;
+        }
       },
       requestSpi: async (wire, signal) => {
         if (connectionState === "closed") throw new Error("Sat supplier connection is closed");
-        return asSatWire(await satWindowLaneOperation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal), "requestSpi");
+        try {
+          const response = asSatWire(await satWindowLaneOperation({ type: "requestSpi", ...fence, wire: wire.slice() }, signal), "requestSpi");
+          setConnectionState("online");
+          return response;
+        } catch (error) {
+          setConnectionState("degraded");
+          throw error;
+        }
       },
       subscribeSspRequests: (handler) => {
         satIncomingHandlers.set(connectionId, { supplierId: input.supplier.supplierId, ownerSessionEpoch: input.ownerSessionEpoch, supplierGeneration: input.supplierGeneration, handler });
@@ -2873,9 +3926,10 @@ const satSubscriptionTransport: SatSubscriptionTransport = {
         };
       },
       close: () => {
-        connectionState = "closed";
+        setConnectionState("closed");
         cancelSatInboundHandlersForConnection(connectionId, "Sat connection was closed");
         satIncomingHandlers.delete(connectionId);
+        satConnectionStateHandlers.delete(connectionId);
         void satWindowLaneOperation({ type: "close", ...fence }).catch(() => undefined);
       },
     };
@@ -2912,7 +3966,12 @@ function scheduleWindowP2pExecutorLeaseExpiry(leaseId: string, acquiredAt: numbe
 
 function clearWindowP2pExecutorLeaseLocked(): void {
   clearWindowP2pExecutorLeaseTimer();
-  if (windowP2pExecutorLease === undefined) return;
+  if (windowP2pExecutorLease === undefined) {
+    // Sat connection state callbacks are capability-bound too; do not leave
+    // them behind merely because the Window lease was already cleared.
+    satConnectionStateHandlers.clear();
+    return;
+  }
   const oldLease = windowP2pExecutorLease;
   const revokedError = windowP2pError("ERR_EXECUTOR_REVOKED", "Window P2P executor lease was revoked");
   windowP2pExecutorConfigSync?.reject(revokedError);
@@ -2926,6 +3985,7 @@ function clearWindowP2pExecutorLeaseLocked(): void {
       windowP2pExecutorIdentityRequests.delete(requestId);
     }
   }
+  satConnectionStateHandlers.clear();
   windowP2pExecutorLease = undefined;
 }
 
@@ -3459,6 +4519,10 @@ async function executeProcessRequest(
         return await handleP2pkhBroadcast(requestId, request);
       case "sat.operation":
         return await executeSatRequest(request);
+      case "channel.operation":
+        return await executeChannelRequest(request);
+      case "contacts.presence.snapshot":
+        return await executeContactsPresenceSnapshot(request);
       default:
         return {
           requestId,
@@ -3625,16 +4689,16 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       const previousGeneration = coordinatorState.keyspaceGeneration;
       const previousEpoch = coordinatorState.sessionEpoch;
       const previousSelected = coordinatorMeta.selectedPublicKeyHex;
+      // 旧 owner 仍在 coordinatorState 中时完成清理，避免清理过程读取到新
+      // owner 的签名身份或 Supplier 配置。
+      releaseMsfileRuntime("activate-key");
+      await releaseSatRuntime("activate-key");
+      clearWindowP2pExecutorLeaseLocked();
       replaceActivePrivateKey(bytes);
       coordinatorState.activePublicKeyHex = key.publicKeyHex;
       coordinatorState.keyspaceGeneration++;
       coordinatorState.sessionEpoch = generateEpoch();
       passkeyAddIntents.clear();
-      // 施工单 docs/proposals/msfile：active key 切换立即销毁旧 MSFile runtime
-      // （wire 身份随 owner 公钥变化，旧 host/连接/授权不可继续使用）。
-      releaseMsfileRuntime("activate-key");
-      releaseSatRuntime("activate-key");
-      clearWindowP2pExecutorLeaseLocked();
       coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
       coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
       try {
@@ -3656,7 +4720,6 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
       }
       publishSessionState("activate-key");
-      emitSatHealth();
       emitMsFileState();
       return true;
     }
@@ -3775,6 +4838,11 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         const previousGeneration = coordinatorState.keyspaceGeneration;
         const previousEpoch = coordinatorState.sessionEpoch;
         const previousSelected = coordinatorMeta.selectedPublicKeyHex;
+        // Passkey 激活与普通切换是同一类 owner 边界：先清理旧 owner 的
+        // MSFile、Sat 物理订阅和窗口 lease，再让新 owner 对外可见。
+        releaseMsfileRuntime("activate-key");
+        await releaseSatRuntime("activate-key");
+        clearWindowP2pExecutorLeaseLocked();
         if (previousPublicKeyHex && previousPublicKeyHex !== key.publicKeyHex) {
           await cancelTaskRuntimesByKey(previousPublicKeyHex);
         }
@@ -4074,15 +5142,13 @@ async function handleLock(
 }
 
 async function performGlobalLock(reason: string): Promise<void> {
-  // Storage is preempted before Vault keys are cleared; no S3 network cleanup
-  // is allowed to delay destruction of the client or credential material.
-  await releaseStorageRuntime(reason);
-  // 施工单 docs/proposals/msfile：lock 时销毁 MSFile runtime，未决请求与确认取消。
-  releaseMsfileRuntime(reason);
-  releaseSatRuntime(reason);
-  clearWindowP2pExecutorLeaseLocked();
-  // abort 所有 session-bound task，并在清空运行句柄前保留 completion，确保
-  // handler 已经退出；否则迟到的 DB commit 可能越过锁定栅栏。
+  // 第一阶段必须完全脱离网络：先递增 epoch、撤销 capability、覆盖密钥
+  // 并广播 locked。Supplier 永不返回时，锁屏请求也不能被远端拖住。
+  const lockedEpoch = generateEpoch();
+  // 先推进会话世代并切换为 locked，使所有已经排队的请求立即失效；
+  // 后续释放连接/写清理意图都只能作为第二阶段后台工作。
+  coordinatorState.sessionEpoch = lockedEpoch;
+  coordinatorState.vaultStatus = reason === "recover-empty" || reason === "empty-vault" ? "uninitialized" : "locked";
   const completions: Promise<void>[] = [];
   for (const [, runtime] of coordinatorState.taskRuntimes) {
     runtime.controller?.abort();
@@ -4095,30 +5161,28 @@ async function performGlobalLock(reason: string): Promise<void> {
     runtime.blockedReason = "Vault is locked";
     runtime.timer = undefined;
   }
-  await Promise.allSettled(completions);
-  for (const runtime of coordinatorState.taskRuntimes.values()) runtime.controller = undefined;
 
-  // 覆盖私钥 buffer
-  if (coordinatorState.activePrivateKeyBytes) {
-    coordinatorState.activePrivateKeyBytes.fill(0);
-  }
-
-  // 撤销 capability、清空 active key
+  // 撤销 capability、清空 active key；replace/drop 会覆盖旧 Uint8Array。
   coordinatorState.activePublicKeyHex = undefined;
-    dropActivePrivateKey();
+  dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
   coordinatorState.storageSecretKey = undefined;
   passkeyAddIntents.clear();
 
-  // 递增 epoch
-  coordinatorState.sessionEpoch = generateEpoch();
-  coordinatorState.vaultStatus = reason === "recover-empty" || reason === "empty-vault" ? "uninitialized" : "locked";
+  coordinatorState.autoLockDeadline = undefined;
+
+  // 这些 release 函数在调用期间只摘除本地句柄；真正的远端退订、连接
+  // 关闭和 DB 清理在第二阶段后台执行，并由 releaseSatRuntime 限时。
+  // 这样旧 runtime 不会在 locked 状态继续对外提供能力。
+  const storageCleanup = releaseStorageRuntime(reason);
+  releaseMsfileRuntime(reason);
+  const satCleanup = releaseSatRuntime(reason);
+  clearWindowP2pExecutorLeaseLocked();
 
   coordinatorState.keyspaceGeneration++;
   if (reason === "empty-vault" || reason === "recover-empty") coordinatorMeta.selectedPublicKeyHex = undefined;
   coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
-  await persistCoordinatorMeta();
   publishSessionState(reason === "key-deleted" || reason === "empty-vault" ? "delete-active-key" : reason === "recover-empty" ? "recover-empty-vault" : "lock");
   emitMsFileState();
   emitStorageState();
@@ -4130,10 +5194,19 @@ async function performGlobalLock(reason: string): Promise<void> {
     snapshots: getTaskSnapshots(),
   });
 
-  // 清除自动锁定 timer
-  if (coordinatorState.autoLockDeadline) {
-    coordinatorState.autoLockDeadline = undefined;
-  }
+  // 元数据只涉及本地持久化，失败不能回滚已经完成的安全锁定。
+  await persistCoordinatorMeta().catch((error) => {
+    console.warn("[coordinator] locked state metadata persistence failed", error instanceof Error ? error.message : String(error));
+  });
+
+  // 任务 completion 只能在仍处于本次 locked epoch 时清理；若期间已经
+  // 解锁，新 runtime 的 controller 不能被旧任务迟到完成覆盖。
+  void Promise.allSettled(completions).then(() => {
+    if (coordinatorState.sessionEpoch !== lockedEpoch) return;
+    for (const runtime of coordinatorState.taskRuntimes.values()) runtime.controller = undefined;
+  });
+  void storageCleanup.catch((error) => console.warn("[storage] locked cleanup failed", error instanceof Error ? error.message : String(error)));
+  void satCleanup.catch((error) => console.warn("[sat-subscription] locked cleanup failed", error instanceof Error ? error.message : String(error)));
 }
 
 async function handleActivateKey(
@@ -4162,7 +5235,7 @@ async function handleActivateKey(
     // Active key change invalidates the MSFile identity, host and all old
     // supplier connections before the new epoch becomes observable.
     releaseMsfileRuntime("activate-key");
-    releaseSatRuntime("activate-key");
+    await releaseSatRuntime("activate-key");
     clearWindowP2pExecutorLeaseLocked();
     replaceActivePrivateKey(privateKey);
     coordinatorState.activePublicKeyHex = request.publicKeyHex;
@@ -4190,7 +5263,6 @@ async function handleActivateKey(
     }
 
     publishSessionState("activate-key");
-    emitSatHealth();
     emitMsFileState();
 
     return {
@@ -4275,18 +5347,6 @@ async function executeCryptoOperation(
   operation: CoordinatorCryptoOperation,
   privateKeyBytes: Uint8Array
 ): Promise<CoordinatorCryptoResult> {
-  const assertChannelLifetime = (issuedAtMs: number, expiresAtMs: number): void => {
-    if (!Number.isSafeInteger(issuedAtMs) || !Number.isSafeInteger(expiresAtMs) || expiresAtMs <= issuedAtMs || expiresAtMs - issuedAtMs > 24 * 60 * 60 * 1000) {
-      throw new Error("Channel message lifetime is invalid");
-    }
-  };
-  const parseChannelContent = (contentJson: Uint8Array): import("bsv8-channel-protocol").JSONValue => {
-    let text: string;
-    try { text = new TextDecoder("utf-8", { fatal: true }).decode(contentJson); } catch { throw new Error("Channel content is not valid UTF-8"); }
-    try { return JSON.parse(text) as import("bsv8-channel-protocol").JSONValue; } catch { throw new Error("Channel content is not valid JSON"); }
-  };
-  const privateKey = parsePrivateKey(privateKeyBytes);
-  const ownerPublicKey = publicKeyFromPrivate(privateKey);
   switch (operation.type) {
     case "signDigest": {
       const sig = await signEcdsaDigest({
@@ -4297,89 +5357,6 @@ async function executeCryptoOperation(
       return { type: "signDigest", signatureHex: bytesToHex(sig), format: operation.format };
     }
     case "deriveP2pkhAddress": return { type: "deriveP2pkhAddress", address: deriveP2pkhAddress(coordinatorState.activePublicKeyHex!, operation.network) };
-    case "sealSendInput": { const i = operation.input; const sealed = sealAppMessageLocalBytes({ senderPrivateKeyBytes: privateKeyBytes, senderPublicKeyBytes: cryptoHexToBytes(coordinatorState.activePublicKeyHex!), recipientPublicKeyBytes: cryptoHexToBytes(i.recipient.recipientPublicKeyHex), senderEndpoint: i.sender.senderOrigin ? { kind: "origin", id: i.sender.senderOrigin } : { kind: "plugin", id: i.sender.senderAppId ?? "" }, recipientEndpoint: i.recipient.recipientOrigin ? { kind: "origin", id: i.recipient.recipientOrigin } : { kind: "plugin", id: i.recipient.recipientAppId ?? "" }, contentType: i.contentType, body: i.body, clientMessageId: i.clientMessageId, createdAtMs: i.createdAtMs }); return { type: "sealSendInput", envelope: sealed.envelope, signature: sealed.signatureBytes }; }
-    case "openSealed": { const r = operation.record; const opened = openAppMessageLocalBytes({ signed: { envelopeBytes: new Uint8Array(r.envelope.envelopeBytes), signatureBytes: new Uint8Array(r.envelope.signatureBytes) }, recipientPrivateKeyBytes: privateKeyBytes, recipientPublicKeyBytes: cryptoHexToBytes(coordinatorState.activePublicKeyHex!) }); return { type: "openSealed", plaintext: new TextEncoder().encode(JSON.stringify(buildOpenedAppMsgMessage(r, opened))) }; }
-    case "channel.seal-deliver": {
-      assertChannelLifetime(operation.issuedAtMs, operation.expiresAtMs);
-      const recipient = parsePublicKey(operation.recipientPublicKeyHex);
-      const channel = inboxChannel(recipient);
-      const messageId = newMessageID();
-      const message = {
-        channel,
-        from_public_key: ownerPublicKey,
-        message_id: messageId,
-        issued_at_ms: operation.issuedAtMs,
-        expires_at_ms: operation.expiresAtMs,
-        protocol: APP_MESSAGE_PROTOCOL,
-        body: newDeliver(parseChannelContent(operation.contentJson))
-      } as const;
-      const envelope = await signAndSeal(message, privateKey);
-      return {
-        type: "channel.seal",
-        channel,
-        messageIdBase64Url: messageId,
-        envelopeJson: marshalEnvelope(envelope),
-        fromPublicKeyHex: ownerPublicKey,
-        expiresAtMs: operation.expiresAtMs
-      };
-    }
-    case "channel.seal-ack": {
-      assertChannelLifetime(operation.issuedAtMs, operation.expiresAtMs);
-      const recipient = parsePublicKey(operation.recipientPublicKeyHex);
-      const channel = inboxChannel(recipient);
-      const messageId = newMessageID();
-      const message = {
-        channel,
-        from_public_key: ownerPublicKey,
-        message_id: messageId,
-        issued_at_ms: operation.issuedAtMs,
-        expires_at_ms: operation.expiresAtMs,
-        protocol: APP_MESSAGE_PROTOCOL,
-        body: newAck(parseMessageID(operation.acknowledgedMessageIdBase64Url))
-      } as const;
-      const envelope = await signAndSeal(message, privateKey);
-      return {
-        type: "channel.seal",
-        channel,
-        messageIdBase64Url: messageId,
-        envelopeJson: marshalEnvelope(envelope),
-        fromPublicKeyHex: ownerPublicKey,
-        expiresAtMs: operation.expiresAtMs
-      };
-    }
-    case "channel.open": {
-      if (!Number.isSafeInteger(operation.nowMs)) throw new Error("Channel nowMs is invalid");
-      const opened = await decodePrivateChannel(operation.channel, new Uint8Array(operation.envelopeJson), privateKey, operation.nowMs);
-      if (opened.protocol !== APP_MESSAGE_PROTOCOL) throw new Error("Unsupported Channel protocol");
-      if (opened.body.type === "deliver") {
-        return {
-          type: "channel.open",
-          channel: opened.channel,
-          messageIdBase64Url: opened.message_id,
-          signedDigestHex: opened.digest,
-          fromPublicKeyHex: opened.from_public_key,
-          toPublicKeyHex: opened.to_public_key,
-          protocol: opened.protocol,
-          bodyType: "deliver",
-          contentJson: canonicalizeValue(opened.body.content),
-          issuedAtMs: opened.issued_at_ms,
-          expiresAtMs: opened.expires_at_ms
-        };
-      }
-      return {
-        type: "channel.open",
-        channel: opened.channel,
-        messageIdBase64Url: opened.message_id,
-        signedDigestHex: opened.digest,
-        fromPublicKeyHex: opened.from_public_key,
-        toPublicKeyHex: opened.to_public_key,
-        protocol: opened.protocol,
-        bodyType: "ack",
-        acknowledgedMessageIdBase64Url: opened.body.acknowledged_message_id,
-        issuedAtMs: opened.issued_at_ms,
-        expiresAtMs: opened.expires_at_ms
-      };
-    }
     default: throw new Error("Unsupported coordinator crypto operation");
   }
 }
@@ -4444,7 +5421,13 @@ async function cancelTaskRuntimesByKey(publicKeyHex: string): Promise<boolean> {
   let cancelled = false;
   const completions: Promise<void>[] = [];
   for (const runtime of coordinatorState.taskRuntimes.values()) {
-    if (resolveKeyScope(runtime)?.publicKeyHex !== publicKeyHex) continue;
+    // keyScope 可能是随当前 active owner 动态变化的函数；owner 切换后，
+    // 运行中的旧任务不能被误认为属于新 owner。以任务启动时捕获的 owner
+    // 为准，确保旧 Contacts/P2PKH 任务及时 abort 并等待 completion。
+    const taskOwnerPublicKeyHex = runtime.state === "running" && runtime.startedPublicKeyHex
+      ? runtime.startedPublicKeyHex
+      : resolveKeyScope(runtime)?.publicKeyHex;
+    if (taskOwnerPublicKeyHex !== publicKeyHex) continue;
     runtime.controller?.abort();
     if (runtime.timer) clearTimeout(runtime.timer);
     runtime.timer = undefined;
@@ -4523,7 +5506,7 @@ async function handleBackgroundSettingsUpdate(
 }
 
 // ============================================================
-// 10. Ordinary P2PKH provider registry and broadcast RPC
+// 10. Ordinary P2PKH data-source selection and transaction broadcast RPC
 // ============================================================
 
 function p2pkhProviderSettings(): P2pkhProviderSettings {
@@ -4920,11 +5903,11 @@ function getTaskSnapshots(): CoordinatorTaskSnapshot[] {
   return snapshots;
 }
 
-function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
+function publishTopicEvent(topic: CoordinatorTopic, event: any): CoordinatorTopicEvent {
   const normalized = {
     ...event,
     topic,
-    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : { assetDataRevision: ++assetDataRevision }),
+    ...(topic === "session.state" ? { sessionRevision: ++sessionRevision } : topic === "background.snapshot" ? { backgroundSnapshotRevision: ++backgroundSnapshotRevision } : topic === "storage.state" ? { storageRevision: event.storageRevision } : topic === "msfile.state" ? { msfileRevision: event.msfileRevision } : topic === "p2pkh.providers" ? { providerRevision: ++p2pkhProviderRevision } : topic === "sat.events" ? { satRevision: event.satRevision } : topic === "channel.events" ? { channelRevision: ++channelRevision } : topic === "contacts.presence" ? { presenceRevision: ++contactsPresenceRevision } : { assetDataRevision: ++assetDataRevision }),
     sessionEpoch: coordinatorState.sessionEpoch,
     ...(topic === "background.snapshot" ? { scheduleSettings: coordinatorState.scheduleSettings } : {})
   } as CoordinatorTopicEvent;
@@ -4933,6 +5916,7 @@ function publishTopicEvent(topic: CoordinatorTopic, event: any): void {
       sendToPort(connectedPort.port, normalized);
     }
   }
+  return normalized;
 }
 
 function sendToPort(port: MessagePort, message: unknown, transfer: ArrayBuffer[] = []): void {
@@ -5014,11 +5998,55 @@ void initializeCoordinator();
 // 14. Test Exports
 // ============================================================
 
+/**
+ * 测试 Coordinator 的私信协议适配边界：业务 JSON 必须先转成
+ * ChannelProtocol 的强类型 body，不能把旧 WebRTC envelope 原样下发。
+ */
+export function __testEncodeChannelPrivateBody(
+  protocol: string,
+  content: import("@keymaster/contracts").JSONValue
+): import("bsv8-channel-protocol/inbox").UnsignedPrivateMessage["body"] {
+  return privateBodyForPublish(protocol, content);
+}
+
+export function __testValidateChannelPrivateProtocol(
+  caller: Extract<CoordinatorChannelOperation, { type: "private-publish" }>['caller'],
+  protocol: string
+): void {
+  validatePrivateProtocolCaller(caller, privateProtocol(protocol));
+}
+
+/**
+ * 用 Coordinator 的真实私密消息签名构造验证 fixture；用于确认协议 TTL
+ * 在“构造 → 签名 → verifySignedPrivateMessage”链路中不会超过上限。
+ */
+export function __testSignChannelPrivateMessage(input: {
+  recipientPublicKeyHex: string;
+  protocol: string;
+  content: import("@keymaster/contracts").JSONValue;
+  messageId?: string;
+  nowMs: number;
+  privateKeyHex: string;
+}): import("bsv8-channel-protocol/inbox").SignedPrivateMessage {
+  const protocol = privateProtocol(input.protocol);
+  return signChannelPrivateMessage({
+    recipientPublicKeyHex: input.recipientPublicKeyHex,
+    protocol,
+    body: privateBodyForPublish(protocol, input.content),
+    messageId: input.messageId ?? newMessageID(),
+    nowMs: input.nowMs,
+    privateKey: parsePrivateKey(cryptoHexToBytes(input.privateKeyHex))
+  });
+}
+
 export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
   return buildSnapshot();
 }
 
 export function __testResetState(): void {
+  // releaseSatRuntime 会同步摘除旧 owner 的全局句柄，并把真实退订放入
+  // satRuntimeRelease；下一次测试创建 runtime 时会等待该 Promise。
+  void releaseSatRuntime("test");
   testPersistCoordinatorMetaFailure = false;
   for (const runtime of coordinatorState.taskRuntimes.values()) {
     runtime.controller?.abort();
@@ -5066,6 +6094,27 @@ export function __testResetState(): void {
   msfileRuntime = undefined;
   lastMsFileState = undefined;
   satIncomingHandlers.clear();
+  channelSeenMessages.clear();
+  channelHashRequests.clear();
+  channelWebrtcOffers.clear();
+  channelRevision = 0;
+  channelPendingPings.clear();
+  if (channelPendingPingCleanupTimer !== undefined) {
+    clearTimeout(channelPendingPingCleanupTimer);
+    channelPendingPingCleanupTimer = undefined;
+  }
+  channelAutoPongBySender.clear();
+  channelAutoPongWindowStartedAtMs = 0;
+  channelAutoPongCount = 0;
+  coordinatorContactsPresenceOff?.();
+  coordinatorContactsPresenceOff = undefined;
+  coordinatorContactsService?.dispose?.();
+  coordinatorContactsService = undefined;
+  contactsPresenceRevision = 0;
+  lastContactsPresenceState = undefined;
+  contactsPresencePublishTail = Promise.resolve();
+  channelPublicSubscribers.clear();
+  channelPrivateSubscribers.clear();
   testSatInboundResponseDispatcher = undefined;
   satRevision = 0;
   lastSatState = undefined;
@@ -5517,8 +6566,8 @@ export function __testSetSatInboundResponseDispatcher(dispatcher: ((operation: S
 }
 
 /** 测试 sat.events 是 SharedWorker 的单一广播源，而不是每个 Tab 自建 runtime。 */
-export function __testPublishSatState(event: import("@keymaster/contracts").CoordinatorSatEvent, health?: import("@keymaster/contracts").MessageProviderHealth): void {
-  emitSatState(event, health);
+export function __testPublishSatState(event: import("@keymaster/contracts").CoordinatorSatEvent): void {
+  emitSatState(event);
 }
 
 export async function __testReleaseExecutorLease(leaseId: string, clientId = "port-exec"): Promise<CoordinatorResponse> {
@@ -5537,7 +6586,7 @@ export async function __testExecutorSignPeerRecord(input: { leaseId: string; exp
 
 export async function __testReleaseMsfileRuntime(): Promise<void> {
   releaseMsfileRuntime("test");
-  releaseSatRuntime("test");
+  await releaseSatRuntime("test");
 }
 
 export async function __testDispatchStorageData(input: { grantId: string; actualPortId: string; requestClientId?: string; connectSessionId?: string }): Promise<CoordinatorResponse> {
@@ -5648,13 +6697,14 @@ export async function __testStorageSlotErrorCodes(): Promise<{ queueFull: string
 export function __testRegisterTask(input: {
   id: string;
   publicKeyHex: string;
+  keyScope?: { publicKeyHex: string } | (() => { publicKeyHex: string } | undefined);
   run(context: { signal: AbortSignal; assertSessionFresh(): void }): Promise<void>;
 }): void {
   coordinatorState.taskRuntimes.set(input.id, {
     id: input.id,
     pluginId: "test",
     state: "idle",
-    keyScope: { publicKeyHex: input.publicKeyHex },
+    keyScope: input.keyScope ?? { publicKeyHex: input.publicKeyHex },
     run: input.run
   });
 }
@@ -5837,11 +6887,4 @@ export function __testGetVaultStatus(): CoordinatorVaultStatus {
 /** 获取 active key。 */
 export function __testGetActivePublicKeyHex(): string | undefined {
   return coordinatorState.activePublicKeyHex;
-}
-
-/** Test-only invocation of the Worker-owned Channel seal/open boundary. */
-export async function __testChannelCrypto(operation: CoordinatorCryptoOperation): Promise<CoordinatorCryptoResult> {
-  const privateKeyBytes = coordinatorState.activePrivateKeyBytes;
-  if (coordinatorState.vaultStatus !== "unlocked" || !privateKeyBytes) throw new Error("Active Channel key is unavailable");
-  return executeCryptoOperation(operation, privateKeyBytes);
 }

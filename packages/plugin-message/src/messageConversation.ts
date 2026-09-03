@@ -6,23 +6,23 @@
 //   - 这里只放纯数据逻辑，不放 React 状态；
 //   - peer 身份只认 publicKeyHex。
 
-import type { AppMsgMessage } from "@keymaster/contracts";
+import type { MessageRecord } from "@keymaster/contracts";
 
 export interface ConversationSummary {
   peerPublicKeyHex: string;
-  latestMessage: AppMsgMessage;
+  latestMessage: MessageRecord;
   latestInsertedAtMs: number;
   messageCount: number;
 }
 
-export function getConversationPeerPublicKeyHex(message: AppMsgMessage, ownerPublicKeyHex: string): string {
+export function getConversationPeerPublicKeyHex(message: MessageRecord, ownerPublicKeyHex: string): string {
   return message.senderPublicKeyHex === ownerPublicKeyHex
     ? message.recipientPublicKeyHex
     : message.senderPublicKeyHex;
 }
 
 export function buildConversationSummaries(
-  messages: readonly AppMsgMessage[],
+  messages: readonly MessageRecord[],
   ownerPublicKeyHex: string
 ): ConversationSummary[] {
   const byPeer = new Map<string, ConversationSummary>();
@@ -48,10 +48,10 @@ export function buildConversationSummaries(
 }
 
 export function listConversationMessages(
-  messages: readonly AppMsgMessage[],
+  messages: readonly MessageRecord[],
   ownerPublicKeyHex: string,
   peerPublicKeyHex: string
-): AppMsgMessage[] {
+): MessageRecord[] {
   return messages
     .filter((message) => getConversationPeerPublicKeyHex(message, ownerPublicKeyHex) === peerPublicKeyHex)
     .slice()

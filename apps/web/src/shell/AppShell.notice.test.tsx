@@ -9,18 +9,30 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createPluginHost, PluginHostProvider } from "@keymaster/runtime";
+import {
+  createMemoryWebrtcConfigStore,
+  createWebrtcService,
+  type WebrtcEnvironment
+} from "@keymaster/plugin-webrtc";
 import type {
   ActiveKeyState,
+  ChannelRuntime,
   KeyspaceService,
   NoticeRecord,
+  NoticeRegistry,
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";
 import { AppShell } from "./AppShell.js";
+import { newSessionID } from "bsv8-channel-protocol";
 
 const OWNER = "02".padEnd(66, "a");
+
+const OTHER = "02".padEnd(66, "c");
+
+const TRANSFER_SENDER = "03".padEnd(66, "b");
 
 beforeEach(() => {
   if (typeof window.matchMedia === "function") return;
@@ -99,6 +111,76 @@ function createHost() {
     component: () => <div data-testid="message-detail-alias-route">Message alias route</div>
   });
   return host;
+}
+
+function makeWebrtcNoticeFixture(noticeRegistry: NoticeRegistry) {
+  let ownerPublicKeyHex = OWNER;
+  type PrivateMessageHandler = Parameters<NonNullable<ChannelRuntime["subscribePrivate"]>>[0];
+  type ActiveKeyChangedHandler = Parameters<KeyspaceService["onActiveKeyChanged"]>[0];
+  let privateHandler: PrivateMessageHandler | undefined;
+  const ownerChangedHandlers = new Set<ActiveKeyChangedHandler>();
+  const hashRequests: Array<{ hash: string; locator: "webrtc-sdp" }> = [];
+  const channel: ChannelRuntime = {
+    isReady: () => true,
+    publish: async () => ({ messageId: "public-message" }),
+    publishHashRequest: async (input) => {
+      hashRequests.push(input);
+      return { messageId: "hash-request-message" };
+    },
+    publishPrivate: async () => ({ messageId: "private-message" }),
+    subscriptionSet: async (channels) => ({ channels }),
+    subscribe: () => () => undefined,
+    subscribePrivate: (handler) => {
+      privateHandler = handler;
+      return () => { privateHandler = undefined; };
+    }
+  };
+  const keyspace = {
+    active: () => ({ activePublicKeyHex: ownerPublicKeyHex }),
+    onActiveKeyChanged: (handler: ActiveKeyChangedHandler) => {
+      ownerChangedHandlers.add(handler);
+      return () => ownerChangedHandlers.delete(handler);
+    }
+  } as unknown as KeyspaceService;
+  const env: WebrtcEnvironment = {
+    createPeerConnection: () => { throw new Error("peer_not_expected"); },
+    getUserMedia: async () => { throw new Error("media_not_expected"); },
+    now: () => Date.now(),
+    delay: async () => undefined
+  };
+  const service = createWebrtcService({
+    channel,
+    keyspace,
+    configStore: createMemoryWebrtcConfigStore(),
+    noticeRegistry,
+    env,
+    isTransferSenderAllowed: () => true
+  });
+  return {
+    service,
+    hashRequests,
+    setOwner(nextOwnerPublicKeyHex: string) {
+      ownerPublicKeyHex = nextOwnerPublicKeyHex;
+      for (const handler of ownerChangedHandlers) {
+        handler({ activePublicKeyHex: nextOwnerPublicKeyHex } as ActiveKeyState);
+      }
+    },
+    deliverForOwner(recipientOwnerPublicKeyHex: string, sessionId: string, hash: string) {
+      privateHandler?.({
+        channel: `bsv8.inbox.${recipientOwnerPublicKeyHex}`,
+        publisherPublicKeyHex: TRANSFER_SENDER,
+        messageId: "incoming-private-message",
+        protocol: "bsv8.message.v1",
+        content: {
+          type: "keymaster.webrtc.transfer.request",
+          session_id: sessionId,
+          hash,
+          kind: "file",
+          byte_length: 1
+        }
+      });
+    }
+  };
 }
 
 function makeNotice(id: string, routeTo?: string): NoticeRecord {
@@ -189,6 +271,40 @@ describe("AppShell notice rail", () => {
     await waitFor(() => {
       expect(window.location.pathname).toBe("/message/peer");
     });
+  });
+
+  it("旧 WebRTC notice 动作完成后不关闭新 owner 的同 session 通知，并可继续接受", async () => {
+    const host = createHost();
+    const fixture = makeWebrtcNoticeFixture(host.notice);
+    const sessionId = newSessionID();
+    const noticeId = `webrtc-transfer-${sessionId}`;
+
+    render(
+      <PluginHostProvider host={host}>
+        <AppShell />
+      </PluginHostProvider>
+    );
+
+    fixture.deliverForOwner(OWNER, sessionId, "a".repeat(64));
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Reject transfer" })).toBeTruthy();
+    });
+
+    // 旧按钮已进入 Shell 的异步执行流程；在 Shell 继续执行自动关闭逻辑前切 owner，
+    // 并让新 owner 生成相同 notice id 的请求。
+    fireEvent.click(screen.getByRole("button", { name: "Reject transfer" }));
+    fixture.setOwner(OTHER);
+    fixture.deliverForOwner(OTHER, sessionId, "b".repeat(64));
+
+    await waitFor(() => {
+      expect(host.notice.list().some((notice) => notice.id === noticeId)).toBe(true);
+      expect(screen.getByRole("button", { name: "Accept transfer" })).toBeTruthy();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Accept transfer" }));
+    await waitFor(() => expect(fixture.hashRequests).toHaveLength(1));
+    await waitFor(() => expect(host.notice.list().some((notice) => notice.id === noticeId)).toBe(false));
+    fixture.service.dispose();
   });
 
   it("shows the same notice under the /messages route", async () => {

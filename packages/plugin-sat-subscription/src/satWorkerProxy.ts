@@ -1,30 +1,19 @@
-// 页面侧 SatSubscription facade。
+// 页面侧 SatSubscription / Channel facade。
 //
-// 本文件不打开 Sat DB、不创建网络连接，也不持有 Channel 私钥。所有调用
-// 通过 SharedWorker Coordinator 的 sat.operation 语义化 RPC 完成。
+// 页面不打开 Sat DB、不创建网络连接、不接触私钥或 SSP wire。所有动作都
+// 通过 SharedWorker 的 typed RPC 完成；Channel runtime 是唯一业务消息入口。
 
 import type {
-  CoordinatorSatEvent,
+  ChannelMessageReceivedEventData,
+  ChannelPrivateMessageEvent,
+  ChannelRuntime,
+  ChannelSubscriptionSetResult,
+  CoordinatorChannelOperation,
   CoordinatorSatOperation,
-  MessageProvider,
-  MessageProviderHandle,
-  MessageProviderHealth,
-  MessageProviderOperations,
-  ProviderDeliveryAckClaim,
-  ProviderGetInput,
-  ProviderListInput,
-  ProviderListResult,
-  ProviderOnlineInput,
-  ProviderOnlineResult,
-  ProviderSealedMessageRecord,
-  ProviderSendInput,
-  ProviderSendResult,
-  ProviderSigner,
-  SatActionResult,
   SatIncomingPublish,
+  SatIncomingPublishHandler,
   SatOwnerSupplierSettingsV1,
   SatSubscriptionAdminService,
-  SatSubscriptionService,
   SatSubscriptionSettingsSnapshot,
   SatSubscriptionSpiService,
   SatSpiInformation,
@@ -32,16 +21,16 @@ import type {
   SatTopUpPreview,
   SatTopUpResult,
   SatCollectResult,
+  SessionCoordinatorClient
 } from "@keymaster/contracts";
-import type { SessionCoordinatorClient } from "@keymaster/contracts";
-
-function unavailable(message: string): Error {
-  return new Error(message);
-}
 
 function unwrap<T>(result: Awaited<ReturnType<SessionCoordinatorClient["satOperation"]>>, operation: string): T {
   if (result.status !== "ok") {
-    const message = "message" in result ? result.message : result.status === "blocked" ? (typeof result.reason === "string" ? result.reason : result.reason.fallback) : result.status;
+    const message = "message" in result
+      ? result.message
+      : result.status === "blocked"
+        ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
+        : result.status;
     const error = new Error(`${operation} failed: ${message}`) as Error & { code?: string };
     if ("code" in result && typeof result.code === "string") error.code = result.code;
     throw error;
@@ -49,175 +38,184 @@ function unwrap<T>(result: Awaited<ReturnType<SessionCoordinatorClient["satOpera
   return result.value as T;
 }
 
-function copyRecord(record: ProviderSealedMessageRecord): ProviderSealedMessageRecord {
-  return {
-    ...record,
-    envelope: {
-      envelopeBytes: record.envelope.envelopeBytes.slice(),
-      signatureBytes: record.envelope.signatureBytes.slice(),
-    },
-  };
+function unwrapChannel<T>(result: Awaited<ReturnType<SessionCoordinatorClient["channelOperation"]>>, operation: string): T {
+  if (result.status !== "ok") {
+    const message = "message" in result
+      ? result.message
+      : result.status === "blocked"
+        ? (typeof result.reason === "string" ? result.reason : result.reason.fallback)
+        : result.status;
+    const error = new Error(`${operation} failed: ${message}`) as Error & { code?: string };
+    if ("code" in result && typeof result.code === "string") error.code = result.code;
+    throw error;
+  }
+  return result.value as T;
 }
 
-/** ACK RPC 只携带 Worker claim 引用，不把页面可篡改的消息正文/路由送回 Worker。 */
-function copyAckClaim(record: ProviderSealedMessageRecord): ProviderDeliveryAckClaim {
-  return {
-    deliveryId: typeof record.deliveryId === "string" ? record.deliveryId : "",
-    supplierId: typeof record.ingressSupplierId === "string" ? record.ingressSupplierId : "",
-    ackClaimToken: typeof record.ackClaimToken === "string" ? record.ackClaimToken : "",
-  };
-}
-
-/** SharedWorker 事件总线上 Sat message 的订阅辅助。 */
-export function subscribeSatMessages(
-  coordinator: SessionCoordinatorClient,
-  handler: (record: ProviderSealedMessageRecord) => void,
-): () => void {
-  return coordinator.subscribeTopic("sat.events", (raw: { event?: CoordinatorSatEvent }) => {
-    const event = raw?.event;
-    if (!event || event.type !== "message") return;
-    try { handler(copyRecord(event.record)); } catch { /* 页面 subscriber 不得反向打断 Coordinator */ }
-  });
-}
-
-/** SharedWorker 事件总线上 Sat inbound Publish 的订阅辅助。 */
+/** SharedWorker 事件总线中的原始 SSP Publish；只给 Sat 设置页诊断使用。 */
 export function subscribeSatIncoming(
   coordinator: SessionCoordinatorClient,
-  handler: (event: SatIncomingPublish) => void,
+  handler: SatIncomingPublishHandler
 ): () => void {
-  return coordinator.subscribeTopic("sat.events", (raw: { event?: CoordinatorSatEvent }) => {
+  return coordinator.subscribeTopic("sat.events", (raw: { event?: { type?: string; event?: SatIncomingPublish } }) => {
     const event = raw?.event;
-    if (!event || event.type !== "incoming") return;
-    try { handler({ ...event.event, contentJson: event.event.contentJson.slice() }); } catch { /* ignore */ }
+    if (!event || event.type !== "incoming" || !event.event) return;
+    const incoming: SatIncomingPublish = event.event;
+    void Promise.resolve()
+      .then(() => handler({
+        deliveryId: incoming.deliveryId,
+        ingressSupplierId: incoming.ingressSupplierId,
+        channel: incoming.channel,
+        requestIdHex: incoming.requestIdHex,
+        contentJson: incoming.contentJson.slice(),
+        chargedAmount: incoming.chargedAmount,
+        receivedAtMs: incoming.receivedAtMs
+      }))
+      .catch(() => undefined); // 页面诊断消费者不能打断 Coordinator。
   });
 }
 
-class SatWorkerProviderHandle implements MessageProviderOperations {
-  private currentState: "bound" | "closed" = "bound";
-  private readonly off: Array<() => void> = [];
-
-  constructor(private readonly coordinator: SessionCoordinatorClient) {}
-
-  state(): "idle" | "connecting" | "bound" | "closed" { return this.currentState; }
-
-  close(): void {
-    if (this.currentState === "closed") return;
-    this.currentState = "closed";
-    for (const unsubscribe of this.off.splice(0)) {
-      try { unsubscribe(); } catch { /* ignore */ }
-    }
-  }
-
-  private assertOpen(): void {
-    if (this.currentState !== "bound") throw unavailable("SatSubscription provider handle is closed");
-  }
-
-  async sendMessage(input: ProviderSendInput): Promise<ProviderSendResult> {
-    this.assertOpen();
-    return unwrap<ProviderSendResult>(await this.coordinator.satOperation({ type: "provider.send", input }), "Sat message send");
-  }
-
-  async listMessages(_input: ProviderListInput): Promise<ProviderListResult> {
-    this.assertOpen();
-    throw unavailable("SatSubscription provider has no remote history");
-  }
-
-  async getMessage(_input: ProviderGetInput): Promise<ProviderSealedMessageRecord | null> {
-    this.assertOpen();
-    throw unavailable("SatSubscription provider has no remote history");
-  }
-
-  subscribeMessages(handler: (record: ProviderSealedMessageRecord) => void): () => void {
-    this.assertOpen();
-    const off = subscribeSatMessages(this.coordinator, handler);
-    this.off.push(off);
-    return () => { off(); const index = this.off.indexOf(off); if (index >= 0) this.off.splice(index, 1); };
-  }
-
-  async checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult> {
-    this.assertOpen();
-    return Object.fromEntries(input.publicKeyHexes.map((key) => [key, "unknown"]));
-  }
-
-  async ackMessage(record: ProviderSealedMessageRecord): Promise<void> {
-    this.assertOpen();
-    unwrap<unknown>(await this.coordinator.satOperation({ type: "provider.ack", claim: copyAckClaim(record) }), "Sat message ACK");
-  }
+function currentOwner(coordinator: SessionCoordinatorClient): string {
+  const owner = coordinator.getBootstrapSnapshot().activePublicKeyHex;
+  if (!owner) throw new Error("No unlocked active owner");
+  return owner;
 }
 
-/** 页面 MessageProvider；真正的 SatSubscription handle 由 Worker runtime 持有。 */
-export class SatSubscriptionWorkerProxyProvider implements MessageProvider {
-  readonly id = "sat-subscription";
-  readonly displayName = "SatSubscription";
-  readonly features = { remoteHistory: false, onlineQuery: false, deliveryAck: true } as const;
-  private healthSnapshot: MessageProviderHealth = { isHealthy: false, lastError: null, lastConnectedAtMs: 0 };
-  private offHealth?: () => void;
-
-  constructor(private readonly coordinator: SessionCoordinatorClient) {
-    this.subscribeHealth();
-  }
-
-  private subscribeHealth(): void {
-    if (this.offHealth) return;
-    this.offHealth = this.coordinator.subscribeTopic("sat.events", (raw: { health?: MessageProviderHealth }) => {
-      if (raw?.health) this.healthSnapshot = { ...raw.health };
-    });
-  }
-
-  async bind(input: { signer: ProviderSigner }): Promise<MessageProviderHandle> {
-    if (!input?.signer?.publicKeyHex) throw unavailable("SatSubscription owner signer is missing");
-    this.subscribeHealth();
-    const health = unwrap<MessageProviderHealth>(await this.coordinator.satOperation({ type: "ensure" }), "SatSubscription runtime");
-    this.healthSnapshot = health;
-    return new SatWorkerProviderHandle(this.coordinator);
-  }
-
-  async shutdown(): Promise<void> {
-    // SharedWorker runtime不能随某一个 Tab 的 AppMsg handle 关闭；锁定、切 key
-    // 时由 Coordinator 统一释放。这里仅清理页面侧健康缓存。
-    this.offHealth?.();
-    this.offHealth = undefined;
-    this.healthSnapshot = { isHealthy: false, lastError: null, lastConnectedAtMs: 0 };
-  }
-
-  health(): MessageProviderHealth { return { ...this.healthSnapshot }; }
-
-  async checkOnline(input: ProviderOnlineInput): Promise<ProviderOnlineResult> {
-    return Object.fromEntries(input.publicKeyHexes.map((key) => [key, "unknown"]));
-  }
-}
-
-function call<T>(coordinator: SessionCoordinatorClient, operation: CoordinatorSatOperation, label: string): Promise<T> {
+function callSat<T>(coordinator: SessionCoordinatorClient, operation: CoordinatorSatOperation, label: string): Promise<T> {
   return coordinator.satOperation(operation).then((result) => unwrap<T>(result, label));
 }
 
-/** 页面 trusted admin facade；仍然只传业务参数。 */
-export function createSatWorkerAdminService(coordinator: SessionCoordinatorClient): SatSubscriptionAdminService {
-  const service: SatSubscriptionService = {
-    publish: (input) => call(coordinator, { type: "service.publish", input }, "Sat Publish"),
-    setSubscription: (input) => call<SatActionResult>(coordinator, { type: "service.setSubscription", input }, "Sat subscription update"),
-    subscribe: (input) => call<SatActionResult>(coordinator, { type: "service.subscribe", input }, "Sat Subscribe"),
-    unsubscribe: (input) => call<SatActionResult>(coordinator, { type: "service.unsubscribe", input }, "Sat Unsubscribe"),
-    refreshSubscriptions: (input) => call(coordinator, { type: "service.refreshSubscriptions", input }, "Sat subscription refresh"),
-    subscribeEvents: (handler) => subscribeSatIncoming(coordinator, handler),
+function callChannel<T>(coordinator: SessionCoordinatorClient, operation: CoordinatorChannelOperation, label: string): Promise<T> {
+  return coordinator.channelOperation(operation).then((result) => unwrapChannel<T>(result, label));
+}
+
+/** 受信任插件使用的 Channel runtime。caller id 在 Coordinator 内生成。 */
+export function createSatWorkerChannelRuntime(
+  coordinator: SessionCoordinatorClient,
+  caller: { kind: "plugin"; pluginId: string } | { kind: "system"; systemId: string }
+): ChannelRuntime {
+  const subscribedChannels = new Set<string>();
+  let subscribedOwner: string | undefined;
+  let subscribedSessionEpoch: string | undefined;
+  const ownerForRequest = (): string => {
+    const owner = currentOwner(coordinator);
+    if (subscribedOwner !== owner) {
+      subscribedChannels.clear();
+      subscribedOwner = owner;
+    }
+    subscribedSessionEpoch = coordinator.getSessionEpoch();
+    return owner;
   };
+  const listen = <T>(handler: (value: T) => void, select: (event: { publicMessage?: ChannelMessageReceivedEventData; privateMessage?: ChannelPrivateMessageEvent }) => T | null): (() => void) =>
+    (() => {
+      const offChannel = coordinator.subscribeTopic("channel.events", (raw: { sessionEpoch?: unknown; publicMessage?: ChannelMessageReceivedEventData; privateMessage?: ChannelPrivateMessageEvent }) => {
+        // channel.events 是全局广播；只有当前 runtime 登记的 session epoch
+        // 才能进入插件，不能依赖 session.state 事件的先后顺序兜底。
+        if (raw.sessionEpoch !== subscribedSessionEpoch) return;
+        const channel = raw.publicMessage?.channel ?? raw.privateMessage?.channel;
+        if (!channel || !subscribedChannels.has(channel)) return;
+        const value = select(raw);
+        if (value) {
+          try { handler(value); } catch { /* 单个插件 handler 失败不影响总线。 */ }
+        }
+      });
+      const offSession = coordinator.subscribeTopic("session.state", (raw: { sessionEpoch?: unknown; activePublicKeyHex?: unknown }) => {
+        const owner = typeof raw.activePublicKeyHex === "string" ? raw.activePublicKeyHex : undefined;
+        const epoch = typeof raw.sessionEpoch === "string" ? raw.sessionEpoch : undefined;
+        if (owner !== subscribedOwner || epoch !== subscribedSessionEpoch) {
+          subscribedChannels.clear();
+          subscribedOwner = owner;
+          subscribedSessionEpoch = epoch;
+        }
+      });
+      return () => { offChannel(); offSession(); };
+    })();
+
   return {
-    ...service,
-    getSettingsSnapshot: () => call<SatSubscriptionSettingsSnapshot>(coordinator, { type: "admin.getSettings" }, "Sat settings"),
-    upsertSupplier: (config: SatSupplierConfigV1) => call<void>(coordinator, { type: "admin.upsertSupplier", config }, "Sat supplier save"),
-    deleteSupplier: (supplierId: string) => call<void>(coordinator, { type: "admin.deleteSupplier", supplierId }, "Sat supplier delete"),
-    setOwnerSettings: (settings: SatOwnerSupplierSettingsV1) => call<void>(coordinator, { type: "admin.setOwnerSettings", settings }, "Sat owner settings"),
+    isReady: () => Boolean(coordinator.getIsConnected() && coordinator.getBootstrapSnapshot().activePublicKeyHex),
+    publish: (input) => {
+      const owner = ownerForRequest();
+      return callChannel(coordinator, {
+        type: "publish",
+        ownerPublicKeyHex: owner,
+        caller,
+        channel: input.channel,
+        content: input.content
+      }, "Channel publish");
+    },
+    publishHashRequest: (input) => {
+      const owner = ownerForRequest();
+      return callChannel(coordinator, {
+        type: "hash-request-publish",
+        ownerPublicKeyHex: owner,
+        caller,
+        hash: input.hash,
+        locator: input.locator
+      }, "Channel Hash request publish");
+    },
+    publishPrivate: (input) => {
+      const owner = ownerForRequest();
+      return callChannel(coordinator, {
+        type: "private-publish",
+        ownerPublicKeyHex: owner,
+        caller,
+        recipientPublicKeyHex: input.recipientPublicKeyHex,
+        protocol: input.protocol,
+        content: input.content
+      }, "Private Channel publish");
+    },
+    subscriptionSet: async (channels): Promise<ChannelSubscriptionSetResult> => {
+      const owner = ownerForRequest();
+      const requestSessionEpoch = coordinator.getSessionEpoch();
+      // 只有 Coordinator 返回的 result.channels 才是“已接受的逻辑订阅
+      // 集合”。请求尚未完成前不能先放宽本地过滤，否则 Coordinator 拒绝
+      // owner inbox 等保留频道时，插件仍会从全局 channel.events 收到私信。
+      const result = await callChannel<ChannelSubscriptionSetResult>(coordinator, {
+        type: "subscription-set",
+        ownerPublicKeyHex: owner,
+        caller,
+        channels: [...channels]
+      }, "Channel subscription set");
+      const currentSessionEpoch = coordinator.getSessionEpoch();
+      const currentOwner = coordinator.getBootstrapSnapshot().activePublicKeyHex;
+      if (currentSessionEpoch !== requestSessionEpoch || currentOwner !== owner) {
+        // 异步 RPC 返回时 owner 可能已经锁屏/切换。旧 owner 的成功结果
+        // 不能写入新 owner 的过滤集合，否则全局 channel.events 会形成
+        // 跨 owner 的私信泄漏窗口。
+        subscribedChannels.clear();
+        subscribedOwner = currentOwner;
+        subscribedSessionEpoch = currentSessionEpoch;
+        throw new Error("Channel subscription result became stale");
+      }
+      subscribedChannels.clear();
+      for (const channel of result.channels) subscribedChannels.add(channel);
+      subscribedSessionEpoch = currentSessionEpoch;
+      return result;
+    },
+    subscribe: (handler) => listen(handler, (event) => event.publicMessage ?? null),
+    subscribePrivate: (handler) => listen(handler, (event) => event.privateMessage ?? null)
+  };
+}
+
+/** 页面 trusted Sat 管理 facade；仍然只传语义化参数。 */
+export function createSatWorkerAdminService(coordinator: SessionCoordinatorClient): SatSubscriptionAdminService {
+  return {
+    getSettingsSnapshot: () => callSat<SatSubscriptionSettingsSnapshot>(coordinator, { type: "admin.getSettings" }, "Sat settings"),
+    upsertSupplier: (config: SatSupplierConfigV1) => callSat<void>(coordinator, { type: "admin.upsertSupplier", config }, "Sat supplier save"),
+    deleteSupplier: (supplierId: string) => callSat<void>(coordinator, { type: "admin.deleteSupplier", supplierId }, "Sat supplier delete"),
+    setOwnerSettings: (settings: SatOwnerSupplierSettingsV1) => callSat<void>(coordinator, { type: "admin.setOwnerSettings", settings }, "Sat owner settings"),
+    refreshSubscriptions: (input) => callSat(coordinator, { type: "admin.refreshSubscriptions", input }, "Sat subscription refresh")
   };
 }
 
 /** 页面 SPI facade；BigInt/Uint8Array 由 structured clone 原样传输。 */
 export function createSatWorkerSpiService(coordinator: SessionCoordinatorClient): SatSubscriptionSpiService {
   return {
-    getInformation: (input) => call<SatSpiInformation>(coordinator, { type: "spi.getInformation", input }, "SPI Information"),
-    prepareTopUp: (input) => call<SatTopUpPreview>(coordinator, { type: "spi.prepareTopUp", input }, "SPI top-up preview"),
-    submitTopUp: (preview) => call<SatTopUpResult>(coordinator, { type: "spi.submitTopUp", preview }, "SPI top-up submit"),
-    collectNew: (input) => call<SatCollectResult>(coordinator, { type: "spi.collectNew", input }, "SPI Collect"),
-    retryCollect: (input) => call<SatCollectResult>(coordinator, { type: "spi.retryCollect", input }, "SPI Collect retry"),
-    collect: (input) => call<SatCollectResult>(coordinator, { type: "spi.collect", input }, "SPI Collect"),
+    getInformation: (input) => callSat<SatSpiInformation>(coordinator, { type: "spi.getInformation", input }, "SPI Information"),
+    prepareTopUp: (input) => callSat<SatTopUpPreview>(coordinator, { type: "spi.prepareTopUp", input }, "SPI top-up preview"),
+    submitTopUp: (preview) => callSat<SatTopUpResult>(coordinator, { type: "spi.submitTopUp", preview }, "SPI top-up submit"),
+    collectNew: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.collectNew", input }, "SPI Collect"),
+    retryCollect: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.retryCollect", input }, "SPI Collect retry"),
+    collect: (input) => callSat<SatCollectResult>(coordinator, { type: "spi.collect", input }, "SPI Collect")
   };
 }

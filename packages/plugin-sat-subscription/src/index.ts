@@ -23,3 +23,9 @@ export {
   type SatP2pkhService,
   type SatSpiServiceConfig
 } from "./satSpi.js";
+export {
+  createSatWorkerAdminService,
+  createSatWorkerChannelRuntime,
+  createSatWorkerSpiService,
+  subscribeSatIncoming
+} from "./satWorkerProxy.js";

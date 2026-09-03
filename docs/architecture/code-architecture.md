@@ -12,7 +12,7 @@
 设计取舍：
 
 - 不展开具体页面和 `src/` 文件级实现，因为那是易变表象。
-- 不把 `plugin-p2pkh`、`plugin-protocol`、`plugin-appmsg` 的专题细节塞进总览页，避免图失焦。
+- 不把 `plugin-p2pkh`、`plugin-protocol`、`plugin-message` 的专题细节塞进总览页，避免图失焦。
 - 只保留平台级稳定骨架，方便以后继续补专题文档。
 
 `docu.md` 可以直接打开本文件，并渲染下面的 PlantUML 图。
@@ -66,6 +66,7 @@ package "plugin 基础设施层" {
   [plugin-background]
   [plugin-woc]
   [plugin-protocol]
+  [plugin-sat-subscription]
 }
 
 package "plugin 平台 / 业务层" {
@@ -73,7 +74,8 @@ package "plugin 平台 / 业务层" {
   [plugin-assets]
   [plugin-transfer]
   [plugin-p2pkh]
-  [plugin-appmsg]
+  [plugin-message]
+  [plugin-contacts]
   [plugin-poker]
 }
 
@@ -106,7 +108,9 @@ package "plugin 平台 / 业务层" {
 [plugin-assets] --> [PluginHost]
 [plugin-transfer] --> [PluginHost]
 [plugin-p2pkh] --> [PluginHost]
-[plugin-appmsg] --> [PluginHost]
+[plugin-sat-subscription] --> [PluginHost] : Coordinator Channel 物理传输
+[plugin-message] --> [PluginHost]
+[plugin-contacts] --> [PluginHost]
 [plugin-poker] --> [PluginHost]
 
 note bottom
@@ -140,7 +144,7 @@ class PluginManifest {
   +dependencies?: PluginDependency[]
   +meta?: PluginMeta
   +keyScopedStorages?: PluginKeyStorageDeclaration[]
-  +appMessageEndpoint?: { endpointId }
+  +capability declarations
   +setup(ctx): void | teardown
 }
 
@@ -366,12 +370,13 @@ React 组件不再负责推断或兜底启动依赖。
 
 - `plugin-protocol` 的 request / confirm / result 流程
 - `plugin-p2pkh` 的转账预览与协议 spend 细节
-- `plugin-appmsg` 的 endpoint / owner / provider 迁移模型
+- `plugin-message` 的本地消息历史与固定私密协议
+- `plugin-contacts` 的 Ping/Pong 在线状态资源
 
 普通 BSV/P2PKH 的确认数据链路已统一为：
 
 ```text
-Coordinator provider registry
+Coordinator P2PKH data-source selection
   -> p2pkh.transactions-sync（按网络过滤、可断点续传）
   -> p2pkh_transactions（唯一确认事实）
   -> p2pkh_owned_outpoints（可重建查询投影）

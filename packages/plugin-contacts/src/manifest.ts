@@ -8,16 +8,22 @@ import type {
   BusinessFeatureRegistry,
   BreadcrumbProvider,
   BreadcrumbRegistry,
+  ContactPresence,
+  ContactPresenceMap,
   ContactsService,
   I18nPluginResources,
   KeyspaceService,
   MessageBus,
+  SessionCoordinatorClient,
   PluginManifest,
   ResourceRegistry,
   RouteRegistry,
   Contact
 } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import {
+  KEYSPACE_SERVICE_CAPABILITY,
+  SESSION_COORDINATOR_CLIENT_CAPABILITY,
+} from "@keymaster/contracts";
 import { ContactDetailPage } from "./ContactDetailPage.js";
 import { ContactsEditor } from "./ContactsEditor.js";
 import { ContactPicker } from "./ContactPicker.js";
@@ -52,6 +58,9 @@ export const contactsResources: I18nPluginResources = {
       "contacts.page.col.name": "Name",
       "contacts.page.col.publicKeyHex": "Public key",
       "contacts.page.col.tags": "Tags",
+      "contacts.page.col.presence": "Status",
+      "contacts.presence.online": "Online",
+      "contacts.presence.offline": "Offline",
       "contacts.page.col.actions": "Actions",
       "contacts.page.action.edit": "Edit",
       "contacts.page.action.delete": "Delete",
@@ -94,6 +103,8 @@ export const contactsResources: I18nPluginResources = {
       "contacts.empty.recent": "No contacts yet",
       "contacts.picker.label": "Contacts",
       "contacts.picker.placeholder": "Pick a contact"
+      ,"contacts.task.presence": "Contact presence probe"
+      ,"contacts.task.presence.description": "Update contact online state with the fixed Ping/Pong protocol."
     },
     "zh-CN": {
       "contacts.route.list": "联系人",
@@ -115,6 +126,9 @@ export const contactsResources: I18nPluginResources = {
       "contacts.page.col.name": "名称",
       "contacts.page.col.publicKeyHex": "公钥",
       "contacts.page.col.tags": "标签",
+      "contacts.page.col.presence": "状态",
+      "contacts.presence.online": "在线",
+      "contacts.presence.offline": "失联",
       "contacts.page.col.actions": "操作",
       "contacts.page.action.edit": "编辑",
       "contacts.page.action.delete": "删除",
@@ -157,6 +171,8 @@ export const contactsResources: I18nPluginResources = {
       "contacts.empty.recent": "还没有联系人",
       "contacts.picker.label": "联系人",
       "contacts.picker.placeholder": "选择联系人"
+      ,"contacts.task.presence": "联系人在线探测"
+      ,"contacts.task.presence.description": "使用固定 Ping/Pong 协议更新联系人在线状态。"
     }
   }
 };
@@ -179,6 +195,7 @@ export const contactsPlugin: PluginManifest = {
   ],
   dependencies: [
     { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
+    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "读取 Coordinator 唯一在线状态快照" },
     { capability: "route.registry", reason: "注册联系人页面" },
     { capability: "business.registry", reason: "接入首页业务导航" }
     ,{ capability: "contacts.public-key-action.registry", reason: "显示联系人公钥操作" }
@@ -186,6 +203,8 @@ export const contactsPlugin: PluginManifest = {
   setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
+    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    // 页面侧只保留联系人 CRUD；Ping/Pong 与唯一后台任务均归 Coordinator Worker。
     const service = createContactsService({ keyspace, messageBus });
     ctx.provide<ContactsService>(CONTACTS_CAPABILITY, service);
     const resources = ctx.get<ResourceRegistry>("resource.registry");
@@ -210,6 +229,44 @@ export const contactsPlugin: PluginManifest = {
         const offChange = service.onChange(invalidate);
         const offActive = keyspace.onActiveKeyChanged(invalidate);
         return () => { offChange(); offActive(); };
+      },
+      invalidation: "immediate"
+    });
+    resources.register<ContactPresenceMap, readonly string[]>({
+      id: "contacts.presence",
+      scope: "active-key",
+      key: (_args, context) => ["contacts.presence", context.activePublicKeyHex ?? "none"],
+      load: async (_args, context) => {
+        if (!context.activePublicKeyHex) return {};
+        const contacts = await service.listContacts();
+        const snapshotResult = await coordinator.contactsPresenceSnapshot();
+        const snapshot = snapshotResult.status === "ok" ? snapshotResult.value : {};
+        const presence: Record<string, ContactPresence> = {};
+        for (const contact of contacts) {
+          const publicKeyHex = contact.publicKeyHex.trim().toLowerCase();
+          presence[publicKeyHex] = snapshot[publicKeyHex] ?? { publicKeyHex, state: "offline" };
+        }
+        return presence;
+      },
+      subscribe: (_args, _context, invalidate) => {
+        const offChange = service.onChange(invalidate);
+        const offActive = keyspace.onActiveKeyChanged(invalidate);
+        const offCoordinatorPresence = coordinator.subscribeTopic("contacts.presence", invalidate);
+        const offSession = coordinator.subscribeTopic("session.state", invalidate);
+        return () => { offChange(); offActive(); offCoordinatorPresence(); offSession(); };
+      },
+      equals: (previous, next) => {
+        if (previous === next) return true;
+        const previousKeys = Object.keys(previous ?? {});
+        const nextKeys = Object.keys(next ?? {});
+        if (previousKeys.length !== nextKeys.length) return false;
+        return nextKeys.every((key) => {
+          const before = previous?.[key];
+          const after = next?.[key];
+          return before?.publicKeyHex === after?.publicKeyHex
+            && before?.state === after?.state
+            && before?.lastPongAtMs === after?.lastPongAtMs;
+        });
       },
       invalidation: "immediate"
     });
@@ -277,8 +334,6 @@ export const contactsPlugin: PluginManifest = {
     };
     breadcrumbs.register(crumbProvider);
     return () => {
-      // 硬切换 001：contacts 业务 service 暂未显式 dispose。路由/菜单/面包屑
-      // 由 host 回收；service 内部监听由 contacts 自身在 unbind 时清。
       service.dispose?.();
     };
   }

@@ -6,7 +6,7 @@
 //   - 展示当前广播连接状态（"connected / disconnected / idle"）；
 //   - 展示当前订阅频道名（**仅展示**，无编辑）；
 //   - 不建本地 DB；刷新 = 等待下一次快照；
-//   - 页面不接触 `appmsg`；服务走 `bsv-price.service` capability；
+//   - 页面不接触 Channel 传输细节；服务走 `bsv-price.service` capability；
 //   - 配错 publisher 公钥时：页面渲染是空态（service 一直拿不到数据）。
 //   - **不**展示历史 / 图表 / 告警。
 

@@ -12,14 +12,8 @@
 //   - i18n 资源通过 pluginId 跟踪，unregisterResources(pluginId) 精确回收。
 //   - 当前 route 属于被 disable 的 plugin 时，host 会先调用 navigateTo 跳走。
 //
-// 硬切换 2026-07-04 001（施工单）：runtime 删除消息专用生命周期。
-//   - 不再监听 keyspace / vault owner 变化、不再注入
-//     `<pluginId>.appmsg.client` capability、不再调用
-//     `appmsg.core.createMessageScopedClient(...)`；
-//   - 业务消息的 owner / provider / endpoint service 迁移由
-//     plugin-appmsg 内部持有；
-//   - runtime 只保留通用装配能力：manifest 元数据校验、registry /
-//     capability 通用装配、endpoint shape 校验 + 唯一性校验。
+// 消息、Channel 和网络生命周期不由 runtime 维护；插件直接声明并消费
+// 自己所需的 capability，SharedWorker Coordinator 负责唯一网络真值。
 
 import type {
   AssetDataInvalidationEvent,
@@ -50,9 +44,10 @@ import {
   KEYSPACE_SERVICE_CAPABILITY,
   LOG_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT,
-  isValidPluginEndpointIdShape
+  CHANNEL_RUNTIME_CAPABILITY,
+  RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT
 } from "@keymaster/contracts";
+import type { ChannelRuntimeFactory } from "@keymaster/contracts";
 import type { ContactPublicKeyActionRegistry } from "@keymaster/contracts";
 
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
@@ -403,17 +398,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   const knownManifests = new Map<string, PluginManifest>();
   const records = new Map<string, PluginRecord>();
   const enabledSet = new Set<string>();
-  /**
-   * 已声明的 pluginEndpointId 集合。
-   *
-   * enable 阶段填：endpointId 形状合法 + 全局唯一才允许写入。
-   * disable 阶段同步删除，避免"插件 disable 后还能 inject 一个
-   * 同 id 的 plugin"导致的孤儿 endpoint 占用。
-   *
-   * 硬切换 2026-07-04 001：**不**再用于 runtime 注入 scoped client
-   * capability——只是用于形状 + 唯一性校验。
-   */
-  const appMessageEndpointIds = new Set<string>();
   let versionCounter = 0;
   const listeners = new Set<HostListener>();
   const safePath = options.safePath ?? "/settings/plugins";
@@ -448,16 +432,33 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       get: (id) => resourceRegistry.get(id),
       _ids: () => resourceRegistry._ids(),
     };
+    const pluginChannelFactory = (): ChannelRuntimeFactory | undefined => {
+      if (!capabilities.has(CHANNEL_RUNTIME_CAPABILITY)) return undefined;
+      const raw = capabilities.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY);
+      return {
+        // 这里忽略插件传入的字符串，始终绑定 manifest.id。
+        forPlugin: (_claimedPluginId: string) => raw.forPlugin(record.manifest.id),
+        // system caller 只能由 Host/Coordinator 内部创建，插件 context 不开放。
+        forSystem: (_claimedSystemId: string) => {
+          throw new Error("Plugin context cannot create a system Channel caller");
+        }
+      };
+    };
     return {
+      pluginId: record.manifest.id,
       onDispose: (cleanup) => { record.disposeCallbacks.push(cleanup); },
       provide: (k, v) => provideCapability(k, v),
       get: (k) => k === RESOURCE_REGISTRY_CAPABILITY
         ? ownerResourceRegistry as any
-        : capabilities.get(k),
+        : k === CHANNEL_RUNTIME_CAPABILITY
+          ? pluginChannelFactory() as any
+          : capabilities.get(k),
       has: (k) => capabilities.has(k),
       require: (k) => k === RESOURCE_REGISTRY_CAPABILITY
         ? ownerResourceRegistry as any
-        : capabilities.require(k),
+        : k === CHANNEL_RUNTIME_CAPABILITY
+          ? pluginChannelFactory() as any
+          : capabilities.require(k),
       messageBus,
       logger: logService.forPlugin(record.manifest.id),
       // 2026-07-08 001 硬切换：plugin 作者通过 `manifest.config` 注入的
@@ -879,24 +880,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
           );
         }
       }
-      // 硬切换 2026-07-04 001：manifest.appMessageEndpoint 仅做形状 +
-      // 唯一性校验；**不**注入任何 scoped client capability。
-      const appMsgEp = record.manifest.appMessageEndpoint;
-      if (appMsgEp) {
-        if (!isValidPluginEndpointIdShape(appMsgEp.endpointId)) {
-          record.state = "blocked";
-          throw new Error(
-            `Plugin "${pluginId}": appMessageEndpoint.endpointId "${appMsgEp.endpointId}" is not a valid pluginEndpointId shape`
-          );
-        }
-        if (appMessageEndpointIds.has(appMsgEp.endpointId)) {
-          record.state = "blocked";
-          throw new Error(
-            `Plugin "${pluginId}": appMessageEndpoint.endpointId "${appMsgEp.endpointId}" already registered by another plugin`
-          );
-        }
-        appMessageEndpointIds.add(appMsgEp.endpointId);
-      }
       if (record.manifest.i18n) {
         i18n.registerResources(record.manifest.id, record.manifest.i18n);
       }
@@ -939,9 +922,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         purgePluginNotices(record.manifest.id);
         i18n.unregisterResources(record.manifest.id);
         record.ownership = emptyOwnership();
-        if (appMsgEp) {
-          appMessageEndpointIds.delete(appMsgEp.endpointId);
-        }
         record.state = "error-disabled";
         record.error = err instanceof Error ? err.message : String(err);
         if (!isStartupRequired(record.manifest)) configStore.setEnabled(pluginId, false);
@@ -978,9 +958,6 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       purgeOwnership(record.ownership, pluginId);
       purgePluginNotices(pluginId);
       i18n.unregisterResources(record.manifest.id);
-      if (record.manifest.appMessageEndpoint) {
-        appMessageEndpointIds.delete(record.manifest.appMessageEndpoint.endpointId);
-      }
       enabledSet.delete(pluginId);
       if (teardownErr || disposeErr) {
         record.state = "error-disabled";

@@ -1,38 +1,30 @@
 // packages/plugin-message/src/manifest.ts
-// 消息业务插件 manifest（施工单 2026-07-04 001 硬切换）。
+// 消息业务插件 manifest（施工单 2026-09-02/003）。
 //
 // 设计缘由：
 //   - `plugin-message` 是一个**极薄业务插件**，appId = `keymaster.message`，
-//     **不**再感知 owner / provider / 任何 provider 细节；
-//   - **不**订阅 keyspace.onActiveChange / vault.onStatusChange；
-//   - **不**走 `<pluginId>.appmsg.client` 旧 capability（runtime 已经
-//     移除该注入路径）；
-//   - **不**通过 plugin-facade 透传 `subscriptionSource()` 这种"subscription
-//     token"——服务内部自动迁移订阅；
+//     **不**感知 owner / provider / 任何物理传输细节；
+//   - 消息服务通过 Coordinator Channel runtime 发送固定私密消息协议；
+//   - 历史只使用本地 key-scoped DB，收件回执是独立私密消息；
 //   - 在自己的 `setup` 阶段：
-//       * `ctx.get<...>("appmsg.endpoint.registry").forEndpoint(...)` 拿到
-//         稳定长寿的 `AppMsgEndpointService`；
-//       * `service` 内部已自动处理 owner / provider 变化；
-//       * 把 service 透传给 `createMessageService(service)` 作为公开
+//       * 从 Coordinator 注入 `ChannelRuntime`；
+//       * 把本地 DB 与 runtime 交给 `createMessageService(...)` 作为公开
 //         `message.service` capability。
 //   - 页面路由固定归本插件：
 //       * `/messages`                —— 会话列表
 //       * `/message/:publicKeyHex`    —— 会话详情（主承载路由）
 //       * `/messages/:publicKeyHex`   —— 会话详情别名，兼容旧口头路径
-//     **不**再注册 `/system/messages` / 系统菜单 / 系统面包屑——AppMsg
-//     管理面归 `plugin-appmsg` 的 `/system/appmsg`。
+//     **不**注册传输系统管理页或远端消息管理页。
 
 import type {
-  AppMsgEndpointId,
-  AppMsgEndpointService,
-  AppMsgEndpointServiceRegistry,
-  AppMsgMessage,
   BusinessFeatureRegistry,
   Contact,
   ContactPublicKeyActionRegistry,
   ContactsService,
+  ChannelRuntimeFactory,
   I18nPluginResources,
   KeyspaceService,
+  MessageRecord,
   PluginContext,
   PluginManifest,
   ResourceRegistry,
@@ -40,9 +32,8 @@ import type {
 } from "@keymaster/contracts";
 import { router } from "@keymaster/runtime";
 import {
-  APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
-  KEYMASTER_MESSAGE_APP_ID,
-  RESOURCE_REGISTRY_CAPABILITY
+  CHANNEL_RUNTIME_CAPABILITY,
+  RESOURCE_REGISTRY_CAPABILITY,
 } from "@keymaster/contracts";
 import { MessagePage } from "./MessagePage.js";
 import { MessageDetailPage } from "./MessageDetailPage.js";
@@ -50,17 +41,17 @@ import { createMessageService } from "./messageService.js";
 
 /** 消息会话聚合结果（Resource Store 数据模型） */
 export interface MessageConversationsData {
-  messages: AppMsgMessage[];
+  messages: MessageRecord[];
   contactsByPeer: Record<string, Contact>;
 }
 
 /** 消息详情页数据（Resource Store 数据模型） */
 export interface MessageDetailData {
-  messages: AppMsgMessage[];
+  messages: MessageRecord[];
   contact: Contact | null;
 }
 
-function messagesEqual(previous: readonly AppMsgMessage[], next: readonly AppMsgMessage[]): boolean {
+function messagesEqual(previous: readonly MessageRecord[], next: readonly MessageRecord[]): boolean {
   if (previous.length !== next.length) return false;
   return previous.every((message, index) => {
     const candidate = next[index];
@@ -171,13 +162,11 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.offline": "Offline",
       "message.page.detail.unknown": "Unknown",
       "message.page.detail.loadMore": "Load 20 older messages",
-      "message.page.noClient": "appmsg.endpoint service is not available.",
+      "message.page.noClient": "Channel messaging service is not available.",
       "message.page.back": "Back",
       "message.page.send.submit": "Send",
       "message.page.send.sending": "Sending…",
       "message.page.send.empty": "Body is empty",
-      "message.page.detail.error.target_offline": "Peer is offline.",
-      "message.page.detail.error.target_unknown": "Peer online status is unknown.",
       "message.page.detail.error.service_not_ready": "Messaging service is not ready. Please try again.",
       "message.page.detail.error.invalid_target": "Target publicKeyHex is invalid.",
       "message.page.detail.error.send_timeout": "Sending timed out. Check the connection and try again.",
@@ -186,7 +175,7 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.seal_failed": "Message encryption failed. Reconnect the active key and try again.",
       "message.page.detail.error.server_unavailable": "The messaging server is temporarily unavailable.",
       "message.page.detail.error.send_rejected": "The messaging server rejected this message.",
-      "message.page.detail.error.send_unknown": "Message sending failed. Check the AppMsg connection status and try again.",
+      "message.page.detail.error.send_unknown": "Message sending failed. Check the Channel service and try again.",
       "message.page.detail.error.device_unavailable": "Local device is unavailable.",
       "message.page.detail.error.send_invite_failed": "Failed to send call invite.",
       "message.page.detail.error.create_offer_failed": "Failed to create offer.",
@@ -272,16 +261,14 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.image": "发送图片",
       "message.page.detail.file": "发送文件",
       "message.page.detail.online": "在线",
-      "message.page.detail.offline": "离线",
+      "message.page.detail.offline": "失联",
       "message.page.detail.unknown": "状态未知",
       "message.page.detail.loadMore": "再加载 20 条更早消息",
-      "message.page.noClient": "appmsg.endpoint service 不可用。",
+      "message.page.noClient": "Channel 消息服务不可用。",
       "message.page.back": "返回",
       "message.page.send.submit": "发送",
       "message.page.send.sending": "发送中…",
       "message.page.send.empty": "正文不能为空",
-      "message.page.detail.error.target_offline": "对方当前离线。",
-      "message.page.detail.error.target_unknown": "无法确认对方在线状态。",
       "message.page.detail.error.service_not_ready": "消息服务未就绪，请稍后重试。",
       "message.page.detail.error.invalid_target": "目标 publicKeyHex 非法。",
       "message.page.detail.error.send_timeout": "发送超时，请检查网络后重试。",
@@ -290,7 +277,7 @@ const messageResources: I18nPluginResources = {
       "message.page.detail.error.seal_failed": "消息加密失败，请重新连接当前密钥后重试。",
       "message.page.detail.error.server_unavailable": "消息服务器暂时不可用，请稍后重试。",
       "message.page.detail.error.send_rejected": "消息服务器拒绝了本条消息。",
-      "message.page.detail.error.send_unknown": "消息发送失败，请检查系统中的 AppMsg 连接状态后重试。",
+      "message.page.detail.error.send_unknown": "消息发送失败，请检查 Channel 服务后重试。",
       "message.page.detail.error.device_unavailable": "本地设备不可用。",
       "message.page.detail.error.send_invite_failed": "发送通话邀请失败。",
       "message.page.detail.error.create_offer_failed": "创建 offer 失败。",
@@ -309,14 +296,6 @@ const messageResources: I18nPluginResources = {
 };
 
 /**
- * plugin-message 的固定 endpoint id。
- */
-const PLUGIN_MESSAGE_ENDPOINT: AppMsgEndpointId = {
-  kind: "plugin",
-  id: KEYMASTER_MESSAGE_APP_ID
-};
-
-/**
  * 消息业务插件 manifest。
  */
 export const messagePlatformPlugin: PluginManifest = {
@@ -332,23 +311,9 @@ export const messagePlatformPlugin: PluginManifest = {
     displayGroup: "platform"
   },
   i18n: messageResources,
-  keyScopedStorages: [], // 该插件不持久化自己的状态；只读 endpoint service
-  /**
-   * 声明 endpointId = `keymaster.message`：runtime 仅做形状校验 +
-   * 唯一性校验；**不**注入任何 scoped client capability。
-   *
-   * `endpointId` 形状必须满足 `isValidPluginEndpointIdShape`——
-   * "keymaster.message" 满足（a.b 形式 portable subset）。
-   */
-  appMessageEndpoint: {
-    endpointId: KEYMASTER_MESSAGE_APP_ID,
-    description: "keymaster.message business app"
-  },
+  keyScopedStorages: [{ storageId: "history", description: "当前 owner 的本地消息历史" }],
   dependencies: [
-    {
-      capability: APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY,
-      reason: "拿 endpoint service（plugin-appmsg 提供）"
-    },
+    { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
     { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
     { capability: "webrtc.service", reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
     { capability: "route.registry", reason: "注册 /message 与 /messages 详情路由" },
@@ -368,14 +333,8 @@ export const messagePlatformPlugin: PluginManifest = {
       order: 20,
       run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`)
     });
-    // 从 plugin-appmsg 的 endpoint registry 拿稳定长寿的 endpoint service。
-    // service 内部自动处理 owner 真值 / active provider 变化；
-    // plugin-message **不需要**监听 keyspace / vault / provider 任何事件。
-    const registry = ctx.get<AppMsgEndpointServiceRegistry>(
-      APPMESSAGE_ENDPOINT_REGISTRY_CAPABILITY
-    );
-    const endpointService = registry.forEndpoint(PLUGIN_MESSAGE_ENDPOINT);
-    const service = createMessageService(endpointService);
+    const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
+    const service = createMessageService({ channel, keyspace: ctx.get<KeyspaceService>("keyspace.service") });
     ctx.provide("message.service", service);
 
     // 注册资源定义（硬切换 003）
@@ -518,8 +477,7 @@ export const messagePlatformPlugin: PluginManifest = {
     });
 
     return () => {
-      // 释放 endpoint service；plugin-appmsg 回收内部订阅迁移资源。
-      registry.releaseEndpoint(PLUGIN_MESSAGE_ENDPOINT);
+      service.dispose?.();
     };
   }
 };

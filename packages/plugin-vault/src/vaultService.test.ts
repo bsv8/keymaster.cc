@@ -91,9 +91,9 @@ class RecordingWorker {
   terminated = false;
   sessionId: string | null = null;
   publicKeyHex: string | null = null;
-  private readonly handleRequest: (msg: Record<string, unknown>) => Promise<
-    Array<{ requestId: string; ok: boolean; result?: unknown; error?: string }>
-  >;
+  private readonly handleRequest: (
+    msg: import("./sessionCryptoProtocol.js").SessionCryptoRequestMessage
+  ) => Promise<import("./sessionCryptoProtocol.js").SessionCryptoResponseMessage[]>;
 
   constructor() {
     RecordingWorker.instances.push(this);

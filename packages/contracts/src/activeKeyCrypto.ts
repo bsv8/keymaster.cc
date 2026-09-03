@@ -10,8 +10,6 @@
 //   - 没有默认格式；缺少或未知格式一律失败
 
 import type { KeyIdentity } from "./keyspace.js";
-import type { AppMsgMessage, AppMsgSendInput } from "./appmsg.js";
-import type { ProviderSealedMessageRecord } from "./messageProvider.js";
 
 /**
  * ECDSA 签名编码格式枚举。
@@ -79,25 +77,12 @@ export interface ActiveKeyCryptoExportBackupResult {
   backup: ArrayBuffer;
 }
 
-export interface ActiveKeyCryptoSealSendInputResult {
-  record: ProviderSealedMessageRecord;
-}
-
 export interface ActiveKeyCrypto {
   getIdentity(): ActiveKeyCryptoIdentity;
   signDigest(input: ActiveKeyCryptoSignDigestInput): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(
     input: ActiveKeyCryptoDeriveP2pkhAddressInput
   ): Promise<ActiveKeyCryptoDeriveP2pkhAddressResult>;
-  sealSendInput(input: {
-    sender: { senderPublicKeyHex: string; senderOrigin?: string; senderAppId?: string };
-    recipient: { recipientPublicKeyHex: string; recipientOrigin?: string; recipientAppId?: string };
-    contentType: AppMsgSendInput["contentType"];
-    body: AppMsgSendInput["body"];
-    clientMessageId: AppMsgSendInput["clientMessageId"];
-    createdAtMs: AppMsgSendInput["createdAtMs"];
-  }): Promise<ActiveKeyCryptoSealSendInputResult | { error: string }> | ActiveKeyCryptoSealSendInputResult | { error: string };
-  openSealed(rec: ProviderSealedMessageRecord): Promise<AppMsgMessage | null>;
   exportEncryptedKeyBackup(
     input: ActiveKeyCryptoExportBackupInput
   ): Promise<ActiveKeyCryptoExportBackupResult>;

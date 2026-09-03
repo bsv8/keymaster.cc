@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type {
   ActiveKeyState,
-  AppMsgMessage,
+  MessageRecord,
   I18nService,
   I18nText,
   I18nValues,
@@ -26,6 +26,11 @@ const OWNER = "02bbbb".padEnd(66, "b");
 const MESSAGE_SERVICE_CAPABILITY = "message.service";
 const KEYSPACE_SERVICE_CAPABILITY = "keyspace.service";
 const WEBRTC_SERVICE_CAPABILITY = "webrtc.service";
+
+type MessageFixture = MessageRecord & {
+  readonly senderAppId?: string;
+  readonly recipientAppId?: string;
+};
 
 function makeFakeI18n(): I18nService {
   return {
@@ -76,7 +81,7 @@ function makeFakeKeyspace(): KeyspaceService {
 }
 
 function makeFakeService(opts?: {
-  messages?: AppMsgMessage[];
+  messages?: MessageFixture[];
   onListMessages?: (input?: { limit?: number; afterMessageId?: string }) => void;
   sendTextMessage?: MessageService["sendTextMessage"];
 }): MessageService {
@@ -122,7 +127,6 @@ function makeFakeWebrtcService(opts?: {
       handler(currentSnapshot);
       return () => subscribers.delete(handler);
     },
-    checkPeerOnline: async () => "online",
     listHistoryForPeer: async () => history,
     getTransferBlob: async () => null,
     startCall: async (input) => {
@@ -342,7 +346,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
 
   it("renders conversation body when peer is in scope", async () => {
     const peer = "02aaaa".padEnd(66, "a");
-    const sample: AppMsgMessage = {
+    const sample: MessageFixture = {
       messageId: "id-detail-1",
       clientMessageId: "c-detail-1",
       senderPublicKeyHex: peer,
@@ -398,7 +402,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       expect((sending as HTMLButtonElement).disabled).toBe(true);
     });
 
-    rejectSend(new Error("appmsg.endpoint: not_ready (no active provider handle)"));
+    rejectSend(new Error("channel runtime: not_ready"));
     await waitFor(() => {
       expect(screen.getByRole("alert").textContent).toBe("message.page.detail.error.service_not_ready");
     });
@@ -407,7 +411,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
 
   it("accepts the singular /message/:publicKeyHex route", async () => {
     const peer = "02cccc".padEnd(66, "c");
-    const sample: AppMsgMessage = {
+    const sample: MessageFixture = {
       messageId: "id-detail-alias-1",
       clientMessageId: "c-detail-alias-1",
       senderPublicKeyHex: peer,
@@ -588,7 +592,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
 
   it("renders newest messages closer to the composer", async () => {
     const peer = "02eeee".padEnd(66, "e");
-    const older: AppMsgMessage = {
+    const older: MessageFixture = {
       messageId: "id-detail-old",
       clientMessageId: "c-detail-old",
       senderPublicKeyHex: peer,
@@ -600,7 +604,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       createdAtMs: 1000,
       insertedAtMs: 1000
     };
-    const newer: AppMsgMessage = {
+    const newer: MessageFixture = {
       messageId: "id-detail-new",
       clientMessageId: "c-detail-new",
       senderPublicKeyHex: OWNER,
@@ -632,7 +636,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
 
   it("renders timeline labels through i18n keys", async () => {
     const peer = "02abab".padEnd(66, "a");
-    const messages: AppMsgMessage[] = [{
+    const messages: MessageFixture[] = [{
       messageId: "id-timeline-text",
       clientMessageId: "c-timeline-text",
       senderPublicKeyHex: OWNER,
@@ -840,7 +844,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       </PluginHostProvider>
     );
     await waitFor(() => {
-      expect(screen.getByText("message.page.detail.online")).toBeTruthy();
+      expect(screen.getByLabelText("message.page.detail.body")).toBeTruthy();
     });
     const input = await screen.findByLabelText("message.page.detail.body");
     expect(input).toBeTruthy();
@@ -871,7 +875,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       </PluginHostProvider>
     );
     await waitFor(() => {
-      expect(screen.getByText("message.page.detail.online")).toBeTruthy();
+      expect(screen.getByLabelText("message.page.detail.body")).toBeTruthy();
     });
     const fileInput = document.querySelector('input[type="file"][accept="image/*"]') as HTMLInputElement | null;
     expect(fileInput).toBeTruthy();
@@ -915,7 +919,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
       </PluginHostProvider>
     );
     await waitFor(() => {
-      expect(screen.getByText("message.page.detail.online")).toBeTruthy();
+      expect(screen.getByLabelText("message.page.detail.body")).toBeTruthy();
     });
     const downloadButton = await screen.findByRole("button", { name: "message.page.detail.timeline.download" });
     fireEvent.click(downloadButton);
@@ -926,7 +930,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
 
   it("shows 20 messages by default and loads 20 more on demand", async () => {
     const peer = "02ffff".padEnd(66, "f");
-    const messages: AppMsgMessage[] = Array.from({ length: 25 }, (_, index) => ({
+    const messages: MessageFixture[] = Array.from({ length: 25 }, (_, index) => ({
       messageId: `id-${index}`,
       clientMessageId: `c-${index}`,
       senderPublicKeyHex: index % 2 === 0 ? OWNER : peer,
@@ -977,7 +981,7 @@ describe("MessageDetailPage in PluginHostProvider", () => {
   it("loads a larger message window for older conversations", async () => {
     const peer = "02dddd".padEnd(66, "d");
     const seenLimits: number[] = [];
-    const sample: AppMsgMessage = {
+    const sample: MessageFixture = {
       messageId: "id-detail-window",
       clientMessageId: "c-detail-window",
       senderPublicKeyHex: peer,

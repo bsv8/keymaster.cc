@@ -21,6 +21,9 @@
 
 import type {
   BinaryField,
+  ChannelPublishParams,
+  ChannelSubscriptionSetParams,
+  JSONValue,
   CipherDecryptParams,
   CipherEncryptParams,
   ConnectLaunchParams,
@@ -126,6 +129,10 @@ function validateParams(
       return validateConnectLogoutParams(raw);
     case "connect.launch":
       return validateConnectLaunchParams(raw);
+    case "channel.publish":
+      return validateChannelPublishParams(raw);
+    case "channel.subscription_set":
+      return validateChannelSubscriptionSetParams(raw);
     case "storage.list":
       return validateStorageListParams(raw);
     case "storage.directory.create":
@@ -364,6 +371,75 @@ function validateConnectLaunchParams(raw: unknown): ConnectLaunchParams {
   try { verifyAppIdentityProof(obj.appIdentity); appIdentity = obj.appIdentity as ConnectLaunchParams["appIdentity"]; }
     catch (error) { throw new ProtocolValidationError("invalid_request", error instanceof AppIdentityValidationError ? error.message : "appIdentity is invalid"); }
   return { launchToken, appIdentity };
+}
+
+/* ============== channel.* validation（施工单 2026-09-02） ============== */
+
+function validateChannelPublishParams(raw: unknown): ChannelPublishParams {
+  const obj = expectObject(raw, "channel.publish params");
+  requireExactKeys(obj, ["channel", "content"], "channel.publish params");
+  const channel = validateExactChannel(obj.channel, "channel");
+  const content = validateJsonValue(obj.content, "content");
+  return { channel, content };
+}
+
+function validateChannelSubscriptionSetParams(raw: unknown): ChannelSubscriptionSetParams {
+  const obj = expectObject(raw, "channel.subscription_set params");
+  requireExactKeys(obj, ["channels"], "channel.subscription_set params");
+  if (!Array.isArray(obj.channels)) {
+    throw new ProtocolValidationError("invalid_request", "channels must be an array");
+  }
+  if (obj.channels.length > 64) {
+    throw new ProtocolValidationError("invalid_request", "channels must contain at most 64 entries");
+  }
+  const channels = obj.channels.map((value, index) => validateExactChannel(value, `channels[${index}]`));
+  if (new Set(channels).size !== channels.length) {
+    throw new ProtocolValidationError("invalid_request", "channels must not contain duplicates");
+  }
+  return { channels };
+}
+
+export function validateExactChannel(value: unknown, field = "channel"): string {
+  const channel = expectString(value, field);
+  if (channel.length === 0 || channel === "*") {
+    throw new ProtocolValidationError("invalid_request", `${field} must be a non-empty exact channel`);
+  }
+  if (new TextEncoder().encode(channel).byteLength > 256) {
+    throw new ProtocolValidationError("invalid_request", `${field} exceeds 256 UTF-8 bytes`);
+  }
+  for (const codePoint of channel) {
+    if (codePoint < " " || codePoint === "\u007f") {
+      throw new ProtocolValidationError("invalid_request", `${field} contains a control character`);
+    }
+  }
+  return channel;
+}
+
+function validateJsonValue(value: unknown, field: string, depth = 0): JSONValue {
+  if (depth > 16) throw new ProtocolValidationError("invalid_request", `${field} is too deeply nested`);
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) throw new ProtocolValidationError("invalid_request", `${field} contains a non-finite number`);
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item, index) => validateJsonValue(item, `${field}[${index}]`, depth + 1));
+  if (isPlainObject(value)) {
+    const output: { [key: string]: JSONValue } = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (key.length > 256) throw new ProtocolValidationError("invalid_request", `${field} contains an oversized object key`);
+      output[key] = validateJsonValue(item, `${field}.${key}`, depth + 1);
+    }
+    return output;
+  }
+  throw new ProtocolValidationError("invalid_request", `${field} must be a JSON value`);
+}
+
+function requireExactKeys(obj: Record<string, unknown>, keys: readonly string[], name: string): void {
+  const actual = Object.keys(obj).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new ProtocolValidationError("invalid_request", `${name} contains unsupported fields`);
+  }
 }
 
 /* ============== storage.* validation ============== */

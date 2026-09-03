@@ -4,13 +4,10 @@
 // 设计缘由：
 //   - 单活会话：整个 plugin-webrtc 实例同时只允许一通会话占位；占位期间包括
 //     「拨号中 / 响铃中 / 已接通 / 挂断清理中」；
-//   - 入站 / 出站信令统一走 `AppMsgEndpointService` 的 `text/plain` body；
-//   - 拨号前必须通过 `endpointService.checkOnline([target])` 拿到 `online` 才
-//     允许继续；`offline` / `unknown` 一律 fail-closed（施工单 §5.4）；
-//   - 设备能力以真实 `getUserMedia(...)` 结果为准：接收方在收到 `invite`
-//     时按 mode 立刻做能力测试，按结果决定 allow / fallback_required / reject；
-//   - 模式协商：接收方有视频 → 允许；只有音频 → 回送 `fallback_required`；
-//     连音频都没有 → 回送 `reject(audio_unavailable)`；
+//   - 文件传输信令统一走 Channel 的固定 `bsv8.webrtc.signal.v1` 私信协议；
+//   - 音视频呼叫暂时关闭：ChannelProtocol 尚未提供正式的呼叫会合请求，不能
+//     用自定义摘要冒充文件 Hash，也不能接受没有前置关系的媒体 offer；
+//   - 收到旧版呼叫请求或媒体 offer 只丢弃，不创建来电、不申请设备权限；
 //   - 不持久化任何媒体 / SDP / ICE 累积态；页面刷新 / disable / 挂断都立刻
 //     释放本地 tracks + RTCPeerConnection；
 //   - phase 状态机：idle / inviting / incoming / connecting / connected / ended；
@@ -19,31 +16,31 @@
 //   - 单测友好：所有浏览器 API 走抽象层 `WebrtcEnvironment`，测试可注入 fake。
 
 import type {
-  AppMsgEndpointId,
-  AppMsgEndpointService,
-  AppMsgMessage
+  ChannelPrivateMessageEvent,
+  ChannelRuntime,
+  JSONValue
 } from "@keymaster/contracts";
 import type { KeyspaceService, NoticeRegistry } from "@keymaster/contracts";
-import { KEYMASTER_WEBRTC_APP_ID } from "./constants.js";
+import { WEBRTC_SIGNAL_PROTOCOL } from "./constants.js";
+import { APP_MESSAGE_PROTOCOL } from "bsv8-channel-protocol/app-message";
+import { HASH_REQUEST_CHANNEL } from "bsv8-channel-protocol/hash-request";
 import type { WebrtcHistoryItem, WebrtcHistoryService } from "./webrtcHistoryService.js";
 import {
-  isAcceptableRemoteSessionId,
-  isSignalExpired,
-  serializeSignal,
+  isAcceptableRemoteSession,
+  newAnswerSignal,
+  newEndOfCandidatesSignal,
+  newIceSignal,
+  newOfferSignal,
+  parseSignalValue,
   tryParseSignal,
-  buildEnvelopeBase,
-  type WebrtcRejectSignal,
-  type WebrtcFallbackRequiredSignal,
-  type WebrtcBusySignal,
-  type WebrtcHangupSignal,
+  type WebrtcHangupReason,
   type WebrtcIceSignal,
   type WebrtcInviteSignal,
   type WebrtcAnswerSignal,
   type WebrtcSignal,
-  type WebrtcTransferAnswerSignal,
-  type WebrtcTransferInviteSignal,
-  type WebrtcTransferRejectSignal
+  type WebrtcEndOfCandidatesSignal
 } from "./webrtcSignal.js";
+import { newMessageID, newSessionID, parseSessionID } from "bsv8-channel-protocol";
 import {
   DEFAULT_STUN_SERVERS,
   type WebrtcConfig,
@@ -76,8 +73,7 @@ export type WebrtcSessionPhase =
 export type WebrtcBlockReason =
   | "service_not_ready"
   | "invalid_target"
-  | "target_offline"
-  | "target_unknown"
+  | "call_protocol_unavailable"
   | "device_unavailable"
   | "send_invite_failed"
   | "create_offer_failed"
@@ -105,7 +101,7 @@ export interface WebrtcSessionSnapshot {
   hasRemoteStream: boolean;
   /** 入站远端一次性提示；UI 消费后清空（消费动作仍由 UI 决定）。 */
   remoteNotice: WebrtcRemoteNotice | null;
-  /** service 整体是否可用（endpoint ready + 设备环境）。 */
+  /** service 整体是否可用（Channel ready + 设备环境）。 */
   serviceReady: boolean;
   /** 最近一次错误（仅诊断；UI 默认不展示 raw 字符串，会走 i18n）。 */
   lastError: WebrtcBlockReason | null;
@@ -122,7 +118,6 @@ export interface WebrtcService {
   snapshot(): WebrtcSessionSnapshot;
   subscribe(handler: WebrtcSubscriber): () => void;
   isReady(): boolean;
-  checkPeerOnline(publicKeyHex: string): Promise<import("@keymaster/contracts").AppMsgOnlineStatus>;
   listHistoryForPeer(peerPublicKeyHex: string): Promise<WebrtcHistoryItem[]>;
   getTransferBlob(blobKey: string): Promise<Blob | null>;
   startCall(input: StartCallInput): Promise<void>;
@@ -130,6 +125,10 @@ export interface WebrtcService {
   sendFile(input: { targetPublicKeyHex: string; file: Blob | File }): Promise<void>;
   acceptIncoming(): Promise<void>;
   rejectIncoming(): Promise<void>;
+  /** 用户明确确认后，才允许为入站文件请求签名并发布 Hash。 */
+  acceptIncomingTransfer(sessionId: string): Promise<void>;
+  /** 拒绝一个尚未建立 WebRTC 连接的入站文件请求。 */
+  rejectIncomingTransfer(sessionId: string): Promise<void>;
   hangup(): Promise<void>;
   consumeRemoteNotice(): void;
 
@@ -152,7 +151,10 @@ export interface WebrtcService {
 export interface WebrtcEnvironment {
   createPeerConnection(config: RTCConfiguration): RTCPeerConnectionLike;
   getUserMedia(constraints: MediaStreamConstraints): Promise<MediaStreamLike>;
-  generateSessionId(): string;
+  /** 可选的测试 session_id 生成器；返回值必须是 ChannelProtocol 的 32-byte base64url。 */
+  generateSessionId?(): string;
+  /** 可选的 SHA-256 注入点，仅用于在测试中控制大文件 Hash 的异步边界。 */
+  hashSha256?(bytes: Uint8Array): Promise<string>;
   now(): number;
   delay(ms: number): Promise<void>;
   /**
@@ -183,6 +185,8 @@ export interface RTCPeerConnectionLike {
 export interface DataChannelLike {
   readonly label: string;
   readonly readyState: "connecting" | "open" | "closing" | "closed";
+  /** 浏览器 RTCDataChannel 的发送缓冲字节数；测试 fake 可以不提供。 */
+  readonly bufferedAmount?: number;
   send(data: string | ArrayBuffer | ArrayBufferView): void;
   close(): void;
   onOpen(cb: () => void): void;
@@ -217,10 +221,7 @@ export function createBrowserWebrtcEnvironment(): WebrtcEnvironment {
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       return createBrowserMediaStreamLike(stream);
     },
-    generateSessionId: () =>
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? `km-wbrtc-${crypto.randomUUID()}`
-        : `km-wbrtc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+    generateSessionId: () => newSessionID(),
     now: () => Date.now(),
     delay: (ms) => new Promise((r) => setTimeout(r, ms)),
     stunDiagnosticTimeoutMs: 4000
@@ -365,6 +366,9 @@ function createBrowserDataChannelLike(channel: RTCDataChannel): DataChannelLike 
     get readyState() {
       return channel.readyState as DataChannelLike["readyState"];
     },
+    get bufferedAmount() {
+      return channel.bufferedAmount;
+    },
     send(data) {
       channel.send(data as never);
     },
@@ -398,17 +402,125 @@ function createBrowserMediaStreamLike(stream: MediaStream): MediaStreamLike {
 
 const ENDED_PHASE_TTL_MS = 1500;
 
+/** 文件传输允许的最大总字节数；入站和出站都必须使用同一个上限。 */
+export const MAX_WEBRTC_TRANSFER_BYTES = 16 * 1024 * 1024;
+/** DataChannel 单个分片的最大原始字节数。 */
+const WEBRTC_TRANSFER_CHUNK_BYTES = 16 * 1024;
+/** 单次传输最多允许的分片数，防止用大量 1-byte 分片耗尽内存。 */
+const MAX_WEBRTC_TRANSFER_CHUNKS = Math.ceil(MAX_WEBRTC_TRANSFER_BYTES / WEBRTC_TRANSFER_CHUNK_BYTES);
+/** 入站传输请求在本地待确认队列中的最长保留时间。 */
+const TRANSFER_REQUEST_TTL_MS = 2 * 60 * 1000;
+/** 同一 WebRTC service 的待确认请求总数上限。 */
+const MAX_PENDING_TRANSFER_REQUESTS = 32;
+/** 单个发送者同时进入待确认队列的请求数上限。 */
+const MAX_PENDING_TRANSFER_REQUESTS_PER_SENDER = 2;
+/** 同时执行通讯录准入查询的总数上限。 */
+const MAX_TRANSFER_ADMISSION_IN_FLIGHT = 8;
+/** 单个发送者同时执行通讯录准入查询的数量上限。 */
+const MAX_TRANSFER_ADMISSION_IN_FLIGHT_PER_SENDER = 2;
+/** 通讯录准入查询的最长等待时间；超时按拒绝处理。 */
+const TRANSFER_ADMISSION_TIMEOUT_MS = 5 * 1000;
+/** 单个发送者在一个限流窗口内允许建立的请求数。 */
+const TRANSFER_REQUEST_RATE_LIMIT = 4;
+const TRANSFER_REQUEST_RATE_WINDOW_MS = 60 * 1000;
+/** DataChannel 没有活动时释放连接，避免传输槽永久占用。 */
+const TRANSFER_IDLE_TIMEOUT_MS = 30 * 1000;
+/** 出站 DataChannel 的高水位；超过后等待浏览器发送缓冲下降。 */
+const TRANSFER_BUFFER_HIGH_WATER_MARK = 1024 * 1024;
+/** 出站 DataChannel 等待恢复时的低水位。 */
+const TRANSFER_BUFFER_LOW_WATER_MARK = 512 * 1024;
+/** 发送缓冲长期不下降时主动失败，避免占用传输槽。 */
+const TRANSFER_BUFFER_WAIT_TIMEOUT_MS = 10 * 1000;
+const MAX_TRANSFER_METADATA_LENGTH = 256;
+const MAX_TRANSFER_MIME_LENGTH = 128;
+
+function createProtocolSessionId(env: WebrtcEnvironment): string {
+  const supplied = env.generateSessionId?.();
+  if (supplied) {
+    try {
+      return parseSessionID(supplied);
+    } catch {
+      // 旧测试环境可能仍返回可读 session 字符串；线上绝不能把它发到 wire。
+    }
+  }
+  return newSessionID();
+}
+
+function encodeDescription(description: RTCSessionDescriptionInit): string {
+  // ChannelProtocol 的 signal.sdp 就是 SDP 文本，不再把整个 description
+  // 对象 JSON 塞进字符串。测试 fake 若没有 SDP 文本才保留可解析的 fallback。
+  return typeof description.sdp === "string" && description.sdp.length > 0
+    ? description.sdp
+    : JSON.stringify(description);
+}
+
+function decodeDescription(sdp: string, type: "offer" | "answer"): RTCSessionDescriptionInit {
+  // 兼容没有实现真实 SDP 的 fake peer；真实浏览器 SDP 直接走文本分支。
+  if (sdp.trimStart().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(sdp) as RTCSessionDescriptionInit;
+      if (parsed && typeof parsed === "object" && typeof parsed.sdp === "string") {
+        return { ...parsed, type: parsed.type ?? type };
+      }
+    } catch {
+      // 不是 JSON 就按真实 SDP 文本处理。
+    }
+  }
+  return { type, sdp };
+}
+
+function isDataChannelOffer(sdp: string): boolean {
+  // 浏览器 data channel offer 有 m=application；fake 可用常见 SCTP 标志。
+  return /(?:^|\r?\n)m=application(?:\s|$)/.test(sdp) || /(?:^|\r?\n)a=sctp(?:\s|$)/.test(sdp);
+}
+
+function toProtocolCandidate(candidate: RTCIceCandidateInit): {
+  candidate: string;
+  sdp_mid: string | null;
+  sdp_m_line_index: number | null;
+} {
+  if (typeof candidate.candidate !== "string" || candidate.candidate.length === 0) {
+    throw new Error("invalid_ice_candidate");
+  }
+  return {
+    candidate: candidate.candidate,
+    sdp_mid: candidate.sdpMid ?? null,
+    sdp_m_line_index: candidate.sdpMLineIndex ?? null
+  };
+}
+
+function fromProtocolCandidate(candidate: WebrtcIceSignal["signal"]["candidate"]): RTCIceCandidateInit {
+  return {
+    candidate: candidate.candidate,
+    sdpMid: candidate.sdp_mid,
+    sdpMLineIndex: candidate.sdp_m_line_index
+  };
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  // 只 Hash 当前 Uint8Array view，不能把带有 offset/更大容量的底层
+  // ArrayBuffer 一并 Hash，否则请求关系会因调用方的 buffer 布局而改变。
+  const viewBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  const digest = await crypto.subtle.digest("SHA-256", viewBuffer);
+  return bytesToHex(new Uint8Array(digest));
+}
+
 export function createWebrtcService(input: {
-  endpointId?: AppMsgEndpointId;
-  endpointService: AppMsgEndpointService;
+  channel: ChannelRuntime;
   keyspace?: KeyspaceService;
   historyService?: WebrtcHistoryService;
   noticeRegistry?: NoticeRegistry;
   configStore: WebrtcConfigStore;
+  /** 只允许已知联系人/业务准入的发送者进入用户确认队列；缺省为拒绝。 */
+  isTransferSenderAllowed?: (publicKeyHex: string, signal?: AbortSignal) => boolean | Promise<boolean>;
   env?: WebrtcEnvironment;
   logger?: WebrtcLogger;
 }): WebrtcService {
-  const endpoint = input.endpointService;
+  const channel = input.channel;
   const store = input.configStore;
   const env = input.env ?? createBrowserWebrtcEnvironment();
   const log: WebrtcLogger = input.logger ?? silentLogger();
@@ -431,9 +543,35 @@ export function createWebrtcService(input: {
       removeBySourcePluginId: () => undefined
     } as NoticeRegistry);
 
-  const MAX_WEBRTC_TRANSFER_BYTES = 16 * 1024 * 1024;
+  async function calculateSha256(bytes: Uint8Array): Promise<string> {
+    return env.hashSha256 ? env.hashSha256(bytes) : sha256Hex(bytes);
+  }
+
+  /** 通过固定 WebRTC 私信协议发布精确 ChannelProtocol body。 */
+  async function publishSignalBody(recipientPublicKeyHex: string, body: WebrtcSignal): Promise<void> {
+    // 先在插件侧走同一个 parser，确保不会把旧 envelope 交给 Coordinator。
+    const parsed = parseSignalValue(body);
+    if (!parsed.ok) throw new Error(`invalid_signal_body: ${parsed.reason}`);
+    await channel.publishPrivate({
+      recipientPublicKeyHex,
+      protocol: WEBRTC_SIGNAL_PROTOCOL,
+      content: parsed.signal as unknown as JSONValue
+    });
+  }
+
+  async function publishHashRequest(hash: string): Promise<string> {
+    if (!channel.publishHashRequest) throw new Error("hash_request_required");
+    const result = await channel.publishHashRequest({ hash, locator: "webrtc-sdp" });
+    if (!result || typeof result.messageId !== "string" || result.messageId.length === 0) {
+      throw new Error("invalid_hash_request_result");
+    }
+    return result.messageId;
+  }
 
   interface ActiveSession {
+    /** 对应本次 offer 的真实 Hash 请求编号；握手完成前为空。 */
+    requestMessageId: string | null;
+    /** ChannelProtocol 32-byte base64url session_id。 */
     sessionId: string;
     direction: "outgoing" | "incoming";
     mode: WebrtcMode;
@@ -444,6 +582,10 @@ export function createWebrtcService(input: {
     pc: RTCPeerConnectionLike | null;
     remoteStream: MediaStreamLike | null;
     pendingOffer: RTCSessionDescriptionInit | null;
+    /** 收到 call request 后，用户已接受但仍在等待 Hash/offer。 */
+    callRequestAccepted: boolean;
+    /** 已为本次 call 发布 Hash 请求，等待对端 offer。 */
+    hashRequestPublished: boolean;
     /** peer connection 已 connected 标志位；用于区分 `connecting` 与 `connected`。 */
     pcConnected: boolean;
     /**
@@ -452,30 +594,321 @@ export function createWebrtcService(input: {
      * 而不是停留在 `inviting` / `incoming`。
      */
     negotiated: boolean;
+    /** 防止来电通知和迟到 offer 同时触发两次媒体授权。 */
+    acceptPromise?: Promise<void>;
   }
   let active: ActiveSession | null = null;
+  interface KnownHashRequest {
+    publisherPublicKeyHex: string;
+    hash: string;
+    expiresAtMs: number;
+  }
+  /** Coordinator 已验签的 Hash 请求；只保存短期关系证据，不保存文件内容。 */
+  const knownHashRequests = new Map<string, KnownHashRequest>();
 
   interface ActiveTransfer {
+    /** 对应本次 DataChannel offer 的真实 Hash 请求编号；握手完成前为空。 */
+    requestMessageId: string | null;
+    /** ChannelProtocol 32-byte base64url session_id。 */
     sessionId: string;
     direction: "outgoing" | "incoming";
     remotePublicKeyHex: string;
     ownerPublicKeyHex: string | null;
+    /** 创建时捕获的 owner generation，防止切换密钥后旧异步操作继续推进。 */
+    ownerGeneration: number;
     startedAtMs: number;
     kind: "image" | "file";
     fileName?: string;
     mimeType?: string;
     byteLength: number;
-    pc: RTCPeerConnectionLike;
+    /** 文件字节 Hash；只有目标发布该 Hash 请求后才创建 offer。 */
+    contentHash: string;
+    pc: RTCPeerConnectionLike | null;
     channel: DataChannelLike | null;
     pendingOffer: RTCSessionDescriptionInit | null;
+    /** 目标 owner 已发布 Hash 请求后才允许创建 offer。 */
+    hashRequestPublished: boolean;
     pendingChunks: Uint8Array[];
     pendingMeta: { kind: "image" | "file"; fileName?: string; mimeType?: string; byteLength: number } | null;
+    /** 已按序接收的下一个分片序号。 */
+    expectedSeq: number;
+    /** 已接收的原始字节数，始终不得超过 byteLength。 */
+    receivedBytes: number;
+    /** 出站端已发送 transfer_end，等待接收端验证后的完成确认。 */
+    awaitingCompletion: boolean;
+    /** 防止 DataChannel open 回调和 readyState 检查重复发送。 */
+    payloadSending: boolean;
+    /** 最近一次传输活动的释放定时器。 */
+    idleTimer?: ReturnType<typeof setTimeout>;
     blob?: Blob;
     settled: boolean;
     resolve?: () => void;
     reject?: (err: Error) => void;
   }
   let activeTransfer: ActiveTransfer | null = null;
+  interface PendingTransferRequest {
+    requesterPublicKeyHex: string;
+    ownerPublicKeyHex: string;
+    /** 收到请求时捕获的 owner generation。 */
+    ownerGeneration: number;
+    hash: string;
+    kind: "image" | "file";
+    byteLength: number;
+    fileName?: string;
+    mimeType?: string;
+    /** 只有用户明确确认后才变为 true。 */
+    accepted: boolean;
+    hashRequestMessageId?: string;
+    /** Hash Publish 尚未返回时先暂存合法 offer，待真实 message_id 确认后处理。 */
+    pendingOffer?: WebrtcInviteSignal;
+    expiresAtMs: number;
+  }
+  interface TransferAcceptanceToken {
+    sessionId: string;
+    ownerGeneration: number;
+    request: PendingTransferRequest;
+  }
+  const pendingTransferRequests = new Map<string, PendingTransferRequest>();
+  const transferRequestRates = new Map<string, { windowStartedAtMs: number; count: number }>();
+  /** 联系人查询是异步的；记录 generation，避免旧查询 finally 删除新 owner 的同键检查。 */
+  const transferRequestChecks = new Map<string, number>();
+  const transferAdmissionInFlightBySender = new Map<string, number>();
+  const transferAdmissionControllers = new Set<AbortController>();
+  let transferAdmissionInFlight = 0;
+  /** 同一时刻只允许一个入站请求进入 Hash Publish；用对象身份防止复用 sessionId 误清理。 */
+  let transferAcceptanceInFlight: TransferAcceptanceToken | null = null;
+  const isTransferSenderAllowed = input.isTransferSenderAllowed ?? (() => false);
+  let pendingTransferPruneTimer: ReturnType<typeof setTimeout> | undefined;
+  let disposed = false;
+  /** 每次 active owner 变化或 service dispose 都递增，作为异步操作的生命周期栅栏。 */
+  let ownerGeneration = 0;
+
+  function pruneKnownHashRequests(): void {
+    const now = env.now();
+    for (const [messageId, request] of knownHashRequests) {
+      if (request.expiresAtMs <= now) knownHashRequests.delete(messageId);
+    }
+    while (knownHashRequests.size > 512) {
+      const first = knownHashRequests.keys().next().value as string | undefined;
+      if (first === undefined) break;
+      knownHashRequests.delete(first);
+    }
+  }
+
+  function rememberKnownHashRequest(message: { publisherPublicKeyHex: string; messageId: string; content: JSONValue }): void {
+    if (message.content === null || typeof message.content !== "object" || Array.isArray(message.content)) return;
+    const hash = message.content.hash;
+    const locators = message.content.locators;
+    if (typeof hash !== "string" || !/^[0-9a-f]{64}$/.test(hash)
+      || !Array.isArray(locators)
+      || !locators.some((locator) => locator !== null && typeof locator === "object" && !Array.isArray(locator) && locator.kind === "webrtc-sdp")) return;
+    const publisherPublicKeyHex = message.publisherPublicKeyHex.trim().toLowerCase();
+    knownHashRequests.set(`${publisherPublicKeyHex}\u0000${message.messageId}`, {
+      publisherPublicKeyHex,
+      hash,
+      expiresAtMs: env.now() + 10 * 60 * 1000
+    });
+    pruneKnownHashRequests();
+  }
+
+  const TRANSFER_REQUEST_TYPE = "keymaster.webrtc.transfer.request";
+
+  function isObject(value: JSONValue): value is { [key: string]: JSONValue } {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function isBoundedMetadata(value: unknown, maxLength: number): value is string {
+    return typeof value === "string"
+      && value.length <= maxLength
+      && ![...value].some((char) => char < " " || char === "\u007f");
+  }
+
+  function parseTransferRequest(content: JSONValue): {
+    sessionId: string;
+    hash: string;
+    kind: "image" | "file";
+    byteLength: number;
+    fileName?: string;
+    mimeType?: string;
+  } | null {
+    if (!isObject(content)
+      || content.type !== TRANSFER_REQUEST_TYPE
+      || typeof content.session_id !== "string"
+      || typeof content.hash !== "string"
+      || (content.kind !== "image" && content.kind !== "file")
+      || typeof content.byte_length !== "number"
+      || !Number.isSafeInteger(content.byte_length)
+      || content.byte_length < 0
+      || content.byte_length > MAX_WEBRTC_TRANSFER_BYTES) return null;
+    if (!/^[0-9a-f]{64}$/.test(content.hash)) return null;
+    try { parseSessionID(content.session_id); } catch { return null; }
+    if (content.file_name !== undefined && !isBoundedMetadata(content.file_name, MAX_TRANSFER_METADATA_LENGTH)) return null;
+    if (content.mime_type !== undefined && !isBoundedMetadata(content.mime_type, MAX_TRANSFER_MIME_LENGTH)) return null;
+    return {
+      sessionId: content.session_id,
+      hash: content.hash,
+      kind: content.kind,
+      byteLength: content.byte_length,
+      ...(typeof content.file_name === "string" ? { fileName: content.file_name } : {}),
+      ...(typeof content.mime_type === "string" ? { mimeType: content.mime_type } : {})
+    };
+  }
+
+  function dismissTransferNotice(sessionId: string): void {
+    noticeRegistry.dismiss(`webrtc-transfer-${sessionId}`);
+  }
+
+  function removePendingTransferRequest(sessionId: string): void {
+    if (!pendingTransferRequests.delete(sessionId)) return;
+    dismissTransferNotice(sessionId);
+    if (pendingTransferRequests.size === 0 && pendingTransferPruneTimer !== undefined) {
+      clearTimeout(pendingTransferPruneTimer);
+      pendingTransferPruneTimer = undefined;
+    }
+  }
+
+  function removePendingTransferRequestIfCurrent(
+    sessionId: string,
+    expected: PendingTransferRequest
+  ): void {
+    if (pendingTransferRequests.get(sessionId) !== expected) return;
+    removePendingTransferRequest(sessionId);
+  }
+
+  function schedulePendingTransferPrune(): void {
+    if (disposed || pendingTransferPruneTimer !== undefined || pendingTransferRequests.size === 0) return;
+    pendingTransferPruneTimer = setTimeout(() => {
+      pendingTransferPruneTimer = undefined;
+      prunePendingTransferRequests();
+      schedulePendingTransferPrune();
+    }, TRANSFER_REQUEST_TTL_MS);
+  }
+
+  function prunePendingTransferRequests(): void {
+    const now = env.now();
+    for (const [sessionId, request] of pendingTransferRequests) {
+      if (request.expiresAtMs <= now) removePendingTransferRequest(sessionId);
+    }
+    for (const [sender, rate] of transferRequestRates) {
+      if (rate.windowStartedAtMs + TRANSFER_REQUEST_RATE_WINDOW_MS <= now) transferRequestRates.delete(sender);
+    }
+    while (pendingTransferRequests.size > MAX_PENDING_TRANSFER_REQUESTS) {
+      const first = pendingTransferRequests.keys().next().value as string | undefined;
+      if (first === undefined) break;
+      removePendingTransferRequest(first);
+    }
+    while (transferRequestRates.size > 512) {
+      const first = transferRequestRates.keys().next().value as string | undefined;
+      if (first === undefined) break;
+      transferRequestRates.delete(first);
+    }
+    if (!disposed) schedulePendingTransferPrune();
+  }
+
+  function pendingTransferCountForSender(senderPublicKeyHex: string): number {
+    let count = 0;
+    for (const request of pendingTransferRequests.values()) {
+      if (request.requesterPublicKeyHex === senderPublicKeyHex) count += 1;
+    }
+    return count;
+  }
+
+  function consumeTransferRequestRate(senderPublicKeyHex: string): boolean {
+    prunePendingTransferRequests();
+    const now = env.now();
+    const current = transferRequestRates.get(senderPublicKeyHex);
+    if (!current || current.windowStartedAtMs + TRANSFER_REQUEST_RATE_WINDOW_MS <= now) {
+      transferRequestRates.set(senderPublicKeyHex, { windowStartedAtMs: now, count: 1 });
+      return true;
+    }
+    if (current.count >= TRANSFER_REQUEST_RATE_LIMIT) return false;
+    current.count += 1;
+    return true;
+  }
+
+  function admissionInFlightForSender(senderPublicKeyHex: string): number {
+    return transferAdmissionInFlightBySender.get(senderPublicKeyHex) ?? 0;
+  }
+
+  function reserveTransferAdmission(senderPublicKeyHex: string): boolean {
+    if (disposed
+      || transferAdmissionInFlight >= MAX_TRANSFER_ADMISSION_IN_FLIGHT
+      || admissionInFlightForSender(senderPublicKeyHex) >= MAX_TRANSFER_ADMISSION_IN_FLIGHT_PER_SENDER) {
+      return false;
+    }
+    transferAdmissionInFlight += 1;
+    transferAdmissionInFlightBySender.set(
+      senderPublicKeyHex,
+      admissionInFlightForSender(senderPublicKeyHex) + 1
+    );
+    return true;
+  }
+
+  function releaseTransferAdmission(senderPublicKeyHex: string): void {
+    transferAdmissionInFlight = Math.max(0, transferAdmissionInFlight - 1);
+    const next = admissionInFlightForSender(senderPublicKeyHex) - 1;
+    if (next <= 0) {
+      transferAdmissionInFlightBySender.delete(senderPublicKeyHex);
+    } else {
+      transferAdmissionInFlightBySender.set(senderPublicKeyHex, next);
+    }
+  }
+
+  function cancelTransferAdmissions(): void {
+    for (const controller of transferAdmissionControllers) controller.abort();
+  }
+
+  async function checkTransferSenderAllowed(senderPublicKeyHex: string): Promise<boolean> {
+    const controller = new AbortController();
+    transferAdmissionControllers.add(controller);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      const decision = Promise.resolve().then(() =>
+        isTransferSenderAllowed(senderPublicKeyHex, controller.signal)
+      );
+      const timedOut = new Promise<boolean>((resolve) => {
+        timeout = setTimeout(() => resolve(false), TRANSFER_ADMISSION_TIMEOUT_MS);
+      });
+      const cancelled = new Promise<boolean>((resolve) => {
+        onAbort = () => resolve(false);
+        if (controller.signal.aborted) onAbort();
+        else controller.signal.addEventListener("abort", onAbort, { once: true });
+      });
+      return await Promise.race([decision, timedOut, cancelled]);
+    } catch (error) {
+      log.warn("webrtc.service", "transfer_sender_admission_failed", error);
+      return false;
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (onAbort !== undefined) controller.signal.removeEventListener("abort", onAbort);
+      transferAdmissionControllers.delete(controller);
+      controller.abort();
+    }
+  }
+
+  async function handleIncomingHashRequest(message: {
+    channel: string;
+    publisherPublicKeyHex: string;
+    messageId: string;
+    content: JSONValue;
+  }): Promise<void> {
+    if (disposed) return;
+    if (message.channel !== HASH_REQUEST_CHANNEL) return;
+    rememberKnownHashRequest(message);
+    const publisher = message.publisherPublicKeyHex.trim().toLowerCase();
+    const current = currentOwnerPublicKeyHex();
+    if (!current || publisher === current) return;
+
+    if (activeTransfer && isTransferCurrent(activeTransfer) && activeTransfer.direction === "outgoing"
+      && activeTransfer.requestMessageId === null
+      && activeTransfer.remotePublicKeyHex === publisher
+      && activeTransfer.contentHash === (knownHashRequests.get(`${publisher}\u0000${message.messageId}`)?.hash ?? "")) {
+      activeTransfer.requestMessageId = message.messageId;
+      activeTransfer.hashRequestPublished = true;
+      await beginOutgoingTransferOffer(activeTransfer);
+    }
+  }
 
   /** `ended` 过渡态：UI 在 ttl 内可见，过了之后清空回 idle。 */
   let endedDeadlineAt: number | null = null;
@@ -483,10 +916,31 @@ export function createWebrtcService(input: {
   let remoteNotice: WebrtcRemoteNotice | null = null;
   let lastError: WebrtcBlockReason | null = null;
   const subscribers = new Set<WebrtcSubscriber>();
-  const owner = () => keyspace.active().activePublicKeyHex ?? null;
+  const owner = () => keyspace.active().activePublicKeyHex?.trim().toLowerCase() ?? null;
+  let observedOwnerPublicKeyHex = owner();
 
   function currentOwnerPublicKeyHex(): string | null {
     return owner();
+  }
+
+  function isOwnerFenceCurrent(ownerPublicKeyHex: string | null, generation: number): boolean {
+    return !disposed
+      && ownerGeneration === generation
+      && currentOwnerPublicKeyHex() === ownerPublicKeyHex;
+  }
+
+  function isTransferCurrent(session: ActiveTransfer): boolean {
+    return activeTransfer === session
+      && !session.settled
+      && isOwnerFenceCurrent(session.ownerPublicKeyHex, session.ownerGeneration);
+  }
+
+  function transferFenceError(session: ActiveTransfer): Error {
+    if (disposed) return new Error("service_disposed");
+    if (!isOwnerFenceCurrent(session.ownerPublicKeyHex, session.ownerGeneration)) {
+      return new Error("transfer_owner_changed");
+    }
+    return new Error("transfer_stale");
   }
 
   async function recordCallEnd(session: ActiveSession, status: "completed" | "missed" | "rejected" | "failed"): Promise<void> {
@@ -537,7 +991,7 @@ export function createWebrtcService(input: {
   function resolveCallEndStatus(input: {
     session: ActiveSession;
     origin: "local" | "remote";
-    reason?: WebrtcHangupSignal["reason"];
+    reason?: WebrtcHangupReason;
   }): "completed" | "missed" | "rejected" | "failed" {
     const { session, origin, reason } = input;
     const established = session.negotiated || session.pcConnected;
@@ -600,6 +1054,48 @@ export function createWebrtcService(input: {
     });
   }
 
+  function upsertIncomingTransferNotice(sessionId: string, request: PendingTransferRequest): void {
+    const fileDescription = request.fileName
+      ? `${request.fileName} (${request.byteLength} bytes)`
+      : `${request.byteLength} bytes`;
+    noticeRegistry.upsert({
+      id: `webrtc-transfer-${sessionId}`,
+      sourcePluginId: "webrtc",
+      priority: 90,
+      title: {
+        key: "webrtc.notice.transfer.title",
+        fallback: "Incoming file transfer"
+      },
+      body: {
+        key: "webrtc.notice.transfer.body",
+        fallback: `${request.requesterPublicKeyHex}: ${request.kind} ${fileDescription}`
+      },
+      createdAtMs: env.now(),
+      routeTo: `/message/${encodeURIComponent(request.requesterPublicKeyHex)}`,
+      dismissible: false,
+      actions: [
+        {
+          id: "accept-transfer",
+          label: { key: "webrtc.notice.transfer.accept", fallback: "Accept transfer" },
+          variant: "primary",
+          run: async () => {
+            // 通知可能在 owner 切换后才执行；捕获请求对象，不能只用远端可复用的 sessionId。
+            await acceptIncomingTransferForRequest(sessionId, request);
+          },
+        },
+        {
+          id: "reject-transfer",
+          label: { key: "webrtc.notice.transfer.reject", fallback: "Reject transfer" },
+          variant: "secondary",
+          run: async () => {
+            // 旧通知的拒绝动作也只能删除它创建的那一个请求。
+            await rejectIncomingTransferForRequest(sessionId, request);
+          },
+        }
+      ]
+    });
+  }
+
   function snapshot(): WebrtcSessionSnapshot {
     let phase: WebrtcSessionPhase = "idle";
     if (active) {
@@ -621,7 +1117,7 @@ export function createWebrtcService(input: {
       hasLocalStream: !!active?.localStream,
       hasRemoteStream: !!active?.remoteStream,
       remoteNotice,
-      serviceReady: endpoint.isReady(),
+      serviceReady: channel.isReady(),
       lastError
     };
   }
@@ -672,27 +1168,11 @@ export function createWebrtcService(input: {
     emit();
   }
 
-  function clearTransfer(): void {
-    const session = activeTransfer;
-    activeTransfer = null;
-    if (!session) return;
-    try {
-      session.channel?.close();
-    } catch {
-      // ignore
-    }
-    try {
-      session.pc.close();
-    } catch {
-      // ignore
-    }
-  }
-
   /**
-   * 主动挂断：先把 ended 标记打开，再异步发 hangup 信令；发完（或失败）
-   * **不**再做额外 emit——`clearActive` 已经 emit 了一次给 UI。
+   * 主动挂断只改变本地会话和 RTCPeerConnection 状态。
+   * ChannelProtocol WebRTC V1 没有 hangup 分支，不能发送私造控制消息。
    */
-  async function doHangup(reason: WebrtcHangupSignal["reason"]): Promise<void> {
+  async function doHangup(reason: WebrtcHangupReason): Promise<void> {
     const session = active;
     if (!session) {
       // 没有活动会话时，如果 UI 点了 hangup → 至少不要让 UI 卡住；走清场。
@@ -710,389 +1190,303 @@ export function createWebrtcService(input: {
       return;
     }
     await recordCallEnd(session, resolveCallEndStatus({ session, origin: "local", reason }));
-    // 先同步清场 + emit，再异步发 hangup；UI 立刻看到 ended，不再卡 inviting。
+    // 先同步清场 + emit；V1 没有 hangup wire 分支，远端依靠 RTC 状态/超时收敛。
     clearActive({ showEndedPhase: true });
-    const envBase = buildEnvelopeBase({ sessionId: session.sessionId, nowMs: env.now() });
-    const body = serializeSignal({
-      ...envBase,
-      type: "hangup",
-      reason
-    });
-    try {
-      await endpoint.sendMessage({
-        recipientPublicKeyHex: session.remotePublicKeyHex,
-        recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-        contentType: "text/plain",
-        body,
-        clientMessageId: `km-wbrtc-hangup-${envBase.sessionId}`,
-        createdAtMs: envBase.createdAtMs
-      });
-    } catch (err) {
-      log.warn("webrtc.service", "hangup_send_failed", err);
-    }
+    void reason;
   }
 
   /* ----- 入站信令处理 ----- */
 
-  function handleIncoming(msg: AppMsgMessage): void {
-    const sig = tryParseSignal(msg);
-    if (!sig) return;
-    if (isSignalExpired(sig, env.now())) return;
-    const remote = msg.senderPublicKeyHex;
-    if (
-      sig.type === "transfer_invite" ||
-      sig.type === "transfer_answer" ||
-      sig.type === "transfer_reject" ||
-      sig.type === "ice"
-    ) {
-      switch (sig.type) {
-        case "transfer_invite":
-          void onRemoteTransferInvite(sig, remote).catch((err) => {
-            log.warn("webrtc.service", "on_remote_transfer_invite_failed", err);
-          });
-          return;
-        case "transfer_answer":
-        case "transfer_reject":
-        case "ice": {
-          const localTransferSession = activeTransfer?.sessionId ?? null;
-          if (localTransferSession === sig.sessionId) {
-            if (sig.type === "transfer_answer") {
-              void onRemoteTransferAnswer(sig).catch((err) => {
-                log.warn("webrtc.service", "on_remote_transfer_answer_failed", err);
-              });
-              return;
-            }
-            if (sig.type === "transfer_reject") {
-              void onRemoteTransferReject(sig).catch((err) => {
-                log.warn("webrtc.service", "on_remote_transfer_reject_failed", err);
-              });
-              return;
-            }
-            void onRemoteTransferIce(sig).catch((err) => {
-              log.warn("webrtc.service", "on_remote_transfer_ice_failed", err);
-            });
-            return;
-          }
-          if (sig.type !== "ice") return;
-          break;
-        }
-      }
-    }
-    const localSession = active?.sessionId ?? null;
-    if (!isAcceptableRemoteSessionId(sig, localSession)) return;
-    switch (sig.type) {
-      case "invite":
-        void onRemoteInvite(sig, remote).catch((err) => {
-          log.warn("webrtc.service", "on_remote_invite_failed", err);
-          lastError = "invalid_state";
-          emit();
-        });
-        return;
-      case "answer":
-        void onRemoteAnswer(sig).catch((err) => {
-          log.warn("webrtc.service", "on_remote_answer_failed", err);
-          lastError = "invalid_state";
-        });
-        return;
-      case "ice":
-        void onRemoteIce(sig).catch((err) => {
-          log.warn("webrtc.service", "on_remote_ice_failed", err);
-        });
-        return;
-      case "reject":
-        onRemoteReject(sig, remote);
-        return;
-      case "busy":
-        onRemoteBusy(remote);
-        return;
-      case "hangup":
-        onRemoteHangup(sig);
-        return;
-      case "fallback_required":
-        onRemoteFallbackRequired(sig, remote);
-        return;
-    }
-  }
-
-  async function onRemoteInvite(
-    sig: WebrtcInviteSignal,
-    remote: string
+  async function handleIncomingTransferRequest(
+    transferRequest: ReturnType<typeof parseTransferRequest> & object,
+    remotePublicKeyHex: string
   ): Promise<void> {
-    if (active) {
-      await sendSimpleSignal(remote, "busy", sig.sessionId, "busy");
-      return;
+    if (disposed) return;
+    const currentOwner = currentOwnerPublicKeyHex();
+    if (!currentOwner || currentOwner === remotePublicKeyHex) return;
+    const capturedOwnerGeneration = ownerGeneration;
+    prunePendingTransferRequests();
+    if (active || activeTransfer || pendingTransferRequests.has(transferRequest.sessionId)) return;
+    if (pendingTransferCountForSender(remotePublicKeyHex) >= MAX_PENDING_TRANSFER_REQUESTS_PER_SENDER) return;
+    if (!consumeTransferRequestRate(remotePublicKeyHex)) return;
+    const checkKey = `${remotePublicKeyHex}\u0000${transferRequest.sessionId}`;
+    if (transferRequestChecks.has(checkKey)) return;
+    if (!reserveTransferAdmission(remotePublicKeyHex)) return;
+    transferRequestChecks.set(checkKey, capturedOwnerGeneration);
+    try {
+      // 联系人准入在用户确认之前执行；即使准入通过，也只建立本地
+      // 有界通知，不调用 publishHashRequest、不签名、不创建 PeerConnection。
+      if (!isOwnerFenceCurrent(currentOwner, capturedOwnerGeneration)) return;
+      if (!await checkTransferSenderAllowed(remotePublicKeyHex)) return;
+      if (!isOwnerFenceCurrent(currentOwner, capturedOwnerGeneration)) return;
+      const ownerAfterCheck = currentOwnerPublicKeyHex();
+      if (!ownerAfterCheck || ownerAfterCheck !== currentOwner
+        || ownerGeneration !== capturedOwnerGeneration || disposed) return;
+      prunePendingTransferRequests();
+      if (active || activeTransfer || pendingTransferRequests.size >= MAX_PENDING_TRANSFER_REQUESTS) return;
+      if (pendingTransferCountForSender(remotePublicKeyHex) >= MAX_PENDING_TRANSFER_REQUESTS_PER_SENDER) return;
+      const request: PendingTransferRequest = {
+        requesterPublicKeyHex: remotePublicKeyHex,
+        ownerPublicKeyHex: ownerAfterCheck,
+        ownerGeneration: capturedOwnerGeneration,
+        hash: transferRequest.hash,
+        kind: transferRequest.kind,
+        byteLength: transferRequest.byteLength,
+        fileName: transferRequest.fileName,
+        mimeType: transferRequest.mimeType,
+        accepted: false,
+        expiresAtMs: env.now() + TRANSFER_REQUEST_TTL_MS
+      };
+      pendingTransferRequests.set(transferRequest.sessionId, request);
+      schedulePendingTransferPrune();
+      upsertIncomingTransferNotice(transferRequest.sessionId, request);
+    } finally {
+      if (transferRequestChecks.get(checkKey) === capturedOwnerGeneration) {
+        transferRequestChecks.delete(checkKey);
+      }
+      releaseTransferAdmission(remotePublicKeyHex);
     }
-    if (sig.mode === "audio") {
-      let stream: MediaStreamLike;
-      try {
-        stream = await env.getUserMedia({ audio: true, video: false });
-      } catch {
-        await sendSimpleSignal(
-          remote,
-          "reject",
-          sig.sessionId,
-          "audio_unavailable"
-        );
+  }
+
+  function handleIncoming(msg: ChannelPrivateMessageEvent): void {
+    if (disposed) return;
+    const remote = msg.publisherPublicKeyHex.trim().toLowerCase();
+    if (msg.protocol === APP_MESSAGE_PROTOCOL) {
+      // 旧版呼叫请求没有对应的正式 ChannelProtocol 会合协议；不能把它
+      // 转换成 Hash 请求或来电状态，也不能因此触发设备权限申请。
+      if (isObject(msg.content) && msg.content.type === "keymaster.webrtc.call.request") return;
+      const transferRequest = parseTransferRequest(msg.content);
+      if (transferRequest) {
+        void handleIncomingTransferRequest(transferRequest, remote).catch((error) => {
+          log.warn("webrtc.service", "incoming_transfer_request_failed", error);
+        });
         return;
       }
-      let parsedOffer: RTCSessionDescriptionInit;
-      try {
-        parsedOffer = JSON.parse(sig.sdp) as RTCSessionDescriptionInit;
-      } catch {
-        stream.stop();
-        await sendSimpleSignal(remote, "reject", sig.sessionId, "invalid_state");
+      return;
+    }
+    if (msg.protocol !== WEBRTC_SIGNAL_PROTOCOL) return;
+    const sig = tryParseSignal(msg.content);
+    if (!sig) return;
+    if (sig.signal.type === "offer") {
+      if (activeTransfer) return;
+      if (isDataChannelOffer(sig.signal.sdp)) {
+        void onRemoteTransferOffer(sig as WebrtcInviteSignal, remote).catch((err) => {
+          log.warn("webrtc.service", "on_remote_transfer_offer_failed", err);
+        });
+      } else {
+        // 音视频呼叫协议未正式注册；尤其不能接受没有前置呼叫请求的
+        // 直接 offer。文件传输仍走独立的 data-channel + 文件 Hash 关系。
         return;
       }
-      active = {
-        sessionId: sig.sessionId,
-        direction: "incoming",
-        mode: "audio",
-        remotePublicKeyHex: remote,
-        ownerPublicKeyHex: currentOwnerPublicKeyHex(),
-        startedAtMs: env.now(),
-        localStream: stream,
-        pc: null,
-        remoteStream: null,
-        pendingOffer: parsedOffer,
-        pcConnected: false,
-        negotiated: false
-      };
-      emit();
-      upsertIncomingNotice(active);
       return;
     }
-    // mode === "video"
-    let parsedOfferVideo: RTCSessionDescriptionInit;
-    try {
-      parsedOfferVideo = JSON.parse(sig.sdp) as RTCSessionDescriptionInit;
-    } catch {
-      await sendSimpleSignal(remote, "reject", sig.sessionId, "invalid_state");
-      return;
-    }
-    try {
-      const stream = await env.getUserMedia({ audio: true, video: true });
-      active = {
-        sessionId: sig.sessionId,
-        direction: "incoming",
-        mode: "video",
-        remotePublicKeyHex: remote,
-        ownerPublicKeyHex: currentOwnerPublicKeyHex(),
-        startedAtMs: env.now(),
-        localStream: stream,
-        pc: null,
-        remoteStream: null,
-        pendingOffer: parsedOfferVideo,
-        pcConnected: false,
-        negotiated: false
-      };
-      emit();
-      upsertIncomingNotice(active);
-      return;
-    } catch {
-      try {
-        const audioOnly = await env.getUserMedia({ audio: true, video: false });
-        audioOnly.stop();
-        await sendSimpleSignal(
-          remote,
-          "fallback_required",
-          sig.sessionId,
-          "video_unavailable",
-          { suggestedMode: "audio" }
-        );
+
+    const transferLocal = activeTransfer?.requestMessageId
+      ? { requestMessageId: activeTransfer.requestMessageId, sessionId: activeTransfer.sessionId }
+      : null;
+    if (transferLocal
+      && activeTransfer
+      && remote === activeTransfer.remotePublicKeyHex
+      && isAcceptableRemoteSession(sig, transferLocal)) {
+      if (sig.signal.type === "answer") {
+        void onRemoteTransferAnswer(sig as WebrtcAnswerSignal).catch((err) => {
+          log.warn("webrtc.service", "on_remote_transfer_answer_failed", err);
+        });
         return;
-      } catch {
-        await sendSimpleSignal(remote, "reject", sig.sessionId, "audio_unavailable");
+      }
+      if (sig.signal.type === "ice-candidate") {
+        void onRemoteTransferIce(sig as WebrtcIceSignal).catch((err) => {
+          log.warn("webrtc.service", "on_remote_transfer_ice_failed", err);
+        });
         return;
+      }
+      if (sig.signal.type === "end-of-candidates") {
+        void onRemoteTransferEndOfCandidates(sig as WebrtcEndOfCandidatesSignal).catch(() => undefined);
       }
     }
   }
 
-  /**
-   * 接收方接受 incoming 会话：建 pc、接入本地流、setRemoteDescription(offer)、
-   * createAnswer、发 answer。
-   */
   async function acceptIncoming(): Promise<void> {
-    if (!active || active.direction !== "incoming") {
-      throw new Error("service_not_ready");
-    }
-    const session = active;
-    if (!session.pendingOffer || !session.localStream) {
-      throw new Error("invalid_state");
-    }
-    const offer = session.pendingOffer;
-    const cfg = configToRTCConfig(store.snapshot());
-    const pc = env.createPeerConnection(cfg);
-    pc.replaceLocalStream(session.localStream);
-    pc.onIceCandidate((c) => {
-      void sendIce(session.sessionId, session.remotePublicKeyHex, c, "call").catch(() => undefined);
-    });
-    pc.onConnectionStateChange((s) => {
-      const cur = active;
-      if (!cur || cur.sessionId !== session.sessionId) return;
-      if (s === "connected") {
-        cur.pcConnected = true;
-        emit();
-        return;
-      }
-      if (s === "failed" || s === "disconnected" || s === "closed") {
-        void doHangup("ice_disconnected");
-      }
-    });
-    pc.onTrack((stream) => {
-      const cur = active;
-      if (cur && cur.sessionId === session.sessionId) {
-        cur.remoteStream = stream;
-        cur.pcConnected = true;
-        emit();
-      }
-    });
-    try {
-      await pc.setRemoteDescription(offer);
-    } catch {
-      // 失败回滚都统一走 clearActive —— 确保 UI 立刻看到 idle。
-      clearActive();
-      await sendSimpleSignal(
-        session.remotePublicKeyHex,
-        "reject",
-        session.sessionId,
-        "invalid_state"
-      );
-      return;
-    }
-    let answer: RTCSessionDescriptionInit;
-    try {
-      answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-    } catch {
-      clearActive();
-      return;
-    }
-    session.pc = pc;
-    session.pendingOffer = null;
-    const envBase = buildEnvelopeBase({ sessionId: session.sessionId, nowMs: env.now() });
-    const body = serializeSignal({
-      ...envBase,
-      type: "answer",
-      mode: session.mode,
-      sdp: JSON.stringify(answer)
-    });
-    try {
-      await endpoint.sendMessage({
-        recipientPublicKeyHex: session.remotePublicKeyHex,
-        recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-        contentType: "text/plain",
-        body,
-        clientMessageId: `km-wbrtc-answer-${envBase.sessionId}`,
-        createdAtMs: envBase.createdAtMs
-      });
-    } catch (err) {
-      log.warn("webrtc.service", "send_answer_failed", err);
-      clearActive();
-      return;
-    }
-    // 接听端已经发出 answer → 已进入协商阶段；UI 立刻从 `incoming` 切到
-    // `connecting`，不再卡 `incoming`。
-    session.negotiated = true;
+    // ChannelProtocol 目前只有文件 Hash 请求的会合关系；没有正式的
+    // 呼叫请求子协议，因此用户接受动作也必须 fail-closed，不能申请设备。
+    lastError = "call_protocol_unavailable";
     emit();
+    throw new Error("call_protocol_unavailable");
   }
 
   async function rejectIncoming(): Promise<void> {
     if (!active || active.direction !== "incoming") return;
     const session = active;
     await recordCallEnd(session, "rejected");
-    await sendSimpleSignal(
-      session.remotePublicKeyHex,
-      "reject",
-      session.sessionId,
-      "declined"
-    );
+    // ChannelProtocol WebRTC V1 没有 reject 分支；拒接只在本地清理会话。
     clearActive();
   }
 
-  async function onRemoteAnswer(sig: WebrtcAnswerSignal): Promise<void> {
-    if (!active || active.sessionId !== sig.sessionId) return;
-    if (!active.pc) return;
-    let parsed: RTCSessionDescriptionInit;
-    try {
-      parsed = JSON.parse(sig.sdp) as RTCSessionDescriptionInit;
-    } catch {
+  async function acceptIncomingTransferForRequest(
+    sessionId: string,
+    expectedRequest?: PendingTransferRequest
+  ): Promise<void> {
+    if (disposed) throw new Error("service_disposed");
+    prunePendingTransferRequests();
+    const request = pendingTransferRequests.get(sessionId);
+    if (expectedRequest !== undefined && request !== expectedRequest) {
+      // 这是旧 owner / 旧通知的晚到操作；不能观察或修改同 sessionId 的新请求。
       return;
     }
+    if (!request || request.expiresAtMs <= env.now()) {
+      if (request) removePendingTransferRequestIfCurrent(sessionId, request);
+      else removePendingTransferRequest(sessionId);
+      throw new Error("transfer_request_expired");
+    }
+    const currentOwner = currentOwnerPublicKeyHex();
+    if (!currentOwner
+      || currentOwner !== request.ownerPublicKeyHex
+      || request.ownerGeneration !== ownerGeneration) {
+      removePendingTransferRequestIfCurrent(sessionId, request);
+      throw new Error("transfer_owner_changed");
+    }
+    if (active || activeTransfer) throw new Error("busy_local");
+    if (request.accepted) return;
+    if (transferAcceptanceInFlight !== null) throw new Error("busy_local");
+
+    const acceptanceToken: TransferAcceptanceToken = {
+      sessionId,
+      ownerGeneration,
+      request
+    };
+    transferAcceptanceInFlight = acceptanceToken;
+    request.accepted = true;
+    dismissTransferNotice(sessionId);
     try {
-      await active.pc.setRemoteDescription(parsed);
-      // 呼出端：answer 接收并 setRemoteDescription 成功 → 协商完成，UI
-      // 从 `inviting` 切到 `connecting`。
-      if (active && active.sessionId === sig.sessionId) {
-        active.negotiated = true;
-        emit();
+      // 只有这一条显式用户确认路径可以触发 owner 签名和公开 Hash Publish。
+      const hashRequestMessageId = await publishHashRequest(request.hash);
+      const current = pendingTransferRequests.get(sessionId);
+      if (!current
+        || current !== request
+        || current.expiresAtMs <= env.now()
+        || current.ownerPublicKeyHex !== currentOwnerPublicKeyHex()
+        || current.ownerGeneration !== ownerGeneration
+        || disposed) {
+        removePendingTransferRequestIfCurrent(sessionId, request);
+        throw new Error("transfer_owner_changed");
       }
-    } catch {
-      // 非法 answer 静默；超时自然挂断。
+      current.hashRequestMessageId = hashRequestMessageId;
+      const pendingOffer = current.pendingOffer;
+      current.pendingOffer = undefined;
+      if (pendingOffer) {
+        await onRemoteTransferOffer(pendingOffer, current.requesterPublicKeyHex);
+      }
+    } catch (error) {
+      removePendingTransferRequestIfCurrent(sessionId, request);
+      log.warn("webrtc.service", "transfer_hash_request_failed", error);
+      throw error instanceof Error ? error : new Error(String(error));
+    } finally {
+      if (transferAcceptanceInFlight === acceptanceToken) transferAcceptanceInFlight = null;
     }
   }
 
-  async function onRemoteIce(sig: WebrtcIceSignal): Promise<void> {
-    if (!active || active.sessionId !== sig.sessionId) return;
-    if (!active.pc) return;
-    try {
-      await active.pc.addIceCandidate(sig.candidate);
-    } catch {
-      // ignore
+  async function acceptIncomingTransfer(sessionId: string): Promise<void> {
+    const expectedRequest = pendingTransferRequests.get(sessionId);
+    await acceptIncomingTransferForRequest(sessionId, expectedRequest);
+  }
+
+  async function rejectIncomingTransferForRequest(
+    sessionId: string,
+    expectedRequest?: PendingTransferRequest
+  ): Promise<void> {
+    // 拒绝不发送自定义 reject wire；删除本地待确认状态即可，避免引入
+    // ChannelProtocol 未定义的业务信令分支。
+    if (expectedRequest !== undefined) {
+      removePendingTransferRequestIfCurrent(sessionId, expectedRequest);
+      return;
     }
+    removePendingTransferRequest(sessionId);
   }
 
-  function onRemoteReject(sig: WebrtcRejectSignal, remote: string): void {
-    if (!active) return;
-    void recordCallEnd(active, "rejected");
-    clearActive({ showEndedPhase: true });
-    remoteNotice = {
-      kind: "rejected",
-      message: `peer rejected: ${sig.reason}`
-    };
-    void remote;
-    emit();
-  }
-
-  function onRemoteBusy(remote: string): void {
-    if (!active) return;
-    void recordCallEnd(active, "missed");
-    clearActive({ showEndedPhase: true });
-    remoteNotice = {
-      kind: "busy",
-      message: "peer is busy"
-    };
-    void remote;
-    emit();
-  }
-
-  function onRemoteHangup(sig: WebrtcHangupSignal): void {
-    if (!active) return;
-    void recordCallEnd(active, resolveCallEndStatus({ session: active, origin: "remote", reason: sig.reason }));
-    clearActive({ showEndedPhase: true });
-    if (sig.reason === "ice_disconnected") {
-      // 走诊断通道；UI 自行决定是否展示。
-    }
-  }
-
-  function onRemoteFallbackRequired(
-    sig: WebrtcFallbackRequiredSignal,
-    remote: string
-  ): void {
-    if (!active) return;
-    void recordCallEnd(active, "missed");
-    clearActive({ showEndedPhase: true });
-    remoteNotice = {
-      kind: "fallback_suggested",
-      message:
-        "peer has no video capability; you can fall back to audio chat",
-      suggestedMode: sig.suggestedMode
-    };
-    void remote;
-    emit();
+  async function rejectIncomingTransfer(sessionId: string): Promise<void> {
+    await rejectIncomingTransferForRequest(sessionId, pendingTransferRequests.get(sessionId));
   }
 
   function isTransferActive(): boolean {
     return activeTransfer !== null;
+  }
+
+  function closeTransferResources(session: ActiveTransfer): void {
+    if (session.idleTimer !== undefined) {
+      clearTimeout(session.idleTimer);
+      session.idleTimer = undefined;
+    }
+    try {
+      session.channel?.close();
+    } catch {
+      // ignore
+    }
+    try {
+      session.pc?.close();
+    } catch {
+      // ignore
+    }
+    session.channel = null;
+    session.pc = null;
+    session.pendingChunks = [];
+    session.pendingMeta = null;
+    session.receivedBytes = 0;
+    session.awaitingCompletion = false;
+    session.payloadSending = false;
+    session.blob = undefined;
+  }
+
+  function touchTransferActivity(session: ActiveTransfer): void {
+    if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
+    if (session.idleTimer !== undefined) clearTimeout(session.idleTimer);
+    session.idleTimer = setTimeout(() => {
+      if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
+      finalizeTransferWithFailure(session, new Error("transfer_idle_timeout"));
+    }, TRANSFER_IDLE_TIMEOUT_MS);
+  }
+
+  async function waitForTransferBuffer(session: ActiveTransfer, payloadLength: number): Promise<void> {
+    const channel = session.channel;
+    if (!channel || typeof channel.bufferedAmount !== "number" || !Number.isFinite(channel.bufferedAmount)) return;
+    if (channel.bufferedAmount + payloadLength <= TRANSFER_BUFFER_HIGH_WATER_MARK) return;
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let pollTimer: ReturnType<typeof setTimeout> | undefined;
+      let timeout: ReturnType<typeof setTimeout>;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (pollTimer !== undefined) clearTimeout(pollTimer);
+        if (error) reject(error); else resolve();
+      };
+      timeout = setTimeout(() => finish(new Error("transfer_backpressure_timeout")), TRANSFER_BUFFER_WAIT_TIMEOUT_MS);
+      const check = (): void => {
+        if (!isTransferCurrent(session) || session.channel !== channel) {
+          finish(transferFenceError(session));
+          return;
+        }
+        const bufferedAmount = channel.bufferedAmount;
+        if (typeof bufferedAmount !== "number" || !Number.isFinite(bufferedAmount)
+          || bufferedAmount + payloadLength <= TRANSFER_BUFFER_LOW_WATER_MARK) {
+          finish();
+          return;
+        }
+        pollTimer = setTimeout(check, 25);
+      };
+      check();
+    });
+  }
+
+  async function sendTransferPayload(session: ActiveTransfer, payload: string): Promise<void> {
+    const channel = session.channel;
+    if (!channel || channel.readyState !== "open") throw new Error("transfer_invalid_state");
+    await waitForTransferBuffer(session, payload.length);
+    if (!isTransferCurrent(session) || session.channel !== channel || channel.readyState !== "open") {
+      throw transferFenceError(session);
+    }
+    channel.send(payload);
+    touchTransferActivity(session);
   }
 
   function finalizeTransferWithFailure(session: ActiveTransfer, err: Error): void {
@@ -1101,17 +1495,8 @@ export function createWebrtcService(input: {
     if (activeTransfer?.sessionId === session.sessionId) {
       activeTransfer = null;
     }
-    try {
-      session.channel?.close();
-    } catch {
-      // ignore
-    }
-    try {
-      session.pc.close();
-    } catch {
-      // ignore
-    }
-    void recordTransferEnd({ session, status: "failed", blob: session.blob }).catch(() => undefined);
+    closeTransferResources(session);
+    void recordTransferEnd({ session, status: "failed" }).catch(() => undefined);
     session.reject?.(err);
     emit();
   }
@@ -1122,11 +1507,13 @@ export function createWebrtcService(input: {
     if (activeTransfer?.sessionId === session.sessionId) {
       activeTransfer = null;
     }
+    const completedBlob = blob ?? session.blob;
     void recordTransferEnd({
       session,
       status: "completed",
-      blob: blob ?? session.blob
+      blob: completedBlob
     }).catch(() => undefined);
+    closeTransferResources(session);
     session.resolve?.();
     emit();
   }
@@ -1139,84 +1526,125 @@ export function createWebrtcService(input: {
     return bytesToBase64(bytes);
   }
 
-  async function sendTransferSignal(
-    remotePublicKeyHex: string,
-    sessionId: string,
-    type: "transfer_invite" | "transfer_answer" | "transfer_reject",
-    payload: Record<string, unknown>
-  ): Promise<void> {
-    const envBase = buildEnvelopeBase({ sessionId, nowMs: env.now() });
-    const body = serializeSignal({
-      ...envBase,
-      type,
-      ...payload
-    } as WebrtcTransferInviteSignal | WebrtcTransferAnswerSignal | WebrtcTransferRejectSignal);
-    await endpoint.sendMessage({
-      recipientPublicKeyHex: remotePublicKeyHex,
-      recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-      contentType: "text/plain",
-      body,
-      clientMessageId: `km-wrtc-${type}-${sessionId}`,
-      createdAtMs: envBase.createdAtMs
-    });
+  async function handleTransferWireMessage(session: ActiveTransfer, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
+    if (typeof data !== "string") throw new Error("transfer_invalid_message");
+    const msg = parseTransferWireMessage(data);
+    if (!msg || msg.sessionId !== session.sessionId) throw new Error("transfer_invalid_message");
+    touchTransferActivity(session);
+
+    if (msg.type === "transfer_begin") {
+      if (session.direction !== "incoming"
+        || session.pendingMeta !== null
+        || msg.kind !== session.kind
+        || msg.byteLength !== session.byteLength) {
+        throw new Error("transfer_invalid_begin");
+      }
+      session.pendingMeta = {
+        kind: session.kind,
+        fileName: session.fileName,
+        mimeType: session.mimeType,
+        byteLength: session.byteLength
+      };
+      session.pendingChunks = [];
+      session.expectedSeq = 0;
+      session.receivedBytes = 0;
+      return;
+    }
+
+    if (msg.type === "transfer_chunk") {
+      if (session.direction !== "incoming" || session.pendingMeta === null) {
+        throw new Error("transfer_invalid_chunk");
+      }
+      if (msg.seq !== session.expectedSeq) throw new Error("transfer_invalid_sequence");
+      if (session.expectedSeq >= MAX_WEBRTC_TRANSFER_CHUNKS) throw new Error("transfer_too_many_chunks");
+      let chunk: Uint8Array;
+      try {
+        chunk = decodeTransferBytes(msg.data);
+      } catch {
+        throw new Error("transfer_invalid_chunk");
+      }
+      if (chunk.byteLength === 0 || chunk.byteLength > WEBRTC_TRANSFER_CHUNK_BYTES) {
+        throw new Error("transfer_chunk_too_large");
+      }
+      if (session.receivedBytes + chunk.byteLength > session.byteLength
+        || session.receivedBytes + chunk.byteLength > MAX_WEBRTC_TRANSFER_BYTES) {
+        throw new Error("transfer_size_mismatch");
+      }
+      session.pendingChunks.push(chunk);
+      session.receivedBytes += chunk.byteLength;
+      session.expectedSeq += 1;
+      return;
+    }
+
+    if (msg.type === "transfer_end") {
+      if (session.direction !== "incoming" || !session.pendingMeta) {
+        throw new Error("transfer_invalid_end");
+      }
+      if (session.receivedBytes !== session.byteLength) {
+        throw new Error("transfer_size_mismatch");
+      }
+      const blobParts = session.pendingChunks.map((chunk) =>
+        chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer
+      );
+      const blob = new Blob(blobParts, { type: session.mimeType || "application/octet-stream" });
+      if (blob.size !== session.byteLength) throw new Error("transfer_size_mismatch");
+      // 先释放分片数组，再进行 Web Crypto Hash，避免同时长期保留两份完整内容。
+      session.pendingChunks = [];
+      const receivedHash = await calculateSha256(new Uint8Array(await blob.arrayBuffer()));
+      if (receivedHash !== session.contentHash) throw new Error("transfer_hash_mismatch");
+      await sendTransferPayload(session, serializeTransferWireMessage({
+        type: "transfer_complete",
+        sessionId: session.sessionId,
+        hash: receivedHash,
+        byteLength: session.byteLength
+      }));
+      session.blob = blob;
+      finalizeTransferWithSuccess(session, blob);
+      return;
+    }
+
+    if (msg.type === "transfer_complete") {
+      if (session.direction !== "outgoing" || !session.awaitingCompletion) {
+        throw new Error("transfer_unexpected_complete");
+      }
+      if (msg.byteLength !== session.byteLength || msg.hash !== session.contentHash) {
+        throw new Error("transfer_hash_mismatch");
+      }
+      session.awaitingCompletion = false;
+      finalizeTransferWithSuccess(session, session.blob);
+      return;
+    }
+
+    if (msg.type === "transfer_cancel") {
+      throw new Error(`transfer_cancel: ${msg.reason}`);
+    }
   }
 
   function attachTransferDataChannel(session: ActiveTransfer, channel: DataChannelLike): void {
+    if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
+    if (session.channel && session.channel !== channel) {
+      try { channel.close(); } catch { /* ignore */ }
+      finalizeTransferWithFailure(session, new Error("transfer_multiple_channels"));
+      return;
+    }
     session.channel = channel;
+    touchTransferActivity(session);
+    const startOutgoing = (): void => {
+      if (session.settled || activeTransfer?.sessionId !== session.sessionId || session.direction !== "outgoing") return;
+      if (session.payloadSending) return;
+      void sendOutgoingTransferPayload(session).catch((err) => {
+        finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
+      });
+    };
     channel.onOpen(() => {
-      if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
-      if (session.direction === "outgoing") {
-        void sendOutgoingTransferPayload(session).catch((err) => {
-          finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
-        });
-      }
+      touchTransferActivity(session);
+      startOutgoing();
     });
     channel.onMessage((data) => {
-      if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
-      if (typeof data !== "string") {
-        finalizeTransferWithFailure(session, new Error("transfer_invalid_message"));
-        return;
-      }
-      const msg = parseTransferWireMessage(data);
-      if (!msg || msg.sessionId !== session.sessionId) {
-        finalizeTransferWithFailure(session, new Error("transfer_invalid_message"));
-        return;
-      }
-      if (msg.type === "transfer_begin") {
-        session.pendingMeta = {
-          kind: msg.kind,
-          fileName: msg.fileName,
-          mimeType: msg.mimeType,
-          byteLength: msg.byteLength
-        };
-        session.pendingChunks = [];
-        return;
-      }
-      if (msg.type === "transfer_chunk") {
-        session.pendingChunks.push(decodeTransferBytes(msg.data));
-        return;
-      }
-      if (msg.type === "transfer_end") {
-        const meta = session.pendingMeta;
-        if (!meta) {
-          finalizeTransferWithFailure(session, new Error("transfer_invalid_message"));
-          return;
-        }
-        const blobParts = session.pendingChunks.map((chunk) =>
-          chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer
-        );
-        const blob = new Blob(blobParts, { type: meta.mimeType || "application/octet-stream" });
-        if (blob.size !== meta.byteLength) {
-          finalizeTransferWithFailure(session, new Error("transfer_size_mismatch"));
-          return;
-        }
-        session.blob = blob;
-        finalizeTransferWithSuccess(session, blob);
-        return;
-      }
-      if (msg.type === "transfer_cancel") {
-        finalizeTransferWithFailure(session, new Error(`transfer_cancel: ${msg.reason}`));
-      }
+      void handleTransferWireMessage(session, data).catch((err) => {
+        finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
+      });
     });
     channel.onClose(() => {
       if (session.settled) return;
@@ -1226,6 +1654,7 @@ export function createWebrtcService(input: {
       if (session.settled) return;
       finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
     });
+    if (channel.readyState === "open") startOutgoing();
   }
 
   async function sendOutgoingTransferPayload(session: ActiveTransfer): Promise<void> {
@@ -1236,34 +1665,96 @@ export function createWebrtcService(input: {
     if (!blob) {
       throw new Error("transfer_invalid_state");
     }
-    const begin = serializeTransferWireMessage({
-      type: "transfer_begin",
-      sessionId: session.sessionId,
-      kind: session.kind,
-      fileName: session.fileName,
-      mimeType: session.mimeType,
-      byteLength: session.byteLength
-    });
-    session.channel.send(begin);
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    const chunkSize = 16 * 1024;
-    for (let offset = 0, seq = 0; offset < bytes.length; offset += chunkSize, seq += 1) {
-      const chunk = bytes.slice(offset, offset + chunkSize);
-      const payload = serializeTransferWireMessage({
-        type: "transfer_chunk",
+    if (session.payloadSending) return;
+    if (session.channel.readyState !== "open") throw new Error("transfer_invalid_state");
+    session.payloadSending = true;
+    touchTransferActivity(session);
+    try {
+      const begin = serializeTransferWireMessage({
+        type: "transfer_begin",
         sessionId: session.sessionId,
-        seq,
-        data: encodeTransferBytes(chunk)
+        kind: session.kind,
+        fileName: session.fileName,
+        mimeType: session.mimeType,
+        byteLength: session.byteLength
       });
-      session.channel.send(payload);
+      await sendTransferPayload(session, begin);
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (session.settled || activeTransfer?.sessionId !== session.sessionId || !session.channel) return;
+      if (bytes.byteLength !== session.byteLength || bytes.byteLength > MAX_WEBRTC_TRANSFER_BYTES) {
+        throw new Error("transfer_size_mismatch");
+      }
+      for (let offset = 0, seq = 0; offset < bytes.length; offset += WEBRTC_TRANSFER_CHUNK_BYTES, seq += 1) {
+        if (session.settled || activeTransfer?.sessionId !== session.sessionId) return;
+        const chunk = bytes.slice(offset, offset + WEBRTC_TRANSFER_CHUNK_BYTES);
+        const payload = serializeTransferWireMessage({
+          type: "transfer_chunk",
+          sessionId: session.sessionId,
+          seq,
+          data: encodeTransferBytes(chunk)
+        });
+        await sendTransferPayload(session, payload);
+      }
+      // 必须先建立等待状态，再发送 end，防止测试 fake 同步回传 complete 时产生竞态。
+      session.awaitingCompletion = true;
+      await sendTransferPayload(session,
+        serializeTransferWireMessage({
+          type: "transfer_end",
+          sessionId: session.sessionId
+        })
+      );
+    } finally {
+      session.payloadSending = false;
     }
-    session.channel.send(
-      serializeTransferWireMessage({
-        type: "transfer_end",
-        sessionId: session.sessionId
-      })
-    );
-    finalizeTransferWithSuccess(session, blob);
+  }
+
+  async function beginOutgoingTransferOffer(session: ActiveTransfer): Promise<void> {
+    if (!isTransferCurrent(session) || session.direction !== "outgoing" || !session.requestMessageId || session.pc) return;
+    const requestMessageId = session.requestMessageId;
+    const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
+    session.pc = pc;
+    pc.onIceCandidate((c) => {
+      const currentRequest = session.requestMessageId;
+      if (currentRequest) void sendIce(currentRequest, session.sessionId, session.remotePublicKeyHex, c).catch(() => undefined);
+    });
+    pc.onIceGatheringStateChange((state) => {
+      if (state === "complete" && session.requestMessageId) {
+        void sendEndOfCandidates(session.requestMessageId, session.sessionId, session.remotePublicKeyHex).catch(() => undefined);
+      }
+    });
+    pc.onConnectionStateChange((s) => {
+      if (activeTransfer?.sessionId !== session.sessionId || session.settled) return;
+      if (s === "failed" || s === "disconnected" || s === "closed") {
+        finalizeTransferWithFailure(session, new Error("transfer_connection_failed"));
+      }
+    });
+    pc.onDataChannel((dataChannel) => {
+      if (activeTransfer?.sessionId !== session.sessionId || session.settled) return;
+      attachTransferDataChannel(session, dataChannel);
+    });
+    const dataChannel = pc.createDataChannel("transfer");
+    attachTransferDataChannel(session, dataChannel);
+    let offer: RTCSessionDescriptionInit;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch (err) {
+      finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
+      return;
+    }
+    if (!isTransferCurrent(session) || session.requestMessageId !== requestMessageId) {
+      if (!session.settled) finalizeTransferWithFailure(session, transferFenceError(session));
+      return;
+    }
+    session.pendingOffer = offer;
+    try {
+      await publishSignalBody(
+        session.remotePublicKeyHex,
+        newOfferSignal(requestMessageId, session.sessionId, encodeDescription(offer))
+      );
+    } catch (err) {
+      finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
+    }
   }
 
   async function startOutgoingTransfer(input: {
@@ -1271,30 +1762,42 @@ export function createWebrtcService(input: {
     kind: "image" | "file";
     file: Blob | File;
   }): Promise<void> {
-    if (!endpoint.isReady()) {
+    if (disposed) throw new Error("service_disposed");
+    if (!channel.isReady()) {
       lastError = "service_not_ready";
       throw new Error("service_not_ready");
     }
     if (active || isTransferActive()) {
       throw new Error("busy_local");
     }
-    const sessionId = env.generateSessionId();
-    const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
+    const ownerPublicKeyHex = currentOwnerPublicKeyHex();
+    if (!ownerPublicKeyHex) throw new Error("owner_unavailable");
+    const capturedOwnerGeneration = ownerGeneration;
+    const sessionId = createProtocolSessionId(env);
     const session: ActiveTransfer = {
+      requestMessageId: null,
       sessionId,
       direction: "outgoing",
       remotePublicKeyHex: input.targetPublicKeyHex,
-      ownerPublicKeyHex: currentOwnerPublicKeyHex(),
+      ownerPublicKeyHex,
+      ownerGeneration: capturedOwnerGeneration,
       startedAtMs: env.now(),
       kind: input.kind,
       fileName: "name" in input.file ? input.file.name : undefined,
       mimeType: input.file.type || undefined,
       byteLength: input.file.size,
-      pc,
+      // Hash 尚未完成；session 已先占槽，计算完成后在 owner fence 通过时写入。
+      contentHash: "",
+      pc: null,
       channel: null,
       pendingOffer: null,
+      hashRequestPublished: false,
       pendingChunks: [],
       pendingMeta: null,
+      expectedSeq: 0,
+      receivedBytes: 0,
+      awaitingCompletion: false,
+      payloadSending: false,
       blob: input.file,
       settled: false
     };
@@ -1303,43 +1806,39 @@ export function createWebrtcService(input: {
       session.resolve = resolve;
       session.reject = reject;
     });
-    pc.onIceCandidate((c) => {
-      void sendIce(session.sessionId, session.remotePublicKeyHex, c, "transfer").catch(() => undefined);
-    });
-    pc.onConnectionStateChange((s) => {
-      if (activeTransfer?.sessionId !== session.sessionId || session.settled) return;
-      if (s === "failed" || s === "disconnected" || s === "closed") {
-        finalizeTransferWithFailure(session, new Error("transfer_connection_failed"));
-      }
-    });
-    pc.onDataChannel((channel) => {
-      if (activeTransfer?.sessionId !== session.sessionId || session.settled) return;
-      attachTransferDataChannel(session, channel);
-    });
-    const channel = pc.createDataChannel("transfer");
-    attachTransferDataChannel(session, channel);
-    let offer: RTCSessionDescriptionInit;
+    // Hash / publish 可能在 done 参与 Promise.race 前就失败；预先挂一个
+    // rejection handler，避免 dispose / owner 切换造成未处理拒绝。
+    void done.catch(() => undefined);
     try {
-      offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-    } catch (err) {
-      finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
-      throw err;
-    }
-    session.pendingOffer = offer;
-    try {
-      await sendTransferSignal(session.remotePublicKeyHex, session.sessionId, "transfer_invite", {
-        kind: session.kind,
-        fileName: session.fileName,
-        mimeType: session.mimeType,
-        byteLength: session.byteLength,
-        sdp: JSON.stringify(offer)
+      // activeTransfer 已在第一次 await 前写入；此后任何并发 sendFile 都会看到 busy。
+      const bytes = new Uint8Array(await input.file.arrayBuffer());
+      if (!isTransferCurrent(session)) throw transferFenceError(session);
+      const contentHash = await calculateSha256(bytes);
+      if (!isTransferCurrent(session)) throw transferFenceError(session);
+      session.contentHash = contentHash;
+      // 先请目标 owner 发布 Hash 请求；随后 offer 才能引用真实的
+      // request_message_id，并通过 Coordinator 的关系审查。
+      await channel.publishPrivate({
+        recipientPublicKeyHex: input.targetPublicKeyHex,
+        protocol: APP_MESSAGE_PROTOCOL,
+        content: {
+          type: TRANSFER_REQUEST_TYPE,
+          session_id: sessionId,
+          hash: contentHash,
+          kind: input.kind,
+          byte_length: input.file.size,
+          ...(session.fileName ? { file_name: session.fileName } : {}),
+          ...(session.mimeType ? { mime_type: session.mimeType } : {})
+        }
       });
+      if (!isTransferCurrent(session)) throw transferFenceError(session);
     } catch (err) {
-      finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
-      throw new Error(
-        `transfer_invite_failed: ${err instanceof Error ? err.message : String(err)}`
-      );
+      const error = err instanceof Error ? err : new Error(String(err));
+      finalizeTransferWithFailure(session, error);
+      if (error.message === "service_disposed" || error.message === "transfer_owner_changed") {
+        throw error;
+      }
+      throw new Error("transfer_request_failed");
     }
     const timeout = env.delay(15_000).then(() => {
       if (session.settled) return;
@@ -1349,43 +1848,70 @@ export function createWebrtcService(input: {
     await Promise.race([done, timeout]);
   }
 
-  async function onRemoteTransferInvite(sig: WebrtcTransferInviteSignal, remote: string): Promise<void> {
-    if (active || isTransferActive()) {
-      await sendTransferSignal(remote, sig.sessionId, "transfer_reject", { reason: "busy" });
+  async function onRemoteTransferOffer(sig: WebrtcInviteSignal, remote: string): Promise<void> {
+    if (disposed) return;
+    if (active || isTransferActive()) return;
+    prunePendingTransferRequests();
+    const request = pendingTransferRequests.get(sig.session_id);
+    const currentOwner = currentOwnerPublicKeyHex();
+    if (request && (request.ownerPublicKeyHex !== currentOwner || request.ownerGeneration !== ownerGeneration)) {
+      removePendingTransferRequest(sig.session_id);
       return;
     }
-    if (sig.byteLength > MAX_WEBRTC_TRANSFER_BYTES) {
-      await sendTransferSignal(remote, sig.sessionId, "transfer_reject", { reason: "file_too_large" });
+    if (!request || request.requesterPublicKeyHex !== remote || !request.accepted) {
+      // 在用户确认前可以暂存至一个已经有界的请求记录，但绝不建立
+      // PeerConnection；未匹配真实 Hash message_id 的 offer 后续仍会被丢弃。
+      if (request && !request.accepted && !request.pendingOffer) request.pendingOffer = sig;
       return;
     }
-    let parsedOffer: RTCSessionDescriptionInit;
-    try {
-      parsedOffer = JSON.parse(sig.sdp) as RTCSessionDescriptionInit;
-    } catch {
-      await sendTransferSignal(remote, sig.sessionId, "transfer_reject", { reason: "invalid_state" });
+    if (request.hashRequestMessageId === undefined) {
+      // Coordinator 已经完成 Hash/offer 关系审查，但本地发布 Hash 的
+      // Promise 可能尚未返回真实 message_id。不能丢 offer，也不能用
+      // offer 自带的 request_message_id 冒充本地 Hash 结果。
+      if (!request.pendingOffer) request.pendingOffer = sig;
       return;
     }
+    if (request.hashRequestMessageId !== sig.request_message_id) return;
+    removePendingTransferRequest(sig.session_id);
+    const parsedOffer = decodeDescription(sig.signal.sdp, "offer");
     const pc = env.createPeerConnection(configToRTCConfig(store.snapshot()));
     const session: ActiveTransfer = {
-      sessionId: sig.sessionId,
+      requestMessageId: sig.request_message_id,
+      sessionId: sig.session_id,
       direction: "incoming",
       remotePublicKeyHex: remote,
-      ownerPublicKeyHex: currentOwnerPublicKeyHex(),
+      ownerPublicKeyHex: currentOwner,
+      ownerGeneration: request.ownerGeneration,
       startedAtMs: env.now(),
-      kind: sig.kind,
-      fileName: sig.fileName,
-      mimeType: sig.mimeType,
-      byteLength: sig.byteLength,
+      // 这些字段来自用户确认前展示并校验过的 APP 请求；DataChannel
+      // 的 transfer_begin 只能与它们一致，不能重新定义传输边界。
+      kind: request.kind,
+      fileName: request.fileName,
+      mimeType: request.mimeType,
+      byteLength: request.byteLength,
+      contentHash: request.hash,
       pc,
       channel: null,
       pendingOffer: parsedOffer,
+      hashRequestPublished: true,
       pendingChunks: [],
       pendingMeta: null,
+      expectedSeq: 0,
+      receivedBytes: 0,
+      awaitingCompletion: false,
+      payloadSending: false,
       settled: false
     };
     activeTransfer = session;
+    touchTransferActivity(session);
+    const requestMessageId = sig.request_message_id;
     pc.onIceCandidate((c) => {
-      void sendIce(session.sessionId, session.remotePublicKeyHex, c, "transfer").catch(() => undefined);
+      void sendIce(requestMessageId, session.sessionId, session.remotePublicKeyHex, c).catch(() => undefined);
+    });
+    pc.onIceGatheringStateChange((state) => {
+      if (state === "complete") {
+        void sendEndOfCandidates(requestMessageId, session.sessionId, session.remotePublicKeyHex).catch(() => undefined);
+      }
     });
     pc.onConnectionStateChange((s) => {
       if (activeTransfer?.sessionId !== session.sessionId || session.settled) return;
@@ -1401,25 +1927,28 @@ export function createWebrtcService(input: {
       await pc.setRemoteDescription(parsedOffer);
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await sendTransferSignal(remote, sig.sessionId, "transfer_answer", {
-        sdp: JSON.stringify(answer)
-      });
+      if (!isTransferCurrent(session)) {
+        finalizeTransferWithFailure(session, transferFenceError(session));
+        return;
+      }
+      await publishSignalBody(
+        remote,
+        newAnswerSignal(requestMessageId, session.sessionId, encodeDescription(answer))
+      );
     } catch (err) {
       finalizeTransferWithFailure(session, err instanceof Error ? err : new Error(String(err)));
       return;
     }
   }
 
-  async function onRemoteTransferAnswer(sig: WebrtcTransferAnswerSignal): Promise<void> {
-    if (!activeTransfer || activeTransfer.direction !== "outgoing") return;
-    if (activeTransfer.sessionId !== sig.sessionId) return;
-    let parsed: RTCSessionDescriptionInit;
-    try {
-      parsed = JSON.parse(sig.sdp) as RTCSessionDescriptionInit;
-    } catch {
-      finalizeTransferWithFailure(activeTransfer, new Error("transfer_invalid_state"));
-      return;
-    }
+  async function onRemoteTransferAnswer(sig: WebrtcAnswerSignal): Promise<void> {
+    if (!activeTransfer
+      || !isTransferCurrent(activeTransfer)
+      || activeTransfer.direction !== "outgoing"
+      || activeTransfer.requestMessageId !== sig.request_message_id
+      || activeTransfer.sessionId !== sig.session_id) return;
+    if (!activeTransfer.pc) return;
+    const parsed = decodeDescription(sig.signal.sdp, "answer");
     try {
       await activeTransfer.pc.setRemoteDescription(parsed);
     } catch (err) {
@@ -1428,18 +1957,28 @@ export function createWebrtcService(input: {
   }
 
   async function onRemoteTransferIce(sig: WebrtcIceSignal): Promise<void> {
-    if (!activeTransfer || activeTransfer.sessionId !== sig.sessionId) return;
+    if (!activeTransfer
+      || !isTransferCurrent(activeTransfer)
+      || activeTransfer.requestMessageId !== sig.request_message_id
+      || activeTransfer.sessionId !== sig.session_id) return;
     if (!activeTransfer.pc) return;
     try {
-      await activeTransfer.pc.addIceCandidate(sig.candidate);
+      await activeTransfer.pc.addIceCandidate(fromProtocolCandidate(sig.signal.candidate));
     } catch {
       // ignore
     }
   }
 
-  async function onRemoteTransferReject(sig: WebrtcTransferRejectSignal): Promise<void> {
-    if (!activeTransfer || activeTransfer.sessionId !== sig.sessionId) return;
-    finalizeTransferWithFailure(activeTransfer, new Error(`transfer_reject: ${sig.reason}`));
+  async function onRemoteTransferEndOfCandidates(sig: WebrtcEndOfCandidatesSignal): Promise<void> {
+    if (!activeTransfer
+      || activeTransfer.requestMessageId !== sig.request_message_id
+      || activeTransfer.sessionId !== sig.session_id) return;
+    if (!activeTransfer.pc) return;
+    try {
+      await activeTransfer.pc.addIceCandidate({ candidate: "" });
+    } catch {
+      // ignore
+    }
   }
 
   type TransferWireMessage =
@@ -1462,9 +2001,15 @@ export function createWebrtcService(input: {
         sessionId: string;
       }
     | {
+        type: "transfer_complete";
+        sessionId: string;
+        hash: string;
+        byteLength: number;
+      }
+    | {
         type: "transfer_cancel";
         sessionId: string;
-        reason: "busy" | "invalid_state" | "file_too_large" | "send_failed";
+        reason: "busy" | "invalid_state" | "file_too_large" | "send_failed" | "invalid_payload" | "hash_mismatch" | "timeout";
       };
 
   function serializeTransferWireMessage(message: TransferWireMessage): string {
@@ -1487,7 +2032,11 @@ export function createWebrtcService(input: {
         typeof msg.kind === "string" &&
         (msg.kind === "image" || msg.kind === "file") &&
         typeof msg.byteLength === "number" &&
-        Number.isFinite(msg.byteLength)
+        Number.isSafeInteger(msg.byteLength) &&
+        msg.byteLength >= 0 &&
+        msg.byteLength <= MAX_WEBRTC_TRANSFER_BYTES &&
+        (msg.fileName === undefined || isBoundedMetadata(msg.fileName, MAX_TRANSFER_METADATA_LENGTH)) &&
+        (msg.mimeType === undefined || isBoundedMetadata(msg.mimeType, MAX_TRANSFER_MIME_LENGTH))
       ) {
         const out: TransferWireMessage = {
           type: "transfer_begin",
@@ -1505,8 +2054,13 @@ export function createWebrtcService(input: {
       if (
         typeof msg.sessionId === "string" &&
         typeof msg.seq === "number" &&
-        Number.isFinite(msg.seq) &&
-        typeof msg.data === "string"
+        Number.isSafeInteger(msg.seq) &&
+        msg.seq >= 0 &&
+        typeof msg.data === "string" &&
+        msg.data.length > 0 &&
+        msg.data.length <= 4 * Math.ceil(WEBRTC_TRANSFER_CHUNK_BYTES / 3) &&
+        msg.data.length % 4 === 0 &&
+        /^[A-Za-z0-9+/]*={0,2}$/.test(msg.data)
       ) {
         return {
           type: "transfer_chunk",
@@ -1523,6 +2077,25 @@ export function createWebrtcService(input: {
       }
       return null;
     }
+    if (msg.type === "transfer_complete") {
+      if (
+        typeof msg.sessionId === "string" &&
+        typeof msg.hash === "string" &&
+        /^[0-9a-f]{64}$/.test(msg.hash) &&
+        typeof msg.byteLength === "number" &&
+        Number.isSafeInteger(msg.byteLength) &&
+        msg.byteLength >= 0 &&
+        msg.byteLength <= MAX_WEBRTC_TRANSFER_BYTES
+      ) {
+        return {
+          type: "transfer_complete",
+          sessionId: msg.sessionId,
+          hash: msg.hash,
+          byteLength: msg.byteLength
+        };
+      }
+      return null;
+    }
     if (msg.type === "transfer_cancel") {
       if (
         typeof msg.sessionId === "string" &&
@@ -1530,7 +2103,10 @@ export function createWebrtcService(input: {
         (msg.reason === "busy" ||
           msg.reason === "invalid_state" ||
           msg.reason === "file_too_large" ||
-          msg.reason === "send_failed")
+          msg.reason === "send_failed" ||
+          msg.reason === "invalid_payload" ||
+          msg.reason === "hash_mismatch" ||
+          msg.reason === "timeout")
       ) {
         return {
           type: "transfer_cancel",
@@ -1566,89 +2142,40 @@ export function createWebrtcService(input: {
     throw new Error("base64_decode_unavailable");
   }
 
-  async function sendSimpleSignal(
-    remotePublicKeyHex: string,
-    type: "reject" | "busy" | "fallback_required",
-    sessionId: string,
-    reason: WebrtcRejectSignal["reason"] | "busy" | WebrtcFallbackRequiredSignal["reason"],
-    extra: { suggestedMode?: WebrtcMode } = {}
-  ): Promise<void> {
-    const envBase = buildEnvelopeBase({ sessionId, nowMs: env.now() });
-    let body: string;
-    if (type === "reject") {
-      body = serializeSignal({
-        ...envBase,
-        type: "reject",
-        reason: reason as WebrtcRejectSignal["reason"]
-      });
-    } else if (type === "busy") {
-      body = serializeSignal({
-        ...envBase,
-        type: "busy",
-        reason: "busy"
-      });
-    } else {
-      body = serializeSignal({
-        ...envBase,
-        type: "fallback_required",
-        reason: "video_unavailable",
-        suggestedMode: extra.suggestedMode ?? "audio"
-      });
-    }
-    try {
-      await endpoint.sendMessage({
-        recipientPublicKeyHex: remotePublicKeyHex,
-        recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-        contentType: "text/plain",
-        body,
-        clientMessageId: `km-wbrtc-${type}-${sessionId}`,
-        createdAtMs: envBase.createdAtMs
-      });
-    } catch {
-      // 静默——对端离线也无所谓
-    }
-  }
-
   async function sendIce(
+    requestMessageId: string,
     sessionId: string,
     remotePublicKeyHex: string,
-    candidate: RTCIceCandidateInit,
-    scope: "call" | "transfer" = "call"
+    candidate: RTCIceCandidateInit
   ): Promise<void> {
-    const matchesCall = active?.sessionId === sessionId;
-    const matchesTransfer = activeTransfer?.sessionId === sessionId;
-    if (!matchesCall && !matchesTransfer) return;
-    const envBase = buildEnvelopeBase({ sessionId, nowMs: env.now() });
-    // 通话与传输共用同一套 ICE 信令，scope 只用于诊断命名。
-    const body = serializeSignal({
-      ...envBase,
-      type: "ice",
-      candidate
-    });
+    const matchesTransfer = activeTransfer?.requestMessageId === requestMessageId && activeTransfer.sessionId === sessionId;
+    if (!matchesTransfer) return;
+    const body = newIceSignal(requestMessageId, sessionId, toProtocolCandidate(candidate));
     try {
-      await endpoint.sendMessage({
-        recipientPublicKeyHex: remotePublicKeyHex,
-        recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-        contentType: "text/plain",
-        body,
-        clientMessageId: `km-wrtc-ice-${scope}-${sessionId}`,
-        createdAtMs: envBase.createdAtMs
-      });
+      await publishSignalBody(remotePublicKeyHex, body);
     } catch {
       // ignore
     }
   }
 
-  /* ----- 出站（拨号）----- */
-
-  async function checkPeerOnline(publicKeyHex: string): Promise<import("@keymaster/contracts").AppMsgOnlineStatus> {
+  async function sendEndOfCandidates(
+    requestMessageId: string,
+    sessionId: string,
+    remotePublicKeyHex: string
+  ): Promise<void> {
+    const matchesTransfer = activeTransfer?.requestMessageId === requestMessageId && activeTransfer.sessionId === sessionId;
+    if (!matchesTransfer) return;
     try {
-      const result = await endpoint.checkOnline([publicKeyHex]);
-      return result[publicKeyHex] ?? "unknown";
+      await publishSignalBody(
+        remotePublicKeyHex,
+        newEndOfCandidatesSignal(requestMessageId, sessionId)
+      );
     } catch {
-      return "unknown";
+      // 候选结束通知丢失时，浏览器仍可依据已有候选继续连接。
     }
   }
+
+  /* ----- 出站（拨号）----- */
 
   async function sendImage(input: { targetPublicKeyHex: string; file: Blob | File }): Promise<void> {
     await sendTransferFileLike(input.targetPublicKeyHex, "image", input.file);
@@ -1666,135 +2193,20 @@ export function createWebrtcService(input: {
     if (file.size > MAX_WEBRTC_TRANSFER_BYTES) {
       throw new Error("transfer_too_large");
     }
-    if (!endpoint.isReady()) {
+    if (!channel.isReady()) {
       throw new Error("service_not_ready");
     }
     if (active || isTransferActive()) {
       throw new Error("busy_local");
     }
-    const online = await checkPeerOnline(targetPublicKeyHex);
-    if (online !== "online") {
-      throw new Error(online === "offline" ? "target_offline" : "target_unknown");
-    }
-    await startOutgoingTransfer({ targetPublicKeyHex, kind, file });
+    await startOutgoingTransfer({ targetPublicKeyHex: targetPublicKeyHex.trim().toLowerCase(), kind, file });
   }
 
   async function startCall(input: StartCallInput): Promise<void> {
-    if (!endpoint.isReady()) {
-      lastError = "service_not_ready";
-      throw new Error("service_not_ready");
-    }
-    if (active || isTransferActive()) {
-      lastError = "busy_local";
-      throw new Error("busy_local");
-    }
-    const target = input.targetPublicKeyHex.trim();
-    if (!/^[0-9a-f]{66}$/i.test(target)) {
-      lastError = "invalid_target";
-      throw new Error("invalid_target");
-    }
-    let online: Awaited<ReturnType<typeof endpoint.checkOnline>>;
-    try {
-      online = await endpoint.checkOnline([target]);
-    } catch {
-      online = { [target]: "unknown" };
-    }
-    const status = online[target];
-    if (status !== "online") {
-      lastError = status === "offline" ? "target_offline" : "target_unknown";
-      throw new Error(
-        status === "offline" ? "target_offline" : "target_unknown"
-      );
-    }
-    let localStream: MediaStreamLike;
-    try {
-      localStream =
-        input.mode === "audio"
-          ? await env.getUserMedia({ audio: true, video: false })
-          : await env.getUserMedia({ audio: true, video: true });
-    } catch (err) {
-      lastError = "device_unavailable";
-      throw new Error("device_unavailable");
-    }
-    const sessionId = env.generateSessionId();
-    const cfg = configToRTCConfig(store.snapshot());
-    const pc = env.createPeerConnection(cfg);
-    pc.replaceLocalStream(localStream);
-    pc.onIceCandidate((c) => {
-      void sendIce(sessionId, target, c).catch(() => undefined);
-    });
-    pc.onConnectionStateChange((s) => {
-      const cur = active;
-      if (!cur || cur.sessionId !== sessionId) return;
-      if (s === "connected") {
-        cur.pcConnected = true;
-        emit();
-        return;
-      }
-      if (s === "failed" || s === "disconnected" || s === "closed") {
-        void doHangup("ice_disconnected");
-      }
-    });
-    pc.onTrack((stream) => {
-      const cur = active;
-      if (cur && cur.sessionId === sessionId) {
-        cur.remoteStream = stream;
-        cur.pcConnected = true;
-        emit();
-      }
-    });
-
-    const newSession: ActiveSession = {
-      sessionId,
-      direction: "outgoing",
-      mode: input.mode,
-      remotePublicKeyHex: target,
-      ownerPublicKeyHex: currentOwnerPublicKeyHex(),
-      startedAtMs: env.now(),
-      localStream,
-      pc,
-      remoteStream: null,
-      pendingOffer: null,
-      pcConnected: false,
-      negotiated: false
-    };
-    active = newSession;
+    void input;
+    lastError = "call_protocol_unavailable";
     emit();
-
-    let offer: RTCSessionDescriptionInit;
-    try {
-      offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-    } catch (err) {
-      log.warn("webrtc.service", "create_offer_failed", err);
-      lastError = "create_offer_failed";
-      // 统一走 clearActive → 释放本地 + 关 pc + emit（让 UI 看到 idle）。
-      clearActive();
-      throw new Error("create_offer_failed");
-    }
-    const envBase = buildEnvelopeBase({ sessionId, nowMs: env.now() });
-    const body = serializeSignal({
-      ...envBase,
-      type: "invite",
-      mode: input.mode,
-      sdp: JSON.stringify(offer)
-    });
-    try {
-      await endpoint.sendMessage({
-        recipientPublicKeyHex: target,
-        recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-        contentType: "text/plain",
-        body,
-        clientMessageId: `km-wbrtc-invite-${sessionId}`,
-        createdAtMs: envBase.createdAtMs
-      });
-    } catch (err) {
-      log.warn("webrtc.service", "send_invite_failed", err);
-      lastError = "send_invite_failed";
-      // invite 失败回滚——同一 clearActive 路径。
-      clearActive();
-      throw new Error("send_invite_failed");
-    }
+    throw new Error("call_protocol_unavailable");
   }
 
   /* ----- STUN 自检 ----- */
@@ -1917,40 +2329,71 @@ export function createWebrtcService(input: {
     };
   }
 
-  /* ----- 订阅 endpointService + dispose ----- */
+  /* ----- 订阅 Channel 私信 + dispose ----- */
 
-  const off = endpoint.subscribeMessages((m) => handleIncoming(m));
+  const off = channel.subscribePrivate((message) => handleIncoming(message));
+  const offHashRequests = channel.subscribe((message) => {
+    void handleIncomingHashRequest(message).catch((error) => {
+      log.warn("webrtc.service", "hash_request_handler_failed", error);
+    });
+  });
+  const subscribeOwnerInbox = (): void => {
+    if (disposed) return;
+    const ownerPublicKeyHex = currentOwnerPublicKeyHex();
+    if (!ownerPublicKeyHex) return;
+    void channel.subscriptionSet([`bsv8.inbox.${ownerPublicKeyHex}`, HASH_REQUEST_CHANNEL]).catch((error) => {
+      log.warn("webrtc.service", "owner_inbox_subscription_failed", error);
+    });
+  };
+  subscribeOwnerInbox();
+  const offOwnerChanged = typeof keyspace.onActiveKeyChanged === "function"
+    ? keyspace.onActiveKeyChanged((state) => {
+      const nextOwner = state.activePublicKeyHex?.trim().toLowerCase() ?? null;
+      if (nextOwner !== observedOwnerPublicKeyHex) {
+        observedOwnerPublicKeyHex = nextOwner;
+        ownerGeneration += 1;
+      }
+      cancelTransferAdmissions();
+      if (active && active.ownerPublicKeyHex !== nextOwner) {
+        clearActive({ showEndedPhase: true });
+      }
+      if (activeTransfer && activeTransfer.ownerPublicKeyHex !== nextOwner) {
+        finalizeTransferWithFailure(activeTransfer, new Error("transfer_owner_changed"));
+      }
+      for (const sessionId of pendingTransferRequests.keys()) removePendingTransferRequest(sessionId);
+      transferRequestChecks.clear();
+      transferRequestRates.clear();
+      transferAcceptanceInFlight = null;
+      subscribeOwnerInbox();
+    })
+    : undefined;
 
   function dispose(): void {
-    // 单一清理路径：本地先清（截断 UI / 释放 tracks / 关 pc / 取消订阅），
-    // 异步发 hangup 信令这一步仅 fire-and-forget——失败就失败。
-    const session = active;
+    if (disposed) return;
+    disposed = true;
+    ownerGeneration += 1;
+    cancelTransferAdmissions();
+    // 单一清理路径：本地截断 UI、释放 tracks、关闭 pc、取消订阅。
+    // V1 没有 hangup wire 分支；远端会由 RTC connection state/超时收敛。
     clearActive({ showEndedPhase: true });
-    off();
-    subscribers.clear();
-    if (session) {
-      const envBase = buildEnvelopeBase({
-        sessionId: session.sessionId,
-        nowMs: env.now()
-      });
-      const body = serializeSignal({
-        ...envBase,
-        type: "hangup",
-        reason: "page_unload"
-      });
-      void endpoint
-        .sendMessage({
-          recipientPublicKeyHex: session.remotePublicKeyHex,
-          recipientAppId: KEYMASTER_WEBRTC_APP_ID,
-          contentType: "text/plain",
-          body,
-          clientMessageId: `km-wbrtc-hangup-${envBase.sessionId}`,
-          createdAtMs: envBase.createdAtMs
-        })
-        .catch((err) => {
-          log.warn("webrtc.service", "dispose_hangup_send_failed", err);
-        });
+    if (activeTransfer) {
+      finalizeTransferWithFailure(activeTransfer, new Error("service_disposed"));
     }
+    for (const sessionId of pendingTransferRequests.keys()) removePendingTransferRequest(sessionId);
+    transferRequestChecks.clear();
+    transferRequestRates.clear();
+    transferAcceptanceInFlight = null;
+    transferAdmissionInFlightBySender.clear();
+    transferAdmissionInFlight = 0;
+    if (pendingTransferPruneTimer !== undefined) {
+      clearTimeout(pendingTransferPruneTimer);
+      pendingTransferPruneTimer = undefined;
+    }
+    off();
+    offHashRequests();
+    offOwnerChanged?.();
+    void channel.subscriptionSet([]).catch(() => undefined);
+    subscribers.clear();
     endedDeadlineAt = null;
   }
 
@@ -1963,8 +2406,7 @@ export function createWebrtcService(input: {
         subscribers.delete(handler);
       };
     },
-    isReady: () => endpoint.isReady(),
-    checkPeerOnline,
+    isReady: () => channel.isReady(),
     listHistoryForPeer: (peerPublicKeyHex) => historyService.listForPeer(peerPublicKeyHex),
     getTransferBlob: (blobKey) => historyService.getBlob(blobKey),
     startCall,
@@ -1972,6 +2414,8 @@ export function createWebrtcService(input: {
     sendFile,
     acceptIncoming,
     rejectIncoming,
+    acceptIncomingTransfer,
+    rejectIncomingTransfer,
     hangup: () => doHangup("hangup"),
     consumeRemoteNotice: () => {
       if (remoteNotice !== null) {

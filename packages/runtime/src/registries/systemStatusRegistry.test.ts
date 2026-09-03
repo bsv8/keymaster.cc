@@ -7,30 +7,30 @@ describe("system status registry", () => {
   it("orders registered system modules and rejects duplicate hooks", () => {
     const registry = createSystemStatusRegistry();
     registry.register({
-      id: "appmsg.status",
-      path: "/system/appmsg",
-      label: { key: "appmsg", fallback: "AppMsg" },
+      id: "module-a.status",
+      path: "/system/module-a",
+      label: { key: "module-a", fallback: "Module A" },
       component: Component,
       order: 20
     });
     registry.register({
-      id: "broadcast.status",
-      path: "/system/broadcast",
-      label: { key: "broadcast", fallback: "Broadcast" },
+      id: "module-b.status",
+      path: "/system/module-b",
+      label: { key: "module-b", fallback: "Module B" },
       component: Component,
       order: 10
     });
 
     expect(registry.list().map((module) => module.id)).toEqual([
-      "broadcast.status",
-      "appmsg.status"
+      "module-b.status",
+      "module-a.status"
     ]);
     expect(() => registry.register({
-      id: "broadcast.status",
-      path: "/system/broadcast",
-      label: { key: "broadcast", fallback: "Broadcast" },
+      id: "module-b.status",
+      path: "/system/module-b",
+      label: { key: "module-b", fallback: "Module B" },
       component: Component,
       order: 10
-    })).toThrow('System status module id "broadcast.status" is already registered');
+    })).toThrow('System status module id "module-b.status" is already registered');
   });
 });

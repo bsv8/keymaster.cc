@@ -6,11 +6,7 @@
 
 import type { PluginManifest } from "@keymaster/contracts";
 import { appsPlugin } from "@keymaster/plugin-apps";
-import { appmsgPlatformPlugin } from "@keymaster/plugin-appmsg";
-import { broadcastPlatformPlugin } from "@keymaster/plugin-broadcast";
 import { bsvPricePlugin } from "@keymaster/plugin-bsv-price";
-import { hubcastPlatformPlugin } from "@keymaster/plugin-hubcast";
-import { hubmsgPlatformPlugin } from "@keymaster/plugin-hubmsg";
 import { messagePlatformPlugin } from "@keymaster/plugin-message";
 import { webrtcPlugin } from "@keymaster/plugin-webrtc";
 import { backgroundPlugin } from "@keymaster/plugin-background";
@@ -40,21 +36,17 @@ export const WEB_PLUGIN_CATALOG: readonly PluginManifest[] = [
   storagePlugin,
   windowP2pPlugin,
   msfilePlugin,
-  broadcastPlatformPlugin,
-  hubcastPlatformPlugin,
-  appmsgPlatformPlugin,
   satSubscriptionPlugin,
-  hubmsgPlatformPlugin,
   protocolPlugin,
+  contactsPlugin,
   webrtcPlugin,
   messagePlatformPlugin,
   settingsPlugin,
   keyImportPlugin,
-  contactsPlugin,
+  backgroundPlugin,
   homePlugin,
   wocPlugin,
   jungleBusPlugin,
-  backgroundPlugin,
   p2pkhPlugin,
   bsv21TokenPlugin,
   stasTokenPlugin,

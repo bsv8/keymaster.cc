@@ -22,13 +22,10 @@
 //     appView mode 可走 owner runtime bootstrap"。
 //   - Connect Storage 施工单：`storage.*` 通过可选 `storage.service` capability
 //     接入；缺少 Storage 插件时，Protocol 仍正常提供其它方法。
-//   - 施工单 2026-07-01 002 硬切换：新增 `appmsg.*` 三个 method（origin
-//     endpoint）；plugin-protocol 自身**不**持有 HubMsg 连接真值；
-//     service 通过 capability `appmsg.core` 反向消费 plugin-appmsg
-//     平台单例。
+//   - 施工单 2026-09-02/003：Session Window 的消息能力统一为
+//     Coordinator Channel 的精确频道发布/订阅；本插件只消费已验证 facade。
 
 import type {
-  AppMsgCore,
   I18nPluginResources,
   KeyspaceService,
   PluginContext,
@@ -39,15 +36,17 @@ import type {
   ProtocolSessionSnapshot,
   ProtocolCommandFeedState,
   ProtocolService,
-  StorageService
+  StorageService,
+  SessionCoordinatorClient
 } from "@keymaster/contracts";
-import { APPMESSAGE_CORE_CAPABILITY, PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
+import { PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
 } from "./protocolService.js";
 import { openProtocolStorageDb } from "./protocolStorageDb.js";
 import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js";
+import { createConnectChannelRuntime } from "./channelRuntime.js";
 
 export const PROTOCOL_PLUGIN_ID = "protocol";
 const protocolResources: I18nPluginResources = {
@@ -450,12 +449,15 @@ export const protocolPlugin: PluginManifest = {
       capability: "vault.service",
       reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
     },
-    { capability: "keyspace.service", reason: "协议需要 owner key 状态" }
+    { capability: "keyspace.service", reason: "协议需要 owner key 状态" },
+    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "Channel 发布和订阅由 SharedWorker Coordinator 统一执行" }
   ],
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
     const vaultService = ctx.get<VaultService>("vault.service");
     const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
+    const coordinatorClient = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
     let storageService: StorageService | undefined;
     try {
       storageService = ctx.get<StorageService>("storage.service");
@@ -532,16 +534,6 @@ export const protocolPlugin: PluginManifest = {
         p2pkhService = undefined;
       }
 
-      // 施工单 2026-07-01 002 硬切换：protocolService 通过 capability 总线
-      // 反向消费 `appmsg.core`（plugin-appmsg 平台单例）。缺时 `appmsg.*`
-      // 三个 method 走 internal_error 降级（与 p2pkhService 缺时同语义）。
-      let appMsgCore: AppMsgCore | undefined;
-      try {
-        appMsgCore = ctx.get<AppMsgCore>(APPMESSAGE_CORE_CAPABILITY);
-      } catch {
-        appMsgCore = undefined;
-      }
-
       const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
@@ -562,7 +554,7 @@ export const protocolPlugin: PluginManifest = {
           }
         },
         p2pkhService: p2pkhService as never,
-        appMsgCore,
+        connectChannelRuntime,
         getAppCatalogResolver: () => {
           try {
             return ctx.get<import("@keymaster/contracts").AppCatalogResolver>("app.catalog");

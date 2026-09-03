@@ -1,25 +1,15 @@
-// packages/plugin-bsv-price/src/bsvPriceProtocol.ts
-// PriceCast v1 body 解码与校验（施工单 §4.2）。
-//
-// 设计缘由：
-//   - body 形状 = `{"quotes": [{exchange, price(decimal string)} ...]}`；
-//   - 这是业务层 decode；core 不解析；
-//   - 校验失败的 body 让 service 整体忽略（不 throw），原快照保留；
-//   - 校验通过的 quotes 列表按 exchange 字典序稳定排序后返回。
+// PriceCast v1 的 Channel 业务内容校验。
 
+import type { JSONValue } from "@keymaster/contracts";
 import { PRICECAST_PROTOCOL_ID } from "./constants.js";
 
-/**
- * 单条报价（业务层视图）。
- */
 export interface BsvPriceQuote {
-  /** 稳定小写交易所 id（gate / bitget / htx 等）。 */
+  /** 稳定的小写交易所编号。 */
   exchange: string;
-  /** 十进制字符串价格。 */
+  /** 十进制价格字符串。 */
   price: string;
 }
 
-/** 已校验快照。 */
 export interface BsvPriceSnapshot {
   quotes: readonly BsvPriceQuote[];
   receivedAtMs: number;
@@ -27,48 +17,32 @@ export interface BsvPriceSnapshot {
 
 const decimalStringRE = /^[0-9]+(\.[0-9]+)?$/;
 
-/**
- * 把 broadcast body 字节解析成快照。
- *
- * 失败语义：返回 `null`（**不** throw）；业务 service 据此忽略本条
- * 消息并保留上一份合法快照。
- */
-export function decodePriceBody(
-  bodyBytes: Uint8Array,
-  receivedAtMs: number,
-  options: { expectedProtocolId: string } = { expectedProtocolId: PRICECAST_PROTOCOL_ID }
-): BsvPriceSnapshot | null {
-  if (!(bodyBytes instanceof Uint8Array)) return null;
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(bodyBytes);
-  } catch {
-    return null;
+/** 验证已由 ChannelProtocol 验签的 PriceCast JSON 内容。 */
+export function decodePriceContent(content: JSONValue): BsvPriceSnapshot | null {
+  if (!isObject(content) || content.protocolId !== PRICECAST_PROTOCOL_ID) return null;
+  if (!Array.isArray(content.quotes)) return null;
+  const quotes: BsvPriceQuote[] = [];
+  for (const value of content.quotes) {
+    if (!isObject(value)) return null;
+    if (typeof value.exchange !== "string" || !value.exchange || typeof value.price !== "string") return null;
+    if (!decimalStringRE.test(value.price)) return null;
+    quotes.push({ exchange: value.exchange, price: value.price });
   }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    return null;
-  }
-  if (!isObject(raw)) return null;
-  const quotes = raw.quotes;
-  if (!Array.isArray(quotes)) return null;
-  const out: BsvPriceQuote[] = [];
-  for (const q of quotes) {
-    if (!isObject(q)) return null;
-    const exchange = q.exchange;
-    const price = q.price;
-    if (typeof exchange !== "string" || exchange.length === 0) return null;
-    if (typeof price !== "string" || !decimalStringRE.test(price)) return null;
-    out.push({ exchange, price });
-  }
-  // 排序保持稳定
-  out.sort((a, b) => (a.exchange < b.exchange ? -1 : a.exchange > b.exchange ? 1 : 0));
-  void options; // 当前签名仅作未来协议兼容位预留
-  return { quotes: out, receivedAtMs };
+  quotes.sort((a, b) => a.exchange.localeCompare(b.exchange));
+  return { quotes, receivedAtMs: Date.now() };
 }
 
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+/** 保留显式时间参数的单元测试辅助函数。 */
+export function decodePriceBody(
+  content: JSONValue,
+  receivedAtMs: number,
+  options: { expectedProtocolId?: string } = {}
+): BsvPriceSnapshot | null {
+  if (options.expectedProtocolId && (!isObject(content) || content.protocolId !== options.expectedProtocolId)) return null;
+  const decoded = decodePriceContent(content);
+  return decoded ? { ...decoded, receivedAtMs } : null;
+}
+
+function isObject(value: JSONValue): value is { [key: string]: JSONValue } {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

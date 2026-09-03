@@ -47,7 +47,7 @@ export interface SystemSettingsItem {
 export interface SystemStatusModule {
   /** 全局唯一、带模块命名空间的 id。 */
   id: string;
-  /** 模块原有的可直达状态路径，例如 `/system/broadcast`。 */
+  /** 模块原有的可直达状态路径，例如 `/system/sat-subscription`。 */
   path: string;
   label: I18nText;
   description?: I18nText;

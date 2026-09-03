@@ -23,7 +23,7 @@ describe("createKeyspaceServiceCoordinator", () => {
 
     const keyspace = createKeyspaceServiceCoordinator(coordinatorClient, new SessionStateMirror(coordinatorClient), createMessageBus());
 
-    expect(keyspace.active()).toEqual({ activePublicKeyHex: "02".padEnd(66, "a") });
+    expect(keyspace.active()).toEqual({ activePublicKeyHex: "02".padEnd(66, "a"), generation: 7 });
     expect(keyspace.requireActiveKey().publicKeyHex).toBe("02".padEnd(66, "a"));
     expect(keyspace.selected()).toBe("02".padEnd(66, "a"));
   });
@@ -33,7 +33,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     const listeners: Array<(event: SessionStateEvent) => void> = [];
     const client = { getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async () => ({ status: "ok" as const, value: undefined, sessionEpoch: "e" }) };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
-    expect(keyspace.active()).toEqual({ activePublicKeyHex: undefined });
+    expect(keyspace.active()).toEqual({ activePublicKeyHex: undefined, generation: 1 });
     expect(keyspace.selected()).toBe(key);
     const nextKey = "03".padEnd(66, "b");
     listeners[0]?.({ topic: "session.state", type: "session.state.changed", cause: "lock", sessionEpoch: "e2", vaultStatus: "locked", activePublicKeyHex: null, selectedPublicKeyHex: nextKey, keyspaceGeneration: 2, sessionRevision: 1 });
