@@ -30,6 +30,7 @@ import {
   __testSetMsfileReadConcurrencySettings,
   __testSetMsfileRuntimeOverride,
   __testBuildChannelPublicMessageTimes,
+  __testBuildChannelSeenMessageKey,
 } from "./keymasterSessionCoordinator.worker.js";
 import { peerIdFromPublicKeyBytes } from "bitcoin-libp2p/identity";
 import { parse as keyholdParse, unlock as keyholdUnlock } from "keyhold";
@@ -253,6 +254,37 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
     });
     // 第二个值故意存在：如果实现再次读取 Date.now，这个测试的输入就会被消耗。
     expect(clocks).toEqual([1_700_000_000_000 + 1]);
+  });
+
+  it("公共、私密与 Hash Request 消息使用独立的本地去重命名空间", () => {
+    const sharedFirstPart = "bsv8.ping.v1";
+    const publisherPublicKey = validPublisherKey(1);
+    const messageId = newMessageID();
+
+    const privateSeenKey = __testBuildChannelSeenMessageKey(
+      "private",
+      sharedFirstPart,
+      publisherPublicKey,
+      messageId
+    );
+    const publicSeenKey = __testBuildChannelSeenMessageKey(
+      "public",
+      sharedFirstPart,
+      publisherPublicKey,
+      messageId
+    );
+    const hashRequestSeenKey = __testBuildChannelSeenMessageKey(
+      "hash-request",
+      `${publisherPublicKey}\u0000${messageId}`
+    );
+
+    expect(new Set([privateSeenKey, publicSeenKey, hashRequestSeenKey]).size).toBe(3);
+    expect(__testBuildChannelSeenMessageKey(
+      "public",
+      sharedFirstPart,
+      publisherPublicKey,
+      messageId
+    )).toBe(publicSeenKey);
   });
 });
 

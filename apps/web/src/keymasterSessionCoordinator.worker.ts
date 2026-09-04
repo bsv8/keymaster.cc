@@ -2521,6 +2521,24 @@ function rememberChannelMessage(key: string): boolean {
   return true;
 }
 
+type ChannelSeenMessageKind = "private" | "public" | "hash-request";
+
+/**
+ * channelSeenMessages 同时保存多种协议消息。kind 是本地存储命名空间，
+ * 防止公共消息的 channel 与私密消息的 protocol 相同时互相误判为重复。
+ */
+function channelSeenMessageKey(kind: ChannelSeenMessageKind, ...parts: readonly string[]): string {
+  return `${kind}\u0000${parts.join("\u0000")}`;
+}
+
+/** 测试不同 Channel 消息类型的本地去重命名空间。 */
+export function __testBuildChannelSeenMessageKey(
+  kind: ChannelSeenMessageKind,
+  ...parts: readonly string[]
+): string {
+  return channelSeenMessageKey(kind, ...parts);
+}
+
 /**
  * 生成并发布完整的 bsv8.hash.request.v1。request_message_id 必须来自这
  * 条真实公开消息，不能由 WebRTC 插件另行随机生成后冒充 Hash 请求。
@@ -2864,7 +2882,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
         return;
       }
       const dedup = privateDedupKey(opened);
-      const key = `${dedup.protocol}\u0000${dedup.from_public_key}\u0000${dedup.message_id}`;
+      const key = channelSeenMessageKey("private", dedup.protocol, dedup.from_public_key, dedup.message_id);
       if (!rememberChannelMessage(key)) return;
       switch (opened.protocol) {
         case PING_PROTOCOL: {
@@ -2939,9 +2957,10 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
     }
     if (event.channel === HASH_REQUEST_CHANNEL) {
       const hashRequest = parseHashRequest(event.channel, event.contentJson, Date.now());
-      const key = channelHashRequestKey(hashRequest.message_id, hashRequest.from_public_key);
-      if (!rememberChannelMessage(key)) return;
-      channelHashRequests.set(key, hashRequest);
+      const relationKey = channelHashRequestKey(hashRequest.message_id, hashRequest.from_public_key);
+      const seenKey = channelSeenMessageKey("hash-request", relationKey);
+      if (!rememberChannelMessage(seenKey)) return;
+      channelHashRequests.set(relationKey, hashRequest);
       pruneChannelProtocolRelations();
       emitChannelPublicMessage({
         channel: event.channel,
@@ -2958,7 +2977,7 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
     }
     const publicMessage = parsePublicMessage(event.channel, event.contentJson, Date.now());
     const publicDedup = publicDedupKey(publicMessage);
-    const key = `${publicDedup.channel}\u0000${publicDedup.from_public_key}\u0000${publicDedup.message_id}`;
+    const key = channelSeenMessageKey("public", publicDedup.channel, publicDedup.from_public_key, publicDedup.message_id);
     if (!rememberChannelMessage(key)) return;
     emitChannelPublicMessage({ channel: publicMessage.channel, publisherPublicKeyHex: publicMessage.from_public_key, messageId: publicMessage.message_id, content: publicMessage.body });
   } catch (error) {
