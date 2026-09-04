@@ -186,13 +186,16 @@ export interface SatSubscriptionAdminService {
 export interface SatSpiCurrencyBalance {
   /** 货币名称，例如 BSV。 */
   currency: string;
-  /** 链网络，例如 main。 */
+  /** SPI 返回的链网络名称，例如 mainnet 或 testnet。 */
   network: string;
   /** 供应商充值地址。 */
   paymentAddress: string;
   /** SPI 最小单位整数；禁止用 JS number 表示。 */
   balance: bigint;
 }
+
+/** SPI 与 P2PKH 共用的 BSV 网络正式名称；不能与 P2PKH 的 main/test 混用。 */
+export type SupportedSpiBsvNetwork = "mainnet" | "testnet";
 
 /** 某供应商某 owner 的 SPI Information 缓存。 */
 export interface SatSpiInformation {
@@ -216,8 +219,8 @@ export interface SatTopUpPreview {
   supplierId: string;
   /** 供应商充值地址。 */
   paymentAddress: string;
-  /** BSV mainnet。 */
-  network: "main";
+  /** 供应商 SPI 返回的 BSV 网络；P2PKH 网络需通过映射转换。 */
+  network: SupportedSpiBsvNetwork;
   /** 精确 satoshis 金额。 */
   amountSatoshis: bigint;
   /** P2PKH service 生成的最终预览对象。 */
@@ -269,8 +272,16 @@ export interface SatCollectResult {
 export interface SatSubscriptionSpiService {
   /** 查询并缓存某供应商的 SPI Information。 */
   getInformation(input: { supplierId: string }): Promise<SatSpiInformation>;
-  /** 生成需要用户确认的 P2PKH mainnet 充值预览。 */
-  prepareTopUp(input: { supplierId: string; amountSatoshis: bigint }): Promise<SatTopUpPreview>;
+  /**
+   * 生成需要用户确认的 P2PKH 充值预览。
+   *
+   * 只有一个 BSV SPI 账户时可省略 currency/network，由服务按 Information
+   * 中唯一账户自动选择；需要显式选择账户时必须同时传入这两个字段。
+   */
+  prepareTopUp(input:
+    | { supplierId: string; amountSatoshis: bigint }
+    | { supplierId: string; currency: string; network: string; amountSatoshis: bigint }
+  ): Promise<SatTopUpPreview>;
   /** 广播已确认且仍与当前配置匹配的充值预览。 */
   submitTopUp(preview: SatTopUpPreview): Promise<SatTopUpResult>;
   /** 每次用户主动回收都创建新的 request_id；不会复用历史终态。 */

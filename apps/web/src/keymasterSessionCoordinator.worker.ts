@@ -1154,9 +1154,9 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
         // P2PKH 只服务 SPI 充值；不能因为充值插件启动/初始化失败而阻断
         // 消息、通讯录、在线状态和 WebRTC。真正准备/提交充值时才懒加载。
         getP2pkh: () => ensureSatP2pkhService(),
-        deriveMainAddress: async (requestedOwner) => {
+        deriveP2pkhAddress: async (requestedOwner, network) => {
           if (requestedOwner !== ownerPublicKeyHex || coordinatorState.activePublicKeyHex !== ownerPublicKeyHex) throw new Error("SPI owner changed before address derivation");
-          const result = await executeCryptoOperation({ type: "deriveP2pkhAddress", network: "main" }, privateKeyForSigner());
+          const result = await executeCryptoOperation({ type: "deriveP2pkhAddress", network }, privateKeyForSigner());
           if (result.type !== "deriveP2pkhAddress") throw new Error("Failed to derive the owner payment address");
           return result.address;
         },

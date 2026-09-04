@@ -5,5 +5,5 @@ export type { SatSubscriptionStateStore, SatSubscriptionStateSnapshot, SatSubscr
 export { createSatSubscriptionProvider, SatSubscriptionProvider, SatSubscriptionError, SatTransportError } from "./satProvider.js";
 export type { SatSubscriptionProviderConfig, SatSubscriptionTransport, SatSupplierConnection, SatSubscriptionSpiRuntime } from "./satProvider.js";
 export { SatSubscriptionHandle } from "./satProvider.js";
-export { createSatSpiService, SatSpiService } from "./satSpi.js";
+export { createSatSpiService, SatSpiService, mapSpiBsvNetwork } from "./satSpi.js";
 export type { SatSpiServiceConfig, SatP2pkhService } from "./satSpi.js";

@@ -20,6 +20,7 @@ export {
 export {
   SatSpiService,
   createSatSpiService,
+  mapSpiBsvNetwork,
   type SatP2pkhService,
   type SatSpiServiceConfig
 } from "./satSpi.js";

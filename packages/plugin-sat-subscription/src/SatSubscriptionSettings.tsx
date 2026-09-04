@@ -11,7 +11,8 @@ import type {
   SatSubscriptionSettingsSnapshot,
   SatSupplierConfigV1,
   SatTopUpPreview,
-  SatSpiInformation
+  SatSpiInformation,
+  SatSpiCurrencyBalance
 } from "@keymaster/contracts";
 import { SAT_SUBSCRIPTION_SERVICE_CAPABILITY, SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
@@ -40,6 +41,12 @@ function satErrorMessage(cause: unknown): string {
   };
   const detail = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "操作失败";
   return labels[code] ? `${labels[code]}：${detail}` : `SatSubscription 操作失败：${detail}`;
+}
+
+function bsvNetworkLabel(network: string): string {
+  if (network === "mainnet") return "BSV 主网";
+  if (network === "testnet") return "BSV 测试网";
+  return `BSV/${network}`;
 }
 
 export function SatSubscriptionSettings() {
@@ -154,12 +161,17 @@ export function SatSubscriptionSettings() {
     finally { setBusy(false); }
   };
 
-  const prepareTopUp = async (supplierId: string) => {
+  const prepareTopUp = async (supplierId: string, account: SatSpiCurrencyBalance) => {
     if (!/^[1-9][0-9]*$/.test(topUpAmount)) { setError("充值金额必须是正整数 satoshis"); return; }
     setBusy(true);
     setError(null);
     try {
-      setTopUpPreview(await spi.prepareTopUp({ supplierId, amountSatoshis: BigInt(topUpAmount) }));
+      setTopUpPreview(await spi.prepareTopUp({
+        supplierId,
+        currency: account.currency,
+        network: account.network,
+        amountSatoshis: BigInt(topUpAmount)
+      }));
     } catch (cause) { setError(satErrorMessage(cause)); }
     finally { setBusy(false); }
   };
@@ -168,7 +180,7 @@ export function SatSubscriptionSettings() {
     if (!topUpPreview) return;
     const preview = topUpPreview;
     const raw = preview.p2pkhPreview && typeof preview.p2pkhPreview === "object" ? preview.p2pkhPreview as Record<string, unknown> : {};
-    const confirmed = typeof window === "undefined" || window.confirm(`确认向 ${preview.paymentAddress} 充值 ${preview.amountSatoshis.toString()} satoshis？\n找零地址：${String(raw.changeAddress ?? "未知")}\n预计矿工费：${String(raw.estimatedFeeSatoshis ?? "未知")}`);
+    const confirmed = typeof window === "undefined" || window.confirm(`确认向 ${bsvNetworkLabel(preview.network)}账户 ${preview.paymentAddress} 充值 ${preview.amountSatoshis.toString()} satoshis？\n找零地址：${String(raw.changeAddress ?? "未知")}\n预计矿工费：${String(raw.estimatedFeeSatoshis ?? "未知")}`);
     if (!confirmed) return;
     setBusy(true);
     setError(null);
@@ -180,14 +192,14 @@ export function SatSubscriptionSettings() {
     finally { setBusy(false); }
   };
 
-  const collect = async (supplierId: string) => {
+  const collect = async (supplierId: string, account: SatSpiCurrencyBalance) => {
     if (!/^[1-9][0-9]*$/.test(collectAmount)) { setError("回收金额必须是正整数 satoshis"); return; }
-    const confirmed = typeof window === "undefined" || window.confirm(`确认从 ${supplierId} 回收 ${collectAmount} satoshis 到当前 owner 的 BSV 主网地址？`);
+    const confirmed = typeof window === "undefined" || window.confirm(`确认从 ${bsvNetworkLabel(account.network)}账户 ${account.paymentAddress} 回收 ${collectAmount} satoshis 到当前 owner 的${bsvNetworkLabel(account.network)}地址？`);
     if (!confirmed) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await spi.collectNew({ supplierId, currency: "BSV", network: "main", amount: BigInt(collectAmount) });
+      const result = await spi.collectNew({ supplierId, currency: account.currency, network: account.network, amount: BigInt(collectAmount) });
       setMessage(`Collect 结果：${result.state}${result.errorCode ? `（${result.errorCode}）` : ""}`);
       await refreshSpi(supplierId);
     } catch (cause) { setError(satErrorMessage(cause)); }
@@ -229,13 +241,12 @@ export function SatSubscriptionSettings() {
             <div>
               <Button size="sm" variant="secondary" disabled={busy} onClick={() => void refreshSpi(supplier.supplierId)}>{tr("sat.settings.spi.refresh", "刷新 SPI 余额")}</Button>
               <Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void refreshSubscriptions(supplier.supplierId)}>{tr("sat.settings.subscriptions.refresh", "刷新远端订阅")}</Button>
-              {spiInfo[supplier.supplierId]?.currencies.map((currency) => <span key={`${currency.currency}-${currency.network}`}> {currency.currency}/{currency.network}: <code>{currency.balance.toString(10)}</code>（充值地址 <code>{currency.paymentAddress}</code>）</span>)}
+              {spiInfo[supplier.supplierId]?.currencies.map((currency) => <span key={`${currency.currency}-${currency.network}`} className="sat-subscription-settings__spi-account"> {currency.currency}/{currency.network}: <code>{currency.balance.toString(10)}</code>（充值地址 <code>{currency.paymentAddress}</code>）{currency.currency === "BSV" ? <> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepareTopUp(supplier.supplierId, currency)}>{tr("sat.settings.spi.prepare", "生成充值预览")}</Button> <Button size="sm" variant="secondary" disabled={busy} onClick={() => void collect(supplier.supplierId, currency)}>{tr("sat.settings.spi.collect", "回收余额")}</Button></> : null}</span>)}
             </div>
             <div>
               <input aria-label={tr("sat.settings.spi.topupAmount", "充值 satoshis")} value={topUpAmount} onChange={(event) => setTopUpAmount(event.target.value)} inputMode="numeric" />
-              <Button size="sm" variant="secondary" disabled={busy} onClick={() => void prepareTopUp(supplier.supplierId)}>{tr("sat.settings.spi.prepare", "生成充值预览")}</Button>
               <input aria-label={tr("sat.settings.spi.collectAmount", "回收 satoshis")} value={collectAmount} onChange={(event) => setCollectAmount(event.target.value)} inputMode="numeric" />
-              <Button size="sm" variant="secondary" disabled={busy} onClick={() => void collect(supplier.supplierId)}>{tr("sat.settings.spi.collect", "回收余额")}</Button>
+              <span>请先刷新 SPI 并在对应 BSV 账户行操作</span>
             </div>
             <div>{tr("sat.settings.actions", "操作")}: <Button size="sm" variant="secondary" disabled={busy} onClick={() => editSupplier(supplier)}>{tr("sat.settings.edit", "编辑")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy} onClick={() => void toggleEnabled(supplier)}>{supplier.enabled ? tr("sat.settings.disable", "停用") : tr("sat.settings.enable", "启用")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void setDefault(supplier.supplierId)}>{tr("sat.settings.default", "设为默认发布")}</Button>{" "}<Button size="sm" variant="secondary" disabled={busy || !supplier.enabled} onClick={() => void toggleReceive(supplier.supplierId)}>{receiving ? tr("sat.settings.receive.off", "关闭接收") : tr("sat.settings.receive.on", "启用接收（可能收费）")}</Button>{" "}<Button size="sm" variant="danger" disabled={busy} onClick={() => void deleteSupplier(supplier)}>{tr("sat.settings.delete", "删除")}</Button></div>
           </div>
@@ -250,7 +261,7 @@ export function SatSubscriptionSettings() {
       <Button disabled={busy} onClick={() => void saveSupplier()}>{tr("sat.settings.save", "保存供应商")}</Button>
       {topUpPreview ? <div role="dialog">
         <strong>{tr("sat.settings.spi.preview", "充值预览")}</strong>
-        <div>Supplier: <code>{topUpPreview.supplierId}</code>；目标: <code>{topUpPreview.paymentAddress}</code>；金额: <code>{topUpPreview.amountSatoshis.toString(10)}</code> sats</div>
+        <div>网络: <strong>{bsvNetworkLabel(topUpPreview.network)}</strong>；Supplier: <code>{topUpPreview.supplierId}</code>；目标: <code>{topUpPreview.paymentAddress}</code>；金额: <code>{topUpPreview.amountSatoshis.toString(10)}</code> sats</div>
         <Button disabled={busy} onClick={() => void submitTopUp()}>{tr("sat.settings.spi.confirm", "确认并广播")}</Button>
         <Button disabled={busy} variant="secondary" onClick={() => setTopUpPreview(null)}>{tr("sat.settings.spi.cancel", "取消")}</Button>
       </div> : null}

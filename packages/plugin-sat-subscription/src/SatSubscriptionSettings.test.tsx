@@ -9,7 +9,8 @@ import type {
   SatOwnerSupplierSettingsV1,
   SatSubscriptionAdminService,
   SatSubscriptionSettingsSnapshot,
-  SatSubscriptionSpiService
+  SatSubscriptionSpiService,
+  SatTopUpPreview
 } from "@keymaster/contracts";
 
 const state = vi.hoisted(() => ({
@@ -139,6 +140,66 @@ describe("SatSubscriptionSettings", () => {
 
     await waitFor(() => expect(state.admin.deleteSupplier).toHaveBeenCalledWith("supplier-a"));
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("不会自动回收"));
+    confirm.mockRestore();
+  });
+
+  it("uses the displayed testnet account for top-up and Collect confirmations", async () => {
+    makeServices();
+    const account = {
+      currency: "BSV",
+      network: "testnet",
+      paymentAddress: "mqrAdPBmbvhLohuqFneSmn8TfZahUvu9eJ",
+      balance: 10_000n
+    } as const;
+    state.spi.getInformation = vi.fn(async () => ({
+      supplierId: "supplier-a",
+      ownerPublicKeyHex: OWNER,
+      currencies: [account],
+      projectType: "test",
+      projectInfoCbor: new Uint8Array(),
+      observedAtMs: 1
+    }));
+    state.spi.prepareTopUp = vi.fn(async () => ({
+      supplierId: "supplier-a",
+      paymentAddress: account.paymentAddress,
+      network: "testnet",
+      amountSatoshis: 1000n,
+      p2pkhPreview: { changeAddress: "mowner", estimatedFeeSatoshis: 5 }
+    } satisfies SatTopUpPreview));
+    state.spi.collectNew = vi.fn(async () => ({
+      requestIdHex: "aa".repeat(32),
+      supplierId: "supplier-a",
+      currency: "BSV",
+      network: "testnet",
+      amount: 1000n,
+      paymentAddress: "mowner",
+      state: "succeeded" as const
+    }));
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    render(<SatSubscriptionSettings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新 SPI 余额" }));
+    await waitFor(() => expect(screen.getByText(/BSV\/testnet/)).toBeTruthy());
+    const prepareButton = screen.getByRole("button", { name: "生成充值预览" });
+    fireEvent.click(prepareButton);
+    await waitFor(() => expect(state.spi.prepareTopUp).toHaveBeenCalledWith({
+      supplierId: "supplier-a",
+      currency: "BSV",
+      network: "testnet",
+      amountSatoshis: 1000n
+    }));
+    fireEvent.click(screen.getByRole("button", { name: "确认并广播" }));
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.stringContaining("BSV 测试网")));
+
+    const collectButton = screen.getAllByRole("button", { name: "回收余额" })[0]!;
+    fireEvent.click(collectButton);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("BSV 测试网"));
+    await waitFor(() => expect(state.spi.collectNew).toHaveBeenCalledWith({
+      supplierId: "supplier-a",
+      currency: "BSV",
+      network: "testnet",
+      amount: 1000n
+    }));
     confirm.mockRestore();
   });
 });
