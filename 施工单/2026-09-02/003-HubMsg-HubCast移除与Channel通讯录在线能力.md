@@ -678,7 +678,9 @@ ChannelProtocol 导出的 `PUBLIC_MESSAGE_MAX_LIFETIME_MS`，并有跨毫秒回�
 当前仍阻断发布的事项：
 
 1. `/home/david/Workspaces/ChannelProtocol` 的 Public Message/Ping 相关实现仍是未提交修改，
-   Keymaster 当前使用本地 `file:` 依赖；发布前必须在协议仓提交、打版本并锁定依赖。
+   npm `bsv8-channel-protocol@0.2.0` 产物也尚未包含当前所需的 Public Message/私密 TTL API。
+   Keymaster 当前通过 npm `0.2.0` 加仓库内临时 pnpm patch 保证云端构建可复现；发布前必须在协议仓
+   提交、打正式版本并锁定依赖，然后删除该临时 patch。
 2. 尚未具备真实双 owner、双 Connect origin、Chromium、Go SatSubscription Server 的多参与方
    E2E 执行环境。本地不执行该外部环境测试，也不把它伪造为已通过；环境具备后需要验证
    公共消息事件隔离、私信 Deliver/ACK、WebRTC 文件传输、Ping/Pong、切 owner、重连和

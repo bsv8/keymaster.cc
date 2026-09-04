@@ -14,6 +14,6 @@
     "@keymaster/contracts": "*",
     "@keymaster/runtime": "*",
     "@keymaster/ui": "*",
-    "bsv8-channel-protocol": "file:../../../ChannelProtocol/typescript"
+    "bsv8-channel-protocol": "0.2.0"
   }
 }
