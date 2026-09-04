@@ -2587,7 +2587,7 @@ function createCoordinatorChannelRuntime(): ChannelRuntime {
         message_id: newMessageID(),
         issued_at_ms: issuedAtMs,
         expires_at_ms: expiresAtMs,
-        content: input.content
+        body: input.content
       }, privateKey);
       await runtime.service.publish({ channel: input.channel, contentJson: marshalPublicMessage(signed) });
       if (coordinatorState.vaultStatus !== "unlocked"
@@ -2958,9 +2958,9 @@ async function handleIncomingChannelPublish(event: SatIncomingPublish): Promise<
     }
     const publicMessage = parsePublicMessage(event.channel, event.contentJson, Date.now());
     const publicDedup = publicDedupKey(publicMessage);
-    const key = `${publicDedup.from_public_key}\u0000${publicDedup.message_id}`;
+    const key = `${publicDedup.channel}\u0000${publicDedup.from_public_key}\u0000${publicDedup.message_id}`;
     if (!rememberChannelMessage(key)) return;
-    emitChannelPublicMessage({ channel: publicMessage.channel, publisherPublicKeyHex: publicMessage.from_public_key, messageId: publicMessage.message_id, content: publicMessage.content });
+    emitChannelPublicMessage({ channel: publicMessage.channel, publisherPublicKeyHex: publicMessage.from_public_key, messageId: publicMessage.message_id, content: publicMessage.body });
   } catch (error) {
     // 无效、过期、未知协议或非 owner inbox 的私密消息全部丢弃；不向 SSP
     // 暴露本地 crypto 错误，也不猜测业务协议。
@@ -3040,7 +3040,7 @@ async function executeChannelRequest(
           message_id: newMessageID(),
           issued_at_ms: issuedAtMs,
           expires_at_ms: expiresAtMs,
-          content: operation.content
+          body: operation.content
         } as const;
         const signed = signPublicMessage(message, privateKey);
         await runtime.service.publish({ channel: operation.channel, contentJson: marshalPublicMessage(signed) });

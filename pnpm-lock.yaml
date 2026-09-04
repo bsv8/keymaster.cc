@@ -7,9 +7,6 @@ settings:
 overrides:
   bitcoin-libp2p: 0.3.0
 
-patchedDependencies:
-  bsv8-channel-protocol@0.2.0: 9db9faef518c680f28f57fe0d0da0a9adb7d854b7bdd65dfdfc4b56454e69dd2
-
 importers:
 
   .:
@@ -205,8 +202,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
-        specifier: 0.2.0
-        version: 0.2.0(patch_hash=9db9faef518c680f28f57fe0d0da0a9adb7d854b7bdd65dfdfc4b56454e69dd2)
+        specifier: 0.3.0
+        version: 0.3.0
       buffer:
         specifier: ^6.0.3
         version: 6.0.3
@@ -319,8 +316,8 @@ importers:
         specifier: ^1.8.0
         version: 1.8.0
       bsv8-channel-protocol:
-        specifier: 0.2.0
-        version: 0.2.0(patch_hash=9db9faef518c680f28f57fe0d0da0a9adb7d854b7bdd65dfdfc4b56454e69dd2)
+        specifier: 0.3.0
+        version: 0.3.0
 
   packages/plugin-home:
     dependencies:
@@ -550,8 +547,8 @@ importers:
         specifier: 0.3.0
         version: 0.3.0(react-native@0.87.0(@babel/core@7.29.7)(@types/react@18.3.31)(react@18.3.1))
       bsv8-channel-protocol:
-        specifier: 0.2.0
-        version: 0.2.0(patch_hash=9db9faef518c680f28f57fe0d0da0a9adb7d854b7bdd65dfdfc4b56454e69dd2)
+        specifier: 0.3.0
+        version: 0.3.0
       sat-subscription-protocol:
         specifier: 0.1.0
         version: 0.1.0
@@ -652,8 +649,8 @@ importers:
         specifier: '*'
         version: link:../ui
       bsv8-channel-protocol:
-        specifier: 0.2.0
-        version: 0.2.0(patch_hash=9db9faef518c680f28f57fe0d0da0a9adb7d854b7bdd65dfdfc4b56454e69dd2)
+        specifier: 0.3.0
+        version: 0.3.0
 
   packages/plugin-window-p2p:
     dependencies:
@@ -2248,8 +2245,8 @@ packages:
   bser@2.1.1:
     resolution: {integrity: sha512-gQxTNE/GAfIIrmHLUE3oJyp5FO6HRBfhjnw4/wMmA63ZGDJnWBmgY/lyQBpnDUkGmAhbSe39tx2d/iTOAfglwQ==}
 
-  bsv8-channel-protocol@0.2.0:
-    resolution: {integrity: sha512-Q7zENvQWK9fG/XJYxign8pSKpR4SSylZNyg8wLNu0DoYyi9RfNga+myUZAFqvPW4CZTF9dA0XkTkNcqA7pJssQ==}
+  bsv8-channel-protocol@0.3.0:
+    resolution: {integrity: sha512-89RA/0ZGuh4FM0mhOVmVb7VG+AaogLTJ296ftTLdzgWM/yWT9SbwkXUXT2ce0EahrGfNEyfLoePXLS8XPZyl1A==}
     engines: {node: '>=20'}
 
   buffer-from@1.1.2:
@@ -6008,7 +6005,7 @@ snapshots:
     dependencies:
       node-int64: 0.4.0
 
-  bsv8-channel-protocol@0.2.0(patch_hash=9db9faef518c680f28f57fe0d0da0a9adb7d854b7bdd65dfdfc4b56454e69dd2):
+  bsv8-channel-protocol@0.3.0:
     dependencies:
       '@multiformats/multiaddr': 13.0.3
       '@noble/curves': 1.9.7

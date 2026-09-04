@@ -13,9 +13,4 @@ overrides:
 minimumReleaseAgeExclude:
   - bitcoin-libp2p@0.3.0
   - bsv8-channel-protocol@0.1.0
-  - bsv8-channel-protocol@0.2.0
-
-# 临时发布桥：npm 0.2.0 尚未包含已冻结的 Public Message/私密 TTL API；
-# 上游发布包含这些 API 的正式版本后，应删除该 patch 并仅保留版本依赖。
-patchedDependencies:
-  bsv8-channel-protocol@0.2.0: patches/bsv8-channel-protocol@0.2.0.patch
+  - bsv8-channel-protocol@0.3.0
