@@ -1,0 +1,255 @@
+/* packages/plugin-sat-subscription/src/styles.css
+ * SatSubscription 系统设置页样式。
+ *
+ * 设置页由 system-settings.registry 装配到公共设置容器中；这里仅负责
+ * SatSubscription 自己的供应商卡片、表单和 SPI 操作区域，不污染全局样式。
+ */
+
+.sat-subscription-settings {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 14px;
+  color: var(--text);
+}
+
+.sat-subscription-settings > h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.sat-subscription-settings > p:not([role]) {
+  margin: -6px 0 2px;
+  color: var(--text-dim);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.sat-subscription-settings > p[role="status"],
+.sat-subscription-settings > p[role="alert"] {
+  margin: 0;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.sat-subscription-settings > p[role="status"] {
+  border-color: color-mix(in srgb, #2fa36b 42%, var(--border));
+  background: color-mix(in srgb, #2fa36b 8%, var(--surface));
+  color: #238356;
+}
+
+.sat-subscription-settings > p[role="alert"] {
+  border-color: color-mix(in srgb, var(--danger) 44%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, var(--surface));
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.sat-subscription-settings > h2,
+.sat-subscription-settings > h3 {
+  margin: 8px 0 0;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+}
+
+.sat-subscription-settings > h2 {
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  font-size: 15px;
+}
+
+.sat-subscription-settings > h3 {
+  font-size: 14px;
+}
+
+.sat-subscription-settings__supplier {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 9px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--surface);
+  box-shadow: 0 1px 1px color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.sat-subscription-settings__supplier > strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.sat-subscription-settings__supplier > code {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.sat-subscription-settings__supplier > div {
+  min-width: 0;
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.sat-subscription-settings__supplier > div code {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.sat-subscription-settings__supplier > div:nth-of-type(4),
+.sat-subscription-settings__supplier > div:nth-of-type(5),
+.sat-subscription-settings__supplier > div:nth-of-type(6) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.sat-subscription-settings__supplier > div:nth-of-type(4),
+.sat-subscription-settings__supplier > div:nth-of-type(5) {
+  padding-top: 2px;
+}
+
+.sat-subscription-settings__supplier > div:nth-of-type(5) input {
+  width: 150px;
+  min-width: 120px;
+}
+
+.sat-subscription-settings__supplier > div span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sat-subscription-settings input,
+.sat-subscription-settings textarea {
+  max-width: 100%;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  outline: none;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+}
+
+.sat-subscription-settings > input,
+.sat-subscription-settings > textarea {
+  width: min(100%, 640px);
+}
+
+.sat-subscription-settings textarea {
+  min-height: 110px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  line-height: 1.5;
+}
+
+.sat-subscription-settings input:hover:not(:disabled),
+.sat-subscription-settings textarea:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+}
+
+.sat-subscription-settings input:focus,
+.sat-subscription-settings textarea:focus {
+  border-color: color-mix(in srgb, var(--primary) 75%, var(--border));
+  background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 13%, transparent);
+}
+
+.sat-subscription-settings input::placeholder,
+.sat-subscription-settings textarea::placeholder {
+  color: color-mix(in srgb, var(--text-dim) 72%, transparent);
+}
+
+.sat-subscription-settings > label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.sat-subscription-settings > label input[type="checkbox"] {
+  width: 15px;
+  min-height: 15px;
+  margin: 0;
+  accent-color: var(--primary);
+}
+
+.sat-subscription-settings > button {
+  align-self: flex-start;
+}
+
+.sat-subscription-settings > [role="dialog"] {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--primary) 42%, var(--border));
+  border-radius: calc(var(--radius) + 2px);
+  background: color-mix(in srgb, var(--primary) 6%, var(--surface));
+}
+
+.sat-subscription-settings > [role="dialog"] > strong {
+  font-size: 13px;
+}
+
+.sat-subscription-settings > [role="dialog"] > div {
+  color: var(--text-dim);
+  font-size: 12px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.sat-subscription-settings > ul {
+  display: flex;
+  max-height: 280px;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.sat-subscription-settings > ul > li {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 560px) {
+  .sat-subscription-settings__supplier {
+    padding: 12px;
+  }
+
+  .sat-subscription-settings__supplier > div:nth-of-type(5) input {
+    flex: 1 1 140px;
+    width: auto;
+  }
+}

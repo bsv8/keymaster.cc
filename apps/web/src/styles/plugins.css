@@ -17,6 +17,7 @@
 @import "@keymaster/plugin-settings/styles.css";
 @import "@keymaster/plugin-background/styles.css";
 @import "@keymaster/plugin-poker/styles.css";
+@import "@keymaster/plugin-sat-subscription/styles.css";
 @import "@keymaster/plugin-protocol/styles.css";
 @import "@keymaster/plugin-message/styles.css";
 @import "@keymaster/plugin-contacts/styles.css";
