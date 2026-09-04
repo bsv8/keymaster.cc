@@ -12,5 +12,4 @@ overrides:
 
 minimumReleaseAgeExclude:
   - bitcoin-libp2p@0.3.0
-  # 当前各项目均固定 bsv8-channel-protocol 版本；按包名放行以兼容 CI 的锁文件校验。
-  - bsv8-channel-protocol
+  - bsv8-channel-protocol@0.3.0
