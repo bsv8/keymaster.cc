@@ -98,7 +98,7 @@ const settingsResources: I18nPluginResources = {
       // 硬切换 002：统一日志页文案
       "logSettings.title": "System logs",
       "logSettings.description":
-        "Inspect the unified system log. Plugins record their activity via ctx.logger; entries are stored in a single global IndexedDB.",
+        "Inspect the unified system log. Plugins record their activity via ctx.logger; entries are stored in a single global platform K-V repository.",
       "logSettings.config.description": "Configure retention and debug collection for the unified system log.",
       "logSettings.config.title": "Configuration",
       "logSettings.config.retentionHint":
@@ -193,7 +193,7 @@ const settingsResources: I18nPluginResources = {
       // 硬切换 002：统一日志页文案
       "logSettings.title": "系统日志",
       "logSettings.description":
-        "查看统一系统日志。插件通过 ctx.logger 记录行为，entry 存储在唯一的全局 IndexedDB 中。",
+        "查看统一系统日志。插件通过 ctx.logger 记录行为，entry 存储在唯一的全局 platform K-V repository 中。",
       "logSettings.config.description": "配置统一系统日志的保留策略与 debug 采集。",
       "logSettings.config.title": "配置",
       "logSettings.config.retentionHint":
@@ -234,6 +234,7 @@ export const settingsPlugin: PluginManifest = {
   meta: {
     kind: "core",
     startup: "optional",
+    bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: false,
     displayGroup: "core"

@@ -12,7 +12,7 @@
 //     集中在 actor 内部。
 //   - 业务插件仍走 woc.service，woc.service 内部通过 messageBus.request
 //     把请求投递给 actor。
-//   - actor mailbox 使用内存消息，不做 IndexedDB 持久化。
+//   - actor mailbox 使用内存消息，不做 platform K-V repository 持久化。
 //   - 阶段 2：handler 收到的 message envelope 携带 MessageBus 内部 signal
 //     （覆盖 caller signal + timeout）。actor 内部不再造 AbortController，
 //     直接把 message.signal 接到 fetch 链路。
@@ -34,7 +34,9 @@ import type {
   WocBsv21TokenDetail
 } from "@keymaster/contracts";
 import { WOC_PRIORITY } from "@keymaster/contracts";
-import { loadWocConfig, saveWocConfig } from "./wocSettings.js";
+import type { KeyValueStore } from "@keymaster/contracts";
+import { createKeyValueSettingsStore } from "@keymaster/runtime";
+import { DEFAULT_WOC_CONFIG, normalizeWocConfig } from "./wocSettings.js";
 import {
   WOC_ACTOR_ACCEPT_CONCURRENCY,
   WOC_ACTOR_TARGET,
@@ -64,9 +66,9 @@ import type {
 } from "@keymaster/contracts";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
-const SHARED_TIMESTAMP_KEY = "woc.sharedTimestamps";
-const SHARED_TIMESTAMP_MAX = 64;
 const WEB_LOCK_NAME = "woc.service.send";
+const WOC_SETTINGS_KEY = "settings";
+const WOC_SETTINGS_PARTITION = "settings";
 
 interface ActorEntry {
   priority: number;
@@ -210,6 +212,8 @@ export interface WocActorHandle {
   onConfigChange(handler: (c: WocConfig) => void): () => void;
   getQueueSnapshot(): WocQueueSnapshot;
   onQueueChange(handler: (s: WocQueueSnapshot) => void): () => void;
+  /** 等待 K-V 配置完成首次加载。 */
+  ready(): Promise<void>;
   dispose(): void;
 }
 
@@ -220,10 +224,19 @@ export interface CreateWocActorOptions {
    * 不传时不记日志（保持旧行为）。
    */
   logger?: PluginLogger;
+  /** Host 预绑定的 WOC owner/App K-V 句柄。 */
+  storage?: KeyValueStore;
 }
 
 export function createWocActor(options: CreateWocActorOptions = {}): WocActorHandle {
-  let config: WocConfig = loadWocConfig();
+  const settingsStore = createKeyValueSettingsStore<WocConfig>({
+    storage: options.storage,
+    key: WOC_SETTINGS_KEY,
+    partition: WOC_SETTINGS_PARTITION,
+    defaults: () => ({ ...DEFAULT_WOC_CONFIG }),
+    normalize: normalizeWocConfig
+  });
+  let config: WocConfig = settingsStore.load();
   const configListeners = new Set<(c: WocConfig) => void>();
   const queueListeners = new Set<(s: WocQueueSnapshot) => void>();
   let messageBus: MessageBus | null = null;
@@ -264,35 +277,13 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     for (const l of queueListeners) l(s);
   }
 
-  function readSharedTimestamps(): number[] {
-    try {
-      const raw = localStorage.getItem(SHARED_TIMESTAMP_KEY);
-      if (!raw) return [];
-      const arr = JSON.parse(raw) as number[];
-      return Array.isArray(arr) ? arr : [];
-    } catch {
-      return [];
-    }
-  }
-  function writeSharedTimestamps(arr: number[]) {
-    try {
-      localStorage.setItem(SHARED_TIMESTAMP_KEY, JSON.stringify(arr));
-    } catch {
-      // 静默失败。
-    }
-  }
   function prune(timestamps: number[], now: number): number[] {
     const cutoff = now - 1000;
     return timestamps.filter((t) => t > cutoff);
   }
   function nextSendAt(): number {
     const now = Date.now();
-    const shared = prune(readSharedTimestamps(), now);
-    const local = prune(localTimestamps, now);
-    const merged = prune(
-      Array.from(new Set([...shared, ...local])).sort((a, b) => a - b),
-      now
-    );
+    const merged = prune(localTimestamps, now);
     const rate = Math.max(config.requestsPerSecond, 0.0001);
     if (merged.length === 0) return now;
     const maxInWindow = Math.max(1, Math.floor(rate));
@@ -309,10 +300,6 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
   }
   function recordSendTime(t: number) {
     localTimestamps.push(t);
-    const shared = prune(readSharedTimestamps(), t);
-    shared.push(t);
-    const trimmed = shared.length > SHARED_TIMESTAMP_MAX ? shared.slice(-SHARED_TIMESTAMP_MAX) : shared;
-    writeSharedTimestamps(trimmed);
   }
   function schedulePump() {
     if (pumpScheduled) return;
@@ -1338,7 +1325,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       if (input.baseUrl !== undefined) changed.baseUrl = next.baseUrl;
       if (input.requestsPerSecond !== undefined) changed.requestsPerSecond = next.requestsPerSecond;
       config = next;
-      saveWocConfig(config);
+      settingsStore.save(config);
       logger?.info({
         scope: "woc.config",
         event: "config.changed",
@@ -1357,6 +1344,18 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     onQueueChange(handler) {
       queueListeners.add(handler);
       return () => queueListeners.delete(handler);
+    },
+    ready: async () => {
+      try {
+        await settingsStore.ready();
+      } catch (error) {
+        // Host 可以在 Vault 解锁前完成插件装载；此时延迟 owner 句柄
+        // 尚无 active key。真正的 K-V 读取由 keyspace active 事件重试。
+        if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
+        return;
+      }
+      config = settingsStore.load();
+      emitConfig();
     },
     dispose() {
       if (disposed) return;

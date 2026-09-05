@@ -1,5 +1,5 @@
-import type { BreadcrumbProvider, BreadcrumbRegistry, I18nPluginResources, PluginManifest, SessionCoordinatorClient, SystemSettingsRegistry } from "@keymaster/contracts";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
+import type { BreadcrumbProvider, BreadcrumbRegistry, I18nPluginResources, PluginManifest, SystemSettingsRegistry, P2pkhCoordinatorControl } from "@keymaster/contracts";
+import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY } from "@keymaster/contracts";
 import { JungleBusSettingsPage } from "./pages/JungleBusSettingsPage.js";
 
 export const jungleBusResources: I18nPluginResources = {
@@ -12,15 +12,16 @@ export const jungleBusResources: I18nPluginResources = {
 
 export const jungleBusPlugin: PluginManifest = {
   id: "junglebus", name: "JungleBus", description: "Confirmed transaction sync provider; no broadcast or subscription capability.",
-  meta: { kind: "platform", startup: "optional", defaultEnabled: true, canDisable: true, providesCapabilities: [], displayGroup: "platform" },
+  meta: { kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, providesCapabilities: [], displayGroup: "platform" },
   i18n: jungleBusResources,
   dependencies: [
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "通过 Coordinator RPC 管理 Worker 可读的 provider 配置" },
     { capability: "system-settings.registry", reason: "注册 JungleBus provider 设置页" },
     { capability: "breadcrumb.registry", reason: "注册 JungleBus 设置面包屑" }
   ],
   setup(ctx) {
-    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("JungleBus Coordinator control is unavailable");
+    ctx.provide(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     // The worker uses this durable flag to mirror the host plugin lifecycle;
     // a disabled optional plugin must not leave its provider executable.
     void coordinator.p2pkhProviderConfigUpdate("junglebus", { enabled: true });

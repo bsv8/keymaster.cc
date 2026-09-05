@@ -1,6 +1,6 @@
 // SatSubscription 的 Window P2P lane。
 //
-// 这里只有公共 P2P Host 和 SSP/SPI stream；owner 私钥、Sat DB 和业务状态都
+// 这里只有公共 P2P Host 和 SSP/SPI stream；owner 私钥、Sat K-V 和业务状态都
 // 在 SharedWorker。每个连接操作/事件都携带 supplier、connection、owner epoch
 // 和 supplier generation 四元组，防止旧连接的迟到结果污染新连接。
 

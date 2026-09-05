@@ -1,15 +1,15 @@
 // packages/plugin-token-stas/src/stasTokenProvider.ts
-// STAS TokenProvider：从 snapshot DB 读取，注入 token.registry。
+// STAS TokenProvider：从 snapshot K-V 读取，注入 token.registry。
 //
 // 设计缘由：
-//   - listTokens / getToken 只读 snapshot DB，不访问 WOC。
-//   - 后台 task 通过 stasSync 写入 DB，页面通过 onChange 重读。
+//   - listTokens / getToken 只读 snapshot K-V，不访问 WOC。
+//   - 后台 task 通过 stasSync 写入 K-V，页面通过 onChange 重读。
 //   - phase 1 只支持主网 STAS；零或负值不进入统一持仓页。
 //   - 同 issuer+symbol 的多地址余额需要聚合。
 //   - tokenId 使用稳定形式 `stas:${issuer}:${symbol}`，避免不同发行方
 //     同名 symbol 相互覆盖。
 //   - 列表稳定排序：按 tokenId 升序。
-//   - DB 已按 active key namespace 隔离，不需要传 publicKeyHex。
+//   - K-V 已按 active key namespace 隔离，不需要传 publicKeyHex。
 
 import type {
   AssetDataNotifier,
@@ -19,10 +19,10 @@ import type {
   TokenProvider,
   TokenSummary
 } from "@keymaster/contracts";
-import type { StasDb, StasTokenSnapshot } from "./stasDb.js";
+import type { StasRepository, StasTokenSnapshot } from "./storage/stasRepository.js";
 
 export interface StasTokenProviderOptions {
-  db: StasDb;
+  stateRepository: StasRepository;
   keyspace: KeyspaceService;
   assetDataNotifier?: AssetDataNotifier;
 }
@@ -51,10 +51,10 @@ export function parseStasTokenId(tokenId: string): { issuer: string; symbol: str
 }
 
 export function createStasTokenProvider(options: StasTokenProviderOptions): TokenProvider {
-  if (!options || !options.db || !options.keyspace) {
-    throw new Error("createStasTokenProvider: db and keyspace are required");
+  if (!options || !options.stateRepository || !options.keyspace) {
+    throw new Error("createStasTokenProvider: stateRepository and keyspace are required");
   }
-  const { db, keyspace, assetDataNotifier } = options;
+  const { stateRepository, keyspace, assetDataNotifier } = options;
   const listeners = new Set<() => void>();
 
   function notify() {
@@ -105,8 +105,8 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
       const state = keyspace.active();
       if (!state.activePublicKeyHex) return [];
 
-      // DB 操作隐式使用当前 active key 的 namespace
-      const snapshots = await db.list();
+      // K-V 操作隐式使用当前 active key 的 namespace
+      const snapshots = await stateRepository.list();
 
       // 按 issuer+symbol 聚合多地址的余额
       const aggregated = new Map<string, {
@@ -144,8 +144,8 @@ export function createStasTokenProvider(options: StasTokenProviderOptions): Toke
       const parsed = parseStasTokenId(tokenId);
       if (!parsed) return undefined;
 
-      // DB 操作隐式使用当前 active key 的 namespace
-      const snapshots = await db.list();
+      // K-V 操作隐式使用当前 active key 的 namespace
+      const snapshots = await stateRepository.list();
       const matching = snapshots.filter(
         (s) => (s.issuer || "") === parsed.issuer && s.symbol === parsed.symbol
       );

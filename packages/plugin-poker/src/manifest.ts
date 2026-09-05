@@ -258,15 +258,14 @@ export const pokerPlugin: PluginManifest = {
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: false,
     canDisable: true,
     providesCapabilities: [POKER_SERVICE_CAPABILITY],
     displayGroup: "business"
   },
   i18n: pokerResources,
-  keyScopedStorages: [
-    { storageId: "poker", description: "Poker settings / tables / presences / tx ingest" }
-  ],
+  storage: { scope: "key", applicationStorageId: "Poker", schemaVersion: 1 },
   dependencies: [
     { capability: "vault.service", reason: "need createActiveKeyCrypto for signing" },
     { capability: "keyspace.service", reason: "active key + key-scoped storage" },
@@ -278,12 +277,19 @@ export const pokerPlugin: PluginManifest = {
     { capability: "home.registry", reason: "register poker home widget" },
     { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" }
   ],
-  setup(ctx) {
+  async setup(ctx) {
     const vault = ctx.get<VaultService>("vault.service");
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
+    if (!ctx.storage) throw new Error("Poker owner storage binding is unavailable");
 
-    const service = createPokerService({ vault, keyspace, messageBus });
+    const service = createPokerService({ vault, keyspace, messageBus, storage: ctx.storage });
+    await service.ready();
+    const offStorageActive = keyspace.onActiveKeyChanged((state) => {
+      if (state.activePublicKeyHex) {
+        void service.ready().catch((error) => ctx.logger.warn({ scope: "poker.config", event: "config.load_failed", message: "Poker config load failed", data: { error: error instanceof Error ? error.message : String(error) } }));
+      }
+    });
     ctx.provide(POKER_SERVICE_CAPABILITY, service);
     const resources = ctx.get<ResourceRegistry>("resource.registry");
     resources.register<PokerConnectionStatus, readonly string[]>({
@@ -406,6 +412,7 @@ export const pokerPlugin: PluginManifest = {
     // 硬切换 001：teardown 桥接到 service.dispose() —— 内部处理 ws / reconnect
     // timer / identity binding / listeners 全部清理。
     return () => {
+      offStorageActive();
       try {
         service.dispose?.();
       } catch {

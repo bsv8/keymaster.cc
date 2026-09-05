@@ -2,10 +2,10 @@
 // BSV-21 后台同步任务。
 //
 // 设计缘由：
-//   - 唯一 WOC / 外网调用者；写自己的 key-scoped snapshot DB。
+//   - 唯一 WOC / 外网调用者；写自己的 key-scoped snapshot K-V。
 //   - 归入 asset-holdings schedule group，由 BackgroundService 统一调度。
 //   - 成功后发布 data-changed 通知。
-//   - 取消后不提交 DB，也不发 data-changed。
+//   - 取消后不提交 K-V，也不发 data-changed。
 //   - 施工单 001：canRun 返回结构化 BackgroundRunEligibility。
 
 import type {
@@ -17,15 +17,15 @@ import type {
   WocService,
   VaultService
 } from "@keymaster/contracts";
-import type { Bsv21Db } from "./bsv21Db.js";
-import type { Bsv21MintHistoryDb } from "./bsv21MintHistoryDb.js";
+import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
+import type { Bsv21MintHistoryRepository } from "./storage/bsv21MintHistoryRepository.js";
 import type { Bsv21ServiceHandle } from "./bsv21Service.js";
 
 export interface CreateBsv21SyncTaskOptions {
-  db: Bsv21Db;
+  stateRepository: Bsv21StateRepository;
   service: Bsv21ServiceHandle;
   woc: WocService;
-  historyDb?: Bsv21MintHistoryDb;
+  historyRepository?: Bsv21MintHistoryRepository;
   keyspace: KeyspaceService;
   vault: VaultService;
   assetDataNotifier?: AssetDataNotifier;
@@ -34,14 +34,14 @@ export interface CreateBsv21SyncTaskOptions {
 /**
  * 创建 BSV-21 后台同步任务。
  * 设计缘由：
- *   - 从 P2PKH 本地 resource DB 读取当前 active key 地址；
+ *   - 从 P2PKH 本地 resource K-V 读取当前 active key 地址；
  *   - 通过 WOC 拉 token list / balance；
  *   - 以一次原子提交替换 BSV-21 snapshot；
  *   - 成功后发 data-changed。
- *   - 取消后不提交 DB、不发 data-changed。
+ *   - 取消后不提交 K-V、不发 data-changed。
  */
 export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): BackgroundTaskDefinition {
-  const { db, service, woc, historyDb, keyspace, vault, assetDataNotifier } = options;
+  const { stateRepository, service, woc, historyRepository, keyspace, vault, assetDataNotifier } = options;
 
   return {
     id: "token-bsv21.sync",
@@ -80,11 +80,11 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       const startedKeyHex = state.activePublicKeyHex;
 
       // 通过 service 获取当前 active key 的 BSV-21 tokens
-      // service 内部会从 P2PKH resource DB 读取地址并通过 WOC 拉取
+      // service 内部会从 P2PKH resource K-V 读取地址并通过 WOC 拉取
       // 传递 signal 以便取消时中止网络请求
       const tokens = await service.listActiveKeyTokens(ctx.signal);
 
-      // 检查取消信号：取消后不提交 DB，不发 data-changed
+      // 检查取消信号：取消后不提交 K-V，不发 data-changed
       if (ctx.signal.aborted) return;
       ctx.assertSessionFresh?.();
 
@@ -123,9 +123,9 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
       }
 
       // 原子替换：在同一事务中删除旧数据并写入新数据
-      // DB 操作隐式使用当前 active key 的 namespace
-      await db.replaceAll(snapshots);
-      await reconcileHistory(historyDb, woc);
+      // K-V 操作隐式使用当前 active key 的 namespace
+      await stateRepository.replaceAll(snapshots);
+      await reconcileHistory(historyRepository, woc);
       ctx.assertSessionFresh?.();
 
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；
@@ -145,9 +145,9 @@ export function createBsv21SyncTask(options: CreateBsv21SyncTaskOptions): Backgr
   };
 }
 
-async function reconcileHistory(historyDb: Bsv21MintHistoryDb | undefined, woc: WocService): Promise<void> {
-  if (!historyDb) return;
-  const current = await historyDb.list().catch(() => []);
+async function reconcileHistory(historyRepository: Bsv21MintHistoryRepository | undefined, woc: WocService): Promise<void> {
+  if (!historyRepository) return;
+  const current = await historyRepository.list().catch(() => []);
   if (current.length === 0) return;
   for (const record of current) {
     const canonicalTxid = record.submit?.spend.canonicalTxid;
@@ -157,7 +157,7 @@ async function reconcileHistory(historyDb: Bsv21MintHistoryDb | undefined, woc: 
     if (observation) {
       const nextStatus = observationToStatus(observation);
       if (record.status === nextStatus && record.submit?.spend.observation === observation) continue;
-      await historyDb.put({
+      await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),
         status: nextStatus,
@@ -174,7 +174,7 @@ async function reconcileHistory(historyDb: Bsv21MintHistoryDb | undefined, woc: 
     }
     const wasObservedUnconfirmed = record.status === "woc-observed-unconfirmed" || record.submit?.spend.observation === "unconfirmed";
     if (wasObservedUnconfirmed) {
-      await historyDb.put({
+      await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),
         status: "woc-dropped",

@@ -8,7 +8,7 @@
 //     `.pricecast.bsvusdt`；不允许写死完整常量化整个频道；
 //   - 后缀稳定不变；只在配置层暴露公钥真值；
 //   - `pricePublisherPublicKeyHex` 的长期运行时真值现在由
-//     `localStorage["bsv-price.settings"]` 承担；`manifest.config` 只作首次 seed。
+//     Host 注入的 BSV Price owner/App K-V 承担；`manifest.config` 只作首次 seed。
 
 export const PRICECAST_PROTOCOL_ID = "pricecast.bsv_price.v1";
 export const PRICECAST_CHANNEL_SUFFIX = ".pricecast.bsvusdt";

@@ -347,7 +347,7 @@ export interface PokerService {
   /**
    * 更新全局网络配置。
    *
-   * 设计缘由：硬切换 004 后 settings 不再写到 key-scoped DB；plugin-poker
+   * 设计缘由：硬切换 004 后 settings 不再写到 key-scoped K-V；plugin-poker
    * 启动时一次性 hydrate 来自 pokerGlobalConfig。更新时同时触发
    * onSettingsChange；若当前已 ready 且 patch.proxyEndpoint 变化，service
    * 会主动 disconnect → reconnect，让新 endpoint 立即生效。
@@ -357,7 +357,7 @@ export interface PokerService {
    * 订阅 settings 变化。
    *
    * 设计缘由：硬切换 004 后 settings 来自 pokerGlobalConfig（localStorage /
-   * 全局 IDB），不会随 binding 切换而变化；订阅时**不会**立即推一次当前值。
+   * 全局平台 K-V），不会随 binding 切换而变化；订阅时**不会**立即推一次当前值。
    */
   onSettingsChange(handler: (settings: PokerSettings) => void): () => void;
 

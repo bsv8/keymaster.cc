@@ -7,6 +7,8 @@ import { KEYSPACE_SERVICE_CAPABILITY, MSFILE_SERVICE_CAPABILITY, WINDOW_P2P_EXEC
 import { createPluginHost } from "@keymaster/runtime";
 import { msfilePlugin } from "./manifest.js";
 
+const TEST_OWNER = `02${"11".repeat(32)}`;
+
 function coordinator(): SessionCoordinatorClient {
   return {
     subscribeTopic: vi.fn(() => () => undefined),
@@ -24,8 +26,26 @@ describe("msfilePlugin manifest", () => {
   });
 
   it("registers the formal file route and removes all owned surfaces on disable", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    host.provide("session-coordinator.client", coordinator());
+    const host = createPluginHost({
+      disableConfigPersistence: true,
+      coordinatorForPlugin: () => coordinator(),
+      storageBindingAuthority: {
+        openOwnerAppStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
+          ...declaration,
+          ownerPublicKeyHex: TEST_OWNER,
+          bucketId: "test",
+          bucketGeneration: 1
+        }),
+        openPlatformStore: async ({ applicationStorageId, schemaVersion }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({
+          scope: "platform",
+          applicationStorageId,
+          schemaVersion,
+          bucketId: "test",
+          bucketGeneration: 1
+        }),
+        deleteOwnerStorage: async () => undefined
+      }
+    });
     const laneRegistry = { register: vi.fn(() => () => undefined) };
     host.provide(WINDOW_P2P_EXECUTOR_CAPABILITY, laneRegistry);
     host.provide(KEYSPACE_SERVICE_CAPABILITY, {

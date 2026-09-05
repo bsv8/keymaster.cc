@@ -1,7 +1,7 @@
 // packages/plugin-vault/src/VaultKeyCreateModal.tsx
 // 硬切换 002：新建 Key Modal。
 // 设计缘由：
-//   - 私钥生成属于 Vault 安全边界，本组件不调用 crypto / noble / IndexedDB，
+//   - 私钥生成属于 Vault 安全边界，本组件不调用 crypto / noble / platform K-V repository，
 //     只负责收集标签 + 调用父组件传入的 onCreate(label)。
 //   - 提交中防重复：loading 期间禁止关闭、禁止二次提交。
 //   - 成功状态：展示公开 KeyRef + 备份风险提示，导出走父组件传入的

@@ -4,7 +4,7 @@
 // （Argon2id KDF + XChaCha20-Poly1305 AEAD），不能使用 Keymaster 私有格式，
 // 也不能提供明文 hex / WIF 导出。
 //
-// 该模块不访问 IndexedDB、不持有 React 状态、不保存密码、不处理文件下载：
+// 该模块不访问 platform K-V repository、不持有 React 状态、不保存密码、不处理文件下载：
 // 边界由 vaultService 持有，它负责把受控会话里拿到的私钥 bytes 传入这里。
 
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";

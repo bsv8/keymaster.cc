@@ -33,6 +33,7 @@ export const wifImporterPlugin: PluginManifest = {
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "import"

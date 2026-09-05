@@ -10,11 +10,12 @@
 //   - 全局网络配置（pokerGlobalConfig）不随 key 切换丢失；
 //   - 桌内切 active key 会强制收拢（service 内部已断开订阅，UI 由 PokerTable 监听）。
 
-import "fake-indexeddb/auto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import { IDBFactory as FDBFactory } from "fake-indexeddb";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
+import type { KeyValueCommitInput, KeyValueCommitResult, KeyValueEntry, KeyValueEntryMeta, KeyValueListInput, KeyValueListResult, KeyValueStore, KeyValueValue } from "@keymaster/contracts";
 import { createPokerService } from "./pokerService.js";
+import { writePresence, writeTable, writeTxIngest } from "./storage/pokerRepository.js";
 
 // 硬切换 002 收尾：测试里"当前 owner"必须落到真实压缩公钥；旧 fixture
 // 的 `"kA"` / `"kB"` / `PUB_A` 等拼接假 hex 在运行期会被
@@ -34,12 +35,6 @@ const PRIV_A = "0000000000000000000000000000000000000000000000000000000000000001
 const PRIV_B = "0000000000000000000000000000000000000000000000000000000000000002";
 const PUB_A = derivePubHex(PRIV_A);
 const PUB_B = derivePubHex(PRIV_B);
-import {
-  clearPokerGlobalConfig,
-  readPokerGlobalConfig,
-  writePokerGlobalConfig
-} from "./pokerGlobalConfig.js";
-
 class FakeMessageBus {
   private handlers = new Map<string, Array<(p: any) => void>>();
   publish(type: string, payload: any) {
@@ -148,9 +143,6 @@ class FakeVault {
     throw new Error("not used");
   }
   async deleteKeyMaterial() {}
-  async removeKey() {
-    throw new Error("deprecated");
-  }
   async createActiveKeyCrypto(publicKeyHex: string) {
     if (publicKeyHex !== PUB_A && publicKeyHex !== PUB_B) {
       throw new Error("unknown key");
@@ -181,20 +173,11 @@ class FakeVault {
   }
 }
 
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.replace(/^0x/, "");
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < out.length; i++) {
-    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
-  }
-  return out;
-}
-
 class FakeKeyspace {
   // 硬切换 005 收尾：active state 不再有 `mode` 字段，只表达 activePublicKeyHex
   // 存在 / 缺省；老 `mode: "all" / setAll()` 已删除。
   private state: { activePublicKeyHex?: string } = { activePublicKeyHex: PUB_A };
-  private dbs = new Map<string, IDBDatabase>();
+  private stores = new Map<string, KeyValueStore>();
   private activeHandlers = new Set<(s: any) => void>();
   private keyMeta = new Map<string, any>([
     [PUB_A, KEY_A],
@@ -243,30 +226,29 @@ class FakeKeyspace {
     this.keyMeta.delete(pkh);
   }
 
-  async openKeyStorage(input: {
-    publicKeyHex: string;
-    pluginId: string;
-    storageId: string;
-    version: number;
-    upgrade: (db: IDBDatabase, oldV: number, newV: number | null) => void;
-  }) {
-    const name = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
-    return await new Promise<{ db: IDBDatabase; name: string; close(): void }>((resolve, reject) => {
-      const req = indexedDB.open(name, input.version);
-      req.onupgradeneeded = (e) => {
-        const db = req.result;
-        input.upgrade(db, e.oldVersion, e.newVersion);
-      };
-      req.onsuccess = () => {
-        const db = req.result;
-        this.dbs.set(name, db);
-        resolve({ db, name, close: () => db.close() });
-      };
-      req.onerror = () => reject(req.error);
+  ownerStore(ownerPublicKeyHex: string = this.state.activePublicKeyHex ?? ""): KeyValueStore {
+    if (!ownerPublicKeyHex) throw new Error("No active owner in test keyspace");
+    const key = `${ownerPublicKeyHex}:Poker:1`;
+    const existing = this.stores.get(key);
+    if (existing) return { ...existing, close: () => undefined };
+    const created = createInMemoryKeyValueStore({
+      scope: "key",
+      ownerPublicKeyHex,
+      applicationStorageId: "Poker",
+      schemaVersion: 1,
+      bucketId: "test-memory",
+      bucketGeneration: 1
     });
+    this.stores.set(key, created);
+    return { ...created, close: () => undefined };
   }
-  registerPluginStorage() {}
-  listPluginStorages() {
+  async openOwnerAppStore(input: { applicationStorageId: string; schemaVersion: number }): Promise<KeyValueStore> {
+    if (!this.state.activePublicKeyHex) throw new Error("No active owner in test keyspace");
+    if (input.applicationStorageId !== "Poker" || input.schemaVersion !== 1) throw new Error("Unexpected Poker storage declaration");
+    return this.ownerStore(this.state.activePublicKeyHex);
+  }
+  registerStorageDeclaration() {}
+  listOwnerStorageDeclarations() {
     return [];
   }
   async prepareDeleteKey() {}
@@ -285,24 +267,39 @@ class FakeKeyspace {
   }
 }
 
+/** 模拟 Host 的延迟 OwnerAppStore：每次 I/O 按当前 active key 重新取句柄。 */
+function activeOwnerStore(ownerKeyspace: FakeKeyspace): KeyValueStore {
+  const open = () => ownerKeyspace.openOwnerAppStore({ applicationStorageId: "Poker", schemaVersion: 1 });
+  return {
+    get bucketId() { return "test-memory"; },
+    get bucketGeneration() { return 1; },
+    get ownerPublicKeyHex() { return ownerKeyspace.active().activePublicKeyHex ?? ""; },
+    applicationStorageId: "Poker",
+    async get<T = KeyValueValue>(key: string, input: { partition?: string } = {}): Promise<KeyValueEntry<T> | undefined> { return (await open()).get<T>(key, input); },
+    async list(input: KeyValueListInput = {}): Promise<KeyValueListResult> { return (await open()).list(input); },
+    async put<T = KeyValueValue>(key: string, value: T, condition: { ifRevision?: number; partition?: string } = {}): Promise<KeyValueEntryMeta> { return (await open()).put(key, value, condition); },
+    async delete(key: string, condition: { ifRevision?: number; partition?: string } = {}): Promise<void> { await (await open()).delete(key, condition); },
+    async commit(input: KeyValueCommitInput): Promise<KeyValueCommitResult> { return (await open()).commit(input); },
+    close() {}
+  };
+}
+
 let svc: ReturnType<typeof createPokerService>;
 let vault: FakeVault;
 let keyspace: FakeKeyspace;
 let bus: FakeMessageBus;
 
 beforeEach(async () => {
-  // 每个测试重置 localStorage 与 IndexedDB。
-  if (typeof localStorage !== "undefined") localStorage.clear();
-  (globalThis as any).indexedDB = new FDBFactory();
+  // 每个测试使用独立的内存 K-V owner namespace，不连接浏览器持久化 API。
   vault = new FakeVault();
   keyspace = new FakeKeyspace();
   bus = new FakeMessageBus();
   keyspace.attachBus(bus);
-  svc = createPokerService({ vault: vault as any, keyspace: keyspace as any, messageBus: bus as any });
+  svc = createPokerService({ vault: vault as any, keyspace: keyspace as any, messageBus: bus as any, storage: keyspace.ownerStore(PUB_A) });
   // 让 service 的 init rebind 完成。
   // 关键（修复 pokerService.test.ts:683 偶发 flake）：
   // rebindToActiveKey("init") 内部在写完 currentSessionKeyHash 之后还要
-  // 跑 migrateLegacySettingsIfNeeded + hydrateFromKeyScopedDb，最后才到
+  // 跑 migrateLegacySettingsIfNeeded + hydrateFromKeyScopedRepository，最后才到
   // `if (userWantsConnection && proxyEndpoint) await this.connect()` 这一行。
   // 如果测试在"currentSessionKeyHash 已写"但"connect 检查还没到"之间就
   // patch userWantsConnection = true / proxyEndpoint = "wss://example"，
@@ -478,7 +475,8 @@ describe("pokerService (active-key-driven)", () => {
     const svc2 = createPokerService({
       vault: vault as any,
       keyspace: keyspace as any,
-      messageBus: bus as any
+      messageBus: bus as any,
+      storage: keyspace.ownerStore(PUB_A)
     });
     await new Promise((r) => setTimeout(r, 0));
     const s = svc2.getSettings();
@@ -568,24 +566,27 @@ describe("pokerService (active-key-driven)", () => {
     expect((svc as any).listIdentityCandidates).toBeUndefined();
   });
 
-  it("updateSettings writes to global config (localStorage) and survives module reload", async () => {
+  it("updateSettings writes to Poker owner K-V and survives service recreation", async () => {
     await svc.updateSettings({ proxyEndpoint: "wss://ls.example" });
-    expect(readPokerGlobalConfig().proxyEndpoint).toBe("wss://ls.example");
-    clearPokerGlobalConfig();
-    expect(readPokerGlobalConfig().proxyEndpoint).toBe("");
-    // 重新写入然后直接读 raw localStorage 验证写入路径。
-    writePokerGlobalConfig({
-      proxyEndpoint: "wss://x",
-      announceP2PNodeEndpoint: "a",
-      announceTxLinkEndpoint: "b",
-      allowFallbackBroadcast: false
+    const stored = await keyspace.ownerStore(PUB_A).get("settings", { partition: "settings" });
+    expect(stored?.value).toMatchObject({ proxyEndpoint: "wss://ls.example" });
+    const svc2 = createPokerService({
+      vault: vault as any,
+      keyspace: keyspace as any,
+      messageBus: bus as any,
+      storage: keyspace.ownerStore(PUB_A)
     });
-    expect(readPokerGlobalConfig()).toEqual({
-      proxyEndpoint: "wss://x",
-      announceP2PNodeEndpoint: "a",
-      announceTxLinkEndpoint: "b",
-      allowFallbackBroadcast: false
+    await svc2.ready();
+    expect(svc2.getSettings().proxyEndpoint).toBe("wss://ls.example");
+    await keyspace.ownerStore(PUB_A).delete("settings", { partition: "settings" });
+    const svc3 = createPokerService({
+      vault: vault as any,
+      keyspace: keyspace as any,
+      messageBus: bus as any,
+      storage: keyspace.ownerStore(PUB_A)
     });
+    await svc3.ready();
+    expect(svc3.getSettings().proxyEndpoint).toBe("");
   });
 
   // ------------------------------------------------------------------------
@@ -597,8 +598,6 @@ describe("pokerService (active-key-driven)", () => {
     // rebind 完成前发 key.deleting。这条路径专门覆盖"事件竞争"——
     // 不能依赖 this.currentSessionKeyHash（异步 init 才填），必须用
     // keyspace.active() 同步判定。
-    if (typeof localStorage !== "undefined") localStorage.clear();
-    (globalThis as any).indexedDB = new FDBFactory();
     const localVault = new FakeVault();
     const localKeyspace = new FakeKeyspace();
     const localBus = new FakeMessageBus();
@@ -609,7 +608,8 @@ describe("pokerService (active-key-driven)", () => {
     const fresh = createPokerService({
       vault: localVault as any,
       keyspace: localKeyspace as any,
-      messageBus: localBus as any
+      messageBus: localBus as any,
+      storage: localKeyspace.ownerStore(PUB_A)
     });
     // 这时：(fresh as any).currentSessionKeyHash 还是 null（init 没填），
     // 但 keyspace.active().activePublicKeyHex === PUB_A——后者是同步
@@ -648,7 +648,7 @@ describe("pokerService (active-key-driven)", () => {
 
     await keyspace.setActive(PUB_B);
     // rebindToActiveKey 是 microtask 异步；多等几轮让它走完
-    // hydrateFromKeyScopedDb → connect() → openSocket() 整条链。
+    // hydrateFromKeyScopedRepository → connect() → openSocket() 整条链。
     for (let i = 0; i < 10; i++) await new Promise((r) => setTimeout(r, 0));
 
     // 关键不变量（硬切换 004）：切 key 后必须按新 key 重建连接。
@@ -767,72 +767,31 @@ describe("pokerService (active-key-driven)", () => {
     }
   });
 
-  it("hydrates presences / tables / txIngest from current active key's IDB on init", async () => {
-    // 准备：在 pkhA 的 DB 里写入若干 cached 行。
-    const handle = await keyspace.openKeyStorage({
-      publicKeyHex: PUB_A,
-      pluginId: "plugin-poker",
-      storageId: "poker",
-      version: 3,
-      upgrade: (db, oldV, newV) => {
-        // 直接复用 service 的 upgrade，避免 import 循环。
-        const u = (svc as any).deps.keyspace;
-        void u;
-        if (!db.objectStoreNames.contains("tables")) {
-          const s = db.createObjectStore("tables", { keyPath: "tableId" });
-          s.createIndex("observedAt", "observedAt");
-        }
-        if (!db.objectStoreNames.contains("presences")) {
-          const s = db.createObjectStore("presences", { keyPath: "publicKeyHex" });
-          s.createIndex("seenAt", "seenAt");
-        }
-        if (!db.objectStoreNames.contains("txIngest")) {
-          const s = db.createObjectStore("txIngest", { keyPath: "txid" });
-          s.createIndex("receivedAt", "receivedAt");
-        }
-        void oldV; void newV;
-      }
+  it("hydrates presences / tables / txIngest from current active key's K-V on init", async () => {
+    // 准备：在 PUB_A 的 owner K-V namespace 中写入缓存记录。
+    const store = keyspace.ownerStore(PUB_A);
+    await writeTable(store, {
+      tableId: "t-cached",
+      variant: "TexasHoldem",
+      seats: 4,
+      stakes: 0,
+      ownerPub: "03xxx",
+      observedAt: 1
     });
-    try {
-      // 直接通过 service 写入一条 txIngest，避免引入更多 helper 导入。
-      await (svc as any).deps.messageBus; // 触发 messageBus 加载
-      // 用 service 内部 writeTxIngest 入口：直接调用我们暴露的持久化方法
-      // 不行（私有）。改用裸 IDB 操作写入 tables / presences，绕开
-      // service 的写接口以模拟"上次会话留下的数据"。
-      await new Promise<void>((resolve, reject) => {
-        const tx = handle.db.transaction("tables", "readwrite");
-        tx.objectStore("tables").put({
-          tableId: "t-cached",
-          variant: "TexasHoldem",
-          seats: 4,
-          stakes: 0,
-          ownerPub: "03xxx",
-          observedAt: 1
-        });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-      await new Promise<void>((resolve, reject) => {
-        const tx = handle.db.transaction("presences", "readwrite");
-        tx.objectStore("presences").put({
-          publicKeyHex: "02cached",
-          endpoint: "node:cached",
-          nick: "cached-nick",
-          seenAt: 1
-        });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
-      });
-    } finally {
-      handle.close();
-    }
+    await writePresence(store, {
+      publicKeyHex: "02cached",
+      endpoint: "node:cached",
+      nick: "cached-nick",
+      seenAt: 1
+    });
 
     // 构造一个新 service：构造函数会触发 rebindToActiveKey("init") →
-    // hydrateFromKeyScopedDb(PUB_A)，应能恢复上面写入的 tables / presences。
+    // hydrateFromKeyScopedRepository(PUB_A)，应能恢复上面写入的 tables / presences。
     const svc2 = createPokerService({
       vault: vault as any,
       keyspace: keyspace as any,
-      messageBus: bus as any
+      messageBus: bus as any,
+      storage: keyspace.ownerStore(PUB_A)
     });
     for (let i = 0; i < 50; i++) {
       const tables = svc2.listTables();
@@ -861,45 +820,18 @@ describe("pokerService (active-key-driven)", () => {
     // scheduleRebindToActiveKey("init")——两次请求只该走一次 hydrate。
     // 即便 rebind 跑两次（其它原因导致的并发），hydrate 仍要幂等：
     // txEvents 不能重复 push。
-    const upgradeFull = (db: IDBDatabase) => {
-      if (!db.objectStoreNames.contains("tables")) {
-        const s = db.createObjectStore("tables", { keyPath: "tableId" });
-        s.createIndex("observedAt", "observedAt");
-      }
-      if (!db.objectStoreNames.contains("presences")) {
-        const s = db.createObjectStore("presences", { keyPath: "publicKeyHex" });
-        s.createIndex("seenAt", "seenAt");
-      }
-      if (!db.objectStoreNames.contains("txIngest")) {
-        const s = db.createObjectStore("txIngest", { keyPath: "txid" });
-        s.createIndex("receivedAt", "receivedAt");
-      }
-    };
-    const handleA = await keyspace.openKeyStorage({
-      publicKeyHex: PUB_A,
-      pluginId: "plugin-poker",
-      storageId: "poker",
-      version: 3,
-      upgrade: upgradeFull
-    });
+    const storeA = keyspace.ownerStore(PUB_A);
     // 写入 5 条 txIngest。
     for (let i = 0; i < 5; i++) {
-      await new Promise<void>((resolve, reject) => {
-        const tx = handleA.db.transaction("txIngest", "readwrite");
-        tx.objectStore("txIngest").put({
-          txid: `tx-${i}`,
-          route: "direct",
-          kind: "test",
-          reason: undefined,
-          rawTx: new Uint8Array([i]),
-          receivedAt: 100 + i,
-          consumed: false
-        });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => reject(tx.error);
+      await writeTxIngest(storeA, {
+        txid: `tx-${i}`,
+        route: "direct",
+        kind: "test",
+        rawTx: new Uint8Array([i]),
+        receivedAt: 100 + i,
+        consumed: false
       });
     }
-    handleA.close();
 
     // 构造 service → onActiveChange (eager) + scheduleRebindToActiveKey("init")
     // 应当被合并成一次 rebind 跑一次 hydrate。即便 service 内部的
@@ -907,7 +839,8 @@ describe("pokerService (active-key-driven)", () => {
     const local = createPokerService({
       vault: vault as any,
       keyspace: keyspace as any,
-      messageBus: bus as any
+      messageBus: bus as any,
+      storage: keyspace.ownerStore(PUB_A)
     });
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
 
@@ -919,77 +852,37 @@ describe("pokerService (active-key-driven)", () => {
     expect(ids).toEqual(["tx-0", "tx-1", "tx-2", "tx-3", "tx-4"]);
 
     // 防御性：再次调 hydrate，验证 idempotent。
-    await (local as any).hydrateFromKeyScopedDb(PUB_A);
+    await (local as any).hydrateFromKeyScopedRepository(PUB_A);
     expect(local.recentTxEvents(100).length).toBe(5);
   });
 
   it("active key switch A → B hydrates B's DB (not A's)", async () => {
-    // 1) 在 pkhA 的 DB 写 table-A。复用 service 的 upgrade（保证 3 个
-    // store 都创建），避免 hydrate 因缺 store 失败。
-    const upgradeFull = (db: IDBDatabase) => {
-      if (!db.objectStoreNames.contains("tables")) {
-        const s = db.createObjectStore("tables", { keyPath: "tableId" });
-        s.createIndex("observedAt", "observedAt");
-      }
-      if (!db.objectStoreNames.contains("presences")) {
-        const s = db.createObjectStore("presences", { keyPath: "publicKeyHex" });
-        s.createIndex("seenAt", "seenAt");
-      }
-      if (!db.objectStoreNames.contains("txIngest")) {
-        const s = db.createObjectStore("txIngest", { keyPath: "txid" });
-        s.createIndex("receivedAt", "receivedAt");
-      }
-    };
-    const handleA = await keyspace.openKeyStorage({
-      publicKeyHex: PUB_A,
-      pluginId: "plugin-poker",
-      storageId: "poker",
-      version: 3,
-      upgrade: upgradeFull
+    // 1) 在 PUB_A 的 owner K-V namespace 中写 table-A。
+    await writeTable(keyspace.ownerStore(PUB_A), {
+      tableId: "t-A",
+      variant: "TexasHoldem",
+      seats: 4,
+      stakes: 0,
+      ownerPub: "03A",
+      observedAt: 1
     });
-    await new Promise<void>((resolve, reject) => {
-      const tx = handleA.db.transaction("tables", "readwrite");
-      tx.objectStore("tables").put({
-        tableId: "t-A",
-        variant: "TexasHoldem",
-        seats: 4,
-        stakes: 0,
-        ownerPub: "03A",
-        observedAt: 1
-      });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    handleA.close();
 
-    // 2) 在 pkhB 的 DB 写 table-B。
-    const handleB = await keyspace.openKeyStorage({
-      publicKeyHex: PUB_B,
-      pluginId: "plugin-poker",
-      storageId: "poker",
-      version: 3,
-      upgrade: upgradeFull
+    // 2) 在 PUB_B 的 owner K-V namespace 中写 table-B。
+    await writeTable(keyspace.ownerStore(PUB_B), {
+      tableId: "t-B",
+      variant: "Omaha",
+      seats: 6,
+      stakes: 0,
+      ownerPub: "03B",
+      observedAt: 2
     });
-    await new Promise<void>((resolve, reject) => {
-      const tx = handleB.db.transaction("tables", "readwrite");
-      tx.objectStore("tables").put({
-        tableId: "t-B",
-        variant: "Omaha",
-        seats: 6,
-        stakes: 0,
-        ownerPub: "03B",
-        observedAt: 2
-      });
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-    });
-    handleB.close();
 
     // 3) 构造新 service → init hydrate from pkhA。
     const svc2 = createPokerService({
       vault: vault as any,
       keyspace: keyspace as any,
-      messageBus: bus as any
+      messageBus: bus as any,
+      storage: activeOwnerStore(keyspace)
     });
     for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
     expect(svc2.listTables().find((t) => t.tableId === "t-A")).toBeTruthy();

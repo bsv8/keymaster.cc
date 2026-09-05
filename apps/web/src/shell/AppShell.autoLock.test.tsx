@@ -16,6 +16,7 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
+import { COORDINATOR_ACTIVITY_CAPABILITY } from "@keymaster/contracts";
 import { SHELL_RESOURCES } from "../i18n/resources.js";
 import { registerShellResources } from "./shellResources.js";
 import { AppShell } from "./AppShell.js";
@@ -69,7 +70,7 @@ function createHost(vault: VaultService, sendActivity = vi.fn()) {
   registerShellResources(host.capabilities.get("resource.registry"));
   host.capabilities.provide<VaultService>("vault.service", vault);
   host.capabilities.provide<KeyspaceService>("keyspace.service", makeKeyspace());
-  host.capabilities.provide("session-coordinator.client", {
+  host.capabilities.provide(COORDINATOR_ACTIVITY_CAPABILITY, {
     getIsConnected: () => true,
     sendActivity
   });

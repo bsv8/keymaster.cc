@@ -1,7 +1,7 @@
 // packages/plugin-msfile/src/MsFileHomeFileWidget.tsx
 // 首页「通过 Seed 获取文件」模块。
 //
-// 组件只调用受信任的 `msfile.service`，不接触 DB、Coordinator、transport 或
+// 组件只调用受信任的 `msfile.service`，不接触 K-V、Coordinator、transport 或
 // Window executor。文件内容只保存在当前任务的内存引用中；新查询、取消、
 // active key / supplier generation 变化和卸载都会释放它以及所有 Blob URL。
 

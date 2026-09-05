@@ -13,11 +13,10 @@
 //     需要短串展示时由 UI 侧 `formatShortPublicKey(publicKeyHex)` 现算。
 //   - 旧 `fingerprint` 概念已废弃,不再是 contract / storage / 业务对象的字段。
 //   - active key 是平台级状态,由 keyspace 维护；业务插件通过该服务获取当前身份。
-//   - 业务相关持久化必须通过 keyspace.openKeyStorage 进入 key namespace。
-//     IndexedDB 没有真正嵌套 namespace,因此用 DB name 表达归属：
-//     `keymaster.key.<publicKeyHex>.plugin.<pluginId>.<storageId>`。
+//   - 业务相关持久化必须通过 keyspace.openOwnerAppStore 进入 key namespace。
+//     返回受限 KeyValueStore；业务层不能获得物理存储句柄。
 //   - 删除 key 由 keyspace.deleteKey 统一调度：先 prepare -> 取消后台任务 ->
-//     删 namespace DB -> 删 Vault 私钥；不允许插件自行 delete where key = ?。
+//     删 namespace K-V -> 删 Vault 私钥；不允许插件自行 delete where key = ?。
 //   - 硬切换 005：active key 模型收窄为"single 模式唯一一把 ready key"：
 //     activePublicKeyHex 缺省即"无 active key"（异常修复态 / 过渡期）,
 //     不再有"all mode 只读总览"语义。
@@ -65,23 +64,6 @@ export interface ActiveKeyState {
   generation?: number;
 }
 
-/** key-scoped storage 打开参数。 */
-export interface KeyScopedStorageOpenInput {
-  publicKeyHex: string;
-  pluginId: string;
-  storageId: string;
-  version: number;
-  /** The fourth argument is the active versionchange transaction when available. */
-  upgrade(db: IDBDatabase, oldVersion: number, newVersion: number | null, transaction?: IDBTransaction): void;
-}
-
-/** key-scoped storage 句柄。 */
-export interface KeyScopedStorageHandle {
-  db: IDBDatabase;
-  name: string;
-  close(): void;
-}
-
 /** Keyspace 服务。 */
 export interface KeyspaceService {
   /** Persisted selection survives lock; active() is runtime-only. */
@@ -96,8 +78,8 @@ export interface KeyspaceService {
    * 把 active key 切到指定 publicKeyHex。
    *
    * 硬切换 004：切换前会先 quiesce 旧 active key 的 namespace
-   * （cancelByKey + await 旧实例退出 + 关闭 openDbs）,再切换 active。
-   * 这样保证 "task 还在跑却看到 DB connection closing" 的竞态从顺序
+   * （cancelByKey + await 旧实例退出 + 关闭 openStores）,再切换 active。
+   * 这样保证 "task 还在跑却看到 K-V connection closing" 的竞态从顺序
    * 上消失,而不是被 catch 吞掉。
    */
   setActive(publicKeyHex: string): Promise<void>;
@@ -110,24 +92,11 @@ export interface KeyspaceService {
   onActiveKeyChanged(handler: (state: ActiveKeyState) => void): () => void;
 
   /**
-   * 打开 key-scoped IndexedDB。DB name 形如
-   * `keymaster.key.<publicKeyHex>.plugin.<pluginId>.<storageId>`。
-   */
-  openKeyStorage(input: KeyScopedStorageOpenInput): Promise<KeyScopedStorageHandle>;
-  /**
-   * 注册 plugin 的 key-scoped storage；建立可删除清单。
-   * 必须由插件在 setup 阶段调用,keyspace 才能在 deleteKey 时找到要删除的 DB。
-   */
-  registerPluginStorage(input: { pluginId: string; storageId: string }): void;
-  /** 当前 keyspace 已注册的 storage 列表（仅诊断）。 */
-  listPluginStorages(): Array<{ pluginId: string; storageId: string }>;
-
-  /**
-   * 删除前的准备：发出 key.deleting 事件,要求插件关闭 DB handle 与后台任务。
+   * 删除前的准备：发出 key.deleting 事件,要求插件关闭 K-V handle 与后台任务。
    * 必须先 await prepareDeleteKey,再进入实际删除。
    *
    * 实现语义（硬切换 008）：实现方必须先 await background.cancelByKey
-   * 把该 key 的所有 task 旧实例退出,再关闭 openDbs,最后再 emit
+   * 把该 key 的所有 task 旧实例退出,再关闭 openStores,最后再 emit
    * key.deleting（emit 不可 await,故关键取消必须由实现主动调用）。
    */
   prepareDeleteKey(publicKeyHex: string): Promise<void>;
@@ -139,7 +108,7 @@ export interface KeyspaceService {
    * 通过后再执行清理主流程：
    *   authoritative label check -> prepareDeleteKey（cancelByKey + 关闭 handle +
    *   emit key.deleting）-> 按 plugin 注册的 storage 列表逐个
-   *   deleteDatabase 全部成功 -> vault.deleteKeyMaterial（仅删私钥
+   *   delete owner namespace K-V content 全部成功 -> vault.deleteKeyMaterial（仅删私钥
    *   材料,不发事件）-> emit key.deleted -> 剩余 0 把 key 时调用
    *   `vault.finalizeEmptyVaultAfterLastKeyDeletion()` 把 Vault 收敛
    *   回 `uninitialized`,否则按 active fallback 选下一把。
@@ -150,8 +119,8 @@ export interface KeyspaceService {
    *     删除授权语义约束住。
    *   - label 不匹配时必须**完全不开始**——不调 prepareDeleteKey、不
    *     emit `key.deleting`、不取消 background 任务、不动 namespace
-   *     DB / 私钥材料。错误信息使用英文（`Key label mismatch`）。
-   *   - namespace DB 删除失败或 blocked 时拒绝继续删除 Vault 私钥,
+   *     K-V / 私钥材料。错误信息使用英文（`Key label mismatch`）。
+   *   - namespace K-V 删除失败或 blocked 时拒绝继续删除 Vault 私钥,
    *     否则会留下归属丢失的业务数据；label 正确也不破例。
    *
    * 约束：仅允许仍处于 ready 状态的 key 通过；找不到 hex 或 key 不

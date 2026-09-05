@@ -8,7 +8,7 @@
     "./coordinator": "./src/coordinator.ts",
     "./provider": "./src/satProvider.ts",
     "./state": "./src/satState.ts",
-    "./db": "./src/satDb.ts",
+    "./repository": "./src/satRepository.ts",
     "./styles.css": "./src/styles.css"
   },
   "types": "./src/index.ts",

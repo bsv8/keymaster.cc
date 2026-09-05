@@ -4,7 +4,7 @@ import {
   bytesToHex,
   hexToBytes
 } from "./crypto.js";
-import type { VaultPasskeyProtectionRecord } from "./vaultDb.js";
+import type { VaultPasskeyProtectionRecord } from "./storage/vaultKeyRepository.js";
 
 type PrfExtensionResult = {
   prf?: {

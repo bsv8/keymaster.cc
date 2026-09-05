@@ -22,9 +22,6 @@ function createLockedHost(input?: { selected?: string; keys?: KeyIdentity[]; del
     setActive: async () => undefined,
     requireActiveKey: () => ({ publicKeyHex: SELECTED, label: "Primary", capabilities: [], createdAt: "now" }),
     onActiveKeyChanged: () => () => undefined,
-    openKeyStorage: async () => { throw new Error("not used"); },
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     onInitializationChange: () => () => undefined,
     isInitializing: () => false

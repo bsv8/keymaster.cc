@@ -71,7 +71,7 @@ export {
   STORAGE_MAX_PARTS,
   STORAGE_MAX_PAYLOAD_BYTES,
   STORAGE_PART_SIZE_BYTES
-} from "./storage.js";
+} from "./storage/kv.js";
 
 export type {
   StorageDeleteParams,
@@ -92,7 +92,7 @@ export type {
   StorageUploadCompleteParams,
   StorageUploadPartParams,
   StorageUploadPartResult
-} from "./storage.js";
+} from "./connectStorage.js";
 
 export {
   MSFILE_BLOCK_SIZE_BYTES,

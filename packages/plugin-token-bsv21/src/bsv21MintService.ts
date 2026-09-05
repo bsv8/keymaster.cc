@@ -5,8 +5,8 @@ import type {
   ProtocolSpendService
 } from "@keymaster/contracts";
 import { buildBsv21P2pkhScript, type Bsv21Payload } from "./bsv21Script.js";
-import type { Bsv21Db } from "./bsv21Db.js";
-import type { Bsv21MintHistoryDb, Bsv21MintHistoryRecord } from "./bsv21MintHistoryDb.js";
+import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
+import type { Bsv21MintHistoryRepository, Bsv21MintHistoryRecord } from "./storage/bsv21MintHistoryRepository.js";
 import type { P2pkhServiceForBsv21 } from "./bsv21Service.js";
 
 export const BSV21_MINT_SERVICE_CAPABILITY = "token-bsv21.mint.service";
@@ -38,8 +38,8 @@ export interface Bsv21MintService {
 }
 
 export function createBsv21MintService(input: {
-  db?: Bsv21Db;
-  historyDb?: Bsv21MintHistoryDb;
+  stateRepository?: Bsv21StateRepository;
+  historyRepository?: Bsv21MintHistoryRepository;
   p2pkh: P2pkhServiceForBsv21;
   protocolSpend: ProtocolSpendService;
 }): Bsv21MintService {
@@ -77,9 +77,9 @@ export function createBsv21MintService(input: {
   }
 
   async function persistDraft(request: Bsv21MintRequest, payload: Bsv21Payload, spend: ProtocolSpendPreview, tokenId: string): Promise<void> {
-    if (!input.historyDb) return;
+    if (!input.historyRepository) return;
     const now = new Date().toISOString();
-    await input.historyDb.put({
+    await input.historyRepository.put({
       id: spend.txid,
       createdAt: now,
       updatedAt: now,
@@ -102,11 +102,11 @@ export function createBsv21MintService(input: {
   }
 
   async function persistFinal(preview: Bsv21MintPreview, result: ProtocolSpendResult, finalTokenId: string): Promise<void> {
-    if (!input.historyDb) return;
+    if (!input.historyRepository) return;
     const now = new Date().toISOString();
-    const existing = await input.historyDb.get(preview.spend.txid).catch(() => undefined);
+    const existing = await input.historyRepository.get(preview.spend.txid).catch(() => undefined);
     if (existing) {
-      await input.historyDb.put({
+      await input.historyRepository.put({
         ...existing,
         updatedAt: now,
         status: result.status,
@@ -118,7 +118,7 @@ export function createBsv21MintService(input: {
       });
       return;
     }
-    await input.historyDb.put({
+    await input.historyRepository.put({
       id: preview.spend.txid,
       createdAt: now,
       updatedAt: now,
@@ -191,8 +191,8 @@ export function createBsv21MintService(input: {
       return { tokenId: `${effectiveTxid}_0`, spend };
     },
     async listHistory() {
-      if (!input.historyDb) return [];
-      return input.historyDb.list();
+      if (!input.historyRepository) return [];
+      return input.historyRepository.list();
     }
   };
 }

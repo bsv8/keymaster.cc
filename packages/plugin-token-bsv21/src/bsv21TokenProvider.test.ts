@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KeyspaceService, AssetDataNotifier } from "@keymaster/contracts";
 import { createBsv21TokenProvider } from "./bsv21TokenProvider.js";
-import type { Bsv21Db, Bsv21TokenSnapshot } from "./bsv21Db.js";
+import type { Bsv21StateRepository, Bsv21TokenSnapshot } from "./storage/bsv21StateRepository.js";
 
 const ACTIVE_PK = "pk-active";
 
@@ -30,7 +30,7 @@ function makeSnapshot(overrides: Partial<Bsv21TokenSnapshot> & { origin: string 
   };
 }
 
-function fakeDb(snapshots: Bsv21TokenSnapshot[]): Bsv21Db {
+function fakeRepository(snapshots: Bsv21TokenSnapshot[]): Bsv21StateRepository {
   return {
     put: vi.fn(),
     replaceAll: vi.fn(),
@@ -48,7 +48,7 @@ describe("bsv21TokenProvider", () => {
         makeSnapshot({ origin: "tok2", address: "addr1", amount: "55" }),
       ];
       const provider = createBsv21TokenProvider({
-        db: fakeDb(snapshots),
+        stateRepository: fakeRepository(snapshots),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
 
@@ -69,7 +69,7 @@ describe("bsv21TokenProvider", () => {
 
     it("无 active key 时返回空", async () => {
       const provider = createBsv21TokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(undefined),
       });
       expect(await provider.listTokens()).toEqual([]);
@@ -83,7 +83,7 @@ describe("bsv21TokenProvider", () => {
         makeSnapshot({ origin: "tok1", address: "addr2", amount: "220", outpoint: "tok1_1", observation: "confirmed", canonicalTxid: "tx2" }),
       ];
       const provider = createBsv21TokenProvider({
-        db: fakeDb(snapshots),
+        stateRepository: fakeRepository(snapshots),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
 
@@ -100,7 +100,7 @@ describe("bsv21TokenProvider", () => {
 
     it("不存在的 token 返回 undefined", async () => {
       const provider = createBsv21TokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
       expect(await provider.getToken("nonexistent")).toBeUndefined();
@@ -108,7 +108,7 @@ describe("bsv21TokenProvider", () => {
 
     it("无 active key 时返回 undefined", async () => {
       const provider = createBsv21TokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(undefined),
       });
       expect(await provider.getToken("tok1")).toBeUndefined();
@@ -128,7 +128,7 @@ describe("bsv21TokenProvider", () => {
 
       const handler = vi.fn();
       const provider = createBsv21TokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(ACTIVE_PK),
         assetDataNotifier: notifier as unknown as AssetDataNotifier,
       });

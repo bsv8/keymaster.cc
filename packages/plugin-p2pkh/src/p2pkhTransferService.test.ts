@@ -30,7 +30,7 @@ function makeVault() {
   } as never;
 }
 
-function makeDb(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
+function makeRepository(utxos: P2pkhUtxo[], resource: P2pkhKeyResource) {
   const claims = new Map<string, P2pkhLocalInputClaim>();
   const locals = new Map<string, P2pkhLocalTransaction>();
   const outputs = new Map<string, P2pkhLocalOutpoint>();
@@ -71,24 +71,24 @@ function makeResource(): P2pkhKeyResource {
 }
 
 function makeService(outcome: "accepted" | "already-known" | "isolated" | "not-dispatched" = "accepted", broadcastError?: Error, options?: { utxos?: P2pkhUtxo[]; protectedOutpoints?: { isProtected(input: { txid: string; vout: number; network: "main" | "test"; publicKeyHex?: string }): boolean } }) {
-  const db = makeDb(options?.utxos ?? [makeUtxo()], makeResource());
+  const stateRepository = makeRepository(options?.utxos ?? [makeUtxo()], makeResource());
   const broadcast = vi.fn(async ({ submissionId }: { submissionId: string }) => {
     if (broadcastError) throw broadcastError;
     if (outcome === "not-dispatched") return { status: "ok" as const, value: { status: "not-dispatched", reason: "coordinator-not-connected" }, sessionEpoch: "test-epoch" };
-    await db.finishLocalSubmission({ submissionId, localState: outcome === "isolated" ? "isolated" : "local-confirmed" });
+    await stateRepository.finishLocalSubmission({ submissionId, localState: outcome === "isolated" ? "isolated" : "local-confirmed" });
     return { status: "ok" as const, value: { status: outcome }, sessionEpoch: "test-epoch" };
   });
   const service = createP2pkhTransferService({
     vault: makeVault(),
     messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
-    getDb: async () => db as never,
+    getStore: async () => stateRepository as never,
     protectedOutpoints: options?.protectedOutpoints as never,
     broadcastPreflight: async () => ({ generation: 7 }),
     broadcastWithCoordinator: broadcast,
     getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" }),
     getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: ["p2pkh"], createdAt: "now" })
   });
-  return { service, db, broadcast };
+  return { service, stateRepository, broadcast };
 }
 
 async function prepare(service: ReturnType<typeof makeService>["service"]) {
@@ -104,52 +104,52 @@ describe("ordinary P2PKH Coordinator transfer", () => {
   });
 
   it.each(["accepted", "already-known"] as const)("promotes %s to local-confirmed", async (outcome) => {
-    const { service, db, broadcast } = makeService(outcome);
+    const { service, stateRepository, broadcast } = makeService(outcome);
     const preview = await prepare(service);
     const result = await service.submit(preview);
     expect(result.status).toBe("local-confirmed");
     expect(result.localInputClaimIds).toHaveLength(1);
     expect(broadcast).toHaveBeenCalledWith(expect.objectContaining({ expectedProviderGeneration: 7 }));
-      expect([...db.locals.values()][0]?.localState).toBe("local-confirmed");
-    expect([...db.claims.values()][0]?.state).toBe("active");
-    expect([...db.outputs.values()][0]?.state).toBe("available");
+      expect([...stateRepository.locals.values()][0]?.localState).toBe("local-confirmed");
+    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
+    expect([...stateRepository.outputs.values()][0]?.state).toBe("available");
   });
 
   it("isolates provider failure and never releases the input claim", async () => {
-    const { service, db } = makeService("isolated");
+    const { service, stateRepository } = makeService("isolated");
     const result = await service.submit(await prepare(service));
     expect(result.status).toBe("isolated");
-    expect([...db.claims.values()][0]?.state).toBe("isolated");
-    expect([...db.locals.values()][0]?.localState).toBe("isolated");
+    expect([...stateRepository.claims.values()][0]?.state).toBe("isolated");
+    expect([...stateRepository.locals.values()][0]?.localState).toBe("isolated");
   });
 
   it("does not write a terminal state when the Coordinator RPC response is lost", async () => {
-    const { service, db } = makeService("accepted", new Error("Coordinator port closed"));
+    const { service, stateRepository } = makeService("accepted", new Error("Coordinator port closed"));
     const result = await service.submit(await prepare(service));
     expect(result.status).toBe("isolated");
     expect(result.error).toBe("Coordinator port closed");
-    expect([...db.locals.values()][0]?.localState).toBe("submitting");
-    expect([...db.locals.values()][0]?.isolationReason).toBeUndefined();
-    expect([...db.claims.values()][0]?.state).toBe("active");
+    expect([...stateRepository.locals.values()][0]?.localState).toBe("submitting");
+    expect([...stateRepository.locals.values()][0]?.isolationReason).toBeUndefined();
+    expect([...stateRepository.claims.values()][0]?.state).toBe("active");
   });
 
   it("revokes a submission when the Coordinator explicitly reports no dispatch", async () => {
-    const { service, db } = makeService("not-dispatched");
+    const { service, stateRepository } = makeService("not-dispatched");
     const result = await service.submit(await prepare(service));
     expect(result.status).toBe("not-dispatched");
-    expect(db.locals.size).toBe(0);
-    expect(db.claims.size).toBe(0);
-    expect(db.outputs.size).toBe(0);
+    expect(stateRepository.locals.size).toBe(0);
+    expect(stateRepository.claims.size).toBe(0);
+    expect(stateRepository.outputs.size).toBe(0);
   });
 
   it("does not select an isolated input for a new preview", async () => {
-    const { service, db } = makeService();
-    db.claims.set("isolated", { id: "isolated", submissionId: "old", resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", txid: FUNDING_TXID, vout: 0, value: 3_000, outpointKey: `${FUNDING_TXID}:0`, state: "isolated", createdAt: "now", updatedAt: "now" });
+    const { service, stateRepository } = makeService();
+    stateRepository.claims.set("isolated", { id: "isolated", submissionId: "old", resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", txid: FUNDING_TXID, vout: 0, value: 3_000, outpointKey: `${FUNDING_TXID}:0`, state: "isolated", createdAt: "now", updatedAt: "now" });
     await expect(prepare(service)).rejects.toThrow(/No P2PKH UTXOs|no-utxos|insufficient/i);
   });
 
   it("revalidates the raw inputs and preview allocation before writing claims", async () => {
-    const { service, db, broadcast } = makeService();
+    const { service, stateRepository, broadcast } = makeService();
     const preview = await prepare(service);
     const tampered = {
       ...preview,
@@ -159,7 +159,7 @@ describe("ordinary P2PKH Coordinator transfer", () => {
       }
     };
     await expect(service.submit(tampered)).rejects.toThrow(/input/i);
-    expect(db.locals.size).toBe(0);
+    expect(stateRepository.locals.size).toBe(0);
     expect(broadcast).not.toHaveBeenCalled();
   });
 
@@ -174,16 +174,16 @@ describe("ordinary P2PKH Coordinator transfer", () => {
   });
 
   it("deduplicates duplicate local logical outputs before public prepare", async () => {
-    const { service, db } = makeService("accepted", undefined, { utxos: [] });
+    const { service, stateRepository } = makeService("accepted", undefined, { utxos: [] });
     const resourceId = makeResourceId("main");
     const txid = "ab".repeat(32);
     const now = "2024-01-01T00:00:00.000Z";
     const makeLocal = (id: string): P2pkhLocalTransaction => ({ id, resourceId, publicKeyHex: OWNER.publicKeyHex, network: "main", txid, rawTxHex: "", localState: "local-confirmed", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 3_000, scriptHex: "" }], parentTxids: [], createdAt: now, updatedAt: now, attempts: [] });
-    db.locals.set("local-a", makeLocal("local-a"));
-    db.locals.set("local-b", makeLocal("local-b"));
+    stateRepository.locals.set("local-a", makeLocal("local-a"));
+    stateRepository.locals.set("local-b", makeLocal("local-b"));
     const makeOutput = (id: string, submissionId: string): P2pkhLocalOutpoint => ({ id, resourceId, txid, vout: 0, value: 3_000, scriptHex: "", submissionId, state: "available", createdAt: now, updatedAt: now });
-    db.outputs.set("output-a", makeOutput("output-a", "local-a"));
-    db.outputs.set("output-b", makeOutput("output-b", "local-b"));
+    stateRepository.outputs.set("output-a", makeOutput("output-a", "local-a"));
+    stateRepository.outputs.set("output-b", makeOutput("output-b", "local-b"));
     const preview = await prepare(service);
     expect(preview.allocation.selected).toHaveLength(1);
     expect(preview.allocation.selected[0]).toMatchObject({ txid, vout: 0, value: 3_000 });
@@ -192,26 +192,26 @@ describe("ordinary P2PKH Coordinator transfer", () => {
 
   it("uses the confirmed candidate when transfer sees a stale local overlay", async () => {
     const txid = "ac".repeat(32);
-    const { service, db } = makeService("accepted", undefined, { utxos: [makeUtxo(3_000, txid)] });
+    const { service, stateRepository } = makeService("accepted", undefined, { utxos: [makeUtxo(3_000, txid)] });
     const now = "2024-01-01T00:00:00.000Z";
-    db.locals.set("stale-local", { id: "stale-local", resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", txid, rawTxHex: "", localState: "local-confirmed", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 9_000, scriptHex: "local-script" }], parentTxids: [], createdAt: now, updatedAt: now, attempts: [] });
-    db.outputs.set("stale-output", { id: "stale-output", resourceId: makeResourceId("main"), txid, vout: 0, value: 9_000, scriptHex: "local-script", submissionId: "stale-local", state: "available", createdAt: now, updatedAt: now });
+    stateRepository.locals.set("stale-local", { id: "stale-local", resourceId: makeResourceId("main"), publicKeyHex: OWNER.publicKeyHex, network: "main", txid, rawTxHex: "", localState: "local-confirmed", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [{ vout: 0, value: 9_000, scriptHex: "local-script" }], parentTxids: [], createdAt: now, updatedAt: now, attempts: [] });
+    stateRepository.outputs.set("stale-output", { id: "stale-output", resourceId: makeResourceId("main"), txid, vout: 0, value: 9_000, scriptHex: "local-script", submissionId: "stale-local", state: "available", createdAt: now, updatedAt: now });
     const preview = await service.prepare({ ownerPublicKeyHex: OWNER.publicKeyHex, assetId: "bsv", recipientAddress: RECIPIENT.address, amountSatoshis: 1_000, feeRateSatoshisPerKb: 1 });
     expect(preview.allocation.selected).toHaveLength(1);
     expect(preview.allocation.selected[0]).toMatchObject({ txid, value: 3_000, status: "confirmed" });
   });
 
   it("rejects before writing when the Coordinator preflight is unavailable", async () => {
-    const { service, db } = makeService();
+    const { service, stateRepository } = makeService();
     const preview = await prepare(service);
     const gated = createP2pkhTransferService({
       vault: makeVault(), messageBus: { publish: vi.fn(), subscribe: vi.fn(() => () => undefined) } as never,
-      getDb: async () => db as never,
+      getStore: async () => stateRepository as never,
       getActiveKey: () => ({ publicKeyHex: OWNER.publicKeyHex, label: "active", capabilities: [], createdAt: "now" }),
       getKeyForOwner: async (publicKeyHex) => ({ publicKeyHex, label: "active", capabilities: [], createdAt: "now" })
     });
     await expect(gated.submit(preview)).rejects.toThrow(/Coordinator broadcast/);
-    expect(db.locals.size).toBe(0);
-    expect(db.claims.size).toBe(0);
+    expect(stateRepository.locals.size).toBe(0);
+    expect(stateRepository.claims.size).toBe(0);
   });
 });

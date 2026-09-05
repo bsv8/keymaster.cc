@@ -4,8 +4,8 @@
 // 设计缘由：
 //   - 日志是平台级能力，不是业务插件私货。runtime 内建 LogService，
 //     业务插件只能通过 ctx.logger 记录，不允许自行 new 一份。
-//   - 不做 per-plugin 日志 DB / 日志 store / 日志 schema 注册点；
-//     全局一份 IndexedDB（keymaster.logs），统一 entry schema。
+//   - 不做 per-plugin 日志 K-V / 日志 store / 日志 schema 注册点；
+//     全局一份 platform K-V repository（keymaster.logs），统一 entry schema。
 //   - debug 开关是系统级单开关：false 时 debug 调用不写库、不能补历史。
 //   - entry 默认禁止写入敏感原文：私钥、助记词、密码、完整 rawTxHex、
 //     完整导入 JSON、完整网络响应体。data 字段只允许放摘要字段。

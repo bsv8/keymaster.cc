@@ -3,11 +3,11 @@
 // 价格订阅是普通 Channel 公共消息：插件只知道精确频道和自己的业务内容，
 // 不接触 Supplier、SSP Wire、签名壳或远端历史。
 
-import type { ChannelRuntime } from "@keymaster/contracts";
+import type { ChannelRuntime, KeyValueStore } from "@keymaster/contracts";
 import { buildPriceChannelId } from "./constants.js";
 import { decodePriceContent, type BsvPriceSnapshot } from "./bsvPriceProtocol.js";
 import {
-  createLocalStorageBsvPriceSettingsStore,
+  createKeyValueBsvPriceSettingsStore,
   normalizePublisherPublicKeyHex,
   type BsvPriceGlobalConfig
 } from "./bsvPriceSettings.js";
@@ -50,8 +50,8 @@ export interface BsvPriceService {
 export interface CreateBsvPriceServiceOptions {
   /** 首次启动时使用的配置种子。 */
   seedPublisherPublicKeyHex?: string;
-  /** 测试可注入 localStorage。 */
-  localStorage?: Storage | null;
+  /** Host 绑定的 BSV Price owner/App K-V 句柄。 */
+  storage?: KeyValueStore;
   /** 测试可注入时钟。 */
   now?: () => number;
 }
@@ -59,16 +59,13 @@ export interface CreateBsvPriceServiceOptions {
 export function createBsvPriceService(
   channel: ChannelRuntime,
   options: CreateBsvPriceServiceOptions = {}
-): BsvPriceService {
-  const store = createLocalStorageBsvPriceSettingsStore(
-    options.localStorage ?? getDefaultLocalStorage(),
-    options.now
-  );
+): BsvPriceService & { ready(): Promise<void> } {
+  const store = createKeyValueBsvPriceSettingsStore(options.storage, options.now);
   const listeners = new Set<() => void>();
   let offMessage: (() => void) | null = null;
   let subscriptionGeneration = 0;
   let currentConfig = store.load();
-  if (!currentConfig) {
+  if (!currentConfig && !options.storage) {
     const seed = normalizePublisherPublicKeyHex(options.seedPublisherPublicKeyHex ?? "");
     if (seed.ok && seed.value) currentConfig = store.bootstrapPublisherPublicKeyHex(seed.value);
   }
@@ -154,7 +151,18 @@ export function createBsvPriceService(
 
   bind();
 
+  const ready = store.ready().then(() => {
+    currentConfig = store.load();
+    if (!currentConfig) {
+      const seed = normalizePublisherPublicKeyHex(options.seedPublisherPublicKeyHex ?? "");
+      if (seed.ok && seed.value) currentConfig = store.bootstrapPublisherPublicKeyHex(seed.value);
+    }
+    currentConfig ??= { pricePublisherPublicKeyHex: "", savedAtMs: 0 };
+    applyConfig(currentConfig);
+  });
+
   return {
+    ready: () => ready,
     snapshot: () => ({
       channelId: state.channelId,
       coreState: state.coreState,
@@ -206,9 +214,4 @@ function cloneSnapshot(input: BsvPriceSnapshot | null): BsvPriceSnapshot | null 
   return input
     ? { receivedAtMs: input.receivedAtMs, quotes: input.quotes.map((quote) => ({ ...quote })) }
     : null;
-}
-
-function getDefaultLocalStorage(): Storage | null {
-  const value = (globalThis as { localStorage?: Storage }).localStorage;
-  return value ?? null;
 }

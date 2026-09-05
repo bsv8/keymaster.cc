@@ -259,7 +259,7 @@ export class SatSubscriptionHandle {
   private readonly physicalUnsubscribeChannels = new Set<string>();
   /** Worker 重启前遗留的远端订阅证据；不能恢复成当前逻辑 desired。 */
   private readonly historicalCleanupChannels = new Set<string>();
-  /** 当前连接代际内的远端订阅查询结果；旧 DB observed 不能直接当真值。 */
+  /** 当前连接代际内的远端订阅查询结果；旧 K-V observed 不能直接当真值。 */
   private readonly supplierRefreshStatus = new Map<string, { generation: number; ok: boolean }>();
   /**
    * 所有会改变物理订阅真值的动作共用一条队列。
@@ -490,7 +490,7 @@ export class SatSubscriptionHandle {
     if (this.connections.get(supplier.supplierId)) {
       this.reconnectAttempts.delete(supplier.supplierId);
       // 重连后的第一步必须刷新远端真值，再按当前 Mux union 对账；不能
-      // 依据旧 DB observed 直接补发收费 Subscribe/Unsubscribe。
+      // 依据旧 K-V observed 直接补发收费 Subscribe/Unsubscribe。
       void this.reconcileAfterReconnect(supplier.supplierId, generation);
       this.updateRuntimeHealth();
       return;
@@ -1017,14 +1017,14 @@ export class SatSubscriptionHandle {
   }
 
   /**
-   * 锁屏前把当前 owner 的全部物理清理意图先写入 owner DB。
+   * 锁屏前把当前 owner 的全部物理清理意图先写入 owner K-V。
    * 网络动作随后可以超时/断开；下次解锁会按该证据先查询远端再继续退订。
    */
   async preparePhysicalCleanup(): Promise<void> {
     this.assertOpen();
     // 这是锁屏安全边界的一部分，不能排在可能永不返回的 SSP mutation
     // 后面。先同步建立本地清理意图，再异步持久化；网络清理失败时下次
-    // 解锁仍能依据 owner-scoped DB 继续对账。
+    // 解锁仍能依据 owner-scoped K-V 继续对账。
     const records = this.stateStore.listSubscriptions();
     const channels = new Set(records.map((item) => item.channel));
     for (const channel of channels) {

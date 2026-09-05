@@ -24,7 +24,7 @@ import type {
   WocBsv21UnspentToken,
   WocBsv21TokenMeta
 } from "@keymaster/contracts";
-import type { Bsv21Db } from "./bsv21Db.js";
+import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 
 /** p2pkh.service capability key；与 plugin-p2pkh manifest 提供的字符串一致。 */
 export const P2PKH_CAPABILITY = "p2pkh.service";

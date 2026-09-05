@@ -8,7 +8,7 @@
 //     让 useCapability 找到。
 //   - 不引入 jsdom-style 全栈测试基础设施；只构造一个 host 对象，再用
 //     @testing-library/react 渲染组件即可。
-//   - 测试用 host 不写 localStorage / IndexedDB（用 disableConfigPersistence
+//   - 测试用 host 不写 localStorage / platform K-V repository（用 disableConfigPersistence
 //     与 host 内的 in-memory storage 即可）。
 //   - 我们不能跨包边界 import plugin-importer-json-file，所以这里直接造
 //     一个最小的 JSON importer 用于 ImportPage 测试。

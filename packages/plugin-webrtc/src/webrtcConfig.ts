@@ -2,16 +2,15 @@
 // WebRTC STUN 配置存储（施工单 2026-07-04 002 硬切换）。
 //
 // 设计缘由：
-//   - STUN 配置是**浏览器网络配置**，**不**是 key-scoped 业务配置（施工单 §4.4）；
-//   - 存 `localStorage`，**不**跟随 active key 切换，**不**进 keyspace storage；
+//   - STUN 配置由 Host 注入的 WebRTC owner/App K-V 句柄承载；
 //   - 形状固定：`{ stunServers: string[] }`；
 //   - 缺省值：`stun:stun.l.google.com:19302`；
 //   - 合法性校验：每条必须以 `stun:` 开头且为合法 URI；
 //   - 写失败 / 解析失败 → 内存态不变 + 抛出英文错误（由设置页 catch 后
 //     展示给用户做 rollback，参考 `OriginSettingsTray`）；
 //   - 内存态 + 持久态分离：
-//       * `loadConfig()` = 从 localStorage 同步读 → 合法性净化；
-//       * `saveConfig(next)` = 同步校验 → 写 localStorage → 通知订阅者；
+//       * `loadConfig()` = 从内存同步读 → 合法性净化；
+//       * `saveConfig(next)` = 同步校验 → 排队写 K-V → 通知订阅者；
 //   - 订阅接口：`subscribe(handler)`：订阅者接收最新配置对象。
 
 /** 配置结构。 */
@@ -24,8 +23,8 @@ export const DEFAULT_STUN_SERVERS: readonly string[] = [
   "stun:stun.l.google.com:19302"
 ];
 
-/** localStorage key。 */
-export const WEBRTC_CONFIG_STORAGE_KEY = "keymaster.webrtc.config.v1";
+/** K-V 中的相对配置键。 */
+export const WEBRTC_CONFIG_STORAGE_KEY = "settings";
 
 /** 单条 STUN URL 默认长度上限。 */
 const MAX_STUN_URL_LENGTH = 256;
@@ -152,12 +151,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 /* ============================================================
- * ConfigStore：localStorage-backed 单例（per plugin enable）
+ * ConfigStore：Host 绑定的 K-V-backed 单例（per plugin enable）
  * ============================================================ */
 
 /**
- * 配置存储抽象。生产实现是 `LocalStorageConfigStore`；测试可以注入
- * `MemoryConfigStore`。
+ * 配置存储抽象。生产实现是 `KeyValueConfigStore`；测试可以注入内存版。
  */
 export interface WebrtcConfigStore {
   /** 同步读当前配置；缺省值兜底。 */
@@ -168,25 +166,40 @@ export interface WebrtcConfigStore {
   subscribe(handler: (config: WebrtcConfig) => void): () => void;
   /** 当前内存真值（最近一次成功 load / save）。 */
   snapshot(): WebrtcConfig;
+  /** 等待 K-V 配置完成首次加载。 */
+  ready(): Promise<void>;
 }
 
 /**
- * localStorage-backed 配置存储。**单例**——一个 plugin-webrtc enable 周期
+ * K-V-backed 配置存储。**单例**——一个 plugin-webrtc enable 周期
  * 内只持有一份内存真值。
  *
  * 设计要点：
- *   - 构造时**不**抛：缺 / 损坏 / 不可用 → 全部降级成默认；
- *   - `save` 同步写 localStorage；写失败抛错（callers 在设置页 catch 并回滚）；
+ *   - 构造时**不**抛：缺 / 损坏 → 全部降级成默认；
+ *   - `save` 同步更新内存并排队写 K-V；
  *   - 订阅者**不**会立即收到自己的 save 的回调（典型 store 模式）；
  *   - 内存态与持久态分离：save 失败抛错时内存态仍保留**上次成功**的
  *     真值，避免脏读。
  */
-export function createLocalStorageWebrtcConfigStore(
-  localStorage: Storage | null,
+export function createKeyValueWebrtcConfigStore(
+  storage: import("@keymaster/contracts").KeyValueStore | undefined,
   now: () => number = () => Date.now()
 ): WebrtcConfigStore {
-  let current: WebrtcConfig = loadOrDefault(localStorage);
+  let current: WebrtcConfig = { stunServers: [...DEFAULT_STUN_SERVERS] };
   const subscribers = new Set<(c: WebrtcConfig) => void>();
+  let writeQueue = Promise.resolve();
+
+  async function ready(): Promise<void> {
+    if (!storage) return;
+    try {
+      const entry = await storage.get<unknown>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
+      if (entry) current = coerceWebrtcConfig(entry.value);
+    } catch (error) {
+      // 插件在 active key 产生前可以先装载；延迟 owner 句柄此时只允许
+      // 返回默认内存配置，active 事件会再次触发 ready()。
+      if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
+    }
+  }
 
   function snapshot(): WebrtcConfig {
     return { stunServers: [...current.stunServers] };
@@ -198,16 +211,14 @@ export function createLocalStorageWebrtcConfigStore(
       throw new Error(validated.error ?? "invalid_config");
     }
     const normalized: WebrtcConfig = { stunServers: validated.value };
-    if (!localStorage) {
-      // 无 localStorage 时仍然允许内存版写（测试场景下也用得到）；
-      // 但**不**通知订阅者（避免假 persist 假写到生产页）。
-      current = normalized;
-      return;
-    }
-    const payload = JSON.stringify({ stunServers: normalized.stunServers, savedAtMs: now() });
-    localStorage.setItem(WEBRTC_CONFIG_STORAGE_KEY, payload);
-    // 写成功后才更新内存 + 通知。
     current = normalized;
+    if (storage) {
+      const persisted = { ...normalized, savedAtMs: now() };
+      writeQueue = writeQueue
+        .then(() => storage.put(WEBRTC_CONFIG_STORAGE_KEY, persisted, { partition: "settings" }))
+        .then(() => undefined)
+        .catch(() => undefined);
+    }
     for (const handler of subscribers) {
       try {
         handler(snapshot());
@@ -226,7 +237,8 @@ export function createLocalStorageWebrtcConfigStore(
         subscribers.delete(handler);
       };
     },
-    snapshot
+    snapshot,
+    ready
   };
 }
 
@@ -260,38 +272,7 @@ export function createMemoryWebrtcConfigStore(
         subscribers.delete(handler);
       };
     },
-    snapshot: () => ({ stunServers: [...current.stunServers] })
+    snapshot: () => ({ stunServers: [...current.stunServers] }),
+    ready: async () => undefined
   };
-}
-
-function loadOrDefault(localStorage: Storage | null): WebrtcConfig {
-  if (!localStorage) {
-    return { stunServers: [...DEFAULT_STUN_SERVERS] };
-  }
-  let raw: string | null = null;
-  try {
-    raw = localStorage.getItem(WEBRTC_CONFIG_STORAGE_KEY);
-  } catch {
-    return { stunServers: [...DEFAULT_STUN_SERVERS] };
-  }
-  if (typeof raw !== "string" || raw.length === 0) {
-    return { stunServers: [...DEFAULT_STUN_SERVERS] };
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { stunServers: [...DEFAULT_STUN_SERVERS] };
-  }
-  return coerceWebrtcConfig(parsed);
-}
-
-/**
- * 在浏览器可用时取 `globalThis.localStorage`，否则给 `null`。
- */
-export function getDefaultWebrtcLocalStorage(): Storage | null {
-  if (typeof globalThis === "undefined") return null;
-  const g = globalThis as { localStorage?: Storage };
-  if (typeof g.localStorage === "undefined") return null;
-  return g.localStorage;
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KeyspaceService, ProtocolSpendPreview, ProtocolSpendService } from "@keymaster/contracts";
-import type { OrdinalMintHistoryDb } from "./ordinalMintHistoryDb.js";
+import type { OrdinalMintHistoryRepository } from "./storage/ordinalMintHistoryRepository.js";
 import { createOrdinalMintService } from "./ordinalMintService.js";
 import type { P2pkhServiceFor1Sat } from "./ordinalsService.js";
 
@@ -53,8 +53,8 @@ function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeo
   };
 }
 
-function fakeHistoryDb(): OrdinalMintHistoryDb {
-  const store = new Map<string, Awaited<ReturnType<OrdinalMintHistoryDb["get"]>>>();
+function fakeHistoryRepository(): OrdinalMintHistoryRepository {
+  const store = new Map<string, Awaited<ReturnType<OrdinalMintHistoryRepository["get"]>>>();
   return {
     async get(id) {
       return store.get(id);
@@ -86,9 +86,9 @@ function bytesToBase64(bytes: Uint8Array): string {
 
 describe("createOrdinalMintService", () => {
   it("persists prepare/submit history in the same record", async () => {
-    const historyDb = fakeHistoryDb();
+    const historyRepository = fakeHistoryRepository();
     const service = createOrdinalMintService({
-      historyDb,
+      historyRepository,
       p2pkh: fakeP2pkh(),
       protocolSpend: fakeProtocolSpend(),
       getActiveOwnerPublicKeyHex: () => ACTIVE_PK
@@ -103,7 +103,7 @@ describe("createOrdinalMintService", () => {
       feeRateSatoshisPerKb: 1000,
       changeAddress: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
     });
-    const prepared = (await historyDb.list())[0]!;
+    const prepared = (await historyRepository.list())[0]!;
     expect(prepared.status).toBe("prepared");
     expect(prepared.request.contentType).toBe("text/plain");
     expect(prepared.request.dataBase64).toBe(bytesToBase64(data));
@@ -111,7 +111,7 @@ describe("createOrdinalMintService", () => {
     expect(prepared.preview.inscriptionId).toBe(preview.inscriptionId);
 
     const result = await service.submit(preview);
-    const submitted = (await historyDb.list())[0]!;
+    const submitted = (await historyRepository.list())[0]!;
     expect(result.inscriptionId).toBe("canonical-txid_0");
     expect(submitted.status).toBe("broadcast-pending-woc");
     expect(submitted.submit?.inscriptionId).toBe("canonical-txid_0");

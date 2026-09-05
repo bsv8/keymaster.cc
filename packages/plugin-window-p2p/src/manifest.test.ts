@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
+import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY } from "@keymaster/contracts";
 import { createPluginHost } from "@keymaster/runtime";
 import { windowP2pPlugin } from "./manifest.js";
 
@@ -12,16 +12,15 @@ describe("windowP2pPlugin manifest", () => {
     expect(windowP2pPlugin.meta).toMatchObject({
       defaultEnabled: true,
       canDisable: false,
-      providesCapabilities: [WINDOW_P2P_EXECUTOR_CAPABILITY]
+      providesCapabilities: [WINDOW_P2P_EXECUTOR_CAPABILITY, WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY]
     });
   });
 
   it("provides the lane registry and rejects an independent disable", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true });
-    host.provide(SESSION_COORDINATOR_CLIENT_CAPABILITY, {
+    const host = createPluginHost({ disableConfigPersistence: true, coordinatorForPlugin: () => ({
       getBootstrapSnapshot: () => ({ vaultStatus: "locked", sessionEpoch: "test" }),
       subscribeTopic: () => () => undefined
-    });
+    }) });
     await host.register(windowP2pPlugin);
 
     expect(host.capabilities.has(WINDOW_P2P_EXECUTOR_CAPABILITY)).toBe(true);

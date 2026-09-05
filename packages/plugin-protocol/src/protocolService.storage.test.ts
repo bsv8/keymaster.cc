@@ -2,10 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import type {
   ConnectSessionRecord,
   ProtocolResultMessage,
-  ProtocolStorageDb,
-  StorageAppContext,
+  ProtocolStorageRepository,
+  OwnerAppStorageGrant,
   StorageListResult,
-  StorageService,
+  StorageRuntimeController,
   VaultService
 } from "@keymaster/contracts";
 import { PROTOCOL_VERSION, STORAGE_PART_SIZE_BYTES } from "@keymaster/contracts";
@@ -22,7 +22,7 @@ const APP_IDENTITY = {
   identityDigestHex: "aa".repeat(32)
 };
 
-function makeDb(session: ConnectSessionRecord | null): ProtocolStorageDb {
+function makeRepository(session: ConnectSessionRecord | null): ProtocolStorageRepository {
   const sessions = session ? new Map([[session.sessionId, session]]) : new Map<string, ConnectSessionRecord>();
   return {
     putCommand: async () => undefined,
@@ -57,7 +57,7 @@ function makeVault(): VaultService {
   } as unknown as VaultService;
 }
 
-function makeStorage(overrides: Partial<StorageService> = {}): StorageService {
+function makeStorage(overrides: Partial<StorageRuntimeController> = {}): StorageRuntimeController {
   const emptyResult: StorageListResult = { prefix: "", parentPrefix: "", directories: [], files: [] };
   return {
     status: () => "ready",
@@ -81,10 +81,10 @@ function makeStorage(overrides: Partial<StorageService> = {}): StorageService {
     completeUpload: vi.fn(),
     abortUpload: vi.fn(),
     ...overrides
-  } as unknown as StorageService;
+  } as unknown as StorageRuntimeController;
 }
 
-function makeHarness(storageService: StorageService, session: ConnectSessionRecord | null = {
+function makeHarness(storageRuntimeController: StorageRuntimeController, session: ConnectSessionRecord | null = {
   sessionId: SESSION_ID,
   origin: ORIGIN,
   ownerPublicKeyHex: OWNER_PUBLIC_KEY_HEX,
@@ -94,7 +94,7 @@ function makeHarness(storageService: StorageService, session: ConnectSessionReco
   createdAt: 1,
   lastUsedAt: 1,
   revokedAt: null
-}, getStorageService: () => StorageService | undefined = () => storageService) {
+}, getStorageRuntimeController: () => StorageRuntimeController | undefined = () => storageRuntimeController) {
   const opener = { closed: false } as Window;
   const results: ProtocolResultMessage[] = [];
   const keyspace = {
@@ -103,9 +103,9 @@ function makeHarness(storageService: StorageService, session: ConnectSessionReco
   const service = new ProtocolServiceImpl({
     vault: makeVault(),
     keyspace: keyspace as never,
-    storageDb: makeDb(session),
-    storageService,
-    getStorageService,
+    storageRepository: makeRepository(session),
+    storageRuntimeController,
+    getStorageRuntimeController,
     resolveOpener: () => opener,
     postReady: () => undefined,
     postResult: (_target, _origin, result) => { results.push(result); }
@@ -152,7 +152,7 @@ async function waitForResultCount(results: ProtocolResultMessage[], count: numbe
 
 describe("ProtocolService storage adapter", () => {
   it("dispatches storage methods with session-bound identity and no caller namespace fields", async () => {
-    let receivedContext: StorageAppContext | undefined;
+    let receivedContext: OwnerAppStorageGrant | undefined;
     let receivedInput: Record<string, unknown> | undefined;
     const storage = makeStorage({
       list: vi.fn(async (context, input) => {
@@ -185,7 +185,7 @@ describe("ProtocolService storage adapter", () => {
   it("resolves a newly enabled Storage service after the old one is replaced", async () => {
     const first = makeStorage();
     const second = makeStorage();
-    let current: StorageService | undefined = first;
+    let current: StorageRuntimeController | undefined = first;
     const harness = makeHarness(first, undefined, () => current);
     harness.service.startSession();
     await harness.service.handleMessage({ data: storageRequest("list-first"), origin: ORIGIN, source: harness.opener } as MessageEvent);

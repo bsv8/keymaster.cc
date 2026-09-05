@@ -44,7 +44,7 @@
 //     resolvedImportPassword、旧的 importRequiredPassword，否则第 4 步
 //     会基于已失效的"曾经用过的密码"复用。
 //   - 关闭向导 / 刷新页面 / 返回欢迎页：本次导入会话整体丢弃。
-//   - 私钥材料**不**写 localStorage / IndexedDB / URL / 长期 React state。
+//   - 私钥材料**不**写 localStorage / platform K-V repository / URL / 长期 React state。
 //   - 主题/语言切换不影响当前 step、已选 importer、文件、解析结果和
 //     密码内存态——只切换展示。
 //
@@ -52,7 +52,7 @@
 //   - 不能在 parse 成功后立刻清空 importPasswordDraft，然后让第 4 步
 //     重新索取同一密码——那是伪复用。
 //   - 不能把 importPasswordDraft / resolvedImportPassword 写到
-//     localStorage、IndexedDB、URL、MessageBus payload。
+//     localStorage、platform K-V repository、URL、MessageBus payload。
 //   - 不能让用户通过 step progress 跳到尚未满足前置条件的步骤。
 //   - 不能在第 4 步复用时仍渲染密码输入框。
 //   - 不能在"明文导入"路径下保留"单输入框无 confirm"的新密码流程。

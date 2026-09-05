@@ -14,7 +14,7 @@ import type {
 } from "@keymaster/contracts";
 import type { P2pkhProtocolSubmission } from "./p2pkhContracts.js";
 import { calcTxidFromRawTxHex, rawTxHexByteLength, signP2pkhTx, type UnsignedTx } from "./p2pkhSigner.js";
-import { resourceIdFor } from "./p2pkhDb.js";
+import { resourceIdFor } from "./storage/p2pkhStateRepository.js";
 
 type P2pkhInputOutpoint = Pick<ProtocolSpendInput, "txid" | "vout">;
 

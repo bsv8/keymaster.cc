@@ -11,43 +11,50 @@
 //   7. data 字段会脱敏：禁止的 key 不会落库；超长字符串被截断。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createInMemoryKeyValueStore } from "../storage/inMemoryKeyValueStore.js";
 import {
   LOG_SERVICE_CAPABILITY,
   type LogConfig,
   type LogEntry,
+  type KeyValueStore,
   type PluginContext,
   type PluginManifest
 } from "@keymaster/contracts";
 import { createPluginHost } from "../createPluginHost.js";
-import { disposeLogDb, LOG_DB_NAME, putEntry } from "./logDb.js";
-import { createLogService, type LogServiceHandle } from "./logService.js";
+import { configureLogRepository, disposeLogRepository, putEntry } from "./logRepository.js";
+import { createLogService as createRuntimeLogService, type CreateLogServiceOptions, type LogServiceHandle } from "./logService.js";
 
-async function resetLogDb() {
-  // 等待 close 真正完成；否则 deleteDatabase 会被前一连接阻塞。
-  await disposeLogDb();
-  // 即便 close 已 resolve，IDB 内部完成清理仍需一两个微任务。
-  await new Promise((r) => setTimeout(r, 10));
-  await new Promise<void>((resolve) => {
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      resolve();
-    };
-    const req = indexedDB.deleteDatabase(LOG_DB_NAME);
-    req.onsuccess = () => finish();
-    req.onerror = () => finish();
-    // 兜底超时：blocked 时 IDB 会一直等，给 1.5s 兜底后强行继续。
-    setTimeout(finish, 1500);
+let testLogStorage: KeyValueStore;
+
+function createSharedTestLogStorage(): KeyValueStore {
+  const storage = createInMemoryKeyValueStore({
+    scope: "platform",
+    applicationStorageId: "logs",
+    schemaVersion: 1,
+    bucketId: "test-memory",
+    bucketGeneration: 1
   });
+  // Service.dispose() 只关闭自己的绑定；这里模拟平台装配层持有的共享
+  // namespace，允许测试在关闭一个 Service 后由下一个 Service 继续读取。
+  return { ...storage, close: () => undefined };
+}
+
+function createLogService(options: CreateLogServiceOptions = {}): LogServiceHandle {
+  return createRuntimeLogService({ ...options, storage: testLogStorage });
+}
+
+async function resetLogRepository() {
+  disposeLogRepository();
 }
 
 beforeEach(async () => {
-  await resetLogDb();
+  await resetLogRepository();
+  testLogStorage = createSharedTestLogStorage();
+  configureLogRepository(testLogStorage);
 });
 
 afterEach(async () => {
-  await resetLogDb();
+  await resetLogRepository();
 });
 
 describe("createLogService - basics", () => {
@@ -378,7 +385,8 @@ describe("createLogService - init race", () => {
     // 给 dispose 的 close 留够时间。
     await new Promise((r) => setTimeout(r, 300));
     // 先用直接读 DB 的方式验证，避免 reader service 自身的 init 时序干扰。
-    const { getConfigRow } = await import("./logDb.js");
+    configureLogRepository(testLogStorage);
+    const { getConfigRow } = await import("./logRepository.js");
     const row = await getConfigRow();
     expect(row).toBeDefined();
     expect(row!.retentionDays).toBe(14);

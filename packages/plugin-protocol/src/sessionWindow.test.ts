@@ -1,14 +1,14 @@
 // packages/plugin-protocol/src/sessionWindow.test.ts
 // Session Window 行为测试：
 //   - sessionWindowBootstrap 路径 normalize / boot mode 解析；
-//   - protocolStorageDb schema（施工单 2026-06-30 002 起 session record
+//   - protocolMultipartUploadRepository schema（施工单 2026-06-30 002 起 session record
 //     不再带 `runtimeBinding`，统一执行 runtime 来源由 resolver 决定）。
 //
 // 施工单 2026-06-30 002 硬切换补充：
 //   - owner runtime bootstrap 校验（hex 派生公钥 === ownerPublicKeyHex）；
 //   - vault 不再提供 export/importUnlockRuntime*。
 //
-// Connect Storage 施工单补充：Storage 行为由独立 plugin-storage 单测覆盖；
+// Connect Storage 施工单补充：Storage 行为由独立 platform-storage 单测覆盖；
 // 本文件只验证 Session Window bootstrap。
 
 // priv=0x...01 对应 secp256k1 压缩公钥（来自 noble secp256k1.getPublicKey 派生）。
@@ -114,7 +114,7 @@ describe("sessionWindowBootstrap", () => {
   });
 });
 
-describe("protocolStorageDb stores (smoke)", () => {
+describe("protocolMultipartUploadRepository stores (smoke)", () => {
   // 验证 ConnectSessionRecord / OriginSettingsRecord 等结构仍兼容旧逻辑
   it("ConnectSessionRecord 不含 ownerKeyId / runtimeBinding 字段（施工单 2026-06-30 002）", () => {
     const rec: ConnectSessionRecord = {
@@ -305,9 +305,9 @@ function makeFakeKeyspace(): ConstructorParameters<typeof ProtocolServiceImpl>[0
       throw new Error("not used");
     },
     onActiveChange: () => () => undefined,
-    openKeyStorage: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
+    openOwnerAppStore: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
+    registerStorageDeclaration: () => undefined,
+    listOwnerStorageDeclarations: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
     isInitializing: () => false,

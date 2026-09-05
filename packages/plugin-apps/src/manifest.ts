@@ -4,7 +4,7 @@
 // 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
 //   - 注册 `/apps` 页面，并接入新业务导航的首页域与首页 widget；
 //   - 点击 `Open App` 时调用 `protocol.service.launchAppView(...)`；
-//   - 插件自身**不**直接 import `protocolStorageDb` /
+//   - 插件自身**不**直接 import `protocolStorageRepository` /
 //     `buildAppBootstrapPayload` / `installLauncherBootstrapRegistry` /
 //     `window.open` popup URL——这些细节全部收口在 service 内部。
 //   - 依赖 `route.registry` / `business.registry` / `protocol.service`。
@@ -116,6 +116,7 @@ export const appsPlugin: PluginManifest = {
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "connect-apps-ready",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business",

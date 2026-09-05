@@ -1,9 +1,5 @@
 import type { PluginManifest, PluginContext } from "@keymaster/contracts";
-import {
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
-  WINDOW_P2P_EXECUTOR_CAPABILITY,
-  type SessionCoordinatorClient
-} from "@keymaster/contracts";
+import { WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, WINDOW_P2P_EXECUTOR_CAPABILITY, type WindowP2pCoordinatorControl } from "@keymaster/contracts";
 import { createWindowP2pLaneRegistry } from "./laneRegistry.js";
 import { installWindowP2pExecutor } from "./windowExecutor.js";
 
@@ -15,16 +11,17 @@ export const windowP2pPlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [WINDOW_P2P_EXECUTOR_CAPABILITY],
+    providesCapabilities: [WINDOW_P2P_EXECUTOR_CAPABILITY, WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "platform"
   },
-  dependencies: [
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "P2P lease 与 TypedSigner 由 Coordinator 管理" }
-  ],
+  dependencies: [],
   setup(ctx: PluginContext) {
-    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinator = ctx.coordinator as WindowP2pCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("Window P2P Coordinator control is unavailable");
+    ctx.provide(WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const registry = createWindowP2pLaneRegistry();
     ctx.provide(WINDOW_P2P_EXECUTOR_CAPABILITY, registry);
     const cleanupExecutor = installWindowP2pExecutor(coordinator, registry);

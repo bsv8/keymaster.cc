@@ -2,14 +2,14 @@
 // P2PKH 设置（硬切换 001）：
 //   - 设置项从 `allowUnconfirmed` 改为 `includeTestnet`。
 //   - 缺省 `false`：P2PKH 默认不包含 testnet 货币（资产、转账、widget、页面按钮、确认同步）。
-//   - 存储位置继续使用全局 localStorage；key = "p2pkh.settings"。
+//   - 存储位置由 Coordinator 平台 K-V 统一承载。
 //   - 保存时调用 `service.applyGlobalSettings`：由 service 负责刷新进程内
 //     缓存、通知订阅者、并在 false → true 时补齐 testnet 资源。
 
 import { useEffect, useState } from "react";
 import { Select, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type P2pkhProviderRegistrySnapshot, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
 import { resolveP2pkhFeeRateSatoshisPerKb, type P2pkhFeeRateTier, type P2pkhGlobalSettings, type P2pkhService } from "../p2pkhContracts.js";
 
 const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
@@ -17,7 +17,7 @@ const DEFAULT_SETTINGS: P2pkhGlobalSettings = { includeTestnet: false };
 export function P2pkhSettingsPage() {
   const host = usePluginHost();
   const service = useCapability<P2pkhService>("p2pkh.service");
-  const coordinator = useCapability<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+  const coordinator = useCapability<P2pkhCoordinatorControl>(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const resourceSettings = useResourceSelector<P2pkhGlobalSettings, P2pkhGlobalSettings>(
     host.resourceStore,

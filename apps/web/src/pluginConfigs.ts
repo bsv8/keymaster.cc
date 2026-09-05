@@ -12,8 +12,7 @@
  *
  * 优先级：
  *   1) `globalThis.__PRICECAST_PUBLISHER_PUBKEY__`（启动脚本注入 seed）；
- *   2) 默认空串 → 仅作为首次 seed 候选；若本地已有
- *      `localStorage["bsv-price.settings"]`，则以本地为准。
+ *   2) 默认空串 → 仅作为首次 seed 候选；旧浏览器设置不参与新桶初始化。
  *
  * 注：本文件里的 `__PRICECAST_PUBLISHER_PUBKEY__` 是**装配层**读
  * （用于桥接到 `manifest.config` seed），不是 plugin 自己的入口。
@@ -32,7 +31,7 @@ function readPublisherPublicKeyHex(): string {
 
 /**
  * 对 `bsv-price` plugin 的强类型配置注入；这里只是首次 seed，
- * 运行时真值会由 `localStorage["bsv-price.settings"]` 接管。
+ * 运行时真值由 BsvPrice owner/App K-V 接管。
  */
 export const bsvPriceConfig = {
   pricePublisherPublicKeyHex: readPublisherPublicKeyHex()

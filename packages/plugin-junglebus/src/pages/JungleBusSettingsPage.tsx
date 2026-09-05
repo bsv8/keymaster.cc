@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { TextInput } from "@keymaster/ui";
 import { useCapability, useI18n } from "@keymaster/runtime";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl } from "@keymaster/contracts";
 import { DEFAULT_JUNGLEBUS_CONFIG } from "../jungleBusClient.js";
 
 type JungleBusDraft = { mainEndpoint: string; testEndpoint: string; requestsPerSecond: string; timeoutMs: string; maxRetries: string };
@@ -17,7 +17,7 @@ function toDraft(value: Record<string, unknown>): JungleBusDraft {
 }
 
 export function JungleBusSettingsPage() {
-  const coordinator = useCapability<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+  const coordinator = useCapability<P2pkhCoordinatorControl>(JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const [draft, setDraft] = useState<JungleBusDraft>(() => toDraft({}));
   const [error, setError] = useState<string | null>(null);

@@ -1,6 +1,6 @@
 // packages/plugin-msfile/src/manifest.ts
 // MSFile 插件清单：提供 `msfile.service`（页面侧 proxy）与 /settings/system
-// 的 MSFile group。设置真值、DB 与网络都在 Coordinator SharedWorker。
+// 的 MSFile group。设置真值、K-V 与网络都在 Coordinator SharedWorker。
 
 import type { I18nPluginResources, PluginManifest, PluginContext, ResourceRegistry, RouteRegistry, WindowP2pExecutorLaneRegistry } from "@keymaster/contracts";
 import {
@@ -9,8 +9,9 @@ import {
   KEYSPACE_SERVICE_CAPABILITY,
   MSFILE_READ_CONCURRENCY_RECOMMENDED,
   MSFILE_SERVICE_CAPABILITY,
+  MSFILE_COORDINATOR_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
+  type MsFileCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
   type SessionCoordinatorClient,
   type SystemSettingsRegistry,
@@ -297,15 +298,15 @@ export const msfilePlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     // 默认加载只负责让设置入口和首页模块稳定出现；未配置全局金额或
     // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [MSFILE_SERVICE_CAPABILITY],
+    providesCapabilities: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "platform"
   },
   dependencies: [
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "MSFile 设置真值与数据面都归 Coordinator SharedWorker" },
     { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
     { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" },
     { capability: "business.registry", reason: "注册 MSFile 首页文件获取投影" },
@@ -313,8 +314,11 @@ export const msfilePlugin: PluginManifest = {
     { capability: "vault.service", reason: "首页文件读取只允许在 Vault unlocked 时进行" }
   ],
   i18n: resources,
+  storage: { scope: "key", applicationStorageId: "MSFile", schemaVersion: 1 },
   setup(ctx: PluginContext) {
-    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinator = ctx.coordinator as MsFileCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("MSFile Coordinator control is unavailable");
+    ctx.provide(MSFILE_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const laneRegistry = ctx.get<WindowP2pExecutorLaneRegistry>(WINDOW_P2P_EXECUTOR_CAPABILITY);
     // MSFile 只注册自己的业务 lane；公共 Host 与 executor 由 Window P2P
     // 系统插件拥有，避免两个插件各自建立网络实例。

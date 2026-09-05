@@ -31,7 +31,7 @@ import {
   type P2pkhServiceForStas
 } from "./stasService.js";
 import { createStasTokenProvider } from "./stasTokenProvider.js";
-import { createStasDb } from "./stasDb.js";
+import { createStasRepository, STAS_SCHEMA_VERSION, STAS_STORAGE_ID } from "./storage/stasRepository.js";
 import { createStasSyncTask } from "./stasSync.js";
 
 const stasResources: I18nPluginResources = {
@@ -53,22 +53,21 @@ const stasResources: I18nPluginResources = {
 export const stasTokenPlugin: PluginManifest = {
   id: "token-stas",
   name: "STAS tokens",
-  description: "STAS fungible token provider：通过 snapshot DB 读取当前 active key 主网地址的 STAS 持仓，注入 token.registry。",
+  description: "STAS fungible token provider：通过 snapshot K-V 读取当前 active key 主网地址的 STAS 持仓，注入 token.registry。",
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business"
   },
   i18n: stasResources,
-  keyScopedStorages: [
-    { storageId: "snapshots", description: "STAS token snapshot DB" }
-  ],
+  storage: { scope: "key", applicationStorageId: STAS_STORAGE_ID, schemaVersion: STAS_SCHEMA_VERSION },
   dependencies: [
     { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
     { capability: WOC_STAS_CAPABILITY, reason: "STAS WOC 查询入口" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped DB" },
+    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
     { capability: "token.registry", reason: "注册 STAS TokenProvider" },
     { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
     { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
@@ -87,17 +86,18 @@ export const stasTokenPlugin: PluginManifest = {
     const vault = ctx.get<VaultService>("vault.service");
     const backgroundService = ctx.get<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY);
 
-    // 创建 STAS snapshot DB（key-scoped：每个 active key 拥有独立 namespace）
-    const db = createStasDb(keyspace);
+    // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
+    if (!ctx.storage) throw new Error("STAS owner storage binding is unavailable");
+    const stateRepository = createStasRepository(ctx.storage);
 
     // 创建 service（保留 WOC 能力，供 sync task 使用）
     const service = createStasService({ keyspace, p2pkh, wocStas });
 
-    // 创建 provider（只读 DB）
-    const provider = createStasTokenProvider({ db, keyspace, assetDataNotifier });
+    // 创建 provider（只读 K-V）
+    const provider = createStasTokenProvider({ stateRepository, keyspace, assetDataNotifier });
 
     // 注册后台同步任务
-    const syncTask = createStasSyncTask({ db, service, keyspace, vault, assetDataNotifier });
+    const syncTask = createStasSyncTask({ stateRepository, service, keyspace, vault, assetDataNotifier });
     backgroundRegistry.register(syncTask);
 
     tokenRegistry.register(provider);
@@ -131,13 +131,13 @@ export const stasTokenPlugin: PluginManifest = {
       // 异步检查 snapshot 以决定 reason
       void (async () => {
         try {
-          const existing = await db.list();
+          const existing = await stateRepository.list();
           const reason = existing.length === 0
             ? BACKGROUND_TRIGGER_REASON.FIRST_SYNC
             : "p2pkh.resources-ready";
           triggerSync(reason);
         } catch {
-          // DB 读取失败时降级为普通 reason
+          // K-V 读取失败时降级为普通 reason
           triggerSync("p2pkh.resources-ready");
         }
       })();
@@ -155,7 +155,7 @@ export const stasTokenPlugin: PluginManifest = {
       offUnlocked();
       offP2pkhResource();
       offSettingsChange?.();
-      db.close();
+      stateRepository.close();
       void service;
       void provider;
     };

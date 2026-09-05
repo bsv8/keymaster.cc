@@ -1,12 +1,12 @@
 import type { P2pkhConfirmedDataProvider, P2pkhProviderRegistry } from "@keymaster/contracts";
 import { P2pkhProviderError } from "@keymaster/contracts";
 import type { P2pkhKeyResource, P2pkhTransactionSyncState } from "./p2pkhContracts.js";
-import type { P2pkhDbHandle } from "./p2pkhDb.js";
+import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 
 export const P2PKH_TRANSACTIONS_SYNC_TASK = "p2pkh.transactions-sync";
 
 export interface P2pkhTransactionSyncDeps {
-  getDb(): Promise<P2pkhDbHandle>;
+  getStore(): Promise<P2pkhStateRepositoryHandle>;
   getResources(): Promise<P2pkhKeyResource[]>;
   registry: P2pkhProviderRegistry;
   getSelection(network: "main" | "test"): { syncProviderId: string | null; generation: number };
@@ -37,8 +37,8 @@ export function createP2pkhTransactionSync(deps: P2pkhTransactionSyncDeps) {
     if (!selection.syncProviderId) throw new P2pkhProviderError("provider-unavailable", `No confirmed sync provider selected for ${network}`);
     const provider = deps.registry.getConfirmedProvider(selection.syncProviderId, network);
     if (!provider) throw new P2pkhProviderError("provider-unavailable", `Selected confirmed provider is unavailable: ${selection.syncProviderId}`);
-    const db = await deps.getDb();
-    const previous = await db.getTransactionSyncState(resource.resourceId);
+    const stateRepository = await deps.getStore();
+    const previous = await stateRepository.getTransactionSyncState(resource.resourceId);
     const resuming = previous?.inProgressProviderId === selection.syncProviderId && previous.inProgressProviderGeneration === selection.generation;
     const runId = resuming && previous?.runId ? previous.runId : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let cursor = resuming ? previous?.inProgressCursor : undefined;
@@ -51,7 +51,7 @@ export function createP2pkhTransactionSync(deps: P2pkhTransactionSyncDeps) {
     const seenPageItems = new Map<string, { blockHeight?: number; blockHash?: string; blockTime?: number }>();
     let emptyHistoryConfirmed = false;
     let providerReturnedTransactions = false;
-    await db.putTransactionSyncState({ id: resource.resourceId, resourceId: resource.resourceId, completeHeadTxid: previous?.completeHeadTxid, inProgressProviderId: selection.syncProviderId, inProgressProviderGeneration: selection.generation, inProgressCursor: cursor, runHeadTxid, runObservedTxids: resuming ? previous?.runObservedTxids : [], runId, pagesSynced: 0, transactionsSynced: 0, lastAttemptAt: now(), lastSuccessAt: previous?.lastSuccessAt });
+    await stateRepository.putTransactionSyncState({ id: resource.resourceId, resourceId: resource.resourceId, completeHeadTxid: previous?.completeHeadTxid, inProgressProviderId: selection.syncProviderId, inProgressProviderGeneration: selection.generation, inProgressCursor: cursor, runHeadTxid, runObservedTxids: resuming ? previous?.runObservedTxids : [], runId, pagesSynced: 0, transactionsSynced: 0, lastAttemptAt: now(), lastSuccessAt: previous?.lastSuccessAt });
     try {
       while (true) {
         if (signal.aborted) return { pages, transactions };
@@ -74,7 +74,7 @@ export function createP2pkhTransactionSync(deps: P2pkhTransactionSyncDeps) {
           // before treating it as a real empty history. This preserves data
           // during a transient provider response while still allowing a
           // genuine all-history reorg to converge and clear stale facts.
-          const existingFacts = typeof db.listTransactionFacts === "function" ? await db.listTransactionFacts({ resourceId: resource.resourceId }) : [];
+          const existingFacts = typeof stateRepository.listTransactionFacts === "function" ? await stateRepository.listTransactionFacts({ resourceId: resource.resourceId }) : [];
           // A terminal empty page after one or more non-empty pages is just
           // the end of this provider walk, not an empty address history.
           // Only a run that has not observed any transaction may perform the
@@ -125,15 +125,15 @@ export function createP2pkhTransactionSync(deps: P2pkhTransactionSyncDeps) {
         // provider exhaustion, but must not be treated as a complete-history
         // snapshot or valid facts from the earlier part of the run would look
         // stale and be deleted.
-        if (typeof db.ingestConfirmedTransactionPage === "function") await db.ingestConfirmedTransactionPage({ resource, transactions: details, syncState: checkpoint, reorgCheck: completePage ? { observedTxids: [...observedTxids], completeHistory: page.exhausted && !anchorSeen && (emptyHistoryConfirmed || !resuming || previous?.runObservedTxids !== undefined), anchorTxid: anchorSeen ? previous?.completeHeadTxid : undefined } : undefined });
-        else { for (const detail of details) await db.ingestConfirmedTransaction({ resource, tx: detail, expectedGeneration: resource.generation }); await db.putTransactionSyncState(checkpoint); }
+        if (typeof stateRepository.ingestConfirmedTransactionPage === "function") await stateRepository.ingestConfirmedTransactionPage({ resource, transactions: details, syncState: checkpoint, reorgCheck: completePage ? { observedTxids: [...observedTxids], completeHistory: page.exhausted && !anchorSeen && (emptyHistoryConfirmed || !resuming || previous?.runObservedTxids !== undefined), anchorTxid: anchorSeen ? previous?.completeHeadTxid : undefined } : undefined });
+        else { for (const detail of details) await stateRepository.ingestConfirmedTransaction({ resource, tx: detail, expectedGeneration: resource.generation }); await stateRepository.putTransactionSyncState(checkpoint); }
         if (completePage) return { pages, transactions };
       }
       return { pages, transactions };
     } catch (error) {
       if (signal.aborted || (typeof error === "object" && error !== null && "name" in error && (error as { name?: unknown }).name === "AbortError")) return { pages, transactions };
-      const current = await db.getTransactionSyncState(resource.resourceId);
-      await db.putTransactionSyncState({ ...(current ?? { id: resource.resourceId, resourceId: resource.resourceId, pagesSynced: pages, transactionsSynced: transactions }), lastError: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300), lastAttemptAt: now(), completeHeadTxid: previous?.completeHeadTxid, inProgressProviderId: selection.syncProviderId, inProgressProviderGeneration: selection.generation, inProgressCursor: cursor, runId, runHeadTxid, runObservedTxids: [...observedTxids], pagesSynced: pages, transactionsSynced: transactions });
+      const current = await stateRepository.getTransactionSyncState(resource.resourceId);
+      await stateRepository.putTransactionSyncState({ ...(current ?? { id: resource.resourceId, resourceId: resource.resourceId, pagesSynced: pages, transactionsSynced: transactions }), lastError: error instanceof Error ? error.message.slice(0, 300) : String(error).slice(0, 300), lastAttemptAt: now(), completeHeadTxid: previous?.completeHeadTxid, inProgressProviderId: selection.syncProviderId, inProgressProviderGeneration: selection.generation, inProgressCursor: cursor, runId, runHeadTxid, runObservedTxids: [...observedTxids], pagesSynced: pages, transactionsSynced: transactions });
       throw error;
     }
   }

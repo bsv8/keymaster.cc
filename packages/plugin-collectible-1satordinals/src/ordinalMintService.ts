@@ -6,7 +6,7 @@ import type {
 } from "@keymaster/contracts";
 import { buildOrdinalP2pkhScript, type OrdinalEnvelopeEntry } from "./ordinalScript.js";
 import type { P2pkhServiceFor1Sat } from "./ordinalsService.js";
-import type { OrdinalMintHistoryDb, OrdinalMintHistoryRecord } from "./ordinalMintHistoryDb.js";
+import type { OrdinalMintHistoryRepository, OrdinalMintHistoryRecord } from "./storage/ordinalMintHistoryRepository.js";
 
 export const ORDINAL_MINT_SERVICE_CAPABILITY = "collectible-1satordinals.mint.service";
 
@@ -41,7 +41,7 @@ export function createOrdinalMintService(input: {
   p2pkh: P2pkhServiceFor1Sat;
   protocolSpend: ProtocolSpendService;
   getActiveOwnerPublicKeyHex: () => string | undefined;
-  historyDb?: OrdinalMintHistoryDb;
+  historyRepository?: OrdinalMintHistoryRepository;
 }): OrdinalMintService {
   async function selectFunding(network: BsvNetwork, ownerPublicKeyHex: string, amount: number, feeRateSatoshisPerKb: number): Promise<Array<{ txid: string; vout: number; value: number; address: string }>> {
     const assetId = network === "main" ? "bsv" : "bsvtest";
@@ -70,9 +70,9 @@ export function createOrdinalMintService(input: {
   }
 
   async function persistDraft(request: OrdinalMintRequest, preview: OrdinalMintPreview, ownerPublicKeyHex: string): Promise<void> {
-    if (!input.historyDb) return;
+    if (!input.historyRepository) return;
     const now = new Date().toISOString();
-    await input.historyDb.put({
+    await input.historyRepository.put({
       id: preview.spend.txid,
       createdAt: now,
       updatedAt: now,
@@ -96,11 +96,11 @@ export function createOrdinalMintService(input: {
   }
 
   async function persistFinal(preview: OrdinalMintPreview, result: ProtocolSpendResult, finalInscriptionId: string): Promise<void> {
-    if (!input.historyDb) return;
+    if (!input.historyRepository) return;
     const now = new Date().toISOString();
-    const existing = await input.historyDb.get(preview.spend.txid).catch(() => undefined);
+    const existing = await input.historyRepository.get(preview.spend.txid).catch(() => undefined);
     if (existing) {
-      await input.historyDb.put({
+      await input.historyRepository.put({
         ...existing,
         updatedAt: now,
         status: result.status,
@@ -117,7 +117,7 @@ export function createOrdinalMintService(input: {
       });
       return;
     }
-    await input.historyDb.put({
+    await input.historyRepository.put({
       id: preview.spend.txid,
       createdAt: now,
       updatedAt: now,
@@ -183,8 +183,8 @@ export function createOrdinalMintService(input: {
       return { spend, inscriptionId: finalInscriptionId };
     },
     async listHistory() {
-      if (!input.historyDb) return [];
-      return input.historyDb.list();
+      if (!input.historyRepository) return [];
+      return input.historyRepository.list();
     }
   };
 }

@@ -1,4 +1,5 @@
-import type { ActiveKeyState, KeyIdentity, KeyspaceService, NoticeRecord, NoticeRegistry, ResourceRegistry, VaultService, VaultStatus } from "@keymaster/contracts";
+import type { ActiveKeyState, ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, KeyIdentity, KeyspaceService, NoticeRecord, NoticeRegistry, ResourceRegistry, VaultService, VaultStatus } from "@keymaster/contracts";
+import { APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
 
 export type ShellGuardResource =
   | { kind: "normal" }
@@ -6,7 +7,20 @@ export type ShellGuardResource =
   | { kind: "needs-repair"; keys: KeyIdentity[] }
   | { kind: "diagnostic"; error: string };
 
-export function registerShellResources(registry: ResourceRegistry): void {
+export function registerShellResources(registry: ResourceRegistry, applicationBootstrap?: ApplicationBootstrapStatus): void {
+  if (applicationBootstrap) {
+    registry.register<ApplicationBootstrapSnapshot, readonly string[]>({
+      id: APPLICATION_BOOTSTRAP_RESOURCE_ID,
+      scope: "global",
+      key: () => [APPLICATION_BOOTSTRAP_RESOURCE_ID],
+      load: async () => applicationBootstrap.snapshot(),
+      // ResourceDefinition 的 subscribe 只表达“资源已失效”；状态读取仍由
+      // load 完成，避免 React 组件直接订阅业务 service。
+      subscribe: (_args, _context, invalidate) => applicationBootstrap.subscribe(() => invalidate()),
+      equals: (previous, next) => JSON.stringify(previous) === JSON.stringify(next),
+      invalidation: "immediate"
+    });
+  }
   registry.register<NoticeRecord[], readonly string[]>({
     id: "shell.notices", scope: "global", key: () => ["shell.notices"],
     load: async (_args, context) => context.getCapability<NoticeRegistry>("notice.registry")?.list() ?? [],

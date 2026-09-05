@@ -10,15 +10,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // ── 模块级 mock ──────────────────────────────────────────────────
-// createBsv21Db / createBsv21Service / createBsv21SyncTask / createBsv21TokenProvider
+// createBsv21StateRepository / createBsv21Service / createBsv21SyncTask / createBsv21TokenProvider
 // 都在 setup() 内部调用，测试只需验证 manifest 的事件绑定逻辑，
 // 不需要真实 IndexedDB 或 WOC 网络。全部 mock 掉。
 
-// 可配置的 db.list 返回值
+// 可配置的 stateRepository.list 返回值
 let mockDbListResult: unknown[] = [];
 
-vi.mock("./bsv21Db.js", () => ({
-  createBsv21Db: () => ({
+vi.mock("./storage/bsv21StateRepository.js", () => ({
+  BSV21_STORAGE_ID: "BSV21",
+  BSV21_SCHEMA_VERSION: 1,
+  createBsv21StateRepository: () => ({
     put: vi.fn(),
     replaceAll: vi.fn(),
     list: vi.fn(() => Promise.resolve(mockDbListResult)),
@@ -90,6 +92,9 @@ async function setupManifest() {
   const dataNotifierListeners: Array<(event: { providerId: string; kinds: string[]; publicKeyHex?: string }) => void> = [];
 
   const ctx = {
+    // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
+    // 因此使用不会被 mock Repository 实际访问的最小占位值。
+    storage: {} as never,
     provide: vi.fn(),
     get: vi.fn((cap: string) => {
       switch (cap) {
@@ -108,7 +113,7 @@ async function setupManifest() {
             active: () => ({ activePublicKeyHex: "pk1" }),
             onActiveKeyChanged: onActiveChangeFn,
             isInitializing: () => false,
-            openKeyStorage: vi.fn(),
+            openOwnerAppStore: vi.fn(),
           };
         case "token.registry":
           return { register: registerToken };

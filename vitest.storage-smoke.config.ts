@@ -15,6 +15,6 @@ for (const [name, value] of Object.entries(smokeFileEnv)) {
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["packages/plugin-storage/src/s3ProviderSmoke.ts"]
+    include: ["packages/platform-storage/src/bucket-providers/s3/s3BucketObjectStore.smoke.ts"]
   }
 });

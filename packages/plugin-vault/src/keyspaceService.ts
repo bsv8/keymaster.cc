@@ -1,13 +1,9 @@
 // packages/plugin-vault/src/keyspaceService.ts
-// KeyspaceService 实现：active key 状态 + key-scoped IndexedDB + key 删除。
+// KeyspaceService 实现：active key 状态 + owner/App K-V + key 删除。
 // 设计缘由：
 //   - KeyspaceService 是平台级状态；业务插件只能通过该服务查询 / 切换 active key。
-//   - 注册 plugin storage：plugin setup 时通过 manifest.keyScopedStorages 或
-//     显式 registerPluginStorage 注入；keyspace 在 deleteKey 时按注册清单逐个
-//     indexedDB.deleteDatabase。
-//   - 删除顺序：prepare -> cancel background -> close handles -> delete namespace
-//     DBs -> delete Vault key。namespace DB 删除失败时拒绝继续，避免留下归属
-//     丢失的业务数据。
+//   - Host 在插件 setup 前注册 storage 声明；keyspace 在 deleteKey 时按注册清单
+//     清理 owner/App 命名空间，再删除 Vault Key 材料。
 //   - 硬切换 005：active key 模型收窄为"single 模式唯一一把 ready key"；
 //     `activePublicKeyHex` 缺省即"无 active key"。不再有 `mode: "all"`、
 //     `setAll()`、所有模式持久化。`autoPickActive` 只在有 ready key 时返回具体
@@ -17,12 +13,12 @@
 //     `listKeys().length > 0 && !activePublicKeyHex` 进入"修复/管理态"阻断。
 //   - 硬切换 004：active 切换、Vault 锁定、删除 key 三条路径统一收口到同
 //     一条 namespace quiesce 语义——cancelByKey（await 旧实例退出）再
-//     关闭 openDbs。"后台任务已收到 abort"不等于"已退出"；必须 await 到
+//     关闭 openStores。"后台任务已收到 abort"不等于"已退出"；必须 await 到
 //     旧实例真正结束，否则会出现 history-backfill 还在跑却已经撞上
-//     `database connection is closing` 的竞态。该语义由内部 helper
+//     `repository connection is closing` 的竞态。该语义由内部 helper
 //     `quiesceNamespace(publicKeyHex)` 提供；setActive / prepareDeleteKey
 //     / onVaultLocked 都必须复用这一条路径，不能在调用方各自手写。
-//   - 硬切换 001 收口：平台身份根字段统一为 publicKeyHex；DB name、
+//   - 硬切换 001 收口：平台身份根字段统一为 publicKeyHex；K-V name、
 //     事件 payload、active state、localStorage 键全部按 publicKeyHex
 //     走。旧 `publicKeyHash` 平台身份字段已从 contract / service 删
 //     除；不再保留兼容 alias。
@@ -39,8 +35,8 @@ import type {
   ActiveKeyState,
   BackgroundService,
   KeyIdentity,
-  KeyScopedStorageHandle,
-  KeyScopedStorageOpenInput,
+  OwnerAppStore,
+  KeyValueStore,
   KeyspaceService,
   PluginLogger
 } from "@keymaster/contracts";
@@ -50,20 +46,11 @@ import {
 } from "@keymaster/contracts";
 import type { VaultService } from "@keymaster/contracts";
 import { KEYSPACE_SERVICE_CAPABILITY } from "@keymaster/contracts";
-
-const ACTIVE_KEY_STORAGE_KEY = "keyspace.activePublicKeyHex";
-const SELECTED_KEY_STORAGE_KEY = "keyspace.selectedPublicKeyHex";
-/**
- * 旧 localStorage 键（activePublicKeyHash）——硬切换 001 收口后不再
- * 读取,只允许在 unlock / bootstrap 阶段 best-effort 清理一次,避免
- * 旧 keyspace active 状态被错误继承。
- */
-const LEGACY_ACTIVE_KEY_STORAGE_KEY = "keyspace.activePublicKeyHash";
-const ALL_KEYS_DB_PREFIX = "keymaster.key.";
+import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 
 // 硬切换 002 收尾：publicKeyHex 是 key 域唯一真值，被用作 active state、
-// namespace DB 名、事件 payload。setActive / activateCreatedKey / deleteKey /
-// openKeyStorage 在拿到 publicKeyHex 时必须先做形状校验——禁止把非 hex 串、
+// namespace K-V 名、事件 payload。setActive / activateCreatedKey / deleteKey /
+// openOwnerAppStore 在拿到 publicKeyHex 时必须先做形状校验——禁止把非 hex 串、
 // 空串、长度离谱的字符串写入 active state 或 namespace 名（防垃圾值泄漏到
 // 后续签名 / 持久化 / 文件名）。
 //
@@ -100,9 +87,21 @@ export interface KeyspaceServiceDeps {
    * 不传时不记日志。
    */
   logger?: PluginLogger;
+  /** Storage-first 装配的 owner/App K-V 工厂；不提供即禁止业务存储。 */
+  ownerStorageFactory?: (input: { ownerPublicKeyHex: string; applicationStorageId: string; schemaVersion: number }) => Promise<OwnerAppStore>;
+  /** 清理一个 owner 根下的全部 App 命名空间；删除 Key 时由平台实现。 */
+  ownerStorageDeleter?: (input: { ownerPublicKeyHex: string }) => Promise<void>;
+  /** Host/Coordinator 内部的绑定权威。 */
+  storageAuthority?: StorageBindingAuthority;
+  /** 平台 K-V 工厂；仅 Host/平台插件装配层使用。 */
+  platformStorageFactory?: (input: { applicationStorageId: string; schemaVersion: number }) => Promise<KeyValueStore>;
+  /** 平台 session K-V；用于保存 selected publicKeyHex，不再使用 localStorage。 */
+  platformStateStore?: KeyValueStore;
 }
 
 export interface KeyspaceHandle extends KeyspaceService {
+  /** Host/Coordinator 内部的存储绑定权威；不属于公开 KeyspaceService。 */
+  storageAuthority?: StorageBindingAuthority;
   /** 在 Vault unlock 后调用，触发 ready 边界收敛（已无 identity backfill）。 */
   onVaultUnlocked(): Promise<void>;
   /**
@@ -110,11 +109,11 @@ export interface KeyspaceHandle extends KeyspaceService {
    *
    * 语义：
    *   1) 若有 active key，先 await quiesceNamespace(active) 把它
-   *      的后台任务停稳、DB handle 关掉；
-   *   2) 再关闭可能残留的其它 openDbs；
+   *      的后台任务停稳、K-V handle 关掉；
+   *   2) 再关闭可能残留的其它 openStores；
    *   3) 再 setActiveInternal({}) 清空 active。
    *
-   * resolve 时表示"当前 namespace 的后台任务已退出，相关 DB handle
+   * resolve 时表示"当前 namespace 的后台任务已退出，相关 K-V handle
    * 已关闭"。这是 `vault.locked` 事件发布之前必须先 await 的屏障：
    * 业务插件订阅 vault.locked 不再承担"正确性依赖于我先 cancel"
    * 的职责，顺序由 keyspace 统一掌控。错误必须冒泡；调用方不允许
@@ -128,7 +127,7 @@ export interface KeyspaceHandle extends KeyspaceService {
    * await quiesceNamespace(prev.active) 把旧 key 的后台任务停稳、再
    * 切到新 key active；只有 await 走完才表示"新 key 已真正成为
    * active"。如果同步调用且不 await，等同于把旧 key 的 history-backfill
-   * 留在内存里继续跑、和新 active 的 namespace DB 切换撞在一起。
+   * 留在内存里继续跑、和新 active 的 namespace K-V 切换撞在一起。
    */
   notifyKeyCreated(identity: KeyIdentity): Promise<void>;
   /**
@@ -141,8 +140,8 @@ export interface KeyspaceHandle extends KeyspaceService {
    *
    * 硬切换 004 收尾：返回 Promise<void>，内部必须先 await quiesceNamespace
    * 旧 active 的 namespace（cancelByKey + await 旧 task 退出 + 关闭
-   * openDbs），再 setActiveInternal。漏 await 等同于让 history-backfill
-   * 在旧 key 仍在跑的情况下被新 active 顶走，复现 `database connection is
+   * openStores），再 setActiveInternal。漏 await 等同于让 history-backfill
+   * 在旧 key 仍在跑的情况下被新 active 顶走，复现 `repository connection is
    * closing` 的同类竞态。
    */
   activateCreatedKey(identity: KeyIdentity): Promise<void>;
@@ -157,23 +156,17 @@ export interface KeyspaceHandle extends KeyspaceService {
   setInitializing(initializing: boolean): void;
 }
 
-interface RegisteredStorage {
-  pluginId: string;
-  storageId: string;
-}
-
-interface OpenDbEntry {
-  handle: KeyScopedStorageHandle;
-  /** 业务插件可以多次 openKeyStorage 拿到不同 IDBDatabase；这里缓存避免重复打开。 */
+interface OpenStoreEntry {
+  handle: KeyValueStore;
+  /** 业务插件可以重复取得同一 owner/App K-V 句柄。 */
   refCount: number;
 }
 
 export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle {
   const activeListeners = new Set<(s: ActiveKeyState) => void>();
   const initListeners = new Set<(initializing: boolean) => void>();
-  const registeredStorages: RegisteredStorage[] = [];
-  /** 当前打开的 namespace db：key = `${publicKeyHex}::${dbName}`，用于共享与统一关闭。 */
-  const openDbs = new Map<string, OpenDbEntry>();
+  /** 当前打开的 owner namespace repository：key = `${publicKeyHex}::${dbName}`，用于共享与统一关闭。 */
+  const openStores = new Map<string, OpenStoreEntry>();
   // 硬切换 008：保存 attach 进来的 background service 引用。
   // 初始可以是构造时直接传入的 deps.background（测试场景），也可以由
   // attachBackgroundService 在 background 插件装载后注入。
@@ -185,46 +178,70 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   let active: ActiveKeyState = {};
   let activeIdentity: KeyIdentity | undefined;
   let initializing = false;
+  let selectedKeyHex: string | undefined;
+
+  /**
+   * 本地测试/单进程装配使用的内部存储权威。
+   *
+   * 生产页面由 Coordinator 提供同名内部能力；这里仅保留工厂适配，
+   * 不把 owner/App 存储入口挂到公开 KeyspaceService 上。
+   */
+  const fallbackStorageAuthority: StorageBindingAuthority | undefined = deps.storageAuthority ?? (
+    deps.ownerStorageFactory || deps.platformStorageFactory || deps.ownerStorageDeleter
+      ? {
+          async openOwnerAppStore({ pluginId, declaration }) {
+            void pluginId;
+            if (declaration.scope !== "key") throw new Error("Owner storage must use key scope");
+            const ownerPublicKeyHex = active.activePublicKeyHex;
+            if (!ownerPublicKeyHex) throw new Error("Key storage is not ready");
+            assertValidPublicKeyHex(ownerPublicKeyHex, "openOwnerAppStore");
+            if (!deps.ownerStorageFactory) throw new Error("Owner storage has not been bootstrapped");
+            const cacheKey = `${ownerPublicKeyHex}::${declaration.applicationStorageId}`;
+            const existing = openStores.get(cacheKey);
+            if (existing) {
+              existing.refCount += 1;
+              return existing.handle as OwnerAppStore;
+            }
+            const handle = await deps.ownerStorageFactory({
+              ownerPublicKeyHex,
+              applicationStorageId: declaration.applicationStorageId,
+              schemaVersion: declaration.schemaVersion
+            });
+            const trackedHandle = new Proxy(handle, {
+              get(target, property, receiver) {
+                if (property !== "close") return Reflect.get(target, property, receiver);
+                return () => {
+                  const tracked = openStores.get(cacheKey);
+                  if (tracked?.handle === trackedHandle) openStores.delete(cacheKey);
+                  target.close();
+                };
+              }
+            });
+            openStores.set(cacheKey, { handle: trackedHandle, refCount: 1 });
+            return trackedHandle;
+          },
+          async openPlatformStore(input) {
+            if (!deps.platformStorageFactory) throw new Error("Platform storage has not been bootstrapped");
+            return deps.platformStorageFactory(input);
+          },
+          async deleteOwnerStorage(input) {
+            if (!deps.ownerStorageDeleter) throw new Error("Owner storage deletion has not been bootstrapped");
+            await deps.ownerStorageDeleter(input);
+          }
+        }
+      : undefined
+  );
 
   function persistActive(state: ActiveKeyState) {
-    try {
-      if (typeof localStorage === "undefined") return;
-      if (state.activePublicKeyHex) {
-        localStorage.setItem(ACTIVE_KEY_STORAGE_KEY, state.activePublicKeyHex);
-        localStorage.setItem(SELECTED_KEY_STORAGE_KEY, state.activePublicKeyHex);
-      } else {
-        localStorage.removeItem(ACTIVE_KEY_STORAGE_KEY);
-      }
-    } catch {
-      // localStorage 不可用时静默退化。
-    }
+    if (!state.activePublicKeyHex) return;
+    selectedKeyHex = state.activePublicKeyHex;
+    void deps.platformStateStore?.put("selectedPublicKeyHex", state.activePublicKeyHex, { partition: "keyspace" }).catch((error) => {
+      console.warn("[keyspace] failed to persist selected key", error);
+    });
   }
 
   function readSelectedKeyHex(): string | undefined {
-    try { return typeof localStorage === "undefined" ? undefined : (localStorage.getItem(SELECTED_KEY_STORAGE_KEY) ?? undefined); }
-    catch { return undefined; }
-  }
-
-  function readPersistedActiveHex(): string | undefined {
-    try {
-      if (typeof localStorage === "undefined") return undefined;
-      return localStorage.getItem(ACTIVE_KEY_STORAGE_KEY) ?? undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * 硬切换 001 收口：best-effort 清理旧 localStorage 键。旧
-   * `keyspace.activePublicKeyHash` 不再被读取,这里只删一次避免脏数据。
-   */
-  function purgeLegacyActiveKeyStorage(): void {
-    try {
-      if (typeof localStorage === "undefined") return;
-      localStorage.removeItem(LEGACY_ACTIVE_KEY_STORAGE_KEY);
-    } catch {
-      // 静默
-    }
+    return selectedKeyHex;
   }
 
   function setActiveInternal(next: ActiveKeyState, identity?: KeyIdentity) {
@@ -307,10 +324,6 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     return listManageableKeys();
   }
 
-  function dbNameFor(publicKeyHex: string, pluginId: string, storageId: string): string {
-    return `${ALL_KEYS_DB_PREFIX}${publicKeyHex}.plugin.${pluginId}.${storageId}`;
-  }
-
   /**
    * 自动选 active key：
    *   - 已持久化的 hex 仍存在 -> 用持久化 hex。
@@ -322,7 +335,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     if (ready.length === 0) {
       return undefined;
     }
-    const persistedHex = readPersistedActiveHex();
+    const persistedHex = readSelectedKeyHex();
     if (persistedHex) {
       const found = ready.find((k) => k.publicKeyHex === persistedHex);
       if (found) return found;
@@ -333,23 +346,22 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   }
 
   /**
-   * 关闭指定 key 的 namespace db：业务插件可能缓存了旧 namespace 的
-   * IDBDatabase，必须关闭后由它们重新 openKeyStorage 拿到新 namespace。
-   * 设计缘由：active key 切换不应该把别的 key 的打开的 db 也关闭；只关闭当前
-   * 即将离开的 active key 的 db。但因为 openKeyStorage 是按需打开的，未必已开，
-   * 所以这里只关闭"旧 active"的 db。
+   * 关闭指定 key 的 namespace K-V 句柄；切换后旧句柄必须 fail closed。
+   * 设计缘由：active key 切换不应该把别的 key 的打开 repository 也关闭；只关闭当前
+   * 即将离开的 active key 的 repository。但因为 openOwnerAppStore 是按需打开的，未必已开，
+   * 所以这里只关闭"旧 active"的 repository。
    */
   function closeNamespaceHandles(publicKeyHex: string | undefined) {
     if (!publicKeyHex) return;
     const prefix = `${publicKeyHex}::`;
-    for (const [key, entry] of openDbs.entries()) {
+    for (const [key, entry] of openStores.entries()) {
       if (!key.startsWith(prefix)) continue;
       try {
         entry.handle.close();
       } catch {
         // 静默
       }
-      openDbs.delete(key);
+      openStores.delete(key);
     }
   }
 
@@ -357,7 +369,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    * 硬切换 004：namespace quiesce——"停任务并等待退出再关 handle"的
    * 单一实现来源。setActive / prepareDeleteKey / onVaultLocked 必须
    * 共用这条路径，不能在调用方各自手写；只要一条路径忘记 await，
-   * 就会重新长回 history-backfill 撞上 `database connection is closing`
+   * 就会重新长回 history-backfill 撞上 `repository connection is closing`
    * 的同类 bug。
    *
    * 顺序（不可重排）：
@@ -365,7 +377,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
    *      background 内部 cancelByKey 已经会 t.ctl?.abort() 再
    *      `await awaitIdle(t)` 等旧实例真正结束；这一句 resolve 时
    *      表示该 key 的 task 旧实例已退出。
-   *   2) 关闭该 key 的 openDbs。
+   *   2) 关闭该 key 的 openStores。
    *
    * 没有 attachedBackground 时按"最小语义退化"——直接关 handle。这
    * 表示"当前没有可等待的后台平台接入"，不新建第二套本地任务状态机。
@@ -402,18 +414,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
   async function deleteKeyRecord(publicKeyHex: string) {
     // 1) prepare：cancel background + 关闭 handle + emit key.deleting。
     await service.prepareDeleteKey(publicKeyHex);
-    // 2) 删除 namespace DB：必须全部成功才能继续删 Vault 私钥。
-    for (const reg of registeredStorages) {
-      const name = dbNameFor(publicKeyHex, reg.pluginId, reg.storageId);
-      try {
-        await deleteDatabaseWithTimeout(name, 3000);
-      } catch (err) {
-        // 阻止 Vault 私钥删除：必须先解决 blocked / timeout 才能继续。
-        throw new Error(
-          `Failed to delete namespace DB "${name}": ${err instanceof Error ? err.message : String(err)}`
-        );
-      }
-    }
+    // 2) 删除 namespace K-V：必须全部成功才能继续删 Vault 私钥。
+    const authority = deps.storageAuthority ?? fallbackStorageAuthority;
+    // 本地单进程装配可能没有平台存储；生产 Coordinator 一定注入权威，
+    // 因此不会绕过 owner 根清理。没有注入时保持旧的无业务存储测试语义。
+    if (authority) await authority.deleteOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
     // 3) 删 Vault 私钥材料。deleteKeyMaterial 不发事件；失败时 namespace
     //    已经被删，必须通知调用方并保留 tombstone。
     try {
@@ -448,16 +453,16 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     //     调用方知道。
     const remainingAll = await deps.vault.listKeys();
     if (remainingAll.length === 0) {
-      try { localStorage.removeItem(SELECTED_KEY_STORAGE_KEY); } catch { /* noop */ }
+      selectedKeyHex = undefined;
+      await deps.platformStateStore?.delete("selectedPublicKeyHex", { partition: "keyspace" }).catch(() => undefined);
       await deps.vault.finalizeEmptyVaultAfterLastKeyDeletion();
       return;
     }
     const persistedSelected = readSelectedKeyHex();
     if (persistedSelected === publicKeyHex || !remainingAll.some((key) => key.publicKeyHex === persistedSelected)) {
       const nextSelected = remainingAll[0]?.publicKeyHex;
-      try {
-        if (nextSelected) localStorage.setItem(SELECTED_KEY_STORAGE_KEY, nextSelected);
-      } catch { /* noop */ }
+      selectedKeyHex = nextSelected;
+      if (nextSelected) await deps.platformStateStore?.put("selectedPublicKeyHex", nextSelected, { partition: "keyspace" });
     }
     if (active.activePublicKeyHex === publicKeyHex) {
       const next = await autoPickActive();
@@ -497,7 +502,7 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
         return;
       }
       // 顺序收紧：先 quiesce 旧 active 的 namespace（await 旧 task
-      // 退出 + 关闭其 openDbs），再切 active。
+      // 退出 + 关闭其 openStores），再切 active。
       //
       // 设计缘由：active 一旦先变，background task 的 keyScope 延迟
       // 求值会指向新 key，此时再 cancelByKey(oldKey) 已无法正确匹配
@@ -535,84 +540,10 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       handler(active);
       return () => activeListeners.delete(handler);
     },
-    async openKeyStorage(input: KeyScopedStorageOpenInput) {
-      assertValidPublicKeyHex(input.publicKeyHex, "openKeyStorage");
-      const cacheKey = `${input.publicKeyHex}::${input.pluginId}::${input.storageId}`;
-      const existing = openDbs.get(cacheKey);
-      if (existing) {
-        existing.refCount += 1;
-        return existing.handle;
-      }
-      const name = dbNameFor(input.publicKeyHex, input.pluginId, input.storageId);
-      const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const req = indexedDB.open(name, input.version);
-        req.onupgradeneeded = (event) => {
-          const ev = event as IDBVersionChangeEvent;
-          input.upgrade(req.result, ev.oldVersion, ev.newVersion ?? null, req.transaction ?? undefined);
-        };
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-        req.onblocked = () => reject(new Error("Key storage open blocked"));
-      });
-      let closed = false;
-      let handle: KeyScopedStorageHandle;
-      const removeTracking = () => {
-        const tracked = openDbs.get(cacheKey);
-        if (tracked?.handle === handle) openDbs.delete(cacheKey);
-      };
-      const onVersionChange = () => {
-        if (closed) return;
-        closed = true;
-        removeTracking();
-        try {
-          db.close();
-        } catch {
-          // 静默
-        }
-      };
-      db.addEventListener("versionchange", onVersionChange);
-      handle = {
-        db,
-        name,
-        close() {
-          if (closed) return;
-          closed = true;
-          db.removeEventListener("versionchange", onVersionChange);
-          try {
-            db.close();
-          } catch {
-            // 静默
-          }
-          removeTracking();
-        }
-      };
-      openDbs.set(cacheKey, { handle, refCount: 1 });
-      // 硬门禁：namespace DB 只对当前 active key 开放。
-      //   - `active.activePublicKeyHex` 必须非空：未激活任何 key 时一律拒绝，
-      //     防止「无 active + 知道 hex 就能开库」被滥用。
-      //   - 必须严格等于 `input.publicKeyHex`：session / repair / 跨 key 复用
-      //     等所有「拿非 active 的 hex 来开库」场景必须 fail-closed，由调用方
-      //     在上层（protocol / p2pkh）通过合法路径（让 active 切到目标 hex）
-      //     进入。修复特殊情况请走专门的内部恢复入口，不要把这条放宽。
-      if (active.activePublicKeyHex !== input.publicKeyHex) {
-        handle.close();
-        throw new Error("Key storage is not ready");
-      }
-      return handle;
-    },
-    registerPluginStorage(input) {
-      if (registeredStorages.some((r) => r.pluginId === input.pluginId && r.storageId === input.storageId)) {
-        return;
-      }
-      registeredStorages.push({ pluginId: input.pluginId, storageId: input.storageId });
-    },
-    listPluginStorages() {
-      return [...registeredStorages];
-    },
     async prepareDeleteKey(publicKeyHex) {
       // 硬切换 004 收尾 + 硬切换 008：严格顺序 + fail-closed。
       //   1) quiesceNamespace —— cancelByKey（await 旧 task 退出）+ 关闭
-      //      该 key 的 openDbs。失败必须冒泡以阻止后续 namespace DB /
+      //      该 key 的 openStores。失败必须冒泡以阻止后续 namespace store /
       //      Vault 私钥删除。
       //   2) emit key.deleting（emit 不可 await，作为日志/保险通知）
       //
@@ -649,9 +580,8 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       return () => initListeners.delete(handler);
     },
     async onVaultUnlocked() {
-      // 硬切换 001 收口：解锁后先 best-effort 清理旧 localStorage
-      // activePublicKeyHash 键,避免脏数据被错误继承。
-      purgeLegacyActiveKeyStorage();
+      const persisted = await deps.platformStateStore?.get<string>("selectedPublicKeyHex", { partition: "keyspace" });
+      selectedKeyHex = persisted?.value;
       // 解锁后 vaultService 已一次性跑完 AAD 升级；canonical
       // store 即 ready 集合。keyspace 只需选 active。
       const ready = await listActiveCandidates();
@@ -671,24 +601,24 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       // 硬切换 004：锁屏清理屏障。顺序：
       //   1) 若当前有 active key，先 await quiesceNamespace(active)
       //      —— cancelByKey（await 旧 task 退出）+ 关闭该 namespace 的
-      //      openDbs；
-      //   2) 关闭可能残留的其它 openDbs（其它 hex 的）；
+      //      openStores；
+      //   2) 关闭可能残留的其它 openStores（其它 hex 的）；
       //   3) setActiveInternal({})。
       //
-      // resolve 时表示"当前 active key 的后台任务已退出、相关 DB handle
+      // resolve 时表示"当前 active key 的后台任务已退出、相关 K-V handle
       // 已关闭"。vaultService.lock() 必须先 await 本方法再 publish
       // `vault.locked`——业务插件订阅 vault.locked 不再承担"我必须先
       // cancel 才安全"的职责。
       await quiesceNamespace(active.activePublicKeyHex);
-      // 步骤 2：清理其它残留 namespace db。
-      for (const [, entry] of [...openDbs.entries()]) {
+      // 步骤 2：清理其它残留 owner namespace repository。
+      for (const [, entry] of [...openStores.entries()]) {
         try {
           entry.handle.close();
         } catch {
           // 静默
         }
       }
-      openDbs.clear();
+      openStores.clear();
       setActiveInternal({});
     },
     async notifyKeyCreated(identity) {
@@ -699,9 +629,9 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       // 需要再去顶栏手动切一次，违反最小惊讶原则。
       //
       // 实现委托给 activateCreatedKey 统一收口；调用方必须 await 本方法，
-      // 直到旧 key 的后台任务退出 + 旧 namespace DB 关掉之后，新 key
+      // 直到旧 key 的后台任务退出 + 旧 namespace K-V repository 关闭之后，新 key
       // 才成为 active——否则旧 key 的 history-backfill 仍在跑却撞上
-      // 旧 namespace DB 被关闭，与手动 setActive 的竞态同源。
+      // 旧 namespace K-V 被关闭，与手动 setActive 的竞态同源。
       //
       // 如果调用方需要更精细的语义（例如批量导入时只激活最后一把），
       // 由调用方直接调 activateCreatedKey 而不是 notifyKeyCreated。
@@ -716,9 +646,9 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
       const prev = active;
       // 硬切换 004 收尾：与 setActive(B) 共用同一条 namespace quiesce
       // 语义——先 await cancelByKey + await 旧 task 退出 + 关闭
-      // openDbs，再 setActiveInternal。新 key 此时尚不存在，没有 task
+      // openStores，再 setActiveInternal。新 key 此时尚不存在，没有 task
       // 跑在它身上；旧的 recent-sync / history-backfill 必须真正退出
-      // 后才能被"踢出"旧 namespace，否则会撞上 `database connection
+      // 后才能被"踢出"旧 namespace，否则会撞上 `repository connection
       // is closing`。
       await quiesceNamespace(prev.activePublicKeyHex);
       setActiveInternal({ activePublicKeyHex: identity.publicKeyHex }, identity);
@@ -729,41 +659,11 @@ export function createKeyspaceService(deps: KeyspaceServiceDeps): KeyspaceHandle
     attachBackgroundService(service) {
       // 硬切换 008：background 插件在 setup 后调用。幂等。
       attachedBackground = service;
-    }
+    },
+    storageAuthority: fallbackStorageAuthority
   };
 
   return service;
-}
-
-/**
- * indexedDB.deleteDatabase 在被其他标签页/同标签页打开的 db 持有时会进入 onblocked。
- * onblocked 不是失败：请求仍会在连接关闭后继续并最终发出 success/error。
- * 因此这里始终等待终态，超时只做诊断，不能提前 reject 后让私钥删除继续。
- */
-function deleteDatabaseWithTimeout(name: string, timeoutMs: number): Promise<void> {
-  return new Promise<void>((resolve, reject) => {
-    let settled = false;
-    const timer = setTimeout(() => {
-      if (!settled) console.warn(`[keyspace] deleteDatabase still blocked after ${timeoutMs}ms`, name);
-    }, timeoutMs);
-    const req = indexedDB.deleteDatabase(name);
-    req.onsuccess = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    req.onerror = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      reject(req.error ?? new Error("deleteDatabase failed"));
-    };
-    req.onblocked = () => {
-      // Keep waiting. IDB has no abort for deleteDatabase; rejecting here would
-      // let callers delete key material while this request may still succeed.
-    };
-  });
 }
 
 // 抑制未使用告警：保留 capability key 字面量与 VaultService 类型供外部断言使用。

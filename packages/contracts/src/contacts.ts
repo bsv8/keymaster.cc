@@ -4,7 +4,7 @@
 // 硬切换 2026-07-09 002：
 //   - 联系人 canonical 身份改为 publicKeyHex；
 //   - 不再使用 address 作为联系人主键语义；
-//   - 联系人归属由 key-scoped DB 表达，不再在联系人行内存 owner 字段；
+//   - 联系人归属由 key-scoped K-V 表达，不再在联系人行内存 owner 字段；
 //   - 不做旧 address -> publicKeyHex 猜测迁移。
 
 import type { I18nText } from "./i18n.js";
@@ -96,7 +96,7 @@ export interface ContactsService {
   probePresence?(input?: { signal?: AbortSignal }): Promise<void>;
   /** 清除当前 owner 的内存在线证据，并通知 presence resource。 */
   resetPresence?(): void;
-  /** 读取当前 owner 的在线状态快照；只读内存证据与本地联系人 DB，不触发网络。 */
+  /** 读取当前 owner 的在线状态快照；只读内存证据与本地联系人 K-V，不触发网络。 */
   getPresenceSnapshot?(): Promise<ContactPresenceMap>;
   /** 硬切换 001：宿主 teardown 时调用。幂等。 */
   dispose?(): void;

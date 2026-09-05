@@ -15,12 +15,11 @@ import {
   createVaultService as createProductionVaultService,
   KeyPersistedButActivationFailedError
 } from "./vaultService.js";
-import { bytesToHex, deriveKey, encryptBytes, encryptVerifier } from "./crypto.js";
+import { encryptVerifier } from "./crypto.js";
 import { createKeyspaceService } from "./keyspaceService.js";
 import { deriveKeyIdentity } from "./keyIdentity.js";
-import { publicKeyHexToP2pkhAddress } from "./p2pkhAddress.js";
 import { __testCreateSessionCryptoRequestHandler } from "./sessionCryptoWorker.js";
-import { disposeVaultDb, vaultDb } from "./vaultDb.js";
+import { disposeVaultKeyRepository, vaultKeyRepository } from "./storage/vaultKeyRepository.js";
 
 const TEST_PRIV = "0000000000000000000000000000000000000000000000000000000000000001";
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
@@ -142,66 +141,9 @@ function hexToBytes(hex: string): Uint8Array {
   return out;
 }
 
-async function resetDb(): Promise<void> {
-  // 关键：先关闭 db 连接，否则 delete 会被阻塞。
-  disposeVaultDb();
-  // `disposeVaultDb()` closes the cached connection in a promise microtask;
-  // resolving immediately from `onblocked` races the next test's open and can
-  // leave stale key records visible. Retry after the close settles instead.
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const deleted = await new Promise<boolean>((resolve) => {
-      const req = indexedDB.deleteDatabase("vault");
-      req.onsuccess = () => resolve(true);
-      req.onerror = () => resolve(true);
-      req.onblocked = () => resolve(false);
-    });
-    if (deleted) return;
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-}
-
-async function seedLegacyV1Vault(input: {
-  password: string;
-  privateKeyHex: string;
-  label: string;
-  binaryEncoding?: "hex" | "base64";
-}): Promise<string> {
-  const encode = (bytes: Uint8Array): string =>
-    input.binaryEncoding === "base64"
-      ? btoa(String.fromCharCode(...bytes))
-      : bytesToHex(bytes);
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await deriveKey(input.password, salt);
-  // Historical v1 vaults used no AAD and the `vault:v1` marker. Keep this
-  // helper faithful to on-disk data so compatibility tests exercise both the
-  // verifier and key-record migration paths.
-  const verifier = await encryptBytes(key, new TextEncoder().encode("vault:v1"));
-  const meta = {
-    id: "singleton" as const,
-    saltB64: encode(salt),
-    verifierSaltB64: encode(verifier.salt),
-    verifierIvB64: encode(verifier.iv),
-    verifierCipherB64: encode(verifier.ciphertext),
-    createdAt: new Date().toISOString()
-  };
-  const identity = deriveKeyIdentity(hexToBytes(input.privateKeyHex));
-  const payload = new TextEncoder().encode(JSON.stringify({ hex: input.privateKeyHex }));
-  const blob = await encryptBytes(key, payload);
-  const record = {
-    publicKeyHex: identity.publicKeyHex,
-    label: input.label,
-    address: publicKeyHexToP2pkhAddress(identity.publicKeyHex, "test"),
-    network: "test" as const,
-    format: "hex",
-    capabilities: ["p2pkh"],
-    createdAt: new Date().toISOString(),
-    cipherSaltB64: encode(blob.salt),
-    cipherIvB64: encode(blob.iv),
-    cipherB64: encode(blob.ciphertext)
-  };
-  await vaultDb.putMeta(meta);
-  await vaultDb.putKey(record);
-  return identity.publicKeyHex;
+async function resetRepository(): Promise<void> {
+  // Vault 测试使用统一 K-V 夹具；每个用例重新创建 keys namespace。
+  disposeVaultKeyRepository();
 }
 
 /** 等到 vaultService.bootstrap() 完成、status 落定。 */
@@ -217,21 +159,21 @@ async function waitForStatus(
 }
 
 beforeEach(async () => {
-  await resetDb();
+  await resetRepository();
 });
 
 afterEach(async () => {
-  await resetDb();
+  await resetRepository();
 });
 
 describe("VaultService.importPrivateKey", () => {
-  it("does not retain private material when vaultDb.putKey fails", async () => {
+  it("does not retain private material when vaultKeyRepository.putKey fails", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const publicKeyHex = deriveKeyIdentity(hexToBytes(TEST_PRIV_2)).publicKeyHex;
-    const putKey = vi.spyOn(vaultDb, "putKey").mockRejectedValueOnce(new Error("injected put failure"));
+    const putKey = vi.spyOn(vaultKeyRepository, "putKey").mockRejectedValueOnce(new Error("injected put failure"));
     try {
       await expect(vault.importPrivateKey({
         password: "test-pw",
@@ -240,7 +182,7 @@ describe("VaultService.importPrivateKey", () => {
         format: "hex",
         capabilities: ["p2pkh"]
       })).rejects.toThrow("injected put failure");
-      expect(await vaultDb.getKey(publicKeyHex)).toBeUndefined();
+      expect(await vaultKeyRepository.getKey(publicKeyHex)).toBeUndefined();
       await expect(vault.createActiveKeyCrypto(publicKeyHex)).rejects.toThrow(/Unknown key/i);
     } finally {
       putKey.mockRestore();
@@ -269,8 +211,8 @@ describe("VaultService.importPrivateKey", () => {
     expect(a.publicKeyHex).not.toBe(b.publicKeyHex);
     const list = await vault.listKeys();
     expect(list.map((k) => k.label).sort()).toEqual(["first", "second"]);
-    expect((await vaultDb.getKey(a.publicKeyHex))?.storageVersion).toBe("keyhold-v2");
-    expect((await vaultDb.getKey(b.publicKeyHex))?.storageVersion).toBe("keyhold-v2");
+    expect((await vaultKeyRepository.getKey(a.publicKeyHex))?.storageVersion).toBe("keyhold-v2");
+    expect((await vaultKeyRepository.getKey(b.publicKeyHex))?.storageVersion).toBe("keyhold-v2");
   });
 
   it("emits key.created AFTER keyspace switches active key (硬切换 008 收尾)", async () => {
@@ -792,20 +734,6 @@ describe("VaultService.createAppViewSession (Worker 生命周期)", () => {
   });
 });
 
-describe("VaultService legacy records (KeyHold hard switch)", () => {
-  it("keeps legacy records opaque and rejects unlock/crypto", async () => {
-    const { messageBus: events } = makeMessageBus();
-    const vault = createVaultService({ messageBus: events });
-    await waitForStatus(vault, "uninitialized");
-    await vault.createVault("test-pw");
-    const publicKeyHex = deriveKeyIdentity(hexToBytes(TEST_PRIV)).publicKeyHex;
-    await vaultDb.putKey({ publicKeyHex, label: "legacy", address: "", network: "main", format: "legacy", capabilities: [], createdAt: new Date().toISOString(), cipherSaltB64: "00", cipherIvB64: "00", cipherB64: "00" });
-    await vault.lock();
-    await expect(vault.unlock("test-pw")).rejects.toThrow("Unsupported key storage version");
-    await expect(vault.exportKeyBackup(publicKeyHex)).rejects.toThrow("Unsupported key storage version");
-  });
-});
-
 describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删空收尾)", () => {
   // 关键不变量：
   //   - 仅在 vault_keys 为空时 resolve；否则 fail closed。
@@ -826,7 +754,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     await vault.finalizeEmptyVaultAfterLastKeyDeletion();
     expect(vault.status()).toBe("uninitialized");
     // vault_meta 已删。
-    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
     // 触发了一次 vault.locked（清理链路），且这一发生在 finalize 期间。
     expect(records.some((r) => r.type === "vault.locked")).toBe(true);
     // 新实例 bootstrap 应读到 uninitialized。
@@ -872,7 +800,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     );
     // 状态不变，meta 仍在。
     expect(vault.status()).toBe("unlocked");
-    expect(await vaultDb.getMeta()).toBeDefined();
+    expect(await vaultKeyRepository.getMeta()).toBeDefined();
     const list = await vault.listKeys();
     expect(list).toHaveLength(1);
   });
@@ -901,8 +829,8 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     await expect(vault.createActiveKeyCrypto(ref.publicKeyHex)).rejects.toBeTruthy();
   });
 
-  it("collapses status to uninitialized even when vaultDb.deleteMeta throws (no half-state)", async () => {
-    // 高优先级修复：finalize 内部 `await vaultDb.deleteMeta()` 抛错时，
+  it("collapses status to uninitialized even when vaultKeyRepository.deleteMeta throws (no half-state)", async () => {
+    // 高优先级修复：finalize 内部 `await vaultKeyRepository.deleteMeta()` 抛错时，
     // 状态机必须仍然收敛到 uninitialized——否则会出现"in-memory 已清空
     // 但 status 仍 unlocked"的错位态：App 不会切回欢迎页、但任何
     // 后续 withPrivateKey / sign 都会撞上 "Vault is locked"。错误仍
@@ -916,7 +844,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
 
     // 用 spy 让 deleteMeta 抛错——这是 deleteMeta 失败的最直接复现。
     const deleteMetaSpy = vi
-      .spyOn(vaultDb, "deleteMeta")
+      .spyOn(vaultKeyRepository, "deleteMeta")
       .mockImplementation(async () => {
         throw new Error("simulated deleteMeta failure");
       });
@@ -938,10 +866,10 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
 
     // 把 spy 还原后再调一次 finalize（这次 deleteMeta 走真实路径）：
     // meta 此时确实在 DB 里，需要把"meta 残留"清掉，避免污染后续测试。
-    expect(await vaultDb.getMeta()).toBeDefined();
+    expect(await vaultKeyRepository.getMeta()).toBeDefined();
     await vault.finalizeEmptyVaultAfterLastKeyDeletion();
     expect(vault.status()).toBe("uninitialized");
-    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
   });
 
   it("vault.locked is still emitted before deleteMeta fails, so session-cleanup listeners get the signal", async () => {
@@ -953,7 +881,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     await waitForStatus(vault, "uninitialized");
     await vault.createVault("test-pw");
     const deleteMetaSpy = vi
-      .spyOn(vaultDb, "deleteMeta")
+      .spyOn(vaultKeyRepository, "deleteMeta")
       .mockImplementation(async () => {
         throw new Error("simulated deleteMeta failure");
       });
@@ -965,7 +893,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
       deleteMetaSpy.mockRestore();
     }
     // 清掉残留 meta，避免污染后续测试。
-    await vaultDb.deleteMeta();
+    await vaultKeyRepository.deleteMeta();
   });
 
   it("surfaces keyspace.onVaultLocked() failure instead of masking it (硬切换 004 收尾)", async () => {
@@ -1004,7 +932,7 @@ describe("VaultService.finalizeEmptyVaultAfterLastKeyDeletion (硬切换 002 删
     // 不能在 finalize 内部先 catch 后强行删 meta，否则又把"清理
     // 失败"掩盖掉。
     // 清掉残留 meta 避免污染后续测试。
-    await vaultDb.deleteMeta();
+    await vaultKeyRepository.deleteMeta();
   });
 });
 
@@ -1165,17 +1093,10 @@ describe("VaultService.getLifecycleSnapshot", () => {
   });
 });
 
-describe("VaultService vaultDb open sanity", () => {
-  it("creates vault_meta and vault_keys stores", async () => {
-    await vaultDb.listKeys();
-    const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const r = indexedDB.open("vault");
-      r.onsuccess = () => resolve(r.result);
-      r.onerror = () => reject(r.error);
-    });
-    expect(db.objectStoreNames.contains("vault_meta")).toBe(true);
-    expect(db.objectStoreNames.contains("vault_keys")).toBe(true);
-    db.close();
+describe("VaultService vaultKeyRepository open sanity", () => {
+  it("opens the canonical Vault K-V namespace", async () => {
+    await expect(vaultKeyRepository.listKeys()).resolves.toEqual([]);
+    await expect(vaultKeyRepository.getMeta()).resolves.toBeUndefined();
   });
 });
 
@@ -1306,13 +1227,6 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
   });
 
   it("createVault also calls keyspace.onVaultUnlocked before setStatus(unlocked)", async () => {
-    disposeVaultDb();
-    await new Promise<void>((resolve) => {
-      const req = indexedDB.deleteDatabase("vault");
-      req.onsuccess = () => resolve();
-      req.onerror = () => resolve();
-      req.onblocked = () => resolve();
-    });
     const { messageBus: events } = makeMessageBus();
     let onVaultUnlockedCalledAt: VaultStatus = "booting";
     let onVaultUnlockedCalled = false;
@@ -1343,7 +1257,7 @@ describe("VaultService.unlock ready boundary (硬切换 008 收尾)", () => {
     // 但不删 meta，DB 里会有孤儿 Vault；下次 bootstrap 把状态读到
     // "locked"，UI 却按 uninitialized 走，状态机错位。修复后必须把
     // meta 一并 delete。
-    disposeVaultDb();
+    disposeVaultKeyRepository();
     await new Promise<void>((resolve) => {
       const req = indexedDB.deleteDatabase("vault");
       req.onsuccess = () => resolve();
@@ -1710,7 +1624,7 @@ describe("VaultService + KeyspaceService integration: always switch active on ne
     expect(wrapped.key.label).toBe("explode");
     expect(wrapped.key.publicKeyHex).toBeDefined();
     // 3) DB 里 key 已存在。
-    const stored = await vaultDb.getKey(wrapped.key.publicKeyHex);
+    const stored = await vaultKeyRepository.getKey(wrapped.key.publicKeyHex);
     expect(stored).toBeDefined();
     expect(stored?.publicKeyHex).toBe(wrapped.key.publicKeyHex);
     // 4) key.created 事件**不**被发布（active 切换失败）。
@@ -1744,7 +1658,7 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     await vault0.lock();
     // 清掉临时 vault 的内存状态；新 vault bootstrap 后会是 "locked"。
     // 为了让目标 vault 走 uninitialized 入口，需要清空整个 vault DB。
-    disposeVaultDb();
+    disposeVaultKeyRepository();
     await new Promise<void>((resolve) => {
       const req = indexedDB.deleteDatabase("vault");
       req.onsuccess = () => resolve();
@@ -1879,12 +1793,12 @@ describe("VaultService.createVaultWithInitialKey (硬切换 009)", () => {
     const wrapped = thrown as KeyPersistedButActivationFailedError;
     expect(wrapped.key.publicKeyHex).toBeTruthy();
     expect(wrapped.key.publicKeyHex).toBeDefined();
-    // 首 Key 仍在 DB 中——通过 vaultDb 直接查证。
-    const stored = await vaultDb.getKey(wrapped.key.publicKeyHex);
+    // 首 Key 仍在 DB 中——通过 vaultKeyRepository 直接查证。
+    const stored = await vaultKeyRepository.getKey(wrapped.key.publicKeyHex);
     expect(stored).toBeDefined();
     expect(stored?.publicKeyHex).toBe(wrapped.key.publicKeyHex);
     // meta 仍在（不要误回滚）。
-    const meta = await vaultDb.getMeta();
+    const meta = await vaultKeyRepository.getMeta();
     expect(meta).toBeDefined();
     // key.created 事件**不**被发布（与 generateKey 现有语义一致）。
     expect(records.some((r) => r.type === "key.created")).toBe(false);
@@ -2212,7 +2126,7 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     // 再构造目标 vault（持有真实 keyspace）。
     await seedVault.createVault("seed-pw");
     await seedVault.lock();
-    disposeVaultDb();
+    disposeVaultKeyRepository();
     await new Promise<void>((resolve) => {
       const req = indexedDB.deleteDatabase("vault");
       req.onsuccess = () => resolve();
@@ -2372,10 +2286,10 @@ describe("VaultService.createVaultWithImportedKey (硬切换 010)", () => {
     expect(wrapped.key.publicKeyHex).toBeTruthy();
     expect(wrapped.key.publicKeyHex).toBeDefined();
     // 首 Key 仍在 DB 中。
-    const stored = await vaultDb.getKey(wrapped.key.publicKeyHex);
+    const stored = await vaultKeyRepository.getKey(wrapped.key.publicKeyHex);
     expect(stored).toBeDefined();
     // meta 仍在。
-    const meta = await vaultDb.getMeta();
+    const meta = await vaultKeyRepository.getMeta();
     expect(meta).toBeDefined();
     // notice 也被设置。
     const notice = vault.getInitialActivationNotice();

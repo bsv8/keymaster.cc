@@ -5,7 +5,7 @@
 // bsv8 envelope 支持：
 //   - 文件读取后能快速识别为 envelope 时，显示"导入源密码"输入框；
 //   - parse 时把 password 放入 file/text input，parse 成功后立即清空密码输入。
-//   - 密码只活在这一次 parse 闭包里，不进入 KeyImportResult / localStorage / IDB。
+//   - 密码只活在这一次 parse 闭包里，不进入 KeyImportResult / localStorage / 平台 K-V。
 //
 // 硬切换 003：所有展示文案走 i18n；KeyImportResult.summary 是 I18nText，
 // 渲染时通过 host.i18n.text() 解析。

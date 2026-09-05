@@ -13,7 +13,7 @@ import type {
   CoordinatorChannelOperation,
   CoordinatorChannelStateEvent,
   CoordinatorValueResult,
-  SessionCoordinatorClient,
+  ProtocolCoordinatorControl,
 } from "@keymaster/contracts";
 
 function unwrap<T>(result: CoordinatorValueResult<T>, operation: string): T {
@@ -39,7 +39,7 @@ function ownerOperation(
 
 /** 为 protocol Service 创建只允许 Connect caller 的 Channel facade。 */
 export function createConnectChannelRuntime(
-  coordinator: SessionCoordinatorClient
+  coordinator: ProtocolCoordinatorControl
 ): ConnectChannelRuntime {
   return {
     publish: async (caller: ConnectChannelCaller, input: ChannelPublishParams): Promise<ChannelPublishResult> => {

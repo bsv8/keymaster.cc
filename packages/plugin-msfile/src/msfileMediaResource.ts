@@ -1,6 +1,6 @@
 // 播放器 session 的 Resource Store 适配。
 // React 不直接订阅 session；Resource Store 负责失效、重渲染和 active-key
-// 生命周期，session 本身仍只保存在内存中，不进入 DB 或 Coordinator 事件。
+// 生命周期，session 本身仍只保存在内存中，不进入 K-V 或 Coordinator 事件。
 
 import type { MsFileService } from "@keymaster/contracts";
 import type { ResourceRegistry } from "@keymaster/contracts";

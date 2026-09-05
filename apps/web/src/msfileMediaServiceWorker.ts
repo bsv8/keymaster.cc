@@ -2,7 +2,7 @@
 //
 // 这是一个极薄的同源 HTTP 外壳：只有固定的虚拟媒体前缀进入这里，其余请求
 // 完全透传。Vault、私钥、supplier、Seed/Block Hash 和媒体字节只存在页面内的
-// Range Host，绝不写入 Service Worker 的 Cache/IndexedDB/日志。
+// Range Host，绝不写入 Service Worker 的 Cache/platform K-V repository/日志。
 
 const PROTOCOL_VERSION = 1;
 const MEDIA_PREFIX = "/__keymaster/msfile-media/";

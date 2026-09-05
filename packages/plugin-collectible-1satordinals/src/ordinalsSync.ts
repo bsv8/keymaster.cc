@@ -17,20 +17,20 @@ import type {
   WocService,
   VaultService
 } from "@keymaster/contracts";
-import type { OrdinalMintHistoryDb } from "./ordinalMintHistoryDb.js";
+import type { OrdinalMintHistoryRepository } from "./storage/ordinalMintHistoryRepository.js";
 import type { OrdinalsServiceHandle } from "./ordinalsService.js";
 
 export interface CreateOrdinalsSyncTaskOptions {
   service: OrdinalsServiceHandle;
   woc: WocService;
-  historyDb?: OrdinalMintHistoryDb;
+  historyRepository?: OrdinalMintHistoryRepository;
   keyspace: KeyspaceService;
   vault: VaultService;
   assetDataNotifier?: AssetDataNotifier;
 }
 
 export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): BackgroundTaskDefinition {
-  const { service, woc, historyDb, keyspace, vault, assetDataNotifier } = options;
+  const { service, woc, historyRepository, keyspace, vault, assetDataNotifier } = options;
 
   return {
     id: "collectible-1satordinals.sync",
@@ -65,7 +65,7 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
       const startedKeyHex = state.activePublicKeyHex;
 
       await service.sync(ctx.signal);
-      await reconcileHistory(historyDb, woc);
+      await reconcileHistory(historyRepository, woc);
       if (ctx.signal.aborted) return;
       ctx.assertSessionFresh?.();
 
@@ -81,9 +81,9 @@ export function createOrdinalsSyncTask(options: CreateOrdinalsSyncTaskOptions): 
   };
 }
 
-async function reconcileHistory(historyDb: OrdinalMintHistoryDb | undefined, woc: WocService): Promise<void> {
-  if (!historyDb) return;
-  const current = await historyDb.list().catch(() => []);
+async function reconcileHistory(historyRepository: OrdinalMintHistoryRepository | undefined, woc: WocService): Promise<void> {
+  if (!historyRepository) return;
+  const current = await historyRepository.list().catch(() => []);
   if (current.length === 0) return;
   for (const record of current) {
     const canonicalTxid = record.submit?.spend.canonicalTxid;
@@ -93,7 +93,7 @@ async function reconcileHistory(historyDb: OrdinalMintHistoryDb | undefined, woc
     if (observation) {
       const nextStatus = observationToStatus(observation);
       if (record.status === nextStatus && record.submit?.spend.observation === observation) continue;
-      await historyDb.put({
+      await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),
         status: nextStatus,
@@ -110,7 +110,7 @@ async function reconcileHistory(historyDb: OrdinalMintHistoryDb | undefined, woc
     }
     const wasObservedUnconfirmed = record.status === "woc-observed-unconfirmed" || record.submit?.spend.observation === "unconfirmed";
     if (wasObservedUnconfirmed) {
-      await historyDb.put({
+      await historyRepository.put({
         ...record,
         updatedAt: new Date().toISOString(),
         status: "woc-dropped",

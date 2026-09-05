@@ -23,7 +23,7 @@ import type {
 } from "./p2pkhContracts.js";
 import { assetIdToNetwork, makeResourceId } from "./p2pkhContracts.js";
 import { deriveP2pkhAddress } from "./p2pkhSigner.js";
-import { localInputClaimIdFor, type P2pkhDbHandle } from "./p2pkhDb.js";
+import { localInputClaimIdFor, type P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 import {
   buildP2pkhTx,
   calcTxidFromRawTxHex,
@@ -42,16 +42,16 @@ export interface P2pkhTransferServiceDeps {
   assetDataNotifier?: AssetDataNotifier;
   /**
    * 硬切换 002 收尾 + 多 owner 支持：按 `publicKeyHex` 返回该 owner
-   * 的 P2PKH namespace DB。transfer 内部所有读 DB 的入口（prepare
+   * 的 P2PKH namespace K-V。transfer 内部所有读 K-V 的入口（prepare
    * 选币 / submit 取 resource / claim / submission 写入）都传
    * `input.ownerPublicKeyHex` 或 `preview.ownerPublicKeyHex`——
    * 严格按调用方指定的 owner 走 namespace，不再从 active key 推导。
    *
-   * 上层 p2pkhService 的硬门禁（`keyspace.openKeyStorage` 要求
+   * 上层 p2pkhService 的硬门禁（`keyspace.openOwnerAppStore` 要求
    * `active === input.publicKeyHex`）保证 `publicKeyHex` 在调用
    * 时刻等于 active key。
    */
-  getDb: (publicKeyHex: string) => Promise<P2pkhDbHandle>;
+  getStore: (publicKeyHex: string) => Promise<P2pkhStateRepositoryHandle>;
   /** Production ordinary transfers use the Coordinator-selected broadcaster. */
   broadcastPreflight?: (input: { network: "main" | "test" }) => Promise<{ generation: number }>;
   broadcastWithCoordinator?: (input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }) => Promise<CoordinatorValueResult<unknown>>;
@@ -86,20 +86,20 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const validated = validateTransferInput(input);
       const network = assetIdToNetwork(validated.assetId);
       const owner = await resolveOwnerKeyIdentity(deps, input.ownerPublicKeyHex);
-      const db = await deps.getDb(owner.publicKeyHex);
+      const stateRepository = await deps.getStore(owner.publicKeyHex);
       const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
       const resourceId = makeResourceId(network);
-      const resource = await db.getResource(resourceId);
+      const resource = await stateRepository.getResource(resourceId);
       if (!resource) {
         throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
       }
       if (resource.publicKeyHex !== owner.publicKeyHex) {
-        // 防御：namespace DB 的 resource 与 owner 不一致 → 拒绝。
+        // 防御：namespace K-V 的 resource 与 owner 不一致 → 拒绝。
         throw new Error("P2PKH resource publicKeyHex does not match owner");
       }
       validateAddressForNetwork(validated.recipientAddress, network);
 
-      const candidates = await listTransferCandidates({ db, resource, ownerPublicKeyHex: owner.publicKeyHex, network, protectedOutpoints: deps.protectedOutpoints });
+      const candidates = await listTransferCandidates({ stateRepository, resource, ownerPublicKeyHex: owner.publicKeyHex, network, protectedOutpoints: deps.protectedOutpoints });
       if (candidates.length === 0) {
         throw buildAllocationError({
           available: 0,
@@ -200,10 +200,10 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 
     async submit(preview) {
       const owner = await resolveOwnerKeyIdentity(deps, preview.ownerPublicKeyHex);
-      const db = await deps.getDb(owner.publicKeyHex);
+      const stateRepository = await deps.getStore(owner.publicKeyHex);
       const network = preview.network;
       const resourceId = makeResourceId(network);
-      const resource = await db.getResource(resourceId);
+      const resource = await stateRepository.getResource(resourceId);
       if (!resource) {
         throw new Error(`P2PKH resource not found for owner ${owner.publicKeyHex} (${network})`);
       }
@@ -217,7 +217,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         throw new Error("Preview amount is invalid");
       }
 
-      const candidates = await listTransferCandidates({ db, resource, ownerPublicKeyHex: owner.publicKeyHex, network, protectedOutpoints: deps.protectedOutpoints });
+      const candidates = await listTransferCandidates({ stateRepository, resource, ownerPublicKeyHex: owner.publicKeyHex, network, protectedOutpoints: deps.protectedOutpoints });
       const activeCrypto = await resolveActiveKeyCrypto(deps.vault, owner.publicKeyHex);
       const { address: expectedChangeAddress } = await activeCrypto.deriveP2pkhAddress({ publicKeyHex: owner.publicKeyHex, network });
       validateFinalTransferPreview(preview, { candidates, expectedChangeAddress });
@@ -241,7 +241,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
       const localSubmission: P2pkhLocalTransaction = { id: submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: preview.txid, rawTxHex: preview.rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: preview.allocation.selected.map((input) => `${input.txid}:${input.vout}`), ownOutputs: preview.outputs.flatMap((output, vout) => output.address === preview.changeAddress ? [{ vout, value: output.value, scriptHex: p2pkhAddressToScriptHex(output.address, network) }] : []), parentTxids: [...new Set(preview.allocation.selected.map((input) => input.txid))], createdAt: now, updatedAt: now, attempts: [] };
       const claims: P2pkhLocalInputClaim[] = preview.allocation.selected.map((input) => ({ id: localInputClaimIdFor(resource.resourceId, input.txid, input.vout), submissionId, resourceId: resource.resourceId, publicKeyHex: owner.publicKeyHex, network, txid: input.txid, vout: input.vout, outpointKey: `${input.txid}:${input.vout}`, value: input.value, state: "active", createdAt: now, updatedAt: now }));
       const localOutpoints: P2pkhLocalOutpoint[] = localSubmission.ownOutputs.map((output) => ({ id: `${resource.resourceId}:${preview.txid}:${output.vout}`, resourceId: resource.resourceId, txid: preview.txid, vout: output.vout, value: output.value, scriptHex: output.scriptHex, submissionId, state: "unavailable", createdAt: now, updatedAt: now }));
-      await db.prepareLocalSubmission({ submission: localSubmission, claims, localOutpoints });
+      await stateRepository.prepareLocalSubmission({ submission: localSubmission, claims, localOutpoints });
 
       {
         let result: CoordinatorValueResult<unknown>;
@@ -257,7 +257,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         if (result.status === "ok") {
           const value = result.value as { status?: string; txid?: string } | undefined;
           if (value?.status === "not-dispatched") {
-            await db.abortUnattemptedLocalSubmission?.({ submissionId, reason: String((value as { reason?: unknown }).reason ?? "not-dispatched"), requestKind: "initial" });
+            await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason: String((value as { reason?: unknown }).reason ?? "not-dispatched"), requestKind: "initial" });
             deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
             return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: String((value as { reason?: unknown }).reason ?? "not-dispatched"), submissionId, localInputClaimIds: [] };
           }
@@ -271,7 +271,7 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
         }
         const reason = "message" in result ? result.message : "Coordinator broadcast transport failed";
         if (result.status === "transport-error" && result.dispatchStatus === "not-dispatched") {
-          await db.abortUnattemptedLocalSubmission?.({ submissionId, reason, requestKind: "initial" });
+          await stateRepository.abortUnattemptedLocalSubmission?.({ submissionId, reason, requestKind: "initial" });
           deps.assetDataNotifier?.emit({ providerId: "p2pkh", publicKeyHex: owner.publicKeyHex, revision: Date.now(), kinds: ["utxo", "submission", "claim"] });
           return { status: "not-dispatched", txid: preview.txid, rawTxHex: preview.rawTxHex, error: reason, submissionId, localInputClaimIds: [] };
         }
@@ -286,21 +286,21 @@ export function createP2pkhTransferService(deps: P2pkhTransferServiceDeps): P2pk
 }
 
 async function listTransferCandidates(input: {
-  db: P2pkhDbHandle;
+  stateRepository: P2pkhStateRepositoryHandle;
   resource: P2pkhKeyResource;
   ownerPublicKeyHex: string;
   network: "main" | "test";
   protectedOutpoints?: ProtectedOutpointRegistry;
 }): Promise<P2pkhUtxo[]> {
-  const reservations = await input.db.listLocalInputClaimsByResource(input.resource.resourceId);
+  const reservations = await input.stateRepository.listLocalInputClaimsByResource(input.resource.resourceId);
   const reserved = new Set(
     reservations.filter((row) => row.state === "active" || row.state === "isolated").map((row) => `${row.txid}:${row.vout}`)
   );
-  const allUtxos = await input.db.listUtxos();
-  const localTransactions = await input.db.listLocalTransactions(input.resource.resourceId);
+  const allUtxos = await input.stateRepository.listUtxos();
+  const localTransactions = await input.stateRepository.listLocalTransactions(input.resource.resourceId);
   const localTransactionIds = new Set(localTransactions.filter((row) => row.localState === "local-confirmed" && row.chainResolution === "unresolved").map((row) => row.id));
   const localCandidatesByOutpoint = new Map<string, P2pkhUtxo>();
-  for (const row of (await input.db.listLocalOutpoints(input.resource.resourceId))
+  for (const row of (await input.stateRepository.listLocalOutpoints(input.resource.resourceId))
     .filter((row) => row.state === "available" && localTransactionIds.has(row.submissionId))
   ) {
     const candidate: P2pkhUtxo = {

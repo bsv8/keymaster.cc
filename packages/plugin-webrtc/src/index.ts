@@ -51,9 +51,8 @@ export {
   validateStunUrl,
   validateStunServers,
   coerceWebrtcConfig,
-  createLocalStorageWebrtcConfigStore,
+  createKeyValueWebrtcConfigStore,
   createMemoryWebrtcConfigStore,
-  getDefaultWebrtcLocalStorage,
   WEBRTC_CONFIG_STORAGE_KEY
 } from "./webrtcConfig.js";
 export {

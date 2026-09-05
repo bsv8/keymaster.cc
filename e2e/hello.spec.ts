@@ -7,9 +7,9 @@ test("hello: production application opens with native browser storage APIs", asy
   await expect
     .poll(() =>
       page.evaluate(() => ({
-        hasIndexedDb: typeof indexedDB !== "undefined",
+        hasIndexedRepository: typeof indexedDB !== "undefined",
         hasWebCrypto: Boolean(window.isSecureContext && window.crypto?.subtle)
       }))
     )
-    .toEqual({ hasIndexedDb: true, hasWebCrypto: true });
+    .toEqual({ hasIndexedRepository: true, hasWebCrypto: true });
 });

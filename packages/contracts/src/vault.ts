@@ -23,7 +23,7 @@ import type { CoordinatorCommandResult } from "./sessionCoordinator.js";
 
 export type BsvNetwork = "main" | "test";
 
-/** 私钥元数据，写入 IndexedDB 时持久化的部分。
+/** 私钥元数据，写入 platform K-V repository 时持久化的部分。
  *
  * 硬切换 002 收尾：
  *   - 删除 `id` 字段（vault 内部 uuid）。canonical 主键是 publicKeyHex
@@ -105,7 +105,8 @@ export interface VaultLifecycleSnapshot {
  * in the public Vault or protocol contracts.
  */
 export interface VaultSealedSecret {
-  version: 1 | 2;
+  /** 当前只接受独立域密钥 + salt-bound AAD 的 v2 envelope。 */
+  version: 2;
   saltHex: string;
   nonceHex: string;
   ciphertextHex: string;
@@ -160,7 +161,7 @@ export interface PasskeyProtection {
  *
  * 设计缘由（硬切换 002 收尾 + 硬切换 009）：
  *   - 出现在 `importPrivateKey` / `generateKey` / `createVaultWithInitialKey`
- *     路径上：DB 已经写入了新 Key（这一步成功），但 keyspace
+ *     路径上：K-V 已经写入了新 Key（这一步成功），但 keyspace
  *     `notifyKeyCreated` / `activateCreatedKey` 抛错，active 没切。
  *   - UI 必须**不**把这种错误当作"完全失败"——私钥材料已经安全落库，
  *     用户仍可继续导出 / 删除 / 手动切 active。错误携带完整公开
@@ -335,7 +336,7 @@ export interface VaultService {
    *       * `createVault` / meta 写入失败 —— 抛原错，状态保持
    *         `uninitialized`；
    *       * 首把导入 key **未落库**（解析失败、重复 publicKeyHex、
-   *         加密失败、DB 写入失败等） —— 内部回滚 meta、清空内存会话、
+   *         加密失败、K-V 写入失败等） —— 内部回滚 meta、清空内存会话、
    *         状态回到 `uninitialized`，再把原错抛给上层；
    *       * 首把导入 key **已落库**但 active 切换失败 —— 抛
    *         `KeyPersistedButActivationFailedError`，**不**回滚已落库 key
@@ -406,7 +407,7 @@ export interface VaultService {
    *
    * 设计缘由：
    *   - "删完最后一把 Key 后应该回到首启欢迎页"是平台级生命周期，
-   *     不能由 keyspace 越层动 `vaultDb.deleteMeta()`，也不能让 UI 凭
+   *     不能由 keyspace 越层动 `vaultKeyRepository.deleteMeta()`，也不能让 UI 凭
    *     "本地列表 length === 0"自己跳转；状态源必须是 Vault。
    *   - 仅允许在"Vault 仍存在但 key 列表已空"的收尾场景调用；否则
    *     fail closed。具体来说：
@@ -493,8 +494,8 @@ export interface VaultService {
    * 删除一个 key 及其加密材料（硬切换 008 + 硬切换 002）。
    * 设计缘由：实际删除流程由 keyspace.deleteKey 统一调度：
    *   1) background.cancelByKey
-   *   2) 关闭 namespace db
-   *   3) deleteDatabase namespace
+   *   2) 关闭 owner K-V Repository handle
+   *   3) 删除 owner namespace 的 K-V 内容
    *   4) vault.deleteKeyMaterial（仅删私钥材料，不发 key.deleted 事件）
    *   5) emit key.deleted（由 keyspace 统一发一次）
    * 不允许业务插件直接调本方法绕过 keyspace。

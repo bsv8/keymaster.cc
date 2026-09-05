@@ -2,7 +2,7 @@
 // 联系人服务实现。
 //
 // 设计缘由：
-//   - 联系人按 active key 的 key-scoped DB 隔离；
+//   - 联系人按 active key 的 key-scoped K-V 隔离；
 //   - canonical 身份只有 publicKeyHex；
 //   - 不保留 address / publicKeyHex 双语义，不做猜测式迁移；
 //   - service 只负责联系人读写，不承担消息 / p2pkh 的投影逻辑。
@@ -14,13 +14,14 @@ import type {
   ContactPresence,
   ContactPresenceMap,
   ContactsService,
+  KeyValueStore,
   KeyspaceService,
   MessageBus,
   ChannelRuntime,
   JSONValue
 } from "@keymaster/contracts";
 import { newPing } from "bsv8-channel-protocol/ping";
-import { createContactsDb, openContactsDb, type ContactsDbHandle } from "./contactsDb.js";
+import { createContactsRepository, type ContactsRepositoryHandle } from "./storage/contactsRepository.js";
 
 export class ContactsDuplicateError extends Error {
   constructor(public readonly publicKeyHex: string) {
@@ -36,6 +37,7 @@ export class ContactsNoActiveKeyError extends Error {
 
 export interface ContactsServiceDeps {
   keyspace: KeyspaceService;
+  storage?: KeyValueStore;
   messageBus?: MessageBus;
   /** Coordinator Channel runtime；缺失时联系人 CRUD 仍可用，但不会探测在线状态。 */
   channel?: ChannelRuntime;
@@ -84,7 +86,7 @@ export function createContactsPresenceTask(deps: ContactsPresenceTaskDeps): Back
 
 export function createContactsService(deps: ContactsServiceDeps): ContactsService {
   const listeners = new Set<() => void>();
-  let handle: ContactsDbHandle | undefined;
+  let handle: ContactsRepositoryHandle | undefined;
   let handleFor: string | undefined;
   const presenceByContact = new Map<string, number>();
   const presenceListeners = new Set<(presence: ContactPresence) => void>();
@@ -174,7 +176,7 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     const owner = currentOwner();
     if (!owner || !deps.channel || !deps.channel.isReady()) return;
     if (presenceOwnerPublicKeyHex !== owner) resetPresence();
-    const contacts = await (await getDbForActiveKey()).list();
+    const contacts = await (await getStoreForActiveKey()).list();
     const eligible = contacts
       .map((contact) => contact.publicKeyHex.trim().toLowerCase())
       .filter(isContactPublicKey);
@@ -199,13 +201,12 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
 
   const keyDeletingOff = deps.messageBus?.subscribe<{ publicKeyHex: string }>("key.deleting", ({ publicKeyHex }) => {
     if (!handle || handleFor !== publicKeyHex) return;
-    try { handle.close(); } catch { /* noop */ }
     handle = undefined;
     handleFor = undefined;
     notify();
   });
 
-  async function getDbForActiveKey(): Promise<ContactsDbHandle> {
+  async function getStoreForActiveKey(): Promise<ContactsRepositoryHandle> {
     const state = deps.keyspace.active();
     if (!state.activePublicKeyHex) {
       throw new ContactsNoActiveKeyError();
@@ -213,20 +214,8 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     if (handle && handleFor === state.activePublicKeyHex) {
       return handle;
     }
-    if (handle) {
-      try {
-        handle.close();
-      } catch {
-        // 静默。
-      }
-      handle = undefined;
-      handleFor = undefined;
-    }
-    const bundle = await openContactsDb({
-      keyspace: deps.keyspace,
-      publicKeyHex: state.activePublicKeyHex
-    });
-    handle = createContactsDb(bundle);
+    if (!deps.storage) throw new ContactsNoActiveKeyError();
+    handle ??= createContactsRepository(deps.storage);
     handleFor = state.activePublicKeyHex;
     return handle;
   }
@@ -252,11 +241,11 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
 
   return {
     async addContact(input) {
-      const db = await getDbForActiveKey();
+      const contactRepository = await getStoreForActiveKey();
       const publicKeyHex = input.publicKeyHex.trim().toLowerCase();
       if (!publicKeyHex) throw new Error("publicKeyHex is required");
       if (!input.name.trim()) throw new Error("Name is required");
-      const existing = await db.findByPublicKeyHex(publicKeyHex);
+      const existing = await contactRepository.findByPublicKeyHex(publicKeyHex);
       if (existing) throw new ContactsDuplicateError(publicKeyHex);
       const now = new Date().toISOString();
       const contact: Contact = {
@@ -268,20 +257,20 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
         createdAt: now,
         updatedAt: now
       };
-      await db.put(contact);
+      await contactRepository.put(contact);
       notify();
       return contact;
     },
     async updateContact(id, input) {
-      const db = await getDbForActiveKey();
-      const existing = await db.get(id);
+      const contactRepository = await getStoreForActiveKey();
+      const existing = await contactRepository.get(id);
       if (!existing) throw new Error(`Contact ${id} not found`);
       const publicKeyHex = input.publicKeyHex.trim().toLowerCase();
       if (!publicKeyHex) throw new Error("publicKeyHex is required");
       if (!input.name.trim()) throw new Error("Name is required");
       const sameIdentity = existing.publicKeyHex === publicKeyHex;
       if (!sameIdentity) {
-        const duplicate = await db.findByPublicKeyHex(publicKeyHex);
+        const duplicate = await contactRepository.findByPublicKeyHex(publicKeyHex);
         if (duplicate && duplicate.id !== id) {
           throw new ContactsDuplicateError(publicKeyHex);
         }
@@ -294,26 +283,26 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
         tags: input.tags ?? existing.tags,
         updatedAt: new Date().toISOString()
       };
-      await db.put(updated);
+      await contactRepository.put(updated);
       notify();
       return updated;
     },
     async removeContact(id) {
-      const db = await getDbForActiveKey();
-      await db.remove(id);
+      const contactRepository = await getStoreForActiveKey();
+      await contactRepository.remove(id);
       notify();
     },
     async listContacts() {
-      const db = await getDbForActiveKey();
-      return db.list();
+      const contactRepository = await getStoreForActiveKey();
+      return contactRepository.list();
     },
     async findByPublicKeyHex(publicKeyHex) {
-      const db = await getDbForActiveKey();
-      return db.findByPublicKeyHex(publicKeyHex.trim().toLowerCase());
+      const contactRepository = await getStoreForActiveKey();
+      return contactRepository.findByPublicKeyHex(publicKeyHex.trim().toLowerCase());
     },
     async findByPublicKeyHexes(publicKeyHexes) {
-      const db = await getDbForActiveKey();
-      return db.findByPublicKeyHexes(publicKeyHexes.map((key) => key.trim().toLowerCase()));
+      const contactRepository = await getStoreForActiveKey();
+      return contactRepository.findByPublicKeyHexes(publicKeyHexes.map((key) => key.trim().toLowerCase()));
     },
     onChange(handler) {
       listeners.add(handler);
@@ -324,7 +313,7 @@ export function createContactsService(deps: ContactsServiceDeps): ContactsServic
     },
     async getPresenceSnapshot(): Promise<ContactPresenceMap> {
       if (!currentOwner()) return {};
-      const contacts = await (await getDbForActiveKey()).list();
+      const contacts = await (await getStoreForActiveKey()).list();
       const presence: Record<string, ContactPresence> = {};
       for (const contact of contacts) {
         const publicKeyHex = contact.publicKeyHex.trim().toLowerCase();

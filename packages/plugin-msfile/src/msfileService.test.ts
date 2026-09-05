@@ -1,9 +1,7 @@
 // packages/plugin-msfile/src/msfileService.test.ts
 // 授权与数据面必测项（施工单 §8.2 / KMMF-005 / KMMF-006）。
 
-import "fake-indexeddb/auto";
 import { afterEach, describe, expect, it } from "vitest";
-import { MSFILE_DB_NAME } from "./msfileDb.js";
 import { MsFileServiceImpl, createMsFileService } from "./msfileService.js";
 import type { MsFileTransport } from "./msfileTransport.js";
 import type {
@@ -131,12 +129,7 @@ afterEach(async () => {
   while (openServices.length > 0) {
     openServices.pop()?.dispose();
   }
-  await new Promise<void>((resolve) => {
-    const request = indexedDB.deleteDatabase(MSFILE_DB_NAME);
-    request.onsuccess = () => resolve();
-    request.onerror = () => resolve();
-    request.onblocked = () => setTimeout(() => resolve(), 50);
-  });
+  await Promise.resolve();
 });
 
 describe("trusted reads", () => {
@@ -448,7 +441,7 @@ interface FakeDbOverrides {
   listSuppliersGate?: { resolve(): void; promise: Promise<void> };
   delayList?: boolean;
 }
-function makeFakeDb(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverrides = {}): import("./msfileDb.js").MsFileDb & {
+function makeFakeRepository(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverrides = {}): import("./storage/msfileRepository.js").MsFileRepository & {
   rows: Map<string, MsFileSupplierConfig>;
   settingsRow: {
     settings: import("@keymaster/contracts").MsFileGlobalPriceSettings | null;
@@ -579,9 +572,9 @@ function makeFakeDb(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverride
   it("serves preloaded suppliers immediately without an explicit init wait", async () => {
     const transport = makeTransport();
     const seeded: MsFileSupplierConfig = { name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true };
-    const db = makeFakeDb([seeded]);
-    db.settingsRow.settings = { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" };
-    const service = createMsFileService({ db, transport: transport as unknown as MsFileTransport });
+    const repository = makeFakeRepository([seeded]);
+    repository.settingsRow.settings = { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" };
+    const service = createMsFileService({ repository, transport: transport as unknown as MsFileTransport });
     openServices.push(service);
 
     // 不等待任何初始化：立即 stat 必须看到预置供应商（而非误报“无供应商”）。
@@ -595,14 +588,14 @@ function makeFakeDb(seed: MsFileSupplierConfig[] = [], overrides: FakeDbOverride
     let releaseList!: () => void;
     const gatePromise = new Promise<void>((resolve) => { releaseList = resolve; });
     const seeded: MsFileSupplierConfig = { name: "old", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true };
-    const db = makeFakeDb([seeded]);
-    const originalList = db.listSuppliers.bind(db);
+    const repository = makeFakeRepository([seeded]);
+    const originalList = repository.listSuppliers.bind(repository);
     let firstCall = true;
-    db.listSuppliers = async () => {
+    repository.listSuppliers = async () => {
       if (firstCall) { firstCall = false; await gatePromise; }
       return originalList();
     };
-    const service = createMsFileService({ db, transport: transport as unknown as MsFileTransport });
+    const service = createMsFileService({ repository, transport: transport as unknown as MsFileTransport });
     openServices.push(service);
 
     // init 的 refresh 挂在首次 listSuppliers 上；公开方法必须等待初始化——
@@ -629,15 +622,15 @@ describe("supplier fence token（第五轮审查修复）", () => {
     let releaseValidator!: () => void;
     const validatorGate = new Promise<void>((resolve) => { releaseValidator = resolve; });
     let validatorCalls = 0;
-    const db = makeFakeDb([]);
+    const repository = makeFakeRepository([]);
     let failNextWrite = false;
-    const origUpsert = db.upsertSupplier.bind(db);
-    db.upsertSupplier = async (config: MsFileSupplierConfig) => {
-      if (failNextWrite) { failNextWrite = false; throw new Error("forced db failure"); }
+    const origUpsert = repository.upsertSupplier.bind(repository);
+    repository.upsertSupplier = async (config: MsFileSupplierConfig) => {
+      if (failNextWrite) { failNextWrite = false; throw new Error("forced repository failure"); }
       await origUpsert(config);
     };
     const service = createMsFileService({
-      db,
+      repository,
       transport: transport as unknown as MsFileTransport,
       validatorLoader: async () => {
         validatorCalls += 1;
@@ -675,7 +668,7 @@ describe("supplier fence token（第五轮审查修复）", () => {
 
     // pre-commit 失败：配置未写入，调用方收到原始 DB 错误。
     const mutationError = (await failingMutation) as Error;
-    expect(mutationError.message).toBe("forced db failure");
+    expect(mutationError.message).toBe("forced repository failure");
   });
 
   it("re-checks the fence after stat validation when a pre-commit mutation interleaves", { timeout: 60_000 }, async () => {
@@ -687,16 +680,16 @@ describe("supplier fence token（第五轮审查修复）", () => {
     const validatorGate = new Promise<void>((resolve) => { releaseValidator = resolve; });
     let validatorCalls = 0;
     const seeded: MsFileSupplierConfig = { name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true };
-    const db = makeFakeDb([seeded]);
-    db.settingsRow.settings = { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" };
+    const repository = makeFakeRepository([seeded]);
+    repository.settingsRow.settings = { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" };
     let failNextWrite = false;
-    const origUpsert = db.upsertSupplier.bind(db);
-    db.upsertSupplier = async (config: MsFileSupplierConfig) => {
-      if (failNextWrite) { failNextWrite = false; throw new Error("forced db failure"); }
+    const origUpsert = repository.upsertSupplier.bind(repository);
+    repository.upsertSupplier = async (config: MsFileSupplierConfig) => {
+      if (failNextWrite) { failNextWrite = false; throw new Error("forced repository failure"); }
       await origUpsert(config);
     };
     const service = createMsFileService({
-      db,
+      repository,
       transport: transport as unknown as MsFileTransport,
       validatorLoader: async () => {
         validatorCalls += 1;
@@ -721,7 +714,7 @@ describe("supplier fence token（第五轮审查修复）", () => {
     await expect(pendingStat).rejects.toMatchObject({ code: "msfile_unavailable" });
     expect(dialCount).toBe(0);
     const mutationError = (await failingMutation) as Error;
-    expect(mutationError.message).toBe("forced db failure");
+    expect(mutationError.message).toBe("forced repository failure");
 
     // 无 mutation 的后续 stat 正常拨号（活性对照）。
     const result = await service.stat({ seedHashHex: "ab".repeat(32) });
@@ -734,8 +727,8 @@ describe("supplier fence token（第五轮审查修复）", () => {
     const validatorGate = new Promise<void>((resolve) => { releaseValidator = resolve; });
     let validatorCalls = 0;
     const seeded: MsFileSupplierConfig = { name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true };
-    const db = makeFakeDb([seeded]);
-    db.settingsRow.settings = { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" };
+    const repository = makeFakeRepository([seeded]);
+    repository.settingsRow.settings = { seedMaxPriceSatoshis: "100", blockMaxPriceSatoshis: "100" };
     let dialCount = 0;
     let probeCount = 0;
     const transport = makeTransport();
@@ -746,7 +739,7 @@ describe("supplier fence token（第五轮审查修复）", () => {
     transport.probe = async (input) => { probeCount += 1; return innerProbe(input); };
     transport.read = async (input) => { dialCount += 1; return innerRead(input); };
     const service = createMsFileService({
-      db,
+      repository,
       transport: transport as unknown as MsFileTransport,
       validatorLoader: async () => {
         validatorCalls += 1;
@@ -785,10 +778,10 @@ describe("supplier fence token（第五轮审查修复）", () => {
 
   it("propagates initialization failure to every public method（第六轮审查修复）", async () => {
     const transport = makeTransport();
-    const failingDb = makeFakeDb([]);
-    failingDb.getGlobalSettings = async () => { throw new Error("db exploded"); };
+    const failingRepository = makeFakeRepository([]);
+    failingRepository.getGlobalSettings = async () => { throw new Error("repository exploded"); };
     const service = createMsFileService({
-      db: failingDb,
+      repository: failingRepository,
       transport: transport as unknown as MsFileTransport,
     });
     openServices.push(service);

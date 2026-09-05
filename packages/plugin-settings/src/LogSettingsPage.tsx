@@ -9,7 +9,7 @@
 //   - debug 关闭时 UI 必须显式说明：debug 不写库、开启后只对未来日志生效。
 //
 // 关键不变量：
-//   - 不为某个插件开专属 store / 专属 DB / 专属设置。
+//   - 不为某个插件开专属 store / 专属 K-V / 专属设置。
 //   - 列表只展示统一 LogEntry schema，不解析任何业务"扩展字段"。
 //   - 清理操作必须让用户明确知道影响范围（pluginId / level / 全部）。
 
@@ -231,7 +231,7 @@ export function LogSettingsPage() {
         title={t("logSettings.title", { defaultValue: "System logs" })}
         description={t("logSettings.description", {
           defaultValue:
-            "Inspect and configure the unified system log. Plugins record their activity via ctx.logger; entries are stored in a single global IndexedDB."
+            "Inspect and configure the unified system log. Plugins record their activity via ctx.logger; entries are stored in a single global platform K-V repository."
         })}
       />
 

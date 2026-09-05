@@ -1,10 +1,9 @@
-import "fake-indexeddb/auto";
-
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
-import type { KeyScopedStorageHandle, KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
+import type { OwnerAppStore, KeyspaceService, ProtectedOutpointRegistry } from "@keymaster/contracts";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
-import { createP2pkhDb, disposeP2pkhDb, openP2pkhDb, resourceIdFor } from "./p2pkhDb.js";
+import { createP2pkhStateRepository, disposeP2pkhStateRepository, openP2pkhStateRepository, resourceIdFor } from "./storage/p2pkhStateRepository.js";
 import { calcTxidFromRawTxHex, deriveP2pkhAddress } from "./p2pkhSigner.js";
 
 function hexToBytes(hex: string): Uint8Array {
@@ -134,7 +133,23 @@ function makeService(options?: {
 
 const INTEGRATION_PRIV = "00000000000000000000000000000000000000000000000000000000000000c1";
 const INTEGRATION_OWNER = deriveP2pkhAddress(INTEGRATION_PRIV, "main");
-const INTEGRATION_DB_NAME = `keymaster.key.${INTEGRATION_OWNER.publicKeyHex}.plugin.p2pkh.state`;
+const integrationStores = new Map<string, OwnerAppStore>();
+
+function openIntegrationStore(publicKeyHex: string): OwnerAppStore {
+    let store = integrationStores.get(publicKeyHex);
+    if (!store) {
+      store = createInMemoryKeyValueStore({
+        scope: "key",
+        ownerPublicKeyHex: publicKeyHex,
+        applicationStorageId: "UTXOS",
+        schemaVersion: 1,
+        bucketId: "test",
+        bucketGeneration: 1
+      }) as OwnerAppStore;
+      integrationStores.set(publicKeyHex, store);
+    }
+    return store;
+}
 
 function makeIntegrationKeyspace(publicKeyHex: string): KeyspaceService {
   return {
@@ -150,28 +165,6 @@ function makeIntegrationKeyspace(publicKeyHex: string): KeyspaceService {
       createdAt: "2024-01-01T00:00:00.000Z"
     }),
     onActiveKeyChanged: () => () => undefined,
-    openKeyStorage: async (input) => {
-      if (input.publicKeyHex !== publicKeyHex) {
-        throw new Error("Key storage is not ready");
-      }
-      const name = `keymaster.key.${input.publicKeyHex}.plugin.${input.pluginId}.${input.storageId}`;
-      const db = await new Promise<IDBDatabase>((resolve, reject) => {
-        const r = indexedDB.open(name, input.version);
-        r.onupgradeneeded = () => {
-          input.upgrade(r.result, 0, input.version);
-        };
-        r.onsuccess = () => resolve(r.result);
-        r.onerror = () => reject(r.error);
-      });
-      const handle: KeyScopedStorageHandle = {
-        db,
-        name,
-        close: () => db.close()
-      };
-      return handle;
-    },
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
     isInitializing: () => false,
@@ -180,29 +173,24 @@ function makeIntegrationKeyspace(publicKeyHex: string): KeyspaceService {
   };
 }
 
-async function openIntegrationDb(): Promise<{
+async function openIntegrationRepository(): Promise<{
   close(): void;
-  db: ReturnType<typeof createP2pkhDb>;
+  stateRepository: ReturnType<typeof createP2pkhStateRepository>;
 }> {
-  const bundle = await openP2pkhDb({ keyspace: makeIntegrationKeyspace(INTEGRATION_OWNER.publicKeyHex), publicKeyHex: INTEGRATION_OWNER.publicKeyHex });
+  const bundle = await openP2pkhStateRepository(openIntegrationStore(INTEGRATION_OWNER.publicKeyHex));
   return {
     close: () => bundle.close(),
-    db: createP2pkhDb(bundle)
+    stateRepository: createP2pkhStateRepository(bundle)
   };
 }
 
-async function resetIntegrationDb(): Promise<void> {
-  disposeP2pkhDb(INTEGRATION_OWNER.publicKeyHex);
-  await new Promise<void>((resolve) => {
-    const req = indexedDB.deleteDatabase(INTEGRATION_DB_NAME);
-    req.onsuccess = () => resolve();
-    req.onerror = () => resolve();
-    req.onblocked = () => resolve();
-  });
+async function resetIntegrationRepository(): Promise<void> {
+  disposeP2pkhStateRepository();
+  integrationStores.delete(INTEGRATION_OWNER.publicKeyHex);
 }
 
 afterEach(async () => {
-  await resetIntegrationDb();
+  await resetIntegrationRepository();
 });
 
 describe("createP2pkhProtocolSpendService", () => {
@@ -252,11 +240,11 @@ describe("createP2pkhProtocolSpendService", () => {
   });
 
   it("rejects protocol spend when transfer has already claimed the same outpoint, and vice versa", async () => {
-    const { db } = await openIntegrationDb();
+    const { stateRepository } = await openIntegrationRepository();
     const resourceId = resourceIdFor("main");
     const txid = "cd".repeat(32);
     const vout = 0;
-    await db.tryClaimInputs({ submissionId: "transfer-submission-1", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid, vout }] });
+    await stateRepository.tryClaimInputs({ submissionId: "transfer-submission-1", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid, vout }] });
 
     const protocolSpendAfterTransfer = createP2pkhProtocolSpendService({
       vault: {
@@ -271,8 +259,8 @@ describe("createP2pkhProtocolSpendService", () => {
       } as never,
       woc: { broadcast: vi.fn(async () => ({ accepted: true as const, canonicalTxid: txid, providerReturnedTxidRaw: txid, providerReturnedTxidNormalized: txid, txidIntegrity: "exact" as const })) } as never,
       claimStore: {
-        tryClaimInputs: async (input) => db.tryClaimInputs(input),
-        releaseLocalInputClaims: async (input) => db.releaseLocalInputClaims(input.claimIds)
+        tryClaimInputs: async (input) => stateRepository.tryClaimInputs(input),
+        releaseLocalInputClaims: async (input) => stateRepository.releaseLocalInputClaims(input.claimIds)
       },
       getKeyForOwner: async () => ({ publicKeyHex: INTEGRATION_OWNER.publicKeyHex })
     });
@@ -299,8 +287,8 @@ describe("createP2pkhProtocolSpendService", () => {
       } as never,
       woc: { broadcast: vi.fn(async () => ({ accepted: true as const, canonicalTxid: txid, providerReturnedTxidRaw: txid, providerReturnedTxidNormalized: txid, txidIntegrity: "exact" as const })) } as never,
       claimStore: {
-        tryClaimInputs: async (input) => db.tryClaimInputs(input),
-        releaseLocalInputClaims: async (input) => db.releaseLocalInputClaims(input.claimIds)
+        tryClaimInputs: async (input) => stateRepository.tryClaimInputs(input),
+        releaseLocalInputClaims: async (input) => stateRepository.releaseLocalInputClaims(input.claimIds)
       },
       getKeyForOwner: async () => ({ publicKeyHex: INTEGRATION_OWNER.publicKeyHex })
     });
@@ -314,7 +302,7 @@ describe("createP2pkhProtocolSpendService", () => {
       changeAddress: INTEGRATION_OWNER.address
     });
 
-    await expect(db.tryClaimInputs({ submissionId: "transfer-submission-2", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid: `${"ef".repeat(32)}`, vout: 0 }] })).rejects.toThrow(/already claimed/);
+    await expect(stateRepository.tryClaimInputs({ submissionId: "transfer-submission-2", resourceId, publicKeyHex: INTEGRATION_OWNER.publicKeyHex, network: "main", inputs: [{ txid: `${"ef".repeat(32)}`, vout: 0 }] })).rejects.toThrow(/already claimed/);
   });
 
   it("rejects the second concurrent prepare for the same funding UTXO", async () => {

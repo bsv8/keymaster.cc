@@ -3,7 +3,7 @@
 //
 // 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-29 003 硬切换）：
 //   - 页面只调 `protocol.service.launchAppView(...)`；**不**直接操作
-//     `protocolStorageDb` / `buildAppBootstrapPayload` /
+//     `protocolStorageRepository` / `buildAppBootstrapPayload` /
 //     `installLauncherBootstrapRegistry` / `window.open` popup URL。
 //   - 校验失败的 app 在页面上显示明确错误态；**不**打崩整个 host。
 //   - 启动失败按 `LaunchAppViewError.code` 映射到 i18n 文案；

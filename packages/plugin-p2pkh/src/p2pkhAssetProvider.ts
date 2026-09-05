@@ -54,7 +54,7 @@ export function createP2pkhAssetProvider(deps: P2pkhAssetProviderDeps): P2pkhAss
     return off;
   }
   unsubs.push(deps.service.onSyncStatusChange(() => notify()));
-  // 订阅 data-changed：后台任务原子提交 DB 后通知页面重读。
+  // 订阅 data-changed：后台任务原子提交 K-V 后通知页面重读。
   unsubs.push(deps.service.onDataChanged(() => notify()));
   trackSubscribe<{ status: P2pkhSyncStatus }>(P2PKH_MSG.SYNC, () => notify());
   trackSubscribe(P2PKH_MSG.TRANSFER_BROADCAST, () => notify());

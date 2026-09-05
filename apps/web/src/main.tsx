@@ -89,7 +89,7 @@ function checkEnvironment(): string | null {
   if (!window.isSecureContext) {
     return [
       "当前页面不是安全上下文（secure context）。",
-      "浏览器在 HTTP + 非 localhost 主机下会禁用 WebCrypto 和 IndexedDB，vault 无法初始化。",
+      "浏览器在 HTTP + 非 localhost 主机下会禁用 WebCrypto，统一存储无法初始化。",
       "请改用以下任一方式访问：",
       "  - http://localhost:5173",
       "  - http://127.0.0.1:5173",
@@ -99,9 +99,6 @@ function checkEnvironment(): string | null {
   }
   if (!window.crypto?.subtle) {
     return "当前浏览器未提供 crypto.subtle（WebCrypto API）。请使用现代浏览器（Chrome/Edge/Firefox/Safari）最新版。";
-  }
-  if (typeof indexedDB === "undefined") {
-    return "当前环境未提供 IndexedDB。vault 无法持久化私钥。";
   }
   return null;
 }

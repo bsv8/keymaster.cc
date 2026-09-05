@@ -23,6 +23,6 @@
 @import "@keymaster/plugin-contacts/styles.css";
 @import "@keymaster/plugin-webrtc/styles.css";
 @import "@keymaster/plugin-bsv-price/styles.css";
-@import "@keymaster/plugin-storage/styles.css";
+@import "@keymaster/platform-storage/styles.css";
 @import "@keymaster/plugin-msfile/styles.css";
 @import "@keymaster/plugin-p2pkh/styles.css";

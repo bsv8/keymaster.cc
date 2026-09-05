@@ -190,7 +190,7 @@ export function subscribeFatalError(listener: FatalListener): () => void {
 /**
  * 重置 fatal store。仅供测试夹具使用;生产代码不应调用。
  *
- * 与 logService 的 disposeLogDb 暴露方式一致:作为 runtime 入口的浅
+ * 与 logService 的 disposeLogRepository 暴露方式一致:作为 runtime 入口的浅
  * re-export,业务插件仍只能走公共 API。
  */
 export function resetFatalErrorForTest(): void {

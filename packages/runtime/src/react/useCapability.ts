@@ -17,6 +17,13 @@ export function useCapability<T>(key: string): T {
   return useMemo(() => host.capabilities.get<T>(key), [host, version, key]);
 }
 
+/** 读取可选兼容 capability；缺失时返回 undefined，不把页面渲染打崩。 */
+export function useOptionalCapability<T>(key: string): T | undefined {
+  const host = usePluginHost();
+  const version = useHostVersion();
+  return useMemo(() => host.capabilities.has(key) ? host.capabilities.get<T>(key) : undefined, [host, version, key]);
+}
+
 export function useHasCapability(key: string): boolean {
   const host = usePluginHost();
   const version = useHostVersion();

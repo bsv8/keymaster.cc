@@ -4,44 +4,27 @@
 // 缺省值与 WOC 官方文档一致：base = api.whatsonchain.com/v1/bsv。
 // 硬切换 001：默认 rate 由 3 改为 2；服务端窗口、同 IP 其它请求、
 // 浏览器调度误差与 429 backoff 都需要余量。
-// 持久化用 localStorage（key: woc.settings），仅保存明文 URL；不允许
-// 把 API Key 写进 localStorage（施工单明确禁止）。
+// 持久化由 Host 注入的 WOC owner/App K-V 句柄负责；本模块只负责默认值
+// 与输入校验，不接触浏览器存储、Provider 或物理路径。
 
 import type { WocConfig } from "@keymaster/contracts";
-
-const STORAGE_KEY = "woc.settings";
 
 export const DEFAULT_WOC_CONFIG: WocConfig = {
   baseUrl: "https://api.whatsonchain.com/v1/bsv",
   requestsPerSecond: 2
 };
 
-export function loadWocConfig(): WocConfig {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<WocConfig>;
-      return {
-        baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : DEFAULT_WOC_CONFIG.baseUrl,
-        requestsPerSecond:
-          typeof parsed.requestsPerSecond === "number" && parsed.requestsPerSecond > 0
-            ? parsed.requestsPerSecond
-            : DEFAULT_WOC_CONFIG.requestsPerSecond
-      };
-    }
-  } catch {
-    // 忽略解析错误，回退到默认值。
-  }
-  return { ...DEFAULT_WOC_CONFIG };
-}
-
-export function saveWocConfig(config: WocConfig): void {
-  try {
-    if (typeof localStorage !== "undefined") localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-  } catch {
-    // SharedWorker uses Coordinator-owned metadata as the durable source;
-    // browser localStorage is only a best-effort legacy UI cache.
-  }
+/** 从 K-V 的未知值恢复合法配置；旧浏览器存储不会被读取。 */
+export function normalizeWocConfig(raw: unknown): WocConfig {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_WOC_CONFIG };
+  const parsed = raw as Partial<WocConfig>;
+  return {
+    baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : DEFAULT_WOC_CONFIG.baseUrl,
+    requestsPerSecond:
+      typeof parsed.requestsPerSecond === "number" && parsed.requestsPerSecond > 0
+        ? parsed.requestsPerSecond
+        : DEFAULT_WOC_CONFIG.requestsPerSecond
+  };
 }
 
 /** 去除尾部斜杠。 */

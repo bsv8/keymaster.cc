@@ -105,6 +105,9 @@ importers:
       '@keymaster/msfile-media':
         specifier: '*'
         version: link:../../packages/msfile-media
+      '@keymaster/platform-storage':
+        specifier: '*'
+        version: link:../../packages/platform-storage
       '@keymaster/plugin-apps':
         specifier: '*'
         version: link:../../packages/plugin-apps
@@ -159,9 +162,6 @@ importers:
       '@keymaster/plugin-settings':
         specifier: '*'
         version: link:../../packages/plugin-settings
-      '@keymaster/plugin-storage':
-        specifier: '*'
-        version: link:../../packages/plugin-storage
       '@keymaster/plugin-token-bsv21':
         specifier: '*'
         version: link:../../packages/plugin-token-bsv21
@@ -225,6 +225,9 @@ importers:
 
   packages/contracts:
     dependencies:
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.2.0
       cborg:
         specifier: ^5.1.6
         version: 5.1.6
@@ -237,6 +240,30 @@ importers:
       mediabunny:
         specifier: 1.55.3
         version: 1.55.3
+
+  packages/platform-storage:
+    dependencies:
+      '@aws-sdk/client-s3':
+        specifier: ^3.864.0
+        version: 3.1106.0
+      '@keymaster/contracts':
+        specifier: '*'
+        version: link:../contracts
+      '@keymaster/runtime':
+        specifier: '*'
+        version: link:../runtime
+      '@keymaster/ui':
+        specifier: '*'
+        version: link:../ui
+      '@noble/hashes':
+        specifier: ^2.0.1
+        version: 2.2.0
+      '@smithy/fetch-http-handler':
+        specifier: ^5.6.13
+        version: 5.6.13
+      '@xmldom/xmldom':
+        specifier: ^0.9.10
+        version: 0.9.10
 
   packages/plugin-apps:
     dependencies:
@@ -567,27 +594,6 @@ importers:
       '@keymaster/ui':
         specifier: '*'
         version: link:../ui
-
-  packages/plugin-storage:
-    dependencies:
-      '@aws-sdk/client-s3':
-        specifier: ^3.864.0
-        version: 3.1106.0
-      '@keymaster/contracts':
-        specifier: '*'
-        version: link:../contracts
-      '@keymaster/runtime':
-        specifier: '*'
-        version: link:../runtime
-      '@keymaster/ui':
-        specifier: '*'
-        version: link:../ui
-      '@smithy/fetch-http-handler':
-        specifier: ^5.6.13
-        version: 5.6.13
-      '@xmldom/xmldom':
-        specifier: ^0.9.10
-        version: 0.9.10
 
   packages/plugin-token-bsv21:
     dependencies:

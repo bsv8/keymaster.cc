@@ -41,14 +41,14 @@ import {
   normalizeMsFileReadConcurrencySettings,
   type MsFileService,
 } from "@keymaster/contracts";
-import { openMsFileDb, sanitizeAppOverride, type MsFileDb } from "./msfileDb.js";
+import { openMsFileRepository, sanitizeAppOverride, type MsFileRepository } from "./storage/msfileRepository.js";
 import { MsFileServiceError } from "./msfileErrors.js";
 import { validateBlockContent, validateSeedContent } from "./contentValidation.js";
 import { toArrayBuffer } from "./sha256.js";
 import { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
 
 export interface MsFileServiceImplDeps {
-  db?: MsFileDb;
+  repository?: MsFileRepository;
   transport?: MsFileTransport;
   now?(): number;
   randomId?(): string;
@@ -84,7 +84,7 @@ const DEFAULT_RANDOM_ID = (): string =>
     ? crypto.randomUUID()
     : `${Date.now().toString(16)}-${Math.floor(Math.random() * 0xffffffff).toString(16)}`;
 
-export class MsFileServiceImpl implements MsFileService {  private readonly db: Promise<MsFileDb>;
+export class MsFileServiceImpl implements MsFileService {  private readonly repository: Promise<MsFileRepository>;
   private readonly transport: MsFileTransport;
   private readonly now: () => number;
   private readonly randomId: () => string;
@@ -110,7 +110,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   private supplierGeneration = 0;
   /**
    * 原子供应商快照（审查修复）：{ generation, suppliers } 整体替换，
-   * 数据面只消费同一快照，杜绝“DB 读旧列表 + 标新 generation”的窗口。
+   * 数据面只消费同一快照，杜绝“K-V 读旧列表 + 标新 generation”的窗口。
    */
   private supplierSnapshot: { generation: number; suppliers: MsFileSupplierConfig[] } = { generation: 0, suppliers: [] };
   /**
@@ -127,7 +127,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   private disposed = false;
 
   constructor(deps: MsFileServiceImplDeps = {}) {
-    this.db = deps.db ? Promise.resolve(deps.db) : openMsFileDb();
+    this.repository = deps.repository ? Promise.resolve(deps.repository) : openMsFileRepository();
     this.transport = deps.transport ?? createUnavailableMsFileTransport();
     this.now = deps.now ?? DEFAULT_NOW;
     this.randomId = deps.randomId ?? DEFAULT_RANDOM_ID;
@@ -144,7 +144,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
 
   /**
    * 公开 control/data 方法的初始化与生命周期栅栏。
-   * 初始化失败（DB 打不开等）永久 fail closed：调用方必须重建服务
+   * 初始化失败（K-V 打不开等）永久 fail closed：调用方必须重建服务
    * （Coordinator 在 lock/unlock 周期中天然重建）。
    */
   private async ensureReady(): Promise<void> {
@@ -183,7 +183,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     }
     this.approvals.clear();
     this.transport.dispose();
-    void this.db.then((db) => db.close()).catch(() => undefined);
+    void this.repository.then((repository) => repository.close()).catch(() => undefined);
     this.listeners.clear();
   }
 
@@ -209,8 +209,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   private async refreshCaches(): Promise<void> {
     try {
       const generationAtStart = this.supplierGeneration;
-      const db = await this.db;
-      const [settingsRow, suppliers] = await Promise.all([db.getGlobalSettings(), db.listSuppliers()]);
+      const repository = await this.repository;
+      const [settingsRow, suppliers] = await Promise.all([repository.getGlobalSettings(), repository.listSuppliers()]);
       // CAS 提交（审查修复）：等待期间若发生 mutation（世代已推进），
       // 本次迟到 refresh 不得覆盖 mutation 发布的新快照。
       if (this.supplierGeneration !== generationAtStart) return;
@@ -221,7 +221,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
       this.cachedSuppliers = suppliers;
       this.emit();
     } catch (error) {
-      // DB 打不开时保持 fail closed 快照，并让 status() 明确报告 unavailable。
+      // K-V 打不开时保持 fail closed 快照，并让 status() 明确报告 unavailable。
       this.initializationError = error;
     }
   }
@@ -230,9 +230,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
 
   async getSettingsSnapshot(): Promise<MsFileSettingsSnapshot> {
     await this.ensureReady();
-    const db = await this.db;
-    const row = await db.getGlobalSettings();
-    const suppliers = await db.listSuppliers();
+    const repository = await this.repository;
+    const row = await repository.getGlobalSettings();
+    const suppliers = await repository.listSuppliers();
     this.cachedSettings = row
       ? canonicalSettingsRow(row)
       : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
@@ -247,7 +247,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
 
   async getReadConcurrencySettings(): Promise<MsFileReadConcurrencySettings> {
     await this.ensureReady();
-    const row = await (await this.db).getGlobalSettings();
+    const row = await (await this.repository).getGlobalSettings();
     const settings = readConcurrencyFromRow(row);
     this.cachedSettings = {
       ...(row ? canonicalSettingsRow(row) : this.cachedSettings),
@@ -261,7 +261,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     const settings = normalizeMsFileReadConcurrencySettings(input);
     if (!settings) assertReadConcurrencySettings(input);
     const updatedAt = this.now();
-    await (await this.db).putReadConcurrencySettings(settings!, updatedAt);
+    await (await this.repository).putReadConcurrencySettings(settings!, updatedAt);
     this.cachedSettings = {
       settings: this.cachedSettings.settings,
       ...settings!,
@@ -282,9 +282,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     await this.ensureReady();
     assertAmount(input?.seedMaxPriceSatoshis, "seedMaxPriceSatoshis");
     assertAmount(input?.blockMaxPriceSatoshis, "blockMaxPriceSatoshis");
-    const db = await this.db;
+    const repository = await this.repository;
     const updatedAt = this.now();
-    await db.putGlobalSettings(
+    await repository.putGlobalSettings(
       { seedMaxPriceSatoshis: input.seedMaxPriceSatoshis, blockMaxPriceSatoshis: input.blockMaxPriceSatoshis },
       updatedAt,
     );
@@ -318,9 +318,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     this.setBarrier(key, { failed: false });
     let committed = false;
     try {
-      const db = await this.db;
-      await db.upsertSupplier(normalized.config);
-      // ---- DB 已提交；以下不得再有任何 await 直到世代/快照推进 ----
+      const repository = await this.repository;
+      await repository.upsertSupplier(normalized.config);
+      // ---- K-V 已提交；以下不得再有任何 await 直到世代/快照推进 ----
       committed = true;
       const nextList = [
         ...this.supplierSnapshot.suppliers.filter((entry) => entry.supplierPublicKeyHex !== key),
@@ -346,7 +346,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
       this.emit();
     } catch (error) {
       if (!committed) {
-        // pre-commit 失败：DB 未变化，恢复原 barrier 状态（可能是 failed 隔离）。
+        // pre-commit 失败：K-V 未变化，恢复原 barrier 状态（可能是 failed 隔离）。
         this.setBarrier(key, previousBarrier ?? undefined);
         this.emit();
       } else if (!(error instanceof Error) || !/closing previous connections failed/.test(error.message)) {
@@ -366,9 +366,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     this.setBarrier(key, { failed: false });
     let committed = false;
     try {
-      const db = await this.db;
-      await db.deleteSupplier(key);
-      // ---- DB 已提交；同步推进世代与快照（无 await 窗口）----
+      const repository = await this.repository;
+      await repository.deleteSupplier(key);
+      // ---- K-V 已提交；同步推进世代与快照（无 await 窗口）----
       committed = true;
       const nextList = this.supplierSnapshot.suppliers.filter((entry) => entry.supplierPublicKeyHex !== key);
       this.supplierGeneration += 1;
@@ -403,12 +403,12 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   async probeSupplier(supplierPublicKeyHex: string, signal?: AbortSignal): Promise<MsFileSupplierProbeResult> {
     await this.ensureReady();
     assertSupplierKey(supplierPublicKeyHex);
-    const db = await this.db;
+    const repository = await this.repository;
     const supplierGenerationAtStart = this.supplierGeneration;
     const fenceAtStart = this.supplierFence;
     // barrier：mutation 窗口内不拨号（审查修复）。
     this.assertNotInvalidating(supplierPublicKeyHex);
-    const supplier = await db.getSupplier(supplierPublicKeyHex);
+    const supplier = await repository.getSupplier(supplierPublicKeyHex);
     if (!supplier) throw new MsFileServiceError("msfile_supplier_not_found");
     if (!supplier.enabled) throw new MsFileServiceError("msfile_supplier_disabled");
     // 与 stat/read 同源的持久化地址严格校验（审查修复）。
@@ -433,13 +433,13 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     assertAppKey(input?.key);
     const override = sanitizeAppOverride(input.override);
     if (override === undefined) throw new Error("override must contain at least one canonical amount field");
-    const db = await this.db;
+    const repository = await this.repository;
     if (!override.seedMaxPriceSatoshis && !override.blockMaxPriceSatoshis) {
-      await db.deleteAppPolicy(input.key);
+      await repository.deleteAppPolicy(input.key);
       this.emit();
       return;
     }
-    await db.putAppPolicy({
+    await repository.putAppPolicy({
       policyKey: msFileAppPolicyKeyString(input.key),
       key: input.key,
       override,
@@ -451,16 +451,16 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   async clearAppPriceOverride(key: MsFileAppIdentityKey): Promise<void> {
     await this.ensureReady();
     assertAppKey(key);
-    const db = await this.db;
-    await db.deleteAppPolicy(key);
+    const repository = await this.repository;
+    await repository.deleteAppPolicy(key);
     this.emit();
   }
 
   async listAppAuthorizations(): Promise<MsFileAppAuthorizationView[]> {
     await this.ensureReady();
-    const db = await this.db;
-    const usages = await db.listAppUsages();
-    const policies = new Map((await db.listAppPolicies()).map((row) => [row.policyKey, row]));
+    const repository = await this.repository;
+    const usages = await repository.listAppUsages();
+    const policies = new Map((await repository.listAppPolicies()).map((row) => [row.policyKey, row]));
     return usages.map((usage) => ({
       key: usage.key,
       appName: usage.appName,
@@ -519,18 +519,18 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   }
 
   private async persistAlwaysOverride(record: MsFilePendingApproval, amount: string): Promise<void> {
-    const db = await this.db;
+    const repository = await this.repository;
     const key: MsFileAppIdentityKey = {
       ownerPublicKeyHex: record.ownerPublicKeyHex,
       publisherPublicKeyHex: record.publisherPublicKeyHex,
       appId: record.appId,
     };
-    const existing = (await db.getAppPolicy(key))?.override ?? {};
+    const existing = (await repository.getAppPolicy(key))?.override ?? {};
     const override =
       record.kind === "seed"
         ? { ...existing, seedMaxPriceSatoshis: amount }
         : { ...existing, blockMaxPriceSatoshis: amount };
-    await db.putAppPolicy({ policyKey: msFileAppPolicyKeyString(key), key, override, updatedAt: this.now() });
+    await repository.putAppPolicy({ policyKey: msFileAppPolicyKeyString(key), key, override, updatedAt: this.now() });
   }
 
   private async requestApproval(record: MsFilePendingApproval, signal?: AbortSignal): Promise<MsFileApprovalDecision> {
@@ -575,7 +575,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
   async stat(input: MsFileStatInput): Promise<MsFileStatResult> {
     assertHash(input?.seedHashHex, "seedHashHex");
     await this.ensureReady();
-    // 审查修复（P1-3）：数据面只消费同一原子快照；DB 读取前先固定世代。
+    // 审查修复（P1-3）：数据面只消费同一原子快照；K-V 读取前先固定世代。
     const snapshot = this.supplierSnapshot;
     const generationAtStart = snapshot.generation;
     const fenceAtStart = this.supplierFence;
@@ -634,8 +634,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     assertSupplierKey(supplierPublicKeyHex);
     // barrier 先于一切解析：mutation 窗口内的购买请求立即 fail closed。
     this.assertNotInvalidating(supplierPublicKeyHex);
-    const db = await this.db;
-    const settings = (await db.getGlobalSettings())?.settings ?? null;
+    const repository = await this.repository;
+    const settings = (await repository.getGlobalSettings())?.settings ?? null;
     const cap = kind === "seed" ? settings?.seedMaxPriceSatoshis : settings?.blockMaxPriceSatoshis;
     if (cap === undefined) throw new MsFileServiceError("msfile_not_configured");
     const { outcome, supplierGeneration, supplierFence } = await this.sendWireRead({ supplierPublicKeyHex, kind, hashHex, cap, signal });
@@ -659,9 +659,9 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
       throw new MsFileServiceError("msfile_identity_required");
     }
     assertAppKeyShape(ctx);
-    const db = await this.db;
+    const repository = await this.repository;
     // 首次调用只记录脱敏 App 摘要与 lastSeenAt，不创建任何文件许可。
-    await db.touchAppUsage(
+    await repository.touchAppUsage(
       { ownerPublicKeyHex: ctx.ownerPublicKeyHex, publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex, appId: ctx.appIdentity.appId },
       ctx.appIdentity.appName,
       this.now()
@@ -680,13 +680,13 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
     assertSupplierKey(supplierPublicKeyHex);
     // 同上：gateway 路径的 barrier 前置。
     this.assertNotInvalidating(supplierPublicKeyHex);
-    const db = await this.db;
+    const repository = await this.repository;
     const key: MsFileAppIdentityKey = {
       ownerPublicKeyHex: ctx.ownerPublicKeyHex,
       publisherPublicKeyHex: ctx.appIdentity.publisherPublicKeyHex,
       appId: ctx.appIdentity.appId,
     };
-    const [globalSettings, appPolicy] = await Promise.all([db.getGlobalSettings(), db.getAppPolicy(key)]);
+    const [globalSettings, appPolicy] = await Promise.all([repository.getGlobalSettings(), repository.getAppPolicy(key)]);
     const effectiveCap =
       kind === "seed"
         ? appPolicy?.override.seedMaxPriceSatoshis ?? globalSettings?.settings?.seedMaxPriceSatoshis
@@ -811,7 +811,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly db: 
 
   /**
    * 数据面供应商解析（审查修复 P1-3）：只消费调用方传入的原子快照，
-   * 不回读 DB。地址严格校验在拨号前执行（动态导入，模块缓存后近零开销）；
+   * 不回读 K-V。地址严格校验在拨号前执行（动态导入，模块缓存后近零开销）；
    * 持久化记录可能来自旧版本校验或外部改动，fail closed。
    */
   private async requireEnabledSupplierFrom(snapshot: { generation: number; suppliers: MsFileSupplierConfig[] }, supplierPublicKeyHex: string): Promise<MsFileSupplierConfig> {
@@ -900,7 +900,7 @@ function readConcurrencyFromRow(row: {
   return normalizeMsFileReadConcurrencySettings(candidate) ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
 }
 
-function canonicalSettingsRow(row: import("./msfileDb.js").MsFileGlobalSettingsSnapshot): MsFileGlobalSettingsSnapshotLike {
+function canonicalSettingsRow(row: import("./storage/msfileRepository.js").MsFileGlobalSettingsSnapshot): MsFileGlobalSettingsSnapshotLike {
   return {
     settings: row.settings,
     ...readConcurrencyFromRow(row),

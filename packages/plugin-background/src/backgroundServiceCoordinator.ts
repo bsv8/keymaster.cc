@@ -19,19 +19,6 @@ import type {
 // 1. Types
 // ============================================================
 
-/** Coordinator client 最小接口（避免跨包导入）。 */
-export interface CoordinatorClientLike {
-  getIsConnected(): boolean;
-  getState(): { taskSnapshots: CoordinatorTaskSnapshotLike[]; scheduleSettings: BackgroundSyncSettings };
-  subscribeTopic(topic: string, handler: (event: any) => void): () => void;
-  backgroundRunNow(taskId: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
-  backgroundTrigger(taskId: string, reason: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
-  backgroundCancel(taskId: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
-  backgroundCancelByKey(publicKeyHex: string): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
-  backgroundSettingsUpdate(settings: BackgroundSyncSettings): Promise<{ status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean }>;
-  reportRecoverableCoordinatorFailure?(kind: string, cause: unknown): void;
-}
-
 interface CoordinatorTaskSnapshotLike {
   id: string;
   pluginId: string;
@@ -48,6 +35,18 @@ interface CoordinatorTaskSnapshotLike {
 }
 
 type CoordinatorResultLike = { status: string; message?: string; reason?: { key: string; fallback: string } | string; retryable?: boolean };
+
+/** Background 实际使用的最小 RPC 面；不把完整 SessionCoordinatorClient 强制带入插件。 */
+export interface CoordinatorClientLike {
+  getIsConnected(): boolean;
+  subscribeTopic(topic: string, listener: (event: any) => void): () => void;
+  backgroundRunNow(taskId: string): Promise<CoordinatorResultLike>;
+  backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorResultLike>;
+  backgroundCancel(taskId: string): Promise<CoordinatorResultLike>;
+  backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorResultLike>;
+  backgroundSettingsUpdate(settings: BackgroundSyncSettings): Promise<CoordinatorResultLike>;
+  reportRecoverableCoordinatorFailure?(kind: string, cause: unknown): void;
+}
 
 export interface BackgroundServiceCoordinatorDeps {
   coordinatorClient: CoordinatorClientLike;

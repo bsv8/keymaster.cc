@@ -1,15 +1,14 @@
 // packages/plugin-protocol/src/manifest.ts
 // 对外协议插件：popup 路由 + service capability + 协议页 i18n +
-// 命令流 IndexedDB。
+// 命令流 platform K-V。
 //
 // 设计缘由（施工单 002 硬切换 + 2026-06-28 002 + 2026-06-29 001 +
 // 2026-06-30 002 + 2026-07-01 001 + 2026-07-01 002）：
 //   - 协议页是常驻 popup：单条 request 完成后 popup 不自动关闭；
 //     `closing` 由 pageUnloading 路径发出。
-//   - 命令流历史走 `keymaster.protocol` IndexedDB：store=commands，
-//     索引 origin / updatedAt / [origin, updatedAt]。
+//   - 命令流历史走 `protocol` platform K-V，按 origin 与时间字段在仓库层过滤。
 //   - service 收到第一条合法 request 时按 `event.origin` 拉历史；
-//     切换 origin 时重新载入；DB 失败时 `historyAvailable=false` 降级。
+//     切换 origin 时重新载入；K-V 失败时 `historyAvailable=false` 降级。
 //   - popup 入口路径只有一条 `/protocol/v1/popup`，**不**注册到
 //     `route.registry`（与施工单 001 公共语义保持一致）。
 //   - 施工单 2026-06-29 001 硬切换：popup 语义统一为 Session Window；
@@ -36,15 +35,16 @@ import type {
   ProtocolSessionSnapshot,
   ProtocolCommandFeedState,
   ProtocolService,
-  StorageService,
-  SessionCoordinatorClient
+  StorageRuntimeController,
+  SessionCoordinatorClient,
+  P2pkhProtocolAdapter
 } from "@keymaster/contracts";
-import { PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY } from "@keymaster/contracts";
+import { PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, type ProtocolCoordinatorControl } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
 } from "./protocolService.js";
-import { openProtocolStorageDb } from "./protocolStorageDb.js";
+import { openProtocolStorageRepository } from "./storage/protocolStorageRepository.js";
 import { parseBootMode, parseBootstrapToken } from "./sessionWindowBootstrap.js";
 import { createConnectChannelRuntime } from "./channelRuntime.js";
 
@@ -113,7 +113,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.feed.empty.waitingOrigin":
         "Waiting for the first request from an external site. Command history will be archived by that site's exact origin.",
       "protocol.feed.historyUnavailable":
-        "History unavailable: local database read failed. The current command still works, but it won't be persisted.",
+        "History unavailable: local repository read failed. The current command still works, but it won't be persisted.",
       "protocol.feed.list.aria": "Command flow history",
       "protocol.feed.decision.pending": "Pending",
       "protocol.feed.decision.approved": "Approved",
@@ -438,33 +438,39 @@ export const protocolPlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
+    // 协议 popup 是锁屏/未初始化时仍需可打开的系统入口；它只依赖
+    // Vault + Keyspace，在 vault-selection 阶段先注册。真正依赖 active
+    // owner 的 Connect App 仍由 connect-apps-ready 阶段装配。
+    bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: [PROTOCOL_SERVICE_CAPABILITY],
     displayGroup: "platform"
   },
   i18n: protocolResources,
+  storage: { scope: "platform", applicationStorageId: "protocol", schemaVersion: 1 },
   dependencies: [
     {
       capability: "vault.service",
       reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
     },
     { capability: "keyspace.service", reason: "协议需要 owner key 状态" },
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "Channel 发布和订阅由 SharedWorker Coordinator 统一执行" }
   ],
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
     const vaultService = ctx.get<VaultService>("vault.service");
     const keyspaceService = ctx.get<KeyspaceService>("keyspace.service");
-    const coordinatorClient = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinatorClient = ctx.coordinator as ProtocolCoordinatorControl | undefined;
+    if (!coordinatorClient) throw new Error("Protocol Coordinator control is unavailable");
+    ctx.provide(PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     const connectChannelRuntime = createConnectChannelRuntime(coordinatorClient);
-    let storageService: StorageService | undefined;
+    let storageRuntimeController: StorageRuntimeController | undefined;
     try {
-      storageService = ctx.get<StorageService>("storage.service");
+      storageRuntimeController = ctx.get<StorageRuntimeController>("storage.runtime-controller");
     } catch {
       // Storage is an optional platform plugin.  The protocol service still
       // starts, while storage.* requests fail closed with a stable error.
-      storageService = undefined;
+      storageRuntimeController = undefined;
     }
 
     // MSFile 是可选平台能力（施工单 docs/proposals/msfile）：缺失时只让
@@ -476,71 +482,29 @@ export const protocolPlugin: PluginManifest = {
       msfileService = undefined;
     }
 
-    // IndexedDB 是历史 / 每站点配置的可选持久化层，绝不能阻塞插件注册。
-    // 某些浏览器在存储服务异常时会让 indexedDB.open() 永久 pending，既不触发
+    // platform K-V repository 是历史 / 每站点配置的可选持久化层，绝不能阻塞插件注册。
+    // 某些浏览器在存储服务异常时会让 platform K-V repository.open() 永久 pending，既不触发
     // error 也不触发 blocked。先以 historyAvailable=false 创建 service，后台
     // 打开成功后再 attach，确保钱包主路径始终可用。
-    {
-      // p2pkh service 是 optional 能力：**不**放进 manifest.dependencies，
-      // 否则 host.enable() 会在 protocolPlugin 早于 plugin-p2pkh 装载时直接
-      // 把本插件打成 blocked，导致 `protocol.service` capability 根本
-      // 不会 provide。这里保留运行时 best-effort 获取；缺时对应方法走
-      // internal_error / fail-closed。
-      //
-      // 边界检查禁止 plugin-protocol 直接 import plugin-p2pkh；这里通过
-      // capability key 拿值，类型断言为最小适配接口。
-      //
-      // 硬切换 002：listUtxos / prepareTransfer / submitTransfer 全部
-      // 接受 `ownerPublicKeyHex`（session 绑定 owner）。plugin-protocol
-      // 在 `executeP2pkhTransferAndFinalize` / `buildAndMaybeBuildBaseTx`
-      // 内从 session 取 owner 后传入。plugin-p2pkh 内部按 owner 直接
-      let p2pkhService:
-        | {
-            listUtxos(filter?: {
-              assetId?: string;
-              ownerPublicKeyHex?: string;
-            }): Promise<Array<{ txid: string; vout: number; value: number }>>;
-            prepareTransfer(input: {
-              assetId: "bsv";
-              ownerPublicKeyHex: string;
-              recipientAddress: string;
-              amountSatoshis: number;
-              feeRateSatoshisPerKb: number;
-            }): Promise<unknown>;
-            submitTransfer(preview: {
-              assetId: "bsv";
-              network: "main";
-              ownerPublicKeyHex: string;
-              recipientAddress: string;
-              amountSatoshis: number;
-              feeRateSatoshisPerKb: number;
-              allocation: unknown;
-              changeAddress: string;
-              outputs: Array<{ address: string; value: number }>;
-              estimatedFeeSatoshis: number;
-              serializedSizeBytes: number;
-              txid: string;
-              rawTxHex: string;
-            }): Promise<unknown>;
-          }
-        | undefined;
+    //
+    // P2PKH 在 owner-apps-ready 阶段才装配。这里必须保存 resolver，而不是
+    // 在 vault-selection setup 时读取一次 undefined；每次 transfer/feepool
+    // 请求都重新取 capability，保证后加载的业务插件可见。
+    const getP2pkhService = (): P2pkhProtocolAdapter | undefined => {
       try {
-        p2pkhService = ctx.get<typeof p2pkhService extends infer T ? T : never>(
-          "p2pkh.service"
-        );
+        return ctx.get<P2pkhProtocolAdapter>("p2pkh.service");
       } catch {
-        // 缺 p2pkh.service capability 时不阻塞 setup；service 内部
-        // 在 p2pkh.transfer 路径上走 internal_error 降级。
-        p2pkhService = undefined;
+        return undefined;
       }
+    };
 
-      const service = createProtocolService({
+    const service = createProtocolService({
         vault: vaultService,
         keyspace: keyspaceService,
-        storageService,
-        getStorageService: () => {
+        storageRuntimeController,
+        getStorageRuntimeController: () => {
           try {
-            return ctx.get<StorageService>("storage.service");
+            return ctx.get<StorageRuntimeController>("storage.runtime-controller");
           } catch {
             return undefined;
           }
@@ -553,7 +517,7 @@ export const protocolPlugin: PluginManifest = {
             return undefined;
           }
         },
-        p2pkhService: p2pkhService as never,
+        getP2pkhService,
         connectChannelRuntime,
         getAppCatalogResolver: () => {
           try {
@@ -627,15 +591,15 @@ export const protocolPlugin: PluginManifest = {
         invalidation: "immediate"
       });
 
-      void openProtocolStorageDb()
-        .then((storageDb) => {
-          service.attachStorageDb(storageDb);
+      void openProtocolStorageRepository(ctx.storage)
+        .then((storageRepository) => {
+          service.attachProtocolStorageRepository(storageRepository);
         })
         .catch((err) => {
           ctx.logger.error({
             scope: "protocol.lifecycle",
-            event: "storageDb.open.failed",
-            message: "storageDb failed to open",
+            event: "storageRepository.open.failed",
+            message: "storageRepository failed to open",
             data: { err: err instanceof Error ? err.message : String(err) }
           });
         });
@@ -661,6 +625,5 @@ export const protocolPlugin: PluginManifest = {
           // ignore
         }
       };
-    }
   }
 };

@@ -31,7 +31,16 @@ import type {
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
   ContactPresenceMap,
+  StorageBootstrapState,
 } from "@keymaster/contracts";
+import type {
+  CoordinatorOwnerStorageData,
+  CoordinatorPlatformStorageData,
+  StorageBindingCoordinatorClient,
+  StorageOwnerGrant,
+  StoragePlatformGrant
+} from "@keymaster/contracts/storage-internal";
+import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
 
 // ============================================================
 // 1. Client Types
@@ -68,7 +77,7 @@ function coordinatorSendError(message: string, dispatchStatus: CoordinatorDispat
 // 2. Coordinator Client
 // ============================================================
 
-export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClient {
+export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClient, StorageBindingCoordinatorClient {
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
   private clientId: string;
@@ -328,6 +337,10 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       kind: "hello",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
+      ...(() => {
+        const state = readStorageBootstrap();
+        return state ? { storageBootstrapState: state as StorageBootstrapState } : {};
+      })()
     };
     const response = await this.sendRequest(request);
     const result = response.operationResult as CoordinatorSubscribeTopicsResult | undefined;
@@ -454,7 +467,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  async storageGrant(context: import("@keymaster/contracts").StorageAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
+  async storageGrant(context: import("@keymaster/contracts").OwnerAppStorageGrant): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
     const request = { kind: "storage.grant" as const, clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId: context.connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
       const response = await this.sendRequest(request);
@@ -486,6 +499,62 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     return this.requestCommand({ kind: "storage.session.abort", clientId: this.clientId, requestId: this.generateRequestId(), connectSessionId, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch });
   }
 
+  async storageBindOwner(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StorageOwnerGrant>> {
+    const request = { kind: "storage.owner.bind" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult as StorageOwnerGrant, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async storageBindPlatform(input: { pluginId: string; declaration: import("@keymaster/contracts").PluginStorageDeclaration }): Promise<import("@keymaster/contracts").CoordinatorValueResult<StoragePlatformGrant>> {
+    const request = { kind: "storage.platform.bind" as const, clientId: this.clientId, requestId: this.generateRequestId(), ...input, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult as StoragePlatformGrant, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async storageOwnerData(data: CoordinatorOwnerStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    return this.sendInternalStorageData("storage.owner.data", data, transfer, signal);
+  }
+
+  async storagePlatformData(data: CoordinatorPlatformStorageData): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "storage.platform.data" as const, clientId: this.clientId, requestId: this.generateRequestId(), data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  async storageDeleteOwner(ownerPublicKeyHex: string): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const request = { kind: "storage.owner.delete" as const, clientId: this.clientId, requestId: this.generateRequestId(), ownerPublicKeyHex, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  private async sendInternalStorageData<K extends "storage.owner.data" | "storage.platform.data">(kind: K, data: K extends "storage.owner.data" ? CoordinatorOwnerStorageData : CoordinatorPlatformStorageData, transfer: ArrayBuffer[] = [], signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
+    const requestId = this.generateRequestId();
+    const request = { kind, clientId: this.clientId, requestId, data, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch } as CoordinatorClientRequest;
+    let onAbort: (() => void) | undefined;
+    try {
+      if (signal?.aborted) return { status: "transport-error", message: "Storage request cancelled", retryable: false };
+      onAbort = () => { void this.storageCancel(requestId); };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const response = await this.sendRequest(request, transfer);
+      if (signal?.aborted) return { status: "transport-error", message: "Storage request cancelled", retryable: false };
+      if (response.ack.status !== "ok") return response.ack;
+      return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
+    } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+    finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
   async msfileControl(control: import("@keymaster/contracts").CoordinatorMsFileControl): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const request = { kind: "msfile.control" as const, clientId: this.clientId, requestId: this.generateRequestId(), control, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {
@@ -495,7 +564,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
   }
 
-  /** SatSubscription 所有页面调用都经过 Coordinator，避免每个 Tab 各自开 DB/连接。 */
+  /** SatSubscription 所有页面调用都经过 Coordinator，避免每个 Tab 各自开 K-V/连接。 */
   async satOperation(operation: CoordinatorSatOperation, signal?: AbortSignal): Promise<import("@keymaster/contracts").CoordinatorValueResult<unknown>> {
     const request = { kind: "sat.operation" as const, clientId: this.clientId, requestId: this.generateRequestId(), operation, expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     let onAbort: (() => void) | undefined;
@@ -531,7 +600,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
   }
 
-  /** 联系人 presence 的读取面只查询 Coordinator 内存/本地 DB，不启动探测。 */
+  /** 联系人 presence 的读取面只查询 Coordinator 内存/本地 K-V，不启动探测。 */
   async contactsPresenceSnapshot(): Promise<import("@keymaster/contracts").CoordinatorValueResult<ContactPresenceMap>> {
     const request = { kind: "contacts.presence.snapshot" as const, clientId: this.clientId, requestId: this.generateRequestId(), expectedSessionEpoch: this.bootstrapSnapshotCache.sessionEpoch };
     try {

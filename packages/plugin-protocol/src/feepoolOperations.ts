@@ -7,7 +7,7 @@
 //     持续协商的草稿。create / close_and_recreate 的新池分支 → 初始版；
 //     spend / close_and_recreate 的 close 之前 → 更新版。
 //   - `pending op` 在 prepare 时落内存，commit 时消费，endSession 时清空。
-//   - `pending op` **不**进 IndexedDB（operationId 故意只活本会话）。
+//   - `pending op` **不**进 platform K-V repository（operationId 故意只活本会话）。
 //   - 真实签名由 `keymaster-multisig-pool` SDK 完成；本文件只做模型。
 
 import type { ProtocolFeePoolAction, ProtocolFeePoolRecord } from "@keymaster/contracts";

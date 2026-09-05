@@ -22,8 +22,9 @@ import {
   SAT_SUBSCRIPTION_PLUGIN_ID,
   SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
   SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
+  SAT_COORDINATOR_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
+  type SatCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY
 } from "@keymaster/contracts";
 
@@ -136,27 +137,30 @@ export const satSubscriptionPlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: [
       SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
       SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
-      CHANNEL_RUNTIME_CAPABILITY
+      CHANNEL_RUNTIME_CAPABILITY,
+      SAT_COORDINATOR_CONTROL_CAPABILITY
     ],
     displayGroup: "platform"
   },
-  keyScopedStorages: [{ storageId: "sat_subscription_v1", description: "SatSubscription owner-scoped supplier, subscription, SPI and Channel state" }],
+  storage: { scope: "key", applicationStorageId: "SatSubscription", schemaVersion: 1 },
   dependencies: [
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "Sat 连接和 Channel runtime 由 SharedWorker 协调" },
     { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
     { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
     { capability: "system-settings.registry", reason: "注册 SatSubscription 系统设置" },
     { capability: "system-status.registry", reason: "注册 SatSubscription 运行诊断" }
   ],
   setup(ctx: PluginContext) {
-    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("Sat Coordinator control is unavailable");
+    ctx.provide(SAT_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const laneRegistry = ctx.get<WindowP2pExecutorLaneRegistry>(WINDOW_P2P_EXECUTOR_CAPABILITY);
-    // Window 只注册网络 lane；DB、状态、Channel crypto 和 provider handle
+    // Window 只注册网络 lane；K-V、状态、Channel crypto 和 provider handle
     // 全部由 Coordinator SharedWorker 创建，避免多 Tab 重复连接/扣费。
     const offLane = laneRegistry.register(new SatWindowP2pLane());
     const admin = createSatWorkerAdminService(coordinator);

@@ -27,8 +27,7 @@ function keyspace(): KeyspaceService {
     selected: () => state.activePublicKeyHex,
     setActive: async () => undefined,
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
-    onActiveKeyChanged: () => () => undefined, openKeyStorage: async () => { throw new Error("unused"); },
-    registerPluginStorage: () => undefined, listPluginStorages: () => [], prepareDeleteKey: async () => undefined,
+    onActiveKeyChanged: () => () => undefined, prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined, isInitializing: () => false, onInitializationChange: () => () => undefined
   };
 }

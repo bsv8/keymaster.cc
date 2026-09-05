@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KeyspaceService, ProtocolSpendPreview, ProtocolSpendService } from "@keymaster/contracts";
-import type { Bsv21MintHistoryDb } from "./bsv21MintHistoryDb.js";
+import type { Bsv21MintHistoryRepository } from "./storage/bsv21MintHistoryRepository.js";
 import { createBsv21MintService } from "./bsv21MintService.js";
 import type { P2pkhServiceForBsv21 } from "./bsv21Service.js";
 
@@ -55,7 +55,7 @@ function fakeProtocolSpend(): ProtocolSpendService & { prepare: ReturnType<typeo
   };
 }
 
-function fakeHistoryDb(): Bsv21MintHistoryDb {
+function fakeHistoryRepository(): Bsv21MintHistoryRepository {
   const store = new Map<string, unknown>();
   return {
     async get(id) {
@@ -99,9 +99,9 @@ describe("createBsv21MintService", () => {
   });
 
   it("persists prepare/submit history in the same record", async () => {
-    const historyDb = fakeHistoryDb();
+    const historyRepository = fakeHistoryRepository();
     const service = createBsv21MintService({
-      historyDb,
+      historyRepository,
       p2pkh: fakeP2pkh(),
       protocolSpend: fakeProtocolSpend()
     });
@@ -114,14 +114,14 @@ describe("createBsv21MintService", () => {
       feeRateSatoshisPerKb: 1000,
       changeAddress: "1BoatSLRHtKNngkdXEeobR76b53LETtpyT"
     });
-    const prepared = (await historyDb.list())[0]!;
+    const prepared = (await historyRepository.list())[0]!;
     expect(prepared.status).toBe("prepared");
     expect(prepared.request.amount).toBe("1");
     expect(prepared.request.sym).toBe("TOK");
     expect(prepared.preview.tokenId).toBe(preview.tokenId);
 
     const result = await service.submit(preview);
-    const submitted = (await historyDb.list())[0]!;
+    const submitted = (await historyRepository.list())[0]!;
     expect(result.tokenId).toBe("canonical-txid_0");
     expect(submitted.status).toBe("broadcast-pending-woc");
     expect(submitted.submit?.tokenId).toBe("canonical-txid_0");

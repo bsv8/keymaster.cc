@@ -6,8 +6,7 @@
 //   - vault 同时提供 vault.service 与 keyspace.service；KeySwitchWidget 由
 //     vault 直接注册到 topbar.registry（order 90），位置在 background.tray
 //     (order 100) 左侧。
-//   - manifest 声明 keyScopedStorages（meta），让 runtime 在装载时自动调用
-//     keyspace.registerPluginStorage。
+//   - Vault 的 keys/ 是平台根，由 Coordinator 在 Storage bootstrap 时注入。
 //   - keyspace service 通过 capability "keyspace.service" 暴露；key 状态
 //     切换由 keyspace 维护，shell 与业务插件只读不写。
 //
@@ -38,10 +37,9 @@ import type {
   , CoordinatorCryptoOperation
   , CoordinatorCryptoResult
   , CoordinatorVaultStatus
-  , SessionCoordinatorClient
   , KeyspaceService
 } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, type VaultLocalSecretService } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, type VaultLocalSecretService, type VaultCoordinatorControl } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
@@ -60,10 +58,7 @@ export interface VaultKeyResourceState {
 }
 
 /** Vault setup 所需的 Coordinator contract 子集。 */
-type CoordinatorClientLike = Pick<
-  SessionCoordinatorClient,
-  "getIsConnected" | "getBootstrapSnapshot" | "subscribeTopic" | "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto" | "backgroundCancelByKey"
->;
+type CoordinatorClientLike = VaultCoordinatorControl;
 
 export const VAULT_CAPABILITY = "vault.service";
 
@@ -422,15 +417,13 @@ export const vaultPlugin: PluginManifest = {
   meta: {
     kind: "core",
     startup: "required",
+    bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY],
+    providesCapabilities: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "core"
   },
   i18n: vaultResources,
-  keyScopedStorages: [
-    { storageId: "meta", description: "Vault 自身元数据（不参与 key namespace）" }
-  ],
   setup(ctx) {
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
 
@@ -440,7 +433,9 @@ export const vaultPlugin: PluginManifest = {
 
     // 尝试获取 Coordinator client（通过 capability）
     let coordinatorClient: CoordinatorClientLike | undefined;
-    coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    coordinatorClient = ctx.coordinator as VaultCoordinatorControl | undefined;
+    if (coordinatorClient) ctx.provide(VAULT_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
+    if (!coordinatorClient) throw new Error("Session Coordinator is unavailable");
     if (coordinatorClient.getIsConnected()) {
       // Both facades derive from one already-committed session mirror.
       const sessionStateMirror = new SessionStateMirror(coordinatorClient);

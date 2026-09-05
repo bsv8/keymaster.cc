@@ -2,10 +2,10 @@
 // STAS 后台同步任务。
 //
 // 设计缘由：
-//   - 唯一 WOC / 外网调用者；写自己的 key-scoped snapshot DB。
+//   - 唯一 WOC / 外网调用者；写自己的 key-scoped snapshot K-V。
 //   - 归入 asset-holdings schedule group，由 BackgroundService 统一调度。
 //   - 成功后发布 data-changed 通知。
-//   - 取消后不提交 DB，也不发 data-changed。
+//   - 取消后不提交 K-V，也不发 data-changed。
 //   - 施工单 001：canRun 返回结构化 BackgroundRunEligibility。
 
 import type {
@@ -16,11 +16,11 @@ import type {
   KeyspaceService,
   VaultService
 } from "@keymaster/contracts";
-import type { StasDb } from "./stasDb.js";
+import type { StasRepository } from "./storage/stasRepository.js";
 import type { StasServiceHandle } from "./stasService.js";
 
 export interface CreateStasSyncTaskOptions {
-  db: StasDb;
+  stateRepository: StasRepository;
   service: StasServiceHandle;
   keyspace: KeyspaceService;
   vault: VaultService;
@@ -30,14 +30,14 @@ export interface CreateStasSyncTaskOptions {
 /**
  * 创建 STAS 后台同步任务。
  * 设计缘由：
- *   - 从 P2PKH 本地 resource DB 读取当前 active key 地址；
+ *   - 从 P2PKH 本地 resource K-V 读取当前 active key 地址；
  *   - 通过 WOC 拉 token list / balance；
  *   - 以一次原子提交替换 STAS snapshot；
  *   - 成功后发 data-changed。
- *   - 取消后不提交 DB、不发 data-changed。
+ *   - 取消后不提交 K-V、不发 data-changed。
  */
 export function createStasSyncTask(options: CreateStasSyncTaskOptions): BackgroundTaskDefinition {
-  const { db, service, keyspace, vault, assetDataNotifier } = options;
+  const { stateRepository, service, keyspace, vault, assetDataNotifier } = options;
 
   return {
     id: "token-stas.sync",
@@ -79,7 +79,7 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
       // 传递 signal 以便取消时中止网络请求
       const tokens = await service.listActiveKeyTokens(ctx.signal);
 
-      // 检查取消信号：取消后不提交 DB，不发 data-changed
+      // 检查取消信号：取消后不提交 K-V，不发 data-changed
       if (ctx.signal.aborted) return;
       ctx.assertSessionFresh?.();
 
@@ -90,15 +90,15 @@ export function createStasSyncTask(options: CreateStasSyncTaskOptions): Backgrou
           network: t.network,
           address: t.address,
           balance: t.entry.balance,
-          // 规范化 issuer：undefined/null → 空字符串，与 DB 主键和
+          // 规范化 issuer：undefined/null → 空字符串，与 K-V 主键和
           // tokenId（makeStasTokenId）使用同一规则。
           issuer: t.entry.issuer ?? "",
           syncedAt: new Date().toISOString(),
         }));
 
       // 原子替换：在同一事务中删除旧数据并写入新数据
-      // DB 操作隐式使用当前 active key 的 namespace
-      await db.replaceAll(snapshots);
+      // K-V 操作隐式使用当前 active key 的 namespace
+      await stateRepository.replaceAll(snapshots);
       ctx.assertSessionFresh?.();
 
       // 关键修复：replaceAll 完成后、发送通知前再检查一次取消信号；

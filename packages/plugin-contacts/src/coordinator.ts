@@ -3,3 +3,4 @@
 
 export { createContactsService, createContactsPresenceTask } from "./contactsService.js";
 export type { ContactsServiceDeps, ContactsPresenceTaskDeps } from "./contactsService.js";
+export { CONTACTS_STORAGE_ID, CONTACTS_SCHEMA_VERSION } from "./storage/contactsRepository.js";

@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { AssetDataNotifier, KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
 import { createOrdinalsSyncTask } from "./ordinalsSync.js";
-import type { OrdinalMintHistoryDb, OrdinalMintHistoryRecord } from "./ordinalMintHistoryDb.js";
+import type { OrdinalMintHistoryRepository, OrdinalMintHistoryRecord } from "./storage/ordinalMintHistoryRepository.js";
 import type { OrdinalsServiceHandle } from "./ordinalsService.js";
 
 function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
@@ -30,7 +30,7 @@ function fakeNotifier(): AssetDataNotifier & { emit: ReturnType<typeof vi.fn> } 
   } as unknown as AssetDataNotifier & { emit: ReturnType<typeof vi.fn> };
 }
 
-function fakeHistoryDb(records: OrdinalMintHistoryRecord[]): OrdinalMintHistoryDb & { put: ReturnType<typeof vi.fn>; list: ReturnType<typeof vi.fn> } {
+function fakeHistoryRepository(records: OrdinalMintHistoryRecord[]): OrdinalMintHistoryRepository & { put: ReturnType<typeof vi.fn>; list: ReturnType<typeof vi.fn> } {
   const store = [...records];
   return {
     async get(id: string) {
@@ -43,7 +43,7 @@ function fakeHistoryDb(records: OrdinalMintHistoryRecord[]): OrdinalMintHistoryD
     }),
     list: vi.fn(async () => [...store]),
     close() {}
-  } as unknown as OrdinalMintHistoryDb & { put: ReturnType<typeof vi.fn>; list: ReturnType<typeof vi.fn> };
+  } as unknown as OrdinalMintHistoryRepository & { put: ReturnType<typeof vi.fn>; list: ReturnType<typeof vi.fn> };
 }
 
 function fakeService(): OrdinalsServiceHandle & { sync: ReturnType<typeof vi.fn> } {
@@ -110,7 +110,7 @@ describe("createOrdinalsSyncTask", () => {
       }
     ]);
     const notifier = fakeNotifier();
-    const historyDb = fakeHistoryDb([
+    const historyRepository = fakeHistoryRepository([
       {
         id: "mint-1",
         createdAt: "2024-01-01T00:00:00.000Z",
@@ -154,13 +154,13 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc({ tx0: "unconfirmed" }),
-      historyDb,
+      historyRepository,
       keyspace: fakeKeyspace("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
     await task.run({ signal: new AbortController().signal, reason: "manual", reportProgress() {} });
-    const updated = await historyDb.list();
+    const updated = await historyRepository.list();
     expect(updated[0]?.status).toBe("woc-observed-unconfirmed");
     expect(updated[0]?.submit?.spend.observation).toBe("unconfirmed");
   });
@@ -187,7 +187,7 @@ describe("createOrdinalsSyncTask", () => {
       }
     ]);
     const notifier = fakeNotifier();
-    const historyDb = fakeHistoryDb([
+    const historyRepository = fakeHistoryRepository([
       {
         id: "mint-1c",
         createdAt: "2024-01-01T00:00:00.000Z",
@@ -231,13 +231,13 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc({ tx0: "confirmed" }),
-      historyDb,
+      historyRepository,
       keyspace: fakeKeyspace("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
     await task.run({ signal: new AbortController().signal, reason: "manual", reportProgress() {} });
-    const updated = await historyDb.list();
+    const updated = await historyRepository.list();
     expect(updated[0]?.status).toBe("woc-confirmed");
     expect(updated[0]?.submit?.spend.observation).toBe("confirmed");
   });
@@ -246,7 +246,7 @@ describe("createOrdinalsSyncTask", () => {
     const service = fakeService();
     (service.listActiveKeyCollectibles as ReturnType<typeof vi.fn>).mockResolvedValue([]);
     const notifier = fakeNotifier();
-    const historyDb = fakeHistoryDb([
+    const historyRepository = fakeHistoryRepository([
       {
         id: "mint-2",
         createdAt: "2024-01-01T00:00:00.000Z",
@@ -291,13 +291,13 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc({}),
-      historyDb,
+      historyRepository,
       keyspace: fakeKeyspace("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
     await task.run({ signal: new AbortController().signal, reason: "manual", reportProgress() {} });
-    const updated = await historyDb.list();
+    const updated = await historyRepository.list();
     expect(updated[0]?.status).toBe("woc-confirmed");
     expect(updated[0]?.submit?.spend.observation).toBe("confirmed");
   });
@@ -305,7 +305,7 @@ describe("createOrdinalsSyncTask", () => {
   it("history 只有先 observed-unconfirmed、随后交易级 observation 消失时才会 dropped", async () => {
     const service = fakeService();
     const notifier = fakeNotifier();
-    const historyDb = fakeHistoryDb([
+    const historyRepository = fakeHistoryRepository([
       {
         id: "mint-2d",
         createdAt: "2024-01-01T00:00:00.000Z",
@@ -350,13 +350,13 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc({}),
-      historyDb,
+      historyRepository,
       keyspace: fakeKeyspace("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
     await task.run({ signal: new AbortController().signal, reason: "manual", reportProgress() {} });
-    const updated = await historyDb.list();
+    const updated = await historyRepository.list();
     expect(updated[0]?.status).toBe("woc-dropped");
     expect(updated[0]?.submit?.spend.observation).toBeUndefined();
     expect(updated[0]?.submit?.spend.droppedReason).toBe("woc-dropped");
@@ -384,7 +384,7 @@ describe("createOrdinalsSyncTask", () => {
       }
     ]);
     const notifier = fakeNotifier();
-    const historyDb = fakeHistoryDb([
+    const historyRepository = fakeHistoryRepository([
       {
         id: "mint-restore",
         createdAt: "2024-01-01T00:00:00.000Z",
@@ -428,13 +428,13 @@ describe("createOrdinalsSyncTask", () => {
     const task = createOrdinalsSyncTask({
       service,
       woc: fakeWoc({ "tx-restore": "confirmed" }),
-      historyDb,
+      historyRepository,
       keyspace: fakeKeyspace("pk1"),
       vault: fakeVault(),
       assetDataNotifier: notifier
     });
     await task.run({ signal: new AbortController().signal, reason: "manual", reportProgress() {} });
-    const updated = await historyDb.list();
+    const updated = await historyRepository.list();
     expect(updated[0]?.status).toBe("woc-confirmed");
     expect(updated[0]?.submit?.spend.observation).toBe("confirmed");
   });

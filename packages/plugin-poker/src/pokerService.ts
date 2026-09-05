@@ -6,11 +6,11 @@
 // 设计缘由（硬切换 004）：
 //   - Poker 身份永远跟随平台 `keyspace.active()` 的 single-mode ready
 //     key；不再维护独立的"稳定 poker identity 绑定"。
-//   - 全局网络配置（proxy endpoint / 双平面 announce / fallback 开关）
-//     走 pokerGlobalConfig（localStorage）；切 active key 不丢。
+//   - 网络配置（proxy endpoint / 双平面 announce / fallback 开关）由 Host
+//     注入的 Poker owner/App K-V 句柄承载。
 //   - key-scoped storage 只承载"明确属于当前 active key 的扑克状态"：
 //     presences / tables / txIngest。切换 active key 时清空旧 key 内存态，
-//     并在 key.deleting 时主动 teardown（不依赖平台删 DB 自然失败）。
+//     并在 key.deleting 时主动 teardown（不依赖平台删 K-V 自然失败）。
 //   - vault 锁定 / all 模式 / active key failed / uninitialized → 一律
 //     fail-closed（断开、停止重连、不允许 publish、UI 提示原因）。
 //   - 重连策略：指数 backoff（1s / 2s / 5s / 10s / 30s 上限）。
@@ -29,12 +29,14 @@
 import type {
   KeyIdentity,
   KeyspaceService,
+  KeyValueStore,
   MessageBus,
   PluginLogger,
   PokerService,
   PokerSessionKeyState,
   VaultService
 } from "@keymaster/contracts";
+import { createKeyValueSettingsStore, type KeyValueSettingsStore } from "@keymaster/runtime";
 import {
   POKER_BROWSER_PROTOCOL_VERSION,
   POKER_FRAME_TYPE,
@@ -57,15 +59,11 @@ import {
   readAllPresences,
   readAllTables,
   readAllTxIngest,
-  readLegacyKeyScopedSettings,
-  upgradePokerDb,
   writeTxIngest
-} from "./pokerDb.js";
+} from "./storage/pokerRepository.js";
 import {
   defaultGlobalPokerConfig,
-  normalizePokerConfig,
-  readPokerGlobalConfig,
-  writePokerGlobalConfig
+  normalizePokerConfig
 } from "./pokerGlobalConfig.js";
 import { resolvePokerSessionKey } from "./pokerSessionKey.js";
 
@@ -84,6 +82,8 @@ export interface PokerServiceDeps {
    * 走统一日志。不传时不记日志。
    */
   logger?: PluginLogger;
+  /** Host 绑定的 Poker owner/App K-V 句柄；缺失时禁止启动。 */
+  storage: KeyValueStore;
 }
 
 /**
@@ -92,7 +92,7 @@ export interface PokerServiceDeps {
  * 设计缘由：plugin-poker 的 manifest.setup 阶段调用本函数；service 不
  * 与 React / 路由耦合，单独可单测。
  */
-export function createPokerService(deps: PokerServiceDeps): PokerService {
+export function createPokerService(deps: PokerServiceDeps): PokerService & { ready(): Promise<void> } {
   return new PokerServiceImpl(deps);
 }
 
@@ -119,8 +119,10 @@ class PokerServiceImpl implements PokerService {
   private ws: WebSocket | null = null;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  /** settings 来自 pokerGlobalConfig（localStorage）；默认值满足 fail-closed。 */
+  /** settings 来自 Host 绑定的 K-V；默认值满足 fail-closed。 */
   private settings: PokerSettings = defaultGlobalPokerConfig();
+  private readonly settingsStore: KeyValueSettingsStore<PokerSettings>;
+  private settingsReady: Promise<void>;
   private presences = new Map<string, PokerPresence>();
   private tables = new Map<string, PokerTable>();
   private txEvents: PokerTxEvent[] = [];
@@ -209,6 +211,14 @@ class PokerServiceImpl implements PokerService {
 
   constructor(deps: PokerServiceDeps) {
     this.deps = deps;
+    this.settingsStore = createKeyValueSettingsStore<PokerSettings>({
+      storage: deps.storage,
+      key: "settings",
+      partition: "settings",
+      defaults: defaultGlobalPokerConfig,
+      normalize: normalizePokerConfig
+    });
+    this.settingsReady = this.reloadSettings();
     this.engine = new PokerProtocolEngine({
       hooks: {
         onAnnounce: ({ playerPubHex, endpoint }) => {
@@ -260,13 +270,6 @@ class PokerServiceImpl implements PokerService {
       }
     });
 
-    // 一次性 hydrate 全局配置（settings 不再依赖 binding）。
-    try {
-      this.settings = readPokerGlobalConfig();
-    } catch {
-      this.settings = defaultGlobalPokerConfig();
-    }
-
     // ---------------------------------------------------------------------
     // 平台事件订阅
     // ---------------------------------------------------------------------
@@ -279,8 +282,8 @@ class PokerServiceImpl implements PokerService {
     // key.deleting：删除前主清理钩子。
     //
     // 设计缘由：service 必须消费这条事件，主动停止旧会话、停重连、清内存态。
-    // 不能只依赖"平台删 IndexedDB 名字后自然失败"——那时 namespace DB 已
-    // 进入删除流程，迟到写入与重连会制造竞态。
+    // 不能只依赖平台删除 owner namespace 后自然失败——迟到写入与重连会
+    // 制造竞态。
     //
     // 关键不变量（硬切换 004 反馈修复）："当前 session key"的判定**不能**
     // 依赖 this.currentSessionKeyHash——该字段是异步 rebindToActiveKey("init")
@@ -342,7 +345,7 @@ class PokerServiceImpl implements PokerService {
     // 在订阅时立刻推一次 handler（见 packages/plugin-vault/src/keyspaceService.ts
     // 的 onActiveChange 实现）。如果这里直接调 rebindToActiveKey，构造
     // 阶段会对同一把 key 跑两次 rebind + hydrate——第二次会重复 push
-    // txEvents（详见 hydrateFromKeyScopedDb 内部去重逻辑）。改成走
+    // txEvents（详见 hydrateFromKeyScopedRepository 内部去重逻辑）。改成走
     // scheduleRebindToActiveKey 让两次请求被 rebindScheduled flag 合并：
     //   - 如果 onActiveChange 已经 schedule 过，本调用被 swallow；
     //   - 如果 onActiveChange 是 lazy（测试桩），本调用 schedule 一次。
@@ -473,7 +476,7 @@ class PokerServiceImpl implements PokerService {
   }
 
   /**
-   * 更新全局网络配置；同时持久化到 pokerGlobalConfig（localStorage）。
+   * 更新全局网络配置；同时持久化到 Poker owner/App K-V 的 settings 记录。
    *
    * 设计缘由（硬切换 004）：
    *   - 全局配置不随切 key 丢失，所以写盘目标是 global config；
@@ -484,7 +487,7 @@ class PokerServiceImpl implements PokerService {
   async updateSettings(patch: Partial<PokerSettings>): Promise<void> {
     const next: PokerSettings = { ...this.settings, ...patch };
     this.settings = normalizePokerConfig(next);
-    writePokerGlobalConfig(this.settings);
+    this.settingsStore.save(this.settings);
     this.deps.messageBus.publish(POKER_EVENT.SettingsChanged, this.settings);
     this.notifySettings();
     if (patch.proxyEndpoint !== undefined && this.currentStatus === "ready") {
@@ -601,7 +604,7 @@ class PokerServiceImpl implements PokerService {
    *   2. 若不是 ready（vaultLocked / missing / notReady / noActiveKey）
    *      → teardown + fail-closed；
    *   3. 若与当前 session key 相同 → 不重复重连，仅刷新内部缓存；
-   *   4. 若不同 → teardown old → hydrate new key-scoped DB → 视用户
+   *   4. 若不同 → teardown old → hydrate new key-scoped K-V → 视用户
    *      意图（userWantsConnection）与 endpoint 配置决定是否自动重连。
    *
    * "reason" 仅用于日志 / 调试，不参与语义判断。
@@ -634,7 +637,7 @@ class PokerServiceImpl implements PokerService {
         state.key.publicKeyHex ? { myPub33: BsvEncoding.fromHex(state.key.publicKeyHex) } : null
       );
       // 同 key 也要 hydrate（首次启动 / 刷新场景）。
-      await this.hydrateFromKeyScopedDb(nextHash);
+      await this.hydrateFromKeyScopedRepository(nextHash);
       return;
     }
 
@@ -650,14 +653,10 @@ class PokerServiceImpl implements PokerService {
       state.key.publicKeyHex ? { myPub33: BsvEncoding.fromHex(state.key.publicKeyHex) } : null
     );
 
-    // 尝试把旧 v1/v2 key-scoped settings 一次性迁到全局（仅当当前
-    // 全局配置仍是默认值，且旧 DB 还有 settings 行）。
-    await this.migrateLegacySettingsIfNeeded(state.key.publicKeyHex);
-
-    // 从当前 active key 的 key-scoped DB 重建 presences / tables /
+    // 从当前 active key 的 key-scoped K-V 重建 presences / tables /
     // txIngest 缓存。设计缘由（硬切换 004）：刷新后 / 切 key 后必须
     // 只恢复"明确属于该 key 的会话上下文"，不混淆。
-    await this.hydrateFromKeyScopedDb(nextHash);
+    await this.hydrateFromKeyScopedRepository(nextHash);
 
     // 自动重建连接（施工单硬切换 004 不变量 4 / 不变量 7）：
     //   - 切 active key 时旧会话收拢，新会话必须按新 key 重建；
@@ -670,59 +669,6 @@ class PokerServiceImpl implements PokerService {
       } catch {
         // status 已经反映失败；不向上冒泡。
       }
-    }
-  }
-
-  /**
-   * 把"v1 / v2 旧 key-scoped settings"一次性迁到全局 pokerGlobalConfig。
-   *
-   * 设计缘由：硬切换 004 要求"只从当前 active key 的旧 DB 尝试迁一次
-   * 到全局配置"。如果全局已经有用户显式保存的设置（不是默认），则
-   * 不覆盖（用户偏好优先）。如果当前 active key 没有旧 DB 或 settings
-   * 已被清，跳过。
-   */
-  private async migrateLegacySettingsIfNeeded(publicKeyHex: string | undefined): Promise<void> {
-    if (!publicKeyHex) return;
-    const global = readPokerGlobalConfig();
-    // 已经有非空 endpoint：用户已在新位置显式保存过，不再迁移覆盖。
-    if (global.proxyEndpoint) return;
-    try {
-      const handle = await this.deps.keyspace.openKeyStorage({
-        publicKeyHex,
-        pluginId: "plugin-poker",
-        storageId: POKER_KEY_STORAGE_ID,
-        version: POKER_KEY_STORAGE_VERSION,
-        upgrade: upgradePokerDb
-      });
-      try {
-        const legacy = await readLegacyKeyScopedSettings(handle.db);
-        if (legacy) {
-          const merged: PokerSettings = {
-            proxyEndpoint: legacy.proxyEndpoint ?? global.proxyEndpoint,
-            announceP2PNodeEndpoint:
-              legacy.announceP2PNodeEndpoint ?? global.announceP2PNodeEndpoint,
-            announceTxLinkEndpoint:
-              legacy.announceTxLinkEndpoint ?? global.announceTxLinkEndpoint,
-            allowFallbackBroadcast:
-              legacy.allowFallbackBroadcast ?? global.allowFallbackBroadcast
-          };
-          // 仅迁到有意义的字段（proxyEndpoint 非空）——空配置不值得覆盖默认。
-          if (merged.proxyEndpoint) {
-            writePokerGlobalConfig(merged);
-            this.settings = merged;
-            this.deps.messageBus.publish(POKER_EVENT.SettingsChanged, merged);
-            this.notifySettings();
-          }
-        }
-      } finally {
-        try {
-          handle.close();
-        } catch {
-          /* noop */
-        }
-      }
-    } catch {
-      // 旧 DB 打不开（vault locked / namespace 不可用）→ 跳过迁移
     }
   }
 
@@ -809,9 +755,9 @@ class PokerServiceImpl implements PokerService {
    * intendedSubscriptions / lastPresence / ownedTablePublishes）全部
    * 都只属于"当前 session key 的视图"——它们不是被删 key 的影子。
    * 当前 session 的会话状态不应该被影响。唯一需要清理的"残余引用"
-   * 是 txIngest / presences / tables 在 DB 里的持久化数据，但那些
-   * 属于被删 key 的 namespace DB，keyspace.deleteKey 自己负责
-   * deleteDatabase，不需要 plugin-poker 再做事。
+   * 是 txIngest / presences / tables 在 K-V 里的持久化数据，但那些
+   * 属于被删 key 的 namespace K-V，keyspace.deleteKey 自己负责
+   * delete owner namespace K-V content，不需要 plugin-poker 再做事。
    *
    * 结论：本函数在非当前 key 路径上是 no-op；保留作为防御性入口，
    * 并显式注释这条不变量，避免后续误改回"清空所有内存态"。
@@ -819,23 +765,23 @@ class PokerServiceImpl implements PokerService {
   private pruneReferencesToKey(publicKeyHex: string): void {
     void publicKeyHex;
     // 不变量：删除非当前 session key 不能打扰当前会话。当前内存态全部
-    // 是当前 session key 的视图；namespace DB 由 keyspace.deleteKey
+    // 是当前 session key 的视图；namespace K-V 由 keyspace.deleteKey
     // 删；本函数保留为空实现。
   }
 
   /**
-   * 从当前 active key 的 key-scoped IDB 恢复 presences / tables /
+   * 从当前 active key 的 key-scoped K-V 恢复 presences / tables /
    * txIngest 缓存。
    *
    * 设计缘由（硬切换 004 验收清单"浏览器刷新恢复"）：
    *   - 启动时：service 构造后立即 scheduleRebindToActiveKey("init")；
-   *     命中 same-key 分支后调本方法，从 IDB 把上次会话留下的
+   *     命中 same-key 分支后调本方法，从 K-V 把上次会话留下的
    *     presences / tables / txIngest 拉回内存。
    *   - 切 active key 后：rebindToActiveKey 命中 different-key 分支；
    *     清空旧 key 内存态 → 写入新 session key 引用 → 调本方法
-   *     从新 key 的 IDB 恢复。
-   *   - 任何失败（旧 DB 不存在 / vault 锁定 / namespace 已删）都
-   *     swallow；service 始终能用空 cache 起步，不会被 DB 阻塞。
+   *     从新 key 的 K-V 恢复。
+   *   - 任何失败（旧 K-V 不存在 / vault 锁定 / namespace 已删）都
+   *     swallow；service 始终能用空 cache 起步，不会被 K-V 阻塞。
    *
    * **幂等性（硬切换 004 反馈修复）**：本函数可以被同一 service 实例
    * 多次调用而不应产生重复数据。具体：
@@ -847,36 +793,12 @@ class PokerServiceImpl implements PokerService {
    * 阶段可能对同一把 key 跑两次 hydrate。test 桩 FakeKeyspace 也应该
    * 模拟这个 eager 行为，否则测试覆盖不到。
    */
-  private async hydrateFromKeyScopedDb(publicKeyHex: string | null): Promise<void> {
+  private async hydrateFromKeyScopedRepository(publicKeyHex: string | null): Promise<void> {
     if (!publicKeyHex) return;
     try {
-      const handle = await this.deps.keyspace.openKeyStorage({
-        publicKeyHex,
-        pluginId: "plugin-poker",
-        storageId: POKER_KEY_STORAGE_ID,
-        version: POKER_KEY_STORAGE_VERSION,
-        upgrade: upgradePokerDb
-      });
+      const handle = this.deps.storage;
       try {
-        // 容错：缺 store 的旧 namespace（比如从未升级到 v3）→ 当作
-        // 空 cache 处理，不阻塞 hydrate。生产路径下 upgradePokerDb 会
-        // 保证三个 store 都存在；这条防御针对"DB 被外部写入半成品 schema"
-        // 的边缘场景。
-        const db = handle.db;
-        const reads: Promise<unknown>[] = [
-          Promise.resolve([] as unknown),
-          Promise.resolve([] as unknown),
-          Promise.resolve([] as unknown)
-        ];
-        if (db.objectStoreNames.contains("tables")) {
-          reads[0] = readAllTables(db);
-        }
-        if (db.objectStoreNames.contains("presences")) {
-          reads[1] = readAllPresences(db);
-        }
-        if (db.objectStoreNames.contains("txIngest")) {
-          reads[2] = readAllTxIngest(db, this.txEventCap);
-        }
+        const reads: Promise<unknown>[] = [readAllTables(handle), readAllPresences(handle), readAllTxIngest(handle, this.txEventCap)];
         const [cachedTables, cachedPresences, cachedTxIngest] = await Promise.all(reads) as [
           ReturnType<typeof readAllTables> extends Promise<infer T> ? T : never,
           ReturnType<typeof readAllPresences> extends Promise<infer T> ? T : never,
@@ -915,7 +837,7 @@ class PokerServiceImpl implements PokerService {
         // 见 packages/plugin-vault/src/keyspaceService.ts），加上
         // 构造里我们主动 scheduleRebindToActiveKey("init")，构造阶段
         // 可能对同一把 key 做两次 hydrate。第二次如果只对本次新读到的
-        // rows 去重，仍会把 DB 里的全部条目重复 push 进 this.txEvents
+        // rows 去重，仍会把 K-V 里的全部条目重复 push 进 this.txEvents
         // （因为本次 seenTxids 是空的）。所以必须先把当前内存里的
         // txid 也并入 seenTxids，才能保证"同一 service 实例的 hydrate
         // 是幂等的"。
@@ -978,7 +900,7 @@ class PokerServiceImpl implements PokerService {
       }
     } catch {
       // namespace 打不开（vault locked / 已删 / 旧版本无表）→ 静默
-      // 兜底为空 cache。绝不允许 DB 故障阻塞 service 启动或切 key。
+      // 兜底为空 cache。绝不允许 K-V 故障阻塞 service 启动或切 key。
     }
   }
 
@@ -998,6 +920,21 @@ class PokerServiceImpl implements PokerService {
     ) {
       throw new Error("Poker session key drifted from active key");
     }
+  }
+
+  ready(): Promise<void> {
+    return this.settingsReady;
+  }
+
+  private reloadSettings(): Promise<void> {
+    return this.settingsStore.ready().catch((error) => {
+      // 插件在 active key 产生前可以先装载；延迟 owner 句柄此时没有
+      // 可读取的 namespace，等 keyspace active 事件再次调用 ready()。
+      if (!(error instanceof Error) || !/active key/u.test(error.message)) throw error;
+    }).then(() => {
+      this.settings = this.settingsStore.load();
+      this.notifySettings();
+    });
   }
 
   private setStatus(s: PokerConnectionStatus): void {
@@ -1300,7 +1237,7 @@ class PokerServiceImpl implements PokerService {
     }
     for (const h of this.txHandlers) h(e);
     this.deps.messageBus.publish(POKER_EVENT.Tx, e);
-    // 持久化到当前 session key 的 IDB（仅在有 session key 时）。
+    // 持久化到当前 session key 的 K-V（仅在有 session key 时）。
     void this.persistTxIngestForCurrentKey(e);
     try {
       this.engine.handleRawTx(rawTx);
@@ -1310,8 +1247,8 @@ class PokerServiceImpl implements PokerService {
   }
 
   /**
-   * 把 tx ingest 事件持久化到当前 session key 的 key-scoped DB。
-   * 设计缘由：硬切换 004 后 key-scoped DB 只承载"明确属于该 key 的扑
+   * 把 tx ingest 事件持久化到当前 session key 的 key-scoped K-V。
+   * 设计缘由：硬切换 004 后 key-scoped K-V 只承载"明确属于该 key 的扑
    * 克状态"。txIngest 来自当前会话，归当前 session key 拥有，因此
    * 写当前 session key 的 namespace。
    */
@@ -1319,15 +1256,9 @@ class PokerServiceImpl implements PokerService {
     const hash = this.currentSessionKeyHash;
     if (!hash) return;
     try {
-      const handle = await this.deps.keyspace.openKeyStorage({
-        publicKeyHex: hash,
-        pluginId: "plugin-poker",
-        storageId: POKER_KEY_STORAGE_ID,
-        version: POKER_KEY_STORAGE_VERSION,
-        upgrade: upgradePokerDb
-      });
+      const handle = this.deps.storage;
       try {
-        await writeTxIngest(handle.db, {
+        await writeTxIngest(handle, {
           txid: e.txid,
           route: e.route,
           kind: e.kind,

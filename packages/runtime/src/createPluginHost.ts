@@ -22,6 +22,7 @@ import type {
   I18nPluginResources,
   I18nService,
   KeyspaceService,
+  KeyValueStore,
   LogService,
   MessageBus,
   PluginContext,
@@ -47,8 +48,10 @@ import {
   CHANNEL_RUNTIME_CAPABILITY,
   RUNTIME_MESSAGE_BUS as RUNTIME_MESSAGE_BUS_CONTRACT
 } from "@keymaster/contracts";
+import { assertSystemStorageDeclaration, validatePluginStorageDeclaration, type PluginStorageDeclaration } from "@keymaster/contracts";
 import type { ChannelRuntimeFactory } from "@keymaster/contracts";
 import type { ContactPublicKeyActionRegistry } from "@keymaster/contracts";
+import type { StorageBindingAuthority } from "@keymaster/contracts/storage-internal";
 
 import { createCapabilityRegistry, type CapabilityRegistry } from "./capabilityRegistry.js";
 import { createMessageBus } from "./messageBus.js";
@@ -116,7 +119,7 @@ export interface PluginHost {
   i18n: I18nService;
   /** 硬切换 002：runtime 内建 log service（统一日志平台）。 */
   log: LogService;
-  /** 启停全局配置（localStorage 持久化 + storage 事件广播）。 */
+  /** 启停全局配置（平台 settings K-V 持久化）。 */
   configStore: PluginConfigStore;
   /** 硬切换 003：资源存储（React 读业务数据、订阅业务数据变更的唯一框架入口）。 */
   resourceStore: ResourceStoreApi;
@@ -140,6 +143,8 @@ export interface PluginHost {
 
   // ===== 新生命周期 =====
   enable(pluginId: string): Promise<void>;
+  /** 清除 blocked/error-disabled 状态并显式重试插件装配。 */
+  retry(pluginId: string): Promise<void>;
   disable(pluginId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
   unregister(pluginId: string): Promise<void>;
   assertCapabilities(capabilities: readonly string[], options?: { phase?: string }): void;
@@ -169,8 +174,27 @@ export interface CreatePluginHostOptions {
   disableConfigPersistence?: boolean;
   /** Tests: disable runtime log persistence/startup and drop append writes. */
   disableLogPersistence?: boolean;
+  /** 生产装配层注入 logs platform K-V 句柄。 */
+  logStorage?: KeyValueStore;
+  /** 生产装配层注入 runtime settings platform K-V 句柄。 */
+  configStorage?: KeyValueStore;
+  /** 无远端配置时使用的初始内存插件启停配置。 */
+  initialPluginConfig?: Record<string, boolean>;
+  /** Host 内部存储绑定权威；不向业务插件暴露。 */
+  storageBindingAuthority?: StorageBindingAuthority;
+  /**
+   * 由应用装配层按 manifest.id 生成插件专属 Coordinator 面。
+   * runtime 不理解各业务 RPC，也不会把一个通用 client 注入所有插件。
+   */
+  coordinatorForPlugin?: (pluginId: string) => unknown;
   safePath?: string;
 }
+
+/**
+ * 可以申请桶级 platform namespace 的最小白名单。
+ * 该列表按插件身份授权，不按 `kind`、插件名称或 capability 猜测权限。
+ */
+export const PLATFORM_STORAGE_MANIFEST_ALLOWLIST = new Set(["storage", "protocol", "vault", "settings"]);
 
 interface PluginRecord {
   manifest: PluginManifest;
@@ -323,12 +347,15 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     debug: options.i18nDebug
   });
 
-  const logService: LogServiceHandle = createLogService({ disablePersistence: options.disableLogPersistence });
+  const logService: LogServiceHandle = createLogService({
+    storage: options.logStorage,
+    disablePersistence: options.disableLogPersistence
+  });
 
   /**
    * 资产数据变更通知器。
    * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
-   * 后台任务原子提交 provider DB 后发布此事件，页面收到后只重读本地 DB。
+   * 后台任务原子提交 provider K-V 后发布此事件，页面收到后只重读本地 K-V。
    *
    * 合并语义（硬切换 003）：
    * - 同一 `providerId + publicKeyHex` 的同一 microtask 内事件合并
@@ -393,7 +420,11 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
   // route.registry path 探测，避免 settings.registry 与 route.registry 双渲染。
   settings.setRoutePathProbe((path) => routes.byPath(path) !== undefined);
 
-  const configStore = createPluginConfigStore({ readOnly: options.disableConfigPersistence });
+  const configStore = createPluginConfigStore({
+    readOnly: options.disableConfigPersistence,
+    storage: options.configStorage,
+    initial: options.initialPluginConfig
+  });
 
   const knownManifests = new Map<string, PluginManifest>();
   const records = new Map<string, PluginRecord>();
@@ -425,7 +456,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     resourceStore.refreshRuntimeBindings();
   }
 
-  function buildContext(record: PluginRecord): PluginContext {
+  function buildContext(record: PluginRecord, storage?: KeyValueStore): PluginContext {
     const ownerResourceRegistry: ResourceRegistry = {
       register: (definition) => registerOwnedResource(resourceRegistry, record.manifest.id, definition),
       unregister: (id) => resourceRegistry.unregister(id),
@@ -463,8 +494,91 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       logger: logService.forPlugin(record.manifest.id),
       // 2026-07-08 001 硬切换：plugin 作者通过 `manifest.config` 注入的
       // 强类型配置真值；缺省 = `{}`，插件对每个字段自处理缺值降级。
-      config: record.manifest.config ?? {}
+      config: record.manifest.config ?? {},
+      storage,
+      // Coordinator facade 必须由 Host 按 manifest id 注入；不再从一个全局
+      // SessionCoordinatorClient capability 回退，避免插件借用其他插件的权限面。
+      coordinator: options.coordinatorForPlugin?.(record.manifest.id)
     };
+  }
+
+  /**
+   * 为 key-scope 插件提供一个由 Host 控制的延迟绑定句柄。
+   *
+   * 首屏可能尚未解锁 Vault，此时没有可绑定的 owner；但插件仍需完成
+   * setup 并注册能力。句柄只在第一次 K-V 操作时按当前 active key 打开
+   * 真正的 OwnerAppStore，切 key 时自动丢弃旧底层句柄。插件始终只能
+   * 接触这个 Host 句柄，不能自行提供 owner、bucket 或物理路径。
+   */
+  function isStaleOwnerStorageBinding(error: unknown): boolean {
+    const code = error && typeof error === "object" && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+    if (code === "storage_unavailable" || code === "storage_identity_required") return true;
+    const message = error instanceof Error ? error.message : String(error);
+    return /owner storage (?:handle|grant|binding) .*?(?:stale|invalid|changed)|owner storage .*unavailable|owner storage owner changed|owner storage bucket generation changed/i.test(message);
+  }
+
+  function createDeferredOwnerAppStore(authority: StorageBindingAuthority, record: PluginRecord, declaration: PluginStorageDeclaration): KeyValueStore {
+    let closed = false;
+    let ownerPublicKeyHex: string | undefined;
+    let bucketGeneration: number | undefined;
+    let current: KeyValueStore | undefined;
+    const invalidateCurrent = () => {
+      current?.close();
+      current = undefined;
+      ownerPublicKeyHex = undefined;
+      bucketGeneration = undefined;
+    };
+    async function resolve(): Promise<KeyValueStore> {
+      if (closed) throw new Error("Owner storage handle is closed");
+      const activeOwnerPublicKeyHex = authority.getActivePublicKeyHex?.()?.toLowerCase();
+      const ownerChanged = authority.getActivePublicKeyHex !== undefined
+        && (!activeOwnerPublicKeyHex || ownerPublicKeyHex !== activeOwnerPublicKeyHex);
+      if (!current || !ownerPublicKeyHex || ownerChanged || bucketGeneration !== current.bucketGeneration) {
+        invalidateCurrent();
+        current = await authority.openOwnerAppStore({ pluginId: record.manifest.id, declaration });
+        ownerPublicKeyHex = current.ownerPublicKeyHex;
+        bucketGeneration = current.bucketGeneration;
+      }
+      return current;
+    }
+    const run = async <T>(operation: (store: KeyValueStore) => Promise<T>): Promise<T> => {
+      const store = await resolve();
+      try {
+        return await operation(store);
+      } catch (error) {
+        // Root/会话恢复后不能重试当前写入：响应可能已经越过远端
+        // 写入边界。这里只丢弃旧绑定，让下一次调用重新申请 grant。
+        if (isStaleOwnerStorageBinding(error)) invalidateCurrent();
+        throw error;
+      }
+    };
+    return {
+      get bucketId() { return current?.bucketId ?? "pending"; },
+      get bucketGeneration() { return current?.bucketGeneration ?? 0; },
+      get ownerPublicKeyHex() { return ownerPublicKeyHex ?? ""; },
+      applicationStorageId: declaration.applicationStorageId,
+      get: async (key, options) => run((store) => store.get(key, options)),
+      list: async (input) => run((store) => store.list(input)),
+      put: async (key, value, condition) => run((store) => store.put(key, value, condition)),
+      delete: async (key, condition) => { await run((store) => store.delete(key, condition)); },
+      commit: async (input) => run((store) => store.commit(input)),
+      close: () => { if (closed) return; closed = true; invalidateCurrent(); }
+    };
+  }
+
+  async function bindManifestStorage(record: PluginRecord): Promise<KeyValueStore | undefined> {
+    const declaration = record.manifest.storage;
+    if (!declaration) return undefined;
+    const authority = options.storageBindingAuthority ?? (capabilities.has("storage.binding-authority")
+      ? capabilities.get<StorageBindingAuthority>("storage.binding-authority")
+      : undefined);
+    if (!authority) throw new Error(`Plugin "${record.manifest.id}" requires the storage binding authority`);
+    if (declaration.scope === "platform") {
+      return authority.openPlatformStore({ pluginId: record.manifest.id, applicationStorageId: declaration.applicationStorageId, schemaVersion: declaration.schemaVersion });
+    }
+    return createDeferredOwnerAppStore(authority, record, declaration);
   }
 
   function snapshotOwnership() {
@@ -507,6 +621,17 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
 
   function validateManifest(plugin: PluginManifest, manifestSet?: readonly PluginManifest[]): void {
     const meta = plugin.meta;
+    const declarations = plugin.storage ? [plugin.storage] : [];
+    for (const declaration of declarations) {
+      if (declaration.scope === "platform" && !PLATFORM_STORAGE_MANIFEST_ALLOWLIST.has(plugin.id)) {
+        throw new Error(`Plugin "${plugin.id}" is not allowed to declare platform storage`);
+      }
+      if (declaration.scope === "key" && declaration.applicationStorageId.toLowerCase() === "keys") {
+        throw new Error(`Plugin "${plugin.id}" cannot claim the platform keys namespace`);
+      }
+      validatePluginStorageDeclaration(declaration);
+      assertSystemStorageDeclaration(plugin.id, declaration);
+    }
     if (meta.startup === "required") {
       if (!meta.defaultEnabled) throw new Error(`Required plugin "${plugin.id}" must have defaultEnabled=true`);
       if (meta.canDisable) throw new Error(`Required plugin "${plugin.id}" must have canDisable=false`);
@@ -547,11 +672,11 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     }
   }
 
-  async function runSetup(record: PluginRecord): Promise<void> {
+  async function runSetup(record: PluginRecord, storage?: KeyValueStore): Promise<void> {
     const before = snapshotOwnership();
     let teardownFn: (() => void | Promise<void>) | undefined;
     try {
-      const result = record.manifest.setup(buildContext(record));
+      const result = record.manifest.setup(buildContext(record, storage));
       teardownFn = (await Promise.resolve(result)) as
         | (() => void | Promise<void>)
         | undefined;
@@ -716,6 +841,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     return firstError;
   }
 
+  // configStore 订阅会在插件启用过程中收到 setEnabled 通知；用 in-flight
+  // 集合避免同一插件被递归 enable，导致 setup 永不返回。
+  const enablingPluginIds = new Set<string>();
+
   const host: PluginHost = {
     capabilities,
     messageBus,
@@ -809,6 +938,26 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       validateManifest(plugin);
       if (knownManifests.has(plugin.id)) {
         knownManifests.set(plugin.id, plugin);
+        const record = records.get(plugin.id);
+        if (record) {
+          record.manifest = plugin;
+          // Host 在第一次 setup 前就会记录 manifest。required 插件第一次
+          // setup 失败后，后续阶段重放 register 时不能把“已知”误当成
+          // “已装配”；必须显式清除失败状态并重新 enable。
+          if ((isStartupRequired(plugin) || plugin.meta.canDisable === false)
+            && (record.state === "error-disabled" || record.state === "blocked")) {
+            try {
+              await host.retry(plugin.id);
+            } catch (err) {
+              throw new StartupPluginError({
+                pluginId: plugin.id,
+                capabilities: plugin.meta.providesCapabilities ?? [],
+                state: record.state,
+                error: record.error ?? (err instanceof Error ? err.message : String(err))
+              });
+            }
+          }
+        }
         return;
       }
       knownManifests.set(plugin.id, plugin);
@@ -867,6 +1016,10 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
     },
 
     async enable(pluginId) {
+      if (enablingPluginIds.has(pluginId)) return;
+      enablingPluginIds.add(pluginId);
+      try {
+        return await (async () => {
       const record = records.get(pluginId);
       if (!record) {
         throw new Error(`Plugin "${pluginId}" is not registered`);
@@ -885,23 +1038,14 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
       }
       enabledSet.add(pluginId);
       registerCapabilitiesFor(record);
+      let storage: KeyValueStore | undefined;
       try {
-        await runSetup(record);
+        storage = await bindManifestStorage(record);
+        await runSetup(record, storage);
         const declared = record.manifest.meta.providesCapabilities ?? [];
         const owned = new Set(record.ownership.capabilities);
         const missing = declared.filter((cap) => !owned.has(cap));
         if (missing.length) throw new Error(`Plugin "${pluginId}" did not provide declared capabilities: ${missing.join(", ")}`);
-        if (record.manifest.keyScopedStorages && record.manifest.keyScopedStorages.length > 0) {
-          if (capabilities.has(KEYSPACE_SERVICE_CAPABILITY)) {
-            const keyspace = capabilities.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
-            for (const decl of record.manifest.keyScopedStorages) {
-              keyspace.registerPluginStorage({
-                pluginId: record.manifest.id,
-                storageId: decl.storageId
-              });
-            }
-          }
-        }
         record.state = "enabled";
         record.error = undefined;
         configStore.setEnabled(pluginId, true);
@@ -916,6 +1060,7 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         bumpVersion();
       } catch (err) {
         enabledSet.delete(pluginId);
+        storage?.close();
         await runDisposeCallbacks(record);
         const ownership = record.ownership;
         purgeOwnership(ownership, pluginId);
@@ -928,6 +1073,24 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         bumpVersion();
         throw err;
       }
+        })();
+      } finally {
+        enablingPluginIds.delete(pluginId);
+      }
+    },
+
+    async retry(pluginId) {
+      const record = records.get(pluginId);
+      if (!record) throw new Error(`Plugin "${pluginId}" is not registered`);
+      if (record.state === "enabled") return;
+      if (record.state !== "error-disabled" && record.state !== "blocked" && record.state !== "disabled" && record.state !== "registered") {
+        return;
+      }
+      record.state = "registered";
+      record.error = undefined;
+      enabledSet.delete(pluginId);
+      bumpVersion();
+      await host.enable(pluginId);
     },
 
     async disable(pluginId) {
@@ -1034,6 +1197,9 @@ export function createPluginHost(options: CreatePluginHostOptions = {}): PluginH
         ? true
         : snap[id] ?? record.manifest.meta.defaultEnabled;
       if (want && !isEnabled) {
+        // setup 失败的不可禁用插件留在 error-disabled，等待显式重试；
+        // 不能在每次其它插件写配置时无限重试并递归 setup。
+        if (record.state === "error-disabled") continue;
         void host.enable(id).catch(() => {
           /* ignore: 留给 UI 显示错误 */
         });
@@ -1054,7 +1220,7 @@ void (null as unknown as KeyspaceService);
 /**
  * 创建资产数据变更通知器。
  * 设计缘由：统一本 tab pub/sub 与跨 tab BroadcastChannel 失效通知。
- * 后台任务原子提交 provider DB 后发布此事件，页面收到后只重读本地 DB。
+ * 后台任务原子提交 provider K-V 后发布此事件，页面收到后只重读本地 K-V。
  *
  * 合并语义（硬切换 003）：
  * - 同一 `providerId + publicKeyHex` 的同一 microtask 内事件合并

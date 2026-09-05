@@ -1,16 +1,12 @@
-// 重新导出底层 db 工具：供 plugin-settings 测试夹具使用。
-// 设计缘由：plugin-settings 的 LogSettingsPage.test.tsx 需要在每个用例
-// 前后清理日志 DB；runtime 的统一入口不暴露 disposeLogDb（生产代码
-// 不应直接拿到 DB 句柄），但测试夹具用浅 re-export 拿到 disposeLogDb /
-// LOG_DB_NAME 是更克制的方案——业务插件仍只能走 log.service。
-export { disposeLogDb, LOG_DB_NAME } from "./logDb.js";
+// 测试夹具只通过 runtime 入口清理日志，不接触物理 Provider。
+export { configureLogRepository, disposeLogRepository, LOG_STORAGE_ID } from "./logRepository.js";
 
 // packages/runtime/src/log/logService.ts
 // LogService 实现（施工单 002 硬切换）。
 //
 // 关键不变量：
 //   1. 唯一入口：业务插件通过 ctx.logger（即 forPlugin(...) 拿到）；
-//      禁止 plugin 自己 new logger 或绕过 runtime 直接 indexedDB。
+//      禁止 plugin 自己 new logger 或绕过 runtime 直接访问平台存储。
 //   2. debugEnabled=false 时 logger.debug() 直接返回，不写库、不排队、不补历史。
 //   3. forPlugin() 返回的 logger 已天然绑定 pluginId，child(scope) 只追加 scope。
 //   4. append 内部统一做：归一化、敏感字段过滤、长度截断。
@@ -34,17 +30,16 @@ import {
   type PluginLogger
 } from "@keymaster/contracts";
 import {
+  configureLogRepository,
   deleteWhere,
-  disposeLogDb,
+  disposeLogRepository,
   getConfigRow,
   listAllEntries,
-  listByPlugin,
-  LOG_STORE_ENTRIES,
   putConfigRow,
   putEntry,
   type LogConfigRow,
   type LogEntryRow
-} from "./logDb.js";
+} from "./logRepository.js";
 
 /** 单条 entry 中 data / error.stack 截断长度上限。 */
 const MAX_FIELD_LENGTH = 2000;
@@ -198,11 +193,13 @@ function matchesClear(entry: LogEntry, q: LogClearQuery): boolean {
 }
 
 export interface CreateLogServiceOptions {
+  /** 生产装配层注入 logs platform K-V 句柄。 */
+  storage?: import("@keymaster/contracts").KeyValueStore;
   /** Tests: disable log persistence/startup and drop append writes. */
   disablePersistence?: boolean;
   /**
    * 初始配置；缺省使用 DEFAULT_LOG_CONFIG。
-   * service 第一次 getConfig 时会尝试从 DB 读；DB 还不存在时使用 init。
+   * service 第一次 getConfig 时会尝试从 K-V 读；K-V 还不存在时使用 init。
    */
   init?: LogConfig;
   /**
@@ -218,13 +215,14 @@ export interface CreateLogServiceOptions {
 }
 
 export interface LogServiceHandle extends LogService {
-  /** 关闭 db 句柄并清掉 listeners；仅测试 / dispose 使用。 */
+  /** 关闭 repository 句柄并清掉 listeners；仅测试 / dispose 使用。 */
   dispose(): void;
   /** 等待当前已入队日志 best-effort 落库；仅 runtime 内部 / 测试使用。 */
   flush(options?: { timeoutMs?: number }): Promise<void>;
 }
 
 export function createLogService(options: CreateLogServiceOptions = {}): LogServiceHandle {
+  if (options.storage) configureLogRepository(options.storage);
   const persistenceDisabled = options.disablePersistence === true;
   let config: LogConfig = { ...(options.init ?? DEFAULT_LOG_CONFIG) };
   const listeners = new Set<(c: LogConfig) => void>();
@@ -236,8 +234,8 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   // 共享 in-flight Promise：所有调用 await 同一个 Promise。
   // 修复前用布尔 `initialized` 短路，后续 append/list/updateConfig 在首次
   // ensureInit 还没完成时就立刻返回，会基于默认 config 做判断 / 写操作，
-  // 错过 DB 真值（debugEnabled / retentionDays）。改成共享 Promise 后，
-  // 任意调用方在 DB 读取完成前都会被挂起，等首次 init 落定才继续。
+  // 错过 K-V 真值（debugEnabled / retentionDays）。改成共享 Promise 后，
+  // 任意调用方在 K-V 读取完成前都会被挂起，等首次 init 落定才继续。
   let initPromise: Promise<void> | null = null;
   let writeTail: Promise<void> = Promise.resolve();
   function ensureInit(): Promise<void> {
@@ -251,7 +249,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
             retentionDays: typeof row.retentionDays === "number" ? row.retentionDays : config.retentionDays,
             debugEnabled: Boolean(row.debugEnabled)
           };
-          // 仅在 DB 真值与 init 不一致时更新并通知订阅者；避免每次启动
+          // 仅在 K-V 真值与 init 不一致时更新并通知订阅者；避免每次启动
           // 都推送一次等价事件。
           if (next.retentionDays !== config.retentionDays || next.debugEnabled !== config.debugEnabled) {
             config = next;
@@ -268,7 +266,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
     })();
     return initPromise;
   }
-  /** 强制重新从 DB 读取（清掉 initPromise 缓存）；测试 / dispose 后用。 */
+  /** 强制重新从 K-V 读取（清掉 initPromise 缓存）；测试 / dispose 后用。 */
   function resetInit(): void {
     initPromise = null;
   }
@@ -412,9 +410,9 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
     },
 
     async updateConfig(patch) {
-      // 关键顺序：先 await ensureInit 让内存 config 与 DB 真值对齐；
+      // 关键顺序：先 await ensureInit 让内存 config 与 K-V 真值对齐；
       // 然后再读取 / 合并 patch。否则首次 init 还没完成时，patch 会基于
-      // 默认 init 计算，init 完成后反而用 DB 真值覆盖用户的 update。
+      // 默认 init 计算，init 完成后反而用 K-V 真值覆盖用户的 update。
       await ensureInit();
       const prevRetention = config.retentionDays;
       const next: LogConfig = {
@@ -518,7 +516,7 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
       removeBrowserFlushHooks?.();
       void (async () => {
         await flushPendingWrites({ timeoutMs: 250 });
-        await disposeLogDb();
+        await disposeLogRepository();
         resetInit();
       })();
     }
@@ -554,9 +552,9 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
   // "retentionDays 过期删除是 best-effort，不因为清理失败阻断系统启动"
   // 的语义。失败只走 onWriteError，不冒泡。
   //
-  // 顺序：先 ensureInit 让 DB 真值与内存对齐；再 prune。
+  // 顺序：先 ensureInit 让 K-V 真值与内存对齐；再 prune。
   // skipStartupPrune 仅跳过 prune；ensureInit 仍然要跑，否则内存 config
-  // 一直是 init 值，订阅者也收不到 DB 真值。
+  // 一直是 init 值，订阅者也收不到 K-V 真值。
   if (!persistenceDisabled) void (async () => {
     await ensureInit();
     if (options.skipStartupPrune) return;
@@ -572,10 +570,6 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
 
   return service;
 }
-
-// 抑制 unused 警告：listByPlugin 仅供未来扩展清理工具使用，本期不消费。
-void listByPlugin;
-void LOG_STORE_ENTRIES;
 
 // 类型守卫 / 帮助：明确 LogListItem 别名。
 export type { LogListItem };

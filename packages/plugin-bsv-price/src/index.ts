@@ -14,10 +14,8 @@ export {
 } from "./bsvPriceService.js";
 export {
   BSV_PRICE_SETTINGS_STORAGE_KEY,
-  createLocalStorageBsvPriceSettingsStore,
+  createKeyValueBsvPriceSettingsStore,
   normalizePublisherPublicKeyHex,
-  readBsvPriceGlobalConfig,
-  writeBsvPriceGlobalConfig,
   type BsvPriceGlobalConfig,
   type BsvPricePublicKeyCheck,
   type BsvPriceSettingsStore

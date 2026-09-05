@@ -8,7 +8,7 @@
 //   - `readyKeyIdentity` 收窄为只持有 `publicKeyHex` 等公开身份字段，
 //     不再持有 vault 内部 surrogate id。
 //   - `onKeyImported` / `onKeyRemoved` 入参改为 `publicKeyHex`。
-//     当前打开的 namespace DB 隐式表达（每个 key 的 namespace 独立 DB）。
+//     当前打开的 namespace K-V 隐式表达（每个 key 的 namespace 独立 K-V）。
 //     唯一 owner 真值，UTXO / history 过滤同 owner 时直接匹配 hex。
 
 import type { BsvNetwork, KeyIdentity, P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
@@ -47,13 +47,13 @@ export const P2PKH_ASSETS: Record<P2pkhAssetId, P2pkhAssetDef> = {
  * P2PKH 资源：当前 active key namespace 下的一个网络资源。
  *
  * 硬切换 007 + 硬切换 002 收尾：
- *   - 资源归属通过当前打开的 namespace DB（`publicKeyHex` 维度）隐式
+ *   - 资源归属通过当前打开的 namespace K-V（`publicKeyHex` 维度）隐式
  *     区分，不再需要资源字段上自带一个 key id。
  *   - resourceId 仅按 `p2pkh:<network>` 区分同 key 下的不同网络资源。
  */
 export interface P2pkhKeyResource {
   resourceId: string;
-  /** owner 公开身份：压缩公钥 hex；仅作为展示字段，与当前 namespace DB 的归属一致。 */
+  /** owner 公开身份：压缩公钥 hex；仅作为展示字段，与当前 namespace K-V 的归属一致。 */
   publicKeyHex: string;
   label: string;
   address: string;
@@ -144,17 +144,6 @@ export interface P2pkhLocalTransaction {
   attempts: P2pkhBroadcastAttempt[];
 }
 
-/** Durable record for legacy rows that could not be migrated completely. */
-export interface P2pkhMigrationAudit {
-  id: string;
-  source: "p2pkh_local_submissions";
-  legacyId?: string;
-  resourceId?: string;
-  reason: "missing-resource-id" | "missing-transaction-fields";
-  missingFields: string[];
-  createdAt: string;
-}
-
 export interface P2pkhLocalOutpoint {
   id: string;
   resourceId: string;
@@ -225,7 +214,7 @@ export interface P2pkhBalance {
 /**
  * P2PKH 全局产品设置（硬切换 001）。
  * 设计缘由：这是产品级显示与同步范围配置，不是某一把 key 的链上状态，
- * 放在全局 localStorage 而不是 key-scoped DB。
+ * 由 Coordinator 平台 K-V 保存，不属于任何单独的浏览器页面状态。
  */
 export type P2pkhFeeRateTier = "low" | "medium" | "high";
 
@@ -238,7 +227,7 @@ export const P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB: Record<P2pkhFeeRateTier, nu
 
 export interface P2pkhGlobalSettings {
   includeTestnet: boolean;
-  /** 省略时兼容旧 localStorage，并回退到 `P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB`。 */
+  /** 省略时回退到 `P2PKH_DEFAULT_FEE_RATE_SATOSHIS_PER_KB`。 */
   feeRateSatoshisPerKb?: Partial<Record<P2pkhFeeRateTier, number>>;
 }
 
@@ -278,7 +267,7 @@ export interface P2pkhUtxo {
  * 不再依赖 vault 内部 surrogate id 维度。
  *
  * 调用方语义：
- *   - 传 `ownerPublicKeyHex`：结果严格按该 owner 的 namespace DB 过滤。
+ *   - 传 `ownerPublicKeyHex`：结果严格按该 owner 的 namespace K-V 过滤。
  *     跨 owner 调用（protocol feepool 等）**必须**传，不传就拿不到对
  *     的 value。底层硬门禁要求 `active === ownerPublicKeyHex`，由
  *     protocol 层 `assertSessionOwnerIsActive` 显式保证。
@@ -451,7 +440,7 @@ export interface P2pkhService {
 
   /**
    * 订阅 P2PKH data-changed 事件。
-   * 设计缘由：后台任务原子提交 DB 后发布，页面收到后重读本地 DB。
+   * 设计缘由：后台任务原子提交 K-V 后发布，页面收到后重读本地 K-V。
    * 不再依赖 sync status 变化猜测数据是否已提交。
    */
   onDataChanged(handler: () => void): () => void;
@@ -474,7 +463,7 @@ export interface P2pkhService {
    */
   onGlobalSettingsChange(handler: (settings: P2pkhGlobalSettings) => void): () => void;
   /**
-   * 应用新的全局设置：写 localStorage、更新进程内缓存、通知订阅者、
+   * 应用新的全局设置：写 Coordinator 平台 K-V、更新进程内缓存、通知订阅者、
    * 并在 includeTestnet 由 false → true 时立即补齐 testnet 资源。
    * 设计缘由：硬切换 001 要求"再次开启 testnet 时立即把 testnet
    * 纳入运行范围"，但 storage 事件不会在本标签页触发，必须由写入
@@ -520,7 +509,7 @@ export interface P2pkhService {
   onKeyImported(publicKeyHex: string): Promise<void>;
   /**
    * 通知 P2PKH 对应 publicKeyHex 的 key 已删除。service 应清理该 hex 的
-   * 派生 cache / 取消 background 任务；但不要触碰 namespace DB——该工作
+   * 派生 cache / 取消 background 任务；但不要触碰 namespace K-V——该工作
    * 已经由 keyspace.deleteKey 在前面完成。
    */
   onKeyRemoved(publicKeyHex: string): Promise<void>;
@@ -585,7 +574,7 @@ export function requireReadyKey(key: KeyIdentity | undefined | null): ReadyKeyId
  * 构造 P2PKH 资源 id。
  *
  * `p2pkh:<network>` 区分 main/test 两个网络资源，`publicKeyHex` 通过
- * 当前打开的 namespace DB 隐式表达。
+ * 当前打开的 namespace K-V 隐式表达。
  */
 export function makeResourceId(network: BsvNetwork): string {
   return `p2pkh:${network}`;

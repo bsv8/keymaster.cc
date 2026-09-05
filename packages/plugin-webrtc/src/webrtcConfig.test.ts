@@ -1,12 +1,13 @@
 // packages/plugin-webrtc/src/webrtcConfig.test.ts
-// STUN 配置校验 / localStorage 写入回滚 / 内存 store 单测。
+// STUN 配置校验 / owner K-V 持久化 / 内存 store 单测。
 
 import { describe, expect, it, vi } from "vitest";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import {
   DEFAULT_STUN_SERVERS,
   WEBRTC_CONFIG_STORAGE_KEY,
   coerceWebrtcConfig,
-  createLocalStorageWebrtcConfigStore,
+  createKeyValueWebrtcConfigStore,
   createMemoryWebrtcConfigStore,
   validateStunServers,
   validateStunUrl
@@ -103,37 +104,27 @@ describe("coerceWebrtcConfig", () => {
   });
 });
 
-describe("createLocalStorageWebrtcConfigStore", () => {
-  class FakeStorage implements Storage {
-    private map = new Map<string, string>();
-    get length(): number {
-      return this.map.size;
-    }
-    key(i: number): string | null {
-      return [...this.map.keys()][i] ?? null;
-    }
-    getItem(k: string): string | null {
-      return this.map.get(k) ?? null;
-    }
-    setItem(k: string, v: string): void {
-      this.map.set(k, String(v));
-    }
-    removeItem(k: string): void {
-      this.map.delete(k);
-    }
-    clear(): void {
-      this.map.clear();
-    }
+describe("createKeyValueWebrtcConfigStore", () => {
+  function createTestStore() {
+    const storage = createInMemoryKeyValueStore({
+      scope: "key",
+      ownerPublicKeyHex: "a".repeat(64),
+      applicationStorageId: "WebRTC",
+      schemaVersion: 1,
+      bucketId: "test-memory",
+      bucketGeneration: 1
+    });
+    return { storage, store: createKeyValueWebrtcConfigStore(storage) };
   }
 
   it("loads default when storage is empty", () => {
-    const s = createLocalStorageWebrtcConfigStore(new FakeStorage());
+    const { store: s } = createTestStore();
     const c = s.load();
     expect(c.stunServers).toEqual([...DEFAULT_STUN_SERVERS]);
   });
 
   it("blur-save persists and notifies subscribers", () => {
-    const s = createLocalStorageWebrtcConfigStore(new FakeStorage());
+    const { store: s } = createTestStore();
     const seen: string[][] = [];
     const off = s.subscribe((c) => seen.push(c.stunServers));
     s.save({ stunServers: ["stun:a.example.com:3478"] });
@@ -142,8 +133,7 @@ describe("createLocalStorageWebrtcConfigStore", () => {
   });
 
   it("rollback on save-failure: throws and does not update memory", () => {
-    const ls = new FakeStorage();
-    const s = createLocalStorageWebrtcConfigStore(ls);
+    const { store: s } = createTestStore();
     s.save({ stunServers: ["stun:a.example.com:3478"] });
     const before = s.snapshot();
     expect(() =>
@@ -153,7 +143,7 @@ describe("createLocalStorageWebrtcConfigStore", () => {
   });
 
   it("save notify does not include save calls themselves twice", () => {
-    const s = createLocalStorageWebrtcConfigStore(new FakeStorage());
+    const { store: s } = createTestStore();
     let count = 0;
     s.subscribe(() => count++);
     count = 0;
@@ -161,13 +151,12 @@ describe("createLocalStorageWebrtcConfigStore", () => {
     expect(count).toBe(1);
   });
 
-  it("uses WEBRTC_CONFIG_STORAGE_KEY", () => {
-    const ls = new FakeStorage();
-    const s = createLocalStorageWebrtcConfigStore(ls);
+  it("uses WEBRTC_CONFIG_STORAGE_KEY in the owner K-V namespace", async () => {
+    const { storage, store: s } = createTestStore();
     s.save({ stunServers: ["stun:abc.example.com:19302"] });
-    const payload = ls.getItem(WEBRTC_CONFIG_STORAGE_KEY);
-    expect(payload).not.toBeNull();
-    expect(JSON.parse(payload!).stunServers).toEqual(["stun:abc.example.com:19302"]);
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    const entry = await storage.get<{ stunServers: string[] }>(WEBRTC_CONFIG_STORAGE_KEY, { partition: "settings" });
+    expect(entry?.value.stunServers).toEqual(["stun:abc.example.com:19302"]);
   });
 });
 

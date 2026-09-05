@@ -68,11 +68,6 @@ function makeFakeKeyspace(): KeyspaceService {
       listeners.add(handler);
       return () => listeners.delete(handler);
     },
-    openKeyStorage: async () => {
-      throw new Error("not implemented");
-    },
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
     isInitializing: () => false,

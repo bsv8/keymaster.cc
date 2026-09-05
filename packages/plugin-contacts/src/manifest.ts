@@ -1,6 +1,6 @@
 // packages/plugin-contacts/src/manifest.ts
 // 联系人插件：注册 contacts.service + 页面 + 菜单 + 首页 widget。
-// 硬切换 008：联系人按 key namespace 隔离（keyScopedStorages + keyspace 依赖）。
+// 硬切换：联系人按 owner/App K-V namespace 隔离。
 //
 // 硬切换 003：route / menu / home widget / breadcrumb 全部走 I18nText。
 
@@ -22,7 +22,8 @@ import type {
 } from "@keymaster/contracts";
 import {
   KEYSPACE_SERVICE_CAPABILITY,
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
+  CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
+  type ContactsCoordinatorControl,
 } from "@keymaster/contracts";
 import { ContactDetailPage } from "./ContactDetailPage.js";
 import { ContactsEditor } from "./ContactsEditor.js";
@@ -30,6 +31,7 @@ import { ContactPicker } from "./ContactPicker.js";
 import { ContactsPage } from "./ContactsPage.js";
 import { RecentContactsWidget } from "./RecentContactsWidget.js";
 import { createContactsService } from "./contactsService.js";
+import { CONTACTS_SCHEMA_VERSION, CONTACTS_STORAGE_ID } from "./storage/contactsRepository.js";
 
 export const CONTACTS_CAPABILITY = "contacts.service";
 export const CONTACTS_PICKER = "contacts.picker";
@@ -184,18 +186,20 @@ export const contactsPlugin: PluginManifest = {
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR],
+    providesCapabilities: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR, CONTACTS_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "business"
   },
   i18n: contactsResources,
-  keyScopedStorages: [
-    { storageId: "book", description: "当前 key 的联系人" }
-  ],
+  storage: {
+    scope: "key",
+    applicationStorageId: CONTACTS_STORAGE_ID,
+    schemaVersion: CONTACTS_SCHEMA_VERSION
+  },
   dependencies: [
     { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "读取 Coordinator 唯一在线状态快照" },
     { capability: "route.registry", reason: "注册联系人页面" },
     { capability: "business.registry", reason: "接入首页业务导航" }
     ,{ capability: "contacts.public-key-action.registry", reason: "显示联系人公钥操作" }
@@ -203,9 +207,11 @@ export const contactsPlugin: PluginManifest = {
   setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
-    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinator = ctx.coordinator as ContactsCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("Contacts Coordinator control is unavailable");
+    ctx.provide(CONTACTS_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     // 页面侧只保留联系人 CRUD；Ping/Pong 与唯一后台任务均归 Coordinator Worker。
-    const service = createContactsService({ keyspace, messageBus });
+    const service = createContactsService({ keyspace, messageBus, storage: ctx.storage });
     ctx.provide<ContactsService>(CONTACTS_CAPABILITY, service);
     const resources = ctx.get<ResourceRegistry>("resource.registry");
     resources.register<Contact[], readonly string[]>({

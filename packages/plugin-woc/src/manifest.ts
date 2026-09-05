@@ -13,6 +13,7 @@ import type {
   BreadcrumbProvider,
   BreadcrumbRegistry,
   I18nPluginResources,
+  KeyspaceService,
   MessageBus,
   PluginManifest,
   SystemSettingsRegistry,
@@ -23,7 +24,8 @@ import type {
 } from "@keymaster/contracts";
 import {
   RUNTIME_MESSAGE_BUS,
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
+  WOC_COORDINATOR_CONTROL_CAPABILITY,
+  type P2pkhCoordinatorControl,
   WOC_1SAT_ORDINALS_CAPABILITY,
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
@@ -90,6 +92,7 @@ export const wocPlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [
@@ -101,15 +104,26 @@ export const wocPlugin: PluginManifest = {
     displayGroup: "platform"
   },
   i18n: wocResources,
+  storage: { scope: "key", applicationStorageId: "WOC", schemaVersion: 1 },
   dependencies: [
     { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "通过 Coordinator 权威读写 provider 私有配置" },
+    { capability: "keyspace.service", reason: "active key 就绪后加载 WOC owner 配置" },
     { capability: "system-settings.registry", reason: "注册 WOC 系统设置" },
     { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" }
   ],
-  setup(ctx) {
+  async setup(ctx) {
+    const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("WOC Coordinator control is unavailable");
+    ctx.provide(WOC_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const messageBus = ctx.get<MessageBus>(RUNTIME_MESSAGE_BUS);
-    const service = createWocService({ messageBus, logger: ctx.logger });
+    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
+    const service = createWocService({ messageBus, logger: ctx.logger, storage: ctx.storage });
+    await service.ready();
+    const offActive = keyspace.onActiveKeyChanged((state) => {
+      if (state.activePublicKeyHex) {
+        void service.ready().catch((error) => ctx.logger.warn({ scope: "woc.config", event: "config.load_failed", message: "WOC config load failed", data: { error: error instanceof Error ? error.message : String(error) } }));
+      }
+    });
     ctx.provide<WocService>(WOC_CAPABILITY, service);
 
     // BSV-21 / STAS / 1Sat Ordinals 的 WOC capability。
@@ -154,6 +168,7 @@ export const wocPlugin: PluginManifest = {
       // 硬切换 001：bridge 到 service.dispose()。
       // actor detach + 取消 messageBus handle 都在 dispose 内。
       service.dispose();
+      offActive();
     };
   }
 };

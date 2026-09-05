@@ -119,6 +119,7 @@ export const homePlugin: PluginManifest = {
   meta: {
     kind: "core",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: false,
     displayGroup: "core"

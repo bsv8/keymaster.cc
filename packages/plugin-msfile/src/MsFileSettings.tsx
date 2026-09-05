@@ -1,7 +1,7 @@
 // packages/plugin-msfile/src/MsFileSettings.tsx
 // /settings/system 的 MSFile group：价格限制 / 供应商配置 / Connect App 授权。
 // 页面只在 Vault unlocked 时渲染（visibleWhen 由 manifest 保证）。
-// 所有读写都通过 `msfile.service`；本组件不接触 IndexedDB。
+// 所有读写都通过 `msfile.service`；本组件不接触 platform K-V repository。
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {

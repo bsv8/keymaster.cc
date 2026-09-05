@@ -25,7 +25,9 @@ import type {
   BackgroundCommandResult,
   PluginLogger
 } from "@keymaster/contracts";
+import type { KeyValueStore } from "@keymaster/contracts";
 import { BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { createKeyValueSettingsStore, type KeyValueSettingsStore } from "@keymaster/runtime";
 
 interface TaskRuntime {
   def: BackgroundTaskDefinition;
@@ -43,8 +45,7 @@ interface TaskRuntime {
   lastScheduledAt?: number;
 }
 
-const ENABLED_PREF_KEY = "background.enabled";
-const SCHEDULE_SETTINGS_KEY = "background.sync.settings";
+const SCHEDULE_SETTINGS_KEY = "settings";
 
 /** 默认设置。 */
 const DEFAULT_SYNC_SETTINGS: BackgroundSyncSettings = {
@@ -94,6 +95,8 @@ export interface BackgroundServiceHandle extends BackgroundService {
 
 export interface CreateBackgroundServiceOptions {
   logger?: PluginLogger;
+  /** Host 绑定的 Background owner/App K-V 句柄。 */
+  storage?: KeyValueStore;
 }
 
 /**
@@ -107,28 +110,18 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
   let intervalTimer: ReturnType<typeof setInterval> | undefined;
   let disposed = false;
   const logger = options.logger;
-
-  /**
-   * 一次性 migration：清除旧的 background.enabled 偏好。
-   */
-  function migrateEnabledPreferences(): void {
-    try {
-      const raw = localStorage.getItem(ENABLED_PREF_KEY);
-      if (raw) {
-        logger?.info({
-          scope: "background.migration",
-          event: "clearing-old-enabled-prefs",
-          message: "Clearing old background.enabled preferences (migration 001)",
-          data: { oldValue: raw }
-        });
-        localStorage.removeItem(ENABLED_PREF_KEY);
-      }
-    } catch {
-      // 静默失败
+  const settingsStore: KeyValueSettingsStore<BackgroundSyncSettings> = createKeyValueSettingsStore({
+    storage: options.storage,
+    key: SCHEDULE_SETTINGS_KEY,
+    partition: "settings",
+    defaults: () => ({ ...DEFAULT_SYNC_SETTINGS }),
+    normalize: (raw) => {
+      const value = raw && typeof raw === "object"
+        ? (raw as Partial<BackgroundSyncSettings>).assetHoldingsIntervalMs
+        : undefined;
+      return { assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(value, 0) };
     }
-  }
-
-  migrateEnabledPreferences();
+  });
 
   function snapshot(task: TaskRuntime): BackgroundTaskSnapshot {
     return {
@@ -164,27 +157,14 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
    * 读取后台同步设置。
    */
   function loadScheduleSettings(): BackgroundSyncSettings {
-    try {
-      const raw = localStorage.getItem(SCHEDULE_SETTINGS_KEY);
-      if (!raw) return DEFAULT_SYNC_SETTINGS;
-      const obj = JSON.parse(raw) as Partial<BackgroundSyncSettings>;
-      return {
-        assetHoldingsIntervalMs: normalizeAssetHoldingsInterval(obj.assetHoldingsIntervalMs, 0)
-      };
-    } catch {
-      return DEFAULT_SYNC_SETTINGS;
-    }
+    return settingsStore.load();
   }
 
   /**
    * 保存后台同步设置。
    */
   function saveScheduleSettings(settings: BackgroundSyncSettings): void {
-    try {
-      localStorage.setItem(SCHEDULE_SETTINGS_KEY, JSON.stringify(settings));
-    } catch {
-      // 静默失败。
-    }
+    settingsStore.save(settings);
   }
 
   function register(def: BackgroundTaskDefinition) {

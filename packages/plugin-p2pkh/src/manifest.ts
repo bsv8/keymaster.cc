@@ -27,17 +27,17 @@ import type {
   VaultService,
   WocService,
   P2pkhProviderRegistrySnapshot
-  , SessionCoordinatorClient
+  , P2pkhCoordinatorControl
 } from "@keymaster/contracts";
 import {
   ASSET_DATA_NOTIFIER_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  WOC_CAPABILITY
-  , SESSION_COORDINATOR_CLIENT_CAPABILITY
+  WOC_CAPABILITY,
+  P2PKH_COORDINATOR_CONTROL_CAPABILITY
 } from "@keymaster/contracts";
-import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhTransactionFact, P2pkhOwnedOutpointProjection, P2pkhLocalTransaction, P2pkhLocalOutpoint, P2pkhLocalInputClaim, P2pkhTransactionSyncState, P2pkhMigrationAudit } from "./p2pkhContracts.js";
+import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhTransactionFact, P2pkhOwnedOutpointProjection, P2pkhLocalTransaction, P2pkhLocalOutpoint, P2pkhLocalInputClaim, P2pkhTransactionSyncState } from "./p2pkhContracts.js";
 
 type ReadinessState = "initializing" | "no-active-key" | "ready";
 import { createP2pkhService } from "./p2pkhService.js";
@@ -45,7 +45,7 @@ import { P2PKH_CAPABILITY } from "./p2pkhContracts.js";
 import { createP2pkhProtocolSpendService } from "./p2pkhProtocolSpend.js";
 import { createP2pkhAssetProvider } from "./p2pkhAssetProvider.js";
 import { createP2pkhTransferProvider } from "./p2pkhTransferProvider.js";
-import { createP2pkhDb, openP2pkhDb } from "./p2pkhDb.js";
+import { createP2pkhStateRepository, openP2pkhStateRepository, P2PKH_REPOSITORY_VERSION, P2PKH_STORAGE_ID } from "./storage/p2pkhStateRepository.js";
 import { P2pkhSettingsPage } from "./pages/P2pkhSettingsPage.js";
 import { registerP2pkhNavigation } from "./pages/P2pkhNavigation.js";
 import { P2pkhTransactionDetailRoute } from "./pages/P2pkhTransactionDetailPage.js";
@@ -611,20 +611,22 @@ export const p2pkhPlugin: PluginManifest = {
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY],
+    providesCapabilities: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "business"
   },
   i18n: p2pkhResources,
-  keyScopedStorages: [
-    { storageId: "state", description: "P2PKH 地址、交易事实、owned outpoint 投影、同步游标与本地交易状态" }
-  ],
+  storage: {
+    scope: "key",
+    applicationStorageId: P2PKH_STORAGE_ID,
+    schemaVersion: P2PKH_REPOSITORY_VERSION
+  },
   dependencies: [
     { capability: "vault.service", reason: "需要 vault 提供私钥与 key 管理" },
     { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
     { capability: WOC_CAPABILITY, reason: "旧协议 spend 使用 WOC broadcaster" },
-    { capability: SESSION_COORDINATOR_CLIENT_CAPABILITY, reason: "确认同步和 provider 配置由 Coordinator 管理" },
     { capability: "protected-outpoint.registry", reason: "排除协议受保护 outpoint" },
     { capability: "asset.registry", reason: "注册 P2PKH AssetProvider" },
     { capability: "transfer.registry", reason: "注册 P2PKH TransferProvider" },
@@ -638,7 +640,9 @@ export const p2pkhPlugin: PluginManifest = {
     const vault = ctx.get<VaultService>("vault.service");
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
     const woc = ctx.get<WocService>(WOC_CAPABILITY);
-    const coordinator = ctx.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
+    if (!coordinator) throw new Error("P2PKH Coordinator control is unavailable");
+    ctx.provide(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinator);
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");
     const protectedOutpoints = ctx.get<ProtectedOutpointRegistry>("protected-outpoint.registry");
     const assetDataNotifier = ctx.has(ASSET_DATA_NOTIFIER_CAPABILITY)
@@ -650,13 +654,12 @@ export const p2pkhPlugin: PluginManifest = {
       coordinator,
       messageBus,
       keyspace,
+      storage: ctx.storage,
       protectedOutpoints,
       assetDataNotifier,
       logger: ctx.logger
     });
-    // SharedWorker cannot read the page's localStorage. Seed its durable
-    // network scope from the service so an existing testnet preference is
-    // honored before the first background sync.
+    // 将页面侧缓存的网络范围同步到 Coordinator 平台 K-V，供后台同步使用。
     void coordinator.p2pkhSettingsUpdate({ includeTestnet: service.getGlobalSettings().includeTestnet });
     ctx.provide(P2PKH_CAPABILITY, service);
     ctx.provide(P2PKH_PROTOCOL_SPEND_CAPABILITY, createP2pkhProtocolSpendService({
@@ -664,22 +667,26 @@ export const p2pkhPlugin: PluginManifest = {
       woc,
       claimStore: {
         async tryClaimInputs(input) {
-          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: input.publicKeyHex });
-          return createP2pkhDb(bundle).tryClaimInputs(input);
+          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          return createP2pkhStateRepository(bundle).tryClaimInputs(input);
         },
         async releaseLocalInputClaims(input) {
-          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: input.publicKeyHex });
-          return createP2pkhDb(bundle).releaseLocalInputClaims(input.claimIds);
+          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          return createP2pkhStateRepository(bundle).releaseLocalInputClaims(input.claimIds);
         }
       },
-      submissionStore: {
-        async getProtocolSubmission(input) {
-          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: input.publicKeyHex });
-          return createP2pkhDb(bundle).getProtocolSubmission(input.id);
+        submissionStore: {
+          async getProtocolSubmission(input) {
+          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          return createP2pkhStateRepository(bundle).getProtocolSubmission(input.id);
         },
         async putProtocolSubmission(record) {
-          const bundle = await openP2pkhDb({ keyspace, publicKeyHex: record.publicKeyHex });
-          return createP2pkhDb(bundle).putProtocolSubmission(record);
+          if (keyspace.active().activePublicKeyHex?.toLowerCase() !== record.publicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+          const bundle = await openP2pkhStateRepository(ctx.storage!);
+          return createP2pkhStateRepository(bundle).putProtocolSubmission(record);
         }
       },
       protectedOutpoints,
@@ -777,7 +784,6 @@ export const p2pkhPlugin: PluginManifest = {
       locals: P2pkhLocalTransaction[];
       localOutpoints: P2pkhLocalOutpoint[];
       claims: P2pkhLocalInputClaim[];
-      migrationAudits: P2pkhMigrationAudit[];
       protectedOutpoints: Array<{ txid: string; vout: number; network: BsvNetwork }>;
       sync: P2pkhTransactionSyncState[];
       syncStatus: P2pkhSyncStatus;
@@ -793,14 +799,14 @@ export const p2pkhPlugin: PluginManifest = {
       inputValuesByResource: Record<string, Record<string, number>>;
     };
     const loadWalletResource = async (context: { activePublicKeyHex?: string }): Promise<P2pkhWalletResource> => {
-      if (!context.activePublicKeyHex) return { resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], migrationAudits: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {} };
+      if (!context.activePublicKeyHex) return { resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {} };
       const includeTestnet = service.getGlobalSettings().includeTestnet;
       const networks = includeTestnet ? ["main", "test"] as const : ["main"] as const;
-      const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: context.activePublicKeyHex }));
+      const stateRepository = createP2pkhStateRepository(await openP2pkhStateRepository(ctx.storage!));
       const resourcesForKey = await service.listResources();
       const resourceIds = resourcesForKey.map((resource) => resource.resourceId);
       // The wallet starts with a bounded page. The returned cursors are opaque
-      // IndexedDB timeline cursors; the page can continue without rereading
+      // platform K-V timeline cursors; the page can continue without rereading
       // the complete history on every invalidation.
       const walletLimits = { facts: 200, owned: 500, locals: 500, localOutpoints: 500, claims: 500 };
       const readPerResource = async <T>(reader: (resourceId: string) => Promise<T[]>): Promise<T[]> => (await Promise.all(resourceIds.map(reader))).flat();
@@ -808,14 +814,13 @@ export const p2pkhPlugin: PluginManifest = {
         const values = await Promise.all(resourceIds.map(async (resourceId) => [resourceId, await reader(resourceId)] as const));
         return { items: values.flatMap(([, page]) => page.items), cursors: Object.fromEntries(values.map(([resourceId, page]) => [resourceId, page.nextCursor])) };
       };
-      const [factsPage, ownedPage, localsPage, localOutpointsPage, claimsPage, migrationAudits, sync, balances, providerResult] = await Promise.all([
+      const [factsPage, ownedPage, localsPage, localOutpointsPage, claimsPage, sync, balances, providerResult] = await Promise.all([
         service.listTransactionFactsPage ? readPagePerResource((resourceId) => service.listTransactionFactsPage!({ resourceId, limit: walletLimits.facts })) : service.listTransactionFacts ? readPerResource((resourceId) => service.listTransactionFacts!({ resourceId, limit: walletLimits.facts })).then((items) => ({ items, cursors: {} })) : Promise.resolve({ items: [] as P2pkhTransactionFact[], cursors: {} }),
         service.listOwnedOutpointsPage ? readPagePerResource((resourceId) => service.listOwnedOutpointsPage!({ resourceId, limit: walletLimits.owned })) : service.listOwnedOutpoints ? readPerResource((resourceId) => service.listOwnedOutpoints!({ resourceId, limit: walletLimits.owned })).then((items) => ({ items, cursors: {} })) : Promise.resolve({ items: [] as P2pkhOwnedOutpointProjection[], cursors: {} }),
         service.listLocalTransactionsPage ? readPagePerResource((resourceId) => service.listLocalTransactionsPage!({ resourceId, limit: walletLimits.locals })) : service.listLocalTransactions ? readPerResource((resourceId) => service.listLocalTransactions!({ resourceId, limit: walletLimits.locals })).then((items) => ({ items, cursors: {} })) : Promise.resolve({ items: [] as P2pkhLocalTransaction[], cursors: {} }),
         service.listLocalOutpointsPage ? readPagePerResource((resourceId) => service.listLocalOutpointsPage!({ resourceId, limit: walletLimits.localOutpoints })) : service.listLocalOutpoints ? readPerResource((resourceId) => service.listLocalOutpoints!({ resourceId, limit: walletLimits.localOutpoints })).then((items) => ({ items, cursors: {} })) : Promise.resolve({ items: [] as P2pkhLocalOutpoint[], cursors: {} }),
         service.listLocalInputClaimsPage ? readPagePerResource((resourceId) => service.listLocalInputClaimsPage!({ resourceId, limit: walletLimits.claims })) : readPerResource((resourceId) => service.listLocalInputClaims(resourceId, walletLimits.claims)).then((items) => ({ items, cursors: {} })),
-        db.listMigrationAudits(),
-        db.listTransactionSyncStates(),
+        stateRepository.listTransactionSyncStates(),
         Promise.all(networks.map(async (network) => [network, await service.getAssetBalance(network === "main" ? "bsv" : "bsvtest")] as const)),
         coordinator.p2pkhProvidersGet()
       ]);
@@ -835,7 +840,7 @@ export const p2pkhPlugin: PluginManifest = {
       const syncStatus: P2pkhSyncStatus = !task ? "idle" : task.state === "running" ? "syncing" : task.state === "blocked" ? "blocked" : task.error ? "failed" : task.lastCompletedAt ? "ok" : "idle";
       const blockedReason = task?.blockedReason;
       const syncError = (typeof blockedReason === "string" ? blockedReason : blockedReason?.fallback) ?? task?.error ?? sync.find((row) => row.lastError)?.lastError;
-      return { resources: resourcesForKey, facts, owned, locals, localOutpoints, claims, migrationAudits, protectedOutpoints: protectedOutpoints.list({ publicKeyHex: context.activePublicKeyHex }), sync, syncStatus, syncError, balances: Object.fromEntries(balances), providers: providerResult.status === "ok" ? providerResult.value : null, factCursors: factsPage.cursors, ownedCursors: ownedPage.cursors, localCursors: localsPage.cursors, localOutpointCursors: localOutpointsPage.cursors, claimCursors: claimsPage.cursors, inputValues, inputValuesByResource };
+      return { resources: resourcesForKey, facts, owned, locals, localOutpoints, claims, protectedOutpoints: protectedOutpoints.list({ publicKeyHex: context.activePublicKeyHex }), sync, syncStatus, syncError, balances: Object.fromEntries(balances), providers: providerResult.status === "ok" ? providerResult.value : null, factCursors: factsPage.cursors, ownedCursors: ownedPage.cursors, localCursors: localsPage.cursors, localOutpointCursors: localOutpointsPage.cursors, claimCursors: claimsPage.cursors, inputValues, inputValuesByResource };
     };
     resources.register<P2pkhWalletResource, readonly string[]>({
       id: "p2pkh.wallet",

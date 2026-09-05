@@ -178,7 +178,7 @@ export interface SatSubscriptionStateSnapshot {
   collectResults: SatCollectResult[];
 }
 
-/** 允许状态存储接入 IndexedDB；纯测试可省略。 */
+/** 允许状态存储接入 platform K-V repository；纯测试可省略。 */
 export interface SatSubscriptionStatePersistence {
   save(snapshot: SatSubscriptionStateSnapshot): Promise<void>;
 }
@@ -341,7 +341,7 @@ function normalizeSnapshot(input: SatSubscriptionStateSnapshot, ownerPublicKeyHe
       && item.ownerGeneration !== undefined
       && item.supplierGeneration !== undefined
       && item.requestWire !== undefined;
-    // 旧 DB 可能没有完整的 owner/generation/Wire。迁移只能把它封存为
+    // 旧 K-V 可能没有完整的 owner/generation/Wire。迁移只能把它封存为
     // unknown_result；不能用当前会话值补齐，否则可能把未知扣费请求发给错误的 owner。
     const recoveryBlocked = unresolved && (!hasRecoveryFields || item.recoveryBlocked === true);
     assertErrorCode(item.errorCode, "Collect errorCode");

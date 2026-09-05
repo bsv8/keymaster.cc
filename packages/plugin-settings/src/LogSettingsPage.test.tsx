@@ -29,7 +29,7 @@ import { LogConfigurationSettings, LogSettingsPage } from "./LogSettingsPage.js"
 
 const LOG_DB_NAME = "keymaster.logs";
 
-async function resetLogDb(): Promise<void> {
+async function resetLogRepository(): Promise<void> {
   // 给前一个测试 close 留几个微任务。
   await new Promise((r) => setTimeout(r, 30));
   await new Promise<void>((resolve) => {
@@ -47,11 +47,11 @@ async function resetLogDb(): Promise<void> {
 }
 
 beforeEach(async () => {
-  await resetLogDb();
+  await resetLogRepository();
 });
 
 afterEach(async () => {
-  await resetLogDb();
+  await resetLogRepository();
 });
 
 /** 单独创建一个干净的 host + 注册 settings plugin（拿到 i18n 资源）。 */

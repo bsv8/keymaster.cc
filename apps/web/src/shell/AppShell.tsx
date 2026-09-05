@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Button, EmptyState, PageHeader } from "@keymaster/ui";
-import { countRender, useCapability, useCurrentPath, useI18n, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
+import { countRender, useCapability, useCurrentPath, useI18n, useOptionalCapability, usePluginHost, useResourceSelector, router } from "@keymaster/runtime";
 import type {
   ActiveKeyState,
   InitialActivationNotice,
@@ -39,6 +39,7 @@ import type {
   VaultService,
   VaultStatus
 } from "@keymaster/contracts";
+import { COORDINATOR_ACTIVITY_CAPABILITY } from "@keymaster/contracts";
 import { Breadcrumbs } from "./Breadcrumbs.js";
 import { RouteRenderer } from "./RouteRenderer.js";
 import { Sidebar } from "./Sidebar.js";
@@ -157,7 +158,7 @@ export function AppShell() {
   // 页面 hidden、blur、暂停不应立即 lock；无任意用户活动达到配置时长才全局 lock。
   // Coordinator client 通过 capability 获取（在组件顶层调用 hook）。
   let coordinatorClient: { getIsConnected(): boolean; sendActivity(): void } | null = null;
-  coordinatorClient = useCapability<{ getIsConnected(): boolean; sendActivity(): void }>("session-coordinator.client") ?? null;
+  coordinatorClient = useOptionalCapability<{ getIsConnected(): boolean; sendActivity(): void }>(COORDINATOR_ACTIVITY_CAPABILITY) ?? null;
 
   useEffect(() => {
     if (vaultStatus !== "unlocked") {

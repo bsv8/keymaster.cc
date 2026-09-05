@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { P2pkhProviderRegistry } from "@keymaster/contracts";
 import type { P2pkhKeyResource } from "./p2pkhContracts.js";
 import { createP2pkhTransactionSync } from "./p2pkhTransactionSync.js";
-import type { P2pkhDbHandle } from "./p2pkhDb.js";
+import type { P2pkhStateRepositoryHandle } from "./storage/p2pkhStateRepository.js";
 
 const resource: P2pkhKeyResource = {
   resourceId: "p2pkh:main",
@@ -14,21 +14,21 @@ const resource: P2pkhKeyResource = {
   generation: 0
 };
 
-function makeDb(previous?: Awaited<ReturnType<P2pkhDbHandle["getTransactionSyncState"]>>, existingFacts: unknown[] = []) {
+function makeRepository(previous?: Awaited<ReturnType<P2pkhStateRepositoryHandle["getTransactionSyncState"]>>, existingFacts: unknown[] = []) {
   const states: unknown[] = [];
   const pages: unknown[] = [];
-  const db = {
+  const stateRepository = {
     async getTransactionSyncState() { return previous; },
     async listTransactionFacts() { return existingFacts; },
     async putTransactionSyncState(state: unknown) { states.push(state); },
     async ingestConfirmedTransactionPage(input: unknown) { pages.push(input); }
-  } as unknown as P2pkhDbHandle;
-  return { db, states, pages };
+  } as unknown as P2pkhStateRepositoryHandle;
+  return { stateRepository, states, pages };
 }
 
-function makeDeps(db: P2pkhDbHandle, provider: unknown) {
+function makeDeps(stateRepository: P2pkhStateRepositoryHandle, provider: unknown) {
   return {
-    getDb: async () => db,
+    getStore: async () => stateRepository,
     getResources: async () => [resource],
     registry: { getConfirmedProvider: () => provider } as unknown as P2pkhProviderRegistry,
     getSelection: () => ({ syncProviderId: "woc", generation: 1 }),
@@ -44,8 +44,8 @@ describe("P2PKH transaction sync", () => {
       async listAddressConfirmedTransactions() { return { items: [{ txid: "aa".repeat(32), blockHeight: 10 }], exhausted: true }; },
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb();
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository();
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await sync.runOnce(new AbortController().signal);
     const terminal = fake.pages[0] as { syncState: { runId?: string; inProgressProviderId?: string }; reorgCheck?: { completeHistory: boolean; observedTxids: string[] } };
     expect(terminal.syncState.runId).toBeTruthy();
@@ -60,8 +60,8 @@ describe("P2PKH transaction sync", () => {
       listAddressConfirmedTransactions: vi.fn(async (input: { cursor?: string }) => { expect(input.cursor).toBe("1"); return { items: [{ txid: "aa".repeat(32), blockHeight: 1 }], exhausted: true }; }),
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb(previous);
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository(previous);
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await sync.runOnce(new AbortController().signal);
     expect((fake.pages[0] as { syncState: { completeHeadTxid?: string } }).syncState.completeHeadTxid).toBe("ff".repeat(32));
     expect((fake.pages[0] as { reorgCheck?: { completeHistory: boolean } }).reorgCheck?.completeHistory).toBe(false);
@@ -75,8 +75,8 @@ describe("P2PKH transaction sync", () => {
       async listAddressConfirmedTransactions() { return { items: [{ txid: "bb".repeat(32), blockHeight: 11 }, { txid: "aa".repeat(32), blockHeight: 10 }], exhausted: true }; },
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb(previous, [{ txid: previous.completeHeadTxid }]);
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository(previous, [{ txid: previous.completeHeadTxid }]);
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await sync.runOnce(new AbortController().signal);
     expect((fake.pages[0] as { reorgCheck?: { completeHistory: boolean; anchorTxid?: string } }).reorgCheck).toEqual({ completeHistory: false, observedTxids: ["bb".repeat(32), "aa".repeat(32)], anchorTxid: "aa".repeat(32) });
   });
@@ -93,8 +93,8 @@ describe("P2PKH transaction sync", () => {
       },
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb(previous, [{ txid: anchorTxid }]);
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository(previous, [{ txid: anchorTxid }]);
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await sync.runOnce(new AbortController().signal);
     expect(calls).toBe(2);
     expect(fake.pages).toHaveLength(2);
@@ -104,7 +104,7 @@ describe("P2PKH transaction sync", () => {
 
   it("retains the run head through a second interruption", async () => {
     const previous = { id: resource.resourceId, resourceId: resource.resourceId, completeHeadTxid: "ff".repeat(32), inProgressProviderId: "woc", inProgressProviderGeneration: 1, inProgressCursor: "1", runHeadTxid: "ff".repeat(32), runObservedTxids: [], runId: "run-1", pagesSynced: 1, transactionsSynced: 1 };
-    let current: Awaited<ReturnType<P2pkhDbHandle["getTransactionSyncState"]>> = previous;
+    let current: Awaited<ReturnType<P2pkhStateRepositoryHandle["getTransactionSyncState"]>> = previous;
     const states: unknown[] = [];
     const pages: unknown[] = [];
     let interruption = true;
@@ -122,13 +122,13 @@ describe("P2PKH transaction sync", () => {
         return { txid: input.txid, rawTxHex: "00" };
       }
     };
-    const db = {
+    const stateRepository = {
       async getTransactionSyncState() { return current; },
       async listTransactionFacts() { return []; },
-      async putTransactionSyncState(state: Awaited<ReturnType<P2pkhDbHandle["getTransactionSyncState"]>>) { current = state; states.push(state); },
+      async putTransactionSyncState(state: Awaited<ReturnType<P2pkhStateRepositoryHandle["getTransactionSyncState"]>>) { current = state; states.push(state); },
       async ingestConfirmedTransactionPage(input: unknown) { pages.push(input); }
-    } as unknown as P2pkhDbHandle;
-    const sync = createP2pkhTransactionSync(makeDeps(db, provider));
+    } as unknown as P2pkhStateRepositoryHandle;
+    const sync = createP2pkhTransactionSync(makeDeps(stateRepository, provider));
     // The first recovery is interrupted after detail fetch and before page
     // commit. The persisted in-progress head must still be available to the
     // next recovery.
@@ -148,8 +148,8 @@ describe("P2PKH transaction sync", () => {
       async listAddressConfirmedTransactions() { calls += 1; return { items: [], exhausted: true }; },
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb(previous, [{ txid: previous.completeHeadTxid }]);
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository(previous, [{ txid: previous.completeHeadTxid }]);
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await expect(sync.runOnce(new AbortController().signal)).resolves.toMatchObject({ pages: 1, transactions: 0 });
     expect(calls).toBe(2);
     expect(fake.pages).toHaveLength(1);
@@ -166,8 +166,8 @@ describe("P2PKH transaction sync", () => {
         : { items: [{ txid: "aa".repeat(32), blockHeight: 10 }], nextCursor: "next", exhausted: false }),
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb(previous, [{ txid: previous.completeHeadTxid }]);
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository(previous, [{ txid: previous.completeHeadTxid }]);
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await sync.runOnce(new AbortController().signal);
     expect(provider.listAddressConfirmedTransactions).toHaveBeenCalledTimes(2);
     expect(fake.pages).toHaveLength(2);
@@ -188,8 +188,8 @@ describe("P2PKH transaction sync", () => {
       },
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb(previous, [{ txid: previous.completeHeadTxid }]);
-    const sync = createP2pkhTransactionSync(makeDeps(fake.db, provider));
+    const fake = makeRepository(previous, [{ txid: previous.completeHeadTxid }]);
+    const sync = createP2pkhTransactionSync(makeDeps(fake.stateRepository, provider));
     await sync.runOnce(new AbortController().signal);
     expect(calls).toBe(3);
     expect((fake.pages[0] as { transactions: Array<{ txid: string }> }).transactions[0]?.txid).toBe("aa".repeat(32));
@@ -203,9 +203,9 @@ describe("P2PKH transaction sync", () => {
       listAddressConfirmedTransactions,
       async getConfirmedTransaction(input: { txid: string }) { return { txid: input.txid, rawTxHex: "00" }; }
     };
-    const fake = makeDb();
+    const fake = makeRepository();
     const sync = createP2pkhTransactionSync({
-      ...makeDeps(fake.db, provider),
+      ...makeDeps(fake.stateRepository, provider),
       getResources: async () => [resource, testResource],
       isNetworkEnabled: (network) => network === "main"
     });

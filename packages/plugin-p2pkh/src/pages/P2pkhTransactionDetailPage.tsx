@@ -7,7 +7,7 @@ import { type WalletSnapshot } from "./P2pkhWalletPage.js";
 
 function emptyWallet(): WalletSnapshot {
   return {
-    resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], migrationAudits: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null,
+    resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null,
     factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {}
   };
 }
@@ -47,7 +47,7 @@ export function P2pkhTransactionDetailPage() {
     (snapshot) => snapshot.data ?? { includeTestnet: false },
     (left, right) => left.includeTestnet === right.includeTestnet
   );
-  const wallet = useResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(host.resourceStore, "p2pkh.wallet", [], (snapshot) => snapshot.data ? { ...snapshot.data, migrationAudits: snapshot.data.migrationAudits ?? [], factCursors: snapshot.data.factCursors ?? {}, ownedCursors: snapshot.data.ownedCursors ?? {}, localCursors: snapshot.data.localCursors ?? {}, localOutpointCursors: snapshot.data.localOutpointCursors ?? {}, claimCursors: snapshot.data.claimCursors ?? {}, inputValues: snapshot.data.inputValues ?? {}, inputValuesByResource: snapshot.data.inputValuesByResource ?? {}, error: snapshot.error?.message, loaded: true } : { ...emptyWallet(), error: snapshot.error?.message, loaded: false }, (left, right) => JSON.stringify(left) === JSON.stringify(right));
+  const wallet = useResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string; loaded: boolean }>(host.resourceStore, "p2pkh.wallet", [], (snapshot) => snapshot.data ? { ...snapshot.data, factCursors: snapshot.data.factCursors ?? {}, ownedCursors: snapshot.data.ownedCursors ?? {}, localCursors: snapshot.data.localCursors ?? {}, localOutpointCursors: snapshot.data.localOutpointCursors ?? {}, claimCursors: snapshot.data.claimCursors ?? {}, inputValues: snapshot.data.inputValues ?? {}, inputValuesByResource: snapshot.data.inputValuesByResource ?? {}, error: snapshot.error?.message, loaded: true } : { ...emptyWallet(), error: snapshot.error?.message, loaded: false }, (left, right) => JSON.stringify(left) === JSON.stringify(right));
   const networkEnabled = network === "main" || settings.includeTestnet;
   const snapshotFact = useMemo(() => source === "transactions" && txid ? wallet.facts.find((row) => row.network === network && row.txid.toLowerCase() === txid.toLowerCase()) : undefined, [wallet.facts, network, txid, source]);
   const snapshotLocal = useMemo(() => {

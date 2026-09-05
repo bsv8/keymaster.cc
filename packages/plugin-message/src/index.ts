@@ -3,7 +3,7 @@
 //
 // 该插件是一个**极薄业务插件**，appId = `keymaster.message`：
 //   - 通过 Coordinator Channel runtime 发送固定私密消息协议；
-//   - 消息历史只存本地 key-scoped DB，不拉取远端历史；
+//   - 消息历史只存本地 key-scoped K-V，不拉取远端历史；
 //   - owner、签名、加密、供应商选择和物理订阅全部由 Coordinator 持有；
 //   - 页面 = `/messages`（会话列表）与 `/message/:publicKeyHex`（会话详情主路由）；
 //   - 同时兼容 `/messages/:publicKeyHex` 作为会话详情别名；

@@ -5,10 +5,10 @@
 //   - `plugin-message` 是一个**极薄业务插件**，appId = `keymaster.message`，
 //     **不**感知 owner / provider / 任何物理传输细节；
 //   - 消息服务通过 Coordinator Channel runtime 发送固定私密消息协议；
-//   - 历史只使用本地 key-scoped DB，收件回执是独立私密消息；
+//   - 历史只使用本地 key-scoped K-V，收件回执是独立私密消息；
 //   - 在自己的 `setup` 阶段：
 //       * 从 Coordinator 注入 `ChannelRuntime`；
-//       * 把本地 DB 与 runtime 交给 `createMessageService(...)` 作为公开
+//       * 把本地 K-V 与 runtime 交给 `createMessageService(...)` 作为公开
 //         `message.service` capability。
 //   - 页面路由固定归本插件：
 //       * `/messages`                —— 会话列表
@@ -305,13 +305,14 @@ export const messagePlatformPlugin: PluginManifest = {
   meta: {
     kind: "core",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: false,
     providesCapabilities: ["message.service"],
     displayGroup: "platform"
   },
   i18n: messageResources,
-  keyScopedStorages: [{ storageId: "history", description: "当前 owner 的本地消息历史" }],
+  storage: { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 },
   dependencies: [
     { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
     { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
@@ -334,7 +335,7 @@ export const messagePlatformPlugin: PluginManifest = {
       run: ({ publicKeyHex }) => router.push(`/message/${encodeURIComponent(publicKeyHex)}`)
     });
     const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(MESSAGE_PLUGIN_ID);
-    const service = createMessageService({ channel, keyspace: ctx.get<KeyspaceService>("keyspace.service") });
+    const service = createMessageService({ channel, keyspace: ctx.get<KeyspaceService>("keyspace.service"), storage: ctx.storage });
     ctx.provide("message.service", service);
 
     // 注册资源定义（硬切换 003）

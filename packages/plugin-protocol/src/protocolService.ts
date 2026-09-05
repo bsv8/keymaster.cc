@@ -55,16 +55,17 @@
 //   - popup 卸载 / 刷新 → 所有 pending feepool operation 立即失效；
 //     endSession 把所有未终态 request 强制收尾为 rejected。
 //
-// 隐私边界：余额不足 / 费用池缺失 / DB 不可用 / 未知 op / 跨 origin
+// 隐私边界：余额不足 / 费用池缺失 / K-V 不可用 / 未知 op / 跨 origin
 // operationId，**全部**对外回 `user_rejected`；本地原因只写
 // `ProtocolCommandRecord.failureReason`。
 //
-// DB 不可用差异化降级：p2pkh 仍可用（auto-approve 被禁用、manual
+// K-V 不可用差异化降级：p2pkh 仍可用（auto-approve 被禁用、manual
 // confirm 仍可走通）；feepool 直接 fail-closed。
 //
 // 不依赖 React；可单测。
 
 import { secp256k1 } from "@noble/curves/secp256k1.js";
+import { deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
 import {
   PROTOCOL_VERSION,
   LaunchAppViewError,
@@ -133,9 +134,9 @@ import {
   type ProtocolService,
   type ProtocolSessionPhase,
   type ProtocolSessionSnapshot,
-  type ProtocolStorageDb,
-  type StorageService,
-  type StorageAppContext,
+  type ProtocolStorageRepository,
+  type StorageRuntimeController,
+  type OwnerAppStorageGrant,
   type MsFileService,
   type MsFileConnectAppContext,
   type MsFileStatResult,
@@ -184,7 +185,7 @@ const DEFAULT_P2PKH_FEE_RATE_SAT_PER_KB = 100;
  * 确认超时缺省秒数（施工单 003 硬切换：per-origin 确认超时）。
  *
  * 设计缘由：
- *   - 缺省 30 秒是 per-origin 策略的保守默认值；DB / 缓存 / UI 都按
+ *   - 缺省 30 秒是 per-origin 策略的保守默认值；K-V / 缓存 / UI 都按
  *     "空 / 非整数 / <= 0 → 30" 规范化。
  *   - 不引入"关闭 timeout"语义：用户明确要 timeout，0 / 负数 / 空 都
  *     不视为"关闭"，而是回退到缺省 30。
@@ -226,7 +227,7 @@ const APPVIEW_READY_RETRY_WINDOW_MS = 5_000;
 const SESSION_WINDOW_OPEN_FEATURES = "popup=yes,width=460,height=820,resizable=yes,scrollbars=yes";
 
 /**
- * 把 DB 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 DB。
+ * 把 K-V 读到的 origin 记录补齐新字段默认值。**纯函数**；不改入参，不读 K-V。
  */
 function normalizeOriginSettings(
   rec: ProtocolOriginSettingsRecord | null | undefined,
@@ -253,22 +254,24 @@ export interface ProtocolServiceDeps {
   vault: VaultService;
   keyspace: KeyspaceService;
   /**
-   * 可选协议存储 DB（commands / origins / feePools）。manifest 在 setup 阶段
+   * 可选协议存储 K-V（commands / origins / feePools）。manifest 在 setup 阶段
    * 打开并通过这个钩子注入；测试里可以传一个内存 fake。`undefined` 时按
    * "历史不可用"降级（p2pkh auto-approve 关闭；feepool fail-closed）。
    */
-  storageDb?: ProtocolStorageDb;
+  storageRepository?: ProtocolStorageRepository;
   /**
    * 可选 P2PKH 业务适配。manifest 从 plugin-p2pkh 暴露的 `p2pkh.service`
    * capability 取值注入；缺时 `p2pkh.transfer` 走 internal_error。
    */
   p2pkhService?: P2pkhProtocolAdapter;
+  /** 延迟解析 P2PKH capability；允许 Protocol 先于 owner-apps 装配。 */
+  getP2pkhService?: () => P2pkhProtocolAdapter | undefined;
   /** Session Window 使用的已验证 Connect Channel facade。 */
   connectChannelRuntime?: ConnectChannelRuntime;
   /** Optional Storage platform capability; absence only disables storage.*. */
-  storageService?: StorageService;
+  storageRuntimeController?: StorageRuntimeController;
   /** Resolve the current Storage capability at request/lifecycle time. */
-  getStorageService?: () => StorageService | undefined;
+  getStorageRuntimeController?: () => StorageRuntimeController | undefined;
   /**
    * Optional MSFile platform capability（施工单 docs/proposals/msfile）。
    * 缺失时只让 `msfile.*` fail closed；不得影响其他方法族。
@@ -391,7 +394,7 @@ interface RequestRecord {
   /**
    * `connect.resume` 进入时的 session 快照（ownerPublicKeyHex /
    * ownerLabel / claimsSnapshot）；只在 `method === "connect.resume"`
-   * 时有值。confirming 视图直接拿这个做展示，不需要再查 DB。
+   * 时有值。confirming 视图直接拿这个做展示，不需要再查 K-V。
    *
    * 关键（施工单 2026-06-28 002 硬切换）：`ownerKeyId` **不**记录在
    * snapshot 里；owner 唯一真值 = `ownerPublicKeyHex`。
@@ -475,10 +478,10 @@ export class ProtocolServiceImpl implements ProtocolService {
   private currentOriginValue: string | null = null;
   /** 当前 origin 下的命令流（最新在前；按 updatedAt desc）。 */
   private feedCommands: ProtocolCommandRecord[] = [];
-  /** 命令流 DB 是否可用。false 时 UI 顶部显示"历史不可用"。 */
+  /** 命令流 K-V 是否可用。false 时 UI 顶部显示"历史不可用"。 */
   private historyAvailableFlag: boolean;
   /**
-   * DB 加载按 origin 隔离的 in-flight promise map（施工单 2026-06-27 002
+   * K-V 加载按 origin 隔离的 in-flight promise map（施工单 2026-06-27 002
    * 反馈修复）。
    *
    * 旧实现用单一全局 `historyLoadInFlight: Promise<void> | null`，复
@@ -610,7 +613,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由（施工单 2026-06-29 001 硬切换）：
    *   - launchToken 只在 Session Window 当前内存有效；Session Window 刷新
    *     / 关闭即失效。
-   *   - 不允许通过 IndexedDB 持久化，避免"刷新后旧 token 仍能消费"。
+   *   - 不允许通过 platform K-V repository 持久化，避免"刷新后旧 token 仍能消费"。
    */
   private readonly launchTokensByToken: Map<
     string,
@@ -743,7 +746,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   private bootstrapFailureReasonValue: string | null = null;
 
   constructor(private readonly deps: ProtocolServiceDeps) {
-    this.historyAvailableFlag = Boolean(deps.storageDb);
+    this.historyAvailableFlag = Boolean(deps.storageRepository);
     this.bootModeValue = deps.bootMode ?? "connect";
     // Channel 事件已经在 Coordinator 完成验签、解密和固定协议分派。
     // Session Window 只做当前 session + exact channel 的最后一层隔离。
@@ -755,15 +758,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /** Resolve the current Storage capability after an independent plugin restart. */
-  private currentStorageService(): StorageService | undefined {
-    if (this.deps.getStorageService) {
+  private currentStorageRuntimeController(): StorageRuntimeController | undefined {
+    if (this.deps.getStorageRuntimeController) {
       try {
-        return this.deps.getStorageService();
+        return this.deps.getStorageRuntimeController();
       } catch {
         return undefined;
       }
     }
-    return this.deps.storageService;
+    return this.deps.storageRuntimeController;
   }
 
   /** MSFile capability 是可选依赖；缺失时 `msfile.*` fail closed。 */
@@ -778,20 +781,32 @@ export class ProtocolServiceImpl implements ProtocolService {
     return this.deps.msfileService;
   }
 
+  /** P2PKH capability 是 owner-apps-ready 才保证存在的可选依赖。 */
+  private currentP2pkhService(): P2pkhProtocolAdapter | undefined {
+    if (this.deps.getP2pkhService) {
+      try {
+        return this.deps.getP2pkhService();
+      } catch {
+        return undefined;
+      }
+    }
+    return this.deps.p2pkhService;
+  }
+
   /**
    * 在服务已经启动后接入可选的协议存储。
    *
-   * IndexedDB 只承载历史、站点配置和 session 持久化，不能成为协议页
+   * platform K-V repository 只承载历史、站点配置和 session 持久化，不能成为协议页
    * 首屏可用性的前置条件。manifest 因而会先创建本 service，再在后台
-   * 成功打开 DB 后调用本方法；若浏览器的 open 永久 pending，service 保持
+   * 成功打开 K-V 后调用本方法；若浏览器的 open 永久 pending，service 保持
    * historyAvailable=false 的安全降级状态，主应用和手动确认流程仍可使用。
    */
-  attachStorageDb(storageDb: ProtocolStorageDb): void {
-    if (this.deps.storageDb) return;
-    this.deps.storageDb = storageDb;
+  attachProtocolStorageRepository(storageRepository: ProtocolStorageRepository): void {
+    if (this.deps.storageRepository) return;
+    this.deps.storageRepository = storageRepository;
     this.historyAvailableFlag = true;
 
-    // DB 尚未就绪期间完成的终态记录仍在内存中；接入后补写，避免一次短暂
+    // K-V 尚未就绪期间完成的终态记录仍在内存中；接入后补写，避免一次短暂
     // 初始化延迟导致本次会话的历史永久丢失。
     for (const request of this.requestsByRecordId.values()) {
       if (this.isTerminalPhase(request.phase)) {
@@ -917,10 +932,10 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.abortController?.abort();
       }
     }
-    const storageService = this.currentStorageService();
+    const storageRuntimeController = this.currentStorageRuntimeController();
     const msfileService = this.currentMsfileService();
     for (const sessionId of sessionIds) {
-      void storageService?.abortSession(sessionId);
+      void storageRuntimeController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
     }
     // 把所有未终态 request 强制收尾为 rejected（不发 result 给 opener）。
@@ -1053,12 +1068,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 读 origin 配置。DB 不可用或该 origin 尚未配置时返回 null。
+   * 读 origin 配置。K-V 不可用或该 origin 尚未配置时返回 null。
    */
   async getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
-    if (!this.deps.storageDb) return null;
+    if (!this.deps.storageRepository) return null;
     try {
-      const raw = await this.deps.storageDb.getOrigin(origin);
+      const raw = await this.deps.storageRepository.getOrigin(origin);
       if (raw) {
         const normalized = normalizeOriginSettings(raw, origin);
         this.originCache.set(origin, normalized);
@@ -1067,7 +1082,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       return null;
     } catch (err) {
       this.deps.logger?.error?.({
-        scope: "protocol.storageDb",
+        scope: "protocol.storageRepository",
         event: "getOrigin.failed",
         origin,
         err: err instanceof Error ? err.message : String(err)
@@ -1077,15 +1092,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 写 origin 配置。DB 不可用时 throw。写入时同步刷内存 cache。
+   * 写 origin 配置。K-V 不可用时 throw。写入时同步刷内存 cache。
    */
   async setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void> {
-    if (!this.deps.storageDb) {
-      throw new Error("Protocol storage DB is not available");
+    if (!this.deps.storageRepository) {
+      throw new Error("Protocol storage K-V is not available");
     }
     const next = normalizeOriginSettings(record, record.origin);
     next.updatedAt = Date.now();
-    await this.deps.storageDb.putOrigin(next);
+    await this.deps.storageRepository.putOrigin(next);
     this.originCache.set(record.origin, next);
   }
 
@@ -1228,7 +1243,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 注意：manual record 进入 `confirming` 时**必须**同时调
    * `refreshTimeoutFromOriginConfig()`（与 `acceptRequest` 路径一致）。
-   * 锁屏期间积累的 manual request 解锁时同样需要按 DB 真值 clamp
+   * 锁屏期间积累的 manual request 解锁时同样需要按 K-V 真值 clamp
    * deadline——否则会固定吃 30 秒默认值，per-origin timeout 配置
    * 不生效。
    */
@@ -1267,7 +1282,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             snapshot.startedFromFallback
           );
           // 同步等待 refresh 落定：cache miss 时 timer 用 30s 兜底启动，
-          // refresh 会 clamp 到 DB 真值；如果 clamp 触发了 finalize，由
+          // refresh 会 clamp 到 K-V 真值；如果 clamp 触发了 finalize，由
           // await 链保证后续 setPhase/emit 不会跟 finalize 收尾冲突。
           await this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
         }
@@ -1334,10 +1349,10 @@ export class ProtocolServiceImpl implements ProtocolService {
         rec.abortController?.abort();
       }
     }
-    const storageService = this.currentStorageService();
+    const storageRuntimeController = this.currentStorageRuntimeController();
     const msfileService = this.currentMsfileService();
     for (const sessionId of sessionIds) {
-      void storageService?.abortSession(sessionId);
+      void storageRuntimeController?.abortSession(sessionId);
       void msfileService?.abortSession(sessionId);
     }
     this.sendClosingBestEffort();
@@ -1462,7 +1477,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     `confirming` 的 record；
    *   - 返回 owner 快照（ownerPublicKeyHex / ownerLabel）；UI 据此渲染
    *     "恢复会话"视图。
-   *   - snapshot 缺失（DB 不可用 / session 失效）时返回 null：UI 据此
+   *   - snapshot 缺失（K-V 不可用 / session 失效）时返回 null：UI 据此
    *     展示"该会话已失效，请重新登录"并禁用"恢复"按钮（仍可"取消"）。
    */
   connectResumeRecord(recordId?: string): {
@@ -1555,7 +1570,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 行为：
    *   - 校验 recordId 存在 + method === "connect.resume" + 当前 phase
    *     处于 `waiting_unlock_manual` 或 `confirming`；
-   *   - snapshot 缺失（DB 不可用 / session 失效）时不推进，UI 应当展示
+   *   - snapshot 缺失（K-V 不可用 / session 失效）时不推进，UI 应当展示
    *     "该会话已失效，请重新登录"。
    */
   async confirmConnectResume(recordId: string, password: string): Promise<void> {
@@ -1832,7 +1847,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 设计缘由（施工单 2026-06-29 002 硬切换 + 2026-06-30 002 硬切换）：
    *   - plugin-apps 是**唯一**允许调用本入口的业务插件；plugin-apps 自己
    *     **不**直接 import / 操作：
-   *       - `protocolStorageDb`
+   *       - `protocolMultipartUploadRepository`
    *       - `buildAppBootstrapPayload`
    *       - `installLauncherBootstrapRegistry`
    *       - `window.open("/protocol/v1/popup?...")`
@@ -1928,7 +1943,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       );
     }
     if (proof.requirements.includes("storage")) {
-      const storage = this.deps.getStorageService?.() ?? this.deps.storageService;
+      const storage = this.deps.getStorageRuntimeController?.() ?? this.deps.storageRuntimeController;
       if (!storage || storage.status() !== "ready") {
         throw new LaunchAppViewError(
           "requirement_unavailable",
@@ -1946,7 +1961,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       );
     }
     if (proof.requirements.includes("storage")) {
-      const storage = this.deps.getStorageService?.() ?? this.deps.storageService;
+      const storage = this.deps.getStorageRuntimeController?.() ?? this.deps.storageRuntimeController;
       if (!storage || storage.status() !== "ready") {
         throw protocolError(
           "storage_unavailable",
@@ -1999,7 +2014,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         "launchAppView: window undefined"
       );
     }
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       throw new LaunchAppViewError(
         "session_storage_unavailable",
         "launchAppView: session storage unavailable"
@@ -2068,7 +2083,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       lastUsedAt: now,
       revokedAt: null
     };
-    await this.deps.storageDb.putConnectSessionAndRevokeOriginPeers(sessionRecord);
+    await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(sessionRecord);
     // 8) 用受控 appView session capability 组装 `SessionRuntimeBootstrap`。
     let sessionRuntimeBootstrap: SessionRuntimeBootstrap;
     try {
@@ -2660,7 +2675,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     //   - 新实现：切 origin 时立即把 `feedCommands` 清成"只含新 origin 内
     //     存活记录的投影"；旧 origin 数据仍保留在 `requestsByRecordId` 里
     //     便于切回，但当前视图只显示新 origin。`loadHistoryForOrigin`
-    //     完成后再用 DB 历史重建当前 origin 视图。
+    //     完成后再用 K-V 历史重建当前 origin 视图。
     if (this.currentOriginValue !== event.origin) {
       this.currentOriginValue = event.origin;
       this.feedCommands = this.buildFeedDisplay(
@@ -2816,7 +2831,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         this.scheduleFailFastRequest(recordId, sessionFail.code, sessionFail.reason);
         return;
       }
-      // preCheck 已通过：session 真值有效 / DB 异常按降级放行（手动
+      // preCheck 已通过：session 真值有效 / K-V 异常按降级放行（手动
       // confirm 继续走）。把 sessionId 落到 record 必填字段；
       // ownerPublicKeyHex 由 fetchSessionForBinding 二次校验后回填。
       let session: ConnectSessionRecord | null = null;
@@ -2824,7 +2839,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       try {
         session = await this.fetchSessionForBinding(sessionId);
       } catch (err) {
-        // DB 异常：accept 阶段无法读到 session 真值；走 manual
+        // K-V 异常：accept 阶段无法读到 session 真值；走 manual
         // confirm 路径，execute 阶段 `requireConnectSession` 再校验。
         // ownerPublicKeyHex 留空——execute 阶段校验失败会写入
         // 本地 failureReason；caller 收到 user_rejected。
@@ -2842,7 +2857,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         // 不 return；让 request 继续走 manual confirm / execute 路径。
       } else if (session === null) {
         // 极端竞态：preCheck 通过 → session 突然被外部 logout / 删除。
-        // 走 fail-fast（与 DB 异常区分）。
+        // 走 fail-fast（与 K-V 异常区分）。
         this.scheduleFailFastRequest(recordId, "user_rejected", "internal_error");
         return;
       } else {
@@ -2929,10 +2944,10 @@ export class ProtocolServiceImpl implements ProtocolService {
    * origin 不匹配 → `invalid_origin`（与 identity.get 同语义，
    * 让 caller 知道自己"用的 sessionId 不是该 origin 的"）。
    *
-   * DB 异常 / DB 不可用处理（关键边界）：
+   * K-V 异常 / K-V 不可用处理（关键边界）：
    *   - fetchSessionForBinding 抛错时**不**走 fail-fast 路径，**返回
    *     null** 让 caller 走 manual confirm / execute 阶段再校验。
-   *     这与旧"DB unavailable 降级"边界一致：p2pkh / cipher / 业务
+   *     这与旧"K-V unavailable 降级"边界一致：p2pkh / cipher / 业务
    *     方法仍可继续走人工确认，execute 阶段 `requireConnectSession`
    *     会再做一次校验。
    */
@@ -2947,8 +2962,8 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       session = await this.fetchSessionForBinding(sessionId);
     } catch (err) {
-      // 关键（施工单 2026-06-28 002 收口）：DB 异常**不**触发 fail-fast。
-      // 与"DB unavailable 降级"边界一致：允许 manual confirm 继续走
+      // 关键（施工单 2026-06-28 002 收口）：K-V 异常**不**触发 fail-fast。
+      // 与"K-V unavailable 降级"边界一致：允许 manual confirm 继续走
       // manual confirm 路径，execute 阶段再校验 session 真值。
       this.deps.logger?.warn?.({
         scope: "protocol.connect",
@@ -2988,21 +3003,21 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 关键不变量（施工单 2026-06-28 002 硬切换）：
    *   - 不存在 / 已 revoke → 返回 `null`；caller 触发 fail-fast。
-   *   - DB 异常 / DB 不可用 → **抛错**。让 caller 区分"session 失效"
-   *     与"DB 异常"两种 case：DB 异常**不**走 fail-fast 路径——与
-   *     旧"DB unavailable 降级"边界一致：p2pkh / cipher / 业务
+   *   - K-V 异常 / K-V 不可用 → **抛错**。让 caller 区分"session 失效"
+   *     与"K-V 异常"两种 case：K-V 异常**不**走 fail-fast 路径——与
+   *     旧"K-V unavailable 降级"边界一致：p2pkh / cipher / 业务
    *     方法仍走 manual confirm（execute 阶段再校验）。Fail-fast 只
-   *     用于"session 真值确凿无效"，**不**用于"DB 查不到"。
+   *     用于"session 真值确凿无效"，**不**用于"K-V 查不到"。
    *   - 跨 origin 不在本函数判断；caller 拿到 session 后自己
    *     `session.origin !== event.origin` 决定走 `invalid_origin`。
    */
   private async fetchSessionForBinding(
     sessionId: string
   ): Promise<ConnectSessionRecord | null> {
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       throw new Error("connect session storage unavailable");
     }
-    const session = await this.deps.storageDb.getConnectSession(sessionId);
+    const session = await this.deps.storageRepository.getConnectSession(sessionId);
     if (!session) return null;
     if (session.revokedAt !== null) return null;
     return session;
@@ -3096,7 +3111,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 准备 `connect.login` record：拉取 ready key 列表作为选 key 候选。
-   * 任何 DB / keyspace 异常都**不**当场拒掉 request——service 仍按 manual
+   * 任何 K-V / keyspace 异常都**不**当场拒掉 request——service 仍按 manual
    * 路径推进；执行阶段会再次校验，失败时回 `user_rejected` + 本地 reason。
    */
   private async bootstrapConnectLoginRecord(rec: RequestRecord, _params: ConnectLoginParams): Promise<void> {
@@ -3127,7 +3142,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 校验项与执行阶段 `requireConnectSessionForCipher` 严格对齐：
    *     session 真值存在 + 未 revoke + origin 匹配 + owner key ready。
    *   - 校验**通过**时同步把 session 真值落到 `rec.connectResumeSnapshot`，
-   *     避免 execute 阶段再去 DB 多走一次（执行路径仍以 DB 当前值为
+   *     避免 execute 阶段再去 K-V 多走一次（执行路径仍以 K-V 当前值为
    *     准，但 snapshot 是热路径上的合理缓存）。
    *
    * 返回：`null` = 校验通过；`{code, reason}` = 校验失败（fail-fast）。
@@ -3137,12 +3152,12 @@ export class ProtocolServiceImpl implements ProtocolService {
     params: ConnectResumeParams,
     origin: string
   ): Promise<{ code: ProtocolErrorCode; reason: ProtocolFailureReason } | null> {
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       return { code: "user_rejected", reason: "internal_error" };
     }
     let session: ConnectSessionRecord | null = null;
     try {
-      session = await this.deps.storageDb.getConnectSession(params.connectSessionId);
+      session = await this.deps.storageRepository.getConnectSession(params.connectSessionId);
     } catch (err) {
       this.deps.logger?.warn?.({
         scope: "protocol.connect",
@@ -3224,7 +3239,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       parsed.method === "cipher.encrypt" ||
       parsed.method === "cipher.decrypt"
     ) {
-      // 同步 cache 检查；cache miss 时直接 await 一次 DB 再判定一次。
+      // 同步 cache 检查；cache miss 时直接 await 一次 K-V 再判定一次。
       let hit =
         parsed.method === "identity.get"
           ? this.isIdentityAutoApprovedSync(origin)
@@ -3250,7 +3265,7 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private isP2pkhAutoApprovedSync(params: P2pkhTransferParams, origin: string): boolean {
-    if (!this.deps.storageDb) return false;
+    if (!this.deps.storageRepository) return false;
     const rec = this.originCache.get(origin) ?? null;
     if (!rec) return false;
     if (!rec.p2pkhAutoApproveEnabled) return false;
@@ -3259,21 +3274,21 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private isIdentityAutoApprovedSync(origin: string): boolean {
-    if (!this.deps.storageDb) return false;
+    if (!this.deps.storageRepository) return false;
     const rec = this.originCache.get(origin) ?? null;
     if (!rec) return false;
     return rec.identityAutoApproveEnabled === true;
   }
 
   private isCipherAutoApprovedSync(origin: string): boolean {
-    if (!this.deps.storageDb) return false;
+    if (!this.deps.storageRepository) return false;
     const rec = this.originCache.get(origin) ?? null;
     if (!rec) return false;
     return rec.cipherAutoApproveEnabled === true;
   }
 
   private isFeepoolAutoSignedSync(amountSatoshis: number, origin: string): boolean {
-    if (!this.deps.storageDb) return false;
+    if (!this.deps.storageRepository) return false;
     const rec = this.originCache.get(origin) ?? null;
     if (!rec) return false;
     if (rec.feePoolAutoSignMaxSatoshis <= 0) return false;
@@ -3284,9 +3299,9 @@ export class ProtocolServiceImpl implements ProtocolService {
   private async getOriginSettingsCached(origin: string): Promise<ProtocolOriginSettingsRecord | null> {
     const cached = this.originCache.get(origin);
     if (cached) return cached;
-    if (!this.deps.storageDb) return null;
+    if (!this.deps.storageRepository) return null;
     try {
-      const raw = await this.deps.storageDb.getOrigin(origin);
+      const raw = await this.deps.storageRepository.getOrigin(origin);
       if (raw) {
         const normalized = normalizeOriginSettings(raw, origin);
         this.originCache.set(origin, normalized);
@@ -3379,7 +3394,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             snapshot.startedFromFallback
           );
           // 与 resumeAfterUnlock 对齐：cache miss 时 timer 用 30s 兜底启动，
-          // refresh 异步 clamp 到 DB 真值；per-origin timeout 配置必须生效。
+          // refresh 异步 clamp 到 K-V 真值；per-origin timeout 配置必须生效。
           void this.refreshTimeoutFromOriginConfig(rec.recordId, rec.origin);
         }
       }
@@ -3402,7 +3417,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 设计要点（施工单 2026-06-27 001 硬切换 + 施工单 003）：
    *   - 每条 confirming request 独立 timer；进入 confirming 时启动。
-   *   - cache miss 用缺省 30 兜底；DB 返回后**clamp down**（不 extend）。
+   *   - cache miss 用缺省 30 兜底；K-V 返回后**clamp down**（不 extend）。
    *   - 修改站点 timeout **不**热更新当前正在倒计时的 request。
    */
   /**
@@ -3416,7 +3431,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     被提前填充，timer 误读到 60s 而非走 30s 兜底。
    *   - `startedFromFallback`：true 表示本次走了 30s 兜底，后续
    *     `refreshTimeoutFromOriginConfig` 才允许 clamp down；false
-   *     表示本次已拿到 cache 真值，后续不允许热更新（DB 真值晚到
+   *     表示本次已拿到 cache 真值，后续不允许热更新（K-V 真值晚到
    *     也**不** extend）。
    */
   private startConfirmTimeout(
@@ -3454,12 +3469,12 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 异步刷 origin 配置后，按 DB 真值重新评估当前 request 的
+   * 异步刷 origin 配置后，按 K-V 真值重新评估当前 request 的
    * timeout deadline。
    *
    * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
    *   - **只**对 `startedFromFallback === true` 的 request 生效——已经
-   *     走同步 cache 命中的 request **不**允许 DB 真值晚到后再热更新。
+   *     走同步 cache 命中的 request **不**允许 K-V 真值晚到后再热更新。
    *     收口掉“修改站点 timeout 配置热更新正在倒计时的 request”的边界。
    *   - `newDeadline < currentDeadline` 才更新（只缩短，不延长）。
    *   - `newDeadline <= Date.now()` 时立即 `finalizeRequestByTimeout`，
@@ -3502,10 +3517,10 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 决定本次 request 进入 confirming 时的 timeout 快照。
    *
    * 设计缘由（施工单 2026-06-28 002 硬切换 timeout 收口）：
-   *   - 同步 cache 命中 → 用 cache 真值启动 timer；后续 DB 真值晚到**不**
+   *   - 同步 cache 命中 → 用 cache 真值启动 timer；后续 K-V 真值晚到**不**
    *     热更新（`startedFromFallback = false`）。
    *   - 同步 cache miss → 用 `DEFAULT_CONFIRM_TIMEOUT_SECONDS`
-   *     （30s）兜底；后续 DB 真值晚到**只**允许 clamp down
+   *     （30s）兜底；后续 K-V 真值晚到**只**允许 clamp down
    *     （`startedFromFallback = true`）。
    *
    * 谁把 request 推进到 `confirming`，谁就在“推进那个瞬间”调用本
@@ -3922,25 +3937,50 @@ export class ProtocolServiceImpl implements ProtocolService {
     return null;
   }
 
-  private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<{ service: StorageService; context: StorageAppContext }> {
-    const service = this.currentStorageService();
+  private async requireStorageContext(rec: RequestRecord, connectSessionId: string): Promise<{ service: StorageRuntimeController; context: OwnerAppStorageGrant }> {
+    const service = this.currentStorageRuntimeController();
     if (!service) throw protocolError("storage_unavailable", "Storage service is unavailable");
     const session = await this.requireConnectSession(rec, connectSessionId);
     if (!session.appIdentity) throw protocolError("storage_identity_required", "Storage requires a verified app identity proof snapshot");
+    if (!session.ownerPublicKeyHex) throw protocolError("storage_identity_required", "Storage requires an active owner");
+    const summary = await service.getProviderSummary();
+    const lifecycle = this.deps.vault.getLifecycleSnapshot();
+    const applicationStorageId = deriveThirdPartyApplicationStorageId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
     return {
       service,
-      context: { connectSessionId: session.sessionId, transportOrigin: rec.origin, appIdentity: session.appIdentity }
+      context: {
+        connectSessionId: session.sessionId,
+        transportOrigin: rec.origin,
+        appIdentity: session.appIdentity,
+        bucketId: `runtime:${summary?.providerId ?? "unknown"}`,
+        bucketGeneration: summary?.generation ?? 1,
+        ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
+        applicationStorageId,
+        sessionEpoch: lifecycle.sessionEpoch
+      }
     };
   }
 
   private async abortCancelledUpload(rec: RequestRecord, connectSessionId: string, uploadId: string): Promise<void> {
-    const service = this.currentStorageService();
+    const service = this.currentStorageRuntimeController();
     if (!service) return;
     try {
       const session = await this.requireConnectSession(rec, connectSessionId);
       if (!session.appIdentity) return;
+      if (!session.ownerPublicKeyHex) return;
+      const summary = await service.getProviderSummary();
+      const lifecycle = this.deps.vault.getLifecycleSnapshot();
       await service.abortUpload(
-        { connectSessionId, transportOrigin: rec.origin, appIdentity: session.appIdentity },
+        {
+          connectSessionId,
+          transportOrigin: rec.origin,
+          appIdentity: session.appIdentity,
+          bucketId: `runtime:${summary?.providerId ?? "unknown"}`,
+          bucketGeneration: summary?.generation ?? 1,
+          ownerPublicKeyHex: session.ownerPublicKeyHex.toLowerCase(),
+          applicationStorageId: deriveThirdPartyApplicationStorageId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId),
+          sessionEpoch: lifecycle.sessionEpoch
+        },
         { uploadId }
       );
     } catch (error) {
@@ -4204,7 +4244,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - session 不存在 / 跨 origin / 已 revoked / owner 不 ready 一律对外
    *     回 `user_rejected`；本地 reason 写 `internal_error`（具体原因
    *     不对外暴露，避免 site 通过 result 反推本地状态）。
-   *   - DB 不可用时也按 internal_error 拒掉——cipher / connect.* / 业务
+   *   - K-V 不可用时也按 internal_error 拒掉——cipher / connect.* / 业务
    *     方法路径不接受"session 不可查"的中间态。
    *   - 跨 origin 单独走 `invalid_origin`（与 identity.get 同语义），
    *     其它失败统一 `user_rejected`。
@@ -4218,7 +4258,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     rec: RequestRecord,
     sessionId: string
   ): Promise<ConnectSessionRecord> {
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       throw localFailure("internal_error", "connect session storage unavailable");
     }
     if (!sessionId) {
@@ -4228,7 +4268,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     try {
       session = await this.fetchSessionForBinding(sessionId);
     } catch (err) {
-      // DB 异常：与"DB unavailable 降级"边界一致——execute 阶段
+      // K-V 异常：与"K-V unavailable 降级"边界一致——execute 阶段
       // 也走"未查到 session"路径，统一 user_rejected。
       this.deps.logger?.warn?.({
         scope: "protocol.connect",
@@ -4244,7 +4284,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 其它统一 `user_rejected`。
       let raw: ConnectSessionRecord | null = null;
       try {
-        raw = await this.deps.storageDb.getConnectSession(sessionId);
+        raw = await this.deps.storageRepository.getConnectSession(sessionId);
       } catch (err) {
         this.deps.logger?.warn?.({
           scope: "protocol.connect",
@@ -4269,7 +4309,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
-   * active key。硬门禁（`keyspace.openKeyStorage` 要求
+   * active key。硬门禁（`keyspace.openOwnerAppStore` 要求
    * `active === input.publicKeyHex`）会在底层挡掉，但「Key storage
    * is not ready」是偶发底层错误，**不**适合作为协议失败语义。
    * 提前在协议层以 `user_rejected / session_owner_mismatch` 显式
@@ -4462,13 +4502,13 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   /**
    * 更新 session.lastUsedAt。fire-and-forget：cipher 解密 / 加密的
-   * 主路径**不**等待 DB 写；写失败时 DB 侧记日志但不影响主流程。
+   * 主路径**不**等待 K-V 写；写失败时 K-V 侧记日志但不影响主流程。
    */
   private touchConnectSession(session: ConnectSessionRecord): void {
-    if (!this.deps.storageDb) return;
+    if (!this.deps.storageRepository) return;
     session.lastUsedAt = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: session.lastUsedAt };
-    void this.deps.storageDb.putConnectSession(next).catch((err) => {
+    void this.deps.storageRepository.putConnectSession(next).catch((err) => {
       this.deps.logger?.warn?.({
         scope: "protocol.connect",
         event: "touchConnectSession.putFailed",
@@ -4486,7 +4526,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    *     （来自 rec.connectLoginSelected；用户在 confirmConnectLogin 时写入）；
    *   - owner 唯一真值 = `ownerPublicKeyHex`；`ownerKeyId` **不**落
    *   - owner key 必须在 keyspace 内可查，且 identityStatus === "ready"；
-   *   - DB 不可用时直接拒掉（fail-closed）。
+   *   - K-V 不可用时直接拒掉（fail-closed）。
    */
   private async executeConnectLogin(rec: RequestRecord): Promise<ConnectLoginResult> {
     const params = rec.params as ConnectLoginParams;
@@ -4499,7 +4539,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       throw localFailure("internal_error", "connect.login: owner key not found");
     }
     // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       throw localFailure("internal_error", "connect.login: session storage unavailable");
     }
     // 一次解析 claims 真值快照（与 identity.get 同语义，但不构造
@@ -4540,7 +4580,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       lastUsedAt: now,
       revokedAt: null
     };
-    await this.deps.storageDb.putConnectSessionAndRevokeOriginPeers(record);
+    await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(record);
     return {
       connectSessionId: sessionId,
       ownerPublicKeyHex: key.publicKeyHex,
@@ -4554,12 +4594,12 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 执行 connect.resume。
    *
    * 关键不变量：
-   *   - session 真值必须仍在 DB 内（rec.connectResumeSnapshot 由
+   *   - session 真值必须仍在 K-V 内（rec.connectResumeSnapshot 由
    *     `bootstrapConnectResumeRecord` 在 acceptRequest 时预填，执行时
-   *     仍以 DB 当前值为准；中间态变化以 DB 为真值）；
+   *     仍以 K-V 当前值为准；中间态变化以 K-V 为真值）；
    *   - origin / revokedAt / owner ready 三道闸在执行时**重新**校验一次
    *     （即使 popup 当前文档 unlock runtime 仍在，session 也可能被外部
-   *     logout / key 删除 / 别的 tab 改 DB）；
+   *     logout / key 删除 / 别的 tab 改 K-V）；
    *   - 失败语义与 cipher 路径一致。
    */
   private async executeConnectResume(rec: RequestRecord): Promise<ConnectResumeResult> {
@@ -4572,9 +4612,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 硬切换 002 收尾：identityStatus 已删除，KeyIdentity 必 ready。
     const now = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
-    if (this.deps.storageDb) {
+    if (this.deps.storageRepository) {
       try {
-        await this.deps.storageDb.putConnectSession(next);
+        await this.deps.storageRepository.putConnectSession(next);
       } catch (err) {
         this.deps.logger?.warn?.({
           scope: "protocol.connect",
@@ -4618,10 +4658,10 @@ export class ProtocolServiceImpl implements ProtocolService {
    */
   private async executeConnectLogout(rec: RequestRecord): Promise<ConnectLogoutResult> {
     const params = rec.params as ConnectLogoutParams;
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       throw localFailure("internal_error", "connect.logout: session storage unavailable");
     }
-    const existing = await this.deps.storageDb.getConnectSession(params.connectSessionId);
+    const existing = await this.deps.storageRepository.getConnectSession(params.connectSessionId);
     const now = Date.now();
     let result: ConnectLogoutResult;
     if (!existing) {
@@ -4642,7 +4682,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       };
     } else {
       const next: ConnectSessionRecord = { ...existing, revokedAt: now };
-      await this.deps.storageDb.putConnectSession(next);
+      await this.deps.storageRepository.putConnectSession(next);
       result = {
         connectSessionId: existing.sessionId,
         revokedAt: now
@@ -4652,7 +4692,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 这一步不依赖 vault.lock 成功与否：session 一旦 logout，旧 owner
     // capability 就不应继续常驻内存。
     this.clearSessionRuntimeBootstrap(result.connectSessionId, "logout");
-    await this.currentStorageService()?.abortSession(result.connectSessionId);
+    await this.currentStorageRuntimeController()?.abortSession(result.connectSessionId);
     await this.currentMsfileService()?.abortSession(result.connectSessionId);
     // 清掉 popup 当前 unlock runtime。**同步** await：施工单 4.4 + 5.1.3
     // 要求 logout 同时"吊销 session + 清 popup unlock runtime"——
@@ -4661,7 +4701,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     // 错）时仍收到 ok=true，导致"session 已吊销但 unlock runtime 还在"
     // 的状态错位。
     //
-    // 副作用：DB 里 session.revokedAt 已被本次写入；即使 vault.lock
+    // 副作用：K-V 里 session.revokedAt 已被本次写入；即使 vault.lock
     // 抛错、对外回 ok=false，session 真值层面 logout 已生效——下次
     // connect.resume / cipher.* 仍会按 fail-fast 路径失败（session
     // revoked）。这是 fail-closed 的安全语义，不是 bug。
@@ -4733,7 +4773,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         "connect.launch: appViewContext not aligned with launchToken"
       );
     }
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       throw localFailure(
         "internal_error",
         "connect.launch: session storage unavailable"
@@ -4741,7 +4781,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     }
     // 校验 session 真值（与 connect.resume 同一路径）：session 不存在 /
     // 已 revoke / origin 不匹配 / owner 不 ready 都拒掉。
-    const session = await this.deps.storageDb.getConnectSession(record.connectSessionId);
+    const session = await this.deps.storageRepository.getConnectSession(record.connectSessionId);
     if (!session) {
       throw localFailure(
         "internal_error",
@@ -4779,7 +4819,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     const now = Date.now();
     const next: ConnectSessionRecord = { ...session, lastUsedAt: now };
     try {
-      await this.deps.storageDb.putConnectSession(next);
+      await this.deps.storageRepository.putConnectSession(next);
     } catch (err) {
       this.deps.logger?.warn?.({
         scope: "protocol.connect.launch",
@@ -4997,7 +5037,8 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeP2pkhTransferAndFinalize(rec: RequestRecord): Promise<void> {
     const params = rec.params as P2pkhTransferParams;
-    if (!this.deps.p2pkhService) {
+    const p2pkhService = this.currentP2pkhService();
+    if (!p2pkhService) {
       rec.phase = "failed";
       rec.errorCode = "internal_error";
       rec.errorMessage = "p2pkh service not available";
@@ -5016,7 +5057,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       const session = await this.requireConnectSession(rec, params.connectSessionId);
       const ownerPublicKeyHex = session.ownerPublicKeyHex;
       // 硬切换 002 收尾：protocol 层显式校验 session owner == 当前
-      // active key。硬门禁（`keyspace.openKeyStorage` 要求
+      // active key。硬门禁（`keyspace.openOwnerAppStore` 要求
       // `active === input.publicKeyHex`）会在底层挡掉，但「Key
       // storage is not ready」是偶发底层错误，**不**适合作为协议
       // 失败语义。提前在协议层以「session is no longer bound to
@@ -5030,7 +5071,7 @@ export class ProtocolServiceImpl implements ProtocolService {
         card.updatedAt = Date.now();
         this.persistRecord(card);
       }
-      const preview = await this.deps.p2pkhService.prepareTransfer({
+      const preview = await p2pkhService.prepareTransfer({
         assetId: "bsv",
         ownerPublicKeyHex,
         recipientAddress: params.recipientAddress,
@@ -5041,7 +5082,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 会校验 resource / 签名 key 与 owner 一致，跨 owner 复用
       // preview 直接拒绝。
       const previewWithOwner = { ...preview, ownerPublicKeyHex };
-      const submitted = await this.deps.p2pkhService.submitTransfer(previewWithOwner);
+      const submitted = await p2pkhService.submitTransfer(previewWithOwner);
       const txid = submitted.txid ?? preview.txid;
       const result: P2pkhTransferResult = {
         txid,
@@ -5070,7 +5111,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeFeepoolPrepareAndFinalize(rec: RequestRecord): Promise<void> {
     const params = rec.params as FeepoolPrepareParams;
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       rec.phase = "failed";
       rec.errorCode = "user_rejected";
       rec.errorMessage = "User rejected";
@@ -5093,7 +5134,7 @@ export class ProtocolServiceImpl implements ProtocolService {
       // 合作为协议失败语义。
       this.assertSessionOwnerIsActive(session);
       const poolKey = `${rec.origin}::${ownerPublicKeyHex}::${params.counterpartyPublicKeyHex}`;
-      const prior = await this.deps.storageDb.getFeePool(poolKey);
+      const prior = await this.deps.storageRepository.getFeePool(poolKey);
       const originSettings = await this.getOriginSettingsCached(rec.origin);
 
       let action: ProtocolFeePoolAction;
@@ -5373,12 +5414,13 @@ export class ProtocolServiceImpl implements ProtocolService {
     baseTxid: string;
     amount: number;
   }> {
-    if (!this.deps.p2pkhService) {
+    const p2pkhService = this.currentP2pkhService();
+    if (!p2pkhService) {
       throw localFailure("internal_error", "p2pkh service required for fee pool base tx");
     }
     // 关键（002 硬切换）：UTXO 选币按 owner 走，**不**读全局 active key。
     // plugin-p2pkh 内部 `listUtxos` filter 已支持 `ownerPublicKeyHex`。
-    const utxos = await this.deps.p2pkhService.listUtxos({
+    const utxos = await p2pkhService.listUtxos({
       assetId: "bsv",
       ownerPublicKeyHex
     });
@@ -5408,7 +5450,7 @@ export class ProtocolServiceImpl implements ProtocolService {
 
   private async executeFeepoolCommitAndFinalize(rec: RequestRecord): Promise<void> {
     const params = rec.params as FeepoolCommitParams;
-    if (!this.deps.storageDb) {
+    if (!this.deps.storageRepository) {
       rec.phase = "failed";
       rec.errorCode = "user_rejected";
       rec.errorMessage = "User rejected";
@@ -5536,7 +5578,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           lastOperationId: op.operationId,
           updatedAt: Date.now()
         };
-        await this.deps.storageDb.putFeePool(newRecord);
+        await this.deps.storageRepository.putFeePool(newRecord);
       } else if (op.action === "spend" && op.priorPool) {
         const baseTxid = op.priorPool.baseTxid;
         const baseTxHex = op.priorPool.baseTxHex;
@@ -5554,7 +5596,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           lastOperationId: op.operationId,
           updatedAt: Date.now()
         };
-        await this.deps.storageDb.putFeePool(newRecord);
+        await this.deps.storageRepository.putFeePool(newRecord);
       }
       if (op.action === "close_and_recreate" && op.closeDraftTxHex) {
         closeDraftTxid = await computeTxidFromHex(op.closeDraftTxHex);
@@ -5775,7 +5817,7 @@ export class ProtocolServiceImpl implements ProtocolService {
     return true;
   }
 
-  /* ============== 命令流（feed）+ DB ============== */
+  /* ============== 命令流（feed）+ K-V ============== */
 
   /**
    * 当前 record 的 phase 是否已经走到终态（不可再被 `confirmByUser` /
@@ -5784,7 +5826,7 @@ export class ProtocolServiceImpl implements ProtocolService {
    * 终态集合（与 `ProtocolCommandPhase` 同步）：
    *   approved / rejected / failed / timed_out
    *
-   * 旧 `waiting_unlock` / `waiting_confirm` 是 DB 历史 schema 上的 alias，
+   * 旧 `waiting_unlock` / `waiting_confirm` 是 K-V 历史 schema 上的 alias，
    * 现在新写入只会落到 `waiting_unlock_manual` / `waiting_unlock_auto`；
    * 这里把 `waiting_unlock` / `waiting_confirm` 也视为**中间态**——它们
    * 一定来自旧历史记录，按活请求区展示策略走（它们不可能出现在新写
@@ -5808,9 +5850,9 @@ export class ProtocolServiceImpl implements ProtocolService {
    *   - 历史区：  终态 record，按 updatedAt desc。
    *   - 拼接顺序：活请求区在前，历史区在后。
    *
-   * 入参 `records` 一般来自 `feedCommands` 或"DB 历史 + 内存活记录"的
+   * 入参 `records` 一般来自 `feedCommands` 或"K-V 历史 + 内存活记录"的
    * 合并结果；本函数只负责按 phase / 时间戳排序，**不**做 id 去重——
-   * 调用方负责先按 id 合并（DB + 内存合并时内存覆盖 DB）。
+   * 调用方负责先按 id 合并（K-V + 内存合并时内存覆盖 K-V）。
    */
   private buildFeedDisplay(records: ProtocolCommandRecord[]): ProtocolCommandRecord[] {
     const live: ProtocolCommandRecord[] = [];
@@ -5935,15 +5977,15 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   private persistRecord(record: ProtocolCommandRecord): void {
-    const db = this.deps.storageDb;
-    if (!db) return;
+    const storageRepository = this.deps.storageRepository;
+    if (!storageRepository) return;
     // 施工单 2026-06-27 001/002 明确：活请求只存在于当前 popup 会话内存，
-    // popup 刷新 / 关闭后不做会话级活卡恢复。因此 IndexedDB 只持久化终态；
+    // popup 刷新 / 关闭后不做会话级活卡恢复。因此 platform K-V repository 只持久化终态；
     // 中间态（waiting_unlock_* / confirming / queued / executing）即便误写，
     // 也只会制造"UI 看起来有活卡，但内存里已经没有 request"的脏状态。
     if (!this.isTerminalPhase(record.phase)) return;
-    void db.putCommand(record).catch((err) => {
-      console.error("[protocol.storageDb] persistRecord failed", {
+    void storageRepository.putCommand(record).catch((err) => {
+      console.error("[protocol.storageRepository] persistRecord failed", {
         id: record.id,
         origin: record.origin,
         error: err instanceof Error ? err.message : String(err)
@@ -5960,14 +6002,14 @@ export class ProtocolServiceImpl implements ProtocolService {
    *
    * 行为：
    *   - 同 origin 内已有的 in-flight load 直接复用返回的 promise（避免
-   *     对同 origin 重复 DB 读取）；**不同 origin 各自独立**——
+   *     对同 origin 重复 K-V 读取）；**不同 origin 各自独立**——
    *     `historyLoadInFlightByOrigin: Map<origin, Promise>`，不能用
    *     全局 `currentOriginValue` 判断复用（否则切到 B 时复用 A 的 in-flight）。
-   *   - 加载完成后，按 recordId 合并 DB 历史 + 内存活记录，**同 id 以
-   *     内存活记录为准**；DB 旧字段不允许覆盖当前内存里的活卡。
-   *   - DB 里若残留旧版本误写进去的中间态 record（confirming /
+   *   - 加载完成后，按 recordId 合并 K-V 历史 + 内存活记录，**同 id 以
+   *     内存活记录为准**；K-V 旧字段不允许覆盖当前内存里的活卡。
+   *   - K-V 里若残留旧版本误写进去的中间态 record（confirming /
    *     waiting_unlock_* / queued / executing），本轮直接忽略：活请求
-   *     只能来自当前 popup 会话内存，不能跨会话从 DB "复活"。
+   *     只能来自当前 popup 会话内存，不能跨会话从 K-V "复活"。
    *   - 合并完成后用 `buildFeedDisplay` 重建展示投影（活请求区
    *     createdAt asc + 历史区 updatedAt desc）。
    *   - 加载完成 / 失败时检查 `currentOriginValue === origin`：如果当前
@@ -5982,9 +6024,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     if (existing) {
       return existing;
     }
-    const db = this.deps.storageDb;
-    if (!db) {
-      // DB 不可用：仅当当前 currentOrigin 仍等于本 origin 时把"不可用"
+    const storageRepository = this.deps.storageRepository;
+    if (!storageRepository) {
+      // K-V 不可用：仅当当前 currentOrigin 仍等于本 origin 时把"不可用"
       // 状态写回 feed；旧 origin 的 in-flight 不会污染新 origin 视图。
       if (this.currentOriginValue === origin) {
         this.feedCommands = this.buildFeedDisplay(
@@ -5999,9 +6041,9 @@ export class ProtocolServiceImpl implements ProtocolService {
     const task = (async () => {
       try {
         const [list, originRec, pools] = await Promise.all([
-          db.listCommandsByOrigin(origin),
-          db.getOrigin(origin),
-          db.listFeePoolsByOrigin(origin)
+          storageRepository.listCommandsByOrigin(origin),
+          storageRepository.getOrigin(origin),
+          storageRepository.listFeePoolsByOrigin(origin)
         ]);
         // 批次隔离：旧 token 晚到 → 丢弃结果。
         if (token !== this.historyLoadToken) {
@@ -6019,7 +6061,7 @@ export class ProtocolServiceImpl implements ProtocolService {
             this.originCache.set(origin, normalizeOriginSettings(originRec, origin));
           }, 0);
         }
-        // 按 recordId 合并：内存活记录优先覆盖 DB 旧记录。
+        // 按 recordId 合并：内存活记录优先覆盖 K-V 旧记录。
         const mergedById = new Map<string, ProtocolCommandRecord>();
         for (const c of list) {
           if (!this.isTerminalPhase(c.phase)) continue;
@@ -6040,7 +6082,7 @@ export class ProtocolServiceImpl implements ProtocolService {
           this.emitFeed();
         }
       } catch (err) {
-        console.error("[protocol.storageDb] loadHistoryForOrigin failed", {
+        console.error("[protocol.storageRepository] loadHistoryForOrigin failed", {
           origin,
           error: err instanceof Error ? err.message : String(err)
         });
@@ -6063,8 +6105,8 @@ export class ProtocolServiceImpl implements ProtocolService {
   }
 
   /**
-   * 取当前 origin 的内存活命令卡（不读 DB）。
-   * 用于切 origin / DB 不可用时快速重建"当前 origin 视图"。
+   * 取当前 origin 的内存活命令卡（不读 K-V）。
+   * 用于切 origin / K-V 不可用时快速重建"当前 origin 视图"。
    */
   private currentOriginLiveCommands(origin: string): ProtocolCommandRecord[] {
     const out: ProtocolCommandRecord[] = [];

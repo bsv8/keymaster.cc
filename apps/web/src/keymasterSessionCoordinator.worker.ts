@@ -13,6 +13,12 @@
 //   - Worker 重启后必为 locked，禁止恢复为 unlocked
 
 import type {
+  CoordinatorOwnerStorageData,
+  CoordinatorPlatformStorageData,
+  StorageOwnerGrant,
+  StoragePlatformGrant,
+} from "@keymaster/contracts/storage-internal";
+import type {
   SessionEpoch,
   CoordinatorVaultStatus,
   CoordinatorClientRequest,
@@ -59,8 +65,14 @@ import type {
   SatIncomingPublish,
   ContactPresenceMap,
   WindowP2pExecutorError,
+  KeyValueListInput,
+  KeyValueValue,
+  KeyValueCommitInput,
   ActiveKeyCrypto,
+  StorageSecretEnvelope,
+  StorageBootstrapState,
 } from "@keymaster/contracts";
+import { SYSTEM_STORAGE_DECLARATIONS, deriveThirdPartyApplicationStorageId } from "@keymaster/contracts";
 import {
   MSFILE_MAX_BLOCK_BYTES,
   MSFILE_MAX_SEED_BYTES,
@@ -68,23 +80,24 @@ import {
   normalizeMsFileReadConcurrencySettings,
   SAT_SUBSCRIPTION_RESOURCE_LIMITS,
 } from "@keymaster/contracts";
-import { vaultDb, type VaultMetaRecord, type VaultKeyRecord, type KeyHoldVaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, base64ToBytes, bytesToHex, decryptBytesWithAad, encryptBytesWithAad, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptBytes, decryptBytes, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
+import { vaultKeyRepository, configureVaultKeyRepository, type VaultMetaRecord, type VaultKeyRecord, deriveKey, verifyVerifier, hexToBytes as cryptoHexToBytes, bytesToHex, decryptBytesWithSaltBoundAad, encryptBytesWithSaltBoundAad, deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, encryptVerifier, buildVaultMeta, encryptMaterialWithPasskey, decryptMaterialWithPasskey, toPasskeySummary } from "@keymaster/plugin-vault/coordinator";
 import { exportPrivateKey as keyholdExportPrivateKey, parse as keyholdParse, recommendedParameters as keyholdRecommendedParameters } from "keyhold";
 // 不能通过 runtime barrel 导入：它 re-export React hooks，Vite 会把
 // React Refresh 注入 SharedWorker，后者没有 window。
 import { createMessageBus } from "@keymaster/runtime/messageBus";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import { createWocService, createWocBsv21Service, createWocStasService, createWoc1SatOrdinalsService, registerWocP2pkhProviders } from "@keymaster/plugin-woc/coordinator";
 import { createJungleBusClient, registerJungleBusP2pkhProvider } from "@keymaster/plugin-junglebus/coordinator";
 import { createP2pkhProviderRegistry, createP2pkhService, type P2pkhService } from "@keymaster/plugin-p2pkh/coordinator";
-import { createP2pkhCoordinatorTasks, openP2pkhDb, createP2pkhDb } from "@keymaster/plugin-p2pkh/coordinator";
-import { createBsv21CoordinatorTask } from "@keymaster/plugin-token-bsv21/coordinator";
-import { createStasCoordinatorTask } from "@keymaster/plugin-token-stas/coordinator";
+import { createP2pkhCoordinatorTasks, openP2pkhStateRepository, createP2pkhStateRepository, P2PKH_REPOSITORY_VERSION, P2PKH_STORAGE_ID } from "@keymaster/plugin-p2pkh/coordinator";
+import { createBsv21CoordinatorTask, BSV21_STORAGE_ID, BSV21_SCHEMA_VERSION } from "@keymaster/plugin-token-bsv21/coordinator";
+import { createStasCoordinatorTask, STAS_STORAGE_ID, STAS_SCHEMA_VERSION } from "@keymaster/plugin-token-stas/coordinator";
 import { createOrdinalsCoordinatorTask } from "@keymaster/plugin-collectible-1satordinals/coordinator";
-import { createContactsPresenceTask, createContactsService } from "@keymaster/plugin-contacts/coordinator";
-import type { KeyspaceService, VaultService, WocService } from "@keymaster/contracts";
+import { createContactsPresenceTask, createContactsService, CONTACTS_STORAGE_ID, CONTACTS_SCHEMA_VERSION } from "@keymaster/plugin-contacts/coordinator";
+import type { KeyspaceService, KeyValueStore, PlatformRootStore, StorageBucketProvider, StorageBucketRef, VaultService, WocService } from "@keymaster/contracts";
 import type {
-  StorageService,
-  StorageServiceStatus,
+  StorageRuntimeController,
+  StorageRuntimeControllerStatus,
   CoordinatorStorageControl,
   CoordinatorStorageData,
   CoordinatorStorageStateEvent,
@@ -94,11 +107,12 @@ import type {
   MsFileConnectAppContext,
   MsFileErrorCode,
 } from "@keymaster/contracts";
-import { createStorageService, openStorageDb, STORAGE_SECRET_SCOPE } from "@keymaster/plugin-storage/coordinator";
+import { createStorageRuntimeController, createOwnerLifecycleGuardedProvider, createPlatformRootStore, openMultipartUploadRepository, STORAGE_SECRET_SCOPE, StorageBootstrapController, StorageHealthController, encryptStorageProfile, normalizeProviderConfig } from "@keymaster/platform-storage/coordinator";
 // 施工单 docs/proposals/msfile：MSFile runtime 真值在 Coordinator SharedWorker。
 // 001 架构 Spike 与 002 生产 Runtime 完成前 transport fail closed；之后由 Window executor 注入。
 import {
   createMsFileService,
+  openMsFileRepository,
   type MsFileServiceImpl,
   type MsFileServiceEventState,
 } from "@keymaster/plugin-msfile/coordinator";
@@ -141,33 +155,35 @@ import { HASH_REQUEST_CHANNEL, newWebRTCSDPLocator, parseAndVerify as parseHashR
 import { ChannelSubscriptionMux, validateExactChannel } from "./channelSubscriptionMux.js";
 import { PendingPingRegistry } from "./channelPendingPingRegistry.js";
 import { MAX_WIRE_BYTES } from "sat-subscription-protocol/protocol";
-import { getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
+import { configureProtocolStorageRepository, getConnectSession as getAuthoritativeConnectSession, isVerifiedAppIdentitySnapshot } from "@keymaster/plugin-protocol/coordinator";
 import {
   createSatSubscriptionProvider,
-  openSatSubscriptionDb,
+  createSatSubscriptionRepository,
+  SAT_SUBSCRIPTION_STORAGE_ID,
+  SAT_SUBSCRIPTION_SCHEMA_VERSION,
   createSatSubscriptionState,
   createSatSpiService,
   type SatSubscriptionProvider,
   type SatSubscriptionStateStore,
-  type SatSubscriptionDb,
+  type SatSubscriptionRepository,
   type SatSubscriptionTransport,
   type SatSupplierConnection,
   SatSubscriptionHandle,
   type SatP2pkhService,
 } from "@keymaster/plugin-sat-subscription/coordinator";
 
-// Vault DB 操作（Worker 内可直接访问 IndexedDB）
+// Vault 平台 K-V 操作（Worker 内只访问 Storage bootstrap 注入的句柄）
 async function getVaultMeta(): Promise<VaultMetaRecord | undefined> {
-  return vaultDb.getMeta();
+  return vaultKeyRepository.getMeta();
 }
 
 async function getActiveKey(): Promise<VaultKeyRecord | undefined> {
   const selectedPublicKeyHex = coordinatorMeta.selectedPublicKeyHex;
   if (selectedPublicKeyHex) {
-    const selected = await vaultDb.getKey(selectedPublicKeyHex);
+    const selected = await vaultKeyRepository.getKey(selectedPublicKeyHex);
     if (selected) return selected;
   }
-  const keys = await vaultDb.listKeys();
+  const keys = await vaultKeyRepository.listKeys();
   const first = keys[0];
   if (first) { coordinatorMeta.selectedPublicKeyHex = first.publicKeyHex; await persistCoordinatorMeta(); }
   return first;
@@ -178,10 +194,8 @@ async function reconcileSelectedPublicKey(): Promise<boolean> {
   const activeKey = await getActiveKey();
   if (activeKey) return true;
 
-  // Legacy versions could leave behind a password meta record without any
-  // key material. That state can never produce an active session, so treat it
-  // as a fresh Vault instead of exposing a locked "No active key" dead end.
-  await vaultDb.deleteMeta();
+  // 没有 Key 的 meta 是不可用的空状态，回到首启流程。
+  await vaultKeyRepository.deleteMeta();
   coordinatorMeta.selectedPublicKeyHex = undefined;
   await persistCoordinatorMeta();
   return false;
@@ -210,7 +224,7 @@ async function decryptPrivateKey(password: string, record: VaultKeyRecord): Prom
 }
 
 function decodePersisted(value: string): Uint8Array {
-  try { return cryptoHexToBytes(value); } catch { return base64ToBytes(value); }
+  return cryptoHexToBytes(value);
 }
 
 interface CoordinatorMetaRecord {
@@ -223,6 +237,14 @@ interface CoordinatorMetaRecord {
   p2pkhSettings?: { includeTestnet: boolean };
 }
 const coordinatorMeta: CoordinatorMetaRecord = { id: "singleton", generation: 0, scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
+const KEY_DELETION_JOURNAL_PREFIX = "deletion/";
+let keyDeletionTail: Promise<void> = Promise.resolve();
+interface KeyDeletionJournal {
+  publicKeyHex: string;
+  confirmationLabel: string;
+  /** 删除事务阶段；每个阶段都必须先持久化再执行下一步。 */
+  phase: "prepared" | "owner-fenced" | "requests-drained" | "owner-deleted" | "key-deleted" | "vault-finalized" | "complete";
+}
 const defaultP2pkhProviders = (): P2pkhProviderSettings => ({ main: { syncProviderId: "woc", broadcastProviderId: "woc" }, test: { syncProviderId: "woc", broadcastProviderId: "woc" }, generation: 0 });
 let p2pkhRegistry: P2pkhProviderRegistry | undefined;
 let p2pkhWocService: WocService | undefined;
@@ -230,382 +252,266 @@ let p2pkhJungleBusClient: ReturnType<typeof createJungleBusClient> | undefined;
 let p2pkhProviderRevision = 0;
 let testP2pkhBroadcastProvider: P2pkhTransactionBroadcastProvider | undefined;
 let testPersistCoordinatorMetaFailure = false;
-async function loadCoordinatorMeta(): Promise<void> {
-  await new Promise<void>((resolve) => {
-    const req = indexedDB.open("keymaster.session-coordinator", 1);
-    req.onupgradeneeded = () => req.result.createObjectStore("meta", { keyPath: "id" });
-    req.onsuccess = () => { const db = req.result; const get = db.transaction("meta", "readonly").objectStore("meta").get("singleton"); get.onsuccess = () => { Object.assign(coordinatorMeta, get.result ?? {}); coordinatorMeta.p2pkhProviders ??= defaultP2pkhProviders(); coordinatorMeta.p2pkhSettings ??= { includeTestnet: false }; if (coordinatorMeta.scheduleSettings) coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings; resolve(); }; get.onerror = () => resolve(); };
-    req.onerror = () => resolve();
+let platformRootStore: PlatformRootStore | undefined;
+/** 当前统一抽象桶 Provider；所有 K-V 与文件运行时共用这一实例。 */
+let platformBucketProvider: StorageBucketProvider | undefined;
+/** Root 安装令牌；不能用 bucketGeneration 代替，因为 A→B→A 可能复用世代值。 */
+let platformRootToken: object | undefined;
+let platformKeysStore: KeyValueStore | undefined;
+let platformStateStore: KeyValueStore | undefined;
+let platformStorageReady = false;
+let storageBootstrapState: StorageBootstrapState | null = null;
+let storageBootstrapController: StorageBootstrapController | undefined;
+const storageHealthController = new StorageHealthController();
+let coordinatorInitializationInProgress = false;
+/** Storage Profile 独立密钥；与 Vault password/session 完全分离。 */
+let storageProfileKey: CryptoKey | undefined;
+let storageProfilePassword: string | undefined;
+let storageProfileSalt: Uint8Array | undefined;
+let storageRootInstallationActive = false;
+let storageRecoveryOrchestrator: Promise<void> | undefined;
+type WorkerOwnerStoreBinding = { close(): void; invalidateBinding(): void };
+const workerOwnerStores = new Set<WorkerOwnerStoreBinding>();
+const STORAGE_PROFILE_SALT_KEY = "storageProfileSaltHex";
+const STORAGE_PROFILE_PARTITION = "storage-profile";
+const STORAGE_PROFILE_KDF_DOMAIN = "keymaster.storage-profile.v2";
+
+async function writeKeyDeletionJournal(journal: KeyDeletionJournal): Promise<void> {
+  if (!platformKeysStore) throw new Error("Vault keys storage is unavailable");
+  await platformKeysStore.put(`${KEY_DELETION_JOURNAL_PREFIX}${journal.publicKeyHex.toLowerCase()}`, journal, { partition: "deletion" });
+}
+
+async function removeKeyDeletionJournal(publicKeyHex: string): Promise<void> {
+  await platformKeysStore?.delete(`${KEY_DELETION_JOURNAL_PREFIX}${publicKeyHex.toLowerCase()}`, { partition: "deletion" });
+}
+
+async function readKeyDeletionJournals(): Promise<KeyDeletionJournal[]> {
+  const page = await platformKeysStore?.list({ partition: "deletion", prefix: KEY_DELETION_JOURNAL_PREFIX, limit: 1000 });
+  return (page?.entries ?? []).map((entry) => entry.value as unknown as KeyDeletionJournal).filter((journal) =>
+    typeof journal?.publicKeyHex === "string" && typeof journal?.confirmationLabel === "string" &&
+    (journal.phase === "prepared" || journal.phase === "owner-fenced" || journal.phase === "requests-drained" || journal.phase === "owner-deleted" || journal.phase === "key-deleted" || journal.phase === "vault-finalized" || journal.phase === "complete")
+  );
+}
+
+async function deriveStorageProfileKey(password: string): Promise<CryptoKey> {
+  if (typeof password !== "string" || password.length < 8) {
+    throw new Error("Storage Profile password must contain at least 8 characters");
+  }
+  if (!storageProfileSalt) throw new Error("Storage Profile salt is unavailable");
+  // 独立域隔离：即使 Vault 和 Storage Profile 使用相同用户密码，二者
+  // 也不会派生出同一把密钥。salt 只保存在平台 K-V，密码永不落盘。
+  return deriveKey(`${STORAGE_PROFILE_KDF_DOMAIN}\0${password}`, storageProfileSalt);
+}
+
+async function setStorageProfilePassword(password: string): Promise<void> {
+  storageProfilePassword = password;
+  storageProfileKey = await deriveStorageProfileKey(password);
+}
+
+/** Storage-first：先验证抽象桶，再打开 keys/ 与平台状态区。 */
+async function bootstrapPlatformStorage(profilePassword = storageProfilePassword): Promise<void> {
+  if (platformRootStore) return;
+  storageBootstrapController?.dispose();
+  const controller = new StorageBootstrapController({
+    state: storageBootstrapState,
+    health: storageHealthController,
+    generation: 1,
+    // 初次冷启动的 Vault metadata/Journal/任务还在上层初始化中，不能由
+    // Provider probe 抢先发布 ready。健康探测定时器复用下面的回调，后续
+    // 自动重试会重新安装 Root 并继续完整恢复。
+    deferReady: true,
+    // 初始 initialize 正在进行时只安装 Root；它完成 metadata/任务后再
+    // 发布 ready。初始化失败后的自动重试则继续完整恢复编排。
+    afterProviderReady: async () => {
+      const provider = controller.getProvider();
+      const bucket = controller.getBucket();
+      if (!provider || !bucket) throw storageUnavailableError("Storage provider probe returned no bucket");
+      if (!platformRootStore || platformBucketProvider !== provider) {
+        if (platformRootStore && platformBucketProvider !== provider) {
+          await releaseStorageRuntime("storage-root-rebind");
+        }
+        storageRootInstallationActive = true;
+        try {
+          await installPlatformStorage(provider, bucket, profilePassword);
+        } finally {
+          storageRootInstallationActive = false;
+        }
+      }
+      if (coordinatorInitializationInProgress || storageRecoveryOrchestrator) return;
+      await runStorageRecoveryOrchestrator();
+    }
   });
+  storageBootstrapController = controller;
+  const bootstrap = await controller.bootstrap(profilePassword);
+  if (!bootstrap.provider || !bootstrap.bucket || (bootstrap.status !== "checking" && bootstrap.status !== "ready")) {
+    const error = new Error(bootstrap.message ?? "Storage bootstrap did not reach ready state") as Error & { code?: string };
+    error.code = bootstrap.status === "authentication" ? "storage_identity_required" : "storage_unavailable";
+    throw error;
+  }
+  // 正常情况下 afterProviderReady 已经完成 Root 安装。这个兜底只处理
+  // 测试替换 callback 或未来控制器实现没有安装 Root 的情况。
+  if (!platformRootStore) {
+    storageRootInstallationActive = true;
+    try {
+      await installPlatformStorage(bootstrap.provider, bootstrap.bucket, profilePassword);
+    } finally {
+      storageRootInstallationActive = false;
+    }
+  }
+}
+
+/** 把已探测通过的 Provider 安装成 Coordinator-owned Root。 */
+async function installPlatformStorage(provider: StorageBucketProvider, bucket: StorageBucketRef, profilePassword?: string): Promise<void> {
+  const previousRootToken = platformRootToken;
+  const rootToken = {};
+  // 先替换令牌，再异步打开 namespace；旧 Root 的所有句柄会立即失效。
+  platformRootToken = rootToken;
+  try {
+    const root = createPlatformRootStore({
+      provider,
+      bucket,
+      isCurrent: ({ ownerPublicKeyHex, bucketGeneration, keyspaceGeneration }) =>
+        platformRootToken === rootToken &&
+        bucketGeneration === bucket.bucketGeneration &&
+        (keyspaceGeneration === undefined || keyspaceGeneration === coordinatorState.keyspaceGeneration) &&
+        (!ownerPublicKeyHex || ownerPublicKeyHex.toLowerCase() === coordinatorState.activePublicKeyHex?.toLowerCase())
+    });
+    const keys = await root.openPlatformKeysStore(1);
+    const state = await root.openPlatformStore({ applicationStorageId: "coordinator", schemaVersion: 1 });
+    const persistedProfileSalt = await state.get<string>(STORAGE_PROFILE_SALT_KEY, { partition: STORAGE_PROFILE_PARTITION });
+    if (persistedProfileSalt?.value && /^[0-9a-f]{32}$/u.test(persistedProfileSalt.value)) {
+      storageProfileSalt = cryptoHexToBytes(persistedProfileSalt.value);
+    } else {
+      storageProfileSalt = crypto.getRandomValues(new Uint8Array(16));
+      await state.put(STORAGE_PROFILE_SALT_KEY, bytesToHex(storageProfileSalt), { partition: STORAGE_PROFILE_PARTITION });
+    }
+    // OPFS 没有远端 Profile 密码；仍为 multipart 密文 ID 使用独立的
+    // 桶内密钥，避免把这些内部值退回明文或依赖 Vault 密码。
+    if (profilePassword) {
+      storageProfilePassword = profilePassword;
+      storageProfileKey = await deriveStorageProfileKey(profilePassword);
+    } else if (bucket.provider === "opfs" && !storageProfileKey) {
+      storageProfileKey = await deriveStorageProfileKey("opfs-local-key");
+    }
+    const protocol = await root.openPlatformStore({ applicationStorageId: "protocol", schemaVersion: 1 });
+    configureVaultKeyRepository(keys);
+    platformRootStore = root;
+    platformBucketProvider = provider;
+    platformKeysStore = keys;
+    platformStateStore = state;
+    configureProtocolStorageRepository(protocol);
+    storageRepository = await openMultipartUploadRepository(await root.openPlatformStore({ applicationStorageId: "storage", schemaVersion: 1 }));
+    platformStorageReady = true;
+  } catch (error) {
+    if (platformRootToken === rootToken) platformRootToken = previousRootToken;
+    throw error;
+  }
+}
+
+/**
+ * Worker 单元测试的 Storage bootstrap 夹具。
+ *
+ * 它只在 `__testResetState()` 中启用，使用 runtime 提供的内存 K-V
+ * 实现保持跨测试的 Worker 重启语义；生产启动永远走上面的 OPFS bootstrap，
+ * 不会因为 Storage 缺失而自动降级到内存。
+ */
+function ensureTestPlatformStorage(): void {
+  if (platformRootStore) return;
+  const bucket: StorageBucketRef = Object.freeze({ bucketId: "test-memory", bucketGeneration: 1, provider: "opfs" });
+  platformRootToken = {};
+  const stores = new Map<string, KeyValueStore>();
+  const getStore = (key: string, binding: Parameters<typeof createInMemoryKeyValueStore>[0]): KeyValueStore => {
+    const existing = stores.get(key);
+    if (existing) return { ...existing, close: () => undefined };
+    const created = createInMemoryKeyValueStore(binding);
+    stores.set(key, created);
+    return { ...created, close: () => undefined };
+  };
+  const root: PlatformRootStore = {
+    bucket,
+    openKeyValueStore: async ({ ownerPublicKeyHex, applicationStorageId, schemaVersion }) => getStore(
+      `owner:${ownerPublicKeyHex}:${applicationStorageId}:${schemaVersion}`,
+      { scope: "key", ownerPublicKeyHex, applicationStorageId, schemaVersion, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }
+    ) as import("@keymaster/contracts").OwnerAppStore,
+    activateOwnerStorage: async () => ({ generation: 1 }),
+    getOwnerStorageGeneration: async () => 1,
+    assertOwnerStorageCurrent: async () => undefined,
+    deleteOwnerStorage: async ({ ownerPublicKeyHex }) => {
+      const prefix = `owner:${ownerPublicKeyHex}:`;
+      for (const key of [...stores.keys()]) {
+        if (key.startsWith(prefix)) { stores.get(key)?.close(); stores.delete(key); }
+      }
+    },
+    openPlatformStore: async ({ applicationStorageId, schemaVersion }) => getStore(
+      `platform:${applicationStorageId}:${schemaVersion}`,
+      { scope: "platform", applicationStorageId, schemaVersion, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }
+    ),
+    openPlatformKeysStore: async (schemaVersion) => getStore(
+      `platform:keys:${schemaVersion}`,
+      { scope: "platform", applicationStorageId: "keys", schemaVersion, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration }
+    )
+  };
+  const keys = getStore("platform:keys:1", { scope: "platform", applicationStorageId: "keys", schemaVersion: 1, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration });
+  const state = getStore("platform:coordinator:1", { scope: "platform", applicationStorageId: "coordinator", schemaVersion: 1, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration });
+  const protocol = getStore("platform:protocol:1", { scope: "platform", applicationStorageId: "protocol", schemaVersion: 1, bucketId: bucket.bucketId, bucketGeneration: bucket.bucketGeneration });
+  platformRootStore = root;
+  platformKeysStore = keys;
+  platformStateStore = state;
+  configureVaultKeyRepository(keys);
+  configureProtocolStorageRepository(protocol);
+  platformStorageReady = true;
+}
+
+
+async function loadCoordinatorMeta(): Promise<void> {
+  const stored = await platformStateStore?.get<CoordinatorMetaRecord>("meta", { partition: "coordinator" });
+  if (stored?.value) Object.assign(coordinatorMeta, stored.value);
+  coordinatorMeta.p2pkhProviders ??= defaultP2pkhProviders();
+  coordinatorMeta.p2pkhSettings ??= { includeTestnet: false };
+  if (coordinatorMeta.scheduleSettings) coordinatorState.scheduleSettings = coordinatorMeta.scheduleSettings;
 }
 async function persistCoordinatorMetaValue(value: CoordinatorMetaRecord): Promise<void> {
   if (testPersistCoordinatorMetaFailure) {
     testPersistCoordinatorMetaFailure = false;
     throw new Error("injected coordinator meta persist failure");
   }
-  await new Promise<void>((resolve, reject) => {
-    const req = indexedDB.open("keymaster.session-coordinator", 1);
-    req.onupgradeneeded = () => {
-      if (!req.result.objectStoreNames.contains("meta")) req.result.createObjectStore("meta", { keyPath: "id" });
-    };
-    req.onsuccess = () => {
-      let openedDb: IDBDatabase | undefined;
-      try {
-        const db = req.result;
-        openedDb = db;
-        const tx = db.transaction("meta", "readwrite");
-        tx.objectStore("meta").put(value);
-        tx.oncomplete = () => { db.close(); resolve(); };
-        tx.onerror = () => { const error = tx.error ?? new Error("Coordinator metadata persistence failed"); db.close(); reject(error); };
-        tx.onabort = () => { const error = tx.error ?? new Error("Coordinator metadata persistence aborted"); db.close(); reject(error); };
-      } catch (error) { openedDb?.close(); reject(error); }
-    };
-    req.onerror = () => reject(req.error ?? new Error("Coordinator metadata database unavailable"));
-  });
+  if (!platformStateStore) throw new Error("Coordinator storage has not been bootstrapped");
+  await platformStateStore.put("meta", value, { partition: "coordinator" });
 }
 async function persistCoordinatorMeta(): Promise<void> {
   await persistCoordinatorMetaValue(coordinatorMeta);
 }
 
-const STORAGE_DB_NAME = "keymaster.storage";
-const STORAGE_DB_VERSION = 1;
-const STORAGE_PROVIDER_SCOPE = "keymaster.storage.provider-config.v1";
-const STORAGE_UPLOAD_SCOPE = "keymaster.storage.upload.v1/";
-const STORAGE_SECRET_DERIVATION_DOMAIN = "keymaster.storage.local-secret.v2";
+let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined;
 
-type StorageEnvelopeRecord = VaultSealedSecret;
-type StorageProviderRecord = { key: "active"; sealedConfig: StorageEnvelopeRecord };
-type StorageUploadRecord = { internalUploadId: string; sealedS3UploadId: StorageEnvelopeRecord };
-type StorageRotationSnapshot = { provider?: StorageProviderRecord; uploads: StorageUploadRecord[] };
-type StorageRotationJournal = { key: "rotation"; phase: "prepared" | "storage-committed"; old: StorageRotationSnapshot; next?: StorageRotationSnapshot };
-let testStorageSessionResolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; ownerPublicKeyHex?: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null>) | undefined;
-
-function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").StorageAppContext["appIdentity"] {
+function isValidStorageIdentity(identity: unknown): identity is import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"] {
   return isVerifiedAppIdentitySnapshot(identity);
 }
 
-async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null> {
+async function readProtocolConnectSession(sessionId: string): Promise<{ sessionId: string; origin: string; ownerPublicKeyHex: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null> {
   if (testStorageSessionResolver) {
     const resolved = await testStorageSessionResolver(sessionId);
     return resolved && resolved.revokedAt === null && Boolean(resolved.sessionId && resolved.origin) && isValidStorageIdentity(resolved.appIdentity)
       ? { sessionId: resolved.sessionId, origin: resolved.origin, ownerPublicKeyHex: resolved.ownerPublicKeyHex ?? "", appIdentity: resolved.appIdentity, revokedAt: null }
       : null;
   }
-  if (!sessionId || typeof indexedDB === "undefined") return null;
+  if (!sessionId) return null;
   const record = await getAuthoritativeConnectSession(sessionId);
   return record && isValidStorageIdentity(record.appIdentity)
     ? { sessionId: record.sessionId, origin: record.origin, ownerPublicKeyHex: record.ownerPublicKeyHex, appIdentity: record.appIdentity, revokedAt: null }
     : null;
 }
 
-function isStorageEnvelope(value: unknown): value is StorageEnvelopeRecord {
-  if (!value || typeof value !== "object") return false;
-  const envelope = value as Partial<StorageEnvelopeRecord>;
-  return (envelope.version === 1 || envelope.version === 2)
-    && typeof envelope.saltHex === "string"
-    && typeof envelope.nonceHex === "string"
-    && typeof envelope.ciphertextHex === "string";
+function localSecretAad(scope: string): string {
+  return `keymaster:local-secret:v2|${scope}`;
 }
 
-function isStorageRotationSnapshot(value: unknown): value is StorageRotationSnapshot {
-  if (!value || typeof value !== "object") return false;
-  const snapshot = value as Partial<StorageRotationSnapshot>;
-  const provider = snapshot.provider;
-  const validProvider = provider === undefined
-    || (typeof provider === "object" && provider !== null && provider.key === "active" && isStorageEnvelope(provider.sealedConfig));
-  const uploads = snapshot.uploads;
-  return validProvider
-    && Array.isArray(uploads)
-    && uploads.every((record) => Boolean(record)
-      && typeof record === "object"
-      && typeof (record as Partial<StorageUploadRecord>).internalUploadId === "string"
-      && isStorageEnvelope((record as Partial<StorageUploadRecord>).sealedS3UploadId));
+/** Vault 插件本地密文使用的会话密钥；它不参与 Storage Profile。 */
+const VAULT_LOCAL_SECRET_DERIVATION_DOMAIN = "keymaster.vault.local-secret.v2";
+async function deriveVaultLocalSecretKey(password: string, vaultSalt: Uint8Array): Promise<CryptoKey> {
+  return deriveKey(`${VAULT_LOCAL_SECRET_DERIVATION_DOMAIN}\0${password}`, vaultSalt);
 }
 
-function isStorageRotationJournal(value: unknown): value is StorageRotationJournal {
-  if (!value || typeof value !== "object") return false;
-  const journal = value as Partial<StorageRotationJournal>;
-  return journal.key === "rotation"
-    && (journal.phase === "prepared" || journal.phase === "storage-committed")
-    && isStorageRotationSnapshot(journal.old)
-    && (journal.next === undefined || isStorageRotationSnapshot(journal.next));
-}
-
-function openExistingStorageDb(): Promise<IDBDatabase | undefined> {
-  return new Promise((resolve) => {
-    const request = indexedDB.open(STORAGE_DB_NAME, STORAGE_DB_VERSION);
-    let created = false;
-    request.onupgradeneeded = (event) => {
-      created = (event as IDBVersionChangeEvent).oldVersion === 0;
-      if (created) request.transaction?.abort();
-    };
-    request.onsuccess = () => {
-      if (created) { request.result.close(); resolve(undefined); return; }
-      resolve(request.result);
-    };
-    request.onerror = () => resolve(undefined);
-  });
-}
-
-function localSecretAad(version: 1 | 2, scope: string): string {
-  return `keymaster:local-secret:v${version}|${scope}`;
-}
-
-async function deriveStorageSecretKey(password: string, vaultSalt: Uint8Array): Promise<CryptoKey> {
-  // A separately domain-separated PBKDF2 invocation prevents local Storage
-  // envelopes from becoming another direct use of the Vault key, while the
-  // Vault salt still gives this derivation the same password-rotation anchor.
-  return deriveKey(`${STORAGE_SECRET_DERIVATION_DOMAIN}\0${password}`, vaultSalt);
-}
-
-async function decryptStoredLocalSecret(key: CryptoKey, scope: string, sealed: StorageEnvelopeRecord, legacyKey?: CryptoKey): Promise<Uint8Array> {
-  const blob = { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) };
-  try {
-    return sealed.version === 2
-      ? await decryptBytesWithSaltBoundAad(key, blob, localSecretAad(2, scope))
-      : await decryptBytesWithAad(key, blob, localSecretAad(1, scope));
-  } catch (error) {
-    // v1/v2 records written before the domain key was introduced used the
-    // Vault password key. Keep a one-time migration path for those records.
-    if (!legacyKey) throw error;
-    return sealed.version === 2
-      ? decryptBytesWithSaltBoundAad(legacyKey, blob, localSecretAad(2, scope))
-      : decryptBytesWithAad(legacyKey, blob, localSecretAad(1, scope));
-  }
-}
-
-async function encryptStoredLocalSecret(key: CryptoKey, scope: string, plaintext: Uint8Array): Promise<StorageEnvelopeRecord> {
-  const blob = await encryptBytesWithSaltBoundAad(key, plaintext, localSecretAad(2, scope));
-  return { version: 2, saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
-}
-
-async function storageSnapshotCanOpen(snapshot: StorageRotationSnapshot, key: CryptoKey, legacyKey?: CryptoKey): Promise<boolean> {
-  try {
-    if (snapshot.provider?.sealedConfig) {
-      const bytes = await decryptStoredLocalSecret(key, STORAGE_PROVIDER_SCOPE, snapshot.provider.sealedConfig, legacyKey);
-      bytes.fill(0);
-    }
-    for (const record of snapshot.uploads) {
-      const bytes = await decryptStoredLocalSecret(key, `${STORAGE_UPLOAD_SCOPE}${record.internalUploadId}`, record.sealedS3UploadId, legacyKey);
-      bytes.fill(0);
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function storageDbTransaction(db: IDBDatabase, mode: IDBTransactionMode, callback: (stores: { provider: IDBObjectStore; uploads: IDBObjectStore }) => void): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let transaction: IDBTransaction | undefined;
-    try {
-      transaction = db.transaction(["providerConfig", "multipartUploads"], mode);
-      callback({ provider: transaction.objectStore("providerConfig"), uploads: transaction.objectStore("multipartUploads") });
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction?.error ?? new Error("Storage transaction failed"));
-      transaction.onabort = () => reject(transaction?.error ?? new Error("Storage transaction aborted"));
-    } catch (error) {
-      try { transaction?.abort(); } catch { /* preserve the original callback error */ }
-      reject(error);
-    }
-  });
-}
-
-function clearStorageRotationJournal(db: IDBDatabase): Promise<void> {
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction("providerConfig", "readwrite");
-      tx.objectStore("providerConfig").delete("rotation");
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error ?? new Error("Storage rotation journal cleanup failed"));
-      tx.onabort = () => reject(tx.error ?? new Error("Storage rotation journal cleanup aborted"));
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-async function recoverStorageRotation(storageKey: CryptoKey, legacyVaultKey: CryptoKey): Promise<void> {
-  const db = await openExistingStorageDb();
-  if (!db) return;
-  try {
-    const rawJournal = await new Promise<unknown>((resolve, reject) => {
-      const tx = db.transaction("providerConfig", "readonly");
-      const request = tx.objectStore("providerConfig").get("rotation");
-      tx.oncomplete = () => resolve(request.result);
-      tx.onerror = () => reject(tx.error);
-    });
-    if (!rawJournal) return;
-    if (!isStorageRotationJournal(rawJournal)) throw new Error("Storage rotation journal is corrupt");
-    const journal = rawJournal;
-    const current = await new Promise<StorageRotationSnapshot>((resolve, reject) => {
-      const tx = db.transaction(["providerConfig", "multipartUploads"], "readonly");
-      const provider = tx.objectStore("providerConfig").get("active");
-      const uploads = tx.objectStore("multipartUploads").getAll();
-      tx.oncomplete = () => resolve({ provider: provider.result as StorageProviderRecord | undefined, uploads: (uploads.result as StorageUploadRecord[]) ?? [] });
-      tx.onerror = () => reject(tx.error);
-    });
-    if (await storageSnapshotCanOpen(current, storageKey, legacyVaultKey)) {
-      // The Vault commit either did not happen (prepared journal) or this is
-      // the new password after a completed Vault commit. Current ciphertext is
-      // therefore already consistent; only the journal needs retiring.
-      await new Promise<void>((resolve, reject) => {
-        const tx = db.transaction("providerConfig", "readwrite");
-        tx.objectStore("providerConfig").delete("rotation");
-        tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error); tx.onabort = () => reject(tx.error);
-      });
-      return;
-    }
-    if (!(await storageSnapshotCanOpen(journal.old, storageKey, legacyVaultKey))) {
-      // Storage is optional, so an unreadable snapshot must not block Vault
-      // unlock. Keep the journal, however: it is still the only evidence that
-      // may make a later retry/recovery possible after a transient key/session
-      // mismatch or a repaired record.
-      return;
-    }
-    await storageDbTransaction(db, "readwrite", ({ provider, uploads }) => {
-      provider.delete("active");
-      if (journal.old.provider) provider.put(journal.old.provider);
-      for (const record of current.uploads) uploads.delete(record.internalUploadId);
-      for (const record of journal.old.uploads) uploads.put(record);
-      provider.delete("rotation");
-    });
-  } catch {
-    // Recovery is compensating Storage maintenance, not part of Vault
-    // authentication. A malformed/corrupt optional record must never make a
-    // valid Vault password fail to unlock. Preserve the journal on every
-    // read/write failure; deleting it would destroy the only rollback proof.
-  } finally {
-    db.close();
-  }
-}
-
-/**
- * Restore the snapshot captured by the first migration attempt. This is a
- * compensating transaction, not another migration: it must never call
- * prepareStorageRotation() or replace the journal's original `old` snapshot.
- */
-async function rollbackStorageRotation(): Promise<void> {
-  const db = await openExistingStorageDb();
-  if (!db) return;
-  try {
-    const rawJournal = await new Promise<unknown>((resolve, reject) => {
-      const tx = db.transaction("providerConfig", "readonly");
-      const request = tx.objectStore("providerConfig").get("rotation");
-      tx.oncomplete = () => resolve(request.result);
-      tx.onerror = () => reject(tx.error);
-    });
-    if (!rawJournal) throw new Error("Storage rotation journal is missing");
-    if (!isStorageRotationJournal(rawJournal)) throw new Error("Storage rotation journal is corrupt");
-    const journal = rawJournal;
-    await storageDbTransaction(db, "readwrite", ({ provider, uploads }) => {
-      provider.delete("active");
-      if (journal.old.provider) provider.put(journal.old.provider);
-      uploads.clear();
-      for (const record of journal.old.uploads) uploads.put(record);
-      provider.delete("rotation");
-    });
-  } finally {
-    db.close();
-  }
-}
-
-/**
- * Take the Storage snapshot and publish the rotation barrier in one
- * IndexedDB transaction. StorageDb write transactions use the same object
- * stores and reject once this barrier exists, so a caller that sealed with
- * the old key cannot commit a late record after the snapshot.
- */
-async function prepareStorageRotation(db: IDBDatabase): Promise<StorageRotationSnapshot> {
-  return new Promise((resolve, reject) => {
-    try {
-      const tx = db.transaction(["providerConfig", "multipartUploads"], "readwrite");
-      const providerStore = tx.objectStore("providerConfig");
-      const provider = providerStore.get("active");
-      const existingRotation = providerStore.get("rotation");
-      const uploads = tx.objectStore("multipartUploads").getAll();
-      let providerDone = false;
-      let uploadsDone = false;
-      let rotationDone = false;
-      let preparationError: Error | undefined;
-      let snapshot: StorageRotationSnapshot | undefined;
-      const publishBarrier = () => {
-        if (!providerDone || !uploadsDone || !rotationDone || snapshot || preparationError) return;
-        snapshot = {
-          provider: provider.result as StorageProviderRecord | undefined,
-          uploads: (uploads.result as StorageUploadRecord[]) ?? []
-        };
-        providerStore.put({ key: "rotation", phase: "prepared", old: snapshot });
-      };
-      provider.onsuccess = () => { providerDone = true; publishBarrier(); };
-      uploads.onsuccess = () => { uploadsDone = true; publishBarrier(); };
-      existingRotation.onsuccess = () => {
-        if (existingRotation.result) {
-          preparationError = new Error("Storage password rotation is already in progress");
-          tx.abort();
-          return;
-        }
-        rotationDone = true;
-        publishBarrier();
-      };
-      tx.oncomplete = () => {
-        if (snapshot) resolve(snapshot);
-        else reject(preparationError ?? new Error("Storage rotation snapshot was not prepared"));
-      };
-      tx.onerror = () => reject(tx.error ?? new Error("Storage rotation snapshot failed"));
-      tx.onabort = () => reject(preparationError ?? tx.error ?? new Error("Storage rotation snapshot aborted"));
-    } catch (error) {
-      reject(error);
-    }
-  });
-}
-
-/** Re-wrap every Storage-owned sealed value before changing the Vault password. */
-async function migrateStorageSecrets(oldStorageKey: CryptoKey, newStorageKey: CryptoKey, legacyVaultKey?: CryptoKey): Promise<void> {
-  const db = await openExistingStorageDb();
-  if (!db) return;
-  let barrierPrepared = false;
-  try {
-    const oldSnapshot = await prepareStorageRotation(db);
-    barrierPrepared = true;
-    const records = oldSnapshot;
-    let providerSealed: StorageEnvelopeRecord | undefined;
-    if (records.provider?.sealedConfig) {
-      const bytes = await decryptStoredLocalSecret(oldStorageKey, STORAGE_PROVIDER_SCOPE, records.provider.sealedConfig, legacyVaultKey);
-      try { providerSealed = await encryptStoredLocalSecret(newStorageKey, STORAGE_PROVIDER_SCOPE, bytes); } finally { bytes.fill(0); }
-    }
-    const uploadSealed = new Map<string, StorageEnvelopeRecord>();
-    for (const record of records.uploads) {
-      const bytes = await decryptStoredLocalSecret(oldStorageKey, `${STORAGE_UPLOAD_SCOPE}${record.internalUploadId}`, record.sealedS3UploadId, legacyVaultKey);
-      try { uploadSealed.set(record.internalUploadId, await encryptStoredLocalSecret(newStorageKey, `${STORAGE_UPLOAD_SCOPE}${record.internalUploadId}`, bytes)); } finally { bytes.fill(0); }
-    }
-    const nextSnapshot: StorageRotationSnapshot = {
-      provider: providerSealed && records.provider ? { ...records.provider, sealedConfig: providerSealed } : records.provider,
-      uploads: records.uploads.map((record) => ({ ...record, sealedS3UploadId: uploadSealed.get(record.internalUploadId) ?? record.sealedS3UploadId }))
-    };
-    await new Promise<void>((resolve, reject) => {
-      const tx = db.transaction(["providerConfig", "multipartUploads"], "readwrite");
-      if (providerSealed && records.provider) tx.objectStore("providerConfig").put({ ...records.provider, sealedConfig: providerSealed });
-      for (const record of records.uploads) {
-        const sealed = uploadSealed.get(record.internalUploadId);
-        if (sealed) tx.objectStore("multipartUploads").put({ ...record, sealedS3UploadId: sealed });
-      }
-      tx.objectStore("providerConfig").put({ key: "rotation", phase: "storage-committed", old: oldSnapshot, next: nextSnapshot } satisfies StorageRotationJournal);
-      tx.oncomplete = () => resolve();
-      tx.onerror = () => reject(tx.error);
-      tx.onabort = () => reject(tx.error);
-    });
-  } catch (error) {
-    // All ciphertext rewrites are prepared in memory and committed in one
-    // IndexedDB transaction. If decryption or the commit fails, retain the
-    // old records and remove the barrier immediately; otherwise the next
-    // unlock would attempt recovery and could lock out the whole Vault.
-    if (barrierPrepared) await clearStorageRotationJournal(db).catch(() => undefined);
-    throw error;
-  } finally {
-    db.close();
-  }
-}
 const persistActiveMeta = persistCoordinatorMeta;
 function normalizedCoordinatorOwner(): string | null {
   return coordinatorState.vaultStatus === "unlocked" && coordinatorState.activePublicKeyHex
@@ -624,7 +530,7 @@ function publishCoordinatorContactsPresence(): void {
       try {
         presence = await service.getPresenceSnapshot?.() ?? {};
       } catch {
-        // 本地联系人 DB 暂不可读时，安全降级为空快照（全部 offline）。
+        // 本地联系人 K-V 暂不可读时，安全降级为空快照（全部 offline）。
         presence = {};
       }
     }
@@ -665,7 +571,7 @@ interface CoordinatorState {
   activePrivateKeyBytes?: Uint8Array;
   passwordKey?: CryptoKey;
   password?: string;
-  storageSecretKey?: CryptoKey;
+  vaultLocalSecretKey?: CryptoKey;
   keyspaceGeneration: number;
   taskRuntimes: Map<string, TaskRuntime>;
   scheduleSettings: CoordinatorBackgroundSyncSettings;
@@ -673,13 +579,29 @@ interface CoordinatorState {
   lastActivityAt: number;
 }
 
-let storageRuntime: StorageService | undefined;
-let storageDb: Awaited<ReturnType<typeof openStorageDb>> | undefined;
-// Test-only seams keep worker ownership/dispatch tests independent from S3 and IDB.
-let testStorageRuntimeOverride: StorageService | undefined;
+/**
+ * 失败的 owner 切换也必须消耗一个新的 keyspace generation。
+ *
+ * 不能把 generation 回滚到旧值：A→B 失败后如果恢复成 A 的旧 generation，
+ * 旧的 A 句柄可能再次通过 Root 的校验。这里同时刷新 session epoch，确保
+ * 其它依赖会话世代的异步操作也不会复活。
+ */
+function invalidateFailedKeyspaceTransition(previousGeneration: number): void {
+  coordinatorState.keyspaceGeneration = Math.max(
+    coordinatorState.keyspaceGeneration,
+    previousGeneration,
+  ) + 1;
+  coordinatorState.sessionEpoch = generateEpoch();
+  coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+}
+
+let storageRuntime: StorageRuntimeController | undefined;
+let storageRepository: Awaited<ReturnType<typeof openMultipartUploadRepository>> | undefined;
+// Test-only seams keep worker ownership/dispatch tests independent from S3 and
+// platform K-V persistence.
+let testStorageRuntimeOverride: StorageRuntimeController | undefined;
 let testStorageStartupFailure = false;
 let storageStartupFailure = false;
-const storageLifecycleListeners = new Set<(snapshot: { status: "unlocked" | "locked" | "uninitialized" }) => void>();
 let storageRevision = 0;
 let msfileRevision = 0;
 let lastStorageState: CoordinatorStorageStateEvent | undefined;
@@ -687,16 +609,188 @@ let storageStateTail: Promise<void> = Promise.resolve();
 const storageRequests = new Map<string, { controller: AbortController; clientId: string; connectSessionId?: string }>();
 const storageRequestKey = (clientId: string, requestId: string): string => `${clientId}\u0000${requestId}`;
 const storagePortCounts = new Map<string, number>();
-const storageGrants = new Map<string, { context: import("@keymaster/contracts").StorageAppContext; clientId: string; sessionEpoch: SessionEpoch }>();
+const storageGrants = new Map<string, { context: import("@keymaster/contracts").OwnerAppStorageGrant; ownerStorageGeneration: number; clientId: string; sessionEpoch: SessionEpoch }>();
+const ownerStorageGrants = new Map<string, StorageOwnerGrant & { clientId: string }>();
+const platformStorageGrants = new Map<string, StoragePlatformGrant & { clientId: string }>();
 let storageMutationTail: Promise<void> = Promise.resolve();
 let storageDataActive = 0;
-type StorageDataWaiter = { resolve: () => void; reject: (error: Error) => void; signal?: AbortSignal; active: boolean; clientId: string };
+type StorageDataWaiter = {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  active: boolean;
+  clientId: string;
+};
 const storageDataWaiters: StorageDataWaiter[] = [];
 const STORAGE_DATA_CONCURRENCY = 4;
 const STORAGE_DATA_MAX_QUEUE = 64;
 const STORAGE_DATA_MAX_PER_PORT = 16;
 const STORAGE_DATA_MAX_ACTIVE_PER_PORT = STORAGE_DATA_CONCURRENCY - 1;
 const storageDataActiveByPort = new Map<string, number>();
+
+/** 删除 owner 时的请求栅栏；新请求拒绝，旧请求可被等待到自然结束。 */
+const ownerStorageFences = new Map<string, number>();
+const ownerStorageRequests = new Map<string, Set<Promise<void>>>();
+/** 锁定期间未完成的旧 owner 排空；下一次解锁必须先消费它。 */
+let pendingOwnerStorageDrain: { ownerPublicKeyHex: string; promise: Promise<void> } | undefined;
+/** 删除 owner 前等待所有 KV/文件请求自然结束的上限。 */
+export const OWNER_STORAGE_DRAIN_TIMEOUT_MS = 5_000;
+
+function storageUnavailableError(message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code: "storage_unavailable" });
+}
+
+function assertOwnerStorageNotFenced(ownerPublicKeyHex: string): void {
+  if (ownerStorageFences.has(ownerPublicKeyHex.toLowerCase())) {
+    throw storageUnavailableError("Owner storage is fenced during a key/session transition");
+  }
+}
+
+function beginOwnerStorageRequest(ownerPublicKeyHex: string): () => void {
+  const owner = ownerPublicKeyHex.toLowerCase();
+  assertOwnerStorageNotFenced(owner);
+  let resolveRelease!: () => void;
+  const pending = new Promise<void>((resolve) => { resolveRelease = resolve; });
+  let requests = ownerStorageRequests.get(owner);
+  if (!requests) {
+    requests = new Set<Promise<void>>();
+    ownerStorageRequests.set(owner, requests);
+  }
+  requests.add(pending);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    requests!.delete(pending);
+    if (requests!.size === 0) ownerStorageRequests.delete(owner);
+    resolveRelease();
+  };
+}
+
+async function drainOwnerStorageRequests(ownerPublicKeyHex: string): Promise<void> {
+  const requests = ownerStorageRequests.get(ownerPublicKeyHex.toLowerCase());
+  if (!requests?.size) return;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const drained = await Promise.race([
+      Promise.allSettled([...requests]).then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), OWNER_STORAGE_DRAIN_TIMEOUT_MS);
+      })
+    ]);
+    if (!drained) {
+      // 超时不能继续 owner 目录清理；迟到的 Provider 写入仍可能在
+      // AbortSignal 被忽略时完成，因此必须保留 Journal 与 owner fence。
+      throw storageUnavailableError("Owner storage requests did not drain before key deletion timeout");
+    }
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function rememberOwnerStorageDrain(ownerPublicKeyHex: string, promise: Promise<void>): void {
+  const owner = ownerPublicKeyHex.toLowerCase();
+  const existing = pendingOwnerStorageDrain;
+  if (existing?.ownerPublicKeyHex === owner) return;
+  pendingOwnerStorageDrain = { ownerPublicKeyHex: owner, promise };
+  // 锁定路径不能因为 Provider 忽略 AbortSignal 而产生未处理 rejection；
+  // 真正的错误由下一次解锁再次 await 并重新 drain 时返回。
+  void promise.then(
+    () => undefined,
+    () => undefined
+  );
+}
+
+/** 等待锁定留下的旧 owner 排空；超时后保留 fence，并允许后续重试。 */
+async function waitForPendingOwnerStorageDrain(): Promise<string | undefined> {
+  const pending = pendingOwnerStorageDrain;
+  if (!pending) return undefined;
+  try {
+    await pending.promise;
+  } catch {
+    // 初次锁定的 drain 可能已经超时，但 Provider 随后才自然结束；
+    // 解锁时重新观察当前集合，不能把旧的 rejected Promise 当成永久结论。
+    await drainOwnerStorageRequests(pending.ownerPublicKeyHex);
+  }
+  if (pendingOwnerStorageDrain?.promise === pending.promise) pendingOwnerStorageDrain = undefined;
+  return pending.ownerPublicKeyHex;
+}
+
+interface ActiveOwnerTransitionResult {
+  /** 切换前的 unlocked owner；成功公开新 owner 后才能释放它的 fence。 */
+  previousOwner?: string;
+  /** lock → unlock 时等待并排空的 owner；成功公开目标后才能释放它的 fence。 */
+  pendingOwner?: string;
+}
+
+/**
+ * 完成一次 active-owner 迁移后，统一释放已经排空的临时 fence。
+ *
+ * pendingOwner 与目标 owner 不一定相同：例如 lock(A) → unlock(B) 时，
+ * pendingOwner 是 A，而新 active owner 是 B。只按“pending 等于目标”清理
+ * 会让 A 永久保持 fenced，之后切回 A 时所有 owner K-V 都会被拒绝。
+ */
+function completeActiveStorageOwnerTransition(transition: ActiveOwnerTransitionResult | undefined): void {
+  if (!transition) return;
+  if (transition.previousOwner) ownerStorageFences.delete(transition.previousOwner);
+  if (transition.pendingOwner) ownerStorageFences.delete(transition.pendingOwner);
+}
+
+/**
+ * 所有 active-key 入口共用的 owner 边界。
+ *
+ * 顺序固定为：旧 owner fence/grant revoke → abort runtime/task → drain
+ * owner storage → 调用方才可以把新 owner 写入 Coordinator state。
+ */
+async function transitionActiveStorageOwner(nextPublicKeyHex: string): Promise<ActiveOwnerTransitionResult> {
+  const nextOwner = nextPublicKeyHex.toLowerCase();
+  let pendingOwner: string | undefined;
+  try {
+    pendingOwner = await waitForPendingOwnerStorageDrain();
+  } catch (error) {
+    // 只有当前仍 unlocked 时才需要主动收口；locked → unlock 失败时已经
+    // 是 fail-closed 状态，必须原样保持。
+    if (coordinatorState.vaultStatus === "unlocked") await performGlobalLock("owner-transition-failed");
+    throw error;
+  }
+
+  const previousOwner = coordinatorState.activePublicKeyHex?.toLowerCase();
+  if (!previousOwner || previousOwner === nextOwner) {
+    return { previousOwner: undefined, pendingOwner };
+  }
+
+  fenceOwnerStorage(previousOwner);
+  releaseMsfileRuntime("activate-key");
+  await releaseSatRuntime("activate-key");
+  clearWindowP2pExecutorLeaseLocked();
+  // 任务 completion 由自己的 session/generation 栅栏收口；这里不等待
+  // 一个可能永不响应 AbortSignal 的业务 task，owner storage drain 才是
+  // 新 owner 暴露前的硬门禁。
+  void cancelTaskRuntimesByKey(previousOwner).catch((error) => {
+    console.warn("[coordinator] old owner task cancellation deferred", error instanceof Error ? error.message : String(error));
+  });
+  const drain = drainOwnerStorageRequests(previousOwner);
+  try {
+    await drain;
+  } catch (error) {
+    rememberOwnerStorageDrain(previousOwner, drain);
+    // 排空超时不得回滚到旧 owner，也不得继续激活目标 owner。
+    await performGlobalLock("owner-transition-failed");
+    throw error;
+  }
+  return { previousOwner, pendingOwner };
+}
+
+function assertOwnerStorageBindingFresh(ownerPublicKeyHex: string, generation: number, rootToken: object | undefined): void {
+  const owner = ownerPublicKeyHex.toLowerCase();
+  if (
+    ownerStorageFences.has(owner) ||
+    coordinatorState.activePublicKeyHex?.toLowerCase() !== owner ||
+    coordinatorState.keyspaceGeneration !== generation ||
+    platformRootToken !== rootToken
+  ) throw storageUnavailableError("Owner storage binding became stale");
+}
 
 /* ---------- MSFile runtime state（施工单 KMMF-005/006） ---------- */
 let msfileRuntime: MsFileServiceImpl | undefined;
@@ -707,7 +801,7 @@ const SAT_WINDOW_LANE_ID = "sat-subscription";
 interface SatWorkerRuntimeState {
   ownerPublicKeyHex: string;
   ownerGeneration: number;
-  db: SatSubscriptionDb;
+  repository: SatSubscriptionRepository;
   state: SatSubscriptionStateStore;
   provider: SatSubscriptionProvider;
   handle: SatSubscriptionHandle;
@@ -1054,11 +1148,17 @@ async function ensureMsfileRuntime(): Promise<MsFileServiceImpl> {
     throw msfileError("msfile_unavailable", "MSFile requires an unlocked Vault");
   }
   if (msfileRuntime) return msfileRuntime;
+  if (!platformRootStore) throw msfileError("msfile_unavailable", "Platform storage has not been bootstrapped");
+  // MSFile 是系统应用，但数据仍属于当前 active public key，不能落入
+  // platform 全局桶；createWorkerOwnerStore 会绑定 `owner/MSFile/`。
+  const msfileStore = createWorkerOwnerStore("msfile", 1);
+  const repository = await openMsFileRepository(msfileStore);
   const service = createMsFileService({
+    repository: repository,
     transport: windowP2pExecutorTransport,
     notifyStateChange: (_state: MsFileServiceEventState) => emitMsFileState()
   });
-  // 服务构造是同步的；DB 打开在内部异步完成，首个 control 调用会等待。
+  // 服务构造是同步的；K-V 打开在内部异步完成，首个 control 调用会等待。
   msfileRuntime = service;
   emitMsFileState();
   return msfileRuntime;
@@ -1103,12 +1203,12 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
   const startAbortController = new AbortController();
   satRuntimeStartAbortController = startAbortController;
   const start = (async (): Promise<SatWorkerRuntimeState> => {
-    const keyspace = createWorkerKeyspace();
-    const db = await openSatSubscriptionDb({ keyspace, publicKeyHex: ownerPublicKeyHex });
+    const store = createWorkerOwnerStore("sat-subscription", SAT_SUBSCRIPTION_SCHEMA_VERSION);
+    const repository = createSatSubscriptionRepository(store);
     let provider: ReturnType<typeof createSatSubscriptionProvider> | undefined;
     let handle: SatSubscriptionHandle | undefined;
     try {
-      const loaded = await db.load();
+      const loaded = await repository.load();
       const initial = {
         ...loaded,
         ownerSettings: loaded.ownerSettings ?? {
@@ -1117,7 +1217,7 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
           receiveSupplierIds: [],
         },
       };
-      const state = createSatSubscriptionState({ ownerPublicKeyHex, initial, persistence: db });
+      const state = createSatSubscriptionState({ ownerPublicKeyHex, initial, persistence: repository });
       provider = createSatSubscriptionProvider({
         stateForOwner: async (requestedOwner) => {
           if (requestedOwner !== coordinatorState.activePublicKeyHex || requestedOwner !== ownerPublicKeyHex) throw new Error("SatSubscription owner changed");
@@ -1165,7 +1265,7 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
       const runtime: SatWorkerRuntimeState = {
         ownerPublicKeyHex,
         ownerGeneration,
-        db,
+        repository,
         state,
         provider: boundProvider,
         handle,
@@ -1180,7 +1280,7 @@ async function ensureSatRuntime(): Promise<SatWorkerRuntimeState> {
     } catch (error) {
       try { handle?.close(); } catch { /* stale start cleanup */ }
       await provider?.shutdown().catch(() => undefined);
-      db.close();
+      repository.close();
       throw error;
     }
   })();
@@ -1244,7 +1344,7 @@ async function releaseSatRuntime(reason: string): Promise<void> {
 
   const cleanup = previousRelease.then(async () => {
     // 必须在 runtime.handle.close / provider.shutdown 前清理物理订阅。
-    // 每一步都有上限：远端 Supplier 永不返回时，清理转为 owner DB 中的
+    // 每一步都有上限：远端 Supplier 永不返回时，清理转为 owner K-V 中的
     // 待退订证据，不能拖延锁屏或阻止后续 owner 建立会话。
     const startedRuntime = runtime ?? await awaitSatCleanup(runtimeStarting ?? Promise.resolve(undefined), "stale runtime start");
     if (startedRuntime) {
@@ -1266,7 +1366,7 @@ async function releaseSatRuntime(reason: string): Promise<void> {
       try { startedRuntime.offIncoming(); } catch { /* ignore */ }
       try { startedRuntime.handle.close(); } catch { /* ignore */ }
       await awaitSatCleanup(startedRuntime.provider.shutdown(), "Sat provider shutdown");
-      startedRuntime.db.close();
+      startedRuntime.repository.close();
     }
   });
   satRuntimeRelease = cleanup.catch((error) => {
@@ -1286,8 +1386,8 @@ function releaseMsfileRuntime(_reason: string): void {
   lastMsFileState = undefined;
 }
 
-function storageCoordinatorError(code: "storage_limit_exceeded" | "storage_unavailable"): Error & { code: typeof code } {
-  const error = new Error(code) as Error & { code: typeof code };
+function storageCoordinatorError(code: "storage_limit_exceeded" | "storage_unavailable", message: string = code): Error & { code: typeof code } {
+  const error = new Error(message) as Error & { code: typeof code };
   error.code = code;
   return error;
 }
@@ -1306,15 +1406,27 @@ function releaseStoragePortSlot(clientId: string): void {
 
 function emitStorageState(): void {
   storageStateTail = storageStateTail.then(async () => {
-    const summary = await (storageRuntime?.getProviderSummary().catch(() => null) ?? Promise.resolve(null));
+    const summary = typeof storageRuntime?.getProviderSummary === "function"
+      ? await storageRuntime.getProviderSummary().catch(() => null)
+      : null;
     const revision = storageRevision + 1;
+    const runtimeStatus = typeof storageRuntime?.status === "function" ? storageRuntime.status() : undefined;
+    const healthStatus = storageHealthController.status();
+    const status = storageStartupFailure || healthStatus === "degraded" || healthStatus === "authentication" || healthStatus === "incompatible"
+      ? "degraded"
+      : !platformStorageReady || healthStatus !== "ready"
+        ? "checking"
+        : runtimeStatus ?? "checking";
     const state: CoordinatorStorageStateEvent = {
       topic: "storage.state", type: "storage.state.changed", storageRevision: revision,
       sessionEpoch: coordinatorState.sessionEpoch,
       providerGeneration: summary?.generation ?? null,
-      status: storageStartupFailure ? "degraded" : storageRuntime?.status() ?? (coordinatorState.vaultStatus === "unlocked" ? "unconfigured" : "locked"),
+      status,
+      healthStatus,
       summary,
-      capabilities: storageRuntime?.getConditionalCapabilities() ?? null,
+      capabilities: typeof storageRuntime?.getConditionalCapabilities === "function"
+        ? storageRuntime.getConditionalCapabilities()
+        : null,
     };
     lastStorageState = state;
     storageRevision = revision;
@@ -1322,8 +1434,152 @@ function emitStorageState(): void {
   }, () => undefined);
 }
 
-function notifyStorageLifecycle(status: "unlocked" | "locked" | "uninitialized"): void {
-  for (const listener of storageLifecycleListeners) listener({ status });
+let skippedInitialStorageHealthSnapshot = false;
+storageHealthController.subscribe(() => {
+  if (!skippedInitialStorageHealthSnapshot) {
+    skippedInitialStorageHealthSnapshot = true;
+    return;
+  }
+  emitStorageState();
+});
+
+/**
+ * Coordinator-owned Storage recovery pipeline. Provider 恢复只是第一步；
+ * Root、Vault metadata、业务任务和旧资源句柄必须在同一条编排链上恢复。
+ */
+async function runStorageRecoveryOrchestrator(): Promise<void> {
+  if (storageRecoveryOrchestrator) return storageRecoveryOrchestrator;
+  storageRecoveryOrchestrator = (async () => {
+    if (!platformRootStore) {
+      if (!storageBootstrapState) throw storageUnavailableError("Storage bootstrap selection is unavailable");
+      // StorageBootstrapController 的自动重试可能已经拿到 provider/bucket，
+      // 但当时还没有安装 Root。优先消费这份 Coordinator 内部结果，避免
+      // 因为重新解密 Profile（密码未持久化）而把一次成功恢复重新变成认证失败。
+      const recoveredProvider = storageBootstrapController?.getProvider();
+      const recoveredBucket = storageBootstrapController?.getBucket();
+      if (recoveredProvider && recoveredBucket) {
+        storageRootInstallationActive = true;
+        try {
+          await installPlatformStorage(recoveredProvider, recoveredBucket, storageProfilePassword);
+        } finally {
+          storageRootInstallationActive = false;
+        }
+      } else {
+        await bootstrapPlatformStorage(storageProfilePassword);
+      }
+    } else {
+      // 恢复只替换当前底层绑定；任务 runtime 仍持有 wrapper，不能把
+      // wrapper 永久 close，否则恢复后的下一次调度必然失败。
+      for (const store of workerOwnerStores) store.invalidateBinding();
+      ownerStorageGrants.clear();
+      platformStorageGrants.clear();
+    }
+    platformStorageReady = true;
+    // Root ready 只是恢复的第一道门。必须先收敛所有未完成的删除
+    // Journal，再恢复任务；否则旧任务可能在 owner 清理之后重新写入。
+    await recoverKeyDeletionJournals();
+    const unfinishedDeletionJournals = await readKeyDeletionJournals();
+    if (unfinishedDeletionJournals.length > 0) {
+      throw storageUnavailableError("Key deletion recovery is incomplete");
+    }
+    const recoveryComplete = await resumeAfterStorageReady();
+    // 初次 initialize 正在 bootstrapPlatformStorage 之后继续读取 metadata
+    // 和注册任务；这里不能越权把尚未完成的冷启动发布成 ready。
+    if (!recoveryComplete) return;
+    storageStartupFailure = false;
+    storageHealthController.setStatus("ready");
+    emitStorageState();
+  })();
+  try {
+    await storageRecoveryOrchestrator;
+  } catch (error) {
+    storageStartupFailure = true;
+    emitStorageState();
+    throw error;
+  } finally {
+    storageRecoveryOrchestrator = undefined;
+  }
+}
+
+/**
+ * 业务 I/O 失败也必须进入 Storage 健康域；不能只在启动/探测失败时更新。
+ * 这里只记录稳定的脱敏文案，避免把 Provider 返回的 URL、请求体或凭据
+ * 传播到 UI 诊断状态。
+ */
+function markStorageIoFailure(error: unknown): void {
+  // Storage 健康是全局真值，与 Vault locked/unlocked 无关。锁屏期间的
+  // Root/平台 K-V 失败也必须留下 degraded 状态，供下一次解锁前恢复。
+  if (!platformStorageReady) return;
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  const message = error instanceof Error ? error.message : String(error);
+  if (code !== "storage_provider_error" && code !== "storage_unavailable") return;
+  if (code === "storage_unavailable" && /cancel|abort|closed|stale|fenced|binding|owner storage requests did not drain|key\/session transition/i.test(message)) return;
+  storageHealthController.setStatus(
+    "degraded",
+    code === "storage_provider_error" ? "Storage provider operation failed" : "Storage is unavailable",
+  );
+  blockWorkerTasksForStorage();
+  // 业务 I/O 失败后进入同一个 single-flight 退避探测器；失败时由
+  // StorageHealthController 安排指数退避，恢复后再广播 ready。
+  void probeStorageAndRecover().catch(() => undefined);
+}
+
+/** Provider 探测、Root 重绑、Journal 收敛和任务恢复的单次原子操作。 */
+async function probeStorageAndRecover(): Promise<void> {
+  const snapshot = await storageHealthController.probe(
+    async () => {
+      const provider = platformBucketProvider;
+      if (!provider) throw Object.assign(new Error("Storage provider is unavailable"), { code: "storage_unavailable" });
+      const result = await provider.probe();
+      if (!result.ok || result.conditionalWrites !== "native") {
+        throw Object.assign(new Error("Storage bucket does not support required conditional writes"), { code: "storage_provider_error" });
+      }
+    },
+    async () => {
+      await runStorageRecoveryOrchestrator();
+    }
+  );
+  if (snapshot.status !== "ready") {
+    storageStartupFailure = true;
+    emitStorageState();
+    throw storageUnavailableError(snapshot.message ?? "Storage recovery is unavailable");
+  }
+  platformStorageReady = true;
+  storageStartupFailure = false;
+}
+
+function isStorageFailure(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  return (typeof code === "string" && code.startsWith("storage_")) || storageHealthController.status() === "degraded" || storageStartupFailure;
+}
+
+function blockWorkerTasksForStorage(): void {
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    if (runtime.timer) clearTimeout(runtime.timer);
+    runtime.timer = undefined;
+    runtime.nextRunAt = undefined;
+    runtime.controller?.abort();
+    if (runtime.state !== "blocked" || runtime.blockedReason !== "Storage unavailable") {
+      runtime.state = "blocked";
+      runtime.blockedReason = "Storage unavailable";
+    }
+  }
+  publishTopicEvent("background.snapshot", {
+    type: "background.snapshot.changed",
+    sessionEpoch: coordinatorState.sessionEpoch,
+    snapshots: getTaskSnapshots(),
+    scheduleSettings: coordinatorState.scheduleSettings
+  });
+}
+
+function assertStorageDataAvailable(): void {
+  if (!platformStorageReady || storageHealthController.status() !== "ready") {
+    throw Object.assign(new Error("Storage is temporarily unavailable"), { code: "storage_unavailable" });
+  }
 }
 
 function pumpStorageDataWaiters(): void {
@@ -1331,15 +1587,56 @@ function pumpStorageDataWaiters(): void {
     let index = storageDataWaiters.findIndex((waiter) => (storageDataActiveByPort.get(waiter.clientId) ?? 0) < STORAGE_DATA_MAX_ACTIVE_PER_PORT);
     if (index < 0) index = 0; // no competing port: do not strand a single client
     const waiter = storageDataWaiters.splice(index, 1)[0]!;
-    if (!waiter.active || waiter.signal?.aborted) continue;
+    if (!waiter.active) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      continue;
+    }
+    if (waiter.signal?.aborted) {
+      waiter.active = false;
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.reject(storageCoordinatorError("storage_unavailable", "Storage request cancelled"));
+      continue;
+    }
     waiter.active = false;
+    if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener("abort", waiter.onAbort);
     storageDataActive += 1;
     storageDataActiveByPort.set(waiter.clientId, (storageDataActiveByPort.get(waiter.clientId) ?? 0) + 1);
     waiter.resolve();
   }
 }
 
-async function withStorageDataSlot<T>(clientId: string, run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+interface StorageDataSlotLifecycle {
+  /** 物理 Provider Promise 已真正开始执行。 */
+  onPhysicalStart?: () => void;
+  /** 物理 Provider Promise 已 settle；此时才允许释放并发槽。 */
+  onPhysicalSettled?: () => void;
+}
+
+/**
+ * 取得 Storage physical slot。
+ *
+ * cancel 只结束调用方等待的 RPC，不结束 Provider 自己的 Promise。槽位和
+ * 每端口 physical 计数必须等真实 Promise settle 后才释放，否则忽略
+ * AbortSignal 的 Provider 可以被反复 cancel 绕过全局并发上限。
+ */
+async function withStorageDataSlot<T>(
+  clientId: string,
+  run: () => Promise<T>,
+  signal?: AbortSignal,
+  lifecycle?: StorageDataSlotLifecycle
+): Promise<T> {
+  let slotHeld = false;
+  const releasePhysicalSlot = (): void => {
+    if (!slotHeld) return;
+    slotHeld = false;
+    storageDataActive = Math.max(0, storageDataActive - 1);
+    const nextPort = Math.max(0, (storageDataActiveByPort.get(clientId) ?? 1) - 1);
+    if (nextPort) storageDataActiveByPort.set(clientId, nextPort); else storageDataActiveByPort.delete(clientId);
+    pumpStorageDataWaiters();
+    lifecycle?.onPhysicalSettled?.();
+  };
+
+  if (signal?.aborted) throw storageCoordinatorError("storage_unavailable", "Storage request cancelled");
   if (storageDataActive >= STORAGE_DATA_CONCURRENCY || (storageDataActiveByPort.get(clientId) ?? 0) >= STORAGE_DATA_MAX_ACTIVE_PER_PORT) {
     if (storageDataWaiters.length >= STORAGE_DATA_MAX_QUEUE) throw storageCoordinatorError("storage_limit_exceeded");
     await new Promise<void>((resolve, reject) => {
@@ -1349,73 +1646,97 @@ async function withStorageDataSlot<T>(clientId: string, run: () => Promise<T>, s
         waiter.active = false;
         const index = storageDataWaiters.indexOf(waiter);
         if (index >= 0) storageDataWaiters.splice(index, 1);
-        reject(storageCoordinatorError("storage_unavailable"));
+        signal?.removeEventListener("abort", abort);
+        reject(storageCoordinatorError("storage_unavailable", "Storage request cancelled"));
       };
+      waiter.onAbort = abort;
       if (signal?.aborted) { abort(); return; }
       signal?.addEventListener("abort", abort, { once: true });
       storageDataWaiters.push(waiter);
     });
+    // pumpStorageDataWaiters() 在 resolve waiter 后到这里之间可能发生
+    // abort；这时已占用的 slot 不能泄漏，但也不能启动 Provider。
+    slotHeld = true;
+    if (signal?.aborted) {
+      releasePhysicalSlot();
+      throw storageCoordinatorError("storage_unavailable", "Storage request cancelled");
+    }
   } else {
     storageDataActive += 1;
     storageDataActiveByPort.set(clientId, (storageDataActiveByPort.get(clientId) ?? 0) + 1);
+    slotHeld = true;
   }
-  const operation = run();
-  operation.catch(() => undefined);
+
+  lifecycle?.onPhysicalStart?.();
+  const operation = Promise.resolve().then(run);
+  // 这里是唯一的 physical slot release 点。不能放到下面 RPC race 的
+  // finally，否则 cancel 会在 Provider 仍运行时把槽位重新交给新请求。
+  void operation.then(releasePhysicalSlot, releasePhysicalSlot);
   let onAbort: (() => void) | undefined;
   try {
     if (!signal) return await operation;
     const cancelled = new Promise<never>((_, reject) => {
-      onAbort = () => reject(storageCoordinatorError("storage_unavailable"));
+      onAbort = () => reject(storageCoordinatorError("storage_unavailable", "Storage request cancelled"));
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     });
     return await Promise.race([operation, cancelled]);
   } finally {
     if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-    storageDataActive -= 1;
-    const nextPort = Math.max(0, (storageDataActiveByPort.get(clientId) ?? 1) - 1);
-    if (nextPort) storageDataActiveByPort.set(clientId, nextPort); else storageDataActiveByPort.delete(clientId);
-    pumpStorageDataWaiters();
   }
 }
 
-async function ensureStorageRuntime(): Promise<StorageService> {
+async function ensureStorageRuntime(): Promise<StorageRuntimeController> {
   if (storageRuntime) return storageRuntime;
   if (testStorageRuntimeOverride) { storageRuntime = testStorageRuntimeOverride; return storageRuntime; }
-  if (testStorageStartupFailure) { storageStartupFailure = true; emitStorageState(); throw storageCoordinatorError("storage_unavailable"); }
+  if (testStorageStartupFailure) { storageStartupFailure = true; storageHealthController.setStatus("degraded", "Storage startup failed"); emitStorageState(); throw storageCoordinatorError("storage_unavailable"); }
   const startupError = (error: unknown): never => {
-    storageStartupFailure = true;
-    emitStorageState();
     const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+    const currentHealth = storageHealthController.status();
+    if (currentHealth === "unselected" || currentHealth === "authentication") {
+      storageStartupFailure = false;
+      emitStorageState();
+    } else {
+      storageStartupFailure = true;
+      storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
+      emitStorageState();
+    }
     if (typeof code === "string" && code.startsWith("storage_")) throw error;
     throw storageCoordinatorError("storage_unavailable");
   };
-  try { storageDb ??= await openStorageDb(); } catch (error) { startupError(error); }
-  const db = storageDb;
-  if (!db) return startupError(new Error("Storage database is unavailable"));
-  const vaultAdapter = {
-    status: () => (coordinatorState.vaultStatus === "fatal" ? "locked" : coordinatorState.vaultStatus),
-    onLifecycleChange(listener: (snapshot: any) => void) {
-      const wrapped = (snapshot: { status: "unlocked" | "locked" | "uninitialized" }) => listener(snapshot);
-      storageLifecycleListeners.add(wrapped); return () => { storageLifecycleListeners.delete(wrapped); };
+  try {
+    if (!storageRepository) {
+      if (!platformRootStore) await bootstrapPlatformStorage();
+      const root = platformRootStore;
+      if (!root) throw new Error("Platform storage root is unavailable");
+      storageRepository = await openMultipartUploadRepository(await root.openPlatformStore({ applicationStorageId: "storage", schemaVersion: 1 }));
     }
-  };
+  } catch (error) { startupError(error); }
+  const multipartUploadRepository = storageRepository;
+  if (!multipartUploadRepository) return startupError(new Error("Storage repository is unavailable"));
   const secret = {
-    async seal(scope: string, plaintext: Uint8Array): Promise<VaultSealedSecret> {
-      const key = coordinatorState.storageSecretKey; if (!key) throw new Error("Vault is locked");
-      const blob = await encryptBytesWithSaltBoundAad(key, plaintext, localSecretAad(2, scope));
+    async seal(scope: string, plaintext: Uint8Array): Promise<StorageSecretEnvelope> {
+      const key = storageProfileKey; if (!key) throw new Error("Storage Profile is unavailable");
+      const blob = await encryptBytesWithSaltBoundAad(key, plaintext, localSecretAad(scope));
       return { version: 2, saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
     },
-    async open(scope: string, sealed: VaultSealedSecret): Promise<Uint8Array> {
-      const key = coordinatorState.storageSecretKey; if (!key) throw new Error("Vault is locked");
-      return sealed.version === 2
-        ? decryptBytesWithSaltBoundAad(key, { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) }, localSecretAad(2, scope))
-        : decryptBytesWithAad(key, { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) }, localSecretAad(1, scope));
+    async open(scope: string, sealed: StorageSecretEnvelope): Promise<Uint8Array> {
+      const key = storageProfileKey; if (!key) throw new Error("Storage Profile is unavailable");
+      if (sealed.version !== 2) throw new Error("Unsupported sealed secret version");
+      return decryptBytesWithSaltBoundAad(key, { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) }, localSecretAad(scope));
     }
   };
-  let runtime: StorageService;
+  let runtime: StorageRuntimeController;
   try {
-    runtime = await createStorageService({ db, secret, vault: vaultAdapter, logger: { warn: (event) => undefined } });
+    runtime = await createStorageRuntimeController({
+      multipartUploadRepository,
+      // 文件 API 直接使用 Provider，必须和 owner K-V 一样经过桶级生命
+      // 周期栅栏；否则另一个 Coordinator 删除 owner 时，迟到 PUT 仍可复活文件。
+      bucketProvider: platformBucketProvider ? createOwnerLifecycleGuardedProvider(platformBucketProvider) : undefined,
+      bucketGeneration: platformRootStore?.bucket.bucketGeneration,
+      secret,
+      logger: { warn: (event) => undefined }
+    });
   } catch (error) {
     startupError(error);
   }
@@ -1426,6 +1747,32 @@ async function ensureStorageRuntime(): Promise<StorageService> {
   return storageRuntime;
 }
 
+/** Storage 选定/解锁后统一恢复 Root、Vault metadata、runtime 与任务。 */
+async function resumeAfterStorageReady(): Promise<boolean> {
+  storageStartupFailure = false;
+  platformStorageReady = true;
+  if (coordinatorState.vaultStatus === "booting") {
+    // 初始 initializeCoordinator 正在等待 bootstrapPlatformStorage；健康探测
+    // 的 recovery finalize 不能再次启动一个嵌套 initialize，否则会互相等待。
+    if (coordinatorInitializationInProgress) return false;
+    coordinatorInitialization = initializeCoordinator(true, true);
+    await coordinatorInitialization;
+    return true;
+  }
+  await ensureStorageRuntime();
+  if (coordinatorState.taskRuntimes.size === 0) await registerCoordinatorTasks();
+  for (const runtime of coordinatorState.taskRuntimes.values()) {
+    if (runtime.state === "blocked" && runtime.blockedReason === "Storage unavailable") {
+      runtime.state = "idle";
+      runtime.blockedReason = undefined;
+      scheduleRuntime(runtime);
+    }
+  }
+  publishSessionState("bootstrap");
+  emitStorageState();
+  return true;
+}
+
 function abortStorageRequests(): void {
   for (const request of storageRequests.values()) request.controller.abort();
   storageRequests.clear();
@@ -1434,12 +1781,13 @@ function abortStorageRequests(): void {
 async function releaseStorageRuntime(reason: string): Promise<void> {
   abortStorageRequests();
   storageGrants.clear();
-  // StorageServiceImpl's dispose aborts its request controller and destroys the
+  ownerStorageGrants.clear();
+  platformStorageGrants.clear();
+  // StorageRuntimeControllerImpl's dispose aborts its request controller and destroys the
   // S3 client without waiting for remote multipart cleanup.
-  (storageRuntime as (StorageService & { dispose?: () => void }) | undefined)?.dispose?.();
+  (storageRuntime as (StorageRuntimeController & { dispose?: () => void }) | undefined)?.dispose?.();
   storageRuntime = undefined;
-  storageDb = undefined;
-  notifyStorageLifecycle(coordinatorState.vaultStatus === "uninitialized" ? "uninitialized" : "locked");
+  storageRepository = undefined;
   void reason;
 }
 
@@ -1501,6 +1849,9 @@ const coordinatorState: CoordinatorState = {
   lastActivityAt: Date.now(),
 };
 
+/** Worker 与 Host 共用的内置插件 -> 存储声明表。 */
+const WORKER_SYSTEM_STORAGE_DECLARATIONS = SYSTEM_STORAGE_DECLARATIONS;
+
 /** Transfer ownership of the worker's active private-key buffer. */
 function replaceActivePrivateKey(next: Uint8Array | undefined): void {
   const previous = coordinatorState.activePrivateKeyBytes;
@@ -1552,59 +1903,66 @@ function assertTaskFresh(taskId: string): void {
  */
 async function enterUnlockedState(
   passwordKey: CryptoKey,
-  storageSecretKey: CryptoKey,
+  vaultLocalSecretKey: CryptoKey,
   activePublicKeyHex: string,
   activePrivateKeyBytes: Uint8Array,
   cause: SessionStateEvent["cause"]
 ): Promise<void> {
   const previous = {
     vaultStatus: coordinatorState.vaultStatus,
-    sessionEpoch: coordinatorState.sessionEpoch,
     activePublicKeyHex: coordinatorState.activePublicKeyHex,
-    activePrivateKeyBytes: coordinatorState.activePrivateKeyBytes,
+    activePrivateKeyBytes: coordinatorState.activePrivateKeyBytes?.slice(),
     passwordKey: coordinatorState.passwordKey,
     password: coordinatorState.password,
-    storageSecretKey: coordinatorState.storageSecretKey,
+    vaultLocalSecretKey: coordinatorState.vaultLocalSecretKey,
     selectedPublicKeyHex: coordinatorMeta.selectedPublicKeyHex,
-    generation: coordinatorMeta.generation
+    generation: coordinatorMeta.generation,
+    keyspaceGeneration: coordinatorState.keyspaceGeneration
   };
-  const changesUnlockedActiveKey = previous.vaultStatus === "unlocked"
-    && previous.activePublicKeyHex !== undefined
-    && previous.activePublicKeyHex !== activePublicKeyHex;
+  let transition: ActiveOwnerTransitionResult | undefined;
   try {
-    // 在 coordinatorState 暴露新 owner 之前完成旧 owner 的 runtime 清理，
-    // 这样旧 Supplier/私钥上下文不会被 B owner 的请求观察到。
-    if (changesUnlockedActiveKey) {
-      releaseMsfileRuntime("activate-key");
-      await releaseSatRuntime("activate-key");
-      clearWindowP2pExecutorLeaseLocked();
-    }
-    // 旧 owner runtime 已经在上面完成清理；现在才把新 owner 放入会话状态。
-    // metadata 写入失败时仍恢复旧会话状态，调用方继续拥有入参私钥 buffer。
+    transition = await transitionActiveStorageOwner(activePublicKeyHex);
+    // 旧私钥不能在新 owner 写入期间继续留在 Coordinator state；回滚使用
+    // 上面保存的独立副本，不能复用已经被覆盖/清零的旧 buffer。
+    dropActivePrivateKey();
     coordinatorState.vaultStatus = "unlocked";
     coordinatorState.sessionEpoch = generateEpoch();
     passkeyAddIntents.clear();
     coordinatorState.activePublicKeyHex = activePublicKeyHex;
     coordinatorState.passwordKey = passwordKey;
     coordinatorState.password = coordinatorState.password ?? "";
-    coordinatorState.storageSecretKey = storageSecretKey;
+    coordinatorState.vaultLocalSecretKey = vaultLocalSecretKey;
     coordinatorMeta.selectedPublicKeyHex = activePublicKeyHex;
     coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
-    await persistCoordinatorMeta();
     replaceActivePrivateKey(activePrivateKeyBytes);
+    await persistCoordinatorMeta();
+    completeActiveStorageOwnerTransition(transition);
   } catch (error) {
+    const failedClosed = previous.vaultStatus === "unlocked" && coordinatorState.vaultStatus !== "unlocked";
+    if (failedClosed) {
+      // drain 超时已经由 transition 主动进入 locked；绝不能把旧私钥/旧
+      // active owner 从回滚分支重新暴露出来。
+      dropActivePrivateKey();
+      coordinatorMeta.selectedPublicKeyHex = previous.selectedPublicKeyHex;
+      coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+      throw error;
+    }
+    dropActivePrivateKey();
     coordinatorState.vaultStatus = previous.vaultStatus;
-    coordinatorState.sessionEpoch = previous.sessionEpoch;
     coordinatorState.activePublicKeyHex = previous.activePublicKeyHex;
-    coordinatorState.activePrivateKeyBytes = previous.activePrivateKeyBytes;
+    if (previous.activePrivateKeyBytes) replaceActivePrivateKey(previous.activePrivateKeyBytes);
     coordinatorState.passwordKey = previous.passwordKey;
     coordinatorState.password = previous.password;
-    coordinatorState.storageSecretKey = previous.storageSecretKey;
+    coordinatorState.vaultLocalSecretKey = previous.vaultLocalSecretKey;
     coordinatorMeta.selectedPublicKeyHex = previous.selectedPublicKeyHex;
-    coordinatorMeta.generation = previous.generation;
+    // lock → unlock 已经排空 pending owner，但新 owner 的 metadata
+    // 提交失败时并没有公开新的 active owner；回滚必须撤销临时 fence。
+    completeActiveStorageOwnerTransition(transition);
+    // 失败回滚不能复用旧 generation/epoch；否则旧 owner 句柄可能重新通过
+    // Root 的 isCurrent 检查。
+    invalidateFailedKeyspaceTransition(Math.max(previous.generation, previous.keyspaceGeneration));
     throw error;
   }
-  notifyStorageLifecycle("unlocked");
   emitStorageState();
 
   // 恢复所有 blocked 任务为 idle 并重新调度
@@ -1618,7 +1976,7 @@ async function enterUnlockedState(
 
   publishSessionState(cause);
   // 解锁后立即建立 owner-scoped Sat runtime 和 owner inbox 的系统 caller。
-  // 连接/供应商暂不可用时只记录诊断；owner 的订阅意图仍留在 Sat DB/Mux，
+  // 连接/供应商暂不可用时只记录诊断；owner 的订阅意图仍留在 Sat K-V/Mux，
   // 后续重连或设置变更会继续对账。
   void ensureSatRuntime()
     .then((runtime) => ensureChannelSubscriptionMux(runtime))
@@ -1640,18 +1998,14 @@ function createWorkerKeyspace(): KeyspaceService {
     // 让 Worker 内部的 owner-scoped service 也能捕获会话世代。
     generation: coordinatorState.keyspaceGeneration
   });
-  const storageName = (key: string, pluginId: string, storageId: string) => `keymaster.key.${key}.plugin.${pluginId}.${storageId}`;
   return {
-    listKeys: async () => (await vaultDb.listKeys()).map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt })),
-    getKey: async (publicKeyHex) => { const key = await vaultDb.getKey(publicKeyHex); return key ? { publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt } : undefined; },
+    listKeys: async () => (await vaultKeyRepository.listKeys()).map((key) => ({ publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt })),
+    getKey: async (publicKeyHex) => { const key = await vaultKeyRepository.getKey(publicKeyHex); return key ? { publicKeyHex: key.publicKeyHex, label: key.label, capabilities: key.capabilities, createdAt: key.createdAt } : undefined; },
     active,
     selected: () => coordinatorMeta.selectedPublicKeyHex,
     setActive: async (publicKeyHex) => { await executeVaultOperation({ type: "setActive", publicKeyHex }); },
     requireActiveKey: () => { if (!coordinatorState.activePublicKeyHex) throw new Error("No active key"); return { publicKeyHex: coordinatorState.activePublicKeyHex, label: "", capabilities: ["p2pkh"], createdAt: "" }; },
     onActiveKeyChanged: () => () => undefined,
-    openKeyStorage: async (input) => { const name = storageName(input.publicKeyHex, input.pluginId, input.storageId); const db = await new Promise<IDBDatabase>((resolve, reject) => { const req = indexedDB.open(name, input.version); req.onupgradeneeded = (event) => input.upgrade(req.result, (event as IDBVersionChangeEvent).oldVersion, input.version, req.transaction ?? undefined); req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); }); return { db, name, close: () => db.close() }; },
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     // Deletion is coordinated by the application keyspace facade so that
     // namespace cleanup and password verification cannot be bypassed.
@@ -1659,6 +2013,91 @@ function createWorkerKeyspace(): KeyspaceService {
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   };
+}
+
+/** Worker 任务在 locked 首屏也要先注册；真实 owner 存储延迟到解锁后绑定。 */
+function createWorkerOwnerStore(pluginId: string, schemaVersion: number): KeyValueStore {
+  const declaration = SYSTEM_STORAGE_DECLARATIONS[pluginId];
+  if (!declaration || declaration.scope !== "key" || declaration.schemaVersion !== schemaVersion) throw new Error(`Unknown owner storage declaration: ${pluginId}`);
+  const applicationStorageId = declaration.applicationStorageId;
+  let closed = false;
+  let ownerPublicKeyHex: string | undefined;
+  let current: KeyValueStore | undefined;
+  let generation: number | undefined;
+  let bindingRootToken: object | undefined;
+  const invalidateBinding = (): void => {
+    current?.close();
+    current = undefined;
+    ownerPublicKeyHex = undefined;
+    generation = undefined;
+    bindingRootToken = undefined;
+  };
+  const resolve = async (): Promise<KeyValueStore> => {
+    if (closed) throw new Error("Worker owner storage handle is closed");
+    assertStorageDataAvailable();
+    const owner = coordinatorState.activePublicKeyHex?.trim().toLowerCase();
+    if (!owner) throw new Error("Owner storage requires an unlocked active key");
+    assertOwnerStorageNotFenced(owner);
+    const expectedGeneration = coordinatorState.keyspaceGeneration;
+    const expectedRootToken = platformRootToken;
+    if (!expectedRootToken) throw new Error("Owner storage root is unavailable");
+    if (!current || ownerPublicKeyHex !== owner || generation !== expectedGeneration || bindingRootToken !== expectedRootToken) {
+      invalidateBinding();
+      if (!platformRootStore) throw new Error("Owner storage is not ready");
+      const root = platformRootStore;
+      const opened = await root.openKeyValueStore({ ownerPublicKeyHex: owner, applicationStorageId, schemaVersion, keyspaceGeneration: expectedGeneration });
+      if (
+        closed ||
+        platformRootStore !== root ||
+        platformRootToken !== expectedRootToken ||
+        coordinatorState.activePublicKeyHex?.toLowerCase() !== owner ||
+        coordinatorState.keyspaceGeneration !== expectedGeneration
+      ) {
+        opened.close();
+        throw storageUnavailableError("Owner storage binding became stale while opening");
+      }
+      current = opened;
+      ownerPublicKeyHex = owner;
+      generation = expectedGeneration;
+      bindingRootToken = expectedRootToken;
+    }
+    return current;
+  };
+  const run = async <T>(operation: (store: KeyValueStore) => Promise<T>): Promise<T> => {
+    try {
+      const store = await resolve();
+      const owner = ownerPublicKeyHex;
+      const boundGeneration = generation;
+      const boundRootToken = bindingRootToken;
+      if (!owner || boundGeneration === undefined) throw storageUnavailableError("Owner storage binding is unavailable");
+      const release = beginOwnerStorageRequest(owner);
+      try {
+        const value = await operation(store);
+        assertOwnerStorageBindingFresh(owner, boundGeneration, boundRootToken);
+        return value;
+      } finally {
+        release();
+      }
+    } catch (error) {
+      markStorageIoFailure(error);
+      throw error;
+    }
+  };
+  const handle = {
+    get bucketId() { return current?.bucketId ?? "pending"; },
+    get bucketGeneration() { return current?.bucketGeneration ?? 0; },
+    get ownerPublicKeyHex() { return ownerPublicKeyHex ?? ""; },
+    applicationStorageId,
+    get: async <T = KeyValueValue>(key: string, options?: { partition?: string }) => run((store) => store.get<T>(key, options)),
+    list: async (input: KeyValueListInput = {}) => run((store) => store.list(input)),
+    put: async <T = KeyValueValue>(key: string, value: T, condition?: { ifRevision?: number; partition?: string }) => run((store) => store.put<T>(key, value, condition)),
+    delete: async (key: string, condition?: { ifRevision?: number; partition?: string }) => { await run((store) => store.delete(key, condition)); },
+    commit: async (input: KeyValueCommitInput) => run((store) => store.commit(input)),
+    close: () => { if (closed) return; closed = true; invalidateBinding(); workerOwnerStores.delete(handle); },
+    invalidateBinding: () => { if (!closed) invalidateBinding(); }
+  } as KeyValueStore & WorkerOwnerStoreBinding;
+  workerOwnerStores.add(handle);
+  return handle;
 }
 
 /**
@@ -1669,7 +2108,7 @@ function createWorkerKeyspace(): KeyspaceService {
  * session。这样 Sat top-up 复用 P2PKH 交易编排时仍然满足私钥不出 Worker。
  */
 async function createWorkerActiveKeyCrypto(publicKeyHex: string): Promise<ActiveKeyCrypto> {
-  const record = await vaultDb.getKey(publicKeyHex);
+  const record = await vaultKeyRepository.getKey(publicKeyHex);
   if (!record) throw new Error(`Unknown key ${publicKeyHex}`);
   const requirePrivateKey = (): Uint8Array => {
     if (coordinatorState.vaultStatus !== "unlocked" || coordinatorState.activePublicKeyHex !== publicKeyHex || !coordinatorState.activePrivateKeyBytes) {
@@ -1737,7 +2176,7 @@ async function ensureSatP2pkhService(): Promise<P2pkhService> {
     const pending = satP2pkhServiceStarting;
     if (satP2pkhServiceStartingToken === satP2pkhServiceStartToken && satP2pkhServiceStartingOwnerPublicKeyHex === ownerPublicKeyHex) return pending;
     // 等待旧 owner 的启动完成并完成自身清理，再开始新 owner 世代，
-    // 避免两个 P2PKH service 同时持有 DB/消息总线订阅。
+    // 避免两个 P2PKH service 同时持有 K-V/消息总线订阅。
     await pending.catch(() => undefined);
     if (satP2pkhService && satP2pkhServiceOwnerPublicKeyHex === ownerPublicKeyHex) return satP2pkhService;
   }
@@ -1817,6 +2256,7 @@ async function registerCoordinatorTasks(): Promise<void> {
   const contactsService = createContactsService({
     keyspace,
     messageBus,
+    storage: createWorkerOwnerStore("contacts", CONTACTS_SCHEMA_VERSION),
     channel: createCoordinatorChannelRuntime()
   });
   coordinatorContactsService = contactsService;
@@ -1872,21 +2312,22 @@ async function registerCoordinatorTasks(): Promise<void> {
     registerJungleBusP2pkhProvider({ registry: p2pkhRegistry, client: jungleBus });
   }
   const providerSettings = () => coordinatorMeta.p2pkhProviders ?? (coordinatorMeta.p2pkhProviders = defaultP2pkhProviders());
-  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, registry: p2pkhRegistry, getSelection: (network) => { const selection = providerSettings()[network]; return { syncProviderId: selection.syncProviderId, generation: providerSettings().generation }; }, isGenerationCurrent: (_network, generation) => generation === providerSettings().generation, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
+  const p2pkh = createP2pkhCoordinatorTasks({ keyspace, storage: createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION), registry: p2pkhRegistry, getSelection: (network) => { const selection = providerSettings()[network]; return { syncProviderId: selection.syncProviderId, generation: providerSettings().generation }; }, isGenerationCurrent: (_network, generation) => generation === providerSettings().generation, isNetworkEnabled: (network) => network === "main" || coordinatorMeta.p2pkhSettings?.includeTestnet === true });
   // The ordinary BSV confirmed pipeline has exactly one task.
   const assetHoldingsIntervalMs = coordinatorState.scheduleSettings.assetHoldingsIntervalMs;
   coordinatorState.taskRuntimes.set("p2pkh.transactions-sync", { id: "p2pkh.transactions-sync", pluginId: "p2pkh", state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, assertSessionFresh }) => { const result = await p2pkh.transactionsSync(signal); assertSessionFresh(); if (!result.cancelled) emitDataChanged("p2pkh", ["resource", "utxo", "history"]); } });
   const p2pkhProvider = {
     listResources: async (assetId: "bsv" | "bsvtest") => {
       if (!coordinatorState.activePublicKeyHex) return [];
-      const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: coordinatorState.activePublicKeyHex }));
-      return (await db.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest"));
+      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+      return (await repository.listResourcesByKey()).filter((resource) => assetId === (resource.network === "main" ? "bsv" : "bsvtest"));
     },
     listUtxos: async (filter?: { assetId?: "bsv" | "bsvtest"; ownerPublicKeyHex?: string }) => {
       const ownerPublicKeyHex = filter?.ownerPublicKeyHex ?? coordinatorState.activePublicKeyHex;
       if (!ownerPublicKeyHex) return [];
-      const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: ownerPublicKeyHex }));
-      const utxos = await db.listUtxos();
+      if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+      const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+      const utxos = await repository.listUtxos();
       return utxos.filter((utxo) => {
         if (filter?.assetId && filter.assetId !== (utxo.network === "main" ? "bsv" : "bsvtest")) return false;
         return true;
@@ -1895,8 +2336,8 @@ async function registerCoordinatorTasks(): Promise<void> {
     getGlobalSettings: () => ({ includeTestnet: coordinatorMeta.p2pkhSettings?.includeTestnet === true })
   };
   const vault = { status: () => coordinatorState.vaultStatus, } as VaultService;
-  const bsv21Task = createBsv21CoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
-  const stasTask = createStasCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const bsv21Task = createBsv21CoordinatorTask({ keyspace, store: createWorkerOwnerStore("token-bsv21", BSV21_SCHEMA_VERSION), p2pkh: p2pkhProvider, woc: createWocBsv21Service({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
+  const stasTask = createStasCoordinatorTask({ keyspace, store: createWorkerOwnerStore("token-stas", STAS_SCHEMA_VERSION), p2pkh: p2pkhProvider, woc: createWocStasService({ messageBus }), vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   const oneSatTask = createOrdinalsCoordinatorTask({ keyspace, p2pkh: p2pkhProvider, woc: createWoc1SatOrdinalsService({ messageBus }), wocService: woc, vault, notifier: { emit: (event) => publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: event.providerId, publicKeyHex: event.publicKeyHex ?? "", kinds: event.kinds }), subscribe: () => () => undefined } });
   coordinatorState.taskRuntimes.set(bsv21Task.id, { id: bsv21Task.id, pluginId: bsv21Task.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await bsv21Task.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
   coordinatorState.taskRuntimes.set(stasTask.id, { id: stasTask.id, pluginId: stasTask.pluginId, state: "idle", intervalMs: assetHoldingsIntervalMs, keyScope: () => coordinatorState.activePublicKeyHex ? { publicKeyHex: coordinatorState.activePublicKeyHex } : undefined, run: async ({ signal, reason, assertSessionFresh }) => { await stasTask.run({ signal, reason, reportProgress: () => undefined, assertSessionFresh }); } });
@@ -1962,7 +2403,11 @@ function handlePortDisconnect(clientId: string): void {
     if (request.clientId === clientId) { request.controller.abort(); storageRequests.delete(requestId); }
   }
   for (const [grantId, grant] of storageGrants) if (grant.clientId === clientId) storageGrants.delete(grantId);
-  storagePortCounts.delete(clientId);
+  for (const [grantId, grant] of ownerStorageGrants) if (grant.clientId === clientId) ownerStorageGrants.delete(grantId);
+  // storagePortCounts tracks third-party physical requests, not just live
+  // ports. A disconnected Provider may ignore AbortSignal; keep the count
+  // until executeStorageRequest's physical Promise settles so a reused
+  // clientId cannot overwrite the old admission accounting.
   // MSFile：断开端口的未决请求与 grant 全部失效。
   for (const [requestId, request] of msfileRequests) {
     if (request.clientId === clientId) { request.controller.abort(); msfileRequests.delete(requestId); }
@@ -1994,8 +2439,10 @@ async function abortNotDispatchedP2pkhSubmission(
   // not evidence that this submission is safe to release.
   if (request.kind !== "p2pkh.broadcast") return;
   try {
-    const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: request.ownerPublicKeyHex }));
-    await db.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason, requestKind: "initial" });
+    const keyspace = createWorkerKeyspace();
+    if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+    await repository.abortUnattemptedLocalSubmission?.({ submissionId: request.submissionId, reason, requestKind: "initial" });
     publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
   } catch {
     // Cleanup is best-effort here. The response is still explicitly marked
@@ -2017,7 +2464,7 @@ async function handleClientMessage(
   connectedPort.lastSeenAt = Date.now();
 
   if (request.kind === "hello") {
-    handleHello(clientId, request);
+    await handleHello(clientId, request);
     return;
   }
 
@@ -2066,12 +2513,13 @@ async function handleClientMessage(
   sendToPort(connectedPort.port, response, transfers);
 }
 
-function handleHello(
+async function handleHello(
   clientId: string,
-  request: { kind: "hello"; clientId: string; requestId: string }
-): void {
+  request: { kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: StorageBootstrapState }
+): Promise<void> {
   const connectedPort = connectedPorts.get(clientId);
   if (!connectedPort) return;
+  await startCoordinatorInitialization(request.storageBootstrapState);
 
   // 发送完整快照
   sendToPort(connectedPort.port, {
@@ -2099,7 +2547,9 @@ async function handleSubscribe(
     if (topic === "asset.data-changed") return [];
     if (topic === "storage.state") {
       const baselineRevision = storageRevision;
-      const summary = storageRuntime?.getProviderSummary().catch(() => null);
+      const summary = typeof storageRuntime?.getProviderSummary === "function"
+        ? storageRuntime.getProviderSummary().catch(() => null)
+        : Promise.resolve(null);
       // Subscription response must be atomic; use the last published state
       // when available, otherwise a locked/unconfigured baseline.
       const cached = lastStorageState ?? {
@@ -2206,72 +2656,299 @@ function handleActivity(clientId: string): void {
 let coordinatorRequestTail: Promise<void> = Promise.resolve();
 
 function isStorageRequest(request: CoordinatorClientRequest): boolean {
-  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort";
+  return request.kind === "storage.grant" || request.kind === "storage.control" || request.kind === "storage.data" || request.kind === "storage.cancel" || request.kind === "storage.session.abort" || request.kind === "storage.owner.bind" || request.kind === "storage.platform.bind" || request.kind === "storage.owner.data" || request.kind === "storage.platform.data" || request.kind === "storage.owner.delete";
+}
+
+function storageErrorResponse(requestId: string, error: unknown): CoordinatorResponse {
+  const code = error && typeof error === "object" && "code" in error
+    ? (error as { code?: unknown }).code
+    : undefined;
+  return {
+    requestId,
+    sessionEpoch: coordinatorState.sessionEpoch,
+    ack: {
+      status: "error",
+      message: error instanceof Error ? error.message : String(error),
+      ...(typeof code === "string" ? { code: code as never } : {})
+    }
+  };
+}
+
+/** 首次 S3 配置必须先形成冷启动 Profile，再探测并绑定统一桶。 */
+async function prepareInitialS3Storage(config: import("@keymaster/contracts").StorageProviderConfigDraft): Promise<import("@keymaster/contracts").StorageSelectedResult> {
+  if (platformRootStore) return { status: "selected", backend: "s3", requiresRuntimeBootstrap: true };
+  const password = config.profilePassword;
+  if (!password || password.length < 8) throw Object.assign(new Error("Storage Profile password is required"), { code: "storage_identity_required" });
+  const normalized = normalizeProviderConfig(config);
+  const envelope = await encryptStorageProfile(normalized, password);
+  storageBootstrapState = {
+    selectedBackend: "s3",
+    selectedProfileId: `${normalized.providerId}:${(normalized.connection as { bucket: string }).bucket}`,
+    encryptedStorageProfileEnvelope: envelope
+  };
+  storageProfilePassword = password;
+  await bootstrapPlatformStorage(password);
+  await setStorageProfilePassword(password);
+  await runStorageRecoveryOrchestrator();
+  return { status: "selected", backend: "s3", requiresRuntimeBootstrap: true };
 }
 
 async function executeStorageControl(request: Extract<CoordinatorClientRequest, { kind: "storage.control" }>): Promise<CoordinatorResponse> {
-  const service = await ensureStorageRuntime();
   const control = request.control;
-  if (control.type === "status") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: service.status() };
-  if (control.type === "summary") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderSummary() };
-  if (control.type === "connection") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderConnection() };
-  if (control.type === "capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: service.getConditionalCapabilities() };
+  if (control.type === "status") {
+    if (storageStartupFailure) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage startup failed", code: "storage_unavailable" } };
+    }
+    if (storageHealthController.status() !== "ready" && !storageStartupFailure) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
+    }
+    const service = await ensureStorageRuntime().catch(() => undefined);
+    if (!service) {
+      if (storageStartupFailure) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage startup failed", code: "storage_unavailable" } };
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
+    }
+    const runtimeStatus = service.status();
+    // 这里报告的是“平台存储是否可启动”，不是 S3 Profile 是否已解锁。
+    // Provider 已配置但 Profile 未解锁时，平台 keys/ 与业务 K-V 仍可用，
+    // 设置页应当先启动，再让用户输入独立 Profile 密码。
+    const status = storageStartupFailure ? "degraded" : platformStorageReady ? "ready" : runtimeStatus;
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: status };
+  }
+  if (control.type === "retry") {
+    try {
+      if (!platformRootStore) {
+        await bootstrapPlatformStorage(storageProfilePassword);
+      } else if (platformBucketProvider) {
+        await probeStorageAndRecover();
+      } else {
+        throw storageUnavailableError("Storage provider is unavailable");
+      }
+      // 初次 bootstrap 失败时，原初始化 Promise 已经结束；恢复成功后
+      // 重新执行同一段 Vault metadata bootstrap，不绕过 Storage-first 门禁。
+      if (platformRootStore && storageHealthController.status() !== "ready") {
+        await runStorageRecoveryOrchestrator();
+      }
+      storageStartupFailure = false;
+      platformStorageReady = true;
+      emitStorageState();
+    } catch (error) {
+      const currentHealth = storageHealthController.status();
+      storageStartupFailure = currentHealth !== "unselected" && currentHealth !== "authentication";
+      if (storageStartupFailure) storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
+      emitStorageState();
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: storageHealthController.status() };
+  }
+  if (control.type === "summary") {
+    const service = await ensureStorageRuntime();
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderSummary() };
+  }
+  if (control.type === "connection") {
+    const service = await ensureStorageRuntime();
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.getProviderConnection() };
+  }
+  if (control.type === "unlock-profile") {
+    try {
+      storageProfilePassword = control.password;
+      if (!platformRootStore) await bootstrapPlatformStorage(control.password);
+      await setStorageProfilePassword(control.password);
+      await runStorageRecoveryOrchestrator();
+      const service = await ensureStorageRuntime();
+      const result = await service.unlockStorageProfile(control.password);
+      if (result.ok) emitStorageState();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } catch {
+      storageHealthController.setStatus("authentication", "Storage Profile password is invalid");
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: false, providerId: "aws-s3", latencyMs: 0, diagnostic: "authentication" } };
+    }
+  }
+  if (control.type === "select-opfs") {
+    try {
+      if (platformRootStore && platformBucketProvider?.provider !== "opfs") throw new Error("The active bucket cannot be switched until the next startup");
+      storageBootstrapState = { selectedBackend: "opfs", selectedProfileId: "opfs" };
+      if (!platformRootStore) await bootstrapPlatformStorage();
+      await runStorageRecoveryOrchestrator();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: true, providerId: "s3-compatible", latencyMs: 0 } };
+    } catch (error) {
+      storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
+      emitStorageState();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: false, providerId: "s3-compatible", latencyMs: 0, diagnostic: "provider" } };
+    }
+  }
+  if (control.type === "import-profile") {
+    try {
+      if (platformRootStore) throw new Error("Storage Profile import requires a cold start so the selected bucket can be rebound");
+      storageBootstrapState = { selectedBackend: "s3", selectedProfileId: "imported", encryptedStorageProfileEnvelope: structuredClone(control.envelope) };
+      storageProfilePassword = control.password;
+      if (!platformRootStore) await bootstrapPlatformStorage(control.password);
+      await setStorageProfilePassword(control.password);
+      await runStorageRecoveryOrchestrator();
+      const service = await ensureStorageRuntime();
+      const result = await service.unlockStorageProfile(control.password);
+      if (result.ok) emitStorageState();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
+    } catch (error) {
+      storageHealthController.setStatus("authentication", error instanceof Error ? error.message : String(error));
+      emitStorageState();
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { ok: false, providerId: "aws-s3", latencyMs: 0, diagnostic: "authentication" } };
+    }
+  }
+  if (control.type === "activate" && !platformRootStore) {
+    const selected = await prepareInitialS3Storage(control.config);
+    // 首次 S3 激活已经完成 Root/Runtime bootstrap。运行期
+    // activateProvider 会把同一个 bucket 误判为“已绑定后禁止切换”，
+    // 因此这里必须以专用 selected 结果结束。
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: selected };
+  }
+  const service = await ensureStorageRuntime();
+  if (control.type === "capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: typeof service.getConditionalCapabilities === "function" ? service.getConditionalCapabilities() : null };
   if (control.type === "cancel-probe") { service.cancelProbe(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
   if (control.type === "probe") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.probeProvider(control.config) };
   const current = (await service.getProviderSummary())?.generation ?? null;
   if (control.type === "activate" && control.expectedProviderGeneration !== current) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Storage provider generation changed" } };
   if ((control.type === "clear" || control.type === "reset") && control.expectedProviderGeneration !== current) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Storage provider generation changed" } };
-  if (control.type === "activate") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.activateProvider(control.config) };
+  if (control.type === "activate") {
+    if (control.config.profilePassword) await setStorageProfilePassword(control.config.profilePassword);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.activateProvider(control.config) };
+  }
   if (control.type === "clear") { await service.clearProviderConfig(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
   if (control.type === "reset") { await service.resetStorage(); return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } }; }
   if (control.type === "probe-capabilities") return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: await service.probeConditionalCapabilities() };
   return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown storage control" } };
 }
 
-async function executeStorageData(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
-  const capturedSessionEpoch = coordinatorState.sessionEpoch;
-  const service = await ensureStorageRuntime();
-  const data = request.data;
-  const ctx = (await resolveStorageGrant(data.grantId, actualClientId)).context;
-  const initialSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
-  const capturedProviderGeneration = initialSummary?.generation ?? null;
-  const signal = controller.signal;
-  let value: unknown;
-  switch (data.type) {
-    case "list": value = await service.list(ctx, { ...data.input, signal }); break;
-    case "create-directory": value = await service.createDirectory(ctx, { ...data.input, signal }); break;
-    case "delete-directory": value = await service.deleteDirectory(ctx, { ...data.input, signal }); break;
-    case "put": value = await service.put(ctx, { ...data.input, signal }); break;
-    case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
-    case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
-    case "begin-upload": value = await service.beginUpload(ctx, { ...data.input, signal }); break;
-    case "upload-part": value = await service.uploadPart(ctx, { ...data.input, signal }); break;
-    case "complete-upload": value = await service.completeUpload(ctx, { ...data.input, signal }); break;
-    case "abort-upload": value = await service.abortUpload(ctx, { ...data.input, signal }); break;
-  }
-  // A provider may ignore AbortSignal and resolve after lock/replacement. The
-  // result is never committed or returned across a session/generation fence.
-  if (controller.signal.aborted || capturedSessionEpoch !== coordinatorState.sessionEpoch) {
-    const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
-  }
-  const finalSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
-  if ((finalSummary?.generation ?? null) !== capturedProviderGeneration) {
-    const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
-  }
-  await resolveStorageGrant(data.grantId, actualClientId);
-  return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+async function resolvePlatformStorageGrant(grantId: string, actualClientId: string): Promise<StoragePlatformGrant & { clientId: string }> {
+  const grant = platformStorageGrants.get(grantId);
+  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) throw new Error("Platform storage grant is invalid");
+  if (!platformRootStore || grant.bucketId !== platformRootStore.bucket.bucketId || grant.bucketGeneration !== platformRootStore.bucket.bucketGeneration) throw new Error("Platform storage bucket generation changed");
+  return grant;
 }
 
-async function resolveStorageGrant(grantId: string, actualClientId: string): Promise<{ context: import("@keymaster/contracts").StorageAppContext; connectSessionId: string }> {
+async function executePlatformStorageData(data: CoordinatorPlatformStorageData, actualClientId: string): Promise<unknown> {
+  assertStorageDataAvailable();
+  const root = platformRootStore;
+  const rootToken = platformRootToken;
+  if (!root || !rootToken) throw new Error("Platform storage has not been bootstrapped");
+  const grant = await resolvePlatformStorageGrant(data.platformGrantId, actualClientId);
+  const store = await root.openPlatformStore({ applicationStorageId: grant.applicationStorageId, schemaVersion: grant.schemaVersion });
+  try {
+    let value: unknown;
+    switch (data.type) {
+      case "platform.get": value = await store.get(data.key, { partition: data.partition }); break;
+      case "platform.list": value = await store.list(data.input); break;
+      case "platform.put": value = await store.put(data.key, data.value, data.condition); break;
+      case "platform.delete": await store.delete(data.key, data.condition); value = undefined; break;
+      case "platform.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
+    }
+    if (platformRootStore !== root || platformRootToken !== rootToken) throw storageUnavailableError("Platform storage binding became stale");
+    assertStorageDataAvailable();
+    return value;
+  } finally {
+    store.close();
+  }
+}
+
+async function resolveOwnerStorageGrant(grantId: string, actualClientId: string): Promise<StorageOwnerGrant> {
+  const grant = ownerStorageGrants.get(grantId);
+  if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch || grant.ownerPublicKeyHex !== coordinatorState.activePublicKeyHex?.toLowerCase()) throw new Error("Owner storage grant is invalid");
+  assertOwnerStorageNotFenced(grant.ownerPublicKeyHex);
+  if (!platformRootStore || grant.bucketId !== platformRootStore.bucket.bucketId || grant.bucketGeneration !== platformRootStore.bucket.bucketGeneration) throw new Error("Owner storage bucket generation changed");
+  await platformRootStore.assertOwnerStorageCurrent({ ownerPublicKeyHex: grant.ownerPublicKeyHex, generation: grant.ownerStorageGeneration });
+  return grant;
+}
+
+async function executeOwnerStorageData(data: CoordinatorOwnerStorageData, actualClientId: string): Promise<unknown> {
+  assertStorageDataAvailable();
+  const grant = await resolveOwnerStorageGrant(data.storageGrantId, actualClientId);
+  const root = platformRootStore;
+  const rootToken = platformRootToken;
+  const generation = coordinatorState.keyspaceGeneration;
+  if (!root || !rootToken) throw new Error("Platform storage has not been bootstrapped");
+  const release = beginOwnerStorageRequest(grant.ownerPublicKeyHex);
+  let store: KeyValueStore | undefined;
+  try {
+    store = await root.openKeyValueStore({
+      ownerPublicKeyHex: grant.ownerPublicKeyHex,
+      applicationStorageId: grant.applicationStorageId,
+      schemaVersion: 1,
+      keyspaceGeneration: generation
+    });
+    let value: unknown;
+    switch (data.type) {
+      case "owner.get": value = await store.get(data.key, { partition: data.partition }); break;
+      case "owner.list": value = await store.list(data.input); break;
+      case "owner.put": value = await store.put(data.key, data.value, data.condition); break;
+      case "owner.delete": await store.delete(data.key, data.condition); value = undefined; break;
+      case "owner.commit": value = await store.commit({ partition: data.partition, ifRevision: data.ifRevision, operations: data.operations }); break;
+    }
+    assertOwnerStorageBindingFresh(grant.ownerPublicKeyHex, generation, rootToken);
+    return value;
+  } finally {
+    store?.close();
+    release();
+  }
+}
+
+async function executeStorageData(request: Extract<CoordinatorClientRequest, { kind: "storage.data" }>, controller: AbortController, actualClientId: string): Promise<CoordinatorResponse> {
+  assertStorageDataAvailable();
+  const capturedSessionEpoch = coordinatorState.sessionEpoch;
+  const service = await ensureStorageRuntime();
+  if (!("grantId" in request.data)) throw new Error("Storage grant is required for file operations");
+  const data = request.data;
+  const resolvedGrant = await resolveStorageGrant(data.grantId, actualClientId);
+  const ctx = resolvedGrant.context;
+  const root = platformRootStore;
+  if (!root) throw storageUnavailableError("Platform storage root is unavailable");
+  // storage.data 与 owner KV 共用同一条 owner tracker。Provider 即使忽略
+  // AbortSignal，删除事务也会等待这个 finally 释放，而不是只等待 KV。
+  const releaseOwnerRequest = beginOwnerStorageRequest(ctx.ownerPublicKeyHex);
+  try {
+    const initialSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
+    const capturedProviderGeneration = initialSummary?.generation ?? null;
+    const signal = controller.signal;
+    let value: unknown;
+    switch (data.type) {
+      case "list": value = await service.list(ctx, { ...data.input, signal }); break;
+      case "create-directory": value = await service.createDirectory(ctx, { ...data.input, signal }); break;
+      case "delete-directory": value = await service.deleteDirectory(ctx, { ...data.input, signal }); break;
+      case "put": value = await service.put(ctx, { ...data.input, signal }); break;
+      case "get-range": value = await service.getRange(ctx, { ...data.input, signal }); break;
+      case "delete": value = await service.delete(ctx, { ...data.input, signal }); break;
+      case "begin-upload": value = await service.beginUpload(ctx, { ...data.input, signal }); break;
+      case "upload-part": value = await service.uploadPart(ctx, { ...data.input, signal }); break;
+      case "complete-upload": value = await service.completeUpload(ctx, { ...data.input, signal }); break;
+      case "abort-upload": value = await service.abortUpload(ctx, { ...data.input, signal }); break;
+    }
+    // A provider may ignore AbortSignal and resolve after lock/replacement. The
+    // result is never committed or returned across a session/generation fence.
+    if (controller.signal.aborted || capturedSessionEpoch !== coordinatorState.sessionEpoch) {
+      const error = new Error("Storage request became stale during owner transition") as Error & { code?: string };
+      error.code = "storage_unavailable";
+      throw error;
+    }
+    const finalSummary = typeof service.getProviderSummary === "function" ? await service.getProviderSummary().catch(() => null) : null;
+    if ((finalSummary?.generation ?? null) !== capturedProviderGeneration) {
+      const error = new Error("storage_unavailable") as Error & { code?: string }; error.code = "storage_unavailable"; throw error;
+    }
+    await root.assertOwnerStorageCurrent({ ownerPublicKeyHex: ctx.ownerPublicKeyHex, generation: resolvedGrant.ownerStorageGeneration });
+    await resolveStorageGrant(data.grantId, actualClientId);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+  } finally {
+    releaseOwnerRequest();
+  }
+}
+
+async function resolveStorageGrant(grantId: string, actualClientId: string): Promise<{ context: import("@keymaster/contracts").OwnerAppStorageGrant; ownerStorageGeneration: number; connectSessionId: string }> {
   const grant = storageGrants.get(grantId);
   if (!grant || grant.clientId !== actualClientId || grant.sessionEpoch !== coordinatorState.sessionEpoch) {
     const error = new Error("Storage grant is invalid") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
   }
   const authoritative = await readProtocolConnectSession(grant.context.connectSessionId);
-  if (!authoritative || authoritative.origin !== grant.context.transportOrigin || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity)) {
+  if (!authoritative || authoritative.origin !== grant.context.transportOrigin || authoritative.ownerPublicKeyHex !== grant.context.ownerPublicKeyHex || JSON.stringify(authoritative.appIdentity) !== JSON.stringify(grant.context.appIdentity) || grant.context.sessionEpoch !== coordinatorState.sessionEpoch || !platformRootStore || grant.context.bucketId !== platformRootStore.bucket.bucketId || grant.context.bucketGeneration !== platformRootStore.bucket.bucketGeneration || coordinatorState.activePublicKeyHex?.toLowerCase() !== grant.context.ownerPublicKeyHex) {
     const error = new Error("Storage session is invalid or revoked") as Error & { code?: string }; error.code = "storage_identity_required"; throw error;
   }
-  return { context: grant.context, connectSessionId: grant.context.connectSessionId };
+  await platformRootStore.assertOwnerStorageCurrent({ ownerPublicKeyHex: grant.context.ownerPublicKeyHex, generation: grant.ownerStorageGeneration });
+  return { context: grant.context, ownerStorageGeneration: grant.ownerStorageGeneration, connectSessionId: grant.context.connectSessionId };
 }
 
 async function abortStorageSession(connectSessionId: string): Promise<void> {
@@ -2283,12 +2960,18 @@ async function abortStorageSession(connectSessionId: string): Promise<void> {
   await service.abortSession(connectSessionId);
 }
 
-async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" }>, actualClientId: string): Promise<CoordinatorResponse> {
+async function executeStorageRequest(request: Extract<CoordinatorClientRequest, { kind: "storage.grant" | "storage.control" | "storage.data" | "storage.cancel" | "storage.session.abort" | "storage.owner.bind" | "storage.platform.bind" | "storage.owner.data" | "storage.platform.data" | "storage.owner.delete" }>, actualClientId: string): Promise<CoordinatorResponse> {
   if (request.kind === "storage.grant") {
     const session = await readProtocolConnectSession(request.connectSessionId);
     if (!session) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage session is invalid or revoked", code: "storage_identity_required" } };
+    const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
+    if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || session.ownerPublicKeyHex.toLowerCase() !== ownerPublicKeyHex || !platformRootStore) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Storage requires an unlocked active owner", code: "storage_identity_required" } };
+    }
+    const applicationStorageId = deriveThirdPartyApplicationStorageId(session.appIdentity.publisherPublicKeyHex, session.appIdentity.appId);
+    const ownerStorageGeneration = await platformRootStore.getOwnerStorageGeneration({ ownerPublicKeyHex });
     const grantId = `grant-${crypto.randomUUID()}`;
-    storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity }, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
+    storageGrants.set(grantId, { context: { connectSessionId: session.sessionId, transportOrigin: session.origin, appIdentity: session.appIdentity, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, applicationStorageId, sessionEpoch: coordinatorState.sessionEpoch }, ownerStorageGeneration, clientId: actualClientId, sessionEpoch: coordinatorState.sessionEpoch });
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grantId };
   }
   if (request.kind === "storage.cancel") {
@@ -2300,11 +2983,86 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
     await abortStorageSession(request.connectSessionId);
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" } };
   }
+  if (request.kind === "storage.platform.bind") {
+    const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId];
+    // Host 的系统日志/插件配置句柄由 bootstrap 使用内部 pluginId
+    // "runtime" 申请，但真实平台目录分别是 logs/settings。
+    const allowedBootstrapNamespace = request.pluginId === "runtime" && (request.declaration.applicationStorageId === "logs" || request.declaration.applicationStorageId === "settings");
+    const allowedVaultNamespace = request.pluginId === "vault" && ["coordinator", "protocol", "storage", "session"].includes(request.declaration.applicationStorageId);
+    if ((!expected || expected.scope !== "platform" || request.declaration.scope !== expected.scope || request.declaration.applicationStorageId !== expected.applicationStorageId || request.declaration.schemaVersion !== expected.schemaVersion) && !allowedBootstrapNamespace && !allowedVaultNamespace) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Platform storage declaration is not authorized", code: "storage_forbidden" } };
+    }
+    if (!platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Platform storage requires a ready root", code: "storage_unavailable" } };
+    const grant: StoragePlatformGrant & { clientId: string } = {
+      platformGrantId: `platform-${crypto.randomUUID()}`,
+      bucketId: platformRootStore.bucket.bucketId,
+      bucketGeneration: platformRootStore.bucket.bucketGeneration,
+      applicationStorageId: request.declaration.applicationStorageId,
+      schemaVersion: request.declaration.schemaVersion,
+      sessionEpoch: coordinatorState.sessionEpoch,
+      clientId: actualClientId
+    };
+    platformStorageGrants.set(grant.platformGrantId, grant);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grant };
+  }
+  if (request.kind === "storage.owner.bind") {
+    const expected = SYSTEM_STORAGE_DECLARATIONS[request.pluginId];
+    if (!expected || expected.scope !== "key" || request.declaration.scope !== expected.scope || request.declaration.applicationStorageId !== expected.applicationStorageId || request.declaration.schemaVersion !== expected.schemaVersion) {
+      return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage declaration is not authorized", code: "storage_forbidden" } };
+    }
+    const ownerPublicKeyHex = coordinatorState.activePublicKeyHex?.toLowerCase();
+    if (coordinatorState.vaultStatus !== "unlocked" || !ownerPublicKeyHex || !platformRootStore) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "Owner storage requires an unlocked active key", code: "storage_unavailable" } };
+    const ownerStorageGeneration = await platformRootStore.getOwnerStorageGeneration({ ownerPublicKeyHex });
+    const grant: StorageOwnerGrant & { clientId: string } = { storageGrantId: `owner-${crypto.randomUUID()}`, bucketId: platformRootStore.bucket.bucketId, bucketGeneration: platformRootStore.bucket.bucketGeneration, ownerPublicKeyHex, applicationStorageId: expected.applicationStorageId, ownerStorageGeneration, sessionEpoch: coordinatorState.sessionEpoch, clientId: actualClientId };
+    ownerStorageGrants.set(grant.storageGrantId, grant);
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: grant };
+  }
+  if (request.kind === "storage.owner.delete") {
+    if (!platformRootStore) throw new Error("Platform storage has not been bootstrapped");
+    try {
+      await platformRootStore.deleteOwnerStorage({ ownerPublicKeyHex: request.ownerPublicKeyHex });
+    } catch (error) {
+      markStorageIoFailure(error);
+      throw error;
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: true };
+  }
+  if (request.kind === "storage.owner.data") {
+    let value: unknown;
+    try {
+      value = await withStorageDataSlot(actualClientId, () => executeOwnerStorageData(request.data, actualClientId), undefined);
+    } catch (error) {
+      markStorageIoFailure(error);
+      throw error;
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+  }
+  if (request.kind === "storage.platform.data") {
+    let value: unknown;
+    try {
+      value = await withStorageDataSlot(actualClientId, () => executePlatformStorageData(request.data, actualClientId), undefined);
+    } catch (error) {
+      markStorageIoFailure(error);
+      throw error;
+    }
+    return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: value };
+  }
   const controller = new AbortController();
+  const requestKey = storageRequestKey(actualClientId, request.requestId);
+  let physicalStarted = false;
+  let physicalAccountingReleased = false;
+  const releasePhysicalAccounting = (): void => {
+    if (physicalAccountingReleased) return;
+    physicalAccountingReleased = true;
+    // A client may reuse a requestId after cancellation. Do not let the old
+    // physical operation delete the newer request's controller entry.
+    if (storageRequests.get(requestKey)?.controller === controller) storageRequests.delete(requestKey);
+    if (request.kind === "storage.data") releaseStoragePortSlot(actualClientId);
+  };
   if (request.kind === "storage.data") {
     if (!reserveStoragePortSlot(actualClientId)) return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: "storage_limit_exceeded", code: "storage_limit_exceeded" } };
   }
-  storageRequests.set(storageRequestKey(actualClientId, request.requestId), { controller, clientId: actualClientId, connectSessionId: request.kind === "storage.data" ? storageGrants.get(request.data.grantId)?.context.connectSessionId : undefined });
+  storageRequests.set(requestKey, { controller, clientId: actualClientId, connectSessionId: request.kind === "storage.data" && "grantId" in request.data ? storageGrants.get(request.data.grantId)?.context.connectSessionId : undefined });
   try {
     if (request.kind === "storage.control") {
       let result!: CoordinatorResponse;
@@ -2313,14 +3071,30 @@ async function executeStorageRequest(request: Extract<CoordinatorClientRequest, 
       result = await run;
       return result;
     }
-    return await withStorageDataSlot(actualClientId, () => executeStorageData(request, controller, actualClientId), controller.signal);
+    return await withStorageDataSlot(
+      actualClientId,
+      () => executeStorageData(request, controller, actualClientId),
+      controller.signal,
+      {
+        onPhysicalStart: () => { physicalStarted = true; },
+        // The RPC may already have returned a cancellation error here. Keep
+        // the admission count and request binding until the real Provider
+        // Promise settles, otherwise repeated cancel calls bypass the limit.
+        onPhysicalSettled: releasePhysicalAccounting
+      }
+    );
   } catch (err) {
+    markStorageIoFailure(err);
     const code = (err as { code?: string })?.code;
     return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: err instanceof Error ? err.message : String(err), ...(typeof code === "string" ? { code: code as never } : {}) } };
   } finally {
-    storageRequests.delete(storageRequestKey(actualClientId, request.requestId));
     if (request.kind === "storage.data") {
-      releaseStoragePortSlot(actualClientId);
+      // Queued/early-cancelled calls never acquired a physical slot, so their
+      // admission reservation belongs to the RPC lifecycle. Once physical
+      // execution starts, releasePhysicalAccounting owns it until settle.
+      if (!physicalStarted) releasePhysicalAccounting();
+    } else if (storageRequests.get(requestKey)?.controller === controller) {
+      storageRequests.delete(requestKey);
     }
   }
 }
@@ -4225,7 +4999,7 @@ async function executeMsfileControlNow(request: Extract<CoordinatorClientRequest
     case "approval.resolve": await service.resolveApproval(control.approvalId, control.decision); value = null; break;
     default: return { requestId: request.requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Unknown MSFile control" } };
   }
-  // DB commit 后复核：请求 epoch、Vault、runtime 身份任一变化都报告为
+  // K-V commit 后复核：请求 epoch、Vault、runtime 身份任一变化都报告为
   // stale-epoch（写入已提交、不可撤销，与 Storage 数据面语义一致）。
   if (
     requestEpoch !== coordinatorState.sessionEpoch ||
@@ -4550,6 +5324,7 @@ async function executeProcessRequest(
         };
     }
   } catch (err) {
+    markStorageIoFailure(err);
     const code = err && typeof err === "object" && typeof (err as { code?: unknown }).code === "string"
       ? (err as { code: string }).code
       : undefined;
@@ -4566,7 +5341,15 @@ async function executeProcessRequest(
 }
 
 async function processRequest(request: CoordinatorClientRequest, actualClientId = (request as { clientId?: string }).clientId ?? "unknown"): Promise<CoordinatorResponse> {
-  if (isStorageRequest(request)) return executeStorageRequest(request as never, actualClientId);
+  if (isStorageRequest(request)) {
+    // Storage 分支有多个异步边界（Provider、K-V、Connect session）。
+    // 无论哪一层抛错都必须回到 RPC 响应，并先由同一个入口分类健康状态；
+    // 不能让 MessagePort 等待到超时。
+    return executeStorageRequest(request as never, actualClientId).catch((error) => {
+      markStorageIoFailure(error);
+      return storageErrorResponse("requestId" in request ? request.requestId : generateRequestId(), error);
+    });
+  }
   if (isMsfileRequest(request)) {
     if (request.kind === "window-p2p.executor.acquire" || request.kind === "window-p2p.executor.release" || request.kind === "window-p2p.executor.spike.transfer" || request.kind === "window-p2p.executor.identity.sign-noise" || request.kind === "window-p2p.executor.identity.sign-peer-record") {
     return executeWindowP2pExecutorRequest(request as WindowP2pExecutorRequest, actualClientId);
@@ -4611,7 +5394,7 @@ async function handleUnlock(
   let privateKey: Uint8Array | undefined;
   let privateKeyTransferred = false;
   try {
-    // 1. 从 DB 读取 vault_meta
+    // 1. 从 K-V 读取 vault_meta
     const meta = await getVaultMeta();
     if (!meta) {
       return {
@@ -4623,6 +5406,7 @@ async function handleUnlock(
 
     // 2. 验证密码
     const passwordKey = await deriveKey(request.password, decodePersisted(meta.saltB64));
+    const vaultLocalSecretKey = await deriveVaultLocalSecretKey(request.password, decodePersisted(meta.saltB64));
     const passwordValid = await verifyVerifier(passwordKey, { salt: decodePersisted(meta.verifierSaltB64), iv: decodePersisted(meta.verifierIvB64), ciphertext: decodePersisted(meta.verifierCipherB64), version: meta.cryptoVersion });
     if (!passwordValid) {
       return {
@@ -4632,15 +5416,12 @@ async function handleUnlock(
       };
     }
 
-    const storageSecretKey = await deriveStorageSecretKey(request.password, decodePersisted(meta.saltB64));
-    await recoverStorageRotation(storageSecretKey, passwordKey);
-
     // 3. 获取 active key。旧版本允许创建“有密码但没有 key”的空 Vault；
     //    这种 Vault 已经是初始化状态，应清掉孤立的密码元数据，
     //    而不是把用户永久卡在 "No active key"。
-    const activeKey = request.publicKeyHex ? await vaultDb.getKey(request.publicKeyHex) : await getActiveKey();
+    const activeKey = request.publicKeyHex ? await vaultKeyRepository.getKey(request.publicKeyHex) : await getActiveKey();
     if (!activeKey) {
-      await vaultDb.deleteMeta();
+      await vaultKeyRepository.deleteMeta();
       await performGlobalLock("recover-empty");
       return {
         requestId,
@@ -4652,7 +5433,7 @@ async function handleUnlock(
 
     // 4. 统一进入 unlocked 状态
     coordinatorState.password = request.password;
-    await enterUnlockedState(passwordKey, storageSecretKey, activeKey.publicKeyHex, privateKey, "unlock");
+    await enterUnlockedState(passwordKey, vaultLocalSecretKey, activeKey.publicKeyHex, privateKey, "unlock");
     privateKeyTransferred = true;
 
     return {
@@ -4661,6 +5442,7 @@ async function handleUnlock(
       ack: { status: "accepted" },
     };
   } catch (err) {
+    markStorageIoFailure(err);
     // unlock 失败，回到 locked
     coordinatorState.vaultStatus = "locked";
     coordinatorState.activePublicKeyHex = undefined;
@@ -4668,13 +5450,9 @@ async function handleUnlock(
     privateKeyTransferred = false;
     coordinatorState.passwordKey = undefined;
     coordinatorState.password = undefined;
-    coordinatorState.storageSecretKey = undefined;
+    coordinatorState.vaultLocalSecretKey = undefined;
 
-    return {
-      requestId,
-      sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "error", message: err instanceof Error ? err.message : String(err) },
-    };
+    return storageErrorResponse(requestId, err);
   } finally {
     if (privateKey && !privateKeyTransferred) privateKey.fill(0);
   }
@@ -4685,15 +5463,168 @@ async function handleVaultOperation(requestId: string, request: { kind: "vault.o
     const result = await executeVaultOperation(request.operation);
     return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: result };
   } catch (err) {
-    return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "error", message: err instanceof Error ? err.message : String(err) } };
+    markStorageIoFailure(err);
+    return storageErrorResponse(requestId, err);
   }
+}
+
+function fenceOwnerStorage(publicKeyHex: string): void {
+  const owner = publicKeyHex.toLowerCase();
+  if (ownerStorageFences.has(owner)) return;
+
+  // 先推进两个世代，再撤销所有 grant；已经拿到 wrapper 的旧请求会在
+  // operation 完成后被最终绑定检查拒绝，新的请求则从 grant/fence 入口拒绝。
+  ownerStorageFences.set(owner, coordinatorState.keyspaceGeneration);
+  coordinatorState.keyspaceGeneration += 1;
+  coordinatorState.sessionEpoch = generateEpoch();
+
+  const ownerConnectSessionIds = new Set(
+    [...storageGrants.values()]
+      .filter((grant) => grant.context.ownerPublicKeyHex.toLowerCase() === owner)
+      .map((grant) => grant.context.connectSessionId)
+  );
+  for (const [requestId, pending] of storageRequests) {
+    if (pending.connectSessionId && ownerConnectSessionIds.has(pending.connectSessionId)) {
+      pending.controller.abort();
+      storageRequests.delete(requestId);
+    }
+  }
+  for (const [grantId, grant] of storageGrants) {
+    if (grant.context.ownerPublicKeyHex.toLowerCase() === owner) storageGrants.delete(grantId);
+  }
+  for (const [grantId, grant] of ownerStorageGrants) {
+    if (grant.ownerPublicKeyHex.toLowerCase() === owner) ownerStorageGrants.delete(grantId);
+  }
+  // 平台 grant 同样绑定当前 session epoch；统一撤销可避免锁定/切 Key
+  // 期间已经拿到的 platform handle 继续写入新的 Root。
+  platformStorageGrants.clear();
+}
+
+function fenceOwnerForKeyDeletion(publicKeyHex: string): void {
+  fenceOwnerStorage(publicKeyHex);
+}
+
+function clearDeletedActiveOwner(publicKeyHex: string): void {
+  if (coordinatorState.activePublicKeyHex?.toLowerCase() !== publicKeyHex.toLowerCase()) return;
+  dropActivePrivateKey();
+  coordinatorState.activePublicKeyHex = undefined;
+}
+
+/**
+ * 崩溃可恢复的联合删除：Journal 先落在 keys/，每个阶段都幂等。
+ * 重启后即使上一次停在任意 await 之间，也会从该阶段继续到收尾。
+ */
+async function executeKeyDeletionTransaction(publicKeyHexInput: string, confirmationLabel: string, existing?: KeyDeletionJournal): Promise<true> {
+  const publicKeyHex = publicKeyHexInput.toLowerCase();
+  const journal: KeyDeletionJournal = existing ?? { publicKeyHex, confirmationLabel, phase: "prepared" };
+  if (!existing) await writeKeyDeletionJournal(journal);
+
+  if (journal.phase !== "key-deleted" && journal.phase !== "vault-finalized" && journal.phase !== "complete") {
+    fenceOwnerForKeyDeletion(publicKeyHex);
+    if (journal.phase === "prepared") {
+      journal.phase = "owner-fenced";
+      await writeKeyDeletionJournal(journal);
+    }
+  }
+
+  if (journal.phase === "owner-fenced") {
+    // activePublicKeyHex 仍保留到这里完成，保证动态 keyScope 的任务也能
+    // 被准确归属；此后清空 active，防止 owner-delete 阶段再有新业务请求。
+    await cancelTaskRuntimesByKey(publicKeyHex);
+    await drainOwnerStorageRequests(publicKeyHex);
+    clearDeletedActiveOwner(publicKeyHex);
+    journal.phase = "requests-drained";
+    await writeKeyDeletionJournal(journal);
+  }
+
+  if (journal.phase === "requests-drained") {
+    const root = platformRootStore;
+    if (!root) throw new Error("Storage has not been bootstrapped");
+    try {
+      await root.deleteOwnerStorage({ ownerPublicKeyHex: publicKeyHex });
+    } catch (error) {
+      markStorageIoFailure(error);
+      throw error;
+    }
+    journal.phase = "owner-deleted";
+    await writeKeyDeletionJournal(journal);
+  }
+
+  if (journal.phase === "owner-deleted") {
+    try {
+      await vaultKeyRepository.deleteKeyAndSidecars(publicKeyHex);
+    } catch (error) {
+      markStorageIoFailure(error);
+      throw error;
+    }
+    journal.phase = "key-deleted";
+    await writeKeyDeletionJournal(journal);
+  }
+
+  if (journal.phase === "key-deleted") {
+    clearDeletedActiveOwner(publicKeyHex);
+    await repairSelectedAfterDelete(publicKeyHex);
+    const remaining = await vaultKeyRepository.listKeys();
+    if (remaining.length === 0) {
+      // 最后一把 Key 删除后必须原子收敛到 uninitialized：先删 Vault meta，
+      // 再让全局 lock 发布 uninitialized，而不是保留一个空 Vault meta。
+      await vaultKeyRepository.deleteMeta();
+      await performGlobalLock("empty-vault");
+    } else {
+      publishSessionState("delete-active-key");
+    }
+    journal.phase = "vault-finalized";
+    await writeKeyDeletionJournal(journal);
+  }
+
+  if (journal.phase === "vault-finalized") {
+    journal.phase = "complete";
+    await writeKeyDeletionJournal(journal);
+  }
+  if (journal.phase === "complete") {
+    await removeKeyDeletionJournal(publicKeyHex);
+    // 删除事务完成后允许将同一公钥作为一次全新的导入重新绑定；
+    // Journal 未完成前必须保留 fence，避免旧请求重新进入该 owner 根。
+    ownerStorageFences.delete(publicKeyHex);
+  }
+  return true;
+}
+
+/** 所有删除（用户操作与启动恢复）共用一条串行事务链。 */
+function executeKeyDeletion(publicKeyHex: string, confirmationLabel: string, existing?: KeyDeletionJournal): Promise<true> {
+  const result = keyDeletionTail.then(
+    () => executeKeyDeletionTransaction(publicKeyHex, confirmationLabel, existing),
+    () => executeKeyDeletionTransaction(publicKeyHex, confirmationLabel, existing)
+  );
+  keyDeletionTail = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function recoverKeyDeletionJournals(): Promise<void> {
+  let firstError: unknown;
+  for (const journal of await readKeyDeletionJournals()) {
+    try {
+      const key = await vaultKeyRepository.getKey(journal.publicKeyHex);
+      // 只有 owner 已经删除、但 key phase 尚未落盘时，才能把缺失 Key
+      // 视为已完成；更早阶段仍必须继续清理 owner 目录。
+      if (!key && journal.phase === "owner-deleted") {
+        journal.phase = "key-deleted";
+        await writeKeyDeletionJournal(journal);
+      }
+      await executeKeyDeletion(journal.publicKeyHex, journal.confirmationLabel, journal);
+    } catch (error) {
+      console.warn("[vault] key deletion recovery deferred", error instanceof Error ? error.message : String(error));
+      firstError ??= error;
+    }
+  }
+  if (firstError) throw firstError;
 }
 
 async function executeVaultOperation(operation: CoordinatorVaultOperation): Promise<unknown> {
   switch (operation.type) {
-    case "listKeys": return (await vaultDb.listKeys()).map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
+    case "listKeys": return (await vaultKeyRepository.listKeys()).map(({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }) => ({ publicKeyHex, label, capabilities, createdAt, address, network, format, source }));
     case "getKey": {
-      const key = await vaultDb.getKey(operation.publicKeyHex);
+      const key = await vaultKeyRepository.getKey(operation.publicKeyHex);
       if (!key) return undefined;
       const { publicKeyHex, label, capabilities, createdAt, address, network, format, source } = key;
       return { publicKeyHex, label, capabilities, createdAt, address, network, format, source };
@@ -4701,48 +5632,60 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     case "verifyPassword": { const meta = await getVaultMeta(); if (!meta) throw new Error("Vault not initialized"); if (!(await verifyPassword(operation.password, meta))) throw new Error("Invalid password"); return true; }
     case "setActive": {
       if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.passwordKey) throw new Error("Vault is locked");
-      const key = await vaultDb.getKey(operation.publicKeyHex); if (!key) throw new Error("Key not found");
+      const key = await vaultKeyRepository.getKey(operation.publicKeyHex); if (!key) throw new Error("Key not found");
       const bytes = await decryptPrivateKey(coordinatorState.password ?? "", key);
       const previousActive = coordinatorState.activePublicKeyHex;
       const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
       const previousGeneration = coordinatorState.keyspaceGeneration;
-      const previousEpoch = coordinatorState.sessionEpoch;
       const previousSelected = coordinatorMeta.selectedPublicKeyHex;
-      // 旧 owner 仍在 coordinatorState 中时完成清理，避免清理过程读取到新
-      // owner 的签名身份或 Supplier 配置。
-      releaseMsfileRuntime("activate-key");
-      await releaseSatRuntime("activate-key");
-      clearWindowP2pExecutorLeaseLocked();
-      replaceActivePrivateKey(bytes);
-      coordinatorState.activePublicKeyHex = key.publicKeyHex;
-      coordinatorState.keyspaceGeneration++;
-      coordinatorState.sessionEpoch = generateEpoch();
-      passkeyAddIntents.clear();
-      coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
-      coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+      let transferred = false;
+      let transition: ActiveOwnerTransitionResult | undefined;
       try {
-        if (previousActive && previousActive !== operation.publicKeyHex) {
-          await cancelTaskRuntimesByKey(previousActive);
-        }
+        transition = await transitionActiveStorageOwner(key.publicKeyHex);
+        dropActivePrivateKey();
+        replaceActivePrivateKey(bytes);
+        transferred = true;
+        coordinatorState.activePublicKeyHex = key.publicKeyHex;
+        if (previousActive?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
+        coordinatorState.sessionEpoch = generateEpoch();
+        passkeyAddIntents.clear();
+        coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
+        coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
         await persistActiveMeta();
+        completeActiveStorageOwnerTransition(transition);
       } catch (error) {
+        const failedClosed = Boolean(previousActive) && coordinatorState.vaultStatus !== "unlocked";
+        if (failedClosed) {
+          dropActivePrivateKey();
+          coordinatorMeta.selectedPublicKeyHex = previousSelected;
+          coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+          throw error;
+        }
         dropActivePrivateKey();
         if (previousBytes) replaceActivePrivateKey(previousBytes);
         coordinatorState.activePublicKeyHex = previousActive;
-        coordinatorState.keyspaceGeneration = previousGeneration;
-        coordinatorState.sessionEpoch = previousEpoch;
         coordinatorMeta.selectedPublicKeyHex = previousSelected;
-        coordinatorMeta.generation = previousGeneration;
+        completeActiveStorageOwnerTransition(transition);
+        invalidateFailedKeyspaceTransition(previousGeneration);
         emitMsFileState();
         throw error;
       } finally {
-        if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
+        if (!transferred) bytes.fill(0);
       }
       publishSessionState("activate-key");
       emitMsFileState();
       return true;
     }
-    case "deleteKeyMaterial": await cancelTaskRuntimesByKey(operation.publicKeyHex); await vaultDb.deleteKeyAndSidecars(operation.publicKeyHex); if (coordinatorState.activePublicKeyHex === operation.publicKeyHex) { dropActivePrivateKey(); coordinatorState.activePublicKeyHex = undefined; } await repairSelectedAfterDelete(operation.publicKeyHex); return true;
+    case "deleteKey": {
+      if (coordinatorState.vaultStatus !== "unlocked") throw new Error("Vault is locked");
+      const keys = await vaultKeyRepository.listKeys();
+      const target = keys.find((key) => key.publicKeyHex === operation.publicKeyHex);
+      if (!target) throw new Error("Key not found");
+      if (!target.label) throw new Error("Key label is unavailable");
+      if (operation.confirmationLabel !== target.label) throw new Error("Key label mismatch");
+      if (!platformRootStore) throw new Error("Storage has not been bootstrapped");
+      return executeKeyDeletion(operation.publicKeyHex, operation.confirmationLabel);
+    }
     case "createVault": return await createVaultRpc(operation.password);
     case "createVaultWithInitialKey": return await createVaultRpc(operation.password, { label: operation.label, capabilities: operation.capabilities });
     case "createVaultWithImportedKey": return await createVaultRpc(operation.vaultPassword, operation.key);
@@ -4751,19 +5694,19 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
     case "exportCurrentKeyBackup": {
       const selectedHex = coordinatorMeta.selectedPublicKeyHex;
       if (!selectedHex) throw new Error("No selected private key");
-      const key = await vaultDb.getKey(selectedHex);
+      const key = await vaultKeyRepository.getKey(selectedHex);
       if (!key) throw new Error("Key not found");
       if (key.storageVersion !== "keyhold-v2" || !key.keyholdDocument) throw new Error("Unsupported key storage version");
       return (await import("keyhold")).serialize((await import("keyhold")).parse((await import("keyhold")).serialize(key.keyholdDocument)));
     }
     case "listCurrentKeyPasskeys": {
       const key = await requireCurrentKeyRecord();
-      return (await vaultDb.listSidecars(key.publicKeyHex)).map(toPasskeySummary);
+      return (await vaultKeyRepository.listSidecars(key.publicKeyHex)).map(toPasskeySummary);
     }
     case "listPasskeysForKey": {
-      const key = await vaultDb.getKey(operation.publicKeyHex);
+      const key = await vaultKeyRepository.getKey(operation.publicKeyHex);
       if (!key) throw new Error("Key not found");
-      return (await vaultDb.listSidecars(key.publicKeyHex)).map(toPasskeySummary);
+      return (await vaultKeyRepository.listSidecars(key.publicKeyHex)).map(toPasskeySummary);
     }
     case "getPasskeyChallenge": {
       const { protection } = await findKeyByPasskeyId(operation.passkeyId);
@@ -4778,7 +5721,7 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       const key = await requireCurrentKeyRecord();
       const label = operation.label.trim();
       if (!label) throw new Error("Passkey name is required");
-      if ((await vaultDb.listSidecars(key.publicKeyHex)).some((item) => item.label === label)) {
+      if ((await vaultKeyRepository.listSidecars(key.publicKeyHex)).some((item) => item.label === label)) {
         throw new Error("Passkey name already exists for this key");
       }
       prunePasskeyAddIntents();
@@ -4799,8 +5742,8 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       if (intent.sessionEpoch !== coordinatorState.sessionEpoch || intent.publicKeyHex !== key.publicKeyHex) {
         throw new Error("Current key changed during passkey setup");
       }
-      const allKeys = await vaultDb.listKeys();
-      if ((await Promise.all(allKeys.map((record) => vaultDb.listSidecars(record.publicKeyHex)))).some((items) => items.some((item) => item.id === operation.credentialIdB64))) {
+      const allKeys = await vaultKeyRepository.listKeys();
+      if ((await Promise.all(allKeys.map((record) => vaultKeyRepository.listSidecars(record.publicKeyHex)))).some((items) => items.some((item) => item.id === operation.credentialIdB64))) {
         throw new Error("Passkey already exists in this Vault");
       }
       const prfOutput = cryptoHexToBytes(operation.prfOutputHex);
@@ -4825,14 +5768,14 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         transports: operation.transports,
         ...encrypted
       };
-      await vaultDb.putSidecar({ publicKeyHex: key.publicKeyHex, ...protection });
+      await vaultKeyRepository.putSidecar({ publicKeyHex: key.publicKeyHex, ...protection });
       return toPasskeySummary(protection);
     }
     case "removePasskeyFromCurrentKey": {
       const key = await requireCurrentKeyRecord();
-      const sidecar = (await vaultDb.listSidecars(key.publicKeyHex)).find((item) => item.id === operation.passkeyId);
+      const sidecar = (await vaultKeyRepository.listSidecars(key.publicKeyHex)).find((item) => item.id === operation.passkeyId);
       if (!sidecar) throw new Error("Passkey protection not found");
-      await vaultDb.deleteSidecar(key.publicKeyHex, operation.passkeyId);
+      await vaultKeyRepository.deleteSidecar(key.publicKeyHex, operation.passkeyId);
       return true;
     }
     case "activateKeyWithPasskey": {
@@ -4855,34 +5798,36 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
         const previousPublicKeyHex = coordinatorState.activePublicKeyHex;
         const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
         const previousGeneration = coordinatorState.keyspaceGeneration;
-        const previousEpoch = coordinatorState.sessionEpoch;
         const previousSelected = coordinatorMeta.selectedPublicKeyHex;
-        // Passkey 激活与普通切换是同一类 owner 边界：先清理旧 owner 的
-        // MSFile、Sat 物理订阅和窗口 lease，再让新 owner 对外可见。
-        releaseMsfileRuntime("activate-key");
-        await releaseSatRuntime("activate-key");
-        clearWindowP2pExecutorLeaseLocked();
-        if (previousPublicKeyHex && previousPublicKeyHex !== key.publicKeyHex) {
-          await cancelTaskRuntimesByKey(previousPublicKeyHex);
-        }
-        replaceActivePrivateKey(privateKey);
         privateKeyTransferred = true;
-        coordinatorState.activePublicKeyHex = key.publicKeyHex;
-        coordinatorState.keyspaceGeneration++;
-        coordinatorState.sessionEpoch = generateEpoch();
-        passkeyAddIntents.clear();
-        coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
-        coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+        let transition: ActiveOwnerTransitionResult | undefined;
         try {
+          transition = await transitionActiveStorageOwner(key.publicKeyHex);
+          dropActivePrivateKey();
+          replaceActivePrivateKey(privateKey);
+          coordinatorState.activePublicKeyHex = key.publicKeyHex;
+          if (previousPublicKeyHex?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
+          coordinatorState.sessionEpoch = generateEpoch();
+          passkeyAddIntents.clear();
+          coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
+          coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
           await persistActiveMeta();
+          completeActiveStorageOwnerTransition(transition);
         } catch (error) {
+          const failedClosed = Boolean(previousPublicKeyHex) && coordinatorState.vaultStatus !== "unlocked";
+          if (failedClosed) {
+            dropActivePrivateKey();
+            coordinatorMeta.selectedPublicKeyHex = previousSelected;
+            coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+            privateKeyTransferred = false;
+            throw error;
+          }
           dropActivePrivateKey();
           if (previousBytes) replaceActivePrivateKey(previousBytes);
           coordinatorState.activePublicKeyHex = previousPublicKeyHex;
-          coordinatorState.keyspaceGeneration = previousGeneration;
-          coordinatorState.sessionEpoch = previousEpoch;
           coordinatorMeta.selectedPublicKeyHex = previousSelected;
-          coordinatorMeta.generation = previousGeneration;
+          completeActiveStorageOwnerTransition(transition);
+          invalidateFailedKeyspaceTransition(previousGeneration);
           privateKeyTransferred = false;
           throw error;
         }
@@ -4894,45 +5839,33 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       }
     }
     case "sealLocalSecret": {
-      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.storageSecretKey) throw new Error("Vault is locked");
+      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.vaultLocalSecretKey) throw new Error("Vault is locked");
       if (!operation.scope || operation.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(operation.scope)) throw new Error("Invalid secret scope");
       try {
-        const blob = await encryptBytesWithSaltBoundAad(coordinatorState.storageSecretKey, operation.plaintext, localSecretAad(2, operation.scope));
+        const blob = await encryptBytesWithSaltBoundAad(coordinatorState.vaultLocalSecretKey, operation.plaintext, localSecretAad(operation.scope));
         return { version: 2, saltHex: bytesToHex(blob.salt), nonceHex: bytesToHex(blob.iv), ciphertextHex: bytesToHex(blob.ciphertext) };
       } finally {
         operation.plaintext.fill(0);
       }
     }
     case "openLocalSecret": {
-      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.storageSecretKey || !coordinatorState.passwordKey) throw new Error("Vault is locked");
+      if (coordinatorState.vaultStatus !== "unlocked" || !coordinatorState.vaultLocalSecretKey || !coordinatorState.passwordKey) throw new Error("Vault is locked");
       if (!operation.scope || operation.scope.length > 256 || /[\u0000-\u001f\u007f]/u.test(operation.scope)) throw new Error("Invalid secret scope");
       const sealed = operation.sealed;
-      if (sealed.version !== 1 && sealed.version !== 2) throw new Error("Invalid sealed secret");
+      if (sealed.version !== 2) throw new Error("Invalid sealed secret");
       const blob = { salt: cryptoHexToBytes(sealed.saltHex), iv: cryptoHexToBytes(sealed.nonceHex), ciphertext: cryptoHexToBytes(sealed.ciphertextHex) };
-      let plaintext: Uint8Array;
-      try {
-        plaintext = sealed.version === 2
-          ? await decryptBytesWithSaltBoundAad(coordinatorState.storageSecretKey, blob, localSecretAad(2, operation.scope))
-          : await decryptBytesWithAad(coordinatorState.storageSecretKey, blob, localSecretAad(1, operation.scope));
-      } catch (error) {
-        // Read legacy Storage envelopes once; newly sealed values always use
-        // the independent domain key above.
-        plaintext = sealed.version === 2
-          ? await decryptBytesWithSaltBoundAad(coordinatorState.passwordKey, blob, localSecretAad(2, operation.scope))
-          : await decryptBytesWithAad(coordinatorState.passwordKey, blob, localSecretAad(1, operation.scope));
-      }
-      return plaintext;
+      return decryptBytesWithSaltBoundAad(coordinatorState.vaultLocalSecretKey, blob, localSecretAad(operation.scope));
     }
     case "changePassword": return await changePasswordRpc(operation.oldPassword, operation.newPassword);
     case "finalizeEmptyVaultAfterLastKeyDeletion": {
-      if ((await vaultDb.listKeys()).length !== 0) throw new Error("Vault still has keys");
-      await vaultDb.deleteMeta();
+      if ((await vaultKeyRepository.listKeys()).length !== 0) throw new Error("Vault still has keys");
+      await vaultKeyRepository.deleteMeta();
       await performGlobalLock("empty-vault");
       return true;
     }
-    case "recoverEmptyVaultToUninitialized": await vaultDb.deleteMeta(); await performGlobalLock("recover-empty"); return true;
+    case "recoverEmptyVaultToUninitialized": await vaultKeyRepository.deleteMeta(); await performGlobalLock("recover-empty"); return true;
     case "exportKeyBackup": {
-      const key = await vaultDb.getKey(operation.publicKeyHex);
+      const key = await vaultKeyRepository.getKey(operation.publicKeyHex);
       if (!key) throw new Error("Key not found");
       if (key.storageVersion !== "keyhold-v2" || !key.keyholdDocument) throw new Error("Unsupported key storage version");
       return (await import("keyhold")).serialize((await import("keyhold")).parse((await import("keyhold")).serialize(key.keyholdDocument)));
@@ -4951,17 +5884,18 @@ async function executeVaultOperation(operation: CoordinatorVaultOperation): Prom
       let targetDocument: import("keyhold").Document;
       try {
         if (!(await verifyPassword(operation.targetPassword, currentMeta))) throw new Error("Invalid password");
-        const existingKey = await vaultDb.getKey(source.publicKeyHex);
+        const existingKey = await vaultKeyRepository.getKey(source.publicKeyHex);
         if (existingKey) throw new Error("Key already exists");
         targetDocument = keyhold.parse(await keyhold.exportPrivateKey({ privateKey: source.privateKey, password: operation.targetPassword, label: sourceDoc.label, parameters: keyhold.recommendedParameters() }));
       } finally {
         source.privateKey.fill(0);
       }
       const record: VaultKeyRecord = { publicKeyHex: source.publicKeyHex, label: sourceDoc.label, address: "", network: "main", format: "keyhold-v2", capabilities: ["p2pkh"], createdAt: new Date().toISOString(), storageVersion: "keyhold-v2", keyholdDocument: targetDocument };
-      await vaultDb.putKey(record);
+      await platformRootStore?.activateOwnerStorage({ ownerPublicKeyHex: record.publicKeyHex });
+      await vaultKeyRepository.putKey(record);
       // 仅当 Vault 已 unlocked 且是第一个 key 时，设置为 active
       if (coordinatorState.vaultStatus === "unlocked") {
-        const keys = await vaultDb.listKeys();
+        const keys = await vaultKeyRepository.listKeys();
         if (keys.length === 1) {
           await executeVaultOperation({ type: "setActive", publicKeyHex: record.publicKeyHex });
         }
@@ -4980,7 +5914,7 @@ async function requireCurrentKeyRecord(): Promise<VaultKeyRecord> {
   ) {
     throw new Error("No active private key");
   }
-  const key = await vaultDb.getKey(coordinatorState.activePublicKeyHex);
+  const key = await vaultKeyRepository.getKey(coordinatorState.activePublicKeyHex);
   if (!key) throw new Error("Active key not found");
   verifySessionKeyPair({
     publicKeyHex: key.publicKeyHex,
@@ -4990,13 +5924,13 @@ async function requireCurrentKeyRecord(): Promise<VaultKeyRecord> {
 }
 
 async function repairSelectedAfterDelete(deleted: string): Promise<void> {
-  const remaining = await vaultDb.listKeys();
+  const remaining = await vaultKeyRepository.listKeys();
   if (remaining.length === 0) {
     coordinatorMeta.selectedPublicKeyHex = undefined;
     await persistCoordinatorMeta();
     return;
   }
-  if (coordinatorMeta.selectedPublicKeyHex === deleted || !await vaultDb.getKey(coordinatorMeta.selectedPublicKeyHex ?? "")) {
+  if (coordinatorMeta.selectedPublicKeyHex === deleted || !await vaultKeyRepository.getKey(coordinatorMeta.selectedPublicKeyHex ?? "")) {
     coordinatorMeta.selectedPublicKeyHex = remaining[0]!.publicKeyHex;
     coordinatorMeta.generation = ++coordinatorState.keyspaceGeneration;
     await persistCoordinatorMeta();
@@ -5009,8 +5943,8 @@ async function findKeyByPasskeyId(passkeyId: string): Promise<{
   protection: import("@keymaster/plugin-vault/coordinator").WebAuthnSidecarRecord;
 }> {
   const matches: Array<{ key: VaultKeyRecord; protection: import("@keymaster/plugin-vault/coordinator").WebAuthnSidecarRecord }> = [];
-  for (const key of await vaultDb.listKeys()) {
-    const protection = (await vaultDb.listSidecars(key.publicKeyHex)).find((item) => item.id === passkeyId);
+  for (const key of await vaultKeyRepository.listKeys()) {
+    const protection = (await vaultKeyRepository.listSidecars(key.publicKeyHex)).find((item) => item.id === passkeyId);
     if (protection) matches.push({ key, protection });
   }
   if (matches.length === 0) throw new Error("Passkey protection not found");
@@ -5026,7 +5960,7 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   const passwordKey = await deriveKey(password, salt);
   const verifier = await (await import("@keymaster/plugin-vault/coordinator")).encryptVerifier(passwordKey);
   const meta = (await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt, verifier });
-  await vaultDb.putMeta(meta);
+  await vaultKeyRepository.putMeta(meta);
   if (key) {
     // 有 key 时调用 addKeyRpc，它会设置 unlocked 状态
     return addKeyRpc(password, { ...key, material: keyMaterial, label: key.label ?? "Key", capabilities: key.capabilities ?? ["p2pkh"], format: key.format ?? "imported", source: key.source }, key.format === "imported" ? "import-initial-key" : "create-initial-key");
@@ -5034,7 +5968,7 @@ async function createVaultRpc(password: string, key?: { label?: string; capabili
   // 空 Vault 创建后保持 locked 状态，清空内存中的 passwordKey
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
-  coordinatorState.storageSecretKey = undefined;
+  coordinatorState.vaultLocalSecretKey = undefined;
   passkeyAddIntents.clear();
   coordinatorState.vaultStatus = "locked";
   coordinatorState.sessionEpoch = generateEpoch();
@@ -5059,21 +5993,26 @@ async function addKeyRpc(password: string, input: { label: string; capabilities?
     const pub = bytesToHex((await import("@noble/curves/secp256k1.js")).secp256k1.getPublicKey(priv, true));
     const document = keyholdParse(await keyholdExportPrivateKey({ privateKey: priv, password, label: input.label, parameters: keyholdRecommendedParameters() }));
     const record: VaultKeyRecord = { publicKeyHex: pub, label: input.label, address: deriveP2pkhAddress(pub, "main"), network: "main" as const, format: input.format, capabilities: input.capabilities ?? ["p2pkh"], createdAt: new Date().toISOString(), source: input.source, storageVersion: "keyhold-v2", keyholdDocument: document };
-    await vaultDb.putKey(record);
+    await platformRootStore?.activateOwnerStorage({ ownerPublicKeyHex: pub });
+    await vaultKeyRepository.putKey(record);
     const wasUnlocked = coordinatorState.vaultStatus === "unlocked";
     // keyspaceGeneration 递增；只有 enter 成功后 worker state 才接管 priv。
-    const previousGeneration = coordinatorState.keyspaceGeneration;
     const previousPassword = coordinatorState.password;
     const previousStatus = coordinatorState.vaultStatus;
+    // 先完成可能失败的密钥派生，再推进 generation；这样派生失败不会留下
+    // 一个无法对应任何状态转换的世代。
+    const vaultLocalSecretKey = await deriveVaultLocalSecretKey(password, decodePersisted(meta.saltB64));
     coordinatorState.keyspaceGeneration++;
     coordinatorState.password = password;
-    const storageSecretKey = await deriveStorageSecretKey(password, decodePersisted(meta.saltB64));
     try {
-      await enterUnlockedState(passwordKey, storageSecretKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
+      await enterUnlockedState(passwordKey, vaultLocalSecretKey, pub, priv, wasUnlocked ? "activate-key" : initialCause);
     } catch (error) {
-      coordinatorState.keyspaceGeneration = previousGeneration;
-      coordinatorState.password = previousPassword;
-      coordinatorState.vaultStatus = previousStatus;
+      // owner drain 超时会由统一 transition 主动收口为 locked；此时不能
+      // 让 addKey 的兼容回滚分支把状态重新写成 unlocked。
+      if (coordinatorState.vaultStatus === "unlocked" || previousStatus !== "unlocked") {
+        coordinatorState.password = previousPassword;
+        coordinatorState.vaultStatus = previousStatus;
+      }
       throw error;
     }
     privateKeyTransferred = true;
@@ -5095,13 +6034,11 @@ async function changePasswordRpc(oldPassword: string, newPassword: string): Prom
     if (!(await verifyPassword(oldPassword, meta))) throw new Error("Invalid password");
   const newSalt = crypto.getRandomValues(new Uint8Array(16));
   const newKey = await deriveKey(newPassword, newSalt);
-  const oldStorageKey = await deriveStorageSecretKey(oldPassword, decodePersisted(meta.saltB64));
   const oldPasswordKey = await deriveKey(oldPassword, decodePersisted(meta.saltB64));
-  const newStorageKey = await deriveStorageSecretKey(newPassword, newSalt);
   const verifier = await (await import("@keymaster/plugin-vault/coordinator")).encryptVerifier(newKey);
-  const records = await vaultDb.listKeys();
+  const records = await vaultKeyRepository.listKeys();
   for (const record of records) if (record.storageVersion !== "keyhold-v2" || !record.keyholdDocument) throw new Error("Unsupported key storage version");
-  const migrated: KeyHoldVaultKeyRecord[] = [];
+  const rotatedRecords: VaultKeyRecord[] = [];
   for (const record of records) {
     const unlocked = await (await import("keyhold")).unlock((await import("keyhold")).parse((await import("keyhold")).serialize(record.keyholdDocument!)), oldPassword);
     try {
@@ -5110,30 +6047,18 @@ async function changePasswordRpc(oldPassword: string, newPassword: string): Prom
         throw new Error("KeyHold public key mismatch");
       }
       const nextDoc = (await import("keyhold")).parse(await (await import("keyhold")).exportPrivateKey({ privateKey: unlocked.privateKey, password: newPassword, label: record.keyholdDocument!.label, parameters: (await import("keyhold")).recommendedParameters() }));
-      migrated.push({ publicKeyHex: record.publicKeyHex, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source, storageVersion: "keyhold-v2", keyholdDocument: nextDoc });
+      rotatedRecords.push({ publicKeyHex: record.publicKeyHex, label: record.label, address: record.address, network: record.network, format: record.format, capabilities: record.capabilities, createdAt: record.createdAt, source: record.source, storageVersion: "keyhold-v2", keyholdDocument: nextDoc });
     } finally { unlocked.privateKey.fill(0); }
   }
   // Re-wrap Storage-owned local secrets behind the same Worker-owned gate.
-  // Slow S3 requests are aborted/drained before the journal migration starts.
-  const storageWithRotation = storageRuntime as (StorageService & { beginPasswordRotation?: () => Promise<void>; finishPasswordRotation?: (degraded?: boolean) => void }) | undefined;
+  // Storage requests are fenced before the password rotation commit.
+  const storageWithRotation = storageRuntime as (StorageRuntimeController & { beginPasswordRotation?: () => Promise<void>; finishPasswordRotation?: (degraded?: boolean) => void }) | undefined;
   let storageRotationDegraded = false;
   try {
     await storageWithRotation?.beginPasswordRotation?.();
-    await migrateStorageSecrets(oldStorageKey, newStorageKey, oldPasswordKey);
     try {
-      await vaultDb.putMetaAndKeys((await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt: newSalt, verifier }), migrated);
+      await vaultKeyRepository.putMetaAndKeys((await import("@keymaster/plugin-vault/coordinator")).buildVaultMeta({ salt: newSalt, verifier }), rotatedRecords);
     } catch (error) {
-      // IndexedDB has no cross-database transaction. Roll Storage back if the
-      // Vault atomic commit fails, preserving the pre-rotation password. If the
-      // compensating write itself fails, surface that fact; the durable journal
-      // remains for recovery on the next unlock instead of being silently lost.
-      try {
-        await rollbackStorageRotation();
-      } catch (rollbackError) {
-        storageRotationDegraded = true;
-        storageWithRotation?.finishPasswordRotation?.(true);
-        throw new Error(`Password rotation rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
-      }
       throw error;
     }
     await performGlobalLock("password-change");
@@ -5163,6 +6088,11 @@ async function handleLock(
 async function performGlobalLock(reason: string): Promise<void> {
   // 第一阶段必须完全脱离网络：先递增 epoch、撤销 capability、覆盖密钥
   // 并广播 locked。Supplier 永不返回时，锁屏请求也不能被远端拖住。
+  const previousActive = coordinatorState.activePublicKeyHex?.toLowerCase();
+  // 锁定也属于 owner 边界：先 fence/grant revoke，再 abort 任务和请求。
+  // fence 保留到下一次解锁完成 drain 后，防止旧 owner 在 lock → unlock
+  // 窗口中重新取得底层存储绑定。
+  if (previousActive) fenceOwnerStorage(previousActive);
   const lockedEpoch = generateEpoch();
   // 先推进会话世代并切换为 locked，使所有已经排队的请求立即失效；
   // 后续释放连接/写清理意图都只能作为第二阶段后台工作。
@@ -5184,20 +6114,25 @@ async function performGlobalLock(reason: string): Promise<void> {
   // 撤销 capability、清空 active key；replace/drop 会覆盖旧 Uint8Array。
   coordinatorState.activePublicKeyHex = undefined;
   dropActivePrivateKey();
+  // 保留 wrapper 给未来 unlock/恢复复用，但立即丢弃所有旧底层绑定。
+  for (const store of workerOwnerStores) store.invalidateBinding();
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
-  coordinatorState.storageSecretKey = undefined;
+  coordinatorState.vaultLocalSecretKey = undefined;
   passkeyAddIntents.clear();
 
   coordinatorState.autoLockDeadline = undefined;
 
   // 这些 release 函数在调用期间只摘除本地句柄；真正的远端退订、连接
-  // 关闭和 DB 清理在第二阶段后台执行，并由 releaseSatRuntime 限时。
+  // 关闭和 K-V 清理在第二阶段后台执行，并由 releaseSatRuntime 限时。
   // 这样旧 runtime 不会在 locked 状态继续对外提供能力。
-  const storageCleanup = releaseStorageRuntime(reason);
   releaseMsfileRuntime(reason);
   const satCleanup = releaseSatRuntime(reason);
   clearWindowP2pExecutorLeaseLocked();
+
+  if (previousActive) {
+    rememberOwnerStorageDrain(previousActive, drainOwnerStorageRequests(previousActive));
+  }
 
   coordinatorState.keyspaceGeneration++;
   if (reason === "empty-vault" || reason === "recover-empty") coordinatorMeta.selectedPublicKeyHex = undefined;
@@ -5215,6 +6150,7 @@ async function performGlobalLock(reason: string): Promise<void> {
 
   // 元数据只涉及本地持久化，失败不能回滚已经完成的安全锁定。
   await persistCoordinatorMeta().catch((error) => {
+    markStorageIoFailure(error);
     console.warn("[coordinator] locked state metadata persistence failed", error instanceof Error ? error.message : String(error));
   });
 
@@ -5224,7 +6160,6 @@ async function performGlobalLock(reason: string): Promise<void> {
     if (coordinatorState.sessionEpoch !== lockedEpoch) return;
     for (const runtime of coordinatorState.taskRuntimes.values()) runtime.controller = undefined;
   });
-  void storageCleanup.catch((error) => console.warn("[storage] locked cleanup failed", error instanceof Error ? error.message : String(error)));
   void satCleanup.catch((error) => console.warn("[sat-subscription] locked cleanup failed", error instanceof Error ? error.message : String(error)));
 }
 
@@ -5243,42 +6178,46 @@ async function handleActivateKey(
   try {
     const meta = await getVaultMeta();
     if (!meta || !(await verifyPassword(request.password, meta))) throw new Error("Invalid password");
-    const key = await vaultDb.getKey(request.publicKeyHex);
+    const key = await vaultKeyRepository.getKey(request.publicKeyHex);
     if (!key || !coordinatorState.passwordKey) throw new Error("Key not found");
     const privateKey = await decryptPrivateKey(coordinatorState.password ?? "", key);
     const previousActive = coordinatorState.activePublicKeyHex;
     const previousBytes = coordinatorState.activePrivateKeyBytes?.slice();
     const previousGeneration = coordinatorState.keyspaceGeneration;
-    const previousEpoch = coordinatorState.sessionEpoch;
     const previousSelected = coordinatorMeta.selectedPublicKeyHex;
-    // Active key change invalidates the MSFile identity, host and all old
-    // supplier connections before the new epoch becomes observable.
-    releaseMsfileRuntime("activate-key");
-    await releaseSatRuntime("activate-key");
-    clearWindowP2pExecutorLeaseLocked();
-    replaceActivePrivateKey(privateKey);
-    coordinatorState.activePublicKeyHex = request.publicKeyHex;
-    coordinatorState.keyspaceGeneration++;
-    coordinatorState.sessionEpoch = generateEpoch();
-    coordinatorMeta.selectedPublicKeyHex = request.publicKeyHex;
-    coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+    let transferred = false;
+    let transition: ActiveOwnerTransitionResult | undefined;
     try {
-      if (previousActive && previousActive !== request.publicKeyHex) {
-        await cancelTaskRuntimesByKey(previousActive);
-      }
+      transition = await transitionActiveStorageOwner(key.publicKeyHex);
+      dropActivePrivateKey();
+      replaceActivePrivateKey(privateKey);
+      transferred = true;
+      coordinatorState.activePublicKeyHex = key.publicKeyHex;
+      if (previousActive?.toLowerCase() === key.publicKeyHex.toLowerCase()) coordinatorState.keyspaceGeneration++;
+      coordinatorState.sessionEpoch = generateEpoch();
+      passkeyAddIntents.clear();
+      coordinatorMeta.selectedPublicKeyHex = key.publicKeyHex;
+      coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
       await persistCoordinatorMeta();
+      completeActiveStorageOwnerTransition(transition);
     } catch (error) {
+      const failedClosed = Boolean(previousActive) && coordinatorState.vaultStatus !== "unlocked";
+      if (failedClosed) {
+        dropActivePrivateKey();
+        coordinatorMeta.selectedPublicKeyHex = previousSelected;
+        coordinatorMeta.generation = coordinatorState.keyspaceGeneration;
+        throw error;
+      }
       dropActivePrivateKey();
       if (previousBytes) replaceActivePrivateKey(previousBytes);
       coordinatorState.activePublicKeyHex = previousActive;
-      coordinatorState.keyspaceGeneration = previousGeneration;
-      coordinatorState.sessionEpoch = previousEpoch;
       coordinatorMeta.selectedPublicKeyHex = previousSelected;
-      coordinatorMeta.generation = previousGeneration;
+      completeActiveStorageOwnerTransition(transition);
+      invalidateFailedKeyspaceTransition(previousGeneration);
       emitMsFileState();
       throw error;
     } finally {
-      if (previousBytes && coordinatorState.activePrivateKeyBytes !== previousBytes) previousBytes.fill(0);
+      if (!transferred) privateKey.fill(0);
     }
 
     publishSessionState("activate-key");
@@ -5290,10 +6229,17 @@ async function handleActivateKey(
       ack: { status: "accepted" },
     };
   } catch (err) {
+    markStorageIoFailure(err);
     return {
       requestId,
       sessionEpoch: coordinatorState.sessionEpoch,
-      ack: { status: "error", message: err instanceof Error ? err.message : String(err) },
+      ack: {
+        status: "error",
+        message: err instanceof Error ? err.message : String(err),
+        ...((err as { code?: unknown })?.code && typeof (err as { code?: unknown }).code === "string"
+          ? { code: (err as { code: string }).code as never }
+          : {})
+      },
     };
   }
 }
@@ -5552,8 +6498,8 @@ async function cancelP2pkhSyncForProviderChange(): Promise<void> {
   if (!publicKeyHex) return;
   const keyspace = createWorkerKeyspace();
   try {
-    const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex }));
-    for (const resource of await db.listResourcesByKey()) await db.clearInProgressSyncState(resource.resourceId);
+    const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+    for (const resource of await repository.listResourcesByKey()) await repository.clearInProgressSyncState(resource.resourceId);
   } catch {
     // The generation fence still prevents late commits. A transient cleanup
     // failure is surfaced by the next sync attempt instead of losing claims.
@@ -5714,8 +6660,9 @@ async function handleP2pkhBroadcast(
   }
 
   const keyspace = createWorkerKeyspace();
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace, publicKeyHex: request.ownerPublicKeyHex }));
-  const localRows = (await db.listLocalTransactions()).filter((row) => row.network === request.network);
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== request.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  const localRows = (await repository.listLocalTransactions()).filter((row) => row.network === request.network);
   const local = localRows.find((row) => row.id === request.submissionId);
   if (!local) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: "Local P2PKH submission not found" } };
   if (!isRebroadcast && (local.localState !== "submitting" || local.chainResolution !== "unresolved")) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "validation-error", message: `Submission is not dispatchable in localState=${local.localState}, chainResolution=${local.chainResolution}` } };
@@ -5747,7 +6694,7 @@ async function handleP2pkhBroadcast(
       const result = await provider.broadcast({ network: request.network, canonicalTxid: row.txid, rawTxHex: row.rawTxHex });
       if (result.canonicalTxid !== row.txid) throw new Error("Broadcast provider returned a different transaction id");
       const finishedAt = new Date().toISOString();
-      await db.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt: { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
+      await repository.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt: { id: `${row.id}:${startedAt}`, submissionId: row.id, providerId: provider.descriptor.id, startedAt, finishedAt, status: result.status, providerReference: result.providerReference, providerCode: result.providerCode, providerMessage: result.providerMessage } });
       publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["utxo", "submission", "claim"] });
       return { status: result.status === "already-known" ? "already-known" : "local-confirmed", txid: row.txid } as const;
     } catch (error) {
@@ -5757,9 +6704,9 @@ async function handleP2pkhBroadcast(
       if (previousLocalState === "local-confirmed") {
         // A failed rebroadcast cannot invalidate an earlier accepted or
         // already-known result. Preserve outputs/claims and append the audit.
-        await db.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt });
+        await repository.finishLocalSubmission({ submissionId: row.id, localState: "local-confirmed", attempt });
       } else {
-        await db.finishLocalSubmission({ submissionId: row.id, localState: "isolated", reason: message, attempt });
+        await repository.finishLocalSubmission({ submissionId: row.id, localState: "isolated", reason: message, attempt });
       }
       publishTopicEvent("asset.data-changed", { type: "asset.data-changed", providerId: "p2pkh", publicKeyHex: request.ownerPublicKeyHex, kinds: ["submission", "claim"] });
       return { status: previousLocalState === "local-confirmed" ? "rebroadcast-failed" : "isolated", txid: row.txid, reason: message } as const;
@@ -5770,7 +6717,7 @@ async function handleP2pkhBroadcast(
       const group = rowsByTxid.get(txid) ?? [];
       // A duplicate audit sibling is part of the same logical transaction.
       // Conflict wins over chain confirmation so an unsafe fork can never be
-      // hidden by IndexedDB return order; chain confirmation then wins over a
+      // hidden by platform K-V repository return order; chain confirmation then wins over a
       // merely local lifecycle and skips the provider call.
       if (group.some((row) => row.chainResolution === "conflicted")) return { requestId, sessionEpoch: coordinatorState.sessionEpoch, ack: { status: "ok" }, operationResult: { status: "isolated", txid, reason: "conflicted-ancestor" } };
       if (group.some((row) => row.chainResolution === "chain-confirmed")) continue;
@@ -5822,7 +6769,8 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
     snapshots: getTaskSnapshots(),
   });
 
-  const execution = (async () => {
+  let execution!: Promise<void>;
+  execution = (async () => {
    try {
     if (runtime.startedEpoch !== coordinatorState.sessionEpoch || runtime.startedGeneration !== coordinatorState.keyspaceGeneration || runtime.startedPublicKeyHex !== coordinatorState.activePublicKeyHex) throw new Error("stale task epoch");
     if (!runtime.run) throw new Error(`Task ${taskId} has no Coordinator handler`);
@@ -5844,6 +6792,9 @@ async function executeTask(taskId: string, reason: string): Promise<void> {
       runtime.error = err instanceof Error ? err.message : String(err);
     }
    } finally {
+    // 同一 Task 在旧 owner completion 尚未结束时可能已经被新 owner
+    // 重新启动；旧 completion 不能覆盖新 execution 的 controller/state。
+    if (runtime.completion !== execution) return;
     runtime.controller = undefined;
 
     // 若当前 Vault 已锁定或 epoch 已变化，保留 blocked，不得把任务重写为 idle
@@ -5883,6 +6834,7 @@ function buildSnapshot(): CoordinatorBootstrapSnapshot {
     keyspaceGeneration: coordinatorState.keyspaceGeneration,
     taskSnapshots: getTaskSnapshots(),
     scheduleSettings: coordinatorState.scheduleSettings,
+    p2pkhSettings: coordinatorMeta.p2pkhSettings,
     p2pkhProviders: getP2pkhProviderSnapshot(),
   };
 }
@@ -5975,11 +6927,49 @@ const workerScope = globalThis as unknown as {
 
 workerScope.onconnect = handlePortConnect;
 
-// Worker 启动时从 DB 读取仅公开的 Vault metadata
+// Worker 启动时从 K-V 读取仅公开的 Vault metadata
 // 状态为 uninitialized 或 locked；绝不读取/解密私钥直到 unlock RPC
-async function initializeCoordinator(): Promise<void> {
+async function initializeCoordinator(skipStorageBootstrap = false, propagateFailure = false): Promise<void> {
+  coordinatorInitializationInProgress = true;
   try {
+    await initializeCoordinatorInternal(skipStorageBootstrap, propagateFailure);
+  } finally {
+    coordinatorInitializationInProgress = false;
+  }
+}
+
+async function initializeCoordinatorInternal(skipStorageBootstrap = false, propagateFailure = false): Promise<void> {
+  if (skipStorageBootstrap && !platformRootStore) {
+    throw storageUnavailableError("Storage root is unavailable during recovery");
+  }
+  if (!skipStorageBootstrap) {
+    try {
+      // Storage 是独立健康域；失败时保持 Vault booting，等待页面重试，
+      // 不能把可恢复的 Provider/CORS/认证问题升级成 Vault fatal。
+      await bootstrapPlatformStorage();
+    } catch (error) {
+      const code = error && typeof error === "object" && "code" in error ? (error as { code?: unknown }).code : undefined;
+      const healthStatus = storageHealthController.status();
+      // 未选择后端、以及已选择 S3 但还没有输入 Profile 密码，都是可恢复的
+      // onboarding 状态；不能把它们伪装成 degraded，否则 UI 会丢失原始入口。
+      const preservesOnboardingState = healthStatus === "unselected" || healthStatus === "authentication";
+      storageStartupFailure = !preservesOnboardingState;
+      if (code === "storage_identity_required" && healthStatus !== "unselected") {
+        storageHealthController.setStatus("authentication", error instanceof Error ? error.message : String(error));
+      } else if (!preservesOnboardingState) {
+        storageHealthController.setStatus("degraded", error instanceof Error ? error.message : String(error));
+      }
+      emitStorageState();
+      publishSessionState("bootstrap");
+      return;
+    }
+  }
+  try {
+    // Storage ready 后，Vault/Keyspace 才允许读取 keys/。
     await loadCoordinatorMeta();
+    // keys/ 中的删除 Journal 优先恢复；这一步不依赖 Vault 解锁，
+    // 因为 Journal 只包含公开公钥和用户确认标签。
+    await recoverKeyDeletionJournals();
     const meta = await getVaultMeta();
     if (meta) {
       coordinatorState.vaultStatus = "locked";
@@ -5987,13 +6977,11 @@ async function initializeCoordinator(): Promise<void> {
       coordinatorState.keyspaceGeneration = coordinatorMeta.generation;
       // Reconcile only the persisted public selection.  This deliberately
       // uses list/get and never parses or unlocks a key document, so opaque
-      // legacy records remain visible for locked recovery/delete flows.
       if (!await reconcileSelectedPublicKey()) coordinatorState.vaultStatus = "uninitialized";
     } else {
       coordinatorState.vaultStatus = "uninitialized";
     }
-    try { await ensureStorageRuntime(); }
-    catch { storageRuntime = undefined; storageDb = undefined; emitStorageState(); }
+    await ensureStorageRuntime();
     await registerCoordinatorTasks();
     // 启动时如果 vault 是 locked 状态，将所有任务标记为 blocked
     if (coordinatorState.vaultStatus === "locked") {
@@ -6002,16 +6990,43 @@ async function initializeCoordinator(): Promise<void> {
         runtime.blockedReason = "Vault is locked";
       }
     }
-  } catch {
-    coordinatorState.vaultStatus = "fatal";
+    // bootstrapPlatformStorage 只完成 Provider/Root 装配；metadata、Journal
+    // 和任务注册也成功后，才把 Storage 健康状态发布为 ready。
+    storageStartupFailure = false;
+    storageHealthController.setStatus("ready");
+    emitStorageState();
+  } catch (error) {
+    // Root 已建立后发生的 Provider/CORS/network/K-V 错误仍属于 Storage
+    // 健康域；Vault 保持 booting，等待 Storage 恢复编排，不得伪装成 fatal。
+    if (isStorageFailure(error)) {
+      storageStartupFailure = true;
+      if (storageHealthController.status() !== "unselected" && storageHealthController.status() !== "authentication") {
+        storageHealthController.setStatus("degraded", "Storage initialization failed");
+      }
+      emitStorageState();
+      coordinatorState.vaultStatus = "booting";
+      if (propagateFailure) throw error;
+    } else {
+      coordinatorState.vaultStatus = "fatal";
+      if (propagateFailure) throw error;
+    }
   } finally {
-    // hello 可能先于异步 IndexedDB 初始化抵达。无论初始化成功或失败，
+    // hello 只在存储启动完成后处理。无论初始化成功或失败，
     // 都必须广播最终状态，否则首个页面会永久停留在 booting。
     publishSessionState("bootstrap");
   }
 }
 
-void initializeCoordinator();
+let coordinatorInitialization: Promise<void> | undefined;
+function startCoordinatorInitialization(state?: StorageBootstrapState): Promise<void> {
+  if (!coordinatorInitialization) {
+    // Worker 没有 localStorage；首个页面 hello 提供启动选择。
+    // 缺失选择时保持 unselected，任何 keys/ 与 Vault 初始化都不得发生。
+    storageBootstrapState = state ?? null;
+    coordinatorInitialization = initializeCoordinator();
+  }
+  return coordinatorInitialization;
+}
 
 // ============================================================
 // 14. Test Exports
@@ -6063,6 +7078,13 @@ export function __testGetSnapshot(): CoordinatorBootstrapSnapshot {
 }
 
 export function __testResetState(): void {
+  ensureTestPlatformStorage();
+  // 测试夹具也模拟一次 Root 重装；旧句柄不能跨“重启”复用同一个令牌。
+  platformRootToken = {};
+  // 测试夹具复用同一个内存 Root；每个用例从 ready 的 Storage 健康基线开始，
+  // 避免上一个用例注入的 degraded/authentication 状态污染后续业务断言。
+  storageHealthController.resetForTesting("ready");
+  storageStartupFailure = false;
   // releaseSatRuntime 会同步摘除旧 owner 的全局句柄，并把真实退订放入
   // satRuntimeRelease；下一次测试创建 runtime 时会等待该 Promise。
   void releaseSatRuntime("test");
@@ -6077,7 +7099,7 @@ export function __testResetState(): void {
   dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
-  coordinatorState.storageSecretKey = undefined;
+  coordinatorState.vaultLocalSecretKey = undefined;
   coordinatorState.keyspaceGeneration = 0;
   coordinatorState.taskRuntimes.clear();
   coordinatorState.autoLockDeadline = undefined;
@@ -6085,6 +7107,11 @@ export function __testResetState(): void {
   connectedPorts.clear();
   storageRequests.clear();
   storageGrants.clear();
+  platformStorageGrants.clear();
+  for (const store of workerOwnerStores) store.invalidateBinding();
+  ownerStorageFences.clear();
+  pendingOwnerStorageDrain = undefined;
+  ownerStorageRequests.clear();
   storagePortCounts.clear();
   storageDataActive = 0;
   storageDataActiveByPort.clear();
@@ -6206,46 +7233,54 @@ export async function __testP2pkhProvidersUpdate(network: "main" | "test", selec
 }
 
 export async function __testSeedP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submission: unknown; claims?: unknown[]; localOutpoints?: unknown[] }): Promise<void> {
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
-  await db.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never, localOutpoints: (input.localOutpoints ?? []) as never });
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  await repository.prepareLocalSubmission({ submission: input.submission as never, claims: (input.claims ?? []) as never, localOutpoints: (input.localOutpoints ?? []) as never });
 }
 
 export async function __testFinishP2pkhLocalSubmission(input: { ownerPublicKeyHex: string; submissionId: string; localState: "local-confirmed" | "isolated" }): Promise<void> {
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
-  await db.finishLocalSubmission({ submissionId: input.submissionId, localState: input.localState });
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  await repository.finishLocalSubmission({ submissionId: input.submissionId, localState: input.localState });
 }
 
 export async function __testSetP2pkhChainResolution(input: { ownerPublicKeyHex: string; submissionId: string; chainResolution: "unresolved" | "chain-confirmed" | "conflicted"; conflictSourceTxids?: string[] }): Promise<void> {
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: input.ownerPublicKeyHex }));
-  const row = (await db.listLocalTransactions()).find((candidate) => candidate.id === input.submissionId);
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== input.ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  const row = (await repository.listLocalTransactions()).find((candidate) => candidate.id === input.submissionId);
   if (!row) throw new Error(`P2PKH submission not found: ${input.submissionId}`);
   const next = { ...row, chainResolution: input.chainResolution, ...(input.chainResolution === "conflicted" ? { conflictSourceTxids: input.conflictSourceTxids ?? ["test-conflict"] } : { conflictSourceTxids: undefined }), ...(input.chainResolution === "chain-confirmed" ? { confirmedFactId: `${row.resourceId}:${row.txid}` } : { confirmedFactId: undefined }) };
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.getDb().transaction("p2pkh_local_transactions", "readwrite");
-    transaction.objectStore("p2pkh_local_transactions").put(next);
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
+  await repository.replaceLocalTransaction(next);
 }
 
 export async function __testListP2pkhLocalTransactions(ownerPublicKeyHex: string): Promise<unknown[]> {
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
-  return db.listLocalTransactions();
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  return repository.listLocalTransactions();
 }
 
 export async function __testListP2pkhLocalOutpoints(ownerPublicKeyHex: string): Promise<unknown[]> {
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
-  return db.listLocalOutpoints();
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  return repository.listLocalOutpoints();
 }
 
 export async function __testListP2pkhLocalInputClaims(ownerPublicKeyHex: string): Promise<unknown[]> {
-  const db = createP2pkhDb(await openP2pkhDb({ keyspace: createWorkerKeyspace(), publicKeyHex: ownerPublicKeyHex }));
-  return db.listLocalInputClaims();
+  const keyspace = createWorkerKeyspace();
+  if (keyspace.active().activePublicKeyHex?.toLowerCase() !== ownerPublicKeyHex.toLowerCase()) throw new Error("P2PKH storage owner is not active");
+  const repository = createP2pkhStateRepository(await openP2pkhStateRepository(createWorkerOwnerStore("p2pkh", P2PKH_REPOSITORY_VERSION)));
+  return repository.listLocalInputClaims();
 }
 
 export async function __testP2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number; expectedSessionEpoch?: SessionEpoch; rebroadcast?: boolean }): Promise<CoordinatorResponse> {
   await ensureTestP2pkhProviders();
+  if (input.submissionId.startsWith("unknown-rebroadcast")) {
+  }
   const kind = input.rebroadcast ? "p2pkh.rebroadcast-ancestors" : "p2pkh.broadcast";
   return handleP2pkhBroadcast(`test-p2pkh-broadcast-${Date.now()}`, {
     kind,
@@ -6263,20 +7298,33 @@ export function __testGetConnectedPortCount(): number {
   return connectedPorts.size;
 }
 
-export function __testSetStorageSessionResolver(resolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").StorageAppContext["appIdentity"]; revokedAt: number | null } | null>) | undefined): void {
+export function __testSetStorageSessionResolver(resolver: ((sessionId: string) => Promise<{ sessionId: string; origin: string; appIdentity: import("@keymaster/contracts").OwnerAppStorageGrant["appIdentity"]; revokedAt: number | null } | null>) | undefined): void {
   testStorageSessionResolver = resolver;
 }
 
 /** Minimal worker seams used by direct ownership/transport regression tests. */
-export function __testSetStorageRuntime(runtime: Partial<StorageService> | undefined): void {
-  testStorageRuntimeOverride = runtime as StorageService | undefined;
+export function __testSetStorageRuntime(runtime: Partial<StorageRuntimeController> | undefined): void {
+  testStorageRuntimeOverride = runtime as StorageRuntimeController | undefined;
   storageRuntime = testStorageRuntimeOverride;
+  if (runtime) {
+    platformStorageReady = true;
+    storageStartupFailure = false;
+    storageHealthController.setStatus("ready");
+  }
 }
 
 export function __testSetStorageStartupFailure(enabled: boolean): void {
   testStorageStartupFailure = enabled;
-  if (!enabled) storageStartupFailure = false;
-  if (enabled) { storageRuntime = undefined; storageDb = undefined; }
+  storageStartupFailure = enabled;
+  if (enabled) {
+    storageHealthController.setStatus("degraded", "Storage startup failed");
+    emitStorageState();
+  }
+  if (!enabled) {
+    storageStartupFailure = false;
+    storageHealthController.resetForTesting("ready");
+  }
+  if (enabled) { storageRuntime = undefined; storageRepository = undefined; }
 }
 
 export async function __testReleaseStorageRuntime(): Promise<void> {
@@ -6289,7 +7337,7 @@ export async function __testStorageMutationBarrierProbe(): Promise<{ blockedBefo
   storageMutationTail = storageMutationTail.then(() => new Promise<void>((resolve) => { release = resolve; }));
   await previous;
   let completed = false;
-  const run = executeStorageControl({ kind: "storage.control", clientId: "test", requestId: crypto.randomUUID(), control: { type: "status" }, expectedSessionEpoch: coordinatorState.sessionEpoch }).then(() => { completed = true; });
+  const run = executeStorageRequest({ kind: "storage.control", clientId: "test", requestId: crypto.randomUUID(), control: { type: "status" }, expectedSessionEpoch: coordinatorState.sessionEpoch }, "test").then(() => { completed = true; });
   await Promise.resolve();
   const blockedBeforeRelease = !completed;
   release();
@@ -6302,7 +7350,7 @@ export async function __testDispatchStorageGrant(connectSessionId: string, actua
   return executeStorageRequest({ kind: "storage.grant", clientId: requestClientId, requestId: crypto.randomUUID(), connectSessionId, expectedSessionEpoch: coordinatorState.sessionEpoch }, actualPortId);
 }
 
-export async function __testResolveStorageGrant(grantId: string, actualPortId: string): Promise<import("@keymaster/contracts").StorageAppContext> {
+export async function __testResolveStorageGrant(grantId: string, actualPortId: string): Promise<import("@keymaster/contracts").OwnerAppStorageGrant> {
   return (await resolveStorageGrant(grantId, actualPortId)).context;
 }
 
@@ -6623,6 +7671,11 @@ export function __testSeedStorageRequest(requestId: string, actualPortId: string
   return controller.signal;
 }
 
+/** 测试专用：模拟 Provider 忽略 AbortSignal 的 owner-scoped 在途请求。 */
+export function __testSeedOwnerStorageRequest(ownerPublicKeyHex: string): () => void {
+  return beginOwnerStorageRequest(ownerPublicKeyHex);
+}
+
 export async function __testDispatchStorageCancel(targetRequestId: string, actualPortId: string): Promise<CoordinatorResponse> {
   return executeStorageRequest({ kind: "storage.cancel", clientId: actualPortId, requestId: crypto.randomUUID(), targetRequestId }, actualPortId);
 }
@@ -6713,6 +7766,53 @@ export async function __testStorageSlotErrorCodes(): Promise<{ queueFull: string
   return { queueFull, queuedAbort, activeAbort };
 }
 
+/**
+ * 测试专用：四个忽略 AbortSignal 的物理操作被取消后仍占用 slot；第五个
+ * 操作必须等真实 Provider Promise settle 后才能启动。
+ */
+export async function __testStorageCancelKeepsPhysicalSlots(): Promise<{
+  activeAfterCancel: number;
+  queuedAfterCancel: number;
+  fifthStartedAfterCancel: boolean;
+  activeDuringFifth: number;
+  fifthStartedAfterPhysicalRelease: boolean;
+  finalActive: number;
+}> {
+  __testResetState();
+  const controllers = Array.from({ length: STORAGE_DATA_CONCURRENCY }, () => new AbortController());
+  const releases: Array<() => void> = [];
+  const canceledRpc = controllers.map((controller, index) => withStorageDataSlot(
+    `slot-cancel-${index}`,
+    () => new Promise<void>((resolve) => { releases.push(resolve); }),
+    controller.signal
+  ).catch(() => undefined));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  controllers.forEach((controller) => controller.abort());
+  await Promise.all(canceledRpc);
+
+  let fifthStarted = false;
+  let releaseFifth!: () => void;
+  const fifth = withStorageDataSlot("slot-cancel-fifth", () => new Promise<void>((resolve) => {
+    fifthStarted = true;
+    releaseFifth = resolve;
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const afterCancel = __testStorageQueueSnapshot();
+  releases.forEach((release) => release());
+  for (let i = 0; i < 3 && !fifthStarted; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+  const afterPhysicalRelease = __testStorageQueueSnapshot();
+  releaseFifth();
+  await fifth;
+  return {
+    activeAfterCancel: afterCancel.globalActive,
+    queuedAfterCancel: afterCancel.queued,
+    fifthStartedAfterCancel: fifthStarted && afterCancel.globalActive < STORAGE_DATA_CONCURRENCY,
+    activeDuringFifth: afterPhysicalRelease.globalActive,
+    fifthStartedAfterPhysicalRelease: fifthStarted,
+    finalActive: __testStorageQueueSnapshot().globalActive
+  };
+}
+
 export function __testRegisterTask(input: {
   id: string;
   publicKeyHex: string;
@@ -6758,7 +7858,7 @@ export async function __testRestartWorker(): Promise<void> {
   dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
-  coordinatorState.storageSecretKey = undefined;
+  coordinatorState.vaultLocalSecretKey = undefined;
   if (meta && !await reconcileSelectedPublicKey()) coordinatorState.vaultStatus = "uninitialized";
 }
 
@@ -6766,16 +7866,16 @@ export async function __testRestartWorker(): Promise<void> {
 // 15. Backup Import Test Helpers
 // ============================================================
 
-/** 删除 Vault（清理 IndexedDB）。 */
+/** 测试专用：删除 Vault 密钥材料。 */
 export async function __testDeleteVault(): Promise<void> {
   try {
     // 删除所有 keys
-    const keys = await vaultDb.listKeys();
+    const keys = await vaultKeyRepository.listKeys();
     for (const key of keys) {
-      await vaultDb.deleteKeyAndSidecars(key.publicKeyHex);
+      await vaultKeyRepository.deleteKeyAndSidecars(key.publicKeyHex);
     }
     // 删除 meta
-    await vaultDb.deleteMeta();
+    await vaultKeyRepository.deleteMeta();
   } catch {
     // 忽略错误（可能数据库不存在）
   }
@@ -6785,8 +7885,26 @@ export async function __testDeleteVault(): Promise<void> {
   dropActivePrivateKey();
   coordinatorState.passwordKey = undefined;
   coordinatorState.password = undefined;
-  coordinatorState.storageSecretKey = undefined;
+  coordinatorState.vaultLocalSecretKey = undefined;
   coordinatorState.keyspaceGeneration = 0;
+}
+
+/** 测试专用：清空一个平台 K-V namespace，不连接浏览器持久化 API。 */
+export async function __testClearPlatformNamespace(applicationStorageId: string): Promise<void> {
+  ensureTestPlatformStorage();
+  if (!platformRootStore) throw new Error("Test platform storage is not ready");
+  const store = await platformRootStore.openPlatformStore({ applicationStorageId, schemaVersion: 1 });
+  for (const partition of ["default", "settings", "suppliers", "policies", "usages"]) {
+    for (;;) {
+      const page = await store.list({ partition, limit: 1000 });
+      if (page.entries.length === 0) break;
+      await store.commit({
+        partition,
+        ifRevision: page.revision,
+        operations: page.entries.map((entry) => ({ type: "delete" as const, key: entry.key }))
+      });
+    }
+  }
 }
 
 /** 创建 Vault（空或带初始 key）。 */
@@ -6816,6 +7934,16 @@ export async function __testSetActive(publicKeyHex: string): Promise<void> {
   await executeVaultOperation({ type: "setActive", publicKeyHex });
 }
 
+/** 测试专用：直接通过一个 Worker owner K-V handle 验证当前 owner 可写。 */
+export async function __testOwnerStoragePut(key: string, value: unknown): Promise<void> {
+  const store = createWorkerOwnerStore("msfile", 1);
+  try {
+    await store.put(key, value, { partition: "transition-test" });
+  } finally {
+    store.close();
+  }
+}
+
 /** 导出备份。 */
 export async function __testExportKeyBackup(publicKeyHex: string): Promise<string> {
   const result = await executeVaultOperation({ type: "exportKeyBackup", publicKeyHex });
@@ -6830,7 +7958,11 @@ export async function __testExportCurrentKeyBackup(): Promise<string> {
 
 /** Test-only facade for the worker's atomic key+sidecar deletion primitive. */
 export async function __testDeleteKeyMaterial(publicKeyHex: string): Promise<void> {
-  await executeVaultOperation({ type: "deleteKeyMaterial", publicKeyHex });
+  // 测试接缝也走与生产相同的 Journal + owner namespace 联合删除，
+  // 只放宽“必须 unlocked”的 RPC 前置条件以覆盖 locked cold path。
+  const key = await vaultKeyRepository.getKey(publicKeyHex);
+  if (!key) throw new Error("Key not found");
+  await executeKeyDeletion(publicKeyHex, key.label);
 }
 
 /** Test-only invocation of the single empty-vault finalization operation. */

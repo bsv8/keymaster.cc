@@ -1,6 +1,6 @@
 // 页面侧 SatSubscription / Channel facade。
 //
-// 页面不打开 Sat DB、不创建网络连接、不接触私钥或 SSP wire。所有动作都
+// 页面不打开 Sat K-V、不创建网络连接、不接触私钥或 SSP wire。所有动作都
 // 通过 SharedWorker 的 typed RPC 完成；Channel runtime 是唯一业务消息入口。
 
 import type {
@@ -21,10 +21,10 @@ import type {
   SatTopUpPreview,
   SatTopUpResult,
   SatCollectResult,
-  SessionCoordinatorClient
+  SatCoordinatorControl
 } from "@keymaster/contracts";
 
-function unwrap<T>(result: Awaited<ReturnType<SessionCoordinatorClient["satOperation"]>>, operation: string): T {
+function unwrap<T>(result: Awaited<ReturnType<SatCoordinatorControl["satOperation"]>>, operation: string): T {
   if (result.status !== "ok") {
     const message = "message" in result
       ? result.message
@@ -38,7 +38,7 @@ function unwrap<T>(result: Awaited<ReturnType<SessionCoordinatorClient["satOpera
   return result.value as T;
 }
 
-function unwrapChannel<T>(result: Awaited<ReturnType<SessionCoordinatorClient["channelOperation"]>>, operation: string): T {
+function unwrapChannel<T>(result: Awaited<ReturnType<SatCoordinatorControl["channelOperation"]>>, operation: string): T {
   if (result.status !== "ok") {
     const message = "message" in result
       ? result.message
@@ -54,7 +54,7 @@ function unwrapChannel<T>(result: Awaited<ReturnType<SessionCoordinatorClient["c
 
 /** SharedWorker 事件总线中的原始 SSP Publish；只给 Sat 设置页诊断使用。 */
 export function subscribeSatIncoming(
-  coordinator: SessionCoordinatorClient,
+  coordinator: SatCoordinatorControl,
   handler: SatIncomingPublishHandler
 ): () => void {
   return coordinator.subscribeTopic("sat.events", (raw: { event?: { type?: string; event?: SatIncomingPublish } }) => {
@@ -75,23 +75,23 @@ export function subscribeSatIncoming(
   });
 }
 
-function currentOwner(coordinator: SessionCoordinatorClient): string {
+function currentOwner(coordinator: SatCoordinatorControl): string {
   const owner = coordinator.getBootstrapSnapshot().activePublicKeyHex;
   if (!owner) throw new Error("No unlocked active owner");
   return owner;
 }
 
-function callSat<T>(coordinator: SessionCoordinatorClient, operation: CoordinatorSatOperation, label: string): Promise<T> {
+function callSat<T>(coordinator: SatCoordinatorControl, operation: CoordinatorSatOperation, label: string): Promise<T> {
   return coordinator.satOperation(operation).then((result) => unwrap<T>(result, label));
 }
 
-function callChannel<T>(coordinator: SessionCoordinatorClient, operation: CoordinatorChannelOperation, label: string): Promise<T> {
+function callChannel<T>(coordinator: SatCoordinatorControl, operation: CoordinatorChannelOperation, label: string): Promise<T> {
   return coordinator.channelOperation(operation).then((result) => unwrapChannel<T>(result, label));
 }
 
 /** 受信任插件使用的 Channel runtime。caller id 在 Coordinator 内生成。 */
 export function createSatWorkerChannelRuntime(
-  coordinator: SessionCoordinatorClient,
+  coordinator: SatCoordinatorControl,
   caller: { kind: "plugin"; pluginId: string } | { kind: "system"; systemId: string }
 ): ChannelRuntime {
   const subscribedChannels = new Set<string>();
@@ -198,7 +198,7 @@ export function createSatWorkerChannelRuntime(
 }
 
 /** 页面 trusted Sat 管理 facade；仍然只传语义化参数。 */
-export function createSatWorkerAdminService(coordinator: SessionCoordinatorClient): SatSubscriptionAdminService {
+export function createSatWorkerAdminService(coordinator: SatCoordinatorControl): SatSubscriptionAdminService {
   return {
     getSettingsSnapshot: () => callSat<SatSubscriptionSettingsSnapshot>(coordinator, { type: "admin.getSettings" }, "Sat settings"),
     upsertSupplier: (config: SatSupplierConfigV1) => callSat<void>(coordinator, { type: "admin.upsertSupplier", config }, "Sat supplier save"),
@@ -209,7 +209,7 @@ export function createSatWorkerAdminService(coordinator: SessionCoordinatorClien
 }
 
 /** 页面 SPI facade；BigInt/Uint8Array 由 structured clone 原样传输。 */
-export function createSatWorkerSpiService(coordinator: SessionCoordinatorClient): SatSubscriptionSpiService {
+export function createSatWorkerSpiService(coordinator: SatCoordinatorControl): SatSubscriptionSpiService {
   return {
     getInformation: (input) => callSat<SatSpiInformation>(coordinator, { type: "spi.getInformation", input }, "SPI Information"),
     prepareTopUp: (input) => callSat<SatTopUpPreview>(coordinator, { type: "spi.prepareTopUp", input }, "SPI top-up preview"),

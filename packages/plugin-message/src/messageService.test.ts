@@ -1,32 +1,31 @@
 // 消息 service 单测：Channel 私信 + 当前 owner 本地历史。
 
-import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
 import type {
   ActiveKeyState,
   ChannelPrivateMessageEvent,
   ChannelRuntime,
+  OwnerAppStore,
   KeyspaceService
 } from "@keymaster/contracts";
 import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
-import { createMessageDb } from "./messageDb.js";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime";
+import { createMessageRepository } from "./storage/messageRepository.js";
 import { createMessageService } from "./messageService.js";
 
 const OWNER = "02" + "aa".repeat(32);
 const OTHER_OWNER = "03" + "cc".repeat(32);
 const PEER = "03" + "bb".repeat(32);
-let databaseSequence = 0;
-
 interface TestKeyspace {
   keyspace: KeyspaceService;
   state: ActiveKeyState;
-  databaseNameFor(ownerPublicKeyHex: string): string;
+  stores: Map<string, OwnerAppStore>;
 }
 
 function keyspace(): TestKeyspace {
   const state: ActiveKeyState = { activePublicKeyHex: OWNER };
-  const databaseNamePrefix = `message-service-test-${databaseSequence++}`;
-  const databaseNameFor = (ownerPublicKeyHex: string) => `${databaseNamePrefix}-${ownerPublicKeyHex.toLowerCase()}`;
+  const stores = new Map<string, OwnerAppStore>();
+  stores.set(OWNER, createInMemoryKeyValueStore({ scope: "key", ownerPublicKeyHex: OWNER, applicationStorageId: "Messages", schemaVersion: 1, bucketId: "test", bucketGeneration: 1 }) as OwnerAppStore);
   const value: KeyspaceService = {
     listKeys: async () => [],
     getKey: async () => undefined,
@@ -35,21 +34,12 @@ function keyspace(): TestKeyspace {
     setActive: async () => undefined,
     requireActiveKey: () => ({ publicKeyHex: OWNER, label: "test", capabilities: [], createdAt: "now" }),
     onActiveKeyChanged: () => () => undefined,
-    openKeyStorage: async (input) => new Promise((resolve, reject) => {
-      const databaseName = databaseNameFor(input.publicKeyHex);
-      const request = indexedDB.open(databaseName, input.version);
-      request.onupgradeneeded = (event) => input.upgrade(request.result, (event as IDBVersionChangeEvent).oldVersion, input.version, request.transaction ?? undefined);
-      request.onsuccess = () => resolve({ db: request.result, name: databaseName, close: () => request.result.close() });
-      request.onerror = () => reject(request.error);
-    }),
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
     isInitializing: () => false,
     onInitializationChange: () => () => undefined
   };
-  return { keyspace: value, state, databaseNameFor };
+  return { keyspace: value, state, stores };
 }
 
 function channel(input: {
@@ -79,14 +69,16 @@ function channel(input: {
 describe("createMessageService", () => {
   it("reports readiness from the owner-scoped Channel runtime", () => {
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: keyspace().keyspace });
+    const fixture = keyspace();
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
     expect(service.isReady()).toBe(true);
     service.dispose?.();
   });
 
   it("publishes a private message and stores only the local record", async () => {
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: keyspace().keyspace });
+    const fixture = keyspace();
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
 
     await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "hello" });
 
@@ -103,7 +95,8 @@ describe("createMessageService", () => {
 
   it("persists a valid incoming message and sends an independent ACK", async () => {
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: keyspace().keyspace });
+    const fixture = keyspace();
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
     transport.emit({
       channel: `bsv8.inbox.${OWNER}`,
       publisherPublicKeyHex: PEER,
@@ -129,7 +122,8 @@ describe("createMessageService", () => {
 
   it("rejects an invalid target before publishing", async () => {
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: keyspace().keyspace });
+    const fixture = keyspace();
+    const service = createMessageService({ channel: transport.runtime, keyspace: fixture.keyspace, storage: fixture.stores.get(OWNER) });
     await expect(service.sendTextMessage({ recipientPublicKeyHex: "not-a-public-key", body: "hello" }))
       .rejects.toThrow("invalid_target");
     expect(transport.publishPrivate).not.toHaveBeenCalled();
@@ -141,7 +135,7 @@ describe("createMessageService", () => {
     let releasePublish!: (value: { messageId: string }) => void;
     const publishGate = new Promise<{ messageId: string }>((resolve) => { releasePublish = resolve; });
     const transport = channel({ publishPrivate: async () => publishGate });
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace });
+    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER) });
 
     const pendingSend = service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "owner fenced" });
     await vi.waitFor(() => expect(transport.publishPrivate).toHaveBeenCalled());
@@ -150,20 +144,20 @@ describe("createMessageService", () => {
     releasePublish({ messageId: "late-message" });
 
     await expect(pendingSend).rejects.toThrow("owner_changed");
-    const db = createMessageDb(testKeyspace.keyspace);
+    const db = createMessageRepository(testKeyspace.stores.get(OWNER)!);
     testKeyspace.state.activePublicKeyHex = OWNER;
     testKeyspace.state.generation = 1;
-    await expect(db.list(OWNER)).resolves.toEqual([]);
+    await expect(db.list()).resolves.toEqual([]);
     testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
     testKeyspace.state.generation = 2;
-    await expect(db.list(OTHER_OWNER)).resolves.toEqual([]);
+    await expect(db.list()).resolves.toEqual([]);
     service.dispose?.();
   });
 
   it("drops an incoming message when the owner changes before the DB write", async () => {
     const testKeyspace = keyspace();
     const transport = channel();
-    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace });
+    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER) });
     transport.emit({
       channel: `bsv8.inbox.${OWNER}`,
       publisherPublicKeyHex: PEER,
@@ -180,45 +174,22 @@ describe("createMessageService", () => {
     testKeyspace.state.activePublicKeyHex = OTHER_OWNER;
     testKeyspace.state.generation = 2;
 
-    await vi.waitFor(async () => expect(await createMessageDb(testKeyspace.keyspace).list(OTHER_OWNER)).toEqual([]));
+    await vi.waitFor(async () => expect(await createMessageRepository(testKeyspace.stores.get(OWNER)!).list()).toEqual([]));
     expect(transport.publishPrivate).not.toHaveBeenCalled();
     testKeyspace.state.activePublicKeyHex = OWNER;
     testKeyspace.state.generation = 1;
-    await expect(createMessageDb(testKeyspace.keyspace).list(OWNER)).resolves.toEqual([]);
+    await expect(createMessageRepository(testKeyspace.stores.get(OWNER)!).list()).resolves.toEqual([]);
     service.dispose?.();
   });
 
-  it("preserves an existing messages store while upgrading it to version 2", async () => {
+  it("writes message history as owner K-V records", async () => {
     const testKeyspace = keyspace();
-    const databaseName = testKeyspace.databaseNameFor(OWNER);
-    const record = {
-      messageId: "legacy-message",
-      clientMessageId: "legacy-client",
-      senderPublicKeyHex: OWNER,
-      recipientPublicKeyHex: PEER,
-      contentType: "text/plain",
-      body: "legacy history",
-      createdAtMs: 1,
-      insertedAtMs: 2
-    };
-    await new Promise<void>((resolve, reject) => {
-      const request = indexedDB.open(databaseName, 1);
-      request.onupgradeneeded = () => request.result.createObjectStore("messages", { keyPath: "messageId" }).put(record);
-      request.onsuccess = () => { request.result.close(); resolve(); };
-      request.onerror = () => reject(request.error);
-    });
-
-    const db = createMessageDb(testKeyspace.keyspace);
-    await expect(db.list(OWNER)).resolves.toEqual([record]);
-    const handle = await testKeyspace.keyspace.openKeyStorage({
-      publicKeyHex: OWNER,
-      pluginId: "message",
-      storageId: "history",
-      version: 2,
-      upgrade: () => undefined
-    });
-    expect(handle.db.objectStoreNames.contains("messages")).toBe(true);
-    expect(handle.db.transaction("messages", "readonly").objectStore("messages").indexNames.contains("insertedAtMs")).toBe(true);
-    handle.close();
+    const transport = channel();
+    const service = createMessageService({ channel: transport.runtime, keyspace: testKeyspace.keyspace, storage: testKeyspace.stores.get(OWNER) });
+    await service.sendTextMessage({ recipientPublicKeyHex: PEER, body: "stored in K-V" });
+    const entries = await testKeyspace.stores.get(OWNER)!.list({ partition: "messages", prefix: "message/" });
+    expect(entries.entries).toHaveLength(1);
+    expect(entries.entries[0]?.value).toEqual(expect.objectContaining({ body: "stored in K-V" }));
+    service.dispose?.();
   });
 });

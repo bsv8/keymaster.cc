@@ -10,14 +10,15 @@ import type {
   PluginManifest,
   ResourceRegistry,
   SystemSettingsRegistry,
-  TopbarRegistry
+  TopbarRegistry,
+  BackgroundCoordinatorControl
 } from "@keymaster/contracts";
 import {
   BACKGROUND_REGISTRY_CAPABILITY,
   BACKGROUND_SERVICE_CAPABILITY,
+  BACKGROUND_COORDINATOR_CONTROL_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
   TOPBAR_REGISTRY_CAPABILITY
 } from "@keymaster/contracts";
 import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinator.js";
@@ -108,12 +109,14 @@ export const backgroundPlugin: PluginManifest = {
   meta: {
     kind: "platform",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY],
+    providesCapabilities: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY, BACKGROUND_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "platform"
   },
   i18n: backgroundResources,
+  storage: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
   dependencies: [
     { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" },
     { capability: "system-settings.registry", reason: "注册后台同步系统设置" }
@@ -123,7 +126,9 @@ export const backgroundPlugin: PluginManifest = {
     let registry: BackgroundRegistry;
     let service: BackgroundService;
 
-    const coordinatorClient = ctx.get<CoordinatorClientLike>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+    const coordinatorClient = ctx.coordinator as BackgroundCoordinatorControl | undefined;
+    if (!coordinatorClient) throw new Error("Background Coordinator control is unavailable");
+    ctx.provide(BACKGROUND_COORDINATOR_CONTROL_CAPABILITY, coordinatorClient);
     if (coordinatorClient.getIsConnected()) {
       // 使用 Coordinator facade
       service = createBackgroundServiceCoordinator({ coordinatorClient });

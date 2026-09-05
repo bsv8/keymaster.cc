@@ -118,7 +118,7 @@ export class ChannelSubscriptionMux {
    *
    * 进行中的 driver Promise 无法被强制取消，但 dispose 会取消所有后续
    * 重试并阻止旧 caller 集合再次驱动新连接，避免 owner 切换后旧 Runtime
-   * 复活。远端未完成的退订由 owner-scoped Sat DB 中的清理意图接管。
+   * 复活。远端未完成的退订由 owner-scoped Sat K-V 中的清理意图接管。
    */
   dispose(): void {
     if (this.disposed) return;

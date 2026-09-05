@@ -7,6 +7,8 @@ import type { MessageBus } from "./messageBus.js";
 import type { I18nPluginResources } from "./i18n.js";
 import type { PluginLogger } from "./log.js";
 import type { PluginBusinessContribution } from "./business.js";
+import type { PluginStorageDeclaration } from "./storage/access.js";
+import type { KeyValueStore } from "./storage/kv.js";
 
 /** 插件运行时上下文，由 plugin host 创建并传入 setup。 */
 export interface PluginContext {
@@ -50,6 +52,16 @@ export interface PluginContext {
    *     内部 store；前者是插件作者自定义字段。
    */
   readonly config?: Record<string, unknown>;
+  /** Host 在 setup 前按 manifest 声明预绑定的 owner/App K-V 句柄。 */
+  readonly storage?: KeyValueStore;
+  /**
+   * Host 按 manifest.id 注入的 Coordinator 窄权限面。
+   *
+   * 该字段是插件身份绑定的，不允许插件通过 capability 字符串索引其它
+   * 插件的 Coordinator 面。具体插件应把它收窄为自己的
+   * `*CoordinatorControl` 契约后再使用。
+   */
+  readonly coordinator?: unknown;
 }
 
 /** 插件依赖描述。 */
@@ -70,6 +82,19 @@ export type PluginKind = "core" | "platform" | "business";
 
 /** 首屏是否允许在该插件缺失时挂载 entrypoint。 */
 export type PluginStartupMode = "required" | "optional";
+
+/**
+ * 插件进入应用启动流水线的明确阶段。
+ *
+ * 装配层只能按这个字段分阶段注册，不能从 pluginId、storage scope
+ * 或插件分类反推阶段。通用 runtime 测试夹具可以省略该字段；应用实际
+ * catalog 必须为每个 manifest 显式填写。
+ */
+export type PluginBootstrapStage =
+  | "storage-onboarding"
+  | "vault-selection"
+  | "owner-apps-ready"
+  | "connect-apps-ready";
 
 export interface StartupCapabilityErrorDetails {
   capability: string;
@@ -103,6 +128,8 @@ export interface PluginMeta {
   canDisable: boolean;
   /** 必须显式选择；required 插件必须 defaultEnabled=true、canDisable=false 且提供能力。 */
   startup: PluginStartupMode;
+  /** 应用启动门禁阶段；生产 manifest 必须显式声明。 */
+  bootstrapStage?: PluginBootstrapStage;
   /** 该插件提供哪些 capability（供反向依赖查询使用）。 */
   providesCapabilities?: string[];
   /** UI 分组（仅展示），不传则按 kind 兜底。 */
@@ -134,12 +161,10 @@ export interface PluginManifest {
    */
   meta: PluginMeta;
   /**
-   * 声明插件拥有的 key-scoped storage。
-   * 装载时由 runtime 自动调用 keyspace.registerPluginStorage，让 keyspace
-   * 在 deleteKey 时能找到要删除的 DB；插件不得直接 indexedDB.open 固定名字
-   * 的 key 相关 DB。
+   * 新统一存储声明。系统 App 也只能通过 `scope: "key"` 获取自己的目录；
+   * `scope: "platform"` 由 Host 白名单显式授权，普通插件会被拒绝。
    */
-  keyScopedStorages?: PluginKeyStorageDeclaration[];
+  storage?: PluginStorageDeclaration;
   /**
    * 显式配置面（施工单 2026-07-08 001 硬切换）。
    *
@@ -169,14 +194,6 @@ export interface PluginManifest {
    */
   i18n?: I18nPluginResources;
   setup(ctx: PluginContext): void | Promise<void> | PluginTeardown | Promise<PluginTeardown>;
-}
-
-/** 插件声明的一个 key-scoped storage。 */
-export interface PluginKeyStorageDeclaration {
-  /** storage 唯一 id（插件内）。 */
-  storageId: string;
-  /** 描述，便于诊断。 */
-  description?: string;
 }
 
 /**

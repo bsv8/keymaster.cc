@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createBsv21SpendProtectionProvider } from "./bsv21SpendProtection.js";
 import type { AssetDataNotifier, KeyspaceService } from "@keymaster/contracts";
-import type { Bsv21Db } from "./bsv21Db.js";
+import type { Bsv21StateRepository } from "./storage/bsv21StateRepository.js";
 
 function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
   let current = activePublicKeyHex;
@@ -11,7 +11,7 @@ function fakeKeyspace(activePublicKeyHex?: string): KeyspaceService {
   } as unknown as KeyspaceService & { setActive(hex: string | undefined): void };
 }
 
-function fakeDb(records: Array<{ origin: string; outpoint?: string; network: "main" | "test" }>): Bsv21Db {
+function fakeRepository(records: Array<{ origin: string; outpoint?: string; network: "main" | "test" }>): Bsv21StateRepository {
   return {
     async list() {
       return records.map((record) => ({
@@ -22,7 +22,7 @@ function fakeDb(records: Array<{ origin: string; outpoint?: string; network: "ma
         canonicalTxid: record.outpoint?.split("_")[0]
       }));
     }
-  } as unknown as Bsv21Db;
+  } as unknown as Bsv21StateRepository;
 }
 
 function fakeNotifier(): AssetDataNotifier & {
@@ -52,9 +52,9 @@ function fakeNotifier(): AssetDataNotifier & {
 describe("createBsv21SpendProtectionProvider", () => {
   it("refreshes protected outpoints when bsv21 asset data changes", async () => {
     const keyspace = fakeKeyspace("pk1");
-    const db = fakeDb([{ origin: "tok1", outpoint: "tx1_0", network: "main" }]);
+    const stateRepository = fakeRepository([{ origin: "tok1", outpoint: "tx1_0", network: "main" }]);
     const notifier = fakeNotifier();
-    const provider = createBsv21SpendProtectionProvider({ db, keyspace, assetDataNotifier: notifier });
+    const provider = createBsv21SpendProtectionProvider({ stateRepository, keyspace, assetDataNotifier: notifier });
     const handler = vi.fn();
     if (!provider.onChange) {
       throw new Error("provider.onChange is required for refresh propagation");

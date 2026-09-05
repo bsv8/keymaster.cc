@@ -18,7 +18,7 @@ import type {
   CoordinatorCommandResult,
   CoordinatorValueResult,
   VaultLifecycleSnapshot,
-  SessionCoordinatorClient,
+  VaultCoordinatorControl,
   PasskeyProtection,
 } from "@keymaster/contracts";
 import type { SessionStateMirror } from "./sessionStateMirror.js";
@@ -35,10 +35,7 @@ interface VaultKeyMaterial {
 }
 
 /** Vault facade 所需的 Coordinator contract 子集。 */
-export type CoordinatorClientLike = Pick<
-  SessionCoordinatorClient,
-  "getIsConnected" | "getBootstrapSnapshot" | "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto"
->;
+export type CoordinatorClientLike = VaultCoordinatorControl;
 
 export interface VaultServiceCoordinatorDeps {
   coordinatorClient: CoordinatorClientLike;
@@ -281,7 +278,8 @@ export class VaultServiceCoordinator implements VaultService {
   }
 
   async deleteKeyMaterial(publicKeyHex: string): Promise<void> {
-    await this.call("deleteKeyMaterial", { publicKeyHex });
+    void publicKeyHex;
+    throw new Error("Use keyspace.deleteKey instead");
   }
 
   async removeKey(publicKeyHex: string): Promise<void> {

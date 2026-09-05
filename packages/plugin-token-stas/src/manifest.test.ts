@@ -11,11 +11,13 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // --- 模块 mock ---
 
-// 可配置的 db.list 返回值
+// 可配置的 stateRepository.list 返回值
 let mockDbListResult: unknown[] = [];
 
-vi.mock("./stasDb.js", () => ({
-  createStasDb: vi.fn(() => ({
+vi.mock("./storage/stasRepository.js", () => ({
+  STAS_STORAGE_ID: "STAS",
+  STAS_SCHEMA_VERSION: 1,
+  createStasRepository: vi.fn(() => ({
     put: vi.fn(),
     replaceAll: vi.fn(),
     list: vi.fn(() => Promise.resolve(mockDbListResult)),
@@ -100,7 +102,7 @@ function createMockCtx() {
   const capabilities = new Map<string, unknown>([
     ["p2pkh.service", { onGlobalSettingsChange }],
     ["woc.stas.service", {}],
-    ["keyspace.service", { onActiveKeyChanged: onActiveChange, active: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openKeyStorage: vi.fn() }],
+    ["keyspace.service", { onActiveKeyChanged: onActiveChange, active: () => ({ activePublicKeyHex: "pk1" }), isInitializing: () => false, openOwnerAppStore: vi.fn() }],
     ["token.registry", { register: tokenRegister }],
     ["background.registry", { register }],
     ["runtime.messageBus", mockMessageBus],
@@ -110,6 +112,9 @@ function createMockCtx() {
   ]);
 
   const ctx = {
+    // manifest 的 owner/App K-V 句柄注入由 Host 负责；本测试只验证事件绑定，
+    // 因此使用不会被 mock Repository 实际访问的最小占位值。
+    storage: {} as never,
     get: vi.fn((key: string) => capabilities.get(key)),
     has: vi.fn(() => true),
   };

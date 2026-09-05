@@ -5,10 +5,13 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./connect-public": "./src/connectPublic.ts"
+    "./connect-public": "./src/connectPublic.ts",
+    "./storage": "./src/storage/index.ts",
+    "./storage-internal": "./src/storage/internal.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {
+    "@noble/hashes": "^2.0.1",
     "cborg": "^5.1.6"
   }
 }

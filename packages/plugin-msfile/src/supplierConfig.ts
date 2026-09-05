@@ -79,7 +79,7 @@ function parsePort(value: string | undefined): boolean {
 
 /**
  * 按精确组件序列校验一个 multiaddr。返回错误消息而不是异常，
- * 便于设置页逐字段展示。DB 读回与拨号前复用本函数。
+ * 便于设置页逐字段展示。K-V 读回与拨号前复用本函数。
  */
 export function normalizeSupplierAddress(
   input: string,
@@ -229,7 +229,7 @@ export function normalizeSupplierDraft(
 }
 
 /**
- * DB 读回 / 拨号前的严格复核（审查修复）：
+ * K-V 读回 / 拨号前的严格复核（审查修复）：
  * 持久化记录可能来自旧版本校验或被外部改动；不合法即 fail closed。
  */
 export function validatePersistedSupplier(

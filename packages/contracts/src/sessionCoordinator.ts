@@ -17,8 +17,7 @@ import type { I18nText } from "./i18n.js";
 import type { BackgroundTaskProgress } from "./background.js";
 import type { VaultSealedSecret } from "./vault.js";
 import type {
-  StorageAppContext,
-  StorageProviderConfigDraft,
+  OwnerAppStorageGrant,
   StorageListResult,
   StorageDirectoryResult,
   StoragePutResult,
@@ -26,14 +25,18 @@ import type {
   StorageDeleteResult,
   StorageUploadBeginResult,
   StorageUploadPartResult,
-  StorageUploadAbortResult,
-  StorageConditionalCapabilityProbeResult,
+  StorageUploadAbortResult
+} from "./connectStorage.js";
+import type {
+  BucketConditionalCapabilityProbeResult,
   StorageProbeResult,
   StorageProviderSummary,
   StorageProviderConnectionView,
-  StorageConditionalCapabilitiesView,
-  StorageServiceStatus,
-} from "./storage.js";
+  BucketConditionalCapabilitiesView,
+  StorageRuntimeControllerStatus,
+  StorageRuntimeStatus
+} from "./storage/runtime.js";
+import type { StorageProviderConfigDraft } from "./storage/profile.js";
 import type {
   P2pkhProviderSettings,
   P2pkhProviderRegistrySnapshot,
@@ -79,6 +82,10 @@ export type CoordinatorStorageControl =
   | { type: "status" }
   | { type: "summary" }
   | { type: "connection" }
+  | { type: "unlock-profile"; password: string }
+  | { type: "select-opfs" }
+  | { type: "import-profile"; envelope: import("./storage/profile.js").StorageProfileEnvelopeV1; password: string }
+  | { type: "retry" }
   | { type: "probe"; config: StorageProviderConfigDraft }
   | { type: "activate"; config: StorageProviderConfigDraft; expectedProviderGeneration: number | null }
   | { type: "clear"; expectedProviderGeneration: number | null }
@@ -106,6 +113,14 @@ export type CoordinatorClientRequestWithStorage =
   | { kind: "storage.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "disconnect"; clientId: string; requestId: string }
   | { kind: "storage.session.abort"; clientId: string; requestId: string; connectSessionId: string; expectedSessionEpoch: SessionEpoch };
+
+/** Host/Coordinator 内部存储请求，不属于插件可见的 SessionCoordinatorClient。 */
+export type CoordinatorClientRequestWithInternalStorage =
+  | { kind: "storage.owner.bind"; clientId: string; requestId: string; pluginId: string; declaration: import("./storage/access.js").PluginStorageDeclaration; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.platform.bind"; clientId: string; requestId: string; pluginId: string; declaration: import("./storage/access.js").PluginStorageDeclaration; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.owner.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorOwnerStorageData; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.platform.data"; clientId: string; requestId: string; data: import("./storage/internal.js").CoordinatorPlatformStorageData; expectedSessionEpoch: SessionEpoch }
+  | { kind: "storage.owner.delete"; clientId: string; requestId: string; ownerPublicKeyHex: string; expectedSessionEpoch: SessionEpoch };
 
 /** MSFile 设置/App 策略真值在 Coordinator；页面只通过 control RPC 读写。 */
 export type CoordinatorMsFileControl =
@@ -198,12 +213,13 @@ export type CoordinatorClientRequestWithWindowP2pExecutor =
 
 export type CoordinatorClientRequest =
   | CoordinatorClientRequestWithStorage
+  | CoordinatorClientRequestWithInternalStorage
   | CoordinatorClientRequestWithMsfile
   | CoordinatorClientRequestWithWindowP2pExecutor
   | { kind: "sat.operation"; clientId: string; requestId: string; operation: CoordinatorSatOperation; expectedSessionEpoch: SessionEpoch }
   | { kind: "channel.operation"; clientId: string; requestId: string; operation: CoordinatorChannelOperation; expectedSessionEpoch: SessionEpoch }
   | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-  | ({ kind: "hello"; clientId: string; requestId: string }
+  | ({ kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: import("./storage/profile.js").StorageBootstrapState }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
@@ -273,7 +289,7 @@ export type CoordinatorVaultOperation =
   | { type: "listKeys" }
   | { type: "getKey"; publicKeyHex: string }
   | { type: "setActive"; publicKeyHex: string }
-  | { type: "deleteKeyMaterial"; publicKeyHex: string }
+  | { type: "deleteKey"; publicKeyHex: string; confirmationLabel: string }
   | { type: "verifyPassword"; password: string }
   | { type: "changePassword"; oldPassword: string; newPassword: string }
   | { type: "finalizeEmptyVaultAfterLastKeyDeletion" }
@@ -309,7 +325,7 @@ export type CoordinatorCommandAck =
   | { status: "not-ready" }
   | { status: "validation-error"; message: string }
   | { status: "ok" }
-  | { status: "error"; message: string; code?: import("./storage.js").StorageErrorCode | import("./msfile.js").MsFileErrorCode | SatErrorCode | WindowP2pExecutorError["code"] };
+  | { status: "error"; message: string; code?: import("./storage/runtime.js").StorageErrorCode | import("./msfile.js").MsFileErrorCode | SatErrorCode | WindowP2pExecutorError["code"] };
 
 /** RPC 响应。 */
 export interface CoordinatorResponse {
@@ -398,9 +414,11 @@ export interface CoordinatorStorageStateEvent {
   storageRevision: number;
   sessionEpoch: SessionEpoch;
   providerGeneration: number | null;
-  status: StorageServiceStatus;
+  status: StorageRuntimeControllerStatus;
+  /** 独立于 Vault 的 Provider/统一桶健康状态。 */
+  healthStatus?: StorageRuntimeStatus;
   summary: StorageProviderSummary | null;
-  capabilities: StorageConditionalCapabilitiesView | null;
+  capabilities: BucketConditionalCapabilitiesView | null;
 }
 
 /** The complete public session snapshot. This is the sole cross-tab session event. */
@@ -470,6 +488,8 @@ export interface CoordinatorBootstrapSnapshot {
   keyspaceGeneration: number;
   taskSnapshots: CoordinatorTaskSnapshot[];
   scheduleSettings: CoordinatorBackgroundSyncSettings;
+  /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
+  p2pkhSettings?: { includeTestnet: boolean };
   p2pkhProviders?: P2pkhProviderRegistrySnapshot;
 }
 
@@ -509,9 +529,13 @@ export interface SessionCoordinatorClient {
   activateKey(password: string, publicKeyHex: string): Promise<CoordinatorCommandResult>;
   vaultOperation(operation: CoordinatorVaultOperation | string, input?: unknown): Promise<CoordinatorValueResult<unknown>>;
   crypto(operation: CoordinatorCryptoOperation): Promise<{ ack: CoordinatorCommandResult; result?: CoordinatorCryptoResult }>;
+  backgroundRunNow(taskId: string): Promise<CoordinatorCommandResult>;
+  backgroundTrigger(taskId: string, reason: string): Promise<CoordinatorCommandResult>;
+  backgroundCancel(taskId: string): Promise<CoordinatorCommandResult>;
   backgroundCancelByKey(publicKeyHex: string): Promise<CoordinatorCommandResult>;
+  backgroundSettingsUpdate(settings: CoordinatorBackgroundSyncSettings): Promise<CoordinatorCommandResult>;
   storageControl(control: CoordinatorStorageControl): Promise<CoordinatorValueResult<unknown>>;
-  storageGrant(context: StorageAppContext): Promise<CoordinatorValueResult<string>>;
+  storageGrant(context: OwnerAppStorageGrant): Promise<CoordinatorValueResult<string>>;
   storageData(data: CoordinatorStorageData, transfer?: ArrayBuffer[], signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   storageCancel(targetRequestId: string): Promise<CoordinatorCommandResult>;
   storageSessionAbort(connectSessionId: string): Promise<CoordinatorCommandResult>;
@@ -525,9 +549,9 @@ export interface SessionCoordinatorClient {
   windowP2pExecutorSpikeTransfer(leaseId: string, expectedSessionEpoch: SessionEpoch, bytes: ArrayBuffer): Promise<CoordinatorValueResult<WindowP2pExecutorTransferResult>>;
   windowP2pExecutorSignNoiseStaticKey(request: Omit<WindowP2pNoiseSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
   windowP2pExecutorSignPeerRecord(request: Omit<WindowP2pPeerRecordSignRequest, "expectedSessionEpoch"> & { expectedSessionEpoch?: SessionEpoch }, signal?: AbortSignal): Promise<CoordinatorValueResult<WindowP2pIdentitySignResult>>;
-  /** 调用 SharedWorker 唯一 SatSubscription runtime；页面不直接持有 Sat DB/连接。 */
+  /** 调用 SharedWorker 唯一 SatSubscription runtime；页面不直接持有 Sat K-V/连接。 */
   satOperation(operation: CoordinatorSatOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
-  /** 调用 SharedWorker 唯一 Channel runtime；页面不直接持有 Sat DB/连接或私钥。 */
+  /** 调用 SharedWorker 唯一 Channel runtime；页面不直接持有 Sat K-V/连接或私钥。 */
   channelOperation(operation: CoordinatorChannelOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   /** 读取 Coordinator 内唯一联系人在线状态快照；不会触发新的网络探测。 */
   contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
@@ -538,11 +562,89 @@ export interface SessionCoordinatorClient {
   p2pkhProviderConfigUpdate(providerId: string, config: Record<string, unknown>): Promise<CoordinatorCommandResult>;
   p2pkhBroadcast(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
   p2pkhRebroadcastAncestors(input: { ownerPublicKeyHex: string; network: "main" | "test"; submissionId: string; expectedProviderGeneration: number }): Promise<CoordinatorValueResult<unknown>>;
+  /** 页面活动心跳；不包含任何业务 RPC 权限。 */
+  sendActivity(): void;
+  /** 记录可恢复的 transport/业务失败，不抛到全局 UI。 */
+  reportRecoverableCoordinatorFailure(kind: string, cause: unknown): void;
 }
+
+/** Coordinator 的共同只读/生命周期面。插件只能拿到自己的扩展接口。 */
+export type CoordinatorSessionControl = Pick<SessionCoordinatorClient,
+  "connect" | "getIsConnected" | "getBootstrapSnapshot" | "getSessionEpoch" |
+  "getActivePublicKeyHex" | "subscribeTopic" | "sendActivity"
+>;
+
+/** Storage 插件 Coordinator 面。 */
+export type StorageCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "storageControl" | "storageGrant" | "storageData" | "storageCancel" | "storageSessionAbort"
+>;
+
+/** Vault 插件 Coordinator 面。 */
+export type VaultCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "unlock" | "lock" | "activateKey" | "vaultOperation" | "crypto" | "backgroundCancelByKey"
+>;
+
+/** Background 插件 Coordinator 面；诊断回报在旧测试夹具中可缺省。 */
+export type BackgroundCoordinatorControl = Pick<SessionCoordinatorClient,
+  "getIsConnected" | "subscribeTopic" |
+  "backgroundRunNow" | "backgroundTrigger" | "backgroundCancel" |
+  "backgroundCancelByKey" | "backgroundSettingsUpdate"
+> & {
+  reportRecoverableCoordinatorFailure?: SessionCoordinatorClient["reportRecoverableCoordinatorFailure"];
+};
+
+/** P2PKH/WOC/JungleBus 插件共享的 P2PKH 配置与广播面。 */
+export type P2pkhCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "p2pkhProvidersGet" | "p2pkhProvidersUpdate" | "p2pkhSettingsUpdate" |
+  "p2pkhProviderConfigGet" | "p2pkhProviderConfigUpdate" |
+  "p2pkhBroadcast" | "p2pkhRebroadcastAncestors"
+>;
+
+/** MSFile 插件 Coordinator 面。 */
+export type MsFileCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "msfileControl" | "msfileGrant" | "msfileData" | "msfileCancel" | "msfileSessionAbort"
+>;
+
+/** SatSubscription 插件 Coordinator 面。 */
+export type SatCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "satOperation" | "channelOperation"
+>;
+
+/** Window P2P 插件 Coordinator 面。 */
+export type WindowP2pCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient,
+  "windowP2pExecutorAcquire" | "windowP2pExecutorRelease" |
+  "windowP2pExecutorSpikeTransfer" | "windowP2pExecutorSignNoiseStaticKey" |
+  "windowP2pExecutorSignPeerRecord"
+>;
+
+/** Protocol 插件只需要 Connect Channel 面。 */
+export type ProtocolCoordinatorControl = CoordinatorSessionControl & Pick<SessionCoordinatorClient, "channelOperation">;
+
+/** Contacts 插件只读取 Coordinator 维护的 presence 快照。 */
+export type ContactsCoordinatorControl = Pick<SessionCoordinatorClient,
+  "getIsConnected" | "getBootstrapSnapshot" | "subscribeTopic" | "contactsPresenceSnapshot"
+>;
 
 // ============================================================
 // 6. Capability Keys
 // ============================================================
 
+/**
+ * @deprecated 仅保留给旧测试夹具；生产 Host 不再注入全局 Coordinator client。
+ * 业务插件必须使用按 manifest 身份绑定的窄 capability。
+ */
 export const SESSION_COORDINATOR_CLIENT_CAPABILITY = "session-coordinator.client";
+/** Shell 只读活动心跳面；不包含任何业务或存储控制 RPC。 */
+export const COORDINATOR_ACTIVITY_CAPABILITY = "session-coordinator.activity";
 export const SESSION_COORDINATOR_SNAPSHOT_CAPABILITY = "session-coordinator.snapshot";
+export const STORAGE_COORDINATOR_CONTROL_CAPABILITY = "storage.coordinator-control";
+export const VAULT_COORDINATOR_CONTROL_CAPABILITY = "vault.coordinator-control";
+export const BACKGROUND_COORDINATOR_CONTROL_CAPABILITY = "background.coordinator-control";
+export const P2PKH_COORDINATOR_CONTROL_CAPABILITY = "p2pkh.coordinator-control";
+export const WOC_COORDINATOR_CONTROL_CAPABILITY = "woc.coordinator-control";
+export const JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY = "junglebus.coordinator-control";
+export const MSFILE_COORDINATOR_CONTROL_CAPABILITY = "msfile.coordinator-control";
+export const SAT_COORDINATOR_CONTROL_CAPABILITY = "sat.coordinator-control";
+export const WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY = "window-p2p.coordinator-control";
+export const PROTOCOL_COORDINATOR_CONTROL_CAPABILITY = "protocol.coordinator-control";
+export const CONTACTS_COORDINATOR_CONTROL_CAPABILITY = "contacts.coordinator-control";

@@ -9,11 +9,16 @@ export interface PluginConfigSnapshot {
 export type PluginConfigStoreListener = (snapshot: PluginConfigSnapshot) => void;
 
 export interface PluginConfigDiagnostic {
-  kind: "invalid-json" | "unknown-version" | "migrated-v1" | "write-failed";
+  kind: "invalid-json" | "incompatible" | "write-failed";
   message: string;
 }
 
 export interface PluginConfigStore {
+  /**
+   * 从平台 settings K-V 恢复配置；调用完成前禁止任何写入覆盖远端真值。
+   * 无存储句柄时该方法仍可安全调用，并立即完成。
+   */
+  hydrate(): Promise<void>;
   read(): PluginConfigSnapshot;
   setEnabled(pluginId: string, enabled: boolean): void;
   clear(pluginId: string): void;

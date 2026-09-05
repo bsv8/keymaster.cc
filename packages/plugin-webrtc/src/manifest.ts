@@ -27,8 +27,7 @@ import { WebrtcSettingsPage } from "./WebrtcSettingsPage.js";
 import type { WebrtcService, WebrtcSessionSnapshot } from "./webrtcService.js";
 import type { WebrtcHistoryItem } from "./webrtcHistoryService.js";
 import {
-  createLocalStorageWebrtcConfigStore,
-  getDefaultWebrtcLocalStorage
+  createKeyValueWebrtcConfigStore
 } from "./webrtcConfig.js";
 import { createWebrtcHistoryService } from "./webrtcHistoryService.js";
 import { createWebrtcService } from "./webrtcService.js";
@@ -192,13 +191,14 @@ export const webrtcPlugin: PluginManifest = {
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [WEBRTC_SERVICE_CAPABILITY],
     displayGroup: "platform"
   },
   i18n: webrtcResources,
-  keyScopedStorages: [{ storageId: "history", description: "WebRTC 本地历史（通话 / 传输）" }],
+  storage: { scope: "key", applicationStorageId: "WebRTC", schemaVersion: 1 },
   dependencies: [
     { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel 私信" },
     { capability: "keyspace.service", reason: "打开 key-scoped 历史库" },
@@ -206,17 +206,20 @@ export const webrtcPlugin: PluginManifest = {
     { capability: "notice.registry", reason: "投递全局紧急 notice" },
     { capability: "system-settings.registry", reason: "注册 WebRTC 系统设置" }
   ],
-  setup(ctx) {
+  async setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");
     const contacts = ctx.get<ContactsService>("contacts.service");
     const noticeRegistry = ctx.get<NoticeRegistry>("notice.registry");
     const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(WEBRTC_PLUGIN_ID);
-    const configStore = createLocalStorageWebrtcConfigStore(
-      getDefaultWebrtcLocalStorage()
-    );
+    const configStore = createKeyValueWebrtcConfigStore(ctx.storage);
+    await configStore.ready();
+    const offStorageActive = keyspace.onActiveKeyChanged((state) => {
+      if (state.activePublicKeyHex) void configStore.ready().catch((error) => console.warn("[webrtc] failed to load owner configuration", error));
+    });
     const historyService = createWebrtcHistoryService({
       keyspace,
-      ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null
+      ownerPublicKeyHex: () => keyspace.active().activePublicKeyHex ?? null,
+      storage: ctx.storage
     });
     const service = createWebrtcService({
       channel,
@@ -318,6 +321,7 @@ export const webrtcPlugin: PluginManifest = {
     });
 
     return () => {
+      offStorageActive();
       service.dispose();
     };
   }

@@ -29,6 +29,7 @@ import type {
   WocUnconfirmedHistory,
   WocUtxoResponse
 } from "@keymaster/contracts";
+import type { KeyValueStore } from "@keymaster/contracts";
 import { WOC_PRIORITY } from "@keymaster/contracts";
 import { createWocActor, type WocActorHandle } from "./wocActor.js";
 import {
@@ -42,6 +43,8 @@ import {
 } from "./wocMessages.js";
 
 export interface WocServiceHandle extends WocService {
+  /** 等待配置从 Host 绑定的 K-V 完成加载。 */
+  ready(): Promise<void>;
   /** 停止调度器(用于测试)。 */
   dispose(): void;
 }
@@ -58,6 +61,8 @@ export interface CreateWocServiceOptions {
    * 不传时不记日志。
    */
   logger?: PluginLogger;
+  /** Host 绑定的 WOC owner/App K-V 句柄。 */
+  storage?: KeyValueStore;
 }
 
 export function createWocService(options: CreateWocServiceOptions): WocServiceHandle {
@@ -67,7 +72,7 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
   const messageBus: MessageBus = options.messageBus;
   // logger 在 attach 之前已经准备好；actor 内部用它做 config / backoff /
   // request 关键轨迹埋点。
-  const actor: WocActorHandle = createWocActor({ logger: options.logger });
+  const actor: WocActorHandle = createWocActor({ logger: options.logger, storage: options.storage });
   actor.attach(messageBus);
 
   function priorityOf(p?: WocRequestOptions["priority"]): number {
@@ -84,6 +89,7 @@ export function createWocService(options: CreateWocServiceOptions): WocServiceHa
   }
 
   return {
+    ready: () => actor.ready(),
     getConfig: () => actor.getConfig(),
     updateConfig: (input) => actor.updateConfig(input),
     onConfigChange: (h) => actor.onConfigChange(h),

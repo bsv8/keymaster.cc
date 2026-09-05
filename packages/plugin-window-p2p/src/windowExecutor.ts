@@ -7,7 +7,7 @@ import { webRTCDirect } from "@libp2p/webrtc";
 import { webSockets } from "@libp2p/websockets";
 import { createHost } from "bitcoin-libp2p/libp2p";
 import type {
-  SessionCoordinatorClient,
+  WindowP2pCoordinatorControl,
   WindowP2pExecutorError,
   WindowP2pExecutorLaneRegistry,
 } from "@keymaster/contracts";
@@ -120,7 +120,7 @@ interface InboundEventWaiter {
 }
 
 export interface WindowP2pExecutorOptions {
-  coordinator: SessionCoordinatorClient;
+  coordinator: WindowP2pCoordinatorControl;
   /** 其它插件注册到唯一 Window Host 的受限 lane。 */
   laneRegistry?: WindowP2pExecutorLaneRegistry;
 }
@@ -131,7 +131,7 @@ export interface WindowP2pExecutorOptions {
  */
 export class WindowP2pExecutor {
   private channel: MessageChannel;
-  private readonly coordinator: SessionCoordinatorClient;
+  private readonly coordinator: WindowP2pCoordinatorControl;
   private readonly laneRegistry?: WindowP2pExecutorLaneRegistry;
   private lease?: import("@keymaster/contracts").WindowP2pExecutorLease;
   private signer?: KeymasterWindowP2pIdentitySigner;
@@ -525,7 +525,7 @@ let installedUnsubscribe: (() => void) | undefined;
 let installRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** 页面只调用一次；多个 tab 各自竞争 Worker lease，失败者保持轻量重试。 */
-export function installWindowP2pExecutor(coordinator: SessionCoordinatorClient, laneRegistry?: WindowP2pExecutorLaneRegistry): () => void {
+export function installWindowP2pExecutor(coordinator: WindowP2pCoordinatorControl, laneRegistry?: WindowP2pExecutorLaneRegistry): () => void {
   if (installedExecutor) return () => { void installedExecutor?.dispose(); };
   const executor = new WindowP2pExecutor({ coordinator, laneRegistry });
   installedExecutor = executor;

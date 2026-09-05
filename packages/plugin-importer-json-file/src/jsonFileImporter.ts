@@ -7,7 +7,7 @@
 //     否则 ciphertext_hex / salt_hex / nonce_hex 会被误判为私钥候选。
 //   - importer 插件不写 Vault、不调用 vault 内部会话能力 —— bsv8 envelope 解密
 //     成功后返回标准导入材料，交给调用方保存。
-// 解析失败时只返回格式错误，不写任何 DB（DB 写入由 vault 完成）。
+// 解析失败时只返回格式错误，不写任何 K-V（K-V 写入由 vault 完成）。
 //
 // 硬切换 012（施工单 001）：本 importer 同时支持 text 与 file 两种输入，
 // 共享同一套解析路径；`password` 是输入的属性，文本与文件都可能携带。

@@ -14,7 +14,10 @@
 //     能进入协议页；locked 态在 popup 内先解锁再继续当前请求。
 //   - 其它路径保持原壳层逻辑（LockedShell / UnlockedShell）。
 
-import { useI18n, useRuntimeStatus } from "@keymaster/runtime";
+import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus } from "@keymaster/contracts";
+import { APPLICATION_BOOTSTRAP_READY_CAPABILITY, APPLICATION_BOOTSTRAP_RESOURCE_ID } from "@keymaster/contracts";
+import { useHasCapability, useI18n, useOptionalCapability, usePluginHost, useResourceSelector, useRuntimeStatus } from "@keymaster/runtime";
+import { StorageOnboardingPage, StorageUnavailableGuard } from "@keymaster/platform-storage";
 import { ProtocolPopupPage } from "@keymaster/plugin-protocol";
 import { LockedShell } from "./shell/LockedShell.js";
 import { UnlockedShell } from "./shell/UnlockedShell.js";
@@ -29,6 +32,65 @@ function isProtocolPopupPath(path: string): boolean {
 }
 
 export function App() {
+  const host = usePluginHost();
+  const hasStorageController = useHasCapability("storage.runtime-controller");
+  const hasVaultService = useHasCapability("vault.service");
+  const hasKeyspaceService = useHasCapability("keyspace.service");
+  const bootstrap = useOptionalCapability<ApplicationBootstrapStatus>(APPLICATION_BOOTSTRAP_READY_CAPABILITY);
+  const fallbackBootstrapSnapshot: ApplicationBootstrapSnapshot = {
+    // Resource 首次加载完成前只能显示门禁页。不能把 pending 资源伪装成
+    // final-ready，否则 capability 刚注入而 bootstrap 状态尚未发布时，
+    // React 会提前进入 RuntimeApp。
+    phase: hasStorageController ? "vault-selection" : "storage-onboarding",
+    storageReady: false,
+    vaultCapabilityReady: hasVaultService && hasKeyspaceService,
+    hasUnlockedActiveKey: false,
+    vaultSelectionReady: hasVaultService && hasKeyspaceService,
+    ownerAppsReady: false,
+    connectAppsReady: false,
+    assetWorkspaceReady: false
+  };
+  const bootstrapSnapshot = useResourceSelector<ApplicationBootstrapSnapshot, ApplicationBootstrapSnapshot>(
+    host.resourceStore,
+    APPLICATION_BOOTSTRAP_RESOURCE_ID,
+    [],
+    (snapshot) => snapshot.data ?? fallbackBootstrapSnapshot,
+    (previous, next) => JSON.stringify(previous) === JSON.stringify(next)
+  );
+
+  // Storage plugin 是未就绪时唯一允许启动的应用入口；Vault capability
+  // 也必须由同一份 application-bootstrap.ready 状态确认后才进入 RuntimeApp。
+  if (!hasStorageController || !bootstrapSnapshot.storageReady) return <StorageOnboardingPage />;
+  const vaultSelectionReady = bootstrapSnapshot.phase === "vault-selection"
+    && bootstrapSnapshot.vaultSelectionReady
+    && bootstrapSnapshot.vaultCapabilityReady
+    && !bootstrapSnapshot.hasUnlockedActiveKey;
+  const applicationReady = bootstrapSnapshot.phase === "connect-apps-ready" &&
+    bootstrapSnapshot.storageReady &&
+    bootstrapSnapshot.vaultCapabilityReady &&
+    bootstrapSnapshot.ownerAppsReady &&
+    bootstrapSnapshot.connectAppsReady &&
+    bootstrapSnapshot.assetWorkspaceReady &&
+    hasVaultService &&
+    hasKeyspaceService;
+  if (vaultSelectionReady) {
+    return <StorageUnavailableGuard><RuntimeApp /></StorageUnavailableGuard>;
+  }
+  if (!applicationReady) {
+    if (bootstrapSnapshot.phase === "error") {
+      return (
+        <div className="app-booting">
+          <p>应用装配失败：{bootstrapSnapshot.error ?? "未知错误"}</p>
+          {bootstrap && <button type="button" onClick={() => void bootstrap.retry().catch(() => undefined)}>重试应用装配</button>}
+        </div>
+      );
+    }
+    return <div className="app-booting"><p>正在完成应用装配…</p></div>;
+  }
+  return <StorageUnavailableGuard><RuntimeApp /></StorageUnavailableGuard>;
+}
+
+function RuntimeApp() {
   const { vault, ready } = useRuntimeStatus();
   const { t } = useI18n();
   const path = typeof window === "undefined" ? "/" : window.location.pathname;

@@ -8,7 +8,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { KeyspaceService, AssetDataNotifier } from "@keymaster/contracts";
 import { createStasTokenProvider, makeStasTokenId, parseStasTokenId } from "./stasTokenProvider.js";
-import type { StasDb, StasTokenSnapshot } from "./stasDb.js";
+import type { StasRepository, StasTokenSnapshot } from "./storage/stasRepository.js";
 
 const ACTIVE_PK = "pk-active";
 
@@ -27,7 +27,7 @@ function makeSnapshot(overrides: Partial<StasTokenSnapshot> & { symbol: string }
   };
 }
 
-function fakeDb(snapshots: StasTokenSnapshot[]): StasDb {
+function fakeRepository(snapshots: StasTokenSnapshot[]): StasRepository {
   return {
     put: vi.fn(),
     replaceAll: vi.fn(),
@@ -62,7 +62,7 @@ describe("stasTokenProvider", () => {
         makeSnapshot({ symbol: "TOK", issuer: "issuerB" }),
       ];
       const provider = createStasTokenProvider({
-        db: fakeDb(snapshots),
+        stateRepository: fakeRepository(snapshots),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
 
@@ -82,7 +82,7 @@ describe("stasTokenProvider", () => {
         makeSnapshot({ symbol: "TOK", issuer: "iss", address: "addr2", balance: 200 }),
       ];
       const provider = createStasTokenProvider({
-        db: fakeDb(snapshots),
+        stateRepository: fakeRepository(snapshots),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
 
@@ -95,7 +95,7 @@ describe("stasTokenProvider", () => {
 
     it("无 active key 时返回空", async () => {
       const provider = createStasTokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(undefined),
       });
       expect(await provider.listTokens()).toEqual([]);
@@ -110,7 +110,7 @@ describe("stasTokenProvider", () => {
         makeSnapshot({ symbol: "OTHER", issuer: "iss", address: "addr1", balance: 50 }),
       ];
       const provider = createStasTokenProvider({
-        db: fakeDb(snapshots),
+        stateRepository: fakeRepository(snapshots),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
 
@@ -124,7 +124,7 @@ describe("stasTokenProvider", () => {
 
     it("不存在的 token 返回 undefined", async () => {
       const provider = createStasTokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
       expect(await provider.getToken("stas:unknown:NOPE")).toBeUndefined();
@@ -132,7 +132,7 @@ describe("stasTokenProvider", () => {
 
     it("无效 tokenId 返回 undefined", async () => {
       const provider = createStasTokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(ACTIVE_PK),
       });
       expect(await provider.getToken("invalid")).toBeUndefined();
@@ -152,7 +152,7 @@ describe("stasTokenProvider", () => {
 
       const handler = vi.fn();
       const provider = createStasTokenProvider({
-        db: fakeDb([]),
+        stateRepository: fakeRepository([]),
         keyspace: fakeKeyspace(ACTIVE_PK),
         assetDataNotifier: notifier as unknown as AssetDataNotifier,
       });

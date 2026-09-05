@@ -16,15 +16,34 @@ import { App } from "./App.js";
 // 把 Runtime 状态做成可注入的 stub：避免引入完整 plugin host。
 const runtimeState = vi.hoisted(() => ({
   vault: "unlocked" as "booting" | "uninitialized" | "locked" | "unlocked",
-  ready: true
+  ready: true,
+  bootstrap: {
+    phase: "connect-apps-ready" as const,
+    storageReady: true,
+    vaultCapabilityReady: true,
+    hasUnlockedActiveKey: true,
+    vaultSelectionReady: true,
+    ownerAppsReady: true,
+    connectAppsReady: true,
+    assetWorkspaceReady: true
+  }
 }));
 
 vi.mock("@keymaster/runtime", () => ({
+  usePluginHost: () => ({ resourceStore: {} }),
+  useHasCapability: () => true,
+  useOptionalCapability: () => undefined,
+  useResourceSelector: (_store: unknown, _id: string, _args: readonly string[], selector: (snapshot: { data?: unknown }) => unknown) => selector({ data: runtimeState.bootstrap }),
   useRuntimeStatus: () => ({ vault: runtimeState.vault, ready: runtimeState.ready }),
   useI18n: () => ({
     t: (key: string, values?: { defaultValue?: string }) => values?.defaultValue ?? key,
     language: () => "en"
   })
+}));
+
+vi.mock("@keymaster/platform-storage", () => ({
+  StorageOnboardingPage: () => <div data-testid="storage-onboarding">storage</div>,
+  StorageUnavailableGuard: ({ children }: { children: ReactNode }) => children
 }));
 
 vi.mock("@keymaster/plugin-protocol", () => ({

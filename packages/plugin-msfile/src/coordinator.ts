@@ -9,11 +9,11 @@ import type {
   CoordinatorMsFileStateEvent,
   SessionEpoch,
 } from "@keymaster/contracts";
-import { openMsFileDb, type MsFileDb } from "./msfileDb.js";
+import { openMsFileRepository, type MsFileRepository } from "./storage/msfileRepository.js";
 import { createMsFileService, MsFileServiceImpl, type MsFileServiceImplDeps, type MsFileServiceEventState } from "./msfileService.js";
 import { createUnavailableMsFileTransport, type MsFileTransport } from "./msfileTransport.js";
 
-export { openMsFileDb, MSFILE_DB_NAME, MSFILE_DB_VERSION, sanitizeAppOverride } from "./msfileDb.js";
+export { openMsFileRepository, MSFILE_STORAGE_ID, MSFILE_STORAGE_VERSION, sanitizeAppOverride } from "./storage/msfileRepository.js";
 export {
   createMsFileService,
   MsFileServiceImpl,
@@ -63,7 +63,7 @@ export function buildMsFileStateEvent(
 }
 
 /**
- * 打开 DB 并创建服务。`transport` 由 apps/web 注入：
+ * 打开 K-V 并创建服务。`transport` 由 apps/web 注入：
  * 生产 Runtime 就绪前返回 unavailable 实现；之后返回 Window executor proxy。
  */
 export async function startMsFileRuntime(options: {
@@ -71,10 +71,10 @@ export async function startMsFileRuntime(options: {
   transport?: MsFileTransport;
   notify: (event: CoordinatorMsFileStateEvent) => void;
   revisionProvider: () => number;
-  db?: MsFileDb;
+  repository?: MsFileRepository;
 }): Promise<MsFileServiceImpl> {
   const deps: MsFileServiceImplDeps = {
-    db: options.db ?? (await openMsFileDb()),
+    repository: options.repository ?? (await openMsFileRepository()),
     transport: options.transport ?? createUnavailableMsFileTransport(),
     notifyStateChange: (state) => {
       options.notify(buildMsFileStateEvent(state, options.revisionProvider(), options.sessionEpoch));

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { createKeyspaceServiceCoordinator } from "./keyspaceServiceCoordinator.js";
 import { SessionStateMirror } from "./sessionStateMirror.js";
 import type { SessionStateEvent } from "@keymaster/contracts";
@@ -40,11 +40,10 @@ describe("createKeyspaceServiceCoordinator", () => {
     expect(keyspace.selected()).toBe(nextKey);
   });
 
-  it("runs label confirmation, cancellation, material deletion, event, and finalization in order", async () => {
+  it("runs label confirmation, cancellation, and the coordinator delete transaction in order", async () => {
     const key = "02".padEnd(66, "a");
-    const operations: string[] = [];
+    const operations: unknown[] = [];
     const events: string[] = [];
-    let listCalls = 0;
     const bus = createMessageBus();
     bus.subscribe("key.deleting", () => events.push("key.deleting"));
     bus.subscribe("key.deleted", () => events.push("key.deleted"));
@@ -52,29 +51,32 @@ describe("createKeyspaceServiceCoordinator", () => {
       getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async (operation: string) => {
+      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
         operations.push(operation);
         if (operation === "listKeys") {
-          listCalls += 1;
-          return { status: "ok" as const, value: listCalls === 1 ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : [], sessionEpoch: "e" };
+          return { status: "ok" as const, value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" };
         }
         return { status: "ok" as const, value: true, sessionEpoch: "e" };
       }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), bus);
     await keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
-    expect(operations).toEqual(["listKeys", "cancel", "deleteKeyMaterial", "listKeys", "finalizeEmptyVaultAfterLastKeyDeletion"]);
+    expect(operations).toEqual([
+      "listKeys",
+      "cancel",
+      { type: "deleteKey", publicKeyHex: key, confirmationLabel: "key" }
+    ]);
     expect(events).toEqual(["key.deleting", "key.deleted"]);
   });
 
   it("does not clean up on a mismatched label", async () => {
     const key = "02".padEnd(66, "a");
-    const operations: string[] = [];
+    const operations: unknown[] = [];
     const client = {
       getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async (operation: string) => {
+      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
         operations.push(operation);
         return { status: "ok" as const, value: [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }], sessionEpoch: "e" };
       }
@@ -84,53 +86,53 @@ describe("createKeyspaceServiceCoordinator", () => {
     expect(operations).toEqual(["listKeys"]);
   });
 
-  it("waits for a blocked namespace request to reach success before deleting material", async () => {
+  it("waits for the coordinator delete transaction before publishing deletion", async () => {
     const key = "02".padEnd(66, "a");
-    const operations: string[] = [];
+    const operations: unknown[] = [];
+    let releaseDelete!: () => void;
+    const deleteTransaction = new Promise<void>((resolve) => {
+      releaseDelete = resolve;
+    });
     const client = {
       getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
-      vaultOperation: async (operation: string) => {
+      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
         operations.push(operation);
-        if (operation === "deleteKeyMaterial") return { status: "ok" as const, value: true, sessionEpoch: "e" };
-        return { status: "ok" as const, value: [ { publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" } ], sessionEpoch: "e" };
+        if (operation === "listKeys") return { status: "ok" as const, value: [ { publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" } ], sessionEpoch: "e" };
+        if (typeof operation !== "string" && operation.type === "deleteKey") {
+          await deleteTransaction;
+        }
+        return { status: "ok" as const, value: true, sessionEpoch: "e" };
       }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
-    keyspace.registerPluginStorage({ pluginId: "plugin", storageId: "store" });
-    const blockedRequest = {} as IDBOpenDBRequest;
-    const deleteDatabase = vi.spyOn(indexedDB, "deleteDatabase").mockImplementation(() => {
-      queueMicrotask(() => blockedRequest.onblocked?.(new Event("blocked") as IDBVersionChangeEvent));
-      return blockedRequest;
-    });
-    try {
-      const deleting = keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
-      await new Promise<void>((resolve) => queueMicrotask(resolve));
-      expect(operations).toEqual(["listKeys", "cancel"]);
-      // The delete promise is still waiting; material deletion cannot begin
-      // while IndexedDB reports only onblocked.
-      let settled = false;
-      void deleting.then(() => { settled = true; });
-      await new Promise<void>((resolve) => setTimeout(resolve, 0));
-      expect(settled).toBe(false);
-      blockedRequest.onsuccess?.(new Event("success") as Event);
-      await deleting;
-      expect(operations).toEqual(["listKeys", "cancel", "deleteKeyMaterial", "listKeys"]);
-    } finally {
-      deleteDatabase.mockRestore();
-    }
+    const deleting = keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    expect(operations).toEqual(["listKeys", "cancel"]);
+    // Coordinator 删除事务未完成前，页面不能宣告 Key 已删除。
+    let settled = false;
+    void deleting.then(() => { settled = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    releaseDelete();
+    await deleting;
+    expect(operations).toEqual([
+      "listKeys",
+      "cancel",
+      { type: "deleteKey", publicKeyHex: key, confirmationLabel: "key" }
+    ]);
   });
 
   it("does not start cleanup when cancellation is blocked", async () => {
     const key = "02".padEnd(66, "a");
-    const operations: string[] = [];
+    const operations: unknown[] = [];
     const bus = createMessageBus();
     const client = {
       getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => ({ status: "blocked" as const, reason: { key: "background.blocked", fallback: "busy" } }),
-      vaultOperation: async (operation: string) => { operations.push(operation); return { status: "ok" as const, value: operation === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" }; }
+      vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => { operations.push(operation); return { status: "ok" as const, value: operation === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" }; }
     };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), bus);
     await expect(keyspace.deleteKey({ publicKeyHex: key, confirmationLabel: "key" })).rejects.toThrow("Background cancellation failed");

@@ -96,8 +96,8 @@ export function createBusinessFeatureRegistry(): BusinessFeatureRegistry {
     listDomains: () => [...domains.values()].map((r) => ({ ...r.domain, features: domainFeatures(r.domain.id).sort(order) })).sort(order),
     listFeatures: () => [...features.values()].filter((feature) => domains.has(feature.domainId)).sort((a, b) => {
       const da = domains.get(a.domainId)!.domain;
-      const db = domains.get(b.domainId)!.domain;
-      return order(da, db) || order(a, b);
+      const rightDomain = domains.get(b.domainId)!.domain;
+      return order(da, rightDomain) || order(a, b);
     }),
     listHomeProjections: () => [...projections.values()]
       .filter((projection) => domains.has(features.get(projection.featureId)?.domainId ?? ""))

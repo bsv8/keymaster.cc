@@ -7,12 +7,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, TextInput } from "@keymaster/ui";
 import { useCapability, useI18n, useLocale } from "@keymaster/runtime";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type SessionCoordinatorClient, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
+import { WOC_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type WocConfig, type WocQueueSnapshot, type WocService } from "@keymaster/contracts";
 import { DEFAULT_WOC_CONFIG, validateRequestsPerSecond, validateWocBaseUrl } from "../wocSettings.js";
 
 export function WocSettingsPage() {
   const service = useCapability<WocService>("woc.service");
-  const coordinator = useCapability<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+  const coordinator = useCapability<P2pkhCoordinatorControl>(WOC_COORDINATOR_CONTROL_CAPABILITY);
   const { t } = useI18n();
   const locale = useLocale();
   const timeFmt = useMemo(

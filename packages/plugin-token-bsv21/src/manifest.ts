@@ -5,7 +5,7 @@
 //   - p2pkh.service：BSV-21 的所有权仍然基于当前钱包 BSV 地址。
 //   - woc.bsv21.service：BSV-21 的 WOC 查询入口。
 //   - token.registry：注册 BSV-21 TokenProvider。
-//   - keyspace.service：拿当前 active key、打开 key-scoped DB。
+//   - keyspace.service：拿当前 active key、打开 key-scoped K-V。
 //   - background.registry：注册 token-bsv21.sync 后台任务。
 //   - background.service：触发即时同步。
 //   - vault.service：sync task canRun 门禁。
@@ -49,8 +49,8 @@ import {
   type P2pkhServiceForBsv21
 } from "./bsv21Service.js";
 import { createBsv21TokenProvider } from "./bsv21TokenProvider.js";
-import { createBsv21Db } from "./bsv21Db.js";
-import { createBsv21MintHistoryDb } from "./bsv21MintHistoryDb.js";
+import { createBsv21StateRepository, BSV21_SCHEMA_VERSION, BSV21_STORAGE_ID } from "./storage/bsv21StateRepository.js";
+import { createBsv21MintHistoryRepository } from "./storage/bsv21MintHistoryRepository.js";
 import { createBsv21SyncTask } from "./bsv21Sync.js";
 import { createBsv21SpendProtectionProvider } from "./bsv21SpendProtection.js";
 import { createBsv21MintService, BSV21_MINT_SERVICE_CAPABILITY } from "./bsv21MintService.js";
@@ -153,24 +153,22 @@ const bsv21Resources: I18nPluginResources = {
 export const bsv21TokenPlugin: PluginManifest = {
   id: "token-bsv21",
   name: "BSV-21 tokens",
-  description: "BSV-21 fungible token provider：通过 snapshot DB 读取当前 active key 的 BSV-21 持仓，注入 token.registry。",
+  description: "BSV-21 fungible token provider：通过 snapshot K-V 读取当前 active key 的 BSV-21 持仓，注入 token.registry。",
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business"
   },
   i18n: bsv21Resources,
-  keyScopedStorages: [
-    { storageId: "snapshots", description: "BSV-21 token snapshot DB" },
-    { storageId: "mint-history", description: "BSV-21 mint history DB" }
-  ],
+  storage: { scope: "key", applicationStorageId: BSV21_STORAGE_ID, schemaVersion: BSV21_SCHEMA_VERSION },
   dependencies: [
     { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
     { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
     { capability: WOC_CAPABILITY, reason: "读取交易与费率等通用 WOC 数据" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped DB" },
+    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
     { capability: "token.registry", reason: "注册 BSV-21 TokenProvider" },
     { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
     { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
@@ -200,22 +198,23 @@ export const bsv21TokenPlugin: PluginManifest = {
     const vault = ctx.get<VaultService>("vault.service");
     const backgroundService = ctx.get<BackgroundService>(BACKGROUND_SERVICE_CAPABILITY);
 
-    // 创建 BSV-21 snapshot DB（key-scoped：每个 active key 拥有独立 namespace）
-    const db = createBsv21Db(keyspace);
-    const historyDb = createBsv21MintHistoryDb(keyspace);
+    // Host 已完成声明校验并注入 owner/App K-V 句柄；Repository 不再接收 Keyspace。
+    if (!ctx.storage) throw new Error("BSV21 owner storage binding is unavailable");
+    const stateRepository = createBsv21StateRepository(ctx.storage);
+    const historyRepository = createBsv21MintHistoryRepository(ctx.storage);
 
     // 创建 service（保留 WOC 能力，供 sync task 使用）
     const service = createBsv21Service({ keyspace, p2pkh, wocBsv21 });
 
-    // 创建 provider（只读 DB）
-    const provider = createBsv21TokenProvider({ db, keyspace, assetDataNotifier });
-    const spendProtection = createBsv21SpendProtectionProvider({ db, keyspace, assetDataNotifier });
-    const mintService = createBsv21MintService({ db, historyDb, p2pkh, protocolSpend });
+    // 创建 provider（只读 K-V）
+    const provider = createBsv21TokenProvider({ stateRepository, keyspace, assetDataNotifier });
+    const spendProtection = createBsv21SpendProtectionProvider({ stateRepository, keyspace, assetDataNotifier });
+    const mintService = createBsv21MintService({ stateRepository, historyRepository, p2pkh, protocolSpend });
     const transferService = createBsv21TransferService({ service, p2pkh, protocolSpend });
     const transferProvider = createBsv21TransferProvider({ tokenRegistry, p2pkh });
 
     // 注册后台同步任务
-    const syncTask = createBsv21SyncTask({ db, service, woc, historyDb, keyspace, vault, assetDataNotifier });
+    const syncTask = createBsv21SyncTask({ stateRepository, service, woc, historyRepository, keyspace, vault, assetDataNotifier });
     backgroundRegistry.register(syncTask);
 
     tokenRegistry.register(provider);
@@ -272,13 +271,13 @@ export const bsv21TokenPlugin: PluginManifest = {
       // 异步检查 snapshot 以决定 reason
       void (async () => {
         try {
-          const existing = await db.list();
+          const existing = await stateRepository.list();
           const reason = existing.length === 0
             ? BACKGROUND_TRIGGER_REASON.FIRST_SYNC
             : "p2pkh.resources-ready";
           triggerSync(reason);
         } catch {
-          // DB 读取失败时降级为普通 reason
+          // K-V 读取失败时降级为普通 reason
           triggerSync("p2pkh.resources-ready");
         }
       })();
@@ -296,7 +295,7 @@ export const bsv21TokenPlugin: PluginManifest = {
       offUnlocked();
       offP2pkhResource();
       offSettingsChange?.();
-      db.close();
+      stateRepository.close();
       protectedOutpoints.unregisterByOwner("token-bsv21");
       void service;
       provider.dispose?.();

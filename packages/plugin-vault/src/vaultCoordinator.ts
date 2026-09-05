@@ -11,14 +11,12 @@
 import {
   deriveKey,
   encryptVerifier,
-  base64ToBytes,
   bytesToHex,
   hexToBytes,
   PBKDF2_PARAMS,
-  verifyLegacyVerifier,
   verifyVerifier
 } from "./crypto.js";
-import type { VaultMetaRecord } from "./vaultDb.js";
+import type { VaultMetaRecord } from "./storage/vaultKeyRepository.js";
 
 export interface VaultKeyMaterial {
   hex: string;
@@ -29,22 +27,7 @@ export interface VaultMetaInput {
   salt: Uint8Array;
   verifier: Awaited<ReturnType<typeof encryptVerifier>>;
   createdAt?: string;
-  cryptoVersion?: "v1" | "v2";
-}
-
-/** 持久化二进制字段的历史编码。新格式固定 hex；旧版为实际 base64。 */
-export type VaultBinaryEncoding = "hex" | "base64";
-/** verifier 的加密语义版本。 */
-export type VaultVerifierVersion = "v1" | "v2";
-
-export interface VerifiedVaultPasswordKey {
-  key: CryptoKey;
-  encoding: VaultBinaryEncoding;
-  verifierVersion: VaultVerifierVersion;
-}
-
-function decodeVaultBytes(value: string, encoding: VaultBinaryEncoding): Uint8Array {
-  return encoding === "hex" ? hexToBytes(value) : base64ToBytes(value);
+  cryptoVersion?: "v2";
 }
 
 export function buildVaultMeta(input: VaultMetaInput): VaultMetaRecord {
@@ -55,7 +38,7 @@ export function buildVaultMeta(input: VaultMetaInput): VaultMetaRecord {
     verifierIvB64: bytesToHex(input.verifier.iv),
     verifierCipherB64: bytesToHex(input.verifier.ciphertext),
     createdAt: input.createdAt ?? new Date().toISOString(),
-    cryptoVersion: input.cryptoVersion ?? "v2",
+    cryptoVersion: "v2",
     kdf: "pbkdf2-sha256",
     iterations: PBKDF2_PARAMS.iterations,
     keyLengthBits: 256
@@ -66,38 +49,21 @@ export async function deriveVaultPasswordKey(password: string, salt: Uint8Array)
   return deriveKey(password, salt);
 }
 
-/**
- * 通过 verifier 探测历史二进制编码与 verifier 加密版本。
- *
- * 不根据字符串外观猜测编码：Base64 完全可能只包含 hex 字符。每种候选
- * 都必须用密码派生出的 key 成功解开 verifier，才能被接受。
- */
-export async function resolveVaultPasswordKey(
-  password: string,
-  meta: VaultMetaRecord
-): Promise<VerifiedVaultPasswordKey> {
-  for (const encoding of ["hex", "base64"] as const) {
-    try {
-      const salt = decodeVaultBytes(meta.saltB64, encoding);
-      // Vault password salt has always been 16 bytes. This also prevents a
-      // malformed alternate representation from reaching PBKDF2.
-      if (salt.byteLength !== 16) continue;
-      const key = await deriveVaultPasswordKey(password, salt);
-      const verifier = {
-        salt: decodeVaultBytes(meta.verifierSaltB64, encoding),
-        iv: decodeVaultBytes(meta.verifierIvB64, encoding),
-        ciphertext: decodeVaultBytes(meta.verifierCipherB64, encoding)
-      };
-      if (await verifyVerifier(key, verifier)) return { key, encoding, verifierVersion: "v2" };
-      if (await verifyLegacyVerifier(key, verifier)) {
-        return { key, encoding, verifierVersion: "v1" };
-      }
-    } catch {
-      // Try the other historic representation. The verifier remains the sole
-      // authority: malformed data and a wrong password both fail closed below.
-    }
+/** 只接受当前 Vault schema；旧编码和旧 verifier 不进入新桶读取路径。 */
+export async function resolveVaultPasswordKey(password: string, meta: VaultMetaRecord): Promise<{ key: CryptoKey }> {
+  if (meta.cryptoVersion !== "v2" || meta.kdf !== "pbkdf2-sha256" || meta.iterations !== PBKDF2_PARAMS.iterations || meta.keyLengthBits !== 256) {
+    throw new Error("Unsupported Vault schema");
   }
-  throw new Error("Invalid password");
+  const salt = hexToBytes(meta.saltB64);
+  const verifierSalt = hexToBytes(meta.verifierSaltB64);
+  const verifierIv = hexToBytes(meta.verifierIvB64);
+  const ciphertext = hexToBytes(meta.verifierCipherB64);
+  if (salt.byteLength !== 16 || verifierSalt.byteLength !== 16 || verifierIv.byteLength !== 12 || ciphertext.byteLength < 16) {
+    throw new Error("Unsupported Vault schema");
+  }
+  const key = await deriveVaultPasswordKey(password, salt);
+  if (!(await verifyVerifier(key, { salt: verifierSalt, iv: verifierIv, ciphertext }))) throw new Error("Invalid password");
+  return { key };
 }
 
 /** 保持调用方只需要 key 的现有 API；需解码记录时使用 resolve*。 */

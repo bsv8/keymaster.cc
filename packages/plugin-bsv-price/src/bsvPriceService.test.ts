@@ -1,19 +1,10 @@
 // BSV 价格服务的 Channel 精确订阅测试。
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type { ChannelMessageReceivedEventData, ChannelRuntime } from "@keymaster/contracts";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import { PRICECAST_PROTOCOL_ID, buildPriceChannelId } from "./constants.js";
 import { createBsvPriceService } from "./bsvPriceService.js";
-
-class FakeStorage implements Storage {
-  private readonly map = new Map<string, string>();
-  get length(): number { return this.map.size; }
-  key(index: number): string | null { return [...this.map.keys()][index] ?? null; }
-  getItem(key: string): string | null { return this.map.get(key) ?? null; }
-  setItem(key: string, value: string): void { this.map.set(key, value); }
-  removeItem(key: string): void { this.map.delete(key); }
-  clear(): void { this.map.clear(); }
-}
 
 class FakeChannel implements ChannelRuntime {
   readonly subscriptionCalls: string[][] = [];
@@ -50,16 +41,17 @@ function makeMessage(channel: string, price = "100.00"): ChannelMessageReceivedE
   };
 }
 
-beforeEach(() => {
-  localStorage.clear();
-});
+function makeStorage() {
+  return createInMemoryKeyValueStore({ scope: "key", ownerPublicKeyHex: PUBLISHER_A, applicationStorageId: "BSVPrice", schemaVersion: 1, bucketId: "test", bucketGeneration: 1 });
+}
 
 describe("createBsvPriceService", () => {
-  it("starts from stored config and subscribes to one exact Channel", () => {
-    const storage = new FakeStorage();
-    storage.setItem("bsv-price.settings", JSON.stringify({ pricePublisherPublicKeyHex: PUBLISHER_A, savedAtMs: 1 }));
+  it("starts from stored config and subscribes to one exact Channel", async () => {
+    const storage = makeStorage();
+    await storage.put("settings", { pricePublisherPublicKeyHex: PUBLISHER_A, savedAtMs: 1 }, { partition: "settings" });
     const channel = new FakeChannel();
-    const service = createBsvPriceService(channel, { localStorage: storage });
+    const service = createBsvPriceService(channel, { storage });
+    await service.ready();
 
     expect(service.configured()).toBe(true);
     expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_A);
@@ -67,20 +59,17 @@ describe("createBsvPriceService", () => {
     service.dispose();
   });
 
-  it("uses and persists the seed when no stored config exists", () => {
-    const storage = new FakeStorage();
+  it("uses the seed when no stored config exists", () => {
     const service = createBsvPriceService(new FakeChannel(), {
-      localStorage: storage,
       seedPublisherPublicKeyHex: PUBLISHER_B
     });
     expect(service.getPublisherPublicKeyHex()).toBe(PUBLISHER_B);
-    expect(JSON.parse(storage.getItem("bsv-price.settings") ?? "{}")).toMatchObject({ pricePublisherPublicKeyHex: PUBLISHER_B });
     service.dispose();
   });
 
   it("switches exact subscriptions and ignores messages from the old Channel", () => {
     const channel = new FakeChannel();
-    const service = createBsvPriceService(channel, { localStorage: new FakeStorage(), seedPublisherPublicKeyHex: PUBLISHER_A });
+    const service = createBsvPriceService(channel, { seedPublisherPublicKeyHex: PUBLISHER_A });
     const oldChannel = buildPriceChannelId(PUBLISHER_A);
     const newChannel = buildPriceChannelId(PUBLISHER_B);
     channel.emit(makeMessage(oldChannel, "100.01"));
@@ -99,7 +88,6 @@ describe("createBsvPriceService", () => {
   it("ignores a valid message from the wrong publisher on the configured Channel", () => {
     const channel = new FakeChannel();
     const service = createBsvPriceService(channel, {
-      localStorage: new FakeStorage(),
       seedPublisherPublicKeyHex: PUBLISHER_A
     });
     channel.emit({
@@ -112,7 +100,7 @@ describe("createBsvPriceService", () => {
 
   it("clears the configured Channel and rejects invalid publisher keys", () => {
     const channel = new FakeChannel();
-    const service = createBsvPriceService(channel, { localStorage: new FakeStorage(), seedPublisherPublicKeyHex: PUBLISHER_A });
+    const service = createBsvPriceService(channel, { seedPublisherPublicKeyHex: PUBLISHER_A });
     service.savePublisherPublicKeyHex("");
     expect(service.snapshot()).toMatchObject({ status: "not_configured", configured: false, channelId: "(not configured)" });
     expect(() => service.savePublisherPublicKeyHex("bad")).toThrow("invalid_length");

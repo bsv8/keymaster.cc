@@ -15,6 +15,7 @@ import type {
   BusinessFeatureRegistry,
   HomeRegistry,
   I18nPluginResources,
+  KeyspaceService,
   PluginManifest,
   ResourceRegistry
 } from "@keymaster/contracts";
@@ -157,9 +158,11 @@ export const bsvPricePlugin: PluginManifest = {
   description:
     "BSV 价格业务插件：消费 Coordinator Channel，订阅 PriceCast publisher 公钥频道，展示交易所价格快照。",
   i18n: bsvPriceResources,
+  storage: { scope: "key", applicationStorageId: "BsvPrice", schemaVersion: 1 },
   meta: {
     kind: "business",
     startup: "optional",
+    bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
     providesCapabilities: [BSV_PRICE_SERVICE_CAPABILITY],
@@ -192,16 +195,17 @@ export const bsvPricePlugin: PluginManifest = {
     {
       capability: RESOURCE_REGISTRY_CAPABILITY,
       reason: "注册 BSV Price 状态资源"
-    }
+    },
+    { capability: "keyspace.service", reason: "active key 就绪后加载 owner 配置" }
   ],
-  setup(ctx) {
+  async setup(ctx) {
     /**
      * 关键约束（施工单 §4.1.1 + §8.六）：
      *   - 不从 keyspace / vault 推断；
      *   - 配置缺失 → 业务页持续空态（**不**构造伪频道占位）；
      *   - `pricePublisherPublicKeyHex` **首次 seed** 仅来自 `ctx.config`，
      *     由装配层在 `manifest.config` 注入；运行时真值由
-     *     `localStorage["bsv-price.settings"]` 承担；
+     *     Host 注入的 BSV Price owner/App K-V 承担；
      *   - 取值后做类型校验：非字符串视为未配置。
      */
     const cfg = ctx.config ?? {};
@@ -212,8 +216,14 @@ export const bsvPricePlugin: PluginManifest = {
         : "";
 
     const channel = ctx.get<ChannelRuntimeFactory>(CHANNEL_RUNTIME_CAPABILITY).forPlugin(BSV_PRICE_PLUGIN_ID);
+    const keyspace = ctx.get<KeyspaceService>("keyspace.service");
     const service = createBsvPriceService(channel, {
-      seedPublisherPublicKeyHex: publisherHex
+      seedPublisherPublicKeyHex: publisherHex,
+      storage: ctx.storage
+    });
+    await service.ready();
+    const offActive = keyspace.onActiveKeyChanged((state) => {
+      if (state.activePublicKeyHex) void service.ready().catch((error) => console.warn("[bsv-price] failed to load owner configuration", error));
     });
     ctx.provide(BSV_PRICE_SERVICE_CAPABILITY, service);
     const resources = ctx.has(RESOURCE_REGISTRY_CAPABILITY)
@@ -315,6 +325,7 @@ export const bsvPricePlugin: PluginManifest = {
     });
 
     return () => {
+      offActive();
       service.dispose();
     };
   }

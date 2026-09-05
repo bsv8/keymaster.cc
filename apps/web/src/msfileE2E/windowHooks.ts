@@ -10,14 +10,14 @@ import type {
   MsFileReadResult,
   MsFileService,
   MsFileSupplierConfig,
-  ProtocolStorageDb,
-  SessionCoordinatorClient,
+  ProtocolStorageRepository,
+  VaultCoordinatorControl,
 } from "@keymaster/contracts";
 import {
+  VAULT_COORDINATOR_CONTROL_CAPABILITY,
   MSFILE_SERVICE_CAPABILITY,
-  SESSION_COORDINATOR_CLIENT_CAPABILITY,
 } from "@keymaster/contracts";
-import { openProtocolStorageDb, verifyAppIdentityProof } from "@keymaster/plugin-protocol";
+import { openProtocolStorageRepository, verifyAppIdentityProof } from "@keymaster/plugin-protocol";
 import type { PluginHost } from "@keymaster/runtime";
 import {
   configureMsFileMediaServiceWorker,
@@ -81,7 +81,7 @@ async function summarizeRead(result: MsFileReadResult): Promise<{
   };
 }
 
-async function ensureUnlocked(coordinator: SessionCoordinatorClient): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
+async function ensureUnlocked(coordinator: VaultCoordinatorControl): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const snapshot = coordinator.getBootstrapSnapshot();
     if (snapshot.vaultStatus === "unlocked" && snapshot.activePublicKeyHex) {
@@ -139,10 +139,10 @@ declare global {
 }
 
 export function installMsFileProductionE2EHooks(host: PluginHost): void {
-  const coordinator = host.capabilities.get<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+  const coordinator = host.capabilities.get<VaultCoordinatorControl>(VAULT_COORDINATOR_CONTROL_CAPABILITY);
   const service = host.capabilities.get<MsFileService>(MSFILE_SERVICE_CAPABILITY);
   if (!coordinator || !service) throw new Error("MSFile E2E requires enabled Coordinator and MSFile capabilities");
-  let protocolDb: ProtocolStorageDb | undefined;
+  let protocolRepository: ProtocolStorageRepository | undefined;
   let readBlockDelayMs = 0;
   const readBlock = service.readBlock.bind(service);
   service.readBlock = (input) => delaySupplierResult(readBlock(input), input.signal, readBlockDelayMs);
@@ -192,9 +192,9 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
     async seedConnectSession(input) {
       const { ownerPublicKeyHex } = await ensureUnlocked(coordinator);
       const appIdentity = verifyAppIdentityProof(input.proof);
-      protocolDb ??= await openProtocolStorageDb();
+      protocolRepository ??= await openProtocolStorageRepository();
       const now = Date.now();
-      await protocolDb.putConnectSession({
+      await protocolRepository.putConnectSession({
         sessionId: input.sessionId,
         origin: input.origin,
         ownerPublicKeyHex,

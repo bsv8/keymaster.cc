@@ -128,7 +128,7 @@ export interface BackgroundTaskContext {
   reason: string;
   /** 上报进度。 */
   reportProgress(progress: BackgroundTaskProgress): void;
-  /** Coordinator 任务在任何 DB commit 前调用，epoch/key/generation 失效时抛错。 */
+  /** Coordinator 任务在任何 K-V commit 前调用，epoch/key/generation 失效时抛错。 */
   assertSessionFresh?: () => void;
 }
 

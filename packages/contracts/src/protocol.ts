@@ -44,7 +44,7 @@ import type {
   StorageUploadCompleteParams,
   StorageUploadPartParams,
   StorageUploadPartResult
-} from "./storage.js";
+} from "./connectStorage.js";
 import type {
   MsFileBlockReadParams,
   MsFileReadResult,
@@ -66,15 +66,15 @@ import type {
 //         - 活请求区：未终态 record，按 createdAt asc（recordId 次级稳定）；
 //         - 历史区：  终态 record，按 updatedAt desc。
 //       同类 request 在活请求区不复用卡位；UI 不应再按索引展开。
-//       历史加载必须按 recordId 合并（内存活记录覆盖 DB 旧记录），
+//       历史加载必须按 recordId 合并（内存活记录覆盖 K-V 旧记录），
 //       批次隔离（origin + token）避免旧 origin 异步回写新 origin 视图。
 //   - 施工单 2026-06-28 001 硬切换：connect session 作为持续登录 caller
 //     的正式真值。
 //       - 新增 connect.login / connect.resume / connect.logout 三个 method；
 //       - cipher.encrypt / cipher.decrypt 强制要求 `connectSessionId`
 //         输入字段；不再读取钱包全局 active key。
-//       - connect session 持久化到 `keymaster.protocol` 的
-//         `connectSessions` store（DB version 升 4）。
+//       - connect session 持久化到 `protocol storage namespace` 的
+//         `connectSessions` store（K-V version 升 4）。
 //       - popup unlock runtime 仅存在于 popup 当前文档内存；popup
 //         刷新 / 关闭后立即失效，caller 通过 `connect.resume` 补 unlock
 //         即可，不需要重新登录。
@@ -115,7 +115,7 @@ import type {
 //         入参 `{ launchToken }`，成功结果形状与 `connect.login` 对齐；
 //         launchToken 一次性消费；不允许 fallback 到 `connect.login`。
 //   - Connect Storage 施工单：`storage.*` 使用独立 `storage.service` capability
-//     与 `keymaster.storage` DB；旧 protocol DB 中的 plaintext
+//     与 `keymaster.storage` K-V；旧 protocol K-V 中的 plaintext
 //     `storageProviderConfig` 只在历史迁移中物理删除，绝不恢复或读取。
 //   - 统一 owner execution runtime：`OwnerExecutionRuntime` 承载同一份
 //     session capability；connect mode 下 runtime 允许两路来源——
@@ -132,7 +132,7 @@ import type {
 //       - `AppBootstrapPayload.sessionRuntimeBootstrap` 承载
 //         `SessionRuntimeBootstrap` capability；Session Window 只在当前内存
 //         注册 owner runtime，**不**假装是"完整解锁钱包窗口"，**不**写
-//         IndexedDB / localStorage / URL。
+//         platform K-V repository / localStorage / URL。
 //       - 所有业务方法（`identity.*` / `intent.sign` / `cipher.*` /
 //         `p2pkh.transfer` / `feepool.*`）走同一个
 //         `resolveOwnerRuntime(session)` 入口；runtime 解析顺序：
@@ -792,9 +792,9 @@ export interface ProtocolOriginSettingsRecord {
    *   - exact origin 语义与 `origin` 字段保持一致，不做 host 归一化。
    *   - 自动批准 = "跳过 manual confirm 页" + "vault 锁定态下解锁后直接
    *     executing 内联执行，不再进入 confirming"。
-   *   - DB 不可用时按 false 处理（走 manual confirm）。
+   *   - K-V 不可用时按 false 处理（走 manual confirm）。
    *   - 旧记录缺字段时由 service 层 `normalizeOriginSettings` 补 false，
-   *     **不**扫库迁移，**不**升 DB version。
+   *     **不**扫库迁移，**不**升 K-V version。
    */
   identityAutoApproveEnabled: boolean;
   /**
@@ -829,7 +829,7 @@ export interface ProtocolOriginSettingsRecord {
    *   - 改动只影响下一条新 request；当前正在倒计时的请求保留它开始
    *     计时时快照下来的 timeout 值，**不**做热更新。
    *   - 旧 origin 记录缺这个字段时，由 service 层 `normalizeOriginSettings`
-   *     补 `30`，不扫库迁移，不升 DB version。
+   *     补 `30`，不扫库迁移，不升 K-V version。
    */
   confirmTimeoutSeconds: number;
   updatedAt: number;
@@ -896,7 +896,7 @@ export interface ProtocolFeePoolRecord {
 /**
  * 本地终态原因（仅写本地历史；对外统一 `user_rejected`）。
  *
- * 设计缘由：余额不足 / 池缺失 / DB 不可用等敏感失败，以及用户本地取消 /
+ * 设计缘由：余额不足 / 池缺失 / K-V 不可用等敏感失败，以及用户本地取消 /
  * client 主动 cancel 等内部终态，都不应暴露给站点；站点**不**应通过
  * `error.message` 反推。V1 把这些本地原因收口在一个固定 union 里；
  * service 层映射到 `ProtocolErrorCode = "user_rejected"`。
@@ -981,7 +981,7 @@ export type ProtocolFailureReason =
  *
  * 设计缘由（施工单 2026-06-28 002 硬切换 + 施工单 2026-06-30 002 硬切换）：
  *   - 这是 auth session 真值；**不**是 unlock runtime。
- *   - 允许持久化（IndexedDB `connectSessions` store）。
+ *   - 允许持久化（platform K-V repository `connectSessions` store）。
  *   - **不**混入 pending request / 中间密文 / 解锁材料。
  *   - `revokedAt` 是被 `connect.logout` 主动吊销的时间戳；非空记录
  *     不允许 `connect.resume` 复活。
@@ -1227,7 +1227,7 @@ export type ChannelSubscriptionSetResultV1 = ChannelSubscriptionSetResult;
  *
  * 设计缘由（施工单 2026-06-29 002 硬切换）：
  *   - 这是 `plugin-apps` **唯一**允许调用的 appView 启动入口；plugin-apps
- *     自己**不**直接操作 `protocolStorageDb` / `buildAppBootstrapPayload`
+ *     自己**不**直接操作 `protocolMultipartUploadRepository` / `buildAppBootstrapPayload`
  *     / `installLauncherBootstrapRegistry` / `window.open` popup URL。
  *   - `appOrigin` 必须是 exact origin；`new URL(appUrl).origin` 必须
  *     === `appOrigin`，否则视为配置错误、整次启动 fail-closed。
@@ -1379,7 +1379,7 @@ export interface AppViewContext {
  *   - Session Window 刷新 / 关闭后 bootstrap runtime 随窗口内存丢失；
  *     connect mode 下允许本窗口用户后续 unlock 后按同 owner 从 vault 重建
  *     runtime；appView mode 不允许依赖这种回退。
- *   - raw 私钥材料 **不**写 IndexedDB / localStorage / sessionStorage
+ *   - raw 私钥材料 **不**写 platform K-V repository / localStorage / sessionStorage
  *     / URL / command history / 明文日志；只允许存在于 launcher 当前内存
  *     与 Session Window 当前内存。
  */
@@ -1721,7 +1721,7 @@ export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends 
  * 合法 request 走到最终决定（approved / rejected / failed），状态
  * 由 service 在状态推进时同步更新。
  *
- * 历史 DB 持久化的是 `ProtocolCommandRecord.phase` / `status` /
+ * 历史 K-V 持久化的是 `ProtocolCommandRecord.phase` / `status` /
  * `decision` 三个收敛点；中间态只在内存里走，不一定都落库。
  *
  * 设计缘由（施工单 2026-06-27 001 硬切换：锁屏 + 多 request 并存 +
@@ -1737,7 +1737,7 @@ export type MethodResult<M extends ProtocolMethod = ProtocolMethod> = M extends 
  *   - `timed_out` 是"超时"专用终态，与 `failed` 平级但 `status` 字段
  *     单独区分。
  *   - 兼容旧 `waiting_unlock` / `waiting_confirm`：保留作为 alias，
- *     让 DB 旧记录仍能被新逻辑识别。
+ *     让 K-V 旧记录仍能被新逻辑识别。
  */
 export type ProtocolCommandPhase =
   | "waiting_unlock"
@@ -1762,8 +1762,8 @@ export type ProtocolCommandDecision = "pending" | "approved" | "rejected" | "fai
  *   - 一条 request = 一条 `ProtocolCommandRecord`；
  *   - 不做 event-sourcing：状态推进直接更新同一条记录；
  *   - 历史只按 `origin`（exact origin，**不**做 host 归一化）归档；
- *   - DB 真值 = Keymaster IndexedDB；UI 文案可显示"站点 / 域名"，
- *     但 DB 落盘必须是 `event.origin` 原样字符串。
+ *   - K-V 真值 = Keymaster platform K-V repository；UI 文案可显示"站点 / 域名"，
+ *     但 K-V 落盘必须是 `event.origin` 原样字符串。
  *   - 不持久化私钥 / 大体积密文 / 完整签名结果 / 解密明文 / 完整 rawTx。
  *   - **owner 唯一真值 = `ownerPublicKeyHex`**：所有业务方法在 record
  *     创建时即快照 `connectSessionId` + `ownerPublicKeyHex`；执行时不再
@@ -1893,7 +1893,7 @@ export interface ProtocolCommandFeedState {
    * **不**应再按索引决定唯一展开卡。
    */
   commands: ProtocolCommandRecord[];
-  /** DB 读 / 写是否可用；false 时 UI 顶部显示"历史不可用"。 */
+  /** K-V 读 / 写是否可用；false 时 UI 顶部显示"历史不可用"。 */
   historyAvailable: boolean;
   /** 锁屏页用的待处理摘要；从 commands 派生；unlocked 时为 null。 */
   lockSummary: ProtocolLockSummary | null;
@@ -1959,27 +1959,27 @@ export interface ProtocolLockSummary {
 export type ProtocolPopupLockState = "locked" | "unlocked";
 
 /**
- * 命令流 DB capability key。manifest 在 setup 阶段 provide；
- * ProtocolService 通过 ctx 注入，**不**直接 import DB 模块。
+ * 命令流 K-V capability key。manifest 在 setup 阶段 provide；
+ * ProtocolService 通过 ctx 注入，**不**直接 import K-V 模块。
  */
-export const PROTOCOL_COMMAND_DB_CAPABILITY = "protocol.commandDb";
+export const PROTOCOL_COMMAND_REPOSITORY_CAPABILITY = "protocol.commandRepository";
 
 /**
- * 协议存储 DB capability key。
+ * 协议存储 K-V capability key。
  *
- * 设计缘由（施工单 002 硬切换）：原 `PROTOCOL_COMMAND_DB_CAPABILITY` 只承载
- * commands store；本次把 DB 升级到 3 store（commands / origins / feePools），
+ * 设计缘由（施工单 002 硬切换）：原 command repository capability 只承载
+ * commands store；本次把 K-V 升级到 3 store（commands / origins / feePools），
  * capability 同步改名。manifest 在 setup 阶段 provide，service 通过 deps
- * 注入，**不**直接 import DB 模块。
+ * 注入，**不**直接 import K-V 模块。
  */
-export const PROTOCOL_STORAGE_DB_CAPABILITY = "protocol.storageDb";
+export const PROTOCOL_STORAGE_REPOSITORY_CAPABILITY = "protocol.storageRepository";
 
 /**
- * 协议存储 DB 抽象。实现走 IndexedDB；测试用 `fake-indexeddb`。
+ * 协议存储 K-V 抽象。实现走 platform K-V repository；测试用 `fake-indexeddb`。
  *
  * 关键不变量：
- *   - DB 名固定 `keymaster.protocol`。施工单 2026-07-01 001 硬切换：
- *     物理删除 `storageProviderConfig` store；DB version 升 9。
+ *   - K-V 名固定 `protocol storage namespace`。施工单 2026-07-01 001 硬切换：
+ *     物理删除 `storageProviderConfig` store；K-V version 升 9。
  *   - 五 store 各司其职：
  *       - `commands`：命令流历史（一条 request = 一条 record）；
  *       - `origins`：按 exact origin 存站点级配置；
@@ -1994,11 +1994,11 @@ export const PROTOCOL_STORAGE_DB_CAPABILITY = "protocol.storageDb";
  *     所有 session（包括已 revoked）；
  *   - `putCommand` / `putOrigin` / `putFeePool` / `putConnectSession`
  *     写同 key 覆盖；
- *   - DB 异常一律 `console.error + rethrow`；调用方决定怎么降级（p2pkh
+ *   - K-V 异常一律 `console.error + rethrow`；调用方决定怎么降级（p2pkh
  *     走 manual confirm、feepool fail-closed、connect session 不可用
  *     时 caller 被要求重新登录）。
  */
-export interface ProtocolStorageDb {
+export interface ProtocolStorageRepository {
   /* ----- commands ----- */
   putCommand(record: ProtocolCommandRecord): Promise<void>;
   getCommand(id: string): Promise<ProtocolCommandRecord | null>;
@@ -2045,7 +2045,7 @@ export interface ProtocolStorageDb {
    *
    * 设计缘由：launchToken 是 launcher 给 client app 的一次性凭证；
    * Session Window 在 bootstrap 阶段把它连同 unlock runtime 一起接进
-   * 当前内存上下文。**不**写 IndexedDB——V1 显式要求 launchToken 只
+   * 当前内存上下文。**不**写 platform K-V repository——V1 显式要求 launchToken 只
    * 存在 Session Window 当前内存，刷新 / 关闭即失效。本接口保留
    * 为可选（实现可走内存 Map），便于将来如果需要"重启 launcher 后仍
    * 能恢复 launchToken"再开启持久化路径。
@@ -2363,12 +2363,12 @@ export interface ProtocolService {
    */
   subscribeFeed(handler: (state: ProtocolCommandFeedState) => void): () => void;
   /**
-   * 读 origin 配置；DB 不可用或该 origin 尚未配置时返回 null。
+   * 读 origin 配置；K-V 不可用或该 origin 尚未配置时返回 null。
    * UI 用此填默认 + 弹 modal 编辑当前 origin。
    */
   getOriginSettings(origin: string): Promise<ProtocolOriginSettingsRecord | null>;
   /**
-   * 写 origin 配置；DB 不可用时 throw（由调用方决定怎么降级）。
+   * 写 origin 配置；K-V 不可用时 throw（由调用方决定怎么降级）。
    */
   setOriginSettings(record: ProtocolOriginSettingsRecord): Promise<void>;
   /**
@@ -2574,7 +2574,7 @@ export interface ProtocolService {
    * 设计缘由（施工单 2026-06-29 002 硬切换）：
    *   - 这是 plugin-apps 唯一允许的 appView 启动入口。plugin-apps 自己
    *     **不**直接 import / 操作：
-   *       - `protocolStorageDb`
+   *       - `protocolMultipartUploadRepository`
    *       - `buildAppBootstrapPayload`
    *       - `installLauncherBootstrapRegistry`
    *       - `window.open("/protocol/v1/popup?...")` popup URL
@@ -2583,7 +2583,7 @@ export interface ProtocolService {
    *       1. 校验 vault 已解锁 + active key ready + owner key 命中；
    *       2. 校验 app 配置合法（`new URL(appUrl).origin === appOrigin`）；
    *       3. 解析 claims 快照（按 input.claims 走 builtin claim 解析）；
-   *       4. 创建新 `connectSessionId` 并落 DB，写 session 真值三元组
+   *       4. 创建新 `connectSessionId` 并落 K-V，写 session 真值三元组
    *          （sessionId + origin + ownerPublicKeyHex）；
    *       5. 调 `vault.createAppViewSession({ sessionId, publicKeyHex, password })`
    *          取受控 capability，组装 `SessionRuntimeBootstrap`；

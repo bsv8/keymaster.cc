@@ -74,15 +74,12 @@ export interface EncryptedBlob {
   iv: Uint8Array;
   /** AES-GCM 密文（包含 tag）。 */
   ciphertext: Uint8Array;
-  /** 版本化标识，便于调用方明确选择读取分支。 */
-  version?: "v1" | "v2";
+  /** 当前加密协议版本。 */
+  version?: "v2";
 }
 
 /** Vault v2 固定 verifier AAD。 */
 export const VAULT_VERIFIER_AAD = "keymaster:v2|vault-verifier";
-
-/** v2 引入 AAD 之前，Vault verifier 使用的固定明文标记。 */
-export const LEGACY_VAULT_VERIFIER_MARKER = "vault:v1";
 
 /** Vault v2 固定 key AAD 前缀。 */
 
@@ -99,9 +96,6 @@ export async function encryptBytesWithAad(
 ): Promise<EncryptedBlob> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  // Historical v1/v2 envelopes authenticate only the explicit AAD. Keep this
-  // generic entry point byte-for-byte compatible; salt-bound envelopes use the
-  // dedicated helpers below.
   const additionalData = aad ? new TextEncoder().encode(aad) : undefined;
   const ciphertext = new Uint8Array(
     await crypto.subtle.encrypt(
@@ -114,12 +108,7 @@ export async function encryptBytesWithAad(
       plaintext as BufferSource
     )
   );
-  return { salt, iv, ciphertext, version: aad ? "v2" : "v1" };
-}
-
-/** 解密。失败抛错（密码错误、篡改都会触发）。 */
-export async function decryptBytes(key: CryptoKey, blob: EncryptedBlob): Promise<Uint8Array> {
-  return decryptBytesWithAad(key, blob, undefined);
+  return { salt, iv, ciphertext, version: "v2" };
 }
 
 /** 解密。失败抛错（密码错误、篡改都会触发）。 */
@@ -128,33 +117,16 @@ export async function decryptBytesWithAad(
   blob: EncryptedBlob,
   aad: string | undefined
 ): Promise<Uint8Array> {
-  try {
-    const plain = await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: blob.iv as BufferSource,
-        additionalData: aad ? new TextEncoder().encode(aad) as BufferSource : undefined
-      },
-      key,
-      blob.ciphertext as BufferSource
-    );
-    return new Uint8Array(plain);
-  } catch (error) {
-    // Also accept the salt-bound variant emitted by the dedicated local-secret
-    // helper, so records written during the transitional implementation remain
-    // readable.
-    const legacyAdditionalData = saltBoundAdditionalData(aad, blob.salt);
-    const plain = await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: blob.iv as BufferSource,
-        additionalData: legacyAdditionalData as BufferSource
-      },
-      key,
-      blob.ciphertext as BufferSource
-    ).catch(() => { throw error; });
-    return new Uint8Array(plain);
-  }
+  const plain = await crypto.subtle.decrypt(
+    {
+      name: "AES-GCM",
+      iv: blob.iv as BufferSource,
+      additionalData: aad ? new TextEncoder().encode(aad) as BufferSource : undefined
+    },
+    key,
+    blob.ciphertext as BufferSource
+  );
+  return new Uint8Array(plain);
 }
 
 /**
@@ -214,28 +186,6 @@ export function bytesToHex(bytes: Uint8Array): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/**
- * 旧版 Vault 曾按字段名把二进制材料实际编码成 base64，而当前格式使用
- * hex。这个转换只用于读取旧持久化记录；所有新写入仍统一走 bytesToHex。
- */
-export function base64ToBytes(value: string): Uint8Array {
-  // 兼容旧版 standard base64，也接受曾被导出的 URL-safe base64。
-  const normalized = value.trim().replace(/-/g, "+").replace(/_/g, "/");
-  if (!normalized || /[^A-Za-z0-9+/=]/.test(normalized)) {
-    throw new Error("Invalid base64");
-  }
-  const unpadded = normalized.replace(/=+$/, "");
-  const padded = unpadded.padEnd(Math.ceil(unpadded.length / 4) * 4, "=");
-  if (padded.length % 4 !== 0) throw new Error("Invalid base64 length");
-  let binary: string;
-  try {
-    binary = atob(padded);
-  } catch {
-    throw new Error("Invalid base64");
-  }
-  return Uint8Array.from(binary, (char) => char.charCodeAt(0));
-}
-
 /** 验证密码：保存一份 verifier，密码错误时 verifier 也对不上。 */
 export async function encryptVerifier(key: CryptoKey): Promise<EncryptedBlob> {
   const marker = new TextEncoder().encode(VAULT_VERIFIER_AAD);
@@ -246,21 +196,6 @@ export async function verifyVerifier(key: CryptoKey, blob: EncryptedBlob): Promi
   try {
     const plain = await decryptBytesWithAad(key, blob, VAULT_VERIFIER_AAD);
     return new TextDecoder().decode(plain) === VAULT_VERIFIER_AAD;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 校验 v1 Vault verifier。
- *
- * v1 没有 additionalData，且明文标记是 `vault:v1`；不能用 v2 verifier
- * 的 AAD 路径读取。仅用于解锁时迁移，任何新写入始终使用 encryptVerifier。
- */
-export async function verifyLegacyVerifier(key: CryptoKey, blob: EncryptedBlob): Promise<boolean> {
-  try {
-    const plain = await decryptBytes(key, blob);
-    return new TextDecoder().decode(plain) === LEGACY_VAULT_VERIFIER_MARKER;
   } catch {
     return false;
   }

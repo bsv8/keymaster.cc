@@ -1,4 +1,4 @@
-// SatSubscription 输入校验。所有校验都在进入 transport/DB 前完成，避免
+// SatSubscription 输入校验。所有校验都在进入 transport/K-V 前完成，避免
 // 把“看起来像配置”的字符串带入连接或付费路径。
 
 import {

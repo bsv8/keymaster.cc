@@ -1,0 +1,23 @@
+{
+  "name": "@keymaster/platform-storage",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./coordinator": "./src/coordinator/index.ts",
+    "./coordinator/authority": "./src/coordinator/authority.ts",
+    "./coordinator/bootstrap": "./src/coordinator/bootstrap.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@keymaster/contracts": "*",
+    "@keymaster/runtime": "*",
+    "@keymaster/ui": "*",
+    "@aws-sdk/client-s3": "^3.864.0",
+    "@noble/hashes": "^2.0.1",
+    "@smithy/fetch-http-handler": "^5.6.13",
+    "@xmldom/xmldom": "^0.9.10"
+  }
+}

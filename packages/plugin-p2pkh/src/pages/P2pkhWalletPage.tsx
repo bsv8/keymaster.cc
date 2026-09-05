@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { Button, DataTable, EmptyState, PageHeader, formatSats, type DataTableColumn } from "@keymaster/ui";
 import { router, useCapability, useI18n, usePluginHost, useResourceSelector } from "@keymaster/runtime";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type P2pkhProviderRegistrySnapshot, type SessionCoordinatorClient } from "@keymaster/contracts";
-import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhMigrationAudit, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhSyncStatus, P2pkhTransactionFact, P2pkhTransactionSyncState } from "../p2pkhContracts.js";
+import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, type P2pkhCoordinatorControl, type P2pkhProviderRegistrySnapshot } from "@keymaster/contracts";
+import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhKeyResource, P2pkhLocalInputClaim, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhSyncStatus, P2pkhTransactionFact, P2pkhTransactionSyncState } from "../p2pkhContracts.js";
 import { balanceAtBlock, detailPath, inputAmount, listPath, parseStoredTransaction, readPage, type P2pkhNetwork, type P2pkhWalletView } from "./p2pkhTransactionView.js";
 
 export const TRANSACTION_PAGE_SIZE = 20;
@@ -14,7 +14,6 @@ export type WalletSnapshot = {
   locals: P2pkhLocalTransaction[];
   localOutpoints: P2pkhLocalOutpoint[];
   claims: P2pkhLocalInputClaim[];
-  migrationAudits: P2pkhMigrationAudit[];
   protectedOutpoints: Array<{ txid: string; vout: number; network: "main" | "test" }>;
   sync: P2pkhTransactionSyncState[];
   syncStatus: P2pkhSyncStatus;
@@ -53,12 +52,12 @@ function amountLabel(value: number | undefined): string {
 export function P2pkhWalletPage({ view = "transactions", network = "main" }: { view?: P2pkhWalletView; network?: P2pkhNetwork } = {}) {
   const host = usePluginHost();
   const { t } = useI18n();
-  const coordinator = useCapability<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY);
+  const coordinator = useCapability<P2pkhCoordinatorControl>(P2PKH_COORDINATOR_CONTROL_CAPABILITY);
   const service = useCapability<P2pkhService>("p2pkh.service");
   const [page, setPage] = useState(() => readPage());
   const [rebroadcasting, setRebroadcasting] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const wallet = useResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string }>(host.resourceStore, "p2pkh.wallet", [], (snapshot) => snapshot.data ? { ...snapshot.data, migrationAudits: snapshot.data.migrationAudits ?? [], factCursors: snapshot.data.factCursors ?? {}, ownedCursors: snapshot.data.ownedCursors ?? {}, localCursors: snapshot.data.localCursors ?? {}, localOutpointCursors: snapshot.data.localOutpointCursors ?? {}, claimCursors: snapshot.data.claimCursors ?? {}, inputValues: snapshot.data.inputValues ?? {}, inputValuesByResource: snapshot.data.inputValuesByResource ?? {}, error: snapshot.error?.message } : { resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], migrationAudits: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {}, error: snapshot.error?.message }, (left, right) => JSON.stringify(left) === JSON.stringify(right));
+  const wallet = useResourceSelector<WalletSnapshot, WalletSnapshot & { error?: string }>(host.resourceStore, "p2pkh.wallet", [], (snapshot) => snapshot.data ? { ...snapshot.data, factCursors: snapshot.data.factCursors ?? {}, ownedCursors: snapshot.data.ownedCursors ?? {}, localCursors: snapshot.data.localCursors ?? {}, localOutpointCursors: snapshot.data.localOutpointCursors ?? {}, claimCursors: snapshot.data.claimCursors ?? {}, inputValues: snapshot.data.inputValues ?? {}, inputValuesByResource: snapshot.data.inputValuesByResource ?? {}, error: snapshot.error?.message } : { resources: [], facts: [], owned: [], locals: [], localOutpoints: [], claims: [], protectedOutpoints: [], sync: [], syncStatus: "idle", balances: {}, providers: null, factCursors: {}, ownedCursors: {}, localCursors: {}, localOutpointCursors: {}, claimCursors: {}, inputValues: {}, inputValuesByResource: {}, error: snapshot.error?.message }, (left, right) => JSON.stringify(left) === JSON.stringify(right));
   const [loadedFacts, setLoadedFacts] = useState<P2pkhTransactionFact[]>(wallet.facts);
   const [loadedOwned, setLoadedOwned] = useState<P2pkhOwnedOutpointProjection[]>(wallet.owned);
   const [loadedLocals, setLoadedLocals] = useState<P2pkhLocalTransaction[]>(wallet.locals);
@@ -359,7 +358,6 @@ export function P2pkhWalletPage({ view = "transactions", network = "main" }: { v
         actions={<><Button variant={network === "main" ? "primary" : "ghost"} onClick={() => router.push(listPath("main", page, view))}>{t("p2pkh.wallet.mainnet", { defaultValue: "Mainnet" })}</Button>{settings.includeTestnet ? <Button variant={network === "test" ? "primary" : "ghost"} onClick={() => router.push(listPath("test", page, view))}>{t("p2pkh.wallet.testnet", { defaultValue: "Testnet" })}</Button> : null}</>}
       />
       {wallet.error ? <EmptyState title={t("p2pkh.wallet.loadFailed", { defaultValue: "Wallet data unavailable" })} description={wallet.error} /> : null}
-      {wallet.migrationAudits.length ? <p role="alert">{t("p2pkh.wallet.migrationAudit", { defaultValue: "Some legacy local submissions need review ({{count}}).", count: wallet.migrationAudits.length })}</p> : null}
       {networkEnabled ? <section className="p2pkh-wallet__balances" aria-label={t("p2pkh.wallet.balances", { defaultValue: "BSV balances" })}>
         <article><h2>{networkTitle}</h2><strong>{networkBalance === undefined ? "—" : formatSats(networkBalance)}</strong><BalanceBreakdown breakdown={wallet.balances[network]?.breakdown} /></article>
       </section> : <EmptyState title={t("p2pkh.wallet.networkDisabled", { defaultValue: "Testnet is disabled" })} description={t("p2pkh.wallet.networkDisabledDescription", { defaultValue: "Enable testnet in P2PKH settings before viewing testnet data." })} />}

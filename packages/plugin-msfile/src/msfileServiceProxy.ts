@@ -1,5 +1,5 @@
 // packages/plugin-msfile/src/msfileServiceProxy.ts
-// 页面侧 facade：不拥有设置真值、DB 或网络。所有控制/数据请求经
+// 页面侧 facade：不拥有设置真值、K-V 或网络。所有控制/数据请求经
 // Coordinator SharedWorker RPC；状态经 `msfile.state` topic 订阅。
 
 import type {
@@ -24,7 +24,7 @@ import type {
   MsFileStatResult,
   MsFileSupplierConfig,
   MsFileSupplierProbeResult,
-  SessionCoordinatorClient,
+  MsFileCoordinatorControl,
 } from "@keymaster/contracts";
 import { MSFILE_READ_CONCURRENCY_RECOMMENDED, normalizeMsFileReadConcurrencySettings } from "@keymaster/contracts";
 import type { MsFileService } from "@keymaster/contracts";
@@ -70,7 +70,7 @@ export class MsFileServiceProxy implements MsFileService {
   private readonly grants = new Map<string, Promise<string>>();
   private readonly unsubscribeState: () => void;
 
-  constructor(private readonly coordinator: SessionCoordinatorClient) {
+  constructor(private readonly coordinator: MsFileCoordinatorControl) {
     this.unsubscribeState = coordinator.subscribeTopic("msfile.state", (event: StateEvent) => {
       if (event.sessionEpoch !== this.current.sessionEpoch) this.grants.clear();
       // 兼容旧 Worker 的 baseline：四项并发设置必须以完整快照进入页面。

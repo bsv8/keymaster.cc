@@ -44,7 +44,7 @@ export interface ResourceDefinition<T, TArgs extends readonly string[] = readonl
   readonly scope: "global" | "active-key";
   /** 生成资源键 */
   key(args: TArgs, context: ResourceContext): ResourceKey;
-  /** 加载资源数据（只能读取本地服务/DB） */
+  /** 加载资源数据（只能读取本地服务/K-V） */
   load(args: TArgs, context: ResourceContext, signal: AbortSignal): Promise<T>;
   /** 订阅失效事件（只表达失效，不直接 setState） */
   subscribe?(args: TArgs, context: ResourceContext, invalidate: () => void): () => void;

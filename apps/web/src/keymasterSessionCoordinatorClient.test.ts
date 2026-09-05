@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { SESSION_COORDINATOR_CLIENT_CAPABILITY, type SessionCoordinatorClient } from "@keymaster/contracts";
+import type { SessionCoordinatorClient } from "@keymaster/contracts";
 import { vaultPlugin, VAULT_CAPABILITY } from "@keymaster/plugin-vault";
 import { createPluginHost } from "@keymaster/runtime";
 import { createCoordinatorClient } from "./keymasterSessionCoordinatorClient.js";
@@ -38,8 +38,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client: SessionCoordinatorClient = createCoordinatorClient({ clientId: "vault-assembly" });
       await client.connect();
 
-      const host = createPluginHost({ disableConfigPersistence: true });
-      host.provide(SESSION_COORDINATOR_CLIENT_CAPABILITY, client);
+      const host = createPluginHost({ disableConfigPersistence: true, coordinatorForPlugin: () => client });
       await host.register(vaultPlugin);
 
       expect(host.state("vault").kind).toBe("enabled");

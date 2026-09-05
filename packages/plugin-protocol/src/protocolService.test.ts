@@ -25,7 +25,7 @@ import {
   type ProtocolMethod,
   type ProtocolOriginSettingsRecord,
   type ProtocolResultMessage,
-  type ProtocolStorageDb
+  type ProtocolStorageRepository
 } from "@keymaster/contracts";
 import { ProtocolServiceImpl, type ProtocolServiceDeps } from "./protocolService.js";
 import type { LaunchTokenRecord, ResolvedClaimValue } from "@keymaster/contracts";
@@ -232,9 +232,9 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
       capabilities: ["p2pkh"],
       createdAt: new Date().toISOString() }),
     onActiveChange: () => () => undefined,
-    openKeyStorage: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
-    registerPluginStorage: () => undefined,
-    listPluginStorages: () => [],
+    openOwnerAppStore: async () => ({ db: {} as IDBDatabase, name: "x", close: () => undefined }),
+    registerStorageDeclaration: () => undefined,
+    listOwnerStorageDeclarations: () => [],
     prepareDeleteKey: async () => undefined,
     deleteKey: async () => undefined,
     isInitializing: () => false,
@@ -243,10 +243,10 @@ function makeKeyspaceStub(publicKeyHex: string): KeyspaceService {
 }
 
 /**
- * 内存 fake storageDb：保留持久语义（同 id / poolKey / origin 覆盖、
+ * 内存 fake storageRepository：保留持久语义（同 id / poolKey / origin 覆盖、
  * 按 origin 隔离、updatedAt desc 排序），不引入 fake-indexeddb。
  */
-function makeFakeStorageDb(): ProtocolStorageDb & { writes: number; readFailures: number; writeFailures: number } {
+function makeFakeMultipartUploadRepository(): ProtocolStorageRepository & { writes: number; readFailures: number; writeFailures: number } {
   const commands = new Map<string, ProtocolCommandRecord>();
   const origins = new Map<string, ProtocolOriginSettingsRecord>();
   const pools = new Map<string, ProtocolFeePoolRecord>();
@@ -363,22 +363,22 @@ function makeFakeSystemSettings() {
 }
 
 /**
- * 构造一个带 valid `sess-test` session 的 storageDb stub。
+ * 构造一个带 valid `sess-test` session 的 storageRepository stub。
  *
  * 施工单 2026-06-28 002 硬切换：所有业务方法都强制要求 `connectSessionId`。
  * cancel/timeout 类测试关心的是 timer 行为（cache miss → 30s 兜底、
  * 只 clamp down、不热更新），**不**关心 session 预校验细节；统一给
- * stubDb 配一个 valid `sess-test` session，让测试代码不再受 002 新增
+ * stubRepository 配一个 valid `sess-test` session，让测试代码不再受 002 新增
  * 的 session 预校验干扰。
  *
  * 调 `stubOverrides` 可以覆盖个别 DB 方法（典型用法：把 `getOrigin`
  * 改成挂住的 promise 模拟慢 DB）。**不**要在这里改 `getConnectSession`——
  * 它必须始终返回 valid session。
  */
-function makeFakeStorageDbWithSession(
-  stubOverrides: Partial<ProtocolStorageDb> = {}
-): ProtocolStorageDb {
-  const base: ProtocolStorageDb = {
+function makeFakeMultipartUploadRepositoryWithSession(
+  stubOverrides: Partial<ProtocolStorageRepository> = {}
+): ProtocolStorageRepository {
+  const base: ProtocolStorageRepository = {
     async putCommand() { /* noop */ },
     async getCommand() { return null; },
     async listCommandsByOrigin() { return []; },
@@ -443,10 +443,10 @@ interface ServiceHarness {
     closing: ProtocolClosingMessage[];
   };
   getResult: () => ProtocolResultMessage | null;
-  storageDb: ReturnType<typeof makeFakeStorageDb>;
+  storageRepository: ReturnType<typeof makeFakeMultipartUploadRepository>;
 }
 
-function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb | undefined = makeFakeStorageDb(), extra: Partial<ProtocolServiceDeps> = {}): ServiceHarness {
+function makeService(publicKeyHex = TEST_PUB_HEX, storageRepository: ProtocolStorageRepository | undefined = makeFakeMultipartUploadRepository(), extra: Partial<ProtocolServiceDeps> = {}): ServiceHarness {
   const opener = makeFakeOpener();
   let resultMessage: ProtocolResultMessage | null = null;
   const posted: ServiceHarness["posted"] = { ready: 0, result: [], closing: [] };
@@ -469,17 +469,17 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
     appCatalogResolver: { resolve: () => ({ kind: "known-valid" as const, proof: VALID_PROOF }) },
     ...extra
   };
-  if (storageDb) {
-    deps.storageDb = storageDb;
+  if (storageRepository) {
+    deps.storageRepository = storageRepository;
   }
   const service = new ProtocolServiceImpl(deps);
   // 施工单 2026-06-28 002 硬切换：业务方法强制要求 connectSessionId；
   // 默认 seed 两条 session（ORIGIN + ORIGIN_FRESH），让绝大多数测试可以
   // 无脑发业务方法。需要测 session 不存在 / 跨 origin / revoked 的测试
   // 自行 override。
-  // 用 `void` + .catch 容错：failing storageDb 测试会抛错，吞掉即可。
-  if (storageDb) {
-    const db = storageDb as ReturnType<typeof makeFakeStorageDb>;
+  // 用 `void` + .catch 容错：failing storageRepository 测试会抛错，吞掉即可。
+  if (storageRepository) {
+    const db = storageRepository as ReturnType<typeof makeFakeMultipartUploadRepository>;
     void db.putConnectSession({
       sessionId: "sess-test",
       origin: ORIGIN,
@@ -539,7 +539,7 @@ function makeService(publicKeyHex = TEST_PUB_HEX, storageDb: ProtocolStorageDb |
     deps,
     posted,
     getResult: () => resultMessage,
-    storageDb: storageDb as ReturnType<typeof makeFakeStorageDb>
+    storageRepository: storageRepository as ReturnType<typeof makeFakeMultipartUploadRepository>
   };
 }
 
@@ -552,20 +552,20 @@ function makeEvent<T>(data: T, origin = ORIGIN, source: object | null = null): M
 }
 
 /**
- * 测试辅助：手工写一条 connect session 到 fake storageDb，
+ * 测试辅助：手工写一条 connect session 到 fake storageRepository，
  * 让 cipher.* / connect.resume 测试不必先走完整 login 流程。
  *
  * 字段与 contract ConnectSessionRecord 严格对齐（施工单 2026-06-28 002
  * 硬切换：已移除 `ownerKeyId`，只保留 `ownerPublicKeyHex`）。
  */
 async function seedConnectSession(
-  storageDb: ReturnType<typeof makeFakeStorageDb>,
+  storageRepository: ReturnType<typeof makeFakeMultipartUploadRepository>,
   sessionId: string,
   ownerPublicKeyHex: string,
   origin: string = ORIGIN
 ): Promise<void> {
   const now = Date.now();
-  await storageDb.putConnectSession({
+  await storageRepository.putConnectSession({
     sessionId,
     origin,
     ownerPublicKeyHex,
@@ -602,10 +602,10 @@ beforeEach(() => {
 
 describe("ProtocolServiceImpl", () => {
   it("can attach IndexedDB after startup without making the protocol unavailable", () => {
-    const { service } = makeService(TEST_PUB_HEX, null as unknown as ProtocolStorageDb);
+    const { service } = makeService(TEST_PUB_HEX, null as unknown as ProtocolStorageRepository);
     expect(service.feedSnapshot().historyAvailable).toBe(false);
 
-    service.attachStorageDb(makeFakeStorageDb());
+    service.attachProtocolStorageRepository(makeFakeMultipartUploadRepository());
 
     expect(service.feedSnapshot().historyAvailable).toBe(true);
   });
@@ -747,9 +747,9 @@ describe("ProtocolServiceImpl", () => {
   });
 
   it("cipher.encrypt + cipher.decrypt round-trip within same origin", async () => {
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
-    await seedConnectSession(storageDb, "sess-cipher-1", TEST_PUB_HEX);
+    await seedConnectSession(storageRepository, "sess-cipher-1", TEST_PUB_HEX);
     const content = new TextEncoder().encode("note body");
     await service.handleMessage(
       makeEvent(
@@ -779,9 +779,9 @@ describe("ProtocolServiceImpl", () => {
   });
 
   it("cipher.decrypt across different origin fails with decrypt_failed", async () => {
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
-    await seedConnectSession(storageDb, "sess-cipher-2", TEST_PUB_HEX);
+    await seedConnectSession(storageRepository, "sess-cipher-2", TEST_PUB_HEX);
     const content = new TextEncoder().encode("body");
     await service.handleMessage(
       makeEvent(
@@ -805,7 +805,7 @@ describe("ProtocolServiceImpl", () => {
     const evil = makeService();
     evil.service.startSession();
     // evil 必须 seed 同 origin 的 session 才能跨过 origin 闸；AES-GCM 仍会失败。
-    await seedConnectSession(evil.storageDb, "sess-evil", TEST_PUB_HEX, EVIL);
+    await seedConnectSession(evil.storageRepository, "sess-evil", TEST_PUB_HEX, EVIL);
     const opener2 = evil.opener;
     await evil.service.handleMessage(
       makeEvent(
@@ -940,9 +940,9 @@ describe("ProtocolServiceImpl", () => {
     // 旧行为（001 单之前）：第二条 request 被单 active request 模型忽略。
     // 新行为（002 单）：多 request 并存；两条独立活卡出现在 feed 活请求区
     // 头部（按 createdAt asc 排序）。
-    const { service, opener, posted, storageDb } = makeService();
+    const { service, opener, posted, storageRepository } = makeService();
     service.startSession();
-    await seedConnectSession(storageDb, "sess-concurrent", TEST_PUB_HEX);
+    await seedConnectSession(storageRepository, "sess-concurrent", TEST_PUB_HEX);
     await service.handleMessage(
       makeEvent(
         {
@@ -1044,14 +1044,14 @@ describe("ProtocolServiceImpl", () => {
   it("loadHistoryForOrigin 按 recordId 合并：内存活记录覆盖 DB 旧记录", async () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：DB 旧记录与内存活记录
     // 同 id 时，**以内存为准**。这条阻止"DB 旧字段覆盖当前内存活卡"。
-    const { service, opener, storageDb } = makeService();
+    const { service, opener, storageRepository } = makeService();
     service.startSession();
     // DB 里有一条旧记录，phase 是 "approved"（终态），但内存里我们等会
     // 推一条同 recordId 但 phase 是 "confirming" 的活记录——不可能完全
     // 真实发生（id 在内存里是 nextRecordId 生成）；所以这里**直接写一
     // 个会冲突的场景**：
     //   1. 先 acceptRequest 创建 record-A，得到 recordId_A；
-    //   2. 手动用 storageDb.putCommand 覆盖 recordId_A 为"approved" 终态
+    //   2. 手动用 storageRepository.putCommand 覆盖 recordId_A 为"approved" 终态
     //      旧记录（模拟"DB 之前已经写过、现在内存 record 仍是 confirming"）；
     //   3. 触发 loadHistoryForOrigin（同 origin 再次 acceptRequest）让合并
     //      路径执行。
@@ -1076,7 +1076,7 @@ describe("ProtocolServiceImpl", () => {
     expect(recordIdA).toBeDefined();
     expect(feed1.commands[0]?.phase).toBe("confirming");
     // 把同 recordId 写一条"approved" 旧记录到 DB（模拟 DB 已经存过终态）。
-    await storageDb.putCommand({
+    await storageRepository.putCommand({
       id: recordIdA!,
       origin: ORIGIN,
       requestId: "live-confirming",
@@ -1122,7 +1122,7 @@ describe("ProtocolServiceImpl", () => {
   });
 
   it("中间态 request 不落库；终态后才进入历史持久化", async () => {
-    const { service, opener, storageDb } = makeService();
+    const { service, opener, storageRepository } = makeService();
     service.startSession();
     await service.handleMessage(
       makeEvent(
@@ -1138,12 +1138,12 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     // request 进入 confirming，但 DB 历史仍应为空：活请求只存在于当前会话内存。
-    const beforeConfirm = await storageDb.listCommandsByOrigin(ORIGIN);
+    const beforeConfirm = await storageRepository.listCommandsByOrigin(ORIGIN);
     expect(beforeConfirm.find((c) => c.requestId === "persist-after-terminal")).toBeUndefined();
 
     await service.confirmByUser();
     await new Promise((r) => setTimeout(r, 30));
-    const afterConfirm = await storageDb.listCommandsByOrigin(ORIGIN);
+    const afterConfirm = await storageRepository.listCommandsByOrigin(ORIGIN);
     const persisted = afterConfirm.find((c) => c.requestId === "persist-after-terminal");
     expect(persisted).toBeDefined();
     expect(persisted?.phase).toBe("approved");
@@ -1153,8 +1153,8 @@ describe("ProtocolServiceImpl", () => {
   it("loadHistoryForOrigin 忽略 DB 残留的中间态脏卡", async () => {
     // 回归这次线上问题：旧版本把 confirming 写进 DB；新 popup 会话收到
     // 同 origin 新请求后，历史加载不能把这条旧活卡重新展示成可交互 live card。
-    const { service, opener, storageDb } = makeService();
-    await storageDb.putCommand({
+    const { service, opener, storageRepository } = makeService();
+    await storageRepository.putCommand({
       id: "stale-confirming-from-db",
       origin: ORIGIN,
       requestId: "stale-confirming-from-db",
@@ -1200,10 +1200,10 @@ describe("ProtocolServiceImpl", () => {
   it("切换 origin 时旧批次历史加载结果不会覆盖新 origin 视图", async () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：旧 origin 的历史加载
     // 晚到时，**不**回写当前 origin 视图（防 origin 切换时旧数据串回）。
-    // 用可控延迟的 storageDb 模拟"旧 origin 加载慢"。
+    // 用可控延迟的 storageRepository 模拟"旧 origin 加载慢"。
     let listCommandsACalls = 0;
     let resolveListCommandsA!: (list: ProtocolCommandRecord[]) => void;
-    const stubDb: ProtocolStorageDb = {
+    const stubRepository: ProtocolStorageRepository = {
       async putCommand() {
         /* noop */
       },
@@ -1273,11 +1273,11 @@ describe("ProtocolServiceImpl", () => {
         return [];
       },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await stubDb.putConnectSession(record);
+        await stubRepository.putConnectSession(record);
       },
 
     };
-    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    const { service, opener } = makeService(TEST_PUB_HEX, stubRepository);
     service.startSession();
     // 第一条 request 来自 origin-a：触发 loadHistoryForOrigin（挂住）。
     await service.handleMessage(
@@ -1338,7 +1338,7 @@ describe("ProtocolServiceImpl", () => {
     const callsByOrigin: string[] = [];
     let listCommandsACalls = 0;
     let listCommandsBCalls = 0;
-    const stubDb: ProtocolStorageDb = {
+    const stubRepository: ProtocolStorageRepository = {
       async putCommand() {
         /* noop */
       },
@@ -1408,11 +1408,11 @@ describe("ProtocolServiceImpl", () => {
         return [];
       },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await stubDb.putConnectSession(record);
+        await stubRepository.putConnectSession(record);
       },
 
     };
-    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    const { service, opener } = makeService(TEST_PUB_HEX, stubRepository);
     service.startSession();
     // 第一条 request 来自 origin-a:触发 in-flight load (挂住)。
     await service.handleMessage(
@@ -1474,7 +1474,7 @@ describe("ProtocolServiceImpl", () => {
     // setRecordPhase 会拿"旧 origin 历史 + 新 origin 活卡"一起 buildFeedDisplay。
     // 新实现：切 origin 瞬间立即清空 feedCommands，只保留新 origin 内
     // 存活记录的投影——避免跨 origin 混排。
-    const { service, opener, storageDb } = makeService();
+    const { service, opener, storageRepository } = makeService();
     service.startSession();
     // 在 origin-a 处理一条 request 并 confirm,使其进入终态 (approved)。
     await service.handleMessage(
@@ -1526,7 +1526,7 @@ describe("ProtocolServiceImpl", () => {
     expect(feedAfterLoad.commands.some((c) => c.origin === "https://origin-a.example")).toBe(false);
     // 注：旧 origin-a 的 from-a 记录仍在 requestsByRecordId 里（用于将来切回），
     // 但当前视图不显示。这是施工单要求的"切 origin 立即换视图"。
-    void storageDb;
+    void storageRepository;
   });
 
   it("修复 #2 (续)：再切回 origin-a,旧 origin 历史能正确重建", async () => {
@@ -1610,11 +1610,11 @@ describe("ProtocolServiceImpl", () => {
         createdAt: new Date().toISOString()
       })
     };
-    const { service, opener, storageDb, deps } = makeService(initialOwner, undefined, {
+    const { service, opener, storageRepository, deps } = makeService(initialOwner, undefined, {
       keyspace: dynamicKeyspace as unknown as KeyspaceService
     });
     // 预 seed 一条 connect session，owner 锁定为创建时的 initialOwner。
-    await seedConnectSession(storageDb, "sess-owner-snap", initialOwner, ORIGIN);
+    await seedConnectSession(storageRepository, "sess-owner-snap", initialOwner, ORIGIN);
     service.startSession();
     await service.handleMessage(
       makeEvent(
@@ -1653,9 +1653,9 @@ describe("ProtocolServiceImpl", () => {
   it("同类 request 不复用卡位：两条 cipher.decrypt 在 feed 投影中独立", async () => {
     // 关键不变量（施工单 2026-06-27 002 硬切换）：同类 request 不应"借壳"
     // 修改第一张卡的内容伪装成更新。两条独立 record，两张独立卡。
-    const { service, opener, storageDb } = makeService();
+    const { service, opener, storageRepository } = makeService();
     service.startSession();
-    await seedConnectSession(storageDb, "sess-two-dec", TEST_PUB_HEX);
+    await seedConnectSession(storageRepository, "sess-two-dec", TEST_PUB_HEX);
     const nonce1 = new Uint8Array(12);
     const nonce2 = new Uint8Array(12);
     nonce2[0] = 1;
@@ -1758,8 +1758,8 @@ describe("ProtocolServiceImpl", () => {
     expect(bInLive?.requestId).toBe("r-B");
   });
 
-  it("switching origin reloads feed history from storageDb", async () => {
-    const { service, opener, storageDb } = makeService();
+  it("switching origin reloads feed history from storageRepository", async () => {
+    const { service, opener, storageRepository } = makeService();
     // 先在 ORIGIN 处理一条 request。
     service.startSession();
     await service.handleMessage(
@@ -1778,7 +1778,7 @@ describe("ProtocolServiceImpl", () => {
     await service.confirmByUser();
     // 假装这条已经写库（service 自己写过，但为了"切换 origin 拉历史"
     // 这条断言显式放一条"另一条不在内存里但应该被 DB 列出"的记录）。
-    await storageDb.putCommand({
+    await storageRepository.putCommand({
       id: "old-on-origin-A",
       origin: ORIGIN,
       requestId: "old-on-origin-A",
@@ -1894,7 +1894,7 @@ describe("ProtocolServiceImpl", () => {
     // 方法都要求 session 真值，**不**fallback 到 active key。本测试
     // 仍验证"DB 写失败不卡 transport + confirm 调度"，但期望
     // result.ok = false（execute 阶段 fail-closed）。
-    const failingDb: ProtocolStorageDb = {
+    const failingRepository: ProtocolStorageRepository = {
       async putCommand() {
         throw new Error("db down");
       },
@@ -1935,11 +1935,11 @@ describe("ProtocolServiceImpl", () => {
         throw new Error("db down");
       },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await failingDb.putConnectSession(record);
+        await failingRepository.putConnectSession(record);
       },
 
     };
-    const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingDb);
+    const { service, opener, getResult } = makeService(TEST_PUB_HEX, failingRepository);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       service.startSession();
@@ -2028,10 +2028,10 @@ describe("ProtocolServiceImpl", () => {
     // 关键不变量：切换 origin 时，DB 读结果不能覆盖当前 in-flight 命令卡。
     // 即便 DB 读比当前命令卡 upsert 更早完成，in-flight 卡的最新状态
     // 也必须保留。
-    const { service, opener, storageDb } = makeService();
+    const { service, opener, storageRepository } = makeService();
     service.startSession();
     // 准备：在 ORIGIN 历史上先放一条已完成的命令卡，DB 里有完整记录。
-    await storageDb.putCommand({
+    await storageRepository.putCommand({
       id: "old-on-origin-A",
       origin: ORIGIN,
       requestId: "req-old",
@@ -2079,7 +2079,7 @@ describe("ProtocolServiceImpl", () => {
 
   it("loadHistoryForOrigin failure keeps the in-flight card alive", async () => {
     // DB 读抛错时，UI 进入"历史不可用"；但当前命令卡不能因此消失。
-    const failingDb: ProtocolStorageDb = {
+    const failingRepository: ProtocolStorageRepository = {
       async putCommand() {
         return undefined;
       },
@@ -2140,11 +2140,11 @@ describe("ProtocolServiceImpl", () => {
         return [];
       },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await failingDb.putConnectSession(record);
+        await failingRepository.putConnectSession(record);
       },
 
     };
-    const { service, opener } = makeService(TEST_PUB_HEX, failingDb);
+    const { service, opener } = makeService(TEST_PUB_HEX, failingRepository);
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
     try {
       service.startSession();
@@ -2417,7 +2417,7 @@ describe("ProtocolServiceImpl", () => {
 
   /**
    * 通用 setup：mock feepoolSdk 返回 deterministic hex；返回 harness（带 service / opener /
-   * storageDb / lastResult helper）。
+   * storageRepository / lastResult helper）。
    *
    * 注意：mock 通过 `vi.doMock` 在 module 缓存里生效；必须在 `await import`
    * 之前；`vi.resetModules` 清缓存让 re-import 真的走新 mock。
@@ -2453,7 +2453,7 @@ describe("ProtocolServiceImpl", () => {
     const opener = makeFakeOpener();
     const posted = { ready: 0, result: [] as ProtocolResultMessage[], closing: [] as ProtocolClosingMessage[] };
     let resultMessage: ProtocolResultMessage | null = null;
-    const fakeStorage = makeFakeStorageDb();
+    const fakeStorage = makeFakeMultipartUploadRepository();
     // 施工单 2026-06-28 002 硬切换：feepool.* 业务方法也需要 connectSessionId。
     await fakeStorage.putConnectSession({
       sessionId: "sess-test",
@@ -2468,7 +2468,7 @@ describe("ProtocolServiceImpl", () => {
     const service = new reloaded.ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
       keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-      storageDb: fakeStorage,
+      storageRepository: fakeStorage,
       p2pkhService: p2pkh as never,
       resolveOpener: () => opener as unknown as Window,
       postReady: () => {
@@ -2485,7 +2485,7 @@ describe("ProtocolServiceImpl", () => {
     return {
       service,
       opener,
-      storageDb: fakeStorage,
+      storageRepository: fakeStorage,
       posted,
       /** 最新一条 result message（成功 / 失败都包含）。 */
       lastResult(): ProtocolResultMessage | null {
@@ -2564,7 +2564,7 @@ describe("ProtocolServiceImpl", () => {
       expect(result.amountSatoshis).toBe(8000);
     }
     // feePools store 此时**未**写（commit 才写）。
-    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    const stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).toBeNull();
     teardownFeepoolMock();
   });
@@ -2650,7 +2650,7 @@ describe("ProtocolServiceImpl", () => {
       sdkUpdatedDraft: { txHex: "bb".repeat(120) }
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
-    await h.storageDb.putFeePool(prior);
+    await h.storageRepository.putFeePool(prior);
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
@@ -2705,7 +2705,7 @@ describe("ProtocolServiceImpl", () => {
       sdkInitialDraft: { txHex: "dd".repeat(120) }
     });
     await setOriginViaService(h.service, { feePoolDefaultFundSatoshis: 10000 });
-    await h.storageDb.putFeePool(prior);
+    await h.storageRepository.putFeePool(prior);
     h.service.startSession();
     await h.service.handleMessage(
       makeEvent(
@@ -2803,7 +2803,7 @@ describe("ProtocolServiceImpl", () => {
       expect((commitResult.result as { action: string }).action).toBe("create");
     }
     // store 里有新池记录；totalAmount = 池大小（**不**等于 transfer 金额）。
-    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    const stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).not.toBeNull();
     expect(stored?.totalAmount).toBe(10000); // 池大小
     expect(stored?.serverAmount).toBe(5000); // transfer 金额
@@ -3071,7 +3071,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    const stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    const stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored).not.toBeNull();
     expect(stored?.totalAmount).toBe(10000);
     expect(stored?.serverAmount).toBe(3000);
@@ -3121,7 +3121,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    let stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    let stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(stored?.serverAmount).toBe(1000);
 
     await h.service.handleMessage(
@@ -3158,7 +3158,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    stored = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    stored = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     // 池持续累计：1000 + 1500 = 2500；草稿已更新到 update 版（"ee"）
     expect(stored?.serverAmount).toBe(2500);
     expect(stored?.draftSpendTxHex).toBe("ee".repeat(100));
@@ -3225,7 +3225,7 @@ describe("ProtocolServiceImpl", () => {
       )
     );
     await h.service.confirmByUser();
-    const oldPool = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    const oldPool = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(oldPool).not.toBeNull();
     expect(oldPool?.totalAmount).toBe(10000);
     expect(oldPool?.serverAmount).toBe(8000);
@@ -3301,7 +3301,7 @@ describe("ProtocolServiceImpl", () => {
     // serverAmount = 新池第一次 transfer（= site 的 amountSatoshis = 2000）。
     // 关键：close 旧池 2000 + 新池 2000 = 4000（**不是**）；V5 修复后新池只继承
     // 自己的第一次 transfer 2000。
-    const newPool = await h.storageDb.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
+    const newPool = await h.storageRepository.getFeePool(`${ORIGIN}::${TEST_PUB_HEX}::${COUNTERPARTY}`);
     expect(newPool).not.toBeNull();
     expect(newPool?.totalAmount).toBe(10000);
     expect(newPool?.serverAmount).toBe(2000); // V5 关键：不是 4000
@@ -3364,8 +3364,8 @@ describe("ProtocolServiceImpl", () => {
 describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   const ORIGIN_FRESH = "https://fresh.example";
 
-  /** 直接构造一个会抛 throw 的 storageDb,用于"DB 不可用"测试。 */
-  function makeFailingDb(): ProtocolStorageDb {
+  /** 直接构造一个会抛 throw 的 storageRepository,用于"DB 不可用"测试。 */
+  function makeFailingRepository(): ProtocolStorageRepository {
     return {
       async putCommand() {
         throw new Error("db down");
@@ -3447,7 +3447,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   }
 
   it("origin settings round-trip includes identityAutoApproveEnabled / cipherAutoApproveEnabled", async () => {
-    const { service, storageDb } = makeService();
+    const { service, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -3462,17 +3462,17 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     const got = await service.getOriginSettings(ORIGIN_FRESH);
     expect(got?.identityAutoApproveEnabled).toBe(true);
     expect(got?.cipherAutoApproveEnabled).toBe(true);
-    const raw = await storageDb.getOrigin(ORIGIN_FRESH);
+    const raw = await storageRepository.getOrigin(ORIGIN_FRESH);
     expect(raw?.identityAutoApproveEnabled).toBe(true);
     expect(raw?.cipherAutoApproveEnabled).toBe(true);
   });
 
   it("normalizes old origin record (missing new fields) to identityAutoApproveEnabled=false / cipherAutoApproveEnabled=false / confirmTimeoutSeconds=30", async () => {
-    const { service, storageDb } = makeService();
+    const { service, storageRepository } = makeService();
     // 模拟旧 schema:直接往 DB 写一条缺新字段的 record。
     // 注意：这里**故意**不写 `confirmTimeoutSeconds` —— 走的是施工单 003
     // 归一化路径（缺字段 → 30）。
-    await storageDb.putOrigin({
+    await storageRepository.putOrigin({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: true,
       p2pkhAutoApproveMaxSatoshis: 5000,
@@ -3485,8 +3485,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     expect(got?.identityAutoApproveEnabled).toBe(false);
     expect(got?.cipherAutoApproveEnabled).toBe(false);
     expect(got?.confirmTimeoutSeconds).toBe(30);
-    // 用共享 storageDb 的第二个 service:cache miss → 异步读 DB → 归一化写 cache。
-    const { service: s2 } = makeService(TEST_PUB_HEX, storageDb);
+    // 用共享 storageRepository 的第二个 service:cache miss → 异步读 DB → 归一化写 cache。
+    const { service: s2 } = makeService(TEST_PUB_HEX, storageRepository);
     s2.startSession();
     const loaded = await s2.getOriginSettings(ORIGIN_FRESH);
     expect(loaded?.identityAutoApproveEnabled).toBe(false);
@@ -3532,7 +3532,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   });
 
   it("cipher.encrypt auto-approve (sync cache hit)", async () => {
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -3545,9 +3545,9 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       updatedAt: 1
     });
     service.startSession();
-    await seedConnectSession(storageDb, "sess-enc-auto", TEST_PUB_HEX);
+    await seedConnectSession(storageRepository, "sess-enc-auto", TEST_PUB_HEX);
     // 重写 seed 后的 session 的 origin 为 ORIGIN_FRESH，避免 invalid_origin。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-enc-auto",
       origin: ORIGIN_FRESH,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3584,7 +3584,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
 
   it("cipher.decrypt auto-approve (sync cache hit)", async () => {
     // 先用同 origin 发一次 encrypt,再用 decrypt 请求(同 origin cache 命中)。
-    const { service, opener, storageDb } = makeService();
+    const { service, opener, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -3599,7 +3599,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     service.startSession();
     // cipher.* 现在强制要求 connectSessionId；为这条 auto-approve 测试
     // 预先 seed 一条 ORIGIN_FRESH 下的 session。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-dec-auto",
       origin: ORIGIN_FRESH,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3664,8 +3664,8 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       confirmTimeoutSeconds: 30,
       updatedAt: 1
     });
-    // 第二次 service:共享 storageDb,但 cache 是空的——模拟 popup 新开会话。
-    const second = makeService(TEST_PUB_HEX, first.storageDb);
+    // 第二次 service:共享 storageRepository,但 cache 是空的——模拟 popup 新开会话。
+    const second = makeService(TEST_PUB_HEX, first.storageRepository);
     second.service.startSession();
     // cache miss 路径:handleMessage 内部 await getOriginSettingsCached →
     // 命中 → setPhase("executing") + fire-and-forget runIdentityCipherAutoApproved。
@@ -3736,10 +3736,10 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
       for (const l of unlockListeners) l({ status: "unlocked", sessionEpoch: "test", vaultLifecycleRevision: 1 });
       return { status: "accepted" as const };
     };
-    const { service, opener, storageDb } = makeService(TEST_PUB_HEX, undefined, {
+    const { service, opener, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
       vault: vaultLocked
     });
-    await storageDb.putOrigin({
+    await storageRepository.putOrigin({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
       p2pkhAutoApproveMaxSatoshis: 0,
@@ -3776,7 +3776,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   });
 
   it("DB unavailable: identity.get auto-approve is off; falls through to manual confirm (after await getOriginSettingsCached catches)", async () => {
-    const { service, opener } = makeService(TEST_PUB_HEX, makeFailingDb());
+    const { service, opener } = makeService(TEST_PUB_HEX, makeFailingRepository());
     service.startSession();
     await service.handleMessage(
       makeEvent(
@@ -3899,7 +3899,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
   });
 
   it("cipher.decrypt auto-approve path: decrypt_failed replies decrypt_failed (not user_rejected)", async () => {
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     await service.setOriginSettings({
       origin: ORIGIN_FRESH,
       p2pkhAutoApproveEnabled: false,
@@ -3913,7 +3913,7 @@ describe("ProtocolServiceImpl origin auto-approve (施工单 001)", () => {
     });
     service.startSession();
     // cipher.* 现在强制要求 connectSessionId；预先 seed 一条 ORIGIN_FRESH 下的 session。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-dec-bad",
       origin: ORIGIN_FRESH,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -3962,8 +3962,8 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
       undefined,
       { resolve: () => ({ kind: "known-invalid" as const, reason: "placeholder publisher key" }) }
     ]) {
-      const storageDb = makeFakeStorageDb();
-      const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageDb, { appCatalogResolver: resolver });
+      const storageRepository = makeFakeMultipartUploadRepository();
+      const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageRepository, { appCatalogResolver: resolver });
       service.startSession();
       await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-gate", method: "connect.login", params: { text: "login" } }, ORIGIN, opener));
       const view = service.connectLoginRecord();
@@ -3975,10 +3975,10 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   });
 
   it("direct login storage requirement 未 ready 时返回 storage_unavailable 且不写 session", async () => {
-    const storageDb = makeFakeStorageDb();
-    const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageDb, {
+    const storageRepository = makeFakeMultipartUploadRepository();
+    const { service, opener, getResult } = makeService(TEST_PUB_HEX, storageRepository, {
       appCatalogResolver: { resolve: () => ({ kind: "known-valid" as const, proof: STORAGE_PROOF }) },
-      storageService: { status: () => "unconfigured" } as never
+      storageRuntimeController: { status: () => "unconfigured" } as never
     });
     service.startSession();
     await service.handleMessage(makeEvent({ v: PROTOCOL_VERSION, type: "request", id: "login-storage-gate", method: "connect.login", params: { text: "login", appIdentity: STORAGE_PROOF } }, ORIGIN, opener));
@@ -3992,7 +3992,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   it("connect.login：caller 不传 ownerPublicKeyHex；用户在 popup UI 选 key 后落 session 真值", async () => {
     // 关键修复（反例反馈）：caller 不携带 ownerPublicKeyHex——owner 是
     // 用户在 popup UI 上选定的；service 不能替 caller 决定。
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     await service.handleMessage(
       makeEvent(
@@ -4022,7 +4022,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(loginResult.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
     expect(typeof loginResult.connectSessionId).toBe("string");
     // session 真值已落 IndexedDB。
-    const stored = await storageDb.getConnectSession(loginResult.connectSessionId);
+    const stored = await storageRepository.getConnectSession(loginResult.connectSessionId);
     expect(stored).not.toBeNull();
     expect(stored?.origin).toBe(ORIGIN);
     expect(stored?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
@@ -4105,10 +4105,10 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 关键不变量（施工单 2026-06-28 001 硬切换 4.3 + 9.2）：popup 刷新/关闭
     // 后，caller 用 connect.resume 恢复时**不**再要求"恢复"按钮确认——
     // unlock 后自动恢复原 session。
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-resume-1";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4149,12 +4149,12 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 关键不变量（施工单 2026-06-28 001 硬切换 9.2）：caller 页面刷新后
     // 优先发 connect.resume；如果 vault locked，仅要求重新输入密码恢复
     // unlock runtime；解锁后**不**再要求"恢复"按钮确认——自动恢复。
-    const { service, opener, getResult, storageDb, deps } = makeService();
+    const { service, opener, getResult, storageRepository, deps } = makeService();
     // 让 vault 一开始 locked。
     deps.vault.status = () => "locked" as const;
     service.startSession();
     const sessionId = "sess-resume-locked";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4197,10 +4197,10 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   it("connect.resume：session 已 revoked → fail-fast（不进 confirming；unlocked 直接 failed）", async () => {
     // 关键修复（反例反馈）：session 无效必须 fail-fast，不能让用户走完
     // confirming 后才被告知失败。
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-revoked";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4243,11 +4243,11 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 关键修复（第二轮反例反馈）：fail-fast **不依赖** vault unlock。
     // 无效 session 在 locked 状态下也直接失败——不允许"先提示解锁"的
     // 路径，避免用户对无效请求做无意义的解锁。
-    const { service, opener, getResult, storageDb, deps } = makeService();
+    const { service, opener, getResult, storageRepository, deps } = makeService();
     deps.vault.status = () => "locked" as const;
     service.startSession();
     const sessionId = "sess-revoked-locked";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4294,7 +4294,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 收到 ok=true，造成"session 已吊销但 unlock runtime 没清"的错位
     // 状态。修复后 lock 失败 propagate 为 internal_error，caller 看
     // 到错误并能理解 logout 不完整。
-    const { service, opener, getResult, storageDb, deps } = makeService();
+    const { service, opener, getResult, storageRepository, deps } = makeService();
     let lockCalls = 0;
     // 模拟真实链路：vault.lock 内部 state 翻转 → 触发 onStatusChange
     // 监听 → popup 顶层调 service.setVaultLockState(true)。施工单
@@ -4309,7 +4309,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     });
     service.startSession();
     const sessionId = "sess-logout-1";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4349,7 +4349,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // vault.locked 触发 setVaultLockState → service.lockStateValue === "locked"。
     expect(service.lockState()).toBe("locked");
     // 落库：session.revokedAt 已写入。
-    const stored = await storageDb.getConnectSession(sessionId);
+    const stored = await storageRepository.getConnectSession(sessionId);
     expect(stored?.revokedAt).toBe(logoutResult.revokedAt);
   });
 
@@ -4359,7 +4359,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     // 然后 vault.lock() 返回 transport-error → service 转为 localFailure → dispatch catch 写
     // failed + replyErrorToRec → caller 收到 ok=false。session 真值层面
     // logout 已生效（后续 resume / cipher 仍会按 fail-fast 失败）。
-    const { service, opener, getResult, storageDb, deps } = makeService();
+    const { service, opener, getResult, storageRepository, deps } = makeService();
     let lockCalls = 0;
     deps.vault.lock = (async () => {
       lockCalls++;
@@ -4367,7 +4367,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     }) as typeof deps.vault.lock;
     service.startSession();
     const sessionId = "sess-logout-lockfail";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4398,7 +4398,7 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
     expect(r?.ok).toBe(false);
     if (r && !r.ok) expect(r.error.code).toBe("user_rejected");
     // DB 层面：session.revokedAt 已被 commit（fail-closed 安全语义）。
-    const stored = await storageDb.getConnectSession(sessionId);
+    const stored = await storageRepository.getConnectSession(sessionId);
     expect(stored?.revokedAt).not.toBeNull();
     // 关键修复（本轮）：即便 vault.lock 抛错，bootstrap runtime 也已被清理。
     expect((service as unknown as { ownerRuntimesBySessionId: Map<string, unknown> }).ownerRuntimesBySessionId.size).toBe(0);
@@ -4510,11 +4510,11 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   });
 
   it("cipher.decrypt：跨 origin sessionId → invalid_origin（不允许跨 origin 复用）", async () => {
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const EVIL = "https://evil.com";
     // 把 session 真值的 origin 写成 EVIL，但 event.origin 是 ORIGIN。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-cross",
       origin: EVIL,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4552,10 +4552,10 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   it("connect.resume：session 绑定 key 已删 → fail-fast，对外 user_rejected", async () => {
     // 关键修复（反例反馈）：owner key 不可用时必须 fail-fast，不能让
     // 用户走完 confirming 后才被告知。
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-deleted-key";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       // ownerPublicKeyHex 用 fake stub 不会识别的值（getKey 返回 undefined）。
@@ -4593,11 +4593,11 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   it("active key 切换不影响已存在 session：cipher 仍走 session 绑定 key", async () => {
     // 关键不变量（施工单 2026-06-28 001 / 002）：cipher 绑定的 ownerPublicKeyHex 与
     // 当前钱包全局 active key 解耦。
-    const { service, opener, getResult, storageDb, deps } = makeService();
+    const { service, opener, getResult, storageRepository, deps } = makeService();
     service.startSession();
     const sessionId = "sess-stable";
     // session 绑定的 ownerPublicKeyHex === TEST_PUB_HEX（key1）。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4639,10 +4639,10 @@ describe("ProtocolServiceImpl connect.* (施工单 2026-06-28 001 硬切换)", (
   });
 
   it("logout 后立即 resume：必须失败（auth session 已吊销）", async () => {
-    const { service, opener, getResult, storageDb } = makeService();
+    const { service, opener, getResult, storageRepository } = makeService();
     service.startSession();
     const sessionId = "sess-then-logout";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -4882,7 +4882,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
 
   it("修复 1（更新语义）：timer 与 setPhase 同步开始；cache miss 兜底 30 秒后 DB 回来会 clamp down", async () => {
     // 用一个 service 写 origin 配置（confirmTimeoutSeconds=5）到 DB；
-    // 再用第二个 service 模拟"popup 新开会话"——cache 空、storageDb 复用。
+    // 再用第二个 service 模拟"popup 新开会话"——cache 空、storageRepository 复用。
     // 关键不变量：
     //   1. timer 与 setPhase 同步启动（不被 DB 阻塞）。
     //   2. DB 异步刷 cache 后，如果 DB 值（5s）< 剩余时间，clamp down 到 5s。
@@ -4904,7 +4904,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       confirmTimeoutSeconds: 5,
       updatedAt: 1
     });
-    const second = makeService(TEST_PUB_HEX, first.storageDb);
+    const second = makeService(TEST_PUB_HEX, first.storageRepository);
     // 施工单 2026-06-28 002 硬切换：业务方法强制要求 connectSessionId；
     // 默认 makeService 已为 ORIGIN seed sess-test session。
     second.service.startSession();
@@ -4957,7 +4957,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       confirmTimeoutSeconds: 60,
       updatedAt: 1
     });
-    const second = makeService(TEST_PUB_HEX, first.storageDb);
+    const second = makeService(TEST_PUB_HEX, first.storageRepository);
     second.service.startSession();
     await second.service.handleMessage(
       makeEvent(
@@ -4989,10 +4989,10 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
   });
 
   it("修复 1（同步保证）：cache miss + 慢 DB 也不延迟 timer 启动", async () => {
-    // 用一个永远不 resolve 的 storageDb getOrigin，模拟"DB 慢到永远没
+    // 用一个永远不 resolve 的 storageRepository getOrigin，模拟"DB 慢到永远没
     // 响应"。timer 必须仍能启动——popup 用户不会无倒计时地等。
     // intent.sign 走纯 manual 路径，不走 cache-miss auto-approve。
-    const slowDb: ProtocolStorageDb = {
+    const slowRepository: ProtocolStorageRepository = {
       async putCommand() { /* noop */ },
       async getCommand() { return null; },
       async listCommandsByOrigin() { return []; },
@@ -5027,11 +5027,11 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       },
       async listConnectSessionsByOrigin() { return []; },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await slowDb.putConnectSession(record);
+        await slowRepository.putConnectSession(record);
       },
 
     };
-    const { service, opener } = makeService(TEST_PUB_HEX, slowDb);
+    const { service, opener } = makeService(TEST_PUB_HEX, slowRepository);
     service.startSession();
     await service.handleMessage(
       makeEvent(
@@ -5066,7 +5066,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     // 旧实现 `deadline = Date.now() + actualMs` 会让总等待 ≈ 2s + 5s = 7s。
     // 正确实现：deadline = 原始起点 + actualMs = 5s（与 DB 延迟无关）。
     let resolveGetOrigin!: (record: ProtocolOriginSettingsRecord | null) => void;
-    const stubDb: ProtocolStorageDb = {
+    const stubRepository: ProtocolStorageRepository = {
       async putCommand() { /* noop */ },
       async getCommand() { return null; },
       async listCommandsByOrigin() { return []; },
@@ -5101,11 +5101,11 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       },
       async listConnectSessionsByOrigin() { return []; },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await stubDb.putConnectSession(record);
+        await stubRepository.putConnectSession(record);
       },
 
     };
-    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    const { service, opener } = makeService(TEST_PUB_HEX, stubRepository);
     service.startSession();
     const phaseStartMs = Date.now();
     await service.handleMessage(
@@ -5165,7 +5165,7 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
     // 用 vi.useFakeTimers 加速验证（不真等 29s）。
     vi.useFakeTimers();
     let resolveGetOrigin!: (record: ProtocolOriginSettingsRecord | null) => void;
-    const stubDb: ProtocolStorageDb = {
+    const stubRepository: ProtocolStorageRepository = {
       async putCommand() { /* noop */ },
       async getCommand() { return null; },
       async listCommandsByOrigin() { return []; },
@@ -5202,12 +5202,12 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       },
       async listConnectSessionsByOrigin() { return []; },
       async putConnectSessionAndRevokeOriginPeers(record: ConnectSessionRecord) {
-        await stubDb.putConnectSession(record);
+        await stubRepository.putConnectSession(record);
       },
 
     };
     try {
-      const { service, opener, getResult, posted } = makeService(TEST_PUB_HEX, stubDb);
+      const { service, opener, getResult, posted } = makeService(TEST_PUB_HEX, stubRepository);
       service.startSession();
       await service.handleMessage(
         makeEvent(
@@ -5510,14 +5510,14 @@ describe("ProtocolServiceImpl cancel / timeout (003)", () => {
       confirmTimeoutSeconds: 60,
       updatedAt: 1
     };
-    const stubDb = makeFakeStorageDbWithSession({
+    const stubRepository = makeFakeMultipartUploadRepositoryWithSession({
       async getOrigin(origin: string) {
         return currentOriginConfig && currentOriginConfig.origin === origin
           ? currentOriginConfig
           : null;
       }
     });
-    const { service, opener } = makeService(TEST_PUB_HEX, stubDb);
+    const { service, opener } = makeService(TEST_PUB_HEX, stubRepository);
     service.startSession();
     // 关键：先把 cache 用 60s 真值填上（setOriginSettings 写 cache
     // 同步），保证进入 confirming 时 `resolveConfirmTimeoutSnapshot`
@@ -5776,8 +5776,8 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
   });
 
   it("session 已 revoke → fail-fast：feepool.prepare 不进 confirming", async () => {
-    const { service, opener, storageDb } = makeService();
-    await storageDb.putConnectSession({
+    const { service, opener, storageRepository } = makeService();
+    await storageRepository.putConnectSession({
       sessionId: "sess-revoked",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5813,8 +5813,8 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
   });
 
   it("session origin 不匹配 → fail-fast：cipher.decrypt 不进 confirming", async () => {
-    const { service, opener, storageDb } = makeService();
-    await storageDb.putConnectSession({
+    const { service, opener, storageRepository } = makeService();
+    await storageRepository.putConnectSession({
       sessionId: "sess-cross",
       origin: "https://evil.com",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5875,11 +5875,11 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
             }
           : undefined
     };
-    const { service, opener, storageDb } = makeService(otherActive, undefined, {
+    const { service, opener, storageRepository } = makeService(otherActive, undefined, {
       p2pkhService: p2pkh as never,
       keyspace: otherKeyspace
     });
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-mismatch",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5942,11 +5942,11 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     const p2pkh = {
       listUtxos: vi.fn(async () => [{ txid: "00".repeat(32), vout: 0, value: 100000 }])
     };
-    const { service, opener, storageDb } = makeService(otherActive, undefined, {
+    const { service, opener, storageRepository } = makeService(otherActive, undefined, {
       p2pkhService: p2pkh as never,
       keyspace: otherKeyspace
     });
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-fp-mismatch",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -5989,10 +5989,10 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // 收口为「session.owner == active」是必要条件，不是「active 切
     // 走不影响 transfer」。
     const p2pkh = makeP2pkhServiceStub002();
-    const { service, opener, storageDb } = makeService(TEST_PUB_HEX, undefined, {
+    const { service, opener, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-stable",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6028,6 +6028,49 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     expect(card?.connectSessionId).toBe("sess-stable");
   });
 
+  it("在 Protocol 先装配、P2PKH 后装配时，业务请求动态取得 capability", async () => {
+    let p2pkh: ReturnType<typeof makeP2pkhServiceStub002> | undefined;
+    const { service, opener, storageRepository } = makeService(TEST_PUB_HEX, undefined, {
+      getP2pkhService: () => p2pkh as never
+    });
+    await storageRepository.putConnectSession({
+      sessionId: "sess-late-p2pkh",
+      origin: ORIGIN,
+      ownerPublicKeyHex: TEST_PUB_HEX,
+      ownerLabel: "Key A",
+      claimsSnapshot: {},
+      createdAt: Date.now(),
+      lastUsedAt: Date.now(),
+      revokedAt: null
+    });
+    service.startSession();
+
+    // 模拟四阶段装配：Protocol setup 已完成，此时才注册 P2PKH capability。
+    p2pkh = makeP2pkhServiceStub002();
+    await service.handleMessage(
+      makeEvent(
+        {
+          v: PROTOCOL_VERSION,
+          type: "request",
+          id: "p2pkh-late-capability",
+          method: "p2pkh.transfer",
+          params: {
+            recipientAddress: "1BvBMSEYstWetqTFn5Au4m4GFg7xJaNVN2",
+            amountSatoshis: 1000,
+            connectSessionId: "sess-late-p2pkh"
+          }
+        },
+        ORIGIN,
+        opener
+      )
+    );
+    await service.confirmByUser();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(service.feedSnapshot().commands.find((card) => card.requestId === "p2pkh-late-capability"))
+      .toMatchObject({ phase: "approved", decision: "approved" });
+  });
+
   it("feepool.prepare / commit 同 origin 不同 owner 不会串池", async () => {
     // 施工单 7.5.6：feepool.prepare / commit 在同 origin 不同 owner 下
     // 不会串池。ownerA 在 origin 建一个池，ownerB 在同 origin 同一个
@@ -6035,9 +6078,9 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // 这里只校验 record.bind owner = session.ownerPublicKeyHex，且
     // feepool poolKey 含 owner 维度。
     const ownerB = "02" + "bb".repeat(32);
-    const { service, opener, storageDb, deps } = makeService(TEST_PUB_HEX);
+    const { service, opener, storageRepository, deps } = makeService(TEST_PUB_HEX);
     // ownerA 建池并 commit。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-ownerA",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6068,7 +6111,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       return undefined;
     };
     // ownerB 的 session。
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-ownerB",
       origin: ORIGIN,
       ownerPublicKeyHex: ownerB,
@@ -6121,10 +6164,10 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
     // 在 sessionB 下用同 operationId 提交 → fail。
     const ownerB = "02" + "bb".repeat(32);
     const p2pkh = makeP2pkhServiceStub002();
-    const { service, opener, storageDb, deps } = makeService(TEST_PUB_HEX, undefined, {
+    const { service, opener, storageRepository, deps } = makeService(TEST_PUB_HEX, undefined, {
       p2pkhService: p2pkh as never
     });
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-A",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6134,7 +6177,7 @@ describe("ProtocolServiceImpl 002 硬切换：所有业务方法都属于 connec
       lastUsedAt: Date.now(),
       revokedAt: null
     });
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-B",
       origin: ORIGIN,
       ownerPublicKeyHex: ownerB,
@@ -6354,12 +6397,12 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("resolver 缺失或已知 invalid 在开窗前 fail closed", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
-      const service = new ProtocolServiceImpl({ vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb });
+      const storageRepository = makeFakeMultipartUploadRepository();
+      const service = new ProtocolServiceImpl({ vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository });
       await expect(service.launchAppView(JUSTNOTE)).rejects.toMatchObject({ code: "invalid_app_config" });
       expect(env.openCalls).toHaveLength(0);
       const blocked = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb,
+        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository,
         appCatalogResolver: { resolve: () => ({ kind: "known-invalid", reason: "placeholder publisher key" }) }
       });
       await expect(blocked.launchAppView(JUSTNOTE)).rejects.toMatchObject({ code: "invalid_app_config" });
@@ -6370,14 +6413,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("只使用 resolver proof 生成稳定 snapshot，不信任 caller 插入顺序", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb,
+        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository,
         appCatalogResolver: { resolve: () => ({ kind: "known-valid", proof: VALID_PROOF }) },
         generateId: (() => { let n = 0; return () => `metadata-${++n}`; })()
       });
       const out = await service.launchAppView({ ...JUSTNOTE });
-      const session = await storageDb.getConnectSession(out.connectSessionId);
+      const session = await storageRepository.getConnectSession(out.connectSessionId);
       expect(session?.appIdentity).toMatchObject({ appId: "justnote", appName: "Justnote" });
     } finally { env.restore(); }
   });
@@ -6386,7 +6429,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     const env = setupWindow();
     try {
       const service = new ProtocolServiceImpl({
-        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb: makeFakeStorageDb(),
+        vault: makeVaultStub(TEST_PUB_HEX), keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository: makeFakeMultipartUploadRepository(),
         appCatalogResolver: { resolve: () => ({ kind: "known-valid", proof: STORAGE_PROOF }) }
       });
       await expect(service.launchAppView({ ...JUSTNOTE, appIdentity: STORAGE_PROOF })).rejects.toMatchObject({ code: "requirement_unavailable" });
@@ -6397,11 +6440,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("成功路径：预建 session + 借 owner 私钥拼 sessionRuntimeBootstrap + 装 bootstrap registry + 打开 Session Window（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         generateId: (() => {
           let n = 0;
           return () => `id-${++n}`;
@@ -6414,7 +6457,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       expect(out.launchToken).toMatch(/^launch-id-/);
       expect(out.appUrl).toContain(`launchToken=${out.launchToken}`);
       // 1) connect session 已落 DB，且 ownerPublicKeyHex 锁定为 active key。
-      const session = await storageDb.getConnectSession(out.connectSessionId);
+      const session = await storageRepository.getConnectSession(out.connectSessionId);
       expect(session).not.toBeNull();
       expect(session?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
       expect(session?.origin).toBe(JUSTNOTE.appOrigin);
@@ -6464,7 +6507,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("在第一个 async 边界前预开窗口，避免 iOS Safari 丢失用户手势", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
       let resolveKey!: (value: unknown) => void;
       (keyspace as unknown as { getKey: () => Promise<unknown> }).getKey = () =>
@@ -6474,7 +6517,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace,
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
 
@@ -6499,11 +6542,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("vault 未解锁 → 抛错，不打开 Session Window", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const vault = makeVaultStub(TEST_PUB_HEX);
       // 强制 status 返回 locked。
       (vault as unknown as { status: () => string }).status = () => "locked";
-      const service = new ProtocolServiceImpl({ vault, keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageDb, appCatalogResolver: TEST_CATALOG_RESOLVER });
+      const service = new ProtocolServiceImpl({ vault, keyspace: makeKeyspaceStub(TEST_PUB_HEX), storageRepository, appCatalogResolver: TEST_CATALOG_RESOLVER });
       let caught: unknown = null;
       try {
         await service.launchAppView(JUSTNOTE);
@@ -6514,7 +6557,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       expect((caught as LaunchAppViewError).code).toBe("vault_locked");
       expect(env.openCalls.length).toBe(0);
       // session 也没有被预建。
-      const sessions = await storageDb.listConnectSessionsByOrigin(JUSTNOTE.appOrigin);
+      const sessions = await storageRepository.listConnectSessionsByOrigin(JUSTNOTE.appOrigin);
       expect(sessions.length).toBe(0);
     } finally {
       env.restore();
@@ -6524,11 +6567,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("appUrl 与 appOrigin 不一致 → 抛错，不打开 Session Window", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
@@ -6555,11 +6598,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("appUrl 不是合法 URL → 抛错", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
@@ -6586,11 +6629,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("window.open 返回 null → 抛错", async () => {
     const env = setupWindow({ openReturns: null });
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
@@ -6608,14 +6651,14 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 
-  it("storageDb 缺失 → 抛错", async () => {
+  it("storageRepository 缺失 → 抛错", async () => {
     const env = setupWindow();
     try {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
         appCatalogResolver: TEST_CATALOG_RESOLVER
-        // 故意不传 storageDb
+        // 故意不传 storageRepository
       });
       let caught: unknown = null;
       try {
@@ -6634,7 +6677,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("active key 找不到 → 抛错", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const keyspace = makeKeyspaceStub(TEST_PUB_HEX);
       // 硬切换 002 收尾：identityStatus 已删除，per-key "not ready" 不再是
       // 合法稳态。本测试在新模型下覆盖"owner key 找不到"分支——
@@ -6643,7 +6686,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace,
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
@@ -6663,7 +6706,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("vault.createAppViewSession 抛错 → export_owner_runtime_failed（施工单 2026-06-30 002 硬切换）", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const vault = makeVaultStub(TEST_PUB_HEX);
       // 模拟 launcher 端取 owner capability 失败。
       (vault as unknown as { createAppViewSession: () => Promise<never> }).createAppViewSession = async () => {
@@ -6672,7 +6715,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       let caught: unknown = null;
@@ -6692,11 +6735,11 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
   it("launchAppView 成功：预建 connect session 真值三元组（sessionId + origin + ownerPublicKeyHex）", async () => {
     const env = setupWindow();
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         appCatalogResolver: TEST_CATALOG_RESOLVER
       });
       const out = await service.launchAppView(JUSTNOTE);
@@ -6705,7 +6748,7 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
       // 关键验收（施工单 2026-06-30 002）：launcher 端写入的 session
       // **不**带 runtimeBinding；runtime 来源由 resolveOwnerRuntime
       // 在每次执行时按当前窗口状态决定。
-      const stored = await storageDb.getConnectSession(out.connectSessionId);
+      const stored = await storageRepository.getConnectSession(out.connectSessionId);
       expect(stored).not.toBeNull();
       expect((stored as unknown as Record<string, unknown>).runtimeBinding).toBeUndefined();
       expect(stored?.ownerPublicKeyHex).toBe(TEST_PUB_HEX);
@@ -6718,12 +6761,12 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
 
 describe("ProtocolServiceImpl appView transport source binding", () => {
   it("connect.launch 缺失/身份不匹配时拒绝且不消费 launchToken", async () => {
-    const storageDb = makeFakeStorageDb();
-    const { service, getResult } = makeService(TEST_PUB_HEX, storageDb, { bootMode: "appView" });
+    const storageRepository = makeFakeMultipartUploadRepository();
+    const { service, getResult } = makeService(TEST_PUB_HEX, storageRepository, { bootMode: "appView" });
     service.startSession();
     const now = Date.now();
     const sessionId = "sess-launch-gate";
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: "https://justnote.apps.bsv8.com",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6759,12 +6802,12 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
   });
 
   it("appView 接受 child app source 的 connect.launch，而不是错误地只认 launcher opener", async () => {
-    const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+    const { service, getResult, storageRepository } = makeService(TEST_PUB_HEX, makeFakeMultipartUploadRepository(), {
       bootMode: "appView"
     });
     service.startSession();
     const now = Date.now();
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-appview",
       origin: "https://justnote.apps.bsv8.com",
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -6870,7 +6913,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       const internals = service as unknown as {
@@ -6932,7 +6975,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       const internals = service as unknown as {
@@ -6975,7 +7018,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       const internals = service as unknown as {
@@ -7024,7 +7067,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       const internals = service as unknown as {
@@ -7076,7 +7119,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       const internals = service as unknown as {
@@ -7121,7 +7164,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       const off = service.subscribe(() => {
@@ -7174,7 +7217,7 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
       const service = new ProtocolServiceImpl({
         vault: makeVaultStub(TEST_PUB_HEX),
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb()
+        storageRepository: makeFakeMultipartUploadRepository()
       });
       service.startSession();
       const fakeOpener = {
@@ -7212,12 +7255,12 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     } as unknown as Window;
     win.open = (() => childWindow) as typeof win.open;
     try {
-      const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+      const { service, getResult, storageRepository } = makeService(TEST_PUB_HEX, makeFakeMultipartUploadRepository(), {
         bootMode: "appView"
       });
       service.startSession();
       const now = Date.now();
-      await storageDb.putConnectSession({
+      await storageRepository.putConnectSession({
         sessionId: "sess-appview-stop",
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7311,12 +7354,12 @@ describe("ProtocolServiceImpl appView transport source binding", () => {
     } as unknown as Window;
     win.open = (() => childWindow) as typeof win.open;
     try {
-      const { service, getResult, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+      const { service, getResult, storageRepository } = makeService(TEST_PUB_HEX, makeFakeMultipartUploadRepository(), {
         bootMode: "appView"
       });
       service.startSession();
       const now = Date.now();
-      await storageDb.putConnectSession({
+      await storageRepository.putConnectSession({
         sessionId: "sess-appview-late",
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7420,12 +7463,12 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const vault = makeVaultStub(TEST_PUB_HEX);
       // 故意让 vault 报 locked：模拟"本地 vault 仍未解锁"的环境。
       (vault as unknown as { status: () => string }).status = () => "locked";
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const disposeReasons: string[] = [];
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         bootMode: "appView"
       });
       service.startSession();
@@ -7435,7 +7478,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       // 直接走 applyLauncherBootstrap 路径：构造合法 bootstrap payload 并应用。
       const sessionId = "sess-lockstate-after-bootstrap";
       const now = Date.now();
-      await storageDb.putConnectSession({
+      await storageRepository.putConnectSession({
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7566,12 +7609,12 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const opener = makeFakeOpener();
       const vault = makeVaultStub(TEST_PUB_HEX);
       (vault as unknown as { status: () => string }).status = () => "locked";
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const disposeReasons: string[] = [];
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         resolveOpener: () => opener as unknown as Window,
         postReady: () => undefined,
         bootMode: "appView"
@@ -7579,7 +7622,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       service.startSession();
       const sessionId = "sess-reset-bootstrap";
       const now = Date.now();
-      await storageDb.putConnectSession({
+      await storageRepository.putConnectSession({
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7669,12 +7712,12 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
     // 时 setVaultLockState(true) 触发 confirming → waiting_unlock_manual
     // 硬收口——这是 connect mode 旧行为的延续；appView mode 的新行为
     // 由上面的 `applyLauncherBootstrap` 测试覆盖。
-    const { service, deps, storageDb, opener } = makeService();
+    const { service, deps, storageRepository, opener } = makeService();
     service.startSession();
     // 预放 session + owner key ready（让 request 不走 fail-fast）
     const sessionId = "sess-relock-cs";
     const now = Date.now();
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId,
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7715,7 +7758,7 @@ describe("ProtocolServiceImpl lockStateValue 真值 (施工单 2026-06-30 003 �
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb: makeFakeStorageDb(),
+        storageRepository: makeFakeMultipartUploadRepository(),
         bootMode: "appView"
       });
       service.startSession();
@@ -7748,13 +7791,13 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
     } as unknown as Window;
     win.open = (() => childWindow) as typeof win.open;
     try {
-      const { service, storageDb } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+      const { service, storageRepository } = makeService(TEST_PUB_HEX, makeFakeMultipartUploadRepository(), {
         bootMode: "appView"
       });
       service.startSession();
       const now = Date.now();
       const sessionId = "sess-cipher-first";
-      await storageDb.putConnectSession({
+      await storageRepository.putConnectSession({
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -7832,7 +7875,7 @@ describe("ProtocolServiceImpl 首条合法 child 协议消息（施工单 2026-0
     } as unknown as Window;
     win.open = (() => childWindow) as typeof win.open;
     try {
-      const { service } = makeService(TEST_PUB_HEX, makeFakeStorageDb(), {
+      const { service } = makeService(TEST_PUB_HEX, makeFakeMultipartUploadRepository(), {
         bootMode: "appView"
       });
       service.startSession();
@@ -7891,7 +7934,7 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
     } as unknown as Window;
     win.open = (() => childWindow) as typeof win.open;
     try {
-      const storageDb = makeFakeStorageDb();
+      const storageRepository = makeFakeMultipartUploadRepository();
       const vault = makeVaultStub(TEST_PUB_HEX);
       // **故意**让 vault status 报 locked —— 旧实现下这条
       // connect.launch 会被全局 lockState 闸门卡住。
@@ -7899,13 +7942,13 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
       const service = new ProtocolServiceImpl({
         vault,
         keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-        storageDb,
+        storageRepository,
         bootMode: "appView"
       });
       service.startSession();
       const now = Date.now();
       const sessionId = "sess-locked-runtime-ready";
-      await storageDb.putConnectSession({
+      await storageRepository.putConnectSession({
         sessionId,
         origin: "https://justnote.apps.bsv8.com",
         ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8077,15 +8120,15 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
 
   it("probeExecutionCondition：locked + keyspace 查不到 owner → 直接 fail-fast（不卡 waiting_unlock）", async () => {
     // 验证施工单 7.5:已删 / 根本不在本地 vault 的 owner key 不应让用户先去解锁。
-    const storageDb = makeFakeStorageDb();
+    const storageRepository = makeFakeMultipartUploadRepository();
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
       keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-      storageDb
+      storageRepository
     });
     service.startSession();
     const now = Date.now();
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-key-removed",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,
@@ -8135,15 +8178,15 @@ describe("ProtocolServiceImpl owner runtime resolver (施工单 2026-06-30 002)"
   it("probeExecutionCondition：locked + keyspace 找到 owner key ready → 推 waiting_unlock（仍允许解锁路径）", async () => {
     // 现有 fakeKeyspaceStub 默认返回 ready key——验证 locked 但 key ready
     // 的合法请求仍走 waiting_unlock_manual，不被错误短路由掉。
-    const storageDb = makeFakeStorageDb();
+    const storageRepository = makeFakeMultipartUploadRepository();
     const service = new ProtocolServiceImpl({
       vault: makeVaultStub(TEST_PUB_HEX),
       keyspace: makeKeyspaceStub(TEST_PUB_HEX),
-      storageDb
+      storageRepository
     });
     service.startSession();
     const now = Date.now();
-    await storageDb.putConnectSession({
+    await storageRepository.putConnectSession({
       sessionId: "sess-key-ok",
       origin: ORIGIN,
       ownerPublicKeyHex: TEST_PUB_HEX,

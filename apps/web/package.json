@@ -30,7 +30,7 @@
     "@keymaster/plugin-poker": "*",
     "@keymaster/plugin-protocol": "*",
     "@keymaster/plugin-settings": "*",
-    "@keymaster/plugin-storage": "*",
+    "@keymaster/platform-storage": "*",
     "@keymaster/plugin-token-bsv21": "*",
     "@keymaster/plugin-token-stas": "*",
     "@keymaster/plugin-vault": "*",

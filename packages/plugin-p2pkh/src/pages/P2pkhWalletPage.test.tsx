@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { sha256 } from "@noble/hashes/sha256";
 import { PluginHostProvider, createPluginHost } from "@keymaster/runtime";
-import { RESOURCE_REGISTRY_CAPABILITY, SESSION_COORDINATOR_CLIENT_CAPABILITY, type KeyspaceService, type ResourceRegistry, type SessionCoordinatorClient } from "@keymaster/contracts";
+import { P2PKH_COORDINATOR_CONTROL_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, type KeyspaceService, type P2pkhCoordinatorControl, type ResourceRegistry, type SessionCoordinatorClient } from "@keymaster/contracts";
 import type { P2pkhBalanceBreakdown, P2pkhGlobalSettings, P2pkhLocalOutpoint, P2pkhLocalTransaction, P2pkhOwnedOutpointProjection, P2pkhService, P2pkhTransactionFact } from "../p2pkhContracts.js";
 import { p2pkhResources } from "../manifest.js";
 import { P2pkhTransactionDetailPage } from "./P2pkhTransactionDetailPage.js";
@@ -39,7 +39,7 @@ function registerWallet(includeTestnet: boolean, facts: P2pkhTransactionFact[] =
     invalidation: "immediate"
   });
   host.provide<KeyspaceService>("keyspace.service", { active: () => ({ activePublicKeyHex: owner }), onActiveKeyChanged: () => () => undefined } as unknown as KeyspaceService);
-  host.provide<SessionCoordinatorClient>(SESSION_COORDINATOR_CLIENT_CAPABILITY, coordinatorOverrides as SessionCoordinatorClient);
+  host.provide<P2pkhCoordinatorControl>(P2PKH_COORDINATOR_CONTROL_CAPABILITY, coordinatorOverrides as unknown as P2pkhCoordinatorControl);
   host.provide<P2pkhService>("p2pkh.service", serviceOverrides as P2pkhService);
   return host;
 }

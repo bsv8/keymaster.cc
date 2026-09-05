@@ -1,74 +1,91 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createPluginConfigStore } from "./pluginConfigStore.js";
+import { describe, expect, it } from "vitest";
+import { createInMemoryKeyValueStore } from "./storage/inMemoryKeyValueStore.js";
+import { createPluginConfigStore, PluginConfigIncompatibleError } from "./pluginConfigStore.js";
 
-const KEY = "keymaster.plugins.runtime";
-
-beforeEach(() => {
-  localStorage.clear();
-});
-
-describe("plugin config store v2", () => {
-  it("migrates a v1 object and writes v2", () => {
-    localStorage.setItem(KEY, JSON.stringify({ vault: false, optional: false }));
-    const store = createPluginConfigStore();
-    expect(store.read()).toEqual({ vault: false, optional: false });
-    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual({
-      version: 2,
-      enabled: { vault: false, optional: false }
+describe("plugin config store", () => {
+  it("reads and persists the versioned platform K-V record", async () => {
+    const storage = createInMemoryKeyValueStore({
+      scope: "platform",
+      applicationStorageId: "settings",
+      schemaVersion: 1,
+      bucketId: "test",
+      bucketGeneration: 1
     });
-    expect(store.diagnostics().some((d) => d.kind === "migrated-v1")).toBe(true);
-  });
-
-  it("normalizes required plugins and preserves optional settings", () => {
-    localStorage.setItem(KEY, JSON.stringify({ version: 2, enabled: { vault: false, optional: false } }));
-    const store = createPluginConfigStore();
+    const store = createPluginConfigStore({ storage, initial: { optional: false } });
     store.setRequiredPluginIds(["vault"]);
+    store.setEnabled("optional", true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const record = await storage.get<{ version: number; enabled: Record<string, boolean> }>("plugins", { partition: "settings" });
+    expect(record?.value).toEqual({ version: 2, enabled: { optional: true, vault: true } });
+  });
+
+  it("normalizes required plugins without a browser persistence API", () => {
+    const store = createPluginConfigStore({ initial: { vault: false, optional: false } });
+    expect(store.normalize(["vault"])).toEqual({ vault: true, optional: false });
     expect(store.read()).toEqual({ vault: true, optional: false });
-    expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual({
-      version: 2,
-      enabled: { vault: true, optional: false }
-    });
   });
 
-  it("recovers from invalid and unknown storage values", () => {
-    localStorage.setItem(KEY, "not-json");
-    const invalid = createPluginConfigStore();
-    expect(invalid.read()).toEqual({});
-    expect(invalid.diagnostics().some((d) => d.kind === "invalid-json")).toBe(true);
-
-    localStorage.setItem(KEY, JSON.stringify({ version: 99, enabled: { vault: false } }));
-    const unknown = createPluginConfigStore();
-    expect(unknown.read()).toEqual({});
-    expect(unknown.diagnostics().some((d) => d.kind === "unknown-version")).toBe(true);
-  });
-
-  it("records persistence failures without blocking the in-memory snapshot", () => {
-    const original = localStorage.setItem;
-    vi.spyOn(localStorage, "setItem").mockImplementation(() => {
-      throw new Error("quota");
+  it("keeps optional settings and reports K-V write failures", async () => {
+    const storage = createInMemoryKeyValueStore({
+      scope: "platform",
+      applicationStorageId: "settings",
+      schemaVersion: 1,
+      bucketId: "test",
+      bucketGeneration: 1
     });
-    const store = createPluginConfigStore();
+    storage.put = async () => { throw new Error("unavailable"); };
+    const store = createPluginConfigStore({ storage, initial: {} });
     store.setEnabled("optional", false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(store.read()).toEqual({ optional: false });
     expect(store.diagnostics().some((d) => d.kind === "write-failed")).toBe(true);
-    vi.spyOn(localStorage, "setItem").mockImplementation(original);
   });
 
-  it("normalizes required=false from a storage event without a write loop", () => {
-    let storageListener: ((event: StorageEvent) => void) | undefined;
-    Object.defineProperty(globalThis, "window", {
-      configurable: true,
-      value: { addEventListener: (_type: string, listener: (event: StorageEvent) => void) => { storageListener = listener; } }
+  it("does not write before remote settings have been hydrated", async () => {
+    const storage = createInMemoryKeyValueStore({
+      scope: "platform",
+      applicationStorageId: "settings",
+      schemaVersion: 1,
+      bucketId: "test",
+      bucketGeneration: 1
     });
-    try {
-      const store = createPluginConfigStore();
-      store.setRequiredPluginIds(["vault"]);
-      localStorage.setItem(KEY, JSON.stringify({ version: 2, enabled: { vault: false } }));
-      storageListener?.({ key: KEY } as StorageEvent);
-      expect(store.read().vault).toBe(true);
-      expect(JSON.parse(localStorage.getItem(KEY)!)).toEqual({ version: 2, enabled: { vault: true } });
-    } finally {
-      delete (globalThis as { window?: unknown }).window;
-    }
+    await storage.put("plugins", { version: 2, enabled: { remote: true } }, { partition: "settings" });
+    const originalPut = storage.put.bind(storage);
+    let putCount = 0;
+    storage.put = async (...args) => { putCount += 1; return originalPut(...args); };
+    const store = createPluginConfigStore({ storage });
+    store.setEnabled("local", false);
+    expect(putCount).toBe(0);
+    await store.hydrate();
+    expect(store.read()).toEqual({ remote: true });
+    store.setRequiredPluginIds(["required"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(putCount).toBe(1);
+  });
+
+  it("rejects v1 config without migrating or overwriting the remote record", async () => {
+    const storage = createInMemoryKeyValueStore({
+      scope: "platform",
+      applicationStorageId: "settings",
+      schemaVersion: 1,
+      bucketId: "test",
+      bucketGeneration: 1
+    });
+    await storage.put("plugins", { version: 1, value: { legacy: true } }, { partition: "settings" });
+    const originalPut = storage.put.bind(storage);
+    let putCount = 0;
+    storage.put = async (...args) => { putCount += 1; return originalPut(...args); };
+    const store = createPluginConfigStore({ storage });
+
+    await expect(store.hydrate()).rejects.toBeInstanceOf(PluginConfigIncompatibleError);
+    expect(store.diagnostics()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "incompatible" })
+    ]));
+    expect(store.schemaVersion()).toBe(1);
+    expect(putCount).toBe(0);
+    store.setEnabled("local", true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(putCount).toBe(0);
+    expect((await storage.get("plugins", { partition: "settings" }))?.value).toEqual({ version: 1, value: { legacy: true } });
   });
 });

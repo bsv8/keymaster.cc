@@ -1,19 +1,20 @@
 // 消息业务 service。
 //
 // 消息只通过 Channel 的固定 `bsv8.message.v1` 私信协议收发；历史记录只写入
-// 当前 owner 的本地 key-scoped DB。这里不查询远端历史、不查询在线状态，也不
+// 当前 owner 的本地 key-scoped K-V。这里不查询远端历史、不查询在线状态，也不
 // 暴露 Supplier、SSP 或私钥字段。
 
 import type {
   ChannelPrivateMessageEvent,
   ChannelRuntime,
   JSONValue,
+  KeyValueStore,
   KeyspaceService,
   MessageContentType,
   MessageRecord
 } from "@keymaster/contracts";
 import { MESSAGE_PRIVATE_PROTOCOL } from "@keymaster/contracts";
-import { createMessageDb, type MessageDbOwnerGuard } from "./messageDb.js";
+import { createMessageRepository, type MessageRepositoryOwnerGuard } from "./storage/messageRepository.js";
 
 /** 消息业务插件公开的 service。 */
 export interface MessageService {
@@ -58,13 +59,14 @@ type MessagePrivateContent = MessageTextContent | MessageAckContent;
 export interface MessageServiceDeps {
   channel: ChannelRuntime;
   keyspace: KeyspaceService;
+  storage?: KeyValueStore;
 }
 
 /** 构造消息 service。 */
 export function createMessageService(deps: MessageServiceDeps): MessageService {
   const messageListeners = new Set<(message: MessageRecord) => void>();
   const changeListeners = new Set<() => void>();
-  const db = createMessageDb(deps.keyspace);
+  const messageRepository = deps.storage ? createMessageRepository(deps.storage) : undefined;
   let disposed = false;
 
   function ownerPublicKeyHex(): string | undefined {
@@ -83,7 +85,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
     return publicKeyHex ? { publicKeyHex, generation: active.generation } : undefined;
   }
 
-  function ownerGuard(owner: OwnerOperation): MessageDbOwnerGuard {
+  function ownerGuard(owner: OwnerOperation): MessageRepositoryOwnerGuard {
     return () => {
       if (disposed) return false;
       const active = deps.keyspace.active();
@@ -125,7 +127,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
       && Number.isFinite(record.createdAtMs);
   }
 
-  async function acknowledge(event: ChannelPrivateMessageEvent, guard: MessageDbOwnerGuard): Promise<void> {
+  async function acknowledge(event: ChannelPrivateMessageEvent, guard: MessageRepositoryOwnerGuard): Promise<void> {
     if (!guard()) return;
     try {
       await deps.channel.publishPrivate({
@@ -143,6 +145,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
 
   async function handlePrivateMessage(event: ChannelPrivateMessageEvent): Promise<void> {
     if (disposed || event.protocol !== MESSAGE_PRIVATE_PROTOCOL) return;
+    if (!messageRepository) return;
     const owner = captureOwner();
     if (!owner || !isMessageContent(event.content)) return;
     if (event.content.type === "ack") return;
@@ -159,12 +162,12 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
       insertedAtMs: Date.now()
     };
     try {
-      await db.put(owner.publicKeyHex, record, guard);
+      await messageRepository.put(record, guard);
       if (!guard()) return;
       notify(record);
       await acknowledge(event, guard);
     } catch {
-      // 锁定、切 key 或本地 DB 关闭时，丢弃本次事件；不伪造成功通知。
+      // 锁定、切 key 或本地 K-V 关闭时，丢弃本次事件；不伪造成功通知。
     }
   }
 
@@ -186,8 +189,8 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
 
     async listMessages(input) {
       const owner = captureOwner();
-      if (!owner) throw new Error("not_ready");
-      const rows = await db.list(owner.publicKeyHex, ownerGuard(owner));
+      if (!owner || !messageRepository) throw new Error("not_ready");
+      const rows = await messageRepository.list(ownerGuard(owner));
       rows.sort((a, b) => b.insertedAtMs - a.insertedAtMs || b.messageId.localeCompare(a.messageId));
       const afterMessageId = input?.afterMessageId;
       const foundAfter = afterMessageId ? rows.findIndex((row) => row.messageId === afterMessageId) : -1;
@@ -198,12 +201,12 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
 
     async getMessage(messageId) {
       const owner = captureOwner();
-      if (!owner) throw new Error("not_ready");
-      return (await db.get(owner.publicKeyHex, messageId, ownerGuard(owner))) ?? null;
+      if (!owner || !messageRepository) throw new Error("not_ready");
+      return (await messageRepository.get(messageId, ownerGuard(owner))) ?? null;
     },
 
     async sendTextMessage(input) {
-      if (disposed || !deps.channel.isReady() || !ownerPublicKeyHex()) throw new Error("not_ready");
+      if (disposed || !messageRepository || !deps.channel.isReady() || !ownerPublicKeyHex()) throw new Error("not_ready");
       const recipientPublicKeyHex = input.recipientPublicKeyHex.trim().toLowerCase();
       if (!/^(02|03)[0-9a-f]{64}$/.test(recipientPublicKeyHex)) {
         throw new Error("invalid_target");
@@ -239,7 +242,7 @@ export function createMessageService(deps: MessageServiceDeps): MessageService {
         createdAtMs,
         insertedAtMs: Date.now()
       };
-      await db.put(sender.publicKeyHex, record, senderGuard);
+      await messageRepository.put(record, senderGuard);
       if (senderGuard()) notify(record);
     },
 

@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   bytesToHex,
   hexToBytes,
-  vaultDb,
-  type LegacyVaultKeyRecord,
+  vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
 import type { CoordinatorSatEvent, JSONValue } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
@@ -52,6 +51,7 @@ import {
   __testDeleteKeyMaterial,
   __testFinalizeEmptyVaultAfterLastKeyDeletion,
   __testGetActivePublicKeyHex,
+  __testOwnerStoragePut,
   __testGetConnectedPortCount,
   __testDispatchStorageGrant,
   __testDispatchStorageData,
@@ -60,13 +60,16 @@ import {
   __testDispatchStorageAbort,
   __testResolveStorageGrant,
   __testSeedStorageRequest,
+  __testSeedOwnerStorageRequest,
   __testSetStorageRuntime,
+  __testClearPlatformNamespace,
   __testSetStorageStartupFailure,
   __testReleaseStorageRuntime,
   __testStorageMutationBarrierProbe,
   __testStorageQueueAdmission,
   __testStorageQueueSnapshot,
   __testStorageSlotErrorCodes,
+  __testStorageCancelKeepsPhysicalSlots,
   __testStorageFairDispatch,
   __testPublishStorageState,
   __testStorageTransfer,
@@ -289,11 +292,119 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
 });
 
 describe("Session Coordinator worker", () => {
+  it("切换 Key 前先排空旧 owner 请求，Provider 忽略 AbortSignal 也不能越过 fence", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const first = await __testCreateVault("pw", { label: "first" });
+    const second = await __testImportPrivateKey("pw", {
+      label: "second",
+      material: { hex: "2".padStart(64, "0") },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    const oldOwner = second.publicKeyHex;
+    const release = __testSeedOwnerStorageRequest(oldOwner);
+    const switching = __testSetActive(first.publicKeyHex!);
+    await flush();
+    expect(__testGetActivePublicKeyHex()).toBe(oldOwner);
+    release();
+    await switching;
+    expect(__testGetActivePublicKeyHex()).toBe(first.publicKeyHex);
+  });
+
+  it("lock 后的旧 owner drain 未完成时不能提前 unlock", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const key = await __testCreateVault("pw", { label: "lock-drain" });
+    const release = __testSeedOwnerStorageRequest(key.publicKeyHex!);
+    await __testLock();
+    expect(__testGetVaultStatus()).toBe("locked");
+
+    const unlocking = __testUnlock("pw", key.publicKeyHex);
+    await flush();
+    expect(__testGetVaultStatus()).toBe("locked");
+    expect(__testGetActivePublicKeyHex()).toBeUndefined();
+    release();
+    await unlocking;
+    expect(__testGetVaultStatus()).toBe("unlocked");
+    expect(__testGetActivePublicKeyHex()).toBe(key.publicKeyHex);
+  });
+
+  it("lock(A) → unlock(B) → switch(A) 后仍可写入 A 的 owner K-V", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const first = await __testCreateVault("pw", { label: "first-owner" });
+    const second = await __testImportPrivateKey("pw", {
+      label: "second-owner",
+      material: { hex: "2".padStart(64, "0") },
+      format: "hex",
+      capabilities: ["p2pkh"]
+    });
+    await __testSetActive(first.publicKeyHex!);
+    await __testLock();
+    await __testUnlock("pw", second.publicKeyHex);
+    await __testSetActive(first.publicKeyHex!);
+    await expect(__testOwnerStoragePut("after-lock-switch", { owner: "first" })).resolves.toBeUndefined();
+  });
+
+  it("Provider 忽略 AbortSignal 时，lock→unlock 仍等待真实 storage.data 结束", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const key = await __testCreateVault("pw", { label: "provider-drain" });
+    const ownerPublicKeyHex = key.publicKeyHex!;
+    const identity = {
+      version: 1 as const,
+      publisherPublicKeyHex: ownerPublicKeyHex,
+      appId: "provider-drain",
+      appName: "Provider Drain",
+      identityDigestHex: "ab".repeat(32)
+    };
+    let releaseProvider!: () => void;
+    const providerPending = new Promise<void>((resolve) => { releaseProvider = resolve; });
+    __testSetStorageSessionResolver(async (sessionId) => ({
+      sessionId,
+      origin: "https://provider-drain.example",
+      ownerPublicKeyHex,
+      appIdentity: identity,
+      revokedAt: null
+    }));
+    __testSetStorageRuntime({
+      list: async () => {
+        await providerPending;
+        return { prefix: "", parentPrefix: "", directories: [], files: [] };
+      },
+      abortSession: async () => undefined
+    });
+
+    try {
+      const grant = await __testDispatchStorageGrant("provider-drain-session", "provider-drain-port");
+      expect(grant.ack.status).toBe("ok");
+      const request = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "provider-drain-port" });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      await __testLock();
+      const unlocking = __testUnlock("pw", ownerPublicKeyHex);
+      await flush();
+      expect(__testGetVaultStatus()).toBe("locked");
+      expect(__testGetActivePublicKeyHex()).toBeUndefined();
+
+      releaseProvider();
+      expect((await request).ack).toMatchObject({ status: "error", code: "storage_unavailable" });
+      expect((await unlocking).ack.status).toBe("accepted");
+      expect(__testGetActivePublicKeyHex()).toBe(ownerPublicKeyHex);
+    } finally {
+      __testSetStorageSessionResolver(undefined);
+      __testSetStorageRuntime(undefined);
+    }
+  });
+
   it("rejects forged client ownership and revoked/changed Storage grants", async () => {
     __testResetState();
+    const ownerPublicKeyHex = VALID_PUBLISHER_KEYS[2]!;
+    __testSetVaultStatus("unlocked", ownerPublicKeyHex);
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[0]!, appId: "app", appName: "App", identityDigestHex: "aa".repeat(32) };
     let revoked = false;
-    __testSetStorageSessionResolver(async (id) => revoked ? null : { sessionId: id, origin: "https://app.example", appIdentity: identity, revokedAt: null });
+    __testSetStorageSessionResolver(async (id) => revoked ? null : { sessionId: id, origin: "https://app.example", ownerPublicKeyHex, appIdentity: identity, revokedAt: null });
     const granted = await __testDispatchStorageGrant("session-a", "port-a", "forged-client");
     expect(granted.ack.status).toBe("ok");
     const grantId = granted.operationResult as string;
@@ -308,11 +419,13 @@ describe("Session Coordinator worker", () => {
 
   it("rejects unknown and identity-less sessions and binds grants to unchanged origin/identity", async () => {
     __testResetState();
+    const ownerPublicKeyHex = VALID_PUBLISHER_KEYS[2]!;
+    __testSetVaultStatus("unlocked", ownerPublicKeyHex);
     __testSetStorageSessionResolver(async () => null);
     expect((await __testDispatchStorageGrant("missing", "port-a")).ack.status).toBe("error");
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[1]!, appId: "app", appName: "App", identityDigestHex: "bb".repeat(32) };
     let origin = "https://one.example";
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin, ownerPublicKeyHex, appIdentity: identity, revokedAt: null }));
     const granted = await __testDispatchStorageGrant("session-b", "port-a");
     expect(granted.ack.status).toBe("ok");
     origin = "https://two.example";
@@ -353,8 +466,9 @@ describe("Session Coordinator worker", () => {
 
   it("aborts a slow Storage data lane when the global lock preempts it", async () => {
     __testResetState();
+    __testSetVaultStatus("unlocked", VALID_PUBLISHER_KEYS[2]!);
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appId: "app", appName: "App", identityDigestHex: "cc".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slow.example", appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slow.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[2]!, appIdentity: identity, revokedAt: null }));
     __testSetStorageRuntime({ list: async (_ctx, input) => await new Promise((_, reject) => { input.signal?.addEventListener("abort", () => { reject(new Error("storage_unavailable")); }); }), abortSession: async () => undefined });
     const grant = await __testDispatchStorageGrant("slow-session", "port-a");
     const pending = __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" });
@@ -365,26 +479,43 @@ describe("Session Coordinator worker", () => {
     __testSetStorageRuntime(undefined);
   });
 
-  it("reclaims all four hanging data slots on lock and serves new runtime data", async () => {
+  it("keeps physical slots occupied until ignored-AbortSignal Providers settle", async () => {
     __testResetState();
+    __testSetVaultStatus("unlocked", VALID_PUBLISHER_KEYS[3]!);
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appId: "app", appName: "App", identityDigestHex: "ff".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slots.example", appIdentity: identity, revokedAt: null }));
-    __testSetStorageRuntime({ list: async () => await new Promise<never>(() => undefined), abortSession: async () => undefined });
-    const grant = await __testDispatchStorageGrant("slots-session", "port-a");
-    const pending = Array.from({ length: 4 }, () => __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: "port-a" }));
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://slots.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[3]!, appIdentity: identity, revokedAt: null }));
+    const releases: Array<() => void> = [];
+    __testSetStorageRuntime({ list: async () => await new Promise<never>((resolve) => { releases.push(() => resolve(undefined as never)); }), abortSession: async () => undefined });
+    const ports = ["port-a", "port-b", "port-c", "port-d"];
+    const grants = await Promise.all(ports.map((port) => __testDispatchStorageGrant("slots-session", port)));
+    const pending = grants.map((grant, index) => __testDispatchStorageData({ grantId: grant.operationResult as string, actualPortId: ports[index]! }));
     await new Promise((resolve) => setTimeout(resolve, 20)); await __testReleaseStorageRuntime();
     expect((await Promise.all(pending)).every((response) => response.ack.status === "error")).toBe(true);
-    expect(__testStorageQueueSnapshot().globalActive).toBe(0);
+    expect(__testStorageQueueSnapshot().globalActive).toBe(4);
+    releases.forEach((release) => release());
+    await vi.waitFor(() => expect(__testStorageQueueSnapshot().globalActive).toBe(0));
     __testSetStorageRuntime({ list: async () => ({ prefix: "", parentPrefix: "", directories: [], files: [] }), abortSession: async () => undefined });
     const nextGrant = await __testDispatchStorageGrant("slots-session", "port-a");
     expect((await __testDispatchStorageData({ grantId: nextGrant.operationResult as string, actualPortId: "port-a" })).ack.status).toBe("ok");
     __testSetStorageSessionResolver(undefined); __testSetStorageRuntime(undefined);
   });
 
+  it("取消四个忽略 AbortSignal 的操作后，第五个仍等待真实物理完成", async () => {
+    await expect(__testStorageCancelKeepsPhysicalSlots()).resolves.toEqual({
+      activeAfterCancel: 4,
+      queuedAfterCancel: 1,
+      fifthStartedAfterCancel: false,
+      activeDuringFifth: 1,
+      fifthStartedAfterPhysicalRelease: true,
+      finalActive: 0
+    });
+  });
+
   it("rejects a late provider success after session epoch or generation changes", async () => {
     __testResetState();
+    __testSetVaultStatus("unlocked", VALID_PUBLISHER_KEYS[4]!);
     const identity = { version: 1 as const, publisherPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appId: "app", appName: "App", identityDigestHex: "dd".repeat(32) };
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", appIdentity: identity, revokedAt: null }));
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
     let release!: () => void;
     const delayed = new Promise<void>((resolve) => { release = resolve; });
     let generation = 1;
@@ -396,7 +527,8 @@ describe("Session Coordinator worker", () => {
     release();
     expect((await pending).ack).toMatchObject({ status: "error", code: "storage_unavailable" });
     __testResetState();
-    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", appIdentity: identity, revokedAt: null }));
+    __testSetVaultStatus("unlocked", VALID_PUBLISHER_KEYS[4]!);
+    __testSetStorageSessionResolver(async (id) => ({ sessionId: id, origin: "https://late.example", ownerPublicKeyHex: VALID_PUBLISHER_KEYS[4]!, appIdentity: identity, revokedAt: null }));
     let releaseEpoch!: () => void;
     const delayedEpoch = new Promise<void>((resolve) => { releaseEpoch = resolve; });
     __testSetStorageRuntime({ getProviderSummary: async () => ({ generation: 1, providerId: "aws-s3", bucketHint: "b", accessKeyHint: "k", secretConfigured: true, updatedAt: 1 }), list: async () => { await delayedEpoch; return { prefix: "", parentPrefix: "", directories: [], files: [] }; }, abortSession: async () => undefined });
@@ -590,7 +722,7 @@ describe("Session Coordinator worker", () => {
   });
 
   it("fans out global lock to both ports and does not lock when one port closes", async () => {
-    // The module's one-time IndexedDB bootstrap is asynchronous. Let it finish
+    // The module's one-time platform K-V bootstrap is asynchronous. Let it finish
     // before installing this test's synthetic session state.
     await new Promise((resolve) => setTimeout(resolve, 30));
     __testResetState();
@@ -770,6 +902,7 @@ describe("Session Coordinator worker", () => {
   it("aborts stale-generation P2PKH submissions before any provider call", async () => {
     __testResetState();
     const owner = "c".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
     const submissionId = `stale-${Date.now()}`;
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
@@ -785,6 +918,7 @@ describe("Session Coordinator worker", () => {
   it("retains an unknown submission when a rebroadcast is not dispatched", async () => {
     __testResetState();
     const owner = "d".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
     const submissionId = `unknown-rebroadcast-${Date.now()}`;
     await __testSeedP2pkhLocalSubmission({
       ownerPublicKeyHex: owner,
@@ -800,6 +934,7 @@ describe("Session Coordinator worker", () => {
   it("preserves local-confirmed state when a rebroadcast provider fails", async () => {
     __testResetState();
     const owner = "e".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
     const submissionId = `failed-rebroadcast-${Date.now()}`;
     const txid = "fa".repeat(32);
     await __testSeedP2pkhLocalSubmission({
@@ -822,6 +957,7 @@ describe("Session Coordinator worker", () => {
   it("broadcasts a double-axis submission without relying on legacy state", async () => {
     __testResetState();
     const owner = "f".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
     const submissionId = `double-axis-${Date.now()}`;
     const txid = "fb".repeat(32);
     const providerBroadcast = vi.fn(async () => ({ canonicalTxid: txid, status: "accepted" as const, providerReference: "provider-ref" }));
@@ -848,6 +984,7 @@ describe("Session Coordinator worker", () => {
   it("skips a chain-confirmed ancestor and broadcasts the unresolved child once", async () => {
     __testResetState();
     const owner = "1".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
     const parentTxid = "10".repeat(32);
     const childTxid = "11".repeat(32);
     await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "confirmed-parent", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: parentTxid, rawTxHex: "parent", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
@@ -870,6 +1007,7 @@ describe("Session Coordinator worker", () => {
   it("blocks a conflicted ancestor before invoking the provider", async () => {
     __testResetState();
     const owner = "2".repeat(64);
+    __testSetVaultStatus("unlocked", owner);
     const parentTxid = "20".repeat(32);
     const childTxid = "21".repeat(32);
     await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: owner, submission: { id: "conflicted-parent", resourceId: "p2pkh:main", publicKeyHex: owner, network: "main", txid: parentTxid, rawTxHex: "parent", localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
@@ -890,6 +1028,7 @@ describe("Session Coordinator worker", () => {
   it("裁决重复 txid sibling 不受返回顺序影响且只阻断一次逻辑交易", async () => {
     for (const [owner, insertionOrder] of [["3".repeat(64), ["normal", "conflict"]], ["4".repeat(64), ["conflict", "normal"]]] as const) {
       __testResetState();
+      __testSetVaultStatus("unlocked", owner);
       const txid = "30".repeat(32);
       const childTxid = "31".repeat(32);
       const seed = async (kind: "normal" | "conflict") => {
@@ -911,6 +1050,7 @@ describe("Session Coordinator worker", () => {
     }
     __testResetState();
     const normalOwner = "5".repeat(64);
+    __testSetVaultStatus("unlocked", normalOwner);
     const normalTxid = "50".repeat(32);
     const normalChildTxid = "51".repeat(32);
     for (const [id, rawTxHex] of [["first-sibling", "z-raw"], ["second-sibling", "a-raw"]] as const) {
@@ -930,6 +1070,7 @@ describe("Session Coordinator worker", () => {
 
     __testResetState();
     const targetOwner = "6".repeat(64);
+    __testSetVaultStatus("unlocked", targetOwner);
     const targetTxid = "60".repeat(32);
     for (const [id, rawTxHex] of [["canonical-sibling", "a-raw"], ["requested-sibling", "z-raw"]] as const) {
       await __testSeedP2pkhLocalSubmission({ ownerPublicKeyHex: targetOwner, submission: { id, resourceId: "p2pkh:main", publicKeyHex: targetOwner, network: "main", txid: targetTxid, rawTxHex, localState: "submitting", chainResolution: "unresolved", inputOutpointKeys: [], ownOutputs: [], parentTxids: [], createdAt: "now", updatedAt: "now", attempts: [] } });
@@ -982,83 +1123,6 @@ describe("Session Coordinator worker", () => {
 
 const TEST_PRIV_2 = "0000000000000000000000000000000000000000000000000000000000000002";
 
-const STORAGE_DB_NAME = "keymaster.storage";
-const STORAGE_PROVIDER_SCOPE = "keymaster.storage.provider-config.v1";
-
-type StorageTestState = {
-  provider?: { sealedConfig: unknown };
-  journal?: unknown;
-};
-
-function seedCorruptStorageUpload(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(STORAGE_DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("providerConfig")) db.createObjectStore("providerConfig", { keyPath: "key" });
-      if (!db.objectStoreNames.contains("multipartUploads")) db.createObjectStore("multipartUploads", { keyPath: "internalUploadId" });
-    };
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const db = request.result;
-      const tx = db.transaction("multipartUploads", "readwrite");
-      tx.objectStore("multipartUploads").put({ internalUploadId: "corrupt-upload", sealedS3UploadId: { version: 2, saltHex: "00", nonceHex: "00", ciphertextHex: "00" } });
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { db.close(); reject(tx.error); };
-    };
-  });
-}
-
-function seedStorageProvider(sealedConfig: unknown): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(STORAGE_DB_NAME, 1);
-    request.onupgradeneeded = () => {
-      const db = request.result;
-      if (!db.objectStoreNames.contains("providerConfig")) db.createObjectStore("providerConfig", { keyPath: "key" });
-      if (!db.objectStoreNames.contains("multipartUploads")) db.createObjectStore("multipartUploads", { keyPath: "internalUploadId" });
-    };
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const db = request.result;
-      const tx = db.transaction("providerConfig", "readwrite");
-      tx.objectStore("providerConfig").put({
-        key: "active",
-        providerId: "aws-s3",
-        publicSummary: { bucketHint: "bucket", accessKeyHint: "key" },
-        sealedConfig,
-        generation: 1,
-        updatedAt: Date.now()
-      });
-      tx.oncomplete = () => { db.close(); resolve(); };
-      tx.onerror = () => { db.close(); reject(tx.error); };
-    };
-  });
-}
-
-function readStorageTestState(): Promise<StorageTestState> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(STORAGE_DB_NAME, 1);
-    request.onerror = () => reject(request.error);
-    request.onsuccess = () => {
-      const db = request.result;
-      const tx = db.transaction("providerConfig", "readonly");
-      const provider = tx.objectStore("providerConfig").get("active");
-      const journal = tx.objectStore("providerConfig").get("rotation");
-      tx.oncomplete = () => { db.close(); resolve({ provider: provider.result, journal: journal.result }); };
-      tx.onerror = () => { db.close(); reject(tx.error); };
-    };
-  });
-}
-
-function deleteStorageDb(): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.deleteDatabase(STORAGE_DB_NAME);
-    request.onsuccess = () => resolve();
-    request.onerror = () => reject(request.error);
-    request.onblocked = () => reject(new Error("Storage database deletion was blocked"));
-  });
-}
-
 describe("Session Coordinator backup import", () => {
   beforeEach(async () => {
     await __testDeleteVault();
@@ -1084,7 +1148,7 @@ describe("Session Coordinator backup import", () => {
 
     await expect(__testImportKeyBackup(legacyBackup, "legacy-pw", "target-pw"))
       .rejects.toThrow("Unrecognized key backup format");
-    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
   });
 
   it("cross-vault import succeeds with different passwords", async () => {
@@ -1092,15 +1156,15 @@ describe("Session Coordinator backup import", () => {
     const backup = await __testExportKeyBackup(sourceResult.publicKeyHex!);
 
     // A second Vault must be a fresh persistent store, rather than merely a
-    // reset Worker session over the source Vault's IndexedDB records.
+    // reset Worker session over the source Vault's platform K-V records.
     await __testDeleteVault();
     __testResetState();
     await __testCreateVault("target-pw", { label: "target-key" });
     const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
     expect(imported.publicKeyHex).toBe(sourceResult.publicKeyHex);
 
-    const targetMeta = await vaultDb.getMeta();
-    const targetRecord = await vaultDb.getKey(imported.publicKeyHex);
+    const targetMeta = await vaultKeyRepository.getMeta();
+    const targetRecord = await vaultKeyRepository.getKey(imported.publicKeyHex);
     expect(targetMeta).toBeDefined();
     expect(targetRecord).toBeDefined();
     expect(targetRecord?.storageVersion).toBe("keyhold-v2");
@@ -1119,7 +1183,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     await expect(__testImportKeyBackup(backup, "wrong-source-pw", "target-pw")).rejects.toThrow(/unable to unlock document/);
-    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("locked");
   });
 
@@ -1131,7 +1195,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     await expect(__testImportKeyBackup(backup, "source-pw", "wrong-target-pw")).rejects.toThrow(/Invalid password/);
-    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("locked");
   });
 
@@ -1148,7 +1212,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     await expect(__testImportKeyBackup(tamperedBackup, "source-pw", "target-pw")).rejects.toThrow();
-    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
   });
 
   it("rejects duplicate key import with Key already exists", async () => {
@@ -1158,11 +1222,11 @@ describe("Session Coordinator backup import", () => {
     __testResetState();
     await __testCreateEmptyVault("target-pw");
     const first = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    const original = await vaultDb.getKey(first.publicKeyHex);
+    const original = await vaultKeyRepository.getKey(first.publicKeyHex);
 
     await expect(__testImportKeyBackup(backup, "source-pw", "target-pw")).rejects.toThrow("Key already exists");
-    expect(await vaultDb.listKeys()).toHaveLength(1);
-    expect(await vaultDb.getKey(first.publicKeyHex)).toEqual(original);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(1);
+    expect(await vaultKeyRepository.getKey(first.publicKeyHex)).toEqual(original);
   });
 
   it("imports the first key into a locked empty Vault and activates it after unlock", async () => {
@@ -1173,7 +1237,7 @@ describe("Session Coordinator backup import", () => {
     await __testCreateEmptyVault("target-pw");
 
     const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
-    expect(await vaultDb.listKeys()).toHaveLength(1);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(1);
     expect(__testGetVaultStatus()).toBe("locked");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
 
@@ -1191,8 +1255,8 @@ describe("Session Coordinator backup import", () => {
     const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
     // Model an unlocked empty Vault without forging session crypto state: remove
     // the only persisted key while retaining the real unlocked target session.
-    await vaultDb.deleteKeyAndSidecars(placeholder.publicKeyHex!);
-    expect(await vaultDb.listKeys()).toHaveLength(0);
+    await vaultKeyRepository.deleteKeyAndSidecars(placeholder.publicKeyHex!);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
     expect(__testGetVaultStatus()).toBe("unlocked");
 
     const a = new TestPort();
@@ -1219,40 +1283,6 @@ describe("Session Coordinator backup import", () => {
   }, 15_000);
 });
 
-describe("Session Coordinator locked legacy recovery", () => {
-  beforeEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-  afterEach(async () => {
-    await __testDeleteVault();
-    __testResetState();
-  });
-
-  it("keeps an opaque legacy key selectable without parsing it at bootstrap", async () => {
-    await __testCreateEmptyVault("pw");
-    const publicKeyHex = bytesToHex(secp256k1.getPublicKey(hexToBytes(TEST_PRIV_2), true));
-    await vaultDb.putKey({
-      publicKeyHex,
-      label: "legacy",
-      address: "",
-      network: "main",
-      format: "legacy",
-      capabilities: ["p2pkh"],
-      createdAt: new Date().toISOString(),
-      cipherVersion: "v2",
-      cipherSaltB64: "00",
-      cipherIvB64: "00",
-      cipherB64: "00"
-    });
-    await __testRestartWorker();
-    const snapshot = __testGetSnapshot();
-    expect(snapshot.vaultStatus).toBe("locked");
-    expect(snapshot.activePublicKeyHex).toBeUndefined();
-    expect(snapshot.selectedPublicKeyHex).toBe(publicKeyHex);
-  });
-});
-
 describe("Session Coordinator locked deletion and cold export", () => {
   beforeEach(async () => {
     await __testDeleteVault();
@@ -1270,14 +1300,14 @@ describe("Session Coordinator locked deletion and cold export", () => {
     expect(result.ack.status).toBe("accepted");
     expect(__testGetVaultStatus()).toBe("uninitialized");
     expect(__testGetActivePublicKeyHex()).toBeUndefined();
-    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
   });
 
   it("classifies a legacy empty Vault as uninitialized after a worker restart", async () => {
     await __testCreateEmptyVault("pw");
     await __testRestartWorker();
     expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
   });
 
   it("cold-exports the persisted selected KeyHold document while locked", async () => {
@@ -1330,168 +1360,15 @@ describe("Session Coordinator locked deletion and cold export", () => {
     const key = await __testCreateVault("pw");
     await __testLock();
     await __testDeleteKeyMaterial(key.publicKeyHex!);
-    expect(__testGetVaultStatus()).toBe("locked");
+    // 删除事务本身已完成最后一把 Key 的 Vault meta 清理，状态直接收敛
+    // 到 uninitialized；旧的显式 finalize 入口仍保持幂等。
+    expect(__testGetVaultStatus()).toBe("uninitialized");
     await __testFinalizeEmptyVaultAfterLastKeyDeletion();
     expect(__testGetVaultStatus()).toBe("uninitialized");
-    expect(await vaultDb.getMeta()).toBeUndefined();
-    expect(await vaultDb.listKeys()).toHaveLength(0);
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
   });
 
-  it("rejects cold export of an opaque legacy record without parsing it", async () => {
-    await __testCreateVault("pw");
-    const key = (await vaultDb.listKeys())[0];
-    if (!key) throw new Error("missing seeded key");
-    const legacy: LegacyVaultKeyRecord = {
-      publicKeyHex: key.publicKeyHex,
-      label: key.label,
-      address: key.address,
-      network: key.network,
-      format: "legacy",
-      capabilities: key.capabilities,
-      createdAt: key.createdAt,
-      cipherVersion: "v2",
-      cipherSaltB64: "00",
-      cipherIvB64: "00",
-      cipherB64: "00"
-    };
-    await vaultDb.putKey(legacy);
-    await __testLock();
-    await expect(__testExportCurrentKeyBackup()).rejects.toThrow("Unsupported key storage version");
-  });
-});
-
-describe("Session Coordinator Storage rotation recovery", () => {
-  beforeEach(async () => {
-    await __testDeleteVault();
-    await deleteStorageDb();
-    __testResetState();
-  });
-
-  afterEach(async () => {
-    await __testDeleteVault();
-    await deleteStorageDb();
-    __testResetState();
-  });
-
-  it("clears the Storage barrier when a ciphertext is corrupt and keeps Vault unlockable", async () => {
-    const key = await __testCreateVault("old-password", { label: "rotation-test" });
-    await seedCorruptStorageUpload();
-
-    await expect(__testChangePassword("old-password", "new-password")).rejects.toBeTruthy();
-    expect(__testGetVaultStatus()).toBe("unlocked");
-
-    await __testLock();
-    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-
-    const request = indexedDB.open(STORAGE_DB_NAME, 1);
-    const journal = await new Promise<unknown>((resolve, reject) => {
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("providerConfig", "readonly");
-        const get = tx.objectStore("providerConfig").get("rotation");
-        tx.oncomplete = () => { db.close(); resolve(get.result); };
-        tx.onerror = () => { db.close(); reject(tx.error); };
-      };
-    });
-    expect(journal).toBeUndefined();
-  });
-
-  it("completes a normal Storage/Vault password rotation and retires its journal", async () => {
-    const key = await __testCreateVault("old-password", { label: "rotation-test" });
-    const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
-    await seedStorageProvider(oldSealed);
-
-    await expect(__testChangePassword("old-password", "new-password")).resolves.toBe(true);
-    expect(__testGetVaultStatus()).toBe("locked");
-    const rotated = await readStorageTestState();
-    expect(rotated.provider?.sealedConfig).not.toEqual(oldSealed);
-    expect(rotated.journal).toBeDefined();
-
-    await expect(__testUnlock("new-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-    expect((await readStorageTestState()).journal).toBeUndefined();
-  });
-
-  it("rejects a wrong old password before any rotation write", async () => {
-    await __testCreateVault("old-password", { label: "rotation-test" });
-    const commit = vi.spyOn(vaultDb, "putMetaAndKeys");
-    try {
-      await expect(__testChangePassword("wrong-password", "new-password")).rejects.toThrow("Invalid password");
-      expect(commit).not.toHaveBeenCalled();
-      expect(__testGetVaultStatus()).toBe("unlocked");
-    } finally {
-      commit.mockRestore();
-    }
-  });
-
-  it("restores the original snapshot directly when the Vault commit fails", async () => {
-    const key = await __testCreateVault("old-password", { label: "rotation-test" });
-    const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
-    await seedStorageProvider(oldSealed);
-    const commit = vi.spyOn(vaultDb, "putMetaAndKeys").mockRejectedValueOnce(new Error("injected Vault commit failure"));
-    try {
-      await expect(__testChangePassword("old-password", "new-password")).rejects.toThrow("injected Vault commit failure");
-    } finally {
-      commit.mockRestore();
-    }
-
-    const restored = await readStorageTestState();
-    expect(restored.provider?.sealedConfig).toEqual(oldSealed);
-    expect(restored.journal).toBeUndefined();
-    await __testLock();
-    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-  }, 15_000);
-
-  // Two unlock/recovery KDFs plus the compensating storage writes exceed the
-  // default 5s Vitest budget on the Node worker, while remaining bounded.
-  it("keeps the journal when rollback or a later recovery write fails", async () => {
-    const key = await __testCreateVault("old-password", { label: "rotation-test" });
-    const oldSealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
-    await seedStorageProvider(oldSealed);
-    const commit = vi.spyOn(vaultDb, "putMetaAndKeys").mockRejectedValueOnce(new Error("injected Vault commit failure"));
-    const rollback = vi.spyOn(IDBObjectStore.prototype, "clear").mockImplementationOnce(() => { throw new Error("injected rollback failure"); });
-    try {
-      await expect(__testChangePassword("old-password", "new-password")).rejects.toThrow("Password rotation rollback failed");
-    } finally {
-      commit.mockRestore();
-      rollback.mockRestore();
-    }
-    expect((await readStorageTestState()).journal).toBeDefined();
-
-    await __testLock();
-    const recovery = vi.spyOn(IDBObjectStore.prototype, "put").mockImplementationOnce(() => { throw new Error("injected recovery write failure"); });
-    try {
-      await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-    } finally {
-      recovery.mockRestore();
-    }
-    expect((await readStorageTestState()).journal).toBeDefined();
-
-    await __testLock();
-    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-    expect((await readStorageTestState()).journal).toBeUndefined();
-  }, 15_000);
-
-  it("keeps a corrupt journal as recovery evidence without blocking Vault unlock", async () => {
-    const key = await __testCreateVault("old-password", { label: "rotation-test" });
-    const sealed = await __testSealLocalSecret(STORAGE_PROVIDER_SCOPE, "provider-secret");
-    await seedStorageProvider(sealed);
-    const request = indexedDB.open(STORAGE_DB_NAME, 1);
-    await new Promise<void>((resolve, reject) => {
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result;
-        const tx = db.transaction("providerConfig", "readwrite");
-        tx.objectStore("providerConfig").put({ key: "rotation", phase: "prepared", old: { corrupted: true } });
-        tx.oncomplete = () => { db.close(); resolve(); };
-        tx.onerror = () => { db.close(); reject(tx.error); };
-      };
-    });
-
-    await __testLock();
-    await expect(__testUnlock("old-password", key.publicKeyHex)).resolves.toMatchObject({ ack: { status: "accepted" } });
-    expect((await readStorageTestState()).journal).toEqual({ key: "rotation", phase: "prepared", old: { corrupted: true } });
-  });
 });
 
 describe("Session Coordinator WebAuthn PRF protection", () => {
@@ -1515,7 +1392,7 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
       prfOutputHex,
       rpId: "keymaster.cc"
     });
-    expect(await vaultDb.listSidecars(first.publicKeyHex!)).toHaveLength(1);
+    expect(await vaultKeyRepository.listSidecars(first.publicKeyHex!)).toHaveLength(1);
     const backup = JSON.parse(await __testExportKeyBackup(first.publicKeyHex!)) as Record<string, unknown>;
     expect(Object.keys(backup).sort()).toEqual(["cipher", "format", "keyDerivation", "label", "publicKeyHex", "version"]);
     expect(backup.format).toBe("keymaster");
@@ -1553,28 +1430,6 @@ describe("Session Coordinator WebAuthn PRF protection", () => {
     expect(backup.format).toBe("keymaster");
   });
 
-  it("does not use an embedded legacy passkey protector", async () => {
-    const key = await __testCreateVault("vault-password", { label: "legacy" });
-    const existing = await vaultDb.getKey(key.publicKeyHex!);
-    if (!existing) throw new Error("missing seeded key");
-    const legacy: LegacyVaultKeyRecord = {
-      publicKeyHex: existing.publicKeyHex,
-      label: existing.label,
-      address: existing.address,
-      network: existing.network,
-      format: "legacy",
-      capabilities: existing.capabilities,
-      createdAt: existing.createdAt,
-      cipherVersion: "v2",
-      cipherSaltB64: "00",
-      cipherIvB64: "00",
-      cipherB64: "00",
-      passkeyProtections: [{ id: "embedded", label: "old", credentialIdB64: "old", prfSaltB64: "old", rpId: "keymaster.cc", createdAt: existing.createdAt, cipherVersion: "webauthn-prf-v1", cipherIvB64: "00", cipherB64: "00" }]
-    };
-    await vaultDb.putKey(legacy);
-    expect(await __testListPasskeysForKey(existing.publicKeyHex)).toEqual([]);
-    await expect(__testActivateKeyWithPasskey({ passkeyId: "embedded", prfOutputHex: "ab".repeat(32) })).rejects.toThrow("Passkey protection not found");
-  });
 });
 
 
@@ -1863,6 +1718,7 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
 
   beforeEach(async () => {
     await __testDeleteVault();
+    await __testClearPlatformNamespace("MSFile");
     __testResetState();
   });
 
@@ -1870,13 +1726,8 @@ describe("Session Coordinator MSFile RPC lane（施工单 docs/proposals/msfile�
     __testSetStorageSessionResolver(undefined);
     await __testReleaseMsfileRuntime();
     await __testDeleteVault();
+    await __testClearPlatformNamespace("MSFile");
     __testResetState();
-    await new Promise<void>((resolve) => {
-      const request = indexedDB.deleteDatabase("keymaster.msfile");
-      request.onsuccess = () => resolve();
-      request.onerror = () => resolve();
-      request.onblocked = () => setTimeout(() => resolve(), 50);
-    });
   });
 
   async function unlockVault(): Promise<string> {

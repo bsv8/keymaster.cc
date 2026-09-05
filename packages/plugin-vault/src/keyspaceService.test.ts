@@ -18,11 +18,12 @@
 //     把 Vault 收回 uninitialized（硬切换 002）。
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createInMemoryKeyValueStore } from "@keymaster/runtime";
 import type { MessageBus } from "@keymaster/runtime";
-import type { BackgroundService, KeyIdentity } from "@keymaster/contracts";
+import type { BackgroundService, KeyIdentity, OwnerAppStore } from "@keymaster/contracts";
 import { createKeyspaceService } from "./keyspaceService.js";
 import { createVaultService } from "./vaultService.js";
-import { disposeVaultDb, vaultDb, type VaultKeyRecord } from "./vaultDb.js";
+import { disposeVaultKeyRepository, vaultKeyRepository, type VaultKeyRecord } from "./storage/vaultKeyRepository.js";
 
 /** 测试用统一锁屏密码——seedVaultMeta / deleteKey 都用这个。 */
 const TEST_PASSWORD = "test-pw";
@@ -92,8 +93,8 @@ function makeFakeBackground(
   };
 }
 
-async function resetDb(): Promise<void> {
-  disposeVaultDb();
+async function resetRepository(): Promise<void> {
+  disposeVaultKeyRepository();
   await new Promise<void>((resolve) => {
     const req = indexedDB.deleteDatabase("vault");
     req.onsuccess = () => resolve();
@@ -103,11 +104,11 @@ async function resetDb(): Promise<void> {
 }
 
 beforeEach(async () => {
-  await resetDb();
+  await resetRepository();
 });
 
 afterEach(async () => {
-  await resetDb();
+  await resetRepository();
 });
 
 /** 等待 vaultService.bootstrap() 完成。 */
@@ -134,11 +135,11 @@ async function seedVault(
   await waitForStatus(vault, "unlocked");
 }
 
-/** 直接在 vaultDb 预填一把"已 backfill"的 ready key（绕开 unlock）。 */
+/** 直接在 vaultKeyRepository 预填一把"已 backfill"的 ready key（绕开 unlock）。 */
 async function seedReadyKey(input: { publicKeyHex: string;
   label: string;
 }): Promise<void> {
-  await vaultDb.putKey({
+  await vaultKeyRepository.putKey({
     publicKeyHex: input.publicKeyHex,
     label: input.label,
     address: "",
@@ -146,9 +147,8 @@ async function seedReadyKey(input: { publicKeyHex: string;
     format: "hex",
     capabilities: ["p2pkh"],
     createdAt: "2024-01-01T00:00:00.000Z",
-    cipherSaltB64: "00",
-    cipherIvB64: "00",
-    cipherB64: "00"
+    storageVersion: "keyhold-v2",
+    keyholdDocument: { version: 1, label: input.label, encrypted: "test" } as never
   });
 }
 
@@ -185,8 +185,8 @@ describe("keyspaceService.deleteKey (硬切换 008 + 015 标签确认)", () => {
       | { publicKeyHex?: string }
       | undefined;
     expect(deletedPayload?.publicKeyHex).toBe("a".repeat(64));
-    // 3) vaultDb 中 key 已删，但 keep key 仍在。
-    const remaining = await vaultDb.listKeys();
+    // 3) vaultKeyRepository 中 key 已删，但 keep key 仍在。
+    const remaining = await vaultKeyRepository.listKeys();
     expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeUndefined();
     expect(remaining.find((r) => r.publicKeyHex === "b".repeat(64))).toBeDefined();
     // 4) Vault 仍保持 unlocked（还有 key）。
@@ -230,7 +230,7 @@ describe("keyspaceService.deleteKey (硬切换 008 + 015 标签确认)", () => {
     expect(records.some((r) => r.type === "key.deleting")).toBe(false);
     expect(records.some((r) => r.type === "key.deleted")).toBe(false);
     // 3) key 仍在。
-    const remaining = await vaultDb.listKeys();
+    const remaining = await vaultKeyRepository.listKeys();
     expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeDefined();
     // 4) Vault 状态不变。
     expect(vault.status()).toBe("unlocked");
@@ -249,7 +249,7 @@ describe("keyspaceService.deleteKey (硬切换 008 + 015 标签确认)", () => {
     await expect(keyspace.deleteKey({ publicKeyHex: "f".repeat(64), confirmationLabel: "Exact Label" })).rejects.toThrow("Key not found");
     expect(background.cancelByKeyCalls).toEqual([]);
     expect(records.some((record) => record.type === "key.deleting")).toBe(false);
-    expect(await vaultDb.getKey("a".repeat(64))).toBeDefined();
+    expect(await vaultKeyRepository.getKey("a".repeat(64))).toBeDefined();
   });
 });
 
@@ -273,7 +273,7 @@ describe("keyspaceService.prepareDeleteKey fail-closed (硬切换 008 收尾)", 
     // 2) namespace DB 未被删：registeredStorages 此时为空，所以这一断言退化为
     //    "没异常"；由 deleteDatabase 路径测覆盖。这里只断言 key 未删。
     // 3) Vault 私钥材料仍在。
-    const remaining = await vaultDb.listKeys();
+    const remaining = await vaultKeyRepository.listKeys();
     expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeDefined();
     // 4) 不发 key.deleted。
     expect(records.some((r) => r.type === "key.deleted")).toBe(false);
@@ -319,7 +319,7 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     // activePublicKeyHex 指向 k-b。
     expect(next.activePublicKeyHex).toBe("b".repeat(64));
     // vault_meta 仍在。
-    expect(await vaultDb.getMeta()).toBeDefined();
+    expect(await vaultKeyRepository.getMeta()).toBeDefined();
   });
 
   it("deleting the LAST key collapses Vault to uninitialized and wipes vault_meta", async () => {
@@ -338,52 +338,47 @@ describe("keyspaceService delete -> empty-vault finalize (硬切换 002)", () =>
     // 2) Vault 状态最终是 uninitialized，不是 locked 也不是仅 active=all。
     expect(vault.status()).toBe("uninitialized");
     // 3) vault_meta 已删——新实例 bootstrap 也读到 uninitialized。
-    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
     const fresh = createVaultService({ messageBus: events });
     await waitForStatus(fresh, "uninitialized");
     // 4) finalize 期间 emit 过 vault.locked，方便订阅者清理会话内存。
     expect(records.some((r) => r.type === "vault.locked")).toBe(true);
   });
 
-  it("waits for a blocked namespace delete until the external handle closes", async () => {
-    // onblocked 不是终态；模拟另一连接收到 versionchange 后关闭，
-    // deleteDatabase 随后 success，keyspace 才能继续删材料。
-    //
-    // 实现：registerPluginStorage 注册一个名字，再手动打开一个同名
-    // IndexedDB 让 deleteDatabase 进入 onblocked。
+  it("waits for the owner storage delete RPC before deleting material", async () => {
+    // OwnerAppStore 删除是 Vault 与业务存储之间的硬边界：删除 RPC 未完成
+    // 前，keyspace 不得继续删除 Vault 私钥材料。
     const { messageBus: events, records } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await seedVault(vault);
     await seedReadyKey({ label: "only", publicKeyHex: "a".repeat(64) });
     const fakeBackground = makeFakeBackground();
-    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
-    keyspace.registerPluginStorage({ pluginId: "test-plugin", storageId: "store" });
+    let releaseOwnerStorageDelete!: () => void;
+    const ownerStorageDelete = new Promise<void>((resolve) => {
+      releaseOwnerStorageDelete = resolve;
+    });
+    const keyspace = createKeyspaceService({
+      messageBus: events,
+      vault,
+      background: fakeBackground,
+      ownerStorageDeleter: async () => ownerStorageDelete
+    });
     await keyspace.setActive("a".repeat(64));
 
-    // 在外部打开同名 DB 让 deleteDatabase 进入 blocked。
-    const dbName = `keymaster.key.${"a".repeat(64)}.plugin.test-plugin.store`;
-    const holder = await new Promise<IDBDatabase>((resolve, reject) => {
-      const req = indexedDB.open(dbName, 1);
-      req.onupgradeneeded = () => {
-        if (!req.result.objectStoreNames.contains("kv")) {
-          req.result.createObjectStore("kv");
-        }
-      };
-      req.onsuccess = () => resolve(req.result);
-      req.onerror = () => reject(req.error);
-    });
-    holder.onversionchange = () => holder.close();
+    const deleting = keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" });
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    let settled = false;
+    void deleting.then(() => { settled = true; });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    expect(settled).toBe(false);
+    expect(await vaultKeyRepository.getKey("a".repeat(64))).toBeDefined();
 
-    try {
-      await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" });
-      // 材料删除只在 deleteDatabase success 后发生。
-      const remaining = await vaultDb.listKeys();
-      expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeUndefined();
-      expect(vault.status()).toBe("uninitialized");
-      expect(records.filter((r) => r.type === "key.deleted")).toHaveLength(1);
-    } finally {
-      holder.close();
-    }
+    releaseOwnerStorageDelete();
+    await deleting;
+    const remaining = await vaultKeyRepository.listKeys();
+    expect(remaining.find((r) => r.publicKeyHex === "a".repeat(64))).toBeUndefined();
+    expect(vault.status()).toBe("uninitialized");
+    expect(records.filter((r) => r.type === "key.deleted")).toHaveLength(1);
   });
 });
 
@@ -411,7 +406,7 @@ describe("keyspaceService delete-last-key -> uninitialized (硬切换 010)", () 
     // 删除唯一一把 key。
     await keyspace.deleteKey({ publicKeyHex: "a".repeat(64), confirmationLabel: "only" });
     expect(vault.status()).toBe("uninitialized");
-    expect(await vaultDb.getMeta()).toBeUndefined();
+    expect(await vaultKeyRepository.getMeta()).toBeUndefined();
 
     // 关键：下一次"新建"或"导入"必须重新决定系统锁屏密码——也就是
     // 必须能再走一次 createVaultWithImportedKey 拿到一把 key。这里用
@@ -455,7 +450,7 @@ describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004
   // closing` 这条根本链路——只要"先 cancel 再关 DB"的顺序破了，这条
   // 路径就还会出错。
 
-  it("setActive(B) cancels A's tasks before closing A's openDbs and switching active", async () => {
+  it("setActive(B) cancels A's tasks before closing A's openStores and switching active", async () => {
     // 1) 起一个 slow cancelByKey（挂 50ms 才 resolve），观察 setActive
     //    在 cancelByKey resolve 前是否已经 setActiveInternal。
     const { messageBus: events, records } = makeMessageBus();
@@ -466,17 +461,20 @@ describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004
     await seedReadyKey({ label: "a", publicKeyHex: hashA });
     await seedReadyKey({ label: "b", publicKeyHex: hashB });
     const fakeBackground = makeFakeBackground();
-    const keyspace = createKeyspaceService({ messageBus: events, vault, background: fakeBackground });
+    const keyspace = createKeyspaceService({
+      messageBus: events,
+      vault,
+      background: fakeBackground,
+      ownerStorageFactory: async ({ ownerPublicKeyHex, applicationStorageId, schemaVersion }) => createInMemoryKeyValueStore({
+        scope: "key", ownerPublicKeyHex, applicationStorageId, schemaVersion, bucketId: "test", bucketGeneration: 1
+      }) as OwnerAppStore
+    });
     await keyspace.setActive(hashA);
 
-    // 2) 直接 open A 的 namespace DB 模拟业务插件缓存。
-    const storageKeyA = keyspace.openKeyStorage({
-      publicKeyHex: hashA,
-      pluginId: "p2pkh",
-      storageId: "main",
-      version: 1,
-      upgrade: () => undefined
-    });
+    // 2) 直接 open A 的 owner/App K-V 模拟业务插件缓存。
+    const storageAuthority = keyspace.storageAuthority;
+    if (!storageAuthority) throw new Error("test storage authority is unavailable");
+    const storageKeyA = storageAuthority.openOwnerAppStore({ pluginId: "p2pkh", declaration: { scope: "key", applicationStorageId: "main", schemaVersion: 1 } });
     await storageKeyA;
 
     // 3) 标记 setActiveInternal 的发生点：通过 activeKey.changed 事件
@@ -504,15 +502,9 @@ describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004
     expect(keyspace.active().activePublicKeyHex).toBe(hashB);
     // 6) cancelByKey 被调过一次，且参数是 A（旧 active）。
     expect(fakeBackground.cancelByKeyCalls).toContain(hashA);
-    // 7) A 的 openDb 应该已被 quiesceNamespace 关掉（cache 中没有 A）。
+    // 7) A 的 openRepository 应该已被 quiesceNamespace 关掉（cache 中没有 A）。
     //    这里仅断言 B 能正常 open——间接证明 keyspace state 没坏。
-    const reopened = await keyspace.openKeyStorage({
-      publicKeyHex: hashB,
-      pluginId: "p2pkh",
-      storageId: "main",
-      version: 1,
-      upgrade: () => undefined
-    });
+    const reopened = await storageAuthority.openOwnerAppStore({ pluginId: "p2pkh", declaration: { scope: "key", applicationStorageId: "main", schemaVersion: 1 } });
     expect(reopened).toBeDefined();
     expect(records.some((r) => r.type === "activeKey.changed")).toBe(true);
   });
@@ -578,7 +570,7 @@ describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004
 
   it("onVaultLocked() with no active key still resolves (no cancel called)", async () => {
     // 硬切换 004 情况 3：没有 active key 时 onVaultLocked 必须直接
-    // 关 openDbs + 清 active；调 background.cancelByKey 应被跳过。
+    // 关 openStores + 清 active；调 background.cancelByKey 应被跳过。
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await seedVault(vault);
@@ -751,7 +743,7 @@ describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004
 });
 
 /**
- * 硬切换 002 收尾：`openKeyStorage` 硬门禁收紧。
+ * 硬切换 002 收尾：`openOwnerAppStore` 硬门禁收紧。
  *   - 没有 active key 时，开任何 namespace DB 一律拒绝
  *     （防止「无 active + 知道 hex 就能开库」被滥用）。
  *   - active 切走后，新 active 不等于已开 handle 的 publicKeyHex
@@ -759,29 +751,32 @@ describe("keyspaceService.setActive / onVaultLocked quiesce order (硬切换 004
  * 不传 new fake keyspace，直接用 createKeyspaceService + IndexedDB
  * 真路径（fake-indexeddb）。
  */
-describe("keyspaceService.openKeyStorage hard gate (硬切换 002 收尾)", () => {
+describe("keyspaceService.openOwnerAppStore hard gate (硬切换 002 收尾)", () => {
   async function freshKeyspaceNoActive(): Promise<ReturnType<typeof createKeyspaceService>> {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await seedVault(vault);
-    return createKeyspaceService({ messageBus: events, vault });
+    return createKeyspaceService({
+      messageBus: events,
+      vault,
+      ownerStorageFactory: async ({ ownerPublicKeyHex, applicationStorageId, schemaVersion }) => createInMemoryKeyValueStore({
+        scope: "key", ownerPublicKeyHex, applicationStorageId, schemaVersion, bucketId: "test", bucketGeneration: 1
+      }) as OwnerAppStore
+    });
   }
 
-  it("rejects openKeyStorage when no active key is set", async () => {
+  it("rejects openOwnerAppStore when no active key is set", async () => {
     const keyspace = await freshKeyspaceNoActive();
     expect(keyspace.active().activePublicKeyHex).toBeUndefined();
     await expect(
-      keyspace.openKeyStorage({
-        publicKeyHex: "a".repeat(64),
-        pluginId: "p2pkh",
-        storageId: "state",
-        version: 1,
-        upgrade: () => undefined
+      keyspace.storageAuthority!.openOwnerAppStore({
+        pluginId: "test-plugin",
+        declaration: { scope: "key", applicationStorageId: "state", schemaVersion: 1 }
       })
     ).rejects.toThrow(/Key storage is not ready/);
   });
 
-  it("rejects openKeyStorage when input.publicKeyHex does not match active", async () => {
+  it("opens only a registered owner/App namespace", async () => {
     const { messageBus: events } = makeMessageBus();
     const vault = createVaultService({ messageBus: events });
     await seedVault(vault);
@@ -791,26 +786,7 @@ describe("keyspaceService.openKeyStorage hard gate (硬切换 002 收尾)", () =
     await seedReadyKey({ label: "b", publicKeyHex: hashB });
     const keyspace = createKeyspaceService({ messageBus: events, vault });
     await keyspace.setActive(hashA);
-    // 用 hashB 开库：active=A，B != A，必须拒绝。
-    await expect(
-      keyspace.openKeyStorage({
-        publicKeyHex: hashB,
-        pluginId: "p2pkh",
-        storageId: "state",
-        version: 1,
-        upgrade: () => undefined
-      })
-    ).rejects.toThrow(/Key storage is not ready/);
-    // 同 active 调用允许通过。
-    await expect(
-      keyspace.openKeyStorage({
-        publicKeyHex: hashA,
-        pluginId: "p2pkh",
-        storageId: "state",
-        version: 1,
-        upgrade: () => undefined
-      })
-    ).resolves.toBeDefined();
+    expect(keyspace.storageAuthority).toBeUndefined();
   });
 });
 
