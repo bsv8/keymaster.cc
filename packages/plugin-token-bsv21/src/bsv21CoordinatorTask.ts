@@ -5,5 +5,8 @@ import { createBsv21SyncTask } from "./bsv21Sync.js";
 
 export function createBsv21CoordinatorTask(input: { keyspace: KeyspaceService; store: KeyValueStore; p2pkh: Parameters<typeof createBsv21Service>[0]["p2pkh"]; woc: WocBsv21Service; wocService: WocService; vault: VaultService; notifier?: AssetDataNotifier }) {
   const service = createBsv21Service({ keyspace: input.keyspace, p2pkh: input.p2pkh, wocBsv21: input.woc });
-  return createBsv21SyncTask({ stateRepository: createBsv21StateRepository(input.store), service, woc: input.wocService, keyspace: input.keyspace, vault: input.vault, assetDataNotifier: input.notifier });
+  return {
+    ...createBsv21SyncTask({ stateRepository: createBsv21StateRepository(input.store), service, woc: input.wocService, keyspace: input.keyspace, vault: input.vault, assetDataNotifier: input.notifier }),
+    unitId: "token-bsv21.coordinator-worker",
+  };
 }

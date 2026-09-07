@@ -23,7 +23,8 @@ import {
   BACKGROUND_TRIGGER_REASON,
   KEYSPACE_SERVICE_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
-  WOC_STAS_CAPABILITY
+  WOC_STAS_CAPABILITY,
+  defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import {
   P2PKH_CAPABILITY,
@@ -62,19 +63,31 @@ export const stasTokenPlugin: PluginManifest = {
     canDisable: true,
     displayGroup: "business"
   },
-  i18n: stasResources,
-  storage: { scope: "key", applicationStorageId: STAS_STORAGE_ID, schemaVersion: STAS_SCHEMA_VERSION },
-  dependencies: [
-    { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
-    { capability: WOC_STAS_CAPABILITY, reason: "STAS WOC 查询入口" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
-    { capability: "token.registry", reason: "注册 STAS TokenProvider" },
-    { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
-    { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
-    { capability: "vault.service", reason: "sync task canRun 门禁" },
-    { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
-    { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" }
+  units: [
+    {
+      id: "token-stas.window",
+      execution: "window",
+      lifetime: "owner-session",
+      storage: { scope: "key", applicationStorageId: STAS_STORAGE_ID, schemaVersion: STAS_SCHEMA_VERSION },
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 主网地址" },
+        { capability: WOC_STAS_CAPABILITY, reason: "STAS WOC 查询入口" },
+        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
+        { capability: "token.registry", reason: "注册 STAS TokenProvider" },
+        { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
+        { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
+        { capability: "vault.service", reason: "sync task canRun 门禁" },
+        { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
+        { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
+      ]),
+    },
+    {
+      id: "token-stas.coordinator-worker",
+      execution: "coordinator-worker",
+      lifetime: "owner-session",
+    },
   ],
+  i18n: stasResources,
   setup(ctx) {
     const p2pkh = ctx.get<P2pkhServiceForStas>(P2PKH_CAPABILITY);
     const wocStas = ctx.get<WocStasService>(WOC_STAS_CAPABILITY);

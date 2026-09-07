@@ -71,6 +71,8 @@ export interface DispatchOptions extends PublishOptions {
   priority?: number;
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** 消息进入终态后调用一次；生命周期 facade 用它释放临时 signal 监听。 */
+  onSettled?: () => void;
 }
 
 /**

@@ -27,7 +27,14 @@ describe("msfilePlugin manifest", () => {
 
   it("registers the formal file route and removes all owned surfaces on disable", async () => {
     const host = createPluginHost({
+      execution: "window",
       disableConfigPersistence: true,
+      initialRuntimeIdentity: {
+        vaultStatus: "unlocked",
+        ownerPublicKeyHex: TEST_OWNER,
+        sessionEpoch: "test-msfile-session:1",
+        bucketGeneration: 1,
+      },
       coordinatorForPlugin: () => coordinator(),
       storageBindingAuthority: {
         openOwnerAppStore: async ({ declaration }) => (await import("@keymaster/runtime")).createInMemoryKeyValueStore({

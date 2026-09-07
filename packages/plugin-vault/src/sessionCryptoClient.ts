@@ -25,7 +25,7 @@ import type {
   SessionCryptoResponseMessage
 } from "./sessionCryptoProtocol.js";
 
-interface SessionCryptoEngine {
+export interface SessionCryptoEngine {
   getIdentity(): ActiveKeyCryptoIdentity;
   signDigest(input: { publicKeyHex: string; digest: ArrayBuffer; format: EcdsaSignatureFormat }): Promise<ActiveKeyCryptoSignDigestResult>;
   deriveP2pkhAddress(input: { publicKeyHex: string; network: "main" | "test" }): Promise<{ publicKeyHex: string; address: string }>;
@@ -35,6 +35,8 @@ interface SessionCryptoEngine {
 export interface SessionCryptoClientOptions {
   engineFactory?: (input: SessionCryptoBootstrapInput) => Promise<SessionCryptoEngine>;
   allowLocalEngineForTests?: boolean;
+  /** 浏览器宿主提供的 Dedicated Worker 工厂；Vite 等构建器需在应用入口编译 Worker。 */
+  workerFactory?: () => Worker;
   /** 主页面 Coordinator SharedWorker 连接。 */
   coordinatorPort?: MessagePort;
   sessionEpoch?: SessionEpoch;
@@ -95,21 +97,30 @@ export async function createSessionCryptoEngine(
     return createCoordinatorBackedEngine(input, options.coordinatorPort, options.sessionEpoch ?? "boot");
   }
   if (options.mode !== "appview") throw new Error("Keymaster session crypto requires the Session Coordinator");
-  if (typeof Worker !== "undefined") return createWorkerBackedEngine(input);
+  if (typeof Worker !== "undefined") return createWorkerBackedEngine(input, options.workerFactory);
   if (options.allowLocalEngineForTests) return createLocalEngine(input);
   throw new Error("Session crypto worker is unavailable");
 }
 
-async function createWorkerBackedEngine(input: SessionCryptoBootstrapInput): Promise<SessionCryptoEngine> {
+async function createWorkerBackedEngine(
+  input: SessionCryptoBootstrapInput,
+  workerFactory?: () => Worker,
+): Promise<SessionCryptoEngine> {
   const WorkerConstructor = (globalThis as { Worker?: typeof Worker }).Worker ?? Worker;
-  const worker = new WorkerConstructor(new URL("./sessionCryptoWorker.ts", import.meta.url), { type: "module" });
+  // 包源码默认路径适用于直接由包构建器编译的宿主；Vite workspace 应通过
+  // workerFactory 注入应用内 Worker 入口，避免把源码 .ts 当作静态资源发送。
+  const worker = workerFactory?.() ?? new WorkerConstructor(new URL("./sessionCryptoWorker.ts", import.meta.url), { type: "module" });
   const pending = new Map<string, { resolve: (value: unknown) => void; reject: (reason?: unknown) => void }>();
-  let disposed = false;
+  // revoked 表示对调用方立即失效；cleanedUp 表示底层 Worker 已经终止。
+  // 两者不能共用一个状态，否则 dispose 先标记后会跳过真正的资源清理。
+  let revoked = false;
+  let cleanedUp = false;
   let cleanupTimer: ReturnType<typeof setTimeout> | null = null;
 
   const cleanup = (reason?: string): void => {
-    if (disposed) return;
-    disposed = true;
+    if (cleanedUp) return;
+    revoked = true;
+    cleanedUp = true;
     if (cleanupTimer) clearTimeout(cleanupTimer);
     for (const entry of pending.values()) entry.reject(new Error(reason ?? "Session crypto worker disposed"));
     pending.clear();
@@ -125,8 +136,13 @@ async function createWorkerBackedEngine(input: SessionCryptoBootstrapInput): Pro
   worker.onerror = (event) => cleanup(event.message || "Session crypto worker error");
   worker.onmessageerror = () => cleanup("Session crypto worker message error");
 
-  const request = <T>(kind: string, payload: Record<string, unknown>, transfer: Transferable[] = []): Promise<T> => {
-    if (disposed) return Promise.reject(new ActiveKeySessionRevokedError());
+  const request = <T>(
+    kind: string,
+    payload: Record<string, unknown>,
+    transfer: Transferable[] = [],
+    allowRevoked = false,
+  ): Promise<T> => {
+    if (revoked && !allowRevoked) return Promise.reject(new ActiveKeySessionRevokedError());
     const requestId = randomId();
     return new Promise<T>((resolve, reject) => {
       pending.set(requestId, { resolve: resolve as (value: unknown) => void, reject });
@@ -134,16 +150,24 @@ async function createWorkerBackedEngine(input: SessionCryptoBootstrapInput): Pro
     });
   };
 
-  const identity = await request<ActiveKeyCryptoIdentity>("init", {
-    sessionId: input.sessionId,
-    publicKeyHex: input.publicKeyHex,
-    privateKeyBytes: input.privateKeyBytes,
-    label: input.label,
-    capabilities: input.capabilities,
-    createdAt: input.createdAt
-  });
+  let identity: ActiveKeyCryptoIdentity;
+  try {
+    // appView 只把私钥 buffer 转移给 Dedicated Worker，不保留页面侧的
+    // structured-clone 副本；初始化失败也必须立即终止这个 Worker。
+    identity = await request<ActiveKeyCryptoIdentity>("init", {
+      sessionId: input.sessionId,
+      publicKeyHex: input.publicKeyHex,
+      privateKeyBytes: input.privateKeyBytes,
+      label: input.label,
+      capabilities: input.capabilities,
+      createdAt: input.createdAt
+    }, [input.privateKeyBytes.buffer as ArrayBuffer]);
+  } catch (error) {
+    cleanup(error instanceof Error ? error.message : "Session crypto worker initialization failed");
+    throw error;
+  }
   const guard = (): void => {
-    if (disposed) throw new ActiveKeySessionRevokedError();
+    if (revoked) throw new ActiveKeySessionRevokedError();
   };
   return {
     getIdentity: () => { guard(); return identity; },
@@ -153,7 +177,7 @@ async function createWorkerBackedEngine(input: SessionCryptoBootstrapInput): Pro
         publicKeyHex: signInput.publicKeyHex,
         digest: signInput.digest,
         format: signInput.format
-      }, [signInput.digest]);
+    }, [signInput.digest]);
       if (result.format !== signInput.format) throw new Error("signDigest format mismatch");
       return result;
     },
@@ -162,8 +186,11 @@ async function createWorkerBackedEngine(input: SessionCryptoBootstrapInput): Pro
       return request<{ publicKeyHex: string; address: string }>("deriveP2pkhAddress", deriveInput);
     },
     dispose(reason = "dispose") {
-      if (disposed) return;
-      void request("dispose", { reason }).finally(() => cleanup(reason));
+      if (revoked) return;
+      // 先撤销公开能力，再允许一次内部 dispose 请求完成 Worker 侧擦除。
+      // request 的调用会同步完成 postMessage，因此此处标记不会丢失销毁消息。
+      void request("dispose", { reason }, [], true).finally(() => cleanup(reason));
+      revoked = true;
       cleanupTimer = setTimeout(() => cleanup(reason), 50);
     }
   };

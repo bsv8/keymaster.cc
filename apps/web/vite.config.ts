@@ -77,8 +77,8 @@ function msFileE2EVirtualModule(): { name: string; resolveId(id: string): string
     load(id) {
       if (id !== MSFILE_E2E_RESOLVED_ID) return undefined;
       return enabled
-        ? 'export { installMsFileProductionE2EHooks } from "/src/msfileE2E/windowHooks.ts";'
-        : 'export function installMsFileProductionE2EHooks() { throw new Error("MSFile E2E hooks are excluded from this build"); }';
+        ? 'export { installMsFileProductionE2EHooks } from "/src/msfileE2E/windowHooks.ts"; export { installLifecycleProductionE2EHooks } from "/src/lifecycleE2E/windowHooks.ts";'
+        : 'export function installMsFileProductionE2EHooks() { throw new Error("MSFile E2E hooks are excluded from this build"); } export function installLifecycleProductionE2EHooks() { throw new Error("Lifecycle E2E hooks are excluded from this build"); }';
     }
   };
 }
@@ -123,6 +123,7 @@ export default defineConfig({
     // 旧 spike 仅由 Playwright 的 VITE_MSFILE_SPIKE=1 隔离构建启用；普通
     // 生产包把该全局固定为 false，连同查询参数分支一起由构建器删除。
     __KEYMASTER_MSFILE_SPIKE__: JSON.stringify(process.env.VITE_MSFILE_SPIKE === "1"),
+    "globalThis.__KEYMASTER_MSFILE_SPIKE__": JSON.stringify(process.env.VITE_MSFILE_SPIKE === "1"),
   },
   // 应用使用 history 路由。资源必须从站点根路径加载；相对 URL 会在
   // `/settings/system-status` 等深层路由被解析为 `/settings/_static/*`。

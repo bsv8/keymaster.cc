@@ -6,6 +6,7 @@
 // 已经同时支持 JSON 文件与 JSON 文本；继续叫 "JSON File" 会和实际能力冲突。
 
 import type { I18nPluginResources, ImporterRegistry, PluginManifest } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { jsonFileImporter } from "./jsonFileImporter.js";
 
 const jsonFileResources: I18nPluginResources = {
@@ -40,8 +41,15 @@ export const jsonFileImporterPlugin: PluginManifest = {
     canDisable: true,
     displayGroup: "import"
   },
+  units: [{
+    id: "importer-json-file.window",
+    execution: "window",
+    lifetime: "root",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "importer.registry", reason: "需要注册 JSON 实现" },
+    ]),
+  }],
   i18n: jsonFileResources,
-  dependencies: [{ capability: "importer.registry", reason: "需要注册 JSON 实现" }],
   setup(ctx) {
     ctx.get<ImporterRegistry>("importer.registry").register(jsonFileImporter);
     return () => {

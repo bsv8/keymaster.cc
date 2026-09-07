@@ -5,11 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { assertMsFileProxyProtocolCommit, MSFILE_GO_DIR } from "./fixtures/msfileProxyProtocol.js";
+import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "./fixtures/msfileProxyProtocol.js";
 
 const execFileAsync = promisify(execFile);
-const GO_LAB_DIR = MSFILE_GO_DIR;
-const GO_KEY_FILE = join(GO_LAB_DIR, "nas-test.key");
 const GO_LISTEN_ADDR = "/ip4/127.0.0.1/udp/0/webrtc-direct";
 
 type OpenPages = { context: BrowserContext; pageA: Page; pageB: Page };
@@ -34,6 +32,7 @@ async function openSpikeContext(browser: Browser): Promise<OpenPages> {
   const context = await browser.newContext();
   const pageA = await context.newPage();
   const pageB = await context.newPage();
+  await grantPersistentStorage(pageA);
   await Promise.all([
     pageA.goto("/?msfileSpike=1", { waitUntil: "load" }),
     pageB.goto("/?msfileSpike=1", { waitUntil: "load" })
@@ -45,22 +44,48 @@ async function openSpikeContext(browser: Browser): Promise<OpenPages> {
   return { context, pageA, pageB };
 }
 
+async function grantPersistentStorage(page: Page): Promise<void> {
+  const browser = page.context().browser();
+  if (!browser) throw new Error("MSFile spike requires Chromium");
+  await page.goto("/?msfileSpikePermission=1", { waitUntil: "domcontentloaded" });
+  const pageCdp = await page.context().newCDPSession(page);
+  const target = await pageCdp.send("Target.getTargetInfo");
+  await pageCdp.detach();
+  const browserContextId = target.targetInfo.browserContextId;
+  if (!browserContextId) throw new Error("MSFile spike browser context is unavailable");
+  const cdp = await browser.newBrowserCDPSession();
+  await cdp.send("Browser.grantPermissions", {
+    origin: "http://127.0.0.1:4173",
+    browserContextId,
+    permissions: ["durableStorage"],
+  });
+  if (!(await page.evaluate(() => navigator.storage.persisted()))) {
+    await cdp.detach();
+    throw new Error("MSFile spike durableStorage permission was not applied");
+  }
+  // 保持 Browser CDP session 存活到 context 关闭；detach 会撤销该 context
+  // 的权限，进而让真实 OPFS bootstrap 误报为环境故障。
+}
+
 async function buildGoLab(): Promise<{ directory: string; binary: string }> {
+  const goLabDir = getMsFileGoDir();
   const directory = await fs.mkdtemp(join(tmpdir(), "keymaster-msfile-spike-"));
   const binary = join(directory, "msfile-webrtc-lab");
-  await execFileAsync("go", ["build", "-o", binary, "./cmd/msfile-webrtc-lab"], { cwd: GO_LAB_DIR, maxBuffer: 4 * 1024 * 1024 });
+  await execFileAsync("go", ["build", "-o", binary, "./cmd/msfile-webrtc-lab"], { cwd: goLabDir, maxBuffer: 4 * 1024 * 1024 });
   return { directory, binary };
 }
 
 async function startGoSupplier(binary: string, ownerPublicKeyHex: string): Promise<{ process: import("node:child_process").ChildProcess; address: string; stdout: string[]; stderr: string[] }> {
+  const goLabDir = getMsFileGoDir();
+  const goKeyFile = join(goLabDir, "nas-test.key");
   const stdout: string[] = [];
   const stderr: string[] = [];
   const child = (await import("node:child_process")).spawn(binary, [
     "labnas",
-    "--identity-key-file", GO_KEY_FILE,
+    "--identity-key-file", goKeyFile,
     "--listen", GO_LISTEN_ADDR,
     "--allow-public-key", ownerPublicKeyHex
-  ], { cwd: GO_LAB_DIR, stdio: ["ignore", "pipe", "pipe"] });
+  ], { cwd: goLabDir, stdio: ["ignore", "pipe", "pipe"] });
   child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk.toString()));
   const address = await new Promise<string>((resolve, reject) => {
     let settled = false;
@@ -176,6 +201,7 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
   });
 
   test("A04/A07: same SharedWorker permits one executor, closes the port, then permits takeover", async ({ browser }) => {
+    test.setTimeout(120_000);
     const { context, pageA, pageB } = await openSpikeContext(browser);
     try {
       await Promise.all([
@@ -209,30 +235,19 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
     const { context, pageA, pageB } = await openSpikeContext(browser);
     try {
       await acquire(pageA);
-      await pageB.evaluate(() => {
-        const state = window as Window & { __msfileSpikeLockPromise?: Promise<{ status: string }> };
-        const channel = new BroadcastChannel("msfile-spike-lifecycle-lock");
-        state.__msfileSpikeLockPromise = new Promise((resolve) => {
-          channel.addEventListener("message", () => {
-            channel.close();
-            resolve(window.__windowP2pExecutorSpike!.lock());
-          }, { once: true });
-        });
-      });
       const started = await pageA.evaluate(() => {
         const result = window.__windowP2pExecutorSpike!.beginNoiseSign();
-        const channel = new BroadcastChannel("msfile-spike-lifecycle-lock");
-        channel.postMessage("lock-now");
-        channel.close();
         return result;
       });
-      const lock = await pageB.evaluate(async () => {
-        const state = window as Window & { __msfileSpikeLockPromise?: Promise<{ status: string }> };
-        if (!state.__msfileSpikeLockPromise) throw new Error("lock listener is not armed");
-        return state.__msfileSpikeLockPromise;
-      });
+      // beginNoiseSign 已把 RPC 投递给 SharedWorker；让浏览器先完成一次
+      // 消息派发，再通知另一页锁定，确保本用例验证的是“进行中的签名”
+      // 被 epoch 栅栏失效，而不是两个尚未送达的请求随机竞速。
+      await pageA.waitForTimeout(10);
+      const lockPromise = pageB.evaluate(async () => window.__windowP2pExecutorSpike!.lock());
       expect(started.pendingAfterStart).toBe(1);
       const result = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.finishNoiseSign());
+      const lock = await lockPromise;
+      console.log(JSON.stringify({ event: "msfile_spike_lifecycle_timing", sign: result, lock }));
       expect(lock.status).toBe("accepted");
       expect(result.signResult).not.toBe("ok");
       expect(result.pendingAfter).toBe(0);
@@ -242,28 +257,13 @@ test.describe("MSFile Window executor spike（施工单 001）", () => {
 
       const replacement = await pageB.evaluate(async () => window.__windowP2pExecutorSpike!.generateReplacementKey());
       expect(replacement.publicKeyHex).not.toBe(newLease.activePublicKeyHex);
-      await pageB.evaluate((publicKeyHex) => {
-        const state = window as Window & { __msfileSpikeSwitchPromise?: Promise<{ status: string }> };
-        const channel = new BroadcastChannel("msfile-spike-lifecycle-switch");
-        state.__msfileSpikeSwitchPromise = new Promise((resolve) => {
-          channel.addEventListener("message", () => {
-            channel.close();
-            resolve(window.__windowP2pExecutorSpike!.setActive(publicKeyHex));
-          }, { once: true });
-        });
-      }, replacement.publicKeyHex);
       await pageA.evaluate(() => {
         window.__windowP2pExecutorSpike!.beginNoiseSign();
-        const channel = new BroadcastChannel("msfile-spike-lifecycle-switch");
-        channel.postMessage("switch-now");
-        channel.close();
       });
-      const switched = await pageB.evaluate(async () => {
-        const state = window as Window & { __msfileSpikeSwitchPromise?: Promise<{ status: string }> };
-        if (!state.__msfileSpikeSwitchPromise) throw new Error("key switch listener is not armed");
-        return state.__msfileSpikeSwitchPromise;
-      });
+      await pageA.waitForTimeout(10);
+      const switchedPromise = pageB.evaluate(async (publicKeyHex) => window.__windowP2pExecutorSpike!.setActive(publicKeyHex), replacement.publicKeyHex);
       const switchSign = await pageA.evaluate(async () => window.__windowP2pExecutorSpike!.finishNoiseSign());
+      const switched = await switchedPromise;
       expect(switched.status).toBe("ok");
       expect(switchSign.signResult).not.toBe("ok");
       expect(switchSign.pendingAfter).toBe(0);

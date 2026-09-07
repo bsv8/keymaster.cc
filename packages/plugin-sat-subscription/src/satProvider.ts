@@ -200,6 +200,15 @@ function stableErrorCode(error: unknown): SatErrorCode {
   return satErrorCodeFromFailure(error);
 }
 
+/** 把取消映射成稳定传输结果：请求开始前可安全丢弃，开始后必须按未知结果恢复。 */
+function throwIfSatOperationAborted(
+  signal: AbortSignal | undefined,
+  sentBoundary: "not-sent" | "unknown",
+): void {
+  if (!signal?.aborted) return;
+  throw new SatTransportError("Sat subscription operation was aborted", { sentBoundary });
+}
+
 /**
  * Window lane 内部 transport 与 provider 可能使用不同的 Error 原型；
  * 这里按稳定 code/sentBoundary 识别，避免传输异常被误报成 protocol。
@@ -616,7 +625,8 @@ export class SatSubscriptionHandle {
     action: "subscribe" | "unsubscribe";
     supplierId: string;
     channel: string;
-  }): Promise<SatActionResult | undefined> {
+  }, signal?: AbortSignal): Promise<SatActionResult | undefined> {
+    throwIfSatOperationAborted(signal, "not-sent");
     const target = input.action === "subscribe" ? "subscribed" : "unsubscribed";
     let record = this.stateStore.listSubscriptions(input.supplierId).find((item) => item.channel === input.channel);
     const refreshStatus = this.supplierRefreshStatus.get(input.supplierId);
@@ -646,7 +656,7 @@ export class SatSubscriptionHandle {
     // unknown_result，禁止把一次不确定操作盲目变成第二次收费操作。后续
     // 调用仍可再次查询远端；只有查询成功且明确缺失时才允许重新收费。
     try {
-      await this.refreshSubscriptionsNow({ supplierId: input.supplierId });
+      await this.refreshSubscriptionsNow({ supplierId: input.supplierId }, signal);
     } catch (error) {
       const code = stableErrorCode(error);
       return {
@@ -692,10 +702,11 @@ export class SatSubscriptionHandle {
     action: "subscribe" | "unsubscribe";
     supplierId: string;
     channel: string;
-  }): Promise<SatActionResult> {
+  }, signal?: AbortSignal): Promise<SatActionResult> {
     this.assertOpen();
     this.assertChannel(input.channel, true);
-    const observedResult = await this.reconcileUnknownSubscription(input);
+    throwIfSatOperationAborted(signal, "not-sent");
+    const observedResult = await this.reconcileUnknownSubscription(input, signal);
     if (observedResult) return observedResult;
     const requestId = validateRequestId(newRequestId());
     let response: Uint8Array;
@@ -708,7 +719,7 @@ export class SatSubscriptionHandle {
       requestGeneration = this.generation;
       await this.stateStore.setDesiredSubscription({ supplierId: input.supplierId, channel: input.channel, state: input.action === "subscribe" ? "subscribing" : "unsubscribing", errorCode: null });
       const wire = input.action === "subscribe" ? newSubscribe(requestId, input.channel) : newUnsubscribe(requestId, input.channel);
-      response = await connection.requestSsp(wire);
+      response = await connection.requestSsp(wire, signal);
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
       const code = stableErrorCode(error);
@@ -789,9 +800,10 @@ export class SatSubscriptionHandle {
     try { await this.stateStore.recordFee(input); } catch (error) { this.cfg.logger?.warn?.("sat.state.fee_audit.failed", { error: error instanceof Error ? error.message : String(error) }); }
   }
 
-  async publishRaw(input: { supplierId: string; channel: string; contentJson: Uint8Array; action: "publish" | "ack" }): Promise<{ requestIdHex: string; chargedAmount: string }> {
+  async publishRaw(input: { supplierId: string; channel: string; contentJson: Uint8Array; action: "publish" | "ack" }, signal?: AbortSignal): Promise<{ requestIdHex: string; chargedAmount: string }> {
     this.assertOpen();
     this.assertChannel(input.channel, false);
+    throwIfSatOperationAborted(signal, "not-sent");
     let contentJson: Uint8Array;
     try {
       contentJson = copyValidatedJson(input.contentJson);
@@ -805,7 +817,7 @@ export class SatSubscriptionHandle {
     let requestConnection: SatSupplierConnection | undefined;
     try {
       requestConnection = this.connectionFor(input.supplierId);
-      response = await requestConnection.requestSsp(newPublish(requestId, input.channel, contentJson));
+      response = await requestConnection.requestSsp(newPublish(requestId, input.channel, contentJson), signal);
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
       const code = stableErrorCode(error);
@@ -835,8 +847,8 @@ export class SatSubscriptionHandle {
     }
   }
 
-  async publish(input: { channel: string; contentJson: Uint8Array }): Promise<{ requestIdHex: string; chargedAmount: string }> {
-    return this.publishRaw({ supplierId: this.defaultSupplierId(), channel: input.channel, contentJson: input.contentJson, action: "publish" });
+  async publish(input: { channel: string; contentJson: Uint8Array }, signal?: AbortSignal): Promise<{ requestIdHex: string; chargedAmount: string }> {
+    return this.publishRaw({ supplierId: this.defaultSupplierId(), channel: input.channel, contentJson: input.contentJson, action: "publish" }, signal);
   }
 
   private defaultSupplierId(): string {
@@ -875,7 +887,7 @@ export class SatSubscriptionHandle {
    * 每个 Supplier/频道独立落库和处理；某个 Supplier 失败不会回滚已经成功
    * 的其它 Supplier，也不会让下一次重试再次收费成功项。
    */
-  private async reconcilePhysicalSubscriptions(requireReceiver = false): Promise<void> {
+  private async reconcilePhysicalSubscriptions(requireReceiver = false, signal?: AbortSignal): Promise<void> {
     const settings = this.stateStore.getOwnerSettings();
     // Disabled/removed Supplier 只保留在历史审计或已完成清理的记录里，
     // 不能再进入本轮物理 reconcile；否则停用后会对一个已关闭连接再次
@@ -891,6 +903,7 @@ export class SatSubscriptionHandle {
     const failures: Array<{ supplierId: string; channel: string; result: SatActionResult }> = [];
 
     for (const channel of channels) {
+      throwIfSatOperationAborted(signal, "not-sent");
       const records = this.stateStore.listSubscriptions().filter((item) =>
         item.channel === channel && Boolean(this.stateStore.getSupplier(item.supplierId)?.enabled)
       );
@@ -922,6 +935,7 @@ export class SatSubscriptionHandle {
       }
 
       for (const supplierId of supplierIds) {
+        throwIfSatOperationAborted(signal, "not-sent");
         // historicalCleanupChannels 只代表 Worker 重启前的远端证据，不能
         // 把旧 App 频道重新加入当前物理 desired。只有本次 runtime 收到的
         // Mux 集合 physicalDesiredChannels 才允许发起 Subscribe。
@@ -932,7 +946,8 @@ export class SatSubscriptionHandle {
           action: shouldSubscribe ? "subscribe" : "unsubscribe",
           supplierId,
           channel
-        });
+        }, signal);
+        throwIfSatOperationAborted(signal, "unknown");
         if (!result.ok) failures.push({ supplierId, channel, result });
       }
 
@@ -992,27 +1007,29 @@ export class SatSubscriptionHandle {
     this.updateRuntimeHealth();
   }
 
-  async subscribePhysical(channel: string): Promise<void> {
+  async subscribePhysical(channel: string, signal?: AbortSignal): Promise<void> {
     this.assertChannel(channel, false);
     await this.enqueueMutation(async () => {
       this.assertOpen();
+      throwIfSatOperationAborted(signal, "not-sent");
       // 第一个新 Mux 集合对该频道拥有新的逻辑生命周期；它可以复用
       // 已知的 owner/Supplier 记录，但不能继承旧 App 的订阅意图。
       this.historicalCleanupChannels.delete(channel);
       this.physicalUnsubscribeChannels.delete(channel);
       this.physicalDesiredChannels.add(channel);
-      await this.reconcilePhysicalSubscriptions(true);
+      await this.reconcilePhysicalSubscriptions(true, signal);
     });
   }
 
-  async unsubscribePhysical(channel: string): Promise<void> {
+  async unsubscribePhysical(channel: string, signal?: AbortSignal): Promise<void> {
     this.assertChannel(channel, false);
     await this.enqueueMutation(async () => {
       this.assertOpen();
+      throwIfSatOperationAborted(signal, "not-sent");
       this.historicalCleanupChannels.delete(channel);
       this.physicalDesiredChannels.add(channel);
       this.physicalUnsubscribeChannels.add(channel);
-      await this.reconcilePhysicalSubscriptions(false);
+      await this.reconcilePhysicalSubscriptions(false, signal);
     });
   }
 
@@ -1022,6 +1039,11 @@ export class SatSubscriptionHandle {
    */
   async preparePhysicalCleanup(): Promise<void> {
     this.assertOpen();
+    // 先推进 Provider 自己的配置世代，使在途 SSP 结果即使迟到也不能
+    // 把“正在退订”的持久意图改回原来的订阅方向。之后再写清理意图，
+    // 下一个 owner 会通过远端查询继续收敛 unknown_result。
+    this.generation += 1;
+    this.supplierRefreshStatus.clear();
     // 这是锁屏安全边界的一部分，不能排在可能永不返回的 SSP mutation
     // 后面。先同步建立本地清理意图，再异步持久化；网络清理失败时下次
     // 解锁仍能依据 owner-scoped K-V 继续对账。
@@ -1048,20 +1070,21 @@ export class SatSubscriptionHandle {
    * 否则设置页的“刷新远端订阅”可能在 Mux 已读取旧 observed、但还没
    * 落库的窗口内并发执行，导致两条操作都认为远端缺少频道并重复收费。
    */
-  async refreshSubscriptions(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }> {
+  async refreshSubscriptions(input: { supplierId: string }, signal?: AbortSignal): Promise<{ channels: string[]; chargedAmount: string }> {
     this.assertOpen();
-    return this.enqueueMutation(() => this.refreshSubscriptionsNow(input));
+    return this.enqueueMutation(() => this.refreshSubscriptionsNow(input, signal));
   }
 
-  private async refreshSubscriptionsNow(input: { supplierId: string }): Promise<{ channels: string[]; chargedAmount: string }> {
+  private async refreshSubscriptionsNow(input: { supplierId: string }, signal?: AbortSignal): Promise<{ channels: string[]; chargedAmount: string }> {
     this.assertOpen();
+    throwIfSatOperationAborted(signal, "not-sent");
     const requestId = validateRequestId(newRequestId());
     let response: Uint8Array;
     const requestGeneration = this.generation;
     let requestConnection: SatSupplierConnection | undefined;
     try {
       requestConnection = this.connectionFor(input.supplierId);
-      response = await requestConnection.requestSsp(newSubscriptionsRequest(requestId));
+      response = await requestConnection.requestSsp(newSubscriptionsRequest(requestId), signal);
       this.assertCurrentSupplierGeneration(input.supplierId, requestGeneration);
     } catch (error) {
       const code = stableErrorCode(error);

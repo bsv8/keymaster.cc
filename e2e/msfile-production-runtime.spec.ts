@@ -13,11 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { chromium, expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
-import { assertMsFileProxyProtocolCommit, MSFILE_GO_DIR } from "./fixtures/msfileProxyProtocol.js";
+import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "./fixtures/msfileProxyProtocol.js";
 
 const execFileAsync = promisify(execFile);
 const KEYMASTER_ORIGIN = "http://127.0.0.1:4173";
-const GO_NAS_DIR = MSFILE_GO_DIR;
 const FILE_BYTES = 2 * 1024 * 1024;
 const BLOCK_BYTES = 256 * 1024;
 const CONNECT_SESSION_ID = "msfile-e2e-connect-session";
@@ -233,6 +232,7 @@ function fixtureBytes(fileIndex: number, filename: string): Buffer {
 }
 
 async function startNasFixture(): Promise<NasFixture> {
+  const goNasDir = getMsFileGoDir();
   const directory = await fs.mkdtemp(join(tmpdir(), "keymaster-msfile-production-"));
   const nasData = join(directory, "nas-data");
   const seedData = join(directory, "seed-data");
@@ -257,7 +257,7 @@ async function startNasFixture(): Promise<NasFixture> {
     "-subj", "/CN=127.0.0.1",
     "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
   ], { maxBuffer: 4 * 1024 * 1024 });
-  await execFileAsync("go", ["build", "-o", binary, "./cmd/msfile-nas"], { cwd: GO_NAS_DIR, maxBuffer: 8 * 1024 * 1024 });
+  await execFileAsync("go", ["build", "-o", binary, "./cmd/msfile-nas"], { cwd: goNasDir, maxBuffer: 8 * 1024 * 1024 });
   await fs.writeFile(config, [
     `identity_key_file: ${JSON.stringify(identityKey)}`,
     `nas_data: ${JSON.stringify(nasData)}`,
@@ -282,7 +282,7 @@ async function startNasFixture(): Promise<NasFixture> {
   ].join("\n"));
 
   const stderr: string[] = [];
-  const child = spawn(binary, ["--config", config], { cwd: GO_NAS_DIR, stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(binary, ["--config", config], { cwd: goNasDir, stdio: ["ignore", "pipe", "pipe"] });
   child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
   const adminOrigin = `https://127.0.0.1:${webPort}`;
   try {
@@ -368,6 +368,29 @@ async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolveClose, reject) => server.close((error) => error ? reject(error) : resolveClose()));
 }
 
+async function grantPersistentStorage(page: Page): Promise<void> {
+  const browserInstance = page.context().browser();
+  if (!browserInstance) throw new Error("MSFile production E2E requires Chromium");
+  await page.goto("/?msfileE2EPermission=1", { waitUntil: "domcontentloaded" });
+  const pageCdp = await page.context().newCDPSession(page);
+  const target = await pageCdp.send("Target.getTargetInfo");
+  await pageCdp.detach();
+  const browserContextId = target.targetInfo.browserContextId;
+  if (!browserContextId) throw new Error("MSFile production E2E browser context is unavailable");
+  const cdp = await browserInstance.newBrowserCDPSession();
+  await cdp.send("Browser.grantPermissions", {
+    origin: KEYMASTER_ORIGIN,
+    browserContextId,
+    permissions: ["durableStorage"],
+  });
+  if (!(await page.evaluate(() => navigator.storage.persisted()))) {
+    await cdp.detach();
+    throw new Error("MSFile production E2E durableStorage permission was not applied");
+  }
+  // 保持 Browser CDP session 存活到 context 关闭；detach 会撤销该 context
+  // 的权限，导致真实 OPFS bootstrap 失败。
+}
+
 async function waitForHooks(page: Page): Promise<void> {
   await page.waitForFunction(() => (window as Window & { __msfileProductionE2E?: unknown }).__msfileProductionE2E !== undefined, undefined, { timeout: 30_000 });
 }
@@ -388,7 +411,7 @@ async function bootstrapProductionPage(page: Page): Promise<void> {
   await waitForHooks(page);
   await page.evaluate(async () => {
     const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
-    await api.bootstrap();
+    await api.bootstrap(true);
   });
 }
 
@@ -433,6 +456,7 @@ test.describe("MSFile production runtime（施工单 002）", () => {
       localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: {} }));
     });
     controlPage = await context.newPage();
+    await grantPersistentStorage(controlPage);
     await controlPage.goto("/?msfileE2E=1", { waitUntil: "load" });
     await waitForHooks(controlPage);
     await controlPage.evaluate(async () => {
@@ -523,17 +547,19 @@ test.describe("MSFile production runtime（施工单 002）", () => {
     // 通过 ignoreHTTPSErrors 全局绕过 TLS。
     const untrustedBrowser = await chromium.launch({ headless: true });
     const untrustedContext = await untrustedBrowser.newContext({ baseURL: KEYMASTER_ORIGIN });
+    let untrustedPage: Page | undefined;
     try {
       await untrustedContext.addInitScript(() => localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: {} })));
-      const page = await untrustedContext.newPage();
-      await page.goto("/?msfileE2E=1", { waitUntil: "load" });
-      await waitForHooks(page);
-      await page.evaluate(async () => {
+      untrustedPage = await untrustedContext.newPage();
+      await grantPersistentStorage(untrustedPage);
+      await untrustedPage.goto("/?msfileE2E=1", { waitUntil: "load" });
+      await waitForHooks(untrustedPage);
+      await untrustedPage.evaluate(async () => {
         const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
         await api.bootstrap();
       });
-      await configure(page, fixture, [fixture.wssAddress]);
-      const rejected = await page.evaluate(async (supplierPublicKeyHex) => {
+      await configure(untrustedPage, fixture, [fixture.wssAddress]);
+      const rejected = await untrustedPage.evaluate(async (supplierPublicKeyHex) => {
         const api = (window as Window & { __msfileProductionE2E: ProductionHooks }).__msfileProductionE2E;
         return api.probe(supplierPublicKeyHex);
       }, fixture.supplierPublicKeyHex);
@@ -542,6 +568,10 @@ test.describe("MSFile production runtime（施工单 002）", () => {
       // 通用 dial failure。这里验收安全边界（未信任证书必拒绝），不伪造原因。
       expect(rejected.addresses[0]).toMatchObject({ ok: false, errorCode: "dial_failed" });
     } finally {
+      // BrowserContext.close() 不保证向页面派发 pagehide；先关闭页面，
+      // 让生产 Coordinator 收到 shutdown/disconnect，避免这个 TLS 负例的
+      // SharedWorker 端口把持久 final-I/O lease 遗留给后续用例。
+      await untrustedPage?.close().catch(() => undefined);
       await untrustedContext.close();
       await untrustedBrowser.close();
     }
@@ -600,9 +630,10 @@ test.describe("MSFile production runtime（施工单 002）", () => {
       await Promise.all(Array.from({ length: 4 }, (_, index) => api.stat(seedHashes[index % seedHashes.length]!)));
       const heapBeforeBytes = heap();
       const startedAt = performance.now();
+      const total = 10_000;
       let completed = 0;
-      while (completed < 10_000) {
-        const count = Math.min(4, 10_000 - completed);
+      while (completed < total) {
+        const count = Math.min(4, total - completed);
         const results = await Promise.all(Array.from({ length: count }, (_, index) => api.stat(seedHashes[(completed + index) % seedHashes.length]!)));
         if (results.some((result) => result.suppliers[0]?.status !== "available")) throw new Error("10k Stat returned a non-available supplier");
         completed += count;

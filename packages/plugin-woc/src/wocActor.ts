@@ -313,6 +313,17 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     return new Promise((r) => setTimeout(r, ms));
   }
 
+  async function sleepUntil(deadline: number): Promise<void> {
+    // setTimeout 接受小数毫秒时可能提前一个整数毫秒唤醒；限流窗口
+    // 是生产约束，不能把提前唤醒当成已经到达 slot。循环检查 Date.now，
+    // 并向上取整等待时间，保证记录的发送时间不会早于 deadline。
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return;
+      await sleep(Math.max(1, Math.ceil(remaining)));
+    }
+  }
+
   async function pump() {
     if (pumping || disposed) return;
     pumping = true;
@@ -376,7 +387,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
       const result = await locker.request(WEB_LOCK_NAME, async () => {
         const slot = nextSendAt();
         const wait = slot - Date.now();
-        if (wait > 0) await sleep(wait);
+        if (wait > 0) await sleepUntil(slot);
         const sendTime = Date.now();
         recordSendTime(sendTime);
         return sendTime;
@@ -385,7 +396,7 @@ export function createWocActor(options: CreateWocActorOptions = {}): WocActorHan
     }
     const slot = nextSendAt();
     const wait = slot - Date.now();
-    if (wait > 0) await sleep(wait);
+    if (wait > 0) await sleepUntil(slot);
     const sendTime = Date.now();
     recordSendTime(sendTime);
     return sendTime;

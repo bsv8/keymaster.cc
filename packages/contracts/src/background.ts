@@ -92,6 +92,11 @@ export interface BackgroundTaskDefinition {
   id: string;
   /** 所属 plugin id。 */
   pluginId: string;
+  /**
+   * 实际运行单元标识；例如 `contacts.coordinator-worker`。
+   * 产品 id 只表示用户启停对象，不能代替 Worker / Window 单元身份。
+   */
+  unitId?: string;
   /** 展示名。硬切换后为 I18nText，runtime 渲染时调用 i18n.text() 解析。 */
   label: I18nText;
   /** 描述。 */
@@ -136,6 +141,10 @@ export interface BackgroundTaskContext {
 export interface BackgroundTaskSnapshot {
   id: string;
   pluginId: string;
+  /** 任务所属的稳定运行单元标识。 */
+  unitId?: string;
+  /** 当前运行实例标识；任务重建后必须变化。 */
+  instanceId?: string;
   /**
    * 展示名（已经解析为可显示字符串）。设计缘由：snapshot 一次性在
    * 内部用当前 i18n language 解析，UI 渲染点只看到 string；
@@ -171,6 +180,8 @@ export interface BackgroundTaskSnapshot {
 /** 注册表接口。 */
 export interface BackgroundRegistry {
   register(task: BackgroundTaskDefinition): void;
+  /** 注销当前插件登记的任务；不存在时抛错，Host facade 会绑定归属。 */
+  unregister?(id: string): void;
   list(): BackgroundTaskDefinition[];
   get(id: string): BackgroundTaskDefinition | undefined;
 }

@@ -41,7 +41,9 @@ import {
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   WOC_CAPABILITY,
-  WOC_BSV21_CAPABILITY
+  WOC_BSV21_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import {
   P2PKH_CAPABILITY,
@@ -162,25 +164,42 @@ export const bsv21TokenPlugin: PluginManifest = {
     canDisable: true,
     displayGroup: "business"
   },
-  i18n: bsv21Resources,
-  storage: { scope: "key", applicationStorageId: BSV21_STORAGE_ID, schemaVersion: BSV21_SCHEMA_VERSION },
-  dependencies: [
-    { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
-    { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
-    { capability: WOC_CAPABILITY, reason: "读取交易与费率等通用 WOC 数据" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
-    { capability: "token.registry", reason: "注册 BSV-21 TokenProvider" },
-    { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
-    { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
-    { capability: "vault.service", reason: "sync task canRun 门禁" },
-    { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
-    { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
-    { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 BSV-21 受保护 outpoint" },
-    { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 BSV-21 mint / transfer 交易" },
-    { capability: "route.registry", reason: "注册 BSV-21 创建页" },
-    { capability: "business.registry", reason: "注册 BSV-21 业务入口" },
-    { capability: "transfer.registry", reason: "注册 BSV-21 transfer provider" }
+  units: [
+    {
+      id: "token-bsv21.window",
+      execution: "window",
+      lifetime: "owner-session",
+      provides: [BSV21_MINT_SERVICE_CAPABILITY, BSV21_TRANSFER_SERVICE_CAPABILITY],
+      providedContracts: defineRuntimeUnitProvidedContracts([
+        BSV21_MINT_SERVICE_CAPABILITY,
+        BSV21_TRANSFER_SERVICE_CAPABILITY,
+      ]),
+      storage: { scope: "key", applicationStorageId: BSV21_STORAGE_ID, schemaVersion: BSV21_SCHEMA_VERSION },
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的 BSV 地址" },
+        { capability: WOC_BSV21_CAPABILITY, reason: "BSV-21 WOC 查询入口" },
+        { capability: WOC_CAPABILITY, reason: "读取交易与费率等通用 WOC 数据" },
+        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化、打开 key-scoped K-V" },
+        { capability: "token.registry", reason: "注册 BSV-21 TokenProvider" },
+        { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册后台同步任务" },
+        { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发即时同步" },
+        { capability: "vault.service", reason: "sync task canRun 门禁" },
+        { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
+        { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布数据变更通知、订阅 P2PKH resource 事件" },
+        { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 BSV-21 受保护 outpoint" },
+        { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 BSV-21 mint / transfer 交易" },
+        { capability: "route.registry", reason: "注册 BSV-21 创建页" },
+        { capability: "business.registry", reason: "注册 BSV-21 业务入口" },
+        { capability: "transfer.registry", reason: "注册 BSV-21 transfer provider" },
+      ]),
+    },
+    {
+      id: "token-bsv21.coordinator-worker",
+      execution: "coordinator-worker",
+      lifetime: "owner-session",
+    },
   ],
+  i18n: bsv21Resources,
   setup(ctx) {
     const p2pkh = ctx.get<P2pkhServiceForBsv21>(P2PKH_CAPABILITY);
     const wocBsv21 = ctx.get<WocBsv21Service>(WOC_BSV21_CAPABILITY);

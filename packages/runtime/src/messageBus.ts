@@ -54,6 +54,8 @@ interface MailboxEntry {
   reject: (err: unknown) => void;
   /** settle 时调用：清理 upstream abort listener + clearTimeout + 移除 ctl abort listener。 */
   cleanup: () => void;
+  /** 进入任一终态后只调用一次；用于释放调用方的临时生命周期监听。 */
+  onSettled?: () => void;
 }
 
 interface ActorHandler {
@@ -243,6 +245,12 @@ export function createMessageBus(): MessageBus {
     }
     if (wasRunning) inFlight -= 1;
     emitSnapshot();
+    try {
+      entry.onSettled?.();
+    } catch (err) {
+      // 终态清理属于观察/生命周期回调，不能改变已经提交的消息结果。
+      lastError = errorMessage(err);
+    }
     if (entry.mode === "request") {
       if (state === "completed") entry.resolve(value);
       else entry.reject(value);
@@ -262,13 +270,14 @@ export function createMessageBus(): MessageBus {
    *    两者都走 settleEntry("canceled")。handler 后续 resolve/reject 因
    *    settled=true 全部 no-op。
    */
-  function enqueueMessage(message: Message, mode: "command" | "request", signal: AbortSignal | undefined): string | Promise<unknown> {
+  function enqueueMessage(message: Message, mode: "command" | "request", signal: AbortSignal | undefined, onSettled?: () => void): string | Promise<unknown> {
     total += 1;
     const target = message.target;
     if (!target) {
       failed += 1;
       lastError = `MessageBus.${mode === "request" ? "request" : "dispatch"} requires a target`;
       emitSnapshot();
+      try { onSettled?.(); } catch { /* 生命周期清理不能阻断错误结果 */ }
       return mode === "request" ? Promise.reject(new Error(lastError)) : message.id;
     }
     const handler = routedHandlers.get(message.type);
@@ -276,12 +285,14 @@ export function createMessageBus(): MessageBus {
       failed += 1;
       lastError = `No handler registered for type "${message.type}" at target "${target}"`;
       emitSnapshot();
+      try { onSettled?.(); } catch { /* 生命周期清理不能阻断错误结果 */ }
       return mode === "request" ? Promise.reject(new Error(lastError)) : message.id;
     }
     if (signal?.aborted) {
       canceled += 1;
       lastError = errorMessage(signal.reason ?? new Error("aborted"));
       emitSnapshot();
+      try { onSettled?.(); } catch { /* 生命周期清理不能阻断错误结果 */ }
       return mode === "request" ? Promise.reject(signal.reason ?? new Error("aborted")) : message.id;
     }
 
@@ -312,6 +323,7 @@ export function createMessageBus(): MessageBus {
         settled: false,
         resolve: (v) => resolve(v),
         reject: (e) => reject(e),
+        onSettled,
         cleanup: () => {
           if (timeoutHandle) clearTimeout(timeoutHandle);
           if (signal) signal.removeEventListener("abort", onUpstreamAbort);
@@ -492,7 +504,7 @@ export function createMessageBus(): MessageBus {
         causationId: options.causationId,
         messageId: options.messageId
       });
-      const result = enqueueMessage(message, "command", options.signal);
+      const result = enqueueMessage(message, "command", options.signal, options.onSettled);
       // enqueueMessage 在 command 模式下不会 reject；但类型系统要求同步返回 string。
       if (typeof result === "string") return result;
       // 防御：理论上 command 模式只会返回 string。
@@ -507,7 +519,7 @@ export function createMessageBus(): MessageBus {
         causationId: options.causationId,
         messageId: options.messageId
       });
-      const result = enqueueMessage(message, "request", options.signal);
+      const result = enqueueMessage(message, "request", options.signal, options.onSettled);
       if (typeof result === "string") {
         return Promise.reject(new Error("MessageBus.request returned a string id unexpectedly"));
       }

@@ -3,6 +3,7 @@
 // 设计缘由：importer 插件不写 vault、不注册菜单/页面。
 
 import type { I18nPluginResources, ImporterRegistry, PluginManifest } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { hexImporter } from "./hexImporter.js";
 
 const hexResources: I18nPluginResources = {
@@ -33,8 +34,15 @@ export const hexImporterPlugin: PluginManifest = {
     canDisable: true,
     displayGroup: "import"
   },
+  units: [{
+    id: "importer-hex.window",
+    execution: "window",
+    lifetime: "root",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "importer.registry", reason: "需要注册 HEX 实现" },
+    ]),
+  }],
   i18n: hexResources,
-  dependencies: [{ capability: "importer.registry", reason: "需要注册 HEX 实现" }],
   setup(ctx) {
     ctx.get<ImporterRegistry>("importer.registry").register(hexImporter);
     return () => {

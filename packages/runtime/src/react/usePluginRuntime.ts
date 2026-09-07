@@ -16,6 +16,8 @@ export interface UsePluginRuntime {
   reverseDeps(id: string): PluginReverseDep[];
   enable(id: string): Promise<void>;
   disable(id: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+  /** 提交产品级绝对启停意图；accepted 只表示意图已持久化。 */
+  submitIntent(id: string, desiredEnabled: boolean): Promise<import("@keymaster/contracts").PluginIntentSubmissionResult>;
   unregister(id: string): Promise<void>;
   version(): number;
   manifests(): string[];
@@ -49,6 +51,9 @@ export function usePluginRuntime(): UsePluginRuntime {
       },
       disable(id) {
         return host.disable(id);
+      },
+      submitIntent(id, desiredEnabled) {
+        return host.submitIntent(id, desiredEnabled);
       },
       unregister(id) {
         return host.unregister(id);

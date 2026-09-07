@@ -35,6 +35,15 @@ const OWNER_DELETE_REQUIRED_EMPTY_PASSES = 2;
 const OWNER_DELETE_DRAIN_TIMEOUT_MS = 5_000;
 const OWNER_DELETE_DRAIN_POLL_MS = 10;
 
+// 同一个 Coordinator 内的 owner 请求共享一条生命周期记录。
+//
+// activeOperations/deletionOperations 都是跨 Worker 的 CAS 计数。跨 Worker
+// 竞争仍由下面各自的重试循环处理；但同一 Worker 如果让多个请求同时对同一
+// 条记录做读改写，会在启动高峰中产生无意义的本地 CAS 惊群，甚至让释放方
+// 在有限重试后误报“lease changed concurrently”。按 owner 串行化的只是这
+// 条生命周期记录的短 CAS，不会把真实 Provider I/O 串行化。
+const ownerLifecycleMutationTails = new Map<string, Promise<void>>();
+
 interface BucketSchemaRecord {
   /** 桶级 schema 记录格式版本，不是插件 namespace 的 schemaVersion。 */
   format: typeof BUCKET_SCHEMA_FORMAT;
@@ -165,6 +174,18 @@ function ownerLifecycleRecord(ownerPublicKeyHex: string, generation: number, sta
   };
 }
 
+function withOwnerLifecycleMutation<T>(ownerPublicKeyHex: string, operation: () => Promise<T>): Promise<T> {
+  const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
+  const previous = ownerLifecycleMutationTails.get(owner) ?? Promise.resolve();
+  const run = previous.then(operation, operation);
+  const tail = run.then(() => undefined, () => undefined);
+  ownerLifecycleMutationTails.set(owner, tail);
+  void tail.then(() => {
+    if (ownerLifecycleMutationTails.get(owner) === tail) ownerLifecycleMutationTails.delete(owner);
+  });
+  return run;
+}
+
 function requireOwnerLifecycleEtag(object: OwnerLifecycleObject): string {
   if (!object.etag) throw new StorageRuntimeError("storage_provider_error", "Storage owner lifecycle CAS is unavailable");
   return object.etag;
@@ -256,6 +277,14 @@ async function acquireOwnerStorageOperation(
   expectedGeneration?: number
 ): Promise<OwnerStorageOperationRelease> {
   const owner = validateOwnerPublicKeyHex(ownerPublicKeyHex);
+  return withOwnerLifecycleMutation(owner, () => acquireOwnerStorageOperationUnsafe(provider, owner, expectedGeneration));
+}
+
+async function acquireOwnerStorageOperationUnsafe(
+  provider: StorageBucketProvider,
+  owner: string,
+  expectedGeneration?: number
+): Promise<OwnerStorageOperationRelease> {
   for (let attempt = 0; attempt < 16; attempt += 1) {
     const current = await readOwnerLifecycle(provider, owner);
     if (!current) throw new StorageRuntimeError("storage_unavailable", "Owner storage lifecycle is unavailable");
@@ -277,25 +306,27 @@ async function acquireOwnerStorageOperation(
       return async () => {
         if (released) return;
         released = true;
-        for (let releaseAttempt = 0; releaseAttempt < 16; releaseAttempt += 1) {
-          const latest = await readOwnerLifecycle(provider, owner);
-          // 只有同一世代的 active/deleting 记录拥有这笔计数。正常流程
-          // 不会在计数非零时进入 deleted；这些分支只保护崩溃恢复/旧句柄。
-          if (!latest || latest.record.generation !== next.generation || latest.record.status === "deleted" || latest.record.activeOperations === 0) return;
-          const releasedRecord: OwnerLifecycleRecord = {
-            ...latest.record,
-            activeOperations: latest.record.activeOperations - 1,
-            updatedAt: Date.now()
-          };
-          try {
-            await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(releasedRecord), { ifMatch: requireOwnerLifecycleEtag(latest) });
-            return;
-          } catch (error) {
-            if (isStorageConflict(error)) continue;
-            throw error;
+        await withOwnerLifecycleMutation(owner, async () => {
+          for (let releaseAttempt = 0; releaseAttempt < 16; releaseAttempt += 1) {
+            const latest = await readOwnerLifecycle(provider, owner);
+            // 只有同一世代的 active/deleting 记录拥有这笔计数。正常流程
+            // 不会在计数非零时进入 deleted；这些分支只保护崩溃恢复/旧句柄。
+            if (!latest || latest.record.generation !== next.generation || latest.record.status === "deleted" || latest.record.activeOperations === 0) return;
+            const releasedRecord: OwnerLifecycleRecord = {
+              ...latest.record,
+              activeOperations: latest.record.activeOperations - 1,
+              updatedAt: Date.now()
+            };
+            try {
+              await provider.put(ownerLifecyclePath(owner), encodeOwnerLifecycle(releasedRecord), { ifMatch: requireOwnerLifecycleEtag(latest) });
+              return;
+            } catch (error) {
+              if (isStorageConflict(error)) continue;
+              throw error;
+            }
           }
-        }
-        throw new StorageRuntimeError("storage_conflict", "Storage owner operation lease changed concurrently");
+          throw new StorageRuntimeError("storage_conflict", "Storage owner operation lease changed concurrently");
+        });
       };
     } catch (error) {
       if (isStorageConflict(error)) continue;

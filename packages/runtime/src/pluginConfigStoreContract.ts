@@ -38,4 +38,8 @@ export interface PluginConfigStore {
   /** 只读诊断：当前持久化 schema 版本。 */
   schemaVersion(): number;
   diagnostics(): readonly PluginConfigDiagnostic[];
+  /** 等待已经入队的配置写入；页面销毁前由 Host 尽力调用。 */
+  flush(options?: { timeoutMs?: number }): Promise<void>;
+  /** 关闭句柄，阻止页面销毁后的迟到写入。 */
+  close(): void;
 }

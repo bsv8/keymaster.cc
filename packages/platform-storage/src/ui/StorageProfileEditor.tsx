@@ -44,8 +44,8 @@ export function StorageProfileEditor() {
     host.resourceStore,
     "storage.status",
     [],
-    (snapshot) => snapshot.data ?? { status: service.status(), summary: null, capabilities: service.getConditionalCapabilities() },
-    (a, b) => a.status === b.status && a.healthStatus === b.healthStatus && JSON.stringify(a.summary) === JSON.stringify(b.summary) && JSON.stringify(a.capabilities) === JSON.stringify(b.capabilities)
+    (snapshot) => snapshot.data ?? { status: service.status(), authorityRecovery: (service as typeof service & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: null, capabilities: service.getConditionalCapabilities() },
+    (a, b) => a.status === b.status && a.healthStatus === b.healthStatus && JSON.stringify(a.authorityRecovery) === JSON.stringify(b.authorityRecovery) && JSON.stringify(a.summary) === JSON.stringify(b.summary) && JSON.stringify(a.capabilities) === JSON.stringify(b.capabilities)
   );
   const [providerId, setProviderId] = useState<StorageProviderId>("aws-s3");
   const [connection, setConnection] = useState<StorageProviderConfigDraft["connection"]>(defaultConnection("aws-s3"));

@@ -8,7 +8,8 @@ describe("satSubscriptionPlugin manifest", () => {
       defaultEnabled: true,
       canDisable: false,
     });
-    expect(satSubscriptionPlugin.dependencies).toEqual(expect.arrayContaining([
+    const unit = satSubscriptionPlugin.units?.find((candidate) => candidate.execution === "window");
+    expect(unit?.dependencies).toEqual(expect.arrayContaining([
       expect.objectContaining({ capability: WINDOW_P2P_EXECUTOR_CAPABILITY }),
     ]));
   });

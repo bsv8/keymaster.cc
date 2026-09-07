@@ -1,5 +1,5 @@
 import type { BreadcrumbProvider, BreadcrumbRegistry, I18nPluginResources, PluginManifest, SystemSettingsRegistry, P2pkhCoordinatorControl } from "@keymaster/contracts";
-import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY } from "@keymaster/contracts";
+import { JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY, defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { JungleBusSettingsPage } from "./pages/JungleBusSettingsPage.js";
 
 export const jungleBusResources: I18nPluginResources = {
@@ -12,12 +12,23 @@ export const jungleBusResources: I18nPluginResources = {
 
 export const jungleBusPlugin: PluginManifest = {
   id: "junglebus", name: "JungleBus", description: "Confirmed transaction sync provider; no broadcast or subscription capability.",
-  meta: { kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, providesCapabilities: [], displayGroup: "platform" },
+  meta: { kind: "platform", startup: "optional", bootstrapStage: "owner-apps-ready", defaultEnabled: true, canDisable: true, displayGroup: "platform" },
+  units: [{
+    id: "junglebus.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([JUNGLEBUS_COORDINATOR_CONTROL_CAPABILITY]),
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "system-settings.registry", reason: "注册 JungleBus provider 设置页" },
+      { capability: "breadcrumb.registry", reason: "注册 JungleBus 设置面包屑" },
+    ]),
+  }, {
+    id: "junglebus.coordinator-worker",
+    execution: "coordinator-worker",
+    lifetime: "owner-session",
+  }],
   i18n: jungleBusResources,
-  dependencies: [
-    { capability: "system-settings.registry", reason: "注册 JungleBus provider 设置页" },
-    { capability: "breadcrumb.registry", reason: "注册 JungleBus 设置面包屑" }
-  ],
   setup(ctx) {
     const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
     if (!coordinator) throw new Error("JungleBus Coordinator control is unavailable");

@@ -19,6 +19,8 @@ import {
 } from "@keymaster/contracts";
 import { openProtocolStorageRepository, verifyAppIdentityProof } from "@keymaster/plugin-protocol";
 import type { PluginHost } from "@keymaster/runtime";
+import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
+import { requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 import {
   configureMsFileMediaServiceWorker,
   ensureMsFileMediaServiceWorker,
@@ -81,7 +83,33 @@ async function summarizeRead(result: MsFileReadResult): Promise<{
   };
 }
 
-async function ensureUnlocked(coordinator: VaultCoordinatorControl): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
+async function ensureStorageReady(client: ReturnType<typeof getCoordinatorClient>): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const status = await client.storageControl({ type: "status" });
+    if (status.status === "ok" && status.value === "ready") return;
+    if (status.status !== "ok") {
+      throw new Error(`MSFile E2E Storage status failed: ${"message" in status ? status.message : status.status}`);
+    }
+    if (status.status === "ok" && (status.value === "unselected" || status.value === "authentication")) {
+      await requestOpfsPersistence();
+      const selected = await client.storageControl({ type: "select-opfs" });
+      if (selected.status !== "ok") throw new Error(`MSFile E2E OPFS selection failed: ${selected.status}`);
+      // SharedWorker 可能在页面导航时重启；把选择写入本机 bootstrap，
+      // 让下一次 hello 仍然使用同一真实 OPFS 后端。
+      writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
+    } else {
+      await client.storageControl({ type: "retry" });
+    }
+    await delay(25);
+  }
+  throw new Error("MSFile E2E Storage did not become ready");
+}
+
+async function ensureUnlocked(
+  coordinator: VaultCoordinatorControl,
+  client: ReturnType<typeof getCoordinatorClient>,
+): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
+  await ensureStorageReady(client);
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const snapshot = coordinator.getBootstrapSnapshot();
     if (snapshot.vaultStatus === "unlocked" && snapshot.activePublicKeyHex) {
@@ -104,15 +132,34 @@ async function ensureUnlocked(coordinator: VaultCoordinatorControl): Promise<{ o
 }
 
 async function waitUntilReady(service: MsFileService): Promise<void> {
+  let configurationRead = false;
   for (let attempt = 0; attempt < 300; attempt += 1) {
     if (service.status() === "ready") return;
+    // 新页面可能先拿到 Worker 的 unconfigured baseline；MSFile runtime
+    // 是按需启动的，配置读取本身会触发真实 Coordinator 恢复并刷新代理。
+    if (!configurationRead || service.status() === "unconfigured") {
+      configurationRead = true;
+      try {
+        const snapshot = await service.getSettingsSnapshot();
+        if (snapshot.globalSettings === null && snapshot.suppliers.length === 0) {
+          throw new Error("MSFile service is not configured");
+        }
+      } catch (error) {
+        if (service.status() === "unavailable") {
+          await delay(25);
+          continue;
+        }
+        throw error;
+      }
+    }
     await delay(25);
   }
   throw new Error(`MSFile service did not become ready; status=${service.status()}`);
 }
 
 export interface MsFileProductionE2EHooks {
-  bootstrap(): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }>;
+  /** `waitForReady` 仅用于需要立即发起数据面的浏览器验收页。 */
+  bootstrap(waitForReady?: boolean): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }>;
   configure(supplier: MsFileSupplierConfig): Promise<void>;
   status(): string;
   probe(supplierPublicKeyHex: string): ReturnType<MsFileService["probeSupplier"]>;
@@ -139,27 +186,61 @@ declare global {
 }
 
 export function installMsFileProductionE2EHooks(host: PluginHost): void {
-  const coordinator = host.capabilities.get<VaultCoordinatorControl>(VAULT_COORDINATOR_CONTROL_CAPABILITY);
-  const service = host.capabilities.get<MsFileService>(MSFILE_SERVICE_CAPABILITY);
-  if (!coordinator || !service) throw new Error("MSFile E2E requires enabled Coordinator and MSFile capabilities");
+  const client = getCoordinatorClient();
+  // 首个页面返回 host 时，Vault/MSFile 可能仍在 storage-onboarding 或
+  // owner-apps-ready 异步门禁中。安装测试钩子不能把这个正常竞态升级成
+  // fatal；先保留 Coordinator 窄面，真正调用时再取得已装配的 service。
+  const coordinator = host.capabilities.has(VAULT_COORDINATOR_CONTROL_CAPABILITY)
+    ? host.capabilities.get<VaultCoordinatorControl>(VAULT_COORDINATOR_CONTROL_CAPABILITY)
+    : client as unknown as VaultCoordinatorControl;
+  let service: MsFileService | undefined;
   let protocolRepository: ProtocolStorageRepository | undefined;
   let readBlockDelayMs = 0;
-  const readBlock = service.readBlock.bind(service);
-  service.readBlock = (input) => delaySupplierResult(readBlock(input), input.signal, readBlockDelayMs);
+  let readBlockPatched = false;
+  const getService = (): MsFileService => {
+    if (!service) {
+      if (!host.capabilities.has(MSFILE_SERVICE_CAPABILITY)) {
+        throw new Error("MSFile E2E service is not ready; bootstrap must finish owner-apps-ready");
+      }
+      service = host.capabilities.get<MsFileService>(MSFILE_SERVICE_CAPABILITY);
+    }
+    if (!readBlockPatched) {
+      const readBlock = service.readBlock.bind(service);
+      service.readBlock = (input) => delaySupplierResult(readBlock(input), input.signal, readBlockDelayMs);
+      readBlockPatched = true;
+    }
+    return service;
+  };
+
+  async function waitForService(): Promise<MsFileService> {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      if (host.capabilities.has(MSFILE_SERVICE_CAPABILITY)) return getService();
+      await delay(25);
+    }
+    throw new Error("MSFile E2E service did not become available after Vault unlock");
+  }
 
   const hooks: MsFileProductionE2EHooks = {
-    bootstrap: () => ensureUnlocked(coordinator),
-    async configure(supplier) {
-      await ensureUnlocked(coordinator);
-      await service.updateGlobalPriceSettings({ seedMaxPriceSatoshis: "0", blockMaxPriceSatoshis: "0" });
-      await service.upsertSupplier(supplier);
-      await waitUntilReady(service);
+    async bootstrap(waitForReady = false) {
+      const owner = await ensureUnlocked(coordinator, client);
+      const msfile = await waitForService();
+      // 首次启动允许保持 unconfigured；已有配置的业务页可显式要求
+      // Window executor 就绪，避免页面代理先以 unavailable 首帧进入操作。
+      if (waitForReady) await waitUntilReady(msfile);
+      return owner;
     },
-    status: () => service.status(),
-    probe: (supplierPublicKeyHex) => service.probeSupplier(supplierPublicKeyHex),
-    stat: (seedHashHex) => service.stat({ seedHashHex }),
-    readSeed: async (supplierPublicKeyHex, seedHashHex) => summarizeRead(await service.readSeed({ supplierPublicKeyHex, seedHashHex })),
-    readBlock: async (supplierPublicKeyHex, blockHashHex) => summarizeRead(await service.readBlock({ supplierPublicKeyHex, blockHashHex })),
+    async configure(supplier) {
+      await ensureUnlocked(coordinator, client);
+      const msfile = await waitForService();
+      await msfile.updateGlobalPriceSettings({ seedMaxPriceSatoshis: "0", blockMaxPriceSatoshis: "0" });
+      await msfile.upsertSupplier(supplier);
+      await waitUntilReady(msfile);
+    },
+    status: () => getService().status(),
+    probe: (supplierPublicKeyHex) => getService().probeSupplier(supplierPublicKeyHex),
+    stat: (seedHashHex) => getService().stat({ seedHashHex }),
+    readSeed: async (supplierPublicKeyHex, seedHashHex) => summarizeRead(await getService().readSeed({ supplierPublicKeyHex, seedHashHex })),
+    readBlock: async (supplierPublicKeyHex, blockHashHex) => summarizeRead(await getService().readBlock({ supplierPublicKeyHex, blockHashHex })),
     setReadDelay(milliseconds) {
       if (!Number.isSafeInteger(milliseconds) || milliseconds < 0 || milliseconds > 30_000) {
         throw new Error("MSFile E2E read delay must be an integer in 0..30000");
@@ -187,10 +268,10 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
         controllerScriptUrl: navigator.serviceWorker.controller?.scriptURL ?? "",
       };
     },
-    readSeeds: async (supplierPublicKeyHex, seedHashHexes) => Promise.all(seedHashHexes.map(async (seedHashHex) => summarizeRead(await service.readSeed({ supplierPublicKeyHex, seedHashHex })))),
-    readBlocks: async (supplierPublicKeyHex, blockHashHexes) => Promise.all(blockHashHexes.map(async (blockHashHex) => summarizeRead(await service.readBlock({ supplierPublicKeyHex, blockHashHex })))),
+    readSeeds: async (supplierPublicKeyHex, seedHashHexes) => Promise.all(seedHashHexes.map(async (seedHashHex) => summarizeRead(await getService().readSeed({ supplierPublicKeyHex, seedHashHex })))),
+    readBlocks: async (supplierPublicKeyHex, blockHashHexes) => Promise.all(blockHashHexes.map(async (blockHashHex) => summarizeRead(await getService().readBlock({ supplierPublicKeyHex, blockHashHex })))),
     async seedConnectSession(input) {
-      const { ownerPublicKeyHex } = await ensureUnlocked(coordinator);
+      const { ownerPublicKeyHex } = await ensureUnlocked(coordinator, client);
       const appIdentity = verifyAppIdentityProof(input.proof);
       protocolRepository ??= await openProtocolStorageRepository();
       const now = Date.now();
@@ -214,9 +295,9 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
         },
       };
     },
-    appAuthorizations: () => service.listAppAuthorizations(),
+    appAuthorizations: () => getService().listAppAuthorizations(),
     async switchToGeneratedKey() {
-      const previousPublicKeyHex = (await ensureUnlocked(coordinator)).ownerPublicKeyHex;
+      const previousPublicKeyHex = (await ensureUnlocked(coordinator, client)).ownerPublicKeyHex;
       const generated = await coordinator.vaultOperation({
         type: "generateKey",
         password: E2E_VAULT_PASSWORD,
@@ -226,7 +307,7 @@ export function installMsFileProductionE2EHooks(host: PluginHost): void {
       if (generated.status !== "ok") throw new Error(`MSFile E2E key switch failed: ${generated.status}`);
       const value = generated.value as { publicKeyHex?: unknown };
       if (typeof value.publicKeyHex !== "string") throw new Error("MSFile E2E key switch returned no public key");
-      const current = await ensureUnlocked(coordinator);
+      const current = await ensureUnlocked(coordinator, client);
       if (current.ownerPublicKeyHex !== value.publicKeyHex) throw new Error("MSFile E2E generated key did not become active");
       return { previousPublicKeyHex, activePublicKeyHex: current.ownerPublicKeyHex };
     },

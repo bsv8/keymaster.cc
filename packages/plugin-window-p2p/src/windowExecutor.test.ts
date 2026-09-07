@@ -18,6 +18,7 @@ const OWNER_B = "03" + "22".repeat(32);
 function makeFixture(input: { attach?: (context: WindowP2pExecutorLaneContext) => Promise<void> } = {}) {
   const host = { stop: vi.fn(async () => undefined) };
   const snapshot: CoordinatorBootstrapSnapshot = {
+    authorityInstanceId: "authority:test",
     vaultStatus: "unlocked" as const,
     activePublicKeyHex: OWNER_A,
     sessionEpoch: "epoch-a",
@@ -69,6 +70,25 @@ describe("WindowP2pExecutor lifecycle", () => {
     await executor.dispose();
     expect(executor.isDisposed).toBe(true);
     expect(fixture.host.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases the Worker lease before slow lane or Host cleanup", async () => {
+    const order: string[] = [];
+    const fixture = makeFixture();
+    fixture.release.mockImplementation(async () => {
+      order.push("release");
+      return { status: "ok" as const };
+    });
+    fixture.laneRegistry.detach = vi.fn(async () => { order.push("detach"); });
+    fixture.host.stop.mockImplementation(async () => { order.push("host-stop"); });
+    const executor = new WindowP2pExecutor({ coordinator: fixture.coordinator, laneRegistry: fixture.laneRegistry });
+
+    await expect(executor.start()).resolves.toBe(true);
+    await executor.stop();
+
+    expect(order.indexOf("release")).toBeGreaterThanOrEqual(0);
+    expect(order.indexOf("release")).toBeLessThan(order.indexOf("detach"));
+    expect(order.indexOf("release")).toBeLessThan(order.indexOf("host-stop"));
   });
 
   it("stops the old Host before taking over a new owner epoch", async () => {

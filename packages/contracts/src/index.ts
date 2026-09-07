@@ -51,3 +51,5 @@ export * from "./channel.js";
 export * from "./message.js";
 export * from "./msfile.js";
 export * from "./applicationBootstrap.js";
+export * from "./lifecycle.js";
+export * from "./pluginProducts.js";

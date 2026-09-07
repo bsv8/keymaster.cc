@@ -17,6 +17,7 @@ import type {
   StorageRuntimeController,
   StorageRuntimeControllerStatus,
   StorageRuntimeStatus,
+  CoordinatorAuthorityRecovery,
   StorageUploadAbortResult,
   StorageUploadBeginResult,
   StorageUploadPartResult,
@@ -24,8 +25,9 @@ import type {
 import { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
 import { encryptStorageProfile, writeStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
 import { normalizeProviderConfig } from "../bucket-providers/s3/s3ClientFactory.js";
+import { requestOpfsPersistence } from "../bucket-providers/opfs/opfsPersistence.js";
 
-type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
+type StateEvent = { topic: "storage.state"; sessionEpoch: string; status: StorageRuntimeControllerStatus; healthStatus?: StorageRuntimeStatus; authorityRecovery?: CoordinatorAuthorityRecovery; summary: StorageProviderSummary | null; capabilities: BucketConditionalCapabilitiesView | null };
 
 function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
   if (result.status === "ok") return Promise.resolve(result.value as T);
@@ -62,6 +64,8 @@ export class StorageRpcProxy implements StorageRuntimeController {
 
   status(): StorageRuntimeControllerStatus { return this.current.status; }
   healthStatus(): StorageRuntimeStatus { return this.current.healthStatus ?? "degraded"; }
+  /** 返回旧 Worker 租约阻塞信息；页面只能据此等待并重试，不能强制接管。 */
+  authorityRecovery(): CoordinatorAuthorityRecovery | undefined { return this.current.authorityRecovery; }
   /** 由 Storage Onboarding 或网络恢复事件触发一次全局探测。 */
   retry(): Promise<unknown> { return this.control({ type: "retry" }); }
   subscribe(listener: () => void): () => void { this.listeners.add(listener); return () => this.listeners.delete(listener); }
@@ -93,11 +97,12 @@ export class StorageRpcProxy implements StorageRuntimeController {
   getProviderSummary(): Promise<StorageProviderSummary | null> { return Promise.resolve(this.current.summary); }
   getProviderConnection(): Promise<StorageProviderConnectionView | null> { return this.control({ type: "connection" }); }
   unlockStorageProfile(password: string): Promise<StorageProbeResult> { return this.control({ type: "unlock-profile", password }); }
-  selectOpfs(): Promise<StorageProbeResult> {
-    return this.control<StorageProbeResult>({ type: "select-opfs" }).then((result) => {
-      if (result.ok) writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
-      return result;
-    });
+  async selectOpfs(): Promise<StorageProbeResult> {
+    // 只有 Window 能申请授权；StorageManager 访问封装在 OPFS Provider。
+    await requestOpfsPersistence();
+    const result = await this.control<StorageProbeResult>({ type: "select-opfs" });
+    if (result.ok) writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
+    return result;
   }
   importStorageProfile(envelope: import("@keymaster/contracts").StorageProfileEnvelopeV1, password: string): Promise<StorageProbeResult> {
     return this.control<StorageProbeResult>({ type: "import-profile", envelope, password }).then((result) => {

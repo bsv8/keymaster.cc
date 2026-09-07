@@ -58,6 +58,12 @@ import type {
 import type { CoordinatorSatOperation, CoordinatorSatStateEvent } from "./satSubscription.js";
 import type { SatErrorCode } from "./satSubscription.js";
 import type { WindowP2pExecutorError } from "./windowP2pExecutor.js";
+import type {
+  PluginIntentCommand,
+  PluginIntentSnapshot,
+  PluginIntentSubmissionResult,
+  PluginLifetime,
+} from "./lifecycle.js";
 
 // ============================================================
 // 1. Session Epoch
@@ -73,6 +79,53 @@ export type CoordinatorVaultStatus =
   | "locked"
   | "unlocked"
   | "fatal";
+
+/**
+ * Coordinator 发现旧 Worker 仍持有最终 I/O 租约时的可恢复状态。
+ *
+ * 这里明确表示“不能安全接管”，不是允许新 Worker 强制抢占；旧 Worker
+ * 释放租约后，用户可以通过重试完成冷切换。activeIoLeaseCount 只用于
+ * 脱敏诊断，不向页面暴露 leaseId 或其它持久化细节。authorityBuildId
+ * 及读写计数用于人工恢复对账，不能被调用方用来申请接管。
+ */
+export interface CoordinatorAuthorityRecovery {
+  status: "recovery-required";
+  reason: "active-final-io-leases";
+  /** 仍持有租约的旧 Worker 构建标识；不包含业务载荷。 */
+  authorityBuildId: string;
+  activeIoLeaseCount: number;
+  /** 活动最终 I/O 的脱敏读写计数，二者之和必须等于 activeIoLeaseCount。 */
+  activeIoOperations: { read: number; write: number };
+  handoverGeneration: number;
+}
+
+/** Coordinator Worker 当前已激活的运行单元快照。 */
+export interface CoordinatorWorkerUnitSnapshot {
+  /** 用户可启停的产品标识。 */
+  productId: string;
+  /** 稳定运行单元标识，不是一次装配生成的实例标识。 */
+  unitId: string;
+  /** 提供者所在执行环境。 */
+  execution: "coordinator-worker";
+  /** 该单元绑定的作用域寿命。 */
+  lifetime: PluginLifetime;
+  /** 本次 Worker 装配生成的单元实例标识。 */
+  instanceId: string;
+  /** 单元是否仍在初始化、已经就绪或启动失败。 */
+  state: "starting" | "ready" | "failed";
+  /** Worker 单元快照的单调修订号；页面用它丢弃乱序或重复快照。 */
+  snapshotRevision: number;
+  /** 该单元拥有的后台服务稳定标识。 */
+  serviceIds: string[];
+  /** 该单元拥有的后台任务稳定标识。 */
+  taskIds: string[];
+  /** owner-session 单元的当前 owner；root/storage 单元不填写。 */
+  ownerPublicKeyHex?: string;
+  /** owner-session 单元绑定的当前会话世代。 */
+  sessionEpoch?: SessionEpoch;
+  /** 启动失败的脱敏诊断文本。 */
+  error?: string;
+}
 
 // ============================================================
 // 2. Client -> Coordinator RPC
@@ -218,8 +271,12 @@ export type CoordinatorClientRequest =
   | CoordinatorClientRequestWithWindowP2pExecutor
   | { kind: "sat.operation"; clientId: string; requestId: string; operation: CoordinatorSatOperation; expectedSessionEpoch: SessionEpoch }
   | { kind: "channel.operation"; clientId: string; requestId: string; operation: CoordinatorChannelOperation; expectedSessionEpoch: SessionEpoch }
+  /** 取消当前端口发起的 Channel 请求；服务端按真实端口身份定位目标。 */
+  | { kind: "channel.cancel"; clientId: string; requestId: string; targetRequestId: string }
   | { kind: "contacts.presence.snapshot"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
-  | ({ kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: import("./storage/profile.js").StorageBootstrapState }
+  | { kind: "plugin.intent.snapshot"; clientId: string; requestId: string }
+  | { kind: "plugin.intent.submit"; clientId: string; requestId: string; command: PluginIntentCommand }
+  | ({ kind: "hello"; clientId: string; requestId: string; storageBootstrapState?: import("./storage/profile.js").StorageBootstrapState; /** Coordinator 服务桥的专用双工端口。 */ servicePort?: MessagePort }
     | { kind: "subscribe"; clientId: string; requestId: string; topics: CoordinatorTopic[] }
     | { kind: "unlock"; clientId: string; requestId: string; password: string; publicKeyHex?: string; expectedSessionEpoch: SessionEpoch }
     | { kind: "lock"; clientId: string; requestId: string; expectedSessionEpoch: SessionEpoch }
@@ -241,7 +298,7 @@ export type CoordinatorClientRequest =
     | { kind: "activity"; clientId: string });
 
 /** Coordinator 订阅主题。 */
-export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence";
+export type CoordinatorTopic = "session.state" | "background.snapshot" | "asset.data-changed" | "storage.state" | "p2pkh.providers" | "msfile.state" | "sat.events" | "channel.events" | "contacts.presence" | "plugin.intent" | "worker.units";
 
 /** MSFile 状态事件：状态、设置摘要与未决超额确认（脱敏视图）。 */
 export interface CoordinatorMsFileStateEvent {
@@ -370,7 +427,21 @@ export type CoordinatorTopicEvent =
   | CoordinatorMsFileStateEvent
   | CoordinatorSatStateEvent
   | CoordinatorChannelStateEvent
-  | CoordinatorContactsPresenceEvent;
+  | CoordinatorContactsPresenceEvent
+  | PluginIntentStateEvent
+  | CoordinatorWorkerUnitStateEvent;
+
+/** SharedWorker 唯一插件启停意图快照。配置持久化成功与实例启动状态分离。 */
+export interface PluginIntentStateEvent {
+  topic: "plugin.intent";
+  type: "plugin.intent.changed";
+  /** 产生该快照的 SharedWorker 启动身份；旧 Worker 事件不得覆盖新 Worker。 */
+  authorityInstanceId: string;
+  /** 与 PluginIntentSnapshot.revision 相同的单调修订。 */
+  pluginIntentRevision: number;
+  sessionEpoch: SessionEpoch;
+  snapshot: PluginIntentSnapshot;
+}
 
 /** Coordinator 已验签并完成固定 inbox 分派的 Channel 事件。 */
 export interface CoordinatorChannelStateEvent {
@@ -417,6 +488,8 @@ export interface CoordinatorStorageStateEvent {
   status: StorageRuntimeControllerStatus;
   /** 独立于 Vault 的 Provider/统一桶健康状态。 */
   healthStatus?: StorageRuntimeStatus;
+  /** 旧 Coordinator 尚未释放最终 I/O；只能等待后显式重试，禁止强制接管。 */
+  authorityRecovery?: CoordinatorAuthorityRecovery;
   summary: StorageProviderSummary | null;
   capabilities: BucketConditionalCapabilitiesView | null;
 }
@@ -441,6 +514,8 @@ export interface SessionStateEvent {
   activePublicKeyHex: string | null;
   selectedPublicKeyHex?: string | null;
   keyspaceGeneration: number;
+  /** Coordinator 启动接管被旧最终 I/O 租约阻塞时的脱敏诊断。 */
+  authorityRecovery?: CoordinatorAuthorityRecovery;
 }
 
 export interface BackgroundSnapshotEvent {
@@ -450,6 +525,18 @@ export interface BackgroundSnapshotEvent {
   backgroundSnapshotRevision: number;
   snapshots: CoordinatorTaskSnapshot[];
   scheduleSettings?: CoordinatorBackgroundSyncSettings;
+}
+
+/** Coordinator Worker 实际运行单元快照；这是 Window 汇总后台状态的唯一入口。 */
+export interface CoordinatorWorkerUnitStateEvent {
+  topic: "worker.units";
+  type: "coordinator.worker-units.changed";
+  /** 产生快照的 Worker 启动身份；旧 Worker 事件不得覆盖当前缓存。 */
+  authorityInstanceId: string;
+  /** Worker 单元快照的单调修订号；旧 revision 不能覆盖新实例。 */
+  workerUnitRevision: number;
+  sessionEpoch: SessionEpoch;
+  units: CoordinatorWorkerUnitSnapshot[];
 }
 
 export interface AssetDataChangedEvent {
@@ -467,7 +554,7 @@ export interface CoordinatorTopicBaseline {
   topic: CoordinatorTopic;
   baselineRevision: number;
   sessionEpoch: SessionEpoch;
-  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent;
+  snapshot: SessionStateEvent | BackgroundSnapshotEvent | AssetDataChangedEvent | CoordinatorStorageStateEvent | P2pkhProvidersEvent | CoordinatorMsFileStateEvent | CoordinatorSatStateEvent | CoordinatorChannelStateEvent | CoordinatorContactsPresenceEvent | PluginIntentStateEvent | CoordinatorWorkerUnitStateEvent;
 }
 
 export interface CoordinatorSubscribeTopicsResult {
@@ -481,22 +568,40 @@ export interface CoordinatorSubscribeTopicsResult {
 
 /** Coordinator 公开状态快照。 */
 export interface CoordinatorBootstrapSnapshot {
+  /** SharedWorker 启动身份；意图命令必须绑定此值。 */
+  authorityInstanceId: string;
+  /** 构建产物不可变身份；生产证据、部署交接和 Worker 升级必须绑定同一值。 */
+  buildId?: string;
   sessionEpoch: SessionEpoch;
   vaultStatus: CoordinatorVaultStatus;
   activePublicKeyHex?: string;
   selectedPublicKeyHex?: string;
   keyspaceGeneration: number;
+  /** 旧 Worker 租约未释放时的可恢复状态；不代表可以安全强制接管。 */
+  authorityRecovery?: CoordinatorAuthorityRecovery;
+  /** 当前 Worker 实际激活的服务/任务单元；未激活的静态单元不会出现在这里。 */
+  coordinatorWorkerUnits?: CoordinatorWorkerUnitSnapshot[];
+  /** 当前 Worker 单元快照修订；缺失单元不是 blocked，而是 unknown。 */
+  coordinatorWorkerUnitSnapshotRevision?: number;
   taskSnapshots: CoordinatorTaskSnapshot[];
   scheduleSettings: CoordinatorBackgroundSyncSettings;
   /** P2PKH 网络范围配置，保存在 Coordinator 平台 K-V。 */
   p2pkhSettings?: { includeTestnet: boolean };
+  /** 当前抽象存储桶世代；只用于绑定生命周期身份，不代替 owner/key 世代。 */
+  storageBucketGeneration?: number;
   p2pkhProviders?: P2pkhProviderRegistrySnapshot;
+  /** 插件产品启用意图；不代表运行单元已经启动。 */
+  pluginIntent?: PluginIntentSnapshot;
 }
 
 /** 任务快照。 */
 export interface CoordinatorTaskSnapshot {
   id: string;
   pluginId: string;
+  /** 稳定运行单元标识；产品启停不等于该单元实例已经运行。 */
+  unitId?: string;
+  /** 本次 Worker 装配生成的实例标识；重建后必须变化。 */
+  instanceId?: string;
   label: string;
   state: "idle" | "queued" | "running" | "blocked";
   progress?: BackgroundTaskProgress;
@@ -555,6 +660,10 @@ export interface SessionCoordinatorClient {
   channelOperation(operation: CoordinatorChannelOperation, signal?: AbortSignal): Promise<CoordinatorValueResult<unknown>>;
   /** 读取 Coordinator 内唯一联系人在线状态快照；不会触发新的网络探测。 */
   contactsPresenceSnapshot(): Promise<CoordinatorValueResult<ContactPresenceMap>>;
+  /** 读取 SharedWorker 唯一插件意图快照。 */
+  pluginIntentSnapshot(): Promise<CoordinatorValueResult<PluginIntentSnapshot>>;
+  /** 提交绝对启停意图；accepted 只表示 Worker 已持久化。 */
+  pluginIntentSubmit(command: PluginIntentCommand): Promise<PluginIntentSubmissionResult>;
   p2pkhProvidersGet(): Promise<CoordinatorValueResult<P2pkhProviderRegistrySnapshot>>;
   p2pkhProvidersUpdate(network: "main" | "test", selection: P2pkhNetworkProviderSelection, expectedGeneration: number): Promise<CoordinatorCommandResult>;
   p2pkhSettingsUpdate(settings: { includeTestnet: boolean }): Promise<CoordinatorCommandResult>;

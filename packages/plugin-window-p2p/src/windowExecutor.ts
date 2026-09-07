@@ -148,6 +148,8 @@ export class WindowP2pExecutor {
   /** libp2p Host.stop() 的幂等保护；start/stop 竞态不能重复关闭同一 Host。 */
   private readonly stoppedHosts = new WeakSet<object>();
   private disposed = false;
+  /** dispose 可能同时由 pagehide 和 Host teardown 触发；两者必须共享一条收尾链。 */
+  private disposing?: Promise<void>;
   private starting?: Promise<boolean>;
   private lifecycleToken = 0;
 
@@ -297,15 +299,25 @@ export class WindowP2pExecutor {
     for (const controller of this.pending.values()) controller.abort();
     this.pending.clear();
     this.rejectInboundEventBudget(new Error("Window P2P executor stopped"));
+
+    // 先撤销 Worker lease，再等待 lane/Host 的异步清理。MSFile lane 的
+    // connection.close() 可能受远端影响；若把 lease release 放在清理之后，
+    // 页面 pagehide 期间旧 Coordinator 会一直持有最终 I/O 租约，下一次
+    // 页面加载只能误判为“旧 Worker 未排空”。release 请求先发出，旧 Worker
+    // 会立即拒绝在途 bridge；本地资源随后继续做尽力清理。
+    const lease = this.lease;
+    this.lease = undefined;
+    const releaseLease = lease
+      ? this.coordinator.windowP2pExecutorRelease(lease.leaseId).catch(() => undefined)
+      : Promise.resolve();
+
     await this.laneRegistry?.detach().catch(() => undefined);
     const host = this.host;
     this.host = undefined;
     if (host) await this.stopHostOnce(host);
     this.signer?.close();
     this.signer = undefined;
-    const lease = this.lease;
-    this.lease = undefined;
-    if (lease) await this.coordinator.windowP2pExecutorRelease(lease.leaseId).catch(() => undefined);
+    await releaseLease;
   }
 
   private async stopHostOnce(host: Host): Promise<void> {
@@ -316,11 +328,15 @@ export class WindowP2pExecutor {
   }
 
   async dispose(): Promise<void> {
-    if (this.disposed) return;
+    if (this.disposing) return this.disposing;
     this.disposed = true;
-    await this.stop();
-    this.channel.port1.close();
-    this.channel.port2.close();
+    const run = (async () => {
+      await this.stop();
+      this.channel.port1.close();
+      this.channel.port2.close();
+    })();
+    this.disposing = run;
+    return run;
   }
 
   get isDisposed(): boolean {
@@ -525,8 +541,8 @@ let installedUnsubscribe: (() => void) | undefined;
 let installRetryTimer: ReturnType<typeof setTimeout> | undefined;
 
 /** 页面只调用一次；多个 tab 各自竞争 Worker lease，失败者保持轻量重试。 */
-export function installWindowP2pExecutor(coordinator: WindowP2pCoordinatorControl, laneRegistry?: WindowP2pExecutorLaneRegistry): () => void {
-  if (installedExecutor) return () => { void installedExecutor?.dispose(); };
+export function installWindowP2pExecutor(coordinator: WindowP2pCoordinatorControl, laneRegistry?: WindowP2pExecutorLaneRegistry): () => void | Promise<void> {
+  if (installedExecutor) return () => installedExecutor?.dispose();
   const executor = new WindowP2pExecutor({ coordinator, laneRegistry });
   installedExecutor = executor;
   const attempt = (snapshot?: import("@keymaster/contracts").CoordinatorBootstrapSnapshot): void => {

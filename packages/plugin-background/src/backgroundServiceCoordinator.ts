@@ -22,6 +22,8 @@ import type {
 interface CoordinatorTaskSnapshotLike {
   id: string;
   pluginId: string;
+  unitId?: string;
+  instanceId?: string;
   label: string;
   state: string;
   progress?: BackgroundTaskSnapshot["progress"];
@@ -77,6 +79,8 @@ export function createBackgroundServiceCoordinator(
     taskSnapshotsCache = event.snapshots.map((s) => ({
       id: s.id,
       pluginId: s.pluginId,
+      unitId: s.unitId,
+      instanceId: s.instanceId,
       label: s.label,
       state: s.state as BackgroundTaskSnapshot["state"],
       progress: s.progress,

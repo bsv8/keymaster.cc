@@ -127,6 +127,9 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     return {
       id: task.def.id,
       pluginId: task.def.pluginId,
+      unitId: task.def.unitId,
+      // Window BackgroundService 的实例由自身注册表管理；旧定义没有
+      // Coordinator instanceId 时保持缺省，避免伪造跨 Worker 身份。
       label: typeof task.def.label === "string" ? task.def.label : task.def.label.fallback,
       state: task.state,
       progress: task.progress,
@@ -178,6 +181,15 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     };
     tasks.set(def.id, t);
     scheduleNext(t);
+    emitAll();
+  }
+
+  function unregister(id: string): void {
+    const task = tasks.get(id);
+    if (!task) throw new Error(`Background task id "${id}" is not registered`);
+    task.rerunRequested = false;
+    task.ctl?.abort();
+    tasks.delete(id);
     emitAll();
   }
 
@@ -544,6 +556,7 @@ export function createBackgroundService(options: CreateBackgroundServiceOptions 
     dispose,
     // Registry 接口
     register,
+    unregister,
     list,
     get: getDef
   } as BackgroundServiceHandle & BackgroundRegistry;

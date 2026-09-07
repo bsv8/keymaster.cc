@@ -18,6 +18,7 @@ import type {
   SystemSettingsRegistry
 } from "@keymaster/contracts";
 import { LOG_SERVICE_CAPABILITY } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { PluginManagerPage } from "./PluginManagerPage.js";
 import { LanguageSection } from "./LanguageSection.js";
 import { LogConfigurationSettings, LogSettingsPage } from "./LogSettingsPage.js";
@@ -74,7 +75,10 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.meta.none": "—",
       "pluginManager.meta.blockers": "Blocking dependents",
       "pluginManager.meta.blockersHint":
-        "Disable these first (or use other tooling) to disable this plugin.",
+        "These dependents will stop automatically and keep their enable intent.",
+      "pluginManager.meta.cascade": "Will stop dependents",
+      "pluginManager.meta.cascadeHint":
+        "Disabling this plugin will stop the listed dependents; their enable intent is preserved.",
       "pluginManager.action.enable": "Enable",
       "pluginManager.action.disable": "Disable",
       "pluginManager.action.cannotDisable": "Cannot disable",
@@ -91,9 +95,13 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.details": "Details",
       "pluginManager.details.hide": "Hide details",
       "pluginManager.state.enabled": "Enabled",
+      "pluginManager.state.starting": "Starting",
+      "pluginManager.state.stopping": "Stopping",
       "pluginManager.state.disabled": "Disabled",
       "pluginManager.state.blocked": "Blocked (missing dependency)",
       "pluginManager.state.errorDisabled": "Error-disabled",
+      "pluginManager.state.cleanupPending": "Cleanup pending",
+      "pluginManager.state.intentPending": "Enable intent is pending runtime state",
       "pluginManager.state.registered": "Registered",
       // 硬切换 002：统一日志页文案
       "logSettings.title": "System logs",
@@ -169,7 +177,9 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.meta.reverse": "被谁依赖",
       "pluginManager.meta.none": "—",
       "pluginManager.meta.blockers": "阻塞的反向依赖",
-      "pluginManager.meta.blockersHint": "请先禁用这些（用其它方式处理），再禁用本插件。",
+      "pluginManager.meta.blockersHint": "这些依赖插件会自动停止，但会保留自己的启用意图。",
+      "pluginManager.meta.cascade": "将自动停止依赖插件",
+      "pluginManager.meta.cascadeHint": "禁用本插件会自动停止列表中的依赖插件，但不会改写它们的启用意图。",
       "pluginManager.action.enable": "启用",
       "pluginManager.action.disable": "禁用",
       "pluginManager.action.cannotDisable": "不可禁用",
@@ -186,9 +196,13 @@ const settingsResources: I18nPluginResources = {
       "pluginManager.details": "详情",
       "pluginManager.details.hide": "收起详情",
       "pluginManager.state.enabled": "已启用",
+      "pluginManager.state.starting": "启动中",
+      "pluginManager.state.stopping": "停止中",
       "pluginManager.state.disabled": "已禁用",
       "pluginManager.state.blocked": "被阻塞（依赖缺失）",
       "pluginManager.state.errorDisabled": "错误已禁用",
+      "pluginManager.state.cleanupPending": "清理未完成",
+      "pluginManager.state.intentPending": "启用意图正在等待运行状态收敛",
       "pluginManager.state.registered": "已注册",
       // 硬切换 002：统一日志页文案
       "logSettings.title": "系统日志",
@@ -239,55 +253,60 @@ export const settingsPlugin: PluginManifest = {
     canDisable: false,
     displayGroup: "core"
   },
-  i18n: settingsResources,
-  dependencies: [
-    { capability: "system-settings.registry", reason: "注册系统语言设置" },
-    { capability: "application-settings.registry", reason: "展示应用设置目录" },
-    { capability: "breadcrumb.registry", reason: "为设置详情页提供面包屑" },
-    { capability: LOG_SERVICE_CAPABILITY, reason: "统一日志页依赖 log.service" }
-  ],
-  business: {
-    domains: [{
-      id: "settings",
-      label: { key: "settings.business.domain", fallback: "Settings" },
-      order: 900,
-      features: [{
-        id: "settings.system",
-        label: { key: "settings.system.title", fallback: "System" },
-        order: 10,
-        icon: "Settings",
-        entry: { path: "/settings/system", component: SystemSettingsPage }
-      }, {
-        id: "settings.application-settings",
-        label: { key: "settings.applicationSettings.title", fallback: "Application settings" },
-        order: 20,
-        icon: "PanelsTopLeft",
-        entry: {
-          path: "/settings/apps",
-          component: ApplicationSettingsPage,
-          activeWhen: (path) => path.startsWith("/settings/apps/")
-        }
-      }, {
-        id: "settings.plugins",
-        label: { key: "settings.business.plugins", fallback: "Plugin settings" },
-        order: 30,
-        icon: "Puzzle",
-        entry: { path: "/settings/plugins", component: PluginManagerPage }
-      }, {
-        id: "settings.logs",
-        label: { key: "settings.route.logs", fallback: "System logs" },
-        order: 40,
-        icon: "ScrollText",
-        entry: { path: "/settings/logs", component: LogSettingsPage }
-      }, {
-        id: "settings.system-status",
-        label: { key: "settings.systemStatus.title", fallback: "System status" },
-        order: 50,
-        icon: "Activity",
-        entry: { path: "/settings/system-status", component: SystemStatusPage }
+  units: [{
+    id: "settings.window",
+    execution: "window",
+    lifetime: "root",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "system-settings.registry", reason: "注册系统语言设置" },
+      { capability: "application-settings.registry", reason: "展示应用设置目录" },
+      { capability: "breadcrumb.registry", reason: "为设置详情页提供面包屑" },
+      { capability: LOG_SERVICE_CAPABILITY, reason: "统一日志页依赖 log.service" },
+    ]),
+    business: {
+      domains: [{
+        id: "settings",
+        label: { key: "settings.business.domain", fallback: "Settings" },
+        order: 900,
+        features: [{
+          id: "settings.system",
+          label: { key: "settings.system.title", fallback: "System" },
+          order: 10,
+          icon: "Settings",
+          entry: { path: "/settings/system", component: SystemSettingsPage }
+        }, {
+          id: "settings.application-settings",
+          label: { key: "settings.applicationSettings.title", fallback: "Application settings" },
+          order: 20,
+          icon: "PanelsTopLeft",
+          entry: {
+            path: "/settings/apps",
+            component: ApplicationSettingsPage,
+            activeWhen: (path) => path.startsWith("/settings/apps/")
+          }
+        }, {
+          id: "settings.plugins",
+          label: { key: "settings.business.plugins", fallback: "Plugin settings" },
+          order: 30,
+          icon: "Puzzle",
+          entry: { path: "/settings/plugins", component: PluginManagerPage }
+        }, {
+          id: "settings.logs",
+          label: { key: "settings.route.logs", fallback: "System logs" },
+          order: 40,
+          icon: "ScrollText",
+          entry: { path: "/settings/logs", component: LogSettingsPage }
+        }, {
+          id: "settings.system-status",
+          label: { key: "settings.systemStatus.title", fallback: "System status" },
+          order: 50,
+          icon: "Activity",
+          entry: { path: "/settings/system-status", component: SystemStatusPage }
+        }]
       }]
-    }]
-  },
+    },
+  }],
+  i18n: settingsResources,
   setup(ctx) {
     const systemSettings = ctx.get<SystemSettingsRegistry>("system-settings.registry");
     systemSettings.register({

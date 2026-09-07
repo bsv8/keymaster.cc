@@ -8,6 +8,7 @@ import { webRTCDirect } from "@libp2p/webrtc";
 import { webSockets } from "@libp2p/websockets";
 import { getCoordinatorClient } from "../keymasterSessionCoordinatorClient.js";
 import { KeymasterWindowP2pIdentitySigner } from "@keymaster/plugin-window-p2p/identity-signer";
+import { requestOpfsPersistence, writeStorageBootstrap } from "@keymaster/platform-storage/coordinator";
 
 const SPIKE_PASSWORD = "msfile-spike-test-password";
 
@@ -30,8 +31,8 @@ export interface MsFileExecutorSpikeHooks {
   rejectForgedPeerRecords(): Promise<{ wrongPeerId: string; nonEmptyAddresses: string; overflowSequence: string }>;
   abortNoiseSign(): Promise<{ error: string; pendingAfter: number }>;
   beginNoiseSign(): { pendingAfterStart: number };
-  finishNoiseSign(): Promise<{ signResult: string; pendingAfter: number }>;
-  lock(): Promise<{ status: string }>;
+  finishNoiseSign(): Promise<{ signResult: string; pendingAfter: number; startedAt: number; finishedAt: number }>;
+  lock(): Promise<{ status: string; startedAt: number; finishedAt: number }>;
   generateReplacementKey(): Promise<{ publicKeyHex: string }>;
   setActive(publicKeyHex: string): Promise<{ status: string }>;
   connectAndInspect(address: string): Promise<{
@@ -167,7 +168,25 @@ function parseEchoFrame(frame: Uint8Array): string {
   return text(frame.subarray(8));
 }
 
+async function ensureStorageReady(coordinator: ReturnType<typeof getCoordinatorClient>): Promise<void> {
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    const status = await coordinator.storageControl({ type: "status" });
+    if (status.status === "ok" && status.value === "ready") return;
+    if (status.status === "ok" && (status.value === "unselected" || status.value === "authentication")) {
+      await requestOpfsPersistence();
+      const selected = await coordinator.storageControl({ type: "select-opfs" });
+      if (selected.status !== "ok") throw new Error(`spike OPFS selection failed: ${selected.status}`);
+      writeStorageBootstrap({ selectedBackend: "opfs", selectedProfileId: "opfs" });
+    } else {
+      await coordinator.storageControl({ type: "retry" });
+    }
+    await delay(25);
+  }
+  throw new Error("spike Storage did not become ready");
+}
+
 async function ensureUnlocked(coordinator: ReturnType<typeof getCoordinatorClient>): Promise<{ ownerPublicKeyHex: string; sessionEpoch: string }> {
+  await ensureStorageReady(coordinator);
   for (let attempt = 0; attempt < 200; attempt += 1) {
     const snapshot = coordinator.getBootstrapSnapshot();
     if (snapshot.vaultStatus !== "booting") {
@@ -202,6 +221,7 @@ export function installMsFileSpikeHooks(): void {
   let host: Host | undefined;
   let lease: SpikeLease | undefined;
   let pendingLifecycleNoiseSign: Promise<string> | undefined;
+  let pendingLifecycleNoiseStartedAt = 0;
 
   const stopHost = async (): Promise<void> => {
     signer?.close();
@@ -283,6 +303,7 @@ export function installMsFileSpikeHooks(): void {
       if (!signer) throw new Error("executor lease is not acquired");
       const currentSigner = signer;
       if (pendingLifecycleNoiseSign) throw new Error("lifecycle Noise sign is already pending");
+      pendingLifecycleNoiseStartedAt = Date.now();
       pendingLifecycleNoiseSign = currentSigner.signNoiseStaticKey(new Uint8Array(32).fill(8))
         .then(() => "ok", (error: unknown) => error instanceof Error ? error.message : String(error));
       return { pendingAfterStart: currentSigner.pendingRequestCount };
@@ -292,11 +313,13 @@ export function installMsFileSpikeHooks(): void {
       const currentSigner = signer;
       const pending = pendingLifecycleNoiseSign;
       pendingLifecycleNoiseSign = undefined;
-      return { signResult: await pending, pendingAfter: currentSigner.pendingRequestCount };
+      const signResult = await pending;
+      return { signResult, pendingAfter: currentSigner.pendingRequestCount, startedAt: pendingLifecycleNoiseStartedAt, finishedAt: Date.now() };
     },
     async lock() {
+      const startedAt = Date.now();
       const result = await coordinator.lock();
-      return { status: result.status };
+      return { status: result.status, startedAt, finishedAt: Date.now() };
     },
     async generateReplacementKey() {
       const result = await coordinator.vaultOperation({ type: "generateKey", password: SPIKE_PASSWORD, label: "MSFile executor replacement", capabilities: ["p2pkh"] });
@@ -362,8 +385,12 @@ export function installMsFileSpikeHooks(): void {
 
       // 直接调用两个 typed signer 方法验证 Worker RPC 与标准 DER 输出；Host
       // 的 Noise/Identify 路径已经通过上面的真实连接使用同一 signer。
-      await withStage("Peer Record sign sequence 0", () => signer!.signPeerRecord({ peerId: signer!.peerId, addresses: [], sequence: 0n }));
-      await withStage("Peer Record sign sequence 1", () => signer!.signPeerRecord({ peerId: signer!.peerId, addresses: [], sequence: 1n }));
+      // Host 的 Identify/AddressBook 使用时间序列生成 Peer Record；测试
+      // 序列必须高于 Host 已经使用的值，不能假定当前值仍为 0。预留一个
+      // 明确的未来窗口，覆盖 Host 启动/Identify Push 在本次调用前后的竞态。
+      const sequence = BigInt(Date.now()) + 1_000_000n;
+      await withStage(`Peer Record sign sequence ${sequence}`, () => signer!.signPeerRecord({ peerId: signer!.peerId, addresses: [], sequence }));
+      await withStage(`Peer Record sign sequence ${sequence + 1n}`, () => signer!.signPeerRecord({ peerId: signer!.peerId, addresses: [], sequence: sequence + 1n }));
       return {
         hostStarted: true,
         localPublicKeyHex: hex(signer.publicKey()),

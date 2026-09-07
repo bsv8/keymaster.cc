@@ -6674,6 +6674,30 @@ describe("ProtocolServiceImpl launchAppView (施工单 2026-06-29 002)", () => {
     }
   });
 
+  it("session 真值落库失败 → typed session_storage_unavailable", async () => {
+    const env = setupWindow();
+    try {
+      const storageRepository = makeFakeMultipartUploadRepository();
+      storageRepository.putConnectSessionAndRevokeOriginPeers = async () => {
+        throw new Error("Platform storage grant is invalid");
+      };
+      const service = new ProtocolServiceImpl({
+        vault: makeVaultStub(TEST_PUB_HEX),
+        keyspace: makeKeyspaceStub(TEST_PUB_HEX),
+        storageRepository,
+        appCatalogResolver: TEST_CATALOG_RESOLVER,
+      });
+
+      await expect(service.launchAppView(JUSTNOTE)).rejects.toMatchObject({
+        name: "LaunchAppViewError",
+        code: "session_storage_unavailable",
+      });
+      expect(env.openCalls).toHaveLength(1);
+    } finally {
+      env.restore();
+    }
+  });
+
   it("active key 找不到 → 抛错", async () => {
     const env = setupWindow();
     try {

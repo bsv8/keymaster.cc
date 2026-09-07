@@ -38,14 +38,21 @@ import {
   type SatCoordinatorControl,
   type WindowP2pCoordinatorControl,
   type ProtocolCoordinatorControl,
-  type ContactsCoordinatorControl
+  type ContactsCoordinatorControl,
+  type PluginIntentCoordinator,
+  type PluginIntentSnapshot,
+  type PluginPermission,
+  type RemoteServiceBridge,
+  type RuntimeIdentityTransition,
 } from "@keymaster/contracts";
+import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_OWNER_STORAGE_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import type { ApplicationBootstrapSnapshot, ApplicationBootstrapStatus, ApplicationBootstrapListener } from "@keymaster/contracts";
 import type { CoordinatorPlatformStorageData, StorageBindingCoordinatorClient } from "@keymaster/contracts/storage-internal";
 import { createPluginHost, type PluginHost } from "@keymaster/runtime";
 import { createStorageBindingAuthority } from "@keymaster/platform-storage/coordinator/authority";
 import { bsvPriceConfig } from "./pluginConfigs.js";
 import { WEB_PLUGIN_CATALOG } from "./pluginCatalog.js";
+import { createWebRuntimeUnitImplementationRegistry } from "./runtimeUnitImplementations.js";
 import { SHELL_RESOURCES } from "./i18n/resources.js";
 import { registerShellResources } from "./shell/shellResources.js";
 import { registerAssetWorkspace } from "./system/registerAssetWorkspace.js";
@@ -66,10 +73,31 @@ export const BOOTSTRAP_PLUGIN_TIMEOUT_MS = 15_000;
 /** Worker 发布切换或缓存重新验证时的一次性恢复等待。 */
 export const COORDINATOR_STARTUP_RETRY_DELAY_MS = 200;
 
+/** owner 插件必须等待服务目录就绪的最长时间；超时交给启动 fatal/retry 面。 */
+export const COORDINATOR_SERVICE_READY_TIMEOUT_MS = BOOTSTRAP_PLUGIN_TIMEOUT_MS;
+
 export const WEB_STARTUP_REQUIRED_CAPABILITIES = [
   "vault.service",
   "keyspace.service"
 ] as const;
+
+const EMPTY_PLUGIN_INTENT_SNAPSHOT: PluginIntentSnapshot = {
+  revision: 0,
+  desiredEnabled: {},
+  desiredRevision: {},
+};
+
+/** 把 Coordinator 的会话快照转换成 Window Host 的作用域身份。 */
+function runtimeIdentityFromSnapshot(
+  snapshot: import("@keymaster/contracts").CoordinatorBootstrapSnapshot,
+): RuntimeIdentityTransition {
+  return {
+    vaultStatus: snapshot.vaultStatus,
+    ownerPublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
+    sessionEpoch: snapshot.sessionEpoch,
+    bucketGeneration: snapshot.storageBucketGeneration,
+  };
+}
 
 type CoordinatorMethodName = keyof SessionCoordinatorClient | keyof StorageBindingCoordinatorClient | "sendActivity";
 
@@ -107,11 +135,50 @@ export function createStorageCoordinatorClient(client: SessionCoordinatorClient)
 }
 
 /** Vault 插件专用 facade：只有 Vault 可以操作私钥与会话生命周期。 */
-export function createVaultCoordinatorClient(client: SessionCoordinatorClient): VaultCoordinatorControl {
-  return bindCoordinatorMethods<VaultCoordinatorControl>(client, [
+type ServiceBridgeSource = RemoteServiceBridge | (() => RemoteServiceBridge | undefined);
+
+function resolveServiceBridge(source: ServiceBridgeSource | undefined): RemoteServiceBridge | undefined {
+  return typeof source === "function" ? source() : source;
+}
+
+export function createVaultCoordinatorClient(client: SessionCoordinatorClient, serviceBridgeSource?: ServiceBridgeSource): VaultCoordinatorControl {
+  const facade = bindCoordinatorMethods<VaultCoordinatorControl>(client, [
     "connect", "getIsConnected", "getBootstrapSnapshot", "getSessionEpoch", "getActivePublicKeyHex", "subscribeTopic",
     "unlock", "lock", "activateKey", "vaultOperation", "crypto", "backgroundCancelByKey"
   ]);
+  if (!serviceBridgeSource) return facade;
+  // Vault 的签名/派生调用必须走 Coordinator 的物理服务桥；传入 bridge
+  // 后不再回退旧的主 RPC，避免生产链路看似可用但绕过 Provider 授权。
+  const remoteCrypto: VaultCoordinatorControl["crypto"] = async (operation) => {
+    const serviceBridge = resolveServiceBridge(serviceBridgeSource);
+    const proxy = serviceBridge?.getProxy({
+      capabilityId: COORDINATOR_CRYPTO_SERVICE,
+      contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
+      execution: "coordinator-worker",
+    });
+    if (!proxy) return { ack: { status: "not-ready" } };
+    try {
+      const result = await proxy.call<import("@keymaster/contracts").CoordinatorCryptoOperation, import("@keymaster/contracts").CoordinatorCryptoResult>(operation, {
+        operationId: `vault-crypto:${operation.type}`,
+      });
+      return { ack: { status: "ok" }, result };
+    } catch (error) {
+      return {
+        ack: {
+          status: error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === "service.unavailable"
+            ? "not-ready"
+            : "error",
+          ...((error && typeof error === "object" && "message" in error && typeof (error as { message?: unknown }).message === "string")
+            ? { message: (error as { message: string }).message }
+            : { message: "Coordinator crypto service failed" }),
+        },
+      };
+    }
+  };
+  return Object.freeze({
+    ...(facade as object),
+    crypto: remoteCrypto,
+  }) as VaultCoordinatorControl;
 }
 
 /**
@@ -119,10 +186,10 @@ export function createVaultCoordinatorClient(client: SessionCoordinatorClient): 
  * 执行一次；插件 setup 通过 `ctx.coordinator` 取得已经绑定身份的对象，
  * 不再通过字符串 capability 取得其它插件的 RPC。
  */
-export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, pluginId: string): unknown {
+export function createPluginCoordinatorFacade(client: SessionCoordinatorClient, pluginId: string, serviceBridgeSource?: ServiceBridgeSource): unknown {
   switch (pluginId) {
     case "storage": return createStorageCoordinatorClient(client);
-    case "vault": return createVaultCoordinatorClient(client);
+    case "vault": return createVaultCoordinatorClient(client, serviceBridgeSource);
     case "background": return bindCoordinatorMethods<BackgroundCoordinatorControl>(client, [
       "getIsConnected", "getBootstrapSnapshot", "subscribeTopic", "backgroundRunNow", "backgroundTrigger",
       "backgroundCancel", "backgroundCancelByKey", "backgroundSettingsUpdate", "reportRecoverableCoordinatorFailure"
@@ -199,13 +266,55 @@ function isStaleCoordinatorStorageBinding(error: unknown): boolean {
   return /storage (?:handle|grant|binding) .*?(?:stale|invalid|changed)|storage .*unavailable|owner storage .*changed|platform storage .*changed/i.test(message);
 }
 
+/**
+ * 等待当前 Coordinator 服务桥完成基线和 owner 服务授权。
+ *
+ * 解锁事件与独立服务端口的快照是两条异步消息：页面可能先收到
+ * `session.state=unlocked`，但此时 owner-storage / crypto 代理还没有 ready。
+ * 消费者必须等到两项服务都 ready，不能把“已解锁”误当成“服务已装配”。
+ */
+export async function waitForCoordinatorServiceBridge(
+  getBridge: () => RemoteServiceBridge | undefined,
+  timeoutMs = COORDINATOR_SERVICE_READY_TIMEOUT_MS,
+): Promise<RemoteServiceBridge> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+    throw new Error("Coordinator service ready timeout must be a non-negative finite number");
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const bridge = getBridge();
+    const services = bridge?.services() ?? [];
+    const ownerStorageReady = services.some((service) =>
+      service.capabilityId === COORDINATOR_OWNER_STORAGE_SERVICE
+      && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
+      && service.status === "ready"
+      && typeof service.grantId === "string"
+      && service.grantId.length > 0
+    );
+    const cryptoReady = services.some((service) =>
+      service.capabilityId === COORDINATOR_CRYPTO_SERVICE
+      && service.contractVersion === COORDINATOR_SERVICE_CONTRACT_VERSION
+      && service.status === "ready"
+      && typeof service.grantId === "string"
+      && service.grantId.length > 0
+    );
+    if (bridge?.state === "ready" && ownerStorageReady && cryptoReady) return bridge;
+    if (Date.now() >= deadline) {
+      throw new Error("Coordinator service bridge did not become ready before owner plugin assembly");
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(25, Math.max(1, deadline - Date.now()))));
+  }
+}
+
 /** 页面侧平台 K-V 句柄：只转发 platform K-V RPC，不暴露 Provider 或物理路径。 */
-function createCoordinatorPlatformStore(
+/** 创建页面 Host 使用的受限平台 K-V 句柄；不暴露真实 Provider 或 grant 值。 */
+export function createCoordinatorPlatformStore(
   client: SessionCoordinatorClient,
   applicationStorageId: string,
   pluginId = "runtime"
 ): KeyValueStore {
   const internalClient = client as SessionCoordinatorClient & StorageBindingCoordinatorClient;
+  let currentGrant: import("@keymaster/contracts/storage-internal").StoragePlatformGrant | undefined;
   let grantPromise: Promise<import("@keymaster/contracts/storage-internal").StoragePlatformGrant> | undefined;
   const grant = async () => {
     if (!grantPromise) {
@@ -215,6 +324,7 @@ function createCoordinatorPlatformStore(
           if ("code" in result && typeof result.code === "string") error.code = result.code;
           throw error;
         }
+        currentGrant = result.value;
         return result.value;
       }).catch((error) => {
         grantPromise = undefined;
@@ -222,6 +332,19 @@ function createCoordinatorPlatformStore(
       });
     }
     return grantPromise;
+  };
+  const invalidateGrant = (expected: import("@keymaster/contracts/storage-internal").StoragePlatformGrant): void => {
+    // 并发请求中如果已经完成重绑，旧请求不能把新 grant 一起清掉。
+    if (currentGrant !== expected) return;
+    currentGrant = undefined;
+    grantPromise = undefined;
+  };
+  const isPreIoGrantValidationFailure = (error: unknown): boolean => {
+    const message = error instanceof Error ? error.message : String(error);
+    // Worker 在打开底层 store 之前完成这两个校验；只有这里允许同一
+    // 业务调用重绑一次。越过最终 I/O 后的 stale binding 不能重放写入。
+    return message === "Platform storage grant is invalid"
+      || message === "Platform storage bucket generation changed";
   };
   let closed = false;
   const assertOpen = () => {
@@ -239,14 +362,20 @@ function createCoordinatorPlatformStore(
     return result.value as T;
   };
   const request = async <T>(build: (platformGrantId: string) => CoordinatorPlatformStorageData): Promise<T> => {
+    assertOpen();
+    const bound = await grant();
     try {
-      const bound = await grant();
       return await call<T>(build(bound.platformGrantId));
     } catch (error) {
-      // 不重试本次写入/提交：响应可能已经跨过远端写入边界。
-      // 只丢弃旧 grant，让下一次业务调用在新 Root 上重新绑定。
-      if (isStaleCoordinatorStorageBinding(error)) grantPromise = undefined;
-      throw error;
+      if (closed || !isPreIoGrantValidationFailure(error)) {
+        // 不重试已经越过远端物理 I/O 的调用；下一次业务调用才重新
+        // 获取 grant，避免把不确定的 put/commit 变成重复写入。
+        if (isStaleCoordinatorStorageBinding(error)) invalidateGrant(bound);
+        throw error;
+      }
+      invalidateGrant(bound);
+      const rebound = await grant();
+      return call<T>(build(rebound.platformGrantId));
     }
   };
   return {
@@ -358,24 +487,138 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   // Spike hooks and plugin capabilities must share the same physical port;
   // creating a second client here would bypass the real SharedWorker session.
   const coordinatorClient = getCoordinatorClient();
-  await connectCoordinatorWithStartupRetry(coordinatorClient);
+  let pageHost: PluginHost | undefined;
+  let pageLifecycleClosed = false;
+  const disposePageLifecycle = (): void => {
+    if (pageLifecycleClosed) return;
+    pageLifecycleClosed = true;
+    const cleanup = pageHost?.dispose("pagehide");
+    // 页面销毁不是一次可重用的业务断线；撤权同步完成后必须立即通知
+    // Coordinator。若等 Host 的异步 teardown（日志/配置/远端连接）结束，
+    // 浏览器可能先销毁文档而不再执行 Promise，旧 Worker 就会留下端口和
+    // final-I/O lease，下一页面只能被错误地挡在 recovery-required。
+    // shutdown 本身只撤销当前页面连接并发送 disconnect；Host cleanup
+    // 仍在后台尽力执行，不能反过来阻塞新 Worker 的接管判定。
+    coordinatorClient.shutdown();
+    if (cleanup) {
+      void cleanup.catch(() => undefined);
+    }
+  };
+  if (typeof window !== "undefined") {
+    // beforeunload 比 pagehide 更早，给 SharedWorker 的 disconnect 控制
+    // 消息更大的投递窗口；pagehide 仍作为不触发 beforeunload 的宿主兜底。
+    // 不使用 once：BFCache 的 pagehide(persisted=true) 不应关闭会恢复的
+    // 页面，恢复后仍必须保留下一次真正销毁的清理监听。
+    const onPageHide = (event: PageTransitionEvent): void => {
+      if (event.persisted) return;
+      disposePageLifecycle();
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+    const onBeforeUnload = (): void => {
+      disposePageLifecycle();
+      window.removeEventListener("beforeunload", onBeforeUnload);
+      window.removeEventListener("pagehide", onPageHide);
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    window.addEventListener("pagehide", onPageHide);
+  }
+  try {
+    await connectCoordinatorWithStartupRetry(coordinatorClient);
   const storageStatus = await coordinatorClient.storageControl({ type: "status" });
   // Storage 是独立健康域。Provider/CORS/认证暂不可用时，仍需让 Vault
   // 和设置页启动，以便用户看到恢复入口；此时不能再读取平台配置 K-V。
   const storageReady = storageStatus.status === "ok" && storageStatus.value === "ready";
 
+  // 插件启停命令的唯一写入面是 SharedWorker。页面 Host 只缓存并投影
+  // Worker 快照；命令本身由 UI 通过 host.submitIntent() 发送到这里。
+  const pluginIntentCoordinator: PluginIntentCoordinator = {
+    get authorityInstanceId() {
+      return coordinatorClient.getBootstrapSnapshot().authorityInstanceId;
+    },
+    snapshot() {
+      const snapshot = coordinatorClient.getBootstrapSnapshot().pluginIntent;
+      return snapshot
+        ? {
+            revision: snapshot.revision,
+            desiredEnabled: { ...snapshot.desiredEnabled },
+            desiredRevision: { ...snapshot.desiredRevision },
+          }
+        : { ...EMPTY_PLUGIN_INTENT_SNAPSHOT };
+    },
+    submit(command) {
+      return coordinatorClient.pluginIntentSubmit(command);
+    },
+    subscribe(listener) {
+      return coordinatorClient.subscribeTopic("plugin.intent", (event) => {
+        if (event.type === "plugin.intent.changed") listener(event.snapshot);
+      });
+    },
+  };
+
   // 日志也是平台诊断数据，必须在 Host 创建时绑定到 Coordinator 平台 K-V。
   // 这样 runtime 首次读取配置和写入 entry 时不会落到测试内存夹具。
   const logStorage = createCoordinatorPlatformStore(coordinatorClient, "logs");
   const configStorage = createCoordinatorPlatformStore(coordinatorClient, "settings");
+  const runtimeUnitImplementationRegistry = createWebRuntimeUnitImplementationRegistry(WEB_PLUGIN_CATALOG);
+  const initialRuntimeIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
   const host = createPluginHost({
     initialI18nResources: [SHELL_RESOURCES],
     i18nDebug: !isProd,
     logStorage,
     configStorage,
-    storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }),
-    coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId)
+    storageBindingAuthority: createStorageBindingAuthority(coordinatorClient as SessionCoordinatorClient & StorageBindingCoordinatorClient & { getActivePublicKeyHex(): string | undefined }, {
+      serviceBridge: () => coordinatorClient.getServiceBridge(),
+      requireServiceBridge: true,
+    }),
+    coordinatorForPlugin: (pluginId) => createPluginCoordinatorFacade(coordinatorClient, pluginId, () => coordinatorClient.getServiceBridge()),
+    // Host 上下文也保留同一条 bridge，业务 Provider 不能自行创建第二条端口。
+    serviceBridgeForPlugin: () => coordinatorClient.getServiceBridge(),
+    pluginIntentCoordinator,
+    // Coordinator Worker 单元状态由唯一远程快照提供；Host 只负责把它
+    // 合并到产品页，不在 Window 侧猜测或伪造后台状态。
+    runtimeUnitSnapshots: () => coordinatorClient.getBootstrapSnapshot().coordinatorWorkerUnits ?? [],
+    // 生产 Window Host 只从当前环境实现注册表取得 setup；manifest 上的
+    // product-level setup 仅由迁移适配器集中登记，不能在 Host 内隐式回退。
+    runtimeUnitImplementationRegistry,
+    requireRuntimeUnitImplementationRegistry: true,
+    // 本页面 Host 明确是 Window 执行环境。未来多单元产品没有 Window
+    // 单元时会 fail closed，不会把 Worker capability 当作本地能力。
+    execution: "window",
+    initialRuntimeIdentity,
+    approvedPermissionsForPlugin: (pluginId, requested) => {
+      const approvedByPlugin: Readonly<Record<string, readonly PluginPermission[]>> = {
+        vault: ["identity.read", "storage.read", "storage.write", "crypto.signIntent", "crypto.signTransaction", "vault.exportBackup", "vault.manage"],
+        storage: ["storage.read", "storage.write", "storage.platform"],
+        protocol: ["identity.read", "crypto.signIntent", "crypto.channel"],
+      };
+      const approved = new Set(approvedByPlugin[pluginId] ?? []);
+      return requested.filter((permission) => approved.has(permission));
+    },
+    sessionPermissionsForPlugin: (_pluginId, requested) => {
+      // 锁定时不向新实例发放 owner/session 权限；Vault 自身只使用
+      // Coordinator facade，业务插件会等到解锁后再进入 owner 阶段。
+      return coordinatorClient.getBootstrapSnapshot().vaultStatus === "unlocked"
+        ? requested
+        : [];
+    },
+    permissionBindingForPlugin: () => ({ policyRevision: 1 }),
+    lifecycleIdentityForPlugin: () => {
+      const snapshot = coordinatorClient.getBootstrapSnapshot();
+      return {
+        sessionEpoch: snapshot.sessionEpoch,
+        ownerPublicKeyHex: snapshot.vaultStatus === "unlocked" ? snapshot.activePublicKeyHex : undefined,
+        bucketGeneration: snapshot.storageBucketGeneration,
+      };
+    },
+    // 页面销毁时给插件一个有限的异步收尾窗口；撤权本身仍同步发生。
+    lifecycleCleanupTimeoutMs: 5_000,
   });
+  pageHost = host;
+  const removeWorkerUnitSubscription = coordinatorClient.subscribeTopic("worker.units", () => {
+    host.refreshRuntimeUnitSnapshots();
+  });
+  host.rootScope.onDispose(removeWorkerUnitSubscription, "worker-unit-snapshot-subscription");
   host.provide(COORDINATOR_ACTIVITY_CAPABILITY, Object.freeze({
     getIsConnected: () => coordinatorClient.getIsConnected(),
     sendActivity: () => coordinatorClient.sendActivity()
@@ -422,22 +665,27 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   const phaseOneCatalog = catalogForStage(fullCatalog, "storage-onboarding");
   if (phaseOneCatalog.length === 0) throw new Error("Web plugin catalog must contain a storage-onboarding plugin");
 
-  // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 显式注入
-  // `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
+  // 施工单 2026-07-08 001 硬切换：装配层对 plugin-bsv-price 的 Window
+  // runtime unit 显式注入 `pricePublisherPublicKeyHex` seed；它只在本地配置缺失时作为首次
   // 默认值，运行时真值由 BSV Price owner/App K-V 接管。
   //
   // 关键约束：
-  //   - 装配层**不**自己改 plugin manifest；改为把已构造好的 `config`
-  //     对象透传给 plugin；plugin 用 `ctx.config[BSV_PRICE_CONFIG_KEY]`
+  //   - 装配层只替换 Window unit 的 `config`，不把配置放回产品级 manifest；
+  //     plugin 用 `ctx.config[BSV_PRICE_CONFIG_KEY]`
   //     读来决定首次 seed；
   //   - 配置来源集中：`pluginConfigs.ts`；
   //   - plugin 自己**不**走 `globalThis.__XXX__` 隐式注入路径。
   //
-  // 这里用 `withConfig` 给 bsvPricePlugin 临时挂上 config，避免对其它
-  // plugin 的 manifest 顺序造成影响。
+  // 这里用临时的 Window unit 描述挂上 config，避免对其它 plugin 的
+  // manifest 顺序造成影响。
   const fullCatalogWithConfig: PluginManifest[] = fullCatalog.map((p) => {
     if (p.id === "bsv-price") {
-      return { ...p, config: { ...bsvPriceConfig } };
+      return {
+        ...p,
+        units: p.units?.map((unit) => unit.execution === "window"
+          ? { ...unit, config: { ...bsvPriceConfig } }
+          : unit),
+      };
     }
     return p;
   });
@@ -449,8 +697,22 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
   let ownerAppsReady = false;
   let connectAppsReady = false;
   let assetWorkspaceReady = false;
+  let assetWorkspaceDisposer: (() => void) | undefined;
   let storageReadyForBootstrap = storageReady;
   let sessionStateOff: (() => void) | undefined;
+  let ownerAssemblyGeneration = 0;
+  let observedRuntimeIdentityKey = runtimeIdentityKeyFor(initialRuntimeIdentity);
+  let observedRuntimeIdentity = initialRuntimeIdentity;
+
+  // 页面销毁时也要回收不是由某个业务 manifest 直接拥有的资产工作区。
+  host.rootScope.onDispose(() => {
+    assetWorkspaceDisposer?.();
+    assetWorkspaceDisposer = undefined;
+  }, "asset-workspace-lifecycle");
+
+  function runtimeIdentityKeyFor(identity: RuntimeIdentityTransition): string {
+    return `${identity.vaultStatus}|${identity.ownerPublicKeyHex ?? ""}|${identity.sessionEpoch}|${identity.bucketGeneration ?? "unknown"}`;
+  }
 
   const currentActiveKey = (): { unlocked: boolean; activePublicKeyHex?: string } => {
     const snapshot = coordinatorClient.getBootstrapSnapshot();
@@ -493,17 +755,30 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     const active = currentActiveKey();
     if (!active.unlocked) return;
     if (ownerAppsPromise) return ownerAppsPromise;
-    ownerAppsPromise = (async () => {
+    const generation = ownerAssemblyGeneration;
+    const isCurrentOwnerGeneration = (): boolean =>
+      generation === ownerAssemblyGeneration && currentActiveKey().unlocked;
+    const stagePromise = (async () => {
       updateBootstrapStatus({ phase: "vault-selection", hasUnlockedActiveKey: true });
+      await waitForCoordinatorServiceBridge(() => coordinatorClient.getServiceBridge());
+      if (!isCurrentOwnerGeneration()) return;
       await registerStage("owner-apps-ready", retryFailed);
+      if (!isCurrentOwnerGeneration()) return;
       ownerAppsReady = true;
       updateBootstrapStatus({ phase: "owner-apps-ready", hasUnlockedActiveKey: true, ownerAppsReady: true });
       if (!assetWorkspaceReady) {
-        await registerAssetWorkspace(host);
+        const disposeWorkspace = await registerAssetWorkspace(host);
+        if (!isCurrentOwnerGeneration()) {
+          disposeWorkspace();
+          return;
+        }
+        assetWorkspaceDisposer = disposeWorkspace;
         assetWorkspaceReady = true;
       }
+      if (!isCurrentOwnerGeneration()) return;
       updateBootstrapStatus({ assetWorkspaceReady: true });
       await registerStage("connect-apps-ready", retryFailed);
+      if (!isCurrentOwnerGeneration()) return;
       connectAppsReady = true;
       assertWebStartupContract(host);
       updateBootstrapStatus({
@@ -514,21 +789,24 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
         assetWorkspaceReady: true
       });
     })();
+    ownerAppsPromise = stagePromise;
     try {
-      await ownerAppsPromise;
+      await stagePromise;
     } catch (error) {
-      ownerAppsPromise = undefined;
-      updateBootstrapStatus({
-        phase: "error",
-        storageReady: true,
-        vaultCapabilityReady: host.capabilities.has("vault.service") && host.capabilities.has("keyspace.service"),
-        hasUnlockedActiveKey: currentActiveKey().unlocked,
-        vaultSelectionReady,
-        ownerAppsReady,
-        connectAppsReady,
-        assetWorkspaceReady,
-        error: error instanceof Error ? error.message : String(error)
-      });
+      if (ownerAppsPromise === stagePromise) {
+        ownerAppsPromise = undefined;
+        updateBootstrapStatus({
+          phase: "error",
+          storageReady: true,
+          vaultCapabilityReady: host.capabilities.has("vault.service") && host.capabilities.has("keyspace.service"),
+          hasUnlockedActiveKey: currentActiveKey().unlocked,
+          vaultSelectionReady,
+          ownerAppsReady,
+          connectAppsReady,
+          assetWorkspaceReady,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
       throw error;
     }
   };
@@ -606,18 +884,75 @@ export async function bootstrapPlugins(): Promise<PluginHost> {
     await enterVaultSelectionStage();
   }
 
-  sessionStateOff = coordinatorClient.subscribeTopic("session.state", (event) => {
-    if (event.type !== "session.state.changed") return;
-    const active = currentActiveKey();
-    if (!vaultSelectionReady) return;
-    updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked });
-    if (active.unlocked && !connectAppsReady) {
-      void runOwnerAndConnectStages().catch((error) => {
-        console.error("[bootstrap] owner/connect plugin assembly failed", error);
+  let sessionTransitionTail = Promise.resolve();
+  const handleSessionStateChanged = async (): Promise<void> => {
+    const nextIdentity = runtimeIdentityFromSnapshot(coordinatorClient.getBootstrapSnapshot());
+    const nextKey = runtimeIdentityKeyFor(nextIdentity);
+    const identityChanged = nextKey !== observedRuntimeIdentityKey;
+    const ownerIdentityChanged = observedRuntimeIdentity.vaultStatus !== nextIdentity.vaultStatus
+      || (observedRuntimeIdentity.ownerPublicKeyHex ?? "") !== (nextIdentity.ownerPublicKeyHex ?? "")
+      || observedRuntimeIdentity.sessionEpoch !== nextIdentity.sessionEpoch;
+
+    // Worker 运行单元属于 session 世代；Coordinator client 在世代切换时
+    // 会先清空旧后台快照，Host 必须立即重新投影，不能等下一条 unit 事件。
+    host.refreshRuntimeUnitSnapshots();
+    if (!identityChanged) {
+      const active = currentActiveKey();
+      if (vaultSelectionReady) {
+        updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked });
+        if (active.unlocked && !connectAppsReady) await runOwnerAndConnectStages();
+      }
+      return;
+    }
+
+    observedRuntimeIdentityKey = nextKey;
+    observedRuntimeIdentity = nextIdentity;
+    const staleOwnerAssembly = ownerIdentityChanged ? ownerAppsPromise : undefined;
+    if (ownerIdentityChanged) {
+      // 这不是用户 disable：意图保持不变，但当前 Window owner 实例和
+      // 资产工作区必须立刻从所有入口消失，不能等待网络 teardown。
+      ownerAssemblyGeneration += 1;
+      ownerAppsPromise = undefined;
+      ownerAppsReady = false;
+      connectAppsReady = false;
+      assetWorkspaceDisposer?.();
+      assetWorkspaceDisposer = undefined;
+      assetWorkspaceReady = false;
+      updateBootstrapStatus({
+        hasUnlockedActiveKey: nextIdentity.vaultStatus === "unlocked",
+        ownerAppsReady: false,
+        connectAppsReady: false,
+        assetWorkspaceReady: false,
+        phase: nextIdentity.vaultStatus === "unlocked" ? "vault-selection" : "vault-selection"
       });
     }
+
+    // transitionRuntimeIdentity 的同步前半段会在此调用返回前撤销旧
+    // owner Scope；await 部分只等待有界异步清理，再按新身份重建实例。
+    await host.transitionRuntimeIdentity(nextIdentity);
+    await staleOwnerAssembly?.catch(() => undefined);
+
+    if (!vaultSelectionReady) return;
+    const active = currentActiveKey();
+    updateBootstrapStatus({ hasUnlockedActiveKey: active.unlocked });
+    if (active.unlocked && !connectAppsReady) await runOwnerAndConnectStages();
+  };
+
+  sessionStateOff = coordinatorClient.subscribeTopic("session.state", (event) => {
+    if (event.type !== "session.state.changed") return;
+    // session.state 事件顺序就是身份世代顺序；串行处理可避免 A -> B
+    // 的旧异步阶段在 B -> A 时覆盖新阶段状态。
+    sessionTransitionTail = sessionTransitionTail
+      .then(handleSessionStateChanged)
+      .catch((error) => {
+        console.error("[bootstrap] session identity transition failed", error);
+      });
   });
   void sessionStateOff;
 
-  return host;
+    return host;
+  } catch (error) {
+    disposePageLifecycle();
+    throw error;
+  }
 }

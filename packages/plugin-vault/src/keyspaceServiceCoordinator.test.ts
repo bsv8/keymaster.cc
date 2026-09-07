@@ -8,6 +8,7 @@ describe("createKeyspaceServiceCoordinator", () => {
   it("initializes from the Coordinator bootstrap snapshot", () => {
     const coordinatorClient = {
       getBootstrapSnapshot: () => ({
+        authorityInstanceId: "authority:test",
         sessionEpoch: "test",
         vaultStatus: "unlocked" as const,
         activePublicKeyHex: "02".padEnd(66, "a"),
@@ -31,7 +32,7 @@ describe("createKeyspaceServiceCoordinator", () => {
   it("keeps selected while locked and active is empty", () => {
     const key = "02".padEnd(66, "a");
     const listeners: Array<(event: SessionStateEvent) => void> = [];
-    const client = { getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async () => ({ status: "ok" as const, value: undefined, sessionEpoch: "e" }) };
+    const client = { getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }), subscribeTopic: (_topic: string, cb: (event: SessionStateEvent) => void) => { listeners.push(cb); return () => undefined; }, backgroundCancelByKey: async () => ({ status: "accepted" as const }), vaultOperation: async () => ({ status: "ok" as const, value: undefined, sessionEpoch: "e" }) };
     const keyspace = createKeyspaceServiceCoordinator(client, new SessionStateMirror(client), createMessageBus());
     expect(keyspace.active()).toEqual({ activePublicKeyHex: undefined, generation: 1 });
     expect(keyspace.selected()).toBe(key);
@@ -48,7 +49,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     bus.subscribe("key.deleting", () => events.push("key.deleting"));
     bus.subscribe("key.deleted", () => events.push("key.deleted"));
     const client = {
-      getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
       vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
@@ -73,7 +74,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     const key = "02".padEnd(66, "a");
     const operations: unknown[] = [];
     const client = {
-      getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
       vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
@@ -94,7 +95,7 @@ describe("createKeyspaceServiceCoordinator", () => {
       releaseDelete = resolve;
     });
     const client = {
-      getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => { operations.push("cancel"); return { status: "accepted" as const }; },
       vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => {
@@ -129,7 +130,7 @@ describe("createKeyspaceServiceCoordinator", () => {
     const operations: unknown[] = [];
     const bus = createMessageBus();
     const client = {
-      getBootstrapSnapshot: () => ({ sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
+      getBootstrapSnapshot: () => ({ authorityInstanceId: "authority:test", sessionEpoch: "e", vaultStatus: "locked" as const, activePublicKeyHex: undefined, selectedPublicKeyHex: key, keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } }),
       subscribeTopic: () => () => undefined,
       backgroundCancelByKey: async () => ({ status: "blocked" as const, reason: { key: "background.blocked", fallback: "busy" } }),
       vaultOperation: async (operation: string | { type: string; [key: string]: unknown }) => { operations.push(operation); return { status: "ok" as const, value: operation === "listKeys" ? [{ publicKeyHex: key, label: "key", capabilities: [], createdAt: "now" }] : true, sessionEpoch: "e" }; }

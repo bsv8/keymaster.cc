@@ -1,0 +1,45 @@
+import { describe, expect, it } from "vitest";
+import {
+  COORDINATOR_WORKER_UNIT_CATALOG,
+  getCoordinatorWorkerAuditOperationForTask,
+  getCoordinatorWorkerUnitForTask,
+  validateCoordinatorWorkerUnitCatalog,
+} from "./workerUnitCatalog.js";
+
+describe("Coordinator Worker unit catalog", () => {
+  it("keeps migrated product, unit, task and final-I/O identities aligned", () => {
+    expect(validateCoordinatorWorkerUnitCatalog()).toEqual([]);
+    expect(COORDINATOR_WORKER_UNIT_CATALOG).toHaveLength(12);
+    expect(COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.unitId === "storage.coordinator-worker")).toMatchObject({
+      productId: "storage",
+      lifetime: "storage",
+      serviceIds: ["storage.runtime-controller"],
+      taskIds: [],
+    });
+    expect(getCoordinatorWorkerUnitForTask("p2pkh.transactions-sync")).toMatchObject({
+      productId: "p2pkh",
+      unitId: "p2pkh.coordinator-worker",
+      finalIoAuditEntries: [{ taskId: "p2pkh.transactions-sync", operation: "p2pkh.sync" }],
+    });
+    expect(getCoordinatorWorkerAuditOperationForTask("p2pkh.transactions-sync")).toBe("p2pkh.sync");
+  });
+
+  it("rejects duplicate product, unit and task identities", () => {
+    const contactsUnit = COORDINATOR_WORKER_UNIT_CATALOG.find((unit) => unit.productId === "contacts")!;
+    const duplicate = [
+      ...COORDINATOR_WORKER_UNIT_CATALOG,
+      {
+        ...contactsUnit,
+        productId: "p2pkh",
+      },
+    ];
+    expect(validateCoordinatorWorkerUnitCatalog(duplicate)).toEqual([
+      "Worker 单元未在产品运行单元契约中声明: contacts.coordinator-worker",
+      "重复 productId: p2pkh",
+      "重复 unitId: contacts.coordinator-worker",
+      "重复 taskId: contacts.presence-probe",
+      "任务产品依赖必须包含自身产品: contacts.coordinator-worker",
+      "重复 serviceId: contacts.service",
+    ]);
+  });
+});

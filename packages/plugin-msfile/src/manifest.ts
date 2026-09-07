@@ -13,6 +13,8 @@ import {
   RESOURCE_REGISTRY_CAPABILITY,
   type MsFileCoordinatorControl,
   WINDOW_P2P_EXECUTOR_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
   type SessionCoordinatorClient,
   type SystemSettingsRegistry,
 } from "@keymaster/contracts";
@@ -303,18 +305,31 @@ export const msfilePlugin: PluginManifest = {
     // 供应商时，组件仍在发起 Stat/Read 前 fail closed。
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "platform"
   },
-  dependencies: [
-    { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
-    { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" },
-    { capability: "business.registry", reason: "注册 MSFile 首页文件获取投影" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
-    { capability: "vault.service", reason: "首页文件读取只允许在 Vault unlocked 时进行" }
-  ],
+  units: [{
+    id: "msfile.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [MSFILE_SERVICE_CAPABILITY, MSFILE_COORDINATOR_CONTROL_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([
+      MSFILE_SERVICE_CAPABILITY,
+      MSFILE_COORDINATOR_CONTROL_CAPABILITY,
+    ]),
+    storage: { scope: "key", applicationStorageId: "MSFile", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "MSFile 数据面挂载到唯一 Window P2P Host 的 msfile lane" },
+      { capability: "system-settings.registry", reason: "MSFile settings live under Settings -> System" },
+      { capability: "business.registry", reason: "注册 MSFile 首页文件获取投影" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 变化时取消首页文件任务" },
+      { capability: "vault.service", reason: "首页文件读取只允许在 Vault unlocked 时进行" },
+    ]),
+  }, {
+    id: "msfile.coordinator-worker",
+    execution: "coordinator-worker",
+    lifetime: "owner-session",
+  }],
   i18n: resources,
-  storage: { scope: "key", applicationStorageId: "MSFile", schemaVersion: 1 },
   setup(ctx: PluginContext) {
     const coordinator = ctx.coordinator as MsFileCoordinatorControl | undefined;
     if (!coordinator) throw new Error("MSFile Coordinator control is unavailable");

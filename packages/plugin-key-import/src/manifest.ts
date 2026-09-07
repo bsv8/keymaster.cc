@@ -10,6 +10,7 @@
 // + 切 active。不允许在 uninitialized 状态下进入此工作区。
 
 import type { I18nPluginResources, PluginManifest, VaultSettingsRegistry } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { KeyImportSection } from "./ImportPage.js";
 
 export const KEY_IMPORT_CAPABILITY = "key-import.platform";
@@ -129,15 +130,21 @@ export const keyImportPlugin: PluginManifest = {
     bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [KEY_IMPORT_CAPABILITY],
     displayGroup: "business"
   },
+  units: [{
+    id: "key-import.window",
+    execution: "window",
+    lifetime: "root",
+    provides: [KEY_IMPORT_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([KEY_IMPORT_CAPABILITY]),
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "vault.service", reason: "导入私钥需要 vault 提供加解密" },
+      { capability: "importer.registry", reason: "依赖 importer 注册表枚举导入器" },
+      { capability: "vault-settings.registry", reason: "将导入工作区嵌入 Key 管理页" },
+    ]),
+  }],
   i18n: keyImportResources,
-  dependencies: [
-    { capability: "vault.service", reason: "导入私钥需要 vault 提供加解密" },
-    { capability: "importer.registry", reason: "依赖 importer 注册表枚举导入器" },
-    { capability: "vault-settings.registry", reason: "将导入工作区嵌入 Key 管理页" }
-  ],
   setup(ctx) {
     ctx.provide(KEY_IMPORT_CAPABILITY, { version: 1 });
 

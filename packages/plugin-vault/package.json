@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./coordinator": "./src/coordinator.ts"
+    "./coordinator": "./src/coordinator.ts",
+    "./session-crypto-worker": "./src/sessionCryptoWorker.ts"
   },
   "types": "./src/index.ts",
   "dependencies": {

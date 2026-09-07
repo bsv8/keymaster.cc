@@ -24,6 +24,7 @@ const BINARY_PREFIX = new TextEncoder().encode("keymaster-kv-v1:binary\n");
 const DEFAULT_PARTITION = "default";
 const MAX_KEY_LENGTH = 1024;
 const MAX_PARTITION_LENGTH = 128;
+const MAX_AUTOMATIC_COMMIT_RETRIES = 8;
 
 interface HeadRecord {
   version: 1;
@@ -350,7 +351,23 @@ export function createKeyValueStore(options: KeyValueStoreOptions): KeyValueStor
   }
 
   function commit(input: KeyValueCommitInput): Promise<KeyValueCommitResult> {
-    return withMaintenanceLock(() => withCurrentLease(() => commitUnlocked(input)));
+    return withMaintenanceLock(async () => {
+      for (let attempt = 0; attempt < MAX_AUTOMATIC_COMMIT_RETRIES; attempt += 1) {
+        try {
+          return await withCurrentLease(() => commitUnlocked(input));
+        } catch (caught) {
+          // 没有显式 ifRevision 时，put/delete/批量 commit 的语义是“基于
+          // 当前快照合并一次操作”；另一个句柄抢先发布 head 只意味着本次
+          // 快照过期，可以重新读取并重放纯 K-V 操作。显式 revision 则是
+          // 调用方要求的乐观锁，必须把冲突原样返回，不能替调用方重试。
+          if (input.ifRevision !== undefined || !(caught instanceof StorageRuntimeError) || caught.code !== "storage_conflict" || attempt + 1 >= MAX_AUTOMATIC_COMMIT_RETRIES) {
+            throw caught;
+          }
+          await new Promise<void>((resolve) => setTimeout(resolve, 0));
+        }
+      }
+      throw fail("storage_conflict", "K-V commit retry limit reached");
+    });
   }
 
   const store: KeyValueStore & KeyValueStoreMaintenance = {

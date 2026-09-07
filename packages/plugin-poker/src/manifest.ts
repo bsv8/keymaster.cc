@@ -33,6 +33,7 @@ import type {
   PokerTable,
   VaultService
 } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { I18N_SERVICE_CAPABILITY, POKER_SERVICE_CAPABILITY } from "@keymaster/contracts";
 import { POKER_SETTINGS_PATH } from "./constants.js";
 import { createPokerService } from "./pokerService.js";
@@ -261,22 +262,28 @@ export const pokerPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: false,
     canDisable: true,
-    providesCapabilities: [POKER_SERVICE_CAPABILITY],
     displayGroup: "business"
   },
+  units: [{
+    id: "poker.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [POKER_SERVICE_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([POKER_SERVICE_CAPABILITY]),
+    storage: { scope: "key", applicationStorageId: "Poker", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "vault.service", reason: "need createActiveKeyCrypto for signing" },
+      { capability: "keyspace.service", reason: "active key + key-scoped storage" },
+      { capability: "runtime.messageBus", reason: "event subscription + publish" },
+      { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
+      { capability: "route.registry", reason: "register poker pages" },
+      { capability: "business.registry", reason: "register poker lobby in the Home business navigation" },
+      { capability: "application-settings.registry", reason: "register poker application settings entry" },
+      { capability: "home.registry", reason: "register poker home widget" },
+      { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" },
+    ]),
+  }],
   i18n: pokerResources,
-  storage: { scope: "key", applicationStorageId: "Poker", schemaVersion: 1 },
-  dependencies: [
-    { capability: "vault.service", reason: "need createActiveKeyCrypto for signing" },
-    { capability: "keyspace.service", reason: "active key + key-scoped storage" },
-    { capability: "runtime.messageBus", reason: "event subscription + publish" },
-    { capability: I18N_SERVICE_CAPABILITY, reason: "i18n for route / menu / settings labels" },
-    { capability: "route.registry", reason: "register poker pages" },
-    { capability: "business.registry", reason: "register poker lobby in the Home business navigation" },
-    { capability: "application-settings.registry", reason: "register poker application settings entry" },
-    { capability: "home.registry", reason: "register poker home widget" },
-    { capability: "breadcrumb.registry", reason: "register poker breadcrumbs" }
-  ],
   async setup(ctx) {
     const vault = ctx.get<VaultService>("vault.service");
     const keyspace = ctx.get<KeyspaceService>("keyspace.service");

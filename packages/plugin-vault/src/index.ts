@@ -13,5 +13,7 @@ export type { VaultMetaRecord, VaultKeyRecord } from "./storage/vaultKeyReposito
 export { isWebAuthnPrfAvailable } from "./webauthnPrf.js";
 export * from "./crypto.js";
 export { deriveP2pkhAddress, signEcdsaDigest, verifySessionKeyPair, bytesToHex, hexToBytes } from "./sessionCryptoCore.js";
+export { createSessionCryptoEngine } from "./sessionCryptoClient.js";
+export type { SessionCryptoClientOptions, SessionCryptoEngine } from "./sessionCryptoClient.js";
 export * from "./vaultCoordinator.js";
 export { createVaultLocalSecretService } from "./localSecretService.js";

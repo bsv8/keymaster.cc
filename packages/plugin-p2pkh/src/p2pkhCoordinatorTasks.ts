@@ -22,6 +22,7 @@ export function createP2pkhCoordinatorTasks(input: {
   });
   return {
     id: "p2pkh.transactions-sync" as const,
+    unitId: "p2pkh.coordinator-worker",
     transactionsSync: (signal: AbortSignal) => sync.runOnce(signal),
     run: (signal: AbortSignal) => sync.runOnce(signal)
   };

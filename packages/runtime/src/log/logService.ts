@@ -217,6 +217,8 @@ export interface CreateLogServiceOptions {
 export interface LogServiceHandle extends LogService {
   /** 关闭 repository 句柄并清掉 listeners；仅测试 / dispose 使用。 */
   dispose(): void;
+  /** 在 Host 撤权时同步移除浏览器 unload hook，避免关闭连接后再次排队日志写入。 */
+  stopBrowserFlushHooks(): void;
   /** 等待当前已入队日志 best-effort 落库；仅 runtime 内部 / 测试使用。 */
   flush(options?: { timeoutMs?: number }): Promise<void>;
 }
@@ -511,9 +513,14 @@ export function createLogService(options: CreateLogServiceOptions = {}): LogServ
       await flushPendingWrites(options);
     },
 
+    stopBrowserFlushHooks() {
+      removeBrowserFlushHooks?.();
+      removeBrowserFlushHooks = null;
+    },
+
     dispose() {
       listeners.clear();
-      removeBrowserFlushHooks?.();
+      service.stopBrowserFlushHooks();
       void (async () => {
         await flushPendingWrites({ timeoutMs: 250 });
         await disposeLogRepository();

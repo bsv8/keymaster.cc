@@ -153,6 +153,31 @@ describe("PlatformRoot bucket schema", () => {
     await expect(root.openKeyValueStore({ ownerPublicKeyHex: `03${"22".repeat(32)}`, applicationStorageId: "Contacts", schemaVersion: 2 })).resolves.toBeDefined();
   });
 
+  it("serializes same-worker owner lease CAS while allowing concurrent stores", async () => {
+    const state: ProviderState = { objects: new Map(), sequence: 0 };
+    const root = createPlatformRootStore({ provider: makeProvider(state), bucket });
+    const ownerPublicKeyHex = `02${"55".repeat(32)}`;
+    const stores = await Promise.all(
+      Array.from({ length: 4 }, () => root.openKeyValueStore({
+        ownerPublicKeyHex,
+        applicationStorageId: "Contacts",
+        schemaVersion: 1
+      }))
+    );
+
+    // 真实 Worker 启动时会同时打开多个 owner store。生命周期 CAS 应只在
+    // 同一 owner 的短计数更新上排队，不能把这些真实 K-V 请求串成一个。
+    await Promise.all(stores.flatMap((store, storeIndex) => [
+      store.put(`concurrent-${storeIndex}-a`, storeIndex),
+      store.put(`concurrent-${storeIndex}-b`, storeIndex),
+      store.get(`concurrent-${storeIndex}-missing`)
+    ]));
+    stores.forEach((store) => store.close());
+
+    const lifecycle = JSON.parse(new TextDecoder().decode(state.objects.get(`.keymaster/owners/${ownerPublicKeyHex}`)!.bytes)) as { activeOperations: number };
+    expect(lifecycle.activeOperations).toBe(0);
+  });
+
   it("fences shared-provider deletion, removes owner schema records, and creates a new generation on reactivation", async () => {
     const state: ProviderState = { objects: new Map(), sequence: 0 };
     const firstRoot = createPlatformRootStore({ provider: makeProvider(state), bucket });

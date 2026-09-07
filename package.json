@@ -9,19 +9,29 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "npm run dev -w @keymaster/web",
-    "build": "npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
+  "dev": "npm run dev -w @keymaster/web",
+  "build": "npm run build -w @keymaster/web && node scripts/check-web-production-artifacts.mjs",
+  "build:production": "node scripts/build-plugin-lifecycle.mjs",
     "smoke:msfile-media-sw": "node scripts/smoke-msfile-media-sw.mjs",
     "verify:msfile-read-concurrency-pressure": "node scripts/msfile-read-concurrency-pressure.mjs",
+    "verify:final-io-audit": "node scripts/check-coordinator-final-io-audit.mjs",
+    "verify:lifecycle-deployment": "node scripts/check-plugin-lifecycle-deployment.mjs",
+    "prepare:lifecycle-evidence": "node scripts/prepare-plugin-lifecycle-evidence.mjs",
+    "verify:lifecycle-production-gates": "node scripts/check-plugin-lifecycle-production-gates.mjs",
+    "verify:lifecycle-release": "pnpm verify:final-io-audit && pnpm verify:lifecycle-deployment && pnpm test:e2e:external && pnpm test:e2e:irreversible-io && pnpm test:e2e:recovery && pnpm verify:lifecycle-production-gates",
     "typecheck": "tsc -b",
     "keys:balance": "node scripts/check-key-balances.mjs",
     "verify:woc-asset": "node scripts/verify-woc-asset-observation.mjs",
     "lint:storage-naming": "node scripts/check-storage-hard-switch.mjs",
-    "lint:boundaries": "node scripts/check-storage-hard-switch.mjs && node scripts/check-boundaries.mjs",
+  "lint:boundaries": "node scripts/check-storage-hard-switch.mjs && node scripts/check-boundaries.mjs && node scripts/check-coordinator-final-io-audit.mjs",
     "lint:react-boundaries": "node scripts/check-react-resource-boundaries.mjs",
     "test": "pnpm lint:react-boundaries && node scripts/run-vitest-batches.mjs",
     "test:storage:smoke": "vitest run --config vitest.storage-smoke.config.ts",
     "test:e2e": "playwright test",
+    "test:e2e:lifecycle": "playwright test --config=playwright.lifecycle.config.ts",
+    "test:e2e:external": "node scripts/run-external-appview-smoke.mjs",
+    "test:e2e:irreversible-io": "node scripts/run-irreversible-io-smoke.mjs",
+    "test:e2e:recovery": "node scripts/run-coordinator-recovery-drill.mjs",
     "test:e2e:report": "playwright show-report",
     "docs:connect:dev": "pnpm --filter @keymaster/connect-docs dev",
     "docs:connect:build": "pnpm --filter @keymaster/connect-docs build"
@@ -52,5 +62,21 @@
     "react-dom": "^18.3.1",
     "react-i18next": "^15.7.4",
     "react-router": "^7.17.0"
-  }
+  },
+  "description": "本地优先的 BSV 浏览器钱包。基于插件架构，按\"基础设施 / 平台 / 业务\"三层分离。",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bsv8/keymaster.cc.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/bsv8/keymaster.cc/issues"
+  },
+  "homepage": "https://github.com/bsv8/keymaster.cc#readme"
 }

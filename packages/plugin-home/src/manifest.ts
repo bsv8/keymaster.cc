@@ -3,7 +3,8 @@
 
 import {
   CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY,
-  KEYSPACE_SERVICE_CAPABILITY
+  KEYSPACE_SERVICE_CAPABILITY,
+  defineRuntimeUnitDependencies,
 } from "@keymaster/contracts";
 import type { I18nPluginResources, PluginManifest } from "@keymaster/contracts";
 import { HomePage } from "./HomePage.js";
@@ -124,27 +125,32 @@ export const homePlugin: PluginManifest = {
     canDisable: false,
     displayGroup: "core"
   },
-  i18n: homeResources,
-  dependencies: [
-    { capability: "home.registry", reason: "读取首页主栏与侧栏卡片" },
-    { capability: "business.registry", reason: "读取业务首页投影" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "展示当前 key 的身份信息" },
-    { capability: "contacts.service", reason: "查询和创建联系人" },
-    { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, reason: "展示扫描到的公钥可执行操作" }
-  ],
-  business: {
-    domains: [{
-      id: "home",
-      label: { key: "home.domain.label", fallback: "Overview" },
-      order: 0,
-      features: [{
-        id: "home.overview",
-        label: { key: "home.menu.label", fallback: "Home" },
+  units: [{
+    id: "home.window",
+    execution: "window",
+    lifetime: "root",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "home.registry", reason: "读取首页主栏与侧栏卡片" },
+      { capability: "business.registry", reason: "读取业务首页投影" },
+      { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "展示当前 key 的身份信息" },
+      { capability: "contacts.service", reason: "查询和创建联系人" },
+      { capability: CONTACT_PUBLIC_KEY_ACTION_REGISTRY_CAPABILITY, reason: "展示扫描到的公钥可执行操作" },
+    ]),
+    business: {
+      domains: [{
+        id: "home",
+        label: { key: "home.domain.label", fallback: "Overview" },
         order: 0,
-        icon: "Home",
-        entry: { path: "/", component: HomePage }
+        features: [{
+          id: "home.overview",
+          label: { key: "home.menu.label", fallback: "Home" },
+          order: 0,
+          icon: "Home",
+          entry: { path: "/", component: HomePage }
+        }]
       }]
-    }]
-  },
+    },
+  }],
+  i18n: homeResources,
   setup() {}
 };

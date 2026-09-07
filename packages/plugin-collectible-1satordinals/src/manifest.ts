@@ -37,7 +37,9 @@ import {
   PROTECTED_OUTPOINT_REGISTRY_CAPABILITY,
   RUNTIME_MESSAGE_BUS,
   WOC_CAPABILITY,
-  WOC_1SAT_ORDINALS_CAPABILITY
+  WOC_1SAT_ORDINALS_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import {
   P2PKH_CAPABILITY,
@@ -139,24 +141,41 @@ export const oneSatOrdinalsCollectiblePlugin: PluginManifest = {
     canDisable: true,
     displayGroup: "business"
   },
-  i18n: oneSatResources,
-  storage: { scope: "key", applicationStorageId: ORDINALS_STORAGE_ID, schemaVersion: ORDINALS_SCHEMA_VERSION },
-  dependencies: [
-    { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的未花费 UTXO 集合" },
-    { capability: WOC_1SAT_ORDINALS_CAPABILITY, reason: "按 outpoint 反查 1Sat inscription" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化" },
-    { capability: "collectible.registry", reason: "注册 1Sat CollectibleProvider" },
-    { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册 1Sat 后台同步任务" },
-    { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发 1Sat 即时同步" },
-    { capability: "vault.service", reason: "1Sat sync task canRun 门禁" },
-    { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
-    { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布 1Sat 数据变更通知" },
-    { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 1Sat 受保护 outpoint" },
-    { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 1Sat mint / transfer 交易" },
-    { capability: "collectible-transfer.registry", reason: "注册 1Sat collectible transfer handler" },
-    { capability: "route.registry", reason: "注册 1Sat 创建页" },
-    { capability: "business.registry", reason: "注册 1Sat 业务入口" }
+  units: [
+    {
+      id: "collectible-1satordinals.window",
+      execution: "window",
+      lifetime: "owner-session",
+      provides: [ORDINAL_MINT_SERVICE_CAPABILITY, ORDINAL_TRANSFER_SERVICE_CAPABILITY],
+      providedContracts: defineRuntimeUnitProvidedContracts([
+        ORDINAL_MINT_SERVICE_CAPABILITY,
+        ORDINAL_TRANSFER_SERVICE_CAPABILITY,
+      ]),
+      storage: { scope: "key", applicationStorageId: ORDINALS_STORAGE_ID, schemaVersion: ORDINALS_SCHEMA_VERSION },
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: P2PKH_CAPABILITY, reason: "读取当前 active key 的未花费 UTXO 集合" },
+        { capability: WOC_1SAT_ORDINALS_CAPABILITY, reason: "按 outpoint 反查 1Sat inscription" },
+        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "监听 active key 变化" },
+        { capability: "collectible.registry", reason: "注册 1Sat CollectibleProvider" },
+        { capability: BACKGROUND_REGISTRY_CAPABILITY, reason: "注册 1Sat 后台同步任务" },
+        { capability: BACKGROUND_SERVICE_CAPABILITY, reason: "触发 1Sat 即时同步" },
+        { capability: "vault.service", reason: "1Sat sync task canRun 门禁" },
+        { capability: RUNTIME_MESSAGE_BUS, reason: "订阅 vault.unlocked / key.deleted" },
+        { capability: ASSET_DATA_NOTIFIER_CAPABILITY, reason: "发布 1Sat 数据变更通知" },
+        { capability: PROTECTED_OUTPOINT_REGISTRY_CAPABILITY, reason: "注册 1Sat 受保护 outpoint" },
+        { capability: P2PKH_PROTOCOL_SPEND_CAPABILITY, reason: "签名 1Sat mint / transfer 交易" },
+        { capability: "collectible-transfer.registry", reason: "注册 1Sat collectible transfer handler" },
+        { capability: "route.registry", reason: "注册 1Sat 创建页" },
+        { capability: "business.registry", reason: "注册 1Sat 业务入口" },
+      ]),
+    },
+    {
+      id: "collectible-1satordinals.coordinator-worker",
+      execution: "coordinator-worker",
+      lifetime: "owner-session",
+    },
   ],
+  i18n: oneSatResources,
   setup(ctx) {
     const p2pkh = ctx.get<P2pkhServiceFor1Sat>(P2PKH_CAPABILITY);
     const wocOneSat = ctx.get<Woc1SatOrdinalsService>(WOC_1SAT_ORDINALS_CAPABILITY);

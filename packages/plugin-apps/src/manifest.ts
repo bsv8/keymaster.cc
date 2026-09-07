@@ -20,6 +20,10 @@ import type {
   PluginManifest,
   RouteRegistry
 } from "@keymaster/contracts";
+import {
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
+} from "@keymaster/contracts";
 import { AppsHomeWidget } from "./AppsHomeWidget.js";
 import { AppsPage } from "./AppsPage.js";
 import { createCatalogResolver } from "./catalog.js";
@@ -120,14 +124,20 @@ export const appsPlugin: PluginManifest = {
     defaultEnabled: true,
     canDisable: true,
     displayGroup: "business",
-    providesCapabilities: ["app.catalog"]
   },
+  units: [{
+    id: "apps.window",
+    execution: "window",
+    lifetime: "root",
+    provides: ["app.catalog"],
+    providedContracts: defineRuntimeUnitProvidedContracts(["app.catalog"]),
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" },
+      { capability: "route.registry", reason: "注册应用列表页面" },
+      { capability: "business.registry", reason: "接入首页业务导航" },
+    ]),
+  }],
   i18n: appsResources,
-  dependencies: [
-    { capability: "protocol.service", reason: "调用 launchAppView 启动 appView" },
-    { capability: "route.registry", reason: "注册应用列表页面" },
-    { capability: "business.registry", reason: "接入首页业务导航" }
-  ],
   setup(ctx) {
     // 暴露只读本地 resolver；协议层通过依赖注入消费，绝不反向 import 本插件。
     ctx.provide("app.catalog", createCatalogResolver());

@@ -156,6 +156,17 @@ async function start() {
           cause: error
         }));
     }
+    if (e2eBuild && typeof window !== "undefined" && new URLSearchParams(window.location.search).has("lifecycleE2E")) {
+      void import("virtual:keymaster-msfile-e2e-hooks")
+        .then((module) => module.installLifecycleProductionE2EHooks(host))
+        .catch((error) => reportFatalError({
+          phase: "custom",
+          scope: "app-root",
+          source: "app-bundle",
+          message: formatStartupErrorSummary(error),
+          cause: error
+        }));
+    }
   } catch (err) {
     // 不再调旧 renderFatalError；统一走 fatal 通道。
     const message = formatStartupErrorSummary(err);

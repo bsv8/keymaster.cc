@@ -43,6 +43,24 @@ type StateEvent = {
   pendingApprovals: MsFilePendingApprovalView[];
 };
 
+/** Stat 元数据在页面侧也做短 TTL 缓存，避免首页轮询反复穿越 RPC。 */
+const MSFILE_STAT_PROXY_CACHE_TTL_MS = 5_000;
+const MSFILE_STAT_PROXY_CACHE_MAX_ENTRIES = 256;
+
+interface CachedStatResult {
+  value: MsFileStatResult;
+  expiresAt: number;
+  sessionEpoch: string;
+  supplierGeneration: number;
+}
+
+function cloneStatResult(value: MsFileStatResult): MsFileStatResult {
+  return {
+    seedHashHex: value.seedHashHex,
+    suppliers: value.suppliers.map((entry) => ({ ...entry })),
+  };
+}
+
 function unwrap<T>(result: CoordinatorValueResult<unknown>): Promise<T> {
   if (result.status === "ok") return Promise.resolve(result.value as T);
   if (result.status === "transport-error") {
@@ -68,11 +86,16 @@ export class MsFileServiceProxy implements MsFileService {
   };
   private readonly listeners = new Set<() => void>();
   private readonly grants = new Map<string, Promise<string>>();
+  private readonly statCache = new Map<string, CachedStatResult>();
   private readonly unsubscribeState: () => void;
 
   constructor(private readonly coordinator: MsFileCoordinatorControl) {
     this.unsubscribeState = coordinator.subscribeTopic("msfile.state", (event: StateEvent) => {
-      if (event.sessionEpoch !== this.current.sessionEpoch) this.grants.clear();
+      if (event.sessionEpoch !== this.current.sessionEpoch) {
+        this.grants.clear();
+        this.statCache.clear();
+      }
+      if (event.supplierGeneration !== this.current.supplierGeneration) this.statCache.clear();
       // 兼容旧 Worker 的 baseline：四项并发设置必须以完整快照进入页面。
       const concurrency = normalizeMsFileReadConcurrencySettings(event)
         ?? { ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
@@ -93,10 +116,38 @@ export class MsFileServiceProxy implements MsFileService {
   dispose(): void {
     this.unsubscribeState();
     this.listeners.clear();
+    this.statCache.clear();
   }
 
   private control<T>(control: CoordinatorMsFileControl): Promise<T> {
     return this.coordinator.msfileControl(control).then((result) => unwrap<T>(result));
+  }
+
+  /**
+   * 配置读取也是状态同步边界：新页面可能先收到 Coordinator 的
+   * `unconfigured` 基线，随后才按需启动 MSFile runtime。成功读取到当前
+   * 快照后，代理必须立即反映同一份权威配置，不能依赖恰好到达的 topic
+   * 事件来决定页面是否可用。
+   */
+  private applySettingsSnapshot(snapshot: MsFileSettingsSnapshot): void {
+    const status: MsFileServiceStatus = snapshot.globalSettings || snapshot.suppliers.length > 0
+      ? "ready"
+      : "unconfigured";
+    const next: StateEvent = {
+      ...this.current,
+      status,
+      supplierGeneration: snapshot.supplierGeneration,
+      globalSettings: snapshot.globalSettings,
+      mediaBlockReadConcurrency: snapshot.mediaBlockReadConcurrency,
+      globalSeedReadConcurrency: snapshot.globalSeedReadConcurrency,
+      globalBlockReadConcurrency: snapshot.globalBlockReadConcurrency,
+      globalStatConcurrency: snapshot.globalStatConcurrency,
+    };
+    const changed = JSON.stringify(this.current) !== JSON.stringify(next);
+    this.current = next;
+    if (changed) {
+      for (const listener of this.listeners) listener();
+    }
   }
 
   private grantFor(ctx: MsFileConnectAppContext): Promise<string> {
@@ -130,8 +181,10 @@ export class MsFileServiceProxy implements MsFileService {
     return this.coordinator.msfileData(build(grantId), transfer, signal).then((result) => unwrap<T>(result));
   }
 
-  getSettingsSnapshot(): Promise<MsFileSettingsSnapshot> {
-    return this.control<MsFileSettingsSnapshot>({ type: "settings.get" });
+  async getSettingsSnapshot(): Promise<MsFileSettingsSnapshot> {
+    const snapshot = await this.control<MsFileSettingsSnapshot>({ type: "settings.get" });
+    this.applySettingsSnapshot(snapshot);
+    return snapshot;
   }
 
   getReadConcurrencySettings(): Promise<MsFileReadConcurrencySettings> {
@@ -206,7 +259,38 @@ export class MsFileServiceProxy implements MsFileService {
   }
 
   stat(input: MsFileStatInput): Promise<MsFileStatResult> {
-    return this.dataFor<MsFileStatResult>(null, () => ({ type: "stat", seedHashHex: input.seedHashHex }), [], input.signal);
+    if (input.signal?.aborted) return Promise.reject(new MsFileServiceError("msfile_unavailable"));
+    const sessionEpoch = this.current.sessionEpoch;
+    const supplierGeneration = this.current.supplierGeneration;
+    const cached = this.statCache.get(input.seedHashHex);
+    if (
+      cached
+      && cached.expiresAt > Date.now()
+      && cached.sessionEpoch === sessionEpoch
+      && cached.supplierGeneration === supplierGeneration
+    ) {
+      return Promise.resolve(cloneStatResult(cached.value));
+    }
+    if (cached) this.statCache.delete(input.seedHashHex);
+    return this.dataFor<MsFileStatResult>(null, () => ({ type: "stat", seedHashHex: input.seedHashHex }), [], input.signal)
+      .then((result) => {
+        if (!result.suppliers.some((entry) => entry.status === "network-error")
+          && this.current.sessionEpoch === sessionEpoch
+          && this.current.supplierGeneration === supplierGeneration) {
+          this.statCache.set(input.seedHashHex, {
+            value: cloneStatResult(result),
+            expiresAt: Date.now() + MSFILE_STAT_PROXY_CACHE_TTL_MS,
+            sessionEpoch,
+            supplierGeneration,
+          });
+          while (this.statCache.size > MSFILE_STAT_PROXY_CACHE_MAX_ENTRIES) {
+            const oldest = this.statCache.keys().next().value as string | undefined;
+            if (oldest === undefined) break;
+            this.statCache.delete(oldest);
+          }
+        }
+        return result;
+      });
   }
 
   readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult> {

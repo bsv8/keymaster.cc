@@ -43,6 +43,7 @@ export function createP2pkhProviderRegistry(): P2pkhProviderRegistry {
     registerConfirmedProvider(provider) { register(confirmed, provider, "confirmed"); },
     unregisterConfirmedProvider(providerId) { confirmed.delete(providerId); },
     registerBroadcastProvider(provider) { register(broadcast, provider, "broadcast"); },
+    unregisterBroadcastProvider(providerId) { broadcast.delete(providerId); },
     listConfirmedProviders(network) {
       return [...confirmed.values()].filter((p) => supports(p.descriptor, network)).map((p) => cloneDescriptor(p.descriptor));
     },

@@ -1,13 +1,13 @@
 # Keymaster 插件系统重构施工单
 
-日期：2026-09-05。状态：待实施；本轮仅交付文档。设计基线：[设计文档](./design.md)，代码 `5b0a3ec`。
+日期：2026-09-06。状态：主链、Window lifetime 编排、子 Scope 清理聚合和 Worker 状态聚合已落地；目标部署发布证据仍待完成。设计基线：[设计文档](./design.md)，代码基线为工作区当前代码。
 
 ## 1. 施工约束
 
 1. 先固定行为与证据，再引入 Cordis；先迁移生命周期，再拆领域代码。保留现有存储世代、删除日志、签名格式、Connect 校验及网络并发限制。
 2. 一个实例只有一个生命周期所有者。迁移批次内部一次切换，旧监听、旧任务注册和旧清理在同批删除；禁止两个框架同时启动同一业务。
 3. 字段、状态、错误原因须有中文说明。文中路径为建议责任范围，新模块路径是施工目标，不表示文件已存在。
-4. 不为设计文档新增业务测试；以下测试均是未来代码施工的验收任务。不得把“计划验证”写成“已经通过”。
+4. 本轮可以为已施工的边界补机制测试，但不能把机制测试等同于生产验收；以下仍未运行的项目必须明确标为未验证。不得把“计划验证”写成“已经通过”。
 5. 不用真实付款、广播或真实私钥验证生命周期；用现有测试替身、临时桶和故障注入。需要端到端协议验证时沿用项目测试环境。
 
 ## 2. 推荐执行顺序与交付门槛
@@ -30,7 +30,7 @@
 
 原 KMP-004 编号保留为一组，后文依赖“004”均指 A / B / C 三个子单全部通过。001 是验证关卡，不是批量迁移授权；其中的协议草案和验证失败必须先反馈到设计，不能边大批改业务边决定安全语义。
 
-## KMP-001：建立实际能力清单，验证 Cordis 适配
+## KMP-001：建立实际能力清单，验证 Cordis 适配（已完成证据收集，结论不通过）
 
 **目标：** 确定要替换的是哪套运行机制，避免重构建立在历史注释上。
 
@@ -49,23 +49,25 @@
 - 按设计 4.4 / 6.1 节验证服务就绪、代理重建、快照乱序和控制命令冲突；确认现有 RPC / baseline 能复用的部分，记录需要补充的字段。
 - 将新旧 Worker 接管提前到此单：选择受控冷切换或两阶段升级，验证旧客户端拒绝策略与旧 I/O 排空；无法证明安全接管时，不允许后续批次切换生产写入。
 
-**交付：** `inventory.md`（现状矩阵）、`cordis-spike.md`（版本和验证记录）、Connect 策略决策记录。没有实际执行的项目明确标为未验证。
+**交付：** [inventory.md](./inventory.md)（现状矩阵）、[cordis-spike.md](./cordis-spike.md)（版本和验证记录）、[connect-strategy.md](./connect-strategy.md)（Connect 策略决策记录）。没有实际执行的项目明确标为未验证。
 
 另在验证记录内强制记录四项决策及证据：运行单元模型（设计 4.2）、状态与命令协议（6.1）、远程服务桥（4.4）、首次升级接管（11.1）。每项写清选择、未选方案原因、测试结果和剩余限制；直接引用并修订这些规范，不强制另建四份重复 ADR（架构决策记录）。
 
-**验收：** 能解释主会话与 Connect 的真实关系；列出当前全部业务运行时的唯一所有者；Cordis 能承载设计语义，且依赖与产物增量可接受。依赖顺序与清理结果不依赖未公开的内部 API。
+**验收结果：** 已解释主会话与 Connect 的实际入口并盘点 25 个 catalog 产品；作用域、资源、意图命令、服务桥、显式运行单元和升级门禁的基础契约已有测试。Cordis 的 Node 隔离导入成功，但浏览器 / Dedicated Worker / SharedWorker 的 Cordis 适配链未验证，且依赖未锁定，因此“采用 Cordis”不通过。本批次选择现有 Host 的自研薄核心作为施工实现；主页面 Window → SharedWorker → 独立 MessagePort → owner/platform 存储与 Coordinator crypto、Dedicated Worker Session Crypto，以及 `/apps → Session Window → 外部 AppView → connect.launch` 已在 Chromium 生产构建回归。25 个产品的 manifest 已显式声明 Window / Worker 单元，Coordinator Worker 另有静态目录和运行态实例注册；剩余门禁是目标部署的 AppView、恢复、不可逆 I/O、旧 Worker 退出和回退证据。
 
-**不通过时：** 保留现有 Host，交付失败原因和最小自研增强备选，不开始批量迁移，不同时引入两套调度器。
+**处理：** 保留现有 Host 并完成最小自研增强；不引入 Cordis，不开始批量业务迁移，不同时引入两套调度器。后续如改用 Cordis，必须先完成浏览器 / Worker 适配器验证并替换当前实现，而不是并行运行。
 
 ## KMP-002：作用域与资源归属
 
 **目标：** 资源在创建时有所有者，销毁不依赖事后猜测。
 
+**当前结果：** 作用域、资源登记、同步撤权、服务桥和跨环境协议的本地实现已落在 `packages/runtime/src/lifecycle/`；Window Host 已按 `storage`、`owner-session`、`connect-session` 选择 Root 子 Scope，锁屏 / 切 Key 同步撤销旧 owner Scope，并在新身份下重建实例；父 Scope 会聚合子 Scope 的超时、失败、迟到成功与待清理资源。已覆盖迟到资源最终成功回收、旧代理、快照缺口、`callId` 复用、插件子 Scope 纳入 Host 清理结果等测试。Node Coordinator 纵向测试与 Chromium 生产构建已验证 Window → SharedWorker → 独立 MessagePort → owner/platform 存储和 crypto；25 个产品的 manifest 与 contracts 静态运行单元目录已逐项校验，Coordinator Worker 的 12 个任务 / 服务单元由运行态注册表绑定 instance。外部部署链和目标环境恢复证据不在本地测试范围内。
+
 **责任范围：** `packages/contracts/src/plugin.ts`；`packages/runtime/src/createPluginHost.ts`、`pluginOwnership.ts`、`messageBus.ts`、`resources/`、各 Registry；建议新增 `packages/runtime/src/lifecycle/`，保持可被 Worker 独立导入。
 
 **施工内容：**
 
-- 按设计 4.2 / 6.1 定义运行单元、作用域、实例令牌、只读上下文、取消信号和清理结果，使用 Cordis 适配实现；不把 Cordis 原始根 Context 暴露给业务。
+- 按设计 4.2 / 6.1 定义运行单元、作用域、实例令牌、只读上下文、取消信号和清理结果，使用 `packages/runtime/src/lifecycle/` 自研薄核心实现；不把 Cordis 原始根 Context 暴露给业务。Cordis 暂不作为生产依赖。
 - 包装现有服务提供、消息订阅、Registry 注册、定时器和请求资源；逐步把 `onDispose` 与 teardown 接到同一释放记录。
 - 规定同步撤销入口和异步收尾分离；所有回调尽力执行、幂等、可观测。清理失败或超时保留待处理状态。
 - 异步创建资源需在开始前登记取消责任；停止后返回的资源立即释放，不能发布到旧上下文。
@@ -82,6 +84,10 @@
 ## KMP-003：依赖驱动启停与唯一权威
 
 **目标：** 禁用提供者时自动停止消费者，解锁或恢复依赖不篡改用户设置。
+
+**当前结果：** SharedWorker 已持有插件意图控制器，页面 UI 已改为提交绝对意图命令；命令去重、修订冲突、Worker 重启后的旧 authority 拒绝和页面旧事件丢弃已有测试。运行时按 `execution` 选择唯一单元，严格依赖匹配 `sourceExecution`、`scope` 和 `contractVersion`；Coordinator 还在持久 authority / handover generation 上保护最终存储与签名边界。25 个产品均有显式 manifest 单元，Coordinator Worker 目录登记 12 个任务 / 服务单元，并由 Worker 运行态注册表绑定实际 instance；未登记的生产任务继续 fail closed。
+
+Coordinator 的生产任务装配现在对未登记 `productId`、`unitId` 或最终 I/O 审计入口的任务 fail closed（安全拒绝）；只有测试专用注册入口可创建临时未登记任务。这样新增手工任务会在运行前暴露为施工缺口，不会静默进入生产。
 
 **责任范围：** `pluginGraph.ts`、`pluginConfigStore.ts`、`createPluginHost.ts`；`apps/web/src/bootstrapPlugins.ts`、`pluginCatalog.ts`、Coordinator Client / Worker；`plugin-settings` 启停界面。
 
@@ -101,11 +107,13 @@
 
 补充验收：starting 中 disable、stopping 中 enable、旧初始化晚报错、配置持久化后启动失败、命令确认丢失后重复提交、相同 commandId 不同内容、修订冲突、主 Worker 重启后旧命令被拒绝。双版本测试必须证明旧写入已被隔离，不能仅验证新页面收到了升级提示。
 
-**清理失败要求：** 旧实例即时失去服务权限；新实例不得在旧写入或排他资源未排空时运行。UI 区分“已停用”和“清理未完成”。
+**清理失败要求：** 旧实例即时失去服务权限；新实例不得在旧写入或排他资源未排空时运行。UI 区分“已停用”和“清理未完成”；清理超时但最终成功后必须自动收敛并允许再次启用。
 
 ## KMP-004A：权限契约与租约验证器
 
 **目标：** 建立可复用的校验入口，不在这一单同时搬迁存储和密码学业务。
+
+**当前结果：** 远程服务桥已使用服务端持有的不透明 `grantId`，并在连接、服务实例、作用域、会话 / owner、授权修订和最终操作 allowlist（允许操作集合）处复核；主页面与 Coordinator 的独立 MessagePort、Worker 服务单元实例和旧代理失效已有 Node / Chromium 证据。上传、订阅、广播 / 支付等不可逆领域入口仍按审计台账要求等待目标环境 smoke，不能以本地链替代外部证据。
 
 **责任范围：** `packages/contracts/src/plugin.ts`、`sessionCoordinator.ts` 及权限契约；`packages/runtime` 的 Context / 服务桥；`bootstrapPlugins.ts` 的 Coordinator facade；Worker RPC 授权入口。
 
@@ -117,6 +125,8 @@
 
 **目标：** 完整打通“单元声明 → 受限句柄 → RPC → 最终存储 I/O”一条链。
 
+**当前结果：** owner 与 platform 存储均由 Coordinator 发放端口绑定 grant；最终 owner / platform I/O 复核 owner、桶世代、session epoch 和根安装令牌。owner 生命周期计数在同一 Worker 内按 owner 串行化短 CAS，跨 Worker 仍通过条件写入重试，避免启动并发时误报 lease 冲突。platform grant 在重连后只对尚未进入物理 I/O 的授权校验失败重绑一次，不重放未知结果写入。主链已由 Node / Chromium 覆盖；领域插件和外部部署仍需逐入口审计。
+
 **责任范围：** `packages/contracts/src/storage/access.ts`、`storage/internal.ts`；`packages/platform-storage/src/coordinator/` 及 owner 存储边界；一个现有 owner 数据消费者。
 
 **施工内容：** 沿用内置存储声明表，区分读写权限，句柄绑定产品 / 单元 / 实例、owner、桶和现有世代。使用 004A 验证器在服务端与最终 I/O 前检查；旧句柄不能动态换绑。替换这一链路按英文文本识别旧绑定的逻辑。
@@ -127,6 +137,8 @@
 
 **目标：** 完整打通“业务意图 → 专用能力 → RPC 授权 → 内核密码学”一条链。
 
+**当前结果：** Coordinator crypto 服务通过独立 MessagePort 暴露，服务端持有 grant 并在最终派生 / 签名操作复核会话、owner、Provider 实例和允许操作；独立 Dedicated Worker Session Crypto 也已完成浏览器回归，dispose 后公开能力立即撤销。Connect 默认 AppView 仍使用受控 bootstrap runtime，不能把 Dedicated Worker 测试路径当作所有 Connect 请求的默认实现。
+
 **责任范围：** `packages/contracts/src/activeKeyCrypto.ts`、`vault.ts`；Vault Coordinator 代理、Worker 密码学入口与一个交易 / 协议调用者。
 
 **施工内容：** 拆分公开身份、交易 / 意图 / Channel 密码学、备份导出和 Vault 管理的窄接口；接入 004A 租约校验。任意摘要签名保留为受信任内部原语，不能因签名请求带一个用途字符串就放行。底层算法、编码格式和原业务校验不变。
@@ -136,6 +148,8 @@
 ## KMP-005：统一主会话边界
 
 **目标：** 锁屏、切 Key、解锁只通过一个控制器推动作用域。
+
+**当前结果：** 主 Coordinator 已统一锁屏、切 Key、解锁时的 session epoch、owner fence、服务代理撤销和最终 I/O lease；旧 proxy、旧 Provider 实例和旧世代请求有 Node / Chromium 回归。旧 Worker 持有活动 final-I/O lease 时不会被强制夺权，状态会保留 `recovery-required` 并由 UI 暴露，避免把“安全拒绝”误报成已恢复。人工处理步骤已记录在 [Coordinator 接管恢复操作协议](./coordinator-recovery-runbook.md)，但目标部署恢复演练和所有领域入口仍未完成。
 
 **责任范围：** `apps/web/src/keymasterSessionCoordinator.worker.ts` 的 `performGlobalLock`、`transitionActiveStorageOwner`、`enterUnlockedState`、激活与 Passkey 入口；`packages/plugin-vault/src/*Coordinator.ts`、`sessionStateMirror.ts`；建议新增 `apps/web/src/coordinator/sessionLifecycle.ts`。
 
@@ -155,6 +169,10 @@
 ## KMP-006：后台任务、MSFile、Sat / Channel 与网络执行器
 
 **目标：** Worker 不再硬编码业务任务和服务的生灭清单。
+
+**当前结果：** 本轮保留领域运行时和现有限流 / 背压，补充了恢复仓库、最终 I/O lease、MSFile 并发压力与媒体 Service Worker smoke；任务型与服务型 Coordinator Worker 单元均已通过静态目录具名，并接入任务身份快照、服务实例快照和最终 I/O 审计。`registerCoordinatorTasks` 仍是单一 Worker 内的领域装配函数，但其创建结果必须绑定到已登记单元，未登记生产任务会 fail closed；下一步不再是隐式迁移，而是目标环境逐项验证和旧逻辑清理。
+
+生产证据门禁从 `packages/contracts/src/pluginProducts.ts` 读取唯一产品清单，并拒绝占位 commit、验收引用和成功选择器；示例证据因此会明确失败，不能被误当作目标部署验收。
 
 **责任范围：** Coordinator 的 `registerCoordinatorTasks`、`ensure/releaseMsfileRuntime`、`ensure/releaseSatRuntime`、P2PKH 支付适配、执行租约；`plugin-background`、`plugin-window-p2p`、`plugin-msfile`、`plugin-sat-subscription` 及各业务 `*CoordinatorTask.ts`；媒体 Worker 与 Service Worker 客户端。
 
@@ -197,6 +215,8 @@
 ## KMP-008：Connect 会话统一
 
 **目标：** Connect 自己的实例与主会话授权之间只有一种明确关系。
+
+**当前结果：** 默认“借用主会话授权、锁屏 / 切 Key 撤权”已经落实到 session、owner、来源、App 身份和 launch token 校验；Chromium 已验证 `/apps → Session Window → 外部 AppView → connect.launch`，同时覆盖预开窗口、一次性 bootstrap 和外部来源回传。独立 Dedicated Worker 仅作为 Session Crypto 能力的单独回归路径；普通 popup、Worker 崩溃和外部真实部署 origin 仍需补齐。
 
 **责任范围：** `plugin-protocol/src/protocolService.ts`、`sessionWindowBootstrap.ts`、`storage/protocolStorageRepository.ts`；`plugin-vault/src/sessionCryptoClient.ts`、`sessionCryptoWorker.ts`、`vaultServiceCoordinator.ts`；Connect SDK 测试与协议说明。
 
@@ -260,6 +280,16 @@
 | 启停命令重放、修订冲突、迟到初始化 | 用户意图只提交一次，旧实例不能覆盖新实例状态 |
 | 插件升级扩大权限 | 无显式批准不扩权，旧租约不能访问新增动作 |
 | 新旧版本同时存在 | 在 003 验证接管门禁；009 复验，不到发布时才定义协议 |
+
+## 本轮仍未解除的生产阻断项
+
+以下项目不是基础机制缺失，而是生产发布仍不能放行的剩余条件：
+
+1. 25 个产品的 manifest / contracts 静态单元和 Coordinator Worker 运行态登记已完成；仍需在发布证据中核对每个目标构建实际输出与单元快照，不能只凭源码声明放行。
+2. AppView 主链已在本地 Chromium 生产构建通过，但外部部署 origin 的同等回归仍未完成；当前外部 App 由 Playwright fixture 提供。
+3. 旧 Worker 崩溃且持有持久 final-I/O lease 时，系统只能 fail closed 并显示 `recovery-required`，不能安全强制夺权；恢复操作协议已产品化为可执行诊断 / 演练脚本，但目标部署演练证据仍未完成。
+4. Coordinator 入口已经统一标记并形成[不可逆 I/O 审计台账](./irreversible-io-audit.md)，但上传、远端订阅、广播 / 支付、未知结果仍需在目标部署环境执行 smoke；本地测试和 MSFile 压力验证不能替代外部供应商验证。
+5. 冷切换无法凭本地测试证明完全不认识接管协议的旧 Worker 已退出；部署 handover 文件、旧 Worker drain / exit 证明、版本淘汰和回退演练仍需发布环境完成。
 
 ## 4. 发布与回退
 

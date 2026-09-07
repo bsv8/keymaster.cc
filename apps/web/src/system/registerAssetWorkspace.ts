@@ -11,20 +11,20 @@ import type {
   KeyIdentity,
   KeyspaceService,
   ResourceRegistry,
+  ResourceDefinition,
   RouteRegistry,
   TokenRegistry,
   TransferOffer,
   TransferRegistry
 } from "@keymaster/contracts";
 import { ASSET_DATA_NOTIFIER_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY } from "@keymaster/contracts";
-import type { PluginHost } from "@keymaster/runtime";
+import { registerOwnedResource, router, type PluginHost } from "@keymaster/runtime";
 import { AssetsPage, AssetDetailRedirect, AssetsHomeWidget } from "./assets.js";
 import { loadAllHoldings, type HoldingRowsResult as HoldingsLoadResult } from "./assets/holdingsFlow.js";
 import { CollectiblesPage, CollectibleDetailPage } from "./collectibles.js";
 import { TransferPage } from "./transfer.js";
 import { createTransferFeatureCapability } from "./transfer/transferFeature.js";
 import { CollectibleTransferPage } from "./collectibleTransfer.js";
-import { router } from "@keymaster/runtime";
 import type { CollectibleSummary } from "@keymaster/contracts";
 
 const assetsResources: I18nPluginResources = {
@@ -271,6 +271,14 @@ function get<T>(host: PluginHost, capability: string): T {
   return host.capabilities.get<T>(capability);
 }
 
+/** 资产工作区不是独立产品插件，仍必须绑定到 owner-session 进行回收。 */
+function registerWorkspaceResource<T, TArgs extends readonly string[]>(
+  registry: ResourceRegistry,
+  definition: ResourceDefinition<T, TArgs>,
+): void {
+  registerOwnedResource(registry, "asset-workspace", definition);
+}
+
 function registerAssetsWorkspace(host: PluginHost): void {
   host.i18n.registerResources("assets", assetsResources);
   const assets = get<AssetRegistry>(host, "asset.registry");
@@ -290,7 +298,7 @@ function registerAssetsWorkspace(host: PluginHost): void {
   };
   business.register("asset-workspace", assetsDomain);
 
-  resources.register<HoldingsLoadResult, readonly string[]>({
+  registerWorkspaceResource<HoldingsLoadResult, readonly string[]>(resources, {
     id: "assets.holdings",
     scope: "active-key",
     key: (_args, context) => ["assets.holdings", context.activePublicKeyHex ?? "none"],
@@ -299,7 +307,7 @@ function registerAssetsWorkspace(host: PluginHost): void {
     invalidation: "microtask"
   });
 
-  resources.register<KeyIdentity | null, readonly string[]>({
+  registerWorkspaceResource<KeyIdentity | null, readonly string[]>(resources, {
     id: "assets.active-context",
     scope: "active-key",
     key: (_args, context) => ["assets.active-context", context.activePublicKeyHex ?? "none"],
@@ -312,7 +320,7 @@ function registerAssetsWorkspace(host: PluginHost): void {
     invalidation: "immediate"
   });
 
-  resources.register({
+  registerWorkspaceResource(resources, {
     id: "assets.detail",
     scope: "global",
     key: (args) => ["assets.detail", args[0] ?? "", args[1] ?? ""],
@@ -360,7 +368,7 @@ function registerCollectiblesWorkspace(host: PluginHost): void {
   const routes = get<RouteRegistry>(host, "route.registry");
   const business = get<BusinessFeatureRegistry>(host, "business.registry");
 
-  resources.register({
+  registerWorkspaceResource(resources, {
     id: "collectibles.list",
     scope: "global",
     key: () => ["collectibles.list"],
@@ -401,7 +409,7 @@ function registerTransferWorkspace(host: PluginHost): void {
   const routes = get<RouteRegistry>(host, "route.registry");
   const business = get<BusinessFeatureRegistry>(host, "business.registry");
 
-  resources.register<ActiveKeyState, readonly string[]>({
+  registerWorkspaceResource<ActiveKeyState, readonly string[]>(resources, {
     id: "transfer.active-key",
     scope: "global",
     key: () => ["transfer.active-key"],
@@ -411,7 +419,7 @@ function registerTransferWorkspace(host: PluginHost): void {
     invalidation: "immediate"
   });
 
-  resources.register<Array<{ providerId: string; items: CollectibleSummary[]; error?: string }>, readonly string[]>({
+  registerWorkspaceResource<Array<{ providerId: string; items: CollectibleSummary[]; error?: string }>, readonly string[]>(resources, {
     id: "transfer.recipient-collectibles",
     scope: "active-key",
     key: (_args, context) => ["transfer.recipient-collectibles", context.activePublicKeyHex ?? "none"],
@@ -437,7 +445,7 @@ function registerTransferWorkspace(host: PluginHost): void {
     invalidation: "immediate"
   });
 
-  resources.register<TransferOffer[], readonly string[]>({
+  registerWorkspaceResource<TransferOffer[], readonly string[]>(resources, {
     id: "transfer.offers",
     scope: "global",
     key: () => ["transfer.offers"],
@@ -480,9 +488,50 @@ function registerCollectibleTransferWorkspace(host: PluginHost): void {
   routes.register({ id: "collectibles.transfer", path: "/collectibles/transfer", label: { key: "collectibleTransfer.route.transfer", fallback: "Transfer collectible" }, component: CollectibleTransferPage });
 }
 
-export async function registerAssetWorkspace(host: PluginHost): Promise<void> {
+export async function registerAssetWorkspace(host: PluginHost): Promise<() => void> {
+  const beforeRouteIds = new Set(host.routes._ids());
+  const beforeHomeIds = new Set(host.home._ids());
+  const beforeResourceIds = new Set(get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY)._ids());
+  const beforeContactActionIds = new Set(host.contactPublicKeyActions._ids());
+  const beforeBusiness = host.business._ids();
+  const beforeBusinessDomainIds = new Set(beforeBusiness.domains);
+  const beforeBusinessFeatureIds = new Set(beforeBusiness.features);
+  const hadTransferFeature = host.capabilities.has("feature.transfer");
+
   registerAssetsWorkspace(host);
   registerCollectiblesWorkspace(host);
   registerCollectibleTransferWorkspace(host);
   registerTransferWorkspace(host);
+
+  let disposed = false;
+  return () => {
+    if (disposed) return;
+    disposed = true;
+    const resources = get<ResourceRegistry>(host, RESOURCE_REGISTRY_CAPABILITY);
+    // 资源记录先停，再移除定义；否则已挂载的 React 订阅可能继续持有
+    // 旧 key 的 provider listener。
+    host.resourceStore.disposeOwner("asset-workspace");
+    for (const id of resources._ids().filter((item) => !beforeResourceIds.has(item))) {
+      resources.unregister(id);
+    }
+    for (const id of host.business._ids().features.filter((item) => !beforeBusinessFeatureIds.has(item))) {
+      host.business.unregisterFeature(id);
+    }
+    for (const id of host.business._ids().domains.filter((item) => !beforeBusinessDomainIds.has(item))) {
+      host.business.unregisterDomain(id);
+    }
+    for (const id of host.routes._ids().filter((item) => !beforeRouteIds.has(item))) {
+      host.routes.unregister(id);
+    }
+    for (const id of host.home._ids().filter((item) => !beforeHomeIds.has(item))) {
+      host.home.unregister(id);
+    }
+    for (const id of host.contactPublicKeyActions._ids().filter((item) => !beforeContactActionIds.has(item))) {
+      host.contactPublicKeyActions.unregister(id);
+    }
+    if (!hadTransferFeature) host.capabilities.revoke("feature.transfer");
+    for (const pluginId of ["assets", "collectibles", "collectibleTransfer", "transfer"]) {
+      host.i18n.unregisterResources(pluginId);
+    }
+  };
 }

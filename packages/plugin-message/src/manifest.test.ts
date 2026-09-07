@@ -4,10 +4,11 @@ import { messagePlatformPlugin } from "./manifest.js";
 
 describe("messagePlatformPlugin", () => {
   it("depends on the Coordinator Channel path and owner Message storage", () => {
-    expect(messagePlatformPlugin.storage).toEqual(
+    const unit = messagePlatformPlugin.units?.find((candidate) => candidate.execution === "window");
+    expect(unit?.storage).toEqual(
       { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 }
     );
-    const dependencies = messagePlatformPlugin.dependencies ?? [];
+    const dependencies = unit?.dependencies ?? [];
     expect(dependencies.map((dependency) => dependency.capability)).toEqual(
       expect.arrayContaining([CHANNEL_RUNTIME_CAPABILITY, "keyspace.service"])
     );

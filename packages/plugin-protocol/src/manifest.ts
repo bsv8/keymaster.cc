@@ -40,6 +40,7 @@ import type {
   P2pkhProtocolAdapter
 } from "@keymaster/contracts";
 import { PROTOCOL_SERVICE_CAPABILITY, RESOURCE_REGISTRY_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY, type ProtocolCoordinatorControl } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { ProtocolPopupPage } from "./ProtocolPopupPage.js";
 import {
   createProtocolService
@@ -83,6 +84,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.confirm.method.intent.sign": "Sign the following content",
       "protocol.confirm.method.cipher.encrypt": "Encrypt the following content",
       "protocol.confirm.method.cipher.decrypt": "Decrypt the following content",
+      "protocol.confirm.method.connect.launch": "Start an app session",
       "protocol.confirm.text": "Message",
       "protocol.confirm.claims": "Requested claims",
       "protocol.confirm.contentType": "Content type",
@@ -271,6 +273,7 @@ const protocolResources: I18nPluginResources = {
       "protocol.confirm.method.intent.sign": "签名以下内容",
       "protocol.confirm.method.cipher.encrypt": "加密以下内容",
       "protocol.confirm.method.cipher.decrypt": "解密以下内容",
+      "protocol.confirm.method.connect.launch": "启动应用会话",
       "protocol.confirm.text": "提示文案",
       "protocol.confirm.claims": "请求的 claims",
       "protocol.confirm.contentType": "内容类型",
@@ -444,18 +447,27 @@ export const protocolPlugin: PluginManifest = {
     bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [PROTOCOL_SERVICE_CAPABILITY],
     displayGroup: "platform"
   },
+  units: [{
+    id: "protocol.window",
+    execution: "window",
+    lifetime: "storage",
+    provides: [PROTOCOL_SERVICE_CAPABILITY, PROTOCOL_COORDINATOR_CONTROL_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([
+      PROTOCOL_SERVICE_CAPABILITY,
+      PROTOCOL_COORDINATOR_CONTROL_CAPABILITY,
+    ]),
+    storage: { scope: "platform", applicationStorageId: "protocol", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      {
+        capability: "vault.service",
+        reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
+      },
+      { capability: "keyspace.service", reason: "协议需要 owner key 状态" },
+    ]),
+  }],
   i18n: protocolResources,
-  storage: { scope: "platform", applicationStorageId: "protocol", schemaVersion: 1 },
-  dependencies: [
-    {
-      capability: "vault.service",
-      reason: "connect mode 需要 vault（受控 capability 取 owner runtime）；appView mode 可走 owner runtime bootstrap"
-    },
-    { capability: "keyspace.service", reason: "协议需要 owner key 状态" },
-  ],
   setup(ctx: PluginContext) {
     // 取依赖（plugin-vault 必须先装载）。
     const vaultService = ctx.get<VaultService>("vault.service");

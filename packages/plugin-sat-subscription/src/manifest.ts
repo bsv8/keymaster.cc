@@ -25,7 +25,9 @@ import {
   SAT_COORDINATOR_CONTROL_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   type SatCoordinatorControl,
-  WINDOW_P2P_EXECUTOR_CAPABILITY
+  WINDOW_P2P_EXECUTOR_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 
 export { SAT_SUBSCRIPTION_PLUGIN_ID } from "@keymaster/contracts";
@@ -140,21 +142,36 @@ export const satSubscriptionPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [
+    displayGroup: "platform"
+  },
+  units: [{
+    id: "sat-subscription.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [
       SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
       SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
       CHANNEL_RUNTIME_CAPABILITY,
       SAT_COORDINATOR_CONTROL_CAPABILITY
     ],
-    displayGroup: "platform"
-  },
-  storage: { scope: "key", applicationStorageId: "SatSubscription", schemaVersion: 1 },
-  dependencies: [
-    { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
-    { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
-    { capability: "system-settings.registry", reason: "注册 SatSubscription 系统设置" },
-    { capability: "system-status.registry", reason: "注册 SatSubscription 运行诊断" }
-  ],
+    providedContracts: defineRuntimeUnitProvidedContracts([
+      SAT_SUBSCRIPTION_SERVICE_CAPABILITY,
+      SAT_SUBSCRIPTION_SPI_SERVICE_CAPABILITY,
+      CHANNEL_RUNTIME_CAPABILITY,
+      SAT_COORDINATOR_CONTROL_CAPABILITY,
+    ]),
+    storage: { scope: "key", applicationStorageId: "SatSubscription", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: WINDOW_P2P_EXECUTOR_CAPABILITY, reason: "Sat 只能复用 Window P2P owner 的唯一 Host" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "设置页业务读取统一经过 Resource Store" },
+      { capability: "system-settings.registry", reason: "注册 SatSubscription 系统设置" },
+      { capability: "system-status.registry", reason: "注册 SatSubscription 运行诊断" },
+    ]),
+  }, {
+    id: "sat-subscription.coordinator-worker",
+    execution: "coordinator-worker",
+    lifetime: "owner-session",
+  }],
   setup(ctx: PluginContext) {
     const coordinator = ctx.coordinator as SatCoordinatorControl | undefined;
     if (!coordinator) throw new Error("Sat Coordinator control is unavailable");

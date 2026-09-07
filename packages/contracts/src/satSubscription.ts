@@ -147,7 +147,7 @@ export interface SatSubscriptionService {
     channel: string;
     /** 完整合法 JSON UTF-8 原始字节。 */
     contentJson: Uint8Array;
-  }): Promise<{ requestIdHex: string; chargedAmount: string }>;
+  }, signal?: AbortSignal): Promise<{ requestIdHex: string; chargedAmount: string }>;
   /** 聚合所有 receive Supplier 的入站 Publish。 */
   subscribeEvents(handler: SatIncomingPublishHandler): () => void;
 }

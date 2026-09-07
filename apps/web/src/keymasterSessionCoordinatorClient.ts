@@ -13,6 +13,7 @@ import type {
   CoordinatorResponse,
   CoordinatorTopicEvent,
   CoordinatorBootstrapSnapshot,
+  CoordinatorAuthorityRecovery,
   CoordinatorTopic,
   CoordinatorCommandResult,
   CoordinatorValueResult,
@@ -31,8 +32,15 @@ import type {
   CoordinatorSatOperation,
   CoordinatorChannelOperation,
   ContactPresenceMap,
+  CoordinatorWorkerUnitStateEvent,
   StorageBootstrapState,
+  PluginIntentCommand,
+  PluginIntentSnapshot,
+  PluginIntentSubmissionResult,
+  RemoteServiceBridge,
+  RemoteServicePortControlMessage,
 } from "@keymaster/contracts";
+import { COORDINATOR_SERVICE_PROTOCOL_VERSION } from "@keymaster/contracts";
 import type {
   CoordinatorOwnerStorageData,
   CoordinatorPlatformStorageData,
@@ -41,6 +49,7 @@ import type {
   StoragePlatformGrant
 } from "@keymaster/contracts/storage-internal";
 import { readStorageBootstrap } from "@keymaster/platform-storage/coordinator/bootstrap";
+import { createMessagePortServiceTransport, createServiceBridge } from "@keymaster/runtime";
 
 // ============================================================
 // 1. Client Types
@@ -80,6 +89,10 @@ function coordinatorSendError(message: string, dispatchStatus: CoordinatorDispat
 export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClient, StorageBindingCoordinatorClient {
   private worker: SharedWorker | null = null;
   private port: MessagePort | null = null;
+  /** 与 Coordinator 主 RPC 分离的服务桥端口；避免业务事件污染服务协议。 */
+  private servicePort: MessagePort | null = null;
+  private serviceTransport: ReturnType<typeof createMessagePortServiceTransport> | null = null;
+  private serviceBridge: RemoteServiceBridge | undefined;
   private clientId: string;
   private workerName?: string;
   private workerUrl?: string;
@@ -87,6 +100,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private reconnectIntervalMs: number;
 
   private bootstrapSnapshotCache: CoordinatorBootstrapSnapshot = {
+    authorityInstanceId: "authority:boot",
     sessionEpoch: "boot",
     vaultStatus: "booting",
     keyspaceGeneration: 0,
@@ -115,11 +129,25 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   private satRevisionCache = -1;
   private channelRevisionCache = -1;
   private contactsPresenceRevisionCache = -1;
+  private pluginIntentRevisionCache = -1;
+  private pluginIntentAuthorityInstanceId = "authority:boot";
+  /**
+   * Worker 单元事件可能先于同一 session.state 到达；先按 sessionEpoch
+   * 暂存，避免为了丢弃旧世代而误丢当前世代的合法快照。集合有界，
+   * 不把断线期间的事件变成长期缓存。
+   */
+  private pendingWorkerUnitEvents = new Map<SessionEpoch, CoordinatorWorkerUnitStateEvent>();
   private contactsPresenceOwnerPublicKeyHex: string | null = null;
   private contactsPresenceSnapshotCache: ContactPresenceMap = {};
 
   private isConnected = false;
+  /** 页面生命周期结束后，连接尝试和自动重连都不得再次复活。 */
+  private shutdownRequested = false;
+  /** 使 disconnect() 能取消尚未完成的 connect/hello/subscription 链。 */
+  private connectionAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** disconnect 发送后给 SharedWorker 留出接收/排空控制消息的短窗口。 */
+  private disconnectCloseTimer: ReturnType<typeof setTimeout> | null = null;
   private recoverableDiagnostics: RecoverableCoordinatorDiagnostic[] = [];
 
   constructor(options: CoordinatorClientOptions = {}) {
@@ -138,7 +166,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // ============================================================
 
   async connect(): Promise<void> {
+    if (this.shutdownRequested) throw new Error("Coordinator client is shut down");
     if (this.isConnected) return;
+    const attempt = ++this.connectionAttempt;
 
     try {
       if (typeof SharedWorker === "undefined") {
@@ -201,31 +231,71 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         this.handleWorkerError(message);
       };
 
-      this.port = this.worker.port;
-      this.port.onmessage = this.handleMessage.bind(this);
-      this.port.onmessageerror = this.handleMessageError.bind(this);
-      this.port.start();
+      const port = this.worker.port;
+      this.port = port;
+      // disconnect() 会给旧端口一个很短的投递窗口；旧端口在窗口内到达
+      // 的迟到事件不能污染随后建立的新连接缓存。
+      port.onmessage = (event) => {
+        if (this.port !== port) return;
+        this.handleMessage(event);
+      };
+      port.onmessageerror = (event) => {
+        if (this.port !== port) return;
+        void event;
+        this.handleMessageError();
+      };
+      port.start();
 
+      const servicePortForHello = this.openServiceBridge();
       this.isConnected = true;
-      await this.sendHello();
-      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events", "channel.events", "contacts.presence"]);
+      await this.sendHello(servicePortForHello);
+      await this.subscribeTopicsAndReadBaselines(["session.state", "background.snapshot", "asset.data-changed", "storage.state", "p2pkh.providers", "msfile.state", "sat.events", "channel.events", "contacts.presence", "plugin.intent", "worker.units"]);
+
+      if (this.shutdownRequested || attempt !== this.connectionAttempt || this.port !== port) {
+        throw new Error("Coordinator connection attempt was cancelled");
+      }
 
       if (this.reconnectTimer) {
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = null;
       }
     } catch (err) {
+      // 没有创建 Worker（例如浏览器不支持 SharedWorker）时 port 和
+      // worker 都为空，不能把当前尝试误判成“已经被取消”而 resolve。
+      // 只有明确出现新 attempt 才吞掉旧连接错误。
+      if (attempt !== this.connectionAttempt) return;
+      if (this.port && this.worker && this.port !== this.worker.port) return;
       this.isConnected = false;
-      this.scheduleReconnect();
+      this.disposeServiceBridge("Coordinator connection attempt failed");
+      if (!this.shutdownRequested) this.scheduleReconnect();
       throw err;
     }
   }
 
-  disconnect(): void {
-    if (this.port) {
-      try { this.port.postMessage({ kind: "disconnect", clientId: this.clientId, requestId: this.generateRequestId() }); } catch { /* messageerror/close fallback */ }
-      this.port.close();
-      this.port = null;
+  private disconnectInternal(closePortAfterMs: number | undefined): void {
+    this.connectionAttempt += 1;
+    this.disposeServiceBridge("Coordinator client disconnected");
+    const port = this.port;
+    this.port = null;
+    if (port) {
+      // MessagePort.close() 会使尚未投递的 outbound message 丢失。先发
+      // 明确的断开协议，再延后一小段时间关闭本地端口，确保 SharedWorker
+      // 能执行 handlePortDisconnect，从而 abort 未完成请求并释放窗口租约。
+      try {
+        port.postMessage({ kind: "disconnect", clientId: this.clientId, requestId: this.generateRequestId() });
+      } catch {
+        /* messageerror/close fallback */
+      }
+      // 页面 unload 期间不能再依赖一个定时器：浏览器可能在定时器
+      // 执行前冻结文档。永久 shutdown 保留端口，让已排队的 disconnect
+      // 尽可能先到达 SharedWorker；文档销毁时浏览器会自动解除端口。
+      if (closePortAfterMs !== undefined) {
+        if (this.disconnectCloseTimer) clearTimeout(this.disconnectCloseTimer);
+        this.disconnectCloseTimer = setTimeout(() => {
+          this.disconnectCloseTimer = null;
+          try { port.close(); } catch { /* already closed */ }
+        }, closePortAfterMs);
+      }
     }
 
     this.worker = null;
@@ -244,13 +314,29 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     }
   }
 
+  disconnect(): void {
+    this.disconnectInternal(100);
+  }
+
+  /** 页面/Worker 永久销毁边界；与可重用的业务 disconnect 区分。 */
+  shutdown(): void {
+    if (this.shutdownRequested) return;
+    this.shutdownRequested = true;
+    // 这是页面/Worker 的永久生命周期边界，不是可重用的业务断线。
+    // 不在这里定时 close 端口，给 unload 场景中的 disconnect 控制消息
+    // 留出浏览器实现允许的投递机会。
+    this.disconnectInternal(undefined);
+  }
+
   private scheduleReconnect(): void {
+    if (this.shutdownRequested) return;
     if (this.reconnectTimer) return;
 
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
+      if (this.shutdownRequested) return;
       void this.connect().catch(() => {
-        this.scheduleReconnect();
+        if (!this.shutdownRequested) this.scheduleReconnect();
       });
     }, this.reconnectIntervalMs);
   }
@@ -288,13 +374,68 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.bootstrapSnapshotCache.sessionEpoch = response.sessionEpoch;
     if (response.operationResult && typeof response.operationResult === "object" && "vaultStatus" in response.operationResult) {
       const snapshot = response.operationResult as CoordinatorBootstrapSnapshot;
-      this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, ...snapshot, taskSnapshots: [...snapshot.taskSnapshots] };
+      if (typeof snapshot.authorityInstanceId === "string" && snapshot.authorityInstanceId.length > 0) {
+        this.adoptPluginIntentAuthority(snapshot.authorityInstanceId);
+      }
+      this.bootstrapSnapshotCache = {
+        ...this.bootstrapSnapshotCache,
+        ...snapshot,
+        taskSnapshots: [...snapshot.taskSnapshots],
+        ...(snapshot.coordinatorWorkerUnits
+          ? { coordinatorWorkerUnits: snapshot.coordinatorWorkerUnits.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })) }
+          : {}),
+      };
+      if (snapshot.pluginIntent) this.cachePluginIntentSnapshot(snapshot.pluginIntent, snapshot.authorityInstanceId);
     }
     pending.resolve(response);
   }
 
+  private adoptPluginIntentAuthority(authorityInstanceId: string): void {
+    if (!authorityInstanceId || authorityInstanceId === this.pluginIntentAuthorityInstanceId) return;
+    this.pluginIntentAuthorityInstanceId = authorityInstanceId;
+    this.pluginIntentRevisionCache = -1;
+  }
+
+  private cachePluginIntentSnapshot(snapshot: PluginIntentSnapshot, authorityInstanceId = this.pluginIntentAuthorityInstanceId): void {
+    if (
+      !snapshot
+      || !Number.isSafeInteger(snapshot.revision)
+      || snapshot.revision < 0
+      || !snapshot.desiredEnabled
+      || typeof snapshot.desiredEnabled !== "object"
+      || Array.isArray(snapshot.desiredEnabled)
+      || !snapshot.desiredRevision
+      || typeof snapshot.desiredRevision !== "object"
+      || Array.isArray(snapshot.desiredRevision)
+    ) return;
+    if (authorityInstanceId !== this.pluginIntentAuthorityInstanceId) return;
+    if (snapshot.revision < this.pluginIntentRevisionCache) return;
+    this.pluginIntentRevisionCache = snapshot.revision;
+    this.bootstrapSnapshotCache = {
+      ...this.bootstrapSnapshotCache,
+      pluginIntent: {
+        revision: snapshot.revision,
+        desiredEnabled: { ...snapshot.desiredEnabled },
+        desiredRevision: { ...snapshot.desiredRevision },
+      },
+    };
+  }
+
   private handleEvent(event: CoordinatorTopicEvent): void {
     this.applyTopicEvent(event);
+  }
+
+  private deferWorkerUnitEvent(event: CoordinatorWorkerUnitStateEvent): void {
+    const previous = this.pendingWorkerUnitEvents.get(event.sessionEpoch);
+    if (!previous || event.workerUnitRevision > previous.workerUnitRevision) {
+      this.pendingWorkerUnitEvents.set(event.sessionEpoch, event);
+    }
+    // 只保留极少数候选世代，防止失联或恶意乱序事件在页面内累积。
+    while (this.pendingWorkerUnitEvents.size > 4) {
+      const oldest = this.pendingWorkerUnitEvents.keys().next().value as SessionEpoch | undefined;
+      if (oldest === undefined) break;
+      this.pendingWorkerUnitEvents.delete(oldest);
+    }
   }
 
   private handleMessageError(): void {
@@ -303,17 +444,18 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private handleWorkerError(message: string): void {
     this.isConnected = false;
+    this.disposeServiceBridge(message);
     this.resetDisconnectedState();
     for (const [requestId, pending] of this.pendingRequests) {
       clearTimeout(pending.timeout);
       pending.reject(new Error(message));
       this.pendingRequests.delete(requestId);
     }
-    this.scheduleReconnect();
+    if (!this.shutdownRequested) this.scheduleReconnect();
   }
 
   private resetDisconnectedState(): void {
-    this.bootstrapSnapshotCache = { sessionEpoch: "boot", vaultStatus: "booting", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } };
+    this.bootstrapSnapshotCache = { authorityInstanceId: "authority:boot", sessionEpoch: "boot", vaultStatus: "booting", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 }, coordinatorWorkerUnits: [], coordinatorWorkerUnitSnapshotRevision: 0 };
     this.topicCaches.clear();
     this.sessionRevisionCache = -1;
     this.backgroundSnapshotRevisionCache = -1;
@@ -324,6 +466,9 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.satRevisionCache = -1;
     this.channelRevisionCache = -1;
     this.contactsPresenceRevisionCache = -1;
+    this.pluginIntentRevisionCache = -1;
+    this.pluginIntentAuthorityInstanceId = "authority:boot";
+    this.pendingWorkerUnitEvents.clear();
     this.contactsPresenceOwnerPublicKeyHex = null;
     this.contactsPresenceSnapshotCache = {};
   }
@@ -332,17 +477,77 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
   // 5. RPC Methods
   // ============================================================
 
-  private async sendHello(): Promise<void> {
+  private openServiceBridge(): MessagePort {
+    if (typeof MessageChannel === "undefined") {
+      throw new Error("Coordinator service bridge requires MessageChannel support");
+    }
+    this.disposeServiceBridge("Coordinator service bridge replaced");
+    const channel = new MessageChannel();
+    const servicePort = channel.port1;
+    const transport = createMessagePortServiceTransport({ port: servicePort });
+    const bridge = createServiceBridge({
+      protocolVersion: COORDINATOR_SERVICE_PROTOCOL_VERSION,
+      transport,
+    });
+    servicePort.addEventListener("message", this.handleServiceBridgeMessage);
+    servicePort.start();
+    this.servicePort = servicePort;
+    this.serviceTransport = transport;
+    this.serviceBridge = bridge;
+    // port2 只在 hello 中转移给 Coordinator；页面永远不再直接持有 Provider 端口。
+    return channel.port2;
+  }
+
+  private readonly handleServiceBridgeMessage = (event: MessageEvent): void => {
+    const data = event.data as Partial<RemoteServicePortControlMessage> | undefined;
+    if (!data || typeof data !== "object" || typeof data.type !== "string") return;
+    if (data.type === "keymaster.remote-service.handshake" && "handshake" in data && data.handshake) {
+      this.serviceBridge?.handshake(data.handshake);
+      return;
+    }
+    if (data.type === "keymaster.remote-service.snapshot" && "snapshot" in data && data.snapshot) {
+      this.serviceBridge?.applySnapshot(data.snapshot);
+      return;
+    }
+    if (data.type === "keymaster.remote-service.invalidate") {
+      this.serviceBridge?.invalidate(data.reason);
+      return;
+    }
+    if (data.type === "keymaster.remote-service.disconnect") {
+      this.serviceBridge?.disconnect(data.reason);
+    }
+  };
+
+  private disposeServiceBridge(reason: string): void {
+    const bridge = this.serviceBridge;
+    this.serviceBridge = undefined;
+    if (bridge) bridge.disconnect(reason);
+    if (this.servicePort) {
+      this.servicePort.removeEventListener("message", this.handleServiceBridgeMessage);
+      try { this.servicePort.close(); } catch { /* already closed */ }
+      this.servicePort = null;
+    }
+    this.serviceTransport?.dispose();
+    this.serviceTransport = null;
+  }
+
+  /** 当前物理连接的服务桥；重连后返回新的桥，旧桥永不复用。 */
+  getServiceBridge(): RemoteServiceBridge | undefined {
+    return this.serviceBridge;
+  }
+
+  private async sendHello(servicePort?: MessagePort): Promise<void> {
     const request: CoordinatorClientRequest = {
       kind: "hello",
       clientId: this.clientId,
       requestId: this.generateRequestId(),
+      ...(servicePort ? { servicePort } : {}),
       ...(() => {
         const state = readStorageBootstrap();
         return state ? { storageBootstrapState: state as StorageBootstrapState } : {};
       })()
     };
-    const response = await this.sendRequest(request);
+    const response = await this.sendRequest(request, servicePort ? [servicePort] : []);
     const result = response.operationResult as CoordinatorSubscribeTopicsResult | undefined;
     for (const baseline of result?.baselines ?? []) this.applyTopicEvent(baseline.snapshot);
   }
@@ -590,7 +795,11 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     let onAbort: (() => void) | undefined;
     try {
       if (signal?.aborted) return { status: "transport-error", message: "Channel request cancelled", retryable: false };
-      onAbort = () => undefined;
+      // 取消不能只在页面侧丢弃结果：Coordinator 需要看到取消，才能中止
+      // 尚未越过供应商边界的物理操作，并让旧 caller 的清理继续排在后面。
+      // 若底层已经越过不可逆边界，Worker 仍会等待真实 Promise settle，
+      // 不会把“本地取消”误当成远端写入已结束。
+      onAbort = () => { void this.channelCancel(request.requestId); };
       signal?.addEventListener("abort", onAbort, { once: true });
       const response = await this.sendRequest(request);
       if (signal?.aborted) return { status: "transport-error", message: "Channel request cancelled", retryable: false };
@@ -598,6 +807,22 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       return { status: "ok", value: response.operationResult, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
     finally { if (onAbort) signal?.removeEventListener("abort", onAbort); }
+  }
+
+  /** 只供 Channel 请求的 AbortSignal 使用；调用方不能指定其它端口。 */
+  private async channelCancel(targetRequestId: string): Promise<CoordinatorCommandResult> {
+    try {
+      return await this.requestCommand({
+        kind: "channel.cancel",
+        clientId: this.clientId,
+        requestId: this.generateRequestId(),
+        targetRequestId
+      });
+    } catch {
+      // 取消是最佳努力通知。原请求的最终结果仍按真实 I/O 边界处理，
+      // 不能因为取消通知自身断线就伪造“已清理”。
+      return { status: "error", message: "Channel cancellation transport failed" };
+    }
   }
 
   /** 联系人 presence 的读取面只查询 Coordinator 内存/本地 K-V，不启动探测。 */
@@ -608,6 +833,51 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       if (response.ack.status !== "ok") return response.ack;
       return { status: "ok", value: (response.operationResult ?? {}) as ContactPresenceMap, sessionEpoch: response.sessionEpoch };
     } catch (cause) { return this.normalizeTransportFailure(request.kind, cause); }
+  }
+
+  /** 读取 SharedWorker 唯一插件启停意图；这里的 snapshot 不等于运行实例状态。 */
+  async pluginIntentSnapshot(): Promise<CoordinatorValueResult<PluginIntentSnapshot>> {
+    const request = {
+      kind: "plugin.intent.snapshot" as const,
+      clientId: this.clientId,
+      requestId: this.generateRequestId(),
+    };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") return response.ack;
+      const snapshot = response.operationResult as PluginIntentSnapshot;
+      this.cachePluginIntentSnapshot(snapshot);
+      return { status: "ok", value: snapshot, sessionEpoch: response.sessionEpoch };
+    } catch (cause) {
+      return this.normalizeTransportFailure(request.kind, cause);
+    }
+  }
+
+  /** 提交绝对启停意图；accepted/duplicate 只表示 Worker 已持久化。 */
+  async pluginIntentSubmit(command: PluginIntentCommand): Promise<PluginIntentSubmissionResult> {
+    const request: CoordinatorClientRequest = {
+      kind: "plugin.intent.submit",
+      clientId: this.clientId,
+      requestId: this.generateRequestId(),
+      command,
+    };
+    try {
+      const response = await this.sendRequest(request);
+      if (response.ack.status !== "ok") {
+        return {
+          status: "transport-error",
+          message: "message" in response.ack && typeof response.ack.message === "string"
+            ? response.ack.message
+            : `Coordinator rejected ${request.kind}`,
+          retryable: response.ack.status !== "validation-error",
+        };
+      }
+      const result = response.operationResult as PluginIntentSubmissionResult;
+      if ("snapshot" in result && result.snapshot) this.cachePluginIntentSnapshot(result.snapshot);
+      return result;
+    } catch (cause) {
+      return this.normalizeTransportFailure(request.kind, cause);
+    }
   }
 
   async msfileGrant(context: import("@keymaster/contracts").MsFileConnectAppContext): Promise<import("@keymaster/contracts").CoordinatorValueResult<string>> {
@@ -793,6 +1063,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private normalizeTransportFailure(kind: CoordinatorClientRequest["kind"], cause: unknown): CoordinatorTransportFailure {
     this.isConnected = false;
+    this.disposeServiceBridge(`Coordinator request failed: ${kind}`);
     this.resetDisconnectedState();
     this.scheduleReconnect();
     this.reportRecoverableCoordinatorFailure(kind, cause);
@@ -831,6 +1102,7 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         this.isConnected = false;
+        this.disposeServiceBridge("Coordinator request timed out");
         this.resetDisconnectedState();
         this.scheduleReconnect();
         reject(coordinatorSendError("Request timeout", "unknown"));
@@ -910,8 +1182,17 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
 
   private applyTopicEvent(event: CoordinatorTopicEvent): void {
     if (!this.isValidTopicEvent(event)) {
-      if (event.topic === "session.state") this.resetDisconnectedState();
+      if (event && typeof event === "object" && "topic" in event && event.topic === "session.state") {
+        this.resetDisconnectedState();
+      }
       this.reportRecoverableCoordinatorFailure("invalid-topic-event", new Error("Invalid Coordinator topic payload"));
+      return;
+    }
+    if (event.topic === "worker.units" && event.sessionEpoch !== this.bootstrapSnapshotCache.sessionEpoch) {
+      // Worker 的运行单元变更和 session.state 通过不同消息发送，不能假设
+      // postMessage 到达顺序。暂存未来世代，等 session.state 先确认世代；
+      // 旧世代随后不会再被应用到当前产品状态。
+      this.deferWorkerUnitEvent(event);
       return;
     }
     const incomingRevision = this.getEventRevision(event);
@@ -925,6 +1206,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     this.setTopicRevision(event);
     this.topicCaches.set(event.topic, event);
     if (event.type === "session.state.changed") {
+      const previousSessionEpoch = this.bootstrapSnapshotCache.sessionEpoch;
+      const sessionChanged = previousSessionEpoch !== event.sessionEpoch;
       // Session fields are committed as one replacement before any listener observes them.
       this.bootstrapSnapshotCache = {
         ...this.bootstrapSnapshotCache,
@@ -933,7 +1216,27 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         activePublicKeyHex: event.activePublicKeyHex ?? undefined,
         selectedPublicKeyHex: event.selectedPublicKeyHex ?? undefined,
         keyspaceGeneration: event.keyspaceGeneration,
+        authorityRecovery: event.authorityRecovery,
       };
+      if (sessionChanged) {
+        // 运行单元属于 session 世代；切换世代时先撤下旧快照，避免旧
+        // Worker 实例在新 owner 页面上短暂显示为仍然 ready。
+        this.topicCaches.delete("worker.units");
+        this.bootstrapSnapshotCache = {
+          ...this.bootstrapSnapshotCache,
+          coordinatorWorkerUnits: [],
+          coordinatorWorkerUnitSnapshotRevision: undefined,
+        };
+        for (const epoch of this.pendingWorkerUnitEvents.keys()) {
+          if (epoch !== event.sessionEpoch) this.pendingWorkerUnitEvents.delete(epoch);
+        }
+        const pendingWorkerUnits = this.pendingWorkerUnitEvents.get(event.sessionEpoch);
+        if (pendingWorkerUnits) {
+          this.pendingWorkerUnitEvents.delete(event.sessionEpoch);
+          // 递归调用只会处理已经验证过且 epoch 已切换到当前值的事件。
+          this.applyTopicEvent(pendingWorkerUnits);
+        }
+      }
       const nextOwner = event.vaultStatus === "unlocked" ? event.activePublicKeyHex : null;
       if (nextOwner !== this.contactsPresenceOwnerPublicKeyHex) {
         this.contactsPresenceOwnerPublicKeyHex = nextOwner;
@@ -944,6 +1247,14 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, taskSnapshots: [...event.snapshots] };
     } else if (event.type === "p2pkh.providers.changed") {
       this.bootstrapSnapshotCache = { ...this.bootstrapSnapshotCache, p2pkhProviders: event.snapshot };
+    } else if (event.type === "coordinator.worker-units.changed") {
+      this.bootstrapSnapshotCache = {
+        ...this.bootstrapSnapshotCache,
+        coordinatorWorkerUnits: event.units.map((unit) => ({ ...unit, serviceIds: [...unit.serviceIds], taskIds: [...unit.taskIds] })),
+        coordinatorWorkerUnitSnapshotRevision: event.workerUnitRevision,
+      };
+    } else if (event.topic === "plugin.intent") {
+      this.cachePluginIntentSnapshot(event.snapshot, event.authorityInstanceId);
     } else if (event.topic === "contacts.presence") {
       this.contactsPresenceOwnerPublicKeyHex = event.activePublicKeyHex;
       this.contactsPresenceSnapshotCache = Object.fromEntries(Object.entries(event.presence).map(([key, value]) => [key, { ...value }])) as ContactPresenceMap;
@@ -966,6 +1277,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (topic === "sat.events") return this.satRevisionCache;
     if (topic === "channel.events") return this.channelRevisionCache;
     if (topic === "contacts.presence") return this.contactsPresenceRevisionCache;
+    if (topic === "plugin.intent") return this.pluginIntentRevisionCache;
+    if (topic === "worker.units") return this.bootstrapSnapshotCache.coordinatorWorkerUnitSnapshotRevision ?? -1;
     return this.assetDataRevisionCache;
   }
 
@@ -978,6 +1291,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     if (event.topic === "sat.events") return event.satRevision;
     if (event.topic === "channel.events") return event.channelRevision;
     if (event.topic === "contacts.presence") return event.presenceRevision;
+    if (event.topic === "plugin.intent") return event.pluginIntentRevision;
+    if (event.topic === "worker.units") return event.workerUnitRevision;
     return event.assetDataRevision;
   }
 
@@ -990,6 +1305,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
     else if (event.topic === "sat.events") this.satRevisionCache = event.satRevision;
     else if (event.topic === "channel.events") this.channelRevisionCache = event.channelRevision;
     else if (event.topic === "contacts.presence") this.contactsPresenceRevisionCache = event.presenceRevision;
+    else if (event.topic === "plugin.intent") this.pluginIntentRevisionCache = event.pluginIntentRevision;
+    else if (event.topic === "worker.units") this.bootstrapSnapshotCache.coordinatorWorkerUnitSnapshotRevision = event.workerUnitRevision;
     else this.assetDataRevisionCache = event.assetDataRevision;
   }
 
@@ -1004,7 +1321,8 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && (typeof event.activePublicKeyHex === "string" || event.activePublicKeyHex === null)
         && Number.isSafeInteger(event.keyspaceGeneration)
         && event.keyspaceGeneration >= 0
-        && (event.vaultStatus === "unlocked" || event.activePublicKeyHex === null);
+        && (event.vaultStatus === "unlocked" || event.activePublicKeyHex === null)
+        && (event.authorityRecovery === undefined || this.isValidAuthorityRecovery(event.authorityRecovery));
     }
     if (event.topic === "background.snapshot") return event.type === "background.snapshot.changed" && Number.isSafeInteger(event.backgroundSnapshotRevision) && Array.isArray(event.snapshots);
     if (event.topic === "storage.state") return event.type === "storage.state.changed" && Number.isSafeInteger(event.storageRevision) && event.storageRevision >= 0 && (event.providerGeneration === null || Number.isSafeInteger(event.providerGeneration));
@@ -1037,7 +1355,78 @@ export class KeymasterSessionCoordinatorClient implements SessionCoordinatorClie
         && Boolean(event.presence)
         && !Array.isArray(event.presence);
     }
+    if (event.topic === "plugin.intent") {
+      return event.type === "plugin.intent.changed"
+        && typeof event.authorityInstanceId === "string"
+        && event.authorityInstanceId === this.bootstrapSnapshotCache.authorityInstanceId
+        && Number.isSafeInteger(event.pluginIntentRevision)
+        && event.pluginIntentRevision >= 0
+        && Boolean(event.snapshot)
+        && event.snapshot.revision === event.pluginIntentRevision
+        && !Array.isArray(event.snapshot.desiredEnabled)
+        && !Array.isArray(event.snapshot.desiredRevision);
+    }
+    if (event.topic === "worker.units") {
+      const unitKeys = new Set<string>();
+      return event.type === "coordinator.worker-units.changed"
+        && typeof event.authorityInstanceId === "string"
+        && event.authorityInstanceId === this.bootstrapSnapshotCache.authorityInstanceId
+        && Number.isSafeInteger(event.workerUnitRevision)
+        && event.workerUnitRevision >= 0
+        && Array.isArray(event.units)
+        && event.units.every((unit) => Boolean(unit)
+          && typeof unit.productId === "string"
+          && unit.productId.length > 0
+          && typeof unit.unitId === "string"
+          && unit.unitId.length > 0
+          && unit.execution === "coordinator-worker"
+          && ["root", "storage", "owner-session", "connect-session"].includes(unit.lifetime)
+          && typeof unit.instanceId === "string"
+          && unit.instanceId.length > 0
+          && ["starting", "ready", "failed"].includes(unit.state)
+          && Number.isSafeInteger(unit.snapshotRevision)
+          && unit.snapshotRevision >= 0
+          && Array.isArray(unit.serviceIds)
+          && unit.serviceIds.every((serviceId) => typeof serviceId === "string" && serviceId.length > 0)
+          && Array.isArray(unit.taskIds)
+          && unit.taskIds.every((taskId) => typeof taskId === "string" && taskId.length > 0)
+          && (unit.error === undefined || typeof unit.error === "string")
+          && (["owner-session", "connect-session"].includes(unit.lifetime)
+            ? typeof unit.ownerPublicKeyHex === "string"
+              && unit.ownerPublicKeyHex.length > 0
+              && unit.sessionEpoch === event.sessionEpoch
+            : unit.ownerPublicKeyHex === undefined && unit.sessionEpoch === undefined)
+          && !unitKeys.has(`${unit.productId}\u0000${unit.unitId}`)
+          && (unitKeys.add(`${unit.productId}\u0000${unit.unitId}`), true));
+    }
     return event.type === "asset.data-changed" && Number.isSafeInteger(event.assetDataRevision);
+  }
+
+  /** 校验旧 Worker 仍持有最终 I/O 租约时发布的恢复诊断，避免不可信事件伪造接管状态。 */
+  private isValidAuthorityRecovery(value: unknown): value is CoordinatorAuthorityRecovery {
+    if (!value || typeof value !== "object") return false;
+    const recovery = value as Partial<CoordinatorAuthorityRecovery>;
+    const authorityBuildId = recovery.authorityBuildId;
+    const activeIoLeaseCount = recovery.activeIoLeaseCount;
+    const activeIoOperations = recovery.activeIoOperations;
+    const handoverGeneration = recovery.handoverGeneration;
+    return recovery.status === "recovery-required"
+      && recovery.reason === "active-final-io-leases"
+      && typeof authorityBuildId === "string"
+      && authorityBuildId.length > 0
+      && typeof activeIoLeaseCount === "number"
+      && Number.isSafeInteger(activeIoLeaseCount)
+      && activeIoLeaseCount > 0
+      && Boolean(activeIoOperations)
+      && typeof activeIoOperations === "object"
+      && Number.isSafeInteger(activeIoOperations.read)
+      && activeIoOperations.read >= 0
+      && Number.isSafeInteger(activeIoOperations.write)
+      && activeIoOperations.write >= 0
+      && activeIoOperations.read + activeIoOperations.write === activeIoLeaseCount
+      && typeof handoverGeneration === "number"
+      && Number.isSafeInteger(handoverGeneration)
+      && handoverGeneration >= 0;
   }
 
   // ============================================================

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "buildId": "<targetBuildId 同一不可变构建标识>",
+  "deploymentId": "<部署系统生成的唯一交接编号>",
+  "targetBuildId": "<待发布构建标识>",
+  "previousBuildId": "<当前线上构建标识>",
+  "protocolVersion": "<Coordinator 控制协议版本>",
+  "strategy": "cold-switch",
+  "phase": "pending",
+  "observedAt": "<现场观测时间>",
+  "previousWorker": {
+    "protocolAware": false,
+    "trafficDrained": false,
+    "exitConfirmed": false,
+    "activeFinalIoLeases": -1,
+    "evidenceRef": "<部署平台流量排空和实例退出原始记录>"
+  },
+  "authority": {
+    "currentBuildId": "<待发布构建标识>",
+    "handoverGeneration": 0,
+    "noParallelAuthority": false,
+    "evidenceRef": "<authority / lease 对账原始记录>"
+  },
+  "rollback": {
+    "formatCompatibilityVerified": false,
+    "reauthRequired": true,
+    "windowUntil": "<回退窗口截止时间>",
+    "evidenceRef": "<回退演练原始记录>"
+  }
+}

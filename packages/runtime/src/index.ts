@@ -48,6 +48,20 @@ export * from "./i18n/createI18nService.js";
 // 装配和测试夹具使用，K-V 层不外暴露。
 export * from "./log/logService.js";
 export * from "./storage/inMemoryKeyValueStore.js";
+export * from "./lifecycle/resourceScope.js";
+export { registerOwnedResource } from "./resources/resourceRegistry.js";
+export * from "./lifecycle/scopedMessageBus.js";
+export * from "./lifecycle/scopedChannelRuntime.js";
+export * from "./lifecycle/permissionLease.js";
+export * from "./lifecycle/permissionVerifier.js";
+export * from "./lifecycle/serviceBridge.js";
+export * from "./lifecycle/messagePortServiceTransport.js";
+export * from "./lifecycle/messagePortServiceProvider.js";
+export * from "./lifecycle/pluginIntentController.js";
+export * from "./lifecycle/taskScheduler.js";
+export * from "./lifecycle/scopedRegistry.js";
+export * from "./lifecycle/upgradeGate.js";
+export * from "./lifecycle/runtimeUnitImplementationRegistry.js";
 
 // 施工单 2026-06-30 001：全局 fatal store。apps/web 与 plugin-vault 等
 // 都通过本入口上报 / 订阅 fatal 错误。`resetFatalErrorForTest` 与

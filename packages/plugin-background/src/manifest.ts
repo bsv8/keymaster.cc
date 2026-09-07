@@ -19,7 +19,9 @@ import {
   BACKGROUND_COORDINATOR_CONTROL_CAPABILITY,
   KEYSPACE_SERVICE_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
-  TOPBAR_REGISTRY_CAPABILITY
+  TOPBAR_REGISTRY_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import { createBackgroundServiceCoordinator } from "./backgroundServiceCoordinator.js";
 
@@ -112,15 +114,25 @@ export const backgroundPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY, BACKGROUND_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "platform"
   },
+  units: [{
+    id: "background.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [BACKGROUND_REGISTRY_CAPABILITY, BACKGROUND_SERVICE_CAPABILITY, BACKGROUND_COORDINATOR_CONTROL_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([
+      BACKGROUND_REGISTRY_CAPABILITY,
+      BACKGROUND_SERVICE_CAPABILITY,
+      BACKGROUND_COORDINATOR_CONTROL_CAPABILITY,
+    ]),
+    storage: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" },
+      { capability: "system-settings.registry", reason: "注册后台同步系统设置" },
+    ]),
+  }],
   i18n: backgroundResources,
-  storage: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
-  dependencies: [
-    { capability: TOPBAR_REGISTRY_CAPABILITY, reason: "需要向 Topbar 注册任务托盘" },
-    { capability: "system-settings.registry", reason: "注册后台同步系统设置" }
-  ],
   setup(ctx) {
     // 施工单 002：优先使用 Coordinator facade
     let registry: BackgroundRegistry;

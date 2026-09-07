@@ -99,17 +99,17 @@ export interface ChannelRuntime {
   /** 当前 owner Channel runtime 是否可用。 */
   isReady(): boolean;
   /** 发布 JSON 内容；消息编号由 Coordinator 产生。 */
-  publish(input: ChannelPublishParams): Promise<ChannelPublishResult>;
+  publish(input: ChannelPublishParams, signal?: AbortSignal): Promise<ChannelPublishResult>;
   /** 发布真实 bsv8.hash.request.v1；请求编号由 Coordinator 生成并返回。 */
-  publishHashRequest?(input: ChannelHashRequestPublishParams): Promise<ChannelPublishResult>;
+  publishHashRequest?(input: ChannelHashRequestPublishParams, signal?: AbortSignal): Promise<ChannelPublishResult>;
   /** 受信任插件发布固定 owner-inbox 私有协议消息；Connect App 不可调用。 */
   publishPrivate(input: {
     recipientPublicKeyHex: string;
     protocol: string;
     content: JSONValue;
-  }): Promise<ChannelPublishResult>;
+  }, signal?: AbortSignal): Promise<ChannelPublishResult>;
   /** 替换本 caller 的订阅集合。 */
-  subscriptionSet(channels: string[]): Promise<ChannelSubscriptionSetResult>;
+  subscriptionSet(channels: string[], signal?: AbortSignal): Promise<ChannelSubscriptionSetResult>;
   /** 订阅已验签的入站事件。 */
   subscribe(handler: (event: ChannelMessageReceivedEventData) => void): () => void;
   /** 订阅固定 owner-inbox 已路由的私有协议消息。 */

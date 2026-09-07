@@ -190,7 +190,9 @@ async function setupManifest() {
 
   // 动态 import 避免 hoisted vi.mock 影响
   const { bsv21TokenPlugin } = await import("./manifest.js");
-  const dispose = bsv21TokenPlugin.setup(ctx as never) as unknown as (() => void) | undefined;
+  // manifest.setup 在跨环境契约中是可选的；该测试夹具明确验证本产品的
+  // Window setup，因此在调用点收窄为已声明的入口。
+  const dispose = bsv21TokenPlugin.setup!(ctx as never) as unknown as (() => void) | undefined;
 
   return { dispose, triggerFn, messageBusListeners, dataNotifierListeners, ctx };
 }

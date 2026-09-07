@@ -12,12 +12,16 @@ describe("windowP2pPlugin manifest", () => {
     expect(windowP2pPlugin.meta).toMatchObject({
       defaultEnabled: true,
       canDisable: false,
-      providesCapabilities: [WINDOW_P2P_EXECUTOR_CAPABILITY, WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY]
+      displayGroup: "platform"
     });
+    expect(windowP2pPlugin.units?.[0]?.provides).toEqual([
+      WINDOW_P2P_EXECUTOR_CAPABILITY,
+      WINDOW_P2P_COORDINATOR_CONTROL_CAPABILITY,
+    ]);
   });
 
   it("provides the lane registry and rejects an independent disable", async () => {
-    const host = createPluginHost({ disableConfigPersistence: true, coordinatorForPlugin: () => ({
+    const host = createPluginHost({ execution: "window", disableConfigPersistence: true, coordinatorForPlugin: () => ({
       getBootstrapSnapshot: () => ({ vaultStatus: "locked", sessionEpoch: "test" }),
       subscribeTopic: () => () => undefined
     }) });

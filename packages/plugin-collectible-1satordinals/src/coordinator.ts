@@ -11,11 +11,14 @@ export function createOrdinalsCoordinatorTask(input: {
   notifier?: AssetDataNotifier;
 }) {
   const service = createOrdinalsService({ keyspace: input.keyspace, p2pkh: input.p2pkh, wocOneSat: input.woc });
-  return createOrdinalsSyncTask({
-    service,
-    woc: input.wocService,
-    keyspace: input.keyspace,
-    vault: input.vault,
-    assetDataNotifier: input.notifier
-  });
+  return {
+    ...createOrdinalsSyncTask({
+      service,
+      woc: input.wocService,
+      keyspace: input.keyspace,
+      vault: input.vault,
+      assetDataNotifier: input.notifier
+    }),
+    unitId: "collectible-1satordinals.coordinator-worker",
+  };
 }

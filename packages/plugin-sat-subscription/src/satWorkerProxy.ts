@@ -85,8 +85,11 @@ function callSat<T>(coordinator: SatCoordinatorControl, operation: CoordinatorSa
   return coordinator.satOperation(operation).then((result) => unwrap<T>(result, label));
 }
 
-function callChannel<T>(coordinator: SatCoordinatorControl, operation: CoordinatorChannelOperation, label: string): Promise<T> {
-  return coordinator.channelOperation(operation).then((result) => unwrapChannel<T>(result, label));
+function callChannel<T>(coordinator: SatCoordinatorControl, operation: CoordinatorChannelOperation, label: string, signal?: AbortSignal): Promise<T> {
+  const request = signal === undefined
+    ? coordinator.channelOperation(operation)
+    : coordinator.channelOperation(operation, signal);
+  return request.then((result) => unwrapChannel<T>(result, label));
 }
 
 /** 受信任插件使用的 Channel runtime。caller id 在 Coordinator 内生成。 */
@@ -133,7 +136,7 @@ export function createSatWorkerChannelRuntime(
 
   return {
     isReady: () => Boolean(coordinator.getIsConnected() && coordinator.getBootstrapSnapshot().activePublicKeyHex),
-    publish: (input) => {
+    publish: (input, signal) => {
       const owner = ownerForRequest();
       return callChannel(coordinator, {
         type: "publish",
@@ -141,9 +144,9 @@ export function createSatWorkerChannelRuntime(
         caller,
         channel: input.channel,
         content: input.content
-      }, "Channel publish");
+      }, "Channel publish", signal);
     },
-    publishHashRequest: (input) => {
+    publishHashRequest: (input, signal) => {
       const owner = ownerForRequest();
       return callChannel(coordinator, {
         type: "hash-request-publish",
@@ -151,9 +154,9 @@ export function createSatWorkerChannelRuntime(
         caller,
         hash: input.hash,
         locator: input.locator
-      }, "Channel Hash request publish");
+      }, "Channel Hash request publish", signal);
     },
-    publishPrivate: (input) => {
+    publishPrivate: (input, signal) => {
       const owner = ownerForRequest();
       return callChannel(coordinator, {
         type: "private-publish",
@@ -162,9 +165,9 @@ export function createSatWorkerChannelRuntime(
         recipientPublicKeyHex: input.recipientPublicKeyHex,
         protocol: input.protocol,
         content: input.content
-      }, "Private Channel publish");
+      }, "Private Channel publish", signal);
     },
-    subscriptionSet: async (channels): Promise<ChannelSubscriptionSetResult> => {
+    subscriptionSet: async (channels, signal): Promise<ChannelSubscriptionSetResult> => {
       const owner = ownerForRequest();
       const requestSessionEpoch = coordinator.getSessionEpoch();
       // 只有 Coordinator 返回的 result.channels 才是“已接受的逻辑订阅
@@ -175,7 +178,7 @@ export function createSatWorkerChannelRuntime(
         ownerPublicKeyHex: owner,
         caller,
         channels: [...channels]
-      }, "Channel subscription set");
+      }, "Channel subscription set", signal);
       const currentSessionEpoch = coordinator.getSessionEpoch();
       const currentOwner = coordinator.getBootstrapSnapshot().activePublicKeyHex;
       if (currentSessionEpoch !== requestSessionEpoch || currentOwner !== owner) {

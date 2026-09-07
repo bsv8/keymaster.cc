@@ -6,6 +6,7 @@
 // 但提供 i18n 资源覆盖 importer 名称/描述，方便设置/历史页展示。
 
 import type { I18nPluginResources, ImporterRegistry, PluginManifest } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies } from "@keymaster/contracts";
 import { wifImporter } from "./wifImporter.js";
 
 const wifResources: I18nPluginResources = {
@@ -38,8 +39,15 @@ export const wifImporterPlugin: PluginManifest = {
     canDisable: true,
     displayGroup: "import"
   },
+  units: [{
+    id: "importer-wif.window",
+    execution: "window",
+    lifetime: "root",
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "importer.registry", reason: "需要注册 WIF 实现" },
+    ]),
+  }],
   i18n: wifResources,
-  dependencies: [{ capability: "importer.registry", reason: "需要注册 WIF 实现" }],
   setup(ctx) {
     const registry = ctx.get<ImporterRegistry>("importer.registry");
     registry.register(wifImporter);

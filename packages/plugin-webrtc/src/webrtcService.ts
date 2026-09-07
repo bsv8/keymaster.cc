@@ -143,7 +143,8 @@ export interface WebrtcService {
   runStunDiagnostics(): Promise<StunDiagnosticResult[]>;
   getStunServers(): readonly string[];
   applyStunServers(input: string[]): Promise<void>;
-  dispose(): void;
+  /** 关闭服务并等待逻辑 Channel caller 释放完成。 */
+  dispose(): void | Promise<void>;
 }
 
 /* ============== 环境抽象 ============== */
@@ -2368,7 +2369,7 @@ export function createWebrtcService(input: {
     })
     : undefined;
 
-  function dispose(): void {
+  async function dispose(): Promise<void> {
     if (disposed) return;
     disposed = true;
     ownerGeneration += 1;
@@ -2392,7 +2393,10 @@ export function createWebrtcService(input: {
     off();
     offHashRequests();
     offOwnerChanged?.();
-    void channel.subscriptionSet([]).catch(() => undefined);
+    // 释放必须等待 Coordinator 收到；否则页面先关闭 MessagePort，旧
+    // caller 会在剩余 Worker 中继续占用物理订阅。远端退订若失败仍由
+    // Sat 领域仓库记录 unknown_result，下一次 owner runtime 再恢复。
+    await channel.subscriptionSet([]).catch(() => undefined);
     subscribers.clear();
     endedDeadlineAt = null;
   }

@@ -4,7 +4,8 @@ import {
   hexToBytes,
   vaultKeyRepository,
 } from "@keymaster/plugin-vault/coordinator";
-import type { CoordinatorSatEvent, JSONValue } from "@keymaster/contracts";
+import type { CoordinatorClientRequest, CoordinatorSatEvent, CoordinatorStorageControl, JSONValue, RemoteServicePortControlMessage } from "@keymaster/contracts";
+import { COORDINATOR_CRYPTO_SERVICE, COORDINATOR_SERVICE_CONTRACT_VERSION } from "@keymaster/contracts";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import {
   __testAcquireExecutorLease,
@@ -74,7 +75,10 @@ import {
   __testPublishStorageState,
   __testStorageTransfer,
   __testAttachPort,
+  __testAttachServicePort,
   __testDispatchStorageMessage,
+  __testFenceCoordinatorAuthority,
+  __testHoldCoordinatorFinalIoLease,
   __testSetStorageSessionResolver,
   __testGetSnapshot,
   __testGetVaultStatus,
@@ -109,6 +113,7 @@ import {
   __testUnlock,
   __testUpdateScheduleSettings
 } from "./keymasterSessionCoordinator.worker.js";
+import { createMessagePortServiceTransport, createServiceBridge } from "@keymaster/runtime";
 
 class TestPort {
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -292,6 +297,77 @@ describe("Coordinator ChannelProtocol 私信编码边界", () => {
 });
 
 describe("Session Coordinator worker", () => {
+  it("通过真实 Worker MessagePort 暴露带授权的 Coordinator crypto service，并在 lock 后撤销旧代理", async () => {
+    await __testDeleteVault();
+    __testResetState();
+    const key = await __testCreateVault("pw", { label: "service-bridge" });
+    await __testUnlock("pw", key.publicKeyHex);
+
+    const mainPortMessages: unknown[] = [];
+    __testAttachPort("service-bridge-client", (message) => mainPortMessages.push(message));
+    const channel = new MessageChannel();
+    const transport = createMessagePortServiceTransport({ port: channel.port1 });
+    const bridge = createServiceBridge({ protocolVersion: "1", transport });
+    const onControl = (event: MessageEvent): void => {
+      const message = event.data as RemoteServicePortControlMessage;
+      if (message.type === "keymaster.remote-service.handshake") bridge.handshake(message.handshake);
+      if (message.type === "keymaster.remote-service.snapshot") bridge.applySnapshot(message.snapshot);
+    };
+    channel.port1.addEventListener("message", onControl);
+    channel.port1.start();
+
+    try {
+      __testAttachServicePort("service-bridge-client", channel.port2);
+      await vi.waitFor(() => {
+        expect(bridge.state).toBe("ready");
+        expect(bridge.services().some((service) => service.capabilityId === COORDINATOR_CRYPTO_SERVICE && service.status === "ready")).toBe(true);
+      });
+      const proxy = bridge.requireProxy({
+        capabilityId: COORDINATOR_CRYPTO_SERVICE,
+        contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
+        execution: "coordinator-worker",
+      });
+      await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).resolves.toMatchObject({ type: "deriveP2pkhAddress" });
+
+      // 绑定仍走 Coordinator 主控制面，数据读写则必须跨独立服务端口，
+      // 这样测试覆盖的是“授权 grant -> MessagePort -> Provider -> owner K-V”完整链。
+      const bindRequest: CoordinatorClientRequest = {
+        kind: "storage.owner.bind",
+        clientId: "service-bridge-client",
+        requestId: "owner-bind-for-service-bridge",
+        pluginId: "background",
+        declaration: { scope: "key", applicationStorageId: "Background", schemaVersion: 1 },
+        expectedSessionEpoch: __testGetSnapshot().sessionEpoch,
+      };
+      await __testDispatchStorageMessage("service-bridge-client", bindRequest);
+      const bindResponse = mainPortMessages.at(-1) as { ack: { status: string }; operationResult?: unknown };
+      expect(bindResponse.ack.status).toBe("ok");
+      const ownerGrant = bindResponse.operationResult as { storageGrantId: string };
+      const ownerProxy = bridge.requireProxy({
+        capabilityId: "coordinator.owner-storage",
+        contractVersion: COORDINATOR_SERVICE_CONTRACT_VERSION,
+        execution: "coordinator-worker",
+      });
+      await expect(ownerProxy.call({ type: "owner.put", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge", value: { ok: true } })).resolves.toBeDefined();
+      await expect(ownerProxy.call({ type: "owner.get", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge" })).resolves.toMatchObject({ value: { ok: true } });
+
+      // 持久化权威被新 Worker 接管后，即使当前进程的内存状态还未刷新，
+      // 最终 owner-storage 边界也必须拒绝旧引用。
+      await __testFenceCoordinatorAuthority();
+      await expect(ownerProxy.call({ type: "owner.get", storageGrantId: ownerGrant.storageGrantId, key: "service-bridge" })).rejects.toMatchObject({ code: "upgrade.authority_stale" });
+
+      await __testLock();
+      await vi.waitFor(() => expect(proxy.revoked).toBe(true));
+      await expect(proxy.call({ type: "deriveP2pkhAddress", network: "main" })).rejects.toMatchObject({ code: "service.unavailable" });
+      expect(mainPortMessages).toHaveLength(1);
+    } finally {
+      transport.dispose();
+      channel.port1.removeEventListener("message", onControl);
+      channel.port1.close();
+      channel.port2.close();
+    }
+  });
+
   it("切换 Key 前先排空旧 owner 请求，Provider 忽略 AbortSignal 也不能越过 fence", async () => {
     await __testDeleteVault();
     __testResetState();
@@ -562,6 +638,251 @@ describe("Session Coordinator worker", () => {
     __testSetStorageStartupFailure(false);
   });
 
+  it("persists plugin intent in the Coordinator and rejects the old authority after restart", async () => {
+    __testResetState();
+    const messages: unknown[] = [];
+    __testAttachPort("plugin-intent-port", (message) => messages.push(message));
+    const first = __testGetSnapshot();
+    const command = {
+      commandId: "plugin-intent-test:1",
+      authorityInstanceId: first.authorityInstanceId,
+      expectedRevision: first.pluginIntent?.revision ?? 0,
+      pluginId: "background",
+      desiredEnabled: true,
+    } as const;
+
+    await __testDispatchStorageMessage("plugin-intent-port", {
+      kind: "plugin.intent.submit",
+      clientId: "plugin-intent-port",
+      requestId: "plugin-intent-submit-1",
+      command,
+    });
+    const accepted = messages.find((message) => (message as { requestId?: string }).requestId === "plugin-intent-submit-1") as {
+      ack?: { status?: string };
+      operationResult?: { status?: string; persisted?: boolean; snapshot?: { revision?: number; desiredEnabled?: Record<string, boolean> } };
+    } | undefined;
+    expect(accepted?.ack).toEqual({ status: "ok" });
+    expect(accepted?.operationResult).toMatchObject({
+      status: "accepted",
+      persisted: true,
+      snapshot: { desiredEnabled: { background: true } },
+    });
+    expect(__testGetSnapshot().pluginIntent?.desiredEnabled.background).toBe(true);
+
+    __testResetState();
+    const afterRestart = __testGetSnapshot();
+    expect(afterRestart.authorityInstanceId).not.toBe(first.authorityInstanceId);
+    messages.length = 0;
+    __testAttachPort("plugin-intent-port", (message) => messages.push(message));
+    await __testDispatchStorageMessage("plugin-intent-port", {
+      kind: "plugin.intent.submit",
+      clientId: "plugin-intent-port",
+      requestId: "plugin-intent-submit-old-authority",
+      command,
+    });
+    const stale = messages.find((message) => (message as { requestId?: string }).requestId === "plugin-intent-submit-old-authority") as {
+      operationResult?: { status?: string; expectedAuthorityInstanceId?: string };
+    } | undefined;
+    expect(stale?.operationResult).toMatchObject({
+      status: "stale-authority",
+      expectedAuthorityInstanceId: afterRestart.authorityInstanceId,
+    });
+
+    messages.length = 0;
+    await __testDispatchStorageMessage("plugin-intent-port", {
+      kind: "plugin.intent.submit",
+      clientId: "plugin-intent-port",
+      requestId: "plugin-intent-submit-unknown-product",
+      command: {
+        ...command,
+        commandId: "plugin-intent-test:unknown-product",
+        authorityInstanceId: afterRestart.authorityInstanceId,
+        expectedRevision: afterRestart.pluginIntent?.revision ?? 0,
+        pluginId: "not-registered-product",
+      },
+    });
+    const unknownProduct = messages.find((message) => (message as { requestId?: string }).requestId === "plugin-intent-submit-unknown-product") as {
+      ack?: { status?: string };
+      operationResult?: { status?: string; message?: string };
+    } | undefined;
+    expect(unknownProduct?.ack).toEqual({ status: "ok" });
+    expect(unknownProduct?.operationResult).toMatchObject({
+      status: "command-conflict",
+      message: "插件产品未在 Coordinator 内置清单注册",
+    });
+  });
+
+  it("blocks Coordinator tasks after product intent is persisted and resumes only after re-enable", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    let runs = 0;
+    __testRegisterTask({
+      id: "p2pkh.transactions-sync",
+      pluginId: "p2pkh",
+      publicKeyHex: "a".repeat(64),
+      run: async () => { runs += 1; },
+    });
+    const messages: unknown[] = [];
+    __testAttachPort("plugin-intent-task-port", (message) => messages.push(message));
+    const submit = async (desiredEnabled: boolean, requestId: string, commandId: string) => {
+      const snapshot = __testGetSnapshot();
+      await __testDispatchStorageMessage("plugin-intent-task-port", {
+        kind: "plugin.intent.submit",
+        clientId: "plugin-intent-task-port",
+        requestId,
+        command: {
+          commandId,
+          authorityInstanceId: snapshot.authorityInstanceId,
+          expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+          pluginId: "p2pkh",
+          desiredEnabled,
+        },
+      });
+      return [...messages].reverse().find((message) => (message as { requestId?: string }).requestId === requestId) as { operationResult?: { status?: string } } | undefined;
+    };
+
+    await expect(submit(false, "plugin-intent-task-disable", "plugin-intent-task:disable")).resolves.toMatchObject({ operationResult: { status: "accepted" } });
+    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync")).toMatchObject({
+      state: "blocked",
+      blockedReason: { fallback: "Plugin disabled: p2pkh" },
+      unitId: "p2pkh.coordinator-worker",
+      instanceId: expect.any(String),
+    });
+    expect(__testGetSnapshot().coordinatorWorkerUnits?.some((unit) => unit.unitId === "p2pkh.coordinator-worker")).toBe(false);
+    await __testRunTask("p2pkh.transactions-sync");
+    expect(runs).toBe(0);
+    await expect(__testBackgroundRunNow("p2pkh.transactions-sync")).resolves.toMatchObject({
+      ack: { status: "blocked", reason: { fallback: "Plugin disabled: p2pkh" } },
+    });
+
+    await expect(submit(true, "plugin-intent-task-enable", "plugin-intent-task:enable")).resolves.toMatchObject({ operationResult: { status: "accepted" } });
+    expect(__testGetSnapshot().taskSnapshots.find((task) => task.id === "p2pkh.transactions-sync")).toMatchObject({ state: "idle" });
+    expect(__testGetSnapshot().coordinatorWorkerUnits).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        productId: "p2pkh",
+        unitId: "p2pkh.coordinator-worker",
+        state: "ready",
+        instanceId: expect.any(String),
+      }),
+    ]));
+    await __testRunTask("p2pkh.transactions-sync");
+    expect(runs).toBe(1);
+  });
+
+  it("projects WOC product intent to provider registry and token task gates", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    await __testP2pkhProvidersUpdate("main", { syncProviderId: "junglebus", broadcastProviderId: "woc" });
+    // 只验证投影，不触发真实网络同步；锁定会让 provider change 的补偿
+    // 调度保持在门禁状态，避免测试把外部供应商当成 fixture。
+    __testSetVaultStatus("locked");
+
+    const messages: unknown[] = [];
+    __testAttachPort("plugin-intent-provider-port", (message) => messages.push(message));
+    const submit = async (desiredEnabled: boolean, commandId: string): Promise<void> => {
+      const snapshot = __testGetSnapshot();
+      await __testDispatchStorageMessage("plugin-intent-provider-port", {
+        kind: "plugin.intent.submit",
+        clientId: "plugin-intent-provider-port",
+        requestId: commandId,
+        command: {
+          commandId,
+          authorityInstanceId: snapshot.authorityInstanceId,
+          expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+          pluginId: "woc",
+          desiredEnabled,
+        },
+      });
+      expect([...messages].reverse().find((message) => (message as { requestId?: string }).requestId === commandId)).toMatchObject({
+        operationResult: { status: "accepted" },
+      });
+    };
+
+    await submit(false, "plugin-intent-provider:disable");
+    const disabled = __testGetSnapshot();
+    expect(disabled.p2pkhProviders?.syncProviders.some((provider) => provider.id === "woc")).toBe(false);
+    expect(disabled.p2pkhProviders?.broadcastProviders.some((provider) => provider.id === "woc")).toBe(false);
+    const blockedTokenTasks = disabled.taskSnapshots.filter((task) => ["token-bsv21.sync", "token-stas.sync", "collectible-1satordinals.sync"].includes(task.id));
+    expect(blockedTokenTasks).toHaveLength(3);
+    for (const task of blockedTokenTasks) {
+      expect(task).toMatchObject({ state: "blocked", blockedReason: { fallback: "Plugin disabled: woc" } });
+    }
+
+    await submit(true, "plugin-intent-provider:enable");
+    const enabled = __testGetSnapshot();
+    expect(enabled.p2pkhProviders?.syncProviders.some((provider) => provider.id === "woc")).toBe(true);
+    expect(enabled.p2pkhProviders?.broadcastProviders.some((provider) => provider.id === "woc")).toBe(true);
+  });
+
+  it("refuses disabling a Coordinator product marked always-on", async () => {
+    __testResetState();
+    const messages: unknown[] = [];
+    __testAttachPort("plugin-intent-always-on-port", (message) => messages.push(message));
+    const snapshot = __testGetSnapshot();
+    await __testDispatchStorageMessage("plugin-intent-always-on-port", {
+      kind: "plugin.intent.submit",
+      clientId: "plugin-intent-always-on-port",
+      requestId: "plugin-intent-always-on",
+      command: {
+        commandId: "plugin-intent-always-on:disable",
+        authorityInstanceId: snapshot.authorityInstanceId,
+        expectedRevision: snapshot.pluginIntent?.revision ?? 0,
+        pluginId: "sat-subscription",
+        desiredEnabled: false,
+      },
+    });
+    const response = [...messages].reverse().find((message) => (message as { requestId?: string }).requestId === "plugin-intent-always-on") as { operationResult?: { status?: string; message?: string } } | undefined;
+    expect(response?.operationResult).toEqual({
+      status: "command-conflict",
+      commandId: "plugin-intent-always-on:disable",
+      message: "该插件产品属于系统必需组件，不能关闭",
+    });
+  });
+
+  it("keeps recovery-required visible when an old Worker still holds final I/O", async () => {
+    __testResetState();
+    const release = await __testHoldCoordinatorFinalIoLease();
+    try {
+      await expect(__testRestartWorker()).rejects.toMatchObject({
+        code: "upgrade.authority_claim_failed",
+        recoveryRequired: true,
+        activeIoLeaseCount: 1,
+      });
+      expect(__testGetSnapshot().authorityRecovery).toMatchObject({
+        status: "recovery-required",
+        reason: "active-final-io-leases",
+        authorityBuildId: expect.any(String),
+        activeIoLeaseCount: 1,
+        activeIoOperations: { read: 0, write: 1 },
+      });
+    } finally {
+      // 旧 Worker 的 release 仍然按旧 authority/generation 定位租约，
+      // 即使新 Worker 已经进入恢复态也必须能够排空它。
+      await release();
+    }
+
+    await __testRestartWorker();
+    expect(__testGetSnapshot().authorityRecovery).toBeUndefined();
+  }, 15_000);
+
+  it("uses the explicit storage retry command to complete old-lease recovery", async () => {
+    __testResetState();
+    const release = await __testHoldCoordinatorFinalIoLease();
+    try {
+      await expect(__testRestartWorker()).rejects.toMatchObject({
+        code: "upgrade.authority_claim_failed",
+        recoveryRequired: true,
+      });
+      expect(__testGetSnapshot().authorityRecovery?.status).toBe("recovery-required");
+    } finally {
+      await release();
+    }
+
+    const retry = await __testDispatchStorageControl({ type: "retry" } satisfies CoordinatorStorageControl);
+    expect(retry.ack.status).toBe("ok");
+    expect(__testGetSnapshot().authorityRecovery).toBeUndefined();
+  }, 15_000);
+
   it("keeps per-port queue admission fair and bounded", () => {
     __testResetState();
     const result = __testStorageQueueAdmission("port-a");
@@ -778,6 +1099,19 @@ describe("Session Coordinator worker", () => {
     await __testRestartWorker();
     expect(__testGetSnapshot().vaultStatus).not.toBe("unlocked");
     expect(__testGetSnapshot().scheduleSettings.assetHoldingsIntervalMs).toBe(60_000);
+  });
+
+  it("does not publish an in-memory schedule change when persistence fails", async () => {
+    __testResetState();
+    __testSetVaultStatus("unlocked", "a".repeat(64));
+    const before = __testGetSnapshot().scheduleSettings;
+    __testFailNextCoordinatorMetaPersist();
+
+    await expect(__testUpdateScheduleSettings({ assetHoldingsIntervalMs: 180_000 })).rejects.toThrow(/injected coordinator meta persist failure/);
+    expect(__testGetSnapshot().scheduleSettings).toEqual(before);
+
+    await __testRestartWorker();
+    expect(__testGetSnapshot().scheduleSettings).toEqual(before);
   });
 
   it("marks tasks as blocked when vault is locked", async () => {
@@ -1252,13 +1586,6 @@ describe("Session Coordinator backup import", () => {
     await __testDeleteVault();
     __testResetState();
 
-    const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
-    // Model an unlocked empty Vault without forging session crypto state: remove
-    // the only persisted key while retaining the real unlocked target session.
-    await vaultKeyRepository.deleteKeyAndSidecars(placeholder.publicKeyHex!);
-    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
-    expect(__testGetVaultStatus()).toBe("unlocked");
-
     const a = new TestPort();
     const b = new TestPort();
     const onconnect = (globalThis as unknown as { onconnect?: (event: MessageEvent) => void }).onconnect;
@@ -1271,6 +1598,13 @@ describe("Session Coordinator backup import", () => {
     await flush();
     a.messages.length = 0;
     b.messages.length = 0;
+
+    const placeholder = await __testCreateVault("target-pw", { label: "placeholder" });
+    // Model an unlocked empty Vault without forging session crypto state: remove
+    // the only persisted key while retaining the real unlocked target session.
+    await vaultKeyRepository.deleteKeyAndSidecars(placeholder.publicKeyHex!);
+    expect(await vaultKeyRepository.listKeys()).toHaveLength(0);
+    expect(__testGetVaultStatus()).toBe("unlocked");
 
     const imported = await __testImportKeyBackup(backup, "source-pw", "target-pw");
     expect(__testGetActivePublicKeyHex()).toBe(imported.publicKeyHex);

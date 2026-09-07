@@ -200,6 +200,15 @@ export interface VaultServiceDeps {
   logger?: PluginLogger;
 }
 
+/** 清理可能已 transfer 到 Dedicated Worker 的密钥副本；detached buffer 视为已不可由本侧访问。 */
+function clearBytesBestEffort(bytes: Uint8Array): void {
+  try {
+    if (bytes.byteLength > 0) bytes.fill(0);
+  } catch {
+    // ArrayBuffer 已转移时，当前环境不能再访问它；Worker 初始化失败路径已负责终止 Worker。
+  }
+}
+
 export function createVaultService(deps: VaultServiceDeps): VaultService {
   const lifecycleListeners = new Set<(snapshot: VaultLifecycleSnapshot) => void>();
   let status: VaultStatus = "booting";
@@ -385,7 +394,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         }
       );
     } catch (err) {
-      enginePrivateKey.fill(0);
+      clearBytesBestEffort(enginePrivateKey);
       throw err;
     }
   }
@@ -415,7 +424,7 @@ export function createVaultService(deps: VaultServiceDeps): VaultService {
         }
       );
     } catch (err) {
-      enginePrivateKey.fill(0);
+      clearBytesBestEffort(enginePrivateKey);
       throw err;
     }
   }

@@ -1,5 +1,6 @@
 import type { I18nPluginResources, PluginManifest, ResourceRegistry, StorageRuntimeController, SystemSettingsRegistry, StorageCoordinatorControl } from "@keymaster/contracts";
 import { RESOURCE_REGISTRY_CAPABILITY, STORAGE_RUNTIME_CONTROLLER_CAPABILITY } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { StorageProfileEditor } from "./ui/StorageProfileEditor.js";
 import { StorageRpcProxy } from "./coordinator/storageRpcProxy.js";
 import type { StorageRuntimeSnapshot } from "./runtime/storageRuntimeController.js";
@@ -105,8 +106,21 @@ export const storagePlatformPlugin: PluginManifest = {
   id: STORAGE_PLATFORM_PLUGIN_ID,
   name: "Storage",
   description: "隔离的 Connect S3-compatible object storage capability.",
-  meta: { kind: "platform", startup: "required", bootstrapStage: "storage-onboarding", defaultEnabled: true, canDisable: false, providesCapabilities: [STORAGE_RUNTIME_CONTROLLER_CAPABILITY], displayGroup: "platform" },
-  dependencies: [{ capability: "system-settings.registry", reason: "Storage settings live under Settings -> System" }],
+  meta: { kind: "platform", startup: "required", bootstrapStage: "storage-onboarding", defaultEnabled: true, canDisable: false, displayGroup: "platform" },
+  units: [{
+    id: "storage.window",
+    execution: "window",
+    lifetime: "storage",
+    provides: [STORAGE_RUNTIME_CONTROLLER_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([STORAGE_RUNTIME_CONTROLLER_CAPABILITY]),
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: "system-settings.registry", reason: "Storage settings live under Settings -> System" },
+    ]),
+  }, {
+    id: "storage.coordinator-worker",
+    execution: "coordinator-worker",
+    lifetime: "storage",
+  }],
   i18n: resources,
   async setup(ctx) {
     const coordinator = ctx.coordinator as StorageCoordinatorControl | undefined;
@@ -119,7 +133,7 @@ export const storagePlatformPlugin: PluginManifest = {
       id: resourceId,
       scope: "global",
       key: () => [resourceId],
-      load: async () => ({ status: service.status(), healthStatus: (service as StorageRuntimeController & { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.(), summary: await service.getProviderSummary(), capabilities: service.getConditionalCapabilities() }),
+      load: async () => ({ status: service.status(), healthStatus: (service as StorageRuntimeController & { healthStatus?: () => import("@keymaster/contracts").StorageRuntimeStatus }).healthStatus?.(), authorityRecovery: (service as StorageRuntimeController & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: await service.getProviderSummary(), capabilities: service.getConditionalCapabilities() }),
       subscribe: (_args, _context, invalidate) => service.subscribe(invalidate),
       invalidation: "immediate"
     });

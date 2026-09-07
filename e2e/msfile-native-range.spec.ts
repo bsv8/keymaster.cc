@@ -14,11 +14,10 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { expect, test, type Page } from "@playwright/test";
 import { nativeMediaFixtures, type NativeMediaFixture } from "./fixtures/nativeMediaFixtures.js";
-import { assertMsFileProxyProtocolCommit, MSFILE_GO_DIR } from "./fixtures/msfileProxyProtocol.js";
+import { assertMsFileProxyProtocolCommit, getMsFileGoDir } from "./fixtures/msfileProxyProtocol.js";
 
 const execFileAsync = promisify(execFile);
 const MEDIA_PREFIX = "/__keymaster/msfile-media/";
-const GO_NAS_DIR = MSFILE_GO_DIR;
 
 interface ProductionHooks {
   /** 初始化测试 Vault 并返回当前 active key。 */
@@ -203,6 +202,7 @@ function supplierConfig(fixture: NativeNasFixture) {
 }
 
 async function startNasFixture(): Promise<NativeNasFixture> {
+  const goNasDir = getMsFileGoDir();
   const directory = await fs.mkdtemp(join(tmpdir(), "keymaster-msfile-native-range-"));
   const nasData = join(directory, "nas-data");
   const seedData = join(directory, "seed-data");
@@ -226,7 +226,7 @@ async function startNasFixture(): Promise<NativeNasFixture> {
     "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost",
   ], { maxBuffer: 4 * 1024 * 1024 });
   await execFileAsync("go", ["build", "-o", binary, "./cmd/msfile-nas"], {
-    cwd: GO_NAS_DIR,
+    cwd: goNasDir,
     maxBuffer: 8 * 1024 * 1024,
   });
   const webRtcPort = await freeUdpPort();
@@ -256,7 +256,7 @@ async function startNasFixture(): Promise<NativeNasFixture> {
   ].join("\n"));
 
   const child = spawn(binary, ["--config", config], {
-    cwd: GO_NAS_DIR,
+    cwd: goNasDir,
     stdio: ["ignore", "pipe", "pipe"],
   });
   child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk.toString()));
@@ -326,6 +326,29 @@ async function waitForHooks(page: Page): Promise<void> {
   await page.waitForFunction(() => Boolean((window as Window & { __msfileProductionE2E?: unknown }).__msfileProductionE2E), undefined, {
     timeout: 30_000,
   });
+}
+
+async function grantPersistentStorage(page: Page): Promise<void> {
+  const browser = page.context().browser();
+  if (!browser) throw new Error("MSFile native Range E2E requires Chromium");
+  await page.goto("/?msfileE2EPermission=1", { waitUntil: "domcontentloaded" });
+  const pageCdp = await page.context().newCDPSession(page);
+  const target = await pageCdp.send("Target.getTargetInfo");
+  await pageCdp.detach();
+  const browserContextId = target.targetInfo.browserContextId;
+  if (!browserContextId) throw new Error("MSFile native Range browser context is unavailable");
+  const cdp = await browser.newBrowserCDPSession();
+  await cdp.send("Browser.grantPermissions", {
+    origin: "http://127.0.0.1:4173",
+    browserContextId,
+    permissions: ["durableStorage"],
+  });
+  if (!(await page.evaluate(() => navigator.storage.persisted()))) {
+    await cdp.detach();
+    throw new Error("MSFile native Range durableStorage permission was not applied");
+  }
+  // 保持 Browser CDP session 存活到 context 关闭；detach 会撤销该 context
+  // 的权限，导致真实 OPFS bootstrap 失败。
 }
 
 async function bootstrapPage(page: Page): Promise<void> {
@@ -614,6 +637,7 @@ test.describe("MSFile 原生 Range production Gate（施工单 003）", () => {
   });
 
   test.beforeEach(async ({ page }) => {
+    await grantPersistentStorage(page);
     await page.addInitScript(() => {
       localStorage.setItem("keymaster.plugins.runtime", JSON.stringify({ version: 2, enabled: {} }));
     });

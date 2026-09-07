@@ -20,6 +20,7 @@ import type {
   RouteRegistry,
   Contact
 } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import {
   KEYSPACE_SERVICE_CAPABILITY,
   CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
@@ -189,21 +190,39 @@ export const contactsPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR, CONTACTS_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "business"
   },
-  i18n: contactsResources,
-  storage: {
-    scope: "key",
-    applicationStorageId: CONTACTS_STORAGE_ID,
-    schemaVersion: CONTACTS_SCHEMA_VERSION
-  },
-  dependencies: [
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
-    { capability: "route.registry", reason: "注册联系人页面" },
-    { capability: "business.registry", reason: "接入首页业务导航" }
-    ,{ capability: "contacts.public-key-action.registry", reason: "显示联系人公钥操作" }
+  units: [
+    {
+      id: "contacts.window",
+      execution: "window",
+      lifetime: "owner-session",
+      provides: [CONTACTS_CAPABILITY, CONTACTS_PICKER, CONTACTS_EDITOR, CONTACTS_COORDINATOR_CONTROL_CAPABILITY],
+      providedContracts: defineRuntimeUnitProvidedContracts([
+        CONTACTS_CAPABILITY,
+        CONTACTS_PICKER,
+        CONTACTS_EDITOR,
+        CONTACTS_COORDINATOR_CONTROL_CAPABILITY,
+      ]),
+      storage: {
+        scope: "key",
+        applicationStorageId: CONTACTS_STORAGE_ID,
+        schemaVersion: CONTACTS_SCHEMA_VERSION
+      },
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "联系人按 key namespace 隔离" },
+        { capability: "route.registry", reason: "注册联系人页面" },
+        { capability: "business.registry", reason: "接入首页业务导航" },
+        { capability: "contacts.public-key-action.registry", reason: "显示联系人公钥操作" },
+      ]),
+    },
+    {
+      id: "contacts.coordinator-worker",
+      execution: "coordinator-worker",
+      lifetime: "owner-session",
+    },
   ],
+  i18n: contactsResources,
   setup(ctx) {
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");

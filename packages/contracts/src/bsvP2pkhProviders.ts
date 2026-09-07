@@ -109,6 +109,8 @@ export interface P2pkhProviderRegistry {
   /** Optional lifecycle hook used when an optional provider plugin is disabled. */
   unregisterConfirmedProvider?(providerId: string): void;
   registerBroadcastProvider(provider: P2pkhTransactionBroadcastProvider): void;
+  /** 关闭 Provider 产品时同步移除广播入口；缺省实现只兼容只读 Provider。 */
+  unregisterBroadcastProvider?(providerId: string): void;
   listConfirmedProviders(network?: BsvNetwork): P2pkhProviderDescriptor[];
   listBroadcastProviders(network?: BsvNetwork): P2pkhProviderDescriptor[];
   getConfirmedProvider(id: string, network: BsvNetwork): P2pkhConfirmedDataProvider | undefined;

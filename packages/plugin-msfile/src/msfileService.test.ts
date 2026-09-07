@@ -133,6 +133,37 @@ afterEach(async () => {
 });
 
 describe("trusted reads", () => {
+  it("caches only recent successful Stat metadata and invalidates it on time or supplier changes", async () => {
+    const transport = makeTransport();
+    let statCalls = 0;
+    let now = 1_000;
+    transport.stat = async ({ supplier }: { supplier: { supplierPublicKeyHex: string } }) => {
+      statCalls += 1;
+      return {
+        supplierPublicKeyHex: supplier.supplierPublicKeyHex,
+        status: "available" as const,
+        recommendedFilename: "fixture.bin",
+        fileSizeBytes: "1",
+        mediaType: "application/octet-stream",
+      };
+    };
+    const service = createMsFileService({ transport: transport as unknown as MsFileTransport, now: () => now });
+    openServices.push(service);
+    await configureGlobal(service);
+
+    await service.stat({ seedHashHex: "ab".repeat(32) });
+    await service.stat({ seedHashHex: "ab".repeat(32) });
+    expect(statCalls).toBe(1);
+
+    now += 5_000;
+    await service.stat({ seedHashHex: "ab".repeat(32) });
+    expect(statCalls).toBe(2);
+
+    await service.upsertSupplier({ name: "nas-2", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true });
+    await service.stat({ seedHashHex: "ab".repeat(32) });
+    expect(statCalls).toBe(3);
+  });
+
   it("fail closed before global settings exist", async () => {
     const service = await freshService();
     await service.upsertSupplier({ name: "nas", supplierPublicKeyHex: SUPPLIER_PUBKEY, addresses: [SUPPLIER_ADDRESS], enabled: true });

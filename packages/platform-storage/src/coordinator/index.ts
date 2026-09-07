@@ -5,11 +5,15 @@ export { openMultipartUploadRepository, MULTIPART_REPOSITORY_NAME, MULTIPART_REP
 export type { MultipartUploadRepository, StoredMultipartUploadRecord, StoredProviderConfigRecord } from "../bootstrap/multipartUploadRepository.js";
 export { StorageRuntimeError } from "../runtime/storageRuntimeError.js";
 export { createOpfsBucketProvider } from "../bucket-providers/opfs/opfsBucketObjectStore.js";
+// Window 侧申请持久化授权；实现仍封装在 OPFS Provider 目录，SharedWorker
+// 只负责在 Provider 探测时读取已授权状态。
+export { requestOpfsPersistence } from "../bucket-providers/opfs/opfsPersistence.js";
 export { createS3BucketProvider } from "../bucket-providers/s3/s3BucketProvider.js";
 export { createS3BucketObjectStore } from "../bucket-providers/s3/s3BucketObjectStore.js";
 export { createKeyValueStore } from "../kv-engine/partitionedKvEngine.js";
 export { createOwnerLifecycleGuardedProvider, createPlatformRootStore } from "../storage-access/platform-root/platformRootStore.js";
 export { createStorageBindingAuthority } from "./storageBindingAuthority.js";
+export type { StorageBindingAuthorityOptions } from "./storageBindingAuthority.js";
 export { createOwnerAppStore } from "../storage-access/owner-app/ownerAppStore.js";
 export { decryptStorageProfile, encryptStorageProfile, importStorageProfileEnvelope, exportStorageProfileEnvelope, readStorageBootstrap, writeStorageBootstrap, clearStorageBootstrap } from "../bootstrap/storageProfileRepository.js";
 export { normalizeProviderConfig } from "../bucket-providers/s3/s3ClientFactory.js";

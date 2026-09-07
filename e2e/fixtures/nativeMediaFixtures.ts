@@ -44,8 +44,50 @@ function wavFixture(totalBytes = 640_044): Buffer {
  * moov 内的 sample offset 仍指向原始 mdat，因此不需要重新编码，也不会
  * 改变媒体内容；浏览器必须通过尾部 Range 取得索引才能解析这个文件。
  */
-function tailMoovMp4Fixture(): Buffer {
-  const source = Buffer.from(MP4_BASE64, "base64");
+function findTailMoovOffset(source: Buffer, fromOffset: number): number {
+  const moov = Buffer.from("moov", "ascii");
+  let typeOffset = source.indexOf(moov, fromOffset + 8);
+  while (typeOffset >= 4) {
+    const candidateOffset = typeOffset - 4;
+    const candidateSize = source.readUInt32BE(candidateOffset);
+    if (candidateSize >= 8 && candidateOffset + candidateSize === source.length) return candidateOffset;
+    typeOffset = source.indexOf(moov, typeOffset + 1);
+  }
+  return -1;
+}
+
+function normalizeMp4Fixture(source: Buffer): Buffer {
+  let offset = 0;
+  while (offset + 8 <= source.length) {
+    const size = source.readUInt32BE(offset);
+    const type = source.toString("ascii", offset + 4, offset + 8);
+    if (type === "moov") return source;
+    if (type === "mdat") {
+      const moovOffset = findTailMoovOffset(source, offset);
+      if (moovOffset > offset + size) {
+        // 该历史 WPT fixture 的 mdat 长度比实际尾部少 6 字节。它的媒体
+        // payload 没有损坏，只是顶层 box header 不一致；在进入浏览器
+        // 测试前修正 header，避免夹具解析器把测试环境问题误报成产品失败。
+        const normalized = Buffer.from(source);
+        normalized.writeUInt32BE(moovOffset - offset, offset);
+        return normalized;
+      }
+    }
+    if (size < 8 || offset + size > source.length) {
+      const moovOffset = type === "mdat" ? findTailMoovOffset(source, offset) : -1;
+      if (moovOffset > offset) {
+        const normalized = Buffer.from(source);
+        normalized.writeUInt32BE(moovOffset - offset, offset);
+        return normalized;
+      }
+      throw new Error("MP4 fixture top-level box is invalid");
+    }
+    offset += size;
+  }
+  throw new Error("MP4 fixture has no moov box");
+}
+
+function tailMoovMp4Fixture(source: Buffer): Buffer {
   let offset = 0;
   let moovOffset = -1;
   while (offset + 8 <= source.length) {
@@ -55,9 +97,7 @@ function tailMoovMp4Fixture(): Buffer {
       moovOffset = offset;
       break;
     }
-    if (size < 8 || offset + size > source.length) {
-      throw new Error("MP4 fixture top-level box is invalid");
-    }
+    if (size < 8 || offset + size > source.length) throw new Error("MP4 fixture top-level box is invalid");
     offset += size;
   }
   if (moovOffset < 0) throw new Error("MP4 fixture has no moov box");
@@ -69,11 +109,12 @@ function tailMoovMp4Fixture(): Buffer {
   return Buffer.concat([source.subarray(0, moovOffset), padding, source.subarray(moovOffset)]);
 }
 
-const MP4_TAIL_MOOV_BYTES = tailMoovMp4Fixture();
+const MP4_FIXTURE = normalizeMp4Fixture(Buffer.from(MP4_BASE64, "base64"));
+const MP4_TAIL_MOOV_BYTES = tailMoovMp4Fixture(MP4_FIXTURE);
 
 export function nativeMediaFixtures(): readonly NativeMediaFixture[] {
   return [
-    { filename: "fixture-native-h264-aac.mp4", mediaType: "video/mp4", bytes: Buffer.from(MP4_BASE64, "base64") },
+    { filename: "fixture-native-h264-aac.mp4", mediaType: "video/mp4", bytes: MP4_FIXTURE },
     { filename: "fixture-native-h264-aac-tail-moov.mp4", mediaType: "video/mp4", bytes: MP4_TAIL_MOOV_BYTES },
     { filename: "fixture-native-mp3.mp3", mediaType: "audio/mpeg", bytes: Buffer.from(MP3_BASE64, "base64") },
     { filename: "fixture-native-webm.webm", mediaType: "video/webm", bytes: Buffer.from(WEBM_BASE64, "base64") },

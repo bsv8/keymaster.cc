@@ -2083,7 +2083,21 @@ export class ProtocolServiceImpl implements ProtocolService {
       lastUsedAt: now,
       revokedAt: null
     };
-    await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(sessionRecord);
+    try {
+      await this.deps.storageRepository.putConnectSessionAndRevokeOriginPeers(sessionRecord);
+    } catch (err) {
+      // Session 真值必须先落库再导航；存储失败时关闭预开的空白窗口，
+      // 并统一转换为 typed error，UI 不应展示底层 grant/OPFS 文案。
+      this.deps.logger?.error?.({
+        scope: "protocol.launcher",
+        event: "connectSession.persist.failed",
+        err: err instanceof Error ? err.message : String(err)
+      });
+      throw new LaunchAppViewError(
+        "session_storage_unavailable",
+        "launchAppView: session storage unavailable"
+      );
+    }
     // 8) 用受控 appView session capability 组装 `SessionRuntimeBootstrap`。
     let sessionRuntimeBootstrap: SessionRuntimeBootstrap;
     try {

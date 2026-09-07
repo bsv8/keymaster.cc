@@ -13,6 +13,7 @@ import type {
   StoragePutResult,
   StorageRuntimeController as StorageRuntimeControllerContract,
   StorageRuntimeControllerStatus,
+  CoordinatorAuthorityRecovery,
   StorageBucketProvider,
   StorageUploadAbortResult,
   StorageUploadBeginResult,
@@ -47,6 +48,8 @@ export interface StorageRuntimeSnapshot {
   status: StorageRuntimeControllerStatus;
   /** 独立于 Vault 的统一桶健康状态。 */
   healthStatus?: import("@keymaster/contracts").StorageRuntimeStatus;
+  /** Coordinator 最终 I/O 接管被旧 Worker 阻塞时的脱敏恢复提示。 */
+  authorityRecovery?: CoordinatorAuthorityRecovery;
   summary: StorageProviderSummary | null;
   capabilities?: BucketConditionalCapabilitiesView | null;
 }

@@ -38,7 +38,7 @@ describe("ChannelSubscriptionMux", () => {
     });
 
     await mux.set("app", ["topic"]);
-    mux.release("app");
+    await mux.release("app");
 
     await vi.waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(2), { timeout: 2_000 });
     expect(mux.callerChannels("app")).toEqual([]);

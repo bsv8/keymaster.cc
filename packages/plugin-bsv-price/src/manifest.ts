@@ -5,7 +5,7 @@
 //   - 本插件直接消费 Coordinator Channel runtime；
 //   - 注册能力：`bsv-price.service` capability；
 //   - 注册路由：`/bsv-price` 单页面（业务页），并在首页右侧栏提供紧凑行情 widget；
-//   - `pricePublisherPublicKeyHex` 由装配层通过 `manifest.config`
+//   - `pricePublisherPublicKeyHex` 由装配层通过 Window unit 的 `config`
 //     注入，只作为首次 seed；运行时编辑器走「设置 → 应用设置」；
 //   - **不**接触 provider handle / wire。
 
@@ -21,7 +21,9 @@ import type {
 } from "@keymaster/contracts";
 import {
   CHANNEL_RUNTIME_CAPABILITY,
-  RESOURCE_REGISTRY_CAPABILITY
+  RESOURCE_REGISTRY_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import {
   BSV_PRICE_CONFIG_KEY,
@@ -144,11 +146,11 @@ const bsvPriceResources: I18nPluginResources = {
  *   - 不接触 provider handle / wire 细节。
  *
  * 配置面（施工单 2026-07-08 001）：
- *   - `pricePublisherPublicKeyHex`：由装配层在 `manifest.config` 显式
+ *   - `pricePublisherPublicKeyHex`：由装配层在 Window unit 的 `config` 显式
  *     注入；hex 字符串来自 PriceCast 服务端运营私钥导出的压缩公钥；
  *   - 缺值 → `bsv-price.service` 立即进入 `not_configured` 状态，
  *     页面持续空态（**不**构造伪频道占位）；
- *   - 配置来源**唯一**接受 `manifest.config`，不再支持 `globalThis`
+ *   - 配置来源**唯一**接受 Window unit 的 `config`，不再支持 `globalThis`
  *     隐式注入路径，避免"`globalThis.__PRICECAST_PUBLISHER_PUBKEY__`
  *     被忽略谁知道写了什么"这类部署歧义。
  */
@@ -158,53 +160,46 @@ export const bsvPricePlugin: PluginManifest = {
   description:
     "BSV 价格业务插件：消费 Coordinator Channel，订阅 PriceCast publisher 公钥频道，展示交易所价格快照。",
   i18n: bsvPriceResources,
-  storage: { scope: "key", applicationStorageId: "BsvPrice", schemaVersion: 1 },
   meta: {
     kind: "business",
     startup: "optional",
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [BSV_PRICE_SERVICE_CAPABILITY],
     displayGroup: "business"
   },
-  // 由装配层在 host.register 之前注入；plugin 自己的 setup 不回写。
-  config: {
-    // 缺省空对象 → plugin 进入 not_configured 状态。
-    pricePublisherPublicKeyHex: ""
-  },
-  dependencies: [
-    {
-      capability: CHANNEL_RUNTIME_CAPABILITY,
-      reason: "通过 Coordinator Channel runtime 订阅精确价格频道"
+  units: [{
+    id: "bsv-price.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [BSV_PRICE_SERVICE_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([BSV_PRICE_SERVICE_CAPABILITY]),
+    storage: { scope: "key", applicationStorageId: "BsvPrice", schemaVersion: 1 },
+    config: {
+      // 缺省空对象 → plugin 进入 not_configured 状态。
+      pricePublisherPublicKeyHex: ""
     },
-    { capability: "route.registry", reason: "注册行情页与应用设置详情页" },
-    {
-      capability: "breadcrumb.registry",
-      reason: "为行情页与应用设置详情页提供面包屑"
-    },
-    {
-      capability: "application-settings.registry",
-      reason: "注册应用设置目录入口"
-    },
-    {
-      capability: "business.registry",
-      reason: "将行情页挂入首页业务域"
-    },
-    { capability: "home.registry", reason: "将 BSV 价格快照显示在首页右侧栏" },
-    {
-      capability: RESOURCE_REGISTRY_CAPABILITY,
-      reason: "注册 BSV Price 状态资源"
-    },
-    { capability: "keyspace.service", reason: "active key 就绪后加载 owner 配置" }
-  ],
+    dependencies: defineRuntimeUnitDependencies([
+      {
+        capability: CHANNEL_RUNTIME_CAPABILITY,
+        reason: "通过 Coordinator Channel runtime 订阅精确价格频道"
+      },
+      { capability: "route.registry", reason: "注册行情页与应用设置详情页" },
+      { capability: "breadcrumb.registry", reason: "为行情页与应用设置详情页提供面包屑" },
+      { capability: "application-settings.registry", reason: "注册应用设置目录入口" },
+      { capability: "business.registry", reason: "将行情页挂入首页业务域" },
+      { capability: "home.registry", reason: "将 BSV 价格快照显示在首页右侧栏" },
+      { capability: RESOURCE_REGISTRY_CAPABILITY, reason: "注册 BSV Price 状态资源" },
+      { capability: "keyspace.service", reason: "active key 就绪后加载 owner 配置" },
+    ]),
+  }],
   async setup(ctx) {
     /**
      * 关键约束（施工单 §4.1.1 + §8.六）：
      *   - 不从 keyspace / vault 推断；
      *   - 配置缺失 → 业务页持续空态（**不**构造伪频道占位）；
      *   - `pricePublisherPublicKeyHex` **首次 seed** 仅来自 `ctx.config`，
-     *     由装配层在 `manifest.config` 注入；运行时真值由
+     *     由装配层在 Window unit 的 `config` 注入；运行时真值由
      *     Host 注入的 BSV Price owner/App K-V 承担；
      *   - 取值后做类型校验：非字符串视为未配置。
      */

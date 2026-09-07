@@ -55,6 +55,7 @@ export function createContactsPresenceTask(deps: ContactsPresenceTaskDeps): Back
   return {
     id: "contacts.presence-probe",
     pluginId: "contacts",
+    unitId: "contacts.coordinator-worker",
     label: { key: "contacts.task.presence", fallback: "联系人在线探测" },
     description: { key: "contacts.task.presence.description", fallback: "使用固定 Ping/Pong 协议更新联系人在线状态。" },
     schedule: {

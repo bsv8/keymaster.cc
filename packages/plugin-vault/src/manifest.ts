@@ -39,7 +39,7 @@ import type {
   , CoordinatorVaultStatus
   , KeyspaceService
 } from "@keymaster/contracts";
-import { KEYSPACE_SERVICE_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, type VaultLocalSecretService, type VaultCoordinatorControl } from "@keymaster/contracts";
+import { KEYSPACE_SERVICE_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY, VAULT_LOCAL_SECRET_CAPABILITY, defineRuntimeUnitProvidedContracts, type VaultLocalSecretService, type VaultCoordinatorControl } from "@keymaster/contracts";
 import { VaultCreatePage } from "./VaultCreatePage.js";
 import { VaultSettingsPage } from "./VaultSettingsPage.js";
 import { CurrentKeySettingsPage } from "./CurrentKeySettingsPage.js";
@@ -420,9 +420,24 @@ export const vaultPlugin: PluginManifest = {
     bootstrapStage: "vault-selection",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "core"
   },
+  units: [{
+    id: "vault.window",
+    execution: "window",
+    lifetime: "root",
+    provides: [VAULT_CAPABILITY, "keyspace.service", VAULT_LOCAL_SECRET_CAPABILITY, VAULT_COORDINATOR_CONTROL_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([
+      VAULT_CAPABILITY,
+      KEYSPACE_SERVICE_CAPABILITY,
+      VAULT_LOCAL_SECRET_CAPABILITY,
+      VAULT_COORDINATOR_CONTROL_CAPABILITY,
+    ]),
+  }, {
+    id: "vault.coordinator-worker",
+    execution: "coordinator-worker",
+    lifetime: "root",
+  }],
   i18n: vaultResources,
   setup(ctx) {
     const messageBus = ctx.get<MessageBus>("runtime.messageBus");

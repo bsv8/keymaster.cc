@@ -84,6 +84,28 @@ const DEFAULT_RANDOM_ID = (): string =>
     ? crypto.randomUUID()
     : `${Date.now().toString(16)}-${Math.floor(Math.random() * 0xffffffff).toString(16)}`;
 
+/**
+ * Stat 是供应商元数据查询，不是内容读取。短暂缓存只用于合并首页/媒体
+ * 反复查询同一 Seed 的压力；供应商世代或 barrier 变化会立即使其失效，
+ * 正常情况下最多保留 5 秒，避免把动态可用性变成长期事实。
+ */
+const MSFILE_STAT_CACHE_TTL_MS = 5_000;
+const MSFILE_STAT_CACHE_MAX_ENTRIES = 256;
+
+interface CachedStatResult {
+  value: MsFileStatResult;
+  expiresAt: number;
+  supplierGeneration: number;
+  supplierFence: number;
+}
+
+function cloneStatResult(value: MsFileStatResult): MsFileStatResult {
+  return {
+    seedHashHex: value.seedHashHex,
+    suppliers: value.suppliers.map((entry) => ({ ...entry })),
+  };
+}
+
 export class MsFileServiceImpl implements MsFileService {  private readonly repository: Promise<MsFileRepository>;
   private readonly transport: MsFileTransport;
   private readonly now: () => number;
@@ -107,6 +129,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
    * 键为 supplier|seedHash；供应商配置世代变化时整体失效。
    */
   private readonly statFileSizeBySupplierSeed = new Map<string, string>();
+  /** 最近 Stat 元数据的短 TTL 缓存；不缓存 network-error。 */
+  private readonly statCache = new Map<string, CachedStatResult>();
   private supplierGeneration = 0;
   /**
    * 原子供应商快照（审查修复）：{ generation, suppliers } 整体替换，
@@ -143,6 +167,19 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   private readonly ready: Promise<void>;
 
   /**
+   * Coordinator 装配 MSFile 时使用的初始化门禁。
+   *
+   * `createMsFileService()` 会立即启动缓存读取；如果 owner K-V 恰好仍在
+   * Storage recovery 窗口，不能把一个尚未完成初始化的实例发布成当前
+   * runtime。调用方等待本门禁后再决定是发布实例还是释放并重试。
+   */
+  async waitUntilInitialized(): Promise<void> {
+    await this.ready;
+    if (this.disposed) throw new MsFileServiceError("msfile_unavailable", "MSFile service was disposed");
+    if (this.initializationError) throw this.initializationError;
+  }
+
+  /**
    * 公开 control/data 方法的初始化与生命周期栅栏。
    * 初始化失败（K-V 打不开等）永久 fail closed：调用方必须重建服务
    * （Coordinator 在 lock/unlock 周期中天然重建）。
@@ -177,6 +214,8 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     // 恢复后都会因 fence 变化被拒，不再触碰已释放的 transport。
     this.supplierFence += 1;
     this.disposed = true;
+    this.statCache.clear();
+    this.statFileSizeBySupplierSeed.clear();
     this.supplierBarriers.clear();
     for (const [, entry] of [...this.approvals]) {
       entry.reject(new MsFileServiceError("user_rejected", "MSFile service was disposed"));
@@ -236,7 +275,12 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
     this.cachedSettings = row
       ? canonicalSettingsRow(row)
       : { settings: null, ...MSFILE_READ_CONCURRENCY_RECOMMENDED };
+    // 配置读取也是状态同步：新建的 Coordinator runtime 可能没有经历
+    // 首次 refresh 的 topic 发布，读取到的权威快照必须立即广播给页面
+    // 代理，否则页面会长期停留在旧的 unconfigured baseline。
+    this.supplierSnapshot = { generation: this.supplierGeneration, suppliers };
     this.cachedSuppliers = suppliers;
+    this.emit();
     return {
       globalSettings: row?.settings ?? null,
       ...readConcurrencyFromRow(row),
@@ -586,6 +630,18 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
       throw new MsFileServiceError("msfile_unavailable", "MSFile supplier configuration changed during stat setup");
     }
     if (enabled.length === 0) return { seedHashHex: input.seedHashHex, suppliers: [] };
+    if (input.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+    const cached = this.statCache.get(input.seedHashHex);
+    const now = this.now();
+    if (
+      cached
+      && cached.expiresAt > now
+      && cached.supplierGeneration === generationAtStart
+      && cached.supplierFence === fenceAtStart
+    ) {
+      return cloneStatResult(cached.value);
+    }
+    if (cached) this.statCache.delete(input.seedHashHex);
     // Stat 对所有启用供应商并发；单个供应商失败不影响其他结果，
     // 网络错误不得折叠成 absent。
     const entries = await Promise.all(
@@ -612,7 +668,23 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
         this.statFileSizeBySupplierSeed.set(`${entry.supplierPublicKeyHex}|${input.seedHashHex}`, entry.fileSizeBytes);
       }
     }
-    return { seedHashHex: input.seedHashHex, suppliers: entries };
+    const result: MsFileStatResult = { seedHashHex: input.seedHashHex, suppliers: entries };
+    // 只缓存无 network-error 的完整结果。网络错误必须尽快重新探测，
+    // 否则瞬时断线会被错误地展示为稳定状态。
+    if (!entries.some((entry) => entry.status === "network-error")) {
+      this.statCache.set(input.seedHashHex, {
+        value: cloneStatResult(result),
+        expiresAt: this.now() + MSFILE_STAT_CACHE_TTL_MS,
+        supplierGeneration: generationAtStart,
+        supplierFence: fenceAtStart,
+      });
+      while (this.statCache.size > MSFILE_STAT_CACHE_MAX_ENTRIES) {
+        const oldest = this.statCache.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.statCache.delete(oldest);
+      }
+    }
+    return result;
   }
 
   async readSeed(input: MsFileReadSeedInput): Promise<MsFileReadResult> {
@@ -733,6 +805,7 @@ export class MsFileServiceImpl implements MsFileService {  private readonly repo
   /** barrier 转变必须推进数据面栅栏版本。 */
   private setBarrier(key: string, state: { failed: boolean } | undefined): void {
     this.supplierFence += 1;
+    this.statCache.clear();
     if (state === undefined) this.supplierBarriers.delete(key);
     else this.supplierBarriers.set(key, state);
   }

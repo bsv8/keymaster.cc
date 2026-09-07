@@ -4,12 +4,12 @@
 // - 当前状态（enabled / disabled / blocked / error-disabled）
 // - 是否允许禁用
 // - 提供 capability、依赖 capability
-// - 反向依赖它的启用中插件
+// - 反向依赖它的启用中插件（禁用时由 Host 自动级联停止）
 // - 启停按钮
 //
 // 设计原则（硬切换 001 + 002）：
 //   - 不做自动依赖 enable / disable；
-//   - 反向依赖阻止 disable，UI 显示阻塞者；
+//   - 反向依赖只用于展示受影响列表，disable 由 Host 自动级联；
 //   - canDisable=false 时禁用按钮置灰；
 //   - 当前路由属于被 disable 的 plugin 时，由 host 负责先跳走；本页不重复处理。
 //   - 信息层级"先可扫描，再展开细节"：默认只渲染 name / group / state /
@@ -20,18 +20,27 @@
 import { useMemo, useState } from "react";
 import { Button, PageHeader } from "@keymaster/ui";
 import { useI18n, usePluginRuntime } from "@keymaster/runtime";
+import type { PluginHost } from "@keymaster/runtime";
 import type { PluginGraph, PluginManifest, PluginReverseDep, PluginStateKind } from "@keymaster/contracts";
 
 function describeState(s: PluginStateKind): { key: string; cls: string } {
   switch (s) {
     case "enabled":
       return { key: "pluginManager.state.enabled", cls: "pm-state pm-state--on" };
+    case "starting":
+      return { key: "pluginManager.state.starting", cls: "pm-state pm-state--warn" };
+    case "stopping":
+      return { key: "pluginManager.state.stopping", cls: "pm-state pm-state--warn" };
     case "disabled":
       return { key: "pluginManager.state.disabled", cls: "pm-state pm-state--off" };
     case "blocked":
       return { key: "pluginManager.state.blocked", cls: "pm-state pm-state--warn" };
     case "error-disabled":
       return { key: "pluginManager.state.errorDisabled", cls: "pm-state pm-state--err" };
+    case "cleanup-pending":
+      return { key: "pluginManager.state.cleanupPending", cls: "pm-state pm-state--err" };
+    case "unknown":
+      return { key: "pluginManager.state.unknown", cls: "pm-state pm-state--warn" };
     case "registered":
       return { key: "pluginManager.state.registered", cls: "pm-state" };
   }
@@ -70,7 +79,10 @@ export function PluginManagerPage() {
     setError(null);
     setBusyId(id);
     try {
-      await runtime.enable(id);
+      const result = await runtime.submitIntent(id, true);
+      if (result.status !== "accepted" && result.status !== "duplicate") {
+        setError(intentResultMessage(result));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -82,8 +94,10 @@ export function PluginManagerPage() {
     setError(null);
     setBusyId(id);
     try {
-      const r = await runtime.disable(id);
-      if (!r.ok) setError(r.reason);
+      const result = await runtime.submitIntent(id, false);
+      if (result.status !== "accepted" && result.status !== "duplicate") {
+        setError(intentResultMessage(result));
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -106,18 +120,24 @@ export function PluginManagerPage() {
           const state = runtime.state(m.id);
           const d = describeState(state.kind);
           const enabled = state.kind === "enabled";
+          const activeLike = state.kind === "enabled" || state.kind === "starting" || state.kind === "stopping";
+          const transitionInProgress = state.kind === "starting" || state.kind === "stopping";
           const canDisable = m.meta?.canDisable !== false;
           const deps = graph.dependencies[m.id] ?? [];
           const provides = graph.provides[m.id] ?? [];
           const reverse = runtime.reverseDeps(m.id);
-          const blockers = reverse.filter((d) => d.enabled);
+          const affectedDependents = reverse.filter((d) => d.enabled);
           // 依赖列表里是 capability key（如 "route.registry"），不是 plugin id。
           // 必须用 host.capabilities.has() 判断；不能误用 getManifest(pluginId)。
-          const missingDeps = deps.filter((c) => !runtime.hasCapability(c));
+          const optionalDeps = new Set(graph.optionalDependencies?.[m.id] ?? []);
+          const missingDeps = deps.filter((c) => !optionalDeps.has(c) && !runtime.hasCapability(c));
           const depsSatisfied = missingDeps.length === 0;
+          const pageUnits = state.units?.filter((unit) => unit.execution === "window") ?? [];
+          const backendUnits = state.units?.filter((unit) => unit.execution === "coordinator-worker") ?? [];
           const isOpen = expanded[m.id] === true;
           const hasDetails =
-            provides.length > 0 || deps.length > 0 || reverse.length > 0 || blockers.length > 0;
+            provides.length > 0 || deps.length > 0 || reverse.length > 0 || affectedDependents.length > 0
+            || pageUnits.length > 0 || backendUnits.length > 0;
           return (
             <article
               key={m.id}
@@ -148,28 +168,34 @@ export function PluginManagerPage() {
                   {t("pluginManager.error", { defaultValue: "Error" })}: {state.error}
                 </p>
               ) : null}
-              {blockers.length > 0 ? (
+              {state.desiredEnabled !== undefined && state.desiredEnabled !== enabled ? (
                 <p className="plugin-card__blockers-line">
-                  <span className="pm-state pm-state--warn">{t("pluginManager.meta.blockers", { defaultValue: "Blocking dependents" })}</span>
+                  {t("pluginManager.state.intentPending", { defaultValue: "Enable intent is pending runtime state" })}
+                </p>
+              ) : null}
+              {affectedDependents.length > 0 ? (
+                <p className="plugin-card__blockers-line">
+                  <span className="pm-state pm-state--warn">{t("pluginManager.meta.cascade", { defaultValue: "Will stop dependents" })}</span>
                   <span className="plugin-card__blockers-list">
-                    {blockers.map((b) => (
+                    {affectedDependents.map((b) => (
                       <span key={b.pluginId} className="plugin-card__dep is-on">{b.pluginId}</span>
                     ))}
                   </span>
                 </p>
               ) : null}
               <footer className="plugin-card__actions">
-                {enabled ? (
+                {activeLike ? (
                   <Button
                     size="sm"
                     variant="danger"
-                    disabled={busyId === m.id || !canDisable || blockers.length > 0}
+                    loading={transitionInProgress && busyId === m.id}
+                    disabled={busyId === m.id || transitionInProgress || !canDisable}
                     onClick={() => doDisable(m.id)}
                     title={
                       !canDisable
                         ? "canDisable=false"
-                        : blockers.length > 0
-                          ? "Blocked by enabled dependents"
+                        : affectedDependents.length > 0
+                          ? t("pluginManager.meta.cascadeHint", { defaultValue: "Disabling this plugin will stop the listed dependents; their enable intent is preserved." })
                           : undefined
                     }
                   >
@@ -276,21 +302,53 @@ export function PluginManagerPage() {
                       )}
                     </dd>
                   </div>
-                  {blockers.length > 0 ? (
+                  {affectedDependents.length > 0 ? (
                     <div className="plugin-card__blockers">
                       <dt>
-                        {t("pluginManager.meta.blockers", { defaultValue: "Blocking dependents" })}
+                        {t("pluginManager.meta.cascade", { defaultValue: "Will stop dependents" })}
                       </dt>
                       <dd>
                         {t("pluginManager.meta.blockersHint", {
                           defaultValue:
-                            "Disable these first (or use other tooling) to disable this plugin."
+                            "These dependents will stop automatically and keep their enable intent."
                         })}
                         <ul>
-                          {blockers.map((b) => (
+                          {affectedDependents.map((b) => (
                             <li key={b.pluginId}>{b.pluginId}</li>
                           ))}
                         </ul>
+                      </dd>
+                    </div>
+                  ) : null}
+                  {backendUnits.length > 0 ? (
+                    <div>
+                      <dt>{t("pluginManager.meta.backendUnits", { defaultValue: "后台单元状态" })}</dt>
+                      <dd>
+                        {backendUnits.map((unit) => {
+                          const unitState = describeState(unit.kind);
+                          return (
+                            <span key={unit.unitId} className="plugin-card__dep" title={unit.error}>
+                              <code>{unit.unitId}</code>: {t(unitState.key, { defaultValue: unitState.key.split(".").pop() ?? unitState.key })}
+                              {unit.instanceId ? ` (${unit.instanceId})` : ""}
+                            </span>
+                          );
+                        })}
+                      </dd>
+                    </div>
+                  ) : null}
+                  {pageUnits.length > 0 ? (
+                    <div>
+                      <dt>{t("pluginManager.meta.pageUnits", { defaultValue: "当前页面单元状态" })}</dt>
+                      <dd>
+                        {pageUnits.map((unit) => {
+                          const unitState = describeState(unit.kind);
+                          return (
+                            <span key={unit.unitId} className="plugin-card__dep" title={unit.error}>
+                              <code>{unit.unitId}</code>: {t(unitState.key, { defaultValue: unitState.key.split(".").pop() ?? unitState.key })}
+                              {unit.instanceId ? ` (${unit.instanceId})` : ""}
+                            </span>
+                          );
+                        })}
                       </dd>
                     </div>
                   ) : null}
@@ -302,4 +360,19 @@ export function PluginManagerPage() {
       </div>
     </div>
   );
+}
+
+function intentResultMessage(result: Awaited<ReturnType<PluginHost["submitIntent"]>>): string {
+  switch (result.status) {
+    case "revision-conflict":
+      return `启停命令修订已过期（当前修订 ${result.snapshot.revision}），请重试`;
+    case "stale-authority":
+      return "Coordinator 已重启，请重试";
+    case "persistence-failed":
+    case "command-conflict":
+    case "transport-error":
+      return result.message;
+    default:
+      return `启停命令未接受：${result.status}`;
+  }
 }

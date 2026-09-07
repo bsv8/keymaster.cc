@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-09-06T00:00:00.000Z",
+  "evidenceExpiresAt": "<证据有效期截止时间>",
+  "commit": "<目标部署验收对应的 commit>",
+  "buildId": "<commit-40位-sourceDigest前16位>",
+  "sourceDigest": "<源代码树 SHA-256>",
+  "domainUnits": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<真实领域单元验收时间>",
+    "evidenceRef": "<领域单元验收记录>",
+    "productIds": [],
+    "units": []
+  },
+  "externalAppView": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<真实外部 AppView 验收时间>",
+    "evidenceRef": "<外部部署 Playwright 报告>",
+    "origin": "https://<已部署 AppView origin>",
+    "successSelector": "<成功状态选择器>"
+  },
+  "recoveryDrill": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<旧 Worker lease 恢复演练时间>",
+    "evidenceRef": "<恢复演练记录>",
+    "oldLeaseObserved": false,
+    "authorityRejected": false,
+    "retrySucceeded": false,
+    "oldLeaseRejected": false,
+    "unknownResultNotReplayed": false
+  },
+  "irreversibleIoSmoke": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<外部供应商 smoke 时间>",
+    "evidenceRef": "<供应商故障注入记录>",
+    "scenarios": [
+      { "id": "owner-storage", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" },
+      { "id": "platform-storage", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" },
+      { "id": "msfile-upload", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" },
+      { "id": "remote-subscription", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" },
+      { "id": "p2pkh-broadcast", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" },
+      { "id": "sat-payment-unknown-result", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" },
+      { "id": "unknown-result-no-replay", "buildId": "<与根 buildId 相同>", "status": "pending", "operationId": "", "repositoryResolution": "unknown", "replayPrevented": false, "evidenceRef": "" }
+    ]
+  },
+  "oldWorkerRetirement": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<旧版本退役验收时间>",
+    "evidenceRef": "<部署编排记录>",
+    "unknownWorkerExitConfirmed": false,
+    "trafficDrainConfirmed": false,
+    "versionRetirementConfirmed": false,
+    "rollbackWindowConfirmed": false
+  },
+  "rollbackDrill": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<回退演练时间>",
+    "evidenceRef": "<回退演练记录>",
+    "formatCompatibilityVerified": false,
+    "noParallelAuthority": false,
+    "reauthRequired": false
+  },
+  "deploymentHandover": {
+    "buildId": "<与根 buildId 相同>",
+    "status": "pending",
+    "verifiedAt": "<部署交接验收时间>",
+    "evidenceRef": "<部署交接文件及原始平台记录>",
+    "handoverFile": "<已通过 verify:lifecycle-deployment 的文件>",
+    "targetBuildId": "<与根 buildId 相同>",
+    "strategy": "cold-switch",
+    "oldWorkerExitConfirmed": false,
+    "trafficDrainConfirmed": false,
+    "noParallelAuthority": false,
+    "rollbackWindowConfirmed": false
+  }
+}

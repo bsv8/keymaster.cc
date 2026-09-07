@@ -20,7 +20,7 @@ class Hub {
   readonly ports = new Set<HubPort>();
   createPort(): HubPort { const port = new HubPort(this); this.ports.add(port); return port; }
   receive(port: HubPort, message: { requestId: string; kind?: string }): void {
-    const response = { requestId: message.requestId, sessionEpoch: "shared-epoch", ack: { status: "ok" }, operationResult: { sessionEpoch: "shared-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } } };
+    const response = { requestId: message.requestId, sessionEpoch: "shared-epoch", ack: { status: "ok" }, operationResult: { authorityInstanceId: "authority:hub", sessionEpoch: "shared-epoch", vaultStatus: "locked", keyspaceGeneration: 0, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 900_000 } } };
     queueMicrotask(() => port.emit(response));
   }
   broadcast(event: unknown): void { for (const port of this.ports) port.emit(event); }
@@ -38,7 +38,7 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const client: SessionCoordinatorClient = createCoordinatorClient({ clientId: "vault-assembly" });
       await client.connect();
 
-      const host = createPluginHost({ disableConfigPersistence: true, coordinatorForPlugin: () => client });
+      const host = createPluginHost({ execution: "window", disableConfigPersistence: true, coordinatorForPlugin: () => client });
       await host.register(vaultPlugin);
 
       expect(host.state("vault").kind).toBe("enabled");
@@ -181,6 +181,63 @@ describe("KeymasterSessionCoordinatorClient", () => {
     }
   });
 
+  it("保留旧 Worker 活动最终 I/O 的 recovery-required 状态，并接受后续清除", async () => {
+    const hub = new Hub();
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "authority-recovery" });
+      await client.connect();
+      const base = {
+        topic: "session.state" as const,
+        type: "session.state.changed" as const,
+        cause: "bootstrap" as const,
+        sessionEpoch: "epoch-1",
+        vaultStatus: "locked" as const,
+        activePublicKeyHex: null,
+        keyspaceGeneration: 1,
+      };
+      hub.broadcast({
+        ...base,
+        sessionRevision: 1,
+        authorityRecovery: {
+          status: "recovery-required" as const,
+          reason: "active-final-io-leases" as const,
+          authorityBuildId: "worker-build-old",
+          activeIoLeaseCount: 2,
+          activeIoOperations: { read: 1, write: 1 },
+          handoverGeneration: 7,
+        },
+      });
+      expect(client.getBootstrapSnapshot().authorityRecovery).toMatchObject({
+        status: "recovery-required",
+        activeIoLeaseCount: 2,
+        handoverGeneration: 7,
+      });
+
+      hub.broadcast({
+        ...base,
+        sessionRevision: 2,
+        authorityRecovery: {
+          status: "recovery-required" as const,
+          reason: "active-final-io-leases" as const,
+          authorityBuildId: "worker-build-forged",
+          activeIoLeaseCount: 2,
+          // 读写计数与总数不一致，客户端必须丢弃这条伪造诊断。
+          activeIoOperations: { read: 0, write: 1 },
+          handoverGeneration: 8,
+        },
+      });
+      // Session 事件整体非法时客户端进入断线安全态，不能继续信任旧诊断。
+      expect(client.getBootstrapSnapshot().authorityRecovery).toBeUndefined();
+
+      hub.broadcast({ ...base, sessionRevision: 3, sessionEpoch: "epoch-2" });
+      expect(client.getBootstrapSnapshot().authorityRecovery).toBeUndefined();
+    } finally {
+      globalThis.SharedWorker = original;
+    }
+  });
+
   it("does not notify session listeners for duplicate or stale session revisions", async () => {
     const hub = new Hub();
     const original = globalThis.SharedWorker;
@@ -274,6 +331,215 @@ describe("KeymasterSessionCoordinatorClient", () => {
     } finally { globalThis.SharedWorker = original; }
   });
 
+  it("binds plugin intent events to the current Worker authority and revision", async () => {
+    const authority = "authority:client-test";
+    const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
+    port.postMessage.mockImplementation((message: unknown) => {
+      const request = message as { requestId: string; kind: string; command?: unknown };
+      let operationResult: unknown;
+      if (request.kind === "hello") {
+        operationResult = {
+          authorityInstanceId: authority,
+          sessionEpoch: "e",
+          vaultStatus: "locked",
+          keyspaceGeneration: 0,
+          taskSnapshots: [],
+          scheduleSettings: { assetHoldingsIntervalMs: 1 },
+          pluginIntent: { revision: 1, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 1 } },
+        };
+      } else if (request.kind === "subscribe") {
+        operationResult = {
+          topics: ["plugin.intent"],
+          baselines: [{
+            topic: "plugin.intent",
+            baselineRevision: 1,
+            sessionEpoch: "e",
+            snapshot: {
+              topic: "plugin.intent",
+              type: "plugin.intent.changed",
+              authorityInstanceId: authority,
+              pluginIntentRevision: 1,
+              sessionEpoch: "e",
+              snapshot: { revision: 1, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 1 } },
+            },
+          }],
+        };
+      } else if (request.kind === "plugin.intent.snapshot") {
+        operationResult = { revision: 2, desiredEnabled: { alpha: true }, desiredRevision: { alpha: 2 } };
+      } else if (request.kind === "plugin.intent.submit") {
+        operationResult = {
+          status: "accepted",
+          commandId: (request.command as { commandId: string }).commandId,
+          persisted: true,
+          snapshot: { revision: 3, desiredEnabled: { alpha: true }, desiredRevision: { alpha: 3 } },
+        };
+      } else {
+        operationResult = {};
+      }
+      queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult } } as MessageEvent));
+    });
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "intent-client" });
+      await client.connect();
+      expect(client.getBootstrapSnapshot()).toMatchObject({
+        authorityInstanceId: authority,
+        pluginIntent: { revision: 1, desiredEnabled: { alpha: false } },
+      });
+
+      const events: unknown[] = [];
+      client.subscribeTopic("plugin.intent", (event) => events.push(event));
+      port.onmessage?.({ data: {
+        topic: "plugin.intent",
+        type: "plugin.intent.changed",
+        authorityInstanceId: authority,
+        pluginIntentRevision: 2,
+        sessionEpoch: "e",
+        snapshot: { revision: 2, desiredEnabled: { alpha: true }, desiredRevision: { alpha: 2 } },
+      } } as MessageEvent);
+      port.onmessage?.({ data: {
+        topic: "plugin.intent",
+        type: "plugin.intent.changed",
+        authorityInstanceId: "authority:old",
+        pluginIntentRevision: 99,
+        sessionEpoch: "e",
+        snapshot: { revision: 99, desiredEnabled: { alpha: false }, desiredRevision: { alpha: 99 } },
+      } } as MessageEvent);
+      expect(events).toHaveLength(1);
+      expect(client.getBootstrapSnapshot().pluginIntent?.revision).toBe(2);
+
+      const result = await client.pluginIntentSubmit({
+        commandId: "intent-command:1",
+        authorityInstanceId: authority,
+        expectedRevision: 2,
+        pluginId: "alpha",
+        desiredEnabled: true,
+      });
+      expect(result).toMatchObject({ status: "accepted", commandId: "intent-command:1" });
+      expect(client.getBootstrapSnapshot().pluginIntent?.revision).toBe(3);
+    } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("按 authority 和单调 revision 合并 Worker 运行单元快照", async () => {
+    const hub = new Hub();
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "worker-unit-snapshot-client" });
+      await client.connect();
+      const events: unknown[] = [];
+      client.subscribeTopic("worker.units", (event) => events.push(event));
+      const unit = {
+        productId: "p2pkh",
+        unitId: "p2pkh.coordinator-worker",
+        execution: "coordinator-worker" as const,
+        lifetime: "owner-session" as const,
+        instanceId: "worker-unit:1",
+        state: "ready" as const,
+        snapshotRevision: 2,
+        serviceIds: ["p2pkh.asset-service"],
+        taskIds: ["p2pkh.transactions-sync"],
+        ownerPublicKeyHex: "a".repeat(64),
+        sessionEpoch: "shared-epoch",
+      };
+      const accepted = {
+        topic: "worker.units" as const,
+        type: "coordinator.worker-units.changed" as const,
+        authorityInstanceId: "authority:hub",
+        workerUnitRevision: 2,
+        sessionEpoch: "shared-epoch",
+        units: [unit],
+      };
+      hub.broadcast(accepted);
+      hub.broadcast({ ...accepted, units: [{ ...unit, instanceId: "worker-unit:stale" }] });
+      hub.broadcast({ ...accepted, authorityInstanceId: "authority:old", workerUnitRevision: 99 });
+
+      expect(events).toEqual([accepted]);
+      expect(client.getBootstrapSnapshot()).toMatchObject({
+        authorityInstanceId: "authority:hub",
+        coordinatorWorkerUnitSnapshotRevision: 2,
+        coordinatorWorkerUnits: [expect.objectContaining({ instanceId: "worker-unit:1" })],
+      });
+    } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("按 sessionEpoch 防止 Worker 单元快照跨世代乱序覆盖", async () => {
+    const hub = new Hub();
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port: hub.createPort() }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "worker-unit-session-fence" });
+      await client.connect();
+      const events: unknown[] = [];
+      client.subscribeTopic("worker.units", (event) => events.push(event));
+      const oldUnit = {
+        productId: "storage",
+        unitId: "storage.coordinator-worker",
+        execution: "coordinator-worker" as const,
+        lifetime: "storage" as const,
+        instanceId: "worker-unit:old",
+        state: "ready" as const,
+        snapshotRevision: 1,
+        serviceIds: ["storage.runtime-controller"],
+        taskIds: [],
+      };
+      const oldEvent = {
+        topic: "worker.units" as const,
+        type: "coordinator.worker-units.changed" as const,
+        authorityInstanceId: "authority:hub",
+        workerUnitRevision: 1,
+        sessionEpoch: "shared-epoch",
+        units: [oldUnit],
+      };
+      hub.broadcast(oldEvent);
+
+      const nextEvent = {
+        ...oldEvent,
+        workerUnitRevision: 2,
+        sessionEpoch: "next-session",
+        units: [{
+          ...oldUnit,
+          productId: "p2pkh",
+          unitId: "p2pkh.coordinator-worker",
+          lifetime: "owner-session" as const,
+          instanceId: "worker-unit:next",
+          snapshotRevision: 2,
+          serviceIds: ["p2pkh.asset-service"],
+          taskIds: ["p2pkh.transactions-sync"],
+          ownerPublicKeyHex: "a".repeat(64),
+          sessionEpoch: "next-session",
+        }],
+      };
+      // 运行单元事件先到时必须等待 session.state，而不能覆盖旧世代。
+      hub.broadcast(nextEvent);
+      expect(client.getBootstrapSnapshot().coordinatorWorkerUnits).toEqual([oldUnit]);
+
+      hub.broadcast({
+        topic: "session.state" as const,
+        type: "session.state.changed" as const,
+        sessionRevision: 1,
+        cause: "lock" as const,
+        sessionEpoch: "next-session",
+        vaultStatus: "locked" as const,
+        activePublicKeyHex: null,
+        keyspaceGeneration: 2,
+      });
+      expect(client.getBootstrapSnapshot()).toMatchObject({
+        sessionEpoch: "next-session",
+        coordinatorWorkerUnits: [expect.objectContaining({ instanceId: "worker-unit:next" })],
+      });
+
+      // 新世代已经确认后，迟到的旧世代即使 revision 更大也只能暂存，
+      // 不能改写当前页面状态或触发运行单元监听器。
+      hub.broadcast({ ...oldEvent, workerUnitRevision: 99, units: [{ ...oldUnit, instanceId: "worker-unit:late-old" }] });
+      expect(events).toHaveLength(2);
+      expect(client.getBootstrapSnapshot().coordinatorWorkerUnits).toEqual(expect.arrayContaining([
+        expect.objectContaining({ instanceId: "worker-unit:next" }),
+      ]));
+    } finally { globalThis.SharedWorker = original; }
+  });
+
   it("clears an unlocked snapshot on transport timeout before reconnect", async () => {
     const port = { start: vi.fn(), postMessage: vi.fn(), close: vi.fn(), onmessage: null as ((event: MessageEvent) => void) | null, onmessageerror: null };
     port.postMessage.mockImplementation((message: unknown) => { const request = message as { requestId: string }; if (request.requestId) queueMicrotask(() => port.onmessage?.({ data: { requestId: request.requestId, sessionEpoch: "e", ack: { status: "ok" }, operationResult: { vaultStatus: "unlocked", activePublicKeyHex: "a".repeat(64), keyspaceGeneration: 1, taskSnapshots: [], scheduleSettings: { assetHoldingsIntervalMs: 1 } } } } as MessageEvent)); });
@@ -319,6 +585,63 @@ describe("KeymasterSessionCoordinatorClient", () => {
       const connecting = client.connect();
       worker.onerror?.({ message: "module failed to load" } as ErrorEvent);
       await expect(connecting).rejects.toThrow("Coordinator worker error: module failed to load");
+    } finally { globalThis.SharedWorker = original; }
+  });
+
+  it("notifies the Coordinator to cancel an in-flight Channel request", async () => {
+    const sent: Array<{ kind?: string; requestId?: string; targetRequestId?: string }> = [];
+    const port = {
+      start: vi.fn(),
+      postMessage: vi.fn((message: { kind?: string; requestId?: string; targetRequestId?: string }) => {
+        sent.push(message);
+        if (message.kind === "hello" || message.kind === "subscribe") {
+          queueMicrotask(() => port.onmessage?.({
+            data: {
+              requestId: message.requestId,
+              sessionEpoch: "channel-epoch",
+              ack: { status: "ok" },
+              operationResult: message.kind === "subscribe" ? { topics: [], baselines: [] } : {
+                authorityInstanceId: "authority:channel-test",
+                sessionEpoch: "channel-epoch",
+                vaultStatus: "unlocked",
+                activePublicKeyHex: "a".repeat(64),
+                keyspaceGeneration: 1,
+                taskSnapshots: [],
+                scheduleSettings: { assetHoldingsIntervalMs: 1 },
+              },
+            },
+          } as MessageEvent));
+        }
+        if (message.kind === "channel.cancel") {
+          queueMicrotask(() => port.onmessage?.({
+            data: { requestId: message.requestId, sessionEpoch: "channel-epoch", ack: { status: "ok" } },
+          } as MessageEvent));
+        }
+      }),
+      close: vi.fn(),
+      onmessage: null as ((event: MessageEvent) => void) | null,
+      onmessageerror: null,
+    };
+    const original = globalThis.SharedWorker;
+    globalThis.SharedWorker = vi.fn(() => ({ port }) as unknown as SharedWorker);
+    try {
+      const client = createCoordinatorClient({ clientId: "channel-cancel-client", requestTimeoutMs: 10, reconnectIntervalMs: 1_000 });
+      await client.connect();
+      const controller = new AbortController();
+      const operation = client.channelOperation({
+        type: "subscription-set",
+        ownerPublicKeyHex: "a".repeat(64),
+        caller: { kind: "plugin", pluginId: "webrtc" },
+        channels: ["bsv8.test.channel"],
+      }, controller.signal);
+      await vi.waitFor(() => expect(sent.find((message) => message.kind === "channel.operation")).toBeDefined());
+      const channelRequest = sent.find((message) => message.kind === "channel.operation");
+      controller.abort("page disposed");
+      await expect(operation).resolves.toMatchObject({ status: "transport-error" });
+      expect(sent).toContainEqual(expect.objectContaining({
+        kind: "channel.cancel",
+        targetRequestId: channelRequest?.requestId,
+      }));
     } finally { globalThis.SharedWorker = original; }
   });
 });

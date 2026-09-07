@@ -29,7 +29,9 @@ import {
   WOC_1SAT_ORDINALS_CAPABILITY,
   WOC_BSV21_CAPABILITY,
   WOC_CAPABILITY,
-  WOC_STAS_CAPABILITY
+  WOC_STAS_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import { createWoc1SatOrdinalsService } from "./woc1SatOrdinalsService.js";
 import { createWocBsv21Service } from "./wocBsv21Service.js";
@@ -95,22 +97,33 @@ export const wocPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [
+    displayGroup: "platform"
+  },
+  units: [{
+    id: "woc.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: [WOC_CAPABILITY, WOC_BSV21_CAPABILITY, WOC_STAS_CAPABILITY, WOC_1SAT_ORDINALS_CAPABILITY, WOC_COORDINATOR_CONTROL_CAPABILITY],
+    providedContracts: defineRuntimeUnitProvidedContracts([
       WOC_CAPABILITY,
       WOC_BSV21_CAPABILITY,
       WOC_STAS_CAPABILITY,
-      WOC_1SAT_ORDINALS_CAPABILITY
-    ],
-    displayGroup: "platform"
-  },
+      WOC_1SAT_ORDINALS_CAPABILITY,
+      WOC_COORDINATOR_CONTROL_CAPABILITY,
+    ]),
+    storage: { scope: "key", applicationStorageId: "WOC", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
+      { capability: "keyspace.service", reason: "active key 就绪后加载 WOC owner 配置" },
+      { capability: "system-settings.registry", reason: "注册 WOC 系统设置" },
+      { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" },
+    ]),
+  }, {
+    id: "woc.coordinator-worker",
+    execution: "coordinator-worker",
+    lifetime: "owner-session",
+  }],
   i18n: wocResources,
-  storage: { scope: "key", applicationStorageId: "WOC", schemaVersion: 1 },
-  dependencies: [
-    { capability: RUNTIME_MESSAGE_BUS, reason: "注册 WOC actor handlers（target=woc）" },
-    { capability: "keyspace.service", reason: "active key 就绪后加载 WOC owner 配置" },
-    { capability: "system-settings.registry", reason: "注册 WOC 系统设置" },
-    { capability: "breadcrumb.registry", reason: "注册 WOC 面包屑" }
-  ],
   async setup(ctx) {
     const coordinator = ctx.coordinator as P2pkhCoordinatorControl | undefined;
     if (!coordinator) throw new Error("WOC Coordinator control is unavailable");

@@ -1,14 +1,22 @@
 # Keymaster 插件系统重构设计：借鉴 Cordis，收口生命周期与权限
 
-日期：2026-09-05。状态：设计提案，尚未实施。代码基线：`5b0a3ec`。
+日期：2026-09-06。状态：施工中（核心跨环境链已验证；生产发布门禁未解除）。代码基线：工作区当前代码。
 
-配套：[施工单](./implementation-plan.md)。本文的“现状”来自代码阅读；“目标”是建议的新行为，不能当作已经实现的保证。
+配套：[施工单](./implementation-plan.md)、[实际能力清单](./inventory.md)、[Cordis 验证记录](./cordis-spike.md)、[Connect 策略](./connect-strategy.md)。本文区分“已验证实现”和“生产前置条件”；未标为已验证的目标不能当作运行保证。
+
+### 当前实施边界
+
+- `packages/runtime` 已接入一套自研的薄生命周期核心：作用域、资源归属、同步撤权、服务桥契约、运行单元筛选、权限租约和升级 Session。它是当前施工适配层，不代表已经完成 Cordis 生产采用。
+- SharedWorker 已持有插件产品意图的唯一写入控制面；页面 UI 提交带 `commandId`、`authorityInstanceId` 和 `expectedRevision` 的绝对命令，实例启动结果仍由本地 Host 单独报告。
+- 当前 Web catalog 的 25 个产品均已在 manifest 与 contracts 静态目录中显式声明 Window 单元；需要跨环境的产品另声明 Coordinator Worker 单元。`pluginCatalog.ts` 只做精确契约校验，`workerUnitCatalog.ts` / `workerUnitRuntime.ts` 负责 Worker 单元目录和实际 instance 快照，不能把静态声明当成启动成功。
+- 主页面的 Window → SharedWorker → 独立 MessagePort 服务桥 → owner/platform 存储与 Coordinator crypto 最终边界已经有 Node 与 Chromium 证据；服务端持有不透明 `grantId`，并校验连接身份、服务实例、会话 / 授权修订和最终 I/O。Dedicated Worker Session Crypto 也有独立浏览器证据。剩余生产门禁集中在目标部署 AppView、旧 Worker 退出、恢复演练、不可逆业务 I/O 全量审计和外部部署验证，不能据此直接生产切换。
+- KMP-001 的 Cordis 实测结论是不在本批次引入未经浏览器 / Worker 验证的 Cordis 依赖，理由和命令输出见 [cordis-spike.md](./cordis-spike.md)。后续若采用 Cordis，必须另做适配器验证，不得与当前核心并行成为第二套调度器。
 
 ## 1. 设计结论
 
 保留现有包划分、存储协议、密码学实现、MessageBus（消息总线）、Logger（日志服务）和 Resource Store（界面资源缓存）。将现有 Runtime 改造成一个管理**作用域、服务依赖、可撤销资源**的薄宿主。
 
-优先验证并采用 Cordis 核心作为宿主内部实现，业务继续使用 Keymaster 的窄接口。不要同时保留两套依赖调度器，也不要引入插件市场、动态脚本加载、通用工作流引擎或另一套消息系统。Cordis 版本与浏览器兼容性必须在第一张施工单实测后锁定，本文不直接选定 npm 版本。
+施工入口曾要求优先验证 Cordis 核心。KMP-001 实测后，本批次暂不引入 Cordis：仓库没有现有依赖，隔离 Node 导入可用但尚未完成浏览器、Dedicated Worker 和 SharedWorker 构建 / 运行验证；当前自研薄核心已经覆盖所需最小语义。业务继续使用 Keymaster 的窄接口，不同时保留两套依赖调度器，也不引入插件市场、动态脚本加载、通用工作流引擎或另一套消息系统。Cordis 后续只能通过独立适配器验证后替换内部实现。
 
 三个核心规则：
 
@@ -38,7 +46,7 @@
 | `packages/runtime/src/messageBus.ts`、`log/logService.ts` | 统一消息总线、带插件身份的 logger | `publish` 不等待异步监听者，不能作为删除完成或停机完成屏障 |
 | `packages/plugin-token-bsv21/src/manifest.ts`、`plugin-p2pkh/src/p2pkhService.ts` 等 | 解锁、切 Key、删除后的刷新与缓存回收 | 多个业务重复处理同一生命周期，是主要迁移对象 |
 
-源码阅读发现的是架构问题和需要验证的风险，不代表上述每个路径已经有可复现的线上故障。本次未运行业务测试。
+源码阅读发现的是架构问题和需要验证的风险，不代表上述每个路径已经有可复现的线上故障。本轮已运行主 Coordinator、存储 / 密码学、生命周期及 Chromium 主链回归；未把这些结果外推为全部业务生产验收。
 
 ### 2.2 不止一个 Worker，不能用一个“全局 unlocked”概括
 
@@ -52,9 +60,9 @@
 
 **Connect 存在实现路径差异，必须记录而不是靠文件名推断：**
 
-- `plugin-vault/src/sessionCryptoClient.ts` 的 `mode: appview` 可创建 `sessionCryptoWorker.ts`；后者有私钥字节状态。
-- 但当前 `plugin-vault/src/manifest.ts` 使用 `createVaultServiceCoordinator`；其 `createAppViewSession` 返回 Coordinator 密码学代理。
-- `plugin-protocol/src/protocolService.ts` 又允许通过 bootstrap runtime（启动时交接的运行能力）执行，并有“不依据本地 Vault 锁定状态判断”的逻辑。
+- `plugin-vault/src/sessionCryptoClient.ts` 的 `mode: appview` 可创建 `sessionCryptoWorker.ts`；后者有私钥字节状态。本批次已用应用 Worker 工厂完成 Dedicated Worker 浏览器回归，但该路径仍不是所有 Connect 请求的默认持钥路径。
+- 当前 `plugin-vault/src/manifest.ts` 使用 `createVaultServiceCoordinator`；其 `createAppViewSession` 返回 Coordinator 密码学代理。实际 AppView 交接由 launcher 预开 Session Window，再将受控 bootstrap runtime 交给 Session Window。
+- `plugin-protocol/src/protocolService.ts` 的 AppView 生产路径已用真实 `/apps → Session Window → 外部 AppView → connect.launch` Chromium 回归验证；它仍执行来源、App 身份、session、owner 和启动令牌校验，不应被解释成第三方页面持有主私钥。
 
 因此目前不能宣称“所有 Connect 操作都由独立 Worker 持钥”，也不能宣称“所有 Connect 会话都独立于主会话”。施工必须追踪生产入口和实际交接对象，用浏览器测试确定路径，再清理没有生产调用者的旧实现。
 
@@ -118,13 +126,13 @@ Cordis 的服务依赖与可逆副作用适合解决“服务出现就装配、�
 | Effect（可撤销副作用） | 定时器、监听、任务、Worker、注册项 | 创建时同时登记释放行为 |
 | Service（服务） | 现有 capability（能力） | 沿用契约与业务实现，不要求全项目改成类继承 |
 
-上游当前明确提示 API 尚不稳定；检索到的 `main` 包描述为 `4.0.0-rc.9`，不等于已验证的可安装版本。浏览器构建、Worker 环境与清理语义都需要实测并固定版本。依据：[上游仓库](https://github.com/cordiverse/cordis)、[包描述](https://github.com/cordiverse/cordis/blob/main/packages/core/package.json)。
+KMP-001 记录的可安装包为 `cordis@4.0.0-rc.9`；隔离 Node 导入和 `new Context()` 成功，但仓库没有锁定依赖，也未完成浏览器、Dedicated Worker、SharedWorker 构建 / 运行验证。该结果不满足“采用 Cordis”门槛。依据：[上游仓库](https://github.com/cordiverse/cordis)、[包描述](https://github.com/cordiverse/cordis/blob/main/packages/core/package.json)、[验证记录](./cordis-spike.md)。
 
 还要注意，上游 `Fiber` 的卸载实现会并行处理部分释放回调，并记录部分清理异常。因此不能推断“await dispose 成功 = 所有远程资源已释放 = 数据事务完成”。Keymaster 必须自己拥有安全撤权、写入排空和结构化清理结果。依据：[Fiber 源码](https://github.com/cordiverse/cordis/blob/main/packages/core/src/fiber.ts)。
 
 以下能力由 Keymaster 保留：跨 Worker RPC（远程调用）、多 Tab 权威、存储隔离、权限审批、私钥保管、不可逆请求处理、删除日志和崩溃恢复。Context 隔离不是恶意代码沙箱。
 
-若 Cordis 验证不通过，先停在适配契约和验证报告；仅以“借鉴思想”增强现有 Host 是备选方案，不同时建设一个自研 Cordis。引入与否属于施工入口决策，不影响下文行为契约。
+因此当前选择“借鉴语义并增强现有 Host”的最小实现，保留跨环境服务桥、权限、存储世代和安全撤权在 Keymaster 自己的边界内。这个选择不解除真实服务桥和最终 I/O 授权门禁；它只避免在证据不足时增加另一套框架依赖。
 
 ## 4. 最小框架模型
 
@@ -147,7 +155,7 @@ Cordis 的服务依赖与可逆副作用适合解决“服务出现就装配、�
 
 包是代码组织方式，产品是用户启停单位，运行单元是装配描述，实例是它在某个作用域中的一次运行。原稿把这些层次压在一张字段表里，容易误读为“一个包只有一个 execution / lifetime”，这里明确修正。
 
-**静态描述**采用两层，但不另建第二份插件目录：现有 manifest 演进为 `PluginDescriptor`（插件产品描述），包含稳定产品 `id`（标识）、展示元数据、允许禁用规则和 `units`（运行单元列表）。`RuntimeUnitDescriptor`（运行单元描述）中的字段如下；名称是目标契约，并非当前 API。
+**静态描述**采用两层，但不另建第二份插件目录：`packages/contracts/src/pluginProducts.ts` 是产品和运行单元的唯一描述源；`apps/web/src/pluginCatalog.ts` 只是可执行 manifest 入口清单并逐项校验该契约，`apps/web/src/coordinator/workerUnitCatalog.ts` 只补充真实 Worker 的 task/service/I/O 归属，也必须从该契约物化（materialize）。现有 manifest 演进为 `PluginDescriptor`（插件产品描述），包含稳定产品 `id`（标识）、展示元数据、允许禁用规则和 `units`（运行单元列表）。`RuntimeUnitDescriptor`（运行单元描述）中的字段如下；名称是目标契约，并非当前 API。
 
 | 字段 | 中文含义与约束 |
 | --- | --- |
@@ -159,7 +167,7 @@ Cordis 的服务依赖与可逆副作用适合解决“服务出现就装配、�
 | `permissions` | 本运行单元申请的权限；不等于已批准权限 |
 | `storage`、`business`、`config` | 分别为存储声明、界面贡献、配置契约与部署默认值；放在使用它们的单元上。可变的用户配置值属于持久意图，不反写静态描述 |
 
-同一个包可导出多个单元，简单插件只声明一个。纯描述与各执行环境的实现入口分开导出，Worker 不导入 React。Connect 网关通常调用已有 Worker 服务，不要求每个业务包都额外写一个 Connect 单元。
+同一个包可导出多个单元，简单插件只声明一个。纯描述与各执行环境的实现入口分开导出，Worker 不导入 React。代码中由 `RuntimeUnitImplementationRegistry`（运行单元实现注册表）按 `productId + unitId` 提供当前环境入口；Window 现有 product-level `setup` 仅由装配适配器登记，Host 的生产路径不再直接回退读取它，Worker 也不会因 Window 有实现而自动获得同名入口。Connect 网关通常调用已有 Worker 服务，不要求每个业务包都额外写一个 Connect 单元。
 
 例如 P2PKH 产品有一个 Worker 资产单元和一个依赖远程资产服务的 Window 单元。三个 Tab 对应一个 Worker 实例和三个 Window 实例。关闭一个 Tab 只释放其 Window 实例；停用产品则让其所有单元停止，并让跨产品依赖者等待。系统支付原语如必须常驻，仍属于独立内核服务，不能暗藏在这个可禁用产品内。
 
@@ -187,7 +195,7 @@ Cordis 的服务依赖与可逆副作用适合解决“服务出现就装配、�
 
 ### 4.4 远程服务桥：把已就绪代理提供给本地 Cordis
 
-Cordis 仅管理本地实例。Keymaster 在现有 Coordinator RPC 和 topic snapshot（主题快照）基础上增加一层统一服务桥，不建设自动网络寻址或跨进程 Context。桥负责服务目录、代理失效和连接状态；本地依赖调度仍交给 Cordis。
+Cordis 仅管理本地实例。Keymaster 在现有 Coordinator RPC 和 topic snapshot（主题快照）基础上增加一层统一服务桥，不建设自动网络寻址或跨进程 Context。当前实际使用的是 `packages/runtime/src/lifecycle/` 的自研薄桥：它负责服务目录、代理失效和连接状态；本地依赖调度仍由 Host 处理。Cordis 暂不进入生产依赖。
 
 **远程服务引用**的最小字段如下。引用用于定位和校验，不是持有即获权的授权凭据。
 
@@ -215,7 +223,9 @@ Cordis 仅管理本地实例。Keymaster 在现有 Coordinator RPC 和 topic sna
 
 **撤销与恢复：** 提供者先拒绝旧实例的新调用，再发布不可用；桥撤下本地服务，消费者按依赖规则停止。提供者重建发新实例引用，桥创建新代理；旧代理永久失效，不能原地换绑新实例。服务恢复后，仅希望启用且满足条件的消费者重建，重建规则见第 6 节和 6.1 节。
 
-**RPC 请求与响应：** 沿用现有请求标识与取消机制，附带绑定的服务引用和授权租约。服务端在接收、敏感操作提交前核对提供者实例及授权世代；客户端在接受结果时再次核对请求所属连接、引用和消费者启动令牌。已排队但不再匹配的调用拒绝，旧调用不能迁移到新提供者执行。桥不自动重放具有外部副作用的请求。
+**RPC 请求与响应：** 业务请求可以携带 `operationId`（业务幂等编号），但 MessagePort 传输层另行生成连接内唯一的 `callId`（传输关联编号）关联响应；不能用调用方可复用的业务编号做传输关联。服务端在接收、敏感操作提交前核对提供者实例、连接身份、服务端 `grantId` 及授权世代；客户端在接受结果时再次核对请求所属连接、引用和消费者启动令牌。已排队但不再匹配的调用拒绝，旧调用不能迁移到新提供者执行。桥不自动重放具有外部副作用的请求。
+
+当前实现证据：`apps/web/src/keymasterSessionCoordinator.worker.ts` 通过独立服务端点持有服务授权，`apps/web/src/keymasterSessionCoordinatorClient.ts` 使用独立 MessagePort，`packages/runtime/src/lifecycle/messagePortServiceTransport.ts` 生成 `callId`；`packages/platform-storage/src/coordinator/storageBindingAuthority.ts` 在远端授权检查未进入物理 I/O 时只重绑一次 platform grant。Node Coordinator 测试和 Chromium 生产构建 E2E 均覆盖这条主链。
 
 **乱序与故障规则：**
 
@@ -511,9 +521,17 @@ Connect Worker 仍是独立的会话执行环境，可以管理协议、请求�
 1. **受控冷切换：** 能确认旧窗口 / Worker 全部退出的部署，停止旧会话后加载新版本，重新认证。不能把“提醒刷新”当作已经退出的证明。
 2. **需要新旧版本并存的部署：** 先发布旧架构也理解的握手与接管版本，在存储权威边界安装新旧都检查的写入接管世代；再发布新生命周期版本。新实例接管前旧版本先停止发租约并排空已提交 I/O，之后旧世代请求全部拒绝。第一阶段发布仍须解决完全不认识协议的更老客户端，不能无限递归假设它们会遵守新规则。
 
-不额外创建页面 leader 选举或分布式插件调度器；接管复用现有存储绑定与世代机制，001 验证它是否覆盖实际写路径。不能证明旧版本已隔离或已有 I/O 已排空时，不开放新写入。存储世代不能追回已提交到供应商的请求，相关结果按 5.5 节核对。
+不额外创建页面 leader 选举或分布式插件调度器；接管复用现有存储绑定与世代机制。不能证明旧版本已隔离或已有 I/O 已排空时，不开放新写入。存储世代不能追回已提交到供应商的请求，相关结果按 5.5 节核对。
 
-001 必须选择并验证首次发布路径；003 实现协议与接管门禁，005 以后才可切换安全机制。009 只复验发布结果，不承担首次定义升级规则。
+本批次已选择受控冷切换作为首次发布路径：新版本通过持久化 authority、handover generation 和最终 I/O lease 拒绝旧世代写入；本地 Node / Chromium 已验证锁屏、旧代理撤销、重启后旧 lease 不能写入以及活动 lease 时保守进入 `recovery-required`。两阶段接管仍只保留为后续部署方案，未证明完全不认识该协议的旧 Worker 可以被隔离，因此不能自动接管这类旧实例。
+
+### 11.2 当前仍未解除的生产阻断项
+
+1. 25 个产品的静态 manifest / contracts 单元与 Coordinator Worker 运行态目录已经落地；发布证据仍需核对目标构建实际输出和快照，不能只凭源码声明放行。
+2. AppView 主链已经在本地 Chromium 生产构建通过，但还缺少真实外部部署 origin 的同等回归；当前外部 App 是 Playwright 路由 fixture。
+3. Worker 崩溃时若旧 Worker 持有持久 final-I/O lease，系统只能 fail closed 并显示 `recovery-required`，不能安全强制接管；[Coordinator 接管恢复操作协议](./coordinator-recovery-runbook.md) 与可执行恢复演练已补齐，但目标部署恢复证据仍未完成。
+4. 代码入口已建立不可逆 I/O 审计台账（见 [irreversible-io-audit.md](./irreversible-io-audit.md)），但上传、远端订阅、广播 / 支付、未知结果仍需在目标部署环境逐项 smoke；本地 MSFile 并发、存储 smoke 不能替代外部供应商验证。
+5. 冷切换不能凭本地测试证明仍存活且完全不认识接管协议的旧 Worker 已退出；部署 handover、版本淘汰和回退演练仍需发布环境证据。
 
 ## 12. 验收底线
 

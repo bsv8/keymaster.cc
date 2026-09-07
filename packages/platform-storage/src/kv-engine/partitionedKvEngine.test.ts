@@ -207,6 +207,22 @@ describe("partitioned K-V engine", () => {
     expect(snapshot.entries.some((entry) => entry.key === "first")).not.toBe(snapshot.entries.some((entry) => entry.key === "second"));
   });
 
+  it("retries an unconditional commit after another handle publishes the head", async () => {
+    const provider = new FakeBucketProvider();
+    const first = makeStore(provider);
+    const second = makeStore(provider);
+    await first.put("base", "base", { partition: "state" });
+
+    provider.armHeadReadBarrier();
+    await expect(Promise.all([
+      first.put("first", 1, { partition: "state" }),
+      second.put("second", 2, { partition: "state" }),
+    ])).resolves.toHaveLength(2);
+
+    const snapshot = await first.snapshot("state");
+    expect(snapshot.entries.map((entry) => entry.key)).toEqual(["base", "first", "second"]);
+  });
+
   it("keeps cursor pages on one immutable revision", async () => {
     const provider = new FakeBucketProvider();
     const store = makeStore(provider);

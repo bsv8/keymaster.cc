@@ -64,8 +64,9 @@ export function createPluginConfigStore(
   let hydratePromise: Promise<void> | undefined;
   let writeQueue = Promise.resolve();
   let requiredPluginIds = new Set<string>();
+  let closed = false;
   const persist = () => {
-    if (!hydrated || !writeEnabled || !options.storage) return;
+    if (closed || !hydrated || !writeEnabled || !options.storage) return;
     const value: StoredV2 = { version: 2, enabled: { ...snapshot } };
     writeQueue = writeQueue
       .then(() => options.storage!.put(STORAGE_KEY, value, { partition: "settings" }).then(() => undefined))
@@ -74,6 +75,7 @@ export function createPluginConfigStore(
       });
   };
   function normalizeSnapshot(requiredIds: Iterable<string>): PluginConfigSnapshot {
+    if (closed) return { ...snapshot };
     const next = { ...snapshot };
     let changed = false;
     for (const id of requiredIds) {
@@ -121,6 +123,7 @@ export function createPluginConfigStore(
     return { value: booleanRecord(record.enabled), version: 2 };
   };
   const hydrate = async (): Promise<void> => {
+    if (closed) throw new Error("Plugin config store is closed");
     if (hydrated) return;
     if (hydratePromise) return hydratePromise;
     hydratePromise = (async () => {
@@ -149,12 +152,14 @@ export function createPluginConfigStore(
       return { ...snapshot };
     },
     setEnabled(pluginId, enabled) {
+      if (closed) throw new Error("Plugin config store is closed");
       if (snapshot[pluginId] === enabled) return;
       snapshot = { ...snapshot, [pluginId]: enabled };
       persist();
       notify();
     },
     clear(pluginId) {
+      if (closed) throw new Error("Plugin config store is closed");
       if (!(pluginId in snapshot)) return;
       const next = { ...snapshot };
       delete next[pluginId];
@@ -196,6 +201,7 @@ export function createPluginConfigStore(
       return normalizeSnapshot(requiredPluginIds);
     },
     setRequiredPluginIds(pluginIds) {
+      if (closed) return;
       requiredPluginIds = new Set(pluginIds);
       normalizeSnapshot(requiredPluginIds);
     },
@@ -204,6 +210,30 @@ export function createPluginConfigStore(
     },
     diagnostics() {
       return [...diagnostics];
+    },
+    async flush(options) {
+      const pending = writeQueue;
+      const timeoutMs = typeof options?.timeoutMs === "number" && options.timeoutMs > 0
+        ? Math.floor(options.timeoutMs)
+        : undefined;
+      if (timeoutMs === undefined) {
+        await pending;
+        return;
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          pending,
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    },
+    close() {
+      closed = true;
     }
   };
 }

@@ -13,8 +13,8 @@ export function StorageUnavailableGuard({ children }: { children: ReactNode }) {
     host.resourceStore,
     "storage.status",
     [],
-    (value) => value.data ?? { status: service.status(), healthStatus, summary: null, capabilities: service.getConditionalCapabilities() },
-    (left, right) => left.status === right.status && left.healthStatus === right.healthStatus && JSON.stringify(left.summary) === JSON.stringify(right.summary) && JSON.stringify(left.capabilities) === JSON.stringify(right.capabilities)
+    (value) => value.data ?? { status: service.status(), healthStatus, authorityRecovery: (service as typeof service & { authorityRecovery?: () => import("@keymaster/contracts").CoordinatorAuthorityRecovery }).authorityRecovery?.(), summary: null, capabilities: service.getConditionalCapabilities() },
+    (left, right) => left.status === right.status && left.healthStatus === right.healthStatus && JSON.stringify(left.authorityRecovery) === JSON.stringify(right.authorityRecovery) && JSON.stringify(left.summary) === JSON.stringify(right.summary) && JSON.stringify(left.capabilities) === JSON.stringify(right.capabilities)
   );
   if (snapshot.status !== "ready" || snapshot.healthStatus !== "ready") return <StorageOnboardingPage />;
   return <>{children}</>;

@@ -14,9 +14,11 @@ import { createInMemoryKeyValueStore } from "@keymaster/runtime/storage";
 import {
   connectCoordinatorWithStartupRetry,
   createPublicCoordinatorClient,
+  createCoordinatorPlatformStore,
   createStorageCoordinatorClient,
   createVaultCoordinatorClient,
   describeBootstrapStep,
+  waitForCoordinatorServiceBridge,
   registerPluginWithTimeout
 } from "./bootstrapPlugins.js";
 import { assertWebStartupContract, WEB_STARTUP_REQUIRED_CAPABILITIES } from "./bootstrapPlugins.js";
@@ -94,6 +96,49 @@ describe("bootstrapPlugins hang detection", () => {
 });
 
 describe("Coordinator startup recovery", () => {
+  it("does not release owner consumers before the service bridge is ready", async () => {
+    let ready = false;
+    const bridge = {
+      get state() { return ready ? "ready" : "handshaking"; },
+      services: () => ready ? [
+        { capabilityId: "coordinator.owner-storage", contractVersion: "1.0.0", status: "ready", grantId: "owner-grant" },
+        { capabilityId: "coordinator.crypto", contractVersion: "1.0.0", status: "ready", grantId: "crypto-grant" },
+      ] : [],
+    } as unknown as import("@keymaster/contracts").RemoteServiceBridge;
+    const waiting = waitForCoordinatorServiceBridge(() => bridge, 100);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(ready).toBe(false);
+    ready = true;
+    await expect(waiting).resolves.toBe(bridge);
+  });
+
+  it("only rebinds a platform grant before the remote operation reaches physical I/O", async () => {
+    const firstGrant = { platformGrantId: "platform-old", bucketId: "bucket", bucketGeneration: 1, applicationStorageId: "settings", schemaVersion: 1, sessionEpoch: "epoch", clientId: "test" };
+    const secondGrant = { ...firstGrant, platformGrantId: "platform-new", bucketGeneration: 2 };
+    const storageBindPlatform = vi.fn()
+      .mockResolvedValueOnce({ status: "ok", value: firstGrant })
+      .mockResolvedValueOnce({ status: "ok", value: secondGrant });
+    const storagePlatformData = vi.fn()
+      .mockResolvedValueOnce({ status: "error", message: "Platform storage bucket generation changed" })
+      .mockResolvedValueOnce({ status: "ok", value: { revision: 1 } });
+    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, "settings");
+
+    await expect(store.put("key", { ok: true })).resolves.toEqual({ revision: 1 });
+    expect(storageBindPlatform).toHaveBeenCalledTimes(2);
+    expect(storagePlatformData.mock.calls.map(([request]) => (request as { platformGrantId: string }).platformGrantId)).toEqual(["platform-old", "platform-new"]);
+  });
+
+  it("does not replay a platform write after the final I/O boundary is stale", async () => {
+    const grant = { platformGrantId: "platform-one", bucketId: "bucket", bucketGeneration: 1, applicationStorageId: "settings", schemaVersion: 1, sessionEpoch: "epoch", clientId: "test" };
+    const storageBindPlatform = vi.fn().mockResolvedValue({ status: "ok", value: grant });
+    const storagePlatformData = vi.fn().mockResolvedValue({ status: "error", message: "Platform storage binding became stale" });
+    const store = createCoordinatorPlatformStore({ storageBindPlatform, storagePlatformData } as unknown as SessionCoordinatorClient, "settings");
+
+    await expect(store.put("key", { ok: true })).rejects.toThrow("Platform storage binding became stale");
+    expect(storageBindPlatform).toHaveBeenCalledTimes(1);
+    expect(storagePlatformData).toHaveBeenCalledTimes(1);
+  });
+
   it("uses frozen null-prototype coordinator facades for each trust boundary", () => {
     const rawClient = Object.create({
       vaultOperation: () => undefined,
@@ -168,7 +213,13 @@ describe("web startup capability contract", () => {
     const coordinatorClient = {
       connect: async () => undefined,
       getIsConnected: () => true,
-      getBootstrapSnapshot: () => ({ keys: [], activePublicKeyHex: undefined }),
+      getBootstrapSnapshot: () => ({
+        keys: [],
+        vaultStatus: "unlocked",
+        sessionEpoch: "test-session:1",
+        activePublicKeyHex: undefined,
+        storageBucketGeneration: 1,
+      }),
       subscribeTopic: () => () => undefined,
       storageControl: async () => ({ status: "ok", value: "ready" }),
       storageGrant: async () => ({ status: "ok", value: "grant" }),
@@ -187,7 +238,14 @@ describe("web startup capability contract", () => {
     const host = createPluginHost({
       disableConfigPersistence: true,
       storageBindingAuthority: makeStorageBindingAuthority(),
-      coordinatorForPlugin: () => coordinatorClient
+      coordinatorForPlugin: () => coordinatorClient,
+      execution: "window",
+      initialRuntimeIdentity: {
+        vaultStatus: "unlocked",
+        ownerPublicKeyHex: "02" + "11".repeat(32),
+        sessionEpoch: "test-session:1",
+        bucketGeneration: 1,
+      }
     });
     const stage = (name: string) => WEB_PLUGIN_CATALOG.filter((plugin) => plugin.meta.bootstrapStage === name);
     host.validateManifestSet([...WEB_PLUGIN_CATALOG]);

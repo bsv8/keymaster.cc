@@ -35,7 +35,9 @@ import {
   P2PKH_PROTOCOL_SPEND_CAPABILITY,
   RESOURCE_REGISTRY_CAPABILITY,
   WOC_CAPABILITY,
-  P2PKH_COORDINATOR_CONTROL_CAPABILITY
+  P2PKH_COORDINATOR_CONTROL_CAPABILITY,
+  defineRuntimeUnitDependencies,
+  defineRuntimeUnitProvidedContracts,
 } from "@keymaster/contracts";
 import type { P2pkhBalance, P2pkhGlobalSettings, P2pkhSyncStatus, P2pkhKeyResource, P2pkhAssetId, P2pkhTransactionFact, P2pkhOwnedOutpointProjection, P2pkhLocalTransaction, P2pkhLocalOutpoint, P2pkhLocalInputClaim, P2pkhTransactionSyncState } from "./p2pkhContracts.js";
 
@@ -614,28 +616,45 @@ export const p2pkhPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: true,
-    providesCapabilities: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
     displayGroup: "business"
   },
-  i18n: p2pkhResources,
-  storage: {
-    scope: "key",
-    applicationStorageId: P2PKH_STORAGE_ID,
-    schemaVersion: P2PKH_REPOSITORY_VERSION
-  },
-  dependencies: [
-    { capability: "vault.service", reason: "需要 vault 提供私钥与 key 管理" },
-    { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
-    { capability: WOC_CAPABILITY, reason: "旧协议 spend 使用 WOC broadcaster" },
-    { capability: "protected-outpoint.registry", reason: "排除协议受保护 outpoint" },
-    { capability: "asset.registry", reason: "注册 P2PKH AssetProvider" },
-    { capability: "transfer.registry", reason: "注册 P2PKH TransferProvider" },
-    { capability: "route.registry", reason: "注册 P2PKH 页面" },
-    { capability: "business.registry", reason: "接入资产业务导航" },
-    { capability: "system-settings.registry", reason: "注册 Testnet 系统设置" },
-    { capability: "home.registry", reason: "注册 P2PKH 首页 widget" },
-    { capability: "breadcrumb.registry", reason: "注册 P2PKH 面包屑" }
+  units: [
+    {
+      id: "p2pkh.window",
+      execution: "window",
+      lifetime: "owner-session",
+      provides: [P2PKH_CAPABILITY, P2PKH_PROTOCOL_SPEND_CAPABILITY, P2PKH_COORDINATOR_CONTROL_CAPABILITY],
+      providedContracts: defineRuntimeUnitProvidedContracts([
+        P2PKH_CAPABILITY,
+        P2PKH_PROTOCOL_SPEND_CAPABILITY,
+        P2PKH_COORDINATOR_CONTROL_CAPABILITY,
+      ]),
+      storage: {
+        scope: "key",
+        applicationStorageId: P2PKH_STORAGE_ID,
+        schemaVersion: P2PKH_REPOSITORY_VERSION
+      },
+      dependencies: defineRuntimeUnitDependencies([
+        { capability: "vault.service", reason: "需要 vault 提供私钥与 key 管理" },
+        { capability: KEYSPACE_SERVICE_CAPABILITY, reason: "active key 与 key-scoped storage" },
+        { capability: WOC_CAPABILITY, reason: "旧协议 spend 使用 WOC broadcaster" },
+        { capability: "protected-outpoint.registry", reason: "排除协议受保护 outpoint" },
+        { capability: "asset.registry", reason: "注册 P2PKH AssetProvider" },
+        { capability: "transfer.registry", reason: "注册 P2PKH TransferProvider" },
+        { capability: "route.registry", reason: "注册 P2PKH 页面" },
+        { capability: "business.registry", reason: "接入资产业务导航" },
+        { capability: "system-settings.registry", reason: "注册 Testnet 系统设置" },
+        { capability: "home.registry", reason: "注册 P2PKH 首页 widget" },
+        { capability: "breadcrumb.registry", reason: "注册 P2PKH 面包屑" },
+      ]),
+    },
+    {
+      id: "p2pkh.coordinator-worker",
+      execution: "coordinator-worker",
+      lifetime: "owner-session",
+    },
   ],
+  i18n: p2pkhResources,
   setup(ctx) {
     const vault = ctx.get<VaultService>("vault.service");
     const keyspace = ctx.get<KeyspaceService>(KEYSPACE_SERVICE_CAPABILITY);

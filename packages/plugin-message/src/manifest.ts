@@ -30,6 +30,7 @@ import type {
   ResourceRegistry,
   RouteRegistry
 } from "@keymaster/contracts";
+import { defineRuntimeUnitDependencies, defineRuntimeUnitProvidedContracts } from "@keymaster/contracts";
 import { router } from "@keymaster/runtime";
 import {
   CHANNEL_RUNTIME_CAPABILITY,
@@ -308,23 +309,26 @@ export const messagePlatformPlugin: PluginManifest = {
     bootstrapStage: "owner-apps-ready",
     defaultEnabled: true,
     canDisable: false,
-    providesCapabilities: ["message.service"],
     displayGroup: "platform"
   },
+  units: [{
+    id: "message.window",
+    execution: "window",
+    lifetime: "owner-session",
+    provides: ["message.service"],
+    providedContracts: defineRuntimeUnitProvidedContracts(["message.service"]),
+    storage: { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 },
+    dependencies: defineRuntimeUnitDependencies([
+      { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
+      { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
+      { capability: "webrtc.service", reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
+      { capability: "route.registry", reason: "注册 /message 与 /messages 详情路由" },
+      { capability: "business.registry", reason: "接入首页业务导航" },
+      { capability: "breadcrumb.registry", reason: "为 /message 与 /messages 详情路由提供面包屑" },
+      { capability: "contacts.public-key-action.registry", reason: "注册联系人发消息操作" },
+    ]),
+  }],
   i18n: messageResources,
-  storage: { scope: "key", applicationStorageId: "Messages", schemaVersion: 1 },
-  dependencies: [
-    { capability: CHANNEL_RUNTIME_CAPABILITY, reason: "通过 Coordinator 使用 Channel" },
-    { capability: "keyspace.service", reason: "读取 active key 并跟随会话聚合刷新" },
-    { capability: "webrtc.service", reason: "读取 WebRTC 历史并发起音视频 / 传输动作" },
-    { capability: "route.registry", reason: "注册 /message 与 /messages 详情路由" },
-    { capability: "business.registry", reason: "接入首页业务导航" },
-    {
-      capability: "breadcrumb.registry",
-      reason: "为 /message 与 /messages 详情路由提供面包屑"
-    },
-    { capability: "contacts.public-key-action.registry", reason: "注册联系人发消息操作" }
-  ],
   setup(ctx) {
     const contactActions = ctx.get<ContactPublicKeyActionRegistry>("contacts.public-key-action.registry");
     contactActions.register({
